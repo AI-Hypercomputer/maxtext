@@ -678,12 +678,46 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
   _PRIMARY_LOSS = 999.0
   _DROPLESS_LOSS = -1.0
 
-  def _run(self, retry_when_tokens_dropped, has_overflow, with_dropless):
-    """Runs training_loop_iteration with fake step fns and returns (eval loss used, dropless call count)."""
+  def _run(
+      self,
+      retry_when_tokens_dropped,
+      has_overflow,
+      with_dropless,
+      retry_dropless_first_steps=0,
+      train_calls=None,
+      with_first_phase=False,
+      first_phase_overflow=False,
+      required_rbf=None,
+  ):
+    """Runs training_loop_iteration with fake step fns and returns (eval loss used, dropless call count).
+
+    When train_calls is a list, a fake p_train_step_dropless is provided and each train step call appends
+    "normal", "first_phase" or "dropless" to it. with_first_phase adds a fake p_train_step_first_phase whose
+    metrics report has_moe_overflow=first_phase_overflow. required_rbf (a list) turns on
+    log_required_ragged_buffer_factor and makes every fake train step return it as metrics["moe_required_rbf"].
+    """
+
+    def _train_metrics(overflow=False):
+      metrics = {"scalar": {}, "scalars": {}, "has_moe_overflow": jnp.bool_(overflow)}
+      if required_rbf is not None:
+        metrics["moe_required_rbf"] = jnp.array(required_rbf, dtype=jnp.float32)
+      return metrics
 
     def p_train_step(state, batch, *rng_args):
       del batch, rng_args
-      return state, {"scalar": {}, "scalars": {}}
+      if train_calls is not None:
+        train_calls.append("normal")
+      return state, _train_metrics()
+
+    def p_train_step_dropless(state, batch, *rng_args):
+      del batch, rng_args
+      train_calls.append("dropless")
+      return state, _train_metrics()
+
+    def p_train_step_first_phase(state, batch, *rng_args):
+      del batch, rng_args
+      train_calls.append("first_phase")
+      return state, _train_metrics(overflow=first_phase_overflow)
 
     def p_eval_step(state, batch, *rng_args):
       del state, batch, rng_args
@@ -704,6 +738,9 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
         elastic_enabled=False,
         enable_diloco=False,
         retry_when_tokens_dropped=retry_when_tokens_dropped,
+        retry_dropless_first_steps=retry_dropless_first_steps,
+        first_phase_ragged_buffer_factor=5.0 if with_first_phase else 0.0,
+        log_required_ragged_buffer_factor=required_rbf is not None,
         logical_axis_rules_for_eval=(),
     )
     metric_logger_instance = mock.MagicMock()
@@ -715,7 +752,8 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
         "init_rng": None,
         "mesh": mesh,
         "p_train_step": p_train_step,
-        "p_train_step_dropless": None,
+        "p_train_step_dropless": p_train_step_dropless if train_calls is not None else None,
+        "p_train_step_first_phase": p_train_step_first_phase if with_first_phase else None,
         "p_eval_step": p_eval_step,
         "p_eval_step_dropless": p_eval_step_dropless if with_dropless else None,
     }
@@ -775,6 +813,87 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
     used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=False, has_overflow=True, with_dropless=True)
     self.assertEqual(used_loss, self._PRIMARY_LOSS)
     self.assertEqual(dropless_call_count, 0)
+
+  def test_first_steps_run_dropless_train_program(self):
+    # step 0, start_step -1: step - start_step = 1 < retry_dropless_first_steps = 2.
+    train_calls = []
+    self._run(
+        retry_when_tokens_dropped=True,
+        has_overflow=False,
+        with_dropless=True,
+        retry_dropless_first_steps=2,
+        train_calls=train_calls,
+    )
+    self.assertEqual(train_calls, ["dropless"])
+
+  def test_steps_after_first_phase_attempt_normal_train_program(self):
+    # step - start_step = 1 is not < retry_dropless_first_steps = 1, so the normal program runs and the
+    # overflow-free step is kept without a replay.
+    train_calls = []
+    self._run(
+        retry_when_tokens_dropped=True,
+        has_overflow=False,
+        with_dropless=True,
+        retry_dropless_first_steps=1,
+        train_calls=train_calls,
+    )
+    self.assertEqual(train_calls, ["normal"])
+
+  def test_first_phase_program_inside_window(self):
+    # first_phase_ragged_buffer_factor > 0: steps inside the window attempt the first-phase program; no overflow,
+    # so its state is kept and neither the normal nor the dropless program runs.
+    train_calls = []
+    self._run(
+        retry_when_tokens_dropped=True,
+        has_overflow=False,
+        with_dropless=True,
+        retry_dropless_first_steps=2,
+        train_calls=train_calls,
+        with_first_phase=True,
+    )
+    self.assertEqual(train_calls, ["first_phase"])
+
+  def test_normal_program_after_first_phase_window(self):
+    # step - start_step = 1 is not < retry_dropless_first_steps = 1: the normal program runs, not the first-phase one.
+    train_calls = []
+    self._run(
+        retry_when_tokens_dropped=True,
+        has_overflow=False,
+        with_dropless=True,
+        retry_dropless_first_steps=1,
+        train_calls=train_calls,
+        with_first_phase=True,
+    )
+    self.assertEqual(train_calls, ["normal"])
+
+  def test_first_phase_overflow_replays_with_dropless_program(self):
+    # A first-phase step that still drops tokens is discarded and replayed with the dropless program.
+    train_calls = []
+    self._run(
+        retry_when_tokens_dropped=True,
+        has_overflow=False,
+        with_dropless=True,
+        retry_dropless_first_steps=2,
+        train_calls=train_calls,
+        with_first_phase=True,
+        first_phase_overflow=True,
+    )
+    self.assertEqual(train_calls, ["first_phase", "dropless"])
+
+  def test_logs_required_rbf_line(self):
+    train_calls = []
+    with mock.patch.object(pre_train.max_logging, "log") as log:
+      self._run(
+          retry_when_tokens_dropped=True,
+          has_overflow=False,
+          with_dropless=True,
+          retry_dropless_first_steps=2,
+          train_calls=train_calls,
+          with_first_phase=True,
+          required_rbf=[1.5, 3.25],
+      )
+    lines = [c.args[0] for c in log.call_args_list if c.args and str(c.args[0]).startswith("REQUIRED_RBF")]
+    self.assertEqual(lines, ["REQUIRED_RBF step=0 max=3.2500 per_layer=[1.5000,3.2500] program=first_phase"])
 
 
 if __name__ == "__main__":

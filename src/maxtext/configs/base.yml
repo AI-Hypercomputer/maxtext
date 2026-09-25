@@ -256,6 +256,9 @@ ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer
 # In general if ragged_buffer_factor > 0, the ragged_buffer_size is balanced_size * ragged_buffer_factor.
 eval_ragged_buffer_factor: -1.0 # evaluation override for ragged_buffer_factor.
 retry_when_tokens_dropped: false # retry the entire train step with worst-case ragged buffer size if tokens would otherwise be dropped.
+retry_dropless_first_steps: 0 # with retry_when_tokens_dropped, run steps with step - start_step < N directly with the dropless program (no normal attempt). 0 = off.
+first_phase_ragged_buffer_factor: 0.0 # with retry_dropless_first_steps=N, the first N steps use this ragged buffer factor (drops replay dropless). 0 = off.
+log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the min ragged_buffer_factor avoiding drops (REQUIRED_RBF).
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
