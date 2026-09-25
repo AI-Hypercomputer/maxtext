@@ -27,24 +27,44 @@ from .. import compute_conv1d as local_compute_conv1d
 from .bwd_memory_ref import make_bwd_block_specs
 from .runtime_utils import ensure_cpu_interpret_registered
 
+# Default number of value heads per grid step, by activation dtype.
+_F32_HEAD_TILE = 16
+_BF16_HEAD_TILE = 32
+
 
 def _gdn_matmul(
     lhs: jax.Array,
     rhs: jax.Array,
     compute_dtype: jnp.dtype = jnp.bfloat16,
     keep_lhs_fp32: bool = False,
+    precise: bool = False,
 ) -> jax.Array:
-  """Executes single-pass BF16 MXU matmul with FP32 accumulation in Hybrid mode."""
+  """Batched MXU matmul with FP32 accumulation for the GDN backward kernel.
+
+  For bf16 activations the default is a single-pass bf16 MXU matmul. With
+  `precise=True` both operands stay f32 and the matmul runs at
+  `Precision.HIGH` (3-pass bf16). The intra-chunk matmuls need this: the
+  gating adjoint sums `q * dq - k * dk` over products that nearly cancel, and
+  bf16-rounded operands leave the A_log / dt_bias gradients with the wrong
+  direction (cosine ~0.3 against an fp32 reference). For f32 activations every
+  matmul runs at `Precision.HIGHEST`.
+  """
   if jnp.dtype(compute_dtype) == jnp.bfloat16:
-    lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
+    if precise:
+      lhs_dtype = rhs_dtype = jnp.float32
+      precision = jax.lax.Precision.HIGH
+    else:
+      lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
+      rhs_dtype = jnp.bfloat16
+      precision = jax.lax.Precision.DEFAULT
     return jax.lax.dot_general(
         lhs.astype(lhs_dtype),
-        rhs.astype(jnp.bfloat16),
+        rhs.astype(rhs_dtype),
         dimension_numbers=(
             ((lhs.ndim - 1,), (rhs.ndim - 2,)),
             (tuple(range(lhs.ndim - 2)), tuple(range(rhs.ndim - 2))),
         ),
-        precision=jax.lax.Precision.DEFAULT,
+        precision=precision,
         preferred_element_type=jnp.float32,
     )
   return jnp.matmul(lhs, rhs, precision=jax.lax.Precision.HIGHEST)
@@ -252,6 +272,13 @@ def _bwd_gdn_pipeline_body(
   v_beta = v_h * beta_h[:, :, None]
   k_beta_g = k_beta * gating_forward
 
+  # Precision split for bf16 activations (see `_gdn_matmul`): the intra-chunk
+  # matmuls (attention, Gram / dS, and the t_inv products) feed the closed-form
+  # gating adjoint below and run with f32 operands (`precise=True`). The
+  # state-path matmuls (state_prev / d_state operands and the state recurrence)
+  # stay single-pass bf16. On the Qwen3.5-397B layer (S=8192) this matches the
+  # all-precise variant's A_log / dt_bias accuracy at about a third of its cost.
+
   # Forward state contribution & v_new in 2 GEMMs instead of 3 (eliminates u, w, ws)
   # Safeguard 1: keep_lhs_fp32=True on A preserves triangular inverse precision
   v_new = _gdn_matmul(
@@ -259,20 +286,21 @@ def _bwd_gdn_pipeline_body(
       v_beta - _gdn_matmul(k_beta_g, state_prev, compute_dtype),
       compute_dtype,
       keep_lhs_fp32=True,
+      precise=True,
   )
 
   q_g = q_h * gating_forward
-  attn_unmasked = _gdn_matmul(q_h, k_h_T, compute_dtype)
+  attn_unmasked = _gdn_matmul(q_h, k_h_T, compute_dtype, precise=True)
   attn = attn_unmasked * g_mat_causal
 
   k_scaled_bwd = k_h * gating_backward
 
-  dv_attn = _gdn_matmul(jnp.swapaxes(attn, -1, -2), do_h, compute_dtype)
+  dv_attn = _gdn_matmul(jnp.swapaxes(attn, -1, -2), do_h, compute_dtype, precise=True)
   dv_new = dv_attn + _gdn_matmul(k_scaled_bwd, d_state, compute_dtype)
-  d_attn = _gdn_matmul(do_h, jnp.swapaxes(v_new, -1, -2), compute_dtype)
+  d_attn = _gdn_matmul(do_h, jnp.swapaxes(v_new, -1, -2), compute_dtype, precise=True)
 
   A_T = jnp.swapaxes(A, -1, -2)
-  d_v_beta = _gdn_matmul(A_T, dv_new, compute_dtype, keep_lhs_fp32=True)
+  d_v_beta = _gdn_matmul(A_T, dv_new, compute_dtype, keep_lhs_fp32=True, precise=True)
 
   # Packed weight-stationary GEMM: computes [-d_k_beta_g, d_q_g] in one matmul
   neg_d_k_beta_g, d_q_g = jnp.split(
@@ -295,7 +323,7 @@ def _bwd_gdn_pipeline_body(
 
   # Single-GEMM Gram adjoint dS (replaces 4 GEMMs and eliminates dw and dA)
   dS = jnp.tril(
-      -_gdn_matmul(d_v_beta, jnp.swapaxes(v_new, -1, -2), compute_dtype),
+      -_gdn_matmul(d_v_beta, jnp.swapaxes(v_new, -1, -2), compute_dtype, precise=True),
       k=-1,
   )
 
@@ -307,11 +335,12 @@ def _bwd_gdn_pipeline_body(
       jnp.concatenate([d_S_unmasked, d_attn_unmasked], axis=1),
       k_h,
       compute_dtype,
+      precise=True,
   )
   d_k_beta_from_S, d_q_h_from_attn = jnp.split(packed_from_k_h, 2, axis=1)
 
-  d_k_h_from_S = _gdn_matmul(jnp.swapaxes(d_S_unmasked, -1, -2), k_beta, compute_dtype)
-  d_k_h_from_attn = _gdn_matmul(jnp.swapaxes(d_attn_unmasked, -1, -2), q_h, compute_dtype)
+  d_k_h_from_S = _gdn_matmul(jnp.swapaxes(d_S_unmasked, -1, -2), k_beta, compute_dtype, precise=True)
+  d_k_h_from_attn = _gdn_matmul(jnp.swapaxes(d_attn_unmasked, -1, -2), q_h, compute_dtype, precise=True)
 
   d_k_beta = d_k_beta_g * gating_forward + d_k_beta_from_S
 
@@ -499,9 +528,9 @@ def pallas_gdn_bwd_kernel(
   if head_tile is not None:
     target_tile = head_tile
   elif jnp.dtype(qkv_conv.dtype) == jnp.float32:
-    target_tile = 16
+    target_tile = _F32_HEAD_TILE
   else:
-    target_tile = 32
+    target_tile = _BF16_HEAD_TILE
 
   max_possible = min(num_v_heads, target_tile)
   tile_v_heads = None

@@ -2336,6 +2336,48 @@ class GdnBwdPallasTest(absltest.TestCase):
           err_msg=f"{name}: kernel diverged from Pure JAX with > 256 packed documents",
       )
 
+  def test_bf16_gating_gradients_match_fp32_reference(self):
+    """bf16 kernel gating gradients (A_log, dt_bias, a, b) must track an fp32 reference in size and direction.
+
+    The closed-form gating adjoint in the backward kernel sums nearly cancelling `q * dq - k * dk` products.
+    With single-pass bf16 intra-chunk matmuls, the A_log / dt_bias gradients had max-abs error ~0.5 of their
+    magnitude and cosine ~0.9 here (~0.3 at S=8192), while the other gradients looked fine.
+    """
+    dims = {"num_k_heads": 2, "num_v_heads": 4, "head_k_dim": 128, "head_v_dim": 128, "conv_kernel_size": 4}
+    chunk_size, seq_len = 64, 512
+    qkv, b, a, cw, cb, al, dt, do = _packing_inputs(jax.random.PRNGKey(2026), 1, seq_len, dims)
+    seg_packed = np.zeros((1, seq_len), dtype=np.int32)
+    for i, (start, end) in enumerate(((0, 100), (100, 230), (230, 300), (300, 500))):
+      seg_packed[0, start:end] = i + 1
+
+    def bf16(x):
+      return x.astype(jnp.bfloat16)
+
+    def grads(fn, dtype_fn, seg):
+      def loss(qkv_, b_, a_, al_, dt_):
+        out, _ = fn(dtype_fn(qkv_), dtype_fn(b_), dtype_fn(a_), cw, cb, al_, dt_, None, None, seg, dims, chunk_size)
+        return jnp.sum(out.astype(jnp.float32) * do)
+
+      g = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(qkv, b, a, al, dt)
+      return dict(zip(("dqkv", "db", "da", "d_a_log", "d_dt_bias"), (np.asarray(x, np.float64).ravel() for x in g)))
+
+    for layout, seg in (("unpacked", None), ("packed", jnp.asarray(seg_packed))):
+      with jax.default_matmul_precision("highest"):
+        ref = grads(_call_pure_jax, lambda x: x, seg)
+        pj_bf16 = grads(_call_pure_jax, bf16, seg)
+      k_bf16 = grads(_call_kernel_api, bf16, seg)
+      for name, r in ref.items():
+        scale = float(np.max(np.abs(r)))
+        rel_pj = float(np.max(np.abs(pj_bf16[name] - r))) / scale
+        rel_k = float(np.max(np.abs(k_bf16[name] - r))) / scale
+        cos_k = float(np.dot(k_bf16[name], r) / (np.linalg.norm(k_bf16[name]) * np.linalg.norm(r)))
+        self.assertLessEqual(
+            rel_k,
+            max(3.0 * rel_pj, 2e-2),
+            f"[{layout}] {name}: kernel bf16 rel err {rel_k:.2e} (bf16 inputs {rel_pj:.2e})",
+        )
+        self.assertGreaterEqual(cos_k, 0.999, f"[{layout}] {name}: kernel bf16 gradient cosine {cos_k:.4f}")
+
   def test_segment_ids_all_ones_with_caller_states_matches_unpacked(self):
     """segment_ids == 1 everywhere must be a no-op even when caller conv/recurrent states are supplied."""
     dims = _packing_dims()
