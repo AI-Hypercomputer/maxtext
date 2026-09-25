@@ -225,7 +225,14 @@ class Indexer(nnx.Module):
     return x
 
   def generate_mask(self, indexer_score: Array, topk_values: Array) -> Array:
-    """Creates a mask for top-k indices
+    """Creates a mask for top-k indices.
+
+    Tie semantics:
+    - If `indexer_mask_exact_topk=True`: ties at the cutoff threshold are pruned so that exactly
+      `k` unmasked tokens (first occurrences along sequence dimension) are retained, aligning
+      strictly with the `topk_indices` contract.
+    - If `indexer_mask_exact_topk=False`: uses `indexer_score >= cutoff` which may retain > k
+      tokens when multiple tokens tie at the cutoff threshold.
 
     Args:
         indexer_score: [b, t, s] float - The computed relevance scores for all tokens.
@@ -277,6 +284,7 @@ class Indexer(nnx.Module):
       previous_chunk: Any = None,
       kv_cache: Any = None,
       model_mode: str = MODEL_MODE_TRAIN,
+      generate_dense_mask: bool = True,
   ):
     """Computes the index score to determine the top-k relevant tokens.
 
@@ -305,12 +313,16 @@ class Indexer(nnx.Module):
       previous_chunk: Previous chunk info for prefill.
       kv_cache: Key-value cache used when serving models.
       model_mode: "train", "prefill", or "autoregressive".
+      generate_dense_mask: Whether to materialize dense [b, t, s] mask. Set False to bypass and avoid OOM.
 
     Returns:
       indexer_mask: A sparse mask [b, t, s] with 0.0 for top-k selected tokens
-        and large negative values otherwise.
-      topk_indices: Indices of the top-k selected tokens [b, t, k].
-      indexer_score: The computed relevance scores [b, t, s].
+        and large negative values otherwise (or None if bypassed via generate_dense_mask=False).
+        In the early-return regime (k.shape[1] <= indexer_topk), returns attention_mask
+        if generate_dense_mask=True else None.
+      topk_indices: Indices of the top-k selected tokens [b, t, k], or None in the early-return
+        regime (k.shape[1] <= indexer_topk) where all available tokens are unmasked.
+      indexer_score: The computed relevance scores [b, t, s], or attention_mask when early-returning.
 
     Notation:
       b: Batch size
@@ -364,7 +376,7 @@ class Indexer(nnx.Module):
 
     # NOTE: If the total available sequence length <= topk, indexer always selects all tokens.
     if k.shape[1] <= self.indexer_topk:
-      return attention_mask, cached_s, attention_mask
+      return (attention_mask if generate_dense_mask else None), None, attention_mask
 
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
@@ -437,6 +449,9 @@ class Indexer(nnx.Module):
       )
     else:
       topk_values, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)  # [b, t, k]
+
+    if not generate_dense_mask:
+      return None, topk_indices, indexer_score
 
     # Create Sparse Index Mask: 0 and large negatives
     indexer_mask = self.generate_mask(indexer_score, topk_values)  # [b, t, s]
@@ -1229,6 +1244,7 @@ class MLA(Attention):
 
     # Indexer Logic
     indexer_mask = None
+    topk_indices = None
     if self.use_indexer:
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
       attention_mask = self.attention_op.generate_attention_mask(
@@ -1243,7 +1259,9 @@ class MLA(Attention):
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
       # apply indexer, indexer_mask [b, q_len, kv_len]
-      indexer_mask, _, indexer_score = self.indexer(
+      generate_dense_mask = (not self.use_absorbed_mqa) or self.config.indexer_loss_scaling_factor > 0.0
+
+      indexer_mask, topk_indices, indexer_score = self.indexer(
           inputs_q=inputs_q,
           low_rank_q=low_rank_q,
           inputs_kv=inputs_kv,
@@ -1253,6 +1271,7 @@ class MLA(Attention):
           previous_chunk=previous_chunk,
           kv_cache=self.IndexerKVCache_0,
           model_mode=model_mode,
+          generate_dense_mask=generate_dense_mask,
       )
 
       if indexer_mask is not None and self.config.indexer_loss_scaling_factor > 0.0:
@@ -1280,6 +1299,7 @@ class MLA(Attention):
         cached_values,
         indexer_mask=indexer_mask,
         record_max_logits=use_qk_clip,
+        topk_indices=topk_indices,
     )
 
     if self.use_absorbed_mqa:

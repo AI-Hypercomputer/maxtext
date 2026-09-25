@@ -144,6 +144,25 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
+def topk_to_mask(
+    topk_indices: Array,
+    kv_len: int,
+    dtype: DType = jnp.float32,
+    offset: int = 0,
+) -> Array:
+  """Constructs a dense mask from topk_indices with bounds checking and offset shift.
+
+  Tokens at valid topk_indices receive 0.0 (unmasked), while all other tokens receive DEFAULT_MASK_VALUE.
+  Out-of-range indices (< 0 or >= kv_len) after applying offset are dropped. Note that dense mask
+  materialization from topk_indices in apply_attention_dot preserves numerical equivalence for validation;
+  sparse execution bypassing full logits materialization requires the dedicated sparse attention kernel.
+  """
+  idx = topk_indices - offset
+  valid = (idx >= 0) & (idx < kv_len)
+  mask = jnp.full((*idx.shape[:-1], kv_len), DEFAULT_MASK_VALUE, dtype=dtype)
+  return jnp.put_along_axis(mask, jnp.where(valid, idx, kv_len), 0.0, axis=-1, inplace=False, mode="drop")
+
+
 def validate_gpu_flash_attention(
     sinks: Array | None,
     record_max_logits: bool,
@@ -1597,6 +1616,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
+      topk_indices: Optional[Array] = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1673,6 +1693,7 @@ class AttentionOp(nnx.Module):
           compressed_mask=compressed_mask,
           record_max_logits=record_max_logits,
           decoder_segment_ids_kv=decoder_segment_ids_kv,
+          topk_indices=topk_indices,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -1724,8 +1745,12 @@ class AttentionOp(nnx.Module):
               value,
               decoder_segment_ids,
               model_mode,
+              segment_positions=segment_positions,
               bidirectional_mask=bidirectional_mask,
+              indexer_mask=indexer_mask,
               record_max_logits=record_max_logits,
+              decoder_segment_ids_kv=decoder_segment_ids_kv,
+              topk_indices=topk_indices,
               qk_product_einsum=qk_product_einsum,
               wv_product_einsum=wv_product_einsum,
           )
@@ -2960,6 +2985,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
+      topk_indices: Optional[Array] = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -3059,6 +3085,15 @@ class AttentionOp(nnx.Module):
       indexer_mask = indexer_mask[:, None, None, :, :]
       # attn_weights: [b, n_kv, n_q // n_kv, q_len, kv_len]
       attn_weights = apply_mask_to_logits(attn_weights, indexer_mask)
+    elif topk_indices is not None:
+      s = key.shape[1]
+      mask = topk_to_mask(topk_indices, s, dtype=attn_weights.dtype)
+      if self.is_partition_in_decode(q_seq_len):
+        mask = partitioning.with_sharding_constraint(mask, (DECODE_BATCH, DECODE_LENGTH, KV_LENGTH))
+      else:
+        mask = partitioning.with_sharding_constraint(mask, (BATCH_ATTN, Q_LENGTH, KV_LENGTH))
+      mask = mask[:, None, None, :, :]
+      attn_weights = apply_mask_to_logits(attn_weights, mask)
 
     if self.is_partition_in_decode(q_seq_len):
       attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
@@ -3252,6 +3287,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
+      topk_indices: Optional[Array] = None,
   ):
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
@@ -3260,6 +3296,7 @@ class AttentionOp(nnx.Module):
     if model_mode != MODEL_MODE_TRAIN:
       assert prefill_kv_cache
       key, value, decoder_segment_ids = prefill_kv_cache
+
     pass_comp_to_prefill = (compressed_kv is not None) and (ar_kv_cache is None)
     k_prefill = key
     v_prefill = value
@@ -3269,6 +3306,8 @@ class AttentionOp(nnx.Module):
 
     indexer_mask_prefill = None
     indexer_mask_ar = None
+    topk_indices_prefill = None
+    topk_indices_ar = None
     if indexer_mask is not None:
       if pass_comp_to_prefill:
         # Pass the compressed KV blocks into the prefill/training attention
@@ -3280,6 +3319,15 @@ class AttentionOp(nnx.Module):
         indexer_mask_prefill = indexer_mask[:, :, :prefill_len]
         if ar_kv_cache is not None:
           indexer_mask_ar = indexer_mask[:, :, prefill_len:]
+
+    if topk_indices is not None:
+      if pass_comp_to_prefill:
+        topk_indices_prefill = topk_indices
+      else:
+        prefill_len = key.shape[1]
+        topk_indices_prefill = jnp.where(topk_indices < prefill_len, topk_indices, -1)
+        if ar_kv_cache is not None:
+          topk_indices_ar = jnp.where(topk_indices >= prefill_len, topk_indices - prefill_len, -1)
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
@@ -3301,6 +3349,7 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_kv=decoder_segment_ids_kv,
         pad_kv_total=pad_kv_total,
         compress_ratio=compress_ratio,
+        topk_indices=topk_indices_prefill,
     )
 
     if ar_kv_cache is None:
@@ -3328,6 +3377,7 @@ class AttentionOp(nnx.Module):
         compressed_mask=compressed_mask,
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
+        topk_indices=topk_indices_ar,
     )
 
     if ar_unnormalized_output is not None:
