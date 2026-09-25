@@ -1910,7 +1910,10 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   if logical_axis_rules is None:
     logical_axis_rules = config.logical_axis_rules
 
-  with axis_rules(logical_axis_rules):
+  # Always trace the model under the training rules: the trace may run a forward pass (e.g. Qwix
+  # quantization), whose activation shardings must stay consistent with the kernels. The override
+  # rules only affect how parameter logical axes resolve to mesh axes below.
+  with axis_rules(config.logical_axis_rules):
     # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
     # nnx_construct_named_sharding which correctly inserts the stacked-layers
     # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally
@@ -1923,6 +1926,8 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     # ourselves via nnx_construct_named_sharding, so auto-assignment is not needed here.
     abs_model = nnx.eval_shape(nnx_init_trainstate_fn)
     _, abs_var_state = nnx.split(abs_model)
+
+  with axis_rules(logical_axis_rules):
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
 
     def _to_abstract_var(a_var, s_var):
