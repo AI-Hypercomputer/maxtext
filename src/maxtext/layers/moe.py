@@ -639,11 +639,7 @@ class RoutedMoE(nnx.Module):
         mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
-        weight_dtype=(
-            jnp.float32
-            if self.config.float32_gate_logits
-            else ctypes.get_weight_dtype(self.config, "gate")
-        ),
+        weight_dtype=(jnp.float32 if self.config.float32_gate_logits else ctypes.get_weight_dtype(self.config, "gate")),
         quant=self.quant,
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
@@ -964,7 +960,7 @@ class RoutedMoE(nnx.Module):
     valid_token_mask = None
     if forced_routed_experts is not None:
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-      auto_weights, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
+      _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
       # A token has real forced routing only if its slots are within [0, num_experts).
       # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
@@ -1385,11 +1381,7 @@ class RoutedMoE(nnx.Module):
             "BKE,BK -> BE",
             reshaped_intermediate,
             reshaped_weights,
-            precision=(
-                jax.lax.Precision.HIGHEST
-                if self.config.float32_weight_sum
-                else matmul_precision
-            ),
+            precision=(jax.lax.Precision.HIGHEST if self.config.float32_weight_sum else matmul_precision),
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
