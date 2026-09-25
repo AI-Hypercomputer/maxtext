@@ -981,6 +981,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # STEP B: 1D Convolution
     # =========================================================================
     qkv = jnp.concatenate([q, k, v], axis=-1)
+    if decoder_segment_ids is not None:
+      mask = decoder_segment_ids != 0
+      qkv = jnp.where(mask[..., None], qkv, 0.0)
     batch, seq_len, _ = qkv.shape
     conv_kernel_size = self.config.gdn_conv_kernel_dim
 
@@ -1029,6 +1032,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     conv_out = self.conv1d(conv_input, out_sharding=flat_sharding)
     # Slice the output to match the original input sequence length.
     conv_out = conv_out[:, -seq_len:, :]
+    if decoder_segment_ids is not None:
+      conv_out = jnp.where(mask[..., None], conv_out, 0.0)
     qkv_conv = jax.nn.silu(conv_out.astype(jnp.float32)).astype(cfg.dtype)
     # q_conv shape: (B, S, key_dim), k_conv shape: (B, S, key_dim), v_conv shape: (B, S, value_dim)
     q_conv, k_conv, v_conv = jnp.split(qkv_conv, [self.key_dim, 2 * self.key_dim], axis=-1)
@@ -1074,6 +1079,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if decoder_segment_ids is not None:
       mask = decoder_segment_ids != 0
       # Apply mask by broadcasting to respective shapes
+      query = jnp.where(mask[..., None, None], query, 0.0)
       key = jnp.where(mask[..., None, None], key, 0.0)
       value = jnp.where(mask[..., None, None], value, 0.0)
       g = jnp.where(mask[..., None], g, 0.0)
@@ -1215,7 +1221,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           next_conv_state = next_conv_state[:orig_cache_batch]
           next_recurrent_state = next_recurrent_state[:orig_cache_batch]
 
-    next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
+    # `jax_chunk_gated_delta_rule` returns `None` for the final state when it is
+    # called without an `initial_state` (the unsharded `self.mesh is None` train
+    # path), so only cast when a state was actually produced.
+    if next_recurrent_state is not None:
+      next_recurrent_state = next_recurrent_state.astype(cfg.dtype)
     if model_mode != MODEL_MODE_TRAIN and active_cache is not None:
       active_cache.update_gdn_states(next_recurrent_state, next_conv_state)  # pyrefly: ignore[bad-argument-type]
 
@@ -1234,6 +1244,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output, out_sharding=out_sharding)
+    if decoder_segment_ids is not None:
+      output = jnp.where(mask[..., None], output, 0.0)
 
     return output, active_cache
 
