@@ -410,18 +410,43 @@ layers in flight), the full-layer gathered expert banks, which expert
 parallelism would avoid by moving tokens instead of weights, and the f32 KDA
 residuals, which a bf16 residual path would halve.
 
-### In flight: k-series (o35n251859)
+### k-series, layout and precision bounds (o35n251859)
 
 Base j2 (pdb=3, sched, DP=4, vocab 4, `remat_policy=custom moe_routing=device`).
 
-| arm | pdb | change | TF/s/dev | MFU | note |
-|---|---|---|---|---|---|
-| k1_ctrl | 3 | none | 109.9 | 9.52% | replicates j2 |
-| k2_noscan | 3 | `scan_layers=False` | | | |
-| k3_wbf16_bound | 3 | `weight_dtype=bfloat16` | | | bound on the fp32 to bf16 relayout |
-| k4_dp8 | 3 | DP=8, FSDP=16 | | | |
-| k5_tp2_p3 | 3 | DP=4, FSDP=16, TP=2 | | | |
-| k6_tp2_p4 | 4 | same as k5 | | | does TP free enough memory for pdb=4 |
+| arm | pdb | change | TF/s/dev | MFU | step s | note |
+|---|---|---|---|---|---|---|
+| k1_ctrl | 3 | none | 109.9 | 9.52% | 0.965 | replicates j2 |
+| k2_noscan | 3 | `scan_layers=False` | 99.4 | 8.62% | 1.067 | |
+| k3_wbf16_bound | 3 | `weight_dtype=bfloat16` | 122.2 | 10.59% | 0.867 | bound only, loss 11.357 vs 10.813 at step 19 |
+| k4_dp8 | 3 | DP=8, FSDP=16 | 101.9 | 8.83% | 1.040 | |
+| k5_tp2_p3 | 3 | DP=4, FSDP=16, TP=2 | | | | OOM, 110.89G vs 94.74G |
+| k6_tp2_p4 | 4 | same as k5 | | | | OOM expected, k5 already over |
+
+k3 is the finding. Pure bf16 weights stall learning, so it is not usable, but
+it prices fp32 weights at 11% of the step: the FSDP gathers and reduce-scatters
+move fp32, and the relayout lane casts them. `cast_params_to_compute_dtype`
+keeps the fp32 master and optimizer and casts large weights to bf16 once per
+step on the sharded copy, so the gathers inside the scan move bf16 and the
+router stays fp32. That is the legitimate version of k3. TP=2 adds memory
+instead of freeing it, and DP=8 loses 7%, so DP=4 x FSDP=32 stays.
+
+### AOT memory for the two new flags
+
+| config | pdb | temporaries | peak live | notes |
+|---|---|---|---|---|
+| j2 | 3 | 90.25 GiB | 88.9 GiB | |
+| j2 | 4 | 105.98G | | OOM by 11.2G |
+| j2 + `kda_conv_in_compute_dtype` | 3 | 90.87 GiB | 88.9 GiB | KDA residuals and chunk states go bf16 (6.6 to 3.05 GiB); the scheduler spends the saving on more MoE rows in flight (20.3 to 27.8 GiB) |
+| j2 + `cast_params_to_compute_dtype` | 3 | 90.75 GiB | | gathers and reduce-scatters already bf16 in j2, so the collectives are unchanged |
+| j2 + both flags | 4 | 97.10G | | OOM by 2.4G, down from 11.2G |
+
+XLA already hoists the bf16 convert above the FSDP all-gather, and gradients are
+reduce-scattered in bf16, so fp32 weights cost no extra collective bytes. The
+likelier source of k3's 11% is KDA: with bf16 weights the conv weight is bf16 too.
+The fp32 conv weight promoted q/k/v to fp32, so the fused KDA kernel ran and
+saved residuals in fp32. With the flag the whole KDA path is bf16, which needs a
+loss check on hardware before it counts.
 
 ## Profiles and xla-shell output
 

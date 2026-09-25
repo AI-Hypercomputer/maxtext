@@ -391,6 +391,24 @@ def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
   return None
 
 
+def _cast_params_for_compute(params, dtype, min_size=1 << 22):
+  """Casts large fp32 weights to the compute dtype.
+
+  Runs on the sharded fp32 master, so the FSDP all-gathers inside the layer scan
+  move bf16 and the weight gradients are reduce-scattered in bf16. Router kernels
+  (`gate`) and small tensors (norms, convs, decay parameters) keep fp32.
+  """
+
+  def cast(path, x):
+    if x.dtype != jnp.float32 or x.size < min_size:
+      return x
+    if any(getattr(k, "key", None) == "gate" for k in path):
+      return x
+    return x.astype(dtype)
+
+  return jax.tree_util.tree_map_with_path(cast, params)
+
+
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
   """Training step for the NNX model.
 
@@ -467,6 +485,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       nnx.update(state.model, curr_params)
 
     def diff_wrapper(curr_params, custom_params, rest, config, data):
+      if config.cast_params_to_compute_dtype:
+        curr_params = _cast_params_for_compute(curr_params, config.dtype)
       local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
       loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
       # Exclude parameters, custom-gradient state, and intermediates. Custom-

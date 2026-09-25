@@ -123,6 +123,8 @@ save_config_to_gcs: false
 
 # gradient dtype
 grad_dtype: "float32"
+# Cast large fp32 weights to dtype before the forward pass, so FSDP moves them in bf16.
+cast_params_to_compute_dtype: false
 
 # activation dtypes.
 dtype: "bfloat16"
@@ -1457,6 +1459,8 @@ kda_allow_neg_eigval: true
 tokamax_kda_max_num_segments: 32
 # Floor (nats) on per-step KDA log-decay fed to the tokamax kernel; it NaNs past ~30. 0 disables.
 tokamax_kda_log_decay_floor: 20.0
+# Cast the KDA short-conv weight to the activation dtype so q/k/v stay bf16.
+kda_conv_in_compute_dtype: false
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on

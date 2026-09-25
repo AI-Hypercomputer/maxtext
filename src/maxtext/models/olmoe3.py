@@ -192,9 +192,12 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     batch, seq_len, _ = x.shape
     heads, dk, dv = self.num_heads, self.head_k_dim, self.head_v_dim
 
-    q = causal_depthwise_conv(self.w_q(x), self.q_conv[...], decoder_segment_ids).reshape(batch, seq_len, heads, dk)
-    k = causal_depthwise_conv(self.w_k(x), self.k_conv[...], decoder_segment_ids).reshape(batch, seq_len, heads, dk)
-    v = causal_depthwise_conv(self.w_v(x), self.v_conv[...], decoder_segment_ids).reshape(batch, seq_len, heads, dv)
+    # An fp32 conv weight otherwise promotes q/k/v (and their kernel residuals) to fp32.
+    cast = self.config.kda_conv_in_compute_dtype
+    q_conv, k_conv, v_conv = (w[...].astype(x.dtype) if cast else w[...] for w in (self.q_conv, self.k_conv, self.v_conv))
+    q = causal_depthwise_conv(self.w_q(x), q_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dk)
+    k = causal_depthwise_conv(self.w_k(x), k_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dk)
+    v = causal_depthwise_conv(self.w_v(x), v_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dv)
 
     raw_g = self.f_proj_2(self.f_proj_1(x)).reshape(batch, seq_len, heads, dk)
     # Reference uses allow_neg_eigval (beta in [0, 2)); False clamps to [0, 1].

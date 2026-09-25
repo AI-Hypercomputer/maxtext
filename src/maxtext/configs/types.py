@@ -513,6 +513,14 @@ class DataTypes(BaseModel):
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
+  cast_params_to_compute_dtype: bool = Field(
+      False,
+      description=(
+          "Cast large fp32 weights to `dtype` once per step, before the forward pass. The fp32 master"
+          " and optimizer are unchanged, but FSDP gathers weights and reduce-scatters their gradients"
+          " in the compute dtype. Router kernels and small tensors stay fp32."
+      ),
+  )
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
       description="Precision level for matrix multiplications.",
@@ -1504,6 +1512,13 @@ class Qwen3Next(BaseModel):
           "Floor, in nats, on the per-step KDA log-decay passed to the tokamax kernel. The kernel overflows"
           " fp32 exp once a step decays past ~30 nats, returning NaN; a floor of 20 changes the output by"
           " under exp(-20) per step. 0 disables it and lets the kernel activate the gate itself."
+      ),
+  )
+  kda_conv_in_compute_dtype: bool = Field(
+      False,
+      description=(
+          "Cast the KDA short-conv weight to the activation dtype, so q/k/v reach the kernel in bf16"
+          " instead of being promoted to fp32 by the fp32 weight. Halves their residuals."
       ),
   )
   gdn_chunk_size: int = Field(
