@@ -1015,47 +1015,58 @@ class TestQwen3Next(unittest.TestCase):
       in_segment = (positions >= start) & (positions < start + length)
       packed_segment_ids = jnp.where(in_segment, i + 1, packed_segment_ids)
 
-    jax_model = qwen3.Qwen3NextGatedDeltaNet(
-        config=self.cfg,
-        mesh=self.mesh,
-        rngs=self.nnx_rngs,
-        inputs_shape=hidden.shape,
-    )
-    packed_out, _ = jax_model(hidden, decoder_segment_ids=packed_segment_ids)
+    orig_pack = getattr(self.cfg, "enable_gdn_sequence_packing", False)
+    orig_kernel = getattr(self.cfg, "use_gdn_kernel", False)
+    try:
+      for use_kernel in (False, True):
+        self.cfg.get_keys()["use_gdn_kernel"] = use_kernel
+        # The pure-JAX path must honour segment ids with the flag at its default (#5351);
+        # only the Pallas kernel path needs `enable_gdn_sequence_packing`.
+        self.cfg.get_keys()["enable_gdn_sequence_packing"] = use_kernel
+        jax_model = qwen3.Qwen3NextGatedDeltaNet(
+            config=self.cfg,
+            mesh=self.mesh,
+            rngs=self.nnx_rngs,
+            inputs_shape=hidden.shape,
+        )
+        packed_out, _ = jax_model(hidden, decoder_segment_ids=packed_segment_ids)
 
-    # Every sequence in the row must produce what it would have produced in a bin of its
-    # own: the front of a row, padded out to the full width.
-    for start, length in zip(starts, lengths):
-      solo_ids = jnp.where(positions < length, 1, 0).astype(jnp.int32)
-      solo_hidden = jnp.zeros_like(hidden).at[:, :length].set(hidden[:, start : start + length])
-      solo_out, _ = jax_model(solo_hidden, decoder_segment_ids=solo_ids)
-      np.testing.assert_allclose(
-          np.asarray(packed_out[:, start : start + length]),
-          np.asarray(solo_out[:, :length]),
-          rtol=1e-4,
-          atol=1e-4,
-          err_msg=f"segment at [{start}, {start + length}) does not match its solo run",
-      )
+        # Every sequence in the row must produce what it would have produced in a bin of its
+        # own: the front of a row, padded out to the full width.
+        for start, length in zip(starts, lengths):
+          solo_ids = jnp.where(positions < length, 1, 0).astype(jnp.int32)
+          solo_hidden = jnp.zeros_like(hidden).at[:, :length].set(hidden[:, start : start + length])
+          solo_out, _ = jax_model(solo_hidden, decoder_segment_ids=solo_ids)
+          np.testing.assert_allclose(
+              np.asarray(packed_out[:, start : start + length]),
+              np.asarray(solo_out[:, :length]),
+              rtol=1e-4,
+              atol=1e-4,
+              err_msg=f"segment at [{start}, {start + length}) does not match its solo run (use_gdn_kernel={use_kernel})",
+          )
 
-    # Marking the whole row as one segment reproduces the behaviour before the reset
-    # existed, when decoder_segment_ids reached the delta rule only as `!= 0`. The gap it
-    # leaves on the last sequence is a large fraction of the output, so the checks above
-    # are not vacuous.
-    last_start, last_len = int(starts[-1]), lengths[-1]
-    solo_ids = jnp.where(positions < last_len, 1, 0).astype(jnp.int32)
-    solo_hidden = jnp.zeros_like(hidden).at[:, :last_len].set(hidden[:, last_start : last_start + last_len])
-    solo_out, _ = jax_model(solo_hidden, decoder_segment_ids=solo_ids)
-    unreset_out, _ = jax_model(hidden, decoder_segment_ids=(packed_segment_ids != 0).astype(jnp.int32))
-    unreset_tail = np.asarray(unreset_out[:, last_start : last_start + last_len])
-    solo_tail = np.asarray(solo_out[:, :last_len])
-    self.assertGreater(np.max(np.abs(unreset_tail - solo_tail)), 0.05 * np.max(np.abs(solo_tail)))
+        # Marking the whole row as one segment reproduces the behaviour before the reset
+        # existed, when decoder_segment_ids reached the delta rule only as `!= 0`. The gap it
+        # leaves on the last sequence is a large fraction of the output, so the checks above
+        # are not vacuous.
+        last_start, last_len = int(starts[-1]), lengths[-1]
+        solo_ids = jnp.where(positions < last_len, 1, 0).astype(jnp.int32)
+        solo_hidden = jnp.zeros_like(hidden).at[:, :last_len].set(hidden[:, last_start : last_start + last_len])
+        solo_out, _ = jax_model(solo_hidden, decoder_segment_ids=solo_ids)
+        unreset_out, _ = jax_model(hidden, decoder_segment_ids=(packed_segment_ids != 0).astype(jnp.int32))
+        unreset_tail = np.asarray(unreset_out[:, last_start : last_start + last_len])
+        solo_tail = np.asarray(solo_out[:, :last_len])
+        self.assertGreater(np.max(np.abs(unreset_tail - solo_tail)), 0.05 * np.max(np.abs(solo_tail)))
 
-    # Gradients stay finite across the boundaries.
-    def loss_fn(inputs):
-      out, _ = jax_model(inputs, decoder_segment_ids=packed_segment_ids)
-      return jnp.sum(out.astype(jnp.float32) ** 2)
+        # Gradients stay finite across the boundaries.
+        def loss_fn(inputs, model=jax_model):
+          out, _ = model(inputs, decoder_segment_ids=packed_segment_ids)
+          return jnp.sum(out.astype(jnp.float32) ** 2)
 
-    self.assertTrue(bool(jnp.all(jnp.isfinite(jax.grad(loss_fn)(hidden)))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(jax.grad(loss_fn)(hidden)))))
+    finally:
+      self.cfg.get_keys()["enable_gdn_sequence_packing"] = orig_pack
+      self.cfg.get_keys()["use_gdn_kernel"] = orig_kernel
     print("test_gated_delta_net_packed_segment_equivalence passed!")
 
   def test_qwen3_next_rms_norm(self):

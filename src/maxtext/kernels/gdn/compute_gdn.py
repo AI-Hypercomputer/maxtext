@@ -108,13 +108,28 @@ def chunked_gdn_per_seq(
     q_large: jax.Array,  # [num_kq_heads, chunk, kq_head_dim]
     k_large: jax.Array,  # [num_kq_heads, chunk, kq_head_dim]
     v_large: jax.Array,  # [num_v_heads, chunk, v_head_dim]
-    gating_log: jax.Array,  # [1, 1, num_v_heads]
-    beta: jax.Array,  # [1, 1, num_v_heads]
+    gating_log: jax.Array,  # [1, chunk, aligned_num_v_heads]
+    beta: jax.Array,  # [1, chunk, aligned_num_v_heads]
     state_prev: jax.Array,  # [num_v_heads, kq_head_dim, v_head_dim]
     cfg: config.GDNConfig,
+    seg_c_col: jax.Array | None = None,  # [1, chunk, 1]
+    seg_aux_col: jax.Array | None = None,  # [1, chunk, 1]
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Perform chunked GDN over input [num_heads, chunk, head_dim]."""
-  dot_prec = jax.lax.Precision.DEFAULT if jnp.dtype(cfg.dtypes.act_in) == jnp.bfloat16 else None
+  dot_prec = jax.lax.Precision.DEFAULT if jnp.dtype(cfg.dtypes.act_in) == jnp.bfloat16 else jax.lax.Precision.HIGHEST
+
+  valid_c = None
+  active_c = None
+  seg_prev = None
+  if cfg.has_seg_ids and seg_c_col is not None and seg_aux_col is not None:
+    valid_c = seg_c_col > 0.5
+    active_c = jnp.abs(seg_c_col)
+    seg_prev = jnp.abs(seg_aux_col[:, cfg.prev_kernel_size : cfg.prev_kernel_size + 1, :])
+    q_large = jnp.where(valid_c, q_large, 0.0)
+    k_large = jnp.where(valid_c, k_large, 0.0)
+    v_large = jnp.where(valid_c, v_large, 0.0)
+    gating_log = jnp.where(valid_c, gating_log, 0.0)
+    beta = jnp.where(valid_c, beta, 0.0)
 
   # NOTE: Repeat along non lane/sublane dim is free.
   q_repeat = jnp.repeat(q_large, cfg.v_per_kq_head, axis=0)
@@ -124,7 +139,12 @@ def chunked_gdn_per_seq(
   # [1, 1, num_v_heads]
   g_cum_sum_list = [gating_log[:, :1]]
   for row in range(1, cfg.chunk_size):
-    g_cum_sum_list.append(g_cum_sum_list[-1] + gating_log[:, row : row + 1])
+    if cfg.has_seg_ids and active_c is not None:
+      same_as_prev = jnp.abs(active_c[:, row : row + 1] - active_c[:, row - 1 : row]) < 0.5
+      prev_sum = jnp.where(same_as_prev, g_cum_sum_list[-1], 0.0)
+      g_cum_sum_list.append(prev_sum + gating_log[:, row : row + 1])
+    else:
+      g_cum_sum_list.append(g_cum_sum_list[-1] + gating_log[:, row : row + 1])
   # [1, chunk, num_v_heads]
   g_cum_sum_log = jnp.concat(g_cum_sum_list, axis=1)
 
@@ -138,13 +158,30 @@ def chunked_gdn_per_seq(
   g_cum_sum_log_t = fused_transpose_broadcast(g_cum_sum_log, src_dim=1, dst_dim=2)
   # [num_v_heads, chunk, chunk]
   g_cum_sum_diff_log = g_cum_sum_log - g_cum_sum_log_t
-  gating_map = jnp.exp(g_cum_sum_diff_log)
-  # [num_v_heads, chunk, 1]
-  gating_backward = jnp.exp(-g_cum_sum_diff_log[..., -1:])
-  # [num_v_heads, chunk, 1]
-  gating_forward = jnp.exp(g_cum_sum_log)
-  # [num_v_heads, 1, 1]
-  gating_last = gating_forward[:, -1:]
+
+  if cfg.has_seg_ids and seg_c_col is not None and valid_c is not None and active_c is not None and seg_prev is not None:
+    seg_c_t = fused_transpose_broadcast(seg_c_col, src_dim=1, dst_dim=2)
+    same_doc_valid = (jnp.abs(seg_c_col - seg_c_t) < 0.5) & valid_c
+    g_cum_sum_diff_log_safe = jnp.where(same_doc_valid, g_cum_sum_diff_log, -1e4)
+    gating_map = jnp.where(same_doc_valid, jnp.exp(g_cum_sum_diff_log_safe), 0.0)
+
+    active_last = active_c[:, -1:, :]
+    m_in = ((jnp.abs(active_c - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(g_cum_sum_log.dtype)
+    m_out = ((jnp.abs(active_c - active_last) < 0.5) & (active_last > 0.5)).astype(g_cum_sum_log.dtype)
+    m_keep = ((jnp.abs(active_last - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(g_cum_sum_log.dtype)
+
+    bwd_diff_safe = jnp.where(m_out > 0.5, -g_cum_sum_diff_log[..., -1:], -1e4)
+    gating_backward = jnp.exp(bwd_diff_safe) * m_out
+    gating_forward = jnp.exp(g_cum_sum_log) * m_in
+    gating_last = jnp.exp(g_cum_sum_log[:, -1:]) * m_keep
+  else:
+    gating_map = jnp.exp(g_cum_sum_diff_log)
+    # [num_v_heads, chunk, 1]
+    gating_backward = jnp.exp(-g_cum_sum_diff_log[..., -1:])
+    # [num_v_heads, chunk, 1]
+    gating_forward = jnp.exp(g_cum_sum_log)
+    # [num_v_heads, 1, 1]
+    gating_last = gating_forward[:, -1:]
 
   mask_dtype = get_mask_dtype(cfg.dtypes.compute)
   iota_r = jax.lax.broadcasted_iota(mask_dtype, gating_map.shape, 1)
@@ -253,6 +290,8 @@ def chunked_gdn_per_seq(
       preferred_element_type=jnp.float32,
   )
   out = out_updated + out_new
+  if valid_c is not None:
+    out = jnp.where(valid_c, out, 0.0)
 
   return out, state, t_inv
 
@@ -274,6 +313,15 @@ def chunked_gdn(
   mask_dtype = get_mask_dtype(cfg.dtypes.compute)
   iota = jax.lax.broadcasted_iota(mask_dtype, (cfg.seq_tile_size, 1, cfg.chunk_size, 1), 2)
   mask = iota < real_sizes.reshape(-1, 1, 1, 1).astype(mask_dtype)
+
+  seg_c_per_seq = []
+  seg_aux_per_seq = []
+  if cfg.has_seg_ids:
+    b_f32 = b_large.astype(jnp.float32)
+    for idx in range(cfg.seq_tile_size):
+      b_trans = fused_transpose_broadcast(b_f32[idx], src_dim=2, dst_dim=0)
+      seg_c_per_seq.append(b_trans[cfg.num_v_heads : cfg.num_v_heads + 1])
+      seg_aux_per_seq.append(b_trans[cfg.num_v_heads + 1 : cfg.num_v_heads + 2])
 
   # [seqs, num_kq_heads, chunk, kq_head_dim]
   q_large = jnp.where(mask, q_large.astype(cfg.dtypes.compute), 0)
@@ -315,6 +363,8 @@ def chunked_gdn(
         beta[idx],
         state_prev[idx],
         cfg,
+        seg_c_col=seg_c_per_seq[idx] if cfg.has_seg_ids else None,
+        seg_aux_col=seg_aux_per_seq[idx] if cfg.has_seg_ids else None,
     )
     out_list.append(out.swapaxes(0, 1))
     state_list.append(state)
@@ -334,11 +384,23 @@ def recurrent_gdn_per_seq(
     beta: jax.Array,  # [num_v_heads, chunk, 1, 1]
     state: jax.Array,  # [num_v_heads, kq_head_dim, v_head_dim]
     cfgs: config.GDNConfig,
+    seg_c_seq: jax.Array | None = None,  # [chunk]
+    seg_prev_init: jax.Array | None = None,  # [1]
 ) -> tuple[jax.Array, jax.Array]:
   """Perform recurrent GDN over input [num_heads, chunk, 1, head_dim]."""
 
   out_list = []
+  prev_active = jnp.abs(seg_prev_init) if (cfgs.has_seg_ids and seg_prev_init is not None) else None
   for c_idx in range(cfgs.chunk_size):
+    valid_curr = None
+    if cfgs.has_seg_ids and seg_c_seq is not None and prev_active is not None:
+      s_val = seg_c_seq[c_idx : c_idx + 1]
+      valid_curr = s_val > 0.5
+      active_curr = jnp.abs(s_val)
+      same_doc = (jnp.abs(active_curr - prev_active) < 0.5) & (prev_active > 0.5)
+      state = jnp.where((same_doc | (~valid_curr)).reshape(1, 1, 1), state, 0.0)
+      prev_active = active_curr
+
     # [num_v_heads, 1, kq_head_dim]
     q_curr = q_compact[:, c_idx]
     q_curr = jnp.repeat(q_curr, cfgs.v_per_kq_head, axis=0)
@@ -387,6 +449,8 @@ def recurrent_gdn_per_seq(
         precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=jnp.float32,
     ).astype(cfgs.dtypes.compute)
+    if valid_curr is not None:
+      out = jnp.where(valid_curr.reshape(1, 1, 1), out, 0.0)
 
     out_list.append(out[:, 0, :])
 
@@ -410,6 +474,20 @@ def recurrent_gdn(
   mask_dtype = get_mask_dtype(cfg.dtypes.compute)
   iota = jax.lax.broadcasted_iota(mask_dtype, (cfg.seq_tile_size, 1, cfg.chunk_size, 1, 1), 2)
   mask = iota < real_sizes.reshape(-1, 1, 1, 1, 1).astype(mask_dtype)
+
+  seg_c_all = None
+  seg_prev_all = None
+  if cfg.has_seg_ids:
+    b_f32 = b_compact.astype(jnp.float32)
+    seg_c_all = b_f32[:, 0, :, 0, cfg.num_v_heads]
+    seg_aux_all = b_f32[:, 0, :, 0, cfg.num_v_heads + 1]
+    # The chunk header is [conv halo (prev_kernel_size), previous segment, 0...];
+    # _pack_fwd_segment_metadata guarantees chunk_size >= prev_kernel_size + 1.
+    assert cfg.prev_kernel_size < cfg.chunk_size, (cfg.prev_kernel_size, cfg.chunk_size)
+    prev_idx = cfg.prev_kernel_size
+    seg_prev_all = jnp.abs(seg_aux_all[:, prev_idx : prev_idx + 1])
+    valid_mask = b_f32[:, :, :, :, cfg.num_v_heads : cfg.num_v_heads + 1] > 0.5
+    mask = mask & valid_mask
 
   # [seqs, num_kq_heads, chunk, 1, kq_head_dim]
   q_compact = jnp.where(mask, q_compact.astype(cfg.dtypes.compute), 0)
@@ -458,6 +536,8 @@ def recurrent_gdn(
         beta[idx],
         state_prev[idx],
         cfg,
+        seg_c_seq=seg_c_all[idx] if seg_c_all is not None else None,
+        seg_prev_init=seg_prev_all[idx] if seg_prev_all is not None else None,
     )
     out_list.append(out)
     new_state_list.append(state)

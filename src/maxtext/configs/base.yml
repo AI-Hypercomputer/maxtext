@@ -1421,6 +1421,8 @@ use_qk_norm_in_gdn: true
 partial_rotary_factor: 1.0
 # Whether to use GDN Pallas kernel
 use_gdn_kernel: false
+# Whether to enable GDN sequence packing
+enable_gdn_sequence_packing: false
 # GDN context parallelism mode ('auto', 'seq', or 'head')
 gdn_cp_mode: "auto"
 

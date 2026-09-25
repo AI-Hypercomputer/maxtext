@@ -21,6 +21,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
+import numpy as np
 from maxtext.common.common_types import (
     Array,
     DType,
@@ -34,6 +35,7 @@ from maxtext.utils.sharding import (
     logical_to_mesh_axes,
     remove_incompatible_mesh_axes_from_partition_spec,
 )
+from . import compute_conv1d as gdn_compute_conv1d
 from .gdn_bwd_pallas import gdn_decoupled_conv1d
 
 try:
@@ -105,6 +107,416 @@ def get_gdn_kernel_cp_sharding_info(
   return logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len
 
 
+def _compute_segmented_conv1d_core(
+    qkv: Array,
+    conv_weight_3d: Array,
+    conv_bias: None | Array,
+    seg_2d: Array,
+    kernel_size: int,
+    conv_state: None | Array,
+    conv_halo_seg: None | Array,
+    out_dtype: DType,
+) -> Array:
+  """Core per-tap same-document depthwise Conv1D keeping conv_input in qkv.dtype."""
+  batch, seq_len, _ = qkv.shape
+  seg_pos = jnp.maximum(seg_2d.astype(jnp.int32), 0)
+  valid_mask = (seg_pos > 0)[:, :, None].astype(jnp.float32)
+
+  halo_len = kernel_size - 1
+  if conv_state is not None:
+    conv_input = jnp.concatenate([conv_state.astype(qkv.dtype), qkv], axis=1)
+  else:
+    conv_input = jnp.pad(qkv, ((0, 0), (halo_len, 0), (0, 0)))
+
+  if conv_halo_seg is not None:
+    halo_pos = jnp.maximum(conv_halo_seg.astype(jnp.int32).reshape(batch, halo_len), 0)
+    full_seg = jnp.concatenate([halo_pos, seg_pos], axis=1)
+  else:
+    full_seg = jnp.pad(seg_pos, ((0, 0), (halo_len, 0)))
+
+  conv_out = sum(
+      (
+          conv_input[:, k : k + seq_len, :].astype(jnp.float32)
+          * ((seg_pos > 0) & (full_seg[:, k : k + seq_len] == seg_pos))[:, :, None].astype(jnp.float32)
+      )
+      * conv_weight_3d[k, 0, :]
+      for k in range(kernel_size)
+  )
+  if conv_bias is not None:
+    conv_out = conv_out + conv_bias.astype(jnp.float32)
+  conv_out = conv_out * valid_mask
+  return conv_out.astype(out_dtype)
+
+
+def segmented_causal_depthwise_conv1d(
+    qkv: Array,
+    conv_weight: Array,
+    conv_bias: None | Array = None,
+    segment_ids: None | Array | DType = None,
+    kernel_size: int | None = None,
+    conv_state: None | Array = None,
+    conv_halo_seg: None | Array = None,
+    dtype: DType | None = None,
+) -> Array:
+  """Causal depthwise Conv1D with per-tap same-document masking and zero output on padding.
+
+  Supports both the full keyword signature:
+    `segmented_causal_depthwise_conv1d(qkv, conv_weight, conv_bias, segment_ids, kernel_size, ...)`
+  and the 4-arg positional signature:
+    `segmented_causal_depthwise_conv1d(x, kernel, segment_ids, dtype=...)`.
+  """
+  if conv_bias is not None and (segment_ids is None or not isinstance(segment_ids, (jax.Array, np.ndarray))):
+    if segment_ids is not None:
+      dtype = segment_ids
+    segment_ids = conv_bias
+    conv_bias = None
+  assert segment_ids is not None, "segment_ids must be provided to segmented_causal_depthwise_conv1d"
+  if kernel_size is None:
+    kernel_size = int(conv_weight.shape[0])
+  out_dtype = dtype if dtype is not None else qkv.dtype
+
+  batch, seq_len, _ = qkv.shape
+  seg_2d = jnp.broadcast_to(segment_ids, (batch, seq_len))
+  if conv_halo_seg is None:
+    # Raw IDs: canonicalize on the full sequence (before any sequence sharding
+    # below), and let a caller conv_state continue the first document.
+    seg_2d = gdn_compute_conv1d.canonicalize_segment_ids(seg_2d)
+    if conv_state is not None:
+      conv_halo_seg, _ = gdn_compute_conv1d.initial_state_segment_metadata(seg_2d, kernel_size)
+  if conv_weight.ndim == 3:
+    conv_weight_3d = conv_weight.astype(jnp.float32)
+  else:
+    conv_weight_3d = conv_weight[:, None, :].astype(jnp.float32)
+
+  qkv_sharding = getattr(jax.typeof(qkv), "sharding", None)
+  if qkv_sharding is not None and getattr(qkv_sharding, "spec", None) is not None:
+    qkv_spec = qkv_sharding.spec
+    mesh = getattr(qkv_sharding, "mesh", None)
+    if len(qkv_spec) >= 3 and any(ax is not None for ax in qkv_spec):
+      seg_pspec = P(qkv_spec[0], qkv_spec[1])
+      cw_pspec = P(None, None, qkv_spec[2])
+      seg_2d = jax.sharding.reshard(seg_2d, seg_pspec)
+      conv_weight_3d = jax.sharding.reshard(conv_weight_3d, cw_pspec)
+      if conv_bias is not None:
+        cb_pspec = P(qkv_spec[2])
+        conv_bias = jax.sharding.reshard(conv_bias, cb_pspec)
+      else:
+        cb_pspec = P()
+      if conv_halo_seg is not None:
+        conv_halo_seg = jax.sharding.reshard(conv_halo_seg, P(qkv_spec[0], None))
+
+      if qkv_spec[1] is not None and mesh is not None and conv_state is None and conv_halo_seg is None:
+        cp_ax = qkv_spec[1]
+        halo_len = kernel_size - 1
+
+        @functools.partial(
+            jax.shard_map,
+            mesh=mesh,
+            in_specs=(
+                P(qkv_spec[0], qkv_spec[1], qkv_spec[2]),
+                cw_pspec,
+                cb_pspec,
+                seg_pspec,
+            ),
+            out_specs=P(qkv_spec[0], qkv_spec[1], qkv_spec[2]),
+            check_vma=False,
+        )
+        def _shard_mapped_conv(qkv_loc, cw_loc, cb_loc, seg_loc):
+          n_cp = jax.lax.psum(1, axis_name=cp_ax)
+          cp_idx = jax.lax.axis_index(cp_ax)
+          perm = [(i, (i + 1) % n_cp) for i in range(n_cp)]
+          halo_qkv = jax.lax.ppermute(qkv_loc[:, -halo_len:, :], axis_name=cp_ax, perm=perm)
+          halo_seg = jax.lax.ppermute(seg_loc[:, -halo_len:], axis_name=cp_ax, perm=perm)
+          halo_qkv = jnp.where(cp_idx == 0, jnp.zeros_like(halo_qkv), halo_qkv)
+          halo_seg = jnp.where(cp_idx == 0, jnp.zeros_like(halo_seg), halo_seg)
+          return _compute_segmented_conv1d_core(
+              qkv_loc,
+              cw_loc,
+              cb_loc,
+              seg_loc,
+              kernel_size,
+              halo_qkv,
+              halo_seg,
+              out_dtype,
+          )
+
+        return _shard_mapped_conv(qkv, conv_weight_3d, conv_bias, seg_2d)
+
+  return _compute_segmented_conv1d_core(
+      qkv,
+      conv_weight_3d,
+      conv_bias,
+      seg_2d,
+      kernel_size,
+      conv_state,
+      conv_halo_seg,
+      out_dtype,
+  )
+
+
+def segment_next_conv_state(
+    conv_state: Array,
+    qkv: Array,
+    decoder_segment_ids: Array,
+    kernel_size: int,
+    sequence_packing: bool,
+) -> Array:
+  """Returns the next Conv1D state of a prefill call: the window ending at the last valid token.
+
+  The caller `conv_state` continues the first document. With
+  `sequence_packing`, the window is masked to the document of the last valid
+  token. Otherwise every non-padding token is one document. A call without
+  valid tokens returns `conv_state` unchanged.
+
+  Args:
+    conv_state: [batch, kernel_size - 1, dim] caller conv state.
+    qkv: [batch, seq, dim] pre-conv activations (padding already zeroed).
+    decoder_segment_ids: [batch, seq] segment IDs (0 = padding).
+    kernel_size: Conv1D kernel size.
+    sequence_packing: Whether GDN sequence packing is enabled.
+  """
+  batch, seq_len, _ = qkv.shape
+  seg_2d = jnp.broadcast_to(decoder_segment_ids, (batch, seq_len))
+  if sequence_packing:
+    seg_2d = gdn_compute_conv1d.canonicalize_segment_ids(seg_2d)
+  else:
+    seg_2d = (seg_2d != 0).astype(jnp.int32)
+  conv_halo_seg, _ = gdn_compute_conv1d.initial_state_segment_metadata(seg_2d, kernel_size)
+  out_dtype = jnp.result_type(conv_state.dtype, qkv.dtype)
+  return gdn_compute_conv1d.extract_segment_conv_state_split(
+      conv_state.astype(out_dtype), qkv.astype(out_dtype), seg_2d, kernel_size, conv_halo_seg
+  )
+
+
+def prepare_jax_gdn_segment_masks(
+    segment_ids: Array,
+    q_c: Array,
+    k_c: Array,
+    v_c: Array,
+    g_c: Array,
+    beta_c: Array,
+    *,
+    batch_size: int,
+    seq_len: int,
+    num_chunks: int,
+    chunk_size: int,
+    cp_axis: None | str | tuple[str, ...] = None,
+    init_seg: None | Array = None,
+    has_initial_state: bool = False,
+):
+  """Prepares segment-aware masks and segment-local cumulative decay for Pure-JAX GDN.
+
+  Without `init_seg`, raw `segment_ids` are canonicalized (globally under
+  `cp_axis`), and `has_initial_state` makes the initial recurrent state continue
+  the first document. With `init_seg`, `segment_ids` must already be canonical.
+  """
+  from . import compute_conv1d as gdn_conv1d  # pylint: disable=import-outside-toplevel,g-import-not-at-top
+  from .gdn_bwd import cp_gdn as bwd_cp_gdn  # pylint: disable=import-outside-toplevel,g-import-not-at-top
+
+  seg_2d = jnp.broadcast_to(segment_ids, (batch_size, seq_len))
+  if cp_axis is not None and init_seg is None:
+    s_enc, _, init_seg = bwd_cp_gdn.gather_cp_segment_metadata(seg_2d, cp_axis, 4, has_initial_state=has_initial_state)
+  else:
+    if init_seg is None:
+      seg_2d = gdn_conv1d.canonicalize_segment_ids(seg_2d)
+      if has_initial_state:
+        init_seg = jnp.ones((batch_size,), dtype=jnp.float32)
+    s_enc = gdn_conv1d.encode_segment_ids(seg_2d, init_seg=init_seg)
+
+  pad_len = num_chunks * chunk_size - seq_len
+  if pad_len > 0:
+    tail_active = -jnp.abs(s_enc[:, -1:])
+    s_enc = jnp.concatenate([s_enc, jnp.broadcast_to(tail_active, (batch_size, pad_len))], axis=1)
+
+  seg_c = s_enc.reshape(batch_size, num_chunks, 1, chunk_size)
+  valid_c = seg_c > 0.5
+  active_c = jnp.abs(seg_c)
+  active_end = active_c[..., -1]
+  if init_seg is not None:
+    init_active = jnp.abs(init_seg.astype(jnp.float32).reshape(batch_size, 1, 1))
+  else:
+    init_active = jnp.zeros((batch_size, 1, 1), dtype=jnp.float32)
+  seg_prev = jnp.concatenate([init_active, active_end[:, :-1, :]], axis=1)[..., None]
+
+  q_c = jnp.where(valid_c[..., None], q_c, 0.0)
+  k_c = jnp.where(valid_c[..., None], k_c, 0.0)
+  v_c = jnp.where(valid_c[..., None], v_c, 0.0)
+  g_c = jnp.where(valid_c, g_c, 0.0)
+  beta_c = jnp.where(valid_c, beta_c, 0.0)
+
+  mask_tril_f32 = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
+  same_active = (jnp.abs(active_c[..., :, None] - active_c[..., None, :]) < 0.5) & (active_c[..., :, None] > 0.5)
+  mask_cumsum = mask_tril_f32 * same_active.astype(jnp.float32)
+  g_cumsum = jnp.einsum(
+      "bnhij,bnhj->bnhi",
+      mask_cumsum,
+      g_c,
+      precision=jax.lax.Precision.HIGHEST,
+  )
+
+  same_valid = (jnp.abs(seg_c[..., :, None] - seg_c[..., None, :]) < 0.5) & valid_c[..., :, None]
+  mask_strict = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1) & same_valid
+  mask_causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=0) & same_valid
+  active_last = active_c[..., -1:]
+  m_in = ((jnp.abs(seg_c - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
+  m_out = ((jnp.abs(seg_c - active_last) < 0.5) & (active_last > 0.5)).astype(jnp.float32)
+  m_keep = ((jnp.abs(active_last - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
+
+  return (
+      q_c,
+      k_c,
+      v_c,
+      g_c,
+      beta_c,
+      g_cumsum,
+      mask_strict,
+      mask_causal,
+      m_in,
+      m_out,
+      m_keep,
+      valid_c,
+  )
+
+
+def run_jax_gdn_delta_rule(
+    *,
+    layer: Any,
+    query: Array,
+    key: Array,
+    value: Array,
+    g: Array,
+    beta: Array,
+    recurrent_state: None | Array,
+    state_sharding: jax.sharding.NamedSharding | None,
+    packed_segment_ids: None | Array,
+    get_logical_axis_rules_fn: Any,
+    gdn_context_axes_fn: Any,
+    delta_rule_fn: Any,
+) -> tuple[Array, None | Array]:
+  """Executes Pure-JAX GDN delta rule inside shard_map with head-CP, seq-CP, and sequence packing."""
+  cfg = layer.config
+  batch = query.shape[0]
+  logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = get_gdn_kernel_cp_sharding_info(
+      cfg, layer.mesh, get_logical_axis_rules_fn, gdn_context_axes_fn
+  )
+  has_initial_state = recurrent_state is not None
+  recurrent_state_arg = (
+      recurrent_state
+      if recurrent_state is not None
+      else jnp.zeros(
+          (batch, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim),
+          dtype=cfg.dtype,
+          out_sharding=state_sharding,
+      )
+  )
+  use_head_cp_jax = bool(cp_axes_active) and getattr(cfg, "gdn_cp_mode", "auto") == "head"
+  if use_head_cp_jax:
+    mesh_batch = logical_to_mesh_axes((KV_BATCH,), mesh=layer.mesh, rules=logical_rules)[0]
+    qkv_pspec = P(mesh_batch, None, cp_axis_for_pspec, None)
+    g_beta_pspec = P(mesh_batch, None, cp_axis_for_pspec)
+    state_pspec = P(mesh_batch, cp_axis_for_pspec, None, None)
+    cp_axes_for_scan = None
+  else:
+    qkv_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, None, None), mesh=layer.mesh, rules=logical_rules)
+    g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, None), mesh=layer.mesh, rules=logical_rules)
+    state_pspec = logical_to_mesh_axes((KV_BATCH, None, None, None), mesh=layer.mesh, rules=logical_rules)
+    if not cp_axes_active:
+      from maxtext.common.common_types import KV_HEAD  # pylint: disable=import-outside-toplevel,g-import-not-at-top
+
+      qkv_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD, None), mesh=layer.mesh, rules=logical_rules)
+      g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD), mesh=layer.mesh, rules=logical_rules)
+      state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=layer.mesh, rules=logical_rules)
+    else:
+      from maxtext.common.common_types import KV_HEAD  # pylint: disable=import-outside-toplevel,g-import-not-at-top
+
+      qkv_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD, None), mesh=layer.mesh, rules=logical_rules)
+      g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD), mesh=layer.mesh, rules=logical_rules)
+      state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=layer.mesh, rules=logical_rules)
+      if qkv_pspec[1] is None:
+        qkv_pspec = P(qkv_pspec[0], cp_axis_for_pspec, *qkv_pspec[2:])
+      if g_beta_pspec[1] is None:
+        g_beta_pspec = P(g_beta_pspec[0], cp_axis_for_pspec, *g_beta_pspec[2:])
+    cp_axes_for_scan = cp_axes_active or None
+
+  qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+      qkv_pspec,
+      query.shape,
+      layer.mesh,
+      dims=(0,),
+      allow_remove_axes=True,
+  )
+  g_beta_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+      g_beta_pspec,
+      g.shape,
+      layer.mesh,
+      dims=(0,),
+      allow_remove_axes=True,
+  )
+  state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+      state_pspec,
+      recurrent_state_arg.shape,
+      layer.mesh,
+      dims=(0,),
+      allow_remove_axes=True,
+  )
+  if packed_segment_ids is not None:
+    seg_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+        P(qkv_pspec[0], qkv_pspec[1]),
+        packed_segment_ids.shape,
+        layer.mesh,
+        dims=(0,),
+        allow_remove_axes=True,
+    )
+  else:
+    seg_pspec = P()
+
+  if cfg.shard_mode == ShardMode.EXPLICIT:
+    query = jax.sharding.reshard(query, qkv_pspec)
+    key = jax.sharding.reshard(key, qkv_pspec)
+    value = jax.sharding.reshard(value, qkv_pspec)
+    g = jax.sharding.reshard(g, g_beta_pspec)
+    beta = jax.sharding.reshard(beta, g_beta_pspec)
+    recurrent_state_arg = jax.sharding.reshard(recurrent_state_arg, state_pspec)
+    if packed_segment_ids is not None:
+      packed_segment_ids = jax.sharding.reshard(packed_segment_ids, seg_pspec)
+
+  @functools.partial(
+      jax.shard_map,
+      mesh=layer.mesh,
+      in_specs=(
+          qkv_pspec,
+          qkv_pspec,
+          qkv_pspec,
+          g_beta_pspec,
+          g_beta_pspec,
+          state_pspec,
+          seg_pspec,
+      ),
+      out_specs=(
+          qkv_pspec,
+          state_pspec,
+      ),
+      check_vma=False,
+  )
+  def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h, seg_val):
+    return delta_rule_fn(
+        query=q,
+        key=k,
+        value=v,
+        g=g_val,
+        beta=beta_val,
+        chunk_size=cfg.gdn_chunk_size,
+        initial_state=init_h,
+        use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+        compute_dtype=cfg.dtype,
+        cp_axis=cp_axes_for_scan,
+        segment_ids=seg_val,
+        has_initial_state=has_initial_state,
+    )
+
+  return shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg, packed_segment_ids)
+
+
 def run_gdn_kernel_layer(
     *,
     layer: Any,
@@ -165,10 +577,22 @@ def run_gdn_kernel_layer(
     qkv = jnp.concatenate([q, k, v], axis=-1)
 
   if decoder_segment_ids is not None:
+    decoder_segment_ids = jnp.broadcast_to(decoder_segment_ids, (batch, seq_len))
+    if cfg.shard_mode == ShardMode.EXPLICIT and layer.mesh is not None:
+      qkv_sharding = getattr(jax.typeof(qkv), "sharding", None)
+      if qkv_sharding is not None and getattr(qkv_sharding, "spec", None) is not None:
+        qkv_spec = qkv_sharding.spec
+        if len(qkv_spec) >= 2:
+          decoder_segment_ids = jax.sharding.reshard(
+              decoder_segment_ids,
+              jax.sharding.NamedSharding(layer.mesh, P(qkv_spec[0], qkv_spec[1])),
+          )
     mask = decoder_segment_ids != 0
     qkv = jnp.where(mask.reshape(mask.shape + (1,) * (qkv.ndim - mask.ndim)), qkv, 0.0)
     a = jnp.where(mask[..., None], a, jnp.asarray(-1e4, dtype=a.dtype))
     b = jnp.where(mask[..., None], b, jnp.asarray(-1e4, dtype=b.dtype))
+    if not getattr(cfg, "enable_gdn_sequence_packing", False):
+      decoder_segment_ids = None
 
   batch, seq_len = qkv.shape[:2]
   conv_kernel_size = cfg.gdn_conv_kernel_dim
@@ -358,7 +782,16 @@ def run_gdn_kernel_layer(
         allow_remove_axes=True,
     )
 
-    seg_pspec = P(qkv_pspec[0], qkv_pspec[1]) if decoder_segment_ids is not None else P()
+    if decoder_segment_ids is not None:
+      seg_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          P(qkv_pspec[0], qkv_pspec[1]),
+          decoder_segment_ids.shape,
+          layer.mesh,
+          dims=(0,),
+          allow_remove_axes=True,
+      )
+    else:
+      seg_pspec = P()
     if cfg.shard_mode == ShardMode.EXPLICIT:
       qkv = jax.sharding.reshard(qkv, jax.sharding.NamedSharding(layer.mesh, qkv_pspec))
       b = jax.sharding.reshard(b, jax.sharding.NamedSharding(layer.mesh, b_a_pspec))

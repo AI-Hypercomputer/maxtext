@@ -14,11 +14,38 @@
 
 """Runtime utilities and CPU interpretation helpers for GDN backward pass."""
 
+import functools
+import logging
+from typing import Optional
+
 import jax
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
 
 from .. import compute_gdn as local_compute_gdn
+
+_logger = logging.getLogger(__name__)
+
+
+def pallas_unsupported_reason(
+    *, head_k_dim: int, head_v_dim: int, chunk_size: int, seq_len: Optional[int] = None
+) -> Optional[str]:
+  """Returns why the Pallas TPU GDN kernel cannot run these shapes, or None if it can."""
+  if head_k_dim % 128 != 0:
+    return f"head_k_dim={head_k_dim} is not a multiple of 128"
+  if head_v_dim % 128 != 0:
+    return f"head_v_dim={head_v_dim} is not a multiple of 128"
+  if chunk_size != 64:
+    return f"chunk_size={chunk_size} != 64"
+  if seq_len is not None and seq_len % chunk_size != 0:
+    return f"local seq_len={seq_len} is not a multiple of chunk_size={chunk_size}"
+  return None
+
+
+@functools.lru_cache(maxsize=None)
+def warn_gdn_pallas_fallback_once(where: str, reason: str) -> None:
+  """Logs (once per `where`/`reason` pair) that the GDN Pallas TPU kernel was skipped."""
+  _logger.warning("GDN %s: not using the Pallas TPU kernel (%s).", where, reason)
 
 
 def ensure_cpu_interpret_registered() -> None:
@@ -78,17 +105,26 @@ def ensure_cpu_interpret_registered() -> None:
 @jax.custom_vjp
 def invert_triangular_matrix(t: jax.Array) -> jax.Array:
   """Computes inverse of unit lower-triangular matrix using Tokamax block forward substitution."""
-  return local_compute_gdn.invert_triangular_matrix(t, block_size=16)
+  return local_compute_gdn.invert_triangular_matrix(t, block_size=16, precision=jax.lax.Precision.HIGHEST)
 
 
 def _invert_triangular_matrix_fwd(t: jax.Array):
-  t_inv = local_compute_gdn.invert_triangular_matrix(t, block_size=16)
+  t_inv = local_compute_gdn.invert_triangular_matrix(t, block_size=16, precision=jax.lax.Precision.HIGHEST)
   return t_inv, t_inv
 
 
 def _invert_triangular_matrix_bwd(res, g):
+  """Backward VJP pass for unit lower-triangular matrix inversion."""
   t_inv = res
-  grad_t = jnp.tril(-(t_inv.mT @ g @ t_inv.mT), k=-1)
+  high_prec = jax.lax.Precision.HIGHEST
+  grad_t = jnp.tril(
+      -jnp.matmul(
+          jnp.matmul(t_inv.mT, g, precision=high_prec),
+          t_inv.mT,
+          precision=high_prec,
+      ),
+      k=-1,
+  )
   return (grad_t,)
 
 

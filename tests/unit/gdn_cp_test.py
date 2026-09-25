@@ -36,6 +36,8 @@ entering each shard is wrong. So each check has a negative control that
 confirms the comparison can fail.
 """
 
+# pylint: disable=protected-access
+
 import os
 import subprocess
 import sys
@@ -56,16 +58,17 @@ from maxtext.kernels.gdn.gdn_bwd import cp_gdn
 @pytest.mark.cpu_only
 def test_gdn_cp_prefix_scan_matches_sequential_reference_on_cpu_mesh():
   if len(jax.devices()) >= 8:
-    devs_8 = np.array(jax.devices()[:8])
-    _run_composition_checks(Mesh(devs_8, ("context",)), "context")
-    _run_composition_checks(Mesh(devs_8.reshape(2, 4), ("fsdp", "context")), "context")
+    _devices = np.array(jax.devices()[:8])
+    _run_composition_checks(Mesh(_devices, ("context",)), "context")
+    _run_composition_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
     _run_composition_checks(
-        Mesh(devs_8.reshape(2, 4), ("context", "context_usp_ulysses")),
+        Mesh(_devices.reshape(2, 4), ("context", "context_usp_ulysses")),
         ("context", "context_usp_ulysses"),
     )
-    _run_gradient_checks(Mesh(devs_8, ("context",)), "context")
-    _run_gradient_checks(Mesh(devs_8.reshape(2, 4), ("fsdp", "context")), "context")
-    _run_end_to_end_checks(Mesh(devs_8, ("context",)), "context")
+    _run_gradient_checks(Mesh(_devices, ("context",)), "context")
+    _run_gradient_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
+    _run_end_to_end_checks(Mesh(_devices, ("context",)), "context")
+    print("GDN_CP_CHECKS_PASSED", flush=True)
     return
   env = os.environ.copy()
   env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
@@ -318,7 +321,6 @@ class GdnCpTest(absltest.TestCase):
 
       # Compute reference t_inv via _compute_forward_conv_and_states
       cw_id = jnp.zeros((4, 1, dim_size), jnp.float32).at[3, 0, :].set(1.0)
-      # pylint: disable=protected-access
       _, _, t_inv = gdn_bwd_pallas._compute_forward_conv_and_states(
           qkv=qkv_conv,
           b=b,
@@ -407,17 +409,4 @@ class GdnCpTest(absltest.TestCase):
 
 
 if __name__ == "__main__":
-  if len(jax.devices()) == 8:
-    _devices = np.array(jax.devices())
-    _run_composition_checks(Mesh(_devices, ("context",)), "context")
-    _run_composition_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
-    _run_composition_checks(
-        Mesh(_devices.reshape(2, 4), ("context", "context_usp_ulysses")),
-        ("context", "context_usp_ulysses"),
-    )
-    _run_gradient_checks(Mesh(_devices, ("context",)), "context")
-    _run_gradient_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
-    _run_end_to_end_checks(Mesh(_devices, ("context",)), "context")
-    print("GDN_CP_CHECKS_PASSED")
-  else:
-    absltest.main()
+  absltest.main()
