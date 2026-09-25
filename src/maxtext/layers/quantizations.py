@@ -16,6 +16,7 @@
 
 import functools
 import json
+import math
 import qwix.pallas as qpl
 import re
 from typing import ClassVar, Tuple, Sequence, Callable
@@ -36,6 +37,7 @@ from qwix._src import interception as qwix_interception
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+from jax.sharding import NamedSharding
 
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
@@ -123,8 +125,8 @@ def dequantize_weight(
   scale_c = jnp.asarray(scale, compute_dtype)
 
   # Per-tensor scalar scale or matching shape
-  if scale_c.ndim == 0 or scale_c.shape == w.shape:
-    return w_c * scale_c
+  if scale_c.ndim == 0 or scale_c.shape == w.shape or scale_c.size == 1:
+    return w_c * scale_c.reshape(()) if scale_c.size == 1 else w_c * scale_c
 
   # Block-wise scale (e.g. 2D for Dense, 3D for MoE)
   if scale_c.ndim == w.ndim and any(s > 1 and s != d for s, d in zip(scale_c.shape, w.shape)):
@@ -137,7 +139,7 @@ def dequantize_weight(
     return (w_c.reshape(interleaved_shape) * scale_c.reshape(scale_shape)).reshape(w.shape)
 
   # Leading-dimension scale (e.g. per-expert (num_experts,) on (num_experts, in_dim, out_dim))
-  if scale_c.ndim < w.ndim and w.shape[: scale_c.ndim] == scale_c.shape:
+  if scale_c.ndim < w.ndim and w.ndim >= 3 and w.shape[: scale_c.ndim] == scale_c.shape:
     scale_c = scale_c.reshape(scale_c.shape + (1,) * (w.ndim - scale_c.ndim))
 
   # Standard JAX broadcasting handles per-channel or broadcastable shapes
@@ -158,6 +160,106 @@ class Quantization:
 
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
+
+
+def infer_scale_granularity(scale_shape: Tuple[int, ...]) -> Tuple[str, int | None]:
+  """Infers quantization scheme ('per_tensor', 'per_channel', or 'block_wise') from scale shape."""
+  nontrivial_axes = [i for i, s in enumerate(scale_shape) if s > 1]
+  if not nontrivial_axes:
+    return "per_tensor", None
+  if len(nontrivial_axes) == 1:
+    return "per_channel", nontrivial_axes[0]
+  return "block_wise", None
+
+
+def native_fp8_dot_general(
+    inputs: jnp.ndarray,
+    quantized_kernel: jnp.ndarray,
+    kernel_scale: jnp.ndarray,
+    scale_block_size: int | Tuple[int, ...] | None,
+    axis: Tuple[int, ...],
+    contract_ind: Tuple[int, ...],
+    compute_dtype: DType = jnp.bfloat16,
+    precision: jax.lax.PrecisionLike = None,
+    out_sharding: NamedSharding | None = None,
+) -> jnp.ndarray:
+  """Computes dot_general with pre-quantized FP8 weights without dequantization."""
+  if len(axis) != 1 or len(contract_ind) != 1:
+    raise NotImplementedError(
+        "native_fp8_dot_general only supports a single contracted axis per "
+        f"operand, got axis={axis}, contract_ind={contract_ind}."
+    )
+  lhs_axis = axis[0]
+  rhs_axis = contract_ind[0]
+
+  # Qwix requires scale.ndim == qvalue.ndim. Determine scheme before reshaping minimal-rank scales.
+  if kernel_scale.ndim == quantized_kernel.ndim:
+    scheme, _ = infer_scale_granularity(kernel_scale.shape)
+  elif kernel_scale.size == 1:
+    scheme = "per_tensor"
+    kernel_scale = kernel_scale.reshape((1,) * quantized_kernel.ndim)
+  else:
+    # Reshape flattened per-channel scale over output axes.
+    scheme = "per_channel"
+    out_axes_shape = tuple(d for i, d in enumerate(quantized_kernel.shape) if i != rhs_axis)
+    if kernel_scale.size != math.prod(out_axes_shape):
+      raise ValueError(
+          f"kernel_scale with shape {kernel_scale.shape} does not match the "
+          f"kernel's non-contracted output shape {out_axes_shape} (kernel "
+          f"shape {quantized_kernel.shape}, contracted axis {rhs_axis})."
+      )
+    kernel_scale = jnp.expand_dims(kernel_scale.reshape(out_axes_shape), axis=rhs_axis)
+
+  rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
+  if scheme == "per_tensor":
+    channelwise_axes = []
+    tiled_axes = {}
+  elif scheme == "per_channel":
+    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+    tiled_axes = {}
+  else:
+    rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
+    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+    tiled_axes = {lhs_axis: rhs_block_size}
+  lhs = qwix.quantize(
+      jnp.asarray(inputs, compute_dtype),
+      jnp.float8_e4m3fn,
+      channelwise_axes=channelwise_axes,
+      tiled_axes=tiled_axes,
+      calibration_method="absmax",
+  )
+  dimension_numbers = (((lhs_axis,), (rhs_axis,)), ((), ()))
+  out = qwix.dot_general(lhs, rhs, dimension_numbers, precision=precision, preferred_element_type=jnp.float32)
+  out = out.astype(compute_dtype)
+  if out_sharding is not None:
+    out = jax.lax.with_sharding_constraint(out, out_sharding)
+  return out
+
+
+@dataclass
+class ServeFp8WeightQuantization(Quantization):
+  """Marks a layer as using native FP8 compute without weight dequantization."""
+
+  quant_mode = None
+
+
+def prepare_fused_gmm_scale(scale: jnp.ndarray, kernel_shape: Tuple[int, ...]) -> jnp.ndarray:
+  """Expands a per-expert weight scale to gmm_v2's rhs_scale
+  layout: (num_experts, num_k_blocks, 1, n_dim). This kernel needs a scale per
+  output (N) channel, unlike gmm v2 elsewhere -- N-axis groups that
+  shared one value in the checkpoint are expanded by repeating it (lossless).
+  """
+  num_experts, k_dim, n_dim = kernel_shape
+  if scale.ndim == 1:
+    scale = scale.reshape(num_experts, 1, 1)
+  if scale.ndim != 3 or scale.shape[0] != num_experts:
+    raise ValueError(f"Unexpected weight scale shape {scale.shape} for kernel shape {kernel_shape}.")
+  _, k_blocks, n_blocks = scale.shape
+  if k_dim % k_blocks != 0 or n_dim % n_blocks != 0:
+    raise ValueError(f"Weight scale shape {scale.shape} does not evenly divide kernel shape {kernel_shape}.")
+  n_repeat = n_dim // n_blocks
+  scale = jnp.repeat(scale.astype(jnp.float32), n_repeat, axis=2)  # (E, k_blocks, n_dim)
+  return jnp.expand_dims(scale, axis=2)  # (E, k_blocks, 1, n_dim)
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
@@ -758,6 +860,9 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.quantization == "serve_fp8_weight":
+    return ServeFp8WeightQuantization()
+
   if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
@@ -942,6 +1047,24 @@ class NANOOFp8Provider(qwix.QtProvider):
     return _apply_linen_module_in_nnx(nn.NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
 
 
+def _get_router_proj_unquantized_rule() -> qwix.QtRule:
+  """Returns a Qwix rule that keeps the MoE router (gate) projection unquantized.
+
+  Setting all qtypes to None bypasses quantization, falling back to standard
+  unquantized jax.lax.dot_general for both forward and backward passes.
+
+  Note: Because Qwix rules are evaluated in a first-match way, this rule must be
+  placed before broader layer catch-all rules (e.g., 'decoder/.*layers.*').
+  """
+  return qwix.QtRule(
+      module_path=r".*/gate$",
+      weight_qtype=None,
+      act_qtype=None,
+      bwd_qtype=None,
+      op_names=("dot_general",),
+  )
+
+
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
@@ -958,7 +1081,11 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   else:
     module_path = "decoder/.*layers.*"
 
-  return [
+  rules = []
+  if not config.quantize_router_proj:
+    rules.append(_get_router_proj_unquantized_rule())
+
+  rules.append(
       qwix.QtRule(
           module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
@@ -969,15 +1096,19 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           bwd_calibration_method=config.bwd_quantization_calibration_method,
           additional_qt_config={"sparsity_rule": sparsity_rule},
           op_names=("dot_general", "gmm", "ragged_dot"),
-      ),
-  ]
+      )
+  )
+  return rules
 
 
 def get_quantization_rule(config: Config):
   """Returns a list of qwix.QtRule from `dtype`."""
 
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
-    return [
+    rules = []
+    if not config.quantize_router_proj:
+      rules.append(_get_router_proj_unquantized_rule())
+    rules.append(
         qwix.QtRule(
             module_path="decoder/.*layers.*",
             weight_qtype=dtype,
@@ -987,7 +1118,8 @@ def get_quantization_rule(config: Config):
             disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
-    ]
+    )
+    return rules
 
   match config.quantization:
     case "int4":

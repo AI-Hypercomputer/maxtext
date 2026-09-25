@@ -289,7 +289,7 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   return [], []
 
 
-def load_compiled(config, partial_train, state, execution_devices):
+def load_compiled(config, partial_train, state, execution_devices, data_sharding=None):
   """# Loading a serialized compiled train step function."""
 
   # Currently partial_train and state  are needed to reconstruct
@@ -306,7 +306,7 @@ def load_compiled(config, partial_train, state, execution_devices):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
-  shaped_batch = get_shaped_batch(config)
+  shaped_batch = get_shaped_batch(config, batch_sharding=data_sharding)
   shaped_input_args = (state, shaped_batch)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)

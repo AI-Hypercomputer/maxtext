@@ -117,6 +117,7 @@ class QuantizationType(str, Enum):
   TE_MXFP8 = "te_mxfp8"
   TE_NVFP4 = "te_nvfp4"
   TE_NVFP4_NO_RHT = "te_nvfp4_no_rht"
+  SERVE_FP8_WEIGHT = "serve_fp8_weight"
 
 
 class TEGroupedGemmQuantizationType(str, Enum):
@@ -571,6 +572,16 @@ class Quantization(BaseModel):
       description=(
           "If True, quantizes the Multi-Token Prediction (MTP) block. Only supported with"
           " `mtp_num_layers > 0` and `quantization=fp8_full`."
+      ),
+  )
+  quantize_router_proj: bool = Field(
+      True,
+      description=(
+          "If True, quantizes the MoE router (gate) projection matmul when quantization is enabled. Targets the"
+          " `GateLogit` module (matching path regex r'.*/gate$'). Default is True for backward compatibility."
+          " Applicable when use_qwix_quantization=True and quantization is set; ignored otherwise. Distinct from"
+          " `float32_gate_logits`, which sets the gate module's compute dtype (operand casts, bias add, score"
+          " function) and does not control quantization."
       ),
   )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
@@ -1140,11 +1151,26 @@ class MoEGeneral(BaseModel):
   )
   float32_weight_sum: bool = Field(
       True,
-      description="Whether to use full fp32 precision to sum expert weights for numerical stability.",
+      description=(
+          "Controls the accumulation precision of the MoE combine reduction after GMM (the weighted sum of expert"
+          " outputs by their routing weights). When True, casts operands to float32 before the combine"
+          " einsum and accumulates in float32 before casting back to the model dtype."
+      ),
   )
   float32_gate_logits: bool = Field(
       False,
-      description="Whether to cast inputs to fp32 to compute MoE gate logits for numerical stability.",
+      description=(
+          "Whether to run the MoE gate (router) module before GMM in fp32 for numerical stability and routing precision."
+          " This is a compute dtype, not a storage dtype: the gate kernel is still stored in `weight_dtype` and"
+          " is cast at use. When True it sets the `GateLogit` compute dtype, which (1) casts the gate input"
+          " activations and kernel before the projection matmul, (2) makes the emitted logits fp32, so downstream"
+          " consumers such as top-k selection and the load balance loss see fp32 values, and (3) applies to the"
+          " routed bias add and the score function. If a decoder block supplies separate gate inputs, those are"
+          " cast as well; for gemma4 it additionally sets the router norm dtype and the router scale cast. It"
+          " does not control quantization -- see `quantize_router_proj`, which governs whether the gate"
+          " projection matmul is quantized. Setting both is rejected at config init, because quantizing the"
+          " projection discards the fp32 operand precision."
+      ),
   )
   prefuse_moe_weights: bool = Field(
       False,
@@ -4597,6 +4623,14 @@ class MaxTextConfig(
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
       if self.quantization != "fp8_full":
         raise ValueError("`quantize_mtp` can only be enabled when `quantization='fp8_full'`.")
+    if self.quantization and self.use_qwix_quantization and self.quantize_router_proj and self.float32_gate_logits:
+      raise ValueError(
+          "`float32_gate_logits=True` is rejected with `quantize_router_proj=True`: the fp32 cast on"
+          " the gate operands is undone by requantization at the projection matmul, so the projection"
+          " remains quantized while believing you configured fp32. The flag's remaining effects (bias"
+          " add, score function, gemma4 router norm) are second-order next to the quantization error."
+          " Set `quantize_router_proj=False` to keep the projection in fp32."
+      )
     if (
         self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
         and self.gradient_accumulation_steps > 1
@@ -5127,6 +5161,16 @@ class MaxTextConfig(
 
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
+
+    # Validation for serve_fp8_weight (native FP8 compute without dequantization).
+    if self.quantization == QuantizationType.SERVE_FP8_WEIGHT:
+      if self.weight_dtype not in (DType.FLOAT8_E4M3FN, DType.FLOAT8_E5M2):
+        raise ValueError(
+            "quantization='serve_fp8_weight' requires weight_dtype to be an FP8 dtype "
+            f"('float8_e4m3fn' or 'float8_e5m2'), got weight_dtype={self.weight_dtype!r}."
+        )
+      if self.use_qwix_quantization:
+        raise ValueError("quantization='serve_fp8_weight' is not supported with use_qwix_quantization=True.")
 
     # Validation for GMM v2
     if self.use_gmm_v2:
