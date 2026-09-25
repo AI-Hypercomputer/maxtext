@@ -71,17 +71,6 @@ except ImportError:
     return hasattr(x, "shape") and hasattr(x, "sharding") and hasattr(x, "dtype") and not isinstance(x, jax.Array)
 
 
-def _deep_merge_dicts(target, source):
-  """Recursively merges source dict into target dict."""
-  out = dict(target)
-  for k, v in source.items():
-    if k in out and isinstance(out[k], dict) and isinstance(v, dict):
-      out[k] = _deep_merge_dicts(out[k], v)
-    else:
-      out[k] = v
-  return out
-
-
 # Logical axis names whose padding semantics are "replicate the existing values"
 # (e.g. KV-head replication for GQA with TP > num_kv_heads).
 _VLLM_REPEAT_AXES = frozenset({"kv_heads", ("expert", "model")})
@@ -1018,6 +1007,7 @@ def from_pretrained(
           lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
       )
       is_nnx_checkpoint = True
+      restored_collections = set()
       if (
           "params" in metadata.item_metadata.tree.keys()
           and "params" in metadata.item_metadata.tree.get("params", {}).keys()
@@ -1031,27 +1021,27 @@ def from_pretrained(
         # does not use, so Orbax would skip them. Build one target per collection instead.
         disk_collections = metadata.item_metadata.tree.get("params", {})
 
-        collection_leaves = collections.defaultdict(dict)
-        for path, leaf in nnx.to_flat_state(param_state):
-          type_ = leaf.type if isinstance(leaf, nnx.Variable) else type(leaf)
-          col_name = variablelib.variable_name_from_type(type_, allow_register=True)
-          val = leaf.get_value() if hasattr(leaf, "get_value") else leaf[...]
-          collection_leaves[col_name][tuple(path)] = val
+        params_collection = checkpointing._group_leaves_by_collection(param_state)  # pylint: disable=protected-access
+        if "params" not in params_collection:
+          params_collection["params"] = jax.tree.map(
+              lambda v: v[...],
+              param_state,
+              is_leaf=lambda n: isinstance(n, nnx.Variable),
+          )
+        # Older checkpoints predate a weight's promotion to a custom collection and still
+        # store it inside `params/params`. Request such weights from there; otherwise they
+        # are never asked for and silently keep their initializer values.
+        params_collection, aliased_collections = checkpointing._alias_legacy_collections(  # pylint: disable=protected-access
+            params_collection, disk_collections
+        )
 
         item_to_restore = {"params": {}}
         restore_args = {"params": {}}
-        for col_name, col_meta in disk_collections.items():
-          if col_name in collection_leaves:
-            col_target = nnx.traversals.unflatten_mapping(collection_leaves[col_name])
-          elif col_name == "params":
-            col_target = jax.tree.map(
-                lambda v: v[...],
-                param_state,
-                is_leaf=lambda n: isinstance(n, nnx.Variable),
-            )
-          else:
-            # A collection on disk that this model does not define; nothing to restore into.
+        for col_name, col_target in params_collection.items():
+          if col_name not in disk_collections:
+            # A model collection the checkpoint does not hold; leave it at its initializer.
             continue
+          col_meta = disk_collections[col_name]
           col_target = _adjust_target_for_moe_fusion(col_target, col_meta, False)
           item_to_restore["params"][col_name] = col_target
           base_restore_args = ocp.checkpoint_utils.construct_restore_args(col_target)
@@ -1060,6 +1050,11 @@ def from_pretrained(
               col_meta,
               mesh,
           )
+        # Collections whose every leaf the restore will overwrite: those read from disk, plus
+        # those aliased into `params` in full. Only these are safe to free before restoring.
+        restored_collections = set(item_to_restore["params"]) | {
+            col for col in aliased_collections if col not in params_collection
+        }
       else:
         # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
         # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model,
@@ -1126,12 +1121,12 @@ def from_pretrained(
             and not is_custom
         ):
           if not is_nnx_checkpoint:
-            # Only free what the restore will actually overwrite. A collection absent from
-            # `item_to_restore` keeps its initialized buffer; deleting it here would leave a
-            # dangling deleted array that fails much later at first use.
+            # Only free what the restore will actually overwrite. A collection it does not
+            # restore keeps its initialized buffer; deleting it here would leave a dangling
+            # deleted array that fails much later at first use.
             type_ = node.type if isinstance(node, nnx.Variable) else type(node)
             col_name = variablelib.variable_name_from_type(type_, allow_register=True)
-            if col_name not in item_to_restore.get("params", {}):
+            if col_name not in restored_collections:
               return node
           inner = node.get_value() if hasattr(node, "get_value") else node[...]
           # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
@@ -1165,13 +1160,7 @@ def from_pretrained(
         # The checkpoint may carry custom collections (e.g. `Tid2EidVar`, `MoEBiasVar`)
         # alongside `params`. Taking only `params` here would silently drop them, leaving
         # those variables un-restored. Merge every collection into one tree instead.
-        restored_params = restored["params"]
-        checkpoint = {}
-        for col_name, col_data in restored_params.items():
-          if isinstance(col_data, dict):
-            checkpoint = _deep_merge_dicts(checkpoint, col_data)
-          else:
-            checkpoint[col_name] = col_data
+        checkpoint = checkpointing._merge_restored_collections(restored["params"])  # pylint: disable=protected-access
 
       if checkpoint:
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
