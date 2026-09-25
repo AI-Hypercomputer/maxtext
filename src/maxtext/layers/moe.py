@@ -1272,14 +1272,16 @@ class RoutedMoE(nnx.Module):
           local_num_experts,
           axis=0,
       )
-      local_overflow = (jnp.sum(local_group_size) > buffer_size).astype(jnp.int32)
+      # Deliberately *not* all-reduced here: nothing inside the layer consumes the
+      # flag (it is only sown for the host-side retry decision), so reducing it
+      # per-layer would put one full-mesh all-reduce inside the forward scan --
+      # 59 blocking collectives per step on a 671B/1024-chip run. `sparse_matmul`
+      # emits the per-device flags as a mesh-sharded array and the training step
+      # reduces all layers at once. See `RoutedMoE.sparse_matmul`.
+      has_overflow = jnp.sum(local_group_size) > buffer_size
       # Clamp local_group_size to buffer_size to ensure we don't exceed buffer
       # capacity by leveraging the helper _truncate_matrix.
       local_group_size = _truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
-      if self.mesh is not None and self.mesh.axis_names:
-        has_overflow = jax.lax.psum(local_overflow, tuple(self.mesh.axis_names)) > 0
-      else:
-        has_overflow = local_overflow > 0
       expert_indices = jnp.arange(local_num_experts)
       sorted_experts = jnp.repeat(
           expert_indices,
@@ -2774,6 +2776,10 @@ class RoutedMoE(nnx.Module):
 
       return output, routing.lb_loss, routing.bias_updates, routing.has_overflow
 
+    # Every mesh axis, flattened onto a single dimension, so that each device
+    # contributes exactly one element to the ragged-buffer overflow flag array.
+    overflow_mesh_axes = tuple(self.mesh.axis_names)
+
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
@@ -2798,7 +2804,10 @@ class RoutedMoE(nnx.Module):
             output_pspec,
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
-            P(),  # has_overflow: replicated scalar, all-reduced across entire mesh
+            # has_overflow: one *unreduced* element per device, laid out as a
+            # (num_devices,) array. Keeping it sharded avoids an all-reduce per
+            # MoE layer; the caller reduces every layer's flags in one shot.
+            P(overflow_mesh_axes),
         ),
         check_vma=self.config.check_vma,
     )
@@ -2894,6 +2903,9 @@ class RoutedMoE(nnx.Module):
 
       force_dropless = getattr(self, "force_dropless", False)
       out, lb_loss, bias_updates, has_overflow = _route_and_compute(force_dropless=force_dropless)
+      # Shape the per-device flag to match `out_specs` above: one element per
+      # device, unreduced.
+      has_overflow = jnp.reshape(jnp.asarray(has_overflow, dtype=jnp.bool_), (1,))
       return out, lb_loss, bias_updates, has_overflow
 
     # Note: SparseCore pinning (`moe_pin_sparse_core_all_gathers`) is currently not supported
@@ -2990,7 +3002,17 @@ class RoutedMoE(nnx.Module):
         self.rngs,
         forced_routed_experts,
     )
-    self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
+    if getattr(self, "force_dropless", False):
+      # `permute` skips ragged-buffer truncation entirely when force_dropless is
+      # set, so the flag is statically false. Sow a compile-time constant rather
+      # than the mesh-sharded array so that the caller's overflow handling folds
+      # away completely -- this is the replay executable, which must not pay for
+      # the retry logic it exists to serve.
+      self.sow(nnx.Intermediate, "moe_has_overflow", jnp.zeros((), jnp.bool_))
+    else:
+      # One *unreduced* flag per device (see `out_specs` above). Callers must
+      # reduce it across the mesh (e.g. `jnp.any`) before branching on it.
+      self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
     return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices, safe_updates=False):

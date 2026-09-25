@@ -105,10 +105,10 @@ def get_functional_train_with_signature(
   in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  if getattr(config, "retry_when_tokens_dropped", False) is True:
-    donate_argnums = ()  # Preserve state so it can be replayed if an overflow occurs
-  else:
-    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  # Donating the state is worth ~7 GiB/device on a 671B run, so it stays on even
+  # with retry_when_tokens_dropped: `train_step` rolls the update back in-graph
+  # on overflow, so the returned state is replayable (see `_rollback_on_overflow`).
+  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
@@ -1476,7 +1476,7 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
-def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> list:
+def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str, ravel: bool = True) -> list:
   """Collects intermediate leaf values whose dict-key path ends with suffix_keys.
 
   Works regardless of model architecture (scanned, scannable blocks, or standard),
@@ -1486,9 +1486,11 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
     intermediate_outputs: The intermediates dict returned by model.apply().
     *suffix_keys: One or more key names forming the expected path suffix,
       e.g. ``("moe_lb_loss",)`` or ``("self_attention", "indexer_loss")``.
+    ravel: Flatten each leaf to 1-D. Pass False for leaves that are sharded
+      across the mesh, where flattening would force a reshard collective.
 
   Returns:
-    A list of 1-D JAX arrays, one per matching leaf (already ravelled).
+    A list of JAX arrays, one per matching leaf (1-D unless ``ravel=False``).
   """
   suffix = tuple(suffix_keys)
   n = len(suffix)
@@ -1496,7 +1498,7 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
   for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
     path_keys = tuple(k.key for k in path if hasattr(k, "key"))
     if len(path_keys) >= n and path_keys[-n:] == suffix:
-      values.append(jnp.ravel(val))
+      values.append(jnp.ravel(val) if ravel else val)
   return values
 
 

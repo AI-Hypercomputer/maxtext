@@ -3635,6 +3635,11 @@ class MaxTextConfig(
         raise ValueError("retry_when_tokens_dropped=True requires use_ragged_sort=True.")
       if self.num_moe_emb_chunks > 0:
         raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
+      if self.enable_diloco:
+        # The dropless replay executable is only built off the plain NNX train
+        # state, so with DiLoCo the step would roll itself back on overflow and
+        # never be replayed.
+        raise ValueError("retry_when_tokens_dropped=True is not supported with enable_diloco=True.")
 
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor is used with supported settings."""

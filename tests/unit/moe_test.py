@@ -543,7 +543,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
           moe_fsdp_use_two_stage_all_gather=False,
           moe_pin_sparse_core_all_gathers=False,
       ),
-      mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
+      mesh=SimpleNamespace(axis_names=("fsdp", "expert"), shape={"fsdp": 32, "expert": expert_parallelism}),
       rngs=object(),
       get_expert_parallelism_size=lambda: expert_parallelism,
       _expert_parallelism_name="expert",
@@ -588,6 +588,8 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
   assert captured["in_specs"][2] is None
   assert captured["in_specs"][9] is None
   assert captured["out_specs"][0] == P(batch_partition, None, None)
+  # The overflow flag stays unreduced: one flag per device over every mesh axis.
+  assert captured["out_specs"][3] == P(("fsdp", "expert"))
 
 
 class RoutedMoeTest(parameterized.TestCase):
@@ -1378,9 +1380,12 @@ class RoutedMoeTest(parameterized.TestCase):
       )
       has_overflow = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_has_overflow")
       self.assertTrue(has_overflow, "Expected a moe_has_overflow intermediate to be sown.")
+      # The sown flags are per-device and unreduced; reducing them is the caller's
+      # job (loss_fn does it once for the whole model). A single overflowing shard
+      # must therefore still make the global reduction True.
       self.assertTrue(
           bool(jnp.any(jnp.array([jnp.any(x) for x in has_overflow]))),
-          "Expected full-mesh all-reduced overflow=True when only shard 0 overflows.",
+          "Expected the reduced overflow flag to be True when only shard 0 overflows.",
       )
 
     # Replay with force_dropless=True matches dropless output.

@@ -1053,14 +1053,20 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
     )
     self.assertEqual(donate_argnums, 0)
 
-  def test_donate_argnums_is_empty_with_retry_when_tokens_dropped(self):
+  def test_donate_argnums_is_zero_with_retry_when_tokens_dropped(self):
+    """Donation stays on with retry_when_tokens_dropped.
+
+    train_step rolls its own update back in-graph on overflow, so the returned
+    state is replayable without paying for an un-aliased copy of the state on
+    every step.
+    """
     step = self._make_mock_step()
     cfg = self._make_mock_config()
     cfg.retry_when_tokens_dropped = True
     _, _, _, _, donate_argnums = maxtext_utils.get_functional_train_with_signature(
         step, "data_sharding", "state_shardings", "model", cfg
     )
-    self.assertEqual(donate_argnums, ())
+    self.assertEqual(donate_argnums, 0)
 
   def test_functional_train_is_partial(self):
     """functional_train should partially apply model and config."""
