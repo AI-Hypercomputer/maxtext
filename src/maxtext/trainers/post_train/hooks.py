@@ -162,7 +162,7 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
         self.eval_metadata["eval_step_count"] != 0
     ), "BaseTrainingHooks.on_eval_step_start() must be called before BaseTrainingHooks.on_eval_step_end()"
 
-    avg_loss = eval_loss / self.eval_metadata["eval_step_count"]
+    avg_loss = eval_loss if self.eval_loss_is_preaveraged() else eval_loss / self.eval_metadata["eval_step_count"]
     metrics = {
         "scalar": {
             "eval/total_loss": eval_loss,
@@ -194,6 +194,10 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
 
     if avg_loss <= self.config.target_eval_loss:
       raise exceptions.StopTraining(f"Target loss {self.config.target_eval_loss=} is achieved.")
+
+  def eval_loss_is_preaveraged(self) -> bool:
+    """Whether Tunix supplies a cross-batch weighted mean to the eval hook."""
+    return False
 
   @abc.abstractmethod
   def get_total_weights(self, batch) -> jax.Array:
