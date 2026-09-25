@@ -948,7 +948,7 @@ def tgmm_v2(
 # sublanes) is obtained by simply swapping the operands, since
 # `tgmm(lhs, rhs)[g] == tgmm(rhs, lhs)[g].T`.
 #
-# Two-phase pipeline (per tgmm_transpose.md):
+# Two-phase pipeline:
 #
 #   1. MXU per-group matmul into VMEM stage buffer:
 #      `stage[bk/128, Gp, bn, 128]` in bf16 (or staged in-place inside `out_ref`
@@ -1006,9 +1006,8 @@ def calculate_tgmm_spatial_minor_tiling(
 ) -> gmm_v2.TileSizes:
   """Calculate optimal tile sizes for spatial minor TGMM kernel.
 
-  Estimates the scoped VMEM the kernel allocates, following the VMEM budget
-  section of `tgmm_transpose.md`. `G` is `dims.size_group`. `Gp` is the group
-  count the kernel emits: `G` aligned to 8, or to `num_lanes` when
+  Estimates the scoped VMEM the kernel allocates. `G` is `dims.size_group`.
+  `Gp` is the group count the kernel emits: `G` aligned to 8, or to `num_lanes` when
   `G > num_lanes`. `lanes_g` is `Gp` aligned to `num_lanes`, the lane footprint
   of the output window.
     - lhs block:  2 * tile_m * tile_k * lhs_bytes (double buffered)
