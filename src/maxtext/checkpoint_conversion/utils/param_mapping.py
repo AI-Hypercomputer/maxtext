@@ -870,9 +870,10 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
     - attention-in_proj_qkvz-kernel: (linear_attn.in_proj_qkv.weight, linear_attn.in_proj_z.weight)
     - attention-in_proj_ba-kernel: (linear_attn.in_proj_b.weight, linear_attn.in_proj_a.weight")
   """
-  num_main_layers = config["text_config"]["num_hidden_layers"]
+  num_main_layers = getattr(maxtext_config, "num_decoder_layers", None) or config["text_config"]["num_hidden_layers"]
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
   is_quantized = getattr(maxtext_config, "weight_dtype", None) == "float8_e4m3fn"
+  num_experts = getattr(maxtext_config, "num_experts", None) or config.get("text_config", config).get("num_experts", 1)
 
   # 1. Non-layer specific weight mappings
   mapping = {
@@ -989,81 +990,92 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               }
           )
 
-      # 3. Handle MLP: Gates and Shared Experts
-      mapping.update(  # pyrefly: ignore[no-matching-overload]
-          {
-              f"{prefix}-mlp-routed_experts-gate-kernel": [
-                  f"model.language_model.layers.{i}.mlp.gate.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wi_0-kernel": [
-                  f"model.language_model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wi_1-kernel": [
-                  f"model.language_model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert-wo-kernel": [
-                  f"model.language_model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices
-              ],
-              f"{prefix}-mlp-shared_expert_gate-kernel": [
-                  f"model.language_model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices
-              ],
-          }
-      )
-      if is_quantized:
-        mapping.update(
-            {
-                f"{prefix}-mlp-shared_expert-wi_0-kernel_scale": [
-                    f"model.language_model.layers.{i}.mlp.shared_expert.gate_proj.weight_scale_inv" for i in hf_indices
-                ],
-                f"{prefix}-mlp-shared_expert-wi_1-kernel_scale": [
-                    f"model.language_model.layers.{i}.mlp.shared_expert.up_proj.weight_scale_inv" for i in hf_indices
-                ],
-                f"{prefix}-mlp-shared_expert-wo-kernel_scale": [
-                    f"model.language_model.layers.{i}.mlp.shared_expert.down_proj.weight_scale_inv" for i in hf_indices
-                ],
-            }
-        )
-
-      # 4. Handle MoE Routed Experts
-      if is_quantized:
-        num_experts = config.get("text_config", config).get("num_experts", 256)
-        mapping.update(
-            {
-                f"{prefix}-mlp-routed_experts-wi_0": [
-                    [f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices]
-                    for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wi_0_scale": [
-                    [f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv" for i in hf_indices]
-                    for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wi_1": [
-                    [f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight" for i in hf_indices]
-                    for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wi_1_scale": [
-                    [f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv" for i in hf_indices]
-                    for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wo": [
-                    [f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in hf_indices]
-                    for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wo_scale": [
-                    [f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv" for i in hf_indices]
-                    for e in range(num_experts)
-                ],
-            }
-        )
-      else:
+      # 3. Handle MLP: Gates and Shared Experts (MoE) or Dense MLP
+      if num_experts > 1:
         mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
-                f"{prefix}-mlp-routed_experts-wo": [
-                    f"model.language_model.layers.{i}.mlp.experts.down_proj" for i in hf_indices
+                f"{prefix}-mlp-routed_experts-gate-kernel": [
+                    f"model.language_model.layers.{i}.mlp.gate.weight" for i in hf_indices
                 ],
-                (f"{prefix}-mlp-routed_experts-wi_0", f"{prefix}-mlp-routed_experts-wi_1"): [
-                    f"model.language_model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
+                f"{prefix}-mlp-shared_expert-wi_0-kernel": [
+                    f"model.language_model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices
                 ],
+                f"{prefix}-mlp-shared_expert-wi_1-kernel": [
+                    f"model.language_model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-shared_expert-wo-kernel": [
+                    f"model.language_model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-shared_expert_gate-kernel": [
+                    f"model.language_model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices
+                ],
+            }
+        )
+        if is_quantized:
+          mapping.update(
+              {
+                  f"{prefix}-mlp-shared_expert-wi_0-kernel_scale": [
+                      f"model.language_model.layers.{i}.mlp.shared_expert.gate_proj.weight_scale_inv" for i in hf_indices
+                  ],
+                  f"{prefix}-mlp-shared_expert-wi_1-kernel_scale": [
+                      f"model.language_model.layers.{i}.mlp.shared_expert.up_proj.weight_scale_inv" for i in hf_indices
+                  ],
+                  f"{prefix}-mlp-shared_expert-wo-kernel_scale": [
+                      f"model.language_model.layers.{i}.mlp.shared_expert.down_proj.weight_scale_inv" for i in hf_indices
+                  ],
+              }
+          )
+
+        # 4. Handle MoE Routed Experts
+        if is_quantized:
+          num_experts = config.get("text_config", config).get("num_experts", 256)
+          mapping.update(
+              {
+                  f"{prefix}-mlp-routed_experts-wi_0": [
+                      [f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices]
+                      for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wi_0_scale": [
+                      [f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv" for i in hf_indices]
+                      for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wi_1": [
+                      [f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight" for i in hf_indices]
+                      for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wi_1_scale": [
+                      [f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv" for i in hf_indices]
+                      for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wo": [
+                      [f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in hf_indices]
+                      for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wo_scale": [
+                      [f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv" for i in hf_indices]
+                      for e in range(num_experts)
+                  ],
+              }
+          )
+        else:
+          mapping.update(  # pyrefly: ignore[no-matching-overload]
+              {
+                  f"{prefix}-mlp-routed_experts-wo": [
+                      f"model.language_model.layers.{i}.mlp.experts.down_proj" for i in hf_indices
+                  ],
+                  (f"{prefix}-mlp-routed_experts-wi_0", f"{prefix}-mlp-routed_experts-wi_1"): [
+                      f"model.language_model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
+                  ],
+              }
+          )
+      else:
+        mapping.update(
+            {
+                f"{prefix}-mlp-wi_0-kernel": [
+                    f"model.language_model.layers.{i}.mlp.gate_proj.weight" for i in hf_indices
+                ],
+                f"{prefix}-mlp-wi_1-kernel": [f"model.language_model.layers.{i}.mlp.up_proj.weight" for i in hf_indices],
+                f"{prefix}-mlp-wo-kernel": [f"model.language_model.layers.{i}.mlp.down_proj.weight" for i in hf_indices],
             }
         )
   else:
@@ -1142,63 +1154,72 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               }
           )
 
-      # MLP: Gates and Shared Experts
+      # MLP: Gates and Shared Experts (MoE) or Dense MLP
       hf_mlp = f"model.language_model.layers.{i}.mlp"
 
-      mapping.update(
-          {
-              f"{prefix}-mlp-routed_experts-gate-kernel": (f"{hf_mlp}.gate.weight"),
-              f"{prefix}-mlp-shared_expert-wi_0-kernel": (f"{hf_mlp}.shared_expert.gate_proj.weight"),
-              f"{prefix}-mlp-shared_expert-wi_1-kernel": (f"{hf_mlp}.shared_expert.up_proj.weight"),
-              f"{prefix}-mlp-shared_expert-wo-kernel": (f"{hf_mlp}.shared_expert.down_proj.weight"),
-              f"{prefix}-mlp-shared_expert_gate-kernel": (f"{hf_mlp}.shared_expert_gate.weight"),
-          }
-      )
-      if is_quantized:
+      if num_experts > 1:
         mapping.update(
             {
-                f"{prefix}-mlp-shared_expert-wi_0-kernel_scale": (f"{hf_mlp}.shared_expert.gate_proj.weight_scale_inv"),
-                f"{prefix}-mlp-shared_expert-wi_1-kernel_scale": (f"{hf_mlp}.shared_expert.up_proj.weight_scale_inv"),
-                f"{prefix}-mlp-shared_expert-wo-kernel_scale": (f"{hf_mlp}.shared_expert.down_proj.weight_scale_inv"),
+                f"{prefix}-mlp-routed_experts-gate-kernel": (f"{hf_mlp}.gate.weight"),
+                f"{prefix}-mlp-shared_expert-wi_0-kernel": (f"{hf_mlp}.shared_expert.gate_proj.weight"),
+                f"{prefix}-mlp-shared_expert-wi_1-kernel": (f"{hf_mlp}.shared_expert.up_proj.weight"),
+                f"{prefix}-mlp-shared_expert-wo-kernel": (f"{hf_mlp}.shared_expert.down_proj.weight"),
+                f"{prefix}-mlp-shared_expert_gate-kernel": (f"{hf_mlp}.shared_expert_gate.weight"),
             }
         )
+        if is_quantized:
+          mapping.update(
+              {
+                  f"{prefix}-mlp-shared_expert-wi_0-kernel_scale": (f"{hf_mlp}.shared_expert.gate_proj.weight_scale_inv"),
+                  f"{prefix}-mlp-shared_expert-wi_1-kernel_scale": (f"{hf_mlp}.shared_expert.up_proj.weight_scale_inv"),
+                  f"{prefix}-mlp-shared_expert-wo-kernel_scale": (f"{hf_mlp}.shared_expert.down_proj.weight_scale_inv"),
+              }
+          )
 
-      # MoE Routed Experts
-      if is_quantized:
-        num_experts = config.get("text_config", config).get("num_experts", 256)
+        # MoE Routed Experts
+        if is_quantized:
+          num_experts = config.get("text_config", config).get("num_experts", 256)
+          mapping.update(
+              {
+                  f"{prefix}-mlp-routed_experts-wi_0": [
+                      f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wi_0_scale": [
+                      f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv"
+                      for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wi_1": [
+                      f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight" for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wi_1_scale": [
+                      f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv"
+                      for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wo": [
+                      f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight" for e in range(num_experts)
+                  ],
+                  f"{prefix}-mlp-routed_experts-wo_scale": [
+                      f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv"
+                      for e in range(num_experts)
+                  ],
+              }
+          )
+        else:
+          mapping.update(  # pyrefly: ignore[no-matching-overload]
+              {
+                  f"{prefix}-mlp-routed_experts-wo": f"model.language_model.layers.{i}.mlp.experts.down_proj",
+                  (
+                      f"{prefix}-mlp-routed_experts-wi_0",
+                      f"{prefix}-mlp-routed_experts-wi_1",
+                  ): f"model.language_model.layers.{i}.mlp.experts.gate_up_proj",
+              }
+          )
+      else:
         mapping.update(
             {
-                f"{prefix}-mlp-routed_experts-wi_0": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wi_0_scale": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv"
-                    for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wi_1": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight" for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wi_1_scale": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv"
-                    for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wo": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight" for e in range(num_experts)
-                ],
-                f"{prefix}-mlp-routed_experts-wo_scale": [
-                    f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv"
-                    for e in range(num_experts)
-                ],
-            }
-        )
-      else:
-        mapping.update(  # pyrefly: ignore[no-matching-overload]
-            {
-                f"{prefix}-mlp-routed_experts-wo": f"model.language_model.layers.{i}.mlp.experts.down_proj",
-                (
-                    f"{prefix}-mlp-routed_experts-wi_0",
-                    f"{prefix}-mlp-routed_experts-wi_1",
-                ): f"model.language_model.layers.{i}.mlp.experts.gate_up_proj",
+                f"{prefix}-mlp-wi_0-kernel": f"{hf_mlp}.gate_proj.weight",
+                f"{prefix}-mlp-wi_1-kernel": f"{hf_mlp}.up_proj.weight",
+                f"{prefix}-mlp-wo-kernel": f"{hf_mlp}.down_proj.weight",
             }
         )
 
@@ -1440,7 +1461,8 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   }
 
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
-  num_main_layers = config["text_config"]["num_hidden_layers"]
+  num_main_layers = getattr(maxtext_config, "num_decoder_layers", None) or config["text_config"]["num_hidden_layers"]
+  num_experts = getattr(maxtext_config, "num_experts", None) or config.get("text_config", config).get("num_experts", 1)
   loop_indices = range(layer_cycle_interval) if scan_layers else range(num_main_layers)
 
   for i in loop_indices:
@@ -1467,27 +1489,32 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         hooks[f"{prefix}-attention-out_proj-kernel_scale"] = transpose
 
     mlp_prefix = f"{prefix}-mlp"
-    hooks[f"{mlp_prefix}-routed_experts-gate-kernel"] = transpose
-    hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel"] = transpose
-    hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
-    hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
-    hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
-    if is_quantized:
-      hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel_scale"] = transpose
-      hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel_scale"] = transpose
-      hooks[f"{mlp_prefix}-shared_expert-wo-kernel_scale"] = transpose
-      hooks[f"{mlp_prefix}-routed_experts-wi_0"] = transpose
-      hooks[f"{mlp_prefix}-routed_experts-wi_0_scale"] = transpose
-      hooks[f"{mlp_prefix}-routed_experts-wi_1"] = transpose
-      hooks[f"{mlp_prefix}-routed_experts-wi_1_scale"] = transpose
-      hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose
-      hooks[f"{mlp_prefix}-routed_experts-wo_scale"] = transpose
+    if num_experts > 1:
+      hooks[f"{mlp_prefix}-routed_experts-gate-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert-wo-kernel"] = transpose
+      hooks[f"{mlp_prefix}-shared_expert_gate-kernel"] = transpose
+      if is_quantized:
+        hooks[f"{mlp_prefix}-shared_expert-wi_0-kernel_scale"] = transpose
+        hooks[f"{mlp_prefix}-shared_expert-wi_1-kernel_scale"] = transpose
+        hooks[f"{mlp_prefix}-shared_expert-wo-kernel_scale"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wi_0"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wi_0_scale"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wi_1"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wi_1_scale"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose
+        hooks[f"{mlp_prefix}-routed_experts-wo_scale"] = transpose
+      else:
+        # pyrefly: ignore[unsupported-operation]
+        hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
+            process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+        )
+        hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
     else:
-      # pyrefly: ignore[unsupported-operation]
-      hooks[(f"{mlp_prefix}-routed_experts-wi_0", f"{mlp_prefix}-routed_experts-wi_1")] = (
-          process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
-      )
-      hooks[f"{mlp_prefix}-routed_experts-wo"] = transpose_expert
+      hooks[f"{mlp_prefix}-wi_0-kernel"] = reshape_kernel
+      hooks[f"{mlp_prefix}-wi_1-kernel"] = reshape_kernel
+      hooks[f"{mlp_prefix}-wo-kernel"] = reshape_kernel
 
   # Vision hooks for Qwen3.5
   vision_config = config.get("vision_config", None)
@@ -4467,6 +4494,7 @@ PARAM_MAPPING = {
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-a3b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3.5-9b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4526,6 +4554,7 @@ HOOK_FNS = {
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-a3b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3.5-9b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
