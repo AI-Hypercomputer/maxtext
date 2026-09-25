@@ -30,6 +30,8 @@ import qwix
 from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Config, DType
 from maxtext.configs import pyconfig
+from maxtext.kernels.ragged import ragged_gather_reduce_v2
+from maxtext.kernels.ragged import ragged_sort
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
@@ -424,6 +426,69 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
     actual_updates = compute_updates(top_k_indices)
     assert_moe_close(actual_updates, expected_updates, jnp.float32)
+
+    # Verify replication_factor divides out identical RoE copies across EP:
+    mesh_roe = Mesh(
+        np.array(devices[:n_dev]).reshape(n_dev, 1),
+        axis_names=("fsdp", "expert"),
+    )
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh_roe,
+        in_specs=P("fsdp", None, None),
+        out_specs=P(),
+        check_vma=False,
+    )
+    def compute_roe_updates(indices):
+      # Each EP shard holds an all-gathered copy of its fsdp slice.
+      return moe.calculate_load_balance_updates(
+          indices * 1,
+          num_experts,
+          rate,
+          axis_names=("fsdp", "expert"),
+          replication_factor=mesh_roe.shape["expert"],
+      )
+
+    actual_roe_updates = compute_roe_updates(top_k_indices)
+    assert_moe_close(actual_roe_updates, expected_updates, jnp.float32)
+
+  def test_ragged_inverse_permutation_and_preprocess(self):
+    """Verifies _inverse_permutation and _preprocess match jnp.argsort."""
+    # pylint: disable=protected-access
+    rng = jax.random.PRNGKey(42)
+    rng_perm, rng_mask = jax.random.split(rng)
+
+    perm = jax.random.permutation(rng_perm, 256).astype(jnp.int32)
+    np.testing.assert_array_equal(
+        ragged_sort._inverse_permutation(perm),
+        jnp.argsort(perm),
+    )
+
+    valid_rows_mask = jax.random.bernoulli(rng_mask, p=0.35, shape=(512,))
+    num_row_partitions = 8
+    reduce_group_size = 8
+    num_simd_lanes = 8
+    row_chunk_size = 32
+    sorted_by_validity, num_src_rows, mask = ragged_gather_reduce_v2._preprocess(
+        valid_rows_mask,
+        reduce_group_size=reduce_group_size,
+        num_row_partitions=num_row_partitions,
+        num_simd_lanes=num_simd_lanes,
+        row_chunk_size=row_chunk_size,
+    )
+    row_partition_size = valid_rows_mask.shape[0] // num_row_partitions
+    valid_rows_mask_2d = valid_rows_mask.reshape(num_row_partitions, -1)
+    expected_sorted = (
+        jnp.argsort(~valid_rows_mask_2d, descending=False, stable=True, axis=-1)
+        + jnp.arange(num_row_partitions, dtype=jnp.int32)[:, None] * row_partition_size
+    ).reshape(-1)
+    np.testing.assert_array_equal(sorted_by_validity, expected_sorted)
+    np.testing.assert_array_equal(num_src_rows, jnp.sum(valid_rows_mask_2d, axis=-1))
+    np.testing.assert_array_equal(
+        mask,
+        jnp.any(valid_rows_mask.reshape(-1, reduce_group_size), axis=-1),
+    )
 
 
 class MoeLoopBlock(nnx.Module):

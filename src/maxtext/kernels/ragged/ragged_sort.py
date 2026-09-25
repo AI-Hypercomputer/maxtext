@@ -20,6 +20,29 @@ from maxtext.kernels.ragged.ragged_gather import ragged_gather
 from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
 
 
+def _inverse_permutation(perm):
+  """Returns ``inv`` with ``inv[perm[i]] = i`` for a 1-D permutation ``perm``.
+
+  Replaces ``jnp.argsort(perm)``: a full sort of ``n`` keys becomes one
+  ``n``-element scatter. The indices are unique, so scatter-add into zeros is
+  the same as scatter-set; add is used because XLA can offload element
+  scatters with an add combiner to SparseCore, but not ones that overwrite.
+
+  Args:
+    perm: 1-D integer permutation array of ``[0, n)``.
+  """
+  n = perm.shape[0]
+  return (
+      jnp.zeros_like(perm)
+      .at[perm]
+      .add(
+          jnp.arange(n, dtype=perm.dtype),
+          unique_indices=True,
+          mode="promise_in_bounds",
+      )
+  )
+
+
 def ring_ragged_sort(
     hidden_states_local,
     topk_indices_local,
@@ -87,12 +110,15 @@ def ring_ragged_sort(
     topk_indices_flat = topk_indices_local.flatten()  # num_tokens_local x topk
     topk_argsort_indices = jnp.argsort(topk_indices_flat)  # num_tokens_local x topk
 
-    token_indices = jnp.arange(num_tokens_local, dtype=jnp.int32).repeat(topk)  # num_tokens_local x topk
-    token_indices_sorted = token_indices[topk_argsort_indices]  # num_tokens_local x topk
+    # Flat entry j belongs to token j // topk, i.e. this equals
+    # `jnp.arange(num_tokens_local).repeat(topk)[topk_argsort_indices]`. The
+    # division avoids a full-size gather (offloaded to SparseCore, where it
+    # queues behind other SC work and delays the ragged gather that needs it).
+    token_indices_sorted = (topk_argsort_indices // topk).astype(jnp.int32)  # num_tokens_local x topk
 
     group_sizes_local = jax.nn.one_hot(topk_indices_flat, num_experts, dtype=jnp.int32).sum(axis=0)  # GLOBAL_NUM_EXPERTS
 
-    topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)  # num_tokens_local x topk
+    topk_argsort_revert_indices = _inverse_permutation(topk_argsort_indices)  # num_tokens_local x topk
     shard_idx = jax.lax.axis_index(ep_name)
 
     local_num_experts = num_experts // ep_size
@@ -392,7 +418,7 @@ def ring_ragged_unsort(
     n = topk_argsort_revert_indices.shape[0]
     # Build the inverse permutation idx_inv such that idx_inv[j] = i
     # where revert[i] = j.
-    idx_inv = jnp.argsort(topk_argsort_revert_indices)
+    idx_inv = _inverse_permutation(topk_argsort_revert_indices)
 
     # Handle the same two buffering modes for backward pass.
     # ragged_gather does the fan-out, by indexing into the un-expanded
