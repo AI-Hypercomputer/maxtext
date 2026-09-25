@@ -44,19 +44,32 @@ def gather_cp_segment_metadata(
     segment_ids: Optional[jax.Array],
     cp_axis: str | tuple[str, ...],
     kernel_size: int,
+    has_initial_state: bool = False,
 ) -> Tuple[Optional[jax.Array], Optional[jax.Array], Optional[jax.Array]]:
-  """Gathers global segment_ids across cp_axis and slices local (s_enc, conv_halo_seg, init_seg)."""
+  """Gathers global segment_ids across cp_axis and slices local (s_enc, conv_halo_seg, init_seg).
+
+  Segment IDs are canonicalized on the gathered global sequence, so every rank
+  sees the same document numbering. With `has_initial_state`, the caller
+  conv/recurrent states continue the first document (canonical ID 1).
+  """
   if segment_ids is None:
     return None, None, None
   batch_size, seq_len = segment_ids.shape
   halo_len = max(kernel_size - 1, 1)
   global_seg = lax.all_gather(segment_ids, axis_name=cp_axis, axis=1, tiled=True)
-  global_s_enc = local_compute_conv1d.encode_segment_ids(global_seg)
+  global_seg = local_compute_conv1d.canonicalize_segment_ids(global_seg)
+  if has_initial_state:
+    init_global = jnp.ones((batch_size,), dtype=jnp.float32)
+    pad_value = 1.0
+  else:
+    init_global = None
+    pad_value = 0.0
+  global_s_enc = local_compute_conv1d.encode_segment_ids(global_seg, init_seg=init_global)
   idx = lax.axis_index(cp_axis)
   start = idx * seq_len
   s_enc_local = lax.dynamic_slice_in_dim(global_s_enc, start, seq_len, axis=1)
 
-  global_s_enc_pad = jnp.pad(global_s_enc, ((0, 0), (halo_len, 0)))
+  global_s_enc_pad = jnp.pad(global_s_enc, ((0, 0), (halo_len, 0)), constant_values=pad_value)
   if kernel_size - 1 > 0:
     conv_halo_seg = lax.dynamic_slice_in_dim(jnp.maximum(global_s_enc_pad, 0.0), start, kernel_size - 1, axis=1)
   else:
@@ -156,15 +169,42 @@ def halo_exchange_for_conv(
   return jnp.where(idx == 0, rank0_halo, recv_halo)
 
 
+def select_end_conv_state_rank(
+    has_valid: Optional[jax.Array],
+    cp_axis: str | tuple[str, ...],
+) -> jax.Array:
+  """Returns a per-row bool that is True on the rank owning the final Conv1D state.
+
+  That is the last rank whose local tokens hold a valid token, or rank 0 if none
+  does (rank 0's window then covers the caller conv state). A rank whose tokens
+  are all padding never owns it: its halo is zeroed by `halo_exchange_for_conv`.
+  Without segment metadata (`has_valid` None), it is the last rank.
+  """
+  d_size = lax.axis_size(cp_axis)
+  idx = lax.axis_index(cp_axis)
+  if has_valid is None:
+    return jnp.asarray(idx == (d_size - 1))
+  owner = lax.pmax(jnp.where(has_valid, idx, 0).astype(jnp.int32), cp_axis)
+  return owner == idx
+
+
 def broadcast_end_conv_state(
     next_cs: jax.Array,
     cp_axis: str | tuple[str, ...],
+    has_valid: Optional[jax.Array] = None,
 ) -> jax.Array:
-  """Broadcasts the final Conv1D state from the last CP rank (D - 1) to all ranks."""
-  d_size = lax.axis_size(cp_axis)
-  idx = lax.axis_index(cp_axis)
-  is_last = idx == (d_size - 1)
-  return lax.psum(jnp.where(is_last, next_cs, jnp.zeros_like(next_cs)), cp_axis)
+  """Broadcasts the final Conv1D state from its owning CP rank to all ranks.
+
+  Args:
+    next_cs: [batch, kernel_size - 1, dim] local conv state of each rank.
+    cp_axis: CP mesh axis name(s).
+    has_valid: Optional [batch] bool, True where the rank's local tokens hold a
+      valid token. None selects the last rank (D - 1).
+  """
+  is_owner = select_end_conv_state_rank(has_valid, cp_axis)
+  if is_owner.ndim == 1:
+    is_owner = is_owner[:, None, None]
+  return lax.psum(jnp.where(is_owner, next_cs, jnp.zeros_like(next_cs)), cp_axis)
 
 
 def halo_exchange_for_conv_bwd(

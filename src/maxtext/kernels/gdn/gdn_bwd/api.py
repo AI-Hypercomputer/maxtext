@@ -22,6 +22,7 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
+from .. import compute_conv1d as local_compute_conv1d
 from .. import wrapper as local_gdn_wrapper
 from . import cp_gdn
 from .compute_conv1d_bwd import conv1d_silu_bwd
@@ -292,6 +293,25 @@ def _is_cp_active(cp_axis_name: str | tuple[str, ...] | None) -> bool:
     return False
 
 
+def _local_segment_metadata(
+    segment_ids: Optional[jax.Array],
+    has_initial_state: bool,
+    conv_kernel_size: int,
+) -> Tuple[Optional[jax.Array], Optional[jax.Array], Optional[jax.Array]]:
+  """Returns canonical (segment_ids, conv_halo_seg, init_seg) for the non-CP path.
+
+  Canonicalization happens once here, on the full sequence. With caller
+  conv/recurrent states, the states continue the first document.
+  """
+  if segment_ids is None:
+    return None, None, None
+  segment_ids = local_compute_conv1d.canonicalize_segment_ids(segment_ids)
+  if not has_initial_state:
+    return segment_ids, None, None
+  conv_halo_seg, init_seg = local_compute_conv1d.initial_state_segment_metadata(segment_ids, conv_kernel_size)
+  return segment_ids, conv_halo_seg, init_seg
+
+
 def _run_cp_gdn_decoupled_fwd_impl(
     qkv: jax.Array,
     b: jax.Array,
@@ -320,7 +340,12 @@ def _run_cp_gdn_decoupled_fwd_impl(
   if seg_metadata is not None:
     s_enc_local, conv_halo_seg, init_seg = seg_metadata
   elif segment_ids is not None:
-    s_enc_local, conv_halo_seg, init_seg = cp_gdn.gather_cp_segment_metadata(segment_ids, cp_axis_name, conv_kernel_size)
+    s_enc_local, conv_halo_seg, init_seg = cp_gdn.gather_cp_segment_metadata(
+        segment_ids,
+        cp_axis_name,
+        conv_kernel_size,
+        has_initial_state=(conv_state is not None) or (recurrent_state is not None),
+    )
   else:
     s_enc_local, conv_halo_seg, init_seg = None, None, None
 
@@ -413,7 +438,14 @@ def _run_cp_gdn_decoupled_fwd_impl(
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
   )
-  final_cs = cp_gdn.broadcast_end_conv_state(next_cs_local, cp_axis_name)
+  if s_enc_local is not None:
+    # Owner = last rank with a valid local token (rank 0 if none). A rank whose
+    # tokens are all padding must not own the state even though its halo is
+    # valid: halo_exchange_for_conv zeroes that halo (different document).
+    cs_has_valid = jnp.any(s_enc_local > 0, axis=1)
+  else:
+    cs_has_valid = None
+  final_cs = cp_gdn.broadcast_end_conv_state(next_cs_local, cp_axis_name, has_valid=cs_has_valid)
   states = (final_cs.astype(qkv.dtype), final_rs.astype(jnp.float32))
   return (out, states), t_inv_2, chunk_states, conv_halo, s_in_r, m_local
 
@@ -465,6 +497,9 @@ def gdn_decoupled_conv1d(
     )
     return out, states
 
+  segment_ids, conv_halo_seg, init_seg = _local_segment_metadata(
+      segment_ids, (conv_state is not None) or (recurrent_state is not None), conv_kernel_size
+  )
   (out, states), _, _ = _run_local_gdn_decoupled_fwd(
       qkv,
       b,
@@ -484,6 +519,8 @@ def gdn_decoupled_conv1d(
       use_qk_norm_in_gdn=use_qk_norm_in_gdn,
       compute_dtype=compute_dtype,
       segment_ids=segment_ids,
+      conv_halo_seg=conv_halo_seg,
+      init_seg=init_seg,
   )
   return out, states
 
@@ -547,9 +584,12 @@ def _gdn_decoupled_conv1d_fwd(
   )
   qkv = checkpoint_name(qkv, "gdn_fwd_conv")
   qkv = checkpoint_name(qkv, "gdn_conv_out")
+  has_initial_state = (conv_state is not None) or (recurrent_state is not None)
   if _is_cp_active(cp_axis_name):
     if segment_ids is not None:
-      seg_metadata = cp_gdn.gather_cp_segment_metadata(segment_ids, cp_axis_name, conv_kernel_size)
+      seg_metadata = cp_gdn.gather_cp_segment_metadata(
+          segment_ids, cp_axis_name, conv_kernel_size, has_initial_state=has_initial_state
+      )
     else:
       seg_metadata = None
     (out, states), t_inv, chunk_states, conv_halo, s_in_r, m_local = _run_cp_gdn_decoupled_fwd_impl(
@@ -594,6 +634,7 @@ def _gdn_decoupled_conv1d_fwd(
     )
     return (out, states), residuals
 
+  segment_ids, conv_halo_seg, init_seg = _local_segment_metadata(segment_ids, has_initial_state, conv_kernel_size)
   (out, states), t_inv, chunk_states = _run_local_gdn_decoupled_fwd(
       qkv,
       b,
@@ -613,9 +654,11 @@ def _gdn_decoupled_conv1d_fwd(
       use_qk_norm_in_gdn=use_qk_norm_in_gdn,
       compute_dtype=compute_dtype,
       segment_ids=segment_ids,
+      conv_halo_seg=conv_halo_seg,
+      init_seg=init_seg,
   )
   out = checkpoint_name(out, "gdn_core_attn_out")
-  seg_bundle = (segment_ids, None, None) if segment_ids is not None else None
+  seg_bundle = (segment_ids, conv_halo_seg, init_seg) if segment_ids is not None else None
   residuals = (
       checkpoint_name(qkv, "gdn_qkv") if qkv is not None else None,
       checkpoint_name(b, "gdn_b") if b is not None else None,
@@ -743,21 +786,32 @@ def _gdn_decoupled_conv1d_bwd(
     has_user_conv_state = conv_state is not None
     has_user_recurrent_state = recurrent_state is not None
 
+  use_cp = _is_cp_active(cp_axis_name)
   if isinstance(seg_slot, tuple):
     segment_ids, conv_halo_seg, init_seg = seg_slot
-  else:
+  elif use_cp:
     segment_ids, conv_halo_seg, init_seg = seg_slot, None, None
+  else:
+    segment_ids, conv_halo_seg, init_seg = _local_segment_metadata(
+        seg_slot, bool(has_user_conv_state) or bool(has_user_recurrent_state), conv_kernel_size
+    )
 
   d_out_raw, d_states = cotangents
   d_conv_state_raw, d_recurrent_state_raw = d_states
   d_out = _unwrap_cotangent(d_out_raw, like_zero=True)
-  d_conv_state = _unwrap_cotangent(d_conv_state_raw, like_zero=False) if has_user_conv_state else None
-  d_recurrent_state = _unwrap_cotangent(d_recurrent_state_raw, like_zero=False) if has_user_recurrent_state else None
-  use_cp = _is_cp_active(cp_axis_name)
+  # next_conv_state / next_recurrent_state depend on the inputs even without
+  # caller initial states, so their cotangents are always propagated.
+  d_conv_state = _unwrap_cotangent(d_conv_state_raw, like_zero=False)
+  d_recurrent_state = _unwrap_cotangent(d_recurrent_state_raw, like_zero=False)
   need_dh0 = bool(has_user_recurrent_state)
 
   if use_cp and segment_ids is not None and conv_halo_seg is None and init_seg is None:
-    segment_ids, conv_halo_seg, init_seg = cp_gdn.gather_cp_segment_metadata(segment_ids, cp_axis_name, conv_kernel_size)
+    segment_ids, conv_halo_seg, init_seg = cp_gdn.gather_cp_segment_metadata(
+        segment_ids,
+        cp_axis_name,
+        conv_kernel_size,
+        has_initial_state=bool(has_user_conv_state) or bool(has_user_recurrent_state),
+    )
 
   # Recompute forward chunk states and t_inv if not cached in residuals
   conv_out_cached = None
@@ -876,10 +930,27 @@ def _gdn_decoupled_conv1d_bwd(
         segment_ids=segment_ids,
         conv_halo_seg=conv_halo_seg,
     )
+    d_cs_ext_for_halo = d_cs_ext_unscaled
+    if d_cs_ext_unscaled is not None and segment_ids is not None:
+      # With packing, next_conv_state is the window ending at the last valid
+      # token of the rank that owns it (see broadcast_end_conv_state). Scatter
+      # its cotangent into that rank's tokens / halo instead of the last rank's tail.
+      cs_has_valid = jnp.any(segment_ids > 0, axis=1)
+      is_owner = cp_gdn.select_end_conv_state_rank(cs_has_valid, cp_axis_name)
+      d_cs_owned = jnp.where(is_owner[:, None, None], d_cs_ext_unscaled, jnp.zeros_like(d_cs_ext_unscaled))
+      d_pre_conv_qkv, d_cs_local = local_compute_conv1d.extract_segment_conv_state_split_adjoint(
+          d_cs_owned,
+          d_pre_conv_qkv,
+          d_cs_local,
+          segment_ids,
+          conv_kernel_size,
+          conv_halo_seg,
+      )
+      d_cs_ext_for_halo = None
     d_pre_conv_qkv, _ = cp_gdn.halo_exchange_for_conv_bwd(
         dx=d_pre_conv_qkv,
         d_conv_state=d_cs_local,
-        d_conv_state_ext=d_cs_ext_unscaled,
+        d_conv_state_ext=d_cs_ext_for_halo,
         kernel_size=conv_kernel_size,
         cp_axis=cp_axis_name,
         segment_ids=segment_ids,
@@ -946,7 +1017,16 @@ def _gdn_decoupled_conv1d_bwd(
       conv_halo_seg=conv_halo_seg,
   )
   # pylint: enable=unbalanced-tuple-unpacking
-  if d_conv_state is not None and pre_conv_qkv.shape[1] >= conv_kernel_size - 1:
+  if d_conv_state is not None and segment_ids is not None:
+    d_pre_conv_qkv, d_cs_local = local_compute_conv1d.extract_segment_conv_state_split_adjoint(
+        d_conv_state,
+        d_pre_conv_qkv,
+        d_cs_local if has_user_conv_state else None,
+        segment_ids,
+        conv_kernel_size,
+        conv_halo_seg,
+    )
+  elif d_conv_state is not None and pre_conv_qkv.shape[1] >= conv_kernel_size - 1:
     d_pre_conv_qkv = d_pre_conv_qkv.at[:, -(conv_kernel_size - 1) :, :].add(d_conv_state.astype(d_pre_conv_qkv.dtype))
 
   d_conv_state_out = d_cs_local if has_user_conv_state else None

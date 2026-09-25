@@ -321,9 +321,20 @@ def pure_jax_decoupled_conv1d_gdn(
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
 ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
-  """Pure-JAX composite of Conv1D + GDN used during backward pass autodiff."""
+  """Pure-JAX composite of Conv1D + GDN used during backward pass autodiff.
+
+  `segment_ids` without `conv_halo_seg` / `init_seg` are treated as raw IDs:
+  they are canonicalized, and caller conv/recurrent states continue the first
+  document. Callers that pass precomputed metadata (e.g. sequence-sharded CP)
+  must pass already-canonical IDs.
+  """
   batch, seq_len, _ = qkv.shape
   key_dim = num_k_heads * head_k_dim
+  has_initial_state = (conv_state is not None) or (recurrent_state is not None)
+  if segment_ids is not None and conv_halo_seg is None and init_seg is None:
+    segment_ids = local_compute_conv1d.canonicalize_segment_ids(segment_ids)
+    if has_initial_state:
+      conv_halo_seg, init_seg = local_compute_conv1d.initial_state_segment_metadata(segment_ids, conv_kernel_size)
 
   # Conv1D in FP32
   if conv_state is not None:
@@ -376,11 +387,16 @@ def pure_jax_decoupled_conv1d_gdn(
       compute_dtype=compute_dtype,
       segment_ids=segment_ids,
       init_seg=init_seg,
+      has_initial_state=init_seg is not None,
   )
 
   if segment_ids is not None:
-    next_conv_state = local_compute_conv1d.extract_segment_conv_state(
-        conv_input, segment_ids, conv_kernel_size, conv_halo_seg
+    next_conv_state = local_compute_conv1d.extract_segment_conv_state_split(
+        conv_state.astype(jnp.float32) if conv_state is not None else None,
+        qkv.astype(jnp.float32),
+        segment_ids,
+        conv_kernel_size,
+        conv_halo_seg,
     ).astype(qkv.dtype)
   else:
     next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :].astype(qkv.dtype)

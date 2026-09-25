@@ -20,6 +20,7 @@ import copy
 import datetime
 import enum
 from enum import Enum
+import functools
 from jinja2 import Environment, TemplateSyntaxError
 import logging
 import math
@@ -53,6 +54,17 @@ class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
 
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _warn_gdn_sequence_packing_disabled_once() -> None:
+  """Logs the packing / GDN sequence packing mismatch warning once per process."""
+  max_logging.warning(
+      "packing=True but enable_gdn_sequence_packing=False: GatedDeltaNet layers will ignore"
+      " packed document boundaries (conv and recurrent state leak across documents). Set"
+      " enable_gdn_sequence_packing=True to make GDN layers segment-aware."
+  )
+
 
 # ----------------------------------------------------------------------------
 # Reusable Enums and Type Aliases
@@ -3784,6 +3796,17 @@ class MaxTextConfig(
           "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
           "requires `use_gdn_kernel=True`."
       )
+    return self
+
+  @model_validator(mode="after")
+  def warn_gdn_packing_without_gdn_sequence_packing(self) -> "MaxTextConfig":
+    """Warns (once per process) when packed inputs reach GDN layers that ignore segment boundaries."""
+    if (
+        self.packing
+        and self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
+        and not self.enable_gdn_sequence_packing
+    ):
+      _warn_gdn_sequence_packing_disabled_once()
     return self
 
   @model_validator(mode="after")

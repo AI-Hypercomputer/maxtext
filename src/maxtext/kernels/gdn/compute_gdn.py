@@ -481,7 +481,10 @@ def recurrent_gdn(
     b_f32 = b_compact.astype(jnp.float32)
     seg_c_all = b_f32[:, 0, :, 0, cfg.num_v_heads]
     seg_aux_all = b_f32[:, 0, :, 0, cfg.num_v_heads + 1]
-    prev_idx = min(cfg.prev_kernel_size, cfg.chunk_size - 1)
+    # The chunk header is [conv halo (prev_kernel_size), previous segment, 0...];
+    # _pack_fwd_segment_metadata guarantees chunk_size >= prev_kernel_size + 1.
+    assert cfg.prev_kernel_size < cfg.chunk_size, (cfg.prev_kernel_size, cfg.chunk_size)
+    prev_idx = cfg.prev_kernel_size
     seg_prev_all = jnp.abs(seg_aux_all[:, prev_idx : prev_idx + 1])
     valid_mask = b_f32[:, :, :, :, cfg.num_v_heads : cfg.num_v_heads + 1] > 0.5
     mask = mask & valid_mask

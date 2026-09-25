@@ -19,9 +19,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import yaml
 
 from maxtext.configs import pyconfig
+from maxtext.configs import types as config_types
 from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
 from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
@@ -132,6 +134,36 @@ class PyconfigTest(unittest.TestCase):
         skip_jax_distributed_system=True,
     )
     self.assertFalse(config.context_parallel_load_balance)
+
+  def _init_qwen3_next_packing(self, **kwargs):
+    return pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        model_name="qwen3-next-80b-a3b",
+        skip_jax_distributed_system=True,
+        **kwargs,
+    )
+
+  def test_gdn_packing_without_gdn_sequence_packing_warns_once(self):
+    """packing=True on a GDN model without enable_gdn_sequence_packing logs one warning per process."""
+    config_types._warn_gdn_sequence_packing_disabled_once.cache_clear()  # pylint: disable=protected-access
+    with mock.patch.object(config_types.max_logging, "warning") as warn:
+      config = self._init_qwen3_next_packing(packing=True, enable_gdn_sequence_packing=False)
+      self._init_qwen3_next_packing(packing=True, enable_gdn_sequence_packing=False)
+    self.assertFalse(config.enable_gdn_sequence_packing)
+    gdn_warnings = [c for c in warn.call_args_list if "enable_gdn_sequence_packing" in str(c)]
+    self.assertEqual(len(gdn_warnings), 1)
+
+  def test_gdn_packing_warning_not_emitted_when_enabled_or_unpacked(self):
+    config_types._warn_gdn_sequence_packing_disabled_once.cache_clear()  # pylint: disable=protected-access
+    with mock.patch.object(config_types.max_logging, "warning") as warn:
+      config = self._init_qwen3_next_packing(packing=True, enable_gdn_sequence_packing=True)
+      self._init_qwen3_next_packing(packing=False, enable_gdn_sequence_packing=False)
+    self.assertTrue(config.enable_gdn_sequence_packing)
+    self.assertEqual([c for c in warn.call_args_list if "enable_gdn_sequence_packing" in str(c)], [])
+
+  def test_enable_gdn_sequence_packing_defaults_false(self):
+    config = self._init_qwen3_next_packing()
+    self.assertFalse(config.enable_gdn_sequence_packing)
 
   def test_load_parameters_path_allowed_without_checkpointing(self):
     """A warm start does not go through the CheckpointManager.

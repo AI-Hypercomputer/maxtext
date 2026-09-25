@@ -1559,7 +1559,14 @@ class GdnBwdPallasTest(absltest.TestCase):
 
       _ = jax.grad(loss_no_states)(qkv)
 
-    self.assertEqual(recorded_calls, [(False, False)])
+    # dh0 is omitted without an initial state. Whether the unused
+    # next_recurrent_state cotangent reaches the kernel as a dense zero (dht
+    # forwarded) or as a symbolic zero (dht skipped) depends on the JAX version;
+    # both are correct. That a non-zero final-state cotangent is never dropped
+    # without an initial state is checked by
+    # test_final_state_cotangents_without_initial_states_match_pure_jax.
+    self.assertLen(recorded_calls, 1)
+    self.assertFalse(recorded_calls[0][1])
 
   def _run_unpacked_solo_baseline(
       self,
@@ -2226,6 +2233,478 @@ class GdnBwdPallasTest(absltest.TestCase):
           check_oracle2=False,
           seed=1006,
       )
+
+  # ---------------------------------------------------------------------------
+  # Regression tests for the sequence-packing review findings. Each of these
+  # fails on the pre-fix code (see the CL description for the failure mode).
+  # ---------------------------------------------------------------------------
+
+  def test_sequence_packing_non_adjacent_repeated_segment_ids(self):
+    """Non-adjacent repeats of one raw ID ([1, 2, 1, 2, 1]) are separate documents for fwd, bwd and Pure JAX."""
+    seg = np.zeros((1, 128), dtype=np.int32)
+    seg[0, 0:20] = 1
+    seg[0, 20:40] = 2
+    seg[0, 40:64] = 1
+    seg[0, 64:104] = 2
+    seg[0, 104:128] = 1
+    self._assert_packed_matches_oracles(jnp.asarray(seg), chunk_size=64, seed=1007)
+
+  def test_bwd_kernel_bf16_segment_ids_above_256_match_relabeled_ids(self):
+    """bf16 `b` must not quantize segment IDs >= 257 inside the backward kernel (intra- and inter-chunk)."""
+    is_tpu = jax.default_backend() == "tpu"
+    hd = 128 if is_tpu else 32
+    batch_size, chunk_size, num_k_heads, num_v_heads = 1, 64, 2, 4
+    lengths = [20, 30, 40, 4, 46, 52]  # run 3 (50..89) crosses the t=63 -> 64 chunk boundary
+    seq_len = sum(lengths)
+    num_chunks = seq_len // chunk_size
+    dim_size = num_k_heads * hd * 2 + num_v_heads * hd
+    keys = jax.random.split(jax.random.PRNGKey(4242), 8)
+    qkv = jax.random.normal(keys[0], (batch_size, seq_len, dim_size), jnp.float32).astype(jnp.bfloat16)
+    b = jax.random.normal(keys[1], (batch_size, seq_len, num_v_heads), jnp.float32).astype(jnp.bfloat16)
+    a = jax.random.normal(keys[2], (batch_size, seq_len, num_v_heads), jnp.float32).astype(jnp.bfloat16)
+    a_log = jax.random.normal(keys[3], (num_v_heads,), jnp.float32)
+    dt_bias = jax.random.normal(keys[4], (num_v_heads,), jnp.float32)
+    do = jax.random.normal(keys[5], (batch_size, seq_len, num_v_heads, hd), jnp.float32).astype(jnp.bfloat16)
+    chunk_states = jax.random.normal(keys[6], (batch_size, num_chunks, num_v_heads, hd, hd), jnp.float32) * 0.1
+    t_inv = jax.random.normal(keys[7], (batch_size, num_chunks, num_v_heads, chunk_size, chunk_size), jnp.float32) * 0.1
+
+    def build(ids):
+      row = np.concatenate([np.full((n,), i, dtype=np.int32) for n, i in zip(lengths, ids)])
+      return jnp.asarray(row[None, :])
+
+    def run(seg):
+      return gdn_bwd_pallas.pallas_gdn_bwd_kernel(
+          qkv_conv=qkv,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          do=do,
+          chunk_states=chunk_states,
+          t_inv=t_inv,
+          num_v_heads=num_v_heads,
+          kq_head_dim=hd,
+          v_head_dim=hd,
+          chunk_size=chunk_size,
+          segment_ids=seg,
+      )
+
+    expected = run(build([1, 2, 3, 0, 4, 5]))
+    for high_ids in ([256, 257, 258, 0, 511, 513], [1025, 257, 256, 0, 513, 511]):
+      got = run(build(high_ids))
+      for name, g_got, g_exp in zip(("dqkv_conv", "db", "da", "d_a_log", "d_dt_bias"), got, expected):
+        np.testing.assert_allclose(
+            np.asarray(g_got, dtype=np.float32),
+            np.asarray(g_exp, dtype=np.float32),
+            rtol=0,
+            atol=1e-6,
+            err_msg=f"{name} changed when segment IDs {high_ids} replaced [1..5] (bf16 ID quantization)",
+        )
+
+  def test_sequence_packing_more_than_256_documents_bf16(self):
+    """More than 256 packed documents with bf16 `b` must match Pure JAX autodiff end to end."""
+    is_tpu = jax.default_backend() == "tpu"
+    dims = _packing_dims()
+    chunk_size, seq_len = 64, 1024
+    lengths = []
+    while sum(lengths) < seq_len:
+      lengths.append(2 + len(lengths) % 3)
+    lengths[-1] -= sum(lengths) - seq_len
+    seg = np.concatenate([np.full((n,), i + 1, dtype=np.int32) for i, n in enumerate(lengths)])[None, :]
+    self.assertGreater(int(seg.max()), 300)
+    inputs = _packing_inputs(jax.random.PRNGKey(1008), 1, seq_len, dims)
+    qkv, b, a, cw, cb, al, dt, do = inputs
+    b = b.astype(jnp.bfloat16)
+    if is_tpu:
+      # The fused TPU forward requires qkv, a and b to share one dtype.
+      qkv, a, do = qkv.astype(jnp.bfloat16), a.astype(jnp.bfloat16), do.astype(jnp.bfloat16)
+    seg = jnp.asarray(seg)
+
+    def loss(fn, *args):
+      out, _ = fn(*args, None, None, seg, dims, chunk_size)
+      return jnp.sum(out.astype(jnp.float32) * do.astype(jnp.float32))
+
+    grads_k = jax.grad(functools.partial(loss, _call_kernel_api), argnums=tuple(range(7)))(qkv, b, a, cw, cb, al, dt)
+    grads_j = jax.grad(functools.partial(loss, _call_pure_jax), argnums=tuple(range(7)))(qkv, b, a, cw, cb, al, dt)
+    tol = 1.6e-1 if is_tpu else 1e-2
+    for name, g_k, g_j in zip(_GRAD_NAMES, grads_k, grads_j):
+      np.testing.assert_allclose(
+          np.asarray(g_k, dtype=np.float32),
+          np.asarray(g_j, dtype=np.float32),
+          rtol=tol,
+          atol=tol,
+          err_msg=f"{name}: kernel diverged from Pure JAX with > 256 packed documents",
+      )
+
+  def test_segment_ids_all_ones_with_caller_states_matches_unpacked(self):
+    """segment_ids == 1 everywhere must be a no-op even when caller conv/recurrent states are supplied."""
+    dims = _packing_dims()
+    chunk_size, seq_len = 64, 128
+    qkv, b, a, cw, cb, al, dt, do = _packing_inputs(jax.random.PRNGKey(1009), 1, seq_len, dims)
+    cs, rs = _packing_states(jax.random.PRNGKey(1010), 1, dims)
+    dcs, drs = _packing_states(jax.random.PRNGKey(1011), 1, dims)
+    ones = jnp.ones((1, seq_len), jnp.int32)
+    for fn_name, fn in (("kernel", _call_kernel_api), ("pure_jax", _call_pure_jax)):
+
+      def loss(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in, seg, fn=fn):
+        out, (ncs, nrs) = fn(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in, seg, dims, chunk_size)
+        return jnp.sum(out * do) + jnp.sum(ncs * dcs) + jnp.sum(nrs * drs), (out, ncs, nrs)
+
+      (_, aux_u), grads_u = jax.value_and_grad(loss, argnums=tuple(range(9)), has_aux=True)(
+          qkv, b, a, cw, cb, al, dt, cs, rs, None
+      )
+      (_, aux_p), grads_p = jax.value_and_grad(loss, argnums=tuple(range(9)), has_aux=True)(
+          qkv, b, a, cw, cb, al, dt, cs, rs, ones
+      )
+      for name, got, exp in zip(("out", "next_conv_state", "next_recurrent_state"), aux_p, aux_u):
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(exp), rtol=2e-3, atol=2e-3, err_msg=f"{fn_name}: {name} (seg=ones vs None)"
+        )
+      for name, got, exp in zip(_GRAD_NAMES + ("d_conv_state", "d_recurrent_state"), grads_p, grads_u):
+        np.testing.assert_allclose(
+            np.asarray(got), np.asarray(exp), rtol=2e-3, atol=2e-3, err_msg=f"{fn_name}: {name} (seg=ones vs None)"
+        )
+
+  def _check_chained_prefill(self, fn, call_segs, seed):
+    """Chained prefill calls carrying (conv_state, recurrent_state) must match one call, fwd and bwd."""
+    dims = _packing_dims()
+    chunk_size = 64
+    call_segs = [np.asarray(s, dtype=np.int32)[None, :] for s in call_segs]
+    ref_seg, pos_maps = _chunked_prefill_reference_layout(call_segs)
+    total = ref_seg.shape[1]
+    keys = jax.random.split(jax.random.PRNGKey(seed), len(call_segs) + 2)
+    per_call = [_packing_inputs(keys[i], 1, s.shape[1], dims) for i, s in enumerate(call_segs)]
+    _, _, _, cw, cb, al, dt, _ = per_call[0]
+    qkvs = [p[0] for p in per_call]
+    bs = [p[1] for p in per_call]
+    as_ = [p[2] for p in per_call]
+    dos = [p[7] for p in per_call]
+    dcs, drs = _packing_states(keys[-1], 1, dims)
+
+    def chained_loss(qkv_l, b_l, a_l, cw_in, cb_in, al_in, dt_in):
+      cs = rs = None
+      loss_val = 0.0
+      outs = []
+      for i, seg in enumerate(call_segs):
+        out, (cs, rs) = fn(
+            qkv_l[i], b_l[i], a_l[i], cw_in, cb_in, al_in, dt_in, cs, rs, jnp.asarray(seg), dims, chunk_size
+        )
+        loss_val = loss_val + jnp.sum(out * dos[i])
+        outs.append(out)
+      loss_val = loss_val + jnp.sum(cs * dcs) + jnp.sum(rs * drs)
+      return loss_val, (outs, cs, rs)
+
+    def scatter(parts, trailing_shape):
+      full = jnp.zeros((1, total) + trailing_shape, parts[0].dtype)
+      for part, pm in zip(parts, pos_maps):
+        full = full.at[:, pm].set(part)
+      return full
+
+    ref_qkv = scatter(qkvs, qkvs[0].shape[2:])
+    ref_b = scatter(bs, bs[0].shape[2:])
+    ref_a = scatter(as_, as_[0].shape[2:])
+    ref_do = scatter(dos, dos[0].shape[2:])
+
+    def ref_loss(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in):
+      out, (cs, rs) = fn(
+          qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, None, None, jnp.asarray(ref_seg), dims, chunk_size
+      )
+      return jnp.sum(out * ref_do) + jnp.sum(cs * dcs) + jnp.sum(rs * drs), (out, cs, rs)
+
+    (_, (outs, cs_c, rs_c)), grads_c = jax.value_and_grad(chained_loss, argnums=tuple(range(7)), has_aux=True)(
+        qkvs, bs, as_, cw, cb, al, dt
+    )
+    (_, (out_r, cs_r, rs_r)), grads_r = jax.value_and_grad(ref_loss, argnums=tuple(range(7)), has_aux=True)(
+        ref_qkv, ref_b, ref_a, cw, cb, al, dt
+    )
+    tol = {"rtol": 2e-3, "atol": 2e-3}
+    for i, pm in enumerate(pos_maps):
+      np.testing.assert_allclose(np.asarray(outs[i]), np.asarray(out_r[:, pm]), err_msg=f"call {i} output", **tol)
+      for name, g_c, g_r in zip(("dqkv", "db", "da"), grads_c[:3], grads_r[:3]):
+        np.testing.assert_allclose(
+            np.asarray(g_c[i]), np.asarray(g_r[:, pm]), err_msg=f"call {i} {name} (through carried states)", **tol
+        )
+    np.testing.assert_allclose(np.asarray(cs_c), np.asarray(cs_r), err_msg="final next_conv_state", **tol)
+    np.testing.assert_allclose(np.asarray(rs_c), np.asarray(rs_r), err_msg="final next_recurrent_state", **tol)
+    for name, g_c, g_r in zip(_GRAD_NAMES[3:], grads_c[3:], grads_r[3:]):
+      np.testing.assert_allclose(np.asarray(g_c), np.asarray(g_r), err_msg=name, **tol)
+
+  def test_chained_prefill_state_continuity_with_segment_ids(self):
+    """Two/three prefill calls carrying states == one call: leading/trailing/mid padding, all-pad call, [1,2,1]."""
+    layouts = {
+        "ones": [[1] * 128, [1] * 128],
+        "trailing_then_leading_pad": [[1] * 100 + [0] * 28, [0] * 10 + [1] * 118],
+        "leading_pad_first_call": [[0] * 5 + [1] * 123, [1] * 128],
+        "non_adjacent_repeat": [[1] * 40 + [2] * 40 + [1] * 48, [1] * 64 + [3] * 64],
+        "all_pad_middle_call": [[1] * 128, [0] * 128, [1] * 128],
+        "gapped_trailing": [[1] * 50 + [0] * 20 + [2] * 50 + [0] * 8, [2] * 128],
+        "short_tail_segment": [[1] * 120 + [2] * 2 + [0] * 6, [2] * 128],
+    }
+    for fn_name, fn in (("kernel", _call_kernel_api), ("pure_jax", _call_pure_jax)):
+      for seed, (name, segs) in enumerate(layouts.items()):
+        with self.subTest(fn=fn_name, layout=name):
+          self._check_chained_prefill(fn, segs, seed=1100 + seed)
+
+  def test_final_state_cotangents_without_initial_states_match_pure_jax(self):
+    """d(next_conv_state), d(next_recurrent_state) must reach the inputs when no initial state is passed."""
+    dims = _packing_dims()
+    chunk_size, seq_len = 64, 128
+    seg = np.zeros((3, seq_len), dtype=np.int32)
+    seg[0, :126] = 1
+    seg[0, 126:] = 2  # segment boundary inside the last K-1 tokens
+    seg[1, :120] = 1  # trailing padding
+    seg[2, :] = 1
+    qkv, b, a, cw, cb, al, dt, do = _packing_inputs(jax.random.PRNGKey(1012), 3, seq_len, dims)
+    dcs, drs = _packing_states(jax.random.PRNGKey(1013), 3, dims)
+    for seg_in in (jnp.asarray(seg), None):
+
+      def loss(fn, *args, seg_in=seg_in):
+        out, (ncs, nrs) = fn(*args, None, None, seg_in, dims, chunk_size)
+        return jnp.sum(out * do) + jnp.sum(ncs * dcs) + jnp.sum(nrs * drs)
+
+      grads_k = jax.grad(functools.partial(loss, _call_kernel_api), argnums=tuple(range(7)))(qkv, b, a, cw, cb, al, dt)
+      grads_j = jax.grad(functools.partial(loss, _call_pure_jax), argnums=tuple(range(7)))(qkv, b, a, cw, cb, al, dt)
+      for name, g_k, g_j in zip(_GRAD_NAMES, grads_k, grads_j):
+        np.testing.assert_allclose(
+            np.asarray(g_k),
+            np.asarray(g_j),
+            rtol=2e-3,
+            atol=2e-3,
+            err_msg=f"{name} (segment_ids={'packed' if seg_in is not None else None})",
+        )
+
+  def test_next_conv_state_ends_at_last_valid_token(self):
+    """next_conv_state is the K-1 window ending at the last valid token, masked to its segment."""
+    dims = _packing_dims()
+    chunk_size, seq_len = 64, 128
+    seg = np.zeros((3, seq_len), dtype=np.int32)
+    seg[0, :120] = 1  # trailing padding
+    seg[1, :120] = 1
+    seg[1, 125] = 2  # single-token segment after a gap, then trailing padding
+    seg[2, :60] = 1  # a whole trailing chunk of padding
+    qkv, b, a, cw, cb, al, dt, _ = _packing_inputs(jax.random.PRNGKey(1014), 3, seq_len, dims)
+    qkv_np = np.asarray(qkv)
+    row1 = np.stack([0 * qkv_np[1, 0], 0 * qkv_np[1, 0], qkv_np[1, 125]])
+    expected = np.stack([qkv_np[0, 117:120], row1, qkv_np[2, 57:60]])
+    for fn_name, fn in (("kernel", _call_kernel_api), ("pure_jax", _call_pure_jax)):
+      _, (ncs, _) = fn(qkv, b, a, cw, cb, al, dt, None, None, jnp.asarray(seg), dims, chunk_size)
+      np.testing.assert_allclose(np.asarray(ncs), expected, rtol=1e-6, atol=1e-6, err_msg=f"{fn_name} next_conv_state")
+
+  def test_segmented_conv1d_positional_dtype_argument(self):
+    """The 4-arg positional shim accepts a jnp.dtype instance (which has a `.shape` attribute)."""
+    from maxtext.kernels.gdn import model_runner  # pylint: disable=import-outside-toplevel
+
+    x = jax.random.normal(jax.random.PRNGKey(0), (1, 16, 8), jnp.float32)
+    kernel = jax.random.normal(jax.random.PRNGKey(1), (4, 8), jnp.float32)
+    seg = jnp.ones((1, 16), jnp.int32)
+    out_pos = model_runner.segmented_causal_depthwise_conv1d(x, kernel, seg, jnp.dtype(jnp.bfloat16))
+    out_kw = model_runner.segmented_causal_depthwise_conv1d(
+        qkv=x, conv_weight=kernel, segment_ids=seg, dtype=jnp.bfloat16
+    )
+    self.assertEqual(out_pos.dtype, jnp.bfloat16)
+    np.testing.assert_allclose(np.asarray(out_pos, np.float32), np.asarray(out_kw, np.float32))
+
+  def test_pure_jax_model_path_seg_ones_with_states_matches_unpacked(self):
+    """Model-path Pure JAX conv/delta rule keep caller conv/recurrent states when segment_ids are packed."""
+    from maxtext.kernels.gdn import model_runner  # pylint: disable=import-outside-toplevel
+
+    batch, seq_len, heads, k_dim, v_dim, chunk = 1, 64, 2, 16, 16, 16
+    keys = jax.random.split(jax.random.PRNGKey(1015), 9)
+    qkv = jax.random.normal(keys[0], (batch, seq_len, 32), jnp.float32)
+    kernel = jax.random.normal(keys[1], (4, 32), jnp.float32)
+    conv_state = jax.random.normal(keys[2], (batch, 3, 32), jnp.float32)
+    ones = jnp.ones((batch, seq_len), jnp.int32)
+    conv_in = jnp.concatenate([conv_state, qkv], axis=1)
+    expected_conv = sum(conv_in[:, k : k + seq_len, :] * kernel[k] for k in range(4))
+    got_conv = model_runner.segmented_causal_depthwise_conv1d(
+        qkv=qkv, conv_weight=kernel, segment_ids=ones, kernel_size=4, conv_state=conv_state
+    )
+    np.testing.assert_allclose(np.asarray(got_conv), np.asarray(expected_conv), rtol=1e-5, atol=1e-5)
+
+    query = jax.random.normal(keys[3], (batch, seq_len, heads, k_dim)) * 0.3
+    key_t = jax.random.normal(keys[4], (batch, seq_len, heads, k_dim)) * 0.3
+    value = jax.random.normal(keys[5], (batch, seq_len, heads, v_dim)) * 0.3
+    g = -jax.nn.softplus(jax.random.normal(keys[6], (batch, seq_len, heads)))
+    beta = jax.nn.sigmoid(jax.random.normal(keys[7], (batch, seq_len, heads)))
+    h0 = jax.random.normal(keys[8], (batch, heads, k_dim, v_dim)) * 0.3
+
+    def delta(seg):
+      return qwen3.jax_chunk_gated_delta_rule(
+          query, key_t, value, g, beta, chunk_size=chunk, initial_state=h0, compute_dtype=jnp.float32, segment_ids=seg
+      )
+
+    out_u, state_u = delta(None)
+    out_p, state_p = delta(ones)
+    np.testing.assert_allclose(np.asarray(out_p), np.asarray(out_u), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(state_p), np.asarray(state_u), rtol=1e-4, atol=1e-4)
+
+  def test_pack_fwd_segment_metadata_rejects_unsupported_chunking(self):
+    """Chunk sizes that cannot hold the K-1 conv halo + previous-segment header raise a clear error."""
+    from maxtext.kernels.gdn import wrapper  # pylint: disable=import-outside-toplevel
+
+    with self.assertRaisesRegex(ValueError, "chunk_size"):
+      wrapper._pack_fwd_segment_metadata(jnp.ones((1, 8), jnp.int32), None, None, 1, 1, 4)
+    with self.assertRaisesRegex(ValueError, "seq_len"):
+      wrapper._pack_fwd_segment_metadata(jnp.ones((1, 40), jnp.int32), None, None, 1, 32, 4)
+    s_enc, seg_aux = wrapper._pack_fwd_segment_metadata(jnp.ones((1, 32), jnp.int32), None, None, 1, 32, 4)
+    self.assertEqual(s_enc.shape, (32,))
+    self.assertEqual(seg_aux.shape, (32,))
+
+  def test_seq_cp_packed_states_rank0_padding_and_empty_last_shard(self):
+    """Seq-CP with caller states: all-pad rank 0 / leading pad on rank 0, and an all-padding last shard."""
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest(f"Requires >= 4 devices, got {len(devices)}")
+    dims = _packing_dims()
+    cp_size, chunk_size, seq_len, batch = 4, 16, 128, 2
+    seg = np.zeros((batch, seq_len), dtype=np.int32)
+    seg[0, 6:56] = 1
+    seg[0, 56:96] = 2  # rank 3 (96..127) is all padding
+    seg[1, 32:] = 1  # rank 0 is all padding
+    seg = jnp.asarray(seg)
+    qkv, b, a, cw, cb, al, dt, do = _packing_inputs(jax.random.PRNGKey(1016), batch, seq_len, dims)
+    cs, rs = _packing_states(jax.random.PRNGKey(1017), batch, dims)
+    dcs, drs = _packing_states(jax.random.PRNGKey(1018), batch, dims)
+    mesh = jax.sharding.Mesh(np.array(devices[:cp_size]), ("context",))
+    P = jax.sharding.PartitionSpec
+
+    def loss_single(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in):
+      out, (ncs, nrs) = _call_kernel_api(
+          qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in, seg, dims, chunk_size
+      )
+      return jnp.sum(out * do) + jnp.sum(ncs * dcs) + jnp.sum(nrs * drs), (out, ncs, nrs)
+
+    def loss_cp(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in):
+      @functools.partial(
+          jax.shard_map,
+          mesh=mesh,
+          in_specs=(P(None, "context", None),) * 3 + (P(),) * 4 + (P(), P(), P(None, "context")),
+          out_specs=(P(None, "context", None, None), (P(), P())),
+          check_vma=False,
+      )
+      def _mapped(q, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, seg_):
+        return _call_kernel_api(q, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, seg_, dims, chunk_size, cp_axis="context")
+
+      out, (ncs, nrs) = _mapped(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in, seg)
+      return jnp.sum(out * do) + jnp.sum(ncs * dcs) + jnp.sum(nrs * drs), (out, ncs, nrs)
+
+    args = (qkv, b, a, cw, cb, al, dt, cs, rs)
+    (_, aux_s), grads_s = jax.value_and_grad(loss_single, argnums=tuple(range(9)), has_aux=True)(*args)
+    (_, aux_c), grads_c = jax.jit(jax.value_and_grad(loss_cp, argnums=tuple(range(9)), has_aux=True))(*args)
+    for name, got, exp in zip(("out", "next_conv_state", "next_recurrent_state"), aux_c, aux_s):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=2e-3, atol=2e-3, err_msg=f"CP vs single: {name}")
+    for name, got, exp in zip(_GRAD_NAMES + ("d_conv_state", "d_recurrent_state"), grads_c, grads_s):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=2e-3, atol=2e-3, err_msg=f"CP vs single: {name}")
+
+    qkv_np = np.asarray(qkv)
+    expected_cs = np.stack([qkv_np[0, 93:96], qkv_np[1, 125:128]])
+    np.testing.assert_allclose(np.asarray(aux_c[1]), expected_cs, rtol=1e-6, atol=1e-6, err_msg="CP next_conv_state")
+    # The caller states must reach the first document (rank 0 leading pad / all-pad rank 0).
+    (_, aux_zero), _ = jax.value_and_grad(loss_single, has_aux=True)(
+        qkv, b, a, cw, cb, al, dt, jnp.zeros_like(cs), jnp.zeros_like(rs)
+    )
+    self.assertGreater(float(jnp.max(jnp.abs(aux_s[0][0, 6:12] - aux_zero[0][0, 6:12]))), 1e-3)
+    self.assertGreater(float(jnp.max(jnp.abs(aux_s[0][1, 32:40] - aux_zero[0][1, 32:40]))), 1e-3)
+
+
+_GRAD_NAMES = ("dqkv", "db", "da", "d_conv_w", "d_conv_b", "d_a_log", "d_dt_bias")
+
+
+def _packing_dims() -> dict[str, int]:
+  hd = 128 if jax.default_backend() == "tpu" else 32
+  return {"num_k_heads": 2, "num_v_heads": 4, "head_k_dim": hd, "head_v_dim": hd, "conv_kernel_size": 4}
+
+
+def _packing_inputs(key, batch_size, seq_len, dims):
+  dim_size = dims["num_k_heads"] * dims["head_k_dim"] * 2 + dims["num_v_heads"] * dims["head_v_dim"]
+  return _init_bwd_inputs(
+      key, batch_size, seq_len, dim_size, dims["num_v_heads"], dims["head_v_dim"], dims["conv_kernel_size"]
+  )
+
+
+def _packing_states(key, batch_size, dims):
+  dim_size = dims["num_k_heads"] * dims["head_k_dim"] * 2 + dims["num_v_heads"] * dims["head_v_dim"]
+  k_cs, k_rs = jax.random.split(key)
+  cs = jax.random.normal(k_cs, (batch_size, dims["conv_kernel_size"] - 1, dim_size), jnp.float32) * 0.5
+  rs = (
+      jax.random.normal(k_rs, (batch_size, dims["num_v_heads"], dims["head_k_dim"], dims["head_v_dim"]), jnp.float32)
+      * 0.2
+  )
+  return cs, rs
+
+
+def _call_kernel_api(qkv, b, a, cw, cb, al, dt, cs, rs, seg, dims, chunk_size, cp_axis=None):
+  return gdn_bwd_pallas.gdn_decoupled_conv1d(
+      qkv,
+      b,
+      a,
+      cw,
+      cb,
+      al,
+      dt,
+      cs,
+      rs,
+      dims["num_k_heads"],
+      dims["num_v_heads"],
+      dims["head_k_dim"],
+      dims["head_v_dim"],
+      dims["conv_kernel_size"],
+      chunk_size,
+      True,
+      jnp.float32,
+      cp_axis,
+      seg,
+  )
+
+
+def _call_pure_jax(qkv, b, a, cw, cb, al, dt, cs, rs, seg, dims, chunk_size):
+  return gdn_bwd_pallas.pure_jax_decoupled_conv1d_gdn(
+      qkv=qkv,
+      b=b,
+      a=a,
+      conv_weight=cw,
+      conv_bias=cb,
+      a_log=al,
+      dt_bias=dt,
+      conv_state=cs,
+      recurrent_state=rs,
+      chunk_size=chunk_size,
+      use_qk_norm_in_gdn=True,
+      compute_dtype=jnp.float32,
+      segment_ids=seg,
+      **dims,
+  )
+
+
+def _chunked_prefill_reference_layout(call_segs):
+  """Returns (ref_seg, pos_maps) of the single-call equivalent of chained prefill calls.
+
+  Trailing 0-padding of every call but the last is bucket padding that the next
+  call does not follow, so the reference drops it in place and appends it at the
+  end of the sequence, where it cannot influence any valid token.
+  """
+  pos_maps = []
+  deferred = []
+  cursor = 0
+  for i, seg in enumerate(call_segs):
+    row = seg[0]
+    valid = np.nonzero(row > 0)[0]
+    if i == len(call_segs) - 1:
+      end = len(row)
+    else:
+      end = int(valid[-1]) + 1 if valid.size else 0
+    pos_map = np.empty(len(row), dtype=np.int64)
+    pos_map[:end] = np.arange(cursor, cursor + end)
+    cursor += end
+    deferred.append((i, end, len(row)))
+    pos_maps.append(pos_map)
+  for i, end, length in deferred:
+    pos_maps[i][end:] = np.arange(cursor, cursor + length - end)
+    cursor += length - end
+  ref_seg = np.zeros((1, cursor), dtype=np.int32)
+  for seg, pos_map in zip(call_segs, pos_maps):
+    ref_seg[0, pos_map] = seg[0]
+  return ref_seg, pos_maps
 
 
 if __name__ == "__main__":

@@ -254,8 +254,16 @@ def jax_chunk_gated_delta_rule(
     compute_dtype: jnp.dtype = jnp.bfloat16,
     segment_ids: None | Array = None,
     init_seg: None | Array = None,
+    has_initial_state: None | bool = None,
 ) -> tuple[Array, None | Array]:
-  """Optimized JAX implementation of Gated Delta Rule."""
+  """Optimized JAX implementation of Gated Delta Rule.
+
+  With `segment_ids`, raw IDs are canonicalized (non-adjacent repeats of one ID
+  are separate documents). When `has_initial_state` (default:
+  `initial_state is not None`), `initial_state` continues the first document.
+  """
+  if has_initial_state is None:
+    has_initial_state = initial_state is not None
   # =========================================================================
   # STAGE 1: PREPARATION & PADDING
   # =========================================================================
@@ -338,6 +346,7 @@ def jax_chunk_gated_delta_rule(
         chunk_size=chunk_size,
         cp_axis=cp_axis,
         init_seg=init_seg,
+        has_initial_state=has_initial_state,
     )
   else:
     # Cumulative decay (Must be float32)
@@ -1161,12 +1170,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         conv_input = jnp.concatenate([conv_state, qkv], axis=1)
 
         if decoder_segment_ids is not None:
-          valid_lens = jnp.sum(decoder_segment_ids != 0, axis=1)
-
-          def extract_state(c_in, v_len):
-            return jax.lax.dynamic_slice_in_dim(c_in, v_len, conv_kernel_size - 1, axis=0)
-
-          next_conv_state = jax.vmap(extract_state)(conv_input, valid_lens)
+          next_conv_state = gdn_kernel_runner.segment_next_conv_state(
+              conv_state,
+              qkv,
+              decoder_segment_ids,
+              conv_kernel_size,
+              sequence_packing=bool(getattr(cfg, "enable_gdn_sequence_packing", False)),
+          ).astype(conv_input.dtype)
         else:
           next_conv_state = conv_input[:, -(conv_kernel_size - 1) :, :]
       else:

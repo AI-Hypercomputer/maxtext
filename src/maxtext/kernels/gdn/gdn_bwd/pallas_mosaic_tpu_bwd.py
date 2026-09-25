@@ -548,7 +548,11 @@ def pallas_gdn_bwd_kernel(
   qkv_conv_5d = jnp.concatenate([q_5d, k_5d, v_5d], axis=-1)
 
   # 2. Prepare b and a into (B, G, C, chunk_size, padded_tile_v_heads)
-  b_5d = b.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_heads).transpose((0, 3, 1, 2, 4))
+  # With sequence packing, the signed segment IDs are packed into the spare lane
+  # of b below. Keep b in f32 then: bf16 rounds integers above 256, so distinct
+  # documents would share an ID. The kernel upcasts b to f32 anyway.
+  b_packed = b.astype(jnp.float32) if segment_ids is not None else b
+  b_5d = b_packed.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_heads).transpose((0, 3, 1, 2, 4))
   if padded_tile_v_heads > tile_v_heads:
     b_5d = jnp.pad(
         b_5d,

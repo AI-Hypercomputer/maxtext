@@ -508,6 +508,7 @@ class GdnCpHeadShardedTest(absltest.TestCase):
         chunk_size=chunk_size,
         cp_size=4,
         gdn_cp_mode="seq",
+        enable_gdn_sequence_packing=True,
     )
     with mesh_cp4:
       model_cp4 = qwen3.Qwen3NextGatedDeltaNet(config=cfg_cp4, mesh=mesh_cp4, dtype=jnp.float32, rngs=nnx.Rngs(111))
@@ -1342,6 +1343,108 @@ class GdnCpHeadShardedTest(absltest.TestCase):
           f"2D (data=2, context=4) CP sequence packing gradient {param_name} diverged: rel_diff={rel_diff:.2e}",
       )
 
+  def test_cp4_kernel_packed_caller_states_and_state_grads(self):
+    """Seq-CP=4 kernel with caller states: rank-0 leading pad, all-pad rank 0 row, all-pad last shard.
+
+    Checks CP vs single-device outputs, next conv/recurrent states and all
+    gradients (including the caller-state gradients), and that next_conv_state
+    is the window ending at the last valid token (not the bucket-padded tail).
+    """
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest(f"Requires >= 4 devices, found {len(devices)}")
+    is_tpu = jax.default_backend() == "tpu"
+    cp_size, chunk_size, batch = 4, 64, 2
+    seq_len = 512
+    num_k_heads, num_v_heads, kernel_size = 2, 4, 4
+    head_dim = 128 if is_tpu else 32
+    dim_size = num_k_heads * head_dim * 2 + num_v_heads * head_dim
+
+    seg_np = np.zeros((batch, seq_len), dtype=np.int32)
+    seg_np[0, 6:224] = 1
+    seg_np[0, 224:384] = 2  # rank 3 (384..511) is all padding
+    seg_np[1, 128:] = 1  # rank 0 is all padding
+    seg = jnp.asarray(seg_np)
+
+    keys = jax.random.split(jax.random.PRNGKey(4242), 12)
+    qkv = jax.random.normal(keys[0], (batch, seq_len, dim_size), jnp.float32)
+    b = jax.random.normal(keys[1], (batch, seq_len, num_v_heads), jnp.float32)
+    a = jax.random.normal(keys[2], (batch, seq_len, num_v_heads), jnp.float32)
+    cw = jax.random.normal(keys[3], (kernel_size, 1, dim_size), jnp.float32)
+    cb = jax.random.normal(keys[4], (dim_size,), jnp.float32)
+    al = jax.random.normal(keys[5], (num_v_heads,), jnp.float32)
+    dt = jax.random.normal(keys[6], (num_v_heads,), jnp.float32)
+    do = jax.random.normal(keys[7], (batch, seq_len, num_v_heads, head_dim), jnp.float32)
+    cs = jax.random.normal(keys[8], (batch, kernel_size - 1, dim_size), jnp.float32) * 0.5
+    rs = jax.random.normal(keys[9], (batch, num_v_heads, head_dim, head_dim), jnp.float32) * 0.2
+    dcs = jax.random.normal(keys[10], cs.shape, jnp.float32)
+    drs = jax.random.normal(keys[11], rs.shape, jnp.float32)
+
+    def call(q, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, seg_, cp_axis):
+      return gdn_bwd_pallas.gdn_decoupled_conv1d(
+          q,
+          b_,
+          a_,
+          cw_,
+          cb_,
+          al_,
+          dt_,
+          cs_,
+          rs_,
+          num_k_heads,
+          num_v_heads,
+          head_dim,
+          head_dim,
+          kernel_size,
+          chunk_size,
+          True,
+          jnp.float32,
+          cp_axis,
+          seg_,
+      )
+
+    mesh = Mesh(np.array(devices[:cp_size]), ("context",))
+
+    def loss_single(*args):
+      out, (ncs, nrs) = call(*args, seg, None)
+      return jnp.sum(out * do) + jnp.sum(ncs * dcs) + jnp.sum(nrs * drs), (out, ncs, nrs)
+
+    def loss_cp(*args):
+      mapped = jax.shard_map(
+          lambda *xs: call(*xs, "context"),
+          mesh=mesh,
+          in_specs=(P(None, "context", None),) * 3 + (P(),) * 6 + (P(None, "context"),),
+          out_specs=(P(None, "context", None, None), (P(), P())),
+          check_vma=False,
+      )
+      out, (ncs, nrs) = mapped(*args, seg)
+      return jnp.sum(out * do) + jnp.sum(ncs * dcs) + jnp.sum(nrs * drs), (out, ncs, nrs)
+
+    args = (qkv, b, a, cw, cb, al, dt, cs, rs)
+    argnums = tuple(range(len(args)))
+    (_, aux_s), grads_s = jax.jit(jax.value_and_grad(loss_single, argnums=argnums, has_aux=True))(*args)
+    (_, aux_c), grads_c = jax.jit(jax.value_and_grad(loss_cp, argnums=argnums, has_aux=True))(*args)
+
+    tol = 2e-2 if is_tpu else 2e-3
+    for name, got, exp in zip(("out", "next_conv_state", "next_recurrent_state"), aux_c, aux_s):
+      got, exp = np.asarray(got), np.asarray(exp)
+      rel = float(np.max(np.abs(got - exp))) / (float(np.max(np.abs(exp))) + 1e-7)
+      self.assertLessEqual(rel, tol, f"CP vs single {name}: rel={rel:.2e}")
+    grad_names = ("dqkv", "db", "da", "d_conv_w", "d_conv_b", "d_a_log", "d_dt_bias", "d_conv_state", "d_recurrent_state")
+    for name, got, exp in zip(grad_names, grads_c, grads_s):
+      got, exp = np.asarray(got), np.asarray(exp)
+      rel = float(np.max(np.abs(got - exp))) / (float(np.max(np.abs(exp))) + 1e-7)
+      self.assertLessEqual(rel, tol, f"CP vs single {name}: rel={rel:.2e}")
+
+    qkv_np = np.asarray(qkv)
+    expected_cs = np.stack([qkv_np[0, 381:384], qkv_np[1, 509:512]])
+    for label, got in (("single", aux_s[1]), ("cp", aux_c[1])):
+      np.testing.assert_allclose(np.asarray(got), expected_cs, rtol=1e-5, atol=1e-5, err_msg=f"{label} next_conv_state")
+    # The caller recurrent state reaches the first document, so its gradient is non-zero. Both rows start with
+    # >= K - 1 padding tokens, so no valid token's conv window reaches the caller conv state: zero gradient.
+    self.assertGreater(float(np.max(np.abs(np.asarray(grads_c[-1])))), 1e-4, "d_recurrent_state is zero")
+    self.assertLessEqual(float(np.max(np.abs(np.asarray(grads_c[-2])))), 1e-6, "d_conv_state leaked through padding")
+
   def _run_e2e_layer_unpacked_solo_loop(
       self,
       *,
@@ -1439,7 +1542,8 @@ class GdnCpHeadShardedTest(absltest.TestCase):
     seq_len = 512 if (is_tpu and has_8_devs) else 256
     chunk_size = 64
     emb_dim = 256 if is_tpu else 128
-    num_k_heads = 4 if is_tpu else 2
+    # CP=4 head-sharded configs (run whenever >= 8 devices) need num_k_heads % 4 == 0.
+    num_k_heads = 4 if (is_tpu or has_8_devs) else 2
     num_v_heads = 16 if is_tpu else 4
     head_dim = 128 if is_tpu else 64
     rng_seed = 2026

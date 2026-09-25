@@ -41,8 +41,19 @@ def _pack_fwd_segment_metadata(
 ) -> tuple[jax.Array, jax.Array]:
   """Packs per-token signed active segment IDs and chunk-boundary auxiliary metadata."""
   prev_kernel_size = kernel_size - 1
+  if chunk_size < prev_kernel_size + 1:
+    raise ValueError(
+        f"GDN sequence packing requires chunk_size >= kernel_size (got chunk_size={chunk_size},"
+        f" kernel_size={kernel_size}): each chunk header stores {prev_kernel_size} conv-halo"
+        " segment IDs plus the previous chunk's segment ID."
+    )
   seg_2d = segment_ids.reshape(num_seqs, -1)
   seq_len = seg_2d.shape[1]
+  if seq_len % chunk_size != 0:
+    raise ValueError(
+        f"GDN sequence packing requires seq_len to be a multiple of chunk_size (got seq_len={seq_len},"
+        f" chunk_size={chunk_size})."
+    )
   num_chunks = seq_len // chunk_size
 
   s_enc = compute_conv1d.encode_segment_ids(seg_2d, init_seg=init_seg)
@@ -361,6 +372,9 @@ def fused_conv1d_gdn(
   b = b.astype(jnp.float32)
   a = a.astype(jnp.float32)
   conv_state = conv_state.astype(jnp.float32)
+  # Unpadded inputs, used to extract the packed next conv state below.
+  qkv_in = qkv
+  conv_state_in = conv_state
 
   # Step 1: Validate inputs.
   num_seqs = state_indices.size
@@ -567,6 +581,12 @@ def fused_conv1d_gdn(
     except (TypeError, ValueError, jax.errors.TracerIntegerConversionError):
       pass
 
+  if has_seg_ids and not is_prefill_only:
+    raise ValueError(
+        "GDN sequence packing (segment_ids) is only supported for prefill-only calls"
+        " (is_prefill_only=True or distribution[0] == 0)."
+    )
+
   if not is_prefill_only:
     out_act, out_conv_state, out_recurrent_state, _ = call_kernel(
         conv_state, recurrent_state, None, config.GDNMode.BATCHED
@@ -584,8 +604,9 @@ def fused_conv1d_gdn(
   out_conv_state = out_conv_state.astype(conv_out_dtype)
   out_conv_state = out_conv_state.reshape(conv_state_shape)
   if has_seg_ids and segment_ids is not None:
-    masked_cs = compute_conv1d.extract_segment_conv_state(
-        out_conv_state[state_indices],
+    masked_cs = compute_conv1d.extract_segment_conv_state_split(
+        conv_state_in[state_indices],
+        qkv_in.reshape(num_seqs, -1, dim),
         segment_ids.reshape(num_seqs, -1),
         kernel_size,
         conv_halo_seg,

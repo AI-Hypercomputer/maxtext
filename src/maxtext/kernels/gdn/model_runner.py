@@ -21,6 +21,7 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
+import numpy as np
 from maxtext.common.common_types import (
     Array,
     DType,
@@ -34,6 +35,7 @@ from maxtext.utils.sharding import (
     logical_to_mesh_axes,
     remove_incompatible_mesh_axes_from_partition_spec,
 )
+from . import compute_conv1d as gdn_compute_conv1d
 from .gdn_bwd_pallas import gdn_decoupled_conv1d
 
 try:
@@ -163,7 +165,7 @@ def segmented_causal_depthwise_conv1d(
   and the 4-arg positional signature:
     `segmented_causal_depthwise_conv1d(x, kernel, segment_ids, dtype=...)`.
   """
-  if conv_bias is not None and (segment_ids is None or not hasattr(segment_ids, "shape")):
+  if conv_bias is not None and (segment_ids is None or not isinstance(segment_ids, (jax.Array, np.ndarray))):
     if segment_ids is not None:
       dtype = segment_ids
     segment_ids = conv_bias
@@ -175,6 +177,12 @@ def segmented_causal_depthwise_conv1d(
 
   batch, seq_len, _ = qkv.shape
   seg_2d = jnp.broadcast_to(segment_ids, (batch, seq_len))
+  if conv_halo_seg is None:
+    # Raw IDs: canonicalize on the full sequence (before any sequence sharding
+    # below), and let a caller conv_state continue the first document.
+    seg_2d = gdn_compute_conv1d.canonicalize_segment_ids(seg_2d)
+    if conv_state is not None:
+      conv_halo_seg, _ = gdn_compute_conv1d.initial_state_segment_metadata(seg_2d, kernel_size)
   if conv_weight.ndim == 3:
     conv_weight_3d = conv_weight.astype(jnp.float32)
   else:
@@ -246,6 +254,40 @@ def segmented_causal_depthwise_conv1d(
   )
 
 
+def segment_next_conv_state(
+    conv_state: Array,
+    qkv: Array,
+    decoder_segment_ids: Array,
+    kernel_size: int,
+    sequence_packing: bool,
+) -> Array:
+  """Returns the next Conv1D state of a prefill call: the window ending at the last valid token.
+
+  The caller `conv_state` continues the first document. With
+  `sequence_packing`, the window is masked to the document of the last valid
+  token. Otherwise every non-padding token is one document. A call without
+  valid tokens returns `conv_state` unchanged.
+
+  Args:
+    conv_state: [batch, kernel_size - 1, dim] caller conv state.
+    qkv: [batch, seq, dim] pre-conv activations (padding already zeroed).
+    decoder_segment_ids: [batch, seq] segment IDs (0 = padding).
+    kernel_size: Conv1D kernel size.
+    sequence_packing: Whether GDN sequence packing is enabled.
+  """
+  batch, seq_len, _ = qkv.shape
+  seg_2d = jnp.broadcast_to(decoder_segment_ids, (batch, seq_len))
+  if sequence_packing:
+    seg_2d = gdn_compute_conv1d.canonicalize_segment_ids(seg_2d)
+  else:
+    seg_2d = (seg_2d != 0).astype(jnp.int32)
+  conv_halo_seg, _ = gdn_compute_conv1d.initial_state_segment_metadata(seg_2d, kernel_size)
+  out_dtype = jnp.result_type(conv_state.dtype, qkv.dtype)
+  return gdn_compute_conv1d.extract_segment_conv_state_split(
+      conv_state.astype(out_dtype), qkv.astype(out_dtype), seg_2d, kernel_size, conv_halo_seg
+  )
+
+
 def prepare_jax_gdn_segment_masks(
     segment_ids: Array,
     q_c: Array,
@@ -260,15 +302,25 @@ def prepare_jax_gdn_segment_masks(
     chunk_size: int,
     cp_axis: None | str | tuple[str, ...] = None,
     init_seg: None | Array = None,
+    has_initial_state: bool = False,
 ):
-  """Prepares segment-aware masks and segment-local cumulative decay for Pure-JAX GDN."""
+  """Prepares segment-aware masks and segment-local cumulative decay for Pure-JAX GDN.
+
+  Without `init_seg`, raw `segment_ids` are canonicalized (globally under
+  `cp_axis`), and `has_initial_state` makes the initial recurrent state continue
+  the first document. With `init_seg`, `segment_ids` must already be canonical.
+  """
   from . import compute_conv1d as gdn_conv1d  # pylint: disable=import-outside-toplevel,g-import-not-at-top
   from .gdn_bwd import cp_gdn as bwd_cp_gdn  # pylint: disable=import-outside-toplevel,g-import-not-at-top
 
   seg_2d = jnp.broadcast_to(segment_ids, (batch_size, seq_len))
   if cp_axis is not None and init_seg is None:
-    s_enc, _, init_seg = bwd_cp_gdn.gather_cp_segment_metadata(seg_2d, cp_axis, 4)
+    s_enc, _, init_seg = bwd_cp_gdn.gather_cp_segment_metadata(seg_2d, cp_axis, 4, has_initial_state=has_initial_state)
   else:
+    if init_seg is None:
+      seg_2d = gdn_conv1d.canonicalize_segment_ids(seg_2d)
+      if has_initial_state:
+        init_seg = jnp.ones((batch_size,), dtype=jnp.float32)
     s_enc = gdn_conv1d.encode_segment_ids(seg_2d, init_seg=init_seg)
 
   pad_len = num_chunks * chunk_size - seq_len
@@ -347,6 +399,7 @@ def run_jax_gdn_delta_rule(
   logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = get_gdn_kernel_cp_sharding_info(
       cfg, layer.mesh, get_logical_axis_rules_fn, gdn_context_axes_fn
   )
+  has_initial_state = recurrent_state is not None
   recurrent_state_arg = (
       recurrent_state
       if recurrent_state is not None
@@ -458,6 +511,7 @@ def run_jax_gdn_delta_rule(
         compute_dtype=cfg.dtype,
         cp_axis=cp_axes_for_scan,
         segment_ids=seg_val,
+        has_initial_state=has_initial_state,
     )
 
   return shard_mapped_delta_rule(query, key, value, g, beta, recurrent_state_arg, packed_segment_ids)
