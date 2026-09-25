@@ -1883,9 +1883,9 @@ qwen3_vl_30b_a3b_dict = {
 }
 qwen3_vl_30b_a3b_config = PTConfig(**qwen3_vl_30b_a3b_dict)
 
-cosmos3_nano_reasoner_dict = {
-    "architectures": ["Cosmos3OmniForConditionalGeneration"],
-    "model_type": "cosmos3_omni",
+weaver_mini_dict = {
+    "architectures": ["WeaverOmniForConditionalGeneration"],
+    "model_type": "weaver_omni",
     "text_config": {
         "attention_bias": False,
         "attention_dropout": 0.0,
@@ -1931,11 +1931,11 @@ cosmos3_nano_reasoner_dict = {
         "temporal_patch_size": 2,
     },
 }
-cosmos3_nano_reasoner_config = PTConfig(**cosmos3_nano_reasoner_dict)
+weaver_mini_config = PTConfig(**weaver_mini_dict)
 
-cosmos3_super_reasoner_dict = {
-    "architectures": ["Cosmos3ForConditionalGeneration"],
-    "model_type": "cosmos3_omni",
+weaver_max_dict = {
+    "architectures": ["WeaverForConditionalGeneration"],
+    "model_type": "weaver_omni",
     "text_config": {
         "attention_bias": False,
         "attention_dropout": 0.0,
@@ -1981,7 +1981,7 @@ cosmos3_super_reasoner_dict = {
         "temporal_patch_size": 2,
     },
 }
-cosmos3_super_reasoner_config = PTConfig(**cosmos3_super_reasoner_dict)
+weaver_max_config = PTConfig(**weaver_max_dict)
 
 
 # {maxtext model name: hf model config}
@@ -2013,8 +2013,8 @@ HF_MODEL_CONFIGS = {
     "qwen3-vl-2b": qwen3_vl_2b_config,
     "qwen3-vl-4b": qwen3_vl_4b_config,
     "qwen3-vl-30b-a3b": qwen3_vl_30b_a3b_config,
-    "cosmos3-nano-reasoner": cosmos3_nano_reasoner_config,
-    "cosmos3-super-reasoner": cosmos3_super_reasoner_config,
+    "weaver-mini": weaver_mini_config,
+    "weaver-max": weaver_max_config,
     "llama3.1-8b": llama31_8b_config,
     "llama3.1-8b-Instruct": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,

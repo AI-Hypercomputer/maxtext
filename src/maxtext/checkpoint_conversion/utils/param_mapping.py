@@ -3949,8 +3949,8 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   return mapping
 
 
-def COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
-  """Returns mapping from MaxText to HuggingFace Cosmos3-Nano Reasoner weight paths."""
+def WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping from MaxText to HuggingFace Weaver weight paths."""
   # 1. Reuse QWEN3_VL mapping
   qwen3_vl_mapping = QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
 
@@ -3968,7 +3968,7 @@ def COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       elif val.startswith("model."):
         val = val[len("model.") :]
 
-      # Apply Cosmos3 specific attention naming
+      # Apply Weaver specific attention naming
       val = val.replace("self_attn.q_proj", "self_attn.to_q")
       val = val.replace("self_attn.k_proj", "self_attn.to_k")
       val = val.replace("self_attn.v_proj", "self_attn.to_v")
@@ -3984,8 +3984,8 @@ def COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   return mapping
 
 
-def COSMOS3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
-  """Creates parameter transformation functions for Cosmos3-Nano Reasoner."""
+def WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation functions for Weaver."""
   # Hooks operate on MaxText Parameter paths, which are identical to Qwen3-VL
   return QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf)
 
@@ -4444,8 +4444,8 @@ PARAM_MAPPING = {
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "cosmos3-nano-reasoner": COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "cosmos3-super-reasoner": COSMOS3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "weaver-mini": WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "weaver-max": WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4503,8 +4503,8 @@ HOOK_FNS = {
     "qwen3-vl-2b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-4b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "cosmos3-nano-reasoner": COSMOS3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "cosmos3-super-reasoner": COSMOS3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "weaver-mini": WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "weaver-max": WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
