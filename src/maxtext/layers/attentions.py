@@ -447,7 +447,7 @@ class Attention(nnx.Module):
         quant=self.quant,
         kv_quant=self.kv_quant,
         num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
+        num_kv_heads=self._attention_op_num_kv_heads(),
         dropout_rate=self.dropout_rate,
         dtype=self.dtype,
         compute_axis_order=self.compute_axis_order,
@@ -556,6 +556,9 @@ class Attention(nnx.Module):
     # so pass None to ensure `logical_to_mesh_axes` defers to using the current Flax context manager
     logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
+
+  def _attention_op_num_kv_heads(self) -> int:
+    return self.num_kv_heads
 
   def _validate_kv_heads(self) -> None:
     """Validates the number of key/value heads."""

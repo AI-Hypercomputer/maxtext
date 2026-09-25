@@ -816,6 +816,13 @@ class MlaAttention(BaseModel):
           " instead of running full projection + jnp.split."
       ),
   )
+  use_mla_absorbed_mqa: bool = Field(
+      False,
+      description=(
+          "Whether to use Absorbed-Query Latent MQA mode in MLA. Trades higher prefill/training FLOPs "
+          "for 57x smaller KV cache footprint and memory bandwidth during autoregressive decode."
+      ),
+  )
 
 
 class CompressedAttention(BaseModel):
@@ -4558,6 +4565,29 @@ class MaxTextConfig(
           f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
           "`use_indexer=True` (DeepSeek Sparse Attention / MLA Indexer)."
       )
+    if self.use_mla_absorbed_mqa:
+      if self.attention_type != AttentionType.MLA.value:
+        raise ValueError(
+            f"`use_mla_absorbed_mqa=True` requires `attention_type='{AttentionType.MLA.value}'`, "
+            f"but found attention_type='{self.attention_type}'."
+        )
+      if self.attention not in ("dot_product", "autoselected"):
+        raise ValueError(
+            f"`use_mla_absorbed_mqa=True` requires `attention` to be 'dot_product' or 'autoselected', "
+            f"but found attention='{self.attention}'."
+        )
+      if self.mla_naive_kvcache:
+        raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with `mla_naive_kvcache=True`.")
+      has_quant = (
+          self.quantize_kvcache
+          or self.use_qwix_quantization
+          or self.use_manual_quantization
+          or self.experimental_sa_quant_q_fp8
+          or self.experimental_sa_quant_k_fp8
+          or (self.quantization and self.quantization not in (QuantizationType.NONE, QuantizationType.TE_NO_QUANT))
+      )
+      if has_quant:
+        raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with quantization or FP8 options.")
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):

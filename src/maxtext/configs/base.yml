@@ -514,6 +514,7 @@ qk_nope_head_dim: 128
 qk_rope_head_dim: 64
 v_head_dim: 128
 use_sliced_mla_proj: false # Whether to slice projection kernel weights before contraction in MLA instead of running full projection + jnp.split.
+use_mla_absorbed_mqa: false # Whether to use Absorbed-Query Latent MQA mode in MLA (optimizes AR decode KV cache footprint/bandwidth at the cost of higher prefill/training FLOPs).
 
 # Compressed Attention parameters
 o_lora_rank: 0 # Output LoRA rank for Compressed Attention.
