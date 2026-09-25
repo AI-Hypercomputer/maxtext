@@ -105,6 +105,9 @@ class RouteOutput:
   # Shape [local experts], tracks number of local tokens routed to every local expert.
   local_group_sizes: Optional[jax.Array] = None
   has_overflow: bool | jax.Array = False
+  # log_required_ragged_buffer_factor probe: minimum ragged_buffer_factor that would have avoided drops, max over
+  # the mesh (float32 scalar). None when the probe is off.
+  required_rbf: Optional[jax.Array] = None
 
 
 def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
@@ -552,6 +555,24 @@ class GateLogit(nnx.Module):
 
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
+
+  def required_ragged_buffer_factor(self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id):
+    """log_required_ragged_buffer_factor probe: the smallest ragged_buffer_factor that would not have dropped tokens.
+
+    group_sizes are the global per-expert token counts of the (EP-gathered) batch, as ring_ragged_sort computes them
+    for the overflow check. The per-shard buffer is int(balanced_size * factor) rows, so a shard drops tokens iff
+    sum(local group sizes) > balanced_size * factor. The result is max over all devices of
+    sum(local group sizes) / balanced_size: one float32 scalar max all-reduce over the mesh axes (no other change).
+    """
+    local_num_experts = self.config.num_experts // num_ep
+    local_group_sizes = jax.lax.dynamic_slice_in_dim(
+        group_sizes, expert_shard_id * local_num_experts, local_num_experts, axis=0
+    )
+    balanced_size = (bsz_times_seq_len // num_ep) * self.num_experts_per_tok
+    required = jnp.sum(local_group_sizes).astype(jnp.float32) / jnp.float32(balanced_size)
+    if self.mesh is not None and self.mesh.axis_names:
+      required = jax.lax.pmax(required, tuple(self.mesh.axis_names))
+    return required
 
   def __init__(
       self,
@@ -1710,7 +1731,15 @@ class RoutedMoE(nnx.Module):
     return tuple(bias[experts_index] for bias in biases)
 
   def get_ragged_buffer_factor(self):
-    """Reads ragged_buffer_factor, preferring `eval_ragged_buffer_factor` under eval axis rules."""
+    """Reads ragged_buffer_factor for this module.
+
+    A per-graphdef `ragged_buffer_factor_override` (set post-construction on the first-phase graphdef via
+    first_phase_ragged_buffer_factor, or on the eval graphdef via eval_ragged_buffer_factor) wins when it is > 0.
+    Otherwise `eval_ragged_buffer_factor` is used under eval axis rules, and `ragged_buffer_factor` elsewhere.
+    """
+    override = getattr(self, "ragged_buffer_factor_override", None)
+    if override is not None and override > 0:
+      return override
     if max_utils.is_eval(self.config):
       return self.config.eval_ragged_buffer_factor
     return self.config.ragged_buffer_factor
@@ -2232,6 +2261,11 @@ class RoutedMoE(nnx.Module):
           force_dropless=force_dropless,
           mesh_axis_names=roe_bias_axis_names,
       )
+      required_rbf = None
+      if getattr(self.config, "log_required_ragged_buffer_factor", False):
+        required_rbf = self.required_ragged_buffer_factor(
+            group_sizes, logits.shape[0] * logits.shape[1], num_ep, expert_shard_id
+        )
       return (
           x,
           RouteOutput(
@@ -2243,6 +2277,7 @@ class RoutedMoE(nnx.Module):
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
               has_overflow=has_overflow,
+              required_rbf=required_rbf,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -2816,7 +2851,7 @@ class RoutedMoE(nnx.Module):
             scatter_dimension=0,
             tiled=True,
         )
-        return output, routing.lb_loss, routing.bias_updates, routing.has_overflow
+        return output, routing.lb_loss, routing.bias_updates, routing.has_overflow, routing.required_rbf
 
       if self.get_expert_parallelism_size() > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
@@ -2848,7 +2883,7 @@ class RoutedMoE(nnx.Module):
           group_sizes=routing.group_sizes,
       )
 
-      return output, routing.lb_loss, routing.bias_updates, routing.has_overflow
+      return output, routing.lb_loss, routing.bias_updates, routing.has_overflow, routing.required_rbf
 
     @functools.partial(
         jax.shard_map,
@@ -2876,6 +2911,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Handle None or replicate the output
             P(),  # has_overflow: replicated scalar, all-reduced across entire mesh
             P(),  # took_fallback: replicated scalar, True if the in-layer dropless branch ran
+            P(),  # required_rbf (probe): replicated scalar max-reduced across entire mesh, or None
         ),
         check_vma=self.config.check_vma,
     )
@@ -2931,7 +2967,7 @@ class RoutedMoE(nnx.Module):
         # load-balance loss / bias updates are averaged across chunks.
         seq_len = x.shape[1]
         chunk = seq_len // n_chunks
-        outs, lb_losses, bias_updates_list, has_overflows = [], [], [], []
+        outs, lb_losses, bias_updates_list, has_overflows, required_rbfs = [], [], [], [], []
         _prev = None
         for c in range(n_chunks):
           sl = slice(c * chunk, (c + 1) * chunk)
@@ -2942,7 +2978,7 @@ class RoutedMoE(nnx.Module):
           # loss stays bit-exact.
           if barrier_enabled and _prev is not None:
             x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
-          out_c, lb_c, bu_c, ov_c = _moe_body(
+          out_c, lb_c, bu_c, ov_c, req_c = _moe_body(
               x_c,
               logits[:, sl, :],
               None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
@@ -2963,19 +2999,22 @@ class RoutedMoE(nnx.Module):
           lb_losses.append(lb_c)
           bias_updates_list.append(bu_c)
           has_overflows.append(ov_c)
+          required_rbfs.append(req_c)
         output = jnp.concatenate(outs, axis=1)
         lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
         bias_updates = None if bias_updates_list[0] is None else sum(bias_updates_list) / n_chunks
         has_overflow = jnp.any(jnp.stack(has_overflows))
-        return output, lb_loss, bias_updates, has_overflow
+        # Each chunk has its own buffer, so the step needs the largest per-chunk factor.
+        required_rbf = None if required_rbfs[0] is None else jnp.max(jnp.stack(required_rbfs))
+        return output, lb_loss, bias_updates, has_overflow, required_rbf
 
       force_dropless = getattr(self, "force_dropless", False)
       fallback_chunks = None
       if self.config.moe_dropless_fallback == "layer":
         fallback_chunks = self.get_dropless_fallback_num_chunks(x.shape[1], n_chunks)
       if fallback_chunks is None:
-        out, lb_loss, bias_updates, has_overflow = _route_and_compute(force_dropless)
-        return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False)
+        out, lb_loss, bias_updates, has_overflow, required_rbf = _route_and_compute(force_dropless)
+        return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf
 
       # In-layer dropless fallback: calculate the overflow, then run either the
       # normal capped path or a chunked dropless path for this layer only (no step replay).
@@ -2983,19 +3022,26 @@ class RoutedMoE(nnx.Module):
           logits, pre_bias_logits, rngs, sharded_input_ids, forced_routed_experts, n_chunks
       )
 
+      # Both branches return required_rbf with the same structure: None when the
+      # log_required_ragged_buffer_factor probe is off, a float32 scalar otherwise. The dropless
+      # branch returns the probe value of its own (fallback_chunks) chunking.
       def _capped_branch():
-        out, lb_loss, bias_updates, has_overflow = _route_and_compute(False)
-        return out, lb_loss, bias_updates, jnp.asarray(has_overflow, dtype=jnp.bool_)
+        out, lb_loss, bias_updates, has_overflow, required_rbf = _route_and_compute(False)
+        return out, lb_loss, bias_updates, jnp.asarray(has_overflow, dtype=jnp.bool_), required_rbf
 
       # Save nothing from the rare dropless branch: lax.cond gives both branches the union of
       # their residuals, so the (larger) dropless residuals would otherwise be held every step.
       @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
       def _dropless_branch():
-        out, lb_loss, bias_updates, _ = _route_and_compute(True, n_chunks=fallback_chunks, barrier_enabled=True)
-        return out, lb_loss, bias_updates, jnp.bool_(False)
+        out, lb_loss, bias_updates, _, required_rbf = _route_and_compute(
+            True, n_chunks=fallback_chunks, barrier_enabled=True
+        )
+        return out, lb_loss, bias_updates, jnp.bool_(False), required_rbf
 
-      out, lb_loss, bias_updates, has_overflow = jax.lax.cond(took_fallback, _dropless_branch, _capped_branch)
-      return out, lb_loss, bias_updates, has_overflow, took_fallback
+      out, lb_loss, bias_updates, has_overflow, required_rbf = jax.lax.cond(
+          took_fallback, _dropless_branch, _capped_branch
+      )
+      return out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf
 
     # Note: SparseCore pinning (`moe_pin_sparse_core_all_gathers`) is currently not supported
     # with `moe_fsdp_use_two_stage_all_gather` (enforced via validation in types.py).
@@ -3077,7 +3123,7 @@ class RoutedMoE(nnx.Module):
     if wo_bias is not None:
       wo_bias = _fsdp_all_gather(wo_bias, wo_bias_pspec)
 
-    output, lb_loss, bias_updates, has_overflow, took_fallback = sparse_matmul_route_and_compute(
+    output, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf = sparse_matmul_route_and_compute(
         inputs,
         gate_logits,
         pre_bias_logits,
@@ -3094,6 +3140,8 @@ class RoutedMoE(nnx.Module):
     self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
     if self.config.moe_dropless_fallback == "layer":
       self.sow(nnx.Intermediate, "moe_dropless_fallback", took_fallback)
+    if required_rbf is not None:
+      self.sow(nnx.Intermediate, "moe_required_rbf", required_rbf)
     return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices, safe_updates=False):
