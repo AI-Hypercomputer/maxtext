@@ -289,6 +289,21 @@ What it settles:
    optimizer footprint (argument size 1.1 to 2.2 GB) but shortens the FSDP ring
    to 64 chips and puts the gradient all-reduce on the fast link.
 3. **pdb=4 is still out,** 8G short even with offload.
+4. **Replicated on nap** (`o35n251513`): every arm within 0.1 TF/s of flex, and
+   the same-run control f6 is 87.5, so f3 is **1.22x** against its own control.
+
+xla-shell on the nap f1 capture (sched flags, no DP), against e4 (no sched):
+
+| | e4 | f1 |
+|---|---|---|
+| step | 1210 ms | 1100 ms |
+| TensorCore | 875 ms | 897 ms |
+| SparseCore comm | 532 ms | 495 ms |
+| comm exposed | 328 ms | **199 ms** |
+| scheduling ceiling | 1.39x | 1.23x |
+
+The flags hide 129 ms of comm and leave the TensorCore lane alone. The remaining
+199 ms is still the first lever; the kernel list is unchanged.
 
 ### In flight: g-series, stacked on f3
 
