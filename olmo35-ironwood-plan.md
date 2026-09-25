@@ -281,6 +281,7 @@ fit VMEM at these shapes, closing item 3.4.
 - [x] 5.4 Acted on the roadmap's #1 kernel (`_fused_dhu_wy_intra_cumsum_pallas_`, 303ms): **1.34x** from `dense_pairs` + bf16
 - [x] 5.5 Latent-MoE fusion and `tokamax_gmm_tile_m` NOT pursued: the roadmap puts gmm_v2/tgmm_v2 at 51+44+28ms against the KDA kernel's 303ms, so they are not the lever
 - [x] 5.6 xla-shell floor recorded: **372ms** (SparseCore comm) against 1.10s as-profiled, i.e. 2.96x software headroom; past it only comm VOLUME helps
+- [x] 5.7 128-device profile (4x4x4, pdb=3, 87.2 TF/s = 7.56%): comm is back on the critical path, **328ms exposed of a 532ms batch-independent SC lane**; scheduling ceiling 875ms (1.39x), floor 532ms. f-series ports the gpt-oss recipe scheduler flags and DP=2 mesh. See `olmo35-ironwood-runs.md`
 
 ## Phase 6: perfsim cross-check and the 20% verdict
 

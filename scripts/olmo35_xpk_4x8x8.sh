@@ -204,7 +204,10 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                     echo "=== ARM \$NAME model=\$M pdb=\$P seq=\$S extra='\$XTRA' \$(date) ===";
                     LOG=/tmp/hc/\$M-\$NAME.log
                     # Optional 5th field: per-arm env overrides, e.g. TOKAMAX_KDA_BF16_FWD=0.
-                    env \$ENVX python3 -m maxtext.trainers.pre_train.train \
+                    # Tokens starting with + are appended to LIBTPU_INIT_ARGS instead.
+                    EV=""; LX="$LIBTPU"
+                    for T in \$ENVX; do case "\$T" in +*) LX="\$LX \${T#+}";; *) EV="\$EV \$T";; esac; done
+                    env LIBTPU_INIT_ARGS="\$LX" \$EV python3 -m maxtext.trainers.pre_train.train \
                       /wt/src/maxtext/configs/base.yml \
                       model_name=\$M run_name=$RUN-\$M-\$NAME steps=$STEPS \
                       dataset_type=synthetic enable_checkpointing=False async_checkpointing=False \

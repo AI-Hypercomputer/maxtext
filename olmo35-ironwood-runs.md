@@ -224,19 +224,49 @@ across the board, the documented bf16 level. New unit test
 `test_matches_unfused_at_large_decay` sets `dt_bias=3` (up to ~48 nats per step);
 it fails at 2.4e-2 without the floor and passes at 4.5e-4 with it.
 
-### Queued: e-series on all three routes
+### 128 devices (4x4x4): run `o35n242234`, e-series
 
-| arm | pdb | extra | what it answers |
+`bodaborg-tpu7x-nap`, 2026-09-24/25, all six arms with the KDA decay floor.
+
+| arm | pdb | extra | TF/s/dev | MFU | step s | outcome |
+|---|---|---|---|---|---|---|
+| e1_p3 | 3 | | **87.2** | **7.56%** | 1.215 | **best**, loss finite and falling |
+| e2_p2_prof | 2 | `profiler=xplane` | 79.5 | 6.89% | 0.889 | capture landed |
+| e3_p2_floor0 | 2 | `tokamax_kda_log_decay_floor=0` | 79.9 | 6.93% | 0.884 | floor costs nothing |
+| e4_p3_prof | 3 | `profiler=xplane` | 87.2 | 7.56% | 1.216 | capture landed |
+| e5_p2_ep4 | 2 | `ici_fsdp_parallelism=32 ici_expert_parallelism=4 shard_exp_on_fsdp=False` | | | | OOM, 108.16G vs 94.74G |
+| e6_p2_noshardexp | 2 | `shard_exp_on_fsdp=False` | 80.1 | 6.94% | 0.882 | neutral |
+
+What it settles:
+
+1. **pdb=3 is the new best, +9% over pdb=2.** The decay floor removed the only
+   thing that blocked it. Estimated temporaries 90.9 GB, so pdb=3 is the last
+   batch that fits under `remat_policy=full`.
+2. **The floor is free.** 79.9 without it against 79.5 and 80.1 with it.
+3. **EP4 costs memory, not just time.** It needs 13.4G more than pdb=2 FSDP-only
+   holds, so it is off the table unless something else frees HBM.
+4. **`shard_exp_on_fsdp` does not matter** at pdb=2 on this mesh.
+
+Raw logs: `/tmp/olmo35_results/nap4x4x4-o35n242234-logs/`.
+
+### In flight: f-series, targeting the exposed comm
+
+The 128-device profiles (below) show 328 ms of SparseCore comm exposed at pdb=3,
+batch-independent. The f-series attacks it at pdb=3. "sched" is the 17
+scheduler and SparseCore flags the gpt-oss Ironwood recipe carries and we never
+ported (latency-hiding layer scheduler, concurrent SC offloading, SC collective
+aggregator, reduce-scatter v2, nd/3d collective offload, two concurrent async
+all-gathers and reduce-scatters, shared-memory limit 150). Per-arm XLA flags are
+passed as `+--flag` tokens in the fifth arm field.
+
+| arm | pdb | change | question |
 |---|---|---|---|
-| e1_p3 | 3 | | pdb=3 throughput with the decay floor |
-| e2_p2_prof | 2 | `profiler=xplane` | 128-device capture; also prices the floor against c1 |
-| e3_p2_floor0 | 2 | `tokamax_kda_log_decay_floor=0` | cost of the floor, same run |
-| e4_p3_prof | 3 | `profiler=xplane` | capture at the new best point |
-| e5_p2_ep4 | 2 | `ici_fsdp_parallelism=32 ici_expert_parallelism=4 shard_exp_on_fsdp=False` | expert parallelism, correctly sharded |
-| e6_p2_noshardexp | 2 | `shard_exp_on_fsdp=False` | the arm c7 lost |
-
-Pod-local captures are now copied into `/tmp/hc` after each arm, so the
-supervisor pulls them with the results instead of losing them with the pod.
+| f1_p3_sched_prof | 3 | sched, captured | does the scheduler hide the comm |
+| f2_p3_dp2 | 3 | `ici_data_parallelism=2 ici_fsdp_parallelism=64` | recipe mesh, DP on the intra-chip pair |
+| f3_p3_sched_dp2 | 3 | both | do they compose |
+| f4_p3_sched_1sc | 3 | sched + single-SC all-gather | recipe-exact against our dual-SC default |
+| f5_p4_sched_offload | 4 | sched + `remat_policy=custom` offload | does hidden comm turn pdb=4 into a win |
+| f6_p3_ctrl | 3 | none | same-run control |
 
 ## Profiles and xla-shell output
 
@@ -277,16 +307,52 @@ there is worth far less than the KDA work.
 
 ### 128 devices
 
-**Not yet captured.** `z_profile` in `o35nap240641` was pinned to pdb=4 and OOMed.
-`c1_prof_p2` in `o35fle241836` ran, but wrote to pod-local `/tmp/out` and the pod
-was lost before harvest. `e2_p2_prof` and `e4_p3_prof` are queued with the fix
-that parks captures in `/tmp/hc`.
+`e2_p2_prof` and `e4_p3_prof` from `o35n242234`, analysed with
+`scripts/olmo35_profile_report.sh gs://agagik-us/olmo35/4x4x4 o35n242234 <arm>`.
+Reports in `/tmp/olmo35_profiles/o35n242234-<arm>/`.
 
-The open question the capture has to answer: at 8 devices the binder moved from
-comm to TensorCore once tuned, but at 128 devices pdb=1 was 54.2 against pdb=2's
-78.2, which is the signature of a large fixed collective cost being amortised.
-So the 128-device profile should show whether comm is back on the critical path
-at this slice, or whether the KDA cumsum is still the single largest kernel.
+| lane | pdb=2 | pdb=3 |
+|---|---|---|
+| step | 887 ms | 1210 ms |
+| TensorCore | 608 ms | 875 ms |
+| of which matmul | 323 ms | 458 ms |
+| of which vpu | 218 ms | 335 ms |
+| of which relayout | 67 ms | 82 ms |
+| SparseCore comm | 518 ms | 532 ms |
+| comm exposed | 276 ms | 328 ms |
+| Host-DMA | 17 ms | 63 ms |
+
+`roadmap --all`, pdb=3:
+
+| # | lever | step | gain | binder |
+|---|---|---|---|---|
+| 0 | as profiled | 1210 ms | | imperfect overlap |
+| 1 | schedule exposed comm | 875 ms | 337 ms | TensorCore |
+| 2 | kernels, bounded by slack | 532 ms | 343 ms | TensorCore |
+| 3 | relayout | 532 ms | 0 | SparseCore comm |
+
+Top kernels at pdb=3 (`roadmap --kernels`): KDA
+`_fused_dhu_wy_intra_cumsum_pallas` 75 ms, `gmm_v2` k=512 69 ms, generic
+fusions 67 ms, `gmm_v2` k=1024 58 ms, KDA `shard_map` 53 ms, `tgmm_v2` 54 ms.
+
+What it says:
+
+1. **Comm is back on the critical path at 128 devices,** answering the open
+   question. At 8 devices tuning had moved the binder to the TensorCore; here
+   27% of the pdb=3 step is exposed collective.
+2. **Comm is batch-independent.** 518 ms at pdb=2, 532 ms at pdb=3. It is the
+   FSDP weight all-gather and gradient reduce-scatter, whose volume depends on
+   parameters, not tokens. This is why pdb 1 to 2 to 3 keeps paying: the fixed
+   cost is amortised over more work.
+3. **Scheduling alone is worth 1.39x** (1210 to 875 ms, ~121 TF/s, 10.5% MFU) if
+   every collective can be hidden. `roadmap --collective` finds all 375 ms
+   hideable, spread over many ~4 ms reduce-scatters, so the fix is compiler
+   scheduling, not one bad op.
+4. **Past that the floor is SparseCore comm at 532 ms,** so going further needs
+   less comm volume (DP on the intra-chip pair, lower-precision gathers), not
+   faster kernels. KDA is 128 ms of kernel time at pdb=3, no longer dominant.
+5. **Non-matmul TensorCore work is 34% of the step,** which is what any
+   FLOP-based estimate misses and part of why perfsim is 4.3x optimistic here.
 
 ## Infrastructure notes that cost real time
 
