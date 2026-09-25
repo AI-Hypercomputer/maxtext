@@ -39,6 +39,7 @@ class _Cfg:
   debug_sharding: bool = False
   training_objective: str = "causal_lm"
   use_tunix_gradient_accumulation: bool = False
+  logical_axis_rules: tuple = (("activation_batch", ("data", "fsdp", "fsdp_transpose", "expert")),)
 
 
 class _TinyNNX(nnx.Module):
@@ -248,6 +249,68 @@ class TestGradientAccumulationNNX(unittest.TestCase):
           for gradient in jax.tree.leaves(raw_grads):
             self.assertTrue(jnp.all(jnp.isfinite(gradient)))
             self.assertTrue(jnp.all(gradient == 0))
+
+
+class TestUnreducedGradientTagging(unittest.TestCase):
+  """Cover when gradient accumulation tags its accumulator `unreduced` over "data".
+
+  The tag is what defers the cross-replica gradient reduction until after the scan. JAX
+  requires the unreduced axes to equal the axes the gradient was contracted over, which
+  are the mesh axes the activation batch dimension is sharded on, so the tag is only
+  valid when "data" is the one batch axis with more than one shard.
+  """
+
+  # Only the mesh shape and the logical rules decide this, so an abstract mesh keeps the
+  # axis sizes independent of how many devices the test runner has.
+  def _shardings(self, axis_sizes, spec=PartitionSpec()):
+    mesh = jax.sharding.AbstractMesh(
+        axis_sizes,
+        ("data", "fsdp", "expert"),
+        axis_types=(jax.sharding.AxisType.Explicit,) * 3,
+    )
+    return {"kernel": NamedSharding(mesh, spec)}
+
+  def test_data_only_batch_axis_is_tagged(self):
+    cfg = _Cfg(shard_mode=ShardMode.EXPLICIT)
+    self.assertTrue(gradient_accumulation.data_is_only_batch_axis(cfg, self._shardings((8, 1, 1))))
+
+  def test_batch_split_across_data_and_fsdp_is_not_tagged(self):
+    """With FSDP on too, "data" alone no longer matches the contracted axes.
+
+    Tagging anyway raises a ShardingTypeError from the backward pass, and the alternative
+    of tagging both axes is illegal because the parameters are sharded over "fsdp".
+    """
+    cfg = _Cfg(shard_mode=ShardMode.EXPLICIT)
+    self.assertFalse(gradient_accumulation.data_is_only_batch_axis(cfg, self._shardings((2, 4, 1))))
+
+  def test_data_parallelism_of_one_is_not_tagged(self):
+    cfg = _Cfg(shard_mode=ShardMode.EXPLICIT)
+    self.assertFalse(gradient_accumulation.data_is_only_batch_axis(cfg, self._shardings((1, 8, 1))))
+
+  def test_auto_shard_mode_is_not_tagged(self):
+    """Auto sharding has no `unreduced` spec to express the deferred reduction with."""
+    cfg = _Cfg(shard_mode=ShardMode.AUTO)
+    self.assertFalse(gradient_accumulation.data_is_only_batch_axis(cfg, self._shardings((8, 1, 1))))
+
+  def test_missing_activation_batch_rule_is_not_tagged(self):
+    cfg = _Cfg(shard_mode=ShardMode.EXPLICIT, logical_axis_rules=())
+    self.assertFalse(gradient_accumulation.data_is_only_batch_axis(cfg, self._shardings((8, 1, 1))))
+
+  def test_tags_are_added_for_a_replicated_parameter(self):
+    sharding = self._shardings((8, 1, 1), PartitionSpec(None))["kernel"]
+    self.assertEqual(gradient_accumulation.update_sharding_for_reduced(sharding).spec.reduced, frozenset({"data"}))
+    self.assertEqual(gradient_accumulation.update_sharding_for_unreduced(sharding).spec.unreduced, frozenset({"data"}))
+
+  def test_parameter_sharded_over_data_is_left_alone(self):
+    """A tensor cannot be reduced over an axis it is already split along.
+
+    ZeRO-1 puts "data" into some parameter specs, and PartitionSpec rejects a tag that
+    overlaps its own partitions, so those parameters keep the untagged spec and their
+    reduction stays where it was.
+    """
+    sharding = self._shardings((8, 1, 1), PartitionSpec("data", None))["kernel"]
+    self.assertIs(gradient_accumulation.update_sharding_for_reduced(sharding), sharding)
+    self.assertIs(gradient_accumulation.update_sharding_for_unreduced(sharding), sharding)
 
 
 if __name__ == "__main__":
