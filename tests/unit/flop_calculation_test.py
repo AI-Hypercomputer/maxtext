@@ -241,6 +241,78 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
+  @parameterized.named_parameters(
+      ("dense_9b", "qwen3.5-9b", 32, 0),
+      ("moe_35b", "qwen3.5-35b-a3b", 0, 40),
+      ("moe_397b", "qwen3.5-397b-a17b", 0, 60),
+  )
+  def test_qwen3_5_dense_moe_layers(self, model_name, dense_layers, moe_layers):
+    """Qwen3.5 uses either dense FFNs or MoE FFNs in every decoder layer."""
+    cfg = self._initialize_model_config(model_name)
+    self.assertEqual(maxtext_utils.get_dense_moe_layers(cfg), (dense_layers, moe_layers))
+
+  def test_qwen3_5_9b_flops(self):
+    """Test Qwen3.5-9B dense model Flops calculation"""
+    cfg = self._initialize_model_config(
+        "qwen3.5-9b",
+        max_target_length=4096,
+        per_device_batch_size=1,
+    )
+    kwargs = cfg.get_keys()
+
+    # 1. Calculate Attention TFLOPs
+    attention_tflops = self.compute_qwen3_next_attention_flops_per_device(kwargs)
+
+    # 2. Calculate Learnable Weight Active Params
+    emb_dim = kwargs["base_emb_dim"]
+    vocab = kwargs["vocab_size"]
+    N = kwargs["base_num_decoder_layers"]
+
+    # Dense MLP Active Params (per layer)
+    # FFN uses SwiGLU (3 matrices: gate_proj, up_proj, down_proj)
+    mlp_dim = kwargs["base_mlp_dim"]
+    params_dense_mlp = 3 * emb_dim * mlp_dim
+
+    # Full Attention Params (per full layer)
+    Hq = kwargs["base_num_query_heads"]
+    Hkv = kwargs["base_num_kv_heads"]
+    Hd = kwargs["head_dim"]
+    params_full_attn = (emb_dim * (Hq + 2 * Hkv) * Hd) + (Hq * Hd * emb_dim)
+
+    # GDN Linear Attention Params (per linear layer)
+    Hk_g = kwargs["gdn_num_key_heads"]
+    Hv_g = kwargs["gdn_num_value_heads"]
+    Dk_g = kwargs["gdn_key_head_dim"]
+    Dv_g = kwargs["gdn_value_head_dim"]
+    K_conv = kwargs["gdn_conv_kernel_dim"]
+
+    K_dim = Hk_g * Dk_g
+    V_dim = Hv_g * Dv_g
+
+    params_gdn_proj = (emb_dim * (2 * K_dim + 2 * V_dim)) + (emb_dim * 2 * Hv_g) + (V_dim * emb_dim)
+    params_gdn_conv = (2 * K_dim + V_dim) * K_conv
+    params_gdn_layer = params_gdn_proj + params_gdn_conv
+
+    # Total Active Params
+    num_full = N // kwargs["inhomogeneous_layer_cycle_interval"]
+    num_linear = N - num_full
+
+    total_active_params = (
+        (vocab * emb_dim)
+        + (num_full * (params_full_attn + params_dense_mlp))
+        + (num_linear * (params_gdn_layer + params_dense_mlp))
+    )
+
+    B = kwargs["per_device_batch_size"]
+    S = kwargs["max_target_length"]
+    weight_tflops = 6 * B * S * total_active_params / 1e12
+
+    golden_tflops = weight_tflops + attention_tflops
+
+    calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
+
+    self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
   def test_llama2_7b_flops(self):
     """Test Llama2 7b Flops calculation with default parameters"""
     cfg = self._initialize_model_config(

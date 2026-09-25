@@ -92,6 +92,23 @@ class ParamMappingTest(unittest.TestCase):
     mapping = param_mapping.QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-layers-pre_self_attention_layer_norm-scale", mapping)
 
+  def test_qwen3_5_dense_mapping(self):
+    """Dense Qwen3.5 maps all MLP projections without MoE parameters."""
+    config = {"text_config": {"num_hidden_layers": 8, "num_experts": 1}}
+    maxtext_config = mock.Mock(
+        num_decoder_layers=8, num_experts=1, inhomogeneous_layer_cycle_interval=4, weight_dtype="bfloat16"
+    )
+    for scanned in (False, True):
+      with self.subTest(scan_layers=scanned):
+        mapping = param_mapping.PARAM_MAPPING["qwen3.5-9b"](config, maxtext_config, scan_layers=scanned)
+        for index in range(4 if scanned else 8):
+          prefix = f"params-decoder-layers-layer_{index}" if scanned else f"params-decoder-layers_{index}"
+          indices = range(index, 8, 4) if scanned else [index]
+          for mt_name, hf_name in (("wi_0", "gate_proj"), ("wi_1", "up_proj"), ("wo", "down_proj")):
+            expected = [f"model.language_model.layers.{i}.mlp.{hf_name}.weight" for i in indices]
+            self.assertEqual(mapping[f"{prefix}-mlp-{mt_name}-kernel"], expected if scanned else expected[0])
+        self.assertFalse(any("routed_experts" in str(key) or "shared_expert" in str(key) for key in mapping))
+
   def test_qwen3_next_mapping(self):
     config = {
         "num_hidden_layers": 4,
