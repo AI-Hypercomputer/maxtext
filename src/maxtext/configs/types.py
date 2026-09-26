@@ -1013,6 +1013,30 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
   )
+  retry_dropless_first_steps: int = Field(
+      0,
+      description=(
+          "With retry_when_tokens_dropped=True, run the first N steps after the loop's start step (i.e. steps with "
+          "step - start_step < N; equal to step < N when training starts at step 0) directly with the dropless "
+          "program, skipping the attempt with the normal program. 0 = off."
+      ),
+  )
+  first_phase_ragged_buffer_factor: float = Field(
+      0.0,
+      description=(
+          "With retry_dropless_first_steps=N > 0, run the first N steps with a precompiled first-phase program whose "
+          "RoutedMoE modules use this ragged buffer factor (instead of the dropless program); a first-phase step that "
+          "still drops tokens is replayed with the dropless program. Must be >= ragged_buffer_factor. 0 = off."
+      ),
+  )
+  log_required_ragged_buffer_factor: bool = Field(
+      False,
+      description=(
+          "Probe: log per train step and per MoE layer the minimum ragged_buffer_factor that would have avoided drops "
+          "(max over shards of the tokens routed to a shard / the per-shard buffer at factor 1). Adds one scalar "
+          "max all-reduce per MoE layer and token chunk, and a device-to-host fetch per step."
+      ),
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -3640,6 +3664,40 @@ class MaxTextConfig(
       if self.num_moe_emb_chunks > 0:
         raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
 
+  def validate_retry_dropless_first_steps_and_first_phase_buffer(self):
+    """Validates retry_dropless_first_steps, first_phase_ragged_buffer_factor and the REQUIRED_RBF probe."""
+    if self.retry_dropless_first_steps < 0:
+      raise ValueError(f"retry_dropless_first_steps must be >= 0 (got {self.retry_dropless_first_steps}).")
+    if self.retry_dropless_first_steps > 0 and not self.retry_when_tokens_dropped:
+      raise ValueError("retry_dropless_first_steps > 0 requires retry_when_tokens_dropped=True.")
+    if self.first_phase_ragged_buffer_factor < 0:
+      raise ValueError(
+          f"first_phase_ragged_buffer_factor must be 0 (off) or > 0 (got {self.first_phase_ragged_buffer_factor})."
+      )
+    if self.first_phase_ragged_buffer_factor > 0:
+      if self.retry_dropless_first_steps <= 0:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_dropless_first_steps > 0.")
+      if not self.retry_when_tokens_dropped:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_when_tokens_dropped=True.")
+      if self.ragged_buffer_factor <= 0:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires ragged_buffer_factor > 0.")
+      if self.first_phase_ragged_buffer_factor < self.ragged_buffer_factor:
+        raise ValueError(
+            f"first_phase_ragged_buffer_factor ({self.first_phase_ragged_buffer_factor}) must be >= "
+            f"ragged_buffer_factor ({self.ragged_buffer_factor})."
+        )
+      if self.te_moe_block:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 is not supported with te_moe_block=True.")
+    if self.log_required_ragged_buffer_factor:
+      if self.te_moe_block:
+        raise ValueError("log_required_ragged_buffer_factor=True is not supported with te_moe_block=True.")
+      if not (self.use_ring_of_experts and self.use_ragged_sort):
+        raise ValueError(
+            "log_required_ragged_buffer_factor=True requires use_ring_of_experts=True and use_ragged_sort=True."
+        )
+      if self.num_moe_emb_chunks > 0:
+        raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
+
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor and eval_ragged_buffer_factor are used with supported settings."""
     if self.te_moe_block:
@@ -4750,6 +4808,7 @@ class MaxTextConfig(
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_mllog()
+    self.validate_retry_dropless_first_steps_and_first_phase_buffer()
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:
