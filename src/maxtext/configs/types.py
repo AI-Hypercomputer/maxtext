@@ -519,6 +519,25 @@ class DataTypes(BaseModel):
 
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
+  grad_accumulation_dtype: Literal["", "float32", "bfloat16"] = Field(
+      "",
+      description=(
+          "The data type MaxTextTrainingEngine sums micro-batch gradients in before casting them to grad_dtype; "
+          "empty uses grad_dtype. 'float32' with grad_dtype=bfloat16 sums more precisely, at the cost of a float32 "
+          "gradient accumulator on device."
+      ),
+  )
+
+  @classmethod
+  def _clean_none_for_grad_accumulation_dtype(cls, v: Any) -> Any:
+    """Coerces None, which an empty `grad_accumulation_dtype=` on the command line becomes, into ''."""
+    return "" if v is None else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues.
+  _validate_grad_accumulation_dtype = field_validator("grad_accumulation_dtype", mode="before")(
+      _clean_none_for_grad_accumulation_dtype
+  )
+
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,

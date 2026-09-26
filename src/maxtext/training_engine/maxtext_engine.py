@@ -20,7 +20,7 @@ the MaxRL AbstractTrainer interface without running an outer loop.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 import contextlib
 import dataclasses
 import functools
@@ -68,6 +68,11 @@ _MODEL_STATE_KEY = "model"
 # Where the same split puts the `nnx.Optimizer`, including the optax state Zero-1 shards.
 _OPTIMIZER_STATE_KEY = "optimizer"
 
+# Memory kinds for `optimizer_memory_host_offload`: as in `train.py`, the optimizer state stays
+# in pinned host memory between updates and is moved to the device only inside `_update_kernel`.
+_HOST_MEMORY_KIND = "pinned_host"
+_DEVICE_MEMORY_KIND = "device"
+
 # The kernels an update is made of, in the order a step runs them. `compile_kernels()` is
 # keyed by these, and so is the ahead-of-time entry point in `maxtext_engine_compile`.
 KERNEL_NAMES = ("fwd_bwd", "fwd_bwd_accum", "update")
@@ -96,6 +101,17 @@ def _is_jax_dynamic(value: Any) -> bool:
     # carries no data either way, so tracing it is harmless and keeps the treedef intact.
     return True
   return any(isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct, np.ndarray, np.generic)) for leaf in leaves)
+
+
+def _normalize_axis_rules(rules: Any) -> Any:
+  """Returns a logical axis rule set as nested tuples, so two spellings of one set compare equal.
+
+  `HyperParameters` turns `logical_axis_rules` into tuples but leaves
+  `logical_axis_rules_for_eval` as the lists the YAML held.
+  """
+  if isinstance(rules, (list, tuple)):
+    return tuple(_normalize_axis_rules(entry) for entry in rules)
+  return rules
 
 
 def _split_static_and_dynamic(batch: Any) -> tuple[Any, dict[str, Any]]:
@@ -302,6 +318,11 @@ def _zero1_sharding(mesh: Any, aval: Any, base: jax.sharding.NamedSharding | Non
   except AssertionError:
     # add_data_to_sharding rejects a shape it cannot shard; leave the value replicated.
     return None
+  # `add_data_to_sharding` may return a new NamedSharding without the base's memory kind. Keep the
+  # kind, so a pinned-host leaf (`optimizer_memory_host_offload`) stays on the host.
+  base_kind = getattr(base, "memory_kind", None)
+  if base_kind is not None and target.memory_kind != base_kind:
+    target = target.with_memory_kind(base_kind)
   return None if target == base else target
 
 
@@ -622,7 +643,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       ValueError: If training_config.model_name is not specified or empty, or if `wrap_with_tunix_adapter`
         is requested without `tokenizer_pad_id` or without a `mesh`.
       NotImplementedError: If `training_config.lora.enable_lora` is True. This engine has no LoRA
-        path and would otherwise full-finetune the base model while the config claims LoRA.
+        path and would otherwise full-finetune the base model while the config claims LoRA. Also
+        if `parameter_memory_host_offload` is set, or if `logical_axis_rules_for_eval` differs from
+        `logical_axis_rules`.
     """
     if not isinstance(training_config, pyconfig.HyperParameters):
       raise TypeError(
@@ -642,6 +665,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       raise NotImplementedError(
           "MaxTextTrainingEngine does not support LoRA, but lora.enable_lora=True was set. "
           "This engine trains all parameters, set lora.enable_lora=False to train with this engine."
+      )
+    # This engine has no path that keeps the weights in host memory, so reject the flag rather
+    # than silently leave every weight in HBM.
+    if getattr(training_config, "parameter_memory_host_offload", False):
+      raise NotImplementedError(
+          "MaxTextTrainingEngine does not support parameter_memory_host_offload; set it to False. "
+          "optimizer_memory_host_offload is supported."
+      )
+    # `train.py` evaluates under `logical_axis_rules_for_eval`; this engine evaluates under the
+    # training rules, so reject a different eval rule set rather than silently ignore it.
+    eval_rules = _normalize_axis_rules(getattr(training_config, "logical_axis_rules_for_eval", None) or ())
+    if eval_rules and eval_rules != _normalize_axis_rules(training_config.logical_axis_rules):
+      eval_rule_name = getattr(training_config, "custom_mesh_and_rule_for_eval", None)
+      raise NotImplementedError(
+          "MaxTextTrainingEngine evaluates under the training logical_axis_rules and does not support separate "
+          "eval rules, but logical_axis_rules_for_eval differs from them (custom_mesh_and_rule_for_eval="
+          f"{getattr(eval_rule_name, 'value', eval_rule_name)!r}). Leave custom_mesh_and_rule_for_eval unset, "
+          "or set it to the same value as custom_mesh_and_rule."
       )
     self._config = training_config
     self._mesh = mesh
@@ -695,6 +736,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._zero1_params_shardings: Any = None
     self._gathered_params_shardings: Any = None
     self._zero1_warned = False
+    # Set by `_compile_for_batch` under `optimizer_memory_host_offload`: the device shardings
+    # `_update_kernel` moves the pinned-host optimizer state onto. `None` without offload.
+    self._optimizer_device_shardings: Any = None
     # Micro step count within the current training step. Resets on `update()`.
     self._micro_step_count = 0
     # Every micro step this run has ever folded in across optimizer steps.
@@ -749,11 +793,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     """Returns the model to train, adopting a mesh when this engine was given none."""
-    # `from_pretrained` calls `create_nnx_sharded_model` outside `logical_axis_rules`,
-    # which re-runs model `__init__` under `jax.jit`. Entering `_sharding_ctx()` here
-    # ensures both the active mesh and `logical_axis_rules` are bound during model
-    # initialization (required by e.g. scanned NNX layers and Tokamax ring attention).
-    with self._sharding_ctx():
+    # Built under the logical axis rules, which some layers check at `__init__` (Tokamax ring
+    # attention validates its sequence sharding there), and with any caller's `jax.set_mesh`
+    # cleared: under a set mesh, `nnx.eval_shape` in `create_nnx_abstract_model` re-derives each
+    # variable's sharding from its logical names and raises on names the rules leave unmapped.
+    # `from_pretrained` enters the mesh itself where it needs one.
+    with jax.set_mesh(None), logical_axis_rules(self._config.logical_axis_rules):
       model_or_model_mesh_pair = model_creation_utils.from_pretrained(
           config=self._config,
           mesh=self._mesh,
@@ -778,7 +823,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return nnx.Optimizer(self._model, tx, wrt=nnx.Param)
 
   def _checkpoint_dir(self) -> str:
-    """Returns the directory this engine checkpoints through; an empty string disables Orbax entirely."""
+    """Returns the directory this engine checkpoints through; an empty string disables its save and resume.
+
+    This covers only the engine's own `CheckpointManager`; `load_parameters_path` is still loaded
+    through Orbax in `from_pretrained`.
+    """
     if not getattr(self._config, "enable_checkpointing", True):
       return ""
     return self._config.checkpoint_dir
@@ -805,6 +854,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_eval_signature = None
     self._model_graphdef = None
     self._freeze_mask = None
+    self._optimizer_device_shardings = None
     self._invalidate_pure_state()
 
   @property
@@ -821,6 +871,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_fwd_bwd_accum = None
     self._compiled_update = None
     self._state_graphdef = None
+    self._optimizer_device_shardings = None
     self._invalidate_pure_state()
     self._compiled_eval = None
     self._compiled_eval_signature = None
@@ -851,6 +902,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_fwd_bwd_accum = None
     self._compiled_update = None
     self._state_graphdef = None
+    self._optimizer_device_shardings = None
     self._invalidate_pure_state()
     self._compiled_eval = None
     self._compiled_eval_signature = None
@@ -954,6 +1006,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     deeper pytree that `jax.jit` rejects as an `in_shardings` prefix mismatch.
     """
     return nnx.State({**state_pure.raw_mapping, _MODEL_STATE_KEY: model_pure.raw_mapping})
+
+  @staticmethod
+  def _with_optimizer_state(state_pure: Any, optimizer_pure: Any) -> Any:
+    """Returns `state_pure` with its optimizer subtree replaced by `optimizer_pure`.
+
+    Through `raw_mapping`, for the same reason as `_with_model_state`.
+    """
+    return nnx.State({**state_pure.raw_mapping, _OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping})
 
   def _check_pure_state_reusable(self, state_pure: Any, params_pure: Any, rest_pure: Any) -> str | None:
     """Returns why the pure state cannot be carried across steps, or None if it can.
@@ -1145,6 +1205,64 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._invalidate_pure_state()
     self._refresh_pure_state()
 
+  def _optimizer_offload_enabled(self) -> bool:
+    """Returns whether the optimizer state is kept in pinned host memory between updates."""
+    return bool(getattr(self._config, "optimizer_memory_host_offload", False)) and self._mesh is not None
+
+  def _offload_optimizer_state(self) -> None:
+    """Moves the optimizer state into pinned host memory, in place, under `optimizer_memory_host_offload`.
+
+    Mirrors `train.py`, which gives the optimizer's shardings a `pinned_host` memory kind
+    (`maxtext_utils.get_abstract_state_nnx`). `_compile_for_batch` runs this before reading the
+    update kernel's shardings off the state, so the kernel takes and returns the optimizer state
+    in host memory; the eager path runs it before each `fwd_bwd` and after each `update()`.
+    Every optimizer leaf moves, scalars included, as in `train.py`. Idempotent: a leaf already in
+    host memory is left alone.
+    """
+    if not self._optimizer_offload_enabled() or self._state is None:
+      return
+    state_pure = self._read_state_pure()
+    if _OPTIMIZER_STATE_KEY not in state_pure:
+      return
+
+    moved = False
+
+    def place(leaf):
+      nonlocal moved
+      if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
+        return leaf
+      base = self._mesh_sharding(leaf)
+      if base.memory_kind == _HOST_MEMORY_KIND:
+        return leaf
+      moved = True
+      return self._place_leaf(leaf, base.with_memory_kind(_HOST_MEMORY_KIND))
+
+    optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
+    if not moved:
+      return
+    with self._sharding_ctx():
+      nnx.update(self._state, nnx.State({_OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
+    self._invalidate_pure_state()
+    self._refresh_pure_state()
+
+  def _with_optimizer_on_device(self, state_pure: Any) -> Any:
+    """Returns `state_pure` with every optimizer leaf in pinned host memory moved onto the device.
+
+    For the eager update, which runs outside `jax.jit` and so cannot compute on pinned-host
+    operands. Each leaf keeps its own sharding and only the memory kind changes, so this does not
+    depend on the shardings the last compile saw.
+    """
+    if _OPTIMIZER_STATE_KEY not in state_pure:
+      return state_pure
+
+    def to_device(leaf):
+      leaf_sharding = getattr(leaf, "sharding", None)
+      if getattr(leaf_sharding, "memory_kind", None) != _HOST_MEMORY_KIND:
+        return leaf
+      return jax.device_put(leaf, leaf_sharding.with_memory_kind(_DEVICE_MEMORY_KIND))
+
+    return self._with_optimizer_state(state_pure, jax.tree.map(to_device, state_pure[_OPTIMIZER_STATE_KEY]))
+
   def _reshard_model_params(self, state_pure: Any, params_shardings: Any) -> Any:
     """Returns `state_pure` with its `nnx.Param` leaves moved onto `params_shardings`.
 
@@ -1157,6 +1275,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     params_pure, rest_pure = nnx.split_state(state_pure[_MODEL_STATE_KEY], nnx.Param, ...)
     params_pure = jax.tree.map(jax.sharding.reshard, params_pure, params_shardings)
     return self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
+
+  def _accumulation_dtype(self) -> Any:
+    """Returns the dtype micro-batch gradients are summed in: `grad_accumulation_dtype`, else `grad_dtype`."""
+    return jnp.dtype(getattr(self._config, "grad_accumulation_dtype", None) or self._config.grad_dtype)
+
+  def _to_accumulation_dtype(self, x: Any) -> Any:
+    """Returns one gradient leaf in the accumulation dtype."""
+    if not hasattr(x, "dtype") or not jnp.issubdtype(x.dtype, jnp.floating):
+      return x
+    target = self._accumulation_dtype()
+    return x if x.dtype == target else x.astype(target)
+
+  def _to_grad_dtype(self, x: Any) -> Any:
+    """Returns one gradient leaf in `grad_dtype`, the dtype the optimizer is handed."""
+    if not hasattr(x, "dtype") or not jnp.issubdtype(x.dtype, jnp.floating) or x.dtype == self._config.grad_dtype:
+      return x
+    return x.astype(self._config.grad_dtype)
 
   def _fwd_bwd_kernel(self, params, rest, batch, acc_grads=None, acc_denom=None):
     """Executes a single forward and backward pass and folds the result into the accumulator.
@@ -1210,14 +1345,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # differentiated, which `loss_out.primary_loss` already carries, so it is discarded here.
     (_, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
 
-    micro_grads = jax.tree.map(
-        lambda x: (
-            x.astype(self._config.grad_dtype)
-            if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) and x.dtype != self._config.grad_dtype
-            else x
-        ),
-        micro_grads,
-    )
+    # Summed in `grad_accumulation_dtype` (default `grad_dtype`) and cast to `grad_dtype` once, in
+    # `_update_kernel`. `train.py` sums in the parameters' dtype, or in bf16 under
+    # `shard_optimizer_over_data` (`gradient_accumulation.py`). A float32 accumulator costs a
+    # float32 gradient tree held across kernel calls.
+    micro_grads = jax.tree.map(self._to_accumulation_dtype, micro_grads)
 
     # Accumulated UNREDUCED, with no `1/denominator` applied: `_update_kernel` divides once
     # by the total, so the optimizer sees `sum(grads)/sum(denom)` rather than a mean of
@@ -1229,8 +1361,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     acc_grads = jax.tree.map(jnp.add, acc_grads, micro_grads)
     return loss_out.primary_loss, loss_out.aux_metrics, new_rest, acc_grads, acc_denom + denominator
 
-  def _update_kernel(self, state_pure, accumulated_grads, accumulated_denominator, mean_loss):
+  def _update_kernel(
+      self, state_pure, accumulated_grads, accumulated_denominator, mean_loss, optimizer_device_shardings=None
+  ):
     """Applies accumulated gradients to update the NNX model state.
+
+    Args:
+      state_pure: The train state's pure form.
+      accumulated_grads: Gradients summed over this step's micro-batches, not yet normalized.
+      accumulated_denominator: The summed loss denominators to normalize them by.
+      mean_loss: Mean micro-batch loss, read only under `skip_step_on_spikes`.
+      optimizer_device_shardings: Device shardings to move a pinned-host optimizer state onto
+        under `optimizer_memory_host_offload`, or None if it is already on the device, as it
+        always is on the eager path.
 
     Returns:
       `(new_state_pure, grad_norm, is_skipped)`. `grad_norm` doubles as the throttler's
@@ -1243,6 +1386,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         else None
     )
     if state_pure is not None:
+      if optimizer_device_shardings is not None:
+        # The optimizer state arrives in pinned host memory; compute on it on the device, as
+        # `train.py`'s `train_step` does, and let `out_shardings` return the new state to the host.
+        # First, so everything below sees device arrays only.
+        state_pure = self._with_optimizer_state(
+            state_pure,
+            jax.device_put(state_pure[_OPTIMIZER_STATE_KEY], optimizer_device_shardings),
+        )
       # Where the gradients have to land before the optimizer can use them. Under Zero-1
       # that is the sharded layout the moments live on; otherwise the plain parameter one.
       grad_target = self._zero1_params_shardings
@@ -1265,10 +1416,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # was empty; yield zeros rather than a NaN, as `gradient_accumulation.py` does.
       has_weights = accumulated_denominator > 0
       safe_denominator = jnp.where(has_weights, accumulated_denominator, 1.0)
-      grads = jax.tree.map(
-          lambda g: jnp.where(has_weights, g / safe_denominator.astype(g.dtype), jnp.zeros_like(g)),
-          accumulated_grads,
-      )
+
+      def normalize(g):
+        # Divide in at least float32, then cast back: bf16 holds integers exactly only up to 256,
+        # so a bf16 denominator would round the token count. (`train.py` divides in the gradients'
+        # dtype, so for bf16 gradients the two differ slightly past 256.) Elementwise, so under
+        # `jax.jit` the casts fuse and no float32 copy of the tree is kept.
+        wide = jnp.promote_types(g.dtype, jnp.float32)
+        return jnp.where(has_weights, (g.astype(wide) / safe_denominator).astype(g.dtype), jnp.zeros_like(g))
+
+      grads = jax.tree.map(normalize, accumulated_grads)
+      # Cast to `grad_dtype` once, after the sum and the division, as `train.py` does with its
+      # accumulated `raw_grads`. A no-op unless `grad_accumulation_dtype` differs from it.
+      grads = jax.tree.map(self._to_grad_dtype, grads)
       freeze_mask = self._freeze_mask
       if freeze_mask is None and self._freeze_mask_fn is not None:
         freeze_mask = self._freeze_mask_fn(accumulated_grads)
@@ -1498,6 +1658,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Before the shardings below are read off the state: this is what puts the optimizer
     # moments on the Zero-1 layout, and `state_mesh_shardings` has to see them there.
     self._shard_optimizer_state_over_data()
+    # After the Zero-1 pass, whose layouts it keeps, and before the shardings below are read off
+    # the state, so the update kernel takes and returns an offloaded optimizer state on the host.
+    self._offload_optimizer_state()
     state_pure = self._read_state_pure()
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
     if self._freeze_mask_fn is not None:
@@ -1514,7 +1677,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return self._fwd_bwd_kernel(params, rest, batch, acc_grads, acc_denom)
 
     def update(state_pure, accumulated_grads, accumulated_denominator, mean_loss):
-      return self._update_kernel(state_pure, accumulated_grads, accumulated_denominator, mean_loss)
+      # `_optimizer_device_shardings` is read at trace time, after it is set below.
+      return self._update_kernel(
+          state_pure, accumulated_grads, accumulated_denominator, mean_loss, self._optimizer_device_shardings
+      )
 
     if self._mesh is not None:
       replicated = jax.sharding.NamedSharding(self._mesh, jax.sharding.PartitionSpec())
@@ -1546,6 +1712,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       fwd_bwd_out_shardings = (None, None, rest_shardings, grad_shardings, replicated)
       update_in_shardings = (state_mesh_shardings, grad_shardings, replicated, None)
       update_out_shardings = (state_mesh_shardings, None, None)
+      # Under offload the optimizer's shardings above are `pinned_host`; `_update_kernel` moves the
+      # state onto the same shardings in device memory.
+      self._optimizer_device_shardings = None
+      if self._optimizer_offload_enabled() and _OPTIMIZER_STATE_KEY in state_mesh_shardings:
+        self._optimizer_device_shardings = jax.tree.map(
+            lambda s: s.with_memory_kind(_DEVICE_MEMORY_KIND),
+            state_mesh_shardings[_OPTIMIZER_STATE_KEY],
+        )
       # A live accumulator predates this compile -- a checkpoint restore hands one back, and
       # a recompile can flip the deferral on or off -- so it may not be on the shardings the
       # kernels were just built for. `jax.jit` matches `in_shardings` exactly and would
@@ -1566,6 +1740,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._note_zero1_declined(_zero1_active(self._config, self._mesh))
       self._zero1_params_shardings = None
       self._gathered_params_shardings = None
+      self._optimizer_device_shardings = None
 
     # 1. JIT Compile Micro FWD/BWD Pass.
     #
@@ -1757,7 +1932,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     with self._sharding_ctx():
       fwd_bwd = self._jitted_kernels["fwd_bwd"].lower(params_aval, rest_aval, batch_aval)
       # Off the kernel's own outputs, not predicted from the parameters: the gradients differ by
-      # `grad_dtype` and, under deferral, an `unreduced` tag.
+      # the accumulation dtype and, under deferral, an `unreduced` tag.
       _, _, _, grads_aval, denominator_aval = fwd_bwd.out_info
       return {
           "fwd_bwd": fwd_bwd,
@@ -1810,6 +1985,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               params, rest, dynamic_batch, self._accumulated_grads, self._accumulated_denominator
           )
     else:
+      # The eager path honours `optimizer_memory_host_offload` too, as `_compile_for_batch` does.
+      self._offload_optimizer_state()
       params, rest = self._read_model_pure(model)
       with self._sharding_ctx():
         loss, aux, new_rest, acc_grads, acc_denom = self._fwd_bwd_kernel(
@@ -1862,7 +2039,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+    compiled = self._compiled and hasattr(self, "_compiled_update")
+    if compiled:
+      # A checkpoint restore replaces the optimizer arrays without recompiling, and under offload
+      # the compiled update expects them in pinned host memory. A no-op when offload is off or the
+      # restore kept the memory kind.
+      self._offload_optimizer_state()
     state_pure = self._read_state_pure()
+    if not compiled:
+      state_pure = self._with_optimizer_on_device(state_pure)
 
     # `_update_kernel` reads `mean_loss` only under `skip_step_on_spikes`, which is traced
     # off `self._config`, so otherwise this was seven eager launches per step
@@ -1877,7 +2062,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # `state_pure` is donated, so between this call and the `nnx.update` below `self._state`
     # is torn -- reading one of its arrays raises "Array has been deleted". Keep them adjacent.
     with self._sharding_ctx():
-      if self._compiled and hasattr(self, "_compiled_update"):
+      if compiled:
         new_state_pure, grad_norm, is_skipped = self._compiled_update(
             state_pure, self._accumulated_grads, self._accumulated_denominator, mean_loss
         )
@@ -1887,6 +2072,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
     nnx.update(self._state, new_state_pure)
     self._publish_state(new_state_pure)
+    if not compiled:
+      # Back to pinned host memory, where the compiled update's `out_shardings` would put it.
+      self._offload_optimizer_state()
 
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
@@ -1960,14 +2148,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Wait for previous computations to finish before dispatching the next one to TPU.
     self._throttler.wait_for_next()
 
-    if self._compile_requested:
-      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
-      signature = _batch_signature(dynamic_batch, static_batch)
-      if self._compiled_eval is None or self._needs_recompile(signature, self._compiled_eval_signature):
-        self._compile_eval_for_batch(dynamic_batch, static_batch)
-      loss, aux = self._compiled_eval(params, rest, dynamic_batch)
-    else:
-      loss, aux = self._eval_kernel(params, rest, batch)
+    # Under `_sharding_ctx`, as in `fwd_bwd`: `jax.jit` is lazy, so the eval kernel may first be
+    # traced here (always, when `compile()` got no dummy data), and it must see the engine's rules.
+    with self._sharding_ctx():
+      if self._compile_requested:
+        dynamic_batch, static_batch = _split_static_and_dynamic(batch)
+        signature = _batch_signature(dynamic_batch, static_batch)
+        if self._compiled_eval is None or self._needs_recompile(signature, self._compiled_eval_signature):
+          self._compile_eval_for_batch(dynamic_batch, static_batch)
+        loss, aux = self._compiled_eval(params, rest, dynamic_batch)
+      else:
+        loss, aux = self._eval_kernel(params, rest, batch)
 
     # No metrics attached: eval metrics are buffered by `_eval_metrics_recorder` and written
     # in EVAL mode when `eval_context` exits.
@@ -2048,6 +2239,35 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       TypeError: If the engine's model is not an NNX module.
     """
     # TODO: Enable precompile for fn.
+    with self.model_scope(*args, **kwargs) as (model, placed_args, placed_kwargs):
+      out = fn(model, *placed_args, **placed_kwargs)
+
+    self._throttler.add_computation(
+        computation=[leaf for leaf in jax.tree.leaves(out) if isinstance(leaf, jax.Array)],
+        metrics=None,
+    )
+    return out
+
+  @contextlib.contextmanager
+  def model_scope(self, *args: Any, **kwargs: Any) -> Iterator[tuple[Any, tuple[Any, ...], dict[str, Any]]]:
+    """Yields `(model, placed_args, placed_kwargs)` for read-only use under the engine's placement.
+
+    Implements Tunix's `AbstractTrainer.model_scope`, which `TrainerWorker.per_token_logps` uses to
+    score log-probs with the trainer's weights. The placement is the one `fwd_only` gives its `fn`:
+    the live model off the train state, the array inputs on `_leaf_data_sharding`, and
+    `_sharding_ctx` held open for the whole block, since the caller's `jax.jit` traces inside it.
+    The caller owns the computation, so unlike `fwd_only` nothing is queued on the throttler.
+
+    Args:
+      *args: Positional inputs to place before yielding.
+      **kwargs: Keyword inputs to place before yielding.
+
+    Yields:
+      The live model and the placed inputs.
+
+    Raises:
+      TypeError: If the engine's model is not an NNX module.
+    """
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
     # Off the train state, not `self._model`: a restore or the `state` setter can rebind
@@ -2062,14 +2282,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._throttler.wait_for_next()
 
     with self._sharding_ctx():
-      args, kwargs = self._place_read_only_inputs((args, kwargs))
-      out = fn(model, *args, **kwargs)
-
-    self._throttler.add_computation(
-        computation=[leaf for leaf in jax.tree.leaves(out) if isinstance(leaf, jax.Array)],
-        metrics=None,
-    )
-    return out
+      placed_args, placed_kwargs = self._place_read_only_inputs((args, kwargs))
+      yield model, placed_args, placed_kwargs
 
   def _reduced_accumulated_grads(self) -> Any:
     """Returns the accumulated gradients in the form Orbax can serialize.
@@ -2085,6 +2299,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return self._accumulated_grads
     with self._sharding_ctx():
       return jax.tree.map(jax.sharding.reshard, self._accumulated_grads, self._plain_grad_shardings)
+
+  def _accumulated_grads_restore_target(self) -> Any:
+    """Returns the restore target for an intra-step checkpoint's accumulated gradients.
+
+    The parameters' shapes and shardings (the reduced form `_reduced_accumulated_grads` saves) in
+    the accumulation dtype. Orbax casts each leaf to its target's dtype, so restoring into the
+    parameters themselves would change the accumulator's dtype whenever the two differ: the
+    compiled kernels would reject it, and for bf16 weights a float32 sum would be rounded to bf16.
+    """
+    accumulation_dtype = self._accumulation_dtype()
+
+    def target(param):
+      if not hasattr(param, "shape") or not hasattr(param, "dtype"):
+        return param
+      dtype = accumulation_dtype if jnp.issubdtype(param.dtype, jnp.floating) else param.dtype
+      return jax.ShapeDtypeStruct(param.shape, dtype, sharding=getattr(param, "sharding", None))
+
+    return jax.tree.map(target, nnx.state(self.model, nnx.Param))
 
   def save_checkpoint(self, metadata: Any, **kwargs: Any) -> None:
     """Forces asynchronous Orbax checkpoint serialization.
@@ -2159,14 +2391,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         model=self.model,
         optimizer=self.optimizer,
         # Not `_reduced_accumulated_grads()`: unlike the save path, nothing here reads the
-        # value. `CheckpointManager.restore_checkpoint` builds its restore target from the
-        # model's params and overwrites this field, so reducing would run the deferred
-        # all-reduce over the whole gradient tree, and allocate a second copy of it, for a
-        # value that is thrown away. In the one corner where it does survive the call --
+        # value. `CheckpointManager.restore_checkpoint` restores into
+        # `accumulated_grads_target` and overwrites this field, so reducing would run the
+        # deferred all-reduce over the whole gradient tree, and allocate a second copy of it,
+        # for a value that is thrown away. In the one corner where it does survive the call --
         # metadata says `micro_step_count > 0` but the checkpoint holds no accumulator --
         # unreduced is the form the already-compiled kernels want, and `_conform_accumulator`
         # below is then a no-op instead of a reshard back.
         accumulated_grads=self._accumulated_grads,
+        accumulated_grads_target=self._accumulated_grads_restore_target(),
     )
 
     restored_step, restored_checkpoint_state, restored_metadata = self._checkpoint_manager.restore_checkpoint(
@@ -2234,7 +2467,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # `restored_checkpoint_state.accumulated_grads` is just the value this engine passed in
     # above, which the branch above has already discarded.
     if self._micro_step_count > 0 and restored_checkpoint_state.accumulated_grads:
-      self._accumulated_grads = restored_checkpoint_state.accumulated_grads
+      # The compiled kernels take the accumulation dtype. A no-op when the restore honoured
+      # `accumulated_grads_target`.
+      self._accumulated_grads = jax.tree.map(self._to_accumulation_dtype, restored_checkpoint_state.accumulated_grads)
       if self._unreduced_grad_shardings is not None:
         # What was saved is the reduced total; what the already-compiled kernels take is an
         # unreduced partial. Without this the resumed step dies on an `in_shardings`
