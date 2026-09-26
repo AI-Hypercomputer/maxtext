@@ -220,9 +220,12 @@ def make_tfds_train_iterator(
       "shuffle_seed": config.data_shuffle_seed,
   }
   if not config.colocated_python_data_input:
+    dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
+        config, process_indices_train
+    )
     train_ds = get_datasets(
-        dataloading_host_index=process_indices_train.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_train),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         **get_datasets_kwargs,
     )
     train_dataloader = preprocessing_pipeline(
@@ -281,14 +284,17 @@ def make_tfds_eval_iterator(
       config.global_batch_size_to_load_eval % global_mesh.size == 0
   ), "Batch size should be divisible by number of global devices."
   if not config.colocated_python_data_input:
+    dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
+        config, process_indices_eval
+    )
     eval_ds = get_datasets(
         dataset_name=config.eval_dataset_name,
         dataset_path=config.dataset_path,
         data_split=config.eval_split,
         shuffle_files=False,
         shuffle_seed=config.data_shuffle_seed,
-        dataloading_host_index=process_indices_eval.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_eval),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
     )
     eval_dataloader = preprocessing_pipeline(
         dataset=eval_ds,
