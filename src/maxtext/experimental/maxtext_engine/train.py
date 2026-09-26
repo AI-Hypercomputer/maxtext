@@ -23,14 +23,14 @@ Training:
     steps=10 gradient_accumulation_steps=3
 """
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
+import functools
 import itertools
 import os
 import time
 from typing import Any
 
 from absl import app
-from flax.linen import logical_axis_rules
 import jax
 import jax.numpy as jnp
 from maxtext.common.data_loader import DataLoader
@@ -45,23 +45,42 @@ from maxtext.utils import train_utils
 import pathwaysutils
 
 
+@functools.cache
+def _micro_batch_splitter(
+    num_micro_steps: int,
+    data_sharding: jax.sharding.Sharding,
+) -> Callable[[dict[str, Any]], list[dict[str, Any]]]:
+  """Returns the jitted split behind `_split_global_batch`, cached per `(num_micro_steps, data_sharding)`."""
+
+  def split(batch: dict[str, Any]) -> list[dict[str, Any]]:
+    # As `reshape_to_microbatch_accumulations` in `gradient_accumulation.py`:
+    # [B, ...] -> [B // G, G, ...] -> [G, B // G, ...], then one micro-batch per index of axis 0.
+    stacked = jax.tree.map(
+        lambda v: jnp.swapaxes(jnp.reshape(v, (v.shape[0] // num_micro_steps, num_micro_steps) + v.shape[1:]), 0, 1),
+        batch,
+    )
+    return [jax.tree.map(lambda v, k=k: v[k], stacked) for k in range(num_micro_steps)]
+
+  # Not donated: no output has the global batch's shape, so XLA could not reuse its buffers.
+  return jax.jit(split, out_shardings=data_sharding)
+
+
 def _split_global_batch(
     batch: dict[str, Any],
     num_micro_steps: int,
     data_sharding: jax.sharding.Sharding,
 ) -> list[dict[str, Any]]:
-  """Splits one global batch into `num_micro_steps` contiguous micro-batches."""
-  micro_batches: list[dict[str, Any]] = [{} for _ in range(num_micro_steps)]
-  for name, value in batch.items():
-    shape = jnp.shape(value)
-    if not shape:
-      for k in range(num_micro_steps):
-        micro_batches[k][name] = value
-      continue
-    micro_size = value.shape[0] // num_micro_steps
-    for k in range(num_micro_steps):
-      micro_batches[k][name] = jax.device_put(value[k * micro_size : (k + 1) * micro_size], data_sharding)
-  return micro_batches
+  """Splits one global batch into `num_micro_steps` micro-batches, in `pre_train/train.py`'s order.
+
+  Micro-batch k is rows `k::num_micro_steps`, as `gradient_accumulation.py` builds it. The order
+  matters: under `per_device_batch_size < 1`, train.py's `loss_fn` trains on only the first
+  `micro_batch_size_to_train_on` rows of each micro-batch.
+
+  Every field is batch-leading and carries `data_sharding`, as `DataLoader.load_next_batch`
+  places it. On such an array the strided split keeps each device's rows local, so it compiles
+  to no collectives, whereas a contiguous split would move rows between devices.
+  """
+  return _micro_batch_splitter(num_micro_steps, data_sharding)(batch)
 
 
 def micro_batch_stream(
@@ -79,6 +98,42 @@ def micro_batch_stream(
           num_micro_steps,
           data_loader.input_data_shardings,
       )
+
+
+def count_chips(devices: Sequence[Any]) -> int:
+  """Returns how many physical chips `devices` span.
+
+  On v7x, JAX exposes each of a chip's two TensorCores as its own device with the chip's
+  `coords`, so a chip is a distinct `(slice_index, coords)` pair; `coords` repeat across the
+  slices of a multislice run. Devices without `coords` (CPU, GPU) are counted as one chip each,
+  with a warning.
+  """
+  chips = set()
+  for device in devices:
+    coords = getattr(device, "coords", None)
+    if coords is None:
+      max_logging.log(
+          f"WARNING: {device} has no `coords`, so each of the {len(devices)} devices is counted as"
+          " one chip in Tokens/s/chip."
+      )
+      return len(devices)
+    chips.add((getattr(device, "slice_index", 0), tuple(coords)))
+  return len(chips)
+
+
+def log_peak_memory() -> None:
+  """Logs local device 0's `peak_bytes_in_use` in GiB, if the backend reports it.
+
+  On TPU this counter excludes XLA program temporaries, so it is not the HBM peak.
+  """
+  device = jax.local_devices()[0]
+  peak = (device.memory_stats() or {}).get("peak_bytes_in_use")
+  if peak is None:
+    return
+  max_logging.log(
+      f"Peak live arrays on {device}: {peak / 2**30:.2f} GiB"
+      " [peak_bytes_in_use; excludes XLA program temporaries on TPU, so not the HBM peak]"
+  )
 
 
 def run_training_loop(
@@ -106,6 +161,8 @@ def run_training_loop(
   stream = micro_batch_stream(data_loader, num_micro_steps)
   first_batch = next(stream)
   engine.compile(first_batch)
+  # Live-array memory is logged here and again after the first optimizer step.
+  max_utils.print_mem_stats("After engine compile")
   stream = itertools.chain([first_batch], stream)
 
   # `MaxTextTrainingEngine._profiler` (`MicroStepProfiler`) only wraps `fwd_bwd` and
@@ -119,13 +176,16 @@ def run_training_loop(
 
   # Precompute per-step token count and per-device TFLOPs for throughput logging.
   num_devices = jax.device_count()
+  # Per-device and per-chip throughput differ where a chip holds more than one JAX device (v7x).
+  # `Tokens/s/device` is the label `pre_train/train.py` logs.
+  num_chips = count_chips(jax.devices())
   tokens_per_step = config.per_device_batch_size * num_devices * num_micro_steps * config.max_target_length
   total_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
 
   max_logging.log(
       f"Starting training engine loop at step {start_step}, running to"
       f" {config.steps} ({num_micro_steps} micro-step(s) per update,"
-      f" {tokens_per_step:.0f} tokens/step across {num_devices} devices,"
+      f" {tokens_per_step:.0f} tokens/step across {num_devices} devices on {num_chips} chips,"
       f" {total_tflops:.2f} TFLOPs/step/device)."
   )
 
@@ -141,17 +201,23 @@ def run_training_loop(
       # to complete before measuring step wall time or closing the profiler window.
       engine._throttler.wait_for_all()
       step_time_s = max(time.perf_counter() - t0, 1e-9)
-      tps_per_chip = tokens_per_step / step_time_s / num_devices
+      tokens_per_s = tokens_per_step / step_time_s
       tflops_per_dev = total_tflops / step_time_s
       max_logging.log(
           f"completed step: {step}, seconds: {step_time_s:.3f},"
           f" train_step_time_ms: {step_time_s * 1000:.2f},"
           f" TFLOP/s/device: {tflops_per_dev:.3f},"
-          f" tokens/s/chip: {tps_per_chip:.2f}"
+          f" Tokens/s/device: {tokens_per_s / num_devices:.3f},"
+          f" Tokens/s/chip: {tokens_per_s / num_chips:.3f}"
       )
+      if step == start_step:
+        max_utils.print_mem_stats("After first optimizer step")
+        # Also logged after the loop; logging it here covers a run that fails in a later step.
+        log_peak_memory()
       prof.maybe_deactivate_profiler(step, engine.state)
       if config.enable_checkpointing:
         engine.save_checkpoint(metadata=None)
+    log_peak_memory()
   finally:
     engine.close()
 
@@ -165,9 +231,11 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   mesh = maxtext_utils.get_mesh_from_config(config)
-  with logical_axis_rules(config.logical_axis_rules):
-    engine = maxtext_engine.MaxTextTrainingEngine(config, mesh=mesh)
-    run_training_loop(config, engine, mesh)
+  # No outer `logical_axis_rules` or mesh context: the engine binds the rules itself wherever it
+  # needs them, because Tunix constructs it without them. Leaving them out here keeps this script
+  # from hiding a missing binding.
+  engine = maxtext_engine.MaxTextTrainingEngine(config, mesh=mesh)
+  run_training_loop(config, engine, mesh)
 
 
 if __name__ == "__main__":
