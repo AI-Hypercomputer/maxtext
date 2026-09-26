@@ -42,6 +42,7 @@ from typing import Any, Sequence
 
 from absl import app
 from flax import nnx
+from flax.core.spmd import logical_axis_rules
 import jax
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
@@ -156,8 +157,9 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
     inside `tx.init` into the moment allocated from it. The result is merged back onto the real
     mesh, whose axis types -- not the stand-in's -- decide what the compiled kernels do.
 
-    Both run under the engine's own `_sharding_ctx`, so the rules the MaxText layers are written
-    against are the live ones rather than a second copy that can drift from them.
+    Both run under the engine's logical axis rules, and `nnx.eval_shape` runs before a JAX mesh
+    is set (just as `create_nnx_abstract_model` does) so Flax does not mistake logical axis names
+    on `nnx.Variable` metadata (e.g. `('norm',)`) for physical mesh axes.
     """
     model_graphdef, model_pure = nnx.split(self._model)
 
@@ -166,10 +168,8 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
       return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
 
     propagation_mesh = _propagation_mesh(self._mesh)
-    with self._sharding_ctx():
+    with logical_axis_rules(self._config.logical_axis_rules):
       state_graphdef, _ = nnx.split(nnx.eval_shape(build, model_pure))
-      # Displaces the real mesh for this trace only: the one above needs no propagation, and a
-      # stand-in set around it collides with the config's own AbstractMesh under `shard_mode=auto`.
       with jax.set_mesh(propagation_mesh):
         state_pure = jax.eval_shape(
             lambda model_state: nnx.split(build(model_state))[1],
