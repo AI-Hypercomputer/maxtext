@@ -433,11 +433,13 @@ class EngineAotParityTest(parameterized.TestCase):
     compiled = maxtext_engine_compile.AbstractMaxTextEngine(cfg, mesh).compile_kernels(_abstract(_batch(cfg, 0)))
 
     self.assertLen(compiled, len(maxtext_engine_compile.KERNEL_NAMES))
-    for kernel in compiled.values():
+    for name, kernel in compiled.items():
       module = re.search(r"^HloModule (\S+?),", kernel.as_text(), re.MULTILINE)
       self.assertIsNotNone(module, "the executable has no module name to match against")
       self.assertRegex(module.group(1), maxtext_engine_compile.HLO_DUMP_DEFAULTS["dump_hlo_local_module_name"])
       self.assertIn(maxtext_engine_compile.HLO_DUMP_DEFAULTS["dump_hlo_module_name"], module.group(1))
+      # The name the empty-dump error tells the user to match.
+      self.assertEqual(module.group(1), f"jit_{name}")
 
 
 class AbstractMaxTextEngineTest(absltest.TestCase):
@@ -567,7 +569,7 @@ class Qwen3TopologyTest(absltest.TestCase):
     """
     local_dir = os.path.join(self.create_tempdir().full_path, "xla_dump")
 
-    with self.assertRaisesRegex(FileNotFoundError, "matched none of the engine's kernels"):
+    with self.assertRaisesRegex(FileNotFoundError, "matched none of the engine's kernels") as raised:
       maxtext_engine_compile.main(
           _script_argv(
               "run_name=engine_aot_dump_test",
@@ -576,6 +578,11 @@ class Qwen3TopologyTest(absltest.TestCase):
               "dump_hlo_local_module_name=jit_train_step",
           )
       )
+    # The names to match are the modules XLA actually writes, which
+    # `test_the_hlo_dump_filters_match_the_names_xla_gives_the_kernels` pins as `jit_<kernel>`.
+    for name in maxtext_engine_compile.KERNEL_NAMES:
+      self.assertIn(f"jit_{name}", str(raised.exception))
+    self.assertNotIn("jit_first_kernel", str(raised.exception))
 
   def test_diloco_is_refused_rather_than_silently_reported_on(self):
     """The engine has no outer step, so these numbers would describe a different run."""
