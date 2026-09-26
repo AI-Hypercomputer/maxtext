@@ -24,6 +24,7 @@ from types import SimpleNamespace
 from unittest import mock, TestCase
 from concurrent.futures import ThreadPoolExecutor  # pylint: disable=no-name-in-module
 
+import jax
 import numpy as np
 import pytest
 
@@ -50,6 +51,9 @@ from maxtext.input_pipeline._mmap_datasource import (
     _parse_weighted_mixture,
 )
 from tests.unit.mmap_test_utils import create_mmap_test_data
+from tests.utils.test_helpers import get_test_config_path
+from maxtext.configs import pyconfig
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.utils.mmap_index_builder import convert
 
 pytestmark = pytest.mark.cpu_only
@@ -1998,6 +2002,99 @@ class GrainMmapNpyEvalConfigTest(TestCase):
               max_target_length=8, eod_id=0, mmap_split_sentences=False
           ),
       )
+
+  def test_mmap_npy_eval_budget_covers_all_data_replicas(self):
+    config = self._config("99,1")
+    config.num_data_replicas_per_process = 2
+    config.data_replica_index = 1
+    dataset_config = self._capture_dataset_config(config)
+    # The index is sharded among both replicas: 5 eval rounds * 3 eval steps * (2 replicas * 4 samples per batch).
+    self.assertEqual(dataset_config.num_samples, 120)
+    self.assertEqual(dataset_config.blend_shard_window, 8)
+
+  def test_one_data_replica_has_no_blend_window(self):
+    self.assertIsNone(self._capture_dataset_config(self._config("99,1")).blend_shard_window)
+
+
+@pytest.mark.cpu_only
+class GrainMmapNpyDataReplicaTest(TestCase):
+  """An mmap_npy blend split among several data replicas per process (num_data_replicas_per_process > 1)."""
+
+  SEQ, EOD, STEPS, NUM_REPLICAS = 16, 0, 8, 2
+
+  def setUp(self):
+    super().setUp()
+    tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+    self.addCleanup(tmp.cleanup)
+    specs = []
+    for name, first_token in (("a", 1000), ("b", 5000)):
+      bin_dir, npy_dir = os.path.join(tmp.name, f"{name}_bin"), os.path.join(tmp.name, f"{name}_npy")
+      os.makedirs(bin_dir)
+      os.makedirs(npy_dir)
+      prefix = os.path.join(bin_dir, "data")
+      # 400 one-sample documents per component; every row of component a starts with a token in [1000, 1400).
+      seqs = [np.array([first_token + i] * self.SEQ + [self.EOD], dtype=np.int32) for i in range(400)]
+      create_mmap_test_data(prefix, seqs, doc_boundaries=list(range(401)))
+      specs.append(f"{npy_dir}|{prefix},0.5")
+    self.config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_checkpointing=False,
+        # A global batch of 8 on 1, 2, 4 or 8 devices, so that every replica gets a non-empty share.
+        per_device_batch_size=max(1, 8 // jax.device_count()),
+        max_target_length=self.SEQ,
+        dataset_type="grain",
+        grain_file_type="mmap_npy",
+        grain_train_files=";".join(specs),
+        mmap_eod_id=self.EOD,
+        grain_worker_count=0,
+        eval_interval=-1,
+        steps=self.STEPS,
+    )
+
+  def _replica_config(self, replica):
+    return self.config.replace(
+        global_batch_size_to_load=self.config.global_batch_size_to_load // self.NUM_REPLICAS,
+        num_data_replicas_per_process=self.NUM_REPLICAS,
+        data_replica_index=replica,
+    )
+
+  def _batches(self, config, num_steps):
+    """Returns up to `num_steps` host batches of `inputs`, stopping early if the iterator is exhausted."""
+    with mock.patch.object(
+        grain_data_processing.multihost_dataloading,
+        "MultiHostDataLoadIterator",
+        side_effect=lambda dataloader, *_args, **_kwargs: iter(dataloader),
+    ):
+      iterator = grain_data_processing.make_grain_train_iterator(config, SimpleNamespace(size=1), [0])
+    batches = []
+    for _ in range(num_steps):
+      try:
+        batches.append(np.asarray(next(iterator)["inputs"]))
+      except StopIteration:
+        break
+    return batches
+
+  def test_each_replica_gets_the_samples_of_every_step(self):
+    replica_batch = self.config.global_batch_size_to_load // self.NUM_REPLICAS
+    for replica in range(self.NUM_REPLICAS):
+      batches = self._batches(self._replica_config(replica), self.STEPS)
+      self.assertEqual(len(batches), self.STEPS, f"replica {replica} ran out of data")
+      for batch in batches:
+        self.assertEqual(batch.shape[0], replica_batch)
+        self.assertTrue((batch != self.EOD).any(axis=1).all(), "padding row in a training batch")
+
+  def test_replicas_split_each_global_batch_into_mixed_parts(self):
+    control = self._batches(self.config, self.STEPS)
+    replicas = [self._batches(self._replica_config(r), self.STEPS) for r in range(self.NUM_REPLICAS)]
+    for step in range(self.STEPS):
+      # Together, without overlap, the replicas read exactly the step's samples of one-replica training.
+      rows = sorted(t for batches in replicas for t in batches[step][:, 0].tolist())
+      self.assertEqual(rows, sorted(control[step][:, 0].tolist()))
+    for replica, batches in enumerate(replicas):
+      first_tokens = np.concatenate([batch[:, 0] for batch in batches])
+      fraction_a = float(np.mean(first_tokens < 5000))
+      self.assertTrue(0.25 < fraction_a < 0.75, f"replica {replica} reads {fraction_a:.2f} of component a")
 
 
 class _RecordingDataset:
