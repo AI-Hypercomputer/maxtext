@@ -32,6 +32,7 @@ Tokens/s/chip: ...`; the step time covers all of the step's device work.
   checkpointed).
 - `profiler=xplane skip_first_n_steps_for_profiler=<n> profiler_steps=<k>` profiles whole optimizer
   steps.
+- For large models on TPU, see [Running fast on TPU](#running-fast-on-tpu).
 
 ### From Python
 
@@ -76,6 +77,68 @@ JAX_PLATFORMS=cpu python3 -m pytest tests/post_training/unit/maxtext_engine_*tes
 
 The tests run on CPU and need Tunix importable (installed or on `PYTHONPATH`). Some start a child
 process with 4 or 8 CPU devices.
+
+## Running fast on TPU
+
+This section collects settings for large models on TPU, and how to profile one. The settings are not
+defaults: each can raise device memory by an amount that depends on the configuration. Before using
+one, compile your configuration with the [ahead-of-time memory report](#ahead-of-time-memory-report)
+with and without it, and measure the step time both ways.
+
+### SparseCore copy offload
+
+On TPUs whose collectives run on the SparseCore (the `--xla_tpu_enable_sparse_core_collective_offload_*`
+libtpu flags), try this libtpu flag:
+
+```
+--xla_tpu_enable_offloading_copy_to_sparsecore=false
+```
+
+XLA can move layout-conversion copies from the TensorCore to the SparseCore, where they share it with
+the offloaded collectives, and the backward pass can then wait longer on its all-gathers and
+reduce-scatters. With the flag the copies stay on the TensorCore. It changes where copies run and how
+buffers are placed, not the arithmetic. It can raise device memory, in `fwd_bwd` and in
+`pre_train/train.py`'s step alike. Set it in `LIBTPU_INIT_ARGS` before JAX starts; it then applies to
+every program the process compiles. For the memory report, add it to `compile_xla_flags`.
+
+### Casting all-reduced gradients after the all-reduce
+
+When the weights are wider than the accumulation dtype (for example float32 weights with
+`grad_dtype=bfloat16`), enable `cast_grads_after_all_reduce=true` together with the flag above. The
+gradients that `fwd_bwd` sums across devices by an all-reduce alone then leave it in the weights'
+dtype and are cast as they join the accumulator (see [One optimizer step](#one-optimizer-step)). Cast
+inside `fwd_bwd`, those all-reduces can become synchronous reductions in the backward pass, which delay
+the collectives the rest of the backward pass overlaps with compute. With the key on, they run in the
+weights' dtype and are rounded to the accumulation dtype once, after the sum.
+
+It can raise device memory too: the uncast gradients are wider, and the schedule XLA then picks can
+hold more at `fwd_bwd`'s peak. Check it together with the flag, in the memory report.
+
+### Float32 gradients
+
+`grad_dtype=float32` keeps the gradients, the accumulator and the optimizer's inputs in float32. On a
+tight memory budget, combine it with `optimizer_memory_host_offload=true`, which moves the optimizer
+state out of device memory between updates. If that is not enough and a `remat_policy=custom` keeps
+the attention output on device (`context=device`), rematerialize it with `context=remat`. With float32
+weights no gradient is cast, so `cast_grads_after_all_reduce` changes nothing.
+
+### Profiling a large step
+
+A trace that outgrows the profiler's size limit is truncated: its device timeline stops early and it
+contains a `Trace Buffers Dropped` event. To profile a large model, profile a step with few
+micro-batches and trace one chip without its SparseCores:
+
+```bash
+python3 -m maxtext.experimental.maxtext_engine.train src/maxtext/configs/base.yml <run flags> \
+  gradient_accumulation_steps=2 profiler=xplane skip_first_n_steps_for_profiler=<n> profiler_steps=1 \
+  enable_tpu_profiling_options=true tpu_num_chips_to_profile_per_task=1 \
+  tpu_num_sparse_cores_to_trace=0 tpu_num_sparse_core_tiles_to_trace=0
+```
+
+With `scan_layers=true`, each `fwd_bwd` in the trace contains a forward and a backward layer scan
+(`while` ops on the device's `XLA Ops` line). Time the TensorCore spends waiting on a collective shows
+there as the collective's `-done` op (`all-gather-done`, `reduce-scatter-done`); the asynchronous
+collectives themselves are on the `Async XLA Ops` line.
 
 ## Callers
 
@@ -133,7 +196,7 @@ sharding at construction (for example Tokamax ring attention), while under `jax.
 |---|---|
 | `grad_dtype` | dtype the optimizer receives gradients in |
 | `grad_accumulation_dtype` | dtype micro-batch gradients are summed in; `""` (default) uses `grad_dtype`. The sum is divided by the total loss denominator and cast to `grad_dtype` once, in `update`. `"float32"` with `grad_dtype=bfloat16` is more precise but keeps a float32 accumulator on device between micro-batches, and each later micro-batch's float32 gradients beside it while `fwd_bwd` runs |
-| `cast_grads_after_all_reduce` (default false) | gradients that `fwd_bwd` sums across devices by an all-reduce alone leave it in the parameters' dtype and are cast to the accumulation dtype as they join the accumulator (see [One optimizer step](#one-optimizer-step)). Meant for TPU together with the libtpu flag `--xla_tpu_enable_offloading_copy_to_sparsecore=false`. No effect when the parameters are already in the accumulation dtype, on the eager path (no `compile()`), or under the deferred data-parallel all-reduce, where `fwd_bwd` reduces no gradient |
+| `cast_grads_after_all_reduce` (default false) | gradients that `fwd_bwd` sums across devices by an all-reduce alone leave it in the parameters' dtype and are cast to the accumulation dtype as they join the accumulator (see [One optimizer step](#one-optimizer-step)). Meant for TPU together with the libtpu flag `--xla_tpu_enable_offloading_copy_to_sparsecore=false`; see [Running fast on TPU](#running-fast-on-tpu). No effect when the parameters are already in the accumulation dtype, on the eager path (no `compile()`), or under the deferred data-parallel all-reduce, where `fwd_bwd` reduces no gradient |
 | `optimizer_memory_host_offload` | the optimizer state lives in pinned host memory; `update` moves it to the device and back, so it is not resident during the forward and backward passes |
 | `parameter_memory_host_offload` | not supported; raises |
 | `shard_optimizer_over_data` (Zero-1) | shards the optimizer state over the `data` axis inside `update`; requires `shard_mode=explicit` |
@@ -163,6 +226,11 @@ estimated on its own `WEIGHT-SYNC STAGING` line when `use_weight_converter=false
 
 On TPU, `jax.Device.memory_stats()["peak_bytes_in_use"]` excludes XLA program temporaries, so it is
 not a substitute for this report.
+
+The report compiles on a CPU host, where some kernels take their CPU fallback paths (for example the
+gated delta net kernels and the SparseCore ragged gathers). The compiled programs can therefore differ
+from the ones that run on TPU, and so can their memory. Treat the peak as an estimate, and compare
+configurations with each other.
 
 ## Tests
 
