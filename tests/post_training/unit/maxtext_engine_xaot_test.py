@@ -291,6 +291,13 @@ class EngineAotParityTest(parameterized.TestCase):
       # Gradients narrower than the parameters, which the AOT path must read off the
       # forward/backward kernel's outputs rather than assume.
       ("bfloat16_grads", {"grad_dtype": "bfloat16"}),
+      # Host-offloaded optimizer state: the moments live on `pinned_host` and are staged onto
+      # device inside `_update_kernel`, on both the live and abstract paths.
+      ("optimizer_host_offload", {"optimizer_memory_host_offload": "True"}),
+      (
+          "zero1_and_optimizer_host_offload",
+          {"shard_optimizer_over_data": "True", "optimizer_memory_host_offload": "True"},
+      ),
   )
   def test_aot_compiles_the_same_hlo_the_trainer_runs(self, overrides):
     cfg, mesh = _config_and_mesh(**overrides)
@@ -422,6 +429,27 @@ class EngineAotParityTest(parameterized.TestCase):
     for engine, label in ((live, "live"), (abstract, "abstract")):
       self.assertIsNotNone(engine._zero1_params_shardings, f"Zero-1 never engaged on the {label} engine")
       self.assertIsNotNone(engine._unreduced_grad_shardings, f"the deferral never engaged on the {label} engine")
+
+  def test_optimizer_host_offload_engages_on_both_paths(self):
+    """Guards `optimizer_host_offload` against passing by leaving the moments on device."""
+    cfg, mesh = _config_and_mesh(optimizer_memory_host_offload=True)
+
+    live = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+    live.compile(_batch(cfg, 0))
+    abstract = maxtext_engine_compile.AbstractMaxTextEngine(cfg, mesh)
+    abstract.compile_kernels(_abstract(_batch(cfg, 0)))
+
+    for engine, label in ((live, "live"), (abstract, "abstract")):
+      self.assertIsNotNone(engine._device_optimizer_shardings, f"host offload never engaged on the {label} engine")
+      state_pure = engine._read_state_pure()
+      opt_leaves = jax.tree.leaves(state_pure[maxtext_engine._OPTIMIZER_STATE_KEY])
+      self.assertNotEmpty(opt_leaves)
+      for leaf in opt_leaves:
+        self.assertEqual(leaf.sharding.memory_kind, "pinned_host", f"{label} optimizer leaf not on pinned_host")
+      model_leaves = jax.tree.leaves(state_pure[maxtext_engine._MODEL_STATE_KEY])
+      self.assertNotEmpty(model_leaves)
+      for leaf in model_leaves:
+        self.assertNotEqual(leaf.sharding.memory_kind, "pinned_host", f"{label} model leaf unexpectedly on pinned_host")
 
   def test_the_hlo_dump_filters_match_the_names_xla_gives_the_kernels(self):
     """Those filters are a claim about names XLA derives from the jitted callables.

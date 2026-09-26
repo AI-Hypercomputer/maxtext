@@ -302,6 +302,8 @@ def _zero1_sharding(mesh: Any, aval: Any, base: jax.sharding.NamedSharding | Non
   except AssertionError:
     # add_data_to_sharding rejects a shape it cannot shard; leave the value replicated.
     return None
+  if base.memory_kind != target.memory_kind:
+    target = target.with_memory_kind(base.memory_kind)
   return None if target == base else target
 
 
@@ -686,6 +688,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._zero1_params_shardings: Any = None
     self._gathered_params_shardings: Any = None
     self._zero1_warned = False
+    self._device_optimizer_shardings: Any = None
     # Micro step count within the current training step. Resets on `update()`.
     self._micro_step_count = 0
     # Every micro step this run has ever folded in across optimizer steps.
@@ -938,6 +941,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     return nnx.State({**state_pure.raw_mapping, _MODEL_STATE_KEY: model_pure.raw_mapping})
 
+  @staticmethod
+  def _with_optimizer_state(state_pure: Any, optimizer_pure: Any) -> Any:
+    """Returns `state_pure` with its optimizer subtree replaced by `optimizer_pure`."""
+    return nnx.State({**state_pure.raw_mapping, _OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping})
+
   def _check_pure_state_reusable(self, state_pure: Any, params_pure: Any, rest_pure: Any) -> str | None:
     """Returns why the pure state cannot be carried across steps, or None if it can.
 
@@ -1128,6 +1136,45 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._invalidate_pure_state()
     self._refresh_pure_state()
 
+  def _offload_optimizer_state_to_host(self) -> None:
+    """Moves the optimizer state onto `pinned_host` memory, in place.
+
+    Mirrors the pre-train path (`maxtext_utils.get_abstract_state_nnx`), where setting
+    `optimizer_memory_host_offload=True` marks the optimizer's `NamedSharding`s with
+    `memory_kind="pinned_host"`. Placing the live (or abstract) optimizer leaves there before
+    `_compile_for_batch` reads `state_mesh_shardings` off the state makes the update kernel's
+    `in_shardings` and `out_shardings` expect and return the optimizer state in host memory,
+    while `_update_kernel` stages it onto device for `apply_gradients`.
+    """
+    if not getattr(self._config, "optimizer_memory_host_offload", False) or self._mesh is None:
+      return
+    state_pure = self._read_state_pure()
+    if _OPTIMIZER_STATE_KEY not in state_pure:
+      return
+
+    moved = False
+
+    def place(leaf):
+      nonlocal moved
+      if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
+        return leaf
+      base = self._mesh_sharding(leaf)
+      if base is None:
+        return leaf
+      target = base.with_memory_kind(kind="pinned_host")
+      if getattr(leaf, "sharding", None) == target:
+        return leaf
+      moved = True
+      return self._place_leaf(leaf, target)
+
+    optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
+    if not moved:
+      return
+    with self._sharding_ctx():
+      nnx.update(self._state, nnx.State({_OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
+    self._invalidate_pure_state()
+    self._refresh_pure_state()
+
   def _reshard_model_params(self, state_pure: Any, params_shardings: Any) -> Any:
     """Returns `state_pure` with its `nnx.Param` leaves moved onto `params_shardings`.
 
@@ -1256,8 +1303,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if freeze_mask is None and self._freeze_mask_fn is not None:
         freeze_mask = self._freeze_mask_fn(accumulated_grads)
       if freeze_mask is not None:
+
         def _apply_freeze(g, is_frozen):
           return jnp.zeros_like(g) if is_frozen else g
+
         grads = jax.tree.map(_apply_freeze, grads, freeze_mask)
       # Before clipping, where Tunix's `optax.global_norm` also sits -- `train.py` would call
       # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16
@@ -1273,9 +1322,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       safe_grads = jax.tree.map(lambda g: jnp.where(should_skip, jnp.zeros_like(g), g), grads)
 
       if self._config.gradient_clipping_threshold > 0:
-        safe_grads = maxtext_utils.apply_gradient_clipping(
-            safe_grads, None, self._config.gradient_clipping_threshold
+        safe_grads = maxtext_utils.apply_gradient_clipping(safe_grads, None, self._config.gradient_clipping_threshold)
+      if self._device_optimizer_shardings is not None and _OPTIMIZER_STATE_KEY in state_pure:
+        # Mirror `train.py`: bring the host-offloaded optimizer state onto device for the
+        # update; the kernel's `out_shardings` (`state_mesh_shardings`) puts the updated
+        # moments back on `pinned_host` on exit.
+        optimizer_pure = jax.tree.map(
+            lambda leaf, s: jax.device_put(leaf, s) if isinstance(s, jax.sharding.NamedSharding) else leaf,
+            state_pure[_OPTIMIZER_STATE_KEY],
+            self._device_optimizer_shardings,
         )
+        state_pure = self._with_optimizer_state(state_pure, optimizer_pure)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if hasattr(local_state, "apply_gradients"):
         if self._config.skip_step_on_spikes:
@@ -1481,6 +1538,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Before the shardings below are read off the state: this is what puts the optimizer
     # moments on the Zero-1 layout, and `state_mesh_shardings` has to see them there.
     self._shard_optimizer_state_over_data()
+    self._offload_optimizer_state_to_host()
     state_pure = self._read_state_pure()
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
     if self._freeze_mask_fn is not None:
@@ -1518,6 +1576,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # optimizer state -- already moved above -- is stored sharded.
       self._zero1_params_shardings = self._zero1_shardings_for(params_pure, params_shardings)
       self._gathered_params_shardings = params_shardings if self._zero1_params_shardings is not None else None
+      if getattr(self._config, "optimizer_memory_host_offload", False) and _OPTIMIZER_STATE_KEY in state_mesh_shardings:
+        self._device_optimizer_shardings = jax.tree.map(
+            lambda s: s.with_memory_kind(kind="device") if isinstance(s, jax.sharding.NamedSharding) else s,
+            state_mesh_shardings[_OPTIMIZER_STATE_KEY],
+        )
+      else:
+        self._device_optimizer_shardings = None
       grad_shardings = self._unreduced_grad_shardings
       if grad_shardings is None:
         grad_shardings = params_shardings
@@ -1549,6 +1614,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._note_zero1_declined(_zero1_active(self._config, self._mesh))
       self._zero1_params_shardings = None
       self._gathered_params_shardings = None
+      self._device_optimizer_shardings = None
 
     # 1. JIT Compile Micro FWD/BWD Pass.
     #
@@ -2372,9 +2438,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     extra = getattr(sync_request, "extra_config", None)
     req_mode = extra.get("weight_sync_mode") if isinstance(extra, dict) else None
     effective_transport = (
-        str(staging_transport or req_mode or os.environ.get("WEIGHT_SYNC_MODE") or "raiden")
-        .strip()
-        .lower()
+        str(staging_transport or req_mode or os.environ.get("WEIGHT_SYNC_MODE") or "raiden").strip().lower()
     )
     if effective_transport in ("file", "filesystem"):
       effective_transport = "gcs"
@@ -2439,16 +2503,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
       # 3. Bind parameters to the unified WeightSynchronizer transport
       # (`RaidenWeightSync` or `GCSWeightSync`).
-      if (
-          self._weight_sync is None
-          or getattr(self, "_last_staged_transport", None) != effective_transport
-      ):
+      if self._weight_sync is None or getattr(self, "_last_staged_transport", None) != effective_transport:
         if self._weight_sync is not None and hasattr(self._weight_sync, "close"):
           self._weight_sync.close()
         base_out = getattr(self._config, "base_output_directory", "") or ""
-        default_staging_dir = (
-            os.environ.get("WEIGHT_SYNC_GCS_DIR")
-            or (os.path.join(base_out, "weight_sync_staging") if base_out else None)
+        default_staging_dir = os.environ.get("WEIGHT_SYNC_GCS_DIR") or (
+            os.path.join(base_out, "weight_sync_staging") if base_out else None
         )
         if effective_transport == "gcs" and not default_staging_dir:
           raise ValueError(
@@ -2494,9 +2554,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Unknown transport: raise rather than return empty metadata. A typo would otherwise
     # surface only as the coordinator's "empty side" error, with nothing logged anywhere
     # naming the transport that was actually asked for.
-    raise ValueError(
-        f"unknown staging_transport {effective_transport!r}; expected 'raiden' or 'gcs'."
-    )
+    raise ValueError(f"unknown staging_transport {effective_transport!r}; expected 'raiden' or 'gcs'.")
 
   def _purge_raiden_buffers(self) -> int:
     """Drops the previous cycle's converted tree; returns leaves released."""
@@ -2514,11 +2572,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._weight_sync:
       if hasattr(self._weight_sync, "release"):
         self._weight_sync.release(sync_request=kwargs.get("sync_request"))
-      metrics = (
-          self._weight_sync.metrics()
-          if hasattr(self._weight_sync, "metrics")
-          else "N/A"
-      )
+      metrics = self._weight_sync.metrics() if hasattr(self._weight_sync, "metrics") else "N/A"
       logging.vlog(1, "Trainer weight sync metrics: %s", metrics)
       self._purge_raiden_buffers()
     return True
