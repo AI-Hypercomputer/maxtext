@@ -344,7 +344,9 @@ def main(argv: Sequence[str]) -> None:
 
     # Wrap train_step with diloco
     train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, params_shardings)
-    train_step_fn = diloco.build_diloco_train_step(config, train_step_partial)
+    train_step_fn = diloco.build_diloco_train_step(
+        config, train_step_partial, outer_params_shardings=state_mesh_shardings.params
+    )
 
     # For DiLoCo, the train_step_fn is already fully wrapped and takes (state, batch, prng)
     func_to_compile = train_step_fn
