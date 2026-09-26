@@ -208,7 +208,7 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                     EV=""; LX="$LIBTPU"
                     for T in \$ENVX; do case "\$T" in +*) LX="\$LX \${T#+}";; *) EV="\$EV \$T";; esac; done
                     # KDA_BC=<n> sets the tokamax KDA intra-chunk sub-block (installed value 4,
-                    # an overflow patch; safe while (n/2) x decay floor x log2(e) < 127).
+                    # an overflow patch; the bwd needs n x decay floor x log2(e) < 127).
                     KD=\$(python3 -c "import tokamax,os;print(os.path.dirname(tokamax.__file__))")/_src/ops/experimental/kda
                     [ -f /tmp/kda_fwd.bak ] || { cp \$KD/pallas_mosaic_tpu_fwd_kernel.py /tmp/kda_fwd.bak; cp \$KD/pallas_mosaic_tpu_bwd_kernel.py /tmp/kda_bwd.bak; }
                     cp /tmp/kda_fwd.bak \$KD/pallas_mosaic_tpu_fwd_kernel.py; cp /tmp/kda_bwd.bak \$KD/pallas_mosaic_tpu_bwd_kernel.py

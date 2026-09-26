@@ -94,21 +94,27 @@ problem (the rstd operand carries a {0,2,1} tiled layout), not to real work.
 | batch 1 / 3 / 6 | 2.57 / 7.50 / 15.21 | linear in B |
 
 The kda8 patch cut BC from 16 to 4 to stop an fp32 exp2 overflow (NaN at
-reference init). The factored exponent spans BC/2 rows, so it is safe when
-**(BC/2) x floor x log2(e) < 127**, where floor is the per-token log-decay
-floor (`tokamax_kda_log_decay_floor`, 20 nats today):
+reference init). On our path the gate is activated outside the kernel (decay
+floor > 0), so the fwd centers the exponent mid-block, but the bwd
+`compute_intra_backward` does not, and its exponent spans the whole sub-block.
+The binding constraint is the bwd: **BC x floor x log2(e) < 127**, where floor
+is the per-token log-decay floor (`tokamax_kda_log_decay_floor`, 20 nats today).
+The microbench stays finite at any BC only because its random gates are mild
+(about 0.13 nats per token).
 
-| BC | max exponent at floor 20 | safe | floor needed |
-|---|---|---|---|
-| 4 | 58 | yes | |
-| 8 | 115 | yes | |
-| 16 | 231 | no | ≤ 11 nats |
+| BC | exponent at floor 20 | exponent at floor 11 | floor needed | in-model (o-series) |
+|---|---|---|---|---|
+| 4 | 115 | | | 121.9 TF/s control |
+| 8 | 231 | 127 | ≤ 10 nats | NaN at step 1, floor 20 |
+| 16 | 462 | 253 | ≤ 5 nats | NaN at step 1, floor 11 |
 
-**BC 8 is safe at the current floor and saves 13%.** BC 16 saves 18% but needs
-a floor of at most 11 nats. That is semantically close to free, since e^-11 per
-token already wipes the state. GDN has no per-channel exponent, so a
-GDN-specialized kernel needs no sub-blocks at all. BC 64 on the broadcast gate
-is its proxy: 5.76 ms, 2.8x faster than MaxText GDN today.
+A first version of this table used BC/2 (the fwd centering) and called BC 8
+safe at floor 20; the o-series disproved it. Lowering the floor from 20 to 11
+leaves loss unchanged (o4: 10.835 vs 10.836 at step 19), since e^-11 per token
+already wipes the state. So **BC 8 needs floor 10** and BC 16 needs floor 5,
+which starts to clip real decays and needs a loss check. GDN has no per-channel
+exponent, so a GDN-specialized kernel needs no sub-blocks at all. BC 64 on the
+broadcast gate is its proxy: 5.76 ms, 2.8x faster than MaxText GDN today.
 
 With BC 64 there is still 5.8 ms against a 0.48 ms roofline. The rest is the
 kernels' own structure (a sequential loop over 128 chunks of 64-row matmuls)
@@ -138,8 +144,8 @@ MoE grouped matmuls are larger (about 180 ms in the f1 profile).
 
 | KDA lever | per-layer saving | step saving (est.) | risk |
 |---|---|---|---|
-| BC 8 | 0.94 ms | ~13 ms, ~1.5% | none by the bound above |
-| BC 16 + floor 11 | 1.32 ms | ~18 ms, ~2% | needs a loss check |
+| BC 8 + floor 10 | 0.94 ms | ~13 ms, ~1.5% | floor 11 measured loss-neutral |
+| BC 16 + floor 5 | 1.32 ms | ~18 ms, ~2% | floor 5 clips decays, needs a loss check |
 | fix the l2norm bwd layout or fuse it in-kernel | up to 1.1 ms | ~16 ms, ~2% | kernel change |
 
 For qwen3.5 the order flips. GDN is the bottleneck there, and routing it

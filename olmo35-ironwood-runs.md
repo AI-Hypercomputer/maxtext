@@ -540,26 +540,42 @@ bf16 KDA vs fp32 KDA at pdb 4 (n3 vs n6): +0.008 loss at step 19, the same gap
 as the l-series, for a 9.4% throughput gain. `moe_dispatch=device` adds 1.2% at
 pdb 4 (n7 vs n3).
 
-### In flight: o-series, KDA sub-block and decay floor (o35n262043)
+### o-series, KDA sub-block and decay floor (o35n262043)
 
-Base n1. `KDA_BC` is the new launcher token (see the next section).
+Base n1. `KDA_BC` is the launcher token for the tokamax KDA intra-chunk sub-block.
+
+| arm | change | TF/s/dev | MFU | loss @19 |
+|---|---|---|---|---|
+| o1_ctrl | control | 121.9 | 10.56% | 10.836 |
+| o2_bc8 | BC 8 | NaN at step 1 | | |
+| o3_bc16_floor11 | BC 16, floor 11 | NaN at step 1 | | |
+| o4_floor11 | floor 11 only | 122.2 | 10.59% | 10.835 |
+| o5_bc8_vt2 | BC 8, vocab tiling 2 | NaN at step 1 | | |
+| o6_bc8_fp32kda | BC 8, fp32 KDA math | NaN at step 1 | | |
+
+**Every BC > 4 arm overflowed.** The kernel bwd does not center the exponent, so
+the safe bound is BC x floor x log2(e) < 127, not BC/2 (see
+`kda-vs-gdn-kernels.md`). fp32 math (o6) NaNs too, so this is range, not
+precision. The floor-11 arm is loss- and speed-neutral, which clears the way for
+BC 8 at floor 10.
+
+### In flight: p-series, BC under the corrected bound (o35n262111)
 
 | arm | change | TF/s/dev | MFU |
 |---|---|---|---|
-| o1_ctrl | control | | |
-| o2_bc8 | BC 8 | | |
-| o3_bc16_floor11 | BC 16, `tokamax_kda_log_decay_floor=11` | | |
-| o4_floor11 | floor 11 only (loss control for o3) | | |
-| o5_bc8_vt2 | BC 8, `num_vocab_tiling=2` | | |
-| o6_bc8_fp32kda | BC 8, fp32 KDA math | | |
+| p1_ctrl | control | | |
+| p2_bc8_floor10 | BC 8, floor 10 (exponent 115) | | |
+| p3_bc16_floor5 | BC 16, floor 5 (exponent 115) | | |
+| p4_floor5 | floor 5 only (loss control for p3) | | |
+| p5_bc8_floor10_fp32kda | BC 8, floor 10, fp32 KDA math | | |
 
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
 at pdb 3 against a 0.48 ms HBM roofline (6.4%). fp32 q/k/v inputs cost 1.83x,
 which predicts 87 ms of the 100 ms l3 win. The kda8 overflow patch (sub-block
-BC 16 to 4) costs 18%. BC 8 is safe at the 20-nat decay floor and saves 13%, so
-the launcher now takes a per-arm `KDA_BC=<n>` token.
+BC 16 to 4) costs 18%. BC 8 saves 13% but needs the decay floor at 10 nats
+(o-series). The launcher takes a per-arm `KDA_BC=<n>` token.
 
 ## Profiles and xla-shell output
 
