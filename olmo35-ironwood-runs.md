@@ -516,19 +516,42 @@ the block-level remat. This is the Qwen3-Next and Gemma4 pattern.
 
 The biggest item at the peak is now the gathered expert weights (31 GiB).
 
-### In flight: n-series, per-layer remat and batch (o35n261924)
+### n-series, per-layer remat and batch (o35n261924)
 
 Base j2 plus `kda_conv_in_compute_dtype` unless noted. plr = `olmoe3_per_layer_remat`.
 
-| arm | pdb | change | TF/s/dev | MFU |
-|---|---|---|---|---|
-| n1_conv | 3 | control (l3) | | |
-| n2_conv_plr | 3 | + plr | | |
-| n3_conv_plr_p4 | 4 | + plr | | |
-| n4_conv_plr_p5 | 5 | + plr | | |
-| n5_conv_plr_p6 | 6 | + plr | | |
-| n6_plr_p4_fp32kda | 4 | plr, fp32 KDA | | |
-| n7_conv_plr_p4_disp | 4 | + plr, `moe_dispatch=device` | | |
+| arm | pdb | change | TF/s/dev | MFU | step s |
+|---|---|---|---|---|---|
+| **n1_conv** | 3 | control (l3) | **122.1** | **10.59%** | 0.868 |
+| n2_conv_plr | 3 | + plr | 106.9 | 9.27% | 0.992 |
+| n3_conv_plr_p4 | 4 | + plr | 113.9 | 9.87% | 1.242 |
+| n4_conv_plr_p5 | 5 | + plr | 117.7 | 10.20% | 1.502 |
+| n5_conv_plr_p6 | 6 | + plr | OOM (99.86G) | | |
+| n6_plr_p4_fp32kda | 4 | plr, fp32 KDA | 104.1 | 9.02% | 1.359 |
+| n7_conv_plr_p4_disp | 4 | + plr, `moe_dispatch=device` | 115.3 | 10.00% | 1.226 |
+
+**Per-layer remat is a memory lever, not a throughput lever.** It is exact:
+n2 tracks n1 within 0.003 loss at steps 4 to 19. It unlocks pdb 4 and 5, but
+recomputing every layer costs 12.5% at pdb 3, and pdb 5 (117.7) still trails the
+pdb 3 control (122.1). pdb 6 OOMs at 99.86G against 94.74G. n1 reproduces l3
+(122.3), so the best config is unchanged at 10.59%.
+
+bf16 KDA vs fp32 KDA at pdb 4 (n3 vs n6): +0.008 loss at step 19, the same gap
+as the l-series, for a 9.4% throughput gain. `moe_dispatch=device` adds 1.2% at
+pdb 4 (n7 vs n3).
+
+### In flight: o-series, KDA sub-block and decay floor (o35n262043)
+
+Base n1. `KDA_BC` is the new launcher token (see the next section).
+
+| arm | change | TF/s/dev | MFU |
+|---|---|---|---|
+| o1_ctrl | control | | |
+| o2_bc8 | BC 8 | | |
+| o3_bc16_floor11 | BC 16, `tokamax_kda_log_decay_floor=11` | | |
+| o4_floor11 | floor 11 only (loss control for o3) | | |
+| o5_bc8_vt2 | BC 8, `num_vocab_tiling=2` | | |
+| o6_bc8_fp32kda | BC 8, fp32 KDA math | | |
 
 ### KDA kernel, single device
 
