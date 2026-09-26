@@ -2593,7 +2593,56 @@ class AOT(BaseModel):
           "chunks of this many tokens rather than from the logits of the whole sequence at once. 0 does not chunk."
       ),
   )
+  compile_engine_max_seq_token_per_tpu: int = Field(
+      0,
+      ge=0,
+      description=(
+          "With compile_engine_loss=grpo: Tunix's max_seq_token_per_tpu. 0 compiles for the micro-batch Tunix's "
+          "PaddedBatchAssembler builds. A positive value compiles for the one its SequencePackedBatchAssembler builds: "
+          "rows of this many tokens, each packing whole sequences, as many rows as the product of the mesh's data, "
+          "fsdp, fsdp_transpose and expert axes."
+      ),
+  )
+  compile_engine_max_segments_per_packed_row: int = Field(
+      0,
+      ge=0,
+      description=(
+          "With compile_engine_max_seq_token_per_tpu: Tunix's max_segments_per_packed_row, the most sequences a "
+          "packed row holds. 0 leaves it unset, so a row holds as many as fit its tokens."
+      ),
+  )
+  compile_engine_router_replay: bool = Field(
+      False,
+      description=(
+          "With compile_engine_loss=grpo: the rollouts return the MoE routing they took (Tunix's "
+          "return_routed_experts), and the micro-batch carries it as routed_experts wherever Tunix's batch assembler "
+          "does, for the trainer to replay."
+      ),
+  )
   write_estimator_result: bool = Field(False, description="Write estimator.py results in a separate file.")
+
+  @model_validator(mode="after")
+  def validate_compile_engine_grpo_options(self) -> "AOT":
+    """Rejects GRPO options that would be silently ignored."""
+    rl_options = (
+        "compile_engine_grpo_config",
+        "compile_engine_logps_chunk_size",
+        "compile_engine_max_seq_token_per_tpu",
+        "compile_engine_max_segments_per_packed_row",
+        "compile_engine_router_replay",
+    )
+    set_options = [option for option in rl_options if getattr(self, option)]
+    if self.compile_engine_loss != "grpo" and set_options:
+      raise ValueError(
+          f"compile_engine_loss={self.compile_engine_loss} does not compile Tunix's GRPO loss, so "
+          f"{', '.join(set_options)} would be ignored: set compile_engine_loss=grpo."
+      )
+    if self.compile_engine_max_segments_per_packed_row and not self.compile_engine_max_seq_token_per_tpu:
+      raise ValueError(
+          "compile_engine_max_segments_per_packed_row limits the sequences in a packed row, so it needs "
+          "compile_engine_max_seq_token_per_tpu, which turns packing on."
+      )
+    return self
 
 
 class DevelopmentAndDebugging(BaseModel):

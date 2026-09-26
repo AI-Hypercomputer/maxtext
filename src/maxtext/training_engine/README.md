@@ -81,6 +81,11 @@ python3 -m maxtext.training_engine.maxtext_engine_compile src/maxtext/configs/ba
   <the same model and parallelism flags as the trainer>
 ```
 
+For a trainer whose micro-batches Tunix packs, add its `max_seq_token_per_tpu` and
+`max_segments_per_packed_row` as `compile_engine_max_seq_token_per_tpu` and
+`compile_engine_max_segments_per_packed_row`; for one whose rollouts return their MoE routing (Tunix's
+`return_routed_experts`), add `compile_engine_router_replay=true`.
+
 The engine is then set up as Tunix's RL trainer sets it up: the model is wrapped in `TunixMaxTextAdapter`,
 and the loss (with `has_aux=True`) and its input mapping come from Tunix's `GRPOAdapter`, built from
 `GRPOConfig(**compile_engine_grpo_config)` with `decode_sampling_temperature` as the default temperature.
@@ -88,20 +93,35 @@ Pass the trainer's own options: they decide which inputs the loss reads and whic
 and options left out take `GRPOConfig`'s defaults, whose `beta` is non-zero. A non-zero
 `compile_engine_logps_chunk_size` computes the log-probabilities in chunks of that many tokens, as Tunix's
 `TrainerWorker` does for `compute_logps_chunk_size`; without it the logits of whole sequences are held at
-once, which at long context and large vocabularies dominates the report. The kernels are compiled for an
-`RLTrainerPayload` laid out as Tunix's `PaddedBatchAssembler` lays out a micro-batch:
+once, which at long context and large vocabularies dominates the report.
 
-- `micro_batch_size_to_train_on` sequences (Tunix's `train_micro_batch_size`), each of
-  `max_prefill_predict_length` prompt tokens (Tunix's `max_prompt_length`) and the rest of
-  `max_target_length` as completion tokens (`max_response_length`).
-- Token ids and masks, per-token advantages, the rollout's log-probabilities and one overlong flag per
-  sequence; the old policy's log-probabilities when `use_rollout_logps` is true, and the reference
-  model's when `beta` is non-zero.
+The kernels are compiled for the `RLTrainerPayload` Tunix's orchestrator builds, which the tool builds with
+Tunix's own code (`GRPOAdapter.create_trainer_payloads` and the batch assembler `create_batch_assembler`
+picks) from rollouts of `max_prefill_predict_length` prompt tokens (Tunix's `max_prompt_length`) and the rest
+of `max_target_length` as completion tokens (`max_response_length`):
+
+- By default, `PaddedBatchAssembler`'s: `micro_batch_size_to_train_on` sequences (Tunix's
+  `train_micro_batch_size`), each padded into a prompt part and a completion part.
+- With `compile_engine_max_seq_token_per_tpu`, `SequencePackedBatchAssembler`'s: rows of that many tokens
+  (at least `max_target_length`, or Tunix rejects them), each holding as many whole sequences as fit, at most
+  `compile_engine_max_segments_per_packed_row`, told apart by `segment_ids`, `segment_positions` and
+  `num_segments`. There is a row per device of the mesh's data, fsdp, fsdp_transpose and expert axes, the
+  trainer mesh dimensions Tunix's `BatchConfig` sizes a packed micro-batch by; `per_device_batch_size` does
+  not set it. Tunix's loss then aggregates per sequence rather than per row.
+- Token ids and masks, per-token advantages, the rollout's log-probabilities and whether it was cut off
+  (`overlong`); the old policy's log-probabilities when `use_rollout_logps` is true, and the reference
+  model's when `beta` is non-zero. Tunix's sampler-trainer agreement step, which adds `sampler_is_weights`
+  when `sampler_is` is `token`, is not modeled.
+- With `compile_engine_router_replay`, the experts each token was routed to in every MoE layer:
+  `routed_experts`, `[sequences, prompt + completion tokens, num_decoder_layers, num_experts_per_tok]` int16,
+  which the loss passes to the model to replay, wherever Tunix's batch assembler carries it. When the
+  assembler leaves it out, the compiled trainer routes every token itself, and the tool prints a line saying
+  so.
 - Pad and end-of-sequence id 0, so no tokenizer is loaded. The ids are constants in the program and change
   no shape.
 
-Sequence packing (`SequencePackedBatchAssembler`) and router replay (`routed_experts`) are not modeled.
-The payload is one of `fwd_bwd`'s arguments, so the report counts it in `arg`; fields the loss does not read
+The micro-batch is built in host memory, as the orchestrator builds one, and only its shapes are compiled
+for. It is one of `fwd_bwd`'s arguments, so the report counts it in `arg`; fields the loss does not read
 are dropped from the program and not counted. This path needs Tunix's RL modules and a model with a
 Hugging Face config, which `TunixMaxTextAdapter` reads.
 
@@ -229,7 +249,7 @@ Variants:
 | float32 gradients | `grad_dtype=float32 optimizer_memory_host_offload=true context=remat` (`cast_grads_after_all_reduce` has no effect with float32 gradients) |
 | without the SparseCore settings | drop `--xla_tpu_enable_offloading_copy_to_sparsecore=false` and `cast_grads_after_all_reduce=true` |
 | check memory first | run `python3 -m maxtext.training_engine.maxtext_engine_compile` with the same flags, plus `compile_topology=tpu7x-256 compile_topology_num_slices=1` and the libtpu flags above in `compile_xla_flags` |
-| memory of the same trainer under Tunix's GRPO loss | add `compile_engine_loss=grpo max_prefill_predict_length=<prompt tokens>` and the trainer's `compile_engine_grpo_config` and `compile_engine_logps_chunk_size` to the compile command (see [Ahead-of-time memory report](#ahead-of-time-memory-report)) |
+| memory of the same trainer under Tunix's GRPO loss | add `compile_engine_loss=grpo max_prefill_predict_length=<prompt tokens>` and the trainer's `compile_engine_grpo_config` and `compile_engine_logps_chunk_size` to the compile command, and, if it packs sequences or replays routing, `compile_engine_max_seq_token_per_tpu`, `compile_engine_max_segments_per_packed_row` and `compile_engine_router_replay` (see [Ahead-of-time memory report](#ahead-of-time-memory-report)) |
 
 ## Results on TPU v7x
 
@@ -316,6 +336,7 @@ sharding at construction (for example Tokamax ring attention), while under `jax.
 | `enable_checkpointing` | `false` disables saving and restoring the train state; `load_parameters_path` still loads weights |
 | `gradient_accumulation_steps` | read only by the standalone script; Tunix chooses the number of micro-batches itself |
 | `compile_engine_loss` (default `maxtext`), `compile_engine_grpo_config`, `compile_engine_logps_chunk_size` | read only by `maxtext_engine_compile.py`: the loss it compiles the kernels with, MaxText's own (`maxtext`) or Tunix's GRPO loss (`grpo`), and the latter's options; see [Ahead-of-time memory report](#ahead-of-time-memory-report) |
+| `compile_engine_max_seq_token_per_tpu` (default 0), `compile_engine_max_segments_per_packed_row` (default 0), `compile_engine_router_replay` (default false) | read only by `maxtext_engine_compile.py`, with `compile_engine_loss=grpo`: Tunix's `max_seq_token_per_tpu` and `max_segments_per_packed_row`, which make the micro-batch sequence-packed, and whether the rollouts return their MoE routing for the trainer to replay; see [Ahead-of-time memory report](#ahead-of-time-memory-report) |
 
 ## Reading the memory report
 
@@ -353,7 +374,7 @@ The engine's tests are in `tests/post_training/unit/` and run on CPU; they requi
 |---|---|
 | `maxtext_engine_test.py` | optimizer offload placement, numerics and restore; accumulation dtypes; sharding rules during model build and eval; `model_scope`; Zero-1 |
 | `maxtext_engine_train_test.py` | the standalone script end to end; the Tunix path through Tunix's own builders and `TrainerWorker.per_token_logps`; parity with `pre_train/train.py` |
-| `maxtext_engine_compile_test.py` | the memory report, against real XLA compiles, including optimizer offload; `compile_engine_loss`, including Tunix's GRPO loss on the payload Tunix builds |
+| `maxtext_engine_compile_test.py` | the memory report, against real XLA compiles, including optimizer offload; `compile_engine_loss`, including Tunix's GRPO loss on the payload Tunix builds, padded or sequence-packed, with or without the rollouts' routing |
 | `maxtext_engine_compile_parity_test.py` | `AbstractMaxTextEngine` compiles Qwen3.5 with the Tunix adapter to the same programs as the live engine |
 | `maxtext_engine_model_build_test.py` | model construction with and without a mesh set by the caller |
 | `maxtext_engine_checkpoint_test.py` | resuming from a mid-step checkpoint through Orbax reproduces the uninterrupted step |

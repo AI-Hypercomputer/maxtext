@@ -19,6 +19,9 @@ its arguments and its outputs. `maxtext_engine_compile.memory_report` corrects b
 check the arithmetic on stand-in executables and abstract-mesh avals, then check the report on a
 real CPU compile against XLA's own byte counts. `GrpoCompileTest` checks that `compile_engine_loss`
 selects the loss: MaxText's own, or Tunix's GRPO loss on the payload Tunix builds.
+`GrpoPackingCompileTest` and `GrpoRouterReplayCompileTest` check the sequence-packed micro-batch and
+the rollouts' MoE routing against what Tunix's own assemblers build, and that the compiled programs
+read them.
 
 The Zero-1 case needs four devices, and the CPU backend reads
 `--xla_force_host_platform_device_count` only at initialization -- already past by the time
@@ -763,10 +766,38 @@ _GRPO_OVERRIDES = (
 )
 
 
-def _grpo_config(*extra: str) -> pyconfig.HyperParameters:
-  """The tiny decoder with `_GRPO_OVERRIDES`, each of `extra` replacing the override of the same key."""
+# A Qwen3.5 small enough to compile on CPU, whose four layers route each token to two of four experts: router
+# replay needs a decoder whose MoE takes forced routing. `sparse_matmul=False` keeps the MoE off megablox, which
+# XLA:CPU can only interpret, and the model's `mrope_section` needs `head_dim * partial_rotary_factor / 2 == 32`.
+_QWEN35_OVERRIDES = (
+    "model_name=qwen3.5-35b-a3b",
+    "sparse_matmul=False",
+    "base_num_decoder_layers=4",
+    "base_emb_dim=64",
+    "base_num_query_heads=2",
+    "base_num_kv_heads=2",
+    "head_dim=256",
+    "base_mlp_dim=64",
+    "base_moe_mlp_dim=64",
+    "num_experts=4",
+    "num_experts_per_tok=2",
+    "gdn_key_head_dim=16",
+    "gdn_value_head_dim=16",
+    "gdn_num_key_heads=2",
+    "gdn_num_value_heads=4",
+    "gdn_chunk_size=16",
+)
+
+
+def _grpo_overrides(*extra: str) -> list[str]:
+  """`_GRPO_OVERRIDES`, each of `extra` replacing the override of the same key."""
   replaced = {override.split("=", 1)[0] for override in extra}
-  return _config(1, *(override for override in _GRPO_OVERRIDES if override.split("=", 1)[0] not in replaced), *extra)
+  return [override for override in _GRPO_OVERRIDES if override.split("=", 1)[0] not in replaced] + list(extra)
+
+
+def _grpo_config(*extra: str) -> pyconfig.HyperParameters:
+  """The tiny decoder with `_grpo_overrides(*extra)`."""
+  return _config(1, *_grpo_overrides(*extra))
 
 
 def _tree_bytes(tree) -> int:
@@ -775,12 +806,12 @@ def _tree_bytes(tree) -> int:
 
 
 def _layout(payload) -> dict[str, Any]:
-  """Each field of an `RLTrainerPayload` as `(shape, dtype)`, or None where it is unset."""
+  """Each field of an `RLTrainerPayload` as `(shape, dtype)`, or as itself where it is None or `num_segments`."""
   layout = {}
   for field in dataclasses.fields(payload):
     value = getattr(payload, field.name)
     if field.name != "metadata":
-      layout[field.name] = None if value is None else (tuple(value.shape), jnp.dtype(value.dtype))
+      layout[field.name] = (tuple(value.shape), jnp.dtype(value.dtype)) if hasattr(value, "shape") else value
   return layout
 
 
@@ -818,6 +849,69 @@ def _assembled_micro_batch(cfg: pyconfig.HyperParameters, algo) -> datatypes.RLT
   if algo.requires_reference_kl:
     batch = batch_assembly.with_ref_per_token_logps(batch, np.zeros(np.shape(batch.completion_ids), np.float32))
   return batch
+
+
+def _orchestrator_micro_batch(
+    cfg: pyconfig.HyperParameters, algo, assembler, num_rollouts: int, routed: bool = False
+) -> datatypes.RLTrainerPayload:
+  """The micro-batch Tunix's orchestrator hands the trainer from `num_rollouts` rollouts of the longest length allowed.
+
+  As `StandardRLProgram` handles them: `algo.create_trainer_payloads` a group at a time, tagged with their
+  trajectory ids, fed to `assembler`, and given the reference model's log-probabilities when `algo` needs them.
+  The rollouts are as long as `get_rl_micro_batch`'s, since lengths decide the layout, but their tokens,
+  log-probabilities, rewards and, with `routed`, experts are random.
+  """
+  prompt_length = cfg.max_prefill_predict_length
+  completion_length = cfg.max_target_length - prompt_length
+  rng = np.random.default_rng(0)
+  group_size = algo.num_generations
+  payloads = []
+  for prompt_index in range(-(-num_rollouts // group_size)):
+    items = []
+    for index in range(group_size):
+      traj = {
+          "prompt_tokens": rng.integers(1, cfg.vocab_size, size=prompt_length, dtype=np.int32),
+          "conversation_tokens": rng.integers(1, cfg.vocab_size, size=completion_length, dtype=np.int32),
+          "conversation_masks": np.ones(completion_length, np.float32),
+          "old_logprobs": -rng.random(completion_length, dtype=np.float32),
+          "status": "SUCCEEDED",
+      }
+      if routed:
+        routing_shape = (prompt_length + completion_length, cfg.num_decoder_layers, cfg.num_experts_per_tok)
+        traj["routed_experts"] = rng.integers(0, cfg.num_experts, size=routing_shape, dtype=np.int16)
+      items.append(datatypes.TrajectoryItem(prompt_id=f"prompt_{prompt_index}", group_index=index, traj=traj))
+    for item, payload in zip(items, algo.create_trainer_payloads(items, rewards=rng.random(group_size).tolist())):
+      payloads.append(dataclasses.replace(payload, metadata={**payload.metadata, "traj_id": item.traj_id}))
+  batches = assembler.feed(payloads[:num_rollouts]) + assembler.flush()
+  assert len(batches) == 1, f"the rollouts filled {len(batches)} micro-batches"
+  batch = batches[0].payload
+  if algo.requires_reference_kl:
+    batch = batch_assembly.with_ref_per_token_logps(batch, np.zeros(np.shape(batch.completion_ids), np.float32))
+  return batch
+
+
+def _assert_same_layout(test: absltest.TestCase, actual, expected) -> None:
+  """Asserts that two `RLTrainerPayload`s are laid out alike.
+
+  The same `_layout`, and the same values wherever a value places a token: the masks, the segment ids and
+  positions, which token ids are padding and which routing slots are unset.
+  """
+  test.assertEqual(_layout(actual), _layout(expected))
+  for name in ("prompt_mask", "completion_mask", "segment_ids", "segment_positions"):
+    if getattr(expected, name) is not None:
+      np.testing.assert_array_equal(getattr(actual, name), getattr(expected, name), err_msg=name)
+  for name in ("prompt_ids", "completion_ids"):
+    padding = [np.asarray(getattr(payload, name)) == maxtext_engine_compile.GRPO_PAD_ID for payload in (actual, expected)]
+    np.testing.assert_array_equal(*padding, err_msg=f"padding in {name}")
+  if expected.routed_experts is not None:
+    unset = [np.asarray(payload.routed_experts) == datatypes.UNSET_ROUTED_EXPERT for payload in (actual, expected)]
+    np.testing.assert_array_equal(*unset, err_msg="unset routing slots")
+
+
+def _fwd_bwd_memory(compiled: dict[str, Any]) -> tuple[int, int]:
+  """`fwd_bwd`'s argument and temporary bytes."""
+  stats = compiled["fwd_bwd"].memory_analysis()
+  return stats.argument_size_in_bytes, stats.temp_size_in_bytes
 
 
 class GrpoCompileTest(parameterized.TestCase):
@@ -871,6 +965,7 @@ class GrpoCompileTest(parameterized.TestCase):
     self.assertLen(raw, len(maxtext_engine_compile.KERNEL_NAMES))
     self.assertLen(verdict, 1)
     self.assertLess(lines.index(split), raw[0])
+    self.assertLess(lines.index(split), lines.index("Jitting and compiling the engine's kernels..."))
     self.assertGreater(verdict[0], raw[-1])
 
   def test_main_compiles_trainer_grpo_options(self):
@@ -925,9 +1020,9 @@ class GrpoCompileTest(parameterized.TestCase):
     cfg = _grpo_config()
     algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0, **grpo_config))
 
-    self.assertEqual(
-        _layout(maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo)), _layout(_assembled_micro_batch(cfg, algo))
-    )
+    micro_batch = maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+
+    self.assertEqual(_layout(micro_batch), _layout(_assembled_micro_batch(cfg, algo)))
 
   def test_rl_micro_batch_needs_prompt_and_completion(self):
     algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
@@ -935,7 +1030,245 @@ class GrpoCompileTest(parameterized.TestCase):
       with self.subTest(prompt_length=prompt_length):
         cfg = _grpo_config(f"max_prefill_predict_length={prompt_length}")
         with self.assertRaisesRegex(ValueError, r"needs 0 < max_prefill_predict_length < max_target_length"):
-          maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo)
+          maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+
+  def test_micro_batch_is_padded_and_unrouted_by_default(self):
+    """Packing and router replay are off unless asked for, which leaves the micro-batch above."""
+    cfg = _grpo_config()
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
+
+    micro_batch = maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+
+    self.assertEqual(
+        (
+            cfg.compile_engine_max_seq_token_per_tpu,
+            cfg.compile_engine_max_segments_per_packed_row,
+            cfg.compile_engine_router_replay,
+        ),
+        (0, 0, False),
+    )
+    self.assertEqual((micro_batch.segment_ids, micro_batch.num_segments, micro_batch.routed_experts), (None, None, None))
+
+
+# A 2 x 2 fsdp x expert mesh, over which a packed micro-batch has four rows. Abstract: only its axis sizes are read.
+_FSDP_BY_EXPERT = AbstractMesh((2, 2), ("fsdp", "expert"))
+
+
+class GrpoPackingCompileTest(parameterized.TestCase):
+  """`compile_engine_max_seq_token_per_tpu`: the micro-batch Tunix's `SequencePackedBatchAssembler` builds."""
+
+  @parameterized.named_parameters(
+      # Two 32-token rollouts fill a 64-token row, under the cap of three. `GRPOConfig`'s defaults, so the
+      # old policy's and the reference model's log-probabilities are packed too.
+      ("tokens_bind", 64, 3, 2, {}),
+      # Three reach the cap with 32 tokens of a 128-token row to spare, which stay padding.
+      ("segments_bind", 128, 3, 3, {"beta": 0.0}),
+      # One to a row, and uncapped, so Tunix allows as many sequences as a row has tokens.
+      ("one_per_row_uncapped", 32, 0, 1, {"use_rollout_logps": False}),
+      # Three fill a 96-token row exactly: the prompt counts towards a rollout's length, not just the completion.
+      ("three_fill_a_row", 96, 0, 3, {}),
+      # Groups of 16, more than the eight rollouts the four rows hold: the group count rounds up.
+      ("groups_larger_than_the_micro_batch", 64, 3, 2, {"num_generations": 16}),
+  )
+  def test_packed_micro_batch_matches_tunix(self, tokens, segments, per_row, grpo_config):
+    """The packed micro-batch is laid out as Tunix's assembler lays out the same rollouts.
+
+    The assembler here is built with the numbers expected -- four rows of `tokens` -- rather than by
+    `create_batch_assembler`, so a micro-batch sized or packed any other way fails. Four rows, for the 2 x 2
+    mesh; the two sequences `per_device_batch_size` gives do not decide it.
+    """
+    cfg = _grpo_config(
+        f"compile_engine_max_seq_token_per_tpu={tokens}", f"compile_engine_max_segments_per_packed_row={segments}"
+    )
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0, **grpo_config))
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=4,
+        num_generations=algo.num_generations,
+        mini_batch_size=1,
+        max_packed_len=tokens,
+        pad_id=maxtext_engine_compile.GRPO_PAD_ID,
+        max_segments_per_packed_row=segments or None,
+    )
+
+    micro_batch = maxtext_engine_compile.get_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)
+
+    _assert_same_layout(self, micro_batch, _orchestrator_micro_batch(cfg, algo, assembler, num_rollouts=4 * per_row))
+    # The layout, spelled out: in every row, `per_row` sequences of 8 prompt and 24 scored completion tokens,
+    # numbered from 1, each with its own positions, then padding, which is segment 0.
+    padding = [0] * (tokens - 32 * per_row)
+    row = {
+        "segment_ids": np.repeat(np.arange(1, per_row + 1), 32).tolist() + padding,
+        "segment_positions": list(range(32)) * per_row + padding,
+        "completion_mask": ([0.0] * 8 + [1.0] * 24) * per_row + padding,
+    }
+    for name, expected in row.items():
+      self.assertEqual(getattr(micro_batch, name).tolist(), [expected] * 4, name)
+    self.assertEqual(micro_batch.prompt_ids.shape, (4, 0))
+    self.assertEqual(micro_batch.num_segments, (segments or tokens) + 1)
+    # And the shapes the kernels are compiled for.
+    self.assertEqual(
+        _layout(maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)), _layout(micro_batch)
+    )
+
+  @parameterized.named_parameters(
+      ("fsdp_by_expert", (2, 2), ("fsdp", "expert"), 4),
+      ("data_by_fsdp_transpose", (3, 2), ("data", "fsdp_transpose"), 6),
+      # Tunix does not count axes that do not split the batch.
+      ("context_and_tensor_not_counted", (3, 2, 2), ("fsdp", "context", "tensor"), 3),
+  )
+  def test_packed_rows_follow_the_mesh(self, sizes, names, rows):
+    """A packed micro-batch has a row per device of the axes the batch is split over, not a set number of sequences."""
+    cfg = _grpo_config("compile_engine_max_seq_token_per_tpu=32")
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
+
+    micro_batch = maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo, AbstractMesh(sizes, names))
+
+    self.assertEqual(micro_batch.completion_ids.shape, (rows, 32))
+    self.assertNotEqual(rows, cfg.micro_batch_size_to_train_on)
+
+  def test_main_compiles_packed_micro_batch(self):
+    """The compiled program reads the packed micro-batch and aggregates the loss per packed sequence.
+
+    One row, as the mesh here is one device, holding two 32-token sequences; six segments, so `num_segments`
+    is 7, a count no other dimension of this model has.
+    """
+    packing = ("compile_engine_max_seq_token_per_tpu=64", "compile_engine_max_segments_per_packed_row=6")
+    output, engine, micro_batch, compiled = _run_main_and_capture(self, *_grpo_overrides(*packing))
+
+    self.assertEqual((micro_batch.completion_ids.shape, micro_batch.num_segments), ((1, 64), 7))
+    batch = compiled["fwd_bwd"].args_info[0][2]["train_example"]
+    self.assertEqual(_layout(batch), _layout(micro_batch))
+    self.assertEqual(batch.num_segments, 7)
+    # Every field is read but the per-token overlong flags, which `overlong_loss_masking`, off by default, reads;
+    # `jax.jit` drops the arguments a program never reads. The prompt part is empty.
+    state = engine.train_state_avals()
+    rows = _by_kernel(maxtext_engine_compile.memory_report(compiled, state))
+    self.assertEqual(
+        rows["fwd_bwd"].argument,
+        _subtree_bytes(state, "model") + _tree_bytes(micro_batch) - _tree_bytes(micro_batch.overlong),
+    )
+    # Tunix's loss sums per segment, into `[rows, num_segments]`, only for a packed micro-batch.
+    _, _, _, padded = _run_main_and_capture(self, *_GRPO_OVERRIDES)
+    per_segment = re.compile(r"f32\[1,7\]")
+    self.assertRegex(compiled["fwd_bwd"].as_text(), per_segment)
+    self.assertNotRegex(padded["fwd_bwd"].as_text(), per_segment)
+    self.assertIn(
+        "Compiling Tunix's GRPO loss, for packed micro-batches of 1 x 64 tokens, each row holding up to 6 sequences of "
+        "up to 8 prompt and 24 completion tokens.",
+        output.splitlines(),
+    )
+
+  def test_micro_batch_follows_the_compiled_mesh(self):
+    """The packed micro-batch `main` compiles for has a row per device of the mesh it compiles for, not of this host."""
+    cfg = _grpo_config("compile_engine_max_seq_token_per_tpu=32")
+
+    with mock.patch.object(maxtext_engine_compile, "AbstractMaxTextEngine"):
+      _, micro_batch = maxtext_engine_compile._engine_and_micro_batch(cfg, _FSDP_BY_EXPERT)
+
+    self.assertEqual(micro_batch.completion_ids.shape, (4, 32))
+
+  def test_rejects_a_row_shorter_than_a_rollout(self):
+    """Tunix's own check: 31 tokens cannot hold a 32-token rollout."""
+    cfg = _grpo_config("compile_engine_max_seq_token_per_tpu=31")
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
+
+    with self.assertRaisesRegex(ValueError, r"max_seq_token_per_tpu=31 is smaller than the longest possible sequence"):
+      maxtext_engine_compile.get_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)
+
+  def test_rejects_options_that_would_be_ignored(self):
+    for option, value in (
+        ("compile_engine_grpo_config", "{beta: 0.0}"),
+        ("compile_engine_logps_chunk_size", 4),
+        ("compile_engine_max_seq_token_per_tpu", 64),
+        ("compile_engine_router_replay", True),
+    ):
+      with self.subTest(option=option):
+        with self.assertRaisesRegex(ValueError, rf"so {option} would be ignored"):
+          _config(1, f"{option}={value}")
+    with self.assertRaisesRegex(ValueError, r"so it needs compile_engine_max_seq_token_per_tpu"):
+      _grpo_config("compile_engine_max_segments_per_packed_row=4")
+    with self.assertRaisesRegex(
+        ValueError, r"compile_engine_max_seq_token_per_tpu\s+Input should be greater than or equal to 0"
+    ):
+      _grpo_config("compile_engine_max_seq_token_per_tpu=-1")
+
+
+class GrpoRouterReplayCompileTest(parameterized.TestCase):
+  """`compile_engine_router_replay`: the rollouts' MoE routing, wherever Tunix's batch assembler carries it."""
+
+  def test_padded_micro_batch_carries_routed_experts(self):
+    """The routing is laid out as `PaddedBatchAssembler` lays it out, in the int16 the trainer receives."""
+    cfg = _grpo_config(*_QWEN35_OVERRIDES, "compile_engine_router_replay=True")
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
+    assembler = batch_assembly.PaddedBatchAssembler(
+        batch_size=2,
+        max_prompt_length=8,
+        max_response_length=24,
+        pad_id=maxtext_engine_compile.GRPO_PAD_ID,
+        num_generations=algo.num_generations,
+        mini_batch_size=1,
+    )
+
+    micro_batch = maxtext_engine_compile.get_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+
+    _assert_same_layout(self, micro_batch, _orchestrator_micro_batch(cfg, algo, assembler, num_rollouts=2, routed=True))
+    # A row per sequence, a slot per prompt and completion token, and top 2 of 4 experts in each of 4 layers.
+    self.assertEqual((micro_batch.routed_experts.shape, micro_batch.routed_experts.dtype), ((2, 32, 4, 2), np.int16))
+
+  def test_packed_micro_batch_routing_matches_tunix(self):
+    """The packed micro-batch carries `routed_experts` exactly where `SequencePackedBatchAssembler` does."""
+    cfg = _grpo_config(*_QWEN35_OVERRIDES, "compile_engine_router_replay=True", "compile_engine_max_seq_token_per_tpu=64")
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
+    assembler = batch_assembly.SequencePackedBatchAssembler(
+        batch_size=4,
+        num_generations=algo.num_generations,
+        mini_batch_size=1,
+        max_packed_len=64,
+        pad_id=maxtext_engine_compile.GRPO_PAD_ID,
+    )
+    expected = _orchestrator_micro_batch(cfg, algo, assembler, num_rollouts=8, routed=True)
+
+    micro_batch = maxtext_engine_compile.get_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)
+
+    _assert_same_layout(self, micro_batch, expected)
+
+  def test_main_compiles_router_replay(self):
+    """The compiled program reads the routing: it takes exactly the routing's bytes more than without it."""
+    _, _, _, unrouted = _run_main_and_capture(self, *_grpo_overrides(*_QWEN35_OVERRIDES))
+    output, _, micro_batch, compiled = _run_main_and_capture(
+        self, *_grpo_overrides(*_QWEN35_OVERRIDES, "compile_engine_router_replay=True")
+    )
+
+    routed_experts = compiled["fwd_bwd"].args_info[0][2]["train_example"].routed_experts
+    self.assertEqual((routed_experts.shape, routed_experts.dtype), ((2, 32, 4, 2), jnp.int16))
+    # `jax.jit` drops the arguments a program never reads.
+    argument, _ = _fwd_bwd_memory(compiled)
+    self.assertEqual(argument - _fwd_bwd_memory(unrouted)[0], _tree_bytes(micro_batch.routed_experts))
+    self.assertIn(
+        "The trainer replays the rollouts' routing: each token's 2 experts in each of 4 layers.", output.splitlines()
+    )
+
+  def test_main_compiles_packed_micro_batch_without_replay(self):
+    """When the packed micro-batch has no routing, router replay leaves the program as it is, and the report says why."""
+    packed = _grpo_overrides(*_QWEN35_OVERRIDES, "compile_engine_max_seq_token_per_tpu=64")
+    _, _, _, unrouted = _run_main_and_capture(self, *packed)
+    output, _, micro_batch, compiled = _run_main_and_capture(self, *packed, "compile_engine_router_replay=True")
+
+    if micro_batch.routed_experts is not None:
+      self.skipTest("Tunix's packed assembler carries routed_experts; test_main_compiles_router_replay covers that.")
+    self.assertEqual(_fwd_bwd_memory(compiled), _fwd_bwd_memory(unrouted))
+    self.assertIn(
+        "compile_engine_router_replay is set, but Tunix's batch assembler drops routed_experts from this micro-batch, "
+        "so the compiled trainer routes every token itself.",
+        output.splitlines(),
+    )
+
+  def test_rejects_a_model_without_routed_experts(self):
+    cfg = _grpo_config("compile_engine_router_replay=True")
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
+
+    with self.assertRaisesRegex(ValueError, r"num_experts=1 leaves this model without routed experts"):
+      maxtext_engine_compile.get_rl_micro_batch(cfg, algo, _FSDP_BY_EXPERT)
 
 
 def _fake_weight_sync_modules(bound: list) -> dict[str, types.ModuleType]:

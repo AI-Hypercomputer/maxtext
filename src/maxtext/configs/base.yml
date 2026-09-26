@@ -1154,6 +1154,14 @@ compile_engine_loss: "maxtext"
 # {beta: 0.0, use_rollout_logps: false}; and Tunix's compute_logps_chunk_size, 0 for no chunking.
 compile_engine_grpo_config: {}
 compile_engine_logps_chunk_size: 0
+# With compile_engine_loss=grpo: Tunix's max_seq_token_per_tpu and max_segments_per_packed_row. 0 tokens compiles for
+# the micro-batch Tunix's PaddedBatchAssembler builds; a positive number, for the rows of that many tokens its
+# SequencePackedBatchAssembler builds. 0 segments leaves a packed row's sequence count unset.
+compile_engine_max_seq_token_per_tpu: 0
+compile_engine_max_segments_per_packed_row: 0
+# With compile_engine_loss=grpo: the rollouts return their MoE routing (Tunix's return_routed_experts), which the
+# micro-batch carries as routed_experts wherever Tunix's batch assembler does, for the trainer to replay.
+compile_engine_router_replay: false
 
 # MaxText Estimator configs
 write_estimator_result: False

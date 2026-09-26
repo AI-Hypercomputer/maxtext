@@ -40,9 +40,11 @@ kernel is written to its own file, suffixed with the kernel name.
 MaxText's own loss on a pre-training batch. `grpo` is Tunix's GRPO loss, set up as Tunix's RL
 trainer sets up a live engine: the model behind the Tunix adapter, and the loss and input mapping
 from Tunix's `GRPOAdapter`, with the trainer's `GRPOConfig` options in `compile_engine_grpo_config`
-and its log-probability chunk size in `compile_engine_logps_chunk_size`. It is compiled for an
-`RLTrainerPayload` of `max_prefill_predict_length` prompt tokens and the rest of
-`max_target_length` completion tokens; see `get_shaped_rl_micro_batch`.
+and its log-probability chunk size in `compile_engine_logps_chunk_size`. It is compiled for the
+`RLTrainerPayload` Tunix's orchestrator builds from rollouts of `max_prefill_predict_length` prompt
+tokens and the rest of `max_target_length` completion tokens: padded, or sequence-packed with
+`compile_engine_max_seq_token_per_tpu`, and carrying the rollouts' MoE routing with
+`compile_engine_router_replay` wherever Tunix's batch assembler carries it; see `get_rl_micro_batch`.
 
 Each kernel's raw `memory_analysis()` is printed, followed by a per-device table built from it.
 The table corrects for two things the raw numbers hide: a donated buffer is counted in both the
@@ -79,6 +81,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+import numpy as np
 
 # Re-exported: which kernels there are is the engine's to say, and this module reports on
 # whatever it lowers.
@@ -695,29 +698,46 @@ def get_shaped_micro_batch(config: pyconfig.HyperParameters) -> dict[str, jax.Sh
   return {key: to_micro_batch(aval) for key, aval in shaped_batch.items()}
 
 
-def get_shaped_rl_micro_batch(config: pyconfig.HyperParameters, algo: Any) -> abstract_engine.RLTrainerPayload:
-  """Returns the abstract `RLTrainerPayload` one `fwd_bwd` call is given under Tunix's GRPO loss.
+def get_rl_micro_batch(
+    config: pyconfig.HyperParameters, algo: Any, mesh: jax.sharding.Mesh
+) -> abstract_engine.RLTrainerPayload:
+  """Returns one micro-batch as Tunix's orchestrator builds it for `algo`, from rollouts of the longest allowed length.
 
-  Laid out as Tunix's `PaddedBatchAssembler` lays out a micro-batch of rollouts that report their
-  log-probabilities and a status: token ids and a mask for the prompt; token ids, a mask, per-token
-  advantages and the rollout's log-probabilities for the completion; and one `overlong` flag per
-  sequence. As in the batches Tunix's orchestrator builds, `old_per_token_logps` is present when `algo`
-  takes the old policy's log-probabilities from the rollout, and `ref_per_token_logps` when it needs the
-  reference model's.
+  Built by Tunix's own code, as `StandardRLProgram` builds one, so that its layout is the trainer's by
+  construction: `algo.create_trainer_payloads` turns each group of `algo.num_generations` rollouts into
+  unbatched payloads, the batch assembler `create_batch_assembler` picks for the trainer assembles them, and
+  the reference model's log-probabilities are added when `algo` needs them. Its sampler-trainer agreement
+  step, which needs the trainer's own log-probabilities and adds `sampler_is_weights` when `sampler_is` is
+  `token`, is not run. The rollouts report their log-probabilities and a status and, with
+  `compile_engine_router_replay`, the experts they were routed to in every MoE layer.
 
-  The micro-batch has `micro_batch_size_to_train_on` sequences, as `get_shaped_micro_batch`'s does.
-  Each is `max_prefill_predict_length` prompt tokens followed by the rest of `max_target_length` as
-  completion tokens, the split `trainers/post_train/rl/train_rl.py` gives its rollout, so the model row
-  is `max_target_length` wide under either loss.
+  A rollout is `max_prefill_predict_length` prompt tokens (Tunix's `max_prompt_length`) followed by the rest
+  of `max_target_length` as completion tokens (`max_response_length`), the split
+  `trainers/post_train/rl/train_rl.py` gives its rollout. The assembler is:
+
+  - with `compile_engine_max_seq_token_per_tpu`, `SequencePackedBatchAssembler`, which packs whole rollouts
+    into rows of that many tokens, at most `compile_engine_max_segments_per_packed_row` to a row. There are as
+    many rows as the product of `mesh`'s data, fsdp, fsdp_transpose and expert axes, the trainer mesh
+    dimensions Tunix sizes a packed micro-batch by, and as many rollouts as fill them.
+  - otherwise `PaddedBatchAssembler`, which pads `micro_batch_size_to_train_on` rollouts (Tunix's
+    `train_micro_batch_size`) into a prompt part and a completion part.
+
+  The micro-batch is built in host memory, as the orchestrator builds one.
 
   Args:
     config: The configuration being compiled.
-    algo: Tunix's `GRPOAdapter`; its `use_rollout_logps` and `requires_reference_kl` decide the
-      optional fields.
+    algo: Tunix's `GRPOAdapter`, which decides the payload's optional fields.
+    mesh: The mesh being compiled for.
 
   Raises:
-    ValueError: If `max_prefill_predict_length` leaves the prompt or the completion empty.
+    ValueError: If `max_prefill_predict_length` leaves the prompt or the completion empty, if router replay
+      is asked of a model without routed experts, or if Tunix rejects the packing budget.
   """
+  # Imported here: only this path uses Tunix's RL orchestration.
+  from tunix.experimental.common import datatypes  # pylint: disable=import-outside-toplevel
+  from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=import-outside-toplevel
+  from tunix.rl import packing  # pylint: disable=import-outside-toplevel
+
   prompt_length = config.max_prefill_predict_length
   completion_length = config.max_target_length - prompt_length
   if prompt_length <= 0 or completion_length <= 0:
@@ -726,22 +746,109 @@ def get_shaped_rl_micro_batch(config: pyconfig.HyperParameters, algo: Any) -> ab
         f"max_prefill_predict_length ({prompt_length}) prompt tokens and the rest as completion tokens, so it "
         "needs 0 < max_prefill_predict_length < max_target_length."
     )
-  micro_batch_size = int(config.micro_batch_size_to_train_on)
-
-  def shaped(length: int, dtype: Any = jnp.float32) -> jax.ShapeDtypeStruct:
-    return jax.ShapeDtypeStruct((micro_batch_size, length), dtype)
-
-  return abstract_engine.RLTrainerPayload(
-      prompt_ids=shaped(prompt_length, jnp.int32),
-      prompt_mask=shaped(prompt_length),
-      completion_ids=shaped(completion_length, jnp.int32),
-      completion_mask=shaped(completion_length),
-      advantages=shaped(completion_length),
-      old_per_token_logps=shaped(completion_length) if algo.use_rollout_logps else None,
-      ref_per_token_logps=shaped(completion_length) if algo.requires_reference_kl else None,
-      rollout_per_token_logps=shaped(completion_length),
-      overlong=jax.ShapeDtypeStruct((micro_batch_size,), jnp.float32),
+  if config.compile_engine_router_replay and config.num_experts <= 1:
+    raise ValueError(
+        f"compile_engine_router_replay replays the rollouts' MoE routing, but num_experts={config.num_experts} "
+        "leaves this model without routed experts."
+    )
+  assembler = batch_assembly.create_batch_assembler(
+      num_generations=algo.num_generations,
+      # How many rollouts make an optimizer update decides when micro-batches are flushed, not their layout.
+      mini_batch_size=1,
+      train_micro_batch_size=int(config.micro_batch_size_to_train_on),
+      batch_config=batch_assembly.BatchConfig(
+          pad_id=GRPO_PAD_ID,
+          max_prompt_length=prompt_length,
+          max_response_length=completion_length,
+          max_seq_token_per_tpu=config.compile_engine_max_seq_token_per_tpu or None,
+          max_segments_per_packed_row=config.compile_engine_max_segments_per_packed_row or None,
+          trainer_fsdp=mesh.shape.get("fsdp"),
+          trainer_dp=mesh.shape.get("data"),
+          trainer_fsdp_transpose=mesh.shape.get("fsdp_transpose"),
+          trainer_expert=mesh.shape.get("expert"),
+      ),
   )
+  rollout_length = prompt_length + completion_length
+  rollouts_per_row = 1
+  if isinstance(assembler, batch_assembly.SequencePackedBatchAssembler):
+    max_segments = packing.effective_max_segments(assembler.max_packed_len, assembler.max_segments_per_packed_row)
+    rollouts_per_row = min(assembler.max_packed_len // rollout_length, max_segments)
+  num_rollouts = assembler.batch_size * rollouts_per_row
+
+  # Any id but the pad id, so that every token reads as a real one.
+  token = GRPO_PAD_ID + 1
+  rollout = {
+      "prompt_tokens": np.full(prompt_length, token, np.int32),
+      "conversation_tokens": np.full(completion_length, token, np.int32),
+      "conversation_masks": np.ones(completion_length, np.float32),
+      "old_logprobs": np.zeros(completion_length, np.float32),
+      "status": "SUCCEEDED",
+  }
+  if config.compile_engine_router_replay:
+    top_k = config.num_experts_per_tok
+    # Expert j in slot j of every layer, a valid routing for every token. A read-only view: the assembler copies
+    # it into the rows it builds, so the rollouts hold no copies of their own.
+    rollout["routed_experts"] = np.broadcast_to(
+        np.arange(top_k, dtype=np.int16), (rollout_length, config.num_decoder_layers, top_k)
+    )
+  group_size = algo.num_generations
+  payloads = []
+  for prompt_index in range(-(-num_rollouts // group_size)):
+    group = [
+        datatypes.TrajectoryItem(prompt_id=f"prompt_{prompt_index}", group_index=index, traj=dict(rollout))
+        for index in range(group_size)
+    ]
+    payloads.extend(algo.create_trainer_payloads(group, rewards=[float(index % 2) for index in range(group_size)]))
+  batches = assembler.feed(payloads[:num_rollouts]) + assembler.flush()
+  if len(batches) != 1:
+    raise RuntimeError(
+        f"Tunix's {type(assembler).__name__} assembled {num_rollouts} rollouts into {len(batches)} micro-batches, "
+        "not one."
+    )
+  micro_batch = batches[0].payload
+  if algo.requires_reference_kl:
+    micro_batch = batch_assembly.with_ref_per_token_logps(
+        micro_batch, np.zeros(np.shape(micro_batch.completion_ids), np.float32)
+    )
+  return micro_batch
+
+
+def get_shaped_rl_micro_batch(
+    config: pyconfig.HyperParameters, algo: Any, mesh: jax.sharding.Mesh
+) -> abstract_engine.RLTrainerPayload:
+  """Returns the shapes of `get_rl_micro_batch`'s micro-batch, which one `fwd_bwd` call is compiled for.
+
+  Its metadata, the rollouts' ids, is dropped: the engine drops it too before calling the loss.
+  """
+  micro_batch = get_rl_micro_batch(config, algo, mesh)
+  return jax.tree.map(lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype), micro_batch.replace(metadata={}))
+
+
+def _describe_rl_micro_batch(config: pyconfig.HyperParameters, micro_batch: abstract_engine.RLTrainerPayload) -> str:
+  """Returns what `main` prints about the RL micro-batch the kernels are compiled for."""
+  prompt_length = config.max_prefill_predict_length
+  completion_length = config.max_target_length - prompt_length
+  if micro_batch.segment_ids is None:
+    lines = [
+        f"Compiling Tunix's GRPO loss, for micro-batches of {micro_batch.prompt_ids.shape[0]} sequences of "
+        f"{prompt_length} prompt and {completion_length} completion tokens."
+    ]
+  else:
+    rows, tokens = micro_batch.completion_ids.shape
+    lines = [
+        f"Compiling Tunix's GRPO loss, for packed micro-batches of {rows} x {tokens} tokens, each row holding up to "
+        f"{micro_batch.num_segments - 1} sequences of up to {prompt_length} prompt and {completion_length} completion "
+        "tokens."
+    ]
+  if micro_batch.routed_experts is not None:
+    _, _, layers, top_k = micro_batch.routed_experts.shape
+    lines.append(f"The trainer replays the rollouts' routing: each token's {top_k} experts in each of {layers} layers.")
+  elif config.compile_engine_router_replay:
+    lines.append(
+        "compile_engine_router_replay is set, but Tunix's batch assembler drops routed_experts from this "
+        "micro-batch, so the compiled trainer routes every token itself."
+    )
+  return "\n".join(lines)
 
 
 def _grpo_engine(
@@ -752,7 +859,10 @@ def _grpo_engine(
   The loss, its input mapping and `has_aux` come from Tunix's `GRPOAdapter`, built from
   `compile_engine_grpo_config`, as Tunix's RL trainer configures a live engine with them. With
   `compile_engine_logps_chunk_size`, the input mapping also passes the loss that chunk size, as
-  Tunix's `TrainerWorker` does for its `logps_chunk_size`.
+  Tunix's `TrainerWorker` does for its `logps_chunk_size`. A packed micro-batch and the rollouts'
+  routing need no wiring of their own: the loss reads `segment_ids`, `segment_positions` and
+  `num_segments` off the payload, and passes its `routed_experts` to the model as
+  `forced_routed_experts`, as it does in the trainer.
   """
   # Imported here: only this path uses Tunix's RL algorithms.
   from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=import-outside-toplevel
@@ -762,8 +872,8 @@ def _grpo_engine(
   # `decode_sampling_temperature`.
   grpo_config = {"temperature": config.decode_sampling_temperature, **config.compile_engine_grpo_config}
   algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(**grpo_config))
-  # First, so an invalid prompt length fails before the model is built.
-  micro_batch = get_shaped_rl_micro_batch(config, algo)
+  # First, so an invalid prompt length or packing budget fails before the model is built.
+  micro_batch = get_shaped_rl_micro_batch(config, algo, topology_mesh)
   engine = AbstractMaxTextEngine(config, topology_mesh, wrap_with_tunix_adapter=True, tokenizer_pad_id=GRPO_PAD_ID)
   engine.with_loss_fn(algo.loss_fn(), has_aux=True)
   gen_model_input_fn = algo.build_gen_model_input_fn(pad_id=GRPO_PAD_ID, eos_id=GRPO_EOS_ID)
@@ -780,6 +890,15 @@ def _grpo_engine(
   return engine, micro_batch
 
 
+def _engine_and_micro_batch(
+    config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh
+) -> tuple[AbstractMaxTextEngine, Any]:
+  """Returns the abstract engine set up with `config.compile_engine_loss`, and the micro-batch to compile it for."""
+  if config.compile_engine_loss == "grpo":
+    return _grpo_engine(config, topology_mesh)
+  return AbstractMaxTextEngine(config, topology_mesh), get_shaped_micro_batch(config)
+
+
 def compile_engine(
     config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh
 ) -> tuple[AbstractMaxTextEngine, dict[str, Any]]:
@@ -794,10 +913,7 @@ def compile_engine(
   Returns:
     `(engine, {kernel name: jax.stages.Compiled})`, the dict keyed by `KERNEL_NAMES`.
   """
-  if config.compile_engine_loss == "grpo":
-    engine, micro_batch = _grpo_engine(config, topology_mesh)
-  else:
-    engine, micro_batch = AbstractMaxTextEngine(config, topology_mesh), get_shaped_micro_batch(config)
+  engine, micro_batch = _engine_and_micro_batch(config, topology_mesh)
   return engine, engine.compile_kernels(micro_batch)
 
 
@@ -837,15 +953,11 @@ def main(argv: Sequence[str]) -> None:
   # After the topology is built, so this does not initialize the local backend first.
   max_utils.print_system_information()
 
+  engine, micro_batch = _engine_and_micro_batch(config, topology_mesh)
   if config.compile_engine_loss == "grpo":
-    prompt_length = config.max_prefill_predict_length
-    print(
-        f"Compiling Tunix's GRPO loss, for micro-batches of {config.micro_batch_size_to_train_on} sequences of "
-        f"{prompt_length} prompt and {config.max_target_length - prompt_length} completion tokens.",
-        flush=True,
-    )
+    print(_describe_rl_micro_batch(config, micro_batch), flush=True)
   print("Jitting and compiling the engine's kernels...", flush=True)
-  engine, compiled = compile_engine(config, topology_mesh)
+  compiled = engine.compile_kernels(micro_batch)
   print("Jitting and compilation complete!", flush=True)
 
   # Saved first, so the executables are kept even if the report below raises.
