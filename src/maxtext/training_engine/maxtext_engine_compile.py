@@ -15,8 +15,8 @@
 """Ahead-of-time (XAOT) compilation of `MaxTextTrainingEngine`'s training step.
 
 `trainers/pre_train/train_compile.py` does this for `train.py`'s single fused `train_step`.
-The engine splits the same work across three kernels -- one forward/backward for the first
-micro-batch of an update, an accumulating one for every later micro-batch, and the optimizer
+The engine splits the same work across three kernels -- the forward/backward pass every
+micro-batch runs, the add that accumulates each later micro-batch's gradients, and the optimizer
 update -- so this compiles all three and reports the cost and memory of each.
 
 Nothing is materialized: the weights, the optimizer moments and the batch are all
@@ -38,16 +38,17 @@ kernel is written to its own file, suffixed with the kernel name.
 
 Each kernel's raw `memory_analysis()` is printed, followed by a per-device table built from it.
 The table corrects for two things the raw numbers hide: a donated buffer is counted in both the
-arguments and the outputs, and the forward/backward kernels are not passed the optimizer state,
-so it appears in neither of their analyses although it stays in HBM. The table ends with the
-TRAIN-KERNEL DEVICE PEAK: the largest, over the three kernels, of what the kernel holds plus the
-train state it runs alongside without being passed.
+arguments and the outputs, and a kernel's analysis sees only its own arguments, not what stays in
+HBM beside it -- the optimizer state and, on a later micro-batch, the running gradient sum beside
+`fwd_bwd`, and the model and optimizer state beside `accumulate`. The table ends with the
+TRAIN-KERNEL DEVICE PEAK: the largest, over the three kernels, of what the kernel holds plus what
+it runs alongside without being passed.
 
 That peak covers the three training kernels only. It excludes weight-sync staging (reported on
 its own line when it can be estimated; see `weight_sync_staging`), `fwd_only` / `model_scope`
 scoring, the eval kernel, generated code (as `max_utils.print_compiled_memory_stats` does), and
-anything the caller holds. It includes `fwd_bwd_accum` even though that kernel never runs at one
-micro-batch per update.
+anything the caller holds. It charges `fwd_bwd` with the running gradient sum even though there
+is none at one micro-batch per update.
 """
 
 import dataclasses
@@ -75,7 +76,7 @@ from maxtext.utils import model_creation_utils
 KERNEL_NAMES = maxtext_engine.KERNEL_NAMES
 
 # Both `dump_hlo` filters default to `jit_train_step`, `train.py`'s fused step; the engine's
-# kernels lower as `jit_<name>` for each of `KERNEL_NAMES` (`jit_fwd_bwd`, `jit_fwd_bwd_accum`,
+# kernels lower as `jit_<name>` for each of `KERNEL_NAMES` (`jit_fwd_bwd`, `jit_accumulate`,
 # `jit_update`), so on those defaults the dump comes back empty.
 HLO_DUMP_DEFAULTS = {
     "dump_hlo_local_module_name": f"jit_({'|'.join(KERNEL_NAMES)})",
@@ -99,13 +100,21 @@ _OPTIMIZER_KEY = maxtext_engine._OPTIMIZER_STATE_KEY  # pylint: disable=protecte
 
 # Per kernel, the top-level train-state subtrees that stay allocated while it runs but are not
 # among its arguments, so its `memory_analysis()` cannot see them. From the signatures
-# `_compile_for_batch` jits: the forward/backward kernels take the model state, a batch and, for
-# `fwd_bwd_accum`, the gradient sum, but never the optimizer; `update` takes the whole state.
+# `_compile_for_batch` jits: `fwd_bwd` takes the model state and a batch but never the optimizer,
+# `accumulate` takes gradients only, and `update` takes the whole state.
 STATE_NOT_PASSED = {
     "fwd_bwd": (_OPTIMIZER_KEY,),
-    "fwd_bwd_accum": (_OPTIMIZER_KEY,),
+    "accumulate": (_MODEL_KEY, _OPTIMIZER_KEY),
     "update": (),
 }
+
+# The running gradient sum is not train state, but it stays allocated from an update's first
+# micro-batch until `update` consumes it, so every later micro-batch runs `fwd_bwd` beside it
+# without passing it. It is exactly what `accumulate` returns, so it is sized from that kernel's
+# outputs. Charged whether or not a run accumulates: the caller picks the number of micro-batches
+# per update at run time.
+ACCUMULATOR = "gradient accumulator"
+ACCUMULATOR_NOT_PASSED = ("fwd_bwd",)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -129,7 +138,8 @@ class KernelMemory:
       donates the offloaded optimizer state, so it is in both `host_argument` and `host_output`.
     host_temp: Host scratch the kernel allocates while it runs, e.g. activations offloaded under
       `remat_policy=custom` with `decoder_layer_input=offload`. Host RAM, so not in `resident`.
-    not_passed: The train-state subtrees resident while this kernel runs but not passed to it.
+    not_passed: What is resident while this kernel runs but not passed to it: train-state
+      subtrees, and `ACCUMULATOR` for the running gradient sum beside `fwd_bwd`.
     device_not_passed: Their bytes in device memory.
     host_not_passed: Their bytes in host memory.
   """
@@ -157,7 +167,7 @@ class KernelMemory:
 
   @property
   def device_total(self) -> int:
-    """Device bytes in use while this kernel runs: its own, plus the train state it is not passed."""
+    """Device bytes in use while this kernel runs: its own, plus what it runs beside without being passed."""
     return self.resident + self.device_not_passed
 
 
@@ -187,8 +197,25 @@ def _tree_bytes_per_device(tree: Any) -> tuple[int, int]:
   return device, host
 
 
+def _accumulator_bytes(compiled: dict[str, Any]) -> int:
+  """Returns the device bytes of the running gradient sum: what `accumulate` returns.
+
+  Raises:
+    ValueError: If `accumulate` is not among `compiled` or has no memory analysis.
+  """
+  if "accumulate" not in compiled:
+    raise ValueError(
+        "fwd_bwd runs beside the running gradient sum, which is sized by accumulate's outputs, but accumulate "
+        "was not compiled."
+    )
+  stats = compiled["accumulate"].memory_analysis()
+  if stats is None:
+    raise ValueError("accumulate has no memory analysis on this backend, so there is nothing to report.")
+  return stats.output_size_in_bytes
+
+
 def memory_report(compiled: dict[str, Any], state: Any) -> list[KernelMemory]:
-  """Returns each kernel's per-device memory, including the train state it runs without being passed.
+  """Returns each kernel's per-device memory, including what it runs alongside without being passed.
 
   Args:
     compiled: `{kernel name: jax.stages.Compiled}`, as `compile_engine_kernels` returns it.
@@ -200,11 +227,12 @@ def memory_report(compiled: dict[str, Any], state: Any) -> list[KernelMemory]:
 
   Raises:
     ValueError: If a kernel is not in `STATE_NOT_PASSED`, has no memory analysis, or runs
-      alongside a subtree `state` lacks, or if `state` has a top-level subtree that is neither the
-      model nor in `STATE_NOT_PASSED`. Each would otherwise understate the peak.
+      alongside a subtree `state` lacks, if `state` has a top-level subtree that is neither the
+      model nor in `STATE_NOT_PASSED`, or if `fwd_bwd` comes without `accumulate`, which sizes the
+      gradient sum it runs beside. Each would otherwise understate the peak.
   """
-  # The model is passed to every kernel. Any other subtree must be classified, or it would be
-  # resident while a kernel runs yet counted in neither its arguments nor `+state`.
+  # Every subtree must be passed to a kernel or classified for it, or it would be resident while
+  # that kernel runs yet counted in neither its arguments nor `+state`.
   known = {_MODEL_KEY}.union(*STATE_NOT_PASSED.values())
   unknown = sorted(str(key) for key in state if key not in known)
   if unknown:
@@ -227,6 +255,9 @@ def memory_report(compiled: dict[str, Any], state: Any) -> list[KernelMemory]:
     if missing:
       raise ValueError(f"The train state has no {missing} subtree, which {name} is expected to run alongside.")
     device_not_passed, host_not_passed = _tree_bytes_per_device([state[key] for key in not_passed])
+    if name in ACCUMULATOR_NOT_PASSED:
+      not_passed += (ACCUMULATOR,)
+      device_not_passed += _accumulator_bytes(compiled)
     rows.append(
         KernelMemory(
             kernel=name,
@@ -338,7 +369,8 @@ def device_peak(rows: Sequence[KernelMemory]) -> KernelMemory:
   """Returns the kernel that sets the train-kernel device peak: the largest `device_total`.
 
   Not the largest `resident`: `update` is passed the optimizer state, so its own numbers usually
-  look largest, but a forward/backward kernel holds that same state on top of its activations.
+  look largest, but `fwd_bwd` runs beside that same state, and the gradient sum, on top of its
+  activations.
   """
   if not rows:
     raise ValueError("There are no kernels to take a peak over.")
@@ -382,13 +414,14 @@ def format_memory_report(rows: Sequence[KernelMemory], staging: WeightSyncStagin
 
   lines = [
       "Engine memory per device, GiB (2^30). resident = arg + out - alias + temp: a donated buffer is in",
-      "both arg and out, and alias is what they share. +state = train state in device memory while the",
-      "kernel runs that is not one of its arguments, so its memory analysis cannot see it. The host",
-      "columns are the same quantities in host memory (pinned_host), which XLA:CPU counts as device.",
-      "The peak below is these three kernels' only. NOT included: weight-sync staging (a copy of the",
-      "parameters in the rollout's layout, held until release_weight_sync), fwd_only/model_scope scoring,",
-      "the eval kernel, generated code, and anything the caller holds. It assumes gradient accumulation:",
-      "at one micro-batch per update fwd_bwd_accum never runs.",
+      "both arg and out, and alias is what they share. +state = what is in device memory while the kernel",
+      "runs without being one of its arguments, so its memory analysis cannot see it: train state and, for",
+      "the fwd_bwd of a later micro-batch, the gradient accumulator. The host columns are the same",
+      "quantities in host memory (pinned_host), which XLA:CPU counts as device. The peak below is these",
+      "three kernels' only. NOT included: weight-sync staging (a copy of the parameters in the rollout's",
+      "layout, held until release_weight_sync), fwd_only/model_scope scoring, the eval kernel, generated",
+      "code, and anything the caller holds. It assumes gradient accumulation, so fwd_bwd is charged with",
+      "the accumulator even though a step of one micro-batch has none, and accumulate does not run then.",
       _table_line("kernel", ((name, width, name) for name, width, _ in _TABLE_COLUMNS), "state not passed"),
   ]
   for row in rows:
@@ -397,8 +430,8 @@ def format_memory_report(rows: Sequence[KernelMemory], staging: WeightSyncStagin
 
   peak = device_peak(rows)
   if peak.not_passed:
-    state_name = " + ".join(f"{key} state" for key in peak.not_passed)
-    because = f"{peak.kernel} {gib(peak.resident)} + {state_name} {gib(peak.device_not_passed)} not passed to it"
+    held = " + ".join(key if key == ACCUMULATOR else f"{key} state" for key in peak.not_passed)
+    because = f"{peak.kernel} {gib(peak.resident)} + {held} {gib(peak.device_not_passed)} not passed to it"
     if peak.host_not_passed:
       because += f"; {gib(peak.host_not_passed)} GiB more of it is on host"
   else:
@@ -567,8 +600,8 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
   def train_state_avals(self) -> Any:
     """Returns the train state's pure form, as avals on the layouts the kernels were compiled against.
 
-    `memory_report` needs these because the optimizer state is not an argument of either
-    forward/backward kernel, so neither kernel's `memory_analysis()` includes it.
+    `memory_report` needs these because the optimizer state is not an argument of `fwd_bwd` or
+    `accumulate`, nor the model state of `accumulate`, so their `memory_analysis()` excludes them.
 
     Only valid after `compile_kernels()`, which moves the optimizer state onto its Zero-1 layout
     (`_shard_optimizer_state_over_data`); read earlier, the moments may come back replicated and
@@ -714,8 +747,8 @@ def main(argv: Sequence[str]) -> None:
     print(f"Cost analysis: {compiled[name].cost_analysis()}")
     print(f"Memory analysis: {compiled[name].memory_analysis()}")
 
-  # The raw analyses above see only each kernel's arguments. The report adds the train state each
-  # kernel runs alongside without being passed, and names the peak.
+  # The raw analyses above see only each kernel's arguments. The report adds what each kernel runs
+  # alongside without being passed, and names the peak.
   state = engine.train_state_avals()
   staging = weight_sync_staging(
       state,

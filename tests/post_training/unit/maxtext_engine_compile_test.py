@@ -125,19 +125,34 @@ def _header(lines: list[str]) -> str:
 class MemoryReportTest(absltest.TestCase):
   """The arithmetic, on stand-in executables whose numbers are chosen to tell the cases apart."""
 
-  def test_optimizer_added_to_fwd_bwd_not_update(self):
-    """Neither forward/backward kernel is passed the optimizer, yet it is in HBM while they run."""
+  def test_state_not_passed_added_to_the_kernels_that_run_beside_it(self):
+    """What a kernel runs beside without being passed it is in HBM while it runs, so it is added to its total.
+
+    `fwd_bwd` is not passed the optimizer or the running gradient sum, `accumulate` neither the model
+    nor the optimizer; `update` is passed all of it.
+    """
     optimizer = {"mu": _aval(8 * _MIB), "nu": _aval(8 * _MIB)}
-    compiled = _kernels(**{name: {"argument_size_in_bytes": 100 * _MIB} for name in maxtext_engine_compile.KERNEL_NAMES})
+    compiled = _kernels(
+        fwd_bwd={"argument_size_in_bytes": 100 * _MIB},
+        # Takes the 5 MiB running sum and a micro-batch's gradients, and returns the sum in place.
+        accumulate={
+            "argument_size_in_bytes": 10 * _MIB,
+            "output_size_in_bytes": 5 * _MIB,
+            "alias_size_in_bytes": 5 * _MIB,
+        },
+        update={"argument_size_in_bytes": 100 * _MIB},
+    )
 
     rows = _by_kernel(maxtext_engine_compile.memory_report(compiled, _state(optimizer)))
 
-    for name in ("fwd_bwd", "fwd_bwd_accum"):
-      with self.subTest(kernel=name):
-        self.assertEqual(rows[name].not_passed, ("optimizer",))
-        self.assertEqual(rows[name].device_not_passed, 16 * _MIB)
-        self.assertEqual(rows[name].device_total, 116 * _MIB)
-    # The update's own arguments already include the optimizer; adding it again double-counts it.
+    self.assertEqual(rows["fwd_bwd"].not_passed, ("optimizer", maxtext_engine_compile.ACCUMULATOR))
+    self.assertEqual(rows["fwd_bwd"].device_not_passed, 16 * _MIB + 5 * _MIB)
+    self.assertEqual(rows["fwd_bwd"].device_total, 121 * _MIB)
+    # `_state`'s model is 64 MiB.
+    self.assertEqual(rows["accumulate"].not_passed, ("model", "optimizer"))
+    self.assertEqual(rows["accumulate"].device_not_passed, 64 * _MIB + 16 * _MIB)
+    self.assertEqual(rows["accumulate"].device_total, 10 * _MIB + 80 * _MIB)
+    # The update's own arguments already include all of it; adding it again double-counts it.
     self.assertEqual(rows["update"].not_passed, ())
     self.assertEqual(rows["update"].device_not_passed, 0)
     self.assertEqual(rows["update"].device_total, 100 * _MIB)
@@ -193,21 +208,19 @@ class MemoryReportTest(absltest.TestCase):
         "temp_size_in_bytes": 10 * _MIB,
         "host_temp_size_in_bytes": offloaded,
     }
-    compiled = _kernels(fwd_bwd=forward, fwd_bwd_accum=forward)
+    compiled = _kernels(fwd_bwd=forward)
 
     rows = maxtext_engine_compile.memory_report(compiled, _state({}))
     report = maxtext_engine_compile.format_memory_report(rows).splitlines()
 
     self.assertIn("host temp", _header(report))
-    for name in ("fwd_bwd", "fwd_bwd_accum"):
-      with self.subTest(kernel=name):
-        row = _by_kernel(rows)[name]
-        self.assertEqual(row.host_temp, offloaded)
-        self.assertEqual(row.resident, 110 * _MIB)
-        self.assertEqual(row.device_total, 110 * _MIB)
-        cells = next(line for line in report if line.startswith(f"{name} ")).split()
-        # kernel, 7 device columns, host arg, host out, host alias, then host temp.
-        self.assertEqual(cells[11], f"{offloaded / _GIB:.2f}")
+    row = _by_kernel(rows)["fwd_bwd"]
+    self.assertEqual(row.host_temp, offloaded)
+    self.assertEqual(row.resident, 110 * _MIB)
+    self.assertEqual(row.device_total, 110 * _MIB)
+    cells = next(line for line in report if line.startswith("fwd_bwd ")).split()
+    # kernel, 7 device columns, host arg, host out, host alias, then host temp.
+    self.assertEqual(cells[11], f"{offloaded / _GIB:.2f}")
     self.assertEqual(_by_kernel(rows)["update"].host_temp, 0)
 
   def test_xla_counts_donated_buffer_twice(self):
@@ -223,7 +236,7 @@ class MemoryReportTest(absltest.TestCase):
     self.assertEqual(row.resident - row.temp, 2 * buffer.nbytes)
 
   def test_host_optimizer_not_counted_as_device(self):
-    """An optimizer in host memory moves from the forward/backward kernels' `+state` to `host state`."""
+    """An optimizer in host memory moves from `+state` to `host state` for each kernel it is not passed to."""
     for memory_kind in ("pinned_host", "unpinned_host"):
       with self.subTest(memory_kind=memory_kind):
         optimizer = {"mu": _aval(8 * _MIB, memory_kind=memory_kind), "nu": _aval(8 * _MIB, memory_kind=memory_kind)}
@@ -232,6 +245,9 @@ class MemoryReportTest(absltest.TestCase):
 
         self.assertEqual(rows["fwd_bwd"].device_not_passed, 0)
         self.assertEqual(rows["fwd_bwd"].host_not_passed, 16 * _MIB)
+        # The model stays in device memory beside `accumulate`.
+        self.assertEqual(rows["accumulate"].device_not_passed, 64 * _MIB)
+        self.assertEqual(rows["accumulate"].host_not_passed, 16 * _MIB)
 
   def test_device_and_unset_memory_kind_count_as_device(self):
     """A concrete mesh reports `device`; an abstract one, or a leaf not yet placed, reports None."""
@@ -267,7 +283,7 @@ class MemoryReportTest(absltest.TestCase):
     """The peak is the largest `device_total`, even when another kernel has the largest `resident`."""
     optimizer = {"mu": _aval(8 * _MIB), "nu": _aval(8 * _MIB)}
     compiled = _kernels(
-        fwd_bwd_accum={"argument_size_in_bytes": 60 * _MIB, "temp_size_in_bytes": 40 * _MIB},
+        fwd_bwd={"argument_size_in_bytes": 60 * _MIB, "temp_size_in_bytes": 40 * _MIB},
         update={"argument_size_in_bytes": 100 * _MIB, "temp_size_in_bytes": 10 * _MIB},
     )
 
@@ -275,25 +291,34 @@ class MemoryReportTest(absltest.TestCase):
     by_kernel = _by_kernel(rows)
     peak = maxtext_engine_compile.device_peak(rows)
 
-    self.assertGreater(by_kernel["update"].resident, by_kernel["fwd_bwd_accum"].resident)
-    self.assertEqual(peak.kernel, "fwd_bwd_accum")
+    self.assertGreater(by_kernel["update"].resident, by_kernel["fwd_bwd"].resident)
+    self.assertEqual(peak.kernel, "fwd_bwd")
     self.assertEqual(peak.device_total, 116 * _MIB)
 
   def test_verdict_names_peak_and_parts(self):
     # Sized in whole hundredths of a GiB so the expected strings are exact.
     compiled = _kernels(
         fwd_bwd={"argument_size_in_bytes": 40 * _GIB, "temp_size_in_bytes": 20 * _GIB},
-        fwd_bwd_accum={"argument_size_in_bytes": 42 * _GIB, "temp_size_in_bytes": int(20.5 * _GIB)},
+        # A 1.25 GiB running sum.
+        accumulate={
+            "argument_size_in_bytes": int(2.5 * _GIB),
+            "output_size_in_bytes": int(1.25 * _GIB),
+            "alias_size_in_bytes": int(1.25 * _GIB),
+        },
         update={"argument_size_in_bytes": 50 * _GIB},
     )
     on_device = {"mu": _aval(int(4.375 * _GIB)), "nu": _aval(int(4.375 * _GIB))}
     on_host = {key: _aval(int(4.375 * _GIB), memory_kind="pinned_host") for key in ("mu", "nu")}
     cases = (
-        (on_device, "TRAIN-KERNEL DEVICE PEAK: 71.25 GiB (fwd_bwd_accum 62.50 + optimizer state 8.75 not passed to it)"),
+        (
+            on_device,
+            "TRAIN-KERNEL DEVICE PEAK: 70.00 GiB (fwd_bwd 60.00 + optimizer state + gradient accumulator 10.00 not "
+            "passed to it)",
+        ),
         (
             on_host,
-            "TRAIN-KERNEL DEVICE PEAK: 62.50 GiB (fwd_bwd_accum 62.50 + optimizer state 0.00 not passed to it; "
-            "8.75 GiB more of it is on host)",
+            "TRAIN-KERNEL DEVICE PEAK: 61.25 GiB (fwd_bwd 60.00 + optimizer state + gradient accumulator 1.25 not "
+            "passed to it; 8.75 GiB more of it is on host)",
         ),
     )
     for optimizer, verdict in cases:
@@ -356,7 +381,8 @@ class MemoryReportTest(absltest.TestCase):
     header = _header(lines)
     row = next(line for line in lines if line.startswith("fwd_bwd "))
 
-    self.assertEqual(row.split(), ["fwd_bwd", *expected.values(), "optimizer"])
+    self.assertEqual(row.split()[: len(expected) + 1], ["fwd_bwd", *expected.values()])
+    self.assertTrue(row.endswith(f"   optimizer, {maxtext_engine_compile.ACCUMULATOR}"), row)
     # Right-aligned: each cell ends where its header ends, in this order left to right.
     position = len("kernel")
     for name, cell in expected.items():
@@ -393,6 +419,11 @@ class MemoryReportTest(absltest.TestCase):
     no_analysis.memory_analysis = lambda: None
     with self.assertRaisesRegex(ValueError, "has no memory analysis"):
       maxtext_engine_compile.memory_report({"update": no_analysis}, _state({}))
+    # `fwd_bwd` runs beside the running gradient sum, and only `accumulate` can size it.
+    with self.assertRaisesRegex(ValueError, "accumulate was not compiled"):
+      maxtext_engine_compile.memory_report({"fwd_bwd": _Compiled()}, _state({}))
+    with self.assertRaisesRegex(ValueError, "accumulate has no memory analysis"):
+      maxtext_engine_compile.memory_report({"fwd_bwd": _Compiled(), "accumulate": no_analysis}, _state({}))
 
   def test_weight_sync_staging_counts_new_buffers(self):
     """A cast to another dtype and a per-layer slice each make a buffer; a cast to a leaf's own dtype does not.
@@ -531,24 +562,28 @@ class CompiledMemoryReportTest(absltest.TestCase):
   # tiled-layout padding, so the byte counts are exactly equal only on XLA:CPU.
   @pytest.mark.cpu_only
   def test_report_matches_xla_allocation(self):
-    """The report's train-state bytes match XLA's, and the forward/backward kernels are not passed the optimizer.
+    """The report's bytes match XLA's, and each kernel is charged with what it runs beside.
 
-    `update` donates the whole train state, so its alias is XLA's own count of that state.
+    `update` donates the whole train state and `accumulate` the running gradient sum, so their
+    aliases are XLA's own counts of those. `fwd_bwd` is passed neither the optimizer nor the sum.
     """
     state = self._engine.train_state_avals()
     model, optimizer = _subtree_bytes(state, "model"), _subtree_bytes(state, "optimizer")
+    params, _ = nnx.split_state(state["model"], nnx.Param, ...)
+    # One float32 gradient per parameter, plus the float32 denominator.
+    gradient_sum = sum(maxtext_engine_compile.per_device_bytes(leaf)[0] for leaf in jax.tree.leaves(params)) + 4
     rows = _by_kernel(maxtext_engine_compile.memory_report(self._compiled, state))
 
     self.assertGreater(optimizer, 0)
     self.assertEqual(rows["update"].alias, model + optimizer)
     self.assertEqual(rows["update"].device_not_passed, 0)
-    for name in ("fwd_bwd", "fwd_bwd_accum"):
-      with self.subTest(kernel=name):
-        # The accumulating kernel also takes the donated gradient sum; set it aside.
-        own_arguments = rows[name].argument - rows[name].alias
-        self.assertGreaterEqual(own_arguments, model)
-        self.assertLess(own_arguments, model + optimizer, "the optimizer is among this kernel's arguments")
-        self.assertEqual(rows[name].device_not_passed, optimizer)
+    self.assertEqual(rows["accumulate"].alias, gradient_sum)
+    self.assertEqual(rows["accumulate"].device_not_passed, model + optimizer)
+    self.assertGreaterEqual(rows["fwd_bwd"].argument, model)
+    self.assertLess(rows["fwd_bwd"].argument, model + optimizer, "the optimizer is among fwd_bwd's arguments")
+    # Sized by what `accumulate` returns, which is the donated sum plus XLA's output tuple.
+    self.assertEqual(rows["fwd_bwd"].device_not_passed, optimizer + rows["accumulate"].output)
+    self.assertGreaterEqual(rows["accumulate"].output, gradient_sum)
 
   def test_train_state_avals_returns_copy(self):
     """The engine's cached state is re-placed in place on a recompile, so a caller must not share it."""
@@ -602,7 +637,7 @@ class CompiledMemoryReportTest(absltest.TestCase):
     self.assertLen(raw, len(maxtext_engine_compile.KERNEL_NAMES), "the raw analyses must still be printed")
     self.assertLen(verdict, 1)
     self.assertGreater(verdict[0], raw[-1])
-    self.assertRegex(lines[verdict[0]], r"^TRAIN-KERNEL DEVICE PEAK: \d+\.\d\d GiB \((fwd_bwd|fwd_bwd_accum|update)\b")
+    self.assertRegex(lines[verdict[0]], r"^TRAIN-KERNEL DEVICE PEAK: \d+\.\d\d GiB \((fwd_bwd|accumulate|update)\b")
     for name in maxtext_engine_compile.KERNEL_NAMES:
       self.assertLen([line for line in lines[raw[-1] : verdict[0]] if line.startswith(f"{name} ")], 1, name)
 
@@ -624,10 +659,10 @@ class OptimizerOffloadReportTest(absltest.TestCase):
   """`optimizer_memory_host_offload` on a real compile, where the raw analyses cannot show it."""
 
   def test_offload_moves_optimizer_out_of_peak(self):
-    """Offload leaves the forward/backward kernels' own analyses unchanged; the report's `+state` shows it.
+    """Offload leaves `fwd_bwd`'s and `accumulate`'s own analyses unchanged; the report's `+state` shows it.
 
-    Those kernels are not passed the optimizer, so their `memory_analysis()` is the same whether
-    it is in device or host memory.
+    Neither kernel is passed the optimizer, so its `memory_analysis()` is the same whether the
+    optimizer is in device or host memory.
     """
     reports = {}
     for offload in (False, True):
@@ -642,11 +677,12 @@ class OptimizerOffloadReportTest(absltest.TestCase):
     # All of it moves, scalars included, and nothing of it is left on the device.
     self.assertEqual(_subtree_bytes(on_state, "optimizer", memory=1), optimizer)
     self.assertEqual(_subtree_bytes(on_state, "optimizer"), 0)
-    for name in ("fwd_bwd", "fwd_bwd_accum"):
+    for name in ("fwd_bwd", "accumulate"):
       with self.subTest(kernel=name):
         self.assertEqual(on[name].resident, off[name].resident, "offload changed a kernel it is not passed to")
-        self.assertEqual((off[name].device_not_passed, off[name].host_not_passed), (optimizer, 0))
-        self.assertEqual((on[name].device_not_passed, on[name].host_not_passed), (0, optimizer))
+        # The optimizer moves from `+state` to `host state`; what else each kernel runs beside stays.
+        self.assertEqual(off[name].device_not_passed - on[name].device_not_passed, optimizer)
+        self.assertEqual((off[name].host_not_passed, on[name].host_not_passed), (0, optimizer))
         self.assertEqual(off[name].device_total - on[name].device_total, optimizer)
     self.assertEqual((off["update"].host_argument, off["update"].host_output), (0, 0))
     # `update` is passed the optimizer either way, so offload can only move its bytes between the
@@ -761,8 +797,10 @@ class Zero1MemoryReportTest(absltest.TestCase):
 
     self.assertIsNotNone(engine._zero1_params_shardings, "Zero-1 never engaged")
     model = _subtree_bytes(state, "model")
-    optimizer = rows["fwd_bwd"].device_not_passed
+    # `accumulate` runs beside the whole train state: its `+state` less the model is the optimizer as counted.
+    optimizer = rows["accumulate"].device_not_passed - model
     self.assertEqual(rows["update"].alias, model + optimizer)
+    self.assertEqual(rows["fwd_bwd"].device_not_passed, optimizer + rows["accumulate"].output)
     # The pre-compile, unsharded optimizer is ~4x larger and does not match XLA's count.
     self.assertNotEqual(rows["update"].alias, model + unsharded)
     self.assertGreater(unsharded, 3 * optimizer)

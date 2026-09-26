@@ -293,7 +293,7 @@ class Qwen35CompileParityTest(parameterized.TestCase):
     """A pad id that differs between the engines changes the HLO, so the parity test can see the wrap.
 
     The adapter synthesizes segment ids from `input_tokens != pad_id` when Tunix passes none, so the
-    pad id is a constant in both forward/backward kernels; the update never sees a token.
+    pad id is a constant in `fwd_bwd`; `accumulate` and `update` never see a token.
     """
     cfg = _config(**_RULE_SETS[0][1])
     mesh = maxtext_utils.get_mesh_from_config(cfg)
@@ -304,13 +304,11 @@ class Qwen35CompileParityTest(parameterized.TestCase):
     live = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh, wrap_with_tunix_adapter=True, tokenizer_pad_id=_PAD_ID)
     lowered_abstract, lowered_live = _lower(abstract, cfg), _lower(live, cfg)
 
-    for name in ("fwd_bwd", "fwd_bwd_accum"):
-      with self.subTest(kernel=name):
-        self.assertNotEqual(
-            _digest(_stablehlo(lowered_abstract[name])),
-            _digest(_stablehlo(lowered_live[name])),
-            f"{name}: a different pad id left the program unchanged, so the parity test cannot see the wrap",
-        )
+    self.assertNotEqual(
+        _digest(_stablehlo(lowered_abstract["fwd_bwd"])),
+        _digest(_stablehlo(lowered_live["fwd_bwd"])),
+        "a different pad id left fwd_bwd unchanged, so the parity test cannot see the wrap",
+    )
 
 
 if __name__ == "__main__":

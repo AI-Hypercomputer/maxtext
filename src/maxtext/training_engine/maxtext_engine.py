@@ -75,7 +75,7 @@ _DEVICE_MEMORY_KIND = "device"
 
 # The kernels an update is made of, in the order a step runs them. `compile_kernels()` is
 # keyed by these, and so is the ahead-of-time entry point in `maxtext_engine_compile`.
-KERNEL_NAMES = ("fwd_bwd", "fwd_bwd_accum", "update")
+KERNEL_NAMES = ("fwd_bwd", "accumulate", "update")
 
 _PURE_STATE_FALLBACK_WARNING = (
     "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
@@ -848,7 +848,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._model = new_model
     self._compiled = False
     self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
+    self._compiled_accumulate = None
     self._compiled_update = None
     self._compiled_eval = None
     self._compiled_eval_signature = None
@@ -868,7 +868,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._optimizer = new_optimizer
     self._compiled = False
     self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
+    self._compiled_accumulate = None
     self._compiled_update = None
     self._state_graphdef = None
     self._optimizer_device_shardings = None
@@ -899,7 +899,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._state = new_state
     self._compiled = False
     self._compiled_fwd_bwd = None
-    self._compiled_fwd_bwd_accum = None
+    self._compiled_accumulate = None
     self._compiled_update = None
     self._state_graphdef = None
     self._optimizer_device_shardings = None
@@ -1293,20 +1293,17 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return x
     return x.astype(self._config.grad_dtype)
 
-  def _fwd_bwd_kernel(self, params, rest, batch, acc_grads=None, acc_denom=None):
-    """Executes a single forward and backward pass and folds the result into the accumulator.
+  def _fwd_bwd_kernel(self, params, rest, batch):
+    """Executes a single forward and backward pass.
 
     Args:
       params: Pure `nnx.Param` state to differentiate against.
       rest: The model's remaining (non-parameter) pure state.
       batch: Loss-function inputs for this micro-batch.
-      acc_grads: Gradients accumulated over earlier micro-batches of this update, or None on
-        the first, which is what lets it skip allocating a parameter-sized buffer.
-      acc_denom: Denominator accumulated alongside `acc_grads`, or None with it.
 
     Returns:
-      `(primary_loss, aux_metrics, new_rest, acc_grads, acc_denom)`, where the last two are
-      this micro-batch folded into the running totals.
+      `(primary_loss, aux_metrics, new_rest, grads, denominator)`: this micro-batch's gradients in
+      the accumulation dtype, not yet normalized, and the loss denominator to normalize them by.
     """
     loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
@@ -1333,7 +1330,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if self._reduced_params_shardings is not None:
       # Tag the differentiated parameters `reduced` over the data axis, so their cotangents
-      # come out `unreduced` and the accumulation below stays replica-local -- the
+      # come out `unreduced` and their accumulation stays replica-local -- the
       # cross-replica all-reduce then runs once, in `_update_kernel`. Deliberately outside
       # `diff_wrapper`: autodiff transposes a reshard, so the same call one line further in
       # would put an all-reduce back into every micro-batch.
@@ -1345,10 +1342,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # differentiated, which `loss_out.primary_loss` already carries, so it is discarded here.
     (_, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
 
-    # Summed in `grad_accumulation_dtype` (default `grad_dtype`) and cast to `grad_dtype` once, in
-    # `_update_kernel`. `train.py` sums in the parameters' dtype, or in bf16 under
-    # `shard_optimizer_over_data` (`gradient_accumulation.py`). A float32 accumulator costs a
-    # float32 gradient tree held across kernel calls.
+    # Summed in `grad_accumulation_dtype` (default `grad_dtype`), by `_accumulate_kernel`, and
+    # cast to `grad_dtype` once, in `_update_kernel`. `train.py` sums in the parameters' dtype, or
+    # in bf16 under `shard_optimizer_over_data` (`gradient_accumulation.py`). A float32
+    # accumulator costs a float32 gradient tree held across kernel calls.
     micro_grads = jax.tree.map(self._to_accumulation_dtype, micro_grads)
 
     # Accumulated UNREDUCED, with no `1/denominator` applied: `_update_kernel` divides once
@@ -1356,10 +1353,30 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # per-micro-batch means, which overweights short micro-batches. Same as
     # `gradient_accumulation.py` in the pre-train path.
     denominator = loss_out.primary_loss.denominator.astype(jnp.float32)
-    if acc_grads is None:
-      return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads, denominator
-    acc_grads = jax.tree.map(jnp.add, acc_grads, micro_grads)
-    return loss_out.primary_loss, loss_out.aux_metrics, new_rest, acc_grads, acc_denom + denominator
+    return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads, denominator
+
+  @staticmethod
+  def _accumulate_kernel(acc_grads, acc_denom, grads, denominator):
+    """Adds one micro-batch's gradients and loss denominator to the running sums.
+
+    A kernel of its own rather than an input to `_fwd_bwd_kernel`. Given the running sum, XLA
+    can fold the add into the backward pass -- into the token embedding's gradient scatter-add,
+    for one, which then gathers an unsharded copy of that leaf -- and the higher peak can push
+    the scheduler into reordering for memory, at the cost of overlap. Kept apart, every
+    micro-batch runs the same forward/backward program, and every leaf is summed as written
+    here, by one elementwise add. Both operands are in the accumulation dtype, which
+    `_fwd_bwd_kernel` casts its gradients to, so that is the dtype the sum is taken in.
+
+    Args:
+      acc_grads: Gradients summed over the earlier micro-batches of this update.
+      acc_denom: Loss denominators summed alongside `acc_grads`.
+      grads: This micro-batch's gradients, as `_fwd_bwd_kernel` returns them.
+      denominator: This micro-batch's loss denominator.
+
+    Returns:
+      `(acc_grads + grads, acc_denom + denominator)`.
+    """
+    return jax.tree.map(jnp.add, acc_grads, grads), acc_denom + denominator
 
   def _update_kernel(
       self, state_pure, accumulated_grads, accumulated_denominator, mean_loss, optimizer_device_shardings=None
@@ -1645,7 +1662,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return jax.tree.map(lambda leaf: self._leaf_data_sharding(leaf, data_spec), dynamic_batch)
 
   def _compile_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
-    """JIT-compiles the fwd/bwd and update kernels for one batch structure.
+    """JIT-compiles the fwd/bwd, accumulate and update kernels for one batch structure.
 
     `static_batch` is closed over rather than passed, so non-array loss arguments (Tunix's
     `algo_config`, `pad_id`, `eos_id`) never reach the jit boundary.
@@ -1672,9 +1689,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
       return self._fwd_bwd_kernel(params, rest, batch)
 
-    def fwd_bwd_accum(params, rest, dynamic, acc_grads, acc_denom):
-      batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
-      return self._fwd_bwd_kernel(params, rest, batch, acc_grads, acc_denom)
+    def accumulate(acc_grads, acc_denom, grads, denominator):
+      return self._accumulate_kernel(acc_grads, acc_denom, grads, denominator)
 
     def update(state_pure, accumulated_grads, accumulated_denominator, mean_loss):
       # `_optimizer_device_shardings` is read at trace time, after it is set below.
@@ -1690,9 +1706,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       batch_shardings = self._batch_data_shardings(dynamic_batch)
       # When the data-parallel all-reduce can be deferred, the gradients live on their own
       # shardings -- `params_shardings` plus an `unreduced` tag -- everywhere they cross a
-      # jit boundary: out of both fwd/bwd kernels, back into the accumulating one, and into
-      # the update. `params_shardings` stays untagged, so the weights themselves are
-      # unaffected; `_fwd_bwd_kernel` applies the matching `reduced` tag inside.
+      # jit boundary: out of `fwd_bwd`, into and out of `accumulate`, and into the update.
+      # `params_shardings` stays untagged, so the weights themselves are unaffected;
+      # `_fwd_bwd_kernel` applies the matching `reduced` tag inside.
       self._reduced_params_shardings, self._unreduced_grad_shardings = _deferred_all_reduce_shardings(
           self._config, self._mesh, params_shardings
       )
@@ -1707,9 +1723,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         self._plain_grad_shardings = None
       else:
         self._plain_grad_shardings = params_shardings
-      first_in_shardings = (params_shardings, rest_shardings, batch_shardings)
-      accum_in_shardings = first_in_shardings + (grad_shardings, replicated)
+      fwd_bwd_in_shardings = (params_shardings, rest_shardings, batch_shardings)
       fwd_bwd_out_shardings = (None, None, rest_shardings, grad_shardings, replicated)
+      # The running sums, then the micro-batch's gradients and denominator, laid out alike.
+      accumulate_out_shardings = (grad_shardings, replicated)
+      accumulate_in_shardings = accumulate_out_shardings * 2
       update_in_shardings = (state_mesh_shardings, grad_shardings, replicated, None)
       update_out_shardings = (state_mesh_shardings, None, None)
       # Under offload the optimizer's shardings above are `pinned_host`; `_update_kernel` moves the
@@ -1728,9 +1746,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         with self._sharding_ctx():
           self._accumulated_grads = jax.tree.map(_conform_accumulator, self._accumulated_grads, grad_shardings)
     else:
-      first_in_shardings = None
-      accum_in_shardings = None
+      fwd_bwd_in_shardings = None
       fwd_bwd_out_shardings = None
+      accumulate_in_shardings = None
+      accumulate_out_shardings = None
       update_in_shardings = None
       update_out_shardings = None
       self._reduced_params_shardings = None
@@ -1742,24 +1761,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._gathered_params_shardings = None
       self._optimizer_device_shardings = None
 
-    # 1. JIT Compile Micro FWD/BWD Pass.
+    # 1. JIT Compile Micro FWD/BWD Pass, and the add that accumulates it.
     #
-    # Two kernels: the first micro-batch has no accumulator to add to and allocates none,
-    # later ones fold in and donate it, so the sum is written back in place instead of
-    # materializing the micro gradients plus a fresh sum. `jax.jit` is lazy, so the second
-    # costs nothing when every update takes one micro-batch. `params` is deliberately NOT
-    # donated: JAX matches donations by shard-shape, not position, so it would alias the
-    # weights into the gradient output.
+    # Every micro-batch runs the same `fwd_bwd`, which is never passed the running sum: the
+    # first micro-batch's gradients start it, and `accumulate` adds each later one's to it (see
+    # `_accumulate_kernel` for why the two are apart).
+    # `params` is deliberately NOT donated to `fwd_bwd`: JAX matches donations by shard-shape,
+    # not position, so it would alias the weights into the gradient output. `accumulate`
+    # donates the running sums, so they are written back in place; not the micro-batch's
+    # gradients too, since every output already has a donated buffer and JAX would only warn.
+    # `jax.jit` is lazy, so `accumulate` costs nothing when every update takes one micro-batch.
     self._compiled_fwd_bwd = jax.jit(
         fwd_bwd,
-        in_shardings=first_in_shardings,
+        in_shardings=fwd_bwd_in_shardings,
         out_shardings=fwd_bwd_out_shardings,
     )
-    self._compiled_fwd_bwd_accum = jax.jit(
-        fwd_bwd_accum,
-        in_shardings=accum_in_shardings,
-        out_shardings=fwd_bwd_out_shardings,
-        donate_argnums=(3, 4),
+    self._compiled_accumulate = jax.jit(
+        accumulate,
+        in_shardings=accumulate_in_shardings,
+        out_shardings=accumulate_out_shardings,
+        donate_argnums=(0, 1),
     )
 
     # 2. JIT Compile Optimizer Update Pass.
@@ -1779,7 +1800,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # lowered again.
     self._jitted_kernels = {
         "fwd_bwd": self._compiled_fwd_bwd,
-        "fwd_bwd_accum": self._compiled_fwd_bwd_accum,
+        "accumulate": self._compiled_accumulate,
         "update": self._compiled_update,
     }
     self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
@@ -1814,7 +1835,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       dummy_data: abstract_engine.TrainerPayload,
       compiler_options: dict[str, Any] | None = None,
   ) -> None:
-    """Triggers SPMD compilation of the fwd_bwd, update and eval steps.
+    """Triggers SPMD compilation of the fwd_bwd, accumulate, update and eval kernels.
 
     Args:
       dummy_data: Sample TrainerPayload providing representative tensor shapes. Its shapes
@@ -1841,7 +1862,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     compiled = self.compile_kernels(dummy_data, compiler_options)
     self._compiled_fwd_bwd = compiled["fwd_bwd"]
-    self._compiled_fwd_bwd_accum = compiled["fwd_bwd_accum"]
+    self._compiled_accumulate = compiled["accumulate"]
     self._compiled_update = compiled["update"]
     self._compile_eval(dummy_data, compiler_options)
 
@@ -1900,10 +1921,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Not public: `jax.jit` offers no way to compile without lowering first, so this exists because
     `compile_kernels` needs it, not because a caller does. Routes through `_compile_for_batch`,
     the same method the live path calls on its first `fwd_bwd`, so the shapes and the shardings
-    are the live ones by construction. The accumulating kernel is lowered even for a
-    single-micro-batch run, where the live engine never traces it: omitting the kernel that holds
-    the extra parameter-sized accumulator would understate the peak that decides whether a
-    configuration fits.
+    are the live ones by construction. `accumulate` is lowered even for a single-micro-batch run,
+    where the live engine never traces it: its outputs are the running sum a later micro-batch's
+    `fwd_bwd` runs beside, which the memory report must count to decide whether a configuration
+    fits.
 
     Args:
       dummy_data: One micro-batch, real or abstract, whose structure must match the batches the
@@ -1936,8 +1957,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       _, _, _, grads_aval, denominator_aval = fwd_bwd.out_info
       return {
           "fwd_bwd": fwd_bwd,
-          "fwd_bwd_accum": self._jitted_kernels["fwd_bwd_accum"].lower(
-              params_aval, rest_aval, batch_aval, grads_aval, denominator_aval
+          "accumulate": self._jitted_kernels["accumulate"].lower(
+              grads_aval, denominator_aval, grads_aval, denominator_aval
           ),
           "update": self._jitted_kernels["update"].lower(state_aval, grads_aval, denominator_aval, mean_loss_aval),
       }
@@ -1973,24 +1994,21 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       signature = _batch_signature(dynamic_batch, static_batch)
       if not self._compiled or self._needs_recompile(signature, self._compiled_signature):
         self._compile_for_batch(dynamic_batch, static_batch)
-      # After any recompile, not before: reading first would hand the new kernel a pure
-      # state split against the old graph.
-      params, rest = self._read_model_pure(model)
-      with self._sharding_ctx():
-        if self._accumulated_grads is None:
-          loss, aux, new_rest, acc_grads, acc_denom = self._compiled_fwd_bwd(params, rest, dynamic_batch)
-        else:
-          # Both accumulators are donated here, so they are rebound from the outputs below.
-          loss, aux, new_rest, acc_grads, acc_denom = self._compiled_fwd_bwd_accum(
-              params, rest, dynamic_batch, self._accumulated_grads, self._accumulated_denominator
-          )
+      # The compiled `fwd_bwd` closes over the static half, so it is passed the traced one only.
+      fwd_bwd_kernel, accumulate_kernel, inputs = self._compiled_fwd_bwd, self._compiled_accumulate, dynamic_batch
     else:
       # The eager path honours `optimizer_memory_host_offload` too, as `_compile_for_batch` does.
       self._offload_optimizer_state()
-      params, rest = self._read_model_pure(model)
-      with self._sharding_ctx():
-        loss, aux, new_rest, acc_grads, acc_denom = self._fwd_bwd_kernel(
-            params, rest, batch, self._accumulated_grads, self._accumulated_denominator
+      fwd_bwd_kernel, accumulate_kernel, inputs = self._fwd_bwd_kernel, self._accumulate_kernel, batch
+    # After any recompile, not before: reading first would hand the new kernel a pure
+    # state split against the old graph.
+    params, rest = self._read_model_pure(model)
+    with self._sharding_ctx():
+      loss, aux, new_rest, acc_grads, acc_denom = fwd_bwd_kernel(params, rest, inputs)
+      if self._accumulated_grads is not None:
+        # The compiled kernel donates both running sums, so they are rebound from the outputs below.
+        acc_grads, acc_denom = accumulate_kernel(
+            self._accumulated_grads, self._accumulated_denominator, acc_grads, acc_denom
         )
     nnx.update(model, new_rest)
     self._publish_model_rest(new_rest)

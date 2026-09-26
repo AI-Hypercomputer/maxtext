@@ -1633,29 +1633,34 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * expected], rtol=1e-6)
 
   def test_grads_accumulate_in_grad_dtype(self):
-    """By default micro-batch gradients are accumulated in `grad_dtype`.
+    """By default micro-batch gradients are accumulated in `grad_dtype`, on the eager and the compiled path.
 
     Under bfloat16 each micro-batch is rounded to bf16 and summed in bf16, which saves device
     memory over a float32 sum; `grad_accumulation_dtype=float32` asks for the float32 sum.
     """
     cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
-    t = maxtext_engine.MaxTextTrainingEngine(cfg)
     third = np.float32(1.0) / np.float32(3.0)
-    t.with_loss_fn(
-        lambda model, *_a, **_k: abstract_engine.WeightedMetric(
-            unreduced_sum=jnp.sum(model.weights[...]) * third, denominator=jnp.array(1.0)
-        )
-    )
     num_micro_batches = 16
-    for _ in range(num_micro_batches):
-      t.fwd_bwd(DummyPayload())
-
     expected_sum = jnp.zeros((), jnp.bfloat16)
     for _ in range(num_micro_batches):
       expected_sum = expected_sum + jnp.asarray(third).astype(jnp.bfloat16)
-    for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
-      self.assertEqual(leaf.dtype, jnp.bfloat16)
-      np.testing.assert_array_equal(np.asarray(leaf, np.float32), np.full(leaf.shape, float(expected_sum)))
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+        t.with_loss_fn(
+            lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.sum(model.weights[...]) * third, denominator=jnp.array(1.0)
+            )
+        )
+        if compiled:
+          t.compile(DummyPayload())
+        for _ in range(num_micro_batches):
+          t.fwd_bwd(DummyPayload())
+
+        for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+          self.assertEqual(leaf.dtype, jnp.bfloat16)
+          np.testing.assert_array_equal(np.asarray(leaf, np.float32), np.full(leaf.shape, float(expected_sum)))
 
   # A per-micro-batch gradient and denominator for which each order of sum, divide and cast gives a
   # different bf16 result: 16 micro-batches of 1/13 over 3 tokens each give 0.025634766 summed in
@@ -1666,14 +1671,20 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   _DENOMINATOR = 3.0
   _MICRO_BATCHES = 16
 
-  def _run_scaled_micro_batches(self, cfg):
-    """Folds `_MICRO_BATCHES` micro-batches of gradient `_SCALE` over `_DENOMINATOR` tokens into a fresh engine."""
+  def _run_scaled_micro_batches(self, cfg, compiled):
+    """Folds `_MICRO_BATCHES` micro-batches of gradient `_SCALE` over `_DENOMINATOR` tokens into a fresh engine.
+
+    On the eager path, or through the compiled kernels if `compiled` is set.
+    """
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
     t = maxtext_engine.MaxTextTrainingEngine(cfg)
     t.with_loss_fn(
         lambda model, *_a, **_k: abstract_engine.WeightedMetric(
             unreduced_sum=jnp.sum(model.weights[...]) * self._SCALE, denominator=jnp.array(self._DENOMINATOR)
         )
     )
+    if compiled:
+      t.compile(DummyPayload())
     for _ in range(self._MICRO_BATCHES):
       t.fwd_bwd(DummyPayload())
     expected_sum = np.float32(0.0)
@@ -1689,16 +1700,22 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     or dropping the final cast each change the recorded norm; see `_SCALE`.
     """
     cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16", grad_accumulation_dtype="float32")
-    t, expected_sum, expected_mean = self._run_scaled_micro_batches(cfg)
-    for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
-      self.assertEqual(leaf.dtype, jnp.float32)
-      np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, expected_sum))
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        t, expected_sum, expected_mean = self._run_scaled_micro_batches(cfg, compiled)
+        for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+          self.assertEqual(leaf.dtype, jnp.float32)
+          np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, expected_sum))
+        np.testing.assert_array_equal(
+            np.asarray(t._accumulated_denominator),  # pylint: disable=protected-access
+            np.float32(self._DENOMINATOR * self._MICRO_BATCHES),
+        )
 
-    t.update()
-    mean_in_grad_dtype = float(jnp.asarray(expected_mean).astype(jnp.bfloat16))
-    self.assertEqual(mean_in_grad_dtype, 210 * 2.0**-13, "`_SCALE` no longer separates the orders")
-    grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
-    np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * mean_in_grad_dtype], rtol=1e-6)
+        t.update()
+        mean_in_grad_dtype = float(jnp.asarray(expected_mean).astype(jnp.bfloat16))
+        self.assertEqual(mean_in_grad_dtype, 210 * 2.0**-13, "`_SCALE` no longer separates the orders")
+        grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
+        np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * mean_in_grad_dtype], rtol=1e-6)
 
   def test_float32_grad_dtype_stays_float32(self):
     """Under grad_dtype=float32 the default is float32 end to end: nothing is rounded through bf16.
@@ -1707,14 +1724,16 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     optimizer fails here.
     """
     cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="float32")
-    t, expected_sum, expected_mean = self._run_scaled_micro_batches(cfg)
-    for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
-      self.assertEqual(leaf.dtype, jnp.float32)
-      np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, expected_sum))
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        t, expected_sum, expected_mean = self._run_scaled_micro_batches(cfg, compiled)
+        for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+          self.assertEqual(leaf.dtype, jnp.float32)
+          np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, expected_sum))
 
-    t.update()
-    grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
-    np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * float(expected_mean)], rtol=1e-6)
+        t.update()
+        grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
+        np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * float(expected_mean)], rtol=1e-6)
 
   def test_bf16_weights_accumulate_in_float32(self):
     """The default accumulates in `grad_dtype`, not the weights' dtype, so bf16 weights keep a float32 sum.
@@ -1722,15 +1741,47 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     `train.py` sums these in bf16, the parameters' dtype -- a known difference from it.
     """
     cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="float32")
-    model = DummyNNXModel()
-    model.weights = nnx.Param(jnp.array([1.0, 2.0], jnp.bfloat16))
-    self.mock_from_pretrained.return_value = (model, self.mock_from_pretrained.return_value[1])
-    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        model = DummyNNXModel()
+        model.weights = nnx.Param(jnp.array([1.0, 2.0], jnp.bfloat16))
+        self.mock_from_pretrained.return_value = (model, self.mock_from_pretrained.return_value[1])
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+        t.with_loss_fn(self._weighted_loss_fn)
+        if compiled:
+          t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+          self.assertEqual(leaf.dtype, jnp.float32)
+          # 8.0 per element per micro-batch; see `_weighted_loss_fn`.
+          np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, 16.0))
+
+  def test_compiled_micro_batches_share_fwd_bwd_and_accumulate_in_place(self):
+    """Every compiled micro-batch runs the one `fwd_bwd`, and each after the first adds into the donated sum.
+
+    The running sum is never an argument of `fwd_bwd` (see `_accumulate_kernel`), and `accumulate`
+    writes it back in place rather than allocating a second parameter-sized tree.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
     t.with_loss_fn(self._weighted_loss_fn)
-    t.fwd_bwd(DummyPayload())
-    t.fwd_bwd(DummyPayload())
-    for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
-      self.assertEqual(leaf.dtype, jnp.float32)
+    t.compile(DummyPayload())
+    with (
+        mock.patch.object(t, "_compiled_fwd_bwd", wraps=t._compiled_fwd_bwd) as fwd_bwd,
+        mock.patch.object(t, "_compiled_accumulate", wraps=t._compiled_accumulate) as accumulate,
+    ):
+      t.fwd_bwd(DummyPayload())
+      accumulate.assert_not_called()
+      first_sum = jax.tree.leaves(t._accumulated_grads)
+      t.fwd_bwd(DummyPayload())
+      t.fwd_bwd(DummyPayload())
+
+    self.assertEqual(fwd_bwd.call_count, 3)
+    self.assertEqual(accumulate.call_count, 2)
+    self.assertTrue(all(leaf.is_deleted() for leaf in first_sum), "the running sum was copied, not donated")
+    # 8.0 per element and a denominator of 4.0 per micro-batch, summed unreduced; see `_weighted_loss_fn`.
+    np.testing.assert_array_equal(np.asarray(t._accumulated_grads["weights"]), [24.0, 24.0])
+    np.testing.assert_array_equal(np.asarray(t._accumulated_denominator), np.float32(12.0))
 
   def test_empty_grad_accumulation_dtype_is_default(self):
     """`grad_accumulation_dtype=` on the command line, which reaches pydantic as None, selects the default."""

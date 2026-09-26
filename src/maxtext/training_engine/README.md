@@ -92,12 +92,17 @@ and does not use the engine.
 
 | call | kernel | takes | returns |
 |---|---|---|---|
-| `fwd_bwd(micro_batch)`, first of a step | `fwd_bwd` | params, rest, batch | loss, aux, rest, grads, denominator |
-| `fwd_bwd(micro_batch)`, later ones | `fwd_bwd_accum` | params, rest, batch, accumulator (donated) | the same, with grads added to the accumulator |
+| `fwd_bwd(micro_batch)` | `fwd_bwd` | params, rest, batch | loss, aux, rest, grads, denominator |
+| `fwd_bwd(micro_batch)`, after the first of a step | `accumulate`, after `fwd_bwd` | accumulator and its denominator (both donated), grads, denominator | the sums |
 | `update()` | `update` | train state (donated), accumulator, denominator | new state, grad norm, skipped flag |
 | `model_scope(*inputs)` | none; the caller jits | inputs | yields the model and the placed inputs under the sharding rules |
 | `fwd_only(fn, *inputs)` | none; `fn` jits | inputs | `fn(model, ...)` |
 | `eval_step(batch)` | eval | params, rest, batch | loss, aux |
+
+Every micro-batch runs the same `fwd_bwd` program. The first micro-batch's gradients start the
+accumulator, and `accumulate` adds each later one's to it in place. The accumulator is not passed to
+`fwd_bwd` because XLA could then fold the add into the backward pass, which raises that program's peak
+memory.
 
 `model_scope` implements Tunix's `AbstractTrainer.model_scope`, which Tunix uses to score per-token
 log-probabilities with the trainer's weights.
@@ -130,16 +135,18 @@ The tool compiles the three training kernels for the topology on CPU and prints 
 
 - `arg`, `out`, `alias` and `temp`, and their `host` counterparts, come from `memory_analysis()`.
 - `resident = arg + out - alias + temp`, since a donated buffer is counted in both `arg` and `out`.
-- `+state` is train state that stays in device memory while the kernel runs but is not one of its
-  arguments: the optimizer state, for both forward/backward kernels (`host state` if it is
-  offloaded). Their raw analyses therefore do not change when the optimizer is offloaded; only
-  `update`'s does.
+- `+state` is what stays in device memory while the kernel runs but is not one of its arguments. For
+  `fwd_bwd` that is the optimizer state (`host state` if it is offloaded) and the gradient
+  accumulator of the earlier micro-batches, sized by `accumulate`'s outputs; for `accumulate` it is
+  the model and optimizer state. The raw analyses of these two kernels therefore do not change when
+  the optimizer is offloaded; only `update`'s does.
 - `total = resident + +state`.
 
-The last line, `TRAIN-KERNEL DEVICE PEAK`, is the largest `total` over the three kernels. It covers
-only those kernels: `fwd_only` / `model_scope` scoring, the eval kernel, generated code and anything
-the caller holds are excluded, and so is weight-sync staging, which is estimated on its own
-`WEIGHT-SYNC STAGING` line when `use_weight_converter=false`.
+The last line, `TRAIN-KERNEL DEVICE PEAK`, is the largest `total` over the three kernels. It assumes
+gradient accumulation, so `fwd_bwd` is charged with the accumulator even when a step has one
+micro-batch. It covers only those kernels: `fwd_only` / `model_scope` scoring, the eval kernel,
+generated code and anything the caller holds are excluded, and so is weight-sync staging, which is
+estimated on its own `WEIGHT-SYNC STAGING` line when `use_weight_converter=false`.
 
 On TPU, `jax.Device.memory_stats()["peak_bytes_in_use"]` excludes XLA program temporaries, so it is
 not a substitute for this report.
