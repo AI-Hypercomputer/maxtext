@@ -144,8 +144,8 @@ MoE grouped matmuls are larger (about 180 ms in the f1 profile).
 
 | KDA lever | per-layer saving | step saving (est.) | risk |
 |---|---|---|---|
-| BC 8 + floor 10 | 0.94 ms | ~13 ms, ~1.5% | floor 11 measured loss-neutral |
-| BC 16 + floor 5 | 1.32 ms | ~18 ms, ~2% | floor 5 clips decays, needs a loss check |
+| BC 8 + floor 10 | 0.94 ms | measured +1.3% (p2) | loss unchanged, adopted |
+| BC 16 + floor 5 | 1.32 ms | measured +1.9% (p3) | +0.016 loss, not taken |
 | fix the l2norm bwd layout or fuse it in-kernel | up to 1.1 ms | ~16 ms, ~2% | kernel change |
 
 For qwen3.5 the order flips. GDN is the bottleneck there, and routing it

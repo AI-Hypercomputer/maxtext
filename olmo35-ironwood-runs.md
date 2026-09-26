@@ -536,9 +536,10 @@ recomputing every layer costs 12.5% at pdb 3, and pdb 5 (117.7) still trails the
 pdb 3 control (122.1). pdb 6 OOMs at 99.86G against 94.74G. n1 reproduces l3
 (122.3), so the best config is unchanged at 10.59%.
 
-bf16 KDA vs fp32 KDA at pdb 4 (n3 vs n6): +0.008 loss at step 19, the same gap
-as the l-series, for a 9.4% throughput gain. `moe_dispatch=device` adds 1.2% at
-pdb 4 (n7 vs n3).
+n6 vs n3 at pdb 4: n6 drops the conv cast, so q/k/v reach the kernel in fp32.
+The conv cast is worth 9.4% here and costs +0.008 loss at step 19, the same gap
+as l3 vs l1. The p-series shows the gap comes from the bf16 q/k/v inputs, not
+from the kernel's bf16 math. `moe_dispatch=device` adds 1.2% at pdb 4 (n7 vs n3).
 
 ### o-series, KDA sub-block and decay floor (o35n262043)
 
@@ -559,15 +560,25 @@ the safe bound is BC x floor x log2(e) < 127, not BC/2 (see
 precision. The floor-11 arm is loss- and speed-neutral, which clears the way for
 BC 8 at floor 10.
 
-### In flight: p-series, BC under the corrected bound (o35n262111)
+### p-series, BC under the corrected bound (o35n262127 nap, o35s262111 flex)
 
-| arm | change | TF/s/dev | MFU |
-|---|---|---|---|
-| p1_ctrl | control | | |
-| p2_bc8_floor10 | BC 8, floor 10 (exponent 115) | | |
-| p3_bc16_floor5 | BC 16, floor 5 (exponent 115) | | |
-| p4_floor5 | floor 5 only (loss control for p3) | | |
-| p5_bc8_floor10_fp32kda | BC 8, floor 10, fp32 KDA math | | |
+Base n1. Loss at step 19 is identical on both routes.
+
+| arm | change | nap TF/s | flex TF/s | MFU (nap) | loss @19 |
+|---|---|---|---|---|---|
+| p1_ctrl | control | 121.6 | 122.5 | 10.54% | 10.836 |
+| **p2_bc8_floor10** | BC 8, floor 10 | **123.7** | **123.5** | **10.73%** | **10.836** |
+| p3_bc16_floor5 | BC 16, floor 5 | 124.5 | 124.0 | 10.79% | 10.852 |
+| p4_floor5 | floor 5 only | 122.0 | 122.1 | 10.57% | 10.833 |
+| p5_bc8_floor10_fp32kda | BC 8, floor 10, fp32 KDA math | 123.3 | lost | 10.69% | 10.836 |
+
+**BC 8 at floor 10 is the new base: +1.3% (mean of the two routes), with loss
+unchanged.** The microbench predicted about 1.5%. BC 16 is faster (+1.9%) but
+costs +0.016 loss. The floor-5 control is neutral (10.833), so the loss comes
+from BC 16 itself, likely bf16 precision on factors near 2^115. Not taken.
+
+**fp32 KDA kernel math is loss-neutral and nearly free** (p5 vs p2: 0.3%, same
+loss). The bf16 loss gap seen since l3 comes from the bf16 q/k/v inputs.
 
 ### KDA kernel, single device
 
