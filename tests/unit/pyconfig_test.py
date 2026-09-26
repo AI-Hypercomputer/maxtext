@@ -75,6 +75,60 @@ class PyconfigTest(unittest.TestCase):
       with self.subTest(**overrides), self.assertRaisesRegex(ValueError, message):
         initialize(**overrides)
 
+  def test_replace_returns_updated_copy(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()], skip_jax_distributed_system=True
+    )
+    original_batch = config.global_batch_size_to_train_on
+    replaced = config.replace(run_name="replaced", global_batch_size_to_train_on=3)
+    self.assertEqual(replaced.run_name, "replaced")
+    self.assertEqual(replaced.global_batch_size_to_train_on, 3)
+    self.assertNotEqual(config.run_name, "replaced")
+    self.assertEqual(config.global_batch_size_to_train_on, original_batch)
+    self.assertEqual(replaced.logical_axis_rules, config.logical_axis_rules)
+
+  def test_replace_rejects_unknown_fields(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()], skip_jax_distributed_system=True
+    )
+    with self.assertRaisesRegex(ValueError, "data_replica_indx"):
+      config.replace(data_replica_indx=1)
+
+  def test_replace_checks_data_replica_fields(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()], skip_jax_distributed_system=True
+    )
+    self.assertEqual(config.replace(num_data_replicas_per_process=2, data_replica_index=1).data_replica_index, 1)
+    with self.assertRaisesRegex(ValueError, "data_replica_index"):
+      config.replace(num_data_replicas_per_process=2, data_replica_index=2)
+    for updates in ({"colocated_python_data_input": True}, {"dataset_type": "c4_mlperf"}, {"dataset_type": "olmo_grain"}):
+      with self.subTest(**updates), self.assertRaisesRegex(ValueError, "num_data_replicas_per_process > 1"):
+        config.replace(num_data_replicas_per_process=2, **updates)
+
+  def test_data_replica_index_must_be_below_replica_count(self):
+    with self.assertRaisesRegex(ValueError, "data_replica_index"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          num_data_replicas_per_process=2,
+          data_replica_index=2,
+      )
+
+  def test_data_replica_fields_boundaries(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        num_data_replicas_per_process=3,
+        data_replica_index=2,
+    )
+    self.assertEqual(config.data_replica_index, 2)
+    with self.assertRaisesRegex(ValueError, "num_data_replicas_per_process"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          num_data_replicas_per_process=0,
+      )
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
