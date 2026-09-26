@@ -28,6 +28,21 @@ REL_REGRESSION_OTHER_RATIO = 1.20
 ABS_INCREASE_UNIT_SEC = 15.0
 ABS_INCREASE_INTEGRATION_SEC = 30.0
 
+# TODO: Remove this exclusion list once pytest-split is fixed to avoid cold-compile noise on first test in shard.
+# Modules excluded from per-test regression enforcement.
+# These modules have heavy XLA compilation costs that are shared across tests
+# within the same pytest-split shard. Because pytest-split randomly redistributes
+# tests across shards on every run, the first test in each shard pays a cold-compile
+# penalty (~30-130s) while subsequent tests reuse the cache (~4-25s). This creates
+# massive false-positive duration swings (e.g. 5s -> 130s) depending on shard
+# position, not code changes. Per-test regressions in these modules are logged as
+# warnings for visibility but do not fail the CI run.
+# See: https://github.com/AI-Hypercomputer/maxtext/pull/5308
+EXCLUDED_MODULES_PER_TEST = {
+    "tests.unit.moe_test",
+    "tests.unit.attention_test",
+}
+
 
 def extract_job_name(xml_file):
   """Extracts job/flavor name from XML filename."""
@@ -42,21 +57,25 @@ def extract_job_name(xml_file):
 
 
 def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
-  """Processes a single testcase and checks for limit violations or regressions."""
-  failed = False
+  """Processes a single testcase and checks for limit violations or regressions.
 
+  Returns:
+    A tuple of (module_name, time_val, is_integration, failed) where failed is True
+    only if the test regressed AND is not in the exclusion list.
+  """
   # 1. Skip processing for skipped tests to avoid corrupting the baseline with ~0s durations
   if testcase.find("skipped") is not None:
-    return False
+    return None, 0.0, False, False
 
   # 2. Skip processing for failed/errored tests to prevent capturing abnormally short durations
   if testcase.find("failure") is not None or testcase.find("error") is not None:
-    return False
+    return None, 0.0, False, False
 
   time_val = float(testcase.get("time", 0.0))
   name = testcase.get("name", "unknown")
   classname = testcase.get("classname", "unknown")
   full_name = f"{classname}.{name}"
+  module_name = classname.rsplit(".", 1)[0] if "." in classname else classname
 
   # Parse custom properties to extract markers
   markers = set()
@@ -83,6 +102,7 @@ def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_d
 
   # Skip regression checking for CPU tests due to shared CPU multi-tenancy noise
   skip_regression = is_cpu
+  failed = False
 
   # Check relative regression if baseline exists
   if not skip_regression and baseline_key in baseline_data:
@@ -91,7 +111,15 @@ def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_d
       ratio = time_val / base_time
       increase = time_val - base_time
       if ratio >= rel_regression_ratio and increase > abs_noise_threshold:
-        print(f"::error::[REGRESSION ALERT] {test_type} significantly degraded!")
+        is_excluded = module_name in EXCLUDED_MODULES_PER_TEST
+        if is_excluded:
+          print(
+              f"::warning::[PER-TEST REGRESSION ALERT] {test_type} significantly degraded"
+              + " (Warn-only: module excluded due to pytest-split sharding noise)."
+          )
+        else:
+          print(f"::error::[REGRESSION ALERT] {test_type} significantly degraded!")
+          failed = True
         print(f"  Test: {full_name}")
         print(f"  Flavor: {job_name}")
         print(f"  File: {os.path.basename(xml_file)}")
@@ -100,9 +128,8 @@ def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_d
         print(f"  Increase: +{increase:.2f}s ({(ratio - 1) * 100:.1f}%)")
         print(f"  Thresholds: >{(rel_regression_ratio - 1) * 100:.0f}% AND >{abs_noise_threshold}s")
         print("-" * 50)
-        failed = True
 
-  return failed
+  return module_name, time_val, is_integration, failed
 
 
 def main():
@@ -131,7 +158,7 @@ def main():
   )
   args = parser.parse_args()
 
-  xml_files = glob.glob(os.path.join(args.xml_dir, "*.xml"))
+  xml_files = sorted(glob.glob(os.path.join(args.xml_dir, "*.xml")))
   if not xml_files:
     print(f"No XML files found in {args.xml_dir}")
     sys.exit(0)
@@ -151,9 +178,12 @@ def main():
 
   total_times_by_job = {}
   total_tests_by_job = {}
+  total_times_by_module = {}
 
   for xml_file in xml_files:
     job_name = extract_job_name(xml_file)
+    if job_name not in total_times_by_module:
+      total_times_by_module[job_name] = {}
 
     try:
       tree = ET.parse(xml_file)
@@ -167,9 +197,15 @@ def main():
         time_val = float(testcase.get("time", 0.0))
         job_time += time_val
 
-        # Micro-level regression check
-        if process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
-          has_regression = True
+        # Per-test regression check (enforced for non-excluded modules, warn-only for excluded)
+        res = process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data)
+        if res and res[0] is not None:
+          module_name, t_val, is_integration, per_test_failed = res
+          if per_test_failed:
+            has_regression = True
+          if module_name not in total_times_by_module[job_name]:
+            total_times_by_module[job_name][module_name] = [0.0, is_integration]
+          total_times_by_module[job_name][module_name][0] += t_val
 
       if job_name != "unknown" or job_count > 0:
         total_times_by_job[job_name] = total_times_by_job.get(job_name, 0.0) + job_time
@@ -179,10 +215,37 @@ def main():
       print(f"Error parsing or processing {xml_file}: {e}")
       has_errors = True
 
+  # Check per-module regression
+  for job_name, modules in total_times_by_module.items():
+    is_cpu = "cpu" in job_name.lower()
+    if is_cpu:
+      continue
+
+    for module_name, (time_val, is_integration) in modules.items():
+      baseline_key = f"{job_name}::MODULE::{module_name}"
+      new_baseline_data[baseline_key] = time_val
+
+      if baseline_key in baseline_data:
+        base_time = baseline_data[baseline_key]
+        if isinstance(base_time, (int, float)) and base_time > 0:
+          ratio = time_val / base_time
+          increase = time_val - base_time
+          abs_noise_threshold = ABS_INCREASE_INTEGRATION_SEC if is_integration else ABS_INCREASE_UNIT_SEC
+
+          if ratio >= REL_REGRESSION_OTHER_RATIO and increase > abs_noise_threshold:
+            print(f"::error::[MODULE REGRESSION ALERT] Module {module_name} significantly degraded!")
+            print(f"  Flavor: {job_name}")
+            print(f"  Previous Duration: {base_time:.2f}s")
+            print(f"  New Duration: {time_val:.2f}s")
+            print(f"  Increase: +{increase:.2f}s ({(ratio - 1) * 100:.1f}%)")
+            print(f"  Thresholds: >{(REL_REGRESSION_OTHER_RATIO - 1) * 100:.0f}% AND >{abs_noise_threshold}s")
+            print("-" * 50)
+            has_regression = True
+
   # Output macro-level benchmark JSON if requested
   if args.output_benchmark:
     benchmarks = []
-    for job, total_time in total_times_by_job.items():
+    for job, total_time in sorted(total_times_by_job.items()):
       # Exclude CPU suites from macro-level dashboard tracking to avoid false alerts from CPU runner noise
       if "cpu" in job.lower():
         continue
@@ -237,7 +300,7 @@ def main():
     print("\nOne or more critical errors occurred during execution.")
     sys.exit(1)
   elif has_regression:
-    print("\nOne or more tests regressed significantly.")
+    print("\nOne or more tests or modules regressed significantly.")
     if args.warn_only:
       print("Non-blocking mode active: exiting with code 0.")
       sys.exit(0)
