@@ -255,7 +255,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_trainable_parameters_mask_freezes_updates_and_isolates_grad_norm(self):
     """trainable_parameters_mask freezes specified parameters and isolates grad_norm."""
+
     class MoEModel(nnx.Module):
+
       def __init__(self):
         self.router_gate = nnx.Param(jnp.array([10.0, 10.0]))
         self.weights = nnx.Param(jnp.array([1.0, 2.0]))
@@ -297,7 +299,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_trainable_parameters_mask_compiled(self):
     """trainable_parameters_mask works in compiled mode."""
+
     class MoEModel(nnx.Module):
+
       def __init__(self):
         self.router_gate = nnx.Param(jnp.array([10.0, 10.0]))
         self.weights = nnx.Param(jnp.array([1.0, 2.0]))
@@ -1693,9 +1697,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       return tokens, prompt, mask
 
     with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
-      tokens, prompt, mask = t.fwd_only(
-          fn, np.ones((2, 4), np.int32), empty_prompt, mask=np.ones((2,), np.int32)
-      )
+      tokens, prompt, mask = t.fwd_only(fn, np.ones((2, 4), np.int32), empty_prompt, mask=np.ones((2,), np.int32))
 
     self.assertEqual(tokens.sharding.spec, jax.sharding.PartitionSpec("data", None))
     # A rank-1 leaf absorbs only the leading entry of the `[batch, sequence]` spec.
@@ -1741,6 +1743,104 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       # when `fwd_only` queued its computation.
       write_metrics.assert_called_once()
       self.assertIsNone(t._throttler._pending_metrics)
+
+  def test_optimizer_memory_host_offload_places_optimizer_state_on_pinned_host(self):
+    """`_offload_optimizer_state_to_host` moves optimizer leaves to `pinned_host` and is idempotent."""
+    cfg = self.setup_config(optimizer_memory_host_offload=True)
+    with mock.patch.object(
+        maxtext_engine.train_utils,
+        "create_training_optimizer",
+        return_value=(lambda step: jnp.array(0.001), optax.adamw(0.01)),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
+
+    placed_targets = []
+
+    def _fake_place_leaf(leaf, target):
+      placed_targets.append(target)
+      return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=target)
+
+    t._refresh_pure_state()
+    t._place_state_on_mesh()
+    with mock.patch.object(t, "_place_leaf", side_effect=_fake_place_leaf):
+      t._offload_optimizer_state_to_host()
+      first_count = len(placed_targets)
+      self.assertGreater(first_count, 0)
+      self.assertTrue(all(s.memory_kind == "pinned_host" for s in placed_targets))
+      # Second call is a no-op since all optimizer leaves already have memory_kind="pinned_host".
+      t._offload_optimizer_state_to_host()
+      self.assertEqual(len(placed_targets), first_count)
+
+    state_pure = t._read_state_pure()
+    opt_leaves = jax.tree.leaves(state_pure["optimizer"])
+    self.assertTrue(
+        all(
+            t._mesh_sharding(leaf).memory_kind == "pinned_host"
+            for leaf in opt_leaves
+            if hasattr(leaf, "shape") and hasattr(leaf, "dtype")
+        )
+    )
+    model_leaves = jax.tree.leaves(state_pure["model"])
+    self.assertTrue(
+        all(
+            t._mesh_sharding(leaf).memory_kind != "pinned_host"
+            for leaf in model_leaves
+            if hasattr(leaf, "shape") and hasattr(leaf, "dtype")
+        )
+    )
+
+  def test_optimizer_memory_host_offload_matches_no_offload(self):
+    """`optimizer_memory_host_offload` runs the host/device plumbing without changing step math."""
+    host_paths = []
+    device_paths = []
+
+    def _run_two_steps(host_offload: bool):
+      cfg = self.setup_config(optimizer_memory_host_offload=host_offload, gradient_clipping_threshold=0.0)
+      mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
+      with mock.patch.object(
+          maxtext_engine.train_utils,
+          "create_training_optimizer",
+          return_value=(lambda step: jnp.array(0.01), optax.adamw(0.01)),
+      ):
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+      t.with_loss_fn(self._weighted_loss_fn)
+      payload = DummyPayload()
+
+      orig_to_host = maxtext_engine.maxtext_utils_nnx.move_memory_to_host
+      orig_to_device = maxtext_engine.maxtext_utils_nnx.move_memory_to_device
+
+      def _record_host(path, sharding):
+        host_paths.append(path)
+        # Verify move_memory_to_host produces pinned_host, then return the CPU-executable sharding.
+        self.assertEqual(orig_to_host(path, sharding).memory_kind, "pinned_host")
+        return sharding
+
+      def _record_device(path, sharding):
+        device_paths.append(path)
+        self.assertEqual(orig_to_device(path, sharding).memory_kind, "device")
+        return sharding
+
+      with (
+          mock.patch.object(maxtext_engine.maxtext_utils_nnx, "move_memory_to_host", side_effect=_record_host),
+          mock.patch.object(maxtext_engine.maxtext_utils_nnx, "move_memory_to_device", side_effect=_record_device),
+      ):
+        t.compile(payload)
+        for _ in range(2):
+          t.fwd_bwd(payload)
+          t.update()
+      return np.asarray(t.model.weights.value), t._device_optimizer_shardings
+
+    weights_off, device_shardings_off = _run_two_steps(host_offload=False)
+    self.assertIsNone(device_shardings_off)
+    self.assertEmpty(host_paths)
+    self.assertEmpty(device_paths)
+
+    weights_on, device_shardings_on = _run_two_steps(host_offload=True)
+    self.assertIsNotNone(device_shardings_on)
+    self.assertNotEmpty(host_paths)
+    self.assertNotEmpty(device_paths)
+    np.testing.assert_allclose(weights_on, weights_off, rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":
