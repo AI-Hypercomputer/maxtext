@@ -27,14 +27,17 @@ from collections.abc import Iterator, Sequence
 import os
 import pathwaysutils
 import itertools
+import time
 from typing import Any
 
 from absl import app
+from flax.core.spmd import logical_axis_rules
 
 import jax
 import jax.numpy as jnp
 
 from maxtext.common.data_loader import DataLoader
+from maxtext.common.profiler import Profiler
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 from maxtext.training_engine import maxtext_engine
@@ -86,7 +89,8 @@ def run_training_loop(
   data_iterator, _ = create_data_iterator(config, mesh)
   data_loader = DataLoader(config, mesh, data_iterator, goodput_recorder=None)
 
-  engine.restore_checkpoint()
+  if config.enable_checkpointing:
+    engine.restore_checkpoint()
 
   start_step = engine.train_step
   train_utils.validate_completed_steps(start_step, config.steps)
@@ -102,17 +106,50 @@ def run_training_loop(
   engine.compile(first_batch)
   stream = itertools.chain([first_batch], stream)
 
+  # `MaxTextTrainingEngine._profiler` (`MicroStepProfiler`) only wraps `fwd_bwd` and
+  # counts `skip_first_n_steps_for_profiler` / `profiler_steps` in micro-steps rather
+  # than optimizer steps. Disable it here and use MaxText's standard `Profiler` around
+  # the outer loop so `skip_first_n_steps_for_profiler` and `profiler_steps` capture
+  # full optimizer steps (`N * fwd_bwd + 1 * update`) identically to `pre_train/train.py`.
+  # pylint: disable=protected-access
+  engine._profiler.do_not_profile = True
+  prof = Profiler(config, offset_step=start_step)
+
+  # Precompute per-step token count and per-device TFLOPs for throughput logging.
+  num_devices = jax.device_count()
+  tokens_per_step = config.per_device_batch_size * num_devices * num_micro_steps * config.max_target_length
+  total_tflops, _, _ = maxtext_utils.calculate_tflops_training_per_device(config)
+
   max_logging.log(
-      f"Starting training engine loop at step {start_step}, running to {config.steps} "
-      f"({num_micro_steps} micro-step(s) per update)."
+      f"Starting training engine loop at step {start_step}, running to"
+      f" {config.steps} ({num_micro_steps} micro-step(s) per update,"
+      f" {tokens_per_step:.0f} tokens/step across {num_devices} devices,"
+      f" {total_tflops:.2f} TFLOPs/step/device)."
   )
 
   try:
-    for _ in range(start_step, config.steps):
-      for _ in range(num_micro_steps):
-        engine.fwd_bwd(next(stream))
-      engine.update()
-      engine.save_checkpoint(metadata=None)
+    for step in range(start_step, config.steps):
+      prof.maybe_activate_profiler(step, engine.state)
+      t0 = time.perf_counter()
+      with jax.profiler.StepTraceAnnotation("train", step_num=step):
+        for _ in range(num_micro_steps):
+          engine.fwd_bwd(next(stream))
+        engine.update()
+      # Wait for the step's asynchronous device execution (`update`) and metrics flush
+      # to complete before measuring step wall time or closing the profiler window.
+      engine._throttler.wait_for_all()
+      step_time_s = max(time.perf_counter() - t0, 1e-9)
+      tokens_per_sec_per_device = tokens_per_step / step_time_s / num_devices
+      tflops_per_dev = total_tflops / step_time_s
+      max_logging.log(
+          f"completed step: {step}, seconds: {step_time_s:.3f},"
+          f" train_step_time_ms: {step_time_s * 1000:.2f},"
+          f" TFLOP/s/device: {tflops_per_dev:.3f},"
+          f" Tokens/s/device: {tokens_per_sec_per_device:.2f}"
+      )
+      prof.maybe_deactivate_profiler(step, engine.state)
+      if config.enable_checkpointing:
+        engine.save_checkpoint(metadata=None)
   finally:
     engine.close()
 
@@ -126,8 +163,9 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   mesh = maxtext_utils.get_mesh_from_config(config)
-  engine = maxtext_engine.MaxTextTrainingEngine(config, mesh=mesh)
-  run_training_loop(config, engine, mesh)
+  with logical_axis_rules(config.logical_axis_rules):
+    engine = maxtext_engine.MaxTextTrainingEngine(config, mesh=mesh)
+    run_training_loop(config, engine, mesh)
 
 
 if __name__ == "__main__":
