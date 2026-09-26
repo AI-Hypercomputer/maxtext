@@ -530,6 +530,14 @@ Base j2 plus `kda_conv_in_compute_dtype` unless noted. plr = `olmoe3_per_layer_r
 | n6_plr_p4_fp32kda | 4 | plr, fp32 KDA | | |
 | n7_conv_plr_p4_disp | 4 | + plr, `moe_dispatch=device` | | |
 
+### KDA kernel, single device
+
+Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
+at pdb 3 against a 0.48 ms HBM roofline (6.4%). fp32 q/k/v inputs cost 1.83x,
+which predicts 87 ms of the 100 ms l3 win. The kda8 overflow patch (sub-block
+BC 16 to 4) costs 18%. BC 8 is safe at the 20-nat decay floor and saves 13%, so
+the launcher now takes a per-arm `KDA_BC=<n>` token.
+
 ## Profiles and xla-shell output
 
 Captures are pulled and analysed with `scripts/olmo35_profile_report.sh`, which

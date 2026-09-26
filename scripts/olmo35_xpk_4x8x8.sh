@@ -207,6 +207,17 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                     # Tokens starting with + are appended to LIBTPU_INIT_ARGS instead.
                     EV=""; LX="$LIBTPU"
                     for T in \$ENVX; do case "\$T" in +*) LX="\$LX \${T#+}";; *) EV="\$EV \$T";; esac; done
+                    # KDA_BC=<n> sets the tokamax KDA intra-chunk sub-block (installed value 4,
+                    # an overflow patch; safe while (n/2) x decay floor x log2(e) < 127).
+                    KD=\$(python3 -c "import tokamax,os;print(os.path.dirname(tokamax.__file__))")/_src/ops/experimental/kda
+                    [ -f /tmp/kda_fwd.bak ] || { cp \$KD/pallas_mosaic_tpu_fwd_kernel.py /tmp/kda_fwd.bak; cp \$KD/pallas_mosaic_tpu_bwd_kernel.py /tmp/kda_bwd.bak; }
+                    cp /tmp/kda_fwd.bak \$KD/pallas_mosaic_tpu_fwd_kernel.py; cp /tmp/kda_bwd.bak \$KD/pallas_mosaic_tpu_bwd_kernel.py
+                    BC=\$(echo "\$ENVX" | tr ' ' '\\n' | sed -n 's/^KDA_BC=//p')
+                    if [ -n "\$BC" ]; then
+                      sed -i "s/^  BC = 4  # kda8/  BC = \$BC  # kda8/" \$KD/pallas_mosaic_tpu_fwd_kernel.py
+                      sed -i "s/^  BC = min(4, BT)/  BC = min(\$BC, BT)/" \$KD/pallas_mosaic_tpu_bwd_kernel.py
+                      echo "KDA_BC=\$BC: \$(grep -c "BC = \$BC  # kda8" \$KD/pallas_mosaic_tpu_fwd_kernel.py) fwd, \$(grep -c "BC = min(\$BC, BT)" \$KD/pallas_mosaic_tpu_bwd_kernel.py) bwd"
+                    fi
                     env LIBTPU_INIT_ARGS="\$LX" \$EV python3 -m maxtext.trainers.pre_train.train \
                       /wt/src/maxtext/configs/base.yml \
                       model_name=\$M run_name=$RUN-\$M-\$NAME steps=$STEPS \
