@@ -52,6 +52,29 @@ def create_training_optimizer(config, model, mesh=None):
 
 def create_checkpoint_manager(config, mesh, init_state_fn):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
+  # Register colocated Python checkpointing dispatchers BEFORE creating any CheckpointManager
+  # so that PyTreeCheckpointHandler resolves array_metadata_store=None during its initialization.
+  #
+  # Why array_metadata_store=None is used in Pathways:
+  # In Pathways Colocated Python mode (SingleReplicaArrayHandler), array sharding and storage
+  # are managed centrally by the single controller via TensorStore (Zarr3/OCDBT headers such as
+  # zarr.json and the global PyTree _metadata manifest). Therefore, Orbax's per-process
+  # ArrayMetadata files (in array_metadatas/) are redundant. Setting array_metadata_store=None:
+  # 1. Eliminates the 600s timeout waiting for process_index=0 to create the array_metadatas/ directory.
+  # 2. Prevents "ValueError: No ArrayMetadata found for process_index=0" during elastic slice loss/recovery.
+  # 3. Reduces GCS object creation (PUT) and metadata read (GET) overhead during Save Finalize.
+  if getattr(config, "enable_single_controller", False) and getattr(config, "colocated_python_checkpointing", False):
+    max_logging.log("Registering colocated python array handler")
+    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+    )
+    ocp_pathways.register_type_handlers(
+        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
+        checkpointing_impl=checkpointing_impl,
+        primary_host=None,
+        array_metadata_store=None,
+    )
+
   # pass in model for muon
   # `setup_checkpoint_logger` only emits a deprecation warning now (Orbax v1 logs
   # internally) and always returns None; we still pass it through for API parity.
@@ -100,17 +123,6 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
         config.checkpoint_storage_target_data_file_size_bytes,
-    )
-
-  # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
-  if checkpoint_manager is not None and config.enable_single_controller and config.colocated_python_checkpointing:
-    max_logging.log("Registering colocated python array handler")
-    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
-        use_colocated_python=True,
-    )
-    ocp_pathways.register_type_handlers(
-        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
-        checkpointing_impl=checkpointing_impl,
     )
 
   return checkpoint_manager
@@ -233,7 +245,7 @@ def _reorder_data_iterator_for_loader(reorder_fn, data_iterator):
   return _ReorderedDataIterator(reorder_fn, data_iterator)
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, restore_checkpoint=True, checkpoint_manager=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
@@ -259,6 +271,11 @@ def setup_train_loop(config, recorder, devices=None):
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    with jax.set_mesh(mesh):
+      init_rng = jax.random.PRNGKey(config.init_weights_seed)
+      init_rng = jax.device_put(
+          init_rng, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+      )
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     # Create abstract NNX model.
     _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
@@ -276,8 +293,11 @@ def setup_train_loop(config, recorder, devices=None):
       return train_state_nnx.TrainStateNNX(model, optimizer)
 
     init_state_fn = create_train_state_fn
-    checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
-    if checkpoint_manager is not None:
+    # Elastic training re-enters setup_train_loop after a reshard with an
+    # already-open checkpoint manager; reuse it instead of opening a second one.
+    if checkpoint_manager is None:
+      checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
+    if checkpoint_manager is not None and restore_checkpoint:
       checkpoint_step = checkpointing.latest_step(checkpoint_manager)
       if checkpoint_step is not None:
         validate_completed_steps(checkpoint_step + 1, config.steps)
@@ -339,7 +359,7 @@ def setup_train_loop(config, recorder, devices=None):
     max_utils.maybe_bootstrap_te_moe(config, mesh, shaped_batch)
 
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
-        data_iterator, config, mesh, checkpoint_manager, init_state_fn
+        data_iterator, config, mesh, checkpoint_manager if restore_checkpoint else None, init_state_fn
     )
     if getattr(getattr(config, "lora", None), "enable_lora", False) and getattr(config.lora, "lora_restore_path", None):
       # Restore standalone LoRA adapter weights onto the base model state after initialization.
@@ -440,6 +460,14 @@ def setup_train_loop(config, recorder, devices=None):
 def validate_train_config(config):
   """Validates the configuration is set correctly for 'train.py'."""
 
+  if getattr(config, "elastic_enabled", False) and (
+      getattr(config, "enable_emergency_checkpoint", False) or getattr(config, "enable_multi_tier_checkpointing", False)
+  ):
+    raise ValueError(
+        "Emergency checkpointing and multi-tier checkpointing are not supported when elasticity is enabled "
+        "(elastic_enabled=True). Please disable enable_emergency_checkpoint and enable_multi_tier_checkpointing."
+    )
+
   if getattr(config, "use_dpo", False):
     raise ValueError("Legacy DPO implementation in train.py is removed. Please use post-training train_dpo.py instead.")
 
@@ -523,3 +551,58 @@ def maybe_cleanup_dcn_throttling(config):
     max_logging.log("DCN Bandwidth throttling cleaned up successfully.")
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.error(f"Failed to clean up DCN bandwidth throttling: {e}")
+
+
+def replicate_single_device_sharded_arrays(pytree):
+  """Replicates any single-device sharded arrays across the whole mesh."""
+  mesh = None
+  for leaf in jax.tree.leaves(pytree):
+    if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
+        leaf.sharding, jax.sharding.NamedSharding
+    ):
+      mesh = leaf.sharding.mesh
+      break
+  if mesh is None:
+    return pytree
+  replicated_sharding = jax.sharding.NamedSharding(
+      mesh, jax.sharding.PartitionSpec()
+  )
+
+  def _replicate(x):
+    if isinstance(x, (jax.Array, jax.ShapeDtypeStruct)) and isinstance(
+        x.sharding, jax.sharding.SingleDeviceSharding
+    ):
+      if isinstance(x, jax.ShapeDtypeStruct):
+        return jax.ShapeDtypeStruct(
+            x.shape, x.dtype, sharding=replicated_sharding
+        )
+      return jax.device_put(x, replicated_sharding)
+    return x
+
+  return jax.tree.map(_replicate, pytree)
+
+
+def restore_original_shardings(restored_pytree, original_abstract_pytree):
+  """Puts restored state back onto the original abstract state shardings."""
+  def _put(restored_leaf, abstract_leaf):
+    if hasattr(restored_leaf, "sharding") and hasattr(abstract_leaf, "sharding"):
+      if restored_leaf.sharding != abstract_leaf.sharding or (
+          hasattr(restored_leaf.sharding, "memory_kind")
+          and hasattr(abstract_leaf.sharding, "memory_kind")
+          and restored_leaf.sharding.memory_kind != abstract_leaf.sharding.memory_kind
+      ):
+        if isinstance(restored_leaf, jax.ShapeDtypeStruct):
+          return jax.ShapeDtypeStruct(
+              restored_leaf.shape,
+              restored_leaf.dtype,
+              sharding=abstract_leaf.sharding,
+          )
+        is_prng = hasattr(restored_leaf, "dtype") and jax.dtypes.issubdtype(restored_leaf.dtype, jax.dtypes.prng_key)
+        data = jax.random.key_data(restored_leaf) if is_prng else restored_leaf
+        put_data = jax.device_put(data, abstract_leaf.sharding)
+        if hasattr(abstract_leaf, "dtype") and jax.dtypes.issubdtype(abstract_leaf.dtype, jax.dtypes.prng_key):
+          return jax.random.wrap_key_data(put_data, dtype=abstract_leaf.dtype)
+        return put_data
+    return restored_leaf
+
+  return jax.tree.map(_put, restored_pytree, original_abstract_pytree)
