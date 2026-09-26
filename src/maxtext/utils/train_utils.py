@@ -244,7 +244,13 @@ def jit_train_and_eval_step(
   """Returns a JIT-compiled train and eval step function."""
   if config.enable_diloco:
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
-    train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
+    if not isinstance(state_mesh_shardings, diloco.DiLoCoTrainState):
+      raise TypeError(
+          f"enable_diloco requires state_mesh_shardings to be a DiLoCoTrainState, got {type(state_mesh_shardings)}."
+      )
+    train_step = diloco.build_diloco_train_step(
+        config, train_step_partial, mesh=mesh, outer_params_shardings=state_mesh_shardings.params
+    )
   data_sharding_for_train = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
   data_sharding_for_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
   p_train_step = jit_train_step(
