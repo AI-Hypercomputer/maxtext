@@ -109,6 +109,13 @@ consumes them, one more gradient tree in the accumulation dtype at `fwd_bwd`'s p
 add lowers the peak where the fold was expensive and raises it by that tree where the fold was not; the
 [memory report](#reading-the-memory-report) counts it.
 
+`fwd_bwd` returns its gradients cast to the accumulation dtype. With `cast_grads_after_all_reduce=true`,
+the gradients it sums across devices by an all-reduce alone, those of parameters sharded over none of
+the mesh axes a batch is split over (norm scales, for example), leave it in the parameters' dtype
+instead and are cast as they join the accumulator. Cast inside `fwd_bwd`, XLA can move the cast ahead of
+the all-reduce, which then runs in the accumulation dtype; cast later, it cannot. Every other gradient
+is still cast inside `fwd_bwd`, which keeps most of its output in the accumulation dtype.
+
 `model_scope` implements Tunix's `AbstractTrainer.model_scope`, which Tunix uses to score per-token
 log-probabilities with the trainer's weights.
 
@@ -126,6 +133,7 @@ sharding at construction (for example Tokamax ring attention), while under `jax.
 |---|---|
 | `grad_dtype` | dtype the optimizer receives gradients in |
 | `grad_accumulation_dtype` | dtype micro-batch gradients are summed in; `""` (default) uses `grad_dtype`. The sum is divided by the total loss denominator and cast to `grad_dtype` once, in `update`. `"float32"` with `grad_dtype=bfloat16` is more precise but keeps a float32 accumulator on device between micro-batches, and each later micro-batch's float32 gradients beside it while `fwd_bwd` runs |
+| `cast_grads_after_all_reduce` (default false) | gradients that `fwd_bwd` sums across devices by an all-reduce alone leave it in the parameters' dtype and are cast to the accumulation dtype as they join the accumulator (see [One optimizer step](#one-optimizer-step)). Meant for TPU together with the libtpu flag `--xla_tpu_enable_offloading_copy_to_sparsecore=false`. No effect when the parameters are already in the accumulation dtype, on the eager path (no `compile()`), or under the deferred data-parallel all-reduce, where `fwd_bwd` reduces no gradient |
 | `optimizer_memory_host_offload` | the optimizer state lives in pinned host memory; `update` moves it to the device and back, so it is not resident during the forward and backward passes |
 | `parameter_memory_host_offload` | not supported; raises |
 | `shard_optimizer_over_data` (Zero-1) | shards the optimizer state over the `data` axis inside `update`; requires `shard_mode=explicit` |
@@ -168,6 +176,7 @@ The engine's tests are in `tests/post_training/unit/` and run on CPU; they requi
 | `maxtext_engine_compile_parity_test.py` | `AbstractMaxTextEngine` compiles Qwen3.5 with the Tunix adapter to the same programs as the live engine |
 | `maxtext_engine_model_build_test.py` | model construction with and without a mesh set by the caller |
 | `maxtext_engine_checkpoint_test.py` | resuming from a mid-step checkpoint through Orbax reproduces the uninterrupted step |
+| `maxtext_engine_grad_cast_test.py` | `cast_grads_after_all_reduce`: which gradients leave `fwd_bwd` uncast, and that moving their cast changes no number on CPU |
 | `maxtext_engine_{constructor,data_parallel,xaot,packing,profiling}_test.py`, `router_replay_engine_test.py` | construction, data parallelism, ahead-of-time compilation, sequence packing, profiling, router replay |
 
 ## Differences from pre_train/train.py

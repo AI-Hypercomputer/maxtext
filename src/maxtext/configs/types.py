@@ -538,6 +538,18 @@ class DataTypes(BaseModel):
       _clean_none_for_grad_accumulation_dtype
   )
 
+  cast_grads_after_all_reduce: bool = Field(
+      False,
+      description=(
+          "MaxTextTrainingEngine only. Gradients that its forward/backward pass sums across devices by an all-reduce "
+          "alone (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass "
+          "in the parameters' dtype and are cast to the accumulation dtype when they join the running sum, after the "
+          "all-reduce. Meant for TPU together with the libtpu flag "
+          "--xla_tpu_enable_offloading_copy_to_sparsecore=false; check device memory with the engine's "
+          "ahead-of-time memory report."
+      ),
+  )
+
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,

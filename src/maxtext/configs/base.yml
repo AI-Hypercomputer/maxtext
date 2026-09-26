@@ -133,6 +133,12 @@ grad_dtype: "float32"
 # "float32" with grad_dtype=bfloat16 sums more precisely, at the cost of float32 gradients on device: the accumulator,
 # and each micro-batch's gradients beside it.
 grad_accumulation_dtype: ""
+# MaxTextTrainingEngine only: gradients that its forward/backward pass sums across devices by an all-reduce alone
+# (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass in the
+# parameters' dtype and are cast to the accumulation dtype when they join the running sum, after the all-reduce.
+# Meant for TPU together with the libtpu flag --xla_tpu_enable_offloading_copy_to_sparsecore=false; see
+# training_engine/README.md.
+cast_grads_after_all_reduce: false
 
 # activation dtypes.
 dtype: "bfloat16"

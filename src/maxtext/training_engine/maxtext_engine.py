@@ -269,6 +269,51 @@ def _deferred_all_reduce_shardings(config: Any, mesh: Any, params_shardings: Any
   )
 
 
+def _all_reduced_grad_mask(config: Any, mesh: Any, grad_shardings: Any, params: Any, accumulation_dtype: Any) -> Any:
+  """Returns, per parameter, whether `fwd_bwd` returns its gradient uncast, or None to cast every leaf there.
+
+  Under `cast_grads_after_all_reduce`, a gradient that `fwd_bwd` sums across devices by an all-reduce
+  alone leaves it in the parameter's dtype and is cast to the accumulation dtype as it joins the
+  running sum, in a later program, where XLA cannot move the cast ahead of the all-reduce. Those are
+  taken to be the gradients of parameters sharded over none of the mesh axes a batch's tokens are
+  split over (`input_data_sharding_logical_axes`), such as norm scales. Every other gradient is still
+  cast inside `fwd_bwd`, which keeps most of its output in the accumulation dtype: under fsdp, one
+  whose parameter is sharded over such an axis is reduce-scattered; one that leaves `fwd_bwd`
+  unreduced (`_deferred_all_reduce_shardings`) is not reduced there at all; and one already in the
+  accumulation dtype has no cast to move. Whether this pays depends on the configuration; see
+  "Running fast on TPU" in the engine's README.
+
+  None when the key is off, without a mesh, or when no gradient qualifies.
+
+  Args:
+    config: The engine's config.
+    mesh: The engine's mesh, or None.
+    grad_shardings: The gradients' shardings as they leave `fwd_bwd`.
+    params: The parameters, or their avals; a gradient has its parameter's dtype.
+    accumulation_dtype: The dtype the running sum is held in.
+  """
+  if not getattr(config, "cast_grads_after_all_reduce", False) or mesh is None:
+    return None
+  token_axes = {
+      axis
+      for entry in sharding.get_input_data_sharding(config, mesh).spec
+      for axis in sharding.mesh_axes_for_dim(entry)
+      if mesh.shape.get(axis, 1) > 1
+  }
+  if not token_axes:
+    return None
+
+  def reduced_by_all_reduce_alone(grad_sharding, param):
+    if not jnp.issubdtype(param.dtype, jnp.floating) or param.dtype == accumulation_dtype:
+      return False
+    spec = grad_sharding.spec
+    sharded_axes = sharding.get_mesh_axes_used_by_tensor_spec(spec.partitions)
+    return not spec.unreduced and not token_axes.intersection(sharded_axes)
+
+  mask = jax.tree.map(reduced_by_all_reduce_alone, grad_shardings, params)
+  return mask if any(jax.tree.leaves(mask)) else None
+
+
 _ZERO1_DECLINED_WARNING = (
     "`shard_optimizer_over_data` (Zero-1) is set, but this engine cannot honour it (%s), so the "
     "optimizer state stays replicated over the data axis. Logged once per engine instance."
@@ -733,6 +778,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._reduced_params_shardings: Any = None
     self._unreduced_grad_shardings: Any = None
     self._plain_grad_shardings: Any = None
+    # Set together by `_compile_for_batch` under `cast_grads_after_all_reduce`: which gradient
+    # leaves `fwd_bwd` returns uncast (see `_all_reduced_grad_mask`), and the jitted cast that brings
+    # them to the accumulation dtype when they start the running sum. `None` casts every leaf
+    # inside `fwd_bwd`, as the eager path always does.
+    self._uncast_grad_mask: Any = None
+    self._cast_uncast_grads: Any = None
     # Set together by `_compile_for_batch` when Zero-1 is on: the parameters as
     # `_update_kernel` shards them to meet the optimizer state, and as it hands them back.
     # `None` keeps the whole update on the replicated layout. See `_zero1_active`.
@@ -1284,11 +1335,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return jnp.dtype(getattr(self._config, "grad_accumulation_dtype", None) or self._config.grad_dtype)
 
   def _to_accumulation_dtype(self, x: Any) -> Any:
-    """Returns one gradient leaf in the accumulation dtype."""
+    """Returns one gradient leaf, or its `jax.ShapeDtypeStruct`, in the accumulation dtype."""
     if not hasattr(x, "dtype") or not jnp.issubdtype(x.dtype, jnp.floating):
       return x
     target = self._accumulation_dtype()
-    return x if x.dtype == target else x.astype(target)
+    if x.dtype == target:
+      return x
+    return x.update(dtype=target) if isinstance(x, jax.ShapeDtypeStruct) else x.astype(target)
 
   def _to_grad_dtype(self, x: Any) -> Any:
     """Returns one gradient leaf in `grad_dtype`, the dtype the optimizer is handed."""
@@ -1305,8 +1358,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       batch: Loss-function inputs for this micro-batch.
 
     Returns:
-      `(primary_loss, aux_metrics, new_rest, grads, denominator)`: this micro-batch's gradients in
-      the accumulation dtype, not yet normalized, and the loss denominator to normalize them by.
+      `(primary_loss, aux_metrics, new_rest, grads, denominator)`: this micro-batch's gradients,
+      not yet normalized, in the accumulation dtype except the leaves in `_uncast_grad_mask`, which
+      keep the parameters' dtype; and the loss denominator to normalize them by.
     """
     loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
@@ -1350,7 +1404,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # in bf16 under `shard_optimizer_over_data` (`gradient_accumulation.py`). A float32
     # accumulator costs a float32 gradient tree held across kernel calls, and a second one while
     # `fwd_bwd` runs, since these gradients are returned in that dtype.
-    micro_grads = jax.tree.map(self._to_accumulation_dtype, micro_grads)
+    if self._uncast_grad_mask is None:
+      micro_grads = jax.tree.map(self._to_accumulation_dtype, micro_grads)
+    else:
+      # Leaves whose gradients are summed across devices by an all-reduce alone are cast as they
+      # join the running sum instead: `_start_running_sum` for the first micro-batch of an update,
+      # `_accumulate_kernel` for the others. See `_all_reduced_grad_mask`.
+      micro_grads = jax.tree.map(
+          lambda g, uncast: g if uncast else self._to_accumulation_dtype(g), micro_grads, self._uncast_grad_mask
+      )
 
     # Accumulated UNREDUCED, with no `1/denominator` applied: `_update_kernel` divides once
     # by the total, so the optimizer sees `sum(grads)/sum(denom)` rather than a mean of
@@ -1368,8 +1430,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     for one, which then gathers an unsharded copy of that leaf -- and the higher peak can push
     the scheduler into reordering for memory, at the cost of overlap. Kept apart, every
     micro-batch runs the same forward/backward program, and every leaf is summed as written
-    here, by one elementwise add. Both operands are in the accumulation dtype, which
-    `_fwd_bwd_kernel` casts its gradients to, so that is the dtype the sum is taken in.
+    here, by one elementwise add in the running sum's dtype, the accumulation dtype. A leaf
+    `_fwd_bwd_kernel` returned in the parameters' dtype (`_uncast_grad_mask`) is cast to it first.
 
     The split costs memory. A kernel that took the donated running sum could add each leaf into
     it in place as the backward pass produced it; here `_fwd_bwd_kernel` returns each
@@ -1387,7 +1449,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       `(acc_grads + grads, acc_denom + denominator)`.
     """
-    return jax.tree.map(jnp.add, acc_grads, grads), acc_denom + denominator
+    return jax.tree.map(lambda acc, g: acc + g.astype(acc.dtype), acc_grads, grads), acc_denom + denominator
 
   def _update_kernel(
       self, state_pure, accumulated_grads, accumulated_denominator, mean_loss, optimizer_device_shardings=None
@@ -1734,6 +1796,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         self._plain_grad_shardings = None
       else:
         self._plain_grad_shardings = params_shardings
+      self._uncast_grad_mask = _all_reduced_grad_mask(
+          self._config, self._mesh, grad_shardings, params_pure, self._accumulation_dtype()
+      )
+      self._cast_uncast_grads = None
+      if self._uncast_grad_mask is not None:
+        # Takes the uncast leaves alone: a jitted function copies every array it returns unchanged.
+        # Compiled on its first call; it holds no more than those leaves in both dtypes.
+        uncast_shardings = [
+            leaf_sharding
+            for leaf_sharding, uncast in zip(jax.tree.leaves(grad_shardings), jax.tree.leaves(self._uncast_grad_mask))
+            if uncast
+        ]
+        self._cast_uncast_grads = jax.jit(
+            lambda leaves: [self._to_accumulation_dtype(g) for g in leaves],
+            in_shardings=(uncast_shardings,),
+            out_shardings=uncast_shardings,
+        )
       fwd_bwd_in_shardings = (params_shardings, rest_shardings, batch_shardings)
       fwd_bwd_out_shardings = (None, None, rest_shardings, grad_shardings, replicated)
       # The running sums, then the micro-batch's gradients and denominator, laid out alike.
@@ -1766,6 +1845,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._reduced_params_shardings = None
       self._unreduced_grad_shardings = None
       self._plain_grad_shardings = None
+      self._uncast_grad_mask = None
+      self._cast_uncast_grads = None
       # `_zero1_shardings_for` is not reached on this branch, so the request is declined here.
       self._note_zero1_declined(_zero1_active(self._config, self._mesh))
       self._zero1_params_shardings = None
@@ -1966,13 +2047,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # Off the kernel's own outputs, not predicted from the parameters: the gradients differ by
       # the accumulation dtype and, under deferral, an `unreduced` tag.
       _, _, _, grads_aval, denominator_aval = fwd_bwd.out_info
+      # The running sum holds every leaf in the accumulation dtype, including those `fwd_bwd`
+      # returns uncast.
+      acc_grads_aval = jax.tree.map(self._to_accumulation_dtype, grads_aval)
       return {
           "fwd_bwd": fwd_bwd,
           "accumulate": self._jitted_kernels["accumulate"].lower(
-              grads_aval, denominator_aval, grads_aval, denominator_aval
+              acc_grads_aval, denominator_aval, grads_aval, denominator_aval
           ),
-          "update": self._jitted_kernels["update"].lower(state_aval, grads_aval, denominator_aval, mean_loss_aval),
+          "update": self._jitted_kernels["update"].lower(state_aval, acc_grads_aval, denominator_aval, mean_loss_aval),
       }
+
+  def _start_running_sum(self, grads: Any) -> Any:
+    """Returns the first micro-batch's gradients as the running sum, every leaf in the accumulation dtype.
+
+    Only the leaves `fwd_bwd` returned uncast (`_uncast_grad_mask`) need converting, and they go
+    through one jitted call rather than one dispatch each; the rest pass through untouched.
+    """
+    if self._uncast_grad_mask is None:
+      return grads
+    leaves, treedef = jax.tree.flatten(grads)
+    uncast = jax.tree.leaves(self._uncast_grad_mask)
+    cast = iter(self._cast_uncast_grads([g for g, is_uncast in zip(leaves, uncast) if is_uncast]))
+    return treedef.unflatten([next(cast) if is_uncast else g for g, is_uncast in zip(leaves, uncast)])
 
   @_profiled_step("fwd_bwd", control_profile=True)
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
@@ -2015,11 +2112,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # state split against the old graph.
     params, rest = self._read_model_pure(model)
     with self._sharding_ctx():
-      loss, aux, new_rest, acc_grads, acc_denom = fwd_bwd_kernel(params, rest, inputs)
-      if self._accumulated_grads is not None:
+      loss, aux, new_rest, grads, denominator = fwd_bwd_kernel(params, rest, inputs)
+      if self._accumulated_grads is None:
+        acc_grads, acc_denom = self._start_running_sum(grads), denominator
+      else:
         # The compiled kernel donates both running sums, so they are rebound from the outputs below.
         acc_grads, acc_denom = accumulate_kernel(
-            self._accumulated_grads, self._accumulated_denominator, acc_grads, acc_denom
+            self._accumulated_grads, self._accumulated_denominator, grads, denominator
         )
     nnx.update(model, new_rest)
     self._publish_model_rest(new_rest)
