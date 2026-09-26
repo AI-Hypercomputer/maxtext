@@ -2223,6 +2223,30 @@ class QuantizedMoeTest(parameterized.TestCase):
     compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.22)
 
 
+class GetRaggedBufferFactorTest(parameterized.TestCase):
+  """Tests that RoutedMoE.get_ragged_buffer_factor picks eval_ragged_buffer_factor only under eval axis rules."""
+
+  TRAIN_RULES = (("activation_batch", ("data", "fsdp")),)
+  EVAL_RULES = (("activation_batch", ("data",)),)
+
+  def _factor(self, eval_ragged_buffer_factor, eval_rules, active_rules):
+    config = SimpleNamespace(
+        ragged_buffer_factor=1.5,
+        eval_ragged_buffer_factor=eval_ragged_buffer_factor,
+        logical_axis_rules=self.TRAIN_RULES,
+        logical_axis_rules_for_eval=eval_rules,
+    )
+    with nn_partitioning.axis_rules(active_rules):
+      return moe.RoutedMoE.get_ragged_buffer_factor(SimpleNamespace(config=config))
+
+  @parameterized.named_parameters(
+      ("eval_rules_with_override", 3.0, EVAL_RULES, EVAL_RULES, 3.0),
+      ("eval_rules_worst_case", -1.0, EVAL_RULES, EVAL_RULES, -1.0),
+  )
+  def test_get_ragged_buffer_factor(self, eval_factor, eval_rules, active_rules, expected):
+    self.assertEqual(self._factor(eval_factor, eval_rules, active_rules), expected)
+
+
 class GetEinsumTest(parameterized.TestCase):
   """Tests for the quantized einsums RoutedMoE.get_einsum hands to dense_matmul."""
 

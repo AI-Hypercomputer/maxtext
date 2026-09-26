@@ -30,7 +30,7 @@ export ZONE="<your-gcp-zone>"
 # -- XPK Workload Configuration --
 # (<YYYY-MM-DD>, <your_hugging_face_token>)
 export RUNNAME="my-server-$(date +%Y-%m-%d-%H-%M-%S)"
-export DOCKER_IMAGE="gcr.io/tpu-prod-env-multipod/maxtext_jax_nightly:<YYYY-MM-DD>"
+export DOCKER_IMAGE="us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext_jax_nightly:<YYYY-MM-DD>"
 export HF_TOKEN="<your_hugging_face_token>" # Optional: if your tokenizer is private
 
 # -- Model Configuration --

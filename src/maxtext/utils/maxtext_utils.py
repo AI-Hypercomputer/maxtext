@@ -36,6 +36,12 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+
+try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter
+except ImportError:
+  lineage_adapter = None
 from maxtext.multimodal import processor as mm_processor
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
@@ -2041,7 +2047,17 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if num_slices > 1:
+  if getattr(config, "use_lineage", False) and lineage_adapter is not None:
+    dcn_parallelism = (
+        max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
+    )
+    mesh = lineage_adapter.create_device_mesh(
+        ici_parallelism,
+        devices,
+        dcn_parallelism=dcn_parallelism,
+        allow_split_physical_axes=allow_split_physical_axes,
+    )
+  elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
 

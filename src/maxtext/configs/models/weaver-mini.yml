@@ -1,4 +1,4 @@
-# Model config for NVIDIA Cosmos3-Nano Reasoner (Text-only mode)
+# Model config for Weaver Mini (Text-only mode)
 
 # Core Architectural Parameters
 decoder_block: "qwen3"

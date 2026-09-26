@@ -1,0 +1,151 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow runs on a schedule or manual trigger to gather major changes
+# since **Last Updated** in docs/release_notes.md and open a PR updating
+# docs/release_notes.md using the update-changelog skill.
+
+name: Update Release Notes
+
+on:
+  schedule:
+    # Runs every Monday at 09:00 UTC
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-changelog
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  update-changelog:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Mint identity token
+        id: mint_identity_token
+        if: |-
+          ${{ vars.APP_ID }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          token: ${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}
+
+      - name: Collect candidate commits
+        id: collect_commits
+        run: |
+          python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode collect
+          if [ ! -s raw_commits.txt ]; then
+            echo "No new candidate commits to announce."
+            echo "has_changes=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has_changes=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Run Gemini CLI with update-changelog skill
+        id: run_gemini
+        if: steps.collect_commits.outputs.has_changes == 'true'
+        uses: google-github-actions/run-gemini-cli@f5a57753971eb5f2734c70df7e796f2fcfbef6e7
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+          GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+        with:
+          gcp_location: '${{ vars.GOOGLE_CLOUD_LOCATION }}'
+          gcp_project_id: '${{ vars.GOOGLE_CLOUD_PROJECT }}'
+          gcp_service_account: '${{ vars.SERVICE_ACCOUNT_EMAIL }}'
+          gcp_workload_identity_provider: '${{ vars.GCP_WIF_PROVIDER }}'
+          gemini_api_key: '${{ secrets.GEMINI_API_KEY }}'
+          gemini_cli_version: '${{ vars.GEMINI_CLI_VERSION }}'
+          gemini_debug: "${{ fromJSON(vars.GEMINI_DEBUG || vars.ACTIONS_STEP_DEBUG || 'false') }}"
+          gemini_model: '${{ vars.GEMINI_MODEL }}'
+          google_api_key: '${{ secrets.GOOGLE_API_KEY }}'
+          use_gemini_code_assist: '${{ vars.GOOGLE_GENAI_USE_GCA }}'
+          use_vertex_ai: '${{ vars.GOOGLE_GENAI_USE_VERTEXAI }}'
+          workflow_name: 'update-changelog'
+          settings: |-
+            {
+              "model": {
+                "maxSessionTurns": 50
+              },
+              "telemetry": {
+                "enabled": false,
+                "target": "gcp"
+              }
+            }
+          prompt: '/update-changelog'
+
+      - name: Verify no commits were dropped
+        if: steps.collect_commits.outputs.has_changes == 'true'
+        run: |
+          if [ ! -s new_notes.md ]; then
+            echo "Error: Gemini did not produce new_notes.md."
+            exit 1
+          fi
+          python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode verify
+
+      - name: Deterministically inject release notes
+        if: steps.collect_commits.outputs.has_changes == 'true'
+        run: |
+          git checkout -- docs/release_notes.md
+          python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode inject
+          rm -f raw_commits.txt new_notes.md
+
+      - name: Create Pull Request
+        if: steps.collect_commits.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+        run: |
+          if git diff --quiet docs/release_notes.md; then
+            echo "No new unreleased changes to announce."
+            exit 0
+          fi
+
+          DATE_STR=$(date -u +"%Y-%m-%d")
+          # One branch and one PR per run, so a maintainer can edit the notes on an open PR.
+          # The run number keeps the branch unique when the workflow is dispatched more than once on the same day.
+          # Edit docs/release_notes.md on this branch directly to correct any wording or categorization before merging.
+          BRANCH_NAME="chore/changelog-update-${DATE_STR}-${GITHUB_RUN_NUMBER}"
+          PR_BODY="Automated release notes update in \`docs/release_notes.md\` generated by the \`update-changelog\` skill."
+
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git checkout -b "${BRANCH_NAME}"
+          git add docs/release_notes.md
+          git commit -m "docs: release notes update (${DATE_STR})"
+          git push -u origin "${BRANCH_NAME}"
+
+          gh pr create \
+            --title "docs: release notes update (${DATE_STR})" \
+            --body "${PR_BODY}" \
+            --base main \
+            --head "${BRANCH_NAME}"

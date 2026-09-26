@@ -55,7 +55,7 @@ DEVICE_TYPE="${DEVICE_TYPE:-v5p-128}"
 # command
 RUNNAME="${RUNNAME:-spmd-dlco-$(date +%H%M)}"
 XPK_WORKLOAD="${XPK_WORKLOAD:-$RUNNAME}"
-DOCKER_IMAGE_BASE="${DOCKER_IMAGE_BASE:-gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:latest}"
+DOCKER_IMAGE_BASE="${DOCKER_IMAGE_BASE:-us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext_jax_stable:latest}"
 MY_IMAGE="gcr.io/${PROJECT}/$(whoami)-runner:${XPK_WORKLOAD}"
 
 if [ -z "${BASE_OUTPUT_DIRECTORY:-}" ]; then

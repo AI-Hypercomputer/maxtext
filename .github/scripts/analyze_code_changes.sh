@@ -122,6 +122,8 @@ UNMATCHED_FILES=()
 
 # Pre-populated list of excluded patterns/files that shouldn't trigger tests
 EXCLUDED_FILES=(
+  '^\.gemini/'
+  '\.github/workflows/update_changelog.yml$'
   '^\.github/scripts/'
   '^tools/'
   '\.md$'

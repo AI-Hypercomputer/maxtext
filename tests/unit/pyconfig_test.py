@@ -690,6 +690,7 @@ assert train._TF_AVAILABLE is False
         "use_random_routing": (False, True),
         "use_ragged_sort": (False, True),
         "ragged_buffer_factor": (-1.0, 2.0),
+        "eval_ragged_buffer_factor": (-1.0, 2.0),
         "use_ring_of_experts": (False, True),
         "num_moe_emb_chunks": (0, 2),
     }

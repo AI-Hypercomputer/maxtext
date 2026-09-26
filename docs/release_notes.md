@@ -22,6 +22,8 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ## Unreleased
 
+**Last Updated**: 538fe7a3f
+
 <!-- Add new unreleased changes below this line -->
 
 ## Releases

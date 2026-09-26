@@ -33,6 +33,11 @@ on:
           )
         required: true
         type: string
+      repository_name:
+        description: 'Artifact Registry repository name'
+        required: false
+        type: string
+        default: 'maxtext-images'
       base_image:
         description: 'The docker image to run tests against'
         required: true
@@ -250,6 +255,7 @@ jobs:
             || '--init --privileged' }}
 
       # Metadata
+      repository_name: ${{ inputs.repository_name }}
       base_image: ${{ inputs.base_image }}
       is_scheduled_run: ${{ inputs.is_scheduled_run }}
       maxtext_installed: ${{ inputs.maxtext_installed }}
