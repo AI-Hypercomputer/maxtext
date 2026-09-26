@@ -408,8 +408,8 @@ def ragged_gather(
 
   dtype = x.dtype
 
-  # Guard against eager initialization on non-TPU hardware (e.g. during CPU tests).
-  # pltpu.get_tpu_info() expects TPU hardware and will crash if executed on CPU.
+  # Off a TPU target (e.g. in CPU tests) pltpu.get_tpu_info() has no chip to describe, so use the reference.
+  # The target, not the host, decides: a CPU host compiling for a TPU topology must emit the kernel.
   if enforce_fallback or not pltpu.is_tpu_device():
     return _fallback_implementation(x, indices, weights, has_weights)
 

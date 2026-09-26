@@ -199,6 +199,8 @@ def jit_and_compile(
   """Jit, lower, and compile func."""
   # `with mesh:` is only needed for drjax (enable_diloco); omit it otherwise to match train.py.
   mesh_ctx = mesh if config.enable_diloco else contextlib.nullcontext()
+  # jax.set_mesh also makes the topology's chip the trace's target, so kernels take their TPU
+  # implementations on this host (pltpu.is_tpu_device) and tile for that chip (pltpu.get_tpu_info).
   with jax.set_mesh(mesh), mesh_ctx, logical_axis_rules:
     jitted = jax.jit(
         func,
