@@ -266,6 +266,88 @@ class MlpBlockTest(unittest.TestCase):
     self.model.init({"params": self.rng, "dropout": self.rng}, x)
 
 
+class SharedExpertSwiGLUClampTest(parameterized.TestCase):
+  """DeepSeek-V4 clamps the shared expert's SwiGLU (reference inference/model.py Expert, swiglu_limit)."""
+
+  def _config(self, **overrides):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="shared_expert_clamp_test",
+        enable_checkpointing=False,
+        dtype="float32",
+        weight_dtype="float32",
+        matmul_precision="highest",
+        per_device_batch_size=1,
+        max_target_length=8,
+        **overrides,
+    )
+
+  def _mlp(self, cfg, limit, activations=("silu", "linear")):
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      return linears.MlpBlock(
+          config=cfg,
+          mesh=mesh,
+          in_features=4,
+          intermediate_dim=8,
+          activations=activations,
+          intermediate_dropout_rate=0.0,
+          dtype=jnp.float32,
+          weight_dtype=jnp.float32,
+          rngs=nnx.Rngs(0),
+          activations_limit=limit,
+      )
+
+  @parameterized.named_parameters(("unfused", False), ("fused", True))
+  def test_clamp_matches_reference_swiglu(self, fused_mlp):
+    cfg = self._config(fused_mlp=fused_mlp)
+    rng = np.random.default_rng(0)
+    w_gate, w_up = rng.normal(0, 8, (4, 8)), rng.normal(0, 8, (4, 8))
+    w_out = rng.normal(0, 1, (8, 4))
+    x = rng.normal(0, 1, (1, 8, 4))
+    gate, up = x @ w_gate, x @ w_up
+    self.assertTrue((gate > 10).any() and (np.abs(up) > 10).any(), "weights must drive the clamp active")
+    gate_c, up_c = np.minimum(gate, 10), np.clip(up, -10, 10)
+    expected = (gate_c / (1 + np.exp(-gate_c)) * up_c) @ w_out
+
+    outs = {}
+    for limit in (10.0, None):
+      mlp = self._mlp(cfg, limit)
+      if fused_mlp:
+        mlp.wi.kernel.set_value(jnp.asarray(np.stack([w_gate, w_up], axis=1), jnp.float32))
+      else:
+        mlp.wi_0.kernel.set_value(jnp.asarray(w_gate, jnp.float32))
+        mlp.wi_1.kernel.set_value(jnp.asarray(w_up, jnp.float32))
+      mlp.wo.kernel.set_value(jnp.asarray(w_out, jnp.float32))
+      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        outs[limit] = np.asarray(mlp(jnp.asarray(x, jnp.float32), deterministic=True))
+    np.testing.assert_allclose(outs[10.0], expected, rtol=1e-5, atol=1e-4)
+    self.assertFalse(np.allclose(outs[None], expected, rtol=1e-3, atol=1e-2))
+
+  def test_limit_requires_two_activation_glu(self):
+    with self.assertRaisesRegex(ValueError, "2-activation GLU"):
+      self._mlp(self._config(), 10.0, activations=("relu",))
+
+  @parameterized.named_parameters(("deepseek4_limit", 10.0, 10.0), ("no_limit", -1.0, None))
+  def test_routed_and_shared_moe_wires_limit(self, config_limit, expected):
+    cfg = self._config(
+        model_name="deepseek4-tiny",
+        override_model_config=True,
+        attention="dot_product",
+        mlp_activations_limit=config_limit,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      block = moe.RoutedAndSharedMoE(
+          config=cfg,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          rngs=nnx.Rngs(0),
+      )
+    self.assertEqual(block.shared_experts.activations_limit, expected)
+
+
 class DeepSeekRoutingTest(unittest.TestCase):
 
   def setUp(self):

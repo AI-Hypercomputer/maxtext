@@ -4117,6 +4117,11 @@ class RoutedAndSharedMoE(nnx.Module):
     )
 
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
+    # DeepSeek clamps the shared expert's SwiGLU like the routed experts (apply_ffn_activation).
+    clamp_shared = (
+        self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4)
+        and self.config.mlp_activations_limit > 0.0
+    )
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,
         in_features=self.moe_expert_input_dim,
@@ -4129,6 +4134,7 @@ class RoutedAndSharedMoE(nnx.Module):
         config=self.config,
         quant=self.quant,
         rngs=self.rngs,
+        activations_limit=self.config.mlp_activations_limit if clamp_shared else None,
     )
 
   @property

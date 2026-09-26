@@ -629,6 +629,7 @@ class MlpBlock(nnx.Module):
       model_mode: None | str = None,
       *,
       rngs: nnx.Rngs,
+      activations_limit: float | None = None,
   ) -> None:
     """A MlpBlock module.
 
@@ -648,7 +649,12 @@ class MlpBlock(nnx.Module):
       use_pre_norm: whether to add pre layer norm in mlp layers.
       quant: Optional quantization config, no quantization if None.
       out_sharding: Named sharding of outputs
+      activations_limit: If set, DeepSeek SwiGLU clamp on the pre-activations of a 2-activation GLU:
+        the gate (index 0) is clipped above at the limit, the linear branch (index 1) to [-limit, limit].
     """
+    if activations_limit is not None and len(activations) != 2:
+      raise ValueError(f"activations_limit requires a 2-activation GLU, got activations={activations}.")
+    self.activations_limit = activations_limit
     self.config = config
     self.mesh = mesh
     self.in_features = in_features
@@ -776,6 +782,13 @@ class MlpBlock(nnx.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
+  def _clip_glu_input(self, idx: int, x: Array) -> Array:
+    if self.activations_limit is None:
+      return x
+    if idx == 0:
+      return jnp.clip(x, max=self.activations_limit)
+    return jnp.clip(x, min=-self.activations_limit, max=self.activations_limit)
+
   def __call__(
       self,
       inputs,
@@ -802,7 +815,7 @@ class MlpBlock(nnx.Module):
 
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
-        y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
+        y = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, x[:, :, idx, ...]))
         activations.append(y)
     else:
       for idx, act_fn in enumerate(self.activations):
@@ -812,7 +825,7 @@ class MlpBlock(nnx.Module):
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
-        x = _convert_to_activation_function(act_fn)(x)
+        x = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, x))
         activations.append(x)
 
     # Take elementwise product of above intermediate activations.
