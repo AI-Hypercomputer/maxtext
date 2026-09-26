@@ -30,7 +30,6 @@ import time
 from typing import Any
 
 from absl import app
-from flax.linen import logical_axis_rules
 import jax
 import jax.numpy as jnp
 from maxtext.common.data_loader import DataLoader
@@ -165,9 +164,8 @@ def main(argv: Sequence[str]) -> None:
   max_utils.print_system_information()
 
   mesh = maxtext_utils.get_mesh_from_config(config)
-  with logical_axis_rules(config.logical_axis_rules):
-    engine = maxtext_engine.MaxTextTrainingEngine(config, mesh=mesh)
-    run_training_loop(config, engine, mesh)
+  engine = maxtext_engine.MaxTextTrainingEngine(config, mesh=mesh)
+  run_training_loop(config, engine, mesh)
 
 
 if __name__ == "__main__":

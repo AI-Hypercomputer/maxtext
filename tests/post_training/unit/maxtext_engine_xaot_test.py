@@ -284,6 +284,13 @@ class EngineAotParityTest(parameterized.TestCase):
       # Zero-1 shards the moments by moving real arrays on the live path and by restating avals
       # on the abstract one.
       ("zero1", {"shard_optimizer_over_data": "True"}),
+      # Optimizer host offload places moments on `pinned_host` and pulls them onto `device` inside
+      # `_update_kernel`, both standalone and combined with Zero-1 sharding.
+      ("optimizer_host_offload", {"optimizer_memory_host_offload": "True"}),
+      (
+          "zero1_and_optimizer_host_offload",
+          {"shard_optimizer_over_data": "True", "optimizer_memory_host_offload": "True"},
+      ),
       ("fsdp", {"ici_data_parallelism": 1, "ici_fsdp_parallelism": _REQUIRED_DEVICES}),
       # The hard case for the abstract path: JAX propagates a layout through `zeros_like` only on
       # Explicit axes, so the moments' shardings have to be observed on a stand-in mesh.
@@ -423,6 +430,56 @@ class EngineAotParityTest(parameterized.TestCase):
       self.assertIsNotNone(engine._zero1_params_shardings, f"Zero-1 never engaged on the {label} engine")
       self.assertIsNotNone(engine._unreduced_grad_shardings, f"the deferral never engaged on the {label} engine")
 
+  @parameterized.named_parameters(
+      ("host_offload_only", {"optimizer_memory_host_offload": "True"}),
+      (
+          "zero1_and_host_offload",
+          {"shard_optimizer_over_data": "True", "optimizer_memory_host_offload": "True"},
+      ),
+  )
+  def test_optimizer_host_offload_places_live_and_abstract_optimizer_state_on_pinned_host(self, overrides):
+    """Optimizer state lives on `pinned_host` from init through update on both live and abstract engines."""
+    cfg, mesh = _config_and_mesh(**overrides)
+
+    live = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+    abstract = maxtext_engine_compile.AbstractMaxTextEngine(cfg, mesh)
+
+    for engine, label in ((live, "live_init"), (abstract, "abstract_init")):
+      state_pure = engine._read_state_pure()
+      for leaf in jax.tree.leaves(state_pure["optimizer"]):
+        if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+          self.assertEqual(leaf.sharding.memory_kind, "pinned_host", label)
+      for leaf in jax.tree.leaves(state_pure["model"]):
+        if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+          self.assertEqual(leaf.sharding.memory_kind, "device", label)
+
+    live_leaves = jax.tree_util.tree_flatten_with_path(nnx.split(live.state)[1])[0]
+    abstract_leaves = jax.tree_util.tree_flatten_with_path(nnx.split(abstract.state)[1])[0]
+    for (live_path, live_leaf), (_, abstract_leaf) in zip(live_leaves, abstract_leaves):
+      where = jax.tree_util.keystr(live_path)
+      self.assertEqual(live._mesh_sharding(live_leaf), abstract._mesh_sharding(abstract_leaf), where)
+
+    live.compile(_batch(cfg, 0))
+    live.fwd_bwd(_batch(cfg, 0))
+    live.update()
+    post_update_state = live._read_state_pure()
+    for leaf in jax.tree.leaves(post_update_state["optimizer"]):
+      if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+        self.assertEqual(leaf.sharding.memory_kind, "pinned_host", "live_post_update")
+    for leaf in jax.tree.leaves(post_update_state["model"]):
+      if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+        self.assertEqual(leaf.sharding.memory_kind, "device", "live_post_update")
+
+  def test_bfloat16_grad_dtype_keeps_fwd_bwd_accumulator_in_float32(self):
+    """`fwd_bwd` and `fwd_bwd_accum` emit float32 accumulators even when `grad_dtype=bfloat16`."""
+    cfg, mesh = _config_and_mesh(grad_dtype="bfloat16")
+    abstract = maxtext_engine_compile.AbstractMaxTextEngine(cfg, mesh)
+    lowered = abstract._lower_kernels(_abstract(_batch(cfg, 0)))
+
+    _, _, _, grads_aval, _ = lowered["fwd_bwd"].out_info
+    for leaf in jax.tree.leaves(grads_aval):
+      self.assertEqual(leaf.dtype, jax.numpy.float32)
+
   def test_the_hlo_dump_filters_match_the_names_xla_gives_the_kernels(self):
     """Those filters are a claim about names XLA derives from the jitted callables.
 
@@ -472,6 +529,19 @@ class AbstractMaxTextEngineTest(absltest.TestCase):
 
     with self.assertRaisesRegex(ValueError, "needs a dummy payload"):
       engine.compile_kernels(None)
+
+  def test_parameter_memory_host_offload_raises_not_implemented_error(self):
+    cfg, mesh = _config_and_mesh(parameter_memory_host_offload="True")
+    with self.assertRaisesRegex(NotImplementedError, "parameter_memory_host_offload"):
+      maxtext_engine_compile.AbstractMaxTextEngine(cfg, mesh)
+
+  def test_self_contained_logical_axis_rules_without_caller_context(self):
+    self.assertEqual(maxtext_engine.sharding.get_logical_axis_rules(), ())
+    engine = maxtext_engine_compile.AbstractMaxTextEngine(self.cfg, self.mesh)
+    self.assertEqual(maxtext_engine.sharding.get_logical_axis_rules(), ())
+    compiled = engine.compile_kernels(_abstract(_batch(self.cfg, 0)))
+    self.assertLen(compiled, len(maxtext_engine_compile.KERNEL_NAMES))
+    self.assertEqual(maxtext_engine.sharding.get_logical_axis_rules(), ())
 
 
 @pytest.mark.tpu_backend

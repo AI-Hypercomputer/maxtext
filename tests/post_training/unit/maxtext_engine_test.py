@@ -419,10 +419,13 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
   @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
   def test_maybe_register_pathways_persistence(self, mock_register_type_handlers):
     import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=import-outside-toplevel
+    from orbax.checkpoint._src.serialization import type_handler_registry  # pylint: disable=import-outside-toplevel
     from maxtext.training_engine import checkpointing as checkpointing_module  # pylint: disable=import-outside-toplevel
 
-    checkpointing_module._PATHWAYS_PERSISTENCE_REGISTERED = False
-    checkpointing_module._maybe_register_pathways_persistence()
+    FakeCloudPathwaysArrayHandler = type("CloudPathwaysArrayHandler", (), {"_array_metadata_store": object()})
+    checkpointing_module._REGISTERED_IMPL = None
+    with mock.patch.object(type_handler_registry, "get_type_handler", return_value=FakeCloudPathwaysArrayHandler()):
+      checkpointing_module._maybe_register_pathways_persistence()
 
     mock_register_type_handlers.assert_called_once()
     self.assertEqual(
@@ -1580,7 +1583,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.mock_from_pretrained.assert_not_called()
 
   def test_gradient_norm_is_recorded_every_step(self):
-    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16", skip_step_on_nan=False)
     self.assertFalse(cfg.skip_step_on_spikes, "this test covers the default, spike-detection-off path")
 
     t = maxtext_engine.MaxTextTrainingEngine(cfg)
@@ -1744,8 +1747,16 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       write_metrics.assert_called_once()
       self.assertIsNone(t._throttler._pending_metrics)
 
+  def test_parameter_memory_host_offload_raises_not_implemented_error(self):
+    """`parameter_memory_host_offload=True` fails loudly during engine initialization."""
+    self.mock_from_pretrained.reset_mock()
+    cfg = self.setup_config(parameter_memory_host_offload=True)
+    with self.assertRaisesRegex(NotImplementedError, "parameter_memory_host_offload"):
+      maxtext_engine.MaxTextTrainingEngine(cfg)
+    self.mock_from_pretrained.assert_not_called()
+
   def test_optimizer_memory_host_offload_places_optimizer_state_on_pinned_host(self):
-    """`_offload_optimizer_state_to_host` moves optimizer leaves to `pinned_host` and is idempotent."""
+    """`optimizer_memory_host_offload=True` places optimizer leaves on `pinned_host` at init and is idempotent."""
     cfg = self.setup_config(optimizer_memory_host_offload=True)
     with mock.patch.object(
         maxtext_engine.train_utils,
@@ -1754,93 +1765,268 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     ):
       t = maxtext_engine.MaxTextTrainingEngine(cfg)
 
-    placed_targets = []
-
-    def _fake_place_leaf(leaf, target):
-      placed_targets.append(target)
-      return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=target)
-
-    t._refresh_pure_state()
-    t._place_state_on_mesh()
-    with mock.patch.object(t, "_place_leaf", side_effect=_fake_place_leaf):
-      t._offload_optimizer_state_to_host()
-      first_count = len(placed_targets)
-      self.assertGreater(first_count, 0)
-      self.assertTrue(all(s.memory_kind == "pinned_host" for s in placed_targets))
-      # Second call is a no-op since all optimizer leaves already have memory_kind="pinned_host".
-      t._offload_optimizer_state_to_host()
-      self.assertEqual(len(placed_targets), first_count)
-
+    # Immediately after __init__, optimizer state leaves are already on pinned_host,
+    # while model parameter leaves remain on device.
     state_pure = t._read_state_pure()
-    opt_leaves = jax.tree.leaves(state_pure["optimizer"])
-    self.assertTrue(
-        all(
-            t._mesh_sharding(leaf).memory_kind == "pinned_host"
-            for leaf in opt_leaves
-            if hasattr(leaf, "shape") and hasattr(leaf, "dtype")
-        )
-    )
-    model_leaves = jax.tree.leaves(state_pure["model"])
-    self.assertTrue(
-        all(
-            t._mesh_sharding(leaf).memory_kind != "pinned_host"
-            for leaf in model_leaves
-            if hasattr(leaf, "shape") and hasattr(leaf, "dtype")
-        )
-    )
+    opt_leaves = [
+        leaf for leaf in jax.tree.leaves(state_pure["optimizer"]) if hasattr(leaf, "shape") and hasattr(leaf, "dtype")
+    ]
+    self.assertNotEmpty(opt_leaves)
+    for leaf in opt_leaves:
+      self.assertEqual(leaf.sharding.memory_kind, "pinned_host")
+      self.assertEqual(t._mesh_sharding(leaf).memory_kind, "pinned_host")
+
+    model_leaves = [
+        leaf for leaf in jax.tree.leaves(state_pure["model"]) if hasattr(leaf, "shape") and hasattr(leaf, "dtype")
+    ]
+    self.assertNotEmpty(model_leaves)
+    for leaf in model_leaves:
+      self.assertEqual(leaf.sharding.memory_kind, "device")
+      self.assertNotEqual(t._mesh_sharding(leaf).memory_kind, "pinned_host")
+
+    # Calling _offload_optimizer_state_to_host() again is an idempotent no-op.
+    with mock.patch.object(t, "_place_leaf", wraps=t._place_leaf) as mock_place:
+      t._offload_optimizer_state_to_host()
+      self.assertEqual(mock_place.call_count, 0)
 
   def test_optimizer_memory_host_offload_matches_no_offload(self):
     """`optimizer_memory_host_offload` runs the host/device plumbing without changing step math."""
     host_paths = []
     device_paths = []
 
-    def _run_two_steps(host_offload: bool):
+    def _run_two_steps(host_offload: bool, compiled: bool = True):
       cfg = self.setup_config(optimizer_memory_host_offload=host_offload, gradient_clipping_threshold=0.0)
       mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
       self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
-      with mock.patch.object(
-          maxtext_engine.train_utils,
-          "create_training_optimizer",
-          return_value=(lambda step: jnp.array(0.01), optax.adamw(0.01)),
-      ):
-        t = maxtext_engine.MaxTextTrainingEngine(cfg)
-      t.with_loss_fn(self._weighted_loss_fn)
-      payload = DummyPayload()
-
       orig_to_host = maxtext_engine.maxtext_utils_nnx.move_memory_to_host
       orig_to_device = maxtext_engine.maxtext_utils_nnx.move_memory_to_device
 
       def _record_host(path, sharding):
         host_paths.append(path)
-        # Verify move_memory_to_host produces pinned_host, then return the CPU-executable sharding.
-        self.assertEqual(orig_to_host(path, sharding).memory_kind, "pinned_host")
-        return sharding
+        res = orig_to_host(path, sharding)
+        self.assertEqual(res.memory_kind, "pinned_host")
+        return res
 
       def _record_device(path, sharding):
         device_paths.append(path)
-        self.assertEqual(orig_to_device(path, sharding).memory_kind, "device")
-        return sharding
+        res = orig_to_device(path, sharding)
+        self.assertEqual(res.memory_kind, "device")
+        return res
 
       with (
+          mock.patch.object(
+              maxtext_engine.train_utils,
+              "create_training_optimizer",
+              return_value=(lambda step: jnp.array(0.01), optax.adamw(0.01)),
+          ),
           mock.patch.object(maxtext_engine.maxtext_utils_nnx, "move_memory_to_host", side_effect=_record_host),
           mock.patch.object(maxtext_engine.maxtext_utils_nnx, "move_memory_to_device", side_effect=_record_device),
       ):
-        t.compile(payload)
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+        t.with_loss_fn(self._weighted_loss_fn)
+        payload = DummyPayload()
+        if compiled:
+          t.compile(payload)
         for _ in range(2):
           t.fwd_bwd(payload)
           t.update()
-      return np.asarray(t.model.weights.value), t._device_optimizer_shardings
 
-    weights_off, device_shardings_off = _run_two_steps(host_offload=False)
+      state_pure = t._read_state_pure()
+      for leaf in jax.tree.leaves(state_pure["optimizer"]):
+        if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+          expected_kind = "pinned_host" if host_offload else "device"
+          self.assertEqual(leaf.sharding.memory_kind, expected_kind)
+      for leaf in jax.tree.leaves(state_pure["model"]):
+        if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+          self.assertEqual(leaf.sharding.memory_kind, "device")
+      return np.asarray(t.model.weights[...]), t._device_optimizer_shardings
+
+    weights_off, device_shardings_off = _run_two_steps(host_offload=False, compiled=True)
     self.assertIsNone(device_shardings_off)
     self.assertEmpty(host_paths)
     self.assertEmpty(device_paths)
 
-    weights_on, device_shardings_on = _run_two_steps(host_offload=True)
+    weights_on, device_shardings_on = _run_two_steps(host_offload=True, compiled=True)
     self.assertIsNotNone(device_shardings_on)
     self.assertNotEmpty(host_paths)
     self.assertNotEmpty(device_paths)
     np.testing.assert_allclose(weights_on, weights_off, rtol=1e-6, atol=1e-6)
+
+    eager_off, _ = _run_two_steps(host_offload=False, compiled=False)
+    eager_on, _ = _run_two_steps(host_offload=True, compiled=False)
+    np.testing.assert_allclose(eager_on, eager_off, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(eager_on, weights_on, rtol=1e-6, atol=1e-6)
+
+  def test_optimizer_memory_host_offload_persists_across_restore_checkpoint(self):
+    """Restoring a checkpoint re-applies `pinned_host` placement to optimizer state leaves."""
+    cfg = self.setup_config(enable_checkpointing=True, optimizer_memory_host_offload=True)
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
+    with mock.patch.object(
+        maxtext_engine.train_utils,
+        "create_training_optimizer",
+        return_value=(lambda step: jnp.array(0.01), optax.adamw(0.01)),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
+
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=3)
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"additional_metadata": {"epoch": 1}}
+    mock_orbax_mgr.metadata.return_value = mock_metadata
+
+    # Simulate Orbax returning freshly materialized device-backed arrays on restore.
+    device_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(), memory_kind="device")
+    fresh_model = DummyNNXModel()
+    fresh_opt = nnx.Optimizer(fresh_model, optax.adamw(0.01), wrt=nnx.Param)
+    restored_model_state = jax.tree.map(
+        lambda x: jax.device_put(x, device_sharding) if hasattr(x, "shape") else x,
+        nnx.state(fresh_model),
+    )
+    restored_opt_state = jax.tree.map(
+        lambda x: jax.device_put(x, device_sharding) if hasattr(x, "shape") else x,
+        nnx.state(fresh_opt, nnx.optimizer.OptState),
+    )
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": restored_model_state,
+        "optimizer_state": restored_opt_state,
+    }
+
+    restored_meta = t.restore_checkpoint(step=3)
+    self.assertEqual(restored_meta, {"epoch": 1})
+    state_pure = t._read_state_pure()
+    for leaf in jax.tree.leaves(state_pure["optimizer"]):
+      if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+        self.assertEqual(leaf.sharding.memory_kind, "pinned_host")
+    for leaf in jax.tree.leaves(state_pure["model"]):
+      if hasattr(leaf, "shape") and hasattr(leaf, "dtype"):
+        self.assertEqual(leaf.sharding.memory_kind, "device")
+
+  def test_self_contained_logical_axis_rules_across_entry_points(self):
+    """Every lifecycle entry point binds `config.logical_axis_rules` without caller context."""
+    expected_rules = tuple(self.mock_config.logical_axis_rules)
+    self.assertNotEmpty(expected_rules)
+    self.assertEqual(maxtext_engine.sharding.get_logical_axis_rules(), ())
+
+    observed = {}
+
+    def _check_from_pretrained(*args, **kwargs):
+      del args, kwargs
+      observed["build_model"] = maxtext_engine.sharding.get_logical_axis_rules()
+      mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(self.mock_config), self.mock_config.mesh_axes)
+      return DummyNNXModel(), mesh
+
+    def _check_create_optimizer(*args, **kwargs):
+      del args, kwargs
+      observed["create_optimizer"] = maxtext_engine.sharding.get_logical_axis_rules()
+      return (lambda step: jnp.array(0.01), optax.sgd(0.01))
+
+    with (
+        mock.patch.object(maxtext_engine.model_creation_utils, "from_pretrained", side_effect=_check_from_pretrained),
+        mock.patch.object(maxtext_engine.train_utils, "create_training_optimizer", side_effect=_check_create_optimizer),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    self.assertEqual(observed["build_model"], expected_rules)
+    self.assertEqual(observed["create_optimizer"], expected_rules)
+    self.assertEqual(maxtext_engine.sharding.get_logical_axis_rules(), ())
+
+    def _loss_fn(model, *args, **kwargs):
+      is_train = kwargs.get("is_train", args[4] if len(args) > 4 else True)
+      key = "train_loss" if is_train else "eval_loss"
+      observed.setdefault(key, []).append(maxtext_engine.sharding.get_logical_axis_rules())
+      return (
+          abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]) * 2.0, denominator=jnp.array(1.0)),
+          {},
+      )
+
+    t.with_loss_fn(_loss_fn)
+    payload = DummyPayload()
+
+    # Eager fwd_bwd, update, and eval_step must all see `expected_rules` with no caller wrapper.
+    t.fwd_bwd(payload)
+    t.update()
+    with t.eval_context():
+      t.eval_step(payload)
+    self.assertEqual(observed["train_loss"][-1], expected_rules)
+    self.assertEqual(observed["eval_loss"][-1], expected_rules)
+    self.assertEqual(maxtext_engine.sharding.get_logical_axis_rules(), ())
+
+    # Deferred compile (`compile(None)`) followed by lazy compilation in `fwd_bwd` and `eval_step`.
+    t.compile(None)
+    t.fwd_bwd(payload)
+    t.update()
+    with t.eval_context():
+      t.eval_step(payload)
+      # Shape change triggers recompilation inside `eval_step`, which must also bind rules.
+      t.eval_step(DummyPayload(token_ids=jnp.ones((2, 4)), token_mask=jnp.ones((2, 4))))
+    self.assertTrue(all(r == expected_rules for r in observed["train_loss"]))
+    self.assertTrue(all(r == expected_rules for r in observed["eval_loss"]))
+    self.assertEqual(maxtext_engine.sharding.get_logical_axis_rules(), ())
+
+  def test_experimental_train_py_does_not_wrap_logical_axis_rules(self):
+    """`experimental/maxtext_engine/train.py` relies on the engine's own `_sharding_ctx()`."""
+    import ast  # pylint: disable=import-outside-toplevel
+    import pathlib  # pylint: disable=import-outside-toplevel
+
+    train_py = pathlib.Path(maxtext_engine.__file__).resolve().parents[1] / "experimental" / "maxtext_engine" / "train.py"
+    source = train_py.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+      if isinstance(node, ast.ImportFrom):
+        imported = {alias.name for alias in node.names}
+        self.assertNotIn("logical_axis_rules", imported)
+      elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        self.assertNotEqual(node.func.id, "logical_axis_rules")
+
+  def test_grad_dtype_bfloat16_accumulates_in_float32_and_casts_once_in_update(self):
+    """Micro-batch gradients accumulate and divide in float32 before casting once to `grad_dtype`."""
+    cfg = self.setup_config(grad_dtype="bfloat16", gradient_clipping_threshold=0.0, skip_step_on_nan=False)
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
+
+    applied_grad_dtypes = []
+    applied_grad_values = []
+    base_tx = optax.sgd(0.1)
+
+    def _spy_update(updates, state, params=None):
+      for leaf in jax.tree.leaves(updates):
+        applied_grad_dtypes.append(leaf.dtype)
+        applied_grad_values.append(np.asarray(leaf, dtype=np.float32))
+      return base_tx.update(updates, state, params)
+
+    spy_tx = optax.GradientTransformation(base_tx.init, _spy_update)
+    with mock.patch.object(
+        maxtext_engine.train_utils,
+        "create_training_optimizer",
+        return_value=(lambda step: jnp.array(0.1), spy_tx),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
+
+    # Use a denominator of 100000.0 (which exceeds bfloat16 max 65504 and would overflow to inf
+    # if divided in bfloat16!) and an unreduced gradient of 50000.0 per micro-batch over 2 micro-batches.
+    # Total unreduced sum = 100000.0, total denominator = 200000.0 -> normalized gradient = 0.5.
+    t.with_loss_fn(
+        lambda model, *_args, **_kwargs: (
+            abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.sum(model.weights[...]) * 50000.0,
+                denominator=jnp.array(100000.0, dtype=jnp.float32),
+            ),
+            {},
+        )
+    )
+    payload = DummyPayload()
+    t.fwd_bwd(payload)
+    for leaf in jax.tree.leaves(t._accumulated_grads):
+      self.assertEqual(leaf.dtype, jnp.float32)
+    t.fwd_bwd(payload)
+    for leaf in jax.tree.leaves(t._accumulated_grads):
+      self.assertEqual(leaf.dtype, jnp.float32)
+
+    t.update()
+    self.assertNotEmpty(applied_grad_dtypes)
+    self.assertTrue(all(dt == jnp.bfloat16 for dt in applied_grad_dtypes))
+    np.testing.assert_allclose(applied_grad_values[0], np.array([0.5, 0.5], dtype=np.float32), rtol=1e-3)
 
 
 if __name__ == "__main__":
