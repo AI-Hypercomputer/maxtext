@@ -1115,6 +1115,13 @@ class TrainPyParityTest(absltest.TestCase):
     self._check(self._run("parity_fp32_g2", grad_dtype="float32", gradient_accumulation_steps=2), 1e-4)
 
   def test_float32_grads_two_micro_batches_adamw(self):
+    """Within the gate but not exact, unlike the two-micro-batch SGD cases.
+
+    XLA can fold train.py's accumulating add into the token embedding's gradient scatter-add, while
+    the engine's `accumulate` adds in source order, and Adam's per-element normalization magnifies
+    that rounding difference on elements whose gradients are near zero. It is not a reason to loosen
+    the gate.
+    """
     self._check(
         self._run("parity_fp32_g2_adamw", grad_dtype="float32", gradient_accumulation_steps=2, opt_type="adamw"), 1e-4
     )

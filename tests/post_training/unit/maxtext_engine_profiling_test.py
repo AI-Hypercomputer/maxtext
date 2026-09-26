@@ -142,6 +142,35 @@ class MaxTextTrainingEngineProfilingTest(absltest.TestCase):
 
     self.stop_trace.assert_called_once()
 
+  def test_the_window_waits_on_the_running_gradient_sum(self):
+    """`accumulate`'s outputs are not part of the train state, so the window waits on them explicitly."""
+    cfg = _tiny_config(
+        base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=1,
+        profiler_steps=1,
+    )
+    mesh = _mesh(cfg)
+    with jax.set_mesh(mesh):
+      engine = _engine(cfg, mesh)
+      profiler = engine._profiler  # pylint: disable=protected-access
+      with (
+          patch.object(profiler, "maybe_activate", wraps=profiler.maybe_activate) as activate,
+          patch.object(profiler, "maybe_deactivate", wraps=profiler.maybe_deactivate) as deactivate,
+      ):
+        engine.fwd_bwd(payload=DummyPayload())
+        first_sum = jax.tree.leaves(engine._accumulated_grads)  # pylint: disable=protected-access
+        # The window is this micro-step alone, the first to run `accumulate`.
+        engine.fwd_bwd(payload=DummyPayload())
+        second_sum = jax.tree.leaves(engine._accumulated_grads)  # pylint: disable=protected-access
+
+    self.start_trace.assert_called_once()
+    self.stop_trace.assert_called_once()
+    for hook, running_sum in ((activate, first_sum), (deactivate, second_sum)):
+      waited = {id(leaf) for leaf in jax.tree.leaves(hook.call_args.kwargs["blocking_object"])}
+      self.assertTrue(running_sum)
+      self.assertTrue(all(id(leaf) in waited for leaf in running_sum), f"{hook} did not wait on the running sum")
+
 
 if __name__ == "__main__":
   absltest.main()

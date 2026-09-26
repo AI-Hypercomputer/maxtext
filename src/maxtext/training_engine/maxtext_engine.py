@@ -592,12 +592,15 @@ def _profiled_step(name: str, control_profile: bool = False) -> Callable[..., An
     def wrapper(self, *args: Any, **kwargs: Any) -> Any:
       step_to_profile = self.total_micro_steps
       current_micro_step_count = self.micro_step_count
+      # The window waits on the running gradient sum as well as the state: `accumulate`'s outputs
+      # are not part of the state, so waiting on the state alone could open or close the window
+      # while an add is still running.
       if control_profile:
         self._profiler.maybe_activate(
             step_to_profile,
             current_micro_step_count,
             self.train_step,
-            blocking_object=self._state,
+            blocking_object=(self._state, self._accumulated_grads),
         )
       with jax.profiler.StepTraceAnnotation(name, step_num=self.train_step):
         result = method(self, *args, **kwargs)
@@ -606,7 +609,7 @@ def _profiled_step(name: str, control_profile: bool = False) -> Callable[..., An
             step_to_profile,
             current_micro_step_count,
             self.train_step,
-            blocking_object=self._state,
+            blocking_object=(self._state, self._accumulated_grads),
         )
       return result
 
@@ -1345,7 +1348,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Summed in `grad_accumulation_dtype` (default `grad_dtype`), by `_accumulate_kernel`, and
     # cast to `grad_dtype` once, in `_update_kernel`. `train.py` sums in the parameters' dtype, or
     # in bf16 under `shard_optimizer_over_data` (`gradient_accumulation.py`). A float32
-    # accumulator costs a float32 gradient tree held across kernel calls.
+    # accumulator costs a float32 gradient tree held across kernel calls, and a second one while
+    # `fwd_bwd` runs, since these gradients are returned in that dtype.
     micro_grads = jax.tree.map(self._to_accumulation_dtype, micro_grads)
 
     # Accumulated UNREDUCED, with no `1/denominator` applied: `_update_kernel` divides once
@@ -1366,6 +1370,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     micro-batch runs the same forward/backward program, and every leaf is summed as written
     here, by one elementwise add. Both operands are in the accumulation dtype, which
     `_fwd_bwd_kernel` casts its gradients to, so that is the dtype the sum is taken in.
+
+    The split costs memory. A kernel that took the donated running sum could add each leaf into
+    it in place as the backward pass produced it; here `_fwd_bwd_kernel` returns each
+    micro-batch's gradients as a tree of their own, held beside the running sum until this kernel
+    consumes them. That is one more gradient tree in the accumulation dtype at the
+    forward/backward peak, which the ahead-of-time memory report charges, so the split lowers the
+    peak only where the fold cost more than that tree.
 
     Args:
       acc_grads: Gradients summed over the earlier micro-batches of this update.
@@ -2788,7 +2799,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def close(self) -> None:
     """Closes the trainer, writes buffered metrics and final checkpoint."""
     if self._profiler is not None:
-      self._profiler.close(blocking_object=self._read_state_pure() if self._state is not None else None)
+      state_pure = self._read_state_pure() if self._state is not None else None
+      self._profiler.close(blocking_object=(state_pure, self._accumulated_grads))
 
     if self._weight_sync:
       if hasattr(self._weight_sync, "close"):

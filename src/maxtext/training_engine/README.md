@@ -101,8 +101,13 @@ and does not use the engine.
 
 Every micro-batch runs the same `fwd_bwd` program. The first micro-batch's gradients start the
 accumulator, and `accumulate` adds each later one's to it in place. The accumulator is not passed to
-`fwd_bwd` because XLA could then fold the add into the backward pass, which raises that program's peak
-memory.
+`fwd_bwd`: given it, XLA can fold the add into the backward pass, and on large meshes folding it into
+the token embedding's gradient scatter-add gathers an unsharded copy of that gradient, which raises the
+program's peak memory and can cost compute/communication overlap. Keeping the add apart has a memory
+cost of its own: each later micro-batch's gradients are held beside the accumulator until `accumulate`
+consumes them, one more gradient tree in the accumulation dtype at `fwd_bwd`'s peak. So the separate
+add lowers the peak where the fold was expensive and raises it by that tree where the fold was not; the
+[memory report](#reading-the-memory-report) counts it.
 
 `model_scope` implements Tunix's `AbstractTrainer.model_scope`, which Tunix uses to score per-token
 log-probabilities with the trainer's weights.
@@ -120,7 +125,7 @@ sharding at construction (for example Tokamax ring attention), while under `jax.
 | key | engine behavior |
 |---|---|
 | `grad_dtype` | dtype the optimizer receives gradients in |
-| `grad_accumulation_dtype` | dtype micro-batch gradients are summed in; `""` (default) uses `grad_dtype`. The sum is divided by the total loss denominator and cast to `grad_dtype` once, in `update`. `"float32"` with `grad_dtype=bfloat16` is more precise but keeps a float32 accumulator on device between micro-batches |
+| `grad_accumulation_dtype` | dtype micro-batch gradients are summed in; `""` (default) uses `grad_dtype`. The sum is divided by the total loss denominator and cast to `grad_dtype` once, in `update`. `"float32"` with `grad_dtype=bfloat16` is more precise but keeps a float32 accumulator on device between micro-batches, and each later micro-batch's float32 gradients beside it while `fwd_bwd` runs |
 | `optimizer_memory_host_offload` | the optimizer state lives in pinned host memory; `update` moves it to the device and back, so it is not resident during the forward and backward passes |
 | `parameter_memory_host_offload` | not supported; raises |
 | `shard_optimizer_over_data` (Zero-1) | shards the optimizer state over the `data` axis inside `update`; requires `shard_mode=explicit` |

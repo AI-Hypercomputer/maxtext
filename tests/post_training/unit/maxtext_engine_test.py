@@ -1773,15 +1773,42 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       t.fwd_bwd(DummyPayload())
       accumulate.assert_not_called()
       first_sum = jax.tree.leaves(t._accumulated_grads)
+      first_denominator = t._accumulated_denominator  # pylint: disable=protected-access
       t.fwd_bwd(DummyPayload())
       t.fwd_bwd(DummyPayload())
 
     self.assertEqual(fwd_bwd.call_count, 3)
     self.assertEqual(accumulate.call_count, 2)
     self.assertTrue(all(leaf.is_deleted() for leaf in first_sum), "the running sum was copied, not donated")
+    self.assertTrue(first_denominator.is_deleted(), "the running denominator was copied, not donated")
     # 8.0 per element and a denominator of 4.0 per micro-batch, summed unreduced; see `_weighted_loss_fn`.
     np.testing.assert_array_equal(np.asarray(t._accumulated_grads["weights"]), [24.0, 24.0])
     np.testing.assert_array_equal(np.asarray(t._accumulated_denominator), np.float32(12.0))
+
+  def test_denominator_is_summed_exactly_past_bfloat16_precision(self):
+    """The loss denominator is summed in float32 on both paths, whatever `grad_dtype` is.
+
+    Token counts above 256 are not all representable in bfloat16, and every other test keeps the
+    total small enough that a bfloat16 sum would still be exact -- so this is the one test that sees
+    a denominator summed, or rounded, in the gradients' dtype.
+    """
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+        t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+        t.with_loss_fn(
+            lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(257.0)
+            )
+        )
+        if compiled:
+          t.compile(DummyPayload())
+        for _ in range(3):
+          t.fwd_bwd(DummyPayload())
+        # 257 lies between the bfloat16 neighbours 256 and 258.
+        np.testing.assert_array_equal(
+            np.asarray(t._accumulated_denominator), np.float32(3 * 257.0)  # pylint: disable=protected-access
+        )
 
   def test_empty_grad_accumulation_dtype_is_default(self):
     """`grad_accumulation_dtype=` on the command line, which reaches pydantic as None, selects the default."""

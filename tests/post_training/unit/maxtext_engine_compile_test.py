@@ -585,6 +585,27 @@ class CompiledMemoryReportTest(absltest.TestCase):
     self.assertEqual(rows["fwd_bwd"].device_not_passed, optimizer + rows["accumulate"].output)
     self.assertGreaterEqual(rows["accumulate"].output, gradient_sum)
 
+  # CPU only, for the same reason as `test_report_matches_xla_allocation`.
+  @pytest.mark.cpu_only
+  def test_accumulator_is_sized_in_the_accumulation_dtype(self):
+    """The running sum beside `fwd_bwd` is charged in `grad_accumulation_dtype`, not in the weights' dtype.
+
+    bfloat16 weights summed in float32 make the two differ by 2x, so a report that sized the sum off
+    the parameters would understate the peak by half the accumulator.
+    """
+    cfg = _config(1, "weight_dtype=bfloat16", "grad_dtype=bfloat16", "grad_accumulation_dtype=float32")
+    engine, compiled = maxtext_engine_compile.compile_engine(cfg, maxtext_utils.get_mesh_from_config(cfg))
+    state = engine.train_state_avals()
+    params, _ = nnx.split_state(state["model"], nnx.Param, ...)
+    leaves = jax.tree.leaves(params)
+    self.assertTrue(all(leaf.dtype == jnp.bfloat16 for leaf in leaves), "the weights are not narrower than the sum")
+    # The parameters' bytes in float32, plus the float32 denominator.
+    float32_sum = 2 * sum(maxtext_engine_compile.per_device_bytes(leaf)[0] for leaf in leaves) + 4
+    rows = _by_kernel(maxtext_engine_compile.memory_report(compiled, state))
+
+    self.assertEqual(rows["accumulate"].alias, float32_sum)
+    self.assertGreaterEqual(rows["fwd_bwd"].device_not_passed - _subtree_bytes(state, "optimizer"), float32_sum)
+
   def test_train_state_avals_returns_copy(self):
     """The engine's cached state is re-placed in place on a recompile, so a caller must not share it."""
     cfg = _config(1)

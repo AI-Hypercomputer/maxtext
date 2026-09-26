@@ -523,8 +523,8 @@ class DataTypes(BaseModel):
       "",
       description=(
           "The data type MaxTextTrainingEngine sums micro-batch gradients in before casting them to grad_dtype; "
-          "empty uses grad_dtype. 'float32' with grad_dtype=bfloat16 sums more precisely, at the cost of a float32 "
-          "gradient accumulator on device."
+          "empty uses grad_dtype. 'float32' with grad_dtype=bfloat16 sums more precisely, at the cost of float32 "
+          "gradients on device: the accumulator, and each micro-batch's gradients beside it."
       ),
   )
 

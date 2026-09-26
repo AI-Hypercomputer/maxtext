@@ -130,7 +130,8 @@ save_config_to_gcs: false
 # gradient dtype
 grad_dtype: "float32"
 # dtype MaxTextTrainingEngine sums micro-batch gradients in before casting them to grad_dtype; "" uses grad_dtype.
-# "float32" with grad_dtype=bfloat16 sums more precisely, at the cost of a float32 gradient accumulator on device.
+# "float32" with grad_dtype=bfloat16 sums more precisely, at the cost of float32 gradients on device: the accumulator,
+# and each micro-batch's gradients beside it.
 grad_accumulation_dtype: ""
 
 # activation dtypes.
