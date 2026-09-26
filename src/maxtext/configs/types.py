@@ -1514,6 +1514,13 @@ class Qwen3Next(BaseModel):
           " under exp(-20) per step. 0 disables it and lets the kernel activate the gate itself."
       ),
   )
+  olmoe3_per_layer_remat: bool = Field(
+      False,
+      description=(
+          "Rematerialize each OLMoE3 layer on its own instead of per mixer cycle. Without it the"
+          " unrolled first cycle is not rematerialized at all and the scanned cycles remat as a block."
+      ),
+  )
   kda_conv_in_compute_dtype: bool = Field(
       False,
       description=(

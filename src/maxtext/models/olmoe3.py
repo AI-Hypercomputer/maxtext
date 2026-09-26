@@ -794,6 +794,10 @@ class OLMoE3ScannableBlock(nnx.Module):
   applied separately with ``first_layer_idx=0`` while the scanned cycles start
   past ``first_num_dense_layers``. Passing the within-cycle index instead would
   make layer 0 of *every* cycle dense.
+
+  With ``olmoe3_per_layer_remat`` each layer is rematerialized on its own under
+  ``remat_policy_fn``, so the backward holds one layer's recomputed activations
+  instead of the whole cycle's.
   """
 
   def __init__(
@@ -804,9 +808,12 @@ class OLMoE3ScannableBlock(nnx.Module):
       quant=None,
       *,
       first_layer_idx: int = 0,
+      remat_policy_fn: Any | None = None,
       rngs: nnx.Rngs,
   ):
     self.config = config
+    self.remat_policy_fn = remat_policy_fn
+    self.remat_layers = config.olmoe3_per_layer_remat and config.remat_policy != "none"
     for i in range(config.inhomogeneous_layer_cycle_interval):
       setattr(
           self,
@@ -833,15 +840,22 @@ class OLMoE3ScannableBlock(nnx.Module):
   ):
     x = carry
     for i in range(self.config.inhomogeneous_layer_cycle_interval):
-      x, _ = getattr(self, f"layer_{i}")(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk,
-          slot,
-      )
+      layer = getattr(self, f"layer_{i}")
+      args = (decoder_segment_ids, decoder_positions, deterministic, model_mode, previous_chunk, slot)
+      if not self.remat_layers:
+        x, _ = layer(x, *args)
+        continue
+      graphdef, state = nnx.split(layer)
+
+      def run_layer(state_in, x_in, graphdef=graphdef, args=args):
+        merged = nnx.merge(graphdef, state_in)
+        out, _ = merged(x_in, *args)
+        return out, nnx.state(merged)
+
+      # The layers are unrolled here, so CSE must be blocked or XLA merges the
+      # recompute back into the forward and saves everything.
+      x, new_state = jax.checkpoint(run_layer, policy=self.remat_policy_fn, prevent_cse=True)(state, x)
+      nnx.update(layer, new_state)
     return x, None
 
 

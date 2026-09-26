@@ -1461,6 +1461,8 @@ tokamax_kda_max_num_segments: 32
 tokamax_kda_log_decay_floor: 20.0
 # Cast the KDA short-conv weight to the activation dtype so q/k/v stay bf16.
 kda_conv_in_compute_dtype: false
+# Rematerialize each OLMoE3 layer on its own instead of per mixer cycle.
+olmoe3_per_layer_remat: false
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on

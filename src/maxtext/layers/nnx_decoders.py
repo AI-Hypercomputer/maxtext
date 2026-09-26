@@ -642,7 +642,10 @@ class NNXDecoder(nnx.Module):
           f"{config.first_num_dense_layers=} > {interval=}."
       )
 
-    self.layers_0 = self._create_single_layer(block_cls, rngs, first_layer_idx=0)
+    # Per-layer remat inside each cycle; otherwise layers_0 is not rematerialized
+    # at all and the scanned cycles remat as one 8-layer block.
+    remat_kwargs = {"remat_policy_fn": self.get_remat_policy()}
+    self.layers_0 = self._create_single_layer(block_cls, rngs, first_layer_idx=0, **remat_kwargs)
 
     num_scanned_cycles = config.num_decoder_layers // interval - 1
     if num_scanned_cycles > 0:
@@ -652,6 +655,7 @@ class NNXDecoder(nnx.Module):
           metadata_axis_name="scanned_blocks",
           rngs=rngs,
           first_layer_idx=interval,
+          **remat_kwargs,
       )
 
   def _init_scanned_deepseek4(self, rngs):
@@ -2440,6 +2444,7 @@ class NNXDecoder(nnx.Module):
           model_mode,
           length=num_scanned_cycles,
           metadata_axis_name="scanned_blocks",
+          skip_block_remat=cfg.olmoe3_per_layer_remat,
           **layer_call_kwargs,
       )
     return y

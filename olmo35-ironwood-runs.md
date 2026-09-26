@@ -476,6 +476,60 @@ control has now landed at 109.6 to 109.9 across three series. The remaining
 levers are the bf16 KDA path (l3/l4) and pdb=4 (l5/l6), both waiting on the
 new source.
 
+### l-series, bf16 KDA conv and param cast (o35n261815)
+
+Base j2 at pdb=3 unless noted.
+
+| arm | pdb | change | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|---|---|
+| l1_ctrl | 3 | none | 109.4 | 9.48% | 0.969 | 10.823 |
+| l2_cast | 3 | `cast_params_to_compute_dtype` | 109.7 | 9.51% | 0.966 | |
+| **l3_conv** | 3 | `kda_conv_in_compute_dtype` | **122.3** | **10.60%** | 0.867 | 10.836 |
+| l4_both | 3 | both | 122.2 | 10.60% | 0.867 | |
+| l5_both_p4_vt8 | 4 | both, vocab 8 | | | | OOM, 95.08G, as the AOT said |
+| l6_both_p4_vt8_lim100 | 4 | both, vocab 8, limit 100 | | | | OOM |
+
+l3 matches the k3 bound to the decimal, so all of k3's 11.8% was KDA running in
+fp32, not the weights. The param cast is neutral, as the AOT predicted. The bf16
+KDA path moves the loss by +0.005, +0.008, +0.011, +0.013 at steps 4, 9, 14, 19:
+small but growing, so it needs a longer run before it can be the default. OLMo-core
+trains under bf16 autocast, which also feeds the KDA kernel bf16.
+
+### OLMoE3 remat: the first cycle was never rematerialized
+
+The pdb=4 peak held 43 GiB of MoE rows. The live ranges show why. OLMo 3.5 has
+`first_num_dense_layers=1`, so `_init_scanned_olmoe3` builds the first 8-layer
+cycle as an unrolled `layers_0` and scans the remaining cycle.
+`_apply_olmoe3_scanned_blocks` called `layers_0` with no `jax.checkpoint`, so
+every activation of its 7 MoE layers was saved from the forward to the backward.
+The scanned cycle was rematerialized as one 8-layer block, so its 7 MoE layers
+were also live together during its backward.
+
+`olmoe3_per_layer_remat` gives each layer its own `jax.checkpoint`
+(`prevent_cse=True`, since the layers are unrolled inside the block) and skips
+the block-level remat. This is the Qwen3-Next and Gemma4 pattern.
+
+| config (AOT) | pdb | temporaries | peak live | MoE rows at peak |
+|---|---|---|---|---|
+| conv + cast, vocab 8 | 4 | 95.08G (OOM) | 92.5 GiB | 43 GiB |
+| conv + per-layer remat | 4 | 70.63 GiB | 62.7 GiB | 3 GiB |
+
+The biggest item at the peak is now the gathered expert weights (31 GiB).
+
+### In flight: n-series, per-layer remat and batch (o35n261924)
+
+Base j2 plus `kda_conv_in_compute_dtype` unless noted. plr = `olmoe3_per_layer_remat`.
+
+| arm | pdb | change | TF/s/dev | MFU |
+|---|---|---|---|---|
+| n1_conv | 3 | control (l3) | | |
+| n2_conv_plr | 3 | + plr | | |
+| n3_conv_plr_p4 | 4 | + plr | | |
+| n4_conv_plr_p5 | 5 | + plr | | |
+| n5_conv_plr_p6 | 6 | + plr | | |
+| n6_plr_p4_fp32kda | 4 | plr, fp32 KDA | | |
+| n7_conv_plr_p4_disp | 4 | + plr, `moe_dispatch=device` | | |
+
 ## Profiles and xla-shell output
 
 Captures are pulled and analysed with `scripts/olmo35_profile_report.sh`, which
