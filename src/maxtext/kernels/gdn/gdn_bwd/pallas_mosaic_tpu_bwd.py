@@ -45,31 +45,39 @@ def _gdn_matmul(
 
   For bf16 activations the default is a single-pass bf16 MXU matmul. With
   `precise=True` both operands stay f32 and the matmul runs at
-  `Precision.HIGH` (3-pass bf16). The intra-chunk matmuls need this: the
+  `Precision.HIGHEST` (6-pass bf16). The intra-chunk matmuls need this: the
   gating adjoint sums `q * dq - k * dk` over products that nearly cancel, and
   bf16-rounded operands leave the A_log / dt_bias gradients with the wrong
   direction (cosine ~0.3 against an fp32 reference). For f32 activations every
   matmul runs at `Precision.HIGHEST`.
+
+  Args:
+    lhs: Left-hand side operand tensor.
+    rhs: Right-hand side operand tensor.
+    compute_dtype: Activation dtype (`bfloat16` or `float32`).
+    keep_lhs_fp32: Whether to keep `lhs` in `float32` when `precise=False`.
+    precise: Whether to keep both operands in `float32` at `Precision.HIGHEST`.
+
+  Returns:
+    The batched matrix product accumulated in `float32`.
   """
-  if jnp.dtype(compute_dtype) == jnp.bfloat16:
-    if precise:
-      lhs_dtype = rhs_dtype = jnp.float32
-      precision = jax.lax.Precision.HIGH
-    else:
-      lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
-      rhs_dtype = jnp.bfloat16
-      precision = jax.lax.Precision.DEFAULT
+  if jnp.dtype(compute_dtype) == jnp.bfloat16 and not precise:
+    lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
     return jax.lax.dot_general(
         lhs.astype(lhs_dtype),
-        rhs.astype(rhs_dtype),
+        rhs.astype(jnp.bfloat16),
         dimension_numbers=(
             ((lhs.ndim - 1,), (rhs.ndim - 2,)),
             (tuple(range(lhs.ndim - 2)), tuple(range(rhs.ndim - 2))),
         ),
-        precision=precision,
+        precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=jnp.float32,
     )
-  return jnp.matmul(lhs, rhs, precision=jax.lax.Precision.HIGHEST)
+  return jnp.matmul(
+      lhs.astype(jnp.float32),
+      rhs.astype(jnp.float32),
+      precision=jax.lax.Precision.HIGHEST,
+  )
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
