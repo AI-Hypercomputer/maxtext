@@ -15,6 +15,7 @@
 """Tests for the DiLoCo implementation in diloco.py"""
 
 
+import json
 import os
 import shutil
 import tempfile
@@ -34,6 +35,7 @@ from maxtext.configs.pyconfig import initialize_pydantic
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
 from maxtext.trainers.diloco.utils import spmd_diloco_checkpointing as diloco_checkpoint_utils
+from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
@@ -399,6 +401,51 @@ class DiLoCoTest(unittest.TestCase):
             "head_dim=4",
         )
     )
+
+  @pytest.mark.cpu_only
+  def test_threaded_streaming_diloco_trains(self):
+    if jax.device_count() < 2:
+      self.skipTest("Needs 2 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=2).")
+    output_dir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, output_dir, ignore_errors=True)
+    metrics_file = os.path.join(output_dir, "metrics.txt")
+    train_main(
+        (
+            None,
+            get_test_config_path(),
+            f"base_output_directory={output_dir}",
+            "run_name=threaded_diloco_test",
+            "enable_diloco=true",
+            "enable_streaming_diloco=true",
+            "enable_threaded_diloco=true",
+            "ici_diloco_parallelism=2",
+            "num_diloco_fragments=3",
+            "diloco_sync_period=3",
+            "num_communication_overlapping_steps=1",
+            "diloco_bucketize_non_scanned=true",
+            "steps=6",
+            "dataset_type=synthetic",
+            "per_device_batch_size=1",
+            "max_target_length=64",
+            "base_emb_dim=32",
+            "base_num_decoder_layers=2",
+            "base_mlp_dim=64",
+            "base_num_query_heads=2",
+            "base_num_kv_heads=2",
+            "head_dim=16",
+            "vocab_size=256",
+            "enable_checkpointing=false",
+            "enable_goodput_recording=false",
+            "monitor_goodput=false",
+            "skip_jax_distributed_system=true",
+            f"metrics_file={metrics_file}",
+        )
+    )
+    # Learner 0 writes the metrics file, one line per step as in train_loop (log_period only affects other sinks).
+    with open(metrics_file, encoding="utf8") as f:
+      records = [json.loads(line) for line in f]
+    self.assertEqual([r["step"] for r in records], list(range(6)))
+    self.assertTrue(all(np.isfinite(r["learning/loss"]) for r in records))
 
   def test_fragmented_tree_manipulator_scanned_filter(self):
     """Tests that parameters matching regex but lacking leading layer dim are NOT marked scanned."""
