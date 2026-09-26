@@ -843,6 +843,9 @@ per_device_batch_size: 12.0
 # When set to between 0 and 1, it's for grain pipeline to use a smaller chip count to read checkpoint from a larger chip count job.
 # Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md#using-grain
 expansion_factor_real_data: -1.0
+# Data-parallel replicas fed by one process, each with its own input pipeline; each loads a slice of the host shard.
+num_data_replicas_per_process: 1
+data_replica_index: 0
 eval_per_device_batch_size: 0.0
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
@@ -1020,6 +1023,8 @@ skip_first_n_steps_for_profiler: 1
 profiler_steps: 5
 hide_profiler_step_metric: false
 profile_cleanly: true # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
+# Pathways only: max number of worker hosts to trace. Set to the total number of TPU hosts to capture all of them.
+profiler_max_num_hosts: 1
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
 # This is useful to debug scenarios where performance is changing.
 enable_tpu_profiling_options: false
@@ -1086,8 +1091,17 @@ dcn_bandwidth_interface: "eth0"
 enable_streaming_diloco: false
 num_diloco_fragments: null
 use_sequential_layers: false
+# Split non-scanned matrices (embedding, output projection; any ndim >= 2 leaf, whatever its size) across the layer
+# fragments, along their longest unsharded axis; matrices whose long axes are all sharded stay whole in fragment 0.
+# Requires num_diloco_fragments >= 3.
+diloco_bucketize_non_scanned: false
 num_communication_overlapping_steps: 0
 communication_overlapping_alpha: 0.0
+# Threaded (non-SPMD) streaming DiLoCo: one host thread per learner, outer step on colocated CPU devices.
+# A threaded run does not checkpoint or export the outer parameters; eval uses each learner's inner parameters.
+enable_threaded_diloco: false
+threaded_diloco_replicate_outer_step: true
+threaded_diloco_transport_timeout_seconds: 3600.0
 
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.

@@ -13,6 +13,9 @@
 # limitations under the License.
 
 """Tests for monitoring metrics"""
+import shutil
+import sys
+import tempfile
 from collections import defaultdict
 import unittest
 from types import SimpleNamespace
@@ -21,6 +24,8 @@ from unittest import mock
 import numpy as np
 
 from maxtext.common.metric_logger import MetricLogger, MetadataKey
+from maxtext.configs import pyconfig
+from tests.utils.test_helpers import get_test_config_path
 
 # pylint: disable=missing-function-docstring
 
@@ -210,6 +215,60 @@ class MetricLoggerLogMetricsTest(unittest.TestCase):
     log_string = mock_log.call_args[0][0]
     self.assertNotIn("live slice count", log_string)
     mock_live_slices.assert_not_called()
+
+
+class MetricLoggerLogPrefixTest(unittest.TestCase):
+  """`log_prefix` set through the constructor reaches every console line of the logger."""
+
+  def test_log_prefix_on_console_lines(self):
+    output_dir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, output_dir, ignore_errors=True)
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        run_name="test_log_prefix",
+        base_output_directory=output_dir,
+        enable_checkpointing=False,
+        abort_on_nan_loss=True,
+    )
+    logger = MetricLogger(config=config, learning_rate_schedule=None, log_prefix="[learner 1] ")
+    train = {
+        "scalar": {
+            "learning/loss": 1.0,
+            "perf/step_time_seconds": 2.0,
+            "perf/per_device_tflops_per_sec": 100.0,
+            "perf/per_device_tokens_per_sec": 1000.0,
+            "learning/total_weights": 100,
+        }
+    }
+    evals = {
+        "scalar": {
+            "eval/avg_loss": 1.0,
+            "eval/avg_perplexity": 2.7,
+            "eval/total_weights": 100,
+            "eval/step_time_seconds": 0.5,
+        }
+    }
+    nan_train = {"scalar": {**train["scalar"], "learning/loss": float("nan")}}
+
+    with mock.patch("maxtext.common.metric_logger.max_logging.log") as mock_log:
+      logger.write_setup_info_to_tensorboard({"w": np.zeros((4, 4))})
+      logger.write_metrics(train, step=0, metric_type="train")
+      logger.write_metrics(evals, step=0, metric_type="running_eval")
+      logger.write_metrics(evals, step=0, metric_type="eval")
+      with self.assertRaises(SystemExit):
+        logger.write_metrics(nan_train, step=1, metric_type="train")
+
+    lines = [call.args[0] for call in mock_log.call_args_list]
+    for expected in (
+        "number parameters: ",
+        "completed step: 0",
+        "To see full metrics",
+        "Completed eval step: 0",
+        "Completed eval after train step 0",
+        "Aborting training due to NaN loss.",
+    ):
+      self.assertTrue(any(line.startswith("[learner 1] " + expected) for line in lines), (expected, lines))
+    self.assertTrue(all(line.startswith("[learner 1] ") for line in lines), lines)
 
 
 class MoeDroplessFallbackLogTest(unittest.TestCase):
