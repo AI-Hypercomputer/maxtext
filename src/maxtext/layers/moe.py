@@ -283,7 +283,7 @@ def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
   return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
 
 
-def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None):
+def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None, replication_factor=1):
   """Computes a bias adjustment update based on expert load.
 
   Used in DeepSeek V3: https://arxiv.org/html/2412.19437v1.
@@ -297,6 +297,11 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=
         Defaults to None for backward compatibility. When provided, expert token
         counts are collectively reduced (psum) across these axes before
         computing the load balance updates.
+      replication_factor: Number of identical copies of the local counts that
+        the psum over `axis_names` adds up (e.g. the EP size in ring-of-experts,
+        where every EP shard routes the same all-gathered batch). The reduced
+        counts are divided by it, which is exact, and keeps `sum(counts)` from
+        overflowing int32 at large scale.
 
   Returns:
       update: The value to add to the expert bias. Shape (num_experts,).
@@ -307,6 +312,8 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=
   expert_counts = jnp.sum(jax.nn.one_hot(flat_indices, num_experts, dtype=jnp.int32), axis=0)
   if axis_names:
     expert_counts = jax.lax.psum(expert_counts, axis_names)
+    if replication_factor > 1:
+      expert_counts = expert_counts // replication_factor
   total_tokens = jnp.sum(expert_counts)
   average_load = total_tokens / num_experts
   direction = jnp.sign(average_load - expert_counts)
@@ -1144,6 +1151,7 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       force_dropless=False,
       mesh_axis_names=None,
+      bias_counts_replication_factor=1,
   ):
     """Permute tokens to group by expert to fit gmm call."""
     is_qarray = isinstance(inputs, qpl.QArray)
@@ -1166,6 +1174,7 @@ class RoutedMoE(nnx.Module):
           self.config.num_experts,
           self.config.routed_bias_update_rate,
           axis_names=mesh_axis_names,
+          replication_factor=bias_counts_replication_factor,
       )
     else:
       bias_updates = None
@@ -2057,9 +2066,16 @@ class RoutedMoE(nnx.Module):
     bias_update_axis_names = _batch_axis_names(gate_logits_pspec)
     # In RoE, logits are already all-gathered across self._expert_parallelism_name before
     # routing, so each shard evaluates the full batch and computes identical token counts.
-    # Exclude the EP axis so psum doesn't redundantly reduce and scale counts by num_ep
-    # for calculate_load_balance_updates().
-    roe_bias_axis_names = _filter_axis_names(bias_update_axis_names, self._expert_parallelism_name)
+    # The counts psum still spans the EP axis: over all batch axes XLA can use
+    # its multi-dimensional all-reduce (and combine it with the whole-mesh
+    # has_overflow psum) instead of a latency-bound ring over the non-EP axes
+    # only. The num_ep identical copies are divided back out in
+    # calculate_load_balance_updates(), which also keeps the summed counts
+    # within int32.
+    if self._expert_parallelism_name in (bias_update_axis_names or ()):
+      roe_bias_counts_replication_factor = self.get_expert_parallelism_size()
+    else:
+      roe_bias_counts_replication_factor = 1
 
     def quantize_and_all_gather_tokens(
         x: jax.Array,
@@ -2161,7 +2177,8 @@ class RoutedMoE(nnx.Module):
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
           force_dropless=force_dropless,
-          mesh_axis_names=roe_bias_axis_names,
+          mesh_axis_names=bias_update_axis_names,
+          bias_counts_replication_factor=roe_bias_counts_replication_factor,
       )
       return (
           x,
