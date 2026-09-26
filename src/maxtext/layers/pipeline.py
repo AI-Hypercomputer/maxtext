@@ -892,32 +892,60 @@ class NNXPipeline(PipelineBase):
     # jax.tree.map to raise "Mismatch custom node data". Mirrors Linen
     # where all_gather_over_fsdp operates on
     # self.layers.variables (the params collection only).
-    _, layers_params, layers_metrics, layers_mutables = nnx.split(
-        layers_state, pipeline_utils.is_static_param, nnx.Intermediate, ...
+    # Non-trainable state is split in two:
+    #   * layers_rngs      -- RngState (RngKey/RngCount). Carried through the
+    #                         scan, because advance_rng_state has to fold the
+    #                         loop iteration into every key so each iteration
+    #                         sees a different dropout mask.
+    #   * layers_broadcast -- everything else that is neither a param, an
+    #                         Intermediate, nor RNG state. Broadcast into every
+    #                         iteration rather than threaded through the carry.
+    #
+    # Broadcasting (rather than carrying) the remainder is what the Linen
+    # pipeline does: get_pipeline_scan_fn passes
+    # variable_broadcast=["_overwrite_with_gradient", "non_trainable"] to
+    # nn.scan. The NNX port originally lumped this partition into the carry and
+    # asserted it was empty apart from RNG state, which made any model with a
+    # non-Param, non-Intermediate variable unrunnable under pipelining. MoE
+    # models are the motivating case: for deepseek3/deepseek4/kimi-k2, GateLogit
+    # stores the router bias as a MoEBiasVar (a bare nnx.Variable subclass, not
+    # an nnx.Param, since it is updated by a running-average rule rather than by
+    # gradient descent), so the assertion fired before a single step could run.
+    #
+    # Broadcasting is numerically exact here: the forward pass never writes to
+    # these variables. calculate_load_balance_updates returns the bias delta up
+    # the call stack for the caller to apply between steps; it is not stored
+    # back into the variable inside the pipelined region. A variable that *were*
+    # mutated in-place per iteration would silently lose those updates, so keep
+    # the guard below to catch a Param accidentally landing in this partition.
+    _, layers_params, layers_metrics, layers_rngs, layers_broadcast = nnx.split(
+        layers_state, pipeline_utils.is_static_param, nnx.Intermediate, nnx.RngState, ...
     )
 
-    # layers_mutables catch-all should contain ONLY RngState variables (RngKey/RngCount).
-    # If non_trainable state (e.g. BatchStat) appears here,
-    # it is being carried through scan instead of broadcast.
     # NOTE: is_leaf stops jax.tree.leaves from traversing *into* Variable nodes,
     # so we see actual Variable instances (not raw arrays).
-    assert all(
-        isinstance(v, nnx.RngState)
-        for v in jax.tree.leaves(layers_mutables, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    broadcast_vars = [
+        v
+        for v in jax.tree.leaves(layers_broadcast, is_leaf=lambda x: isinstance(x, nnx.Variable))
         if isinstance(v, nnx.Variable)
-    ), (
-        "Non-RngState variable found in layers_mutables catch-all partition. "
-        "Only RngState variables (RngKey/RngCount) should be present."
+    ]
+    assert not any(pipeline_utils.is_static_param(None, v) for v in broadcast_vars), (
+        "Trainable parameter found in the broadcast partition of the pipeline state: "
+        f"{sorted({type(v).__name__ for v in broadcast_vars})}. Parameters must be "
+        "partitioned by is_static_param so they participate in FSDP all-gather."
     )
 
     if self.config.pipeline_fsdp_ag_once:
       layers_params = self.all_gather_over_fsdp(layers_params, logical_partition_spec)
 
     def scan_body(carry, _):
-      current_loop_state, current_layer_mutables = carry
+      current_loop_state, current_layer_rngs = carry
       iteration = current_loop_state["loop_iteration"]
-      advanced_mutables = pipeline_utils.advance_rng_state(current_layer_mutables, iteration)
-      current_layer_state = nnx.State.merge(layers_params, layers_metrics, advanced_mutables)
+      advanced_rngs = pipeline_utils.advance_rng_state(current_layer_rngs, iteration)
+      # layers_broadcast is closed over rather than carried: it is read-only for
+      # the duration of the pipeline, so every iteration sees the same values
+      # and the scan carry stays limited to state that genuinely evolves.
+      current_layer_state = nnx.State.merge(layers_params, layers_metrics, advanced_rngs, layers_broadcast)
 
       new_loop_state, new_layer_state = self.run_one_iteration(
           current_loop_state,
@@ -930,10 +958,12 @@ class NNXPipeline(PipelineBase):
           logical_partition_spec,
       )
 
-      _, _, new_layer_metrics, new_layer_mutables = nnx.split(
-          new_layer_state, pipeline_utils.is_static_param, nnx.Intermediate, ...
+      # The broadcast partition comes back out of run_one_iteration unchanged;
+      # drop it so the carry structure matches the one scan was given.
+      _, _, new_layer_metrics, new_layer_rngs, _ = nnx.split(
+          new_layer_state, pipeline_utils.is_static_param, nnx.Intermediate, nnx.RngState, ...
       )
-      return (new_loop_state, new_layer_mutables), new_layer_metrics
+      return (new_loop_state, new_layer_rngs), new_layer_metrics
 
     if self.config.set_remat_policy_on_pipeline_iterations:
       scan_body = jax.checkpoint(
@@ -941,19 +971,19 @@ class NNXPipeline(PipelineBase):
       )
 
     if self.config.scan_pipeline_iterations:
-      (loop_state, final_layer_mutables), stacked_metrics = jax.lax.scan(
-          scan_body, (loop_state, layers_mutables), None, length=total_iterations
+      (loop_state, final_layer_rngs), stacked_metrics = jax.lax.scan(
+          scan_body, (loop_state, layers_rngs), None, length=total_iterations
       )
     else:
-      current_carry = (loop_state, layers_mutables)
+      current_carry = (loop_state, layers_rngs)
       metrics_history = []
       for _ in range(total_iterations):
         current_carry, step_metrics = scan_body(current_carry, None)
         metrics_history.append(step_metrics)
-      loop_state, final_layer_mutables = current_carry
+      loop_state, final_layer_rngs = current_carry
       stacked_metrics = jax.tree.map(lambda *xs: jnp.stack(xs), *metrics_history) if metrics_history else layers_metrics
 
-    final_layer_state = nnx.State.merge(layers_params, stacked_metrics, final_layer_mutables)
+    final_layer_state = nnx.State.merge(layers_params, stacked_metrics, final_layer_rngs, layers_broadcast)
     nnx.update(self.layers, final_layer_state)
 
     final_output = self.permute_output_micro_per_stage_dim(loop_state["state_io"])
@@ -1377,14 +1407,35 @@ class NNXCircularPipeline(PipelineBase):
         layers_state, pipeline_utils.is_static_param, nnx.Intermediate, ...
     )
 
-    # Validate: layers_mutables should contain ONLY RngState variables
-    assert all(
-        isinstance(v, nnx.RngState)
+    # Unlike NNXPipeline, the circular pipeline keeps all non-param, non-metric
+    # state in a single partition and threads it through the 'carry_state' Linen
+    # collection. That plumbing (flatten_nnx_state / unflatten_nnx_state) is
+    # generic over variable types, so non-RNG state such as the MoE router bias
+    # (MoEBiasVar, used by deepseek3/deepseek4/kimi-k2) rides along correctly;
+    # only the old RngState-only assertion stood in the way.
+    #
+    # Carrying rather than broadcasting it costs a little carry traffic but is
+    # numerically exact, because these variables are read-only inside the
+    # pipelined region: the router-bias update is returned up the call stack for
+    # the caller to apply between steps, never written back here. Splitting out
+    # a separate broadcast collection (as NNXPipeline does, mirroring Linen's
+    # variable_broadcast) would mean threading another argument through four
+    # nested custom_vjp signatures, which is not worth it for read-only state.
+    #
+    # A trainable param landing in this partition *would* be a real bug -- it
+    # would bypass the FSDP all-gather and the weight-prefetch path -- so keep
+    # guarding against that.
+    # NOTE: is_leaf stops jax.tree.leaves from traversing *into* Variable nodes,
+    # so we see actual Variable instances (not raw arrays).
+    mutable_vars = [
+        v
         for v in jax.tree.leaves(layers_mutables, is_leaf=lambda x: isinstance(x, nnx.Variable))
         if isinstance(v, nnx.Variable)
-    ), (
-        "Non-RngState variable found in layers_mutables catch-all partition. "
-        "Only RngState variables (RngKey/RngCount) should be present."
+    ]
+    assert not any(pipeline_utils.is_static_param(None, v) for v in mutable_vars), (
+        "Trainable parameter found in the carry_state partition of the circular pipeline state: "
+        f"{sorted({type(v).__name__ for v in mutable_vars})}. Parameters must be partitioned by "
+        "is_static_param so they participate in FSDP all-gather and weight prefetching."
     )
 
     # Pre-capture Python config values needed inside the stage function.

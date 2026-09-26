@@ -343,6 +343,56 @@ class PipelineParallelismTest(unittest.TestCase):
         config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen
     )
 
+  def test_circular_deepseek_v3_routed_bias_same_output_and_grad(self):
+    # Same shape as the test above, but with DeepSeek-V3's routed bias enabled.
+    #
+    # `GateLogit.__init__` stores the router bias as a `MoEBiasVar` (a bare
+    # `nnx.Variable` subclass) rather than an `nnx.Param` when `use_bias` is set
+    # and `model_name` starts with "deepseek3"/"deepseek4"/"kimi-k2" -- the bias
+    # is updated by a running average rather than by gradient descent, so it
+    # must stay out of the optimizer. `model_name` is therefore load-bearing
+    # here: with the default model name the bias would be a plain `nnx.Param`
+    # and this test would not exercise the interesting path.
+    #
+    # The pipeline used to reject that variable outright ("Non-RngState variable
+    # found in layers_mutables catch-all partition"), because it partitioned
+    # layer state into params / intermediates / everything-else and assumed the
+    # remainder was RNG state. It is now split once more, so RNG state is
+    # carried through the scan while the rest is broadcast -- matching the Linen
+    # pipeline's `variable_broadcast=["_overwrite_with_gradient",
+    # "non_trainable"]`. Comparing against the sequential reference is what
+    # confirms broadcasting does not change the numerics.
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        enable_checkpointing=False,
+        enable_goodput_recording=False,
+        run_name="circular_moe_routed_bias",
+        model_name="deepseek3-tiny",
+        override_model_config=True,
+        max_target_length=128,
+        base_emb_dim=28,
+        ici_pipeline_parallelism=4,
+        base_num_decoder_layers=8,
+        first_num_dense_layers=0,
+        num_pipeline_microbatches=8,
+        per_device_batch_size=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+        megablox=False,
+        sparse_matmul=False,
+        capacity_factor=1,
+        decoder_block="deepseek",
+        base_moe_mlp_dim=1024,
+        base_mlp_dim=1024,
+        attention_type="mla",
+        shared_experts=1,
+        routed_bias=True,
+        routed_score_func="sigmoid",
+    )
+    self.assert_pipeline_matches_sequential_output_and_grad(
+        config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen
+    )
+
   @pytest.mark.scheduled_only
   def test_deepseek_ragged_a2a_ep_same_output_and_grad(self):
     config = pyconfig.initialize(
