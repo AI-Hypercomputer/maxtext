@@ -1171,6 +1171,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Enable top-k probability normalization for router weights (Qwen3-specific).",
   )
+  use_topk_kernel: bool = Field(
+      False,
+      description="Whether to use the Pallas fused Top-K router gating kernel with analytical VJP.",
+  )
   return_routed_experts: bool = Field(
       False,
       description=(

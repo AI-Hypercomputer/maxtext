@@ -333,6 +333,9 @@ use_gmm_v2_heuristic_tiling: false
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
+# Whether to use Pallas fused Top-K router gating kernel on TPU
+use_topk_kernel: false
+
 # Record each MoE layer's routing decisions as a `selected_experts` intermediate, which the decoder
 # returns alongside the hidden state as `expert_indices`. Only read on the vLLM fused MoE path
 # (attention: vllm_rpa / vllm_batched_rpa), so in practice only the vLLM sampler in RL sets it, to
