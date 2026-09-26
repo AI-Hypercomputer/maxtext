@@ -45,16 +45,26 @@ def _gdn_matmul(
 
   For bf16 activations the default is a single-pass bf16 MXU matmul. With
   `precise=True` both operands stay f32 and the matmul runs at
-  `Precision.HIGH` (3-pass bf16). The intra-chunk matmuls need this: the
+  `Precision.HIGHEST` (6-pass bf16). The intra-chunk matmuls need this: the
   gating adjoint sums `q * dq - k * dk` over products that nearly cancel, and
   bf16-rounded operands leave the A_log / dt_bias gradients with the wrong
   direction (cosine ~0.3 against an fp32 reference). For f32 activations every
   matmul runs at `Precision.HIGHEST`.
+
+  Args:
+    lhs: Left-hand side operand tensor.
+    rhs: Right-hand side operand tensor.
+    compute_dtype: Activation dtype (`bfloat16` or `float32`).
+    keep_lhs_fp32: Whether to keep `lhs` in `float32` when `precise=False`.
+    precise: Whether to keep both operands in `float32` at `Precision.HIGHEST`.
+
+  Returns:
+    The batched matrix product accumulated in `float32`.
   """
   if jnp.dtype(compute_dtype) == jnp.bfloat16:
     if precise:
       lhs_dtype = rhs_dtype = jnp.float32
-      precision = jax.lax.Precision.HIGH
+      precision = jax.lax.Precision.HIGHEST
     else:
       lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
       rhs_dtype = jnp.bfloat16
