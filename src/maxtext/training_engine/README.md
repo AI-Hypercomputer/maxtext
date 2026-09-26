@@ -68,6 +68,43 @@ python3 -m maxtext.training_engine.maxtext_engine_compile src/maxtext/configs/ba
   <the same model and parallelism flags as the run>
 ```
 
+To check the configuration of an RL trainer, add `compile_engine_loss=grpo`, which compiles the kernels
+with Tunix's GRPO loss instead of MaxText's own:
+
+```bash
+python3 -m maxtext.training_engine.maxtext_engine_compile src/maxtext/configs/base.yml \
+  compile_topology=<topology> compile_topology_num_slices=1 compile_engine_loss=grpo \
+  max_target_length=<prompt + completion tokens> max_prefill_predict_length=<prompt tokens> \
+  per_device_batch_size=<sequences per micro-batch / chips> \
+  compile_engine_grpo_config="{<the trainer's GRPOConfig options, e.g. beta: 0.0>}" \
+  compile_engine_logps_chunk_size=<the trainer's compute_logps_chunk_size> \
+  <the same model and parallelism flags as the trainer>
+```
+
+The engine is then set up as Tunix's RL trainer sets it up: the model is wrapped in `TunixMaxTextAdapter`,
+and the loss (with `has_aux=True`) and its input mapping come from Tunix's `GRPOAdapter`, built from
+`GRPOConfig(**compile_engine_grpo_config)` with `decode_sampling_temperature` as the default temperature.
+Pass the trainer's own options: they decide which inputs the loss reads and which operations it runs,
+and options left out take `GRPOConfig`'s defaults, whose `beta` is non-zero. A non-zero
+`compile_engine_logps_chunk_size` computes the log-probabilities in chunks of that many tokens, as Tunix's
+`TrainerWorker` does for `compute_logps_chunk_size`; without it the logits of whole sequences are held at
+once, which at long context and large vocabularies dominates the report. The kernels are compiled for an
+`RLTrainerPayload` laid out as Tunix's `PaddedBatchAssembler` lays out a micro-batch:
+
+- `micro_batch_size_to_train_on` sequences (Tunix's `train_micro_batch_size`), each of
+  `max_prefill_predict_length` prompt tokens (Tunix's `max_prompt_length`) and the rest of
+  `max_target_length` as completion tokens (`max_response_length`).
+- Token ids and masks, per-token advantages, the rollout's log-probabilities and one overlong flag per
+  sequence; the old policy's log-probabilities when `use_rollout_logps` is true, and the reference
+  model's when `beta` is non-zero.
+- Pad and end-of-sequence id 0, so no tokenizer is loaded. The ids are constants in the program and change
+  no shape.
+
+Sequence packing (`SequencePackedBatchAssembler`) and router replay (`routed_experts`) are not modeled.
+The payload is one of `fwd_bwd`'s arguments, so the report counts it in `arg`; fields the loss does not read
+are dropped from the program and not counted. This path needs Tunix's RL modules and a model with a
+Hugging Face config, which `TunixMaxTextAdapter` reads.
+
 ### Running the tests
 
 ```bash
@@ -203,6 +240,7 @@ sharding at construction (for example Tokamax ring attention), while under `jax.
 | `skip_step_on_nan` (default true), `skip_step_on_spikes`, `max_grad_norm_spike` | a non-finite or spiking step leaves the state unchanged and records `step_skipped` |
 | `enable_checkpointing` | `false` disables saving and restoring the train state; `load_parameters_path` still loads weights |
 | `gradient_accumulation_steps` | read only by the standalone script; Tunix chooses the number of micro-batches itself |
+| `compile_engine_loss` (default `maxtext`), `compile_engine_grpo_config`, `compile_engine_logps_chunk_size` | read only by `maxtext_engine_compile.py`: the loss it compiles the kernels with, MaxText's own (`maxtext`) or Tunix's GRPO loss (`grpo`), and the latter's options; see [Ahead-of-time memory report](#ahead-of-time-memory-report) |
 
 ## Reading the memory report
 
@@ -240,7 +278,7 @@ The engine's tests are in `tests/post_training/unit/` and run on CPU; they requi
 |---|---|
 | `maxtext_engine_test.py` | optimizer offload placement, numerics and restore; accumulation dtypes; sharding rules during model build and eval; `model_scope`; Zero-1 |
 | `maxtext_engine_train_test.py` | the standalone script end to end; the Tunix path through Tunix's own builders and `TrainerWorker.per_token_logps`; parity with `pre_train/train.py` |
-| `maxtext_engine_compile_test.py` | the memory report, against real XLA compiles, including optimizer offload |
+| `maxtext_engine_compile_test.py` | the memory report, against real XLA compiles, including optimizer offload; `compile_engine_loss`, including Tunix's GRPO loss on the payload Tunix builds |
 | `maxtext_engine_compile_parity_test.py` | `AbstractMaxTextEngine` compiles Qwen3.5 with the Tunix adapter to the same programs as the live engine |
 | `maxtext_engine_model_build_test.py` | model construction with and without a mesh set by the caller |
 | `maxtext_engine_checkpoint_test.py` | resuming from a mid-step checkpoint through Orbax reproduces the uninterrupted step |

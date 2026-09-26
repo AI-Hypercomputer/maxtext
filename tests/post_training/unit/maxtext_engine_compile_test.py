@@ -17,7 +17,8 @@
 A kernel's `memory_analysis()` sees only its own arguments, and counts a donated buffer in both
 its arguments and its outputs. `maxtext_engine_compile.memory_report` corrects both. These tests
 check the arithmetic on stand-in executables and abstract-mesh avals, then check the report on a
-real CPU compile against XLA's own byte counts.
+real CPU compile against XLA's own byte counts. `GrpoCompileTest` checks that `compile_engine_loss`
+selects the loss: MaxText's own, or Tunix's GRPO loss on the payload Tunix builds.
 
 The Zero-1 case needs four devices, and the CPU backend reads
 `--xla_force_host_platform_device_count` only at initialization -- already past by the time
@@ -30,6 +31,7 @@ actually ran.
 # pylint: disable=protected-access
 
 import contextlib
+import dataclasses
 import io
 import os
 import re
@@ -47,11 +49,18 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import AbstractMesh, AxisType, NamedSharding, PartitionSpec as P
 from maxtext.configs import pyconfig
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.pre_train import train_compile as pre_train_compile
 from maxtext.training_engine import maxtext_engine
 from maxtext.training_engine import maxtext_engine_compile
 from maxtext.utils import maxtext_utils
+import numpy as np
 import pytest
+from tunix.experimental.common import datatypes
+from tunix.experimental.orchestrator import algorithm_adapter
+from tunix.experimental.orchestrator import batch_assembly
+from tunix.rl import algo_core
+from tunix.rl import algorithm_config
 
 from tests.utils.test_helpers import get_test_config_path
 
@@ -549,6 +558,52 @@ def _subtree_bytes(state, key: str, memory: int = 0) -> int:
   return sum(maxtext_engine_compile.per_device_bytes(leaf)[memory] for leaf in jax.tree.leaves(state[key]))
 
 
+def _run_main(test: absltest.TestCase, *extra: str) -> str:
+  """Runs `main` itself on this host's CPU and returns what it printed.
+
+  Only the topology lookup, which needs libtpu, is replaced. `main` sets the PRNG implementation
+  process-wide, so it is put back. Each of `extra` replaces the default of the same key.
+  """
+  previous = jax.config.jax_default_prng_impl
+  test.addCleanup(jax.config.update, "jax_default_prng_impl", previous)
+  replaced = {override.split("=", 1)[0] for override in extra}
+  defaults = [
+      override
+      for override in _tiny_overrides(1)
+      if not override.startswith("ici_") and override.split("=", 1)[0] not in replaced
+  ]
+  argv = (
+      ["", get_test_config_path("base.yml"), "run_name=engine_compile_main_test"]
+      + ["compile_topology=v6e-1", "compile_topology_num_slices=1"]
+      + defaults
+      + list(extra)
+  )
+  stdout = io.StringIO()
+  with (
+      mock.patch.dict(os.environ),
+      mock.patch.object(pre_train_compile, "get_topology_mesh", maxtext_utils.get_mesh_from_config),
+      contextlib.redirect_stdout(stdout),
+  ):
+    maxtext_engine_compile.main(argv)
+  return stdout.getvalue()
+
+
+def _run_main_and_capture(test: absltest.TestCase, *extra: str) -> tuple[str, Any, Any, dict[str, Any]]:
+  """`_run_main`, also returning the engine `main` compiled, the micro-batch it compiled for, and the executables."""
+  calls = []
+  compile_kernels = maxtext_engine_compile.AbstractMaxTextEngine.compile_kernels
+
+  def capture(engine, micro_batch, *args, **kwargs):
+    compiled = compile_kernels(engine, micro_batch, *args, **kwargs)
+    calls.append((engine, micro_batch, compiled))
+    return compiled
+
+  with mock.patch.object(maxtext_engine_compile.AbstractMaxTextEngine, "compile_kernels", capture):
+    output = _run_main(test, *extra)
+  test.assertLen(calls, 1)
+  return (output, *calls[0])
+
+
 class CompiledMemoryReportTest(absltest.TestCase):
   """The report on the engine's real kernels, checked against what XLA says it allocated."""
 
@@ -628,31 +683,8 @@ class CompiledMemoryReportTest(absltest.TestCase):
     with self.assertRaisesRegex(RuntimeError, "only meaningful after compile_kernels"):
       engine.train_state_avals()
 
-  def _run_main(self, *extra: str) -> str:
-    """Runs `main` itself on this host's CPU and returns what it printed.
-
-    Only the topology lookup, which needs libtpu, is replaced. `main` sets the PRNG implementation
-    process-wide, so it is put back.
-    """
-    previous = jax.config.jax_default_prng_impl
-    self.addCleanup(jax.config.update, "jax_default_prng_impl", previous)
-    argv = (
-        ["", get_test_config_path("base.yml"), "run_name=engine_compile_main_test"]
-        + ["compile_topology=v6e-1", "compile_topology_num_slices=1"]
-        + [override for override in _tiny_overrides(1) if not override.startswith("ici_")]
-        + list(extra)
-    )
-    stdout = io.StringIO()
-    with (
-        mock.patch.dict(os.environ),
-        mock.patch.object(pre_train_compile, "get_topology_mesh", maxtext_utils.get_mesh_from_config),
-        contextlib.redirect_stdout(stdout),
-    ):
-      maxtext_engine_compile.main(argv)
-    return stdout.getvalue()
-
   def test_main_prints_report_after_analyses(self):
-    lines = self._run_main().splitlines()
+    lines = _run_main(self).splitlines()
     raw = [index for index, line in enumerate(lines) if line.startswith("Memory analysis: ")]
     verdict = [index for index, line in enumerate(lines) if line.startswith("TRAIN-KERNEL DEVICE PEAK: ")]
     self.assertLen(raw, len(maxtext_engine_compile.KERNEL_NAMES), "the raw analyses must still be printed")
@@ -668,7 +700,7 @@ class CompiledMemoryReportTest(absltest.TestCase):
 
     with mock.patch.object(jax.stages.Compiled, "memory_analysis", return_value=None):
       with self.assertRaisesRegex(ValueError, "has no memory analysis on this backend"):
-        self._run_main(f"compiled_trainstep_file={output}")
+        _run_main(self, f"compiled_trainstep_file={output}")
 
     for name in maxtext_engine_compile.KERNEL_NAMES:
       written = maxtext_engine_compile.kernel_save_path(output, name)
@@ -712,6 +744,198 @@ class OptimizerOffloadReportTest(absltest.TestCase):
     self.assertEqual(
         on["update"].argument + on["update"].host_argument, off["update"].argument + off["update"].host_argument
     )
+
+
+# The Tunix adapter needs a model with a Hugging Face config. Two sequences per micro-batch and two
+# micro-batches per update, so the micro-batch is not the global batch; 8 of the 32 tokens are prompt,
+# so the prompt and the completion differ in length. `shard_mode=auto` is the default, which the config
+# Tunix builds for its trainer keeps. The temperature is not `GRPOConfig`'s default, so a compile that
+# ignored `decode_sampling_temperature` would be seen.
+_GRPO_OVERRIDES = (
+    "compile_engine_loss=grpo",
+    "model_name=qwen3-0.6b",
+    "override_model_config=True",
+    "shard_mode=auto",
+    "per_device_batch_size=2",
+    "gradient_accumulation_steps=2",
+    "max_prefill_predict_length=8",
+    "decode_sampling_temperature=0.7",
+)
+
+
+def _grpo_config(*extra: str) -> pyconfig.HyperParameters:
+  """The tiny decoder with `_GRPO_OVERRIDES`, each of `extra` replacing the override of the same key."""
+  replaced = {override.split("=", 1)[0] for override in extra}
+  return _config(1, *(override for override in _GRPO_OVERRIDES if override.split("=", 1)[0] not in replaced), *extra)
+
+
+def _tree_bytes(tree) -> int:
+  """Device bytes per device of every leaf in `tree`, by the report's own per-leaf rule."""
+  return sum(maxtext_engine_compile.per_device_bytes(leaf)[0] for leaf in jax.tree.leaves(tree))
+
+
+def _layout(payload) -> dict[str, Any]:
+  """Each field of an `RLTrainerPayload` as `(shape, dtype)`, or None where it is unset."""
+  layout = {}
+  for field in dataclasses.fields(payload):
+    value = getattr(payload, field.name)
+    if field.name != "metadata":
+      layout[field.name] = None if value is None else (tuple(value.shape), jnp.dtype(value.dtype))
+  return layout
+
+
+def _assembled_micro_batch(cfg: pyconfig.HyperParameters, algo) -> datatypes.RLTrainerPayload:
+  """One micro-batch as Tunix's orchestrator builds it for `algo`, from rollouts shorter than the padded lengths.
+
+  The rollouts report their log-probabilities and a status. They go through `algo.create_trainer_payloads`
+  and `PaddedBatchAssembler`, and get the reference model's log-probabilities when `algo` needs them.
+  """
+  micro_batch_size = cfg.micro_batch_size_to_train_on
+  prompt_length = cfg.max_prefill_predict_length
+  completion_length = cfg.max_target_length - prompt_length
+  rng = np.random.default_rng(0)
+  items = []
+  for index in range(micro_batch_size):
+    completion = rng.integers(1, cfg.vocab_size, size=completion_length - 1 - index, dtype=np.int32)
+    traj = {
+        "prompt_tokens": rng.integers(1, cfg.vocab_size, size=prompt_length - 1, dtype=np.int32),
+        "conversation_tokens": completion,
+        "conversation_masks": np.ones(completion.size, np.float32),
+        "old_logprobs": np.full(completion.size, -1.0, np.float32),
+        "status": "SUCCEEDED",
+    }
+    items.append(datatypes.TrajectoryItem(prompt_id="prompt", group_index=index, traj=traj))
+  payloads = algo.create_trainer_payloads(items, rewards=[float(index % 2) for index in range(micro_batch_size)])
+  assembler = batch_assembly.PaddedBatchAssembler(
+      batch_size=micro_batch_size,
+      max_prompt_length=prompt_length,
+      max_response_length=completion_length,
+      pad_id=maxtext_engine_compile.GRPO_PAD_ID,
+      num_generations=algo.num_generations,
+      mini_batch_size=1,
+  )
+  batch = assembler.pack(payloads)[0]
+  if algo.requires_reference_kl:
+    batch = batch_assembly.with_ref_per_token_logps(batch, np.zeros(np.shape(batch.completion_ids), np.float32))
+  return batch
+
+
+class GrpoCompileTest(parameterized.TestCase):
+  """`compile_engine_loss`: the loss the engine's kernels are compiled with."""
+
+  def test_main_compiles_grpo_loss(self):
+    """`grpo` compiles every kernel through Tunix's GRPO loss, set up as Tunix's RL trainer sets up the engine."""
+    output, engine, micro_batch, compiled = _run_main_and_capture(self, *_GRPO_OVERRIDES)
+    cfg = engine._config
+
+    self.assertIsInstance(engine.model, TunixMaxTextAdapter)
+    self.assertEqual(engine.model._pad_id, maxtext_engine_compile.GRPO_PAD_ID)
+    self.assertIs(engine._loss_fn, algo_core.grpo_loss_fn)
+    self.assertTrue(engine._has_aux)
+    inputs = engine._gen_model_input_fn(micro_batch)
+    self.assertEqual(sorted(inputs), ["algo_config", "eos_id", "pad_id", "train_example"])
+    self.assertIs(inputs["train_example"], micro_batch)
+    self.assertEqual(
+        (inputs["pad_id"], inputs["eos_id"]), (maxtext_engine_compile.GRPO_PAD_ID, maxtext_engine_compile.GRPO_EOS_ID)
+    )
+    # `GRPOConfig`'s defaults, but for the temperature.
+    self.assertEqual(inputs["algo_config"], algorithm_config.GRPOConfig(temperature=cfg.decode_sampling_temperature))
+
+    # Two sequences of 8 prompt and 24 completion tokens, laid out as Tunix lays out a micro-batch for this
+    # algorithm.
+    self.assertEqual(micro_batch.prompt_ids.shape, (2, 8))
+    self.assertEqual(micro_batch.completion_ids.shape, (2, 24))
+    algo = algorithm_adapter.GRPOAdapter(inputs["algo_config"])
+    self.assertEqual(_layout(micro_batch), _layout(_assembled_micro_batch(cfg, algo)))
+
+    # `fwd_bwd` takes the payload and returns GRPO's metrics, not those of MaxText's loss.
+    batch = compiled["fwd_bwd"].args_info[0][2]
+    self.assertEqual(list(batch), ["train_example"])
+    self.assertEqual(_layout(batch["train_example"]), _layout(micro_batch))
+    aux = compiled["fwd_bwd"].out_info[1]
+    self.assertContainsSubset({"pg_clipfrac", "advantage/abs_mean", "kl"}, set(aux))
+    self.assertNotIn("xent_sum", aux)
+
+    # The payload is among `fwd_bwd`'s arguments, beside the model. `jax.jit` drops the arguments a program
+    # never reads, which for this loss are the prompt mask and the overlong flags.
+    state = engine.train_state_avals()
+    rows = _by_kernel(maxtext_engine_compile.memory_report(compiled, state))
+    unread = _tree_bytes((micro_batch.prompt_mask, micro_batch.overlong))
+    self.assertEqual(rows["fwd_bwd"].argument, _subtree_bytes(state, "model") + _tree_bytes(micro_batch) - unread)
+
+    lines = output.splitlines()
+    split = "Compiling Tunix's GRPO loss, for micro-batches of 2 sequences of 8 prompt and 24 completion tokens."
+    self.assertIn(split, lines)
+    raw = [index for index, line in enumerate(lines) if line.startswith("Memory analysis: ")]
+    verdict = [index for index, line in enumerate(lines) if line.startswith("TRAIN-KERNEL DEVICE PEAK: ")]
+    self.assertLen(raw, len(maxtext_engine_compile.KERNEL_NAMES))
+    self.assertLen(verdict, 1)
+    self.assertLess(lines.index(split), raw[0])
+    self.assertGreater(verdict[0], raw[-1])
+
+  def test_main_compiles_trainer_grpo_options(self):
+    """The trainer's `GRPOConfig` options and log-probability chunk size reach the compiled program."""
+    _, engine, micro_batch, compiled = _run_main_and_capture(
+        self,
+        *_GRPO_OVERRIDES,
+        "compile_engine_grpo_config={beta: 0.0, use_rollout_logps: false}",
+        "compile_engine_logps_chunk_size=4",
+    )
+    inputs = engine._gen_model_input_fn(micro_batch)
+    self.assertEqual(
+        inputs["algo_config"],
+        algorithm_config.GRPOConfig(
+            temperature=engine._config.decode_sampling_temperature, beta=0.0, use_rollout_logps=False
+        ),
+    )
+    self.assertIsNone(micro_batch.ref_per_token_logps)
+    self.assertIsNone(micro_batch.old_per_token_logps)
+    self.assertEqual(inputs["compute_logps_chunk_size"], 4)
+
+    # Tunix scans over the chunks, forward and backward, so the chunked program has more loops than the other.
+    _, _, _, unchunked = _run_main_and_capture(self, *_GRPO_OVERRIDES)
+    self.assertGreater(compiled["fwd_bwd"].as_text().count(" while("), unchunked["fwd_bwd"].as_text().count(" while("))
+
+  def test_main_compiles_maxtext_loss_by_default(self):
+    """`maxtext`, the default, compiles MaxText's own loss on a pre-training batch, with no Tunix adapter."""
+    self.assertEqual(_config(1).compile_engine_loss, "maxtext")
+    for extra in ((), ("compile_engine_loss=maxtext",)):
+      with self.subTest(extra=extra):
+        output, engine, micro_batch, compiled = _run_main_and_capture(self, *extra)
+
+        self.assertNotIsInstance(engine.model, TunixMaxTextAdapter)
+        self.assertIsNone(engine._loss_fn)
+        self.assertIsNone(engine._gen_model_input_fn)
+        self.assertEqual(micro_batch, maxtext_engine_compile.get_shaped_micro_batch(engine._config))
+        self.assertIn("xent_sum", compiled["fwd_bwd"].out_info[1])
+        self.assertNotIn("GRPO", output)
+
+  def test_rejects_unknown_loss(self):
+    with self.assertRaisesRegex(ValueError, r"compile_engine_loss\s+Input should be 'maxtext' or 'grpo'"):
+      _config(1, "compile_engine_loss=ppo")
+
+  @parameterized.named_parameters(
+      # A non-zero `beta`, so the reference model's log-probabilities are present too.
+      ("grpo_config_defaults", {}),
+      ("no_kl_term", {"beta": 0.0}),
+      ("old_logps_recomputed", {"use_rollout_logps": False}),
+  )
+  def test_rl_micro_batch_matches_tunix(self, grpo_config):
+    """The payload has the fields Tunix gives such a micro-batch, with the same shapes and dtypes, and no others."""
+    cfg = _grpo_config()
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0, **grpo_config))
+
+    self.assertEqual(
+        _layout(maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo)), _layout(_assembled_micro_batch(cfg, algo))
+    )
+
+  def test_rl_micro_batch_needs_prompt_and_completion(self):
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
+    for prompt_length in (0, 32):
+      with self.subTest(prompt_length=prompt_length):
+        cfg = _grpo_config(f"max_prefill_predict_length={prompt_length}")
+        with self.assertRaisesRegex(ValueError, r"needs 0 < max_prefill_predict_length < max_target_length"):
+          maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo)
 
 
 def _fake_weight_sync_modules(bound: list) -> dict[str, types.ModuleType]:

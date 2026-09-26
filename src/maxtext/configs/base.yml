@@ -1146,6 +1146,14 @@ rope_pairwise: false
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+# training_engine/maxtext_engine_compile.py only: the loss the engine's kernels are compiled with. "maxtext" is
+# MaxText's own loss; "grpo" is Tunix's GRPO loss, on RL batches of max_prefill_predict_length prompt tokens and the
+# rest of max_target_length as completion tokens. See training_engine/README.md.
+compile_engine_loss: "maxtext"
+# With compile_engine_loss=grpo: keyword arguments for Tunix's GRPOConfig, as the trainer being checked sets them, e.g.
+# {beta: 0.0, use_rollout_logps: false}; and Tunix's compute_logps_chunk_size, 0 for no chunking.
+compile_engine_grpo_config: {}
+compile_engine_logps_chunk_size: 0
 
 # MaxText Estimator configs
 write_estimator_result: False

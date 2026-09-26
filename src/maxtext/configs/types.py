@@ -2568,6 +2568,31 @@ class AOT(BaseModel):
   compiled_trainstep_file: PathStr = Field("", description="Name of saved serialized compiled train_step.")
   compile_topology: str = Field("", description="Target hardware version, e.g. 'v5e-256'.")
   compile_topology_num_slices: int = Field(-1, description="Number of target slices.")
+  compile_engine_loss: Literal["maxtext", "grpo"] = Field(
+      "maxtext",
+      description=(
+          "training_engine/maxtext_engine_compile.py only: the loss MaxTextTrainingEngine's kernels are compiled "
+          "with. 'maxtext' is MaxText's own loss on a pre-training batch. 'grpo' is Tunix's GRPO loss behind the "
+          "Tunix adapter, as Tunix's RL trainer runs the engine, on RL batches of max_prefill_predict_length prompt "
+          "tokens and the rest of max_target_length as completion tokens."
+      ),
+  )
+  compile_engine_grpo_config: dict[str, Any] = Field(
+      default_factory=dict,
+      description=(
+          "With compile_engine_loss=grpo: keyword arguments for Tunix's GRPOConfig, as the trainer being checked "
+          "sets them, e.g. {beta: 0.0, use_rollout_logps: false}. `temperature` defaults to "
+          "decode_sampling_temperature, the others to GRPOConfig's defaults."
+      ),
+  )
+  compile_engine_logps_chunk_size: int = Field(
+      0,
+      ge=0,
+      description=(
+          "With compile_engine_loss=grpo: Tunix's compute_logps_chunk_size, which computes the log-probabilities in "
+          "chunks of this many tokens rather than from the logits of the whole sequence at once. 0 does not chunk."
+      ),
+  )
   write_estimator_result: bool = Field(False, description="Write estimator.py results in a separate file.")
 
 

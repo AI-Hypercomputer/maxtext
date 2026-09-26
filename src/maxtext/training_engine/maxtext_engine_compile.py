@@ -36,6 +36,14 @@ Example, qwen3-0.6b on four v6e chips:
 Add `compiled_trainstep_file=/tmp/engine_qwen3.pickle` to serialize the executables; each
 kernel is written to its own file, suffixed with the kernel name.
 
+`compile_engine_loss` picks the loss the kernels are compiled with. The default, `maxtext`, is
+MaxText's own loss on a pre-training batch. `grpo` is Tunix's GRPO loss, set up as Tunix's RL
+trainer sets up a live engine: the model behind the Tunix adapter, and the loss and input mapping
+from Tunix's `GRPOAdapter`, with the trainer's `GRPOConfig` options in `compile_engine_grpo_config`
+and its log-probability chunk size in `compile_engine_logps_chunk_size`. It is compiled for an
+`RLTrainerPayload` of `max_prefill_predict_length` prompt tokens and the rest of
+`max_target_length` completion tokens; see `get_shaped_rl_micro_batch`.
+
 Each kernel's raw `memory_analysis()` is printed, followed by a per-device table built from it.
 The table corrects for two things the raw numbers hide: a donated buffer is counted in both the
 arguments and the outputs, and a kernel's analysis sees only its own arguments, not what stays in
@@ -65,6 +73,7 @@ from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.pre_train import train_compile as pre_train_compile
+from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
@@ -84,6 +93,12 @@ HLO_DUMP_DEFAULTS = {
 }
 
 _GIB = 2**30
+
+# The pad and end-of-sequence ids the GRPO loss is compiled with, so that no tokenizer is loaded. Tunix
+# falls back to pad id 0, and to the pad id for end-of-sequence, when a tokenizer defines neither. Both
+# are constants in the masks the loss and the Tunix adapter build, so their values change no shape.
+GRPO_PAD_ID = 0
+GRPO_EOS_ID = GRPO_PAD_ID
 
 # Labels of the report's summary lines. The peak is named for what it covers, the three training
 # kernels, because a full step can need more; see the module docstring.
@@ -680,10 +695,98 @@ def get_shaped_micro_batch(config: pyconfig.HyperParameters) -> dict[str, jax.Sh
   return {key: to_micro_batch(aval) for key, aval in shaped_batch.items()}
 
 
+def get_shaped_rl_micro_batch(config: pyconfig.HyperParameters, algo: Any) -> abstract_engine.RLTrainerPayload:
+  """Returns the abstract `RLTrainerPayload` one `fwd_bwd` call is given under Tunix's GRPO loss.
+
+  Laid out as Tunix's `PaddedBatchAssembler` lays out a micro-batch of rollouts that report their
+  log-probabilities and a status: token ids and a mask for the prompt; token ids, a mask, per-token
+  advantages and the rollout's log-probabilities for the completion; and one `overlong` flag per
+  sequence. As in the batches Tunix's orchestrator builds, `old_per_token_logps` is present when `algo`
+  takes the old policy's log-probabilities from the rollout, and `ref_per_token_logps` when it needs the
+  reference model's.
+
+  The micro-batch has `micro_batch_size_to_train_on` sequences, as `get_shaped_micro_batch`'s does.
+  Each is `max_prefill_predict_length` prompt tokens followed by the rest of `max_target_length` as
+  completion tokens, the split `trainers/post_train/rl/train_rl.py` gives its rollout, so the model row
+  is `max_target_length` wide under either loss.
+
+  Args:
+    config: The configuration being compiled.
+    algo: Tunix's `GRPOAdapter`; its `use_rollout_logps` and `requires_reference_kl` decide the
+      optional fields.
+
+  Raises:
+    ValueError: If `max_prefill_predict_length` leaves the prompt or the completion empty.
+  """
+  prompt_length = config.max_prefill_predict_length
+  completion_length = config.max_target_length - prompt_length
+  if prompt_length <= 0 or completion_length <= 0:
+    raise ValueError(
+        f"compile_engine_loss=grpo splits max_target_length ({config.max_target_length}) into "
+        f"max_prefill_predict_length ({prompt_length}) prompt tokens and the rest as completion tokens, so it "
+        "needs 0 < max_prefill_predict_length < max_target_length."
+    )
+  micro_batch_size = int(config.micro_batch_size_to_train_on)
+
+  def shaped(length: int, dtype: Any = jnp.float32) -> jax.ShapeDtypeStruct:
+    return jax.ShapeDtypeStruct((micro_batch_size, length), dtype)
+
+  return abstract_engine.RLTrainerPayload(
+      prompt_ids=shaped(prompt_length, jnp.int32),
+      prompt_mask=shaped(prompt_length),
+      completion_ids=shaped(completion_length, jnp.int32),
+      completion_mask=shaped(completion_length),
+      advantages=shaped(completion_length),
+      old_per_token_logps=shaped(completion_length) if algo.use_rollout_logps else None,
+      ref_per_token_logps=shaped(completion_length) if algo.requires_reference_kl else None,
+      rollout_per_token_logps=shaped(completion_length),
+      overlong=jax.ShapeDtypeStruct((micro_batch_size,), jnp.float32),
+  )
+
+
+def _grpo_engine(
+    config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh
+) -> tuple[AbstractMaxTextEngine, abstract_engine.RLTrainerPayload]:
+  """Returns an abstract engine set up with Tunix's GRPO loss, and the micro-batch to compile it for.
+
+  The loss, its input mapping and `has_aux` come from Tunix's `GRPOAdapter`, built from
+  `compile_engine_grpo_config`, as Tunix's RL trainer configures a live engine with them. With
+  `compile_engine_logps_chunk_size`, the input mapping also passes the loss that chunk size, as
+  Tunix's `TrainerWorker` does for its `logps_chunk_size`.
+  """
+  # Imported here: only this path uses Tunix's RL algorithms.
+  from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=import-outside-toplevel
+  from tunix.rl import algorithm_config  # pylint: disable=import-outside-toplevel
+
+  # Tunix sets the temperature to the rollout's, which MaxText's RL trainer samples at
+  # `decode_sampling_temperature`.
+  grpo_config = {"temperature": config.decode_sampling_temperature, **config.compile_engine_grpo_config}
+  algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(**grpo_config))
+  # First, so an invalid prompt length fails before the model is built.
+  micro_batch = get_shaped_rl_micro_batch(config, algo)
+  engine = AbstractMaxTextEngine(config, topology_mesh, wrap_with_tunix_adapter=True, tokenizer_pad_id=GRPO_PAD_ID)
+  engine.with_loss_fn(algo.loss_fn(), has_aux=True)
+  gen_model_input_fn = algo.build_gen_model_input_fn(pad_id=GRPO_PAD_ID, eos_id=GRPO_EOS_ID)
+  chunk_size = config.compile_engine_logps_chunk_size
+  if chunk_size > 0:
+    base_fn = gen_model_input_fn
+
+    def gen_model_input_fn(payload: Any) -> dict[str, Any]:
+      inputs = dict(base_fn(payload))
+      inputs.setdefault("compute_logps_chunk_size", chunk_size)
+      return inputs
+
+  engine.with_gen_model_input_fn(gen_model_input_fn)
+  return engine, micro_batch
+
+
 def compile_engine(
     config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh
 ) -> tuple[AbstractMaxTextEngine, dict[str, Any]]:
   """Lowers and compiles every kernel the engine runs, on `topology_mesh`, and keeps the engine.
+
+  The kernels compute the loss `config.compile_engine_loss` names: MaxText's own on a pre-training
+  micro-batch, or Tunix's GRPO loss on an `RLTrainerPayload`.
 
   The engine is returned too because it knows the train state's layout, which the memory report
   needs and the executables do not carry; see `AbstractMaxTextEngine.train_state_avals`.
@@ -691,8 +794,11 @@ def compile_engine(
   Returns:
     `(engine, {kernel name: jax.stages.Compiled})`, the dict keyed by `KERNEL_NAMES`.
   """
-  engine = AbstractMaxTextEngine(config, topology_mesh)
-  return engine, engine.compile_kernels(get_shaped_micro_batch(config))
+  if config.compile_engine_loss == "grpo":
+    engine, micro_batch = _grpo_engine(config, topology_mesh)
+  else:
+    engine, micro_batch = AbstractMaxTextEngine(config, topology_mesh), get_shaped_micro_batch(config)
+  return engine, engine.compile_kernels(micro_batch)
 
 
 def compile_engine_kernels(config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh) -> dict[str, Any]:
@@ -731,6 +837,13 @@ def main(argv: Sequence[str]) -> None:
   # After the topology is built, so this does not initialize the local backend first.
   max_utils.print_system_information()
 
+  if config.compile_engine_loss == "grpo":
+    prompt_length = config.max_prefill_predict_length
+    print(
+        f"Compiling Tunix's GRPO loss, for micro-batches of {config.micro_batch_size_to_train_on} sequences of "
+        f"{prompt_length} prompt and {config.max_target_length - prompt_length} completion tokens.",
+        flush=True,
+    )
   print("Jitting and compiling the engine's kernels...", flush=True)
   engine, compiled = compile_engine(config, topology_mesh)
   print("Jitting and compilation complete!", flush=True)
