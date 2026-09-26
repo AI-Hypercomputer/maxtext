@@ -1054,6 +1054,8 @@ profiler_steps: 5
 hide_profiler_step_metric: false
 enable_continuous_profiling: false # [Experimental] Enables continuous profiling (Allows saving >2GB traces) Requires JAX >= 0.11.2.
 profile_cleanly: true # If set to true, adds a block_until_ready on train state which aligns the profile for each step.
+# Pathways only: max number of worker hosts to trace. Set to the total number of TPU hosts to capture all of them.
+profiler_max_num_hosts: 1
 profile_periodically_period: -1 # If set to a positive integer, profile every profile_periodically_period steps.
 # This is useful to debug scenarios where performance is changing.
 enable_tpu_profiling_options: false

@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import yaml
 
 from maxtext.configs import pyconfig
@@ -860,6 +861,27 @@ assert train._TF_AVAILABLE is False
         quantization="int8",
         weight_quantization_calibration_method="fixed,-1,1",
     )
+
+  def test_profiler_max_num_hosts_validation(self):
+    """profiler_max_num_hosts > 1 is rejected at config time where it would be ignored or fail once profiling starts."""
+
+    def config(on_pathways, **overrides):
+      with mock.patch("pathwaysutils.is_pathways_backend_used", return_value=on_pathways):
+        return pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            profiler_max_num_hosts=4,
+            **overrides,
+        )
+
+    with self.assertRaisesRegex(ValueError, "only supported on the Pathways backend"):
+      config(on_pathways=False, profiler="xplane")
+    with self.assertRaisesRegex(ValueError, "requires profiler=xplane without managed_mldiagnostics"):
+      config(on_pathways=True, profiler="nsys")
+    with self.assertRaisesRegex(ValueError, "requires profiler=xplane without managed_mldiagnostics"):
+      config(on_pathways=True, profiler="xplane", managed_mldiagnostics=True)
+    self.assertEqual(config(on_pathways=True, profiler="xplane").profiler_max_num_hosts, 4)
+    self.assertEqual(config(on_pathways=False, profiler="").profiler_max_num_hosts, 4)  # No profiler: no effect.
 
   def test_base_yml_types_parity(self):
     """Verifies that types.MaxTextConfig() defaults match MaxTextConfig(**base_yaml)."""

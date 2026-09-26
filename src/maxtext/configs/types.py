@@ -3087,6 +3087,15 @@ class Profiling(BaseModel):
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
   profiler_steps: int = Field(5, description="Number of steps to profile.")
   profile_cleanly: bool = Field(True, description="Add block_until_ready to align profile for each step.")
+  profiler_max_num_hosts: PositiveInt = Field(
+      1,
+      description=(
+          "Pathways only: maximum number of worker hosts to trace with the xplane profiler. Set it to the number of"
+          " TPU hosts across all slices to capture every host's TPU planes. Values above 1 rely on the"
+          " jax.profiler.start_trace installed by pathwaysutils.initialize(), which train.py calls, and are rejected"
+          " at config validation unless profiler=xplane (without managed_mldiagnostics) runs on the Pathways backend."
+      ),
+  )
   profile_periodically_period: int = Field(-1, description="If positive, profile every N steps.")
   hide_profiler_step_metric: bool = Field(False, description="Whether to enable profiler step metric.")
   enable_continuous_profiling: bool = Field(False, description="If true, it will support saving profile > 2GB.")
@@ -4488,6 +4497,19 @@ class MaxTextConfig(
           "shard_embed_moe_on_fsdp requires quantization to be specified and "
           "weight_quantization_calibration_method to be fixed (static scaling mode)."
       )
+    return self
+
+  @model_validator(mode="after")
+  def validate_profiler_max_num_hosts(self) -> "MaxTextConfig":
+    """Rejects profiler_max_num_hosts > 1 where it would be ignored or fail once profiling starts."""
+    if self.profiler_max_num_hosts == 1 or self.profiler == ProfilerType.NONE:
+      return self
+    if self.profiler != ProfilerType.XPLANE or self.managed_mldiagnostics:
+      raise ValueError("profiler_max_num_hosts > 1 requires profiler=xplane without managed_mldiagnostics.")
+    import pathwaysutils  # pylint: disable=import-outside-toplevel
+
+    if not pathwaysutils.is_pathways_backend_used():
+      raise ValueError("profiler_max_num_hosts > 1 is only supported on the Pathways backend (JAX_PLATFORMS=proxy).")
     return self
 
   @model_validator(mode="after")

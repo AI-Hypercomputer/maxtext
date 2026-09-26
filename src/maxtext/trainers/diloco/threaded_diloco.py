@@ -346,7 +346,9 @@ class Learner:
       if self.learner_idx == 0:
         for f in range(manipulator.num_fragments):  # Seed the outer state with the initial parameters.
           self.mailbox.put((_INIT_STEP, f), fragment_transfer.move_fragment(transfer.extract(params, f), self.cpu_mesh))
-      logger = metric_logger.MetricLogger(config=config, learning_rate_schedule=lr_schedule)
+      logger = metric_logger.MetricLogger(
+          config=config, learning_rate_schedule=lr_schedule, log_prefix=f"[learner {self.learner_idx}] "
+      )
       logger.write_setup_info_to_tensorboard(params)
       del params
 
