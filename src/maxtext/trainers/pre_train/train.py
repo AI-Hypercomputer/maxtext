@@ -81,6 +81,7 @@ from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
 from maxtext.experimental.lineage import lineage_adapter
+from maxtext.trainers.diloco import threaded_diloco
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -1651,7 +1652,10 @@ def run(config, recorder, elastic_retry_cache=None):
       max_utils.maybe_get_transformer_engine_context(config),
       profiler.nnx_named_scope_context(),
   ):
-    train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
+    if config.enable_threaded_diloco:
+      threaded_diloco.run_threaded_diloco(config, recorder, train_step, eval_step)
+    else:
+      train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
 
 def get_train_func(config, recorder, argv):
