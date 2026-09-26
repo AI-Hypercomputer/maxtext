@@ -156,6 +156,44 @@ Both are set explicitly in the command above. The overlap-steps default of `2` i
 
 $H = P = 37$ matches Qwen3-8B's 36 decoder layers plus one fragment for the non-scanned embeddings and head, giving $\Delta h = 1$ — one fragment synchronized per step.
 
+### Threaded Streaming DiLoCo on Pathways
+
+`enable_threaded_diloco=true` runs the streaming DiLoCo schedule without one global SPMD program. The single Pathways controller starts one learner thread per DiLoCo replica (per index of the `diloco` mesh axis; with the script's `dcn_diloco_parallelism=NUM_SLICES`, one per slice), and each thread runs the regular train step on its replica's devices. The outer Nesterov step runs on the replicas' colocated CPU devices. Each learner hands a fragment to the syncer at its sync step and applies the synced result `num_communication_overlapping_steps` steps later. The design intent is that the transfer and outer step run while the learners keep training, so a learner only waits if the synced fragment has not arrived by the step that applies it. The command below therefore uses `DILOCO_NUM_COMM_OVERLAP_STEPS="5"` rather than the SPMD recommendation of `0` (§7).
+
+```bash
+CLUSTER="your-cluster" \
+ZONE="your-zone" \
+PROJECT="your-project" \
+DEVICE_TYPE="v6e-8" \
+NUM_SLICES="2" \
+XPK_WORKLOAD="tdlco-8b-01" \
+BASE_OUTPUT_DIRECTORY="gs://your-bucket/maxtext-logs" \
+MODEL_NAME="qwen3-8b" \
+DILOCO_NUM_FRAGMENTS="37" \
+DILOCO_NUM_COMM_OVERLAP_STEPS="5" \
+DILOCO_OUTER_LR="0.7" \
+bash src/maxtext/trainers/diloco/scripts/run_threaded_streaming_diloco.sh
+```
+
+```{admonition} As written, this command is a throughput smoke test
+---
+class: warning
+---
+The threaded script's defaults are chosen for a short throughput run, not for training:
+
+| Variable          | Script default           | For a training run                                                                            |
+| :---------------- | :----------------------- | :-------------------------------------------------------------------------------------------- |
+| `DILOCO_OUTER_LR` | `0.1`                    | `0.7` (set in the command above)                                                              |
+| `DATASET_ARGS`    | `dataset_type=synthetic` | A real `grain`, `tfds` or `hf` pipeline, including its data location and `tokenizer_path`     |
+| `STEPS`           | `100`                    | Your training length                                                                          |
+| `WEIGHT_DTYPE`    | `bfloat16`               | `float32` to keep the parameters and synced fragments in full precision, as the SPMD script does |
+```
+
+- **Pathways only**: the learners and the syncer share one controller process (`xpk workload create-pathways`).
+- **Bucketized non-layer fragment**: `diloco_bucketize_non_scanned=true` (the script's default) splits large non-scanned parameters such as the embedding across the layer fragments instead of syncing them all in one step. It requires `num_diloco_fragments >= 3` and does not support `shard_optimizer_over_data`.
+- **Profiling**: set `PROFILE=true` and `PROFILER_MAX_NUM_HOSTS` to the total number of TPU hosts across all slices (for example `4` for 2x `v6e-8`, assuming 2 hosts per `v6e-8` slice) to trace every host, and `PROFILER_CHIPS_PER_HOST` to the TPU chips per host (default `4`). `STEPS` must exceed `PROFILER_SKIP_STEPS` (default `40`). Each learner's steps appear as `train_learner_<i>` in the trace.
+- **Rejected at startup**: checkpointing, `colocated_python_data_input`, fewer than 2 DiLoCo replicas, dataset types other than `synthetic`, `grain`, `tfds`, and `hf`, and more than one JAX process (threaded DiLoCo needs a single controller). See §10.
+
 ______________________________________________________________________
 
 ## 5. Production Recipe 3: Streaming DiLoCo MoE Pre-training (Qwen3-30B-A3B)
@@ -227,15 +265,15 @@ ______________________________________________________________________
 
 ## 7. Tuning Guidelines
 
-| Hyperparameter                               | Recommended Setting          | Description                                                                                                                                                                                                                                                                                      |
-| :------------------------------------------- | :--------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `diloco_sync_period` ($H$)                   | **`= num_diloco_fragments`** | Sync period. Setting $H = P$ ensures exactly 1 fragment is synchronized every local step ($\Delta h = 1$). In general $\Delta h = \max(1, \text{round}(H/P))$ and the effective period is $P \cdot \Delta h$, so prefer an $H$ that is a multiple of $P$.                                        |
-| `num_diloco_fragments` ($P$)                 | **`num_layers + 1`**         | Partition count (1 for non-scanned embeddings/head + 1 per transformer decoder layer). Must be $\ge 2$, and `num_decoder_layers` must be divisible by $P - 1$.                                                                                                                                   |
-| `use_sequential_layers`                      | `false`                      | Layer-to-fragment assignment. `false` interleaves layers round-robin across fragments (each sync touches the full depth of the network); `true` gives each fragment a contiguous block of layers.                                                                                                |
-| `diloco_outer_lr` ($\eta_{\text{outer}}$)    | **`0.3` – `0.9`**            | Outer learning rate. Start from `0.3` – `0.9` (e.g. `0.7`) and tune based on inner LR.                                                                                                                                                                                                           |
-| `diloco_outer_momentum` ($\beta$)            | `0.9`                        | Nesterov momentum coefficient for the outer optimizer.                                                                                                                                                                                                                                           |
-| `num_communication_overlapping_steps` ($V$)  | `0` (or `1`)                 | Delay in inner steps before applying outer weights. In the current SPMD design, this does not enhance hardware efficiency but simulates the algorithmic behavior of delayed weight merging; it will provide non-blocking hardware overlap in future MPMD multi-threading. Coupled with $\alpha$. |
-| `communication_overlapping_alpha` ($\alpha$) | `0.0`                        | Soft parameter blending factor in $[0, 1]$ ($\theta_{\text{inner}} \leftarrow \alpha \theta_{\text{inner}} + (1 - \alpha) \theta_{\text{outer}}$). `0.0` applies direct replacement; `0.5` averages local and global; `1.0` keeps the local fragment, i.e. no effective exchange.                |
+| Hyperparameter                               | Recommended Setting          | Description                                                                                                                                                                                                                                                                                                                                                                    |
+| :------------------------------------------- | :--------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `diloco_sync_period` ($H$)                   | **`= num_diloco_fragments`** | Sync period. Setting $H = P$ ensures exactly 1 fragment is synchronized every local step ($\Delta h = 1$). In general $\Delta h = \max(1, \text{round}(H/P))$ and the effective period is $P \cdot \Delta h$, so prefer an $H$ that is a multiple of $P$.                                                                                                                      |
+| `num_diloco_fragments` ($P$)                 | **`num_layers + 1`**         | Partition count (1 for non-scanned embeddings/head + 1 per transformer decoder layer). Must be $\ge 2$, and `num_decoder_layers` must be divisible by $P - 1$.                                                                                                                                                                                                                 |
+| `use_sequential_layers`                      | `false`                      | Layer-to-fragment assignment. `false` interleaves layers round-robin across fragments (each sync touches the full depth of the network); `true` gives each fragment a contiguous block of layers.                                                                                                                                                                              |
+| `diloco_outer_lr` ($\eta_{\text{outer}}$)    | **`0.3` – `0.9`**            | Outer learning rate. Start from `0.3` – `0.9` (e.g. `0.7`) and tune based on inner LR.                                                                                                                                                                                                                                                                                         |
+| `diloco_outer_momentum` ($\beta$)            | `0.9`                        | Nesterov momentum coefficient for the outer optimizer.                                                                                                                                                                                                                                                                                                                         |
+| `num_communication_overlapping_steps` ($V$)  | `0` (or `1`) for SPMD        | Delay in inner steps before applying outer weights. In the SPMD design, this does not enhance hardware efficiency but simulates the algorithmic behavior of delayed weight merging. The threaded runner (`enable_threaded_diloco=true`) uses $V$ as the number of steps the transfer and outer step have to finish before a learner applies the result. Coupled with $\alpha$. |
+| `communication_overlapping_alpha` ($\alpha$) | `0.0`                        | Soft parameter blending factor in $[0, 1]$ ($\theta_{\text{inner}} \leftarrow \alpha \theta_{\text{inner}} + (1 - \alpha) \theta_{\text{outer}}$). `0.0` applies direct replacement; `0.5` averages local and global; `1.0` keeps the local fragment, i.e. no effective exchange.                                                                                              |
 
 ### Choosing $P$ for Your Model
 
@@ -266,11 +304,11 @@ Read the table as $P - 1 \in \text{divisors}(N_{\text{layers}})$. If you need a 
 
   When using standard AdamW inner optimization, starting with `diloco_outer_lr: 0.7` is a strong baseline.
 
-- **Overlapping Steps ($V$) and Alpha ($\alpha$) in SPMD vs. MPMD**:
+- **Overlapping Steps ($V$) and Alpha ($\alpha$) in SPMD vs. Threaded DiLoCo**:
   `num_communication_overlapping_steps` ($V$) and `communication_overlapping_alpha` ($\alpha$) are coupled in defining the asynchronous weight merging policy:
 
-  - **Current SPMD Design**: Because JAX SPMD compiles each step into a synchronous XLA graph, setting $V > 0$ or $\alpha > 0$ **does not enhance hardware training efficiency or hide network latency**. However, it allows researchers to accurately **simulate the algorithmic convergence behavior** of delayed weight merging and soft parameter blending. Setting $V=0$ is standard for performance.
-  - **Future MPMD Multi-Threading Design**: In upcoming MPMD architectures with independent background communication threads, $V$ and $\alpha$ will provide true, non-blocking hardware compute/communication overlap.
+  - **SPMD Design**: Because JAX SPMD compiles each step into a synchronous XLA graph, setting $V > 0$ or $\alpha > 0$ **does not enhance hardware training efficiency or hide network latency**. However, it allows researchers to accurately **simulate the algorithmic convergence behavior** of delayed weight merging and soft parameter blending. Setting $V=0$ is standard for performance.
+  - **Threaded Design (`enable_threaded_diloco=true`)**: The fragment transfer and outer step run on separate threads and on CPU devices while the learners keep training, and a learner applies a synced fragment $V$ steps after handing it off. $V$ is therefore the number of steps the transfer and outer step have to finish before a learner waits for them. See [Threaded Streaming DiLoCo on Pathways](#threaded-streaming-diloco-on-pathways).
 
 ______________________________________________________________________
 
@@ -286,6 +324,8 @@ learning/loss_island_{K-1}
 ```
 
 Use these to diagnose the failure mode specific to low-communication training: islands drifting apart between synchronizations. A healthy run shows the per-island losses tracking each other closely and re-converging at each sync. A widening spread — especially one that does not shrink after a sync — usually means $H$ is too large or the outer learning rate is too high.
+
+Threaded runs (`enable_threaded_diloco=true`) do not emit `learning/loss_island_*`. Each learner `i` logs its own metrics instead: its step-metric log lines start with `[learner i]`, and it writes a separate TensorBoard run named `<run_name>_learner_<i>` under `<base_output_directory>/<run_name>/tensorboard/`. Compare the learners' `learning/loss` across these runs. Only learner 0 writes `gcs_metrics`, `metrics_file` and the profile.
 
 ______________________________________________________________________
 
@@ -308,15 +348,23 @@ ______________________________________________________________________
 
 All DiLoCo misconfigurations are caught at startup, before any accelerator work begins. The table maps each error to its cause.
 
-| Error message (abridged)                                                               | Cause and fix                                                                                                                      |
-| :------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------- |
-| `enable_diloco must be True when enable_streaming_diloco is True.`                     | Streaming is a mode of DiLoCo, not a replacement. Set both flags.                                                                  |
-| `num_diloco_fragments must be specified when enable_streaming_diloco is True.`         | `num_diloco_fragments` defaults to `null`. Set it explicitly, typically to `num_layers + 1`.                                       |
-| `num_diloco_fragments (N) must be at least 2 ...`                                      | You need at least one fragment for non-scanned params and one for layers.                                                          |
-| `enable_streaming_diloco=True requires scan_layers=True.`                              | Fragments are slices of the scanned layer stack; unscanned models have no such stack. Enable `scan_layers`, or use Vanilla DiLoCo. |
-| `The number of decoder layers (N) must be divisible by (num_diloco_fragments - 1) ...` | Pick $P$ such that $P - 1$ divides $N_{\text{layers}}$. See the table in §7.                                                       |
-| `Batch dimension B is not divisible by num_diloco_replicas K.`                         | The global batch is split across islands. Adjust `per_device_batch_size` or the slice count so $GBS$ is a multiple of $K$.         |
-| `Cannot resolve dcn_diloco_parallelism=-1 ...`                                         | `num_slices` isn't divisible by the product of the other DCN axes. Set `dcn_diloco_parallelism` explicitly.                        |
+| Error message (abridged)                                                                    | Cause and fix                                                                                                                                                                      |
+| :------------------------------------------------------------------------------------------ | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enable_diloco must be True when enable_streaming_diloco is True.`                          | Streaming is a mode of DiLoCo, not a replacement. Set both flags.                                                                                                                  |
+| `num_diloco_fragments must be specified when enable_streaming_diloco is True.`              | `num_diloco_fragments` defaults to `null`. Set it explicitly, typically to `num_layers + 1`.                                                                                       |
+| `num_diloco_fragments (N) must be at least 2 ...`                                           | You need at least one fragment for non-scanned params and one for layers.                                                                                                          |
+| `enable_streaming_diloco=True requires scan_layers=True.`                                   | Fragments are slices of the scanned layer stack; unscanned models have no such stack. Enable `scan_layers`, or use Vanilla DiLoCo.                                                 |
+| `The number of decoder layers (N) must be divisible by (num_diloco_fragments - 1) ...`      | Pick $P$ such that $P - 1$ divides $N_{\text{layers}}$. See the table in §7.                                                                                                       |
+| `Batch dimension B is not divisible by num_diloco_replicas K.`                              | The global batch is split across islands. Adjust `per_device_batch_size` or the slice count so $GBS$ is a multiple of $K$.                                                         |
+| `Cannot resolve dcn_diloco_parallelism=-1 ...`                                              | `num_slices` isn't divisible by the product of the other DCN axes. Set `dcn_diloco_parallelism` explicitly.                                                                        |
+| `diloco_bucketize_non_scanned requires num_diloco_fragments >= 3 ...`                       | Bucketizing spreads the non-scanned matrices over the layer fragments, so it needs at least two of them. Raise `num_diloco_fragments` or set `diloco_bucketize_non_scanned=false`. |
+| `diloco_bucketize_non_scanned does not support shard_optimizer_over_data (Zero-1).`         | Set one of the two to `false`.                                                                                                                                                     |
+| `enable_threaded_diloco=True requires enable_diloco=True and enable_streaming_diloco=True.` | Threaded DiLoCo runs the streaming schedule. Set all three flags.                                                                                                                  |
+| `enable_threaded_diloco=True requires at least 2 DiLoCo replicas ...`                       | `ici_diloco_parallelism * dcn_diloco_parallelism` must be at least 2.                                                                                                              |
+| `enable_threaded_diloco=True does not support checkpointing yet ...`                        | Set `enable_checkpointing=false`.                                                                                                                                                  |
+| `enable_threaded_diloco=True does not support colocated_python_data_input.`                 | Set `colocated_python_data_input=false`.                                                                                                                                           |
+| `enable_threaded_diloco=True supports dataset_type synthetic, grain, tfds or hf ...`        | Use one of these input pipelines.                                                                                                                                                  |
+| `Threaded DiLoCo needs a single controller (e.g. Pathways), got N processes.`               | Raised when training starts with more than one JAX process. Submit with `xpk workload create-pathways`, as the threaded script does.                                               |
 
 **Run diverges or loss spikes at sync boundaries.** Lower `diloco_outer_lr` first — it is the most sensitive knob, and the inverse scaling rule above means a high inner LR needs a lower outer LR. If per-island losses spread apart steadily, reduce `diloco_sync_period` so islands reconcile more often.
 
