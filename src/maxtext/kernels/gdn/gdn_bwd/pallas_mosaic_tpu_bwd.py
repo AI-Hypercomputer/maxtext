@@ -61,25 +61,23 @@ def _gdn_matmul(
   Returns:
     The batched matrix product accumulated in `float32`.
   """
-  if jnp.dtype(compute_dtype) == jnp.bfloat16:
-    if precise:
-      lhs_dtype = rhs_dtype = jnp.float32
-      precision = jax.lax.Precision.HIGHEST
-    else:
-      lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
-      rhs_dtype = jnp.bfloat16
-      precision = jax.lax.Precision.DEFAULT
+  if jnp.dtype(compute_dtype) == jnp.bfloat16 and not precise:
+    lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
     return jax.lax.dot_general(
         lhs.astype(lhs_dtype),
-        rhs.astype(rhs_dtype),
+        rhs.astype(jnp.bfloat16),
         dimension_numbers=(
             ((lhs.ndim - 1,), (rhs.ndim - 2,)),
             (tuple(range(lhs.ndim - 2)), tuple(range(rhs.ndim - 2))),
         ),
-        precision=precision,
+        precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=jnp.float32,
     )
-  return jnp.matmul(lhs, rhs, precision=jax.lax.Precision.HIGHEST)
+  return jnp.matmul(
+      lhs.astype(jnp.float32),
+      rhs.astype(jnp.float32),
+      precision=jax.lax.Precision.HIGHEST,
+  )
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
