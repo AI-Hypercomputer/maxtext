@@ -261,12 +261,12 @@ class _KernelHlo:
   An executable keeps no handle on the lowering it came from, so the only way to read a
   kernel's optimized HLO is to lower it again, through the jitted wrapper `compile()` built it
   from. Recording `ShapeDtypeStruct`s rather than the arrays themselves keeps that independent
-  of donation -- `_compiled_update` donates its state, so by the time a test asks for the HLO
-  those buffers are gone.
+  of donation -- `_compiled_update` donates its state and `_compiled_accumulate` the running sum,
+  so by the time a test asks for the HLO those buffers are gone.
 
   Lowering is lazy and memoized: it is a full XLA compile, and only a third of the tests
-  below want HLO at all. It needs the mesh set, because the fwd/bwd kernels apply the
-  `reduced` tag while tracing, and by then the run that recorded the avals is long over.
+  below want HLO at all. It needs the mesh set, because `fwd_bwd` applies the `reduced` tag
+  while tracing, and by then the run that recorded the avals is long over.
   """
 
   def __init__(self, engine, kernel: str, attr: str, mesh):
@@ -313,8 +313,8 @@ class _Recipe:
 
 # Probe name -> the engine's name for that kernel, and the attribute it dispatches through.
 _KERNELS = {
-    "first": ("fwd_bwd", "_compiled_fwd_bwd"),
-    "accum": ("fwd_bwd_accum", "_compiled_fwd_bwd_accum"),
+    "fwd_bwd": ("fwd_bwd", "_compiled_fwd_bwd"),
+    "accumulate": ("accumulate", "_compiled_accumulate"),
     "update": ("update", "_compiled_update"),
 }
 
@@ -633,26 +633,34 @@ class CollectivePlacementTest(absltest.TestCase):
   __test__ = False
 
   def test_micro_batch_kernels_move_only_scalars_across_replicas(self):
-    """The whole point: no parameter-sized all-reduce per micro-batch, only per step."""
+    """The whole point: no parameter-sized all-reduce per micro-batch, only per step.
+
+    `accumulate` adds `unreduced` partial sums, so it must keep them replica-local too: reducing
+    there would put the all-reduce back into every micro-batch after the first.
+    """
     run = _run(_BASE)
-    first = _array_all_reduces(run.hlo("first"))
-    accum = _array_all_reduces(run.hlo("accum"))
+    fwd_bwd = _array_all_reduces(run.hlo("fwd_bwd"))
+    accumulate = _array_all_reduces(run.hlo("accumulate"))
     update = _array_all_reduces(run.hlo("update"))
 
-    self.assertEmpty(first, f"first micro-batch still all-reduces arrays: {first}")
-    self.assertEmpty(accum, f"accumulating micro-batches still all-reduce arrays: {accum}")
+    self.assertEmpty(fwd_bwd, f"every micro-batch still all-reduces arrays: {fwd_bwd}")
+    self.assertEmpty(accumulate, f"the running sum is all-reduced as it accumulates: {accumulate}")
     # Vacuity guard from the other side: the traffic did not vanish, it moved.
     self.assertNotEmpty(update, "no array all-reduce in update() either -- the gradients are never reduced")
 
   def test_without_the_deferral_every_micro_batch_pays(self):
-    """Proves the probe above can fail. Same model, same probe, tag withheld."""
+    """Proves the probe above can fail. Same model, same probe, tag withheld.
+
+    Every micro-batch runs `fwd_bwd`, so that is where the baseline pays; `accumulate` adds
+    gradients that are already reduced, and has nothing to reduce either way.
+    """
     run = _run(_NO_DEFER)
-    first = _array_all_reduces(run.hlo("first"))
-    accum = _array_all_reduces(run.hlo("accum"))
+    fwd_bwd = _array_all_reduces(run.hlo("fwd_bwd"))
+    accumulate = _array_all_reduces(run.hlo("accumulate"))
     update = _array_all_reduces(run.hlo("update"))
 
-    self.assertNotEmpty(first, "baseline should all-reduce the gradients in the first micro-batch")
-    self.assertNotEmpty(accum, "baseline should all-reduce the gradients in every micro-batch")
+    self.assertNotEmpty(fwd_bwd, "baseline should all-reduce the gradients in every micro-batch")
+    self.assertEmpty(accumulate, f"baseline should have nothing to reduce in accumulate: {accumulate}")
     self.assertEmpty(update, f"baseline should have nothing left to reduce in update(): {update}")
 
   def test_zero1_costs_one_all_gather_in_update_and_nothing_per_micro_batch(self):
@@ -666,8 +674,8 @@ class CollectivePlacementTest(absltest.TestCase):
 
     added = {k: _gathered_elements(zero1.hlo(k)) - _gathered_elements(baseline.hlo(k)) for k in _KERNELS}
     self.assertGreater(added["update"], 0, "update() gathers nothing, so the parameters were never sharded")
-    self.assertEqual(added["first"], 0, "Zero-1 added an all-gather to the first micro-batch")
-    self.assertEqual(added["accum"], 0, "Zero-1 added an all-gather to the accumulating micro-batches")
+    self.assertEqual(added["fwd_bwd"], 0, "Zero-1 added an all-gather to every micro-batch")
+    self.assertEqual(added["accumulate"], 0, "Zero-1 added an all-gather to the accumulation")
 
   def test_zero1_composes_with_the_deferred_all_reduce(self):
     """The pair is the point: one reduction per step, on 1/N of the optimizer.
@@ -678,8 +686,8 @@ class CollectivePlacementTest(absltest.TestCase):
     """
     run = _run(_ZERO1)
 
-    self.assertEmpty(_array_all_reduces(run.hlo("first")))
-    self.assertEmpty(_array_all_reduces(run.hlo("accum")))
+    self.assertEmpty(_array_all_reduces(run.hlo("fwd_bwd")))
+    self.assertEmpty(_array_all_reduces(run.hlo("accumulate")))
     self.assertNotEmpty(_array_all_reduces(run.hlo("update")), "the gradients are never reduced at all")
 
 
@@ -785,7 +793,7 @@ class LifecycleTest(absltest.TestCase):
 
     Orbax cannot serialize an unreduced array at all -- `device_indices_map` is undefined for
     one -- so `save_checkpoint` reduces first, and `restore_checkpoint` puts the accumulator
-    back on the layout `_compiled_fwd_bwd_accum` was built against. Restoring does not
+    back on the layout `_compiled_accumulate` was built against. Restoring does not
     recompile, so the moments have to land back sharded too: `_compiled_update` was built
     against sharded ones and would die on an `in_shardings` mismatch, and if it somehow did
     not, the optimizer would quietly be replicated for the rest of the run.

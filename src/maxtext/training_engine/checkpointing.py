@@ -38,6 +38,11 @@ class CheckpointState:
   # How many micro-batches of `step` are folded into `accumulated_grads`. 0 for a complete
   # step, whose gradients have already been applied and discarded.
   micro_step_count: int = 0
+  # Restore target for `accumulated_grads`, as `jax.ShapeDtypeStruct`s with the accumulator's
+  # dtype and shardings. Orbax casts each leaf to its target's dtype, so this is needed when the
+  # gradients are accumulated in a dtype other than the parameters'. None restores into the
+  # parameters' own state.
+  accumulated_grads_target: Any = None
 
 
 _PERSISTENCE = "persistence"
@@ -417,7 +422,9 @@ class CheckpointManager:
       restore_args["accumulated_metrics"] = ocp.args.PyTreeRestore()
 
     if "accumulated_grads" in metadata.item_metadata:
-      accumulated_grads_target = nnx.state(checkpoint_state.model, nnx.Param)
+      accumulated_grads_target = checkpoint_state.accumulated_grads_target
+      if accumulated_grads_target is None:
+        accumulated_grads_target = nnx.state(checkpoint_state.model, nnx.Param)
       restore_args["accumulated_grads"] = ocp.args.PyTreeRestore(
           item=accumulated_grads_target,
           restore_args=ocp.checkpoint_utils.construct_restore_args(target=accumulated_grads_target),

@@ -25,6 +25,7 @@ from flax import nnx
 from flax import struct
 import jax
 import jax.numpy as jnp
+from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
 from maxtext.training_engine import abstract_engine
@@ -35,6 +36,7 @@ from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 import orbax.checkpoint as ocp
+import pydantic
 import pytest
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
@@ -68,6 +70,11 @@ class DummyPayload(abstract_engine.TrainerPayload):
   token_ids: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
   token_mask: Any = dataclasses.field(default_factory=lambda: jnp.ones((2, 2)))
   metadata: dict[str, Any] = struct.field(pytree_node=False, default_factory=dict)
+
+
+def _nested_tuples(value):
+  """A logical axis rule set with every list turned into a tuple, so two spellings of it compare equal."""
+  return tuple(_nested_tuples(v) for v in value) if isinstance(value, (list, tuple)) else value
 
 
 class MaxTextTrainingEngineTest(absltest.TestCase):
@@ -255,7 +262,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_trainable_parameters_mask_freezes_updates_and_isolates_grad_norm(self):
     """trainable_parameters_mask freezes specified parameters and isolates grad_norm."""
+
     class MoEModel(nnx.Module):
+
       def __init__(self):
         self.router_gate = nnx.Param(jnp.array([10.0, 10.0]))
         self.weights = nnx.Param(jnp.array([1.0, 2.0]))
@@ -297,7 +306,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_trainable_parameters_mask_compiled(self):
     """trainable_parameters_mask works in compiled mode."""
+
     class MoEModel(nnx.Module):
+
       def __init__(self):
         self.router_gate = nnx.Param(jnp.array([10.0, 10.0]))
         self.weights = nnx.Param(jnp.array([1.0, 2.0]))
@@ -1588,7 +1599,459 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("gradient_norm", buffer.scalar_metrics)
     grad_norm = buffer.scalar_metrics["gradient_norm"]
     np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(8.0)], rtol=1e-3)
-    self.assertNotIn("step_skipped", buffer.scalar_metrics)
+    # `skip_step_on_nan` defaults to True, so the default path records whether the step was
+    # skipped; finite gradients mean it was not.
+    self.assertTrue(cfg.skip_step_on_nan)
+    np.testing.assert_array_equal(np.asarray(buffer.scalar_metrics["step_skipped"]), [0.0])
+
+  def test_bf16_grads_divided_by_float32_denominator(self):
+    """bf16 accumulated gradients are divided by the float32 denominator, not by a bf16 cast of it.
+
+    bf16 holds integers exactly only up to 256, so a denominator of 257 casts to 256. The
+    expected gradient is 256/257 rounded once to bf16 (0.99609375), not 1.0. Checked on both the
+    eager and the compiled path.
+    """
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
+    expected = float(jnp.asarray(np.float32(256.0) / np.float32(257.0)).astype(jnp.bfloat16))
+    self.assertEqual(float(jnp.asarray(257.0, jnp.bfloat16)), 256.0, "257 must be unrepresentable in bf16")
+    self.assertNotEqual(expected, 1.0)
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+        t.with_loss_fn(
+            lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.sum(model.weights[...]) * 256.0, denominator=jnp.array(257.0)
+            )
+        )
+        if compiled:
+          t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
+        # Both elements equal, so the norm is sqrt(2) times the normalized gradient.
+        np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * expected], rtol=1e-6)
+
+  def test_grads_accumulate_in_grad_dtype(self):
+    """By default micro-batch gradients are accumulated in `grad_dtype`, on the eager and the compiled path.
+
+    Under bfloat16 each micro-batch is rounded to bf16 and summed in bf16, which saves device
+    memory over a float32 sum; `grad_accumulation_dtype=float32` asks for the float32 sum.
+    """
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16")
+    third = np.float32(1.0) / np.float32(3.0)
+    num_micro_batches = 16
+    expected_sum = jnp.zeros((), jnp.bfloat16)
+    for _ in range(num_micro_batches):
+      expected_sum = expected_sum + jnp.asarray(third).astype(jnp.bfloat16)
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+        t.with_loss_fn(
+            lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.sum(model.weights[...]) * third, denominator=jnp.array(1.0)
+            )
+        )
+        if compiled:
+          t.compile(DummyPayload())
+        for _ in range(num_micro_batches):
+          t.fwd_bwd(DummyPayload())
+
+        for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+          self.assertEqual(leaf.dtype, jnp.bfloat16)
+          np.testing.assert_array_equal(np.asarray(leaf, np.float32), np.full(leaf.shape, float(expected_sum)))
+
+  # A per-micro-batch gradient and denominator for which each order of sum, divide and cast gives a
+  # different bf16 result: 16 micro-batches of 1/13 over 3 tokens each give 0.025634766 summed in
+  # float32, divided once and cast once; 0.025756836 cast to bf16 before the division; 0.025878906
+  # summed in bf16. A total denominator that is a power of two could not show where the cast
+  # happens, and a denominator of 1 could not tell a sum of sums from a mean of means.
+  _SCALE = np.float32(1.0) / np.float32(13.0)
+  _DENOMINATOR = 3.0
+  _MICRO_BATCHES = 16
+
+  def _run_scaled_micro_batches(self, cfg, compiled):
+    """Folds `_MICRO_BATCHES` micro-batches of gradient `_SCALE` over `_DENOMINATOR` tokens into a fresh engine.
+
+    On the eager path, or through the compiled kernels if `compiled` is set.
+    """
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+    t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(
+        lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.sum(model.weights[...]) * self._SCALE, denominator=jnp.array(self._DENOMINATOR)
+        )
+    )
+    if compiled:
+      t.compile(DummyPayload())
+    for _ in range(self._MICRO_BATCHES):
+      t.fwd_bwd(DummyPayload())
+    expected_sum = np.float32(0.0)
+    for _ in range(self._MICRO_BATCHES):
+      expected_sum = np.float32(expected_sum + self._SCALE)
+    return t, expected_sum, np.float32(expected_sum / np.float32(self._DENOMINATOR * self._MICRO_BATCHES))
+
+  def test_float32_accumulation_casts_once(self):
+    """grad_accumulation_dtype=float32 under grad_dtype=bfloat16: sum in float32, divide once, cast once.
+
+    The accumulator must hold the undivided float32 sum, and the optimizer the quotient rounded
+    to bf16 once. Casting before the division, dividing each micro-batch by its own denominator,
+    or dropping the final cast each change the recorded norm; see `_SCALE`.
+    """
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="bfloat16", grad_accumulation_dtype="float32")
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        t, expected_sum, expected_mean = self._run_scaled_micro_batches(cfg, compiled)
+        for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+          self.assertEqual(leaf.dtype, jnp.float32)
+          np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, expected_sum))
+        np.testing.assert_array_equal(
+            np.asarray(t._accumulated_denominator),  # pylint: disable=protected-access
+            np.float32(self._DENOMINATOR * self._MICRO_BATCHES),
+        )
+
+        t.update()
+        mean_in_grad_dtype = float(jnp.asarray(expected_mean).astype(jnp.bfloat16))
+        self.assertEqual(mean_in_grad_dtype, 210 * 2.0**-13, "`_SCALE` no longer separates the orders")
+        grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
+        np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * mean_in_grad_dtype], rtol=1e-6)
+
+  def test_float32_grad_dtype_stays_float32(self):
+    """Under grad_dtype=float32 the default is float32 end to end: nothing is rounded through bf16.
+
+    Checks the values, not just the dtype, so a bf16 rounding anywhere between the sum and the
+    optimizer fails here.
+    """
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="float32")
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        t, expected_sum, expected_mean = self._run_scaled_micro_batches(cfg, compiled)
+        for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+          self.assertEqual(leaf.dtype, jnp.float32)
+          np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, expected_sum))
+
+        t.update()
+        grad_norm = t.get_metrics(clear_cache=True).scalar_metrics["gradient_norm"]
+        np.testing.assert_allclose(np.asarray(grad_norm), [np.sqrt(2.0) * float(expected_mean)], rtol=1e-6)
+
+  def test_bf16_weights_accumulate_in_float32(self):
+    """The default accumulates in `grad_dtype`, not the weights' dtype, so bf16 weights keep a float32 sum.
+
+    `train.py` sums these in bf16, the parameters' dtype -- a known difference from it.
+    """
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, grad_dtype="float32")
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        model = DummyNNXModel()
+        model.weights = nnx.Param(jnp.array([1.0, 2.0], jnp.bfloat16))
+        self.mock_from_pretrained.return_value = (model, self.mock_from_pretrained.return_value[1])
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+        t.with_loss_fn(self._weighted_loss_fn)
+        if compiled:
+          t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        for leaf in jax.tree.leaves(t._accumulated_grads):  # pylint: disable=protected-access
+          self.assertEqual(leaf.dtype, jnp.float32)
+          # 8.0 per element per micro-batch; see `_weighted_loss_fn`.
+          np.testing.assert_array_equal(np.asarray(leaf), np.full(leaf.shape, 16.0))
+
+  def test_compiled_micro_batches_share_fwd_bwd_and_accumulate_in_place(self):
+    """Every compiled micro-batch runs the one `fwd_bwd`, and each after the first adds into the donated sum.
+
+    The running sum is never an argument of `fwd_bwd` (see `_accumulate_kernel`), and `accumulate`
+    writes it back in place rather than allocating a second parameter-sized tree.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    t.compile(DummyPayload())
+    with (
+        mock.patch.object(t, "_compiled_fwd_bwd", wraps=t._compiled_fwd_bwd) as fwd_bwd,
+        mock.patch.object(t, "_compiled_accumulate", wraps=t._compiled_accumulate) as accumulate,
+    ):
+      t.fwd_bwd(DummyPayload())
+      accumulate.assert_not_called()
+      first_sum = jax.tree.leaves(t._accumulated_grads)
+      first_denominator = t._accumulated_denominator  # pylint: disable=protected-access
+      t.fwd_bwd(DummyPayload())
+      t.fwd_bwd(DummyPayload())
+
+    self.assertEqual(fwd_bwd.call_count, 3)
+    self.assertEqual(accumulate.call_count, 2)
+    self.assertTrue(all(leaf.is_deleted() for leaf in first_sum), "the running sum was copied, not donated")
+    self.assertTrue(first_denominator.is_deleted(), "the running denominator was copied, not donated")
+    # 8.0 per element and a denominator of 4.0 per micro-batch, summed unreduced; see `_weighted_loss_fn`.
+    np.testing.assert_array_equal(np.asarray(t._accumulated_grads["weights"]), [24.0, 24.0])
+    np.testing.assert_array_equal(np.asarray(t._accumulated_denominator), np.float32(12.0))
+
+  def test_denominator_is_summed_exactly_past_bfloat16_precision(self):
+    """The loss denominator is summed in float32 on both paths, whatever `grad_dtype` is.
+
+    Token counts above 256 are not all representable in bfloat16, and every other test keeps the
+    total small enough that a bfloat16 sum would still be exact -- so this is the one test that sees
+    a denominator summed, or rounded, in the gradients' dtype.
+    """
+    for compiled in (False, True):
+      with self.subTest(compiled=compiled):
+        self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+        t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+        t.with_loss_fn(
+            lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+                unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(257.0)
+            )
+        )
+        if compiled:
+          t.compile(DummyPayload())
+        for _ in range(3):
+          t.fwd_bwd(DummyPayload())
+        # 257 lies between the bfloat16 neighbours 256 and 258.
+        np.testing.assert_array_equal(
+            np.asarray(t._accumulated_denominator), np.float32(3 * 257.0)  # pylint: disable=protected-access
+        )
+
+  def test_empty_grad_accumulation_dtype_is_default(self):
+    """`grad_accumulation_dtype=` on the command line, which reaches pydantic as None, selects the default."""
+    common = {"model_name": "llama3.1-8b", "run_name": "test_run", "skip_jax_distributed_system": True}
+    from_argv = pyconfig.initialize([None, get_test_config_path(), "grad_accumulation_dtype="], **common)
+    self.assertEqual(from_argv.grad_accumulation_dtype, "")
+    from_kwargs = pyconfig.initialize([None, get_test_config_path()], grad_accumulation_dtype=None, **common)
+    self.assertEqual(from_kwargs.grad_accumulation_dtype, "")
+    # Still a closed set: None is the only new spelling of the default.
+    with self.assertRaisesRegex(pydantic.ValidationError, "grad_accumulation_dtype"):
+      pyconfig.initialize([None, get_test_config_path(), "grad_accumulation_dtype=fp32"], **common)
+
+  def _adam_engine(self, **config_overrides):
+    """Returns an engine over a fresh dummy model with a real Adam optimizer (it has moments)."""
+    mesh = self.mock_from_pretrained.return_value[1]
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), mesh)
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, **config_overrides)
+    with mock.patch.object(
+        maxtext_engine.train_utils,
+        "create_training_optimizer",
+        return_value=(lambda step: jnp.array(0.1), optax.adam(0.1)),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(self._weighted_loss_fn)
+    return t
+
+  @staticmethod
+  def _memory_kinds(tree):
+    return {leaf.sharding.memory_kind for leaf in jax.tree.leaves(tree) if hasattr(leaf, "sharding")}
+
+  def test_optimizer_offload_keeps_state_on_host(self):
+    """With the flag set, the optimizer state stays in host memory across compiled steps."""
+    t = self._adam_engine(optimizer_memory_host_offload=True)
+    t.compile(DummyPayload())
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.model, nnx.Param)), {"device"})
+
+    for _ in range(2):
+      t.fwd_bwd(DummyPayload())
+      t.fwd_bwd(DummyPayload())
+      t.update()
+      # The update kernel hands the new state straight back to the host.
+      self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+      self.assertEqual(self._memory_kinds(nnx.state(t.state.model, nnx.Param)), {"device"})
+
+  def test_optimizer_offload_preserves_numerics(self):
+    """Offload moves bytes only: two steps give bit-identical weights and moments."""
+    trained = []
+    for offload in (False, True):
+      t = self._adam_engine(optimizer_memory_host_offload=offload)
+      t.compile(DummyPayload())
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_optimizer_state_on_device_without_offload(self):
+    """Without the flag, the optimizer state stays in device memory."""
+    t = self._adam_engine()
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"device"})
+
+  def test_update_reoffloads_restored_optimizer_state(self):
+    """A restore can hand the moments back on the device after the kernels were compiled."""
+    t = self._adam_engine(optimizer_memory_host_offload=True)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    # What a restore that lands on the device leaves behind.
+    on_device = jax.tree.map(
+        lambda x: jax.device_put(x, x.sharding.with_memory_kind("device")), nnx.state(t.state.optimizer)
+    )
+    nnx.update(t.state.optimizer, on_device)
+    t._invalidate_pure_state()  # pylint: disable=protected-access
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"device"})
+
+    t.fwd_bwd(DummyPayload())
+    t.update()  # Would raise an in_shardings mismatch without the re-offload.
+    self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+  def test_optimizer_offload_on_eager_path(self):
+    """`optimizer_memory_host_offload` also applies on the eager path, where `compile()` is never called.
+
+    It changes placement only: two eager steps give the same weights and moments with it off.
+    """
+    trained = []
+    for offload in (False, True):
+      t = self._adam_engine(optimizer_memory_host_offload=offload)
+      expected = {"pinned_host"} if offload else {"device"}
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        # Off HBM from the first forward pass, as a compile would have moved it.
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.model, nnx.Param)), {"device"})
+      self.assertFalse(t._compiled)  # pylint: disable=protected-access
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+
+  def test_update_after_state_setter_swaps_optimizer(self):
+    """The `state` setter drops the previous compile's optimizer shardings.
+
+    Between the setter and the next `fwd_bwd` nothing is compiled, so `update()` runs eagerly and
+    must place the new optimizer state (SGD's, replacing Adam's) by its own tree structure, with
+    and without offload.
+    """
+    for offload in (False, True):
+      with self.subTest(offload=offload):
+        t = self._adam_engine(optimizer_memory_host_offload=offload)
+        t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        t.fwd_bwd(DummyPayload())
+        before = np.asarray(t.state.model.weights[...])
+
+        t.state = train_state_nnx.TrainStateNNX(t.model, nnx.Optimizer(t.model, optax.sgd(0.1), wrt=nnx.Param))
+        self.assertIsNone(t._optimizer_device_shardings)  # pylint: disable=protected-access
+        t.update()
+
+        # `_weighted_loss_fn`'s gradient is 2.0 per element, so SGD at 0.1 moves each weight by 0.2.
+        np.testing.assert_allclose(before - np.asarray(t.state.model.weights[...]), [0.2, 0.2], atol=1e-6)
+        expected = {"pinned_host"} if offload else {"device"}
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+        # And the next step recompiles against the new tree.
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
+
+  def test_parameter_offload_is_rejected(self):
+    """The engine has no parameter-offload path, so the flag must fail loudly."""
+    with self.assertRaisesRegex(NotImplementedError, "parameter_memory_host_offload"):
+      maxtext_engine.MaxTextTrainingEngine(self.setup_config(parameter_memory_host_offload=True))
+
+  def test_differing_eval_rules_are_rejected(self):
+    """`train.py` evaluates under `logical_axis_rules_for_eval`; the engine only has the training rules."""
+    differing = self.setup_config(custom_mesh_and_rule_for_eval="pure-fsdp")
+    self.assertNotEqual(
+        _nested_tuples(differing.logical_axis_rules_for_eval), _nested_tuples(differing.logical_axis_rules)
+    )
+    with self.assertRaisesRegex(NotImplementedError, "pure-fsdp"):
+      maxtext_engine.MaxTextTrainingEngine(differing)
+    self.mock_from_pretrained.assert_not_called()
+
+    # Both of these are accepted: the default, where the eval rules are the training rules, and an
+    # eval rule set named explicitly and equal to the training one. The latter reaches the engine
+    # as lists while the training rules are tuples, so it must be compared by value.
+    maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    same = self.setup_config(custom_mesh_and_rule="pure-fsdp", custom_mesh_and_rule_for_eval="pure-fsdp")
+    self.assertNotEqual(same.logical_axis_rules_for_eval, same.logical_axis_rules)
+    maxtext_engine.MaxTextTrainingEngine(same)
+
+  def _rules_and_mesh(self):
+    """The logical axis rules and the abstract mesh in force right now."""
+    return maxtext_engine.sharding.get_logical_axis_rules(), jax.sharding.get_abstract_mesh()
+
+  def test_build_model_uses_rules_without_mesh(self):
+    """What `from_pretrained` sees when Tunix constructs the engine with a mesh.
+
+    The config's own logical axis rules must be in force, because some layers (e.g. Tokamax ring
+    attention) validate their sharding at `__init__`. A `jax.set_mesh` must not be: under one,
+    flax's `nnx.eval_shape` in `create_nnx_abstract_model` re-derives every sharding from its
+    logical names and raises for a name the rules leave unmapped, such as `norm` under `cp-as-ep`.
+    """
+    model, mesh = self.mock_from_pretrained.return_value
+    seen = {}
+
+    def record(*_args, **_kwargs):
+      seen["rules"], abstract_mesh = self._rules_and_mesh()
+      seen["mesh_set"] = not abstract_mesh.empty
+      return model  # A caller-supplied mesh means `from_pretrained` returns the bare model.
+
+    self.mock_from_pretrained.side_effect = record
+    maxtext_engine.MaxTextTrainingEngine(self.mock_config, mesh=mesh)
+
+    self.assertEqual(seen["rules"], self.mock_config.logical_axis_rules)
+    self.assertFalse(seen["mesh_set"])
+
+  def test_build_model_clears_caller_mesh(self):
+    """`with jax.set_mesh(mesh): MaxTextTrainingEngine(...)` must not reach `from_pretrained`.
+
+    See the previous test for why; `maxtext_engine_model_build_test.py` covers it on a real
+    model. The caller's mesh is restored afterwards.
+    """
+    model, mesh = self.mock_from_pretrained.return_value
+    seen = {}
+
+    def record(*_args, **_kwargs):
+      seen["mesh_set"] = not jax.sharding.get_abstract_mesh().empty
+      return model
+
+    self.mock_from_pretrained.side_effect = record
+    with jax.set_mesh(mesh):
+      maxtext_engine.MaxTextTrainingEngine(self.mock_config, mesh=mesh)
+      restored = jax.sharding.get_abstract_mesh()
+
+    self.assertFalse(seen["mesh_set"])
+    self.assertEqual(restored, mesh.abstract_mesh)
+
+  def test_eval_step_traces_under_engine_rules(self):
+    """The eval kernel traces under the config's rules and the engine mesh, as `fwd_bwd`'s does.
+
+    Tunix's `TrainerWorker.compile()` passes no dummy data, so `eval_step` is where the eval
+    kernel is first traced on that path. Covers both the deferred-compile path and the eager one,
+    and compares by value, so a wrong rule set or a missing mesh fails too.
+    """
+    seen = []
+
+    def loss_fn(model, *_args, **_kwargs):
+      seen.append(self._rules_and_mesh())
+      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(1.0))
+
+    deferred = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    deferred.with_loss_fn(loss_fn)
+    deferred.compile(None)  # What Tunix's worker does: no dummy payload, so nothing is built yet.
+    deferred.eval_step(DummyPayload())
+
+    self.mock_from_pretrained.return_value = (DummyNNXModel(), self.mock_from_pretrained.return_value[1])
+    eager = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    eager.with_loss_fn(loss_fn)
+    eager.eval_step(DummyPayload())
+
+    self.assertLen(seen, 2)
+    for engine, (rules, abstract_mesh) in zip((deferred, eager), seen):
+      self.assertEqual(rules, self.mock_config.logical_axis_rules)
+      self.assertEqual(abstract_mesh, engine._mesh.abstract_mesh)  # pylint: disable=protected-access
+
+  def test_zero1_sharding_keeps_memory_kind(self):
+    """`add_data_to_sharding` builds a fresh sharding; the memory kind must survive it."""
+    mesh = self.mock_from_pretrained.return_value[1]
+    base = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None)).with_memory_kind("pinned_host")
+    target = maxtext_engine._zero1_sharding(  # pylint: disable=protected-access
+        mesh, jax.ShapeDtypeStruct((4,), jnp.float32), base
+    )
+    self.assertIsNotNone(target)
+    self.assertIn("data", jax.tree.leaves(tuple(target.spec)))
+    self.assertEqual(target.memory_kind, "pinned_host")
 
   def test_perplexity_is_emitted_alongside_the_loss(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
@@ -1693,9 +2156,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       return tokens, prompt, mask
 
     with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
-      tokens, prompt, mask = t.fwd_only(
-          fn, np.ones((2, 4), np.int32), empty_prompt, mask=np.ones((2,), np.int32)
-      )
+      tokens, prompt, mask = t.fwd_only(fn, np.ones((2, 4), np.int32), empty_prompt, mask=np.ones((2,), np.int32))
 
     self.assertEqual(tokens.sharding.spec, jax.sharding.PartitionSpec("data", None))
     # A rank-1 leaf absorbs only the leading entry of the `[batch, sequence]` spec.
@@ -1711,6 +2172,67 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertTrue(inside)
     # And released on exit: the scope is a loan, not a global mode switch.
     self.assertFalse(maxtext_engine.sharding.get_logical_axis_rules())
+
+  def test_model_scope_yields_model_and_placed_inputs(self):
+    """`model_scope` is what Tunix's `TrainerWorker.per_token_logps` enters to score log-probs.
+
+    It must hand back the model a step trains, the inputs on the step's shardings with Python
+    scalars left alone, and keep the logical axis rules in force for the whole block, because
+    the caller's own `jax.jit` traces inside it.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+
+    with mock.patch.object(maxtext_engine.sharding, "get_input_data_sharding", return_value=self._sharded_batch_spec(t)):
+      with t.model_scope(np.ones((2, 4), np.int32), pad_id=0, temperature=1.0) as (model, args, kwargs):
+        rules_inside = maxtext_engine.sharding.get_logical_axis_rules()
+        (tokens,) = args
+
+    self.assertIs(model, t.state.model)
+    self.assertEqual(tokens.sharding.spec, jax.sharding.PartitionSpec("data", None))
+    self.assertEqual(kwargs, {"pad_id": 0, "temperature": 1.0})
+    self.assertIsInstance(kwargs["pad_id"], int)
+    self.assertTrue(rules_inside)
+    self.assertFalse(maxtext_engine.sharding.get_logical_axis_rules())
+
+  def test_model_scope_is_context_manager(self):
+    """Tunix's worker calls `model_scope` on the trainer; the engine must answer it as a context manager."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    scope = t.model_scope()
+    self.assertTrue(hasattr(scope, "__enter__") and hasattr(scope, "__exit__"))
+    with scope as (model, args, kwargs):
+      self.assertIs(model, t.state.model)
+      self.assertEqual((args, kwargs), ((), {}))
+
+  def test_model_scope_holds_mesh_and_rules(self):
+    """The caller's jit traces inside the block, so it needs what `fwd_bwd` traces under: both, by value."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    with t.model_scope():
+      rules, abstract_mesh = self._rules_and_mesh()
+    self.assertEqual(rules, self.mock_config.logical_axis_rules)
+    self.assertEqual(abstract_mesh, t._mesh.abstract_mesh)  # pylint: disable=protected-access
+
+  def test_model_scope_releases_on_exception(self):
+    """An exception in the caller's block must not leave the engine's rules or mesh bound on the thread."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    with self.assertRaises(KeyError):
+      with t.model_scope(np.ones((2, 4), np.int32)):
+        raise KeyError("boom")
+    rules, abstract_mesh = self._rules_and_mesh()
+    self.assertFalse(rules)
+    self.assertTrue(abstract_mesh.empty)
+
+  def test_model_scope_yields_rebound_model(self):
+    """After the `state` setter the model a step trains is the new one, not `self._model`.
+
+    In the default fixture `state.model is self._model`, so the other `model_scope` tests cannot
+    tell the two apart; rebinding the state here makes them differ.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    new_model = DummyNNXModel()
+    t.state = train_state_nnx.TrainStateNNX(new_model, nnx.Optimizer(new_model, optax.sgd(0.1), wrt=nnx.Param))
+    self.assertIsNot(new_model, t._model)  # pylint: disable=protected-access
+    with t.model_scope() as (model, _, _):
+      self.assertIs(model, new_model)
 
   def test_fwd_only_throttles_consecutive_calls_and_flushes_pending_metrics(self):
     """Consecutive `fwd_only` calls stay bounded by the throttler and flush stashed metrics."""
