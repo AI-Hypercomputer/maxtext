@@ -92,8 +92,10 @@ def _rehome_aval(aval: Any, mesh: jax.sharding.Mesh) -> Any:
   """
   if not hasattr(aval, "shape") or not hasattr(aval, "dtype"):
     return aval
-  spec = getattr(getattr(aval, "sharding", None), "spec", None)
-  target = jax.sharding.NamedSharding(mesh, spec) if spec is not None else None
+  sharding_obj = getattr(aval, "sharding", None)
+  spec = getattr(sharding_obj, "spec", None)
+  memory_kind = getattr(sharding_obj, "memory_kind", None)
+  target = jax.sharding.NamedSharding(mesh, spec, memory_kind=memory_kind) if spec is not None else None
   return jax.ShapeDtypeStruct(aval.shape, aval.dtype, sharding=target)
 
 
@@ -129,12 +131,13 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
     anything, minus the checkpoint load -- so no weights, no HF token and no network.
     """
     del wrap_with_tunix_adapter, tokenizer_pad_id  # `__init__` accepts neither.
-    _, abstract_model = model_creation_utils.create_nnx_abstract_model(
-        model_creation_utils.verify_and_sync_scan_layers(self._config),
-        self._mesh,
-        model_mode=common_types.MODEL_MODE_TRAIN,
-        rng_key=self._init_rng,
-    )
+    with self._sharding_ctx():
+      _, abstract_model = model_creation_utils.create_nnx_abstract_model(
+          model_creation_utils.verify_and_sync_scan_layers(self._config),
+          self._mesh,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          rng_key=self._init_rng,
+      )
     return abstract_model
 
   def _build_optimizer(self, tx: Any) -> Any:
