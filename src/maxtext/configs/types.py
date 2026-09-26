@@ -41,7 +41,7 @@ from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator
 from pydantic.main import BaseModel
-from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveInt
+from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt
 
 
 class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
@@ -2730,6 +2730,30 @@ class DilocoParams(BaseModel):
           " `num_communication_overlapping_steps` steps. alpha=0.5 does a"
           " uniform average between the local fragment parameters and the"
           " globally shared one."
+      ),
+  )
+
+  # Threaded (non-SPMD) streaming DiLoCo parameters
+  enable_threaded_diloco: bool = Field(
+      False,
+      description=(
+          "Run streaming DiLoCo with one host thread per learner and an outer optimizer on colocated CPU devices"
+          " (trainers/diloco/threaded_diloco.py) instead of one SPMD program. Requires a single controller."
+          " Does not checkpoint or export the outer parameters, and eval uses each learner's inner parameters."
+      ),
+  )
+  threaded_diloco_replicate_outer_step: bool = Field(
+      True,
+      description=(
+          "Run the outer step on every learner's colocated CPU devices so each learner gets its result locally."
+          " If False, only learner 0's CPU devices run it and the result is copied to the other learners."
+      ),
+  )
+  threaded_diloco_transport_timeout_seconds: PositiveFloat = Field(
+      3600.0,
+      description=(
+          "Deadlock guard for learner <-> syncer messages. Must exceed the longest legitimate wait, e.g. the device"
+          " queue draining when profiling starts."
       ),
   )
 
@@ -6075,13 +6099,47 @@ class MaxTextConfig(
       diloco_idx = self.dcn_parallelism.index(-1)
       self.dcn_parallelism[diloco_idx] = self.dcn_diloco_parallelism
     self.num_diloco_replicas = int(self.ici_diloco_parallelism * self.dcn_diloco_parallelism)
+    if self.enable_threaded_diloco:
+      if not (self.enable_diloco and self.enable_streaming_diloco):
+        raise ValueError("enable_threaded_diloco=True requires enable_diloco=True and enable_streaming_diloco=True.")
+      if self.num_diloco_replicas < 2:
+        raise ValueError(
+            f"enable_threaded_diloco=True requires at least 2 DiLoCo replicas, got {self.num_diloco_replicas}."
+        )
+      if self.enable_checkpointing:
+        raise ValueError(
+            "enable_threaded_diloco=True does not support checkpointing yet; set enable_checkpointing=False."
+        )
+      if self.colocated_python_data_input:
+        raise ValueError("enable_threaded_diloco=True does not support colocated_python_data_input.")
+      if self.dataset_type not in (DatasetType.SYNTHETIC, DatasetType.GRAIN, DatasetType.TFDS, DatasetType.HF):
+        raise ValueError(
+            f"enable_threaded_diloco=True supports dataset_type synthetic, grain, tfds or hf, got {self.dataset_type}."
+        )
+      if "diloco" not in self.mesh_axes:
+        raise ValueError(f"enable_threaded_diloco=True requires a 'diloco' axis in mesh_axes, got {self.mesh_axes}.")
+      # Same schedule as fragmenter.get_streaming_schedule. A learner applies the outer value of the sync it sent;
+      # SPMD streaming DiLoCo applies the latest one, which differs once the fragment is re-synced before the apply.
+      steps_between_syncs = max(1, int(round(self.diloco_sync_period / max(1, self.num_diloco_fragments))))
+      period = self.num_diloco_fragments * steps_between_syncs
+      if self.num_communication_overlapping_steps >= period:
+        raise ValueError(
+            "enable_threaded_diloco=True requires num_communication_overlapping_steps"
+            f" ({self.num_communication_overlapping_steps}) to be smaller than the streaming period"
+            f" (num_diloco_fragments * steps between syncs = {period})."
+        )
+      # train_loop features that the threaded learners do not implement.
+      for flag in ("retry_when_tokens_dropped", "enable_rampup_batch_size", "enable_mllog"):
+        if getattr(self, flag):
+          raise ValueError(f"enable_threaded_diloco=True does not support {flag}=True.")
 
     # (b/496973624) use_tokamax_gmm is incompatible with enable_diloco: drjax.map_fn wraps
     # the train step in jax.vmap over the diloco axis, which causes JAX to batch through
     # lax.scan (layer scan).
     # Tokamax's vmap_rule then tries to reconstruct GroupSizes with a batched 2-D value, but
     # GroupSizes.__post_init__ requires exactly a 1-D shape.
-    if self.enable_diloco and self.use_tokamax_gmm:
+    # Threaded DiLoCo learners run the plain train step without drjax, so they are not affected.
+    if self.enable_diloco and self.use_tokamax_gmm and not self.enable_threaded_diloco:
       raise ValueError(
           "use_tokamax_gmm=True is not compatible with enable_diloco=True due to a known "
           "incompatibility between tokamax's GroupSizes vmap_rule and JAX's scan batching. "

@@ -1128,6 +1128,11 @@ use_sequential_layers: false
 diloco_bucketize_non_scanned: false
 num_communication_overlapping_steps: 0
 communication_overlapping_alpha: 0.0
+# Threaded (non-SPMD) streaming DiLoCo: one host thread per learner, outer step on colocated CPU devices.
+# A threaded run does not checkpoint or export the outer parameters; eval uses each learner's inner parameters.
+enable_threaded_diloco: false
+threaded_diloco_replicate_outer_step: true
+threaded_diloco_transport_timeout_seconds: 3600.0
 
 
 # You may disable clipping by setting gradient_clipping_threshold to zero.

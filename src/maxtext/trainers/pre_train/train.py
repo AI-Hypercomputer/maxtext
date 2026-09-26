@@ -72,6 +72,7 @@ from maxtext.common.goodput import (
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
+from maxtext.trainers.diloco import threaded_diloco
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -1531,7 +1532,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
 def run(config, recorder):
   """Run the job given hyperparameters and utilities."""
   with (max_utils.maybe_get_transformer_engine_context(config),):
-    train_loop(config, recorder)
+    if config.enable_threaded_diloco:
+      threaded_diloco.run_threaded_diloco(config, recorder, train_step, eval_step)
+    else:
+      train_loop(config, recorder)
 
 
 def get_train_func(config, recorder, argv):
