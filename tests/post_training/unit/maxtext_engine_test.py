@@ -26,6 +26,7 @@ from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
+from maxtext.optimizers import optimizers
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
 from maxtext.training_engine import metrics as metrics_module
@@ -251,6 +252,87 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     recorded = np.asarray(metrics.scalar_metrics["gradient_norm"]).reshape(-1)
     self.assertEqual(recorded.shape, (1,), "one norm per update, not one per micro-batch")
     np.testing.assert_allclose(recorded[0], np.sqrt(2 * 0.25**2), rtol=1e-5)
+
+  def test_trainable_parameters_mask_freezes_updates_and_isolates_grad_norm(self):
+    """trainable_parameters_mask freezes specified parameters and isolates grad_norm."""
+    class MoEModel(nnx.Module):
+      def __init__(self):
+        self.router_gate = nnx.Param(jnp.array([10.0, 10.0]))
+        self.weights = nnx.Param(jnp.array([1.0, 2.0]))
+
+    moe_model = MoEModel()
+    dummy_mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(self.mock_config), self.mock_config.mesh_axes)
+    self.mock_from_pretrained.return_value = (moe_model, dummy_mesh)
+
+    config = self.setup_config(trainable_parameters_mask=["^(?!.*router_gate).*"])
+    base_opt = optax.sgd(0.1)
+    tx = optimizers.apply_trainable_parameters_mask(base_opt, config)
+
+    with mock.patch.object(maxtext_engine.train_utils, "create_training_optimizer", return_value=(lambda s: 0.1, tx)):
+      t = maxtext_engine.MaxTextTrainingEngine(config)
+
+      t.with_loss_fn(
+          lambda model, *_args, **_kwargs: (
+              abstract_engine.WeightedMetric(
+                  unreduced_sum=jnp.sum(model.weights.get_value()) + 5.0 * jnp.sum(model.router_gate.get_value()),
+                  denominator=jnp.array(1.0),
+              ),
+              {},
+          )
+      )
+      payload = DummyPayload()
+      t.fwd_bwd(payload)
+      t.update()
+
+      np.testing.assert_allclose(np.asarray(t.model.router_gate.get_value()), [10.0, 10.0])
+      self.assertFalse(np.allclose(np.asarray(t.model.weights.get_value()), [1.0, 2.0]))
+
+      metrics = t.get_metrics(clear_cache=True)
+      recorded_norm = float(np.asarray(metrics.scalar_metrics["gradient_norm"]).reshape(-1)[0])
+      # Without masking, the norm would include router_gate: sqrt(1^2 + 1^2 + 5^2 + 5^2) = sqrt(52) = 7.211.
+      # With masking, it reflects only the weights (around sqrt(2) = 1.414).
+      self.assertLess(recorded_norm, 2.0)
+      self.assertGreater(recorded_norm, 0.0)
+
+  def test_trainable_parameters_mask_compiled(self):
+    """trainable_parameters_mask works in compiled mode."""
+    class MoEModel(nnx.Module):
+      def __init__(self):
+        self.router_gate = nnx.Param(jnp.array([10.0, 10.0]))
+        self.weights = nnx.Param(jnp.array([1.0, 2.0]))
+
+    moe_model = MoEModel()
+    dummy_mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(self.mock_config), self.mock_config.mesh_axes)
+    self.mock_from_pretrained.return_value = (moe_model, dummy_mesh)
+
+    config = self.setup_config(trainable_parameters_mask=["^(?!.*router_gate).*"])
+    base_opt = optax.sgd(0.1)
+    tx = optimizers.apply_trainable_parameters_mask(base_opt, config)
+
+    with mock.patch.object(maxtext_engine.train_utils, "create_training_optimizer", return_value=(lambda s: 0.1, tx)):
+      t = maxtext_engine.MaxTextTrainingEngine(config)
+
+      t.with_loss_fn(
+          lambda model, *_args, **_kwargs: (
+              abstract_engine.WeightedMetric(
+                  unreduced_sum=jnp.sum(model.weights.get_value()) + 5.0 * jnp.sum(model.router_gate.get_value()),
+                  denominator=jnp.array(1.0),
+              ),
+              {},
+          )
+      )
+      payload = DummyPayload()
+      t.compile(payload)
+      t.fwd_bwd(payload)
+      t.update()
+
+      np.testing.assert_allclose(np.asarray(t.model.router_gate.get_value()), [10.0, 10.0])
+      self.assertFalse(np.allclose(np.asarray(t.model.weights.get_value()), [1.0, 2.0]))
+
+      metrics = t.get_metrics(clear_cache=True)
+      recorded_norm = float(np.asarray(metrics.scalar_metrics["gradient_norm"]).reshape(-1)[0])
+      self.assertLess(recorded_norm, 2.0)
+      self.assertGreater(recorded_norm, 0.0)
 
   @mock.patch("orbax.checkpoint.PyTreeCheckpointHandler")
   @mock.patch("orbax.checkpoint.CheckpointManager")
