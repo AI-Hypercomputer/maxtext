@@ -56,6 +56,8 @@ routed_bias_update_rate: 0.001
 load_balance_loss_weight: 0.0001
 log_moe_bias_norms: false
 routed_scaling_factor: 1.5
+# Reference Gate computes router logits in fp32 (linear(x.float(), weight.float())) regardless of model dtype.
+float32_gate_logits: true
 
 
 # --- Attention configuration ---
