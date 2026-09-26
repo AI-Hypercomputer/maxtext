@@ -177,6 +177,81 @@ With `scan_layers=true`, each `fwd_bwd` in the trace contains a forward and a ba
 there as the collective's `-done` op (`all-gather-done`, `reduce-scatter-done`); the asynchronous
 collectives themselves are on the `Async XLA Ops` line.
 
+## Recipe: Qwen3.5-397B-A17B on 128 TPU v7x chips
+
+The configuration below trains Qwen3.5-397B-A17B with the standalone script on 128 TPU v7x chips (256
+devices): mesh fsdp 32 x context 4 x expert 2 with `custom_mesh_and_rule=cp-as-ep`, sequences of 65,536
+tokens, and 1,024 sequences per optimizer step (16 micro-batches of 64), with float32 weights, bfloat16
+compute and AdamW. Run it on every host of the slice.
+
+<details>
+<summary>Full flags</summary>
+
+```bash
+export LIBTPU_INIT_ARGS="--xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true \
+--xla_tpu_enable_offloading_gather_to_sparsecore=true \
+--xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_reduce_scatter_v2=true \
+--xla_tpu_aggressive_opt_barrier_removal=true --xla_tpu_scoped_vmem_limit_kib=65536 \
+--xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false \
+--xla_tpu_enable_sparse_core_collective_offload_all_gather=true \
+--xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true \
+--xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true \
+--xla_tpu_dvfs_p_state=7 --xla_tpu_enable_offloading_copy_to_sparsecore=false"
+
+python3 -m maxtext.experimental.maxtext_engine.train src/maxtext/configs/base.yml \
+  run_name=<run_name> base_output_directory=<output_dir> steps=<steps> \
+  model_name=qwen3.5-397b-a17b base_num_decoder_layers=60 override_model_config=true scan_layers=True \
+  use_multimodal=false dataset_type=synthetic max_target_length=65536 tokenizer_path='' packing=false \
+  opt_type=adamw adam_weight_decay=0.0 adam_b1=0.9 adam_b2=0.999 adam_eps=1e-8 learning_rate=1e-5 \
+  dtype=bfloat16 mu_dtype=bfloat16 grad_dtype=bfloat16 cast_grads_after_all_reduce=true \
+  megablox=true sparse_matmul=true use_tokamax_gmm=true use_gmm_v2=true use_gmm_v2_heuristic_tiling=true \
+  merge_gating_gmm=false use_ring_of_experts=true use_ragged_sort=true use_custom_sort_vjp=false \
+  ragged_buffer_factor=2.0 use_random_routing=True num_moe_token_chunks=2 moe_chunk_barrier=false \
+  attention=flash use_tokamax_splash=true use_splash_scheduler=true sa_block_q=1024 sa_block_kv=4096 \
+  sa_block_kv_compute=512 sa_block_q_dkv=2048 sa_block_kv_dkv=2048 sa_block_kv_dkv_compute=512 \
+  sa_fuse_reciprocal=false sa_use_base2_exp=true dq_reduction_steps=3 \
+  gdn_chunk_size=64 use_gdn_kernel=true gdn_cp_mode=auto \
+  custom_mesh_and_rule=cp-as-ep ici_tensor_parallelism=1 ici_fsdp_parallelism=32 ici_context_parallelism=4 \
+  ici_expert_parallelism=2 context_parallel_strategy=ring context_parallel_load_balance=False \
+  allow_split_physical_axes=False \
+  remat_policy=custom decoder_layer_input=device context=device gdn=remat gdn_conv=remat \
+  num_vocab_tiling=2 use_iota_embed=false \
+  per_device_batch_size=0.25 gradient_accumulation_steps=16 enable_checkpointing=false
+```
+
+</details>
+
+Variants:
+
+| goal | change to the flags above |
+|---|---|
+| bfloat16 gradients, fastest (as above) | none |
+| float32 gradients | `grad_dtype=float32 optimizer_memory_host_offload=true context=remat` (`cast_grads_after_all_reduce` has no effect with float32 gradients) |
+| without the SparseCore settings | drop `--xla_tpu_enable_offloading_copy_to_sparsecore=false` and `cast_grads_after_all_reduce=true` |
+| check memory first | run `python3 -m maxtext.training_engine.maxtext_engine_compile` with the same flags, plus `compile_topology=tpu7x-256 compile_topology_num_slices=1` and the libtpu flags above in `compile_xla_flags` |
+| memory of the same trainer under Tunix's GRPO loss | add `compile_engine_loss=grpo max_prefill_predict_length=<prompt tokens>` and the trainer's `compile_engine_grpo_config` and `compile_engine_logps_chunk_size` to the compile command (see [Ahead-of-time memory report](#ahead-of-time-memory-report)) |
+
+## Results on TPU v7x
+
+Measured with the recipe above (the standalone script for the engine), steady state over the first
+steps after step 0. The `pre_train/train.py` rows ran the same model, flags and code plus two kernel
+changes that are not part of MaxText yet (a single-scan vocabulary-tiled loss and a cost estimate for
+the gated-delta-net forward kernel), which make it slightly faster; the engine rows ran without them.
+
+| trainer | settings | s/step | tokens/s/chip | vs `pre_train/train.py` |
+|---|---|---|---|---|
+| `pre_train/train.py` | bfloat16 gradients | 206.12 | 2,543.6 | — |
+| `pre_train/train.py` | + `--xla_tpu_enable_offloading_copy_to_sparsecore=false` | does not fit | — | runs out of device memory at load |
+| engine | bfloat16 gradients, without the SparseCore settings | 228.86 | 2,291 | 11.0% slower |
+| engine | + `--xla_tpu_enable_offloading_copy_to_sparsecore=false` | 214.70 | 2,442 | 4.2% slower |
+| engine | + `cast_grads_after_all_reduce=true` (the recipe) | 201.43 | 2,603 | **2.3% faster** |
+| engine | float32 gradients, optimizer offload, `context=remat`, without the SparseCore settings | 229.72 | 2,282 | 11.4% slower |
+| engine | float32 gradients, optimizer offload, `context=remat`, + `--xla_tpu_enable_offloading_copy_to_sparsecore=false` (the float32 variant) | 217.19 | 2,414 | 5.4% slower |
+
+`pre_train/train.py`'s step time is the interval between its metric lines; its `seconds` field measures
+dispatch only on this configuration. The engine's is the script's own measurement, from dispatch until
+the step's device work drains.
+
 ## Callers
 
 | caller | class | notes |
