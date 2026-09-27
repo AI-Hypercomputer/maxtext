@@ -311,7 +311,7 @@ class GdnCpTest(absltest.TestCase):
       head_k_dim, head_v_dim = 32, 32
       dim_size = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim
       k0, k1, k2, k3, k4, k5, k6 = jax.random.split(jax.random.PRNGKey(100 + num_chunks), 7)
-      qkv_conv = jax.random.normal(k0, (batch, seq_len, dim_size), jnp.float32) * 0.1
+      qkv_raw = jax.random.normal(k0, (batch, seq_len, dim_size), jnp.float32) * 0.1
       b = jax.random.normal(k1, (batch, seq_len, num_v_heads), jnp.float32) * 0.2
       a = jax.random.normal(k2, (batch, seq_len, num_v_heads), jnp.float32) * 0.2
       a_log = jnp.log(jax.random.uniform(k3, (num_v_heads,), minval=0.1, maxval=1.0))
@@ -319,10 +319,10 @@ class GdnCpTest(absltest.TestCase):
       h0 = jax.random.normal(k5, (batch, num_v_heads, head_k_dim, head_v_dim), jnp.float32) * 0.1
       do = jax.random.normal(k6, (batch, seq_len, num_v_heads, head_v_dim), jnp.float32) * 0.1
 
-      # Compute reference t_inv via _compute_forward_conv_and_states
+      # Compute reference qkv_conv and t_inv via _compute_forward_conv_and_states
       cw_id = jnp.zeros((4, 1, dim_size), jnp.float32).at[3, 0, :].set(1.0)
-      _, _, t_inv = gdn_bwd_pallas._compute_forward_conv_and_states(
-          qkv=qkv_conv,
+      qkv_conv, _, t_inv = gdn_bwd_pallas._compute_forward_conv_and_states(
+          qkv=qkv_raw,
           b=b,
           a=a,
           conv_weight=cw_id,
@@ -354,7 +354,7 @@ class GdnCpTest(absltest.TestCase):
           use_qk_norm_in_gdn=True,
       )
       k_only = qkv_conv[:, :, num_k_heads * head_k_dim : 2 * num_k_heads * head_k_dim]
-      m_loc_konly, s_ext_konly = cp_gdn.compose_local_from_t_inv(
+      m_loc_konly, _ = cp_gdn.compose_local_from_t_inv(
           qkv_conv=k_only,
           b=b,
           a=a,
@@ -370,7 +370,49 @@ class GdnCpTest(absltest.TestCase):
           s_ext_pass1=s_ext,
       )
       np.testing.assert_allclose(m_loc_konly, m_loc, rtol=1e-6, atol=1e-6)
-      np.testing.assert_allclose(s_ext_konly, s_ext, rtol=1e-6, atol=1e-6)
+
+      # Independently verify s_ext (initial_state=0) and m_loc @ h0 + s_ext (initial_state=h0)
+      # against pure_jax_decoupled_conv1d_gdn so neither m_loc nor s_ext is compared with itself.
+      _, (_, s_ext_ref) = gdn_bwd_pallas.pure_jax_decoupled_conv1d_gdn(
+          qkv=qkv_raw,
+          b=b,
+          a=a,
+          conv_weight=cw_id,
+          conv_bias=None,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          conv_state=None,
+          recurrent_state=None,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          conv_kernel_size=4,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+          compute_dtype=jnp.float32,
+      )
+      _, (_, final_h_ref) = gdn_bwd_pallas.pure_jax_decoupled_conv1d_gdn(
+          qkv=qkv_raw,
+          b=b,
+          a=a,
+          conv_weight=cw_id,
+          conv_bias=None,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          conv_state=None,
+          recurrent_state=h0,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          conv_kernel_size=4,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=True,
+          compute_dtype=jnp.float32,
+      )
+      np.testing.assert_allclose(s_ext, s_ext_ref, rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(jnp.matmul(m_loc, h0) + s_ext, final_h_ref, rtol=1e-5, atol=1e-5)
 
       dm_uncached, ds_uncached = cp_gdn.compose_bwd_local_from_t_inv(
           qkv_conv=qkv_conv,
@@ -405,7 +447,6 @@ class GdnCpTest(absltest.TestCase):
       )
       np.testing.assert_allclose(dm_uncached, dm_cached, rtol=1e-5, atol=1e-5)
       np.testing.assert_allclose(ds_uncached, ds_cached, rtol=1e-5, atol=1e-5)
-      del h0
 
 
 if __name__ == "__main__":

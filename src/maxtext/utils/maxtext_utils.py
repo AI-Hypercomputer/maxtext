@@ -232,7 +232,7 @@ def _expand_gdn_remat_names(names: list[str]) -> list[str]:
         ]
     )
   if "gdn_conv" in names:
-    expanded.extend(["gdn_conv_out", "gdn_fwd_conv", "gdn_conv_state"])
+    expanded.extend(["gdn_conv_out", "gdn_fwd_conv"])
   if "gdn_states" in names:
     # Partial GDN remat: keep only the fwd Pallas kernel outputs that the bwd Pallas kernel
     # consumes (``t_inv``, ``chunk_states``) plus the kernel's primal output. All three are
@@ -240,7 +240,7 @@ def _expand_gdn_remat_names(names: list[str]) -> list[str]:
     # replay the whole fwd kernel in bwd anyway. ``gdn_m_local`` only exists in the
     # seq-sharded CP path, where it is derived from the pass-1 kernel and is tiny.
     expanded.extend(["gdn_core_attn_out", "gdn_t_inv", "gdn_chunk_states", "gdn_m_local"])
-  return expanded
+  return list(dict.fromkeys(expanded))
 
 
 def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
@@ -285,6 +285,12 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
     if getattr(config, "use_gdn_kernel", False):
       save_names = _expand_gdn_remat_names(save_names)
       offload_names = _expand_gdn_remat_names(offload_names)
+    overlap = set(save_names) & set(offload_names)
+    if overlap:
+      raise ValueError(
+          f"Conflicting custom remat configuration: tensors {sorted(overlap)} appear in both "
+          "tensors_on_device and tensors_to_offload (e.g. conflicting `gdn` and `gdn_states` settings)."
+      )
     return save_names, offload_names
   return [], []
 

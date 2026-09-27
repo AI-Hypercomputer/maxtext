@@ -326,6 +326,6 @@ def get_tile_sizes(
     )
 
   # Guarantee strictly positive tile sizes (>= 1) for Pallas grid compilation.
-  decode_tile_size = max(1, min(decode_tile_size, batch_size))
+  decode_tile_size = max(1, min(decode_tile_size, batch_size, max(1, num_seqs)))
   mixed_tile_size = max(1, min(mixed_tile_size, batch_size))
   return decode_tile_size, mixed_tile_size

@@ -341,7 +341,7 @@ class TInvBufferedRef(BaseBufferedRef):
     for idx in range(self.cfg.seq_tile_size):
       pltpu.make_async_copy(
           vmem_ref.at[idx],
-          dst_ref.at[p_id + idx],
+          dst_ref.at[p_id * self.cfg.seq_tile_size + idx],
           sem,
       ).start()
 
@@ -376,7 +376,7 @@ class ChunkStatesBufferedRef(BaseBufferedRef):
     for idx in range(self.cfg.seq_tile_size):
       pltpu.make_async_copy(
           vmem_ref.at[idx],
-          dst_ref.at[p_id + idx],
+          dst_ref.at[p_id * self.cfg.seq_tile_size + idx],
           sem,
       ).start()
 

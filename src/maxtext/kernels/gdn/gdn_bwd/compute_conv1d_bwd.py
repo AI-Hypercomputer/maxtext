@@ -52,6 +52,7 @@ def conv1d_silu_fwd(
     conv_state: Optional[jax.Array] = None,
     segment_ids: Optional[jax.Array] = None,
     conv_halo_seg: Optional[jax.Array] = None,
+    output_dtype: Optional[jnp.dtype] = None,
 ) -> Tuple[jax.Array, jax.Array]:
   """Forward Conv1D + SiLU returning (conv_out, qkv_conv)."""
   _, seq_len, _ = qkv.shape
@@ -77,7 +78,7 @@ def conv1d_silu_fwd(
     if conv_bias is not None:
       conv_out = conv_out + conv_bias.astype(jnp.float32)
   qkv_conv = jax.nn.silu(conv_out)
-  return conv_out, qkv_conv.astype(qkv.dtype)
+  return conv_out, qkv_conv.astype(output_dtype or qkv.dtype)
 
 
 def conv1d_silu_bwd(

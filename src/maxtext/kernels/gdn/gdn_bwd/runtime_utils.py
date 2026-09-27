@@ -14,22 +14,30 @@
 
 """Runtime utilities and CPU interpretation helpers for GDN backward pass."""
 
-import functools
-import logging
-from typing import Optional
+from typing import Any, Optional
 
 import jax
-from jax.experimental import pallas as pl
 import jax.numpy as jnp
 
 from .. import compute_gdn as local_compute_gdn
 
-_logger = logging.getLogger(__name__)
+
+def target_platform(*arrays: Any) -> str:
+  """Returns the platform ('tpu', 'cpu', 'gpu') the computation is being compiled for.
+
+  Like `pltpu.get_tpu_info()`, this prefers the active abstract mesh (`jax.set_mesh`, `shard_map`,
+  `jax.sharding.use_abstract_mesh`) and then the inputs' mesh over `jax.default_backend()`, so CPU-host AOT
+  compilation for a TPU mesh selects the Pallas TPU kernel instead of the CPU fallback.
+  """
+  meshes = [jax.sharding.get_abstract_mesh()]
+  meshes += [jax.typeof(x).sharding.mesh for x in arrays if x is not None]
+  for mesh in meshes:
+    if mesh.abstract_device is not None:
+      return mesh.abstract_device.platform
+  return jax.default_backend()
 
 
-def pallas_unsupported_reason(
-    *, head_k_dim: int, head_v_dim: int, chunk_size: int, seq_len: Optional[int] = None
-) -> Optional[str]:
+def pallas_unsupported_reason(*, head_k_dim: int, head_v_dim: int, chunk_size: int) -> Optional[str]:
   """Returns why the Pallas TPU GDN kernel cannot run these shapes, or None if it can."""
   if head_k_dim % 128 != 0:
     return f"head_k_dim={head_k_dim} is not a multiple of 128"
@@ -37,15 +45,7 @@ def pallas_unsupported_reason(
     return f"head_v_dim={head_v_dim} is not a multiple of 128"
   if chunk_size != 64:
     return f"chunk_size={chunk_size} != 64"
-  if seq_len is not None and seq_len % chunk_size != 0:
-    return f"local seq_len={seq_len} is not a multiple of chunk_size={chunk_size}"
   return None
-
-
-@functools.lru_cache(maxsize=None)
-def warn_gdn_pallas_fallback_once(where: str, reason: str) -> None:
-  """Logs (once per `where`/`reason` pair) that the GDN Pallas TPU kernel was skipped."""
-  _logger.warning("GDN %s: not using the Pallas TPU kernel (%s).", where, reason)
 
 
 def ensure_cpu_interpret_registered() -> None:
@@ -60,43 +60,6 @@ def ensure_cpu_interpret_registered() -> None:
       _ti.get_tpu_info.cache_clear()
     except Exception:
       pass
-  except Exception:  # pragma: no cover
-    pass
-
-  try:
-    from jax._src.pallas.mosaic import pipeline as _pl_pipeline  # noqa: E402
-
-    if not getattr(_pl_pipeline, "_is_cpu_safe_cbs_patched", False):
-      _orig_cbs = getattr(
-          _pl_pipeline,
-          "_original_create_bounded_slice",
-          _pl_pipeline._create_bounded_slice,
-      )
-      _pl_pipeline._original_create_bounded_slice = _orig_cbs
-
-      def _cpu_safe_create_bounded_slice(
-          slice_start,
-          slice_size,
-          block_size,
-          dim_size,
-          *args,
-          tiling=None,
-          **kwargs,
-      ):
-        if isinstance(slice_size, int) and (tiling is None or slice_size % tiling == 0):
-          return pl.ds(slice_start, slice_size)
-        return _orig_cbs(
-            slice_start,
-            slice_size,
-            block_size,
-            dim_size,
-            tiling,
-            *args,
-            **kwargs,
-        )
-
-      _pl_pipeline._create_bounded_slice = _cpu_safe_create_bounded_slice
-      _pl_pipeline._is_cpu_safe_cbs_patched = True
   except Exception:  # pragma: no cover
     pass
   # pylint: enable=protected-access,broad-exception-caught,import-outside-toplevel
