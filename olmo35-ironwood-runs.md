@@ -580,6 +580,21 @@ from BC 16 itself, likely bf16 precision on factors near 2^115. Not taken.
 **fp32 KDA kernel math is loss-neutral and nearly free** (p5 vs p2: 0.3%, same
 loss). The bf16 loss gap seen since l3 comes from the bf16 q/k/v inputs.
 
+### q-series, dispatch and vocab tiling on the new base (o35n262354)
+
+Base p2 (BC 8, floor 10).
+
+| arm | change | TF/s/dev | MFU |
+|---|---|---|---|
+| q1_ctrl | control | 122.3 | 10.60% |
+| q2_disp | `moe_dispatch=device` | 122.8 | 10.64% |
+| q3_vt2 | `num_vocab_tiling=2` | 122.6 | 10.62% |
+| q4_disp_vt2 | both | 123.3 | 10.69% |
+
+**Flat.** The control repeats p2 at 122.3 against 123.7, so run-to-run spread is
+about 1% and every arm sits inside it. Levers this small need repeats to
+resolve. The next step is a profile of the new base to re-rank what is left.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
