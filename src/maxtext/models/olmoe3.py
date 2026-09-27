@@ -590,10 +590,30 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     else:
       pool = jnp.full((batch, seq_len), cfg.emo_eval_document_expert_pool, dtype=jnp.int32)
 
-    order = jnp.argsort(-document_scores, axis=-1)
-    rank = jnp.argsort(order, axis=-1)
-    keep = rank < pool[..., None]
+    if cfg.moe_lean_routing:
+      keep = self._emo_keep_by_threshold(jax.lax.stop_gradient(document_scores), pool)
+      keep = checkpoint_name(keep, "moe_routing")
+    else:
+      order = jnp.argsort(-document_scores, axis=-1)
+      rank = jnp.argsort(order, axis=-1)
+      keep = rank < pool[..., None]
     return jnp.where(keep, gate_logits, -jnp.inf)
+
+  @staticmethod
+  def _emo_keep_by_threshold(scores, pool):
+    """``argsort(argsort(-scores)) < pool`` with one value sort instead of two argsorts.
+
+    The pool-th largest score is the threshold. Everything above it is kept, and
+    ties at the threshold fill the remaining slots lowest index first, which is
+    the order the stable argsort gives.
+    """
+    num_experts = scores.shape[-1]
+    ascending = jnp.sort(scores, axis=-1)
+    thr = jnp.take_along_axis(ascending, (num_experts - pool)[..., None], axis=-1)
+    above = scores > thr
+    at = scores == thr
+    slots = pool[..., None] - jnp.sum(above, axis=-1, keepdims=True)
+    return above | (at & (jnp.cumsum(at, axis=-1) <= slots))
 
   def load_balance_loss(self, top_k_indices, logits) -> jax.Array:
     """OLMo-core's batch-level load-balancing loss (``global_load_balancing``).

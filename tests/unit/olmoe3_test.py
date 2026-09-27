@@ -263,6 +263,59 @@ class OLMoE3RoutingTest(unittest.TestCase):
           expected = set(np.argsort(-masked)[:k].tolist())
           self.assertEqual(set(np.asarray(indices[b, t]).tolist()), expected, f"b={b} t={t}")
 
+  def test_emo_threshold_keep_matches_double_argsort(self):
+    """The one-sort EMo mask equals ``argsort(argsort(-s)) < pool``, ties included."""
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    import numpy as np
+    from maxtext.models.olmoe3 import OLMoE3LatentRoutedMoE
+
+    rng = np.random.default_rng(0)
+    for coarse in (False, True):
+      scores = rng.random((2, 32, 64)).astype(np.float32)
+      if coarse:  # heavy ties, including at the threshold
+        scores = np.round(scores * 4) / 4
+      pool = rng.integers(8, 65, (2, 32)).astype(np.int32)
+      ref = jnp.argsort(jnp.argsort(-scores, axis=-1), axis=-1) < pool[..., None]
+      got = OLMoE3LatentRoutedMoE._emo_keep_by_threshold(jnp.asarray(scores), jnp.asarray(pool))  # pylint: disable=protected-access
+      self.assertTrue(bool((ref == got).all()))
+
+  def test_lean_routing_is_exact(self):
+    """``moe_lean_routing`` changes no value or gradient on the sparse-matmul path."""
+    pool, seq_len = 20, 32
+    outs = []
+    for lean in (False, True):
+      cfg = _config(
+          "olmoe3-30m",
+          max_target_length=seq_len,
+          extra=(
+              "override_model_config=True",
+              f"emo_min_document_expert_pool={pool}",
+              f"emo_max_document_expert_pool={pool}",
+              f"emo_eval_document_expert_pool={pool}",
+              "sparse_matmul=True",
+              "remat_policy=custom",
+              "moe_routing=device",
+              f"moe_lean_routing={lean}",
+          ),
+      )
+      mesh, model = _build(cfg)
+      tokens = (jnp.arange(seq_len, dtype=jnp.int32)[None, :] * 7) % 101 + 1
+      positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
+      segments = jnp.concatenate([jnp.ones((1, 12), jnp.int32), jnp.full((1, seq_len - 12), 2, jnp.int32)], axis=1)
+      with mesh:
+        params = model.init({"params": jax.random.PRNGKey(0)}, tokens, positions, segments)
+
+        def loss(p, model=model):
+          out = model.apply(p, tokens, positions, segments, enable_dropout=False)
+          logits = out[0] if isinstance(out, tuple) else out
+          return jnp.sum(jnp.sin(logits))
+
+        outs.append(jax.value_and_grad(loss)(params))
+    (v0, g0), (v1, g1) = outs
+    self.assertEqual(float(v0), float(v1))
+    for a, b in zip(jax.tree_util.tree_leaves(g0), jax.tree_util.tree_leaves(g1)):
+      self.assertTrue(bool(jnp.array_equal(a, b)))
+
 
 try:  # pylint: disable=g-import-not-at-top
   from tokamax._src.ops.experimental.kda import api as _tokamax_kda_api  # noqa: F401  pylint: disable=unused-import

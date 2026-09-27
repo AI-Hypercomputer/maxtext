@@ -222,6 +222,23 @@ def _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g):
 take_along_last_axis_dense_vjp.defvjp(_take_along_last_axis_dense_vjp_fwd, _take_along_last_axis_dense_vjp_bwd)
 
 
+@jax.custom_vjp
+def _permute_rows(inputs: jax.Array, indices: jax.Array, inverse: jax.Array) -> jax.Array:
+  """`inputs[indices]` whose bwd gathers with a known inverse instead of argsorting."""
+  return inputs[indices, ...]
+
+
+def _permute_rows_fwd(inputs: jax.Array, indices: jax.Array, inverse: jax.Array) -> tuple[jax.Array, jax.Array]:
+  return inputs[indices, ...], inverse
+
+
+def _permute_rows_bwd(inverse: jax.Array, grads: jax.Array) -> tuple[jax.Array, None, None]:
+  return grads[inverse, ...], None, None
+
+
+_permute_rows.defvjp(_permute_rows_fwd, _permute_rows_bwd)
+
+
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
@@ -1054,6 +1071,12 @@ class RoutedMoE(nnx.Module):
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
         top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+      elif self.config.moe_lean_routing:
+        # Gather the weights with the saved indices so the bwd reuses them
+        # instead of rerunning top_k (a full sort over the experts on TPU).
+        _, top_k_indices = jax.lax.top_k(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
+        top_k_indices = adc.checkpoint_name(top_k_indices, "moe_routing")
+        top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -1318,7 +1341,11 @@ class RoutedMoE(nnx.Module):
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+        if self.config.moe_lean_routing:
+          inverse = adc.checkpoint_name(jnp.argsort(sorted_selected_experts), "moe_routing")
+          sorted_inputs = _permute_rows(replicated_inputs_2d, sorted_selected_experts, inverse)
+        else:
+          sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
 
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
@@ -1416,11 +1443,16 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
-      unsort_intermediate = _sort_activations(
-          intermediate,
-          jnp.argsort(sorted_selected_experts),
-          use_custom_sort_vjp,
-      )
+      if self.config.moe_lean_routing:
+        # Same argsort as in permute(), so XLA CSEs it when both are in one computation.
+        inverse = adc.checkpoint_name(jnp.argsort(sorted_selected_experts), "moe_routing")
+        unsort_intermediate = _permute_rows(intermediate, inverse, sorted_selected_experts)
+      else:
+        unsort_intermediate = _sort_activations(
+            intermediate,
+            jnp.argsort(sorted_selected_experts),
+            use_custom_sort_vjp,
+        )
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
       reshaped_intermediate = jnp.reshape(
           unsort_intermediate,

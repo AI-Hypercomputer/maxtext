@@ -1459,6 +1459,8 @@ kda_allow_neg_eigval: true
 tokamax_kda_max_num_segments: 32
 # Floor (nats) on per-step KDA log-decay fed to the tokamax kernel; it NaNs past ~30. 0 disables.
 tokamax_kda_log_decay_floor: 20.0
+# Same MoE routing with fewer sorts, and routing indices saved for the bwd.
+moe_lean_routing: false
 # Cast the KDA short-conv weight to the activation dtype so q/k/v stay bf16.
 kda_conv_in_compute_dtype: false
 # Rematerialize each OLMoE3 layer on its own instead of per mixer cycle.

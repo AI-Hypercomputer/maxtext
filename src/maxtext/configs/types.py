@@ -1521,6 +1521,14 @@ class Qwen3Next(BaseModel):
           " unrolled first cycle is not rematerialized at all and the scanned cycles remat as a block."
       ),
   )
+  moe_lean_routing: bool = Field(
+      False,
+      description=(
+          "Same routing, fewer sorts: the EMo pool mask from one value sort instead of two argsorts,"
+          " the routing inverse permutation computed once, and top-k indices and the EMo mask saved"
+          " under the moe_routing remat name so the bwd does not recompute them."
+      ),
+  )
   kda_conv_in_compute_dtype: bool = Field(
       False,
       description=(

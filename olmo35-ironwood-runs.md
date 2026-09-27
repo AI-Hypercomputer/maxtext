@@ -595,6 +595,56 @@ Base p2 (BC 8, floor 10).
 about 1% and every arm sits inside it. Levers this small need repeats to
 resolve. The next step is a profile of the new base to re-rank what is left.
 
+### r-series, profile of the p2 base (o35n270031 nap, o35s270031 flex)
+
+| arm | nap TF/s | flex TF/s | MFU (nap) |
+|---|---|---|---|
+| r1_prof | 124.2 | 123.6 | 10.77% |
+| r2_ctrl | 123.9 | | 10.74% |
+| r3_ctrl | 124.0 | | 10.75% |
+
+Three nap repeats agree to 0.3%, so the q-series spread was route and queue
+noise, not the step. The profiled step (flex r1, one device) is 850 ms:
+
+| bucket | ms | share |
+|---|---|---|
+| MoE grouped matmuls (gmm_v2, tgmm_v2) | 189 | 22% |
+| loop fusions (silu, reductions, glue) | 142 | 17% |
+| KDA (kernels plus their glue) | 129 | 15% |
+| **MoE routing: argsort, top_k, gathers** | **149** | **18%** |
+| dense matmuls | 72 | 9% |
+| converts and copies | 62 | 7% |
+| collectives (exposed) | 47 | 6% |
+| splash attention (2 layers) | 27 | 3% |
+
+Remat recompute is 110 ms (13%) of the step. Of that, 22 ms is argsort, 9 ms
+top_k and 27 ms gmm.
+
+**Routing is now as large as KDA, and most of it is sorts.** Every MoE layer
+runs four argsorts in the forward and three more in remat (0.8 to 0.9 ms each):
+
+1. The EMo pool mask computes `rank = argsort(argsort(-document_scores))` over
+   512 experts per token.
+2. The routing permutation sorts again for its inverse, and the custom sort
+   VJP re-derives each inverse with another argsort in the bwd.
+
+On top of that, `top_k` over 512 experts is a full sort on TPU (1.16 ms). It is
+rerun in remat because the top_k VJP keeps its own indices, not the
+`moe_routing`-named copy. On one device, a packed-key sort and a scatter
+inverse are no faster than argsort (0.50 / 0.51 / 1.62 ms at 393k), so the
+lever is fewer sorts, not faster ones.
+
+`moe_lean_routing=True` does exactly that, with identical math:
+
+1. The EMo keep mask comes from one value sort plus a threshold. Ties at the
+   threshold fill lowest index first, as the stable argsort does.
+2. The routing inverse is computed once and passed to a custom VJP.
+3. The top_k indices and the EMo mask are saved under `moe_routing`, and the
+   weights are gathered with the saved indices.
+
+`test_lean_routing_is_exact` checks that loss and every parameter gradient are
+bitwise equal on CPU with EMo pools active.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
