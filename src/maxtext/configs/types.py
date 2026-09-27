@@ -1049,6 +1049,37 @@ class MoEGeneral(BaseModel):
           "precompiled (compiled_trainstep_file or AutoPGLE)."
       ),
   )
+  block_state_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: jax.block_until_ready(state), evaluate the learning-rate schedule once "
+          "(compiles its small eager ops) and run a cross-host barrier. Does not touch the dataset."
+      ),
+  )
+  prefetch_first_batch_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: load and device_put the first training batch, block until it is ready, "
+          "and feed it to the first train step. NOTE: this touches the training data before RUN_START."
+      ),
+  )
+  warm_input_reshard_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: device_put an all-zero synthetic batch through the same host->global->input "
+          "sharding path as the loader, so the reshard program is compiled outside the timer. No dataset access."
+      ),
+  )
+  train_shard_in_read: bool = Field(
+      False,
+      description=(
+          "c4_mlperf train split: shard by file in tfds (host i opens files i, i+n, ...) instead of reading the full "
+          "stream and keeping every n-th example. Needs >= n files (e.g. the 16384-file reshard)."
+      ),
+  )
+  train_interleave_cycle_length: int = Field(
+      -1, description="c4_mlperf train split: tfds interleave_cycle_length (-1 = tfds default, 16)."
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
