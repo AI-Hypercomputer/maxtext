@@ -788,6 +788,40 @@ there the transpose fuses into the f32 to bf16 cast; in the model the cast runs
 before the all-gather, so the copy was a separate pass. New base: 141.5 TF/s,
 12.26%.
 
+### z-series, profile of the trhs base (o35n270912)
+
+z1_prof runs at 140.8 TF/s. One device, against x1:
+
+| | x1 (l2out) | z1 (trhs) |
+|---|---|---|
+| step (profiled ops) | 765 ms | 742 ms |
+| copies | 83.6 ms | 49 ms |
+| gmm_v2 and tgmm_v2 | 162 ms | 166 ms |
+| exposed collectives | 68 ms | 76 ms |
+
+The trhs kernel costs nothing measurable; the copies drop 35 ms and about 8 ms
+of that comes back as exposed collectives. Where the 742 ms go:
+
+| bucket | ms | share |
+|---|---|---|
+| MoE gmm (fwd, dlhs, drhs) | 166 | 22% |
+| loop fusions | 150 | 20% |
+| KDA kernels | 99 | 13% |
+| exposed collectives | 76 | 10% |
+| dense matmul fusions | 73 | 10% |
+| sort and top_k | 55 | 7% |
+| copies | 39 | 5% |
+| splash attention | 27 | 4% |
+| gather and scatter | 24 | 3% |
+
+Remat accounts for 66 ms across buckets. The largest loop fusions are the MoE
+SwiGLU, `silu(gate) * up`: the bwd `add_any` 22.8 ms, the fwd `mul` 16.7 ms and
+its remat 7.2 ms, about 47 ms (6%). Each is a separate HBM pass over the
+`[393216, 1024]` gate and up activations, near the roofline for that design,
+so the lever is fewer passes, not faster ones. The largest exposed collective
+is the async all-reduce of the `bf16[512,512,1024]` expert grads
+(`moe.py:3027`).
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
