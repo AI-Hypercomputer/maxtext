@@ -1009,9 +1009,14 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
-  retry_when_tokens_dropped: bool = Field(
-      False,
-      description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
+  moe_dropless_fallback: Literal["step", "layer"] | None = Field(
+      None,
+      description=(
+          "What to do when the ragged buffer (ragged_buffer_factor > 0) would drop tokens. None: drop them."
+          " 'step': discard the candidate state and replay the whole train step with a dropless buffer."
+          " 'layer': per MoE layer, calculate the overflow from the router's top-k and take a chunked dropless"
+          " branch (lax.cond) for that layer only; no step replay."
+      ),
   )
   num_moe_token_chunks: PositiveInt = Field(
       1,
@@ -3624,21 +3629,25 @@ class MaxTextConfig(
           f"Found other ICI axes enabled: {active}."
       )
 
-  def validate_retry_when_tokens_dropped(self):
-    """Validates prerequisites for the step-level dropless fallback retry."""
-    if self.retry_when_tokens_dropped:
-      if self.num_experts <= 1:
-        raise ValueError("retry_when_tokens_dropped=True requires num_experts > 1.")
-      if self.ragged_buffer_factor == -1:
-        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0 (got default -1.0).")
-      if self.ragged_buffer_factor <= 0:
-        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0.")
-      if not self.use_ring_of_experts:
-        raise ValueError("retry_when_tokens_dropped=True is currently only supported with use_ring_of_experts=True.")
-      if not self.use_ragged_sort:
-        raise ValueError("retry_when_tokens_dropped=True requires use_ragged_sort=True.")
-      if self.num_moe_emb_chunks > 0:
-        raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
+  def validate_moe_dropless_fallback(self):
+    """Validates prerequisites for the step-level ('step') and in-layer ('layer') dropless fallback."""
+    mode = self.moe_dropless_fallback
+    if mode is None:
+      return
+    prefix = f"moe_dropless_fallback='{mode}'"
+    if self.num_experts <= 1:
+      raise ValueError(f"{prefix} requires num_experts > 1.")
+    if self.ragged_buffer_factor <= 0:
+      raise ValueError(f"{prefix} requires ragged_buffer_factor > 0.0.")
+    if not self.use_ring_of_experts:
+      raise ValueError(f"{prefix} is currently only supported with use_ring_of_experts=True.")
+    if not self.use_ragged_sort:
+      raise ValueError(f"{prefix} requires use_ragged_sort=True.")
+    if self.num_moe_emb_chunks > 0:
+      raise ValueError(f"{prefix} does not support num_moe_emb_chunks > 0.")
+    if mode == "layer" and self.use_random_routing:
+      # The overflow check re-derives top-k outside permute(); random routing would not reproduce it.
+      raise ValueError(f"{prefix} does not support use_random_routing=True.")
 
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor and eval_ragged_buffer_factor are used with supported settings."""
@@ -3885,7 +3894,7 @@ class MaxTextConfig(
         _ep_disabled_flags = {
             "use_random_routing": False,
             "use_ragged_sort": False,
-            "retry_when_tokens_dropped": False,
+            "moe_dropless_fallback": None,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
@@ -4746,7 +4755,7 @@ class MaxTextConfig(
       if self.model_name.startswith("deepseek4") and self.first_num_hash_layers > 0 and self.use_ring_of_experts:
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
-      self.validate_retry_when_tokens_dropped()
+      self.validate_moe_dropless_fallback()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_mllog()
