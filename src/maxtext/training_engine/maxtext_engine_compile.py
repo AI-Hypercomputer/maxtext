@@ -15,8 +15,8 @@
 """Ahead-of-time (XAOT) compilation of `MaxTextTrainingEngine`'s training step.
 
 `trainers/pre_train/train_compile.py` does this for `train.py`'s single fused `train_step`.
-The engine splits the same work across three kernels -- one forward/backward for the first
-micro-batch of an update, an accumulating one for every later micro-batch, and the optimizer
+The engine splits the same work across three kernels -- the forward/backward pass every
+micro-batch runs, the add that accumulates each later micro-batch's gradients, and the optimizer
 update -- so this compiles all three and reports the cost and memory of each.
 
 Nothing is materialized: the weights, the optimizer moments and the batch are all
@@ -35,35 +35,445 @@ Example, qwen3-0.6b on four v6e chips:
 
 Add `compiled_trainstep_file=/tmp/engine_qwen3.pickle` to serialize the executables; each
 kernel is written to its own file, suffixed with the kernel name.
+
+`compile_engine_loss` picks the loss the kernels are compiled with. The default, `maxtext`, is
+MaxText's own loss on a pre-training batch. `grpo` is Tunix's GRPO loss, set up as Tunix's RL
+trainer sets up a live engine: the model behind the Tunix adapter, and the loss and input mapping
+from Tunix's `GRPOAdapter`, with the trainer's `GRPOConfig` options in `compile_engine_grpo_config`
+and its log-probability chunk size in `compile_engine_logps_chunk_size`. It is compiled for the
+`RLTrainerPayload` Tunix's orchestrator builds from rollouts of `max_prefill_predict_length` prompt
+tokens and the rest of `max_target_length` completion tokens: padded, or sequence-packed with
+`compile_engine_max_seq_token_per_tpu`, and carrying the rollouts' MoE routing with
+`compile_engine_router_replay` wherever Tunix's batch assembler carries it; see `get_rl_micro_batch`.
+
+Each kernel's raw `memory_analysis()` is printed, followed by a per-device table built from it.
+The table corrects for two things the raw numbers hide: a donated buffer is counted in both the
+arguments and the outputs, and a kernel's analysis sees only its own arguments, not what stays in
+HBM beside it -- the optimizer state and, on a later micro-batch, the running gradient sum beside
+`fwd_bwd`, and the model and optimizer state beside `accumulate`. The table ends with the
+TRAIN-KERNEL DEVICE PEAK: the largest, over the three kernels, of what the kernel holds plus what
+it runs alongside without being passed.
+
+That peak covers the three training kernels only. It excludes weight-sync staging (reported on
+its own line when it can be estimated; see `weight_sync_staging`), `fwd_only` / `model_scope`
+scoring, the eval kernel, generated code (as `max_utils.print_compiled_memory_stats` does), and
+anything the caller holds. It charges `fwd_bwd` with the running gradient sum even though there
+is none at one micro-batch per update.
 """
 
+import dataclasses
+import math
 import os
 from typing import Any, Sequence
 
 from absl import app
 from flax import nnx
 import jax
+import jax.numpy as jnp
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
+from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.pre_train import train_compile as pre_train_compile
+from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+import numpy as np
 
 # Re-exported: which kernels there are is the engine's to say, and this module reports on
 # whatever it lowers.
 KERNEL_NAMES = maxtext_engine.KERNEL_NAMES
 
 # Both `dump_hlo` filters default to `jit_train_step`, `train.py`'s fused step; the engine's
-# kernels lower as `jit_first_kernel`, `jit_accum_kernel` and `jit__update_kernel`, so on those
-# defaults the dump comes back empty.
+# kernels lower as `jit_<name>` for each of `KERNEL_NAMES` (`jit_fwd_bwd`, `jit_accumulate`,
+# `jit_update`), so on those defaults the dump comes back empty.
 HLO_DUMP_DEFAULTS = {
     "dump_hlo_local_module_name": f"jit_({'|'.join(KERNEL_NAMES)})",
     "dump_hlo_module_name": "jit_",
 }
+
+_GIB = 2**30
+
+# The pad and end-of-sequence ids the GRPO loss is compiled with, so that no tokenizer is loaded. Tunix
+# falls back to pad id 0, and to the pad id for end-of-sequence, when a tokenizer defines neither. Both
+# are constants in the masks the loss and the Tunix adapter build, so their values change no shape.
+GRPO_PAD_ID = 0
+GRPO_EOS_ID = GRPO_PAD_ID
+
+# Labels of the report's summary lines. The peak is named for what it covers, the three training
+# kernels, because a full step can need more; see the module docstring.
+PEAK_LABEL = "TRAIN-KERNEL DEVICE PEAK"
+STAGING_LABEL = "WEIGHT-SYNC STAGING"
+
+# Memory kinds that live in host RAM. Anything else, including `None` (an aval with no memory kind
+# yet), is counted as device memory.
+_HOST_MEMORY_KINDS = frozenset({"pinned_host", "unpinned_host"})
+
+# Top-level keys of the train state's pure form, `nnx.split(TrainStateNNX(...))`.
+_MODEL_KEY = maxtext_engine._MODEL_STATE_KEY  # pylint: disable=protected-access
+_OPTIMIZER_KEY = maxtext_engine._OPTIMIZER_STATE_KEY  # pylint: disable=protected-access
+
+# Per kernel, the top-level train-state subtrees that stay allocated while it runs but are not
+# among its arguments, so its `memory_analysis()` cannot see them. From the signatures
+# `_compile_for_batch` jits: `fwd_bwd` takes the model state and a batch but never the optimizer,
+# `accumulate` takes gradients only, and `update` takes the whole state.
+STATE_NOT_PASSED = {
+    "fwd_bwd": (_OPTIMIZER_KEY,),
+    "accumulate": (_MODEL_KEY, _OPTIMIZER_KEY),
+    "update": (),
+}
+
+# The running gradient sum is not train state, but it stays allocated from an update's first
+# micro-batch until `update` consumes it, so every later micro-batch runs `fwd_bwd` beside it
+# without passing it. It is exactly what `accumulate` returns, so it is sized from that kernel's
+# outputs. Charged whether or not a run accumulates: the caller picks the number of micro-batches
+# per update at run time.
+ACCUMULATOR = "gradient accumulator"
+ACCUMULATOR_NOT_PASSED = ("fwd_bwd",)
+
+
+@dataclasses.dataclass(frozen=True)
+class KernelMemory:
+  """One kernel's memory, per device, in bytes.
+
+  `argument` through `host_temp` come from `memory_analysis()`; the `not_passed` fields are
+  what it cannot see.
+
+  Attributes:
+    kernel: The kernel's name, one of `KERNEL_NAMES`.
+    argument: Device bytes of the arguments.
+    output: Device bytes of the outputs.
+    alias: Device bytes an argument shares with an output -- a donated buffer written in place,
+      which `argument` and `output` both include.
+    temp: Device scratch the kernel allocates while it runs.
+    host_argument: Host bytes of the arguments, e.g. a leaf on `pinned_host`. XLA:CPU has a single
+      memory space, so there it reports zero and counts such a leaf in `argument`.
+    host_output: Host bytes of the outputs, with the same caveat.
+    host_alias: `alias` for host memory -- under `optimizer_memory_host_offload` the update
+      donates the offloaded optimizer state, so it is in both `host_argument` and `host_output`.
+    host_temp: Host scratch the kernel allocates while it runs, e.g. activations offloaded under
+      `remat_policy=custom` with `decoder_layer_input=offload`. Host RAM, so not in `resident`.
+    not_passed: What is resident while this kernel runs but not passed to it: train-state
+      subtrees, and `ACCUMULATOR` for the running gradient sum beside `fwd_bwd`.
+    device_not_passed: Their bytes in device memory.
+    host_not_passed: Their bytes in host memory.
+  """
+
+  kernel: str
+  argument: int
+  output: int
+  alias: int
+  temp: int
+  host_argument: int
+  host_output: int
+  host_alias: int
+  host_temp: int
+  not_passed: tuple[str, ...]
+  device_not_passed: int
+  host_not_passed: int
+
+  @property
+  def resident(self) -> int:
+    """Device bytes the kernel holds: `argument + (output - alias) + temp`.
+
+    The formula `max_utils.print_compiled_memory_stats` uses, which also excludes generated code.
+    """
+    return self.argument + self.output - self.alias + self.temp
+
+  @property
+  def device_total(self) -> int:
+    """Device bytes in use while this kernel runs: its own, plus what it runs beside without being passed."""
+    return self.resident + self.device_not_passed
+
+
+def per_device_bytes(leaf: Any) -> tuple[int, int]:
+  """Returns the `(device, host)` bytes one device holds of `leaf`; at most one is nonzero.
+
+  A leaf with no sharding is counted whole, as a replicated one is. Uses `dtype.itemsize` rather
+  than `np.dtype(...).itemsize`, which rejects the PRNG key dtype in the model's RNG state.
+  """
+  if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
+    return 0, 0
+  sharding = getattr(leaf, "sharding", None)
+  shard_shape = sharding.shard_shape(leaf.shape) if sharding is not None else leaf.shape
+  nbytes = math.prod(shard_shape) * leaf.dtype.itemsize
+  if getattr(sharding, "memory_kind", None) in _HOST_MEMORY_KINDS:
+    return 0, nbytes
+  return nbytes, 0
+
+
+def _tree_bytes_per_device(tree: Any) -> tuple[int, int]:
+  """Returns the `(device, host)` bytes one device holds of every leaf in `tree`."""
+  device, host = 0, 0
+  for leaf in jax.tree.leaves(tree):
+    leaf_device, leaf_host = per_device_bytes(leaf)
+    device += leaf_device
+    host += leaf_host
+  return device, host
+
+
+def _accumulator_bytes(compiled: dict[str, Any]) -> int:
+  """Returns the device bytes of the running gradient sum: what `accumulate` returns.
+
+  Raises:
+    ValueError: If `accumulate` is not among `compiled` or has no memory analysis.
+  """
+  if "accumulate" not in compiled:
+    raise ValueError(
+        "fwd_bwd runs beside the running gradient sum, which is sized by accumulate's outputs, but accumulate "
+        "was not compiled."
+    )
+  stats = compiled["accumulate"].memory_analysis()
+  if stats is None:
+    raise ValueError("accumulate has no memory analysis on this backend, so there is nothing to report.")
+  return stats.output_size_in_bytes
+
+
+def memory_report(compiled: dict[str, Any], state: Any) -> list[KernelMemory]:
+  """Returns each kernel's per-device memory, including what it runs alongside without being passed.
+
+  Args:
+    compiled: `{kernel name: jax.stages.Compiled}`, as `compile_engine_kernels` returns it.
+    state: The train state's pure form -- arrays or avals, each on its sharding -- on the layouts
+      the kernels were compiled against; see `AbstractMaxTextEngine.train_state_avals`.
+
+  Returns:
+    One `KernelMemory` per kernel, in `compiled`'s order.
+
+  Raises:
+    ValueError: If a kernel is not in `STATE_NOT_PASSED`, has no memory analysis, or runs
+      alongside a subtree `state` lacks, if `state` has a top-level subtree that is neither the
+      model nor in `STATE_NOT_PASSED`, or if `fwd_bwd` comes without `accumulate`, which sizes the
+      gradient sum it runs beside. Each would otherwise understate the peak.
+  """
+  # Every subtree must be passed to a kernel or classified for it, or it would be resident while
+  # that kernel runs yet counted in neither its arguments nor `+state`.
+  known = {_MODEL_KEY}.union(*STATE_NOT_PASSED.values())
+  unknown = sorted(str(key) for key in state if key not in known)
+  if unknown:
+    raise ValueError(
+        f"The train state has top-level subtrees {unknown} that STATE_NOT_PASSED does not classify. Add them, "
+        "based on the kernel signatures in `_compile_for_batch`."
+    )
+  rows = []
+  for name, executable in compiled.items():
+    if name not in STATE_NOT_PASSED:
+      raise ValueError(
+          f"STATE_NOT_PASSED has no entry for kernel {name!r}. Add one, based on its signature in "
+          "`_compile_for_batch`."
+      )
+    stats = executable.memory_analysis()
+    if stats is None:
+      raise ValueError(f"{name} has no memory analysis on this backend, so there is nothing to report.")
+    not_passed = STATE_NOT_PASSED[name]
+    missing = [key for key in not_passed if key not in state]
+    if missing:
+      raise ValueError(f"The train state has no {missing} subtree, which {name} is expected to run alongside.")
+    device_not_passed, host_not_passed = _tree_bytes_per_device([state[key] for key in not_passed])
+    if name in ACCUMULATOR_NOT_PASSED:
+      not_passed += (ACCUMULATOR,)
+      device_not_passed += _accumulator_bytes(compiled)
+    rows.append(
+        KernelMemory(
+            kernel=name,
+            argument=stats.argument_size_in_bytes,
+            output=stats.output_size_in_bytes,
+            alias=stats.alias_size_in_bytes,
+            temp=stats.temp_size_in_bytes,
+            host_argument=stats.host_argument_size_in_bytes,
+            host_output=stats.host_output_size_in_bytes,
+            host_alias=stats.host_alias_size_in_bytes,
+            host_temp=stats.host_temp_size_in_bytes,
+            not_passed=not_passed,
+            device_not_passed=device_not_passed,
+            host_not_passed=host_not_passed,
+        )
+    )
+  return rows
+
+
+@dataclasses.dataclass(frozen=True)
+class WeightSyncStaging:
+  """What `MaxTextTrainingEngine.prepare_weight_sync` holds on device, per device, in bytes.
+
+  Attributes:
+    held_copy: Device bytes of the staged parameter copy, which lives until `release_weight_sync`
+      (or the next `prepare_weight_sync`) and is not in any kernel's analysis. None when
+      `use_weight_converter` is set: the converter stages the rollout's layout, which is not
+      known here.
+    model: Device bytes of the model state, resident throughout.
+    optimizer: Device bytes of the optimizer state, resident throughout unless offloaded.
+  """
+
+  held_copy: int | None
+  model: int
+  optimizer: int
+
+  @property
+  def device_total(self) -> int | None:
+    """Device bytes while the copy is held: the train state plus the copy, before any temporaries."""
+    if self.held_copy is None:
+      return None
+    return self.model + self.optimizer + self.held_copy
+
+
+def _path_keys(path: Sequence[Any]) -> tuple[Any, ...]:
+  """Returns a `tree_flatten_with_path` path as the keys `flax.traverse_util.flatten_dict` would give."""
+  return tuple(getattr(key, "key", getattr(key, "name", getattr(key, "idx", key))) for key in path)
+
+
+def weight_sync_staging(
+    state: Any,
+    *,
+    scan_layers: bool,
+    scan_axis: int,
+    use_weight_converter: bool,
+    layer_container: str = "layers",
+) -> WeightSyncStaging:
+  """Returns the device bytes `prepare_weight_sync` holds beyond the train state.
+
+  Mirrors its path without `use_weight_converter`: every floating `nnx.Param` is cast to bfloat16
+  and, under `scan_layers`, the scanned layers are sliced into one array per layer
+  (`raiden_unscan.unscan_layers`). A cast to a different dtype or a slice makes a new buffer, so an
+  unscanned bfloat16 model is staged in place and costs nothing. The copy is held until
+  `release_weight_sync`, alongside the model and optimizer state (the gradient accumulator is
+  released by `update`).
+
+  With `use_weight_converter` (the config default) the copy is in the rollout's layout, which is
+  not known at compile time, so `held_copy` is None.
+
+  Excludes the conversion's temporaries: with `scan_layers` and weights that are not bfloat16, the
+  scanned bfloat16 cast is alive alongside the per-layer slices until the unscan returns, up to one
+  more copy of the scanned parameters. Assumes the scan axis is not sharded.
+
+  Args:
+    state: The train state's pure form, as `memory_report` takes it.
+    scan_layers: `config.scan_layers`.
+    scan_axis: `config.param_scan_axis`.
+    use_weight_converter: `config.use_weight_converter`.
+    layer_container: The key `unscan_layers` splits; `prepare_weight_sync` uses its default.
+
+  Returns:
+    The staged copy's device bytes, next to the train state it is held alongside.
+  """
+  model, _ = _tree_bytes_per_device(state[_MODEL_KEY])
+  optimizer, _ = _tree_bytes_per_device(state[_OPTIMIZER_KEY])
+  if use_weight_converter:
+    return WeightSyncStaging(held_copy=None, model=model, optimizer=optimizer)
+
+  held_copy = 0
+  params = jax.tree_util.tree_flatten_with_path(state[_MODEL_KEY], is_leaf=lambda node: isinstance(node, nnx.Variable))[0]
+  for path, variable in params:
+    if not isinstance(variable, nnx.Param):
+      continue
+    in_scanned_layer = scan_layers and layer_container in _path_keys(path)
+    for leaf in jax.tree.leaves(variable):
+      if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
+        continue
+      floating = jnp.issubdtype(leaf.dtype, jnp.floating)
+      staged_dtype = jnp.dtype(jnp.bfloat16) if floating else leaf.dtype
+      cast_copies = floating and leaf.dtype != staged_dtype
+      slice_copies = in_scanned_layer and len(leaf.shape) > scan_axis
+      if cast_copies or slice_copies:
+        staged = jax.ShapeDtypeStruct(leaf.shape, staged_dtype, sharding=getattr(leaf, "sharding", None))
+        held_copy += sum(per_device_bytes(staged))
+  return WeightSyncStaging(held_copy=held_copy, model=model, optimizer=optimizer)
+
+
+def device_peak(rows: Sequence[KernelMemory]) -> KernelMemory:
+  """Returns the kernel that sets the train-kernel device peak: the largest `device_total`.
+
+  Not the largest `resident`: `update` is passed the optimizer state, so its own numbers usually
+  look largest, but `fwd_bwd` runs beside that same state, and the gradient sum, on top of its
+  activations.
+  """
+  if not rows:
+    raise ValueError("There are no kernels to take a peak over.")
+  return max(rows, key=lambda row: row.device_total)
+
+
+# The table's columns between the kernel name and the subtrees not passed to it: (header, width,
+# bytes). The header and the cell come from one entry, so they cannot drift apart.
+_TABLE_COLUMNS = (
+    ("arg", 9, lambda row: row.argument),
+    ("out", 9, lambda row: row.output),
+    ("alias", 9, lambda row: row.alias),
+    ("temp", 9, lambda row: row.temp),
+    ("resident", 10, lambda row: row.resident),
+    ("+state", 9, lambda row: row.device_not_passed),
+    ("total", 9, lambda row: row.device_total),
+    ("host arg", 12, lambda row: row.host_argument),
+    ("host out", 9, lambda row: row.host_output),
+    ("host alias", 11, lambda row: row.host_alias),
+    ("host temp", 10, lambda row: row.host_temp),
+    ("host state", 11, lambda row: row.host_not_passed),
+)
+
+
+def _table_line(first: str, cells: Any, last: str) -> str:
+  """Returns one table line: `first` left-aligned, each `(header, width, text)` right-aligned, then `last`."""
+  return f"{first:<15}" + "".join(f"{text:>{width}}" for _, width, text in cells) + f"   {last}"
+
+
+def format_memory_report(rows: Sequence[KernelMemory], staging: WeightSyncStaging | None = None) -> str:
+  """Returns the report `main` prints: a per-device table, then a line naming the peak.
+
+  Args:
+    rows: `memory_report`'s rows.
+    staging: `weight_sync_staging`'s estimate. When given, it is printed on its own line before
+      the peak, which does not include it.
+  """
+
+  def gib(num_bytes: int) -> str:
+    return f"{num_bytes / _GIB:.2f}"
+
+  lines = [
+      "Engine memory per device, GiB (2^30). resident = arg + out - alias + temp: a donated buffer is in",
+      "both arg and out, and alias is what they share. +state = what is in device memory while the kernel",
+      "runs without being one of its arguments, so its memory analysis cannot see it: train state and, for",
+      "the fwd_bwd of a later micro-batch, the gradient accumulator. The host columns are the same",
+      "quantities in host memory (pinned_host), which XLA:CPU counts as device. The peak below is these",
+      "three kernels' only. NOT included: weight-sync staging (a copy of the parameters in the rollout's",
+      "layout, held until release_weight_sync), fwd_only/model_scope scoring, the eval kernel, generated",
+      "code, and anything the caller holds. It assumes gradient accumulation, so fwd_bwd is charged with",
+      "the accumulator even though a step of one micro-batch has none, and accumulate does not run then.",
+      _table_line("kernel", ((name, width, name) for name, width, _ in _TABLE_COLUMNS), "state not passed"),
+  ]
+  for row in rows:
+    cells = ((name, width, gib(cell(row))) for name, width, cell in _TABLE_COLUMNS)
+    lines.append(_table_line(row.kernel, cells, ", ".join(row.not_passed) or "-"))
+
+  peak = device_peak(rows)
+  if peak.not_passed:
+    held = " + ".join(key if key == ACCUMULATOR else f"{key} state" for key in peak.not_passed)
+    because = f"{peak.kernel} {gib(peak.resident)} + {held} {gib(peak.device_not_passed)} not passed to it"
+    if peak.host_not_passed:
+      because += f"; {gib(peak.host_not_passed)} GiB more of it is on host"
+  else:
+    because = f"{peak.kernel}, which is passed all the train state it runs with"
+
+  if staging is not None:
+    train_state = (
+        f"{gib(staging.model + staging.optimizer)} GiB of train state "
+        f"(model {gib(staging.model)} + optimizer {gib(staging.optimizer)})"
+    )
+    if staging.device_total is None:
+      lines.append(
+          f"{STAGING_LABEL}, outside the peak below: not estimated -- use_weight_converter stages the rollout's "
+          f"layout, which this tool does not see. It is held until release_weight_sync on top of {train_state}."
+      )
+    else:
+      above = f"; ABOVE the {PEAK_LABEL.lower()}" if staging.device_total > peak.device_total else ""
+      lines.append(
+          f"{STAGING_LABEL}, outside the peak below: prepare_weight_sync holds a {gib(staging.held_copy)} GiB copy of "
+          f"the parameters until release_weight_sync, on top of {train_state}: {gib(staging.device_total)} GiB before "
+          f"the conversion's temporaries{above}"
+      )
+  lines.append(f"{PEAK_LABEL}: {gib(peak.device_total)} GiB ({because})")
+  return "\n".join(lines)
 
 
 def _propagation_mesh(mesh: jax.sharding.Mesh) -> jax.sharding.Mesh:
@@ -104,12 +514,21 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
   is allocated and no checkpoint, tokenizer or network is touched. Nothing can be executed.
   """
 
-  def __init__(self, training_config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh) -> None:
+  def __init__(
+      self,
+      training_config: pyconfig.HyperParameters,
+      mesh: jax.sharding.Mesh,
+      wrap_with_tunix_adapter: bool = False,
+      tokenizer_pad_id: int | None = None,
+  ) -> None:
     """Initializes an engine that can be lowered but not run.
 
     Args:
       training_config: MaxText HyperParameters configuration instance.
       mesh: The mesh to compile against, typically a topology this host does not own.
+      wrap_with_tunix_adapter: As `MaxTextTrainingEngine`'s. Needed to compile a Tunix loss
+        (`algo_core.grpo_loss_fn`), which calls the model with Tunix's signature.
+      tokenizer_pad_id: As `MaxTextTrainingEngine`'s; required with the adapter.
 
     Raises:
       ValueError: If `mesh` is None. With no weights there is no device set to read one off.
@@ -120,21 +539,35 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
           "off, and the point of the abstract path is to compile against a mesh this host does not own -- "
           "build one with `trainers.pre_train.train_compile.get_topology_mesh`."
       )
-    super().__init__(training_config, mesh=mesh)
+    super().__init__(
+        training_config,
+        mesh=mesh,
+        wrap_with_tunix_adapter=wrap_with_tunix_adapter,
+        tokenizer_pad_id=tokenizer_pad_id,
+    )
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     """Returns the model with `jax.ShapeDtypeStruct` weights on their real shardings.
 
     The same `create_nnx_abstract_model` call `from_pretrained` makes before it materializes
-    anything, minus the checkpoint load -- so no weights, no HF token and no network.
+    anything, minus the checkpoint load -- so no weights, no HF token and no network. The
+    adapter wrap matches `from_pretrained`'s, so a compiled Tunix loss sees the same module as a
+    live engine's.
     """
-    del wrap_with_tunix_adapter, tokenizer_pad_id  # `__init__` accepts neither.
     _, abstract_model = model_creation_utils.create_nnx_abstract_model(
         model_creation_utils.verify_and_sync_scan_layers(self._config),
         self._mesh,
         model_mode=common_types.MODEL_MODE_TRAIN,
         rng_key=self._init_rng,
     )
+    if wrap_with_tunix_adapter:
+      with self._mesh:
+        abstract_model = TunixMaxTextAdapter(
+            base_model=abstract_model,
+            use_no_op_mappings="maxtext_config" in self._config.vllm_additional_config,
+            pad_id=tokenizer_pad_id,
+        )
+        abstract_model.config = None  # pyrefly: ignore[missing-attribute]
     return abstract_model
 
   def _build_optimizer(self, tx: Any) -> Any:
@@ -156,8 +589,13 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
     inside `tx.init` into the moment allocated from it. The result is merged back onto the real
     mesh, whose axis types -- not the stand-in's -- decide what the compiled kernels do.
 
-    Both run under the engine's own `_sharding_ctx`, so the rules the MaxText layers are written
-    against are the live ones rather than a second copy that can drift from them.
+    The layout trace runs under the engine's own `_sharding_ctx`, so the rules the MaxText layers
+    are written against are the live ones rather than a second copy that can drift from them.
+
+    The graph trace runs with no mesh in context. Given one, `nnx.eval_shape` re-derives every
+    variable's sharding from its logical names through flax's `get_var_pspec`, which, unlike
+    MaxText's lookup, raises on a mesh axis two dimensions both map to or on a logical name the
+    rules leave unmapped. Only the graph is kept from this trace, so skipping that loses nothing.
     """
     model_graphdef, model_pure = nnx.split(self._model)
 
@@ -166,9 +604,9 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
       return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
 
     propagation_mesh = _propagation_mesh(self._mesh)
+    state_graphdef, _ = nnx.split(nnx.eval_shape(build, model_pure))
     with self._sharding_ctx():
-      state_graphdef, _ = nnx.split(nnx.eval_shape(build, model_pure))
-      # Displaces the real mesh for this trace only: the one above needs no propagation, and a
+      # Displaces the real mesh for this trace only: the graph trace above needs none, and a
       # stand-in set around it collides with the config's own AbstractMesh under `shard_mode=auto`.
       with jax.set_mesh(propagation_mesh):
         state_pure = jax.eval_shape(
@@ -176,6 +614,26 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
             jax.tree.map(lambda aval: _rehome_aval(aval, propagation_mesh), model_pure),
         )
     return nnx.merge(state_graphdef, jax.tree.map(lambda aval: _rehome_aval(aval, self._mesh), state_pure))
+
+  def train_state_avals(self) -> Any:
+    """Returns the train state's pure form, as avals on the layouts the kernels were compiled against.
+
+    `memory_report` needs these because the optimizer state is not an argument of `fwd_bwd` or
+    `accumulate`, nor the model state of `accumulate`, so their `memory_analysis()` excludes them.
+
+    Only valid after `compile_kernels()`, which moves the optimizer state onto its Zero-1 layout
+    (`_shard_optimizer_state_over_data`); read earlier, the moments may come back replicated and
+    overstate the peak. Each call returns a new tree, so a caller cannot modify the engine's own.
+
+    Raises:
+      RuntimeError: If no kernel has been compiled yet.
+    """
+    if not self._compiled:
+      raise RuntimeError(
+          "train_state_avals() is only meaningful after compile_kernels(): compiling is what places the "
+          "optimizer state on the layout it runs on."
+      )
+    return jax.tree.map(maxtext_engine._to_aval, self._read_state_pure())  # pylint: disable=protected-access
 
   def _checkpoint_dir(self) -> str:
     """Returns no directory: Orbax creates whatever it is given, and this engine can never save."""
@@ -240,13 +698,281 @@ def get_shaped_micro_batch(config: pyconfig.HyperParameters) -> dict[str, jax.Sh
   return {key: to_micro_batch(aval) for key, aval in shaped_batch.items()}
 
 
+def get_rl_micro_batch(
+    config: pyconfig.HyperParameters, algo: Any, mesh: jax.sharding.Mesh
+) -> abstract_engine.RLTrainerPayload:
+  """Returns one micro-batch as Tunix's orchestrator builds it for `algo`, from rollouts of the longest allowed length.
+
+  Built by Tunix's own code, as `StandardRLProgram` builds one, so that its layout is the trainer's by
+  construction: `algo.create_trainer_payloads` turns each group of `algo.num_generations` rollouts into
+  unbatched payloads, the batch assembler `create_batch_assembler` picks for the trainer assembles them, and
+  the reference model's log-probabilities are added when `algo` needs them, and so are the fields
+  `StandardRLProgram`'s sampler-trainer agreement step writes, with the rollout's log-probabilities standing in
+  for the trainer's (see `_with_sampler_trainer_agreement`). The rollouts report their log-probabilities and a
+  status and, with `compile_engine_router_replay`, the experts they were routed to in every MoE layer.
+
+  A rollout is `max_prefill_predict_length` prompt tokens (Tunix's `max_prompt_length`) followed by the rest
+  of `max_target_length` as completion tokens (`max_response_length`), the split
+  `trainers/post_train/rl/train_rl.py` gives its rollout. The assembler is:
+
+  - with `compile_engine_max_seq_token_per_tpu`, `SequencePackedBatchAssembler`, which packs whole rollouts
+    into rows of that many tokens, at most `compile_engine_max_segments_per_packed_row` to a row. There are as
+    many rows as the product of `mesh`'s data, fsdp, fsdp_transpose and expert axes, the trainer mesh
+    dimensions Tunix sizes a packed micro-batch by, and as many rollouts as fill them.
+  - otherwise `PaddedBatchAssembler`, which pads `micro_batch_size_to_train_on` rollouts (Tunix's
+    `train_micro_batch_size`) into a prompt part and a completion part.
+
+  The micro-batch is built in host memory, as the orchestrator builds one.
+
+  Args:
+    config: The configuration being compiled.
+    algo: Tunix's `GRPOAdapter`, which decides the payload's optional fields.
+    mesh: The mesh being compiled for.
+
+  Raises:
+    ValueError: If `max_prefill_predict_length` leaves the prompt or the completion empty, if router replay
+      is asked of a model without routed experts, or if Tunix rejects the packing budget.
+  """
+  # Imported here: only this path uses Tunix's RL orchestration.
+  from tunix.experimental.common import datatypes  # pylint: disable=import-outside-toplevel
+  from tunix.experimental.orchestrator import batch_assembly  # pylint: disable=import-outside-toplevel
+  from tunix.rl import packing  # pylint: disable=import-outside-toplevel
+
+  prompt_length = config.max_prefill_predict_length
+  completion_length = config.max_target_length - prompt_length
+  if prompt_length <= 0 or completion_length <= 0:
+    raise ValueError(
+        f"compile_engine_loss=grpo splits max_target_length ({config.max_target_length}) into "
+        f"max_prefill_predict_length ({prompt_length}) prompt tokens and the rest as completion tokens, so it "
+        "needs 0 < max_prefill_predict_length < max_target_length."
+    )
+  if config.compile_engine_router_replay and config.num_experts <= 1:
+    raise ValueError(
+        f"compile_engine_router_replay replays the rollouts' MoE routing, but num_experts={config.num_experts} "
+        "leaves this model without routed experts."
+    )
+  assembler = batch_assembly.create_batch_assembler(
+      num_generations=algo.num_generations,
+      # How many rollouts make an optimizer update decides when micro-batches are flushed, not their layout.
+      mini_batch_size=1,
+      train_micro_batch_size=int(config.micro_batch_size_to_train_on),
+      batch_config=batch_assembly.BatchConfig(
+          pad_id=GRPO_PAD_ID,
+          max_prompt_length=prompt_length,
+          max_response_length=completion_length,
+          max_seq_token_per_tpu=config.compile_engine_max_seq_token_per_tpu or None,
+          max_segments_per_packed_row=config.compile_engine_max_segments_per_packed_row or None,
+          trainer_fsdp=mesh.shape.get("fsdp"),
+          trainer_dp=mesh.shape.get("data"),
+          trainer_fsdp_transpose=mesh.shape.get("fsdp_transpose"),
+          trainer_expert=mesh.shape.get("expert"),
+      ),
+  )
+  rollout_length = prompt_length + completion_length
+  rollouts_per_row = 1
+  if isinstance(assembler, batch_assembly.SequencePackedBatchAssembler):
+    max_segments = packing.effective_max_segments(assembler.max_packed_len, assembler.max_segments_per_packed_row)
+    rollouts_per_row = min(assembler.max_packed_len // rollout_length, max_segments)
+  num_rollouts = assembler.batch_size * rollouts_per_row
+
+  # Any id but the pad id, so that every token reads as a real one.
+  token = GRPO_PAD_ID + 1
+  rollout = {
+      "prompt_tokens": np.full(prompt_length, token, np.int32),
+      "conversation_tokens": np.full(completion_length, token, np.int32),
+      "conversation_masks": np.ones(completion_length, np.float32),
+      "old_logprobs": np.zeros(completion_length, np.float32),
+      "status": "SUCCEEDED",
+  }
+  if config.compile_engine_router_replay:
+    top_k = config.num_experts_per_tok
+    # Expert j in slot j of every layer, a valid routing for every token. A read-only view: the assembler copies
+    # it into the rows it builds, so the rollouts hold no copies of their own.
+    rollout["routed_experts"] = np.broadcast_to(
+        np.arange(top_k, dtype=np.int16), (rollout_length, config.num_decoder_layers, top_k)
+    )
+  group_size = algo.num_generations
+  payloads = []
+  for prompt_index in range(-(-num_rollouts // group_size)):
+    group = [
+        datatypes.TrajectoryItem(prompt_id=f"prompt_{prompt_index}", group_index=index, traj=dict(rollout))
+        for index in range(group_size)
+    ]
+    payloads.extend(algo.create_trainer_payloads(group, rewards=[float(index % 2) for index in range(group_size)]))
+  batches = assembler.feed(payloads[:num_rollouts]) + assembler.flush()
+  if len(batches) != 1:
+    raise RuntimeError(
+        f"Tunix's {type(assembler).__name__} assembled {num_rollouts} rollouts into {len(batches)} micro-batches, "
+        "not one."
+    )
+  micro_batch = batches[0].payload
+  if algo.requires_reference_kl:
+    micro_batch = batch_assembly.with_ref_per_token_logps(
+        micro_batch, np.zeros(np.shape(micro_batch.completion_ids), np.float32)
+    )
+  # The condition `StandardRLProgram.train_stage` runs its sampler-trainer agreement step under.
+  if micro_batch.old_per_token_logps is not None and algo.algo_config.use_rollout_logps:
+    micro_batch = _with_sampler_trainer_agreement(micro_batch, algo.algo_config)
+  return micro_batch
+
+
+def _with_sampler_trainer_agreement(
+    micro_batch: abstract_engine.RLTrainerPayload, algo_config: Any
+) -> abstract_engine.RLTrainerPayload:
+  """Returns `micro_batch` with the fields `StandardRLProgram`'s sampler-trainer agreement step writes into it.
+
+  That step scores the micro-batch under the trainer's weights, passes those log-probabilities and the rollout's
+  to `tunix.rl.common.sampler_trainer_agreement`, and `_apply_sampler_trainer_agreement` writes the results into
+  the micro-batch: `sampler_is_weights` when `sampler_is` is `token`, a filtered `completion_mask` with
+  `seq_logprob_error_threshold`, and the trainer's log-probabilities in place of `old_per_token_logps` with
+  either. Which fields it writes, and their shapes and dtypes, do not depend on the trainer's values, so the
+  rollout's log-probabilities stand in for them. Of the three, only `sampler_is_weights` changes what is
+  compiled. The scoring pass itself is not compiled.
+  """
+  sampler_is = algo_config.sampler_is
+  threshold = algo_config.seq_logprob_error_threshold
+  threshold = float(threshold) if isinstance(threshold, (int, float)) else None
+  if sampler_is != "token" and threshold is None:
+    return micro_batch
+
+  # Imported here: only the GRPO compile uses Tunix.
+  from tunix.rl import common as rl_common  # pylint: disable=import-outside-toplevel
+
+  trainer_logps = np.asarray(micro_batch.old_per_token_logps, np.float32)
+  _, sampler_is_weights, completion_mask = rl_common.sampler_trainer_agreement(
+      micro_batch.old_per_token_logps,
+      trainer_logps,
+      micro_batch.completion_mask,
+      sampler_is=sampler_is,
+      sampler_is_threshold=algo_config.sampler_is_threshold,
+      seq_logprob_error_threshold=threshold,
+      segment_ids=micro_batch.segment_ids,
+  )
+  updates = {"old_per_token_logps": trainer_logps}
+  if threshold is not None:
+    updates["completion_mask"] = np.asarray(completion_mask)
+  if sampler_is_weights is not None:
+    updates["sampler_is_weights"] = np.asarray(sampler_is_weights)
+  return dataclasses.replace(micro_batch, **updates)
+
+
+def get_shaped_rl_micro_batch(
+    config: pyconfig.HyperParameters, algo: Any, mesh: jax.sharding.Mesh
+) -> abstract_engine.RLTrainerPayload:
+  """Returns the shapes of `get_rl_micro_batch`'s micro-batch, which one `fwd_bwd` call is compiled for.
+
+  Its metadata, the rollouts' ids, is dropped: the engine drops it too before calling the loss.
+  """
+  micro_batch = get_rl_micro_batch(config, algo, mesh)
+  return jax.tree.map(lambda leaf: jax.ShapeDtypeStruct(leaf.shape, leaf.dtype), micro_batch.replace(metadata={}))
+
+
+def _describe_rl_micro_batch(config: pyconfig.HyperParameters, micro_batch: abstract_engine.RLTrainerPayload) -> str:
+  """Returns what `main` prints about the RL micro-batch the kernels are compiled for."""
+  prompt_length = config.max_prefill_predict_length
+  completion_length = config.max_target_length - prompt_length
+  if micro_batch.segment_ids is None:
+    lines = [
+        f"Compiling Tunix's GRPO loss, for micro-batches of {micro_batch.prompt_ids.shape[0]} sequences of "
+        f"{prompt_length} prompt and {completion_length} completion tokens."
+    ]
+  else:
+    rows, tokens = micro_batch.completion_ids.shape
+    lines = [
+        f"Compiling Tunix's GRPO loss, for packed micro-batches of {rows} x {tokens} tokens, each row holding up to "
+        f"{micro_batch.num_segments - 1} sequences of up to {prompt_length} prompt and {completion_length} completion "
+        "tokens."
+    ]
+  if micro_batch.routed_experts is not None:
+    _, _, layers, top_k = micro_batch.routed_experts.shape
+    lines.append(f"The trainer replays the rollouts' routing: each token's {top_k} experts in each of {layers} layers.")
+  elif config.compile_engine_router_replay:
+    lines.append(
+        "compile_engine_router_replay is set, but Tunix's batch assembler drops routed_experts from this "
+        "micro-batch, so the compiled trainer routes every token itself."
+    )
+  if micro_batch.sampler_is_weights is not None:
+    lines.append(
+        "The loss weights each token by Tunix's importance-sampling weights (sampler_is: token). Tunix's "
+        "sampler-trainer agreement step computed them from the rollout's log-probabilities in place of the "
+        "trainer's, so the agreement metrics it logged are not measurements."
+    )
+  return "\n".join(lines)
+
+
+def _grpo_engine(
+    config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh
+) -> tuple[AbstractMaxTextEngine, abstract_engine.RLTrainerPayload]:
+  """Returns an abstract engine set up with Tunix's GRPO loss, and the micro-batch to compile it for.
+
+  The loss, its input mapping and `has_aux` come from Tunix's `GRPOAdapter`, built from
+  `compile_engine_grpo_config`, as Tunix's RL trainer configures a live engine with them. With
+  `compile_engine_logps_chunk_size`, the input mapping also passes the loss that chunk size, as
+  Tunix's `TrainerWorker` does for its `logps_chunk_size`. A packed micro-batch and the rollouts'
+  routing need no wiring of their own: the loss reads `segment_ids`, `segment_positions` and
+  `num_segments` off the payload, and passes its `routed_experts` to the model as
+  `forced_routed_experts`, as it does in the trainer.
+  """
+  # Imported here: only this path uses Tunix's RL algorithms.
+  from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=import-outside-toplevel
+  from tunix.rl import algorithm_config  # pylint: disable=import-outside-toplevel
+
+  # Tunix sets the temperature to the rollout's, which MaxText's RL trainer samples at
+  # `decode_sampling_temperature`.
+  grpo_config = {"temperature": config.decode_sampling_temperature, **config.compile_engine_grpo_config}
+  algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(**grpo_config))
+  # First, so an invalid prompt length or packing budget fails before the model is built.
+  micro_batch = get_shaped_rl_micro_batch(config, algo, topology_mesh)
+  engine = AbstractMaxTextEngine(config, topology_mesh, wrap_with_tunix_adapter=True, tokenizer_pad_id=GRPO_PAD_ID)
+  engine.with_loss_fn(algo.loss_fn(), has_aux=True)
+  gen_model_input_fn = algo.build_gen_model_input_fn(pad_id=GRPO_PAD_ID, eos_id=GRPO_EOS_ID)
+  chunk_size = config.compile_engine_logps_chunk_size
+  if chunk_size > 0:
+    base_fn = gen_model_input_fn
+
+    def gen_model_input_fn(payload: Any) -> dict[str, Any]:
+      inputs = dict(base_fn(payload))
+      inputs.setdefault("compute_logps_chunk_size", chunk_size)
+      return inputs
+
+  engine.with_gen_model_input_fn(gen_model_input_fn)
+  return engine, micro_batch
+
+
+def _engine_and_micro_batch(
+    config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh
+) -> tuple[AbstractMaxTextEngine, Any]:
+  """Returns the abstract engine set up with `config.compile_engine_loss`, and the micro-batch to compile it for."""
+  if config.compile_engine_loss == "grpo":
+    return _grpo_engine(config, topology_mesh)
+  return AbstractMaxTextEngine(config, topology_mesh), get_shaped_micro_batch(config)
+
+
+def compile_engine(
+    config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh
+) -> tuple[AbstractMaxTextEngine, dict[str, Any]]:
+  """Lowers and compiles every kernel the engine runs, on `topology_mesh`, and keeps the engine.
+
+  The kernels compute the loss `config.compile_engine_loss` names: MaxText's own on a pre-training
+  micro-batch, or Tunix's GRPO loss on an `RLTrainerPayload`.
+
+  The engine is returned too because it knows the train state's layout, which the memory report
+  needs and the executables do not carry; see `AbstractMaxTextEngine.train_state_avals`.
+
+  Returns:
+    `(engine, {kernel name: jax.stages.Compiled})`, the dict keyed by `KERNEL_NAMES`.
+  """
+  engine, micro_batch = _engine_and_micro_batch(config, topology_mesh)
+  return engine, engine.compile_kernels(micro_batch)
+
+
 def compile_engine_kernels(config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh) -> dict[str, Any]:
   """Lowers and compiles every kernel the engine runs, on `topology_mesh`.
 
   Returns:
     `{kernel name: jax.stages.Compiled}`, keyed by `KERNEL_NAMES`.
   """
-  return AbstractMaxTextEngine(config, topology_mesh).compile_kernels(get_shaped_micro_batch(config))
+  return compile_engine(config, topology_mesh)[1]
 
 
 def kernel_save_path(compiled_trainstep_file: str, kernel_name: str) -> str:
@@ -276,20 +1002,35 @@ def main(argv: Sequence[str]) -> None:
   # After the topology is built, so this does not initialize the local backend first.
   max_utils.print_system_information()
 
+  engine, micro_batch = _engine_and_micro_batch(config, topology_mesh)
+  if config.compile_engine_loss == "grpo":
+    print(_describe_rl_micro_batch(config, micro_batch), flush=True)
   print("Jitting and compiling the engine's kernels...", flush=True)
-  compiled = compile_engine_kernels(config, topology_mesh)
+  compiled = engine.compile_kernels(micro_batch)
   print("Jitting and compilation complete!", flush=True)
+
+  # Saved first, so the executables are kept even if the report below raises.
+  if config.compiled_trainstep_file != "":
+    for name in KERNEL_NAMES:
+      save_path = kernel_save_path(config.compiled_trainstep_file, name)
+      pre_train_compile.save_compiled(compiled[name], save_path)
+      print(f"Successfully saved compiled {name} kernel as {save_path}")
 
   for name in KERNEL_NAMES:
     print(f"--- {name} ---")
     print(f"Cost analysis: {compiled[name].cost_analysis()}")
     print(f"Memory analysis: {compiled[name].memory_analysis()}")
 
-  if config.compiled_trainstep_file != "":
-    for name in KERNEL_NAMES:
-      save_path = kernel_save_path(config.compiled_trainstep_file, name)
-      pre_train_compile.save_compiled(compiled[name], save_path)
-      print(f"Successfully saved compiled {name} kernel as {save_path}")
+  # The raw analyses above see only each kernel's arguments. The report adds what each kernel runs
+  # alongside without being passed, and names the peak.
+  state = engine.train_state_avals()
+  staging = weight_sync_staging(
+      state,
+      scan_layers=config.scan_layers,
+      scan_axis=config.param_scan_axis,
+      use_weight_converter=config.use_weight_converter,
+  )
+  print(format_memory_report(memory_report(compiled, state), staging), flush=True)
 
   print("Finished training_engine/maxtext_engine_compile.py successfully!", flush=True)
 
@@ -297,10 +1038,11 @@ def main(argv: Sequence[str]) -> None:
     # `upload_dump` deletes what it uploaded; say which filter was too narrow rather than raise
     # from the rmtree of a directory XLA never wrote.
     if not os.path.isdir(config.dump_hlo_local_dir):
+      modules = ", ".join(f"jit_{name}" for name in KERNEL_NAMES)
       raise FileNotFoundError(
           f"dump_hlo is set but XLA wrote nothing to {config.dump_hlo_local_dir}: "
           f"dump_hlo_local_module_name={config.dump_hlo_local_module_name!r} matched none of the engine's "
-          f"kernels (jit_first_kernel, jit_accum_kernel, jit__update_kernel)."
+          f"kernels ({modules})."
       )
     gcs_utils.upload_dump(
         config.dump_hlo_local_dir,

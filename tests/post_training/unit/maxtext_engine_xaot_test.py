@@ -196,7 +196,7 @@ class _LiveKernels:
 
   _ATTRIBUTES = {
       "fwd_bwd": "_compiled_fwd_bwd",
-      "fwd_bwd_accum": "_compiled_fwd_bwd_accum",
+      "accumulate": "_compiled_accumulate",
       "update": "_compiled_update",
   }
 
@@ -266,8 +266,8 @@ class EngineAotParityTest(parameterized.TestCase):
   def _live(self, cfg, mesh, micro_batches: int = 2):
     """Runs one full optimizer step and returns the engine plus its dispatched kernels.
 
-    Two micro-batches: the accumulating kernel is traced lazily, so a single-micro-batch run
-    would leave `fwd_bwd_accum` with nothing on the live side to compare against.
+    Two micro-batches: `accumulate` runs only from the second on, so a single-micro-batch run
+    would leave it with nothing on the live side to compare against.
     """
     engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
     engine.compile(_batch(cfg, 0))
@@ -394,7 +394,7 @@ class EngineAotParityTest(parameterized.TestCase):
     `nnx.Optimizer` builds optax's `count` and its own `step` with `jnp.zeros` under no mesh, so
     they reach the first update uncommitted and come back from it committed -- a second argument
     signature, and a second compile of the largest kernel in the engine. `_place_state_on_mesh`
-    settles them up front; this pins it.
+    settles them up front; this pins it, for every dispatch of every kernel over both steps.
     """
     cfg, mesh = _config_and_mesh()
 
@@ -403,11 +403,15 @@ class EngineAotParityTest(parameterized.TestCase):
       engine.fwd_bwd(_batch(cfg, micro))
     engine.update()
 
+    # Two micro-batches per step: `fwd_bwd` runs for each, `accumulate` for the second.
+    per_step = {"fwd_bwd": 2, "accumulate": 1, "update": 1}
+    self.assertEqual(sorted(kernels.calls), sorted(per_step))
     for name, calls in kernels.calls.items():
-      self.assertLen(calls, 2, f"{name} should have been dispatched once per step")
-      first, second = (jax.tree_util.tree_flatten_with_path(call)[0] for call in calls)
-      differing = [jax.tree_util.keystr(path) for (path, a), (_, b) in zip(first, second) if a != b]
-      self.assertEmpty(differing, f"{name} is dispatched with a different signature on the second step")
+      self.assertLen(calls, 2 * per_step[name], f"{name} should have been dispatched {per_step[name]}x per step")
+      first, *later = (jax.tree_util.tree_flatten_with_path(call)[0] for call in calls)
+      for index, call in enumerate(later, start=1):
+        differing = [jax.tree_util.keystr(path) for (path, a), (_, b) in zip(first, call) if a != b]
+        self.assertEmpty(differing, f"{name} dispatch {index} has a different signature from the first")
 
   def test_zero1_and_the_deferred_all_reduce_engage_on_both_paths(self):
     """Guards the two parameterizations that would otherwise pass by both doing nothing."""
@@ -433,11 +437,13 @@ class EngineAotParityTest(parameterized.TestCase):
     compiled = maxtext_engine_compile.AbstractMaxTextEngine(cfg, mesh).compile_kernels(_abstract(_batch(cfg, 0)))
 
     self.assertLen(compiled, len(maxtext_engine_compile.KERNEL_NAMES))
-    for kernel in compiled.values():
+    for name, kernel in compiled.items():
       module = re.search(r"^HloModule (\S+?),", kernel.as_text(), re.MULTILINE)
       self.assertIsNotNone(module, "the executable has no module name to match against")
       self.assertRegex(module.group(1), maxtext_engine_compile.HLO_DUMP_DEFAULTS["dump_hlo_local_module_name"])
       self.assertIn(maxtext_engine_compile.HLO_DUMP_DEFAULTS["dump_hlo_module_name"], module.group(1))
+      # The name the empty-dump error tells the user to match.
+      self.assertEqual(module.group(1), f"jit_{name}")
 
 
 class AbstractMaxTextEngineTest(absltest.TestCase):
@@ -567,7 +573,7 @@ class Qwen3TopologyTest(absltest.TestCase):
     """
     local_dir = os.path.join(self.create_tempdir().full_path, "xla_dump")
 
-    with self.assertRaisesRegex(FileNotFoundError, "matched none of the engine's kernels"):
+    with self.assertRaisesRegex(FileNotFoundError, "matched none of the engine's kernels") as raised:
       maxtext_engine_compile.main(
           _script_argv(
               "run_name=engine_aot_dump_test",
@@ -576,6 +582,11 @@ class Qwen3TopologyTest(absltest.TestCase):
               "dump_hlo_local_module_name=jit_train_step",
           )
       )
+    # The names to match are the modules XLA actually writes, which
+    # `test_the_hlo_dump_filters_match_the_names_xla_gives_the_kernels` pins as `jit_<kernel>`.
+    for name in maxtext_engine_compile.KERNEL_NAMES:
+      self.assertIn(f"jit_{name}", str(raised.exception))
+    self.assertNotIn("jit_first_kernel", str(raised.exception))
 
   def test_diloco_is_refused_rather_than_silently_reported_on(self):
     """The engine has no outer step, so these numbers would describe a different run."""

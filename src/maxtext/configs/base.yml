@@ -129,6 +129,16 @@ save_config_to_gcs: false
 
 # gradient dtype
 grad_dtype: "float32"
+# dtype MaxTextTrainingEngine sums micro-batch gradients in before casting them to grad_dtype; "" uses grad_dtype.
+# "float32" with grad_dtype=bfloat16 sums more precisely, at the cost of float32 gradients on device: the accumulator,
+# and each micro-batch's gradients beside it.
+grad_accumulation_dtype: ""
+# MaxTextTrainingEngine only: gradients that its forward/backward pass sums across devices by an all-reduce alone
+# (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass in the
+# parameters' dtype and are cast to the accumulation dtype when they join the running sum, after the all-reduce.
+# Meant for TPU together with the libtpu flag --xla_tpu_enable_offloading_copy_to_sparsecore=false; see
+# training_engine/README.md.
+cast_grads_after_all_reduce: false
 
 # activation dtypes.
 dtype: "bfloat16"
@@ -1136,6 +1146,22 @@ rope_pairwise: false
 compiled_trainstep_file: "" # Name of saved serialized compiled train_step, e.g. compiled_train_v5e-256.pickle
 compile_topology: '' # Target hardware version, e.g. 'v5e-256'
 compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+# training_engine/maxtext_engine_compile.py only: the loss the engine's kernels are compiled with. "maxtext" is
+# MaxText's own loss; "grpo" is Tunix's GRPO loss, on RL batches of max_prefill_predict_length prompt tokens and the
+# rest of max_target_length as completion tokens. See training_engine/README.md.
+compile_engine_loss: "maxtext"
+# With compile_engine_loss=grpo: keyword arguments for Tunix's GRPOConfig, as the trainer being checked sets them, e.g.
+# {beta: 0.0, use_rollout_logps: false}; and Tunix's compute_logps_chunk_size, 0 for no chunking.
+compile_engine_grpo_config: {}
+compile_engine_logps_chunk_size: 0
+# With compile_engine_loss=grpo: Tunix's max_seq_token_per_tpu and max_segments_per_packed_row. 0 tokens compiles for
+# the micro-batch Tunix's PaddedBatchAssembler builds; a positive number, for the rows of that many tokens its
+# SequencePackedBatchAssembler builds. 0 segments leaves a packed row's sequence count unset.
+compile_engine_max_seq_token_per_tpu: 0
+compile_engine_max_segments_per_packed_row: 0
+# With compile_engine_loss=grpo: the rollouts return their MoE routing (Tunix's return_routed_experts), which the
+# micro-batch carries as routed_experts wherever Tunix's batch assembler does, for the trainer to replay.
+compile_engine_router_replay: false
 
 # MaxText Estimator configs
 write_estimator_result: False

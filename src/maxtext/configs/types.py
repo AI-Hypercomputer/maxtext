@@ -508,6 +508,37 @@ class DataTypes(BaseModel):
 
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
+  grad_accumulation_dtype: Literal["", "float32", "bfloat16"] = Field(
+      "",
+      description=(
+          "The data type MaxTextTrainingEngine sums micro-batch gradients in before casting them to grad_dtype; "
+          "empty uses grad_dtype. 'float32' with grad_dtype=bfloat16 sums more precisely, at the cost of float32 "
+          "gradients on device: the accumulator, and each micro-batch's gradients beside it."
+      ),
+  )
+
+  @classmethod
+  def _clean_none_for_grad_accumulation_dtype(cls, v: Any) -> Any:
+    """Coerces None, which an empty `grad_accumulation_dtype=` on the command line becomes, into ''."""
+    return "" if v is None else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues.
+  _validate_grad_accumulation_dtype = field_validator("grad_accumulation_dtype", mode="before")(
+      _clean_none_for_grad_accumulation_dtype
+  )
+
+  cast_grads_after_all_reduce: bool = Field(
+      False,
+      description=(
+          "MaxTextTrainingEngine only. Gradients that its forward/backward pass sums across devices by an all-reduce "
+          "alone (parameters sharded over none of the axes a batch is split over, such as norm scales) leave that pass "
+          "in the parameters' dtype and are cast to the accumulation dtype when they join the running sum, after the "
+          "all-reduce. Meant for TPU together with the libtpu flag "
+          "--xla_tpu_enable_offloading_copy_to_sparsecore=false; check device memory with the engine's "
+          "ahead-of-time memory report."
+      ),
+  )
+
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
@@ -2519,7 +2550,81 @@ class AOT(BaseModel):
   compiled_trainstep_file: PathStr = Field("", description="Name of saved serialized compiled train_step.")
   compile_topology: str = Field("", description="Target hardware version, e.g. 'v5e-256'.")
   compile_topology_num_slices: int = Field(-1, description="Number of target slices.")
+  compile_engine_loss: Literal["maxtext", "grpo"] = Field(
+      "maxtext",
+      description=(
+          "training_engine/maxtext_engine_compile.py only: the loss MaxTextTrainingEngine's kernels are compiled "
+          "with. 'maxtext' is MaxText's own loss on a pre-training batch. 'grpo' is Tunix's GRPO loss behind the "
+          "Tunix adapter, as Tunix's RL trainer runs the engine, on RL batches of max_prefill_predict_length prompt "
+          "tokens and the rest of max_target_length as completion tokens."
+      ),
+  )
+  compile_engine_grpo_config: dict[str, Any] = Field(
+      default_factory=dict,
+      description=(
+          "With compile_engine_loss=grpo: keyword arguments for Tunix's GRPOConfig, as the trainer being checked "
+          "sets them, e.g. {beta: 0.0, use_rollout_logps: false}. `temperature` defaults to "
+          "decode_sampling_temperature, the others to GRPOConfig's defaults."
+      ),
+  )
+  compile_engine_logps_chunk_size: int = Field(
+      0,
+      ge=0,
+      description=(
+          "With compile_engine_loss=grpo: Tunix's compute_logps_chunk_size, which computes the log-probabilities in "
+          "chunks of this many tokens rather than from the logits of the whole sequence at once. 0 does not chunk."
+      ),
+  )
+  compile_engine_max_seq_token_per_tpu: int = Field(
+      0,
+      ge=0,
+      description=(
+          "With compile_engine_loss=grpo: Tunix's max_seq_token_per_tpu. 0 compiles for the micro-batch Tunix's "
+          "PaddedBatchAssembler builds. A positive value compiles for the one its SequencePackedBatchAssembler builds: "
+          "rows of this many tokens, each packing whole sequences, as many rows as the product of the mesh's data, "
+          "fsdp, fsdp_transpose and expert axes."
+      ),
+  )
+  compile_engine_max_segments_per_packed_row: int = Field(
+      0,
+      ge=0,
+      description=(
+          "With compile_engine_max_seq_token_per_tpu: Tunix's max_segments_per_packed_row, the most sequences a "
+          "packed row holds. 0 leaves it unset, so a row holds as many as fit its tokens."
+      ),
+  )
+  compile_engine_router_replay: bool = Field(
+      False,
+      description=(
+          "With compile_engine_loss=grpo: the rollouts return the MoE routing they took (Tunix's "
+          "return_routed_experts), and the micro-batch carries it as routed_experts wherever Tunix's batch assembler "
+          "does, for the trainer to replay."
+      ),
+  )
   write_estimator_result: bool = Field(False, description="Write estimator.py results in a separate file.")
+
+  @model_validator(mode="after")
+  def validate_compile_engine_grpo_options(self) -> "AOT":
+    """Rejects GRPO options that would be silently ignored."""
+    rl_options = (
+        "compile_engine_grpo_config",
+        "compile_engine_logps_chunk_size",
+        "compile_engine_max_seq_token_per_tpu",
+        "compile_engine_max_segments_per_packed_row",
+        "compile_engine_router_replay",
+    )
+    set_options = [option for option in rl_options if getattr(self, option)]
+    if self.compile_engine_loss != "grpo" and set_options:
+      raise ValueError(
+          f"compile_engine_loss={self.compile_engine_loss} does not compile Tunix's GRPO loss, so "
+          f"{', '.join(set_options)} would be ignored: set compile_engine_loss=grpo."
+      )
+    if self.compile_engine_max_segments_per_packed_row and not self.compile_engine_max_seq_token_per_tpu:
+      raise ValueError(
+          "compile_engine_max_segments_per_packed_row limits the sequences in a packed row, so it needs "
+          "compile_engine_max_seq_token_per_tpu, which turns packing on."
+      )
+    return self
 
 
 class DevelopmentAndDebugging(BaseModel):

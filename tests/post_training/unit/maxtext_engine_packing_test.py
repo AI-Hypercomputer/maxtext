@@ -1062,10 +1062,9 @@ class PackedCompiledPathTest(unittest.TestCase):
     self.assertTrue(engine._compiled, "the first packed fwd_bwd must compile")  # pylint: disable=protected-access
     grads = _grads_after(engine, self.payload)
 
-    # Two micro-batches, because the branch has two kernels and only the second
-    # one reaches `_compiled_fwd_bwd_accum` -- the one that donates the live
-    # accumulator, which is where packing's extra static (`num_segments`) has to
-    # agree between the kernel and the batch or the donation is rejected.
+    # Two micro-batches, because only the second reaches `_compiled_accumulate`,
+    # which donates the live accumulator and adds the packed gradients to it; the
+    # summed denominator shows both micro-batches were counted.
     self.assertEqual(float(np.asarray(engine._accumulated_denominator)), 2 * _NUM_SEQ)  # pylint: disable=protected-access
     self.assertLess(_rel_l2(grads, self.eager_grads), self._COMPILED_TOL)
 
@@ -1084,7 +1083,7 @@ class PackedCompiledPathTest(unittest.TestCase):
 
     # `jax.jit` wrappers before, XLA executables after.
     self.assertIsInstance(engine._compiled_fwd_bwd, jax.stages.Compiled)  # pylint: disable=protected-access
-    self.assertIsInstance(engine._compiled_fwd_bwd_accum, jax.stages.Compiled)  # pylint: disable=protected-access
+    self.assertIsInstance(engine._compiled_accumulate, jax.stages.Compiled)  # pylint: disable=protected-access
     self.assertIsInstance(engine._compiled_update, jax.stages.Compiled)  # pylint: disable=protected-access
 
     with (
@@ -1101,8 +1100,8 @@ class PackedCompiledPathTest(unittest.TestCase):
     recompile.assert_not_called()
     # Both halves, because either alone is satisfied by the wrong thing: a run
     # that quietly stayed eager also never recompiles, and a run that rebuilt the
-    # kernel also ends up calling one.
-    executable.assert_called_once()
+    # kernel also ends up calling one. Once per micro-batch.
+    self.assertEqual(executable.call_count, 2)
 
     self.assertEqual(step, 1)
     self.assertLess(_rel_l2(grads, self.eager_grads), self._COMPILED_TOL)
