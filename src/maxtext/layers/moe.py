@@ -29,6 +29,7 @@ import jax
 from jax import ad_checkpoint as adc
 from jax.experimental.compute_on import compute_on
 from jax.experimental import xla_metadata
+from jax.experimental.layout import Layout, with_layout_constraint
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -208,6 +209,32 @@ def _forward_optimization_barrier_bwd(_, cotangents):
 
 
 _forward_optimization_barrier.defvjp(_forward_optimization_barrier_fwd, _forward_optimization_barrier_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _forward_layout_constraint(x, major_to_minor):
+  """`with_layout_constraint` on the forward value and the identity on its cotangent."""
+  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor))
+
+
+def _forward_layout_constraint_fwd(x, major_to_minor):
+  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor)), None
+
+
+def _forward_layout_constraint_bwd(major_to_minor, _, cotangent):
+  del major_to_minor
+  return (cotangent,)
+
+
+_forward_layout_constraint.defvjp(_forward_layout_constraint_fwd, _forward_layout_constraint_bwd)
+
+
+def forward_row_major(x: jax.Array) -> jax.Array:
+  """Returns `x` unchanged, but laid out row-major in memory in the forward pass.
+
+  Only the forward value is constrained; the cotangent keeps whatever layout XLA picks.
+  """
+  return _forward_layout_constraint(x, tuple(range(x.ndim)))
 
 
 def get_batchsplit_init_kernel_axes():
@@ -2831,6 +2858,12 @@ class RoutedMoE(nnx.Module):
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
             ),
         )
+        if self.config.ring_of_experts_row_major_reduce_scatter:
+          # Left to itself, layout assignment can give this input the layer output's layout, which may be
+          # sequence-minor. XLA then copies the whole [expert shards x batch, seq, embed] combine output into that
+          # layout and the reduce-scatter's result back to row-major. Row-major makes the reduce-scatter read the
+          # combine output where it is.
+          output = forward_row_major(output)
         output = jax.lax.psum_scatter(
             output,
             self._expert_parallelism_name,

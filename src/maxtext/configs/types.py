@@ -1056,6 +1056,16 @@ class MoEGeneral(BaseModel):
           " Requires use_ring_of_experts=True."
       ),
   )
+  ring_of_experts_row_major_reduce_scatter: bool = Field(
+      False,
+      description=(
+          "Ring of Experts only. Lay out the input of the expert-parallel reduce-scatter"
+          " row-major in memory, in the forward pass. Left to itself, XLA may give that input"
+          " the layer output's layout, copy the whole combine output into it and copy the"
+          " reduce-scatter's result back. The value is unchanged and the backward pass is left"
+          " as it is. Requires use_ring_of_experts=True."
+      ),
+  )
   te_moe_block: bool = Field(
       False,
       description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
@@ -1256,6 +1266,8 @@ class MoEGeneral(BaseModel):
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
     if self.ring_of_experts_local_routing and not self.use_ring_of_experts:
       raise ValueError("ring_of_experts_local_routing=True requires use_ring_of_experts=True.")
+    if self.ring_of_experts_row_major_reduce_scatter and not self.use_ring_of_experts:
+      raise ValueError("ring_of_experts_row_major_reduce_scatter=True requires use_ring_of_experts=True.")
     return self
 
   @model_validator(mode="after")
