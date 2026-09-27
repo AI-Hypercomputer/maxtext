@@ -253,6 +253,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     in_specs += [PartitionSpec(), PartitionSpec()]
     max_num_segments = int(self.config.tokamax_kda_max_num_segments)
     decay_floor = float(self.config.tokamax_kda_log_decay_floor)
+    l2norm_outside = bool(self.config.tokamax_kda_l2norm_outside)
 
     @functools.partial(
         jax.shard_map,
@@ -283,13 +284,15 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
         g_hf = jnp.maximum(log_decay, -decay_floor)
       else:
         gate_kwargs = {"use_gate_in_kernel": True, "a_log": a_log_, "delta_time_bias": dt_bias_}
+      if l2norm_outside:
+        q_, k_ = _kernel_l2norm(q_), _kernel_l2norm(k_)
       out, _ = kda_api.kimi_delta_attention(
           head_first(q_),
           head_first(k_),
           head_first(v_),
           g_hf,
           beta_.transpose(2, 0, 1),
-          use_qk_l2norm=True,
+          use_qk_l2norm=not l2norm_outside,
           **gate_kwargs,
           **seg_kwargs,
       )
@@ -300,6 +303,12 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
       args.append(decoder_segment_ids.astype(jnp.int32))
     args += [self.A_log[...], self.dt_bias[...]]
     return call_kernel(*args)
+
+
+def _kernel_l2norm(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
+  """The tokamax KDA kernel's q/k L2-norm (fp32 math, eps inside the rsqrt, input dtype out)."""
+  x_f = x.astype(jnp.float32)
+  return (x_f * jax.lax.rsqrt(jnp.sum(x_f * x_f, axis=-1, keepdims=True) + eps)).astype(x.dtype)
 
 
 def _l2_normalize(x: jnp.ndarray, eps: float = 1e-12) -> jnp.ndarray:

@@ -1514,6 +1514,13 @@ class Qwen3Next(BaseModel):
           " under exp(-20) per step. 0 disables it and lets the kernel activate the gate itself."
       ),
   )
+  tokamax_kda_l2norm_outside: bool = Field(
+      False,
+      description=(
+          "Do the KDA q/k L2-norm in MaxText, in [B,T,H,D] layout, instead of inside the tokamax kernel."
+          " Same formula; lets XLA fuse the norm and its bwd with the neighbouring ops."
+      ),
+  )
   olmoe3_per_layer_remat: bool = Field(
       False,
       description=(

@@ -389,6 +389,26 @@ class OLMoE3TokamaxKDATest(unittest.TestCase):
     segment_ids = jnp.concatenate([jnp.full((2, 30), 1, jnp.int32), jnp.full((2, 34), 2, jnp.int32)], axis=1)
     self._compare(segment_ids)
 
+  def test_l2norm_outside_matches_in_kernel(self):
+    """The MaxText-side q/k L2-norm gives the kernel's output and input grads."""
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from flax import nnx
+    from maxtext.models.olmoe3 import OLMoE3KimiDeltaAttention
+
+    x = jax.random.normal(jax.random.PRNGKey(3), (2, 64, 128), jnp.float32)
+    results = []
+    for outside in (False, True):
+      cfg = _config("olmoe3-30m", extra=("use_tokamax_kda=True", f"tokamax_kda_l2norm_outside={outside}"))
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      with mesh:
+        layer = OLMoE3KimiDeltaAttention(cfg, mesh, None, rngs=nnx.Rngs(params=0))
+        out, grad = jax.jit(jax.value_and_grad(lambda x_, layer=layer: jnp.sum(layer(x_, None) ** 2)))(x)
+      results.append((float(out), jax.device_get(grad)))
+    (out_in, grad_in), (out_out, grad_out) = results
+    self.assertAlmostEqual(out_in, out_out, delta=1e-5 * abs(out_in))
+    rel = jnp.max(jnp.abs(grad_out - grad_in)) / jnp.max(jnp.abs(grad_in))
+    self.assertLess(float(rel), 1e-4, f"l2norm-outside grad relative error {rel:.2e}")
+
 
 class OLMoE3ChunkedDeltaRuleTest(unittest.TestCase):
   """The chunked delta rule must be the scan, not an approximation of it.
