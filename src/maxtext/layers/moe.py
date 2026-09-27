@@ -188,6 +188,28 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+@jax.custom_vjp
+def _forward_optimization_barrier(operands):
+  """`jax.lax.optimization_barrier` on the forward values and the identity on their cotangents.
+
+  `jax.lax.optimization_barrier` transposes to a barrier over the cotangents. This
+  variant constrains only the forward schedule and leaves the backward program as it
+  is without the barrier.
+  """
+  return jax.lax.optimization_barrier(operands)
+
+
+def _forward_optimization_barrier_fwd(operands):
+  return jax.lax.optimization_barrier(operands), None
+
+
+def _forward_optimization_barrier_bwd(_, cotangents):
+  return (cotangents,)
+
+
+_forward_optimization_barrier.defvjp(_forward_optimization_barrier_fwd, _forward_optimization_barrier_bwd)
+
+
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
@@ -3050,6 +3072,36 @@ class RoutedMoE(nnx.Module):
       w1_bias = _fsdp_all_gather(w1_bias, w1_bias_pspec)
     if wo_bias is not None:
       wo_bias = _fsdp_all_gather(wo_bias, wo_bias_pspec)
+
+    prefetch = self.config.moe_expert_weight_prefetch
+    if prefetch is not None and max_utils.xla_strips_optimization_barriers(self.config.compile_xla_flags):
+      # XLA would remove the barrier before scheduling, so it could not order anything.
+      max_logging.warning(
+          f"moe_expert_weight_prefetch={prefetch} is skipped: --xla_tpu_aggressive_opt_barrier_removal=true"
+          " (or ENABLED) removes optimization barriers before scheduling. Set it to false to use the prefetch."
+      )
+      prefetch = None
+    if prefetch is not None:
+      # The gathers above read only the layer's parameters, so they could start at
+      # the top of the decoder layer, but the latency-hiding scheduler issues them
+      # after the attention/GDN mixer and after this layer's token all-gathers.
+      # Tying the gathered weights to the tokens and the router logits with an
+      # optimization barrier makes everything downstream of the mixer in this block
+      # (the EP token all-gathers, routing, the expert GEMMs) wait for the weight
+      # gathers, so the scheduler has to issue them early enough to finish under the
+      # mixer. The logits must be tied too: an untied routing chain keeps the mixer
+      # out of the scheduler's reach and the gathers are issued after it (seen in the
+      # rematerialized forward inside the backward pass). The barrier is the
+      # identity, so the math is unchanged. "forward" leaves the backward alone;
+      # "forward_backward" also keeps the transposed barrier, which makes the input
+      # gradient wait for the layer's expert-weight gradients.
+      # Every output of the barrier must be used below. In the rematerialized
+      # forward inside the backward pass an unused output is dead, and the ordering
+      # it carried is dropped with it.
+      barrier = jax.lax.optimization_barrier if prefetch == "forward_backward" else _forward_optimization_barrier
+      inputs, gate_logits, pre_bias_logits, (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias) = barrier(
+          (inputs, gate_logits, pre_bias_logits, (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias))
+      )
 
     output, lb_loss, bias_updates, has_overflow = sparse_matmul_route_and_compute(
         inputs,

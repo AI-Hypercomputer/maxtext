@@ -1155,6 +1155,22 @@ class MoEGeneral(BaseModel):
       False,
       description="Use two separate All-Gather calls for MoE weights sharded on both FSDP and FSDP-transpose.",
   )
+  moe_expert_weight_prefetch: None | Literal["forward", "forward_backward"] = Field(
+      None,
+      description=(
+          "Requires sparse_matmul=True; None ('none' on the command line) is off. Ties the FSDP-gathered expert"
+          " weights to the routed tokens and router logits with jax.lax.optimization_barrier, so the EP"
+          " token all-gathers, routing and expert GEMMs wait for the weight all-gathers and the scheduler"
+          " issues those gathers under the preceding attention/GDN mixer. 'forward' constrains the forward"
+          " pass only (the barrier's cotangent is the identity). 'forward_backward' keeps the transposed"
+          " barrier as well, so the input gradient waits for the layer's expert-weight gradients, which"
+          " moves each layer's weight-gradient GEMMs next to that layer instead of to the end of the"
+          " backward layer loop. The barrier is the identity, so the math is unchanged. It only acts if"
+          " XLA keeps optimization barriers: when --xla_tpu_aggressive_opt_barrier_removal=true or ENABLED"
+          " applies (compile_xla_flags overrides LIBTPU_INIT_ARGS and XLA_FLAGS), the layer skips the barrier"
+          " and logs a warning."
+      ),
+  )
   shard_exp_on_fsdp: bool = Field(
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
@@ -3969,6 +3985,13 @@ class MaxTextConfig(
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
 
+  def validate_moe_expert_weight_prefetch(self):
+    """Validates that moe_expert_weight_prefetch is set only on the path that places the barrier."""
+    if self.moe_expert_weight_prefetch is not None and not self.sparse_matmul:
+      raise ValueError(
+          "moe_expert_weight_prefetch requires sparse_matmul=True: only the sparse-matmul MoE path places the barrier."
+      )
+
   def validate_moe_quantize_token_all_gather(self):
     """Validates that moe_quantize_token_all_gather is used with supported settings."""
     if self.moe_quantize_token_all_gather:
@@ -4970,6 +4993,7 @@ class MaxTextConfig(
       self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_expert_weight_prefetch()
     self.validate_mllog()
 
     if self.enable_streaming_diloco:
@@ -5793,6 +5817,12 @@ class RLConfig(
       raise ValueError(
           f"max_seq_token_per_tpu ({self.max_seq_token_per_tpu}) must be at least "
           f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
+      )
+
+    # MaxTextConfig's validate_moe_expert_weight_prefetch does not run on RLConfig.
+    if self.moe_expert_weight_prefetch is not None and not self.sparse_matmul:
+      raise ValueError(
+          "moe_expert_weight_prefetch requires sparse_matmul=True: only the sparse-matmul MoE path places the barrier."
       )
 
     # Set tokenizer_path based on model_name if not explicitly provided.

@@ -360,6 +360,13 @@ return_routed_experts: false
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 moe_fsdp_use_two_stage_all_gather: false
+# Sparse-matmul MoE: tie the FSDP-gathered expert weights to the routed tokens and router logits with an
+# optimization barrier so the weight all-gathers are issued under the preceding attention/GDN mixer instead of
+# after it. The math is unchanged. none (off) | forward (forward schedule only) | forward_backward (also keep the
+# transposed barrier, which makes the input gradient wait for the expert-weight gradients). Requires
+# sparse_matmul. With --xla_tpu_aggressive_opt_barrier_removal=true or ENABLED, which strip optimization barriers,
+# the layer skips the barrier and logs a warning.
+moe_expert_weight_prefetch: "none"
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false

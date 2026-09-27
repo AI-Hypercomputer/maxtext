@@ -92,6 +92,25 @@ def parse_libtpu_flags_to_dict(flags_str: str) -> dict:
   return options_dict
 
 
+def xla_strips_optimization_barriers(compile_xla_flags: str = "") -> bool:
+  """Returns whether --xla_tpu_aggressive_opt_barrier_removal is set to a value that strips barriers in the compile.
+
+  libtpu removes optimization barriers before scheduling when the flag is true or ENABLED; false, DISABLED and the
+  default keep them. Values are compared case-insensitively, and 1 counts as true. `compile_xla_flags` reaches the
+  compiler as per-compile options, which override LIBTPU_INIT_ARGS and XLA_FLAGS, so the environment is read only
+  when `compile_xla_flags` does not set the flag. The environment may repeat a flag, which
+  `parse_libtpu_flags_to_dict` rejects, so it is scanned token by token and its last setting wins. Flags set only on
+  a remote compile server, such as Pathways workers, are not visible here.
+  """
+  flag = "xla_tpu_aggressive_opt_barrier_removal"
+  value = parse_libtpu_flags_to_dict(compile_xla_flags).get(flag)
+  if value is None:
+    env_flags = f"{os.environ.get('LIBTPU_INIT_ARGS', '')} {os.environ.get('XLA_FLAGS', '')}".split()
+    env_values = [token.split("=", 1)[1] for token in env_flags if token.startswith(f"--{flag}=")]
+    value = env_values[-1] if env_values else None
+  return value is not None and value.lower() in ("true", "1", "enabled")
+
+
 def with_memory_kind(t, memory_kind):
   return jax.tree_util.tree_map(lambda x: x.with_memory_kind(kind=memory_kind), t)
 
