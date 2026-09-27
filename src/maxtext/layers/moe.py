@@ -1717,6 +1717,41 @@ class RoutedMoE(nnx.Module):
       worst_case_factor = min(ep_degree, global_experts / top_k)
       return int(balanced_size * worst_case_factor)
 
+  def get_dropless_fallback_num_chunks(self, seq_len, n_chunks):
+    """Chunk count for the in-layer dropless branch, or None if the ragged buffer can never overflow.
+
+    A dropless chunk allocates EP * balanced rows versus factor * balanced for the capped path, so
+    n_chunks * EP / factor chunks (rounded up to a divisor of seq_len) keep the fallback's per-chunk
+    buffer, and hence peak HBM, no larger than the capped path's.
+    """
+    ep = self.get_expert_parallelism_size()
+    factor = self.get_ragged_buffer_factor()
+    if factor <= 0.0 or factor >= min(ep, self.config.num_experts / self.num_experts_per_tok):
+      return None
+    target = min(math.ceil(n_chunks * ep / factor), seq_len)
+    return next(d for d in range(target, seq_len + 1) if seq_len % d == 0)
+
+  def _check_ragged_overflow(self, logits, pre_bias_logits, rngs, input_ids, forced_routed_experts, n_chunks):
+    """Returns True if permute()'s ragged buffer would overflow for any chunk on any EP shard.
+
+    Counts this device's (token, k) pairs per chunk per destination EP shard, all-reduces the counts
+    over EP (what each shard receives after the all-gather) and compares them with the buffer size.
+    """
+    num_ep = self.get_expert_parallelism_size()
+    _, selected_experts = self.get_topk(logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
+    batch, seq_len, top_k = selected_experts.shape
+    # Forced-routing padding (-1) maps to no shard, so one_hot gives it an all-zero row.
+    target_shard = selected_experts // (self.config.num_experts // num_ep)
+    counts = jax.nn.one_hot(target_shard, num_ep, dtype=jnp.int32)
+    counts = counts.reshape(batch, n_chunks, -1, num_ep).sum(axis=(0, 2))  # [n_chunks, EP]
+    if num_ep > 1:
+      counts = jax.lax.psum(counts, self._expert_parallelism_name)
+    buffer_size = self.get_ragged_buffer_size(
+        batch * (seq_len // n_chunks) * top_k, num_ep, self.config.num_experts, top_k, self.get_ragged_buffer_factor()
+    )
+    overflow = jnp.any(counts > buffer_size).astype(jnp.int32)
+    return jax.lax.psum(overflow, tuple(self.mesh.axis_names)) > 0
+
   def sparse_matmul(
       self,
       inputs,
@@ -2806,6 +2841,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
             P(),  # has_overflow: replicated scalar, all-reduced across entire mesh
+            P(),  # took_fallback: replicated scalar, True if the in-layer dropless branch ran
         ),
         check_vma=self.config.check_vma,
     )
@@ -2833,7 +2869,7 @@ class RoutedMoE(nnx.Module):
       if barrier_enabled is None:
         barrier_enabled = self.config.moe_chunk_barrier
 
-      def _route_and_compute(force_dropless):
+      def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
         if n_chunks <= 1 or not self.config.use_ring_of_experts:
           return _moe_body(
@@ -2900,8 +2936,32 @@ class RoutedMoE(nnx.Module):
         return output, lb_loss, bias_updates, has_overflow
 
       force_dropless = getattr(self, "force_dropless", False)
-      out, lb_loss, bias_updates, has_overflow = _route_and_compute(force_dropless=force_dropless)
-      return out, lb_loss, bias_updates, has_overflow
+      fallback_chunks = None
+      if self.config.moe_dropless_fallback == "layer":
+        fallback_chunks = self.get_dropless_fallback_num_chunks(x.shape[1], n_chunks)
+      if fallback_chunks is None:
+        out, lb_loss, bias_updates, has_overflow = _route_and_compute(force_dropless)
+        return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False)
+
+      # In-layer dropless fallback: calculate the overflow, then run either the
+      # normal capped path or a chunked dropless path for this layer only (no step replay).
+      took_fallback = self._check_ragged_overflow(
+          logits, pre_bias_logits, rngs, sharded_input_ids, forced_routed_experts, n_chunks
+      )
+
+      def _capped_branch():
+        out, lb_loss, bias_updates, has_overflow = _route_and_compute(False)
+        return out, lb_loss, bias_updates, jnp.asarray(has_overflow, dtype=jnp.bool_)
+
+      # Save nothing from the rare dropless branch: lax.cond gives both branches the union of
+      # their residuals, so the (larger) dropless residuals would otherwise be held every step.
+      @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
+      def _dropless_branch():
+        out, lb_loss, bias_updates, _ = _route_and_compute(True, n_chunks=fallback_chunks, barrier_enabled=True)
+        return out, lb_loss, bias_updates, jnp.bool_(False)
+
+      out, lb_loss, bias_updates, has_overflow = jax.lax.cond(took_fallback, _dropless_branch, _capped_branch)
+      return out, lb_loss, bias_updates, has_overflow, took_fallback
 
     # Note: SparseCore pinning (`moe_pin_sparse_core_all_gathers`) is currently not supported
     # with `moe_fsdp_use_two_stage_all_gather` (enforced via validation in types.py).
@@ -2983,7 +3043,7 @@ class RoutedMoE(nnx.Module):
     if wo_bias is not None:
       wo_bias = _fsdp_all_gather(wo_bias, wo_bias_pspec)
 
-    output, lb_loss, bias_updates, has_overflow = sparse_matmul_route_and_compute(
+    output, lb_loss, bias_updates, has_overflow, took_fallback = sparse_matmul_route_and_compute(
         inputs,
         gate_logits,
         pre_bias_logits,
@@ -2998,6 +3058,8 @@ class RoutedMoE(nnx.Module):
         forced_routed_experts,
     )
     self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
+    if self.config.moe_dropless_fallback == "layer":
+      self.sow(nnx.Intermediate, "moe_dropless_fallback", took_fallback)
     return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices, safe_updates=False):

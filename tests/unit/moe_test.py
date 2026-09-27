@@ -542,6 +542,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
           check_vma=False,
           moe_fsdp_use_two_stage_all_gather=False,
           moe_pin_sparse_core_all_gathers=False,
+          moe_dropless_fallback=None,
       ),
       mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
       rngs=object(),
@@ -566,7 +567,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
     del function, mesh, check_vma
     captured["in_specs"] = in_specs
     captured["out_specs"] = out_specs
-    return lambda x, *_args: (x, None, None, jnp.bool_(False))
+    return lambda x, *_args: (x, None, None, jnp.bool_(False), jnp.bool_(False))
 
   with mock.patch.object(jax, "shard_map", side_effect=fake_shard_map):
     output, _, _ = moe.RoutedMoE.sparse_matmul(
@@ -1230,13 +1231,13 @@ class RoutedMoeTest(parameterized.TestCase):
       self,
       mesh,
       ragged_buffer_factor,
-      retry_when_tokens_dropped,
+      moe_dropless_fallback: str | None = None,
       force_dropless: bool = False,
   ):
     """Builds a mixtral-8x7b RoutedMoE with the given ragged buffer/retry settings."""
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name=f"moe_retry_test_{ragged_buffer_factor}_{retry_when_tokens_dropped}_{force_dropless}",
+        run_name=(f"moe_retry_test_{ragged_buffer_factor}_{moe_dropless_fallback}_{force_dropless}"),
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         override_model_config=True,
@@ -1253,7 +1254,7 @@ class RoutedMoeTest(parameterized.TestCase):
         float32_gate_logits=True,
         use_ragged_sort=True,
         ragged_buffer_factor=ragged_buffer_factor,
-        retry_when_tokens_dropped=retry_when_tokens_dropped,
+        moe_dropless_fallback=moe_dropless_fallback,
     )
     model = moe.get_routed_moe(
         name="MoeBlock",
@@ -1286,9 +1287,7 @@ class RoutedMoeTest(parameterized.TestCase):
     rng_model, rng_hidden_states = jax.random.split(rng)
     device_count = jax.device_count()
 
-    cfg_dropless, model_dropless = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=-1.0, retry_when_tokens_dropped=False
-    )
+    cfg_dropless, model_dropless = self._build_retry_test_model(mesh, ragged_buffer_factor=-1.0)
     hidden_states = jax.random.uniform(
         rng_hidden_states,
         (
@@ -1303,19 +1302,19 @@ class RoutedMoeTest(parameterized.TestCase):
       out_dropless, _, grads_dropless = self._out_loss_and_grad(model_dropless, variables["params"], hidden_states)
 
     _, model_retry = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=0.1, retry_when_tokens_dropped=True, force_dropless=True
+        mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="step", force_dropless=True
     )
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
       out_retry, _, grads_retry = self._out_loss_and_grad(model_retry, variables["params"], hidden_states)
 
-    _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1, retry_when_tokens_dropped=False)
+    _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
       out_no_retry, _, _ = self._out_loss_and_grad(model_no_retry, variables["params"], hidden_states)
 
     # Sanity check: the buffer must actually force drops without the flag, else this test proves nothing.
     self.assertFalse(
         jnp.allclose(out_no_retry.astype(jnp.float32), out_dropless.astype(jnp.float32), rtol=1e-2, atol=1e-2),
-        msg="retry_when_tokens_dropped=False unexpectedly matches dropless -- buffer isn't forcing an overflow.",
+        msg="moe_dropless_fallback=None unexpectedly matches dropless -- buffer isn't forcing an overflow.",
     )
 
     assert_moe_close(out_retry, out_dropless, cfg_dropless.dtype)
@@ -1323,16 +1322,14 @@ class RoutedMoeTest(parameterized.TestCase):
       assert_moe_close(g_retry, g_dropless, cfg_dropless.dtype)
 
   @pytest.mark.tpu_only
-  def test_retry_when_tokens_dropped_asymmetric_shard_overflow(self):
+  def test_step_dropless_fallback_asymmetric_shard_overflow(self):
     """Overflow flag and replay must fire correctly when only one EP shard overflows, not both."""
     mesh = self._build_retry_test_mesh()
     rng = jax.random.PRNGKey(2345)
     rng_model, rng_hidden_states = jax.random.split(rng)
     device_count = jax.device_count()
 
-    cfg_dropless, model_dropless = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=-1.0, retry_when_tokens_dropped=False
-    )
+    cfg_dropless, model_dropless = self._build_retry_test_model(mesh, ragged_buffer_factor=-1.0)
     hidden_states = jax.random.uniform(
         rng_hidden_states,
         (
@@ -1358,17 +1355,17 @@ class RoutedMoeTest(parameterized.TestCase):
           {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
       )
 
-    _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1, retry_when_tokens_dropped=False)
+    _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
       out_no_retry, _, _ = model_no_retry.apply(
           {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
       )
     self.assertFalse(
         jnp.allclose(out_no_retry.astype(jnp.float32), out_dropless.astype(jnp.float32), rtol=1e-2, atol=1e-2),
-        msg="retry_when_tokens_dropped=False unexpectedly matches dropless -- forced routing isn't overflowing shard 0.",
+        msg="moe_dropless_fallback=None unexpectedly matches dropless -- forced routing isn't overflowing shard 0.",
     )
 
-    _, model_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1, retry_when_tokens_dropped=True)
+    _, model_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="step")
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
       _, mutated = model_retry.apply(
           {"params": variables["params"]},
@@ -1385,13 +1382,105 @@ class RoutedMoeTest(parameterized.TestCase):
 
     # Replay with force_dropless=True matches dropless output.
     _, model_replay = self._build_retry_test_model(
-        mesh, ragged_buffer_factor=0.1, retry_when_tokens_dropped=True, force_dropless=True
+        mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="step", force_dropless=True
     )
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
       out_replay, _, _ = model_replay.apply(
           {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
       )
     assert_moe_close(out_replay, out_dropless, cfg_dropless.dtype)
+
+  @pytest.mark.tpu_only
+  def test_layer_dropless_fallback_matches_dropless(self):
+    """A tiny buffer + in-layer fallback matches dropless output and gradients in one pass (no replay)."""
+    mesh = self._build_retry_test_mesh()
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+
+    cfg_dropless, model_dropless = self._build_retry_test_model(mesh, ragged_buffer_factor=-1.0)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (
+            int(cfg_dropless.per_device_batch_size) * device_count,
+            cfg_dropless.max_target_length,
+            cfg_dropless.base_emb_dim,
+        ),
+        dtype=cfg_dropless.dtype,
+    )
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
+      variables = model_dropless.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      out_dropless, _, grads_dropless = self._out_loss_and_grad(model_dropless, variables["params"], hidden_states)
+
+    _, model_no_fallback = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
+      out_no_fallback, _, _ = self._out_loss_and_grad(model_no_fallback, variables["params"], hidden_states)
+    self.assertFalse(
+        jnp.allclose(out_no_fallback.astype(jnp.float32), out_dropless.astype(jnp.float32), rtol=1e-2, atol=1e-2),
+        msg="ragged_buffer_factor=0.1 unexpectedly matches dropless -- buffer isn't forcing an overflow.",
+    )
+
+    _, model_fallback = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="layer")
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
+      out_fallback, _, grads_fallback = self._out_loss_and_grad(model_fallback, variables["params"], hidden_states)
+      _, mutated = model_fallback.apply({"params": variables["params"]}, hidden_states, mutable=["intermediates"])
+    took_fallback = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_dropless_fallback")
+    self.assertTrue(bool(jnp.any(jnp.array([jnp.any(x) for x in took_fallback]))), "Expected the dropless branch.")
+    # The fallback absorbed the overflow, so moe_has_overflow must not report dropped tokens.
+    has_overflow = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_has_overflow")
+    self.assertFalse(bool(jnp.any(jnp.array([jnp.any(x) for x in has_overflow]))), "No tokens should be dropped.")
+
+    assert_moe_close(out_fallback, out_dropless, cfg_dropless.dtype)
+    for g_fallback, g_dropless in zip(
+        jax.tree_util.tree_leaves(grads_fallback), jax.tree_util.tree_leaves(grads_dropless)
+    ):
+      assert_moe_close(g_fallback, g_dropless, cfg_dropless.dtype)
+
+  @pytest.mark.tpu_only
+  def test_layer_dropless_fallback_asymmetric_shard_overflow(self):
+    """The predicate must fire (on every device) when only one EP shard overflows, and match dropless."""
+    mesh = self._build_retry_test_mesh()
+    rng = jax.random.PRNGKey(2345)
+    rng_model, rng_hidden_states = jax.random.split(rng)
+    device_count = jax.device_count()
+
+    cfg_dropless, model_dropless = self._build_retry_test_model(mesh, ragged_buffer_factor=-1.0)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (
+            int(cfg_dropless.per_device_batch_size) * device_count,
+            cfg_dropless.max_target_length,
+            cfg_dropless.base_emb_dim,
+        ),
+        dtype=cfg_dropless.dtype,
+    )
+    # num_experts=8, ici_expert_parallelism=2 -> shard 0 owns experts [0, 4); route everything there.
+    forced_routed_experts = jnp.broadcast_to(
+        jnp.arange(cfg_dropless.num_experts_per_tok, dtype=jnp.int32),
+        hidden_states.shape[:2] + (cfg_dropless.num_experts_per_tok,),
+    )
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
+      variables = model_dropless.init(
+          {"params": rng_model, "dropout": rng_model}, hidden_states, forced_routed_experts=forced_routed_experts
+      )
+      out_dropless, _, _ = model_dropless.apply(
+          {"params": variables["params"]}, hidden_states, forced_routed_experts=forced_routed_experts
+      )
+
+    _, model_fallback = self._build_retry_test_model(mesh, ragged_buffer_factor=0.1, moe_dropless_fallback="layer")
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
+      (out_fallback, _, _), mutated = model_fallback.apply(
+          {"params": variables["params"]},
+          hidden_states,
+          forced_routed_experts=forced_routed_experts,
+          mutable=["intermediates"],
+      )
+    took_fallback = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_dropless_fallback")
+    self.assertTrue(bool(jnp.any(jnp.array([jnp.any(x) for x in took_fallback]))), "Expected the dropless branch.")
+    # The fallback absorbed the overflow, so moe_has_overflow must not report dropped tokens.
+    has_overflow = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_has_overflow")
+    self.assertFalse(bool(jnp.any(jnp.array([jnp.any(x) for x in has_overflow]))), "No tokens should be dropped.")
+    assert_moe_close(out_fallback, out_dropless, cfg_dropless.dtype)
 
   @pytest.mark.tpu_only
   def test_moe_fsdp_two_stage_parallelism_tpu_only(self):
@@ -2245,6 +2334,36 @@ class GetRaggedBufferFactorTest(parameterized.TestCase):
   )
   def test_get_ragged_buffer_factor(self, eval_factor, eval_rules, active_rules, expected):
     self.assertEqual(self._factor(eval_factor, eval_rules, active_rules), expected)
+
+
+class DroplessFallbackNumChunksTest(parameterized.TestCase):
+  """Tests RoutedMoE.get_dropless_fallback_num_chunks sizing of the in-layer dropless branch."""
+
+  def _chunks(self, ep, factor, seq_len, n_chunks=1, num_experts=256, top_k=8):
+    config = SimpleNamespace(num_experts=num_experts)
+    module = SimpleNamespace(
+        config=config,
+        num_experts_per_tok=top_k,
+        get_expert_parallelism_size=lambda: ep,
+        get_ragged_buffer_factor=lambda: factor,
+    )
+    return moe.RoutedMoE.get_dropless_fallback_num_chunks(module, seq_len, n_chunks)
+
+  @parameterized.named_parameters(
+      # Dropless buffer = EP * balanced -> EP / factor chunks.
+      ("dsv3_ep16_factor4", 16, 4.0, 4096, 1, 4),
+      ("dsv3_ep32_factor4", 32, 4.0, 4096, 1, 8),
+      # EP > E/top_k: the dropless buffer is still EP (not min(EP, E/top_k) = 32) times balanced.
+      ("dsv3_ep64_factor4", 64, 4.0, 4096, 1, 16),
+      # Fast path already chunked 2x -> fallback needs 2x more chunks.
+      ("fast_path_chunked", 32, 4.0, 4096, 2, 16),
+      # Target 32/3 -> 11 does not divide 4096; the next divisor is 16.
+      ("rounds_up_to_divisor", 32, 3.0, 4096, 1, 16),
+      # Buffer already >= worst case: overflow is impossible, no fallback branch.
+      ("buffer_covers_worst_case", 4, 4.0, 4096, 1, None),
+  )
+  def test_num_chunks(self, ep, factor, seq_len, n_chunks, expected):
+    self.assertEqual(self._chunks(ep, factor, seq_len, n_chunks), expected)
 
 
 class GetEinsumTest(parameterized.TestCase):
