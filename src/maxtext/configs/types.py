@@ -315,6 +315,9 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "laya",
+    "laya-multilingual",
+    "laya-typed-decisions",
 ]
 
 

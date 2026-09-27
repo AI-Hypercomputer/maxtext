@@ -1983,6 +1983,52 @@ weaver_max_dict = {
 }
 weaver_max_config = PTConfig(**weaver_max_dict)
 
+laya_dict = {
+    "architectures": ["ModernBertModel"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "bos_token_id": 50281,
+    "cls_token_id": 50281,
+    "embedding_dropout": 0.0,
+    "eos_token_id": 50282,
+    "global_attn_every_n_layers": 3,
+    "global_rope_theta": 160000.0,
+    "hidden_activation": "gelu",
+    "hidden_size": 1024,
+    "initializer_range": 0.02,
+    "intermediate_size": 2624,
+    "local_attention": 128,
+    "local_rope_theta": 10000.0,
+    "max_position_embeddings": 8192,
+    "mlp_bias": False,
+    "mlp_dropout": 0.0,
+    "model_type": "modernbert",
+    "norm_bias": False,
+    "norm_eps": 1e-05,
+    "num_attention_heads": 16,
+    "num_hidden_layers": 28,
+    "pad_token_id": 50283,
+    "sep_token_id": 50282,
+    "tie_word_embeddings": True,
+    "dtype": "bfloat16",
+    "vocab_size": 50368,
+}
+laya_config = transformers.ModernBertConfig(**laya_dict)  # pylint: disable=unexpected-keyword-arg
+
+laya_multilingual_dict = {
+    **laya_dict,
+    "bos_token_id": 256000,
+    "cls_token_id": 256000,
+    "eos_token_id": 256001,
+    "local_rope_theta": 160000.0,
+    "pad_token_id": 256002,
+    "sep_token_id": 256001,
+    "vocab_size": 256800,
+}
+laya_multilingual_config = transformers.ModernBertConfig(
+    **laya_multilingual_dict
+)  # pylint: disable=unexpected-keyword-arg
+
 
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
@@ -2041,4 +2087,7 @@ HF_MODEL_CONFIGS = {
     "olmo3-7b": olmo3_7b_config,
     "olmo3-7b-pt": olmo3_7b_config,
     "olmo3-32b": olmo3_32b_config,
+    "laya": laya_config,
+    "laya-multilingual": laya_multilingual_config,
+    "laya-typed-decisions": laya_config,
 }

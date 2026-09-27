@@ -4416,6 +4416,75 @@ DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN
 
 
+def LAYA_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config=None, scan_layers=False):
+  """Returns mapping from MaxText parameter names to HuggingFace Laya safetensors weight names."""
+  del maxtext_config, scan_layers
+  n_layers = config["num_hidden_layers"]
+  mapping = {
+      "params-token_embedder-embedding": "encoder.embeddings.tok_embeddings.weight",
+      "params-decoder-embedding_norm-scale": "encoder.embeddings.norm.weight",
+      "params-decoder-decoder_norm-scale": "encoder.final_norm.weight",
+      "params-decoder-decision_head-type_emb-embedding": "type_emb.weight",
+      "params-decoder-decision_head-scorer_0-scale": "scorer.0.weight",
+      "params-decoder-decision_head-scorer_0-bias": "scorer.0.bias",
+      "params-decoder-decision_head-scorer_1-kernel": "scorer.1.weight",
+      "params-decoder-decision_head-scorer_1-bias": "scorer.1.bias",
+      "params-decoder-decision_head-scorer_3-kernel": "scorer.3.weight",
+      "params-decoder-decision_head-scorer_3-bias": "scorer.3.bias",
+      "params-decoder-decision_head-act_head_0-kernel": "act_head.0.weight",
+      "params-decoder-decision_head-act_head_0-bias": "act_head.0.bias",
+      "params-decoder-decision_head-act_head_2-kernel": "act_head.2.weight",
+      "params-decoder-decision_head-act_head_2-bias": "act_head.2.bias",
+      "params-decoder-decision_head-temperature": "temperature",
+  }
+  for hi in range(2):
+    p = f"params-decoder-decision_head-head_layers_{hi}"
+    hp = f"head.layers.{hi}"
+    mapping.update(
+        {
+            f"{p}-norm1-scale": f"{hp}.norm1.weight",
+            f"{p}-norm1-bias": f"{hp}.norm1.bias",
+            f"{p}-in_proj-kernel": f"{hp}.self_attn.in_proj_weight",
+            f"{p}-in_proj-bias": f"{hp}.self_attn.in_proj_bias",
+            f"{p}-out_proj-kernel": f"{hp}.self_attn.out_proj.weight",
+            f"{p}-out_proj-bias": f"{hp}.self_attn.out_proj.bias",
+            f"{p}-norm2-scale": f"{hp}.norm2.weight",
+            f"{p}-norm2-bias": f"{hp}.norm2.bias",
+            f"{p}-linear1-kernel": f"{hp}.linear1.weight",
+            f"{p}-linear1-bias": f"{hp}.linear1.bias",
+            f"{p}-linear2-kernel": f"{hp}.linear2.weight",
+            f"{p}-linear2-bias": f"{hp}.linear2.bias",
+        }
+    )
+  for layer_idx in range(n_layers):
+    lp = f"params-decoder-layers_{layer_idx}"
+    hlp = f"encoder.layers.{layer_idx}"
+    if layer_idx > 0:
+      mapping[f"{lp}-attn_norm-scale"] = f"{hlp}.attn_norm.weight"
+    mapping.update(
+        {
+            f"{lp}-attn-Wqkv-kernel": f"{hlp}.attn.Wqkv.weight",
+            f"{lp}-attn-Wo-kernel": f"{hlp}.attn.Wo.weight",
+            f"{lp}-mlp_norm-scale": f"{hlp}.mlp_norm.weight",
+            f"{lp}-mlp-Wi-kernel": f"{hlp}.mlp.Wi.weight",
+            f"{lp}-mlp-Wo-kernel": f"{hlp}.mlp.Wo.weight",
+        }
+    )
+  return mapping
+
+
+def LAYA_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config=None, scan_layers=False, saving_to_hf=False):
+  """Returns parameter transformation hooks for Laya (2D transpose on all DenseGeneral kernels)."""
+  del saving_to_hf
+  param_map = LAYA_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config=maxtext_config, scan_layers=scan_layers)
+
+  def transpose_kernel(input_tensor, target_shape):
+    del target_shape
+    return input_tensor.T
+
+  return {k: transpose_kernel for k in param_map if k.endswith("-kernel")}
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4472,6 +4541,9 @@ PARAM_MAPPING = {
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "laya": LAYA_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "laya-multilingual": LAYA_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "laya-typed-decisions": LAYA_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -4532,6 +4604,9 @@ HOOK_FNS = {
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b-pt": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "laya": LAYA_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "laya-multilingual": LAYA_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "laya-typed-decisions": LAYA_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
 VLLM_HOOK_FNS = {
