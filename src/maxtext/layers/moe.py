@@ -195,7 +195,7 @@ def get_batchsplit_init_kernel_axes():
   )
 
 
-def random_routing(rng_key, gate_logits, num_experts_per_tok):
+def random_routing(rng_key, gate_logits, num_experts_per_tok, num_token_shards=1, token_shard_index=0):
   """Performs random routing of tokens to experts.
 
   Args:
@@ -203,6 +203,8 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
     gate_logits: A JAX array of shape (batch_size, sequence_length, num_experts)
       representing the logits for each expert.
     num_experts_per_tok: The number of experts to select for each token.
+    num_token_shards: The number of equal batch shards `gate_logits` is one of.
+    token_shard_index: Which of those shards `gate_logits` is.
 
   Returns:
     A tuple containing:
@@ -215,7 +217,9 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
                        representing the weights for the selected experts.
   """
   bs, seq_len, num_experts = gate_logits.shape
-  selected_num = bs * seq_len * num_experts_per_tok
+  # The draw covers all `num_token_shards` shards and this shard keeps its own rows, so routing the
+  # shards separately picks the same experts as routing their concatenation.
+  selected_num = num_token_shards * bs * seq_len * num_experts_per_tok
   # Directly generate random integers in the range [0, num_experts)
   top_k_indices = jax.random.randint(
       rng_key,
@@ -224,7 +228,9 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
       maxval=num_experts,
       dtype=jnp.int32,
   )
-  top_k_indices = top_k_indices.reshape(bs, seq_len, num_experts_per_tok)
+  top_k_indices = top_k_indices.reshape(num_token_shards * bs, seq_len, num_experts_per_tok)
+  if num_token_shards > 1:
+    top_k_indices = jax.lax.dynamic_slice_in_dim(top_k_indices, token_shard_index * bs, bs, axis=0)
   top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
   return top_k_weights, top_k_indices
 
@@ -971,8 +977,15 @@ class RoutedMoE(nnx.Module):
       rngs=None,
       input_ids=None,
       forced_routed_experts=None,
+      num_token_shards=1,
+      token_shard_index=0,
   ):
-    """get topk."""
+    """get topk.
+
+    Routing is per token. `num_token_shards` and `token_shard_index` say which of several equal batch
+    shards these logits are; only random routing needs them, to draw the same experts as routing all
+    of the shards at once.
+    """
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
     valid_token_mask = None
@@ -1001,7 +1014,9 @@ class RoutedMoE(nnx.Module):
           raise ValueError("The random key cannot be None for random routing.")
         # Reuse the 'params' RNG stream to ensure random routing
         rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
-        top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
+        top_k_weights, top_k_indices = random_routing(
+            rng, gate_logits, self.num_experts_per_tok, num_token_shards, token_shard_index
+        )
         return top_k_weights, top_k_indices
 
       if self.is_hash_routing:
@@ -1175,21 +1190,27 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       force_dropless=False,
       mesh_axis_names=None,
+      topk=None,
   ):
-    """Permute tokens to group by expert to fit gmm call."""
+    """Permute tokens to group by expert to fit gmm call.
+
+    `topk`, if given, is `(weights, selected_experts, lb_loss)` already computed for `inputs`. Then
+    `gate_logits`, `pre_bias_logits`, `rngs` and `input_ids` are not used, and of
+    `forced_routed_experts` only whether it is None matters: it says padded slots may be present.
+    """
     is_qarray = isinstance(inputs, qpl.QArray)
     raw_inputs = inputs.qvalue if is_qarray else inputs
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = raw_inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
-    lb_loss = None
-    # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
-    probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
-    if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
-      softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-      lb_loss = self.load_balance_loss(selected_experts, softmax_probs)
+    if topk is None:
+      weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
+      lb_loss = None
+      if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
+        lb_loss = self.router_load_balance_loss(selected_experts, gate_logits, pre_bias_logits)
+    else:
+      weights, selected_experts, lb_loss = topk
 
     if self.should_update_load_balance():
       bias_updates = calculate_load_balance_updates(
@@ -2151,13 +2172,39 @@ class RoutedMoE(nnx.Module):
       else:
         x = _ep_all_gather(x)
 
-      # Duplicate routing inputs across all expert shards. Routing evaluates
-      # the full gathered batch; logits, pre_bias_logits, and
-      # forced_routed_experts must follow the identical all-gather so expert
-      # assignments align across shards.
-      logits, pre_bias_logits, forced_routed_experts = tuple(
-          _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
-      )
+      topk = None
+      if self.config.ring_of_experts_local_routing:
+        # Routing is per token, so each shard routes only its own tokens and all-gathers the top-k
+        # ids and weights the way the tokens were gathered. The [tokens, num_experts] logits never
+        # cross shards, so neither does their gradient, and the gradient of the top-k gather is a
+        # scatter into this shard's logits rather than into the whole gathered batch's.
+        weights, selected_experts = self.get_topk(
+            logits,
+            pre_bias_logits,
+            rngs,
+            input_ids,
+            forced_routed_experts,
+            num_token_shards=num_ep,
+            token_shard_index=expert_shard_id,
+        )
+        lb_loss = None
+        if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
+          # The loss averages per-sequence terms over the batch, and every shard holds the same
+          # number of sequences, so the mean over shards is the loss over the gathered batch.
+          lb_loss = jax.lax.pmean(
+              self.router_load_balance_loss(selected_experts, logits, pre_bias_logits),
+              self._expert_parallelism_name,
+          )
+        topk = (_ep_all_gather(weights), _ep_all_gather(selected_experts), lb_loss)
+        logits, pre_bias_logits = None, None
+      else:
+        # Duplicate routing inputs across all expert shards. Routing evaluates
+        # the full gathered batch; logits, pre_bias_logits, and
+        # forced_routed_experts must follow the identical all-gather so expert
+        # assignments align across shards.
+        logits, pre_bias_logits, forced_routed_experts = tuple(
+            _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
+        )
 
       # "Route" tokens within each shard.
       num_experts_per_shard = self.config.num_experts // num_ep
@@ -2182,6 +2229,7 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           force_dropless=force_dropless,
           mesh_axis_names=roe_bias_axis_names,
+          topk=topk,
       )
       return (
           x,
@@ -3234,6 +3282,13 @@ class RoutedMoE(nnx.Module):
     dispatch_mask = combine_mask.astype(bool)
 
     return dispatch_mask, combine_mask
+
+  def router_load_balance_loss(self, top_k_indices, gate_logits, pre_bias_logits) -> jax.Array:
+    """The load balance loss, taking the routing probabilities from the router logits."""
+    # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
+    probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
+    softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+    return self.load_balance_loss(top_k_indices, softmax_probs)
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits) -> jax.Array:

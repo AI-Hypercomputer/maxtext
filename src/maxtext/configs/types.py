@@ -1046,6 +1046,16 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  ring_of_experts_local_routing: bool = Field(
+      False,
+      description=(
+          "Ring of Experts only. Each expert shard routes its own tokens and all-gathers just the"
+          " top-k expert ids and weights, instead of all-gathering the router logits and routing"
+          " every gathered token on every shard. Same routing (it is per token); less"
+          " communication, and the router gradient is scattered into the local logits only."
+          " Requires use_ring_of_experts=True."
+      ),
+  )
   te_moe_block: bool = Field(
       False,
       description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
@@ -1228,6 +1238,8 @@ class MoEGeneral(BaseModel):
   def validate_moe_chunks(self) -> "MoEGeneral":
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    if self.ring_of_experts_local_routing and not self.use_ring_of_experts:
+      raise ValueError("ring_of_experts_local_routing=True requires use_ring_of_experts=True.")
     return self
 
   @model_validator(mode="after")
