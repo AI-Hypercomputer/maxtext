@@ -1071,6 +1071,9 @@ skip_step_scaling_factor: 6.0
 skip_step_on_nan: true
 # If > 0, skip the training step when raw grad norm exceeds this threshold
 max_grad_norm_spike: 0.0
+# If true, record the L2 norm of every gradient leaf next to the global gradient norm, which
+# identifies the parameter a NaN/Inf gradient came from. One extra reduction per step.
+log_per_leaf_grad_norm: false
 
 # List of parameter names/patterns to train.
 # If non-empty, all other parameters will be frozen. Example: ['.*indexer.*'].
