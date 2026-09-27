@@ -718,6 +718,30 @@ Lean base, m-tile on all six knobs unless stated.
 loses 11%. A larger tile only on the weight-gradient pass does not help. The new
 base is lean routing plus tm 1024 on all six knobs: 134.0 TF/s, 11.62%.
 
+### w-series, KDA q/k norm outside the kernel (o35n270549 nap, o35s270549 flex)
+
+tm 1024 base. `tokamax_kda_l2norm_outside=True` does the q/k L2-norm in
+MaxText in [B,T,H,D] layout with the kernel's formula (fp32, eps 1e-6 inside the
+rsqrt) and passes `use_qk_l2norm=False`. It targets the 31 ms
+`chunk_kda_bwd_custom/mul` glue in the s4 profile (3.6% of the step).
+
+| arm | route | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|---|
+| w1_ctrl | nap | 134.3 | 11.65% | 0.789 | 10.836 |
+| w4_ctrl | nap | 134.3 | 11.64% | 0.789 | 10.836 |
+| w1_ctrl | flex | 134.1 | 11.63% | 0.790 | 10.836 |
+| **w2_l2out** | nap | **137.3** | **11.90%** | **0.772** | 10.834 |
+| **w3_l2out** | nap | **137.7** | **11.94%** | **0.770** | 10.834 |
+| w2_l2out | flex | 137.3 | 11.91% | 0.772 | 10.834 |
+
+**+2.4% (18 ms per step), repeated on both clusters.** XLA fuses the norm and
+its bwd into the neighbouring conv and transpose fusions, so the kernel's
+separate bwd pass over dq and dk goes away. The forward is the same formula. The
+bwd differs only in rounding: the kernel differentiates through the bf16
+normalized q, autodiff through the raw q. That moves the step-19 loss by 0.002,
+the same size as the tm 2048 shift. A CPU test pins the output and input grads
+to 1e-4 relative. New base: 137.5 TF/s, 11.92%.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
