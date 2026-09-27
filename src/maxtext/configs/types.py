@@ -1758,6 +1758,16 @@ class RematAndOffload(BaseModel):
           "forward Pallas kernel in backward without saving all GDN residuals like `gdn` (remat, device, offload)."
       ),
   )
+  gdn_cp_state: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the sequence-sharded context-parallel GatedDeltaNet (GDN) carries: the conv halo, the "
+          "local state transition and the incoming recurrent state, named where they are produced. Keeping them on "
+          "device/offload lets the backward replay the second forward kernel pass without replaying the halo "
+          "exchange, the first pass and the cross-rank state composition. No effect without sequence-sharded GDN "
+          "context parallelism (remat, device, offload)."
+      ),
+  )
   mlpwi: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first MLP layer's intermediate output.",
@@ -1785,6 +1795,15 @@ class RematAndOffload(BaseModel):
   moe_mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MoE layer's output.",
+  )
+  moe_route: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the ring-of-experts ragged sort's integer routing results (sorted token indices, "
+          "revert indices, per-expert group sizes). Keeping them on device/offload lets the backward replay the "
+          "token gather without replaying both argsorts. Requires sparse_matmul=True, use_ring_of_experts=True "
+          "and use_ragged_sort=True (remat, device, offload)."
+      ),
   )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
@@ -4007,23 +4026,33 @@ class MaxTextConfig(
 
   @model_validator(mode="after")
   def validate_gdn_remat_requires_kernel(self) -> "MaxTextConfig":
-    """Raise ValueError if gdn, gdn_conv or gdn_states is misconfigured."""
-    if self.gdn == self.gdn_conv == self.gdn_states == "remat":
+    """Raise ValueError if gdn, gdn_conv, gdn_states or gdn_cp_state is misconfigured."""
+    if self.gdn == self.gdn_conv == self.gdn_states == self.gdn_cp_state == "remat":
       return self
     if not self.use_gdn_kernel:
       raise ValueError(
-          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
-          "requires `use_gdn_kernel=True`."
+          "Granular GDN rematerialization (setting `gdn`, `gdn_conv`, `gdn_states` or `gdn_cp_state` to 'device' or "
+          "'offload') requires `use_gdn_kernel=True`."
       )
     if self.remat_policy != "custom":
       raise ValueError(
-          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
-          f"requires `remat_policy='custom'`, got `remat_policy={self.remat_policy!r}`."
+          "Granular GDN rematerialization (setting `gdn`, `gdn_conv`, `gdn_states` or `gdn_cp_state` to 'device' or "
+          f"'offload') requires `remat_policy='custom'`, got `remat_policy={self.remat_policy!r}`."
       )
     if {self.gdn, self.gdn_states} == {"device", "offload"}:
       raise ValueError(
           "Conflicting GDN remat configuration: `gdn` and `gdn_states` cannot be set to opposite "
           "'device' and 'offload' targets because `gdn_states` is a subset of `gdn` residuals."
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_route_remat_requires_ring_ragged_sort(self) -> "MaxTextConfig":
+    """Raise ValueError if moe_route is configured for device/offload on a path that does not name it."""
+    if self.moe_route != "remat" and not (self.sparse_matmul and self.use_ring_of_experts and self.use_ragged_sort):
+      raise ValueError(
+          "Saving or offloading `moe_route` requires `sparse_matmul=True`, `use_ring_of_experts=True` and "
+          "`use_ragged_sort=True`: only the ring-of-experts ragged sort names the routing indices."
       )
     return self
 
@@ -4484,10 +4513,12 @@ class MaxTextConfig(
           "gdn",
           "gdn_conv",
           "gdn_states",
+          "gdn_cp_state",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_route",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -5856,10 +5887,12 @@ class RLConfig(
           "gdn",
           "gdn_conv",
           "gdn_states",
+          "gdn_cp_state",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_route",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -5876,6 +5909,12 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    if self.moe_route != "remat" and not (self.sparse_matmul and self.use_ring_of_experts and self.use_ragged_sort):
+      raise ValueError(
+          "Saving or offloading `moe_route` requires `sparse_matmul=True`, `use_ring_of_experts=True` and "
+          "`use_ragged_sort=True`: only the ring-of-experts ragged sort names the routing indices."
+      )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {

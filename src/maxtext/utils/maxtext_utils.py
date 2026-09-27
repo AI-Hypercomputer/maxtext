@@ -233,6 +233,13 @@ def _expand_gdn_remat_names(names: list[str]) -> list[str]:
     )
   if "gdn_conv" in names:
     expanded.extend(["gdn_conv_out", "gdn_fwd_conv"])
+  if "gdn_cp_state" in names:
+    # Seq-sharded CP only: the carries named where the CP forward produces them. Pass 2 consumes
+    # the halo and the incoming state, and the bwd reads m_local, so saving all three lets the bwd
+    # replay skip the halo exchange, pass 1 and the cross-rank state composition. The late-named
+    # halo and incoming state (``gdn_conv_state``, ``gdn_recurrent_state``) cannot do this: pass 2
+    # has already consumed the originals.
+    expanded.extend(["gdn_cp_conv_halo", "gdn_cp_m_local", "gdn_cp_s_in"])
   if "gdn_states" in names:
     # Partial GDN remat: keep only the fwd Pallas kernel outputs that the bwd Pallas kernel
     # consumes (``t_inv``, ``chunk_states``) plus the kernel's primal output. All three are

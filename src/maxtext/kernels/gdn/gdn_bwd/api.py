@@ -368,6 +368,13 @@ def _run_cp_gdn_decoupled_fwd_impl(
       cp_axis=cp_axis_name,
       segment_ids=s_enc_local,
   )
+  # The CP carries (conv halo, local transition m_local, incoming state s_in_r) are named where
+  # they are produced, for the `gdn_cp_state` remat key. Pass 2 consumes the halo and s_in_r, and
+  # the backward reads m_local, so saving all three lets the backward replay pass 2 alone. The
+  # residual names in `_gdn_decoupled_conv1d_fwd` wrap the halo and s_in_r only after pass 2, so
+  # saving those still replays the halo exchange, pass 1 and the cross-rank composition to feed
+  # the pass-2 replay.
+  conv_halo = checkpoint_name(conv_halo, "gdn_cp_conv_halo")
   zero_rs = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
 
   # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv and S_ext_local
@@ -425,9 +432,11 @@ def _run_cp_gdn_decoupled_fwd_impl(
       init_seg=init_seg,
       precision=cp_matmul_precision,
   )
+  m_local = checkpoint_name(m_local, "gdn_cp_m_local")
 
   h_init = recurrent_state.astype(jnp.float32) if recurrent_state is not None else zero_rs
   s_in_r, final_rs = cp_gdn.incoming_state(m_local, s_ext_local, h_init, cp_axis_name, precision=cp_matmul_precision)
+  s_in_r = checkpoint_name(s_in_r, "gdn_cp_s_in")
 
   # Pass 2: Local GDN with true incoming state s_in_r
   (out, (next_cs_local, _)), t_inv_2, chunk_states = _run_local_gdn_decoupled_fwd(

@@ -15,6 +15,7 @@
 """Ragged token sorting operations with custom VJP."""
 
 import jax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
 from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
@@ -93,6 +94,11 @@ def ring_ragged_sort(
     group_sizes_local = jax.nn.one_hot(topk_indices_flat, num_experts, dtype=jnp.int32).sum(axis=0)  # GLOBAL_NUM_EXPERTS
 
     topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)  # num_tokens_local x topk
+    # Named for the `moe_route` remat key. Saving these integer results lets the backward replay
+    # the token gather, whose output the expert GMMs need again, without replaying both argsorts.
+    token_indices_sorted = checkpoint_name(token_indices_sorted, "moe_route")
+    group_sizes_local = checkpoint_name(group_sizes_local, "moe_route")
+    topk_argsort_revert_indices = checkpoint_name(topk_argsort_revert_indices, "moe_route")
     shard_idx = jax.lax.axis_index(ep_name)
 
     local_num_experts = num_experts // ep_size

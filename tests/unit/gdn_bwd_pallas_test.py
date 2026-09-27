@@ -1160,12 +1160,13 @@ class GdnBwdPallasTest(absltest.TestCase):
     self.assertIn("name=gdn_core_attn_out", jaxpr_str)
 
   def test_gdn_granular_remat_requires_gdn_kernel(self):
-    """Verifies that setting gdn, gdn_conv or gdn_states to device/offload raises ValueError when use_gdn_kernel=False."""
+    """Verifies that setting a granular GDN remat key to device/offload raises ValueError when use_gdn_kernel=False."""
     cfg = object.__new__(config_types.MaxTextConfig)
     object.__setattr__(cfg, "remat_policy", "custom")
     object.__setattr__(cfg, "gdn", "device")
     object.__setattr__(cfg, "gdn_conv", "remat")
     object.__setattr__(cfg, "gdn_states", "remat")
+    object.__setattr__(cfg, "gdn_cp_state", "remat")
     object.__setattr__(cfg, "use_gdn_kernel", False)
 
     with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
@@ -1179,6 +1180,15 @@ class GdnBwdPallasTest(absltest.TestCase):
     # gdn_states alone (gdn=remat gdn_conv=remat) is also granular GDN remat and needs the kernel.
     object.__setattr__(cfg, "gdn", "remat")
     object.__setattr__(cfg, "gdn_states", "device")
+    object.__setattr__(cfg, "use_gdn_kernel", False)
+    with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
+      config_types.MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
+    object.__setattr__(cfg, "use_gdn_kernel", True)
+    self.assertIs(config_types.MaxTextConfig.validate_gdn_remat_requires_kernel(cfg), cfg)
+
+    # So is gdn_cp_state alone: its checkpoint names exist only in the kernel's CP forward.
+    object.__setattr__(cfg, "gdn_states", "remat")
+    object.__setattr__(cfg, "gdn_cp_state", "device")
     object.__setattr__(cfg, "use_gdn_kernel", False)
     with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
       config_types.MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
@@ -1215,6 +1225,36 @@ class GdnBwdPallasTest(absltest.TestCase):
     self.assertCountEqual(
         offload_names, ["gdn_states", "gdn_core_attn_out", "gdn_t_inv", "gdn_chunk_states", "gdn_m_local"]
     )
+
+  def test_gdn_cp_state_remat_names(self):
+    """`gdn_cp_state` expands to the CP carries named where they are produced, not to the late residual names."""
+
+    class DummyConfig:
+      use_gdn_kernel = True
+      remat_policy = "custom"
+      tensors_on_device = ["decoder_layer_input", "gdn_cp_state"]
+      tensors_to_offload = []
+
+    save_names, offload_names = maxtext_utils.get_save_and_offload_names(DummyConfig())
+    self.assertEqual(offload_names, [])
+    self.assertCountEqual(
+        save_names, ["decoder_layer_input", "gdn_cp_state", "gdn_cp_conv_halo", "gdn_cp_m_local", "gdn_cp_s_in"]
+    )
+    # The residual-tuple names wrap the halo and the incoming state after pass 2 has consumed them, so saving those
+    # would not stop the backward replay from re-running pass 1. gdn_cp_state names its own copies of all three
+    # carries and must not map to any residual-tuple name.
+    for name in ("gdn_conv_state", "gdn_recurrent_state", "gdn_m_local", "gdn_core_attn_out", "gdn_t_inv"):
+      self.assertNotIn(name, save_names)
+
+    class OffloadConfig:
+      use_gdn_kernel = True
+      remat_policy = "custom"
+      tensors_on_device = ["decoder_layer_input"]
+      tensors_to_offload = ["gdn_cp_state"]
+
+    save_names, offload_names = maxtext_utils.get_save_and_offload_names(OffloadConfig())
+    self.assertEqual(save_names, ["decoder_layer_input"])
+    self.assertCountEqual(offload_names, ["gdn_cp_state", "gdn_cp_conv_halo", "gdn_cp_m_local", "gdn_cp_s_in"])
 
   def test_pallas_gdn_bwd_kernel_dht_and_dh0_against_autodiff(self):
     """Verifies pallas_gdn_bwd_kernel with non-zero d_recurrent_state (dht), return_dh0=True, and conv_state."""
