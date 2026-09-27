@@ -1027,6 +1027,23 @@ class MoEGeneral(BaseModel):
           " effect."
       ),
   )
+  moe_chunk_pipeline: bool = Field(
+      False,
+      description=(
+          "Software-pipeline the chunked ring-of-experts MoE loop. Chunk c+1's token"
+          " all-gather is ordered after chunk c's routed tokens, chunk c's combine after"
+          " chunk c+1's routed tokens, chunk c+1's combine after chunk c's reduce-scatter,"
+          " and chunk c's reduce-scatter after chunk c+1's first expert GEMM, so on the"
+          " SparseCore queue chunk c+1's dispatch runs under chunk c's expert GEMMs and"
+          " chunk c's combine under chunk c+1's. The orderings are optimization barriers,"
+          " so the math is unchanged. With use_ragged_sort=False only the combine's weighted"
+          " sum waits for the previous chunk's reduce-scatter, not its unsort. The barriers"
+          " only act if XLA keeps them: when --xla_tpu_aggressive_opt_barrier_removal=true"
+          " or ENABLED applies (compile_xla_flags overrides LIBTPU_INIT_ARGS and XLA_FLAGS),"
+          " the layer runs the plain chunk loop and logs a warning. Requires num_moe_token_chunks>1,"
+          " use_ring_of_experts=True and num_moe_emb_chunks=0."
+      ),
+  )
 
   moe_expert_input_dim: int = Field(
       -1,
@@ -1262,12 +1279,21 @@ class MoEGeneral(BaseModel):
 
   @model_validator(mode="after")
   def validate_moe_chunks(self) -> "MoEGeneral":
+    """Validates the options of the chunked ring-of-experts MoE loop, which all require ring of experts."""
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
     if self.ring_of_experts_local_routing and not self.use_ring_of_experts:
       raise ValueError("ring_of_experts_local_routing=True requires use_ring_of_experts=True.")
     if self.ring_of_experts_row_major_reduce_scatter and not self.use_ring_of_experts:
       raise ValueError("ring_of_experts_row_major_reduce_scatter=True requires use_ring_of_experts=True.")
+    if self.moe_chunk_pipeline:
+      if self.num_moe_token_chunks <= 1 or not self.use_ring_of_experts:
+        raise ValueError("moe_chunk_pipeline=True requires num_moe_token_chunks > 1 and use_ring_of_experts=True.")
+      if self.moe_chunk_barrier:
+        raise ValueError("moe_chunk_pipeline=True and moe_chunk_barrier=True order the chunks in opposite ways.")
+      # num_moe_emb_chunks is a MoEKernels field; this validator runs on the combined config.
+      if getattr(self, "num_moe_emb_chunks", 0) > 0:
+        raise ValueError("moe_chunk_pipeline=True does not support num_moe_emb_chunks > 0.")
     return self
 
   @model_validator(mode="after")
