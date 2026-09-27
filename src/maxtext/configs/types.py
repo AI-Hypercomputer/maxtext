@@ -1307,7 +1307,7 @@ class Qwen3Next(BaseModel):
       description="Whether to use GDN Pallas kernel.",
   )
   enable_gdn_sequence_packing: bool = Field(
-      False,
+      True,
       description=(
           "Whether to enable GDN sequence packing (document-boundary state resets and causal conv masking) in the"
           " Pallas GDN kernel path. The pure-JAX path (use_gdn_kernel=False) always honours decoder_segment_ids."

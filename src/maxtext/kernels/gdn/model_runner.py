@@ -591,7 +591,7 @@ def run_gdn_kernel_layer(
     qkv = jnp.where(mask.reshape(mask.shape + (1,) * (qkv.ndim - mask.ndim)), qkv, 0.0)
     a = jnp.where(mask[..., None], a, jnp.asarray(-1e4, dtype=a.dtype))
     b = jnp.where(mask[..., None], b, jnp.asarray(-1e4, dtype=b.dtype))
-    if not getattr(cfg, "enable_gdn_sequence_packing", False):
+    if not getattr(cfg, "enable_gdn_sequence_packing", True):
       decoder_segment_ids = None
 
   batch, seq_len = qkv.shape[:2]
@@ -624,25 +624,12 @@ def run_gdn_kernel_layer(
 
   conv_bias_arg = layer.conv1d.bias.value if getattr(layer.conv1d, "bias", None) is not None else None
   conv_weight_arg = layer.conv1d.kernel.value
-  conv_state_arg = (
-      conv_state
-      if conv_state is not None
-      else jnp.zeros(
-          (batch, cfg.gdn_conv_kernel_dim - 1, qkv.shape[-1]),
-          dtype=cfg.dtype,
-      )
-  )
-  recurrent_state_arg = (
-      recurrent_state.astype(state_dtype)
-      if recurrent_state is not None
-      else jnp.zeros(
-          (batch, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim),
-          dtype=state_dtype,
-      )
-  )
+  conv_state_arg = conv_state
+  recurrent_state_arg = recurrent_state.astype(state_dtype) if recurrent_state is not None else None
 
   if layer.mesh is not None:
     logical_rules = cfg.logical_axis_rules
+    recurrent_state_shape = (batch, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim)
     if use_head_sharded_cp:
       num_groups = layer.num_k_heads
       channels_per_group = 2 * layer.head_k_dim + layer.v_heads_per_k_head * layer.head_v_dim
@@ -666,6 +653,7 @@ def run_gdn_kernel_layer(
       else:
         conv_bias_pspec = P()
 
+      conv_state_shape = (batch, cfg.gdn_conv_kernel_dim - 1, num_groups, channels_per_group)
       if conv_state is not None:
         cs_q = conv_state[..., : layer.key_dim].reshape(batch, cfg.gdn_conv_kernel_dim - 1, num_groups, layer.head_k_dim)
         cs_k = conv_state[..., layer.key_dim : 2 * layer.key_dim].reshape(
@@ -676,18 +664,7 @@ def run_gdn_kernel_layer(
         )
         conv_state_arg = jnp.concatenate([cs_q, cs_k, cs_v], axis=-1)
       else:
-        conv_state_arg = jnp.zeros(
-            (batch, cfg.gdn_conv_kernel_dim - 1, num_groups, channels_per_group),
-            dtype=cfg.dtype,
-        )
-      recurrent_state_arg = (
-          recurrent_state.astype(state_dtype)
-          if recurrent_state is not None
-          else jnp.zeros(
-              (batch, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim),
-              dtype=state_dtype,
-          )
-      )
+        conv_state_arg = None
       a_log_arg = layer.A_log[...]
       dt_bias_arg = layer.dt_bias[...]
 
@@ -702,22 +679,7 @@ def run_gdn_kernel_layer(
       out_attn_pspec = P(mesh_batch, cp_axis_name, None, None)
     elif use_seq_sharded_cp:
       conv_weight_arg = layer.conv1d.kernel.value
-      conv_state_arg = (
-          conv_state
-          if conv_state is not None
-          else jnp.zeros(
-              (batch, cfg.gdn_conv_kernel_dim - 1, qkv.shape[-1]),
-              dtype=cfg.dtype,
-          )
-      )
-      recurrent_state_arg = (
-          recurrent_state.astype(state_dtype)
-          if recurrent_state is not None
-          else jnp.zeros(
-              (batch, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim),
-              dtype=state_dtype,
-          )
-      )
+      conv_state_shape = (batch, cfg.gdn_conv_kernel_dim - 1, qkv.shape[-1])
       a_log_arg = layer.A_log[...]
       dt_bias_arg = layer.dt_bias[...]
 
@@ -733,22 +695,7 @@ def run_gdn_kernel_layer(
       out_attn_pspec = P(mesh_batch, cp_axis_name, None, None)
     else:
       conv_weight_arg = layer.conv1d.kernel.value
-      conv_state_arg = (
-          conv_state
-          if conv_state is not None
-          else jnp.zeros(
-              (batch, cfg.gdn_conv_kernel_dim - 1, qkv.shape[-1]),
-              dtype=cfg.dtype,
-          )
-      )
-      recurrent_state_arg = (
-          recurrent_state.astype(state_dtype)
-          if recurrent_state is not None
-          else jnp.zeros(
-              (batch, layer.num_v_heads, layer.head_k_dim, layer.head_v_dim),
-              dtype=state_dtype,
-          )
-      )
+      conv_state_shape = (batch, cfg.gdn_conv_kernel_dim - 1, qkv.shape[-1])
       a_log_arg = layer.A_log[...]
       dt_bias_arg = layer.dt_bias[...]
 
@@ -769,11 +716,13 @@ def run_gdn_kernel_layer(
         b_a_pspec, b.shape, layer.mesh, dims=(0,), allow_remove_axes=True
     )
     conv_state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
-        conv_state_pspec, conv_state_arg.shape, layer.mesh, dims=(0,), allow_remove_axes=True
+        conv_state_pspec, conv_state_shape, layer.mesh, dims=(0,), allow_remove_axes=True
     )
     recurrent_state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
-        recurrent_state_pspec, recurrent_state_arg.shape, layer.mesh, dims=(0,), allow_remove_axes=True
+        recurrent_state_pspec, recurrent_state_shape, layer.mesh, dims=(0,), allow_remove_axes=True
     )
+    conv_state_in_pspec = conv_state_pspec if conv_state_arg is not None else P()
+    recurrent_state_in_pspec = recurrent_state_pspec if recurrent_state_arg is not None else P()
     out_attn_pspec = remove_incompatible_mesh_axes_from_partition_spec(
         out_attn_pspec,
         (batch, seq_len, layer.num_v_heads, layer.head_v_dim),
@@ -796,10 +745,12 @@ def run_gdn_kernel_layer(
       qkv = jax.sharding.reshard(qkv, jax.sharding.NamedSharding(layer.mesh, qkv_pspec))
       b = jax.sharding.reshard(b, jax.sharding.NamedSharding(layer.mesh, b_a_pspec))
       a = jax.sharding.reshard(a, jax.sharding.NamedSharding(layer.mesh, b_a_pspec))
-      conv_state_arg = jax.sharding.reshard(conv_state_arg, jax.sharding.NamedSharding(layer.mesh, conv_state_pspec))
-      recurrent_state_arg = jax.sharding.reshard(
-          recurrent_state_arg, jax.sharding.NamedSharding(layer.mesh, recurrent_state_pspec)
-      )
+      if conv_state_arg is not None:
+        conv_state_arg = jax.sharding.reshard(conv_state_arg, jax.sharding.NamedSharding(layer.mesh, conv_state_pspec))
+      if recurrent_state_arg is not None:
+        recurrent_state_arg = jax.sharding.reshard(
+            recurrent_state_arg, jax.sharding.NamedSharding(layer.mesh, recurrent_state_pspec)
+        )
       if decoder_segment_ids is not None:
         decoder_segment_ids = jax.sharding.reshard(decoder_segment_ids, jax.sharding.NamedSharding(layer.mesh, seg_pspec))
 
@@ -814,8 +765,8 @@ def run_gdn_kernel_layer(
             conv_bias_pspec,
             a_log_pspec,
             dt_bias_pspec,
-            conv_state_pspec,
-            recurrent_state_pspec,
+            conv_state_in_pspec,
+            recurrent_state_in_pspec,
             seg_pspec,
         ),
         out_specs=(

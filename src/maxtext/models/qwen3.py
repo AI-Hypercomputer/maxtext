@@ -1234,8 +1234,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # =========================================================================
       # STEP C: Gated Delta Rule Recurrence
       # =========================================================================
-      A_log = jnp.asarray(self.A_log[...], dtype=cfg.dtype)
-      dt_bias = jnp.asarray(self.dt_bias[...], dtype=cfg.dtype)
+      A_log = jnp.asarray(self.A_log[...], dtype=jnp.float32)
+      dt_bias = jnp.asarray(self.dt_bias[...], dtype=jnp.float32)
       if cfg.shard_mode == ShardMode.EXPLICIT:
         # Both are stored replicated but broadcast against (B, S, H_v) activations whose
         # head axis is sharded, and explicit sharding requires broadcast operands to
@@ -1246,8 +1246,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         dt_bias = jax.sharding.reshard(dt_bias, head_spec)
       # beta shape: (B, S, H_v)
       beta = jax.nn.sigmoid(b)
-      # g shape: (B, S, H_v)
-      g = -jnp.exp(A_log) * jax.nn.softplus(a + dt_bias)
+      # g shape: (B, S, H_v), computed in float32 to preserve precision for g_cumsum and A_log/dt_bias gradients
+      g = -jnp.exp(A_log) * jax.nn.softplus(a.astype(jnp.float32) + dt_bias)
 
       if decoder_segment_ids is not None:
         mask = decoder_segment_ids != 0
