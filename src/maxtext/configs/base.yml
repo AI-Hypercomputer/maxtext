@@ -1335,6 +1335,11 @@ cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any
 dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the kv steps are supported.
 ### Determine if we want to use load balance for context parallelism
 context_parallel_load_balance: true
+# Load-balance causal attention inside each attention layer only: the layer input, positions and segment ids are
+# permuted into DUAL_CHUNK_SWAP order on entry and the output is permuted back on exit. Every other layer (e.g.
+# GatedDeltaNet, whose recurrence needs natural order) and the input pipeline keep natural order. Only causal
+# (global) attention layers are balanced. Requires context_parallel_load_balance: false and use_multimodal: false.
+context_parallel_attention_load_balance: false
 context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 

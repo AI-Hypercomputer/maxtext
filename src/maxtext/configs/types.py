@@ -1570,6 +1570,16 @@ class HardwareAndMesh(BaseModel):
   )
   param_scan_axis: int = Field(1, description="Axis to scan over for parameters.")
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
+  context_parallel_attention_load_balance: bool = Field(
+      False,
+      description=(
+          "Load-balance causal attention under context parallelism inside each attention layer only. The layer "
+          "input, positions and segment ids are permuted into DUAL_CHUNK_SWAP order on entry and the output is "
+          "permuted back on exit, so every other layer and the input pipeline keep natural token order. Only "
+          "causal (global) attention layers are balanced. Requires context_parallel_load_balance=False and "
+          "use_multimodal=False."
+      ),
+  )
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
@@ -3772,6 +3782,52 @@ class MaxTextConfig(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
       )
 
+  def _validate_context_parallel_attention_load_balance(self, context_parallel_size: int):
+    """Validates attention-local causal load balancing (`context_parallel_attention_load_balance`).
+
+    Unlike `context_parallel_load_balance`, this is legal with GatedDeltaNet context parallelism. The
+    DUAL_CHUNK_SWAP permutation is applied to the attention layer's input and undone on its output inside
+    `Attention.__call__`, so the GatedDeltaNet recurrence, which needs device order to equal sequence order,
+    never sees a reordered tensor.
+    """
+    if not self.context_parallel_attention_load_balance:
+      return
+    prefix = "context_parallel_attention_load_balance=True"
+    if self.context_parallel_load_balance:
+      raise ValueError(
+          f"{prefix} requires context_parallel_load_balance=False: the input pipeline would already have "
+          "reordered the batch, and the attention layer would reorder it a second time."
+      )
+    if self.context_parallel_strategy not in ("ring", "all_gather"):
+      raise ValueError(
+          f"{prefix} supports context_parallel_strategy='ring' or 'all_gather', got "
+          f"{self.context_parallel_strategy!r}."
+      )
+    if context_parallel_size <= 1 or context_parallel_size % 2 != 0:
+      raise ValueError(
+          f"{prefix} requires an even context parallelism of at least 2, got {context_parallel_size}. Set the "
+          "ici/dcn context parallelism sizes explicitly."
+      )
+    if self.max_target_length % (2 * context_parallel_size) != 0:
+      raise ValueError(
+          f"{prefix} requires max_target_length ({self.max_target_length}) to be divisible by "
+          f"2 * context_parallel_size ({2 * context_parallel_size})."
+      )
+    if self.attention_type != AttentionType.GLOBAL.value:
+      raise ValueError(f"{prefix} supports only attention_type='global', got {self.attention_type!r}.")
+    if self.use_indexer:
+      raise ValueError(f"{prefix} does not support the sparse indexer mask.")
+    # Vision encoder layers (bidirectional, rotary angles from the image grid) keep natural order, but the
+    # multimodal decoder inputs (image-token masks, 3D positions) have not been checked under the permutation.
+    if self.use_multimodal:
+      raise ValueError(f"{prefix} does not support use_multimodal=True.")
+    # Only these two kernels build their causal mask from the permutation (the TPU Splash/ring masks) or
+    # from positions (dot product). The GPU kernels would apply a plain causal mask to permuted tokens.
+    if self.attention not in ("flash", "dot_product"):
+      raise ValueError(f"{prefix} supports attention='flash' (TPU) or 'dot_product', got {self.attention!r}.")
+    if "gpu" in self.hardware:
+      raise ValueError(f"{prefix} is not supported on GPU.")
+
   def _validate_usp_context_parallelism(self):
     """Validates the USP (Ulysses over ring) context parallelism configuration."""
     if self.context_parallel_strategy != "usp":
@@ -5155,6 +5211,7 @@ class MaxTextConfig(
             f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
     self._validate_usp_context_parallelism()
+    self._validate_context_parallel_attention_load_balance(context_parallel_size)
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.
