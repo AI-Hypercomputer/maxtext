@@ -19,7 +19,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest import mock
 import yaml
 
 from maxtext.configs import pyconfig
@@ -64,17 +63,29 @@ class PyconfigTest(unittest.TestCase):
     config = pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
         skip_jax_distributed_system=True,
+        remat_policy="custom",
         gdn="device",
         use_gdn_kernel=True,
     )
     self.assertEqual(config.gdn, "device")
     self.assertTrue(config.use_gdn_kernel)
 
+    # Non-custom remat_policy with gdn/gdn_conv/gdn_states != "remat" must fast-fail.
+    with self.assertRaisesRegex(ValueError, "requires `remat_policy='custom'`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          remat_policy="full",
+          gdn="device",
+          use_gdn_kernel=True,
+      )
+
   def test_gdn_states_requires_gdn_kernel(self):
     with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
       pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
           skip_jax_distributed_system=True,
+          remat_policy="custom",
           gdn_states="device",
           use_gdn_kernel=False,
       )
@@ -110,6 +121,29 @@ class PyconfigTest(unittest.TestCase):
     self.assertEqual(config.tensors_on_device, ["decoder_layer_input"])
     self.assertEqual(config.tensors_to_offload, ["gdn_states"])
 
+    # Mixing gdn=device and gdn_conv=offload is valid now that their tensor sets are disjoint.
+    config_disjoint = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        remat_policy="custom",
+        gdn="device",
+        gdn_conv="offload",
+        use_gdn_kernel=True,
+    )
+    self.assertIn("gdn", config_disjoint.tensors_on_device)
+    self.assertIn("gdn_conv", config_disjoint.tensors_to_offload)
+
+    # Conflicting gdn=device and gdn_states=offload must fast-fail.
+    with self.assertRaisesRegex(ValueError, "Conflicting GDN remat configuration"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          remat_policy="custom",
+          gdn="device",
+          gdn_states="offload",
+          use_gdn_kernel=True,
+      )
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
@@ -136,33 +170,118 @@ class PyconfigTest(unittest.TestCase):
     self.assertFalse(config.context_parallel_load_balance)
 
   def _init_qwen3_next_packing(self, **kwargs):
+    defaults = {"max_target_length": 1024}
+    defaults.update(kwargs)
     return pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
         model_name="qwen3-next-80b-a3b",
         skip_jax_distributed_system=True,
-        **kwargs,
+        **defaults,
     )
 
-  def test_gdn_packing_without_gdn_sequence_packing_warns_once(self):
-    """packing=True with the GDN kernel but without enable_gdn_sequence_packing logs one warning per process."""
-    config_types._warn_gdn_sequence_packing_disabled_once.cache_clear()  # pylint: disable=protected-access
-    with mock.patch.object(config_types.max_logging, "warning") as warn:
-      config = self._init_qwen3_next_packing(packing=True, use_gdn_kernel=True, enable_gdn_sequence_packing=False)
-      self._init_qwen3_next_packing(packing=True, use_gdn_kernel=True, enable_gdn_sequence_packing=False)
-    self.assertFalse(config.enable_gdn_sequence_packing)
-    gdn_warnings = [c for c in warn.call_args_list if "enable_gdn_sequence_packing" in str(c)]
-    self.assertEqual(len(gdn_warnings), 1)
+  def test_gdn_packing_allowed_with_kernel_and_pure_jax(self):
+    """Sequence packing works out of the box for both the Pallas kernel and pure-JAX paths without a separate flag."""
+    cfg_packed_kernel = self._init_qwen3_next_packing(packing=True, use_gdn_kernel=True)
+    self.assertTrue(cfg_packed_kernel.packing)
+    self.assertTrue(cfg_packed_kernel.use_gdn_kernel)
+    cfg_unpacked = self._init_qwen3_next_packing(packing=False, use_gdn_kernel=True)
+    self.assertFalse(cfg_unpacked.packing)
+    cfg_pure_jax = self._init_qwen3_next_packing(packing=True, use_gdn_kernel=False)
+    self.assertFalse(cfg_pure_jax.use_gdn_kernel)
+    cfg_rl = pyconfig.initialize(
+        ["", get_post_train_test_config_path("rl")],
+        skip_jax_distributed_system=True,
+        config_class=config_types.RLConfig,
+        model_name="qwen3-next-80b-a3b",
+        max_target_length=1024,
+        packing=True,
+        max_seq_token_per_tpu=4096,
+        use_gdn_kernel=True,
+    )
+    self.assertTrue(cfg_rl.use_gdn_kernel)
+    self.assertEqual(cfg_rl.max_seq_token_per_tpu, 4096)
 
-  def test_gdn_packing_warning_not_emitted_when_enabled_unpacked_or_pure_jax(self):
-    """No warning when the kernel is segment-aware, inputs are unpacked, or the pure-JAX path is used."""
-    config_types._warn_gdn_sequence_packing_disabled_once.cache_clear()  # pylint: disable=protected-access
-    with mock.patch.object(config_types.max_logging, "warning") as warn:
-      config = self._init_qwen3_next_packing(packing=True, use_gdn_kernel=True, enable_gdn_sequence_packing=True)
-      self._init_qwen3_next_packing(packing=False, use_gdn_kernel=True, enable_gdn_sequence_packing=False)
-      # The pure-JAX path always honours decoder_segment_ids, so the flag is irrelevant there.
-      self._init_qwen3_next_packing(packing=True, use_gdn_kernel=False, enable_gdn_sequence_packing=False)
-    self.assertTrue(config.enable_gdn_sequence_packing)
-    self.assertEqual([c for c in warn.call_args_list if "enable_gdn_sequence_packing" in str(c)], [])
+  def test_gdn_kernel_fast_fail_constraints(self):
+    """Verifies fast-fail ValueErrors for unsupported GDN kernel configurations."""
+    # use_gdn_kernel=True with tensor parallelism > 1 raises ValueError on both MaxTextConfig and RLConfig.
+    with self.assertRaisesRegex(ValueError, "does not support tensor parallelism"):
+      self._init_qwen3_next_packing(
+          packing=False,
+          use_gdn_kernel=True,
+          ici_tensor_parallelism=2,
+          ici_fsdp_parallelism=1,
+      )
+    with self.assertRaisesRegex(ValueError, "does not support tensor parallelism"):
+      pyconfig.initialize(
+          ["", get_post_train_test_config_path("rl")],
+          skip_jax_distributed_system=True,
+          config_class=config_types.RLConfig,
+          model_name="qwen3-next-80b-a3b",
+          max_target_length=1024,
+          packing=False,
+          use_gdn_kernel=True,
+          ici_tensor_parallelism=2,
+          ici_fsdp_parallelism=1,
+      )
+
+    # max_target_length must split into whole kernel chunks on every CP rank.
+    with self.assertRaisesRegex(
+        ValueError, "max_target_length \\(100\\) to be a multiple of the GDN context parallelism"
+    ):
+      self._init_qwen3_next_packing(
+          packing=False,
+          use_gdn_kernel=True,
+          max_target_length=100,
+      )
+    with self.assertRaisesRegex(
+        ValueError, "max_target_length \\(128\\) to be a multiple of the GDN context parallelism"
+    ):
+      self._init_qwen3_next_packing(
+          packing=False,
+          use_gdn_kernel=True,
+          max_target_length=128,
+          ici_context_parallelism=4,
+          context_parallel_load_balance=False,
+      )
+    cfg_cp4 = self._init_qwen3_next_packing(
+        packing=False,
+        use_gdn_kernel=True,
+        max_target_length=256,
+        ici_context_parallelism=4,
+        context_parallel_load_balance=False,
+    )
+    self.assertEqual(cfg_cp4.max_target_length // cfg_cp4.ici_context_parallelism, cfg_cp4.gdn_chunk_size)
+
+    # gdn_chunk_size != 64 or head_dim % 128 != 0 raises ValueError when use_gdn_kernel=True.
+    with self.assertRaisesRegex(ValueError, "requires gdn_chunk_size=64"):
+      self._init_qwen3_next_packing(
+          packing=False,
+          use_gdn_kernel=True,
+          override_model_config=True,
+          gdn_chunk_size=32,
+      )
+    with self.assertRaisesRegex(ValueError, "multiples of 128"):
+      self._init_qwen3_next_packing(
+          packing=False,
+          use_gdn_kernel=True,
+          override_model_config=True,
+          gdn_key_head_dim=64,
+          gdn_value_head_dim=64,
+      )
+
+    # use_qk_norm_in_gdn=False with use_gdn_kernel=True raises ValueError.
+    with self.assertRaisesRegex(ValueError, "requires use_qk_norm_in_gdn=True"):
+      self._init_qwen3_next_packing(
+          packing=False,
+          use_gdn_kernel=True,
+          override_model_config=True,
+          use_qk_norm_in_gdn=False,
+      )
+
+    # gdn_cp_mode is a Literal, so a typo is rejected at config time instead of silently running "auto".
+    with self.assertRaisesRegex(ValueError, r"gdn_cp_mode[\s\S]*invalid_mode"):
+      self._init_qwen3_next_packing(packing=False, gdn_cp_mode="invalid_mode")
+    self.assertEqual(self._init_qwen3_next_packing(packing=False, gdn_cp_mode="head").gdn_cp_mode, "head")
 
   def test_rl_config_gdn_granular_remat_requires_gdn_kernel(self):
     """RLConfig does not inherit MaxTextConfig's validators, so it carries its own GDN remat guard."""
@@ -171,13 +290,34 @@ class PyconfigTest(unittest.TestCase):
           ["", get_post_train_test_config_path("rl")],
           skip_jax_distributed_system=True,
           config_class=config_types.RLConfig,
+          remat_policy="custom",
           gdn="device",
           use_gdn_kernel=False,
       )
 
-  def test_enable_gdn_sequence_packing_defaults_false(self):
-    config = self._init_qwen3_next_packing()
-    self.assertFalse(config.enable_gdn_sequence_packing)
+  def test_rl_config_gdn_context_parallelism_and_packed_length_fast_fail(self):
+    """RL-only checks: GDN CP guards that MaxTextConfig runs elsewhere, and max_seq_token_per_tpu chunking."""
+
+    def init_rl(**kwargs):
+      return pyconfig.initialize(
+          ["", get_post_train_test_config_path("rl")],
+          skip_jax_distributed_system=True,
+          config_class=config_types.RLConfig,
+          model_name="qwen3-next-80b-a3b",
+          max_target_length=1024,
+          **kwargs,
+      )
+
+    with self.assertRaisesRegex(ValueError, "does not support context parallelism yet"):
+      init_rl(ici_context_parallelism=2, shard_mode="explicit", context_parallel_load_balance=False)
+    with self.assertRaisesRegex(ValueError, "requires context_parallel_load_balance=False"):
+      init_rl(ici_context_parallelism=2, context_parallel_load_balance=True)
+    self.assertEqual(init_rl(ici_context_parallelism=2, context_parallel_load_balance=False).ici_context_parallelism, 2)
+
+    with self.assertRaisesRegex(ValueError, r"max_seq_token_per_tpu \(1100\) to be a multiple"):
+      init_rl(use_gdn_kernel=True, max_seq_token_per_tpu=1100)
+    cfg_packed = init_rl(use_gdn_kernel=True, max_seq_token_per_tpu=1088)
+    self.assertEqual(cfg_packed.max_seq_token_per_tpu, 1088)
 
   def test_load_parameters_path_allowed_without_checkpointing(self):
     """A warm start does not go through the CheckpointManager.
@@ -431,6 +571,15 @@ class PyconfigTest(unittest.TestCase):
 
         with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_usp_ulysses_parallelism=2)
+
+        with self.assertRaisesRegex(Exception, "does not support context parallelism"):
+          initialize(
+              ici_context_parallelism=2,
+              context_parallel_load_balance=False,
+              use_gdn_kernel=True,
+              packing=False,
+              max_target_length=128,
+          )
 
   def test_explicit_sharding_mistral_decoder_support(self):
     """The Mistral-family decoders that have been onboarded to explicit sharding are accepted."""
@@ -878,20 +1027,6 @@ assert train._TF_AVAILABLE is False
           val_yaml,
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
       )
-
-  def test_gdn_sequence_packing_flag_config(self):
-    config_default = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
-        skip_jax_distributed_system=True,
-    )
-    self.assertFalse(config_default.enable_gdn_sequence_packing)
-
-    config_enabled = pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
-        skip_jax_distributed_system=True,
-        enable_gdn_sequence_packing=True,
-    )
-    self.assertTrue(config_enabled.enable_gdn_sequence_packing)
 
 
 if __name__ == "__main__":

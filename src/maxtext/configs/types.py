@@ -20,7 +20,6 @@ import copy
 import datetime
 import enum
 from enum import Enum
-import functools
 from jinja2 import Environment, TemplateSyntaxError
 import logging
 import math
@@ -54,16 +53,6 @@ class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
 
 
 logger = logging.getLogger(__name__)
-
-
-@functools.lru_cache(maxsize=1)
-def _warn_gdn_sequence_packing_disabled_once() -> None:
-  """Logs the packing / GDN sequence packing mismatch warning once per process."""
-  max_logging.warning(
-      "packing=True and use_gdn_kernel=True but enable_gdn_sequence_packing=False: the GDN Pallas"
-      " kernel will ignore packed document boundaries (conv and recurrent state leak across"
-      " documents). Set enable_gdn_sequence_packing=True to make the kernel segment-aware."
-  )
 
 
 # ----------------------------------------------------------------------------
@@ -1306,14 +1295,7 @@ class Qwen3Next(BaseModel):
       False,
       description="Whether to use GDN Pallas kernel.",
   )
-  enable_gdn_sequence_packing: bool = Field(
-      True,
-      description=(
-          "Whether to enable GDN sequence packing (document-boundary state resets and causal conv masking) in the"
-          " Pallas GDN kernel path. The pure-JAX path (use_gdn_kernel=False) always honours decoder_segment_ids."
-      ),
-  )
-  gdn_cp_mode: str = Field(
+  gdn_cp_mode: Literal["auto", "seq", "head"] = Field(
       "auto",
       description="GDN context parallelism mode ('auto', 'seq', or 'head').",
   )
@@ -3793,25 +3775,78 @@ class MaxTextConfig(
 
   @model_validator(mode="after")
   def validate_gdn_remat_requires_kernel(self) -> "MaxTextConfig":
-    """Raise ValueError if gdn, gdn_conv or gdn_states is configured for device/offload without use_gdn_kernel=True."""
-    if (self.gdn != "remat" or self.gdn_conv != "remat" or self.gdn_states != "remat") and not self.use_gdn_kernel:
+    """Raise ValueError if gdn, gdn_conv or gdn_states is misconfigured."""
+    if self.gdn == self.gdn_conv == self.gdn_states == "remat":
+      return self
+    if not self.use_gdn_kernel:
       raise ValueError(
           "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
           "requires `use_gdn_kernel=True`."
       )
+    if self.remat_policy != "custom":
+      raise ValueError(
+          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
+          f"requires `remat_policy='custom'`, got `remat_policy={self.remat_policy!r}`."
+      )
+    if {self.gdn, self.gdn_states} == {"device", "offload"}:
+      raise ValueError(
+          "Conflicting GDN remat configuration: `gdn` and `gdn_states` cannot be set to opposite "
+          "'device' and 'offload' targets because `gdn_states` is a subset of `gdn` residuals."
+      )
     return self
 
-  @model_validator(mode="after")
-  def warn_gdn_packing_without_gdn_sequence_packing(self) -> "MaxTextConfig":
-    """Warns (once per process) when packed inputs reach GDN kernel layers that ignore segment boundaries."""
-    if (
-        self.packing
-        and self.use_gdn_kernel
-        and self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
-        and not self.enable_gdn_sequence_packing
-    ):
-      _warn_gdn_sequence_packing_disabled_once()
-    return self
+  @staticmethod
+  def validate_gdn_config(cfg: Any, *, is_rl_config: bool) -> None:
+    """Fast-fails GDN settings that the Pallas kernel or GDN context parallelism cannot run correctly.
+
+    Shared by MaxTextConfig and RLConfig. RLConfig does not inherit MaxTextConfig's validators but its trainer
+    config is used directly as the model config, so it also gets the remat, explicit-sharding and load-balance
+    checks that MaxTextConfig runs in its own validators.
+    """
+    if is_rl_config:
+      MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
+    if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+      return
+    cp_size = math.prod(
+        max(1, getattr(cfg, f"{mesh}_{axis}_parallelism"))
+        for mesh in ("ici", "dcn")
+        for axis in ("context", "context_usp_ulysses")
+    )
+    if is_rl_config and cp_size > 1:
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        raise ValueError(
+            f"'explicit' sharding with the '{cfg.decoder_block.value}' decoder does not support context parallelism yet."
+        )
+      if cfg.context_parallel_load_balance:
+        raise ValueError("GatedDeltaNet context parallelism requires context_parallel_load_balance=False.")
+
+    if not cfg.use_gdn_kernel:
+      return
+    if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
+      raise ValueError(
+          "use_gdn_kernel=True does not support tensor parallelism: the kernel's shard_map does not shard over "
+          f"'tensor' (got ici_tensor_parallelism={cfg.ici_tensor_parallelism}, "
+          f"dcn_tensor_parallelism={cfg.dcn_tensor_parallelism})."
+      )
+    if cfg.gdn_chunk_size != 64:
+      raise ValueError(f"use_gdn_kernel=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}.")
+    if cfg.gdn_key_head_dim % 128 or cfg.gdn_value_head_dim % 128:
+      raise ValueError(
+          "use_gdn_kernel=True requires gdn_key_head_dim and gdn_value_head_dim to be multiples of 128, "
+          f"got {cfg.gdn_key_head_dim} and {cfg.gdn_value_head_dim}."
+      )
+    if not cfg.use_qk_norm_in_gdn:
+      raise ValueError("use_gdn_kernel=True requires use_qk_norm_in_gdn=True.")
+    seq_lens = {"max_target_length": cfg.max_target_length}
+    if is_rl_config and cfg.max_seq_token_per_tpu > 0:
+      seq_lens["max_seq_token_per_tpu"] = cfg.max_seq_token_per_tpu
+    for name, seq_len in seq_lens.items():
+      if seq_len % (cp_size * cfg.gdn_chunk_size):
+        raise ValueError(
+            f"use_gdn_kernel=True requires {name} ({seq_len}) to be a multiple of the GDN context parallelism "
+            f"degree ({cp_size}) times gdn_chunk_size ({cfg.gdn_chunk_size}), so that every per-rank sequence "
+            "is a whole number of kernel chunks."
+        )
 
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
@@ -4770,7 +4805,7 @@ class MaxTextConfig(
             * self.ici_context_usp_ulysses_parallelism
             * self.dcn_context_usp_ulysses_parallelism
         )
-        if gdn_context_parallel_size > 1 and not self.use_gdn_kernel:
+        if gdn_context_parallel_size > 1:
           raise ValueError(
               f"'explicit' sharding with the '{decoder_name}' decoder does not"
               " support context parallelism yet. The GatedDeltaNet short"
@@ -5275,6 +5310,7 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
+    self.validate_gdn_config(self, is_rl_config=False)
     return self
 
 
@@ -5590,14 +5626,6 @@ class RLConfig(
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
-    if (self.gdn != "remat" or self.gdn_conv != "remat" or self.gdn_states != "remat") and not getattr(
-        self, "use_gdn_kernel", False
-    ):
-      raise ValueError(
-          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
-          "requires `use_gdn_kernel=True`."
-      )
-
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {
           "diloco": getattr(self, f"{prefix}_diloco_parallelism"),
@@ -5626,4 +5654,5 @@ class RLConfig(
     dcn_map = get_parallelism_map("dcn")
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
+    MaxTextConfig.validate_gdn_config(self, is_rl_config=True)
     return self

@@ -86,8 +86,15 @@ def gdn_context_axes(cfg) -> tuple[str, ...]:
   return tuple(
       name
       for name, size in (
-          ("context", getattr(cfg, "ici_context_parallelism", 1)),
-          ("context_usp_ulysses", getattr(cfg, "ici_context_usp_ulysses_parallelism", 1)),
+          (
+              "context",
+              getattr(cfg, "ici_context_parallelism", 1) * getattr(cfg, "dcn_context_parallelism", 1),
+          ),
+          (
+              "context_usp_ulysses",
+              getattr(cfg, "ici_context_usp_ulysses_parallelism", 1)
+              * getattr(cfg, "dcn_context_usp_ulysses_parallelism", 1),
+          ),
       )
       if size > 1
   )
@@ -1101,7 +1108,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           "but use_paged_state was False! Check attention_metadata and mesh."
       )
 
-    if use_gdn_kernel:
+    if use_gdn_kernel and not (seq_len == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE):
       core_attn_out, next_conv_state, next_recurrent_state = gdn_kernel_runner.run_gdn_kernel_layer(
           layer=self,
           query=query,
@@ -1182,8 +1189,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       else:
         conv_input = jnp.pad(qkv, ((0, 0), (conv_kernel_size - 1, 0), (0, 0)))
 
-      # The pure-JAX path always honours `decoder_segment_ids` (as in #5351).
-      # `enable_gdn_sequence_packing` only gates the Pallas kernel packing path.
       packed_segment_ids = (
           jnp.broadcast_to(decoder_segment_ids, (batch, seq_len)) if decoder_segment_ids is not None else None
       )

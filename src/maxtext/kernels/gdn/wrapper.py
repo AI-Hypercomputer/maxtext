@@ -67,11 +67,14 @@ def _pack_fwd_segment_metadata(
     )
   else:
     halo_0 = jnp.zeros((num_seqs, prev_kernel_size), dtype=jnp.float32)
-  full_valid = jnp.concatenate([halo_0, s_valid], axis=1)
-  chunk_halos = jnp.stack(
-      [full_valid[:, c * chunk_size : c * chunk_size + prev_kernel_size] for c in range(num_chunks)],
-      axis=1,
-  )
+  s_valid_3d = s_valid.reshape(num_seqs, num_chunks, chunk_size)
+  if prev_kernel_size > 0:
+    chunk_halos = jnp.concatenate(
+        [halo_0[:, None, :], s_valid_3d[:, :-1, chunk_size - prev_kernel_size :]],
+        axis=1,
+    )
+  else:
+    chunk_halos = jnp.zeros((num_seqs, num_chunks, 0), dtype=jnp.float32)
 
   active_3d = jnp.abs(s_enc.reshape(num_seqs, num_chunks, chunk_size))
   active_end = active_3d[:, :, -1]
@@ -330,6 +333,7 @@ def outer_kernel(
         "zero_initialize_out",
         "compute_precision",
         "is_prefill_only",
+        "use_qk_norm_in_gdn",
     ),
 )
 def fused_conv1d_gdn(
@@ -357,6 +361,7 @@ def fused_conv1d_gdn(
     decode_tile_size: int | None = None,
     mixed_tile_size: int | None = None,
     is_prefill_only: bool = False,
+    use_qk_norm_in_gdn: bool = True,
     segment_ids: jax.Array | None = None,
     conv_halo_seg: jax.Array | None = None,
     init_seg: jax.Array | None = None,
@@ -410,7 +415,28 @@ def fused_conv1d_gdn(
       mixed_tile_size=mixed_tile_size,
   )
 
+  if is_prefill_only:
+    # Prefill-only calls carry num_seqs equal-length sequences. t_inv/chunk_states hold
+    # batch_size // chunk_size chunks, so a partial chunk would be written out of bounds.
+    seq_len_per_seq = batch_size // max(1, num_seqs)
+    if batch_size % mixed_tile_size != 0 or seq_len_per_seq % mixed_tile_size != 0:
+      raise ValueError(
+          f"GDN prefill kernel requires batch_size ({batch_size}) and per-sequence length"
+          f" ({seq_len_per_seq}) to be multiples of chunk_size ({mixed_tile_size})."
+      )
+
   has_seg_ids = segment_ids is not None
+  if has_seg_ids and not is_prefill_only:
+    raise ValueError(
+        "GDN sequence packing (segment_ids) is only supported for prefill-only calls" " (is_prefill_only=True)."
+    )
+  if has_seg_ids and conv_halo_seg is None and init_seg is None:
+    segment_ids = compute_conv1d.canonicalize_segment_ids(segment_ids.reshape(num_seqs, -1))
+    has_init_per_seq = (seq_lens - (query_start_loc[1:] - query_start_loc[:-1])) > 0
+    halo_ones, init_ones = compute_conv1d.initial_state_segment_metadata(segment_ids, kernel_size)
+    conv_halo_seg = jnp.where(has_init_per_seq[:, None], halo_ones, 0.0)
+    init_seg = jnp.where(has_init_per_seq, init_ones, 0.0)
+
   extra_lanes = 2 if has_seg_ids else 0
   batch_padding_size = padded_batch_size - batch_size
   aligned_num_v_heads = tiling.align_to(n_v + extra_lanes, num_lanes)
@@ -473,6 +499,7 @@ def fused_conv1d_gdn(
         kq_head_dim=d_k,
         v_head_dim=d_v,
         has_seg_ids=has_seg_ids,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
         dtypes=config.Dtypes(
             act_in=act_in_dtype,
             act_out=act_out_dtype,
@@ -498,6 +525,7 @@ def fused_conv1d_gdn(
           state_indices=state_indices,
           start_seq=distribution[0],
           end_seq=distribution[-1],
+          is_prefill_only=is_prefill_only,
       )
 
     metadata_spec = jax.tree.map(lambda _: smem_spec, metadata_obj)
@@ -572,19 +600,6 @@ def fused_conv1d_gdn(
         in_recurrent_state,
         in_act,
         weights,
-    )
-
-  if not is_prefill_only:
-    try:
-      if int(distribution[0]) == 0:
-        is_prefill_only = True
-    except (TypeError, ValueError, jax.errors.TracerIntegerConversionError):
-      pass
-
-  if has_seg_ids and not is_prefill_only:
-    raise ValueError(
-        "GDN sequence packing (segment_ids) is only supported for prefill-only calls"
-        " (is_prefill_only=True or distribution[0] == 0)."
     )
 
   if not is_prefill_only:

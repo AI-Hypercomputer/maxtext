@@ -81,6 +81,7 @@ class GDNConfig:
   v_head_dim: int
   num_buffers: int = 2
   has_seg_ids: bool = False
+  use_qk_norm_in_gdn: bool = True
 
   @property
   def chunk_size(self) -> int:

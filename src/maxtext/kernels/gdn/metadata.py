@@ -63,13 +63,15 @@ def compute_per_seq_metadata(
     state_indices: jax.Array,
     start_seq: jax.Array,
     end_seq: jax.Array,
+    is_prefill_only: bool = False,
 ) -> memory_ref.MetadataRef:
   """Metadata for computing single sequence per tile."""
 
   max_seqs = seq_lens.size
   max_tokens = cfg.batch_size
+  max_num_tiles = pl.cdiv(max_tokens, cfg.chunk_size) + max_seqs if is_prefill_only else max_tokens
   all_seqs = jnp.arange(max_seqs)
-  all_tokens = jnp.arange(max_tokens)
+  all_tiles = jnp.arange(max_num_tiles)
 
   # Shift to ensure first element is for start_seq.
   query_start_loc = jnp.roll(query_start_loc, shift=-start_seq)
@@ -99,9 +101,9 @@ def compute_per_seq_metadata(
   # introduces padding to p_id_to_s_idx[i] where i >= num_tiles. Since the
   # kernel only checks value up-to p_id_to_s_idx[num_tiles-1], padded value
   # will not impact kernel execution.
-  p_id_to_s_idx = jnp.repeat(all_seqs, s_idx_to_num_tiles, total_repeat_length=max_tokens)
+  p_id_to_s_idx = jnp.repeat(all_seqs, s_idx_to_num_tiles, total_repeat_length=max_num_tiles)
   # Map program id (p_id) to tile id of a sequence.
-  p_id_to_t_id = all_tokens - s_idx_to_start_p_id[p_id_to_s_idx]
+  p_id_to_t_id = all_tiles - s_idx_to_start_p_id[p_id_to_s_idx]
   # Map tile index to starting row of its activation.
   p_id_to_r_base = query_start_loc[p_id_to_s_idx] + p_id_to_t_id * cfg.chunk_size
   # Calculate number of rows to calculate / fetch for each tile.

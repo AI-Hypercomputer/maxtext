@@ -27,7 +27,7 @@ from .. import compute_conv1d as local_compute_conv1d
 from .bwd_memory_ref import make_bwd_block_specs
 from .runtime_utils import ensure_cpu_interpret_registered
 from .runtime_utils import pallas_unsupported_reason
-from .runtime_utils import warn_gdn_pallas_fallback_once
+from .runtime_utils import target_platform
 
 # Default number of value heads per grid step, by activation dtype.
 _F32_HEAD_TILE = 16
@@ -523,12 +523,11 @@ def pallas_gdn_bwd_kernel(
   num_chunks).
   """
   if interpret is None:
-    on_cpu = jax.default_backend() == "cpu"
+    on_cpu = target_platform(qkv_conv) == "cpu"
     fallback_reason = pallas_unsupported_reason(head_k_dim=kq_head_dim, head_v_dim=v_head_dim, chunk_size=chunk_size)
-    if on_cpu or fallback_reason is not None:
-      if not on_cpu:
-        warn_gdn_pallas_fallback_once("backward", f"{fallback_reason}; running Pallas in interpret mode (very slow)")
-      interpret = True
+    if fallback_reason is not None and not on_cpu:
+      raise ValueError(f"GDN Pallas TPU backward kernel does not support {fallback_reason}.")
+    interpret = on_cpu
   if interpret:
     ensure_cpu_interpret_registered()
 
@@ -547,6 +546,10 @@ def pallas_gdn_bwd_kernel(
 
   has_dht = d_recurrent_state is not None
   has_dh0 = bool(return_dh0)
+  if segment_ids is not None and init_seg is None:
+    segment_ids = local_compute_conv1d.canonicalize_segment_ids(segment_ids.reshape(batch_size, seq_len))
+    if has_dh0:
+      _, init_seg = local_compute_conv1d.initial_state_segment_metadata(segment_ids, 4)
   if head_tile is not None:
     target_tile = head_tile
   elif jnp.dtype(qkv_conv.dtype) == jnp.float32:

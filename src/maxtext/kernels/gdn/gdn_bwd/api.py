@@ -31,7 +31,7 @@ from .jax_compute_gdn_states import _compute_forward_conv_and_states
 from .jax_compute_gdn_states import pure_jax_decoupled_conv1d_gdn
 from .pallas_mosaic_tpu_bwd import pallas_gdn_bwd_kernel
 from .runtime_utils import pallas_unsupported_reason
-from .runtime_utils import warn_gdn_pallas_fallback_once
+from .runtime_utils import target_platform
 
 
 def decoupled_conv1d_gdn_bwd_kernel(
@@ -72,6 +72,8 @@ def decoupled_conv1d_gdn_bwd_kernel(
 ]:
   """Decoupled Conv1D + GDN backward combining Pallas GDN bwd and JAX Conv1D bwd."""
   del seq_lens, qkv
+  if segment_ids is not None and conv_halo_seg is None and init_seg is None:
+    segment_ids, conv_halo_seg, init_seg = _local_segment_metadata(segment_ids, conv_state is not None, kernel_size)
   conv_out, qkv_conv = conv1d_silu_fwd(
       qkv=pre_conv_qkv,
       conv_weight=conv_weight,
@@ -156,13 +158,17 @@ def _run_local_gdn_decoupled_fwd(
     Optional[jax.Array],
 ]:
   """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU."""
-  on_cpu = jax.extend.backend.get_backend().platform == "cpu"
-  fallback_reason = pallas_unsupported_reason(
-      head_k_dim=head_k_dim, head_v_dim=head_v_dim, chunk_size=chunk_size, seq_len=qkv.shape[1]
-  )
-  if on_cpu or fallback_reason is not None:
-    if not on_cpu:
-      warn_gdn_pallas_fallback_once("forward", f"{fallback_reason}; falling back to pure JAX")
+  batch_size, seq_len, dim_size = qkv.shape
+  if seq_len % chunk_size != 0:
+    raise ValueError(
+        f"GDN forward kernel requires the local sequence length ({seq_len}) to be a multiple of"
+        f" chunk_size ({chunk_size}); with sequence-sharded context parallelism this is seq_len / cp."
+    )
+  on_cpu = target_platform(qkv) == "cpu"
+  fallback_reason = pallas_unsupported_reason(head_k_dim=head_k_dim, head_v_dim=head_v_dim, chunk_size=chunk_size)
+  if not on_cpu and fallback_reason is not None:
+    raise ValueError(f"GDN Pallas TPU forward kernel does not support {fallback_reason}.")
+  if on_cpu:
     out, states = pure_jax_decoupled_conv1d_gdn(
         qkv=qkv,
         b=b,
@@ -209,7 +215,6 @@ def _run_local_gdn_decoupled_fwd(
     )
     return (out, states), t_inv, chunk_states
 
-  batch_size, seq_len, dim_size = qkv.shape
   num_seqs = batch_size
   num_chunks = seq_len // chunk_size
 
@@ -265,6 +270,7 @@ def _run_local_gdn_decoupled_fwd(
       compute_precision=jnp.dtype(compute_dtype),
       mixed_tile_size=chunk_size,
       is_prefill_only=True,
+      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
@@ -303,14 +309,17 @@ def _local_segment_metadata(
   """Returns canonical (segment_ids, conv_halo_seg, init_seg) for the non-CP path.
 
   Canonicalization happens once here, on the full sequence. With caller
-  conv/recurrent states, the states continue the first document.
+  conv/recurrent states, the states continue the first document; without them,
+  the halo and initial state belong to no document (0). The metadata is always
+  explicit so the kernels, which canonicalize when it is missing, do not
+  canonicalize again.
   """
   if segment_ids is None:
     return None, None, None
   segment_ids = local_compute_conv1d.canonicalize_segment_ids(segment_ids)
-  if not has_initial_state:
-    return segment_ids, None, None
   conv_halo_seg, init_seg = local_compute_conv1d.initial_state_segment_metadata(segment_ids, conv_kernel_size)
+  if not has_initial_state:
+    conv_halo_seg, init_seg = jnp.zeros_like(conv_halo_seg), jnp.zeros_like(init_seg)
   return segment_ids, conv_halo_seg, init_seg
 
 
@@ -395,6 +404,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
       conv_state=conv_halo[:, :, q_size : q_size + k_size],
       segment_ids=s_enc_local,
       conv_halo_seg=conv_halo_seg,
+      output_dtype=jnp.float32,
   )
   m_local, s_ext_local = cp_gdn.compose_local_from_t_inv(
       qkv_conv=k_conv,
@@ -1052,7 +1062,7 @@ def _gdn_decoupled_conv1d_bwd(
 gdn_decoupled_conv1d.defvjp(
     _gdn_decoupled_conv1d_fwd,
     _gdn_decoupled_conv1d_bwd,
-    symbolic_zeros=False,
+    symbolic_zeros=True,
 )
 
 __all__ = [

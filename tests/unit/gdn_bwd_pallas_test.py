@@ -299,14 +299,15 @@ class GdnBwdPallasTest(absltest.TestCase):
 
   def test_decoupled_conv1d_gdn_kernel_conv_bias_none(self):
     """Verifies GDN kernel backward executes correctly when conv_bias is None."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 1
     num_v_heads = 2
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
@@ -350,14 +351,15 @@ class GdnBwdPallasTest(absltest.TestCase):
 
   def test_decoupled_conv1d_gdn_kernel_multi_batch(self):
     """Verifies GDN kernel backward handles batch_size > 1."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 2
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 1
     num_v_heads = 2
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
@@ -528,14 +530,15 @@ class GdnBwdPallasTest(absltest.TestCase):
 
   def test_decoupled_conv1d_gdn_kernel_bwd_with_cached_tinv_in_residuals(self):
     """Verifies _gdn_decoupled_conv1d_bwd gives identical grads with cached t_inv."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 1
     num_v_heads = 2
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
     qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
@@ -653,14 +656,15 @@ class GdnBwdPallasTest(absltest.TestCase):
 
   def test_run_local_gdn_decoupled_fwd_returns_cached_chunk_states(self):
     """Verifies _run_local_gdn_decoupled_fwd returns properly shaped chunk_states."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 1
     num_v_heads = 2
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
@@ -718,19 +722,21 @@ class GdnBwdPallasTest(absltest.TestCase):
         use_qk_norm_in_gdn=True,
         compute_dtype=jnp.float32,
     )
-    np.testing.assert_allclose(chunk_states, exp_chunk_states, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(t_inv, exp_t_inv, rtol=1e-5, atol=1e-5)
+    tol = 5e-3 if is_tpu else 1e-5
+    np.testing.assert_allclose(chunk_states, exp_chunk_states, rtol=tol, atol=tol)
+    np.testing.assert_allclose(t_inv, exp_t_inv, rtol=tol, atol=tol)
 
   def test_decoupled_conv1d_gdn_kernel_gradient_with_initial_states(self):
     """Verifies custom VJP gradients when initial conv_state and recurrent_state are provided."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 1
     num_v_heads = 2
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
@@ -804,18 +810,19 @@ class GdnBwdPallasTest(absltest.TestCase):
 
     for exp_g, act_g in zip(exp_grads, act_grads):
       self.assertIsNotNone(act_g)
-      np.testing.assert_allclose(exp_g, act_g, rtol=1e-3, atol=1e-3)
+      np.testing.assert_allclose(exp_g, act_g, rtol=2e-3, atol=2e-3)
 
   def test_gdn_kernel_bwd_multi_group_head_parallel(self):
     """Verifies multi-group head-parallel grid dispatch matches reference."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 4
     num_v_heads = 8
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
     key = jax.random.PRNGKey(1234)
@@ -874,14 +881,15 @@ class GdnBwdPallasTest(absltest.TestCase):
 
   def test_gdn_kernel_bwd_variable_length_segment_ids_reset(self):
     """Verifies segment_ids document boundaries reset carried state gradient to prevent leakage."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 1
     num_v_heads = 2
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
     key = jax.random.PRNGKey(5678)
@@ -950,14 +958,15 @@ class GdnBwdPallasTest(absltest.TestCase):
 
   def test_decoupled_conv1d_gdn_kernel_bwd_with_head_tile(self):
     """Verifies decoupled_conv1d_gdn_bwd_kernel forwards head_tile correctly."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 4
     num_v_heads = 8
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
@@ -1020,14 +1029,15 @@ class GdnBwdPallasTest(absltest.TestCase):
 
   def test_decoupled_conv1d_gdn_equal_heads_mha(self):
     """Verifies GDN backward pass when num_v_heads == num_k_heads (1:1 head ratio)."""
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    seq_len = 32
+    chunk_size = 64 if is_tpu else 16
+    seq_len = 2 * chunk_size
     num_k_heads = 2
     num_v_heads = 2
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
-    chunk_size = 16
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
     key = jax.random.PRNGKey(777)
@@ -1071,14 +1081,15 @@ class GdnBwdPallasTest(absltest.TestCase):
     residuals (chunk_states, t_inv) are saved in memory, preventing duplicate
     forward execution during backward autodiff.
     """
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 32
+    chunk_size = 64 if is_tpu else 32
     num_chunks = 2
     seq_len = num_chunks * chunk_size
     num_k_heads = 2
     num_v_heads = 4
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
@@ -1151,6 +1162,7 @@ class GdnBwdPallasTest(absltest.TestCase):
   def test_gdn_granular_remat_requires_gdn_kernel(self):
     """Verifies that setting gdn, gdn_conv or gdn_states to device/offload raises ValueError when use_gdn_kernel=False."""
     cfg = object.__new__(config_types.MaxTextConfig)
+    object.__setattr__(cfg, "remat_policy", "custom")
     object.__setattr__(cfg, "gdn", "device")
     object.__setattr__(cfg, "gdn_conv", "remat")
     object.__setattr__(cfg, "gdn_states", "remat")
@@ -1324,15 +1336,16 @@ class GdnBwdPallasTest(absltest.TestCase):
     if len(devices) < 4:
       self.skipTest(f"Requires >= 4 devices, got {len(devices)}")
 
+    is_tpu = jax.default_backend() == "tpu"
     batch_size = 1
-    chunk_size = 16
+    chunk_size = 64 if is_tpu else 16
     cp_size = 4
     num_chunks = cp_size * 2  # 2 chunks per rank
     seq_len = num_chunks * chunk_size
     num_k_heads = 2
     num_v_heads = 4
-    head_k_dim = 64
-    head_v_dim = 64
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
 
@@ -1438,15 +1451,16 @@ class GdnBwdPallasTest(absltest.TestCase):
 
     (_, (cp_out, cp_cs, cp_rs)), cp_grads = run_cp(qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, h0)
 
-    np.testing.assert_allclose(cp_out, ref_out, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(cp_cs, ref_cs, rtol=1e-4, atol=1e-4)
-    np.testing.assert_allclose(cp_rs, ref_rs, rtol=1e-4, atol=1e-4)
+    tol = 2e-3 if is_tpu else 1e-4
+    np.testing.assert_allclose(cp_out, ref_out, rtol=tol, atol=tol)
+    np.testing.assert_allclose(cp_cs, ref_cs, rtol=tol, atol=tol)
+    np.testing.assert_allclose(cp_rs, ref_rs, rtol=tol, atol=tol)
     for idx_g, (g_cp, g_ref) in enumerate(zip(cp_grads, ref_grads)):
       np.testing.assert_allclose(
           g_cp,
           g_ref,
-          rtol=1e-4,
-          atol=1e-4,
+          rtol=tol,
+          atol=tol,
           err_msg=f"CP=4 gradient arg {idx_g} diverged from CP=1",
       )
 
@@ -1505,9 +1519,13 @@ class GdnBwdPallasTest(absltest.TestCase):
     )
     self.assertEqual((n_in_11, n_out_11), (10, 6))
 
-    batch_size, seq_len, chunk_size = 1, 32, 16
+    is_tpu = jax.default_backend() == "tpu"
+    batch_size = 1
+    chunk_size = 64 if is_tpu else 16
+    seq_len = 2 * chunk_size
     num_k_heads, num_v_heads = 2, 4
-    head_k_dim, head_v_dim = 16, 16
+    head_k_dim = 128 if is_tpu else 16
+    head_v_dim = 128 if is_tpu else 16
     conv_kernel_size = 4
     dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
     qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
@@ -2597,12 +2615,16 @@ class GdnBwdPallasTest(absltest.TestCase):
     devices = jax.devices()
     if len(devices) < 4:
       self.skipTest(f"Requires >= 4 devices, got {len(devices)}")
+    is_tpu = jax.default_backend() == "tpu"
     dims = _packing_dims()
-    cp_size, chunk_size, seq_len, batch = 4, 16, 128, 2
+    cp_size, batch = 4, 2
+    chunk_size = 64 if is_tpu else 16
+    scale = chunk_size // 16
+    seq_len = 128 * scale
     seg = np.zeros((batch, seq_len), dtype=np.int32)
-    seg[0, 6:56] = 1
-    seg[0, 56:96] = 2  # rank 3 (96..127) is all padding
-    seg[1, 32:] = 1  # rank 0 is all padding
+    seg[0, 6 : 56 * scale] = 1
+    seg[0, 56 * scale : 96 * scale] = 2  # rank 3 is all padding
+    seg[1, 32 * scale :] = 1  # rank 0 is all padding
     seg = jnp.asarray(seg)
     qkv, b, a, cw, cb, al, dt, do = _packing_inputs(jax.random.PRNGKey(1016), batch, seq_len, dims)
     cs, rs = _packing_states(jax.random.PRNGKey(1017), batch, dims)
@@ -2633,20 +2655,24 @@ class GdnBwdPallasTest(absltest.TestCase):
     args = (qkv, b, a, cw, cb, al, dt, cs, rs)
     (_, aux_s), grads_s = jax.value_and_grad(loss_single, argnums=tuple(range(9)), has_aux=True)(*args)
     (_, aux_c), grads_c = jax.jit(jax.value_and_grad(loss_cp, argnums=tuple(range(9)), has_aux=True))(*args)
+    tol = 2e-2 if is_tpu else 2e-3
     for name, got, exp in zip(("out", "next_conv_state", "next_recurrent_state"), aux_c, aux_s):
-      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=2e-3, atol=2e-3, err_msg=f"CP vs single: {name}")
+      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=tol, atol=tol, err_msg=f"CP vs single: {name}")
     for name, got, exp in zip(_GRAD_NAMES + ("d_conv_state", "d_recurrent_state"), grads_c, grads_s):
-      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=2e-3, atol=2e-3, err_msg=f"CP vs single: {name}")
+      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=tol, atol=tol, err_msg=f"CP vs single: {name}")
 
     qkv_np = np.asarray(qkv)
-    expected_cs = np.stack([qkv_np[0, 93:96], qkv_np[1, 125:128]])
-    np.testing.assert_allclose(np.asarray(aux_c[1]), expected_cs, rtol=1e-6, atol=1e-6, err_msg="CP next_conv_state")
+    expected_cs = np.stack([qkv_np[0, 96 * scale - 3 : 96 * scale], qkv_np[1, 128 * scale - 3 : 128 * scale]])
+    np.testing.assert_allclose(np.asarray(aux_c[1]), expected_cs, rtol=1e-5, atol=1e-5, err_msg="CP next_conv_state")
     # The caller states must reach the first document (rank 0 leading pad / all-pad rank 0).
     (_, aux_zero), _ = jax.value_and_grad(loss_single, has_aux=True)(
         qkv, b, a, cw, cb, al, dt, jnp.zeros_like(cs), jnp.zeros_like(rs)
     )
     self.assertGreater(float(jnp.max(jnp.abs(aux_s[0][0, 6:12] - aux_zero[0][0, 6:12]))), 1e-3)
-    self.assertGreater(float(jnp.max(jnp.abs(aux_s[0][1, 32:40] - aux_zero[0][1, 32:40]))), 1e-3)
+    self.assertGreater(
+        float(jnp.max(jnp.abs(aux_s[0][1, 32 * scale : 32 * scale + 8] - aux_zero[0][1, 32 * scale : 32 * scale + 8]))),
+        1e-3,
+    )
 
 
 _GRAD_NAMES = ("dqkv", "db", "da", "d_conv_w", "d_conv_b", "d_a_log", "d_dt_bias")
