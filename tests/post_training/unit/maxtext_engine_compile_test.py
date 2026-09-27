@@ -30,9 +30,11 @@ flag set, as `maxtext_engine_xaot_test.py` does, and fails unless the child repo
 actually ran.
 """
 
-# Some tests compare the report with the engine's own (private) train state.
+# Some tests compare the report with the engine's own (private) train state, and one runs Tunix's (private)
+# sampler-trainer agreement step to build the micro-batch to expect.
 # pylint: disable=protected-access
 
+import asyncio
 import contextlib
 import dataclasses
 import io
@@ -62,8 +64,10 @@ import pytest
 from tunix.experimental.common import datatypes
 from tunix.experimental.orchestrator import algorithm_adapter
 from tunix.experimental.orchestrator import batch_assembly
+from tunix.experimental.orchestrator import rl_program
 from tunix.rl import algo_core
 from tunix.rl import algorithm_config
+from tunix.rl import common as rl_common
 
 from tests.utils.test_helpers import get_test_config_path
 
@@ -848,7 +852,7 @@ def _assembled_micro_batch(cfg: pyconfig.HyperParameters, algo) -> datatypes.RLT
   batch = assembler.pack(payloads)[0]
   if algo.requires_reference_kl:
     batch = batch_assembly.with_ref_per_token_logps(batch, np.zeros(np.shape(batch.completion_ids), np.float32))
-  return batch
+  return _with_tunix_sampler_trainer_agreement(batch, algo)
 
 
 def _orchestrator_micro_batch(
@@ -887,7 +891,38 @@ def _orchestrator_micro_batch(
   batch = batches[0].payload
   if algo.requires_reference_kl:
     batch = batch_assembly.with_ref_per_token_logps(batch, np.zeros(np.shape(batch.completion_ids), np.float32))
-  return batch
+  return _with_tunix_sampler_trainer_agreement(batch, algo)
+
+
+class _Trainer:
+  """Stands in for Tunix's trainer engine, scoring every token as the rollout did, as the compile tool assumes."""
+
+  def __init__(self, per_token_logps):
+    self._per_token_logps = per_token_logps
+
+  async def per_token_logps(self, role, items):
+    del role, items
+    return types.SimpleNamespace(per_token_logps=self._per_token_logps)
+
+
+def _with_tunix_sampler_trainer_agreement(batch, algo):
+  """`batch` after `StandardRLProgram`'s own sampler-trainer agreement step.
+
+  `StandardRLProgram.train_stage` runs the step under the condition copied here; the step itself is Tunix's.
+  """
+  if batch.old_per_token_logps is None or not algo.algo_config.use_rollout_logps:
+    return batch
+  threshold = algo.algo_config.seq_logprob_error_threshold
+  program = types.SimpleNamespace(
+      engine=_Trainer(batch.old_per_token_logps),
+      generation_args=types.SimpleNamespace(temperature=1.0),
+      batch_config=types.SimpleNamespace(pad_id=maxtext_engine_compile.GRPO_PAD_ID),
+      assembler=None,
+      sampler_is=algo.algo_config.sampler_is,
+      sampler_is_threshold=algo.algo_config.sampler_is_threshold,
+      seq_logprob_error_threshold=float(threshold) if isinstance(threshold, (int, float)) else None,
+  )
+  return asyncio.run(rl_program.StandardRLProgram._apply_sampler_trainer_agreement(program, batch, {}))
 
 
 def _assert_same_layout(test: absltest.TestCase, actual, expected) -> None:
@@ -991,6 +1026,20 @@ class GrpoCompileTest(parameterized.TestCase):
     _, _, _, unchunked = _run_main_and_capture(self, *_GRPO_OVERRIDES)
     self.assertGreater(compiled["fwd_bwd"].as_text().count(" while("), unchunked["fwd_bwd"].as_text().count(" while("))
 
+  def test_main_compiles_sampler_is_weights(self):
+    """With `sampler_is: token`, the compiled program reads the importance-sampling weights: exactly their bytes more."""
+    _, _, _, unweighted = _run_main_and_capture(self, *_GRPO_OVERRIDES)
+    _, _, micro_batch, compiled = _run_main_and_capture(
+        self, *_GRPO_OVERRIDES, "compile_engine_grpo_config={sampler_is: token}"
+    )
+
+    self.assertEqual(
+        (micro_batch.sampler_is_weights.shape, micro_batch.sampler_is_weights.dtype),
+        (micro_batch.completion_ids.shape, jnp.float32),
+    )
+    argument, _ = _fwd_bwd_memory(compiled)
+    self.assertEqual(argument - _fwd_bwd_memory(unweighted)[0], _tree_bytes(micro_batch.sampler_is_weights))
+
   def test_main_compiles_maxtext_loss_by_default(self):
     """`maxtext`, the default, compiles MaxText's own loss on a pre-training batch, with no Tunix adapter."""
     self.assertEqual(_config(1).compile_engine_loss, "maxtext")
@@ -1014,6 +1063,13 @@ class GrpoCompileTest(parameterized.TestCase):
       ("grpo_config_defaults", {}),
       ("no_kl_term", {"beta": 0.0}),
       ("old_logps_recomputed", {"use_rollout_logps": False}),
+      # Tunix's sampler-trainer agreement step adds the importance-sampling weights, and replaces the old policy's
+      # log-probabilities with the trainer's.
+      ("token_sampler_is", {"sampler_is": "token"}),
+      # It replaces values only: the old policy's log-probabilities and a filtered completion mask.
+      ("sequence_error_threshold", {"seq_logprob_error_threshold": 1.5}),
+      # Without the rollout's log-probabilities, Tunix skips that step.
+      ("token_sampler_is_without_rollout_logps", {"sampler_is": "token", "use_rollout_logps": False}),
   )
   def test_rl_micro_batch_matches_tunix(self, grpo_config):
     """The payload has the fields Tunix gives such a micro-batch, with the same shapes and dtypes, and no others."""
@@ -1023,6 +1079,15 @@ class GrpoCompileTest(parameterized.TestCase):
     micro_batch = maxtext_engine_compile.get_shaped_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
 
     self.assertEqual(_layout(micro_batch), _layout(_assembled_micro_batch(cfg, algo)))
+
+  def test_agreement_step_skipped_when_tunix_writes_nothing(self):
+    """With `GRPOConfig`'s defaults the step writes no field, so it is not run and logs no made-up agreement metrics."""
+    cfg = _grpo_config()
+    algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
+
+    with mock.patch.object(rl_common, "sampler_trainer_agreement", wraps=rl_common.sampler_trainer_agreement) as step:
+      maxtext_engine_compile.get_rl_micro_batch(cfg, algo, maxtext_utils.get_mesh_from_config(cfg))
+      step.assert_not_called()
 
   def test_rl_micro_batch_needs_prompt_and_completion(self):
     algo = algorithm_adapter.GRPOAdapter(algorithm_config.GRPOConfig(temperature=1.0))
@@ -1069,6 +1134,10 @@ class GrpoPackingCompileTest(parameterized.TestCase):
       ("three_fill_a_row", 96, 0, 3, {}),
       # Groups of 16, more than the eight rollouts the four rows hold: the group count rounds up.
       ("groups_larger_than_the_micro_batch", 64, 3, 2, {"num_generations": 16}),
+      # Importance-sampling weights, computed from the packed log-probabilities, share their layout.
+      ("token_sampler_is", 64, 3, 2, {"sampler_is": "token"}),
+      # With packing, Tunix filters the completion mask per packed sequence rather than per row.
+      ("sequence_error_threshold", 64, 3, 2, {"seq_logprob_error_threshold": 1.5}),
   )
   def test_packed_micro_batch_matches_tunix(self, tokens, segments, per_row, grpo_config):
     """The packed micro-batch is laid out as Tunix's assembler lays out the same rollouts.

@@ -110,8 +110,11 @@ of `max_target_length` as completion tokens (`max_response_length`):
   not set it. Tunix's loss then aggregates per sequence rather than per row.
 - Token ids and masks, per-token advantages, the rollout's log-probabilities and whether it was cut off
   (`overlong`); the old policy's log-probabilities when `use_rollout_logps` is true, and the reference
-  model's when `beta` is non-zero. Tunix's sampler-trainer agreement step, which adds `sampler_is_weights`
-  when `sampler_is` is `token`, is not modeled.
+  model's when `beta` is non-zero. With `use_rollout_logps`, the field Tunix's sampler-trainer agreement step
+  adds: `sampler_is_weights`, float32 and shaped like the completion tokens, when `sampler_is` is `token`. Its
+  other writes, the trainer's log-probabilities in place of `old_per_token_logps` and a filtered
+  `completion_mask`, change values, not the layout; the tool passes the rollout's log-probabilities for the
+  trainer's. The forward pass that step scores the micro-batch with is not compiled.
 - With `compile_engine_router_replay`, the experts each token was routed to in every MoE layer:
   `routed_experts`, `[sequences, prompt + completion tokens, num_decoder_layers, num_experts_per_tok]` int16,
   which the loss passes to the model to replay, wherever Tunix's batch assembler carries it. When the

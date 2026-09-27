@@ -706,10 +706,10 @@ def get_rl_micro_batch(
   Built by Tunix's own code, as `StandardRLProgram` builds one, so that its layout is the trainer's by
   construction: `algo.create_trainer_payloads` turns each group of `algo.num_generations` rollouts into
   unbatched payloads, the batch assembler `create_batch_assembler` picks for the trainer assembles them, and
-  the reference model's log-probabilities are added when `algo` needs them. Its sampler-trainer agreement
-  step, which needs the trainer's own log-probabilities and adds `sampler_is_weights` when `sampler_is` is
-  `token`, is not run. The rollouts report their log-probabilities and a status and, with
-  `compile_engine_router_replay`, the experts they were routed to in every MoE layer.
+  the reference model's log-probabilities are added when `algo` needs them, and so are the fields
+  `StandardRLProgram`'s sampler-trainer agreement step writes, with the rollout's log-probabilities standing in
+  for the trainer's (see `_with_sampler_trainer_agreement`). The rollouts report their log-probabilities and a
+  status and, with `compile_engine_router_replay`, the experts they were routed to in every MoE layer.
 
   A rollout is `max_prefill_predict_length` prompt tokens (Tunix's `max_prompt_length`) followed by the rest
   of `max_target_length` as completion tokens (`max_response_length`), the split
@@ -810,7 +810,50 @@ def get_rl_micro_batch(
     micro_batch = batch_assembly.with_ref_per_token_logps(
         micro_batch, np.zeros(np.shape(micro_batch.completion_ids), np.float32)
     )
+  # The condition `StandardRLProgram.train_stage` runs its sampler-trainer agreement step under.
+  if micro_batch.old_per_token_logps is not None and algo.algo_config.use_rollout_logps:
+    micro_batch = _with_sampler_trainer_agreement(micro_batch, algo.algo_config)
   return micro_batch
+
+
+def _with_sampler_trainer_agreement(
+    micro_batch: abstract_engine.RLTrainerPayload, algo_config: Any
+) -> abstract_engine.RLTrainerPayload:
+  """Returns `micro_batch` with the fields `StandardRLProgram`'s sampler-trainer agreement step writes into it.
+
+  That step scores the micro-batch under the trainer's weights, passes those log-probabilities and the rollout's
+  to `tunix.rl.common.sampler_trainer_agreement`, and `_apply_sampler_trainer_agreement` writes the results into
+  the micro-batch: `sampler_is_weights` when `sampler_is` is `token`, a filtered `completion_mask` with
+  `seq_logprob_error_threshold`, and the trainer's log-probabilities in place of `old_per_token_logps` with
+  either. Which fields it writes, and their shapes and dtypes, do not depend on the trainer's values, so the
+  rollout's log-probabilities stand in for them. Of the three, only `sampler_is_weights` changes what is
+  compiled. The scoring pass itself is not compiled.
+  """
+  sampler_is = algo_config.sampler_is
+  threshold = algo_config.seq_logprob_error_threshold
+  threshold = float(threshold) if isinstance(threshold, (int, float)) else None
+  if sampler_is != "token" and threshold is None:
+    return micro_batch
+
+  # Imported here: only the GRPO compile uses Tunix.
+  from tunix.rl import common as rl_common  # pylint: disable=import-outside-toplevel
+
+  trainer_logps = np.asarray(micro_batch.old_per_token_logps, np.float32)
+  _, sampler_is_weights, completion_mask = rl_common.sampler_trainer_agreement(
+      micro_batch.old_per_token_logps,
+      trainer_logps,
+      micro_batch.completion_mask,
+      sampler_is=sampler_is,
+      sampler_is_threshold=algo_config.sampler_is_threshold,
+      seq_logprob_error_threshold=threshold,
+      segment_ids=micro_batch.segment_ids,
+  )
+  updates = {"old_per_token_logps": trainer_logps}
+  if threshold is not None:
+    updates["completion_mask"] = np.asarray(completion_mask)
+  if sampler_is_weights is not None:
+    updates["sampler_is_weights"] = np.asarray(sampler_is_weights)
+  return dataclasses.replace(micro_batch, **updates)
 
 
 def get_shaped_rl_micro_batch(
@@ -847,6 +890,12 @@ def _describe_rl_micro_batch(config: pyconfig.HyperParameters, micro_batch: abst
     lines.append(
         "compile_engine_router_replay is set, but Tunix's batch assembler drops routed_experts from this "
         "micro-batch, so the compiled trainer routes every token itself."
+    )
+  if micro_batch.sampler_is_weights is not None:
+    lines.append(
+        "The loss weights each token by Tunix's importance-sampling weights (sampler_is: token). Tunix's "
+        "sampler-trainer agreement step computed them from the rollout's log-probabilities in place of the "
+        "trainer's, so the agreement metrics it logged are not measurements."
     )
   return "\n".join(lines)
 
