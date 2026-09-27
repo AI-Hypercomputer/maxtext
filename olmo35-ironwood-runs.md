@@ -684,6 +684,25 @@ pdb 4 gained more from lean routing than pdb 3 (113.9 to 127.1), but the
 per-layer remat it needs still costs more than the larger batch returns.
 pdb 3 stays.
 
+### u-series, gmm_v2 m-tile (o35n270338)
+
+Lean base. The m-tile is set on all six `wi_tile_*_batch_seq` and
+`wo_tile_*_batch_seq` knobs. The k and n tiles stay at 1024 and are clamped to
+the GEMM size (512 or 1024).
+
+| arm | change | TF/s/dev | MFU | loss @19 |
+|---|---|---|---|---|
+| u1_ctrl | tm 512 (shipped) | 131.4 | 11.39% | 10.836 |
+| u2_heur | `use_gmm_v2_heuristic_tiling=True` | 109.1 | 9.45% | 10.838 |
+| u3_tm256 | tm 256 | 121.2 | 10.51% | 10.838 |
+| **u4_tm1024** | tm 1024 | **133.9** | **11.61%** | **10.836** |
+
+**tm 1024 is +1.9%.** This is the opposite of the alignment guess: at 768 rows
+per expert on average, the larger tile wins and the smaller one loses 8%.
+Per-tile overhead dominates straddle waste at these narrow GEMMs (k and n of 512
+to 1024). The tokamax heuristic tiling is 17% slower. The v-series tests
+2048 and 4096.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
