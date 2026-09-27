@@ -951,8 +951,16 @@ class RoutedMoE(nnx.Module):
       rngs=None,
       input_ids=None,
       forced_routed_experts=None,
+      per_expert_scale=None,
   ):
-    """get topk."""
+    """get topk.
+
+    `per_expert_scale` (Gemma 4 only) is normally read off the module, but the
+    sparse path runs inside a `jax.shard_map` that cannot close over an array
+    living on explicit mesh axes, so it hands the value in instead.
+    """
+    if per_expert_scale is None and self.per_expert_scale is not None:
+      per_expert_scale = self.per_expert_scale[...]
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
     valid_token_mask = None
@@ -1020,10 +1028,10 @@ class RoutedMoE(nnx.Module):
           weight_sum = jnp.where(weight_sum == 0, 1.0, weight_sum)
         top_k_weights /= weight_sum
 
-      if self.per_expert_scale is not None and not (
+      if per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
       ):
-        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
+        per_expert_scale_topk = jnp.take_along_axis(per_expert_scale[None, None, :], top_k_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return top_k_weights, top_k_indices
@@ -1144,6 +1152,7 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       force_dropless=False,
       mesh_axis_names=None,
+      per_expert_scale=None,
   ):
     """Permute tokens to group by expert to fit gmm call."""
     is_qarray = isinstance(inputs, qpl.QArray)
@@ -1152,7 +1161,14 @@ class RoutedMoE(nnx.Module):
     inputs_shape = raw_inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
+    weights, selected_experts = self.get_topk(
+        gate_logits,
+        pre_bias_logits,
+        rngs,
+        input_ids,
+        forced_routed_experts,
+        per_expert_scale=per_expert_scale,
+    )
     lb_loss = None
     # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
     probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
@@ -2101,6 +2117,7 @@ class RoutedMoE(nnx.Module):
         input_ids=None,
         forced_routed_experts=None,
         force_dropless=False,
+        per_expert_scale=None,
     ):
       if self.config.moe_pin_sparse_core_all_gathers:
 
@@ -2162,6 +2179,7 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           force_dropless=force_dropless,
           mesh_axis_names=roe_bias_axis_names,
+          per_expert_scale=per_expert_scale,
       )
       return (
           x,
@@ -2192,6 +2210,7 @@ class RoutedMoE(nnx.Module):
         rngs,
         input_ids=None,
         forced_routed_experts=None,
+        per_expert_scale=None,
     ):
       local_sorted_indices = None
       all_shards_group_sizes = None
@@ -2215,6 +2234,7 @@ class RoutedMoE(nnx.Module):
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
           mesh_axis_names=bias_update_axis_names,
+          per_expert_scale=per_expert_scale,
       )
 
       if num_ep > 1:
@@ -2304,6 +2324,7 @@ class RoutedMoE(nnx.Module):
         input_ids=None,
         forced_routed_experts=None,
         force_dropless=False,
+        per_expert_scale=None,
     ):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -2320,6 +2341,7 @@ class RoutedMoE(nnx.Module):
             input_ids=input_ids,
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
+            per_expert_scale=per_expert_scale,
         )
       else:
         return ra2a_and_route(
@@ -2331,6 +2353,7 @@ class RoutedMoE(nnx.Module):
             rngs,
             input_ids=input_ids,
             forced_routed_experts=forced_routed_experts,
+            per_expert_scale=per_expert_scale,
         )
 
     def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
@@ -2563,6 +2586,7 @@ class RoutedMoE(nnx.Module):
         rngs,
         embed_dim,
         forced_routed_experts=None,
+        per_expert_scale=None,
     ):
       """Overlap token all-gather and GMM computation along embedding dimension."""
       num_ep = self.get_expert_parallelism_size()
@@ -2583,6 +2607,7 @@ class RoutedMoE(nnx.Module):
           chunk_rngs_key,
           input_ids=sharded_input_ids,
           forced_routed_experts=forced_routed_experts,
+          per_expert_scale=per_expert_scale,
       )
 
       if self.config.mlp_bias:
@@ -2618,6 +2643,7 @@ class RoutedMoE(nnx.Module):
             chunk_rngs_key,
             input_ids=sharded_input_ids,
             forced_routed_experts=forced_routed_experts,
+            per_expert_scale=per_expert_scale,
         )
         return (next_x, next_ps0, next_ps1, chunk_idx + 1), None
 
@@ -2664,6 +2690,7 @@ class RoutedMoE(nnx.Module):
         rngs,
         forced_routed_experts=None,
         force_dropless=False,
+        per_expert_scale=None,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
@@ -2680,6 +2707,7 @@ class RoutedMoE(nnx.Module):
             rngs,
             embed_dim,
             forced_routed_experts=forced_routed_experts,
+            per_expert_scale=per_expert_scale,
         )
       else:
         x, routing, route_metadata = route(
@@ -2690,6 +2718,7 @@ class RoutedMoE(nnx.Module):
             input_ids=sharded_input_ids,
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
+            per_expert_scale=per_expert_scale,
         )
         mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
@@ -2781,6 +2810,11 @@ class RoutedMoE(nnx.Module):
 
       return output, routing.lb_loss, routing.bias_updates, routing.has_overflow
 
+    # Gemma 4's per-expert router scale is consumed by get_topk, deep inside the
+    # shard_map below. A shard_map cannot close over an array that lives on explicit
+    # mesh axes, so it is threaded down as an argument instead of read off the module.
+    per_expert_scale = None if self.per_expert_scale is None else self.per_expert_scale[...]
+
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
@@ -2800,6 +2834,8 @@ class RoutedMoE(nnx.Module):
             # with below); recomputing it would skip
             # maybe_replicate_incompatible_batch.
             gate_logits_pspec if forced_routed_experts is not None else None,
+            # Routing sees every expert, so the per-expert scale enters replicated.
+            P() if per_expert_scale is not None else None,
         ),
         out_specs=(
             output_pspec,
@@ -2822,6 +2858,7 @@ class RoutedMoE(nnx.Module):
         sharded_input_ids,
         rngs,
         forced_routed_experts=None,
+        per_expert_scale=None,
     ):
       # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
@@ -2850,6 +2887,7 @@ class RoutedMoE(nnx.Module):
               rngs,
               forced_routed_experts,
               force_dropless=force_dropless,
+              per_expert_scale=per_expert_scale,
           )
 
         # Chunked ring-of-experts pipeline: split the per-shard tokens along the
@@ -2886,6 +2924,7 @@ class RoutedMoE(nnx.Module):
               rngs,
               None if forced_routed_experts is None else forced_routed_experts[:, sl, :],
               force_dropless=force_dropless,
+              per_expert_scale=per_expert_scale,
           )
           if barrier_enabled:
             _prev = out_c
@@ -2982,6 +3021,10 @@ class RoutedMoE(nnx.Module):
       w1_bias = _fsdp_all_gather(w1_bias, w1_bias_pspec)
     if wo_bias is not None:
       wo_bias = _fsdp_all_gather(wo_bias, wo_bias_pspec)
+    if per_expert_scale is not None and self.config.shard_mode == ShardMode.EXPLICIT:
+      # shard_map will not insert a reshard for an operand whose layout disagrees with
+      # `in_specs`, and the scale is declared "exp" -> the expert axis.
+      per_expert_scale = self._maybe_shard_with_pspec(per_expert_scale, P())
 
     output, lb_loss, bias_updates, has_overflow = sparse_matmul_route_and_compute(
         inputs,
@@ -2996,6 +3039,7 @@ class RoutedMoE(nnx.Module):
         input_ids,
         self.rngs,
         forced_routed_experts,
+        per_expert_scale,
     )
     self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
     return output, lb_loss, bias_updates
