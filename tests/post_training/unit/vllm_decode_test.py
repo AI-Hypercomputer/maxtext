@@ -112,5 +112,49 @@ class MropeInputPositionsTest(unittest.TestCase):
         np.testing.assert_array_equal(positions[dim], np.arange(length, dtype=np.int32))
 
 
+class RoutedExpertsReplicationTest(unittest.TestCase):
+  """Verify expert_indices returned by MaxTextForCausalLM.__call__ are replicated across the mesh."""
+
+  def test_expert_indices_are_replicated_across_mesh(self):
+    from unittest import mock  # pylint: disable=import-outside-toplevel
+    from flax import nnx  # pylint: disable=import-outside-toplevel
+    import jax  # pylint: disable=import-outside-toplevel
+    from jax import numpy as jnp  # pylint: disable=import-outside-toplevel
+    from jax.sharding import Mesh, NamedSharding, PartitionSpec  # pylint: disable=import-outside-toplevel
+
+    class _DummyDecoder(nnx.Module):
+
+      def __call__(self, **kwargs):
+        del kwargs
+        hidden = jnp.zeros((4, 1, 8), dtype=jnp.float32)
+        kv_caches = [jnp.zeros((2, 4), dtype=jnp.float32)]
+        expert_indices = jnp.arange(8, dtype=jnp.int32).reshape(1, 4, 2)
+        return hidden, kv_caches, expert_indices
+
+    mesh = Mesh(np.array(jax.devices()), ("data",))
+    wrapper = object.__new__(MaxTextForCausalLM)
+    object.__setattr__(wrapper, "model", _DummyDecoder())
+    object.__setattr__(wrapper, "mesh", mesh)
+    object.__setattr__(
+        wrapper, "maxtext_config", types.SimpleNamespace(dtype=jnp.float32, logical_axis_rules=())
+    )
+    object.__setattr__(wrapper, "model_mode", "autoregressive")
+
+    attn_metadata = types.SimpleNamespace(input_positions=jnp.arange(4, dtype=jnp.int32))
+    input_ids = jnp.arange(4, dtype=jnp.int32)
+    kv_caches = [jnp.zeros((2, 4), dtype=jnp.float32)]
+
+    with mock.patch.object(
+        jax.lax, "with_sharding_constraint", wraps=jax.lax.with_sharding_constraint
+    ) as mock_constraint:
+      _, _, _, expert_indices = wrapper(kv_caches, input_ids, attn_metadata)
+
+    self.assertIsNotNone(expert_indices)
+    self.assertEqual(expert_indices.shape, (1, 4, 2))
+    mock_constraint.assert_called_once()
+    _, target_sharding = mock_constraint.call_args[0]
+    self.assertEqual(target_sharding, NamedSharding(wrapper.mesh, PartitionSpec()))
+
+
 if __name__ == "__main__":
   unittest.main()
