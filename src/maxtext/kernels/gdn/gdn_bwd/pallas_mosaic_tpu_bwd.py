@@ -99,7 +99,7 @@ def _gdn_matmul(
         precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=jnp.float32,
     )
-    return dot_bf16(lhs_hi, rhs_hi) + dot_bf16(lhs_hi, rhs_lo) + dot_bf16(lhs_lo, rhs_hi)
+    return (dot_bf16(lhs_hi, rhs_lo) + dot_bf16(lhs_lo, rhs_hi)) + dot_bf16(lhs_hi, rhs_hi)
   return jnp.matmul(
       lhs.astype(jnp.float32),
       rhs.astype(jnp.float32),
