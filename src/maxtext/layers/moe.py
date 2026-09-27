@@ -130,6 +130,41 @@ def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax
   return jnp.diff(clamped_cumsum_extended, axis=0)
 
 
+def keep_top_by_bisection(scores: jax.Array, k) -> jax.Array:
+  """Mask of the ``k`` largest entries on the last axis, ties lowest index first, without a sort.
+
+  Equals ``argsort(argsort(-scores)) < k`` (stable). The k-th largest value is
+  found by 32 counting passes over order-preserving uint32 keys of the scores,
+  one bit at a time from the top. ``k`` is an int or broadcasts to
+  ``scores.shape[:-1] + (1,)``.
+  """
+  scores = scores.astype(jnp.float32)
+  scores = jnp.where(scores == 0, 0.0, scores)  # -0.0 ties +0.0, as in the float compare
+  bits = jax.lax.bitcast_convert_type(scores, jnp.int32)
+  # Negative floats flip their magnitude bits, then the sign bit flips, so
+  # unsigned order matches float order.
+  key = jax.lax.bitcast_convert_type(bits ^ ((bits >> 31) & 0x7FFFFFFF), jnp.uint32) ^ jnp.uint32(0x80000000)
+  want = jnp.broadcast_to(jnp.asarray(k, jnp.int32), scores.shape[:-1] + (1,))
+
+  def step(i, thr):
+    cand = thr | (jnp.uint32(1) << (31 - i).astype(jnp.uint32))
+    return jnp.where(jnp.sum(key >= cand, axis=-1, keepdims=True) >= want, cand, thr)
+
+  thr = jax.lax.fori_loop(0, 32, step, jnp.zeros(want.shape, jnp.uint32))
+  above = key > thr
+  at = key == thr
+  slots = want - jnp.sum(above, axis=-1, keepdims=True)
+  return above | (at & (jnp.cumsum(at, axis=-1) <= slots))
+
+
+def mask_to_indices(keep: jax.Array, k: int) -> jax.Array:
+  """Ascending positions of the ``k`` set entries per row of a mask with exactly ``k`` set."""
+  slot = jnp.where(keep, jnp.cumsum(keep, axis=-1, dtype=jnp.int32) - 1, -1)
+  idx = jax.lax.broadcasted_iota(jnp.int32, keep.shape, keep.ndim - 1)
+  onehot = slot[..., None] == jnp.arange(k, dtype=jnp.int32)
+  return jnp.sum(jnp.where(onehot, idx[..., None], 0), axis=-2)
+
+
 def _sort_activations(
     inputs: jax.Array,
     sort_indices: jax.Array,
@@ -1074,7 +1109,13 @@ class RoutedMoE(nnx.Module):
       elif self.config.moe_lean_routing:
         # Gather the weights with the saved indices so the bwd reuses them
         # instead of rerunning top_k (a full sort over the experts on TPU).
-        _, top_k_indices = jax.lax.top_k(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
+        if self.config.moe_topk_by_bisection:
+          # Same experts in ascending index order instead of by score; the combine
+          # sums over them, so only its summation order changes.
+          keep = keep_top_by_bisection(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
+          top_k_indices = mask_to_indices(keep, self.num_experts_per_tok)
+        else:
+          _, top_k_indices = jax.lax.top_k(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
         top_k_indices = adc.checkpoint_name(top_k_indices, "moe_routing")
         top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
       else:

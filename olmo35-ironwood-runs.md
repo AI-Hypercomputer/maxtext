@@ -846,6 +846,27 @@ SparseCore 3D all-gather offload takes, inside the shard_map it becomes a
 `prefuse_moe_weights=True` (one wi GMM with N=2048) compiles to 107.7 GB of
 temp against 94.3 GB for the base, so it cannot fit at pdb 3 and was not run.
 
+### bb-series, EMo threshold by bisection (o35n271157)
+
+The EMo document pool mask sorted all 512 scores per document to read the
+pool-th largest (23 ms/step of `jnp.sort` in z1). `emo_threshold_by_bisection`
+finds the same threshold with 32 masked count passes over the order-preserving
+uint32 key of each score, then breaks ties by index exactly as the sort did.
+The mask is bitwise identical (unit test over pools 16 to 512 with coarse ties).
+
+| arm | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|
+| bb1_ctrl | 141.5 | 12.27% | 0.749 | 10.834 |
+| bb4_ctrl | 141.8 | 12.29% | 0.748 | 10.834 |
+| bb2_bis | 144.2 | 12.50% | 0.736 | 10.834 |
+| bb3_bis | 144.3 | 12.51% | 0.735 | 10.834 |
+
+**+1.9%, kept.** Loss is unchanged, as expected for an identical mask. New base
+is `y2_trhs` plus `emo_threshold_by_bisection=True`. The same bisection
+replaces `lax.top_k` in lean routing under `moe_topk_by_bisection` (17.4 ms in
+z1). It returns the same expert set in ascending index order, which only
+reorders the combine sum; that is the cc-series.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd

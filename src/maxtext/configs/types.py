@@ -1141,6 +1141,11 @@ class MoEGeneral(BaseModel):
   )
   emo_max_document_expert_pool: int = Field(512, description="Largest EMo training pool size (must be <= num_experts).")
   emo_eval_document_expert_pool: int = Field(512, description="Fixed EMo pool size outside training.")
+  emo_threshold_by_bisection: bool = Field(
+      False,
+      description="With moe_lean_routing, find the EMo pool threshold by bisecting on the score bits"
+      " (32 counting passes) instead of sorting every token's expert scores.",
+  )
   use_custom_sort_vjp: bool = Field(
       True,
       description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul.",
@@ -1543,6 +1548,11 @@ class Qwen3Next(BaseModel):
           " the routing inverse permutation computed once, and top-k indices and the EMo mask saved"
           " under the moe_routing remat name so the bwd does not recompute them."
       ),
+  )
+  moe_topk_by_bisection: bool = Field(
+      False,
+      description="With moe_lean_routing, pick the top-k experts by bisecting on the logit bits instead of"
+      " lax.top_k (a sort on TPU). Same experts, returned in ascending index order.",
   )
   kda_conv_in_compute_dtype: bool = Field(
       False,

@@ -279,6 +279,22 @@ class OLMoE3RoutingTest(unittest.TestCase):
       got = OLMoE3LatentRoutedMoE._emo_keep_by_threshold(jnp.asarray(scores), jnp.asarray(pool))  # pylint: disable=protected-access
       self.assertTrue(bool((ref == got).all()))
 
+  def test_emo_threshold_bisection_matches_sort(self):
+    """The bisected EMo threshold keeps the same experts as the sorted one, ties and negatives included."""
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    import numpy as np
+    from maxtext.models.olmoe3 import OLMoE3LatentRoutedMoE
+
+    rng = np.random.default_rng(1)
+    for coarse in (False, True):
+      scores = (rng.random((2, 32, 512)) - 0.1).astype(np.float32)
+      if coarse:
+        scores = np.round(scores * 4) / 4
+      pool = rng.integers(16, 513, (2, 32)).astype(np.int32)
+      ref = jnp.argsort(jnp.argsort(-scores, axis=-1), axis=-1) < pool[..., None]
+      got = OLMoE3LatentRoutedMoE._emo_keep_by_threshold(jnp.asarray(scores), jnp.asarray(pool), bisect=True)  # pylint: disable=protected-access
+      self.assertTrue(bool((ref == got).all()))
+
   def test_lean_routing_is_exact(self):
     """``moe_lean_routing`` changes no value or gradient on the sparse-matmul path."""
     pool, seq_len = 20, 32
@@ -315,6 +331,57 @@ class OLMoE3RoutingTest(unittest.TestCase):
     self.assertEqual(float(v0), float(v1))
     for a, b in zip(jax.tree_util.tree_leaves(g0), jax.tree_util.tree_leaves(g1)):
       self.assertTrue(bool(jnp.array_equal(a, b)))
+
+  def test_topk_by_bisection_matches_lax_top_k(self):
+    """Bisection top-k picks the same expert set as ``lax.top_k``, in ascending index order."""
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.layers import moe as moe_lib
+
+    logits = jax.random.normal(jax.random.PRNGKey(3), (4, 64, 512), jnp.float32)
+    logits = jnp.where(jax.random.uniform(jax.random.PRNGKey(4), logits.shape) < 0.5, logits, -jnp.inf)
+    _, ref = jax.lax.top_k(logits, 16)
+    got = moe_lib.mask_to_indices(moe_lib.keep_top_by_bisection(logits, 16), 16)
+    self.assertTrue(bool((jnp.sort(ref, axis=-1) == got).all()))
+
+  def test_bisection_routing_matches_lean(self):
+    """The two bisection flags only reorder the combine sum: values and grads match lean routing closely."""
+    pool, seq_len = 20, 32
+    outs = []
+    for bisect in (False, True):
+      cfg = _config(
+          "olmoe3-30m",
+          max_target_length=seq_len,
+          extra=(
+              "override_model_config=True",
+              f"emo_min_document_expert_pool={pool}",
+              f"emo_max_document_expert_pool={pool}",
+              f"emo_eval_document_expert_pool={pool}",
+              "sparse_matmul=True",
+              "remat_policy=custom",
+              "moe_routing=device",
+              "moe_lean_routing=True",
+              f"emo_threshold_by_bisection={bisect}",
+              f"moe_topk_by_bisection={bisect}",
+          ),
+      )
+      mesh, model = _build(cfg)
+      tokens = (jnp.arange(seq_len, dtype=jnp.int32)[None, :] * 7) % 101 + 1
+      positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
+      segments = jnp.concatenate([jnp.ones((1, 12), jnp.int32), jnp.full((1, seq_len - 12), 2, jnp.int32)], axis=1)
+      with mesh:
+        params = model.init({"params": jax.random.PRNGKey(0)}, tokens, positions, segments)
+
+        def loss(p, model=model):
+          out = model.apply(p, tokens, positions, segments, enable_dropout=False)
+          logits = out[0] if isinstance(out, tuple) else out
+          return jnp.sum(jnp.sin(logits))
+
+        outs.append(jax.value_and_grad(loss)(params))
+    (v0, g0), (v1, g1) = outs
+    self.assertAlmostEqual(float(v0), float(v1), delta=1e-4 * abs(float(v0)))
+    for a, b in zip(jax.tree_util.tree_leaves(g0), jax.tree_util.tree_leaves(g1)):
+      # Tolerance scales with the leaf's largest entry: reordering the combine sum perturbs near-zero entries.
+      self.assertLessEqual(float(jnp.max(jnp.abs(a - b))), 1e-3 * float(jnp.max(jnp.abs(a))) + 1e-5)
 
 
 try:  # pylint: disable=g-import-not-at-top

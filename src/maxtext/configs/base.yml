@@ -273,6 +273,8 @@ emo_enabled: false
 emo_min_document_expert_pool: 16
 emo_max_document_expert_pool: 512
 emo_eval_document_expert_pool: 512
+# With moe_lean_routing, find the EMo pool threshold by bisection instead of a sort.
+emo_threshold_by_bisection: false
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 router_topk_matmul_vjp: false # deepseek routing: dense one-hot VJP for the top-k weight gather (no scatter-add in the backward)
@@ -1465,6 +1467,8 @@ tokamax_kda_log_decay_floor: 20.0
 tokamax_kda_l2norm_outside: false
 # Same MoE routing with fewer sorts, and routing indices saved for the bwd.
 moe_lean_routing: false
+# With moe_lean_routing, top-k by bisection on the logit bits instead of a sort.
+moe_topk_by_bisection: false
 # Cast the KDA short-conv weight to the activation dtype so q/k/v stay bf16.
 kda_conv_in_compute_dtype: false
 # Rematerialize each OLMoE3 layer on its own instead of per mixer cycle.

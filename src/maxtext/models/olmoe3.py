@@ -600,7 +600,9 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
       pool = jnp.full((batch, seq_len), cfg.emo_eval_document_expert_pool, dtype=jnp.int32)
 
     if cfg.moe_lean_routing:
-      keep = self._emo_keep_by_threshold(jax.lax.stop_gradient(document_scores), pool)
+      keep = self._emo_keep_by_threshold(
+          jax.lax.stop_gradient(document_scores), pool, bisect=cfg.emo_threshold_by_bisection
+      )
       keep = checkpoint_name(keep, "moe_routing")
     else:
       order = jnp.argsort(-document_scores, axis=-1)
@@ -609,13 +611,16 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     return jnp.where(keep, gate_logits, -jnp.inf)
 
   @staticmethod
-  def _emo_keep_by_threshold(scores, pool):
+  def _emo_keep_by_threshold(scores, pool, bisect=False):
     """``argsort(argsort(-scores)) < pool`` with one value sort instead of two argsorts.
 
     The pool-th largest score is the threshold. Everything above it is kept, and
     ties at the threshold fill the remaining slots lowest index first, which is
-    the order the stable argsort gives.
+    the order the stable argsort gives. ``bisect`` finds the threshold with 32
+    counting passes over the scores' order-preserving uint32 keys instead of a sort.
     """
+    if bisect:
+      return moe.keep_top_by_bisection(scores, pool[..., None])
     num_experts = scores.shape[-1]
     ascending = jnp.sort(scores, axis=-1)
     thr = jnp.take_along_axis(ascending, (num_experts - pool)[..., None], axis=-1)
