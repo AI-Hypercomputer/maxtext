@@ -94,8 +94,8 @@ HF_IDS = {
     "olmo3-7b": "allenai/Olmo-3-7B-Instruct",
     "olmo3-7b-pt": "allenai/Olmo-3-1025-7B",
     "olmo3-32b": "allenai/Olmo-3-32B-Think",
-    "weaver-mini": "Qwen/Qwen3-VL-4B-Instruct",
-    "weaver-max": "Qwen/Qwen3-VL-8B-Instruct",
+    # Note: weaver-* models intentionally have no default HF repo id here; pass
+    # --hf_model_path for checkpoint conversion and tokenizer_path for inference.
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }

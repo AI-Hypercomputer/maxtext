@@ -436,7 +436,13 @@ def _transform_and_save_weights(
   if lora_restore_path and not load_parameters_path:
     # Adapter Mode
     transformed_hf_weights, found_hf_modules = _transform_weights_to_adapter(param_map, maxtext_state_dict)
-    save_adapter_files(output_directory, transformed_hf_weights, config, found_hf_modules, HF_IDS.get(config.model_name))
+    save_adapter_files(
+        output_directory,
+        transformed_hf_weights,
+        config,
+        found_hf_modules,
+        FLAGS.hf_model_path or HF_IDS.get(config.model_name),
+    )
     max_logging.log(f"✅ LoRA adapter successfully saved at {output_directory}")
   else:
     # Base or Merged Mode
@@ -504,8 +510,10 @@ def main(argv: Sequence[str]) -> None:
 
   # 1. Get HuggingFace Model Configuration
   model_key = config.model_name
-  if model_key not in HF_IDS:
-    raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
+  if model_key not in HF_MODEL_CONFIGS:
+    raise ValueError(
+        f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_MODEL_CONFIGS.keys())}"
+    )
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
 
   # Validate architecture consistency (raising ValueError on mismatch) or override HF config if specified.
@@ -516,8 +524,8 @@ def main(argv: Sequence[str]) -> None:
     _apply_yarn_rope_config(hf_config_obj, config)
 
   # 2. Load Tokenizer
-  if model_key not in HF_IDS:
-    raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
+  if not FLAGS.hf_model_path and model_key not in HF_IDS:
+    raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}. Please specify --hf_model_path.")
   hf_token = config.hf_access_token
   hf_tokenizer_id = FLAGS.hf_model_path or HF_IDS[model_key]
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)

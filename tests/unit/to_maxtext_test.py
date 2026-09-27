@@ -29,6 +29,7 @@ pytestmark = [pytest.mark.decoupled_target]
 from maxtext.checkpoint_conversion.to_maxtext import (
     _convert_tensor_to_numpy,
     _extract_conversion_args,
+    _resolve_hf_model_id,
     resolve_scale_key,
 )
 
@@ -100,6 +101,36 @@ class ExtractConversionArgsTest(unittest.TestCase):
     self.assertEqual(extracted["eager_load_method"], "safetensors")
     self.assertEqual(extracted["simulated_cpu_devices_count"], 4)
     self.assertEqual(remaining, ["base.yml", "model_name=qwen3.5-35b-a3b-fp8", "steps=10"])
+
+
+class ResolveHfModelIdTest(unittest.TestCase):
+
+  def test_default_hf_id_from_globals(self):
+    self.assertEqual(_resolve_hf_model_id("qwen3-vl-4b"), "Qwen/Qwen3-VL-4B-Instruct")
+
+  def test_hf_model_path_overrides_default(self):
+    self.assertEqual(
+        _resolve_hf_model_id("qwen3-vl-4b", hf_model_path="/tmp/custom_model"),
+        "/tmp/custom_model",
+    )
+
+  def test_model_without_default_hf_id_succeeds_with_hf_model_path(self):
+    self.assertEqual(
+        _resolve_hf_model_id("weaver-mini", hf_model_path="org/custom-weaver-mini"),
+        "org/custom-weaver-mini",
+    )
+    self.assertEqual(
+        _resolve_hf_model_id("weaver-max", hf_model_path="org/custom-weaver-max"),
+        "org/custom-weaver-max",
+    )
+
+  def test_model_without_default_hf_id_raises_without_hf_model_path(self):
+    with self.assertRaisesRegex(ValueError, "Unsupported model name: weaver-mini"):
+      _resolve_hf_model_id("weaver-mini")
+
+  def test_unsupported_model_raises_even_with_hf_model_path(self):
+    with self.assertRaisesRegex(ValueError, "Unsupported model name: nonexistent-model"):
+      _resolve_hf_model_id("nonexistent-model", hf_model_path="/tmp/custom_model")
 
 
 if __name__ == "__main__":

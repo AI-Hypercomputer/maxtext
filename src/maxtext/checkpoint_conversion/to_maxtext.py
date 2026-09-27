@@ -965,6 +965,30 @@ def _extract_conversion_args(args: Sequence[str]) -> tuple[dict[str, Any], list[
   return extracted, cleaned_args
 
 
+def _resolve_hf_model_id(model_name: str | None, hf_model_path: str | None = None) -> str:
+  """Resolves the HuggingFace model path or repo ID for checkpoint conversion.
+
+  When `hf_model_path` is explicitly provided, allows models registered in
+  `HF_MODEL_CONFIGS` (even if they do not have a default repo ID in `HF_IDS`).
+  Otherwise, falls back to `HF_IDS[model_name]`.
+  """
+  if hf_model_path:
+    base_model_name = model_name.replace("-Instruct", "") if model_name else None
+    if model_name not in HF_IDS and base_model_name not in HF_MODEL_CONFIGS:
+      raise ValueError(
+          f"Unsupported model name: {model_name}. "
+          f"Supported models are: {sorted(set(HF_IDS.keys()) | set(HF_MODEL_CONFIGS.keys()))}"
+      )
+    return hf_model_path
+
+  if model_name not in HF_IDS:
+    raise ValueError(
+        f"Unsupported model name: {model_name}. "
+        f"Supported models are: {list(HF_IDS.keys())}, or specify --hf_model_path."
+    )
+  return HF_IDS[model_name]
+
+
 def main(
     args: Sequence[str],
     lazy_load_tensors: bool = True,
@@ -983,6 +1007,7 @@ def main(
   revision = extracted.get("revision", revision)
   simulated_cpu_devices_count = extracted.get("simulated_cpu_devices_count", simulated_cpu_devices_count)
   args = cleaned_args
+  model_name_original = None
   # Check if the user is using an Instruct version. If so, use the base model architecture
   for i, raw_param in enumerate(args):
     if raw_param.startswith("model_name="):
@@ -994,14 +1019,8 @@ def main(
         args[i] = f"model_name={model_name_arg}"
       break
 
-  # check the supported model ids
-  if model_name_original not in HF_IDS:
-    raise ValueError(
-        f"Unsupported model name: {model_name_original}.\
-                      Supported models are: {list(HF_IDS.keys())}"
-    )
-
-  model_id = hf_model_path or HF_IDS[model_name_original]
+  # Resolve the target HuggingFace model ID or path
+  model_id = _resolve_hf_model_id(model_name_original, hf_model_path)
 
   # Initialize maxtext config
   config = pyconfig.initialize(args)
