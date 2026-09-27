@@ -822,6 +822,30 @@ so the lever is fewer passes, not faster ones. The largest exposed collective
 is the async all-reduce of the `bf16[512,512,1024]` expert grads
 (`moe.py:3027`).
 
+### aa-series, expert all-gather inside the shard_map (o35n271120)
+
+The expert weights enter the MoE shard_map replicated, so their grad leaves as
+a psum: 45 full `bf16[512,512,1024]` all-reduces per step in the HLO. The
+candidate passed them in still expert-sharded over FSDP and ran
+`jax.lax.all_gather` inside, whose transpose is a reduce-scatter. Local AOT
+confirmed the swap (45 reduce-scatters of `bf16[16,512,1024]`, 7 small
+all-reduces over DP, 3.8 GB less temp).
+
+| arm | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|
+| aa1_ctrl | 141.6 | 12.28% | 0.748 | 10.834 |
+| aa4_ctrl | 141.9 | 12.31% | 0.747 | 10.834 |
+| aa2_gis | 135.0 | 11.70% | 0.786 | 10.832 |
+| aa3_gis | 135.2 | 11.72% | 0.784 | 10.832 |
+
+**-4.7%, dropped.** Half the grad traffic does not pay for losing the
+boundary all-gather: in the base it runs on mesh-axis replica groups that the
+SparseCore 3D all-gather offload takes, inside the shard_map it becomes a
+32-wide explicit-group all-gather. The patch is not kept.
+
+`prefuse_moe_weights=True` (one wi GMM with N=2048) compiles to 107.7 GB of
+temp against 94.3 GB for the base, so it cannot fit at pdb 3 and was not run.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
