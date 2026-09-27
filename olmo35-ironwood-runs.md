@@ -703,6 +703,21 @@ Per-tile overhead dominates straddle waste at these narrow GEMMs (k and n of 512
 to 1024). The tokamax heuristic tiling is 17% slower. The v-series tests
 2048 and 4096.
 
+### v-series, larger m-tiles (o35n270401)
+
+Lean base, m-tile on all six knobs unless stated.
+
+| arm | change | TF/s/dev | MFU | loss @19 |
+|---|---|---|---|---|
+| **v1_tm1024** | tm 1024 | **134.0** | **11.62%** | **10.836** |
+| v2_tm2048 | tm 2048 | 132.4 | 11.48% | 10.834 |
+| v3_tm4096 | tm 4096 | 119.0 | 10.32% | 10.836 |
+| v4_tm1k_drhs2k | tm 1024, drhs 2048 | 133.4 | 11.56% | 10.835 |
+
+**tm 1024 is the optimum** and repeats u4 (133.9). 2048 loses 1.2%, 4096
+loses 11%. A larger tile only on the weight-gradient pass does not help. The new
+base is lean routing plus tm 1024 on all six knobs: 134.0 TF/s, 11.62%.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
