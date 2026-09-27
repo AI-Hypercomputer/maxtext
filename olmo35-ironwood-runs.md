@@ -734,9 +734,10 @@ rsqrt) and passes `use_qk_l2norm=False`. It targets the 31 ms
 | **w3_l2out** | nap | **137.7** | **11.94%** | **0.770** | 10.834 |
 | w2_l2out | flex | 137.3 | 11.91% | 0.772 | 10.834 |
 
-**+2.4% (18 ms per step), repeated on both clusters.** XLA fuses the norm and
-its bwd into the neighbouring conv and transpose fusions, so the kernel's
-separate bwd pass over dq and dk goes away. The forward is the same formula. The
+**+2.4% (18 ms per step), repeated on both clusters.** The expected mechanism is
+that XLA fuses the norm and its bwd into the neighbouring conv and transpose
+fusions instead of a separate pass over dq and dk; the x-series profile checks
+this. The forward is the same formula. The
 bwd differs only in rounding: the kernel differentiates through the bf16
 normalized q, autodiff through the raw q. That moves the step-19 loss by 0.002,
 the same size as the tm 2048 shift. A CPU test pins the output and input grads
