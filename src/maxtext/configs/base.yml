@@ -1462,6 +1462,10 @@ partial_rotary_factor: 1.0
 use_gdn_kernel: false
 # GDN context parallelism mode ('auto', 'seq', or 'head')
 gdn_cp_mode: "auto"
+# Precision of the f32 matmuls in the sequence-sharded CP state composition of the GDN kernel path
+# ('highest' = 6 bf16 passes on TPU, 'high' = 3 passes). Only used with use_gdn_kernel: true and
+# sequence-sharded GDN CP (gdn_cp_mode 'seq', or 'auto' when it does not pick head sharding); a no-op otherwise.
+gdn_cp_matmul_precision: "highest"
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

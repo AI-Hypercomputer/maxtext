@@ -345,6 +345,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
     cp_axis_name: str | tuple[str, ...],
     segment_ids: Optional[jax.Array] = None,
     seg_metadata: Optional[Tuple[Optional[jax.Array], Optional[jax.Array], Optional[jax.Array]]] = None,
+    cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
 ):
   """Runs 2-pass sequence-sharded CP forward for GDN."""
   batch_size = qkv.shape[0]
@@ -422,10 +423,11 @@ def _run_cp_gdn_decoupled_fwd_impl(
       s_ext_pass1=states_pass1[1],
       segment_ids=s_enc_local,
       init_seg=init_seg,
+      precision=cp_matmul_precision,
   )
 
   h_init = recurrent_state.astype(jnp.float32) if recurrent_state is not None else zero_rs
-  s_in_r, final_rs = cp_gdn.incoming_state(m_local, s_ext_local, h_init, cp_axis_name)
+  s_in_r, final_rs = cp_gdn.incoming_state(m_local, s_ext_local, h_init, cp_axis_name, precision=cp_matmul_precision)
 
   # Pass 2: Local GDN with true incoming state s_in_r
   (out, (next_cs_local, _)), t_inv_2, chunk_states = _run_local_gdn_decoupled_fwd(
@@ -462,7 +464,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
   return (out, states), t_inv_2, chunk_states, conv_halo, s_in_r, m_local
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 19))
 def gdn_decoupled_conv1d(
     qkv: jax.Array,
     b: jax.Array,
@@ -483,8 +485,13 @@ def gdn_decoupled_conv1d(
     compute_dtype: jnp.dtype,
     cp_axis_name: str | tuple[str, ...] | None = None,
     segment_ids: Optional[jax.Array] = None,
+    cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
 ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
-  """Decoupled Conv1D + GDN with Pallas backward pass and optional sequence-sharded CP."""
+  """Decoupled Conv1D + GDN with Pallas backward pass and optional sequence-sharded CP.
+
+  `cp_matmul_precision` sets the precision of the f32 matmuls that compose the recurrent state across
+  sequence-sharded CP ranks (`cp_gdn`); it is unused without CP.
+  """
   if _is_cp_active(cp_axis_name):
     (out, states), _, _, _, _, _ = _run_cp_gdn_decoupled_fwd_impl(
         qkv,
@@ -506,6 +513,7 @@ def gdn_decoupled_conv1d(
         compute_dtype=compute_dtype,
         cp_axis_name=cp_axis_name,
         segment_ids=segment_ids,
+        cp_matmul_precision=cp_matmul_precision,
     )
     return out, states
 
@@ -567,6 +575,7 @@ def _gdn_decoupled_conv1d_fwd(
     compute_dtype: jnp.dtype,
     cp_axis_name: str | tuple[str, ...] | None = None,
     segment_ids: Optional[jax.Array] = None,
+    cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
 ):
   """Forward rule for custom_vjp registration of gdn_decoupled_conv1d."""
   (
@@ -625,6 +634,7 @@ def _gdn_decoupled_conv1d_fwd(
         cp_axis_name=cp_axis_name,
         segment_ids=segment_ids,
         seg_metadata=seg_metadata,
+        cp_matmul_precision=cp_matmul_precision,
     )
     out = checkpoint_name(out, "gdn_core_attn_out")
     residuals = (
@@ -698,15 +708,19 @@ def _gdn_decoupled_conv1d_bwd(
     use_qk_norm_in_gdn: bool,
     compute_dtype: jnp.dtype,
     cp_axis_name: str | tuple[str, ...] | None = None,
+    cp_matmul_precision: Any = cp_gdn.DEFAULT_PRECISION,
     residuals: tuple[Any, ...] | None = None,
     cotangents: tuple[Any, ...] | None = None,
 ):
   """Backward rule for custom_vjp registration of gdn_decoupled_conv1d."""
-  # Support 10-arg positional calls where cp_axis_name was omitted
-  if cotangents is None and isinstance(cp_axis_name, tuple) and len(cp_axis_name) >= 10:
-    cotangents = residuals
-    residuals = cp_axis_name
-    cp_axis_name = None
+  # Support positional calls that omit the trailing nondiff arguments: 10 args (no cp_axis_name,
+  # no cp_matmul_precision) or 11 args (no cp_matmul_precision).
+  if residuals is None and cotangents is None and isinstance(cp_axis_name, tuple) and len(cp_axis_name) >= 10:
+    residuals, cotangents = cp_axis_name, cp_matmul_precision
+    cp_axis_name, cp_matmul_precision = None, cp_gdn.DEFAULT_PRECISION
+  elif cotangents is None and isinstance(cp_matmul_precision, tuple) and len(cp_matmul_precision) >= 10:
+    residuals, cotangents = cp_matmul_precision, residuals
+    cp_matmul_precision = cp_gdn.DEFAULT_PRECISION
 
   m_local_fwd = None
   seg_slot = None
@@ -903,8 +917,11 @@ def _gdn_decoupled_conv1d_bwd(
         m_local_cached=m_local_fwd,
         segment_ids=segment_ids,
         init_seg=init_seg,
+        precision=cp_matmul_precision,
     )
-    dht_local, _ = cp_gdn.incoming_grad_state(dm_local, ds_ext_local, dht_final, cp_axis_name)
+    dht_local, _ = cp_gdn.incoming_grad_state(
+        dm_local, ds_ext_local, dht_final, cp_axis_name, precision=cp_matmul_precision
+    )
     bwd_out = pallas_gdn_bwd_kernel(
         qkv_conv=qkv_conv,
         b=b,
