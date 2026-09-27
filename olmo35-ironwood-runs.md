@@ -670,6 +670,20 @@ top_k (17 ms) and one routing argsort per layer (7 ms). None is recomputed in
 remat any more. The step is now MoE grouped matmuls 23%, loop fusions 18%,
 KDA 16%, dense matmuls 9%, converts 8%.
 
+### t-series, on the lean base (o35n270251)
+
+| arm | change | TF/s/dev | MFU | loss @19 |
+|---|---|---|---|---|
+| t1_ctrl | control | 131.2 | 11.37% | 10.836 |
+| t2_disp | `moe_dispatch=device` | 131.5 | 11.40% | 10.837 |
+| t3_plr_p4 | per-layer remat, pdb 4 | 127.1 | 11.02% | 10.929 (other batch) |
+| t4_ctrl | control repeat | 131.4 | 11.39% | 10.836 |
+
+The controls repeat s2 within 0.2%. Saving the dispatch buffer is noise again.
+pdb 4 gained more from lean routing than pdb 3 (113.9 to 127.1), but the
+per-layer remat it needs still costs more than the larger batch returns.
+pdb 3 stays.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
