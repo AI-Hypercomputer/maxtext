@@ -769,6 +769,25 @@ is ported into the vendored kernel behind `gmm_v2_dlhs_transpose_in_kernel`. On
 a local v4 the fwd and both grads are bitwise identical with and without it.
 The y-series measures it in-model.
 
+### y-series, dlhs transpose in the kernel (o35n270839 nap, o35s270839 flex)
+
+l2out base.
+
+| arm | route | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|---|
+| y1_ctrl | nap | 137.5 | 11.92% | 0.772 | 10.834 |
+| y4_ctrl | nap | 137.4 | 11.91% | 0.771 | 10.834 |
+| y1_ctrl | flex | 137.6 | 11.93% | 0.770 | 10.834 |
+| **y2_trhs** | nap | **141.4** | **12.25%** | **0.750** | 10.834 |
+| **y3_trhs** | nap | **141.6** | **12.27%** | **0.749** | 10.834 |
+
+**+2.9% (22 ms per step) with identical loss.** The step saves about half of
+the 43 ms of copies; the in-kernel transpose costs the rest, or some copies
+remain (the next profile tells). A local v4 microbench showed no gain because
+there the transpose fuses into the f32 to bf16 cast; in the model the cast runs
+before the all-gather, so the copy was a separate pass. New base: 141.5 TF/s,
+12.26%.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
