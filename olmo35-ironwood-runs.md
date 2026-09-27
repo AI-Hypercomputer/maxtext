@@ -867,6 +867,22 @@ replaces `lax.top_k` in lean routing under `moe_topk_by_bisection` (17.4 ms in
 z1). It returns the same expert set in ascending index order, which only
 reorders the combine sum; that is the cc-series.
 
+### cc-series, router top-k by bisection (o35n271227)
+
+Base is `y2_trhs` plus `emo_threshold_by_bisection=True`.
+
+| arm | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|
+| cc1_ctrl | 144.0 | 12.49% | 0.736 | 10.834 |
+| cc4_ctrl | 144.4 | 12.52% | 0.734 | 10.834 |
+| cc2_tk | 140.8 | 12.20% | 0.753 | 10.833 |
+| cc3_tk | 141.4 | 12.26% | 0.750 | 10.833 |
+
+**-2.1%, dropped.** The EMo mask bisects one row per document; the router
+bisects all 393216 token rows, so 32 count passes over `[rows, 512]` plus the
+`[rows, 512, 16]` one-hot in `mask_to_indices` cost more than the 17.4 ms of
+`lax.top_k` they replace. The flag stays in, default off.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
