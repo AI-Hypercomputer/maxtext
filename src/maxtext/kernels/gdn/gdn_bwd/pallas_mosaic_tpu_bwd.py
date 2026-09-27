@@ -827,7 +827,7 @@ def pallas_gdn_bwd_kernel(
     vmem_limit_bytes = int(cfg.vmem_limit_mb) * 1024 * 1024
   else:
     tpu_info = pltpu.get_tpu_info()
-    vmem_limit_bytes = int(0.85 * tpu_info.vmem_capacity_bytes)
+    vmem_limit_bytes = int(0.9 * tpu_info.vmem_capacity_bytes)
 
   hbm = pltpu.MemorySpace.HBM
   pallas_out = pl.pallas_call(
