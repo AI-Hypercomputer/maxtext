@@ -1421,6 +1421,14 @@ class MoEKernels(BaseModel):
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
 
+  gmm_v2_dlhs_transpose_in_kernel: bool = Field(
+      False,
+      description=(
+          "In the GMM v2 bwd, read the weight as stored and transpose it inside the dlhs kernel,"
+          " instead of writing a transposed copy of the gathered expert weights to HBM every layer."
+      ),
+  )
+
   tokamax_gmm_tile_m: NonNegativeInt = Field(
       0,
       description=(

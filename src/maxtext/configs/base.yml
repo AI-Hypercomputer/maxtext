@@ -345,6 +345,8 @@ use_gmm_v2: false
 # Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
 # When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
 use_gmm_v2_heuristic_tiling: false
+# Transpose the expert weight inside the GMM v2 dlhs kernel instead of copying it in HBM.
+gmm_v2_dlhs_transpose_in_kernel: false
 # Override the m-tile of the Tokamax v1 ragged-dot kernel; 0 keeps tokamax's heuristic.
 # The wi_tile_*/wo_tile_* knobs above do not reach that kernel, since tokamax.ragged_dot
 # takes no tiling argument. Its heuristic uses tile_m = min(total_rows, 1024) and never

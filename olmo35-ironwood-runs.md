@@ -743,6 +743,32 @@ normalized q, autodiff through the raw q. That moves the step-19 loss by 0.002,
 the same size as the tm 2048 shift. A CPU test pins the output and input grads
 to 1e-4 relative. New base: 137.5 TF/s, 11.92%.
 
+### x-series, profile of the l2out base (o35n270751)
+
+x1_prof runs at 137.4 TF/s, same as the unprofiled arms. One device, against s4:
+
+| | s4 (lean, tm 512) | x1 (tm 1024, l2out) |
+|---|---|---|
+| step (profiled ops) | 801 ms | 765 ms |
+| gmm_v2 and tgmm_v2 | 186 ms | 162 ms |
+| `chunk_kda_bwd_custom/mul` | 31 ms | 0 |
+| new norm fusions | 0 | about 6 ms |
+| sort and top_k | 55 ms | 55 ms |
+
+The profile confirms the w-series mechanism: the kernel's separate l2norm bwd
+pass is gone and the norm lands in small XLA fusions.
+
+**Next target: relayout copies of the gathered expert weights, 43 ms (5.6%).**
+Each is a 0.9 ms HBM copy of the all-gathered bf16 bank, `[512,1024,512]` from
+layout `{2,1,0}` to `{1,2,0}` (and the matching wi copy), traced to the weight
+cast at `moe.py:3938`. It feeds the GMM bwd dlhs, which computes
+`dout @ W^T`: `_dlhs_run_tokamax_v2` did `rhs.swapaxes(1, 2)` because the
+vendored gmm_v2 had no `transpose_rhs`. Upstream tokamax gmm_v2 has one (the
+BlockSpec reads `[tile_n, tile_k]` blocks and the MXU matmul takes `.T`), so it
+is ported into the vendored kernel behind `gmm_v2_dlhs_transpose_in_kernel`. On
+a local v4 the fwd and both grads are bitwise identical with and without it.
+The y-series measures it in-model.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd

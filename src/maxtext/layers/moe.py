@@ -2054,6 +2054,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2=self.config.use_gmm_v2,
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
+            dlhs_transpose_in_kernel=self.config.gmm_v2_dlhs_transpose_in_kernel,
             interpret=megablox_interpret,
         )
       else:
