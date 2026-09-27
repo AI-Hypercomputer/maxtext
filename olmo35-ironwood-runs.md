@@ -645,6 +645,31 @@ lever is fewer sorts, not faster ones.
 `test_lean_routing_is_exact` checks that loss and every parameter gradient are
 bitwise equal on CPU with EMo pools active.
 
+### s-series, lean routing (o35n270116)
+
+Base p2.
+
+| arm | change | TF/s/dev | MFU | loss @19 |
+|---|---|---|---|---|
+| s1_ctrl | control | 123.7 | 10.73% | 10.836 |
+| **s2_lean** | `moe_lean_routing=True` | **131.2** | **11.37%** | **10.836** |
+| s3_lean | repeat | 131.4 | 11.39% | 10.836 |
+| s4_lean_prof | repeat, profiled | 131.5 | 11.40% | 10.836 |
+
+**Lean routing is +6.1% with loss unchanged, and it is the new base.** The
+three lean arms agree to 0.2%. Profile, s4 against r1, one device:
+
+| | r1 (p2) | s4 (lean) |
+|---|---|---|
+| step | 850 ms | 801 ms |
+| sorts and top_k | 98 ms | 55 ms |
+| remat recompute | 110 ms | 76 ms |
+
+What sorts remain: the EMo value sort (1.55 ms per layer, 23 ms), the forward
+top_k (17 ms) and one routing argsort per layer (7 ms). None is recomputed in
+remat any more. The step is now MoE grouped matmuls 23%, loop fusions 18%,
+KDA 16%, dense matmuls 9%, converts 8%.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
