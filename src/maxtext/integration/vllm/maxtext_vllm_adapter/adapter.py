@@ -20,7 +20,7 @@ from flax.core.spmd import logical_axis_rules
 import jax
 from jax import numpy as jnp
 from jax.experimental.pallas import tpu as pltpu
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import numpy as np
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
@@ -367,6 +367,12 @@ class MaxTextForCausalLM(nnx.Module):
 
       if isinstance(res, tuple) and len(res) == 3:
         hidden, layer_kv_caches, expert_indices = res
+        if expert_indices is not None and self.mesh is not None:
+          # Replicate across mesh for multi-host device_get().
+          expert_indices = jax.lax.with_sharding_constraint(
+              expert_indices,
+              NamedSharding(self.mesh, PartitionSpec()),
+          )
       else:
         hidden, layer_kv_caches = res
 
