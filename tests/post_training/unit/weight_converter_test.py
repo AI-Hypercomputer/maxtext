@@ -785,5 +785,197 @@ class TargetFreeConversionTest(unittest.TestCase):
     self.assertIn("must be divisible by base_num_kv_heads", str(ctx.exception))
 
 
+def _fp32_leaf_source(float32_gate_logits: bool, logits_dot_in_fp32: bool):
+  """Trainer state with the leaf dtypes MaxText gives it under these flags.
+
+  Kernels and the embedding follow weight_dtype (bf16). The flags move specific
+  leaves to float32, mirroring the model code: common_types.get_weight_dtype
+  pins norms, GDN conv1d/A_log/dt_bias, the routed and shared-expert gates and
+  logits_dense under float32_gate_logits; nnx_decoders pins decoder_norm and
+  logits_dense under logits_dot_in_fp32. decoder_norm is *not* float32 under
+  float32_gate_logits alone.
+
+  Slot 0 is a GatedDeltaNet layer and slot 3 the full-attention layer of the
+  shrunk qwen3.5 cycle. Layer leaves are scanned and take the "slice" op; the
+  embedding, decoder_norm and logits_dense take "identity".
+  """
+  bf16 = jnp.bfloat16
+  gated = jnp.float32 if float32_gate_logits else bf16
+  logits = jnp.float32 if (float32_gate_logits or logits_dot_in_fp32) else bf16
+  final_norm = jnp.float32 if logits_dot_in_fp32 else bf16
+
+  def scanned(dtype, *shape):
+    # +0.1 is not representable in bf16, so a float32 leaf rounded through bf16
+    # on the way shows up as a value mismatch, not only as a dtype one.
+    return _scanned(*shape, offset=0.1).astype(dtype)
+
+  def layer(attention):
+    return {
+        "input_layernorm": {"scale": scanned(gated, EMB)},
+        "post_attention_layernorm": {"scale": scanned(gated, EMB)},
+        "attention": attention,
+        "mlp": {
+            "routed_experts": {"gate": {"kernel": scanned(gated, EMB, EXPERTS)}},
+            "shared_expert": {"wi_0": {"kernel": scanned(bf16, EMB, MOE_DIM)}},
+            "shared_expert_gate": {"kernel": scanned(gated, EMB, 1)},
+        },
+    }
+
+  gdn = {
+      "in_proj_qkvz": {"kernel": scanned(bf16, EMB, 12)},
+      "conv1d": {"kernel": scanned(gated, 4, 1, 12)},
+      "A_log": scanned(gated, 2),
+      "dt_bias": scanned(gated, 2),
+  }
+  full_attention = {"attention": {"query": {"kernel": scanned(bf16, EMB, 2, 4)}}}
+  return {
+      "base": {
+          "token_embedder": {"embedding": _arr(16, EMB).astype(bf16)},
+          "decoder": {
+              "layers": {"layer_0": layer(gdn), f"layer_{CYCLE - 1}": layer(full_attention)},
+              "decoder_norm": {"scale": _arr(EMB, offset=0.1).astype(final_norm)},
+              "logits_dense": {"kernel": _arr(EMB, 16, offset=0.1).astype(logits)},
+          },
+      }
+  }
+
+
+def _source_dtypes(source):
+  return {".".join(key): jnp.dtype(value.dtype) for key, value in traverse_util.flatten_dict(source).items()}
+
+
+def _dtypes_by_source(out):
+  """{source path: dtype} for a target-free result, keyed back to its source.
+
+  `layers_{i}` folds back to the scanned `layers.layer_{i % CYCLE}` it was
+  sliced from, so a source leaf whose blocks disagree on dtype shows up as a set
+  rather than hiding behind whichever block was read last.
+  """
+  seen = {}
+  for key, leaf in traverse_util.flatten_dict(out).items():
+    parts = []
+    for part in key:
+      if isinstance(part, str) and part.startswith("layers_"):
+        parts += ["layers", f"layer_{int(part[len('layers_'):]) % CYCLE}"]
+      else:
+        parts.append(str(part))
+    seen.setdefault(".".join(parts), set()).add(jnp.dtype(getattr(leaf, "value", leaf).dtype))
+  return {path: next(iter(dtypes)) if len(dtypes) == 1 else dtypes for path, dtypes in seen.items()}
+
+
+class TargetFreeFloat32LeafDtypeTest(unittest.TestCase):
+  """Target-free sync must send each leaf in the dtype the rollout holds it in.
+
+  With no target state the converter alone picks the wire dtype, and Tunix's
+  transport preflight fails the whole sync round on any per-key item_size
+  mismatch. A rollout built with float32_gate_logits or logits_dot_in_fp32
+  holds the leaves those flags move to float32 in float32, so they must arrive
+  float32; bf16 kernels must still arrive bf16, and with both flags off the old
+  gate/router-only rule must be unchanged.
+  """
+
+  BF16 = jnp.dtype(jnp.bfloat16)
+  F32 = jnp.dtype(jnp.float32)
+  # The only paths the flag-independent rule lets keep their source dtype.
+  GATES = frozenset(
+      f"base.decoder.layers.layer_{slot}.mlp.{name}.kernel"
+      for slot in (0, CYCLE - 1)
+      for name in ("routed_experts.gate", "shared_expert_gate")
+  )
+
+  @staticmethod
+  def _converter(**flags):
+    return MaxTextToMaxTextConverter(_config(weight_dtype="bfloat16", **flags))
+
+  def test_float32_gate_logits_keeps_every_float32_leaf(self):
+    for logits_dot_in_fp32 in (False, True):
+      source = _fp32_leaf_source(float32_gate_logits=True, logits_dot_in_fp32=logits_dot_in_fp32)
+      # Sources here are only bf16 or float32, so "float32 stays float32, bf16
+      # goes to target_dtype" is exactly "every leaf keeps its source dtype".
+      want = _source_dtypes(source)
+      # Guard the fixture itself: a float32 leaf of every kind the flag moves,
+      # on both op paths, or this test could pass without exercising them.
+      fp32 = {path for path, dtype in want.items() if dtype == self.F32}
+      gdn = "base.decoder.layers.layer_0"
+      self.assertLessEqual(
+          {
+              f"{gdn}.input_layernorm.scale",
+              f"{gdn}.attention.conv1d.kernel",
+              f"{gdn}.attention.A_log",
+              f"{gdn}.attention.dt_bias",
+              "base.decoder.logits_dense.kernel",
+          }
+          | self.GATES,
+          fp32,
+      )
+      for abstract in (False, True):
+        with self.subTest(logits_dot_in_fp32=logits_dot_in_fp32, abstract=abstract):
+          src = jax.tree_util.tree_map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), source) if abstract else source
+          converter = self._converter(float32_gate_logits=True, logits_dot_in_fp32=logits_dot_in_fp32)
+          self.assertEqual(_dtypes_by_source(converter.convert(src, target_state=None)), want)
+          self.assertEqual({g.op for g in converter._groups}, {"identity", "slice"})  # pylint: disable=protected-access
+
+  def test_kept_float32_leaf_is_not_rounded_through_bf16(self):
+    source = _fp32_leaf_source(float32_gate_logits=True, logits_dot_in_fp32=False)
+    out = self._converter(float32_gate_logits=True).convert(source, target_state=None)["base"]["decoder"]
+    src = source["base"]["decoder"]
+    # Slice path: slot 0, block 1 is layers_4.
+    got = getattr(out[f"layers_{CYCLE}"]["attention"]["A_log"], "value", out[f"layers_{CYCLE}"]["attention"]["A_log"])
+    want = jnp.take(src["layers"]["layer_0"]["attention"]["A_log"], 1, axis=SCAN_AXIS)
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
+    # Identity path.
+    got = getattr(out["logits_dense"]["kernel"], "value", out["logits_dense"]["kernel"])
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(src["logits_dense"]["kernel"]))
+
+  def test_flags_off_keeps_only_gate_and_router_dtypes(self):
+    """With both flags off only gate/router leaves keep their source dtype."""
+    source = _fp32_leaf_source(float32_gate_logits=True, logits_dot_in_fp32=True)
+    want = {path: dtype if path in self.GATES else self.BF16 for path, dtype in _source_dtypes(source).items()}
+    f32_leaf = jnp.zeros((2,), jnp.float32)
+    # An absent flag must behave like an explicit False.
+    for flags in ({}, {"float32_gate_logits": False, "logits_dot_in_fp32": False}):
+      with self.subTest(flags=flags):
+        converter = self._converter(**flags)
+        arrived = _dtypes_by_source(converter.convert(source, target_state=None))
+        self.assertEqual({path for path, dtype in arrived.items() if dtype == self.F32}, self.GATES)
+        self.assertEqual(arrived, want)
+        # No qwen3.5 param path contains "router", so the fixture cannot reach
+        # that half of the rule; check it directly.
+        self.assertEqual(
+            converter._target_free_dtype(f32_leaf, "decoder.layers.layer_0.mlp.router.kernel", jnp.bfloat16),  # pylint: disable=protected-access
+            self.F32,
+        )
+
+  def test_logits_dot_in_fp32_alone_keeps_decoder_norm_and_logits_dense(self):
+    source = _fp32_leaf_source(float32_gate_logits=False, logits_dot_in_fp32=True)
+    arrived = _dtypes_by_source(self._converter(logits_dot_in_fp32=True).convert(source, target_state=None))
+    self.assertEqual(arrived["base.decoder.decoder_norm.scale"], self.F32)
+    self.assertEqual(arrived["base.decoder.logits_dense.kernel"], self.F32)
+    self.assertEqual(arrived, _source_dtypes(source))
+
+  def test_bf16_leaf_is_never_upcast(self):
+    """The rule keys on the source dtype, so an all-bf16 trainer stays bf16.
+
+    Covers gate paths too, and both flags on, where an over-broad rule keyed on
+    the path or the flag alone would up-cast.
+    """
+    source = _fp32_leaf_source(float32_gate_logits=False, logits_dot_in_fp32=False)
+    for float32_gate_logits in (False, True):
+      for logits_dot_in_fp32 in (False, True):
+        with self.subTest(float32_gate_logits=float32_gate_logits, logits_dot_in_fp32=logits_dot_in_fp32):
+          converter = self._converter(float32_gate_logits=float32_gate_logits, logits_dot_in_fp32=logits_dot_in_fp32)
+          arrived = _dtypes_by_source(converter.convert(source, target_state=None))
+          self.assertEqual(set(arrived), set(_source_dtypes(source)))
+          self.assertEqual(set(arrived.values()), {self.BF16})
+
+  def test_leaf_without_dtype_falls_back_to_target_dtype(self):
+    converter = self._converter(float32_gate_logits=True, logits_dot_in_fp32=True)
+    for path in ("decoder.decoder_norm.scale", "decoder.layers.layer_0.mlp.routed_experts.gate.kernel"):
+      with self.subTest(path=path):
+        self.assertEqual(
+            converter._target_free_dtype(0.5, path, jnp.bfloat16), jnp.bfloat16  # pylint: disable=protected-access
+        )
+
+
 if __name__ == "__main__":
   unittest.main()

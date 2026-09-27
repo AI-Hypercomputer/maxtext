@@ -1041,6 +1041,29 @@ class MaxTextToMaxTextConverter:
 
     raise ConversionPlanError(f"Unknown moe_fused_layout: {self.moe_fused_layout!r}")
 
+  def _target_free_dtype(self, raw_val, path: str, target_dtype):
+    """Wire dtype for a non-MoE leaf when the rollout sent no target state.
+
+    Router leaves keep their source dtype, as before. Under float32_gate_logits
+    MaxText also stores norms, GDN A_log/dt_bias/conv1d, shared_expert_gate and
+    logits_dense in float32 (common_types.get_weight_dtype), and
+    logits_dot_in_fp32 does the same for decoder_norm and logits_dense. A
+    rollout model built with the same flags holds those leaves in float32 too,
+    so they must be sent unconverted or the transport preflight rejects the
+    item_size. Assumes weight_dtype is bfloat16 on both sides, as Tunix sets it.
+    """
+    src_dt = getattr(raw_val, "dtype", None)
+    if src_dt is None:
+      return target_dtype
+    if "gate" in path or "router" in path:
+      return src_dt
+    fp32_surgical = getattr(self.config, "float32_gate_logits", False) or getattr(
+        self.config, "logits_dot_in_fp32", False
+    )
+    if fp32_surgical and jnp.dtype(src_dt) == jnp.float32:
+      return src_dt
+    return target_dtype
+
   def _execute_group_target_free(self, group: _PlanGroup, src_flat):
     """Executes a conversion plan group without a target state."""
     path = group.source_path
@@ -1048,7 +1071,7 @@ class MaxTextToMaxTextConverter:
 
     if group.op == "identity":
       raw_val = src_flat[group.source_keys[0]]
-      tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+      tgt_dt = self._target_free_dtype(raw_val, path, target_dtype)
       val = _apply_dtype_cast(raw_val, tgt_dt, path)
       is_kv = "key.kernel" in path or "value.kernel" in path
       if (
@@ -1074,7 +1097,7 @@ class MaxTextToMaxTextConverter:
 
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
-    tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+    tgt_dt = self._target_free_dtype(raw_val, path, target_dtype)
     val = _apply_dtype_cast(raw_val, tgt_dt, path)
     self._check_scan_axis(val, path)
     per_block = self._slice_bulk_target_free(val, path)
