@@ -23,6 +23,7 @@ import datetime
 import functools
 import gc
 import os
+import time
 
 from absl import app
 
@@ -38,6 +39,7 @@ except ImportError:
   _TF_AVAILABLE = False
 
 import jax
+from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 
@@ -710,7 +712,10 @@ def training_loop_iteration(
     elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
-    example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+    # load_first_batch_before_run_start: the first batch was already loaded before RUN_START.
+    example_batch = python_vars.pop("first_batch", None)
+    if example_batch is None:
+      example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
     # DiLoCo's inner step takes the rng like the inner NNX step.
     if config.enable_diloco:
       # pylint: disable=not-callable
@@ -1003,6 +1008,21 @@ def train_loop(config, recorder, state=None):
   _job_completed_gracefully = False
   te_moe_overflow_window = []
   try:
+    if config.load_first_batch_before_run_start:
+      # Load the first batch (the slow part of the first step: e.g. filling the tf.data shuffle buffer from GCS)
+      # before RUN_START, then barrier so no host starts the clock while another is still loading.
+      load_start = time.perf_counter()
+      with jax.profiler.StepTraceAnnotation("train", step_num=start_step):
+        first_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+      jax.block_until_ready(first_batch)
+      python_vars["first_batch"] = first_batch
+      load_end = time.perf_counter()
+      multihost_utils.sync_global_devices("load_first_batch_before_run_start")
+      max_logging.log(
+          f"load_first_batch_before_run_start: first batch {load_end - load_start:.3f} s, "
+          f"barrier wait {time.perf_counter() - load_end:.3f} s (process {jax.process_index()})"
+      )
+
     python_vars["last_step_completion"] = datetime.datetime.now()
 
     mllog_utils.init_print(config)

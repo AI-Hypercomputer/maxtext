@@ -543,6 +543,9 @@ base_output_directory: ""
 # Whether to enable MLPerf logging (mllog). Default is false.
 # Note: MLPerf compliance checking requires eval_interval > 0 (at least one eval_accuracy event).
 enable_mllog: false
+# Before init_stop/run_start, load + block on the first train batch on every host, then a cross-host barrier,
+# so the first-batch input-pipeline latency is not inside the MLPerf timed region.
+load_first_batch_before_run_start: false
 
 # File name for exporting MLPerf mllog entries in base_output_directory (e.g. "mllog.log" or "seed_1.out").
 # If base_output_directory is set and mllog_file is empty, defaults to "mllog_<data_shuffle_seed>.log"

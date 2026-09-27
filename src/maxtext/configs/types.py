@@ -343,6 +343,14 @@ class RunInfo(BaseModel):
   debug_sharding: bool = Field(False, description="If True, print model weight sharding details.")
   base_output_directory: PathStr = Field("", description="Base directory for all outputs, typically a GCS path.")
   enable_mllog: bool = Field(False, description="If True, enables MLPerf logging (mllog).")
+  load_first_batch_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start are logged, load and device_put the first training batch on every host, block "
+          "until it is ready and run a cross-host barrier; the first train step then consumes that batch. Moves the "
+          "first-batch input-pipeline latency (and the hosts' arrival skew) out of the MLPerf timed region."
+      ),
+  )
   mllog_file: None | PathStr = Field(
       "",
       description="Optional filename or path for mllog export in base_output_directory "
