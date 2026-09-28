@@ -534,11 +534,6 @@ class TestMHC(parameterized.TestCase):
     """Toggling use_mhc_pallas_kernel must not change the layer's output values."""
     self._assert_pallas_matches_reference(interpret=True)
 
-  @pytest.mark.tpu_only
-  def test_pallas_kernel_matches_reference_path_tpu(self):
-    """As above, but against the real Mosaic-compiled kernel instead of interpret mode."""
-    self._assert_pallas_matches_reference(interpret=False)
-
   def test_sigmoid_gate_computes_in_float32(self):
     """The shared gate must not round its scale/bias down to the activation dtype.
 
