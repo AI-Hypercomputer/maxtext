@@ -383,6 +383,24 @@ outputs are in `gs://agagik-us/olmo35/4x4x4/analysis/`, alongside the two attrib
 | **kk3** | **current base**, 151.2 TF/s | 0.701 s | `gs://agagik-us/olmo35/4x4x4/o35n281137-olmo35-tiny-kk3_prof/tensorboard/plugins/profile/2026_09_28_11_48_50/gke-tpu-c19ec041-mw2h.xplane.pb` | `kk3_analyze.txt`, `kk3_roadmap.txt`, `kk3_collective.txt`, `kk3_components.txt` |
 | **kk4** | **original config**, 78.5 TF/s | 0.901 s | `gs://agagik-us/olmo35/4x4x4/o35n281137-olmo35-tiny-kk4_orig_prof/tensorboard/plugins/profile/2026_09_28_11_51_39/gke-tpu-c19ec041-mw2h.xplane.pb` | `kk4_analyze.txt`, `kk4_roadmap.txt`, `kk4_components.txt` |
 
+All captures of this model, in GCS (full paths: `gcloud storage ls "gs://agagik-us/olmo35/**.xplane.pb"`):
+
+| capture | what | location |
+|---|---|---|
+| sps8 iw | 8 devices on SPS, first best config (2026-09-21) | `gs://agagik-us/olmo35/profiles/sps8-20260921-iw/` |
+| e2, e4 | 128 devices, pdb 2 and pdb 3, early flags | `gs://agagik-us/olmo35/4x4x4/o35n242234-olmo35-tiny-e2_p2_prof/`, `...-e4_p3_prof/` |
+| f1 | scheduler flags (nap and flex spot) | `gs://agagik-us/olmo35/4x4x4/o35n251513-olmo35-tiny-f1_p3_sched_prof/`, `gs://agagik-us/olmo35/profiles/flexspot-o35s251513-f1_p3_sched_prof/` |
+| h1 | pdb 3, sched, DP 4 | `gs://agagik-us/olmo35/4x4x4/o35n251712-olmo35-tiny-h1_ctrl_prof/` |
+| r1 | p2 base (nap and flex spot) | `gs://agagik-us/olmo35/4x4x4/o35n270031-olmo35-tiny-r1_prof/`, `gs://agagik-us/olmo35/profiles/flexspot-o35s270031-r1_prof/` |
+| s4 | lean routing | `gs://agagik-us/olmo35/4x4x4/o35n270116-olmo35-tiny-s4_lean_prof/` |
+| x1 | l2out base | `gs://agagik-us/olmo35/4x4x4/o35n270751-olmo35-tiny-x1_prof/` |
+| z1 | trhs base (two captures, retry) | `gs://agagik-us/olmo35/4x4x4/o35n270912-olmo35-tiny-z1_prof/` |
+| dd1, gg8, kk3, kk4 | this study, table above | as above |
+| KDA vs GDN | single device, tokamax KDA, jnp KDA, MaxText GDN | `gs://agagik-us/olmo35/profiles/kda-vs-gdn-single-device-20260926/` |
+
+Text reports for e2, e4, f1 and h1 are under `gs://agagik-us/olmo35/4x4x4/analysis/<run>-<arm>/`.
+The c1 capture was lost with its pod and does not exist.
+
 The fused routed-expert numbers (2.32x) and the Pallas top-k numbers come from
 single-device microbenchmarks on tpu7x-cluster-flex (`scripts/latent_moe_fusion_bench.py`,
 wall-clock timing, no xplane), not from these captures.
