@@ -636,9 +636,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
 
 
-# Auxiliary values from `loss_fn` that fractional eval accumulates across
-# microbatches. Keep in sync with the aux dict `loss_fn` returns: a key left
-# out here is silently missing from the eval metrics.
 _AVERAGED_EVAL_KEYS = ("z_loss", "moe_lb_loss", "indexer_loss", "mtp_loss")
 _ACCUMULATED_EVAL_KEYS = ("xent_sum", "total_weights") + _AVERAGED_EVAL_KEYS
 # Boolean flags, true if any microbatch raised them, rather than summed.
