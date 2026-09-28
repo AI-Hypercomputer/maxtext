@@ -1631,6 +1631,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _prepare_batch(self, payload: Any) -> Any:
     """Maps a payload to the inputs the loss function is called with."""
+    if getattr(payload, "segment_ids", None) is not None and self._config.use_gdn_kernel and not self._config.packing:
+      raise ValueError(
+          "The payload carries segment_ids, which Tunix sets only on sequence-packed rows, but packing=False: "
+          "with use_gdn_kernel=True the GDN kernel then ignores those document boundaries in training. "
+          "Set packing=True."
+      )
     if self._gen_model_input_fn is not None:
       if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
         payload = dataclasses.replace(payload, metadata={})
