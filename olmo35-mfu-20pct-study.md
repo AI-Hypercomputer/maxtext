@@ -275,6 +275,8 @@ roofline.
 | ii | splash blocks, same-run control | 147.1 (no blocks) | 149.7 / 149.8 | **+1.8%** | kept |
 | ii | fused splash bwd + tokamax splash | 149.7 / 149.8 | 150.2 / 151.0 | **+0.6%** | kept, loss unchanged |
 | ii | `SEQ_MINOR` layouts | 150.6 (fused) | 150.5 | 0 | dropped |
+| jj | all-gather / reduce-scatter concurrency 4 | 150.4 / 151.1 | 151.0 / 150.9 | 0 | neutral |
+| jj | `--xla_latency_hiding_scheduler_rerun=2` | 150.4 / 151.1 | 150.9 | 0 | neutral; flag levers used up |
 
 Capacity, 2026-09-28: the ee-series has been queued on nap since 04:10 UTC. From
 04:31 on, every resubmit is suspended with `insufficient unused quota for

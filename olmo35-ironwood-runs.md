@@ -953,6 +953,23 @@ Base is the hh base plus the 1024 / 2048 splash blocks. `fused` adds
 tokamax splash: +0.6%, kept**, loss unchanged. `SEQ_MINOR` adds nothing over
 `fused` and moves the loss by 0.001; dropped. New base 150.6 TF/s, 13.06%, 0.704 s.
 
+### jj-series, XLA scheduler flags (o35n281101)
+
+Base is the ii base (fused splash). `conc4` adds all-gather and reduce-scatter
+concurrency 4; `rerun` adds `--xla_latency_hiding_scheduler_rerun=2`.
+
+| arm | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|
+| jj1_orig | 78.4 | 6.79% | 0.901 | 10.685 |
+| jj2_ctrl | 150.4 | 13.04% | 0.704 | 10.832 |
+| jj6_ctrl | 151.1 | 13.10% | 0.702 | 10.832 |
+| jj3_conc4 | 151.0 | 13.09% | 0.702 | 10.832 |
+| jj5_conc4 | 150.9 | 13.08% | 0.702 | 10.832 |
+| jj4_rerun | 150.9 | 13.08% | 0.702 | 10.832 |
+
+**Both neutral** (inside the 150.4 to 151.1 control spread). Flag-level levers are
+used up on this base; the kk-series profiles it instead.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
