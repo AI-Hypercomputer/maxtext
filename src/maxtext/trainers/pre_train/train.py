@@ -56,6 +56,7 @@ from maxtext.utils import elastic_utils
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
 from maxtext.layers.attention_mla import indexer_losses
+from maxtext.layers import moe
 from maxtext.common import checkpointing, profiler
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -271,7 +272,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # Zero1+GA to reduce communication overhead.
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
-  if config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation:
+  manual_gradient_accumulation = config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation
+  if manual_gradient_accumulation:
     loss = xent_sum
   else:
     # When using Tunix gradient accumulation, we revert to standard normalization.
@@ -283,11 +285,24 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # We keep z-loss normalized by total_weights.
   total_z_loss = total_z_loss / (total_weights + EPS)
 
+  # The auxiliary losses below (MTP, indexer, MoE load balance) are already
+  # normalized means. Under manual gradient accumulation the objective is the
+  # unnormalized xent_sum and the accumulated gradient is divided by the token
+  # count of the whole global batch, so each auxiliary term is scaled by this
+  # microbatch's token count to keep its gradient weight at 1/GA per microbatch
+  # (exactly so when microbatches carry equal token counts). The aux values
+  # themselves are returned unscaled for logging, and eval_step's loss is left
+  # as before.
+  def _add_aux_loss(total, aux_loss):
+    if manual_gradient_accumulation and is_train:
+      return total + aux_loss * jnp.asarray(total_weights, jnp.float32)
+    return total + aux_loss
+
   # Calculate and Add MTP Loss
   mtp_loss = 0.0
   if config.mtp_num_layers > 0 and is_train:
     mtp_loss = calculate_mtp_loss(intermediate_outputs, config)
-    loss += mtp_loss
+    loss = _add_aux_loss(loss, mtp_loss)
 
   # Calculate and add auxiliary Indexer loss
   indexer_loss = 0.0
@@ -296,7 +311,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     indexer_losses_list = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "indexer_loss")
     if indexer_losses_list:
       indexer_loss = jnp.mean(jnp.concatenate([jnp.atleast_1d(x) for x in indexer_losses_list]))
-      loss += indexer_loss  # Injects loss into scalar objective to drive backward gradients for indexer weights.
+      # Injects loss into scalar objective to drive backward gradients for indexer weights.
+      loss = _add_aux_loss(loss, indexer_loss)
     else:
       max_logging.debug("No Indexer loss found. Defaulting to 0.0.")
 
@@ -305,8 +321,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if config.num_experts > 1:
     moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
     if moe_lb_losses:
-      moe_lb_loss = jnp.mean(jnp.concatenate(moe_lb_losses))
-      loss += moe_lb_loss
+      lb_losses = jnp.concatenate(moe_lb_losses)
+      # Megatron-LM (MoEAuxLossAutoScaler) adds every MoE layer's aux loss to the objective, so routers
+      # that use its seq_aux_loss sum over layers (decoder + MTP); other routers keep the average.
+      moe_lb_loss = jnp.sum(lb_losses) if moe.uses_megatron_seq_aux_loss(config) else jnp.mean(lb_losses)
+      loss = _add_aux_loss(loss, moe_lb_loss)
     else:
       max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
 
@@ -378,6 +397,14 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     required_rbf_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_required_rbf")
     if required_rbf_values:
       aux["moe_required_rbf"] = jnp.concatenate([x.astype(jnp.float32) for x in required_rbf_values])
+  if getattr(config, "moe_log_max_load_ratio", False):
+    # One value per MoE layer (decoder + MTP), each already max-reduced over token chunks,
+    # expert shards and EP groups. A step overflows iff the max exceeds ragged_buffer_factor.
+    load_ratios = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_max_load_ratio")
+    if load_ratios:
+      load_ratios = jnp.concatenate(load_ratios)
+      aux["moe_max_load_ratio"] = jnp.max(load_ratios)
+      aux["moe_max_load_ratio_mean"] = jnp.mean(load_ratios)
   return loss, aux
 
 
@@ -600,6 +627,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     )
   if config.moe_dropless_fallback == "layer":
     scalar_metrics["learning/moe_dropless_fallback_layers"] = aux["moe_dropless_fallback_layers"]
+  if "moe_max_load_ratio" in aux:
+    scalar_metrics["learning/moe_max_load_ratio"] = aux["moe_max_load_ratio"]
+    scalar_metrics["learning/moe_max_load_ratio_mean"] = aux["moe_max_load_ratio_mean"]
   scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
     new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)

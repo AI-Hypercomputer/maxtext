@@ -249,6 +249,7 @@ sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 num_moe_token_chunks: 1 # split routed-MoE tokens into N chunks (ring-of-experts path) so each chunk's EP all-gather / reduce-scatter overlaps the previous chunk's GMM compute. 1 = disabled (identical to baseline).
 moe_chunk_barrier: false # wraps its iteration with optimization_barrier to chain the chunked ring-of-experts MoE loop so each chunk's input is fenced on the previous chunk's output, forcing sequential (no-interleave) chunk execution. Math unchanged (barrier is identity), loss bit-exact. Needs num_moe_token_chunks>1 + use_ring_of_experts=True to matter.
+moe_log_max_load_ratio: false # debug: log learning/moe_max_load_ratio{,_mean} (expert-shard load / balanced load) on the ring-of-experts ragged path; overflow iff max > ragged_buffer_factor.
 ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer for routed MoE activations.
 # By default (-1), the routed buffer is worst case size to ensure no dropping.
 # When set to 1.0 this buffer if set to the size assuming perfectly balanced. If the routing dictates
@@ -265,6 +266,7 @@ log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
+moe_use_megatron_seq_aux_loss: false # when true, sigmoid routers (routed_score_func="sigmoid") use Megatron-LM's sequence-wise aux loss summed over MoE layers; false (default) uses the Switch-style loss averaged over MoE layers.
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 router_topk_matmul_vjp: false # deepseek routing: dense one-hot VJP for the top-k weight gather (no scatter-add in the backward)

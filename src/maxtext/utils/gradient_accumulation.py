@@ -21,6 +21,7 @@ from jax.sharding import NamedSharding
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode
+from maxtext.layers.moe import load_balance_updates_from_counts
 from maxtext.utils.sharding import maybe_shard_with_name
 
 
@@ -188,6 +189,29 @@ def gradient_accumulation_loss_and_grad(
   )
   scanned_aux = aux
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
+  # The auxiliary losses are per-microbatch means; the step's value is their mean over microbatches (as in `loss`
+  # above), not their sum, so the logged learning/{moe_lb,indexer,mtp}_loss match GA=1.
+  for key in ("moe_lb_loss", "indexer_loss", "mtp_loss"):
+    if key in aux:
+      aux[key] = aux[key] / config.gradient_accumulation_steps
+  if getattr(config, "routed_bias", False) and getattr(config, "routed_bias_update_rate", 0.0) > 0.0:
+    # RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1;
+    # convert the counts summed across microbatches into a single full-batch sign() update.
+    def finalize_bias(counts):
+      if isinstance(counts, jax.Array) and jnp.issubdtype(counts.dtype, jnp.integer):
+        return load_balance_updates_from_counts(counts, config.num_experts, config.routed_bias_update_rate)
+      return counts
+
+    for key in ("moe_bias_updates", "mtp_moe_bias_updates"):
+      if aux.get(key) is not None:
+        aux[key] = jax.tree.map(finalize_bias, aux[key])
+    if "intermediate_outputs" in aux:
+      aux["intermediate_outputs"] = jax.tree_util.tree_map_with_path(
+          lambda path, val: (
+              finalize_bias(val) if path and getattr(path[-1], "key", None) == "moe_bias_updates" else val
+          ),
+          aux["intermediate_outputs"],
+      )
   if "te_moe_capacity_overflow" in scanned_aux:
     aux["te_moe_capacity_overflow"] = jnp.any(scanned_aux["te_moe_capacity_overflow"], axis=0)
     aux["te_moe_max_total_recv_tokens"] = jnp.max(scanned_aux["te_moe_max_total_recv_tokens"], axis=0)
@@ -195,6 +219,9 @@ def gradient_accumulation_loss_and_grad(
   if "moe_required_rbf" in scanned_aux:
     # log_required_ragged_buffer_factor probe: the step needs the largest factor over microbatches.
     aux["moe_required_rbf"] = jnp.max(scanned_aux["moe_required_rbf"], axis=0)
+  if "moe_max_load_ratio" in scanned_aux:
+    aux["moe_max_load_ratio"] = jnp.max(scanned_aux["moe_max_load_ratio"], axis=0)
+    aux["moe_max_load_ratio_mean"] = jnp.mean(scanned_aux["moe_max_load_ratio_mean"], axis=0)
 
   if is_nnx:
     nnx.update(model, grad_and_loss["rest_state"])

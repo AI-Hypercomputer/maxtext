@@ -298,6 +298,31 @@ class MllogUtilsTest(unittest.TestCase):
     self.assertEqual(self.mllogger.value_of(_CONSTANTS.MICRO_BATCH_SIZE), 2)
     self.assertEqual(self.mllogger.value_of(_CONSTANTS.CONFIG_FILENAME), "config.yml")
 
+  def test_init_print_comm_precision_includes_quantized_token_all_gather(self):
+    config = self.setup_local(moe_quantize_token_all_gather=True)
+    mllog_utils.init_print(config)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM), "fp8")
+
+    # Without EP > 1, the token all-gather does not run, so comm precision stays at grad/dtype precision.
+    self.mllogger.events.clear()
+    config_ep1 = make_config(
+        mllog_file=config.mllog_file,
+        moe_quantize_token_all_gather=True,
+        ici_expert_parallelism=1,
+    )
+    mllog_utils.init_print(config_ep1)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM), "bfloat16")
+
+    # With fp32 grad_dtype and unquantized token all-gather, comm precision is fp32.
+    self.mllogger.events.clear()
+    config_fp32 = make_config(
+        mllog_file=config.mllog_file,
+        moe_quantize_token_all_gather=False,
+        grad_dtype="float32",
+    )
+    mllog_utils.init_print(config_fp32)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM), "fp32")
+
   def test_disabled_config_emits_nothing(self):
     config = make_config(enable_mllog=False)
     mllog_utils.setup_mllog(config)

@@ -227,6 +227,9 @@ class MetricLogger:
     if self.config.num_experts > 1:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
       log_parts.append(f"moe_lb_loss: {moe_lb_loss:.6f}")
+      if "learning/moe_max_load_ratio" in scalars:
+        log_parts.append(f"moe_max_load_ratio: {scalars['learning/moe_max_load_ratio']:.4f}")
+        log_parts.append(f"moe_max_load_ratio_mean: {scalars['learning/moe_max_load_ratio_mean']:.4f}")
 
     if getattr(self.config, "mtp_num_layers", 0) > 0:
       mtp_loss = scalars.get("learning/mtp_loss", 0.0)

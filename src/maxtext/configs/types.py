@@ -1065,6 +1065,16 @@ class MoEGeneral(BaseModel):
           " effect."
       ),
   )
+  moe_log_max_load_ratio: bool = Field(
+      False,
+      description=(
+          "Debug only. Log learning/moe_max_load_ratio{,_mean}: the max (mean) over MoE layers of"
+          " the largest (tokens routed to an expert shard) / (perfectly balanced load) over token"
+          " chunks and expert shards. A step overflows the ragged buffer iff the max exceeds"
+          " ragged_buffer_factor (up to buffer rounding). Requires sparse_matmul=True,"
+          " te_moe_block=False, use_ring_of_experts=True and use_ragged_sort=True."
+      ),
+  )
 
   moe_expert_input_dim: int = Field(
       -1,
@@ -1076,6 +1086,15 @@ class MoEGeneral(BaseModel):
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  moe_use_megatron_seq_aux_loss: bool = Field(
+      False,
+      description=(
+          "When True, sigmoid routers (routed_score_func='sigmoid', with te_moe_block=False) use"
+          " Megatron-LM's sequence-wise auxiliary load-balancing loss (fp32 per-token normalized sigmoid scores,"
+          " token fractions from an unbiased, ungrouped top-k over the full sequence, summed over MoE layers)."
+          " When False (default), sigmoid routers use the Switch Transformer-style loss averaged over MoE layers."
+      ),
+  )
   use_custom_sort_vjp: bool = Field(
       True,
       description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul.",
@@ -3715,6 +3734,16 @@ class MaxTextConfig(
       if self.num_moe_emb_chunks > 0:
         raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
 
+  def validate_moe_log_max_load_ratio(self):
+    """Validates that moe_log_max_load_ratio is used with the ring-of-experts ragged path."""
+    if self.moe_log_max_load_ratio and not (
+        self.sparse_matmul and not self.te_moe_block and self.use_ring_of_experts and self.use_ragged_sort
+    ):
+      raise ValueError(
+          "moe_log_max_load_ratio=True requires sparse_matmul=True, te_moe_block=False,"
+          " use_ring_of_experts=True and use_ragged_sort=True."
+      )
+
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor and eval_ragged_buffer_factor are used with supported settings."""
     if self.te_moe_block:
@@ -4822,6 +4851,7 @@ class MaxTextConfig(
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
       self.validate_moe_dropless_fallback()
+      self.validate_moe_log_max_load_ratio()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_mllog()
