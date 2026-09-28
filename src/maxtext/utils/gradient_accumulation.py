@@ -14,6 +14,8 @@
 
 """Functions for gradient accumulation (GA)"""
 
+import functools
+
 import jax
 import jax.numpy as jnp
 from jax.experimental.xla_metadata import set_xla_metadata
@@ -103,10 +105,28 @@ def gradient_accumulation_loss_and_grad(
     ga_params = params
 
   ga_params = jax.tree.map(_maybe_shard_with_name, ga_params, ga_params_shardings)
+
+  # Under manual GA, _loss_fn returns the token-summed xent (plus aux terms scaled by the microbatch token count), so
+  # differentiating it directly seeds the backward pass with 1 where the GA=1 loss (xent_sum / W) seeds it with 1/W.
+  # Every backward cotangent is then about W times its GA=1 value. A static (fixed-range) fp8 calibration of the
+  # backward cotangents (e.g. bwd_quantization_calibration_method=fixed,0.01) is sized for the GA=1 magnitude and
+  # saturates, which distorts the gradient. Scale the differentiated loss by 1/S, with S the static global-batch
+  # token capacity, so the cotangents carry the GA=1 magnitude, and fold S back into the final division below.
+  # The accumulated gradient is mathematically unchanged: sum_i grad(L_i) / W.
+  use_tunix_ga = getattr(config, "use_tunix_gradient_accumulation", False)
+  token_capacity = getattr(config, "global_batch_size_to_train_on", 0) * getattr(config, "max_target_length", 0)
+  loss_scale = 1.0 / float(token_capacity) if (token_capacity > 0 and not use_tunix_ga) else 1.0
+
+  # functools.wraps keeps _loss_fn's signature visible, which nnx.value_and_grad needs to resolve is_train=.
+  @functools.wraps(_loss_fn)
+  def _scaled_loss_fn(*args, **kwargs):
+    loss, aux = _loss_fn(*args, **kwargs)
+    return loss * loss_scale, aux
+
   if is_nnx:
-    grad_func = nnx.value_and_grad(_loss_fn, argnums=0, has_aux=True)
+    grad_func = nnx.value_and_grad(_scaled_loss_fn, argnums=0, has_aux=True)
   else:
-    grad_func = jax.value_and_grad(_loss_fn, argnums=4, has_aux=True)
+    grad_func = jax.value_and_grad(_scaled_loss_fn, argnums=4, has_aux=True)
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
@@ -180,11 +200,9 @@ def gradient_accumulation_loss_and_grad(
     unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
-  divisor = (
-      config.gradient_accumulation_steps if getattr(config, "use_tunix_gradient_accumulation", False) else denominator
-  )
+  divisor = config.gradient_accumulation_steps if use_tunix_ga else denominator * loss_scale
   raw_grads = jax.tree_util.tree_map(
-      lambda arr: jnp.where(has_weights, arr / divisor, jnp.zeros_like(arr)),
+      lambda arr: jnp.where(has_weights, (arr / divisor).astype(arr.dtype), jnp.zeros_like(arr)),
       raw_grads,
   )
   scanned_aux = aux
