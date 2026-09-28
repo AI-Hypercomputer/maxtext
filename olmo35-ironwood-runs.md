@@ -1022,6 +1022,47 @@ layers' backward), not scheduler knobs.
 on the old base). The loss moves by 0.004 to 0.006 from reduction order. This
 closes the loop: flag and mesh levers are used up at 151.0 TF/s, 13.09%.
 
+### sa-series, OLMo 3.5 small on 4x4x4 (o35n281800)
+
+Tiny's optimized base with DP 1 x FSDP 128 and `olmoe3_per_layer_remat=True`
+(stock remat recomputes each 8-layer cycle as one block and OOMs at pdb 1).
+
+| arm | pdb | change | TF/s | MFU | step s | loss @19 |
+|---|---|---|---|---|---|---|
+| sa1_orig_p1, sa2_orig_p2 | 1, 2 | stock flags | failed | | | scoped VMEM OOM at compile |
+| sa3_base_p1 | 1 | base | 96.0 | 8.32% | 1.926 | 11.403 |
+| **sa4_base_p2** | **2** | base | **136.4** | **11.82%** | **2.713** | |
+| sa5_basefull_p2 | 2 | `remat_policy=full` | 126.7 | 10.98% | 2.920 | |
+| sa6_basefull_p2_prof | 2 | sa5 + profile | 126.7 | 10.98% | 2.920 | |
+
+AOT memory on tpu7x-128 (add about 6 GB for the AOT understatement): pdb 2
+with per-layer remat 81.6 GB (fits), pdb 4 about 110 GB (no), all-to-all EP 2
+at pdb 2 75.7 GB (fits). Medium at pdb 1 with per-layer remat needs 100.17 GB
+of temporaries alone, so it does not fit a 4x4x4 at any pdb.
+
+sa6 profile, xla_shell (`gs://agagik-us/olmo35/4x4x4/analysis/sa6_*.clean.txt`):
+
+| view | value |
+|---|---|
+| TensorCore lane | 2.49 s (matmul 1.43, VPU 0.78, relayout 0.27) |
+| SparseCore lane | 1.58 s (hidden 1.20, exposed 0.38) |
+| roadmap: schedule comm, then good kernels | 2.49 s, then **1.58 s comm-bound** |
+| top kernel | gmm_v2 g512 m262144 k768, 275 ms |
+
+| component | ms | share |
+|---|---|---|
+| MoE routed GEMMs (gmm + tgmm) | 861 | 30% |
+| KDA (glue 465, kernels 175) | 640 | 22% |
+| MoE router, combine, dispatch, EMo, top-k | 332 | 11% |
+| collectives, exposed | 308 | 11% |
+| dense projections | 176 | 6% |
+| copies and relayout | 141 | 5% |
+| LM head + loss | 124 | 4% |
+
+Unlike tiny, small has a comm floor: 1.58 s caps FSDP-only small at about 20%
+MFU even with good kernels. The next lever is comm volume, via expert
+parallelism (eb-series).
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
