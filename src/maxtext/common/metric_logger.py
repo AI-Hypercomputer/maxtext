@@ -56,6 +56,25 @@ _METRICS_TO_MANAGED = {
 }
 
 
+STEP_DIAGNOSTICS_KEYS = (
+    ("raw_grad_norm", "learning/raw_grad_norm"),
+    ("grad_norm", "learning/grad_norm"),
+    ("param_norm", "learning/param_norm"),
+    ("max_abs_grad", "diag/max_abs_grad"),
+    ("moe_bias_checksum", "diag/moe_bias_checksum"),
+    ("moe_bias_update_nonzero", "diag/moe_bias_update_nonzero"),
+    ("moe_overflow", "diag/moe_overflow"),
+)
+
+
+def step_diagnostics_text(scalars):
+  """The log_step_diagnostics part of the step line: 'diag: raw_grad_norm=... grad_norm=... ...' (%.9e; n/a if absent)."""
+  parts = []
+  for name, key in STEP_DIAGNOSTICS_KEYS:
+    parts.append(f"{name}={float(scalars[key]):.9e}" if key in scalars else f"{name}=n/a")
+  return "diag: " + " ".join(parts)
+
+
 def _prepare_metrics_for_json(metrics, step, run_name):
   """Converts metric dictionary into json supported types (e.g. float)"""
   metrics_dict = {val: float(metrics["scalar"][val]) for val in metrics["scalar"]}
@@ -236,6 +255,9 @@ class MetricLogger:
     if getattr(self.config, "use_indexer", False):
       indexer_l = scalars.get("learning/indexer_loss", 0.0)
       log_parts.append(f"indexer_loss: {float(indexer_l)}")
+
+    if getattr(self.config, "log_step_diagnostics", False):
+      log_parts.append(step_diagnostics_text(scalars))
 
     max_logging.log(", ".join(log_parts))
 

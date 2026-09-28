@@ -228,6 +228,9 @@ float32_weight_sum: true
 # compute dtype only (the kernel is still stored in weight_dtype): casts the gate inputs and kernel, emits fp32 logits, and applies to the routed bias add and score function.
 # see quantize_router_proj for whether the gate projection matmul is quantized; enabling both is rejected.
 float32_gate_logits: false
+# gate_matmul_precision - precision of the MoE gate projection dot only (default/high/highest; forward and transposes).
+# "default" = use matmul_precision (unchanged behavior). With float32_gate_logits, "highest" keeps f32 operands on TPU.
+gate_matmul_precision: "default"
 # multi-token prediction configs
 # the number of auxiliary prediction layers to use for mtp.
 # set to 0 to disable the feature.
@@ -248,17 +251,26 @@ sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 num_moe_token_chunks: 1 # split routed-MoE tokens into N chunks (ring-of-experts path) so each chunk's EP all-gather / reduce-scatter overlaps the previous chunk's GMM compute. 1 = disabled (identical to baseline).
 moe_chunk_barrier: false # wraps its iteration with optimization_barrier to chain the chunked ring-of-experts MoE loop so each chunk's input is fenced on the previous chunk's output, forcing sequential (no-interleave) chunk execution. Math unchanged (barrier is identity), loss bit-exact. Needs num_moe_token_chunks>1 + use_ring_of_experts=True to matter.
+moe_combine_per_chunk: false # chunked ring-of-experts: chunk c's unpermute waits on chunk c-1's combine reduce-scatter (forward-only data dependency on the routing weights, saved as remat name moe_combine_order), so the SparseCore runs unpermute0, RS0, unpermute1, RS1. Math unchanged.
 ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer for routed MoE activations.
 # By default (-1), the routed buffer is worst case size to ensure no dropping.
 # When set to 1.0 this buffer if set to the size assuming perfectly balanced. If the routing dictates
 # a size larger than this then tokens are dropped.
 # In general if ragged_buffer_factor > 0, the ragged_buffer_size is balanced_size * ragged_buffer_factor.
 retry_when_tokens_dropped: false # retry the entire train step with worst-case ragged buffer size if tokens would otherwise be dropped.
+retry_dropless_first_steps: 0 # with retry_when_tokens_dropped, run steps with step - start_step < N directly with the dropless program (no normal attempt). 0 = off.
+eval_ragged_buffer_factor: -1.0 # ragged buffer factor for the eval program only. -1 = same as ragged_buffer_factor.
+first_phase_ragged_buffer_factor: 0.0 # with retry_dropless_first_steps=N, the first N steps use this ragged buffer factor (drops replay dropless). 0 = off.
+log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the min ragged_buffer_factor avoiding drops (REQUIRED_RBF).
+warmup_programs_in_init: false # before init_stop/run_start, run each precompiled train/eval program once on a synthetic batch (state unchanged), then a cross-host barrier.
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
+router_topk_argmax: false # deepseek routing: top-k indices by k masked argmax passes instead of lax.top_k (no 256-wide sort)
+ragged_unsort_reuse_argsort: false # ring ragged sort: reuse the forward permutation in the unsort backward (one argsort fewer)
+router_topk_matmul_vjp: false # deepseek routing: dense one-hot VJP for the top-k weight gather (no scatter-add in the backward)
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
 te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
 te_ep_overflow_check_every_n_steps: 20 # host check interval for TE EP overflow when ragged_buffer_factor limits receive capacity
@@ -288,8 +300,21 @@ ragged_gather_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 
 ragged_gather_reduce_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather reduce kernel
 # Pin MoE FSDP and EP all-gathers to dedicated SparseCores using compute_on
 moe_pin_sparse_core_all_gathers: false
+# Split controls (OR-ed with moe_pin_sparse_core_all_gathers): pin only the EP all-gathers (dispatch tokens, router
+# logits, combine backward) or only the FSDP weight all-gathers. fwd_only keeps the pinned FSDP weight all-gather in the
+# forward and runs its transpose (the weight-gradient reshard) outside compute_on, so the gradient's cross-slice
+# all-reduce is not consumed by a SparseCore region.
+moe_pin_sparse_core_ep_all_gathers: false
+moe_pin_sparse_core_fsdp_all_gathers: false
+moe_pin_sparse_core_fsdp_all_gathers_fwd_only: false
 moe_fsdp_all_gather_sparse_core_id: 0
 moe_ep_all_gather_sparse_core_id: 1
+# Ring of experts: fp8 payload (per-row scale) for the backward all-gather of the MoE output cotangent
+moe_fp8_bwd_dispatch: false
+moe_fp8_bwd_dispatch_qtype: "float8_e4m3fn" # or float8_e5m2
+# Ring of experts: forward combine as an fp8 (e4m3, per-row scale) all-to-all + local f32 sum
+moe_fp8_combine: false
+moe_fp8_combine_pin_sparse_core: false
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs
@@ -356,6 +381,9 @@ routed_scaling_factor: 1.0 # scaling factor for routing scores
 routed_score_func: "" # scoring function for routing
 routed_bias: false # a flag if a learnable bias is added for routing
 routed_bias_update_rate: 0.0 # a flag indicate the update rate applied to the router bias term
+routed_bias_global_counts: false # update the routed bias once per step from expert counts summed over token chunks (and GA microbatches) rather than averaging per-chunk updates; GA > 1 always sums counts
+log_step_diagnostics: false # append grad/param norms, max |grad|, routed-bias checksum, nonzero bias updates and the overflow flag to every training step log line
+defer_small_all_reduces: false # ring-of-experts only: reduce the per-layer routed-bias counts and the token-overflow flag once after the layer loop rather than with one small all-reduce per layer
 mlp_bias: false # a flag if a learnable bias is added for MLP matmul, and originally implemented to support the GPT-OSS model architecture.
 n_routing_groups: -1 # number of groups for routing, disabled by default
 first_num_hash_layers: 0 # number of hash routing layers, used in DeepSeek V4 (0 means disabled)
@@ -811,6 +839,7 @@ per_device_batch_size: 12.0
 # Details in https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md#using-grain
 expansion_factor_real_data: -1.0
 eval_per_device_batch_size: 0.0
+eval_sample_repeat: 1 # eval tiles the real eval samples k times (eval_per_device_batch_size counts the repeated rows); loss and weights are divided by k. 1 = off.
 max_corpus_chars: 10_000_000
 train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 train_image_column: 'image'

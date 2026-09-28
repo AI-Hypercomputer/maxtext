@@ -35,6 +35,7 @@ def ring_ragged_sort(
     gather_bytes_accessed_override=-1,
     gather_reduce_bytes_accessed_override=-1,
     use_single_sparsecore=False,
+    return_argsort_indices=False,
 ):
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
@@ -71,6 +72,9 @@ def ring_ragged_sort(
         only the tokens destined for local experts, padded with zeros elsewhere.
       - 1D tensor ``group_sizes_local`` tracking expert token counts.
       - 1D tensor ``topk_argsort_revert_indices`` for inverse routing.
+      - Only when ``return_argsort_indices``: 1D tensor ``topk_argsort_indices``, the forward sort permutation
+        (the inverse of ``topk_argsort_revert_indices``), which :func:`ring_ragged_unsort` can take to skip
+        recomputing it by argsort in its backward pass.
   """
 
   @jax.custom_vjp
@@ -140,6 +144,8 @@ def ring_ragged_sort(
       )
 
     out = (x, group_sizes_local, topk_argsort_revert_indices)
+    if return_argsort_indices:
+      out = out + (topk_argsort_indices,)
 
     res = (
         topk_argsort_revert_indices,
@@ -167,7 +173,7 @@ def ring_ragged_sort(
         local_buffer_size,
         _,
     ) = res
-    g_x, _, _ = g_out
+    g_x = g_out[0]
     # Restrict to the [start, end) source range via a validity bitmask. The
     # ragged kernel packs valid rows to the front of each row-partition and
     # only iterates over the populated prefix, so we hand it the mask directly
@@ -241,6 +247,7 @@ def ring_ragged_unsort(
     gather_bytes_accessed_override=-1,
     gather_reduce_bytes_accessed_override=-1,
     use_single_sparsecore=False,
+    topk_argsort_indices=None,
 ):
   """Dual of :func:`ring_ragged_sort`.
 
@@ -267,6 +274,10 @@ def ring_ragged_unsort(
     ep_name: ``str`` identifying the expert parallel axis name.
     topk_weights: ``[num_tokens_local * topk]`` tensor of per-slot routing weights.
       Differentiated: its gradient is what trains the router.
+    topk_argsort_indices: optional forward sort permutation from ``ring_ragged_sort(...,
+      return_argsort_indices=True)``. The backward needs the inverse of ``topk_argsort_revert_indices``; since
+      ``revert = argsort(topk_argsort_indices)``, that inverse is ``topk_argsort_indices`` itself, so passing it
+      removes one argsort from the backward pass. Values are identical either way.
 
   Returns:
     A 2D ``[num_tokens_local, hidden]`` tensor with expert outputs scattered back
@@ -279,6 +290,7 @@ def ring_ragged_unsort(
       group_sizes_local,
       topk_argsort_revert_indices,
       topk_weights_flat,
+      topk_argsort_indices,
   ):
     """Unsort and scatter activations."""
     return _ring_ragged_unsort_fwd(
@@ -286,6 +298,7 @@ def ring_ragged_unsort(
         group_sizes_local,
         topk_argsort_revert_indices,
         topk_weights_flat,
+        topk_argsort_indices,
     )[0]
 
   @jax.named_scope("ragged-unsort-fwd")
@@ -294,6 +307,7 @@ def ring_ragged_unsort(
       group_sizes_local,
       topk_argsort_revert_indices,
       topk_weights_flat,
+      topk_argsort_indices,
   ):
     """Executes unsorting sending tokens back."""
     group_offsets = jnp.cumulative_sum(group_sizes_local, include_initial=True)
@@ -359,6 +373,7 @@ def ring_ragged_unsort(
         shard_output_start,
         shard_output_end,
         buffer_size,
+        topk_argsort_indices,
     )
 
     return out, res
@@ -386,13 +401,18 @@ def ring_ragged_unsort(
         shard_output_start,
         shard_output_end,
         buffer_size,
+        topk_argsort_indices,
     ) = res
     g_hidden_states_local = g_out
 
     n = topk_argsort_revert_indices.shape[0]
     # Build the inverse permutation idx_inv such that idx_inv[j] = i
     # where revert[i] = j.
-    idx_inv = jnp.argsort(topk_argsort_revert_indices)
+    if topk_argsort_indices is not None:
+      # revert = argsort(topk_argsort_indices), so its inverse is the forward permutation itself.
+      idx_inv = topk_argsort_indices
+    else:
+      idx_inv = jnp.argsort(topk_argsort_revert_indices)
 
     # Handle the same two buffering modes for backward pass.
     # ragged_gather does the fan-out, by indexing into the un-expanded
@@ -445,7 +465,7 @@ def ring_ragged_unsort(
       dot_local = jnp.sum(gathered.astype(jnp.float32) * sorted_tokens_local.astype(jnp.float32), axis=-1)
       slots = jnp.where(mask, sliced_idx_inv, n)
       grad_topk_weights = jnp.zeros((n,), jnp.float32).at[slots].set(dot_local, mode="drop")
-    return grad_sorted_tokens, None, None, grad_topk_weights
+    return grad_sorted_tokens, None, None, grad_topk_weights, None
 
   _ring_ragged_unsort.defvjp(_ring_ragged_unsort_fwd, _ring_ragged_unsort_bwd)
 
@@ -457,6 +477,7 @@ def ring_ragged_unsort(
       group_sizes_local,
       topk_argsort_revert_indices,
       topk_weights_flat,
+      topk_argsort_indices,
   )
 
 

@@ -233,6 +233,7 @@ class MultiHostDataLoadIterator:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
     self.out_of_data = False
     self.last_local_data = None
+    self._reset_and_unread = False
     self.generate_padding_batch = generate_padding_batch
     self.expansion_loading_factor_for_grain = expansion_loading_factor_for_grain
     _GLOBAL_MULTIHOST_ITERATORS.add(self)
@@ -246,6 +247,7 @@ class MultiHostDataLoadIterator:
       raise ValueError("Type error: dataloader should be either tf.data.Dataset or Iterable.")
     self.out_of_data = False
     self.last_local_data = None
+    self._reset_and_unread = True
 
   def close(self):
     if hasattr(self, "local_iterator"):
@@ -260,10 +262,16 @@ class MultiHostDataLoadIterator:
     self.close()
 
   def __iter__(self):
-    self.reset()
+    # A for loop starts from the first batch. Skip the rebuild when `reset()` was just
+    # called and nothing has been read since (e.g. the eval loop in train.py resets the
+    # iterator explicitly, because wrappers such as `_ReorderedDataIterator` do not reset
+    # in `__iter__`); building a second tf.data iterator would discard the first one.
+    if not self._reset_and_unread:
+      self.reset()
     return self
 
   def __next__(self):
+    self._reset_and_unread = False
     return self._get_next_batch_sharded()
 
   def _get_next_batch_sharded(self) -> jax.Array:
