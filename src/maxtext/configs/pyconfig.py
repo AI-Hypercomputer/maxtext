@@ -336,7 +336,12 @@ class HyperParameters:
   maintaining backward compatibility with attribute-style access and JAX object types.
   """
 
-  def __init__(self, pydantic_config: types.MaxTextConfig):
+  def __init__(self, pydantic_config: Any):
+    if isinstance(pydantic_config, dict):
+      object.__setattr__(self, "_pydantic_config", None)
+      object.__setattr__(self, "_flat_config", pydantic_config)
+      return
+
     object.__setattr__(self, "_pydantic_config", pydantic_config)
 
     final_dict = pydantic_config.model_dump()
@@ -350,8 +355,10 @@ class HyperParameters:
     final_dict["logical_axis_rules_for_eval"] = _lists_to_tuples(final_dict["logical_axis_rules_for_eval"])
     final_dict["data_sharding"] = _lists_to_tuples(final_dict["data_sharding"])
 
-    final_dict["decoder_block"] = DecoderBlockType(final_dict["decoder_block"])
-    final_dict["shard_mode"] = ShardMode(final_dict["shard_mode"])
+    if "decoder_block" in final_dict and final_dict["decoder_block"]:
+      final_dict["decoder_block"] = DecoderBlockType(final_dict["decoder_block"])
+    if "shard_mode" in final_dict and final_dict["shard_mode"]:
+      final_dict["shard_mode"] = ShardMode(final_dict["shard_mode"])
 
     object.__setattr__(self, "_flat_config", final_dict)
 
@@ -407,9 +414,18 @@ def _handle_config_exception(e: Exception):
     raise e
 
 
+config: HyperParameters | None = None
+
+
 def initialize(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> HyperParameters:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides."""
+  global config
   try:
+    config_path, cli_args = _resolve_or_infer_config(argv, **kwargs)
+    if "wan" in config_path.lower():
+      from maxtext.m3.models.wan.wan_utils import initialize_wan_config
+      config = initialize_wan_config(argv, config_path, cli_args, **kwargs)
+      return config
     pydantic_config = _initialize_pydantic(argv, config_class=config_class, **kwargs)
     config = HyperParameters(pydantic_config)
     return config
