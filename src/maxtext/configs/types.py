@@ -1926,11 +1926,11 @@ class GrainDataset(BaseModel):
   grain_eval_files: PathStr = Field("", description="Evaluation source specification for the selected Grain file type.")
   grain_train_mixture_config_path: PathStr = Field(
       "",
-      description="Path to an ArrayRecord JSON file specifying Grain training mixture weights.",
+      description="Path to an ArrayRecord/Bagz JSON file specifying Grain training mixture weights.",
   )
   grain_file_type: str = Field(
       "arrayrecord",
-      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet, mmap, mmap_npy.",
+      description="File type for Grain data. Supported: arrayrecord, bagz, tfrecord, parquet, mmap, mmap_npy.",
   )
   grain_use_elastic_iterator: bool = Field(
       False,
@@ -1957,7 +1957,8 @@ class GrainDataset(BaseModel):
   grain_index_storage_option: None | Literal["in_memory", "offloaded"] = Field(
       None,
       description=(
-          "ArrayRecord reader index storage. None uses the ArrayRecord reader default. Do not use 'offloaded' with "
+          "ArrayRecord/Bagz reader index storage (for Bagz: 'in_memory' caches per-record limits in RAM, "
+          "'offloaded' reads them from storage per lookup). None uses the reader default. Do not use 'offloaded' with "
           "direct gs:// paths because it can significantly degrade input performance. For Cloud Storage, use a "
           "filesystem with metadata caching, such as GCSFUSE."
       ),
@@ -4515,9 +4516,9 @@ class MaxTextConfig(
           "Colocated python data input is only supported with Pathways (single"
           " controller) enabled (`enable_single_controller=True`)."
       )
-    if self.grain_use_elastic_iterator and self.grain_file_type != "arrayrecord":
+    if self.grain_use_elastic_iterator and self.grain_file_type not in ("arrayrecord", "bagz"):
       raise ValueError(
-          "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord`. "
+          "`grain_use_elastic_iterator=True` only supports `grain_file_type=arrayrecord` or `bagz`. "
           "tfrecord and parquet pipelines use `InterleaveIterDataset` (a many-to-one "
           "IterDataset transform), which `ElasticIterator` forbids. "
           f"Got grain_file_type={self.grain_file_type}."
