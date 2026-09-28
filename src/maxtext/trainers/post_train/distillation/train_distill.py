@@ -914,15 +914,15 @@ def main(argv: Sequence[str]) -> None:
   teacher_argv = [argv[0], argv[1]]
   teacher_config = pyconfig.initialize(teacher_argv, **teacher_overrides)
 
-  # Batch shape (per_device_batch_size / max_target_length / gradient_accumulation_steps)
+  # Batch layout (per_device_batch_size / max_target_length / gradient_accumulation_steps / packing)
   # must be set at the YAML top level — not inside *_overrides — since student and
   # teacher share the input pipeline.
-  for batch_field in ("per_device_batch_size", "max_target_length", "gradient_accumulation_steps"):
+  for batch_field in ("per_device_batch_size", "max_target_length", "gradient_accumulation_steps", "packing"):
     s_val = getattr(student_config, batch_field)
     t_val = getattr(teacher_config, batch_field)
     if s_val != t_val:
       raise ValueError(
-          f"Distillation batch shape mismatch on '{batch_field}': "
+          f"Distillation batch layout mismatch on '{batch_field}': "
           f"student={s_val} vs teacher={t_val}. The teacher consumes batches from the "
           f"student-driven input pipeline, so these must agree. Set '{batch_field}' at "
           f"the YAML top level (not inside *_overrides) so both configs inherit it."
