@@ -2379,22 +2379,27 @@ class GdnBwdPallasTest(absltest.TestCase):
       g = jax.grad(loss, argnums=(0, 1, 2, 3, 4))(qkv, b, a, al, dt)
       return dict(zip(("dqkv", "db", "da", "d_a_log", "d_dt_bias"), (np.asarray(x, np.float64).ravel() for x in g)))
 
+    from maxtext.kernels.gdn.gdn_bwd import pallas_mosaic_tpu_bwd as gdn_bwd_mod  # pylint: disable=import-outside-toplevel
+
     for layout, seg in (("unpacked", None), ("packed", jnp.asarray(seg_packed))):
       with jax.default_matmul_precision("highest"):
         ref = grads(_call_pure_jax, lambda x: x, seg)
         pj_bf16 = grads(_call_pure_jax, bf16, seg)
-      k_bf16 = grads(_call_kernel_api, bf16, seg)
-      for name, r in ref.items():
-        scale = float(np.max(np.abs(r)))
-        rel_pj = float(np.max(np.abs(pj_bf16[name] - r))) / scale
-        rel_k = float(np.max(np.abs(k_bf16[name] - r))) / scale
-        cos_k = float(np.dot(k_bf16[name], r) / (np.linalg.norm(k_bf16[name]) * np.linalg.norm(r)))
-        self.assertLessEqual(
-            rel_k,
-            max(3.0 * rel_pj, 2e-2),
-            f"[{layout}] {name}: kernel bf16 rel err {rel_k:.2e} (bf16 inputs {rel_pj:.2e})",
-        )
-        self.assertGreaterEqual(cos_k, 0.999, f"[{layout}] {name}: kernel bf16 gradient cosine {cos_k:.4f}")
+      for supports_high in (True, False):
+        with mock.patch.object(gdn_bwd_mod, "_SUPPORTS_PALLAS_PRECISION_HIGH", supports_high):
+          k_bf16 = grads(_call_kernel_api, bf16, seg)
+        for name, r in ref.items():
+          scale = float(np.max(np.abs(r)))
+          rel_pj = float(np.max(np.abs(pj_bf16[name] - r))) / scale
+          rel_k = float(np.max(np.abs(k_bf16[name] - r))) / scale
+          cos_k = float(np.dot(k_bf16[name], r) / (np.linalg.norm(k_bf16[name]) * np.linalg.norm(r)))
+          tag = f"{layout}, supports_high={supports_high}"
+          self.assertLessEqual(
+              rel_k,
+              max(3.0 * rel_pj, 2e-2),
+              f"[{tag}] {name}: kernel bf16 rel err {rel_k:.2e} (bf16 inputs {rel_pj:.2e})",
+          )
+          self.assertGreaterEqual(cos_k, 0.999, f"[{tag}] {name}: kernel bf16 gradient cosine {cos_k:.4f}")
 
   def test_segment_ids_all_ones_with_caller_states_matches_unpacked(self):
     """segment_ids == 1 everywhere must be a no-op even when caller conv/recurrent states are supplied."""
@@ -2673,6 +2678,85 @@ class GdnBwdPallasTest(absltest.TestCase):
         float(jnp.max(jnp.abs(aux_s[0][1, 32 * scale : 32 * scale + 8] - aux_zero[0][1, 32 * scale : 32 * scale + 8]))),
         1e-3,
     )
+
+  def test_bwd_kernel_matmul_precision_split(self):
+    """The 9 intra-chunk backward matmuls run at 3-pass bf16 (Precision.HIGH on >=0.11.1, 3x DEFAULT on 0.11.0).
+
+    With bf16 activations the 6 state-path matmuls stay single-pass bf16 by design and the 2 cumsum dots run at
+    HIGHEST; with f32 activations all 17 run at HIGHEST.
+    """
+    from maxtext.kernels.gdn.gdn_bwd import pallas_mosaic_tpu_bwd as gdn_bwd_mod  # pylint: disable=import-outside-toplevel
+
+    chunk_size, n_k, n_v, hd, num_chunks = 64, 2, 4, 128, 2
+    seq_len, dim_size = num_chunks * chunk_size, 2 * n_k * hd + n_v * hd
+    highest = (jax.lax.Precision.HIGHEST,) * 2
+    high = jax.lax.Precision.HIGH
+
+    def dot_generals(act_dtype):
+      f32 = jnp.float32
+      specs = (
+          jax.ShapeDtypeStruct((1, seq_len, dim_size), act_dtype),
+          jax.ShapeDtypeStruct((1, seq_len, n_v), act_dtype),
+          jax.ShapeDtypeStruct((1, seq_len, n_v), act_dtype),
+          jax.ShapeDtypeStruct((n_v,), f32),
+          jax.ShapeDtypeStruct((n_v,), f32),
+          jax.ShapeDtypeStruct((1, seq_len, n_v, hd), act_dtype),
+          jax.ShapeDtypeStruct((1, num_chunks, n_v, hd, hd), f32),
+          jax.ShapeDtypeStruct((1, num_chunks, n_v, chunk_size, chunk_size), f32),
+      )
+      kernel = functools.partial(
+          gdn_bwd_pallas.pallas_gdn_bwd_kernel,
+          num_v_heads=n_v,
+          kq_head_dim=hd,
+          v_head_dim=hd,
+          chunk_size=chunk_size,
+          interpret=True,
+      )
+      return _find_eqns(jax.make_jaxpr(kernel)(*specs).jaxpr, "dot_general")
+
+    def operand_dtypes(eqn):
+      return tuple(str(v.aval.dtype) for v in eqn.invars)
+
+    with mock.patch.object(gdn_bwd_mod, "_SUPPORTS_PALLAS_PRECISION_HIGH", True):
+      bf16_dots = dot_generals(jnp.bfloat16)
+      self.assertLen(bf16_dots, 17)
+      cumsum_dots = [e for e in bf16_dots if e.params["precision"] == highest]
+      precise_dots = [e for e in bf16_dots if e.params["precision"] in (high, (high, high))]
+      single_pass = [e for e in bf16_dots if e not in cumsum_dots and e not in precise_dots]
+      self.assertLen(cumsum_dots, 2, "the 2 cumsum dots must run at HIGHEST")
+      self.assertLen(precise_dots, 9, "the 9 intra-chunk (precise=True) matmuls must run at HIGH on JAX >= 0.11.1")
+      self.assertEqual({operand_dtypes(e) for e in precise_dots}, {("float32", "float32")})
+      self.assertLen(single_pass, 6, "only the 6 state-path matmuls may run single-pass")
+      self.assertEqual({operand_dtypes(e) for e in single_pass}, {("bfloat16", "bfloat16")})
+
+    with mock.patch.object(gdn_bwd_mod, "_SUPPORTS_PALLAS_PRECISION_HIGH", False):
+      bf16_dots_0110 = dot_generals(jnp.bfloat16)
+      # 2 cumsum (HIGHEST) + 9 * 3 (3-pass bf16x3 DEFAULT) + 6 (state-path DEFAULT) = 35
+      self.assertLen(bf16_dots_0110, 35)
+      cumsum_0110 = [e for e in bf16_dots_0110 if e.params["precision"] == highest]
+      default_0110 = [e for e in bf16_dots_0110 if e.params["precision"] != highest]
+      self.assertLen(cumsum_0110, 2)
+      self.assertLen(default_0110, 33)
+      self.assertEqual({operand_dtypes(e) for e in default_0110}, {("bfloat16", "bfloat16")})
+
+    f32_dots = dot_generals(jnp.float32)
+    self.assertLen(f32_dots, 17)
+    self.assertEqual({e.params["precision"] for e in f32_dots}, {highest})
+
+
+def _find_eqns(jaxpr, primitive_name):
+  """Returns every `primitive_name` equation in `jaxpr`, including those in nested (tuples of) sub-jaxprs."""
+  found = []
+  for eqn in jaxpr.eqns:
+    if eqn.primitive.name == primitive_name:
+      found.append(eqn)
+    for param in eqn.params.values():
+      for sub in param if isinstance(param, (tuple, list)) else (param,):
+        if isinstance(sub, jax.extend.core.ClosedJaxpr):
+          found += _find_eqns(sub.jaxpr, primitive_name)
+        elif isinstance(sub, jax.extend.core.Jaxpr):
+          found += _find_eqns(sub, primitive_name)
+  return found
 
 
 _GRAD_NAMES = ("dqkv", "db", "da", "d_conv_w", "d_conv_b", "d_a_log", "d_dt_bias")

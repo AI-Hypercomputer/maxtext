@@ -34,6 +34,9 @@ _F32_HEAD_TILE = 16
 _BF16_HEAD_TILE = 32
 
 
+_SUPPORTS_PALLAS_PRECISION_HIGH = jax.__version_info__ >= (0, 11, 1)
+
+
 def _gdn_matmul(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -44,10 +47,11 @@ def _gdn_matmul(
   """Batched MXU matmul with FP32 accumulation for the GDN backward kernel.
 
   For bf16 activations the default is a single-pass bf16 MXU matmul. With
-  `precise=True` both operands stay f32 and the matmul runs at
-  `Precision.HIGHEST` (6-pass bf16). The intra-chunk matmuls need this: the
-  gating adjoint sums `q * dq - k * dk` over products that nearly cancel, and
-  bf16-rounded operands leave the A_log / dt_bias gradients with the wrong
+  `precise=True` both operands stay f32 and the matmul runs at 3-pass bf16
+  (`Precision.HIGH` on JAX >= 0.11.1, or explicit 3-pass bf16 decomposition
+  with `Precision.DEFAULT` on JAX 0.11.0). The intra-chunk matmuls need this:
+  the gating adjoint sums `q * dq - k * dk` over products that nearly cancel,
+  and 1-pass bf16 operands leave the A_log / dt_bias gradients with the wrong
   direction (cosine ~0.3 against an fp32 reference). For f32 activations every
   matmul runs at `Precision.HIGHEST`.
 
@@ -56,23 +60,46 @@ def _gdn_matmul(
     rhs: Right-hand side operand tensor.
     compute_dtype: Activation dtype (`bfloat16` or `float32`).
     keep_lhs_fp32: Whether to keep `lhs` in `float32` when `precise=False`.
-    precise: Whether to keep both operands in `float32` at `Precision.HIGHEST`.
+    precise: Whether to use 3-pass bf16 precision for `bfloat16` activations.
 
   Returns:
     The batched matrix product accumulated in `float32`.
   """
-  if jnp.dtype(compute_dtype) == jnp.bfloat16 and not precise:
-    lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
-    return jax.lax.dot_general(
-        lhs.astype(lhs_dtype),
-        rhs.astype(jnp.bfloat16),
-        dimension_numbers=(
-            ((lhs.ndim - 1,), (rhs.ndim - 2,)),
-            (tuple(range(lhs.ndim - 2)), tuple(range(rhs.ndim - 2))),
-        ),
+  dimension_numbers = (
+      ((lhs.ndim - 1,), (rhs.ndim - 2,)),
+      (tuple(range(lhs.ndim - 2)), tuple(range(rhs.ndim - 2))),
+  )
+  if jnp.dtype(compute_dtype) == jnp.bfloat16:
+    if not precise:
+      lhs_dtype = jnp.float32 if keep_lhs_fp32 else jnp.bfloat16
+      return jax.lax.dot_general(
+          lhs.astype(lhs_dtype),
+          rhs.astype(jnp.bfloat16),
+          dimension_numbers=dimension_numbers,
+          precision=jax.lax.Precision.DEFAULT,
+          preferred_element_type=jnp.float32,
+      )
+    lhs_f32 = lhs.astype(jnp.float32)
+    rhs_f32 = rhs.astype(jnp.float32)
+    if _SUPPORTS_PALLAS_PRECISION_HIGH:
+      return jax.lax.dot_general(
+          lhs_f32,
+          rhs_f32,
+          dimension_numbers=dimension_numbers,
+          precision=jax.lax.Precision.HIGH,
+          preferred_element_type=jnp.float32,
+      )
+    lhs_hi = lhs_f32.astype(jnp.bfloat16)
+    lhs_lo = (lhs_f32 - lhs_hi.astype(jnp.float32)).astype(jnp.bfloat16)
+    rhs_hi = rhs_f32.astype(jnp.bfloat16)
+    rhs_lo = (rhs_f32 - rhs_hi.astype(jnp.float32)).astype(jnp.bfloat16)
+    dot_bf16 = functools.partial(
+        jax.lax.dot_general,
+        dimension_numbers=dimension_numbers,
         precision=jax.lax.Precision.DEFAULT,
         preferred_element_type=jnp.float32,
     )
+    return (dot_bf16(lhs_hi, rhs_lo) + dot_bf16(lhs_lo, rhs_hi)) + dot_bf16(lhs_hi, rhs_hi)
   return jnp.matmul(
       lhs.astype(jnp.float32),
       rhs.astype(jnp.float32),
@@ -800,7 +827,7 @@ def pallas_gdn_bwd_kernel(
     vmem_limit_bytes = int(cfg.vmem_limit_mb) * 1024 * 1024
   else:
     tpu_info = pltpu.get_tpu_info()
-    vmem_limit_bytes = int(0.85 * tpu_info.vmem_capacity_bytes)
+    vmem_limit_bytes = int(0.9 * tpu_info.vmem_capacity_bytes)
 
   hbm = pltpu.MemorySpace.HBM
   pallas_out = pl.pallas_call(
