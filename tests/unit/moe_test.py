@@ -24,6 +24,9 @@ import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
+import ml_dtypes
+import numpy as np
+import qwix
 from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Config, DType
 from maxtext.configs import pyconfig
@@ -35,9 +38,7 @@ from maxtext.layers.quantizations import Fp8Quantization, WeightQuantConfig, con
 from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
-import numpy as np
 import pytest
-import qwix
 
 
 def compare_tree(a, b, relative_norm_diff_threshold=1e-02):
@@ -1452,6 +1453,7 @@ class RoutedMoeTest(parameterized.TestCase):
         shard_embed_moe_on_fsdp=True,
         max_target_length=128,
         float32_gate_logits=True,
+        quantize_router_proj=False,
         quantization="fp8_full",
         use_qwix_quantization=True,
         weight_quantization_calibration_method="fixed,-224,224",
@@ -2088,6 +2090,7 @@ class QuantizedMoeTest(parameterized.TestCase):
           per_device_batch_size=2,
           max_target_length=256,
           float32_gate_logits=True,
+          quantize_router_proj=False,
           ici_expert_parallelism=ici_expert_parallelism,
           sparse_matmul=sparse_matmul,
           megablox=megablox,
@@ -2176,6 +2179,7 @@ class QuantizedMoeTest(parameterized.TestCase):
           per_device_batch_size=1,
           max_target_length=128,
           float32_gate_logits=True,
+          quantize_router_proj=False,
           ici_expert_parallelism=ici_expert_parallelism,
           sparse_matmul=True,
           megablox=False,
@@ -2666,6 +2670,319 @@ class FusedMoeTPUTest(unittest.TestCase):
         rtol=1e-2,
         atol=1e-2,
     )
+    self.assertIsNone(lb_loss)
+    self.assertIsNone(bias_updates)
+
+
+def _quantize_moe_weight_blockwise(rng, shape, block_size):
+  """Absmax-quantizes synthetic (E, K, N) MoE weight per (block_size, block_size) tile."""
+  e, k, n = shape
+  kb, nb = k // block_size, n // block_size
+  w = rng.uniform(-1.0, 1.0, size=shape).astype(np.float32)
+  w_blocks = w.reshape(e, kb, block_size, nb, block_size)
+  scale = np.max(np.abs(w_blocks), axis=(2, 4)) / 448.0
+  scale = np.where(scale == 0, 1.0, scale)
+  scale_full = np.repeat(np.repeat(scale, block_size, axis=1), block_size, axis=2)
+  w_q = np.clip(np.round(w / scale_full), -448.0, 448.0).astype(ml_dtypes.float8_e4m3fn)
+  return w_q, scale.astype(np.float32)
+
+
+@pytest.mark.tpu_only
+@pytest.mark.post_training
+class SparseMoeNativeGmmPerChannelAxisTest(unittest.TestCase):
+  """Tests that K-axis per-channel scales fall back to dequantize in RoutedMoE."""
+
+  def test_k_axis_only_scale_falls_back_to_dequantize(self):
+    block_size = 128
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_native_gmm_k_axis_scale",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        weight_dtype="float8_e4m3fn",
+        weight_block_size=block_size,
+        quantization="serve_fp8_weight",
+        sparse_matmul=True,
+        use_gmm_v2=True,
+        use_tokamax_gmm=True,
+        megablox=True,
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        max_target_length=16,
+        per_device_batch_size=1,
+    )
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=cfg.dtype,
+        weight_dtype=jnp.float8_e4m3fn,
+        quant=configure_quantization(cfg),
+        rngs=nnx.Rngs(params=0),
+    )
+
+    e, embed, moe_mlp = model.num_experts, model.moe_expert_input_dim, model.intermediate_dim
+    rng = np.random.default_rng(5)
+    wi_0_q, wi_0_scale_full = _quantize_moe_weight_blockwise(rng, (e, embed, moe_mlp), block_size)
+    wi_1_q, wi_1_scale_full = _quantize_moe_weight_blockwise(rng, (e, embed, moe_mlp), block_size)
+    wo_q, wo_scale_full = _quantize_moe_weight_blockwise(rng, (e, moe_mlp, embed), block_size)
+    # Collapse block-wise grid to K-axis per-channel scale (channel_axis == 0).
+    model.wi_0[...] = jnp.asarray(wi_0_q)
+    model.wi_0_scale[...] = jnp.asarray(np.max(wi_0_scale_full, axis=2, keepdims=True))
+    model.wi_1[...] = jnp.asarray(wi_1_q)
+    model.wi_1_scale[...] = jnp.asarray(np.max(wi_1_scale_full, axis=2, keepdims=True))
+    model.wo[...] = jnp.asarray(wo_q)
+    model.wo_scale[...] = jnp.asarray(np.max(wo_scale_full, axis=2, keepdims=True))
+
+    inputs = jax.random.normal(jax.random.PRNGKey(11), (1, 16, embed), dtype=jnp.bfloat16)
+    native_quant = model.quant
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      native_out, _, _ = model(inputs)
+      model.quant = None  # native_gmm requires isinstance(self.quant, ServeFp8WeightQuantization)
+      dequant_out, _, _ = model(inputs)
+    model.quant = native_quant
+
+    native_np = np.array(native_out, dtype=np.float32)
+    dequant_np = np.array(dequant_out, dtype=np.float32)
+    self.assertTrue(np.all(np.isfinite(native_np)))
+    # Output should match since K-axis scale falls back to dequantize.
+    np.testing.assert_allclose(native_np, dequant_np, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.tpu_only
+@pytest.mark.post_training
+class SparseMoeNativeGmmPerTensorTest(unittest.TestCase):
+  """Covers the per_tensor branch of _maybe_native_gmm_weight (untested by the
+  other native-gmm tests). Needs weight_block_size=None for a genuine 1D
+  per-expert scale allocation.
+  """
+
+  def test_per_tensor_scale_matches_dequantize(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_native_gmm_per_tensor_scale",
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        weight_dtype="float8_e4m3fn",
+        weight_block_size=None,
+        quantization="serve_fp8_weight",
+        sparse_matmul=True,
+        use_gmm_v2=True,
+        use_tokamax_gmm=True,
+        megablox=True,
+        ici_expert_parallelism=jax.device_count(),
+        log_config=False,
+        max_target_length=16,
+        per_device_batch_size=1,
+    )
+    devices = maxtext_utils.create_device_mesh(cfg)
+    mesh = Mesh(devices, cfg.mesh_axes)
+    model = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=cfg.dtype,
+        weight_dtype=jnp.float8_e4m3fn,
+        quant=configure_quantization(cfg),
+        rngs=nnx.Rngs(params=0),
+    )
+
+    e, embed, moe_mlp = model.num_experts, model.moe_expert_input_dim, model.intermediate_dim
+    rng = np.random.default_rng(3)
+
+    def _quantize_per_tensor(shape):
+      w = rng.uniform(-1.0, 1.0, size=shape).astype(np.float32)
+      scale = np.max(np.abs(w), axis=tuple(range(1, w.ndim))) / 448.0  # true 1D (E,)
+      scale = np.where(scale == 0, 1.0, scale)
+      w_q = np.clip(np.round(w / scale[:, None, None]), -448.0, 448.0).astype(ml_dtypes.float8_e4m3fn)
+      return w_q, scale.astype(np.float32)
+
+    wi_0_q, wi_0_scale = _quantize_per_tensor((e, embed, moe_mlp))
+    wi_1_q, wi_1_scale = _quantize_per_tensor((e, embed, moe_mlp))
+    wo_q, wo_scale = _quantize_per_tensor((e, moe_mlp, embed))
+    self.assertEqual(model.wo_scale[...].shape, (e,))  # confirms a true 1D per-expert allocation
+    model.wi_0[...] = jnp.asarray(wi_0_q)
+    model.wi_0_scale[...] = jnp.asarray(wi_0_scale)
+    model.wi_1[...] = jnp.asarray(wi_1_q)
+    model.wi_1_scale[...] = jnp.asarray(wi_1_scale)
+    model.wo[...] = jnp.asarray(wo_q)
+    model.wo_scale[...] = jnp.asarray(wo_scale)
+
+    inputs = jax.random.normal(jax.random.PRNGKey(11), (1, 16, embed), dtype=jnp.bfloat16)
+    native_quant = model.quant
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      native_out, _, _ = model(inputs)
+      model.quant = None
+      dequant_out, _, _ = model(inputs)
+    model.quant = native_quant
+
+    native_np = np.array(native_out, dtype=np.float32)
+    dequant_np = np.array(dequant_out, dtype=np.float32)
+    self.assertTrue(np.all(np.isfinite(native_np)))
+    relerr = float(np.max(np.abs(native_np - dequant_np)) / (np.max(np.abs(dequant_np)) + 1e-12))
+    self.assertLess(relerr, 0.1, f"native (per_tensor) vs dequantize relerr={relerr:.3e}")
+
+
+@pytest.mark.tpu_only
+@pytest.mark.post_training
+class FusedMoeNativeFp8Test(unittest.TestCase):
+  """Tests native FP8 through fused_moe_matmul -- the real vllm_rpa rollout
+  MoE path, gated separately from sparse_matmul+gmm_v2 (native_fused_gmm vs.
+  native_gmm in moe.py).
+  """
+
+  def _make_model(self, cfg):
+    """Builds a RoutedMoE on a real 2-axis ("data", "model") mesh."""
+    # fused_moe_func's shard_map hardcodes tpu_inference's ("data", "model")
+    # axis names, not MaxText's training-mesh convention -- build the same
+    # 2-axis mesh real rollout uses.
+    devices = np.array(jax.devices()).reshape(-1, 1)  # (data=N, model=1)
+    mesh = Mesh(devices, ("data", "model"))
+    model = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=cfg.dtype,
+        # RoutedMoE.__init__'s weight_dtype is a separate constructor arg from
+        # cfg.weight_dtype -- omitting it silently builds a non-fp8 model.
+        weight_dtype=jnp.float8_e4m3fn,
+        quant=configure_quantization(cfg),
+        rngs=nnx.Rngs(params=0),
+    )
+    return model, mesh
+
+  def _assign_synthetic_fp8_weights(self, model, block_size, seed=7):
+    """Assigns block-wise quantized weights matching a real weight_block_size=128
+    checkpoint layout (not a collapsed per-tensor/per-channel special case)."""
+    e, embed, moe_mlp = model.num_experts, model.moe_expert_input_dim, model.intermediate_dim
+    rng = np.random.default_rng(seed)
+    wi_0_q, wi_0_scale = _quantize_moe_weight_blockwise(rng, (e, embed, moe_mlp), block_size)
+    wi_1_q, wi_1_scale = _quantize_moe_weight_blockwise(rng, (e, embed, moe_mlp), block_size)
+    wo_q, wo_scale = _quantize_moe_weight_blockwise(rng, (e, moe_mlp, embed), block_size)
+    model.wi_0[...] = jnp.asarray(wi_0_q)
+    model.wi_0_scale[...] = jnp.asarray(wi_0_scale)
+    model.wi_1[...] = jnp.asarray(wi_1_q)
+    model.wi_1_scale[...] = jnp.asarray(wi_1_scale)
+    model.wo[...] = jnp.asarray(wo_q)
+    model.wo_scale[...] = jnp.asarray(wo_scale)
+    return embed
+
+  def _assign_synthetic_fused_fp8_weights(self, model, block_size, seed=7):
+    """Like _assign_synthetic_fp8_weights, but for prefuse_moe_weights=True:
+    assigns directly to the single fused model.wi/model.wi_scale (shape
+    (E, embed, 2*moe_mlp)), matching what a real prefused rollout checkpoint
+    -- and the fused_native_scale branch in RoutedMoE.__call__ -- actually
+    reads."""
+    e, embed, moe_mlp = model.num_experts, model.moe_expert_input_dim, model.intermediate_dim
+    rng = np.random.default_rng(seed)
+    wi_q, wi_scale = _quantize_moe_weight_blockwise(rng, (e, embed, 2 * moe_mlp), block_size)
+    wo_q, wo_scale = _quantize_moe_weight_blockwise(rng, (e, moe_mlp, embed), block_size)
+    model.wi[...] = jnp.asarray(wi_q)
+    model.wi_scale[...] = jnp.asarray(wi_scale)
+    model.wo[...] = jnp.asarray(wo_q)
+    model.wo_scale[...] = jnp.asarray(wo_scale)
+    return embed
+
+  def _make_config(self, run_name, **overrides):
+    """Base vllm_rpa + serve_fp8_weight config, block_size=128."""
+    block_size = 128
+    kwargs = dict(  # pylint: disable=use-dict-literal
+        run_name=run_name,
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        dtype="bfloat16",
+        weight_dtype="float8_e4m3fn",
+        weight_block_size=block_size,
+        quantization="serve_fp8_weight",
+        attention="vllm_rpa",
+        # EP=1: real expert parallelism hits an unrelated pre-existing bug in
+        # this tpu_inference version's ragged_gather kernel.
+        ici_expert_parallelism=1,
+        log_config=False,
+        max_target_length=16,
+        per_device_batch_size=1,
+    )
+    kwargs.update(overrides)
+    return pyconfig.initialize([None, get_test_config_path()], **kwargs), block_size
+
+  def test_native_matches_dequantize_baseline(self):
+    """Native FP8 through fused_moe_matmul should closely match the existing
+    dequantize-then-requantize baseline."""
+    cfg, block_size = self._make_config("fused_moe_native_fp8")
+    model, _ = self._make_model(cfg)
+    embed = self._assign_synthetic_fp8_weights(model, block_size)
+
+    inputs = jax.random.normal(jax.random.PRNGKey(11), (1, 16, embed), dtype=jnp.bfloat16)
+    native_quant = model.quant
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      native_out, _, _ = model(inputs)
+      model.quant = None
+      dequant_out, _, _ = model(inputs)
+    model.quant = native_quant
+
+    native_np = np.array(native_out, dtype=np.float32)
+    dequant_np = np.array(dequant_out, dtype=np.float32)
+    self.assertTrue(np.all(np.isfinite(native_np)))
+    relerr = float(np.max(np.abs(native_np - dequant_np)) / (np.max(np.abs(dequant_np)) + 1e-12))
+    # Loose tolerance: native skips fused_moe_func's own activation
+    # requantization, so the two paths aren't bit-identical.
+    self.assertLess(relerr, 0.1, f"native vs dequantize relerr={relerr:.3e}")
+
+  def test_native_matches_dequantize_baseline_prefused(self):
+    """Same as test_native_matches_dequantize_baseline, but with
+    prefuse_moe_weights=True -- the actual real vLLM serving configuration
+    (weight_converter.py fuses wi_0/wi_1 -> wi before rollout sees it), which
+    exercises the fused_native_scale branch and prepare_fused_gmm_scale on a
+    real block-quantized (not collapsed) scale shape."""
+    cfg, block_size = self._make_config("fused_moe_native_fp8_prefused", prefuse_moe_weights=True)
+    model, _ = self._make_model(cfg)
+    embed = self._assign_synthetic_fused_fp8_weights(model, block_size)
+
+    inputs = jax.random.normal(jax.random.PRNGKey(13), (1, 16, embed), dtype=jnp.bfloat16)
+    native_quant = model.quant
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      native_out, _, _ = model(inputs)
+      model.quant = None
+      dequant_out, _, _ = model(inputs)
+    model.quant = native_quant
+
+    native_np = np.array(native_out, dtype=np.float32)
+    dequant_np = np.array(dequant_out, dtype=np.float32)
+    self.assertTrue(np.all(np.isfinite(native_np)))
+    relerr = float(np.max(np.abs(native_np - dequant_np)) / (np.max(np.abs(dequant_np)) + 1e-12))
+    self.assertLess(relerr, 0.1, f"native vs dequantize relerr={relerr:.3e}")
+
+  def test_sparse_matmul_gmm_v2_flags_dont_crash_under_vllm_rpa(self):
+    """Regression test: sparse_matmul=True + use_gmm_v2=True with
+    attention=vllm_rpa used to wrap kernels in a QArray that crashed
+    fused_moe_matmul's jnp.concatenate. vllm_rpa always wins the dispatch,
+    so this should behave like sparse_matmul=False."""
+    cfg, block_size = self._make_config(
+        "fused_moe_sparse_matmul_guard",
+        sparse_matmul=True,
+        use_gmm_v2=True,
+        use_tokamax_gmm=True,
+        megablox=True,
+    )
+    model, _ = self._make_model(cfg)
+    embed = self._assign_synthetic_fp8_weights(model, block_size)
+    inputs = jax.random.normal(jax.random.PRNGKey(12), (1, 16, embed), dtype=jnp.bfloat16)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      out, lb_loss, bias_updates = model(inputs)  # must not raise
+    self.assertTrue(np.all(np.isfinite(np.array(out, dtype=np.float32))))
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
 

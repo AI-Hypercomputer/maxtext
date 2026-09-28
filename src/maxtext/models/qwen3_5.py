@@ -200,7 +200,13 @@ class Qwen3_5DecoderLayer(nnx.Module):
       batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
       dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
       self.attention = Qwen3_5GatedDeltaNet(
-          config=cfg, inputs_shape=dummy_inputs_shape, mesh=self.mesh, dtype=cfg.dtype, model_mode=model_mode, rngs=rngs
+          config=cfg,
+          inputs_shape=dummy_inputs_shape,
+          mesh=self.mesh,
+          dtype=cfg.dtype,
+          model_mode=model_mode,
+          quant=self.quant,
+          rngs=rngs,
       )
 
     # Second LayerNorm, applied before the MoE block (outputs fp32 into MoE router when float32_gate_logits=True).
@@ -237,9 +243,7 @@ class Qwen3_5DecoderLayer(nnx.Module):
     residual = inputs
 
     if isinstance(attention_metadata, dict):
-      layer_meta = attention_metadata.get(f"layer.{self.layer_idx}", attention_metadata.get(self.layer_idx))
-      if layer_meta is not None:
-        attention_metadata = layer_meta
+      attention_metadata = attention_metadata.get(f"layer.{self.layer_idx}", attention_metadata.get(self.layer_idx))
 
     # First LayerNorm, applied before the attention block.
     hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
