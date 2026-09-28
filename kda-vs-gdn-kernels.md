@@ -156,7 +156,7 @@ GDN-specialized sub-block.
 
 Today on TPU, KDA and GDN run at the same speed through the tokamax kernel
 (7.50 vs 7.42 ms). The implementation decides the speed. The part that is
-specific to KDA is real but small: about 1.3x per layer, about 3% of the tiny
+specific to KDA is real but small: about 1.3x per layer at BC 4, about 1.5% of the tiny
 step.
 
 ### In the full model (tiny, 16 layers, 14 KDA, current base)
@@ -168,11 +168,11 @@ From the dd1 and gg8 profiles in `olmo35-mfu-20pct-study.md`.
 | step | 0.702 s, 151.0 TF/s, 13.09% MFU |
 | KDA total | 208 ms (Pallas kernels 68, XLA glue 140) |
 | of which the varlen padding tax | about 116 ms (measured, gg `packing=False`) |
-| KDA to GDN with a no-sub-block kernel | 1.7 ms x 14 = about 23 ms, about 3% of the step |
+| KDA to GDN with a no-sub-block kernel, from the BC 8 base | 0.73 ms x 14 = about 10 ms, about 1.5% of the step |
 | reset-aware KDA kernel plus fused glue | about 173 ms, projected 16.7% MFU |
 
 The lever is the padding and the glue around KDA, not swapping KDA for GDN.
-The fine-grained decay costs about 3% of the step; the kernel work around it is
+The fine-grained decay costs about 1.5% of the step; the kernel work around it is
 worth about 25%.
 
 ### Common claims, checked against the measurements
