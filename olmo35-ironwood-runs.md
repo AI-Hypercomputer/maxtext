@@ -933,6 +933,26 @@ summation reorder. The full recipe set failed at config parse: the recipe's
 `SEQ` layout is `SEQ_MINOR` in this tree's `QKVLayout`. The ii-series splits the
 fused backward kernel and the layout into separate arms.
 
+### ii-series, splash blocks confirmed, fused backward and layout (o35n281003)
+
+Base is the hh base plus the 1024 / 2048 splash blocks. `fused` adds
+`sa_use_fused_bwd_kernel=True use_tokamax_splash=True`; `seqminor` adds
+`SEQ_MINOR` q/k/v layouts on top of `fused`; `noblk` is the hh base.
+
+| arm | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|
+| ii1_orig | 78.4 | 6.80% | 0.901 | 10.685 |
+| ii6_noblk | 147.1 | 12.75% | 0.721 | 10.834 |
+| ii2_ctrl | 149.7 | 12.98% | 0.708 | 10.832 |
+| ii7_ctrl | 149.8 | 12.99% | 0.708 | 10.832 |
+| ii3_fused | 150.2 | 13.02% | 0.706 | 10.832 |
+| ii5_fused | 151.0 | 13.09% | 0.702 | 10.832 |
+| ii4_seqminor | 150.5 | 13.05% | 0.704 | 10.833 |
+
+**Blocks: +1.8%, kept** (same-run control against `noblk`). **Fused backward plus
+tokamax splash: +0.6%, kept**, loss unchanged. `SEQ_MINOR` adds nothing over
+`fused` and moves the loss by 0.001; dropped. New base 150.6 TF/s, 13.06%, 0.704 s.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd

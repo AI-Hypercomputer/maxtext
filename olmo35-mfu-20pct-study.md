@@ -247,6 +247,7 @@ the check.
 |---|---|---|---|---|---|
 | 0 | current base | | | 0.735 | 12.5% |
 | 1 | Pallas top-k | **built and measured**, gg-series +1.6% | 11 | **0.722 (measured)** | **12.7%** |
+| 1b | splash blocks + fused bwd | **measured**, hh and ii +2.4% | 18 | **0.704 (measured)** | **13.1%** |
 | 2 | KDA: reset-aware kernel at 30% + fused glue | varlen part **measured** (116 ms, gg nopack), rest assumed | ~173 | 0.550 | 16.7% |
 | 3 | fused routed-expert kernel (wi+SwiGLU+wo, custom VJP) | **prototype measured** 2.32x at this shape, ragged-adjusted; not wired | ~57 to 76 | 0.474 to 0.455 | 19.4% to 20.2% |
 | 4 | group alignment and tile tuning on top of 3 (43% to ~60% of roofline) | assumed buildable | ~25 | 0.449 to 0.430 | **20.5% to 21.4%** |
@@ -271,6 +272,9 @@ roofline.
 | gg | original config, pdb 2, stock flags | | 80.1 | | reference: base is 1.81x the original |
 | hh | splash blocks 1024 / 2048 (gpt-oss recipe) | 147.1 / 146.9 | 149.0 | **+1.3%** | reorder only (loss 10.832 vs 10.834); ii confirms |
 | hh | full recipe splash set | | failed | | `SEQ` layout name, rerun as `SEQ_MINOR` in ii |
+| ii | splash blocks, same-run control | 147.1 (no blocks) | 149.7 / 149.8 | **+1.8%** | kept |
+| ii | fused splash bwd + tokamax splash | 149.7 / 149.8 | 150.2 / 151.0 | **+0.6%** | kept, loss unchanged |
+| ii | `SEQ_MINOR` layouts | 150.6 (fused) | 150.5 | 0 | dropped |
 
 Capacity, 2026-09-28: the ee-series has been queued on nap since 04:10 UTC. From
 04:31 on, every resubmit is suspended with `insufficient unused quota for
