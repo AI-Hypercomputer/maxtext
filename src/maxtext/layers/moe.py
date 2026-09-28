@@ -553,6 +553,94 @@ class GateLogit(nnx.Module):
     return output, pre_bias_logits
 
 
+def static_quantized_all_gather(
+    x: jax.Array,
+    axis_name: str,
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    calibration_method: str = "fixed,-57344,57344",
+) -> jax.Array:
+  """Performs all_gather with static FP8 per-tensor scale."""
+  x_q = qpl.quantize(
+      x.astype(jnp.float32),
+      jnp.float8_e5m2,
+      channelwise_axes=[],
+      calibration_method=calibration_method,
+  )
+  gathered_qvals = jax.lax.all_gather(x_q.qvalue, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+  return (gathered_qvals.astype(jnp.float32) * x_q.scale).astype(x.dtype)
+
+
+def rowwise_quantized_all_gather(
+    x: jax.Array,
+    axis_name: str,
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    qtype: jnp.dtype = jnp.float8_e5m2,
+) -> jax.Array:
+  """Performs all_gather with dynamic row-wise (token-wise) FP8 scale."""
+  g_f32 = x.astype(jnp.float32)
+  grads_q = qpl.quantize(
+      g_f32,
+      qtype=qtype,
+      channelwise_axes=[0],
+  )
+  gathered_qvals = jax.lax.all_gather(grads_q.qvalue, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+  gathered_scales = jax.lax.all_gather(grads_q.scale, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+  return (gathered_qvals.astype(jnp.float32) * gathered_scales).astype(x.dtype)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4))
+def _moe_combine_psum_scatter(
+    x: jax.Array,
+    axis_name: str,
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    bwd_method: str = "",
+) -> jax.Array:
+  """Evaluates psum_scatter in forward, and quantized All-Gather in backward."""
+  return jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
+
+
+def _moe_combine_psum_scatter_fwd(
+    x: jax.Array,
+    axis_name: str,
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    bwd_method: str = "",
+):
+  return _moe_combine_psum_scatter(x, axis_name, scatter_dimension, tiled, bwd_method), None
+
+
+def _moe_combine_psum_scatter_bwd(
+    axis_name: str,
+    scatter_dimension: int,
+    tiled: bool,
+    bwd_method: str,
+    res,
+    grads: jax.Array,
+):
+  if not bwd_method:
+    gathered_grads = jax.lax.all_gather(grads, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+    return (gathered_grads,)
+
+  if bwd_method.startswith("fixed"):
+    dequant = static_quantized_all_gather(
+        grads, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled, calibration_method=bwd_method
+    )
+    return (dequant,)
+  elif bwd_method in ("rowwise"):
+    dequant = rowwise_quantized_all_gather(grads, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
+    return (dequant,)
+
+  raise ValueError(
+      f"Unsupported moe_quantize_combine_bwd_method: {bwd_method}. Supported: '', 'rowwise', 'fixed,<bound>'."
+  )
+
+
+_moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
+
+
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
 
@@ -2845,12 +2933,22 @@ class RoutedMoE(nnx.Module):
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
             ),
         )
-        output = jax.lax.psum_scatter(
-            output,
-            self._expert_parallelism_name,
-            scatter_dimension=0,
-            tiled=True,
-        )
+        combine_bwd_method = self.config.moe_quantize_combine_bwd_method
+        if combine_bwd_method:
+          output = _moe_combine_psum_scatter(
+              output,
+              self._expert_parallelism_name,
+              scatter_dimension=0,
+              tiled=True,
+              bwd_method=combine_bwd_method,
+          )
+        else:
+          output = jax.lax.psum_scatter(
+              output,
+              self._expert_parallelism_name,
+              scatter_dimension=0,
+              tiled=True,
+          )
         return output, routing.lb_loss, routing.bias_updates, routing.has_overflow, routing.required_rbf
 
       if self.get_expert_parallelism_size() > 1:

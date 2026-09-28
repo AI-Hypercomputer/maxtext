@@ -42,6 +42,13 @@ from absl import flags as _absl_flags
 if not _absl_flags.FLAGS.is_parsed():
   _absl_flags.FLAGS(sys.argv[:1])
 
+try:
+  import pathwaysutils
+
+  pathwaysutils.initialize()
+except ImportError:
+  pass
+
 import jax
 import os
 import importlib.util

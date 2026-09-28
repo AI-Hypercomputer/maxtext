@@ -688,7 +688,7 @@ def _bwd_quantize_gradient(
         calibration_method=quantization_rule.bwd_calibration_method,
     )
     drhs_calib = (
-        quantization_rule.additional_qt_config.get("moe_drhs_grad_quantization_calibration_method", None)
+        (quantization_rule.additional_qt_config or {}).get("moe_drhs_grad_quantization_calibration_method", None)
         or quantization_rule.bwd_calibration_method
     )
     drhs_dout = qpl.quantize(
