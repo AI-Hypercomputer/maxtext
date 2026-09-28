@@ -841,7 +841,12 @@ def training_loop_iteration(
     elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
-    example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+    _t_load = time.perf_counter()
+    example_batch = python_vars.pop("prefetched_batch", None)
+    if example_batch is None:
+      example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+    if step == start_step:
+      max_logging.log(f"STEP0_DEBUG: batch obtained in {time.perf_counter() - _t_load:.3f} s")
     # DiLoCo's inner step takes the rng like the inner NNX step.
     if config.enable_diloco:
       # pylint: disable=not-callable
@@ -889,6 +894,15 @@ def training_loop_iteration(
         else:
           state, metrics = p_train_step(state, example_batch, *step_rng_args)
           _maybe_log_required_rbf(config, step, metrics, "normal")
+
+  if step == start_step:
+    _t_dispatched = time.perf_counter()
+    jax.block_until_ready(state)
+    _t_done = time.perf_counter()
+    max_logging.log(
+        f"STEP0_DEBUG: load_start->dispatch_return {_t_dispatched - _t_load:.3f} s, "
+        f"dispatch-return->device done {_t_done - _t_dispatched:.3f} s"
+    )
 
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
@@ -1391,6 +1405,52 @@ def train_loop(config, recorder, state=None):
   _job_completed_gracefully = False
   te_moe_overflow_window = []
   try:
+    if (
+        config.block_state_before_run_start
+        or config.prefetch_first_batch_before_run_start
+        or config.warm_input_reshard_before_run_start
+    ):
+      _t0 = time.perf_counter()
+      jax.block_until_ready(state)
+      _t1 = time.perf_counter()
+      # The metric logger evaluates learning_rate_schedule(step) eagerly after every step; the first call compiles a
+      # handful of tiny eager ops (clip, cos, where, ...). Do it once here so step 0 does not pay for it.
+      jax.block_until_ready(learning_rate_schedule(start_step))
+      _t2 = time.perf_counter()
+      if config.warm_input_reshard_before_run_start:
+        # The loader builds each host batch as a global array sharded over all mesh axes
+        # (multihost_dataloading._form_global_array) and then device_puts it to the input sharding, which
+        # compiles a reshard program on first use. Warm it with an all-zero synthetic batch (no training data).
+        _src_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(mesh.axis_names))
+        _dst_sharding = getattr(data_loader, "input_data_shardings", None) or data_sharding
+        _local_rows = config.global_batch_size_to_load // jax.process_count()
+        _n_local = len(mesh.local_devices)
+
+        def _synthetic_global(leaf):
+          local = np.zeros((_local_rows,) + tuple(leaf.shape[1:]), dtype=leaf.dtype)
+          bufs = jax.device_put(np.split(local, _n_local, axis=0), mesh.local_devices)
+          global_shape = (jax.process_count() * _local_rows,) + tuple(leaf.shape[1:])
+          return jax.make_array_from_single_device_arrays(global_shape, _src_sharding, bufs)
+
+        _warm = jax.device_put(jax.tree.map(_synthetic_global, shaped_batch), _dst_sharding)
+        jax.block_until_ready(_warm)
+        del _warm
+      _t2b = time.perf_counter()
+      _t3 = _t2b
+      if config.prefetch_first_batch_before_run_start:
+        with jax.profiler.StepTraceAnnotation("train", step_num=start_step):
+          prefetched = data_loader.load_next_batch(rampup_manager=rampup_manager)
+        jax.block_until_ready(prefetched)
+        python_vars["prefetched_batch"] = prefetched
+        _t3 = time.perf_counter()
+      multihost_utils.sync_global_devices("pre_run_start_block")
+      _t4 = time.perf_counter()
+      max_logging.log(
+          f"PRE_RUN_START: state ready {_t1 - _t0:.3f} s, lr schedule warm {_t2 - _t1:.3f} s, "
+          f"input reshard warm {_t2b - _t2:.3f} s, "
+          f"first batch {_t3 - _t2b:.3f} s, barrier {_t4 - _t3:.3f} s (process {jax.process_index()})"
+      )
+
     python_vars["last_step_completion"] = datetime.datetime.now()
 
     start_run_clock(config, start_step, warmup_fn=warmup_fn, python_vars=python_vars)

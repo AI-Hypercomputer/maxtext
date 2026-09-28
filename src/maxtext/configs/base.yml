@@ -263,6 +263,11 @@ eval_ragged_buffer_factor: -1.0 # ragged buffer factor for the eval program only
 first_phase_ragged_buffer_factor: 0.0 # with retry_dropless_first_steps=N, the first N steps use this ragged buffer factor (drops replay dropless). 0 = off.
 log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the min ragged_buffer_factor avoiding drops (REQUIRED_RBF).
 warmup_programs_in_init: false # before init_stop/run_start, run each precompiled train/eval program once on a synthetic batch (state unchanged), then a cross-host barrier.
+block_state_before_run_start: false # before run_start: block_until_ready(state), warm the LR schedule, cross-host barrier.
+prefetch_first_batch_before_run_start: false # before run_start: load + device_put + block on the first train batch (touches data before RUN_START).
+warm_input_reshard_before_run_start: false # before run_start: device_put a synthetic zero batch to compile the input reshard program (no data).
+train_shard_in_read: false # c4_mlperf train: shard by file in tfds instead of read-all-then-ds.shard (needs >= n_hosts files).
+train_interleave_cycle_length: -1 # c4_mlperf train: tfds interleave_cycle_length (-1 = tfds default).
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
