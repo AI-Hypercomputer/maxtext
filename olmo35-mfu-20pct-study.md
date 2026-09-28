@@ -220,6 +220,63 @@ matters for planning: with this FSDP=32 x DP=4 sharding the step cannot go below
 volume helps. 20% needs 460 ms, so the target sits inside the kernel budget and
 the comm floor does not bind it.
 
+### Profile of the 0.704 s base and of the original (kk3, kk4)
+
+kk-series (`o35n281137`): kk3 profiles the optimized base (0.699 s step, 695 ms
+of profiled ops), kk4 the original config (pdb 2, stock flags, 0.900 s step).
+Same attribution as dd1. The original moves 16384 tokens per step, the base 24576.
+
+| component | dd1 ms | kk3 ms (base) | kk4 ms (original) | kernel verdict on kk3 |
+|---|---|---|---|---|
+| KDA glue | 140.4 | 140.3 | 110.9 | not effective: varlen pack, unfused elementwise |
+| KDA Pallas kernels | 67.6 | 67.5 | 108.3 | **not effective**, 10% of roofline |
+| MoE routed GEMMs (gmm + tgmm) | 166.7 | 164.9 | 134.0 | **not effective**, 39% of 63.8 |
+| MoE other | 33.8 | 56.6 | 34.2 | not effective |
+| collectives, exposed | 58.2 | 51.8 | **274.9** | scheduling |
+| LM head + loss | 37.8 | 37.8 | 25.0 | GEMM effective, loss not |
+| dense matmuls | 40.7 | 40.7 | 34.2 | **effective** |
+| MoE top-k + sort | 31.7 | **14.4** | 69.6 | top-k now a 4.4 ms Pallas custom call; the sorts remain |
+| attention (splash) | 26.5 | **9.3** | 20.2 | **close to effective**: 39% of the 3.6 ms roofline, was 14% |
+| dispatch + combine | 17.2 | 17.1 | 15.5 | not effective |
+| copies / relayout | 14.1 | 14.2 | 42.8 | layout |
+| EMo bisection | 10.6 | 10.6 | | not effective |
+
+The top-k and splash levers show up where expected: together -34.5 ms of device
+time, which matches the measured 0.735 s to 0.704 s. Splash went from 14% to
+39% of roofline with the 1024 / 2048 blocks and the fused backward, and is now
+the only non-matmul kernel near the 50% good-kernel bar. The Pallas top-k is
+faster than XLA's sort but still VPU-bound, **not effective**.
+
+xla_shell on both:
+
+| quantity | kk3 (base) | kk4 (original) |
+|---|---|---|
+| step | 699 ms | 900 ms |
+| TensorCore lane | 626 ms: compute 365, VPU 213, relayout 49 | 607 ms: compute 322, VPU 218, relayout 67 |
+| SparseCore lane (collectives) | 372 ms, 307 hidden, **65 exposed** | 539 ms, 250 hidden, **289 exposed** |
+| comm hidden | 82% | 46% |
+| best-overlap ceiling | 626 ms (1.12x headroom) | 607 ms (1.48x headroom) |
+| roadmap floor | **372 ms**, binder SparseCore comm | |
+
+| roadmap step (kk3) | lever | step ms | gain |
+|---|---|---|---|
+| 0 | as profiled | 699 | |
+| 1 | schedule the exposed comm | 626 | 72 |
+| 2 | kernels, bounded by comm slack | 372 | 254 |
+| 3 | relayout | 372 | 0 |
+| 4 | host-offload remat | 372 | 0 |
+
+The hill climb's main win over the original is scheduling: exposed comm fell
+from 289 ms to 65 ms per step while the TensorCore lane stayed near 610 to 630 ms.
+The base is now TC-lane-bound with 1.12x of schedule headroom left, so what
+remains is kernel work, which is what the flag sweeps (jj) also showed. `roadmap
+--collective` places the remaining 97 ms of exposed comm on expert-grad
+all-reduces (2 to 4 ms each, near the end of the step) and the gmm-adjacent
+expert all-gathers (1 to 2 ms each). The ll-series tests SparseCore all-reduce
+offload and the recipe's pipeliner flags against exactly those. The comm floor
+rose from 325 ms (gg8, unpacked) to 372 ms (37.9% MFU); 20% at 460 ms is still
+inside the kernel budget.
+
 ## Quality neutrality, per lever
 
 | lever | math change | why quality is unchanged |
@@ -277,6 +334,7 @@ roofline.
 | ii | `SEQ_MINOR` layouts | 150.6 (fused) | 150.5 | 0 | dropped |
 | jj | all-gather / reduce-scatter concurrency 4 | 150.4 / 151.1 | 151.0 / 150.9 | 0 | neutral |
 | jj | `--xla_latency_hiding_scheduler_rerun=2` | 150.4 / 151.1 | 150.9 | 0 | neutral; flag levers used up |
+| kk | profile of the base and the original | 150.7 / 151.1 (flex) | 151.2 (prof) | | orig 78.3 / 78.8; profile source |
 
 Capacity, 2026-09-28: the ee-series has been queued on nap since 04:10 UTC. From
 04:31 on, every resubmit is suspended with `insufficient unused quota for

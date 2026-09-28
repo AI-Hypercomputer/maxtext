@@ -970,6 +970,23 @@ concurrency 4; `rerun` adds `--xla_latency_hiding_scheduler_rerun=2`.
 **Both neutral** (inside the 150.4 to 151.1 control spread). Flag-level levers are
 used up on this base; the kk-series profiles it instead.
 
+### kk-series, profiles of the base and the original (o35n281137 nap, o35s281137 flex)
+
+| arm | cluster | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|---|
+| kk1_orig | nap | 78.3 | 6.79% | 0.903 | 10.685 |
+| kk4_orig_prof | nap | 78.5 | 6.80% | 0.901 | 10.685 |
+| kk2_ctrl | nap | 150.7 | 13.07% | 0.703 | 10.832 |
+| kk3_prof | nap | 151.2 | 13.11% | 0.701 | 10.832 |
+| kk1_orig | flex spot | 78.8 | 6.83% | 0.897 | |
+| kk2_ctrl | flex spot | 151.1 | 13.10% | 0.701 | |
+| kk3_prof | flex spot | 151.2 | 13.11% | 0.701 | |
+
+The flex spot 4x4x4 admitted this series too and reproduces nap within 0.6%.
+Profile analysis is in olmo35-mfu-20pct-study.md: base TC-lane-bound (626 ms lane,
+65 ms exposed comm), original comm-bound (289 ms exposed). Splash is 9.3 ms (39%
+of roofline, was 26.5 ms), top-k plus sorts 14.4 ms (was 31.7).
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
