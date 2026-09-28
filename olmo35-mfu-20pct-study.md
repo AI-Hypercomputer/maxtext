@@ -269,6 +269,8 @@ roofline.
 | gg | Pallas top-k (`moe_topk_pallas`) | 144.6 / 144.5 | 146.9 / 147.0 | **+1.6%** | kept, loss identical |
 | gg | `packing=False` (varlen KDA tax, diagnostic) | 144.6 / 144.5 | 171.8 / 171.6 | **+18.8%** | ceiling of a reset-aware KDA kernel |
 | gg | original config, pdb 2, stock flags | | 80.1 | | reference: base is 1.81x the original |
+| hh | splash blocks 1024 / 2048 (gpt-oss recipe) | 147.1 / 146.9 | 149.0 | **+1.3%** | reorder only (loss 10.832 vs 10.834); ii confirms |
+| hh | full recipe splash set | | failed | | `SEQ` layout name, rerun as `SEQ_MINOR` in ii |
 
 Capacity, 2026-09-28: the ee-series has been queued on nap since 04:10 UTC. From
 04:31 on, every resubmit is suspended with `insufficient unused quota for

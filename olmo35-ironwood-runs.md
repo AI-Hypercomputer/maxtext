@@ -913,6 +913,26 @@ real data, which packs several documents per row; it is the measured ceiling of
 a KDA kernel that applies segment resets inside the chunk recurrence instead of
 padding every segment to a chunk boundary.
 
+### hh-series, splash attention settings (o35n280846)
+
+Base is the gg base plus `moe_topk_pallas=True`. `blk` is the gpt-oss Ironwood
+recipe's block set: q/kv 1024 forward, 2048 for dq and dkv (was 512 everywhere).
+
+| arm | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|
+| hh1_orig | 79.9 | 6.93% | 0.884 | 10.685 |
+| hh2_ctrl | 147.1 | 12.75% | 0.721 | 10.834 |
+| hh6_ctrl | 146.9 | 12.74% | 0.721 | 10.834 |
+| hh5_blk | 149.0 | 12.92% | 0.712 | 10.832 |
+| hh3_sa, hh4_sa | | | | `KeyError: 'SEQ'` |
+
+**Blocks: +1.3%, 9 ms (one arm, re-confirmed in the ii-series).** Larger blocks
+cut the splash grid steps 4x for dq/dkv. Only the fp32 online-softmax
+accumulation order changes; the step-19 loss moves by 0.002, the size of a
+summation reorder. The full recipe set failed at config parse: the recipe's
+`SEQ` layout is `SEQ_MINOR` in this tree's `QKVLayout`. The ii-series splits the
+fused backward kernel and the layout into separate arms.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
