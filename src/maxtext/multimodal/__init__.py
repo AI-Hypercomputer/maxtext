@@ -11,3 +11,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from maxtext.multimodal.processor_vae_image import VaeImageProcessor, VaeImageProcessorLDM3D, PipelineImageInput
+from maxtext.multimodal.processor_vae_video import VaeVideoProcessor, VideoProcessor
