@@ -642,7 +642,7 @@ def fused_conv1d_gdn(
         ),
         name=cfg.get_kernel_name(),
         metadata=cfg.get_metadata(),
-        cost_estimate=cost_estimate or get_cost_estimate(cfg, num_seqs=num_seqs),
+        cost_estimate=cost_estimate if cost_estimate is not None else get_cost_estimate(cfg, num_seqs=num_seqs),
     )(
         metadata_obj,
         qkv,
