@@ -129,6 +129,22 @@ coarse ties, mostly -inf, signed zeros, bf16). Local v4, [3, 8192, 512], k=16:
 | Pallas, int keys, bt=256 | 679 | **5.0x** |
 | Pallas, int keys, bt=1024 | 670 | 5.0x |
 
+Real v7x (tpu7x-cluster-flex, 2x2x1, one device), same shape, exact in both dtypes:
+
+| input | `lax.top_k` us | Pallas best us (bt) | speedup | HBM roofline us | kernel efficiency |
+|---|---|---|---|---|---|
+| f32 | 1480 | 391 (512) | **3.8x** | 14.1 | 3.6% |
+| bf16 | 356 | 364 (512) | 1.0x | 7.2 | 2.0% |
+
+The in-model `top_k` runs 1163 us/call, which matches the f32 path, so the
+expected saving is about 15 x (1163 - 394) = 11.5 ms per step. **Verdict: faster
+than XLA, still not an effective kernel.** It is VPU-bound: 16 rounds, each with a
+512-deep max and a 512-deep min over every token column, about 1.2M vreg ops per
+call. A good kernel would stream the logits once (HBM-bound, ~15-25 us), for
+example a per-token threshold found from a coarse histogram followed by one
+compaction pass; that would also absorb the EMo threshold (10.6 ms) and the
+routing sorts (14.2 ms) into the same pass.
+
 **Collectives (58 ms exposed).** The expert-weight all-gather
 (quantizations.py:120) and the expert-grad all-reduce (moe.py:3068) are not
 overlapped with the layer's compute. Overlap does not change any value.
@@ -162,12 +178,12 @@ the check.
 | step | lever | kernel status | save ms | step s | MFU |
 |---|---|---|---|---|---|
 | 0 | current base | | | 0.735 | 12.5% |
-| 1 | Pallas top-k | **built**, exact, ff-series pending | ~14 | 0.721 | 12.8% |
-| 2 | KDA: reset-aware kernel at 30% + fused glue | **assumed buildable** | ~173 | 0.548 | 16.8% |
-| 3 | group-aligned gmm at 75% (unfused) | **assumed buildable** | ~82 | 0.466 | 19.7% |
-| 4 | fused SwiGLU epilogue (gmm_v2 `fuse_act`) | exists in gmm_v2, not wired | ~20 | 0.446 | **20.6%** |
-| 5 | collective overlap | flags and scheduling | ~48 | 0.398 | 23.1% |
-| 6 | top-k/sort/EMo fused, dispatch, LM-head loss, splash, copies | assumed buildable | ~90 | 0.308 | 29.9% |
+| 1 | Pallas top-k | **built**, exact, 3.8x on v7x, ff-series pending | ~12 | 0.723 | 12.7% |
+| 2 | KDA: reset-aware kernel at 30% + fused glue | **assumed buildable** | ~173 | 0.550 | 16.7% |
+| 3 | group-aligned gmm at 75% (unfused) | **assumed buildable** | ~82 | 0.468 | 19.7% |
+| 4 | fused SwiGLU epilogue (gmm_v2 `fuse_act`) | exists in gmm_v2, not wired | ~20 | 0.448 | **20.5%** |
+| 5 | collective overlap | flags and scheduling | ~48 | 0.400 | 23.0% |
+| 6 | top-k/sort/EMo fused, dispatch, LM-head loss, splash, copies | assumed buildable | ~90 | 0.310 | 29.7% |
 
 KDA plus the MoE GEMM kernel are the two levers that matter: together they carry
 ~255 of the 275 ms. Everything else is second order. With all good kernels the
