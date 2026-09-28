@@ -22,13 +22,14 @@ from typing import Callable
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.kernels.mhc import api as mhc_kernel
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes
 
 
 @functools.lru_cache(maxsize=None)
@@ -208,6 +209,98 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         res_scale=jnp.asarray(self.res_alpha_scale[...], self.dtype),
     )
 
+  def _kernel_token_axes(self):
+    """Returns the mesh axes of the batch and length dims, or None if unsharded.
+
+    Every mHC op is token-local (the RMS norm, projections and gates all reduce
+    over `streams * embedding` of a single token), so the kernels can run
+    independently on each batch/length shard. The embedding dim must stay whole.
+    """
+    if self.mesh is None:
+      return None
+    rules = get_logical_axis_rules() or self.config.logical_axis_rules
+    token_axes = tuple(logical_to_mesh_axes(("activation_batch", "activation_length"), mesh=self.mesh, rules=rules))
+    if all(axis in (None, ()) for axis in token_axes):
+      return None
+    return token_axes
+
+  def _sharded_kernel_call(self, kernel_fn, args, in_ranks, out_ranks):
+    """Runs a mHC Pallas kernel under a token-sharded `shard_map`.
+
+    A bare `pallas_call` lowers to a Mosaic custom call that GSPMD cannot
+    partition, so on a multi-device mesh it fails with "Mosaic kernels cannot be
+    automatically partitioned". `shard_map` makes the partitioning explicit.
+
+    Args:
+      kernel_fn: Function taking `args` and returning a tuple of arrays.
+      args: Positional arguments for `kernel_fn`.
+      in_ranks: Per argument, the rank of a token-major activation
+        (`[batch, length, ...]`), or None for a replicated pytree (weights,
+        permutations).
+      out_ranks: Rank of each output, all token-major.
+
+    Returns:
+      The tuple returned by `kernel_fn`.
+    """
+    token_axes = self._kernel_token_axes()
+    if token_axes is None:
+      return kernel_fn(*args)
+
+    def spec(rank):
+      if rank is None:
+        return P()
+      return P(*token_axes, *([None] * (rank - 2)))
+
+    # check_vma=False is required, not defensive: `pallas_call` builds its
+    # `out_shape` from a plain `jax.ShapeDtypeStruct`, which carries no
+    # `manual_axis_type`, and check_vma=True rejects that outright. With
+    # check_vma=False, the transpose of `shard_map` psums the cotangents of
+    # replicated inputs, so weight gradients are reduced across token shards.
+    sharded_fn = jax.shard_map(
+        kernel_fn,
+        mesh=self.mesh,
+        in_specs=tuple(spec(rank) for rank in in_ranks),
+        out_specs=tuple(spec(rank) for rank in out_ranks),
+        check_vma=False,
+    )
+    return sharded_fn(*args)
+
+  def _kernel_pre(self, x, weights, kernel_config):
+    """Token-sharded `mhc_kernel.pre`."""
+
+    def pre_fn(x, weights):
+      # Built inside the body, not passed through `shard_map`: the kernel's
+      # custom_vjp takes `permutations` as a non-differentiable argument, which
+      # must be a constant rather than a tracer.
+      permutations = jnp.asarray(get_permutation_matrices(self.k), self.dtype)
+      layer_input, context = mhc_kernel.pre(x, weights, permutations, config=kernel_config)
+      return layer_input, context.x, context.h_post, context.residual
+
+    layer_input, context_x, h_post, residual = self._sharded_kernel_call(
+        pre_fn,
+        (x, weights),
+        in_ranks=(4, None),
+        out_ranks=(3, 4, 3, 4),
+    )
+    context = mhc_kernel.MhcContext(x=context_x, h_post=h_post, residual=residual, implementation="mosaic")
+    return layer_input, context
+
+  def _kernel_post(self, layer_out, context, kernel_config):
+    """Token-sharded `mhc_kernel.post`."""
+    implementation = context.implementation
+
+    def post_fn(layer_out, context_x, h_post, residual):
+      local_context = mhc_kernel.MhcContext(x=context_x, h_post=h_post, residual=residual, implementation=implementation)
+      return (mhc_kernel.post(layer_out, local_context, config=kernel_config),)
+
+    (output,) = self._sharded_kernel_call(
+        post_fn,
+        (layer_out, context.x, context.h_post, context.residual),
+        in_ranks=(3, 4, 3, 4),
+        out_ranks=(4,),
+    )
+    return output
+
   def res_mapping(self, h_res: Array):
     """Helper function for residual mapping after matmul."""
     # In MaxText, we match weight precision to activations before Matmul
@@ -272,12 +365,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
           rms_epsilon=self.config.normalization_layer_epsilon,
       )
       weights = self._get_mhc_weights()
-      layer_input, context = mhc_kernel.pre(
-          x,
-          weights,
-          jnp.asarray(get_permutation_matrices(self.k), self.dtype),
-          config=kernel_config,
-      )
+      layer_input, context = self._kernel_pre(x, weights, kernel_config)
     else:
       with jax.named_scope("mhc_norm"):
         # 1. Flatten the tensor, and RMS normalization
@@ -339,10 +427,10 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
           bwd_block_size=bwd_block_size,
           bwd_feature_block_size=bwd_feature_block_size,
       )
-      output = mhc_kernel.post(
+      output = self._kernel_post(
           layer_out,
           context,
-          config=kernel_config,
+          kernel_config,
       )
       return output, metadata
 
