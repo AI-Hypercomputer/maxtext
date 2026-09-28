@@ -369,6 +369,31 @@ The first supervisor hit its 3-hour limit at 07:12 without admission. At 07:37 t
 ee and ff arms were merged into one gg-series (original, base x2, Pallas top-k x2,
 `packing=False` x2, `packing=False` with profile) under an 8-hour supervisor.
 
+## Profiles
+
+Each capture covers steps 5 to 7 on device 0 (`profiler=xplane
+skip_first_n_steps_for_profiler=5 profiler_steps=3`). xla_shell and attribution
+outputs are in `gs://agagik-us/olmo35/4x4x4/analysis/`, alongside the two attribution scripts
+(`srcsurvey.py` builds the records pickle, `components.py` groups it).
+
+| profile | config | step | xplane | analysis |
+|---|---|---|---|---|
+| dd1 | study start base, 144.6 TF/s | 0.735 s | `gs://agagik-us/olmo35/4x4x4/o35n280354-olmo35-tiny-dd1_prof/tensorboard/plugins/profile/2026_09_28_04_03_29/gke-tpu-8fcc56a0-sr15.xplane.pb` | tables in this doc |
+| gg8 | base, `packing=False` (diagnostic) | 0.617 s | `gs://agagik-us/olmo35/4x4x4/o35n280808-olmo35-tiny-gg8_nopack_prof/tensorboard/plugins/profile/2026_09_28_08_38_36/gke-tpu-42351936-1w5v.xplane.pb` | `gg8_analyze.txt`, `gg8_roadmap.txt`, `gg8_components.txt` |
+| **kk3** | **current base**, 151.2 TF/s | 0.701 s | `gs://agagik-us/olmo35/4x4x4/o35n281137-olmo35-tiny-kk3_prof/tensorboard/plugins/profile/2026_09_28_11_48_50/gke-tpu-c19ec041-mw2h.xplane.pb` | `kk3_analyze.txt`, `kk3_roadmap.txt`, `kk3_collective.txt`, `kk3_components.txt` |
+| **kk4** | **original config**, 78.5 TF/s | 0.901 s | `gs://agagik-us/olmo35/4x4x4/o35n281137-olmo35-tiny-kk4_orig_prof/tensorboard/plugins/profile/2026_09_28_11_51_39/gke-tpu-c19ec041-mw2h.xplane.pb` | `kk4_analyze.txt`, `kk4_roadmap.txt`, `kk4_components.txt` |
+
+The fused routed-expert numbers (2.32x) and the Pallas top-k numbers come from
+single-device microbenchmarks on tpu7x-cluster-flex (`scripts/latent_moe_fusion_bench.py`,
+wall-clock timing, no xplane), not from these captures.
+
+```
+PYTHONPATH=/home/agagik_google_com/olmo35/xla-shell python -m xla_shell -c "read_xplane kk3.xplane.pb; analyze_profile"
+PYTHONPATH=/home/agagik_google_com/olmo35/xla-shell python -m xla_shell -c "read_xplane kk3.xplane.pb; roadmap --all"
+PYTHONPATH=/home/agagik_google_com/olmo35/xla-shell python srcsurvey.py kk3.xplane.pb kk3recs.pkl
+PYTHONPATH=/home/agagik_google_com/olmo35/xla-shell python components.py kk3.xplane.pb kk3recs.pkl
+```
+
 ## Reproduce
 
 ```
