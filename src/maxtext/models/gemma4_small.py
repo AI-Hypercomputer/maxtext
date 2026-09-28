@@ -19,7 +19,6 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
@@ -29,6 +28,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import with_logical_constraint
 
 
 # E2B repeats 4 sliding + 1 global (period 5); E4B repeats 5 sliding + 1 global
@@ -418,7 +418,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
 
     if isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     # Bidirectional image-token mask is only meaningful in local-sliding
@@ -428,7 +428,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
 
     residual = inputs
     h = self.pre_self_attention_norm(inputs)
-    h = nn.with_logical_constraint(h, self.activation_axis_names)
+    h = with_logical_constraint(h, self.activation_axis_names)
 
     attn_out, kv_cache = self.self_attention(
         h,
@@ -444,14 +444,14 @@ class Gemma4SmallDecoderLayer(nnx.Module):
         shared_value=shared_value,
     )
     attn_out = self.post_self_attention_norm(attn_out)
-    attn_out = nn.with_logical_constraint(attn_out, self.activation_axis_names)
+    attn_out = with_logical_constraint(attn_out, self.activation_axis_names)
     h = residual + attn_out
 
     residual = h
     mlp_in = self.pre_ffw_norm(h)
     mlp_out = self.mlp(mlp_in, deterministic=deterministic)
     mlp_out = self.post_ffw_norm(mlp_out)
-    mlp_out = nn.with_logical_constraint(mlp_out, self.activation_axis_names)
+    mlp_out = with_logical_constraint(mlp_out, self.activation_axis_names)
     h = residual + mlp_out
 
     if self.per_layer_input_gate is not None and per_layer_input is not None:
@@ -461,10 +461,10 @@ class Gemma4SmallDecoderLayer(nnx.Module):
       gated = gate * per_layer_input.astype(cfg.dtype)
       proj = self.per_layer_projection(gated)
       proj = self.post_per_layer_input_norm(proj)
-      proj = nn.with_logical_constraint(proj, self.activation_axis_names)
+      proj = with_logical_constraint(proj, self.activation_axis_names)
       h = residual + proj
 
     h = h * jnp.asarray(self.layer_scalar.value, cfg.dtype)
-    h = nn.with_logical_constraint(h, self.activation_axis_names)
+    h = with_logical_constraint(h, self.activation_axis_names)
 
     return h, kv_cache

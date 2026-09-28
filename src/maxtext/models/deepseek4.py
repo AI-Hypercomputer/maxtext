@@ -17,7 +17,6 @@
 from typing import Optional
 
 from flax import nnx
-import flax.linen as nn
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, AttentionType
@@ -27,6 +26,7 @@ from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.layers import quantizations
 from maxtext.models import deepseek
+from maxtext.utils.sharding import with_logical_constraint
 from jax.ad_checkpoint import checkpoint_name
 
 
@@ -227,7 +227,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
       kv_cache=None,
       decoder_input_tokens=None,
   ):
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
 
