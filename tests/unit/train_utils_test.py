@@ -153,6 +153,28 @@ class TestReorderedDataIterator(unittest.TestCase):
     self.assertEqual(first_pass, [100, 101])
     self.assertEqual(second_pass, first_pass)
 
+  def test_eval_reset_then_for_loop_builds_one_iterator(self):
+    """train.py resets the eval iterator and then runs a for loop over it: one local iterator per eval."""
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    batches = [{"x": np.full((len(jax.devices()), 2), i, dtype=np.int32)} for i in range(2)]
+
+    class _CountingLoader:
+      builds = 0
+
+      def __iter__(self):
+        _CountingLoader.builds += 1
+        return iter(batches)
+
+    eval_iterator = multihost_dataloading.MultiHostDataLoadIterator(_CountingLoader(), mesh)
+    self.assertEqual(_CountingLoader.builds, 1)
+    for _ in range(2):
+      eval_iterator.reset()
+      self.assertEqual([int(b["x"][0, 0]) for b in eval_iterator], [0, 1])
+    self.assertEqual(_CountingLoader.builds, 3)
+    # A for loop without an explicit reset still starts from the first batch.
+    self.assertEqual([int(b["x"][0, 0]) for b in eval_iterator], [0, 1])
+    self.assertEqual(_CountingLoader.builds, 4)
+
 
 class TestValidateTrainConfig(unittest.TestCase):
   """Tests for validate_train_config."""
