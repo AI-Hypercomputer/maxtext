@@ -145,6 +145,37 @@ example a per-token threshold found from a coarse histogram followed by one
 compaction pass; that would also absorb the EMo threshold (10.6 ms) and the
 routing sorts (14.2 ms) into the same pass.
 
+**Fused routed-expert kernel, measured at this shape.** The prototype in
+`scripts/latent_moe_fusion_bench.py` (wi_0 and wi_1 GEMMs, SwiGLU and the wo GEMM
+in one Pallas kernel, hidden activation kept in VMEM, custom VJP with a dx kernel
+and a dW kernel) was run on a real v7x device (tpu7x-cluster-flex 2x2x1, image
+kdaj24) at the OLMo 3.5 per-device shape: 393216 rows (768 per expert), 512
+experts, latent 512, hidden 1024, bf16, balanced groups.
+
+| variant, one MoE layer | fwd ms | fwd+bwd ms | vs XLA | fwd+bwd roofline ms | efficiency |
+|---|---|---|---|---|---|
+| XLA `ragged_dot` x3 plus GLU | 6.03 | 17.6 | 1.00x | 3.22 | 18% |
+| prefused wi, concat hoisted (best unfused) | 5.05 | 14.4 | 1.22x | 3.22 | 22% |
+| fused, tm=256 tn=256 tn_dw=256 | 5.77 | 17.3 | 1.02x | 3.22 | 19% |
+| fused, tm=256 tn=512 tn_dw=512 | 3.86 | 11.1 | 1.58x | 3.22 | 29% |
+| **fused, tm=256 tn=1024 tn_dw=1024** | **2.55** | **7.54** | **2.32x** | 3.22 | **43%** |
+
+The full-width hidden block (tn = 1024) is what makes it win: every narrower block
+re-reads x and re-accumulates the output. At 43% of the MXU roofline this is
+**close to an effective kernel**, and it is the measured basis for waterfall steps
+3 and 4. In the model the routed GEMMs plus SwiGLU cost 189 ms, 12.6 ms per layer;
+15 layers at 7.54 ms is 113 ms, a **~76 ms** saving with balanced groups. With
+dropless raggedness the bench's own model costs tm=256 about 14% (1.84x vs 2.14x
+at cv 0.05 on the OLMoE3 shape), so ~8.8 ms per layer and ~57 ms saved. Not wired
+into MaxText yet: the prototype assumes each expert's rows start on a 256-row
+boundary, so integration needs group-aligned padding in the dispatch.
+
+Quality: the result is not bit-identical to the shipping path. It differs by
+4.7e-3 relative (fwd) because the shipping path rounds the hidden activation to
+bf16 in HBM between kernels, while the fused kernel keeps it in f32 in VMEM, so
+it is closer to an f32 reference, not further. It is the same math at higher
+intermediate precision.
+
 **Collectives (58 ms exposed).** The expert-weight all-gather
 (quantizations.py:120) and the expert-grad all-reduce (moe.py:3068) are not
 overlapped with the layer's compute. Overlap does not change any value.
@@ -180,14 +211,16 @@ the check.
 | 0 | current base | | | 0.735 | 12.5% |
 | 1 | Pallas top-k | **built**, exact, 3.8x on v7x, ff-series pending | ~12 | 0.723 | 12.7% |
 | 2 | KDA: reset-aware kernel at 30% + fused glue | **assumed buildable** | ~173 | 0.550 | 16.7% |
-| 3 | group-aligned gmm at 75% (unfused) | **assumed buildable** | ~82 | 0.468 | 19.7% |
-| 4 | fused SwiGLU epilogue (gmm_v2 `fuse_act`) | exists in gmm_v2, not wired | ~20 | 0.448 | **20.5%** |
-| 5 | collective overlap | flags and scheduling | ~48 | 0.400 | 23.0% |
-| 6 | top-k/sort/EMo fused, dispatch, LM-head loss, splash, copies | assumed buildable | ~90 | 0.310 | 29.7% |
+| 3 | fused routed-expert kernel (wi+SwiGLU+wo, custom VJP) | **prototype measured** 2.32x at this shape, ragged-adjusted; not wired | ~57 to 76 | 0.474 to 0.455 | 19.4% to 20.2% |
+| 4 | group alignment and tile tuning on top of 3 (43% to ~60% of roofline) | assumed buildable | ~25 | 0.449 to 0.430 | **20.5% to 21.4%** |
+| 5 | collective overlap | flags and scheduling | ~48 | 0.401 to 0.382 | 22.9% to 24.1% |
+| 6 | top-k/sort/EMo fused, dispatch, LM-head loss, splash, copies | assumed buildable | ~90 | 0.311 to 0.292 | 29.6% to 31.5% |
 
-KDA plus the MoE GEMM kernel are the two levers that matter: together they carry
-~255 of the 275 ms. Everything else is second order. With all good kernels the
-step reaches about 0.31 s, 30% MFU, still 2.7x its roofline.
+KDA plus the MoE expert kernel are the two levers that matter: together they
+carry 255 to 275 of the 275 ms. The MoE half now rests on a measured prototype;
+the KDA half is still an assumed kernel. Everything else is second order. With
+all good kernels the step reaches about 0.29 to 0.31 s, 30% MFU, still 2.6x its
+roofline.
 
 ## Measured runs
 
