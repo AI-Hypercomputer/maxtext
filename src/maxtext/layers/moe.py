@@ -188,6 +188,37 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def take_along_last_axis_dense_vjp(x: jax.Array, indices: jax.Array, num_classes: int) -> jax.Array:
+  """`jnp.take_along_axis(x, indices, axis=-1)` whose backward is dense rather than a scatter-add.
+
+  The transpose of `take_along_axis` is a scatter-add of the `[..., k]` cotangent into `[..., num_classes]`. On the
+  TPU, XLA sorts the flattened indices and then runs an element-serial scatter; for DeepSeek routing
+  ([tokens, 8] into [tokens, 256]) that is the largest VPU-lane op in the step. Here the backward is
+  `d x[..., e] = sum_k g[..., k] * (indices[..., k] == e)`, one fused compare-select-reduce.
+
+  Requires `0 <= indices < num_classes` (true for `lax.top_k` output). When the indices along the last axis are
+  distinct (top-k), each output element receives at most one nonzero term, so the gradient equals the scatter-add
+  result exactly; with repeated indices it is the same sum in a different order.
+  """
+  del num_classes
+  return jnp.take_along_axis(x, indices, axis=-1)
+
+
+def _take_along_last_axis_dense_vjp_fwd(x, indices, num_classes):
+  del num_classes
+  return jnp.take_along_axis(x, indices, axis=-1), indices
+
+
+def _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g):
+  iota = jax.lax.broadcasted_iota(indices.dtype, (1,) * indices.ndim + (num_classes,), indices.ndim)
+  hit = indices[..., None] == iota  # [..., k, num_classes]
+  return jnp.sum(jnp.where(hit, g[..., None], jnp.zeros((), g.dtype)), axis=-2), None
+
+
+take_along_last_axis_dense_vjp.defvjp(_take_along_last_axis_dense_vjp_fwd, _take_along_last_axis_dense_vjp_bwd)
+
+
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
@@ -1098,7 +1129,10 @@ class RoutedMoE(nnx.Module):
         jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
         k=self.num_experts_per_tok,
     )
-    top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
+    if getattr(self.config, "router_topk_matmul_vjp", False):
+      top_k_weights = take_along_last_axis_dense_vjp(pre_bias_logits, top_k_indices, pre_bias_logits.shape[-1])
+    else:
+      top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
     return top_k_weights, top_k_indices
 
   def apply_ffn_activation(self, layer_w0, layer_w1):

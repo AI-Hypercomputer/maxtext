@@ -335,6 +335,75 @@ class DeepSeekRoutingTest(unittest.TestCase):
         jax.numpy.allclose(expected_top_k_weights, actual_top_k_weights, rtol=1e-05, atol=1e-05, equal_nan=False)
     )
 
+  def test_take_along_last_axis_dense_vjp_matches_take_along_axis(self):
+    # Distinct top-k indices, as the router produces: forward and gradient must match the stock path exactly.
+    logits = jax.random.normal(jax.random.PRNGKey(0), (2, 64, 32), dtype=jnp.bfloat16)
+    _, indices = jax.lax.top_k(logits, 4)
+    cotangent = jax.random.normal(jax.random.PRNGKey(1), (2, 64, 4), dtype=jnp.float32)
+
+    def loss(x, take):
+      return jnp.sum(take(x).astype(jnp.float32) * cotangent)
+
+    def stock(x):
+      return jnp.take_along_axis(x, indices, axis=-1)
+
+    def dense(x):
+      return moe.take_along_last_axis_dense_vjp(x, indices, x.shape[-1])
+
+    np.testing.assert_array_equal(np.asarray(stock(logits)), np.asarray(dense(logits)))
+    np.testing.assert_array_equal(
+        np.asarray(jax.grad(lambda x: loss(x, stock))(logits)),
+        np.asarray(jax.grad(lambda x: loss(x, dense))(logits)),
+    )
+    lowered = jax.jit(jax.grad(lambda x: loss(x, dense))).lower(logits).as_text()
+    self.assertNotIn("scatter", lowered)
+
+  def test_deepseek_routing_topk_matmul_vjp(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="deepseek_routing_test",
+        enable_checkpointing=False,
+        decoder_block="deepseek",
+        dtype="bfloat16",
+        max_target_length=2,
+        max_prefill_predict_length=1,
+        per_device_batch_size=1,
+        n_routing_groups=4,
+        topk_routing_group=2,
+        num_experts=16,
+        num_experts_per_tok=4,
+        sparse_matmul=True,
+        base_moe_mlp_dim=1024,
+        base_mlp_dim=1024,
+        router_topk_matmul_vjp=True,
+    )
+    model = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=cfg.dtype,
+        rngs=nnx.Rngs(params=0),
+    )
+    gate_logits = jax.random.normal(jax.random.PRNGKey(2), (2, 8, 16), dtype=jnp.float32)
+    pre_bias_logits = gate_logits - 0.5
+    cotangent = jax.random.normal(jax.random.PRNGKey(3), (2, 8, 4), dtype=jnp.float32)
+
+    def loss(pre, m):
+      w, _ = m.deepseek_routing(gate_logits, pre)
+      return jnp.sum(w * cotangent)
+
+    w_ref, i_ref = self.model.deepseek_routing(gate_logits, pre_bias_logits)
+    w_new, i_new = model.deepseek_routing(gate_logits, pre_bias_logits)
+    np.testing.assert_array_equal(np.asarray(i_ref), np.asarray(i_new))
+    np.testing.assert_array_equal(np.asarray(w_ref), np.asarray(w_new))
+    np.testing.assert_array_equal(
+        np.asarray(jax.grad(loss)(pre_bias_logits, self.model)),
+        np.asarray(jax.grad(loss)(pre_bias_logits, model)),
+    )
+
   def test_deepseek_bias_updates(self):
     num_experts = 4
     rate = 0.01
