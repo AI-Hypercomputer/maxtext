@@ -612,6 +612,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
           moe_fsdp_use_two_stage_all_gather=False,
           moe_pin_sparse_core_all_gathers=False,
           moe_dropless_fallback=None,
+          load_balance_loss_weight=0.0,
       ),
       mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
       rngs=object(),
