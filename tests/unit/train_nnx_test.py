@@ -54,7 +54,7 @@ class _Cfg:
   indexer_loss_scaling_factor: float = 0.0
   num_vocab_tiling: int = 1
   num_experts: int = 1
-  retry_when_tokens_dropped: bool = False
+  moe_dropless_fallback: str | None = None
   routed_bias: bool = False
   routed_bias_update_rate: float = 0.0
   mtp_num_layers: int = 0
@@ -442,14 +442,14 @@ class TestTrainStepNNX(unittest.TestCase):
 class TestMoeOverflowLoggingNNX(unittest.TestCase):
   """Covers train_step/eval_step surfacing has_moe_overflow for training_loop_iteration's retry branches."""
 
-  def _build_state(self, has_overflow, retry_when_tokens_dropped):
-    cfg = _Cfg(retry_when_tokens_dropped=retry_when_tokens_dropped)
+  def _build_state(self, has_overflow, step_fallback):
+    cfg = _Cfg(moe_dropless_fallback="step" if step_fallback else None)
     model = _TinyDecoderMoEOverflow(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), has_overflow=has_overflow)
     optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
     return cfg, train_state_nnx.TrainStateNNX(model, optimizer)
 
-  def _metrics(self, has_overflow, retry_when_tokens_dropped):
-    cfg, ts = self._build_state(has_overflow, retry_when_tokens_dropped)
+  def _metrics(self, has_overflow, step_fallback):
+    cfg, ts = self._build_state(has_overflow, step_fallback)
     state_graphdef, state_pure = nnx.split(ts)
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     _, metrics = pre_train.train_step(
@@ -457,19 +457,19 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
     )
     return metrics
 
-  def _eval_metrics(self, has_overflow, retry_when_tokens_dropped):
+  def _eval_metrics(self, has_overflow, step_fallback):
     """Runs eval_step and returns its metrics dict."""
-    cfg, ts = self._build_state(has_overflow, retry_when_tokens_dropped)
+    cfg, ts = self._build_state(has_overflow, step_fallback)
     state_graphdef, state_pure = nnx.split(ts)
     data = _make_data(batch=cfg.micro_batch_size_to_eval_on, vocab=cfg.vocab_size)
     return pre_train.eval_step(state_graphdef, cfg, state_pure, data)
 
   def test_surfaces_overflow_when_flag_on(self):
-    metrics = self._metrics(has_overflow=True, retry_when_tokens_dropped=True)
+    metrics = self._metrics(has_overflow=True, step_fallback=True)
     self.assertTrue(bool(metrics["has_moe_overflow"]))
 
   def test_no_overflow_when_flag_on(self):
-    metrics = self._metrics(has_overflow=False, retry_when_tokens_dropped=True)
+    metrics = self._metrics(has_overflow=False, step_fallback=True)
     self.assertFalse(bool(metrics["has_moe_overflow"]))
 
   def test_key_absent_when_flag_off(self):
@@ -477,18 +477,18 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
 
     change every model's compiled train_step output, even non-MoE ones.
     """
-    metrics = self._metrics(has_overflow=True, retry_when_tokens_dropped=False)
+    metrics = self._metrics(has_overflow=True, step_fallback=False)
     self.assertNotIn("has_moe_overflow", metrics)
 
   def test_eval_step_also_surfaces_overflow(self):
     """eval_step must surface has_moe_overflow the same way train_step does -- it's what
     training_loop_iteration's eval-retry branch checks before replaying with the dropless step.
     """
-    metrics = self._eval_metrics(has_overflow=True, retry_when_tokens_dropped=True)
+    metrics = self._eval_metrics(has_overflow=True, step_fallback=True)
     self.assertTrue(bool(metrics["has_moe_overflow"]))
 
   def test_eval_step_key_absent_when_flag_off(self):
-    metrics = self._eval_metrics(has_overflow=True, retry_when_tokens_dropped=False)
+    metrics = self._eval_metrics(has_overflow=True, step_fallback=False)
     self.assertNotIn("has_moe_overflow", metrics)
 
 
@@ -671,14 +671,14 @@ class TestRecordActivationMetricsParity(unittest.TestCase):
 
 class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
   """Covers training_loop_iteration's host-side eval-retry branch: p_eval_step_dropless is
-  invoked (and its metrics used) only when retry_when_tokens_dropped is on, a dropless eval
+  invoked (and its metrics used) only when moe_dropless_fallback="step", a dropless eval
   step is available, and the primary eval step reports has_moe_overflow.
   """
 
   _PRIMARY_LOSS = 999.0
   _DROPLESS_LOSS = -1.0
 
-  def _run(self, retry_when_tokens_dropped, has_overflow, with_dropless):
+  def _run(self, step_fallback, has_overflow, with_dropless):
     """Runs training_loop_iteration with fake step fns and returns (eval loss used, dropless call count)."""
 
     def p_train_step(state, batch, *rng_args):
@@ -688,7 +688,7 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
     def p_eval_step(state, batch, *rng_args):
       del state, batch, rng_args
       metrics = {"scalar": {"evaluation/total_loss": jnp.array(self._PRIMARY_LOSS)}}
-      if retry_when_tokens_dropped:
+      if step_fallback:
         metrics["has_moe_overflow"] = jnp.bool_(has_overflow)
       return metrics
 
@@ -703,7 +703,7 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
     cfg = pytypes.SimpleNamespace(
         elastic_enabled=False,
         enable_diloco=False,
-        retry_when_tokens_dropped=retry_when_tokens_dropped,
+        moe_dropless_fallback="step" if step_fallback else None,
         logical_axis_rules_for_eval=(),
     )
     metric_logger_instance = mock.MagicMock()
@@ -757,22 +757,22 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
     return used_loss, len(dropless_calls)
 
   def test_replays_with_dropless_metrics_on_overflow(self):
-    used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=True, has_overflow=True, with_dropless=True)
+    used_loss, dropless_call_count = self._run(step_fallback=True, has_overflow=True, with_dropless=True)
     self.assertEqual(used_loss, self._DROPLESS_LOSS)
     self.assertEqual(dropless_call_count, 1)
 
   def test_keeps_primary_metrics_without_overflow(self):
-    used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=True, has_overflow=False, with_dropless=True)
+    used_loss, dropless_call_count = self._run(step_fallback=True, has_overflow=False, with_dropless=True)
     self.assertEqual(used_loss, self._PRIMARY_LOSS)
     self.assertEqual(dropless_call_count, 0)
 
   def test_keeps_primary_metrics_when_dropless_unavailable(self):
-    used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=True, has_overflow=True, with_dropless=False)
+    used_loss, dropless_call_count = self._run(step_fallback=True, has_overflow=True, with_dropless=False)
     self.assertEqual(used_loss, self._PRIMARY_LOSS)
     self.assertEqual(dropless_call_count, 0)
 
   def test_keeps_primary_metrics_when_flag_off(self):
-    used_loss, dropless_call_count = self._run(retry_when_tokens_dropped=False, has_overflow=True, with_dropless=True)
+    used_loss, dropless_call_count = self._run(step_fallback=False, has_overflow=True, with_dropless=True)
     self.assertEqual(used_loss, self._PRIMARY_LOSS)
     self.assertEqual(dropless_call_count, 0)
 

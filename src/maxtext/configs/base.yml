@@ -255,7 +255,10 @@ ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer
 # a size larger than this then tokens are dropped.
 # In general if ragged_buffer_factor > 0, the ragged_buffer_size is balanced_size * ragged_buffer_factor.
 eval_ragged_buffer_factor: -1.0 # evaluation override for ragged_buffer_factor.
-retry_when_tokens_dropped: false # retry the entire train step with worst-case ragged buffer size if tokens would otherwise be dropped.
+# When the ragged buffer would drop tokens: None = drop them; step = replay the whole train step with a
+# dropless buffer; layer = per MoE layer, lax.cond into a chunked dropless branch (no step replay).
+# Valid values: None, step, layer
+moe_dropless_fallback: None
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss

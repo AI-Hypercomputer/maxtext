@@ -239,6 +239,15 @@ class MetricLogger:
 
     max_logging.log(", ".join(log_parts))
 
+    # Logged here rather than in the train loop: metrics are flushed one step late, so reading
+    # the flag does not add a per-step host sync (which the in-layer fallback exists to avoid).
+    fallback_layers = scalars.get("learning/moe_dropless_fallback_layers")
+    if fallback_layers is not None and int(fallback_layers) > 0:
+      max_logging.log(
+          f"Step {step}: MoE ragged buffer overflow detected in {int(fallback_layers)} layer(s); "
+          f"in-layer dropless fallback was used (no tokens dropped)."
+      )
+
   def _log_eval_metrics(self, metrics, step):
     """Logs the final accumulated eval summary at the end of an eval run."""
     scalars = metrics["scalar"]
@@ -266,6 +275,13 @@ class MetricLogger:
       log_parts.append(f"avg_indexer_loss={indexer_l:.3f}")
 
     max_logging.log(", ".join(log_parts))
+
+    fallback_layers = int(scalars.get("eval/moe_dropless_fallback_layers", 0))
+    if fallback_layers > 0:
+      max_logging.log(
+          f"Eval after train step {step}: MoE ragged buffer overflow detected in {fallback_layers} layer(s) "
+          f"summed over eval steps; in-layer dropless fallback was used (no tokens dropped)."
+      )
 
   def _log_running_eval_metrics(self, metrics, step):
     """Logs a per-eval-step running average (deferred by one eval step)."""
@@ -488,6 +504,10 @@ class MetricLogger:
         scalar.get("evaluation/mtp_acceptance_rate_percent", 0.0)
     )
     self.cumulative_eval_metrics["scalar"]["eval/z_loss"] += float(scalar.get("evaluation/z_loss", 0.0))
+    if "evaluation/moe_dropless_fallback_layers" in scalar:
+      self.cumulative_eval_metrics["scalar"]["eval/moe_dropless_fallback_layers"] += float(
+          scalar["evaluation/moe_dropless_fallback_layers"]
+      )
 
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""

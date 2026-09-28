@@ -105,7 +105,7 @@ def get_functional_train_with_signature(
   in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  if getattr(config, "retry_when_tokens_dropped", False) is True:
+  if getattr(config, "moe_dropless_fallback", None) == "step":
     donate_argnums = ()  # Preserve state so it can be replayed if an overflow occurs
   else:
     donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.

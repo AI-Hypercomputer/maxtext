@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Tests for monitoring metrics"""
+from collections import defaultdict
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -209,3 +210,74 @@ class MetricLoggerLogMetricsTest(unittest.TestCase):
     log_string = mock_log.call_args[0][0]
     self.assertNotIn("live slice count", log_string)
     mock_live_slices.assert_not_called()
+
+
+class MoeDroplessFallbackLogTest(unittest.TestCase):
+  """Tests the log line emitted when the in-layer dropless fallback fires."""
+
+  def _make_logger(self):
+    logger = MetricLogger.__new__(MetricLogger)  # skip __init__
+    logger.config = SimpleNamespace(
+        rampup_end_step=0,
+        hide_profiler_step_metric=False,
+        num_experts=1,
+        mtp_num_layers=0,
+        use_indexer=False,
+    )
+    return logger
+
+  def _metrics(self, fallback_layers):
+    scalars = {
+        "learning/loss": 1.0,
+        "learning/total_weights": 1,
+        "perf/step_time_seconds": 1.0,
+        "perf/per_device_tflops_per_sec": 1.0,
+        "perf/per_device_tokens_per_sec": 1.0,
+    }
+    if fallback_layers is not None:
+      scalars["learning/moe_dropless_fallback_layers"] = np.int32(fallback_layers)
+    return {"scalar": scalars}
+
+  def _logged(self, fallback_layers):
+    logger = self._make_logger()
+    with (
+        mock.patch("maxtext.common.metric_logger.elastic_utils.elastic_enabled", return_value=False),
+        mock.patch("maxtext.common.metric_logger.max_logging.log") as log,
+    ):
+      logger._log_training_metrics(self._metrics(fallback_layers), step=7)  # pylint: disable=protected-access
+    return [c.args[0] for c in log.call_args_list]
+
+  def test_logs_when_fallback_taken(self):
+    lines = self._logged(3)
+    self.assertTrue(any("Step 7: MoE ragged buffer overflow detected in 3 layer(s)" in l for l in lines))
+
+  def test_silent_when_no_fallback(self):
+    self.assertFalse(any("overflow" in l for l in self._logged(0)))
+    self.assertFalse(any("overflow" in l for l in self._logged(None)))
+
+  def _eval_logged(self, per_step_fallback_layers):
+    """Accumulates eval steps like the deferred flush does, then logs the eval summary."""
+    logger = self._make_logger()
+    logger.cumulative_eval_metrics = {"scalar": defaultdict(float)}
+    for fallback_layers in per_step_fallback_layers:
+      scalars = {"evaluation/total_loss": 1.0, "evaluation/total_weights": 1.0}
+      if fallback_layers is not None:
+        scalars["evaluation/moe_dropless_fallback_layers"] = np.int32(fallback_layers)
+      logger._accumulate_eval_metrics({"scalar": scalars})  # pylint: disable=protected-access
+    cumulative = logger.cumulative_eval_metrics["scalar"]
+    cumulative.update({"eval/avg_loss": 1.0, "eval/avg_perplexity": 2.7})
+    with mock.patch("maxtext.common.metric_logger.max_logging.log") as log:
+      logger._log_eval_metrics(logger.cumulative_eval_metrics, step=5)  # pylint: disable=protected-access
+    return cumulative, [c.args[0] for c in log.call_args_list]
+
+  def test_eval_logs_fallback_summed_over_eval_steps(self):
+    _, lines = self._eval_logged([2, 0, 3])
+    self.assertTrue(any("Eval after train step 5: MoE ragged buffer overflow detected in 5 layer(s)" in l for l in lines))
+
+  def test_eval_silent_when_no_fallback(self):
+    for per_step in ([0, 0], [None, None]):
+      with self.subTest(per_step=per_step):
+        cumulative, lines = self._eval_logged(per_step)
+        self.assertFalse(any("overflow" in l for l in lines))
+    # Runs without layer mode get no new eval metric key.
+    self.assertNotIn("eval/moe_dropless_fallback_layers", cumulative)

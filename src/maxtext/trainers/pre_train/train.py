@@ -362,11 +362,16 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         }
     )
   has_moe_overflow = jnp.bool_(False)
-  if config.retry_when_tokens_dropped:
+  if config.moe_dropless_fallback == "step":
     moe_overflow_flags = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_has_overflow")
     if moe_overflow_flags:
       has_moe_overflow = jnp.any(jnp.stack([jnp.any(x) for x in moe_overflow_flags]))
   aux["has_moe_overflow"] = has_moe_overflow
+  if config.moe_dropless_fallback == "layer":
+    fallback_flags = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_dropless_fallback")
+    aux["moe_dropless_fallback_layers"] = sum(
+        (jnp.sum(jnp.asarray(x).astype(jnp.int32)) for x in fallback_flags), jnp.int32(0)
+    )
   return loss, aux
 
 
@@ -587,6 +592,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             "learning/te_moe_recv_capacity_per_rank": aux["te_moe_recv_capacity_per_rank"],
         }
     )
+  if config.moe_dropless_fallback == "layer":
+    scalar_metrics["learning/moe_dropless_fallback_layers"] = aux["moe_dropless_fallback_layers"]
   scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
     new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)
@@ -612,7 +619,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "scalar": scalar_metrics,
       "scalars": {},
   }
-  if config.retry_when_tokens_dropped:
+  if config.moe_dropless_fallback == "step":
     metrics["has_moe_overflow"] = (  # pyrefly: ignore[bad-assignment]
         has_moe_overflow if has_moe_overflow is not None else jnp.bool_(False)  # pyrefly: ignore[bad-assignment]
     )
@@ -654,8 +661,10 @@ def eval_step(model, config, state, data, dropout_rng=None):
           "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },
   }
-  if config.retry_when_tokens_dropped:
+  if config.moe_dropless_fallback == "step":
     metrics["has_moe_overflow"] = aux.get("has_moe_overflow", False)
+  if config.moe_dropless_fallback == "layer":
+    metrics["scalar"]["evaluation/moe_dropless_fallback_layers"] = aux["moe_dropless_fallback_layers"]
 
   return metrics
 
@@ -719,7 +728,7 @@ def training_loop_iteration(
       step_rng_args = ()
     with maybe_record_goodput(recorder, GoodputEvent.STEP, step):
       with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_train):
-        if config.retry_when_tokens_dropped and p_train_step_dropless is not None:
+        if config.moe_dropless_fallback == "step" and p_train_step_dropless is not None:
           candidate_state, metrics = p_train_step(state, example_batch, *step_rng_args)
           if bool(metrics.get("has_moe_overflow")):
             max_logging.log(
@@ -784,7 +793,7 @@ def training_loop_iteration(
       with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
         if (
-            config.retry_when_tokens_dropped
+            config.moe_dropless_fallback == "step"
             and p_eval_step_dropless is not None
             and bool(eval_metrics.get("has_moe_overflow"))
         ):
@@ -850,7 +859,7 @@ def train_loop(config, recorder, state=None):
     jit_model = model
   else:
     jit_model, state = nnx.split(state)
-    if config.retry_when_tokens_dropped:
+    if config.moe_dropless_fallback == "step":
       reconstructed = nnx.merge(jit_model, state)
       for _, module in nnx.iter_graph(reconstructed):
         if type(module).__name__ == "RoutedMoE":
