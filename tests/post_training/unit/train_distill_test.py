@@ -1134,17 +1134,19 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.save_checkpoint_on_completion = False
     mock_student_cfg.logical_axis_rules = []
 
-    # main() validates that student/teacher share batch shape — set explicit
+    # main() validates that student/teacher share batch layout — set explicit
     # equal scalars on both mocks so the assertion passes.
     mock_student_cfg.per_device_batch_size = 1
     mock_student_cfg.max_target_length = 16
     mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.packing = True
 
     mock_teacher_cfg = mock.Mock()
     mock_teacher_cfg.vocab_size = 32000
     mock_teacher_cfg.per_device_batch_size = 1
     mock_teacher_cfg.max_target_length = 16
     mock_teacher_cfg.gradient_accumulation_steps = 1
+    mock_teacher_cfg.packing = True
     mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
 
     # 2. Model Loading
@@ -1244,17 +1246,19 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.save_checkpoint_on_completion = False
     mock_student_cfg.logical_axis_rules = []
 
-    # main() validates that student/teacher share batch shape — set explicit
+    # main() validates that student/teacher share batch layout — set explicit
     # equal scalars on both mocks so the assertion passes.
     mock_student_cfg.per_device_batch_size = 1
     mock_student_cfg.max_target_length = 16
     mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.packing = True
 
     mock_teacher_cfg = mock.Mock()
     mock_teacher_cfg.vocab_size = 32000
     mock_teacher_cfg.per_device_batch_size = 1
     mock_teacher_cfg.max_target_length = 16
     mock_teacher_cfg.gradient_accumulation_steps = 1
+    mock_teacher_cfg.packing = True
     mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
 
     mock_student_model = mock.Mock()
@@ -1277,6 +1281,24 @@ class TrainDistillTest(unittest.TestCase):
     # check that both student and teacher models are set since online mode should load both
     self.assertIs(model_bundle.student_model, mock_student_model)
     self.assertIs(model_bundle.teacher_model, mock_teacher_model)
+
+  @mock.patch("maxtext.configs.pyconfig.initialize")
+  def test_main_rejects_teacher_packing_that_differs_from_the_student(self, mock_pyconfig_init):
+    """The teacher consumes the student's batches, so a packing mismatch is refused before any model loads."""
+    mock_global = mock.Mock(
+        student_overrides={},
+        teacher_overrides={"load_parameters_path": "gs://ckpt"},
+        offline_data_dir=None,
+        base_output_directory="",
+        run_name="",
+    )
+    batch_layout = {"per_device_batch_size": 1, "max_target_length": 16, "gradient_accumulation_steps": 1}
+    mock_student_cfg = mock.Mock(packing=True, **batch_layout)
+    mock_teacher_cfg = mock.Mock(packing=False, **batch_layout)
+    mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
+
+    with self.assertRaisesRegex(ValueError, "mismatch on 'packing'"):
+      train_distill.main(["train_distill.py", "config.yml"])
 
   @mock.patch.object(distillation_utils, "calculate_distillation_tflops_per_device", return_value=(0.0, 0.0, 0.0))
   def test_student_freeze_param_filter(self, _mock_tflops):
