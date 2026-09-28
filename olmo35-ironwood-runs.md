@@ -885,6 +885,34 @@ count passes over `[24576, 512]` plus the `[24576, 512, 16]` one-hot in
 flag stays in, default off. The replacement attempt is the Pallas top-k in the
 ff-series.
 
+### gg-series, Pallas top-k and the varlen KDA tax (o35n280808)
+
+Base is `y2_trhs` plus `emo_threshold_by_bisection=True`. `gg1_orig` is the
+original config (pdb 2, stock flags, as `a2_p2s8k`).
+
+| arm | TF/s/dev | MFU | step s | loss @19 |
+|---|---|---|---|---|
+| gg1_orig | 80.1 | 6.94% | 0.882 | 10.685 |
+| gg2_ctrl | 144.6 | 12.53% | 0.733 | 10.834 |
+| gg7_ctrl | 144.5 | 12.53% | 0.734 | 10.834 |
+| gg3_topk | 146.9 | 12.74% | 0.722 | 10.834 |
+| gg5_topk | 147.0 | 12.74% | 0.722 | 10.834 |
+| gg4_nopack | 171.8 | 14.89% | 0.617 | 10.834 |
+| gg6_nopack | 171.6 | 14.88% | 0.617 | 10.834 |
+| gg8_nopack_prof | 172.1 | 14.92% | 0.617 | 10.834 |
+
+**`moe_topk_pallas=True`: +1.6%, kept.** 11.5 ms per step, exactly what the
+single-device v7x bench predicted (15 x (1163 - 394) us). Loss identical, as the
+CPU test requires (bit-identical values and grads).
+
+**`packing=False`: +18.8%, diagnostic only.** Synthetic rows are one segment each,
+so this computes the same function here (loss identical) while skipping the
+tokamax varlen KDA path. 116 ms per step is the varlen tax: padding 8192 to
+10240, the gathers and relayouts around the kernel. It is **not** a lever for
+real data, which packs several documents per row; it is the measured ceiling of
+a KDA kernel that applies segment resets inside the chunk recurrence instead of
+padding every segment to a chunk boundary.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd

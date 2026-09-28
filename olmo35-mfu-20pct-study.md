@@ -183,6 +183,43 @@ overlapped with the layer's compute. Overlap does not change any value.
 **Splash (26.5 ms).** 2 layers only, 14% of an upper-bound roofline. Block sizes
 are untuned for seq 8192 at this head count.
 
+### Profile with the varlen tax removed (gg8, `packing=False`)
+
+Same attribution as dd1, 613 ms of profiled ops (step 0.617 s), remat 64.3 ms.
+Only KDA moves; this isolates what a reset-aware kernel buys and what is left.
+
+| component | dd1 ms (packed) | gg8 ms (unpacked) | delta | verdict |
+|---|---|---|---|---|
+| KDA glue | 140.4 | 50.3 | -90.1 | not effective: conv, gates, l2norm, o_norm unfused |
+| KDA Pallas kernels | 67.6 | 51.3 | -16.3 | **not effective**: 3.7 ms/layer vs 0.48 roofline, 13% |
+| MoE routed GEMMs (gmm + tgmm) | 166.7 | 166.4 | | not effective, 38% |
+| MoE other | 33.8 | 58.9 | +25.1 | attribution shift from the varlen glue, same ops |
+| collectives, exposed | 58.2 | 53.1 | | scheduling |
+| all others | 261 | 233 | | unchanged kernels |
+
+xla_shell `analyze_profile` and `roadmap --all` on gg8:
+
+| quantity | value |
+|---|---|
+| TensorCore lane | 540 ms: compute 326, VPU 187, relayout 27 |
+| SparseCore lane (collectives) | 325 ms, 257 hidden, 68 exposed |
+| best-overlap ceiling (schedule only) | 540 ms |
+| roadmap floor, all levers | **325 ms**, binder SparseCore comm |
+
+| roadmap step | lever | step ms | gain |
+|---|---|---|---|
+| 0 | as profiled | 614 | |
+| 1 | schedule the exposed comm | 540 | 74 |
+| 2 | kernels, bounded by comm slack | 325 | 216 |
+| 3 | relayout reduction | 325 | 0 |
+| 4 | host-offload remat | 325 | 0 |
+
+Non-matmul TensorCore work (VPU plus relayout) is 35% of the step. The floor
+matters for planning: with this FSDP=32 x DP=4 sharding the step cannot go below
+325 ms (32.6% MFU) however good the kernels get; past that, only less comm
+volume helps. 20% needs 460 ms, so the target sits inside the kernel budget and
+the comm floor does not bind it.
+
 ## Quality neutrality, per lever
 
 | lever | math change | why quality is unchanged |
@@ -209,8 +246,8 @@ the check.
 | step | lever | kernel status | save ms | step s | MFU |
 |---|---|---|---|---|---|
 | 0 | current base | | | 0.735 | 12.5% |
-| 1 | Pallas top-k | **built**, exact, 3.8x on v7x, ff-series pending | ~12 | 0.723 | 12.7% |
-| 2 | KDA: reset-aware kernel at 30% + fused glue | **assumed buildable** | ~173 | 0.550 | 16.7% |
+| 1 | Pallas top-k | **built and measured**, gg-series +1.6% | 11 | **0.722 (measured)** | **12.7%** |
+| 2 | KDA: reset-aware kernel at 30% + fused glue | varlen part **measured** (116 ms, gg nopack), rest assumed | ~173 | 0.550 | 16.7% |
 | 3 | fused routed-expert kernel (wi+SwiGLU+wo, custom VJP) | **prototype measured** 2.32x at this shape, ragged-adjusted; not wired | ~57 to 76 | 0.474 to 0.455 | 19.4% to 20.2% |
 | 4 | group alignment and tile tuning on top of 3 (43% to ~60% of roofline) | assumed buildable | ~25 | 0.449 to 0.430 | **20.5% to 21.4%** |
 | 5 | collective overlap | flags and scheduling | ~48 | 0.401 to 0.382 | 22.9% to 24.1% |
@@ -229,8 +266,9 @@ roofline.
 | bb | EMo threshold by bisection | 141.5 / 141.8 | 144.2 / 144.3 | +1.9% | kept (base) |
 | cc | router top-k by bisection | 144.0 / 144.4 | 140.8 / 141.4 | -2.1% | dropped |
 | dd | profile of the base | 144.2 | 144.6 (prof) | | profile source |
-| ee | `packing=False` (varlen KDA tax) | pending | pending | | |
-| ff | Pallas top-k, plus original config | pending | pending | | |
+| gg | Pallas top-k (`moe_topk_pallas`) | 144.6 / 144.5 | 146.9 / 147.0 | **+1.6%** | kept, loss identical |
+| gg | `packing=False` (varlen KDA tax, diagnostic) | 144.6 / 144.5 | 171.8 / 171.6 | **+18.8%** | ceiling of a reset-aware KDA kernel |
+| gg | original config, pdb 2, stock flags | | 80.1 | | reference: base is 1.81x the original |
 
 Capacity, 2026-09-28: the ee-series has been queued on nap since 04:10 UTC. From
 04:31 on, every resubmit is suspended with `insufficient unused quota for
