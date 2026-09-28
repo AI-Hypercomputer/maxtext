@@ -272,8 +272,8 @@ The base is now TC-lane-bound with 1.12x of schedule headroom left, so what
 remains is kernel work, which is what the flag sweeps (jj) also showed. `roadmap
 --collective` places the remaining 97 ms of exposed comm on expert-grad
 all-reduces (2 to 4 ms each, near the end of the step) and the gmm-adjacent
-expert all-gathers (1 to 2 ms each). The ll-series tests SparseCore all-reduce
-offload and the recipe's pipeliner flags against exactly those. The comm floor
+expert all-gathers (1 to 2 ms each). The ll-series tested SparseCore all-reduce
+offload and the recipe's pipeliner flags against exactly those: both neutral. The comm floor
 rose from 325 ms (gg8, unpacked) to 372 ms (37.9% MFU); 20% at 460 ms is still
 inside the kernel budget.
 
@@ -335,6 +335,8 @@ roofline.
 | jj | all-gather / reduce-scatter concurrency 4 | 150.4 / 151.1 | 151.0 / 150.9 | 0 | neutral |
 | jj | `--xla_latency_hiding_scheduler_rerun=2` | 150.4 / 151.1 | 150.9 | 0 | neutral; flag levers used up |
 | kk | profile of the base and the original | 150.7 / 151.1 (flex) | 151.2 (prof) | | orig 78.3 / 78.8; profile source |
+| ll | SparseCore all-reduce offload | 150.7 / 151.1 | 151.0 / 151.4 (flex) | 0 | neutral |
+| ll | pipeliner + experimental scheduler features | 150.7 / 151.1 | 150.4 / 151.3 (flex) | 0 | neutral; exposed comm is dependency-bound |
 
 Capacity, 2026-09-28: the ee-series has been queued on nap since 04:10 UTC. From
 04:31 on, every resubmit is suspended with `insufficient unused quota for

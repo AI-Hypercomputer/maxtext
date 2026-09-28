@@ -987,6 +987,27 @@ Profile analysis is in olmo35-mfu-20pct-study.md: base TC-lane-bound (626 ms lan
 65 ms exposed comm), original comm-bound (289 ms exposed). Splash is 9.3 ms (39%
 of roofline, was 26.5 ms), top-k plus sorts 14.4 ms (was 31.7).
 
+### ll-series, SparseCore all-reduce offload and pipeliner flags (o35n281238 nap, o35s281238 flex)
+
+`scar` adds `--xla_tpu_enable_sparse_core_collective_offload_all_reduce=true`
+with a 204800-byte minimum; `sched` adds the recipe's experimental scheduler
+features, collective pipeliner, all-gather backward pipelining and
+`data_parallel_opt_different_sized_ops`; `both` is the two together.
+
+| arm | nap TF/s/dev | flex TF/s/dev | MFU (nap) | step s (nap) | loss @19 |
+|---|---|---|---|---|---|
+| ll1_orig | 79.6 | 78.6 | 6.90% | 0.888 | 10.685 |
+| ll2_ctrl | 150.7 | 151.6 | 13.06% | 0.704 | 10.832 |
+| ll6_ctrl | 151.1 | | 13.10% | 0.702 | 10.832 |
+| ll3_scar | 151.0 | 151.4 | 13.09% | 0.702 | 10.832 |
+| ll4_sched | 150.4 | 151.3 | 13.04% | 0.704 | 10.832 |
+| ll5_both | 151.0 | 151.1 | 13.09% | 0.702 | 10.832 |
+
+**All neutral** on both clusters. The 65 ms of exposed comm in kk3 does not
+respond to placement flags; the roadmap's 72 ms schedule gain needs dependency
+changes (for example, splitting the expert-grad all-reduces from the last
+layers' backward), not scheduler knobs.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
