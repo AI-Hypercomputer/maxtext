@@ -1,0 +1,471 @@
+# Copyright 2023 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This sentinel is a reminder to choose a real run name.
+run_name: ''
+
+metrics_file: "" # for testing, local file that stores scalar metrics. If empty, no metrics are written.
+# If true save metrics such as loss and TFLOPS to GCS in {base_output_directory}/{run_name}/metrics/
+write_metrics: True
+
+timing_metrics_file: "" # for testing, local file that stores function timing metrics such as state creation, compilation. If empty, no metrics are written.
+write_timing_metrics: True
+
+gcs_metrics: False
+# If true save config to GCS in {base_output_directory}/{run_name}/
+save_config_to_gcs: False
+log_period: 100
+
+pretrained_model_name_or_path: 'Wan-AI/Wan2.1-T2V-14B-Diffusers'
+model_name: wan2.1
+model_type: 'T2V'
+
+# Overrides the transformer from pretrained_model_name_or_path
+wan_transformer_pretrained_model_name_or_path: ''
+
+unet_checkpoint: ''
+revision: ''
+# This will convert the weights to this dtype.
+# When running inference on TPUv5e, use weights_dtype: 'bfloat16'
+weights_dtype: 'bfloat16'
+# This sets the layer's dtype in the model. Ex: nn.Dense(dtype=activations_dtype)
+activations_dtype: 'bfloat16'
+# The dtype for text_encoder model during load/compile
+text_encoder_dtype: 'float32'
+
+# Whether to compile the text_encoder with torch.compile
+compile_text_encoder: False
+
+# Maximum sequence length for the text encoder
+max_sequence_length: 512
+
+vae_weights_dtype: 'float32'
+vae_dtype: 'float32'
+scheduler_dtype: 'float32'
+
+# Replicates vae across devices instead of using the model's sharding annotations for sharding.
+replicate_vae: False
+
+# Chunk size for VAE decode scan. Increase to improve decode time at the cost of memory.
+vae_decode_chunk: 1
+
+# Chunk size for VAE encode scan. (num_input_frames - 1) must be divisible by this value.
+# Increase to improve encode time at the cost of memory.
+vae_encode_chunk: 4
+vae_spatial: -1
+
+# matmul and conv precision from https://jax.readthedocs.io/en/latest/jax.lax.html#jax.lax.Precision
+# Options are "DEFAULT", "HIGH", "HIGHEST"
+# fp32 activations and fp32 weights with HIGHEST will provide the best precision
+# at the cost of time.
+precision: "DEFAULT"
+# Use jax.lax.scan for transformer layers
+scan_layers: True
+# Use jax.lax.scan for the diffusion loop (non-cache path only).
+# Note: Enabling this will disable per-step profiling.
+scan_diffusion_loop: False
+
+# if False state is not jitted and instead replicate is called. This is good for debugging on single host
+# It must be True for multi-host.
+jit_initializers: True
+
+# Set true to load weights from pytorch
+from_pt: True
+split_head_dim: True
+attention: 'flash' # Supported attention: dot_product, flash, tokamax_flash, cudnn_flash_te, ring, tokamax_ring, ulysses, ulysses_custom, ulysses_ring
+use_base2_exp: True
+use_experimental_scheduler: True
+# For attention=ulysses_ring, hidden Ulysses shard count; ring shards are context / this.
+ulysses_shards: -1
+# Splits Ulysses all-to-all into head-group chunks. The last chunk carries any remainder.
+# For communication-compute overlap to be effective, enable the following XLA flags:
+#   --xla_tpu_enable_async_all_to_all=true
+#   --xla_tpu_overlap_compute_collective_tc=true
+# (Refer to README.md for the full recommended XLA_FLAGS list)
+ulysses_attention_chunks: 1
+flash_min_seq_length: 4096
+dropout: 0.0
+
+# If mask_padding_tokens is True, we pass in segment ids to splash attention to avoid attending to padding tokens.
+# Else we do not pass in segment ids and on vpu bound hardware like trillium this is faster.
+# However, when padding tokens are significant, this will lead to worse quality and should be set to True.
+mask_padding_tokens: True
+# Maxdiffusion has 2 types of attention sharding strategies:
+# 1. attention_sharding_uniform = True : same sequence sharding rules applied for q in both (self and cross attention)
+# 2. attention_sharding_uniform = False : Heads are sharded uniformly across devices for self attention while sequence is sharded
+#    in cross attention q.
+attention_sharding_uniform: True
+
+flash_block_sizes: {
+  "block_q" : 512,
+  "block_kv_compute" : 512,
+  "block_kv" : 512,
+  "block_q_dkv" : 512,
+  "block_kv_dkv" : 512,
+  "block_kv_dkv_compute" : 512,
+  "block_q_dq" : 512,
+  "block_kv_dq" : 512,
+  "use_fused_bwd_kernel": False,
+}
+# Use on v6e
+# flash_block_sizes: {
+#   "block_q" : 3024,
+#   "block_kv_compute" : 1024,
+#   "block_kv" : 2048,
+#   "block_q_dkv" : 3024,
+#   "block_kv_dkv" : 2048,
+#   "block_kv_dkv_compute" : 1024,
+#   "block_q_dq" : 3024,
+#   "block_kv_dq" : 2048,
+#   "use_fused_bwd_kernel": False,
+# }
+# Use on v5p
+# flash_block_sizes: {
+#   "block_q" : 3024,
+#   "block_kv_compute" : 1024,
+#   "block_kv" : 2048,
+#   "block_q_dkv" : 1024,
+#   "block_kv_dkv" : 3072,
+#   "block_kv_dkv_compute" : 256,
+#   "block_q_dq" : 1024,
+#   "block_kv_dq" : 3072
+# }
+# GroupNorm groups
+# Tile-size auto-tuning. When enable_tile_search: True, generate_wan runs a fast one-DiT-block
+# grid search (maxdiffusion/utils/tile_size_grid_search.py) before inference and overwrites
+# flash_block_sizes' block_q/block_kv/block_kv_compute with the winner. Default off (no-op).
+enable_tile_search: False
+tile_search_mode: 'smart'   # 'smart' (VMEM-capped candidate ladders) | 'full' (2D sweep)
+tile_search_iters: 10
+tile_search_out: ''         # dir for the results CSV; '' -> print only
+
+norm_num_groups: 32
+
+# train text_encoder - Currently not supported for SDXL
+train_text_encoder: False
+text_encoder_learning_rate: 4.25e-6
+
+# https://arxiv.org/pdf/2305.08891.pdf
+snr_gamma: -1.0
+
+timestep_bias: {
+  # a value of later will increase the frequence of the model's final training steps.
+  # none, earlier, later, range
+  strategy: "none",
+  # multiplier for bias, a value of 2.0 will double the weight of the bias, 0.5 will halve it.
+  multiplier: 1.0,
+  # when using strategy=range, the beginning (inclusive) timestep to bias.
+  begin: 0,
+  # when using strategy=range, the final step (inclusive) to bias.
+  end: 1000,
+  # portion of timesteps to bias.
+  # 0.5 will bias one half of the timesteps. Value of strategy determines
+  # whether the biased portions are in the earlier or later timesteps.
+  portion: 0.25
+}
+
+# Override parameters from checkpoints's scheduler.
+diffusion_scheduler_config: {
+  _class_name: 'FlaxEulerDiscreteScheduler',
+  prediction_type: 'epsilon',
+  rescale_zero_terminal_snr: False,
+  timestep_spacing: 'trailing'
+}
+
+# Output directory
+# Create a GCS bucket, e.g. my-maxtext-outputs and set this to "gs://my-maxtext-outputs/"
+base_output_directory: ""
+
+# Hardware
+hardware: 'tpu' # Supported hardware types are 'tpu', 'gpu'
+skip_jax_distributed_system: False
+
+# Parallelism
+mesh_axes: ['data', 'fsdp', 'context', 'tensor']
+
+# batch : batch dimension of data and activations
+# hidden :
+# embed : attention qkv dense layer hidden dim named as embed
+# heads : attention head dim = num_heads * head_dim
+# length : attention sequence length
+# temb_in : dense.shape[0] of resnet dense before conv
+# out_c : dense.shape[1] of resnet dense before conv
+# out_channels : conv.shape[-1] activation
+# keep_1 : conv.shape[0] weight
+# keep_2 : conv.shape[1] weight
+# conv_in : conv.shape[2] weight
+# conv_out : conv.shape[-1] weight
+logical_axis_rules: [
+                      ['batch', ['data', 'fsdp']],
+                      ['activation_batch', ['data', 'fsdp']],
+                      ['activation_self_attn_heads', ['context', 'tensor']],
+                      ['activation_cross_attn_q_length', ['context', 'tensor']],
+                      ['activation_length', 'context'],
+                      ['activation_heads', 'tensor'],
+                      ['mlp','tensor'],
+                      ['embed', ['context', 'fsdp']],
+                      ['heads', 'tensor'],
+                      ['norm', 'tensor'],
+                      ['conv_batch', ['data', 'context', 'fsdp']],
+                      ['out_channels', 'tensor'],
+                      ['conv_out', 'context'],
+                    ]
+vae_logical_axis_rules: [
+                          ['activation_batch', 'redundant'],
+                          ['activation_length', 'vae_spatial'],
+                          ['activation_heads', null],
+                          ['activation_kv_length', null],
+                          ['embed', null],
+                          ['heads', null],
+                          ['norm', null],
+                          ['conv_batch', 'redundant'],
+                          ['out_channels', 'vae_spatial'],
+                          ['conv_out', 'vae_spatial'],
+                          ['conv_in', 'vae_spatial'],
+                        ]
+data_sharding: [['data', 'fsdp', 'context', 'tensor']]
+
+# One axis for each parallelism type may hold a placeholder (-1)
+# value to auto-shard based on available slices and devices.
+# By default, product of the DCN axes should equal number of slices
+# and product of the ICI axes should equal number of devices per slice.
+dcn_data_parallelism: 1
+dcn_fsdp_parallelism: 1
+dcn_context_parallelism: -1  # recommended DCN axis to be auto-sharded
+dcn_tensor_parallelism: 1
+ici_data_parallelism: 1
+ici_fsdp_parallelism: 1
+ici_context_parallelism: -1  # recommended ICI axis to be auto-sharded
+ici_tensor_parallelism: 1
+
+allow_split_physical_axes: False
+
+# Dataset
+# Replace with dataset path or train_data_dir. One has to be set.
+dataset_name: 'diffusers/pokemon-gpt4-captions'
+train_split: 'train'
+dataset_type: 'tfrecord'  # Options: 'tfrecord', 'hf', 'tf', 'grain', 'synthetic'
+# ==============================================================================
+# Synthetic Data Configuration (only used when dataset_type='synthetic')
+# ==============================================================================
+# To use synthetic data for testing/debugging without real datasets:
+# 1. Set dataset_type: 'synthetic' above
+# 2. Optionally set synthetic_num_samples (null=infinite, or a number like 10000)
+# 3. Optionally override dimensions with synthetic_override_* flags below
+#
+# synthetic_num_samples: null  # null for infinite, or set a number
+#
+# Optional dimension overrides (comment out to use pipeline/config values):
+# synthetic_override_height: 720
+# synthetic_override_width: 1280
+# synthetic_override_num_frames: 121
+# synthetic_override_max_sequence_length: 512
+# synthetic_override_text_embed_dim: 4096
+# synthetic_override_num_channels_latents: 16
+# synthetic_override_vae_scale_factor_spatial: 8
+# synthetic_override_vae_scale_factor_temporal: 4
+# ==============================================================================
+
+cache_latents_text_encoder_outputs: True
+# cache_latents_text_encoder_outputs only apply to dataset_type="tf",
+# only apply to small dataset that fits in memory
+# prepare image latents and text encoder outputs
+# Reduce memory consumption and reduce step time during training
+# transformed dataset is saved at dataset_save_location
+dataset_save_location: ''
+load_tfrecord_cached: True
+train_data_dir: ''
+dataset_config_name: ''
+jax_cache_dir: ''
+# Directory for per-shape AOT serialized executables ('' = disabled).
+aot_cache_dir: ''
+# Directory for memoized torch->flax converted weights ('' = disabled).
+converted_weights_dir: ''
+hf_data_dir: ''
+hf_train_files: ''
+hf_access_token: ''
+image_column: 'image'
+caption_column: 'text'
+resolution: 1024
+center_crop: False
+random_flip: False
+# If cache_latents_text_encoder_outputs is True
+# the num_proc is set to 1
+tokenize_captions_num_proc: 4
+transform_images_num_proc: 4
+reuse_example_batch: False
+enable_data_shuffling: True
+
+# Defines the type of gradient checkpoint to enable.
+# NONE - means no gradient checkpoint
+# FULL - means full gradient checkpoint, whenever possible (minimum memory usage)
+# MATMUL_WITHOUT_BATCH - means gradient checkpoint for every linear/matmul operation,
+# except for ones that involve batch dimension - that means that all attention and projection
+# layers will have gradient checkpoint, but not the backward with respect to the parameters.
+# OFFLOAD_MATMUL_WITHOUT_BATCH - same as MATMUL_WITHOUT_BATCH but offload instead of recomputing.
+# CUSTOM - set names to offload and save.
+remat_policy: "NONE"
+# For CUSTOM policy set below, current annotations are for: attn_output, query_proj, key_proj, value_proj
+# xq_out, xk_out, ffn_activation
+names_which_can_be_saved: []
+names_which_can_be_offloaded: []
+
+# checkpoint every number of samples, -1 means don't checkpoint.
+checkpoint_every: -1
+checkpoint_dir: ""
+# Directory to cache pretrained weights as an orbax checkpoint for fast inference loads.
+# On first run (slow, diffusers load), weights are saved here automatically.
+# On subsequent runs, weights are loaded from here instead (~10x faster).
+pretrained_orbax_dir: ""
+# enables one replica to read the ckpt then broadcast to the rest
+enable_single_replica_ckpt_restoring: False
+
+# Training loop
+learning_rate: 1.e-5
+scale_lr: False
+max_train_samples: -1
+# max_train_steps takes priority over num_train_epochs.
+max_train_steps: 1500
+num_train_epochs: 1
+seed: 0
+output_dir: 'sdxl-model-finetuned'
+per_device_batch_size: 1.0
+# If global_batch_size % jax.device_count is not 0, use FSDP sharding.
+global_batch_size: 0
+disable_training_weights: False # if True, disables the use of mid-point loss weighting
+
+# For creating tfrecords from dataset
+tfrecords_dir: ''
+no_records_per_shard: 0
+enable_eval_timesteps: False
+timesteps_list: [125, 250, 375, 500, 625, 750, 875]
+num_eval_samples: 420
+
+warmup_steps_fraction: 0.1
+learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
+save_optimizer: False
+
+# However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
+# dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.
+
+# AdamW optimizer parameters
+adam_b1: 0.9 # Exponential decay rate to track the first moment of past gradients.
+adam_b2: 0.999 # Exponential decay rate to track the second moment of past gradients.
+adam_eps: 1.e-8 # A small constant applied to denominator outside of the square root.
+adam_weight_decay: 0.0 # AdamW Weight decay
+opt_enable_grad_clipping: False
+max_grad_value: 1.0
+opt_enable_grad_global_norm_clipping: False
+max_grad_norm: 1.0
+
+enable_profiler: False
+# Skip first n steps for profiling, to omit things like compilation and to give
+# the iteration time a chance to stabilize.
+skip_first_n_steps_for_profiler: 5
+profiler_steps: 10
+
+# Enable JAX named scopes for detailed profiling and debugging
+# When enabled, adds named scopes around key operations in transformer and attention layers
+enable_jax_named_scopes: False
+
+# Generation parameters
+prompt_file: ""
+prompt: "A cat and a dog baking a cake together in a kitchen. The cat is carefully measuring flour, while the dog is stirring the batter with a wooden spoon. The kitchen is cozy, with sunlight streaming through the window."
+prompt_2: "A cat and a dog baking a cake together in a kitchen. The cat is carefully measuring flour, while the dog is stirring the batter with a wooden spoon. The kitchen is cozy, with sunlight streaming through the window."
+negative_prompt: "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
+do_classifier_free_guidance: True
+height: 720
+width: 1280
+num_frames: 81
+guidance_scale: 5.0
+flow_shift: 5.0
+
+# Diffusion CFG cache (FasterCache-style, WAN 2.1 T2V only)
+# Skips the unconditional forward pass on ~35% of steps via residual compensation.
+# See: FasterCache (Lv et al. 2024), WAN 2.1 paper §4.4.2
+use_cfg_cache: False
+
+# Batch positive and negative prompts in text encoder to save compute.
+use_batched_text_encoder: False
+
+use_kv_cache: False
+use_magcache: False
+magcache_thresh: 0.12
+magcache_K: 2
+retention_ratio: 0.2
+mag_ratios_base: [1.0, 1.0, 1.02504, 1.03017, 1.00025, 1.00251, 0.9985, 0.99962, 0.99779, 0.99771, 0.9966, 0.99658, 0.99482, 0.99476, 0.99467, 0.99451, 0.99664, 0.99656, 0.99434, 0.99431, 0.99533, 0.99545, 0.99468, 0.99465, 0.99438, 0.99434, 0.99516, 0.99517, 0.99384, 0.9938, 0.99404, 0.99401, 0.99517, 0.99516, 0.99409, 0.99408, 0.99428, 0.99426, 0.99347, 0.99343, 0.99418, 0.99416, 0.99271, 0.99269, 0.99313, 0.99311, 0.99215, 0.99215, 0.99218, 0.99215, 0.99216, 0.99217, 0.99163, 0.99161, 0.99138, 0.99135, 0.98982, 0.9898, 0.98996, 0.98995, 0.9887, 0.98866, 0.98772, 0.9877, 0.98767, 0.98765, 0.98573, 0.9857, 0.98501, 0.98498, 0.9838, 0.98376, 0.98177, 0.98173, 0.98037, 0.98035, 0.97678, 0.97677, 0.97546, 0.97543, 0.97184, 0.97183, 0.96711, 0.96708, 0.96349, 0.96345, 0.95629, 0.95625, 0.94926, 0.94929, 0.93964, 0.93961, 0.92511, 0.92504, 0.90693, 0.90678, 0.8796, 0.87945, 0.86111, 0.86189]
+
+# Based on 3.4. in https://arxiv.org/pdf/2305.08891.pdf
+guidance_rescale: 0.0
+num_inference_steps: 50
+fps: 16
+save_final_checkpoint: False
+
+# SDXL Lightning parameters
+lightning_from_pt: True
+# Empty or "ByteDance/SDXL-Lightning" to enable lightning.
+lightning_repo: ""
+# Empty or "sdxl_lightning_4step_unet.safetensors" to enable lightning.
+lightning_ckpt: ""
+
+# LoRA parameters
+enable_lora: False
+# Values are lists to support multiple LoRA loading during inference in the future.
+lora_config: {
+  rank: [64],
+  lora_model_name_or_path: ["lightx2v/Wan2.1-Distill-Loras"],
+  weight_name: ["wan2.1_t2v_14b_lora_rank64_lightx2v_4step.safetensors"],
+  adapter_name: ["wan21-distill-lora"],
+  scale: [1.0],
+  from_pt: []
+}
+# Ex with values:
+# lora_config : {
+#   lora_model_name_or_path: ["ByteDance/Hyper-SD"],
+#   weight_name: ["Hyper-SDXL-2steps-lora.safetensors"],
+#   adapter_name: ["hyper-sdxl"],
+#   scale: [0.7],
+#   from_pt: [True]
+# }
+
+enable_mllog: False
+
+#controlnet
+controlnet_model_name_or_path: 'diffusers/controlnet-canny-sdxl-1.0'
+controlnet_from_pt: True
+controlnet_conditioning_scale: 0.5
+controlnet_image: 'https://upload.wikimedia.org/wikipedia/commons/thumb/c/c1/Google_%22G%22_logo.svg/1024px-Google_%22G%22_logo.svg.png'
+quantization: ''
+# Shard the range finding operation for quantization. By default this is set to number of slices.
+quantization_local_shard_count: -1
+compile_topology_num_slices: -1 # Number of target slices, set to a positive integer.
+use_qwix_quantization: False # Whether to use qwix for quantization. If set to True, the transformer of WAN will be quantized using qwix.
+# Quantization calibration method used for weights, activations and bwd. Supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#L70-L80
+weight_quantization_calibration_method: "absmax"
+act_quantization_calibration_method: "absmax"
+bwd_quantization_calibration_method: "absmax"
+qwix_module_path: ".*"
+
+# Eval model on per eval_every steps. -1 means don't eval.
+eval_every: -1
+eval_data_dir: ""
+enable_generate_video_for_eval: False # This will increase the used TPU memory.
+eval_max_number_of_samples_in_bucket: 60 # The number of samples per bucket for evaluation. This is calculated by num_eval_samples / len(timesteps_list).
+
+enable_ssim: False
+
+# ML Diagnostics settings
+enable_ml_diagnostics: False
+profiler_gcs_path: ""
+enable_ondemand_xprof: False
