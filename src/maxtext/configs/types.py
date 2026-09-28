@@ -2251,6 +2251,35 @@ class TrainingLoop(BaseModel):
   data_shuffle_seed: int = Field(0, description="Seed for data shuffling.")
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
   max_inflight_computations: int = Field(2, description="Maximum number of inflight computations on device.")
+  block_state_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: jax.block_until_ready(state), evaluate the learning-rate schedule once "
+          "(compiles its small eager ops) and run a cross-host barrier. Does not touch the dataset."
+      ),
+  )
+  warm_input_reshard_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: device_put an all-zero synthetic batch through the same host->global->input "
+          "sharding path as the data loader, so the reshard program is compiled outside the timer. No dataset access."
+      ),
+  )
+  train_shard_in_read: bool = Field(
+      False,
+      description=(
+          "c4_mlperf train split: shard by file in tfds (host i opens files i, i+n, ...) instead of reading the full "
+          "stream and keeping every n-th example. Needs at least as many files as data-loading hosts."
+      ),
+  )
+  train_interleave_cycle_length: int = Field(
+      -1,
+      description=(
+          "c4_mlperf train split: tfds interleave_cycle_length, i.e. number of files read concurrently per host "
+          "(-1 = tfds default of 16). With train_shard_in_read, keep this below the files per host so that "
+          "data_shuffle_seed changes which files are read first."
+      ),
+  )
 
 
 class ManifoldConstrainedHyperConnections(BaseModel):
