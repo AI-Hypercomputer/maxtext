@@ -1013,7 +1013,7 @@ class MoEGeneral(BaseModel):
       None,
       description=(
           "What to do when the ragged buffer (ragged_buffer_factor > 0) would drop tokens. None: drop them."
-          " 'step': discard the candidate state and replay the whole train step with a dropless buffer."
+          " 'step': roll the step's update back in-graph and replay the whole train step with a dropless buffer."
           " 'layer': per MoE layer, calculate the overflow from the router's top-k and take a chunked dropless"
           " branch (lax.cond) for that layer only; no step replay."
       ),
@@ -3728,6 +3728,15 @@ class MaxTextConfig(
     if mode == "layer" and self.use_random_routing:
       # The overflow check re-derives top-k outside permute(); random routing would not reproduce it.
       raise ValueError(f"{prefix} does not support use_random_routing=True.")
+    if mode == "step":
+      if self.enable_diloco:
+        raise ValueError(f"{prefix} is not supported with enable_diloco=True.")
+      if self.compiled_trainstep_file:
+        raise ValueError(f"{prefix} is not supported with compiled_trainstep_file.")
+      if self.optimizer_memory_host_offload or self.parameter_memory_host_offload:
+        raise ValueError(
+            f"{prefix} is not supported with optimizer_memory_host_offload or parameter_memory_host_offload."
+        )
 
   def validate_retry_dropless_first_steps_and_first_phase_buffer(self):
     """Validates retry_dropless_first_steps, first_phase_ragged_buffer_factor and the REQUIRED_RBF probe."""

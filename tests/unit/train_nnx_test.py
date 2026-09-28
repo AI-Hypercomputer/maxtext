@@ -491,6 +491,39 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
     metrics = self._eval_metrics(has_overflow=True, step_fallback=False)
     self.assertNotIn("has_moe_overflow", metrics)
 
+  def _before_after(self, has_overflow, step_fallback, jit=False):
+    """Runs train_step, eagerly or under jit, and returns the input/output state leaves."""
+    cfg, ts = self._build_state(has_overflow, step_fallback)
+    state_graphdef, state_pure = nnx.split(ts)
+    before = jax.tree_util.tree_leaves(state_pure)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+
+    def step(state, data):
+      return pre_train.train_step(
+          state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state, data=data
+      )
+
+    new_state, _ = (jax.jit(step) if jit else step)(state_pure, data)
+    return before, jax.tree_util.tree_leaves(new_state)
+
+  def test_state_is_rolled_back_on_overflow(self):
+    for jit in (False, True):
+      with self.subTest(jit=jit):
+        before, after = self._before_after(has_overflow=True, step_fallback=True, jit=jit)
+        self.assertEqual(len(before), len(after))
+        for i, (b, a) in enumerate(zip(before, after)):
+          self.assertTrue(bool(jnp.array_equal(b, a)), f"state leaf {i} changed despite a token-drop rollback")
+
+  def test_state_advances_without_overflow(self):
+    for jit in (False, True):
+      with self.subTest(jit=jit):
+        before, after = self._before_after(has_overflow=False, step_fallback=True, jit=jit)
+        self.assertEqual(len(before), len(after))
+        self.assertTrue(
+            any(not bool(jnp.array_equal(b, a)) for b, a in zip(before, after)),
+            "train_step left the state untouched with has_overflow=False -- the rollback test proves nothing.",
+        )
+
 
 class TestEvalStepNNX(unittest.TestCase):
   """Cover the NNX branch of eval_step (lines 568-570)."""

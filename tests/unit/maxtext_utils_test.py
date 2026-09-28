@@ -1053,14 +1053,14 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
     )
     self.assertEqual(donate_argnums, 0)
 
-  def test_donate_argnums_is_empty_with_step_dropless_fallback(self):
+  def test_donate_argnums_is_zero_with_step_dropless_fallback(self):
     step = self._make_mock_step()
     cfg = self._make_mock_config()
     cfg.moe_dropless_fallback = "step"
     _, _, _, _, donate_argnums = maxtext_utils.get_functional_train_with_signature(
         step, "data_sharding", "state_shardings", "model", cfg
     )
-    self.assertEqual(donate_argnums, ())
+    self.assertEqual(donate_argnums, 0)
 
   def test_functional_train_is_partial(self):
     """functional_train should partially apply model and config."""
