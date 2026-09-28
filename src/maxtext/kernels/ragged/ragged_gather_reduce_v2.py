@@ -282,10 +282,27 @@ def _preprocess(
   row_partition_size = valid_rows_mask.shape[0] // num_row_partitions
   valid_rows_mask_2d = valid_rows_mask.reshape(num_row_partitions, -1)
 
-  # Stable sort of a boolean key is a stable partition: valid rows keep their
-  # relative order and move ahead of the invalid ones.
-  sorted_by_validity = jnp.argsort(~valid_rows_mask_2d, descending=False, stable=True, axis=-1)
-  sorted_by_validity += jnp.arange(num_row_partitions)[:, None] * row_partition_size
+  # Stable partition: valid rows keep their relative order and move ahead of
+  # the invalid ones. This equals a stable argsort of ~mask, but computes each
+  # row's destination from prefix counts and inverts it with one unique-index
+  # scatter instead of a full sort. Scatter-add into zeros equals scatter-set
+  # for unique indices, and add keeps it eligible for SparseCore offload.
+  is_valid = valid_rows_mask_2d.astype(jnp.int32)
+  valid_before = jnp.cumsum(is_valid, axis=-1) - is_valid
+  num_valid = jnp.sum(is_valid, axis=-1, keepdims=True)
+  pos = jnp.arange(row_partition_size, dtype=jnp.int32)[None, :]
+  dest = jnp.where(valid_rows_mask_2d, valid_before, num_valid + (pos - valid_before))
+  partition_offsets = jnp.arange(num_row_partitions, dtype=jnp.int32)[:, None] * row_partition_size
+  sorted_by_validity = (
+      jnp.zeros((num_row_partitions * row_partition_size,), jnp.int32)
+      .at[(dest + partition_offsets).reshape(-1)]
+      .add(
+          (pos + partition_offsets).reshape(-1),
+          unique_indices=True,
+          mode="promise_in_bounds",
+      )
+      .reshape(num_row_partitions, row_partition_size)
+  )
 
   pad_to = _align_to(row_partition_size, row_chunk_size)
   if pad_to > row_partition_size:
