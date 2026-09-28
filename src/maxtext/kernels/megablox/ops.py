@@ -687,12 +687,16 @@ def _bwd_quantize_gradient(
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
         calibration_method=quantization_rule.bwd_calibration_method,
     )
+    drhs_calib = (
+        quantization_rule.additional_qt_config.get("moe_drhs_grad_quantization_calibration_method", None)
+        or quantization_rule.bwd_calibration_method
+    )
     drhs_dout = qpl.quantize(
         # pyrefly: ignore[bad-argument-type]
         drhs_dout,
         quantization_rule.bwd_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
-        calibration_method=quantization_rule.bwd_calibration_method,
+        calibration_method=drhs_calib,
     )
   return dlhs_dout, drhs_dout
 

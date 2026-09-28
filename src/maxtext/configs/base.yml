@@ -172,6 +172,7 @@ weight_quantization_calibration_method: "absmax"
 act_quantization_calibration_method: "absmax"
 bwd_quantization_calibration_method: "absmax"
 drhs_grad_quantization_calibration_method: null  # weight-gradient-arm cotangent calibration; null = bwd_quantization_calibration_method
+moe_drhs_grad_quantization_calibration_method: null  # MoE GMM weight-gradient cotangent calibration; null = bwd_quantization_calibration_method
 # shard the range finding operation for quantization. by default this is set to number of slices.
 quantization_local_shard_count: -1
 # The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block.

@@ -1066,9 +1066,13 @@ def _get_router_proj_unquantized_rule() -> qwix.QtRule:
 
 
 def _drhs_grad_calibration_override(config: Config) -> dict:
-  """Qwix DotGeneralQtConfig override for the weight-gradient arm's cotangent calibration (see types.py)."""
-  m = getattr(config, "drhs_grad_quantization_calibration_method", None)
-  return {"drhs_grad_calibration_method": m} if m else {}
+  """Overrides for weight-gradient arm cotangent calibration (see types.py)."""
+  overrides = {}
+  if getattr(config, "drhs_grad_quantization_calibration_method", None):
+    overrides["drhs_grad_calibration_method"] = config.drhs_grad_quantization_calibration_method
+  if getattr(config, "moe_drhs_grad_quantization_calibration_method", None):
+    overrides["moe_drhs_grad_quantization_calibration_method"] = config.moe_drhs_grad_quantization_calibration_method
+  return overrides
 
 
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):

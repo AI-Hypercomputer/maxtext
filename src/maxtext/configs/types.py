@@ -603,6 +603,14 @@ class Quantization(BaseModel):
           "removes that reduction. The activation-gradient arm (dX = dY W^T) is unaffected."
       ),
   )
+  moe_drhs_grad_quantization_calibration_method: str | None = Field(
+      None,
+      description=(
+          "Calibration for the cotangent in the weight-gradient matmul of MoE GMM layers only (qwix drhs_grad; dW = X^T dY). "
+          "None inherits bwd_quantization_calibration_method. A fixed range (e.g. 'fixed,0.01') removes the dynamic "
+          "token-axis reduction in the MoE backward pass."
+      ),
+  )
   weight_sparsity_n: int | None = Field(
       None,
       description=("The 'N' in N:M sparsity, representing the maximum number of non-zero" " values in each block."),

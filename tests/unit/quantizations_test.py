@@ -853,5 +853,50 @@ class LogitsProjQwixTest(unittest.TestCase):
       self.assertEqual((rule.weight_calibration_method, rule.act_calibration_method), (expected, expected))
 
 
+class DrhsGradCalibrationOverrideTest(unittest.TestCase):
+
+  def test_moe_drhs_grad_calibration_override(self):
+    """Verifies that QtRule receives both drhs_grad and moe_drhs_grad in additional_qt_config."""
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek3-671b",
+            "quantization=fp8_full",
+            "use_qwix_quantization=true",
+            "bwd_quantization_calibration_method=absmax",
+            "drhs_grad_quantization_calibration_method=fixed,0.02",
+            "moe_drhs_grad_quantization_calibration_method=fixed,0.01",
+        ],
+        run_name="moe_drhs_calib_test",
+        skip_jax_distributed_system=True,
+    )
+    rules = quantizations.get_fp8_full_qwix_rule_w_sparsity(cfg)
+    layer_rule = [r for r in rules if "decoder/.*layers.*" in r.module_path][0]
+
+    self.assertIn("dot_general", layer_rule.op_names)
+    self.assertIn("gmm", layer_rule.op_names)
+    self.assertEqual(layer_rule.additional_qt_config.get("drhs_grad_calibration_method"), "fixed,0.02")
+    self.assertEqual(layer_rule.additional_qt_config.get("moe_drhs_grad_quantization_calibration_method"), "fixed,0.01")
+
+
+  def test_drhs_grad_calibration_override_in_megablox(self):
+    """Verifies that _bwd_quantize_gradient honors moe_drhs_grad_quantization_calibration_method for weight gradients."""
+
+    rule = qwix.QtRule(
+        module_path=".*",
+        bwd_qtype=jnp.float8_e5m2,
+        bwd_calibration_method="absmax",
+        additional_qt_config={"moe_drhs_grad_quantization_calibration_method": "fixed,0.01"},
+    )
+    dlhs_dout = jnp.ones((8, 16), dtype=jnp.bfloat16)
+    drhs_dout = jnp.ones((8, 16), dtype=jnp.bfloat16)
+
+    dlhs_q, drhs_q = ops._bwd_quantize_gradient(dlhs_dout, drhs_dout, rule) # pylint: disable=protected-access
+    self.assertEqual(dlhs_q.qtype, jnp.float8_e5m2)
+    self.assertEqual(drhs_q.qtype, jnp.float8_e5m2)
+    self.assertFalse(jnp.array_equal(dlhs_q.scale, drhs_q.scale))
+
+
 if __name__ == "__main__":
   unittest.main()
