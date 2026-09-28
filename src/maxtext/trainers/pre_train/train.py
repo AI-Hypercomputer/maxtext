@@ -1012,6 +1012,9 @@ def train_loop(config, recorder, state=None):
   _job_completed_gracefully = False
   te_moe_overflow_window = []
   try:
+    train_utils.prepare_before_run_start(
+        config, state, learning_rate_schedule, start_step, mesh, data_loader, shaped_batch
+    )
     python_vars["last_step_completion"] = datetime.datetime.now()
 
     mllog_utils.init_print(config)

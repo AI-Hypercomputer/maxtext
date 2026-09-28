@@ -302,8 +302,12 @@ def get_dataset(
     enable_data_shuffling: bool = False,
     data_shuffle_seed: int = 0,
     shard_in_read: bool = False,
+    interleave_cycle_length: int = -1,
 ) -> tf.data.Dataset:
   """Load and return a dataset of examples."""
+  extra_read_config = {}
+  if interleave_cycle_length > 0:
+    extra_read_config["interleave_cycle_length"] = interleave_cycle_length
   if shard_in_read:
     # shard dataset in reading
     read_config = tfds.ReadConfig(
@@ -312,13 +316,14 @@ def get_dataset(
             input_pipeline_id=dataloading_host_index,
             num_input_pipelines=dataloading_host_count,
         ),
+        **extra_read_config,
     )
     ds_builder = tfds.builder(dataset_name, data_dir=data_dir)
     ds_builder.download_and_prepare()
     ds = ds_builder.as_dataset(split=split, read_config=read_config, shuffle_files=enable_data_shuffling)
   else:
     # shard dataset after reading
-    read_config = tfds.ReadConfig(shuffle_seed=data_shuffle_seed)
+    read_config = tfds.ReadConfig(shuffle_seed=data_shuffle_seed, **extra_read_config)
     ds_builder = tfds.builder(dataset_name, data_dir=data_dir)
     ds = ds_builder.as_dataset(split=split, read_config=read_config, shuffle_files=enable_data_shuffling)
     ds = ds.shard(num_shards=dataloading_host_count, index=dataloading_host_index)
@@ -548,6 +553,8 @@ def make_c4_mlperf_train_iterator(
       data_dir=train_data_dir,
       enable_data_shuffling=config.enable_data_shuffling,
       data_shuffle_seed=config.data_shuffle_seed,
+      shard_in_read=config.train_shard_in_read,
+      interleave_cycle_length=config.train_interleave_cycle_length,
   )
 
   train_ds = rekey(train_ds, {"inputs": None, "targets": train_col})
