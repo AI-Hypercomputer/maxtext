@@ -23,6 +23,7 @@ import datetime
 import functools
 import gc
 import os
+import time
 
 from absl import app
 
@@ -39,6 +40,7 @@ except ImportError:
 
 import jax
 import jax.numpy as jnp
+from jax.experimental import multihost_utils
 from jax.sharding import NamedSharding
 
 from flax import nnx, traverse_util
@@ -431,6 +433,33 @@ def _rollback_on_overflow(new_state, old_leaves, has_moe_overflow):
   return jax.tree_util.tree_unflatten(treedef, [_select(n, o) for n, o in zip(new_leaves, old_leaves)])
 
 
+def step_diagnostics(raw_grads, has_moe_overflow, bias_values, bias_updates):
+  """log_step_diagnostics scalars that are not already in the step metrics.
+
+  Returns max |raw gradient| over all parameters (pre-clip), the routed-bias checksum (sum over MoE layers of the sum
+  of the updated router bias, float32), the number of nonzero routed-bias update entries of this step and the MoE
+  overflow flag, each as a float32 scalar. The gradient and parameter L2 norms are logged from the existing
+  learning/raw_grad_norm, learning/grad_norm and learning/param_norm.
+  """
+  leaves = [
+      g for g in jax.tree_util.tree_leaves(raw_grads) if hasattr(g, "dtype") and jnp.issubdtype(g.dtype, jnp.inexact)
+  ]
+  max_abs = jnp.max(jnp.stack([jnp.max(jnp.abs(g)).astype(jnp.float32) for g in leaves])) if leaves else jnp.float32(0)
+  checksum = jnp.float32(0)
+  for b in bias_values:
+    checksum = checksum + jnp.sum(jnp.asarray(b, jnp.float32))
+  nonzero = jnp.float32(0)
+  for u in bias_updates:
+    nonzero = nonzero + jnp.sum(jnp.asarray(u) != 0).astype(jnp.float32)
+  overflow = jnp.asarray(False if has_moe_overflow is None else has_moe_overflow).astype(jnp.float32)
+  return {
+      "diag/max_abs_grad": max_abs,
+      "diag/moe_bias_checksum": checksum,
+      "diag/moe_bias_update_nonzero": nonzero,
+      "diag/moe_overflow": overflow,
+  }
+
+
 def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
   """Finds the router gate bias parameter in a module graph."""
   if module is None:
@@ -556,6 +585,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   mtp_loss = aux.get("mtp_loss", 0.0)
   new_opt_state = None
   bias_metrics = {}
+  # log_step_diagnostics: the updated router biases and this step's bias updates (see step_diagnostics).
+  diag_bias_values, diag_bias_updates = [], []
 
   if config.gradient_clipping_threshold > 0:
     grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
@@ -610,6 +641,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
             node.bias.value = node.bias.value + jnp.array(update_val)
+            diag_bias_values.append(node.bias.value)
+            diag_bias_updates.append(update_val)
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
     else:
@@ -618,7 +651,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
       decoder_bias = _find_gate_bias(decoder_layer)
       if decoder_bias is not None and moe_bias_updates is not None:
-        decoder_bias.value = decoder_bias.value + jnp.array(moe_bias_updates[0])
+        decoder_update = jnp.array(moe_bias_updates[0])
+        decoder_bias.value = decoder_bias.value + decoder_update
+        diag_bias_values.append(decoder_bias.value)
+        diag_bias_updates.append(decoder_update)
 
       # 2. Update auxiliary MTP MoE layers (if enabled).
       # Unlike the main decoder, each MTP layer is an individual un-scanned layer
@@ -628,7 +664,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           mtp_layer = getattr(new_state.model.mtp_block, f"mtp_layer_{i + 1}", None)
           mtp_bias = _find_gate_bias(mtp_layer)
           if mtp_bias is not None:
-            mtp_bias.value = mtp_bias.value + jnp.array(update)
+            mtp_update = jnp.array(update)
+            mtp_bias.value = mtp_bias.value + mtp_update
+            diag_bias_values.append(mtp_bias.value)
+            diag_bias_updates.append(mtp_update)
 
   lm_loss = xent_sum / (total_weights + EPS)
   scalar_metrics = {
@@ -667,6 +706,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
     model_params = nnx.state(new_state.model, nnx.Param)
     scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(model_params)
+
+  if getattr(config, "log_step_diagnostics", False):
+    scalar_metrics.update(step_diagnostics(raw_grads, has_moe_overflow, diag_bias_values, diag_bias_updates))
+    if "learning/raw_grad_norm" not in scalar_metrics:  # optimizer_memory_host_offload skips the norms above
+      scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
+      scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(nnx.state(new_state.model, nnx.Param))
 
   # Surface skip-step rejections as a TB metric. The skip-step optimizer stores
   # is_skipped in its opt_state; read it back off the optimizer just updated in place.
@@ -982,6 +1028,111 @@ def aot_compile_step(p_step, lower_args, compiler_options, prefix):
   return compiled
 
 
+def make_synthetic_batch(config, shaped_batch, seed=0):
+  """Materializes a batch with the keys, shapes, dtypes and shardings of `shaped_batch` (ShapeDtypeStructs) without
+  touching the dataset: token ids are drawn from jax.random.PRNGKey(seed), positions are an arange over the sequence
+  axis, segmentations and other integer fields are ones, float fields are zeros. Built inside one jit whose
+  out_shardings are the structs' shardings, so the result is a global array like the loader's device_put batch."""
+  names = sorted(shaped_batch)
+  seq_len = int(getattr(config, "max_target_length", 0))
+
+  def _seq_axis(shape):
+    axes = [i for i, n in enumerate(shape) if n == seq_len and i > 0]
+    return axes[0] if axes else len(shape) - 1
+
+  def _gen(key):
+    out = {}
+    keys = jax.random.split(key, len(names))
+    for sub_key, name in zip(keys, names):
+      shape, dtype = shaped_batch[name].shape, shaped_batch[name].dtype
+      if name in ("inputs", "targets"):
+        out[name] = jax.random.randint(sub_key, shape, 0, max(int(config.vocab_size), 1), dtype=dtype)
+      elif name.endswith("_position"):
+        out[name] = jax.lax.broadcasted_iota(dtype, shape, _seq_axis(shape))
+      elif jnp.issubdtype(dtype, jnp.floating):
+        out[name] = jnp.zeros(shape, dtype)
+      else:
+        out[name] = jnp.ones(shape, dtype)
+    return out
+
+  out_shardings = {name: getattr(shaped_batch[name], "sharding", None) for name in names}
+  return jax.jit(_gen, out_shardings=out_shardings)(jax.random.PRNGKey(seed))
+
+
+def _array_leaf_ids(tree):
+  return {id(leaf) for leaf in jax.tree_util.tree_leaves(tree) if isinstance(leaf, jax.Array)}
+
+
+def _delete_outputs(outputs, keep_ids):
+  """Frees the device buffers of a warmup program's outputs, except leaves that are the kept (real) state's arrays
+  (jit may forward an unchanged input to its output)."""
+  for leaf in jax.tree_util.tree_leaves(outputs):
+    if isinstance(leaf, jax.Array) and id(leaf) not in keep_ids and not leaf.is_deleted():
+      leaf.delete()
+
+
+def warmup_programs(
+    programs, state, mesh, train_rules, eval_rules, train_batch, eval_batch, rng_args=(), copy_train_state=False
+):
+  """warmup_programs_in_init: executes each program once through its jit (the same dispatch path as the loop, so
+  step 0 hits the jit cache and the executable is loaded) under the loop's mesh / logical-axis-rule contexts.
+
+  programs: list of (name, kind, p_step) with kind "train" or "eval"; entries whose p_step is None are skipped.
+  The real `state` is never modified: eval programs and non-donating train programs cannot change their inputs;
+  when copy_train_state is True (train programs donate the state) each train program gets a fresh copy of it.
+  Every output (new state, metrics, routed-bias updates) is discarded. Returns {name: wall seconds}.
+  """
+  keep_ids = _array_leaf_ids(state)
+  timings = {}
+  for name, kind, p_step in programs:
+    if p_step is None:
+      continue
+    rules, batch = (train_rules, train_batch) if kind == "train" else (eval_rules, eval_batch)
+    if batch is None:
+      max_logging.log(f"warmup_programs_in_init: skipping {name} (no synthetic {kind} batch)")
+      continue
+    start = time.perf_counter()
+    with jax.set_mesh(mesh), logical_axis_rules(rules):
+      arg_state = state
+      if kind == "train" and copy_train_state:
+        arg_state = jax.tree_util.tree_map(lambda x: x.copy() if isinstance(x, jax.Array) else x, state)
+      outputs = p_step(arg_state, batch, *rng_args)
+      jax.block_until_ready(outputs)
+    timings[name] = time.perf_counter() - start
+    _delete_outputs(outputs, keep_ids)
+    if arg_state is not state:
+      _delete_outputs(arg_state, keep_ids)
+    del outputs, arg_state
+    max_logging.log(f"warmup_programs_in_init: {name} ({kind}) {timings[name]:.3f} s")
+  gc.collect()
+  return timings
+
+
+def start_run_clock(config, start_step, warmup_fn=None, barrier_fn=None, python_vars=None):
+  """Logs init_print, then (warmup_programs_in_init) runs warmup_fn and a cross-host barrier, then init_stop,
+  run_start and block_start. With warmup_fn None the sequence is the original init_print, init_stop, run_start,
+  block_start. mllog writes only on jax.process_index() == 0; the barrier makes every host leave init together, so
+  run_start (process 0) sits right before every host's first step."""
+  mllog_utils.init_print(config)
+  if warmup_fn is not None:
+    start = time.perf_counter()
+    warmup_fn()
+    warmed = time.perf_counter()
+    if barrier_fn is None:
+      barrier_fn = lambda: multihost_utils.sync_global_devices("warmup_programs_in_init")  # pylint: disable=unnecessary-lambda-assignment
+    barrier_fn()
+    done = time.perf_counter()
+    max_logging.log(
+        f"warmup_programs_in_init: warmup {warmed - start:.3f} s, barrier wait {done - warmed:.3f} s "
+        f"(process {jax.process_index()})"
+    )
+    if python_vars is not None:
+      python_vars["last_step_completion"] = datetime.datetime.now()
+  mllog_utils.init_stop()
+  mllog_utils.run_start()
+  mllog_utils.block_start(config, start_step)
+
+
 def train_loop(config, recorder, state=None):
   """Main Training loop."""
   (
@@ -1078,6 +1229,9 @@ def train_loop(config, recorder, state=None):
   # Do not enter the legacy `mesh` context manager here: the training loop calls
   # p_train_step without it, and the mismatch in jit's tracing-cache key would
   # cause train_step to be traced and compiled a second time on the first step.
+  precompiled_train = False
+  precompiled_eval = False
+  shaped_eval_batch = None
   with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
     data_sharding = sharding.get_input_data_sharding(config, mesh)
     shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
@@ -1100,6 +1254,7 @@ def train_loop(config, recorder, state=None):
       compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
       compiled_stats = compiled.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_stats, prefix="train")
+      precompiled_train = True
       if p_train_step_dropless is not None:
         # Precompile the dropless retry program here so no compile happens inside the timed loop.
         aot_compile_step(p_train_step_dropless, lower_args, compiler_options, prefix="train_dropless")
@@ -1121,6 +1276,7 @@ def train_loop(config, recorder, state=None):
       compiled_eval = p_eval_step.lower(*eval_lower_args).compile(compiler_options=compiler_options)
       compiled_eval_stats = compiled_eval.memory_analysis()
       max_utils.print_compiled_memory_stats(compiled_eval_stats, prefix="eval")
+      precompiled_eval = True
       if p_eval_step_dropless is not None:
         aot_compile_step(p_eval_step_dropless, eval_lower_args, compiler_options, prefix="eval_dropless")
   prof = profiler.Profiler(config, offset_step=start_step)
@@ -1185,6 +1341,48 @@ def train_loop(config, recorder, state=None):
       "dump_hlo_upload_all": config.dump_hlo_upload_all,
   }
 
+  warmup_fn = None
+  if getattr(config, "warmup_programs_in_init", False):
+    if not (precompiled_train or precompiled_eval):
+      max_logging.log("warmup_programs_in_init: no precompiled program (compiled_trainstep_file or AutoPGLE); skipped")
+    else:
+      warmup_list = []
+      if precompiled_train:
+        warmup_list += [
+            ("train", "train", p_train_step),
+            ("train_first_phase", "train", p_train_step_first_phase),
+            ("train_dropless", "train", p_train_step_dropless),
+        ]
+      if precompiled_eval:
+        warmup_list += [("eval", "eval", p_eval_step), ("eval_dropless", "eval", p_eval_step_dropless)]
+      # Same shardings as the loop's batches: the loader's device_put sharding for train, the eval rules for eval.
+      train_batch_sharding = getattr(data_loader, "input_data_shardings", None) or data_sharding
+      train_shaped = {
+          k: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=train_batch_sharding) for k, v in shaped_batch.items()
+      }
+      warmup_train_batch = make_synthetic_batch(config, train_shaped, seed=0) if precompiled_train else None
+      warmup_eval_batch = make_synthetic_batch(config, shaped_eval_batch, seed=1) if precompiled_eval else None
+      # train_step always donates the state (maxtext_utils.get_functional_train_with_signature, including under
+      # moe_dropless_fallback="step", which rolls back in-graph), so each warmed train program gets a copy.
+      copy_train_state = True
+      # pylint: disable=not-callable
+      warmup_rng_args = (jax.jit(jax.random.fold_in)(init_rng, start_step),) if config.enable_diloco else ()
+
+      def _run_warmup():
+        warmup_programs(
+            warmup_list,
+            state,
+            mesh,
+            config.logical_axis_rules,
+            config.logical_axis_rules_for_eval,
+            warmup_train_batch,
+            warmup_eval_batch,
+            rng_args=warmup_rng_args,
+            copy_train_state=copy_train_state,
+        )
+
+      warmup_fn = _run_warmup
+
   _job_completed_gracefully = False
   te_moe_overflow_window = []
   try:
@@ -1193,10 +1391,7 @@ def train_loop(config, recorder, state=None):
     )
     python_vars["last_step_completion"] = datetime.datetime.now()
 
-    mllog_utils.init_print(config)
-    mllog_utils.init_stop()
-    mllog_utils.run_start()
-    mllog_utils.block_start(config, start_step)
+    start_run_clock(config, start_step, warmup_fn=warmup_fn, python_vars=python_vars)
 
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:

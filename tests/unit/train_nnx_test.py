@@ -21,6 +21,7 @@ production loss_fn uses (decoder_input_tokens, decoder_positions, ...).
 
 from dataclasses import dataclass
 import datetime
+import functools
 import types as pytypes
 import unittest
 from unittest import mock
@@ -32,6 +33,7 @@ import jax.numpy as jnp
 from maxtext.layers import nnx_scan
 import numpy as np
 from maxtext.common import train_state_nnx
+from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train import train as pre_train
@@ -1042,6 +1044,255 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
       )
     lines = [c.args[0] for c in log.call_args_list if c.args and str(c.args[0]).startswith("REQUIRED_RBF")]
     self.assertEqual(lines, ["REQUIRED_RBF step=0 max=3.2500 per_layer=[1.5000,3.2500] program=first_phase"])
+
+
+def _state_checksum(state):
+  """Host copies of every array leaf of an NNX state (PRNG keys as key data), in leaf order."""
+  out = []
+  for leaf in jax.tree_util.tree_leaves(state):
+    if isinstance(leaf, jax.Array):
+      if jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key):
+        leaf = jax.random.key_data(leaf)
+      out.append(np.array(leaf))
+  return out
+
+
+class TestWarmupProgramsInInit(unittest.TestCase):
+  """warmup_programs_in_init: warmup_programs, make_synthetic_batch and start_run_clock."""
+
+  def _mesh(self):
+    return jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape(1), ("data",))
+
+  def _shaped(self, mesh=None, batch=2, seq=4):
+    # The tiny decoder fixture builds its own explicit mesh, so the train/eval tests use unsharded batches.
+    sharding = None if mesh is None else jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    return {k: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=sharding) for k, v in _make_data(batch, seq).items()}
+
+  def _routed_bias_programs(self, cfg, donate):
+    """Jitted train/eval programs over a tiny routed-bias model; returns (state, p_train, p_eval, mesh)."""
+    model = _TinyDecoderMoEBias(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    optimizer = nnx.Optimizer(model, optax.adam(0.01), wrt=nnx.Param)
+    graphdef, state = nnx.split(train_state_nnx.TrainStateNNX(model, optimizer))
+    train_fn = functools.partial(pre_train.train_step, graphdef, cfg, None, None)
+    eval_fn = functools.partial(pre_train.eval_step, graphdef, cfg)
+    p_train = jax.jit(train_fn, donate_argnums=(0,) if donate else ())
+    p_eval = jax.jit(eval_fn)
+    return state, p_train, p_eval, model.mesh  # the loop's mesh context must be the model's mesh
+
+  def _check_state_unchanged(self, donate):
+    """Warms train (twice, as normal and dropless) and eval programs and checks every state leaf is bit-identical."""
+    cfg = _Cfg()
+    cfg.routed_bias = True
+    cfg.routed_bias_update_rate = 0.001
+    state, p_train, p_eval, mesh = self._routed_bias_programs(cfg, donate)
+    batch = pre_train.make_synthetic_batch(cfg, self._shaped())
+    before = _state_checksum(state)
+
+    # The train program does change params, optimizer state and the routed bias when its output is kept.
+    with jax.set_mesh(mesh):
+      new_state, _ = p_train(jax.tree_util.tree_map(lambda x: x.copy(), state), batch)
+    self.assertEqual(float(np.asarray(new_state.model.decoder.gate.bias.value).sum()), 6.0)
+    changed = [not np.array_equal(a, b) for a, b in zip(before, _state_checksum(new_state))]
+    self.assertGreaterEqual(sum(changed), 3)
+
+    programs = [("train", "train", p_train), ("train_dropless", "train", p_train), ("eval", "eval", p_eval)]
+    pre_train.warmup_programs(programs, state, mesh, (), (), batch, batch, copy_train_state=donate)
+
+    self.assertFalse(any(leaf.is_deleted() for leaf in jax.tree_util.tree_leaves(state)))
+    after = _state_checksum(state)
+    self.assertEqual(len(before), len(after))
+    for a, b in zip(before, after):
+      np.testing.assert_array_equal(a, b)
+    self.assertEqual(float(np.asarray(state.model.decoder.gate.bias.value).sum()), 0.0)
+
+  def test_state_unchanged_after_warmup_non_donating(self):
+    self._check_state_unchanged(donate=False)
+
+  def test_state_unchanged_after_warmup_donating_copy(self):
+    self._check_state_unchanged(donate=True)
+
+  def test_runs_each_precompiled_program_exactly_once(self):
+    calls = []
+
+    def fake(name):
+      def p_step(state, batch, *rng_args):
+        del rng_args
+        calls.append((name, batch))
+        return state, {"loss": jnp.zeros(())}
+
+      return p_step
+
+    programs = [
+        ("train", "train", fake("train")),
+        ("train_first_phase", "train", None),  # not precompiled
+        ("train_dropless", "train", fake("train_dropless")),
+        ("eval", "eval", fake("eval")),
+        ("eval_dropless", "eval", fake("eval_dropless")),
+    ]
+    state = {"w": jnp.ones((2,))}
+    timings = pre_train.warmup_programs(programs, state, self._mesh(), (), (), "train_batch", "eval_batch")
+    self.assertEqual(
+        calls,
+        [
+            ("train", "train_batch"),
+            ("train_dropless", "train_batch"),
+            ("eval", "eval_batch"),
+            ("eval_dropless", "eval_batch"),
+        ],
+    )
+    self.assertEqual(sorted(timings), ["eval", "eval_dropless", "train", "train_dropless"])
+    self.assertFalse(state["w"].is_deleted())
+
+  def test_warmup_fills_the_jit_dispatch_cache(self):
+    cfg = _Cfg()
+    state, p_train, _, mesh = self._routed_bias_programs(cfg, donate=False)
+    shaped = self._shaped(mesh)  # NamedSharding like the loader's input_data_shardings
+    pre_train.warmup_programs(
+        [("train", "train", p_train)], state, mesh, (), (), pre_train.make_synthetic_batch(cfg, shaped), None
+    )
+    self.assertEqual(p_train._cache_size(), 1)  # pylint: disable=protected-access
+    # The loop's first step: a real batch with the same shapes and sharding hits the warmed entry.
+    real = jax.device_put({k: np.zeros(v.shape, v.dtype) for k, v in shaped.items()}, shaped["inputs"].sharding)
+    with jax.set_mesh(mesh), pre_train.logical_axis_rules(()):
+      p_train(state, real)
+    self.assertEqual(p_train._cache_size(), 1)  # pylint: disable=protected-access
+
+  def test_synthetic_batch_matches_shapes_and_uses_prng_tokens(self):
+    cfg = _Cfg()
+    cfg.max_target_length = 4
+    shaped = self._shaped(self._mesh(), batch=3, seq=4)
+    batch = pre_train.make_synthetic_batch(cfg, shaped, seed=0)
+    self.assertEqual(sorted(batch), sorted(shaped))
+    for k, v in shaped.items():
+      self.assertEqual((batch[k].shape, batch[k].dtype), (v.shape, v.dtype))
+      self.assertEqual(batch[k].sharding, v.sharding)
+    tokens = np.asarray(batch["inputs"])
+    self.assertTrue(((tokens >= 0) & (tokens < cfg.vocab_size)).all())
+    np.testing.assert_array_equal(np.asarray(batch["inputs_position"]), np.broadcast_to(np.arange(4), (3, 4)))
+    np.testing.assert_array_equal(np.asarray(batch["inputs_segmentation"]), np.ones((3, 4)))
+
+  def _clock_order(self, with_warmup):
+    """Runs start_run_clock with mllog and the barrier mocked; returns (call order, python_vars)."""
+    order = []
+    names = ("init_print", "init_stop", "run_start", "block_start")
+    patches = [
+        mock.patch.object(pre_train.mllog_utils, n, side_effect=lambda *a, _n=n, **k: order.append(_n)) for n in names
+    ]
+    patches.append(
+        mock.patch.object(
+            pre_train.multihost_utils, "sync_global_devices", side_effect=lambda *_: order.append("barrier")
+        )
+    )
+    python_vars = {"last_step_completion": None}
+    for p in patches:
+      p.start()
+    try:
+      pre_train.start_run_clock(
+          _Cfg(),
+          0,
+          warmup_fn=(lambda: order.append("warmup")) if with_warmup else None,
+          python_vars=python_vars,
+      )
+    finally:
+      for p in patches:
+        p.stop()
+    return order, python_vars
+
+  def test_run_start_after_warmup_and_barrier(self):
+    order, python_vars = self._clock_order(with_warmup=True)
+    self.assertEqual(order, ["init_print", "warmup", "barrier", "init_stop", "run_start", "block_start"])
+    self.assertIsNotNone(python_vars["last_step_completion"])  # step 0's step time excludes the warmup
+
+  def test_knob_off_keeps_original_mllog_sequence_without_barrier(self):
+    order, python_vars = self._clock_order(with_warmup=False)
+    self.assertEqual(order, ["init_print", "init_stop", "run_start", "block_start"])
+    self.assertIsNone(python_vars["last_step_completion"])
+
+
+class TestStepDiagnosticsNNX(unittest.TestCase):
+  """log_step_diagnostics: the diagnostic scalars are produced, finite and correct, and appear on the step line."""
+
+  _DIAG_KEYS = (
+      "learning/raw_grad_norm",
+      "learning/grad_norm",
+      "learning/param_norm",
+      "diag/max_abs_grad",
+      "diag/moe_bias_checksum",
+      "diag/moe_bias_update_nonzero",
+      "diag/moe_overflow",
+  )
+
+  def _run(self, log_step_diagnostics, model_cls="bias"):
+    """One train_step on the routed-bias + MTP stub ("bias") or the overflow stub; returns (cfg, metrics)."""
+    cfg = _Cfg(gradient_clipping_threshold=1e-3, moe_dropless_fallback="step")
+    cfg.log_step_diagnostics = log_step_diagnostics
+    if model_cls == "bias":
+      cfg.routed_bias, cfg.routed_bias_update_rate, cfg.mtp_num_layers = True, 0.001, 2
+      model = _TinyDecoderMoEBiasWithMTP(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), num_mtp_layers=2)
+    else:
+      model = _TinyDecoderMoEOverflow(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), has_overflow=True)
+    optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
+    state_graphdef, state_pure = nnx.split(train_state_nnx.TrainStateNNX(model, optimizer))
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    _, metrics = pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+    )
+    return cfg, metrics
+
+  def test_diagnostics_finite_and_correct(self):
+    _, metrics = self._run(True)
+    scal = {k: float(v) for k, v in metrics["scalar"].items()}
+    for k in self._DIAG_KEYS:
+      self.assertIn(k, scal)
+      self.assertTrue(np.isfinite(scal[k]), k)
+    # Biases start at 0 and get +1 (decoder 2x3), +2 and +3 (two MTP layers of 3): checksum 6 + 6 + 9, 12 nonzero.
+    self.assertAlmostEqual(scal["diag/moe_bias_checksum"], 21.0, places=5)
+    self.assertEqual(scal["diag/moe_bias_update_nonzero"], 12.0)
+    self.assertEqual(scal["diag/moe_overflow"], 0.0)
+    self.assertGreater(scal["diag/max_abs_grad"], 0.0)
+    # Clipping at 1e-3 makes the post-clip norm the threshold, below the pre-clip norm.
+    self.assertLess(scal["learning/grad_norm"], scal["learning/raw_grad_norm"])
+    self.assertLessEqual(scal["diag/max_abs_grad"], scal["learning/raw_grad_norm"] + 1e-6)
+
+  def test_overflow_value(self):
+    _, metrics = self._run(True, model_cls="overflow")
+    self.assertEqual(float(metrics["scalar"]["diag/moe_overflow"]), 1.0)
+    self.assertEqual(float(metrics["scalar"]["diag/moe_bias_update_nonzero"]), 0.0)
+
+  def test_off_adds_nothing(self):
+    _, metrics = self._run(False)
+    self.assertFalse([k for k in metrics["scalar"] if k.startswith("diag/")])
+
+  def test_step_log_line(self):
+    cfg, metrics = self._run(True)
+    logger = metric_logger.MetricLogger.__new__(metric_logger.MetricLogger)  # skip __init__
+    logger.config = pytypes.SimpleNamespace(
+        rampup_end_step=0,
+        hide_profiler_step_metric=False,
+        elastic_enabled=False,
+        num_experts=1,
+        mtp_num_layers=cfg.mtp_num_layers,
+        use_indexer=False,
+        log_step_diagnostics=True,
+    )
+    scalars = {k: float(v) for k, v in metrics["scalar"].items()}
+    perf = ("perf/step_time_seconds", "perf/per_device_tflops_per_sec", "perf/per_device_tokens_per_sec")
+    scalars.update({k: 1.0 for k in perf})
+    with mock.patch.object(metric_logger.max_logging, "log") as log:
+      logger.log_metrics({"scalar": scalars}, step=3, metric_type="train")
+    line = log.call_args[0][0]
+    self.assertIn("completed step: 3", line)
+    self.assertIn("diag: raw_grad_norm=", line)
+    diag = line.split("diag: ")[1].split(",")[0].split()
+    self.assertEqual([d.split("=")[0] for d in diag], [n for n, _ in metric_logger.STEP_DIAGNOSTICS_KEYS])
+    for d in diag:
+      self.assertTrue(np.isfinite(float(d.split("=")[1])), d)
+    self.assertIn("moe_bias_checksum=2.100000000e+01", line)
+    # Flag off: no diag part.
+    logger.config.log_step_diagnostics = False
+    with mock.patch.object(metric_logger.max_logging, "log") as log:
+      logger.log_metrics({"scalar": scalars}, step=3, metric_type="train")
+    self.assertNotIn("diag:", log.call_args[0][0])
 
 
 if __name__ == "__main__":
