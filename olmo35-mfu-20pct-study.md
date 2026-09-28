@@ -236,7 +236,9 @@ Capacity, 2026-09-28: the ee-series has been queued on nap since 04:10 UTC. From
 04:31 on, every resubmit is suspended with `insufficient unused quota for
 google.com/tpu in flavor tpu7x-flavor, 52 more needed` (other users hold the
 4x4x4 quota); the flex spot 4x4x4 and dws 2x4x4 routes are pending for capacity.
-The supervisor keeps resubmitting.
+The first supervisor hit its 3-hour limit at 07:12 without admission. At 07:37 the
+ee and ff arms were merged into one gg-series (original, base x2, Pallas top-k x2,
+`packing=False` x2, `packing=False` with profile) under an 8-hour supervisor.
 
 ## Reproduce
 
