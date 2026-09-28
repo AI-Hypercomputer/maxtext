@@ -1150,6 +1150,14 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
   )
+  moe_quantize_combine_bwd_method: str | None = Field(
+      "",
+      description=(
+          "Quantization method for Token Combine backward All-Gather. "
+          "'' = unquantized BF16; 'rowwise' = dynamic row-wise FP8 E5M2; "
+          "'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
+      ),
+  )
   ragged_sort_use_single_sparsecore: bool = Field(
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
@@ -3961,6 +3969,20 @@ class MaxTextConfig(
             " (static scaling mode)."
         )
 
+  def validate_moe_quantize_combine_bwd_method(self):
+    """Validates that moe_quantize_combine_bwd_method is only used with ring of experts."""
+    if self.moe_quantize_combine_bwd_method:
+      if not self.use_ring_of_experts:
+        raise ValueError(
+            f"moe_quantize_combine_bwd_method='{self.moe_quantize_combine_bwd_method}' requires use_ring_of_experts=True."
+        )
+      method = self.moe_quantize_combine_bwd_method
+      if not (method == "rowwise" or method.startswith("fixed")):
+        raise ValueError(
+            f"Unsupported moe_quantize_combine_bwd_method: '{method}'. "
+            "Supported options: '', 'rowwise', 'fixed,<bound>'."
+        )
+
   @staticmethod
   def _load_mesh_config_from_yaml(rule_value: str) -> dict:
     """Helper to load and parse custom mesh YAML configurations."""
@@ -4883,6 +4905,7 @@ class MaxTextConfig(
       self.validate_moe_log_max_load_ratio()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_quantize_combine_bwd_method()
     self.validate_mllog()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
 

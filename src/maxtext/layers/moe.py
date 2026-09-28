@@ -20,7 +20,7 @@ import enum
 import functools
 import math
 import random
-from typing import Iterable, Optional, Tuple, Union
+from typing import Any, Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
 from flax import nnx
@@ -633,6 +633,110 @@ class GateLogit(nnx.Module):
       bias = jnp.asarray(self.bias[...], self.dtype)
       output += bias
     return output, pre_bias_logits
+
+
+def static_quantized_all_gather(
+    x: jax.Array,
+    axis_name: str | tuple[str, ...],
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    calibration_method: str = "fixed,-57344,57344",
+) -> jax.Array:
+  """Performs all_gather with static FP8 per-tensor scale."""
+  x_q = qpl.quantize(
+      x.astype(jnp.float32),
+      jnp.float8_e5m2,
+      channelwise_axes=[],
+      calibration_method=calibration_method,
+  )
+  gathered_qvals = jax.lax.all_gather(x_q.qvalue, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+  return (gathered_qvals.astype(jnp.float32) * x_q.scale).astype(x.dtype)
+
+
+def rowwise_quantized_all_gather(
+    x: jax.Array,
+    axis_name: str | tuple[str, ...],
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    qtype: jnp.dtype = jnp.float8_e5m2,
+) -> jax.Array:
+  """Performs all_gather with dynamic row-wise (token-wise) FP8 scale."""
+  g_f32 = x.astype(jnp.float32)
+  # Scale per-token across all leading dims (e.g. (batch, seq) for 3D or (tokens,) for 2D)
+  # so each token vector along the contracting/hidden dim receives an independent dynamic
+  # scale, consistent with GMM activation gradient quantization in ops.py.
+  grads_q = qpl.quantize(
+      g_f32,
+      qtype=qtype,
+      channelwise_axes=tuple(range(x.ndim - 1)),
+  )
+  gathered_qvals = jax.lax.all_gather(grads_q.qvalue, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+  gathered_scales = jax.lax.all_gather(grads_q.scale, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+  return (gathered_qvals.astype(jnp.float32) * gathered_scales).astype(x.dtype)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4))
+def _moe_combine_psum_scatter(
+    x: jax.Array,
+    axis_name: str | tuple[str, ...],
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    bwd_method: str = "",
+) -> jax.Array:
+  """Evaluates psum_scatter in forward, and quantized All-Gather in backward.
+
+  Shapes:
+    Forward:
+      x: [global_batch, sequence_length, hidden_dim], where global_batch is
+        the full batch across all expert parallelism (EP) shards.
+      Output: [local_batch, sequence_length, hidden_dim], scattered along
+        scatter_dimension=0 (local_batch = global_batch // num_ep).
+    Backward:
+      grads: [local_batch, sequence_length, hidden_dim], incoming cotangent.
+      Output: [global_batch, sequence_length, hidden_dim], gathered along
+        scatter_dimension=0.
+  """
+  return jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
+
+
+def _moe_combine_psum_scatter_fwd(
+    x: jax.Array,
+    axis_name: str | tuple[str, ...],
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    bwd_method: str = "",
+) -> tuple[jax.Array, None]:
+  return _moe_combine_psum_scatter(x, axis_name, scatter_dimension, tiled, bwd_method), None
+
+
+def _moe_combine_psum_scatter_bwd(
+    axis_name: str | tuple[str, ...],
+    scatter_dimension: int,
+    tiled: bool,
+    bwd_method: str,
+    res: Any,
+    grads: jax.Array,
+) -> tuple[jax.Array]:
+  """Custom VJP backward pass for _moe_combine_psum_scatter."""
+  if not bwd_method:
+    gathered_grads = jax.lax.all_gather(grads, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+    return (gathered_grads,)
+
+  if bwd_method.startswith("fixed"):
+    dequant = static_quantized_all_gather(
+        grads, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled, calibration_method=bwd_method
+    )
+    return (dequant,)
+  elif bwd_method == "rowwise":
+    dequant = rowwise_quantized_all_gather(grads, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
+    return (dequant,)
+
+  raise ValueError(
+      f"Unsupported moe_quantize_combine_bwd_method: {bwd_method}. Supported: '', 'rowwise', 'fixed,<bound>'."
+  )
+
+
+_moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
 
 
 class RoutedMoE(nnx.Module):
@@ -2990,12 +3094,22 @@ class RoutedMoE(nnx.Module):
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
             ),
         )
-        output = jax.lax.psum_scatter(
-            output,
-            self._expert_parallelism_name,
-            scatter_dimension=0,
-            tiled=True,
-        )
+        combine_bwd_method = self.config.moe_quantize_combine_bwd_method
+        if combine_bwd_method:
+          output = _moe_combine_psum_scatter(
+              output,
+              self._expert_parallelism_name,
+              scatter_dimension=0,
+              tiled=True,
+              bwd_method=combine_bwd_method,
+          )
+        else:
+          output = jax.lax.psum_scatter(
+              output,
+              self._expert_parallelism_name,
+              scatter_dimension=0,
+              tiled=True,
+          )
         return (
             output,
             routing.lb_loss,
