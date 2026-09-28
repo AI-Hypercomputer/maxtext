@@ -14,6 +14,24 @@ verdict: **effective** (at or near what a good TPU kernel achieves) or **not
 effective** (with the gap and what a good kernel would reach). Where no good
 kernel exists yet, the projection says so and states the assumed efficiency.
 
+## Status at the end of the 2026-09-28 loop
+
+| quantity | value |
+|---|---|
+| original config | 78.0 to 79.6 TF/s, 6.8 to 6.9%, 0.89 to 0.91 s |
+| optimized base | 151.0 TF/s, **13.09%**, 0.702 s, 1.93x the original |
+| quality-neutral wins this study | Pallas top-k +1.6%, splash blocks +1.8%, fused splash bwd +0.6% |
+| flag and mesh levers tested neutral or worse | scheduler concurrency, LHS rerun, SC all-reduce offload, pipeliner, `SEQ_MINOR`, DP 2 and DP 8 |
+| binder | TensorCore lane 626 ms of 699 (kk3); exposed comm 65 ms, dependency-bound |
+| comm floor (roadmap, all kernels good) | 372 ms, 37.9% MFU |
+| what 20% needs | reset-aware KDA kernel (~173 ms) plus the fused routed-expert kernel wired with group-aligned dispatch (~57 to 76 ms) |
+
+20% is **not reached by flags or mesh**; every such lever is now used up on this
+base. It stays inside the kernel budget (460 ms target vs 372 ms comm floor), and
+the two kernels that carry it are the KDA varlen path (208 ms, about 10% of
+roofline, not effective) and the routed-expert GEMMs (165 ms, 39% of roofline,
+not effective; a prototype reaches 2.32x at this shape on v7x).
+
 ## Target
 
 | quantity | value |
@@ -22,9 +40,10 @@ kernel exists yet, the projection says so and states the assumed efficiency.
 | peak bf16 per device | 1153.5 TF/s |
 | HBM per device | 3.69 TB/s |
 | original config, `a2_p2s8k` (pdb 2, stock flags) | 78.2 TF/s, **6.78%** |
-| current base (dd1/dd2, pdb 3) | 144.3 TF/s, **12.51%**, step **0.735 s** |
+| study start base (dd1/dd2, pdb 3) | 144.3 TF/s, 12.51%, step 0.735 s |
+| current base (kk to mm controls, pdb 3) | 151.0 TF/s, **13.09%**, step **0.702 s** |
 | 20% MFU | 230.7 TF/s, step **0.460 s** |
-| gap | **275 ms** per step (37% of the step) |
+| gap from the current base | **242 ms** per step (34% of the step) |
 
 Geometry per device: 24576 tokens (pdb 3 x seq 8192), d=1024, 16 layers (14 KDA,
 2 attention at 7 and 15), layer 0 dense (mlp 8192), 15 MoE layers with 512 experts
@@ -35,12 +54,14 @@ top-16, latent 512, expert hidden 1024, vocab 100352. Routed rows per device:
 
 | view | step s | MFU | note |
 |---|---|---|---|
-| measured, current base | 0.735 | 12.5% | median of steps 10-19 |
+| measured, study start base | 0.735 | 12.5% | median of steps 10-19 |
+| measured, current base | 0.702 | 13.1% | kk to mm controls, nap and flex agree within 0.6% |
 | roofline, current kernels unfused | 0.156 | 59% | per-component max(MXU, HBM) |
 | roofline, fused routed-expert kernel | 0.115 | 80% | SwiGLU in the gmm epilogue |
 | perfsim, same operating point | 0.338 | 34.8% | remat=full, counts 135 TF/device |
 
-perfsim is **2.17x optimistic** here (0.735 / 0.338). Its FLOP count includes the
+perfsim is **2.17x optimistic** at the study start (0.735 / 0.338) and 2.08x on
+the current base (0.702 / 0.338; the operating point is unchanged, so perfsim was not rerun). Its FLOP count includes the
 full-remat recompute, so its MFU is not directly comparable; the step ratio is the
 usable number. The roofline says the model itself is not the limit: the step is
 4.7x its roofline, and the whole gap to 20% is kernel and scheduling efficiency.
@@ -337,6 +358,8 @@ roofline.
 | kk | profile of the base and the original | 150.7 / 151.1 (flex) | 151.2 (prof) | | orig 78.3 / 78.8; profile source |
 | ll | SparseCore all-reduce offload | 150.7 / 151.1 | 151.0 / 151.4 (flex) | 0 | neutral |
 | ll | pipeliner + experimental scheduler features | 150.7 / 151.1 | 150.4 / 151.3 (flex) | 0 | neutral; exposed comm is dependency-bound |
+| mm | mesh DP 2 x FSDP 64 | 151.1 / 151.0 | 149.4 / 149.9 (flex) | -1.1% | dropped |
+| mm | mesh DP 8 x FSDP 16 | 151.1 / 151.0 | 135.3 / 135.7 (flex) | -10.4% | dropped; DP 4 x FSDP 32 stays |
 
 Capacity, 2026-09-28: the ee-series has been queued on nap since 04:10 UTC. From
 04:31 on, every resubmit is suspended with `insufficient unused quota for

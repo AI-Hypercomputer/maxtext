@@ -1008,6 +1008,20 @@ respond to placement flags; the roadmap's 72 ms schedule gain needs dependency
 changes (for example, splitting the expert-grad all-reduces from the last
 layers' backward), not scheduler knobs.
 
+### mm-series, mesh on the current base (o35n281337 nap, o35s281337 flex)
+
+| arm | mesh | nap TF/s/dev | flex TF/s/dev | MFU (nap) | step s (nap) | loss @19 |
+|---|---|---|---|---|---|---|
+| mm1_orig | original | 78.0 | 79.6 | 6.76% | 0.906 | 10.685 |
+| mm2_ctrl | DP 4 x FSDP 32 | 151.1 | 151.1 | 13.10% | 0.702 | 10.832 |
+| mm5_ctrl | DP 4 x FSDP 32 | 151.0 | | 13.09% | 0.702 | 10.832 |
+| mm3_dp2 | DP 2 x FSDP 64 | 149.4 | 149.9 | 12.95% | 0.710 | 10.836 |
+| mm4_dp8 | DP 8 x FSDP 16 | 135.3 | 135.7 | 11.73% | 0.783 | 10.838 |
+
+**DP 4 x FSDP 32 stays** (DP 2 -1.1%, DP 8 -10.4%, same ranking as the k-series
+on the old base). The loss moves by 0.004 to 0.006 from reduction order. This
+closes the loop: flag and mesh levers are used up at 151.0 TF/s, 13.09%.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
