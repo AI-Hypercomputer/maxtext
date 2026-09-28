@@ -41,7 +41,7 @@ In BF16 precision, numerical alignment has been achieved with sub-millinat accur
 | **IS OOB Ratio (Prompt, TIS)** | **28.12% (9/32 OOB, 23/32 in-band)** | **PASSED** (< 50% target) |
 | **Sequence Geometric Mean (Prompt)** | **0.99958** | **PASSED** ([0.999, 1.002] band) |
 | **Median \|dlogp\| (Decode)** | **0.0260** | **PASSED** (< 0.05 target) |
-| **Kept Fraction (Decode, mult_err $\le 2.0$)** | **96.88% (31/32 active)** | **PASSED** (> 95% target) |
+| **Sample Mask (Decode, mult_err $\le 2.0$)** | **96.88% (31/32 kept active, 1 discarded)** | **PASSED** (> 90% target) |
 
 ### Default Alignment Configuration in BF16:
 1. **FP32 LM Head Projection (`--logits-dot-fp32`):**
@@ -130,7 +130,7 @@ To quantize the vast majority (>91%) of model parameters without running into XL
 | **PROMPT Sequence Geometric Mean** | **0.99958** | **0.99821** | **[0.999, 1.002] band** |
 | **DECODE Median \|dlogp\|** | **0.0260** | **0.0394 (39.4 millinats)** | **< 0.05 (PASSED)** |
 | **DECODE IS OOB Ratio (seq-mask-tis)** | **100.00% (32/32 OOB, 0/32 in-band)** | **96.77% (30/31 OOB, 1/31 in-band)** | **[0.999, 1.002] band** |
-| **DECODE Sample Mask (mult_err $\le 2.0$)** | **96.88% (31/32 active)** | **96.88% (31/32 active)** | **> 90% (PASSED)** |
+| **DECODE Sample Mask (mult_err $\le 2.0$)** | **96.88% (31/32 kept active, 1 discarded)** | **96.88% (31/32 kept active, 1 discarded)** | **> 90% (PASSED)** |
 | **Throughput (per 32k prompt)** | **~7.5s / prompt** | **~8.0s / prompt** | **< 15s (FAST)** |
 
 ---
