@@ -3943,6 +3943,13 @@ class MaxTextConfig(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
+      # The emb-chunking path (moe_emb_chunking in moe.py) routes per chunk and does not tag its routed input with
+      # checkpoint_name("moe_x_sorted"), so a non-remat moe_x_sorted would be silently ignored there.
+      if self.moe_x_sorted != RematLocation.REMAT:
+        raise ValueError(
+            f"moe_x_sorted={RematLocation(self.moe_x_sorted).value} is not supported with num_moe_emb_chunks > 0; "
+            "use moe_x_sorted=remat."
+        )
 
   def validate_moe_quantize_token_all_gather(self):
     """Validates that moe_quantize_token_all_gather is used with supported settings."""
