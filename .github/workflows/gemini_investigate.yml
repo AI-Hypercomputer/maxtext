@@ -13,9 +13,11 @@
 # limitations under the License.
 
 # This workflow handles the "investigate" command for Gemini,
-# which is used to analyze and investigate test failures by
+# which is used to analyze and investigate CI failures by
 # gathering relevant logs and context, and then running a Gemini
-# agent to assist in diagnosing the issue.
+# agent to assist in diagnosing the issue. It is also called by the
+# scheduled MaxText Package Tests and TPU/GPU Docker Images pipelines
+# when they fail, to comment on their failure notification issues.
 
 name: 'Gemini Failure Investigator'
 
@@ -26,6 +28,10 @@ on:
         type: 'string'
         required: false
       failed_run_id:
+        type: 'string'
+        required: false
+      tracking_issue_number:
+        description: 'The issue tracking the failed run (e.g. the failed build notification issue) to post the report to.'
         type: 'string'
         required: false
     secrets:
@@ -52,12 +58,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id || inputs.failed_run_id }}
+          TRACKING_ISSUE_NUMBER: ${{ inputs.tracking_issue_number }}
           REPO: ${{ github.repository }}
           BRANCH: ${{ github.event.pull_request.head.ref }}
           SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number || github.event.pull_request.number || github.event.issue.number }}
         run: |
           mkdir -p .gemini
+
+          # Record the issue tracking the failed run (if any), so that the report is posted there
+          if [ -n "$TRACKING_ISSUE_NUMBER" ]; then
+            echo "$TRACKING_ISSUE_NUMBER" > .gemini/tracking_issue_number.txt
+          fi
 
           # Determine target run ID
           if [ -z "$RUN_ID" ]; then
@@ -84,8 +96,28 @@ jobs:
           echo "Gathering logs for failed run: $RUN_ID"
 
           if [ -n "$RUN_ID" ]; then
+            # Record metadata of the failed run: workflow, trigger, commit, and failed jobs and steps
+            gh run view "$RUN_ID" --repo "$REPO" \
+              --json workflowName,displayTitle,event,headBranch,headSha,url,jobs \
+              --jq 'def failed: .conclusion == "failure" or .conclusion == "timed_out" or .conclusion == "startup_failure" or .conclusion == "action_required";
+                {workflowName, displayTitle, event, headBranch, headSha, url,
+                 failedJobs: [.jobs[] | select(failed) | {databaseId, name, conclusion, url, failedSteps: [.steps[] | select(failed) | .name]}]}' \
+              > .gemini/failed_run.json || true
+
             # Retrieve only the failing lines/jobs to avoid token limit overhead
             gh run view "$RUN_ID" --log-failed --repo "$REPO" > .gemini/failed_logs.txt || true
+
+            # `gh run view --log-failed` refuses to fetch logs while the run is still in progress,
+            # which is the case when this workflow is called by the failed run itself, so fall
+            # back to downloading the logs of each failed job.
+            if [ ! -s .gemini/failed_logs.txt ] && [ -s .gemini/failed_run.json ]; then
+              echo "Downloading the logs of the failed jobs instead"
+              jq -r '.failedJobs[] | "\(.databaseId)\t\(.name)"' .gemini/failed_run.json |
+                while IFS=$'\t' read -r JOB_ID JOB_NAME; do
+                  echo "===== Logs of failed job: ${JOB_NAME} ====="
+                  gh api "repos/${REPO}/actions/jobs/${JOB_ID}/logs" || true
+                done > .gemini/failed_logs.txt || true
+            fi
           else
             echo "No failed runs found." > .gemini/failed_logs.txt
           fi
