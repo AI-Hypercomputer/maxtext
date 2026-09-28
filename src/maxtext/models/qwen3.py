@@ -1589,7 +1589,6 @@ class Qwen3NextScannableBlock(nnx.Module):
           mesh=mesh,
           shard_mode=cfg.shard_mode,
           debug_sharding=cfg.debug_sharding,
-          extra_stack_level=1,
       )
     else:
       self._maybe_shard_with_logical = lambda inputs, *args, **kwargs: inputs
@@ -1796,7 +1795,6 @@ class Qwen3NextDecoderLayer(nnx.Module):
           mesh=mesh,
           shard_mode=cfg.shard_mode,
           debug_sharding=cfg.debug_sharding,
-          extra_stack_level=1,
       )
     else:
       self.out_sharding = None
@@ -1973,7 +1971,6 @@ class AttentionWithNorm(nnx.Module):
           mesh=mesh,
           shard_mode=config.shard_mode,
           debug_sharding=config.debug_sharding,
-          extra_stack_level=1,
       )
     else:
       self.out_sharding = None

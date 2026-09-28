@@ -163,7 +163,6 @@ class Qwen3_5DecoderLayer(nnx.Module):
           mesh=mesh,
           shard_mode=cfg.shard_mode,
           debug_sharding=cfg.debug_sharding,
-          extra_stack_level=1,
       )
     else:
       self.out_sharding = None

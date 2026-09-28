@@ -17,7 +17,6 @@
 
 import math
 
-from flax import linen as nn
 from flax import nnx
 import jax
 from jax import lax
@@ -36,6 +35,7 @@ from maxtext.layers.moe import RoutedAndSharedMoE
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import with_logical_constraint
 
 #### Multi modal model implementation
 
@@ -447,11 +447,11 @@ class Llama4DecoderLayer(nnx.Module):
       is_scan_carry = True
     elif isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     lnx = self.pre_self_attention_layer_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
@@ -466,23 +466,23 @@ class Llama4DecoderLayer(nnx.Module):
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = with_logical_constraint(attention_lnx, self.activation_axis_names)
     intermediate_inputs = inputs + attention_lnx
 
     # Fully Connected
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs)
-    hidden_states = nn.with_logical_constraint(hidden_states, self.activation_axis_names)
+    hidden_states = with_logical_constraint(hidden_states, self.activation_axis_names)
 
     load_balance_loss = None
     if self.is_moe_layer:
       mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
     else:
       mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = with_logical_constraint(layer_output, self.activation_axis_names)
 
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
@@ -573,7 +573,7 @@ class Llama4ScannableBlock(nnx.Module):
 
     cfg = self.config
 
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
     for layer_id in range(cfg.inhomogeneous_layer_cycle_interval):

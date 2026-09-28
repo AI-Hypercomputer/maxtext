@@ -15,11 +15,12 @@
 # pylint: disable=line-too-long, disable=bare-except, consider-using-generator
 """Utils that are only interesting to MaxText and sharding related."""
 
+import collections
 from collections.abc import Iterable
 import inspect  # for debugging only
 from pathlib import Path
 
-from flax import linen as nn, nnx
+from flax import nnx
 from flax.core.spmd import get_logical_axis_rules as flax_get_logical_axis_rules
 import jax
 from jax.core import Tracer
@@ -53,6 +54,71 @@ def get_input_data_sharding(config, mesh, rules=None):
 def get_logical_axis_rules():
   """Get the logical axis rules for the flax model"""
   return flax_get_logical_axis_rules()
+
+
+class _UnassignedAxis:
+  """Marks a logical dimension that no rule has mapped to a mesh axis yet."""
+
+  def __repr__(self):
+    return "UnassignedAxis"
+
+  def __bool__(self):
+    return False
+
+
+_UNASSIGNED_AXIS = _UnassignedAxis()
+
+
+def _mesh_axes_free(new_assignment, existing_assignments):
+  """True if none of the mesh axes in `new_assignment` is used in `existing_assignments`."""
+  new = set(jax.tree_util.tree_leaves(new_assignment))
+  existing = set(jax.tree_util.tree_leaves(existing_assignments))
+  new.discard(P.UNCONSTRAINED)
+  new.discard(None)
+  return not existing.intersection(new)
+
+
+def logical_to_spec(logical_names, rules=None):
+  """Maps logical dimension names to a PartitionSpec using the logical axis rules.
+
+  Rules are (logical name, mesh axes) pairs in priority order. A dimension takes
+  the first matching rule whose mesh axes no other dimension uses yet;
+  dimensions no rule assigns are left unsharded. Without `rules`, uses the ones
+  set by `logical_axis_rules`. Same behavior as Flax's
+  `flax.linen.logical_to_mesh_axes`.
+  """
+  if logical_names is None:
+    return None
+  if rules is None:
+    rules = get_logical_axis_rules()
+  counts = collections.Counter(logical_names)
+  # None and special values like PartitionSpec.UNCONSTRAINED may repeat.
+  dups = tuple(k for k, v in counts.items() if v > 1 and isinstance(k, str))
+  if dups:
+    raise ValueError(f"Unsupported: Dimensions {dups} occur more than once in array names.")
+  if not isinstance(rules, (tuple, list)):
+    raise ValueError("Unknown axis rule specification type.")
+  result = [(_UNASSIGNED_AXIS if isinstance(name, str) else name) for name in logical_names]
+  for rule_logical_name, rule_mesh_axes in rules:
+    if rule_logical_name in logical_names:
+      pos = logical_names.index(rule_logical_name)
+      if _mesh_axes_free(rule_mesh_axes, result) and result[pos] is _UNASSIGNED_AXIS:
+        result[pos] = rule_mesh_axes
+  return P(*(None if x is _UNASSIGNED_AXIS else x for x in result))
+
+
+def with_logical_constraint(x, logical_axes):
+  """Constrains `x` to `logical_axes` when a global mesh is set; otherwise returns `x`.
+
+  Port of `flax.linen.with_logical_constraint` for one array and the rules set by
+  `logical_axis_rules`. Like the Flax call it only applies under a global mesh
+  (`jax.set_mesh`); MaxEngine enters its mesh with `with mesh:`, so there it does
+  nothing. Use `maybe_shard_with_logical` for a constraint that always applies.
+  """
+  rules = get_logical_axis_rules()
+  if not rules or logical_axes is None or jax.sharding.get_abstract_mesh().empty:
+    return x
+  return jax.lax.with_sharding_constraint(x, logical_to_spec(logical_axes, rules))
 
 
 def _get_sharding_desc(inputs, extra_stack_level):
@@ -385,10 +451,10 @@ jax.tree_util.register_pytree_node(
 def logical_to_mesh_axes(logical_names, mesh, rules=None):
   """Remove size one mesh axes given logical names."""
   if logical_names is None or not any(isinstance(name, CompoundLogicalAxis) for name in logical_names):
-    return remove_size_one_mesh_axis(nn.logical_to_mesh_axes(logical_names, rules=rules), mesh)
+    return remove_size_one_mesh_axis(logical_to_spec(logical_names, rules=rules), mesh)
   groups = [tuple(name) if isinstance(name, CompoundLogicalAxis) else (name,) for name in logical_names]
   # Resolve all names in one call so a mesh axis is still used by at most one logical name.
-  flat_spec = list(nn.logical_to_mesh_axes(tuple(n for group in groups for n in group), rules=rules))
+  flat_spec = list(logical_to_spec(tuple(n for group in groups for n in group), rules=rules))
   grouped = []
   for group in groups:
     resolved, flat_spec = flat_spec[: len(group)], flat_spec[len(group) :]

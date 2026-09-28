@@ -22,8 +22,8 @@ import re
 from typing import Any
 import warnings
 
-from flax import linen as nn
 from flax import nnx
+from flax.core.spmd import logical_axis_rules
 import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
@@ -1832,7 +1832,7 @@ class NNXDecoder(nnx.Module):
       if self.is_deepseek:
         # Pre-pipeline: dense layers + outside-pipeline MoE layers under PP-as-DP axis rules.
         logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
-        with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
+        with self.mesh, logical_axis_rules(logical_axis_rules_pp_as_dp):
           if cfg.scan_layers:
             if getattr(self, "dense_layers", None) is not None and cfg.first_num_dense_layers > 0:
               y, self.dense_layers, _ = self._apply_layers_sequentially(
@@ -1907,7 +1907,7 @@ class NNXDecoder(nnx.Module):
           logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
           with (
               self.mesh,
-              nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp),
+              logical_axis_rules(logical_axis_rules_pp_as_dp),
           ):
             if cfg.scan_layers and hasattr(self, "layers_outside_pipeline"):
               remaining = cfg.num_decoder_layers - cfg.pipeline_parallel_layers
