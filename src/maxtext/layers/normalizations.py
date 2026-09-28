@@ -304,3 +304,22 @@ Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
     scale_init=jax.nn.initializers.zeros,
     scale_offset=1.0,
 )
+
+
+class FP32LayerNorm(nnx.Module):
+  """LayerNorm computed in float32 for numerical stability."""
+
+  def __init__(self, rngs: nnx.Rngs, dim: int, eps: float, elementwise_affine: bool):
+    self.layer_norm = nnx.LayerNorm(
+        rngs=rngs,
+        num_features=dim,
+        epsilon=eps,
+        use_bias=elementwise_affine,
+        use_scale=elementwise_affine,
+        param_dtype=jnp.float32,
+        dtype=jnp.float32,
+    )
+
+  def __call__(self, inputs: jax.Array) -> jax.Array:
+    origin_dtype = inputs.dtype
+    return self.layer_norm(inputs.astype(dtype=jnp.float32)).astype(dtype=origin_dtype)
