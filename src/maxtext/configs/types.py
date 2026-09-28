@@ -1554,6 +1554,11 @@ class Qwen3Next(BaseModel):
       description="With moe_lean_routing, pick the top-k experts by bisecting on the logit bits instead of"
       " lax.top_k (a sort on TPU). Same experts, returned in ascending index order.",
   )
+  moe_topk_pallas: bool = Field(
+      False,
+      description="With moe_lean_routing, pick the top-k experts with the Pallas kernel in kernels/topk.py"
+      " instead of lax.top_k (a sort on TPU). Same indices in the same order.",
+  )
   kda_conv_in_compute_dtype: bool = Field(
       False,
       description=(

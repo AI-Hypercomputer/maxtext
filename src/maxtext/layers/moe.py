@@ -36,6 +36,7 @@ from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.kernels import sort_activations
+from maxtext.kernels import topk as topk_kernel
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -1114,6 +1115,13 @@ class RoutedMoE(nnx.Module):
           # sums over them, so only its summation order changes.
           keep = keep_top_by_bisection(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
           top_k_indices = mask_to_indices(keep, self.num_experts_per_tok)
+        elif self.config.moe_topk_pallas:
+          # Same indices as lax.top_k from k max-and-mask rounds in VMEM, not a sort.
+          top_k_indices = topk_kernel.topk_indices(
+              jax.lax.stop_gradient(gate_logits),
+              self.num_experts_per_tok,
+              interpret=jax.devices()[0].platform != "tpu",
+          )
         else:
           _, top_k_indices = jax.lax.top_k(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
         top_k_indices = adc.checkpoint_name(top_k_indices, "moe_routing")

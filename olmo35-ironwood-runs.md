@@ -879,9 +879,11 @@ Base is `y2_trhs` plus `emo_threshold_by_bisection=True`.
 | cc3_tk | 141.4 | 12.26% | 0.750 | 10.833 |
 
 **-2.1%, dropped.** The EMo mask bisects one row per document; the router
-bisects all 393216 token rows, so 32 count passes over `[rows, 512]` plus the
-`[rows, 512, 16]` one-hot in `mask_to_indices` cost more than the 17.4 ms of
-`lax.top_k` they replace. The flag stays in, default off.
+bisects all 24576 token rows per device (the logits are `[24576, 512]`), so 32
+count passes over `[24576, 512]` plus the `[24576, 512, 16]` one-hot in
+`mask_to_indices` cost more than the 17.4 ms of `lax.top_k` they replace. The
+flag stays in, default off. The replacement attempt is the Pallas top-k in the
+ff-series.
 
 ### KDA kernel, single device
 

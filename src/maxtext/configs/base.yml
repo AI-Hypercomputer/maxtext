@@ -1469,6 +1469,8 @@ tokamax_kda_l2norm_outside: false
 moe_lean_routing: false
 # With moe_lean_routing, top-k by bisection on the logit bits instead of a sort.
 moe_topk_by_bisection: false
+# With moe_lean_routing, top-k with a Pallas max-and-mask kernel instead of a sort.
+moe_topk_pallas: false
 # Cast the KDA short-conv weight to the activation dtype so q/k/v stay bf16.
 kda_conv_in_compute_dtype: false
 # Rematerialize each OLMoE3 layer on its own instead of per mixer cycle.

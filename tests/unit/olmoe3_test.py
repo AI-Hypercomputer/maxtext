@@ -343,6 +343,53 @@ class OLMoE3RoutingTest(unittest.TestCase):
     got = moe_lib.mask_to_indices(moe_lib.keep_top_by_bisection(logits, 16), 16)
     self.assertTrue(bool((jnp.sort(ref, axis=-1) == got).all()))
 
+  def test_pallas_topk_matches_lax_top_k(self):
+    """The Pallas top-k kernel returns ``lax.top_k`` indices exactly, ties and -inf included."""
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.kernels import topk as topk_kernel
+
+    logits = jax.random.normal(jax.random.PRNGKey(3), (3, 100, 512), jnp.float32)
+    ties = jnp.round(logits * 2) / 2
+    sparse = jnp.where(jax.random.uniform(jax.random.PRNGKey(4), logits.shape) < 0.02, logits, -jnp.inf)
+    signed_zero = jnp.where(logits > 0, 0.0, -0.0)
+    for x in (logits, ties, sparse, signed_zero, logits.astype(jnp.bfloat16)):
+      _, ref = jax.lax.top_k(x, 16)
+      got = topk_kernel.topk_indices(x, 16, block_tokens=128, interpret=True)
+      self.assertTrue(bool((ref == got).all()))
+
+  def test_pallas_topk_routing_matches_lean(self):
+    """moe_topk_pallas picks the same experts in the same order, so values and grads are bit-identical."""
+    seq_len = 32
+    outs = []
+    for pallas in (False, True):
+      cfg = _config(
+          "olmoe3-30m",
+          max_target_length=seq_len,
+          extra=(
+              "sparse_matmul=True",
+              "moe_routing=device",
+              "moe_lean_routing=True",
+              f"moe_topk_pallas={pallas}",
+          ),
+      )
+      mesh, model = _build(cfg)
+      tokens = (jnp.arange(seq_len, dtype=jnp.int32)[None, :] * 7) % 101 + 1
+      positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
+      segments = jnp.ones((1, seq_len), jnp.int32)
+      with mesh:
+        params = model.init({"params": jax.random.PRNGKey(0)}, tokens, positions, segments)
+
+        def loss(p, model=model):
+          out = model.apply(p, tokens, positions, segments, enable_dropout=False)
+          logits = out[0] if isinstance(out, tuple) else out
+          return jnp.sum(jnp.sin(logits))
+
+        outs.append(jax.value_and_grad(loss)(params))
+    (v0, g0), (v1, g1) = outs
+    self.assertEqual(float(v0), float(v1))
+    for a, b in zip(jax.tree_util.tree_leaves(g0), jax.tree_util.tree_leaves(g1)):
+      self.assertTrue(bool(jnp.array_equal(a, b)))
+
   def test_bisection_routing_matches_lean(self):
     """The two bisection flags only reorder the combine sum: values and grads match lean routing closely."""
     pool, seq_len = 20, 32
