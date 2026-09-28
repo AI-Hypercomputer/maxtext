@@ -152,6 +152,57 @@ For qwen3.5 the order flips. GDN is the bottleneck there, and routing it
 through the tokamax kernel is a 2.2x layer win available today, or 2.8x with a
 GDN-specialized sub-block.
 
+## What to expect from KDA vs GDN in OLMo 3.5
+
+Today on TPU, KDA and GDN run at the same speed through the tokamax kernel
+(7.50 vs 7.42 ms). The implementation decides the speed. The part that is
+specific to KDA is real but small: about 1.3x per layer, about 3% of the tiny
+step.
+
+### In the full model (tiny, 16 layers, 14 KDA, current base)
+
+From the dd1 and gg8 profiles in `olmo35-mfu-20pct-study.md`.
+
+| item | number |
+|---|---|
+| step | 0.702 s, 151.0 TF/s, 13.09% MFU |
+| KDA total | 208 ms (Pallas kernels 68, XLA glue 140) |
+| of which the varlen padding tax | about 116 ms (measured, gg `packing=False`) |
+| KDA to GDN with a no-sub-block kernel | 1.7 ms x 14 = about 23 ms, about 3% of the step |
+| reset-aware KDA kernel plus fused glue | about 173 ms, projected 16.7% MFU |
+
+The lever is the padding and the glue around KDA, not swapping KDA for GDN.
+The fine-grained decay costs about 3% of the step; the kernel work around it is
+worth about 25%.
+
+### Common claims, checked against the measurements
+
+| claim | verdict | evidence |
+|---|---|---|
+| KDA loses the big-matmul structure | only in a naive kernel | MXU FLOPs are identical (186 G); both HBM-bound at about 110 FLOP/B vs a ridge of 313; roofline gap is 1.09x, all of it the dk-wide gate bytes |
+| the TPU tax is DPLR bookkeeping in general | narrower: fp32 range | the decay sits inside the K K^T contraction and only becomes a matmul when folded into the operands, which overflows unless the chunk is split into sub-blocks; BC 4 is 7.50 ms, one block is 5.83 ms; the bound is BC x floor x log2(e) < 127 |
+| GDN is easier on TPU | backwards in MaxText today | GDN has no fused kernel; its pure-JAX path is 16.0 ms, 2.1x slower than KDA; routing GDN through the KDA kernel is a 2.2x layer win for qwen3.5 now |
+| a mature kernel closes the gap | not yet, for either | best is 5.8 ms against a 0.48 ms floor (8%); the rest is a sequential loop over 128 chunks of 64-row matmuls plus glue (24%, mostly the l2norm bwd layout at 1.19 ms for about 30 us of traffic) |
+| small chunks help (GPU FlashKDA uses 16) | not on TPU | chunk 128 is +3% vs 64; no GPU measurement of ours to compare |
+| decode is not much worse for KDA | agrees, not measured | both read and update the full dk x dv state per head per token; KDA adds one dk-wide gate vector; expect a tie within a few percent |
+
+### Decode
+
+Not measured yet (plan phase 7). The state traffic dominates and is the same
+for both, so the projection is KDA equal to GDN within a few percent. The
+decode lever is elsewhere: KV heads of the full-attention layers must divide
+TP (`kda-headdim-answer.md`).
+
+### Research direction
+
+The target is a KDA parameterization or kernel that does not need the
+overflow-driven sub-blocks. One route is to bound the per-token log-decay so
+one block spans the whole chunk (BC equal to chunk). That recovers the GDN
+kernel shape (the 1.3x) and keeps per-channel forgetting. The floor already
+moves this way: floor 11 left the loss unchanged (o4), floor 5 cost +0.016
+(p3). Past that, both KDA and GDN need a kernel that is not a sequential loop
+of 64-row matmuls, which is where the remaining 12x to roofline sits.
+
 ## Reproduce
 
 The flex 2x2x2 nodes are two-host slices. One pod on one node runs as a single
