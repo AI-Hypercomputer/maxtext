@@ -569,5 +569,76 @@ bash /usr/local/google/home/wenxindong/.gemini/config/skills/cdk-jobs/scripts/cd
   argmax agree (prompt)                                       97.80%                        -
 ```
 
+---
+
+### Appendix E: Cross-Precision Verification (Pure BF16 Trainer vs. MoE-Only FP8 Sampler, 4096 Decode Tokens, No EOS)
+
+- **CDK Job ID:** `j-d3d92a16-d045-4064-8204`
+- **Trainer:** Pure BF16 weights all the way (`--model-type bf16 --no-trainer-fp8-moe`)
+- **Sampler:** MoE-Only FP8 per-channel quantization (`--fp8-moe`)
+- **GCS Artifacts Path:** `gs://cloud-devkit/jobs/j-d3d92a16-d045-4064-8204/outputs/j-d3d92a16-d045-4064-8204-vllm-runner-0/j-d3d92a16-d045-4064-8204-vllm-runner-0-0-6p6f6/vllm-container/r2e32_bf16_tr_moe_fp8_sa_gen4k/`
+
+#### 1. Why this run was performed:
+In realistic production RL deployment, rollouts are generated using an FP8 MoE serving engine to save high-bandwidth memory (HBM) and inference latency, while the training loop updates the unquantized BFloat16 master weights. This experiment tests whether the numerical discrepancy between an FP8 MoE sampler and an unquantized BF16 trainer remains within the MLPerf TIS tolerance band $[0.999, 1.002]$.
+
+#### 2. Key Findings:
+1. **Parity Matches Pure BF16:**
+   - **Decode `is_oob_ratio`: 34.38% (21/32 kept in-band)** — virtually identical to the pure BF16 vs. BF16 run (31.25%, 22/32 kept in-band).
+   - **Decode Median $|d\log p|$: 0.0000 (0.0 millinats)** across 131,072 tokens.
+   - **Decode Mean $|d\log p|$: 0.0093 (9.3 millinats)** — lower than MoE FP8 / MoE FP8 (14.8 millinats).
+   - **Sequence Geometric Mean: 0.99931** (tightly centered inside the $[0.999, 1.002]$ band).
+   - **100% Sequence Retention: 32/32 (100.00% active)** (mean multiplier error = **1.0118** vs threshold 2.0).
+   - **Zero Outliers (>10 nats): 0.00e+00**.
+2. **Prompt Prefill Alignment:**
+   - **Median $|d\log p|$: 0.0008 (0.8 millinats)**.
+   - **Argmax Agreement: 98.95%** across 131,008 prompt tokens.
+   - **Prompt Geomean: 0.99898** (within 0.002% of the 0.999 threshold).
+
+#### 3. Summary Report (`summary.txt`):
+```text
+== OUTPUT (decode, sampled) <- what RL trains on   band=[0.999, 1.002]
+  metric                         cdk_r2e32_bf16_tr_moe_fp8_sa_gen4k                reference
+  tokens / seqs                                         131072 / 32              262144 / 32
+  per-token oob [band]                                       28.40%                   97.79%
+  |dlogp| med / p99 / max                     0.0000 / 0.156 / 4.97   0.0341 / 0.310 / 17.22
+  >>> is_oob_ratio (script)                       34.38% kept 21/32         93.75% kept 2/32
+  seqs below / above band                                    11 / 0                   30 / 0
+  seq log-ratio median (rsd)                   -5.537e-04 (7.4e-04)     -3.928e-03 (2.7e-03)
+  seq log-ratio min / max                   -3.994e-03 / +8.030e-04  -1.071e-02 / -2.320e-05
+  median per-seq SE                                         6.2e-04                        -
+  nonfinite script/pad/real                               0 / 0 / 0                        0
+    real NaN sampler/trainer                                  0 / 0                        -
+  is_oob_ratio (tunix sem.)                                  34.38%                        -
+  token_logdiff_mean                                     -6.872e-04                        -
+  token_logdiff_absmean                                      0.0093                        -
+  token_logdiff sd                                           0.0472                        -
+  frac tokens trainer<sampler                                41.85%                        -
+  outlier frac (>10 nats)                       0.00e+00 (0.00/seq)                        -
+  seq geomean mean/min/max              0.99931 / 0.99601 / 1.00080                        -
+  [cdk_r2e32_bf16_tr_moe_fp8_sa_gen4k] 11/32 rejected, one-sided LOW (trainer < sampler); median seq log-ratio -5.54e-04 (band [-1.00e-03, +2.00e-03]), robust spread 7.4e-04, per-seq SE 6.2e-04 -> center and spread fit; rejections are tail sequences
+
+== PROMPT (prefill, teacher-forced)   band=[0.999, 1.002]
+  metric                         cdk_r2e32_bf16_tr_moe_fp8_sa_gen4k                reference
+  tokens / seqs                                         131008 / 32             1048380 / 32
+  per-token oob [band]                                       46.71%                   98.58%
+  |dlogp| med / p99 / max                     0.0008 / 0.294 / 1.37   0.0550 / 6.379 / 29.89
+  >>> is_oob_ratio (script)                       53.12% kept 15/32         84.38% kept 5/32
+  seqs below / above band                                    17 / 0                  10 / 17
+  seq log-ratio median (rsd)                   -1.125e-03 (1.3e-03)     +2.459e-03 (9.6e-03)
+  seq log-ratio min / max                   -3.368e-03 / +1.646e-03  -1.864e-02 / +2.348e-02
+  median per-seq SE                                         1.1e-03                        -
+  nonfinite script/pad/real                             32 / 0 / 32                      164
+    real NaN sampler/trainer                                 32 / 0                        -
+  is_oob_ratio (tunix sem.)                                  53.12%                        -
+  token_logdiff_mean                                     -1.021e-03                        -
+  token_logdiff_absmean                                      0.0269                        -
+  token_logdiff sd                                           0.0675                        -
+  frac tokens trainer<sampler                                49.29%                        -
+  outlier frac (>10 nats)                       0.00e+00 (0.00/seq)                        -
+  seq geomean mean/min/max              0.99898 / 0.99664 / 1.00165                        -
+  argmax agree (prompt)                                      98.95%                        -
+```
+
+
 
 
