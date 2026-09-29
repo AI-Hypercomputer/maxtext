@@ -26,6 +26,7 @@ import dataclasses
 import functools
 import gc
 import os
+import time
 from typing import Any, Optional
 
 from absl import logging
@@ -2759,6 +2760,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       Sequence of WorkUnitMetadata or synchronization endpoints.
     """
+    t_start = time.monotonic()
     sync_request = kwargs.get("sync_request")
     extra = getattr(sync_request, "extra_config", None)
     req_mode = extra.get("weight_sync_mode") if isinstance(extra, dict) else None
@@ -2785,11 +2787,21 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           and self._last_staged_step == self.train_step
           and self._staged_metadata is not None
       ):
+        total_variables = sum(len(m.variables) for m in self._staged_metadata)
         logging.info(
             "Trainer reusing staged weight sync (%s) for step %d (%d variables)",
             effective_transport,
             self.train_step,
-            sum(len(m.variables) for m in self._staged_metadata),
+            total_variables,
+        )
+        logging.info(
+            "TRAINER_WEIGHT_SYNC_TIMING step=prepare_weight_sync train_step=%d "
+            "transport=%s reused=True total_s=%.3f work_units=%d variables=%d",
+            self.train_step,
+            effective_transport,
+            time.monotonic() - t_start,
+            len(self._staged_metadata),
+            total_variables,
         )
         return self._staged_metadata
 
@@ -2797,10 +2809,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # from the previous cycle BEFORE convert(). Do not block on async
       # checkpoint persistence (`_checkpoint_manager.wait_until_finished()`), so
       # GCS uploads overlap with weight conversion and transfer.
+      t_throttle = time.monotonic()
       self._throttler.wait_for_all()
+      throttler_wait_s = time.monotonic() - t_throttle
+
+      t_purge = time.monotonic()
       self._purge_raiden_buffers()
+      purge_buffers_s = time.monotonic() - t_purge
 
       # 2. Extract clean trainable parameters
+      t_convert = time.monotonic()
       params_state = self._get_trainable_params_state()
 
       if self._use_weight_converter:
@@ -2825,9 +2843,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           converted_state = params_state
 
       del params_state
+      convert_s = time.monotonic() - t_convert
 
       # 3. Bind parameters to the unified WeightSynchronizer transport
       # (`RaidenWeightSync` or `GCSWeightSync`).
+      t_bind = time.monotonic()
       if self._weight_sync is None or getattr(self, "_last_staged_transport", None) != effective_transport:
         if self._weight_sync is not None and hasattr(self._weight_sync, "close"):
           self._weight_sync.close()
@@ -2852,17 +2872,25 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
       self._weight_sync.bind(converted_state)
       del converted_state
+      bind_s = time.monotonic() - t_bind
 
       # 4. Initiate Device-to-Host / GCS checkpoint staging for transfer.
+      t_d2h = time.monotonic()
       if self._weight_sync.active:
         self._weight_sync.d2h(sync_request=sync_request)
+      d2h_s = time.monotonic() - t_d2h
 
       verify_weights = is_verify_weights_enabled()
+      t_checksum = time.monotonic()
       if verify_weights:
         logging.info("Source weights checksums: %s", self._weight_sync.checksums())
+      checksum_s = time.monotonic() - t_checksum if verify_weights else 0.0
 
+      t_meta = time.monotonic()
       all_metadata = self._weight_sync.work_unit_metadata_all()
+      metadata_s = time.monotonic() - t_meta
       total_variables = sum(len(m.variables) for m in all_metadata)
+      total_s = time.monotonic() - t_start
 
       logging.info(
           "Trainer prepared weight sync (%s) for step %d: registered %d work unit(s) with %d variables on mesh %s",
@@ -2871,6 +2899,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           len(all_metadata),
           total_variables,
           all_metadata[0].mesh_axes if all_metadata else (),
+      )
+      logging.info(
+          "TRAINER_WEIGHT_SYNC_TIMING step=prepare_weight_sync train_step=%d "
+          "transport=%s throttler_wait_s=%.3f purge_buffers_s=%.3f "
+          "convert_s=%.3f bind_s=%.3f d2h_s=%.3f checksum_s=%.3f "
+          "metadata_s=%.3f total_s=%.3f work_units=%d variables=%d",
+          self.train_step,
+          effective_transport,
+          throttler_wait_s,
+          purge_buffers_s,
+          convert_s,
+          bind_s,
+          d2h_s,
+          checksum_s,
+          metadata_s,
+          total_s,
+          len(all_metadata),
+          total_variables,
       )
       self._last_staged_step = self.train_step
       self._staged_metadata = all_metadata
@@ -2892,14 +2938,31 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def release_weight_sync(self, **kwargs: Any) -> Any:
     """Releases staged weight buffers or cleans up temporary checkpoints after transfer completion."""
+    t_start = time.monotonic()
     self._last_staged_step = None
     self._staged_metadata = None
+    sync_release_s = 0.0
+    purge_buffers_s = 0.0
+    purged_leaves = 0
     if self._weight_sync:
       if hasattr(self._weight_sync, "release"):
+        t_rel = time.monotonic()
         self._weight_sync.release(sync_request=kwargs.get("sync_request"))
+        sync_release_s = time.monotonic() - t_rel
       metrics = self._weight_sync.metrics() if hasattr(self._weight_sync, "metrics") else "N/A"
       logging.vlog(1, "Trainer weight sync metrics: %s", metrics)
-      self._purge_raiden_buffers()
+      t_purge = time.monotonic()
+      purged_leaves = self._purge_raiden_buffers()
+      purge_buffers_s = time.monotonic() - t_purge
+    logging.info(
+        "TRAINER_WEIGHT_SYNC_TIMING step=release_weight_sync train_step=%d "
+        "sync_release_s=%.3f purge_buffers_s=%.3f purged_leaves=%d total_s=%.3f",
+        self.train_step,
+        sync_release_s,
+        purge_buffers_s,
+        purged_leaves,
+        time.monotonic() - t_start,
+    )
     return True
 
   def close(self) -> None:
