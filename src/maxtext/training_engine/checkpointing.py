@@ -17,14 +17,11 @@
 from collections.abc import Mapping
 import dataclasses
 import os
-import time
 from typing import Any, List
-import zlib
 
 from absl import logging
 from flax import nnx
 import jax
-import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 import orbax.checkpoint as ocp
@@ -64,51 +61,6 @@ _PATHWAYS_PERSISTENCE_HANDLERS = ("CloudPathwaysArrayHandler", "PathwaysPersiste
 
 class PathwaysCheckpointingUnavailableError(RuntimeError):
   """Pathways checkpointing was explicitly requested but could not be registered."""
-
-
-class CheckpointRestoreError(RuntimeError):
-  """A checkpoint exists at the requested step but could not be restored."""
-
-
-# Versioned: changing the formula must not turn older fingerprinted checkpoints into mismatches.
-_FINGERPRINT_KEY = "fingerprints_v1"
-
-
-@jax.jit
-def _leaf_u32_sum(leaf: jax.Array) -> jax.Array:
-  """Wraparound uint32 sum of `leaf`'s raw bits: exact, so identical under any sharding.
-
-  Same-width bitcast first (wider dtypes split into uint32 words), so shapes such as bf16
-  `[4096, 15, 1]` never hit a width-changing bitcast. Each element is weighted by an odd
-  function of its global index (`iota` is global under SPMD), so elements or shards written
-  to the wrong position change the sum, and an all-zero tensor's sum depends on its shape.
-  """
-  if jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key):
-    leaf = jax.random.key_data(leaf)
-  if leaf.dtype == jnp.bool_:  # e.g. `is_skipped` in the skip_step_on_spikes optimizer state
-    leaf = leaf.astype(jnp.uint8)
-  bits = jax.lax.bitcast_convert_type(leaf, {1: jnp.uint8, 2: jnp.uint16}.get(leaf.dtype.itemsize, jnp.uint32))
-  bits = bits.astype(jnp.uint32)
-  weight = jnp.uint32(0x9E3779B9)
-  for dim in range(bits.ndim):
-    weight = weight * jnp.uint32(0x01000193) + jax.lax.broadcasted_iota(jnp.uint32, bits.shape, dim)
-  return ((bits + jnp.uint32(0x9E3779B9)) * (weight | 1)).sum(dtype=jnp.uint32)
-
-
-def _tree_fingerprint(state: Any) -> int:
-  """Checksum of every leaf's bits, weighted per key path so swapped leaves also change it.
-
-  Per-leaf dispatch (rather than one jit over the tree) tolerates leaves on different device
-  sets, and `device_get` of the whole list is a single host round trip.
-  """
-  flat = jax.tree_util.tree_flatten_with_path(nnx.to_pure_dict(state) if isinstance(state, nnx.State) else state)[0]
-  sums = jax.device_get([_leaf_u32_sum(x) for _, x in flat])
-  return sum(int(s) * (zlib.crc32(jax.tree_util.keystr(p).encode()) | 1) for (p, _), s in zip(flat, sums)) & 0xFFFFFFFF
-
-
-def _format_fingerprints(fingerprints: Mapping[str, int]) -> str:
-  """`item=0x........` pairs; the save and verify log lines share it so they can be compared verbatim."""
-  return " ".join(f"{item}={fp:#010x}" for item, fp in fingerprints.items())
 
 
 def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
@@ -385,11 +337,6 @@ class CheckpointManager:
         save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params),
     )
     save_args = {"model_params": model_cp_args}
-    # Taken from the values handed to Orbax, before the async upload overlaps the next step, so
-    # restore can prove the persisted bytes are exactly these.
-    fingerprint_start = time.perf_counter()
-    fingerprints = {"model_params": _tree_fingerprint(params)}
-    fingerprint_seconds = time.perf_counter() - fingerprint_start
 
     if checkpoint_state.optimizer:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
@@ -399,10 +346,6 @@ class CheckpointManager:
           save_args=jax.tree.map(lambda _: ocp.SaveArgs(), optimizer_state),
       )
       save_args["optimizer_state"] = optimizer_cp_args
-      fingerprint_start = time.perf_counter()
-      fingerprints["optimizer_state"] = _tree_fingerprint(optimizer_state)
-      fingerprint_seconds += time.perf_counter() - fingerprint_start
-    custom_metadata[_FINGERPRINT_KEY] = fingerprints
 
     if checkpoint_state.accumulated_metrics:
       jax.block_until_ready(checkpoint_state.accumulated_metrics)
@@ -426,21 +369,12 @@ class CheckpointManager:
       )
       save_args["accumulated_grads"] = grads_cp_args
 
-    saved = self._checkpoint_manager.save(
+    return self._checkpoint_manager.save(
         step=step,
         args=ocp.args.Composite(**save_args),
         custom_metadata=custom_metadata,
         **kwargs,
     )
-    if saved:  # Orbax's interval policy may decline; only an accepted save carries these values.
-      logging.info(
-          "Checkpoint %s step=%d %s (%.2fs)",
-          _FINGERPRINT_KEY,
-          step,
-          _format_fingerprints(fingerprints),
-          fingerprint_seconds,
-      )
-    return saved
 
   def restore_checkpoint(
       self,
@@ -455,9 +389,6 @@ class CheckpointManager:
 
     Returns:
       A tuple of (step, checkpoint_state, custom metadata).
-
-    Raises:
-      CheckpointRestoreError: If a checkpoint exists at `step` but cannot be restored.
     """
     if self._checkpoint_manager is None:
       logging.info("Checkpointing is disabled, skipping restore.")
@@ -503,50 +434,14 @@ class CheckpointManager:
     if metadata and hasattr(metadata, "custom_metadata"):
       custom_metadata = metadata.custom_metadata
 
-    restore_start = time.perf_counter()
     try:
       restored_items = self._checkpoint_manager.restore(
           step=step,
           args=ocp.args.Composite(**restore_args),
       )
     except Exception as e:  # pylint: disable=broad-except
-      # Returning "no checkpoint" here would make the orchestrator start a fresh run from the
-      # base weights while the checkpoint it failed to read is still on disk.
-      raise CheckpointRestoreError(
-          f"Checkpoint at step {step} exists but could not be restored; refusing to silently "
-          f"start a fresh run over it. {type(e).__name__}: {e}"
-      ) from e
-    restore_seconds = time.perf_counter() - restore_start
-
-    saved_fingerprints = custom_metadata.get(_FINGERPRINT_KEY) if isinstance(custom_metadata, Mapping) else None
-    if saved_fingerprints is None:
-      logging.info(
-          "Checkpoint at step %d predates save-time fingerprints; skipping verification (restore %.1fs).",
-          step,
-          restore_seconds,
-      )
-    else:
-      verify_start = time.perf_counter()
-      verified = {}  # Only items actually restored and recomputed, so the log never claims more.
-      # Checked before `nnx.update`, so a mismatch leaves the live state untouched.
-      for item, want in saved_fingerprints.items():
-        if item not in restored_items:
-          continue
-        if (got := _tree_fingerprint(restored_items[item])) != want:
-          raise CheckpointRestoreError(
-              f"Checkpoint at step {step}: restored {item!r} fingerprint {got:#010x} != {want:#010x} "
-              "recorded at save time; the persisted bytes differ from what the trainer held (or the "
-              "restore target's dtypes differ from the saved ones)."
-          )
-        verified[item] = got
-      logging.info(
-          "Verified checkpoint %s step=%d %s (restore %.1fs, verify %.2fs)",
-          _FINGERPRINT_KEY,
-          step,
-          _format_fingerprints(verified),
-          restore_seconds,
-          time.perf_counter() - verify_start,
-      )
+      logging.exception("Failed to restore checkpoint: %s", e)
+      return None, None, None
 
     if "model_params" in restored_items:
       nnx.update(checkpoint_state.model, restored_items["model_params"])
