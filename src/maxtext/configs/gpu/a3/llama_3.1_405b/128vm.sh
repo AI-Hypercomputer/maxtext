@@ -1,12 +1,15 @@
 echo "Running 128vm.sh"
-# Example command to invoke this script via XPK, assume you've installed xpk
+# Example command to submit this script with Cluster Toolkit (gcluster). See
+# docs/run_maxtext/run_maxtext_via_cluster_toolkit.md to install gcluster. LOCATION is the
+# cluster's region (regional clusters) or zone (zonal clusters). COMPUTE_TYPE is the GPU type,
+# e.g. h100-80gb-8 (a3-highgpu-8g). The script runs on 128 nodes (dcn_fsdp_parallelism=128).
 # COMMAND="bash src/maxtext/configs/gpu/a3/llama_3.1_405b/128vm.sh"
 # COMMAND='export LD_LIBRARY_PATH=/usr/local/cuda-12.6/compat:$LD_LIBRARY_PATH;'"${COMMAND}";
 #
-# xpk workload create --project=${PROJECT}--cluster=${CLUSTER_NAME} --zone=${ZONE} \
-# --workload=${WORKLOAD_NAME} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME} \
-# --device-type=${DEVICE_TYPE} --num-nodes=2 --priority=high \
-# --command="$COMMAND" --env=XLA_FLAGS=$XLA_FLAGS
+# gcluster job submit --project=${PROJECT_ID} --cluster=${CLUSTER_NAME} --location=${LOCATION} \
+# --name=${WORKLOAD_NAME} --image=gcr.io/${PROJECT_ID}/${LOCAL_IMAGE_NAME} \
+# --compute-type=${COMPUTE_TYPE} --num-nodes=128 --priority=high \
+# --command="$COMMAND" --env="XLA_FLAGS=$XLA_FLAGS"
 
 # Stop execution if any command exits with error
 set -e
