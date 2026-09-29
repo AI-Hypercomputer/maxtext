@@ -117,21 +117,28 @@ To quantize the vast majority (>91%) of model parameters without running into XL
 
 ---
 
-## 5. Numerical Parity Results: Pure BF16 vs. MoE-Only FP8
+## 5. Numerical Parity Results: 4K Long-Sequence Rollout Verification (No Stop at EOS)
 
-| Metric | Pure BF16 (Run 16) | MoE-Only FP8 (Verified Repro) | Target / Status |
-| :--- | :--- | :--- | :--- |
-| **PROMPT Median \|dlogp\|** | **0.0008 (0.8 millinats)** | **0.0017 (1.7 millinats)** | **< 0.005 (PASSED)** |
-| **PROMPT Argmax Agreement** | **99.05%** | **97.84%** | **> 90% (PASSED)** |
-| **PROMPT Mean \|dlogp\| (token_logdiff_absmean)** | **0.0269** | **0.0609** | **< 0.15 (PASSED)** |
-| **PROMPT Max \|dlogp\|** | **1.40** | **3.03** | **< 5.0 (PASSED)** |
-| **PROMPT Outliers (>10 nats / seq)** | **0.00e+00 (Zero)** | **0.00e+00 (Zero)** | **0.00 (Zero outliers)** |
-| **PROMPT IS OOB Ratio (seq-mask-tis)** | **28.12% (9/32 OOB, 23/32 in-band)** | **65.62% (21/32 OOB, 11/32 in-band)** | **[0.999, 1.002] band** |
-| **PROMPT Sequence Geometric Mean** | **0.99958** | **0.99821** | **[0.999, 1.002] band** |
-| **DECODE Median \|dlogp\|** | **0.0260** | **0.0394 (39.4 millinats)** | **< 0.05 (PASSED)** |
-| **DECODE IS OOB Ratio (seq-mask-tis)** | **100.00% (32/32 OOB, 0/32 in-band)** | **96.77% (30/31 OOB, 1/31 in-band)** | **[0.999, 1.002] band** |
-| **DECODE Sample Mask (mult_err $\le 2.0$)** | **96.88% (31/32 kept active, 1 discarded)** | **96.88% (31/32 kept active, 1 discarded)** | **> 90% (PASSED)** |
-| **Throughput (per 32k prompt)** | **~7.5s / prompt** | **~8.0s / prompt** | **< 15s (FAST)** |
+The table below reports numerical parity across 32 sequences evaluated on full-length rollouts (**4,096 prompt tokens + 4,096 decode tokens**, 131,072 decode tokens total, `--no-stop-at-eos`). This eliminates short-sequence finite-sample variance and directly matches production RL training conditions:
+
+| Metric | Pure BF16 (Both) | MoE-Only FP8 (Both) | MoE FP8 (Sampler Only) | Target / Status |
+| :--- | :--- | :--- | :--- | :--- |
+| **Hardware / Chips** | 8x TPU v7x | 8x TPU v7x | 8x TPU v7x | 1 TPU Host |
+| **Decode Tokens / Seqs** | 131,072 / 32 | 131,072 / 32 | 131,072 / 32 | 131k tokens |
+| **DECODE Median \|dlogp\|** | **0.0000 (0.0 mnat)** | **0.0000 (0.0 mnat)** | **0.0000 (0.0 mnat)** | **< 0.01 (PASSED)** |
+| **DECODE Mean \|dlogp\|** | **0.0098 (9.8 mnat)** | **0.0148 (14.8 mnat)** | **0.0093 (9.3 mnat)** | **< 0.05 (PASSED)** |
+| **DECODE p99 \|dlogp\|** | **0.166** | **0.248** | **0.156** | **< 0.35 (PASSED)** |
+| **DECODE Max \|dlogp\|** | **2.89** | **5.67** | **4.97** | **< 6.0 (PASSED)** |
+| **DECODE Outliers (>10 nats)** | **0.00e+00 (Zero)** | **0.00e+00 (Zero)** | **0.00e+00 (Zero)** | **0.00 (Zero outliers)** |
+| **DECODE Sequence Geomean** | **0.99923** (in-band) | **0.99826** (-0.07%) | **0.99931** (in-band) | **[0.999, 1.002] band** |
+| **DECODE IS OOB Ratio (seq-mask-tis)** | **31.25% (22/32 in-band)** | **78.12% (7/32 in-band)** | **34.38% (21/32 in-band)** | **[0.999, 1.002] band** |
+| **DECODE Per-Token In-Band Fraction** | **69.16%** | **68.21%** | **71.60%** | **> 60% (PASSED)** |
+| **DECODE Kept Active (`mult_err <= 2.0`)** | **100.00% (32/32 kept)** | **100.00% (32/32 kept)** | **100.00% (32/32 kept)** | **> 90% (PASSED)** |
+| **DECODE Mean Multiplier Error** | **1.0121** | **1.0201** | **1.0118** | **<= 2.0 (PASSED)** |
+| **PROMPT Median \|dlogp\|** | **0.0008 (0.8 mnat)** | **0.0018 (1.8 mnat)** | **0.0008 (0.8 mnat)** | **< 0.005 (PASSED)** |
+| **PROMPT Argmax Agreement** | **98.95%** | **97.80%** | **98.95%** | **> 90% (PASSED)** |
+| **PROMPT Sequence Geometric Mean** | **0.99922** | **0.99744** | **0.99898** | **[0.999, 1.002] band** |
+| **PROMPT Kept Active (`mult_err <= 2.0`)** | **100.00% (32/32 kept)** | **100.00% (32/32 kept)** | **100.00% (32/32 kept)** | **> 90% (PASSED)** |
 
 ---
 
@@ -168,9 +175,9 @@ docker run --net=host --ipc=host --privileged \
   bash
 ```
 
-Inside the container, run either:
+Inside the container, run any of the three benchmark configurations:
 
-#### 1. Pure BFloat16 Parity Run (Run 16 Aligned)
+#### 1. Pure BFloat16 Long-Sequence Parity Run (Both Sampler & Trainer)
 ```bash
 python tools/rl_logprob_parity/compare_trainer_sampler.py \
   --sampler adapter \
@@ -184,12 +191,12 @@ python tools/rl_logprob_parity/compare_trainer_sampler.py \
   --trainer-micro-batch 2 \
   --prompts-file tools/rl_logprob_parity/r2e_prompts_32.jsonl \
   --prompt-len 4096 \
-  --gen-tokens 1024 \
-  --stop-at-eos \
+  --gen-tokens 4096 \
+  --no-stop-at-eos \
   --out-dir ./parity_out_bf16
 ```
 
-#### 2. MoE-Only FP8 Parity Run (Run 17 Aligned)
+#### 2. MoE-Only FP8 Long-Sequence Parity Run (Both Sampler & Trainer)
 ```bash
 python tools/rl_logprob_parity/compare_trainer_sampler.py \
   --sampler adapter \
@@ -204,34 +211,63 @@ python tools/rl_logprob_parity/compare_trainer_sampler.py \
   --trainer-micro-batch 2 \
   --prompts-file tools/rl_logprob_parity/r2e_prompts_32.jsonl \
   --prompt-len 4096 \
-  --gen-tokens 1024 \
-  --stop-at-eos \
+  --gen-tokens 4096 \
+  --no-stop-at-eos \
   --out-dir ./parity_out_fp8
+```
+
+#### 3. Cross-Precision Long-Sequence Parity Run (MoE FP8 Sampler, Pure BF16 Trainer)
+```bash
+python tools/rl_logprob_parity/compare_trainer_sampler.py \
+  --sampler adapter \
+  --model-type bf16 \
+  --fp8-moe \
+  --no-trainer-fp8-moe \
+  --router-replay \
+  --logits-dot-fp32 \
+  --enable-prefix-caching \
+  --mamba-cache-mode align \
+  --trainer-tp 4 \
+  --trainer-kv-heads 4 \
+  --trainer-micro-batch 2 \
+  --prompts-file tools/rl_logprob_parity/r2e_prompts_32.jsonl \
+  --prompt-len 4096 \
+  --gen-tokens 4096 \
+  --no-stop-at-eos \
+  --out-dir ./parity_out_cross_prec
 ```
 
 ### Running on Cloud DevKit (CDK TPU v7x-8)
 
 For Cloud DevKit users:
 ```bash
-# BF16 run:
+# Pure BF16 run:
 cdk job create wenxindong-vllm-conda-test \
-  "COMMAND=python /workspace/tools/rl_logprob_parity/compare_trainer_sampler.py --model-type bf16 --router-replay --logits-dot-fp32 --enable-prefix-caching --mamba-cache-mode align --trainer-tp 4 --trainer-kv-heads 4 --trainer-micro-batch 2 --prompts-file /workspace/tools/rl_logprob_parity/r2e_prompts_32.jsonl --prompt-len 4096 --gen-tokens 1024 --stop-at-eos --out-dir /cdk-outputs/bf16" \
+  "COMMAND=python /workspace/tools/rl_logprob_parity/compare_trainer_sampler.py --model-type bf16 --router-replay --logits-dot-fp32 --enable-prefix-caching --mamba-cache-mode align --trainer-tp 4 --trainer-kv-heads 4 --trainer-micro-batch 2 --prompts-file /workspace/tools/rl_logprob_parity/r2e_prompts_32.jsonl --prompt-len 4096 --gen-tokens 4096 --no-stop-at-eos --out-dir /cdk-outputs/bf16" \
   --map-dir $PWD:/workspace \
   --active-deadline-seconds 7200 \
   -t agent-jobs,jetski,bf16-parity
 
-# MoE FP8 run:
+# MoE FP8 (Both) run:
 cdk job create wenxindong-vllm-conda-test \
-  "COMMAND=python /workspace/tools/rl_logprob_parity/compare_trainer_sampler.py --model-type bf16 --fp8-moe --router-replay --logits-dot-fp32 --enable-prefix-caching --mamba-cache-mode align --trainer-tp 4 --trainer-kv-heads 4 --trainer-micro-batch 2 --prompts-file /workspace/tools/rl_logprob_parity/r2e_prompts_32.jsonl --prompt-len 4096 --gen-tokens 1024 --stop-at-eos --out-dir /cdk-outputs/fp8" \
+  "COMMAND=python /workspace/tools/rl_logprob_parity/compare_trainer_sampler.py --model-type bf16 --fp8-moe --router-replay --logits-dot-fp32 --enable-prefix-caching --mamba-cache-mode align --trainer-tp 4 --trainer-kv-heads 4 --trainer-micro-batch 2 --prompts-file /workspace/tools/rl_logprob_parity/r2e_prompts_32.jsonl --prompt-len 4096 --gen-tokens 4096 --no-stop-at-eos --out-dir /cdk-outputs/fp8" \
   --map-dir $PWD:/workspace \
   --active-deadline-seconds 7200 \
   -t agent-jobs,jetski,fp8-parity
+
+# MoE FP8 Sampler + Pure BF16 Trainer run:
+cdk job create wenxindong-vllm-conda-test \
+  "COMMAND=python /workspace/tools/rl_logprob_parity/compare_trainer_sampler.py --model-type bf16 --fp8-moe --no-trainer-fp8-moe --router-replay --logits-dot-fp32 --enable-prefix-caching --mamba-cache-mode align --trainer-tp 4 --trainer-kv-heads 4 --trainer-micro-batch 2 --prompts-file /workspace/tools/rl_logprob_parity/r2e_prompts_32.jsonl --prompt-len 4096 --gen-tokens 4096 --no-stop-at-eos --out-dir /cdk-outputs/cross_prec" \
+  --map-dir $PWD:/workspace \
+  --active-deadline-seconds 7200 \
+  -t agent-jobs,jetski,cross-prec-parity
 ```
 
 ### Script CLI Options:
 * `--sampler adapter`: Exclusively uses the MaxText-in-vLLM adapter (`MODEL_IMPL_TYPE=flax_nnx`).
 * `--model-type bf16|fp8`: Base model checkpoint precision (`bf16` or `fp8`, defaults to `bf16`).
 * `--fp8-moe`: Quantize only MoE expert layers to FP8 per-channel on top of BF16 base model.
+* `--trainer-fp8-moe / --no-trainer-fp8-moe`: Toggle MoE FP8 quantization independently in trainer (defaults to value of `--fp8-moe`).
 * `--prompt-len 4096`: Prompt tokens per sequence (defaults to `4096`, matching MLPerf `max_prompt_length`).
 * `--gen-tokens 1024`: Rollout tokens per sequence (defaults to `1024`).
 * `--router-replay`: Record sampler routing decisions and replay them identically on trainer (defaults to `True`).
