@@ -371,3 +371,8 @@ def downsample_video_mask_to_tokens(video_mask, config):
 
     return downsample_qwen3_video_mask(video_mask, config)
   raise ValueError(f"Model {config.model_name} does not support padded video-mask reduction.")
+
+
+# VAE Image & Video Processors for Diffusion Models
+from maxtext.multimodal.processor_vae_image import VaeImageProcessor, VaeImageProcessorLDM3D, PipelineImageInput
+from maxtext.multimodal.processor_vae_video import VaeVideoProcessor, VideoProcessor
