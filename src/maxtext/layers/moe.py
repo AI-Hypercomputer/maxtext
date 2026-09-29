@@ -51,6 +51,7 @@ from maxtext.utils.sharding import (
     logical_to_mesh_axes,
     maybe_shard_with_logical,
     maybe_shard_with_pspec,
+    mesh_axes_for_dim,
     remove_expert_from_partition_spec,
     remove_incompatible_mesh_axes_from_partition_spec,
     remove_mesh_axes_from_partition_spec,
@@ -1534,6 +1535,8 @@ class RoutedMoE(nnx.Module):
       # so this is the load every shard of the group would receive with an unbounded buffer.
       balanced_load = (bsz_times_seq_len / num_expert_parallelism) * self.num_experts_per_tok
       max_load_ratio = max_expert_shard_load_ratio(group_size, num_expert_parallelism, balanced_load)
+      if self.mesh is not None and self.mesh.axis_names:
+        max_load_ratio = jax.lax.pmax(max_load_ratio, tuple(self.mesh.axis_names))
     if use_truncated_buffer:
       local_num_experts = self.config.num_experts // num_expert_parallelism
       shard_idx = jax.lax.axis_index(self._expert_parallelism_name) if num_expert_parallelism > 1 else 0
@@ -1544,21 +1547,10 @@ class RoutedMoE(nnx.Module):
           local_num_experts,
           axis=0,
       )
-      local_overflow = (jnp.sum(local_group_size) > buffer_size).astype(jnp.int32)
+      has_overflow = jnp.sum(local_group_size) > buffer_size
       # Clamp local_group_size to buffer_size to ensure we don't exceed buffer
       # capacity by leveraging the helper _truncate_matrix.
       local_group_size = _truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
-      if self.mesh is not None and self.mesh.axis_names:
-        mesh_axes = tuple(self.mesh.axis_names)
-        if max_load_ratio is not None:
-          # One all-reduce for both: max(overflow flag) > 0 is equivalent to sum(overflow flag) > 0.
-          overflow_and_ratio = jax.lax.pmax(jnp.stack([local_overflow.astype(jnp.float32), max_load_ratio]), mesh_axes)
-          has_overflow = overflow_and_ratio[0] > 0
-          max_load_ratio = overflow_and_ratio[1]
-        else:
-          has_overflow = jax.lax.psum(local_overflow, mesh_axes) > 0
-      else:
-        has_overflow = local_overflow > 0
       expert_indices = jnp.arange(local_num_experts)
       sorted_experts = jnp.repeat(
           expert_indices,
@@ -1566,8 +1558,6 @@ class RoutedMoE(nnx.Module):
           total_repeat_length=buffer_size,
       )
     else:
-      if max_load_ratio is not None and self.mesh is not None and self.mesh.axis_names:
-        max_load_ratio = jax.lax.pmax(max_load_ratio, tuple(self.mesh.axis_names))
       local_group_size = None
       expert_indices = jnp.arange(self.num_experts)
       sorted_experts = jnp.repeat(
@@ -3051,6 +3041,21 @@ class RoutedMoE(nnx.Module):
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
         )
+
+        # moe_x_sorted: tag the routed (expert-sorted) MoE input and its small routing/metadata
+        # bundle for the custom remat policy. With moe_x_sorted=device the backward loads these
+        # instead of re-running route(), which removes the rematted dispatch token all-gather (EP
+        # axis) and the SparseCore ragged sort from the backward pass; the expert GMMs re-run from
+        # the saved tensor. The routing/metadata leaves (indices, group sizes, weights) are tiny but
+        # must be saved too, or the sort re-runs just to reproduce them. Tags are inert under the
+        # default moe_x_sorted=remat. tree.map so a QArray input (moe_quantize_token_all_gather)
+        # gets its qvalue/scale leaves tagged.
+        def _cn(t):
+          return adc.checkpoint_name(t, "moe_x_sorted") if isinstance(t, jax.Array) else t
+
+        x = jax.tree.map(_cn, x)
+        routing = jax.tree.map(_cn, routing)
+        route_metadata = jax.tree.map(_cn, route_metadata)
         mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
         if self.config.mlp_bias:
@@ -3165,31 +3170,36 @@ class RoutedMoE(nnx.Module):
           routing.max_load_ratio,
       )
 
+    in_specs = (
+        input_partition_pspec,
+        gate_logits_pspec,
+        pre_bias_logits_pspec,
+        w0_pspec,
+        w1_pspec,
+        wo_pspec,
+        w0_bias_pspec,
+        w1_bias_pspec,
+        wo_bias_pspec,
+        decoder_tokens_pspec,
+        P(),  # Replicate the input key
+        # Reuse gate_logits_pspec (which forced_routed_experts is sharded
+        # with below); recomputing it would skip
+        # maybe_replicate_incompatible_batch.
+        gate_logits_pspec if forced_routed_experts is not None else None,
+    )
+    # Not every mesh axis: shard_map rejects axes an enclosing vmap mapped away ("stage", "diloco").
+    input_mesh_axes = {axis for spec in in_specs if spec is not None for dim in spec for axis in mesh_axes_for_dim(dim)}
+    overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)
+
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
-        in_specs=(
-            input_partition_pspec,
-            gate_logits_pspec,
-            pre_bias_logits_pspec,
-            w0_pspec,
-            w1_pspec,
-            wo_pspec,
-            w0_bias_pspec,
-            w1_bias_pspec,
-            wo_bias_pspec,
-            decoder_tokens_pspec,
-            P(),  # Replicate the input key
-            # Reuse gate_logits_pspec (which forced_routed_experts is sharded
-            # with below); recomputing it would skip
-            # maybe_replicate_incompatible_batch.
-            gate_logits_pspec if forced_routed_experts is not None else None,
-        ),
+        in_specs=in_specs,
         out_specs=(
             output_pspec,
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
-            P(),  # has_overflow: replicated scalar, all-reduced across entire mesh
+            P(overflow_mesh_axes),  # has_overflow: unreduced, reduced once per step in loss_fn
             P(),  # took_fallback: replicated scalar, True if the in-layer dropless branch ran
             P(),  # required_rbf (probe): replicated scalar max-reduced across entire mesh, or None
         )
@@ -3296,11 +3306,16 @@ class RoutedMoE(nnx.Module):
         return output, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio
 
       force_dropless = getattr(self, "force_dropless", False)
+
+      def _per_device_flag(has_overflow):
+        return jnp.reshape(jnp.asarray(has_overflow, dtype=jnp.bool_), (1,))
+
       fallback_chunks = None
       if self.config.moe_dropless_fallback == "layer":
         fallback_chunks = self.get_dropless_fallback_num_chunks(x.shape[1], n_chunks)
       if fallback_chunks is None:
         out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(force_dropless)
+        has_overflow = _per_device_flag(has_overflow)
         if log_max_load_ratio:
           return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf, max_load_ratio
         return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf
@@ -3330,6 +3345,7 @@ class RoutedMoE(nnx.Module):
       out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = jax.lax.cond(
           took_fallback, _dropless_branch, _capped_branch
       )
+      has_overflow = _per_device_flag(has_overflow)
       if log_max_load_ratio:
         return out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf, max_load_ratio
       return out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf
@@ -3434,7 +3450,10 @@ class RoutedMoE(nnx.Module):
       # Global (batch, sequence) arrays: one loss per full sequence (not per token chunk), averaged
       # over the global batch.
       lb_loss = self.megatron_seq_aux_loss(pre_bias_logits if pre_bias_logits is not None else gate_logits)
-    self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
+    if getattr(self, "force_dropless", False):
+      self.sow(nnx.Intermediate, "moe_has_overflow", jnp.zeros((), jnp.bool_))
+    else:
+      self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
     if self.config.moe_dropless_fallback == "layer":
       self.sow(nnx.Intermediate, "moe_dropless_fallback", took_fallback)
     if required_rbf is not None:

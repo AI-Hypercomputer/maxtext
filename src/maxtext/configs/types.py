@@ -1013,7 +1013,7 @@ class MoEGeneral(BaseModel):
       None,
       description=(
           "What to do when the ragged buffer (ragged_buffer_factor > 0) would drop tokens. None: drop them."
-          " 'step': discard the candidate state and replay the whole train step with a dropless buffer."
+          " 'step': roll the step's update back in-graph and replay the whole train step with a dropless buffer."
           " 'layer': per MoE layer, calculate the overflow from the router's top-k and take a chunked dropless"
           " branch (lax.cond) for that layer only; no step replay."
       ),
@@ -1787,6 +1787,15 @@ class RematAndOffload(BaseModel):
   mlpwi_1: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second part of a gated MLP's output.",
+  )
+  moe_x_sorted: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routed (post-dispatch, expert-sorted) MoE input plus its small "
+          "routing/metadata bundle. 'device' saves them across the remat boundary so the backward "
+          "does not re-run the dispatch token all-gather and ragged sort; the expert GMMs re-run "
+          "from the saved tensor. Default 'remat' recomputes (existing behavior)."
+      ),
   )
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
@@ -3736,6 +3745,15 @@ class MaxTextConfig(
     if mode == "layer" and self.use_random_routing:
       # The overflow check re-derives top-k outside permute(); random routing would not reproduce it.
       raise ValueError(f"{prefix} does not support use_random_routing=True.")
+    if mode == "step":
+      if self.enable_diloco:
+        raise ValueError(f"{prefix} is not supported with enable_diloco=True.")
+      if self.compiled_trainstep_file:
+        raise ValueError(f"{prefix} is not supported with compiled_trainstep_file.")
+      if self.optimizer_memory_host_offload or self.parameter_memory_host_offload:
+        raise ValueError(
+            f"{prefix} is not supported with optimizer_memory_host_offload or parameter_memory_host_offload."
+        )
 
   def validate_retry_dropless_first_steps_and_first_phase_buffer(self):
     """Validates retry_dropless_first_steps, first_phase_ragged_buffer_factor and the REQUIRED_RBF probe."""
@@ -3941,6 +3959,13 @@ class MaxTextConfig(
         raise ValueError(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
+        )
+      # The emb-chunking path (moe_emb_chunking in moe.py) routes per chunk and does not tag its routed input with
+      # checkpoint_name("moe_x_sorted"), so a non-remat moe_x_sorted would be silently ignored there.
+      if self.moe_x_sorted != RematLocation.REMAT:
+        raise ValueError(
+            f"moe_x_sorted={RematLocation(self.moe_x_sorted).value} is not supported with num_moe_emb_chunks > 0; "
+            "use moe_x_sorted=remat."
         )
 
   def validate_moe_quantize_token_all_gather(self):
@@ -4416,6 +4441,7 @@ class MaxTextConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
@@ -5833,6 +5859,7 @@ class RLConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",

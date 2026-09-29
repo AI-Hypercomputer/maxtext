@@ -382,7 +382,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     )
   has_moe_overflow = jnp.bool_(False)
   if config.moe_dropless_fallback == "step":
-    moe_overflow_flags = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_has_overflow")
+    moe_overflow_flags = maxtext_utils.collect_intermediates_by_suffix(
+        intermediate_outputs, "moe_has_overflow", ravel=False
+    )
     if moe_overflow_flags:
       has_moe_overflow = jnp.any(jnp.stack([jnp.any(x) for x in moe_overflow_flags]))
   aux["has_moe_overflow"] = has_moe_overflow
@@ -406,6 +408,27 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       aux["moe_max_load_ratio"] = jnp.max(load_ratios)
       aux["moe_max_load_ratio_mean"] = jnp.mean(load_ratios)
   return loss, aux
+
+
+def _rollback_on_overflow(new_state, old_leaves, has_moe_overflow):
+  """Returns the pre-step state leaves instead of `new_state` if the MoE ragged buffer overflowed."""
+  if not isinstance(has_moe_overflow, jax.core.Tracer) and not bool(has_moe_overflow):
+    return new_state
+
+  def _select(new, old):
+    dtype = getattr(new, "dtype", None)
+    if dtype is not None and jnp.issubdtype(dtype, jax.dtypes.extended):
+      # NNX never updates typed PRNG keys in place; their stream counts are rolled back.
+      return new
+    return jnp.where(has_moe_overflow, old, new)
+
+  new_leaves, treedef = jax.tree_util.tree_flatten(new_state)
+  if len(new_leaves) != len(old_leaves):
+    raise ValueError(
+        "moe_dropless_fallback='step': cannot roll back the step -- the updated state has "
+        f"{len(new_leaves)} leaves but the input state had {len(old_leaves)}."
+    )
+  return jax.tree_util.tree_unflatten(treedef, [_select(n, o) for n, o in zip(new_leaves, old_leaves)])
 
 
 def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
@@ -437,6 +460,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   del dropout_rng  # unused for NNX (kept for jit signature parity)
   # pylint: disable=too-many-nested-blocks
   # --- Per-path initialization ---
+  input_state_leaves = jax.tree_util.tree_leaves(state) if config.moe_dropless_fallback == "step" else None
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
   loss_model, loss_params, loss_rng = state.model, None, None
 
@@ -668,7 +692,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   # Drop Intermediates (e.g. sowed max_logits for QK-Clip) and the MTP sown
   # vars (mtp_losses/mtp_acceptance) before returning. They're absent from
   # state_mesh_shardings and would cause a leaf-count / structure mismatch.
-  return nnx.state(new_state, nnx.Not(nnx.Intermediate)), metrics
+  out_state = nnx.state(new_state, nnx.Not(nnx.Intermediate))
+  if input_state_leaves is not None and has_moe_overflow is not None:
+    out_state = _rollback_on_overflow(out_state, input_state_leaves, has_moe_overflow)
+  return out_state, metrics
 
 
 def eval_step(model, config, state, data, dropout_rng=None):
@@ -786,7 +813,7 @@ def training_loop_iteration(
           max_logging.log(f"Step {step}: dropless first-phase program")
           state, metrics = p_train_step_dropless(state, example_batch, *step_rng_args)
           _maybe_log_required_rbf(config, step, metrics, "dropless")
-        elif config.moe_dropless_fallback == "step" and p_train_step_dropless is not None:
+        else:
           # With first_phase_ragged_buffer_factor > 0, first-phase steps attempt the first-phase program (larger
           # finite ragged buffer) instead of the normal one; an overflow still replays with the dropless program.
           if in_first_phase and p_train_step_first_phase is not None:
@@ -796,28 +823,17 @@ def training_loop_iteration(
             p_attempt, attempt_name = p_train_step_first_phase, "first_phase"
           else:
             p_attempt, attempt_name = p_train_step, "normal"
-          candidate_state, metrics = p_attempt(state, example_batch, *step_rng_args)
+          state, metrics = p_attempt(state, example_batch, *step_rng_args)
           _maybe_log_required_rbf(config, step, metrics, attempt_name)
-          if bool(metrics.get("has_moe_overflow")):
-            max_logging.log(
-                f"Step {step}: MoE ragged buffer overflow detected! "
-                f"Discarding candidate state and replaying step with dropless buffer..."
-            )
-            # Explicitly deallocate device buffers held by candidate_state before replaying
-            # with p_train_step_dropless to avoid pinning two ~13.4 GB model states in HBM.
-            jax.tree_util.tree_map(
-                lambda x: x.delete() if hasattr(x, "delete") else None,
-                candidate_state,
-            )
-            del candidate_state
-            gc.collect()
+          if (
+              config.moe_dropless_fallback == "step"
+              and p_train_step_dropless is not None
+              and bool(metrics.get("has_moe_overflow"))
+          ):
+            max_logging.log(f"Step {step}: MoE ragged buffer overflow detected! Replaying step with dropless buffer...")
+            # The attempt rolled its update back, so `state` is still the pre-step state.
             state, metrics = p_train_step_dropless(state, example_batch, *step_rng_args)
             _maybe_log_required_rbf(config, step, metrics, "dropless")
-          else:
-            state = candidate_state
-        else:
-          state, metrics = p_train_step(state, example_batch, *step_rng_args)
-          _maybe_log_required_rbf(config, step, metrics, "normal")
 
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
