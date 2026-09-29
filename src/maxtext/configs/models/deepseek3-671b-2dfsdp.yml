@@ -71,7 +71,9 @@ logical_axis_rules: [
     ['activation_stage', 'stage'],
     ['embed', ['fsdp']],
     ['embed_attn', ['fsdp']],
+    ['embed_shared', ['fsdp']],
     ['embed_moe', ['fsdp']],
+    ['embed_router', ['fsdp']],
     ['embed_vocab', ['fsdp', 'fsdp_transpose']],
     ['q_lora', ['fsdp']],
     ['kv_lora', ['fsdp']],
@@ -82,6 +84,7 @@ logical_axis_rules: [
     ['kv_heads', ['fsdp_transpose', 'expert']],
     ['heads', ['fsdp_transpose', 'expert']],
     ['mlp', ['fsdp_transpose', 'expert']],
+    ['mlp_shared', ['fsdp_transpose', 'expert']],
     ['mlp_moe', ['fsdp_transpose', 'expert']],
     ['diloco', 'diloco'],
 ]

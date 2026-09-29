@@ -301,12 +301,22 @@ def test_with_axis_on_dim_handles_none_and_out_of_range():
     sharding.with_axis_on_dim(PartitionSpec("data", None), "context", 2)
 
 
-def test_embed_attn_rule_accompanies_embed_rule():
-  """Every shipped rule set that shards 'embed' must also cover 'embed_attn'.
+@pytest.mark.parametrize(
+    "split_axis, parent_axis",
+    [
+        ("embed_attn", "embed"),
+        ("embed_shared", "embed"),
+        ("mlp_shared", "mlp"),
+        ("embed_router", "embed_moe"),
+    ],
+)
+def test_split_axis_rule_accompanies_parent_rule(split_axis, parent_axis):
+  """Every shipped rule set that shards `parent_axis` must also cover `split_axis`.
 
-  The attention projections use the 'embed_attn' logical axis instead of
-  'embed', so a rule set that only defines 'embed' would silently leave the
-  attention weights replicated.
+  The attention projections use 'embed_attn' instead of 'embed', the MoE shared
+  experts 'embed_shared' / 'mlp_shared' instead of 'embed' / 'mlp', and the MoE
+  router 'embed_router' instead of 'embed_moe'. A rule set that only defines the
+  parent axis would silently leave those weights replicated.
   """
   missing = []
   for path in sorted(pathlib.Path(maxtext_globals.MAXTEXT_CONFIGS_DIR).rglob("*.yml")):
@@ -314,7 +324,7 @@ def test_embed_attn_rule_accompanies_embed_rule():
     if not rules:
       continue
     names = {rule[0] for rule in rules}
-    if "embed" in names and "embed_attn" not in names:
+    if parent_axis in names and split_axis not in names:
       missing.append(str(path))
 
-  assert not missing, f"logical_axis_rules define 'embed' but not 'embed_attn' in: {missing}"
+  assert not missing, f"logical_axis_rules define '{parent_axis}' but not '{split_axis}' in: {missing}"

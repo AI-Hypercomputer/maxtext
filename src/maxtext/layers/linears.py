@@ -628,6 +628,8 @@ class MlpBlock(nnx.Module):
       quant: None | Quant = None,
       model_mode: None | str = None,
       *,
+      embed_axis_name: str = "embed",
+      mlp_axis_name: str = "mlp",
       rngs: nnx.Rngs,
   ) -> None:
     """A MlpBlock module.
@@ -647,6 +649,8 @@ class MlpBlock(nnx.Module):
       use_bias: whether to add bias in all feedforward layers.
       use_pre_norm: whether to add pre layer norm in mlp layers.
       quant: Optional quantization config, no quantization if None.
+      embed_axis_name: Logical axis name of the kernels' embedding dimension.
+      mlp_axis_name: Logical axis name of the kernels' hidden dimension.
       out_sharding: Named sharding of outputs
     """
     self.config = config
@@ -689,7 +693,7 @@ class MlpBlock(nnx.Module):
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           kernel_init=self.kernel_init,
-          kernel_axes=("embed", "num_activations", "mlp"),
+          kernel_axes=(embed_axis_name, "num_activations", mlp_axis_name),
           quant=self.quant,
           use_bias=self.use_bias,
           shard_mode=self.config.shard_mode,
@@ -710,7 +714,7 @@ class MlpBlock(nnx.Module):
             dtype=self.dtype,
             weight_dtype=self.weight_dtype,
             kernel_init=self.kernel_init,
-            kernel_axes=("embed", "mlp"),
+            kernel_axes=(embed_axis_name, mlp_axis_name),
             quant=self.quant,
             use_bias=self.use_bias,
             shard_mode=self.config.shard_mode,
@@ -730,7 +734,7 @@ class MlpBlock(nnx.Module):
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         kernel_init=self.kernel_init,
-        kernel_axes=("mlp", "embed"),
+        kernel_axes=(mlp_axis_name, embed_axis_name),
         quant=self.quant,
         use_bias=self.use_bias,
         shard_mode=self.config.shard_mode,

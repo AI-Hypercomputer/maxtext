@@ -4476,6 +4476,8 @@ class RoutedAndSharedMoE(nnx.Module):
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
 
+    # The router ('embed_router') and the shared experts ('embed_shared', 'mlp_shared') have their own
+    # logical axes, so a rule set can shard them apart from the routed experts and the dense MLPs.
     # NOTE: the name MoeBlock_0 is to ensure reverse compatibility with
     # existing checkpoints for routed experts.
     self.MoeBlock_0 = RoutedMoE(
@@ -4484,7 +4486,7 @@ class RoutedAndSharedMoE(nnx.Module):
         num_experts_per_tok=self.config.num_experts_per_tok,
         mesh=self.mesh,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed_moe", None),
+        kernel_axes=("embed_router", None),
         intermediate_dim=self.config.moe_mlp_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
@@ -4505,6 +4507,8 @@ class RoutedAndSharedMoE(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         config=self.config,
         quant=self.quant,
+        embed_axis_name="embed_shared",
+        mlp_axis_name="mlp_shared",
         rngs=self.rngs,
     )
 

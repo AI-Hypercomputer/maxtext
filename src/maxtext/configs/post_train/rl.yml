@@ -327,6 +327,7 @@ logical_axis_rules: [
       ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
       ['embed_moe', ['fsdp', 'fsdp_transpose', 'context']],
       ['embed_moe', ['fsdp', 'context']],
+      ['embed_router', ['fsdp', 'fsdp_transpose', 'context']],
 
       # Standard MLP / Dense Layers / Model Structure
       ['activation_mlp', ['tensor', 'tensor_sequence']],
@@ -336,10 +337,13 @@ logical_axis_rules: [
       ['activation_embed', ['tensor']],
       ['activation_stage', 'stage'],
       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
+      ['mlp_shared', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
       ['gdn_head', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
       ['embed', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
       ['embed', ['fsdp', 'context', 'expert']],
       ['embed_attn', ['fsdp', 'context', 'expert']],
+      ['embed_shared', ['fsdp', 'fsdp_transpose', 'context', 'expert']],
+      ['embed_shared', ['fsdp', 'context', 'expert']],
       ['norm', ['tensor']],
       ['layers', 'stage'],
       ['diloco', 'diloco'],

@@ -1493,10 +1493,10 @@ class TransformerEngineQuantization(Quantization):
           return tex.noop_collective_op_set
 
         if len(mesh_axes) >= 1:
-          # CGEMM in MLP layer (up projection, down projection)
-          if mesh_axes[0] == "embed" and mesh_axes[-1] == "mlp":
+          # CGEMM in MLP layer (up projection, down projection), including the MoE shared experts
+          if mesh_axes[0] in ("embed", "embed_shared") and mesh_axes[-1] in ("mlp", "mlp_shared"):
             return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
-          elif mesh_axes[0] == "mlp" and mesh_axes[-1] in ("embed", "embed_attn"):
+          elif mesh_axes[0] in ("mlp", "mlp_shared") and mesh_axes[-1] in ("embed", "embed_attn", "embed_shared"):
             # 'embed_attn' covers the flattened attention output projection of Qwen3 hybrid models.
             return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
           elif overlap_policy == TeCommGemmOverlapPolicy.FULL:

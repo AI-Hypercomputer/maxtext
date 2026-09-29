@@ -14,6 +14,7 @@ replicate_quant_scale: true
 logical_axis_rules: [
                       ['embed', []],
                       ['embed_attn', []],
+                      ['embed_shared', []],
                       ['vocab', ['tensor', 'autoregressive']],
                       ['activation_batch', []],
                       ['activation_length', []],
@@ -35,6 +36,7 @@ logical_axis_rules: [
                       ['activation_kv', ['tensor', 'autoregressive']],
                       ['norm', []],
                       ['mlp', ['tensor', 'autoregressive']],
+                      ['mlp_shared', ['tensor', 'autoregressive']],
                       ['activation_mlp', ['tensor', 'autoregressive']],
                       ['cache_batch_prefill', []],
                       ['cache_batch', ['autoregressive']],

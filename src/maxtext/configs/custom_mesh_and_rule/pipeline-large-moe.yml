@@ -53,6 +53,7 @@ logical_axis_rules: [
                       ['activation_stage', 'stage'],
                       ['activation_exp', ['expert']],
                       ['mlp', ['tensor']],
+                      ['mlp_shared', ['tensor']],
                       ['mlp_moe', ['tensor']],
                       ['mlp_no_fsdp', ['tensor']],
                       ['vocab', ['tensor']],
@@ -61,8 +62,10 @@ logical_axis_rules: [
                       ['kv_heads', ['tensor']],
                       ['embed', ['fsdp', 'expert']], # remove context from embed sharding
                       ['embed_attn', ['fsdp', 'expert']], # remove context from embed sharding
+                      ['embed_shared', ['fsdp', 'expert']], # remove context from embed sharding
                       ['embed_vocab', ['fsdp', 'expert']],
                       ['embed_moe', ['fsdp']],
+                      ['embed_router', ['fsdp']],
                       ['q_lora', ['fsdp']],
                       ['kv_lora', ['fsdp']],
                       ['norm', ['tensor']],

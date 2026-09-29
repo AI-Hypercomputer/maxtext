@@ -55,6 +55,7 @@ logical_axis_rules: [
                       ['exp', ['expert', 'fsdp']], # fsdp shards exp instead embed
                       ['mlp_moe', ['fsdp_transpose']],
                       ['embed_moe', ['context']],
+                      ['embed_router', ['context']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
@@ -68,8 +69,10 @@ logical_axis_rules: [
                       ['activation_stage', 'stage'],
                       # General Weights
                       ['mlp', ['fsdp_transpose']],
+                      ['mlp_shared', ['fsdp_transpose']],
                       ['embed', ['fsdp', 'context', 'expert']],
                       ['embed_attn', ['fsdp', 'context', 'expert']],
+                      ['embed_shared', ['fsdp', 'context', 'expert']],
                       ['norm', []],
                       ['layers', 'stage'],
                   ]
