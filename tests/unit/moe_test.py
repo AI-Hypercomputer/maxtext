@@ -614,7 +614,9 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
           moe_dropless_fallback=None,
           load_balance_loss_weight=0.0,
       ),
-      mesh=SimpleNamespace(shape={"fsdp": 32, "expert": expert_parallelism}),
+      mesh=SimpleNamespace(
+          axis_names=("diloco", "fsdp", "expert"), shape={"diloco": 2, "fsdp": 32, "expert": expert_parallelism}
+      ),
       rngs=object(),
       get_expert_parallelism_size=lambda: expert_parallelism,
       _expert_parallelism_name="expert",
@@ -659,6 +661,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
   assert captured["in_specs"][2] is None
   assert captured["in_specs"][9] is None
   assert captured["out_specs"][0] == P(batch_partition, None, None)
+  assert captured["out_specs"][3] == P(batch_partition)
 
 
 class RoutedMoeTest(parameterized.TestCase):
@@ -1447,7 +1450,7 @@ class RoutedMoeTest(parameterized.TestCase):
       self.assertTrue(has_overflow, "Expected a moe_has_overflow intermediate to be sown.")
       self.assertTrue(
           bool(jnp.any(jnp.array([jnp.any(x) for x in has_overflow]))),
-          "Expected full-mesh all-reduced overflow=True when only shard 0 overflows.",
+          "Expected the reduced overflow flag to be True when only shard 0 overflows.",
       )
 
     # Replay with force_dropless=True matches dropless output.
