@@ -155,7 +155,12 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
   path = os.path.join(out_dir, "tokens.npz")
   if os.path.exists(path) and not args.retokenize:
     z = np.load(path)
-    log(f"tokens: reusing {path} {z['tokens'].shape}")
+    saved = int(z["prefix_len"]) if "prefix_len" in z.files else 0
+    if bool(saved) != bool(args.skip_common_prefix):
+      raise SystemExit(f"{path} was built with prefix_len={saved}, which doesn't match --skip-common-prefix; "
+                       "rerun with --retokenize")
+    log(f"tokens: reusing {path} {z['tokens'].shape} prefix_len={saved} "
+        f"unique rows={len(np.unique(z['tokens'], axis=0))}/{z['tokens'].shape[0]}")
     return path
   os.environ.setdefault("HF_HOME", hf_home)
   os.environ.setdefault("HF_HUB_OFFLINE", "1")
@@ -172,14 +177,28 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
           continue
         rec = json.loads(ln)
         ids = tok(rec["text"], add_special_tokens=False)["input_ids"]
-        if len(ids) < SEQ_LEN:
-          short.append(len(ids))
-        rows.append(ids[:SEQ_LEN])
+        rows.append(ids)
+    # Prompts that share a system prompt + tool schema longer than SEQ_LEN truncate to one identical row.
+    # --skip-common-prefix drops the token prefix every row shares, so each row starts at its own text
+    # (and no longer contains the system prompt / tool schema the RL context always has).
+    prefix_len = 0
+    if args.skip_common_prefix:
+      if len(rows) < 2:
+        raise SystemExit("--skip-common-prefix needs at least 2 prompts")
+      prefix_len = min(len(r) for r in rows)
+      for r in rows[1:]:
+        prefix_len = min(prefix_len, next((i for i, (a, b) in enumerate(zip(rows[0], r)) if a != b), prefix_len))
+    for r in rows:
+      if len(r) - prefix_len < SEQ_LEN:
+        short.append(len(r) - prefix_len)
     if short:
-      raise SystemExit(f"{len(short)} prompt(s) shorter than SEQ_LEN={SEQ_LEN}: {short[:5]}")
-    tokens = np.array(rows, dtype=np.int32)
-    np.savez(path, tokens=tokens, n_files=np.int32(len(rows)), n_corpus_tokens=np.int32(tokens.size))
+      raise SystemExit(f"{len(short)} prompt(s) shorter than SEQ_LEN={SEQ_LEN} after a {prefix_len}-token prefix: {short[:5]}")
+    tokens = np.array([r[prefix_len : prefix_len + SEQ_LEN] for r in rows], dtype=np.int32)
+    n_unique = len(np.unique(tokens, axis=0))
+    np.savez(path, tokens=tokens, n_files=np.int32(len(rows)), n_corpus_tokens=np.int32(tokens.size),
+             prefix_len=np.int32(prefix_len), n_unique_rows=np.int32(n_unique))
     log(f"tokens: {tokens.shape} from {len(rows)} prompts in {args.prompts_file} -> {path}")
+    log(f"tokens: skipped common prefix = {prefix_len} tokens, unique rows = {n_unique}/{len(rows)}")
     log(f"tokens: first = {tok.decode(tokens[0, :12])!r}")
     return path
 
@@ -873,7 +892,9 @@ def compare(prev_logprobs, generation_logprobs, token_mask=None, sample_mask=Non
   raw = prev_logprobs - generation_logprobs
   log_is_ratio = np.nan_to_num(raw, nan=0.0, posinf=0.0, neginf=0.0)
   if token_mask is None:
-    token_mask = np.isfinite(raw).astype(np.float64)
+    token_mask = np.ones_like(raw, dtype=np.float64)
+  # A non-finite log-prob (e.g. a NaN decode) is excluded, not scored as a perfect match.
+  token_mask = token_mask * np.isfinite(raw)
   n_seq = log_is_ratio.shape[0]
 
   # Per-sequence multiplicative error: mean_t exp(|log_is_t|) (Tunix algo_core.py)
@@ -904,6 +925,7 @@ def compare(prev_logprobs, generation_logprobs, token_mask=None, sample_mask=Non
       n_tokens=int(token_mask.sum()),
       n_seqs=n_seq,
       n_nonfinite=int((~np.isfinite(raw)).sum()),
+      n_seqs_nonfinite=int((~np.isfinite(raw)).any(axis=-1).sum()),
       token_oob_ratio=float(tok_oob),
       token_in_band=float(1.0 - tok_oob),
       token_logdiff_absmean=token_logdiff_absmean,
@@ -923,7 +945,7 @@ def compare(prev_logprobs, generation_logprobs, token_mask=None, sample_mask=Non
 
 def print_report(name, m):
   print(f"\n### {name}")
-  print(f"  tokens={m['n_tokens']}  seqs={m['n_seqs']}  nonfinite(zeroed)={m['n_nonfinite']}  "
+  print(f"  tokens={m['n_tokens']}  seqs={m['n_seqs']}  nonfinite(masked)={m['n_nonfinite']} in {m['n_seqs_nonfinite']} seqs  "
         f"band=[{RATIO_MIN}, {RATIO_MAX}]")
   print(f"  per-token : oob {m['token_oob_ratio']:.2%}  in-band {m['token_in_band']:.2%}   "
         f"|dlogp| med {m['abs_d_median']:.4f} / p99 {m['abs_d_p99']:.3f} / max {m['abs_d_max']:.2f}")
@@ -956,12 +978,11 @@ def stage_compare(args, out_dir):
     raise SystemExit("trainer and sampler ran on different tokens; delete the npz files and rerun")
   label = "MaxText-in-vLLM (adapter)"
   quantize_trainer_moe = args.fp8_moe if getattr(args, "trainer_fp8_moe", None) is None else args.trainer_fp8_moe
-  if getattr(args, "fp8_moe", False) and not quantize_trainer_moe:
-    precision_tag = "BF16/BF16+MoE-FP8"
-  elif getattr(args, "fp8_moe", False):
-    precision_tag = "BF16+MoE-FP8/BF16+MoE-FP8"
-  else:
-    precision_tag = f"{args.model_type.upper()}/{args.model_type.upper()}"
+  base = args.model_type.upper()
+  fp8_tag = "+MoE-FP8" + ("(legacy-round)" if getattr(args, "fp8_legacy_round", False) else "")
+  trainer_tag = base + (fp8_tag if quantize_trainer_moe else "")
+  sampler_tag = base + (fp8_tag if getattr(args, "fp8_moe", False) else "")
+  precision_tag = f"{trainer_tag}/{sampler_tag}"  # trainer/sampler
   head = f"MaxText trainer vs {label} sampler — Qwen3.5-35B-A3B {precision_tag}, full model"
 
   n_prompt = sa["logp"].shape[1]
@@ -1054,6 +1075,8 @@ def main():
   ap.add_argument("--text-glob", default="docs/**/*.md", help="corpus glob, relative to the MaxText tree")
   ap.add_argument("--text-file", default=None, help="single text file, overrides --text-glob")
   ap.add_argument("--retokenize", action="store_true", help="rebuild tokens.npz even if it exists")
+  ap.add_argument("--skip-common-prefix", action="store_true",
+                  help="with --prompts-file, drop the token prefix all prompts share before taking SEQ_LEN tokens")
 
   ap.add_argument("--router-replay", action=argparse.BooleanOptionalAction, default=True,
                   help="record sampler routing decisions and force them in trainer via forced_routed_experts (default True)")
