@@ -1846,6 +1846,17 @@ class RematAndOffload(BaseModel):
           "from the saved tensor. Default 'remat' recomputes (existing behavior)."
       ),
   )
+  moe_routing: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the MoE routing index maps only: the top-k expert ids (DeepSeek routing) and, on the "
+          "ring-of-experts ragged path, the sort permutation, its inverse, the sorted token indices and the group "
+          "sizes. 'device' saves these small integer arrays across the remat boundary, so the backward re-runs "
+          "neither top-k nor the ragged-sort argsorts, and the unsort backward reuses the saved permutation instead "
+          "of sorting again. The dispatch gather and the expert GMMs still re-run. Values are unchanged, so loss "
+          "and gradients are bit-identical. Default 'remat' recomputes (existing behavior)."
+      ),
+  )
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
@@ -4496,6 +4507,7 @@ class MaxTextConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routing",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
@@ -5926,6 +5938,7 @@ class RLConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routing",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
