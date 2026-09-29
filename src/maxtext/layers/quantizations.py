@@ -222,7 +222,7 @@ def native_fp8_dot_general(
     rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
     channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
     tiled_axes = {lhs_axis: rhs_block_size}
-  if act_calibration_method.lower().startswith("fixed"):
+  if is_static_calibration(act_calibration_method):
     channelwise_axes = []
     tiled_axes = {}
   lhs = qwix.quantize(
@@ -242,10 +242,40 @@ def native_fp8_dot_general(
 
 @dataclass
 class ServeFp8WeightQuantization(Quantization):
-  """Marks a layer as using native FP8 compute without weight dequantization."""
+  """Marks a layer as using native FP8 compute without weight dequantization.
+
+  Weights are FP8 with static scales loaded from the checkpoint. Activations (matmul
+  inputs) are quantized to FP8 according to `act_calibration_method`:
+
+    - "absmax" (default): dynamic scale computed from the activation at runtime.
+    - "fixed,-A,A" or "fixed,A": static per-tensor scale A / 448, no runtime reduction.
+
+  The setting applies to the dense layers (`native_fp8_dot_general`) and to the routed
+  experts on the tpu-inference fused MoE path (`static_act_scale`).
+  """
 
   quant_mode = None
   act_calibration_method: str = "absmax"
+
+  def __post_init__(self):
+    if is_static_calibration(self.act_calibration_method):
+      # Fail at config time on e.g. an asymmetric range instead of at trace time.
+      get_static_scale(jnp.float8_e4m3fn, self.act_calibration_method)
+
+  def static_act_scale(self) -> jax.Array | None:
+    """Returns the static per-tensor activation scale as a float32 [1, 1] array.
+
+    Returns None when activations use dynamic scaling.
+    """
+    if not is_static_calibration(self.act_calibration_method):
+      return None
+    scale = get_static_scale(jnp.float8_e4m3fn, self.act_calibration_method)
+    return jnp.full((1, 1), scale, dtype=jnp.float32)
+
+
+def is_static_calibration(calibration_method: str | None) -> bool:
+  """Whether `calibration_method` is a fixed-range (static scale) calibration."""
+  return bool(calibration_method) and calibration_method.lower().startswith("fixed")
 
 
 def prepare_fused_gmm_scale(scale: jnp.ndarray, kernel_shape: Tuple[int, ...]) -> jnp.ndarray:

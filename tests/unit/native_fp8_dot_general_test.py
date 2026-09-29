@@ -36,6 +36,7 @@ from flax import nnx
 from qwix._src.core import dot_general as qwix_dg
 
 from maxtext.layers import linears
+from maxtext.layers import moe
 from maxtext.layers import quantizations
 
 
@@ -625,6 +626,62 @@ class NativeFp8StaticActScaleTest(unittest.TestCase):
       jaxprs[calib] = str(jax.make_jaxpr(layer)(x))
     self.assertIn("reduce_max", jaxprs["absmax"])
     self.assertNotIn("reduce_max", jaxprs[self._STATIC])
+
+
+class ServeFp8ActCalibrationModesTest(unittest.TestCase):
+  """The two serve_fp8_weight activation modes and how they reach the fused MoE kernel."""
+
+  @staticmethod
+  @jax.jit
+  def _fused_moe_with_input_scales(hidden_states, w1_input_scale=None, w2_input_scale=None):
+    """Stands in for tpu-inference's jitted fused_moe_func after the input-scale change."""
+    del w1_input_scale, w2_input_scale
+    return hidden_states
+
+  @staticmethod
+  @jax.jit
+  def _fused_moe_without_input_scales(hidden_states):
+    """Stands in for a tpu-inference fused_moe_func without input-scale support."""
+    return hidden_states
+
+  def test_dynamic_mode_has_no_static_scale(self):
+    quant = quantizations.ServeFp8WeightQuantization()
+    self.assertEqual(quant.act_calibration_method, "absmax")
+    self.assertIsNone(quant.static_act_scale())
+
+  def test_static_mode_scale(self):
+    for calib in ("fixed,-224,224", "fixed,224"):
+      scale = quantizations.ServeFp8WeightQuantization(act_calibration_method=calib).static_act_scale()
+      self.assertEqual(scale.shape, (1, 1))
+      self.assertEqual(scale.dtype, jnp.float32)
+      np.testing.assert_array_equal(np.asarray(scale), [[0.5]])  # 224 / 448
+
+  def test_asymmetric_fixed_range_is_rejected_at_construction(self):
+    with self.assertRaises(ValueError):
+      quantizations.ServeFp8WeightQuantization(act_calibration_method="fixed,-100,224")
+
+  def test_fused_moe_kwargs_are_empty_in_dynamic_mode(self):
+    for quant in (None, quantizations.ServeFp8WeightQuantization()):
+      self.assertEqual(moe.fused_moe_input_scale_kwargs(quant, self._fused_moe_with_input_scales), {})
+    # Dynamic mode never needs the new tpu-inference arguments.
+    self.assertEqual(
+        moe.fused_moe_input_scale_kwargs(
+            quantizations.ServeFp8WeightQuantization(), self._fused_moe_without_input_scales
+        ),
+        {},
+    )
+
+  def test_fused_moe_kwargs_in_static_mode(self):
+    quant = quantizations.ServeFp8WeightQuantization(act_calibration_method="fixed,-224,224")
+    kwargs = moe.fused_moe_input_scale_kwargs(quant, self._fused_moe_with_input_scales)
+    self.assertEqual(set(kwargs), {"w1_input_scale", "w2_input_scale"})
+    for scale in kwargs.values():
+      np.testing.assert_array_equal(np.asarray(scale), [[0.5]])
+
+  def test_static_mode_with_old_tpu_inference_fails_loudly(self):
+    quant = quantizations.ServeFp8WeightQuantization(act_calibration_method="fixed,-224,224")
+    with self.assertRaisesRegex(ValueError, "w1_input_scale"):
+      moe.fused_moe_input_scale_kwargs(quant, self._fused_moe_without_input_scales)
 
 
 if __name__ == "__main__":

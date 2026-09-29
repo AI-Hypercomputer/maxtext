@@ -18,6 +18,7 @@
 import dataclasses
 import enum
 import functools
+import inspect
 import math
 import random
 from typing import Any, Iterable, Optional, Tuple, Union
@@ -474,6 +475,27 @@ def _filter_axis_names(
   exclude = (exclude_axes,) if isinstance(exclude_axes, str) else tuple(exclude_axes)
   filtered = tuple(ax for ax in axis_names if ax not in exclude)
   return filtered or None
+
+
+def fused_moe_input_scale_kwargs(quant, fused_moe_fn) -> dict[str, jax.Array]:
+  """Static activation-scale kwargs for tpu-inference's `fused_moe_func`.
+
+  With `serve_fp8_weight` and a fixed `act_quantization_calibration_method`, both expert
+  grouped matmuls quantize their input with the same static per-tensor scale as the dense
+  layers, instead of the kernel's dynamic per-row, per-K-block scale. Returns {} (dynamic
+  scaling, the kernel default) otherwise.
+  """
+  if not isinstance(quant, quantizations.ServeFp8WeightQuantization):
+    return {}
+  scale = quant.static_act_scale()
+  if scale is None:
+    return {}
+  if "w1_input_scale" not in inspect.signature(fused_moe_fn).parameters:
+    raise ValueError(
+        f"act_quantization_calibration_method={quant.act_calibration_method!r} requires a tpu-inference whose"
+        " fused_moe_func accepts w1_input_scale / w2_input_scale; upgrade tpu-inference or use 'absmax'."
+    )
+  return {"w1_input_scale": scale, "w2_input_scale": scale}
 
 
 class Tid2EidVar(nnx.Variable):
@@ -4189,6 +4211,9 @@ class RoutedMoE(nnx.Module):
       rule = quantizations.get_fused_moe_rule()
       quantized_w1, w1_scale = quantizations.quantize_weight_for_fused_moe(fused_kernel, rule)
       quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
+    # serve_fp8_weight with a fixed act_quantization_calibration_method: the experts use the
+    # same static activation scale as the dense layers ({} keeps the kernel's dynamic scale).
+    input_scale_kwargs = fused_moe_input_scale_kwargs(self.quant, fused_moe_func)
     fused_moe = quantizations.without_qwix_interception(fused_moe_func)
 
     output_2d = fused_moe(
@@ -4206,6 +4231,7 @@ class RoutedMoE(nnx.Module):
         use_ep=use_ep,
         activation=activation,
         scoring_fn=scoring_fn,
+        **input_scale_kwargs,
         # Forward the same environment-backed kernel knobs that tpu-inference passes on its
         # own serving path (tpu_inference/layers/common/moe.py). Without these, env vars such
         # as ONEHOT_MOE_PERMUTE_THRESHOLD and VLLM_MOE_CHUNK_SIZE are silently ignored when a
