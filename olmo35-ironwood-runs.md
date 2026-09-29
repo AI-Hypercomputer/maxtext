@@ -1063,6 +1063,52 @@ Unlike tiny, small has a comm floor: 1.58 s caps FSDP-only small at about 20%
 MFU even with good kernels. The next lever is comm volume, via expert
 parallelism (eb-series).
 
+### eb and ec series, expert parallelism for small (o35n281910, o35n282010)
+
+sa4's config plus `ici_expert_parallelism=E ici_fsdp_parallelism=128/E
+shard_exp_on_fsdp=False capacity_factor=-1 ragged_buffer_factor=R` (dropless
+all-to-all, buffer R x balanced). eb ran the pre-rebase source; ec ran the
+rebased tree (`e66d0e25e`, pod log `src from gs://agagik-us/olmo35/src.tgz`).
+
+| arm | E | R | change | TF/s | MFU | step s |
+|---|---|---|---|---|---|---|
+| eb0_sa4_prof | 1 | | FSDP 128, profiled | 136.6 | 11.84% | 2.710 |
+| **ec0_ctrl** | 1 | | same, rebased tree | **136.4** | **11.83%** | **2.712** |
+| eb1, ec1_ep2_prof | 2 | 1.5 | | 90.3 | 7.83% | 4.099 |
+| eb2 | 4 | 1.5 | | 93.5 | 8.11% | 3.957 |
+| ec5_ep4_t2048 | 4 | 1.5 | wi/wo tiles 2048 | 93.4 | 8.09% | 3.963 |
+| ec2, ec3 | 4 | 1.0, 1.25 | | NaN at step 1 | | |
+| eb3 | 8 | 1.5 | | NaN at step 2 | | |
+| ec6 | 8 | -1 (worst case) | | OOM, 275 GB temporaries | | |
+| eb4, ec4 | 2 | 1.5 | ring + `moe_dropless_fallback=layer` + probe | failed | | eb4 stale source; ec4 shape bug `(2,4096,1)` vs `(4,1,512)` in the fallback path |
+
+The rebase is perf-neutral (ec0 vs eb0). Routing at init is more than 1.25x
+imbalanced per EP 4 shard, and an overflowing buffer turns the loss to NaN
+instead of dropping or falling back.
+
+ec1 profile vs eb0, xla_shell (`gs://agagik-us/olmo35/4x4x4/analysis/ec1_*.clean.txt`):
+
+| | FSDP (eb0) | EP 2 (ec1) |
+|---|---|---|
+| step | 2.71 s | 4.10 s |
+| TensorCore lane | 2.44 s (relayout 0.27) | 3.46 s (relayout 1.02) |
+| SparseCore comm | 1.53 s (exposed 0.21) | 1.86 s (exposed 0.59) |
+| roadmap floor | 1.53 s | 1.86 s |
+
+| op added by EP 2 | ms per step |
+|---|---|
+| `ragged_all_to_all` 262144 x 768 bf16, 3 per layer, on the TensorCore, not overlapped | 507 |
+| 362 scalar s32 all-reduces (about 0.7 ms each, latency-bound) | 258 |
+| `gather_fusion` (`_take`) local re-permute | about 270 |
+| extra sort | 64 |
+
+FSDP's expert weight traffic was already 86% hidden, so EP removes little
+visible time and adds about 1.4 s of exposed TensorCore work. At this batch on
+128 devices FSDP 128 pdb 2 stays small's best config; EP should pay only where
+FSDP comm cannot hide (medium and up on 4x8x8). ec1's source mapping failed to
+parse (xprof RET_CHECK on async-update), so its component table is not usable;
+the op numbers come straight from the trace.
+
 ### KDA kernel, single device
 
 Details in `kda-vs-gdn-kernels.md`. The tokamax KDA layer takes 7.50 ms fwd+bwd
