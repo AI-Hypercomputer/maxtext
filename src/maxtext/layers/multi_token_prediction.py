@@ -294,7 +294,7 @@ class MultiTokenPredictionLayer(nnx.Module):
     """
     if self.config.use_lineage:
       # Lineage runs everything but `final_norm`, which the block applies.
-      out, mtp_lb_loss = lineage_adapter.run_lineage_mtp_layer(
+      out, mtp_lb_loss, mtp_bias_updates = lineage_adapter.run_lineage_mtp_layer(
           prev_hidden_state=prev_hidden_state,
           target_token_embedding=target_token_embedding,
           mtp_params=nnx.state(self, (nnx.Param, moe.MoEBiasVar)),
@@ -306,6 +306,8 @@ class MultiTokenPredictionLayer(nnx.Module):
       )
       if mtp_lb_loss is not None:
         self.sow(nnx.Intermediate, "moe_lb_loss", mtp_lb_loss)
+      if mtp_bias_updates is not None:
+        self.sow(nnx.Intermediate, "moe_bias_updates", mtp_bias_updates)
       return out
 
     target_token_embedding = sharding.maybe_shard_with_logical(

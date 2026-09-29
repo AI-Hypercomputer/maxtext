@@ -1986,7 +1986,7 @@ class NNXDecoder(nnx.Module):
           elif cfg.use_lineage:
             if lineage_adapter is None:
               raise ImportError("use_lineage=True requires the Google-internal lineage_adapter.")
-            y, lineage_lb_loss = lineage_adapter.run_lineage_dsv3(
+            y, lineage_lb_loss, lineage_bias_updates = lineage_adapter.run_lineage_dsv3(
                 inputs=y,
                 dense_params=self._build_linen_params(self.dense_layers),
                 sparse_params=self._build_linen_params(self.moe_layers),
@@ -1997,6 +1997,8 @@ class NNXDecoder(nnx.Module):
             )
             if lineage_lb_loss is not None:
               self.sow(nnx.Intermediate, "moe_lb_loss", lineage_lb_loss)
+            if lineage_bias_updates is not None:
+              self.sow(nnx.Intermediate, "moe_bias_updates", lineage_bias_updates)
           else:
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,
