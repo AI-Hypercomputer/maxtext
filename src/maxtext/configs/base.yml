@@ -286,6 +286,7 @@ te_gmm_quantization: "" # quantization mode for TE GMM matmuls; available option
 # Pipeline: quantize token -> EP all-gather -> sort -> GMM, so tokens stay quantized end to end.
 # Requires use_ring_of_experts=true, use_gmm_v2=true, and quantization with fixed act calibration.
 moe_quantize_token_all_gather: false
+fp8_moe: false # whether only MoE layers are quantized to FP8
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).
