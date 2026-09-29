@@ -160,6 +160,10 @@ If you get a `command not found: upload_maxtext_docker_image` error, it means yo
 **Note on Permissions:** You will need the [**Artifact Registry Writer**](https://docs.cloud.google.com/artifact-registry/docs/access-control#permissions) role to push Docker images to Artifact Registry. If you don't have this permission, contact your project administrator to grant you this role through "Google Cloud Console -> IAM -> Grant access".
 ````
 
+## Re-running CI tests without rebuilding images
+
+The images that CI tests run against are built by the nightly TPU and GPU Docker image pipelines, not by the local build flow above. Maintainers can re-run those pipeline tests on a previous run's image with only the code replaced (fast-rebuild), or re-run the failed jobs on the same image. See [CI Docker image pipelines](../development/ci_docker_image_pipelines.md).
+
 ## Troubleshooting
 
 1. If you see the following error while building or uploading your Docker image, try adding the listed file path to `.dockerignore`. Do not include the `./` prefix in the `.dockerignore` file:
