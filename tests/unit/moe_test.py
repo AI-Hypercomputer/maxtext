@@ -3677,6 +3677,33 @@ class RoutedMoEFp8Test(parameterized.TestCase):
     self.assertLess(float(mse), max_mse)
 
 
+class LoadBalanceLossDensityProbTest(unittest.TestCase):
+  """RoutedMoE.load_balance_loss with a precomputed per-sequence density_prob."""
+
+  def test_density_prob_matches_probs(self):
+    fake = SimpleNamespace(num_experts=8, num_experts_per_tok=2, config=SimpleNamespace(load_balance_loss_weight=0.01))
+    logits = jax.random.normal(jax.random.PRNGKey(0), (4, 16, 8), dtype=jnp.float32)
+    probs = jax.nn.softmax(logits, axis=-1)
+    _, top_k_indices = jax.lax.top_k(logits, 2)
+
+    def from_probs(x):
+      return moe.RoutedMoE.load_balance_loss(fake, top_k_indices, jax.nn.softmax(x, axis=-1))
+
+    def from_density_prob(x):
+      density_prob = jnp.mean(jax.nn.softmax(x, axis=-1), axis=1)
+      return moe.RoutedMoE.load_balance_loss(fake, top_k_indices, None, density_prob=density_prob)
+
+    np.testing.assert_allclose(from_density_prob(logits), from_probs(logits), rtol=1e-6)
+    np.testing.assert_allclose(jax.grad(from_density_prob)(logits), jax.grad(from_probs)(logits), rtol=1e-5, atol=1e-10)
+    # The density_prob of a batch concatenation is the concatenation of per-shard density_probs.
+    halves = [jnp.mean(probs[:2], axis=1), jnp.mean(probs[2:], axis=1)]
+    np.testing.assert_allclose(
+        moe.RoutedMoE.load_balance_loss(fake, top_k_indices, None, density_prob=jnp.concatenate(halves)),
+        moe.RoutedMoE.load_balance_loss(fake, top_k_indices, probs),
+        rtol=1e-6,
+    )
+
+
 class RequiredRaggedBufferFactorTest(unittest.TestCase):
   """RoutedMoE.required_ragged_buffer_factor: the factor at which the fullest shard's buffer is exactly full."""
 
