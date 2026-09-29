@@ -22,9 +22,101 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ## Unreleased
 
-**Last Updated**: 538fe7a3f
+**Last Updated**: 8154b7d97
 
 <!-- Add new unreleased changes below this line -->
+
+#### Changes
+
+##### Models
+
+- **Weaver Architecture**: Added the Weaver Mixture-of-Transformers (MoT) block and standardized Weaver model naming across configurations.
+- **DeepSeek-V3 / Lineage**: Integrated the Lineage DeepSeek-V3 model (`dsv3.py`) into MaxText, including routed expert output weight layout storage under `use_lineage`, router bias update collection, and a custom `dsv3-mlperf-4k` device mesh and sharding rule.
+- **DeepSeek-V4**: Added checkpoint conversion support and parameter mapping for DeepSeek-V4 models.
+- **Cosmos3**: Added model bring-up configurations and architecture support for `Cosmos3-super-reasoner` and `Cosmos3-nano`.
+- **Qwen3 / Qwen3.5**: Added model configurations and Hugging Face parameter mappings for `qwen3.5-35b-a3b-fp8` and `qwen3.5-397b-a17b-fp8`, verified `qwen3.5-35b-a3b` weight conversion, and optimized Qwen3-Next to only instantiate shared experts when `shared_experts > 0`.
+- **M3 Core**: Introduced the `m3` core package scaffolding with architectural design rules, layout testing, mesh creation, sharding rules, and RoPE positional embeddings.
+- **MoE Dropless Fallback & Ragged Buffers**: Added `moe_dropless_fallback` (`None|step|layer`) with memory-neutral step fallback, host-driven step replay retry for ragged buffer overflow, `eval_ragged_buffer_factor` for evaluation-specific ragged buffer sizing, and precompiled replay/eval programs ([moe configuration](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/moe_configuration.html)).
+- **MoE Routing & Load Balancing**: Implemented dense custom VJP for router top-k selection (eliminating backward scatter), optimized top-2 expert group scoring and routing performance, aligned sigmoid-router auxiliary loss and full-batch expert bias updates with Megatron-LM, added support for extracting and replaying routing decisions across inference and training, and integrated TE `MoEBlock` ([moe configuration](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/moe_configuration.html)).
+- **Decoders & Normalization**: Added RMSNorm support for Apple ENVY and OLMo3 decoder blocks, introduced GPT-OSS attention sinks, added 2D transposed shape alignment in `model_creation_utils`, split embedding logical axis names in attention modules, and established default sharding rule constants in `types.py` with base configuration parity testing.
+
+##### Pre-Training
+
+- **DiLoCo Pre-Training**: Added comprehensive documentation and tutorials for DiLoCo distributed pre-training, and migrated DiLoCo launch workflows and scripts from XPK to Cluster Toolkit ([core concepts](https://maxtext.readthedocs.io/en/latest/reference/core_concepts.html), [diloco](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/diloco.html), [diloco pretraining](https://maxtext.readthedocs.io/en/latest/tutorials/diloco_pretraining.html), [tutorials](https://maxtext.readthedocs.io/en/latest/tutorials.html)).
+- **Attention Kernels & Flash Attention**: Optimized JAX Flash Attention with a specialized path for sequences longer than 4096 tokens, added HCA static compilation for Splash Attention in DeepSeek-V4, and refactored the mHC kernel to use `emit_pipeline`.
+- **DeepSeek-V4 Compressed Structured Attention (CSA)**: Added a fused Pallas TPU StreamIndex score kernel, implemented QK attention head chunking to lower peak memory usage, added indexer loss support, and enabled the native block-sparse path for indexer masks under Context Parallelism.
+- **Multi-Token Prediction (MTP)**: Enabled quantized Multi-Token Prediction and added separate final layer normalization for MTP blocks in DeepSeek models.
+- **Context Parallelism & Positional Embeddings**: Eliminated XLA backward adjoint interior padding during sequence restoration in `reorder_sequence` for context parallelism, sharded GatedDeltaNet sequences under `ici_context_parallelism`, removed all-to-all communication from TSP/CP segmentation masking, avoided JAX recompilations in MRoPE position calculation via inline NumPy, and normalized MRoPE shapes across vLLM hybrid cache utilities.
+
+##### Post-Training
+
+- **Raiden Weight Synchronization**: Integrated high-performance Raiden and Raiden-FFI weight synchronization into `MaxTextTrainingEngine` conforming to Tunix's trainer contract, featuring streaming and target-free weight conversion for vLLM rollout, support for inhomogeneous layer cycle intervals in `raiden_unscan`, and unified synchronizer management.
+- **Reinforcement Learning (RL) & GRPO**: Plumbed GRPO flags to the agentic learner, added RL sequence-packing and vLLM block-size knobs, added `free_kv_cache_during_weight_sync` and `gc_collect_after_weight_sync` options, optimized `extract_answer` to linear time complexity, exposed `reward_num_workers` with picklable reward wrappers, added a Gemma 4 26B GRPO tutorial, and integrated the MaxText trainer backend into the distributed GSM8K example ([post training index](https://maxtext.readthedocs.io/en/latest/tutorials/post_training_index.html), [rl gemma4 26b](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_gemma4_26b.html), [rl gemma4 e4b](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_gemma4_e4b.html)).
+- **Distillation & LoRA**: Added end-to-end launch scripts and configs for Distillation Training, and refactored LoRA parameter resharding with modernized Flax NNX variable access and streamlined graph traversal.
+- **vLLM Serving**: Added vLLM Mamba prefix caching in Qwen3 GatedDeltaNet layers, implemented MoE 128-lane chunking and padding for GMM layouts, and indexed KV caches via `layer_name_to_kvcache_index` in the vLLM adapter.
+
+##### Multimodal
+
+- **Multimodal Pipelines & SFT**: Added Grain data pipeline support for multimodal SFT, enabled end-to-end video SFT with variable frame resolutions and durations, added ChartNet SFT configurations with string response support, and updated Omni multimodal processing pipelines ([multimodal](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/multimodal.html)).
+- **Qwen3-VL Serving**: Added `vllm_decode` support for Qwen3-VL vision-language inference ([inference](https://maxtext.readthedocs.io/en/latest/tutorials/inference.html)).
+
+##### Performance
+
+- **FP8 Training & Quantization Infrastructure**: Added native FP8 inference (`serve_fp8_weight`) for `DenseGeneral` and GMM v2, added dynamic weight-only FP8 dequantization types and direct FP8 scale tensor ingestion in `to_maxtext`, implemented `drhs_grad_quantization_calibration_method` cotangent calibration for weight gradients, enabled quantized logits projection, and allowed keeping MoE router projections unquantized for numerical stability ([moe configuration](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/moe_configuration.html), [quantization](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/quantization.html)).
+- **MoE Communication Quantization**: Enabled token-quantized all-gather pipelines with Ring of Experts, added quantized all-gather for the Ring of Experts combine backward, surfaced TPU inference MoE kernel knobs and padding, and pre-quantized weights for fused MoE kernels ([moe configuration](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/moe_configuration.html), [quantization](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/quantization.html)).
+- **Explicit Sharding & ZeRO-1**: Onboarded Qwen3.5, Qwen3-Next, Qwen3, Qwen2, Kimi-K2, Mistral, Mixtral, and Gemma model families to explicit sharding and ZeRO-1 with gradient accumulation; deferred data-parallel gradient all-reduces to `update()` under GA; scaled backward cotangents at GA=1 scale; supported partitioned optimizer state sharding propagation with `MaskedNode` filtering in ZeRO-1; and explicitly tracked `shard_embed_moe_on_fsdp` ([moe configuration](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/moe_configuration.html)).
+- **Sharded Muon Optimizer**: Integrated a sharding-aware, distributed version of the Muon optimizer into MaxText, generalized weight dimension extraction, added support for Qwen3 and GPT-OSS MoE blocks in Muon, and added configuration flags to selectively apply Muon to MoE routers.
+- **SparseCore & Pallas Kernels**: Added `moe_pin_sparse_core_all_gathers` to pin FSDP and EP all-gathers to SparseCores, lowered `plsc.bitcast` to `tpu.bitcast` during layout passes, and tuned Pallas SparseCore compiler parameters across `sc_ragged_gather` and `sc_ragged_gather_reduce`.
+- **Execution & Tiling Optimizations**: Added Tokamax GMM v2 heuristic tiling, evaluation-stage tile sizes and QKV layouts, nested scans over hybrid attention with per-layer remat for Qwen3-Next, `moe_x_sorted` remat locations across expert boundaries, and collective `psum` reductions for expert bias calculation ([moe configuration](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/moe_configuration.html)).
+
+##### Checkpointing / Goodput
+
+- **Orbax v1 Checkpointing**: Refactored MaxText checkpointing to use Orbax v1 APIs as the primary backend, enabled dequantize-on-load parameter restoration, supported restoring variables outside the standard `params` collection, registered Pathways persistence array handlers with bounded host staging, and introduced standalone checkpointer benchmarking configurations.
+- **Goodput & Checkpointing Guides**: Added `goodput_job_name` configuration for Goodput telemetry logging, and migrated multi-tier and emergency checkpointing guides from XPK to Cluster Toolkit ([emergency checkpointing](https://maxtext.readthedocs.io/en/latest/guides/checkpointing_solutions/emergency_checkpointing.html), [multi tier checkpointing](https://maxtext.readthedocs.io/en/latest/guides/checkpointing_solutions/multi_tier_checkpointing.html)).
+
+##### Usability
+
+- **Data Input & Grain**: Added Megatron MMap data format support for Grain data loaders with integrated mmap index building, migrated post-training scripts from TFDS to Grain, enabled Grain to read TFDS configurations, optimized input pipeline throughput during evaluation, and set default `dataset_type` to synthetic ([data input pipeline](https://maxtext.readthedocs.io/en/latest/guides/data_input_pipeline.html), [data input grain](https://maxtext.readthedocs.io/en/latest/guides/data_input_pipeline/data_input_grain.html), [data input megatron mmap](https://maxtext.readthedocs.io/en/latest/guides/data_input_pipeline/data_input_megatron_mmap.html), [full finetuning](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/full_finetuning.html)).
+- **MLPerf Compliance & Performance**: Added official MLPerf training logging compliance, reduced step-0 overhead via per-file `c4_mlperf` train sharding and data-free pre-run start setup, implemented continuous stream chunking for C4 MLPerf, and cached eval batches per host.
+- **Documentation & Cluster Toolkit Migration**: Migrated core navigation, getting started, and architecture guides from XPK to Cluster Toolkit (CTK), added pre-training and post-training Docker images for release 0.2.4 to tutorials, and added Gemini agent skills for MaxText development ([getting started](https://maxtext.readthedocs.io/en/latest/getting_started.html), [install maxtext](https://maxtext.readthedocs.io/en/latest/install_maxtext.html), [architecture overview](https://maxtext.readthedocs.io/en/latest/reference/architecture/architecture_overview.html), [build maxtext](https://maxtext.readthedocs.io/en/latest/tutorials/build_maxtext.html)).
+- **Artifact Registry Migration**: Updated container image registry paths across tutorials, scripts, and documentation from Google Container Registry (GCR) to Google Artifact Registry ([run maxtext elastic training](https://maxtext.readthedocs.io/en/latest/run_maxtext/run_maxtext_elastic_training.html), [run maxtext via pathways](https://maxtext.readthedocs.io/en/latest/run_maxtext/run_maxtext_via_pathways.html), [lora on multi host](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/lora_on_multi_host.html)).
+- **Dependency Upgrades**: Upgraded JAX to version 0.11.1, made TensorFlow an optional dependency in requirements, and upgraded Tokamax to 0.0.14 and DrJAX to 0.2.1 ([update dependencies](https://maxtext.readthedocs.io/en/latest/development/update_dependencies.html), [data input tfds](https://maxtext.readthedocs.io/en/latest/guides/data_input_pipeline/data_input_tfds.html), [install maxtext](https://maxtext.readthedocs.io/en/latest/install_maxtext.html)).
+- **Diagnostics & Telemetry**: Added support for custom GCS destination paths for ML Diagnostic telemetry logging, and optimized multi-worker XLA dumping to avoid redundant CNS I/O with `--dump_xla_all_hosts`.
+
+#### Bug Fixes
+
+- Fixed attention mask generation edge cases for `AttentionType.COMPRESSED` (DeepSeek-V4 attention) across chunked prefill, packed sequences, and standalone environments.
+- Fixed Context Parallelism (CP) size derivation from active logical axis rules and computed local block padding for dynamic Splash indexer masks under CP.
+- Fixed vocab tiling hidden-state cotangent scaling.
+- Fixed inference `query_heads` rule mapping in `AttentionOp` and inference configuration.
+- Fixed dropless-replay remat override to match the Flax NNX decoder.
+- Fixed dropped routing-weight gradients in `ring_ragged_unsort`.
+- Fixed FP8 MoE on the `sparse_matmul` path and quantized MoE on the `dense_matmul` path.
+- Fixed Tunix adapter defects, engine packing path, and MoE weight tracking / zero-pad key sets in RL training.
+- Fixed `RLConfig` device mesh initialization to prevent `NoneType` `AttributeError`.
+- Fixed vLLM sampler initialization failures, `cache_heads`/`paged_kv_heads` axis ordering, and hybrid decode for Qwen3.5.
+- Fixed MoE data-parallel reduce-scatter and logical axis sharding in the vLLM serving path.
+- Fixed GatedDeltaNet (GDN) Mamba block table indexing and enabled align cache mode under prefix caching.
+- Fixed standalone Torchax converter for current TPU inference and wired `use_standalone_converter` into rollout.
+- Fixed standalone checkpointer restore loop using Orbax v1 load, and raised `RuntimeError` on fatal checkpointing errors.
+- Fixed GCS path handling by skipping unnecessary `exists()` checks, and allowed warm starts from `load_parameters_path` without requiring checkpointing.
+- Fixed Grain dataloader starvation and process leak on slice recovery, resolved `c4_mlperf` fractional eval batch size handling, and fixed `tensorflow_text` `ImportError` in post-training.
+- Fixed tokenizer type mismatch and Grain `IterDataset` crash for Qwen3-VL-2B.
+- Fixed EOS token detection and Qwen vision model routing in `multimodal_eval`.
+- Fixed chat template prompt/completion formatting and SFT masking for Gemma 4 reasoning.
+- Fixed XLA fusion breakage and numerical drift in Qwen3 under AUTO shard mode, passed `weight_dtype` in `Qwen3NextSparseMoeBlock` shared expert gate, and fixed argument mismatch in `_maybe_set_compact_mamba_num_blocks_override`.
+- Fixed `AttributeError` in MHC-lite during shape evaluation and sharding construction.
+- Fixed duplicate XLA compilation of `jit(train_step)` and resolved Flax NNX throughput regression when `scan_layers=False`.
+- Fixed FP8 custom-gradient state overwrite during Flax NNX training.
+- Fixed Ahead-Of-Time (AOT) compilation for ragged kernels and supported internal compile and orchestration.
+- Fixed DiLoCo test state loading by explicitly setting `enable_checkpointing`.
+- Suppressed Pyrefly type checking errors on JAX scalar types to improve compatibility with upcoming JAX releases.
+
+#### Deprecations
+
+- **Flax Linen Removal**: Completely removed legacy Flax Linen modules, layers, and `*_as_linen` model wrappers, deleted the `pure_nnx`, `enable_nnx`, and `pure_nnx_decoder` configuration flags, and collapsed dispatch logic across trainers (pre-train, DiLoCo, GRPO), inference (MaxEngine, KVCache, vLLM, LoRA), quantization, and model creation ([distillation](https://maxtext.readthedocs.io/en/latest/guides/distillation.html), [knowledge distillation](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/knowledge_distillation.html), [lora](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/lora.html)).
+- Removed the deprecated `--parallel_threads` CLI flag from `to_huggingface.py`.
+- Replaced deprecated `google-cloud-sdk` package with `google-cloud-cli` in Dockerfiles ([run maxtext via xpk](https://maxtext.readthedocs.io/en/latest/run_maxtext/run_maxtext_via_xpk.html), [rl on multi host](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/rl_on_multi_host.html), [sft on multi host](https://maxtext.readthedocs.io/en/latest/tutorials/posttraining/sft_on_multi_host.html)).
 
 ## Releases
 
