@@ -1081,14 +1081,11 @@ class MoEGeneral(BaseModel):
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
       "and recommended only when num_experts is a multiple of fsdp_parallelism",
   )
-  moe_spread_experts_over_fsdp: str = Field(
-      "never",
-      description="Shard the MoE weights' expert dimension over the fsdp mesh axis in addition to "
-      "the expert axis (exp -> [expert, fsdp]), releasing the MoE embed dimension from fsdp so the "
-      "two never claim the same mesh axis. Unlike shard_exp_on_fsdp this composes with "
-      "expert/tensor parallelism. 'auto': apply whenever the model is MoE, fsdp > 1, and "
-      "num_experts is divisible by ici_expert_parallelism * ici_fsdp_parallelism; 'always': apply "
-      "and error if indivisible; 'never': keep base rules.",
+  moe_spread_experts_over_fsdp: bool = Field(
+      False,
+      description="Use the FSDP mesh axis as an additional expert-parallel axis for routed MoE: expert weights "
+      "are sharded over [expert, fsdp], stay sharded during expert computation, and routed tokens communicate "
+      "over the combined (expert, fsdp) expert-parallel group.",
   )
   shard_embed_moe_on_fsdp: bool = Field(
       False,
@@ -1135,11 +1132,13 @@ class MoEGeneral(BaseModel):
           "SparseCore pinning for MoE all-gathers (`moe_pin_sparse_core_all_gathers=True`) "
           "is not supported with `moe_fsdp_use_two_stage_all_gather=True`."
       )
-    active_sharding_flags = sum([self.shard_exp_on_fsdp, self.use_2d_fsdp_sharding, self.shard_embed_moe_on_fsdp])
+    active_sharding_flags = sum(
+        [self.shard_exp_on_fsdp, self.use_2d_fsdp_sharding, self.shard_embed_moe_on_fsdp, self.moe_spread_experts_over_fsdp]
+    )
     if active_sharding_flags > 1:
       raise ValueError(
-          "Only one of shard_exp_on_fsdp, use_2d_fsdp_sharding, or "
-          "shard_embed_moe_on_fsdp can be True at the same time."
+          "Only one of shard_exp_on_fsdp, use_2d_fsdp_sharding, shard_embed_moe_on_fsdp or "
+          "moe_spread_experts_over_fsdp can be True at the same time."
       )
     return self
 
@@ -3658,6 +3657,36 @@ class MaxTextConfig(
     # Explicitly setting encoding removes the need for the pylint disable comment
     with open(custom_mesh_path, "r", encoding="utf-8") as f:
       return yaml.safe_load(f) or {}
+
+  @model_validator(mode="after")
+  def validate_moe_spread_experts_over_fsdp(self) -> "MaxTextConfig":
+    """moe_spread_experts_over_fsdp: (expert, fsdp) is the MoE expert-parallel group; guard unsupported paths."""
+    if not self.moe_spread_experts_over_fsdp:
+      return self
+    unsupported = {
+        "sparse_matmul=False": not self.sparse_matmul,
+        "use_ring_of_experts": self.use_ring_of_experts,
+        "use_batch_split_schedule": self.use_batch_split_schedule,
+        "te_moe_block": self.te_moe_block,
+        "custom_mesh_and_rule": self.custom_mesh_and_rule is not CustomRule.DEFAULT,
+        "vllm_rpa attention": self.attention in ("vllm_rpa", "vllm_batched_rpa"),
+        "model_call_mode=inference (not validated yet)": self.model_call_mode == "inference",
+        # multi-slice: the EP group would span slices and route tokens over DCN
+        "dcn_fsdp_parallelism != 1": self.dcn_fsdp_parallelism != 1,
+        "dcn_expert_parallelism != 1": self.dcn_expert_parallelism != 1,
+        # embed_moe keeps fsdp_transpose, which would re-gather expert weights
+        "fsdp_transpose parallelism != 1": self.ici_fsdp_transpose_parallelism != 1 or self.dcn_fsdp_transpose_parallelism != 1,
+    }
+    incompatible = [name for name, enabled in unsupported.items() if enabled]
+    if incompatible:
+      raise ValueError(f"moe_spread_experts_over_fsdp is not supported with: {', '.join(incompatible)}.")
+    ep, fsdp = self.ici_expert_parallelism, self.ici_fsdp_parallelism
+    if ep > 0 and fsdp > 0 and self.num_experts % (ep * fsdp) != 0:
+      raise ValueError(
+          f"moe_spread_experts_over_fsdp requires num_experts ({self.num_experts}) to be divisible by "
+          f"ici_expert_parallelism * ici_fsdp_parallelism ({ep} * {fsdp})."
+      )
+    return self
 
   @model_validator(mode="after")
   def validate_shard_embed_moe_on_fsdp(self) -> "MaxTextConfig":
