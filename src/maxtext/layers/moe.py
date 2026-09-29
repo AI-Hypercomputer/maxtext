@@ -3680,8 +3680,9 @@ class RoutedMoE(nnx.Module):
       raise ImportError("fused_moe_matmul requires the tpu-inference package.") from e
 
     # Align tpu_inference ShardingAxisName with current device mesh
-    if self.mesh is not None:
-      valid_axes = set(self.mesh.axis_names)
+    mesh = getattr(self, "mesh", None)
+    if mesh is not None:
+      valid_axes = set(mesh.axis_names)
       overrides = {}
       for attr in ("EXPERT", "MLP_DATA", "ATTN_DATA", "EXPERT_DATA", "MLP_TENSOR", "MOE_TENSOR"):
         val = getattr(ShardingAxisName, attr, None)

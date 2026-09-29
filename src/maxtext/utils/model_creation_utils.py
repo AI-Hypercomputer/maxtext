@@ -1035,7 +1035,7 @@ def _restore_and_quantize_moe_layerwise(
     reduce_axes = tuple(d for d in range(w.ndim) if d != 0 and d != channel_axis)
     max_val = jnp.max(jnp.abs(w), axis=reduce_axes, keepdims=True)
     scale = jnp.maximum(max_val / FP8_MAX, 1e-12).astype(jnp.float32)
-    q_w = jnp.clip(jnp.round(w / scale), -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
+    q_w = jnp.clip(w / scale, -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
     return q_w, scale
 
   decoder = getattr(model, "decoder", model)
