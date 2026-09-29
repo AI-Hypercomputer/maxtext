@@ -207,8 +207,12 @@ def stage_tokenize(args, hf_home, maxtext_root, out_dir):
 # ---------------------------------------------------------------- 2. sampler
 
 
-def quantize_model_moe_fp8(model, per_expert: bool = True):
-  """Quantize only MoE expert weights in MaxText model to float8_e4m3fn with per-channel scaling (Peano lab post method)."""
+def quantize_model_moe_fp8(model, per_expert: bool = True, legacy_round: bool = False):
+  """Quantize only MoE expert weights in MaxText model to float8_e4m3fn with per-channel scaling (Peano lab post method).
+
+  w / scale is cast straight to e4m3 (round-to-nearest-even in the FP8 grid). legacy_round=True reproduces the
+  original jnp.round() before the cast, which snaps every value to an integer first and zeroes |w/scale| < 0.5.
+  """
   import jax.numpy as jnp
   from flax import nnx
 
@@ -221,7 +225,10 @@ def quantize_model_moe_fp8(model, per_expert: bool = True):
       reduce_axes = tuple(d for d in range(w.ndim) if d != channel_axis)
     max_val = jnp.max(jnp.abs(w), axis=reduce_axes, keepdims=True)
     scale = jnp.maximum(max_val / FP8_MAX, 1e-12).astype(jnp.float32)
-    q_w = jnp.clip(jnp.round(w / scale), -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
+    x = w.astype(jnp.float32) / scale
+    if legacy_round:
+      x = jnp.round(x)
+    q_w = jnp.clip(x, -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
     return q_w, scale
 
   count = 0
@@ -487,6 +494,22 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
   if args.router_replay:
     kw["enable_return_routed_experts"] = True
 
+  if args.fp8_moe:
+    # tpu-inference's model_loader captures graphdef + state treedef right after _get_nnx_model returns
+    # (nnx.split(jit_model)), and every step runs nnx.merge on that capture. Quantizing runner.model after LLM()
+    # only mutates the Python module (and adds wo_scale/wi_scale leaves the captured treedef does not have), so
+    # dispatch kept running the bf16 weights. Quantize inside the loader, before the split.
+    from tpu_inference.models.common import model_loader as _tpu_model_loader
+
+    _orig_get_nnx_model = _tpu_model_loader._get_nnx_model
+
+    def _get_nnx_model_fp8(*a, **k):
+      jit_model = _orig_get_nnx_model(*a, **k)
+      quantize_model_moe_fp8(jit_model.model, per_expert=True, legacy_round=args.fp8_legacy_round)
+      return jit_model
+
+    _tpu_model_loader._get_nnx_model = _get_nnx_model_fp8
+
   llm = LLM(**kw)
   log(f"adapter engine up (model_type={args.model_type})")
 
@@ -503,7 +526,14 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
   runner.get_mrope_input_positions_fn = _text_mrope
 
   if args.fp8_moe:
-    quantize_model_moe_fp8(runner.model.model, per_expert=True)
+    _tpu_model_loader._get_nnx_model = _orig_get_nnx_model
+    # Check the dispatch view, not the module: these are the arrays model_fn actually receives.
+    import jax.numpy as jnp
+
+    n_fp8 = sum(1 for x in runner.state_leaves if getattr(x, "dtype", None) == jnp.float8_e4m3fn)
+    log(f"sampler: {n_fp8} float8_e4m3fn leaves in runner.state_leaves")
+    if n_fp8 == 0:
+      raise RuntimeError("--fp8-moe: sampler dispatch state has no FP8 leaves; MoE quantization did not take effect")
 
   if args.weight_sync:
     sync_weights_from_trainer(args, out_dir, runner)
@@ -754,7 +784,7 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
 
   quantize_trainer_moe = args.fp8_moe if getattr(args, "trainer_fp8_moe", None) is None else args.trainer_fp8_moe
   if quantize_trainer_moe:
-    quantize_model_moe_fp8(model, per_expert=True)
+    quantize_model_moe_fp8(model, per_expert=True, legacy_round=args.fp8_legacy_round)
 
   gd, st = nnx.split(model)
 
@@ -1039,6 +1069,8 @@ def main():
                   help="alias for --fp8-moe")
   ap.add_argument("--trainer-fp8-moe", action=argparse.BooleanOptionalAction, default=None,
                   help="quantize MoE layers in trainer; defaults to value of --fp8-moe")
+  ap.add_argument("--fp8-legacy-round", action="store_true",
+                  help="reproduce the original quantizer: jnp.round(w/scale) to an integer before the e4m3 cast")
   ap.add_argument("--fp8-moe-sampler-only", action="store_true",
                   help="quantize only MoE layers to FP8 in sampler, leaving trainer in pure BF16")
   ap.add_argument("--tag", default=None, help="run tag / experiment label")
