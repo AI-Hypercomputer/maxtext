@@ -35,6 +35,8 @@ from maxtext.common import train_state_nnx
 from maxtext.common.metric_logger import record_activation_metrics
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train import train as pre_train
+from maxtext.layers.multi_token_prediction import mtp_losses
+from maxtext.utils import gradient_accumulation
 import optax
 
 
@@ -645,6 +647,119 @@ class TestRoutedBiasReadNNX(unittest.TestCase):
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     _, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
     self.assertIsNone(aux["moe_bias_updates"])
+
+
+class _AuxLossMTPBlock(nnx.Module):
+  """Sows MTP loss components (token-summed loss and token count) the way MultiTokenPredictionBlock does."""
+
+  def __init__(self, hidden: int, rngs: nnx.Rngs):
+    self.v = nnx.Param(jax.random.normal(rngs.params(), (hidden,)))
+
+  def __call__(self, h):
+    per_token = jnp.tanh(h @ self.v[...]) ** 2
+    self.losses = mtp_losses(jnp.stack([jnp.sum(per_token)]))
+    self.weights = mtp_losses(jnp.stack([jnp.array(per_token.size, jnp.float32)]))
+
+
+class _TinyDecoderAuxLosses(_TinyDecoder):
+  """`_TinyDecoder` that also produces MoE load-balance, indexer and MTP losses.
+
+  Each auxiliary loss is a per-token mean, so for equal-sized microbatches the
+  mean over microbatches equals the global-batch value and the GA gradient can
+  be compared exactly against the non-GA gradient.
+  """
+
+  def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
+    super().__init__(vocab_size, hidden, rngs=rngs)
+    self.lb_w = nnx.Param(jax.random.normal(rngs.params(), (hidden,)))
+    self.indexer_w = nnx.Param(jax.random.normal(rngs.params(), (hidden,)))
+    self.mtp_block = _AuxLossMTPBlock(hidden, rngs)
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+    h = self.embed(decoder_input_tokens)
+    self.sow(nnx.Intermediate, "moe_lb_loss", jnp.atleast_1d(jnp.mean(jax.nn.sigmoid(h @ self.lb_w[...]))))
+    self.sow(indexer_losses, "indexer_loss", jnp.mean(jnp.sin(h @ self.indexer_w[...]) ** 2))
+    self.mtp_block(h)
+    return out
+
+
+def _params_shardings(model):
+  """Replicated NamedSharding tree on the model's mesh, shaped like nnx.split(model, nnx.Param, ...)[1]."""
+  _, params, _ = nnx.split(model, nnx.Param, ...)
+  ns = jax.sharding.NamedSharding(model.mesh, jax.sharding.PartitionSpec())
+  return jax.tree.map(lambda _: ns, params)
+
+
+class TestGradientAccumulationAuxLosses(unittest.TestCase):
+  """Under GA the MTP, indexer and load-balance gradients match the non-GA gradient of the global batch.
+
+  The aux-loss weighting and the logged aux values under GA come from #5401 (loss_fn's _add_aux_loss and the mean
+  over microbatches in gradient_accumulation_loss_and_grad); these tests check them together with the cotangent
+  scale (loss / S, gradient / (W / S)), which must leave every gradient, aux terms included, unchanged.
+  """
+
+  def _cfg(self, ga_steps, batch, seq=4):
+    """Config with MTP, indexer and load-balance losses on; GA microbatches of batch // ga_steps."""
+    cfg = _Cfg(
+        gradient_accumulation_steps=ga_steps,
+        micro_batch_size_to_train_on=batch // ga_steps,
+        num_experts=4,
+        mtp_num_layers=1,
+        use_indexer=True,
+        indexer_sparse_training=True,
+        indexer_loss_scaling_factor=1.0,
+    )
+    cfg.mtp_loss_scaling_factor = 0.5  # not a _Cfg field; read by calculate_mtp_loss
+    # Read by gradient_accumulation's cotangent scale (the static global-batch token capacity).
+    cfg.global_batch_size_to_train_on = batch
+    cfg.max_target_length = seq
+    return cfg
+
+  def _data(self, batch=4, seq=4):
+    data = _make_data(batch=batch, seq=seq)
+    data["inputs"] = jax.random.randint(jax.random.PRNGKey(1), (batch, seq), 0, 8)
+    data["targets"] = jax.random.randint(jax.random.PRNGKey(2), (batch, seq), 0, 8)
+    return data
+
+  def _grads_as_dict(self, grads):
+    return {jax.tree_util.keystr(p): np.asarray(v) for p, v in jax.tree_util.tree_leaves_with_path(grads)}
+
+  def test_ga1_loss_unchanged(self):
+    data = self._data()
+    model = _TinyDecoderAuxLosses(8, hidden=4, rngs=nnx.Rngs(0))
+    loss, aux = pre_train.loss_fn(model, self._cfg(1, 4), data, None, None, is_train=True)
+    expected = aux["xent_sum"] / (aux["total_weights"] + 1e-8) + aux["mtp_loss"] + aux["indexer_loss"]
+    expected = expected + aux["moe_lb_loss"]
+    np.testing.assert_allclose(float(loss), float(expected), rtol=1e-6)
+
+  def test_ga2_aux_gradients_match_global_batch(self):
+    data = self._data()
+    ga_model = _TinyDecoderAuxLosses(8, hidden=4, rngs=nnx.Rngs(0))
+    ga_loss, aux, ga_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        pre_train.loss_fn, self._cfg(2, 4), ga_model, None, _params_shardings(ga_model), dict(data), None
+    )
+    self.assertGreater(float(aux["mtp_loss"]), 0.0)
+    self.assertGreater(float(aux["indexer_loss"]), 0.0)
+    self.assertGreater(float(aux["moe_lb_loss"]), 0.0)
+
+    ref_model = _TinyDecoderAuxLosses(8, hidden=4, rngs=nnx.Rngs(0))
+    grad_fn = nnx.value_and_grad(pre_train.loss_fn, argnums=0, has_aux=True)
+    (ref_loss, ref_aux), ref_grads = grad_fn(ref_model, self._cfg(1, 4), dict(data), None, None, is_train=True)
+
+    got, want = self._grads_as_dict(ga_grads), self._grads_as_dict(ref_grads)
+    self.assertEqual(set(got), set(want))
+    for key in want:
+      np.testing.assert_allclose(got[key], want[key], rtol=1e-5, atol=1e-7, err_msg=key)
+    # The aux-only parameters get a gradient of ordinary size (not ~1/tokens).
+    for key in want:
+      if "lb_w" in key or "indexer_w" in key or "mtp_block" in key:
+        self.assertGreater(np.abs(want[key]).max(), 1e-3, key)
+    # The reported loss and the logged aux losses equal the GA=1 values of the same global batch (the aux losses are
+    # per-token means and the two microbatches carry equal token counts).
+    np.testing.assert_allclose(float(ga_loss), float(ref_loss), rtol=1e-5)
+    for key in ("moe_lb_loss", "indexer_loss", "mtp_loss"):
+      np.testing.assert_allclose(float(aux[key]), float(ref_aux[key]), rtol=1e-5, err_msg=key)
 
 
 class TestRecordActivationMetricsParity(unittest.TestCase):
