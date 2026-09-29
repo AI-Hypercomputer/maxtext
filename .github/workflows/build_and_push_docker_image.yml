@@ -158,11 +158,12 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           push: true
+          provenance: false
           context: .
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
           tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ inputs.repository_name }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
-          outputs: type=image,compression=zstd,force-compression=true
+          outputs: type=image,push=true,compression=zstd
           build-args: |
             DEVICE=${{ inputs.device }}
             MODE=${{ inputs.build_mode }}
@@ -178,14 +179,14 @@ jobs:
 
           # Add date tag
           IMAGE_DATE="$(date +%Y-%m-%d)"
-          gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
+          gcloud artifacts docker tags add "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
 
           # Convert date to YYYYMMDD format
           clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
 
           # Add MaxText tag
           MAXTEXT_SHA=$(git rev-parse --short HEAD)
-          gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
+          gcloud artifacts docker tags add "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
         env:
           INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
