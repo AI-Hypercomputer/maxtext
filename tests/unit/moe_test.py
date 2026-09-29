@@ -1191,6 +1191,109 @@ class RoutedMoeTest(parameterized.TestCase):
           ),
       )
 
+  def _run_topk_before_ep_all_gather_loss_and_grad(self, **overrides):
+    """moe_topk_before_ep_all_gather=True matches the gathered-logits top-k in loss and gradients."""
+
+    def _build_cfg(topk_before: bool):
+      kwargs = {
+          "enable_checkpointing": False,
+          "model_name": "mixtral-8x7b",
+          "override_model_config": True,
+          "base_emb_dim": 512,
+          "base_mlp_dim": 256,
+          "base_moe_mlp_dim": 256,
+          "dtype": "bfloat16",
+          "weight_dtype": "float32",
+          "megablox": False,
+          "sparse_matmul": True,
+          "per_device_batch_size": 4,
+          "ici_expert_parallelism": 2,
+          "use_ring_of_experts": True,
+          "max_target_length": 64,
+          "float32_gate_logits": True,
+          "load_balance_loss_weight": 0.01,
+          "use_ragged_sort": True,
+          # CPU ragged_dot needs the truncated (local-expert) group sizes, so no dropless default here.
+          "ragged_buffer_factor": 1.5,
+          "ragged_gather_fallback": True,
+          "ragged_gather_reduce_fallback": True,
+          "moe_topk_before_ep_all_gather": topk_before,
+      }
+      kwargs.update(overrides)
+      return pyconfig.initialize(
+          [None, get_test_config_path()], run_name=f"moe_topk_before_ep_ag_{topk_before}", **kwargs
+      )
+
+    def _loss_and_grad(cfg, variables, hidden_states):
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      model = moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        return jnp.mean(out.astype(jnp.float32) ** 2) + lb_loss.astype(jnp.float32), lb_loss
+
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        if variables is None:
+          variables = model.init({"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(0)}, hidden_states)
+        (loss, lb_loss), grads = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))(
+            variables["params"], hidden_states
+        )
+      return variables, loss, lb_loss, grads
+
+    cfg_ref = _build_cfg(topk_before=False)
+    hidden_states = jax.random.uniform(
+        jax.random.PRNGKey(2345),
+        (int(cfg_ref.per_device_batch_size) * jax.device_count(), cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+        dtype=cfg_ref.dtype,
+    )
+    variables, loss_ref, lb_ref, grads_ref = _loss_and_grad(cfg_ref, None, hidden_states)
+    _, loss_new, lb_new, grads_new = _loss_and_grad(_build_cfg(topk_before=True), variables, hidden_states)
+
+    # Same routing; only the bf16 accumulation order of the per-sequence probability mean differs.
+    np.testing.assert_allclose(lb_new, lb_ref, rtol=1e-3)
+    np.testing.assert_allclose(loss_new, loss_ref, rtol=1e-3)
+    leaves_ref, treedef_ref = jax.tree_util.tree_flatten(grads_ref)
+    leaves_new, treedef_new = jax.tree_util.tree_flatten(grads_new)
+    self.assertEqual(treedef_ref, treedef_new)
+    for g_ref, g_new in zip(leaves_ref, leaves_new):
+      g_ref, g_new = np.asarray(g_ref, np.float32), np.asarray(g_new, np.float32)
+      np.testing.assert_allclose(g_new, g_ref, rtol=1e-2, atol=1e-2 * float(np.max(np.abs(g_ref))))
+
+  @pytest.mark.tpu_only
+  def test_topk_before_ep_all_gather_loss_and_grad(self):
+    self._run_topk_before_ep_all_gather_loss_and_grad()
+
+  @pytest.mark.tpu_only
+  def test_topk_before_ep_all_gather_loss_and_grad_token_chunks(self):
+    self._run_topk_before_ep_all_gather_loss_and_grad(num_moe_token_chunks=2)
+
+  @pytest.mark.tpu_only
+  def test_topk_before_ep_all_gather_loss_and_grad_dropping_buffer(self):
+    # Drops tokens, so the dropped set must match too.
+    self._run_topk_before_ep_all_gather_loss_and_grad(ragged_buffer_factor=0.5)
+
+  @pytest.mark.tpu_only
+  def test_topk_before_ep_all_gather_loss_and_grad_sparse_core(self):
+    self._run_topk_before_ep_all_gather_loss_and_grad(
+        base_emb_dim=7168,
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        megablox=True,
+        ragged_buffer_factor=-1.0,
+        ragged_gather_fallback=False,
+        ragged_gather_reduce_fallback=False,
+    )
+
   @pytest.mark.tpu_only
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)

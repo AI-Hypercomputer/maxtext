@@ -155,6 +155,8 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `moe_quantize_token_all_gather`: If enabled, quantizes token activations to the quantized dtype (e.g. FP8) prior to the Ring of Experts All-Gather across the EP mesh axis, reducing inter-chip communication volume proportionally to the quantized width (2x for FP8 vs BF16). Requires `use_ring_of_experts=True`, `use_gmm_v2=True`, and static activation calibration. See [Quantization guide](quantization.md) for full pipeline details. Default is `False`.
 
+`moe_topk_before_ep_all_gather`: If enabled with `use_ring_of_experts=True`, each expert shard runs top-k on its local tokens and all-gathers only the resulting `(batch, seq, num_experts_per_tok)` weights and expert ids, instead of all-gathering the `(batch, seq, num_experts)` router logits and repeating top-k on the full gathered batch on every shard. This removes the redundant top-k and cuts the router all-gather (and its backward reduce-scatter) by a factor of `num_experts / num_experts_per_tok`. Only the top-k (the index map) moves before the all-gather; the token sort/permutation still happens after it. Expert assignment is unchanged, and loss and gradients match up to floating-point summation order. Ignored with forced, hash or random routing. Default is `False`.
+
 `moe_fsdp_use_two_stage_all_gather`: If enabled, split the All-Gather operation for MoE weights into two separate stages when using FSDP/FSDP-transpose sharding. This is preferred when 3D All-Gather support is unavailable.
 
 **MoE FSDP Sharding Strategies** (Note: At most one of the following three flags can be enabled at a time):

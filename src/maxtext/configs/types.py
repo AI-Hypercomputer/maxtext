@@ -1107,6 +1107,14 @@ class MoEGeneral(BaseModel):
           " that jnp.take_along_axis transposes to. Forward and gradient values are unchanged."
       ),
   )
+  moe_topk_before_ep_all_gather: bool = Field(
+      False,
+      description=(
+          "Ring of experts: run top-k on the local tokens and all-gather the top-k weights and expert ids"
+          " instead of the full router logits. The token sort still runs after the all-gather."
+          " Ignored with forced, hash or random routing."
+      ),
+  )
   use_ring_of_experts: bool = Field(
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
@@ -3799,6 +3807,11 @@ class MaxTextConfig(
           " use_ring_of_experts=True and use_ragged_sort=True."
       )
 
+  def validate_moe_topk_before_ep_all_gather(self):
+    """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
+    if self.moe_topk_before_ep_all_gather and not (self.sparse_matmul and self.use_ring_of_experts):
+      raise ValueError("moe_topk_before_ep_all_gather=True requires sparse_matmul=True and use_ring_of_experts=True.")
+
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor and eval_ragged_buffer_factor are used with supported settings."""
     if self.te_moe_block:
@@ -4931,6 +4944,7 @@ class MaxTextConfig(
       self.validate_moe_log_max_load_ratio()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_topk_before_ep_all_gather()
     self.validate_moe_quantize_combine_bwd_method()
     self.validate_mllog()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
