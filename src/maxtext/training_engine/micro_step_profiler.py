@@ -55,6 +55,20 @@ class MicroStepProfiler:
       )
       return
     self.profiling_options = jax.profiler.ProfileOptions()
+    if config.enable_tpu_profiling_options:
+      # common/profiler.py builds the same three keys but is imported only by
+      # the inference entry points, so they are inert on the training engine.
+      # Its additional config.profiler == "xplane" gate is redundant here: the
+      # ProfilerType.NONE return above already covers it.
+      self.profiling_options.advanced_configuration = {
+          "tpu_num_chips_to_profile_per_task": config.tpu_num_chips_to_profile_per_task,
+          "tpu_num_sparse_core_tiles_to_trace": config.tpu_num_sparse_core_tiles_to_trace,
+          "tpu_num_sparse_cores_to_trace": config.tpu_num_sparse_cores_to_trace,
+      }
+      logging.info(
+          "TPU advanced profiling enabled: %s",
+          self.profiling_options.advanced_configuration,
+      )
     self.profile_active: bool = False
     # profiler_period is the distance between successive profiling window,
     # profiler_steps=3, profiler_period=4 gives [1,3], [5,7], [9,11].
