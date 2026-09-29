@@ -640,15 +640,18 @@ def static_quantized_all_gather(
     axis_name: str | tuple[str, ...],
     scatter_dimension: int = 0,
     tiled: bool = True,
+    qtype: jnp.dtype = jnp.float8_e5m2,
     calibration_method: str = "fixed,-57344,57344",
 ) -> jax.Array:
   """Performs all_gather with static FP8 per-tensor scale."""
+  x_f32 = x.astype(jnp.float32)
   x_q = qpl.quantize(
-      x.astype(jnp.float32),
-      jnp.float8_e5m2,
-      channelwise_axes=[],
+      x_f32,
+      qtype=qtype,
+      channelwise_axes=(),
       calibration_method=calibration_method,
   )
+  # Static scale is uniform across all EP shards; only qvalues are gathered.
   gathered_qvals = jax.lax.all_gather(x_q.qvalue, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
   return (gathered_qvals.astype(jnp.float32) * x_q.scale).astype(x.dtype)
 
@@ -661,17 +664,19 @@ def rowwise_quantized_all_gather(
     qtype: jnp.dtype = jnp.float8_e5m2,
 ) -> jax.Array:
   """Performs all_gather with dynamic row-wise (token-wise) FP8 scale."""
-  g_f32 = x.astype(jnp.float32)
+  x_f32 = x.astype(jnp.float32)
   # Scale per-token across all leading dims (e.g. (batch, seq) for 3D or (tokens,) for 2D)
   # so each token vector along the contracting/hidden dim receives an independent dynamic
   # scale, consistent with GMM activation gradient quantization in ops.py.
-  grads_q = qpl.quantize(
-      g_f32,
+  x_q = qpl.quantize(
+      x_f32,
       qtype=qtype,
       channelwise_axes=tuple(range(x.ndim - 1)),
+      calibration_method="absmax",
   )
-  gathered_qvals = jax.lax.all_gather(grads_q.qvalue, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
-  gathered_scales = jax.lax.all_gather(grads_q.scale, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+  # Dynamic scales vary per token shard and must be all-gathered alongside qvalues.
+  gathered_qvals = jax.lax.all_gather(x_q.qvalue, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
+  gathered_scales = jax.lax.all_gather(x_q.scale, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
   return (gathered_qvals.astype(jnp.float32) * gathered_scales).astype(x.dtype)
 
 
@@ -706,6 +711,7 @@ def _moe_combine_psum_scatter_fwd(
     tiled: bool = True,
     bwd_method: str = "",
 ) -> tuple[jax.Array, None]:
+  """Custom VJP forward pass for _moe_combine_psum_scatter."""
   return _moe_combine_psum_scatter(x, axis_name, scatter_dimension, tiled, bwd_method), None
 
 

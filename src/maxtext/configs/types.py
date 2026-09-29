@@ -1154,7 +1154,7 @@ class MoEGeneral(BaseModel):
       "",
       description=(
           "Quantization method for Token Combine backward All-Gather. "
-          "'' = unquantized BF16; 'rowwise' = dynamic row-wise FP8 E5M2; "
+          "'' = unquantized BF16; 'rowwise' = dynamic token-wise FP8 E5M2; "
           "'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
       ),
   )
