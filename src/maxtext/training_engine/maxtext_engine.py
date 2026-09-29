@@ -2516,13 +2516,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       The metadata PyTree of the restored checkpoint.
     """
     step = kwargs.get("step", None)
-    # The restore target is read off the live state, and `CloudPathwaysArrayHandler` only restores
-    # into a NamedSharding. An engine that has not compiled yet -- Tunix resumes right after
-    # `bring_up_workers(dummy_data=None)` -- still holds optax's `count` and the optimizer's `step`
-    # uncommitted on one device, so commit them here as `_compile_for_batch` does first (it additionally
-    # applies Zero-1 and optimizer offload).
-    self._refresh_pure_state()
-    self._place_state_on_mesh()
     checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
