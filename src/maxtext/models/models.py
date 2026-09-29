@@ -34,6 +34,7 @@ from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.multimodal import processor as mm_processor
+from maxtext.utils import max_logging
 
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions
@@ -48,12 +49,12 @@ def transformer_as_linen(
     *,
     name: str | None = None,
 ) -> nnx_wrappers.ToLinen:
-  """Constructs an NNX Transformer wrapped as a Linen module.
+  """Constructs an NNX Transformer wrapped as a Linen module. Deprecated.
 
   Returns a `TransformerLinen` that wraps the NNX-style Transformer so it can be
-  driven through the Linen init/apply API (checkpoint conversion, AOT compile,
-  the inference engine). Pure-NNX call sites build `Transformer` directly via
-  `model_creation_utils.from_config`.
+  driven through the Linen init/apply API. Nothing in MaxText needs this anymore;
+  it is kept for callers of `model_creation_utils.from_config` without `rngs`.
+  Pass `rngs` to `from_config` to get the NNX `Transformer` instead.
 
   Args:
     config (Config): The configuration object specifying model hyperparameters and options.
@@ -66,6 +67,10 @@ def transformer_as_linen(
   Returns:
     nnx_wrappers.ToLinen: An NNX Transformer wrapped as a Linen module.
   """
+  max_logging.log(
+      "WARNING: models.transformer_as_linen, and model_creation_utils.from_config without rngs, are deprecated."
+      " Please pass rngs=nnx.Rngs(...) to from_config to get the NNX Transformer."
+  )
   return TransformerLinen(
       Transformer,
       args=(),

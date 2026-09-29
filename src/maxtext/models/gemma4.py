@@ -27,7 +27,7 @@ from typing import Optional, Any
 from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
 from maxtext.layers import initializers
 from maxtext.layers import moe
-from maxtext.layers import nnx_scan, nnx_wrappers
+from maxtext.layers import nnx_scan
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import MlpBlock
@@ -413,12 +413,6 @@ class Gemma4DecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-Gemma4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Gemma4DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-
 class Gemma4ScannableBlock(nnx.Module):
   """A repeatable block of Gemma4 decoder layers, scanning local layers."""
 
@@ -699,9 +693,3 @@ class Gemma4ScannableBlock(nnx.Module):
     if cfg.scan_layers:
       return y, None
     return y
-
-
-Gemma4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Gemma4ScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

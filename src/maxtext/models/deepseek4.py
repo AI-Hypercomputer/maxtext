@@ -25,7 +25,6 @@ from maxtext.common.common_types import HyperConnectionType
 from maxtext.layers import attention_compressed
 from maxtext.layers import initializers
 from maxtext.layers import moe
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.models import deepseek
 from jax.ad_checkpoint import checkpoint_name
@@ -259,14 +258,3 @@ class DeepSeek4ScannableBlock(nnx.Module):
     )
 
     return y, None
-
-
-DeepSeek4LayerToLinen = nnx_wrappers.to_linen_class(
-    DeepSeek4DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-DeepSeek4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    DeepSeek4ScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

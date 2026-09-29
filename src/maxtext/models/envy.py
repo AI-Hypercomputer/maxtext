@@ -23,7 +23,6 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config, MODEL_MODE_PREFILL
 from maxtext.layers import initializers
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout
@@ -256,12 +255,6 @@ class EnvyDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-EnvyDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    EnvyDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-
 class EnvyScannableBlock(nnx.Module):
   """A repeatable block of inhomogeneous layers for Envy."""
 
@@ -334,9 +327,3 @@ class EnvyScannableBlock(nnx.Module):
       return y, None
     else:
       return y
-
-
-EnvyScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    EnvyScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

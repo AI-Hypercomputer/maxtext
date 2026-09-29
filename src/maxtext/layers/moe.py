@@ -42,7 +42,7 @@ from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
-from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -652,22 +652,20 @@ class GateLogit(nnx.Module):
       self.bias = None
 
     if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
-      dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
-      dot_general_linen = dot_general_cls()
-      quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
-      self._quant_dot_general_name = f"{type(dot_general_linen).__name__}_0"
+      self._quant_dot_general_name, quant_dot_general = quantizations.make_dot_general(quant, kernel_axes, rngs)
       setattr(self, self._quant_dot_general_name, quant_dot_general)
-      block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE block scaling
-      dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
-      self(dummy_inputs, _initializing=True)
-      # See the matching comment in linears.py.
-      if not quant.needs_apply_rngs:
-        quant_dot_general.release_rngs()
+      # See the matching comments in linears.py.
+      if isinstance(quant_dot_general, nnx_wrappers.ToNNX):
+        block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE block scaling
+        dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
+        self(dummy_inputs, _initializing=True)
+        if not quant.needs_apply_rngs:
+          quant_dot_general.release_rngs()
     else:
       self._quant_dot_general_name = None
 
   @property
-  def quant_dot_general(self) -> nnx_wrappers.ToNNX | None:
+  def quant_dot_general(self) -> nnx.Module | None:
     if self._quant_dot_general_name is None:
       return None
     return getattr(self, self._quant_dot_general_name)
@@ -3928,7 +3926,7 @@ class RoutedMoE(nnx.Module):
                 f"Einsum name '{op_id}' is not registered in quant_einsums. "
                 f"Available names: {list(self.quant_einsums.keys())}"
             )
-          return self.quant_einsums[op_id](*args, mutable=["_overwrite_with_gradient"])
+          return self.quant_einsums[op_id](*args)
         einsum = self.quant.einsum(mesh_axes=rhs_mesh_axes)  # pytype: disable=attribute-error
         return quantizations.apply_einsum_in_nnx(self, op_id, einsum, ["aqt"], *args)
 
@@ -4846,110 +4844,3 @@ class RoutedAndSharedMoE(nnx.Module):
         out_sharding=out_sharding,
     )
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
-
-
-def get_gate_logit(
-    inputs_shape: tuple[int, ...],
-    out_features_shape: Union[Iterable[int], int],
-    model_name: str,
-    axis: Union[Iterable[int], int] = -1,
-    weight_dtype: ctypes.DType = jnp.float32,
-    dtype: ctypes.DType = jnp.float32,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
-    kernel_axes: Tuple[Optional[str], ...] = (),
-    use_bias: bool = False,
-    score_func: str = "",
-    quant: Optional[quantizations.AqtQuantization] = None,
-    matmul_precision: str = "default",
-    name: Optional[str] = None,
-):
-  """Creates a GateLogit Linen module."""
-
-  axis = linears.canonicalize_tuple(axis)
-  in_features_shape = tuple(inputs_shape[ax] for ax in linears.normalize_axes(axis, len(inputs_shape)))
-
-  module = nnx_wrappers.to_linen(
-      GateLogit,
-      in_features_shape=in_features_shape,
-      out_features_shape=out_features_shape,
-      model_name=model_name,
-      axis=axis,
-      weight_dtype=weight_dtype,
-      dtype=dtype,
-      kernel_init=kernel_init,
-      kernel_axes=kernel_axes,
-      use_bias=use_bias,
-      score_func=score_func,
-      quant=quant,
-      matmul_precision=matmul_precision,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-  return module
-
-
-def get_routed_moe(
-    config: ctypes.Config,
-    num_experts: int,
-    num_experts_per_tok: int,
-    mesh: jax.sharding.Mesh,
-    kernel_init: NdInitializer,
-    kernel_axes: Tuple[Optional[str], ...],
-    intermediate_dim: int = 2048,
-    weight_dtype: ctypes.DType = jnp.float32,
-    dtype: ctypes.DType = jnp.float32,
-    quant: Optional[quantizations.AqtQuantization] = None,
-    name: Optional[str] = None,
-    force_dropless: bool = False,
-):
-  """Creates a RoutedMoE Linen module."""
-
-  module = nnx_wrappers.to_linen(
-      RoutedMoE,
-      config=config,
-      num_experts=num_experts,
-      num_experts_per_tok=num_experts_per_tok,
-      mesh=mesh,
-      kernel_init=kernel_init,
-      kernel_axes=kernel_axes,
-      intermediate_dim=intermediate_dim,
-      weight_dtype=weight_dtype,
-      dtype=dtype,
-      quant=quant,
-      name=name,
-      force_dropless=force_dropless,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-  return module
-
-
-def get_routed_and_shared_moe(
-    config: ctypes.Config,
-    mesh: jax.sharding.Mesh,
-    kernel_init: NdInitializer,
-    kernel_axes: Tuple[Optional[str], ...],
-    weight_dtype: ctypes.DType = jnp.float32,
-    dtype: ctypes.DType = jnp.float32,
-    quant: Optional[quantizations.AqtQuantization] = None,
-    name: Optional[str] = None,
-    is_hash_routing: bool = False,
-):
-  """Creates a RoutedAndSharedMoE Linen module."""
-
-  module = nnx_wrappers.to_linen(
-      RoutedAndSharedMoE,
-      config=config,
-      mesh=mesh,
-      kernel_init=kernel_init,
-      kernel_axes=kernel_axes,
-      weight_dtype=weight_dtype,
-      dtype=dtype,
-      quant=quant,
-      name=name,
-      is_hash_routing=is_hash_routing,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-  return module

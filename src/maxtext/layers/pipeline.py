@@ -28,8 +28,7 @@ from flax import linen as nn
 from flax.core import lift as flax_lift
 from flax.core import scope as flax_scope
 from flax import nnx
-from maxtext.layers import initializers
-from maxtext.layers.nnx_wrappers import is_linen_initializing, to_linen_class
+from maxtext.layers.nnx_wrappers import is_linen_initializing
 
 from maxtext.common.common_types import Config, MODEL_MODE_TRAIN, ShardMode
 from maxtext.utils.sharding import (
@@ -1821,33 +1820,3 @@ def create_nnx_pipeline(
         config=config, stage_factory=stage_factory, mesh=mesh, remat_policy=remat_policy, rngs=rngs
     )
   return NNXPipeline(config=config, stage_factory=stage_factory, mesh=mesh, remat_policy=remat_policy, rngs=rngs)
-
-
-Pipeline = to_linen_class(
-    NNXPipeline,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-CircularPipeline = to_linen_class(
-    NNXCircularPipeline,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-
-def create_pipeline(
-    config: Config,
-    layers=None,
-    mesh: Mesh = None,
-    remat_policy: Any = None,
-) -> nn.Module:
-  """Returns the ToLinen-wrapped NNX pipeline appropriate for the config.
-
-  For raw NNX pipeline classes (no Linen wrapping), use create_nnx_pipeline() instead.
-
-  Args:
-    config: Model configuration.
-    layers: Callable[[nnx.Rngs], nnx.Module] constructing one pipeline stage.
-    mesh: JAX device mesh for sharding.
-    remat_policy: Optional rematerialization policy.
-  """
-  cls = CircularPipeline if config.pipeline_fsdp_ag_per_repeat else Pipeline
-  return cls(config=config, stage_factory=layers, mesh=mesh, remat_policy=remat_policy)
