@@ -11,7 +11,7 @@
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -23,7 +23,7 @@
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -33,7 +33,7 @@
   },
   "['model']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
     "partition_spec": [
-      null,
+      "fsdp_transpose",
       null,
       "fsdp"
     ],
@@ -114,10 +114,7 @@
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -128,10 +125,7 @@
   },
   "['model']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -145,10 +139,7 @@
   },
   "['model']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -160,10 +151,7 @@
   },
   "['model']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -177,7 +165,10 @@
   },
   "['model']/['decoder']/['logits_dense']/['kernel']/.value": {
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ],
       null
     ],
     "shape": [
@@ -187,10 +178,7 @@
   },
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -238,13 +226,10 @@
   },
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -255,13 +240,10 @@
   },
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -272,12 +254,9 @@
   },
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
-      null,
+      "fsdp_transpose",
       "fsdp"
     ],
     "shape": [
@@ -289,10 +268,7 @@
   },
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -304,10 +280,7 @@
   },
   "['model']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -321,10 +294,7 @@
     "partition_spec": [
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       2816,
@@ -367,10 +337,7 @@
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -381,10 +348,7 @@
   },
   "['model']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -398,10 +362,7 @@
   },
   "['model']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -413,10 +374,7 @@
   },
   "['model']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -455,7 +413,10 @@
   "['model']/['token_embedder']/['embedding']/.value": {
     "partition_spec": [
       null,
-      "fsdp"
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ]
     ],
     "shape": [
       102400,
@@ -478,7 +439,7 @@
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -490,7 +451,7 @@
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -500,7 +461,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
     "partition_spec": [
-      null,
+      "fsdp_transpose",
       null,
       "fsdp"
     ],
@@ -545,10 +506,7 @@
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -559,10 +517,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -576,10 +531,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -591,10 +543,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -608,7 +557,10 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['logits_dense']/['kernel']/.value": {
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ],
       null
     ],
     "shape": [
@@ -618,10 +570,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -633,13 +582,10 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -650,13 +596,10 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -667,12 +610,9 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
-      null,
+      "fsdp_transpose",
       "fsdp"
     ],
     "shape": [
@@ -684,10 +624,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -699,10 +636,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -716,10 +650,7 @@
     "partition_spec": [
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       2816,
@@ -762,10 +693,7 @@
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -776,10 +704,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -793,10 +718,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -808,10 +730,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['mu']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -826,7 +745,10 @@
   "['optimizer']/['opt_state']/[0]/['mu']/['token_embedder']/['embedding']/.value": {
     "partition_spec": [
       null,
-      "fsdp"
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ]
     ],
     "shape": [
       102400,
@@ -845,7 +767,7 @@
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -857,7 +779,7 @@
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -867,7 +789,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['mlp']/['wo']/['kernel']/.value": {
     "partition_spec": [
-      null,
+      "fsdp_transpose",
       null,
       "fsdp"
     ],
@@ -912,10 +834,7 @@
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -926,10 +845,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -943,10 +859,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -958,10 +871,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['dense_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -975,7 +885,10 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['logits_dense']/['kernel']/.value": {
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ],
       null
     ],
     "shape": [
@@ -985,10 +898,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['gate']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1000,13 +910,10 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_0']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -1017,13 +924,10 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wi_1']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -1034,12 +938,9 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['MoeBlock_0']/['wo']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
-      null,
+      "fsdp_transpose",
       "fsdp"
     ],
     "shape": [
@@ -1051,10 +952,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_0']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1066,10 +964,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['DeepSeekMoeBlock_0']/['shared_experts']/['wi_1']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1083,10 +978,7 @@
     "partition_spec": [
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       2816,
@@ -1129,10 +1021,7 @@
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -1143,10 +1032,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['query']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -1160,10 +1046,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['wkv_a']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1175,10 +1058,7 @@
   },
   "['optimizer']/['opt_state']/[0]/['nu']/['decoder']/['moe_layers']/['self_attention']/['wkv_b']/['kernel']/.value": {
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -1193,7 +1073,10 @@
   "['optimizer']/['opt_state']/[0]/['nu']/['token_embedder']/['embedding']/.value": {
     "partition_spec": [
       null,
-      "fsdp"
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ]
     ],
     "shape": [
       102400,

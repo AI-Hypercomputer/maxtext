@@ -55,9 +55,13 @@ Similar in philosophy to `ep-as-cp.yml`, this configuration explicitly includes 
 
 Different with the rule in `base.yml`, this rule configures expert physical axis to function as data parallelism rather than FSDP. This removes the constraint where FSDPxEP is limited by specific model dimensions, particularly for small tensors such as attention projections. Ultimately, this change benefits large-scale training.
 
+### `fsdp-as-dp-for-attn.yml`
+
+Built on `ep-as-dp.yml` for large-scale training, where the FSDP rank is so large (above 512) that the all-gather of small weights becomes latency bound. The attention weights, the MoE router (`embed_router`) and the shared experts (`embed_shared`, `mlp_shared`) are sharded on the much smaller `expert` axis and replicated over `fsdp` / `fsdp_transpose`, so `fsdp` acts as data parallelism for them. The routed experts and dense MLPs, which are large enough to keep scaling with FSDP, stay sharded on `fsdp`. This trades HBM for cheaper all-gathers.
+
 ### `fsdp-as-dp-for-attn-cp-as-ep-for-moe.yml`
 
-Combines `fsdp-as-dp-for-attn.yml` with the context-axis borrowing of `cp-as-ep.yml`, for fractional batch size (e.g. `per_device_batch_size=0.5`) at large scale on TPU v7x. The `context` axis is laid over the two TensorCores of a chip, so each chip holds one sequence split in half. In attention, `fsdp` / `fsdp_transpose` act as data parallelism and the attention weights are sharded on `context` and `expert` (the `context` part of their all-gather stays on-chip). Inside the MoE, `context` joins `expert`, giving EP = `context` x `expert`. `context` is the last mesh axis so that the v7x mesh builder, which assigns axes last-first and offers the core axis first, places it on the TensorCore pair.
+Combines `fsdp-as-dp-for-attn.yml` with the context-axis borrowing of `cp-as-ep.yml`, for fractional batch size (e.g. `per_device_batch_size=0.5`) at large scale on TPU v7x. The `context` axis is laid over the two TensorCores of a chip, so each chip holds one sequence split in half. In attention, `fsdp` / `fsdp_transpose` act as data parallelism and the attention, router and shared expert weights are sharded on `context` and `expert` (the `context` part of their all-gather stays on-chip). Inside the MoE, `context` joins `expert`, giving EP = `context` x `expert`. `context` is the last mesh axis so that the v7x mesh builder, which assigns axes last-first and offers the core axis first, places it on the TensorCore pair.
 
 ### `fsdp-as-dp-for-attn-cp-as-ep-for-moe-eval.yml`
 

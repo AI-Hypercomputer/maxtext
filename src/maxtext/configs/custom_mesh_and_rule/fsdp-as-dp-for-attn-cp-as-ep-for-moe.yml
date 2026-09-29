@@ -16,17 +16,19 @@
 # the MoE, as in cp-as-ep.yml. It uses data, FSDP, FSDP_transpose, expert and
 # context, and assigns them as:
 #
-#   FSDP acts like DP for attn, but FSDP for moe
-#   EP acts like FSDP for attn, and EP for moe
-#   CP acts like CP (and FSDP) for attn, and EP for moe
+#   FSDP acts like DP for attn, router and shared experts, but FSDP for routed experts
+#   EP acts like FSDP for attn, router and shared experts, and EP for routed experts
+#   CP acts like CP (and FSDP) for attn, router and shared experts, and EP for routed experts
 #
 # It targets fractional per_device_batch_size (e.g. 0.5) on TPU v7x, where
 # context is laid over the two TensorCores of a chip: each chip holds one
 # sequence, split in half along the sequence dimension. Attention weights
-# ('q_lora', 'kv_lora' and 'embed_attn') are sharded on context and expert, so
-# their all-gather stays on the small axes (the context half is on-chip), and
-# they are replicated over fsdp / fsdp_transpose. Inside the core MoE part
-# (between EP all2all) context joins expert, giving EP = context x expert.
+# ('q_lora', 'kv_lora' and 'embed_attn'), the MoE router ('embed_router') and
+# the shared experts ('embed_shared', 'mlp_shared') are sharded on context and
+# expert, so their all-gather stays on the small axes (the context half is
+# on-chip), and they are replicated over fsdp / fsdp_transpose. Inside the core
+# MoE part (between EP all2all) context joins expert, giving EP = context x
+# expert.
 #
 # 'context' is the last mesh axis on purpose: the TPU v7x mesh builder assigns
 # logical axes last-first and offers the core axis first, so this keeps context
@@ -83,10 +85,10 @@ logical_axis_rules: [
                       ['exp', ['context', 'expert']],
                       ['mlp_moe', ['fsdp_transpose']],
                       ['embed_moe', ['fsdp']],
-                      ['embed_router', ['fsdp']],
-                      ['mlp_shared', ['fsdp_transpose']],
-                      ['embed_shared', ['fsdp', 'fsdp_transpose']],
-                      ['embed_shared', ['fsdp']],
+                      # Router and shared expert weights, sharded on context and expert like the attention weights
+                      ['embed_router', ['context', 'expert']],
+                      ['mlp_shared', []],
+                      ['embed_shared', ['context', 'expert']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================

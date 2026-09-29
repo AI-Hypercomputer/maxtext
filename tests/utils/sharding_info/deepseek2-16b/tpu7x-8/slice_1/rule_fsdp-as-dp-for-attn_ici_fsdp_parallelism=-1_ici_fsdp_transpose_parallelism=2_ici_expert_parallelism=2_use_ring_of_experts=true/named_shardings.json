@@ -5,15 +5,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -29,21 +27,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -57,21 +53,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -85,19 +79,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
+      "fsdp_transpose",
       null,
       "fsdp"
     ],
@@ -113,15 +105,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -139,15 +129,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -165,15 +153,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -187,15 +173,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -209,15 +193,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -231,15 +213,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -253,15 +233,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -275,15 +253,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -297,15 +273,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -323,25 +297,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -356,22 +325,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -389,22 +353,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -420,22 +379,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -453,19 +407,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ],
       null
     ],
     "shape": [
@@ -479,22 +434,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -510,15 +460,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -532,15 +480,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -554,15 +500,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -576,15 +520,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -598,15 +540,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -620,15 +560,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -642,25 +580,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -675,25 +608,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -708,24 +636,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
-      null,
+      "fsdp_transpose",
       "fsdp"
     ],
     "shape": [
@@ -741,22 +664,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -772,22 +690,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -803,24 +716,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       2816,
@@ -834,15 +742,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -860,15 +766,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -886,15 +790,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -912,25 +814,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -945,22 +842,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -978,22 +870,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1009,22 +896,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -1042,15 +924,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -1062,15 +942,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -1082,15 +960,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -1102,15 +978,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -1122,15 +996,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -1142,15 +1014,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -1162,20 +1032,21 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
-      "fsdp"
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ]
     ],
     "shape": [
       102400,
@@ -1188,15 +1059,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -1208,15 +1077,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1232,21 +1099,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -1260,21 +1125,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -1288,19 +1151,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
+      "fsdp_transpose",
       null,
       "fsdp"
     ],
@@ -1316,15 +1177,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1342,15 +1201,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1368,15 +1225,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1394,25 +1249,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -1427,22 +1277,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -1460,22 +1305,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1491,22 +1331,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -1524,19 +1359,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ],
       null
     ],
     "shape": [
@@ -1550,22 +1386,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1581,25 +1412,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -1614,25 +1440,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -1647,24 +1468,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
-      null,
+      "fsdp_transpose",
       "fsdp"
     ],
     "shape": [
@@ -1680,22 +1496,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1711,22 +1522,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1742,24 +1548,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       2816,
@@ -1773,15 +1574,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1799,15 +1598,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1825,15 +1622,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -1851,25 +1646,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -1884,22 +1674,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -1917,22 +1702,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -1948,22 +1728,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -1981,20 +1756,21 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
-      "fsdp"
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ]
     ],
     "shape": [
       102400,
@@ -2007,15 +1783,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2031,21 +1805,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -2059,21 +1831,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       "fsdp",
       null,
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       2048,
@@ -2087,19 +1857,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      null,
+      "fsdp_transpose",
       null,
       "fsdp"
     ],
@@ -2115,15 +1883,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2141,15 +1907,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2167,15 +1931,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2193,25 +1955,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -2226,22 +1983,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -2259,22 +2011,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -2290,22 +2037,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -2323,19 +2065,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      "fsdp",
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ],
       null
     ],
     "shape": [
@@ -2349,22 +2092,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -2380,25 +2118,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -2413,25 +2146,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       "fsdp",
-      null
+      "fsdp_transpose"
     ],
     "shape": [
       64,
@@ -2446,24 +2174,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
-      null,
+      "fsdp_transpose",
       "fsdp"
     ],
     "shape": [
@@ -2479,22 +2202,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -2510,22 +2228,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -2541,24 +2254,19 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       2816,
@@ -2572,15 +2280,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2598,15 +2304,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2624,15 +2328,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
@@ -2650,25 +2352,20 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
       null,
       null,
-      [
-        "context",
-        "expert"
-      ]
+      "expert"
     ],
     "shape": [
       16,
@@ -2683,22 +2380,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -2716,22 +2408,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null
     ],
@@ -2747,22 +2434,17 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
-      [
-        "context",
-        "expert"
-      ],
+      "expert",
       null,
       null,
       null
@@ -2780,20 +2462,21 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [
       null,
-      "fsdp"
+      [
+        "fsdp",
+        "fsdp_transpose"
+      ]
     ],
     "shape": [
       102400,
@@ -2806,15 +2489,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
@@ -2826,15 +2507,13 @@
         "data",
         "fsdp",
         "fsdp_transpose",
-        "expert",
-        "context"
+        "expert"
       ],
       "shape": {
         "data": 1,
         "fsdp": 2,
-        "fsdp_transpose": 1,
-        "expert": 2,
-        "context": 2
+        "fsdp_transpose": 2,
+        "expert": 2
       }
     },
     "partition_spec": [],
