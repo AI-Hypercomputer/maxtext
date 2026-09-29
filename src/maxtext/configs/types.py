@@ -5268,6 +5268,8 @@ class MaxTextConfig(
             f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
     self._validate_usp_context_parallelism()
+    if self.mhc_split_axis_contraction and self.ici_tensor_parallelism == self.dcn_tensor_parallelism == 1:
+      raise ValueError("mhc_split_axis_contraction=True requires tensor parallelism (ici/dcn_tensor_parallelism > 1).")
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.

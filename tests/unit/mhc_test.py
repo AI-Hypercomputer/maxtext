@@ -131,7 +131,6 @@ class TestMHC(parameterized.TestCase):
         "base_emb_dim": self.dim,
         "mhc_expansion_rate": rate,
         "enable_mhc_lite": enable_mhc_lite,
-        "mhc_split_axis_contraction": mhc_split_axis_contraction,
         "use_mhc_pallas_kernel": use_mhc_pallas_kernel,
         "decoder_block": "deepseek",
         "num_experts": 4,
@@ -153,6 +152,9 @@ class TestMHC(parameterized.TestCase):
         [None, get_test_config_path()],
         **kwargs,
     )
+    # Set after initialize: MaxTextConfig rejects this flag at TP=1 and the test mesh is
+    # single-device. Split and flat paths are equivalent at a fixed TP, so TP=1 is valid here.
+    self.config.get_keys()["mhc_split_axis_contraction"] = mhc_split_axis_contraction
     devices_array = maxtext_utils.create_device_mesh(self.config)
     self.mesh = Mesh(devices_array, self.config.mesh_axes)
 
