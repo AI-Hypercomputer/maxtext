@@ -4213,7 +4213,7 @@ class RoutedMoE(nnx.Module):
       quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
     # serve_fp8_weight with a fixed act_quantization_calibration_method: the experts use the
     # same static activation scale as the dense layers ({} keeps the kernel's dynamic scale).
-    input_scale_kwargs = fused_moe_input_scale_kwargs(self.quant, fused_moe_func)
+    input_scale_kwargs = fused_moe_input_scale_kwargs(getattr(self, "quant", None), fused_moe_func)
     fused_moe = quantizations.without_qwix_interception(fused_moe_func)
 
     output_2d = fused_moe(
