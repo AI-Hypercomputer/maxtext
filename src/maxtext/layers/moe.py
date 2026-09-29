@@ -1582,6 +1582,7 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           tag_routing_fn=routing_tag_fn(self.config),
           return_argsort_indices=return_argsort_indices,
+          gather_reduce_bf16_output=self.config.ragged_gather_reduce_bf16_output,
       )
       if return_argsort_indices:
         sorted_inputs, group_size, sorted_selected_experts, topk_argsort_indices = ring_sort_out
@@ -1715,6 +1716,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
+          gather_reduce_bf16_output=self.config.ragged_gather_reduce_bf16_output,
       )
     else:
       unsort_intermediate = _sort_activations(

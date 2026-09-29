@@ -41,6 +41,8 @@ class _Config:
   in_dtype: Any
   core_axis_name: str
   subcore_axis_name: str
+  # Write bfloat16 output, two columns per uint32 word (see _unpack_bf16_columns).
+  pack_bf16_output: bool = False
 
   @property
   def row_chunk_size(self) -> int:
@@ -65,6 +67,7 @@ def get_cost_estimate(
     input_dtype_bytes: int,
     bytes_accessed_override: int = -1,
     flops_override: int = -1,
+    output_dtype_bytes: int = 4,
 ) -> pl.CostEstimate:
   """Returns a cost estimate for the ragged gather-reduce kernel.
 
@@ -80,6 +83,7 @@ def get_cost_estimate(
       of auto-computing.  -1 (default) means auto-compute.
     flops_override: If > 0, use this value as the flop count instead of
       auto-computing.  -1 (default) means auto-compute.
+    output_dtype_bytes: Size of one output element in bytes.
 
   Returns:
     A ``pl.CostEstimate`` suitable for XLA scheduling.
@@ -97,13 +101,13 @@ def get_cost_estimate(
   else:
     # Bytes accessed:
     #   read  – input rows + src_indices (int32) + dst_indices (int32) + topk_weights (f32)
-    #   write – output rows (float32)
+    #   write – output rows (float32, or bfloat16 when packed)
     bytes_in = padded_input_size * aligned_hidden_size * input_dtype_bytes  # input rows
     bytes_in += padded_input_size * 4  # src_indices (int32)
     bytes_in += padded_input_size * 4  # dst_indices (int32)
     bytes_in += padded_input_size * 4  # topk_weights (float32)
     output_rows = padded_input_size // reduce_group_size
-    bytes_out = output_rows * aligned_hidden_size * 4  # output rows (float32)
+    bytes_out = output_rows * aligned_hidden_size * output_dtype_bytes  # output rows
     bytes_accessed = bytes_in + bytes_out
 
   return pl.CostEstimate(
@@ -182,6 +186,33 @@ def _fallback_implementation(
   return out
 
 
+def _round_f32_bits_to_bf16_bits(bits: jax.Array) -> jax.Array:
+  """Rounds float32 bit patterns (uint32) to bfloat16 bit patterns, returned in the low 16 bits.
+
+  Round-to-nearest-even, the same as ``astype(jnp.bfloat16)``. NaN becomes the canonical quiet NaN with the
+  same sign.
+  """
+  lsb = jnp.bitwise_and(jnp.right_shift(bits, 16), jnp.uint32(1))
+  rounded = jnp.right_shift(bits + jnp.uint32(0x7FFF) + lsb, 16)
+  quiet_nan = jnp.bitwise_or(jnp.bitwise_and(jnp.right_shift(bits, 16), jnp.uint32(0x8000)), jnp.uint32(0x7FC0))
+  is_nan = jnp.bitwise_and(bits, jnp.uint32(0x7FFFFFFF)) > jnp.uint32(0x7F800000)
+  return jnp.where(is_nan, quiet_nan, rounded)
+
+
+def _unpack_bf16_columns(packed: jax.Array, col_chunk_size: int) -> jax.Array:
+  """Unpacks the kernel's packed bfloat16 output, ``(rows, cols // 2)`` uint32 -> ``(rows, cols)`` bfloat16.
+
+  Within each ``col_chunk_size`` column chunk, word ``j`` holds column ``j`` in its low 16 bits and column
+  ``j + col_chunk_size // 2`` in its high 16 bits. Pairing columns half a chunk apart (instead of neighbors)
+  lets the kernel pack two whole SIMD vectors without a lane shuffle.
+  """
+  rows, packed_cols = packed.shape
+  half = col_chunk_size // 2
+  words = packed.reshape(rows, packed_cols // half, 1, half)
+  halves = jnp.concatenate([jnp.bitwise_and(words, jnp.uint32(0xFFFF)), jnp.right_shift(words, 16)], axis=2)
+  return jax.lax.bitcast_convert_type(halves.astype(jnp.uint16), jnp.bfloat16).reshape(rows, packed_cols * 2)
+
+
 def _calculate_num_column_partitions(
     hidden_size: int, input_size: int, num_cores: int, num_lanes: int, num_simd_lanes: int
 ) -> int:
@@ -234,10 +265,10 @@ def _calculate_row_tiling(
   return num_row_subchunks, row_chunk_size
 
 
-def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
+def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int, alignment: int = 128) -> int:
   """Picks the column chunk size the inner pipeline gathers at a time.
 
-  The chunk is the largest divisor of ``col_size`` whose gather double-buffer
+  The chunk is the largest multiple of ``alignment`` dividing ``col_size`` whose gather double-buffer
   still fits comfortably in SparseCore VMEM.
   """
   generation = pltpu.get_tpu_info().generation
@@ -256,11 +287,11 @@ def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
   # Larger chunk sizes cause larger pipeline bubbles, so cap it at 1024.
   max_safe_col = min(max_safe_col, _CostModelConstants.MAX_COL_CHUNK_SIZE)
 
-  start_col = (min(col_size, max_safe_col) // 128) * 128
-  for chunk in range(start_col, 127, -128):
+  start_col = (min(col_size, max_safe_col) // alignment) * alignment
+  for chunk in range(start_col, alignment - 1, -alignment):
     if col_size % chunk == 0:
       return chunk
-  return 128
+  return alignment
 
 
 def _preprocess(
@@ -544,34 +575,38 @@ def main_kernel(
       src_idx_slice = src_indices_vmem_sc[row_slice]
       prev_dst_vals_vec = prev_dst_val_vmem_sc[row_slice]
 
+      def load_weighted(row_src, col_slice):
+        val_u32 = gather_ref[row_src, col_slice]
+        if cfg.in_dtype == jnp.bfloat16:
+          # The two bfloat16 rows packed in one uint32 word sit in the low
+          # (even row) or high (odd row) 16 bits. Shift the wanted half
+          # into the float32 sign/exponent position and clear the rest.
+          shift = jnp.where(jnp.bitwise_and(src_idx_slice[row_src], 1) == 0, 16, 0)
+          shifted = jnp.bitwise_and(jnp.left_shift(val_u32, shift), jnp.uint32(0xFFFF0000))
+          data_f32 = plsc.bitcast(shifted, jnp.float32)
+        else:
+          data_f32 = plsc.bitcast(val_u32, jnp.float32)
+        return data_f32 * tw_slice[row_src]
+
+      def same_group_as_previous(row_src):
+        # Reduction: accumulate while the destination group is unchanged,
+        # restart otherwise. Sorting guarantees rows of one group are
+        # contiguous.
+        if row_src == 0:
+          prev_dst = prev_dst_vals_vec[0]
+        else:
+          prev_dst = dst_slice[row_src - 1]
+        return dst_slice[row_src] == prev_dst
+
       def col_loop(col_compute_offset):
         col_slice = pl.ds(col_compute_offset, num_simd_lanes)
         # Running sum, seeded by the carry from the previous sub-chunk.
         previous_accumulated_data = scratch.prev_iter_last_row_vmem[c, col_slice]
 
         for row_src in range(num_simd_lanes):
-          val_u32 = gather_ref[row_src, col_slice]
-          if cfg.in_dtype == jnp.bfloat16:
-            # The two bfloat16 rows packed in one uint32 word sit in the low
-            # (even row) or high (odd row) 16 bits. Shift the wanted half
-            # into the float32 sign/exponent position and clear the rest.
-            shift = jnp.where(jnp.bitwise_and(src_idx_slice[row_src], 1) == 0, 16, 0)
-            shifted = jnp.bitwise_and(jnp.left_shift(val_u32, shift), jnp.uint32(0xFFFF0000))
-            data_f32 = plsc.bitcast(shifted, jnp.float32)
-          else:
-            data_f32 = plsc.bitcast(val_u32, jnp.float32)
-          data_f32 *= tw_slice[row_src]
-
-          # Reduction: accumulate while the destination group is unchanged,
-          # restart otherwise. Sorting guarantees rows of one group are
-          # contiguous.
-          dst_row_hbm = dst_slice[row_src]
-          if row_src == 0:
-            prev_dst = prev_dst_vals_vec[0]
-          else:
-            prev_dst = dst_slice[row_src - 1]
+          data_f32 = load_weighted(row_src, col_slice)
           accumulated_data = jnp.where(
-              dst_row_hbm == prev_dst,
+              same_group_as_previous(row_src),
               previous_accumulated_data + data_f32,
               data_f32,
           )
@@ -585,18 +620,48 @@ def main_kernel(
           if row_src == num_simd_lanes - 1:
             scratch.prev_iter_last_row_vmem[c, col_slice] = accumulated_data
 
-      plsc.parallel_loop(0, col_chunk_size, step=num_simd_lanes)(col_loop)
+      def packed_col_loop(col_compute_offset):
+        # Same as col_loop, for columns j and j + half of the chunk at once. The sums and the cross-block carry
+        # stay float32; only the value written out is rounded to bfloat16, and the two bfloat16 columns share
+        # one uint32 word so the per-row scatter still moves 32-bit elements.
+        lo_slice = pl.ds(col_compute_offset, num_simd_lanes)
+        hi_slice = pl.ds(col_compute_offset + col_chunk_size // 2, num_simd_lanes)
+        previous_lo = scratch.prev_iter_last_row_vmem[c, lo_slice]
+        previous_hi = scratch.prev_iter_last_row_vmem[c, hi_slice]
+
+        for row_src in range(num_simd_lanes):
+          same_group = same_group_as_previous(row_src)
+          data_lo = load_weighted(row_src, lo_slice)
+          data_hi = load_weighted(row_src, hi_slice)
+          accumulated_lo = jnp.where(same_group, previous_lo + data_lo, data_lo)
+          accumulated_hi = jnp.where(same_group, previous_hi + data_hi, data_hi)
+          previous_lo, previous_hi = accumulated_lo, accumulated_hi
+
+          lo_bits = _round_f32_bits_to_bf16_bits(plsc.bitcast(accumulated_lo, jnp.uint32))
+          hi_bits = _round_f32_bits_to_bf16_bits(plsc.bitcast(accumulated_hi, jnp.uint32))
+          out_vmem_sc[row_src, lo_slice] = jnp.bitwise_or(lo_bits, jnp.left_shift(hi_bits, 16))
+          if row_src == num_simd_lanes - 1:
+            scratch.prev_iter_last_row_vmem[c, lo_slice] = accumulated_lo
+            scratch.prev_iter_last_row_vmem[c, hi_slice] = accumulated_hi
+
+      if cfg.pack_bf16_output:
+        plsc.parallel_loop(0, col_chunk_size // 2, step=num_simd_lanes)(packed_col_loop)
+      else:
+        plsc.parallel_loop(0, col_chunk_size, step=num_simd_lanes)(col_loop)
 
       # Scatter every source row's reduced value to its output row. Rows
       # that share a group write the same value (idempotent); rows routed to
       # the garbage destination are harmless.
       dma_src_row_slice = dma_src_row_vmem_sc[row_slice]
       dma_dst_row_slice = dma_dst_row_vmem_sc[row_slice]
+      out_packing = 2 if cfg.pack_bf16_output else 1
+      out_cols = col_chunk_size // out_packing
+      out_hbm_col_start = col_hbm_start // out_packing
       copies = []
       for i in range(num_simd_lanes):
         copy = pltpu.make_async_copy(
-            out_vmem_sc.at[dma_src_row_slice[i], pl.ds(0, col_chunk_size)],
-            out_hbm_ref.at[dma_dst_row_slice[i], pl.ds(col_hbm_start, col_chunk_size)],
+            out_vmem_sc.at[dma_src_row_slice[i], pl.ds(0, out_cols)],
+            out_hbm_ref.at[dma_dst_row_slice[i], pl.ds(out_hbm_col_start, out_cols)],
             send_sem,
         )
         copy.start()
@@ -632,6 +697,7 @@ def main_kernel(
         "flops_override",
         "bytes_accessed_override",
         "use_single_sparsecore",
+        "bf16_output",
     ),
 )
 def ragged_gather_reduce(
@@ -644,6 +710,7 @@ def ragged_gather_reduce(
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
     use_single_sparsecore: bool = False,
+    bf16_output: bool = False,
 ) -> jax.Array:
   """Gathers ``x`` by ``indices``, weights and masks, then reduces by group.
 
@@ -653,6 +720,12 @@ def ragged_gather_reduce(
     topk_weights: 1-D per-row weights, ``(input_size,)``.
     valid_rows_mask: 1-D bool mask of valid gathered rows, ``(input_size,)``.
     reduce_group_size: number of consecutive rows summed into one output row.
+    bf16_output: if True and ``x`` is bfloat16, the SparseCore kernel rounds each reduced float32 row to
+      bfloat16 before writing it, instead of writing float32 and casting afterwards. That halves the output
+      write and drops the float32 pass. The sums are still float32 and the rounding is the same, so the
+      result is bitwise identical. Ignored for other dtypes and when the per-core column slice is not a
+      multiple of 256. Column chunks are then multiples of 256, which can be smaller than the default chunk
+      (e.g. 512 instead of 896 for hidden size 7168).
 
   Returns:
     Reduced output, ``(input_size // reduce_group_size, hidden_size)``.
@@ -691,7 +764,11 @@ def ragged_gather_reduce(
 
   aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
   col_size = aligned_hidden_size // num_column_partitions
-  col_chunk_size = _calculate_col_chunk_size(col_size, num_simd_lanes)
+  # Packing pairs columns half a chunk apart, and each packed half chunk must still be a whole number of
+  # 128-lane tiles for the output DMA, so the packed path needs a chunk that is a multiple of 256.
+  pack_bf16_output = bf16_output and x.dtype == jnp.bfloat16 and col_size % 256 == 0
+  col_chunk_size = _calculate_col_chunk_size(col_size, num_simd_lanes, alignment=256 if pack_bf16_output else 128)
+  out_packing = 2 if pack_bf16_output else 1
 
   # Step 3: Pre-process inputs (weights, padding, sort by validity).
   # The kernel gathers x through a uint32 reinterpretation; carry the weights
@@ -738,14 +815,15 @@ def ragged_gather_reduce(
       in_dtype=x.dtype,
       core_axis_name=vector_mesh.core_axis_name,
       subcore_axis_name=vector_mesh.subcore_axis_name,
+      pack_bf16_output=pack_bf16_output,
   )
 
   # The output gets one extra row: the kernel's garbage scatter destination.
   out = pl.kernel(
       functools.partial(main_kernel, cfg=cfg),
       out_type=jax.ShapeDtypeStruct(
-          (padded_input_size // reduce_group_size + 1, aligned_hidden_size),
-          jnp.float32,
+          (padded_input_size // reduce_group_size + 1, aligned_hidden_size // out_packing),
+          jnp.uint32 if pack_bf16_output else jnp.float32,
       ),
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
@@ -759,6 +837,7 @@ def ragged_gather_reduce(
           input_dtype_bytes=dtype_bytes,
           flops_override=flops_override,
           bytes_accessed_override=bytes_accessed_override,
+          output_dtype_bytes=4 // out_packing,
       ),
       scratch_types=(  # pyrefly: ignore[bad-argument-type]
           _Scratch(
@@ -772,7 +851,10 @@ def ragged_gather_reduce(
               dma_src_row_vmem=pltpu.VMEM((row_chunk_size,), jnp.int32),
               dma_dst_row_vmem=pltpu.VMEM((row_chunk_size,), jnp.int32),
               prev_dst_val_vmem=pltpu.VMEM((row_chunk_size,), jnp.int32),
-              out_vmem=pltpu.VMEM((num_simd_lanes, col_chunk_size), jnp.float32),
+              out_vmem=pltpu.VMEM(
+                  (num_simd_lanes, col_chunk_size // out_packing),
+                  jnp.uint32 if pack_bf16_output else jnp.float32,
+              ),
               sem=pltpu.SemaphoreType.DMA((2,)),
           ),
       ),
@@ -789,6 +871,8 @@ def ragged_gather_reduce(
   )
 
   # Step 5: Post-process the output (drop padding, zero empty groups, cast).
+  if pack_bf16_output:
+    out = _unpack_bf16_columns(out, col_chunk_size)
   out = out[: input_size // reduce_group_size, :hidden_size]
   out = jnp.where(mask[: input_size // reduce_group_size, None], out, jnp.zeros_like(out))
   return out.astype(x.dtype)

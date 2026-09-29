@@ -37,6 +37,7 @@ def ring_ragged_sort(
     use_single_sparsecore=False,
     tag_routing_fn=None,
     return_argsort_indices=False,
+    gather_reduce_bf16_output=False,
 ):
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
@@ -70,6 +71,8 @@ def ring_ragged_sort(
       policy can save them. The backward then re-runs only the gather, not the sorts that produce these arrays.
     return_argsort_indices: if True, also return ``topk_argsort_indices``, the inverse of
       ``topk_argsort_revert_indices``, so :func:`ring_ragged_unsort` does not have to re-sort to get it.
+    gather_reduce_bf16_output: passed to ``ragged_gather_reduce(bf16_output=...)`` for the backward
+      gather-reduce; bitwise identical result.
 
   Returns:
     A tuple containing:
@@ -209,6 +212,7 @@ def ring_ragged_sort(
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
+          bf16_output=gather_reduce_bf16_output,
       )
     else:
       # Buffering: g_x has size `local_buffer_size` (packed).
@@ -235,6 +239,7 @@ def ring_ragged_sort(
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
+          bf16_output=gather_reduce_bf16_output,
       )
     return grad_hidden_states, None, None, None
 
@@ -262,6 +267,7 @@ def ring_ragged_unsort(
     gather_reduce_bytes_accessed_override=-1,
     use_single_sparsecore=False,
     topk_argsort_indices=None,
+    gather_reduce_bf16_output=False,
 ):
   """Dual of :func:`ring_ragged_sort`.
 
@@ -291,6 +297,8 @@ def ring_ragged_unsort(
     topk_argsort_indices: optional inverse of ``topk_argsort_revert_indices`` (as returned by
       :func:`ring_ragged_sort` with ``return_argsort_indices=True``). The backward needs this permutation; when it is
       None, the backward re-derives it with an argsort. Both give the same permutation.
+    gather_reduce_bf16_output: passed to ``ragged_gather_reduce(bf16_output=...)`` for the forward
+      gather-reduce; bitwise identical result.
 
   Returns:
     A 2D ``[num_tokens_local, hidden]`` tensor with expert outputs scattered back
@@ -358,6 +366,7 @@ def ring_ragged_unsort(
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
+          bf16_output=gather_reduce_bf16_output,
       )
     else:
       # Shift indices so they map to the packed local buffer [0, local_num_tokens).
@@ -377,6 +386,7 @@ def ring_ragged_unsort(
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
+          bf16_output=gather_reduce_bf16_output,
       )
 
     res = (

@@ -1199,6 +1199,12 @@ class MoEGeneral(BaseModel):
       description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
       "reduce SparseCore kernel. When false (default), use the SparseCore kernel.",
   )
+  ragged_gather_reduce_bf16_output: bool = Field(
+      False,
+      description="When true, the ring-of-experts ragged gather reduce SparseCore kernel rounds its float32 sums "
+      "to bfloat16 inside the kernel and writes bfloat16, instead of writing float32 and casting afterwards. "
+      "Halves the kernel's output write and removes the separate cast pass. Bitwise identical results.",
+  )
   ragged_gather_cost_estimate_flops: int = Field(
       -1,
       description="Flop cost estimate override for the ragged gather kernel. "
