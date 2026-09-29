@@ -738,6 +738,12 @@ class RoutedMoE(nnx.Module):
       self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
     elif self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
+      if self.config.use_lineage:
+        # Lineage all-gathers the routed `wo` over its FSDP axis inside every
+        # sparse layer and expects it sharded on the hidden (mlp) dim. Storing
+        # it sharded on the embed dim lands the gathered weight in a transposed
+        # layout that costs a relayout copy per use.
+        self.wo_kernel_axes = ("expert_only", "embed_moe", None)
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
       self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
