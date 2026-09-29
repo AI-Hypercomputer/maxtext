@@ -95,6 +95,7 @@ def _leaf_u32_sum(leaf: jax.Array) -> jax.Array:
   return ((bits + jnp.uint32(0x9E3779B9)) * (weight | 1)).sum(dtype=jnp.uint32)
 
 
+
 def _tree_fingerprint(state: Any) -> int:
   """Checksum of every leaf's bits, weighted per key path so swapped leaves also change it.
 
@@ -104,6 +105,15 @@ def _tree_fingerprint(state: Any) -> int:
   flat = jax.tree_util.tree_flatten_with_path(nnx.to_pure_dict(state) if isinstance(state, nnx.State) else state)[0]
   sums = jax.device_get([_leaf_u32_sum(x) for _, x in flat])
   return sum(int(s) * (zlib.crc32(jax.tree_util.keystr(p).encode()) | 1) for (p, _), s in zip(flat, sums)) & 0xFFFFFFFF
+
+
+def _fingerprinting_enabled(config: Any = None) -> bool:
+  """Returns whether save/restore fingerprinting is enabled."""
+  if os.environ.get("DISABLE_ORBAX_FINGERPRINT", "").lower() in ("1", "true", "yes"):
+    return False
+  if config is not None and getattr(config, "disable_orbax_fingerprint", False):
+    return False
+  return True
 
 
 def _format_fingerprints(fingerprints: Mapping[str, int]) -> str:
@@ -234,6 +244,7 @@ class CheckpointManager:
       checkpoint_dir: The root directory for saving checkpoints.
       config: The training configuration.
     """
+    self._config = config
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if checkpoint_dir:
       if (
@@ -385,11 +396,15 @@ class CheckpointManager:
         save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params),
     )
     save_args = {"model_params": model_cp_args}
-    # Taken from the values handed to Orbax, before the async upload overlaps the next step, so
-    # restore can prove the persisted bytes are exactly these.
-    fingerprint_start = time.perf_counter()
-    fingerprints = {"model_params": _tree_fingerprint(params)}
-    fingerprint_seconds = time.perf_counter() - fingerprint_start
+    fingerprints = {}
+    fingerprint_seconds = 0.0
+    enable_fp = _fingerprinting_enabled(self._config)
+    offload_opt = bool(getattr(self._config, "optimizer_memory_host_offload", False))
+
+    if enable_fp:
+      fingerprint_start = time.perf_counter()
+      fingerprints["model_params"] = _tree_fingerprint(params)
+      fingerprint_seconds = time.perf_counter() - fingerprint_start
 
     if checkpoint_state.optimizer:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
@@ -399,10 +414,12 @@ class CheckpointManager:
           save_args=jax.tree.map(lambda _: ocp.SaveArgs(), optimizer_state),
       )
       save_args["optimizer_state"] = optimizer_cp_args
-      fingerprint_start = time.perf_counter()
-      fingerprints["optimizer_state"] = _tree_fingerprint(optimizer_state)
-      fingerprint_seconds += time.perf_counter() - fingerprint_start
-    custom_metadata[_FINGERPRINT_KEY] = fingerprints
+      if enable_fp and not offload_opt:
+        fingerprint_start = time.perf_counter()
+        fingerprints["optimizer_state"] = _tree_fingerprint(optimizer_state)
+        fingerprint_seconds += time.perf_counter() - fingerprint_start
+    if fingerprints:
+      custom_metadata[_FINGERPRINT_KEY] = fingerprints
 
     if checkpoint_state.accumulated_metrics:
       jax.block_until_ready(checkpoint_state.accumulated_metrics)
@@ -432,7 +449,7 @@ class CheckpointManager:
         custom_metadata=custom_metadata,
         **kwargs,
     )
-    if saved:  # Orbax's interval policy may decline; only an accepted save carries these values.
+    if saved and fingerprints:  # Orbax's interval policy may decline; only an accepted save carries these values.
       logging.info(
           "Checkpoint %s step=%d %s (%.2fs)",
           _FINGERPRINT_KEY,
@@ -519,7 +536,12 @@ class CheckpointManager:
     restore_seconds = time.perf_counter() - restore_start
 
     saved_fingerprints = custom_metadata.get(_FINGERPRINT_KEY) if isinstance(custom_metadata, Mapping) else None
-    if saved_fingerprints is None:
+    if not _fingerprinting_enabled(self._config):
+      logging.info(
+          "Checkpoint fingerprint verification is disabled; skipping verification (restore %.1fs).",
+          restore_seconds,
+      )
+    elif saved_fingerprints is None:
       logging.info(
           "Checkpoint at step %d predates save-time fingerprints; skipping verification (restore %.1fs).",
           step,

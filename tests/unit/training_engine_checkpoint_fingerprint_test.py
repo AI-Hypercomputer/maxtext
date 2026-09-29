@@ -157,6 +157,57 @@ class CheckpointFingerprintTest(unittest.TestCase):
     (verified,) = _matches(logs, _VERIFIED_RE)
     self.assertEqual(verified.group("fps"), f"model_params={_fp(nnx.state(model)):#010x}")
 
+  def test_disable_orbax_fingerprint_env_var_skips_save_and_restore(self):
+    os.environ["DISABLE_ORBAX_FINGERPRINT"] = "1"
+    model, optimizer = _build(seed=0)
+    _train_step(model, optimizer)
+    manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
+    saved = manager.save_checkpoint(
+        step=1,
+        checkpoint_state=checkpointing.CheckpointState(model=model, optimizer=optimizer),
+    )
+    manager.wait_until_finished()
+    manager.close()
+    self.assertTrue(saved)
+
+    meta_path = os.path.join(self.ckpt_dir, "1", "_CHECKPOINT_METADATA")
+    with open(meta_path, encoding="utf-8") as f:
+      meta = json.load(f)
+    self.assertNotIn(checkpointing._FINGERPRINT_KEY, meta.get("custom_metadata", {}))
+
+    fresh_model, fresh_opt = _build(seed=123)
+    with self.assertLogs("absl", level="INFO") as logs:
+      self._restore_into(fresh_model, fresh_opt)
+    self.assertTrue(any("Checkpoint fingerprint verification is disabled" in r.getMessage() for r in logs.records))
+    self.assertEqual(_matches(logs, _VERIFIED_RE), [])
+
+  def test_optimizer_memory_host_offload_skips_optimizer_state_fingerprint(self):
+    config = _config()
+    config.optimizer_memory_host_offload = True
+    model, optimizer = _build(seed=0)
+    _train_step(model, optimizer)
+    manager = checkpointing.CheckpointManager(self.ckpt_dir, config)
+    with self.assertLogs("absl", level="INFO") as save_logs:
+      manager.save_checkpoint(
+          step=1,
+          checkpoint_state=checkpointing.CheckpointState(model=model, optimizer=optimizer),
+      )
+    manager.wait_until_finished()
+    manager.close()
+
+    (saved,) = _matches(save_logs, _SAVE_RE)
+    self.assertEqual(saved.group("fps"), f"model_params={_fp(nnx.state(model)):#010x}")
+
+    fresh_model, fresh_opt = _build(seed=123)
+    restore_mgr = checkpointing.CheckpointManager(self.ckpt_dir, config)
+    self.addCleanup(restore_mgr.close)
+    with self.assertLogs("absl", level="INFO") as restore_logs:
+      restore_mgr.restore_checkpoint(
+          checkpointing.CheckpointState(model=fresh_model, optimizer=fresh_opt)
+      )
+    (verified,) = _matches(restore_logs, _VERIFIED_RE)
+    self.assertEqual(verified.group("fps"), f"model_params={_fp(nnx.state(fresh_model)):#010x}")
+
 
 _FPS = r"(?P<fps>(?:\w+=0x[0-9a-f]{8})(?: \w+=0x[0-9a-f]{8})*)"
 _SAVE_RE = re.compile(rf"^Checkpoint fingerprints_v1 step=(?P<step>\d+) {_FPS} \(\d+\.\d{{2}}s\)$")
