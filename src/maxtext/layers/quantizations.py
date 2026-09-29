@@ -182,6 +182,7 @@ def native_fp8_dot_general(
     compute_dtype: DType = jnp.bfloat16,
     precision: jax.lax.PrecisionLike = None,
     out_sharding: NamedSharding | None = None,
+    act_calibration_method: str = "absmax",
 ) -> jnp.ndarray:
   """Computes dot_general with pre-quantized FP8 weights without dequantization."""
   if len(axis) != 1 or len(contract_ind) != 1:
@@ -221,12 +222,15 @@ def native_fp8_dot_general(
     rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
     channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
     tiled_axes = {lhs_axis: rhs_block_size}
+  if act_calibration_method.lower().startswith("fixed"):
+    channelwise_axes = []
+    tiled_axes = {}
   lhs = qwix.quantize(
       jnp.asarray(inputs, compute_dtype),
       jnp.float8_e4m3fn,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
-      calibration_method="absmax",
+      calibration_method=act_calibration_method,
   )
   dimension_numbers = (((lhs_axis,), (rhs_axis,)), ((), ()))
   out = qwix.dot_general(lhs, rhs, dimension_numbers, precision=precision, preferred_element_type=jnp.float32)
@@ -241,6 +245,7 @@ class ServeFp8WeightQuantization(Quantization):
   """Marks a layer as using native FP8 compute without weight dequantization."""
 
   quant_mode = None
+  act_calibration_method: str = "absmax"
 
 
 def prepare_fused_gmm_scale(scale: jnp.ndarray, kernel_shape: Tuple[int, ...]) -> jnp.ndarray:
@@ -861,7 +866,7 @@ def get_quant_mode(quant_mode_str: str = "train"):
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
   if config.quantization == "serve_fp8_weight":
-    return ServeFp8WeightQuantization()
+    return ServeFp8WeightQuantization(act_calibration_method=config.act_quantization_calibration_method)
 
   if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
