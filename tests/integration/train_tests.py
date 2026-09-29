@@ -17,6 +17,7 @@ import json
 import os
 import tempfile
 import unittest
+import uuid
 import numpy as np
 import pytest
 import jax
@@ -31,6 +32,14 @@ from tests.utils.test_helpers import (
     get_test_base_output_directory,
     is_rocm_backend,
 )
+
+# Unique per test process so that concurrent runs (pytest-xdist workers, CI
+# matrix shards, overlapping workflow runs) don't write TensorBoard events,
+# logs, or checkpoints to the same `base_output_directory/run_name` path. A
+# shared path causes GCS 412 PreconditionFailed errors when two processes
+# upload the same object concurrently.
+_XDIST_WORKER = os.environ.get("PYTEST_XDIST_WORKER", "main")
+_RUN_NAME = f"runner_test_{_XDIST_WORKER}_{uuid.uuid4().hex[:8]}"
 
 
 def _small_model_base_emb_dim(device_count):
@@ -259,7 +268,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           f"dataset_path={dataset_path}",
           "max_target_length=128",
           "steps=2",
@@ -272,7 +281,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
@@ -284,7 +293,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "steps=2",
           "enable_checkpointing=False",
@@ -298,7 +307,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "quantization=int8",
           "steps=2",
@@ -311,7 +320,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "quantization=fp8",
           "steps=2",
@@ -324,7 +333,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "quantization=nanoo_fp8",
           "steps=2",
@@ -337,7 +346,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "steps=2",
           "enable_checkpointing=False",
@@ -350,7 +359,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "steps=2",
           "enable_checkpointing=False",
@@ -364,7 +373,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "quantization=te_fp8_delayedscaling",
           "steps=2",
@@ -377,7 +386,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "quantization=te_fp8_currentscaling",
           "steps=2",
@@ -390,7 +399,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "quantization=te_mxfp8",
           "steps=2",
@@ -403,7 +412,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
           "steps=2",
           "enable_checkpointing=False",
@@ -418,7 +427,7 @@ class TrainTests(unittest.TestCase):
           None,
           get_test_config_path(),
           f"base_output_directory={_base_output_directory}",
-          "run_name=runner_test",
+          f"run_name={_RUN_NAME}",
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
@@ -657,7 +666,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=2",
         "enable_checkpointing=False",
@@ -677,7 +686,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=10",
         "enable_checkpointing=False",
@@ -715,7 +724,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         f"dataset_path={self.dataset_path}",
         "steps=10",
         "enable_checkpointing=False",
@@ -748,7 +757,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         f"dataset_path={self.dataset_path}",
         "steps=10",
         "attention=dot_product",
@@ -773,7 +782,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         f"dataset_path={self.dataset_path}",
         "steps=10",
         "param_scan_axis=0",  # scan axis 0 is required for parameter offload
@@ -794,7 +803,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         f"dataset_path={self.dataset_path}",
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=2",
@@ -820,7 +829,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         f"dataset_path={self.dataset_path}",
         "steps=3",
         "enable_checkpointing=False",
@@ -1206,7 +1215,7 @@ class TrainTests(unittest.TestCase):
             None,
             get_test_config_path(),
             f"base_output_directory={self._base_output_directory}",
-            "run_name=runner_test",
+            f"run_name={_RUN_NAME}",
             f"dataset_path={self.dataset_path}",
             "steps=3",
             "enable_checkpointing=False",
@@ -1249,7 +1258,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         f"dataset_path={self.dataset_path}",
         "steps=10",
         "enable_checkpointing=False",
@@ -1288,7 +1297,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=10",
         "enable_checkpointing=False",
@@ -1311,7 +1320,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         "dataset_type=synthetic",  # use synthetic dataset_type to decrease training time
         "steps=1" if rocm_backend else "steps=10",
         "enable_checkpointing=False",
@@ -1357,7 +1366,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         f"dataset_path={self.dataset_path}",
         "steps=1" if rocm_backend else "steps=10",
         "enable_checkpointing=False",
@@ -1393,7 +1402,7 @@ class TrainTests(unittest.TestCase):
         None,
         get_test_config_path(),
         f"base_output_directory={self._base_output_directory}",
-        "run_name=runner_test",
+        f"run_name={_RUN_NAME}",
         f"dataset_path={self.dataset_path}",
         "steps=5",
         "enable_checkpointing=False",
