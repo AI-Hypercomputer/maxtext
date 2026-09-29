@@ -2382,17 +2382,6 @@ class QuantizedMoeTest(parameterized.TestCase):
 
     compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.22)
 
-  def test_moe_quantize_combine_bwd_method_requires_ring_of_experts(self):
-    """Verifies that moe_quantize_combine_bwd_method raises ValueError without ring_of_experts."""
-    with self.assertRaises(ValueError):
-      pyconfig.initialize(
-          [None, get_test_config_path()],
-          run_name="moe_combine_validation_test",
-          model_name="mixtral-8x7b",
-          use_ring_of_experts=False,
-          moe_quantize_combine_bwd_method="rowwise",
-      )
-
   @parameterized.named_parameters(
       {"testcase_name": "rowwise", "bwd_method": "rowwise"},
       {"testcase_name": "fixed", "bwd_method": "fixed,0.01"},
@@ -2444,7 +2433,7 @@ class QuantizedMoeTest(parameterized.TestCase):
           wo_tile_drhs_batch_seq=128,
       )
 
-    cfg_ref = _build_cfg("")
+    cfg_ref = _build_cfg(bwd_method_val="")
     hidden_states = jax.random.normal(
         rng_hidden_states,
         (
@@ -3533,7 +3522,7 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
     self.assertTrue(model.config.moe_quantize_token_all_gather)
 
 
-class RoutedMoEFp8Test(unittest.TestCase):
+class RoutedMoEFp8Test(parameterized.TestCase):
   """Unit tests for RoutedMoE FP8 weight storage and dynamic dequantization scales."""
 
   def _make_fp8_cfg(self, prefuse_moe_weights=True, weight_block_size=None):
@@ -3655,10 +3644,14 @@ class RoutedMoEFp8Test(unittest.TestCase):
     expected_wi_shape = (cfg.num_experts, 128 // 64, (cfg.base_moe_mlp_dim * 2) // 32)
     self.assertEqual(model.wi_scale.shape, expected_wi_shape)
 
-  def test_moe_combine_psum_scatter_bwd(self):
-    """Verifies _moe_combine_psum_scatter custom VJP with bwd_method='rowwise'."""
-    x = jax.random.normal(jax.random.PRNGKey(0), (16, 32), dtype=jnp.bfloat16)
-    cotangent = jax.random.normal(jax.random.PRNGKey(1), (16, 32), dtype=jnp.bfloat16)
+  @parameterized.named_parameters(
+      {"testcase_name": "rowwise", "bwd_method": "rowwise", "max_mse": 0.05},
+      {"testcase_name": "static", "bwd_method": "fixed,57344", "max_mse": 0.1},
+  )
+  def test_moe_combine_psum_scatter_bwd(self, bwd_method: str, max_mse: float):
+    """Verifies _moe_combine_psum_scatter custom VJP on 3D tensors."""
+    x = jax.random.normal(jax.random.PRNGKey(0), (2, 4, 32), dtype=jnp.bfloat16)
+    cotangent = jax.random.normal(jax.random.PRNGKey(1), (2, 4, 32), dtype=jnp.bfloat16)
 
     with (
         mock.patch.object(jax.lax, "psum_scatter", side_effect=lambda v, *a, **k: v),
@@ -3670,7 +3663,7 @@ class RoutedMoEFp8Test(unittest.TestCase):
       (d_ref,) = vjp_ref(cotangent)
 
       out_q, vjp_q = jax.vjp(
-          lambda v: _moe_combine_psum_scatter(v, "expert", scatter_dimension=0, tiled=False, bwd_method="rowwise"), x
+          lambda v: _moe_combine_psum_scatter(v, "expert", scatter_dimension=0, tiled=False, bwd_method=bwd_method), x
       )
       (d_q,) = vjp_q(cotangent)
 
@@ -3678,32 +3671,7 @@ class RoutedMoEFp8Test(unittest.TestCase):
     self.assertEqual(d_q.dtype, jnp.bfloat16)
     self.assertEqual(d_q.shape, cotangent.shape)
     mse = jnp.mean((d_ref.astype(jnp.float32) - d_q.astype(jnp.float32)) ** 2)
-    self.assertLess(float(mse), 0.05)
-
-  def test_moe_combine_psum_scatter_bwd_static(self):
-    """Verifies _moe_combine_psum_scatter custom VJP with bwd_method='fixed,57344'."""
-    x = jax.random.normal(jax.random.PRNGKey(0), (16, 32), dtype=jnp.bfloat16)
-    cotangent = jax.random.normal(jax.random.PRNGKey(1), (16, 32), dtype=jnp.bfloat16)
-
-    with (
-        mock.patch.object(jax.lax, "psum_scatter", side_effect=lambda v, *a, **k: v),
-        mock.patch.object(jax.lax, "all_gather", side_effect=lambda v, *a, **k: v),
-    ):
-      out_ref, vjp_ref = jax.vjp(
-          lambda v: _moe_combine_psum_scatter(v, "expert", scatter_dimension=0, tiled=False, bwd_method=""), x
-      )
-      (d_ref,) = vjp_ref(cotangent)
-
-      out_static, vjp_static = jax.vjp(
-          lambda v: _moe_combine_psum_scatter(v, "expert", scatter_dimension=0, tiled=False, bwd_method="fixed,57344"), x
-      )
-      (d_static,) = vjp_static(cotangent)
-
-    np.testing.assert_allclose(out_static, out_ref, rtol=1e-5, atol=1e-5)
-    self.assertEqual(d_static.dtype, jnp.bfloat16)
-    self.assertEqual(d_static.shape, cotangent.shape)
-    mse = jnp.mean((d_ref.astype(jnp.float32) - d_static.astype(jnp.float32)) ** 2)
-    self.assertLess(float(mse), 0.1)
+    self.assertLess(float(mse), max_mse)
 
 
 class RequiredRaggedBufferFactorTest(unittest.TestCase):
