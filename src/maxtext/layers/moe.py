@@ -3946,7 +3946,7 @@ class RoutedMoE(nnx.Module):
         or isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
     )
     native_gmm = (
-        is_fp8_moe
+        isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
         and cfg.sparse_matmul
         and cfg.use_gmm_v2
         and not is_fused_moe_path

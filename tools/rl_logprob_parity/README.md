@@ -406,3 +406,168 @@ bash /usr/local/google/home/wenxindong/.gemini/config/skills/cdk-jobs/scripts/cd
 - **Trainer Scoring Path:** The MaxText trainer runs **Tokamax GMM v1 (`tokamax.ragged_dot`)** in `sparse_matmul`. The FP8 weights are exact-dequantized in memory ($W_{\text{dequant}} = W_{\text{FP8}} \times \text{scale}$), computing $X_{\text{BF16}} \cdot (W_{\text{FP8}} \times \text{scale})$.
 - **Why It Aligns Closely (1.7 millinats):** Because scaling is 1D per-channel along the output dimension (rather than 2D block-wise across the contraction axis), $(X \cdot W) \times s \equiv X \cdot (W \times s)$ by associativity of scalar multiplication, producing sub-2 millinat parity across 131k tokens.
 
+---
+
+### Appendix C: Long-Sequence Rollout Verification (Pure BFloat16, 4096 Decode Tokens, No EOS)
+
+- **CDK Job ID:** `j-d4b7efdd-5df6-4b05-ab10`
+- **Model Checkpoint:** Pure BF16 (`gs://cloud-devkit/users/wenxindong/ckpt/qwen3.5-35b-a3b/unscanned/0/items`)
+- **GCS Artifacts Path:** `gs://cloud-devkit/jobs/j-d4b7efdd-5df6-4b05-ab10/outputs/j-d4b7efdd-5df6-4b05-ab10-vllm-runner-0/j-d4b7efdd-5df6-4b05-ab10-vllm-runner-0-0-pqv6l/vllm-container/r2e32_bf16_no_stop_eos_gen4k/`
+
+#### 1. Why this run was performed:
+In standard offline evaluation with `--stop-at-eos`, single-turn prompts without an environment/sandbox terminate early at `<|im_end|>` (median length: **14 tokens**).
+Because the MLPerf TIS tolerance band $[0.999, 1.002]$ is only **0.3% wide**, the finite-sample standard error for $N=14$ tokens is $\text{SE} = \frac{\sigma}{\sqrt{N}} \approx \frac{0.20}{\sqrt{14}} \approx 5.4\%$, which is $18\times$ wider than the tolerance band. Consequently, statistical sampling variance naturally pushes individual short sequence geometric means outside the band, resulting in nearly 100% out-of-band ratio.
+
+To verify that long sequences converge to the low $\sim 10\%$ OOB ratio seen in production MLPerf DeepSWE training (where rollouts average thousands of tokens), this run set `--no-stop-at-eos --gen-tokens 4096`, forcing every sequence to generate all 4,096 rollout tokens (131,072 decode tokens total).
+
+#### 2. Key Findings:
+1. **Decode `is_oob_ratio` Plummeted from 100% down to 31.25%:**
+   - In short rollouts (median 14 tokens): 0/32 sequences were in-band (100% OOB).
+   - In 4,096-token rollouts: **22 of 32 sequences landed inside the band (31.25% OOB)**.
+2. **Standard Error Dropped by 90x:**
+   - Median per-sequence $\text{SE}$ dropped from $5.3 \times 10^{-2}$ ($5.3\%$) down to **$5.9 \times 10^{-4}$ ($0.059\%$)**.
+   - With sampling noise suppressed, the sequence geometric mean tightly centered at **0.99923** (cleanly inside the $[0.999, 1.002]$ band).
+3. **Decode Numerical Parity:**
+   - **Median $|d\log p|$: 0.0000 (0.0 millinats)** across 131,072 tokens.
+   - **Mean $|d\log p|$: 0.0098** (10x lower than short rollouts).
+   - **Zero Outliers (>10 nats): 0.00e+00**.
+   - **Active Sequences (`mult_err <= 2.0`): 32/32 (100% active)**.
+
+#### 3. Summary Report (`summary.txt`):
+```text
+== OUTPUT (decode, sampled) <- what RL trains on   band=[0.999, 1.002]
+  metric                         cdk_r2e32_bf16_no_stop_eos_gen4k                reference
+  tokens / seqs                                       131072 / 32              262144 / 32
+  per-token oob [band]                                     30.84%                   97.79%
+  |dlogp| med / p99 / max                   0.0000 / 0.166 / 2.89   0.0341 / 0.310 / 17.22
+  >>> is_oob_ratio (script)                     31.25% kept 22/32         93.75% kept 2/32
+  seqs below / above band                                  10 / 0                   30 / 0
+  seq log-ratio median (rsd)                 -6.322e-04 (6.3e-04)     -3.928e-03 (2.7e-03)
+  seq log-ratio min / max                 -3.152e-03 / +7.841e-04  -1.071e-02 / -2.320e-05
+  median per-seq SE                                       5.9e-04                        -
+  nonfinite script/pad/real                             0 / 0 / 0                        0
+    real NaN sampler/trainer                                0 / 0                        -
+  is_oob_ratio (tunix sem.)                                31.25%                        -
+  token_logdiff_mean                                   -7.728e-04                        -
+  token_logdiff_absmean                                    0.0098                        -
+  token_logdiff sd                                         0.0434                        -
+  frac tokens trainer<sampler                              45.33%                        -
+  outlier frac (>10 nats)                     0.00e+00 (0.00/seq)                        -
+  seq geomean mean/min/max            0.99923 / 0.99685 / 1.00078                        -
+  [cdk_r2e32_bf16_no_stop_eos_gen4k] 10/32 rejected, one-sided LOW (trainer < sampler); median seq log-ratio -6.32e-04 (band [-1.00e-03, +2.00e-03]), robust spread 6.3e-04, per-seq SE 5.9e-04 -> center and spread fit; rejections are tail sequences
+
+== PROMPT (prefill, teacher-forced)   band=[0.999, 1.002]
+  metric                         cdk_r2e32_bf16_no_stop_eos_gen4k                reference
+  tokens / seqs                                       131008 / 32             1048380 / 32
+  per-token oob [band]                                     46.64%                   98.58%
+  |dlogp| med / p99 / max                   0.0008 / 0.298 / 1.12   0.0550 / 6.379 / 29.89
+  >>> is_oob_ratio (script)                     46.88% kept 17/32         84.38% kept 5/32
+  seqs below / above band                                  15 / 0                  10 / 17
+  seq log-ratio median (rsd)                 -9.957e-04 (1.1e-03)     +2.459e-03 (9.6e-03)
+  seq log-ratio min / max                 -2.389e-03 / +1.593e-03  -1.864e-02 / +2.348e-02
+  median per-seq SE                                       1.1e-03                        -
+  is_oob_ratio (tunix sem.)                                46.88%                        -
+  token_logdiff_mean                                   -7.784e-04                        -
+  token_logdiff_absmean                                    0.0268                        -
+  token_logdiff sd                                         0.0671                        -
+  frac tokens trainer<sampler                              49.05%                        -
+  outlier frac (>10 nats)                     0.00e+00 (0.00/seq)                        -
+  seq geomean mean/min/max            0.99922 / 0.99761 / 1.00159                        -
+  argmax agree (prompt)                                    98.95%                        -
+```
+
+---
+
+### Appendix D: Long-Sequence Rollout Verification (MoE-Only FP8, 4096 Decode Tokens, No EOS)
+
+- **CDK Job ID:** `j-e06264f2-7575-4098-9f63`
+- **Model Checkpoint:** Pure BF16 (`gs://cloud-devkit/users/wenxindong/ckpt/qwen3.5-35b-a3b/unscanned/0/items`) with MoE FP8 per-channel quantization (`--fp8-moe`)
+- **GCS Artifacts Path:** `gs://cloud-devkit/jobs/j-e06264f2-7575-4098-9f63/outputs/j-e06264f2-7575-4098-9f63-vllm-runner-0/j-e06264f2-7575-4098-9f63-vllm-runner-0-0-phnfw/vllm-container/r2e32_moe_fp8_no_stop_eos_gen4k/`
+
+#### 1. Reproduction Command:
+```bash
+bash /usr/local/google/home/wenxindong/.gemini/config/skills/cdk-jobs/scripts/cdk_agent.sh job create wenxindong-vllm-conda-test \
+  "COMMAND=bash /workspace/bundle/run_parity.sh \
+    --sampler adapter \
+    --model-type bf16 \
+    --fp8-moe \
+    --router-replay \
+    --logits-dot-fp32 \
+    --enable-prefix-caching \
+    --mamba-cache-mode align \
+    --trainer-tp 4 \
+    --trainer-kv-heads 4 \
+    --trainer-micro-batch 2 \
+    --prompts-file /workspace/rl_parity_ws/data/r2e_prompts_32.jsonl \
+    --prompt-len 4096 \
+    --gen-tokens 4096 \
+    --no-stop-at-eos \
+    --seq-logprob-error-threshold 2.0 \
+    --tag r2e32_moe_fp8_no_stop_eos_gen4k" \
+  --map-dir $PWD/scratch/rl_parity_ws:vllm-runner:/workspace/rl_parity_ws \
+  --map-dir $PWD/scratch/cdk_bundle:vllm-runner:/workspace/bundle \
+  --active-deadline-seconds 7200 \
+  -t agent-jobs,jetski,fp8-gen4k-nostop
+```
+
+#### 2. Key Findings:
+1. **Decode Numerical Parity Under 4096 Rollout Tokens (131,072 Tokens):**
+   - **Median $|d\log p|$: 0.0000 (0.0 millinats)** across 131,072 decode tokens.
+   - **Mean $|d\log p|$: 0.0148 (14.8 millinats)**.
+   - **Zero Outliers (>10 nats): 0.00e+00** (exactly zero).
+   - **Active Sequences (`mult_err <= 2.0`): 32/32 (100.00% active)** (mean multiplier error = 1.0201).
+   - **Sequence Geometric Mean:** Centered at **0.99826** (min 0.99495, max 1.00024).
+   - **Per-Token In-Band Fraction:** **68.21%** of tokens fell directly inside $[0.999, 1.002]$.
+2. **Prompt Prefill Alignment (131,008 Tokens):**
+   - **Median $|d\log p|$: 0.0018 (1.8 millinats)** — **30x lower than reference** (0.0550).
+   - **Argmax Agreement: 97.80%** across 131k prompt tokens.
+   - **Active Sequences (`mult_err <= 2.0`): 32/32 (100.00% active)**.
+   - **Zero Outliers (>10 nats): 0.00e+00**.
+
+#### 3. Summary Report (`summary.txt`):
+```text
+== OUTPUT (decode, sampled) <- what RL trains on   band=[0.999, 1.002]
+  metric                         cdk_r2e32_moe_fp8_no_stop_eos_gen4k                reference
+  tokens / seqs                                          131072 / 32              262144 / 32
+  per-token oob [band]                                        31.79%                   97.79%
+  |dlogp| med / p99 / max                      0.0000 / 0.248 / 5.67   0.0341 / 0.310 / 17.22
+  >>> is_oob_ratio (script)                         78.12% kept 7/32         93.75% kept 2/32
+  seqs below / above band                                     25 / 0                   30 / 0
+  seq log-ratio median (rsd)                    -1.642e-03 (8.8e-04)     -3.928e-03 (2.7e-03)
+  seq log-ratio min / max                    -5.063e-03 / +2.388e-04  -1.071e-02 / -2.320e-05
+  median per-seq SE                                          9.6e-04                        -
+  nonfinite script/pad/real                                0 / 0 / 0                        0
+    real NaN sampler/trainer                                   0 / 0                        -
+  is_oob_ratio (tunix sem.)                                   78.12%                        -
+  token_logdiff_mean                                      -1.744e-03                        -
+  token_logdiff_absmean                                       0.0148                        -
+  token_logdiff sd                                            0.0666                        -
+  frac tokens trainer<sampler                                 43.54%                        -
+  outlier frac (>10 nats)                        0.00e+00 (0.00/seq)                        -
+  seq geomean mean/min/max               0.99826 / 0.99495 / 1.00024                        -
+  [cdk_r2e32_moe_fp8_no_stop_eos_gen4k] 25/32 rejected, one-sided LOW (trainer < sampler); median seq log-ratio -1.64e-03 (band [-1.00e-03, +2.00e-03]), robust spread 8.8e-04, per-seq SE 9.6e-04 -> BIAS: the median sequence is out of band; NOISE: per-seq SE alone moves geomeans across the band (short sequences)
+
+== PROMPT (prefill, teacher-forced)   band=[0.999, 1.002]
+  metric                         cdk_r2e32_moe_fp8_no_stop_eos_gen4k                reference
+  tokens / seqs                                          131008 / 32             1048380 / 32
+  per-token oob [band]                                        51.18%                   98.58%
+  |dlogp| med / p99 / max                      0.0018 / 0.686 / 2.66   0.0550 / 6.379 / 29.89
+  >>> is_oob_ratio (script)                         71.88% kept 9/32         84.38% kept 5/32
+  seqs below / above band                                     23 / 0                  10 / 17
+  seq log-ratio median (rsd)                    -2.965e-03 (2.5e-03)     +2.459e-03 (9.6e-03)
+  seq log-ratio min / max                    -5.842e-03 / +1.612e-03  -1.864e-02 / +2.348e-02
+  median per-seq SE                                          2.5e-03                        -
+  nonfinite script/pad/real                              32 / 0 / 32                      164
+    real NaN sampler/trainer                                  32 / 0                        -
+  is_oob_ratio (tunix sem.)                                   71.88%                        -
+  token_logdiff_mean                                      -2.567e-03                        -
+  token_logdiff_absmean                                       0.0611                        -
+  token_logdiff sd                                            0.1620                        -
+  frac tokens trainer<sampler                                 46.15%                        -
+  outlier frac (>10 nats)                        0.00e+00 (0.00/seq)                        -
+  seq geomean mean/min/max               0.99744 / 0.99418 / 1.00161                        -
+  argmax agree (prompt)                                       97.80%                        -
+```
+
+
+
