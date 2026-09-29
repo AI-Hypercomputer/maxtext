@@ -1780,6 +1780,15 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second part of a gated MLP's output.",
   )
+  moe_x_sorted: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routed (post-dispatch, expert-sorted) MoE input plus its small "
+          "routing/metadata bundle. 'device' saves them across the remat boundary so the backward "
+          "does not re-run the dispatch token all-gather and ragged sort; the expert GMMs re-run "
+          "from the saved tensor. Default 'remat' recomputes (existing behavior)."
+      ),
+  )
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
@@ -3934,6 +3943,13 @@ class MaxTextConfig(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
+      # The emb-chunking path (moe_emb_chunking in moe.py) routes per chunk and does not tag its routed input with
+      # checkpoint_name("moe_x_sorted"), so a non-remat moe_x_sorted would be silently ignored there.
+      if self.moe_x_sorted != RematLocation.REMAT:
+        raise ValueError(
+            f"moe_x_sorted={RematLocation(self.moe_x_sorted).value} is not supported with num_moe_emb_chunks > 0; "
+            "use moe_x_sorted=remat."
+        )
 
   def validate_moe_quantize_token_all_gather(self):
     """Validates that moe_quantize_token_all_gather is used with supported settings."""
@@ -4394,6 +4410,7 @@ class MaxTextConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
@@ -5810,6 +5827,7 @@ class RLConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
