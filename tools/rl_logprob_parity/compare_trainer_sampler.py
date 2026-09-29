@@ -752,7 +752,8 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
   model, mesh = model_creation_utils.from_pretrained(cfg, devices=jax.devices(), model_mode=MODEL_MODE_TRAIN)
   log("trainer model loaded")
 
-  if args.fp8_moe:
+  quantize_trainer_moe = args.fp8_moe if getattr(args, "trainer_fp8_moe", None) is None else args.trainer_fp8_moe
+  if quantize_trainer_moe:
     quantize_model_moe_fp8(model, per_expert=True)
 
   gd, st = nnx.split(model)
@@ -924,7 +925,10 @@ def stage_compare(args, out_dir):
   if not np.array_equal(tr["tokens"], sa["tokens"]):
     raise SystemExit("trainer and sampler ran on different tokens; delete the npz files and rerun")
   label = "MaxText-in-vLLM (adapter)"
-  if getattr(args, "fp8_moe", False):
+  quantize_trainer_moe = args.fp8_moe if getattr(args, "trainer_fp8_moe", None) is None else args.trainer_fp8_moe
+  if getattr(args, "fp8_moe", False) and not quantize_trainer_moe:
+    precision_tag = "BF16/BF16+MoE-FP8"
+  elif getattr(args, "fp8_moe", False):
     precision_tag = "BF16+MoE-FP8/BF16+MoE-FP8"
   else:
     precision_tag = f"{args.model_type.upper()}/{args.model_type.upper()}"
@@ -1033,9 +1037,16 @@ def main():
                   help="load BF16 model and quantize only MoE layers to FP8 per-channel (Peano lab post method)")
   ap.add_argument("--moe-only-fp8", dest="fp8_moe", action="store_true",
                   help="alias for --fp8-moe")
+  ap.add_argument("--trainer-fp8-moe", action=argparse.BooleanOptionalAction, default=None,
+                  help="quantize MoE layers in trainer; defaults to value of --fp8-moe")
+  ap.add_argument("--fp8-moe-sampler-only", action="store_true",
+                  help="quantize only MoE layers to FP8 in sampler, leaving trainer in pure BF16")
   ap.add_argument("--tag", default=None, help="run tag / experiment label")
 
   args = ap.parse_args()
+  if args.fp8_moe_sampler_only:
+    args.fp8_moe = True
+    args.trainer_fp8_moe = False
   if args.fp8:
     args.model_type = "fp8"
   if args.ep is not None:
