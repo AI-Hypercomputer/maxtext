@@ -53,9 +53,9 @@ def create_training_optimizer(config, model, mesh=None):
 def create_checkpoint_manager(config, mesh, init_state_fn):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
   # pass in model for muon
-  # `setup_checkpoint_logger` only emits a deprecation warning now (Orbax v1 logs
-  # internally) and always returns None; we still pass it through for API parity.
-  logger = checkpointing.setup_checkpoint_logger(config)  # pylint: disable=assignment-from-no-return
+  # Orbax checkpoint Cloud Logger (None unless `enable_checkpoint_cloud_logger`),
+  # used by ML Goodput to measure checkpoint save/restore badput.
+  logger = checkpointing.setup_checkpoint_logger(config)
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager(
         config.local_checkpoint_directory,
