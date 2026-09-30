@@ -14,6 +14,7 @@
 
 """Checkpointing utilities for MaxText training engine."""
 
+import collections
 from collections.abc import Mapping
 import dataclasses
 import os
@@ -228,6 +229,49 @@ def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
   _REGISTERED_IMPL = impl_name
 
 
+def _assert_uniform_device_set(tree: Any, *, item: str) -> None:
+  """Raises PathwaysCheckpointingUnavailableError if leaves in `tree` span differing device sets.
+
+  Orbax's ColocatedPythonDispatcher dispatches by array sharding device_set and asserts a single
+  uniform device set per dispatched batch. A 0-D scalar leaf (such as optax `count` or `step`) left
+  on a 1-device SingleDeviceSharding causes the dispatcher to fail inside Orbax with a generic
+  ValueError naming neither the item nor the offending leaf keypaths.
+
+  Args:
+    tree: The PyTree or NNX State to inspect (pure metadata read, zero device transfer).
+    item: Name of the checkpoint item being saved (e.g., "model_params" or "optimizer_state").
+
+  Raises:
+    PathwaysCheckpointingUnavailableError: If any leaf's sharding.device_set differs from the
+      majority device set across `tree`, listing up to 5 offending keypaths.
+  """
+  flat = jax.tree_util.tree_flatten_with_path(
+      nnx.to_pure_dict(tree) if isinstance(tree, nnx.State) else tree
+  )[0]
+  sharded: list[tuple[Any, frozenset[Any]]] = []
+  for path, leaf in flat:
+    sharding = getattr(leaf, "sharding", None)
+    device_set = getattr(sharding, "device_set", None)
+    if device_set is not None:
+      sharded.append((path, frozenset(device_set)))
+  if len(sharded) <= 1:
+    return
+  majority_set, _ = collections.Counter(ds for _, ds in sharded).most_common(1)[0]
+  offenders = [
+      f"{jax.tree_util.keystr(p)} (len(device_set)={len(ds)})"
+      for p, ds in sharded
+      if ds != majority_set
+  ]
+  if offenders:
+    sample = ", ".join(offenders[:5])
+    more = f" (+{len(offenders) - 5} more)" if len(offenders) > 5 else ""
+    raise PathwaysCheckpointingUnavailableError(
+        f"colocated_python checkpoint save for item={item!r} requires every leaf to share "
+        f"the same sharding.device_set (majority len={len(majority_set)}), but {len(offenders)} "
+        f"leaf/leaves differ: {sample}{more}."
+    )
+
+
 class CheckpointManager:
   """CheckpointManager wrapper for MaxText training engine."""
 
@@ -387,6 +431,8 @@ class CheckpointManager:
       kwargs["force"] = True
 
     params = nnx.state(checkpoint_state.model)
+    if _REGISTERED_IMPL == _COLOCATED_PYTHON:
+      _assert_uniform_device_set(params, item="model_params")
     jax.block_until_ready(params)
     model_cp_args = ocp.args.PyTreeSave(
         item=params,
@@ -402,6 +448,8 @@ class CheckpointManager:
 
     if checkpoint_state.optimizer:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
+      if _REGISTERED_IMPL == _COLOCATED_PYTHON:
+        _assert_uniform_device_set(optimizer_state, item="optimizer_state")
       jax.block_until_ready(optimizer_state)
       optimizer_cp_args = ocp.args.PyTreeSave(
           item=optimizer_state,
