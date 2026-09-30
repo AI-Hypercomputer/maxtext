@@ -852,6 +852,34 @@ class LogitsProjQwixTest(unittest.TestCase):
       ][0]
       self.assertEqual((rule.weight_calibration_method, rule.act_calibration_method), (expected, expected))
 
+  def test_logits_bwd_calibration_method(self):
+    """logits_bwd_quantization_calibration_method overrides the logits cotangent calibration only."""
+    for override, expected_logits in [("", "fixed,-0.00125,0.00125"), ("absmax", "absmax")]:
+      extra = [f"logits_bwd_quantization_calibration_method={override}"] if override else []
+      cfg = pyconfig.initialize(
+          [
+              "",
+              get_test_config_path(),
+              "model_name=deepseek3-671b",
+              "quantization=fp8_full",
+              "use_qwix_quantization=true",
+              "bwd_quantization_calibration_method=fixed,-0.00125,0.00125",
+              "drhs_grad_quantization_calibration_method=fixed,0.00125",
+              "quantize_logits_proj=true",
+              *extra,
+          ],
+          run_name="logits_bwd_calib_test",
+          skip_jax_distributed_system=True,
+      )
+      rules = quantizations.get_fp8_full_qwix_rule_w_sparsity(cfg)
+      logits_rule = [r for r in rules if r.module_path == "decoder/logits_dense.*"][0]
+      layer_rule = [r for r in rules if r.module_path in ("decoder/.*layers.*", "(decoder/.*layers.*|mtp_block/.*)")][0]
+      self.assertEqual(logits_rule.bwd_calibration_method, expected_logits)
+      # The decoder layers keep the fixed range, and the weight-gradient override is untouched on both rules.
+      self.assertEqual(layer_rule.bwd_calibration_method, "fixed,-0.00125,0.00125")
+      self.assertEqual(logits_rule.additional_qt_config["drhs_grad_calibration_method"], "fixed,0.00125")
+      self.assertEqual(layer_rule.additional_qt_config["drhs_grad_calibration_method"], "fixed,0.00125")
+
 
 if __name__ == "__main__":
   unittest.main()

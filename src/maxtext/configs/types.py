@@ -603,6 +603,16 @@ class Quantization(BaseModel):
           "removes that reduction. The activation-gradient arm (dX = dY W^T) is unaffected."
       ),
   )
+  logits_bwd_quantization_calibration_method: str = Field(
+      "",
+      description=(
+          "Backward (cotangent) calibration method for the output logits projection (decoder/logits_dense, also used"
+          " by the MTP head) when `quantize_logits_proj=True`. If empty (default), inherits"
+          " `bwd_quantization_calibration_method`. Set to 'absmax' to keep per-token scaling on the logits cotangent"
+          " while the decoder layers use a fixed range: (softmax - onehot)/N_tokens spans more than e5m2's range"
+          " relative to a single fixed scale, so a per-tensor fixed range zeroes the low-probability vocabulary entries."
+      ),
+  )
   weight_sparsity_n: int | None = Field(
       None,
       description=("The 'N' in N:M sparsity, representing the maximum number of non-zero" " values in each block."),

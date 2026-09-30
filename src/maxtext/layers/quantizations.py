@@ -1096,7 +1096,9 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
             bwd_qtype=jnp.float8_e5m2,
             weight_calibration_method=logits_calib or config.weight_quantization_calibration_method,
             act_calibration_method=logits_calib or config.act_quantization_calibration_method,
-            bwd_calibration_method=config.bwd_quantization_calibration_method,
+            bwd_calibration_method=(
+                config.logits_bwd_quantization_calibration_method or config.bwd_quantization_calibration_method
+            ),
             additional_qt_config=_drhs_grad_calibration_override(config) or None,
             op_names=("dot_general",),
         )
