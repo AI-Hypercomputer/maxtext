@@ -158,14 +158,110 @@ def _sort_activations(
     return inputs[sort_indices, ...]
 
 
-def _route_activations(inputs: jax.Array, selected_experts: jax.Array) -> jax.Array:
+def _route_activations(
+    inputs: jax.Array,
+    selected_experts: jax.Array,
+    sorted_selected_experts: jax.Array | None = None,
+) -> jax.Array:
   """Groups token activations by expert without materializing Top-K copies."""
   selected_experts = selected_experts.reshape((inputs.shape[0], -1))
+  if sorted_selected_experts is not None:
+    return _route_activations_precomputed(
+        inputs,
+        sorted_selected_experts,
+        selected_experts.shape[1],
+    )
   # When use_gather_mosaic_kernel=False, use the general JAX backward, which
   # gathers and sums gradients from all expert copies of each token. The
   # optimized Mosaic gather-reduce kernel currently requires exactly 8 selected
   # experts per token and is enabled only by the specialized batch-split path.
   return sort_activations.route(inputs, selected_experts, use_gather_mosaic_kernel=False)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _route_activations_precomputed(
+    inputs: jax.Array,
+    sorted_selected_experts: jax.Array,
+    num_experts_per_tok: int,
+) -> jax.Array:
+  """Route activations using precomputed `sorted_selected_experts`."""
+  return inputs[sorted_selected_experts // num_experts_per_tok, ...]
+
+
+def _route_activations_precomputed_fwd(
+    inputs: jax.Array,
+    sorted_selected_experts: jax.Array,
+    num_experts_per_tok: int,
+) -> tuple[jax.Array, jax.Array]:
+  return (
+      inputs[sorted_selected_experts // num_experts_per_tok, ...],
+      sorted_selected_experts,
+  )
+
+
+def _route_activations_precomputed_bwd(
+    num_experts_per_tok: int,
+    residuals: jax.Array,
+    grads: jax.Array,
+) -> tuple[jax.Array, None]:
+  sorted_selected_experts = residuals
+  unsorted_grads = grads[jnp.argsort(sorted_selected_experts), ...]
+  return (
+      jnp.sum(
+          jnp.reshape(unsorted_grads, (-1, num_experts_per_tok) + grads.shape[1:]),
+          axis=1,
+      ),
+      None,
+  )
+
+
+_route_activations_precomputed.defvjp(
+    _route_activations_precomputed_fwd,
+    _route_activations_precomputed_bwd,
+)
+
+
+def _unsort_activations(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    use_custom_vjp: bool,
+) -> jax.Array:
+  """Unsort activations that were sorted by `sort_indices`."""
+  assert inputs.shape[0] == sort_indices.shape[0]
+  with jax.named_scope("sort_activations"):
+    if use_custom_vjp:
+      return _unsort_activations_custom(inputs, sort_indices)
+    return inputs[jnp.argsort(sort_indices), ...]
+
+
+@jax.custom_vjp
+def _unsort_activations_custom(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+) -> jax.Array:
+  """Unsort activations with custom vjp that reuses `sort_indices` in backward."""
+  return inputs[jnp.argsort(sort_indices), ...]
+
+
+def _unsort_activations_custom_fwd(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+  return _unsort_activations_custom(inputs, sort_indices), sort_indices
+
+
+def _unsort_activations_custom_bwd(
+    residuals: jax.Array,
+    grads: jax.Array,
+) -> tuple[jax.Array, None]:
+  sort_indices = residuals
+  return _sort_activations_custom(grads, sort_indices), None
+
+
+_unsort_activations_custom.defvjp(
+    _unsort_activations_custom_fwd,
+    _unsort_activations_custom_bwd,
+)
 
 
 @jax.custom_vjp
@@ -1247,7 +1343,11 @@ class RoutedMoE(nnx.Module):
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        sorted_inputs = _route_activations(
+            inputs_2d,
+            flatten_selected_experts_safe,
+            sorted_selected_experts=sorted_selected_experts,
+        )
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -1346,9 +1446,9 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
-      unsort_intermediate = _sort_activations(
+      unsort_intermediate = _unsort_activations(
           intermediate,
-          jnp.argsort(sorted_selected_experts),
+          sorted_selected_experts,
           use_custom_sort_vjp,
       )
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
@@ -2498,9 +2598,9 @@ class RoutedMoE(nnx.Module):
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
-          local_output = _sort_activations(
+          local_output = _unsort_activations(
               intermediate_output,
-              jnp.argsort(route_metadata.local_sorted_indices),
+              route_metadata.local_sorted_indices,
               self.config.use_custom_sort_vjp,
           )
 
