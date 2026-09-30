@@ -1294,6 +1294,85 @@ class RoutedMoeTest(parameterized.TestCase):
         ragged_gather_reduce_fallback=False,
     )
 
+  def _moe_routing_maps_cfg(self, moe_routing_maps: str):
+    """Tiny ring-of-experts ragged-sort MoE config (EP2) for the moe_routing_maps test."""
+    kwargs = {
+        "enable_checkpointing": False,
+        "model_name": "mixtral-8x7b",
+        "override_model_config": True,
+        "base_emb_dim": 512,
+        "base_mlp_dim": 256,
+        "base_moe_mlp_dim": 256,
+        "dtype": "bfloat16",
+        "weight_dtype": "float32",
+        "megablox": False,
+        "sparse_matmul": True,
+        "per_device_batch_size": 4,
+        "ici_expert_parallelism": 2,
+        "use_ring_of_experts": True,
+        "max_target_length": 64,
+        "float32_gate_logits": True,
+        "load_balance_loss_weight": 0.01,
+        "use_ragged_sort": True,
+        "ragged_buffer_factor": 1.5,
+        "ragged_gather_fallback": True,
+        "ragged_gather_reduce_fallback": True,
+        "moe_routing_maps": moe_routing_maps,
+    }
+    return pyconfig.initialize([None, get_test_config_path()], run_name=f"moe_routing_maps_{moe_routing_maps}", **kwargs)
+
+  @pytest.mark.tpu_only
+  def test_moe_routing_maps_remat_loss_and_grad(self):
+    """moe_routing_maps=device under a remat that saves only "moe_routing_maps": bit-identical loss and gradients."""
+
+    def _loss_and_grad(cfg, variables, hidden_states):
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      model = moe.get_routed_moe(
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+      # Same remat as the custom policy with only moe_routing_maps=device.
+      @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.save_only_these_names("moe_routing_maps"))
+      def apply(params, x):
+        return model.apply({"params": params}, x)
+
+      def loss_fn(params, x):
+        out, lb_loss, _ = apply(params, x)
+        return jnp.mean(out.astype(jnp.float32) ** 2) + lb_loss.astype(jnp.float32), lb_loss
+
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        if variables is None:
+          variables = model.init({"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(0)}, hidden_states)
+        step = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
+        (loss, lb_loss), grads = step(variables["params"], hidden_states)
+      return variables, loss, lb_loss, grads
+
+    cfg_ref = self._moe_routing_maps_cfg("remat")
+    hidden_states = jax.random.uniform(
+        jax.random.PRNGKey(2345),
+        (int(cfg_ref.per_device_batch_size) * jax.device_count(), cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+        dtype=cfg_ref.dtype,
+    )
+    variables, loss_ref, lb_ref, grads_ref = _loss_and_grad(cfg_ref, None, hidden_states)
+    _, loss_new, lb_new, grads_new = _loss_and_grad(self._moe_routing_maps_cfg("device"), variables, hidden_states)
+
+    # Only integer index maps are saved instead of recomputed, so every value is bit-identical.
+    np.testing.assert_array_equal(loss_new, loss_ref)
+    np.testing.assert_array_equal(lb_new, lb_ref)
+    leaves_ref, treedef_ref = jax.tree_util.tree_flatten(grads_ref)
+    leaves_new, treedef_new = jax.tree_util.tree_flatten(grads_new)
+    self.assertEqual(treedef_ref, treedef_new)
+    for g_ref, g_new in zip(leaves_ref, leaves_new):
+      np.testing.assert_array_equal(np.asarray(g_new), np.asarray(g_ref))
+
   @pytest.mark.tpu_only
   def test_ragged_sort_loss_and_grad_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True)

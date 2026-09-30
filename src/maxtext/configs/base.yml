@@ -459,6 +459,7 @@ moe_mlpwi_0: 'remat'
 moe_mlpwi_1: 'remat'
 moe_mlpwo: 'remat'
 moe_x_sorted: 'remat' # routed (expert-sorted) MoE input plus its routing metadata; 'device' keeps it in HBM (tokens x top-k x emb per layer) so the backward skips the dispatch all-gather and ragged sort, 'offload' moves it to host, 'remat' recomputes it. Not supported with num_moe_emb_chunks > 0.
+moe_routing_maps: 'remat' # MoE routing index maps only (top-k expert ids, ragged-sort permutations, sorted token indices and group sizes)
 query_proj: 'remat'
 key_proj: 'remat'
 value_proj: 'remat'

@@ -1855,6 +1855,13 @@ class RematAndOffload(BaseModel):
           "from the saved tensor. Default 'remat' recomputes (existing behavior)."
       ),
   )
+  moe_routing_maps: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the MoE routing index maps only (top-k expert ids, ragged-sort permutations, sorted token "
+          "indices and group sizes)."
+      ),
+  )
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
@@ -4512,6 +4519,7 @@ class MaxTextConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routing_maps",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
@@ -5965,6 +5973,7 @@ class RLConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routing_maps",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
