@@ -1200,12 +1200,14 @@ report_performance_metric_for_gcp_monitoring: false
 enable_tensorboard: true
 
 # Vertex AI Tensorboard Configurations - https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/use_vertex_ai_tensorboard.md
-# Set to true for GCE, false if running via XPK
+# Set to true to have MaxText create (or reuse) the Vertex AI Tensorboard instance and Experiment and upload logs.
+# Leave false if they are created outside MaxText and UPLOAD_DATA_TO_TENSORBOARD is set in the environment
+# (legacy XPK set this automatically; with Cluster Toolkit pass it via `gcluster job submit --env`).
 use_vertex_tensorboard: false
-# Project to create Vertex AI Tensorboard in for GCE, blank if project is set using 'gcloud config set project'
-# Set this to blank if running via XPK
+# Project to create Vertex AI Tensorboard in, blank if project is set using 'gcloud config set project'
+# Leave blank when use_vertex_tensorboard is false
 vertex_tensorboard_project: ""
-# Region to create Vertex AI Tensorboard in for GCE, blank if running via XPK
+# Region to create Vertex AI Tensorboard in, blank when use_vertex_tensorboard is false
 # Vertex AI supported regions: https://cloud.google.com/vertex-ai/docs/general/locations#available-regions
 vertex_tensorboard_region: ""
 
