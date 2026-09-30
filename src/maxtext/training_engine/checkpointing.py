@@ -63,6 +63,18 @@ class PathwaysCheckpointingUnavailableError(RuntimeError):
   """Pathways checkpointing was explicitly requested but could not be registered."""
 
 
+class CheckpointRestoreError(RuntimeError):
+  """A checkpoint exists at the requested step but could not be restored."""
+
+
+def _device_restore_target(leaf: Any) -> Any:
+  """Strips `pinned_host` from restore target shardings so Pathways restores valid device arrays."""
+  sharding = getattr(leaf, "sharding", None)
+  if isinstance(sharding, jax.sharding.NamedSharding) and sharding.memory_kind == "pinned_host":
+    return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=sharding.with_memory_kind("device"))
+  return leaf
+
+
 def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
   """Registers the Orbax Pathways array handler for `impl_name`, if applicable.
 
@@ -389,6 +401,9 @@ class CheckpointManager:
 
     Returns:
       A tuple of (step, checkpoint_state, custom metadata).
+
+    Raises:
+      CheckpointRestoreError: If a checkpoint exists at `step` but cannot be restored.
     """
     if self._checkpoint_manager is None:
       logging.info("Checkpointing is disabled, skipping restore.")
@@ -414,7 +429,7 @@ class CheckpointManager:
       restore_args["optimizer_state"] = ocp.args.PyTreeRestore(
           item=optimizer_state,
           restore_args=ocp.checkpoint_utils.construct_restore_args(
-              target=nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
+              target=jax.tree.map(_device_restore_target, optimizer_state)
           ),
       )
 
@@ -440,8 +455,12 @@ class CheckpointManager:
           args=ocp.args.Composite(**restore_args),
       )
     except Exception as e:  # pylint: disable=broad-except
-      logging.exception("Failed to restore checkpoint: %s", e)
-      return None, None, None
+      # Returning "no checkpoint" here would make the orchestrator start a fresh run from the
+      # base weights while the checkpoint it failed to read is still on disk.
+      raise CheckpointRestoreError(
+          f"Checkpoint at step {step} exists but could not be restored; refusing to silently "
+          f"start a fresh run over it. {type(e).__name__}: {e}"
+      ) from e
 
     if "model_params" in restored_items:
       nnx.update(checkpoint_state.model, restored_items["model_params"])

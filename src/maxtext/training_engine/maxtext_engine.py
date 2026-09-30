@@ -2516,6 +2516,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       The metadata PyTree of the restored checkpoint.
     """
     step = kwargs.get("step", None)
+    # The restore target is read off the live state, and `CloudPathwaysArrayHandler` only restores
+    # into a NamedSharding. An engine that has not compiled yet -- Tunix resumes right after
+    # `bring_up_workers(dummy_data=None)` -- still holds optax's `count` and the optimizer's `step`
+    # uncommitted on one device, and its moments unsharded in device HBM. Settle mesh placement,
+    # Zero-1 sharding, and host offload up front as `_compile_for_batch` does, then re-offload the
+    # newly restored device arrays after `restore_checkpoint` returns.
+    self._refresh_pure_state()
+    self._place_state_on_mesh()
+    self._shard_optimizer_state_over_data()
+    self._offload_optimizer_state()
     checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
@@ -2542,6 +2552,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Orbax has just written new arrays into the live NNX variables, so the cache is wrong
     # rather than merely old.
     self._invalidate_pure_state()
+    self._offload_optimizer_state()
 
     if restored_checkpoint_state.accumulated_metrics:
       buffers = []
