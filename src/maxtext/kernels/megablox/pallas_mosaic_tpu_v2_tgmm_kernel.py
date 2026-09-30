@@ -18,6 +18,7 @@
 
 import dataclasses
 import functools
+import os
 from typing import Any, Callable, Tuple
 
 import jax
@@ -27,6 +28,17 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
+
+
+def _tgmm_noslice_enabled(cfgs: gmm_v2.GmmConfigs) -> bool:
+  if (os.environ.get("MAXTEXT_G4_TGMM_NOSLICE", "0") or "0").strip().lower() in ("0", "", "false", "off"):
+    return False
+  if cfgs.has_partial_sum:
+    return False
+  if pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k) != 1:
+    return False
+  sublane = pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype)
+  return cfgs.dims.size_k % sublane == 0
 
 
 @jax.tree_util.register_dataclass
@@ -350,7 +362,8 @@ def tgmm_inner_kernel(
         acc *= scale_slice
       if cfgs.has_partial_sum:
         acc += tiled_ps_ref[...].astype(acc.dtype)  # pyrefly: ignore[unsupported-operation]
-      tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
+      out_k = tiled_out_ref.shape[0]
+      tiled_out_ref[...] = (acc[:out_k, :] if out_k < acc.shape[0] else acc).astype(tiled_out_ref.dtype)
     else:
       acc_ref[...] = acc
 
@@ -461,8 +474,9 @@ def generate_tgmm_block_specs(
         index_map.rhs_scale_index_map,
     )
   rhs_spec = OperandRef(value=rhs_block_spec, scale=rhs_scale_block_spec)
+  out_tile_k = cfgs.dims.size_k if _tgmm_noslice_enabled(cfgs) else cfgs.tiles.tile_k
   out_block_spec = pl.BlockSpec(
-      (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
+      (None, out_tile_k, cfgs.tiles.tile_n),
       index_map.out_index_map,
   )
   ps_block_spec = None
@@ -719,7 +733,7 @@ def tgmm_v2(
   # Pad K up to a tile_k multiple so (a) every k-tile written by the matmul
   # stays in-bounds, and (b) the zero-init path can slice in sublane-aligned
   # chunks. tile_k is num_lanes-aligned, which is also sublane-tile-aligned.
-  aligned_k = gmm_v2.align_to(dims.size_k, tiles.tile_k)
+  aligned_k = dims.size_k if _tgmm_noslice_enabled(cfgs) else gmm_v2.align_to(dims.size_k, tiles.tile_k)
   out_init = jax.ShapeDtypeStruct((num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype)
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
@@ -788,7 +802,9 @@ def tgmm_v2(
       # It does not affect the kernel's computation.
       metadata=gmm_v2.get_metadata(cfgs),  # pyrefly: ignore[bad-argument-type]
       input_output_aliases=input_output_aliases,
-  )(group_sizes, group_offset, lhs, rhs, partial_sum)[:, : dims.size_k, : dims.size_n]
+  )(group_sizes, group_offset, lhs, rhs, partial_sum)
+  if aligned_k != dims.size_k or aligned_n != dims.size_n:
+    raw_out = raw_out[:, : dims.size_k, : dims.size_n]
 
   if partial_sum is not None:
     local_group_sizes = lax.dynamic_slice(group_sizes, (group_offset[0],), (num_actual_groups,))

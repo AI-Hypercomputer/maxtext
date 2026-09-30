@@ -87,6 +87,8 @@ Env (read at trace time):
                               weights; 0: round weights to bf16 (1 matmul).
   MAXTEXT_G4_COMBINE_BWD      backward kernel: v5 (default, column-oriented) | v4.
   MAXTEXT_G4_COMBINE_BWD_RQ   v5 backward rows per chunk (default 1024).
+  MAXTEXT_G4_ROWINFO_IOTA     1: build the row-info array directly in 2-D
+                              (no [R, 3] stack + pad relayout); default 0.
   MAXTEXT_G4_COMBINE_MODE     microbenchmarks only (results are WRONG unless
                               "full"): full | dma | compute | nomerge.
 """
@@ -331,6 +333,17 @@ def _row_info(sort_idx, k):
   else:
     tok = s // k
     rem = s - tok * k
+  if _env_int("MAXTEXT_G4_ROWINFO_IOTA", 0) != 0:
+    c0 = jnp.bitwise_and(tok, 255).astype(jnp.bfloat16)[:, None]
+    c1 = (tok >> 8).astype(jnp.bfloat16)[:, None]
+    c2 = rem.astype(jnp.bfloat16)[:, None]
+    lane = lax.broadcasted_iota(jnp.int32, (1, _LANES), 1)
+    z = jnp.zeros((1, 1), dtype=jnp.bfloat16)
+    return jnp.where(
+        lane == 0,
+        c0,
+        jnp.where(lane == 1, c1, jnp.where(lane == 2, c2, z)),
+    )
   info = jnp.stack([jnp.bitwise_and(tok, 255), tok >> 8, rem], axis=-1).astype(jnp.bfloat16)
   return jnp.pad(info, ((0, 0), (0, _LANES - info.shape[1])))
 

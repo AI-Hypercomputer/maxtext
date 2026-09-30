@@ -197,6 +197,7 @@ class MoeCombineTest(parameterized.TestCase):
       ("bucket256_en128", {"MAXTEXT_G4_COMBINE_BUCKET": "256", "MAXTEXT_G4_COMBINE_EN": "128"}),
       ("bwd_v4", {"MAXTEXT_G4_COMBINE_BWD": "v4"}),
       ("bwd_v5_rq512", {"MAXTEXT_G4_COMBINE_BWD": "v5", "MAXTEXT_G4_COMBINE_BWD_RQ": "512"}),
+      ("rowinfo_iota", {"MAXTEXT_G4_ROWINFO_IOTA": "1"}),
   )
   def test_env_variants(self, env):
     old = {kk: os.environ.get(kk) for kk in env}

@@ -157,6 +157,31 @@ def _g4_data_fence(logits, weights, gmm_view=()):
   return logits + (dep * 0.0).astype(logits.dtype)
 
 
+def _g4_glu_custom_vjp() -> bool:
+  """MAXTEXT_G4_GLU_CUSTOM_VJP=1: custom VJP on the gate/up split `out[:, :n], out[:, n:]`
+  so backward uses `jnp.concatenate([dw0, dw1], axis=-1)` instead of two 1408-wide
+  zero-pads + f32 upcasts + f32 add_any + bf16 downcast (`pad_add_fusion`, ~38 ms/step)."""
+  return (os.environ.get("MAXTEXT_G4_GLU_CUSTOM_VJP", "0") or "0").strip().lower() not in ("0", "", "false", "off")
+
+
+@jax.custom_vjp
+def _g4_split_gate_up(out: jax.Array) -> tuple[jax.Array, jax.Array]:
+  n = out.shape[-1] // 2
+  return out[:, :n], out[:, n:]
+
+
+def _g4_split_gate_up_fwd(out: jax.Array):
+  return _g4_split_gate_up(out), None
+
+
+def _g4_split_gate_up_bwd(_res, g):
+  dw0, dw1 = g
+  return (jnp.concatenate([dw0, dw1], axis=-1),)
+
+
+_g4_split_gate_up.defvjp(_g4_split_gate_up_fwd, _g4_split_gate_up_bwd)
+
+
 @struct.dataclass
 class RouteMetadata:
   """EP communication state needed to undo the forward all-to-all after expert computation."""
@@ -2698,8 +2723,11 @@ class RoutedMoE(nnx.Module):
           # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
           w_fused = jnp.concatenate([w0, w1], axis=-1)
           out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        if _g4_glu_custom_vjp():
+          layer_w0, layer_w1 = _g4_split_gate_up(out)
+        else:
+          n = out.shape[-1] // 2
+          layer_w0, layer_w1 = out[:, :n], out[:, n:]
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
