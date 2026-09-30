@@ -1259,6 +1259,64 @@ class MoEGeneral(BaseModel):
       description="When the MoE FSDP weight all-gathers are pinned, pin only the forward all-gather; its transpose"
       " (the weight-gradient reshard) runs outside compute_on, as with the pin off.",
   )
+  moe_pin_sparse_core_ep_all_gathers_fwd_only: bool = Field(
+      False,
+      description="When the MoE EP all-gathers are pinned, pin only the forward all-gather; its transpose (the"
+      " cotangent reduce-scatter over the expert axis) is a plain psum_scatter offloaded by XLA.",
+  )
+  moe_pin_sparse_core_gate_all_gather: bool = Field(
+      False,
+      description="Pin the MoE router (gate) kernel FSDP all-gather to the FSDP SparseCore"
+      " (moe_fsdp_all_gather_sparse_core_id). Its transpose, the gate weight-gradient reduction, then also runs"
+      " asynchronously on that SparseCore instead of as a synchronous TensorCore all-reduce.",
+  )
+  constrain_dense_kernel_grad: bool = Field(
+      False,
+      description="Constrain each DenseGeneral kernel's cotangent to the kernel's (FSDP) sharding, so the per-layer"
+      " weight gradient lowers to a reduce-scatter instead of a full all-reduce + dynamic slice.",
+  )
+  dense_fsdp_shard_map_dot: bool = Field(
+      False,
+      description="Compute FSDP-sharded DenseGeneral matmuls inside shard_map with an explicit kernel all-gather, so"
+      " the weight gradient is a reduce-scatter over the FSDP axes plus a small all-reduce over the other data axes"
+      " (instead of a full all-reduce + dynamic slice). With qwix fp8_full the gather stays fp8; the backward"
+      " absmax calibration of the weight-gradient cotangent becomes per device shard.",
+  )
+  dense_fsdp_shard_map_max_kernel_elems: int = Field(
+      134217728,
+      description="dense_fsdp_shard_map_dot only applies to kernels with at most this many elements (<= 0: no"
+      " limit). The default keeps the vocab-sized output head on the GSPMD path (its gathered bf16 kernel is ~1.85 GB).",
+  )
+  embed_fsdp_shard_map: bool = Field(
+      False,
+      description="Compute the one-hot (use_iota_embed) token embedding inside shard_map with an explicit FSDP"
+      " all-gather of the table, so its gradient is a reduce-scatter over the FSDP axes plus a small all-reduce over"
+      " the other data axes instead of a full all-reduce of the [vocab, embed] table over every device.",
+  )
+  embed_fsdp_rs_chunks: int = Field(
+      1, description="With embed_fsdp_shard_map, split the table-gradient reduce-scatter into this many vocab slices."
+  )
+  moe_combine_rs_sparse_core_ids: str = Field(
+      "",
+      description="Comma-separated SparseCore ids to pin the ring-of-experts combine reduce-scatter (forward) to,"
+      " one per token chunk (chunk c uses ids[c % len]). Empty = unpinned (XLA default offload).",
+  )
+  moe_ep_bwd_rs_sparse_core_ids: str = Field(
+      "",
+      description="Comma-separated SparseCore ids to pin the ring-of-experts EP all-gather backward reduce-scatter to,"
+      " one per token chunk (chunk c uses ids[c % len]). Empty = unpinned when fwd_only is set.",
+  )
+  moe_combine_rgr_single_sparsecore: bool = Field(
+      False,
+      description="Run the ring-of-experts combine ragged gather-reduce (and its backward gather) on one SparseCore,"
+      " leaving the other SparseCore free for the combine reduce-scatter.",
+  )
+  moe_chunk_combine_fence: bool = Field(
+      False,
+      description="With num_moe_token_chunks>1, fence chunk c+1's wo GMM input on chunk c's pre-reduce-scatter"
+      " combine output (forward-only optimization_barrier) so chunk c's gather-reduce and reduce-scatter are"
+      " issued before chunk c+1's wo GMM and overlap with it.",
+  )
   moe_fsdp_all_gather_sparse_core_id: int = Field(
       0,
       description="SparseCore ID to pin MoE FSDP all-gathers to when moe_pin_sparse_core_all_gathers is True.",

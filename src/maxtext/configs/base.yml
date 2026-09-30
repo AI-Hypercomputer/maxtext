@@ -320,6 +320,18 @@ moe_pin_sparse_core_all_gathers: false
 moe_pin_sparse_core_ep_all_gathers: false
 moe_pin_sparse_core_fsdp_all_gathers: false
 moe_pin_sparse_core_fsdp_all_gathers_fwd_only: false
+moe_pin_sparse_core_ep_all_gathers_fwd_only: false # pinned EP AG in fwd only; its bwd RS is unpinned
+# Pin the router (gate) kernel all-gather (and so its weight-gradient reduction) to the FSDP SparseCore.
+moe_pin_sparse_core_gate_all_gather: false
+constrain_dense_kernel_grad: false # constrain DenseGeneral kernel grads to the FSDP sharding (RS instead of AR+DS)
+dense_fsdp_shard_map_dot: false # FSDP DenseGeneral matmuls in shard_map: weight-grad RS instead of AR+DS
+dense_fsdp_shard_map_max_kernel_elems: 134217728 # dsm only for kernels up to this size (excludes the vocab head)
+embed_fsdp_shard_map: false # one-hot token embedding in shard_map: table-grad RS instead of full AR
+embed_fsdp_rs_chunks: 1 # split the embed_fsdp_shard_map table-grad RS into N vocab slices
+moe_combine_rs_sparse_core_ids: "" # per-chunk SparseCore ids for the combine reduce-scatter, e.g. "0,1"
+moe_ep_bwd_rs_sparse_core_ids: "" # per-chunk SparseCore ids for the EP all-gather bwd reduce-scatter, e.g. "0,1"
+moe_combine_rgr_single_sparsecore: false # combine gather-reduce on a single SparseCore
+moe_chunk_combine_fence: false # fence chunk c+1's wo GMM on chunk c's combine output (fwd-only barrier)
 moe_fsdp_all_gather_sparse_core_id: 0
 moe_ep_all_gather_sparse_core_id: 1
 # tunable tiling dimensions used for mlp gmm

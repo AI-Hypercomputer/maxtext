@@ -560,6 +560,7 @@ class GateLogit(nnx.Module):
       quant: Optional[quantizations.AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
+      pin_sc_all_gather_core_id: Optional[int] = None,
   ):
     """Initializes the GateLogit module.
 
@@ -579,7 +580,10 @@ class GateLogit(nnx.Module):
       score_func: Scoring function for output normalization before applying bias.
       quant: The quantization configuration. If None, no quantization is applied.
       matmul_precision: The precision level for the matrix multiplication.
+      pin_sc_all_gather_core_id: If set, the kernel all-gather (and hence its transpose, the
+        weight-gradient reduction) runs on this SparseCore via compute_on.
     """
+    self.pin_sc_all_gather_core_id = pin_sc_all_gather_core_id
     self.in_features_shape = linears.canonicalize_tuple(in_features_shape)
     self.out_features_shape = linears.canonicalize_tuple(out_features_shape)
     self.model_name = model_name
@@ -659,6 +663,17 @@ class GateLogit(nnx.Module):
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
       kernel = self.kernel[...]
+    use_sc_gate_dot = (
+        self.pin_sc_all_gather_core_id is not None
+        and not _initializing
+        and not quantizations.in_serve_mode(self.quant)
+        and self.quant_dot_general is None
+        and self.shard_mode == ShardMode.AUTO
+        and inputs.ndim == 3
+        and norm_axis == (inputs.ndim - 1,)
+    )
+    if use_sc_gate_dot:
+      raw_kernel = kernel
     kernel = jnp.asarray(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(norm_axis)))
@@ -667,16 +682,27 @@ class GateLogit(nnx.Module):
         if self.shard_mode == ShardMode.EXPLICIT
         else None
     )
-    output = linears._compute_dot_general_nnx(
-        inputs,
-        kernel,
-        norm_axis,
-        contract_ind,
-        self.matmul_precision,
-        self.quant_dot_general,
-        _initializing,
-        out_sharding=output_sharding,
-    )
+    if use_sc_gate_dot:
+      output = _sc_gate_dot(
+          inputs,
+          raw_kernel,
+          self.mesh,
+          self.kernel_axes,
+          self.dtype,
+          self.matmul_precision,
+          self.pin_sc_all_gather_core_id,
+      )
+    else:
+      output = linears._compute_dot_general_nnx(
+          inputs,
+          kernel,
+          norm_axis,
+          contract_ind,
+          self.matmul_precision,
+          self.quant_dot_general,
+          _initializing,
+          out_sharding=output_sharding,
+      )
     pre_bias_logits = None
 
     if self.score_func:
@@ -690,6 +716,62 @@ class GateLogit(nnx.Module):
       bias = jnp.asarray(self.bias[...], self.dtype)
       output += bias
     return output, pre_bias_logits
+
+
+def _sc_gate_dot(
+    inputs: jax.Array,
+    kernel: jax.Array,
+    mesh: Mesh,
+    kernel_axes: Tuple[Optional[str], ...],
+    compute_dtype: ctypes.DType,
+    matmul_precision: str,
+    core_id: int,
+) -> jax.Array:
+  """Router logits `inputs @ kernel` with an explicit, SparseCore-pinned FSDP all-gather of the kernel.
+
+  Under plain GSPMD the gate weight gradient is reduced with a synchronous TensorCore all-reduce over
+  all devices (followed by a dynamic slice to the FSDP shard). Doing the matmul inside shard_map with an
+  explicit all_gather makes the gradient a psum_scatter over the FSDP axes (pinned to the same
+  SparseCore, asynchronous) plus a small psum of the 1/FSDP shard over the remaining data axes.
+  """
+  rules = get_logical_axis_rules()
+  x_spec = logical_to_mesh_axes(("activation_batch", "activation_norm_length", None), mesh=mesh, rules=rules)
+  k_spec = logical_to_mesh_axes(kernel_axes, mesh=mesh, rules=rules)
+  gather_axes = k_spec[0]
+  if k_spec[1:] and any(s is not None for s in k_spec[1:]):
+    raise ValueError(f"_sc_gate_dot expects a kernel sharded on dim 0 only, got {k_spec}")
+
+  @functools.partial(
+      compute_on,
+      compute_type="tpu_sparsecore",
+      out_memory_spaces=jax.memory.Space.Device,
+      compiler_options={"sparse_core_config": {"core_ids": [core_id]}},
+  )
+  def _gather(w):
+    return jax.lax.all_gather(w, axis_name=gather_axes, axis=0, tiled=True)
+
+  def _axes(spec):
+    out = []
+    for dim in spec:
+      if dim is None:
+        continue
+      out.extend(dim if isinstance(dim, (tuple, list)) else (dim,))
+    return out
+
+  k_axes = set(_axes(k_spec))
+  # Mark the kernel varying over the data-parallel axes *before* the gather so that the
+  # transpose is psum_scatter(fsdp) first, then a psum of the small shard over the rest.
+  vary_axes = tuple(a for a in mesh.axis_names if a in set(_axes(x_spec)) and a not in k_axes)
+
+  def _body(x, w):
+    if vary_axes:
+      w = jax.lax.pcast(w, axis_name=vary_axes, to="varying")
+    if gather_axes is not None:
+      w = _gather(w)
+    w = jnp.asarray(w, compute_dtype)
+    return jax.lax.dot_general(x, w, (((x.ndim - 1,), (0,)), ((), ())), precision=jax.lax.Precision(matmul_precision))
+
+  return jax.shard_map(_body, mesh=mesh, in_specs=(x_spec, k_spec), out_specs=x_spec)(inputs, kernel)
 
 
 def _all_gather_quantized_payload(
@@ -748,13 +830,48 @@ def _all_gather_quantized_payload(
   return (gathered_qvals.astype(jnp.float32) * scale).astype(x.dtype)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4))
+def _psum_scatter_maybe_pinned(x, axis_name, scatter_dimension, tiled, sc_core_id):
+  """psum_scatter, optionally pinned to one SparseCore (sc_core_id >= 0) via compute_on."""
+  if sc_core_id is None or sc_core_id < 0:
+    return jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
+
+  @functools.partial(
+      compute_on,
+      compute_type="tpu_sparsecore",
+      out_memory_spaces=jax.memory.Space.Device,
+      compiler_options={"sparse_core_config": {"core_ids": [sc_core_id]}},
+  )
+  def _pinned(z):
+    return jax.lax.psum_scatter(z, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
+
+  return _pinned(x)
+
+
+@jax.custom_vjp
+def _fwd_only_barrier(a, b):
+  """optimization_barrier((a, b)) in the forward; identity (no barrier) on the cotangents."""
+  return jax.lax.optimization_barrier((a, b))
+
+
+def _fwd_only_barrier_fwd(a, b):
+  return jax.lax.optimization_barrier((a, b)), None
+
+
+def _fwd_only_barrier_bwd(_, cts):
+  return cts
+
+
+_fwd_only_barrier.defvjp(_fwd_only_barrier_fwd, _fwd_only_barrier_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5))
 def _moe_combine_psum_scatter(
     x: jax.Array,
     axis_name: str | tuple[str, ...],
     scatter_dimension: int = 0,
     tiled: bool = True,
     bwd_method: str = "",
+    sc_core_id: int = -1,
 ) -> jax.Array:
   """Evaluates psum_scatter in forward, and quantized All-Gather in backward.
 
@@ -769,7 +886,7 @@ def _moe_combine_psum_scatter(
       Output: [global_batch, sequence_length, hidden_dim], gathered along
         scatter_dimension=0.
   """
-  return jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
+  return _psum_scatter_maybe_pinned(x, axis_name, scatter_dimension, tiled, sc_core_id)
 
 
 def _moe_combine_psum_scatter_fwd(
@@ -778,9 +895,10 @@ def _moe_combine_psum_scatter_fwd(
     scatter_dimension: int = 0,
     tiled: bool = True,
     bwd_method: str = "",
+    sc_core_id: int = -1,
 ) -> tuple[jax.Array, None]:
   """Custom VJP forward pass for _moe_combine_psum_scatter."""
-  return _moe_combine_psum_scatter(x, axis_name, scatter_dimension, tiled, bwd_method), None
+  return _moe_combine_psum_scatter(x, axis_name, scatter_dimension, tiled, bwd_method, sc_core_id), None
 
 
 def _moe_combine_psum_scatter_bwd(
@@ -788,6 +906,7 @@ def _moe_combine_psum_scatter_bwd(
     scatter_dimension: int,
     tiled: bool,
     bwd_method: str,
+    sc_core_id: int,
     res: Any,
     grads: jax.Array,
 ) -> tuple[jax.Array]:
@@ -956,6 +1075,9 @@ class RoutedMoE(nnx.Module):
         score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
         shard_mode=config.shard_mode,
+        pin_sc_all_gather_core_id=(
+            self.config.moe_fsdp_all_gather_sparse_core_id if self.config.moe_pin_sparse_core_gate_all_gather else None
+        ),
         rngs=self.rngs,
     )
     rule = qpl.get_current_rule("gmm")
@@ -1714,7 +1836,10 @@ class RoutedMoE(nnx.Module):
           gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
-          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+          use_single_sparsecore=(
+              self.config.ragged_sort_use_single_sparsecore
+              or getattr(self.config, "moe_combine_rgr_single_sparsecore", False)
+          ),
           topk_argsort_indices=topk_argsort_indices,
           gather_reduce_bf16_output=self.config.ragged_gather_reduce_bf16_output,
       )
@@ -2543,7 +2668,12 @@ class RoutedMoE(nnx.Module):
         input_ids=None,
         forced_routed_experts=None,
         force_dropless=False,
+        chunk_idx=0,
     ):
+      bwd_rs_core_ids = [
+          int(t) for t in str(getattr(self.config, "moe_ep_bwd_rs_sparse_core_ids", "") or "").split(",") if t.strip()
+      ]
+      bwd_rs_core_id = bwd_rs_core_ids[chunk_idx % len(bwd_rs_core_ids)] if bwd_rs_core_ids else -1
       if self.config.moe_pin_sparse_core_all_gathers or getattr(self.config, "moe_pin_sparse_core_ep_all_gathers", False):
 
         @functools.partial(
@@ -2552,8 +2682,34 @@ class RoutedMoE(nnx.Module):
             out_memory_spaces=jax.memory.Space.Device,
             compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
         )
-        def _ep_all_gather(z):
+        def _ep_all_gather_pinned(z):
           return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+
+        if getattr(self.config, "moe_pin_sparse_core_ep_all_gathers_fwd_only", False) or bwd_rs_core_id >= 0:
+          # Forward: the pinned SparseCore all-gather. Backward: psum_scatter, either unpinned (bwd_rs_core_id < 0)
+          # or pinned to a per-chunk SparseCore id (e.g. "0,1" to split chunk cotangents across both SparseCores).
+          ep_axis = self._expert_parallelism_name
+
+          @jax.custom_vjp
+          def _ep_all_gather_fwd_pinned(z):
+            return _ep_all_gather_pinned(z)
+
+          def _ep_all_gather_fwd(z):
+            return _ep_all_gather_pinned(z), None
+
+          def _ep_all_gather_bwd(_, g):
+            return (_psum_scatter_maybe_pinned(g, ep_axis, 0, True, bwd_rs_core_id),)
+
+          _ep_all_gather_fwd_pinned.defvjp(_ep_all_gather_fwd, _ep_all_gather_bwd)
+
+          def _ep_all_gather(z):
+            # Integer inputs (expert ids) have no cotangent; keep them on the plain pinned path.
+            if jnp.issubdtype(z.dtype, jnp.floating):
+              return _ep_all_gather_fwd_pinned(z)
+            return _ep_all_gather_pinned(z)
+
+        else:
+          _ep_all_gather = _ep_all_gather_pinned
 
       else:
 
@@ -2785,6 +2941,7 @@ class RoutedMoE(nnx.Module):
         input_ids=None,
         forced_routed_experts=None,
         force_dropless=False,
+        chunk_idx=0,
     ):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -2801,6 +2958,7 @@ class RoutedMoE(nnx.Module):
             input_ids=input_ids,
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
+            chunk_idx=chunk_idx,
         )
       else:
         return ra2a_and_route(
@@ -3131,6 +3289,29 @@ class RoutedMoE(nnx.Module):
       )
       return output0, output1, gmm_fn, routing, route_metadata, wo_bias
 
+    def _combine_rs(output, chunk_idx=0):
+      """Ring-of-experts combine: sum the partial outputs across the expert shards (reduce-scatter)."""
+      combine_bwd_method = self.config.moe_quantize_combine_bwd_method
+      rs_core_ids = [
+          int(t) for t in str(getattr(self.config, "moe_combine_rs_sparse_core_ids", "") or "").split(",") if t.strip()
+      ]
+      rs_core_id = rs_core_ids[chunk_idx % len(rs_core_ids)] if rs_core_ids else -1
+      if combine_bwd_method or rs_core_id >= 0:
+        return _moe_combine_psum_scatter(
+            output,
+            self._expert_parallelism_name,
+            0,
+            True,
+            combine_bwd_method or "",
+            rs_core_id,
+        )
+      return jax.lax.psum_scatter(
+          output,
+          self._expert_parallelism_name,
+          scatter_dimension=0,
+          tiled=True,
+      )
+
     def _moe_body(
         x,
         logits,
@@ -3145,6 +3326,8 @@ class RoutedMoE(nnx.Module):
         rngs,
         forced_routed_experts=None,
         force_dropless=False,
+        chunk_idx=0,
+        fence_io=None,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
@@ -3171,6 +3354,7 @@ class RoutedMoE(nnx.Module):
             input_ids=sharded_input_ids,
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
+            chunk_idx=chunk_idx,
         )
 
         # moe_x_sorted: tag the routed (expert-sorted) MoE input and its small routing/metadata
@@ -3196,6 +3380,11 @@ class RoutedMoE(nnx.Module):
         output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
 
       intermediate_layer = self.apply_ffn_activation(output0, output1)
+      if fence_io is not None and fence_io.get("prev") is not None:
+        # moe_chunk_combine_fence: hold this chunk's wo GMM until the previous chunk's combine
+        # gather-reduce (+ convert) is done. The previous chunk's reduce-scatter consumes the fenced
+        # value, so it can be issued before (and overlap with) this GMM.
+        intermediate_layer, fence_io["prev_fenced"] = _fwd_only_barrier(intermediate_layer, fence_io["prev"])
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       intermediate_output = gmm_fn(
           intermediate_layer,
@@ -3238,22 +3427,9 @@ class RoutedMoE(nnx.Module):
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
             ),
         )
-        combine_bwd_method = self.config.moe_quantize_combine_bwd_method
-        if combine_bwd_method:
-          output = _moe_combine_psum_scatter(
-              output,
-              self._expert_parallelism_name,
-              scatter_dimension=0,
-              tiled=True,
-              bwd_method=combine_bwd_method,
-          )
-        else:
-          output = jax.lax.psum_scatter(
-              output,
-              self._expert_parallelism_name,
-              scatter_dimension=0,
-              tiled=True,
-          )
+        if fence_io is None:
+          output = _combine_rs(output, chunk_idx)
+        # else: the caller reduce-scatters this chunk's output (after fencing the next chunk's wo GMM on it).
         return (
             output,
             routing.lb_loss,
@@ -3400,6 +3576,8 @@ class RoutedMoE(nnx.Module):
         chunk = seq_len // n_chunks
         outs, lb_losses, bias_updates_list, has_overflows, required_rbfs, max_load_ratios = [], [], [], [], [], []
         _prev = None
+        combine_fence = bool(getattr(self.config, "moe_chunk_combine_fence", False))
+        _combine_prev = None
         for c in range(n_chunks):
           sl = slice(c * chunk, (c + 1) * chunk)
           x_c = x[:, sl, :]
@@ -3409,6 +3587,7 @@ class RoutedMoE(nnx.Module):
           # loss stays bit-exact.
           if barrier_enabled and _prev is not None:
             x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
+          fence_io = {"prev": _combine_prev} if combine_fence else None
           out_c, lb_c, bu_c, ov_c, req_c, ratio_c = _moe_body(
               x_c,
               logits[:, sl, :],
@@ -3423,7 +3602,17 @@ class RoutedMoE(nnx.Module):
               rngs,
               None if forced_routed_experts is None else forced_routed_experts[:, sl, :],
               force_dropless=force_dropless,
+              chunk_idx=c,
+              fence_io=fence_io,
           )
+          if combine_fence:
+            # out_c is this chunk's pre-reduce-scatter combine output; reduce-scatter the previous chunk now
+            # (from the fenced copy) and this one after the next chunk's wo GMM is fenced on it.
+            if c > 0:
+              outs[c - 1] = _combine_rs(fence_io.get("prev_fenced", _combine_prev), c - 1)
+            _combine_prev = out_c
+            if c == n_chunks - 1:
+              out_c = _combine_rs(out_c, c)
           if barrier_enabled:
             _prev = out_c
           outs.append(out_c)
@@ -4762,7 +4951,14 @@ class RoutedAndSharedMoE(nnx.Module):
         num_experts_per_tok=self.config.num_experts_per_tok,
         mesh=self.mesh,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed_moe", None),
+        # Router gate kernel: use the dedicated "moe_gate_in" logical axis when the
+        # active rules define it (e.g. ep-as-dp-wx); otherwise keep "embed_moe".
+        kernel_axes=(
+            "moe_gate_in"
+            if any(rule[0] == "moe_gate_in" for rule in (self.config.logical_axis_rules or []))
+            else "embed_moe",
+            None,
+        ),
         intermediate_dim=self.config.moe_mlp_dim,
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
