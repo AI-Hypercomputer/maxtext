@@ -206,6 +206,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
 
   intermediates = nnx.pop(model, nnx.Intermediate)
   intermediate_outputs = intermediates.to_pure_dict()
+  # defer_small_all_reduces: the MoE layers emitted local partial expert counts; reduce the stacked arrays here, once,
+  # after the layer loop (a no-op when the flag is off).
+  intermediate_outputs = moe.finalize_deferred_intermediates(intermediate_outputs, config)
 
   # Store them under the collection name so calculate_mtp_loss and
   # calculate_mtp_acceptance_rate find them at the path they expect.

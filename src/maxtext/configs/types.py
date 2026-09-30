@@ -1223,6 +1223,21 @@ class MoEGeneral(BaseModel):
       False,
       description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
   )
+  moe_pin_sparse_core_ep_all_gathers: bool = Field(
+      False,
+      description="Pin only the ring-of-experts EP all-gathers (dispatch tokens and routing inputs) to a SparseCore"
+      " (OR-ed with moe_pin_sparse_core_all_gathers).",
+  )
+  moe_pin_sparse_core_fsdp_all_gathers: bool = Field(
+      False,
+      description="Pin only the MoE FSDP weight all-gathers to a SparseCore (OR-ed with"
+      " moe_pin_sparse_core_all_gathers).",
+  )
+  moe_pin_sparse_core_fsdp_all_gathers_fwd_only: bool = Field(
+      False,
+      description="When the MoE FSDP weight all-gathers are pinned, pin only the forward all-gather; its transpose"
+      " (the weight-gradient reshard) runs outside compute_on, as with the pin off.",
+  )
   moe_fsdp_all_gather_sparse_core_id: int = Field(
       0,
       description="SparseCore ID to pin MoE FSDP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
@@ -1304,7 +1319,9 @@ class MoEGeneral(BaseModel):
   @model_validator(mode="after")
   def validate_moe_sharding_strategy(self) -> "MoEGeneral":
     """Ensure that only one MoE FSDP sharding strategy is active at a time."""
-    if self.moe_pin_sparse_core_all_gathers and self.moe_fsdp_use_two_stage_all_gather:
+    if (
+        self.moe_pin_sparse_core_all_gathers or self.moe_pin_sparse_core_fsdp_all_gathers
+    ) and self.moe_fsdp_use_two_stage_all_gather:
       raise ValueError(
           "SparseCore pinning for MoE all-gathers (`moe_pin_sparse_core_all_gathers=True`) "
           "is not supported with `moe_fsdp_use_two_stage_all_gather=True`."
@@ -1412,6 +1429,13 @@ class DeepSeekMoE(BaseModel):
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
   routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
+  defer_small_all_reduces: bool = Field(
+      False,
+      description="Ring-of-experts sparse_matmul only: drop the per-layer all-reduces of the routed-bias expert counts"
+      " from the scanned layer. Each MoE layer emits its local partial counts, the scan stacks them, and loss_fn"
+      " reduces the stacked array once after the layer loop (one all-reduce). Same sums as the per-layer path. (The"
+      " token-overflow flag of moe_dropless_fallback='step' is already reduced once per step without this flag.)",
+  )
   log_moe_bias_norms: bool = Field(False, description="Whether to log the norms of MoE router biases.")
   log_step_diagnostics: bool = Field(
       False,
@@ -5572,6 +5596,17 @@ class MaxTextConfig(
       )
 
     self._validate_check_vma_is_supported()
+    if self.defer_small_all_reduces:
+      if not (self.use_ring_of_experts and self.sparse_matmul):
+        raise ValueError(
+            "defer_small_all_reduces requires use_ring_of_experts=True and sparse_matmul=True (the deferral is"
+            " implemented on the ring-of-experts sparse_matmul path only)."
+        )
+      if self.moe_dropless_fallback == "layer":
+        raise ValueError(
+            "defer_small_all_reduces does not support moe_dropless_fallback='layer' (the in-layer fallback's two"
+            " branches would emit per-chunk counts of different chunkings)."
+        )
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
