@@ -1579,6 +1579,7 @@ class RoutedMoE(nnx.Module):
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+          gather_reduce_bf16_output=self.config.ragged_gather_reduce_bf16_output,
       )
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)

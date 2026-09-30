@@ -299,6 +299,8 @@ ragged_gather_fallback: false # when true, unconditionally use the JAX reference
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
 ragged_gather_reduce_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                                      # ragged gather reduce SparseCore kernel. When false (default), use the SparseCore kernel.
+ragged_gather_reduce_bf16_output: false # when true, the ring-of-experts ragged gather reduce SparseCore kernel writes
+                                        # bfloat16 (rounded in-kernel) instead of float32 + a cast. Bitwise identical.
 ragged_gather_cost_estimate_flops: -1 # -1 means auto-compute, any > 0 value overrides the flop cost estimate for the ragged gather kernel
 ragged_gather_reduce_cost_estimate_flops: -1 # -1 means auto-compute, any > 0 value overrides the flop cost estimate for the ragged gather reduce kernel
 ragged_gather_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather kernel
