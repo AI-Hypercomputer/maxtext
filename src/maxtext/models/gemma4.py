@@ -136,8 +136,10 @@ class Gemma4MoE(nnx.Module):
     unscaled_norm = self.gate_norm(original_inputs)
 
     root_size = self.config.emb_dim**-0.5
-    router_scale = jnp.asarray(self.pre_forward_scale_2.value, gate_dtype)
-    gate_inputs = unscaled_norm * root_size * router_scale
+    # Scale in fp32 and round once (keeps the norm-scale gradient reductions in
+    # fp32, so XLA can hoist them out of the scanned layer loop).
+    router_scale = jnp.asarray(self.pre_forward_scale_2.value, jnp.float32)
+    gate_inputs = jnp.asarray(jnp.asarray(unscaled_norm, jnp.float32) * root_size * router_scale, gate_dtype)
 
     # 3. Pass both to routed_moe
     routed_experts, load_balance_loss, moe_bias_updates = self.moe_block.routed_moe(
