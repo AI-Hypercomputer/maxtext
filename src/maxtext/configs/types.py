@@ -603,6 +603,25 @@ class Quantization(BaseModel):
           "removes that reduction. The activation-gradient arm (dX = dY W^T) is unaffected."
       ),
   )
+  bwd_delayed_scaling: bool = Field(
+      False,
+      description="fp8_full with Qwix: every quantized call site inside a DeepSeek decoder layer quantizes its"
+      " backward cotangent with a per-tensor scale read from per-layer, per-site state (as `fixed,R` with R from the"
+      " state), R = margin * max of the last H global amaxes of that site. The amax of step t sets the scale of step"
+      " t+1, so no quantize waits on its own reduction. Requires equal symmetric fixed weight/activation"
+      " calibrations. See utils/bwd_delayed_scaling.py.",
+  )
+  bwd_delayed_scaling_history: int = Field(4, description="bwd_delayed_scaling: amax history length H (>= 1).")
+  bwd_delayed_scaling_margin: float = Field(
+      16.0,
+      description="bwd_delayed_scaling: scale = margin * max(history). e5m2 spans ~30 binades below R, so a large margin"
+      " (16-64) costs no precision and keeps spikes from saturating.",
+  )
+  bwd_delayed_scaling_init: float = Field(
+      0.001,
+      description="bwd_delayed_scaling: step-0 scale R (the value a `fixed,R` calibration would use), set by the"
+      " state initializer; a params-only restore keeps it.",
+  )
   weight_sparsity_n: int | None = Field(
       None,
       description=("The 'N' in N:M sparsity, representing the maximum number of non-zero" " values in each block."),
@@ -5841,10 +5860,8 @@ class RLConfig(
         self.tokenizer_path = HF_IDS[model_name]
         self.tokenizer_type = TokenizerType.HUGGINGFACE
       else:
-        raise ValueError(
-            "model_name not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
-          Please pass tokenizer_path in your command."
-        )
+        raise ValueError("model_name not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
+          Please pass tokenizer_path in your command.")
 
     if self.optimizer_memory_host_offload:
       raise ValueError(

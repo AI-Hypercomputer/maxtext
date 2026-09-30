@@ -42,6 +42,7 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
+from maxtext.utils import bwd_delayed_scaling
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -2266,25 +2267,29 @@ class RoutedMoE(nnx.Module):
         )
       elif use_custom_vjp_gmm:
         # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
-        output = mblx.gmm(
-            lhs=inputs,
-            rhs=kernel,
-            group_sizes=group_sizes,
-            preferred_element_type=self.dtype,
-            tiling=tiling,
-            group_offset=group_offset,
-            lhs_quantize_dtype=lhs_quantize_dtype,
-            rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
-            use_tokamax_backend=self.config.use_tokamax_gmm,
-            weight_gather_axes=weight_gather_axes,
-            lhs_vma_axes=lhs_vma_axes,
-            rhs_vma_axes=rhs_vma_axes,
-            use_gmm_v2=self.config.use_gmm_v2,
-            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
-            partial_sum=partial_sum,
-            interpret=megablox_interpret,
-        )
+        def _mblx_gmm(inputs, kernel, group_sizes, group_offset, partial_sum):
+          return mblx.gmm(
+              lhs=inputs,
+              rhs=kernel,
+              group_sizes=group_sizes,
+              preferred_element_type=self.dtype,
+              tiling=tiling,
+              group_offset=group_offset,
+              lhs_quantize_dtype=lhs_quantize_dtype,
+              rhs_quantize_dtype=rhs_quantize_dtype,
+              use_qwix_quantization=self.config.use_qwix_quantization,
+              use_tokamax_backend=self.config.use_tokamax_gmm,
+              weight_gather_axes=weight_gather_axes,
+              lhs_vma_axes=lhs_vma_axes,
+              rhs_vma_axes=rhs_vma_axes,
+              use_gmm_v2=self.config.use_gmm_v2,
+              use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+              partial_sum=partial_sum,
+              interpret=megablox_interpret,
+          )
+
+        # bwd_delayed_scaling: the gmm's backward quantizes its cotangent with this site's stored scale.
+        output = bwd_delayed_scaling.tap("gmm", _mblx_gmm, inputs, kernel, group_sizes, group_offset, partial_sum)
       else:
         # jax.lax.ragged_dot
         output = jax_ragged_dot_gmm(

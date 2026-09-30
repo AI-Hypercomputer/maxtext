@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Transformer model definition."""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -39,6 +40,7 @@ from maxtext.layers.engram import NgramHashMapping
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import deepseek_batchsplit
 from maxtext.models import deepseek_batchsplit_fp8
+from maxtext.utils import bwd_delayed_scaling
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding
 from maxtext.utils.sharding import maybe_shard_with_logical
@@ -78,6 +80,9 @@ class DeepSeekGenericLayer(nnx.Module):
 
     batch_size, sequence_length = max_utils.get_batch_seq_len_for_mode(self.config, self.model_mode)
     self.dummy_inputs_shape = (batch_size, sequence_length, self.config.emb_dim)
+    if getattr(config, "bwd_delayed_scaling", False):
+      # Per-site bwd scale + amax history; its gradient is this step's amax (train_step computes the update).
+      self.bwd_dscale = bwd_delayed_scaling.make_state(config)
 
     self.out_sharding = create_sharding(self.mesh, self.logical_axis_names, rules=get_logical_axis_rules())
     self.mlp_intermediate_sharding = create_sharding(
@@ -401,6 +406,23 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
     return self.post_process(layer_output, None, None, kv_cache)
 
 
+def _with_bwd_dscale_context(call):
+  """bwd_delayed_scaling: exposes the layer's state to the quantized call sites traced inside the layer."""
+
+  @functools.wraps(call)
+  def wrapper(self, *args, **kwargs):
+    state = getattr(self, "bwd_dscale", None)
+    if state is None or not bwd_delayed_scaling.enabled():
+      return call(self, *args, **kwargs)
+    with bwd_delayed_scaling.layer_context(state.value, type(self).__name__):
+      return call(self, *args, **kwargs)
+
+  return wrapper
+
+
+DeepSeekDenseLayer.__call__ = _with_bwd_dscale_context(DeepSeekDenseLayer.__call__)
+
+
 DeepSeekDenseLayerToLinen = nnx_wrappers.to_linen_class(
     DeepSeekDenseLayer,
     base_metadata_fn=initializers.variable_to_logically_partitioned,
@@ -622,6 +644,9 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
+
+
+DeepSeekMoELayer.__call__ = _with_bwd_dscale_context(DeepSeekMoELayer.__call__)
 
 
 DeepSeekMoELayerToLinen = nnx_wrappers.to_linen_class(

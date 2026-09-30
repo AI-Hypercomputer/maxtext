@@ -172,6 +172,10 @@ weight_quantization_calibration_method: "absmax"
 act_quantization_calibration_method: "absmax"
 bwd_quantization_calibration_method: "absmax"
 drhs_grad_quantization_calibration_method: null  # weight-gradient-arm cotangent calibration; null = bwd_quantization_calibration_method
+bwd_delayed_scaling: false  # fp8_full: decoder-layer bwd quantizers use a per-layer, per-site delayed scale (utils/bwd_delayed_scaling.py)
+bwd_delayed_scaling_history: 4  # amax history length H; scale = margin * max(last H global amaxes)
+bwd_delayed_scaling_margin: 16.0  # multiplier on the history max (e5m2 spans ~30 binades below R: a large margin costs no precision)
+bwd_delayed_scaling_init: 0.001  # step-0 scale, in the units of fixed,R; kept by a params-only restore
 # shard the range finding operation for quantization. by default this is set to number of slices.
 quantization_local_shard_count: -1
 # The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block.
