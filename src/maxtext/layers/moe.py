@@ -121,15 +121,27 @@ def _g4_ag_fence_mode() -> str:
   return "none" if v in ("0", "none", "off", "false") else v
 
 
-def _g4_data_fence(logits, weights):
+def _g4_fence_src_gmm() -> bool:
+  """MAXTEXT_G4_FENCE_SRC=gmm: the wi fence reads its element from the same
+  [E/2, emb, 2N] reshape view the split gmm (and its dlhs transpose) consumes,
+  instead of from the [E, emb/2, 2N] half. In the v3 HLO the rematted fence
+  slice on the half view got layout {1,2,0}, forcing a full 507 MB copy of each
+  gathered wi half per layer in bwd (~43 ms/step) just to read one element."""
+  return (os.environ.get("MAXTEXT_G4_FENCE_SRC", "") or "").strip().lower() == "gmm"
+
+
+def _g4_data_fence(logits, weights, gmm_view=()):
   """logits + 0 * sum(stop_gradient(w[0,...,0])): value-identical for finite weights.
 
   XLA does not fold float `x * 0` (NaN semantics), so this keeps a real data
   edge from each all-gather-done to the routing logits. Single-element static
   slices: no weight copy. stop_gradient: no backward cost / dependency.
+  gmm_view: per-weight bools; True -> read from w.reshape(E/2, 2*K, N) (3D only).
   """
   dep = None
-  for w in weights:
+  for i, w in enumerate(weights):
+    if i < len(gmm_view) and gmm_view[i] and w.ndim == 3 and w.shape[0] % 2 == 0:
+      w = w.reshape(w.shape[0] // 2, 2 * w.shape[1], w.shape[2])
     s = jax.lax.stop_gradient(w[(0,) * w.ndim]).astype(jnp.float32)
     dep = s if dep is None else dep + s
   return logits + (dep * 0.0).astype(logits.dtype)
@@ -3097,9 +3109,10 @@ class RoutedMoE(nnx.Module):
         # (SparseCore) token permute gather is issued; see _g4_ag_fence_mode.
         if _fence in ("wi", "all"):
           _ws = (w0, w1, wo) if _fence == "all" else (w0, w1)
-          logits = _g4_data_fence(logits, _ws)
+          _gv = (True, True) if (_g4_fence_src_gmm() and self.config.prefuse_moe_weights) else ()
+          logits = _g4_data_fence(logits, _ws, _gv)
           if pre_bias_logits is not None:
-            pre_bias_logits = _g4_data_fence(pre_bias_logits, _ws)
+            pre_bias_logits = _g4_data_fence(pre_bias_logits, _ws, _gv)
 
       override_chunks = getattr(self, "num_moe_token_chunks", None)
       n_chunks = override_chunks if override_chunks is not None else self.config.num_moe_token_chunks
