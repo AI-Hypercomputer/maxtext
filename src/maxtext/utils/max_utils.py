@@ -350,8 +350,8 @@ def initialize_jax_for_gpu(raw_keys):
 def initialize_jax_for_cpu(raw_keys):
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready."""
   coordinator_ip_address = get_coordinator_ip_address()
-  coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port used in XPK
-  # Env variables to be set in XPK or otherwise
+  coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port (the port XPK exposes for CPU workloads)
+  # These env variables must be set by the launcher (XPK sets them for CPU workloads)
   job_index = int(os.environ.get("JOB_INDEX"))  # pyrefly: ignore[bad-argument-type]
   job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))  # pyrefly: ignore[bad-argument-type]
   processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))  # pyrefly: ignore[bad-argument-type]

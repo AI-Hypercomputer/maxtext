@@ -155,5 +155,5 @@ echo "==========================================================================
 echo "Your image is available at:"
 echo "👉 ${FULL_IMAGE_PATH}"
 echo ""
-echo "You can copy-paste the path above directly into your XPK or GKE workload configurations."
+echo "You can copy-paste the path above directly into 'gcluster job submit --image' or your GKE workload configurations."
 echo "========================================================================================================="

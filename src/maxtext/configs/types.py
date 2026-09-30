@@ -2916,7 +2916,14 @@ class Tensorboard(BaseModel):
   """Configuration for Tensorboard logging."""
 
   enable_tensorboard: bool = Field(True, description="Enable Tensorboard logging.")
-  use_vertex_tensorboard: bool = Field(False, description="Set to True for GCE, False if running via XPK.")
+  use_vertex_tensorboard: bool = Field(
+      False,
+      description=(
+          "Set to True to have MaxText create (or reuse) the Vertex AI Tensorboard instance and Experiment and upload"
+          " logs. Leave False if they are created outside MaxText and UPLOAD_DATA_TO_TENSORBOARD is set in the"
+          " environment."
+      ),
+  )
   vertex_tensorboard_project: Optional[str] = Field("", description="GCP project for Vertex AI Tensorboard.")
   vertex_tensorboard_region: Optional[str] = Field("", description="Region for Vertex AI Tensorboard.")
 
