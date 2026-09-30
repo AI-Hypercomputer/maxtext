@@ -8,7 +8,7 @@ ENV PYTHONPATH=/app/maxtext/src:${PYTHONPATH}
 RUN echo "--> Installing user-provided dependencies..." && \
     uv pip install -r ${REQUIREMENTS_FILE} -c /opt/venv/server_constraints.txt && \
     echo "--> Verifying JAX patch integrity..." && \
-    python -c "from jax._src.lib import _jax; _jax.colocated_python_cpu_client" && \
+    python -c "from jax._src.lib import _jax; from pathways_sidecar import sidecar_main_lib; from jax.experimental.colocated_python import serialization; assert getattr(_jax, 'colocated_python_cpu_client', None) or serialization._get_cpu_device_map()" && \
     python -c "import orbax.checkpoint, tensorstore, gcsfs; print(orbax.checkpoint.__version__)" && \
     uv cache clean
 # ENTRYPOINT/CMD inherited (sidecar gRPC server).

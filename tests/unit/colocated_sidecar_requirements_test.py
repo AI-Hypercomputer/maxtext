@@ -101,7 +101,7 @@ class ColocatedSidecarRequirementsTest(unittest.TestCase):
         "COPY maxtext /app/maxtext",
         "ENV PYTHONPATH=/app/maxtext/src:${PYTHONPATH}",
         "uv pip install -r ${REQUIREMENTS_FILE} -c /opt/venv/server_constraints.txt",
-        "from jax._src.lib import _jax; _jax.colocated_python_cpu_client",
+        "from jax._src.lib import _jax; from pathways_sidecar import sidecar_main_lib",
         "import orbax.checkpoint, tensorstore, gcsfs",
     ):
       self.assertIn(required_fragment, content)
