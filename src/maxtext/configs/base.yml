@@ -240,6 +240,8 @@ mtp_loss_scaling_factor: 0.1
 # acceptance rate during evaluation. for example, a value of `1` targets the
 # first auxiliary prediction head. set to 0 to disable this specific evaluation
 mtp_eval_target_module: 0
+# reuse the main decoder's token embeddings instead of a second lookup
+mtp_reuse_input_embedding: false
 
 # mixture of experts (moe)
 num_experts: 1

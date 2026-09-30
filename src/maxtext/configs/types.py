@@ -687,6 +687,10 @@ class MTP(BaseModel):
       0,
       description="Specifies which MTP layer is used to calculate metrics.",
   )
+  mtp_reuse_input_embedding: bool = Field(
+      False,
+      description="Reuse the main decoder's token embeddings instead of a second lookup.",
+  )
 
 
 class LogitsAndLoss(BaseModel):
@@ -4920,6 +4924,8 @@ class MaxTextConfig(
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    if self.mtp_reuse_input_embedding and self.use_multimodal:
+      raise ValueError("`mtp_reuse_input_embedding` does not support multimodal inputs.")
     if self.quantize_mtp:
       if self.mtp_num_layers <= 0:
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
