@@ -493,11 +493,23 @@ class CheckpointManager:
 
     if checkpoint_state.optimizer is not None and "optimizer_state" in metadata.item_metadata:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
+      # `CloudPathwaysArrayHandler.deserialize` ignores `memory_kind="pinned_host"` for physical
+      # placement (allocating restored buffers in device HBM) while keeping `pinned_host` on the
+      # returned array's sharding metadata. Request `device` placement explicitly so the restored
+      # sharding matches physical placement; `MaxTextTrainingEngine.restore_checkpoint` then
+      # offloads the restored optimizer state to `pinned_host`.
+      def _device_restore_target(leaf: Any) -> Any:
+        sharding = getattr(leaf, "sharding", None)
+        if getattr(sharding, "memory_kind", None) == "pinned_host":
+          return jax.ShapeDtypeStruct(
+              leaf.shape, leaf.dtype, sharding=sharding.with_memory_kind("device")
+          )
+        return leaf
+
+      optimizer_target = jax.tree.map(_device_restore_target, optimizer_state)
       restore_args["optimizer_state"] = ocp.args.PyTreeRestore(
-          item=optimizer_state,
-          restore_args=ocp.checkpoint_utils.construct_restore_args(
-              target=nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
-          ),
+          item=optimizer_target,
+          restore_args=ocp.checkpoint_utils.construct_restore_args(target=optimizer_target),
       )
 
     if "accumulated_metrics" in metadata.item_metadata:

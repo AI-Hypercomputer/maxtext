@@ -2515,14 +2515,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       The metadata PyTree of the restored checkpoint.
     """
+    if not self._config.enable_checkpointing or not self._checkpoint_dir():
+      return None
     step = kwargs.get("step", None)
+    if step is None and self._checkpoint_manager.get_latest_step() is None:
+      return None
+
     # The restore target is read off the live state, and `CloudPathwaysArrayHandler` only restores
     # into a NamedSharding. An engine that has not compiled yet -- Tunix resumes right after
     # `bring_up_workers(dummy_data=None)` -- still holds optax's `count` and the optimizer's `step`
-    # uncommitted on one device, so commit them here as `_compile_for_batch` does first (it additionally
-    # applies Zero-1 and optimizer offload).
+    # uncommitted on one device, and its optimizer moments in device HBM. Commit and offload them
+    # here as `_compile_for_batch` does so pre-restore moments are off HBM before Orbax allocates
+    # the restored buffers.
     self._refresh_pure_state()
     self._place_state_on_mesh()
+    self._shard_optimizer_state_over_data()
+    self._offload_optimizer_state()
     checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
@@ -2543,12 +2551,21 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         step=step,
     )
     if restored_step is None:
+      if not self._compiled:
+        self._invalidate_pure_state()
       return None
 
     logging.info("Checkpoint restored from step %d.", restored_step)
-    # Orbax has just written new arrays into the live NNX variables, so the cache is wrong
-    # rather than merely old.
+    # Orbax has just written new arrays into the live NNX variables, and returns optimizer
+    # buffers in device memory. Re-place and offload immediately so device HBM is freed before
+    # post-restore weight sync or compilation runs.
     self._invalidate_pure_state()
+    self._refresh_pure_state()
+    self._place_state_on_mesh()
+    self._shard_optimizer_state_over_data()
+    self._offload_optimizer_state()
+    if not self._compiled:
+      self._invalidate_pure_state()
 
     if restored_checkpoint_state.accumulated_metrics:
       buffers = []
