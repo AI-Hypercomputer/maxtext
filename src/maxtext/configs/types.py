@@ -1592,6 +1592,12 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     ["mlp_moe", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
     ["embed_moe", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
     ["embed_moe", ["fsdp", "context", "context_usp_ulysses"]],
+    # The router shards like 'embed_moe' and the shared experts like 'mlp' / 'embed';
+    # they have their own names so a rule set can shard them apart.
+    ["embed_router", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
+    ["mlp_shared", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
+    ["embed_shared", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    ["embed_shared", ["fsdp", "context", "context_usp_ulysses", "expert"]],
     # ==========================================
     # Standard MLP / Dense Layers / Model Structure
     # ==========================================

@@ -1404,6 +1404,8 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           weight_dtype=cfg.weight_dtype,
           quant=self.quant,
           model_mode=config.model_call_mode,
+          embed_axis_name="embed_shared",
+          mlp_axis_name="mlp_shared",
           rngs=rngs,
       )
 
@@ -1415,7 +1417,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           dtype=cfg.dtype,
           weight_dtype=get_weight_dtype(cfg, "shared_expert_gate"),
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", None),
+          kernel_axes=("embed_shared", None),
           matmul_precision=cfg.matmul_precision,
           rngs=rngs,
       )

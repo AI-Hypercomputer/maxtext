@@ -12,18 +12,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This rule uses data, FSDP, FSDP_transpose and expert. Expert axis acts as
-# data parallelism in components except core MoE part (between EP all2all).
+# This rule is fsdp-as-dp-for-attn.yml plus a context axis that is borrowed by
+# the MoE, as in cp-as-ep.yml. It uses data, FSDP, FSDP_transpose, expert and
+# context, and assigns them as:
+#
+#   FSDP acts like DP for attn, router and shared experts, but FSDP for routed experts
+#   EP acts like FSDP for attn, router and shared experts, and EP for routed experts
+#   CP acts like CP (and FSDP) for attn, router and shared experts, and EP for routed experts
+#
+# It targets fractional per_device_batch_size (e.g. 0.5) on TPU v7x, where
+# context is laid over the two TensorCores of a chip: each chip holds one
+# sequence, split in half along the sequence dimension. Attention weights
+# ('q_lora', 'kv_lora' and 'embed_attn'), the MoE router ('embed_router') and
+# the shared experts ('embed_shared', 'mlp_shared') are sharded on context and
+# expert, so their all-gather stays on the small axes (the context half is
+# on-chip), and they are replicated over fsdp / fsdp_transpose. Inside the core
+# MoE part (between EP all2all) context joins expert, giving EP = context x
+# expert.
+#
+# 'context' is the last mesh axis on purpose: the TPU v7x mesh builder assigns
+# logical axes last-first and offers the core axis first, so this keeps context
+# on the TensorCore pair instead of letting a large expert axis claim it.
+#
+# Pair it with fsdp-as-dp-for-attn-cp-as-ep-for-moe-eval.yml for evaluation at a
+# smaller eval_per_device_batch_size of 1 / (context x expert).
 
-mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert']
-data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert']]
+mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']
+data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']]
 logical_axis_rules: [
                       # ==========================================
                       # Vocabulary Embedding
                       # ==========================================
                       # Vocab Activations
                       ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
                       ['activation_vocab', []],
                       # Vocab Weights
                       ['vocab', []],
@@ -38,15 +60,17 @@ logical_axis_rules: [
                       ['activation_length_attn', ['context']],
                       ['activation_q_length', ['context']],
                       ['activation_kv_length', []],
-                      ['activation_embed_attn', ['tensor', 'tensor_transpose']],
+                      ['activation_embed_attn', []],
                       ['activation_kv', []],
                       ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_kv_head_dim', []],
-                      # Attention Weights
-                      ['q_lora', ['fsdp']],
+                      # Attention Weights, sharded on context and expert instead of fsdp:
+                      # fsdp acts like DP here, context and expert act like FSDP
+                      ['q_lora', ['context', 'expert']],
                       ["q_lora_up_proj", []],
-                      ['kv_lora', ['fsdp']],
+                      ['kv_lora', ['context', 'expert']],
                       ["kv_lora_up_proj", []],
+                      ['embed_attn', ['context', 'expert']],
                       # ==========================================
                       # Mixture of Experts (MoE)
                       # ==========================================
@@ -56,12 +80,15 @@ logical_axis_rules: [
                       ['activation_norm_length_moe', []],
                       ['activation_embed_moe', []],
                       ['activation_mlp_moe', []],
-                      ['activation_exp', ['expert']],
+                      ['activation_exp', ['context', 'expert']],
                       # MoE Weights
-                      ['exp', 'expert'],
+                      ['exp', ['context', 'expert']],
                       ['mlp_moe', ['fsdp_transpose']],
                       ['embed_moe', ['fsdp']],
-                      ['embed_router', ['fsdp']],
+                      # Router and shared expert weights, sharded on context and expert like the attention weights
+                      ['embed_router', ['context', 'expert']],
+                      ['mlp_shared', []],
+                      ['embed_shared', ['context', 'expert']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
@@ -69,18 +96,14 @@ logical_axis_rules: [
                       ['activation_mlp', []],
                       # Note activation batch and length also get used in vocab
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
-                      ['activation_length', []],
-                      ['activation_norm_length', []],
+                      ['activation_length', ['context']],
+                      ['activation_norm_length', ['context']],
                       ['activation_embed', []],
                       ['activation_stage', []],
                       # General Weights
                       ['mlp', ['fsdp_transpose']],
-                      ['mlp_shared', ['fsdp_transpose']],
                       ['embed', ['fsdp', 'fsdp_transpose']],
                       ['embed', ['fsdp']],
-                      ['embed_attn', ['fsdp', 'fsdp_transpose']],
-                      ['embed_shared', ['fsdp', 'fsdp_transpose']],
-                      ['embed_shared', ['fsdp']],
                       # ==========================================
                       # Deprecated / Scheduled for Removal
                       # ==========================================

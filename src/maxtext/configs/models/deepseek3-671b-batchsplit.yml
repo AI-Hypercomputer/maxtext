@@ -74,7 +74,9 @@ logical_axis_rules: [
     ['activation_heads', []],
     ['embed', ['fsdp']],
     ['embed_attn', ['fsdp']],
+    ['embed_shared', ['fsdp']],
     ['embed_moe', ['fsdp']],
+    ['embed_router', ['fsdp']],
     ['embed_vocab', ['fsdp']],
     ['embed_no_exp', ['fsdp']],
     ['embed_no_exp_moe', ['fsdp']],
@@ -86,5 +88,6 @@ logical_axis_rules: [
     ['kv_heads', []],
     ['heads', []],
     ['mlp', []],
+    ['mlp_shared', []],
     ['expert_only', ['expert']],
 ]

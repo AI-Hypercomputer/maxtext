@@ -14,25 +14,26 @@
 
 # This rule uses data, FSDP, FSDP_transpose and expert, and assigns them as:
 #
-#   FSDP acts like DP for attn, but FSDP for moe
-#   EP acts like FSDP for attn, and EP for moe
+#   FSDP acts like DP for attn, router and shared experts, but FSDP for routed experts
+#   EP acts like FSDP for attn, router and shared experts, and EP for routed experts
 #
-# That is, attention weights ('q_lora', 'kv_lora' and 'embed_attn') are sharded
-# on the expert axis and replicated over fsdp / fsdp_transpose, while MoE and
-# dense MLP weights keep using FSDP as in ep-as-dp.yml. Outside the core MoE
-# part (between EP all2all) the expert axis carries the batch, so sharding the
-# attention weights on it behaves like FSDP over a much smaller and faster axis:
-# it trades HBM for a cheaper all-gather.
+# That is, attention weights ('q_lora', 'kv_lora' and 'embed_attn'), the MoE
+# router ('embed_router') and the shared experts ('embed_shared', 'mlp_shared')
+# are sharded on the expert axis and replicated over fsdp / fsdp_transpose,
+# while routed expert and dense MLP weights keep using FSDP as in ep-as-dp.yml.
+# Outside the core MoE part (between EP all2all) the expert axis carries the
+# batch, so sharding those weights on it behaves like FSDP over a much smaller
+# and faster axis: it trades HBM for a cheaper all-gather.
 #
-# This is mainly useful for large scale training. The attention weights are
-# small, so once the FSDP rank is large (larger than 512) each shard is tiny and
-# their all-gather is dominated by latency rather than bandwidth, which makes
-# the attention layer latency bound. Sharding the attention weights on the
+# This is mainly useful for large scale training. The attention, router and
+# shared expert weights are small, so once the FSDP rank is large (larger than
+# 512) each shard is tiny and their all-gather is dominated by latency rather
+# than bandwidth, which makes those layers latency bound. Sharding them on the
 # (much smaller) expert axis keeps the per-shard slice large enough that the
 # collective stays bandwidth bound, at the cost of replicating those weights
-# over fsdp / fsdp_transpose. MoE weights are large enough to keep scaling with
-# FSDP, so they are left alone. DeepSeek V3 MLPerf training at 4k sequence
-# length is one such case.
+# over fsdp / fsdp_transpose. Routed expert weights are large enough to keep
+# scaling with FSDP, so they are left alone. DeepSeek V3 MLPerf training at 4k
+# sequence length is one such case.
 
 mesh_axes: ['data', 'fsdp', 'fsdp_transpose', 'expert']
 data_sharding: [['data', 'fsdp', 'fsdp_transpose', 'expert']]
@@ -82,6 +83,10 @@ logical_axis_rules: [
                       ['exp', 'expert'],
                       ['mlp_moe', ['fsdp_transpose']],
                       ['embed_moe', ['fsdp']],
+                      # Router and shared expert weights, sharded on expert like the attention weights
+                      ['embed_router', ['expert']],
+                      ['mlp_shared', []],
+                      ['embed_shared', ['expert']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
