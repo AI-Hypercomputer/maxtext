@@ -151,6 +151,7 @@ dmypy.json
 # Gemini CLI
 .gemini/
 !.gemini/commands/
+.agents/
 gha-creds-*.json
 
 # vscode workspace
