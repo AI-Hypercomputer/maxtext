@@ -86,7 +86,7 @@ class Embed(nnx.Module):
             (self.num_embeddings, self.num_features),
             embed_weight_dtype,
         ),
-        sharding=("vocab", "embed_vocab"),
+        sharding=("embed_vocab", "vocab"),
     )
 
   def __call__(self, inputs: Array, model_mode: str = MODEL_MODE_TRAIN) -> Array:
