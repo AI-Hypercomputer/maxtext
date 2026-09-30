@@ -1226,6 +1226,10 @@ class MoEGeneral(BaseModel):
       description="Bytes-accessed cost estimate override for the ragged gather reduce kernel. "
       "-1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate.",
   )
+  moe_pin_sparse_core_gate_all_gather: bool = Field(
+      default=False,
+      description="Whether to pin MoE router GateLogit FSDP all-gather and backward weight-grad reduce-scatter to SparseCore 0.",
+  )
   moe_pin_sparse_core_all_gathers: bool = Field(
       False,
       description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",

@@ -305,6 +305,7 @@ ragged_gather_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 
 ragged_gather_reduce_cost_estimate_bytes_accessed: -1 # -1 means auto-compute, any > 0 value overrides the bytes_accessed cost estimate for the ragged gather reduce kernel
 # Pin MoE FSDP and EP all-gathers to dedicated SparseCores using compute_on
 moe_pin_sparse_core_all_gathers: false
+moe_pin_sparse_core_gate_all_gather: false
 # Split controls (OR-ed with moe_pin_sparse_core_all_gathers): pin only the ring-of-experts EP all-gathers (dispatch
 # tokens and routing inputs) or only the FSDP weight all-gathers. fwd_only keeps the pinned FSDP weight all-gather in the
 # forward and runs its transpose (the weight-gradient reshard) outside compute_on, so the gradient's cross-slice

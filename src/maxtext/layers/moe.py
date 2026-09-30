@@ -674,6 +674,20 @@ class GateLogit(nnx.Module):
         if self.shard_mode == ShardMode.EXPLICIT
         else None
     )
+    if getattr(self.config, "moe_pin_sparse_core_gate_all_gather", False):
+      with jax.remat(
+          jax.tree_util.Partial(
+              xla_metadata_Context,
+              mosaic_fusion_group=_ROUTING_MOSAIC_FUSION_GROUP,
+              custom_call_target="SparseCoreOffload",
+              sparse_core_id="0",
+          )
+      ):
+        if self.shard_mode == ShardMode.EXPLICIT:
+          unsharded_kernel_sharding = create_sharding(self.mesh, (None, None))
+          kernel = jax.lax.reshard(kernel, unsharded_kernel_sharding)
+        else:
+          kernel = nn.with_logical_constraint(kernel, (None, None))
     output = linears._compute_dot_general_nnx(
         inputs,
         kernel,
