@@ -123,6 +123,10 @@ class HandTest(unittest.TestCase):
     np.testing.assert_allclose(gx, fx, rtol=0, atol=1e-6 * float(jnp.max(jnp.abs(fx))))
     np.testing.assert_allclose(gw, fw, rtol=0, atol=1e-6 * float(jnp.max(jnp.abs(fw))))
     self.assertFalse(np.array_equal(np.asarray(ax), np.asarray(gx)))
+    rx, _ = jax.jit(
+        jax.grad(lambda a, b: jnp.sum(dot_general_qt.dot_general_qt(a, b, dn, qt("absmax")) * dy), argnums=(0, 1))
+    )(x, w)
+    np.testing.assert_array_equal(ax, rx)  # outside a tap the sentinel is exactly its fallback
     # amax = max|dY * s| with s = 224 / 448
     np.testing.assert_allclose(float(gs[0, 0]), 0.5 * float(jnp.max(jnp.abs(dy))), rtol=1e-6)
     self.assertTrue(bool(jnp.all(gs[1:] == 0)) and bool(jnp.all(gs[0, 1:] == 0)))
