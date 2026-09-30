@@ -47,7 +47,7 @@ class _Model(nnx.Module):
     return self.linear2(self.dropout(jax.nn.relu(self.linear1(x)), deterministic=True))
 
 
-def _config():
+def _config(restore_concurrent_gb=96):
   """The `CheckpointManager` fields it reads, set to the Pathways-persistence on-disk format."""
   return SimpleNamespace(
       checkpoint_period=1,
@@ -56,6 +56,7 @@ def _config():
       checkpoint_storage_use_ocdbt=False,
       checkpoint_storage_use_zarr3=False,
       checkpoint_storage_device_host_concurrent_gb=None,
+      checkpoint_storage_concurrent_gb=restore_concurrent_gb,
   )
 
 
@@ -212,6 +213,44 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
     got_opt = _leaves(nnx.state(fresh_opt, nnx.optimizer.OptState))
     for name, want in want_opt.items():
       np.testing.assert_array_equal(got_opt[name], want, err_msg=name)
+
+  def test_pytree_handler_passes_restore_concurrent_gb_and_round_trips(self):
+    model, optimizer = _build(seed=7)
+    _train_step(model, optimizer)
+    want_params = _leaves(nnx.state(model))
+    cfg = _config(restore_concurrent_gb=16)
+
+    with mock.patch.object(
+        checkpointing.ocp,
+        "PyTreeCheckpointHandler",
+        wraps=checkpointing.ocp.PyTreeCheckpointHandler,
+    ) as spy_handler:
+      save_mgr = checkpointing.CheckpointManager(self.ckpt_dir, cfg)
+      self.assertEqual(spy_handler.call_count, 4)
+      for call in spy_handler.call_args_list:
+        self.assertEqual(call.kwargs.get("restore_concurrent_gb"), 16)
+      saved = save_mgr.save_checkpoint(
+          step=1,
+          checkpoint_state=checkpointing.CheckpointState(model=model, optimizer=optimizer),
+      )
+      save_mgr.wait_until_finished()
+      save_mgr.close()
+      self.assertTrue(saved)
+
+      fresh_model, fresh_opt = _build(seed=99)
+      restore_mgr = checkpointing.CheckpointManager(self.ckpt_dir, cfg)
+      self.addCleanup(restore_mgr.close)
+      self.assertEqual(spy_handler.call_count, 8)
+      for call in spy_handler.call_args_list[4:]:
+        self.assertEqual(call.kwargs.get("restore_concurrent_gb"), 16)
+      step, _, _ = restore_mgr.restore_checkpoint(
+          checkpointing.CheckpointState(model=fresh_model, optimizer=fresh_opt)
+      )
+
+    self.assertEqual(step, 1)
+    got_params = _leaves(nnx.state(fresh_model))
+    for name, want in want_params.items():
+      np.testing.assert_array_equal(got_params[name], want, err_msg=name)
 
 
 if __name__ == "__main__":

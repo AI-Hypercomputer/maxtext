@@ -18,9 +18,18 @@ This module is the single place that translates MaxText's flat checkpoint flags
 into those objects. It builds configuration only.
 """
 import datetime
+from typing import Literal
 
 from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import v1 as ocp
+
+LoadImpl = Literal["no_dispatcher", "persistence", "colocated_python"]
+
+_PATHWAYS_LOAD_IMPL_MAP: dict[str, ocp_pathways.CheckpointingImpl] = {
+    "colocated_python": ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON,
+    "persistence": ocp_pathways.CheckpointingImpl.PERSISTENCE,
+    "no_dispatcher": ocp_pathways.CheckpointingImpl.NO_DISPATCHER,
+}
 
 
 # v0 PyTreeCheckpointHandler converts `*_concurrent_gb` with GB = 10**9 bytes.
@@ -92,6 +101,7 @@ def build_context(
     enable_single_replica_ckpt_restoring: bool = False,
     replica_axis_index: int = 0,
     colocated_python_checkpointing: bool = False,
+    pathways_load_impl: LoadImpl | None = None,
     partial_load: bool = False,
     checkpoint_layout: ocp.options.CheckpointLayout | None = None,
 ) -> ocp.Context:
@@ -115,6 +125,10 @@ def build_context(
       to the rest (replaces the v0 ``SingleReplicaArrayHandler``).
     replica_axis_index: Mesh axis separating replicas for load-and-broadcast.
     colocated_python_checkpointing: Use Pathways colocated-python checkpointing.
+    pathways_load_impl: Optional explicit Pathways checkpointing implementation
+      for load/warm-start paths (``"no_dispatcher"``, ``"persistence"``, or
+      ``"colocated_python"``). When ``None``, falls back to
+      ``colocated_python_checkpointing``.
     partial_load: Restore only the keys present in the abstract tree (the v1
       equivalent of v0 ``partial_restore=True``).
     checkpoint_layout: On-disk layout (``ORBAX`` or ``SAFETENSORS``) for
@@ -155,7 +169,11 @@ def build_context(
         _SINGLE_REPLICA_BROADCAST_MEMORY_LIMIT_BYTES
     )
 
-  if colocated_python_checkpointing:
+  if pathways_load_impl is not None:
+    if pathways_load_impl not in _PATHWAYS_LOAD_IMPL_MAP:
+      raise ValueError(f"Unknown pathways_load_impl: {pathways_load_impl!r}")
+    ctx.pathways.checkpointing_impl = _PATHWAYS_LOAD_IMPL_MAP[pathways_load_impl]
+  elif colocated_python_checkpointing:
     ctx.pathways.checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
         use_colocated_python=True,
     )

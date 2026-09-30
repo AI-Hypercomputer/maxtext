@@ -180,6 +180,15 @@ def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
   return nnx.merge_state(linen_state, aux_state, ephemeral)
 
 
+def _derive_pathways_load_impl(config: Any | None = None) -> checkpoint_context.LoadImpl | None:
+  """Derives the warm-start Pathways load implementation from config and environment."""
+  if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE") != "1":
+    return None
+  if isinstance(config, dict):
+    return config.get("pathways_checkpointing_impl") or "persistence"
+  return getattr(config, "pathways_checkpointing_impl", "persistence") or "persistence"
+
+
 def _load_linen_checkpoint_into_nnx(
     path,
     abstract_nnx_state,
@@ -215,6 +224,7 @@ def _load_linen_checkpoint_into_nnx(
       checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
       partial_load=True,
       enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+      pathways_load_impl=_derive_pathways_load_impl(config),
   )
   # Orbax v1 refuses to read an item subdirectory directly (the step root carries the
   # checkpoint indicator); normalize the documented ".../<step>/items" form to its root
@@ -329,6 +339,7 @@ def _load_full_state_from_path(
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         checkpoint_layout=ocp.options.CheckpointLayout.ORBAX,
         enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+        pathways_load_impl=_derive_pathways_load_impl(maxtext_config),
     )
     with context:
       return ocp.load(path, abstract_unboxed_pre_state)

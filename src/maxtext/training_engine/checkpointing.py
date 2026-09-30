@@ -305,6 +305,7 @@ class CheckpointManager:
             use_ocdbt=config.checkpoint_storage_use_ocdbt,
             use_zarr3=config.checkpoint_storage_use_zarr3,
             save_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
+            restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
         )
 
       self._checkpoint_manager = ocp.CheckpointManager(
