@@ -29,21 +29,42 @@ You can use a single Vertex AI Tensorboard instance to track and compare metrics
 ## Prerequisites
 
 - Enable [Vertex AI API](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/start/cloud-environment#set_up_a_project) in your Google Cloud console.
-- Assign [Vertex AI User IAM role](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/general/access-control#aiplatform.user) to the service account used by the TPU VMs. This is required to create and access the Vertex AI Tensorboard in Google Cloud console. If you are using XPK for MaxText, the necessary Vertex AI User IAM role will be automatically assigned to your node pools by XPK – no need to assign it manually.
+- Assign [Vertex AI User IAM role](https://docs.cloud.google.com/gemini-enterprise-agent-platform/machine-learning/general/access-control#aiplatform.user) to the service account used by the TPU VMs. This is required to create and access the Vertex AI Tensorboard in Google Cloud console. If you are using Cluster Toolkit for MaxText, the necessary Vertex AI User IAM role can be granted via the cluster configuration or cluster policy path; legacy XPK setups handled this automatically.
 
 ## Upload logs to Vertex AI Tensorboard
 
-**Scenario 1: Using XPK to run MaxText on GKE**
+**Scenario 1: Using Cluster Toolkit to run MaxText on GKE**
 
-XPK simplifies MaxText's Vertex AI Tensorboard integration. A Vertex Tensorboard instance and Experiment are automatically created by XPK during workload scheduling. Also, XPK automatically sets the necessary environment variables, eliminating the need to manually configure this in MaxText. Set `use_vertex_tensorboard=False` to avoid setting up Vertex Tensorboard again in MaxText. This is how the configuration will look like for running MaxText via XPK:
+Unlike legacy XPK (which automatically created a Vertex AI TensorBoard instance and Experiment during workload scheduling and injected `UPLOAD_DATA_TO_TENSORBOARD`), Cluster Toolkit (`gcluster job submit`) does not automatically provision Vertex AI TensorBoard resources or inject `TENSORBOARD_*` environment variables.
 
+To automatically create (or reuse) a Vertex AI TensorBoard instance named `<vertex_tensorboard_project>-tb-instance` and an Experiment named `<run_name>` and upload logs from `config.tensorboard_dir`, set `use_vertex_tensorboard=True` along with your project and region:
+
+```yaml
+run_name: "test-run"
+use_vertex_tensorboard: True
+vertex_tensorboard_project: "test-project" # or vertex_tensorboard_project: ""
+vertex_tensorboard_region: "us-central1"
 ```
+
+Alternatively, if you have already created the Vertex AI TensorBoard instance and Experiment externally (or in a legacy XPK environment that injects these variables automatically), you can set `use_vertex_tensorboard: False` in MaxText so it does not attempt to re-create the resources, and pass the required environment variables via `gcluster job submit`:
+
+```bash
+gcluster job submit \
+  --env UPLOAD_DATA_TO_TENSORBOARD=1 \
+  --env TENSORBOARD_PROJECT="test-project" \
+  --env TENSORBOARD_REGION="us-central1" \
+  --env TENSORBOARD_NAME="test-project-tb-instance" \
+  --env EXPERIMENT_NAME="test-run" \
+  ...
+```
+
+with the following MaxText configuration:
+
+```yaml
 use_vertex_tensorboard: False
 vertex_tensorboard_project: ""
 vertex_tensorboard_region: ""
 ```
-
-The above configuration will upload logs in `config.tensorboard_dir` to Vertex Tensorboard instance set as an environment variable by XPK.
 
 **Scenario 2: Running MaxText on GCE**
 
@@ -51,7 +72,7 @@ Set `use_vertex_tensorboard=True` to upload logs in `config.tensorboard_dir` to 
 
 **Scenario 2.1: Configuration to upload logs to Vertex AI Tensorboard**
 
-```
+```yaml
 run_name: "test-run"
 use_vertex_tensorboard: True
 vertex_tensorboard_project: "test-project" # or vertex_tensorboard_project: ""
@@ -62,9 +83,9 @@ The above configuration will try to create a Vertex AI Tensorboard instance name
 
 **Scenario 2.2: Configuration to not upload logs to Vertex AI Tensorboard**
 
-The following configuration will not upload any log data collected in `config.tensorboard_dir` to Tensorboard in Vertex AI.
+The following configuration (when `UPLOAD_DATA_TO_TENSORBOARD` is not set in the environment) will not upload any log data collected in `config.tensorboard_dir` to Tensorboard in Vertex AI.
 
-```
+```yaml
 use_vertex_tensorboard: False
 vertex_tensorboard_project: ""
 vertex_tensorboard_region: ""

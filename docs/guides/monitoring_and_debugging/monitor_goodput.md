@@ -66,11 +66,9 @@ following access scope during node pool creation:
 
 - `https://www.googleapis.com/auth/cloud-platform`
 
-XPK adds this access scope to the GPU, TPU and CPU node pools, so XPK is the recommended method to create clusters and node-pools in you intend to run your workloads on GKE.
+Cluster Toolkit node pools default to the `https://www.googleapis.com/auth/cloud-platform` access scope across GPU, TPU, and CPU node pools, so Cluster Toolkit is the recommended method to create GKE clusters and node pools for MaxText workloads (legacy XPK also added this access scope).
 
-Instructions on how to create clusters using XPK can be
-found [here](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/usage/clusters.md) and how to create workloads using XPK can be found
-[here](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/usage/workloads.md).
+For new deployments, use the Cluster Toolkit path described in [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md). The XPK docs remain only for legacy compatibility.
 
 ```{note}
 Access Scopes are immutable and workloads can only be migrated to new node pools with required access scopes. Access scopes on already created clusters cannot be updated.
