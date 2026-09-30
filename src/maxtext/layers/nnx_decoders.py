@@ -1458,7 +1458,7 @@ class NNXDecoder(nnx.Module):
     y = (
         decoder_input_embeddings
         if decoder_input_embeddings is not None
-        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+        else self.embed_tokens(shared_embedding, decoder_input_tokens, model_mode)
     )
 
     # Precomputed embeddings are complete (including any multimodal replacements),
@@ -1551,6 +1551,46 @@ class NNXDecoder(nnx.Module):
 
     return y
 
+  def embed_tokens(self, shared_embedding, decoder_input_tokens, model_mode):
+    """Looks up the token embeddings, before dropout and positional embeddings."""
+    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+
+  def _is_indexer_dense_warmup(self, model_mode):
+    """True in the Indexer Dense Warm-up stage, where the main model is frozen and needs no logits."""
+    cfg = self.config
+    return (
+        getattr(cfg, "use_indexer", False)
+        and getattr(cfg, "indexer_loss_scaling_factor", 0.0) > 0.0
+        and not getattr(cfg, "indexer_sparse_training", False)
+    ) and model_mode == MODEL_MODE_TRAIN
+
+  def mtp_merges_output_head(self, model_mode):
+    """True if the MTP block, not the decoder, computes the main logits (mtp_merge_output_head).
+
+    The MTP block then runs the output head once on the main and MTP hidden states together, so the shared
+    head weight gets one gradient matmul and one gradient reduction instead of one per head.
+    """
+    cfg = self.config
+    return (
+        getattr(cfg, "mtp_merge_output_head", False)
+        and getattr(cfg, "mtp_num_layers", 0) > 0
+        and model_mode == MODEL_MODE_TRAIN
+        and cfg.num_vocab_tiling <= 1
+        and cfg.attention not in ("vllm_rpa", "vllm_batched_rpa")
+        and not self._is_indexer_dense_warmup(model_mode)
+    )
+
+  def apply_final_norm(self, y):
+    """Applies the main decoder final normalization (decoder_norm)."""
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      norm_out_sharding = create_sharding(
+          self.mesh,
+          ("activation_batch", "activation_length", "activation_embed"),
+      )
+    else:
+      norm_out_sharding = None
+    return self.decoder_norm(y, out_sharding=norm_out_sharding)
+
   def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
     """Applies final normalization and projects hidden states to logits.
 
@@ -1567,15 +1607,7 @@ class NNXDecoder(nnx.Module):
 
     cfg = self.config
     if normalize_y:
-      if cfg.shard_mode == ShardMode.EXPLICIT:
-        norm_out_sharding = create_sharding(
-            self.mesh,
-            ("activation_batch", "activation_length", "activation_embed"),
-        )
-      else:
-        norm_out_sharding = None
-
-      y = self.decoder_norm(y, out_sharding=norm_out_sharding)
+      y = self.apply_final_norm(y)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:
@@ -2298,11 +2330,7 @@ class NNXDecoder(nnx.Module):
 
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
     # for efficiency, as the main model is frozen and the LM loss is not needed.
-    elif (
-        getattr(cfg, "use_indexer", False)
-        and getattr(cfg, "indexer_loss_scaling_factor", 0.0) > 0.0
-        and not getattr(cfg, "indexer_sparse_training", False)
-    ) and model_mode == MODEL_MODE_TRAIN:
+    elif self._is_indexer_dense_warmup(model_mode):
       logits = None
 
     # When vocab tiling is enabled in training mode, full logits won't generate to reduce memory
@@ -2310,6 +2338,10 @@ class NNXDecoder(nnx.Module):
     elif cfg.num_vocab_tiling > 1 and model_mode == MODEL_MODE_TRAIN:
       logits = None
       self.sow(nnx.Intermediate, "hidden_states", hidden_state)
+
+    # With mtp_merge_output_head, the MTP block projects the main hidden state together with its own.
+    elif self.mtp_merges_output_head(model_mode):
+      logits = None
 
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)

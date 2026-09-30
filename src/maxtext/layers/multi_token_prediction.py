@@ -464,7 +464,29 @@ class MultiTokenPredictionBlock(nnx.Module):
       decoder_segment_ids,
       model_mode,
       deterministic,
+      main_token_embeddings=None,
+      merge_main_output_head=False,
   ) -> dict:
+    """Runs the MTP layers and sows their losses.
+
+    Args:
+      shared_embedding: Shared token embedding, used for the MTP input embeddings and the output head.
+      main_hidden_state: Final (pre-norm) hidden state of the main decoder.
+      input_ids: Main decoder input tokens.
+      target_ids: Main decoder target tokens.
+      target_mask: Main decoder target mask or packed segment ids.
+      position_ids: Main decoder positions.
+      decoder_segment_ids: Main decoder segment ids.
+      model_mode: Operational mode.
+      deterministic: Whether dropout is disabled.
+      main_token_embeddings: Token embeddings of ``input_ids`` from the main decoder (mtp_reuse_input_embedding).
+        If given, the MTP input embeddings are these shifted left, instead of a new lookup of the shifted tokens.
+      merge_main_output_head: If True (mtp_merge_output_head), runs the output head once on the main and all MTP
+        hidden states and returns the main logits.
+
+    Returns:
+      ``{"logits": main_logits}`` if ``merge_main_output_head``, else ``{}``.
+    """
     cfg = self.config
     cp_size = self.mesh.shape.get(cfg.context_sharding, 1) if self.mesh is not None else 1
 
@@ -524,7 +546,46 @@ class MultiTokenPredictionBlock(nnx.Module):
     mtp_preds_list = []
     mtp_masks_list = []
 
+    def add_layer_outputs(k, mtp_logits, k_target_ids, k_target_mask):
+      """Records the loss terms (training) and eval predictions of MTP layer k."""
+      mtp_logits = self._shard_logits(mtp_logits)
+      mtp_xent = _cross_entropy_with_integer_labels(mtp_logits, k_target_ids)
+      mtp_xent = sharding.maybe_shard_with_logical(
+          mtp_xent,
+          ("activation_embed_and_logits_batch", "activation_length"),
+          self.mesh,
+          cfg.shard_mode,
+          debug_sharding=cfg.debug_sharding,
+      )
+      mtp_xent_masked = mtp_xent * k_target_mask
+
+      if model_mode == MODEL_MODE_TRAIN:
+        mtp_losses_list.append(jnp.sum(mtp_xent_masked))
+        mtp_weights_list.append(jnp.sum(k_target_mask).astype(jnp.float32))
+
+      if cfg.mtp_eval_target_module == k:
+        # Float32 to avoid gradient errors; converted back to int32 in acceptance calculation.
+        mtp_preds_list.append(jnp.argmax(mtp_logits, axis=-1).astype(jnp.float32))
+        mtp_masks_list.append(k_target_mask)
+
+    # Token embeddings of rolled_input_ids, when shifted from the main decoder's embeddings.
+    rolled_token_embeddings = main_token_embeddings
+    if main_token_embeddings is not None:
+      # Rolled-in positions hold token id 0, so they take the embedding of token 0.
+      token_zero_embedding = shared_embedding.embed_single_token(0)
+      not_filled = jnp.ones(input_ids.shape, dtype=jnp.int32)
+    # With merge_main_output_head, the per-layer normalized hidden states, targets and masks wait for one head call.
+    pending_heads = []
+
     for k in range(1, cfg.mtp_num_layers + 1):
+      if main_token_embeddings is not None:
+        # roll_and_mask_by_segment zero-fills the positions whose token id it replaces with 0.
+        is_filled = roll_and_mask_by_segment(not_filled, rolled_segment_ids) == 0
+        rolled_token_embeddings = jnp.where(
+            is_filled[..., None],
+            token_zero_embedding,
+            roll_and_mask_by_segment(rolled_token_embeddings, rolled_segment_ids),
+        )
       rolled_input_ids = roll_and_mask_by_segment(rolled_input_ids, rolled_segment_ids)
       rolled_target_ids = roll_and_mask_by_segment(rolled_target_ids, rolled_segment_ids)
       rolled_target_mask = roll_and_mask_by_segment(rolled_target_mask, rolled_segment_ids)
@@ -533,12 +594,14 @@ class MultiTokenPredictionBlock(nnx.Module):
       if rolled_segment_ids is not None:
         rolled_segment_ids = roll_and_mask(rolled_segment_ids)
 
+      embedding_kwargs = {} if main_token_embeddings is None else {"decoder_input_embeddings": rolled_token_embeddings}
       target_token_embedding = self.decoder._apply_embedding(
           shared_embedding,
           rolled_input_ids,
           rolled_position_id,
           deterministic,
           model_mode=self.decoder.model_mode,
+          **embedding_kwargs,
       )
 
       mtp_layer = getattr(self, f"mtp_layer_{k}")
@@ -561,41 +624,27 @@ class MultiTokenPredictionBlock(nnx.Module):
           sharding.get_logical_axis_rules(),
       )
 
+      if merge_main_output_head:
+        pending_heads.append((normed_mtp_hidden_state, rolled_target_ids, rolled_target_mask))
+        continue
+
       mtp_logits = self.decoder.apply_output_head(
           shared_embedding, normed_mtp_hidden_state, deterministic, model_mode, normalize_y=False
       )
+      add_layer_outputs(k, mtp_logits, rolled_target_ids, rolled_target_mask)
 
-      logits_logical_axes = (
-          "activation_embed_and_logits_batch",
-          "activation_length",
-          "activation_vocab",
+    outputs = {}
+    if merge_main_output_head:
+      normed_main_hidden_state = self.decoder.apply_final_norm(main_hidden_state)
+      all_logits = self._merged_output_head(
+          shared_embedding,
+          [normed_main_hidden_state] + [h for h, _, _ in pending_heads],
+          deterministic,
+          model_mode,
       )
-      mtp_logits = sharding.maybe_shard_with_logical(
-          mtp_logits,
-          logits_logical_axes,
-          self.mesh,
-          cfg.shard_mode,
-          debug_sharding=cfg.debug_sharding,
-      )
-
-      mtp_xent = _cross_entropy_with_integer_labels(mtp_logits, rolled_target_ids)
-      mtp_xent = sharding.maybe_shard_with_logical(
-          mtp_xent,
-          ("activation_embed_and_logits_batch", "activation_length"),
-          self.mesh,
-          cfg.shard_mode,
-          debug_sharding=cfg.debug_sharding,
-      )
-      mtp_xent_masked = mtp_xent * rolled_target_mask
-
-      if model_mode == MODEL_MODE_TRAIN:
-        mtp_losses_list.append(jnp.sum(mtp_xent_masked))
-        mtp_weights_list.append(jnp.sum(rolled_target_mask).astype(jnp.float32))
-
-      if cfg.mtp_eval_target_module == k:
-        # Float32 to avoid gradient errors; converted back to int32 in acceptance calculation.
-        mtp_preds_list.append(jnp.argmax(mtp_logits, axis=-1).astype(jnp.float32))
-        mtp_masks_list.append(rolled_target_mask)
+      outputs["logits"] = all_logits[0]
+      for k, (mtp_logits, (_, k_target_ids, k_target_mask)) in enumerate(zip(all_logits[1:], pending_heads), start=1):
+        add_layer_outputs(k, mtp_logits, k_target_ids, k_target_mask)
 
     if mtp_losses_list:
       # Not part of checkpoints, don't declare in __init__
@@ -606,7 +655,38 @@ class MultiTokenPredictionBlock(nnx.Module):
       self.mtp_preds = mtp_acceptance(jnp.stack(mtp_preds_list))
       self.mtp_mask = mtp_acceptance(jnp.stack(mtp_masks_list))
 
-    return {}
+    return outputs
+
+  def _shard_logits(self, logits):
+    return sharding.maybe_shard_with_logical(
+        logits,
+        ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
+        self.mesh,
+        self.config.shard_mode,
+        debug_sharding=self.config.debug_sharding,
+    )
+
+  def _merged_output_head(self, shared_embedding, normed_hidden_states, deterministic, model_mode):
+    """Runs the output head once on several [batch, length, emb] hidden states and splits the logits.
+
+    The hidden states are interleaved along the length axis ([batch, length * n, emb]), which keeps each length
+    shard's rows on the same device under context parallelism. Each logits row still comes from its own row, but
+    the head weight gradient is one matmul over all rows, followed by one reduction.
+    """
+    cfg = self.config
+    n = len(normed_hidden_states)
+    batch, length, emb = normed_hidden_states[0].shape
+    y = jnp.stack(normed_hidden_states, axis=2).reshape(batch, length * n, emb)
+    y = sharding.maybe_shard_with_logical(
+        y,
+        ("activation_batch", "activation_length", "activation_embed"),
+        self.mesh,
+        cfg.shard_mode,
+        sharding.get_logical_axis_rules(),
+    )
+    logits = self.decoder.apply_output_head(shared_embedding, y, deterministic, model_mode, normalize_y=False)
+    logits = logits.reshape(batch, length, n, logits.shape[-1])
+    return [self._shard_logits(logits[:, :, i]) for i in range(n)]
 
 
 def calculate_mtp_loss(intermediate_outputs, config):

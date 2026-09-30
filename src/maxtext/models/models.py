@@ -282,6 +282,18 @@ class Transformer(nnx.Module):
           bidirectional_mask_video=bidirectional_mask_video,
       )
 
+    # With mtp_reuse_input_embedding, look up the token embeddings once here; the MTP block shifts them instead of
+    # looking up the shifted tokens again, and the embedding table gets a single gradient.
+    mtp_token_embeddings = None
+    if (
+        getattr(self.config, "mtp_reuse_input_embedding", False)
+        and getattr(self.config, "mtp_num_layers", 0) > 0
+        and decoder_input_embeddings is None
+        and multimodal_input is None
+    ):
+      decoder_input_embeddings = self.decoder.embed_tokens(self.token_embedder, decoder_input_tokens, model_mode)
+      mtp_token_embeddings = decoder_input_embeddings
+
     res = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
@@ -322,9 +334,11 @@ class Transformer(nnx.Module):
     #   1. The same `DecoderLayer` blueprint for its internal transformer blocks.
     #   2. The `shared_embedding` for both embedding future tokens and for its final
     #      logit projection.
-    # Its only effect is to "sow" these losses; it does not alter the primary logits output.
+    # Its only effect is to "sow" these losses; it does not alter the primary logits output. With
+    # mtp_merge_output_head it also computes the main logits, in the same output head call as its own.
     if getattr(self.config, "mtp_num_layers", 0) > 0:
-      self.mtp_block(
+      merge_main_output_head = self.decoder.mtp_merges_output_head(model_mode)
+      mtp_outputs = self.mtp_block(
           shared_embedding=self.token_embedder,
           main_hidden_state=hidden_state,
           input_ids=decoder_input_tokens,
@@ -334,7 +348,11 @@ class Transformer(nnx.Module):
           decoder_segment_ids=decoder_segment_ids,
           deterministic=not enable_dropout,
           model_mode=model_mode,
+          main_token_embeddings=mtp_token_embeddings,
+          merge_main_output_head=merge_main_output_head,
       )
+      if merge_main_output_head:
+        logits = mtp_outputs["logits"]
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # In vLLM, logits are computed separately after updating the KV cache.

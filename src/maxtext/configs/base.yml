@@ -240,6 +240,12 @@ mtp_loss_scaling_factor: 0.1
 # acceptance rate during evaluation. for example, a value of `1` targets the
 # first auxiliary prediction head. set to 0 to disable this specific evaluation
 mtp_eval_target_module: 0
+# reuse the main decoder's token embeddings (shifted left) as the mtp input embeddings instead of a second lookup.
+# the forward is bitwise identical; the embedding table gets one gradient reduction instead of two.
+mtp_reuse_input_embedding: false
+# run the shared output head once on the main and mtp hidden states in training: one head weight gradient matmul and
+# reduction instead of one per head.
+mtp_merge_output_head: false
 
 # mixture of experts (moe)
 num_experts: 1
