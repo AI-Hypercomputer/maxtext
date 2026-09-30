@@ -67,8 +67,10 @@ def log(*a):
 def resolve_paths(args):
   """Locate the persist disk, the HF cache and the MaxText tree. The disk has moved between hosts before,
   so prefer an explicit flag/env var and fall back to whichever candidate actually holds the HF hub."""
-  maxtext_root = args.maxtext_root or os.environ.get("MAXTEXT_ROOT") or os.path.dirname(
-      os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+  maxtext_root = (
+      args.maxtext_root
+      or os.environ.get("MAXTEXT_ROOT")
+      or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
   )
   hf_home = args.hf_home or os.environ.get("HF_HOME")
   if not hf_home:
@@ -244,8 +246,7 @@ def sync_weights_from_trainer(args, out_dir, runner):
       ici_tensor_parallelism=args.trainer_tp,
       ici_expert_parallelism=args.sync_src_ep if args.sync_src_ep is not None else args.ep,
       allow_split_physical_axes=True,
-      **({"base_num_kv_heads": args.trainer_kv_heads, "override_model_config": True}
-         if args.trainer_kv_heads else {}),
+      **({"base_num_kv_heads": args.trainer_kv_heads, "override_model_config": True} if args.trainer_kv_heads else {}),
       log_config=False,
       skip_jax_distributed_system=True,
       enable_checkpointing=True,
@@ -279,8 +280,9 @@ def sync_weights_from_trainer(args, out_dir, runner):
   replaced = sum(1 for a, b in zip(before, after) if a != b) / max(len(before), 1)
   log(f"weight-sync: {replaced:.1%} of destination buffers replaced")
   if replaced == 0.0:
-    raise SystemExit("--weight-sync: transfer did not modify the engine's weights; aborting so the run "
-                     "is not mislabelled as synced")
+    raise SystemExit(
+        "--weight-sync: transfer did not modify the engine's weights; aborting so the run " "is not mislabelled as synced"
+    )
   # Mirror tunix's post-sync bookkeeping: the runner caches flattened state leaves.
   if hasattr(runner, "state"):
     runner.state_leaves = tuple(jax.tree_util.tree_leaves(runner.state))
@@ -323,11 +325,13 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
   # experts instead of over the MLP dimension also drops moe_mlp_tp_size to tensor_parallelism * attn_dp,
   # which is what decides whether GMM_v2 forces the 512 -> 2048 pad on every expert weight.
   if args.ep > 1:
-    sharding = {"sharding_strategy": {
-        "expert_parallelism": args.ep,
-        "tensor_parallelism": args.sharding_tp,
-        "enable_dp_attention": True,
-    }}
+    sharding = {
+        "sharding_strategy": {
+            "expert_parallelism": args.ep,
+            "tensor_parallelism": args.sharding_tp,
+            "enable_dp_attention": True,
+        }
+    }
   elif args.attn_dp > 1:
     sharding = {"sharding_strategy": {"enable_dp_attention": True, "attn_dp_size": args.attn_dp}}
   else:
@@ -403,8 +407,10 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       logp[b, i] = d[tid].logprob if tid in d else np.nan
       top1[b, i] = max(d.items(), key=lambda kv: kv[1].logprob)[0]
   saved = dict(logp=logp, top1=top1, tokens=tokens)
-  log(f"sampler: prompt pass done; mean logp={np.nanmean(logp[:, 1:]):.4f} "
-      f"top-1 acc={np.mean(top1[:, 1:] == tokens[:, 1:]):.3f}")
+  log(
+      f"sampler: prompt pass done; mean logp={np.nanmean(logp[:, 1:]):.4f} "
+      f"top-1 acc={np.mean(top1[:, 1:] == tokens[:, 1:]):.3f}"
+  )
   path = os.path.join(out_dir, f"sampler_{args.sampler}_logprobs.npz")
   # Checkpoint before the rollouts: generation is by far the longest phase, and losing a completed prompt
   # pass to a crash partway through decode costs the whole prefill again.
@@ -419,12 +425,17 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       # Let each rollout end at EOS, as it would in the RL loop. Rows then have different lengths; the
       # tail of each row is padded and its logprob left NaN, so compare()'s token mask drops it. Padding
       # sits after the real tokens and attention is causal, so it cannot affect the scored positions.
-      gsp = SamplingParams(max_tokens=args.gen_tokens, temperature=args.gen_temperature,
-                           top_p=1.0, top_k=-1, logprobs=1)
+      gsp = SamplingParams(max_tokens=args.gen_tokens, temperature=args.gen_temperature, top_p=1.0, top_k=-1, logprobs=1)
     else:
-      gsp = SamplingParams(max_tokens=args.gen_tokens, min_tokens=args.gen_tokens,
-                           temperature=args.gen_temperature, top_p=1.0, top_k=-1, logprobs=1,
-                           ignore_eos=True)
+      gsp = SamplingParams(
+          max_tokens=args.gen_tokens,
+          min_tokens=args.gen_tokens,
+          temperature=args.gen_temperature,
+          top_p=1.0,
+          top_k=-1,
+          logprobs=1,
+          ignore_eos=True,
+      )
     log(f"sampler: generating {args.gen_tokens} tokens x {len(tokens)} prompts (temperature={args.gen_temperature})")
     gouts = llm.generate([TokensPrompt(prompt_token_ids=[int(t) for t in row]) for row in tokens], gsp)
     # Pad short rows with EOS so the trainer gets a rectangular batch; their logprobs stay NaN and are
@@ -445,9 +456,11 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       if n < args.gen_tokens and not args.stop_at_eos:
         log(f"sampler: WARNING prompt {b} returned {n} < {args.gen_tokens} tokens")
     saved.update(gen_ids=gen_ids, gen_logp=gen_logp, gen_lens=gen_lens)
-    log(f"sampler: generation done; mean gen logp={np.nanmean(gen_logp):.4f}; "
+    log(
+        f"sampler: generation done; mean gen logp={np.nanmean(gen_logp):.4f}; "
         f"lengths min {gen_lens.min()} med {int(np.median(gen_lens))} max {gen_lens.max()} "
-        f"(hit cap: {(gen_lens >= args.gen_tokens).sum()}/{len(gen_lens)})")
+        f"(hit cap: {(gen_lens >= args.gen_tokens).sum()}/{len(gen_lens)})"
+    )
 
     # Dump the rollouts as text too -- the npz only has ids, and the text is what you actually read when
     # judging whether the model is producing sane agent output.
@@ -456,13 +469,19 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
     with open(gen_path, "w", encoding="utf-8") as fh:
       for b in range(len(tokens)):
         ids = [int(t) for t in gen_ids[b, : gen_lens[b]]]
-        fh.write(json.dumps({
-            "row": b,
-            "n_tokens": len(ids),
-            "mean_logp": float(np.nanmean(gen_logp[b])),
-            "prompt_tail": gen_tok.decode([int(t) for t in tokens[b, -200:]]),
-            "text": gen_tok.decode(ids),
-        }, ensure_ascii=False) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "row": b,
+                    "n_tokens": len(ids),
+                    "mean_logp": float(np.nanmean(gen_logp[b])),
+                    "prompt_tail": gen_tok.decode([int(t) for t in tokens[b, -200:]]),
+                    "text": gen_tok.decode(ids),
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
     log(f"sampler: wrote rollout text to {gen_path}")
     del gouts
 
@@ -509,7 +528,9 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       gen_ids = sa["gen_ids"]
   tokens_np = prompt_np if gen_ids is None else np.concatenate([prompt_np, gen_ids], axis=1).astype(np.int32)
   seq_len = tokens_np.shape[1]
-  log(f"trainer: scoring {tokens_np.shape} ({'prompt only' if gen_ids is None else f'prompt {SEQ_LEN} + gen {gen_ids.shape[1]}'})")
+  log(
+      f"trainer: scoring {tokens_np.shape} ({'prompt only' if gen_ids is None else f'prompt {SEQ_LEN} + gen {gen_ids.shape[1]}'})"
+  )
 
   cfg = pyconfig.initialize(
       [sys.argv[0], base_yml, "attention=flash"],
@@ -538,8 +559,7 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       # Attention heads are atomic under TP, so TP above num_kv_heads (2 here) needs the KV heads
       # replicated up first. The adapter already does this on the sampler side (base_num_kv_heads =
       # tp * ep), so padding here moves the trainer toward the sampler's layout, not away from it.
-      **({"base_num_kv_heads": args.trainer_kv_heads, "override_model_config": True}
-         if args.trainer_kv_heads else {}),
+      **({"base_num_kv_heads": args.trainer_kv_heads, "override_model_config": True} if args.trainer_kv_heads else {}),
       log_config=False,
       # Single host, and when the sampler stage ran first the vLLM engine has already brought up the JAX
       # backend in this process -- jax.distributed.initialize() would then fail outright.
@@ -561,8 +581,10 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       wi_tile_fwd_embed_dim=128,
       wi_tile_fwd_mlp_dim=128,
   )
-  log(f"trainer cfg: emb={cfg.emb_dim} q={cfg.num_query_heads} kv={cfg.num_kv_heads} "
-      f"E={cfg.num_experts} k={cfg.num_experts_per_tok} layers={cfg.num_decoder_layers}")
+  log(
+      f"trainer cfg: emb={cfg.emb_dim} q={cfg.num_query_heads} kv={cfg.num_kv_heads} "
+      f"E={cfg.num_experts} k={cfg.num_experts_per_tok} layers={cfg.num_decoder_layers}"
+  )
 
   model, mesh = model_creation_utils.from_pretrained(cfg, devices=jax.devices(), model_mode=MODEL_MODE_TRAIN)
   log("trainer model loaded")
@@ -679,14 +701,20 @@ def compare(prev_logprobs, generation_logprobs, token_mask=None, sample_mask=Non
 
 def print_report(name, m):
   print(f"\n### {name}")
-  print(f"  tokens={m['n_tokens']}  seqs={m['n_seqs']}  nonfinite(zeroed)={m['n_nonfinite']}  "
-        f"band=[{RATIO_MIN}, {RATIO_MAX}]")
-  print(f"  per-token : oob {m['token_oob_ratio']:.2%}  in-band {m['token_in_band']:.2%}   "
-        f"|dlogp| med {m['abs_d_median']:.4f} / p99 {m['abs_d_p99']:.3f} / max {m['abs_d_max']:.2f}")
+  print(
+      f"  tokens={m['n_tokens']}  seqs={m['n_seqs']}  nonfinite(zeroed)={m['n_nonfinite']}  "
+      f"band=[{RATIO_MIN}, {RATIO_MAX}]"
+  )
+  print(
+      f"  per-token : oob {m['token_oob_ratio']:.2%}  in-band {m['token_in_band']:.2%}   "
+      f"|dlogp| med {m['abs_d_median']:.4f} / p99 {m['abs_d_p99']:.3f} / max {m['abs_d_max']:.2f}"
+  )
   print(f"  {'seq':>4} {'seq_log_is_ratio_mean':>22} {'seq_geomean_is_ratio':>21} {'kept':>5}")
   for b in range(m["n_seqs"]):
-    print(f"  {b:>4} {m['seq_log_is_ratio_mean'][b]:>22.6e} "
-          f"{m['seq_geomean_is_ratio'][b]:>21.6f} {int(m['seq_kept_mask'][b]):>5}")
+    print(
+        f"  {b:>4} {m['seq_log_is_ratio_mean'][b]:>22.6e} "
+        f"{m['seq_geomean_is_ratio'][b]:>21.6f} {int(m['seq_kept_mask'][b]):>5}"
+    )
   print(f"  kept {int(m['seq_kept_mask'].sum())}/{m['n_seqs']}")
   print(f"  >>> is_oob_ratio (seq-mask-tis) = {m['is_oob_ratio']:.4f} ({m['is_oob_ratio']:.2%})")
   print(f"      oob_ratio    (per-token)   = {m['token_oob_ratio']:.4f} ({m['token_oob_ratio']:.2%})")
@@ -740,48 +768,92 @@ class _HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescrip
 def main():
   global SEQ_LEN  # pylint: disable=global-statement  (--prompt-len rebinds it for every stage)
   ap = argparse.ArgumentParser(description=__doc__, formatter_class=_HelpFormatter)
-  ap.add_argument("--stage", default="all", choices=["all", "tokenize", "sampler", "trainer", "compare"],
-                  help="all = every stage in this process; the rest hand off through npz files in --out-dir")
-  ap.add_argument("--sampler", default="adapter", choices=["adapter", "native"],
-                  help="adapter = MaxText-in-vLLM (MODEL_IMPL_TYPE=flax_nnx); native = tpu-inference torchax path")
+  ap.add_argument(
+      "--stage",
+      default="all",
+      choices=["all", "tokenize", "sampler", "trainer", "compare"],
+      help="all = every stage in this process; the rest hand off through npz files in --out-dir",
+  )
+  ap.add_argument(
+      "--sampler",
+      default="adapter",
+      choices=["adapter", "native"],
+      help="adapter = MaxText-in-vLLM (MODEL_IMPL_TYPE=flax_nnx); native = tpu-inference torchax path",
+  )
   ap.add_argument("--out-dir", default=None)
   ap.add_argument("--hf-home", default=None)
   ap.add_argument("--maxtext-root", default=None)
   ap.add_argument("--ckpt", default=CKPT, help="MaxText-format checkpoint for the trainer and the adapter")
-  ap.add_argument("--gen-tokens", type=int, default=61440,
-                  help="output tokens to roll out per prompt for the decode-path comparison; 0 = prompt only")
+  ap.add_argument(
+      "--gen-tokens",
+      type=int,
+      default=61440,
+      help="output tokens to roll out per prompt for the decode-path comparison; 0 = prompt only",
+  )
   ap.add_argument("--gen-temperature", type=float, default=1.0, help="sampling temperature for the rollouts")
-  ap.add_argument("--logits-dot-fp32", action="store_true",
-                  help="run the lm_head projection in fp32 (logits_dot_in_fp32) on BOTH trainer and sampler")
-  ap.add_argument("--stop-at-eos", action="store_true",
-                  help="let rollouts end at EOS (--gen-tokens becomes a cap) instead of forcing the full "
-                       "length with ignore_eos; short rows are padded and their logprobs masked out")
+  ap.add_argument(
+      "--logits-dot-fp32",
+      action="store_true",
+      help="run the lm_head projection in fp32 (logits_dot_in_fp32) on BOTH trainer and sampler",
+  )
+  ap.add_argument(
+      "--stop-at-eos",
+      action="store_true",
+      help="let rollouts end at EOS (--gen-tokens becomes a cap) instead of forcing the full "
+      "length with ignore_eos; short rows are padded and their logprobs masked out",
+  )
   ap.add_argument("--attn-dp", type=int, default=4, help="attention DP degree inside the tp=8 mesh")
-  ap.add_argument("--ep", type=int, default=1,
-                  help="expert parallelism on both sides (8 matches the production rollout config); "
-                       "takes precedence over --attn-dp and removes the GMM_v2 MoE padding")
-  ap.add_argument("--sharding-tp", type=int, default=1,
-                  help="sharding_strategy.tensor_parallelism for the sampler when --ep > 1")
-  ap.add_argument("--sync-src-ep", type=int, default=None,
-                  help="expert parallelism of the --weight-sync source model; defaults to --ep. Set 1 to "
-                       "sync from an FSDP+TP trainer into an EP sampler, as a real RL job does")
-  ap.add_argument("--weight-sync", action="store_true",
-                  help="before sampling, load the trainer model and push its params into the engine with "
-                       "tunix transfer_state_directly, instead of letting the sampler load the checkpoint "
-                       "itself -- this is what a real Tunix RL step does every iteration")
+  ap.add_argument(
+      "--ep",
+      type=int,
+      default=1,
+      help="expert parallelism on both sides (8 matches the production rollout config); "
+      "takes precedence over --attn-dp and removes the GMM_v2 MoE padding",
+  )
+  ap.add_argument(
+      "--sharding-tp", type=int, default=1, help="sharding_strategy.tensor_parallelism for the sampler when --ep > 1"
+  )
+  ap.add_argument(
+      "--sync-src-ep",
+      type=int,
+      default=None,
+      help="expert parallelism of the --weight-sync source model; defaults to --ep. Set 1 to "
+      "sync from an FSDP+TP trainer into an EP sampler, as a real RL job does",
+  )
+  ap.add_argument(
+      "--weight-sync",
+      action="store_true",
+      help="before sampling, load the trainer model and push its params into the engine with "
+      "tunix transfer_state_directly, instead of letting the sampler load the checkpoint "
+      "itself -- this is what a real Tunix RL step does every iteration",
+  )
   ap.add_argument("--gpu-memory-utilization", type=float, default=0.5)
-  ap.add_argument("--prompt-len", type=int, default=SEQ_LEN,
-                  help="prompt tokens per row; overrides the SEQ_LEN default")
-  ap.add_argument("--prompts-file", default=None,
-                  help="JSONL of real prompts, one {\"text\": ...} per line; each becomes one row truncated "
-                       "to SEQ_LEN. Overrides --text-glob/--text-file and sets the batch size.")
-  ap.add_argument("--trainer-micro-batch", type=int, default=0,
-                  help="rows per trainer forward pass; 0 = all at once. Must divide the row count")
-  ap.add_argument("--trainer-kv-heads", type=int, default=0,
-                  help="replicate the trainer's KV heads up to this count; needed for --trainer-tp above "
-                       "the model's num_kv_heads (2 for Qwen3.5-35B-A3B)")
-  ap.add_argument("--trainer-tp", type=int, default=1,
-                  help="tensor parallelism for the trainer mesh; the rest of the devices go to FSDP")
+  ap.add_argument("--prompt-len", type=int, default=SEQ_LEN, help="prompt tokens per row; overrides the SEQ_LEN default")
+  ap.add_argument(
+      "--prompts-file",
+      default=None,
+      help='JSONL of real prompts, one {"text": ...} per line; each becomes one row truncated '
+      "to SEQ_LEN. Overrides --text-glob/--text-file and sets the batch size.",
+  )
+  ap.add_argument(
+      "--trainer-micro-batch",
+      type=int,
+      default=0,
+      help="rows per trainer forward pass; 0 = all at once. Must divide the row count",
+  )
+  ap.add_argument(
+      "--trainer-kv-heads",
+      type=int,
+      default=0,
+      help="replicate the trainer's KV heads up to this count; needed for --trainer-tp above "
+      "the model's num_kv_heads (2 for Qwen3.5-35B-A3B)",
+  )
+  ap.add_argument(
+      "--trainer-tp",
+      type=int,
+      default=1,
+      help="tensor parallelism for the trainer mesh; the rest of the devices go to FSDP",
+  )
   ap.add_argument("--text-glob", default="docs/**/*.md", help="corpus glob, relative to the MaxText tree")
   ap.add_argument("--text-file", default=None, help="single text file, overrides --text-glob")
   ap.add_argument("--retokenize", action="store_true", help="rebuild tokens.npz even if it exists")

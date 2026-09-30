@@ -784,6 +784,48 @@ class TargetFreeConversionTest(unittest.TestCase):
       )
     self.assertIn("must be divisible by base_num_kv_heads", str(ctx.exception))
 
+  def test_case_10_moe_fp8_weight_sync(self):
+    """Verifies BF16 trainer -> MoE FP8 sampler weight sync with per-channel scales."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+        fp8_moe=True,
+    )
+    source = _source_tree(True)
+    target = _target_tree(fused=True)
+    # Convert target MoE layers to float8 and add scale tensors
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    out = converter.convert(source, target_state=target)
+
+    for layer in range(NUM_LAYERS):
+      moe_out = out["decoder"][f"layers_{layer}"]["moe_block"]
+      wi = getattr(moe_out["wi"], "value", moe_out["wi"])
+      wi_scale = getattr(moe_out["wi_scale"], "value", moe_out["wi_scale"])
+      wo = getattr(moe_out["wo"], "value", moe_out["wo"])
+      wo_scale = getattr(moe_out["wo_scale"], "value", moe_out["wo_scale"])
+
+      self.assertEqual(wi.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(wi.shape, (EXPERTS, EMB, MOE_DIM * 2))
+      self.assertEqual(wi_scale.dtype, jnp.float32)
+      self.assertEqual(wi_scale.shape, (EXPERTS, 1, MOE_DIM * 2))
+
+      self.assertEqual(wo.dtype, jnp.float8_e4m3fn)
+      self.assertEqual(wo.shape, (EXPERTS, MOE_DIM, EMB))
+      self.assertEqual(wo_scale.dtype, jnp.float32)
+      self.assertEqual(wo_scale.shape, (EXPERTS, 1, EMB))
+
+      # Scales should be positive non-zero floats
+      self.assertTrue(bool(jnp.all(wi_scale > 0)))
+      self.assertTrue(bool(jnp.all(wo_scale > 0)))
+
 
 if __name__ == "__main__":
   unittest.main()

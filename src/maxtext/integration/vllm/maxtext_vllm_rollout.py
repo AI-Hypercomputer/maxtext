@@ -92,6 +92,8 @@ def _rule_table_for(model_name: str):
   """
   if model_name == "qwen3-0.6b":
     return MODEL_TO_CONVERSION_RULES["qwen3"]
+  if model_name.startswith("qwen3.5"):
+    return None
   return _NO_RULE_TABLE
 
 
@@ -130,8 +132,13 @@ def _create_model_converter(
   if rule_table is not _NO_RULE_TABLE:
     if not use_hf_mapping:
       # Direct path: vLLM runs the MaxText model itself, so the differences are
-      # purely structural (scanned vs unrolled layers, fused vs split MoE).
-      return WeightConverter(rules=None, config=config, tp=tp, debug=debug)
+      return WeightConverter(
+          rules=None,
+          config=config,
+          tp=tp,
+          fp8_moe=bool(getattr(config, "fp8_moe", False)),
+          debug=debug,
+      )
     if rule_table is None:
       raise NotImplementedError(
           f"{model_name} has no HuggingFace-target conversion rules. It is only "
@@ -274,6 +281,9 @@ def validate_direct_sync_layer_coverage(source, target) -> int:
   def source_covers(target_key):
     if target_key in source_layer_keys:
       return True
+    if target_key and str(target_key[-1]).endswith("_scale"):
+      base_key = target_key[:-1] + (str(target_key[-1])[:-6],)
+      return source_covers(base_key)
     # Tunix fuses split training weights into the inference-only prefused
     # parameter before transfer. Treat the pair as coverage for target `wi`.
     if target_key and target_key[-1] == "wi":
