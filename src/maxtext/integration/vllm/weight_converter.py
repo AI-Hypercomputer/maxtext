@@ -589,6 +589,21 @@ def _group_plan(plan: List[_PlanEntry], fp8_moe: bool = False) -> List[_PlanGrou
   return groups
 
 
+def _quantize_fp8_targets(group: _PlanGroup, per_block) -> List[Tuple[Tuple[Any, ...], Any]]:
+  """Returns (target_key, array) pairs for an FP8 group: each block's FP8 weight or its per-channel scale.
+
+  A block feeds both a weight and a `_scale` target, so quantize it once and hand out both halves.
+  """
+  quantized = {
+      idx: quantize_weight_per_channel(per_block[idx], channel_axis=2)
+      for idx in dict.fromkeys(idx for idx, _ in group.targets)
+  }
+  return [
+      (tgt_key, quantized[idx][1] if str(tgt_key[-1]).endswith("_scale") else quantized[idx][0])
+      for idx, tgt_key in group.targets
+  ]
+
+
 class ConversionPlanError(ValueError):
   """Raised when the source and target trees cannot be fully reconciled."""
 
@@ -1096,11 +1111,7 @@ class MaxTextToMaxTextConverter:
       per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
       if not group.quantize_to_fp8:
         return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-      outs = []
-      for idx, tgt_key in group.targets:
-        q_w, s = quantize_weight_per_channel(per_block[idx], channel_axis=2)
-        outs.append((tgt_key, s if str(tgt_key[-1]).endswith("_scale") else q_w))
-      return outs
+      return _quantize_fp8_targets(group, per_block)
 
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
@@ -1110,11 +1121,7 @@ class MaxTextToMaxTextConverter:
     per_block = self._slice_bulk_target_free(val, path)
     if not group.quantize_to_fp8:
       return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
-    outs = []
-    for idx, tgt_key in group.targets:
-      q_w, s = quantize_weight_per_channel(per_block[idx], channel_axis=2)
-      outs.append((tgt_key, s if str(tgt_key[-1]).endswith("_scale") else q_w))
-    return outs
+    return _quantize_fp8_targets(group, per_block)
 
   def _execute_group(self, group: _PlanGroup, src_flat, tgt_flat):
     """Produces every target leaf in `group`. Returns (target_key, array) pairs."""
@@ -1143,18 +1150,13 @@ class MaxTextToMaxTextConverter:
       return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
 
     outs = []
-    for idx, tgt_key in group.targets:
-      q_w, s = quantize_weight_per_channel(per_block[idx], channel_axis=2)
+    for tgt_key, arr in _quantize_fp8_targets(group, per_block):
       tgt_val = tgt_flat[tgt_key]
       if str(tgt_key[-1]).endswith("_scale"):
-        s = s.astype(tgt_val.dtype)
-        if getattr(tgt_val, "sharding", None) is not None:
-          s = jax.lax.with_sharding_constraint(s, tgt_val.sharding)
-        outs.append((tgt_key, s))
-      else:
-        if getattr(tgt_val, "sharding", None) is not None:
-          q_w = jax.lax.with_sharding_constraint(q_w, tgt_val.sharding)
-        outs.append((tgt_key, q_w))
+        arr = arr.astype(tgt_val.dtype)
+      if getattr(tgt_val, "sharding", None) is not None:
+        arr = jax.lax.with_sharding_constraint(arr, tgt_val.sharding)
+      outs.append((tgt_key, arr))
     return outs
 
   def _check_scan_axis(self, val, path: str) -> None:

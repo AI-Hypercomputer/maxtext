@@ -31,12 +31,14 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import types as pytypes  # pylint: disable=wrong-import-position
 import unittest  # pylint: disable=wrong-import-position
+from unittest import mock  # pylint: disable=wrong-import-position
 
 import jax  # pylint: disable=wrong-import-position
 import jax.numpy as jnp  # pylint: disable=wrong-import-position
 import numpy as np  # pylint: disable=wrong-import-position
 import pytest  # pylint: disable=wrong-import-position
 from flax import traverse_util  # pylint: disable=wrong-import-position
+from maxtext.integration.vllm import weight_converter  # pylint: disable=wrong-import-position
 
 from maxtext.integration.vllm.weight_converter import (
     ConversionPlanError,
@@ -906,6 +908,34 @@ class TargetFreeConversionTest(unittest.TestCase):
         w = want["decoder"][f"layers_{layer}"]["moe_block"][name]
         g, w = getattr(g, "value", g), getattr(w, "value", w)
         np.testing.assert_array_equal(np.asarray(g, np.float32), np.asarray(w, np.float32), err_msg=name)
+
+  def test_case_14_moe_fp8_quantizes_each_block_once(self):
+    """A block feeds both a weight and a scale target; it is quantized once, not once per target."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+        fp8_moe=True,
+    )
+    target = _target_tree(fused=True)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    with mock.patch.object(
+        weight_converter, "quantize_weight_per_channel", wraps=weight_converter.quantize_weight_per_channel
+    ) as quantize:
+      converter.convert(_source_tree(True), target_state=target)
+
+    fp8_groups = [g for g in converter._direct._groups if g.quantize_to_fp8]  # pylint: disable=protected-access
+    num_targets = sum(len(g.targets) for g in fp8_groups)
+    num_blocks = sum(len({idx for idx, _ in g.targets}) for g in fp8_groups)
+    self.assertEqual(num_targets, 2 * num_blocks)  # a weight and a scale per block
+    self.assertEqual(quantize.call_count, num_blocks)
 
 
 if __name__ == "__main__":
