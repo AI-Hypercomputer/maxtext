@@ -562,6 +562,11 @@ class RoutedMoE(nnx.Module):
       weight_dtype = weight_quant.weight_dtype
     elif getattr(config, "fp8_moe", False):
       weight_dtype = jnp.float8_e4m3fn
+    if config.fp8_moe_fake_quant:
+      if config.fp8_moe:
+        raise ValueError("fp8_moe stores the expert weights in FP8 already; fp8_moe_fake_quant needs them unquantized.")
+      if config.weight_block_size is not None:
+        raise ValueError("fp8_moe_fake_quant rounds to per-channel scales; it requires weight_block_size=None.")
 
     self.config = config
     self.force_dropless = force_dropless
@@ -3993,6 +3998,13 @@ class RoutedMoE(nnx.Module):
       else:
         w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
         w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
+
+    if cfg.fp8_moe_fake_quant and not is_fused_moe_path:
+      # Axis 2 is the output dim of wi_0/wi_1 (mlp) and wo (embed). An fp8_moe rollout quantizes the
+      # fused wi = [wi_0 | wi_1] per output channel, so rounding the halves separately is identical.
+      w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel)
+      w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
+      wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because

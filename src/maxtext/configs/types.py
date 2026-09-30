@@ -1201,6 +1201,15 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether MoE weights are quantized to float8_e4m3fn in inference/rollout.",
   )
+  fp8_moe_fake_quant: bool = Field(
+      False,
+      description=(
+          "Keep routed-expert weights (wi/wo) in weight_dtype but round them in the forward pass to the"
+          " per-channel float8_e4m3fn grid fp8_moe stores them on, with straight-through gradients. A"
+          " trainer with this set computes with exactly the expert weights an fp8_moe rollout receives"
+          " on weight sync. Activations stay in dtype."
+      ),
+  )
   rollout_fp8_moe: bool = Field(
       False,
       description=(

@@ -172,6 +172,21 @@ def quantize_weight_per_channel(w: Any, channel_axis: int = 2) -> Tuple[Any, Any
   return q_w, scale
 
 
+def fake_quantize_weight_per_channel(w: Array, channel_axis: int = 2) -> Array:
+  """Rounds `w` to the grid of `quantize_weight_per_channel(w)`, with a straight-through gradient.
+
+  The forward value is the dequantized weight in `w.dtype`, i.e. the weight an FP8 rollout holding
+  `quantize_weight_per_channel(w)` computes with. The backward pass treats the rounding as the
+  identity, so gradients reach the high-precision `w`.
+  """
+  q, scale = quantize_weight_per_channel(w, channel_axis)
+  # Under jit, XLA folds the f32 -> fp8 -> f32 convert pair into a no-op, dropping the rounding.
+  q = jax.lax.optimization_barrier(q)
+  w_q = jax.lax.stop_gradient((q.astype(jnp.float32) * scale).astype(w.dtype))
+  # w - stop_gradient(w) is exactly zero, so the forward value is exactly w_q.
+  return w_q + (w - jax.lax.stop_gradient(w))
+
+
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""

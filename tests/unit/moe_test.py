@@ -3043,6 +3043,97 @@ class FusedMoeNativeFp8Test(unittest.TestCase):
     self.assertIsNone(bias_updates)
 
 
+@pytest.mark.tpu_only
+class Fp8MoeFakeQuantTest(unittest.TestCase):
+  """fp8_moe_fake_quant makes a bf16 trainer see the routed-expert weights an fp8_moe rollout serves."""
+
+  def _make_config(self, run_name, weight_block_size=None, **overrides):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name=run_name,
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        weight_block_size=weight_block_size,
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=1,
+        max_target_length=128,
+        float32_gate_logits=True,
+        log_config=False,
+        **overrides,
+    )
+
+  def _build_model(self, cfg, mesh):
+    return moe.get_routed_moe(
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+    )
+
+  def test_matches_rollout_weights_with_straight_through_grads(self):
+    """The forward pass equals a plain model holding the dequantized quantize_weight_per_channel(w),
+    the weights the rollout converter produces; the gradient is the plain model's gradient there."""
+    cfg = self._make_config("fp8_moe_fake_quant", fp8_moe_fake_quant=True)
+    ref_cfg = self._make_config("fp8_moe_fake_quant_ref")
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model, ref = self._build_model(cfg, mesh), self._build_model(ref_cfg, mesh)
+
+    rng_model, rng_x = jax.random.split(jax.random.PRNGKey(21))
+    x = jax.random.normal(
+        rng_x, (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim), cfg.dtype
+    )
+    params = nn.unbox(model.init(rng_model, x)["params"])
+
+    def rollout_weight(w):
+      # Quantize under jit, as the weight converter does: on some TPUs (v5p) the jitted scale
+      # differs from the eager one by an ulp. Dequantize outside it, since XLA folds an
+      # in-jit fp8 round trip.
+      q, scale = jax.jit(quantizations.quantize_weight_per_channel)(w)
+      return (q.astype(jnp.float32) * scale).astype(w.dtype)
+
+    ref_params = dict(params)
+    for name in ("wi_0", "wi_1", "wo"):
+      ref_params[name] = rollout_weight(params[name])
+      self.assertFalse(np.array_equal(np.asarray(ref_params[name]), np.asarray(params[name])))
+
+    def loss_and_grad(m, p):
+      def loss_fn(p):
+        out, _, _ = m.apply({"params": p}, x)
+        return jnp.mean(out.astype(jnp.float32) ** 2), out
+
+      return jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(p)
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      (_, out), grads = loss_and_grad(model, params)
+      (_, ref_out), ref_grads = loss_and_grad(ref, ref_params)
+
+    np.testing.assert_array_equal(np.asarray(out, np.float32), np.asarray(ref_out, np.float32))
+    for name in ("wi_0", "wi_1", "wo"):
+      np.testing.assert_array_equal(np.asarray(grads[name], np.float32), np.asarray(ref_grads[name], np.float32))
+    self.assertTrue(np.any(np.asarray(grads["wo"], np.float32) != 0))
+
+  def test_rejects_fp8_moe_and_block_scales(self):
+    for overrides in ({"fp8_moe": True}, {"weight_block_size": 128}):
+      cfg = self._make_config("fp8_moe_fake_quant_rejected", fp8_moe_fake_quant=True, **overrides)
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      x = jnp.zeros((int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim))
+      with self.assertRaisesRegex(ValueError, "fp8_moe_fake_quant"):
+        self._build_model(cfg, mesh).init(jax.random.PRNGKey(0), x)
+
+
 @pytest.mark.parametrize(
     "model_name,flag",
     [
