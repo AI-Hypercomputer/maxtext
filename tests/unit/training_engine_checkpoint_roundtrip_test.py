@@ -181,6 +181,38 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
 
     self.assertEqual(manager.restore_checkpoint(state), (None, state, None))
 
+  def test_restore_into_pinned_host_optimizer_requests_device_memory_kind(self):
+    os.environ["ENABLE_ORBAX_FINGERPRINT"] = "1"
+    model, optimizer = self._save_trained(steps=2)
+    want_opt = _leaves(nnx.state(optimizer, nnx.optimizer.OptState))
+
+    fresh_model, fresh_opt = _build(seed=123)
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+    host_sharding = jax.sharding.NamedSharding(
+        mesh, jax.sharding.PartitionSpec()
+    ).with_memory_kind("pinned_host")
+    offloaded_opt_state = jax.tree.map(
+        lambda x: jax.device_put(x, host_sharding) if isinstance(x, jax.Array) else x,
+        nnx.state(fresh_opt, nnx.optimizer.OptState),
+    )
+    nnx.update(fresh_opt, offloaded_opt_state)
+    for leaf in jax.tree.leaves(nnx.state(fresh_opt, nnx.optimizer.OptState)):
+      if isinstance(leaf, jax.Array):
+        self.assertEqual(leaf.sharding.memory_kind, "pinned_host")
+
+    manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
+    self.addCleanup(manager.close)
+    step, _, _ = manager.restore_checkpoint(
+        checkpointing.CheckpointState(model=fresh_model, optimizer=fresh_opt)
+    )
+    self.assertEqual(step, 2)
+    for leaf in jax.tree.leaves(nnx.state(fresh_opt, nnx.optimizer.OptState)):
+      if isinstance(leaf, jax.Array):
+        self.assertEqual(leaf.sharding.memory_kind, "device")
+    got_opt = _leaves(nnx.state(fresh_opt, nnx.optimizer.OptState))
+    for name, want in want_opt.items():
+      np.testing.assert_array_equal(got_opt[name], want, err_msg=name)
+
 
 if __name__ == "__main__":
   unittest.main()
