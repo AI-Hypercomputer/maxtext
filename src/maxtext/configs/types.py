@@ -1073,6 +1073,10 @@ class MoEGeneral(BaseModel):
           " use_gmm_v2=True, and quantization with fixed act calibration."
       ),
   )
+  fp8_moe: bool = Field(
+      False,
+      description="Whether only MoE expert layers are quantized to FP8.",
+  )
 
   moe_dispatch_no_expert_sharding: bool = Field(
       False,
