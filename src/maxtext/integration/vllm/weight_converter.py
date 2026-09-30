@@ -38,6 +38,7 @@ from maxtext.integration.vllm.convert_utils import (
     _sharding_summary,
     normalize_dtype,
     pad_to_tpu_lanes,
+    resolve_fp8_moe,
     resolve_rollout_tp,
 )
 
@@ -285,7 +286,7 @@ class WeightConverter:
     self.tp = resolve_rollout_tp(config, tp)
     self.kv_tp_size = kv_tp_size or getattr(config, "kv_tp_size", 1) or self.tp
     self.moe_mlp_tp_size = moe_mlp_tp_size or getattr(config, "moe_mlp_tp_size", 1) or self.tp
-    self.fp8_moe = fp8_moe if fp8_moe is not None else getattr(config, "fp8_moe", False)
+    self.fp8_moe = resolve_fp8_moe(config, fp8_moe)
 
     # Read by the rollout engine to decide whether to trace the reshard
     # step that runs after conversion.
@@ -718,7 +719,7 @@ class MaxTextToMaxTextConverter:
     self.tp = resolve_rollout_tp(config, tp)
     self.kv_tp_size = kv_tp_size or getattr(config, "kv_tp_size", 1) or self.tp
     self.moe_mlp_tp_size = moe_mlp_tp_size or getattr(config, "moe_mlp_tp_size", 1) or self.tp
-    self.fp8_moe = fp8_moe if fp8_moe is not None else getattr(config, "fp8_moe", False)
+    self.fp8_moe = resolve_fp8_moe(config, fp8_moe)
     self.moe_fused_layout = moe_fused_layout
     self.allow_unused_source_keys = allow_unused_source_keys
     self.debug = debug

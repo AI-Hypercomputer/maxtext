@@ -744,3 +744,19 @@ def resolve_prefuse_moe_weights(config: Any, prefuse_moe_weights: Optional[bool]
 def is_verify_weights_enabled() -> bool:
   """Returns whether weight verification / checksum validation is active."""
   return os.environ.get("VERIFY_WEIGHTS", "").lower() == "true"
+
+
+def resolve_fp8_moe(config: Any = None, fp8_moe: Optional[bool] = None) -> bool:
+  """Resolves MoE FP8 quantization flag from override, environment, or config."""
+  if fp8_moe is not None:
+    return bool(fp8_moe)
+  for env_var in ("ROLLOUT_FP8_MOE", "FP8_MOE"):
+    if env_var in os.environ:
+      return os.environ[env_var].lower() in ("1", "true", "yes")
+  if config is not None:
+    for attr in ("rollout_fp8_moe", "fp8_moe"):
+      val = getattr(config, attr, None)
+      if val is not None:
+        return bool(val)
+  return False
+
