@@ -121,6 +121,16 @@ def _g4_ag_fence_mode() -> str:
   return "none" if v in ("0", "none", "off", "false") else v
 
 
+def _g4_gmm_trhs() -> bool:
+  """MAXTEXT_G4_GMM_TRHS=1 (only with MAXTEXT_G4_WLAYOUT=2 on the gmm_v2 path):
+  backward dlhs of the split wi gmm and of the wo gmm uses the forked NT kernel
+  (kernels/megablox/gmm_v2_trhs.py, transpose_rhs=True) on the gathered weights,
+  instead of gmm_v2 on rhs.swapaxes(1, 2), which XLA materializes as ~87 ms/step
+  of 507 MB / 253 MB transpose copies in the remat. wo then goes through
+  split_gmm.gmm_single (same gmm_v2 fwd / tgmm_v2 drhs kernels as megablox)."""
+  return (os.environ.get("MAXTEXT_G4_GMM_TRHS", "0") or "0").strip() not in ("0", "", "false", "off")
+
+
 def _g4_fence_src_gmm() -> bool:
   """MAXTEXT_G4_FENCE_SRC=gmm: the wi fence reads its element from the same
   [E/2, emb, 2N] reshape view the split gmm (and its dlhs transpose) consumes,
@@ -2656,6 +2666,7 @@ class RoutedMoE(nnx.Module):
             tiling=None if self.config.use_gmm_v2_heuristic_tiling else wi_tile_size,
             preferred_element_type=self.dtype,
             group_offset=base,
+            transpose_rhs_dlhs=_g4_gmm_trhs(),
         )
         if padding_amount > 0:
           out = out[: x.shape[0]]
@@ -2977,12 +2988,37 @@ class RoutedMoE(nnx.Module):
 
       intermediate_layer = self.apply_ffn_activation(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-      )
+      _wo_kw = getattr(gmm_fn, "keywords", None) or {}
+      if (
+          g4_wlayout == 2
+          and _g4_gmm_trhs()
+          and self.config.use_tokamax_gmm
+          and self.config.use_gmm_v2
+          and not self.config.quantization
+          and isinstance(_wo_kw.get("group_offset"), int)
+          and "group_sizes" in _wo_kw
+          and not isinstance(wo, qpl.QArray)
+          and self.mesh.devices.flat[0].platform == "tpu"
+      ):
+        # MAXTEXT_G4_GMM_TRHS: wo gmm with NT-kernel dlhs (no wo^T copy).
+        _wo_in, _wo_pad = max_utils.maybe_pad(intermediate_layer, fwd_tile("wi_tile_fwd_batch_seq"))
+        intermediate_output = split_gmm.gmm_single(
+            _wo_in.astype(self.dtype),
+            wo.astype(self.dtype),
+            _wo_kw["group_sizes"],
+            tiling=None if self.config.use_gmm_v2_heuristic_tiling else wo_tile_size,
+            preferred_element_type=self.dtype,
+            group_offset=_wo_kw["group_offset"],
+        )
+        if _wo_pad > 0:
+          intermediate_output = intermediate_output[: intermediate_layer.shape[0]]
+      else:
+        intermediate_output = gmm_fn(
+            intermediate_layer,
+            wo,
+            tiling=wo_tile_size,
+            weight_gather_axes=wo_gather_axes,
+        )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
             intermediate_output,

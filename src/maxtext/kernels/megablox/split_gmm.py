@@ -85,8 +85,38 @@ def _tpu_tgmm(lhs, rhs, group_sizes, group_offset, num_actual_groups, tile, out_
   )
 
 
+def _tpu_gmm_trhs(lhs, rhs_nk, group_sizes, group_offset, partial_sum, zero_initialize, tile, out_dtype):
+  """Like _tpu_gmm but rhs_nk is [G, N, K] (NT matmul, no HBM transpose). G4 fork kernel."""
+  from maxtext.kernels.megablox import gmm_v2_trhs  # pylint: disable=import-outside-toplevel
+
+  tile_info = (
+      gmm_v2_trhs.calculate_tiling if tile is None else gmm_v2_trhs.TileSizes(tile_m=tile[0], tile_k=tile[1], tile_n=tile[2])
+  )
+  return gmm_v2_trhs.gmm_v2(
+      lhs=lhs,
+      rhs=rhs_nk,
+      group_sizes=group_sizes,
+      rhs_scale=None,
+      tile_info=tile_info,
+      preferred_element_type=out_dtype,
+      partial_sum=partial_sum,
+      group_offset=jnp.asarray(group_offset, jnp.int32),
+      zero_initialize=zero_initialize,
+      transpose_rhs=True,
+  )
+
+
 # name -> (gmm_fn, tgmm_fn). Tests register a pure-JAX model of the kernels.
 IMPLS = {"tpu": (_tpu_gmm, _tpu_tgmm)}
+# name -> gmm_fn taking rhs as [G, N, K] (dlhs without a transpose copy).
+TRHS_IMPLS = {"tpu": _tpu_gmm_trhs}
+
+
+def _dlhs_fn(impl, trhs):
+  """(gmm_fn, rhs_view) for dlhs = grad @ rhs^T."""
+  if trhs:
+    return TRHS_IMPLS[impl], lambda r: r
+  return IMPLS[impl][0], lambda r: r.swapaxes(1, 2)
 
 
 def _boundary_row(group_sizes, first_hi_group):
@@ -119,7 +149,7 @@ def _split_gmm(lhs, rhs_lo, rhs_hi, group_sizes, cfg):
 
 
 def _split_gmm_fwd(lhs, rhs_lo, rhs_hi, group_sizes, cfg):
-  tiling, out_dtype, base, impl = cfg
+  tiling, out_dtype, base, impl, _ = cfg
   gmm_fn, _ = IMPLS[impl]
   fwd_tile = None if tiling is None else tiling[0:3]
   out = _chained_pair(gmm_fn, lhs, rhs_lo, rhs_hi, group_sizes, base, fwd_tile, out_dtype)
@@ -127,18 +157,19 @@ def _split_gmm_fwd(lhs, rhs_lo, rhs_hi, group_sizes, cfg):
 
 
 def _split_gmm_bwd(cfg, res, grad):
-  tiling, _, base, impl = cfg
-  gmm_fn, tgmm_fn = IMPLS[impl]
+  tiling, _, base, impl, trhs = cfg
+  _, tgmm_fn = IMPLS[impl]
+  dlhs_fn, rhs_view = _dlhs_fn(impl, trhs)
   lhs, rhs_lo, rhs_hi, group_sizes = res
   g_lo, g_hi = rhs_lo.shape[0], rhs_hi.shape[0]
   dlhs_tile = None if tiling is None else tiling[3:6]
   drhs_tile = None if tiling is None else tiling[6:9]
   grad = grad.astype(lhs.dtype)
   dlhs = _chained_pair(
-      gmm_fn,
+      dlhs_fn,
       grad,
-      rhs_lo.swapaxes(1, 2),
-      rhs_hi.swapaxes(1, 2),
+      rhs_view(rhs_lo),
+      rhs_view(rhs_hi),
       group_sizes,
       base,
       dlhs_tile,
@@ -162,6 +193,7 @@ def gmm_split_experts(
     preferred_element_type,
     group_offset: int = 0,
     impl: str = "tpu",
+    transpose_rhs_dlhs: bool = False,
 ) -> jax.Array:
   """Grouped matmul against two contiguous expert blocks without concatenating them.
 
@@ -174,6 +206,8 @@ def gmm_split_experts(
     preferred_element_type: output dtype.
     group_offset: static python int, first expert handled by rhs_lo.
     impl: key into IMPLS.
+    transpose_rhs_dlhs: backward dlhs uses the NT gmm (TRHS_IMPLS) on the
+      untransposed weights instead of gmm on rhs.swapaxes(1, 2).
 
   Returns:
     [M, N] = rows of each expert multiplied by that expert's weight; rows outside
@@ -186,5 +220,60 @@ def gmm_split_experts(
       jnp.dtype(preferred_element_type),
       group_offset,
       impl,
+      bool(transpose_rhs_dlhs),
   )
   return _split_gmm(lhs, rhs_lo, rhs_hi, group_sizes, cfg)
+
+
+# Single-weight grouped matmul (used for wo with MAXTEXT_G4_GMM_TRHS): same fwd /
+# drhs kernels as the megablox gmm_v2 path, but dlhs uses the NT kernel.
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
+def _single_gmm(lhs, rhs, group_sizes, cfg):
+  return _single_gmm_fwd(lhs, rhs, group_sizes, cfg)[0]
+
+
+def _single_gmm_fwd(lhs, rhs, group_sizes, cfg):
+  tiling, out_dtype, base, impl, _ = cfg
+  gmm_fn, _ = IMPLS[impl]
+  fwd_tile = None if tiling is None else tiling[0:3]
+  out = gmm_fn(lhs, rhs, group_sizes, base, None, True, fwd_tile, out_dtype)
+  return out, (lhs, rhs, group_sizes)
+
+
+def _single_gmm_bwd(cfg, res, grad):
+  tiling, _, base, impl, trhs = cfg
+  _, tgmm_fn = IMPLS[impl]
+  dlhs_fn, rhs_view = _dlhs_fn(impl, trhs)
+  lhs, rhs, group_sizes = res
+  dlhs_tile = None if tiling is None else tiling[3:6]
+  drhs_tile = None if tiling is None else tiling[6:9]
+  grad = grad.astype(lhs.dtype)
+  dlhs = dlhs_fn(grad, rhs_view(rhs), group_sizes, base, None, True, dlhs_tile, lhs.dtype)
+  drhs = tgmm_fn(lhs, grad, group_sizes, base, rhs.shape[0], drhs_tile, rhs.dtype)
+  return dlhs, drhs, None
+
+
+_single_gmm.defvjp(_single_gmm_fwd, _single_gmm_bwd)
+
+
+def gmm_single(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    *,
+    tiling: tuple[int, ...] | None,
+    preferred_element_type,
+    group_offset: int = 0,
+    impl: str = "tpu",
+    transpose_rhs_dlhs: bool = True,
+) -> jax.Array:
+  """lhs [M, K] @ rhs [G, K, N] grouped; custom VJP with NT-kernel dlhs."""
+  assert isinstance(group_offset, int), "gmm_single needs a static group_offset"
+  cfg = (
+      None if tiling is None else tuple(int(t) for t in tiling),
+      jnp.dtype(preferred_element_type),
+      group_offset,
+      impl,
+      bool(transpose_rhs_dlhs),
+  )
+  return _single_gmm(lhs, rhs, group_sizes, cfg)
