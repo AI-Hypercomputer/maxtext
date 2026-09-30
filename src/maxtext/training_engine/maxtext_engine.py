@@ -842,6 +842,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           prefuse_moe_weights=prefuse_moe,
           rollout_backend=self._rollout_backend,
           debug=self._config.weight_sync_debug,
+          fp8_moe=bool(self._config.fp8_moe or self._config.rollout_fp8_moe),
       )
     else:
       self._weight_converter = None

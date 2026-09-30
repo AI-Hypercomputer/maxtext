@@ -44,6 +44,7 @@ from maxtext.integration.vllm.weight_converter import (
     MoEFusedLayout,
     Rule,
     WeightConverter,
+    _group_plan,
     MODEL_TO_CONVERSION_RULES,
 )
 
@@ -825,6 +826,86 @@ class TargetFreeConversionTest(unittest.TestCase):
       # Scales should be positive non-zero floats
       self.assertTrue(bool(jnp.all(wi_scale > 0)))
       self.assertTrue(bool(jnp.all(wo_scale > 0)))
+
+  def test_case_11_moe_fp8_weight_sync_unfused(self):
+    """prefuse_moe_weights=false: the rollout keeps wi_0/wi_1, and each gets its own per-channel scale."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=False,
+        fp8_moe=True,
+    )
+    source = _source_tree(True)
+    target = _target_tree(fused=False)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      for name, out_dim in (("wi_0", MOE_DIM), ("wi_1", MOE_DIM), ("wo", EMB)):
+        moe[name] = moe[name].astype(jnp.float8_e4m3fn)
+        moe[f"{name}_scale"] = jnp.ones((EXPERTS, 1, out_dim), dtype=jnp.float32)
+
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    out = converter.convert(source, target_state=target)
+
+    for layer in range(NUM_LAYERS):
+      slot, block = layer % CYCLE, layer // CYCLE
+      src_moe = source["base"]["decoder"]["layers"][f"layer_{slot}"]["moe_block"]
+      moe_out = out["decoder"][f"layers_{layer}"]["moe_block"]
+      for name, out_dim in (("wi_0", MOE_DIM), ("wi_1", MOE_DIM), ("wo", EMB)):
+        q = getattr(moe_out[name], "value", moe_out[name])
+        scale = getattr(moe_out[f"{name}_scale"], "value", moe_out[f"{name}_scale"])
+        self.assertEqual(q.dtype, jnp.float8_e4m3fn, name)
+        self.assertEqual(scale.shape, (EXPERTS, 1, out_dim), name)
+        want = jnp.take(src_moe[name], block, axis=SCAN_AXIS).astype(jnp.float32)
+        got = q.astype(jnp.float32) * scale
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=0.07, atol=0, err_msg=name)
+
+  def test_case_12_fp8_scale_target_without_fp8_moe_raises(self):
+    """A rollout with FP8 scales but a converter that does not quantize fails at plan time."""
+    cfg = _config(inhomogeneous_layer_cycle_interval=CYCLE, num_decoder_layers=NUM_LAYERS, prefuse_moe_weights=True)
+    target = _target_tree(fused=True)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=False)
+    with self.assertRaisesRegex(ConversionPlanError, "FP8 scale"):
+      converter.convert(_source_tree(True), target_state=target)
+
+  def test_case_13_moe_fp8_scale_target_listed_first(self):
+    """An FP8 group whose first target is the (E, 1, out) scale still aligns the weight to the weight target."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+        fp8_moe=True,
+    )
+    target = _target_tree(fused=True)
+    for layer in range(NUM_LAYERS):
+      moe = target["decoder"][f"layers_{layer}"]["moe_block"]
+      moe["wi"] = moe["wi"].astype(jnp.float8_e4m3fn)
+      moe["wi_scale"] = jnp.ones((EXPERTS, 1, MOE_DIM * 2), dtype=jnp.float32)
+      moe["wo"] = moe["wo"].astype(jnp.float8_e4m3fn)
+      moe["wo_scale"] = jnp.ones((EXPERTS, 1, EMB), dtype=jnp.float32)
+
+    converter = WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
+    want = converter.convert(_source_tree(True), target_state=target)
+
+    # Targets are sorted by slice index only, so reversing the plan puts each scale ahead of its weight.
+    direct = converter._direct  # pylint: disable=protected-access
+    direct._plan = list(reversed(direct._plan))  # pylint: disable=protected-access
+    direct._groups = _group_plan(direct._plan, fp8_moe=True)  # pylint: disable=protected-access
+    fp8_groups = [g for g in direct._groups if g.quantize_to_fp8]  # pylint: disable=protected-access
+    self.assertTrue(fp8_groups)
+    self.assertTrue(all(str(g.targets[0][1][-1]).endswith("_scale") for g in fp8_groups))
+    got = converter.convert(_source_tree(True), target_state=target)
+
+    for layer in range(NUM_LAYERS):
+      for name in ("wi", "wi_scale", "wo", "wo_scale"):
+        g = got["decoder"][f"layers_{layer}"]["moe_block"][name]
+        w = want["decoder"][f"layers_{layer}"]["moe_block"][name]
+        g, w = getattr(g, "value", g), getattr(w, "value", w)
+        np.testing.assert_array_equal(np.asarray(g, np.float32), np.asarray(w, np.float32), err_msg=name)
 
 
 if __name__ == "__main__":

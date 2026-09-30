@@ -40,6 +40,7 @@ from maxtext.integration.vllm.convert_utils import (
     pad_to_tpu_lanes,
     resolve_rollout_tp,
 )
+from maxtext.layers.quantizations import quantize_weight_per_channel
 
 
 # ==========================================
@@ -537,7 +538,6 @@ class _PlanGroup:
   quantize_to_fp8: bool = False
 
 
-
 def _group_plan(plan: List[_PlanEntry], fp8_moe: bool = False) -> List[_PlanGroup]:
   """Collapses per-leaf plan entries into one group per source parameter.
 
@@ -560,8 +560,14 @@ def _group_plan(plan: List[_PlanEntry], fp8_moe: bool = False) -> List[_PlanGrou
   for key in order:
     entries = grouped[key]
     source_keys, op = key
-    # Only MoE expert weights (fuse_moe for wi, or down projection wo) get quantized to FP8
-    is_moe_weight = (op == "fuse_moe") or (str(source_keys[0][-1]) in ("wi", "wo"))
+    # Only MoE expert weights get quantized to FP8: fused wi, unfused wi_0/wi_1, and the down projection wo.
+    is_moe_weight = (op == "fuse_moe") or (str(source_keys[0][-1]) in ("wi", "wi_0", "wi_1", "wo"))
+    has_scale_target = any(str(e.target_key[-1]).endswith("_scale") for e in entries)
+    if has_scale_target and not (fp8_moe and is_moe_weight):
+      raise ConversionPlanError(
+          f"Rollout expects an FP8 scale for {'.'.join(map(str, source_keys[0]))}, but the converter "
+          f"does not quantize it (fp8_moe={fp8_moe})."
+      )
     groups.append(
         _PlanGroup(
             source_keys=source_keys,
@@ -642,24 +648,6 @@ def _summarize_tree_placement(flat: Mapping[Tuple[Any, ...], Any]) -> str:
   if not ids:
     return "[unknown]"
   return f"[{min(ids)}..{max(ids)}]({len(ids)})"
-
-
-def _quantize_moe_weight_to_fp8(w: Any, channel_axis: int = 2) -> Tuple[Any, Any]:
-  """Per-channel FP8 quantization (float8_e4m3fn) and scale computation for MoE weights."""
-  reduce_axes = tuple(d for d in range(w.ndim) if d != 0 and d != channel_axis)
-  if isinstance(w, jax.ShapeDtypeStruct):
-    scale_shape = list(w.shape)
-    for d in reduce_axes:
-      scale_shape[d] = 1
-    return (
-        jax.ShapeDtypeStruct(w.shape, jnp.float8_e4m3fn),
-        jax.ShapeDtypeStruct(tuple(scale_shape), jnp.float32),
-    )
-  FP8_MAX = 448.0
-  max_val = jnp.max(jnp.abs(w), axis=reduce_axes, keepdims=True)
-  scale = jnp.maximum(max_val / FP8_MAX, 1e-12).astype(jnp.float32)
-  q_w = jnp.clip(w / scale, -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
-  return q_w, scale
 
 
 class MaxTextToMaxTextConverter:
@@ -880,11 +868,7 @@ class MaxTextToMaxTextConverter:
         continue
 
       is_scale = str(tgt_key[-1]).endswith("_scale")
-      lookup_key = (
-          tgt_key[:-1] + (str(tgt_key[-1])[:-6],)
-          if is_scale
-          else tgt_key
-      )
+      lookup_key = tgt_key[:-1] + (str(tgt_key[-1])[:-6],) if is_scale else tgt_key
 
       layer_idx, prefix_len, suffix_start = _find_unrolled_layer(lookup_key)
       if layer_idx < 0:
@@ -1059,11 +1043,7 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = int(
-          self.moe_mlp_tp_size
-          if self.moe_mlp_tp_size >= 1
-          else (self.tp if self.tp >= 1 else 1)
-      )
+      n_shards = int(self.moe_mlp_tp_size if self.moe_mlp_tp_size >= 1 else (self.tp if self.tp >= 1 else 1))
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
@@ -1118,7 +1098,7 @@ class MaxTextToMaxTextConverter:
         return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
       outs = []
       for idx, tgt_key in group.targets:
-        q_w, s = _quantize_moe_weight_to_fp8(per_block[idx], channel_axis=2)
+        q_w, s = quantize_weight_per_channel(per_block[idx], channel_axis=2)
         outs.append((tgt_key, s if str(tgt_key[-1]).endswith("_scale") else q_w))
       return outs
 
@@ -1132,13 +1112,15 @@ class MaxTextToMaxTextConverter:
       return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
     outs = []
     for idx, tgt_key in group.targets:
-      q_w, s = _quantize_moe_weight_to_fp8(per_block[idx], channel_axis=2)
+      q_w, s = quantize_weight_per_channel(per_block[idx], channel_axis=2)
       outs.append((tgt_key, s if str(tgt_key[-1]).endswith("_scale") else q_w))
     return outs
 
   def _execute_group(self, group: _PlanGroup, src_flat, tgt_flat):
     """Produces every target leaf in `group`. Returns (target_key, array) pairs."""
-    first_tgt = tgt_flat[group.targets[0][1]]
+    # Shape, sharding and dtype come from a weight target: in an FP8 group the first target may be an (E, 1, out) scale.
+    first_tgt_key = next((k for _, k in group.targets if not str(k[-1]).endswith("_scale")), group.targets[0][1])
+    first_tgt = tgt_flat[first_tgt_key]
     path = group.source_path
 
     if group.op == "identity":
@@ -1162,7 +1144,7 @@ class MaxTextToMaxTextConverter:
 
     outs = []
     for idx, tgt_key in group.targets:
-      q_w, s = _quantize_moe_weight_to_fp8(per_block[idx], channel_axis=2)
+      q_w, s = quantize_weight_per_channel(per_block[idx], channel_axis=2)
       tgt_val = tgt_flat[tgt_key]
       if str(tgt_key[-1]).endswith("_scale"):
         s = s.astype(tgt_val.dtype)

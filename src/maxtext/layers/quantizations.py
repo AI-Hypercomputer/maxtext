@@ -19,7 +19,7 @@ import json
 import math
 import qwix.pallas as qpl
 import re
-from typing import ClassVar, Tuple, Sequence, Callable
+from typing import Any, ClassVar, Tuple, Sequence, Callable
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -144,6 +144,32 @@ def dequantize_weight(
 
   # Standard JAX broadcasting handles per-channel or broadcastable shapes
   return w_c * scale_c
+
+
+def quantize_weight_per_channel(w: Any, channel_axis: int = 2) -> Tuple[Any, Any]:
+  """Per-channel float8_e4m3fn quantization of an (num_experts, in_dim, out_dim) MoE expert weight.
+
+  Keeps one absmax scale per expert (axis 0) and channel (`channel_axis`), reducing over the other
+  axes, so the scale has w's rank with the reduced axes set to 1. The fused MoE kernel applies such
+  per-output-channel scales after its FP8 matmul. Accepts a jax.ShapeDtypeStruct for shape inference.
+
+  Returns:
+    (quantized weight in float8_e4m3fn, float32 scale).
+  """
+  reduce_axes = tuple(d for d in range(w.ndim) if d not in (0, channel_axis))
+  if isinstance(w, jax.ShapeDtypeStruct):
+    scale_shape = list(w.shape)
+    for d in reduce_axes:
+      scale_shape[d] = 1
+    return (
+        jax.ShapeDtypeStruct(w.shape, jnp.float8_e4m3fn),
+        jax.ShapeDtypeStruct(tuple(scale_shape), jnp.float32),
+    )
+  FP8_MAX = 448.0
+  max_val = jnp.max(jnp.abs(w), axis=reduce_axes, keepdims=True)
+  scale = jnp.maximum(max_val / FP8_MAX, 1e-12).astype(jnp.float32)
+  q_w = jnp.clip(w / scale, -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
+  return q_w, scale
 
 
 @dataclass

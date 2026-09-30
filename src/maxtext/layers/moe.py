@@ -3743,7 +3743,7 @@ class RoutedMoE(nnx.Module):
         onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
         moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
         scatter_results=(
-            self.mesh is not None
+            getattr(self, "mesh", None) is not None
             and (
                 self.mesh.shape.get("data", 1)
                 * self.mesh.shape.get("attn_dp", 1)
@@ -3937,8 +3937,7 @@ class RoutedMoE(nnx.Module):
         and not is_fused_moe_path
     )
     is_kernel_quantized = (
-        isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
-        or getattr(cfg, "fp8_moe", False)
+        isinstance(self.quant, quantizations.ServeFp8WeightQuantization) or getattr(cfg, "fp8_moe", False)
     ) and is_fused_moe_path
 
     def _maybe_native_gmm_weight(kernel, scale):

@@ -276,6 +276,8 @@ moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expe
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 prefuse_moe_weights: false # whether to pre-fuse MoE weights (wi_0 and wi_1 into wi) during initialization
 fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference/rollout
+# Trainer side: the rollout serves fp8_moe experts, so weight sync quantizes them (and emits their scales).
+rollout_fp8_moe: false
 load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul

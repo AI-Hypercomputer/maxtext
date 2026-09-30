@@ -1201,6 +1201,14 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether MoE weights are quantized to float8_e4m3fn in inference/rollout.",
   )
+  rollout_fp8_moe: bool = Field(
+      False,
+      description=(
+          "Trainer side: the rollout runs with fp8_moe, so the weight converter quantizes the routed-expert"
+          " weights to float8_e4m3fn and emits their per-channel scales on every sync. The trainer's own"
+          " weights are unaffected."
+      ),
+  )
   fuse_expert_scales: bool = Field(
       False,
       description="Whether to fuse the expert scaling factors into the expert weights. "
