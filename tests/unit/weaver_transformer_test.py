@@ -73,9 +73,7 @@ def _copy_unscanned_to_scanned_layers(
 ) -> None:
   """Stacks per-layer weights from unscanned ``nnx.List`` into ``scanned_layers``."""
   num_layers = len(unscanned_layers)
-  per_layer_flat = [
-      dict(nnx.to_flat_state(nnx.split(unscanned_layers[i], nnx.Param, ...)[1])) for i in range(num_layers)
-  ]
+  per_layer_flat = [dict(nnx.to_flat_state(nnx.split(unscanned_layers[i], nnx.Param, ...)[1])) for i in range(num_layers)]
 
   _, scanned_params, _ = nnx.split(scanned_layers, nnx.Param, ...)
   for path, scanned_leaf in nnx.to_flat_state(scanned_params):
