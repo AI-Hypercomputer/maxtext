@@ -1197,6 +1197,27 @@ class MoEGeneral(BaseModel):
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
       "This enables a single FFN1 grouped GEMM in sparse MoE paths and passes fused weights directly in vllm_rpa mode.",
   )
+  fp8_moe: bool = Field(
+      False,
+      description="Whether MoE weights are quantized to float8_e4m3fn in inference/rollout.",
+  )
+  fp8_moe_fake_quant: bool = Field(
+      False,
+      description=(
+          "Keep routed-expert weights (wi/wo) in weight_dtype but round them in the forward pass to the"
+          " per-channel float8_e4m3fn grid fp8_moe stores them on, with straight-through gradients. A"
+          " trainer with this set computes with exactly the expert weights an fp8_moe rollout receives"
+          " on weight sync. Activations stay in dtype."
+      ),
+  )
+  rollout_fp8_moe: bool = Field(
+      False,
+      description=(
+          "Trainer side: the rollout runs with fp8_moe, so the weight converter quantizes the routed-expert"
+          " weights to float8_e4m3fn and emits their per-channel scales on every sync. The trainer's own"
+          " weights are unaffected."
+      ),
+  )
   fuse_expert_scales: bool = Field(
       False,
       description="Whether to fuse the expert scaling factors into the expert weights. "

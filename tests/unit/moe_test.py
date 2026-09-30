@@ -33,6 +33,7 @@ from maxtext.configs import pyconfig
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
+from maxtext.layers import quantizations
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization, WeightQuantConfig, configure_quantization
 from maxtext.utils import max_logging, maxtext_utils
@@ -2965,6 +2966,61 @@ class FusedMoeNativeFp8Test(unittest.TestCase):
     relerr = float(np.max(np.abs(native_np - dequant_np)) / (np.max(np.abs(dequant_np)) + 1e-12))
     self.assertLess(relerr, 0.1, f"native vs dequantize relerr={relerr:.3e}")
 
+  def test_fp8_moe_matches_bf16_with_dequantized_weights(self):
+    """fp8_moe keeps weight_dtype=bfloat16 and stores only the routed experts in FP8, with
+    per-channel scales. The fused kernel then runs FP8 x FP8 on the MXU: it quantizes the
+    activations to float8_e4m3fn itself (dynamic, 512-wide blocks along K), which dominates the
+    gap to a bf16 model holding the dequantized weights."""
+    overrides = {
+        "weight_dtype": "bfloat16",
+        "quantization": "",
+        "prefuse_moe_weights": True,
+        "weight_block_size": None,
+    }
+    cfg, _ = self._make_config("fused_moe_fp8_moe", fp8_moe=True, **overrides)
+    ref_cfg, _ = self._make_config("fused_moe_fp8_moe_ref", **overrides)
+    devices = np.array(jax.devices()).reshape(-1, 1)
+    mesh = Mesh(devices, ("data", "model"))
+
+    def make(c):
+      return moe.RoutedMoE(
+          config=c,
+          num_experts=c.num_experts,
+          num_experts_per_tok=c.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          dtype=c.dtype,
+          weight_dtype=c.weight_dtype,
+          quant=configure_quantization(c),
+          rngs=nnx.Rngs(params=0),
+      )
+
+    model, ref = make(cfg), make(ref_cfg)
+    self.assertEqual(model.wi[...].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(model.wo[...].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(model.gate.kernel[...].dtype, ref.gate.kernel[...].dtype)
+    self.assertEqual(ref.wi[...].dtype, jnp.bfloat16)
+    self.assertIsNone(getattr(ref, "wi_scale", None))
+
+    for name in ("wi", "wo"):
+      q, scale = quantizations.quantize_weight_per_channel(getattr(ref, name)[...])
+      self.assertEqual(scale.shape, getattr(model, f"{name}_scale")[...].shape)
+      getattr(model, name)[...] = q
+      getattr(model, f"{name}_scale")[...] = scale
+      getattr(ref, name)[...] = quantizations.dequantize_weight(q, scale, jnp.bfloat16)
+    model.gate.kernel[...] = ref.gate.kernel[...]
+
+    inputs = jax.random.normal(jax.random.PRNGKey(14), (1, 16, model.moe_expert_input_dim), dtype=jnp.bfloat16)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      out, _, _ = model(inputs)
+      ref_out, _, _ = ref(inputs)
+    out_np = np.array(out, dtype=np.float32)
+    ref_np = np.array(ref_out, dtype=np.float32)
+    self.assertTrue(np.all(np.isfinite(out_np)))
+    relerr = float(np.max(np.abs(out_np - ref_np)) / (np.max(np.abs(ref_np)) + 1e-12))
+    self.assertLess(relerr, 0.1, f"fp8_moe vs bf16 dequantized relerr={relerr:.3e}")
+
   def test_sparse_matmul_gmm_v2_flags_dont_crash_under_vllm_rpa(self):
     """Regression test: sparse_matmul=True + use_gmm_v2=True with
     attention=vllm_rpa used to wrap kernels in a QArray that crashed
@@ -2985,6 +3041,97 @@ class FusedMoeNativeFp8Test(unittest.TestCase):
     self.assertTrue(np.all(np.isfinite(np.array(out, dtype=np.float32))))
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
+
+
+@pytest.mark.tpu_only
+class Fp8MoeFakeQuantTest(unittest.TestCase):
+  """fp8_moe_fake_quant makes a bf16 trainer see the routed-expert weights an fp8_moe rollout serves."""
+
+  def _make_config(self, run_name, weight_block_size=None, **overrides):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name=run_name,
+        enable_checkpointing=False,
+        model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        weight_block_size=weight_block_size,
+        megablox=True,
+        sparse_matmul=True,
+        per_device_batch_size=1,
+        max_target_length=128,
+        float32_gate_logits=True,
+        log_config=False,
+        **overrides,
+    )
+
+  def _build_model(self, cfg, mesh):
+    return moe.get_routed_moe(
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+    )
+
+  def test_matches_rollout_weights_with_straight_through_grads(self):
+    """The forward pass equals a plain model holding the dequantized quantize_weight_per_channel(w),
+    the weights the rollout converter produces; the gradient is the plain model's gradient there."""
+    cfg = self._make_config("fp8_moe_fake_quant", fp8_moe_fake_quant=True)
+    ref_cfg = self._make_config("fp8_moe_fake_quant_ref")
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model, ref = self._build_model(cfg, mesh), self._build_model(ref_cfg, mesh)
+
+    rng_model, rng_x = jax.random.split(jax.random.PRNGKey(21))
+    x = jax.random.normal(
+        rng_x, (int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim), cfg.dtype
+    )
+    params = nn.unbox(model.init(rng_model, x)["params"])
+
+    def rollout_weight(w):
+      # Quantize under jit, as the weight converter does: on some TPUs (v5p) the jitted scale
+      # differs from the eager one by an ulp. Dequantize outside it, since XLA folds an
+      # in-jit fp8 round trip.
+      q, scale = jax.jit(quantizations.quantize_weight_per_channel)(w)
+      return (q.astype(jnp.float32) * scale).astype(w.dtype)
+
+    ref_params = dict(params)
+    for name in ("wi_0", "wi_1", "wo"):
+      ref_params[name] = rollout_weight(params[name])
+      self.assertFalse(np.array_equal(np.asarray(ref_params[name]), np.asarray(params[name])))
+
+    def loss_and_grad(m, p):
+      def loss_fn(p):
+        out, _, _ = m.apply({"params": p}, x)
+        return jnp.mean(out.astype(jnp.float32) ** 2), out
+
+      return jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(p)
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      (_, out), grads = loss_and_grad(model, params)
+      (_, ref_out), ref_grads = loss_and_grad(ref, ref_params)
+
+    np.testing.assert_array_equal(np.asarray(out, np.float32), np.asarray(ref_out, np.float32))
+    for name in ("wi_0", "wi_1", "wo"):
+      np.testing.assert_array_equal(np.asarray(grads[name], np.float32), np.asarray(ref_grads[name], np.float32))
+    self.assertTrue(np.any(np.asarray(grads["wo"], np.float32) != 0))
+
+  def test_rejects_fp8_moe_and_block_scales(self):
+    for overrides in ({"fp8_moe": True}, {"weight_block_size": 128}):
+      cfg = self._make_config("fp8_moe_fake_quant_rejected", fp8_moe_fake_quant=True, **overrides)
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      x = jnp.zeros((int(cfg.per_device_batch_size) * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim))
+      with self.assertRaisesRegex(ValueError, "fp8_moe_fake_quant"):
+        self._build_model(cfg, mesh).init(jax.random.PRNGKey(0), x)
 
 
 @pytest.mark.parametrize(
@@ -3222,7 +3369,7 @@ class MoePinSparseCoreAllGathersTest(unittest.TestCase):
 class RoutedMoEFp8Test(unittest.TestCase):
   """Unit tests for RoutedMoE FP8 weight storage and dynamic dequantization scales."""
 
-  def _make_fp8_cfg(self, prefuse_moe_weights=True, weight_block_size=None):
+  def _make_fp8_cfg(self, prefuse_moe_weights=True, weight_block_size=None, **overrides):
     return pyconfig.initialize(
         [None, get_test_config_path()],
         run_name="fp8_moe_test",
@@ -3242,7 +3389,24 @@ class RoutedMoEFp8Test(unittest.TestCase):
         sparse_matmul=False,
         per_device_batch_size=1,
         max_target_length=8,
+        **overrides,
     )
+
+  def test_fp8_moe_per_channel_scale_init(self):
+    """fp8_moe without weight_block_size keeps one scale per expert and output channel."""
+    for prefuse in (True, False):
+      cfg = self._make_fp8_cfg(prefuse_moe_weights=prefuse, fp8_moe=True)
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      model = make_moe(cfg, mesh, intermediate_dim=cfg.base_moe_mlp_dim)
+
+      wi_out = cfg.base_moe_mlp_dim * (2 if prefuse else 1)
+      wi_scales = [model.wi_scale] if prefuse else [model.wi_0_scale, model.wi_1_scale]
+      for scale in wi_scales:
+        self.assertEqual(scale.shape, (cfg.num_experts, 1, wi_out))
+      self.assertEqual(model.wo_scale.shape, (cfg.num_experts, 1, cfg.base_emb_dim))
+      self.assertEqual(model.wo[...].dtype, jnp.float8_e4m3fn)
+      self.assertEqual(model.wi_scale_axes, (model.wi_kernel_axes[0], None, model.wi_kernel_axes[2]))
+      self.assertEqual(model.wo_scale_axes, (model.wo_kernel_axes[0], None, model.wo_kernel_axes[2]))
 
   def test_fp8_prefused_per_expert_scale_init(self):
     """Verifies 1D per-expert scale initialization and sharding when prefuse_moe_weights=True."""
