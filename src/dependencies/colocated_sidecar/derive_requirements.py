@@ -62,7 +62,7 @@ def derive_sidecar_requirements(
   allow_set = (
       {_canonical_name(p) for p in spec.allowlist}
       | must_include_set
-      | {"cloudpickle", "etils"}
+      | {"cloudpickle", "etils", "jinja2", "jaxtyping"}
       if spec.allowlist is not None
       else None
   )
@@ -74,11 +74,7 @@ def derive_sidecar_requirements(
       continue
     if match := _PKG_NAME_RE.match(line):
       pkg = _canonical_name(match.group(1))
-      if (
-          pkg in drop_set
-          or ("jax" in drop_set and pkg.startswith("jax"))
-          or ("libtpu" in drop_set and pkg.startswith("libtpu"))
-      ):
+      if pkg in drop_set or ("libtpu" in drop_set and pkg.startswith("libtpu")):
         continue
       if allow_set is not None and pkg not in allow_set:
         continue
