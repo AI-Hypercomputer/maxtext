@@ -23,6 +23,7 @@ from absl import logging as absl_logging
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh
 from flax import nnx
 
@@ -1104,6 +1105,7 @@ if __name__ == "__main__":
   unittest.main()
 
 
+@pytest.mark.tpu_only
 class MTPSharedEmbeddingAndHeadTest(unittest.TestCase):
   """mtp_reuse_input_embedding and mtp_merge_output_head on the full Transformer.
 
