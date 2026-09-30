@@ -85,6 +85,8 @@ Env (read at trace time):
   MAXTEXT_G4_COMBINE_MERGE    bwd merge select dtype: bf16 (default) | f32.
   MAXTEXT_G4_COMBINE_WSPLIT   1 (default): exact hi+lo split of non-bf16
                               weights; 0: round weights to bf16 (1 matmul).
+  MAXTEXT_G4_COMBINE_BWD      backward kernel: v5 (default, column-oriented) | v4.
+  MAXTEXT_G4_COMBINE_BWD_RQ   v5 backward rows per chunk (default 1024).
   MAXTEXT_G4_COMBINE_MODE     microbenchmarks only (results are WRONG unless
                               "full"): full | dma | compute | nomerge.
 """
@@ -191,12 +193,17 @@ def _kernel_opts():
   merge = os.environ.get("MAXTEXT_G4_COMBINE_MERGE", "bf16").strip().lower()
   if merge not in ("bf16", "f32"):
     raise ValueError(f"MAXTEXT_G4_COMBINE_MERGE must be bf16|f32, got {merge!r}")
+  bwd = os.environ.get("MAXTEXT_G4_COMBINE_BWD", "v5").strip().lower()
+  if bwd not in ("v4", "v5"):
+    raise ValueError(f"MAXTEXT_G4_COMBINE_BWD must be v4|v5, got {bwd!r}")
   return (
       ("mode", mode),
       ("dyn", _env_int("MAXTEXT_G4_COMBINE_DYNDMA", 1) != 0),
       ("bucket", _env_int("MAXTEXT_G4_COMBINE_BUCKET", 512)),
       ("en", _env_int("MAXTEXT_G4_COMBINE_EN", 256)),
       ("merge", merge),
+      ("bwd", bwd),
+      ("rq", _env_int("MAXTEXT_G4_COMBINE_BWD_RQ", 1024)),
   )
 
 
@@ -665,6 +672,77 @@ def _exact_bf16_parts(v, dtype):
   return p1, p2, p3
 
 
+def _bwd_row_chunk(jrows, pref):
+  """Largest multiple of 256 that is <= min(pref, jrows)."""
+  return max(256, min(pref, jrows) // 256 * 256)
+
+
+def _bwd_compute_v5(w_ref, dy_ref, dw_ref, buf, ibuf, obuf, slot, used, t0, *, c, e, en, jrows, split, rq, do_mm):
+  """Column-oriented backward compute over RQ-row chunks of the buffer.
+
+  Per chunk (rows j in [q0, q0 + RQ), token-in-block tok_j, top-k slot k_j):
+    GT  = x_rows . dy^T               [RQ, C]  (MXU; dy^T is the stationary operand)
+    dw_j = GT[j, tok_j]               (masked lane reduction)
+    dW[c, k] += sum_j [tok_j = c] [k_j = k] dw_j   (exact 0/1 MXU routing, 3 bf16 parts)
+    S[j, c] = [tok_j = c] * W[c, k_j]  [RQ, C]  (no transposes: W^T is built once)
+    obuf rows = S @ dy                 (MXU; dy column chunk is the stationary operand)
+  Large RQ keeps the MXU streaming many rows per stationary tile (v4 streamed
+  only 256 rows per tile and transposed [C, 256] f32 tiles for S).
+  The last chunk is clamped into the buffer (q0 = min(q * RQ, J - RQ)); rows it
+  shares with the previous chunk recompute identical obuf values and are
+  excluded from dW.
+  """
+  dt = dy_ref.dtype
+  dw = jnp.zeros((c, _LANES), jnp.float32)
+  if do_mm:
+    w = w_ref[...]  # [C, 128] f32
+    wt = w.T  # [128, C]
+    wt_hi = wt.astype(dt)
+    wt_lo = (wt - wt_hi.astype(jnp.float32)).astype(dt) if split else None
+    iota_c = lax.broadcasted_iota(jnp.int32, (rq, c), 1)
+    iota_l = lax.broadcasted_iota(jnp.int32, (rq, _LANES), 1)
+    iota_r = lax.broadcasted_iota(jnp.int32, (rq, 1), 0)
+    iota_cr = lax.broadcasted_iota(jnp.int32, (c, rq), 0)
+    nq = (used + (rq - 1)) // rq
+
+    def q_body(q, dw):
+      qs = q * rq
+      q0 = _al(jnp.minimum(qs, jrows - rq), 256)
+      info = ibuf[slot, pl.ds(q0, rq), :].astype(jnp.float32)  # [RQ, 128]
+      row = iota_r + q0
+      tok = (info[:, 0:1] + 256.0 * info[:, 1:2]).astype(jnp.int32) - t0
+      tokc = jnp.where((tok >= 0) & (tok < c) & (row < used), tok, -1)  # [RQ, 1]
+      kc = info[:, 2:3].astype(jnp.int32)
+      m = iota_c == tokc  # [RQ, C]
+      # dW
+      gt = _mm(buf[slot, pl.ds(q0, rq), :], dy_ref[...], ((1,), (1,)))  # [RQ, C]
+      dwc = jnp.sum(jnp.where(m, gt, 0.0), axis=1, keepdims=True)  # [RQ, 1]
+      a_jk = jnp.where((iota_l == kc) & (row >= qs), dwc, 0.0)  # [RQ, 128]
+      tokrow, _ = _chunk_info(ibuf, slot, q0, rq, c, t0, used)  # [1, RQ]
+      mt = (iota_cr == tokrow).astype(dt)  # [C, RQ]
+      for part in _exact_bf16_parts(a_jk, dt):
+        dw = dw + _mm(mt, part)  # [C, 128]
+      # obuf rows
+      koh = (iota_l == kc).astype(dt)  # [RQ, 128]
+      s_hi = jnp.where(m, _mm(koh, wt_hi), 0.0).astype(dt)  # [RQ, C]
+      s_lo = jnp.where(m, _mm(koh, wt_lo), 0.0).astype(dt) if split else None
+
+      def n_body(n, carry):
+        n0 = _al(n * en, en)
+        dyn_ = dy_ref[:, pl.ds(n0, en)]  # [C, en]
+        ob = _mm(s_hi, dyn_)
+        if s_lo is not None:
+          ob = ob + _mm(s_lo, dyn_)
+        obuf[slot, pl.ds(q0, rq), pl.ds(n0, en)] = ob.astype(obuf.dtype)
+        return carry
+
+      lax.fori_loop(0, e // en, n_body, 0)
+      return dw
+
+    dw = lax.fori_loop(0, nq, q_body, dw)
+  dw_ref[...] = dw
+
+
 def _bwd_kernel(
     tab_cur,
     tab_nxt,
@@ -721,46 +799,50 @@ def _bwd_kernel(
   merge_f32 = opts["merge"] == "f32"
   t0 = b * c
 
-  # ---- compute: dW^T [kp, C], the weighted, permuted dy rows (obuf) ----
-  dwt = jnp.zeros((kp, c), jnp.float32)
-  if do_mm:
-    w_hi, w_lo = _split_w(w_ref, split, dt)
-    iota_c = lax.broadcasted_iota(jnp.int32, (c, jq), 0)
-    iota_k = lax.broadcasted_iota(jnp.int32, (kp, jq), 0)
+  if opts["bwd"] == "v5":
+    _bwd_compute_v5(w_ref, dy_ref, dwt_ref, buf, ibuf, obuf, slot, used, t0, c=c, e=e, en=en, jrows=jrows, split=split,
+                    rq=_bwd_row_chunk(jrows, opts["rq"]), do_mm=do_mm)
+  else:
+    # ---- compute: dW^T [kp, C], the weighted, permuted dy rows (obuf) ----
+    dwt = jnp.zeros((kp, c), jnp.float32)
+    if do_mm:
+      w_hi, w_lo = _split_w(w_ref, split, dt)
+      iota_c = lax.broadcasted_iota(jnp.int32, (c, jq), 0)
+      iota_k = lax.broadcasted_iota(jnp.int32, (kp, jq), 0)
 
-    def q_body(q, dwt):
-      q0 = _al(q * jq, jq)
-      xq = buf[slot, pl.ds(q0, jq), :]  # [jq, E]
-      gt = _mm(dy_ref[...], xq, ((1,), (1,)))  # [C, jq] = <dy[c], x row j>
-      tokrow, krow = _chunk_info(ibuf, slot, q0, jq, c, t0, used)
-      m = iota_c == tokrow
-      # dW of row j: its column of gt (at most one owning token); then route it
-      # to (k(j), c(j)) with exact 0/1 matmuls (3 bf16 parts of the f32 value).
-      dwrow = jnp.sum(jnp.where(m, gt, 0.0), axis=0, keepdims=True)  # [1, jq]
-      a_kj = jnp.where(iota_k == krow, dwrow, 0.0)  # [kp, jq]
-      m01 = m.astype(dt)
-      for part in _exact_bf16_parts(a_kj, dt):
-        dwt = dwt + _mm(part, m01, ((1,), (1,)))  # [kp, C]
-      sel_hi, sel_lo = _row_weights(w_hi, w_lo, krow, jq, dt)
-      st_hi = jnp.where(m, sel_hi, 0.0).T.astype(dt)  # [jq, C]
-      st_lo = None
-      if split:
-        st_lo = jnp.where(m, sel_lo, 0.0).T.astype(dt)
+      def q_body(q, dwt):
+        q0 = _al(q * jq, jq)
+        xq = buf[slot, pl.ds(q0, jq), :]  # [jq, E]
+        gt = _mm(dy_ref[...], xq, ((1,), (1,)))  # [C, jq] = <dy[c], x row j>
+        tokrow, krow = _chunk_info(ibuf, slot, q0, jq, c, t0, used)
+        m = iota_c == tokrow
+        # dW of row j: its column of gt (at most one owning token); then route it
+        # to (k(j), c(j)) with exact 0/1 matmuls (3 bf16 parts of the f32 value).
+        dwrow = jnp.sum(jnp.where(m, gt, 0.0), axis=0, keepdims=True)  # [1, jq]
+        a_kj = jnp.where(iota_k == krow, dwrow, 0.0)  # [kp, jq]
+        m01 = m.astype(dt)
+        for part in _exact_bf16_parts(a_kj, dt):
+          dwt = dwt + _mm(part, m01, ((1,), (1,)))  # [kp, C]
+        sel_hi, sel_lo = _row_weights(w_hi, w_lo, krow, jq, dt)
+        st_hi = jnp.where(m, sel_hi, 0.0).T.astype(dt)  # [jq, C]
+        st_lo = None
+        if split:
+          st_lo = jnp.where(m, sel_lo, 0.0).T.astype(dt)
 
-      def n_body(n, carry2):
-        n0 = _al(n * en, en)
-        dyn_ = dy_ref[:, pl.ds(n0, en)]  # [C, en]
-        ob = _mm(st_hi, dyn_)
-        if st_lo is not None:
-          ob = ob + _mm(st_lo, dyn_)
-        obuf[slot, pl.ds(q0, jq), pl.ds(n0, en)] = ob.astype(obuf.dtype)
-        return carry2
+        def n_body(n, carry2):
+          n0 = _al(n * en, en)
+          dyn_ = dy_ref[:, pl.ds(n0, en)]  # [C, en]
+          ob = _mm(st_hi, dyn_)
+          if st_lo is not None:
+            ob = ob + _mm(st_lo, dyn_)
+          obuf[slot, pl.ds(q0, jq), pl.ds(n0, en)] = ob.astype(obuf.dtype)
+          return carry2
 
-      lax.fori_loop(0, e // en, n_body, 0)
-      return dwt
+        lax.fori_loop(0, e // en, n_body, 0)
+        return dwt
 
-    dwt = lax.fori_loop(0, nq, q_body, dwt)
-  dwt_ref[...] = dwt
+      dwt = lax.fori_loop(0, nq, q_body, dwt)
+    dwt_ref[...] = dwt
 
   # ---- previous step's writes must land before the partial granules are read ----
   if do_dma:
@@ -852,8 +934,11 @@ def _bwd_call(x, w_pad, tab, info, dy, *, block_tokens, num_groups, split, inter
       pl.BlockSpec(memory_space=pl.ANY),
       pl.BlockSpec(memory_space=pl.ANY),
   ]
-  # dW^T [kp, T]
-  dw_spec, dw_shape = pl.BlockSpec((kp, c), lambda b: (0, b)), (kp, t)
+  v5 = dict(opts).get("bwd", "v4") == "v5"
+  if v5:  # dW [T, 128] (weights in lanes [0, K))
+    dw_spec, dw_shape = pl.BlockSpec((c, _LANES), lambda b: (b, 0)), (t, _LANES)
+  else:  # dW^T [kp, T]
+    dw_spec, dw_shape = pl.BlockSpec((kp, c), lambda b: (0, b)), (kp, t)
   out_specs = [dw_spec, pl.BlockSpec(memory_space=pl.ANY)]
   itemsize = jnp.dtype(x.dtype).itemsize
   vmem = (
@@ -861,7 +946,7 @@ def _bwd_call(x, w_pad, tab, info, dy, *, block_tokens, num_groups, split, inter
       + 2 * jrows * _LANES * itemsize  # row info
       + 2 * c * e * itemsize  # dy blocks
       + 2 * c * _LANES * 4 + 2 * kp * c * 4  # weight / dW blocks
-      + 12 * 1024 * 1024  # chunk temporaries, compiler scratch
+      + (24 if v5 else 12) * 1024 * 1024  # chunk temporaries, compiler scratch
   )
   kernel = functools.partial(_bwd_kernel, g=g, jrows=jrows, e=e, split=split, a=align, opts=opts)
   (tab, w_pad, dy, x, info), mat = _match_vma(tab, w_pad, dy, x, info)
@@ -916,7 +1001,10 @@ def _combine_vjp_bwd(cfg, res, dy):
   info = _row_info(sort_idx, k)
   kcfg = dict(cfg)
   dw_out, dx = _bwd_call(x, w_pad, tab, info, dy.astype(x.dtype), **kcfg)
-  dw = dw_out[:k].T
+  if dict(kcfg["opts"]).get("bwd", "v4") == "v5":
+    dw = dw_out[:, :k]
+  else:
+    dw = dw_out[:k].T
   return dx, dw.astype(w.dtype), None, None
 
 
