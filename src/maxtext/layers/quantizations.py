@@ -182,6 +182,7 @@ def native_fp8_dot_general(
     compute_dtype: DType = jnp.bfloat16,
     precision: jax.lax.PrecisionLike = None,
     out_sharding: NamedSharding | None = None,
+    act_calibration_method: str = "absmax",
 ) -> jnp.ndarray:
   """Computes dot_general with pre-quantized FP8 weights without dequantization."""
   if len(axis) != 1 or len(contract_ind) != 1:
@@ -221,12 +222,15 @@ def native_fp8_dot_general(
     rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
     channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
     tiled_axes = {lhs_axis: rhs_block_size}
+  if is_static_calibration(act_calibration_method):
+    channelwise_axes = []
+    tiled_axes = {}
   lhs = qwix.quantize(
       jnp.asarray(inputs, compute_dtype),
       jnp.float8_e4m3fn,
       channelwise_axes=channelwise_axes,
       tiled_axes=tiled_axes,
-      calibration_method="absmax",
+      calibration_method=act_calibration_method,
   )
   dimension_numbers = (((lhs_axis,), (rhs_axis,)), ((), ()))
   out = qwix.dot_general(lhs, rhs, dimension_numbers, precision=precision, preferred_element_type=jnp.float32)
@@ -238,9 +242,40 @@ def native_fp8_dot_general(
 
 @dataclass
 class ServeFp8WeightQuantization(Quantization):
-  """Marks a layer as using native FP8 compute without weight dequantization."""
+  """Marks a layer as using native FP8 compute without weight dequantization.
+
+  Weights are FP8 with static scales loaded from the checkpoint. Activations (matmul
+  inputs) are quantized to FP8 according to `act_calibration_method`:
+
+    - "absmax" (default): dynamic scale computed from the activation at runtime.
+    - "fixed,-A,A" or "fixed,A": static per-tensor scale A / 448, no runtime reduction.
+
+  The setting applies to the dense layers (`native_fp8_dot_general`) and to the routed
+  experts on the tpu-inference fused MoE path (`static_act_scale`).
+  """
 
   quant_mode = None
+  act_calibration_method: str = "absmax"
+
+  def __post_init__(self):
+    if is_static_calibration(self.act_calibration_method):
+      # Fail at config time on e.g. an asymmetric range instead of at trace time.
+      get_static_scale(jnp.float8_e4m3fn, self.act_calibration_method)
+
+  def static_act_scale(self) -> jax.Array | None:
+    """Returns the static per-tensor activation scale as a float32 [1, 1] array.
+
+    Returns None when activations use dynamic scaling.
+    """
+    if not is_static_calibration(self.act_calibration_method):
+      return None
+    scale = get_static_scale(jnp.float8_e4m3fn, self.act_calibration_method)
+    return jnp.full((1, 1), scale, dtype=jnp.float32)
+
+
+def is_static_calibration(calibration_method: str | None) -> bool:
+  """Whether `calibration_method` is a fixed-range (static scale) calibration."""
+  return bool(calibration_method) and calibration_method.lower().startswith("fixed")
 
 
 def prepare_fused_gmm_scale(scale: jnp.ndarray, kernel_shape: Tuple[int, ...]) -> jnp.ndarray:
@@ -861,7 +896,7 @@ def get_quant_mode(quant_mode_str: str = "train"):
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
   if config.quantization == "serve_fp8_weight":
-    return ServeFp8WeightQuantization()
+    return ServeFp8WeightQuantization(act_calibration_method=config.act_quantization_calibration_method)
 
   if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.

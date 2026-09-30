@@ -118,6 +118,7 @@ def _compute_dot_general_nnx(
     compute_dtype: DType | None = None,
     native_fp8_compute: bool = False,
     scale_block_size: int | tuple[int, ...] | None = None,
+    act_calibration_method: str = "absmax",
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -152,6 +153,7 @@ def _compute_dot_general_nnx(
         compute_dtype=compute_dtype,
         precision=matmul_precision,
         out_sharding=out_sharding,
+        act_calibration_method=act_calibration_method,
     )
 
   if kernel_scale is not None or is_fp8_dtype(getattr(kernel, "dtype", None)):
@@ -470,6 +472,7 @@ class DenseGeneral(nnx.Module):
       out_sharding = None
 
     contract_ind = tuple(range(0, len(self.axis)))
+    native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
     output = _compute_dot_general_nnx(
         inputs,
         kernel,
@@ -481,8 +484,9 @@ class DenseGeneral(nnx.Module):
         out_sharding,
         kernel_scale=kernel_scale,
         compute_dtype=self.dtype,
-        native_fp8_compute=isinstance(self.quant, quantizations.ServeFp8WeightQuantization),
+        native_fp8_compute=native_fp8_compute,
         scale_block_size=self.block_size,
+        act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
     )
 
     if self.bias is not None:
