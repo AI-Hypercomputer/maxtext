@@ -25,6 +25,7 @@ Subgroups:
   S1: layers 0..2 (unrolled prefix: SWA+hash layers 0..1, CSA+indexer+hash layer 2)
   S2: layers 3..6 (2 scanned HCA+CSA blocks with top-k routed MoE)
   S3: layers 41..42 + hc_head + decoder_norm + logits_dense + masked cross-entropy
+  B<b>: layers 3+2b..4+2b (scanned block b, b in 0..18). S1 + B0..B18 + S3 covers all 43 layers + head.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ import gc
 import hashlib
 import json
 import os
+import re
 import resource
 import subprocess
 import sys
@@ -59,6 +61,7 @@ from maxtext.trainers.pre_train import train_compile
 from maxtext.utils import sharding as mt_sharding
 import numpy as np
 import orbax.checkpoint as ocp
+import safetensors.numpy as safetensors_np
 from safetensors.torch import load_file
 from tests.utils import deepseek4_layerwise as views
 import torch
@@ -227,6 +230,34 @@ def capture_topk_any_mesh(records: list):
     attention_compressed.DeepseekV4Indexer.__call__ = orig_indexer
 
 
+NUM_SCANNED_BLOCKS = 19
+UNITS = ("S1", "S2", "S3") + tuple(f"B{b}" for b in range(NUM_SCANNED_BLOCKS))
+
+
+def unit_layers(sg_name: str) -> list[int]:
+  """Native layer ids verified by a unit."""
+  if sg_name == "S1":
+    return [0, 1, 2]
+  if sg_name == "S2":
+    return [3, 4, 5, 6]
+  if sg_name == "S3":
+    return [41, 42]
+  b = int(re.fullmatch(r"B(\d+)", sg_name).group(1))
+  return [3 + 2 * b, 4 + 2 * b]
+
+
+def save_outputs(path: str, tensors: dict[str, np.ndarray]) -> None:
+  """Writes fp32 unit outputs as safetensors to a local or gs:// path."""
+  local = path
+  if path.startswith("gs://"):
+    local = os.path.join("/tmp/ds4_layerwise_outputs", os.path.basename(path))
+  os.makedirs(os.path.dirname(os.path.abspath(local)), exist_ok=True)
+  safetensors_np.save_file({k: np.ascontiguousarray(v, dtype=np.float32) for k, v in tensors.items()}, local)
+  if local != path:
+    subprocess.run(["gcloud", "storage", "cp", local, path], check=True)
+  log(f"Saved outputs {sorted(tensors)} to {path}")
+
+
 def ensure_local_bundle(bundle_dir: str, sg_name: str, num_cotangents: int) -> str:
   """Downloads bundle files from GCS to /tmp if bundle_dir is a gs:// URI."""
   if not bundle_dir.startswith("gs://"):
@@ -270,17 +301,8 @@ def restore_subgroup_weights(
   entries = views.flat_state(state)
   fm = _flat_tree(_meta_tree(unscanned_ckpt))
 
-  if subgroup_name == "S1":
-    u_layers = [0, 1, 2]
-    needs_globals = False
-  elif subgroup_name == "S2":
-    u_layers = [3, 4, 5, 6]
-    needs_globals = False
-  elif subgroup_name == "S3":
-    u_layers = [41, 42]
-    needs_globals = True
-  else:
-    raise ValueError(f"Unknown subgroup {subgroup_name}")
+  u_layers = unit_layers(subgroup_name)
+  needs_globals = subgroup_name == "S3"
 
   needed_u = {f"layers_{l}" for l in u_layers}
   if needs_globals:
@@ -406,8 +428,8 @@ def expert_key_mapping(sg_name: str, num_blocks: int):
       mapping.append((f"params-decoder-layers_{l}-mlp-MoeBlock_0-wi_0", l, "w1", False))
       mapping.append((f"params-decoder-layers_{l}-mlp-MoeBlock_0-wi_1", l, "w3", False))
       mapping.append((f"params-decoder-layers_{l}-mlp-MoeBlock_0-wo", l, "w2", False))
-  elif sg_name in ("S2", "S3"):
-    u_layers = [3, 4, 5, 6] if sg_name == "S2" else [41, 42]
+  else:
+    u_layers = unit_layers(sg_name)
     for j in range(2):
       for b in range(num_blocks):
         actual_l = u_layers[2 * b + j]
@@ -479,13 +501,14 @@ def aot_compile_subgroup(fns: dict, sv, *, h_shape: tuple[int, ...], act_dtype) 
 def main() -> None:
   """CLI entry point for real-weight layer-subgroup forward/backward verification."""
   parser = argparse.ArgumentParser()
-  parser.add_argument("--subgroup", required=True, choices=["S1", "S2", "S3"])
+  parser.add_argument("--subgroup", required=True, choices=UNITS)
   parser.add_argument("--bundle_dir", required=True)
   parser.add_argument("--dtype", default="float32", choices=["float32", "bfloat16"])
   parser.add_argument("--num_cotangents", type=int, default=1)
   parser.add_argument("--unscanned_ckpt", default=DEFAULT_UNSCANNED_CKPT)
   parser.add_argument("--tid2eid_path", default=DEFAULT_TID2EID_PATH)
   parser.add_argument("--out_json", default=None)
+  parser.add_argument("--save_outputs", default=None, help="safetensors path (local or gs://) for h_out / dh_in")
   parser.add_argument("--assert_pass", action="store_true")
   parser.add_argument("--megablox", default="auto", choices=["auto", "true", "false"])
   parser.add_argument(
@@ -518,8 +541,9 @@ def main() -> None:
     manifest = json.load(f)
 
   seq = 4096
-  num_layers = 5 if sg_name in ("S1", "S3") else 7
-  num_blocks = 1 if sg_name in ("S1", "S3") else 2
+  num_layers = 7 if sg_name == "S2" else 5
+  num_blocks = 2 if sg_name == "S2" else 1
+  is_block_unit = sg_name not in ("S1", "S3")
   num_devices = jax.device_count()
 
   ma = manifest["model_args"]
@@ -621,7 +645,7 @@ def main() -> None:
     if sg_name == "S1":
       out = jax.jit(lambda h_, p_, b_: subgroup_views.s1(h_, p_, b_, tokens, segs, pos))(h_in, params, bias)
       jax.block_until_ready(out)
-    elif sg_name == "S2":
+    elif is_block_unit:
       out = jax.jit(lambda h_, p_, b_: subgroup_views.blocks(h_, p_, b_, tokens, segs, pos))(h_in, params, bias)
       jax.block_until_ready(out)
     elif sg_name == "S3":
@@ -634,7 +658,7 @@ def main() -> None:
             lambda h__, p__, b__: subgroup_views.s1(h__, p__, b__, tokens, segs, pos), h_, p_, b_
         )[1](v_)
     )
-  elif sg_name == "S2":
+  elif is_block_unit:
     bwd_fn = jax.jit(
         lambda h_, p_, b_, v_: jax.vjp(
             lambda h__, p__, b__: subgroup_views.blocks(h__, p__, b__, tokens, segs, pos), h_, p_, b_
@@ -675,7 +699,7 @@ def main() -> None:
       "timings": {"fwd_s": fwd_s},
   }
 
-  if sg_name in ("S1", "S2"):
+  if sg_name != "S3":
     h_out_ref = fwd_tensors["h_out"].float().numpy()
     h_cmp = compare_arrs(np.asarray(out, dtype=np.float32), h_out_ref, "h_out")
     results["forward"]["h_out"] = h_cmp
@@ -729,12 +753,8 @@ def main() -> None:
     )
 
   log("Checking routing and indexer top-k agreements...")
-  if sg_name == "S1":
-    ref_l, idx_l = [0, 1, 2], [2]
-  elif sg_name == "S2":
-    ref_l, idx_l = [3, 4, 5, 6], [4, 6]
-  else:
-    ref_l, idx_l = [41, 42], [42]
+  ref_l = unit_layers(sg_name)
+  idx_l = [l for l in ref_l if ref_args.compress_ratios[l] == 4]
 
   moe_raw = [r for r in records if r[0] == "moe"]
   moe_step = len(moe_raw) // len(ref_l) if (moe_raw and len(moe_raw) % len(ref_l) == 0) else 1
@@ -767,7 +787,11 @@ def main() -> None:
     vjp_tags.append("loss")
 
   hf_cfg_dict = views.hf_config_from_ref_args(ref_args, num_layers=num_layers)
-  layer_map = {3: 41, 4: 42} if sg_name == "S3" else None
+  layer_map = None if sg_name in ("S1", "S2") else {3: unit_layers(sg_name)[0], 4: unit_layers(sg_name)[1]}
+  saved = {"h_out": np.asarray(out_blocks if sg_name == "S3" else out, dtype=np.float32)}
+  if sg_name == "S3":
+    saved["head_in"] = np.asarray(head_in_mt, dtype=np.float32)
+    saved["xent_sum"] = np.asarray(out[1], dtype=np.float32)
 
   for tag in vjp_tags:
     log(f"--- Running VJP for {tag} ---")
@@ -791,6 +815,7 @@ def main() -> None:
     vjp_time = time.time() - t0_vjp
     log(f"VJP {tag} computed in {vjp_time:.1f}s.")
 
+    saved[f"dh_in.{tag}"] = np.asarray(dh_in, dtype=np.float32)
     dh_in_ref = vjp_tensors["dh_in"].float().numpy()
     dh_in_cmp = compare_arrs(np.asarray(dh_in, dtype=np.float32), dh_in_ref, f"dh_in_{tag}")
     log(f"dh_in {tag}: max_abs={dh_in_cmp['max_abs']:.4e} rel_l2={dh_in_cmp['rel_l2']:.4e} cos={dh_in_cmp['cos']:.6f}")
@@ -889,6 +914,9 @@ def main() -> None:
     # Release this cotangent's device gradients before the next VJP; v5p-8 HBM fits only one set.
     del dh_in, dparams, dbias
 
+  if args_cli.save_outputs:
+    save_outputs(args_cli.save_outputs, saved)
+  del saved
   results["peak_rss_gib"] = rss_gib()
   log(f"--- Verification for {sg_name} completed. Peak RSS: {results['peak_rss_gib']:.1f} GiB ---")
 
