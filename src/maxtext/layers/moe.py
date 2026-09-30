@@ -114,6 +114,9 @@ class RouteOutput:
   # tokens routed to a shard divided by the perfectly balanced load. Only set when
   # moe_log_max_load_ratio=True on the ring-of-experts ragged path.
   max_load_ratio: Optional[jax.Array] = None
+  # Inverse of sorted_selected_experts on the ring-of-experts ragged path, so the unsort backward does not re-sort to
+  # get it. Only set when moe_routing_maps is not "remat".
+  topk_argsort_indices: Optional[jax.Array] = None
 
 
 def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
@@ -417,6 +420,18 @@ def finalize_deferred_intermediates(intermediate_outputs, config):
     return leaf
 
   return jax.tree_util.tree_map_with_path(_fix, intermediate_outputs)
+
+
+def routing_tag_fn(config):
+  """Returns the checkpoint_name tagger for the integer routing arrays, or None under moe_routing_maps=remat.
+
+  With moe_routing_maps=device (or offload) and remat_policy=custom, the tagged top-k expert ids and the ragged-sort
+  permutations are saved across the remat boundary, so the backward re-runs neither top-k nor the sorts. These
+  are integer index maps, so saving them instead of recomputing them does not change any value.
+  """
+  if getattr(config, "moe_routing_maps", "remat") == "remat":
+    return None
+  return lambda t: adc.checkpoint_name(t, "moe_routing_maps")
 
 
 def uses_megatron_seq_aux_loss(config) -> bool:
@@ -1413,6 +1428,10 @@ class RoutedMoE(nnx.Module):
         jnp.where(expert_mask > 0, gate_logits, -jnp.inf),
         k=self.num_experts_per_tok,
     )
+    # Tag before the weight gather, so the gather's backward reads the saved ids instead of re-running top-k.
+    tag_routing_fn = routing_tag_fn(self.config)
+    if tag_routing_fn is not None:
+      top_k_indices = tag_routing_fn(top_k_indices)
     if getattr(self.config, "router_topk_matmul_vjp", False):
       top_k_weights = take_along_last_axis_dense_vjp(pre_bias_logits, top_k_indices, pre_bias_logits.shape[-1])
     else:
@@ -1539,6 +1558,7 @@ class RoutedMoE(nnx.Module):
     # local prefix of valid rows.
     use_ragged_in_permute = self.config.use_ragged_sort and self.config.use_ring_of_experts
     buffer_size = None
+    topk_argsort_indices = None
     if use_ragged_in_permute:
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
       if forced_routed_experts is not None:
@@ -1564,7 +1584,8 @@ class RoutedMoE(nnx.Module):
       else:
         buffer_size = None
 
-      sorted_inputs, group_size, sorted_selected_experts = ring_ragged_sort(
+      tag_routing_fn = routing_tag_fn(self.config)
+      sorted_inputs, group_size, sorted_selected_experts, topk_argsort_indices = ring_ragged_sort(
           inputs_2d,
           topk_indices_2d,
           self.config.num_experts,
@@ -1579,7 +1600,11 @@ class RoutedMoE(nnx.Module):
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+          tag_routing_fn=tag_routing_fn,
       )
+      if tag_routing_fn is None:
+        # moe_routing_maps=remat: unpermute re-derives the permutation in its backward (existing behavior).
+        topk_argsort_indices = None
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
 
@@ -1668,6 +1693,7 @@ class RoutedMoE(nnx.Module):
         local_group_size,
         has_overflow,
         max_load_ratio,
+        topk_argsort_indices,
     )
 
   def unpermute(
@@ -1679,6 +1705,7 @@ class RoutedMoE(nnx.Module):
       sequence_length,
       use_custom_sort_vjp=True,
       group_sizes=None,
+      topk_argsort_indices=None,
   ):
     """Unpermute tokens to original order and combine weights."""
 
@@ -1703,6 +1730,7 @@ class RoutedMoE(nnx.Module):
           gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+          topk_argsort_indices=topk_argsort_indices,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -2600,6 +2628,7 @@ class RoutedMoE(nnx.Module):
           local_group_sizes,
           has_overflow,
           max_load_ratio,
+          topk_argsort_indices,
       ) = self.permute(
           x,
           logits,
@@ -2633,6 +2662,7 @@ class RoutedMoE(nnx.Module):
               has_overflow=has_overflow,
               required_rbf=required_rbf,
               max_load_ratio=max_load_ratio,
+              topk_argsort_indices=topk_argsort_indices,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -2664,6 +2694,7 @@ class RoutedMoE(nnx.Module):
           lb_loss,
           bias_updates,
           local_group_sizes,
+          _,
           _,
           _,
       ) = self.permute(
@@ -3207,6 +3238,7 @@ class RoutedMoE(nnx.Module):
             sequence_length=sequence_length,
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
             group_sizes=routing.group_sizes,
+            topk_argsort_indices=routing.topk_argsort_indices,
         )
 
         # Sum up the partial outputs across the expert shards.
