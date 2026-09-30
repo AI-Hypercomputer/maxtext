@@ -77,7 +77,7 @@ COPY benchmarks*/ benchmarks/
 ARG INCLUDE_TEST_ASSETS=false
 RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
         echo "Downloading test assets from GCS..."; \
-        if ! gcloud storage cp -r gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}/golden_logits"; then \
+        if ! gcloud storage cp gs://maxtext-test-assets/* "${MAXTEXT_TEST_ASSETS_ROOT}/golden_logits"; then \
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
         fi; \
     fi
