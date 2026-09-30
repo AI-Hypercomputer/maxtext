@@ -360,6 +360,14 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
+# Store the prefused MoE `wi` weight as [2, num_experts, emb/2, 2*mlp] (a row-major reshape of the fused
+# [num_experts, emb, 2*mlp] weight whose two leading slices are the expert halves W[:E/2] and W[E/2:]).
+# Each half is all-gathered on its own and consumed by two chained gmm_v2 calls (kernels/megablox/split_gmm.py),
+# so no copy of the ~1 GB fused weight is ever concatenated or split in forward or backward.
+# Requires prefuse_moe_weights=true, shard_exp_on_fsdp=true, sparse_matmul=true, use_gmm_v2=true, no quantization,
+# num_moe_emb_chunks=0, no expert parallelism, and even num_experts / moe_expert_input_dim.
+# false (default) keeps the fused [num_experts, emb, 2*mlp] layout.
+moe_split_expert_weight_layout: false
 # Keep embed_moe sharded so we can manually QAG it over FSDP.
 # Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
 shard_embed_moe_on_fsdp: false

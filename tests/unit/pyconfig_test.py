@@ -76,6 +76,29 @@ class PyconfigTest(unittest.TestCase):
           moe_use_direct_token_gather=False,
       )
 
+  def test_split_expert_weight_layout_requires_gmm_v2_prefuse_and_exp_on_fsdp(self):
+    with self.assertRaisesRegex(ValueError, "`moe_split_expert_weight_layout=True` requires `prefuse_moe_weights=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_split_expert_weight_layout=True,
+          prefuse_moe_weights=False,
+      )
+
+  def test_split_expert_weight_layout_rejects_expert_parallelism(self):
+    with self.assertRaisesRegex(ValueError, "requires a static expert group offset"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_split_expert_weight_layout=True,
+          prefuse_moe_weights=True,
+          shard_exp_on_fsdp=True,
+          sparse_matmul=True,
+          use_tokamax_gmm=True,
+          use_gmm_v2=True,
+          num_experts=8,
+          base_mlp_dim=256,
+          base_moe_mlp_dim=256,
+          ici_expert_parallelism=2,
+      )
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 

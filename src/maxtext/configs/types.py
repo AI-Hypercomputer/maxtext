@@ -1217,6 +1217,17 @@ class MoEGeneral(BaseModel):
       description="Whether to fuse the expert scaling factors into the expert weights. "
       "This can improve inference performance.",
   )
+  moe_split_expert_weight_layout: bool = Field(
+      False,
+      description=(
+          "Store the prefused MoE `wi` weight as [2, num_experts, emb/2, 2*mlp], a row-major reshape of the fused"
+          " [num_experts, emb, 2*mlp] weight whose two leading slices are the expert halves W[:E/2] and W[E/2:]."
+          " Each half is all-gathered on its own and consumed by two chained gmm_v2 calls (split_gmm), so the fused"
+          " weight is never concatenated or split in forward or backward. Requires prefuse_moe_weights=True,"
+          " shard_exp_on_fsdp=True, sparse_matmul=True, use_gmm_v2=True, no quantization, num_moe_emb_chunks=0,"
+          " no expert parallelism and even num_experts / moe_expert_input_dim."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_moe_chunks(self) -> "MoEGeneral":
@@ -5223,6 +5234,29 @@ class MaxTextConfig(
         raise ValueError("`moe_permute_kernel='tc'` requires `moe_use_direct_token_gather=True`.")
       if self.use_ring_of_experts:
         raise ValueError("`moe_permute_kernel='tc'` requires `use_ring_of_experts=False`.")
+
+    if self.moe_split_expert_weight_layout:
+      if not (self.prefuse_moe_weights and self.shard_exp_on_fsdp and self.sparse_matmul and self.use_gmm_v2):
+        raise ValueError(
+            "`moe_split_expert_weight_layout=True` requires `prefuse_moe_weights=True`, `shard_exp_on_fsdp=True`,"
+            " `sparse_matmul=True` and `use_gmm_v2=True`."
+        )
+      if self.quantization or self.num_moe_emb_chunks > 0 or self.attention in ("vllm_rpa", "vllm_batched_rpa"):
+        raise ValueError(
+            "`moe_split_expert_weight_layout=True` is not supported with quantization, `num_moe_emb_chunks > 0`"
+            " or the vLLM fused MoE attention paths."
+        )
+      if self.ici_expert_parallelism != 1 or self.dcn_expert_parallelism != 1:
+        raise ValueError(
+            "`moe_split_expert_weight_layout=True` requires a static expert group offset, i.e."
+            " `ici_expert_parallelism=1` and `dcn_expert_parallelism=1`."
+        )
+      expert_input_dim = self.emb_dim if self.moe_expert_input_dim <= 0 else self.moe_expert_input_dim
+      if self.num_experts % 2 != 0 or expert_input_dim % 2 != 0:
+        raise ValueError(
+            "`moe_split_expert_weight_layout=True` requires even `num_experts` and expert input dim, got"
+            f" num_experts={self.num_experts}, moe_expert_input_dim={expert_input_dim}."
+        )
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

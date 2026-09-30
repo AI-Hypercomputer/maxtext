@@ -37,6 +37,7 @@ from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.kernels import moe_combine_tc
 from maxtext.kernels import sort_activations
+from maxtext.kernels.megablox import split_gmm
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -700,15 +701,26 @@ class RoutedMoE(nnx.Module):
       self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
       self.wo = jnp.zeros((num_experts, intermediate_dim, self.moe_expert_input_dim))
     elif self.config.prefuse_moe_weights:
+      wi_value = self.kernel_init(
+          self.rngs.params(),
+          (num_experts, self.moe_expert_input_dim, moe_intermediate_dim * 2),
+          weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+      wi_axes = self.wi_kernel_axes
+      if self.config.moe_split_expert_weight_layout:
+        # [2, E, emb/2, 2N] is a pure row-major reshape of the fused [E, emb, 2N]
+        # (same init), but dim 1 is sharded, so each device holds 1/E of *each*
+        # expert half W[:E/2], W[E/2:] -> two ~half-size all-gathers whose results
+        # reshape (bitcast) to [E/2, emb, 2N] without any concat. The remaining
+        # preconditions (shard_exp_on_fsdp, sparse_matmul, gmm_v2, even E / emb,
+        # ...) are checked at config init.
+        wi_value = wi_value.reshape(2, num_experts, self.moe_expert_input_dim // 2, moe_intermediate_dim * 2)
+        wi_axes = (None,) + tuple(self.wi_kernel_axes)
       self.wi = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim * 2),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
-          out_sharding=self.wi_kernel_axes,
+          wi_value,
+          out_sharding=wi_axes,
       )
       self.wo = nnx.Param(
           self.kernel_init(
@@ -1777,8 +1789,17 @@ class RoutedMoE(nnx.Module):
       wo_bias,
       input_ids=None,
       forced_routed_experts=None,
+      split_expert_layout=False,
   ):
-    """Perform sparse matrix multiplication of inputs and Experts."""
+    """Perform sparse matrix multiplication of inputs and Experts.
+
+    With `split_expert_layout=True` (config `moe_split_expert_weight_layout`),
+    w0_kernel / w1_kernel are the two contiguous expert halves of the prefused
+    wi, each [E, emb/2, 2*mlp] (sharded on dim 0), i.e. W[:E/2] and W[E/2:] of
+    the fused [E, emb, 2*mlp] weight in a free (bitcast) reshape. They are
+    all-gathered separately and reshaped to [E/2, emb, 2*mlp] inside the
+    shard_map (see gmm_up).
+    """
 
     def fwd_tile(name):
       """Reads a forward GMM tile size, preferring `eval_*` under eval axis rules."""
@@ -2440,6 +2461,39 @@ class RoutedMoE(nnx.Module):
       )
       return wo_gather_axes, wo_tile_size
 
+    def split_expert_wi_gmm(x, w_lo, w_hi, gmm_fn, wi_tile_size):
+      """x @ W with W given as two gathered expert halves (moe_split_expert_weight_layout).
+
+      w_lo / w_hi arrive as [E, emb/2, 2N] (the all-gathered halves of the
+      [2, E, emb/2, 2N] param); the reshape to [E/2, emb, 2N] is a bitcast. The
+      two gmm_v2 calls accumulate into one buffer (see split_gmm); the custom VJP
+      chains dlhs the same way and runs two group-offset tgmm_v2 calls that write
+      the two drhs halves directly, so no concat / split copy is ever emitted.
+      """
+      e2 = w_lo.shape[0] // 2
+      w_lo = w_lo.reshape(e2, 2 * w_lo.shape[1], w_lo.shape[2])
+      w_hi = w_hi.reshape(e2, 2 * w_hi.shape[1], w_hi.shape[2])
+      kw = gmm_fn.keywords
+      base = kw["group_offset"]
+      if not isinstance(base, int):
+        raise NotImplementedError(
+            "moe_split_expert_weight_layout=True needs a static expert group offset (no expert parallelism)."
+        )
+      inputs, padding_amount = max_utils.maybe_pad(x, fwd_tile("wi_tile_fwd_batch_seq"))
+      out = split_gmm.gmm_split_experts(
+          inputs.astype(self.dtype),
+          w_lo.astype(self.dtype),
+          w_hi.astype(self.dtype),
+          kw["group_sizes"],
+          tiling=None if self.config.use_gmm_v2_heuristic_tiling else wi_tile_size,
+          preferred_element_type=self.dtype,
+          group_offset=base,
+          use_dlhs_transpose_rhs=getattr(self.config, "moe_gmm_v2_dlhs_transpose_rhs", False),
+      )
+      if padding_amount > 0:
+        out = out[: x.shape[0]]
+      return out
+
     def gmm_up(
         x,
         w0,
@@ -2455,9 +2509,12 @@ class RoutedMoE(nnx.Module):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
-        out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        if split_expert_layout:
+          out = split_expert_wi_gmm(x, w0, w1, gmm_fn, wi_tile_size)
+        else:
+          # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
+          w_fused = jnp.concatenate([w0, w1], axis=-1)
+          out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
@@ -4001,15 +4058,33 @@ class RoutedMoE(nnx.Module):
     w0_kernel = None
     w1_kernel = None
     wi_native_scale = None
+    split_expert_layout = False
     if cfg.prefuse_moe_weights and is_fused_moe_path:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       fused_kernel, wi_native_scale = _maybe_native_fused_weight(self.wi[...], wi_scale)
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if (
+          wi.ndim == 4
+          and cfg.sparse_matmul
+          and not quantizations.in_serve_mode(self.quant)
+          and self.wi_0_sparsity_module is None
+      ):
+        # moe_split_expert_weight_layout: wi is [2, E, emb/2, 2N]; wi[h] (a local
+        # slice of the unsharded leading dim) is expert block h. Each is
+        # all-gathered on its own at the shard_map boundary and consumed without
+        # concat (see gmm_up).
+        split_expert_layout = True
+        w0_kernel = wi[0]
+        w1_kernel = wi[1]
+      else:
+        if wi.ndim == 4:
+          # Paths that do not consume the split layout: rebuild the fused [E, emb, 2N].
+          wi = wi.reshape(wi.shape[1], wi.shape[0] * wi.shape[2], wi.shape[3])
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
@@ -4087,6 +4162,7 @@ class RoutedMoE(nnx.Module):
           wo_bias,
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
+          split_expert_layout=split_expert_layout,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
