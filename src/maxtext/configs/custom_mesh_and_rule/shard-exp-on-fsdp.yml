@@ -55,6 +55,7 @@ logical_axis_rules: [
                       ['exp', ['expert', 'fsdp']], # fsdp shards exp instead embed
                       ['mlp_moe', ['fsdp_transpose']],
                       ['embed_moe', ['context']],
+                      ['embed_router', ['context']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================

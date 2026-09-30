@@ -55,6 +55,10 @@ Similar in philosophy to `ep-as-cp.yml`, this configuration explicitly includes 
 
 Different with the rule in `base.yml`, this rule configures expert physical axis to function as data parallelism rather than FSDP. This removes the constraint where FSDPxEP is limited by specific model dimensions, particularly for small tensors such as attention projections. Ultimately, this change benefits large-scale training.
 
+### `fsdp-as-dp-for-attn.yml`
+
+Built on `ep-as-dp.yml` for large-scale training where the FSDP rank is large enough that small-weight all-gathers become latency bound. Attention weights (`q_lora`, `kv_lora`, `embed_attn`) are sharded on the smaller `expert` axis and replicated over `fsdp` / `fsdp_transpose`, the tiny MoE router weight (`embed_router`) is fully replicated (`[]`), and the larger routed and shared expert weights remain sharded on `fsdp` / `fsdp_transpose`.
+
 ### `shard-exp-on-fsdp`
 
 When enabled, this shards the expert dimension of the MoE weights across the FSDP axis. It requires `num_experts` to be a multiple of FSDP rank and is particularly useful when using the Muon optimizer.

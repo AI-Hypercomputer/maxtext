@@ -1599,6 +1599,8 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     ["mlp_moe", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
     ["embed_moe", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
     ["embed_moe", ["fsdp", "context", "context_usp_ulysses"]],
+    ["embed_router", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
+    ["embed_router", ["fsdp", "context", "context_usp_ulysses"]],
     # ==========================================
     # Standard MLP / Dense Layers / Model Structure
     # ==========================================

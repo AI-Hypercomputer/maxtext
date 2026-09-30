@@ -63,6 +63,7 @@ logical_axis_rules: [
                       ['embed_attn', ['fsdp', 'expert']], # remove context from embed sharding
                       ['embed_vocab', ['fsdp', 'expert']],
                       ['embed_moe', ['fsdp']],
+                      ['embed_router', ['fsdp']],
                       ['q_lora', ['fsdp']],
                       ['kv_lora', ['fsdp']],
                       ['norm', ['tensor']],
