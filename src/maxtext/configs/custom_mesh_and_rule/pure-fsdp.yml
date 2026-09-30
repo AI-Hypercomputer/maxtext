@@ -29,6 +29,7 @@ logical_axis_rules: [
                       ['embed_attn', ['fsdp']],
                       ['embed_vocab', ['fsdp']],
                       ['embed_moe', ['fsdp']],
+                      ['embed_router', ['fsdp']],
                       ['q_lora', ['fsdp']],
                       ['kv_lora', ['fsdp']],
                       ['exp_with_fsdp', 'fsdp'],

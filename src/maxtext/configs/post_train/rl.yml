@@ -327,6 +327,8 @@ logical_axis_rules: [
       ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
       ['embed_moe', ['fsdp', 'fsdp_transpose', 'context']],
       ['embed_moe', ['fsdp', 'context']],
+      ['embed_router', ['fsdp', 'fsdp_transpose', 'context']],
+      ['embed_router', ['fsdp', 'context']],
 
       # Standard MLP / Dense Layers / Model Structure
       ['activation_mlp', ['tensor', 'tensor_sequence']],
