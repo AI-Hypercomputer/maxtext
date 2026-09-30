@@ -537,7 +537,6 @@ class _PlanGroup:
   quantize_to_fp8: bool = False
 
 
-
 def _group_plan(plan: List[_PlanEntry], fp8_moe: bool = False) -> List[_PlanGroup]:
   """Collapses per-leaf plan entries into one group per source parameter.
 
@@ -880,11 +879,7 @@ class MaxTextToMaxTextConverter:
         continue
 
       is_scale = str(tgt_key[-1]).endswith("_scale")
-      lookup_key = (
-          tgt_key[:-1] + (str(tgt_key[-1])[:-6],)
-          if is_scale
-          else tgt_key
-      )
+      lookup_key = tgt_key[:-1] + (str(tgt_key[-1])[:-6],) if is_scale else tgt_key
 
       layer_idx, prefix_len, suffix_start = _find_unrolled_layer(lookup_key)
       if layer_idx < 0:
@@ -1059,11 +1054,7 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = int(
-          self.moe_mlp_tp_size
-          if self.moe_mlp_tp_size >= 1
-          else (self.tp if self.tp >= 1 else 1)
-      )
+      n_shards = int(self.moe_mlp_tp_size if self.moe_mlp_tp_size >= 1 else (self.tp if self.tp >= 1 else 1))
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
@@ -1108,10 +1099,12 @@ class MaxTextToMaxTextConverter:
           val = _jit_repeat_axes(val, ((-2, self.kv_replication),))
       return [(tgt_key, val) for _, tgt_key in group.targets]
 
+    calc_dtype = jnp.bfloat16 if group.quantize_to_fp8 else target_dtype
+
     if group.op == "fuse_moe":
       raw_0 = src_flat[group.source_keys[0]]
       raw_1 = src_flat[group.source_keys[1]]
-      wi_0, wi_1 = (_apply_dtype_cast(raw_0, target_dtype, path), _apply_dtype_cast(raw_1, target_dtype, path))
+      wi_0, wi_1 = (_apply_dtype_cast(raw_0, calc_dtype, path), _apply_dtype_cast(raw_1, calc_dtype, path))
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
       if not group.quantize_to_fp8:
@@ -1124,7 +1117,7 @@ class MaxTextToMaxTextConverter:
 
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
-    tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
+    tgt_dt = getattr(raw_val, "dtype", calc_dtype) if ("gate" in path or "router" in path) else calc_dtype
     val = _apply_dtype_cast(raw_val, tgt_dt, path)
     self._check_scan_axis(val, path)
     per_block = self._slice_bulk_target_free(val, path)
@@ -1138,7 +1131,8 @@ class MaxTextToMaxTextConverter:
 
   def _execute_group(self, group: _PlanGroup, src_flat, tgt_flat):
     """Produces every target leaf in `group`. Returns (target_key, array) pairs."""
-    first_tgt = tgt_flat[group.targets[0][1]]
+    first_tgt_key = next((k for _, k in group.targets if not str(k[-1]).endswith("_scale")), group.targets[0][1])
+    first_tgt = tgt_flat[first_tgt_key]
     path = group.source_path
 
     if group.op == "identity":
