@@ -2384,12 +2384,6 @@ class ManifoldConstrainedHyperConnections(BaseModel):
       description=("Feature block size for backward pass of MHC Pallas kernel."),
   )
 
-  @model_validator(mode="after")
-  def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
-    if self.use_mhc_pallas_kernel and not self.enable_mhc_lite:
-      raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
-    return self
-
   mhc_split_axis_contraction: bool = Field(
       False,
       description=(
@@ -2397,6 +2391,14 @@ class ManifoldConstrainedHyperConnections(BaseModel):
           "so the activation's TP-sharded embed dim is never all-gathered."
       ),
   )
+
+  @model_validator(mode="after")
+  def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
+    if self.use_mhc_pallas_kernel and not self.enable_mhc_lite:
+      raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
+    if self.use_mhc_pallas_kernel and self.mhc_split_axis_contraction:
+      raise ValueError("use_mhc_pallas_kernel=True is not supported with mhc_split_axis_contraction=True.")
+    return self
 
 
 class DilocoParams(BaseModel):
