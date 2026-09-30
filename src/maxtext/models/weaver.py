@@ -29,6 +29,10 @@ place without routing through a shared ``Attention`` or ``Decoder`` class:
 6. ``WeaverMLP`` feed-forward block (``silu`` SwiGLU and ``relu2`` variants).
 7. ``WeaverMoTDecoderLayer`` dual-pathway Mixture-of-Transformers decoder
    block with canonical weight alias properties.
+8. ``WeaverOmniTransformer`` full 36-layer joint multimodal diffusion backbone
+   integrating ``embed_tokens``, ``proj_in``, ``time_embedder``, stacked
+   ``WeaverMoTDecoderLayer`` blocks (``scan_layers=False`` and
+   ``scan_layers=True``), ``norm``, ``norm_moe_gen``, and ``proj_out``.
 
     ========================================================================
                    WEAVER DECODER LAYER DATA FLOW
@@ -71,6 +75,7 @@ from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask_info
+from maxtext.layers import nnx_scan
 import numpy as np
 
 
@@ -79,15 +84,28 @@ import numpy as np
 # ==============================================================================
 
 
+def _resolve_jax_dtype(dtype: Any) -> Any:
+  """Resolves a string or dtype object to a JAX dtype."""
+  if isinstance(dtype, str):
+    return getattr(jnp, dtype, jnp.dtype(dtype))
+  return dtype
+
+
 @dataclasses.dataclass
 class WeaverConfig:
-  """Configuration for Weaver Mixture-of-Transformers blocks."""
+  """Configuration for Weaver Mixture-of-Transformers blocks and backbone."""
 
   hidden_size: int = 4096
   head_dim: int = 128
   num_attention_heads: int = 32
   num_key_value_heads: int = 8
   intermediate_size: int = 12288
+  num_hidden_layers: int = 36
+  vocab_size: int = 151936
+  latent_channels: int = 48
+  patch_size: int = 2
+  time_embed_in_channels: int = 256
+  timestep_scale: float = 0.001
   rms_norm_eps: float = 1e-6
   hidden_act: str = "silu"
   attention_bias: bool = False
@@ -97,7 +115,15 @@ class WeaverConfig:
   attention_kernel: str = "dot_product"
   use_ragged_ops: bool = False
   mrope_section: tuple[int, int, int] = (24, 20, 20)
-  rope_theta: float = 1_000_000.0
+  rope_theta: float = 5_000_000.0
+  scan_layers: bool = False
+  param_scan_axis: int = 0
+  remat_policy: str = "none"
+  embed_kernel_axes: tuple[None | str, ...] = ("vocab", "embed")
+  proj_in_kernel_axes: tuple[None | str, ...] = ("patch", "embed")
+  time_mlp_in_kernel_axes: tuple[None | str, ...] = ("time_embed", "embed")
+  time_mlp_out_kernel_axes: tuple[None | str, ...] = ("embed", "embed")
+  proj_out_kernel_axes: tuple[None | str, ...] = ("embed", "patch")
   q_kernel_axes: tuple[None | str, ...] = ("embed", "heads")
   kv_kernel_axes: tuple[None | str, ...] = ("embed", "kv_heads")
   o_kernel_axes: tuple[None | str, ...] = ("heads", "embed")
@@ -114,6 +140,52 @@ class WeaverConfig:
           "num_attention_heads must be divisible by num_key_value_heads, "
           f"got {self.num_attention_heads=} {self.num_key_value_heads=}"
       )
+    self.dtype = _resolve_jax_dtype(self.dtype)
+    self.weight_dtype = _resolve_jax_dtype(self.weight_dtype)
+
+  @classmethod
+  def from_maxtext_config(cls, config: Any) -> WeaverConfig:
+    """Constructs a ``WeaverConfig`` from a MaxText ``pyconfig`` object."""
+    if isinstance(config, cls):
+      return config
+
+    mlp_acts = getattr(config, "mlp_activations", ["silu", "linear"])
+    hidden_act = "relu2" if "relu2" in mlp_acts else "silu"
+
+    raw_attn = str(getattr(config, "attention", "dot_product"))
+    attn_kernel = raw_attn if raw_attn in ("dot_product", "flash", "splash") else "dot_product"
+
+    mrope_raw = getattr(config, "mrope_section", (24, 20, 20))
+    mrope_tuple = (int(mrope_raw[0]), int(mrope_raw[1]), int(mrope_raw[2]))
+
+    return cls(
+        hidden_size=int(getattr(config, "emb_dim", getattr(config, "base_emb_dim", 4096))),
+        head_dim=int(getattr(config, "head_dim", 128)),
+        num_attention_heads=int(getattr(config, "num_query_heads", getattr(config, "base_num_query_heads", 32))),
+        num_key_value_heads=int(getattr(config, "num_kv_heads", getattr(config, "base_num_kv_heads", 8))),
+        intermediate_size=int(getattr(config, "mlp_dim", getattr(config, "base_mlp_dim", 12288))),
+        num_hidden_layers=int(getattr(config, "num_decoder_layers", getattr(config, "base_num_decoder_layers", 36))),
+        vocab_size=int(getattr(config, "vocab_size", 151936)),
+        latent_channels=int(getattr(config, "latent_channels", 48)),
+        patch_size=int(getattr(config, "patch_size", 2)),
+        time_embed_in_channels=int(getattr(config, "time_embed_in_channels", 256)),
+        timestep_scale=float(getattr(config, "timestep_scale", 0.001)),
+        rms_norm_eps=float(getattr(config, "normalization_layer_epsilon", 1e-6)),
+        hidden_act=hidden_act,
+        attention_bias=bool(getattr(config, "attention_bias", False)),
+        qk_norm_for_text=bool(getattr(config, "qk_norm_for_text", getattr(config, "use_qk_norm", True))),
+        qk_norm_for_diffusion=bool(getattr(config, "qk_norm_for_diffusion", True)),
+        use_und_k_norm_for_gen=bool(getattr(config, "use_und_k_norm_for_gen", False)),
+        attention_kernel=attn_kernel,
+        use_ragged_ops=bool(getattr(config, "use_ragged_attention", False)),
+        mrope_section=mrope_tuple,
+        rope_theta=float(getattr(config, "rope_max_timescale", 5_000_000.0)),
+        scan_layers=bool(getattr(config, "scan_layers", False)),
+        param_scan_axis=int(getattr(config, "param_scan_axis", 0)),
+        remat_policy=str(getattr(config, "remat_policy", "none")),
+        dtype=_resolve_jax_dtype(getattr(config, "dtype", jnp.float32)),
+        weight_dtype=_resolve_jax_dtype(getattr(config, "weight_dtype", jnp.float32)),
+    )
 
 
 def _adapt_kernel_init(
@@ -132,6 +204,40 @@ def _adapt_kernel_init(
       return kernel_init(key, shape, dtype, in_axis, out_axis)
 
   return _wrapped
+
+
+def _make_embed(
+    num_embeddings: int,
+    features: int,
+    *,
+    dtype: Any = jnp.float32,
+    weight_dtype: Any = jnp.float32,
+    embedding_init: Callable[..., jax.Array] | None = None,
+    kernel_axes: tuple[None | str, ...] = ("vocab", "embed"),
+    sharding_hook: Callable[[Any, str], Any] | None = None,
+    hook_name: str = "embed_kernel_init",
+    rngs: nnx.Rngs,
+) -> nnx.Embed:
+  """Constructs a pure ``nnx.Embed`` with logical-axis annotations."""
+  base_init = _adapt_kernel_init(embedding_init or nnx.initializers.normal(stddev=0.02))
+  if sharding_hook is not None:
+    base_init = sharding_hook(base_init, hook_name)
+  meta_init = nnx.with_metadata(
+      base_init,
+      out_sharding=kernel_axes,
+      kernel_axes=kernel_axes,
+      eager_sharding=False,
+  )
+  embed = nnx.Embed(
+      num_embeddings=num_embeddings,
+      features=features,
+      dtype=dtype,
+      param_dtype=weight_dtype,
+      embedding_init=meta_init,
+      rngs=rngs,
+  )
+  embed.kernel_axes = kernel_axes
+  return embed
 
 
 def _make_linear(
@@ -1628,3 +1734,647 @@ class WeaverMoTDecoderLayer(nnx.Module):
     mlp_out_gen = self.mlp_moe_gen(mlp_in_gen)
 
     return hook(residual_und + mlp_out_und, "post_mlp"), hook(residual_gen + mlp_out_gen, "gen_post_mlp")
+
+
+# ==============================================================================
+# 8. Weaver Omni-Transformer Full Backbone Architecture (Pure Flax NNX)
+# ==============================================================================
+
+
+def patchify_latents(latents: jax.Array, patch_size: int = 2) -> jax.Array:
+  """Patchifies 5D video/image latents ``[B, C, T, H, W]`` into ``[B, S_gen, p*p*C]``.
+
+  Matches the spatial 2D patchification layout ``b c t (h p1) (w p2) -> b (t h w) (p1 p2 c)``.
+
+  Args:
+    latents: Latent tensor of shape ``[B, C, T, H, W]``.
+    patch_size: Spatial patch size ``p`` along height and width.
+
+  Returns:
+    Patchified token sequence of shape ``[B, T * (H // p) * (W // p), p * p * C]``.
+  """
+  if latents.ndim != 5:
+    raise ValueError(f"latents must be a 5D array [B, C, T, H, W], got shape {latents.shape}.")
+  bsz, c_lat, t_lat, h_lat, w_lat = latents.shape
+  if h_lat % patch_size != 0 or w_lat % patch_size != 0:
+    raise ValueError(f"Latent spatial dimensions ({h_lat}, {w_lat}) must be divisible by patch_size ({patch_size}).")
+  h_patch = h_lat // patch_size
+  w_patch = w_lat // patch_size
+  s_gen = t_lat * h_patch * w_patch
+  patch_dim = patch_size * patch_size * c_lat
+
+  reshaped = latents.reshape(bsz, c_lat, t_lat, h_patch, patch_size, w_patch, patch_size)
+  permuted = jnp.einsum("bcthpwq->bthwpqc", reshaped)
+  return permuted.reshape(bsz, s_gen, patch_dim)
+
+
+def unpatchify_latents(
+    patches: jax.Array,
+    t_lat: int,
+    h_lat: int,
+    w_lat: int,
+    *,
+    patch_size: int = 2,
+    latent_channels: int = 48,
+) -> jax.Array:
+  """Unpatchifies generation tokens ``[B, S_gen, p*p*C]`` or ``[B*S_gen, p*p*C]`` to ``[B, C, T, H, W]``.
+
+  Matches the inverse spatial layout ``(b t h w) (p1 p2 c) -> b c t (h p1) (w p2)``.
+
+  Args:
+    patches: Patch token tensor of shape ``[B, S_gen, p*p*C]`` or ``[B * S_gen, p*p*C]``.
+    t_lat: Number of latent temporal frames ``T``.
+    h_lat: Latent spatial height ``H``.
+    w_lat: Latent spatial width ``W``.
+    patch_size: Spatial patch size ``p`` along height and width.
+    latent_channels: Number of latent channels ``C``.
+
+  Returns:
+    Unpatchified latent tensor of shape ``[B, C, T, H, W]``.
+  """
+  if h_lat % patch_size != 0 or w_lat % patch_size != 0:
+    raise ValueError(f"Latent spatial dimensions ({h_lat}, {w_lat}) must be divisible by patch_size ({patch_size}).")
+  h_patch = h_lat // patch_size
+  w_patch = w_lat // patch_size
+  s_gen = t_lat * h_patch * w_patch
+  patch_dim = patch_size * patch_size * latent_channels
+
+  if patches.shape[-1] != patch_dim:
+    raise ValueError(f"Expected patch feature dim {patch_dim}, got {patches.shape[-1]}.")
+
+  if patches.ndim == 2:
+    if patches.shape[0] % s_gen != 0:
+      raise ValueError(f"Total patch tokens ({patches.shape[0]}) must be divisible by s_gen ({s_gen}).")
+    bsz = patches.shape[0] // s_gen
+  elif patches.ndim == 3:
+    bsz = patches.shape[0]
+    if patches.shape[1] != s_gen:
+      raise ValueError(f"Expected s_gen={s_gen} along axis 1, got {patches.shape[1]}.")
+  else:
+    raise ValueError(f"patches must be 2D or 3D, got shape {patches.shape}.")
+
+  reshaped = patches.reshape(bsz, t_lat, h_patch, w_patch, patch_size, patch_size, latent_channels)
+  permuted = jnp.einsum("bthwpqc->bcthpwq", reshaped)
+  return permuted.reshape(bsz, latent_channels, t_lat, h_lat, w_lat)
+
+
+def get_weaver_timestep_embedding(
+    timesteps: jax.Array,
+    num_channels: int = 256,
+    *,
+    flip_sin_to_cos: bool = True,
+    downscale_freq_shift: float = 0.0,
+    scale: float = 1.0,
+    max_period: int = 10000,
+) -> jax.Array:
+  """Computes sinusoidal timestep embeddings in ``float32``.
+
+  Args:
+    timesteps: Timestep tensor of shape ``[N]`` or ``[B, T]``.
+    num_channels: Number of sinusoidal embedding channels (default 256).
+    flip_sin_to_cos: Whether to order ``[cos, sin]`` instead of ``[sin, cos]``.
+    downscale_freq_shift: Frequency shift denominator offset.
+    scale: Multiplier applied to sinusoidal arguments.
+    max_period: Controls minimum frequency of the embeddings.
+
+  Returns:
+    Float32 sinusoidal embeddings of shape ``(*timesteps.shape, num_channels)``.
+  """
+  half_dim = num_channels // 2
+  exponent = -math.log(float(max_period)) * jnp.arange(0, half_dim, dtype=jnp.float32)
+  exponent = exponent / (half_dim - downscale_freq_shift)
+
+  emb = jnp.exp(exponent)
+  emb = timesteps[..., None].astype(jnp.float32) * emb
+
+  emb = scale * emb
+  emb = jnp.concatenate([jnp.sin(emb), jnp.cos(emb)], axis=-1)
+
+  if flip_sin_to_cos:
+    emb = jnp.concatenate([emb[..., half_dim:], emb[..., :half_dim]], axis=-1)
+
+  if num_channels % 2 == 1:
+    emb = jnp.pad(emb, ((0, 0),) * (emb.ndim - 1) + ((0, 1),))
+
+  return emb
+
+
+class WeaverTimeEmbedder(nnx.Module):
+  """Sinusoidal + 2-layer SiLU MLP diffusion timestep embedder using pure ``nnx.Linear``."""
+
+  def __init__(
+      self,
+      in_channels: int = 256,
+      time_embed_dim: int = 4096,
+      *,
+      timestep_scale: float = 0.001,
+      use_bias: bool = True,
+      in_kernel_axes: tuple[None | str, ...] = ("time_embed", "embed"),
+      out_kernel_axes: tuple[None | str, ...] = ("embed", "embed"),
+      sharding_hook: Callable[[Any, str], Any] | None = None,
+      dtype: Any = jnp.float32,
+      weight_dtype: Any = jnp.float32,
+      kernel_init: Callable[..., jax.Array] | None = None,
+      rngs: nnx.Rngs,
+  ):
+    """Initializes the diffusion timestep embedder."""
+    self.in_channels = in_channels
+    self.time_embed_dim = time_embed_dim
+    self.timestep_scale = timestep_scale
+    self.use_bias = use_bias
+    self.dtype = _resolve_jax_dtype(dtype)
+    self.weight_dtype = _resolve_jax_dtype(weight_dtype)
+
+    self.mlp_0 = _make_linear(
+        in_channels,
+        time_embed_dim,
+        use_bias=use_bias,
+        dtype=jnp.float32,
+        weight_dtype=self.weight_dtype,
+        kernel_init=kernel_init,
+        kernel_axes=in_kernel_axes,
+        sharding_hook=sharding_hook,
+        hook_name="time_mlp_0_kernel_init",
+        rngs=rngs,
+    )
+    self.mlp_2 = _make_linear(
+        time_embed_dim,
+        time_embed_dim,
+        use_bias=use_bias,
+        dtype=jnp.float32,
+        weight_dtype=self.weight_dtype,
+        kernel_init=kernel_init,
+        kernel_axes=out_kernel_axes,
+        sharding_hook=sharding_hook,
+        hook_name="time_mlp_2_kernel_init",
+        rngs=rngs,
+    )
+
+  @property
+  def linear_1(self) -> nnx.Linear:
+    """First linear projection in the timestep MLP (``mlp_0``)."""
+    return self.mlp_0
+
+  @property
+  def linear_2(self) -> nnx.Linear:
+    """Second linear projection in the timestep MLP (``mlp_2``)."""
+    return self.mlp_2
+
+  def __call__(self, timesteps: jax.Array) -> jax.Array:
+    """Embeds scalar/per-frame diffusion timesteps into ``time_embed_dim``."""
+    scaled_t = timesteps.astype(jnp.float32) * self.timestep_scale
+    t_emb = get_weaver_timestep_embedding(
+        scaled_t,
+        num_channels=self.in_channels,
+        flip_sin_to_cos=True,
+        downscale_freq_shift=0.0,
+    )
+    hidden = jax.nn.silu(self.mlp_0(t_emb))
+    return self.mlp_2(hidden).astype(self.dtype)
+
+
+def build_weaver_3d_position_ids(
+    batch_size: int,
+    s_und: int,
+    t_lat: int,
+    h_patch: int,
+    w_patch: int,
+) -> jax.Array:
+  """Constructs packed 3D M-RoPE coordinates ``[N_total, 3]`` for ``[text, vision]`` samples.
+
+  For each sample:
+  * Understanding (text) tokens have 1D positions ``(i, i, i)`` for ``i in 0..s_und-1``.
+  * Generation (vision) tokens have 3D positions ``(s_und + t, h, w)`` across the
+    ``(t_lat, h_patch, w_patch)`` patch grid.
+
+  Args:
+    batch_size: Number of samples ``B``.
+    s_und: Number of understanding (text) tokens per sample.
+    t_lat: Number of temporal latent frames ``T``.
+    h_patch: Number of spatial height patches ``H // p``.
+    w_patch: Number of spatial width patches ``W // p``.
+
+  Returns:
+    Integer coordinate array of shape ``[B * (s_und + t_lat * h_patch * w_patch), 3]``.
+  """
+  pos_und = jnp.broadcast_to(jnp.arange(s_und, dtype=jnp.int32)[:, None], (s_und, 3))
+
+  t_grid = jnp.repeat(jnp.arange(t_lat, dtype=jnp.int32) + s_und, h_patch * w_patch)
+  h_grid = jnp.tile(jnp.repeat(jnp.arange(h_patch, dtype=jnp.int32), w_patch), t_lat)
+  w_grid = jnp.tile(jnp.arange(w_patch, dtype=jnp.int32), t_lat * h_patch)
+  pos_gen = jnp.stack([t_grid, h_grid, w_grid], axis=-1)
+
+  sample_pos = jnp.concatenate([pos_und, pos_gen], axis=0)
+  return jnp.tile(sample_pos, (batch_size, 1))
+
+
+class WeaverOmniTransformer(nnx.Module):
+  """Complete Weaver joint Mixture-of-Transformers diffusion backbone.
+
+  Integrates:
+  * ``embed_tokens``: Text token embedding table (``nnx.Embed``).
+  * ``proj_in`` (alias ``vae2llm``): Patchified latent input projection (``nnx.Linear``).
+  * ``time_embedder``: Sinusoidal + 2-layer SiLU MLP timestep embedder (``WeaverTimeEmbedder``).
+  * ``layers`` / ``scanned_layers``: Stack of ``WeaverMoTDecoderLayer`` blocks supporting
+    both ``scan_layers=False`` and ``scan_layers=True``.
+  * ``norm``: Final understanding pathway RMSNorm (``nnx.RMSNorm``).
+  * ``norm_moe_gen``: Final generation pathway RMSNorm (``nnx.RMSNorm``).
+  * ``proj_out`` (alias ``llm2vae``): Output projection back to latent patch space (``nnx.Linear``).
+  """
+
+  def __init__(
+      self,
+      config: WeaverConfig | Any | int = 4096,
+      *,
+      head_dim: int | None = None,
+      num_attention_heads: int | None = None,
+      num_key_value_heads: int | None = None,
+      intermediate_size: int | None = None,
+      num_hidden_layers: int | None = None,
+      vocab_size: int | None = None,
+      latent_channels: int | None = None,
+      patch_size: int | None = None,
+      time_embed_in_channels: int | None = None,
+      timestep_scale: float | None = None,
+      rms_norm_eps: float | None = None,
+      hidden_act: str | None = None,
+      attention_bias: bool | None = None,
+      qk_norm_for_text: bool | None = None,
+      qk_norm_for_diffusion: bool | None = None,
+      use_und_k_norm_for_gen: bool | None = None,
+      attention_kernel: str | None = None,
+      use_ragged_ops: bool | None = None,
+      mrope_section: tuple[int, int, int] | None = None,
+      rope_theta: float | None = None,
+      scan_layers: bool | None = None,
+      param_scan_axis: int | None = None,
+      remat_policy: str | None = None,
+      dtype: Any | None = None,
+      weight_dtype: Any | None = None,
+      sharding_hook: Callable[[Any, str], Any] | None = None,
+      mesh: sharding.Mesh | None = None,
+      kernel_init: Callable[..., jax.Array] | None = None,
+      rngs: nnx.Rngs,
+  ):
+    """Initializes ``WeaverOmniTransformer`` from ``WeaverConfig``, MaxText ``Config``, or kwargs."""
+    del mesh
+    if isinstance(config, WeaverConfig):
+      cfg = dataclasses.replace(config)
+    elif isinstance(config, int):
+      cfg = WeaverConfig(hidden_size=config)
+    else:
+      cfg = WeaverConfig.from_maxtext_config(config)
+
+    overrides: dict[str, Any] = {}
+    for field_name, val in (
+        ("head_dim", head_dim),
+        ("num_attention_heads", num_attention_heads),
+        ("num_key_value_heads", num_key_value_heads),
+        ("intermediate_size", intermediate_size),
+        ("num_hidden_layers", num_hidden_layers),
+        ("vocab_size", vocab_size),
+        ("latent_channels", latent_channels),
+        ("patch_size", patch_size),
+        ("time_embed_in_channels", time_embed_in_channels),
+        ("timestep_scale", timestep_scale),
+        ("rms_norm_eps", rms_norm_eps),
+        ("hidden_act", hidden_act),
+        ("attention_bias", attention_bias),
+        ("qk_norm_for_text", qk_norm_for_text),
+        ("qk_norm_for_diffusion", qk_norm_for_diffusion),
+        ("use_und_k_norm_for_gen", use_und_k_norm_for_gen),
+        ("attention_kernel", attention_kernel),
+        ("use_ragged_ops", use_ragged_ops),
+        ("mrope_section", mrope_section),
+        ("rope_theta", rope_theta),
+        ("scan_layers", scan_layers),
+        ("param_scan_axis", param_scan_axis),
+        ("remat_policy", remat_policy),
+        ("dtype", dtype),
+        ("weight_dtype", weight_dtype),
+    ):
+      if val is not None:
+        overrides[field_name] = val
+    if overrides:
+      cfg = dataclasses.replace(cfg, **overrides)
+
+    self.config = cfg
+    self.hidden_size = cfg.hidden_size
+    self.head_dim = cfg.head_dim
+    self.num_attention_heads = cfg.num_attention_heads
+    self.num_key_value_heads = cfg.num_key_value_heads
+    self.intermediate_size = cfg.intermediate_size
+    self.num_hidden_layers = cfg.num_hidden_layers
+    self.vocab_size = cfg.vocab_size
+    self.latent_channels = cfg.latent_channels
+    self.patch_size = cfg.patch_size
+    self.patch_dim = cfg.patch_size * cfg.patch_size * cfg.latent_channels
+    self.time_embed_in_channels = cfg.time_embed_in_channels
+    self.timestep_scale = cfg.timestep_scale
+    self.rms_norm_eps = cfg.rms_norm_eps
+    self.hidden_act = cfg.hidden_act
+    self.mrope_section = cfg.mrope_section
+    self.rope_theta = cfg.rope_theta
+    self.scan_layers = cfg.scan_layers
+    self.param_scan_axis = cfg.param_scan_axis
+    self.remat_policy = cfg.remat_policy
+    self.use_ragged_ops = cfg.use_ragged_ops
+    self.dtype = cfg.dtype
+    self.weight_dtype = cfg.weight_dtype
+    self.sharding_hook = sharding_hook or (lambda x, name: x)
+
+    # 1. Text token embedding table.
+    self.embed_tokens = _make_embed(
+        num_embeddings=cfg.vocab_size,
+        features=cfg.hidden_size,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=cfg.embed_kernel_axes,
+        sharding_hook=sharding_hook,
+        hook_name="embed_tokens_kernel_init",
+        rngs=rngs,
+    )
+
+    # 2. Latent patch input projection (vae2llm).
+    self.proj_in = _make_linear(
+        self.patch_dim,
+        cfg.hidden_size,
+        use_bias=True,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_init=kernel_init,
+        kernel_axes=cfg.proj_in_kernel_axes,
+        sharding_hook=sharding_hook,
+        hook_name="proj_in_kernel_init",
+        rngs=rngs,
+    )
+
+    # 3. Diffusion timestep embedder.
+    self.time_embedder = WeaverTimeEmbedder(
+        in_channels=cfg.time_embed_in_channels,
+        time_embed_dim=cfg.hidden_size,
+        timestep_scale=cfg.timestep_scale,
+        in_kernel_axes=cfg.time_mlp_in_kernel_axes,
+        out_kernel_axes=cfg.time_mlp_out_kernel_axes,
+        sharding_hook=sharding_hook,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_init=kernel_init,
+        rngs=rngs,
+    )
+
+    # 4. Stacked Mixture-of-Transformers decoder blocks.
+    if cfg.scan_layers:
+      self.layers = None
+      self.scanned_layers = nnx_scan.create_scanned_layers(
+          lambda layer_rngs: WeaverMoTDecoderLayer(
+              cfg,
+              sharding_hook=sharding_hook,
+              kernel_init=kernel_init,
+              rngs=layer_rngs,
+          ),
+          length=cfg.num_hidden_layers,
+          param_scan_axis=cfg.param_scan_axis,
+          metadata_axis_name="layers",
+          rngs=rngs,
+      )
+    else:
+      self.layers = nnx.List(
+          [
+              WeaverMoTDecoderLayer(
+                  cfg,
+                  sharding_hook=sharding_hook,
+                  kernel_init=kernel_init,
+                  rngs=rngs,
+              )
+              for _ in range(cfg.num_hidden_layers)
+          ]
+      )
+      self.scanned_layers = None
+
+    # 5. Final pathway RMSNorms.
+    self.norm = _make_rmsnorm(
+        cfg.hidden_size,
+        epsilon=cfg.rms_norm_eps,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=cfg.norm_kernel_axes,
+        sharding_hook=sharding_hook,
+        hook_name="norm_scale_init",
+        rngs=rngs,
+    )
+    self.norm_moe_gen = _make_rmsnorm(
+        cfg.hidden_size,
+        epsilon=cfg.rms_norm_eps,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=cfg.norm_kernel_axes,
+        sharding_hook=sharding_hook,
+        hook_name="norm_moe_gen_scale_init",
+        rngs=rngs,
+    )
+
+    # 6. Output projection to latent patch space (llm2vae).
+    self.proj_out = _make_linear(
+        cfg.hidden_size,
+        self.patch_dim,
+        use_bias=True,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_init=kernel_init,
+        kernel_axes=cfg.proj_out_kernel_axes,
+        sharding_hook=sharding_hook,
+        hook_name="proj_out_kernel_init",
+        rngs=rngs,
+    )
+
+  @classmethod
+  def from_config(
+      cls,
+      config: WeaverConfig | Any,
+      *,
+      rngs: nnx.Rngs,
+      mesh: sharding.Mesh | None = None,
+      sharding_hook: Callable[[Any, str], Any] | None = None,
+      kernel_init: Callable[..., jax.Array] | None = None,
+      **overrides: Any,
+  ) -> WeaverOmniTransformer:
+    """Constructs ``WeaverOmniTransformer`` from a ``WeaverConfig`` or MaxText ``Config``."""
+    return cls(
+        config,
+        mesh=mesh,
+        sharding_hook=sharding_hook,
+        kernel_init=kernel_init,
+        rngs=rngs,
+        **overrides,
+    )
+
+  @property
+  def vae2llm(self) -> nnx.Linear:
+    """Canonical alias for the latent patch input projection (``proj_in``)."""
+    return self.proj_in
+
+  @property
+  def llm2vae(self) -> nnx.Linear:
+    """Canonical alias for the latent patch output projection (``proj_out``)."""
+    return self.proj_out
+
+  @overload
+  def __call__(
+      self,
+      input_ids: jax.Array,
+      latents: jax.Array,
+      timesteps: jax.Array,
+      *,
+      position_ids: jax.Array | None = None,
+      metadata: WeaverPackingMetadata | None = None,
+      return_hidden_states: Literal[False] = False,
+  ) -> jax.Array:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      input_ids: jax.Array,
+      latents: jax.Array,
+      timesteps: jax.Array,
+      *,
+      position_ids: jax.Array | None = None,
+      metadata: WeaverPackingMetadata | None = None,
+      return_hidden_states: Literal[True],
+  ) -> tuple[jax.Array, jax.Array]:
+    ...
+
+  def __call__(
+      self,
+      input_ids: jax.Array,
+      latents: jax.Array,
+      timesteps: jax.Array,
+      *,
+      position_ids: jax.Array | None = None,
+      metadata: WeaverPackingMetadata | None = None,
+      return_hidden_states: bool = False,
+  ) -> jax.Array | tuple[jax.Array, jax.Array]:
+    """Executes the full Weaver Omni-Transformer forward pass.
+
+    Args:
+      input_ids: Understanding (text) token IDs of shape ``[B, S_und]``.
+      latents: Noisy video/image latent tensor of shape ``[B, C, T, H, W]``.
+      timesteps: Diffusion timesteps of shape ``[B]``, ``[B, 1]``, or ``[B, T]``.
+      position_ids: Optional 3D M-RoPE position IDs of shape ``[N_total, 3]``
+        or ``[3, N_total]``. Computed automatically from ``(B, S_und, T, H//p, W//p)``
+        when ``None``.
+      metadata: Optional pre-built ``WeaverPackingMetadata``. Constructed
+        automatically for ``[S_und] * B`` and ``[S_gen] * B`` when ``None``.
+      return_hidden_states: When ``True``, returns ``(preds_vision, last_hidden_state)``
+        where ``last_hidden_state`` has shape ``[N_total, hidden_size]``.
+
+    Returns:
+      Predicted velocity/noise latent tensor of shape ``[B, C, T, H, W]`` (or a
+      tuple ``(preds_vision, last_hidden_state)`` when ``return_hidden_states=True``).
+    """
+    if input_ids.ndim != 2:
+      raise ValueError(f"input_ids must be 2D [B, S_und], got shape {input_ids.shape}.")
+    if latents.ndim != 5:
+      raise ValueError(f"latents must be 5D [B, C, T, H, W], got shape {latents.shape}.")
+
+    bsz, s_und = input_ids.shape
+    bsz_lat, c_lat, t_lat, h_lat, w_lat = latents.shape
+    if bsz != bsz_lat:
+      raise ValueError(f"Batch size mismatch between input_ids ({bsz}) and latents ({bsz_lat}).")
+    if c_lat != self.latent_channels:
+      raise ValueError(f"Expected latent_channels={self.latent_channels}, got {c_lat}.")
+
+    p = self.patch_size
+    h_patch = h_lat // p
+    w_patch = w_lat // p
+    s_gen = t_lat * h_patch * w_patch
+
+    # 1. Embed understanding (text) tokens -> [B * S_und, hidden_size].
+    text_embeds = self.embed_tokens(input_ids).astype(self.dtype)
+    und_seq = text_embeds.reshape(bsz * s_und, self.hidden_size)
+
+    # 2. Patchify latents, project to hidden_size, and add timestep embeddings -> [B * S_gen, hidden_size].
+    patches = patchify_latents(latents.astype(self.dtype), patch_size=p)
+    vision_embeds = self.proj_in(patches)
+
+    time_embeds = self.time_embedder(timesteps).astype(self.dtype)
+    if time_embeds.ndim == 2:
+      time_embeds = time_embeds[:, None, :]
+    elif time_embeds.ndim == 3 and time_embeds.shape[1] == t_lat and s_gen != t_lat:
+      time_embeds = jnp.repeat(time_embeds, h_patch * w_patch, axis=1)
+
+    gen_tokens = vision_embeds + time_embeds
+    gen_seq = gen_tokens.reshape(bsz * s_gen, self.hidden_size)
+
+    # 3. Build packing metadata and 3D M-RoPE rotary tables.
+    if metadata is None:
+      metadata = build_weaver_packing_metadata([s_und] * bsz, [s_gen] * bsz)
+
+    if position_ids is None:
+      pos_3d = build_weaver_3d_position_ids(
+          batch_size=bsz,
+          s_und=s_und,
+          t_lat=t_lat,
+          h_patch=h_patch,
+          w_patch=w_patch,
+      )
+    else:
+      if position_ids.ndim == 2 and position_ids.shape[0] == 3 and position_ids.shape[1] == metadata.total_tokens:
+        pos_3d = position_ids.T
+      else:
+        pos_3d = position_ids
+
+    cos, sin = compute_3d_mrope_cos_sin(
+        pos_3d,
+        head_dim=self.head_dim,
+        mrope_section=self.mrope_section,
+        rope_theta=self.rope_theta,
+    )
+    cos = cos.astype(self.dtype)
+    sin = sin.astype(self.dtype)
+
+    # 4. Apply stacked Mixture-of-Transformers decoder blocks.
+    if self.scan_layers:
+      assert self.scanned_layers is not None
+      remat = self.remat_policy not in ("none", "")
+      und_seq, gen_seq = nnx_scan.apply_scanned_layers(
+          self.scanned_layers,
+          (und_seq, gen_seq),
+          length=self.num_hidden_layers,
+          param_scan_axis=self.param_scan_axis,
+          apply_fn=lambda layer, carry: layer(carry[0], carry[1], metadata, cos, sin),
+          remat=remat,
+      )
+    else:
+      assert self.layers is not None
+      for layer in self.layers:
+        und_seq, gen_seq = layer(und_seq, gen_seq, metadata, cos, sin)
+
+    # 5. Final pathway RMSNorms.
+    und_seq = self.norm(und_seq)
+    gen_seq = self.norm_moe_gen(gen_seq)
+
+    # 6. Project generation tokens to patch space and unpatchify to [B, C, T, H, W].
+    gen_patches = self.proj_out(gen_seq)
+    preds_vision = unpatchify_latents(
+        gen_patches,
+        t_lat=t_lat,
+        h_lat=h_lat,
+        w_lat=w_lat,
+        patch_size=p,
+        latent_channels=c_lat,
+    )
+
+    if return_hidden_states:
+      last_hidden_state = reinterleave_streams(
+          und_tokens=und_seq,
+          gen_tokens=gen_seq,
+          packed_und_token_indexes=metadata.packed_und_token_indexes,
+          packed_gen_token_indexes=metadata.packed_gen_token_indexes,
+          total_tokens=metadata.total_tokens,
+          use_ragged_ops=self.use_ragged_ops,
+      )
+      return preds_vision, last_hidden_state
+
+    return preds_vision
