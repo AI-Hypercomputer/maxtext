@@ -1894,6 +1894,48 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.update()  # Would raise an in_shardings mismatch without the re-offload.
     self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
 
+  def test_restore_checkpoint_offloads_optimizer_state_before_and_after_restore(self):
+    """`restore_checkpoint` moves moments to pinned_host before Orbax restores and immediately after."""
+    for compile_before_restore in (False, True):
+      with self.subTest(compile_before_restore=compile_before_restore):
+        t = self._adam_engine(enable_checkpointing=True, optimizer_memory_host_offload=True)
+        if compile_before_restore:
+          t.compile(DummyPayload())
+        mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=3)
+        mock_metadata = mock.MagicMock()
+        mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+        mock_metadata.custom_metadata = {"additional_metadata": {"step": 3}}
+        mock_orbax_mgr.metadata.return_value = mock_metadata
+
+        seen_pre_restore_kinds = []
+
+        def fake_restore(step, args):
+          del step, args
+          seen_pre_restore_kinds.append(self._memory_kinds(nnx.state(t.state.optimizer)))
+          device_sharding = jax.sharding.NamedSharding(
+              t._mesh, jax.sharding.PartitionSpec()
+          ).with_memory_kind("device")
+          restored_opt = jax.tree.map(
+              lambda x: jax.device_put(x, device_sharding) if hasattr(x, "sharding") else x,
+              nnx.state(t.state.optimizer, nnx.optimizer.OptState),
+          )
+          return {
+              "model_params": nnx.state(t.state.model),
+              "optimizer_state": restored_opt,
+          }
+
+        mock_orbax_mgr.restore.side_effect = fake_restore
+
+        self.assertEqual(t.restore_checkpoint(), {"step": 3})
+        self.assertEqual(seen_pre_restore_kinds, [{"pinned_host"}])
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
+        if not compile_before_restore:
+          t.compile(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"pinned_host"})
+
   def test_optimizer_offload_on_eager_path(self):
     """`optimizer_memory_host_offload` also applies on the eager path, where `compile()` is never called.
 
