@@ -105,6 +105,7 @@ class MaxTextTrainingEngineProfilingTest(absltest.TestCase):
     """`fwd_bwd` starts the profile and `update` stops it, without an outer loop."""
     cfg = _tiny_config(
         base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
         skip_first_n_steps_for_profiler=1,
         profiler_steps=1,
     )
@@ -125,9 +126,49 @@ class MaxTextTrainingEngineProfilingTest(absltest.TestCase):
     self.start_trace.assert_called_once()
     self.stop_trace.assert_called_once()
 
+  def _profiler_options_from_one_profiled_step(self, **overrides) -> jax.profiler.ProfileOptions:
+    """Runs a single profiled step and returns the options `start_trace` received."""
+    cfg = _tiny_config(
+        base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=0,
+        profiler_steps=1,
+        **overrides,
+    )
+    mesh = _mesh(cfg)
+    with jax.set_mesh(mesh):
+      engine = _engine(cfg, mesh)
+      engine.fwd_bwd(payload=DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2))))
+      engine.update()
+    self.start_trace.assert_called_once()
+    return self.start_trace.call_args.kwargs["profiler_options"]
+
+  def test_the_tpu_options_reach_start_trace_when_enabled(self):
+    """The three keys are inert unless `enable_tpu_profiling_options` is set."""
+    options = self._profiler_options_from_one_profiled_step(
+        enable_tpu_profiling_options=True,
+        tpu_num_chips_to_profile_per_task=1,
+        tpu_num_sparse_core_tiles_to_trace=1,
+        tpu_num_sparse_cores_to_trace=2,
+    )
+    self.assertEqual(
+        dict(options.advanced_configuration),
+        {
+            "tpu_num_chips_to_profile_per_task": 1,
+            "tpu_num_sparse_core_tiles_to_trace": 1,
+            "tpu_num_sparse_cores_to_trace": 2,
+        },
+    )
+
+  def test_the_tpu_options_are_absent_by_default(self):
+    """`enable_tpu_profiling_options` defaults to false, leaving the options untouched."""
+    options = self._profiler_options_from_one_profiled_step()
+    self.assertFalse(options.advanced_configuration)
+
   def test_close_rescues_a_profile_left_open_by_an_interrupted_step(self):
     cfg = _tiny_config(
         base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
         skip_first_n_steps_for_profiler=0,
         profiler_steps=5,
     )
