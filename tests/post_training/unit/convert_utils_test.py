@@ -27,6 +27,7 @@ from maxtext.integration.vllm.convert_utils import (
     DEFAULT_TPU_NUM_LANES,
     is_verify_weights_enabled,
     pad_to_tpu_lanes,
+    resolve_fp8_moe,
     resolve_prefuse_moe_weights,
     resolve_rollout_tp,
 )
@@ -196,6 +197,27 @@ class ConvertUtilsTest(unittest.TestCase):
       rollout_tensor_parallelism = 2
 
     self.assertEqual(resolve_rollout_tp(DummyConfig()), 2)
+
+  def test_resolve_fp8_moe(self):
+    self.assertTrue(resolve_fp8_moe(None, fp8_moe=True))
+    self.assertFalse(resolve_fp8_moe(None, fp8_moe=False))
+
+    class DummyConfig:
+      fp8_moe = True
+
+    self.assertTrue(resolve_fp8_moe(DummyConfig()))
+
+    orig = os.environ.get("FP8_MOE")
+    try:
+      os.environ["FP8_MOE"] = "true"
+      self.assertTrue(resolve_fp8_moe())
+      os.environ["FP8_MOE"] = "false"
+      self.assertFalse(resolve_fp8_moe())
+    finally:
+      if orig is not None:
+        os.environ["FP8_MOE"] = orig
+      else:
+        os.environ.pop("FP8_MOE", None)
 
 
 if __name__ == "__main__":
