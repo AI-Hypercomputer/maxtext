@@ -1,0 +1,43 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Precision-policy specification for DeepSeek-V4 when running in production bfloat16 mode.
+# Lists operations that the official DeepSeek-V4 reference (inference/model.py) explicitly
+# promotes to float32 regardless of activation/weight bfloat16 dtype.
+
+model_family: deepseek4
+production_dtype: bfloat16
+ops:
+  - name: router_gate_logits
+    maxtext_symbol: maxtext.layers.moe.GateLogit.__call__
+    maxtext_config_flag: float32_gate_logits
+    required_compute_dtype: float32
+    official_citation: "inference/model.py:Gate.forward (F.linear(x.float(), self.weight.float()))"
+    bug_reference: b/566474598
+  - name: rms_norm_variance
+    maxtext_symbol: maxtext.layers.normalizations.RMSNorm.__call__
+    required_compute_dtype: float32
+    official_citation: "inference/model.py:RMSNorm.forward (F.rms_norm(x.float(), ...))"
+  - name: attention_softmax_with_sinks
+    maxtext_symbol: maxtext.layers.attentions.AttentionOp.apply_attention_dot
+    required_compute_dtype: float32
+    official_citation: "inference/model.py:MLA.forward (scores.softmax(dim=-1, dtype=torch.float32))"
+  - name: mhc_sinkhorn_normalization
+    maxtext_symbol: maxtext.layers.mhc.sinkhorn
+    required_compute_dtype: float32
+    official_citation: "inference/model.py:Block.hc_pre (hc_scale.float(), Sinkhorn in float32 with eps=1e-6)"
+  - name: csa_indexer_scores
+    maxtext_symbol: maxtext.layers.attention_compressed.DeepseekV4Indexer.__call__
+    required_compute_dtype: float32
+    official_citation: "inference/model.py:Indexer.forward (weights_proj(x).float(), score accumulation in float32)"

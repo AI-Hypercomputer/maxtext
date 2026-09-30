@@ -547,16 +547,22 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             name_prefix = "-".join(map(str, prefix))
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
-            node.bias.value = node.bias.value + jnp.array(update_val)
+            update_arr = jnp.array(update_val)
+            if update_arr.shape != node.bias.value.shape and update_arr.T.shape == node.bias.value.shape:
+              update_arr = update_arr.T
+            node.bias.value = node.bias.value + update_arr
             if getattr(config, "log_moe_bias_norms", False):
-              bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
+              bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(update_arr)
     else:
       # 1. Update main decoder scanned MoE layers.
-      # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
+      # The update from the scan is (num_moe_layers, num_experts) and must be transposed when param_scan_axis=1.
       decoder_layer = getattr(new_state.model.decoder, "moe_layers", new_state.model.decoder)
       decoder_bias = _find_gate_bias(decoder_layer)
       if decoder_bias is not None and moe_bias_updates is not None:
-        decoder_bias.value = decoder_bias.value + jnp.array(moe_bias_updates[0])
+        update_arr = jnp.array(moe_bias_updates[0])
+        if update_arr.shape != decoder_bias.value.shape and update_arr.T.shape == decoder_bias.value.shape:
+          update_arr = update_arr.T
+        decoder_bias.value = decoder_bias.value + update_arr
 
       # 2. Update auxiliary MTP MoE layers (if enabled).
       # Unlike the main decoder, each MTP layer is an individual un-scanned layer
