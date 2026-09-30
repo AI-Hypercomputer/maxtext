@@ -167,7 +167,7 @@ class TrainerCheckpointInferenceLoadTest(unittest.TestCase):
       return None, None, None
 
     with mock.patch.object(engine._checkpoint_manager, "restore_checkpoint", side_effect=spy):  # pylint: disable=protected-access
-      self.assertIsNone(engine.restore_checkpoint())
+      self.assertIsNone(engine.restore_checkpoint(step=0))
     model_state, opt_state = targets["model"], targets["opt"]
 
     self.assertEqual(_pathways_restore_violations(model_state), [])
