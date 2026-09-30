@@ -316,6 +316,16 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
     # Flatten the n_shards dimension back out to match the final model shape, drop wi_0/wi_1.
     new_node = {k: v for k, v in ckpt_node.items() if k not in ("wi_0", "wi_1")}
     new_node["wi"] = wi_interleaved.reshape(*wi_model.shape)
+
+    if "wi_0_scale" in ckpt_node and "wi_1_scale" in ckpt_node and "wi_scale" in model_node:
+      wi_scale_model = model_node["wi_scale"]
+      target_half_scale_dim = wi_scale_model.shape[-1] // 2
+      padded_chunked_scale_0 = _pad_and_chunk(ckpt_node["wi_0_scale"], target_half_scale_dim)
+      padded_chunked_scale_1 = _pad_and_chunk(ckpt_node["wi_1_scale"], target_half_scale_dim)
+      scale_interleaved = jnp.concatenate([padded_chunked_scale_0, padded_chunked_scale_1], axis=-1)
+      new_node = {k: v for k, v in new_node.items() if k not in ("wi_0_scale", "wi_1_scale")}
+      new_node["wi_scale"] = scale_interleaved.reshape(*wi_scale_model.shape)
+
     return new_node
 
   return jax.tree_util.tree_map_with_path(_maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site)
@@ -992,6 +1002,29 @@ def from_pretrained(
                   )
               }
               new_target["wi_1"] = {
+                  "value": jax.ShapeDtypeStruct(
+                      shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                  )
+              }
+          elif k == "wi_scale" and "wi_scale" not in meta_tree and "wi_0_scale" in meta_tree and "wi_1_scale" in meta_tree:
+            if not is_nnx:
+              arr = v
+              half_dim = arr.shape[-1] // 2
+              new_target["wi_0_scale"] = jax.ShapeDtypeStruct(
+                  shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+              )
+              new_target["wi_1_scale"] = jax.ShapeDtypeStruct(
+                  shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+              )
+            else:
+              arr = v["value"]
+              half_dim = arr.shape[-1] // 2
+              new_target["wi_0_scale"] = {
+                  "value": jax.ShapeDtypeStruct(
+                      shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                  )
+              }
+              new_target["wi_1_scale"] = {
                   "value": jax.ShapeDtypeStruct(
                       shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
                   )
