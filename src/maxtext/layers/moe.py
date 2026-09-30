@@ -477,7 +477,7 @@ def _filter_axis_names(
   return filtered or None
 
 
-def fused_moe_input_scale_kwargs(quant, fused_moe_fn) -> dict[str, jax.Array]:
+def fused_moe_lhs_scale_kwargs(quant, fused_moe_fn) -> dict[str, jax.Array]:
   """Static activation-scale kwargs for tpu-inference's `fused_moe_func`.
 
   With `serve_fp8_weight` and a fixed `act_quantization_calibration_method`, both expert
@@ -490,12 +490,12 @@ def fused_moe_input_scale_kwargs(quant, fused_moe_fn) -> dict[str, jax.Array]:
   scale = quant.static_act_scale()
   if scale is None:
     return {}
-  if "w1_input_scale" not in inspect.signature(fused_moe_fn).parameters:
+  if "w1_lhs_scale" not in inspect.signature(fused_moe_fn).parameters:
     raise ValueError(
         f"act_quantization_calibration_method={quant.act_calibration_method!r} requires a tpu-inference whose"
-        " fused_moe_func accepts w1_input_scale / w2_input_scale; upgrade tpu-inference or use 'absmax'."
+        " fused_moe_func accepts w1_lhs_scale / w2_lhs_scale; upgrade tpu-inference or use 'absmax'."
     )
-  return {"w1_input_scale": scale, "w2_input_scale": scale}
+  return {"w1_lhs_scale": scale, "w2_lhs_scale": scale}
 
 
 class Tid2EidVar(nnx.Variable):
@@ -4213,7 +4213,7 @@ class RoutedMoE(nnx.Module):
       quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
     # serve_fp8_weight with a fixed act_quantization_calibration_method: the experts use the
     # same static activation scale as the dense layers ({} keeps the kernel's dynamic scale).
-    input_scale_kwargs = fused_moe_input_scale_kwargs(getattr(self, "quant", None), fused_moe_func)
+    lhs_scale_kwargs = fused_moe_lhs_scale_kwargs(getattr(self, "quant", None), fused_moe_func)
     fused_moe = quantizations.without_qwix_interception(fused_moe_func)
 
     output_2d = fused_moe(
@@ -4231,7 +4231,7 @@ class RoutedMoE(nnx.Module):
         use_ep=use_ep,
         activation=activation,
         scoring_fn=scoring_fn,
-        **input_scale_kwargs,
+        **lhs_scale_kwargs,
         # Forward the same environment-backed kernel knobs that tpu-inference passes on its
         # own serving path (tpu_inference/layers/common/moe.py). Without these, env vars such
         # as ONEHOT_MOE_PERMUTE_THRESHOLD and VLLM_MOE_CHUNK_SIZE are silently ignored when a
