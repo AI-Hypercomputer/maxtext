@@ -1042,6 +1042,17 @@ class MoEGeneral(BaseModel):
           "max all-reduce per MoE layer and token chunk, and a device-to-host fetch per step."
       ),
   )
+  warmup_programs_in_init: bool = Field(
+      False,
+      description=(
+          "After the setup precompiles and before init_stop/run_start are logged, execute each precompiled train "
+          "program (normal, first-phase, dropless) and eval program (eval, eval dropless) once through its jit on a "
+          "synthetic batch (PRNG token ids, never the dataset), discard the outputs so parameters, optimizer state "
+          "and routed biases are unchanged, block on completion and run a cross-host barrier. Moves the first "
+          "execution (and the hosts' arrival skew) out of the scored window. Skipped when the programs are not "
+          "precompiled (compiled_trainstep_file or AutoPGLE)."
+      ),
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -1105,6 +1116,14 @@ class MoEGeneral(BaseModel):
           "DeepSeek routing: take the top-k routing weights with a custom VJP whose backward builds the dense"
           " [..., num_experts] gradient as a one-hot compare-select-sum over the k slots, instead of the scatter-add"
           " that jnp.take_along_axis transposes to. Forward and gradient values are unchanged."
+      ),
+  )
+  moe_topk_before_ep_all_gather: bool = Field(
+      False,
+      description=(
+          "Ring of experts: run top-k on the local tokens and all-gather the top-k weights and expert ids"
+          " instead of the full router logits. The token sort still runs after the all-gather."
+          " Ignored with forced, hash or random routing."
       ),
   )
   use_ring_of_experts: bool = Field(
@@ -1418,6 +1437,12 @@ class DeepSeekMoE(BaseModel):
       " token-overflow flag of moe_dropless_fallback='step' is already reduced once per step without this flag.)",
   )
   log_moe_bias_norms: bool = Field(False, description="Whether to log the norms of MoE router biases.")
+  log_step_diagnostics: bool = Field(
+      False,
+      description="Append to every training step's log line: pre-clip and post-clip global grad norm, param norm,"
+      " max |grad|, the routed-bias checksum (sum over MoE layers of sum(bias)), the number of nonzero routed-bias"
+      " update entries and the MoE overflow flag.",
+  )
   mlp_bias: bool = Field(
       False,
       description="Whether to add a learnable bias for MLP matmul, "
@@ -3823,6 +3848,11 @@ class MaxTextConfig(
           " use_ring_of_experts=True and use_ragged_sort=True."
       )
 
+  def validate_moe_topk_before_ep_all_gather(self):
+    """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
+    if self.moe_topk_before_ep_all_gather and not (self.sparse_matmul and self.use_ring_of_experts):
+      raise ValueError("moe_topk_before_ep_all_gather=True requires sparse_matmul=True and use_ring_of_experts=True.")
+
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor and eval_ragged_buffer_factor are used with supported settings."""
     if self.te_moe_block:
@@ -4955,6 +4985,7 @@ class MaxTextConfig(
       self.validate_moe_log_max_load_ratio()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_topk_before_ep_all_gather()
     self.validate_moe_quantize_combine_bwd_method()
     self.validate_mllog()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()

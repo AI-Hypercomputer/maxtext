@@ -1443,6 +1443,8 @@ class RoutedMoE(nnx.Module):
       compute_lb_loss=True,
       return_expert_counts=False,
       defer_reductions=False,
+      precomputed_topk=None,
+      precomputed_density_prob=None,
   ):
     """Permute tokens to group by expert to fit gmm call.
 
@@ -1455,6 +1457,10 @@ class RoutedMoE(nnx.Module):
       defer_reductions: defer_small_all_reduces. The routed-bias signal is this shard's local expert
         counts, not all-reduced here (see finalize_deferred_bias_signal). Takes precedence over
         return_expert_counts.
+      precomputed_topk: Optional (weights, selected_experts) already computed by the caller; skips
+        get_topk. gate_logits / pre_bias_logits are then unused.
+      precomputed_density_prob: Optional per-sequence mean router probabilities (batch, num_experts)
+        used for the load-balance loss instead of recomputing them from the logits.
     """
     is_qarray = isinstance(inputs, qpl.QArray)
     raw_inputs = inputs.qvalue if is_qarray else inputs
@@ -1462,13 +1468,19 @@ class RoutedMoE(nnx.Module):
     inputs_shape = raw_inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
+    if precomputed_topk is not None:
+      weights, selected_experts = precomputed_topk
+    else:
+      weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
     lb_loss = None
-    # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
-    probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
     if compute_lb_loss and self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
-      softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-      lb_loss = self.load_balance_loss(selected_experts, softmax_probs)
+      if precomputed_density_prob is not None:
+        lb_loss = self.load_balance_loss(selected_experts, None, density_prob=precomputed_density_prob)
+      else:
+        # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
+        probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
+        softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+        lb_loss = self.load_balance_loss(selected_experts, softmax_probs)
 
     if self.should_update_load_balance():
       if defer_reductions:
@@ -2525,13 +2537,33 @@ class RoutedMoE(nnx.Module):
       else:
         x = _ep_all_gather(x)
 
-      # Duplicate routing inputs across all expert shards. Routing evaluates
-      # the full gathered batch; logits, pre_bias_logits, and
-      # forced_routed_experts must follow the identical all-gather so expert
-      # assignments align across shards.
-      logits, pre_bias_logits, forced_routed_experts = tuple(
-          _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
+      local_tokens = logits.shape[0] * logits.shape[1]
+      precomputed_topk = None
+      precomputed_density_prob = None
+      topk_before_all_gather = (
+          self.config.moe_topk_before_ep_all_gather
+          and forced_routed_experts is None
+          and not self.is_hash_routing
+          and not self.config.use_random_routing
       )
+      if topk_before_all_gather:
+        # Top-k is per token, so run it on the local tokens and all-gather only the (batch, seq, k)
+        # weights and expert ids instead of the (batch, seq, num_experts) logits: every shard
+        # otherwise redoes top-k on the full gathered batch, and the logit gather (and its
+        # reduce-scatter in the backward) moves num_experts / k times more bytes. Only the index map
+        # is computed here; permute() below still sorts the gathered tokens.
+        weights, selected_experts = self.get_topk(logits, pre_bias_logits, rngs, input_ids)
+        precomputed_topk = (_ep_all_gather(weights), _ep_all_gather(selected_experts))
+        if self.config.load_balance_loss_weight > 0.0 and not use_megatron_seq_aux_loss:
+          # Per-sequence statistic, so gathering it over EP gives the same loss as the full batch.
+          probs_logits = pre_bias_logits if pre_bias_logits is not None else logits
+          softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+          precomputed_density_prob = _ep_all_gather(jnp.mean(softmax_probs, axis=1))
+        logits, pre_bias_logits = None, None
+      else:
+        logits, pre_bias_logits, forced_routed_experts = tuple(
+            _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
+        )
 
       # "Route" tokens within each shard.
       num_experts_per_shard = self.config.num_experts // num_ep
@@ -2560,12 +2592,12 @@ class RoutedMoE(nnx.Module):
           compute_lb_loss=not use_megatron_seq_aux_loss,
           return_expert_counts=True,
           defer_reductions=defer_small_ars,
+          precomputed_topk=precomputed_topk,
+          precomputed_density_prob=precomputed_density_prob,
       )
       required_rbf = None
       if getattr(self.config, "log_required_ragged_buffer_factor", False):
-        required_rbf = self.required_ragged_buffer_factor(
-            group_sizes, logits.shape[0] * logits.shape[1], num_ep, expert_shard_id
-        )
+        required_rbf = self.required_ragged_buffer_factor(group_sizes, local_tokens * num_ep, num_ep, expert_shard_id)
       return (
           x,
           RouteOutput(
@@ -3768,7 +3800,7 @@ class RoutedMoE(nnx.Module):
     return dispatch_mask, combine_mask
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
-  def load_balance_loss(self, top_k_indices, logits) -> jax.Array:
+  def load_balance_loss(self, top_k_indices, logits, density_prob=None) -> jax.Array:
     """Compute the sequence-wise load balance loss.
 
     For DeepSeek V4 like models, standard load balancing across an entire batch can
@@ -3781,6 +3813,8 @@ class RoutedMoE(nnx.Module):
     into the total training loss. By minimizing this scaled auxiliary loss,
     the optimizer updates the routing parameters to actively enforce an even
     distribution of tokens to experts within each individual sequence.
+
+    `density_prob` optionally passes the precomputed per-sequence mean of `logits` (batch, num_experts).
     """
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
     summed_expert_mask = jnp.sum(expert_mask, axis=2)
@@ -3790,7 +3824,8 @@ class RoutedMoE(nnx.Module):
     density = jnp.mean(summed_expert_mask, axis=1) / self.num_experts_per_tok
     # get fraction of probability allocated to each expert
     # jnp.mean over axis=1 isolates the routing probability per sequence.
-    density_prob = jnp.mean(logits, axis=1)
+    if density_prob is None:
+      density_prob = jnp.mean(logits, axis=1)
     # The sequence-wise densities and probabilities are multiplied and then averaged
     # over the batch dimension, scaled by the required constant.
     loss = jnp.mean(density * density_prob) * (self.num_experts**2) * self.config.load_balance_loss_weight
