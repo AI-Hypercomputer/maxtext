@@ -36,6 +36,7 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import moe_combine_tc
 from maxtext.kernels import sort_activations
 from maxtext.kernels.megablox import split_gmm
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
@@ -64,6 +65,18 @@ import qwix.pallas as qpl
 import tokamax
 
 set_xla_metadata = xla_metadata.set_xla_metadata
+
+
+def _g4_combine_mode() -> str:
+  """MAXTEXT_G4_COMBINE: "0" (default, baseline unsort + einsum) or "tc"."""
+  mode = os.environ.get("MAXTEXT_G4_COMBINE", "0").strip().lower()
+  return mode if mode == "tc" else "0"
+
+
+def _g4_scale_onehot() -> bool:
+  """MAXTEXT_G4_SCALE_ONEHOT (default: on iff MAXTEXT_G4_COMBINE is on)."""
+  default = "1" if _g4_combine_mode() != "0" else "0"
+  return os.environ.get("MAXTEXT_G4_SCALE_ONEHOT", default) == "1"
 
 
 DISPATCH = "dispatch"
@@ -1188,7 +1201,15 @@ class RoutedMoE(nnx.Module):
       if self.per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
       ):
-        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
+        if _g4_scale_onehot():
+          # Compare/select + reduce on the TensorCore instead of a tiny
+          # take_along_axis gather (which XLA offloads to SparseCore). Exact:
+          # exactly one term is non-zero; its VJP is a reduction, not a scatter.
+          scale = self.per_expert_scale.value
+          hit = top_k_indices[..., None] == jnp.arange(scale.shape[0], dtype=top_k_indices.dtype)
+          per_expert_scale_topk = jnp.sum(jnp.where(hit, scale, jnp.zeros((), scale.dtype)), axis=-1)
+        else:
+          per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return top_k_weights, top_k_indices
@@ -1514,6 +1535,18 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
+    elif self._use_fused_combine(intermediate, weights, group_sizes):
+      # MAXTEXT_G4_COMBINE=tc: fused unpermute + top-k weighted sum (f32
+      # accumulation, same arithmetic as float32_weight_sum=True). Never
+      # materializes the [tokens*top_k, emb] unsorted copy; see
+      # kernels/moe_combine_tc.py.
+      with jax.named_scope("moe_combine"):
+        output = moe_combine_tc.combine(
+            intermediate,
+            sorted_selected_experts,
+            jnp.reshape(weights, (-1, self.num_experts_per_tok)),
+            group_sizes,
+        )
     else:
       unsort_intermediate = _unsort_activations(
           intermediate,
@@ -1540,6 +1573,23 @@ class RoutedMoE(nnx.Module):
             precision=matmul_precision,
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
+
+  def _use_fused_combine(self, intermediate, weights, group_sizes) -> bool:
+    """True iff MAXTEXT_G4_COMBINE selects the fused combine and it is valid here.
+
+    Valid only for the plain local sort: every token*top_k row is present in
+    `intermediate` in stable expert-sorted order and `group_sizes` sums to the
+    row count (no expert parallelism, no truncated/ragged buffers).
+    """
+    if _g4_combine_mode() == "0" or group_sizes is None:
+      return False
+    if not isinstance(intermediate, jax.Array) or intermediate.ndim != 2:
+      return False
+    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+      return False
+    if self.get_expert_parallelism_size() != 1 or self.config.use_ring_of_experts:
+      return False
+    return intermediate.shape[0] == math.prod(weights.shape) and group_sizes.ndim == 1
 
   @staticmethod
   def _maybe_truncate_local_group_size(
