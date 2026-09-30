@@ -1576,6 +1576,7 @@ class NNXDecoder(nnx.Module):
         and getattr(cfg, "mtp_num_layers", 0) > 0
         and model_mode == MODEL_MODE_TRAIN
         and cfg.num_vocab_tiling <= 1
+        and not getattr(cfg, "quantize_logits_proj", False)
         and cfg.attention not in ("vllm_rpa", "vllm_batched_rpa")
         and not self._is_indexer_dense_warmup(model_mode)
     )

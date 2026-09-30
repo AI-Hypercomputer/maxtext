@@ -4918,6 +4918,9 @@ class MaxTextConfig(
       raise ValueError("`mtp_reuse_input_embedding` does not support multimodal inputs.")
     if self.mtp_merge_output_head and self.num_vocab_tiling > 1:
       raise ValueError("`mtp_merge_output_head` does not support `num_vocab_tiling > 1`.")
+    if self.mtp_merge_output_head and self.quantize_logits_proj:
+      # A merged call would share the fp8 activation and gradient scales between the main and MTP heads.
+      raise ValueError("`mtp_merge_output_head` does not support `quantize_logits_proj`.")
     if self.quantize_mtp:
       if self.mtp_num_layers <= 0:
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
