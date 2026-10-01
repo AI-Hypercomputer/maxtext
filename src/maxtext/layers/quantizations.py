@@ -1123,6 +1123,12 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
 
   if config.quantize_logits_proj:
     logits_calib = config.logits_proj_quant_calibration_method or None
+    logits_bwd_calib = getattr(config, "logits_proj_bwd_quant_calibration_method", "") or None
+    logits_drhs_override = (
+        {"drhs_grad_calibration_method": logits_bwd_calib}
+        if logits_bwd_calib
+        else _drhs_grad_calibration_override(config)
+    )
     rules.append(
         qwix.QtRule(
             module_path="decoder/logits_dense.*",
@@ -1131,8 +1137,8 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
             bwd_qtype=jnp.float8_e5m2,
             weight_calibration_method=logits_calib or config.weight_quantization_calibration_method,
             act_calibration_method=logits_calib or config.act_quantization_calibration_method,
-            bwd_calibration_method=config.bwd_quantization_calibration_method,
-            additional_qt_config=_drhs_grad_calibration_override(config) or None,
+            bwd_calibration_method=logits_bwd_calib or config.bwd_quantization_calibration_method,
+            additional_qt_config=logits_drhs_override or None,
             op_names=("dot_general",),
         )
     )

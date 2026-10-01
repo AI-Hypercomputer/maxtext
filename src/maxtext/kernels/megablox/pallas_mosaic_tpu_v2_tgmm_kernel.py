@@ -565,13 +565,15 @@ def tgmm_kernel_main(
     semaphore_ref: DMA semaphore for the zeroing copies.
     cfgs: GmmConfigs object containing kernel configurations.
   """
-  num_groups_to_zero = zero_out_start(
-      lhs_group_sizes_ref,
-      group_offset_ref,
-      out_ref,
-      zero_ref,
-      semaphore_ref,
-  )
+  num_groups_to_zero = 0
+  if not cfgs.has_partial_sum:
+    num_groups_to_zero = zero_out_start(
+        lhs_group_sizes_ref,
+        group_offset_ref,
+        out_ref,
+        zero_ref,
+        semaphore_ref,
+    )
 
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.dims.size_n, cfgs.tiles.tile_n)
@@ -599,11 +601,12 @@ def tgmm_kernel_main(
   scratches = [acc_ref, metadata_ref]
 
   pipeline_fn(lhs_in, rhs_operand, ps_in, out_ref, scratches=scratches)
-  zero_out_end(
-      num_groups_to_zero,
-      out_ref,
-      semaphore_ref,
-  )
+  if not cfgs.has_partial_sum:
+    zero_out_end(
+        num_groups_to_zero,
+        out_ref,
+        semaphore_ref,
+    )
 
 
 def validate_tgmm_inputs(
@@ -753,6 +756,10 @@ def tgmm_v2(
   hbm_spec = pl.BlockSpec(memory_space=pltpu.HBM)
   partial_sum_spec = None
   if partial_sum is not None:
+    pad_k = aligned_k - dims.size_k
+    pad_n = aligned_n - dims.size_n
+    if pad_k > 0 or pad_n > 0:
+      partial_sum = jnp.pad(partial_sum, ((0, 0), (0, pad_k), (0, pad_n)))
     partial_sum_spec = hbm_spec
   in_specs = [
       hbm_spec,  # lhs
@@ -790,8 +797,4 @@ def tgmm_v2(
       input_output_aliases=input_output_aliases,
   )(group_sizes, group_offset, lhs, rhs, partial_sum)[:, : dims.size_k, : dims.size_n]
 
-  if partial_sum is not None:
-    local_group_sizes = lax.dynamic_slice(group_sizes, (group_offset[0],), (num_actual_groups,))
-    empty_mask = (local_group_sizes == 0).reshape(num_actual_groups, 1, 1)
-    return jnp.where(empty_mask, partial_sum, raw_out)
   return raw_out

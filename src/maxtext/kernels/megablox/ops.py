@@ -76,6 +76,10 @@ def gmm(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    return_rhs: bool = False,
+    return_lhs: bool = False,
+    fuse_dlhs_scale: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   if interpret is None:
@@ -107,12 +111,14 @@ def gmm(
           act_calibration_method="absmax",
       )
 
+  lhs_dtype = preferred_element_type if isinstance(lhs, qpl.QArray) else lhs.dtype
+  rhs_dtype = preferred_element_type if isinstance(rhs, qpl.QArray) else rhs.dtype
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21),
   )
-  gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
+  gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   return gmm_fwd_bwd(
       lhs,
       rhs,
@@ -132,6 +138,10 @@ def gmm(
       use_gmm_v2,
       use_gmm_v2_heuristic_tiling,
       partial_sum,
+      return_rhs,
+      return_lhs,
+      fuse_dlhs_scale,
+      use_dlhs_transpose_rhs,
   )
 
 
@@ -169,6 +179,10 @@ def _gmm_fwd(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    return_rhs: bool = False,
+    return_lhs: bool = False,
+    fuse_dlhs_scale: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -241,7 +255,16 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  return out, (
+  del fuse_dlhs_scale, use_dlhs_transpose_rhs
+  if return_rhs and return_lhs:
+    fwd_out = (out, rhs, lhs)
+  elif return_rhs:
+    fwd_out = (out, rhs)
+  elif return_lhs:
+    fwd_out = (out, lhs)
+  else:
+    fwd_out = out
+  return fwd_out, (
       lhs,
       rhs,
       group_sizes,
@@ -497,6 +520,10 @@ def _gmm_bwd(
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
+    return_rhs: bool,
+    return_lhs: bool,
+    fuse_dlhs_scale: bool,
+    use_dlhs_transpose_rhs: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -526,6 +553,20 @@ def _gmm_bwd(
       rhs_is_qarray,
   ) = residual
   num_actual_groups = residual_rhs.shape[0]
+  drhs_partial_sum = None
+  dlhs_partial_sum = None
+  if return_rhs and return_lhs:
+    grad, drhs_partial_sum, dlhs_partial_sum = grad
+  elif return_rhs:
+    grad, drhs_partial_sum = grad
+  elif return_lhs:
+    grad, dlhs_partial_sum = grad
+  if isinstance(drhs_partial_sum, qpl.QArray):
+    drhs_partial_sum = drhs_partial_sum.qvalue
+  if transpose_rhs and drhs_partial_sum is not None:
+    drhs_partial_sum = drhs_partial_sum.swapaxes(1, 2)
+  if isinstance(dlhs_partial_sum, qpl.QArray):
+    dlhs_partial_sum = dlhs_partial_sum.qvalue
 
   # Jargon used here:
   #  - lhs: input activation in forward pass, possibly quantized.
@@ -551,8 +592,12 @@ def _gmm_bwd(
   if quantization_rule:
     dlhs_dout, drhs_dout = _bwd_quantize_gradient(dlhs_dout, drhs_dout, quantization_rule)
 
+  lhs_scale_for_dlhs = None
+  if lhs_is_qarray and isinstance(residual_lhs, qpl.QArray):
+    lhs_scale_for_dlhs = residual_lhs.scale
+
   # 3. DLHS Gradient Execution
-  dlhs = _compute_dlhs(
+  dlhs, lhs_scale_applied = _compute_dlhs(
       dlhs_dout,
       rhs,
       group_sizes,
@@ -566,6 +611,10 @@ def _gmm_bwd(
       interpret,
       lhs_vma_axes,
       use_gmm_v2_heuristic_tiling,
+      partial_sum=dlhs_partial_sum,
+      lhs_scale=lhs_scale_for_dlhs,
+      fuse_dlhs_scale=fuse_dlhs_scale,
+      use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
   )
 
   # 4. DRHS Gradient Execution
@@ -585,6 +634,7 @@ def _gmm_bwd(
       rhs_vma_axes,
       quantization_rule,
       use_gmm_v2_heuristic_tiling,
+      partial_sum=drhs_partial_sum,
   )
 
   # 5. Output Formatting
@@ -599,10 +649,14 @@ def _gmm_bwd(
   # If forward inputs were QArray, wrap cotangents in QArray to match JAX pytree container
   # structure expected by autodiff.
   if lhs_is_qarray and isinstance(residual_lhs, qpl.QArray):
-    # Scale dlhs by lhs_scale to propagate chain rule through pre-quantized QArray input.
-    lhs_scale = (residual_lhs.scale.squeeze() if residual_lhs.scale.size == 1 else residual_lhs.scale).astype(dlhs.dtype)
+    if not lhs_scale_applied:
+      # Scale dlhs by lhs_scale to propagate chain rule through pre-quantized QArray input.
+      lhs_scale = (residual_lhs.scale.squeeze() if residual_lhs.scale.size == 1 else residual_lhs.scale).astype(
+          dlhs.dtype
+      )
+      dlhs = dlhs * lhs_scale
     dlhs = qpl.QArray(
-        qvalue=dlhs * lhs_scale,
+        qvalue=dlhs,
         scale=jnp.zeros_like(residual_lhs.scale),
         zero_point=jnp.zeros_like(residual_lhs.zero_point) if residual_lhs.zero_point is not None else None,
         qtype=residual_lhs.qtype,
@@ -667,7 +721,17 @@ def _bwd_prepare_inputs(
   # Apply lhs.scale to drhs_dout, as axis m will disappear in drhs.
   if isinstance(lhs, qpl.QArray):
     # lhs - qvalue: [m, k] scale: [m, 1]
-    drhs_dout = drhs_dout * (lhs.scale.squeeze() if lhs.scale.size == 1 else lhs.scale).astype(grad.dtype)
+    if (
+        quantization_rule is not None
+        and quantization_rule.weight_qtype == quantization_rule.act_qtype
+        and quantization_rule.weight_calibration_method is not None
+        and quantization_rule.weight_calibration_method == quantization_rule.act_calibration_method
+        and quantization_rule.weight_calibration_method.lower().startswith("fixed")
+        and lhs.scale.size == 1
+    ):
+      drhs_dout = dlhs_dout
+    else:
+      drhs_dout = drhs_dout * (lhs.scale.squeeze() if lhs.scale.size == 1 else lhs.scale).astype(grad.dtype)
     lhs = lhs.qvalue
 
   return dlhs_dout, drhs_dout, lhs, rhs
@@ -680,20 +744,27 @@ def _bwd_quantize_gradient(
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Applies backward quantization to incoming gradients."""
   if quantization_rule.bwd_qtype:
+    add_cfg = getattr(quantization_rule, "additional_qt_config", None) or {}
+    dlhs_cal = quantization_rule.bwd_calibration_method
+    drhs_cal = add_cfg.get("drhs_grad_calibration_method") or dlhs_cal
+    same_input = dlhs_dout is drhs_dout
     dlhs_dout = qpl.quantize(
         # pyrefly: ignore[bad-argument-type]
         dlhs_dout,
         quantization_rule.bwd_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-        calibration_method=quantization_rule.bwd_calibration_method,
+        calibration_method=dlhs_cal,
     )
-    drhs_dout = qpl.quantize(
-        # pyrefly: ignore[bad-argument-type]
-        drhs_dout,
-        quantization_rule.bwd_qtype,
-        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
-        calibration_method=quantization_rule.bwd_calibration_method,
-    )
+    if same_input and dlhs_cal == drhs_cal and dlhs_cal is not None and dlhs_cal.lower().startswith("fixed"):
+      drhs_dout = dlhs_dout
+    else:
+      drhs_dout = qpl.quantize(
+          # pyrefly: ignore[bad-argument-type]
+          drhs_dout,
+          quantization_rule.bwd_qtype,
+          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
+          calibration_method=drhs_cal,
+      )
   return dlhs_dout, drhs_dout
 
 
@@ -716,10 +787,14 @@ def _compute_dlhs(
     interpret: bool,
     lhs_vma_axes: tuple,
     use_gmm_v2_heuristic_tiling: bool,
-) -> jnp.ndarray:
+    partial_sum: jnp.ndarray | None = None,
+    lhs_scale: jnp.ndarray | None = None,
+    fuse_dlhs_scale: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
+) -> tuple[jnp.ndarray, bool]:
   """Routes execution of DLHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
-    return _dlhs_run_tokamax_v1(
+    dlhs = _dlhs_run_tokamax_v1(
         dlhs_dout,
         rhs,
         group_sizes,
@@ -727,14 +802,27 @@ def _compute_dlhs(
         transpose_rhs,
         use_manual_quantization,
     )
+    return (dlhs + partial_sum if partial_sum is not None else dlhs), False
   elif use_tokamax_backend and use_gmm_v2:
     return _dlhs_run_tokamax_v2(
-        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, use_gmm_v2_heuristic_tiling, transpose_rhs
+        dlhs_dout,
+        rhs,
+        group_sizes,
+        group_offset,
+        lhs_dtype,
+        tiling,
+        use_gmm_v2_heuristic_tiling,
+        transpose_rhs,
+        partial_sum=partial_sum,
+        lhs_scale=lhs_scale,
+        fuse_dlhs_scale=fuse_dlhs_scale,
+        use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
     )
   else:
-    return _dlhs_run_megablox(
+    dlhs = _dlhs_run_megablox(
         dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs, interpret, lhs_vma_axes
     )
+    return (dlhs + partial_sum if partial_sum is not None else dlhs), False
 
 
 def _dlhs_run_tokamax_v1(
@@ -785,7 +873,7 @@ def _dlhs_scale_grad_by_rhs_scale(
 
   # 2. Apply scale (handle shared vs per-expert scales)
   if rhs_scale.shape[0] == 1:
-    return grad * rhs_scale.astype(grad.dtype)
+    return grad * (rhs_scale.squeeze() if rhs_scale.size == 1 else rhs_scale).astype(grad.dtype)
   else:
     repeated_scale = jnp.repeat(
         rhs_scale.astype(grad.dtype),
@@ -805,16 +893,41 @@ def _dlhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     transpose_rhs: bool,
-) -> jnp.ndarray:
+    partial_sum: jnp.ndarray | None = None,
+    lhs_scale: jnp.ndarray | None = None,
+    fuse_dlhs_scale: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
+) -> tuple[jnp.ndarray, bool]:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
-  # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs support.
-  dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
-  dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
+  if use_dlhs_transpose_rhs:
+    dlhs_rhs = rhs
+    kernel_transpose_rhs = not transpose_rhs
+  else:
+    dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
+    kernel_transpose_rhs = False
+  is_qarray_dout = isinstance(dlhs_dout, qpl.QArray)
+  dlhs_lhs = dlhs_dout.qvalue if is_qarray_dout else dlhs_dout
 
   if use_gmm_v2_heuristic_tiling:
     dlhs_tiling = gmm_v2.calculate_tiling
   else:
     dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+
+  can_fuse_scale = (
+      (fuse_dlhs_scale or partial_sum is not None)
+      and is_qarray_dout
+      and dlhs_dout.scale.size == 1
+      and (lhs_scale is None or lhs_scale.size == 1)
+  )
+  kernel_lhs_scale = None
+  kernel_partial_sum = None
+  lhs_scale_applied = False
+  if can_fuse_scale:
+    kernel_lhs_scale = dlhs_dout.scale.astype(jnp.float32).reshape(1, 1)
+    if lhs_scale is not None:
+      kernel_lhs_scale = kernel_lhs_scale * lhs_scale.astype(jnp.float32).reshape(1, 1)
+      lhs_scale_applied = True
+    kernel_partial_sum = partial_sum
 
   dlhs = gmm_v2.gmm_v2(
       lhs=dlhs_lhs,
@@ -822,18 +935,28 @@ def _dlhs_run_tokamax_v2(
       group_sizes=group_sizes,
       # rhs scale is already applied to dlhs_lhs
       rhs_scale=None,
+      partial_sum=kernel_partial_sum,
       tile_info=dlhs_tiling,
       preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
+      lhs_scale=kernel_lhs_scale,
       # Bypass internal quantization if incoming dlhs_dout is already a QArray.
-      maybe_quantize_lhs=not isinstance(dlhs_dout, qpl.QArray),
+      maybe_quantize_lhs=not is_qarray_dout,
+      transpose_rhs=kernel_transpose_rhs,
   )
 
-  # Rescale dlhs by dlhs_dout.scale when incoming gradient was pre-quantized QArray.
-  if isinstance(dlhs_dout, qpl.QArray):
-    dlhs = dlhs * (dlhs_dout.scale.squeeze() if dlhs_dout.scale.size == 1 else dlhs_dout.scale).astype(dlhs.dtype)
+  if not can_fuse_scale:
+    # Rescale dlhs by dlhs_dout.scale when incoming gradient was pre-quantized QArray.
+    if is_qarray_dout:
+      dlhs = dlhs * (dlhs_dout.scale.squeeze() if dlhs_dout.scale.size == 1 else dlhs_dout.scale).astype(dlhs.dtype)
+    if partial_sum is not None:
+      if lhs_scale is not None:
+        lhs_s = (lhs_scale.squeeze() if lhs_scale.size == 1 else lhs_scale).astype(dlhs.dtype)
+        dlhs = dlhs * lhs_s
+        lhs_scale_applied = True
+      dlhs = dlhs + partial_sum
 
-  return dlhs
+  return dlhs, lhs_scale_applied
 
 
 def _dlhs_run_megablox(
@@ -882,13 +1005,22 @@ def _compute_drhs(
     rhs_vma_axes: tuple,
     quantization_rule: qwix.QtRule | None,
     use_gmm_v2_heuristic_tiling: bool,
+    partial_sum: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
     drhs = _drhs_run_tokamax_v1(drhs_dout, lhs, group_sizes, rhs_dtype, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
     drhs = _drhs_run_tokamax_v2(
-        drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, use_gmm_v2_heuristic_tiling
+        drhs_dout,
+        lhs,
+        group_sizes,
+        group_offset,
+        num_actual_groups,
+        rhs_dtype,
+        tiling,
+        use_gmm_v2_heuristic_tiling,
+        partial_sum=partial_sum,
     )
   else:
     drhs = _drhs_run_megablox(
@@ -957,6 +1089,7 @@ def _drhs_run_tokamax_v2(
     rhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
+    partial_sum: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
   """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
@@ -977,6 +1110,7 @@ def _drhs_run_tokamax_v2(
       group_sizes=group_sizes,
       num_actual_groups=num_actual_groups,
       rhs_scale=rhs_scale,
+      partial_sum=partial_sum,
       precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=rhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,

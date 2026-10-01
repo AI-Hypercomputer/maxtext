@@ -566,6 +566,9 @@ class Quantization(BaseModel):
           " Only supported with `quantization=fp8_full`, `logits_via_embedding=False`, and `num_vocab_tiling = 1`."
       ),
   )
+  logits_proj_bwd_quant_calibration_method: str = Field(
+      "", description="Backward calibration method override for logits_dense."
+  )
   logits_proj_quant_calibration_method: str = Field(
       "",
       description=(
@@ -1073,6 +1076,18 @@ class MoEGeneral(BaseModel):
           " reduce-scatter overlaps the previous chunk's GMM compute. Requires"
           " use_ring_of_experts=True."
       ),
+  )
+  moe_accumulate_wi_dlhs: bool = Field(
+      False,
+      description="Accumulate MoE wi_0/wi_1 backward DLHS in-place via gmm_v2 partial_sum and fuse dlhs scale.",
+  )
+  moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
+      False,
+      description="Use native transpose_rhs in gmm_v2 backward DLHS to avoid explicit RHS transpose copy.",
+  )
+  moe_accumulate_chunk_wgrad: bool = Field(
+      False,
+      description="Accumulate MoE weight gradients in-place across token chunks via tgmm_v2 partial_sum.",
   )
   moe_chunk_barrier: bool = Field(
       False,
