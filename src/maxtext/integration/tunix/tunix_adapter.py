@@ -21,6 +21,7 @@ It also handles weight mapping for compatibility with Hugging Face models.
 
 from __future__ import annotations
 
+import contextlib
 from typing import Any, Optional, Tuple
 
 import jax.numpy as jnp
@@ -64,9 +65,19 @@ def _compat_top_k(operand, k, axis=-1):
     return _orig_top_k(operand, k, axis=axis)
 
 
-jax.lax.with_sharding_constraint = _compat_wsc
-# pyrefly: ignore[bad-assignment]
-jax.lax.top_k = _compat_top_k
+@contextlib.contextmanager
+def _jax_compat_shims():
+  """Applies the shims only while the adapter runs, so they don't leak into other code in the process."""
+  prev_wsc, prev_top_k = jax.lax.with_sharding_constraint, jax.lax.top_k
+  jax.lax.with_sharding_constraint = _compat_wsc
+  # pyrefly: ignore[bad-assignment]
+  jax.lax.top_k = _compat_top_k
+  try:
+    yield
+  finally:
+    jax.lax.with_sharding_constraint = prev_wsc
+    # pyrefly: ignore[bad-assignment]
+    jax.lax.top_k = prev_top_k
 
 
 def _segment_ids_from_attention_mask(attention_mask: Array, input_tokens: Array) -> Array:
@@ -156,12 +167,13 @@ class TunixMaxTextAdapter(nnx.Module):
       decoder_segment_ids = _segment_ids_from_attention_mask(attention_mask, input_tokens)
     if decoder_segment_ids is None and self._pad_id is not None:
       decoder_segment_ids = (input_tokens != self._pad_id).astype(jnp.int32)
-    logits = self.base(
-        decoder_input_tokens=input_tokens,
-        decoder_positions=positions,
-        decoder_segment_ids=decoder_segment_ids,
-        forced_routed_experts=forced_routed_experts,
-    )
+    with _jax_compat_shims():
+      logits = self.base(
+          decoder_input_tokens=input_tokens,
+          decoder_positions=positions,
+          decoder_segment_ids=decoder_segment_ids,
+          forced_routed_experts=forced_routed_experts,
+      )
     return logits, None
 
   def to_hf_mappings(self):
