@@ -33,7 +33,7 @@ NdInitializer = Callable[[PRNGKey, Shape, DType, InitializerAxis, InitializerAxi
 def _default_embed_init(key, shape, dtype=jnp.float32):
   target_dtype = dtype
   sample_dtype = jnp.float32 if is_fp8_dtype(dtype) else dtype
-  fn = nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
+  fn = jax.nn.initializers.variance_scaling(1.0, "fan_in", "normal", out_axis=0)
   return fn(key, shape, sample_dtype).astype(target_dtype)
 
 
