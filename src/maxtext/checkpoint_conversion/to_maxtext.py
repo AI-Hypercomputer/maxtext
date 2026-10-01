@@ -73,7 +73,7 @@ from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf
 from maxtext.inference.inference_utils import str2bool
 from maxtext.layers import quantizations
 from maxtext.models import models
-from maxtext.utils import max_logging, max_utils, maxtext_utils
+from maxtext.utils import index_share_utils, max_logging, max_utils, maxtext_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
@@ -88,7 +88,7 @@ except ImportError:
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
 
 
-def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any]) -> Any:
+def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any], config: Any = None) -> Any:
   """Resolves missing indexer parameters for GLM-5.2 Shared (S) layers from preceding Full (F) donor layers.
 
   Use-Case:
@@ -96,7 +96,7 @@ def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any]) ->
     on Shared (S) layers (e.g., layers 1, 2, 3) because they share weights with the preceding
     Full (F) donor layer (e.g., layer 0). When constructing the MaxText model state (or when
     prune_shared_indexers=False), any missing indexer weight on a shared layer is resolved
-    by searching backwards for the closest preceding donor layer containing the physical tensor.
+    by determining the donor layer via `get_donor_layer_idx`.
   """
   str_key = str(key)
   if "indexer" in str_key and str_key.startswith("model.layers."):
@@ -104,7 +104,18 @@ def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any]) ->
     if m:
       layer_idx = int(m.group(1))
       rest = m.group(2)
-      # Search backwards for the closest preceding donor layer containing the key
+      pattern = getattr(config, "index_share_pattern", None) if config else None
+      if pattern:
+        num_layers = getattr(config, "base_num_decoder_layers", layer_idx + 1)
+        pattern_tuple = index_share_utils.parse_index_share_pattern(pattern, num_layers)
+        donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern_tuple)
+        donor_key = f"model.layers.{donor_idx}.{rest}"
+        try:
+          return getter_fn(donor_key)
+        except (KeyError, ValueError, FileNotFoundError):
+          pass
+
+      # Fallback: search backwards for closest preceding donor layer containing the key
       for candidate_idx in range(layer_idx - 1, -1, -1):
         donor_key = f"model.layers.{candidate_idx}.{rest}"
         try:
@@ -1045,7 +1056,7 @@ def main(
         try:
           return orig_tensor_getter(key)
         except (ValueError, KeyError) as e:
-          donor_tensor = _resolve_shared_indexer_tensor(key, orig_tensor_getter)
+          donor_tensor = _resolve_shared_indexer_tensor(key, orig_tensor_getter, config=config)
           if donor_tensor is not None:
             return donor_tensor
           raise e
