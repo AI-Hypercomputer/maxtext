@@ -72,6 +72,7 @@ from maxtext.common.goodput import (
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
+from maxtext.utils import bwd_delayed_scaling
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -563,6 +564,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
     grad_func = jax.value_and_grad(diff_wrapper, argnums=(0, 1), has_aux=True)
     (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
+    if config.bwd_delayed_scaling:
+      # The bwd_dscale gradients hold this step's global amax per (layer, site): next step's scale and history.
+      custom_grads, dscale_metrics = bwd_delayed_scaling.apply_update(custom_params, custom_grads)
     nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
 
   raw_grads = jax.tree_util.tree_map(
@@ -697,6 +701,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     scalar_metrics["learning/moe_max_load_ratio"] = aux["moe_max_load_ratio"]
     scalar_metrics["learning/moe_max_load_ratio_mean"] = aux["moe_max_load_ratio_mean"]
   scalar_metrics.update(bias_metrics)
+  if config.bwd_delayed_scaling and config.gradient_accumulation_steps == 1:
+    scalar_metrics.update(dscale_metrics)
   if config.use_qk_clip:
     new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)
 

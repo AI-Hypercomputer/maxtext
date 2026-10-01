@@ -43,6 +43,7 @@ from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
 import flax.linen as nn
 from flax import nnx
+
 # Support different packaging structures across environments even within
 # the same Qwix version identifier (imports from _src.utils vs _src).
 try:
@@ -69,6 +70,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype
 from maxtext.inference.kvcache import KVQuant
+from maxtext.utils import bwd_delayed_scaling
 from maxtext.utils import max_logging
 
 # Params used to define mixed precision quantization configs
@@ -1143,6 +1145,13 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   # Disjunct regex paths, e.g. "(path1|path2|...)"
   module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
 
+  bwd_calib = config.bwd_quantization_calibration_method
+  drhs_override = _drhs_grad_calibration_override(config)
+  if getattr(config, "bwd_delayed_scaling", False):
+    # Delayed scaling: the layers' bwd quantizers read their scale from the layer state inside a tap; the method
+    # after the sentinel is the fallback for matching dots outside the layers (e.g. the MTP input projection).
+    bwd_calib = bwd_delayed_scaling.bwd_calibration_method(bwd_calib)
+    drhs_override = {k: bwd_delayed_scaling.bwd_calibration_method(v) for k, v in drhs_override.items()}
   rules.append(
       qwix.QtRule(
           module_path=module_path,
@@ -1151,8 +1160,8 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
           bwd_qtype=jnp.float8_e5m2,
           weight_calibration_method=config.weight_quantization_calibration_method,
           act_calibration_method=config.act_quantization_calibration_method,
-          bwd_calibration_method=config.bwd_quantization_calibration_method,
-          additional_qt_config={"sparsity_rule": sparsity_rule, **_drhs_grad_calibration_override(config)},
+          bwd_calibration_method=bwd_calib,
+          additional_qt_config={"sparsity_rule": sparsity_rule, **drhs_override},
           op_names=("dot_general", "gmm", "ragged_dot"),
       )
   )
@@ -1203,10 +1212,40 @@ def get_quantization_rule(config: Config):
       return None
 
 
+class DelayedScalingQtProvider(qwix.QtProvider):
+  """qwix.QtProvider whose quantized dot_generals run inside bwd_delayed_scaling.tap (bwd_delayed_scaling).
+
+  Same as qwix.QtProvider.dot_general, except that the DotGeneralQtConfig is resolved here, in the module context
+  (Qwix identifies rules and weights from the calling module), and the context-free dot_general_qt call is what the
+  tap re-traces in its custom_vjp forward, which JAX may invoke outside that context (remat in the layer scan).
+  """
+
+  def dot_general(self, lhs, rhs, dimension_numbers, precision=None, preferred_element_type=None, *, out_sharding=None):
+    rule, op_id = self._get_current_rule_and_op_id("dot_general")
+    if rule is None or rule.weight_qtype is None:
+      return jax.lax.dot_general(
+          lhs,
+          rhs,
+          dimension_numbers,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          out_sharding=out_sharding,
+      )
+    config = self._create_dot_general_qt_config(rule, op_id, lhs, rhs)
+
+    def fn(a, b):
+      return dot_general_qt.dot_general_qt(a, b, dimension_numbers, config)
+
+    return bwd_delayed_scaling.tap(op_id, fn, lhs, rhs)
+
+
 def get_qt_provider(config):
   """Get quantization rules based on the config."""
+  bwd_delayed_scaling.configure(config)
   match config.quantization:
     case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
+      if bwd_delayed_scaling.enabled():
+        return DelayedScalingQtProvider(get_quantization_rule(config))
       return qwix.QtProvider(get_quantization_rule(config))
     case "fp8_gpu":
       return NvidaFp8Provider(get_quantization_rule(config))

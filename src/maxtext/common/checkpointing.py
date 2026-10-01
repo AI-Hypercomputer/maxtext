@@ -387,6 +387,12 @@ def _restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
 
 
+def _is_bwd_dscale(path):
+  """bwd_delayed_scaling state is not a weight: a params checkpoint never has it, and a params-only restore leaves it
+  at its initial value (utils/bwd_delayed_scaling.py)."""
+  return "bwd_dscale" in map(str, path)
+
+
 def _abstract_params(abstract_unboxed_pre_state):
   """Returns the state's weights: persistent model variables (excluding transient state), or Linen's `params` collection."""
   if isinstance(abstract_unboxed_pre_state, nnx.State):
@@ -395,10 +401,14 @@ def _abstract_params(abstract_unboxed_pre_state):
     )
     return model_state.filter(
         lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+        and not _is_bwd_dscale(path)
     )
   elif hasattr(abstract_unboxed_pre_state, "model") and isinstance(abstract_unboxed_pre_state.model, nnx.Module):
     state = nnx.state(abstract_unboxed_pre_state.model)
-    return state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)))
+    return state.filter(
+        lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+        and not _is_bwd_dscale(path)
+    )
   return abstract_unboxed_pre_state.params
 
 
