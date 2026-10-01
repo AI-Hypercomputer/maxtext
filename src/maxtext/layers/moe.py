@@ -839,15 +839,70 @@ def _scheduling_group_call(group_id: int, fn):
   expert GMMs and chunk c-1's combine reduce-scatter with the same id therefore forces the
   reduce-scatter to be in flight while the GMMs run. Unlike `jax.lax.optimization_barrier`, the
   annotation survives the default `xla_tpu_aggressive_opt_barrier_removal` setting and it adds no
-  copies or extra buffers: it only constrains the instruction order. `ad_metadata="drop"` keeps the
-  transposed (backward) ops untagged so the backward schedule is unchanged.
+  copies or extra buffers: it only constrains the instruction order.
+
+  The tagged call (`xla_metadata_call2`) is only ever traced as a primal computation: it sits in the
+  forward of a `jax.custom_vjp` whose backward re-runs `jax.vjp` on the *untagged* function. This keeps
+  the backward ops untagged (backward schedule unchanged) and avoids transposing the call primitive,
+  which under the decoder layer's remat currently fails (rematerialized primal outputs end up on the
+  same equation that consumes tangents and are treated as cotangent accumulators). The values `fn`
+  closes over (routing weights/indices, ...) are hoisted into explicit inputs so that they get their
+  gradients too. The custom-VJP residuals are just the inputs (sorted tokens, expert weights,
+  routing); with the default `mlpwo`/`moe_mlpwo: remat` policy (required by the config validator) the
+  backward recomputes the chunk's GMMs exactly as without the flag, so HBM use is unchanged.
   """
   call2 = getattr(xla_metadata, "xla_metadata_call2", None)
   if call2 is None:
     raise NotImplementedError(
         "moe_combine_rs_chunk_overlap needs jax.experimental.xla_metadata.xla_metadata_call2 (newer JAX)."
     )
-  return call2(fn, {"_scheduling_group_id": group_id}, ad_metadata="drop")
+
+  def apply(*args):
+    # Hoist everything `fn` closes over (routing weights/indices, masks, ...) into explicit inputs: the
+    # custom-VJP backward is traced outside the enclosing shard_map trace, so it must not capture its
+    # tracers. (`jax.closure_convert` leaves integer-typed tracers in the closure, hence make_jaxpr.)
+    flat_args, in_tree = jax.tree_util.tree_flatten(args)
+    out_tree = []
+
+    def flat_fn(*flat):
+      out_flat, tree = jax.tree_util.tree_flatten(fn(*jax.tree_util.tree_unflatten(in_tree, flat)))
+      out_tree.append(tree)
+      return out_flat
+
+    closed = jax.make_jaxpr(flat_fn)(*flat_args)
+    jaxpr, consts = closed.jaxpr, list(closed.consts)
+
+    def pure_fn(consts, flat):
+      return jax.tree_util.tree_unflatten(out_tree[0], jax.core.eval_jaxpr(jaxpr, consts, *flat))
+
+    grouped = call2(pure_fn, {"_scheduling_group_id": group_id}, ad_metadata="drop")
+
+    @jax.custom_vjp
+    def run(consts, flat):
+      return grouped(consts, flat)
+
+    def _fwd(consts, flat):
+      return grouped(consts, flat), (consts, flat)
+
+    def _bwd(res, cts):
+      leaves, treedef = jax.tree_util.tree_flatten(res)
+      is_diff = [jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.inexact) for leaf in leaves]
+      diff_leaves = [leaf for leaf, d in zip(leaves, is_diff) if d]
+
+      def fn_of_diff_leaves(*diff):
+        it = iter(diff)
+        full = [next(it) if d else leaf for leaf, d in zip(leaves, is_diff)]
+        return pure_fn(*jax.tree_util.tree_unflatten(treedef, full))
+
+      _, vjp_fn = jax.vjp(fn_of_diff_leaves, *diff_leaves)
+      diff_cts = iter(vjp_fn(cts))
+      full_cts = [next(diff_cts) if d else None for d in is_diff]
+      return jax.tree_util.tree_unflatten(treedef, full_cts)
+
+    run.defvjp(_fwd, _bwd)
+    return run(consts, flat_args)
+
+  return apply
 
 
 class RoutedMoE(nnx.Module):
@@ -3317,10 +3372,8 @@ class RoutedMoE(nnx.Module):
           out = adc.checkpoint_name(adc.checkpoint_name(out, "mlpwo"), "moe_mlpwo")
           return _unpermute(out)
 
-        # NOTE: the unpermute (a custom-VJP kernel that keeps its input as a residual) must be traced
-        # inside an xla_metadata_call: a call output used as a downstream custom_vjp residual breaks
-        # the transpose. "rs" therefore groups chunk c's compute + unpermute; "unpermute_rs" groups
-        # chunk c's compute alone and moves its unpermute into chunk c+1's group (see _finish_combine).
+        # "rs" groups chunk c's compute + unpermute; "unpermute_rs" groups chunk c's compute alone and
+        # moves its unpermute into chunk c+1's group together with the reduce-scatter (see _finish_combine).
         group_fn = _expert_compute if combine_overlap["mode"] == "unpermute_rs" else _expert_compute_and_unpermute
         intermediate_output = _scheduling_group_call(combine_overlap["group_id"], group_fn)(
             x, w0, w1, wo, w0_bias, w1_bias, wo_bias
@@ -3452,7 +3505,7 @@ class RoutedMoE(nnx.Module):
 
         With combine_overlap (the next chunk's scheduling group) the ops join that group so they overlap the
         next chunk's GMMs; for the last chunk (combine_overlap=None) the reduce-scatter is left ungrouped and a
-        still-pending unpermute gets a group of its own (it must be traced inside an xla_metadata_call).
+        still-pending unpermute gets a group of its own (so both modes trace the unpermute the same way).
         """
         intermediate_output, unpermute_fn, reduce_scatter_fn = pending
         if unpermute_fn is None:

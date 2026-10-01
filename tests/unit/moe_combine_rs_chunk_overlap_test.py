@@ -23,7 +23,6 @@ import unittest
 
 import jax
 import jax.numpy as jnp
-from jax.experimental import xla_metadata
 from jax.sharding import Mesh
 import numpy as np
 import pytest
@@ -86,10 +85,8 @@ class CombineOverlapMeshTest(unittest.TestCase):
     super().setUp()
     if len(jax.devices("cpu")) < _REQUIRED_CPU_DEVICES:
       self.skipTest("needs 8 CPU devices; run through test_combine_rs_chunk_overlap_on_cpu_mesh")
-    if not hasattr(xla_metadata, "xla_metadata_call2"):
-      self.skipTest("moe_combine_rs_chunk_overlap needs jax.experimental.xla_metadata.xla_metadata_call2")
 
-  def _run(self, mode, chunks=2, rbf=-1.0, combine_bwd_method="", custom_sort_vjp=False):
+  def _run(self, mode, chunks=2, rbf=-1.0, combine_bwd_method="", custom_sort_vjp=False, remat=False):
     """Returns (output, loss, grads, lowered HLO text) of the layer's loss and grad under jax.jit."""
     # pylint: disable=import-outside-toplevel
     from flax.linen import partitioning as nn_partitioning
@@ -146,12 +143,15 @@ class CombineOverlapMeshTest(unittest.TestCase):
         out, _, _ = model.apply({"params": p}, h)
         return jnp.sum(out.astype(jnp.float32) ** 2), out
 
+      if remat:
+        # Mirrors the decoder-layer remat (custom policy): the grouped ops are rematerialized and transposed.
+        loss_fn = jax.checkpoint(loss_fn, policy=jax.checkpoint_policies.save_only_these_names("mlpwo", "moe_mlpwo"))
       f = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
       hlo = f.lower(variables["params"], x).as_text()
       (loss, out), grads = f(variables["params"], x)
     return out, loss, grads, hlo
 
-  def _check_modes_match_flag_off(self, combine_bwd_method="", custom_sort_vjp=False):
+  def _check_modes_match_flag_off(self, combine_bwd_method="", custom_sort_vjp=False, remat=False):
     """Both overlap modes reproduce the flag-off output, loss and gradients exactly and only add scheduling groups."""
     out_ref, loss_ref, grads_ref, hlo_ref = self._run(
         "", combine_bwd_method=combine_bwd_method, custom_sort_vjp=custom_sort_vjp
@@ -159,10 +159,14 @@ class CombineOverlapMeshTest(unittest.TestCase):
     self.assertNotIn("_scheduling_group_id", hlo_ref)
     for mode in ("rs", "unpermute_rs"):
       with self.subTest(mode=mode):
-        out, loss, grads, hlo = self._run(mode, combine_bwd_method=combine_bwd_method, custom_sort_vjp=custom_sort_vjp)
+        out, loss, grads, hlo = self._run(
+            mode, combine_bwd_method=combine_bwd_method, custom_sort_vjp=custom_sort_vjp, remat=remat
+        )
         # Ordering only: same ops, same numbers.
         np.testing.assert_array_equal(np.asarray(out), np.asarray(out_ref))
-        np.testing.assert_array_equal(np.asarray(loss), np.asarray(loss_ref))
+        # The scalar loss is reduced outside the layer; XLA:CPU may fuse that reduction differently once the
+        # layer's forward is a custom_vjp under remat (1 ulp in f32), so compare it with a tight tolerance.
+        np.testing.assert_allclose(np.asarray(loss), np.asarray(loss_ref), rtol=1e-6, atol=0)
         for g, g_ref in zip(jax.tree_util.tree_leaves(grads), jax.tree_util.tree_leaves(grads_ref)):
           np.testing.assert_array_equal(np.asarray(g), np.asarray(g_ref))
         # Scheduling groups are present (ids start at 20000 so they cannot collide with other schedules).
@@ -184,11 +188,18 @@ class CombineOverlapMeshTest(unittest.TestCase):
   def test_modes_match_flag_off_custom_sort_vjp_quantized_combine_bwd(self):
     self._check_modes_match_flag_off(combine_bwd_method="rowwise", custom_sort_vjp=True)
 
+  def test_modes_match_flag_off_under_remat(self):
+    """Under jax.checkpoint (as in the decoder layer) the grouped ops are rematerialized/transposed without error."""
+    self._check_modes_match_flag_off(custom_sort_vjp=True, remat=True)
+
+  def test_modes_match_flag_off_under_remat_quantized_combine_bwd(self):
+    self._check_modes_match_flag_off(combine_bwd_method="rowwise", custom_sort_vjp=True, remat=True)
+
 
 if __name__ == "__main__":
   CombineOverlapMeshTest.__test__ = True
   suite = unittest.defaultTestLoader.loadTestsFromTestCase(CombineOverlapMeshTest)
   res = unittest.TextTestRunner(verbosity=2).run(suite)
-  if res.wasSuccessful() and res.testsRun == 4 and not res.skipped:
+  if res.wasSuccessful() and res.testsRun == 6 and not res.skipped:
     print("COMBINE_RS_CHUNK_OVERLAP_MESH_TESTS_PASSED")
   sys.exit(0 if res.wasSuccessful() else 1)

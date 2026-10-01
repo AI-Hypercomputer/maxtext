@@ -1336,10 +1336,15 @@ class MoEGeneral(BaseModel):
 
   @model_validator(mode="after")
   def validate_moe_chunks(self) -> "MoEGeneral":
+    """Checks the chunked ring-of-experts settings (num_moe_token_chunks, moe_combine_rs_chunk_overlap)."""
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
     if self.moe_combine_rs_chunk_overlap and (self.num_moe_token_chunks <= 1 or not self.use_ring_of_experts):
       raise ValueError("moe_combine_rs_chunk_overlap requires num_moe_token_chunks > 1 and use_ring_of_experts=True.")
+    if self.moe_combine_rs_chunk_overlap and (self.mlpwo != "remat" or self.moe_mlpwo != "remat"):
+      raise ValueError(
+          "moe_combine_rs_chunk_overlap requires mlpwo='remat' and moe_mlpwo='remat' (nothing inside the group is saved)."
+      )
     return self
 
   @model_validator(mode="after")
