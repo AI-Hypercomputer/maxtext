@@ -1458,7 +1458,7 @@ class NNXDecoder(nnx.Module):
     y = (
         decoder_input_embeddings
         if decoder_input_embeddings is not None
-        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+        else self.embed_tokens(shared_embedding, decoder_input_tokens, model_mode)
     )
 
     # Precomputed embeddings are complete (including any multimodal replacements),
@@ -1550,6 +1550,10 @@ class NNXDecoder(nnx.Module):
       y += self.position_embedder(decoder_positions.astype("int32"), model_mode=model_mode)
 
     return y
+
+  def embed_tokens(self, shared_embedding, decoder_input_tokens, model_mode):
+    """Looks up the token embeddings, before dropout and positional embeddings."""
+    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
   def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
     """Applies final normalization and projects hidden states to logits.

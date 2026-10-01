@@ -138,6 +138,17 @@ class Embed(nnx.Module):
 
     return output
 
+  def embed_single_token(self, token_id: int) -> Array:
+    """Returns the [num_features] embedding of one token id, bitwise equal to the row `__call__` returns."""
+    embedding = jnp.asarray(
+        _maybe_move_embedding_to_device(self.embedding.get_value(), self.config),
+        self.dtype,
+    )
+    row = embedding[token_id]
+    if self.config.use_iota_embed:
+      row = jnp.where(row == 0, jnp.zeros_like(row), row)
+    return row
+
   def attend(self, query: Array, out_sharding: NamedSharding | None = None) -> Array:
     """Attend over the embedding using a query array.
 

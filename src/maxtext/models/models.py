@@ -282,6 +282,18 @@ class Transformer(nnx.Module):
           bidirectional_mask_video=bidirectional_mask_video,
       )
 
+    # With mtp_reuse_input_embedding, look up the token embeddings once here; the MTP block shifts them instead of
+    # looking up the shifted tokens again, and the embedding table gets a single gradient.
+    mtp_token_embeddings = None
+    if (
+        getattr(self.config, "mtp_reuse_input_embedding", False)
+        and getattr(self.config, "mtp_num_layers", 0) > 0
+        and decoder_input_embeddings is None
+        and multimodal_input is None
+    ):
+      decoder_input_embeddings = self.decoder.embed_tokens(self.token_embedder, decoder_input_tokens, model_mode)
+      mtp_token_embeddings = decoder_input_embeddings
+
     res = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
@@ -334,6 +346,7 @@ class Transformer(nnx.Module):
           decoder_segment_ids=decoder_segment_ids,
           deterministic=not enable_dropout,
           model_mode=model_mode,
+          main_token_embeddings=mtp_token_embeddings,
       )
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
