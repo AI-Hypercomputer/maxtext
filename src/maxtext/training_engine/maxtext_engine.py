@@ -2453,7 +2453,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     Args:
       metadata: Checkpoint metadata payload from Orchestrator.
-      **kwargs: Additional checkpoint saving options.
+      **kwargs: Additional checkpoint saving options. `save_optimizer_state=False` writes the
+        model params without the optimizer state, which can be several times their size.
     """
     if not self._config.enable_checkpointing or not self._checkpoint_dir():
       logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
@@ -2463,6 +2464,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._throttler.wait_for_all()
 
     step = kwargs.pop("step", None)
+    save_optimizer_state = kwargs.pop("save_optimizer_state", True)
     if step is None and isinstance(metadata, Mapping):
       step = metadata.get("step")
     if step is None:
@@ -2479,6 +2481,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
     else:
       logging.info("Saving checkpoint at step %d.", step)
+    if not save_optimizer_state:
+      logging.info("Checkpoint at step %d skips the optimizer state.", step)
 
     custom_metadata = {}
     if metadata:
@@ -2492,7 +2496,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         step=step,
         checkpoint_state=checkpointing.CheckpointState(
             model=self.model,
-            optimizer=self.optimizer,
+            optimizer=self.optimizer if save_optimizer_state else None,
             # The full history, not `get_metrics()`: CheckpointState.accumulated_metrics is
             # a list, and restore_checkpoint iterates it back into the recorder's buffer.
             accumulated_metrics=self._metrics_recorder.get_metrics_history(clear_cache=False),

@@ -155,6 +155,50 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
     for name, want in _leaves(nnx.state(model, nnx.Param)).items():
       np.testing.assert_array_equal(got[name], want, err_msg=name)
 
+  def test_resume_skips_params_only_checkpoints(self):
+    model, optimizer = self._save_trained(steps=2)
+    want_opt = _leaves(nnx.state(optimizer, nnx.optimizer.OptState))
+    manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
+    for step in (3, 4):
+      _train_step(model, optimizer)
+      self.assertTrue(
+          manager.save_checkpoint(step=step, checkpoint_state=checkpointing.CheckpointState(model=model))
+      )
+    manager.wait_until_finished()
+    manager.close()
+
+    _, fresh_opt, (step, _, _) = self._restore_fresh()
+
+    self.assertEqual(step, 2)
+    got_opt = _leaves(nnx.state(fresh_opt, nnx.optimizer.OptState))
+    for name, want in want_opt.items():
+      np.testing.assert_array_equal(got_opt[name], want, err_msg=name)
+    # The resumed run redoes steps 3 and 4, so they must be gone for Orbax to write them again.
+    self.assertEqual(sorted(os.listdir(self.ckpt_dir)), ["2"])
+
+  def test_params_only_checkpoint_needs_no_optimizer_to_restore(self):
+    model, optimizer = self._save_trained(steps=2)
+    manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
+    _train_step(model, optimizer)
+    manager.save_checkpoint(step=3, checkpoint_state=checkpointing.CheckpointState(model=model))
+    manager.wait_until_finished()
+    manager.close()
+    want_params = _leaves(nnx.state(model))
+
+    # Resuming training from it would start the optimizer over, so that fails loudly.
+    with self.assertRaisesRegex(checkpointing.CheckpointRestoreError, "no optimizer state"):
+      self._restore_fresh(step=3)
+
+    fresh_model, _ = _build(seed=123)
+    manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
+    self.addCleanup(manager.close)
+    step, _, _ = manager.restore_checkpoint(checkpointing.CheckpointState(model=fresh_model), step=3)
+
+    self.assertEqual(step, 3)
+    got_params = _leaves(nnx.state(fresh_model))
+    for name, want in want_params.items():
+      np.testing.assert_array_equal(got_params[name], want, err_msg=name)
+
   def test_unrestorable_checkpoint_raises_instead_of_fresh_start(self):
     self._save_trained(steps=2)
     # Keep `.zarray` so metadata still reads (a missing array dir already fails loudly there) and
