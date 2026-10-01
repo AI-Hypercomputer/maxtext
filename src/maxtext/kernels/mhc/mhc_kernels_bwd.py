@@ -312,7 +312,6 @@ def pre_bwd(
     cotangents: tuple[jax.Array, jax.Array, jax.Array, jax.Array],
     x: jax.Array,
     weights: common.MhcWeights,
-    permutations: jax.Array,
     config: common.MhcKernelConfig,
 ) -> tuple[jax.Array, common.MhcWeights]:
   """Computes pre-branch gradients with in-kernel input-gradient accumulation."""
@@ -320,6 +319,7 @@ def pre_bwd(
   d_layer_input, d_x_acc, d_h_post, d_residual = cotangents
   batch, sequence, streams, embedding = x.shape
   tokens = batch * sequence
+  permutations = common.permutation_matrices(streams).astype(x.dtype)
 
   x_flat = x.reshape(tokens, streams, embedding)
   d_x_acc_flat = d_x_acc.reshape(tokens, streams, embedding)
@@ -408,7 +408,6 @@ def post_bwd(
 
 def pre_op_bwd(
     config: common.MhcKernelConfig,
-    permutations: jax.Array,
     residuals: tuple[tuple[jax.Array, jax.Array], tuple[jax.Array, common.MhcWeights]],
     cotangents: tuple[jax.Array, common.KernelContext],
 ) -> tuple[jax.Array, common.MhcWeights]:
@@ -420,7 +419,6 @@ def pre_op_bwd(
       (d_layer_input, d_x, d_h_post, d_residual),
       x,
       weights,
-      permutations,
       config=config,
   )
 

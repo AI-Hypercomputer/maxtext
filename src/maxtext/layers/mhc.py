@@ -14,8 +14,6 @@
 
 """DeepSeek Manifold-Constrained Hyper Connections (mHC) Layer."""
 
-import functools
-import itertools
 import math
 from typing import Callable
 
@@ -26,21 +24,20 @@ from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.kernels.mhc import api as mhc_kernel
+from maxtext.kernels.mhc import common as mhc_kernel_common
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes
+import numpy as np
 
 
-@functools.lru_cache(maxsize=None)
-def get_permutation_matrices(k: int) -> Array:
-  """Generates all permutation matrices of size k.
+def get_permutation_matrices(k: int) -> np.ndarray:
+  """Returns all permutation matrices of size k, shared with the Pallas kernel.
 
   Reference: mHC-lite: https://openreview.net/pdf?id=5IJX6kvOif
   Shape: (k!, k, k)
   """
-  perms = list(itertools.permutations(range(k)))
-  perms_array = jnp.array(perms)
-  return jnp.eye(k)[perms_array]
+  return mhc_kernel_common.permutation_matrices(k)
 
 
 def get_functions(expansion_rate: int):
@@ -268,11 +265,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     """Token-sharded `mhc_kernel.pre`."""
 
     def pre_fn(x, weights):
-      # Built inside the body, not passed through `shard_map`: the kernel's
-      # custom_vjp takes `permutations` as a non-differentiable argument, which
-      # must be a constant rather than a tracer.
-      permutations = jnp.asarray(get_permutation_matrices(self.k), self.dtype)
-      layer_input, context = mhc_kernel.pre(x, weights, permutations, config=kernel_config)
+      layer_input, context = mhc_kernel.pre(x, weights, config=kernel_config)
       return layer_input, context.x, context.h_post, context.residual
 
     layer_input, context_x, h_post, residual = self._sharded_kernel_call(

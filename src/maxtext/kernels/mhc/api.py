@@ -48,7 +48,6 @@ def _validate_implementation(
 def pre(
     x: jax.Array,
     weights: common.MhcWeights,
-    permutations: jax.Array,
     *,
     config: common.MhcKernelConfig = common.MhcKernelConfig(),
     implementation: Implementation | Sequence[Implementation] | None = None,
@@ -61,8 +60,6 @@ def pre(
   Args:
     x: Input streams of shape `(batch, sequence, streams, embedding)`.
     weights: Structured `MhcWeights` container with all layer parameters.
-    permutations: All permutation matrices of shape
-      `(num_permutations, streams, streams)`.
     config: Structured `MhcKernelConfig` tuning and compiler configuration.
     implementation: Preferred implementation (`"mosaic"` or `"mosaic_tpu"`).
 
@@ -70,12 +67,10 @@ def pre(
     A tuple `(layer_input, context)` where `layer_input` feeds the wrapped
     model branch, and `context` is passed unchanged to `post`.
   """
-  permutations = jax.lax.stop_gradient(permutations)
   _validate_implementation(implementation)
   layer_input, kernel_context = mhc_kernels_fwd.pre(
       x,
       weights,
-      permutations,
       config=config,
   )
   x_context, h_post, residual = kernel_context
