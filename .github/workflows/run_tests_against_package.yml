@@ -227,19 +227,18 @@ jobs:
             fi
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
-            $PYTHON_EXE -m pip install --quiet pytest-split
+            # Whole test classes stay on one shard (tests/utils/class_split.py), so the same test
+            # pays the compile cost in the nightly run and in PR runs alike.
             if [ -f .test_durations ]; then
-              echo "Using downloaded .test_durations with least_duration splitting algorithm."
-              SPLIT_ALGO="--splitting-algorithm least_duration"
+              echo "Using downloaded .test_durations to balance the class-level split."
             else
-              echo "Warning: .test_durations not found. Falling back to default split."
-              SPLIT_ALGO=""
+              echo "Warning: .test_durations not found. The class-level split uses equal weights."
             fi
             if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
               $PYTHON_EXE -m pip install --quiet pytest-xdist
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto ${SPLIT_ALGO}"
+              SPLIT_ARGS="--class-splits ${INPUTS_TOTAL_WORKERS} --class-group ${INPUTS_WORKER_GROUP} -n auto"
             else
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
+              SPLIT_ARGS="--class-splits ${INPUTS_TOTAL_WORKERS} --class-group ${INPUTS_WORKER_GROUP}"
             fi
           else
             SPLIT_ARGS=""
@@ -249,12 +248,13 @@ jobs:
           if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
             python3 tests/utils/update_hlo_references.py
           else
+            # The GofN suffix lets process_test_results.py notice a shard that left no result file.
             # shellcheck disable=SC2086
             $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
               -v \
               -m "${FINAL_PYTEST_MARKER}" \
               --durations=0 \
-              --junitxml=test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}.xml \
+              --junitxml=test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}of${INPUTS_TOTAL_WORKERS}.xml \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} &

@@ -117,6 +117,7 @@ if os.getenv("JAX_PLATFORMS") == "proxy":
 
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.newly_added_detection import get_changed_tests
+from tests.utils.class_split import ClassSplitPlugin
 
 # Configure JAX to use unsafe_rbg PRNG implementation to match main scripts.
 if is_decoupled():
@@ -207,6 +208,23 @@ def pytest_collection_modifyitems(config, items):
       item.add_marker(pytest.mark.cpu_only)
 
 
+def pytest_addoption(parser):
+  """Registers the class-level shard split (see tests/utils/class_split.py). Integers only."""
+  group = parser.getgroup("class-split", "deal whole test classes to CI shards")
+  group.addoption(
+      "--class-splits",
+      type=int,
+      default=None,
+      help="Number of shards the collected tests are dealt into, whole classes only.",
+  )
+  group.addoption(
+      "--class-group",
+      type=int,
+      default=None,
+      help="1-based index of the shard to run; requires --class-splits.",
+  )
+
+
 def pytest_configure(config):
   """Registers custom pytest markers dynamically."""
   for m in [
@@ -221,6 +239,8 @@ def pytest_configure(config):
       "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
   ]:
     config.addinivalue_line("markers", m)
+  if config.getoption("class_splits") is not None or config.getoption("class_group") is not None:
+    config.pluginmanager.register(ClassSplitPlugin(config), "classsplitplugin")
 
 
 @pytest.fixture(autouse=True, scope="module")
