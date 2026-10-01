@@ -20,7 +20,9 @@ seeded model, as a resumed RL trainer would.
 """
 
 import glob
+import inspect
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -278,7 +280,16 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
           cb.key_priority("any_param"),
           serialization_types.TransferPriority.ASYNCHRONOUS_DEPRIORITIZED,
       )
-      self.assertTrue(hasattr(cb, "on_transfer_end"))
+      # Orbax's ArrayHandler invokes status hooks (e.g. on_write_end) at commit time; a callback
+      # missing any of them fails every colocated save. Derive the hook set from the installed
+      # Orbax source so this test tracks the real contract instead of a hard-coded list.
+      self.assertIsInstance(cb, serialization_types.DefaultSerializationStatusCallback)
+      from orbax.checkpoint._src.serialization import jax_array_handlers  # pylint: disable=g-import-not-at-top
+
+      invoked_hooks = set(re.findall(r"callback\.(on_\w+)", inspect.getsource(jax_array_handlers)))
+      self.assertTrue(invoked_hooks, "expected ArrayHandler to invoke at least one callback hook")
+      for hook in invoked_hooks:
+        self.assertIsNone(getattr(cb, hook)(("any_param",)), hook)
 
   def test_colocated_transport_sharding_normalizer_strips_pinned_host(self):
     mock_ct = mock.MagicMock()

@@ -181,27 +181,15 @@ def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
       impl = ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON
       from orbax.checkpoint._src.serialization import types as serialization_types  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
-      priority_mod = getattr(ocp_pathways, "TransferPriority", None) or getattr(
-          serialization_types, "TransferPriority", None
-      )
-      target_priority = getattr(priority_mod, "ASYNCHRONOUS_DEPRIORITIZED", "ASYNCHRONOUS_DEPRIORITIZED")
-      cb_base = getattr(ocp_pathways, "SerializationCallback", object)
+      # Subclass Orbax's no-op default so every status hook the ArrayHandler invokes
+      # (on_transfer_start/end, on_write_start/end — the set varies across Orbax versions) is
+      # inherited; only the priority is overridden. A hand-rolled class missing `on_write_end`
+      # fails every colocated save at commit time (observed on orbax 0.12.6, 397B/32 hosts).
+      class _DeprioritizedCallback(serialization_types.DefaultSerializationStatusCallback):
+        """Routes all arrays through Orbax's memory-limited (deprioritized) D2H batching."""
 
-      class _DeprioritizedCallback(cb_base):  # type: ignore[misc,valid-type]
-        def key_priority(self, _) -> Any:
-          return target_priority
-
-        def on_transfer_start(self, *args: Any, **kwargs: Any) -> None:
-          pass
-
-        def on_transfer_end(self, *args: Any, **kwargs: Any) -> None:
-          pass
-
-        def on_commit_start(self, *args: Any, **kwargs: Any) -> None:
-          pass
-
-        def on_commit_end(self, *args: Any, **kwargs: Any) -> None:
-          pass
+        def key_priority(self, _: Any) -> serialization_types.TransferPriority:
+          return serialization_types.TransferPriority.ASYNCHRONOUS_DEPRIORITIZED
 
       register_kwargs["callback"] = _DeprioritizedCallback()
     else:
