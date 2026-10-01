@@ -54,8 +54,13 @@ for dtype in ${LAYERWISE_DTYPES}; do
     if [[ -n "${LAYERWISE_OUTPUTS_DIR}" ]]; then
       save_args=(--save_outputs="${LAYERWISE_OUTPUTS_DIR}/${dtype}/${sg}.safetensors")
     fi
+    # fp32 GMM tiles exceed the default 16 MiB scoped VMEM on v5p.
+    libtpu_args="${LIBTPU_INIT_ARGS:-}"
+    if [[ "${dtype}" == "float32" ]]; then
+      libtpu_args="${libtpu_args} --xla_tpu_scoped_vmem_limit_kib=65536"
+    fi
     # Keep sweeping after a failing unit so one run reports every layer.
-    python3 tests/end_to_end/tpu/deepseek/v4-284b/verify_layerwise.py \
+    LIBTPU_INIT_ARGS="${libtpu_args}" python3 tests/end_to_end/tpu/deepseek/v4-284b/verify_layerwise.py \
       --subgroup="${sg}" \
       --bundle_dir="${LAYERWISE_BUNDLE_DIR}" \
       --dtype="${dtype}" \

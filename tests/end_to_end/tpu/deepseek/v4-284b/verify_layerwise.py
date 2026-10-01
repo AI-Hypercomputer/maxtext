@@ -516,6 +516,10 @@ def main() -> None:
   )
   args_cli = parser.parse_args()
   absl_logging.set_verbosity(absl_logging.WARNING)
+  if args_cli.dtype == "float32":
+    # The MoE GMM kernels (megablox, ragged_dot) call dot_general without a precision, so matmul_precision does not
+    # reach them; on TPU the default is a single bf16 pass (B0 h_out 4.6e-3 vs 1.6e-5 with highest).
+    jax.config.update("jax_default_matmul_precision", "highest")
   # TPU uses the pretrain-stage MoE kernel (megablox GMM, 2_test_deepseek.sh); CPU cannot compile Mosaic
   # kernels, so it uses jax.lax.ragged_dot.
   on_tpu = bool(args_cli.aot_topology) or jax.default_backend() == "tpu"
