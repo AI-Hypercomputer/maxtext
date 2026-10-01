@@ -654,6 +654,31 @@ class GmmTest(parameterized.TestCase):
     self.assertFalse(jnp.any(jnp.isnan(actual)))
 
   @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
+  def test_gmm_tile_k_larger_than_size_k_uninitialized_memory(self):
+    """Stale NaNs in the out-of-bounds lhs K-tail must not reach the output.
+
+    With a fixed tile_k larger than size_k (e.g. a 1024 tile on a 256-wide
+    tensor-parallel shard), the lhs block reads past size_k. Masking only the
+    rhs K-tail is not enough because NaN * 0 is NaN.
+    """
+    batch_size = 512
+    in_size = 256
+    out_size = 512
+    num_groups = 4
+    k0, k1 = jax.random.split(jax.random.key(0))
+    lhs = jax.random.normal(k0, (batch_size, in_size), dtype=jnp.bfloat16)
+    rhs = jax.random.normal(k1, (num_groups, in_size, out_size), dtype=jnp.bfloat16)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+    expected = reference_gmm(lhs, rhs, group_sizes)
+
+    poison_tpu_memory()
+    tile_info = gmm_backend.TileSizes(tile_m=512, tile_k=1024, tile_n=512)
+    actual = gmm_backend.gmm_v2(lhs, rhs, group_sizes, tile_info=tile_info)
+
+    self.assertFalse(jnp.any(jnp.isnan(actual)))
+    assert_arrays_all_close(actual, expected)
+
+  @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128],
       in_size=[1024],

@@ -457,6 +457,10 @@ def inner_kernel(
     if is_last_k_step and valid_k != 0:
       mask_rhs = lax.broadcasted_iota(jnp.int32, tiled_rhs.shape, 0) < valid_k
       tiled_rhs = jnp.where(mask_rhs, tiled_rhs, 0)
+      # The lhs K-tail is read out of bounds and may hold stale NaN/Inf, and
+      # NaN * 0 is NaN, so masking rhs alone is not enough.
+      mask_lhs = lax.broadcasted_iota(jnp.int32, tiled_lhs.shape, 1) < valid_k
+      tiled_lhs = jnp.where(mask_lhs, tiled_lhs, 0)
 
     # Step 2: Matmul.
     acc_list = []
