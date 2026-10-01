@@ -70,6 +70,12 @@ from maxtext.models import (
     qwen3_custom,
     simple_layer,
 )
+
+try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter
+except ImportError:
+  lineage_adapter = None
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from maxtext.utils.sharding import create_sharding
@@ -1452,7 +1458,7 @@ class NNXDecoder(nnx.Module):
     y = (
         decoder_input_embeddings
         if decoder_input_embeddings is not None
-        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+        else self.embed_tokens(shared_embedding, decoder_input_tokens, model_mode)
     )
 
     # Precomputed embeddings are complete (including any multimodal replacements),
@@ -1488,8 +1494,8 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-397b-a17b",
             "qwen3.5-397b-a17b-fp8",
             "maxtext-omni-gemma3-qwen3",
-            "cosmos3-nano-reasoner",
-            "cosmos3-super-reasoner",
+            "weaver-mini",
+            "weaver-max",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1511,8 +1517,8 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-35b-fp8",
             "qwen3.5-397b-a17b",
             "qwen3.5-397b-a17b-fp8",
-            "cosmos3-nano-reasoner",
-            "cosmos3-super-reasoner",
+            "weaver-mini",
+            "weaver-max",
         }:
           y = mm_utils.merge_mm_embeddings(
               text_embeddings=y,
@@ -1544,6 +1550,10 @@ class NNXDecoder(nnx.Module):
       y += self.position_embedder(decoder_positions.astype("int32"), model_mode=model_mode)
 
     return y
+
+  def embed_tokens(self, shared_embedding, decoder_input_tokens, model_mode):
+    """Looks up the token embeddings, before dropout and positional embeddings."""
+    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
   def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
     """Applies final normalization and projects hidden states to logits.
@@ -1613,7 +1623,7 @@ class NNXDecoder(nnx.Module):
   def _build_linen_params(self, moe_stack: nnx.Module) -> dict:
     """
     Bridges NNX to Linen by creating a dictionary that mimics the exact variable
-    structure expected by `deepseek_batchsplit.fetch_weights`.
+    structure expected by `deepseek_batchsplit.fetch_weights` and `lineage_adapter`.
     """
     state_dict = nnx.state(moe_stack, (nnx.Param, moe.MoEBiasVar))
     moe_block = state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0"))
@@ -1632,6 +1642,7 @@ class NNXDecoder(nnx.Module):
         "post_self_attention_layer_norm": state_dict["post_self_attention_layer_norm"],
         "self_attention": state_dict["self_attention"],
         "DeepSeekMoeBlock_0": moe_block,
+        "mlp": state_dict.get("mlp"),
     }
 
   def _find_next_boundary(self, current_idx, end_idx, engram_indices):
@@ -1976,6 +1987,22 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 **common_kwargs,
             )
+          elif cfg.use_lineage:
+            if lineage_adapter is None:
+              raise ImportError("use_lineage=True requires the Google-internal lineage_adapter.")
+            y, lineage_lb_loss, lineage_bias_updates = lineage_adapter.run_lineage_dsv3(
+                inputs=y,
+                dense_params=self._build_linen_params(self.dense_layers),
+                sparse_params=self._build_linen_params(self.moe_layers),
+                decoder_positions=decoder_positions,
+                mesh=self.mesh,
+                cfg=cfg,
+                decoder_segment_ids=decoder_segment_ids,
+            )
+            if lineage_lb_loss is not None:
+              self.sow(nnx.Intermediate, "moe_lb_loss", lineage_lb_loss)
+            if lineage_bias_updates is not None:
+              self.sow(nnx.Intermediate, "moe_bias_updates", lineage_bias_updates)
           else:
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,
@@ -2191,6 +2218,8 @@ class NNXDecoder(nnx.Module):
             layer_kwargs["decoder_input_tokens"] = input_tokens
 
           current_kwargs = dict(layer_kwargs)
+          if isinstance(attention_metadata, dict):
+            current_kwargs["attention_metadata"] = attention_metadata.get(f"layer.{lyr}", attention_metadata.get(lyr))
 
           routed_experts = current_kwargs.pop("forced_routed_experts", None)
           if routed_experts is not None:

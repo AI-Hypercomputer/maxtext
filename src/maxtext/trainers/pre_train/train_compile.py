@@ -25,13 +25,14 @@ message during this compilation
 as you would on the target hardware.
 """
 
+import contextlib
 import functools
 import os
 from typing import Sequence
 
 from absl import app
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules as axis_rules
 import jax
 from jax.experimental.serialize_executable import serialize
 from jax.experimental.topologies import get_topology_desc
@@ -122,7 +123,7 @@ def _collect_nnx_activation_shardings(create_model_fn, config, mesh):
         enable_dropout=False,
     )
 
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), axis_rules(config.logical_axis_rules):
     jax.eval_shape(_nnx_forward, abstract_input, abstract_input, abstract_input)
 
 
@@ -154,7 +155,7 @@ def get_shaped_inputs(topology_mesh, config):
   logical_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
   # For NNX, get_functional_train_with_signature expects the graphdef (static structure),
   # not the raw model — mirroring how the training loop does nnx.split(train_state).
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     abs_train_state = nnx.eval_shape(init_state_fn)
     graphdef, _ = nnx.split(abs_train_state)
   model = graphdef
@@ -196,9 +197,9 @@ def jit_and_compile(
     logical_axis_rules,
 ):
   """Jit, lower, and compile func."""
-  # Use both jax.set_mesh (new API) and `with mesh:` (old API) so that drjax,
-  # which reads from pxla.thread_resources.env.physical_mesh, can find the mesh.
-  with jax.set_mesh(mesh), mesh, logical_axis_rules:
+  # `with mesh:` is only needed for drjax (enable_diloco); omit it otherwise to match train.py.
+  mesh_ctx = mesh if config.enable_diloco else contextlib.nullcontext()
+  with jax.set_mesh(mesh), mesh_ctx, logical_axis_rules:
     jitted = jax.jit(
         func,
         in_shardings=in_shardings,
@@ -280,7 +281,7 @@ def is_oom(argv: Sequence[str]) -> bool:
         static_argnums,
         donate_argnums,
         config,
-        nn_partitioning.axis_rules(config.logical_axis_rules),
+        axis_rules(config.logical_axis_rules),
     )
     return False
   except Exception as e:
@@ -391,7 +392,7 @@ def main(argv: Sequence[str]) -> None:
       static_argnums,
       donate_argnums,
       config,
-      nn_partitioning.axis_rules(config.logical_axis_rules),
+      axis_rules(config.logical_axis_rules),
   )
   print("Jitting and compilation complete!", flush=True)
 

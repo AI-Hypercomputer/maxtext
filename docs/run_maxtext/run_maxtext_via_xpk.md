@@ -18,7 +18,17 @@
 
 # At scale with XPK
 
-This guide provides the recommended workflow for running MaxText on Google Kubernetes Engine (GKE) using the **Accelerated Processing Kit (XPK)**. For a complete reference on XPK, please see the [official XPK repository](https://github.com/AI-Hypercomputer/xpk).
+```{warning}
+This guide is kept for legacy compatibility only. The recommended path for new GKE deployments is [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). XPK is deprecated and should not be used for new cluster provisioning or workload orchestration.
+
+For a direct Cluster Toolkit command reference, see [At scale with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). The XPK commands below are retained only for existing deployments.
+```
+
+## Cluster Toolkit replacement
+
+For new deployments, please refer to [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md).
+
+This guide documents the older workflow for running MaxText on Google Kubernetes Engine (GKE) using the **Accelerated Processing Kit (XPK)**. For a complete reference on XPK, please see the [official XPK repository](https://github.com/AI-Hypercomputer/xpk).
 
 ## Overview of the workflow
 
@@ -201,29 +211,29 @@ Ahead-of-Time (AOT) compilation can significantly reduce the startup time of you
 First, run `train_compile.py` script to create the compiled artifact for the specified TPU topology.
 
 ```bash
-export WORKLOAD_NAME="${USER}-aot-job"
+export WORKLOAD_NAME=<RUN_NAME>
 export TPU_TYPE="your-tpu-type" # e.g. "v5p-32"
 export NUM_SLICES=your-num-slices # e.g. 1
 export PER_DEVICE_BATCH_SIZE=your-batch-size # e.g. 1
 export USER=your-username
 
 python3 -m maxtext.trainers.pre_train.train_compile \
-  compile_topology=${TPU_TYPE} \
-  compile_topology_num_slices=${NUM_SLICES} \
-  compiled_trainstep_file=maxtext_${TPU_TYPE}_aot.pickle \
-  per_device_batch_size=${PER_DEVICE_BATCH_SIZE}
+  compile_topology=${TPU_TYPE?} \
+  compile_topology_num_slices=${NUM_SLICES?} \
+  compiled_trainstep_file=maxtext_${TPU_TYPE?}_aot.pickle \
+  per_device_batch_size=${PER_DEVICE_BATCH_SIZE?}
 ```
 
-This will create a file named `maxtext_${TPU_TYPE}_aot.pickle` in your MaxText root directory.
+This will create a file named `maxtext_${TPU_TYPE?}_aot.pickle` in your MaxText root directory.
 
 ### Step 2: Re-build and upload your Docker image
 
 The AOT artifact must be included in your Docker image. The `docker_upload_runner.sh` script automatically copies the contents of your MaxText directory into the image:
 
 ```bash
-export CLOUD_IMAGE_NAME="${USER}-maxtext-aot-runner"
+export CLOUD_IMAGE_NAME=<IMAGE_NAME>
 
-bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME}
+bash src/dependencies/scripts/docker_upload_runner.sh CLOUD_IMAGE_NAME=${CLOUD_IMAGE_NAME?}
 ```
 
 ### Step 3: Create the XPK workload with the AOT artifact
@@ -237,18 +247,18 @@ export CLUSTER_NAME=your-cluster-name
 export PROJECT_ID=your-project-id
 
 xpk workload create \
-  --cluster ${CLUSTER_NAME} \
-  --workload ${WORKLOAD_NAME} \
-  --docker-image "gcr.io/${PROJECT_ID}/${CLOUD_IMAGE_NAME}" \
-  --tpu-type ${TPU_TYPE} \
-  --num-slices ${NUM_SLICES} \
+  --cluster ${CLUSTER_NAME?} \
+  --workload ${WORKLOAD_NAME?} \
+  --docker-image "gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}" \
+  --tpu-type ${TPU_TYPE?} \
+  --num-slices ${NUM_SLICES?} \
   --command "python3 -m maxtext.trainers.pre_train.train \
-    run_name=${WORKLOAD_NAME} \
-    base_output_directory=${BASE_OUTPUT_DIR} \
-    dataset_path=${DATASET_PATH} \
+    run_name=${WORKLOAD_NAME?} \
+    base_output_directory=${BASE_OUTPUT_DIR?} \
+    dataset_path=${DATASET_PATH?} \
     steps=100 \
-    per_device_batch_size=${PER_DEVICE_BATCH_SIZE} \
-    compiled_trainstep_file=/deps/maxtext_${TPU_TYPE}_aot.pickle"
+    per_device_batch_size=${PER_DEVICE_BATCH_SIZE?} \
+    compiled_trainstep_file=/deps/maxtext_${TPU_TYPE?}_aot.pickle"
 ```
 
 Your job will now start faster by skipping the JAX compilation step on the cluster.

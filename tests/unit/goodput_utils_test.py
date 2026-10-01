@@ -32,6 +32,7 @@ from maxtext.common.goodput import (
     RECORD_JOB_START_TIME,
     _construct_goodput_monitor,
     create_goodput_recorder,
+    get_goodput_job_name,
     maybe_monitor_goodput,
     maybe_record_goodput,
     record_goodput,
@@ -295,6 +296,32 @@ class GoodputUtilsTest(unittest.TestCase):
 
     mock_record_job_start_time.assert_called_once()
     mock_record_job_end_time.assert_not_called()
+
+  @mock.patch("google.cloud.logging.Client")
+  def test_goodput_job_name_override(self, mock_cloud_logger):
+    """goodput_job_name overrides run_name for GoodputRecorder and GoodputMonitor when set."""
+    mock_cloud_logger.return_value = mock.MagicMock()
+    self.assertEqual(get_goodput_job_name(self.config), "runner_test")
+
+    overridden_config = _ConfigOverride(self.config, goodput_job_name="gemma3-4b-pre-runner_test")
+    self.assertEqual(get_goodput_job_name(overridden_config), "gemma3-4b-pre-runner_test")
+
+    recorder = create_goodput_recorder(overridden_config)
+    self.assertIsNotNone(recorder)
+    self.assertEqual(mock_cloud_logger.return_value.logger.call_args[0][0], "goodput_gemma3-4b-pre-runner_test")
+
+  @mock.patch.dict("os.environ", {"M_GOODPUT_JOB_NAME": "llama3-pre-shared-run"}, clear=False)
+  def test_goodput_job_name_env_override(self):
+    """M_GOODPUT_JOB_NAME populates config.goodput_job_name via pyconfig."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        base_output_directory=get_test_base_output_directory(),
+        run_name="shared-run",
+        enable_checkpointing=False,
+    )
+    self.assertEqual(cfg.run_name, "shared-run")
+    self.assertEqual(cfg.goodput_job_name, "llama3-pre-shared-run")
+    self.assertEqual(get_goodput_job_name(cfg), "llama3-pre-shared-run")
 
 
 if __name__ == "__main__":

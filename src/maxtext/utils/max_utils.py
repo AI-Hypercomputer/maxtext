@@ -31,6 +31,7 @@ from packaging.version import Version
 
 from etils import epath
 import flax
+from flax.core.spmd import get_logical_axis_rules
 import jax
 from pathlib import Path
 from contextlib import contextmanager
@@ -349,8 +350,8 @@ def initialize_jax_for_gpu(raw_keys):
 def initialize_jax_for_cpu(raw_keys):
   """Jax distributed initialize for CPUs. Includes retries until the coordinator is ready."""
   coordinator_ip_address = get_coordinator_ip_address()
-  coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port used in XPK
-  # Env variables to be set in XPK or otherwise
+  coordinator_address = coordinator_ip_address + ":1234"  # JAX coordinator port (the port XPK exposes for CPU workloads)
+  # These env variables must be set by the launcher (XPK sets them for CPU workloads)
   job_index = int(os.environ.get("JOB_INDEX"))  # pyrefly: ignore[bad-argument-type]
   job_completion_index = int(os.environ.get("JOB_COMPLETION_INDEX"))  # pyrefly: ignore[bad-argument-type]
   processes_in_job = int(os.environ.get("PROCESSES_IN_JOB"))  # pyrefly: ignore[bad-argument-type]
@@ -1305,7 +1306,19 @@ def maybe_bootstrap_te_moe(config, mesh, shaped_batch):
   ep_size = mesh.shape.get(ep_axis, 1)
   fsdp_size = mesh.shape.get(fsdp_axis, 1)
 
-  batch_size, sequence_length = shaped_batch["inputs"].shape[:2]
+  loaded_batch_size, sequence_length = shaped_batch["inputs"].shape[:2]
+  ga_steps = config.gradient_accumulation_steps
+  if loaded_batch_size % ga_steps != 0:
+    raise ValueError(f"TE MoE EP loaded batch size ({loaded_batch_size}) must be divisible by GA steps ({ga_steps}).")
+  # Bootstrap for one model invocation, not the full accumulated batch.
+  # Cover both the loaded microbatch and the model-initialization batch.
+  batch_size = max(loaded_batch_size // ga_steps, config.micro_batch_size_to_train_on)
+  if config.eval_interval > 0:
+    batch_size = max(batch_size, config.micro_batch_size_to_eval_on)
+  if batch_size <= 0 or batch_size % (fsdp_size * ep_size) != 0:
+    raise ValueError(
+        f"TE MoE EP per-call batch size ({batch_size}) must be positive and divisible by FSDP * EP ({fsdp_size * ep_size})."
+    )
   if config.num_experts % ep_size != 0:
     raise ValueError(f"num_experts={config.num_experts} must be divisible by EP size={ep_size}.")
 
@@ -1385,3 +1398,25 @@ def maybe_pad(inputs, tile_size):
         [(0, padding_amount, 0), (0, 0, 0)],
     )
   return inputs, padding_amount
+
+
+def is_eval(config) -> bool:
+  """Returns True when evaluation-specific kernel tile sizes (`eval_*`) should be used.
+
+  Evaluation tile sizes (`eval_*`) take effect when evaluation runs under a
+  custom logical mesh/sharding rule (`logical_axis_rules_for_eval !=
+  logical_axis_rules`). Because `eval_step` executes inside
+  `logical_axis_rules(config.logical_axis_rules_for_eval)`, comparing the
+  active logical axis rules against `logical_axis_rules_for_eval` reliably
+  distinguishes evaluation from training without relying on batch size or
+  tensor sharding.
+
+  Args:
+    config: MaxText config object.
+
+  Returns:
+    True if executing under evaluation logical axis rules.
+  """
+  eval_rules = getattr(config, "logical_axis_rules_for_eval", None)
+  train_rules = getattr(config, "logical_axis_rules", None)
+  return bool(eval_rules and eval_rules != train_rules and get_logical_axis_rules() == eval_rules)

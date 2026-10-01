@@ -404,7 +404,6 @@ class TestMHC(parameterized.TestCase):
         use_mhc_pallas_kernel=use_mhc_pallas_kernel,
         dim=128,
         sequence_length=256,
-        per_device_batch_size=1,
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -481,7 +480,6 @@ class TestMHC(parameterized.TestCase):
         mhc_pallas_kernel_bwd_feature_block_size=512,
         dim=128,
         sequence_length=128,
-        per_device_batch_size=1,
         dtype="bfloat16",
     )
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):

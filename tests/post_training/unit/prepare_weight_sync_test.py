@@ -65,6 +65,10 @@ class PrepareWeightSyncTest(unittest.TestCase):
     )
     self.engine._use_weight_converter = True
     self.engine._weight_converter = mock.MagicMock()
+    # `__new__` skips `__init__`, so every attribute `prepare_weight_sync` reads has to be
+    # set here. None is the default a real engine carries until the rollout worker calls
+    # `set_target_state`, and it selects target-free conversion.
+    self.engine._target_state = None
     self.engine._rollout_backend = "maxtext"
     self.engine._get_trainable_params_state = mock.MagicMock(return_value={"layer": jnp.zeros((4, 4))})
 

@@ -183,6 +183,9 @@ linkcheck_ignore = [
     # Ignore GitHub PRs and blobs that trigger rate limiting
     r"https://github\.com/AI-Hypercomputer/maxtext/pull/.*",
     r"https://github\.com/AI-Hypercomputer/maxtext/blob/.*",
+    # Ignore the new-issue links, which redirect to the GitHub login page for
+    # anonymous requests made by the link checker
+    r"https://github\.com/AI-Hypercomputer/maxtext/issues/new.*",
 ]
 
 

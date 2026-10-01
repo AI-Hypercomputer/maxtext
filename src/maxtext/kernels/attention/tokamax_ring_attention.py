@@ -217,9 +217,24 @@ def build_splash_config(
   dq_reduction_steps = config.dq_reduction_steps
   q_seq_len_per_shard = q_seq_len // context_parallel_size
   kv_seq_len_per_shard = kv_seq_len // context_parallel_size
-  block_q = min(config.sa_block_q, q_seq_len_per_shard)
-  block_kv = min(config.sa_block_kv, kv_seq_len_per_shard)
-  block_kv_compute = min(config.sa_block_kv_compute, kv_seq_len_per_shard)
+  is_eval = max_utils.is_eval(config)
+  if is_eval:
+    sa_block_q = config.eval_sa_block_q
+    sa_block_kv = config.eval_sa_block_kv
+    sa_block_kv_compute = config.eval_sa_block_kv_compute
+    sa_q_layout = config.eval_sa_q_layout
+    sa_k_layout = config.eval_sa_k_layout
+    sa_v_layout = config.eval_sa_v_layout
+  else:
+    sa_block_q = config.sa_block_q
+    sa_block_kv = config.sa_block_kv
+    sa_block_kv_compute = config.sa_block_kv_compute
+    sa_q_layout = config.sa_q_layout
+    sa_k_layout = config.sa_k_layout
+    sa_v_layout = config.sa_v_layout
+  block_q = min(sa_block_q, q_seq_len_per_shard)
+  block_kv = min(sa_block_kv, kv_seq_len_per_shard)
+  block_kv_compute = min(sa_block_kv_compute, kv_seq_len_per_shard)
   block_q_dkv = min(config.sa_block_q_dkv, q_seq_len_per_shard)
   block_kv_dkv = min(config.sa_block_kv_dkv, kv_seq_len_per_shard)
   block_kv_dkv_compute = min(config.sa_block_kv_dkv_compute, kv_seq_len_per_shard)
@@ -239,16 +254,24 @@ def build_splash_config(
       block_kv_dkv=block_kv_dkv,
       block_kv_dkv_compute=block_kv_dkv_compute,
       use_fused_bwd_kernel=True,
-      q_layout=tokamax_splash_kernel.QKVLayout[config.sa_q_layout],
-      k_layout=tokamax_splash_kernel.QKVLayout[config.sa_k_layout],
-      v_layout=tokamax_splash_kernel.QKVLayout[config.sa_v_layout],
+      q_layout=tokamax_splash_kernel.QKVLayout[sa_q_layout],
+      k_layout=tokamax_splash_kernel.QKVLayout[sa_k_layout],
+      v_layout=tokamax_splash_kernel.QKVLayout[sa_v_layout],
       attn_logits_soft_cap=attn_logits_soft_cap,
       residual_checkpoint_name="context",
       use_base2_exp=False,
-      fwd_cost_estimate=pl.CostEstimate(flops=config.cost_estimate_flops_fwd, transcendentals=0, bytes_accessed=0)
+      fwd_cost_estimate=pl.CostEstimate(
+          flops=config.cost_estimate_flops_fwd,
+          transcendentals=0,
+          bytes_accessed=0,
+      )
       if config.cost_estimate_flops_fwd >= 0
       else None,
-      bwd_cost_estimate=pl.CostEstimate(flops=config.cost_estimate_flops_bwd, transcendentals=0, bytes_accessed=0)
+      bwd_cost_estimate=pl.CostEstimate(
+          flops=config.cost_estimate_flops_bwd,
+          transcendentals=0,
+          bytes_accessed=0,
+      )
       if config.cost_estimate_flops_bwd >= 0
       else None,
       dq_reduction_steps=dq_reduction_steps if dq_reduction_steps > 0 else None,

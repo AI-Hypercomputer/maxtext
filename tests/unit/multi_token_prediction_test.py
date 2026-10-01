@@ -14,6 +14,7 @@
 """multi_token_prediction_test"""
 
 import unittest
+from unittest import mock
 import functools
 from types import SimpleNamespace
 from absl import logging as absl_logging
@@ -22,6 +23,7 @@ from absl import logging as absl_logging
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh
 from flax import nnx
 
@@ -32,6 +34,7 @@ from maxtext.layers import quantizations
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.common_types import Config
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
+from maxtext.models import models
 from maxtext.trainers.pre_train import train as pre_train
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -1096,6 +1099,95 @@ class CrossEntropyWithIntegerLabelsTest(unittest.TestCase):
 
     np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(actual_grad, expected_grad, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.tpu_only
+class MTPReuseInputEmbeddingTest(unittest.TestCase):
+  """mtp_reuse_input_embedding on the full Transformer.
+
+  Loss and every gradient are bitwise identical to the flag-off run, except the embedding table gradient, whose
+  terms are now summed before the lookup's transpose.
+  """
+
+  def _run(self, **flags):
+    """Returns (loss, mtp_loss, flat grads, #embedding lookups)."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="mtp_reuse_input_embedding_test",
+        skip_jax_distributed_system=True,
+        mtp_num_layers=1,
+        attention="dot_product",
+        enable_dropout=False,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        base_num_decoder_layers=2,
+        max_target_length=16,
+        per_device_batch_size=1,
+        vocab_size=64,
+        # float32 activations: with bfloat16, XLA's excess-precision fusion choices differ between the two graphs.
+        dtype="float32",
+        **flags,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = models.Transformer(cfg, mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=0))
+    batch, seq = jax.device_count(), cfg.max_target_length
+    k1, k2 = jax.random.split(jax.random.PRNGKey(7))
+    # Token 0 in the inputs too, so a rolled-in id 0 is not the only use of row 0.
+    inputs = jax.random.randint(k1, (batch, seq), 0, cfg.vocab_size)
+    segments = jnp.ones((batch, seq), dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32), (batch, seq))
+    data = {
+        "inputs": inputs,
+        "inputs_position": positions,
+        "inputs_segmentation": segments,
+        "targets": jax.random.randint(k2, (batch, seq), 0, cfg.vocab_size),
+        "targets_segmentation": segments,
+    }
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    def loss(p):
+      loss_value, aux = pre_train.loss_fn(nnx.merge(graphdef, p, rest), cfg, data, None, None, is_train=True)
+      return loss_value, aux["mtp_loss"]
+
+    embed_calls = 0
+    real_embed = embeddings.Embed.__call__
+
+    def count_embed(*args, **kwargs):
+      nonlocal embed_calls
+      embed_calls += 1
+      return real_embed(*args, **kwargs)
+
+    with mock.patch.object(embeddings.Embed, "__call__", count_embed):
+      (loss_value, mtp_loss), grads = jax.value_and_grad(loss, has_aux=True)(params)
+    self.assertGreater(float(mtp_loss), 0.0)
+    flat = {jax.tree_util.keystr(k): np.asarray(v) for k, v in jax.tree_util.tree_leaves_with_path(grads)}
+    return np.asarray(loss_value), np.asarray(mtp_loss), flat, embed_calls
+
+  def _check(self):
+    """Compares flag on vs off: loss and every gradient but the embedding table's must be bitwise equal.
+
+    Returns the number of embedding lookups (off, on).
+    """
+    ref_loss, ref_mtp, ref_grads, ref_embeds = self._run()
+    loss, mtp, grads, embeds = self._run(mtp_reuse_input_embedding=True)
+    np.testing.assert_array_equal(loss, ref_loss)
+    np.testing.assert_array_equal(mtp, ref_mtp)
+    self.assertEqual(grads.keys(), ref_grads.keys())
+    matched = 0
+    for name, ref in ref_grads.items():
+      if "token_embedder" in name:
+        matched += 1
+        np.testing.assert_allclose(grads[name], ref, rtol=1e-4, atol=1e-7, err_msg=name)
+      else:
+        np.testing.assert_array_equal(grads[name], ref, err_msg=name)
+    self.assertEqual(matched, 1)
+    return ref_embeds, embeds
+
+  def test_reuse_input_embedding(self):
+    self.assertEqual(self._check(), (2, 1))
 
 
 if __name__ == "__main__":

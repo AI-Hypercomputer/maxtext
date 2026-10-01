@@ -238,6 +238,12 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
       ("vocab_size", "vocab_size"),
       ("global_head_dim", "global_head_dim"),
       ("num_global_key_value_heads", "global_num_kv_heads"),
+      ("hc_mult", "mhc_expansion_rate"),
+      ("num_hash_layers", "first_num_hash_layers"),
+      ("index_n_heads", "indexer_n_heads"),
+      ("index_head_dim", "indexer_head_dim"),
+      ("o_lora_rank", "o_lora_rank"),
+      ("o_groups", "o_groups"),
   ]
 
   if max_config.attention_type == "mla":

@@ -14,6 +14,7 @@
 
 """Unit tests for MaxText scanned-weight unrolling workarounds."""
 
+import inspect
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -29,6 +30,9 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import (
     uses_maxtext_vllm_adapter,
     validate_direct_sync_layer_coverage,
 )
+
+from tunix.generate.vllm_sampler import VllmConfig
+from tunix.rl.rollout import base_rollout
 
 pytestmark = pytest.mark.post_training
 
@@ -390,13 +394,15 @@ class DirectSyncRolloutConfigTest(unittest.TestCase):
 class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
   """Verify the custom rollout preserves Tunix rollout options."""
 
-  @pytest.mark.cpu_only
-  def test_forwards_sampling_parallelism_and_capacity_options(self):
-    sampling_kwargs = {
-        "stop": ["</answer>"],
-        "detokenize": True,
-        "include_stop_str_in_output": True,
-    }
+  _SAMPLING_KWARGS = {
+      "stop": ["</answer>"],
+      "detokenize": True,
+      "include_stop_str_in_output": True,
+  }
+
+  def _build_vllm_config(self, vllm_config_cls=None, **rollout_overrides):
+    """Constructs the rollout with fakes and returns (VllmConfig it built, fake sampler)."""
+    sampling_kwargs = self._SAMPLING_KWARGS
     rollout_config = SimpleNamespace(
         kv_cache_size=1280,
         rollout_mapping_config=None,
@@ -424,6 +430,7 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
         rollout_vllm_delete_dst_buffers=True,
         rollout_vllm_reshard_chunk_size=8,
         rollout_vllm_sampling_kwargs=sampling_kwargs,
+        **rollout_overrides,
     )
     maxtext_config = SimpleNamespace(
         model_name="qwen3.5-35b-a3b",
@@ -443,7 +450,7 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
         ),
         mock.patch(
             "maxtext.integration.vllm.maxtext_vllm_rollout.VllmConfig",
-            side_effect=SimpleNamespace,
+            **({"new": vllm_config_cls} if vllm_config_cls else {"side_effect": SimpleNamespace}),
         ),
         mock.patch(
             "maxtext.integration.vllm.maxtext_vllm_rollout.MaxTextVllmSampler",
@@ -459,8 +466,13 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
           maxtext_config=maxtext_config,
       )
 
-    config = sampler_cls.call_args.kwargs["config"]
-    self.assertEqual(config.sampling_kwargs, sampling_kwargs)
+    return sampler_cls.call_args.kwargs["config"], fake_sampler
+
+  @pytest.mark.cpu_only
+  def test_forwards_sampling_parallelism_and_capacity_options(self):
+    config, fake_sampler = self._build_vllm_config()
+
+    self.assertEqual(config.sampling_kwargs, self._SAMPLING_KWARGS)
     self.assertEqual(config.expert_parallel_size, 1)
     self.assertEqual(config.return_logprobs, True)
     self.assertEqual(config.reshard_chunk_size, 8)
@@ -471,6 +483,65 @@ class MaxTextVllmRolloutConfigForwardingTest(unittest.TestCase):
     self.assertEqual(config.engine_kwargs["logprobs_mode"], "raw_logprobs")
     self.assertNotIn("swap_space", config.engine_kwargs)
     fake_sampler.load_checkpoint.assert_called_once_with({"base": {}})
+
+  @pytest.mark.cpu_only
+  def test_forwards_free_kv_cache_during_weight_sync(self):
+    for value in (True, False):
+      config, _ = self._build_vllm_config(rollout_vllm_free_kv_cache_during_weight_sync=value)
+      self.assertIs(config.free_kv_cache_during_weight_sync, value)
+
+  @pytest.mark.cpu_only
+  def test_omits_free_kv_cache_option_when_vllm_config_does_not_accept_it(self):
+    """A rollout config carrying the field must not break a VllmConfig that predates it."""
+
+    class StrictVllmConfig:
+      """Rejects the option, like the VllmConfig of a tunix that predates it."""
+
+      def __init__(self, *, mesh=None, **fields):
+        if "free_kv_cache_during_weight_sync" in fields:
+          raise TypeError("unexpected keyword argument 'free_kv_cache_during_weight_sync'")
+        vars(self).update(fields, mesh=mesh)
+
+    StrictVllmConfig.__signature__ = inspect.Signature(
+        [inspect.Parameter("mesh", inspect.Parameter.KEYWORD_ONLY, default=None)]
+    )
+
+    with self.assertLogs(level="WARNING") as logs:
+      config, _ = self._build_vllm_config(
+          vllm_config_cls=StrictVllmConfig, rollout_vllm_free_kv_cache_during_weight_sync=False
+      )
+
+    self.assertFalse(hasattr(config, "free_kv_cache_during_weight_sync"))
+    self.assertTrue(any("free_kv_cache_during_weight_sync" in line for line in logs.output), logs.output)
+    self.assertEqual(config.reshard_chunk_size, 8)
+
+  @pytest.mark.cpu_only
+  def test_forwards_free_kv_cache_option_when_vllm_config_signature_cannot_be_inspected(self):
+    """An uninspectable VllmConfig is treated as accepting the option, like `_kwargs_supported_by` does."""
+    with mock.patch.object(inspect, "signature", side_effect=ValueError("no signature found")):
+      config, _ = self._build_vllm_config(rollout_vllm_free_kv_cache_during_weight_sync=False)
+
+    self.assertFalse(config.free_kv_cache_during_weight_sync)
+
+  @pytest.mark.cpu_only
+  def test_free_kv_cache_option_names_match_the_installed_tunix(self):
+    """A misspelt or renamed tunix field would be dropped without an error, so pin both names."""
+
+    def fields_mentioning_free_kv_cache(cls):
+      return [name for name in inspect.signature(cls).parameters if "free_kv_cache" in name]
+
+    rollout_fields = fields_mentioning_free_kv_cache(base_rollout.RolloutConfig)
+    if not rollout_fields:
+      self.skipTest("installed tunix predates free_kv_cache_during_weight_sync")
+
+    self.assertEqual(rollout_fields, ["rollout_vllm_free_kv_cache_during_weight_sync"])
+    self.assertEqual(fields_mentioning_free_kv_cache(VllmConfig), ["free_kv_cache_during_weight_sync"])
+
+  @pytest.mark.cpu_only
+  def test_omits_free_kv_cache_option_for_a_tunix_that_predates_it(self):
+    config, _ = self._build_vllm_config()
+
+    self.assertFalse(hasattr(config, "free_kv_cache_during_weight_sync"))
 
 
 class MaxTextAdapterSelectionTest(unittest.TestCase):

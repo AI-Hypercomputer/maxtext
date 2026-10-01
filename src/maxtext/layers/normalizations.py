@@ -16,9 +16,7 @@
 
 from typing import Any
 
-from flax import linen as nn
 from flax import nnx
-from flax.linen import initializers as linen_initializers
 import jax
 from jax import lax
 import jax.numpy as jnp
@@ -68,7 +66,7 @@ class RMSNorm(nnx.Module):
       weight_dtype: Any = jnp.float32,
       shard_mode: ShardMode = ShardMode.AUTO,
       kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.ones,
+      scale_init: Initializer = jax.nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
       scale_offset: float = 0.0,
       with_scale: bool = True,
@@ -179,7 +177,7 @@ def Qwen3NextRMSNorm(
           weight_dtype=weight_dtype,
           shard_mode=shard_mode if shard_mode is not None else ShardMode.AUTO,
           kernel_axes=kernel_axes if kernel_axes is not None else (),
-          scale_init=linen_initializers.zeros,
+          scale_init=jax.nn.initializers.zeros,
           scale_offset=1.0,
           parameter_memory_host_offload=bool(parameter_memory_host_offload),
           rngs=rngs,
@@ -261,7 +259,7 @@ def rms_norm(
     weight_dtype: Any = jnp.float32,
     shard_mode: ShardMode = ShardMode.AUTO,
     kernel_axes: tuple[None | str, ...] = (),
-    scale_init: Initializer = nn.initializers.ones,
+    scale_init: Initializer = jax.nn.initializers.ones,
     name: None | str = None,
     parameter_memory_host_offload: bool = False,
     with_scale: bool = True,
@@ -303,6 +301,6 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
     RMSNorm,
     base_metadata_fn=variable_to_logically_partitioned,
-    scale_init=linen_initializers.zeros,
+    scale_init=jax.nn.initializers.zeros,
     scale_offset=1.0,
 )

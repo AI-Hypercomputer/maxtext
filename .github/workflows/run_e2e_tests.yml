@@ -31,6 +31,11 @@ on:
         description: 'GitHub SHA of MaxText to be passed to the Airflow DAG run.'
         required: true
         type: string
+      test_scope:
+        description: 'Which test suites the DAG should run: all, pre-training or post-training.'
+        required: false
+        type: string
+        default: all
     secrets:
       AIRFLOW_CALLBACK_TOKEN:
         required: false
@@ -61,16 +66,18 @@ jobs:
           RUN_ID: ${{ inputs.run_id }}
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
+          TEST_SCOPE: ${{ inputs.test_scope }}
         run: |
           IAP_TOKEN=$(gcloud auth print-access-token)
           PAYLOAD=$(python3 -c 'import json, os
           from datetime import datetime, timezone
           run_id = os.environ["RUN_ID"]
           repo = os.environ["GITHUB_REPO"]
+          test_scope = os.environ["TEST_SCOPE"]
           now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           print(json.dumps({
               "dag_run_id": f"auto_gha__{run_id}__{now}",
-              "note": f"Automated E2E TPU test suite triggered by GitHub Actions.\n\nWorkflow Run: https://github.com/{repo}/actions/runs/{run_id}",
+              "note": f"Automated E2E TPU test suite ({test_scope}) triggered by GitHub Actions.\n\nWorkflow Run: https://github.com/{repo}/actions/runs/{run_id}",
               "conf": {
                   "build_mode": os.environ["BUILD_MODE"],
                   "commit_sha": os.environ["COMMIT_SHA"],
@@ -78,6 +85,7 @@ jobs:
                   "github_repo": repo,
                   "github_token": os.environ["GITHUB_TOKEN"],
                   "is_automated": True,
+                  "test_scope": test_scope,
               }
           }))')
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \

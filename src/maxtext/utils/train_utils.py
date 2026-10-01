@@ -16,13 +16,17 @@
 """Utils that are only interesting for training in MaxText."""
 
 import subprocess
+import time
 import jax
+import numpy as np
 import optax
 import functools
 import orbax.checkpoint.pathways as ocp_pathways
 
+from jax.experimental import multihost_utils
+
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 
 from maxtext.common import checkpointing
 from maxtext.common import emergency_checkpointing
@@ -30,6 +34,7 @@ from maxtext.common import train_state_nnx
 from maxtext.common.common_types import ReorderStrategy
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
+from maxtext.input_pipeline import multihost_dataloading
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
 from maxtext.utils import diloco_sharding
@@ -40,6 +45,49 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
+
+
+def prepare_before_run_start(config, state, learning_rate_schedule, start_step, mesh, data_loader, shaped_batch):
+  """Optional setup that runs before init_stop/run_start and never touches the dataset.
+
+  MLPerf starts the clock before any part of the system touches the dataset, so everything here uses only the
+  model state, the config and synthetic (all-zero) inputs. The two flags are independent.
+  """
+  timings = []
+
+  if config.warm_input_reshard_before_run_start:
+    # The loader builds each host batch as a global array sharded over all mesh axes
+    # (multihost_dataloading._form_global_array) and then device_puts it to the input sharding, which compiles a
+    # reshard program on first use. Warm that path with an all-zero synthetic batch (no training data).
+    t = time.perf_counter()
+    local_rows = config.global_batch_size_to_load // jax.process_count()
+
+    def _synthetic_global(leaf):
+      local = np.zeros((local_rows,) + tuple(leaf.shape[1:]), dtype=leaf.dtype)
+      return multihost_dataloading._form_global_array((), local, mesh)  # pylint: disable=protected-access
+
+    warm = jax.device_put(jax.tree.map(_synthetic_global, shaped_batch), data_loader.input_data_shardings)
+    jax.block_until_ready(warm)
+    del warm
+    timings.append(f"input reshard warm {time.perf_counter() - t:.3f} s")
+
+  if config.block_state_before_run_start:
+    # Wait for the restored/initialized train state so it is not paid for inside step 0.
+    t = time.perf_counter()
+    jax.block_until_ready(state)
+    timings.append(f"state ready {time.perf_counter() - t:.3f} s")
+    # The metric logger evaluates learning_rate_schedule(step) eagerly after every step; the first call compiles a
+    # handful of tiny eager ops. Do it once here so step 0 does not pay for it.
+    t = time.perf_counter()
+    jax.block_until_ready(learning_rate_schedule(start_step))
+    timings.append(f"lr schedule warm {time.perf_counter() - t:.3f} s")
+    # Make all hosts log run_start together instead of process 0 starting the clock while others are still in init.
+    t = time.perf_counter()
+    multihost_utils.sync_global_devices("pre_run_start")
+    timings.append(f"barrier {time.perf_counter() - t:.3f} s")
+
+  if timings:
+    max_logging.log("Pre-run_start setup: " + ", ".join(timings))
 
 
 def create_training_optimizer(config, model, mesh=None):
@@ -142,7 +190,10 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
     execution_mesh = mesh if mesh is not None else model.mesh
     execution_devices = execution_mesh.devices.flatten().tolist()
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state, execution_devices)
+    with jax.set_mesh(execution_mesh), logical_axis_rules(config.logical_axis_rules):
+      p_train_step = maxtext_utils.load_compiled(
+          config, functional_train, state, execution_devices, data_sharding=data_sharding
+      )
     max_logging.log("Loaded compiled function!")
   else:
     p_train_step = jax.jit(
@@ -348,7 +399,7 @@ def setup_train_loop(config, recorder, devices=None):
       # pyrefly: ignore[bad-argument-type]
       lora_utils.restore_lora_from_path(target_model_state, config)
       _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       # We only need the graphdef here; it's merged with state below. Avoid
       # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable
       # under jax.set_mesh(mesh) and rejects any logical name missing from
@@ -363,12 +414,12 @@ def setup_train_loop(config, recorder, devices=None):
       else:
         state_mesh_shardings_params = state_mesh_shardings.params
     else:
-      with nn_partitioning.axis_rules(config.logical_axis_rules):
+      with logical_axis_rules(config.logical_axis_rules):
         _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
         _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
 
     if config.enable_diloco:
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+      with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
         outer_params_sharding = (
             state_mesh_shardings_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
             if isinstance(state_mesh_shardings_params, nnx.State)

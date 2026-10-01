@@ -8,27 +8,39 @@ set -e
 # 4. Post-Sync Loss Spike Severity (Delta L_sync / diloco/post_sync_loss_spike_severity)
 # 5. Post-Sync Expert Utilization Entropy (EUE / diloco/post_sync_expert_utilization_entropy)
 #
+# The workload is submitted via Cluster Toolkit (gcluster); see
+# docs/run_maxtext/run_maxtext_via_cluster_toolkit.md. TPU reservations are configured
+# on the cluster's node pools, so there is no per-workload reservation flag.
+#
 # ------------------------------------------------------------------------------
 # Example Invocations:
 # ------------------------------------------------------------------------------
 # 1. Standard Multi-Slice MoE DiLoCo Training (2x v5p-128, Qwen3-30B-A3B on C4):
-#      CLUSTER="mlperf-v5p" ZONE="europe-west4-b" PROJECT="cloud-tpu-multipod-dev" \
+#      CLUSTER="your-cluster-name" LOCATION="your-cluster-location" PROJECT="your-project-id" \
 #      DEVICE_TYPE="v5p-128" NUM_SLICES="2" RUNNAME="dlco-moe-01" \
-#      BASE_OUTPUT_DIRECTORY="gs://chriszuo-maxtext-logs" DATASET_PATH="gs://chriszuo-maxtext-datasets" \
-#      RESERVATION="cloudtpu-20240716121201-595617744" \
+#      BASE_OUTPUT_DIRECTORY="gs://your-bucket/maxtext-logs" DATASET_PATH="gs://your-bucket/maxtext-datasets" \
 #      STEPS="100" DILOCO_SYNC_PERIOD="49" DILOCO_NUM_FRAGMENTS="49" \
 #      bash src/maxtext/trainers/diloco/scripts/run_spmd_streaming_dlco_moe_c4.sh
 # ------------------------------------------------------------------------------
 
-CLUSTER="${CLUSTER:-mlperf-v5p}"
-PROJECT="${PROJECT:-cloud-tpu-multipod-dev}"
-ZONE="${ZONE:-europe-west4-b}"
+# Required: GKE cluster name, project, and cluster location
+# (LOCATION is the cluster's region for regional clusters, or its zone for zonal ones).
+for var in CLUSTER PROJECT LOCATION; do
+  if [ -z "${!var:-}" ]; then
+    echo "Error: ${var} is not set. Please set CLUSTER, PROJECT and LOCATION (e.g. CLUSTER=your-cluster-name PROJECT=your-project-id LOCATION=your-cluster-location)."
+    exit 1
+  fi
+done
 
 NUM_SLICES="${NUM_SLICES:-2}"
 DEVICE_TYPE="${DEVICE_TYPE:-v5p-128}"
 
-RUNNAME="${RUNNAME:-dlco-moe-$(date +%H%M)}"
-DOCKER_IMAGE_BASE="${DOCKER_IMAGE_BASE:-gcr.io/tpu-prod-env-multipod/maxtext_jax_stable:latest}"
+RUNNAME="${RUNNAME:-dlco-moe-$(date +%H%M)}" # also used as the gcluster workload name
+if [ "${#RUNNAME}" -gt 28 ]; then
+  echo "Error: RUNNAME '${RUNNAME}' exceeds the 28-character limit for gcluster workload names."
+  exit 1
+fi
+DOCKER_IMAGE_BASE="${DOCKER_IMAGE_BASE:-us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest}"
 MY_IMAGE="gcr.io/${PROJECT}/$(whoami)-runner:${RUNNAME}"
 
 if [ -z "${BASE_OUTPUT_DIRECTORY:-}" ]; then
@@ -151,24 +163,21 @@ EOF
 echo "Pushing docker image: ${MY_IMAGE}"
 docker push "${MY_IMAGE}"
 
-echo "Submitting MoE DiLoCo training workload using XPK..."
-XPK_ARGS=(
-  --workload "${RUNNAME}"
-  --docker-image "${MY_IMAGE}"
+echo "Submitting MoE DiLoCo training workload using Cluster Toolkit (gcluster)..."
+GCLUSTER_ARGS=(
+  --name "${RUNNAME}"
+  --image "${MY_IMAGE}"
   --command "${CMD}"
   --num-slices "${NUM_SLICES}"
   --priority "${PRIORITY:-medium}"
-  --enable-debug-logs
+  --restarts "${MAX_RESTARTS:-0}"
+  --verbose
   --cluster "${CLUSTER}"
-  --tpu-type "${DEVICE_TYPE}"
+  --compute-type "${DEVICE_TYPE}"
   --project "${PROJECT}"
-  --zone "${ZONE}"
+  --location "${LOCATION}"
 )
 
-if [ -n "${RESERVATION:-}" ] && [ "${RESERVATION}" != "NONE" ]; then
-  XPK_ARGS+=(--reservation "${RESERVATION}")
-fi
-
-xpk workload create "${XPK_ARGS[@]}"
+gcluster job submit "${GCLUSTER_ARGS[@]}"
 
 echo "MoE DiLoCo workload submission complete!"

@@ -16,7 +16,7 @@
 
 from typing import Any, Protocol
 
-import flax.linen as nn
+from flax.core.spmd import logical_axis_rules
 import jax
 from tpu_inference.models.jax.utils.multi_modal_utils import convert_torch_tensor_to_jax, normalize_mm_grid_thw
 
@@ -93,7 +93,7 @@ class Qwen3VLMultimodalHandler:
           grid_w * patch_size,
       )
 
-      with mesh, nn.logical_axis_rules(maxtext_config.logical_axis_rules):
+      with mesh, logical_axis_rules(maxtext_config.logical_axis_rules):
         image_embeddings, _ = model.vision_encoder(input_images=input_images, deterministic=True)
       embeddings.append(image_embeddings.squeeze(0))
       current_idx += image_size

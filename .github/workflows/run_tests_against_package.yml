@@ -28,6 +28,11 @@ on:
       device_name:
         required: true
         type: string
+      repository_name:
+        description: 'Artifact Registry repository name'
+        required: false
+        type: string
+        default: 'maxtext-images'
       base_image:
         required: true
         type: string
@@ -90,11 +95,17 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     timeout-minutes: 90
     container:
-      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/maxtext-images/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || 'maxtext-images' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
+        # cpu-unit runs the hardware-agnostic bulk (every test auto-marked cpu_only), and it is the
+        # only job that runs them. On one device a test whose batch is smaller than the mesh, or that
+        # never enters an axis_rules context, passes for the wrong reason; 4 virtual devices make the
+        # sharding real so those bugs surface here instead of on accelerator runners. Also lets the
+        # tests that self-skip below 2 devices actually run.
+        XLA_FLAGS: ${{ inputs.flavor == 'cpu-unit' && '--xla_force_host_platform_device_count=4' || '' }}
         VLLM_TARGET_DEVICE: "tpu"
         UV_TORCH_BACKEND: "cpu"
         MAXTEXT_PACKAGE_EXTRA: >-

@@ -34,7 +34,7 @@ from typing import Any, Sequence
 
 from absl import app
 from absl import flags
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 import jax
 from maxtext.common import profiler
 from maxtext.common.common_types import Config
@@ -150,7 +150,7 @@ def decode_with_vllm(config: Config) -> None:
   argv_list = ["", str(vllm_config_path), "log_config=False"]
   vllm_config = pyconfig.initialize(argv_list)
 
-  with nn_partitioning.axis_rules(vllm_config.logical_axis_rules):
+  with logical_axis_rules(vllm_config.logical_axis_rules):
     llm = LLM(**vllm_args)
 
   max_logging.log("Generating output...")

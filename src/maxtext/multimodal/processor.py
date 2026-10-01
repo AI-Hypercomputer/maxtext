@@ -42,9 +42,9 @@ _MODEL_TO_BLOCKS = {
     "qwen3.5-397b-a17b-fp8": ("qwen3_5", "qwen3_5"),
     # Stitched model
     "maxtext-omni-gemma3-qwen3": ("gemma3", "qwen3"),
-    # Cosmos
-    "cosmos3-nano-reasoner": ("qwen3_vl", "qwen3"),
-    "cosmos3-super-reasoner": ("qwen3_vl", "qwen3"),
+    # Weaver
+    "weaver-mini": ("qwen3_vl", "qwen3"),
+    "weaver-max": ("qwen3_vl", "qwen3"),
 }
 
 
@@ -149,7 +149,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
   decoder_block = _get_decoder_block(config)
 
   if "maxtext-omni" in getattr(config, "model_name", ""):
-    from maxtext.experimental.omni_poc.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
+    from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
 
     return processor_maxtext_omni.get_image_offsets_omni(vision_block, decoder_block, processor_output)
   elif vision_block in ["gemma3"]:
@@ -236,7 +236,7 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
   decoder_block = _get_decoder_block(config)
 
   if "maxtext-omni" in getattr(config, "model_name", ""):
-    from maxtext.experimental.omni_poc.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
+    from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
 
     return processor_maxtext_omni.add_extra_tokens_for_omni(
         tokens, vision_block, decoder_block, processor_output=processor_output
@@ -318,7 +318,7 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
   decoder_block = _get_decoder_block(config)
 
   if "maxtext-omni" in getattr(config, "model_name", ""):
-    from maxtext.experimental.omni_poc.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
+    from maxtext.experimental.omni_pipeline.utils import processor_maxtext_omni  # pylint: disable=import-outside-toplevel
 
     bidirectional_mask_vision = processor_maxtext_omni.get_bidirectional_mask_vision_omni(
         vision_block, decoder_block, decoder_input_tokens
@@ -364,7 +364,7 @@ def downsample_video_mask_to_tokens(video_mask, config):
   """Routes video-mask reduction to the model-specific multimodal processor."""
   if video_mask is None:
     return None
-  if config.model_name.startswith(("qwen3", "cosmos3")):
+  if config.model_name.startswith(("qwen3", "weaver")):
     from maxtext.multimodal.processor_qwen3_omni import (  # pylint: disable=import-outside-toplevel
         downsample_video_mask_to_tokens as downsample_qwen3_video_mask,
     )

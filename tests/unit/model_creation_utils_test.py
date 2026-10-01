@@ -549,6 +549,14 @@ class TestCreateModel(unittest.TestCase):
     model = model_creation_utils.create_model(self.config, self.mesh)
     self.assertIsInstance(model, nn.Module)
 
+  def test_m3_disabled_by_default(self):
+    self.assertFalse(self.config.use_m3_model)
+
+  def test_m3_rejects_unsupported_model(self):
+    config = _make_config(use_m3_model=True)
+    with self.assertRaisesRegex(ValueError, "Model 'default' does not support the m3 backend"):
+      model_creation_utils.create_model(config, self.mesh)
+
 
 class TestFromConfig(unittest.TestCase):
   """Tests for from_config()."""

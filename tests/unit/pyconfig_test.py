@@ -49,6 +49,32 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_step_dropless_fallback_rejects_unreplayable_combinations(self):
+    def initialize(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          model_name="mixtral-8x7b",
+          megablox=True,
+          sparse_matmul=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=True,
+          ici_expert_parallelism=2,
+          ragged_buffer_factor=1.0,
+          moe_dropless_fallback="step",
+          **kwargs,
+      )
+
+    self.assertEqual(initialize().moe_dropless_fallback, "step")
+    for overrides, message in (
+        ({"enable_diloco": True, "dcn_diloco_parallelism": 2}, "not supported with enable_diloco"),
+        ({"compiled_trainstep_file": "/tmp/train_step.pickle"}, "not supported with compiled_trainstep_file"),
+        ({"optimizer_memory_host_offload": True}, "not supported with optimizer_memory_host_offload"),
+        ({"parameter_memory_host_offload": True}, "or parameter_memory_host_offload"),
+    ):
+      with self.subTest(**overrides), self.assertRaisesRegex(ValueError, message):
+        initialize(**overrides)
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
@@ -588,6 +614,43 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(config.local_sa_v_layout, "SEQ_MINOR")
     self.assertFalse(config.local_use_splash_scheduler)
 
+  def test_sa_and_gmm_eval_flags_inherit_and_override(self):
+    """eval_sa_* and eval_wi/wo_tile_fwd_* use base.yml defaults; eval_local_sa_* inherits from eval_sa_* when unset."""
+    cfg = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        sa_block_q=256,
+        sa_block_kv=512,
+        local_sa_block_q=64,
+        sa_q_layout="SEQ_MINOR",
+        local_sa_q_layout="HEAD_DIM_MINOR",
+        wi_tile_fwd_batch_seq=256,
+        wo_tile_fwd_embed_dim=2048,
+    )
+    self.assertEqual((cfg.eval_sa_block_q, cfg.eval_sa_block_kv, cfg.eval_local_sa_block_q), (512, 512, 512))
+    self.assertEqual((cfg.eval_sa_q_layout, cfg.eval_local_sa_q_layout), ("HEAD_DIM_MINOR", "HEAD_DIM_MINOR"))
+    self.assertEqual((cfg.eval_wi_tile_fwd_batch_seq, cfg.eval_wo_tile_fwd_embed_dim), (512, 1024))
+
+    cfg_override = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        sa_block_q=256,
+        eval_sa_block_q=1024,
+        eval_sa_block_kv=2048,
+        eval_local_sa_block_q=128,
+        sa_q_layout="HEAD_DIM_MINOR",
+        eval_sa_q_layout="SEQ_MINOR",
+        wi_tile_fwd_batch_seq=256,
+        eval_wi_tile_fwd_batch_seq=1024,
+        eval_wo_tile_fwd_mlp_dim=4096,
+    )
+    self.assertEqual(
+        (cfg_override.eval_sa_block_q, cfg_override.eval_local_sa_block_q, cfg_override.eval_local_sa_block_kv),
+        (1024, 128, 2048),
+    )
+    self.assertEqual((cfg_override.eval_sa_q_layout, cfg_override.eval_local_sa_q_layout), ("SEQ_MINOR", "SEQ_MINOR"))
+    self.assertEqual((cfg_override.eval_wi_tile_fwd_batch_seq, cfg_override.eval_wo_tile_fwd_mlp_dim), (1024, 4096))
+
   def test_eval_start_step_config(self):
     """Verifies that eval_start_step defaults to 0 and can be overridden via pyconfig."""
     config_default = pyconfig.initialize(
@@ -653,6 +716,7 @@ assert train._TF_AVAILABLE is False
         "use_random_routing": (False, True),
         "use_ragged_sort": (False, True),
         "ragged_buffer_factor": (-1.0, 2.0),
+        "eval_ragged_buffer_factor": (-1.0, 2.0),
         "use_ring_of_experts": (False, True),
         "num_moe_emb_chunks": (0, 2),
     }

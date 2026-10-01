@@ -73,7 +73,7 @@ from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
+from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, maybe_shard_with_pspec
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
@@ -623,6 +623,8 @@ class AttentionOp(nnx.Module):
     self.max_target_length = max_target_length
     self.num_query_heads = num_query_heads
     self.num_kv_heads = num_kv_heads
+    self.attention_type = _resolve_attention_type(self.config, attention_type)
+    self.is_absorbed_mqa = getattr(config, "use_mla_absorbed_mqa", False) and self.attention_type == AttentionType.MLA
     self.float32_qk_product = float32_qk_product
     self.max_prefill_predict_length = max_prefill_predict_length
     self.float32_logits = float32_logits
@@ -641,7 +643,6 @@ class AttentionOp(nnx.Module):
     self.dtype = dtype
     self.quant = quant
     self.kv_quant = kv_quant
-    self.attention_type = _resolve_attention_type(self.config, attention_type)
     self.causal_block_size = getattr(self.config, "causal_block_size", None)
     if self.attention_type == AttentionType.BLOCK_DIFFUSION:
       if self.causal_block_size is None or self.causal_block_size <= 0:
@@ -661,6 +662,9 @@ class AttentionOp(nnx.Module):
         self.block_q = self.config.local_sa_block_q
         self.block_kv = self.config.local_sa_block_kv
         self.block_kv_compute = self.config.local_sa_block_kv_compute
+        self.eval_block_q = self.config.eval_local_sa_block_q
+        self.eval_block_kv = self.config.eval_local_sa_block_kv
+        self.eval_block_kv_compute = self.config.eval_local_sa_block_kv_compute
         self.block_q_dkv = self.config.local_sa_block_q_dkv
         self.block_kv_dkv = self.config.local_sa_block_kv_dkv
         self.block_kv_dkv_compute = self.config.local_sa_block_kv_dkv_compute
@@ -670,6 +674,9 @@ class AttentionOp(nnx.Module):
         self.q_layout = self.config.local_sa_q_layout
         self.k_layout = self.config.local_sa_k_layout
         self.v_layout = self.config.local_sa_v_layout
+        self.eval_q_layout = self.config.eval_local_sa_q_layout
+        self.eval_k_layout = self.config.eval_local_sa_k_layout
+        self.eval_v_layout = self.config.eval_local_sa_v_layout
         self.use_splash_scheduler = self.config.local_use_splash_scheduler
         self.fuse_reciprocal = self.config.local_sa_fuse_reciprocal
         self.use_base2_exp = self.config.local_sa_use_base2_exp
@@ -677,6 +684,9 @@ class AttentionOp(nnx.Module):
         self.block_q = self.config.sa_block_q
         self.block_kv = self.config.sa_block_kv
         self.block_kv_compute = self.config.sa_block_kv_compute
+        self.eval_block_q = self.config.eval_sa_block_q
+        self.eval_block_kv = self.config.eval_sa_block_kv
+        self.eval_block_kv_compute = self.config.eval_sa_block_kv_compute
         self.block_q_dkv = self.config.sa_block_q_dkv
         self.block_kv_dkv = self.config.sa_block_kv_dkv
         self.block_kv_dkv_compute = self.config.sa_block_kv_dkv_compute
@@ -686,6 +696,9 @@ class AttentionOp(nnx.Module):
         self.q_layout = self.config.sa_q_layout
         self.k_layout = self.config.sa_k_layout
         self.v_layout = self.config.sa_v_layout
+        self.eval_q_layout = self.config.eval_sa_q_layout
+        self.eval_k_layout = self.config.eval_sa_k_layout
+        self.eval_v_layout = self.config.eval_sa_v_layout
         self.use_splash_scheduler = self.config.use_splash_scheduler
         self.fuse_reciprocal = self.config.sa_fuse_reciprocal
         self.use_base2_exp = self.config.sa_use_base2_exp
@@ -1589,6 +1602,14 @@ class AttentionOp(nnx.Module):
       wv_product_einsum: Callable[..., Array],
   ):
     """Apply attention"""
+    if self.attention_kernel == "cudnn_flash_jax":
+      validate_gpu_flash_attention(sinks, record_max_logits)
+      if isinstance(key, KVTensor):
+        key = key.dequant()
+      if isinstance(value, KVTensor):
+        value = value.dequant()
+      query, key, value = self._align_qkv_for_cudnn_flash(query, key, value)
+
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
@@ -1742,11 +1763,6 @@ class AttentionOp(nnx.Module):
           None,
       )
     elif self.attention_kernel == "cudnn_flash_jax":
-      validate_gpu_flash_attention(sinks, record_max_logits)
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
       return (
           *self.cudnn_jax_flash_attention(query, key, value, decoder_segment_ids, model_mode),
           None,
@@ -1917,16 +1933,41 @@ class AttentionOp(nnx.Module):
     pad_kv = 0
     decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
 
+    if max_utils.is_eval(self.config):
+      block_q = self.eval_block_q
+      block_kv = self.eval_block_kv
+      block_kv_compute = self.eval_block_kv_compute
+      block_q_dkv = block_q
+      block_kv_dkv = block_kv
+      block_kv_dkv_compute = block_kv_compute
+      block_q_dq = block_q
+      block_kv_dq = block_kv
+      q_layout = self.eval_q_layout
+      k_layout = self.eval_k_layout
+      v_layout = self.eval_v_layout
+    else:
+      block_q = self.block_q
+      block_kv = self.block_kv
+      block_kv_compute = self.block_kv_compute
+      block_q_dkv = self.block_q_dkv
+      block_kv_dkv = self.block_kv_dkv
+      block_kv_dkv_compute = self.block_kv_dkv_compute
+      block_q_dq = self.block_q_dq
+      block_kv_dq = self.block_kv_dq
+      q_layout = self.q_layout
+      k_layout = self.k_layout
+      v_layout = self.v_layout
+
     # Pad sequences to block-sized boundaries upfront for AttentionType.COMPRESSED
     if self.attention_type == AttentionType.COMPRESSED:
-      if query.shape[2] % self.block_q != 0:
-        pad_q = (self.block_q - (query.shape[2] % self.block_q)) % self.block_q
+      if query.shape[2] % block_q != 0:
+        pad_q = (block_q - (query.shape[2] % block_q)) % block_q
         query = jnp.pad(query, ((0, 0), (0, 0), (0, pad_q), (0, 0)))
         if decoder_segment_ids is not None:
           decoder_segment_ids = jnp.pad(decoder_segment_ids, ((0, 0), (0, pad_q)), constant_values=-1)
 
-      if key.shape[2] % self.block_kv != 0:
-        pad_kv = (self.block_kv - (key.shape[2] % self.block_kv)) % self.block_kv
+      if key.shape[2] % block_kv != 0:
+        pad_kv = (block_kv - (key.shape[2] % block_kv)) % block_kv
         key = jnp.pad(key, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
         value = jnp.pad(value, ((0, 0), (0, 0), (0, pad_kv), (0, 0)))
         if decoder_segment_ids_kv_in is not None:
@@ -1998,16 +2039,16 @@ class AttentionOp(nnx.Module):
     def create_sa_config(config, query, key, attn_logits_soft_cap):
       if config.use_tokamax_splash:
         sa_config = tokamax_splash_kernel.SplashConfig(
-            block_q=min(self.block_q, query.shape[2]),
-            block_kv=min(self.block_kv, key.shape[2]),
-            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
-            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(self.block_kv_dkv_compute, key.shape[2]),
+            block_q=min(block_q, query.shape[2]),
+            block_kv=min(block_kv, key.shape[2]),
+            block_kv_compute=min(block_kv_compute, key.shape[2]),
+            block_q_dkv=min(block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(block_kv_dkv_compute, key.shape[2]),
             use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
-            q_layout=tokamax_splash_kernel.QKVLayout[self.q_layout],
-            k_layout=tokamax_splash_kernel.QKVLayout[self.k_layout],
-            v_layout=tokamax_splash_kernel.QKVLayout[self.v_layout],
+            q_layout=tokamax_splash_kernel.QKVLayout[q_layout],
+            k_layout=tokamax_splash_kernel.QKVLayout[k_layout],
+            v_layout=tokamax_splash_kernel.QKVLayout[v_layout],
             attn_logits_soft_cap=attn_logits_soft_cap,
             fuse_reciprocal=self.fuse_reciprocal,
             use_base2_exp=self.use_base2_exp,
@@ -2038,18 +2079,18 @@ class AttentionOp(nnx.Module):
         )
       else:
         sa_config = splash_attention_kernel.BlockSizes(
-            block_q=min(self.block_q, query.shape[2]),
-            block_kv=min(self.block_kv, key.shape[2]),
-            block_kv_compute=min(self.block_kv_compute, key.shape[2]),
-            block_q_dkv=min(self.block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(self.block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(self.block_kv_dkv_compute, key.shape[2]),
-            block_q_dq=None if self.use_fused_bwd_kernel else min(self.block_q_dq, query.shape[2]),
-            block_kv_dq=None if self.use_fused_bwd_kernel else min(self.block_kv_dq, query.shape[2]),
+            block_q=min(block_q, query.shape[2]),
+            block_kv=min(block_kv, key.shape[2]),
+            block_kv_compute=min(block_kv_compute, key.shape[2]),
+            block_q_dkv=min(block_q_dkv, query.shape[2]),
+            block_kv_dkv=min(block_kv_dkv, key.shape[2]),
+            block_kv_dkv_compute=min(block_kv_dkv_compute, key.shape[2]),
+            block_q_dq=None if self.use_fused_bwd_kernel else min(block_q_dq, query.shape[2]),
+            block_kv_dq=None if self.use_fused_bwd_kernel else min(block_kv_dq, key.shape[2]),
             use_fused_bwd_kernel=self.use_fused_bwd_kernel,
-            q_layout=splash_attention_kernel.QKVLayout[self.q_layout],
-            k_layout=splash_attention_kernel.QKVLayout[self.k_layout],
-            v_layout=splash_attention_kernel.QKVLayout[self.v_layout],
+            q_layout=splash_attention_kernel.QKVLayout[q_layout],
+            k_layout=splash_attention_kernel.QKVLayout[k_layout],
+            v_layout=splash_attention_kernel.QKVLayout[v_layout],
         )
       return sa_config
 
@@ -2766,6 +2807,25 @@ class AttentionOp(nnx.Module):
       _inject_te_softmax_offset(dpa_layer, _sinks_to_te_softmax_offset(sinks, self.num_query_heads))
     return dpa_layer(query, key, value, sequence_descriptor=attn_mask)
 
+  def _align_qkv_for_cudnn_flash(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+  ) -> tuple[Array, Array, Array]:
+    """Broadcasts key/value batch dim to match query batch dim for cuDNN flash attention."""
+    if query.shape[0] != key.shape[0]:
+      if key.shape[0] == 1 and query.shape[0] > 1:
+        key = jnp.broadcast_to(key, (query.shape[0], *key.shape[1:]))
+        value = jnp.broadcast_to(value, (query.shape[0], *value.shape[1:]))
+      else:
+        raise ValueError(
+            "Query and key/value batch sizes must match for cuDNN flash attention: "
+            f"{query.shape=}, {key.shape=}, {value.shape=}"
+        )
+
+    return query, key, value
+
   def cudnn_jax_flash_attention(
       self,
       query: Array,
@@ -2786,6 +2846,8 @@ class AttentionOp(nnx.Module):
 
     if model_mode == MODEL_MODE_AUTOREGRESSIVE:
       lengths = jnp.sum(decoder_segment_ids, axis=-1)
+      if lengths.shape[0] == 1 and query.shape[0] > 1:
+        lengths = jnp.broadcast_to(lengths, (query.shape[0],))
 
       output, lse = dot_product_attention(
           query,
@@ -2913,34 +2975,45 @@ class AttentionOp(nnx.Module):
 
     # special sharding for decode
     q_seq_len = query.shape[1]
-    prefill_qkv_sharding = (BATCH_ATTN, PREFILL_LENGTH, HEAD, D_KV)
-    decode_qkv_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
+    if self.is_absorbed_mqa:
+      prefill_q_sharding = (BATCH_ATTN, PREFILL_LENGTH, HEAD, None)
+      decode_q_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, None)
+      prefill_kv_sharding = (BATCH_ATTN, PREFILL_LENGTH, None, None)
+      decode_kv_sharding = (DECODE_BATCH, DECODE_LENGTH, None, None)
+      weights_decode_shd = (KV_LENGTH, None, HEAD, None, None)
+      weights_prefill_shd = (BATCH_ATTN, None, HEAD, PREFILL_LENGTH, KV_LENGTH)
+    else:
+      prefill_q_sharding = (BATCH_ATTN, PREFILL_LENGTH, HEAD, D_KV)
+      decode_q_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
+      prefill_kv_sharding = prefill_q_sharding
+      decode_kv_sharding = decode_q_sharding
+      weights_decode_shd = (KV_LENGTH, HEAD, None, None, None)
+      weights_prefill_shd = (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH)
+
     if self.is_partition_in_decode(q_seq_len):
-      query = partitioning.with_sharding_constraint(query, decode_qkv_sharding)
+      query = partitioning.with_sharding_constraint(query, decode_q_sharding)
       # avoid sharding scale tensor when using kv cache quantization
       if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, decode_qkv_sharding)
-        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, decode_qkv_sharding)
+        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, decode_kv_sharding)
+        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, decode_kv_sharding)
       else:
-        key = partitioning.with_sharding_constraint(key, decode_qkv_sharding)
-        value = partitioning.with_sharding_constraint(value, decode_qkv_sharding)
+        key = partitioning.with_sharding_constraint(key, decode_kv_sharding)
+        value = partitioning.with_sharding_constraint(value, decode_kv_sharding)
     elif model_mode == MODEL_MODE_PREFILL:
-      query = partitioning.with_sharding_constraint(query, prefill_qkv_sharding)
+      query = partitioning.with_sharding_constraint(query, prefill_q_sharding)
       # avoid sharding scale tensor when using kv cache quantization
       if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, prefill_qkv_sharding)
-        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, prefill_qkv_sharding)
+        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, prefill_kv_sharding)
+        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, prefill_kv_sharding)
       else:
-        key = partitioning.with_sharding_constraint(key, prefill_qkv_sharding)
-        value = partitioning.with_sharding_constraint(value, prefill_qkv_sharding)
+        key = partitioning.with_sharding_constraint(key, prefill_kv_sharding)
+        value = partitioning.with_sharding_constraint(value, prefill_kv_sharding)
 
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode, qk_product_einsum)
     if self.is_partition_in_decode(q_seq_len):
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, weights_decode_shd)
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_weights = partitioning.with_sharding_constraint(
-          attn_weights, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH)
-      )
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, weights_prefill_shd)
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -3035,7 +3108,7 @@ class AttentionOp(nnx.Module):
     """
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
-    assert n_kv == self.num_kv_heads
+    assert n_kv == self.num_kv_heads and n % n_kv == 0
     precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (
         0,

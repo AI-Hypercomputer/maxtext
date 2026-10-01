@@ -27,7 +27,6 @@ from jax.sharding import NamedSharding, Mesh, PartitionSpec
 from jax.ad_checkpoint import checkpoint_name
 
 from flax import nnx
-import flax.linen as nn
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config, Shape, is_fp8_dtype
 from maxtext.common.common_types import MODEL_MODE_PREFILL
@@ -52,7 +51,7 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
   elif isinstance(fn_or_string, str):
-    return getattr(nn, fn_or_string)
+    return getattr(jax.nn, fn_or_string)
   elif callable(fn_or_string):
     return fn_or_string
   else:
@@ -117,6 +116,9 @@ def _compute_dot_general_nnx(
     out_sharding: NamedSharding | None = None,
     kernel_scale: Array | None = None,
     compute_dtype: DType | None = None,
+    native_fp8_compute: bool = False,
+    scale_block_size: int | tuple[int, ...] | None = None,
+    act_calibration_method: str = "absmax",
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -126,13 +128,35 @@ def _compute_dot_general_nnx(
       quant_dot_general.lazy_init(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
     return quant_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None, mutable=["aqt"])
 
+  if compute_dtype is None:
+    compute_dtype = inputs.dtype
+
   if out_sharding is not None:
     out_ndim = (inputs.ndim - len(axis)) + (kernel.ndim - len(contract_ind))
     out_sharding = truncate_out_sharding(out_sharding, out_ndim)
 
+  if (
+      native_fp8_compute
+      and is_fp8_dtype(kernel.dtype)
+      and kernel_scale is not None
+      and len(axis) == 1
+      and len(contract_ind) == 1
+  ):
+    # Native FP8 supports single contracted axis; multi-axis contractions fall back to dequantize.
+    return quantizations.native_fp8_dot_general(
+        inputs,
+        kernel,
+        kernel_scale,
+        scale_block_size,
+        axis,
+        contract_ind,
+        compute_dtype=compute_dtype,
+        precision=matmul_precision,
+        out_sharding=out_sharding,
+        act_calibration_method=act_calibration_method,
+    )
+
   if kernel_scale is not None or is_fp8_dtype(getattr(kernel, "dtype", None)):
-    if compute_dtype is None:
-      compute_dtype = inputs.dtype
     kernel = dequantize_weight(kernel, kernel_scale, compute_dtype=compute_dtype)
 
   return dot_general(
@@ -312,7 +336,8 @@ class DenseGeneral(nnx.Module):
       self.scale_axes = None
       self.kernel_scale = None
 
-    if quant:
+    if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
+      # Native FP8 compute runs in _compute_dot_general_nnx; no Linen quantizer needed.
       dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
       dot_general_linen = dot_general_cls()
       quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
@@ -447,6 +472,7 @@ class DenseGeneral(nnx.Module):
       out_sharding = None
 
     contract_ind = tuple(range(0, len(self.axis)))
+    native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
     output = _compute_dot_general_nnx(
         inputs,
         kernel,
@@ -458,6 +484,9 @@ class DenseGeneral(nnx.Module):
         out_sharding,
         kernel_scale=kernel_scale,
         compute_dtype=self.dtype,
+        native_fp8_compute=native_fp8_compute,
+        scale_block_size=self.block_size,
+        act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
     )
 
     if self.bias is not None:

@@ -92,6 +92,8 @@ class InferenceRouterReplayExtractionTest(unittest.TestCase):
         "ici_tensor_parallelism": 4,
         "ici_data_parallelism": 1,
         "ici_expert_parallelism": 1,
+        # opt in to the routing capture this test extracts; off by default for serving
+        "return_routed_experts": True,
     }
 
     cfg_infer = pyconfig.initialize(

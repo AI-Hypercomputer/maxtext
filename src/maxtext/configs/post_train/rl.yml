@@ -166,6 +166,15 @@ max_target_length: 1024
 kv_cache_buffer: 256
 hbm_utilization_vllm: 0.72
 swap_space_vllm_gb: 2
+# Maps to tunix RolloutConfig.rollout_vllm_free_kv_cache_during_weight_sync -> VllmConfig.free_kv_cache_during_weight_sync
+# (effective once the tunix pin declares it; until then the setting is ignored and the trainer logs that).
+# The weight sync materializes a second copy of the sampler weights on HBM while the new values are resharded in;
+# freeing the KV cache first makes room for that copy. false keeps the pool (hbm_utilization_vllm of each chip)
+# allocated across the sync and only resets its prefix-cache entries, which saves the free + re-allocation
+# (about 2 s per step on a colocated Qwen3-0.6B run at hbm_utilization_vllm=0.3). With false the sync runs out of
+# HBM when that second copy does not fit next to the pool, so check the headroom before disabling: the default
+# hbm_utilization_vllm above leaves far less room than 0.3, and colocated setups have the least.
+free_kv_cache_during_weight_sync: true
 # Generation Configuration During Training
 # Important to keep a high-ish temperature for varied, diverse responses during
 # training.
@@ -182,6 +191,10 @@ vllm_block_size: null  # KV-cache page size; null lets the backend choose
 async_scheduling: true
 # stop generation when any of these strings is generated
 stop_strings: null
+# Record each MoE layer's routing decisions during rollout as `expert_indices`, so the
+# sampler's routing can be replayed on the trainer. Off by default so rollouts do not pay
+# for the extra top-k.
+return_routed_experts: false
 
 # ====== Checkpoint Configuration ======
 enable_checkpointing: true
@@ -205,6 +218,21 @@ penalty_incorrect_answer: 0.0
 # check_numbers] reward list is REPLACED entirely.
 reward_functions_path: ''
 reward_functions: ''
+
+# ====== Tunix runtime knobs ======
+# Run a full host gc.collect() after each trainer->sampler weight sync
+# (tunix ClusterConfig.gc_collect_after_weight_sync; effective once the tunix pin declares it).
+# Each sync leaves another copy of the weights on HBM until Python's garbage collector releases it;
+# with this disabled the copies accumulate and the run can OOM over time. The collection costs about
+# one second per step on a colocated setup, so disable it only when there is enough HBM headroom.
+gc_collect_after_weight_sync: true
+
+# Worker processes tunix uses to evaluate the reward functions over the batch
+# (tunix GrpoConfig.reward_num_workers; effective once the tunix pin declares it).
+# 0 = evaluate reward functions serially in the trainer process (default); -1 = one worker per CPU.
+reward_num_workers: 0
+# Seconds to wait for one reward-function chunk in a worker before falling back to the parent process.
+reward_worker_timeout_seconds: 180.0
 
 # ====== Configuration for math_verify Pool ======
 # Global timeout (seconds) for math_verify calls across all examples in a batch
@@ -299,6 +327,8 @@ logical_axis_rules: [
       ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
       ['embed_moe', ['fsdp', 'fsdp_transpose', 'context']],
       ['embed_moe', ['fsdp', 'context']],
+      ['embed_router', ['fsdp', 'fsdp_transpose', 'context']],
+      ['embed_router', ['fsdp', 'context']],
 
       # Standard MLP / Dense Layers / Model Structure
       ['activation_mlp', ['tensor', 'tensor_sequence']],

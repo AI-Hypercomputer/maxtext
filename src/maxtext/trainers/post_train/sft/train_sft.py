@@ -46,7 +46,7 @@ import pathwaysutils
 
 from flax import nnx
 from flax.nnx import tracers
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 
 from orbax import checkpoint as ocp
 
@@ -295,7 +295,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.from_pretrained(mt_config)
 
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     if mt_config.lora.enable_lora:
       model = lora_utils.apply_lora_to_model(model, mesh, mt_config)
 
@@ -326,7 +326,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     # Disable NNX graph caching for MoE models (where experts > 1) to allow
     # necessary dynamic metadata synchronization during forward passes (e.g., in jax.lax.scan).
     enable_nnx_cache = mt_config.num_experts <= 1

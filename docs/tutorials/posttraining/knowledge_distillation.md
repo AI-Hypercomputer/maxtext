@@ -41,8 +41,8 @@ The following recipe demonstrates the process of offline distillation using **Qw
 #### a. Setup environment variables
 
 ```bash
-export HF_TOKEN=<your-hf-token> # e.g., hf_BA6...
-export RUN_NAME=<your-run-name> # e.g., distill-20260115
+export HF_TOKEN=<HF_TOKEN> # e.g., hf_BA6...
+export RUN_NAME=<RUN_NAME> # e.g., distill-20260115
 ```
 
 #### b. Install dependencies
@@ -56,10 +56,10 @@ To store large models and datasets, attach a Hyperdisk to your TPU VM. Refer to 
 First, create a Hyperdisk:
 
 ```bash
-export ZONE=<your-tpu-zone>  # e.g., us-central1-a
-export TPU_VM_NAME=<your-tpu-vm-name>
-export DISK_NAME=<your-disk-name>  # e.g., my-hyperdisk
-export DISK_SIZE=<disk-size>  # e.g., 500GB
+export ZONE=<ZONE>  # e.g., us-central1-a
+export TPU_VM_NAME=<TPU_VM_NAME>
+export DISK_NAME=<DISK_NAME>  # e.g., my-hyperdisk
+export DISK_SIZE=<DISK_SIZE>  # e.g., 500GB
 
 gcloud compute disks create ${DISK_NAME?} \
   --size=${DISK_SIZE?} \
@@ -87,7 +87,7 @@ sudo mount /dev/sdb /mnt/hyperdisk
 Update the BASE_OUTPUT_DIRECTORY to point to the mounted disk and create the directory:
 
 ```bash
-export BASE_NAME=<your-base-directory>  # e.g., knowledge-distillation
+export BASE_NAME=<BASE_DIRECTORY>  # e.g., knowledge-distillation
 export BASE_OUTPUT_DIRECTORY=/mnt/hyperdisk/${BASE_NAME?}
 mkdir -p ${BASE_OUTPUT_DIRECTORY?}
 ```
@@ -96,7 +96,7 @@ mkdir -p ${BASE_OUTPUT_DIRECTORY?}
 
 ### Obtain and prepare the teacher model
 
-For the teacher model, we will use **vLLM** to run inference. vLLM can load Hugging Face checkpoints directly, so **no conversion to MaxText format is needed** for the teacher. Ensure the teacher model is supported on TPU vLLM (refer to the [vLLM TPU recommended models](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features) for the latest list).
+For the teacher model, we will use **vLLM** to run inference. vLLM can load Hugging Face checkpoints directly, so **no conversion to MaxText format is needed** for the teacher. Ensure the teacher model is supported on TPU vLLM (refer to the [vLLM TPU recommended models](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models/) for the latest list).
 
 You can simply download the model from Hugging Face to your local directory:
 
@@ -231,13 +231,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
 
 #### b. Install Tunix
 
-The online distillation trainer depends on Tunix. The XPK launcher script ([`scripts/run_distill_xpk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh)) contains a `prep_image` step that layers Tunix on top of the MaxText base image. For local runs, install the same pin used by the launcher — the default `TUNIX_SOURCE` in `run_distill_xpk.sh` is the source of truth. As of this writing:
-
-```bash
-pip install "git+https://github.com/google/tunix@348959d18a4a09c75e58a7d49aec9d8b0eb4a8b6"
-```
-
-> **Note:** The commit pin above will drift as the launcher is updated. Before installing, check the `TUNIX_SOURCE` default in [`run_distill_xpk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh) and use that spec. Once a Tunix PyPI release ships, this will become a versioned `google-tunix==<ver>` install.
+The online distillation trainer depends on Tunix. Ensure you have installed MaxText with `maxtext[tpu-post-train]` and run `install_tpu_post_train_extra_deps` (see [Install MaxText](../../install_maxtext.md)), which automatically installs the tested Tunix version pinned in [`src/dependencies/extra_deps/post_train_github_deps.txt`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/extra_deps/post_train_github_deps.txt).
 
 ### Configuration
 
@@ -320,18 +314,21 @@ The schedule values above are a strong default for same-size pruning recovery. S
 
 > **Note:** `distill_layer_indices` is applied to **both** student and teacher activations identically. When the two have different depths (Pattern A or a depth-pruned Pattern B), every index must be valid on the *smaller* side, and same-numbered layers are aligned across the two models. The trainer cannot map student layer *i* to teacher layer *f(i)* for arbitrary *f*. If the depths differ significantly, prefer logit-only distillation (`distill_beta=0`).
 
-#### Multi-host on GKE via XPK
+#### Multi-host on GKE via Cluster Toolkit
 
-A reference launcher is provided at `src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh`. It handles image preparation (`prep_image` layers Tunix on top of the MaxText base image), workload submission, log streaming, and an auto-resume loop for long-running jobs.
+A reference launcher is provided at [`src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh). It handles image preparation (`prep_image` layers Tunix on top of the MaxText base image), runner image upload (`upload_runner`), workload submission (`submit`), log streaming (`monitor`), workload cancellation (`cleanup`), and an auto-resume loop (`resume_until_done`) for long-running jobs.
 
 Minimum environment variables:
 
 ```bash
-export XPK_CLUSTER=<your-gke-cluster>
-export XPK_PROJECT=<your-gcp-project>
-export XPK_ZONE=<cluster-zone>             # e.g. us-central1-a
-export XPK_DEVICE_TYPE=<tpu-type>          # e.g. tpu7x-4x4x4, v5p-128
-export XPK_BASE_OUTPUT_DIR=gs://<bucket>/distill-runs
+export PROJECT_ID=<PROJECT_ID>
+export GKE_CLUSTER=<CLUSTER_NAME>
+export LOCATION=<LOCATION>                 # e.g., 'europe-west4' (region) or 'us-central1-a' (zone)
+export COMPUTE_TYPE=<COMPUTE_TYPE>         # e.g., 'tpu7x-standard-4t', 'ct5p-hightpu-4t'
+export TOPOLOGY=<TOPOLOGY>                 # e.g., '4x4x4'
+export RUN_NAME=<RUN_NAME>
+export DOCKER_IMAGE=<IMAGE_NAME>           # e.g., gcr.io/${PROJECT_ID}/maxtext_base_image:${USER}-distill
+export BASE_OUTPUT_DIRECTORY=gs://<GCS_BUCKET>/distill-runs
 
 # Distillation hyperparameters (always passed; override yml values)
 export DISTILL_ALPHA=0.9
@@ -346,20 +343,23 @@ export DISTILL_LAYER_INDICES=[3,7,11,15,19,23,27,31]   # no spaces inside bracke
 Then:
 
 ```bash
-# One-time: layer Tunix on top of the MaxText base image
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh prep_image
+# (Optional) One-time: layer a custom Tunix pin on top of the MaxText base image
+bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh prep_image
 
-# Bake ./src into a runner image and push to gcr.io/$XPK_PROJECT/...:${USER}-distill
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh upload_runner
+# Bake ./src into a runner image and push to gcr.io/$PROJECT_ID/...:${USER}-distill
+bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh upload_runner
 
 # Submit a workload
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh submit
+bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh submit
 
-# Stream logs
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh monitor
+# Monitor job status and stream logs
+bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh monitor
+
+# Cancel and clean up the workload
+bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh cleanup
 
 # Auto-resume on failure (uses the same workload + base output dir, so checkpoint resume works)
-bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_xpk.sh resume_until_done
+bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh resume_until_done
 ```
 
 The script's header comment lists every supported environment variable.

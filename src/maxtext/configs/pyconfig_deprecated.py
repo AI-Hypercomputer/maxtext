@@ -704,7 +704,7 @@ class _HyperParameters:
   def user_init(raw_keys):
     """Transformations between the config data and configs used at runtime"""
     if raw_keys["run_name"] == "":
-      raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # using XPK default
+      raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # set by some JobSet launchers, e.g. for Pathways
       if raw_keys["run_name"] == "":
         now = datetime.datetime.now()
         timestamp = now.strftime("%Y-%m-%d-%H-%M")

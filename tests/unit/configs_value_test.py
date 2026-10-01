@@ -20,6 +20,7 @@ import unittest.mock
 from absl.testing import absltest
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+from maxtext.layers import quantizations
 from maxtext.utils import globals as maxtext_globals
 import pydantic
 
@@ -96,6 +97,21 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_enable_mllog_without_eval_warns(self):
+    """enable_mllog with eval_interval <= 0 is allowed (for measuring eval impact) and logs a warning."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=-1"]
+    with unittest.mock.patch("maxtext.utils.max_logging.warning") as mock_warning:
+      config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+    self.assertTrue(
+        any("enable_mllog=True with eval_interval=" in str(call.args[0]) for call in mock_warning.call_args_list)
+    )
+
+  def test_enable_mllog_accepted_with_eval(self):
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=1"]
+    config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+
   def test_te_moe_block_rejects_unsupported_options_during_config_validation(self):
     common_config = {
         "run_name": "test",
@@ -169,6 +185,32 @@ class ConfigTest(absltest.TestCase):
     te_ring_config = {**native_ring_config, "te_moe_block": True, "te_gmm_quantization": "te_no_quant"}
     config = types.MaxTextConfig(**te_ring_config)
     self.assertEqual(config.ragged_buffer_factor, 1.5)
+
+  def test_moe_dropless_fallback_modes(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 8,
+        "base_mlp_dim": 64,
+        "base_moe_mlp_dim": 64,
+        "override_logical_axis_rules": True,
+        "use_ring_of_experts": True,
+        "use_ragged_sort": True,
+        "ragged_buffer_factor": 1.5,
+    }
+    for mode in (None, "step", "layer"):
+      with self.subTest(moe_dropless_fallback=mode):
+        config = types.MaxTextConfig(**common_config, moe_dropless_fallback=mode)
+        self.assertEqual(config.moe_dropless_fallback, mode)
+
+    # YAML/CLI "none" reaches pydantic as None, so it must mean "off".
+    for raw in ("none", "None"):
+      with self.subTest(raw=raw):
+        raw_keys = {**common_config, "moe_dropless_fallback": raw}
+        kwargs = pyconfig._prepare_for_pydantic(raw_keys)  # pylint: disable=protected-access
+        self.assertIsNone(types.MaxTextConfig(**kwargs).moe_dropless_fallback)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.MaxTextConfig(**common_config, moe_dropless_fallback="both")
 
   def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
     argv = [
@@ -1060,6 +1102,61 @@ class ConfigTest(absltest.TestCase):
         "quantization=int8",
     ]
     with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv)
+
+  def test_serve_fp8_weight_accepts_valid_config(self):
+    """Tests valid serve_fp8_weight configuration."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+    ]
+    config = pyconfig.initialize(argv)
+    self.assertEqual(config.quantization, "serve_fp8_weight")
+
+  def test_serve_fp8_weight_threads_act_calibration_method(self):
+    """Tests that serve_fp8_weight picks up act_quantization_calibration_method."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "act_quantization_calibration_method=fixed,-224,224",
+    ]
+    quant = quantizations.configure_quantization(pyconfig.initialize(argv))
+    self.assertIsInstance(quant, quantizations.ServeFp8WeightQuantization)
+    self.assertEqual(quant.act_calibration_method, "fixed,-224,224")
+
+  def test_serve_fp8_weight_requires_fp8_weight_dtype(self):
+    """Tests that serve_fp8_weight requires an FP8 weight_dtype."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=bfloat16",
+    ]
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "requires weight_dtype to be an FP8 dtype"):
+      pyconfig.initialize(argv)
+
+  def test_serve_fp8_weight_rejects_qwix_quantization(self):
+    """Tests that serve_fp8_weight rejects use_qwix_quantization=True."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "use_qwix_quantization=true",
+    ]
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with use_qwix_quantization=True"):
       pyconfig.initialize(argv)
 
 

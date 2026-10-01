@@ -19,8 +19,8 @@ import functools
 import os
 from typing import Sequence
 
-from flax import linen as nn, nnx, traverse_util
-from flax.linen import partitioning as nn_partitioning
+from flax import nnx, traverse_util
+from flax.core.spmd import logical_axis_rules as axis_rules
 from flax.training.train_state import TrainState
 import jax
 from jax.experimental import mesh_utils
@@ -31,13 +31,17 @@ from maxtext.common import checkpointing
 from maxtext.common.common_types import (
     AttentionType,
     DecoderBlockType,
-    MODEL_MODE_AUTOREGRESSIVE,
-    MODEL_MODE_PREFILL,
     ReorderStrategy,
     ShardMode,
 )
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+
+try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter
+except ImportError:
+  lineage_adapter = None
 from maxtext.multimodal import processor as mm_processor
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
@@ -101,10 +105,7 @@ def get_functional_train_with_signature(
   in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
-  if getattr(config, "retry_when_tokens_dropped", False) is True:
-    donate_argnums = ()  # Preserve state so it can be replayed if an overflow occurs
-  else:
-    donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
+  donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
   return functional_train, in_shardings, out_shardings, static_argnums, donate_argnums
 
 
@@ -257,7 +258,7 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   return [], []
 
 
-def load_compiled(config, partial_train, state, execution_devices):
+def load_compiled(config, partial_train, state, execution_devices, data_sharding=None):
   """# Loading a serialized compiled train step function."""
 
   # Currently partial_train and state  are needed to reconstruct
@@ -274,7 +275,7 @@ def load_compiled(config, partial_train, state, execution_devices):
     return in_tree_recreated, out_tree_recreated
 
   serialized_compiled = load_serialized_compiled(config.compiled_trainstep_file)
-  shaped_batch = get_shaped_batch(config)
+  shaped_batch = get_shaped_batch(config, batch_sharding=data_sharding)
   shaped_input_args = (state, shaped_batch)
   shaped_input_kwargs = {}
   in_tree, out_tree = get_train_input_output_trees(partial_train, shaped_input_args, shaped_input_kwargs)
@@ -1472,7 +1473,7 @@ def get_nested_value(dictionary, nested_key, default=None):
   return current_level
 
 
-def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> list:
+def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str, ravel: bool = True) -> list:
   """Collects intermediate leaf values whose dict-key path ends with suffix_keys.
 
   Works regardless of model architecture (scanned, scannable blocks, or standard),
@@ -1482,9 +1483,11 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
     intermediate_outputs: The intermediates dict returned by model.apply().
     *suffix_keys: One or more key names forming the expected path suffix,
       e.g. ``("moe_lb_loss",)`` or ``("self_attention", "indexer_loss")``.
+    ravel: Flatten each leaf to 1-D. Pass False for leaves that are sharded
+      across the mesh, where flattening would force a reshard collective.
 
   Returns:
-    A list of 1-D JAX arrays, one per matching leaf (already ravelled).
+    A list of JAX arrays, one per matching leaf (1-D unless ``ravel=False``).
   """
   suffix = tuple(suffix_keys)
   n = len(suffix)
@@ -1492,7 +1495,7 @@ def collect_intermediates_by_suffix(intermediate_outputs, *suffix_keys: str) -> 
   for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
     path_keys = tuple(k.key for k in path if hasattr(k, "key"))
     if len(path_keys) >= n and path_keys[-n:] == suffix:
-      values.append(jnp.ravel(val))
+      values.append(jnp.ravel(val) if ravel else val)
   return values
 
 
@@ -1599,7 +1602,7 @@ def init_initial_state(model, tx, config, is_training, key):
 
 def get_abstract_param(model, config):
   """Get abstract model structure (name, shape) without materializing the weights to save memory"""
-  with model.mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+  with model.mesh, axis_rules(config.logical_axis_rules):
     key = jax.random.PRNGKey(0)
     input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
 
@@ -1647,7 +1650,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
     # Load params from checkpoint
     max_logging.log(f"Loading decode params from {config.load_parameters_path}")
     unboxed_abstract_state, state_mesh_annotations, _ = get_abstract_state(config, mesh, init_state_fn, False)
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with axis_rules(config.logical_axis_rules):
       params = checkpointing.load_params_from_path(
           config.load_parameters_path,
           unboxed_abstract_state.params,
@@ -1705,7 +1708,7 @@ def setup_initial_state(
   )
 
   # Initialization
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
@@ -1823,15 +1826,6 @@ def setup_initial_state(
   return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
 
 
-def get_logical_annotations(config, mesh, init_state_fn):
-  init_state_partial = init_state_fn
-
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    abstract_state = jax.eval_shape(init_state_partial)
-    logical_annotations = nn.get_partition_spec(abstract_state)
-  return logical_annotations
-
-
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
   """Get a shaped abstraction of the state (including optimizer)."""
   return get_abstract_state_nnx(config, mesh, init_state_fn, is_training)
@@ -1865,7 +1859,7 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   """
   assert nnx_init_trainstate_fn is not None, "get_abstract_state_nnx: init function must be given."
 
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     # Use nnx.eval_shape + nnx.split instead of nnx.get_abstract_model, so we can apply
     # nnx_construct_named_sharding which correctly inserts the stacked-layers
     # axis into the partition spec. nnx.get_abstract_model uses get_var_pspec internally
@@ -1963,69 +1957,6 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
   )
 
 
-def get_prefill_kv_cache_annotations(model, config, rng, mesh):
-  """Get a shaped abstraction of the state (including optimizer)"""
-
-  def init_kv_cache(model, config):
-    input_shape = (
-        config.micro_batch_size_to_train_on,
-        config.max_prefill_predict_length,
-    )
-    image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
-    )
-    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
-        model_mode=MODEL_MODE_PREFILL,
-        slot=0,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
-
-def get_kv_cache_annotations(model, config, rng, mesh):
-  """Get a shaped abstraction of the state (including optimizer)"""
-
-  def init_kv_cache(model, config):
-    input_shape = (config.micro_batch_size_to_train_on, 1)
-    image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on
-    )
-    audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-
-    model_vars = model.init(
-        {"params": rng, "dropout": rng, "aqt": rng},
-        jnp.ones(input_shape),
-        jnp.ones(input_shape),
-        encoder_images=jnp.ones(image_shape) if config.use_multimodal else None,
-        encoder_audios=jnp.ones(audio_shape) if config.use_audio else None,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        slot=0,
-    )
-    return model_vars["cache"]
-
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
-    init_kv_cache_partial = functools.partial(init_kv_cache, model, config)
-    abstract_state = jax.eval_shape(init_kv_cache_partial)
-  state_logical_annotations = nn.get_partition_spec(abstract_state)
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-    state_mesh_annotations = nn.logical_to_mesh(state_logical_annotations)
-  return state_mesh_annotations
-
-
 def _nnx_cache_partition_specs(abstract_model, config, mesh):
   """Per-leaf PartitionSpec tree for the abstract model's nnx.Cache vars.
 
@@ -2035,7 +1966,7 @@ def _nnx_cache_partition_specs(abstract_model, config, mesh):
   _, cache_state, _ = nnx.split(abstract_model, nnx.Cache, ...)
   # nnx_construct_named_sharding reads logical axis rules from the
   # active flax partitioning context, so wrap.
-  with nn_partitioning.axis_rules(config.logical_axis_rules):
+  with axis_rules(config.logical_axis_rules):
     named_state = sharding.nnx_construct_named_sharding(cache_state, mesh)
   return jax.tree.map(lambda s: s.spec, named_state.to_pure_dict())
 
@@ -2115,7 +2046,17 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if num_slices > 1:
+  if getattr(config, "use_lineage", False) and lineage_adapter is not None:
+    dcn_parallelism = (
+        max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
+    )
+    mesh = lineage_adapter.create_device_mesh(
+        ici_parallelism,
+        devices,
+        dcn_parallelism=dcn_parallelism,
+        allow_split_physical_axes=allow_split_physical_axes,
+    )
+  elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
 
