@@ -784,7 +784,6 @@ def _run_pipeline_reference(x, weights: mhc_kernel_common.MhcWeights, permutatio
 def _run_pipeline_api(
     x,
     weights: mhc_kernel_common.MhcWeights,
-    permutations,
     implementation=None,
     config: mhc_kernel_common.MhcKernelConfig | None = None,
     interpret=True,
@@ -797,7 +796,6 @@ def _run_pipeline_api(
   layer_input, context = mhc_kernel.pre(
       x,
       weights,
-      permutations,
       config=config,
       implementation=implementation,
   )
@@ -808,12 +806,11 @@ class TestMhcKernelsFwd(parameterized.TestCase):
   """Unit tests for MaxText mHC-lite Pallas forward kernel."""
 
   def test_doubly_stochastic(self):
-    x, weights, permutations, _ = _make_kernel_inputs(batch=1, sequence=128, streams=4, embedding=128)
+    x, weights, _, _ = _make_kernel_inputs(batch=1, sequence=128, streams=4, embedding=128)
     config = mhc_kernel.MhcKernelConfig(interpret=True)
     _, context = mhc_kernel.pre(
         x,
         weights,
-        permutations,
         config=config,
     )
     row_sums = jnp.sum(context.residual, axis=-1)
@@ -831,20 +828,18 @@ class TestMhcKernelsFwd(parameterized.TestCase):
     actual = _run_pipeline_api(
         x,
         weights,
-        permutations,
         implementation=implementation,
         interpret=True,
     )
     np.testing.assert_allclose(actual, expected, rtol=5e-2, atol=5e-2)
 
   def test_unsupported_shape_raises_error(self):
-    x, weights, permutations, _ = _make_kernel_inputs(batch=1, sequence=16, streams=2, embedding=128)
+    x, weights, _, _ = _make_kernel_inputs(batch=1, sequence=16, streams=2, embedding=128)
     config = mhc_kernel.MhcKernelConfig(interpret=True)
     with self.assertRaises(mhc_kernel_common.UnsupportedInputError):
       mhc_kernel.pre(
           x,
           weights,
-          permutations,
           config=config,
       )
 
@@ -862,7 +857,7 @@ class TestMhcKernelsBwd(parameterized.TestCase):
     expected_dx, expected_dw = expected_vjp_fn(cotangent)
 
     actual_out, actual_vjp_fn = jax.vjp(
-        lambda x_, w_: _run_pipeline_api(x_, w_, permutations, implementation=None, interpret=True),
+        lambda x_, w_: _run_pipeline_api(x_, w_, implementation=None, interpret=True),
         x,
         weights,
     )
@@ -895,7 +890,7 @@ class TestMhcKernelsBwd(parameterized.TestCase):
     expected_dx, expected_dw = expected_vjp_fn(cotangent)
 
     actual_out, actual_vjp_fn = jax.vjp(
-        lambda x_, w_: _run_pipeline_api(x_, w_, permutations, config=config, interpret=True),
+        lambda x_, w_: _run_pipeline_api(x_, w_, config=config, interpret=True),
         x,
         weights,
     )

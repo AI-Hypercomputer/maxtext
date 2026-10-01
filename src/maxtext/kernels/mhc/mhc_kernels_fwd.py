@@ -194,14 +194,14 @@ def _post_apply_fwd(
 def pre_fwd(
     x: jax.Array,
     weights: common.MhcWeights,
-    permutations: jax.Array,
     config: common.MhcKernelConfig,
 ) -> tuple[tuple[jax.Array, common.KernelContext], tuple[jax.Array, jax.Array]]:
   """Runs coefficient and pre-application forward kernels."""
-  common.validate_inputs(x, config.block_size, permutations.shape)
+  common.validate_inputs(x, config.block_size)
   batch, sequence, streams, embedding = x.shape
   tokens = batch * sequence
   x_flat = x.reshape(tokens, streams, embedding)
+  permutations = common.permutation_matrices(streams).astype(x.dtype)
 
   coeff_params = weights.to_coeff_params()
   outputs = _coeff_fwd(x_flat, coeff_params, permutations, config)
@@ -238,26 +238,24 @@ def post_fwd(
   return output.reshape(batch, sequence, streams, embedding)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(0, 2))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
 def _pre_op(
     config: common.MhcKernelConfig,
     x: jax.Array,
-    permutations: jax.Array,
     weights: common.MhcWeights,
 ) -> tuple[jax.Array, common.KernelContext]:
   """Differentiable pre-branch mHC operation."""
-  (layer_input, context), _ = pre_fwd(x, weights, permutations, config)
+  (layer_input, context), _ = pre_fwd(x, weights, config)
   return layer_input, context
 
 
 def _pre_op_fwd(
     config: common.MhcKernelConfig,
     x: jax.Array,
-    permutations: jax.Array,
     weights: common.MhcWeights,
 ):
   """Custom-VJP forward rule for the pre-branch operation."""
-  primals_out, saved = pre_fwd(x, weights, permutations, config)
+  primals_out, saved = pre_fwd(x, weights, config)
   return primals_out, (saved, (x, weights))
 
 
@@ -294,7 +292,6 @@ _post_op.defvjp(_post_op_fwd, mhc_kernels_bwd.post_op_bwd)
 def pre(
     x: jax.Array,
     weights: common.MhcWeights,
-    permutations: jax.Array,
     config: common.MhcKernelConfig = common.MhcKernelConfig(),
 ) -> tuple[jax.Array, common.KernelContext]:
   """Runs the coefficient and pre-application kernels.
@@ -302,16 +299,14 @@ def pre(
   Args:
     x: Input streams with shape `[batch, sequence, streams, embedding]`.
     weights: Structured weights container.
-    permutations: Permutation matrices with shape `[streams!, streams,
-      streams]`.
     config: Kernel tuning and compiler configuration.
 
   Returns:
     A pair containing the branch input and opaque kernel context.
   """
-  common.validate_inputs(x, config.block_size, permutations.shape)
+  common.validate_inputs(x, config.block_size)
   common.validate_token_block_size(x.shape[0] * x.shape[1], config.bwd_block_size, name="bwd_block_size")
-  return _pre_op(config, x, permutations, weights)
+  return _pre_op(config, x, weights)
 
 
 def post(
