@@ -460,6 +460,24 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertNotIn("accumulated_metrics", args_dict)
     self.assertNotIn("accumulated_grads", args_dict)
 
+  def test_save_checkpoint_without_optimizer_state(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+
+    for save_optimizer_state in (True, False):
+      mock_orbax_mgr = self._mock_orbax_manager(t)
+      t.save_checkpoint(metadata=None, save_optimizer_state=save_optimizer_state)
+      mock_orbax_mgr.save.assert_called_once()
+      call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+      # Consumed by the engine, not forwarded to Orbax.
+      self.assertNotIn("save_optimizer_state", call_kwargs)
+      args_dict = (
+          dict(call_kwargs["args"].items())
+          if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+          else call_kwargs["args"].__dict__
+      )
+      self.assertIn("model_params", args_dict)
+      self.assertEqual("optimizer_state" in args_dict, save_optimizer_state)
+
   def test_save_checkpoint_omits_items_with_no_leaves(self):
     mock_config = self.setup_config(enable_checkpointing=True)
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)

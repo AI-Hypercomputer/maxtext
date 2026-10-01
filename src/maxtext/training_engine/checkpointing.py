@@ -331,6 +331,41 @@ class CheckpointManager:
       return False
     return micro_step_count == 0 or micro_step_count > saved_micro_step_count
 
+  def _latest_step_with_optimizer_state(self, latest_step: int) -> int:
+    """Returns the newest step that resumes training with its optimizer state.
+
+    Saves made with `save_optimizer_state=False` hold only the model params, and resuming from
+    one would restart the optimizer from scratch. So fall back to the newest checkpoint that has
+    the optimizer state, and delete the params-only steps after it: the resumed run redoes them,
+    and Orbax refuses to write a step that already exists. If no checkpoint holds the optimizer
+    state, `latest_step` is returned unchanged.
+
+    Args:
+      latest_step: The latest step on disk.
+
+    Returns:
+      The step to restore from.
+    """
+    steps = sorted(self._checkpoint_manager.all_steps(), reverse=True)
+    for step in steps:
+      if "optimizer_state" in self._checkpoint_manager.metadata(step).item_metadata:
+        break
+    else:
+      return latest_step
+    newer = [s for s in steps if s > step]
+    if newer:
+      logging.warning(
+          "Latest checkpoint step %d has no optimizer state; resuming from step %d and deleting the"
+          " params-only steps %s after it.",
+          latest_step,
+          step,
+          sorted(newer),
+      )
+      self._checkpoint_manager.wait_until_finished()
+      for s in newer:
+        self._checkpoint_manager.delete(s)
+    return step
+
   def _delete_saved_step(self, step: int) -> None:
     """Deletes the checkpoint at `step` to make room for a more complete one.
 
@@ -481,6 +516,8 @@ class CheckpointManager:
       if step is None:
         logging.info("No checkpoint found, skipping restore.")
         return None, checkpoint_state, None
+      if checkpoint_state.optimizer is not None:
+        step = self._latest_step_with_optimizer_state(step)
 
     metadata = self._checkpoint_manager.metadata(step)
     restore_args: dict[str, Any] = {}
