@@ -1267,6 +1267,72 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def WEAVER_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace Weaver weights path and their shape."""
+  text_cfg = config.get("text_config", config) if isinstance(config, dict) else config
+  hidden_size = config.get("hidden_size", text_cfg["hidden_size"])
+  num_hidden_layers = config.get("num_hidden_layers", text_cfg["num_hidden_layers"])
+  vocab_size = config.get("vocab_size", text_cfg["vocab_size"])
+  num_attention_heads = config.get("num_attention_heads", text_cfg["num_attention_heads"])
+  num_key_value_heads = config.get("num_key_value_heads", text_cfg["num_key_value_heads"])
+  head_dim = config.get("head_dim", text_cfg.get("head_dim", hidden_size // num_attention_heads))
+  intermediate_size = config.get("intermediate_size", text_cfg["intermediate_size"])
+  in_channels = config.get("in_channels", config.get("latent_channels", 48))
+  patch_size = config.get("patch_size", 2)
+  patch_dim = in_channels * patch_size * patch_size
+  time_embed_in_channels = config.get("time_embed_in_channels", 256)
+
+  q_dim = num_attention_heads * head_dim
+  kv_dim = num_key_value_heads * head_dim
+
+  mapping = {
+      "embed_tokens.weight": [vocab_size, hidden_size],
+      "lm_head.weight": [vocab_size, hidden_size],
+      "norm.weight": [hidden_size],
+      "norm_moe_gen.weight": [hidden_size],
+      "proj_in.weight": [hidden_size, patch_dim],
+      "proj_in.bias": [hidden_size],
+      "proj_out.weight": [patch_dim, hidden_size],
+      "proj_out.bias": [patch_dim],
+      "time_embedder.linear_1.weight": [hidden_size, time_embed_in_channels],
+      "time_embedder.linear_1.bias": [hidden_size],
+      "time_embedder.linear_2.weight": [hidden_size, hidden_size],
+      "time_embedder.linear_2.bias": [hidden_size],
+  }
+
+  for layer_idx in range(num_hidden_layers):
+    layer_prefix = f"layers.{layer_idx}"
+    mapping.update(
+        {
+            f"{layer_prefix}.input_layernorm.weight": [hidden_size],
+            f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+            f"{layer_prefix}.input_layernorm_moe_gen.weight": [hidden_size],
+            f"{layer_prefix}.post_attention_layernorm_moe_gen.weight": [hidden_size],
+            f"{layer_prefix}.self_attn.to_q.weight": [q_dim, hidden_size],
+            f"{layer_prefix}.self_attn.to_k.weight": [kv_dim, hidden_size],
+            f"{layer_prefix}.self_attn.to_v.weight": [kv_dim, hidden_size],
+            f"{layer_prefix}.self_attn.to_out.weight": [hidden_size, q_dim],
+            f"{layer_prefix}.self_attn.norm_q.weight": [head_dim],
+            f"{layer_prefix}.self_attn.norm_k.weight": [head_dim],
+            f"{layer_prefix}.self_attn.add_q_proj.weight": [q_dim, hidden_size],
+            f"{layer_prefix}.self_attn.add_k_proj.weight": [kv_dim, hidden_size],
+            f"{layer_prefix}.self_attn.add_v_proj.weight": [kv_dim, hidden_size],
+            f"{layer_prefix}.self_attn.to_add_out.weight": [hidden_size, q_dim],
+            f"{layer_prefix}.self_attn.norm_added_q.weight": [head_dim],
+            f"{layer_prefix}.self_attn.norm_added_k.weight": [head_dim],
+            f"{layer_prefix}.self_attn.k_norm_und_for_gen.weight": [head_dim],
+            f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+            f"{layer_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+            f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+            f"{layer_prefix}.mlp_moe_gen.gate_proj.weight": [intermediate_size, hidden_size],
+            f"{layer_prefix}.mlp_moe_gen.up_proj.weight": [intermediate_size, hidden_size],
+            f"{layer_prefix}.mlp_moe_gen.down_proj.weight": [hidden_size, intermediate_size],
+        }
+    )
+
+  return mapping
+
+
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1290,6 +1356,9 @@ HF_SHAPE = {
     "qwen3-vl-2b": QWEN3_VL_HF_WEIGHTS_TO_SHAPE,
     "qwen3-vl-4b": QWEN3_VL_HF_WEIGHTS_TO_SHAPE,
     "qwen3-vl-30b-a3b": QWEN3_VL_HF_WEIGHTS_TO_SHAPE,
+    "weaver-mini": WEAVER_HF_WEIGHTS_TO_SHAPE,
+    "weaver-max": WEAVER_HF_WEIGHTS_TO_SHAPE,
+    "weaver-nano-diffuser": WEAVER_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-8b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-8b-Instruct": LLAMA31_HF_WEIGHTS_TO_SHAPE,
     "llama3.1-70b": LLAMA31_HF_WEIGHTS_TO_SHAPE,
