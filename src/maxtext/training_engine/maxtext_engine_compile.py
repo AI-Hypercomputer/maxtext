@@ -23,7 +23,9 @@ Nothing is materialized: the weights, the optimizer moments and the batch are al
 `jax.ShapeDtypeStruct`s, and the device mesh is a topology description rather than hardware.
 So a v5e-256 configuration can be compiled from a workstation, and an out-of-memory one
 reports the same `RESOURCE_EXHAUSTED` it would report on the target -- before the target is
-booked.
+booked. The kernels are traced under that mesh (`jax.set_mesh`), so those with a TPU
+implementation and a fallback compile the TPU one (`pltpu.is_tpu_device`), tiled for the
+topology's chip.
 
 Example, qwen3-0.6b on four v6e chips:
 

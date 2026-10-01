@@ -144,6 +144,62 @@ class PyconfigTest(unittest.TestCase):
           use_gdn_kernel=True,
       )
 
+  def test_gdn_cp_state_requires_gdn_kernel(self):
+    with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          gdn_cp_state="device",
+          use_gdn_kernel=False,
+      )
+
+  def test_gdn_cp_state_custom_remat_resolves_tensors(self):
+    """`gdn_cp_state` defaults to remat and, under remat_policy=custom, lands in tensors_on_device / tensors_to_offload."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        remat_policy="custom",
+        use_gdn_kernel=True,
+    )
+    self.assertEqual(config.gdn_cp_state, "remat")
+    self.assertEqual(config.tensors_on_device, ["decoder_layer_input"])
+
+    for location, on_device, offloaded in (
+        ("device", ["decoder_layer_input", "gdn_cp_state"], []),
+        ("offload", ["decoder_layer_input"], ["gdn_cp_state"]),
+    ):
+      config = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          remat_policy="custom",
+          gdn_cp_state=location,
+          use_gdn_kernel=True,
+      )
+      self.assertEqual(config.tensors_on_device, on_device)
+      self.assertEqual(config.tensors_to_offload, offloaded)
+
+  def test_moe_route_requires_ring_of_experts_with_ragged_sort(self):
+    """Only the ring-of-experts ragged sort names the routing indices; elsewhere the key would be a silent no-op.
+
+    The dense-matmul MoE path never calls the ragged sort, so it is rejected too.
+    """
+    self.assertEqual(
+        pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()], skip_jax_distributed_system=True
+        ).moe_route,
+        "remat",
+    )
+    for sparse_matmul, ring_of_experts, ragged_sort in ((True, False, False), (True, True, False), (False, True, True)):
+      with self.assertRaisesRegex(ValueError, "`moe_route` requires `sparse_matmul=True`"):
+        pyconfig.initialize(
+            [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+            skip_jax_distributed_system=True,
+            moe_route="device",
+            sparse_matmul=sparse_matmul,
+            use_ring_of_experts=ring_of_experts,
+            use_ragged_sort=ragged_sort,
+        )
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
@@ -285,15 +341,33 @@ class PyconfigTest(unittest.TestCase):
 
   def test_rl_config_gdn_granular_remat_requires_gdn_kernel(self):
     """RLConfig does not inherit MaxTextConfig's validators, so it carries its own GDN remat guard."""
-    with self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
-      pyconfig.initialize(
-          ["", get_post_train_test_config_path("rl")],
-          skip_jax_distributed_system=True,
-          config_class=config_types.RLConfig,
-          remat_policy="custom",
-          gdn="device",
-          use_gdn_kernel=False,
-      )
+    for key in ("gdn", "gdn_cp_state"):
+      with self.subTest(key=key), self.assertRaisesRegex(ValueError, "requires `use_gdn_kernel=True`"):
+        pyconfig.initialize(
+            ["", get_post_train_test_config_path("rl")],
+            skip_jax_distributed_system=True,
+            config_class=config_types.RLConfig,
+            remat_policy="custom",
+            use_gdn_kernel=False,
+            **{key: "device"},
+        )
+
+  def test_rl_config_moe_route_requires_ring_of_experts_with_ragged_sort(self):
+    """RLConfig carries its own copy of the moe_route guard."""
+    for sparse_matmul, ring_of_experts, ragged_sort in ((True, False, False), (False, True, True)):
+      with (
+          self.subTest(sparse_matmul=sparse_matmul, ring_of_experts=ring_of_experts),
+          self.assertRaisesRegex(ValueError, "`moe_route` requires `sparse_matmul=True`"),
+      ):
+        pyconfig.initialize(
+            ["", get_post_train_test_config_path("rl")],
+            skip_jax_distributed_system=True,
+            config_class=config_types.RLConfig,
+            moe_route="device",
+            sparse_matmul=sparse_matmul,
+            use_ring_of_experts=ring_of_experts,
+            use_ragged_sort=ragged_sort,
+        )
 
   def test_rl_config_gdn_context_parallelism_and_packed_length_fast_fail(self):
     """RL-only checks: GDN CP guards that MaxTextConfig runs elsewhere, and max_seq_token_per_tpu chunking."""

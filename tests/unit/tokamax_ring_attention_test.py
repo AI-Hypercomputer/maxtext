@@ -301,6 +301,7 @@ class TokamaxRingAttentionTest(absltest.TestCase):
         ring_axis="ring",
         attn_logits_soft_cap=None,
         maybe_shard_with_pspec=shard_with_pspec,
+        load_balanced=True,
     )
     qkv_spec = jax.sharding.PartitionSpec(None, None, "ring", None)
 

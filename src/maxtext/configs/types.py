@@ -1027,6 +1027,23 @@ class MoEGeneral(BaseModel):
           " effect."
       ),
   )
+  moe_chunk_pipeline: bool = Field(
+      False,
+      description=(
+          "Software-pipeline the chunked ring-of-experts MoE loop. Chunk c+1's token"
+          " all-gather is ordered after chunk c's routed tokens, chunk c's combine after"
+          " chunk c+1's routed tokens, chunk c+1's combine after chunk c's reduce-scatter,"
+          " and chunk c's reduce-scatter after chunk c+1's first expert GEMM, so on the"
+          " SparseCore queue chunk c+1's dispatch runs under chunk c's expert GEMMs and"
+          " chunk c's combine under chunk c+1's. The orderings are optimization barriers,"
+          " so the math is unchanged. With use_ragged_sort=False only the combine's weighted"
+          " sum waits for the previous chunk's reduce-scatter, not its unsort. The barriers"
+          " only act if XLA keeps them: when --xla_tpu_aggressive_opt_barrier_removal=true"
+          " or ENABLED applies (compile_xla_flags overrides LIBTPU_INIT_ARGS and XLA_FLAGS),"
+          " the layer runs the plain chunk loop and logs a warning. Requires num_moe_token_chunks>1,"
+          " use_ring_of_experts=True and num_moe_emb_chunks=0."
+      ),
+  )
 
   moe_expert_input_dim: int = Field(
       -1,
@@ -1045,6 +1062,26 @@ class MoEGeneral(BaseModel):
   use_ring_of_experts: bool = Field(
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
+  )
+  ring_of_experts_local_routing: bool = Field(
+      False,
+      description=(
+          "Ring of Experts only. Each expert shard routes its own tokens and all-gathers just the"
+          " top-k expert ids and weights, instead of all-gathering the router logits and routing"
+          " every gathered token on every shard. Same routing (it is per token); less"
+          " communication, and the router gradient is scattered into the local logits only."
+          " Requires use_ring_of_experts=True."
+      ),
+  )
+  ring_of_experts_row_major_reduce_scatter: bool = Field(
+      False,
+      description=(
+          "Ring of Experts only. Lay out the input of the expert-parallel reduce-scatter"
+          " row-major in memory, in the forward pass. Left to itself, XLA may give that input"
+          " the layer output's layout, copy the whole combine output into it and copy the"
+          " reduce-scatter's result back. The value is unchanged and the backward pass is left"
+          " as it is. Requires use_ring_of_experts=True."
+      ),
   )
   te_moe_block: bool = Field(
       False,
@@ -1145,6 +1182,22 @@ class MoEGeneral(BaseModel):
       False,
       description="Use two separate All-Gather calls for MoE weights sharded on both FSDP and FSDP-transpose.",
   )
+  moe_expert_weight_prefetch: None | Literal["forward", "forward_backward"] = Field(
+      None,
+      description=(
+          "Requires sparse_matmul=True; None ('none' on the command line) is off. Ties the FSDP-gathered expert"
+          " weights to the routed tokens and router logits with jax.lax.optimization_barrier, so the EP"
+          " token all-gathers, routing and expert GEMMs wait for the weight all-gathers and the scheduler"
+          " issues those gathers under the preceding attention/GDN mixer. 'forward' constrains the forward"
+          " pass only (the barrier's cotangent is the identity). 'forward_backward' keeps the transposed"
+          " barrier as well, so the input gradient waits for the layer's expert-weight gradients, which"
+          " moves each layer's weight-gradient GEMMs next to that layer instead of to the end of the"
+          " backward layer loop. The barrier is the identity, so the math is unchanged. It only acts if"
+          " XLA keeps optimization barriers: when --xla_tpu_aggressive_opt_barrier_removal=true or ENABLED"
+          " applies (compile_xla_flags overrides LIBTPU_INIT_ARGS and XLA_FLAGS), the layer skips the barrier"
+          " and logs a warning."
+      ),
+  )
   shard_exp_on_fsdp: bool = Field(
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
@@ -1226,8 +1279,21 @@ class MoEGeneral(BaseModel):
 
   @model_validator(mode="after")
   def validate_moe_chunks(self) -> "MoEGeneral":
+    """Validates the options of the chunked ring-of-experts MoE loop, which all require ring of experts."""
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    if self.ring_of_experts_local_routing and not self.use_ring_of_experts:
+      raise ValueError("ring_of_experts_local_routing=True requires use_ring_of_experts=True.")
+    if self.ring_of_experts_row_major_reduce_scatter and not self.use_ring_of_experts:
+      raise ValueError("ring_of_experts_row_major_reduce_scatter=True requires use_ring_of_experts=True.")
+    if self.moe_chunk_pipeline:
+      if self.num_moe_token_chunks <= 1 or not self.use_ring_of_experts:
+        raise ValueError("moe_chunk_pipeline=True requires num_moe_token_chunks > 1 and use_ring_of_experts=True.")
+      if self.moe_chunk_barrier:
+        raise ValueError("moe_chunk_pipeline=True and moe_chunk_barrier=True order the chunks in opposite ways.")
+      # num_moe_emb_chunks is a MoEKernels field; this validator runs on the combined config.
+      if getattr(self, "num_moe_emb_chunks", 0) > 0:
+        raise ValueError("moe_chunk_pipeline=True does not support num_moe_emb_chunks > 0.")
     return self
 
   @model_validator(mode="after")
@@ -1376,6 +1442,18 @@ class Qwen3Next(BaseModel):
   gdn_cp_mode: Literal["auto", "seq", "head"] = Field(
       "auto",
       description="GDN context parallelism mode ('auto', 'seq', or 'head').",
+  )
+  gdn_cp_matmul_precision: Literal["highest", "high"] = Field(
+      "highest",
+      description=(
+          "Precision of the f32 matmuls that compose the GDN recurrent state across sequence-sharded context"
+          " parallelism (kernels/gdn/gdn_bwd/cp_gdn.py). On TPU 'highest' runs 6 bf16 passes and 'high' runs 3."
+          " Only the XLA composition math changes; the Pallas kernels keep their own precision. It applies only"
+          " with use_gdn_kernel=True and sequence-sharded GDN context parallelism: gdn_cp_mode='seq', or 'auto',"
+          " which shards the sequence unless the GDN context parallelism is 2 and divides the number of key"
+          " heads. It has no effect with use_gdn_kernel=False (that path's context parallelism always uses"
+          " HIGHEST) or with head-sharded context parallelism."
+      ),
   )
 
 
@@ -1546,6 +1624,16 @@ class HardwareAndMesh(BaseModel):
   )
   param_scan_axis: int = Field(1, description="Axis to scan over for parameters.")
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
+  context_parallel_attention_load_balance: bool = Field(
+      False,
+      description=(
+          "Load-balance causal attention under context parallelism inside each attention layer only. The layer "
+          "input, positions and segment ids are permuted into DUAL_CHUNK_SWAP order on entry and the output is "
+          "permuted back on exit, so every other layer and the input pipeline keep natural token order. Only "
+          "causal (global) attention layers are balanced. Requires context_parallel_load_balance=False and "
+          "use_multimodal=False."
+      ),
+  )
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
@@ -1724,6 +1812,16 @@ class RematAndOffload(BaseModel):
           "forward Pallas kernel in backward without saving all GDN residuals like `gdn` (remat, device, offload)."
       ),
   )
+  gdn_cp_state: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the sequence-sharded context-parallel GatedDeltaNet (GDN) carries: the conv halo, the "
+          "local state transition and the incoming recurrent state, named where they are produced. Keeping them on "
+          "device/offload lets the backward replay the second forward kernel pass without replaying the halo "
+          "exchange, the first pass and the cross-rank state composition. No effect without sequence-sharded GDN "
+          "context parallelism (remat, device, offload)."
+      ),
+  )
   mlpwi: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first MLP layer's intermediate output.",
@@ -1751,6 +1849,15 @@ class RematAndOffload(BaseModel):
   moe_mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MoE layer's output.",
+  )
+  moe_route: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the ring-of-experts ragged sort's integer routing results (sorted token indices, "
+          "revert indices, per-expert group sizes). Keeping them on device/offload lets the backward replay the "
+          "token gather without replaying both argsorts. Requires sparse_matmul=True, use_ring_of_experts=True "
+          "and use_ragged_sort=True (remat, device, offload)."
+      ),
   )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
@@ -3748,6 +3855,52 @@ class MaxTextConfig(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
       )
 
+  def _validate_context_parallel_attention_load_balance(self, context_parallel_size: int):
+    """Validates attention-local causal load balancing (`context_parallel_attention_load_balance`).
+
+    Unlike `context_parallel_load_balance`, this is legal with GatedDeltaNet context parallelism. The
+    DUAL_CHUNK_SWAP permutation is applied to the attention layer's input and undone on its output inside
+    `Attention.__call__`, so the GatedDeltaNet recurrence, which needs device order to equal sequence order,
+    never sees a reordered tensor.
+    """
+    if not self.context_parallel_attention_load_balance:
+      return
+    prefix = "context_parallel_attention_load_balance=True"
+    if self.context_parallel_load_balance:
+      raise ValueError(
+          f"{prefix} requires context_parallel_load_balance=False: the input pipeline would already have "
+          "reordered the batch, and the attention layer would reorder it a second time."
+      )
+    if self.context_parallel_strategy not in ("ring", "all_gather"):
+      raise ValueError(
+          f"{prefix} supports context_parallel_strategy='ring' or 'all_gather', got "
+          f"{self.context_parallel_strategy!r}."
+      )
+    if context_parallel_size <= 1 or context_parallel_size % 2 != 0:
+      raise ValueError(
+          f"{prefix} requires an even context parallelism of at least 2, got {context_parallel_size}. Set the "
+          "ici/dcn context parallelism sizes explicitly."
+      )
+    if self.max_target_length % (2 * context_parallel_size) != 0:
+      raise ValueError(
+          f"{prefix} requires max_target_length ({self.max_target_length}) to be divisible by "
+          f"2 * context_parallel_size ({2 * context_parallel_size})."
+      )
+    if self.attention_type != AttentionType.GLOBAL.value:
+      raise ValueError(f"{prefix} supports only attention_type='global', got {self.attention_type!r}.")
+    if self.use_indexer:
+      raise ValueError(f"{prefix} does not support the sparse indexer mask.")
+    # Vision encoder layers (bidirectional, rotary angles from the image grid) keep natural order, but the
+    # multimodal decoder inputs (image-token masks, 3D positions) have not been checked under the permutation.
+    if self.use_multimodal:
+      raise ValueError(f"{prefix} does not support use_multimodal=True.")
+    # Only these two kernels build their causal mask from the permutation (the TPU Splash/ring masks) or
+    # from positions (dot product). The GPU kernels would apply a plain causal mask to permuted tokens.
+    if self.attention not in ("flash", "dot_product"):
+      raise ValueError(f"{prefix} supports attention='flash' (TPU) or 'dot_product', got {self.attention!r}.")
+    if "gpu" in self.hardware:
+      raise ValueError(f"{prefix} is not supported on GPU.")
+
   def _validate_usp_context_parallelism(self):
     """Validates the USP (Ulysses over ring) context parallelism configuration."""
     if self.context_parallel_strategy != "usp":
@@ -3870,6 +4023,13 @@ class MaxTextConfig(
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
 
+  def validate_moe_expert_weight_prefetch(self):
+    """Validates that moe_expert_weight_prefetch is set only on the path that places the barrier."""
+    if self.moe_expert_weight_prefetch is not None and not self.sparse_matmul:
+      raise ValueError(
+          "moe_expert_weight_prefetch requires sparse_matmul=True: only the sparse-matmul MoE path places the barrier."
+      )
+
   def validate_moe_quantize_token_all_gather(self):
     """Validates that moe_quantize_token_all_gather is used with supported settings."""
     if self.moe_quantize_token_all_gather:
@@ -3927,23 +4087,33 @@ class MaxTextConfig(
 
   @model_validator(mode="after")
   def validate_gdn_remat_requires_kernel(self) -> "MaxTextConfig":
-    """Raise ValueError if gdn, gdn_conv or gdn_states is misconfigured."""
-    if self.gdn == self.gdn_conv == self.gdn_states == "remat":
+    """Raise ValueError if gdn, gdn_conv, gdn_states or gdn_cp_state is misconfigured."""
+    if self.gdn == self.gdn_conv == self.gdn_states == self.gdn_cp_state == "remat":
       return self
     if not self.use_gdn_kernel:
       raise ValueError(
-          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
-          "requires `use_gdn_kernel=True`."
+          "Granular GDN rematerialization (setting `gdn`, `gdn_conv`, `gdn_states` or `gdn_cp_state` to 'device' or "
+          "'offload') requires `use_gdn_kernel=True`."
       )
     if self.remat_policy != "custom":
       raise ValueError(
-          "Granular GDN rematerialization (setting `gdn`, `gdn_conv` or `gdn_states` to 'device' or 'offload') "
-          f"requires `remat_policy='custom'`, got `remat_policy={self.remat_policy!r}`."
+          "Granular GDN rematerialization (setting `gdn`, `gdn_conv`, `gdn_states` or `gdn_cp_state` to 'device' or "
+          f"'offload') requires `remat_policy='custom'`, got `remat_policy={self.remat_policy!r}`."
       )
     if {self.gdn, self.gdn_states} == {"device", "offload"}:
       raise ValueError(
           "Conflicting GDN remat configuration: `gdn` and `gdn_states` cannot be set to opposite "
           "'device' and 'offload' targets because `gdn_states` is a subset of `gdn` residuals."
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_route_remat_requires_ring_ragged_sort(self) -> "MaxTextConfig":
+    """Raise ValueError if moe_route is configured for device/offload on a path that does not name it."""
+    if self.moe_route != "remat" and not (self.sparse_matmul and self.use_ring_of_experts and self.use_ragged_sort):
+      raise ValueError(
+          "Saving or offloading `moe_route` requires `sparse_matmul=True`, `use_ring_of_experts=True` and "
+          "`use_ragged_sort=True`: only the ring-of-experts ragged sort names the routing indices."
       )
     return self
 
@@ -4404,10 +4574,12 @@ class MaxTextConfig(
           "gdn",
           "gdn_conv",
           "gdn_states",
+          "gdn_cp_state",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_route",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -4859,6 +5031,7 @@ class MaxTextConfig(
       self.validate_retry_when_tokens_dropped()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_expert_weight_prefetch()
     self.validate_mllog()
 
     if self.enable_streaming_diloco:
@@ -5131,6 +5304,7 @@ class MaxTextConfig(
             f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
     self._validate_usp_context_parallelism()
+    self._validate_context_parallel_attention_load_balance(context_parallel_size)
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.
@@ -5683,6 +5857,12 @@ class RLConfig(
           f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
       )
 
+    # MaxTextConfig's validate_moe_expert_weight_prefetch does not run on RLConfig.
+    if self.moe_expert_weight_prefetch is not None and not self.sparse_matmul:
+      raise ValueError(
+          "moe_expert_weight_prefetch requires sparse_matmul=True: only the sparse-matmul MoE path places the barrier."
+      )
+
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if tokenizer_path is None:
@@ -5775,10 +5955,12 @@ class RLConfig(
           "gdn",
           "gdn_conv",
           "gdn_states",
+          "gdn_cp_state",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_route",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -5795,6 +5977,12 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+
+    if self.moe_route != "remat" and not (self.sparse_matmul and self.use_ring_of_experts and self.use_ragged_sort):
+      raise ValueError(
+          "Saving or offloading `moe_route` requires `sparse_matmul=True`, `use_ring_of_experts=True` and "
+          "`use_ragged_sort=True`: only the ring-of-experts ragged sort names the routing indices."
+      )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {

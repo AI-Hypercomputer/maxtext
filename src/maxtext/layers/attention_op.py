@@ -73,7 +73,7 @@ from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules
+from maxtext.utils.sharding import logical_to_mesh_axes, maybe_shard_with_pspec, get_logical_axis_rules, mesh_axes_for_dim
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
@@ -943,10 +943,15 @@ class AttentionOp(nnx.Module):
         if axis is not None and axis != self.config.ulysses_context_sharding and axis in self.mesh.shape
     )
 
-  def _load_balanced_context_parallel(self) -> bool:
+  def _load_balanced_context_parallel(self, sequence_load_balanced: bool = False) -> bool:
     """Whether the load-balanced CP path is valid for this call.
 
-    `context_parallel_load_balance` on its own is not enough. The load-balanced
+    `sequence_load_balanced=True` means the caller (`Attention.__call__` under
+    `context_parallel_attention_load_balance`) has itself permuted Q/K/V, positions and
+    segment ids into DUAL_CHUNK_SWAP order for exactly `_context_parallel_size()` shards
+    (see `attention_load_balance_context_size`), so the load-balanced path applies.
+
+    Otherwise `context_parallel_load_balance` on its own is not enough. The load-balanced
     path assumes the batch arrives in DUAL_CHUNK_SWAP order: the mask bakes that
     permutation into a static `q_sequence`, and `wrap_flash_attention` restores
     K/V to contiguous order. The input pipeline applies that order once, for one
@@ -959,7 +964,50 @@ class AttentionOp(nnx.Module):
     back to the plain causal path, which is correct at any shard count.
     """
     cp_size = self._context_parallel_size()
+    if sequence_load_balanced:
+      return cp_size > 1
     return cp_size > 1 and max_utils.reordered_cp_size(self.config, self.mesh) == cp_size
+
+  def attention_load_balance_context_size(self, model_mode: str) -> int:
+    """How many context shards `Attention.__call__` should load-balance over; 1 means off.
+
+    Under `context_parallel_attention_load_balance` the attention layer permutes its own
+    input into DUAL_CHUNK_SWAP order and undoes it on the output, so the batch and every
+    other layer stay in natural order. That needs the query sequence to be sharded over
+    exactly the `context_sharding` axis under the ambient rules. When it is not (e.g. an
+    eval rule without context parallelism) or outside training, this returns 1 and the
+    layer runs the plain causal path, which is correct at any shard count.
+
+    Only plain causal layers (`AttentionType.GLOBAL`) are balanced. Other layers keep
+    natural order: a FULL (bidirectional) layer such as a vision encoder has no causal
+    imbalance to fix, and may take its rotary angles from the natural token order rather
+    than from the positions that travel with the permuted tokens.
+    """
+    if not self.config.context_parallel_attention_load_balance or model_mode != MODEL_MODE_TRAIN or self.mesh is None:
+      return 1
+    if self.attention_type != AttentionType.GLOBAL:
+      return 1
+    context_axis = self.config.context_sharding
+    q_seq_axes = mesh_axes_for_dim(self._logical_to_mesh_axes((Q_LENGTH,))[0])
+    if q_seq_axes != (context_axis,):
+      return 1
+    cp_size = self.mesh.shape[context_axis]
+    return cp_size if cp_size % 2 == 0 else 1
+
+  def reorder_for_attention_load_balance(self, x: Array | None, *, to_natural: bool = False) -> Array | None:
+    """Moves a `[batch, seq, ...]` activation between natural and DUAL_CHUNK_SWAP order.
+
+    The sequence dim is sharded over `context_sharding` and the batch dim as the attention
+    batch (`BATCH_ATTN`) under the ambient rules. See
+    `tokamax_ring_attention.reorder_for_load_balance`.
+    """
+    return tokamax_ring_attention.reorder_for_load_balance(
+        x,
+        mesh=self.mesh,
+        axis_name=self.config.context_sharding,
+        batch_axes=self._logical_to_mesh_axes((BATCH_ATTN,))[0],
+        to_natural=to_natural,
+    )
 
   def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
     """Check attention inputs."""
@@ -997,6 +1045,7 @@ class AttentionOp(nnx.Module):
       pad_kv_total: int = 0,
       decoder_segment_ids_kv: Optional[Array] = None,
       attention_type: AttentionType | None = None,
+      sequence_load_balanced: bool = False,
   ) -> Array | None:
     """Generates a combined attention mask for Transformer models.
 
@@ -1072,6 +1121,9 @@ class AttentionOp(nnx.Module):
         this call. Lets a caller ask for a subset of the usual mask, e.g. a
         kernel that applies causality and the sliding window itself and only
         needs sequence separation. Defaults to `self.attention_type`.
+      sequence_load_balanced: Whether the caller permuted the query/key tokens
+        into DUAL_CHUNK_SWAP order itself (`context_parallel_attention_load_balance`).
+        Causality is then taken from `segment_positions`, which must be set.
 
     Returns:
       An `Array` representing the attention mask, with shape
@@ -1091,6 +1143,8 @@ class AttentionOp(nnx.Module):
           Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
     """
     attention_type = self.attention_type if attention_type is None else attention_type
+    if sequence_load_balanced and segment_positions is None:
+      raise ValueError("A load-balanced (DUAL_CHUNK_SWAP) token order needs segment_positions to build the causal mask.")
     mask = None
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -1117,7 +1171,7 @@ class AttentionOp(nnx.Module):
       next_pos = kv_seq_len - 1
     use_segment_positions = (
         segment_positions is not None
-        and self._load_balanced_context_parallel()
+        and self._load_balanced_context_parallel(sequence_load_balanced)
         and previous_chunk is None
         and model_mode != MODEL_MODE_AUTOREGRESSIVE
     )
@@ -1584,6 +1638,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
+      sequence_load_balanced: bool = False,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1593,6 +1648,15 @@ class AttentionOp(nnx.Module):
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
     cp_size = self._context_parallel_size()
+    if sequence_load_balanced and not (
+        self.attention_kernel == "dot_product" or (self.attention_kernel == "flash" and target_hardware == "tpu")
+    ):
+      # Only these kernels take causality from the DUAL_CHUNK_SWAP permutation (TPU Splash / ring masks)
+      # or from positions (dot product); the others would apply a plain causal mask to permuted tokens.
+      raise ValueError(
+          "A load-balanced (DUAL_CHUNK_SWAP) token order is supported only by attention='dot_product' and by "
+          f"attention='flash' on TPU, got attention={self.attention_kernel!r} on {target_hardware!r}."
+      )
     if self.attention_type == AttentionType.COMPRESSED and cp_size > 1:
       raise ValueError(f"Context parallelism (cp_size={cp_size}) is not supported with AttentionType.COMPRESSED.")
     if (
@@ -1652,6 +1716,7 @@ class AttentionOp(nnx.Module):
           compressed_mask=compressed_mask,
           record_max_logits=record_max_logits,
           decoder_segment_ids_kv=decoder_segment_ids_kv,
+          sequence_load_balanced=sequence_load_balanced,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -1684,6 +1749,7 @@ class AttentionOp(nnx.Module):
             decoder_segment_ids_kv=decoder_segment_ids_kv,
             pad_kv_total=pad_kv_total,
             compress_ratio=compress_ratio,
+            sequence_load_balanced=sequence_load_balanced,
         )
         if max_logits is not None:
           self.max_logits = nnx.Intermediate(max_logits)
@@ -1867,6 +1933,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Array | None = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
+      sequence_load_balanced: bool = False,
   ) -> tuple[Array, Array]:
     """TPU Flash Attention."""
 
@@ -1874,7 +1941,7 @@ class AttentionOp(nnx.Module):
     use_ulysses = ulysses_attention.is_context_parallel_ulysses_requested(self.config)
     use_usp = usp_attention.is_context_parallel_usp_requested(self.config)
     cp_size = self._context_parallel_size()
-    load_balanced_context_parallel = self._load_balanced_context_parallel()
+    load_balanced_context_parallel = self._load_balanced_context_parallel(sequence_load_balanced)
     if use_tokamax_ring:
       self._validate_tpu_tokamax_ring_runtime(
           model_mode=model_mode,
@@ -2063,6 +2130,7 @@ class AttentionOp(nnx.Module):
               ring_axis=self.config.context_sharding,
               attn_logits_soft_cap=attn_logits_soft_cap,
               maybe_shard_with_pspec=self._maybe_shard_with_pspec,
+              load_balanced=load_balanced_context_parallel,
               mask=None,
           )
       )
@@ -2898,6 +2966,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
+      sequence_load_balanced: bool = False,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -2960,6 +3029,7 @@ class AttentionOp(nnx.Module):
         compressed_mask=compressed_mask,
         segment_positions=segment_positions,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
+        sequence_load_balanced=sequence_load_balanced,
     )
 
     if self.config.moba:
@@ -3179,7 +3249,17 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
+      sequence_load_balanced: bool = False,
   ):
+    """Applies attention.
+
+    `sequence_load_balanced=True` declares that the caller permuted query, key, value,
+    `inputs_positions` and `decoder_segment_ids` into DUAL_CHUNK_SWAP order over the
+    context axis (`attention_load_balance_context_size`) and will undo it on the output.
+    It is valid only in training.
+    """
+    if sequence_load_balanced and model_mode != MODEL_MODE_TRAIN:
+      raise ValueError("A load-balanced (DUAL_CHUNK_SWAP) token order is supported only in training.")
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
     else:
@@ -3228,6 +3308,7 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_kv=decoder_segment_ids_kv,
         pad_kv_total=pad_kv_total,
         compress_ratio=compress_ratio,
+        sequence_load_balanced=sequence_load_balanced,
     )
 
     if ar_kv_cache is None:

@@ -616,6 +616,7 @@ def run_gdn_kernel_layer(
   use_head_sharded_cp, use_seq_sharded_cp = _resolve_gdn_cp_mode(
       cfg, cp_size, layer.num_k_heads, model_mode, use_gdn_kernel=True
   )
+  cp_matmul_precision = jax.lax.Precision[getattr(cfg, "gdn_cp_matmul_precision", "highest").upper()]
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
@@ -924,6 +925,7 @@ def run_gdn_kernel_layer(
           compute_dtype=state_dtype,
           cp_axis_name=cp_axis_name if use_seq_sharded_cp else None,
           segment_ids=seg_val,
+          cp_matmul_precision=cp_matmul_precision,
       )
 
     if not isinstance(qkv, jax.core.Tracer):

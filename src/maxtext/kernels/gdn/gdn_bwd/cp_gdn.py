@@ -37,7 +37,9 @@ import jax.numpy as jnp
 
 from .. import compute_conv1d as local_compute_conv1d
 
-_PREC = jax.lax.Precision.HIGHEST
+# Precision of the f32 composition matmuls below: 6 bf16 passes on TPU. `gdn_cp_matmul_precision=high`
+# passes Precision.HIGH (3 passes) to them through their `precision` argument instead.
+DEFAULT_PRECISION = jax.lax.Precision.HIGHEST
 
 
 def gather_cp_segment_metadata(
@@ -78,13 +80,17 @@ def gather_cp_segment_metadata(
   return s_enc_local, conv_halo_seg, init_seg
 
 
-def compose(left: Tuple[jax.Array, jax.Array], right: Tuple[jax.Array, jax.Array]) -> Tuple[jax.Array, jax.Array]:
+def compose(
+    left: Tuple[jax.Array, jax.Array],
+    right: Tuple[jax.Array, jax.Array],
+    precision: jax.lax.Precision = DEFAULT_PRECISION,
+) -> Tuple[jax.Array, jax.Array]:
   """Composes two affine maps: (A_r, B_r) o (A_l, B_l) = (A_r @ A_l, A_r @ B_l + B_r)."""
   a_l, b_l = left
   a_r, b_r = right
   return (
-      jnp.matmul(a_r, a_l, precision=_PREC),
-      jnp.matmul(a_r, b_l, precision=_PREC) + b_r,
+      jnp.matmul(a_r, a_l, precision=precision),
+      jnp.matmul(a_r, b_l, precision=precision) + b_r,
   )
 
 
@@ -93,6 +99,7 @@ def incoming_state(
     b_loc: jax.Array,
     h_init: jax.Array,
     cp_axis: str | tuple[str, ...],
+    precision: jax.lax.Precision = DEFAULT_PRECISION,
 ) -> Tuple[jax.Array, jax.Array]:
   """Hillis-Steele prefix scan across `cp_axis` returning (h_in, final_h) in O(log2 D) steps."""
   d_size = lax.axis_size(cp_axis)
@@ -104,7 +111,7 @@ def incoming_state(
     fwd = [(i, i + step) for i in range(d_size - step)]
     a_recv = lax.ppermute(a_run, cp_axis, fwd)
     b_recv = lax.ppermute(b_run, cp_axis, fwd)
-    a_cmp, b_cmp = compose((a_recv, b_recv), (a_run, b_run))
+    a_cmp, b_cmp = compose((a_recv, b_recv), (a_run, b_run), precision)
     live = idx >= step
     a_run = jnp.where(live, a_cmp, a_run)
     b_run = jnp.where(live, b_cmp, b_run)
@@ -113,13 +120,13 @@ def incoming_state(
   shift1 = [(i, i + 1) for i in range(d_size - 1)]
   a_ex = lax.ppermute(a_run, cp_axis, shift1)
   b_ex = lax.ppermute(b_run, cp_axis, shift1)
-  carried = jnp.matmul(a_ex, h_init, precision=_PREC) + b_ex
+  carried = jnp.matmul(a_ex, h_init, precision=precision) + b_ex
   h_in = jnp.where(idx == 0, h_init, carried)
 
   last = idx == (d_size - 1)
   a_tot = lax.psum(jnp.where(last, a_run, jnp.zeros_like(a_run)), cp_axis)
   b_tot = lax.psum(jnp.where(last, b_run, jnp.zeros_like(b_run)), cp_axis)
-  final_h = jnp.matmul(a_tot, h_init, precision=_PREC) + b_tot
+  final_h = jnp.matmul(a_tot, h_init, precision=precision) + b_tot
   return h_in, final_h
 
 
@@ -283,6 +290,7 @@ def compose_local_from_t_inv(
     s_ext_pass1: Optional[jax.Array] = None,
     segment_ids: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
+    precision: jax.lax.Precision = DEFAULT_PRECISION,
 ) -> Tuple[jax.Array, jax.Array]:
   """Folds local chunks into (M_local, S_ext_local) using pre-batched GEMMs outside lax.scan."""
   batch, seq_len, _ = qkv_conv.shape
@@ -336,7 +344,8 @@ def compose_local_from_t_inv(
     mask_tril = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32))
     same_active = (jnp.abs(active_c[..., :, None] - active_c[..., None, :]) < 0.5) & (active_c[..., :, None] > 0.5)
     mask_cumsum = mask_tril[None, None, None, :, :] * same_active.astype(jnp.float32)
-    cumsum_h = jnp.einsum("nbhij,nbhj->nbhi", mask_cumsum, log_g, precision=_PREC)
+    # The segment-masked cumsum feeds exp(); it stays at HIGHEST whatever `precision` is.
+    cumsum_h = jnp.einsum("nbhij,nbhj->nbhi", mask_cumsum, log_g, precision=DEFAULT_PRECISION)
 
     active_last = active_c[..., -1:]
     m_in = ((jnp.abs(seg_c - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
@@ -358,9 +367,9 @@ def compose_local_from_t_inv(
   t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))  # [N_c, B, H_v, C, C]
 
   # Pre-batched GEMMs across all chunks outside any sequential loop
-  w_all = jnp.matmul(t_inv_c, k_beta_g, precision=_PREC)  # [N_c, B, H_v, C, d_k]
+  w_all = jnp.matmul(t_inv_c, k_beta_g, precision=precision)  # [N_c, B, H_v, C, d_k]
   eye = jnp.eye(head_k_dim, dtype=jnp.float32)
-  m_all = gating_last * eye - jnp.matmul(jnp.swapaxes(k_scaled_bwd, -1, -2), w_all, precision=_PREC)
+  m_all = gating_last * eye - jnp.matmul(jnp.swapaxes(k_scaled_bwd, -1, -2), w_all, precision=precision)
 
   if s_ext_pass1 is not None:
     cur_m = m_all
@@ -368,10 +377,10 @@ def compose_local_from_t_inv(
       n = cur_m.shape[0]
       if n % 2 == 1:
         rem = cur_m[-1:]
-        cur_m = jnp.matmul(cur_m[1:-1:2], cur_m[0:-1:2], precision=_PREC)
+        cur_m = jnp.matmul(cur_m[1:-1:2], cur_m[0:-1:2], precision=precision)
         cur_m = jnp.concatenate([cur_m, rem], axis=0)
       else:
-        cur_m = jnp.matmul(cur_m[1::2], cur_m[0::2], precision=_PREC)
+        cur_m = jnp.matmul(cur_m[1::2], cur_m[0::2], precision=precision)
     return cur_m[0], s_ext_pass1.astype(jnp.float32)
 
   v_orig = (
@@ -383,8 +392,8 @@ def compose_local_from_t_inv(
   if valid_c is not None:
     v_h = jnp.where(valid_c[..., None], v_h, 0.0)
   v_beta = v_h * beta_h[..., None]
-  u_all = jnp.matmul(t_inv_c, v_beta, precision=_PREC)
-  s_all = jnp.matmul(jnp.swapaxes(k_scaled_bwd, -1, -2), u_all, precision=_PREC)
+  u_all = jnp.matmul(t_inv_c, v_beta, precision=precision)
+  s_all = jnp.matmul(jnp.swapaxes(k_scaled_bwd, -1, -2), u_all, precision=precision)
 
   cur_m = m_all
   cur_s = s_all
@@ -394,15 +403,15 @@ def compose_local_from_t_inv(
       rem_m, rem_s = cur_m[-1:], cur_s[-1:]
       even_m, odd_m = cur_m[0:-1:2], cur_m[1:-1:2]
       even_s, odd_s = cur_s[0:-1:2], cur_s[1:-1:2]
-      next_s = jnp.matmul(odd_m, even_s, precision=_PREC) + odd_s
-      next_m = jnp.matmul(odd_m, even_m, precision=_PREC)
+      next_s = jnp.matmul(odd_m, even_s, precision=precision) + odd_s
+      next_m = jnp.matmul(odd_m, even_m, precision=precision)
       cur_m = jnp.concatenate([next_m, rem_m], axis=0)
       cur_s = jnp.concatenate([next_s, rem_s], axis=0)
     else:
       even_m, odd_m = cur_m[0::2], cur_m[1::2]
       even_s, odd_s = cur_s[0::2], cur_s[1::2]
-      cur_s = jnp.matmul(odd_m, even_s, precision=_PREC) + odd_s
-      cur_m = jnp.matmul(odd_m, even_m, precision=_PREC)
+      cur_s = jnp.matmul(odd_m, even_s, precision=precision) + odd_s
+      cur_m = jnp.matmul(odd_m, even_m, precision=precision)
   return cur_m[0], cur_s[0]
 
 
@@ -424,6 +433,7 @@ def compose_bwd_local_from_t_inv(
     m_local_cached: Optional[jax.Array] = None,
     segment_ids: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
+    precision: jax.lax.Precision = DEFAULT_PRECISION,
 ) -> Tuple[jax.Array, jax.Array]:
   """Computes backward rank transition (dM_local, dS_ext_local) using pre-batched GEMMs."""
   batch, seq_len, _ = qkv_conv.shape
@@ -491,7 +501,8 @@ def compose_bwd_local_from_t_inv(
     same_valid = (jnp.abs(seg_c[..., :, None] - seg_c[..., None, :]) < 0.5) & valid_c[..., :, None]
     mask_cumsum = mask_causal_base[None, None, None, :, :] * same_active.astype(jnp.float32)
     mask_causal = mask_causal_base[None, None, None, :, :] * same_valid.astype(jnp.float32)
-    cumsum_h = jnp.einsum("nbhij,nbhj->nbhi", mask_cumsum, log_g, precision=_PREC)
+    # The segment-masked cumsum feeds exp(); it stays at HIGHEST whatever `precision` is.
+    cumsum_h = jnp.einsum("nbhij,nbhj->nbhi", mask_cumsum, log_g, precision=DEFAULT_PRECISION)
 
     active_last = active_c[..., -1:]
     m_in = ((jnp.abs(seg_c - seg_prev) < 0.5) & (seg_prev > 0.5)).astype(jnp.float32)
@@ -519,15 +530,15 @@ def compose_bwd_local_from_t_inv(
   g_mat_causal = jnp.exp(safe_diff_causal) * mask_causal
 
   # Pre-batched intra-chunk GEMMs across all chunks outside any sequential loop
-  attn = jnp.matmul(q_h, jnp.swapaxes(k_h, -1, -2), precision=_PREC) * g_mat_causal
-  dv_attn = jnp.matmul(jnp.swapaxes(attn, -1, -2), do_h, precision=_PREC)
-  dv_beta_0 = jnp.matmul(jnp.swapaxes(t_inv_c, -1, -2), dv_attn, precision=_PREC)
-  ds_loc_all = jnp.matmul(jnp.swapaxes(q_g, -1, -2), do_h, precision=_PREC) - jnp.matmul(
-      jnp.swapaxes(k_beta_g, -1, -2), dv_beta_0, precision=_PREC
+  attn = jnp.matmul(q_h, jnp.swapaxes(k_h, -1, -2), precision=precision) * g_mat_causal
+  dv_attn = jnp.matmul(jnp.swapaxes(attn, -1, -2), do_h, precision=precision)
+  dv_beta_0 = jnp.matmul(jnp.swapaxes(t_inv_c, -1, -2), dv_attn, precision=precision)
+  ds_loc_all = jnp.matmul(jnp.swapaxes(q_g, -1, -2), do_h, precision=precision) - jnp.matmul(
+      jnp.swapaxes(k_beta_g, -1, -2), dv_beta_0, precision=precision
   )
-  w_all = jnp.matmul(t_inv_c, k_beta_g, precision=_PREC)
+  w_all = jnp.matmul(t_inv_c, k_beta_g, precision=precision)
   eye = jnp.eye(head_k_dim, dtype=jnp.float32)
-  dm_all = gating_last * eye - jnp.matmul(jnp.swapaxes(w_all, -1, -2), k_scaled_bwd, precision=_PREC)
+  dm_all = gating_last * eye - jnp.matmul(jnp.swapaxes(w_all, -1, -2), k_scaled_bwd, precision=precision)
 
   cur_dm = dm_all
   cur_ds = ds_loc_all
@@ -537,16 +548,16 @@ def compose_bwd_local_from_t_inv(
       rem_dm, rem_ds = cur_dm[:1], cur_ds[:1]
       even_dm, odd_dm = cur_dm[1::2], cur_dm[2::2]
       even_ds, odd_ds = cur_ds[1::2], cur_ds[2::2]
-      next_ds = jnp.matmul(even_dm, odd_ds, precision=_PREC) + even_ds
-      next_dm = jnp.matmul(even_dm, odd_dm, precision=_PREC)
+      next_ds = jnp.matmul(even_dm, odd_ds, precision=precision) + even_ds
+      next_dm = jnp.matmul(even_dm, odd_dm, precision=precision)
       cur_dm = jnp.concatenate([rem_dm, next_dm], axis=0)
       cur_ds = jnp.concatenate([rem_ds, next_ds], axis=0)
     else:
       even_dm, odd_dm = cur_dm[0::2], cur_dm[1::2]
       even_ds, odd_ds = cur_ds[0::2], cur_ds[1::2]
-      cur_ds = jnp.matmul(even_dm, odd_ds, precision=_PREC) + even_ds
+      cur_ds = jnp.matmul(even_dm, odd_ds, precision=precision) + even_ds
       if m_local_cached is None or n > 2:
-        cur_dm = jnp.matmul(even_dm, odd_dm, precision=_PREC)
+        cur_dm = jnp.matmul(even_dm, odd_dm, precision=precision)
       else:
         cur_dm = even_dm[:1]
 
@@ -559,6 +570,7 @@ def incoming_grad_state(
     ds_ext_loc: jax.Array,
     dht_final: jax.Array,
     cp_axis: str | tuple[str, ...],
+    precision: jax.lax.Precision = DEFAULT_PRECISION,
 ) -> Tuple[jax.Array, jax.Array]:
   """Reverse Hillis-Steele prefix scan across `cp_axis` from rank D-1 down to 0."""
   d_size = lax.axis_size(cp_axis)
@@ -572,7 +584,7 @@ def incoming_grad_state(
     b_recv = lax.ppermute(b_run, cp_axis, bwd)
     # Downstream rank (idx + step) acts first on dht_final;
     # current rank idx acts second.
-    a_cmp, b_cmp = compose((a_recv, b_recv), (a_run, b_run))
+    a_cmp, b_cmp = compose((a_recv, b_recv), (a_run, b_run), precision)
     live = idx < (d_size - step)
     a_run = jnp.where(live, a_cmp, a_run)
     b_run = jnp.where(live, b_cmp, b_run)
@@ -581,11 +593,11 @@ def incoming_grad_state(
   shift1_bwd = [(i + 1, i) for i in range(d_size - 1)]
   a_ex = lax.ppermute(a_run, cp_axis, shift1_bwd)
   b_ex = lax.ppermute(b_run, cp_axis, shift1_bwd)
-  carried = jnp.matmul(a_ex, dht_final, precision=_PREC) + b_ex
+  carried = jnp.matmul(a_ex, dht_final, precision=precision) + b_ex
   dht_local = jnp.where(idx == (d_size - 1), dht_final, carried)
 
   first = idx == 0
   a_tot = lax.psum(jnp.where(first, a_run, jnp.zeros_like(a_run)), cp_axis)
   b_tot = lax.psum(jnp.where(first, b_run, jnp.zeros_like(b_run)), cp_axis)
-  dh0_total = jnp.matmul(a_tot, dht_final, precision=_PREC) + b_tot
+  dh0_total = jnp.matmul(a_tot, dht_final, precision=precision) + b_tot
   return dht_local, dh0_total

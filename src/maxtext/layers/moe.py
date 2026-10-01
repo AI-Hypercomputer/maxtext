@@ -29,6 +29,7 @@ import jax
 from jax import ad_checkpoint as adc
 from jax.experimental.compute_on import compute_on
 from jax.experimental import xla_metadata
+from jax.experimental.layout import Layout, with_layout_constraint
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -188,6 +189,84 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+@jax.custom_vjp
+def _forward_optimization_barrier(operands):
+  """`jax.lax.optimization_barrier` on the forward values and the identity on their cotangents.
+
+  `jax.lax.optimization_barrier` transposes to a barrier over the cotangents. This
+  variant constrains only the forward schedule and leaves the backward program as it
+  is without the barrier.
+  """
+  return jax.lax.optimization_barrier(operands)
+
+
+def _forward_optimization_barrier_fwd(operands):
+  return jax.lax.optimization_barrier(operands), None
+
+
+def _forward_optimization_barrier_bwd(_, cotangents):
+  return (cotangents,)
+
+
+_forward_optimization_barrier.defvjp(_forward_optimization_barrier_fwd, _forward_optimization_barrier_bwd)
+
+
+def barrier_tie(x, dep, backward: bool = False):
+  """Returns `(x, dep)` unchanged, tied together by `jax.lax.optimization_barrier`.
+
+  XLA orders instructions by data dependencies alone. Nothing computed from either
+  output of the tie can start before both inputs exist, so everything that reads the
+  returned `x` is ordered after `dep`, and everything that reads the returned `dep`
+  after `x`.
+
+  Both outputs must replace both inputs downstream. The ordering is carried only by
+  outputs that something reads: where an output has no reader, XLA may drop that
+  operand and the dependency with it.
+
+  In the rematerialized forward inside the backward pass, JAX recomputes a tie with all
+  of its operands as soon as the backward reads either output (JAX has no rule that
+  drops unused barrier operands). If the backward reads only one output, the other
+  operand feeds nothing, and XLA removes it along with any work done only to compute
+  it, so the tie orders nothing there and costs nothing. A tie holds in the backward
+  only if the backward reads both of its outputs.
+
+  backward=False passes the cotangents through untouched, so only the forward schedule
+  is constrained. backward=True is the plain barrier, whose transpose also ties the
+  cotangents.
+
+  Needs --xla_tpu_aggressive_opt_barrier_removal=false (the libtpu default): with the
+  flag true or ENABLED, XLA removes barriers between collectives before scheduling.
+  """
+  barrier = jax.lax.optimization_barrier if backward else _forward_optimization_barrier
+  return barrier((x, dep))
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _forward_layout_constraint(x, major_to_minor):
+  """`with_layout_constraint` on the forward value and the identity on its cotangent."""
+  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor))
+
+
+def _forward_layout_constraint_fwd(x, major_to_minor):
+  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor)), None
+
+
+def _forward_layout_constraint_bwd(major_to_minor, _, cotangent):
+  del major_to_minor
+  return (cotangent,)
+
+
+_forward_layout_constraint.defvjp(_forward_layout_constraint_fwd, _forward_layout_constraint_bwd)
+
+
+def forward_row_major(x: jax.Array) -> jax.Array:
+  """Returns `x` unchanged, but laid out row-major in memory in the forward pass.
+
+  Only the forward value is constrained; the cotangent keeps whatever layout XLA picks.
+  """
+  return _forward_layout_constraint(x, tuple(range(x.ndim)))
+
+
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
@@ -195,7 +274,7 @@ def get_batchsplit_init_kernel_axes():
   )
 
 
-def random_routing(rng_key, gate_logits, num_experts_per_tok):
+def random_routing(rng_key, gate_logits, num_experts_per_tok, num_token_shards=1, token_shard_index=0):
   """Performs random routing of tokens to experts.
 
   Args:
@@ -203,6 +282,8 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
     gate_logits: A JAX array of shape (batch_size, sequence_length, num_experts)
       representing the logits for each expert.
     num_experts_per_tok: The number of experts to select for each token.
+    num_token_shards: The number of equal batch shards `gate_logits` is one of.
+    token_shard_index: Which of those shards `gate_logits` is.
 
   Returns:
     A tuple containing:
@@ -215,7 +296,9 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
                        representing the weights for the selected experts.
   """
   bs, seq_len, num_experts = gate_logits.shape
-  selected_num = bs * seq_len * num_experts_per_tok
+  # The draw covers all `num_token_shards` shards and this shard keeps its own rows, so routing the
+  # shards separately picks the same experts as routing their concatenation.
+  selected_num = num_token_shards * bs * seq_len * num_experts_per_tok
   # Directly generate random integers in the range [0, num_experts)
   top_k_indices = jax.random.randint(
       rng_key,
@@ -224,7 +307,9 @@ def random_routing(rng_key, gate_logits, num_experts_per_tok):
       maxval=num_experts,
       dtype=jnp.int32,
   )
-  top_k_indices = top_k_indices.reshape(bs, seq_len, num_experts_per_tok)
+  top_k_indices = top_k_indices.reshape(num_token_shards * bs, seq_len, num_experts_per_tok)
+  if num_token_shards > 1:
+    top_k_indices = jax.lax.dynamic_slice_in_dim(top_k_indices, token_shard_index * bs, bs, axis=0)
   top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
   return top_k_weights, top_k_indices
 
@@ -971,8 +1056,15 @@ class RoutedMoE(nnx.Module):
       rngs=None,
       input_ids=None,
       forced_routed_experts=None,
+      num_token_shards=1,
+      token_shard_index=0,
   ):
-    """get topk."""
+    """get topk.
+
+    Routing is per token. `num_token_shards` and `token_shard_index` say which of several equal batch
+    shards these logits are; only random routing needs them, to draw the same experts as routing all
+    of the shards at once.
+    """
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
     valid_token_mask = None
@@ -1001,7 +1093,9 @@ class RoutedMoE(nnx.Module):
           raise ValueError("The random key cannot be None for random routing.")
         # Reuse the 'params' RNG stream to ensure random routing
         rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
-        top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
+        top_k_weights, top_k_indices = random_routing(
+            rng, gate_logits, self.num_experts_per_tok, num_token_shards, token_shard_index
+        )
         return top_k_weights, top_k_indices
 
       if self.is_hash_routing:
@@ -1175,21 +1269,27 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       force_dropless=False,
       mesh_axis_names=None,
+      topk=None,
   ):
-    """Permute tokens to group by expert to fit gmm call."""
+    """Permute tokens to group by expert to fit gmm call.
+
+    `topk`, if given, is `(weights, selected_experts, lb_loss)` already computed for `inputs`. Then
+    `gate_logits`, `pre_bias_logits`, `rngs` and `input_ids` are not used, and of
+    `forced_routed_experts` only whether it is None matters: it says padded slots may be present.
+    """
     is_qarray = isinstance(inputs, qpl.QArray)
     raw_inputs = inputs.qvalue if is_qarray else inputs
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = raw_inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, inputs_shape[2]))
-    weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
-    lb_loss = None
-    # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
-    probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
-    if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
-      softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
-      lb_loss = self.load_balance_loss(selected_experts, softmax_probs)
+    if topk is None:
+      weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
+      lb_loss = None
+      if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
+        lb_loss = self.router_load_balance_loss(selected_experts, gate_logits, pre_bias_logits)
+    else:
+      weights, selected_experts, lb_loss = topk
 
     if self.should_update_load_balance():
       bias_updates = calculate_load_balance_updates(
@@ -2151,13 +2251,39 @@ class RoutedMoE(nnx.Module):
       else:
         x = _ep_all_gather(x)
 
-      # Duplicate routing inputs across all expert shards. Routing evaluates
-      # the full gathered batch; logits, pre_bias_logits, and
-      # forced_routed_experts must follow the identical all-gather so expert
-      # assignments align across shards.
-      logits, pre_bias_logits, forced_routed_experts = tuple(
-          _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
-      )
+      topk = None
+      if self.config.ring_of_experts_local_routing:
+        # Routing is per token, so each shard routes only its own tokens and all-gathers the top-k
+        # ids and weights the way the tokens were gathered. The [tokens, num_experts] logits never
+        # cross shards, so neither does their gradient, and the gradient of the top-k gather is a
+        # scatter into this shard's logits rather than into the whole gathered batch's.
+        weights, selected_experts = self.get_topk(
+            logits,
+            pre_bias_logits,
+            rngs,
+            input_ids,
+            forced_routed_experts,
+            num_token_shards=num_ep,
+            token_shard_index=expert_shard_id,
+        )
+        lb_loss = None
+        if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
+          # The loss averages per-sequence terms over the batch, and every shard holds the same
+          # number of sequences, so the mean over shards is the loss over the gathered batch.
+          lb_loss = jax.lax.pmean(
+              self.router_load_balance_loss(selected_experts, logits, pre_bias_logits),
+              self._expert_parallelism_name,
+          )
+        topk = (_ep_all_gather(weights), _ep_all_gather(selected_experts), lb_loss)
+        logits, pre_bias_logits = None, None
+      else:
+        # Duplicate routing inputs across all expert shards. Routing evaluates
+        # the full gathered batch; logits, pre_bias_logits, and
+        # forced_routed_experts must follow the identical all-gather so expert
+        # assignments align across shards.
+        logits, pre_bias_logits, forced_routed_experts = tuple(
+            _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
+        )
 
       # "Route" tokens within each shard.
       num_experts_per_shard = self.config.num_experts // num_ep
@@ -2182,6 +2308,7 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           force_dropless=force_dropless,
           mesh_axis_names=roe_bias_axis_names,
+          topk=topk,
       )
       return (
           x,
@@ -2670,6 +2797,76 @@ class RoutedMoE(nnx.Module):
       )
       return output0, output1, gmm_fn, routing, route_metadata, wo_bias
 
+    def _up_projection(x, routing, route_metadata, w0, w1, w0_bias, w1_bias, wo_bias):
+      """The gate and up projections of the routed tokens `x`."""
+      mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
+
+      if self.config.mlp_bias:
+        w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+
+      gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
+      output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
+      return output0, output1, gmm_fn, wo_bias
+
+    def _down_projection(output0, output1, gmm_fn, wo, wo_bias, routing, route_metadata):
+      """The activation and the down projection, per routed token."""
+      intermediate_layer = self.apply_ffn_activation(output0, output1)
+      wo_gather_axes, wo_tile_size = get_wo_gmm_params()
+      intermediate_output = gmm_fn(
+          intermediate_layer,
+          wo,
+          tiling=wo_tile_size,
+          weight_gather_axes=wo_gather_axes,
+      )
+      if self.get_tensor_parallelism_size() > 1:
+        intermediate_output = jax.lax.psum_scatter(
+            intermediate_output,
+            self._tensor_parallelism_name,
+            scatter_dimension=1,
+            tiled=True,
+        )
+      if self.config.mlp_bias:
+        mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(intermediate_output, routing, route_metadata)
+        intermediate_output = intermediate_output + wo_bias
+        intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
+      return adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
+
+    def _ring_unpermute(intermediate_output, routing, batch_size, sequence_length):
+      """Ring of experts: unsort, weight and sum the outputs locally, as [expert shards x batch, seq, embed]."""
+      # Unsort and deduplicate the outputs locally.
+      output = self.unpermute(
+          intermediate_output,
+          routing.sorted_selected_experts,
+          routing.weights,
+          batch_size=batch_size,
+          sequence_length=sequence_length,
+          use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+          group_sizes=routing.group_sizes,
+      )
+      return jnp.reshape(
+          output,
+          (
+              -1,
+              sequence_length,
+              self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
+          ),
+      )
+
+    def _ring_reduce_scatter(output):
+      """Ring of experts: sum the partial outputs across the expert shards."""
+      if self.config.ring_of_experts_row_major_reduce_scatter:
+        # Left to itself, layout assignment can give this input the layer output's layout, which may be
+        # sequence-minor. XLA then copies the whole [expert shards x batch, seq, embed] combine output into that
+        # layout and the reduce-scatter's result back to row-major. Row-major makes the reduce-scatter read the
+        # combine output where it is.
+        output = forward_row_major(output)
+      return jax.lax.psum_scatter(
+          output,
+          self._expert_parallelism_name,
+          scatter_dimension=0,
+          tiled=True,
+      )
+
     def _moe_body(
         x,
         logits,
@@ -2711,62 +2908,12 @@ class RoutedMoE(nnx.Module):
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
         )
-        mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
+        output0, output1, gmm_fn, wo_bias = _up_projection(x, routing, route_metadata, w0, w1, w0_bias, w1_bias, wo_bias)
 
-        if self.config.mlp_bias:
-          w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
-
-        gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
-        output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
-
-      intermediate_layer = self.apply_ffn_activation(output0, output1)
-      wo_gather_axes, wo_tile_size = get_wo_gmm_params()
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-      )
-      if self.get_tensor_parallelism_size() > 1:
-        intermediate_output = jax.lax.psum_scatter(
-            intermediate_output,
-            self._tensor_parallelism_name,
-            scatter_dimension=1,
-            tiled=True,
-        )
-      if self.config.mlp_bias:
-        mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(intermediate_output, routing, route_metadata)
-        intermediate_output = intermediate_output + wo_bias
-        intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
-      intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
+      intermediate_output = _down_projection(output0, output1, gmm_fn, wo, wo_bias, routing, route_metadata)
 
       if self.config.use_ring_of_experts:
-        # Unsort and deduplicate the outputs locally.
-        output = self.unpermute(
-            intermediate_output,
-            routing.sorted_selected_experts,
-            routing.weights,
-            batch_size=batch_size,
-            sequence_length=sequence_length,
-            use_custom_sort_vjp=self.config.use_custom_sort_vjp,
-            group_sizes=routing.group_sizes,
-        )
-
-        # Sum up the partial outputs across the expert shards.
-        output = jnp.reshape(
-            output,
-            (
-                -1,
-                sequence_length,
-                self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
-            ),
-        )
-        output = jax.lax.psum_scatter(
-            output,
-            self._expert_parallelism_name,
-            scatter_dimension=0,
-            tiled=True,
-        )
+        output = _ring_reduce_scatter(_ring_unpermute(intermediate_output, routing, batch_size, sequence_length))
         return output, routing.lb_loss, routing.bias_updates, routing.has_overflow
 
       if self.get_expert_parallelism_size() > 1:
@@ -2852,9 +2999,116 @@ class RoutedMoE(nnx.Module):
       barrier_enabled = getattr(self, "moe_chunk_barrier", None)
       if barrier_enabled is None:
         barrier_enabled = self.config.moe_chunk_barrier
+      pipeline_enabled = getattr(self, "moe_chunk_pipeline", None)
+      if pipeline_enabled is None:
+        pipeline_enabled = self.config.moe_chunk_pipeline
+      pipeline_enabled = pipeline_enabled and n_chunks > 1 and self.config.use_ring_of_experts
+      if pipeline_enabled and max_utils.xla_strips_optimization_barriers(self.config.compile_xla_flags):
+        # XLA would remove the barriers before scheduling, so the pipeline could not order anything.
+        max_logging.warning(
+            "moe_chunk_pipeline=True is skipped: --xla_tpu_aggressive_opt_barrier_removal=true (or ENABLED)"
+            " removes optimization barriers before scheduling. Set it to false to use the pipeline."
+        )
+        pipeline_enabled = False
+
+      def _pipelined_route_and_compute(force_dropless):
+        """The chunked ring of experts below, as a two-stage software pipeline.
+
+        Same chunks, same per-chunk ops, same reductions. The SparseCore runs the
+        offloaded collectives and ragged gathers one at a time, in the order they are
+        issued, and left alone XLA issues both chunks' token all-gathers back to back
+        and both reduce-scatters after both chunks' expert GEMMs. Four ties
+        (`barrier_tie`, an optimization barrier) set the issue order instead:
+          1. chunk c+1's token all-gather waits for chunk c's routed tokens, so it
+             queues behind chunk c's ragged gather and runs under chunk c's GEMMs;
+          2. chunk c's gather-reduce waits for chunk c+1's routed tokens, so chunk
+             c+1's ragged gather is ahead of it in the queue;
+          3. chunk c+1's gather-reduce waits for chunk c's reduce-scatter, so that
+             reduce-scatter runs under chunk c+1's GEMMs, not after them;
+          4. chunk c's reduce-scatter waits for chunk c+1's first expert GEMM, so the
+             TensorCore does not idle while chunk c's gather-reduce runs.
+        A barrier ties both ways, so each tie also orders its first input's readers
+        after its second input: (1) chunk c's GEMMs wait for the slice of the layer
+        input that feeds chunk c+1; (2) chunk c+1's GEMMs wait for chunk c's down
+        projection; (3) the final concatenation waits for chunk c+1's routing weights;
+        (4) chunk c+1's activation and down projection wait for chunk c's gather-reduce.
+        Each tie returns both of its inputs and both replace the originals, so every
+        barrier output is read.
+
+        In the rematerialized forward inside the backward pass, ties 1 and 2 hold as
+        well: the backward reads both of their outputs. Ties 3 and 4 do not. JAX still
+        recomputes them with all of their operands, so the recomputed forward contains
+        chunk c's gather-reduce (under tie 4) and reduce-scatter (under tie 3). But the
+        backward reads neither the reduce-scatter's input nor its output, so nothing
+        reads those barrier outputs, and XLA removes the reduce-scatter and its
+        gather-reduce. The compiled backward has the collectives of the plain chunk loop.
+        """
+        seq_len = x.shape[1]
+        chunk = seq_len // n_chunks
+
+        def _dispatch(c, x_c):
+          sl = slice(c * chunk, (c + 1) * chunk)
+          return route(
+              x_c,
+              logits[:, sl, :],
+              None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
+              rngs,
+              input_ids=None if sharded_input_ids is None else sharded_input_ids[:, sl],
+              forced_routed_experts=None if forced_routed_experts is None else forced_routed_experts[:, sl, :],
+              force_dropless=force_dropless,
+          )
+
+        def _with_routed(dispatched_c, routed):
+          return (routed,) + tuple(dispatched_c[1:])
+
+        dispatched = [_dispatch(0, x[:, 0:chunk, :])] + [None] * (n_chunks - 1)
+        outs, lb_losses, bias_updates_list, has_overflows = [], [], [], []
+        unpermuted = None  # the previous chunk's combine input, not yet reduce-scattered
+        for c in range(n_chunks):
+          if c + 1 < n_chunks:
+            # 1. The next chunk's token all-gather waits for this chunk's routed tokens.
+            x_next, routed = barrier_tie(x[:, (c + 1) * chunk : (c + 2) * chunk, :], dispatched[c][0])
+            dispatched[c] = _with_routed(dispatched[c], routed)
+            dispatched[c + 1] = _dispatch(c + 1, x_next)
+          x_c, routing, route_metadata = dispatched[c]
+          output0, output1, gmm_fn, wo_bias_c = _up_projection(
+              x_c, routing, route_metadata, w0, w1, w0_bias, w1_bias, wo_bias
+          )
+          if unpermuted is not None:
+            # 4. The previous chunk's reduce-scatter waits for this chunk's first expert GEMM,
+            #    so the TensorCore runs that GEMM while the gather-reduce is on the SparseCore.
+            unpermuted, output0 = barrier_tie(unpermuted, output0)
+            outs.append(_ring_reduce_scatter(unpermuted))
+          intermediate_output = _down_projection(output0, output1, gmm_fn, wo, wo_bias_c, routing, route_metadata)
+          if c + 1 < n_chunks:
+            # 2. This chunk's gather-reduce waits for the next chunk's routed tokens.
+            intermediate_output, routed = barrier_tie(intermediate_output, dispatched[c + 1][0])
+            dispatched[c + 1] = _with_routed(dispatched[c + 1], routed)
+          if outs:
+            # 3. This chunk's gather-reduce waits for the previous chunk's reduce-scatter. The tie holds the
+            #    gather-reduce's routing weights, a small input: holding the down-projection output instead
+            #    keeps layout assignment from giving that output the gather-reduce's tiling, and XLA then
+            #    inserts a full copy of the down-projection output. With use_ragged_sort=True the gather-reduce
+            #    kernel reads the weights, so the tie holds all of it. Without ragged sort, unpermute unsorts
+            #    first and applies the weights after, so the tie holds only the weighted sum and the unsort may
+            #    run before the previous chunk's reduce-scatter.
+            weights, outs[-1] = barrier_tie(routing.weights, outs[-1])
+            routing = routing.replace(weights=weights)
+          unpermuted = _ring_unpermute(intermediate_output, routing, x.shape[0], chunk)
+          lb_losses.append(routing.lb_loss)
+          bias_updates_list.append(routing.bias_updates)
+          has_overflows.append(routing.has_overflow)
+        outs.append(_ring_reduce_scatter(unpermuted))
+        output = jnp.concatenate(outs, axis=1)
+        lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
+        bias_updates = None if bias_updates_list[0] is None else sum(bias_updates_list) / n_chunks
+        has_overflow = jnp.any(jnp.stack(has_overflows))
+        return output, lb_loss, bias_updates, has_overflow
 
       def _route_and_compute(force_dropless):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
+        if pipeline_enabled:
+          return _pipelined_route_and_compute(force_dropless)
         if n_chunks <= 1 or not self.config.use_ring_of_experts:
           return _moe_body(
               x,
@@ -3002,6 +3256,37 @@ class RoutedMoE(nnx.Module):
       w1_bias = _fsdp_all_gather(w1_bias, w1_bias_pspec)
     if wo_bias is not None:
       wo_bias = _fsdp_all_gather(wo_bias, wo_bias_pspec)
+
+    prefetch = self.config.moe_expert_weight_prefetch
+    if prefetch is not None and max_utils.xla_strips_optimization_barriers(self.config.compile_xla_flags):
+      # XLA would remove the barrier before scheduling, so it could not order anything.
+      max_logging.warning(
+          f"moe_expert_weight_prefetch={prefetch} is skipped: --xla_tpu_aggressive_opt_barrier_removal=true"
+          " (or ENABLED) removes optimization barriers before scheduling. Set it to false to use the prefetch."
+      )
+      prefetch = None
+    if prefetch is not None:
+      # The gathers above read only the layer's parameters, so they could start at
+      # the top of the decoder layer, but the latency-hiding scheduler issues them
+      # after the attention/GDN mixer and after this layer's token all-gathers.
+      # Tying the gathered weights to the tokens and the router logits with an
+      # optimization barrier makes everything downstream of the mixer in this block
+      # (the EP token all-gathers, routing, the expert GEMMs) wait for the weight
+      # gathers, so the scheduler has to issue them early enough to finish under the
+      # mixer. The logits must be tied too: an untied routing chain keeps the mixer
+      # out of the scheduler's reach and the gathers are issued after it (seen in the
+      # rematerialized forward inside the backward pass). The barrier is the
+      # identity, so the math is unchanged. "forward" leaves the backward alone;
+      # "forward_backward" also keeps the transposed barrier, which makes the input
+      # gradient wait for the layer's expert-weight gradients.
+      # Every output of the barrier must be used below. In the rematerialized
+      # forward inside the backward pass an unused output is dead, and the ordering
+      # it carried is dropped with it.
+      (inputs, gate_logits, pre_bias_logits), (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias) = barrier_tie(
+          (inputs, gate_logits, pre_bias_logits),
+          (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias),
+          backward=prefetch == "forward_backward",
+      )
 
     output, lb_loss, bias_updates, has_overflow = sparse_matmul_route_and_compute(
         inputs,
@@ -3234,6 +3519,13 @@ class RoutedMoE(nnx.Module):
     dispatch_mask = combine_mask.astype(bool)
 
     return dispatch_mask, combine_mask
+
+  def router_load_balance_loss(self, top_k_indices, gate_logits, pre_bias_logits) -> jax.Array:
+    """The load balance loss, taking the routing probabilities from the router logits."""
+    # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
+    probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
+    softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+    return self.load_balance_loss(top_k_indices, softmax_probs)
 
   # See Switch Transformer (https://arxiv.org/abs/2101.03961) for more details.
   def load_balance_loss(self, top_k_indices, logits) -> jax.Array:
