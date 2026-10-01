@@ -255,26 +255,35 @@ def use_maxtext_loss_function(trainer, mt_config):
     The trainer configured with the MaxText loss function.
   """
 
-  def loss_func(
-      model,
-      inputs,
-      inputs_position,
-      inputs_segmentation,
-      targets,
-      targets_position,
-      targets_segmentation,
-  ):
-    data = {
-        "inputs": inputs,
-        "inputs_position": inputs_position,
-        "inputs_segmentation": inputs_segmentation,
-        "targets": targets,
-        "targets_position": targets_position,
-        "targets_segmentation": targets_segmentation,
-    }
-    return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=True)
+  def make_loss_func(is_train):
+    def loss_func(
+        model,
+        inputs,
+        inputs_position,
+        inputs_segmentation,
+        targets,
+        targets_position,
+        targets_segmentation,
+    ):
+      data = {
+          "inputs": inputs,
+          "inputs_position": inputs_position,
+          "inputs_segmentation": inputs_segmentation,
+          "targets": targets,
+          "targets_position": targets_position,
+          "targets_segmentation": targets_segmentation,
+      }
+      return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=is_train)
 
-  trainer = trainer.with_loss_fn(loss_func, has_aux=True)
+    return loss_func
+
+  # Tunix PeftTrainer.with_loss_fn() defaults `eval_loss_fn` to the same callable
+  # as `loss_fn`. We override `eval_loss_fn` with `is_train=False` so that evaluation:
+  #   - Disables dropout to ensure deterministic eval loss / perplexity.
+  #   - Excludes auxiliary Multi-Token Prediction (MTP) loss from the reported eval loss.
+  #   - Prevents updating running sparsity statistics (`batch_stats`) during eval.
+  trainer = trainer.with_loss_fn(make_loss_func(is_train=True), has_aux=True)
+  trainer.eval_loss_fn = make_loss_func(is_train=False)
   return trainer
 
 
