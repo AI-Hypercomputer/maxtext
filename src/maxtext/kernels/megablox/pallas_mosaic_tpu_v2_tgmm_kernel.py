@@ -27,6 +27,7 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
+from maxtext.kernels.megablox import relayout
 
 
 @jax.tree_util.register_dataclass
@@ -178,6 +179,29 @@ def calculate_tgmm_tiling(
   return gmm_v2.TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n)
 
 
+def _operand_size(x: jax.Array, name: str) -> int:
+  """Returns the flattened minor size of a 2D `[M, S]` or 3D `[M, S//128, 128]` operand."""
+  if x.ndim == 2:
+    return x.shape[1]
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  if x.ndim != 3 or x.shape[-1] != num_lanes:
+    raise ValueError(f"tgmm {name} must be [M, S] or [M, S // {num_lanes}, {num_lanes}]; got {x.shape}.")
+  return x.shape[1] * num_lanes
+
+
+def _check_3d_tile(tile_d0: int, full_d0: int, dtype) -> None:
+  if relayout.needs_window(tile_d0, full_d0):
+    relayout.check_window(tile_d0, full_d0, dtype, store=False)
+  else:
+    relayout.check_tile_d0(tile_d0, full_d0=full_d0, dtype=dtype)
+
+
+def _window(tile: int, full: int) -> bool:
+  """3D operand tile that is not a legal D0 block (see relayout.needs_window)."""
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  return relayout.needs_window(tile // num_lanes, full // num_lanes)
+
+
 def make_tgmm_configs(
     lhs: jax.Array,  # [m, k]
     rhs: jax.Array,  # [m, n]
@@ -197,8 +221,9 @@ def make_tgmm_configs(
   assert lhs.shape[0] == rhs.shape[0], (
       f"lhs and rhs m-dim mismatch: {lhs.shape[0]}!={rhs.shape[0]} {lhs.shape}" f" vs {rhs.shape}"
   )
-  size_m, size_k = lhs.shape
-  _, size_n = rhs.shape
+  size_m = lhs.shape[0]
+  size_k = _operand_size(lhs, "lhs")
+  size_n = _operand_size(rhs, "rhs")
   if rhs_scale is not None:
     # rhs_scale.shape[0] is the number of quant blocks along the m (reduction)
     # dimension. tgmm_v2 only implements per-N (per-output-channel) scaling,
@@ -239,11 +264,13 @@ def make_tgmm_configs(
       quant_block_size=rhs_quant_block_size_m,
       dtype=rhs.dtype,
       has_scale=(rhs_scale is not None),
+      is_3d=rhs.ndim == 3,
   )
   lhs_cfgs = gmm_v2.InputConfigs(
       quant_dtype=None,
       quant_block_size=-1,
       dtype=lhs.dtype,
+      is_3d=lhs.ndim == 3,
   )
 
   fuse_act = None  # fuse_act has to be None in tgmm.
@@ -262,6 +289,18 @@ def make_tgmm_configs(
         target_zero_ref_bytes,
         partial_sum is not None,
     )
+
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  if lhs_cfgs.is_3d:
+    if tiles.tile_k % num_lanes or size_k % tiles.tile_k:
+      raise ValueError(f"3D tgmm lhs requires tile_k % 128 == 0 and size_k % tile_k == 0; got {tiles=}, {size_k=}.")
+    _check_3d_tile(tiles.tile_k // num_lanes, size_k // num_lanes, lhs.dtype)
+  if rhs_cfgs.is_3d:
+    if tiles.tile_n % num_lanes or size_n % tiles.tile_n:
+      raise ValueError(f"3D tgmm rhs requires tile_n % 128 == 0 and size_n % tile_n == 0; got {tiles=}, {size_n=}.")
+    _check_3d_tile(tiles.tile_n // num_lanes, size_n // num_lanes, rhs.dtype)
+  if (lhs_cfgs.is_3d or rhs_cfgs.is_3d) and tiles.tile_m % size_lhs_sublane:
+    raise ValueError(f"3D tgmm requires tile_m % sublane == 0; got {tiles=}, {size_lhs_sublane=}.")
 
   return gmm_v2.GmmConfigs(
       dims=dims,
@@ -310,8 +349,37 @@ def tgmm_inner_kernel(
   # NB: grid=(num_n, num_k, num_gm)
   tiled_rhs_scale_ref = tiled_rhs_ref.scale
 
-  tiled_lhs_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
-  tiled_rhs_ref = tiled_rhs_ref.value.reshape(-1, tiled_rhs_ref.value.shape[-1])
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  tile_m = cfgs.tiles.tile_m
+  if cfgs.lhs_cfgs.is_3d:
+    # [tile_m // sublane, sublane, tile_d0, 128] -> [tile_m, tile_k]
+    lhs_3d_ref = tiled_lhs_ref
+    if _window(cfgs.tiles.tile_k, cfgs.dims.size_k):
+      # Full-D0 slab block; relayout the K window k_id (grid axis 1) from VMEM.
+      load_lhs = lambda: relayout.load_3d_window_as_2d(
+          lhs_3d_ref, tile_m, cfgs.tiles.tile_k // num_lanes, pl.program_id(1)
+      )
+    else:
+      load_lhs = lambda: relayout.load_3d_as_2d(lhs_3d_ref, tile_m, cfgs.tiles.tile_k // num_lanes)
+    lhs_shape = (tile_m, cfgs.tiles.tile_k)
+  else:
+    tiled_lhs_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
+    load_lhs = lambda: tiled_lhs_ref[...]
+    lhs_shape = tiled_lhs_ref.shape
+  if cfgs.rhs_cfgs.is_3d:
+    rhs_3d_ref = tiled_rhs_ref.value
+    if _window(cfgs.tiles.tile_n, cfgs.dims.size_n):
+      # Full-D0 slab block; relayout the N window n_id (grid axis 0) from VMEM.
+      load_rhs = lambda: relayout.load_3d_window_as_2d(
+          rhs_3d_ref, tile_m, cfgs.tiles.tile_n // num_lanes, pl.program_id(0)
+      )
+    else:
+      load_rhs = lambda: relayout.load_3d_as_2d(rhs_3d_ref, tile_m, cfgs.tiles.tile_n // num_lanes)
+    rhs_shape = (tile_m, cfgs.tiles.tile_n)
+  else:
+    tiled_rhs_ref = tiled_rhs_ref.value.reshape(-1, tiled_rhs_ref.value.shape[-1])
+    load_rhs = lambda: tiled_rhs_ref[...]  # pyrefly: ignore[bad-index]
+    rhs_shape = tiled_rhs_ref.shape  # pyrefly: ignore[missing-attribute]
   gm_id = pl.program_id(2)
 
   def _matmul(is_new_group: bool, is_group_changing: bool):
@@ -324,15 +392,15 @@ def tgmm_inner_kernel(
     m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
     m_start_local = m_start - m_offset
     m_end_local = m_end - m_offset
-    lhs_iota = lax.broadcasted_iota(jnp.int32, tiled_lhs_ref.shape, 0)
+    lhs_iota = lax.broadcasted_iota(jnp.int32, lhs_shape, 0)
     lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
-    lhs_masked = jnp.where(lhs_mask, tiled_lhs_ref[...], 0)
+    lhs_masked = jnp.where(lhs_mask, load_lhs(), 0)
     # If there are no NaNs, masking both lhs and rhs shouldn't be necessary.
     # But without masking both, we sometimes see the result contain NaNs so we
     # decide to mask both to be safe.
-    rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)  # pyrefly: ignore[missing-attribute]
+    rhs_iota = lax.broadcasted_iota(jnp.int32, rhs_shape, 0)
     rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
-    rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)  # pyrefly: ignore[bad-index]
+    rhs_masked = jnp.where(rhs_mask, load_rhs(), 0)
 
     acc = jax.lax.dot_general(
         lhs_masked,
@@ -417,6 +485,11 @@ class TgmmIndexMaps:
     row_start = m_start // self.cfgs.dims.size_lhs_sublane
     row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
     row_size = row_end - row_start
+    if self.cfgs.lhs_cfgs.is_3d:
+      # Block is [rows, sublane, tile_d0, 128]; K is blocked along D0 (a window
+      # block covers the full D0).
+      k_blk = 0 if _window(self.cfgs.tiles.tile_k, self.cfgs.dims.size_k) else k_id
+      return (pl.ds(row_start, row_size), 0, k_blk, 0)
     return (pl.ds(row_start, row_size), 0, k_id)
 
   def rhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
@@ -426,6 +499,9 @@ class TgmmIndexMaps:
     row_start = m_start // self.cfgs.dims.size_lhs_sublane
     row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
     row_size = row_end - row_start
+    if self.cfgs.rhs_cfgs.is_3d:
+      n_blk = 0 if _window(self.cfgs.tiles.tile_n, self.cfgs.dims.size_n) else n_id
+      return (pl.ds(row_start, row_size), 0, n_blk, 0)
     return (pl.ds(row_start, row_size), 0, n_id)
 
   def rhs_scale_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
@@ -446,14 +522,20 @@ def generate_tgmm_block_specs(
   # after this reshape has size tile_m // size_lhs_sublane — i.e., the number of
   # "sublane-rows" in a tile.
   bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane)
-  lhs_block_spec = pl.BlockSpec(
-      (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_k),
-      index_map.lhs_index_map,
-  )
-  rhs_block_spec = pl.BlockSpec(
-      (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
-      index_map.rhs_index_map,
-  )
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  sublane = cfgs.dims.size_lhs_sublane
+  if cfgs.lhs_cfgs.is_3d:
+    lhs_tile = cfgs.dims.size_k if _window(cfgs.tiles.tile_k, cfgs.dims.size_k) else cfgs.tiles.tile_k
+    lhs_block_shape = (bounded_slice_gm, sublane, lhs_tile // num_lanes, num_lanes)
+  else:
+    lhs_block_shape = (bounded_slice_gm, sublane, cfgs.tiles.tile_k)
+  lhs_block_spec = pl.BlockSpec(lhs_block_shape, index_map.lhs_index_map)
+  if cfgs.rhs_cfgs.is_3d:
+    rhs_tile = cfgs.dims.size_n if _window(cfgs.tiles.tile_n, cfgs.dims.size_n) else cfgs.tiles.tile_n
+    rhs_block_shape = (bounded_slice_gm, sublane, rhs_tile // num_lanes, num_lanes)
+  else:
+    rhs_block_shape = (bounded_slice_gm, sublane, cfgs.tiles.tile_n)
+  rhs_block_spec = pl.BlockSpec(rhs_block_shape, index_map.rhs_index_map)
   rhs_scale_block_spec = None
   if cfgs.rhs_cfgs.has_scale:
     rhs_scale_block_spec = pl.BlockSpec(
@@ -589,9 +671,10 @@ def tgmm_kernel_main(
       in_specs=in_specs,
       out_specs=out_specs,
   )
-  lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, lhs_ref.shape[-1])
+  # [M, S] -> [M // sublane, sublane, S]; 3D [M, D0, 128] -> [M // sublane, sublane, D0, 128].
+  lhs_in = lhs_ref.reshape(-1, cfgs.dims.size_lhs_sublane, *lhs_ref.shape[1:])
   rhs_value = rhs_ref.value
-  rhs_in = rhs_value.reshape(-1, cfgs.dims.size_lhs_sublane, rhs_value.shape[-1])
+  rhs_in = rhs_value.reshape(-1, cfgs.dims.size_lhs_sublane, *rhs_value.shape[1:])
   rhs_operand = OperandRef(value=rhs_in, scale=rhs_ref.scale)
   ps_in = None
   if cfgs.has_partial_sum:
@@ -645,8 +728,8 @@ def validate_tgmm_inputs(
     ],
 )
 def tgmm_v2(
-    lhs: jax.Array,  # [size_m, size_k]
-    rhs: jax.Array,  # [size_m, size_n]
+    lhs: jax.Array,  # [size_m, size_k] or [size_m, size_k // 128, 128]
+    rhs: jax.Array,  # [size_m, size_n] or [size_m, size_n // 128, 128]
     group_sizes: jax.Array,
     num_actual_groups: int,
     rhs_scale: jax.Array | None = None,  # [1, 1, size_n] (per-N scale)

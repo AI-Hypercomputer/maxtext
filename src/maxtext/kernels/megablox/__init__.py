@@ -13,4 +13,6 @@
 # limitations under the License.
 """Megablox kernel"""
 
+from maxtext.kernels.megablox.ops import collect_quantized_weight
 from maxtext.kernels.megablox.ops import gmm
+from maxtext.kernels.megablox.ops import WeightLayoutOpts

@@ -1137,6 +1137,13 @@ class MoEGeneral(BaseModel):
           " Ignored with forced, hash or random routing."
       ),
   )
+  moe_topk_before_ep_all_gather_random_routing: bool = Field(
+      False,
+      description=(
+          "Also apply moe_topk_before_ep_all_gather under use_random_routing (routes are drawn per EP"
+          " shard from the params key folded with the shard id)."
+      ),
+  )
   use_ring_of_experts: bool = Field(
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
@@ -1191,6 +1198,97 @@ class MoEGeneral(BaseModel):
   ragged_sort_use_single_sparsecore: bool = Field(
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
+  )
+  load_parameters_truncate_layers: bool = Field(
+      False,
+      description=(
+          "load_parameters_path: weights stored with a larger scanned-layer axis are loaded by taking the"
+          " leading layers (e.g. a full-depth checkpoint into a model with fewer decoder layers)."
+      ),
+  )
+  moe_tc_ragged_sort: bool = Field(
+      False,
+      description=(
+          "Ring-of-experts ragged sort/unsort on TensorCore (DMA Pallas kernels ported from lineage)"
+          " instead of the SparseCore ragged_gather / ragged_gather_reduce kernels. Requires"
+          " use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0."
+      ),
+  )
+  moe_tc_ragged_gather_block_size: int = Field(1024, description="Rows per grid step of the TC ragged gather.")
+  moe_tc_ragged_reduce_block_size: int = Field(896, description="VMEM rows per block of the TC ragged gather-reduce.")
+  moe_tc_ragged_mask_padding: bool = Field(
+      True, description="Zero TC ragged-gather buffer rows past the valid count (the kernel leaves them uninitialized)."
+  )
+  moe_tc_ragged_weights_on_activation: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort: multiply routing weights into the expert activation (buffer, mlp)"
+          " before the wo matmul instead of into the (buffer, emb) expert output before the unsort."
+      ),
+  )
+  moe_tc_ragged_weights_sort_payload: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_weights_on_activation: carry the routing weights as a payload of the expert"
+          " sort (lax.sort) instead of argsort + gathering each buffer row's weight (r20 variant; slower)."
+      ),
+  )
+  moe_tc_ragged_flatten_block_size: int = Field(
+      0,
+      description=(
+          "If > 0, relayout (N, D/128, 128) <-> (N, D) around the TC ragged kernels with a Pallas kernel over"
+          " only the valid rows (lineage ragged_flatten), this many rows per grid step. 0 uses XLA reshapes."
+      ),
+  )
+  moe_tc_ragged_3d_gmm: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort (tokamax gmm_v2): keep the sorted token buffer in the TC kernels' 3D layout"
+          " (buffer, emb // 128, 128). The wi gmm_v2 / tgmm_v2 kernels consume it and the wo gmm_v2 produces it"
+          " directly (relayout in VMEM), removing the (N, D/128, 128) <-> (N, D) relayouts around the sorted"
+          " buffer. Embed-dim GMM tiles must be multiples of 128 that divide the embed dim; tiles that are not"
+          " multiples of 1024 (e.g. 3584 / 1792) DMA whole (emb // 128, 128) slabs and relayout the window in VMEM."
+      ),
+  )
+  moe_sc_collect_weights: bool = Field(
+      False,
+      description=(
+          "Tokamax gmm_v2 with fp8 weight all-gather: run the routed-expert FSDP weight all-gather (and the weight"
+          " gradient reduce-scatter) on a SparseCore via compute_on, like lineage's collect_w_ici. The SparseCore"
+          " collective writes the row-major layout the Pallas kernels pin, avoiding the TensorCore relayout copies."
+      ),
+  )
+  moe_sc_collect_core: int = Field(1, description="SparseCore id used by moe_sc_collect_weights.")
+  moe_sc_collect_hoist: bool = Field(
+      True,
+      description=(
+          "With moe_sc_collect_weights: quantize + collect each routed weight once at the MoE shard_map entry"
+          " (shared by all num_moe_token_chunks) instead of inside every gmm call, so the chunks' weight grads are"
+          " summed before a single reduce-scatter."
+      ),
+  )
+  moe_wo_shard_mlp_on_fsdp: bool = Field(
+      False,
+      description=(
+          "Shard the routed wo kernel [E, mlp, embed] on its mlp (row) dim over FSDP instead of embed (lineage"
+          " layout: wo_kernel_axes=(exp, embed_moe, None)), so a SparseCore row-dim collect writes the row-major"
+          " layout the gmm kernels pin."
+      ),
+  )
+  moe_gmm_flat_rhs: bool = Field(
+      False,
+      description=(
+          "Tokamax gmm_v2: pass routed-expert weights to the kernel through their free 2D [E * rows, cols] bitcast"
+          " view (lineage flat_rhs) so the kernel keeps the producer's HBM tiling. The rhs row tile must divide the"
+          " per-expert rows."
+      ),
+  )
+  moe_gmm_kernel_transpose_dlhs: bool = Field(
+      False,
+      description=(
+          "Tokamax gmm_v2: the dlhs gmm (dout @ W^T) transposes weight tiles in VMEM instead of materializing"
+          " W.swapaxes(1, 2) in HBM."
+      ),
   )
   moe_use_direct_token_gather: bool = Field(
       False,

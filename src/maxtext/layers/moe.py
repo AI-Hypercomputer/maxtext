@@ -41,6 +41,9 @@ from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
+from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
+from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
+from maxtext.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.utils import max_logging
@@ -117,6 +120,8 @@ class RouteOutput:
   # Inverse of sorted_selected_experts on the ring-of-experts ragged path, so the unsort backward does not re-sort to
   # get it. Only set when moe_routing_maps is not "remat".
   topk_argsort_indices: Optional[jax.Array] = None
+  # moe_tc_ragged_sort: TcRouting shared by the TensorCore ragged sort and unsort of this chunk.
+  tc_routing: Optional[Any] = None
 
 
 def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
@@ -936,6 +941,10 @@ class RoutedMoE(nnx.Module):
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
       self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
+      if self.config.moe_wo_shard_mlp_on_fsdp:
+        # Lineage layout (see use_lineage above): FSDP on wo's mlp (row) dim, so the gathered weight
+        # is row-major without a relayout copy. Only supported without tensor parallelism.
+        self.wo_kernel_axes = ("exp", "embed_moe", None)
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # vLLM uses 'model' as the tensor parallelism axis name
@@ -1255,6 +1264,20 @@ class RoutedMoE(nnx.Module):
       return math.prod(self.mesh.shape.get(name, 1) for name in self._expert_parallelism_name)
     return self.mesh.shape.get(self._expert_parallelism_name, 1)
 
+  def _gmm_weight_layout_kwargs(self):
+    """Lineage-style routed-expert weight layout options for mblx.gmm (all default off)."""
+    cfg = self.config
+    sc_core = cfg.moe_sc_collect_core if getattr(cfg, "moe_sc_collect_weights", False) else -1
+    flat_rhs = getattr(cfg, "moe_gmm_flat_rhs", False)
+    kernel_transpose = getattr(cfg, "moe_gmm_kernel_transpose_dlhs", False)
+    if sc_core < 0 and not flat_rhs and not kernel_transpose:
+      return {}
+    return {
+        "weight_layout": mblx.WeightLayoutOpts(
+            sc_collect_core=sc_core, flat_rhs=flat_rhs, kernel_transpose_dlhs=kernel_transpose
+        )
+    }
+
   def get_tensor_parallelism_size(self):
     if isinstance(self._tensor_parallelism_name, tuple):
       size = 1
@@ -1281,8 +1304,13 @@ class RoutedMoE(nnx.Module):
       rngs=None,
       input_ids=None,
       forced_routed_experts=None,
+      random_routing_fold=None,
   ):
-    """get topk."""
+    """get topk.
+
+    random_routing_fold: if set, folded into the random-routing key (e.g. the EP shard id when
+    routing only this shard's tokens), so shards do not draw identical routes.
+    """
     # shape of top_k_weights & top_k_indices:
     # (batch, sequence, num_experts_per_tok).
     valid_token_mask = None
@@ -1304,6 +1332,8 @@ class RoutedMoE(nnx.Module):
           raise ValueError("The random key cannot be None for random routing.")
         # Reuse the 'params' RNG stream to ensure random routing
         rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
+        if random_routing_fold is not None:
+          rng = jax.random.fold_in(rng, random_routing_fold)
         top_k_weights, top_k_indices = random_routing(rng, gate_logits, self.num_experts_per_tok)
         return top_k_weights, top_k_indices
 
@@ -1559,6 +1589,8 @@ class RoutedMoE(nnx.Module):
     use_ragged_in_permute = self.config.use_ragged_sort and self.config.use_ring_of_experts
     buffer_size = None
     topk_argsort_indices = None
+    use_tc_sort = False
+    tc_routing = None
     if use_ragged_in_permute:
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
       if forced_routed_experts is not None:
@@ -1584,6 +1616,33 @@ class RoutedMoE(nnx.Module):
       else:
         buffer_size = None
 
+      use_tc_sort = (
+          getattr(self.config, "moe_tc_ragged_sort", False)
+          and buffer_size is not None
+          and buffer_size < bsz_times_seq_len * self.num_experts_per_tok
+      )
+    if use_ragged_in_permute and use_tc_sort:
+      sorted_inputs, group_size, sorted_selected_experts, tc_routing = ring_ragged_sort_tc(
+          inputs_2d,
+          topk_indices_2d,
+          self.config.num_experts,
+          self.num_experts_per_tok,
+          self._expert_parallelism_name,
+          num_expert_parallelism,
+          buffer_size,
+          gather_block_size=self.config.moe_tc_ragged_gather_block_size,
+          reduce_block_size=self.config.moe_tc_ragged_reduce_block_size,
+          mask_padding=self.config.moe_tc_ragged_mask_padding,
+          flatten_block_size=self.config.moe_tc_ragged_flatten_block_size,
+          topk_weights_local=(
+              weights
+              if self.config.moe_tc_ragged_weights_on_activation
+              and getattr(self.config, "moe_tc_ragged_weights_sort_payload", False)
+              else None
+          ),
+          keep_3d=getattr(self.config, "moe_tc_ragged_3d_gmm", False),
+      )
+    elif use_ragged_in_permute:
       tag_routing_fn = routing_tag_fn(self.config)
       sorted_inputs, group_size, sorted_selected_experts, topk_argsort_indices = ring_ragged_sort(
           inputs_2d,
@@ -1694,6 +1753,7 @@ class RoutedMoE(nnx.Module):
         has_overflow,
         max_load_ratio,
         topk_argsort_indices,
+        tc_routing,
     )
 
   def unpermute(
@@ -1706,10 +1766,23 @@ class RoutedMoE(nnx.Module):
       use_custom_sort_vjp=True,
       group_sizes=None,
       topk_argsort_indices=None,
+      tc_routing=None,
+      tc_prescaled=False,
   ):
     """Unpermute tokens to original order and combine weights."""
 
-    if self.config.use_ragged_sort and self.config.use_ring_of_experts:
+    if tc_routing is not None:
+      output = ring_ragged_unsort_tc(
+          intermediate,
+          tc_routing,
+          self.num_experts_per_tok,
+          jnp.ravel(weights).astype(jnp.float32),
+          gather_block_size=self.config.moe_tc_ragged_gather_block_size,
+          mask_padding=self.config.moe_tc_ragged_mask_padding,
+          flatten_block_size=self.config.moe_tc_ragged_flatten_block_size,
+          prescaled=tc_prescaled,
+      )
+    elif self.config.use_ragged_sort and self.config.use_ring_of_experts:
       local_num_experts = self.config.num_experts // self.get_expert_parallelism_size()
       # Build the flat routing weights in the same layout as
       # topk_argsort_revert_indices (i.e. the flat token×topk order before
@@ -2242,6 +2315,7 @@ class RoutedMoE(nnx.Module):
         weight_gather_axes,
         group_offset,
         partial_sum=None,
+        out_is_3d=False,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2334,6 +2408,8 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
+            **({"out_is_3d": True} if out_is_3d else {}),
+            **self._gmm_weight_layout_kwargs(),
         )
       else:
         # jax.lax.ragged_dot
@@ -2432,6 +2508,8 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
+        if self.config.moe_wo_shard_mlp_on_fsdp:
+          wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
       else:
         # Tell XLA to automatically gather the D dimension (e.g. for dynamic absmax scaling)
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
@@ -2457,6 +2535,23 @@ class RoutedMoE(nnx.Module):
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
     weight_gather = explicitly_weight_ag()
+    # moe_sc_collect_weights + moe_sc_collect_hoist: quantize + collect w0/w1/wo once at the shard_map
+    # entry (mblx.collect_quantized_weight) and call gmm with no weight_gather_axes, so the chunks' weight
+    # grads are summed before a single (SparseCore) reduce-scatter. Same conditions as gmm's QAG path.
+    gmm_rule = qpl.get_current_rule("gmm") if self.config.use_qwix_quantization else None
+    hoist_collect = bool(
+        self.config.moe_sc_collect_weights
+        and self.config.moe_sc_collect_hoist
+        and weight_gather
+        and self.config.use_tokamax_gmm
+        and gmm_rule is not None
+        and gmm_rule.bwd_qtype
+        and gmm_rule.weight_qtype
+    )
+    if hoist_collect and (self.config.prefuse_moe_weights or self.config.num_moe_emb_chunks > 0):
+      raise NotImplementedError("moe_sc_collect_hoist does not support prefuse_moe_weights or num_moe_emb_chunks.")
+    if self.config.moe_wo_shard_mlp_on_fsdp and self.get_tensor_parallelism_size() > 1:
+      raise NotImplementedError("moe_wo_shard_mlp_on_fsdp does not support tensor parallelism.")
     (
         batch_logical_axis,
         input_partition_pspec,
@@ -2594,7 +2689,7 @@ class RoutedMoE(nnx.Module):
           self.config.moe_topk_before_ep_all_gather
           and forced_routed_experts is None
           and not self.is_hash_routing
-          and not self.config.use_random_routing
+          and (not self.config.use_random_routing or self.config.moe_topk_before_ep_all_gather_random_routing)
       )
       if topk_before_all_gather:
         # Top-k is per token, so run it on the local tokens and all-gather only the (batch, seq, k)
@@ -2602,7 +2697,13 @@ class RoutedMoE(nnx.Module):
         # otherwise redoes top-k on the full gathered batch, and the logit gather (and its
         # reduce-scatter in the backward) moves num_experts / k times more bytes. Only the index map
         # is computed here; permute() below still sorts the gathered tokens.
-        weights, selected_experts = self.get_topk(logits, pre_bias_logits, rngs, input_ids)
+        weights, selected_experts = self.get_topk(
+            logits,
+            pre_bias_logits,
+            rngs,
+            input_ids,
+            random_routing_fold=expert_shard_id if self.config.use_random_routing else None,
+        )
         precomputed_topk = (_ep_all_gather(weights), _ep_all_gather(selected_experts))
         if self.config.load_balance_loss_weight > 0.0 and not use_megatron_seq_aux_loss:
           # Per-sequence statistic, so gathering it over EP gives the same loss as the full batch.
@@ -2629,6 +2730,7 @@ class RoutedMoE(nnx.Module):
           has_overflow,
           max_load_ratio,
           topk_argsort_indices,
+          tc_routing,
       ) = self.permute(
           x,
           logits,
@@ -2663,6 +2765,7 @@ class RoutedMoE(nnx.Module):
               required_rbf=required_rbf,
               max_load_ratio=max_load_ratio,
               topk_argsort_indices=topk_argsort_indices,
+              tc_routing=tc_routing,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -2694,6 +2797,7 @@ class RoutedMoE(nnx.Module):
           lb_loss,
           bias_updates,
           local_group_sizes,
+          _,
           _,
           _,
           _,
@@ -2836,9 +2940,10 @@ class RoutedMoE(nnx.Module):
           active.append((ax, tensor_dim_index))
       return active
 
-    def get_wi_gmm_params():
+    def get_wi_gmm_params(for_collect=False):
       wi_gather_axes = []
-      if weight_gather:
+      # With hoist_collect the weight is already collected at the shard_map entry.
+      if weight_gather and (for_collect or not hoist_collect):
         # weight_gather implies either exp or embed_moe is sharded.
         if self.config.shard_exp_on_fsdp:
           # wi [Experts, In, Hidden] -> Gather Exp(0)
@@ -2861,9 +2966,10 @@ class RoutedMoE(nnx.Module):
       )
       return wi_gather_axes, wi_tile_size
 
-    def get_wo_gmm_params():
+    def get_wo_gmm_params(for_collect=False):
       wo_gather_axes = []
-      if weight_gather:
+      # With hoist_collect the weight is already collected at the shard_map entry.
+      if weight_gather and (for_collect or not hoist_collect):
         # weight_gather implies either exp or embed_moe is sharded.
         if self.config.shard_exp_on_fsdp:
           # wo [Experts, Hidden, Out] -> Gather Exp(0)
@@ -3207,13 +3313,30 @@ class RoutedMoE(nnx.Module):
         gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
         output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
 
+      tc_prescaled = (
+          self.config.use_ring_of_experts
+          and getattr(routing, "tc_routing", None) is not None
+          and self.config.moe_tc_ragged_weights_on_activation
+      )
+      if tc_prescaled:
+        # Routing weights applied on the (buffer, mlp) activation (fuses into silu * mul), as in
+        # lineage ragged_silu_mul, instead of on the (buffer, emb) expert output before the unsort.
+        w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
       intermediate_layer = self.apply_ffn_activation(output0, output1)
+      if tc_prescaled:
+        intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
+      # moe_tc_ragged_3d_gmm: the TC sort left the token buffer in the (buffer, emb // 128, 128) layout;
+      # the wo gmm then also writes its output in that layout for the TC unsort.
+      x_is_3d = self.config.num_moe_emb_chunks <= 0 and (x.qvalue if isinstance(x, qpl.QArray) else x).ndim == 3
+      if x_is_3d and (self.get_tensor_parallelism_size() > 1 or self.config.mlp_bias):
+        raise NotImplementedError("moe_tc_ragged_3d_gmm does not support tensor parallelism or mlp_bias.")
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
+          **({"out_is_3d": True} if x_is_3d else {}),
       )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
@@ -3239,6 +3362,8 @@ class RoutedMoE(nnx.Module):
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
             group_sizes=routing.group_sizes,
             topk_argsort_indices=routing.topk_argsort_indices,
+            tc_routing=routing.tc_routing,
+            tc_prescaled=tc_prescaled,
         )
 
         # Sum up the partial outputs across the expert shards.
@@ -3371,6 +3496,13 @@ class RoutedMoE(nnx.Module):
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
       # drops fsdp -> GSPMD inserts the boundary all-gather) and reused across all
       # chunks of the ring-of-experts pipeline below.
+      if hoist_collect:
+        # Quantize + collect each routed weight once for all chunks (see hoist_collect).
+        sc_core = self.config.moe_sc_collect_core
+        wi_axes, wo_axes = get_wi_gmm_params(for_collect=True)[0], get_wo_gmm_params(for_collect=True)[0]
+        w0 = mblx.collect_quantized_weight(w0.astype(self.dtype), wi_axes, gmm_rule, sc_core)
+        w1 = mblx.collect_quantized_weight(w1.astype(self.dtype), wi_axes, gmm_rule, sc_core)
+        wo = mblx.collect_quantized_weight(wo.astype(self.dtype), wo_axes, gmm_rule, sc_core)
       override_chunks = getattr(self, "num_moe_token_chunks", None)
       n_chunks = override_chunks if override_chunks is not None else self.config.num_moe_token_chunks
       barrier_enabled = getattr(self, "moe_chunk_barrier", None)
