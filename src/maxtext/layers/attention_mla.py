@@ -674,6 +674,7 @@ class MLA(Attention):
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
+          **self._weight_all_gather_kwargs(),
       )
     else:
       # LoRA path for Q.
@@ -689,6 +690,7 @@ class MLA(Attention):
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
+          **self._weight_all_gather_kwargs(),
       )
       self.q_norm = RMSNorm(
           num_features=self.q_lora_rank,
@@ -710,6 +712,7 @@ class MLA(Attention):
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
+          **self._weight_all_gather_kwargs(),
       )
 
     # KV LoRA path.
@@ -725,6 +728,7 @@ class MLA(Attention):
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
         rngs=self.rngs,
+        **self._weight_all_gather_kwargs(),
     )
     self.kv_norm = RMSNorm(
         num_features=self.kv_lora_rank,
@@ -749,6 +753,7 @@ class MLA(Attention):
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
         rngs=self.rngs,
+        **self._weight_all_gather_kwargs(),
     )
 
     # Set softmax scaling.

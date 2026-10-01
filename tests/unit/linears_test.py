@@ -665,6 +665,71 @@ class MlpBlockTest(unittest.TestCase):
             ),
         )
 
+  def test_dense_pin_sparse_core_all_gathers(self):
+    """`dense_pin_sparse_core_all_gathers` must be a pure placement hint: same outputs and weight grads.
+
+    The flag emits the kernel unshard explicitly inside a `compute_on("tpu_sparsecore")` region (so XLA pins
+    the all-gather to a SparseCore instead of auto-offloading it onto the shared queue). It must not change the
+    MLP output or the weight gradients, and the region must only appear when the kernel is actually sharded on
+    a batch-like mesh axis (here `fsdp` = all local devices; with a single device the pin is a no-op).
+    """
+    in_features = 128
+    intermediate_dim = 256
+    batch_size = 4
+    seq_len = 8
+    num_devices = jax.device_count()
+
+    def build_and_run(pin):
+      config_arguments = {
+          "per_device_batch_size": 1.0,
+          "run_name": "test",
+          "enable_checkpointing": False,
+          "max_target_length": seq_len,
+          "dtype": "bfloat16",
+          "ici_fsdp_parallelism": num_devices,
+          "dense_pin_sparse_core_all_gathers": pin,
+      }
+      argv = [sys.argv[0], get_test_config_path()]
+      cfg = pyconfig.initialize(argv, **config_arguments)
+      devices_array = maxtext_utils.create_device_mesh(cfg)
+      mesh = jax.sharding.Mesh(devices_array, cfg.mesh_axes)
+      with mesh, nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        layer = linears.MlpBlock(
+            config=cfg,
+            mesh=mesh,
+            in_features=in_features,
+            intermediate_dim=intermediate_dim,
+            rngs=nnx.Rngs(params=0, dropout=1),
+        )
+        inputs = jax.random.uniform(jax.random.PRNGKey(1), (batch_size, seq_len, in_features), dtype=cfg.dtype)
+
+        def loss_fn(m, x):
+          return jnp.sum(m(x).astype(jnp.float32))
+
+        forward = nnx.jit(lambda m, x: m(x))
+        out = forward(layer, inputs)
+        grads = nnx.jit(nnx.grad(loss_fn))(layer, inputs)
+        hlo_text = forward.lower(layer, inputs).as_text()
+        return out, grads, hlo_text
+
+    reference, reference_grads, reference_hlo = build_and_run(pin=False)
+    pinned, pinned_grads, pinned_hlo = build_and_run(pin=True)
+
+    self.assertEqual(pinned.shape, (batch_size, seq_len, in_features))
+    np.testing.assert_array_equal(np.asarray(reference, np.float32), np.asarray(pinned, np.float32))
+    reference_flat = dict(nnx.to_flat_state(reference_grads))
+    for path, pinned_grad in nnx.to_flat_state(pinned_grads):
+      np.testing.assert_array_equal(
+          np.asarray(reference_flat[path], np.float32), np.asarray(pinned_grad, np.float32), err_msg=str(path)
+      )
+
+    self.assertNotIn("_xla_compute_type", reference_hlo)
+    if num_devices > 1:
+      # wi and wo kernels each get one pinned all-gather region.
+      self.assertEqual(pinned_hlo.count("_xla_compute_type"), 2)
+    else:
+      self.assertNotIn("_xla_compute_type", pinned_hlo)
+
 
 if __name__ == "__main__":
   unittest.main()

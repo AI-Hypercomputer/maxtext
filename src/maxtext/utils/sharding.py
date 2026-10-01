@@ -963,6 +963,11 @@ def get_formatted_sharding_annotations(params, mesh=None):
 
 FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
 
+# Mesh axes that carry the (batch, sequence) of activations rather than a tensor-parallel
+# split of the weights. A weight sharded on any of these must be all-gathered over it
+# before its matmul, so they are the axes an explicit weight unshard peels off.
+WEIGHT_GATHER_MESH_AXES = ("data", "fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert")
+
 
 def remove_mesh_axes_from_partition_spec(pspec, axes_to_remove, dims=None):
   """Return `pspec` with `axes_to_remove` stripped from the given dims.

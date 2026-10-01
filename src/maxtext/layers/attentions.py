@@ -652,6 +652,20 @@ class Attention(nnx.Module):
           self.value = self.init_kv_w(inputs_kv_shape=inputs_kv_shape)
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
+  def _weight_all_gather_kwargs(self) -> dict:
+    """DenseGeneral kwargs that pin the projection-weight all-gathers to a SparseCore.
+
+    Only non-empty with `attention_pin_sparse_core_all_gathers`; see
+    `DenseGeneral._maybe_pin_sparse_core_all_gather`.
+    """
+    if not getattr(self.config, "attention_pin_sparse_core_all_gathers", False):
+      return {}
+    return {
+        "mesh": self.mesh,
+        "pin_sparse_core_all_gather": True,
+        "all_gather_sparse_core_id": self.config.dense_all_gather_sparse_core_id,
+    }
+
   def init_query_w(self, inputs_q_shape: Tuple) -> nnx.Module:
     """Query projection initialization."""
 
@@ -695,6 +709,7 @@ class Attention(nnx.Module):
         shard_mode=self.config.shard_mode,
         block_size=block_size,
         rngs=self.rngs,
+        **self._weight_all_gather_kwargs(),
     )
 
   def query_projection(self, inputs_q: Array, out_sharding: NamedSharding | None = None) -> Array:
@@ -735,6 +750,7 @@ class Attention(nnx.Module):
         use_bias=self.use_bias_in_projections,
         block_size=block_size,
         rngs=self.rngs,
+        **self._weight_all_gather_kwargs(),
     )
 
   def kv_projection(self, inputs_kv: Array, proj_name: str, out_sharding: NamedSharding | None = None) -> nnx.Module:
@@ -833,6 +849,7 @@ class Attention(nnx.Module):
         use_bias=False if self.is_qwen2 else self.use_bias_in_projections,
         block_size=block_size,
         rngs=self.rngs,
+        **self._weight_all_gather_kwargs(),
     )
 
   def out_projection(self, out: Array, out_sharding: NamedSharding | None = None) -> Array:

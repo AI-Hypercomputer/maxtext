@@ -1249,6 +1249,13 @@ class MoEGeneral(BaseModel):
       description="When the MoE FSDP weight all-gathers are pinned, pin only the forward all-gather; its transpose"
       " (the weight-gradient reshard) runs outside compute_on, as with the pin off.",
   )
+  moe_pin_sparse_core_megablox_weight_all_gathers: bool = Field(
+      False,
+      description="Pin the forward quantized expert-weight all-gathers of the tokamax/megablox grouped matmul (QAG,"
+      " `weight_gather_axes`) to SparseCore `moe_fsdp_all_gather_sparse_core_id` via compute_on. These all-gathers"
+      " are explicit shard_map collectives that `moe_pin_sparse_core_all_gathers` does not cover; the backward"
+      " weight-gradient reduce-scatter is unchanged.",
+  )
   moe_fsdp_all_gather_sparse_core_id: int = Field(
       0,
       description="SparseCore ID to pin MoE FSDP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
@@ -1744,6 +1751,23 @@ class LayoutAndSharding(BaseModel):
   dense_fsdp_use_two_stage_all_gather: bool = Field(
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
+  )
+  dense_pin_sparse_core_all_gathers: bool = Field(
+      False,
+      description="Pin the weight all-gathers of dense MLP / shared-expert DenseGeneral kernels to the SparseCore"
+      " `dense_all_gather_sparse_core_id` via compute_on (forward and remat only; the weight-gradient"
+      " reduce-scatter is unchanged). Without the pin XLA auto-offloads these all-gathers and queues them"
+      " on a single SparseCore behind the MoE reduce-scatters.",
+  )
+  attention_pin_sparse_core_all_gathers: bool = Field(
+      False,
+      description="Same as dense_pin_sparse_core_all_gathers for the attention projection weights"
+      " (q/k/v/out and the MLA wq_a/wq_b/wkv_a/wkv_b kernels).",
+  )
+  dense_all_gather_sparse_core_id: int = Field(
+      1,
+      description="SparseCore ID used by dense_pin_sparse_core_all_gathers / attention_pin_sparse_core_all_gathers."
+      " Defaults to 1 so the pinned all-gathers run in parallel with the auto-offloaded collectives on SparseCore 0.",
   )
   internal_compile: bool = Field(
       False,

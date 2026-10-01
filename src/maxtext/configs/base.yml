@@ -314,6 +314,9 @@ moe_pin_sparse_core_all_gathers: false
 moe_pin_sparse_core_ep_all_gathers: false
 moe_pin_sparse_core_fsdp_all_gathers: false
 moe_pin_sparse_core_fsdp_all_gathers_fwd_only: false
+# Pin the forward quantized expert-weight all-gathers of the tokamax/megablox grouped matmul (QAG) to
+# `moe_fsdp_all_gather_sparse_core_id`; these explicit shard_map all-gathers are not covered by the flags above.
+moe_pin_sparse_core_megablox_weight_all_gathers: false
 moe_fsdp_all_gather_sparse_core_id: 0
 moe_ep_all_gather_sparse_core_id: 1
 # tunable tiling dimensions used for mlp gmm
@@ -800,6 +803,13 @@ shard_optimizer_over_data: false
 
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 dense_fsdp_use_two_stage_all_gather: false
+# Pin the weight all-gathers of dense MLP / shared-expert kernels (dense_*) and of the attention projection
+# kernels (attention_*) to SparseCore `dense_all_gather_sparse_core_id` with compute_on. Forward/remat only; the
+# weight-gradient reduce-scatter is unchanged. Without the pin XLA auto-offloads these all-gathers and serializes
+# them on one SparseCore behind the MoE reduce-scatters.
+dense_pin_sparse_core_all_gathers: false
+attention_pin_sparse_core_all_gathers: false
+dense_all_gather_sparse_core_id: 1
 
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,

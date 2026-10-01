@@ -2334,6 +2334,11 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
+            weight_gather_sparse_core_id=(
+                self.config.moe_fsdp_all_gather_sparse_core_id
+                if getattr(self.config, "moe_pin_sparse_core_megablox_weight_all_gathers", False)
+                else None
+            ),
         )
       else:
         # jax.lax.ragged_dot

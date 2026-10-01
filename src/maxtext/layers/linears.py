@@ -23,10 +23,13 @@ import jax
 import jax.numpy as jnp
 
 from jax import lax
+from jax.experimental.compute_on import compute_on
 from jax.sharding import NamedSharding, Mesh, PartitionSpec
 from jax.ad_checkpoint import checkpoint_name
 
 from flax import nnx
+
+import qwix.pallas as qpl
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config, Shape, is_fp8_dtype
 from maxtext.common.common_types import MODEL_MODE_PREFILL
@@ -40,6 +43,7 @@ from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
+from maxtext.utils.sharding import WEIGHT_GATHER_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
 
 
@@ -184,6 +188,8 @@ class DenseGeneral(nnx.Module):
       mesh: Mesh | None = None,
       use_two_stage_all_gather: bool = False,
       debug_sharding: bool = False,
+      pin_sparse_core_all_gather: bool = False,
+      all_gather_sparse_core_id: int = 1,
       has_scale: bool | None = None,
       kernel_scale_init: Initializer | None = None,
       scale_shape: Shape | None = None,
@@ -217,6 +223,13 @@ class DenseGeneral(nnx.Module):
         transpose XLA emits for a single combined 2-axis all-gather.
       debug_sharding: when True, log the logical/physical sharding of the
         two-stage all-gather constraints to the sharding dump files.
+      pin_sparse_core_all_gather: when True, unshard the kernel over the
+        batch-like mesh axes (`WEIGHT_GATHER_MESH_AXES`) with an explicit
+        all-gather pinned to a SparseCore via `compute_on`, instead of leaving
+        the all-gather to the SPMD partitioner (which XLA then auto-offloads
+        and serializes on a single SparseCore). Forward only: the weight
+        gradient reshard is unchanged. Requires `mesh`.
+      all_gather_sparse_core_id: SparseCore to pin the all-gather to.
       has_scale: whether to initialize a separate scale parameter (kernel_scale).
       kernel_scale_init: initializer function for kernel_scale.
       scale_shape: explicit shape for kernel_scale.
@@ -247,6 +260,8 @@ class DenseGeneral(nnx.Module):
     self.mesh = mesh
     self.use_two_stage_all_gather = use_two_stage_all_gather
     self.debug_sharding = debug_sharding
+    self.pin_sparse_core_all_gather = pin_sparse_core_all_gather
+    self.all_gather_sparse_core_id = all_gather_sparse_core_id
     self.has_scale = has_scale
     self.scale_dtype = scale_dtype
     self.block_size = block_size
@@ -391,6 +406,81 @@ class DenseGeneral(nnx.Module):
     kernel = shard(kernel, stage2)
     return kernel
 
+  def _maybe_pin_sparse_core_all_gather(self, kernel, kernel_scale):
+    """Unshard the kernel over the batch-like mesh axes with a SparseCore-pinned all-gather.
+
+    By default the kernel all-gather is implicit: the SPMD partitioner inserts it in
+    front of the dot_general and XLA auto-offloads it to a SparseCore, where all such
+    all-gathers are queued on one core behind the MoE reduce-scatters. Emitting the
+    gather explicitly inside a `compute_on("tpu_sparsecore")` region pins it to
+    `all_gather_sparse_core_id` so it can run in parallel with that queue.
+
+    The pin is forward only (also under remat): the backward of this op is the
+    plain transpose of the sharding constraint, so the weight-gradient
+    reduce-scatter is emitted exactly as without the pin.
+
+    Under qwix fp8 training with a fixed-range weight calibration, the kernel is
+    quantized to its fp8 qvalue before the gather (so 8-bit bytes move, as in the
+    implicit path) and dequantized afterwards; qwix's own requantization of the
+    dequantized kernel is exact, so forward numerics are unchanged. Other
+    calibrations gather the compute-dtype kernel.
+    """
+    if not self.pin_sparse_core_all_gather or self.mesh is None or self.use_two_stage_all_gather:
+      return kernel
+    if kernel_scale is not None:
+      # Pre-quantized (serving) weights carry a separate scale; leave them to the partitioner.
+      return kernel
+
+    full_logical = PartitionSpec(*self.kernel_axes)
+    sharded = get_physical_spec_without_axes(full_logical, self.mesh, ())
+    gathered = get_physical_spec_without_axes(full_logical, self.mesh, WEIGHT_GATHER_MESH_AXES)
+    if sharded.spec == gathered.spec:
+      # Not sharded on any batch-like axis, so there is no all-gather to pin.
+      return kernel
+
+    shard = functools.partial(maybe_shard_with_name, shard_mode=self.shard_mode, debug_sharding=self.debug_sharding)
+
+    @functools.partial(
+        compute_on,
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [self.all_gather_sparse_core_id]}},
+    )
+    def _pinned_gather(x):
+      return shard(x, gathered)
+
+    rule = qpl.get_current_rule("dot_general")
+    weight_qtype = getattr(rule, "weight_qtype", None) if rule is not None else None
+    calibration = getattr(rule, "weight_calibration_method", None) if rule is not None else None
+    quantize_before_gather = (
+        weight_qtype is not None
+        and not is_fp8_dtype(getattr(kernel, "dtype", None))
+        and isinstance(calibration, str)
+        and calibration.lower().startswith("fixed")
+    )
+
+    def _gather_fwd_value(x):
+      if not quantize_before_gather:
+        return _pinned_gather(x)
+      q = quantizations.manual_quantize(x, weight_qtype, calibration)
+      qvalue = _pinned_gather(q.qvalue)
+      return (qvalue.astype(x.dtype) * q.scale.astype(x.dtype)).astype(x.dtype)
+
+    @jax.custom_vjp
+    def _gather(x):
+      return _gather_fwd_value(x)
+
+    def _gather_vjp_fwd(x):
+      return _gather_fwd_value(x), None
+
+    def _gather_vjp_bwd(_, g):
+      # Transpose of the sharding constraint: the cotangent keeps the gathered
+      # sharding and XLA reshards it to the parameter sharding, as with the pin off.
+      return (shard(g, gathered),)
+
+    _gather.defvjp(_gather_vjp_fwd, _gather_vjp_bwd)
+    return _gather(kernel)
+
   def __call__(
       self,
       inputs: Array,
@@ -466,6 +556,7 @@ class DenseGeneral(nnx.Module):
       kernel = kernel[..., begin:end]
 
     kernel = self._maybe_two_stage_all_gather(kernel)
+    kernel = self._maybe_pin_sparse_core_all_gather(kernel, kernel_scale)
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:
@@ -701,6 +792,8 @@ class MlpBlock(nnx.Module):
           mesh=self.mesh,
           use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
           debug_sharding=self.config.debug_sharding,
+          pin_sparse_core_all_gather=self.config.dense_pin_sparse_core_all_gathers,
+          all_gather_sparse_core_id=self.config.dense_all_gather_sparse_core_id,
           block_size=block_size,
           weight_quant=weight_quant,
           rngs=rngs,
@@ -722,6 +815,8 @@ class MlpBlock(nnx.Module):
             mesh=self.mesh,
             use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
             debug_sharding=self.config.debug_sharding,
+            pin_sparse_core_all_gather=self.config.dense_pin_sparse_core_all_gathers,
+            all_gather_sparse_core_id=self.config.dense_all_gather_sparse_core_id,
             block_size=block_size,
             weight_quant=weight_quant,
             rngs=rngs,
@@ -742,6 +837,8 @@ class MlpBlock(nnx.Module):
         mesh=self.mesh,
         use_two_stage_all_gather=self.config.dense_fsdp_use_two_stage_all_gather,
         debug_sharding=self.config.debug_sharding,
+        pin_sparse_core_all_gather=self.config.dense_pin_sparse_core_all_gathers,
+        all_gather_sparse_core_id=self.config.dense_all_gather_sparse_core_id,
         block_size=block_size,
         weight_quant=weight_quant,
         rngs=rngs,

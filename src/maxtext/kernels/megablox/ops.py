@@ -20,6 +20,7 @@ import dataclasses
 import functools
 from typing import List, Literal, Tuple
 import jax
+from jax.experimental.compute_on import compute_on
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
@@ -76,8 +77,14 @@ def gmm(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    weight_gather_sparse_core_id: int | None = None,
 ):
-  """Grouped matrix multiplication operation."""
+  """Grouped matrix multiplication operation.
+
+  `weight_gather_sparse_core_id`: when set, the forward quantized weight all-gather
+  (QAG, see `_fwd_gather_weight`) is emitted inside a `compute_on("tpu_sparsecore")`
+  region pinned to that SparseCore instead of being left to XLA's auto-offload.
+  """
   if interpret is None:
     # Default to native (TPU) lowering. `jax.devices()[0]` is NOT the compile TARGET:
     # during train_compile the local backend is CPU (JAX_PLATFORMS=cpu) while the mesh
@@ -110,7 +117,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
@@ -132,6 +139,7 @@ def gmm(
       use_gmm_v2,
       use_gmm_v2_heuristic_tiling,
       partial_sum,
+      weight_gather_sparse_core_id,
   )
 
 
@@ -169,6 +177,7 @@ def _gmm_fwd(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    weight_gather_sparse_core_id: int | None = None,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -209,7 +218,7 @@ def _gmm_fwd(
       and weight_gather_axes
   ):
     # pyrefly: ignore[bad-assignment]
-    rhs = _fwd_gather_weight(rhs, weight_gather_axes)
+    rhs = _fwd_gather_weight(rhs, weight_gather_axes, weight_gather_sparse_core_id)
 
   # Backend Execution Routing
   if use_tokamax_backend and not use_gmm_v2:
@@ -290,13 +299,29 @@ def _fwd_quantize_activation_and_weight(
   return lhs, rhs
 
 
-def _fwd_gather_weight(rhs: qpl.QArray, weight_gather_axes: List[Tuple[str, int]]) -> qpl.QArray:
-  """Applies QAG (Quantization All-Gather) to RHS weights during forward pass."""
-  for axis_name, axis_idx in weight_gather_axes:
-    rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
-    # replace the qvalue with the gathered qvalue in the QArray
-    rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
-  return rhs
+def _fwd_gather_weight(
+    rhs: qpl.QArray, weight_gather_axes: List[Tuple[str, int]], sparse_core_id: int | None = None
+) -> qpl.QArray:
+  """Applies QAG (Quantization All-Gather) to RHS weights during forward pass.
+
+  With `sparse_core_id` the all-gathers run in a `compute_on("tpu_sparsecore")` region
+  pinned to that core (otherwise XLA auto-offloads them, serialized on one SparseCore).
+  The backward reduce-scatter (`_drhs_scatter_weight`) is unaffected either way.
+  """
+
+  def _gather(qvalue):
+    for axis_name, axis_idx in weight_gather_axes:
+      qvalue = jax.lax.all_gather(qvalue, axis_name, axis=axis_idx, tiled=True)
+    return qvalue
+
+  if sparse_core_id is not None:
+    _gather = compute_on(
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [sparse_core_id]}},
+    )(_gather)
+  # replace the qvalue with the gathered qvalue in the QArray
+  return dataclasses.replace(rhs, qvalue=_gather(rhs.qvalue))
 
 
 def _fwd_run_tokamax_v1(
@@ -497,6 +522,7 @@ def _gmm_bwd(
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
+    weight_gather_sparse_core_id: int | None,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -516,6 +542,9 @@ def _gmm_bwd(
     jnp.ndarray | None,
 ]:
   """Backward function for throughput GMM VJP."""
+  # The SparseCore pin only applies to the forward weight all-gather; the backward
+  # reduce-scatter (`_drhs_scatter_weight`) is left to XLA as before.
+  del weight_gather_sparse_core_id
   (
       residual_lhs,
       residual_rhs,
