@@ -338,7 +338,7 @@ class CheckpointManager:
     one would restart the optimizer from scratch. So fall back to the newest checkpoint that has
     the optimizer state, and delete the params-only steps after it: the resumed run redoes them,
     and Orbax refuses to write a step that already exists. If no checkpoint holds the optimizer
-    state, `latest_step` is returned unchanged.
+    state, `latest_step` is returned unchanged and the restore raises.
 
     Args:
       latest_step: The latest step on disk.
@@ -528,7 +528,13 @@ class CheckpointManager:
         restore_args=ocp.checkpoint_utils.construct_restore_args(target=abstract_params),
     )
 
-    if checkpoint_state.optimizer is not None and "optimizer_state" in metadata.item_metadata:
+    if checkpoint_state.optimizer is not None and "optimizer_state" not in metadata.item_metadata:
+      # Resuming training with a freshly initialized optimizer would silently change the run.
+      raise CheckpointRestoreError(
+          f"Checkpoint at step {step} has no optimizer state (saved with save_optimizer_state=False);"
+          " restore it with optimizer=None, or resume from a step that has the optimizer state."
+      )
+    if checkpoint_state.optimizer is not None:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
       # `CloudPathwaysArrayHandler.deserialize` ignores `memory_kind="pinned_host"` for physical
       # placement (allocating restored buffers in device HBM) while keeping `pinned_host` on the

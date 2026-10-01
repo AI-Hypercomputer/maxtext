@@ -176,7 +176,7 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
     # The resumed run redoes steps 3 and 4, so they must be gone for Orbax to write them again.
     self.assertEqual(sorted(os.listdir(self.ckpt_dir)), ["2"])
 
-  def test_explicit_step_restores_params_only_checkpoint(self):
+  def test_params_only_checkpoint_needs_no_optimizer_to_restore(self):
     model, optimizer = self._save_trained(steps=2)
     manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
     _train_step(model, optimizer)
@@ -185,7 +185,14 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
     manager.close()
     want_params = _leaves(nnx.state(model))
 
-    fresh_model, _, (step, _, _) = self._restore_fresh(step=3)
+    # Resuming training from it would start the optimizer over, so that fails loudly.
+    with self.assertRaisesRegex(checkpointing.CheckpointRestoreError, "no optimizer state"):
+      self._restore_fresh(step=3)
+
+    fresh_model, _ = _build(seed=123)
+    manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
+    self.addCleanup(manager.close)
+    step, _, _ = manager.restore_checkpoint(checkpointing.CheckpointState(model=fresh_model), step=3)
 
     self.assertEqual(step, 3)
     got_params = _leaves(nnx.state(fresh_model))
