@@ -14,7 +14,9 @@
 
 """Linear Layers."""
 
+import dataclasses
 import functools
+import math
 import operator
 from typing import Any, Callable, Iterable, Sequence
 
@@ -23,6 +25,7 @@ import jax
 import jax.numpy as jnp
 
 from jax import lax
+from jax.experimental.compute_on import compute_on
 from jax.sharding import NamedSharding, Mesh, PartitionSpec
 from jax.ad_checkpoint import checkpoint_name
 
@@ -41,6 +44,194 @@ from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
+from maxtext.utils.sharding import logical_to_mesh_sharding
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# FSDP DenseGeneral matmul in shard_map with an explicit weight-gradient reduce-scatter
+# (config: dense_fsdp_shard_map_dot and dense_wgrad_rs_*; see configs/types.py).
+#
+# Under GSPMD the per-layer weight gradient of an FSDP-sharded kernel that is used by batch-sharded activations is
+# partial over every data-parallel device (fsdp x expert for ep-as-dp), while the kernel is sharded over fsdp only.
+# XLA then emits a full all-reduce over all devices followed by a dynamic-slice (instead of a reduce-scatter), and
+# the all-reduce is exposed at the end of each layer's backward. Doing the matmul inside shard_map with an explicit
+# all_gather of the kernel makes the transpose a psum_scatter over the FSDP axes plus a small psum of the 1/FSDP
+# shard over the remaining data axes. The backward reduce-scatter is additionally
+#   * issued on a [num_fsdp_shards, rows_per_shard, ...] view so the scatter dimension is the major, tile-aligned
+#     dimension (XLA's TPU reduce-scatter decomposer rewrites reduce-scatters whose scatter dimension is not major,
+#     or whose shards are not tile-aligned, back into all-reduce + dynamic-slice), and
+#   * optionally pinned to one SparseCore (dense_wgrad_rs_sparse_core_id) so it does not queue behind the FSDP
+#     weight all-gather prefetch on the other SparseCore.
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+@dataclasses.dataclass
+class DenseWgradReduceScatterConfig:
+  """Settings for the shard_map FSDP dot; set once per model by `configure_dense_wgrad_reduce_scatter`."""
+
+  enabled: bool = False
+  mesh: Mesh | None = None
+  # With qwix fp8_full and a fixed weight calibration ('fixed,-a,a') the kernel shard is quantized with the same
+  # fixed scale before the all-gather, so the gather moves fp8 bytes as in the GSPMD path.
+  fp8_fixed_absmax: float | None = None
+  # Kernels with more elements keep the GSPMD path (<= 0: no limit); excludes the vocab head by default.
+  max_kernel_elems: int = 0
+  # SparseCore id the backward reduce-scatter is pinned to (compute_on); < 0 leaves the placement to XLA.
+  sparse_core_id: int = -1
+  # Reduce-scatter a [num_shards, rows_per_shard, ...] view of the cotangent so the scatter dimension is major.
+  flatten_scatter_dim: bool = True
+
+
+_DENSE_WGRAD_RS = DenseWgradReduceScatterConfig()
+
+
+def configure_dense_wgrad_reduce_scatter(config: Config, mesh: Mesh | None) -> None:
+  """Configures the FSDP shard_map dot (weight-gradient reduce-scatter) from `config` for all DenseGenerals."""
+  global _DENSE_WGRAD_RS  # pylint: disable=global-statement
+  fp8_absmax = None
+  calibration = str(getattr(config, "weight_quantization_calibration_method", "") or "")
+  if (
+      getattr(config, "use_qwix_quantization", False)
+      and getattr(config, "quantization", None) == "fp8_full"
+      and calibration.startswith("fixed")
+  ):
+    vals = [abs(float(v)) for v in calibration.split(",")[1:]]
+    if len(vals) == 1 or (len(vals) == 2 and vals[0] == vals[1]):
+      fp8_absmax = vals[-1]
+  _DENSE_WGRAD_RS = DenseWgradReduceScatterConfig(
+      enabled=bool(getattr(config, "dense_fsdp_shard_map_dot", False)),
+      mesh=mesh,
+      fp8_fixed_absmax=fp8_absmax,
+      max_kernel_elems=int(getattr(config, "dense_fsdp_shard_map_max_kernel_elems", 0)),
+      sparse_core_id=int(getattr(config, "dense_wgrad_rs_sparse_core_id", -1)),
+      flatten_scatter_dim=bool(getattr(config, "dense_wgrad_rs_flatten_scatter_dim", True)),
+  )
+
+
+def _flat_mesh_axes(spec) -> list[str]:
+  out = []
+  for dim in spec:
+    if dim is None:
+      continue
+    out.extend(dim if isinstance(dim, (tuple, list)) else (dim,))
+  return out
+
+
+def _wgrad_reduce_scatter(g, axes, dim, num_shards, sparse_core_id, flatten):
+  """psum_scatter of the gathered-kernel cotangent `g` over `axes` on `dim` (tiled), i.e. the all_gather transpose.
+
+  With `flatten` the scatter dimension is moved to the front and split into [num_shards, rows_per_shard], so the
+  scattered dimension is the major dimension (and tile-aligned) and XLA keeps the collective a reduce-scatter.
+  With `sparse_core_id >= 0` the collective is pinned to that SparseCore.
+  """
+  axis_name = axes if len(axes) > 1 else axes[0]
+  scatter_dimension = 0 if flatten else dim
+
+  def _rs(z):
+    return jax.lax.psum_scatter(z, axis_name, scatter_dimension=scatter_dimension, tiled=True)
+
+  if sparse_core_id >= 0:
+    # compute_on traces its body like a jit, so the collective's static arguments are closed over above.
+    _rs = compute_on(
+        compute_type="tpu_sparsecore",
+        out_memory_spaces=jax.memory.Space.Device,
+        compiler_options={"sparse_core_config": {"core_ids": [sparse_core_id]}},
+    )(_rs)
+
+  if not flatten:
+    return _rs(g)
+  # [.., S*r, ..] -> [S, r, ..]: the scattered dimension becomes a leading dimension of its own, so each
+  # device's shard [1, r, ..] is a whole number of (8,128) tiles (a 2-D [S, -1] view would scatter inside a
+  # tile, which XLA also decomposes into all-reduce + dynamic-slice).
+  g = jnp.moveaxis(g, dim, 0)
+  shard_shape = (g.shape[0] // num_shards,) + g.shape[1:]
+  out = _rs(g.reshape((num_shards,) + shard_shape))
+  return jnp.moveaxis(out.reshape(shard_shape), 0, dim)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5, 6))
+def _fsdp_all_gather(w, axes, dim, fp8_absmax, num_shards, sparse_core_id, flatten):
+  """Tiled all_gather of the kernel shard `w` over `axes` on `dim`; the backward is `_wgrad_reduce_scatter`.
+
+  With `fp8_absmax` the shard is quantized to fp8 (fixed per-tensor scale) before the gather and dequantized after
+  it; with a power-of-two scale the dequantized values are exactly the ones qwix re-quantizes with the same fixed
+  calibration, so the fp8 matmul operands are unchanged (the backward is a straight-through psum_scatter).
+  """
+  del num_shards, sparse_core_id, flatten
+  axis_name = axes if len(axes) > 1 else axes[0]
+  if fp8_absmax is None:
+    return jax.lax.all_gather(w, axis_name, axis=dim, tiled=True)
+  fmax = float(jnp.finfo(jnp.float8_e4m3fn).max)
+  scale = jnp.asarray(fp8_absmax / fmax, w.dtype)
+  q = jnp.clip(w / scale, -fmax, fmax).astype(jnp.float8_e4m3fn)
+  q = jax.lax.all_gather(q, axis_name, axis=dim, tiled=True)
+  return q.astype(w.dtype) * scale
+
+
+def _fsdp_all_gather_fwd(w, axes, dim, fp8_absmax, num_shards, sparse_core_id, flatten):
+  return _fsdp_all_gather(w, axes, dim, fp8_absmax, num_shards, sparse_core_id, flatten), None
+
+
+def _fsdp_all_gather_bwd(axes, dim, fp8_absmax, num_shards, sparse_core_id, flatten, _, g):
+  del fp8_absmax
+  return (_wgrad_reduce_scatter(g, axes, dim, num_shards, sparse_core_id, flatten),)
+
+
+_fsdp_all_gather.defvjp(_fsdp_all_gather_fwd, _fsdp_all_gather_bwd)
+
+
+def _fsdp_shard_map_dot(inputs, kernel, kernel_axes, norm_axis, matmul_precision, settings):
+  """`inputs @ kernel` inside shard_map with an explicit FSDP all-gather of the kernel.
+
+  Returns None when the layout is not supported (the caller then uses the GSPMD path): the kernel must be sharded on
+  exactly one dimension, the activations only on their leading (batch/sequence) dimensions, and the kernel's mesh
+  axes must be a subset of the activation's.
+  """
+  mesh = settings.mesh
+  k_spec = tuple(logical_to_mesh_sharding(PartitionSpec(*kernel_axes), mesh).spec)
+  k_spec = k_spec + (None,) * (kernel.ndim - len(k_spec))
+  sharded = [(i, d) for i, d in enumerate(k_spec) if d is not None]
+  if len(sharded) != 1:
+    return None
+  gdim, gaxes = sharded[0]
+  gaxes = tuple(gaxes) if isinstance(gaxes, (tuple, list)) else (gaxes,)
+  num_shards = math.prod(mesh.shape[a] for a in gaxes)
+  if kernel.shape[gdim] % num_shards:
+    return None
+  n_batch = inputs.ndim - len(norm_axis)
+  if n_batch < 1 or tuple(norm_axis) != tuple(range(n_batch, inputs.ndim)):
+    return None
+  logical_x = ("activation_batch", "activation_norm_length")[: min(n_batch, 2)]
+  logical_x = logical_x + (None,) * (inputs.ndim - len(logical_x))
+  x_spec = tuple(logical_to_mesh_sharding(PartitionSpec(*logical_x), mesh).spec)
+  x_spec = x_spec + (None,) * (inputs.ndim - len(x_spec))
+  if any(d is not None for d in x_spec[n_batch:]):
+    return None
+  x_axes = set(_flat_mesh_axes(x_spec))
+  k_axes = set(gaxes)
+  if not k_axes or not k_axes <= x_axes:
+    return None
+  for size, d in zip(inputs.shape, x_spec):
+    if size % math.prod(mesh.shape[a] for a in _flat_mesh_axes((d,))):
+      return None
+  # Data axes the kernel is replicated over: marking the kernel varying over them before the gather makes the
+  # transpose a psum_scatter over `gaxes` first and then a psum of the small 1/FSDP shard over `vary`.
+  vary = tuple(a for a in mesh.axis_names if a in x_axes and a not in k_axes)
+  out_spec = PartitionSpec(*(x_spec[:n_batch] + (None,) * (kernel.ndim - len(norm_axis))))
+  contract = (tuple(range(n_batch, inputs.ndim)), tuple(range(len(norm_axis))))
+  precision = lax.Precision(matmul_precision)
+  fp8_absmax = settings.fp8_fixed_absmax
+  sparse_core_id, flatten = settings.sparse_core_id, settings.flatten_scatter_dim
+
+  def _body(x, w):
+    if vary:
+      w = jax.lax.pcast(w, axis_name=vary, to="varying")
+    w = _fsdp_all_gather(w, gaxes, gdim, fp8_absmax, num_shards, sparse_core_id, flatten)
+    return lax.dot_general(x, w, (contract, ((), ())), precision=precision)
+
+  return jax.shard_map(_body, mesh=mesh, in_specs=(PartitionSpec(*x_spec), PartitionSpec(*k_spec)), out_specs=out_spec)(
+      inputs, kernel
+  )
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
@@ -464,6 +655,30 @@ class DenseGeneral(nnx.Module):
       if not 0 <= begin < end <= kernel.shape[-1]:
         raise ValueError(f"slice_bounds {slice_bounds} must be valid and within [0, {kernel.shape[-1]}]")
       kernel = kernel[..., begin:end]
+
+    if (
+        _DENSE_WGRAD_RS.enabled
+        and not _initializing
+        and slice_bounds is None
+        and self.quant is None
+        and kernel_scale is None
+        and self.shard_mode == ShardMode.AUTO
+        and self.kernel_axes
+        and not self.parameter_memory_host_offload
+        and isinstance(kernel, jax.Array)
+        and not is_fp8_dtype(kernel.dtype)
+        and len(self.kernel_axes) == kernel.ndim
+        and (self.mesh is not None or _DENSE_WGRAD_RS.mesh is not None)
+        and (_DENSE_WGRAD_RS.max_kernel_elems <= 0 or kernel.size <= _DENSE_WGRAD_RS.max_kernel_elems)
+    ):
+      settings = _DENSE_WGRAD_RS
+      if self.mesh is not None and self.mesh is not settings.mesh:
+        settings = dataclasses.replace(settings, mesh=self.mesh)
+      output = _fsdp_shard_map_dot(inputs, kernel, self.kernel_axes, norm_axis, self.matmul_precision, settings)
+      if output is not None:
+        if self.bias is not None:
+          output += jnp.asarray(self.bias[...], self.dtype)
+        return output
 
     kernel = self._maybe_two_stage_all_gather(kernel)
 

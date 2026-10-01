@@ -1745,6 +1745,33 @@ class LayoutAndSharding(BaseModel):
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
   )
+  dense_fsdp_shard_map_dot: bool = Field(
+      False,
+      description="Compute FSDP-sharded DenseGeneral matmuls (attention projections, dense/shared-expert MLP) inside"
+      " shard_map with an explicit kernel all-gather, so each per-layer weight gradient is a reduce-scatter over the"
+      " FSDP axes plus a small all-reduce of the 1/FSDP shard over the remaining data axes, instead of the full"
+      " all-reduce over every data-parallel device + dynamic-slice that XLA emits for the GSPMD dot. With qwix"
+      " fp8_full and a fixed weight calibration the gather stays fp8. Forward math is unchanged; the backward absmax"
+      " calibration of the weight-gradient cotangent becomes per device shard.",
+  )
+  dense_fsdp_shard_map_max_kernel_elems: int = Field(
+      134217728,
+      description="dense_fsdp_shard_map_dot only applies to kernels with at most this many elements (<= 0: no limit)."
+      " The default keeps the vocab-sized output head on the GSPMD path (its gathered bf16 kernel is ~1.85 GB).",
+  )
+  dense_wgrad_rs_sparse_core_id: int = Field(
+      -1,
+      description="With dense_fsdp_shard_map_dot, pin the weight-gradient reduce-scatter to this SparseCore via"
+      " compute_on (e.g. 1, away from the FSDP weight all-gather prefetch on moe_fsdp_all_gather_sparse_core_id)."
+      " -1 leaves the placement to XLA.",
+  )
+  dense_wgrad_rs_flatten_scatter_dim: bool = Field(
+      True,
+      description="With dense_fsdp_shard_map_dot, issue the weight-gradient reduce-scatter on a"
+      " [num_fsdp_shards, rows_per_shard, ...] view of the cotangent so the scatter dimension is the major,"
+      " tile-aligned dimension; otherwise XLA's TPU reduce-scatter decomposer rewrites reduce-scatters on a minor"
+      " dimension (e.g. [7168, 576]{0,1}) back into an all-reduce + dynamic-slice.",
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",

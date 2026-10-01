@@ -801,6 +801,16 @@ shard_optimizer_over_data: false
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 dense_fsdp_use_two_stage_all_gather: false
 
+# FSDP DenseGeneral matmuls (attention projections, dense / shared-expert MLP) inside shard_map with an explicit kernel
+# all-gather, so the per-layer weight gradient is a reduce-scatter over fsdp (+ a small all-reduce over the other data
+# axes) instead of a full all-reduce over all devices + dynamic-slice. The reduce-scatter is issued on a
+# [num_fsdp_shards, rows_per_shard, ...] view (scatter dim major, so XLA keeps it a reduce-scatter) and can be pinned
+# to a SparseCore.
+dense_fsdp_shard_map_dot: false
+dense_fsdp_shard_map_max_kernel_elems: 134217728 # kernels above this size (the vocab head) keep the GSPMD path
+dense_wgrad_rs_sparse_core_id: -1 # SparseCore id for the weight-gradient reduce-scatter; -1 = XLA default
+dense_wgrad_rs_flatten_scatter_dim: true
+
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.

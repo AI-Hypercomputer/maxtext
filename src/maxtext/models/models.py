@@ -28,6 +28,7 @@ from flax import nnx
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
+from maxtext.layers import linears
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder
@@ -123,6 +124,8 @@ class Transformer(nnx.Module):
 
     cfg = self.config
     mesh = self.mesh
+    # FSDP DenseGeneral weight-gradient reduce-scatter (dense_fsdp_shard_map_dot); a no-op when disabled.
+    linears.configure_dense_wgrad_reduce_scatter(cfg, mesh)
     self.token_embedder = Embed(
         mesh=self.mesh,
         num_embeddings=cfg.vocab_size,
