@@ -17,7 +17,9 @@
 import collections
 from collections.abc import Mapping
 import dataclasses
+import math
 import os
+import threading
 import time
 from typing import Any, List
 import zlib
@@ -52,6 +54,9 @@ class CheckpointState:
 _PERSISTENCE = "persistence"
 _COLOCATED_PYTHON = "colocated_python"
 _PATHWAYS_CHECKPOINTING_IMPLS = (_PERSISTENCE, _COLOCATED_PYTHON)
+
+# Default per-host sidecar SHM dispatch budget (8 GB), updated from config in CheckpointManager.__init__.
+_COLOCATED_DISPATCH_MAX_BYTES: int = 8 * 10**9
 
 # Which impl this process registered, or None if registration has not succeeded yet. Orbax
 # registers type handlers process-globally, so this doubles as the conflict detector.
@@ -167,17 +172,43 @@ def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
 
     # pylint: enable=g-import-not-at-top,import-outside-toplevel
 
+    register_kwargs: dict[str, Any] = {
+        "use_single_replica_array_handler": False,
+        # Preserve array metadata store required for pytrees with typed PRNG keys.
+        "array_metadata_store": array_metadata_store_lib.Store(),
+    }
     if impl_name == _COLOCATED_PYTHON:
       impl = ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON
+      from orbax.checkpoint._src.serialization import types as serialization_types  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+      priority_mod = getattr(ocp_pathways, "TransferPriority", None) or getattr(
+          serialization_types, "TransferPriority", None
+      )
+      target_priority = getattr(priority_mod, "ASYNCHRONOUS_DEPRIORITIZED", "ASYNCHRONOUS_DEPRIORITIZED")
+      cb_base = getattr(ocp_pathways, "SerializationCallback", object)
+
+      class _DeprioritizedCallback(cb_base):  # type: ignore[misc,valid-type]
+        def key_priority(self, _) -> Any:
+          return target_priority
+
+        def on_transfer_start(self, *args: Any, **kwargs: Any) -> None:
+          pass
+
+        def on_transfer_end(self, *args: Any, **kwargs: Any) -> None:
+          pass
+
+        def on_commit_start(self, *args: Any, **kwargs: Any) -> None:
+          pass
+
+        def on_commit_end(self, *args: Any, **kwargs: Any) -> None:
+          pass
+
+      register_kwargs["callback"] = _DeprioritizedCallback()
     else:
       impl = ocp_pathways.CheckpointingImpl.PERSISTENCE
 
-    ocp_pathways.register_type_handlers(
-        use_single_replica_array_handler=False,
-        checkpointing_impl=impl,
-        # Preserve array metadata store required for pytrees with typed PRNG keys.
-        array_metadata_store=array_metadata_store_lib.Store(),
-    )
+    register_kwargs["checkpointing_impl"] = impl
+    ocp_pathways.register_type_handlers(**register_kwargs)
 
     handler = type_handler_registry.get_type_handler(jax.Array)
     handler_name = type(handler).__name__
@@ -209,6 +240,9 @@ def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
         "memory at 397B scale; aborting before the first save rather than OOM-ing mid-run."
     )
 
+  if impl_name == _COLOCATED_PYTHON:
+    _configure_colocated_python_handler(handler)
+
   store = getattr(handler, "_array_metadata_store", None)
   if store is None:
     logging.error(
@@ -227,6 +261,122 @@ def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
   # Latch only on success, so a failed attempt re-raises on the next construction
   # instead of being swallowed by the early return above.
   _REGISTERED_IMPL = impl_name
+
+
+def _normalize_colocated_cpu_shardings() -> None:
+  """Strips `pinned_host` memory kind when mapping shardings to sidecar CPU devices."""
+  try:
+    from orbax.checkpoint._src.multihost import colocated_transport  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  except (ImportError, AttributeError):
+    return
+  if getattr(colocated_transport, "_maxtext_Normalized", False):
+    return
+
+  def _cpu_sharding_without_memory_kind(sharding: jax.sharding.Sharding) -> jax.sharding.Sharding:
+    if isinstance(sharding, jax.sharding.SingleDeviceSharding):
+      cpu_devices = colocated_transport.cp.colocated_cpu_devices(list(sharding.device_set))
+      return jax.sharding.SingleDeviceSharding(cpu_devices[0])
+    if isinstance(sharding, jax.sharding.NamedSharding):
+      return jax.sharding.NamedSharding(colocated_transport.colocated_cpu_mesh(sharding.mesh), sharding.spec)
+    raise TypeError(f"Sharding type {type(sharding)} not supported in to_colocated_python.")
+
+  def _normalize_single_device_sharding_without_memory_kind(
+      sharding: jax.sharding.SingleDeviceSharding,
+  ) -> jax.sharding.SingleDeviceSharding:
+    device = next(iter(sharding.device_set))
+    if colocated_transport._device_platform(device) == "cpu":
+      return jax.sharding.SingleDeviceSharding(device)
+    return jax.sharding.SingleDeviceSharding(colocated_transport._to_serializable_cpu_device(device))
+
+  colocated_transport.colocated_cpu_sharding = _cpu_sharding_without_memory_kind
+  colocated_transport._normalize_single_device_sharding_to_colocated_cpu = (
+      _normalize_single_device_sharding_without_memory_kind
+  )
+  colocated_transport._maxtext_Normalized = True
+
+
+def _est_host_bytes(spec: Any) -> int:
+  """Estimates per-host bytes for an array spec, handling extended dtypes like key<fry>."""
+  try:
+    itemsize = int(jnp.dtype(spec.dtype).itemsize)
+  except Exception:  # pylint: disable=broad-except
+    try:
+      itemsize = int(getattr(spec.dtype, "itemsize", 8) or 8)
+    except Exception:  # pylint: disable=broad-except
+      itemsize = 8
+  if itemsize <= 0:
+    itemsize = 8
+  shd = getattr(spec, "sharding", None)
+  if shd is not None and hasattr(shd, "shard_shape"):
+    try:
+      devs_per_host = min(4, len(getattr(shd, "device_set", ()) or (1,)))
+      return devs_per_host * int(math.prod(shd.shard_shape(spec.shape))) * itemsize
+    except Exception:  # pylint: disable=broad-except
+      pass
+  return int(math.prod(spec.shape)) * itemsize
+
+
+def _configure_colocated_python_handler(handler: Any, *, d2h_concurrent_gb: float | None = None) -> None:
+  """Configures colocated Python handler with sharding normalization and serialized batched dispatch."""
+  global _COLOCATED_DISPATCH_MAX_BYTES
+  if d2h_concurrent_gb is not None and d2h_concurrent_gb > 0:
+    _COLOCATED_DISPATCH_MAX_BYTES = int(d2h_concurrent_gb * 10**9)
+  _normalize_colocated_cpu_shardings()
+  dispatcher = getattr(handler, "_dispatcher", None)
+  if dispatcher is None or getattr(dispatcher, "_maxtext_wrapped", False):
+    return
+  lock = threading.Lock()
+  orig_dispatch = dispatcher.dispatch
+
+  def _run_dispatch(func: Any, input_arrays: Any, specs: Any, func_args: Any, kw: Any) -> Any:
+    res = orig_dispatch(func, input_arrays=input_arrays, result_specs=specs, func_args=func_args, func_kwargs=kw)
+    try:
+      jax.block_until_ready(res)
+    except Exception:  # pylint: disable=broad-except
+      pass
+    return res
+
+  def locked_dispatch(
+      func: Any,
+      *,
+      input_arrays: Any = None,
+      result_specs: Any = None,
+      func_args: Any = (),
+      func_kwargs: Any = None,
+  ) -> Any:
+    with lock:
+      if (
+          getattr(func, "__name__", "") == "_sync_deserialize_arrays"
+          and isinstance(result_specs, (list, tuple))
+          and len(result_specs) > 1
+          and func_kwargs is not None
+          and "infos" in func_kwargs
+          and "args" in func_kwargs
+          and "shardings" in func_kwargs
+      ):
+        out, b_infos, b_args, b_shardings, b_specs = [], [], [], [], []
+        b_bytes = 0
+        for info, arg, shd, spec in zip(
+            func_kwargs["infos"], func_kwargs["args"], func_kwargs["shardings"], result_specs
+        ):
+          arr_bytes = _est_host_bytes(spec)
+          if b_specs and b_bytes + arr_bytes >= _COLOCATED_DISPATCH_MAX_BYTES:
+            kw = {**func_kwargs, "infos": b_infos, "args": b_args, "shardings": b_shardings}
+            out.extend(_run_dispatch(func, input_arrays, b_specs, func_args, kw))
+            b_infos, b_args, b_shardings, b_specs, b_bytes = [], [], [], [], 0
+          b_infos.append(info)
+          b_args.append(arg)
+          b_shardings.append(shd)
+          b_specs.append(spec)
+          b_bytes += arr_bytes
+        if b_specs:
+          kw = {**func_kwargs, "infos": b_infos, "args": b_args, "shardings": b_shardings}
+          out.extend(_run_dispatch(func, input_arrays, b_specs, func_args, kw))
+        return out
+      return _run_dispatch(func, input_arrays, result_specs, func_args, func_kwargs)
+
+  dispatcher.dispatch = locked_dispatch
+  dispatcher._maxtext_wrapped = True
 
 
 def _assert_uniform_device_set(tree: Any, *, item: str) -> None:
@@ -296,7 +446,12 @@ class CheckpointManager:
             "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
             f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r}."
         )
-      _maybe_register_pathways_persistence(getattr(config, "pathways_checkpointing_impl", _PERSISTENCE))
+      impl = getattr(config, "pathways_checkpointing_impl", _PERSISTENCE)
+      _maybe_register_pathways_persistence(impl)
+      if impl == _COLOCATED_PYTHON:
+        _configure_colocated_python_handler(
+            None, d2h_concurrent_gb=getattr(config, "checkpoint_storage_device_host_concurrent_gb", None)
+        )
 
       # Use configured array format (e.g. use_ocdbt=False for Pathways).
       # Build a fresh handler per item as Orbax handlers carry per-item state.

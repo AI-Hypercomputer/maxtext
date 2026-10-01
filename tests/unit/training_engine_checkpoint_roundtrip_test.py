@@ -252,6 +252,92 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
     for name, want in want_params.items():
       np.testing.assert_array_equal(got_params[name], want, err_msg=name)
 
+  def test_maybe_register_colocated_python_passes_deprioritized_callback(self):
+    self.addCleanup(os.environ.pop, "ENABLE_PATHWAYS_PERSISTENCE", None)
+    os.environ["ENABLE_PATHWAYS_PERSISTENCE"] = "1"
+    checkpointing._REGISTERED_IMPL = None
+    self.addCleanup(setattr, checkpointing, "_REGISTERED_IMPL", None)
+    mock_handler = mock.MagicMock()
+    mock_handler.has_dispatcher.return_value = True
+    type(mock_handler).__name__ = "ArrayHandler"
+
+    import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=g-import-not-at-top
+    from orbax.checkpoint._src.serialization import type_handler_registry  # pylint: disable=g-import-not-at-top
+    from orbax.checkpoint._src.serialization import types as serialization_types  # pylint: disable=g-import-not-at-top
+
+    with (
+        mock.patch.object(ocp_pathways, "register_type_handlers") as mock_reg,
+        mock.patch.object(type_handler_registry, "get_type_handler", return_value=mock_handler),
+    ):
+      checkpointing._maybe_register_pathways_persistence("colocated_python")
+      mock_reg.assert_called_once()
+      call_kwargs = mock_reg.call_args.kwargs
+      self.assertIn("callback", call_kwargs)
+      cb = call_kwargs["callback"]
+      self.assertEqual(
+          cb.key_priority("any_param"),
+          serialization_types.TransferPriority.ASYNCHRONOUS_DEPRIORITIZED,
+      )
+      self.assertTrue(hasattr(cb, "on_transfer_end"))
+
+  def test_colocated_transport_sharding_normalizer_strips_pinned_host(self):
+    mock_ct = mock.MagicMock()
+    mock_ct._maxtext_Normalized = False
+    mock_ct._device_platform.return_value = "tpu"
+    mock_ct._to_serializable_cpu_device.side_effect = lambda d: d
+    mock_ct.cp.colocated_cpu_devices.side_effect = lambda devs: devs
+    mock_ct.colocated_cpu_mesh.side_effect = lambda m: m
+
+    import orbax.checkpoint._src.multihost as ocp_multihost  # pylint: disable=g-import-not-at-top
+
+    with mock.patch.object(ocp_multihost, "colocated_transport", mock_ct):
+      checkpointing._normalize_colocated_cpu_shardings()
+      self.assertTrue(mock_ct._maxtext_Normalized)
+
+      dev = jax.devices()[0]
+      sds_pinned = jax.sharding.SingleDeviceSharding(dev).with_memory_kind("pinned_host")
+      self.assertEqual(sds_pinned.memory_kind, "pinned_host")
+      norm_sds = mock_ct._normalize_single_device_sharding_to_colocated_cpu(sds_pinned)
+      self.assertEqual(norm_sds.memory_kind, "device")
+
+      mesh = jax.sharding.Mesh(np.array([dev]), ("data",))
+      named_pinned = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()).with_memory_kind("pinned_host")
+      norm_named = mock_ct.colocated_cpu_sharding(named_pinned)
+      self.assertEqual(norm_named.memory_kind, "device")
+
+  def test_wrapped_dispatcher_batches_sync_deserialize_arrays_including_prng_key(self):
+    dispatcher = mock.MagicMock()
+    dispatcher._maxtext_wrapped = False
+    dispatches = []
+
+    def fake_dispatch(func, *, input_arrays=None, result_specs=None, func_args=(), func_kwargs=None):
+      dispatches.append((func, list(result_specs), func_kwargs))
+      return [f"out_{i}" for i in range(len(result_specs))]
+
+    dispatcher.dispatch = fake_dispatch
+    dummy_handler = SimpleNamespace(_dispatcher=dispatcher)
+
+    # 1000 bytes budget: 800-byte float32 + 800-byte key<fry> + 200-byte float32 -> 3 batches
+    self.addCleanup(setattr, checkpointing, "_COLOCATED_DISPATCH_MAX_BYTES", 8 * 10**9)
+    checkpointing._configure_colocated_python_handler(dummy_handler, d2h_concurrent_gb=1e-6)
+    self.assertTrue(dispatcher._maxtext_wrapped)
+
+    def _sync_deserialize_arrays():
+      pass
+
+    specs = [
+        jax.ShapeDtypeStruct((200,), jnp.float32),  # 800 bytes
+        jax.ShapeDtypeStruct((100,), jax.random.key(0).dtype),  # 800 bytes (key<fry>)
+        jax.ShapeDtypeStruct((50,), jnp.float32),  # 200 bytes
+    ]
+    kwargs = {"infos": [1, 2, 3], "args": [4, 5, 6], "shardings": [None, None, None]}
+    res = dispatcher.dispatch(_sync_deserialize_arrays, result_specs=specs, func_kwargs=kwargs)
+    self.assertEqual(res, ["out_0", "out_0", "out_0"])
+    self.assertEqual(len(dispatches), 3)
+    self.assertEqual(len(dispatches[0][1]), 1)
+    self.assertEqual(len(dispatches[1][1]), 1)
+    self.assertEqual(len(dispatches[2][1]), 1)
+
 
 if __name__ == "__main__":
   unittest.main()
