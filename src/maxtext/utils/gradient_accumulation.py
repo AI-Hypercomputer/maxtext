@@ -243,7 +243,7 @@ def gradient_accumulation_loss_and_grad(
   # above), not their sum, so the logged learning/{moe_lb,indexer,mtp}_loss match GA=1.
   for key in ("moe_lb_loss", "indexer_loss", "mtp_loss"):
     if key in aux:
-      aux[key] = aux[key] / config.gradient_accumulation_steps
+      aux[key] = aux[key] / num_microbatches
   if getattr(config, "routed_bias", False) and getattr(config, "routed_bias_update_rate", 0.0) > 0.0:
     # RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1;
     # convert the counts summed across microbatches into a single full-batch sign() update.
