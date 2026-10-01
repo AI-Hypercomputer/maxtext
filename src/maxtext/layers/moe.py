@@ -841,26 +841,19 @@ def _scheduling_group_call(group_id: int, fn):
   annotation survives the default `xla_tpu_aggressive_opt_barrier_removal` setting and it adds no
   copies or extra buffers: it only constrains the instruction order.
 
-  The tagged call (`xla_metadata_call2`) is only ever traced as a primal computation: it sits in the
-  forward of a `jax.custom_vjp` whose backward re-runs `jax.vjp` on the *untagged* function. This keeps
-  the backward ops untagged (backward schedule unchanged) and avoids transposing the call primitive,
-  which under the decoder layer's remat currently fails (rematerialized primal outputs end up on the
-  same equation that consumes tangents and are treated as cotangent accumulators). The values `fn`
-  closes over (routing weights/indices, ...) are hoisted into explicit inputs so that they get their
-  gradients too. The custom-VJP residuals are just the inputs (sorted tokens, expert weights,
-  routing); with the default `mlpwo`/`moe_mlpwo: remat` policy (required by the config validator) the
-  backward recomputes the chunk's GMMs exactly as without the flag, so HBM use is unchanged.
+  The ops are tagged with the context form of `set_xla_metadata` (per-op frontend attribute;
+  `xla_metadata_call2` puts the attribute on a `call` that XLA's CallInliner drops). To keep the tag off
+  the backward pass -- the context is replayed on transposed/rematerialized ops, which produces
+  annotation groups with gaps that XLA rejects -- the tagged forward sits in a `jax.custom_vjp` whose
+  backward runs `jax.vjp` on the untagged function. The values `fn` closes over (routing weights/indices,
+  ...) are hoisted into explicit inputs (`jax.closure_convert` leaves integer tracers in the closure) so
+  that the backward does not capture tracers and they get their gradients. The custom-VJP residuals are
+  just the inputs (sorted tokens, expert weights, routing); with the default `mlpwo`/`moe_mlpwo: remat`
+  policy (required by the config validator) the backward recomputes the chunk's GMMs exactly as without
+  the flag, so HBM use is unchanged.
   """
-  call2 = getattr(xla_metadata, "xla_metadata_call2", None)
-  if call2 is None:
-    raise NotImplementedError(
-        "moe_combine_rs_chunk_overlap needs jax.experimental.xla_metadata.xla_metadata_call2 (newer JAX)."
-    )
 
   def apply(*args):
-    # Hoist everything `fn` closes over (routing weights/indices, masks, ...) into explicit inputs: the
-    # custom-VJP backward is traced outside the enclosing shard_map trace, so it must not capture its
-    # tracers. (`jax.closure_convert` leaves integer-typed tracers in the closure, hence make_jaxpr.)
     flat_args, in_tree = jax.tree_util.tree_flatten(args)
     out_tree = []
 
@@ -875,14 +868,18 @@ def _scheduling_group_call(group_id: int, fn):
     def pure_fn(consts, flat):
       return jax.tree_util.tree_unflatten(out_tree[0], jax.core.eval_jaxpr(jaxpr, consts, *flat))
 
-    grouped = call2(pure_fn, {"_scheduling_group_id": group_id}, ad_metadata="drop")
+    def tagged_fn(consts, flat):
+      # Re-binding the (untagged) jaxpr under the context tags every op of the chunk; the custom_vjp
+      # forward must not close over `fn`'s captured tracers, hence the hoisted jaxpr here as well.
+      with set_xla_metadata(_scheduling_group_id=group_id):
+        return pure_fn(consts, flat)
 
     @jax.custom_vjp
     def run(consts, flat):
-      return grouped(consts, flat)
+      return tagged_fn(consts, flat)
 
     def _fwd(consts, flat):
-      return grouped(consts, flat), (consts, flat)
+      return tagged_fn(consts, flat), (consts, flat)
 
     def _bwd(res, cts):
       leaves, treedef = jax.tree_util.tree_flatten(res)
