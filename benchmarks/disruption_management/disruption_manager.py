@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ from benchmarks.disruption_management.disruption_handler import PATHWAYS_WORKER_
 from benchmarks.disruption_management.disruption_handler import TriggerType
 from benchmarks.disruption_management.monitor import create_monitor
 from benchmarks.disruption_management.monitor import Monitor
-from benchmarks.xpk_configs import XpkClusterConfig
+from benchmarks.ctk_configs import ClusterConfig
 
 
 class DisruptionManager:
@@ -51,7 +51,7 @@ class DisruptionManager:
   def add_workload(
       self,
       workload_name: str,
-      cluster_config: XpkClusterConfig,
+      cluster_config: ClusterConfig,
       disruption_configs: list[DisruptionConfig],
   ) -> None:
     """Adds a workload and starts monitoring for disruptions & recovery.
@@ -116,7 +116,7 @@ class DisruptionManager:
   def _monitor_and_disrupt_workload(
       self,
       workload_name: str,
-      cluster_config: XpkClusterConfig,
+      cluster_config: ClusterConfig,
       disruption_config: DisruptionConfig,
   ) -> None:
     """Monitors workload progress, triggers disruptions, and recoveries."""
