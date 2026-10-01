@@ -2242,6 +2242,7 @@ class RoutedMoE(nnx.Module):
         weight_gather_axes,
         group_offset,
         partial_sum=None,
+        return_lhs=False,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2334,6 +2335,8 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
+            return_lhs=return_lhs,
+            fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
         )
       else:
         # jax.lax.ragged_dot
@@ -2346,6 +2349,18 @@ class RoutedMoE(nnx.Module):
             padding_amount,
         )
 
+      def _unpad_lhs(t):
+        if padding_amount > 0:
+          if isinstance(t, qpl.QArray):
+            return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]])
+          return t[: orig_inputs_shape[0]]
+        return t
+
+      if return_lhs:
+        output, lhs_out = output
+        if padding_amount > 0:
+          output = output[: orig_inputs_shape[0]]
+        return output, _unpad_lhs(lhs_out)
       if padding_amount > 0:
         output = output[: orig_inputs_shape[0]]
       return output
@@ -2915,13 +2930,20 @@ class RoutedMoE(nnx.Module):
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       else:
-        layer_w0 = gmm_fn(
+        accum_wi_dlhs = self.config.moe_accumulate_wi_dlhs and self.config.use_tokamax_gmm and self.config.use_gmm_v2
+        res0 = gmm_fn(
             x,
             w0,
             tiling=wi_tile_size,
             weight_gather_axes=wi_gather_axes,
             partial_sum=partial_accum0,
+            return_lhs=accum_wi_dlhs,
         )
+        if accum_wi_dlhs:
+          layer_w0, x_for_w1 = res0  # pylint: disable=unbalanced-tuple-unpacking
+        else:
+          layer_w0 = res0
+          x_for_w1 = x
         if self.config.mlp_bias and w0_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           if mask is not None:
@@ -2929,7 +2951,7 @@ class RoutedMoE(nnx.Module):
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
 
         layer_w1 = gmm_fn(
-            x,
+            x_for_w1,
             w1,
             tiling=wi_tile_size,
             weight_gather_axes=wi_gather_axes,

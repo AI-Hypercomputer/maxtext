@@ -570,6 +570,8 @@ def inner_kernel(
       acc += acc_ref[...]
 
     if is_last_k_step:
+      if cfgs.lhs_cfgs.has_scale and cfgs.lhs_cfgs.quant_dtype is None:
+        acc *= tiled_lhs_ref.get_scale().astype(acc.dtype)
       if cfgs.rhs_cfgs.has_bias:
         tiled_rhs_bias = tiled_rhs_ref.get_bias()
         acc += tiled_rhs_bias.astype(acc.dtype)
@@ -1082,7 +1084,6 @@ def validate_inputs(
     assert size_k % num_quant_blocks == 0
 
   if lhs_scale is not None:
-    assert maybe_quantize_lhs, "lhs_scale requires maybe_quantize_lhs=True."
     # Only per-tensor scales are supported for now. The current implementation generalizes to per-channel [M, 1] and
     # sub-channel [M, num_k_blocks]; extend the validation and the block spec /
     # index map together when adding those.
@@ -1222,13 +1223,13 @@ def make_gmm_configs(
       if not is_rhs_float:
         lhs_q_dtype = jnp.int8.dtype
 
-  if lhs_scale is not None:
+  if lhs_scale is not None and maybe_quantize_lhs:
     assert lhs_q_dtype is not None, (
         "lhs_scale requires lhs quantization to engage, but no lhs quant "
         "dtype was selected. Ensure rhs is quantized and the hardware supports "
         "fp8/int8 matmul."
     )
-  has_lhs_scale = lhs_scale is not None and lhs_q_dtype is not None
+  has_lhs_scale = lhs_scale is not None
 
   lhs_cfgs = InputConfigs(
       quant_dtype=lhs_q_dtype,

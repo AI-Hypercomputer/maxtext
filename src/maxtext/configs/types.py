@@ -1074,6 +1074,10 @@ class MoEGeneral(BaseModel):
           " use_ring_of_experts=True."
       ),
   )
+  moe_accumulate_wi_dlhs: bool = Field(
+      False,
+      description="Accumulate MoE wi_0/wi_1 backward DLHS in-place via gmm_v2 partial_sum and fuse dlhs scale.",
+  )
   moe_chunk_barrier: bool = Field(
       False,
       description=(
