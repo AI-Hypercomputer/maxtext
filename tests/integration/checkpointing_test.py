@@ -29,6 +29,7 @@ import glob
 import json
 from math import isclose
 import os.path
+import shutil
 
 import pytest
 
@@ -38,6 +39,7 @@ from maxtext.utils.globals import MAXTEXT_TEST_ASSETS_ROOT
 from tests.utils.test_helpers import (
     get_test_config_path,
     get_test_base_output_directory,
+    get_test_local_output_directory,
 )
 
 
@@ -98,15 +100,16 @@ def get_checkpointing_command(
   )
 
 
-def check_loss(metrics_file, target):
+def check_loss(metrics_dir, metrics_file, target):
   """Asserts over loss values from loaded checkpoint.
 
   Args:
+    metrics_dir: The directory holding the saved_ and restored_ metrics files.
     metrics_file: The base name of the metrics file.
     target: The target metric to check in the metrics file.
   """
-  metrics_file_saved = "saved_" + metrics_file
-  metrics_file_restored = "restored_" + metrics_file
+  metrics_file_saved = os.path.join(metrics_dir, "saved_" + metrics_file)
+  metrics_file_restored = os.path.join(metrics_dir, "restored_" + metrics_file)
 
   with (
       open(metrics_file_saved, "rt", encoding="utf8") as saved,
@@ -119,6 +122,23 @@ def check_loss(metrics_file, target):
     print("saved loss: ", saved_loss)
     print("restored loss: ", restored_loss)
     assert isclose(saved_loss, restored_loss, rel_tol=0.1)
+
+
+def _fresh_local_ckpt_dir():
+  """Returns an empty, existing per-process local directory for checkpoints and metrics files.
+
+  Local because GHA runners cannot write to GCS; per process because parallel workers would
+  otherwise share the checkpoints and the metrics files that check_loss compares. Created here
+  because every host opens its metrics file, and Orbax only creates directories on process 0.
+  Emptied first because the restored run appends to its metrics file (only step 0 truncates), so
+  a leftover one would give check_loss a stale first line. Callers remove it only on success,
+  so a failure leaves the artifacts in place for inspection.
+  """
+  local_ckpt_dir = get_test_local_output_directory()
+  shutil.rmtree(local_ckpt_dir, ignore_errors=True)
+  os.makedirs(local_ckpt_dir)
+  print(f"checkpointing test output: {local_ckpt_dir}")
+  return local_ckpt_dir
 
 
 def run_checkpointing(hardware, attention_type):
@@ -151,13 +171,13 @@ def run_checkpointing(hardware, attention_type):
       "grain_worker_count=0",
       f"grain_train_files={selected_pattern}",
   ]
-  local_ckpt_dir = "/tmp/maxtext_local_output"
+  local_ckpt_dir = _fresh_local_ckpt_dir()
   train_main(
       get_checkpointing_command(
           run_date,
           hardware=hardware,
           steps=1,
-          metrics_file="saved_metrics.txt",
+          metrics_file=os.path.join(local_ckpt_dir, "saved_metrics.txt"),
           attention_type=attention_type,
           dataset_type="grain",
           dataset_path=dataset_path,
@@ -171,7 +191,7 @@ def run_checkpointing(hardware, attention_type):
           run_date,
           hardware=hardware,
           steps=2,
-          metrics_file="restored_metrics.txt",
+          metrics_file=os.path.join(local_ckpt_dir, "restored_metrics.txt"),
           attention_type=attention_type,
           dataset_type="grain",
           dataset_path=dataset_path,
@@ -180,7 +200,8 @@ def run_checkpointing(hardware, attention_type):
       + grain_command
   )
 
-  check_loss("metrics.txt", "learning/loss")
+  check_loss(local_ckpt_dir, "metrics.txt", "learning/loss")
+  shutil.rmtree(local_ckpt_dir, ignore_errors=True)
 
 
 @pytest.mark.integration_test
@@ -205,14 +226,14 @@ def test_scan_layers_mismatch_tpu():
   hardware = "tpu"
   attention_type = "autoselected"
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-  local_ckpt_dir = "/tmp/maxtext_local_output"
+  local_ckpt_dir = _fresh_local_ckpt_dir()
 
   def get_cmd(steps, metrics_file):
     return get_checkpointing_command(
         run_date,
         hardware=hardware,
         steps=steps,
-        metrics_file=metrics_file,
+        metrics_file=os.path.join(local_ckpt_dir, metrics_file),
         attention_type=attention_type,
         dataset_type="synthetic",
         dataset_path="/tmp/gcsfuse",
@@ -234,3 +255,4 @@ def test_scan_layers_mismatch_tpu():
   assert "Checkpoint does not match the model" in message
   assert "decoder/layers_0/" in message
   assert "scan_layers" in message
+  shutil.rmtree(local_ckpt_dir, ignore_errors=True)

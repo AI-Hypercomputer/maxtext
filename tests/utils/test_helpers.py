@@ -33,6 +33,11 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, MAXTEXT_CONFIGS_DIR
 # expire it without touching anything else in gs://runner-maxtext-logs.
 _DEFAULT_TEST_OUTPUT_ROOT = "gs://runner-maxtext-logs/test_outputs"
 
+# Default local root for test output in decoupled mode; the same directory that
+# decoupled_base_test.yml uses as base_output_directory. LOCAL_BASE_OUTPUT
+# replaces it.
+_DEFAULT_DECOUPLED_TEST_OUTPUT_ROOT = os.path.join("maxtext_local_output", "gcloud_decoupled_test_logs")
+
 
 def _get_test_process_output_id() -> str:
   """Returns the name of this process's test output subdirectory.
@@ -47,10 +52,16 @@ def _get_test_process_output_id() -> str:
   Independent test runners (e.g. separate CI shards) must not share a value, or
   they will write to the same directory. Under pytest-xdist the worker id is
   appended, so workers still get separate directories.
+
+  The name is computed once, at import time. A child process that calls
+  get_test_base_output_directory() itself therefore gets a different directory;
+  compute the path in the parent and pass it down (as compile_cache_test does).
   """
   xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
   shared_id = os.environ.get("MAXTEXT_TEST_OUTPUT_ID")
   if shared_id:
+    if "/" in shared_id or os.sep in shared_id or shared_id in (".", ".."):
+      raise ValueError(f"MAXTEXT_TEST_OUTPUT_ID must be a single path component, got {shared_id!r}")
     return f"{shared_id}_{xdist_worker}" if xdist_worker else shared_id
   return f"worker_{xdist_worker or 'main'}_{os.getpid()}_{uuid.uuid4().hex[:8]}"
 
@@ -158,24 +169,39 @@ def get_test_base_output_directory(cloud_path=None):
     cloud_path: Optional custom GCS path to use in cloud mode.
                 Defaults to a process-isolated subdirectory under
                 "gs://runner-maxtext-logs/test_outputs" if not specified.
+                Ignored in decoupled mode.
 
   Returns:
-    Local test logs directory when decoupled, otherwise returns
+    In decoupled mode, a process-isolated subdirectory of LOCAL_BASE_OUTPUT if
+    set, else of "maxtext_local_output/gcloud_decoupled_test_logs". Otherwise
     the specified cloud path or a process-isolated path under
     "gs://runner-maxtext-logs/test_outputs".
     The local path is absolute so Orbax (which rejects relative
     checkpoint paths) can write checkpoints into it.
   """
   if is_decoupled():
-    return os.path.abspath(os.path.join("maxtext_local_output", "gcloud_decoupled_test_logs", _TEST_PROCESS_OUTPUT_ID))
+    root = os.environ.get("LOCAL_BASE_OUTPUT") or _DEFAULT_DECOUPLED_TEST_OUTPUT_ROOT
+    return os.path.abspath(os.path.join(root, _TEST_PROCESS_OUTPUT_ID))
   if cloud_path:
     return cloud_path
   return f"{_DEFAULT_TEST_OUTPUT_ROOT}/{_TEST_PROCESS_OUTPUT_ID}"
 
 
+def get_test_local_output_directory():
+  """Return a process-isolated local directory, for test output that must stay off GCS.
+
+  It uses the same per-process name as get_test_base_output_directory(), so the
+  processes of a multi-host job that share MAXTEXT_TEST_OUTPUT_ID resolve to the
+  same path on every host, as a multi-host Orbax job on a shared filesystem
+  requires; /tmp itself is usually host-local. The directory is not created.
+  """
+  return os.path.join("/tmp", "maxtext_local_output", _TEST_PROCESS_OUTPUT_ID)
+
+
 __all__ = [
     "ensure_tokenizer_downloaded",
     "get_test_base_output_directory",
+    "get_test_local_output_directory",
     "is_rocm_backend",
     "get_test_config_path",
     "get_post_train_test_config_path",
