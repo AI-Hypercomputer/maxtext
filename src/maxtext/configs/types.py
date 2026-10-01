@@ -374,6 +374,22 @@ class Checkpointing(BaseModel):
   enable_checkpointing: bool = Field(True, description="If True, enables saving checkpoints during training.")
   load_checkpoint_only_once: bool = Field(False, description="If True, deep copy the reference model to the actor model.")
   async_checkpointing: bool = Field(True, description="If True, uses an asynchronous checkpointer for performance.")
+  async_checkpointing_timeout_secs: PositiveInt = Field(
+      1200,
+      description=(
+          "Deadline in seconds for the background half of an async checkpoint save (storage writes and"
+          " finalization). A save that outlives it fails. 1200 is Orbax's own default. Training engine only."
+      ),
+  )
+  abandon_failed_checkpoint_saves: bool = Field(
+      False,
+      description=(
+          "Training engine only. If False (default), a background checkpoint save that fails (typically by"
+          " outliving async_checkpointing_timeout_secs) is logged and its failure is raised from the next"
+          " checkpoint call, which aborts the run. If True, the failure is logged and training continues with"
+          " its state intact; the next save proceeds normally and the failed step is simply not restorable."
+      ),
+  )
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")
   enable_single_replica_ckpt_restoring: bool = Field(

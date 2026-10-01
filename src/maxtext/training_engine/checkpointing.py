@@ -216,8 +216,7 @@ def _maybe_register_pathways_persistence(impl_name: str = _PERSISTENCE) -> None:
     )
   else:
     logging.info(
-        "Registered Pathways array handler (impl=%s, %s, store=%s); "
-        "TPUs will write directly to storage.",
+        "Registered Pathways array handler (impl=%s, %s, store=%s); " "TPUs will write directly to storage.",
         impl.name,
         handler_name,
         type(store).__name__,
@@ -243,11 +242,17 @@ class CheckpointManager:
       config: The training configuration.
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
+    # Whether a background save that fails is raised from the next checkpoint call (False, the
+    # default) or logged and dropped (True). See `_drain_in_flight_save`.
+    self._abandon_failed_saves = config.abandon_failed_checkpoint_saves
+    # The step of the save most recently handed to Orbax, so a failure that surfaces later can
+    # be attributed to it.
+    self._in_flight_step: int | None = None
+    # The failure dropped by the most recent abandonment, if no later save has replaced it in
+    # Orbax; the one failure a wait with no save in flight may drop again (see `_drain_in_flight_save`).
+    self._abandoned_failure: BaseException | None = None
     if checkpoint_dir:
-      if (
-          os.environ.get("ENABLE_PATHWAYS_PERSISTENCE") == "1"
-          and not str(checkpoint_dir).startswith("gs://")
-      ):
+      if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE") == "1" and not str(checkpoint_dir).startswith("gs://"):
         raise ValueError(
             "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
             f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r}."
@@ -269,6 +274,8 @@ class CheckpointManager:
               save_interval_steps=config.checkpoint_period,
               max_to_keep=config.max_num_checkpoints_to_keep,
               enable_async_checkpointing=config.async_checkpointing,
+              # Deadline for the background half of a save (storage writes and finalization).
+              async_options=ocp.AsyncOptions(timeout_secs=config.async_checkpointing_timeout_secs),
           ),
           item_handlers={
               "model_params": _pytree_handler(),
@@ -285,9 +292,88 @@ class CheckpointManager:
     return None
 
   def wait_until_finished(self) -> None:
-    """Waits for any ongoing async checkpoint saves to finish."""
-    if self._checkpoint_manager:
+    """Waits for any ongoing async checkpoint save; a failed one is raised or abandoned (see `_drain_in_flight_save`)."""
+    self._drain_in_flight_save("explicit wait")
+
+  def _drain_in_flight_save(self, reason: str) -> bool:
+    """Blocks until the save most recently handed to Orbax has finished, attributing its failure to its step.
+
+    Orbax finishes an async save on a background thread with a deadline (`async_checkpointing_timeout_secs`,
+    1200 s by default). That thread's failure is stored and raised from whichever later call waits on
+    it -- the next `save`, `delete`, `wait_until_finished` or `close` -- once per thread that waits
+    (`CheckpointManager._FinalizeThread.join` keeps a per-thread flag and never clears the stored
+    exception; only a later save replaces the thread). A timed-out save therefore surfaces from the
+    *next* checkpoint call, while the training state in memory is intact. So every wait in this
+    wrapper goes through here. By default the failure is logged against the step it belongs to and
+    re-raised, which takes that next call -- and, through the trainer worker, the run -- down with it.
+    With `abandon_failed_checkpoint_saves=true` it is logged and the save dropped instead: the next
+    save proceeds normally. Only a failure attributable to a save this wrapper handed over is ever
+    dropped: the one in flight, or the already abandoned one surfacing again on another thread (it is
+    the same exception object). Anything else is raised regardless of the flag.
+
+    Dropping a save stops nothing that is still running: the deadline only ends Orbax's wait, and the
+    storage writes it was waiting for (with Pathways persistence, uploads already issued to the
+    workers) finish on their own, leaving the step directory uncommitted. Nothing awaits them, so a
+    late failure cannot reach this thread.
+
+    Args:
+      reason: Why the wait is happening, for the log line.
+
+    Returns:
+      True if nothing was in flight (or checkpointing is disabled) or it finished; False if it failed
+      and has been abandoned.
+
+    Raises:
+      The save's failure, unless `abandon_failed_checkpoint_saves` is True; any failure that cannot be
+      attributed to a save this wrapper handed over.
+    """
+    if self._checkpoint_manager is None:
+      return True
+    step = self._in_flight_step
+    try:
       self._checkpoint_manager.wait_until_finished()
+    except Exception as e:  # pylint: disable=broad-except
+      self._in_flight_step = None
+      if step is None:
+        if e is self._abandoned_failure:
+          logging.warning(
+              "The already abandoned checkpoint save surfaced again on this thread (%s): %s: %s",
+              reason,
+              type(e).__name__,
+              e,
+          )
+          return False
+        logging.error(
+            "Waiting on the checkpoint manager failed with no save in flight (%s): %s: %s. This is not a background save "
+            "failure this wrapper can attribute to a step, so it is raised regardless of abandon_failed_checkpoint_saves.",
+            reason,
+            type(e).__name__,
+            e,
+        )
+        raise
+      if not self._abandon_failed_saves:
+        logging.error(
+            "The background half of the checkpoint save at step %s failed with %s: %s; raising it from here (%s). "
+            "The training state is intact; set abandon_failed_checkpoint_saves=true to drop such a save and continue.",
+            step,
+            type(e).__name__,
+            e,
+            reason,
+        )
+        raise
+      self._abandoned_failure = e
+      logging.error(
+          "Abandoning the checkpoint save at step %s (%s): its background half failed with %s: %s. "
+          "The training state is intact and the next save will proceed; step %s is not restorable.",
+          step,
+          reason,
+          type(e).__name__,
+          e,
+          step,
+      )
+      return False
+    self._in_flight_step = None
+    return True
 
   def get_saved_micro_step_count(self, step: int) -> int:
     """Returns how far into `step` the checkpoint already on disk got.
@@ -361,7 +447,7 @@ class CheckpointManager:
           step,
           sorted(newer),
       )
-      self._checkpoint_manager.wait_until_finished()
+      self._drain_in_flight_save("before deleting params-only steps")
       for s in newer:
         self._checkpoint_manager.delete(s)
     return step
@@ -376,7 +462,13 @@ class CheckpointManager:
       step: The step to delete.
     """
     logging.info("Deleting intra-step checkpoint at step %d so a more complete one can replace it.", step)
-    self._checkpoint_manager.wait_until_finished()
+    in_flight = self._in_flight_step
+    if not self._drain_in_flight_save(f"before deleting step {step}") and in_flight == step:
+      # The save being superseded was the one just abandoned: Orbax has already dropped it from
+      # its bookkeeping (`delete` would raise FileNotFoundError), and the forced save that follows
+      # removes whatever it left in the step directory.
+      logging.info("The abandoned save at step %d is no longer registered; nothing to delete.", step)
+      return
     self._checkpoint_manager.delete(step)
 
   def save_checkpoint(
@@ -405,6 +497,15 @@ class CheckpointManager:
     # can tell whether it supersedes what is already on disk.
     custom_metadata = dict(custom_metadata) if custom_metadata else {}
     custom_metadata["micro_step_count"] = checkpoint_state.micro_step_count
+
+    # Orbax waits for the previous save only for a step it is going to save ("must happen after
+    # `should_save` to avoid blocking callers"); mirror that, so a step the interval policy declines
+    # neither blocks on the in-flight save nor takes its failure. The wait is also where the previous
+    # save's failure surfaces -- absorbed or raised per `abandon_failed_checkpoint_saves` -- rather
+    # than from inside Orbax's `save`, which would take this save down with it; and it drops a
+    # failed step from `get_latest_step()` before the check below.
+    if kwargs.get("force") or self._checkpoint_manager.should_save(step):
+      self._drain_in_flight_save(f"before saving step {step}")
 
     # A checkpoint already exists at this step. Skip, unless this one is more complete --
     # the case that matters is a step resumed from an intra-step checkpoint and then run to
@@ -478,6 +579,9 @@ class CheckpointManager:
         custom_metadata=custom_metadata,
         **kwargs,
     )
+    if saved:
+      self._in_flight_step = step
+      self._abandoned_failure = None  # Orbax's finalize thread is replaced; the old failure cannot surface again.
     if saved and not fingerprints_enabled:
       logging.info("Checkpoint step=%d saved without fingerprints (ENABLE_ORBAX_FINGERPRINT=0).", step)
     elif saved:  # Orbax's interval policy may decline; only an accepted save carries these values.
@@ -536,6 +640,7 @@ class CheckpointManager:
       )
     if checkpoint_state.optimizer is not None:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
+
       # `CloudPathwaysArrayHandler.deserialize` ignores `memory_kind="pinned_host"` for physical
       # placement (allocating restored buffers in device HBM) while keeping `pinned_host` on the
       # returned array's sharding metadata. Request `device` placement explicitly so the restored
@@ -544,9 +649,7 @@ class CheckpointManager:
       def _device_restore_target(leaf: Any) -> Any:
         sharding = getattr(leaf, "sharding", None)
         if getattr(sharding, "memory_kind", None) == "pinned_host":
-          return jax.ShapeDtypeStruct(
-              leaf.shape, leaf.dtype, sharding=sharding.with_memory_kind("device")
-          )
+          return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=sharding.with_memory_kind("device"))
         return leaf
 
       optimizer_target = jax.tree.map(_device_restore_target, optimizer_state)
@@ -635,6 +738,7 @@ class CheckpointManager:
     return step, checkpoint_state, custom_metadata
 
   def close(self) -> None:
-    """Closes the checkpoint manager."""
+    """Closes the checkpoint manager once the in-flight save, if any, has finished (a failed one is raised or abandoned)."""
     if self._checkpoint_manager:
+      self._drain_in_flight_save("before close")
       self._checkpoint_manager.close()
