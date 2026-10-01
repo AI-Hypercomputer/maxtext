@@ -638,6 +638,50 @@ class TrainTests(unittest.TestCase):
     )
 
   @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_moe_block_deepseek4_hash_and_routed_bias(self):
+    """Runs real TE MoE kernels for DSv4 hash routing and top-k routed-bias updates."""
+    gpu_device = jax.devices("gpu")[0]
+    compute_capability = getattr(gpu_device, "compute_capability", None)
+    try:
+      if float(compute_capability) < 10.0:
+        pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
+    except Exception:  # pylint: disable=broad-exception-caught
+      pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
+
+    train_main(
+        TrainTests.CONFIGS["synthetic"]
+        + [
+            "model_name=deepseek4-tiny",
+            "override_model_config=True",
+            "base_num_decoder_layers=3",
+            "first_num_hash_layers=1",
+            "compress_ratios=[0,4,128]",
+            "attention=dot_product",
+            "quantization=te_no_quant",
+            "base_emb_dim=32",
+            "base_num_kv_heads=1",
+            "head_dim=32",
+            "num_experts=4",
+            "num_experts_per_tok=2",
+            "shared_experts=1",
+            "base_moe_mlp_dim=32",
+            "routed_bias=True",
+            "routed_bias_update_rate=0.125",
+            "load_balance_loss_weight=0.0",
+            "sparse_matmul=True",
+            "megablox=False",
+            "prefuse_moe_weights=True",
+            "te_moe_block=True",
+            "te_gmm_quantization=te_no_quant",
+            "hardware=gpu_multiprocess",
+            "ici_fsdp_parallelism=1",
+            "ici_expert_parallelism=-1",
+            "enable_tensorboard=False",
+        ]
+    )
+
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"])
