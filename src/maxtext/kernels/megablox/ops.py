@@ -76,6 +76,7 @@ def gmm(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    use_dlhs_transpose_rhs: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   if interpret is None:
@@ -107,12 +108,14 @@ def gmm(
           act_calibration_method="absmax",
       )
 
+  lhs_dtype = preferred_element_type if isinstance(lhs, qpl.QArray) else lhs.dtype
+  rhs_dtype = preferred_element_type if isinstance(rhs, qpl.QArray) else rhs.dtype
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18),
   )
-  gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
+  gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   return gmm_fwd_bwd(
       lhs,
       rhs,
@@ -132,6 +135,7 @@ def gmm(
       use_gmm_v2,
       use_gmm_v2_heuristic_tiling,
       partial_sum,
+      use_dlhs_transpose_rhs,
   )
 
 
@@ -169,6 +173,7 @@ def _gmm_fwd(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -241,6 +246,7 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
+  del use_dlhs_transpose_rhs
   return out, (
       lhs,
       rhs,
@@ -497,6 +503,7 @@ def _gmm_bwd(
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
+    use_dlhs_transpose_rhs: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -566,6 +573,7 @@ def _gmm_bwd(
       interpret,
       lhs_vma_axes,
       use_gmm_v2_heuristic_tiling,
+      use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
   )
 
   # 4. DRHS Gradient Execution
@@ -716,6 +724,7 @@ def _compute_dlhs(
     interpret: bool,
     lhs_vma_axes: tuple,
     use_gmm_v2_heuristic_tiling: bool,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DLHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -729,7 +738,15 @@ def _compute_dlhs(
     )
   elif use_tokamax_backend and use_gmm_v2:
     return _dlhs_run_tokamax_v2(
-        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, use_gmm_v2_heuristic_tiling, transpose_rhs
+        dlhs_dout,
+        rhs,
+        group_sizes,
+        group_offset,
+        lhs_dtype,
+        tiling,
+        use_gmm_v2_heuristic_tiling,
+        transpose_rhs,
+        use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
     )
   else:
     return _dlhs_run_megablox(
@@ -805,10 +822,15 @@ def _dlhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     transpose_rhs: bool,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> jnp.ndarray:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
-  # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs support.
-  dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
+  if use_dlhs_transpose_rhs:
+    dlhs_rhs = rhs
+    kernel_transpose_rhs = not transpose_rhs
+  else:
+    dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
+    kernel_transpose_rhs = False
   dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
 
   if use_gmm_v2_heuristic_tiling:
@@ -827,6 +849,7 @@ def _dlhs_run_tokamax_v2(
       group_offset=group_offset,
       # Bypass internal quantization if incoming dlhs_dout is already a QArray.
       maybe_quantize_lhs=not isinstance(dlhs_dout, qpl.QArray),
+      transpose_rhs=kernel_transpose_rhs,
   )
 
   # Rescale dlhs by dlhs_dout.scale when incoming gradient was pre-quantized QArray.
