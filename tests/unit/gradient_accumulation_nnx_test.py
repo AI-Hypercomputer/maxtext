@@ -124,6 +124,7 @@ def _trimming_loss_fn(model, config, data, dropout_rng, params, is_train=True):
   }
   return xent_sum, aux
 
+
 def _make_cotangent_clip(bound):
   """Identity forward; the backward clips the cotangent to [-bound, bound].
 
