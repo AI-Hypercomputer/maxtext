@@ -45,7 +45,7 @@ class _Cfg:
 
   per_device_batch_size: float = 1.0
   global_batch_size_to_load: int | None = None
-  global_batch_size_to_train_on: int | None = None
+  global_batch_size_to_train_on: int = 0
   micro_batch_size_to_train_on: int | None = None
   eval_per_device_batch_size: float = 1.0
   global_batch_size_to_load_eval: int | None = None
