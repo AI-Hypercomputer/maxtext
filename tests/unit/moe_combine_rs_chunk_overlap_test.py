@@ -89,7 +89,7 @@ class CombineOverlapMeshTest(unittest.TestCase):
     if not hasattr(xla_metadata, "xla_metadata_call2"):
       self.skipTest("moe_combine_rs_chunk_overlap needs jax.experimental.xla_metadata.xla_metadata_call2")
 
-  def _run(self, mode, chunks=2, rbf=-1.0, combine_bwd_method=""):
+  def _run(self, mode, chunks=2, rbf=-1.0, combine_bwd_method="", custom_sort_vjp=False):
     """Returns (output, loss, grads, lowered HLO text) of the layer's loss and grad under jax.jit."""
     # pylint: disable=import-outside-toplevel
     from flax.linen import partitioning as nn_partitioning
@@ -118,6 +118,7 @@ class CombineOverlapMeshTest(unittest.TestCase):
         num_moe_token_chunks=chunks,
         moe_combine_rs_chunk_overlap=mode,
         moe_quantize_combine_bwd_method=combine_bwd_method,
+        use_custom_sort_vjp=custom_sort_vjp,
         routed_bias=True,
         routed_bias_update_rate=0.01,
         routed_score_func="sigmoid",
@@ -150,13 +151,15 @@ class CombineOverlapMeshTest(unittest.TestCase):
       (loss, out), grads = f(variables["params"], x)
     return out, loss, grads, hlo
 
-  def _check_modes_match_flag_off(self, combine_bwd_method=""):
+  def _check_modes_match_flag_off(self, combine_bwd_method="", custom_sort_vjp=False):
     """Both overlap modes reproduce the flag-off output, loss and gradients exactly and only add scheduling groups."""
-    out_ref, loss_ref, grads_ref, hlo_ref = self._run("", combine_bwd_method=combine_bwd_method)
+    out_ref, loss_ref, grads_ref, hlo_ref = self._run(
+        "", combine_bwd_method=combine_bwd_method, custom_sort_vjp=custom_sort_vjp
+    )
     self.assertNotIn("_scheduling_group_id", hlo_ref)
     for mode in ("rs", "unpermute_rs"):
       with self.subTest(mode=mode):
-        out, loss, grads, hlo = self._run(mode, combine_bwd_method=combine_bwd_method)
+        out, loss, grads, hlo = self._run(mode, combine_bwd_method=combine_bwd_method, custom_sort_vjp=custom_sort_vjp)
         # Ordering only: same ops, same numbers.
         np.testing.assert_array_equal(np.asarray(out), np.asarray(out_ref))
         np.testing.assert_array_equal(np.asarray(loss), np.asarray(loss_ref))
@@ -174,11 +177,18 @@ class CombineOverlapMeshTest(unittest.TestCase):
     """The custom-VJP reduce-scatter (moe_quantize_combine_bwd_method) also traces inside the scheduling group."""
     self._check_modes_match_flag_off(combine_bwd_method="rowwise")
 
+  def test_modes_match_flag_off_custom_sort_vjp(self):
+    """use_custom_sort_vjp: the unsort custom-VJP keeps its input as a residual, so it must trace inside the group."""
+    self._check_modes_match_flag_off(custom_sort_vjp=True)
+
+  def test_modes_match_flag_off_custom_sort_vjp_quantized_combine_bwd(self):
+    self._check_modes_match_flag_off(combine_bwd_method="rowwise", custom_sort_vjp=True)
+
 
 if __name__ == "__main__":
   CombineOverlapMeshTest.__test__ = True
   suite = unittest.defaultTestLoader.loadTestsFromTestCase(CombineOverlapMeshTest)
   res = unittest.TextTestRunner(verbosity=2).run(suite)
-  if res.wasSuccessful() and res.testsRun == 2 and not res.skipped:
+  if res.wasSuccessful() and res.testsRun == 4 and not res.skipped:
     print("COMBINE_RS_CHUNK_OVERLAP_MESH_TESTS_PASSED")
   sys.exit(0 if res.wasSuccessful() else 1)

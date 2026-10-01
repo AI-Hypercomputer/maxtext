@@ -3263,6 +3263,45 @@ class RoutedMoE(nnx.Module):
           intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
         return intermediate_output
 
+      def _unpermute(intermediate_output):
+        # Unsort and deduplicate the outputs locally.
+        output = self.unpermute(
+            intermediate_output,
+            routing.sorted_selected_experts,
+            routing.weights,
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+            use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+            group_sizes=routing.group_sizes,
+            topk_argsort_indices=routing.topk_argsort_indices,
+        )
+        return jnp.reshape(
+            output,
+            (
+                -1,
+                sequence_length,
+                self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
+            ),
+        )
+
+      def _reduce_scatter(output):
+        # Sum up the partial outputs across the expert shards.
+        combine_bwd_method = self.config.moe_quantize_combine_bwd_method
+        if combine_bwd_method:
+          return _moe_combine_psum_scatter(
+              output,
+              self._expert_parallelism_name,
+              scatter_dimension=0,
+              tiled=True,
+              bwd_method=combine_bwd_method,
+          )
+        return jax.lax.psum_scatter(
+            output,
+            self._expert_parallelism_name,
+            scatter_dimension=0,
+            tiled=True,
+        )
+
       if combine_overlap is None:
         intermediate_layer = self.apply_ffn_activation(output0, output1)
         intermediate_output = _wo_and_bias(intermediate_layer, wo, wo_bias)
@@ -3273,56 +3312,30 @@ class RoutedMoE(nnx.Module):
           output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
           return _wo_and_bias(self.apply_ffn_activation(output0, output1), wo, wo_bias)
 
-        intermediate_output = _scheduling_group_call(combine_overlap["group_id"], _expert_compute)(
+        def _expert_compute_and_unpermute(*args):
+          out = _expert_compute(*args)
+          out = adc.checkpoint_name(adc.checkpoint_name(out, "mlpwo"), "moe_mlpwo")
+          return _unpermute(out)
+
+        # NOTE: the unpermute (a custom-VJP kernel that keeps its input as a residual) must be traced
+        # inside an xla_metadata_call: a call output used as a downstream custom_vjp residual breaks
+        # the transpose. "rs" therefore groups chunk c's compute + unpermute; "unpermute_rs" groups
+        # chunk c's compute alone and moves its unpermute into chunk c+1's group (see _finish_combine).
+        group_fn = _expert_compute if combine_overlap["mode"] == "unpermute_rs" else _expert_compute_and_unpermute
+        intermediate_output = _scheduling_group_call(combine_overlap["group_id"], group_fn)(
             x, w0, w1, wo, w0_bias, w1_bias, wo_bias
         )
-      intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
+      if combine_overlap is None or combine_overlap["mode"] == "unpermute_rs":
+        intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
 
-        def _unpermute(intermediate_output):
-          # Unsort and deduplicate the outputs locally.
-          output = self.unpermute(
-              intermediate_output,
-              routing.sorted_selected_experts,
-              routing.weights,
-              batch_size=batch_size,
-              sequence_length=sequence_length,
-              use_custom_sort_vjp=self.config.use_custom_sort_vjp,
-              group_sizes=routing.group_sizes,
-              topk_argsort_indices=routing.topk_argsort_indices,
-          )
-          return jnp.reshape(
-              output,
-              (
-                  -1,
-                  sequence_length,
-                  self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
-              ),
-          )
-
-        def _reduce_scatter(output):
-          # Sum up the partial outputs across the expert shards.
-          combine_bwd_method = self.config.moe_quantize_combine_bwd_method
-          if combine_bwd_method:
-            return _moe_combine_psum_scatter(
-                output,
-                self._expert_parallelism_name,
-                scatter_dimension=0,
-                tiled=True,
-                bwd_method=combine_bwd_method,
-            )
-          return jax.lax.psum_scatter(
-              output,
-              self._expert_parallelism_name,
-              scatter_dimension=0,
-              tiled=True,
-          )
-
         if combine_overlap is None:
           output = _reduce_scatter(_unpermute(intermediate_output))
+        elif combine_overlap["mode"] == "unpermute_rs":
+          output = (intermediate_output, _unpermute, _reduce_scatter)  # unpermute + RS deferred to the caller
         else:
-          output = (intermediate_output, _unpermute, _reduce_scatter)
+          output = (intermediate_output, None, _reduce_scatter)  # already unpermuted; RS deferred to the caller
         return (
             output,
             routing.lb_loss,
@@ -3435,14 +3448,23 @@ class RoutedMoE(nnx.Module):
         barrier_enabled = self.config.moe_chunk_barrier
 
       def _finish_combine(pending, combine_overlap):
-        """Unpermute + reduce-scatter a deferred chunk output, optionally inside the next chunk's scheduling group."""
+        """Finishes a deferred chunk combine (unpermute if still pending, then reduce-scatter).
+
+        With combine_overlap (the next chunk's scheduling group) the ops join that group so they overlap the
+        next chunk's GMMs; for the last chunk (combine_overlap=None) the reduce-scatter is left ungrouped and a
+        still-pending unpermute gets a group of its own (it must be traced inside an xla_metadata_call).
+        """
         intermediate_output, unpermute_fn, reduce_scatter_fn = pending
+        if unpermute_fn is None:
+          if combine_overlap is None:
+            return reduce_scatter_fn(intermediate_output)
+          return _scheduling_group_call(combine_overlap["group_id"], reduce_scatter_fn)(intermediate_output)
         if combine_overlap is None:
-          return reduce_scatter_fn(unpermute_fn(intermediate_output))
-        group_id = combine_overlap["group_id"]
-        if combine_overlap["mode"] == "unpermute_rs":
-          return _scheduling_group_call(group_id, lambda t: reduce_scatter_fn(unpermute_fn(t)))(intermediate_output)
-        return _scheduling_group_call(group_id, reduce_scatter_fn)(unpermute_fn(intermediate_output))
+          output = _scheduling_group_call(next(_COMBINE_OVERLAP_GROUP_IDS), unpermute_fn)(intermediate_output)
+          return reduce_scatter_fn(output)
+        return _scheduling_group_call(combine_overlap["group_id"], lambda t: reduce_scatter_fn(unpermute_fn(t)))(
+            intermediate_output
+        )
 
       def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
