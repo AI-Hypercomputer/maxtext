@@ -462,9 +462,12 @@ class DenseGeneral(nnx.Module):
     def _gather_fwd_value(x):
       if not quantize_before_gather:
         return _pinned_gather(x)
-      q = quantizations.manual_quantize(x, weight_qtype, calibration)
-      qvalue = _pinned_gather(q.qvalue)
-      return (qvalue.astype(x.dtype) * q.scale.astype(x.dtype)).astype(x.dtype)
+      # Symmetric fixed-range quantization, as qwix applies it to the weight (per-tensor static scale).
+      scale = quantizations.get_static_scale(weight_qtype, calibration)
+      bound = quantizations.numerics.get_symmetric_bound(weight_qtype)
+      qvalue = jnp.clip(x / jnp.asarray(scale, x.dtype), -bound, bound).astype(weight_qtype)
+      qvalue = _pinned_gather(qvalue)
+      return qvalue.astype(x.dtype) * jnp.asarray(scale, x.dtype)
 
     @jax.custom_vjp
     def _gather(x):
