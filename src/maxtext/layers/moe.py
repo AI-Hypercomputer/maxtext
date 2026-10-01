@@ -562,6 +562,17 @@ class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
 
 
+class ExpertPermutationVar(nnx.BatchStat):
+  """Lineage per-layer routed expert permutation (`lineage_expert_permutation`).
+
+  Stored as float32 for the same reason as `Tid2EidVar` and cast to int32 at use.
+  The Lineage forward pass overwrites it with the permutation for the next step.
+  A `BatchStat` (runtime state, like running statistics): full-state checkpoints
+  keep it, while params-only loads (`load_parameters_path`) skip it and leave it
+  at its identity initialisation.
+  """
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
