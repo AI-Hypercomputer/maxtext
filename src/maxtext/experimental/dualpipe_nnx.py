@@ -254,6 +254,7 @@ def dualpipe_loss_and_grad(config, model, params_shardings, data, loss_from_logi
   batch = _microbatches(data, config.gradient_accumulation_steps, config.micro_batch_size_to_train_on)
   schedule = make_training_schedule(
       prefix_apply, layer_apply, loss_apply, grad_dtype=config.grad_dtype,
+      full_remat=config.remat_policy == "full",
   )
   with jax.named_scope("dual_pipe"):
     loss_sum, aux, layer_grads, boundary_grads = schedule(layer_params, layer_state, boundary_params, batch)

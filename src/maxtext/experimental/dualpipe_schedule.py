@@ -19,7 +19,7 @@ def _reduce_aux(stacked_aux):
 
 
 def make_training_schedule(
-    prefix_apply, layer_apply, loss_apply, schedule="dual_pipe", grad_dtype=jnp.float32,
+    prefix_apply, layer_apply, loss_apply, schedule="dual_pipe", grad_dtype=jnp.float32, full_remat=False,
 ):
   """Build a serial or fused layer-level 1F1B loss/gradient computation.
 
@@ -58,9 +58,32 @@ def make_training_schedule(
     raise TypeError("Layer callbacks must be a tuple, one per group")
   if not layer_apply:
     raise ValueError("At least one layer group is required")
-  layer_passes = tuple(
-      jax.fwd_and_bwd(apply, argnums=(0, 1), has_aux=True, jitted=False) for apply in layer_apply
-  )
+  def make_layer_passes(apply):
+    # Keep the existing behavior when full remat is not selected.
+    if not full_remat:
+      forward, backward = jax.fwd_and_bwd(apply, argnums=(0, 1), has_aux=True, jitted=False)
+      return forward, lambda weights, state, saved, dy: backward(saved, dy)
+
+    def forward(weights, hidden, state, positions, segments):
+      output, metrics = apply(weights, hidden, state, positions, segments)
+      # Save this layer's INPUT so backward can recompute the layer later.
+      # Do not save weights/state here: they do not change between microbatches.
+      # Returning them here would make scan build another copy of every layer's weights.
+      return output, (hidden, positions, segments), metrics
+
+    def backward(weights, state, saved, dy):
+      hidden, positions, segments = saved
+      # Recompute using the saved activation and the ORIGINAL model weights.
+      # This preserves full remat without keeping weights in the saved activations.
+      # Metrics are counted in forward only; ignore them during recomputation.
+      _, pullback = jax.vjp(
+          lambda w, x: apply(w, x, state, positions, segments)[0], weights, hidden
+      )
+      return pullback(dy)
+
+    return forward, backward
+
+  layer_passes = tuple(make_layer_passes(apply) for apply in layer_apply)
   # Reuse each forward trace's saved-VJP metadata between fill and steady state.
   # These helpers inline into the caller's train_step, not separate GPU calls.
   prefix_forward = jax.jit(prefix_forward, inline=True)
@@ -132,13 +155,17 @@ def make_training_schedule(
     def backward_layers(residuals, dhidden):
       gradient_groups = [None] * len(params)
       for group in reversed(range(len(params))):
-        def body(dhidden, residual):
+        def body(dhidden, layer_data):
+          # Weights/state come from the model, not from the saved activations.
+          weights, state, residual = layer_data
           with jax.named_scope("backward"):
-            dweights, dhidden = backwards[group](residual, dhidden)
+            dweights, dhidden = backwards[group](weights, state, residual, dhidden)
           return dhidden, dweights
 
         # reverse=True visits L-1..0 but stacks gradients in original order.
-        dhidden, gradient_groups[group] = jax.lax.scan(body, dhidden, residuals[group], reverse=True)
+        dhidden, gradient_groups[group] = jax.lax.scan(
+            body, dhidden, (params[group], states[group], residuals[group]), reverse=True
+        )
       return dhidden, tuple(gradient_groups)
 
     def forward_microbatch(data):
@@ -190,28 +217,39 @@ def make_training_schedule(
       dprefix = previous_dhidden
       with jax.named_scope("combined_bf_layers"):
         for backward_group, forward_group, backward_stop, forward_start, length in segments:
-          old_residuals = jax.tree.map(
-              lambda r: r[backward_stop - length : backward_stop][::-1], previous_residuals[backward_group]
-          )
-          next_weights, next_state = jax.tree.map(
-              lambda x: x[forward_start : forward_start + length], (params[forward_group], states[forward_group])
-          )
-
-          def combined_layer(carry, layer_data):
+          def combined_layer(carry, index):
             dhidden, next_hidden = carry
-            old_residual, next_weights, next_state = layer_data
+            # A runs backward: read one saved layer input, from last layer to first.
+            # Index the original array instead of making a reversed copy of it.
+            old_residual = jax.tree.map(
+                lambda r: jax.lax.dynamic_index_in_dim(r, backward_stop - 1 - index, axis=0, keepdims=False),
+                previous_residuals[backward_group],
+            )
+            # A and B use the same model weights, but at different layer indices.
+            # Read one layer from the original weights for each; do not copy a whole group.
+            backward_weights, backward_state = jax.tree.map(
+                lambda x: jax.lax.dynamic_index_in_dim(x, backward_stop - 1 - index, axis=0, keepdims=False),
+                (params[backward_group], states[backward_group]),
+            )
+            next_weights, next_state = jax.tree.map(
+                lambda x: jax.lax.dynamic_index_in_dim(x, forward_start + index, axis=0, keepdims=False),
+                (params[forward_group], states[forward_group]),
+            )
             # B_i at layer L-1-k and F_(i+1) at layer k have independent carries.
             with jax.named_scope("backward"):
-              dweights, dhidden = backwards[backward_group](old_residual, dhidden)
+              dweights, dhidden = backwards[backward_group](backward_weights, backward_state, old_residual, dhidden)
             with jax.named_scope("forward"):
               next_hidden, next_residual, metrics = forwards[forward_group](
                   next_weights, next_hidden, next_state, data["inputs_position"], data["inputs_segmentation"]
               )
             return (dhidden, next_hidden), (dweights, next_residual, metrics)
 
+          # Pass layer numbers to the loop; it reads the needed inputs directly.
           (dprefix, next_hidden), (reversed_grads, next_residuals, metrics) = jax.lax.scan(
-              combined_layer, (dprefix, next_hidden), (old_residuals, next_weights, next_state)
+              combined_layer, (dprefix, next_hidden), jnp.arange(length)
           )
+          # Keep this separate reversal: gradients must match the original weight order.
+          # It does not reverse saved activations or model weights.
           gradient_parts[backward_group].append(jax.tree.map(lambda g: g[::-1], reversed_grads))
           residual_parts[forward_group].append(next_residuals)
           metrics = _reduce_aux(metrics)
