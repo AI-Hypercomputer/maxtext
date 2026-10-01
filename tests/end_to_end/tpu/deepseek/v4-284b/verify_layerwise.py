@@ -189,14 +189,17 @@ def _var_sharding(var, mesh) -> jax.sharding.NamedSharding:
   return jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
 
-def _set_entry(entries: dict, key: str, arr, populated: set[str]) -> None:
+# Skeleton (shape, dtype) per state entry, keyed by id(model); restores replace inactive leaves with scalars.
+_SKELETON_SPECS: dict[int, dict[str, tuple[tuple[int, ...], object]]] = {}
+
+
+def _set_entry(entries: dict, specs: dict, key: str, arr, populated: set[str]) -> None:
   if key not in entries:
     raise KeyError(f"Missing model state entry: {key}")
-  var = entries[key]
-  target = var.get_value()
-  if tuple(arr.shape) != tuple(target.shape):
-    raise ValueError(f"Shape mismatch for {key}: got {arr.shape}, expected {target.shape}")
-  var.set_value(jnp.asarray(arr, dtype=target.dtype))
+  shape, dtype = specs[key]
+  if tuple(arr.shape) != shape:
+    raise ValueError(f"Shape mismatch for {key}: got {arr.shape}, expected {shape}")
+  entries[key].set_value(jnp.asarray(arr, dtype=dtype))
   populated.add(key)
 
 
@@ -289,20 +292,25 @@ def restore_subgroup_weights(
     unscanned_ckpt: str,
     tid2eid_path: str,
     abstract: bool = False,
+    with_globals: bool = False,
 ) -> set[str]:
   """Restores active subgroup weights from unscanned_ckpt (+ tid2eid) and shards onto mesh.
 
   With `abstract`, jit-argument leaves (Param, MoEBiasVar) become sharded ShapeDtypeStructs for AOT
   compilation against a device-less topology mesh; other Variables stay concrete (trace constants).
+  Embedding and head weights are restored for S3, or for any unit with `with_globals`.
   """
   log(f"Restoring weights for {subgroup_name} from {unscanned_ckpt}...")
   cpu_dev = jax.devices("cpu")[0]
   state = nnx.state(model)
   entries = views.flat_state(state)
+  specs = _SKELETON_SPECS.setdefault(
+      id(model), {k: (tuple(v.get_value().shape), v.get_value().dtype) for k, v in entries.items()}
+  )
   fm = _flat_tree(_meta_tree(unscanned_ckpt))
 
   u_layers = unit_layers(subgroup_name)
-  needs_globals = subgroup_name == "S3"
+  needs_globals = subgroup_name == "S3" or with_globals
 
   needed_u = {f"layers_{l}" for l in u_layers}
   if needs_globals:
@@ -349,19 +357,23 @@ def restore_subgroup_weights(
     if max_eid >= mt_config.num_experts:
       raise ValueError(f"Invalid tid2eid max expert id {max_eid} >= num_experts {mt_config.num_experts}")
     for l in (0, 1, 2):
+      # Checkpoints converted with Tid2EidVar support also store the table as a layer leaf; it must agree.
+      ckpt_tid = layer_leaves[l].pop(("mlp", "MoeBlock_0", "tid2eid"), None)
       layer_leaves[l]["tid2eid"] = t_tid[f"layers_{l}"].numpy()
+      if ckpt_tid is not None and not np.array_equal(ckpt_tid, layer_leaves[l]["tid2eid"]):
+        raise ValueError(f"layers_{l} tid2eid in {unscanned_ckpt} differs from {tid2eid_path}")
     log(f"Loaded 284B tid2eid (max_eid={max_eid}).")
 
   populated: set[str] = set()
   with jax.default_device(cpu_dev):
     if needs_globals:
-      _set_entry(entries, "params-token_embedder-embedding", globals_leaves["token_embedder"], populated)
-      _set_entry(entries, "params-decoder-decoder_norm-scale", globals_leaves["decoder_norm"], populated)
-      _set_entry(entries, "params-decoder-hc_head-hc_base", globals_leaves["hc_head_hc_base"], populated)
-      _set_entry(entries, "params-decoder-hc_head-hc_fn", globals_leaves["hc_head_hc_fn"], populated)
-      _set_entry(entries, "params-decoder-hc_head-hc_scale", globals_leaves["hc_head_hc_scale"], populated)
+      _set_entry(entries, specs, "params-token_embedder-embedding", globals_leaves["token_embedder"], populated)
+      _set_entry(entries, specs, "params-decoder-decoder_norm-scale", globals_leaves["decoder_norm"], populated)
+      _set_entry(entries, specs, "params-decoder-hc_head-hc_base", globals_leaves["hc_head_hc_base"], populated)
+      _set_entry(entries, specs, "params-decoder-hc_head-hc_fn", globals_leaves["hc_head_hc_fn"], populated)
+      _set_entry(entries, specs, "params-decoder-hc_head-hc_scale", globals_leaves["hc_head_hc_scale"], populated)
       if "params-decoder-logits_dense-kernel" in entries:
-        _set_entry(entries, "params-decoder-logits_dense-kernel", globals_leaves["logits_dense"], populated)
+        _set_entry(entries, specs, "params-decoder-logits_dense-kernel", globals_leaves["logits_dense"], populated)
 
     if subgroup_name == "S1":
       for l in (0, 1, 2):
@@ -370,7 +382,7 @@ def restore_subgroup_weights(
             k = f"Tid2EidVar-decoder-layers_{l}-mlp-MoeBlock_0-tid2eid"
           else:
             k = f"params-decoder-layers_{l}-" + "-".join(subpath)
-          _set_entry(entries, k, arr, populated)
+          _set_entry(entries, specs, k, arr, populated)
       expected_active = {k for k in entries if any(f"-layers_{l}-" in k and "scanned_blocks" not in k for l in (0, 1, 2))}
     else:
       for j in range(2):
@@ -383,7 +395,7 @@ def restore_subgroup_weights(
           else:
             stacked = np.stack([layer_leaves[l][subpath] for l in target_layers], axis=1)
             k = f"params-decoder-scanned_blocks-layers_{j}-" + "-".join(subpath)
-          _set_entry(entries, k, stacked, populated)
+          _set_entry(entries, specs, k, stacked, populated)
       expected_active = {k for k in entries if "scanned_blocks" in k}
       if needs_globals:
         expected_active |= {
@@ -498,6 +510,43 @@ def aot_compile_subgroup(fns: dict, sv, *, h_shape: tuple[int, ...], act_dtype) 
   log(f"AOT PASSED: {sorted(fns)} forward and VJP compile for {topo}.")
 
 
+def replicate_batch_axis(mt_config) -> None:
+  """Replicates batch activations while keeping all model parameters FSDP-sharded across the mesh."""
+  object.__setattr__(
+      mt_config,
+      "logical_axis_rules",
+      tuple(
+          (
+              k,
+              tuple(ax for ax in (v if isinstance(v, (list, tuple)) else (v,)) if ax not in ("fsdp", "fsdp_transpose"))
+              if "batch" in k
+              else v,
+          )
+          for k, v in mt_config.logical_axis_rules
+      ),
+  )
+
+
+def init_model_on_cpu(mt_config, mesh):
+  """Builds the Transformer skeleton on a 1-CPU mesh; modules still capture `mesh` for later placement.
+
+  A topology mesh has no devices, and a TPU mesh would stack unsharded scanned layers on one chip's HBM;
+  restore_subgroup_weights places the active leaves onto `mesh`.
+  """
+  cpu_dev = jax.devices("cpu")[0]
+  init_mesh = jax.sharding.Mesh(
+      np.array([cpu_dev]).reshape((1,) * len(mesh.axis_names)), mesh.axis_names, axis_types=mesh.axis_types
+  )
+  with jax.default_device(cpu_dev), views.maxtext_context(mt_config, init_mesh):
+    return views.models.Transformer(
+        mt_config,
+        mesh,
+        views.quantizations.configure_quantization(mt_config),
+        model_mode=views.MODEL_MODE_TRAIN,
+        rngs=nnx.Rngs(params=0, dropout=0),
+    )
+
+
 def main() -> None:
   """CLI entry point for real-weight layer-subgroup forward/backward verification."""
   parser = argparse.ArgumentParser()
@@ -571,39 +620,13 @@ def main() -> None:
       megablox=use_megablox,
       **(topo_kwargs if args_cli.aot_topology else {}),
   )
-  # Replicate batch=1 activations while keeping all model parameters FSDP-sharded across the mesh.
-  object.__setattr__(
-      mt_config,
-      "logical_axis_rules",
-      tuple(
-          (
-              k,
-              tuple(ax for ax in (v if isinstance(v, (list, tuple)) else (v,)) if ax not in ("fsdp", "fsdp_transpose"))
-              if "batch" in k
-              else v,
-          )
-          for k, v in mt_config.logical_axis_rules
-      ),
-  )
+  replicate_batch_axis(mt_config)
   if args_cli.aot_topology:
     mesh = train_compile.get_topology_mesh(mt_config)
   else:
     mesh = views.maxtext_utils.get_mesh_from_config(mt_config)
   log(f"megablox={use_megablox}, mesh={dict(mesh.shape)}")
-  cpu_dev = jax.devices("cpu")[0]
-  # Eager init runs on a 1-CPU mesh: a topology mesh has no devices, and a TPU mesh would stack unsharded scanned
-  # layers on one chip's HBM. Modules still capture `mesh`; restore_subgroup_weights places active leaves onto it.
-  init_mesh = jax.sharding.Mesh(
-      np.array([cpu_dev]).reshape((1,) * len(mesh.axis_names)), mesh.axis_names, axis_types=mesh.axis_types
-  )
-  with jax.default_device(cpu_dev), views.maxtext_context(mt_config, init_mesh):
-    model = views.models.Transformer(
-        mt_config,
-        mesh,
-        views.quantizations.configure_quantization(mt_config),
-        model_mode=views.MODEL_MODE_TRAIN,
-        rngs=nnx.Rngs(params=0, dropout=0),
-    )
+  model = init_model_on_cpu(mt_config, mesh)
   log(f"Model skeleton initialized on CPU in {time.time() - t0_init:.1f}s.")
 
   active_keys = restore_subgroup_weights(
