@@ -12,11 +12,11 @@
 #   docker tag maxtext-unit-test-cuda12:py312 us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext-unit-test-cuda12:py312
 #   docker push us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext-unit-test-cuda12:py312
 
-# Default to Python 3.12.
+# Default to Python 3.12 and Ubuntu 24.04 (can be overridden with Airlock mirror).
 ARG PYTHON_VERSION=3.12
+ARG BASEIMAGE=ubuntu:24.04
 
-FROM nvcr.io/nvidia/cuda-dl-base:25.06-cuda12.9-devel-ubuntu24.04
-# TODO: enable cuda 13, e.g., nvcr.io/nvidia/cuda-dl-base:25.08-cuda13.0-devel-ubuntu24.04.
+FROM ${BASEIMAGE}
 
 # Set the working directory in the container
 WORKDIR /maxtext
@@ -33,6 +33,8 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 ENV CLOUD_SDK_VERSION=latest
 # Ensure apt package installations run without manual intervention
 ENV DEBIAN_FRONTEND=noninteractive
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
 # See all env variables
 RUN env
 
@@ -54,9 +56,8 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dea
 RUN apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*
 # Install gcsfuse
 RUN export GCSFUSE_REPO=gcsfuse-bullseye && \
-    echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list && \
-    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add - && \
-    apt update -y && apt -y install gcsfuse && \
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list && \
+    apt-get update -y && apt-get -y install gcsfuse && \
     rm -rf /var/lib/apt/lists/*
 # See all installed system level packages
 RUN apt list --installed

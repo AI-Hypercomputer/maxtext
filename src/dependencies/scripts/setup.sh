@@ -131,7 +131,7 @@ fi
 echo "Python version check passed. Continuing with script."
 echo "--------------------------------------------------"
 
-apt-get update && apt-get upgrade -y && apt-get install -y sudo
+apt-get update && apt-get install -y --no-install-recommends sudo
 (sudo bash || bash) <<'EOF'
 # sudo strips the exports set by the parent shell, so re-export them here to
 # keep apt-get non-interactive.
@@ -140,10 +140,11 @@ export NEEDRESTART_SUSPEND=1
 export NEEDRESTART_MODE=l
 apt-get update && \
 apt-get upgrade -y && \
-apt-get install -y numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool && \
+apt-get install -y --no-install-recommends numactl lsb-release gnupg curl net-tools iproute2 procps lsof git ethtool ca-certificates && \
 export GCSFUSE_REPO=gcsfuse-`lsb_release -c -s`
-echo "deb https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
-curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+if [ "$GCSFUSE_REPO" = "gcsfuse-trixie" ]; then GCSFUSE_REPO="gcsfuse-bookworm"; fi
+curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-key.gpg && gpg --dearmor --yes -o /usr/share/keyrings/cloud.google.gpg /tmp/apt-key.gpg && rm /tmp/apt-key.gpg
+echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list
 apt-get update -y && apt-get -y install gcsfuse
 rm -rf /var/lib/apt/lists/*
 EOF
