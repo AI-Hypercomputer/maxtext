@@ -250,7 +250,7 @@ class DeepSeekGenericLayer(nnx.Module):
       self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
 
     if self.config.te_moe_block and moe_bias_updates is not None:
-      total_recv_tokens, recv_capacity_per_rank = moe_bias_updates
+      total_recv_tokens, recv_capacity_per_rank, routed_bias_updates = moe_bias_updates
       self.sow(nnx.Intermediate, "te_moe_total_recv_tokens", total_recv_tokens)
       self.sow(nnx.Intermediate, "te_moe_recv_capacity_per_rank", recv_capacity_per_rank)
       self.sow(
@@ -258,7 +258,8 @@ class DeepSeekGenericLayer(nnx.Module):
           "te_moe_capacity_overflow",
           jnp.any(total_recv_tokens > recv_capacity_per_rank),
       )
-    elif self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+      moe_bias_updates = routed_bias_updates
+    if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
       self.sow(nnx.Intermediate, "moe_bias_updates", moe_bias_updates)
 
     if getattr(self.config, "record_internal_nn_metrics", False):
@@ -607,11 +608,16 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           self.DeepSeekMoeBlock_0,
           x=intermediate_inputs,
           mhc_type=HyperConnectionType.MLP_MOE,
+          input_ids=decoder_input_tokens,
       )
       load_balance_loss = metadata["load_balance_loss"]
       moe_bias_updates = metadata["moe_bias_updates"]
     else:
-      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(hidden_states, deterministic)
+      mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp_op(
+          hidden_states,
+          deterministic,
+          input_ids=decoder_input_tokens,
+      )
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
@@ -619,7 +625,10 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
-        x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
+        x,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+        input_ids=kwargs.get("input_ids"),
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
 
