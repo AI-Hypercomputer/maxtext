@@ -15,6 +15,9 @@
 """Unit tests for tfds_data_processing_c4_mlperf: MLPerf DS v3 continuous stream chunking and eval batch decimation."""
 
 import os
+import tempfile
+import threading
+import time
 import types
 import unittest
 from unittest import mock
@@ -28,9 +31,11 @@ os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_force_host_p
 
 tf = pytest.importorskip("tensorflow")
 tfds = pytest.importorskip("tensorflow_datasets")
+from tensorflow_datasets.core import reader as tfds_reader  # pylint: disable=wrong-import-position
 
 from maxtext.input_pipeline import tfds_data_processing_c4_mlperf as c4_mlperf
 from maxtext.input_pipeline.tfds_data_processing_c4_mlperf import (
+    _files_hold_one_example_each,
     _pad_to_batch_size,
     _place_real_rows_in_local_batch,
     chunk_token_stream,
@@ -426,6 +431,155 @@ def _make_eval_dataset(num_examples: int, seq_len: int) -> "tf.data.Dataset":
       )
   }
   return tf.data.Dataset.from_generator(gen, output_signature=signature)
+
+
+_NUM_HOSTS = 128
+_NUM_FILES = 2048
+_SEQ_LEN = 8
+_LOCAL_ROWS = 8
+_TOKENS_PER_EXAMPLE = _LOCAL_ROWS * _SEQ_LEN
+_TRAIN_STEP_S = 0.5
+
+
+def _example_tokens(key):
+  return (2 + 1000 * key + np.arange(_TOKENS_PER_EXAMPLE)).astype(np.int32)
+
+
+_EVAL_DATASET = "one_example_per_file_eval"
+
+
+def _write_one_example_per_file_eval(data_dir):
+  """Writes an eval split laid out like the MLPerf c4/en:3.0.9 one: one pre-tokenized example per tfrecord file.
+
+  The files and metadata are written directly (no generation step), so `tfds.builder` reads
+  them back as a read-only dataset, as it does for the MLPerf data.
+  """
+  features = tfds.features.FeaturesDict({"ids": tfds.features.Tensor(shape=(_TOKENS_PER_EXAMPLE,), dtype=np.int32)})
+  version_dir = os.path.join(data_dir, _EVAL_DATASET, "1.0.0")
+  os.makedirs(version_dir)
+  for key in range(_NUM_FILES):
+    path = os.path.join(version_dir, f"{_EVAL_DATASET}-validation.tfrecord-{key:05d}-of-{_NUM_FILES:05d}")
+    with tf.io.TFRecordWriter(path) as writer:
+      writer.write(features.serialize_example({"ids": _example_tokens(key)}))
+  tfds.folder_dataset.write_metadata(data_dir=version_dir, features=features, check_data=False)
+
+
+class _FileReadCounter:
+  """Records the tfrecord files the tfds reader pulls examples from (one example per file)."""
+
+  def __init__(self):
+    self.files = []
+    self._lock = threading.Lock()
+    self._orig = tfds_reader._get_dataset_from_filename  # pylint: disable=protected-access
+
+  def _record(self, filename):
+    with self._lock:
+      self.files.append(filename.numpy().decode())
+    return np.int64(0)
+
+  def dataset_from_filename(self, instruction, *args, **kwargs):
+    ds = self._orig(instruction, *args, **kwargs)
+
+    def _tag(example):
+      done = tf.py_function(self._record, [instruction.filename], tf.int64)
+      with tf.control_dependencies([done]):
+        return tf.identity(example)
+
+    return ds.map(_tag)
+
+
+class EvalReadsOwnFilesOnceTest(unittest.TestCase):
+  """Host i of 128 reads only its own eval file, once, and gets the same eval batch as before.
+
+  Before the change, the eval shard was taken after reading (host i reads files 0..i to find
+  its first example) and the cache never completed (the loop reads one batch out of a longer
+  shard), so every eval read the files again.
+  """
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+    cls.data_dir = cls._tmp.name
+    _write_one_example_per_file_eval(cls.data_dir)
+    cls.name = _EVAL_DATASET
+    builder = tfds.builder(cls.name, data_dir=cls.data_dir)
+    instructions = builder.info.splits["validation"].file_instructions
+    cls.files = [os.path.basename(f.filename) for f in instructions]
+    assert len(cls.files) == _NUM_FILES and all(f.take == 1 for f in instructions)
+    # Read order of the whole split: host i's single example sits in file i.
+    cls.examples = [x["ids"] for x in tfds.as_numpy(builder.as_dataset(split="validation", shuffle_files=False))]
+
+  @classmethod
+  def tearDownClass(cls):
+    cls._tmp.cleanup()
+    super().tearDownClass()
+
+  def _build(self, host, shard_in_read):
+    ds = c4_mlperf.get_dataset(
+        self.name, "validation", host, _NUM_HOSTS, data_dir=self.data_dir, shard_in_read=shard_in_read
+    )
+    ds = c4_mlperf.rekey(ds, {"inputs": None, "targets": "ids"})
+    return preprocess_eval_dataset(
+        ds,
+        types.SimpleNamespace(pad_id=0, eos_id=1),
+        eval_global_batch_size_to_load=_NUM_HOSTS * _LOCAL_ROWS,
+        max_target_length=_SEQ_LEN,
+        num_examples=_LOCAL_ROWS,
+        real_data_rows=list(range(_LOCAL_ROWS)),
+        num_batches=1,
+        dataloading_host_count=_NUM_HOSTS,
+    )
+
+  def _evals(self, host, shard_in_read, num_evals=3):
+    """Runs `num_evals` evals the way train.py does.
+
+    Returns the eval batches, the files read in each eval, and whether the last eval's
+    iterator ended after its num_batches (= 1) batches.
+    """
+    counter = _FileReadCounter()
+    with (
+        mock.patch.object(tfds_reader, "_get_dataset_from_filename", counter.dataset_from_filename),
+        mock.patch.object(c4_mlperf.jax, "process_count", return_value=_NUM_HOSTS),
+    ):
+      ds = self._build(host, shard_in_read)
+      batches, reads = [], []
+      for _ in range(num_evals):
+        start = len(counter.files)
+        it = ds.as_numpy_iterator()  # the eval iterator reset before each eval
+        # The eval loop stops after num_batches (= 1) batches without draining the iterator.
+        batches.append(next(it))
+        # The train step before the next eval. The prefetch completes the truncated cache in the
+        # background meanwhile; before the change the cache was discarded at the next reset.
+        time.sleep(_TRAIN_STEP_S)
+        reads.append(counter.files[start:])
+      # Whether one eval is exactly num_batches batches long.
+      ended = next(it, None) is None
+    return batches, reads, ended
+
+  def test_files_hold_one_example_each(self):
+    self.assertTrue(_files_hold_one_example_each(self.name, "validation", self.data_dir, _NUM_HOSTS))
+    # More loading hosts than files: some hosts would get no file, keep sharding after reading.
+    self.assertFalse(_files_hold_one_example_each(self.name, "validation", self.data_dir, 2 * _NUM_FILES))
+
+  def test_same_batch_own_files_and_no_reread(self):
+    for host in (0, 5, 64, 127):
+      with self.subTest(host=host):
+        before, before_reads, _ = self._evals(host, shard_in_read=False, num_evals=1)
+        after, after_reads, after_ended = self._evals(host, shard_in_read=True)
+        # Byte-identical eval batch, on every eval.
+        for batch in after:
+          self.assertEqual(sorted(batch), sorted(before[0]))
+          for key in before[0]:
+            np.testing.assert_array_equal(batch[key], before[0][key])
+        np.testing.assert_array_equal(after[0]["inputs"], self.examples[host].reshape(_LOCAL_ROWS, _SEQ_LEN))
+        # Before: host i reads at least files 0..i. After: only its own files, and only once.
+        self.assertTrue(set(self.files[: host + 1]) <= set(before_reads[0]))
+        own = set(self.files[host::_NUM_HOSTS])
+        self.assertIn(self.files[host], after_reads[0])
+        self.assertTrue(set(after_reads[0]) <= own, after_reads[0])
+        self.assertEqual(after_reads[1:], [[], []])
+        self.assertTrue(after_ended)
 
 
 class PadToBatchSizeTest(unittest.TestCase):

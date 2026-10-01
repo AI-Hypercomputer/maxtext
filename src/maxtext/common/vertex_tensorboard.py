@@ -121,11 +121,11 @@ class VertexTensorboardManager:
       if not os.environ.get("EXPERIMENT_NAME"):
         os.environ["EXPERIMENT_NAME"] = config.run_name
 
-      if config.use_vertex_tensorboard:  # running MaxText on GCE
+      if config.use_vertex_tensorboard:  # MaxText creates/reuses the Tensorboard instance and Experiment
         tensorboard_url = self.setup()
         if tensorboard_url is None:
           raise ValueError("Unable to create Tensorboard and Experiment in Vertex AI.")
         max_logging.log(f"View your Vertex AI Tensorboard at: {tensorboard_url}")
         self.upload_data(config.tensorboard_dir)
-      elif os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):  # running MaxText via XPK
+      elif os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):  # instance and Experiment created outside MaxText
         self.upload_data(config.tensorboard_dir)

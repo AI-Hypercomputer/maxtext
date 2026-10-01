@@ -687,6 +687,10 @@ class MTP(BaseModel):
       0,
       description="Specifies which MTP layer is used to calculate metrics.",
   )
+  mtp_reuse_input_embedding: bool = Field(
+      False,
+      description="Reuse the main decoder's token embeddings instead of a second lookup.",
+  )
 
 
 class LogitsAndLoss(BaseModel):
@@ -825,6 +829,13 @@ class MlaAttention(BaseModel):
       description=(
           "Whether to slice projection kernel weights before contraction in MLA"
           " instead of running full projection + jnp.split."
+      ),
+  )
+  use_mla_absorbed_mqa: bool = Field(
+      False,
+      description=(
+          "Whether to use Absorbed-Query Latent MQA mode in MLA. Trades higher prefill/training FLOPs "
+          "for 57x smaller KV cache footprint and memory bandwidth during autoregressive decode."
       ),
   )
 
@@ -1013,9 +1024,44 @@ class MoEGeneral(BaseModel):
       None,
       description=(
           "What to do when the ragged buffer (ragged_buffer_factor > 0) would drop tokens. None: drop them."
-          " 'step': discard the candidate state and replay the whole train step with a dropless buffer."
+          " 'step': roll the step's update back in-graph and replay the whole train step with a dropless buffer."
           " 'layer': per MoE layer, calculate the overflow from the router's top-k and take a chunked dropless"
           " branch (lax.cond) for that layer only; no step replay."
+      ),
+  )
+  retry_dropless_first_steps: int = Field(
+      0,
+      description=(
+          "With moe_dropless_fallback='step', run the first N steps after the loop's start step (i.e. steps with "
+          "step - start_step < N; equal to step < N when training starts at step 0) directly with the dropless "
+          "program, skipping the attempt with the normal program. 0 = off."
+      ),
+  )
+  first_phase_ragged_buffer_factor: float = Field(
+      0.0,
+      description=(
+          "With retry_dropless_first_steps=N > 0, run the first N steps with a precompiled first-phase program whose "
+          "RoutedMoE modules use this ragged buffer factor (instead of the dropless program); a first-phase step that "
+          "still drops tokens is replayed with the dropless program. Must be >= ragged_buffer_factor. 0 = off."
+      ),
+  )
+  log_required_ragged_buffer_factor: bool = Field(
+      False,
+      description=(
+          "Probe: log per train step and per MoE layer the minimum ragged_buffer_factor that would have avoided drops "
+          "(max over shards of the tokens routed to a shard / the per-shard buffer at factor 1). Adds one scalar "
+          "max all-reduce per MoE layer and token chunk, and a device-to-host fetch per step."
+      ),
+  )
+  warmup_programs_in_init: bool = Field(
+      False,
+      description=(
+          "After the setup precompiles and before init_stop/run_start are logged, execute each precompiled train "
+          "program (normal, first-phase, dropless) and eval program (eval, eval dropless) once through its jit on a "
+          "synthetic batch (PRNG token ids, never the dataset), discard the outputs so parameters, optimizer state "
+          "and routed biases are unchanged, block on completion and run a cross-host barrier. Moves the first "
+          "execution (and the hosts' arrival skew) out of the scored window. Skipped when the programs are not "
+          "precompiled (compiled_trainstep_file or AutoPGLE)."
       ),
   )
   num_moe_token_chunks: PositiveInt = Field(
@@ -1041,6 +1087,16 @@ class MoEGeneral(BaseModel):
           " effect."
       ),
   )
+  moe_log_max_load_ratio: bool = Field(
+      False,
+      description=(
+          "Debug only. Log learning/moe_max_load_ratio{,_mean}: the max (mean) over MoE layers of"
+          " the largest (tokens routed to an expert shard) / (perfectly balanced load) over token"
+          " chunks and expert shards. A step overflows the ragged buffer iff the max exceeds"
+          " ragged_buffer_factor (up to buffer rounding). Requires sparse_matmul=True,"
+          " te_moe_block=False, use_ring_of_experts=True and use_ragged_sort=True."
+      ),
+  )
 
   moe_expert_input_dim: int = Field(
       -1,
@@ -1052,9 +1108,34 @@ class MoEGeneral(BaseModel):
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  moe_use_megatron_seq_aux_loss: bool = Field(
+      False,
+      description=(
+          "When True, sigmoid routers (routed_score_func='sigmoid', with te_moe_block=False) use"
+          " Megatron-LM's sequence-wise auxiliary load-balancing loss (fp32 per-token normalized sigmoid scores,"
+          " token fractions from an unbiased, ungrouped top-k over the full sequence, summed over MoE layers)."
+          " When False (default), sigmoid routers use the Switch Transformer-style loss averaged over MoE layers."
+      ),
+  )
   use_custom_sort_vjp: bool = Field(
       True,
       description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul.",
+  )
+  router_topk_matmul_vjp: bool = Field(
+      False,
+      description=(
+          "DeepSeek routing: take the top-k routing weights with a custom VJP whose backward builds the dense"
+          " [..., num_experts] gradient as a one-hot compare-select-sum over the k slots, instead of the scatter-add"
+          " that jnp.take_along_axis transposes to. Forward and gradient values are unchanged."
+      ),
+  )
+  moe_topk_before_ep_all_gather: bool = Field(
+      False,
+      description=(
+          "Ring of experts: run top-k on the local tokens and all-gather the top-k weights and expert ids"
+          " instead of the full router logits. The token sort still runs after the all-gather."
+          " Ignored with forced, hash or random routing."
+      ),
   )
   use_ring_of_experts: bool = Field(
       False,
@@ -1098,6 +1179,14 @@ class MoEGeneral(BaseModel):
   use_ragged_sort: bool = Field(
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
+  )
+  moe_quantize_combine_bwd_method: str | None = Field(
+      "",
+      description=(
+          "Quantization method for Token Combine backward All-Gather. "
+          "'' = unquantized BF16; 'rowwise' = dynamic token-wise FP8 E5M2; "
+          "'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
+      ),
   )
   ragged_sort_use_single_sparsecore: bool = Field(
       False,
@@ -1144,6 +1233,21 @@ class MoEGeneral(BaseModel):
   moe_pin_sparse_core_all_gathers: bool = Field(
       False,
       description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
+  )
+  moe_pin_sparse_core_ep_all_gathers: bool = Field(
+      False,
+      description="Pin only the ring-of-experts EP all-gathers (dispatch tokens and routing inputs) to a SparseCore"
+      " (OR-ed with moe_pin_sparse_core_all_gathers).",
+  )
+  moe_pin_sparse_core_fsdp_all_gathers: bool = Field(
+      False,
+      description="Pin only the MoE FSDP weight all-gathers to a SparseCore (OR-ed with"
+      " moe_pin_sparse_core_all_gathers).",
+  )
+  moe_pin_sparse_core_fsdp_all_gathers_fwd_only: bool = Field(
+      False,
+      description="When the MoE FSDP weight all-gathers are pinned, pin only the forward all-gather; its transpose"
+      " (the weight-gradient reshard) runs outside compute_on, as with the pin off.",
   )
   moe_fsdp_all_gather_sparse_core_id: int = Field(
       0,
@@ -1226,7 +1330,9 @@ class MoEGeneral(BaseModel):
   @model_validator(mode="after")
   def validate_moe_sharding_strategy(self) -> "MoEGeneral":
     """Ensure that only one MoE FSDP sharding strategy is active at a time."""
-    if self.moe_pin_sparse_core_all_gathers and self.moe_fsdp_use_two_stage_all_gather:
+    if (
+        self.moe_pin_sparse_core_all_gathers or self.moe_pin_sparse_core_fsdp_all_gathers
+    ) and self.moe_fsdp_use_two_stage_all_gather:
       raise ValueError(
           "SparseCore pinning for MoE all-gathers (`moe_pin_sparse_core_all_gathers=True`) "
           "is not supported with `moe_fsdp_use_two_stage_all_gather=True`."
@@ -1334,7 +1440,20 @@ class DeepSeekMoE(BaseModel):
   routed_score_func: str = Field("", description="Scoring function for routing (e.g., 'softmax', 'sigmoid').")
   routed_bias: bool = Field(False, description="Whether to add a bias term for routing.")
   routed_bias_update_rate: float = Field(0.0, description="Update rate applied to the router bias term.")
+  defer_small_all_reduces: bool = Field(
+      False,
+      description="Ring-of-experts sparse_matmul only: drop the per-layer all-reduces of the routed-bias expert counts"
+      " from the scanned layer. Each MoE layer emits its local partial counts, the scan stacks them, and loss_fn"
+      " reduces the stacked array once after the layer loop (one all-reduce). Same sums as the per-layer path. (The"
+      " token-overflow flag of moe_dropless_fallback='step' is already reduced once per step without this flag.)",
+  )
   log_moe_bias_norms: bool = Field(False, description="Whether to log the norms of MoE router biases.")
+  log_step_diagnostics: bool = Field(
+      False,
+      description="Append to every training step's log line: pre-clip and post-clip global grad norm, param norm,"
+      " max |grad|, the routed-bias checksum (sum over MoE layers of sum(bias)), the number of nonzero routed-bias"
+      " update entries and the MoE overflow flag.",
+  )
   mlp_bias: bool = Field(
       False,
       description="Whether to add a learnable bias for MLP matmul, "
@@ -1484,6 +1603,8 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     ["mlp_moe", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
     ["embed_moe", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
     ["embed_moe", ["fsdp", "context", "context_usp_ulysses"]],
+    ["embed_router", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
+    ["embed_router", ["fsdp", "context", "context_usp_ulysses"]],
     # ==========================================
     # Standard MLP / Dense Layers / Model Structure
     # ==========================================
@@ -1728,6 +1849,22 @@ class RematAndOffload(BaseModel):
   mlpwi_1: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second part of a gated MLP's output.",
+  )
+  moe_x_sorted: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routed (post-dispatch, expert-sorted) MoE input plus its small "
+          "routing/metadata bundle. 'device' saves them across the remat boundary so the backward "
+          "does not re-run the dispatch token all-gather and ragged sort; the expert GMMs re-run "
+          "from the saved tensor. Default 'remat' recomputes (existing behavior)."
+      ),
+  )
+  moe_routing_maps: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the MoE routing index maps only (top-k expert ids, ragged-sort permutations, sorted token "
+          "indices and group sizes)."
+      ),
   )
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
@@ -2200,6 +2337,35 @@ class TrainingLoop(BaseModel):
   data_shuffle_seed: int = Field(0, description="Seed for data shuffling.")
   init_weights_seed: int = Field(0, description="Seed for model weight initialization.")
   max_inflight_computations: int = Field(2, description="Maximum number of inflight computations on device.")
+  block_state_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: jax.block_until_ready(state), evaluate the learning-rate schedule once "
+          "(compiles its small eager ops) and run a cross-host barrier. Does not touch the dataset."
+      ),
+  )
+  warm_input_reshard_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: device_put an all-zero synthetic batch through the same host->global->input "
+          "sharding path as the data loader, so the reshard program is compiled outside the timer. No dataset access."
+      ),
+  )
+  train_shard_in_read: bool = Field(
+      False,
+      description=(
+          "c4_mlperf train split: shard by file in tfds (host i opens files i, i+n, ...) instead of reading the full "
+          "stream and keeping every n-th example. Needs at least as many files as data-loading hosts."
+      ),
+  )
+  train_interleave_cycle_length: int = Field(
+      -1,
+      description=(
+          "c4_mlperf train split: tfds interleave_cycle_length, i.e. number of files read concurrently per host "
+          "(-1 = tfds default of 16). With train_shard_in_read, keep this below the files per host so that "
+          "data_shuffle_seed changes which files are read first."
+      ),
+  )
 
 
 class ManifoldConstrainedHyperConnections(BaseModel):
@@ -2763,7 +2929,14 @@ class Tensorboard(BaseModel):
   """Configuration for Tensorboard logging."""
 
   enable_tensorboard: bool = Field(True, description="Enable Tensorboard logging.")
-  use_vertex_tensorboard: bool = Field(False, description="Set to True for GCE, False if running via XPK.")
+  use_vertex_tensorboard: bool = Field(
+      False,
+      description=(
+          "Set to True to have MaxText create (or reuse) the Vertex AI Tensorboard instance and Experiment and upload"
+          " logs. Leave False if they are created outside MaxText and UPLOAD_DATA_TO_TENSORBOARD is set in the"
+          " environment."
+      ),
+  )
   vertex_tensorboard_project: Optional[str] = Field("", description="GCP project for Vertex AI Tensorboard.")
   vertex_tensorboard_region: Optional[str] = Field("", description="Region for Vertex AI Tensorboard.")
 
@@ -3648,6 +3821,64 @@ class MaxTextConfig(
     if mode == "layer" and self.use_random_routing:
       # The overflow check re-derives top-k outside permute(); random routing would not reproduce it.
       raise ValueError(f"{prefix} does not support use_random_routing=True.")
+    if mode == "step":
+      if self.enable_diloco:
+        raise ValueError(f"{prefix} is not supported with enable_diloco=True.")
+      if self.compiled_trainstep_file:
+        raise ValueError(f"{prefix} is not supported with compiled_trainstep_file.")
+      if self.optimizer_memory_host_offload or self.parameter_memory_host_offload:
+        raise ValueError(
+            f"{prefix} is not supported with optimizer_memory_host_offload or parameter_memory_host_offload."
+        )
+
+  def validate_retry_dropless_first_steps_and_first_phase_buffer(self):
+    """Validates retry_dropless_first_steps, first_phase_ragged_buffer_factor and the REQUIRED_RBF probe."""
+    if self.retry_dropless_first_steps < 0:
+      raise ValueError(f"retry_dropless_first_steps must be >= 0 (got {self.retry_dropless_first_steps}).")
+    if self.retry_dropless_first_steps > 0 and self.moe_dropless_fallback != "step":
+      raise ValueError("retry_dropless_first_steps > 0 requires moe_dropless_fallback='step'.")
+    if self.first_phase_ragged_buffer_factor < 0:
+      raise ValueError(
+          f"first_phase_ragged_buffer_factor must be 0 (off) or > 0 (got {self.first_phase_ragged_buffer_factor})."
+      )
+    if self.first_phase_ragged_buffer_factor > 0:
+      if self.retry_dropless_first_steps <= 0:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_dropless_first_steps > 0.")
+      if self.moe_dropless_fallback != "step":
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires moe_dropless_fallback='step'.")
+      if self.ragged_buffer_factor <= 0:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 requires ragged_buffer_factor > 0.")
+      if self.first_phase_ragged_buffer_factor < self.ragged_buffer_factor:
+        raise ValueError(
+            f"first_phase_ragged_buffer_factor ({self.first_phase_ragged_buffer_factor}) must be >= "
+            f"ragged_buffer_factor ({self.ragged_buffer_factor})."
+        )
+      if self.te_moe_block:
+        raise ValueError("first_phase_ragged_buffer_factor > 0 is not supported with te_moe_block=True.")
+    if self.log_required_ragged_buffer_factor:
+      if self.te_moe_block:
+        raise ValueError("log_required_ragged_buffer_factor=True is not supported with te_moe_block=True.")
+      if not (self.use_ring_of_experts and self.use_ragged_sort):
+        raise ValueError(
+            "log_required_ragged_buffer_factor=True requires use_ring_of_experts=True and use_ragged_sort=True."
+        )
+      if self.num_moe_emb_chunks > 0:
+        raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
+
+  def validate_moe_log_max_load_ratio(self):
+    """Validates that moe_log_max_load_ratio is used with the ring-of-experts ragged path."""
+    if self.moe_log_max_load_ratio and not (
+        self.sparse_matmul and not self.te_moe_block and self.use_ring_of_experts and self.use_ragged_sort
+    ):
+      raise ValueError(
+          "moe_log_max_load_ratio=True requires sparse_matmul=True, te_moe_block=False,"
+          " use_ring_of_experts=True and use_ragged_sort=True."
+      )
+
+  def validate_moe_topk_before_ep_all_gather(self):
+    """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
+    if self.moe_topk_before_ep_all_gather and not (self.sparse_matmul and self.use_ring_of_experts):
+      raise ValueError("moe_topk_before_ep_all_gather=True requires sparse_matmul=True and use_ring_of_experts=True.")
 
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor and eval_ragged_buffer_factor are used with supported settings."""
@@ -3810,6 +4041,13 @@ class MaxTextConfig(
             f"num_moe_emb_chunks > 0 requires use_gmm_v2=True and use_ring_of_experts=True. "
             f"Got use_gmm_v2={self.use_gmm_v2}, use_ring_of_experts={self.use_ring_of_experts}."
         )
+      # The emb-chunking path (moe_emb_chunking in moe.py) routes per chunk and does not tag its routed input with
+      # checkpoint_name("moe_x_sorted"), so a non-remat moe_x_sorted would be silently ignored there.
+      if self.moe_x_sorted != RematLocation.REMAT:
+        raise ValueError(
+            f"moe_x_sorted={RematLocation(self.moe_x_sorted).value} is not supported with num_moe_emb_chunks > 0; "
+            "use moe_x_sorted=remat."
+        )
 
   def validate_moe_quantize_token_all_gather(self):
     """Validates that moe_quantize_token_all_gather is used with supported settings."""
@@ -3835,6 +4073,20 @@ class MaxTextConfig(
             "moe_quantize_token_all_gather=True requires quantization to be"
             " specified and act_quantization_calibration_method to be fixed"
             " (static scaling mode)."
+        )
+
+  def validate_moe_quantize_combine_bwd_method(self):
+    """Validates that moe_quantize_combine_bwd_method is only used with ring of experts."""
+    if self.moe_quantize_combine_bwd_method:
+      if not self.use_ring_of_experts:
+        raise ValueError(
+            f"moe_quantize_combine_bwd_method='{self.moe_quantize_combine_bwd_method}' requires use_ring_of_experts=True."
+        )
+      method = self.moe_quantize_combine_bwd_method
+      if not (method == "rowwise" or method.startswith("fixed")):
+        raise ValueError(
+            f"Unsupported moe_quantize_combine_bwd_method: '{method}'. "
+            "Supported options: '', 'rowwise', 'fixed,<bound>'."
         )
 
   @staticmethod
@@ -4270,6 +4522,8 @@ class MaxTextConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
+          "moe_routing_maps",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
@@ -4597,6 +4851,29 @@ class MaxTextConfig(
           f"Setting `indexer_cutoff_threshold='{self.indexer_cutoff_threshold}'` is only valid when "
           "`use_indexer=True` (DeepSeek Sparse Attention / MLA Indexer)."
       )
+    if self.use_mla_absorbed_mqa:
+      if self.attention_type != AttentionType.MLA.value:
+        raise ValueError(
+            f"`use_mla_absorbed_mqa=True` requires `attention_type='{AttentionType.MLA.value}'`, "
+            f"but found attention_type='{self.attention_type}'."
+        )
+      if self.attention not in ("dot_product", "autoselected"):
+        raise ValueError(
+            f"`use_mla_absorbed_mqa=True` requires `attention` to be 'dot_product' or 'autoselected', "
+            f"but found attention='{self.attention}'."
+        )
+      if self.mla_naive_kvcache:
+        raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with `mla_naive_kvcache=True`.")
+      has_quant = (
+          self.quantize_kvcache
+          or self.use_qwix_quantization
+          or self.use_manual_quantization
+          or self.experimental_sa_quant_q_fp8
+          or self.experimental_sa_quant_k_fp8
+          or (self.quantization and self.quantization not in (QuantizationType.NONE, QuantizationType.TE_NO_QUANT))
+      )
+      if has_quant:
+        raise ValueError("`use_mla_absorbed_mqa=True` is incompatible with quantization or FP8 options.")
     if self.attention_type == AttentionType.CHUNK.value and (
         not isinstance(self.chunk_attn_window_size, int) or self.chunk_attn_window_size <= 0
     ):
@@ -4655,6 +4932,8 @@ class MaxTextConfig(
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    if self.mtp_reuse_input_embedding and self.use_multimodal:
+      raise ValueError("`mtp_reuse_input_embedding` does not support multimodal inputs.")
     if self.quantize_mtp:
       if self.mtp_num_layers <= 0:
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
@@ -4756,9 +5035,13 @@ class MaxTextConfig(
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
       self.validate_moe_dropless_fallback()
+      self.validate_moe_log_max_load_ratio()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_topk_before_ep_all_gather()
+    self.validate_moe_quantize_combine_bwd_method()
     self.validate_mllog()
+    self.validate_retry_dropless_first_steps_and_first_phase_buffer()
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:
@@ -5366,6 +5649,17 @@ class MaxTextConfig(
       )
 
     self._validate_check_vma_is_supported()
+    if self.defer_small_all_reduces:
+      if not (self.use_ring_of_experts and self.sparse_matmul):
+        raise ValueError(
+            "defer_small_all_reduces requires use_ring_of_experts=True and sparse_matmul=True (the deferral is"
+            " implemented on the ring-of-experts sparse_matmul path only)."
+        )
+      if self.moe_dropless_fallback == "layer":
+        raise ValueError(
+            "defer_small_all_reduces does not support moe_dropless_fallback='layer' (the in-layer fallback's two"
+            " branches would emit per-chunk counts of different chunkings)."
+        )
 
     # Final string-to-enum conversions if they haven't been coerced by pydantic yet.
     if isinstance(self.decoder_block, str):
@@ -5684,6 +5978,8 @@ class RLConfig(
           "context",
           "mlpwi",
           "moe_mlpwi_0",
+          "moe_x_sorted",
+          "moe_routing_maps",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",

@@ -95,10 +95,30 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       issues: write
+    outputs:
+      issue_number: ${{ steps.create_issue.outputs.issue-number }}
     steps:
       - name: Create issue on failure
+        id: create_issue
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           title-template: "MaxText GPU Docker Image Build Failure"
           label-name: "gpu-docker-image-build-failure"
+
+  investigate_failure:
+    name: Investigate failed build # investigates the failure and comments on the tracking issue
+    needs: [build_and_push_docker_images, run_ci_tests, notify_failure]
+    if: ${{ failure() && (github.event_name == 'schedule' || inputs.repository_name == 'maxtext-images') }}
+    uses: ./.github/workflows/gemini_investigate.yml
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+      actions: 'read'
+    with:
+      failed_run_id: '${{ github.run_id }}'
+      tracking_issue_number: '${{ needs.notify_failure.outputs.issue_number }}'
+    secrets:
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}

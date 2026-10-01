@@ -70,7 +70,7 @@ The router computes affinity logits via $s = \mathrm{score}(x W_g) + b$, where $
 
 `routed_bias`: If enabled, adds a learnable bias term to the gate logits to facilitate load balancing.
 
-`routed_bias_update_rate`: Defines the update rate to the routed bias term above. Applicable only to the DeepSeek decoder block. For DeepSeek V4, this enables a specialized, auxiliary-loss-free routing bias mechanism. This implementation utilizes a pure `nnx.Variable` (`MoEBiasVar`) instead of a standard `nnx.Param`, which completely isolates the bias update step from the global model optimizer state. The bias is updated directly at the end of the routing step to balance the token distribution mathematically across experts without compromising language modeling convergence.
+`routed_bias_update_rate`: Defines the update rate to the routed bias term above. Applicable only to the DeepSeek decoder block. For DeepSeek V4, this enables a specialized, auxiliary-loss-free routing bias mechanism. This implementation utilizes a pure `nnx.Variable` (`MoEBiasVar`) instead of a standard `nnx.Param`, which completely isolates the bias update step from the global model optimizer state. The bias is updated directly at the end of the routing step to balance the token distribution mathematically across experts without compromising language modeling convergence. The update is `routed_bias_update_rate * sign(mean_load - load)`, computed from the expert token counts of the full global batch (summed over `num_moe_token_chunks`), as in Megatron-LM.
 
 `float32_gate_logits` (default: `False`): Runs the MoE router computation before GMM ($s = \mathrm{score}(x W_g) + b$) in `float32` for numerical stability. Operands ($x$, $W_g$) are stored in `weight_dtype` and cast to `float32` at compute time; emitted logits $s$ remain `float32` for downstream Top-K and load-balancing losses. For `gemma4`, the router norm and scale are also computed in `float32`.
 
@@ -89,7 +89,9 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `routed_scaling_factor`: A scalar multiplier applied to the expert weights.
 
-`load_balance_loss_weight`: Sets the coefficient for the auxiliary loss term used to encourage balanced token distribution among experts.
+`load_balance_loss_weight`: Sets the coefficient for the auxiliary loss term used to encourage balanced token distribution among experts. By default (`moe_use_megatron_seq_aux_loss=False`), routers use a Switch Transformer-style loss averaged over MoE layers. When `moe_use_megatron_seq_aux_loss=True`, sigmoid routers (`routed_score_func="sigmoid"`, e.g. DeepSeek-V3) use Megatron-LM's sequence-wise aux loss (`seq_aux_loss`): the probabilities are the `float32` sigmoid scores normalized per token, the token fractions come from a top-k without the routing bias or group limit, the loss is computed per full sequence, and the per-layer losses are summed over MoE layers.
+
+`moe_use_megatron_seq_aux_loss` (default: `False`): Selects whether sigmoid routers (`routed_score_func="sigmoid"`, with `te_moe_block=False`) use Megatron-LM's sequence-wise auxiliary load-balancing loss summed across MoE layers (`True`) or the Switch Transformer-style auxiliary loss averaged across MoE layers (`False`).
 
 `norm_topk_prob`: If enabled, normalizes the router weights for the selected top-k experts.
 
@@ -123,8 +125,10 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 `moe_dropless_fallback`: What to do when `ragged_buffer_factor > 0` and the ragged buffer would drop tokens. This allows training with a smaller tuned buffer for speed/memory efficiency while guaranteeing no token dropping. Requires `use_ring_of_experts=True` and `use_ragged_sort=True`.
 
 - `None` (default): tokens that overflow the buffer are dropped.
-- `step`: the step is run with the capped buffer; if any layer overflows, the candidate state is discarded and the entire train step is replayed with a worst-case (dropless) buffer. State donation is disabled and the host checks for overflow after every step.
+- `step`: the step is run with the capped buffer; if any layer overflows, the step discards its own update in-graph and the entire train step is replayed with a worst-case (dropless) buffer from the state it returned. State donation stays enabled (input/output aliased), since the replay never needs a second copy of the state, and the host checks for overflow after every step. Not supported with `enable_diloco` or `compiled_trainstep_file`, neither of which has a dropless replay executable, nor with `optimizer_memory_host_offload` or `parameter_memory_host_offload`.
 - `layer`: MoE layer calculates from the router's top-k whether its ragged buffer would overflow, then uses `lax.cond` to run either the normal capped path or a chunked dropless path for that layer only. Nothing is replayed, state donation stays enabled, and there is no per-step host sync.
+
+`moe_log_max_load_ratio` (debug, default `False`): Logs `learning/moe_max_load_ratio` and `learning/moe_max_load_ratio_mean`, the max and mean over MoE layers of the largest expert-shard load divided by the perfectly balanced load. A step overflows the ragged buffer when the max exceeds `ragged_buffer_factor`, so these metrics help size it. Requires `use_ring_of_experts=True` and `use_ragged_sort=True`.
 
 `use_custom_sort_vjp`: If enabled, use a custom Vector-Jacobian Product (VJP) sort for efficient backward pass processing in sparse matmul. Recommended to replace the inefficient scatter-add generated by the `jax.numpy.take` in the backward pass.
 
@@ -150,6 +154,8 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 `use_ring_of_experts` (experimental): This feature requires expert parallelism. If enabled, it replaces the standard two All-to-All communications with All-Gather in dispatch and Reduce-Scatter in collect. By gathering inputs across all shards, it allows for local routing and Top-K calculations, followed by result aggregation via Reduce-Scatter. This approach is particularly effective for models with a large Top-K, as it gathers activations before they are replicated k times to reduce communication.
 
 `moe_quantize_token_all_gather`: If enabled, quantizes token activations to the quantized dtype (e.g. FP8) prior to the Ring of Experts All-Gather across the EP mesh axis, reducing inter-chip communication volume proportionally to the quantized width (2x for FP8 vs BF16). Requires `use_ring_of_experts=True`, `use_gmm_v2=True`, and static activation calibration. See [Quantization guide](quantization.md) for full pipeline details. Default is `False`.
+
+`moe_topk_before_ep_all_gather`: If enabled with `use_ring_of_experts=True`, each expert shard runs top-k on its local tokens and all-gathers only the resulting `(batch, seq, num_experts_per_tok)` weights and expert ids, instead of all-gathering the `(batch, seq, num_experts)` router logits and repeating top-k on the full gathered batch on every shard. This removes the redundant top-k and cuts the router all-gather (and its backward reduce-scatter) by a factor of `num_experts / num_experts_per_tok`. Only the top-k (the index map) moves before the all-gather; the token sort/permutation still happens after it. Expert assignment is unchanged, and loss and gradients match up to floating-point summation order. Ignored with forced, hash or random routing. Default is `False`.
 
 `moe_fsdp_use_two_stage_all_gather`: If enabled, split the All-Gather operation for MoE weights into two separate stages when using FSDP/FSDP-transpose sharding. This is preferred when 3D All-Gather support is unavailable.
 

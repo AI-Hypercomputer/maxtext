@@ -265,6 +265,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
@@ -276,6 +277,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           "dataset_type=synthetic",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
@@ -289,6 +291,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           "per_device_batch_size=0.25",
           "ici_tensor_parallelism=4",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
@@ -304,6 +307,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
@@ -317,6 +321,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
@@ -330,6 +335,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
@@ -342,6 +348,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides
@@ -355,6 +362,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides
@@ -370,6 +378,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
@@ -383,6 +392,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
@@ -396,6 +406,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
       ]
       + _small_model_overrides,
@@ -408,6 +419,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           "max_target_length=128",
           "per_device_batch_size=1",
           "dropout_rate=0.02",
@@ -422,6 +434,7 @@ class TrainTests(unittest.TestCase):
           "steps=2",
           "enable_checkpointing=False",
           "enable_goodput_recording=False",
+          "enable_tensorboard=False",
           "dataset_type=hf",
           "hf_path=parquet",
           f"hf_train_files={dataset_path}/hf/c4/c4-train-00000-of-01637.parquet",
@@ -526,7 +539,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   def test_moe_nanoo_fp8(self):
-    train_main(TrainTests.CONFIGS["moe"] + ["quantization=nanoo_fp8", "enable_tensorboard=False"])
+    train_main(TrainTests.CONFIGS["moe"] + ["quantization=nanoo_fp8"])
 
   @pytest.mark.integration_test
   def test_moe_fp8_token_dropping(self):
@@ -542,7 +555,7 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   def test_moe_nanoo_fp8_sparse_matmul(self):
-    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=nanoo_fp8", "enable_tensorboard=False"])
+    train_main(TrainTests.CONFIGS["moe_sparse"] + ["quantization=nanoo_fp8"])
 
   # int8 takes the `quant_dg` branch of the same read, which the fp8 tests never reach.
   @pytest.mark.integration_test

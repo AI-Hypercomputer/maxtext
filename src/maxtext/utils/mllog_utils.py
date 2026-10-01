@@ -198,6 +198,29 @@ def _axis_product(config, *names) -> int:
   return product
 
 
+# Bits per element of the MLPerf pre-approved numerical formats, used to pick the lowest of several.
+_PRECISION_BITS = {
+    "fp64": 64,
+    "fp32": 32,
+    "tf32": 19,
+    "fp16": 16,
+    "bfloat16": 16,
+    "fp8": 8,
+    "int8": 8,
+    "uint8": 8,
+    "mxfp6": 6,
+    "nvfp4": 4,
+    "mxfp4": 4,
+    "int4": 4,
+    "uint4": 4,
+}
+
+
+def _lowest_precision(*precisions: str) -> str:
+  """Returns the precision with the fewest bits (the first on ties); unknown formats rank lowest, so they surface."""
+  return min(precisions, key=lambda p: _PRECISION_BITS.get(p, 0))
+
+
 def init_print(config):
   """Logs the static submission and hyperparameter events for compliance checking."""
   setup_mllog(config)
@@ -237,7 +260,15 @@ def init_print(config):
   # MLPerf v6.1 mandatory precision, parallelism, micro-batch size, and config filename disclosure.
   dtype_str = _mllog_precision(getattr(config, "dtype", "bfloat16"))
   linear_prec = _mllog_precision(getattr(config, "quantization", None), fallback=dtype_str)
-  comm_prec = _mllog_precision(getattr(config, "grad_dtype", None), fallback=dtype_str)
+  comm_precisions = [_mllog_precision(getattr(config, "grad_dtype", None), fallback=dtype_str)]
+  if (
+      getattr(config, "moe_quantize_token_all_gather", False)
+      and getattr(config, "quantization", "")
+      and _axis_product(config, "ici_expert_parallelism", "dcn_expert_parallelism") > 1
+  ):
+    # The ring-of-experts EP all-gather sends tokens quantized with the GMM activation qtype (fp8 for fp8_full).
+    comm_precisions.append(linear_prec)
+  comm_prec = _lowest_precision(*comm_precisions)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_LINEAR, linear_prec)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_ATTN, dtype_str)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_COMM, comm_prec)

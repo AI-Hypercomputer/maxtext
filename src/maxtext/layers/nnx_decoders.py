@@ -1458,7 +1458,7 @@ class NNXDecoder(nnx.Module):
     y = (
         decoder_input_embeddings
         if decoder_input_embeddings is not None
-        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+        else self.embed_tokens(shared_embedding, decoder_input_tokens, model_mode)
     )
 
     # Precomputed embeddings are complete (including any multimodal replacements),
@@ -1550,6 +1550,10 @@ class NNXDecoder(nnx.Module):
       y += self.position_embedder(decoder_positions.astype("int32"), model_mode=model_mode)
 
     return y
+
+  def embed_tokens(self, shared_embedding, decoder_input_tokens, model_mode):
+    """Looks up the token embeddings, before dropout and positional embeddings."""
+    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
   def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
     """Applies final normalization and projects hidden states to logits.
@@ -1986,7 +1990,7 @@ class NNXDecoder(nnx.Module):
           elif cfg.use_lineage:
             if lineage_adapter is None:
               raise ImportError("use_lineage=True requires the Google-internal lineage_adapter.")
-            y, lineage_lb_loss = lineage_adapter.run_lineage_dsv3(
+            y, lineage_lb_loss, lineage_bias_updates = lineage_adapter.run_lineage_dsv3(
                 inputs=y,
                 dense_params=self._build_linen_params(self.dense_layers),
                 sparse_params=self._build_linen_params(self.moe_layers),
@@ -1997,6 +2001,8 @@ class NNXDecoder(nnx.Module):
             )
             if lineage_lb_loss is not None:
               self.sow(nnx.Intermediate, "moe_lb_loss", lineage_lb_loss)
+            if lineage_bias_updates is not None:
+              self.sow(nnx.Intermediate, "moe_bias_updates", lineage_bias_updates)
           else:
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,

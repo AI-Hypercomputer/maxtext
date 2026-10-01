@@ -20,6 +20,7 @@ import unittest.mock
 from absl.testing import absltest
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+from maxtext.layers import quantizations
 from maxtext.utils import globals as maxtext_globals
 import pydantic
 
@@ -1115,6 +1116,21 @@ class ConfigTest(absltest.TestCase):
     ]
     config = pyconfig.initialize(argv)
     self.assertEqual(config.quantization, "serve_fp8_weight")
+
+  def test_serve_fp8_weight_threads_act_calibration_method(self):
+    """Tests that serve_fp8_weight picks up act_quantization_calibration_method."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "act_quantization_calibration_method=fixed,-224,224",
+    ]
+    quant = quantizations.configure_quantization(pyconfig.initialize(argv))
+    self.assertIsInstance(quant, quantizations.ServeFp8WeightQuantization)
+    self.assertEqual(quant.act_calibration_method, "fixed,-224,224")
 
   def test_serve_fp8_weight_requires_fp8_weight_dtype(self):
     """Tests that serve_fp8_weight requires an FP8 weight_dtype."""
