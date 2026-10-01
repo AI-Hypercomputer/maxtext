@@ -66,3 +66,4 @@ use_indexer: true
 indexer_n_heads: 32
 indexer_head_dim: 128
 indexer_topk: 2048
+indexer_rope_interleave: true

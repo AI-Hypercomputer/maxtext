@@ -67,6 +67,7 @@ use_indexer: true
 indexer_n_heads: 32
 indexer_head_dim: 128
 indexer_topk: 2048
+indexer_rope_interleave: true
 
 # GLM-5.2 Cross-Layer IndexCache / IndexShare (Exact 78-layer HF topology: 3 Dense Full + 18x(3 Shared + 1 Full) + 3 Shared)
 use_index_share: true
