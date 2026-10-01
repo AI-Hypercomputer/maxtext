@@ -31,13 +31,13 @@ import numpy as np
 import optax
 
 
-def _config():
-  """Returns a CheckpointManager config for the on-disk Pathways persistence format."""
+def _config(use_ocdbt: bool = False):
+  """Returns a CheckpointManager config; Zarr v2 (Pathways persistence layout) by default, OCDBT packfiles if set."""
   return SimpleNamespace(
       checkpoint_period=1,
       max_num_checkpoints_to_keep=5,
       async_checkpointing=False,
-      checkpoint_storage_use_ocdbt=False,
+      checkpoint_storage_use_ocdbt=use_ocdbt,
       checkpoint_storage_use_zarr3=False,
       checkpoint_storage_device_host_concurrent_gb=None,
       checkpoint_storage_concurrent_gb=96,
@@ -166,35 +166,103 @@ class TrainingEngineCheckpointFormatTest(unittest.TestCase):
           )
           self.assertEqual(restored_step, 1)
 
-          # 4. Verify model parameters bit-exactness and dtype parity
-          want_params = _leaves(nnx.state(save_model))
-          got_params = _leaves(nnx.state(fresh_model))
-          self.assertEqual(got_params.keys(), want_params.keys())
-          self.assertEqual(len(got_params), 2)  # Load-bearing parameter leaf counter
-          for name, want in want_params.items():
-            got = got_params[name]
-            self.assertEqual(got.dtype, want.dtype, msg=f"Param dtype mismatch at {name}")
-            self.assertEqual(
-                np.asarray(got).tobytes(),
-                np.asarray(want).tobytes(),
-                msg=f"Param bit mismatch at {name}",
-            )
-            self.assertTrue(bool(jnp.array_equal(got, want)), msg=f"Param array_equal at {name}")
+          # 4-5. Verify model parameters and optimizer state bit-exactness and dtype parity
+          self._assert_state_matches(save_model, save_opt, fresh_model, fresh_opt)
 
-          # 5. Verify optimizer state bit-exactness and dtype parity
-          want_opt = _leaves(nnx.state(save_opt, nnx.optimizer.OptState))
-          got_opt = _leaves(nnx.state(fresh_opt, nnx.optimizer.OptState))
-          self.assertEqual(got_opt.keys(), want_opt.keys())
-          self.assertEqual(len(got_opt), 6)  # Load-bearing optimizer leaf counter (step, count, mu x2, nu x2)
-          for name, want in want_opt.items():
-            got = got_opt[name]
-            self.assertEqual(got.dtype, want.dtype, msg=f"OptState dtype mismatch at {name}")
-            self.assertEqual(
-                np.asarray(got).tobytes(),
-                np.asarray(want).tobytes(),
-                msg=f"OptState bit mismatch at {name}",
+  def _assert_state_matches(self, save_model, save_opt, fresh_model, fresh_opt):
+    """Asserts restored params (2 leaves) and optimizer state (6 leaves) are bit-exact and dtype-identical."""
+    want_params = _leaves(nnx.state(save_model))
+    got_params = _leaves(nnx.state(fresh_model))
+    self.assertEqual(got_params.keys(), want_params.keys())
+    self.assertEqual(len(got_params), 2)  # Load-bearing parameter leaf counter
+    for name, want in want_params.items():
+      got = got_params[name]
+      self.assertEqual(got.dtype, want.dtype, msg=f"Param dtype mismatch at {name}")
+      self.assertEqual(
+          np.asarray(got).tobytes(),
+          np.asarray(want).tobytes(),
+          msg=f"Param bit mismatch at {name}",
+      )
+      self.assertTrue(bool(jnp.array_equal(got, want)), msg=f"Param array_equal at {name}")
+
+    want_opt = _leaves(nnx.state(save_opt, nnx.optimizer.OptState))
+    got_opt = _leaves(nnx.state(fresh_opt, nnx.optimizer.OptState))
+    self.assertEqual(got_opt.keys(), want_opt.keys())
+    self.assertEqual(len(got_opt), 6)  # Load-bearing optimizer leaf counter (step, count, mu x2, nu x2)
+    for name, want in want_opt.items():
+      got = got_opt[name]
+      self.assertEqual(got.dtype, want.dtype, msg=f"OptState dtype mismatch at {name}")
+      self.assertEqual(
+          np.asarray(got).tobytes(),
+          np.asarray(want).tobytes(),
+          msg=f"OptState bit mismatch at {name}",
+      )
+      self.assertTrue(bool(np.array_equal(np.asarray(got), np.asarray(want))), msg=f"OptState array_equal at {name}")
+
+  def _save_ocdbt(self, case_dir, dtype, host_offload=False):
+    """Saves step 1 with use_ocdbt=True and returns the (model, optimizer) that were saved."""
+    save_model, save_opt = _build_model_and_optimizer(dtype, factor=1.0)
+    if host_offload:
+      _apply_host_offload(save_opt)
+    save_mgr = checkpointing.CheckpointManager(case_dir, _config(use_ocdbt=True))
+    saved = save_mgr.save_checkpoint(
+        step=1,
+        checkpoint_state=checkpointing.CheckpointState(model=save_model, optimizer=save_opt),
+    )
+    save_mgr.wait_until_finished()
+    save_mgr.close()
+    self.assertTrue(saved)
+    return save_model, save_opt
+
+  def test_ocdbt_format_matrix_save_and_restore(self):
+    """OCDBT packfile layout: no loose .zarray objects, manifest present, bit-exact restore across the dtype matrix."""
+    dtypes = (jnp.bfloat16, jnp.float32, jnp.float8_e4m3fn, jnp.float8_e5m2)
+    for dtype in dtypes:
+      for host_offload in (False, True):
+        dtype_name = getattr(dtype, "__name__", str(dtype))
+        with self.subTest(dtype=dtype_name, host_offload=host_offload):
+          case_dir = os.path.join(self.ckpt_dir, f"ocdbt_{dtype_name}_{host_offload}")
+          os.makedirs(case_dir, exist_ok=True)
+          save_model, save_opt = self._save_ocdbt(case_dir, dtype, host_offload)
+
+          # On-disk format: zero per-array .zarray files, a merged root manifest.ocdbt per item, no zarr3.
+          step_dir = os.path.join(case_dir, "1")
+          zarrays = glob.glob(os.path.join(step_dir, "**", ".zarray"), recursive=True)
+          self.assertEqual(len(zarrays), 0, msg=f"OCDBT wrote loose .zarray files: {zarrays}")
+          for item in ("model_params", "optimizer_state"):
+            self.assertTrue(
+                os.path.exists(os.path.join(step_dir, item, "manifest.ocdbt")),
+                msg=f"missing merged root manifest.ocdbt for {item}",
             )
-            self.assertTrue(bool(np.array_equal(np.asarray(got), np.asarray(want))), msg=f"OptState array_equal at {name}")
+          self.assertEqual(glob.glob(os.path.join(case_dir, "**", "zarr.json"), recursive=True), [])
+
+          fresh_model, fresh_opt = _build_model_and_optimizer(dtype, factor=0.0)
+          if host_offload:
+            _apply_host_offload(fresh_opt)
+          restore_mgr = checkpointing.CheckpointManager(case_dir, _config(use_ocdbt=True))
+          self.addCleanup(restore_mgr.close)
+          restored_step, _, _ = restore_mgr.restore_checkpoint(
+              checkpointing.CheckpointState(model=fresh_model, optimizer=fresh_opt),
+              step=1,
+          )
+          self.assertEqual(restored_step, 1)
+          self._assert_state_matches(save_model, save_opt, fresh_model, fresh_opt)
+
+  def test_ocdbt_checkpoint_restorable_by_zarr2_configured_reader(self):
+    """A reader configured with use_ocdbt=False still restores an OCDBT checkpoint (Orbax detects manifest.ocdbt)."""
+    case_dir = os.path.join(self.ckpt_dir, "ocdbt_cross_reader")
+    os.makedirs(case_dir, exist_ok=True)
+    save_model, save_opt = self._save_ocdbt(case_dir, jnp.bfloat16)
+
+    fresh_model, fresh_opt = _build_model_and_optimizer(jnp.bfloat16, factor=0.0)
+    restore_mgr = checkpointing.CheckpointManager(case_dir, _config(use_ocdbt=False))
+    self.addCleanup(restore_mgr.close)
+    restored_step, _, _ = restore_mgr.restore_checkpoint(
+        checkpointing.CheckpointState(model=fresh_model, optimizer=fresh_opt),
+        step=1,
+    )
+    self.assertEqual(restored_step, 1)
+    self._assert_state_matches(save_model, save_opt, fresh_model, fresh_opt)
 
   def test_fp8_restore_into_bfloat16_target_fails_or_mismatches(self):
     """Verifies Slice F mutation check: restoring FP8 checkpoint into bfloat16 target fails bit-exactness against saved FP8."""
