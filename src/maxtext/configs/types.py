@@ -1074,6 +1074,10 @@ class MoEGeneral(BaseModel):
           " use_ring_of_experts=True."
       ),
   )
+  moe_accumulate_chunk_wgrad: bool = Field(
+      False,
+      description="Accumulate MoE weight gradients in-place across token chunks via tgmm_v2 partial_sum.",
+  )
   moe_chunk_barrier: bool = Field(
       False,
       description=(
