@@ -103,6 +103,45 @@ class TrainSFTTest(unittest.TestCase):
       params = list(sig.parameters.keys())
       self.assertEqual(params, ["model", "optimizer", "grad_accumulator", "inputs", "is_update_step"])
 
+  def test_use_maxtext_loss_function_eval_uses_is_train_false(self):
+    """Test that train loss runs with is_train=True and eval loss runs with is_train=False."""
+
+    class FakeTrainer:
+      """Mimics Tunix PeftTrainer.with_loss_fn, which sets both loss_fn and eval_loss_fn."""
+
+      def with_loss_fn(self, loss_fn, has_aux=False):
+        self.loss_fn = loss_fn
+        self.eval_loss_fn = loss_fn
+        self.has_aux = has_aux
+        return self
+
+    batch = {
+        "inputs": "inputs",
+        "inputs_position": "inputs_position",
+        "inputs_segmentation": "inputs_segmentation",
+        "targets": "targets",
+        "targets_position": "targets_position",
+        "targets_segmentation": "targets_segmentation",
+    }
+    mt_config = SimpleNamespace()
+    model = mock.MagicMock()
+
+    with mock.patch.object(train_sft, "loss_fn", return_value=(0.0, {})) as mock_loss_fn:
+      trainer = train_sft.use_maxtext_loss_function(FakeTrainer(), mt_config)
+      self.assertTrue(trainer.has_aux)
+      self.assertIsNot(trainer.loss_fn, trainer.eval_loss_fn)
+
+      trainer.loss_fn(model, **batch)
+      _, train_kwargs = mock_loss_fn.call_args
+      self.assertTrue(train_kwargs["is_train"])
+
+      trainer.eval_loss_fn(model, **batch)
+      eval_args, eval_kwargs = mock_loss_fn.call_args
+      self.assertFalse(eval_kwargs["is_train"])
+      self.assertIs(eval_args[0], model)
+      self.assertIs(eval_args[1], mt_config)
+      self.assertEqual(eval_args[2], batch)
+
 
 if __name__ == "__main__":
   unittest.main()
