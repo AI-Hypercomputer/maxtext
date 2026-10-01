@@ -19,6 +19,7 @@ import dataclasses
 import enum
 import functools
 import inspect
+import itertools
 import math
 import random
 from typing import Any, Iterable, Optional, Tuple, Union
@@ -823,6 +824,30 @@ def _moe_combine_psum_scatter_bwd(
 
 
 _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
+
+
+# Source of `_scheduling_group_id`s for moe_combine_rs_chunk_overlap. Ids only need to be unique within
+# one traced program; start high so they cannot collide with the small fixed ids other schedules use.
+_COMBINE_OVERLAP_GROUP_IDS = itertools.count(20_000)
+
+
+def _scheduling_group_call(group_id: int, fn):
+  """Returns `fn` with its forward-pass ops tagged `_scheduling_group_id=group_id`; the backward is untagged.
+
+  XLA's latency hiding scheduler keeps all instructions of one scheduling group together: the group's
+  async collectives are started before, and waited for after, the group's compute. Tagging chunk c's
+  expert GMMs and chunk c-1's combine reduce-scatter with the same id therefore forces the
+  reduce-scatter to be in flight while the GMMs run. Unlike `jax.lax.optimization_barrier`, the
+  annotation survives the default `xla_tpu_aggressive_opt_barrier_removal` setting and it adds no
+  copies or extra buffers: it only constrains the instruction order. `ad_metadata="drop"` keeps the
+  transposed (backward) ops untagged so the backward schedule is unchanged.
+  """
+  call2 = getattr(xla_metadata, "xla_metadata_call2", None)
+  if call2 is None:
+    raise NotImplementedError(
+        "moe_combine_rs_chunk_overlap needs jax.experimental.xla_metadata.xla_metadata_call2 (newer JAX)."
+    )
+  return call2(fn, {"_scheduling_group_id": group_id}, ad_metadata="drop")
 
 
 class RoutedMoE(nnx.Module):
@@ -3157,7 +3182,13 @@ class RoutedMoE(nnx.Module):
         rngs,
         forced_routed_experts=None,
         force_dropless=False,
+        combine_overlap=None,
     ):
+      # combine_overlap (moe_combine_rs_chunk_overlap, chunked ring-of-experts only): a dict with
+      # "group_id" (scheduling group of this chunk's expert GMMs) and "mode". The combine
+      # (unpermute + reduce-scatter) is then NOT applied here; `output` is returned as
+      # (intermediate_output, unpermute_fn, reduce_scatter_fn) so the caller can issue the previous
+      # chunk's reduce-scatter inside this chunk's scheduling group.
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
@@ -3205,67 +3236,93 @@ class RoutedMoE(nnx.Module):
           w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
         gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
-        output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
+        output0 = output1 = None  # with combine_overlap the up GMMs run inside _expert_compute below
+        if combine_overlap is None:
+          output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
 
-      intermediate_layer = self.apply_ffn_activation(output0, output1)
-      wo_gather_axes, wo_tile_size = get_wo_gmm_params()
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-      )
-      if self.get_tensor_parallelism_size() > 1:
-        intermediate_output = jax.lax.psum_scatter(
-            intermediate_output,
-            self._tensor_parallelism_name,
-            scatter_dimension=1,
-            tiled=True,
+      def _wo_and_bias(intermediate_layer, wo, wo_bias):
+        wo_gather_axes, wo_tile_size = get_wo_gmm_params()
+        intermediate_output = gmm_fn(
+            intermediate_layer,
+            wo,
+            tiling=wo_tile_size,
+            weight_gather_axes=wo_gather_axes,
         )
-      if self.config.mlp_bias:
-        mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(intermediate_output, routing, route_metadata)
-        intermediate_output = intermediate_output + wo_bias
-        intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
+        if self.get_tensor_parallelism_size() > 1:
+          intermediate_output = jax.lax.psum_scatter(
+              intermediate_output,
+              self._tensor_parallelism_name,
+              scatter_dimension=1,
+              tiled=True,
+          )
+        if self.config.mlp_bias:
+          mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(
+              intermediate_output, routing, route_metadata
+          )
+          intermediate_output = intermediate_output + wo_bias
+          intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
+        return intermediate_output
+
+      if combine_overlap is None:
+        intermediate_layer = self.apply_ffn_activation(output0, output1)
+        intermediate_output = _wo_and_bias(intermediate_layer, wo, wo_bias)
+      else:
+        # All expert compute of this chunk (up GMMs -> activation -> wo GMM) in one scheduling group,
+        # shared with the previous chunk's combine reduce-scatter (issued by the caller).
+        def _expert_compute(x, w0, w1, wo, w0_bias, w1_bias, wo_bias):
+          output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
+          return _wo_and_bias(self.apply_ffn_activation(output0, output1), wo, wo_bias)
+
+        intermediate_output = _scheduling_group_call(combine_overlap["group_id"], _expert_compute)(
+            x, w0, w1, wo, w0_bias, w1_bias, wo_bias
+        )
       intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
-        # Unsort and deduplicate the outputs locally.
-        output = self.unpermute(
-            intermediate_output,
-            routing.sorted_selected_experts,
-            routing.weights,
-            batch_size=batch_size,
-            sequence_length=sequence_length,
-            use_custom_sort_vjp=self.config.use_custom_sort_vjp,
-            group_sizes=routing.group_sizes,
-            topk_argsort_indices=routing.topk_argsort_indices,
-        )
 
-        # Sum up the partial outputs across the expert shards.
-        output = jnp.reshape(
-            output,
-            (
-                -1,
-                sequence_length,
-                self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
-            ),
-        )
-        combine_bwd_method = self.config.moe_quantize_combine_bwd_method
-        if combine_bwd_method:
-          output = _moe_combine_psum_scatter(
+        def _unpermute(intermediate_output):
+          # Unsort and deduplicate the outputs locally.
+          output = self.unpermute(
+              intermediate_output,
+              routing.sorted_selected_experts,
+              routing.weights,
+              batch_size=batch_size,
+              sequence_length=sequence_length,
+              use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+              group_sizes=routing.group_sizes,
+              topk_argsort_indices=routing.topk_argsort_indices,
+          )
+          return jnp.reshape(
+              output,
+              (
+                  -1,
+                  sequence_length,
+                  self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
+              ),
+          )
+
+        def _reduce_scatter(output):
+          # Sum up the partial outputs across the expert shards.
+          combine_bwd_method = self.config.moe_quantize_combine_bwd_method
+          if combine_bwd_method:
+            return _moe_combine_psum_scatter(
+                output,
+                self._expert_parallelism_name,
+                scatter_dimension=0,
+                tiled=True,
+                bwd_method=combine_bwd_method,
+            )
+          return jax.lax.psum_scatter(
               output,
               self._expert_parallelism_name,
               scatter_dimension=0,
               tiled=True,
-              bwd_method=combine_bwd_method,
           )
+
+        if combine_overlap is None:
+          output = _reduce_scatter(_unpermute(intermediate_output))
         else:
-          output = jax.lax.psum_scatter(
-              output,
-              self._expert_parallelism_name,
-              scatter_dimension=0,
-              tiled=True,
-          )
+          output = (intermediate_output, _unpermute, _reduce_scatter)
         return (
             output,
             routing.lb_loss,
@@ -3377,6 +3434,16 @@ class RoutedMoE(nnx.Module):
       if barrier_enabled is None:
         barrier_enabled = self.config.moe_chunk_barrier
 
+      def _finish_combine(pending, combine_overlap):
+        """Unpermute + reduce-scatter a deferred chunk output, optionally inside the next chunk's scheduling group."""
+        intermediate_output, unpermute_fn, reduce_scatter_fn = pending
+        if combine_overlap is None:
+          return reduce_scatter_fn(unpermute_fn(intermediate_output))
+        group_id = combine_overlap["group_id"]
+        if combine_overlap["mode"] == "unpermute_rs":
+          return _scheduling_group_call(group_id, lambda t: reduce_scatter_fn(unpermute_fn(t)))(intermediate_output)
+        return _scheduling_group_call(group_id, reduce_scatter_fn)(unpermute_fn(intermediate_output))
+
       def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
         if n_chunks <= 1 or not self.config.use_ring_of_experts:
@@ -3412,6 +3479,13 @@ class RoutedMoE(nnx.Module):
         chunk = seq_len // n_chunks
         outs, lb_losses, bias_updates_list, has_overflows, required_rbfs, max_load_ratios = [], [], [], [], [], []
         _prev = None
+        # moe_combine_rs_chunk_overlap: XLA schedules both chunks' combine reduce-scatters after both
+        # chunks' GMMs (they then queue serially on the SparseCore and the TensorCore idles until the
+        # last one is done). Put chunk c's expert GMMs and chunk c-1's reduce-scatter into one XLA
+        # scheduling group, so the reduce-scatter is in flight while the GMMs run. "unpermute_rs" also
+        # moves chunk c-1's unpermute (SparseCore ragged gather-reduce) into the group.
+        overlap_mode = self.config.moe_combine_rs_chunk_overlap if self.config.num_moe_emb_chunks == 0 else ""
+        pending = None  # previous chunk's (intermediate_output, unpermute_fn, reduce_scatter_fn)
         for c in range(n_chunks):
           sl = slice(c * chunk, (c + 1) * chunk)
           x_c = x[:, sl, :]
@@ -3421,6 +3495,9 @@ class RoutedMoE(nnx.Module):
           # loss stays bit-exact.
           if barrier_enabled and _prev is not None:
             x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
+          combine_overlap = None
+          if overlap_mode:
+            combine_overlap = {"group_id": next(_COMBINE_OVERLAP_GROUP_IDS), "mode": overlap_mode}
           out_c, lb_c, bu_c, ov_c, req_c, ratio_c = _moe_body(
               x_c,
               logits[:, sl, :],
@@ -3435,8 +3512,15 @@ class RoutedMoE(nnx.Module):
               rngs,
               None if forced_routed_experts is None else forced_routed_experts[:, sl, :],
               force_dropless=force_dropless,
+              combine_overlap=combine_overlap,
           )
-          if barrier_enabled:
+          if overlap_mode:
+            if pending is not None:
+              # Previous chunk's combine, reduce-scatter in this chunk's scheduling group.
+              outs[c - 1] = _finish_combine(pending, combine_overlap)
+            pending = out_c
+            out_c = None  # filled in by _finish_combine below
+          if barrier_enabled and out_c is not None:
             _prev = out_c
           outs.append(out_c)
           lb_losses.append(lb_c)
@@ -3444,6 +3528,8 @@ class RoutedMoE(nnx.Module):
           has_overflows.append(ov_c)
           required_rbfs.append(req_c)
           max_load_ratios.append(ratio_c)
+        if overlap_mode:
+          outs[-1] = _finish_combine(pending, None)  # last chunk: nothing left to overlap with
         output = jnp.concatenate(outs, axis=1)
         lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
         if bias_updates_list[0] is None:

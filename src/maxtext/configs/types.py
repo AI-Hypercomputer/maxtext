@@ -1087,6 +1087,19 @@ class MoEGeneral(BaseModel):
           " effect."
       ),
   )
+  moe_combine_rs_chunk_overlap: Literal["", "rs", "unpermute_rs"] = Field(
+      "",
+      description=(
+          "Chunked ring-of-experts MoE (num_moe_token_chunks>1) only. By default XLA schedules the"
+          " combine reduce-scatters of all token chunks after the last chunk's expert GMMs, so they"
+          " queue serially on the SparseCore while the TensorCore idles. 'rs' puts chunk c's expert"
+          " GMMs and chunk c-1's combine reduce-scatter into one XLA scheduling group"
+          " (_scheduling_group_id), so the reduce-scatter runs while the GMMs run; 'unpermute_rs'"
+          " additionally moves chunk c-1's unpermute (ragged gather-reduce) into that group. Forward"
+          " math and the backward pass are unchanged (ordering only, no extra buffers); '' disables."
+          " Requires num_moe_token_chunks>1, use_ring_of_experts=True and num_moe_emb_chunks=0."
+      ),
+  )
   moe_log_max_load_ratio: bool = Field(
       False,
       description=(
@@ -1325,6 +1338,8 @@ class MoEGeneral(BaseModel):
   def validate_moe_chunks(self) -> "MoEGeneral":
     if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
       raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
+    if self.moe_combine_rs_chunk_overlap and (self.num_moe_token_chunks <= 1 or not self.use_ring_of_experts):
+      raise ValueError("moe_combine_rs_chunk_overlap requires num_moe_token_chunks > 1 and use_ring_of_experts=True.")
     return self
 
   @model_validator(mode="after")
