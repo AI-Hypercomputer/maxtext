@@ -15,6 +15,8 @@ Qwen3 is a family of open-source large language models from the Qwen team at Ali
 
 -   **Qwen3.5-35B-A3B**
 
+-   **Qwen3.8-2.4T-A95B**
+
 For more details on Qwen3 architecture, see the [Qwen3 Technical Report](https://arxiv.org/abs/2505.09388).
 
 For more details on Qwen3-Omni architecture, see the [Qwen3-Omni Technical Report](https://arxiv.org/abs/2509.17765).
@@ -207,4 +209,20 @@ export BASE_OUTPUT_PATH=gs://<YOUR-GCS-BUCKET>/qwen3.5-397b-a17b_maxtext_ckpt
 
 # 3. Execute the conversion and validation script
 bash tests/end_to_end/tpu/qwen/moe/qwen3.5-397b-a17b/1_test_qwen3.5_397b_a17b.sh
+```
+
+### Qwen3.8-2.4T-A95B
+
+```bash
+# 1. Export your Hugging Face token
+export HF_TOKEN="your_hf_token_here"
+
+# 2. Set the base path for conversion outputs
+export BASE_OUTPUT_PATH=gs://<YOUR-GCS-BUCKET>/qwen3.8-2.4t-a95b_maxtext_ckpt
+
+# (Optional) Set the path to your local Hugging Face checkpoint
+# export HF_MODEL_PATH=/path/to/local/qwen3.8-2.4t-a95b_hf_checkpoint
+
+# 3. Execute the conversion and validation script
+bash tests/end_to_end/tpu/qwen/moe/qwen3.8-2.4t-a95b/1_test_qwen3.8_2.4t_a95b.sh
 ```
