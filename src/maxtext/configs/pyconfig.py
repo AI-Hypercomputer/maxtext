@@ -179,6 +179,21 @@ def _merge_logical_axis_rules(base_rules, new_rules):
   return updated_rules
 
 
+def _spread_moe_experts_over_fsdp_rules(rules):
+  """moe_spread_experts_over_fsdp: rewrite rules in place of replacing them, so model-specific axes survive.
+  exp / activation_exp lead with the (expert, fsdp) expert-parallel group (same order as the MoE EP axis);
+  embed_moe drops only fsdp, so no tensor maps fsdp twice."""
+  out = []
+  for name, axes in rules:
+    axes = [] if axes is None else [axes] if isinstance(axes, str) else list(axes)
+    if name in ("exp", "activation_exp"):
+      axes = ["expert", "fsdp"] + [a for a in axes if a not in ("expert", "fsdp")]
+    elif name == "embed_moe":
+      axes = [a for a in axes if a != "fsdp"]
+    out.append([name, axes])
+  return out
+
+
 def _apply_rules(base_rules, new_rules, config):
   if config.get("override_logical_axis_rules"):
     return new_rules
@@ -559,6 +574,8 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
       except (ValueError, KeyError) as e:
         raise ValueError(f"Couldn't parse value from ENV '{new_proposal}' for key '{k}'") from e
 
+  if raw_keys_dict.get("moe_spread_experts_over_fsdp") and not raw_keys_dict.get("custom_mesh_and_rule"):
+    raw_keys_dict["logical_axis_rules"] = _spread_moe_experts_over_fsdp_rules(raw_keys_dict["logical_axis_rules"])
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict, config_class=config_class)
 
   if pydantic_kwargs.get("use_tokamax_splash") and pydantic_kwargs.get("use_jax_splash"):

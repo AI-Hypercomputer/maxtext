@@ -838,5 +838,46 @@ assert train._TF_AVAILABLE is False
       )
 
 
+  def _rules(self, **kw):
+    cfg = pyconfig.initialize([None, get_test_config_path()], skip_jax_distributed_system=True, **kw)
+    return {r[0]: r[1] for r in cfg.logical_axis_rules}, cfg
+
+  def test_moe_spread_experts_over_fsdp_off_keeps_rules(self):
+    rules, _ = self._rules(model_name="mixtral-8x7b")
+    self.assertEqual(rules["exp"], "expert")
+    self.assertIn("fsdp", rules["embed_moe"])
+
+  def test_moe_spread_experts_over_fsdp_on_rewrites_moe_rules_only(self):
+    rules, cfg = self._rules(model_name="mixtral-8x7b", moe_spread_experts_over_fsdp=True)
+    self.assertTrue(cfg.moe_spread_experts_over_fsdp)
+    self.assertEqual(list(rules["exp"]), ["expert", "fsdp"])
+    self.assertEqual(list(rules["activation_exp"]), ["expert", "fsdp"])
+    self.assertNotIn("fsdp", rules["embed_moe"])
+    self.assertIn("fsdp", rules["embed"])  # non-MoE weights still FSDP-sharded
+
+  def test_moe_spread_experts_over_fsdp_preserves_other_axes(self):
+    rules = [["exp", ["expert", "context_autoregressive"]], ["activation_exp", "expert"],
+             ["embed_moe", ["fsdp", "context_autoregressive", "tensor_transpose"]], ["mlp", ["tensor"]]]
+    got = dict((n, a) for n, a in pyconfig._spread_moe_experts_over_fsdp_rules(rules))  # pylint: disable=protected-access
+    self.assertEqual(got["exp"], ["expert", "fsdp", "context_autoregressive"])
+    self.assertEqual(got["activation_exp"], ["expert", "fsdp"])
+    self.assertEqual(got["embed_moe"], ["context_autoregressive", "tensor_transpose"])
+    self.assertEqual(got["mlp"], ["tensor"])
+
+  def test_moe_spread_experts_over_fsdp_divisibility(self):
+    with self.assertRaisesRegex(ValueError, "divisible"):
+      self._rules(model_name="mixtral-8x7b", moe_spread_experts_over_fsdp=True,
+                  ici_expert_parallelism=2, ici_fsdp_parallelism=8)  # 8 experts, EP*FSDP=16
+
+  def test_moe_spread_experts_over_fsdp_rejects_unsupported(self):
+    for extra in ({"shard_exp_on_fsdp": True}, {"use_ring_of_experts": True, "use_ragged_sort": True},
+                  {"sparse_matmul": False}, {"custom_mesh_and_rule": "shard-exp-on-fsdp"},
+                  {"dcn_fsdp_parallelism": 2}, {"dcn_expert_parallelism": 2},
+                  {"ici_fsdp_transpose_parallelism": 2}, {"attention": "vllm_rpa"},
+                  {"model_call_mode": "inference"}):
+      with self.subTest(extra=extra), self.assertRaises(ValueError):
+        self._rules(model_name="mixtral-8x7b", moe_spread_experts_over_fsdp=True, **extra)
+
+
 if __name__ == "__main__":
   unittest.main()

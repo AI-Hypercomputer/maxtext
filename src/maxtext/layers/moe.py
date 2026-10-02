@@ -948,8 +948,17 @@ class RoutedMoE(nnx.Module):
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
+    elif getattr(self.config, "moe_spread_experts_over_fsdp", False):
+      # fsdp joins the expert-parallel group inside routed MoE; order matches the 'exp' rule [expert, fsdp].
+      self._expert_parallelism_name = ("expert", "fsdp")
     else:
       self._expert_parallelism_name = "expert"
+    if getattr(self.config, "moe_spread_experts_over_fsdp", False) and self.num_experts % self.get_expert_parallelism_size():
+      # Config-time validation skips auto-filled (-1) degrees; check the resolved mesh here.
+      raise ValueError(
+          f"moe_spread_experts_over_fsdp requires num_experts ({self.num_experts}) to be divisible by the "
+          f"expert * fsdp mesh size ({self.get_expert_parallelism_size()})."
+      )
 
     if isinstance(self.quant, (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization)):
       einsum_names = [WI_0, WI_1, WO]
@@ -2437,10 +2446,12 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
         wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
-        # Update kernel pspec for FSDP AG
-        w0_pspec = remove_mesh_axes_from_partition_spec(w0_pspec, ("fsdp",))
-        w1_pspec = remove_mesh_axes_from_partition_spec(w1_pspec, ("fsdp",))
-        wo_pspec = remove_mesh_axes_from_partition_spec(wo_pspec, ("fsdp",))
+        # Update kernel pspec for FSDP AG. With moe_spread_experts_over_fsdp, fsdp is an expert-parallel
+        # axis: expert weights stay sharded over [expert, fsdp] into the GMM and are not gathered.
+        if not getattr(self.config, "moe_spread_experts_over_fsdp", False):
+          w0_pspec = remove_mesh_axes_from_partition_spec(w0_pspec, ("fsdp",))
+          w1_pspec = remove_mesh_axes_from_partition_spec(w1_pspec, ("fsdp",))
+          wo_pspec = remove_mesh_axes_from_partition_spec(wo_pspec, ("fsdp",))
       return (
           batch_logical_axis,
           input_partition_pspec,

@@ -369,6 +369,14 @@ moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
 shard_exp_on_fsdp: false
+# Use the FSDP mesh axis as an additional expert-parallel axis for routed (sparse_matmul) MoE:
+# expert weights are sharded over [expert, fsdp] and stay sharded through the expert GMM (no FSDP
+# weight all-gather), and routed tokens are exchanged over the combined (expert, fsdp) group, so
+# effective MoE EP = ici_expert_parallelism * ici_fsdp_parallelism. Non-MoE layers keep FSDP as usual.
+# Requires num_experts % (expert * fsdp) == 0 and sparse_matmul=True; not supported with Ring of
+# Experts, batch-split schedule, TE MoE block, vLLM RPA attention, multi-slice DCN fsdp/expert,
+# fsdp_transpose, custom_mesh_and_rule or the other MoE FSDP strategies.
+moe_spread_experts_over_fsdp: false
 # Keep embed_moe sharded so we can manually QAG it over FSDP.
 # Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
 shard_embed_moe_on_fsdp: false
