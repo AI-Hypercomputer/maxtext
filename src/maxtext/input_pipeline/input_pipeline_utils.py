@@ -547,6 +547,45 @@ def make_parquet_iter_dataset(path: str, hf_access_token: str | None = None):
   return grain.experimental.ParquetIterDataset(path)
 
 
+def make_bagz_data_source(paths: Iterable[str], index_storage_option: str | None = None):
+  """Returns a `bagz.Reader` over the given Bagz shards for `grain.MapDataset.source`.
+
+  `bagz>=0.3.0` readers are picklable (they pickle their file spec and reopen the shards
+  after unpickling), so the reader works as-is with Grain worker processes and
+  `ElasticIterator`; no wrapper class is needed.
+
+  Args:
+    paths: Bagz file paths, in the order that defines the global record index.
+    index_storage_option: None keeps the bagz default; 'in_memory' caches the per-record
+      limits (offsets) in RAM; 'offloaded' reads them from storage on every lookup.
+  """
+  try:
+    import bagz  # pylint: disable=import-outside-toplevel
+  except ImportError as e:
+    raise ImportError(
+        "grain_file_type=bagz requires the optional `bagz>=0.3.0` package: pip install 'bagz>=0.3.0' "
+        "(or 'bagz[gcs]>=0.3.0' to also read gs:// paths directly)."
+    ) from e
+  paths = [str(p) for p in paths]
+  if any("," in p for p in paths):
+    raise ValueError("Bagz file paths must not contain ',' because bagz uses it to separate shards.")
+  options = bagz.Reader.Options()
+  if index_storage_option == "in_memory":
+    options.limits_storage = bagz.LimitsStorage.IN_MEMORY
+  elif index_storage_option == "offloaded":
+    options.limits_storage = bagz.LimitsStorage.ON_DISK
+  try:
+    return bagz.Reader(",".join(paths), options)
+  except FileNotFoundError as e:
+    if "No file system registered" not in str(e):
+      raise
+    raise ImportError(
+        "bagz has no file system registered for these paths. To read gs:// paths directly, install the "
+        "`bagz-gcs` plugin (pip install 'bagz[gcs]>=0.3.0'), or mount the bucket with Cloud Storage FUSE "
+        "and use the local mount path."
+    ) from e
+
+
 def compute_file_sharding(file_count, host_index, host_count):
   """Compute per-host file slicing and optional row-shard parameters.
 
