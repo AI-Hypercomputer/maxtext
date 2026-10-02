@@ -1328,12 +1328,12 @@ def gmm_v2(
     rhs_bias: The rhs bias of shape [size_group, 1, out_size].
     partial_sum: Optional. Per-token partial sums of shape [size_m, size_n].
     group_offset: Optional. The group offset of shape [1,].
-    lhs_scale: Optional scale used to quantize the (unquantized) lhs
-      inside the kernel and the result is multiplied back by `scale`. The shape
-      encodes granularity; currently only per-tensor `[1, 1]` is supported. When
-      None, a quantized lhs uses the default dynamic per-block absmax
-      calibration. Only takes effect when maybe_quantize_lhs is True and rhs is
-      quantized.
+    lhs_scale: Optional per-tensor `[1, 1]` lhs scale. With maybe_quantize_lhs
+      and a quantized rhs, it is used to quantize the (unquantized) lhs inside
+      the kernel and the result is multiplied back by `scale`; when None, a
+      quantized lhs uses the default dynamic per-block absmax calibration.
+      Otherwise the accumulator is multiplied by `scale` after the matmul,
+      before rhs_bias and partial_sum are added.
     tile_info: The tile sizes or tile function to use.
     vmem_limit_bytes: Optional vmem limit in bytes.
     precision: Unused. Exists for compatibility reasons.

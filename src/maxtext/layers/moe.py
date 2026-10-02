@@ -2349,21 +2349,16 @@ class RoutedMoE(nnx.Module):
             padding_amount,
         )
 
-      def _unpad_lhs(t):
-        if padding_amount > 0:
-          if isinstance(t, qpl.QArray):
-            return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]])
-          return t[: orig_inputs_shape[0]]
-        return t
-
-      if return_lhs:
-        output, lhs_out = output
-        if padding_amount > 0:
-          output = output[: orig_inputs_shape[0]]
-        return output, _unpad_lhs(lhs_out)
+      output, lhs_out = output if return_lhs else (output, None)
       if padding_amount > 0:
         output = output[: orig_inputs_shape[0]]
-      return output
+        if return_lhs:
+          # Mirror the padding above: only the qvalue of a QArray was padded.
+          if isinstance(lhs_out, qpl.QArray):
+            lhs_out = dataclasses.replace(lhs_out, qvalue=lhs_out.qvalue[: orig_inputs_shape[0]])
+          else:
+            lhs_out = lhs_out[: orig_inputs_shape[0]]
+      return (output, lhs_out) if return_lhs else output
 
     def is_batch_sharded_by_ep(input_activation):
       # The batch is sharded by expert, except during inference decoding (where batch size == 1).
@@ -2930,8 +2925,11 @@ class RoutedMoE(nnx.Module):
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
       else:
-        accum_wi_dlhs = self.config.moe_accumulate_wi_dlhs and self.config.use_tokamax_gmm and self.config.use_gmm_v2
-        res0 = gmm_fn(
+        # With moe_accumulate_wi_dlhs, the wi_0 GMM returns its input and the wi_1 GMM consumes that, so in the
+        # backward pass the wi_1 DLHS arrives as the cotangent of the returned input and the wi_0 DLHS GMM
+        # accumulates onto it in place (gmm_v2 partial_sum) instead of a separate add of the two DLHS.
+        accum_wi_dlhs = self.config.moe_accumulate_wi_dlhs
+        layer_w0 = gmm_fn(
             x,
             w0,
             tiling=wi_tile_size,
@@ -2939,11 +2937,7 @@ class RoutedMoE(nnx.Module):
             partial_sum=partial_accum0,
             return_lhs=accum_wi_dlhs,
         )
-        if accum_wi_dlhs:
-          layer_w0, x_for_w1 = res0  # pylint: disable=unbalanced-tuple-unpacking
-        else:
-          layer_w0 = res0
-          x_for_w1 = x
+        layer_w0, x_for_w1 = layer_w0 if accum_wi_dlhs else (layer_w0, x)
         if self.config.mlp_bias and w0_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           if mask is not None:

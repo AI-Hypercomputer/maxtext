@@ -109,6 +109,11 @@ def gmm(
           act_calibration_method="absmax",
       )
 
+  if return_lhs and not (use_tokamax_backend and use_gmm_v2):
+    # The cotangent of the returned lhs is accumulated into dlhs via gmm_v2 partial_sum,
+    # which other backends do not support; they would silently drop it.
+    raise ValueError("return_lhs=True requires use_tokamax_backend=True and use_gmm_v2=True.")
+
   lhs_dtype = preferred_element_type if isinstance(lhs, qpl.QArray) else lhs.dtype
   rhs_dtype = preferred_element_type if isinstance(rhs, qpl.QArray) else rhs.dtype
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
@@ -117,7 +122,7 @@ def gmm(
       nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
-  return gmm_fwd_bwd(
+  out, lhs_out = gmm_fwd_bwd(
       lhs,
       rhs,
       group_sizes,
@@ -139,6 +144,7 @@ def gmm(
       return_lhs,
       fuse_dlhs_scale,
   )
+  return (out, lhs_out) if return_lhs else out
 
 
 # ==============================================================================
@@ -193,6 +199,9 @@ def _gmm_fwd(
 
   - lhs: [m, k]
   - rhs: [g, k, n] if transpose_rhs=False. [g, n, k] if transpose_rhs=True
+
+  Always returns (out, lhs) so the output structure does not depend on return_lhs;
+  gmm() drops lhs unless return_lhs=True.
   """
 
   # Track whether operands arrived as QArray (e.g. from token all-gather quantization
@@ -249,9 +258,8 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  del fuse_dlhs_scale
-  fwd_out = (out, lhs) if return_lhs else out
-  return fwd_out, (
+  del return_lhs, fuse_dlhs_scale  # Only used by gmm() and _gmm_bwd.
+  return (out, lhs), (
       lhs,
       rhs,
       group_sizes,
@@ -538,10 +546,10 @@ def _gmm_bwd(
       rhs_is_qarray,
   ) = residual
   num_actual_groups = residual_rhs.shape[0]
-  dlhs_partial_sum = None
-  if return_lhs:
-    grad, dlhs_partial_sum = grad
-  if isinstance(dlhs_partial_sum, qpl.QArray):
+  grad, dlhs_partial_sum = grad
+  if not return_lhs:
+    dlhs_partial_sum = None
+  elif isinstance(dlhs_partial_sum, qpl.QArray):
     dlhs_partial_sum = dlhs_partial_sum.qvalue
 
   # Jargon used here:
@@ -748,7 +756,11 @@ def _compute_dlhs(
     lhs_scale: jnp.ndarray | None = None,
     fuse_dlhs_scale: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
-  """Routes execution of DLHS based on backend choices."""
+  """Routes execution of DLHS based on backend choices.
+
+  Returns (dlhs, lhs_scale_applied). partial_sum (only set with return_lhs, i.e. tokamax gmm_v2) is
+  added to dlhs; lhs_scale_applied tells the caller whether lhs_scale was already folded into dlhs.
+  """
   if use_tokamax_backend and not use_gmm_v2:
     dlhs = _dlhs_run_tokamax_v1(
         dlhs_dout,
@@ -758,7 +770,7 @@ def _compute_dlhs(
         transpose_rhs,
         use_manual_quantization,
     )
-    return (dlhs + partial_sum if partial_sum is not None else dlhs), False
+    return dlhs, False
   elif use_tokamax_backend and use_gmm_v2:
     return _dlhs_run_tokamax_v2(
         dlhs_dout,
@@ -777,7 +789,7 @@ def _compute_dlhs(
     dlhs = _dlhs_run_megablox(
         dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs, interpret, lhs_vma_axes
     )
-    return (dlhs + partial_sum if partial_sum is not None else dlhs), False
+    return dlhs, False
 
 
 def _dlhs_run_tokamax_v1(
@@ -863,20 +875,19 @@ def _dlhs_run_tokamax_v2(
   else:
     dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
 
-  can_fuse_scale = (
-      (fuse_dlhs_scale or partial_sum is not None)
-      and is_qarray_dout
-      and dlhs_dout.scale.size == 1
-      and (lhs_scale is None or lhs_scale.size == 1)
-  )
+  # The kernel adds partial_sum after applying its lhs_scale, so partial_sum can only go into the kernel
+  # when every scale on dlhs (dlhs_dout.scale and, with partial_sum, the pre-quantized lhs scale) is
+  # folded into that per-tensor lhs_scale. Otherwise scale and accumulate after the kernel.
+  scales = [s for s in (dlhs_dout.scale if is_qarray_dout else None, lhs_scale) if s is not None]
+  can_fuse_scale = (fuse_dlhs_scale or partial_sum is not None) and all(s.size == 1 for s in scales)
   kernel_lhs_scale = None
   kernel_partial_sum = None
   lhs_scale_applied = False
   if can_fuse_scale:
-    kernel_lhs_scale = dlhs_dout.scale.astype(jnp.float32).reshape(1, 1)
-    if lhs_scale is not None:
-      kernel_lhs_scale = kernel_lhs_scale * lhs_scale.astype(jnp.float32).reshape(1, 1)
-      lhs_scale_applied = True
+    for scale in scales:
+      scale = scale.astype(jnp.float32).reshape(1, 1)
+      kernel_lhs_scale = scale if kernel_lhs_scale is None else kernel_lhs_scale * scale
+    lhs_scale_applied = lhs_scale is not None
     kernel_partial_sum = partial_sum
 
   dlhs = gmm_v2.gmm_v2(
@@ -890,8 +901,9 @@ def _dlhs_run_tokamax_v2(
       preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
       lhs_scale=kernel_lhs_scale,
-      # Bypass internal quantization if incoming dlhs_dout is already a QArray.
-      maybe_quantize_lhs=not is_qarray_dout,
+      # Bypass internal quantization if incoming dlhs_dout is already a QArray, or when lhs_scale is a
+      # post-matmul scale rather than a quantization scale.
+      maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,
   )
 
   if not can_fuse_scale:

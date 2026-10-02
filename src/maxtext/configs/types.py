@@ -1076,7 +1076,12 @@ class MoEGeneral(BaseModel):
   )
   moe_accumulate_wi_dlhs: bool = Field(
       False,
-      description="Accumulate MoE wi_0/wi_1 backward DLHS in-place via gmm_v2 partial_sum and fuse dlhs scale.",
+      description=(
+          "Route the routed-MoE wi_1 GMM input through the wi_0 GMM so that in the backward pass the wi_1 DLHS"
+          " is accumulated in place into the wi_0 DLHS (gmm_v2 partial_sum) instead of summed by a separate add."
+          " Also folds per-tensor DLHS scales into the gmm_v2 kernel for all MoE GMMs. Requires"
+          " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+      ),
   )
   moe_chunk_barrier: bool = Field(
       False,
@@ -5548,6 +5553,11 @@ class MaxTextConfig(
             f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
             f"max_target_length={self.max_target_length}."
         )
+
+    if self.moe_accumulate_wi_dlhs and not (self.use_tokamax_gmm and self.use_gmm_v2 and not self.prefuse_moe_weights):
+      raise ValueError(
+          "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+      )
 
     if self.use_lineage:
       if not self.scan_layers:
