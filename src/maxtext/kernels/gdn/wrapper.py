@@ -320,6 +320,55 @@ def outer_kernel(
   _run()
 
 
+def get_cost_estimate(
+    cfg: config.GDNConfig,
+    num_seqs: int = 1,
+) -> pl.CostEstimate:
+  """Computes the Pallas CostEstimate (FLOPs, transcendentals, bytes accessed) for fused_conv1d_gdn."""
+  t = cfg.batch_size
+  c = cfg.chunk_size
+  num_chunks = max(1, t // c)
+  d = cfg.dim_size
+  k_conv = cfg.kernel_size
+  h_k = cfg.num_kq_heads
+  h_v = cfg.num_v_heads
+  d_k = cfg.kq_head_dim
+  d_v = cfg.v_head_dim
+
+  # 1. FLOPs: Causal Conv1D + elementwise (SiLU, Q/K L2 norm, gating) + GDN recurrence matmuls
+  conv1d_flops = 2 * t * d * k_conv
+  elem_flops = 2 * t * d + 7 * t * h_k * d_k + 5 * t * h_v
+  state_flops = 6 * t * h_v * d_k * d_v
+  chunk_flops = t * c * (4 * h_v * (d_k + d_v) + 2 * h_k * d_k + c * h_v) if c > 1 else 0
+  total_flops = conv1d_flops + elem_flops + state_flops + chunk_flops
+
+  # 2. Transcendentals: SiLU exp, Q/K L2-norm rsqrt, sigmoid/softplus, and chunk decay exp
+  decay_transcendentals = c + 5 if c > 1 else 4
+  total_transcendentals = t * (d + 2 * h_k + h_v * decay_transcendentals)
+
+  # 3. Bytes accessed: HBM inputs (qkv, b, a, weights), states (read+write), and outputs (out, t_inv, chunk_states)
+  act_in_bytes = jnp.dtype(cfg.dtypes.act_in).itemsize
+  act_out_bytes = jnp.dtype(cfg.dtypes.act_out).itemsize
+  compute_bytes = jnp.dtype(cfg.dtypes.compute).itemsize
+  conv_state_bytes = jnp.dtype(cfg.dtypes.conv_state).itemsize
+  recurrent_state_bytes = jnp.dtype(cfg.dtypes.recurrent_state).itemsize
+
+  input_bytes = t * (d + 2 * h_v) * act_in_bytes + (d * k_conv + 2 * h_v) * compute_bytes
+  state_rw_bytes = 2 * num_seqs * ((k_conv - 1) * d * conv_state_bytes + h_v * d_k * d_v * recurrent_state_bytes)
+  output_bytes = (
+      t * h_v * d_v * act_out_bytes
+      + num_chunks * h_v * c * c * compute_bytes
+      + (num_chunks * h_v * d_k * d_v * compute_bytes if cfg.mode == config.GDNMode.PER_SEQ else 0)
+  )
+  total_bytes = input_bytes + state_rw_bytes + output_bytes
+
+  return pl.CostEstimate(
+      flops=int(total_flops),
+      transcendentals=int(total_transcendentals),
+      bytes_accessed=int(total_bytes),
+  )
+
+
 @jax.jit(
     donate_argnames=("conv_state", "recurrent_state"),
     static_argnames=(
@@ -334,6 +383,7 @@ def outer_kernel(
         "compute_precision",
         "is_prefill_only",
         "use_qk_norm_in_gdn",
+        "cost_estimate",
     ),
 )
 def fused_conv1d_gdn(
@@ -365,6 +415,7 @@ def fused_conv1d_gdn(
     segment_ids: jax.Array | None = None,
     conv_halo_seg: jax.Array | None = None,
     init_seg: jax.Array | None = None,
+    cost_estimate: pl.CostEstimate | None = None,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array], jax.Array, jax.Array]:
   """Perform conv1d and gdn in a single fused kernel, returning (out, states, t_inv, chunk_states)."""
   act_in_dtype = qkv.dtype
@@ -591,6 +642,7 @@ def fused_conv1d_gdn(
         ),
         name=cfg.get_kernel_name(),
         metadata=cfg.get_metadata(),
+        cost_estimate=cost_estimate if cost_estimate is not None else get_cost_estimate(cfg, num_seqs=num_seqs),
     )(
         metadata_obj,
         qkv,
