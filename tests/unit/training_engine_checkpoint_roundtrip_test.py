@@ -53,6 +53,8 @@ def _config():
       checkpoint_period=1,
       max_num_checkpoints_to_keep=5,
       async_checkpointing=True,
+      async_checkpointing_timeout_secs=1200,
+      abandon_failed_checkpoint_saves=False,
       checkpoint_storage_use_ocdbt=False,
       checkpoint_storage_use_zarr3=False,
       checkpoint_storage_device_host_concurrent_gb=None,
@@ -161,9 +163,7 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
     manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
     for step in (3, 4):
       _train_step(model, optimizer)
-      self.assertTrue(
-          manager.save_checkpoint(step=step, checkpoint_state=checkpointing.CheckpointState(model=model))
-      )
+      self.assertTrue(manager.save_checkpoint(step=step, checkpoint_state=checkpointing.CheckpointState(model=model)))
     manager.wait_until_finished()
     manager.close()
 
@@ -227,14 +227,12 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
 
   def test_restore_into_pinned_host_optimizer_requests_device_memory_kind(self):
     os.environ["ENABLE_ORBAX_FINGERPRINT"] = "1"
-    model, optimizer = self._save_trained(steps=2)
+    _, optimizer = self._save_trained(steps=2)
     want_opt = _leaves(nnx.state(optimizer, nnx.optimizer.OptState))
 
     fresh_model, fresh_opt = _build(seed=123)
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
-    host_sharding = jax.sharding.NamedSharding(
-        mesh, jax.sharding.PartitionSpec()
-    ).with_memory_kind("pinned_host")
+    host_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()).with_memory_kind("pinned_host")
     offloaded_opt_state = jax.tree.map(
         lambda x: jax.device_put(x, host_sharding) if isinstance(x, jax.Array) else x,
         nnx.state(fresh_opt, nnx.optimizer.OptState),
@@ -246,9 +244,7 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
 
     manager = checkpointing.CheckpointManager(self.ckpt_dir, _config())
     self.addCleanup(manager.close)
-    step, _, _ = manager.restore_checkpoint(
-        checkpointing.CheckpointState(model=fresh_model, optimizer=fresh_opt)
-    )
+    step, _, _ = manager.restore_checkpoint(checkpointing.CheckpointState(model=fresh_model, optimizer=fresh_opt))
     self.assertEqual(step, 2)
     for leaf in jax.tree.leaves(nnx.state(fresh_opt, nnx.optimizer.OptState)):
       if isinstance(leaf, jax.Array):

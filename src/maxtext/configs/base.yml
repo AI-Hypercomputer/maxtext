@@ -54,6 +54,14 @@ enable_checkpointing: true
 save_checkpoint_on_start: true
 save_checkpoint_on_completion: true
 async_checkpointing: true
+# Deadline (seconds) for the background half of an async save: storage writes and finalization.
+# 1200 is Orbax's own default.
+async_checkpointing_timeout_secs: 1200
+# Training engine only. By default a background save that fails (typically by outliving the deadline
+# above) is logged and its failure is raised from the next checkpoint call, which aborts the run.
+# Set to true to abandon such a save instead: the failure is logged, training continues with its
+# state intact and the next save proceeds normally; the failed step is simply not restorable.
+abandon_failed_checkpoint_saves: false
 checkpoint_period: 10_000
 max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: false

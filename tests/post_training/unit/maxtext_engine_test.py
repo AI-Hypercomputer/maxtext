@@ -379,6 +379,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
             save_interval_steps=mock_config.checkpoint_period,
             max_to_keep=mock_config.max_num_checkpoints_to_keep,
             enable_async_checkpointing=mock_config.async_checkpointing,
+            async_options=ocp.AsyncOptions(timeout_secs=mock_config.async_checkpointing_timeout_secs),
         ),
         item_handlers={
             "model_params": mock_handler.return_value,
@@ -1930,9 +1931,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         def fake_restore(step, args):
           del step, args
           seen_pre_restore_kinds.append(self._memory_kinds(nnx.state(t.state.optimizer)))
-          device_sharding = jax.sharding.NamedSharding(
-              t._mesh, jax.sharding.PartitionSpec()
-          ).with_memory_kind("device")
+          device_sharding = jax.sharding.NamedSharding(t._mesh, jax.sharding.PartitionSpec()).with_memory_kind("device")
           restored_opt = jax.tree.map(
               lambda x: jax.device_put(x, device_sharding) if hasattr(x, "sharding") else x,
               nnx.state(t.state.optimizer, nnx.optimizer.OptState),
