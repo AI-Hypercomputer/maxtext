@@ -436,6 +436,29 @@ def feature_tiled_block_spec(
   )
 
 
+def token_out_shape(shape: tuple[int, ...], dtype: Any, like: jax.Array) -> jax.ShapeDtypeStruct:
+  """Returns a `pallas_call` out_shape that varies over the same manual mesh axes as `like`.
+
+  Under `jax.shard_map(..., check_vma=True)`, `pallas_call` requires every
+  `out_shape` to state its varying manual axes. Every mHC output is computed
+  from the token-major activation `like`, so it varies wherever `like` does.
+  Outside a `shard_map` the axis set is empty and this is a plain struct.
+  """
+  return jax.ShapeDtypeStruct(shape, dtype, manual_axis_type=jax.typeof(like).mat)
+
+
+def psum_to_primal_vma(grad: jax.Array, primal: jax.Array) -> jax.Array:
+  """Sums `grad` over the manual mesh axes it varies on but `primal` does not.
+
+  A replicated weight's gradient comes out of the kernels as one partial sum per
+  token shard. A custom-VJP rule must return cotangents with the primal's vma,
+  so those partial sums are reduced here. A no-op outside a `shard_map` and
+  under `check_vma=False`, where the `shard_map` transpose does the reduction.
+  """
+  axes = tuple(sorted(jax.typeof(grad).mat.varying - jax.typeof(primal).mat.varying))
+  return jax.lax.psum(grad, axes) if axes else grad
+
+
 def fold_norm_scale(norm_scale, pre_alpha, post_alpha, res_alpha) -> jax.Array:
   """Folds the RMSNorm channel scale into the three projections."""
   alpha = jnp.concatenate((pre_alpha, post_alpha, res_alpha), axis=-1)
