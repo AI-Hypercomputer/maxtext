@@ -20,6 +20,7 @@ import enum
 import functools
 import inspect
 import math
+import os
 import random
 from typing import Any, Iterable, Optional, Tuple, Union
 
@@ -36,7 +37,9 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import moe_combine_tc
 from maxtext.kernels import sort_activations
+from maxtext.kernels.megablox import split_gmm
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -66,11 +69,119 @@ import tokamax
 set_xla_metadata = xla_metadata.set_xla_metadata
 
 
+def _g4_combine_mode() -> str:
+  """MAXTEXT_G4_COMBINE: "0" (default, baseline unsort + einsum) or "tc"."""
+  mode = os.environ.get("MAXTEXT_G4_COMBINE", "0").strip().lower()
+  return mode if mode == "tc" else "0"
+
+
+def _g4_scale_onehot() -> bool:
+  """MAXTEXT_G4_SCALE_ONEHOT (default: on iff MAXTEXT_G4_COMBINE is on)."""
+  default = "1" if _g4_combine_mode() != "0" else "0"
+  return os.environ.get("MAXTEXT_G4_SCALE_ONEHOT", default) == "1"
+
+
 DISPATCH = "dispatch"
 COMBINE = "combine"
 WI_0 = "wi_0"
 WI_1 = "wi_1"
 WO = "wo"
+
+
+def _g4_wlayout_mode() -> int:
+  """MAXTEXT_G4_WLAYOUT env gate for the expert-split prefused `wi` layout.
+
+  0 / unset: baseline behaviour (prefused wi [E, emb, 2*mlp]).
+  1: wi stored as [2, E, emb/2, 2*mlp] (= fused wi reshaped, sharded on dim 1),
+     all-gathered as two ~half-size expert blocks; two group-offset gmm calls summed.
+  2: same layout; the two gmm_v2 calls accumulate into one buffer (split_gmm),
+     chained dlhs + two group-offset tgmm calls in backward.
+  """
+  try:
+    return int(os.environ.get("MAXTEXT_G4_WLAYOUT", "0") or 0)
+  except ValueError:
+    return 0
+
+
+def _g4_ag_fence_mode() -> str:
+  """MAXTEXT_G4_AG_FENCE (only consulted when MAXTEXT_G4_WLAYOUT > 0).
+
+  The expert-weight all-gathers and the MoE token permute gather both run on
+  SparseCore 0. Without copies between the all-gather and the gmm, XLA's
+  scheduler issues the wi all-gathers *after* the permute gather, serialized
+  right in front of each gmm (fully exposed). The fence makes routing depend on
+  the gathered weights, so the weight all-gathers must finish before
+  routing/permute starts and get overlapped with attention (as in baseline).
+    "wi" (default) / "all": DATA dependency: logits += 0 * stop_gradient(w[0,..,0])
+        for the two wi halves (+ wo for "all"). A true def-use edge on the
+        all-gather-done; survives async/SparseCore collective rewrites. (An
+        optimization_barrier is not enough: on TPU its control edge is not
+        honored for SparseCore all-gathers.)
+    "0"/"none": no fence.
+  """
+  v = (os.environ.get("MAXTEXT_G4_AG_FENCE", "wi") or "wi").strip().lower()
+  return "none" if v in ("0", "none", "off", "false") else v
+
+
+def _g4_gmm_trhs() -> bool:
+  """MAXTEXT_G4_GMM_TRHS=1 (only with MAXTEXT_G4_WLAYOUT=2 on the gmm_v2 path):
+  backward dlhs of the split wi gmm and of the wo gmm uses the forked NT kernel
+  (kernels/megablox/gmm_v2_trhs.py, transpose_rhs=True) on the gathered weights,
+  instead of gmm_v2 on rhs.swapaxes(1, 2), which XLA materializes as ~87 ms/step
+  of 507 MB / 253 MB transpose copies in the remat. wo then goes through
+  split_gmm.gmm_single (same gmm_v2 fwd / tgmm_v2 drhs kernels as megablox)."""
+  return (os.environ.get("MAXTEXT_G4_GMM_TRHS", "0") or "0").strip() not in ("0", "", "false", "off")
+
+
+def _g4_fence_src_gmm() -> bool:
+  """MAXTEXT_G4_FENCE_SRC=gmm: the wi fence reads its element from the same
+  [E/2, emb, 2N] reshape view the split gmm (and its dlhs transpose) consumes,
+  instead of from the [E, emb/2, 2N] half. In the v3 HLO the rematted fence
+  slice on the half view got layout {1,2,0}, forcing a full 507 MB copy of each
+  gathered wi half per layer in bwd (~43 ms/step) just to read one element."""
+  return (os.environ.get("MAXTEXT_G4_FENCE_SRC", "") or "").strip().lower() == "gmm"
+
+
+def _g4_data_fence(logits, weights, gmm_view=()):
+  """logits + 0 * sum(stop_gradient(w[0,...,0])): value-identical for finite weights.
+
+  XLA does not fold float `x * 0` (NaN semantics), so this keeps a real data
+  edge from each all-gather-done to the routing logits. Single-element static
+  slices: no weight copy. stop_gradient: no backward cost / dependency.
+  gmm_view: per-weight bools; True -> read from w.reshape(E/2, 2*K, N) (3D only).
+  """
+  dep = None
+  for i, w in enumerate(weights):
+    if i < len(gmm_view) and gmm_view[i] and w.ndim == 3 and w.shape[0] % 2 == 0:
+      w = w.reshape(w.shape[0] // 2, 2 * w.shape[1], w.shape[2])
+    s = jax.lax.stop_gradient(w[(0,) * w.ndim]).astype(jnp.float32)
+    dep = s if dep is None else dep + s
+  return logits + (dep * 0.0).astype(logits.dtype)
+
+
+def _g4_glu_custom_vjp() -> bool:
+  """MAXTEXT_G4_GLU_CUSTOM_VJP=1: custom VJP on the gate/up split `out[:, :n], out[:, n:]`
+  so backward uses `jnp.concatenate([dw0, dw1], axis=-1)` instead of two 1408-wide
+  zero-pads + f32 upcasts + f32 add_any + bf16 downcast (`pad_add_fusion`, ~38 ms/step)."""
+  return (os.environ.get("MAXTEXT_G4_GLU_CUSTOM_VJP", "0") or "0").strip().lower() not in ("0", "", "false", "off")
+
+
+@jax.custom_vjp
+def _g4_split_gate_up(out: jax.Array) -> tuple[jax.Array, jax.Array]:
+  n = out.shape[-1] // 2
+  return out[:, :n], out[:, n:]
+
+
+def _g4_split_gate_up_fwd(out: jax.Array):
+  return _g4_split_gate_up(out), None
+
+
+def _g4_split_gate_up_bwd(_res, g):
+  dw0, dw1 = g
+  return (jnp.concatenate([dw0, dw1], axis=-1),)
+
+
+_g4_split_gate_up.defvjp(_g4_split_gate_up_fwd, _g4_split_gate_up_bwd)
 
 
 @struct.dataclass
@@ -170,14 +281,110 @@ def _sort_activations(
     return inputs[sort_indices, ...]
 
 
-def _route_activations(inputs: jax.Array, selected_experts: jax.Array) -> jax.Array:
+def _route_activations(
+    inputs: jax.Array,
+    selected_experts: jax.Array,
+    sorted_selected_experts: jax.Array | None = None,
+) -> jax.Array:
   """Groups token activations by expert without materializing Top-K copies."""
   selected_experts = selected_experts.reshape((inputs.shape[0], -1))
+  if sorted_selected_experts is not None:
+    return _route_activations_precomputed(
+        inputs,
+        sorted_selected_experts,
+        selected_experts.shape[1],
+    )
   # When use_gather_mosaic_kernel=False, use the general JAX backward, which
   # gathers and sums gradients from all expert copies of each token. The
   # optimized Mosaic gather-reduce kernel currently requires exactly 8 selected
   # experts per token and is enabled only by the specialized batch-split path.
   return sort_activations.route(inputs, selected_experts, use_gather_mosaic_kernel=False)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _route_activations_precomputed(
+    inputs: jax.Array,
+    sorted_selected_experts: jax.Array,
+    num_experts_per_tok: int,
+) -> jax.Array:
+  """Route activations using precomputed `sorted_selected_experts`."""
+  return inputs[sorted_selected_experts // num_experts_per_tok, ...]
+
+
+def _route_activations_precomputed_fwd(
+    inputs: jax.Array,
+    sorted_selected_experts: jax.Array,
+    num_experts_per_tok: int,
+) -> tuple[jax.Array, jax.Array]:
+  return (
+      inputs[sorted_selected_experts // num_experts_per_tok, ...],
+      sorted_selected_experts,
+  )
+
+
+def _route_activations_precomputed_bwd(
+    num_experts_per_tok: int,
+    residuals: jax.Array,
+    grads: jax.Array,
+) -> tuple[jax.Array, None]:
+  sorted_selected_experts = residuals
+  unsorted_grads = grads[jnp.argsort(sorted_selected_experts), ...]
+  return (
+      jnp.sum(
+          jnp.reshape(unsorted_grads, (-1, num_experts_per_tok) + grads.shape[1:]),
+          axis=1,
+      ),
+      None,
+  )
+
+
+_route_activations_precomputed.defvjp(
+    _route_activations_precomputed_fwd,
+    _route_activations_precomputed_bwd,
+)
+
+
+def _unsort_activations(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    use_custom_vjp: bool,
+) -> jax.Array:
+  """Unsort activations that were sorted by `sort_indices`."""
+  assert inputs.shape[0] == sort_indices.shape[0]
+  with jax.named_scope("sort_activations"):
+    if use_custom_vjp:
+      return _unsort_activations_custom(inputs, sort_indices)
+    return inputs[jnp.argsort(sort_indices), ...]
+
+
+@jax.custom_vjp
+def _unsort_activations_custom(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+) -> jax.Array:
+  """Unsort activations with custom vjp that reuses `sort_indices` in backward."""
+  return inputs[jnp.argsort(sort_indices), ...]
+
+
+def _unsort_activations_custom_fwd(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+  return _unsort_activations_custom(inputs, sort_indices), sort_indices
+
+
+def _unsort_activations_custom_bwd(
+    residuals: jax.Array,
+    grads: jax.Array,
+) -> tuple[jax.Array, None]:
+  sort_indices = residuals
+  return _sort_activations_custom(grads, sort_indices), None
+
+
+_unsort_activations_custom.defvjp(
+    _unsort_activations_custom_fwd,
+    _unsort_activations_custom_bwd,
+)
 
 
 @jax.custom_vjp
@@ -1029,15 +1236,33 @@ class RoutedMoE(nnx.Module):
       self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
       self.wo = jnp.zeros((num_experts, intermediate_dim, self.moe_expert_input_dim))
     elif self.config.prefuse_moe_weights:
+      wi_value = self.kernel_init(
+          self.rngs.params(),
+          (num_experts, self.moe_expert_input_dim, moe_intermediate_dim * 2),
+          weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
+      wi_axes = self.wi_kernel_axes
+      if (
+          _g4_wlayout_mode() > 0
+          and self.config.shard_exp_on_fsdp
+          and self.config.sparse_matmul
+          and self.config.num_moe_emb_chunks <= 0
+          and self.config.attention not in ("vllm_rpa", "vllm_batched_rpa")
+          and not ctypes.is_fp8_dtype(weight_dtype)
+          and num_experts % 2 == 0
+          and self.moe_expert_input_dim % 2 == 0
+      ):
+        # MAXTEXT_G4_WLAYOUT: [2, E, emb/2, 2N] is a pure row-major reshape of the
+        # fused [E, emb, 2N] (same init), but dim 1 is sharded, so each device holds
+        # 1/E of *each* expert half W[:E/2], W[E/2:] -> two ~half-size all-gathers
+        # whose results reshape (bitcast) to [E/2, emb, 2N] without any concat.
+        wi_value = wi_value.reshape(2, num_experts, self.moe_expert_input_dim // 2, moe_intermediate_dim * 2)
+        wi_axes = (None,) + tuple(self.wi_kernel_axes)
       self.wi = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim * 2),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
-          out_sharding=self.wi_kernel_axes,
+          wi_value,
+          out_sharding=wi_axes,
       )
       self.wo = nnx.Param(
           self.kernel_init(
@@ -1353,7 +1578,15 @@ class RoutedMoE(nnx.Module):
       if self.per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
       ):
-        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
+        if _g4_scale_onehot():
+          # Compare/select + reduce on the TensorCore instead of a tiny
+          # take_along_axis gather (which XLA offloads to SparseCore). Exact:
+          # exactly one term is non-zero; its VJP is a reduction, not a scatter.
+          scale = self.per_expert_scale.value
+          hit = top_k_indices[..., None] == jnp.arange(scale.shape[0], dtype=top_k_indices.dtype)
+          per_expert_scale_topk = jnp.sum(jnp.where(hit, scale, jnp.zeros((), scale.dtype)), axis=-1)
+        else:
+          per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return top_k_weights, top_k_indices
@@ -1626,7 +1859,11 @@ class RoutedMoE(nnx.Module):
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        sorted_inputs = _route_activations(
+            inputs_2d,
+            flatten_selected_experts_safe,
+            sorted_selected_experts=sorted_selected_experts,
+        )
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -1732,10 +1969,22 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
       )
+    elif self._use_fused_combine(intermediate, weights, group_sizes):
+      # MAXTEXT_G4_COMBINE=tc: fused unpermute + top-k weighted sum (f32
+      # accumulation, same arithmetic as float32_weight_sum=True). Never
+      # materializes the [tokens*top_k, emb] unsorted copy; see
+      # kernels/moe_combine_tc.py.
+      with jax.named_scope("moe_combine"):
+        output = moe_combine_tc.combine(
+            intermediate,
+            sorted_selected_experts,
+            jnp.reshape(weights, (-1, self.num_experts_per_tok)),
+            group_sizes,
+        )
     else:
-      unsort_intermediate = _sort_activations(
+      unsort_intermediate = _unsort_activations(
           intermediate,
-          jnp.argsort(sorted_selected_experts),
+          sorted_selected_experts,
           use_custom_sort_vjp,
       )
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
@@ -1758,6 +2007,23 @@ class RoutedMoE(nnx.Module):
             precision=matmul_precision,
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
+
+  def _use_fused_combine(self, intermediate, weights, group_sizes) -> bool:
+    """True iff MAXTEXT_G4_COMBINE selects the fused combine and it is valid here.
+
+    Valid only for the plain local sort: every token*top_k row is present in
+    `intermediate` in stable expert-sorted order and `group_sizes` sums to the
+    row count (no expert parallelism, no truncated/ragged buffers).
+    """
+    if _g4_combine_mode() == "0" or group_sizes is None:
+      return False
+    if not isinstance(intermediate, jax.Array) or intermediate.ndim != 2:
+      return False
+    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+      return False
+    if self.get_expert_parallelism_size() != 1 or self.config.use_ring_of_experts:
+      return False
+    return intermediate.shape[0] == math.prod(weights.shape) and group_sizes.ndim == 1
 
   @staticmethod
   def _maybe_truncate_local_group_size(
@@ -2159,8 +2425,16 @@ class RoutedMoE(nnx.Module):
       wo_bias,
       input_ids=None,
       forced_routed_experts=None,
+      g4_wlayout=0,
   ):
-    """Perform sparse matrix multiplication of inputs and Experts."""
+    """Perform sparse matrix multiplication of inputs and Experts.
+
+    g4_wlayout > 0 (MAXTEXT_G4_WLAYOUT): w0_kernel / w1_kernel are the two
+    contiguous expert halves of the prefused wi, each [E, emb/2, 2*mlp]
+    (sharded on dim 0), i.e. W[:E/2] and W[E/2:] of the fused [E, emb, 2*mlp]
+    weight in a free (bitcast) reshape. They are all-gathered separately and
+    reshaped to [E/2, emb, 2*mlp] inside the shard_map (see gmm_up).
+    """
 
     def fwd_tile(name):
       """Reads a forward GMM tile size, preferring `eval_*` under eval axis rules."""
@@ -2887,6 +3161,48 @@ class RoutedMoE(nnx.Module):
       )
       return wo_gather_axes, wo_tile_size
 
+    def g4_split_expert_wi_gmm(x, w_lo, w_hi, gmm_fn, wi_tile_size, wi_gather_axes):
+      """MAXTEXT_G4_WLAYOUT: x @ W with W given as two gathered expert halves (no concat).
+
+      w_lo / w_hi arrive as [E, emb/2, 2N] (the all-gathered halves of the
+      [2, E, emb/2, 2N] param); the reshape to [E/2, emb, 2N] is a bitcast.
+      """
+      e2 = w_lo.shape[0] // 2
+      w_lo = w_lo.reshape(e2, 2 * w_lo.shape[1], w_lo.shape[2])
+      w_hi = w_hi.reshape(e2, 2 * w_hi.shape[1], w_hi.shape[2])
+      kw = gmm_fn.keywords
+      base = kw["group_offset"]
+      use_chained = (
+          g4_wlayout == 2
+          and self.config.use_tokamax_gmm
+          and self.config.use_gmm_v2
+          and not self.config.quantization
+          and isinstance(base, int)
+          and self.mesh.devices.flat[0].platform == "tpu"
+      )
+      if use_chained:
+        # Two gmm_v2 calls accumulating into one buffer; custom VJP chains dlhs the
+        # same way and runs two group-offset tgmm calls (dW halves, no split copy).
+        inputs, padding_amount = max_utils.maybe_pad(x, fwd_tile("wi_tile_fwd_batch_seq"))
+        out = split_gmm.gmm_split_experts(
+            inputs.astype(self.dtype),
+            w_lo.astype(self.dtype),
+            w_hi.astype(self.dtype),
+            kw["group_sizes"],
+            tiling=None if self.config.use_gmm_v2_heuristic_tiling else wi_tile_size,
+            preferred_element_type=self.dtype,
+            group_offset=base,
+            transpose_rhs_dlhs=_g4_gmm_trhs(),
+        )
+        if padding_amount > 0:
+          out = out[: x.shape[0]]
+        return out
+      # Mode 1: two independent group-offset gmm calls (each zero outside its
+      # experts' rows) summed; exact since every row has exactly one nonzero term.
+      out_lo = gmm_fn(x, w_lo, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, group_offset=base)
+      out_hi = gmm_fn(x, w_hi, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, group_offset=base + e2)
+      return out_lo + out_hi
+
     def gmm_up(
         x,
         w0,
@@ -2902,11 +3218,17 @@ class RoutedMoE(nnx.Module):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
-        out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        if g4_wlayout:
+          out = g4_split_expert_wi_gmm(x, w0, w1, gmm_fn, wi_tile_size, wi_gather_axes)
+        else:
+          # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
+          w_fused = jnp.concatenate([w0, w1], axis=-1)
+          out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        if _g4_glu_custom_vjp():
+          layer_w0, layer_w1 = _g4_split_gate_up(out)
+        else:
+          n = out.shape[-1] // 2
+          layer_w0, layer_w1 = out[:, :n], out[:, n:]
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
@@ -2999,9 +3321,9 @@ class RoutedMoE(nnx.Module):
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
-          local_output = _sort_activations(
+          local_output = _unsort_activations(
               intermediate_output,
-              jnp.argsort(route_metadata.local_sorted_indices),
+              route_metadata.local_sorted_indices,
               self.config.use_custom_sort_vjp,
           )
 
@@ -3210,12 +3532,37 @@ class RoutedMoE(nnx.Module):
 
       intermediate_layer = self.apply_ffn_activation(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-      )
+      _wo_kw = getattr(gmm_fn, "keywords", None) or {}
+      if (
+          g4_wlayout == 2
+          and _g4_gmm_trhs()
+          and self.config.use_tokamax_gmm
+          and self.config.use_gmm_v2
+          and not self.config.quantization
+          and isinstance(_wo_kw.get("group_offset"), int)
+          and "group_sizes" in _wo_kw
+          and not isinstance(wo, qpl.QArray)
+          and self.mesh.devices.flat[0].platform == "tpu"
+      ):
+        # MAXTEXT_G4_GMM_TRHS: wo gmm with NT-kernel dlhs (no wo^T copy).
+        _wo_in, _wo_pad = max_utils.maybe_pad(intermediate_layer, fwd_tile("wi_tile_fwd_batch_seq"))
+        intermediate_output = split_gmm.gmm_single(
+            _wo_in.astype(self.dtype),
+            wo.astype(self.dtype),
+            _wo_kw["group_sizes"],
+            tiling=None if self.config.use_gmm_v2_heuristic_tiling else wo_tile_size,
+            preferred_element_type=self.dtype,
+            group_offset=_wo_kw["group_offset"],
+        )
+        if _wo_pad > 0:
+          intermediate_output = intermediate_output[: intermediate_layer.shape[0]]
+      else:
+        intermediate_output = gmm_fn(
+            intermediate_layer,
+            wo,
+            tiling=wo_tile_size,
+            weight_gather_axes=wo_gather_axes,
+        )
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
             intermediate_output,
@@ -3372,6 +3719,17 @@ class RoutedMoE(nnx.Module):
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
       # drops fsdp -> GSPMD inserts the boundary all-gather) and reused across all
       # chunks of the ring-of-experts pipeline below.
+      if g4_wlayout:
+        _fence = _g4_ag_fence_mode()
+        # Force the (SparseCore) weight all-gathers to complete before the
+        # (SparseCore) token permute gather is issued; see _g4_ag_fence_mode.
+        if _fence in ("wi", "all"):
+          _ws = (w0, w1, wo) if _fence == "all" else (w0, w1)
+          _gv = (True, True) if (_g4_fence_src_gmm() and self.config.prefuse_moe_weights) else ()
+          logits = _g4_data_fence(logits, _ws, _gv)
+          if pre_bias_logits is not None:
+            pre_bias_logits = _g4_data_fence(pre_bias_logits, _ws, _gv)
+
       override_chunks = getattr(self, "num_moe_token_chunks", None)
       n_chunks = override_chunks if override_chunks is not None else self.config.num_moe_token_chunks
       barrier_enabled = getattr(self, "moe_chunk_barrier", None)
@@ -4626,15 +4984,27 @@ class RoutedMoE(nnx.Module):
     w0_kernel = None
     w1_kernel = None
     wi_native_scale = None
+    g4_wlayout = 0
     if cfg.prefuse_moe_weights and is_fused_moe_path:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       fused_kernel, wi_native_scale = _maybe_native_fused_weight(self.wi[...], wi_scale)
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if wi.ndim == 4 and cfg.sparse_matmul and not quantizations.in_serve_mode(self.quant) and self.wi_0_sparsity_module is None:
+        # MAXTEXT_G4_WLAYOUT: [2, E, emb/2, 2N]; wi[h] (a local slice of the
+        # unsharded leading dim) is expert block h. Each is all-gathered on its own
+        # at the shard_map boundary and consumed without concat (see gmm_up).
+        g4_wlayout = max(1, _g4_wlayout_mode())
+        w0_kernel = wi[0]
+        w1_kernel = wi[1]
+      else:
+        if wi.ndim == 4:
+          # Unsupported path for the split layout: rebuild the fused [E, emb, 2N].
+          wi = wi.reshape(wi.shape[1], wi.shape[0] * wi.shape[2], wi.shape[3])
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
@@ -4712,6 +5082,7 @@ class RoutedMoE(nnx.Module):
           wo_bias,
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
+          g4_wlayout=g4_wlayout,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(

@@ -120,13 +120,13 @@ class RMSNorm(nnx.Module):
     if self.shard_mode == ShardMode.EXPLICIT:
       effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
 
-    if self.scale_offset != 0.0:
-      normed_fp32 = x * lax.rsqrt(mean2 + self.epsilon)
-      y = jnp.einsum("...k,k->...k", normed_fp32, effective_scale, out_sharding=out_sharding)
-      return jnp.asarray(y, self.dtype)
-
-    effective_scale = jnp.asarray(effective_scale, self.dtype)
-    return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
+    # Multiply the fp32 normalized activations by the fp32 scale and round once.
+    # Casting the fp32 scale to the compute dtype first puts a convert between
+    # the scale-gradient all-reduce and the fp32 scan carry in backward, which
+    # blocks XLA from hoisting that all-reduce out of the scanned layer loop.
+    normed_fp32 = x * lax.rsqrt(mean2 + self.epsilon)
+    y = jnp.einsum("...k,k->...k", normed_fp32, effective_scale, out_sharding=out_sharding)
+    return jnp.asarray(y, self.dtype)
 
 
 class GlobalRMSNorm(RMSNorm):
