@@ -292,6 +292,7 @@ ModelName = Literal[
     "qwen3-vl-30b-a3b",
     "weaver-mini",
     "weaver-max",
+    "weaver-nano-diffuser",
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
@@ -5116,6 +5117,7 @@ class MaxTextConfig(
           "maxtext-omni-gemma3-qwen3",
           "weaver-mini",
           "weaver-max",
+          "weaver-nano-diffuser",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")
