@@ -113,7 +113,11 @@ class MetricLogger:
   Logger for saving metrics to a local file, GCS and TensorBoard.
   """
 
-  def __init__(self, config, learning_rate_schedule, start_step=0):
+  # Prepended to this logger's console lines, e.g. to tell apart several loggers in one process. __init__ sets the
+  # instance attribute; this class-level default only serves loggers built with __new__ (as some unit tests do).
+  log_prefix: str = ""
+
+  def __init__(self, config, learning_rate_schedule, start_step=0, log_prefix=""):
     self.writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
     self.config = config
     self.metadata = {}
@@ -121,6 +125,7 @@ class MetricLogger:
     self.performance_metric_queue = self.get_performance_metric_queue(config)
     self.learning_rate_schedule = learning_rate_schedule
     self.start_step = start_step
+    self.log_prefix = log_prefix
     self.cumulative_eval_metrics = {"scalar": defaultdict(float)}
     # self.buffered_metrics is a polymorphic deferred-write queue. Entries are one of:
     #   ("train", train_step, metrics, step_time_delta)
@@ -262,7 +267,7 @@ class MetricLogger:
     if getattr(self.config, "log_step_diagnostics", False):
       log_parts.append(step_diagnostics_text(scalars))
 
-    max_logging.log(", ".join(log_parts))
+    max_logging.log(self.log_prefix + ", ".join(log_parts))
 
     # Logged here rather than in the train loop: metrics are flushed one step late, so reading
     # the flag does not add a per-step host sync (which the in-layer fallback exists to avoid).
@@ -299,7 +304,7 @@ class MetricLogger:
       indexer_l = scalars.get("eval/avg_indexer_loss", 0.0)
       log_parts.append(f"avg_indexer_loss={indexer_l:.3f}")
 
-    max_logging.log(", ".join(log_parts))
+    max_logging.log(self.log_prefix + ", ".join(log_parts))
 
     fallback_layers = int(scalars.get("eval/moe_dropless_fallback_layers", 0))
     if fallback_layers > 0:
@@ -325,7 +330,7 @@ class MetricLogger:
               f"running mtp_acceptance_rate={scalars['eval/avg_mtp_acceptance_rate_percent']:.2f}%",
           ]
       )
-    max_logging.log(", ".join(log_parts))
+    max_logging.log(self.log_prefix + ", ".join(log_parts))
 
   def _is_profiler_boundary_step(self, step):
     """Determines if the current step is a profiler start/stop boundary that should be hidden."""
@@ -346,10 +351,10 @@ class MetricLogger:
     """This function checks whether we have nan or inf values in training"""
     loss = metrics["scalar"].get("learning/loss")
     if self.config.abort_on_nan_loss and np.isnan(loss):
-      max_logging.log("Aborting training due to NaN loss.")
+      max_logging.log(f"{self.log_prefix}Aborting training due to NaN loss.")
       sys.exit(1)
     if self.config.abort_on_inf_loss and np.isinf(loss):
-      max_logging.log("Aborting training due to Inf loss.")
+      max_logging.log(f"{self.log_prefix}Aborting training due to Inf loss.")
       sys.exit(1)
 
   def write_metrics_locally(self, metrics, step):
@@ -390,7 +395,7 @@ class MetricLogger:
       full_log = step % self.config.log_period == 0
 
       if full_log and jax.process_index() == 0:
-        max_logging.log(f"To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
+        max_logging.log(f"{self.log_prefix}To see full metrics 'tensorboard --logdir={self.config.tensorboard_dir}'")
         self.writer.flush()
 
   def write_metrics_to_managed_mldiagnostics(self, metrics, step):
@@ -422,7 +427,7 @@ class MetricLogger:
     num_model_parameters = max_utils.calculate_num_params_from_pytree(params)
     self.metadata[MetadataKey.PER_DEVICE_TFLOPS], _, _ = maxtext_utils.calculate_tflops_training_per_device(self.config)
     self.metadata[MetadataKey.PER_DEVICE_TOKENS] = maxtext_utils.calculate_tokens_training_per_device(self.config)
-    max_logging.log(f"number parameters: {num_model_parameters/1e9:.3f} billion")
+    max_logging.log(f"{self.log_prefix}number parameters: {num_model_parameters/1e9:.3f} billion")
     if not self.config.enable_tensorboard:
       return
     max_utils.add_text_to_summary_writer("num_model_parameters", str(num_model_parameters), self.writer)

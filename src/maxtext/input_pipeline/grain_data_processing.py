@@ -131,10 +131,15 @@ def _apply_mapdataset_transforms(
   return dataset
 
 
-def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None, split_index=0):
-  """Build the configuration used by the Megatron-compatible data sources."""
+def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None, split_index=0, batch_size=None):
+  """Build the configuration used by the Megatron-compatible data sources.
+
+  `batch_size` is the replica's global batch per step; with several data replicas per process it sets the blend
+  window (the step batch of all replicas) that keeps each replica's share of an mmap_npy blend mixed.
+  """
   if config.grain_file_type not in ("mmap", "mmap_npy"):
     return None
+  _, num_replicas = input_pipeline_utils.get_data_replica(config)
   return MMapDatasetConfig(
       max_target_length=config.max_target_length,
       eod_id=config.mmap_eod_id,
@@ -145,6 +150,7 @@ def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None,
       seed=seed,
       split_ratio=split_ratio,
       split_index=split_index,
+      blend_shard_window=batch_size * num_replicas if batch_size and num_replicas > 1 else None,
   )
 
 
@@ -339,6 +345,7 @@ def get_datasets(
         seed=dataset_config.seed,
         split=dataset_config.split_ratio,
         split_index=dataset_config.split_index,
+        blend_shard_window=dataset_config.blend_shard_window,
     )
   else:
     raise ValueError(
@@ -747,11 +754,13 @@ def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, 
   """Applies preprocessing_fn then wraps the result with ElasticIterator.
 
   When shard_index/shard_count are None, defaults to jax.process_index()/jax.process_count().
+  ElasticIterator gives each shard `global_batch_size // shard_count` rows. The shards of `get_dataloading_shard`
+  cover every data replica, so its global batch is that of all replicas.
   """
   ds = preprocessing_fn(dataset=dataset)
   return ElasticIterator(
       ds,
-      global_batch_size=config.global_batch_size_to_load,
+      global_batch_size=input_pipeline_utils.get_all_replicas_batch_size(config, config.global_batch_size_to_load),
       shard_options=grain.ShardOptions(
           shard_index=shard_index if shard_index is not None else jax.process_index(),
           shard_count=shard_count if shard_count is not None else jax.process_count(),
@@ -775,8 +784,9 @@ def make_grain_train_iterator(
   ), "Batch size should be divisible by number of global devices."
 
   pipeline_fn = _get_pipeline_fn(config)
+  # The mmap_npy index is sharded among every data replica, so it holds the samples of all of them.
   mmap_npy_num_samples = (
-      config.steps * config.global_batch_size_to_load
+      config.steps * input_pipeline_utils.get_all_replicas_batch_size(config, config.global_batch_size_to_load)
       if config.grain_file_type == "mmap_npy" and getattr(config, "steps", 0) > 0
       else None
   )
@@ -786,6 +796,7 @@ def make_grain_train_iterator(
       seed=config.data_shuffle_seed,
       split_ratio=config.mmap_npy_split or None,
       split_index=0,
+      batch_size=config.global_batch_size_to_load,
   )
 
   grain_train_files = config.grain_train_files
@@ -864,9 +875,10 @@ def make_grain_train_iterator(
   if 0 < config.expansion_factor_real_data < 1:
     num_dataloader_to_restore = int(1 / config.expansion_factor_real_data)
     train_dataloader_list = []
-    dataloading_host_count = len(process_indices) * num_dataloader_to_restore
     for i in range(num_dataloader_to_restore):
-      dataloading_host_index = len(process_indices) * i + process_indices.index(jax.process_index())
+      dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
+          config, process_indices, shard_offset=i, shards_per_host=num_dataloader_to_restore
+      )
       train_ds = get_ds_fn(
           dataloading_host_index=dataloading_host_index,
           dataloading_host_count=dataloading_host_count,
@@ -879,8 +891,7 @@ def make_grain_train_iterator(
     ]
 
   # Default non-colocated, expansion_factor_real_data >=1 path
-  shard_index = process_indices.index(jax.process_index())
-  shard_count = len(process_indices)
+  shard_index, shard_count = input_pipeline_utils.get_dataloading_shard(config, process_indices)
   train_ds = get_ds_fn(
       dataloading_host_index=shard_index,
       dataloading_host_count=shard_count,
@@ -931,7 +942,11 @@ def make_grain_eval_iterator(
       eval_rounds = -(-config.steps // eval_interval)
     else:
       eval_rounds = 1
-    mmap_npy_eval_num_samples = eval_rounds * config.eval_steps * config.global_batch_size_to_load_eval
+    mmap_npy_eval_num_samples = (
+        eval_rounds
+        * config.eval_steps
+        * input_pipeline_utils.get_all_replicas_batch_size(config, config.global_batch_size_to_load_eval)
+    )
 
   dataset_config = _build_dataset_config(
       config,
@@ -939,6 +954,7 @@ def make_grain_eval_iterator(
       seed=config.data_shuffle_seed,
       split_ratio=config.mmap_npy_split or None,
       split_index=1 if config.mmap_npy_split else 0,
+      batch_size=config.global_batch_size_to_load_eval,
   )
 
   grain_eval_files = config.grain_eval_files
@@ -988,9 +1004,10 @@ def make_grain_eval_iterator(
   )
 
   if not config.colocated_python_data_input:
+    dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(config, process_indices)
     eval_ds = get_ds_fn(
-        dataloading_host_index=process_indices.index(jax.process_index()),
-        dataloading_host_count=len(process_indices),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
     )
     eval_dataloader = preprocessing_fn(dataset=eval_ds)
     return multihost_dataloading.MultiHostDataLoadIterator(

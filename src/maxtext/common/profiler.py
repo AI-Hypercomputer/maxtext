@@ -15,9 +15,11 @@
 """Dispatch to the chosen profiler."""
 
 from ctypes import cdll
+import inspect
 import os
 import subprocess
 import shutil
+from typing import Any
 
 import jax
 
@@ -40,11 +42,20 @@ class Profiler:
     self.output_path = ""
     self.upload_all_profiler_results = config.upload_all_profiler_results
     self.profile_cleanly = config.profile_cleanly
+    # MaxTextConfig only accepts values above 1 with profiler=xplane on the Pathways backend.
+    self.profiler_max_num_hosts = config.profiler_max_num_hosts
     self.profile_period = config.profile_periodically_period
     self.start_initial_profile_step = self._set_first_profiler_step(config.skip_first_n_steps_for_profiler, offset_step)
     self.finished_initial_profile_step = self._set_last_profiler_step(config.profiler_steps, config.steps)
     if config.profiler != "" and self.start_initial_profile_step >= config.steps:
       raise ValueError("Profiling requested but initial profiling step set past training final step")
+    if (
+        self.mode == "xplane"
+        and self.profiler_max_num_hosts > 1
+        and "max_num_hosts" not in inspect.signature(jax.profiler.start_trace).parameters
+    ):
+      # JAX's own start_trace has no max_num_hosts; pathwaysutils.initialize() replaces it on Pathways.
+      raise ValueError("profiler_max_num_hosts > 1 requires pathwaysutils.initialize() to be called first.")
     self.prof = None  # managed mldiagnostics xprof collector.
     self.managed_mldiagnostics = config.managed_mldiagnostics
     if config.managed_mldiagnostics:
@@ -112,7 +123,16 @@ class Profiler:
         return
       self.libcudart.cudaProfilerStart()
     elif self.mode == "xplane":
-      jax.profiler.start_trace(self.output_path, profiler_options=self.profiling_options)
+      if self.profiler_max_num_hosts > 1:
+        # On Pathways, pathwaysutils.initialize() replaces jax.profiler.start_trace with a version that traces
+        # `max_num_hosts` worker hosts (1 by default); __init__ checked that it has. Typed Any only because the
+        # type checker sees JAX's own signature, which has no max_num_hosts.
+        pathways_start_trace: Any = jax.profiler.start_trace
+        pathways_start_trace(
+            self.output_path, profiler_options=self.profiling_options, max_num_hosts=self.profiler_max_num_hosts
+        )
+      else:
+        jax.profiler.start_trace(self.output_path, profiler_options=self.profiling_options)
 
   def maybe_deactivate_profiler(self, step, state):
     """Conditionally deactivates the profiler based on the current step.
