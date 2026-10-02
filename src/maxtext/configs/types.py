@@ -574,6 +574,15 @@ class Quantization(BaseModel):
           " `act_quantization_calibration_method`. Set to e.g. 'absmax' to force absmax calibration."
       ),
   )
+  logits_proj_bwd_quant_calibration_method: str = Field(
+      "",
+      description=(
+          "Backward (gradient) calibration method for the output logits (logits_dense) projection when"
+          " `quantize_logits_proj=True`. Applies to both the activation-gradient and weight-gradient arms. If empty"
+          " (default), inherits `bwd_quantization_calibration_method` and `drhs_grad_quantization_calibration_method`."
+          " Set to e.g. 'absmax' to force absmax calibration."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
