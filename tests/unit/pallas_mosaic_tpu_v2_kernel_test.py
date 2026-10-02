@@ -333,7 +333,9 @@ class GmmTest(parameterized.TestCase):
     self.assertIs(actual, expected)
     self.assertEqual(call_kwargs["transpose_rhs"], expected_transpose_rhs)
     self.assertTrue(bool(jnp.array_equal(call_kwargs["rhs"], expected_rhs)))
-    expected_tiling = gmm_backend.calculate_tiling if use_gmm_v2_heuristic_tiling else gmm_backend.TileSizes(512, 1024, 512)
+    expected_tiling = (
+        gmm_backend.calculate_tiling if use_gmm_v2_heuristic_tiling else gmm_backend.TileSizes(512, 1024, 512)
+    )
     self.assertEqual(call_kwargs["tile_info"], expected_tiling)
     self.assertTrue(call_kwargs["maybe_quantize_lhs"])
 
