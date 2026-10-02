@@ -620,6 +620,21 @@ def _gmm_bwd(
   return dlhs, drhs, None, None, d_existing_out, dpartial_sum
 
 
+def _is_fixed_calibration(calibration_method: str | None) -> bool:
+  """Returns whether a qwix calibration method is "fixed,...", which always yields a constant per-tensor scale."""
+  return calibration_method is not None and calibration_method.lower().startswith("fixed")
+
+
+def _lhs_rhs_share_fixed_scale(quantization_rule: qwix.QtRule | None) -> bool:
+  """Returns whether lhs and rhs are quantized to the same dtype with the same fixed calibration."""
+  return (
+      quantization_rule is not None
+      and quantization_rule.weight_qtype == quantization_rule.act_qtype
+      and quantization_rule.weight_calibration_method == quantization_rule.act_calibration_method
+      and _is_fixed_calibration(quantization_rule.weight_calibration_method)
+  )
+
+
 def _bwd_prepare_inputs(
     grad: jnp.ndarray,
     lhs: jnp.ndarray | qpl.QArray,
@@ -639,6 +654,7 @@ def _bwd_prepare_inputs(
   # Assume channelwise scale on rhs n.
   # Apply rhs.scale to dlhs_dout to avoid dequantizing or requantizing rhs.
   # We cannot apply the scale to dlhs because axis n will disappear there.
+  rhs_has_scalar_scale = isinstance(rhs, qpl.QArray) and rhs.scale.size == 1
   if isinstance(rhs, qpl.QArray):
     # rhs - qvalue: [g, k, n] scale: [1, 1, n], assume transpose_rhs=False
     if not use_gmm_v2:
@@ -667,7 +683,12 @@ def _bwd_prepare_inputs(
   # Apply lhs.scale to drhs_dout, as axis m will disappear in drhs.
   if isinstance(lhs, qpl.QArray):
     # lhs - qvalue: [m, k] scale: [m, 1]
-    drhs_dout = drhs_dout * (lhs.scale.squeeze() if lhs.scale.size == 1 else lhs.scale).astype(grad.dtype)
+    if rhs_has_scalar_scale and lhs.scale.size == 1 and _lhs_rhs_share_fixed_scale(quantization_rule):
+      # lhs.scale == rhs.scale, so drhs_dout == dlhs_dout. Reuse the same array so that
+      # _bwd_quantize_gradient can quantize it only once.
+      drhs_dout = dlhs_dout
+    else:
+      drhs_dout = drhs_dout * (lhs.scale.squeeze() if lhs.scale.size == 1 else lhs.scale).astype(grad.dtype)
     lhs = lhs.qvalue
 
   return dlhs_dout, drhs_dout, lhs, rhs
@@ -680,20 +701,34 @@ def _bwd_quantize_gradient(
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Applies backward quantization to incoming gradients."""
   if quantization_rule.bwd_qtype:
+    dlhs_calibration_method = quantization_rule.bwd_calibration_method
+    drhs_calibration_method = (quantization_rule.additional_qt_config or {}).get(
+        "drhs_grad_calibration_method"
+    ) or dlhs_calibration_method
+    # Fixed calibration is per-tensor and ignores channelwise_axes, so when both arms share the same
+    # input and the same fixed calibration, the quantized results are identical.
+    share_quantized_grad = (
+        dlhs_dout is drhs_dout
+        and dlhs_calibration_method == drhs_calibration_method
+        and _is_fixed_calibration(dlhs_calibration_method)
+    )
     dlhs_dout = qpl.quantize(
         # pyrefly: ignore[bad-argument-type]
         dlhs_dout,
         quantization_rule.bwd_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-        calibration_method=quantization_rule.bwd_calibration_method,
+        calibration_method=dlhs_calibration_method,
     )
-    drhs_dout = qpl.quantize(
-        # pyrefly: ignore[bad-argument-type]
-        drhs_dout,
-        quantization_rule.bwd_qtype,
-        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
-        calibration_method=quantization_rule.bwd_calibration_method,
-    )
+    if share_quantized_grad:
+      drhs_dout = dlhs_dout
+    else:
+      drhs_dout = qpl.quantize(
+          # pyrefly: ignore[bad-argument-type]
+          drhs_dout,
+          quantization_rule.bwd_qtype,
+          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [1],
+          calibration_method=drhs_calibration_method,
+      )
   return dlhs_dout, drhs_dout
 
 
