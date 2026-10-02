@@ -2243,6 +2243,7 @@ class RoutedMoE(nnx.Module):
         group_offset,
         partial_sum=None,
         return_lhs=False,
+        return_rhs=False,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2338,6 +2339,7 @@ class RoutedMoE(nnx.Module):
             interpret=megablox_interpret,
             return_lhs=return_lhs,
             fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
+            return_rhs=return_rhs,
         )
       else:
         # jax.lax.ragged_dot
@@ -2358,9 +2360,16 @@ class RoutedMoE(nnx.Module):
           return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]])
         return t[: orig_inputs_shape[0]]
 
+      # The returned lhs is padded like the output; the returned rhs (weights) is not.
+      if return_lhs and return_rhs:
+        output, lhs_out, rhs_out = output
+        return unpad(output), unpad(lhs_out), rhs_out
       if return_lhs:
         output, lhs_out = output
         return unpad(output), unpad(lhs_out)
+      if return_rhs:
+        output, rhs_out = output
+        return unpad(output), rhs_out
       return unpad(output)
 
     def is_batch_sharded_by_ep(input_activation):
@@ -2910,9 +2919,13 @@ class RoutedMoE(nnx.Module):
         partial_accum0=None,
         partial_accum1=None,
         mask=None,
+        gather_weights=True,
+        return_weights=False,
     ):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
+      if not gather_weights:
+        wi_gather_axes = []
       if self.config.prefuse_moe_weights:
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
@@ -2927,6 +2940,7 @@ class RoutedMoE(nnx.Module):
             layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+        return layer_w0, layer_w1
       else:
         # With moe_accumulate_wi_dlhs, the wi_0 GMM returns its input and the wi_1 GMM consumes that, so in the
         # backward pass the wi_1 DLHS arrives as the cotangent of the returned input and the wi_0 DLHS GMM
@@ -2939,8 +2953,15 @@ class RoutedMoE(nnx.Module):
             weight_gather_axes=wi_gather_axes,
             partial_sum=partial_accum0,
             return_lhs=accum_wi_dlhs,
+            return_rhs=return_weights,
         )
-        layer_w0, x_for_w1 = layer_w0 if accum_wi_dlhs else (layer_w0, x)
+        x_for_w1 = x
+        if accum_wi_dlhs and return_weights:
+          layer_w0, x_for_w1, w0 = layer_w0
+        elif accum_wi_dlhs:
+          layer_w0, x_for_w1 = layer_w0
+        elif return_weights:
+          layer_w0, w0 = layer_w0
         if self.config.mlp_bias and w0_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           if mask is not None:
@@ -2953,13 +2974,18 @@ class RoutedMoE(nnx.Module):
             tiling=wi_tile_size,
             weight_gather_axes=wi_gather_axes,
             partial_sum=partial_accum1,
+            return_rhs=return_weights,
         )
+        if return_weights:
+          layer_w1, w1 = layer_w1
         if self.config.mlp_bias and w1_bias is not None:
           layer_w1 = layer_w1 + w1_bias
           if mask is not None:
             layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
-      return layer_w0, layer_w1
+        if return_weights:
+          return layer_w0, layer_w1, w0, w1
+        return layer_w0, layer_w1
 
     def valid_token_count(x, routing, route_metadata):
       """Rows of `x` the gmm actually computes; the rest is ragged-buffer padding."""
@@ -3176,6 +3202,8 @@ class RoutedMoE(nnx.Module):
         rngs,
         forced_routed_experts=None,
         force_dropless=False,
+        gather_weights=True,
+        return_weights=False,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
@@ -3224,16 +3252,36 @@ class RoutedMoE(nnx.Module):
           w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
         gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
-        output0, output1 = gmm_up(x, w0, w1, w0_bias, w1_bias, gmm_fn, weight_gather, mask=mask)
+        up_res = gmm_up(
+            x,
+            w0,
+            w1,
+            w0_bias,
+            w1_bias,
+            gmm_fn,
+            weight_gather,
+            mask=mask,
+            gather_weights=gather_weights,
+            return_weights=return_weights,
+        )
+        if return_weights:
+          output0, output1, w0, w1 = up_res  # pylint: disable=unbalanced-tuple-unpacking
+        else:
+          output0, output1 = up_res  # pylint: disable=unbalanced-tuple-unpacking
 
       intermediate_layer = self.apply_ffn_activation(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
+      if not gather_weights:
+        wo_gather_axes = []
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
+          return_rhs=return_weights,
       )
+      if return_weights:
+        intermediate_output, wo = intermediate_output
       if self.get_tensor_parallelism_size() > 1:
         intermediate_output = jax.lax.psum_scatter(
             intermediate_output,
@@ -3292,6 +3340,7 @@ class RoutedMoE(nnx.Module):
             routing.has_overflow,
             routing.required_rbf,
             routing.max_load_ratio,
+            (w0, w1, wo),
         )
 
       if self.get_expert_parallelism_size() > 1:
@@ -3331,6 +3380,7 @@ class RoutedMoE(nnx.Module):
           routing.has_overflow,
           routing.required_rbf,
           routing.max_load_ratio,
+          (w0, w1, wo),
       )
 
     in_specs = (
@@ -3399,7 +3449,7 @@ class RoutedMoE(nnx.Module):
       def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
         if n_chunks <= 1 or not self.config.use_ring_of_experts:
-          out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _moe_body(
+          out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, _ = _moe_body(
               x,
               logits,
               pre_bias_logits,
@@ -3431,6 +3481,12 @@ class RoutedMoE(nnx.Module):
         chunk = seq_len // n_chunks
         outs, lb_losses, bias_updates_list, has_overflows, required_rbfs, max_load_ratios = [], [], [], [], [], []
         _prev = None
+        # With moe_accumulate_chunk_wgrad, each chunk's GMMs return the (gathered, possibly quantized)
+        # weights they consumed and the next chunk reuses them. The weights are then gathered and
+        # quantized once (chunk 0), and in bwd each chunk's tgmm accumulates its weight gradient in place
+        # onto the later chunks' gradient instead of materializing and summing one per chunk.
+        accum_chunk_wgrad = self.config.moe_accumulate_chunk_wgrad
+        cur_w0, cur_w1, cur_wo = w0, w1, wo
         for c in range(n_chunks):
           sl = slice(c * chunk, (c + 1) * chunk)
           x_c = x[:, sl, :]
@@ -3440,13 +3496,13 @@ class RoutedMoE(nnx.Module):
           # loss stays bit-exact.
           if barrier_enabled and _prev is not None:
             x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
-          out_c, lb_c, bu_c, ov_c, req_c, ratio_c = _moe_body(
+          out_c, lb_c, bu_c, ov_c, req_c, ratio_c, chunk_weights = _moe_body(
               x_c,
               logits[:, sl, :],
               None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
-              w0,
-              w1,
-              wo,
+              cur_w0,
+              cur_w1,
+              cur_wo,
               w0_bias,
               w1_bias,
               wo_bias,
@@ -3454,7 +3510,11 @@ class RoutedMoE(nnx.Module):
               rngs,
               None if forced_routed_experts is None else forced_routed_experts[:, sl, :],
               force_dropless=force_dropless,
+              gather_weights=not accum_chunk_wgrad or c == 0,
+              return_weights=accum_chunk_wgrad and c < n_chunks - 1,
           )
+          if accum_chunk_wgrad:
+            cur_w0, cur_w1, cur_wo = chunk_weights
           if barrier_enabled:
             _prev = out_c
           outs.append(out_c)

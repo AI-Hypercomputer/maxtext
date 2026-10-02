@@ -251,6 +251,7 @@ megablox: true
 sparse_matmul: true
 capacity_factor: -1.0 # a factor to decide expert capacity for token dropping, and no dropping by default
 num_moe_token_chunks: 1 # split routed-MoE tokens into N chunks (ring-of-experts path) so each chunk's EP all-gather / reduce-scatter overlaps the previous chunk's GMM compute. 1 = disabled (identical to baseline).
+moe_accumulate_chunk_wgrad: false # with num_moe_token_chunks>1, gather/quantize MoE weights once and accumulate their gradients in place across chunks via tgmm_v2 partial_sum. requires use_tokamax_gmm=true, use_gmm_v2=true, num_moe_emb_chunks=0, prefuse_moe_weights=false.
 moe_accumulate_wi_dlhs: false # accumulate the MoE wi_1 backward DLHS into the wi_0 DLHS in place (gmm_v2 partial_sum) and fold per-tensor DLHS scales into the kernel. Requires use_tokamax_gmm=True, use_gmm_v2=True, prefuse_moe_weights=False.
 moe_gmm_v2_dlhs_transpose_rhs: false # use native transpose_rhs in GMM v2 backward DLHS; false keeps the explicit RHS transpose
 moe_chunk_barrier: false # wraps its iteration with optimization_barrier to chain the chunked ring-of-experts MoE loop so each chunk's input is fenced on the previous chunk's output, forcing sequential (no-interleave) chunk execution. Math unchanged (barrier is identity), loss bit-exact. Needs num_moe_token_chunks>1 + use_ring_of_experts=True to matter.

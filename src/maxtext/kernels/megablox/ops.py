@@ -76,6 +76,7 @@ def gmm(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    return_rhs: bool = False,
     return_lhs: bool = False,
     fuse_dlhs_scale: bool = False,
     use_dlhs_transpose_rhs: bool = False,
@@ -110,6 +111,11 @@ def gmm(
           act_calibration_method="absmax",
       )
 
+  if return_rhs and not (use_tokamax_backend and use_gmm_v2):
+    # The cotangent of the returned rhs is accumulated into drhs via tgmm_v2 partial_sum,
+    # which other backends do not support; they would silently drop it.
+    raise ValueError("return_rhs=True requires use_tokamax_backend=True and use_gmm_v2=True.")
+
   if return_lhs and not (use_tokamax_backend and use_gmm_v2):
     # The cotangent of the returned lhs is accumulated into dlhs via gmm_v2 partial_sum,
     # which other backends do not support; they would silently drop it.
@@ -120,10 +126,10 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
-  out, lhs_out = gmm_fwd_bwd(
+  out, lhs_out, rhs_out = gmm_fwd_bwd(
       lhs,
       rhs,
       group_sizes,
@@ -142,11 +148,18 @@ def gmm(
       use_gmm_v2,
       use_gmm_v2_heuristic_tiling,
       partial_sum,
+      return_rhs,
       return_lhs,
       fuse_dlhs_scale,
       use_dlhs_transpose_rhs,
   )
-  return (out, lhs_out) if return_lhs else out
+  if return_lhs and return_rhs:
+    return out, lhs_out, rhs_out
+  if return_lhs:
+    return out, lhs_out
+  if return_rhs:
+    return out, rhs_out
+  return out
 
 
 # ==============================================================================
@@ -183,11 +196,12 @@ def _gmm_fwd(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    return_rhs: bool = False,
     return_lhs: bool = False,
     fuse_dlhs_scale: bool = False,
     use_dlhs_transpose_rhs: bool = False,
 ) -> tuple[
-    jnp.ndarray,
+    tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -203,8 +217,8 @@ def _gmm_fwd(
   - lhs: [m, k]
   - rhs: [g, k, n] if transpose_rhs=False. [g, n, k] if transpose_rhs=True
 
-  Always returns (out, lhs) so the output structure does not depend on return_lhs;
-  gmm() drops lhs unless return_lhs=True.
+  Always returns (out, lhs, rhs) so the output structure does not depend on return_lhs/return_rhs;
+  gmm() drops lhs unless return_lhs=True and rhs unless return_rhs=True.
   """
 
   del use_dlhs_transpose_rhs  # Only affects the custom backward pass.
@@ -263,8 +277,8 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  del return_lhs, fuse_dlhs_scale  # Only used by gmm() and _gmm_bwd.
-  return (out, lhs), (
+  del return_rhs, return_lhs, fuse_dlhs_scale  # Only used by gmm() and _gmm_bwd.
+  return (out, lhs, rhs), (
       lhs,
       rhs,
       group_sizes,
@@ -520,6 +534,7 @@ def _gmm_bwd(
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
+    return_rhs: bool,
     return_lhs: bool,
     fuse_dlhs_scale: bool,
     use_dlhs_transpose_rhs: bool,
@@ -552,11 +567,22 @@ def _gmm_bwd(
       rhs_is_qarray,
   ) = residual
   num_actual_groups = residual_rhs.shape[0]
-  grad, dlhs_partial_sum = grad
+  grad, dlhs_partial_sum, drhs_partial_sum = grad
+  # With return_lhs, the cotangent of the returned lhs is the input gradient already computed by its
+  # other consumers (e.g. the MoE wi_1 GMM). The DLHS GMM adds this dlhs onto it in place.
   if not return_lhs:
     dlhs_partial_sum = None
   elif isinstance(dlhs_partial_sum, qpl.QArray):
     dlhs_partial_sum = dlhs_partial_sum.qvalue
+  # With return_rhs, the cotangent of the returned rhs is the weight gradient already accumulated
+  # by its downstream consumers (e.g. later MoE token chunks). tgmm adds this drhs onto it in place.
+  if not return_rhs:
+    drhs_partial_sum = None
+  else:
+    if isinstance(drhs_partial_sum, qpl.QArray):
+      drhs_partial_sum = drhs_partial_sum.qvalue
+    if transpose_rhs:
+      drhs_partial_sum = drhs_partial_sum.swapaxes(1, 2)
 
   # Jargon used here:
   #  - lhs: input activation in forward pass, possibly quantized.
@@ -624,6 +650,7 @@ def _gmm_bwd(
       rhs_vma_axes,
       quantization_rule,
       use_gmm_v2_heuristic_tiling,
+      partial_sum=drhs_partial_sum,
   )
 
   # 5. Output Formatting
@@ -986,13 +1013,22 @@ def _compute_drhs(
     rhs_vma_axes: tuple,
     quantization_rule: qwix.QtRule | None,
     use_gmm_v2_heuristic_tiling: bool,
+    partial_sum: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
     drhs = _drhs_run_tokamax_v1(drhs_dout, lhs, group_sizes, rhs_dtype, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
     drhs = _drhs_run_tokamax_v2(
-        drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, use_gmm_v2_heuristic_tiling
+        drhs_dout,
+        lhs,
+        group_sizes,
+        group_offset,
+        num_actual_groups,
+        rhs_dtype,
+        tiling,
+        use_gmm_v2_heuristic_tiling,
+        partial_sum=partial_sum,
     )
   else:
     drhs = _drhs_run_megablox(
@@ -1061,6 +1097,7 @@ def _drhs_run_tokamax_v2(
     rhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
+    partial_sum: jnp.ndarray | None = None,
 ) -> jnp.ndarray:
   """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
@@ -1081,6 +1118,7 @@ def _drhs_run_tokamax_v2(
       group_sizes=group_sizes,
       num_actual_groups=num_actual_groups,
       rhs_scale=rhs_scale,
+      partial_sum=partial_sum,
       precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=rhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
