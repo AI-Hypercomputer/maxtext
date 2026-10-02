@@ -29,9 +29,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import AttentionType, Config
 from maxtext.layers import attentions
-from maxtext.layers import initializers
 from maxtext.layers import linears
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import MlpBlock
@@ -235,12 +233,6 @@ class Olmo3DecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
-Olmo3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Olmo3DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-
 class Olmo3ScannableBlock(nnx.Module):
   """A repeatable block of Olmo 3 decoder layers.
 
@@ -318,9 +310,3 @@ class Olmo3ScannableBlock(nnx.Module):
       return y, None
     else:
       return y
-
-
-Olmo3ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Olmo3ScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

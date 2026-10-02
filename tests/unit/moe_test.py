@@ -39,6 +39,7 @@ from maxtext.layers.quantizations import Fp8Quantization, WeightQuantConfig, con
 from maxtext.utils import max_logging, maxtext_utils
 from maxtext.utils.sharding import remove_expert_from_partition_spec
 from tests.utils.test_helpers import get_test_config_path
+from tests.utils import linen_wrappers
 import pytest
 
 
@@ -247,7 +248,8 @@ class MlpBlockTest(unittest.TestCase):
     self.rng = jax.random.PRNGKey(42)
     quant = Fp8Quantization()
     devices_array = maxtext_utils.create_device_mesh(self.config)
-    self.model = linears.mlp_block(
+    self.model = linen_wrappers.to_linen(
+        linears.MlpBlock,
         mesh=Mesh(devices_array, self.config.mesh_axes),
         config=self.config,
         in_features=2,
@@ -740,7 +742,8 @@ class RoutedMoeTest(parameterized.TestCase):
 
   def get_moe_output(self, variables, hidden_states, cfg, mesh):
     """retrieve expected output from MoE"""
-    model = moe.get_routed_moe(
+    model = linen_wrappers.to_linen(
+        moe.RoutedMoE,
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,
@@ -1108,7 +1111,8 @@ class RoutedMoeTest(parameterized.TestCase):
       )
 
     def _build_model(cfg, mesh):
-      return moe.get_routed_moe(
+      return linen_wrappers.to_linen(
+          moe.RoutedMoE,
           name="MoeBlock",
           config=cfg,
           num_experts=cfg.num_experts,
@@ -1226,7 +1230,8 @@ class RoutedMoeTest(parameterized.TestCase):
 
     def _loss_and_grad(cfg, variables, hidden_states):
       mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-      model = moe.get_routed_moe(
+      model = linen_wrappers.to_linen(
+          moe.RoutedMoE,
           name="MoeBlock",
           config=cfg,
           num_experts=cfg.num_experts,
@@ -1327,7 +1332,8 @@ class RoutedMoeTest(parameterized.TestCase):
 
     def _loss_and_grad(cfg, variables, hidden_states):
       mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-      model = moe.get_routed_moe(
+      model = linen_wrappers.to_linen(
+          moe.RoutedMoE,
           name="MoeBlock",
           config=cfg,
           num_experts=cfg.num_experts,
@@ -1447,7 +1453,8 @@ class RoutedMoeTest(parameterized.TestCase):
 
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    model = moe.get_routed_moe(
+    model = linen_wrappers.to_linen(
+        moe.RoutedMoE,
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,
@@ -1512,7 +1519,8 @@ class RoutedMoeTest(parameterized.TestCase):
         ragged_buffer_factor=ragged_buffer_factor,
         moe_dropless_fallback=moe_dropless_fallback,
     )
-    model = moe.get_routed_moe(
+    model = linen_wrappers.to_linen(
+        moe.RoutedMoE,
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,
@@ -1833,7 +1841,8 @@ class RoutedMoeTest(parameterized.TestCase):
     mesh = Mesh(devices_array, cfg.mesh_axes)
 
     # Instantiate QAG-quantized model with shard_embed_moe_on_fsdp
-    model_qag = moe.get_routed_moe(
+    model_qag = linen_wrappers.to_linen(
+        moe.RoutedMoE,
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,
@@ -2305,7 +2314,8 @@ class QuantizedMoeTest(parameterized.TestCase):
 
   def _build_and_quantize_moe_model(self, cfg: Config, mesh: Mesh):
     """Instantiates and optionally applies Qwix FP8 quantization rules to RoutedMoE."""
-    model = moe.get_routed_moe(
+    model = linen_wrappers.to_linen(
+        moe.RoutedMoE,
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,
