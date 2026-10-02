@@ -15,6 +15,8 @@
 """Unit tests for Pallas Mosaic TPU v2 kernels."""
 
 import collections
+from unittest import mock
+
 import pytest
 
 from absl.testing import absltest
@@ -25,6 +27,7 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 from maxtext.kernels.megablox import common
+from maxtext.kernels.megablox import ops as megablox_ops
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_backend
 
@@ -211,6 +214,116 @@ def assert_arrays_all_close(actual, desired, *, atol=None, rtol=None):
   chex.assert_trees_all_close(actual, desired, atol=atol, rtol=rtol)
 
 
+class GmmDispatchTest(parameterized.TestCase):
+  """CPU-compatible routing tests; the TPU kernels are mocked."""
+
+  @parameterized.product(
+      rhs_dtype=(jnp.int4, jnp.int8, jnp.bfloat16, jnp.float8_e4m3fn),
+      use_gmm_v2_heuristic_tiling=(False, True),
+      use_dlhs_transpose_rhs=(None, False, True),
+      transpose_rhs=(False, True),
+  )
+  def test_dlhs_rhs_transpose_dispatch_by_dtype(
+      self, rhs_dtype, use_gmm_v2_heuristic_tiling, use_dlhs_transpose_rhs, transpose_rhs
+  ):
+    """DLHS materializes sub-byte RHS transposes before calling GMM v2."""
+    num_groups, out_size, in_size, batch_size = 2, 16, 32, 8
+    dlhs_dout = jnp.ones((batch_size, in_size), dtype=jnp.bfloat16)
+    rhs_shape = (num_groups, in_size, out_size) if transpose_rhs else (num_groups, out_size, in_size)
+    rhs = (jnp.arange(num_groups * out_size * in_size).reshape(rhs_shape) % 8).astype(rhs_dtype)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+    expected = jnp.zeros((batch_size, out_size), dtype=jnp.bfloat16)
+    tiling = (256, 512, 256, 512, 1024, 512, 256, 512, 256)
+
+    # None exercises the public helper default for backward compatibility.
+    kwargs = {} if use_dlhs_transpose_rhs is None else {"use_dlhs_transpose_rhs": use_dlhs_transpose_rhs}
+    with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", return_value=expected) as gmm_v2_mock:
+      actual = megablox_ops._dlhs_run_tokamax_v2(  # pylint: disable=protected-access
+          dlhs_dout=dlhs_dout,
+          rhs=rhs,
+          group_sizes=group_sizes,
+          group_offset=None,
+          lhs_dtype=jnp.bfloat16,
+          tiling=tiling,
+          use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
+          transpose_rhs=transpose_rhs,
+          **kwargs,
+      )
+
+    call_kwargs = gmm_v2_mock.call_args.kwargs
+    expected_transpose_rhs = (
+        bool(use_dlhs_transpose_rhs) and not transpose_rhs and jax.dtypes.itemsize_bits(rhs_dtype) >= 8
+    )
+    expected_rhs = rhs if transpose_rhs or expected_transpose_rhs else rhs.swapaxes(1, 2)
+    self.assertIs(actual, expected)
+    self.assertEqual(call_kwargs["transpose_rhs"], expected_transpose_rhs)
+    self.assertTrue(bool(jnp.array_equal(call_kwargs["rhs"], expected_rhs)))
+    expected_tiling = (
+        gmm_backend.calculate_tiling if use_gmm_v2_heuristic_tiling else gmm_backend.TileSizes(512, 1024, 512)
+    )
+    self.assertEqual(call_kwargs["tile_info"], expected_tiling)
+    self.assertTrue(call_kwargs["maybe_quantize_lhs"])
+
+  @parameterized.product(
+      use_dlhs_transpose_rhs=(None, False, True),
+      transpose_rhs=(False, True),
+      use_gmm_v2_heuristic_tiling=(False, True),
+      has_partial_sum=(False, True),
+  )
+  def test_dlhs_transpose_flag_through_custom_vjp(
+      self, use_dlhs_transpose_rhs, transpose_rhs, use_gmm_v2_heuristic_tiling, has_partial_sum
+  ):
+    """Check flag routing and cotangents through JIT with reference backends."""
+    num_groups, batch_size, in_size, out_size = 2, 8, 16, 32
+    lhs = jnp.linspace(-1.0, 1.0, batch_size * in_size).reshape(batch_size, in_size)
+    rhs = jnp.linspace(-0.5, 0.5, num_groups * in_size * out_size).reshape(num_groups, in_size, out_size)
+    if transpose_rhs:
+      rhs = rhs.swapaxes(1, 2)
+    partial_sum = jnp.ones((batch_size, out_size)) if has_partial_sum else None
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+
+    def mock_gmm(lhs, rhs, transpose_rhs=False, partial_sum=None, **kwargs):
+      del kwargs
+      if transpose_rhs:
+        rhs = rhs.swapaxes(1, 2)
+      out = jnp.einsum("gmk,gkn->gmn", lhs.reshape(num_groups, -1, lhs.shape[-1]), rhs)
+      out = out.reshape(batch_size, -1)
+      return out if partial_sum is None else out + partial_sum
+
+    def mock_tgmm(lhs, rhs, **kwargs):
+      del kwargs
+      return jnp.einsum(
+          "gmk,gmn->gkn",
+          lhs.reshape(num_groups, -1, lhs.shape[-1]),
+          rhs.reshape(num_groups, -1, rhs.shape[-1]),
+      )
+
+    def loss(lhs, rhs, partial_sum):
+      kwargs = {} if use_dlhs_transpose_rhs is None else {"use_dlhs_transpose_rhs": use_dlhs_transpose_rhs}
+      out = megablox_ops.gmm(
+          lhs,
+          rhs,
+          group_sizes,
+          transpose_rhs=transpose_rhs,
+          use_tokamax_backend=True,
+          use_gmm_v2=True,
+          use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
+          partial_sum=partial_sum,
+          **kwargs,
+      )
+      return jnp.sum(out**2)
+
+    def reference_loss(lhs, rhs, partial_sum):
+      return jnp.sum(mock_gmm(lhs, rhs, transpose_rhs=transpose_rhs, partial_sum=partial_sum) ** 2)
+
+    with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", side_effect=mock_gmm) as gmm_mock:
+      with mock.patch.object(megablox_ops.tgmm_v2, "tgmm_v2", side_effect=mock_tgmm):
+        actual = jax.jit(jax.value_and_grad(loss, argnums=(0, 1, 2)))(lhs, rhs, partial_sum)
+    expected = jax.jit(jax.value_and_grad(reference_loss, argnums=(0, 1, 2)))(lhs, rhs, partial_sum)
+    chex.assert_trees_all_close(actual, expected, atol=1e-4, rtol=1e-5)
+    self.assertEqual(gmm_mock.call_args.kwargs["transpose_rhs"], bool(use_dlhs_transpose_rhs) and not transpose_rhs)
+
+
 class GmmTest(parameterized.TestCase):
 
   def setUp(self):
@@ -257,6 +370,101 @@ class GmmTest(parameterized.TestCase):
     )
 
     assert_arrays_all_close(actual, expected)
+
+  @parameterized.product(
+      input_dtype=(jnp.bfloat16, jnp.float8_e4m3fn),
+      tile_sizes=((128, 128, 128), (512, 1024, 1024)),
+  )
+  def test_gmm_native_rhs_transpose_matches_swapaxes(self, input_dtype, tile_sizes):
+    """Native transpose_rhs must be bit-exact with a materialized transpose."""
+    num_groups, out_size, in_size, batch_size = 8, 1280, 2048, 4096
+    lhs_key, rhs_key = jax.random.split(jax.random.PRNGKey(2026))
+    lhs = jax.random.normal(lhs_key, (batch_size, in_size), dtype=jnp.bfloat16).astype(input_dtype)
+    rhs = jax.random.normal(
+        rhs_key,
+        (num_groups, out_size, in_size),
+        dtype=jnp.bfloat16,
+    ).astype(input_dtype)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+    tiles = gmm_backend.TileSizes(*tile_sizes)
+
+    out_swap = gmm_backend.gmm_v2(
+        lhs=lhs,
+        rhs=rhs.swapaxes(1, 2),
+        group_sizes=group_sizes,
+        rhs_scale=None,
+        tile_info=tiles,
+        preferred_element_type=jnp.bfloat16,
+        transpose_rhs=False,
+    )
+    out_native = gmm_backend.gmm_v2(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        rhs_scale=None,
+        tile_info=tiles,
+        preferred_element_type=jnp.bfloat16,
+        transpose_rhs=True,
+    )
+
+    self.assertEqual(out_native.shape, (batch_size, out_size))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out_swap))))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out_native))))
+    self.assertTrue(bool(jnp.array_equal(out_swap, out_native)))
+
+  @parameterized.product(
+      input_dtype=(jnp.bfloat16, jnp.float8_e4m3fn),
+      fuse_act=("silu", "gelu", "swigluoai"),
+      maybe_quantize_lhs=(False, True),
+  )
+  def test_gmm_fused_activation_with_native_rhs_transpose(self, input_dtype, fuse_act, maybe_quantize_lhs):
+    """Fused activation supports native transposed RHS weights."""
+    num_groups, fused_out_size, in_size, batch_size = 8, 2048, 1024, 4096
+    lhs_key, rhs_key, bias_key = jax.random.split(jax.random.PRNGKey(2026), 3)
+    lhs = jax.random.normal(lhs_key, (batch_size, in_size), dtype=jnp.bfloat16).astype(input_dtype)
+    rhs = jax.random.normal(
+        rhs_key,
+        (num_groups, in_size, fused_out_size),
+        dtype=jnp.bfloat16,
+    ).astype(input_dtype)
+    rhs_scale = jnp.linspace(0.5, 1.5, num_groups * 2 * fused_out_size).reshape(num_groups, 2, 1, fused_out_size)
+    rhs_bias = jax.random.normal(
+        bias_key,
+        (num_groups, 1, fused_out_size),
+        dtype=jnp.bfloat16,
+    )
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+    tiles = gmm_backend.TileSizes(512, 1024, 512)
+
+    out_standard = gmm_backend.gmm_v2(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        rhs_scale=rhs_scale,
+        rhs_bias=rhs_bias,
+        tile_info=tiles,
+        preferred_element_type=jnp.bfloat16,
+        maybe_quantize_lhs=maybe_quantize_lhs,
+        fuse_act=fuse_act,
+        transpose_rhs=False,
+    )
+    out_transposed = gmm_backend.gmm_v2(
+        lhs=lhs,
+        rhs=rhs.swapaxes(1, 2),
+        group_sizes=group_sizes,
+        rhs_scale=rhs_scale,
+        rhs_bias=rhs_bias,
+        tile_info=tiles,
+        preferred_element_type=jnp.bfloat16,
+        maybe_quantize_lhs=maybe_quantize_lhs,
+        fuse_act=fuse_act,
+        transpose_rhs=True,
+    )
+
+    self.assertEqual(out_transposed.shape, (batch_size, fused_out_size // 2))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out_standard))))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out_transposed))))
+    self.assertTrue(bool(jnp.array_equal(out_standard, out_transposed)))
 
   @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(

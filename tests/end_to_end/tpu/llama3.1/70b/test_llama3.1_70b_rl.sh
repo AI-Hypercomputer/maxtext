@@ -34,7 +34,8 @@ python3 -m maxtext.inference.vllm_decode \
     hbm_utilization_vllm=0.85 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True scan_layers=false enable_single_controller=${use_pathways} \
-    ici_tensor_parallelism=8
+    ici_tensor_parallelism=8 \
+    ici_data_parallelism=4
 
 # Step 2: Run RL on the converted checkpoint
 python3 -m maxtext.trainers.post_train.rl.train_rl \
@@ -60,4 +61,5 @@ python3 -m maxtext.inference.vllm_decode \
     hbm_utilization_vllm=0.6 \
     prompt='Suggest some famous landmarks in London.' \
     use_chat_template=True scan_layers=true enable_single_controller=${use_pathways} \
-    ici_tensor_parallelism=8
+    ici_tensor_parallelism=8 \
+    ici_data_parallelism=4

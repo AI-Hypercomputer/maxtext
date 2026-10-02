@@ -852,6 +852,34 @@ class LogitsProjQwixTest(unittest.TestCase):
       ][0]
       self.assertEqual((rule.weight_calibration_method, rule.act_calibration_method), (expected, expected))
 
+  def test_logits_proj_bwd_calibration_methods(self):
+    """Verifies logits_dense QtRule bwd calibration inheritance and override of both gradient arms."""
+    for override, expected_dlhs, expected_drhs in [
+        ("", "absmax", "fixed,0.01"),
+        ("absmax,1.5", "absmax,1.5", "absmax,1.5"),
+    ]:
+      extra = [f"logits_proj_bwd_quant_calibration_method={override}"] if override else []
+      cfg = pyconfig.initialize(
+          [
+              "",
+              get_test_config_path(),
+              "model_name=deepseek3-671b",
+              "quantization=fp8_full",
+              "use_qwix_quantization=true",
+              "bwd_quantization_calibration_method=absmax",
+              "drhs_grad_quantization_calibration_method=fixed,0.01",
+              "quantize_logits_proj=true",
+              *extra,
+          ],
+          run_name="logits_proj_bwd_calib_test",
+          skip_jax_distributed_system=True,
+      )
+      rule = [
+          r for r in quantizations.get_fp8_full_qwix_rule_w_sparsity(cfg) if r.module_path == "decoder/logits_dense.*"
+      ][0]
+      self.assertEqual(rule.bwd_calibration_method, expected_dlhs)
+      self.assertEqual(rule.additional_qt_config["drhs_grad_calibration_method"], expected_drhs)
+
 
 if __name__ == "__main__":
   unittest.main()

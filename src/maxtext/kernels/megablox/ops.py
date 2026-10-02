@@ -78,6 +78,7 @@ def gmm(
     partial_sum: jnp.ndarray | None = None,
     return_lhs: bool = False,
     fuse_dlhs_scale: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   if interpret is None:
@@ -119,7 +120,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out = gmm_fwd_bwd(
@@ -143,6 +144,7 @@ def gmm(
       partial_sum,
       return_lhs,
       fuse_dlhs_scale,
+      use_dlhs_transpose_rhs,
   )
   return (out, lhs_out) if return_lhs else out
 
@@ -183,6 +185,7 @@ def _gmm_fwd(
     partial_sum: jnp.ndarray | None = None,
     return_lhs: bool = False,
     fuse_dlhs_scale: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -203,6 +206,8 @@ def _gmm_fwd(
   Always returns (out, lhs) so the output structure does not depend on return_lhs;
   gmm() drops lhs unless return_lhs=True.
   """
+
+  del use_dlhs_transpose_rhs  # Only affects the custom backward pass.
 
   # Track whether operands arrived as QArray (e.g. from token all-gather quantization
   # or gathered weights) to return matching cotangent containers in backward pass.
@@ -517,6 +522,7 @@ def _gmm_bwd(
     use_gmm_v2_heuristic_tiling: bool,
     return_lhs: bool,
     fuse_dlhs_scale: bool,
+    use_dlhs_transpose_rhs: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -598,6 +604,7 @@ def _gmm_bwd(
       partial_sum=dlhs_partial_sum,
       lhs_scale=lhs_scale_for_dlhs,
       fuse_dlhs_scale=fuse_dlhs_scale,
+      use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
   )
 
   # 4. DRHS Gradient Execution
@@ -755,6 +762,7 @@ def _compute_dlhs(
     partial_sum: jnp.ndarray | None = None,
     lhs_scale: jnp.ndarray | None = None,
     fuse_dlhs_scale: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Routes execution of DLHS based on backend choices.
 
@@ -784,6 +792,7 @@ def _compute_dlhs(
         partial_sum=partial_sum,
         lhs_scale=lhs_scale,
         fuse_dlhs_scale=fuse_dlhs_scale,
+        use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
     )
   else:
     dlhs = _dlhs_run_megablox(
@@ -863,10 +872,9 @@ def _dlhs_run_tokamax_v2(
     partial_sum: jnp.ndarray | None = None,
     lhs_scale: jnp.ndarray | None = None,
     fuse_dlhs_scale: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
-  # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs support.
-  dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
   is_qarray_dout = isinstance(dlhs_dout, qpl.QArray)
   dlhs_lhs = dlhs_dout.qvalue if is_qarray_dout else dlhs_dout
 
@@ -874,6 +882,17 @@ def _dlhs_run_tokamax_v2(
     dlhs_tiling = gmm_v2.calculate_tiling
   else:
     dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+
+  if use_dlhs_transpose_rhs:
+    kernel_transpose_rhs = not transpose_rhs
+    dlhs_rhs = rhs
+  else:
+    kernel_transpose_rhs = False
+    dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
+  # Sub-byte packing only supports the standard [group, k, n] RHS layout.
+  if kernel_transpose_rhs and jax.dtypes.itemsize_bits(rhs.dtype) < 8:
+    dlhs_rhs = rhs.swapaxes(1, 2)
+    kernel_transpose_rhs = False
 
   # The kernel adds partial_sum after applying its lhs_scale, so partial_sum can only go into the kernel
   # when every scale on dlhs (dlhs_dout.scale and, with partial_sum, the pre-quantized lhs scale) is
@@ -901,6 +920,7 @@ def _dlhs_run_tokamax_v2(
       preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
       lhs_scale=kernel_lhs_scale,
+      transpose_rhs=kernel_transpose_rhs,
       # Bypass internal quantization if incoming dlhs_dout is already a QArray, or when lhs_scale is a
       # post-matmul scale rather than a quantization scale.
       maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,

@@ -54,7 +54,7 @@ class Gpt3LayerNorm(nnx.Module):
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
       kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.zeros,
+      scale_init: Initializer = jax.nn.initializers.zeros,
       use_bias: bool = True,
       reductions_in_fp32: bool = False,
       parameter_memory_host_offload: bool = False,

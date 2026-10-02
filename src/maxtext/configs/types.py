@@ -574,6 +574,15 @@ class Quantization(BaseModel):
           " `act_quantization_calibration_method`. Set to e.g. 'absmax' to force absmax calibration."
       ),
   )
+  logits_proj_bwd_quant_calibration_method: str = Field(
+      "",
+      description=(
+          "Backward (gradient) calibration method for the output logits (logits_dense) projection when"
+          " `quantize_logits_proj=True`. Applies to both the activation-gradient and weight-gradient arms. If empty"
+          " (default), inherits `bwd_quantization_calibration_method` and `drhs_grad_quantization_calibration_method`."
+          " Set to e.g. 'absmax' to force absmax calibration."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -1083,6 +1092,10 @@ class MoEGeneral(BaseModel):
           " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
       ),
   )
+  moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
+      False,
+      description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
+  )
   moe_chunk_barrier: bool = Field(
       False,
       description=(
@@ -1486,6 +1499,18 @@ class DeepSeekMoE(BaseModel):
       False,
       description="Whether to use Lineage DeepSeek-V3 execution.",
   )
+  lineage_quantization: Literal["none", "fp8_full"] = Field(
+      "none",
+      description=("Quantization of the Lineage sparse-layer routed experts. Only used" " if use_lineage is True."),
+  )
+
+  @classmethod
+  def _lineage_quantization_none(cls, v: Any) -> Any:
+    """pyconfig converts the string "none" to None; map it back."""
+    return "none" if v is None else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues
+  _validate_lineage_quantization = field_validator("lineage_quantization", mode="before")(_lineage_quantization_none)
 
 
 class Qwen3Next(BaseModel):
@@ -5063,10 +5088,10 @@ class MaxTextConfig(
               f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
           )
 
-    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
+    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with scanned layers.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
       raise ValueError(
-          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
+          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with scanned layers)."
       )
     if self.use_multimodal:
       # Gemma 4 small (E2B / E4B) only supports text for now; multimodal

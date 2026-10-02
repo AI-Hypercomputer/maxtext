@@ -7194,18 +7194,20 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
         rngs=self.nnx_rng,
     )
 
+    batch_size = cfg.global_batch_size_to_train_on
+
     def make_kv_tensor(seq_len):
-      qval = jnp.ones((1, seq_len, cfg.num_kv_heads, cfg.head_dim), dtype=jnp.int8)
-      scale = jnp.ones((1, seq_len, cfg.num_kv_heads, 1), dtype=jnp.bfloat16)
+      qval = jnp.ones((batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim), dtype=jnp.int8)
+      scale = jnp.ones((batch_size, seq_len, cfg.num_kv_heads, 1), dtype=jnp.bfloat16)
       return attention_op.KVTensor(qvalue=qval, scale=[scale], scale_t=None, bias=[], dequant_dtype=jnp.bfloat16)
 
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
       # 1. Prefill mode (q_seq_len > 1) with KVTensor
       prefill_len = cfg.max_prefill_predict_length
-      q_prefill = jnp.ones((1, prefill_len, cfg.num_query_heads, cfg.head_dim), dtype=jnp.bfloat16)
+      q_prefill = jnp.ones((batch_size, prefill_len, cfg.num_query_heads, cfg.head_dim), dtype=jnp.bfloat16)
       k_prefill = make_kv_tensor(prefill_len)
       v_prefill = make_kv_tensor(prefill_len)
-      seg_prefill = jnp.ones((1, prefill_len), dtype=jnp.int32)
+      seg_prefill = jnp.ones((batch_size, prefill_len), dtype=jnp.int32)
       out_prefill, _, _ = op.apply_attention_dot(
           query=q_prefill,
           key=k_prefill,
@@ -7220,10 +7222,10 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
 
       # 2. Decode mode (q_seq_len == 1, is_partition_in_decode == True) with KVTensor
       target_len = cfg.max_target_length
-      q_ar = jnp.ones((1, 1, cfg.num_query_heads, cfg.head_dim), dtype=jnp.bfloat16)
+      q_ar = jnp.ones((batch_size, 1, cfg.num_query_heads, cfg.head_dim), dtype=jnp.bfloat16)
       k_ar = make_kv_tensor(target_len)
       v_ar = make_kv_tensor(target_len)
-      seg_ar = jnp.ones((1, target_len), dtype=jnp.int32)
+      seg_ar = jnp.ones((batch_size, target_len), dtype=jnp.int32)
       out_ar, _, _ = op.apply_attention_dot(
           query=q_ar,
           key=k_ar,
