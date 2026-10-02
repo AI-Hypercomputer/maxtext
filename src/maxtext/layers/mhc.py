@@ -247,17 +247,11 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         return P()
       return P(*token_axes, *([None] * (rank - 2)))
 
-    # check_vma=False is required, not defensive: `pallas_call` builds its
-    # `out_shape` from a plain `jax.ShapeDtypeStruct`, which carries no
-    # `manual_axis_type`, and check_vma=True rejects that outright. With
-    # check_vma=False, the transpose of `shard_map` psums the cotangents of
-    # replicated inputs, so weight gradients are reduced across token shards.
     sharded_fn = jax.shard_map(
         kernel_fn,
         mesh=self.mesh,
         in_specs=tuple(spec(rank) for rank in in_ranks),
         out_specs=tuple(spec(rank) for rank in out_ranks),
-        check_vma=False,
     )
     return sharded_fn(*args)
 

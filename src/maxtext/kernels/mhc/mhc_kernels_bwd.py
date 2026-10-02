@@ -121,10 +121,10 @@ def _post_apply_bwd(
     d_x, d_layer_output, d_h_post, d_residual = pl.pallas_call(
         kernel_main,
         out_shape=(
-            jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
-            jax.ShapeDtypeStruct((tokens, embedding), layer_output.dtype),
-            jax.ShapeDtypeStruct((tokens, streams), h_post.dtype),
-            jax.ShapeDtypeStruct((tokens, streams, streams), residual.dtype),
+            common.token_out_shape((tokens, streams, embedding), x.dtype, x),
+            common.token_out_shape((tokens, embedding), layer_output.dtype, x),
+            common.token_out_shape((tokens, streams), h_post.dtype, x),
+            common.token_out_shape((tokens, streams, streams), residual.dtype, x),
         ),
         in_specs=common.hbm_specs(5),
         out_specs=common.hbm_specs(4),
@@ -178,8 +178,8 @@ def _pre_apply_bwd(
     d_x_acc_out, d_h_pre = pl.pallas_call(
         kernel_main,
         out_shape=(
-            jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
-            jax.ShapeDtypeStruct((tokens, streams), h_pre.dtype),
+            common.token_out_shape((tokens, streams, embedding), x.dtype, x),
+            common.token_out_shape((tokens, streams), h_pre.dtype, x),
         ),
         in_specs=common.hbm_specs(4),
         out_specs=common.hbm_specs(2),
@@ -256,7 +256,8 @@ def _coeff_bwd(
 
   spec_x = common.token_block_spec((tokens, streams, embedding), config.bwd_block_size)
   param_specs = jax.tree.map(lambda p: common.whole(p.shape), coeff_params)
-  param_out_shapes = jax.tree.map(lambda p: jax.ShapeDtypeStruct(p.shape, jnp.float32), coeff_params)
+  # Per-shard partial sums over this shard's tokens, so they vary like `x`.
+  param_out_shapes = jax.tree.map(lambda p: common.token_out_shape(p.shape, jnp.float32, x), coeff_params)
   output_specs = jax.tree.map(
       lambda out: common.token_block_spec(out.shape, config.bwd_block_size),
       d_outputs,
@@ -286,7 +287,7 @@ def _coeff_bwd(
     d_x, *d_param_grads = pl.pallas_call(
         kernel_main,
         out_shape=(
-            jax.ShapeDtypeStruct((tokens, streams, embedding), x.dtype),
+            common.token_out_shape((tokens, streams, embedding), x.dtype, x),
             *jax.tree.leaves(param_out_shapes),
         ),
         in_specs=in_specs,
@@ -303,6 +304,7 @@ def _coeff_bwd(
         *jax.tree.leaves(d_outputs),
         d_x_acc,
     )
+  d_param_grads = map(common.psum_to_primal_vma, d_param_grads, jax.tree.leaves(coeff_params))
   d_coeff_grads = common.MhcCoeffGradients(*d_param_grads)
   return d_x, d_coeff_grads
 

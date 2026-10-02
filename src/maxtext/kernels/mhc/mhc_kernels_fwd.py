@@ -83,9 +83,9 @@ def _coeff_fwd(
     h_pre, h_post, residual = pl.pallas_call(
         kernel_main,
         out_shape=(
-            jax.ShapeDtypeStruct((tokens, streams), jnp.float32),
-            jax.ShapeDtypeStruct((tokens, streams), jnp.float32),
-            jax.ShapeDtypeStruct((tokens, streams, streams), jnp.float32),
+            common.token_out_shape((tokens, streams), jnp.float32, x),
+            common.token_out_shape((tokens, streams), jnp.float32, x),
+            common.token_out_shape((tokens, streams, streams), jnp.float32, x),
         ),
         in_specs=common.hbm_specs(1 + num_params + 1),
         out_specs=common.hbm_specs(3),
@@ -129,7 +129,7 @@ def _pre_apply_fwd(
   with common.tpu_mesh_context():
     return pl.pallas_call(
         kernel_main,
-        out_shape=jax.ShapeDtypeStruct((tokens, embedding), jnp.bfloat16),
+        out_shape=common.token_out_shape((tokens, embedding), jnp.bfloat16, x),
         in_specs=common.hbm_specs(2),
         out_specs=common.HBM_SPEC,
         cost_estimate=dims.pre_apply_fwd_cost(),
@@ -180,7 +180,7 @@ def _post_apply_fwd(
   with common.tpu_mesh_context():
     return pl.pallas_call(
         kernel_main,
-        out_shape=jax.ShapeDtypeStruct((tokens, streams, embedding), jnp.bfloat16),
+        out_shape=common.token_out_shape((tokens, streams, embedding), jnp.bfloat16, x),
         in_specs=common.hbm_specs(4),
         out_specs=common.HBM_SPEC,
         cost_estimate=dims.post_apply_fwd_cost(),
