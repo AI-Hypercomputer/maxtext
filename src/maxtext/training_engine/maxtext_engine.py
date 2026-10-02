@@ -34,6 +34,7 @@ import jax.numpy as jnp
 from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
+from maxtext.optimizers import optimizers
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
 from maxtext.integration.vllm.convert_utils import (
     is_verify_weights_enabled,
@@ -653,6 +654,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_eval_signature: Any = None
     self._signature_compare_warned: bool = False
     self._replicated_batch_warned: bool = False
+    self._trainable_patterns = getattr(training_config, "trainable_parameters_mask", None)
+    self._freeze_mask_fn = optimizers._get_path_mask_fn(self._trainable_patterns, match_returns_true=False)
+    self._freeze_mask: Any = None
     if not training_config.model_name:
       raise ValueError("training_config.model_name must be specified")
     self._model = self._build_model(wrap_with_tunix_adapter, tokenizer_pad_id)
@@ -782,6 +786,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_eval = None
     self._compiled_eval_signature = None
     self._model_graphdef = None
+    self._freeze_mask = None
     self._invalidate_pure_state()
 
   @property
@@ -1240,6 +1245,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           lambda g: jnp.where(has_weights, g / safe_denominator.astype(g.dtype), jnp.zeros_like(g)),
           accumulated_grads,
       )
+      freeze_mask = self._freeze_mask
+      if freeze_mask is None and self._freeze_mask_fn is not None:
+        freeze_mask = self._freeze_mask_fn(accumulated_grads)
+      if freeze_mask is not None:
+        def _apply_freeze(g, m):
+          is_frozen = m.get_value() if hasattr(m, "get_value") else m
+          return jnp.where(is_frozen, jnp.zeros_like(g), g)
+        grads = jax.tree.map(_apply_freeze, grads, freeze_mask)
       # Before clipping, where Tunix's `optax.global_norm` also sits -- `train.py` would call
       # this `raw_grad_norm`. In float32 whatever `grad_dtype` is: a sum of squares over bf16
       # overflows on production-size models.
@@ -1449,6 +1462,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._shard_optimizer_state_over_data()
     state_pure = self._read_state_pure()
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    if self._freeze_mask_fn is not None:
+      self._freeze_mask = self._freeze_mask_fn(params_pure)
+    else:
+      self._freeze_mask = None
 
     def fwd_bwd(params, rest, dynamic):
       batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
