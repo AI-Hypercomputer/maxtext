@@ -14,19 +14,19 @@
 
 """Tests for pyconfig."""
 
+import copy
 import os.path
 import subprocess
 import sys
 import tempfile
 import unittest
-import yaml
-
 from maxtext.configs import pyconfig
-from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
+from maxtext.configs.pyconfig import _CONFIG_FILE_MAPPING, _module_from_path, resolve_config_path
 from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
-from tests.utils.test_helpers import get_test_config_path, get_post_train_test_config_path
+from tests.utils.test_helpers import get_post_train_test_config_path, get_test_config_path
+import yaml
 
 
 class PyconfigTest(unittest.TestCase):
@@ -40,6 +40,45 @@ class PyconfigTest(unittest.TestCase):
     )
 
     self.assertTrue(config.quantization is None or config.quantization == "")
+
+  def test_with_num_slices_rederives_topology(self):
+    """Elastic recovery gets a re-validated copy; the original config is untouched."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        num_slices=4,
+        dcn_data_parallelism=4,
+    )
+    resized = config.with_num_slices(2)
+
+    self.assertEqual((config.num_slices, config.dcn_data_parallelism), (4, 4))
+    self.assertEqual((resized.num_slices, resized.dcn_data_parallelism), (2, 2))
+    self.assertEqual(
+        resized.dcn_parallelism[resized.mesh_axes.index("data")], 2
+    )
+    # Nothing is left stale: the flat dict, the pydantic model and deepcopy all agree.
+    self.assertEqual(resized.get_keys()["num_slices"], 2)
+    self.assertEqual(copy.deepcopy(resized).num_slices, 2)
+    self.assertIn("num_slices", resized._pydantic_config.model_fields_set)  # pylint: disable=protected-access
+
+  def test_with_num_slices_keeps_unspecified_dcn_data_parallelism(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        num_slices=4,
+        dcn_data_parallelism=-1,
+    )
+    self.assertEqual(config.with_num_slices(2).dcn_data_parallelism, -1)
+
+  def test_with_num_slices_is_idempotent(self):
+    """Re-validating an already validated config must not change any derived value."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        num_slices=4,
+        dcn_data_parallelism=4,
+    )
+    self.assertEqual(config.with_num_slices(4).get_keys(), config.get_keys())
 
   def test_gmm_v2_heuristic_tiling_requires_gmm_v2(self):
     with self.assertRaisesRegex(ValueError, "`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`."):
