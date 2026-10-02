@@ -2240,6 +2240,7 @@ class RoutedMoE(nnx.Module):
         weight_gather_axes,
         group_offset,
         partial_sum=None,
+        return_lhs=False,
         return_rhs=False,
     ):
       def extract_vma(tensor):
@@ -2334,6 +2335,8 @@ class RoutedMoE(nnx.Module):
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
+            return_lhs=return_lhs,
+            fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
             return_rhs=return_rhs,
         )
       else:
@@ -2347,10 +2350,25 @@ class RoutedMoE(nnx.Module):
             padding_amount,
         )
 
-      output, rhs_out = output if return_rhs else (output, None)
-      if padding_amount > 0:
-        output = output[: orig_inputs_shape[0]]
-      return (output, rhs_out) if return_rhs else output
+      def unpad(t):
+        if padding_amount == 0:
+          return t
+        # Mirror the padding above: only the qvalue of a QArray was padded.
+        if isinstance(t, qpl.QArray):
+          return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]])
+        return t[: orig_inputs_shape[0]]
+
+      # The returned lhs is padded like the output; the returned rhs (weights) is not.
+      if return_lhs and return_rhs:
+        output, lhs_out, rhs_out = output
+        return unpad(output), unpad(lhs_out), rhs_out
+      if return_lhs:
+        output, lhs_out = output
+        return unpad(output), unpad(lhs_out)
+      if return_rhs:
+        output, rhs_out = output
+        return unpad(output), rhs_out
+      return unpad(output)
 
     def is_batch_sharded_by_ep(input_activation):
       # The batch is sharded by expert, except during inference decoding (where batch size == 1).
@@ -2922,15 +2940,25 @@ class RoutedMoE(nnx.Module):
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
         return layer_w0, layer_w1
       else:
+        # With moe_accumulate_wi_dlhs, the wi_0 GMM returns its input and the wi_1 GMM consumes that, so in the
+        # backward pass the wi_1 DLHS arrives as the cotangent of the returned input and the wi_0 DLHS GMM
+        # accumulates onto it in place (gmm_v2 partial_sum) instead of a separate add of the two DLHS.
+        accum_wi_dlhs = self.config.moe_accumulate_wi_dlhs
         layer_w0 = gmm_fn(
             x,
             w0,
             tiling=wi_tile_size,
             weight_gather_axes=wi_gather_axes,
             partial_sum=partial_accum0,
+            return_lhs=accum_wi_dlhs,
             return_rhs=return_weights,
         )
-        if return_weights:
+        x_for_w1 = x
+        if accum_wi_dlhs and return_weights:
+          layer_w0, x_for_w1, w0 = layer_w0
+        elif accum_wi_dlhs:
+          layer_w0, x_for_w1 = layer_w0
+        elif return_weights:
           layer_w0, w0 = layer_w0
         if self.config.mlp_bias and w0_bias is not None:
           layer_w0 = layer_w0 + w0_bias
@@ -2939,7 +2967,7 @@ class RoutedMoE(nnx.Module):
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
 
         layer_w1 = gmm_fn(
-            x,
+            x_for_w1,
             w1,
             tiling=wi_tile_size,
             weight_gather_axes=wi_gather_axes,

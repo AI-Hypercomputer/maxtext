@@ -605,6 +605,8 @@ def inner_kernel(
       acc += acc_ref[...]
 
     if is_last_k_step:
+      if cfgs.lhs_cfgs.has_scale and cfgs.lhs_cfgs.quant_dtype is None:
+        acc *= tiled_lhs_ref.get_scale().astype(acc.dtype)
       if cfgs.rhs_cfgs.has_bias:
         tiled_rhs_bias = tiled_rhs_ref.get_bias()
         acc += tiled_rhs_bias.astype(acc.dtype)
@@ -1130,7 +1132,6 @@ def validate_inputs(
     assert size_k % num_quant_blocks == 0
 
   if lhs_scale is not None:
-    assert maybe_quantize_lhs, "lhs_scale requires maybe_quantize_lhs=True."
     # Only per-tensor scales are supported for now. The current implementation generalizes to per-channel [M, 1] and
     # sub-channel [M, num_k_blocks]; extend the validation and the block spec /
     # index map together when adding those.
@@ -1275,13 +1276,13 @@ def make_gmm_configs(
       if not is_rhs_float:
         lhs_q_dtype = jnp.int8.dtype
 
-  if lhs_scale is not None:
+  if lhs_scale is not None and maybe_quantize_lhs:
     assert lhs_q_dtype is not None, (
         "lhs_scale requires lhs quantization to engage, but no lhs quant "
         "dtype was selected. Ensure rhs is quantized and the hardware supports "
         "fp8/int8 matmul."
     )
-  has_lhs_scale = lhs_scale is not None and lhs_q_dtype is not None
+  has_lhs_scale = lhs_scale is not None
 
   lhs_cfgs = InputConfigs(
       quant_dtype=lhs_q_dtype,
@@ -1384,12 +1385,12 @@ def gmm_v2(
     rhs_bias: The rhs bias of shape [size_group, 1, out_size].
     partial_sum: Optional. Per-token partial sums of shape [size_m, size_n].
     group_offset: Optional. The group offset of shape [1,].
-    lhs_scale: Optional scale used to quantize the (unquantized) lhs
-      inside the kernel and the result is multiplied back by `scale`. The shape
-      encodes granularity; currently only per-tensor `[1, 1]` is supported. When
-      None, a quantized lhs uses the default dynamic per-block absmax
-      calibration. Only takes effect when maybe_quantize_lhs is True and rhs is
-      quantized.
+    lhs_scale: Optional per-tensor `[1, 1]` lhs scale. With maybe_quantize_lhs
+      and a quantized rhs, it is used to quantize the (unquantized) lhs inside
+      the kernel and the result is multiplied back by `scale`; when None, a
+      quantized lhs uses the default dynamic per-block absmax calibration.
+      Otherwise the accumulator is multiplied by `scale` after the matmul,
+      before rhs_bias and partial_sum are added.
     tile_info: The tile sizes or tile function to use.
     vmem_limit_bytes: Optional vmem limit in bytes.
     precision: Unused. Exists for compatibility reasons.

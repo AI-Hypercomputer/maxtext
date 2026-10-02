@@ -238,7 +238,7 @@ class GmmDispatchTest(parameterized.TestCase):
     # None exercises the public helper default for backward compatibility.
     kwargs = {} if use_dlhs_transpose_rhs is None else {"use_dlhs_transpose_rhs": use_dlhs_transpose_rhs}
     with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", return_value=expected) as gmm_v2_mock:
-      actual = megablox_ops._dlhs_run_tokamax_v2(  # pylint: disable=protected-access
+      actual, lhs_scale_applied = megablox_ops._dlhs_run_tokamax_v2(  # pylint: disable=protected-access
           dlhs_dout=dlhs_dout,
           rhs=rhs,
           group_sizes=group_sizes,
@@ -256,6 +256,7 @@ class GmmDispatchTest(parameterized.TestCase):
     )
     expected_rhs = rhs if transpose_rhs or expected_transpose_rhs else rhs.swapaxes(1, 2)
     self.assertIs(actual, expected)
+    self.assertFalse(lhs_scale_applied)
     self.assertEqual(call_kwargs["transpose_rhs"], expected_transpose_rhs)
     self.assertTrue(bool(jnp.array_equal(call_kwargs["rhs"], expected_rhs)))
     expected_tiling = (
@@ -493,6 +494,39 @@ class GmmTest(parameterized.TestCase):
         group_sizes,
         partial_sum=ps,
         group_offset=group_offset,
+    )
+    assert_arrays_all_close(actual, expected)
+
+  @parameterized.product(
+      lhs_dtype=[jnp.bfloat16, jnp.float8_e4m3fn],
+      has_partial_sum=[True, False],
+      group_offset=[0, 2],
+  )
+  def test_gmm_post_matmul_lhs_scale(self, lhs_dtype, has_partial_sum, group_offset):
+    """With maybe_quantize_lhs=False, lhs_scale multiplies the matmul result before partial_sum is added."""
+    batch_size, in_size, out_size, num_groups = 128, 512, 512, 4
+    num_local_groups = num_groups - group_offset
+    k0, k1, k2 = jax.random.split(jax.random.key(0), 3)
+
+    lhs = jax.random.normal(k0, (batch_size, in_size), dtype=jnp.bfloat16).astype(lhs_dtype)
+    rhs = jax.random.normal(k1, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16)
+    lhs_scale = jnp.full((1, 1), 0.5, dtype=jnp.float32)
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+    ps = jax.random.normal(k2, (batch_size, out_size), dtype=jnp.bfloat16) if has_partial_sum else None
+
+    # Scaling lhs is the same as scaling the matmul result, and reference_gmm adds partial_sum afterwards.
+    scaled_lhs = (lhs.astype(jnp.float32) * lhs_scale).astype(jnp.bfloat16)
+    expected = reference_gmm(scaled_lhs, rhs, group_sizes, partial_sum=ps, group_offset=group_offset)
+    actual = gmm_backend.gmm_v2(
+        lhs,
+        rhs,
+        group_sizes,
+        partial_sum=ps,
+        group_offset=group_offset,
+        lhs_scale=lhs_scale,
+        preferred_element_type=jnp.bfloat16,
+        maybe_quantize_lhs=False,
     )
     assert_arrays_all_close(actual, expected)
 

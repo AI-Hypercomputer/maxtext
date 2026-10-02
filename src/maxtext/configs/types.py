@@ -1093,6 +1093,15 @@ class MoEGeneral(BaseModel):
           " num_moe_emb_chunks=0 and prefuse_moe_weights=False."
       ),
   )
+  moe_accumulate_wi_dlhs: bool = Field(
+      False,
+      description=(
+          "Route the routed-MoE wi_1 GMM input through the wi_0 GMM so that in the backward pass the wi_1 DLHS"
+          " is accumulated in place into the wi_0 DLHS (gmm_v2 partial_sum) instead of summed by a separate add."
+          " Also folds per-tensor DLHS scales into the gmm_v2 kernel for all MoE GMMs. Requires"
+          " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+      ),
+  )
   moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
@@ -5586,6 +5595,11 @@ class MaxTextConfig(
       raise ValueError(
           "moe_accumulate_chunk_wgrad=True requires use_tokamax_gmm=True, use_gmm_v2=True, num_moe_emb_chunks=0"
           " and prefuse_moe_weights=False."
+      )
+
+    if self.moe_accumulate_wi_dlhs and not (self.use_tokamax_gmm and self.use_gmm_v2 and not self.prefuse_moe_weights):
+      raise ValueError(
+          "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
       )
 
     if self.use_lineage:
