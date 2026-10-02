@@ -67,6 +67,8 @@ class AccumulateChunkWgradParityTest(unittest.TestCase):
         weight_quantization_calibration_method="fixed,-224,224",
         act_quantization_calibration_method="fixed,-224,224",
         bwd_quantization_calibration_method="fixed,-1,1",
+        # The tiny config sets float32_gate_logits=True, which is rejected with a quantized router projection.
+        quantize_router_proj=False,
     )
 
 
