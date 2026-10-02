@@ -4117,6 +4117,26 @@ class MaxTextConfig(
       )
     return self
 
+  @model_validator(mode="after")
+  def _validate_colocated_checkpointing(self) -> "MaxTextConfig":
+    """Validate requirements when pathways_checkpointing_impl == 'colocated_python'."""
+    if self.pathways_checkpointing_impl == "colocated_python":
+      if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
+        raise ValueError(
+            "pathways_checkpointing_impl='colocated_python' requires "
+            "ENABLE_PATHWAYS_PERSISTENCE=1 in the environment."
+        )
+      if (
+          self.checkpoint_storage_device_host_concurrent_gb is None
+          or self.checkpoint_storage_device_host_concurrent_gb <= 0
+      ):
+        raise ValueError(
+            "checkpoint_storage_device_host_concurrent_gb must be positive when "
+            "pathways_checkpointing_impl='colocated_python', got "
+            f"{self.checkpoint_storage_device_host_concurrent_gb}."
+        )
+    return self
+
   @staticmethod
   def validate_gdn_config(cfg: Any, *, is_rl_config: bool) -> None:
     """Fast-fails GDN settings that the Pallas kernel or GDN context parallelism cannot run correctly.
@@ -6013,4 +6033,5 @@ class RLConfig(
     self.dcn_parallelism = [dcn_map[axis] for axis in self.mesh_axes]
 
     MaxTextConfig.validate_gdn_config(self, is_rl_config=True)
+    MaxTextConfig._validate_colocated_checkpointing(self)
     return self

@@ -180,6 +180,18 @@ def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
   return nnx.merge_state(linen_state, aux_state, ephemeral)
 
 
+def _use_colocated_python_load(config: Any | None = None) -> bool:
+  """Returns True when warm-start loads should use Pathways colocated Python."""
+  if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE") != "1":
+    return False
+  impl = (
+      config.get("pathways_checkpointing_impl")
+      if isinstance(config, dict)
+      else getattr(config, "pathways_checkpointing_impl", None)
+  )
+  return impl == "colocated_python"
+
+
 def _load_linen_checkpoint_into_nnx(
     path,
     abstract_nnx_state,
@@ -215,6 +227,7 @@ def _load_linen_checkpoint_into_nnx(
       checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
       partial_load=True,
       enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+      colocated_python_checkpointing=_use_colocated_python_load(config),
   )
   # Orbax v1 refuses to read an item subdirectory directly (the step root carries the
   # checkpoint indicator); normalize the documented ".../<step>/items" form to its root
@@ -329,6 +342,7 @@ def _load_full_state_from_path(
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         checkpoint_layout=ocp.options.CheckpointLayout.ORBAX,
         enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+        colocated_python_checkpointing=_use_colocated_python_load(maxtext_config),
     )
     with context:
       return ocp.load(path, abstract_unboxed_pre_state)

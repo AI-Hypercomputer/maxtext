@@ -2462,6 +2462,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
+    # Settle uncompiled state onto the mesh before Orbax serializes it.
+    # `_place_state_on_mesh()` is what commits uncommitted or single-device 0-D
+    # scalar optimizer leaves (`count`, `step`) onto the full mesh;
+    # `_shard_optimizer_state_over_data()` shards parameter-shaped moments over
+    # the data axis for Zero-1 and leaves scalar leaves untouched.
+    if self._state is None or not self._compiled:
+      self._refresh_pure_state()
+      self._place_state_on_mesh()
+      self._shard_optimizer_state_over_data()
 
     step = kwargs.pop("step", None)
     save_optimizer_state = kwargs.pop("save_optimizer_state", True)

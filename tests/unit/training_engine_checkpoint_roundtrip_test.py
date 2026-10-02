@@ -20,7 +20,9 @@ seeded model, as a resumed RL trainer would.
 """
 
 import glob
+import inspect
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -257,6 +259,139 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
     for name, want in want_opt.items():
       np.testing.assert_array_equal(got_opt[name], want, err_msg=name)
 
+  def test_maybe_register_colocated_python_without_env_raises(self):
+    checkpointing._REGISTERED_IMPL = None
+    self.addCleanup(setattr, checkpointing, "_REGISTERED_IMPL", None)
+    for env_dict in ({}, {"ENABLE_PATHWAYS_PERSISTENCE": "0"}):
+      with self.subTest(env=env_dict), mock.patch.dict(os.environ, env_dict, clear=True):
+        with self.assertRaisesRegex(
+            checkpointing.PathwaysCheckpointingUnavailableError,
+            "pathways_checkpointing_impl='colocated_python' requires ENABLE_PATHWAYS_PERSISTENCE=1",
+        ):
+          checkpointing._maybe_register_pathways_persistence("colocated_python", d2h_concurrent_gb=16)
+
+  def test_maybe_register_colocated_python_passes_deprioritized_callback(self):
+    self.addCleanup(os.environ.pop, "ENABLE_PATHWAYS_PERSISTENCE", None)
+    os.environ["ENABLE_PATHWAYS_PERSISTENCE"] = "1"
+    checkpointing._REGISTERED_IMPL = None
+    self.addCleanup(setattr, checkpointing, "_REGISTERED_IMPL", None)
+    mock_handler = mock.MagicMock()
+    mock_handler.has_dispatcher.return_value = True
+    type(mock_handler).__name__ = "ArrayHandler"
+
+    import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=g-import-not-at-top
+    from orbax.checkpoint._src.serialization import type_handler_registry  # pylint: disable=g-import-not-at-top
+    from orbax.checkpoint._src.serialization import types as serialization_types  # pylint: disable=g-import-not-at-top
+
+    with (
+        mock.patch.object(ocp_pathways, "register_type_handlers") as mock_reg,
+        mock.patch.object(type_handler_registry, "get_type_handler", return_value=mock_handler),
+        mock.patch.object(
+            checkpointing,
+            "_configure_colocated_python_handler",
+            wraps=checkpointing._configure_colocated_python_handler,
+        ) as spy_configure,
+    ):
+      checkpointing._maybe_register_pathways_persistence("colocated_python", d2h_concurrent_gb=16)
+      spy_configure.assert_called_once_with(mock_handler, d2h_concurrent_gb=16)
+      mock_reg.assert_called_once()
+      call_kwargs = mock_reg.call_args.kwargs
+      self.assertIn("callback", call_kwargs)
+      cb = call_kwargs["callback"]
+      self.assertEqual(
+          cb.key_priority("any_param"),
+          serialization_types.TransferPriority.ASYNCHRONOUS_DEPRIORITIZED,
+      )
+      # Orbax's ArrayHandler invokes status hooks (e.g. on_write_end) at commit time; a callback
+      # missing any of them fails every colocated save. Derive the hook set from the installed
+      # Orbax source so this test tracks the real contract instead of a hard-coded list.
+      self.assertIsInstance(cb, serialization_types.DefaultSerializationStatusCallback)
+      from orbax.checkpoint._src.serialization import jax_array_handlers  # pylint: disable=g-import-not-at-top
+
+      invoked_hooks = set(re.findall(r"callback\.(on_\w+)", inspect.getsource(jax_array_handlers)))
+      self.assertTrue(invoked_hooks, "expected ArrayHandler to invoke at least one callback hook")
+      for hook in invoked_hooks:
+        self.assertIsNone(getattr(cb, hook)(("any_param",)), hook)
+
+  def test_colocated_transport_sharding_normalizer_strips_pinned_host(self):
+    from orbax.checkpoint._src.multihost import colocated_transport  # pylint: disable=g-import-not-at-top
+
+    with (
+        mock.patch.object(colocated_transport, "_maxtext_Normalized", False, create=True),
+        mock.patch.object(colocated_transport, "colocated_cpu_sharding", colocated_transport.colocated_cpu_sharding),
+        mock.patch.object(
+            colocated_transport,
+            "_normalize_single_device_sharding_to_colocated_cpu",
+            colocated_transport._normalize_single_device_sharding_to_colocated_cpu,
+        ),
+        mock.patch.object(colocated_transport.cp, "colocated_cpu_devices", side_effect=lambda devs: devs),
+        mock.patch.object(colocated_transport, "colocated_cpu_mesh", side_effect=lambda m: m),
+    ):
+      checkpointing._normalize_colocated_cpu_shardings()
+      self.assertTrue(colocated_transport._maxtext_Normalized)
+
+      dev = jax.devices()[0]
+      sds_pinned = jax.sharding.SingleDeviceSharding(dev).with_memory_kind("pinned_host")
+      self.assertEqual(sds_pinned.memory_kind, "pinned_host")
+      norm_sds = colocated_transport._normalize_single_device_sharding_to_colocated_cpu(sds_pinned)
+      self.assertEqual(norm_sds.memory_kind, "device")
+
+      mesh = jax.sharding.Mesh(np.array([dev]), ("data",))
+      named_pinned = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()).with_memory_kind("pinned_host")
+      norm_named = colocated_transport.colocated_cpu_sharding(named_pinned)
+      self.assertEqual(norm_named.memory_kind, "device")
+
+  def test_wrapped_dispatcher_batches_sync_deserialize_arrays_including_prng_key(self):
+    dispatcher = mock.MagicMock()
+    dispatcher._maxtext_wrapped = False
+    dispatches = []
+
+    def fake_dispatch(func, *, input_arrays=None, result_specs=None, func_args=(), func_kwargs=None):
+      dispatches.append((func, list(result_specs), func_kwargs))
+      return [f"out_{i}" for i in range(len(result_specs))]
+
+    dispatcher.dispatch = fake_dispatch
+    dummy_handler = SimpleNamespace(_dispatcher=dispatcher)
+
+    # 1000 bytes budget: 800-byte float32 + 800-byte key<fry> + 200-byte float32 -> 3 batches
+    checkpointing._configure_colocated_python_handler(dummy_handler, d2h_concurrent_gb=1e-6)
+    self.assertTrue(dispatcher._maxtext_wrapped)
+
+    def _sync_deserialize_arrays():
+      pass
+
+    specs = [
+        jax.ShapeDtypeStruct((200,), jnp.float32),  # 800 bytes
+        jax.ShapeDtypeStruct((100,), jax.random.key(0).dtype),  # 800 bytes (key<fry>)
+        jax.ShapeDtypeStruct((50,), jnp.float32),  # 200 bytes
+    ]
+    kwargs = {"infos": [1, 2, 3], "args": [4, 5, 6], "shardings": [None, None, None]}
+    res = dispatcher.dispatch(_sync_deserialize_arrays, result_specs=specs, func_kwargs=kwargs)
+    self.assertEqual(res, ["out_0", "out_0", "out_0"])
+    self.assertEqual(len(dispatches), 3)
+    self.assertEqual(len(dispatches[0][1]), 1)
+    self.assertEqual(len(dispatches[1][1]), 1)
+    self.assertEqual(len(dispatches[2][1]), 1)
+
+  def test_est_host_bytes_scales_with_v5p_and_v7x_devices_per_host(self):
+    def _make_sharding(device_kind: str, num_devices: int):
+      devs = [mock.Mock(device_kind=device_kind) for _ in range(num_devices)]
+      return mock.Mock(
+          spec=jax.sharding.NamedSharding,
+          device_set=frozenset(devs),
+          shard_shape=lambda shape: (shape[0] // num_devices, *shape[1:]),
+      )
+
+    # 16-device sharded (160, 4) float32 -> per-shard shape (10, 4) = 160 bytes/shard.
+    # TPU v5p has 4 devices/host -> 4 * 160 = 640 bytes/host.
+    v5p_spec = jax.ShapeDtypeStruct((160, 4), jnp.float32, sharding=_make_sharding("TPU v5p", 16))
+    self.assertEqual(checkpointing._est_host_bytes(v5p_spec), 4 * 160)
+
+    # TPU v7x has 8 devices/host -> 8 * 160 = 1280 bytes/host.
+    v7x_spec = jax.ShapeDtypeStruct((160, 4), jnp.float32, sharding=_make_sharding("TPU v7x", 16))
+    self.assertEqual(checkpointing._est_host_bytes(v7x_spec), 8 * 160)
+
 
 if __name__ == "__main__":
   unittest.main()
+
