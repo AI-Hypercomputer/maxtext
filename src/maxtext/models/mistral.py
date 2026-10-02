@@ -24,6 +24,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config
+from maxtext.layers import initializers, nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout, MlpBlock
@@ -220,3 +221,9 @@ class MistralDecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output, kv_cache
+
+
+MistralDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    MistralDecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)

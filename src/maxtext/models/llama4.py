@@ -28,6 +28,7 @@ from maxtext.common.common_types import Array, AttentionType, Config, MODEL_MODE
 from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.layers import initializers
 from maxtext.layers import linears
+from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout
@@ -511,6 +512,12 @@ class Llama4DecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
+Llama4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Llama4DecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
+
+
 class Llama4ScannableBlock(nnx.Module):
   """A repeatable block given nope_layer_interval and interleave_moe_layer_step."""
 
@@ -594,6 +601,12 @@ class Llama4ScannableBlock(nnx.Module):
       return y, None
     else:
       return y
+
+
+Llama4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    Llama4ScannableBlock,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
 
 
 class Llama4VisionEncoderLayer(nnx.Module):

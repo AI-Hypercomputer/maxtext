@@ -44,7 +44,6 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
-from tests.utils import linen_wrappers
 import pytest
 
 
@@ -1218,8 +1217,7 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
 
   @staticmethod
   def _build_model(cfg, mesh):
-    return linen_wrappers.to_linen(
-        moe.RoutedMoE,
+    return moe.get_routed_moe(
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,

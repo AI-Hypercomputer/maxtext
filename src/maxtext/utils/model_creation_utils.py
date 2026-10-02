@@ -506,9 +506,6 @@ def from_config(
 ) -> nn.Module | models.Transformer:
   """Load a pretrained MaxText model from checkpoint.
 
-  With `rngs` this returns the NNX `Transformer`. Without it, it returns the
-  Linen-wrapped model from `models.transformer_as_linen`, which is deprecated.
-
   `quant_mode_str` is one of "train", "convert", "serve" — controls the AQT
   quantization mode at model construction time. NNX layers freeze their
   param shape on `quant_mode_str` (e.g. SERVE skips the full-precision kernel),

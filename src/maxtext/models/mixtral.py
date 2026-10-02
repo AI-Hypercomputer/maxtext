@@ -24,7 +24,7 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config
-from maxtext.layers import initializers
+from maxtext.layers import initializers, nnx_wrappers
 from maxtext.layers import moe
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
@@ -209,3 +209,9 @@ class MixtralDecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output, kv_cache
+
+
+MixtralDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    MixtralDecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)

@@ -40,7 +40,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
-from maxtext.layers import nnx_scan
+from maxtext.layers import nnx_scan, nnx_wrappers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -955,15 +955,25 @@ class NNXDecoder(nnx.Module):
     setattr(self, attr_name, layer)
 
   def _create_single_layer(self, decoder_layer_class, rngs, **kwargs):
-    """Helper to create a single layer."""
-    return decoder_layer_class(
-        config=self.config,
-        mesh=self.mesh,
-        quant=self.quant,
-        model_mode=self.model_mode,
-        rngs=rngs,
-        **kwargs,
-    )
+    """Helper to create a single layer (Linen or NNX)."""
+    if issubclass(decoder_layer_class, nnx.Module):
+      return decoder_layer_class(
+          config=self.config,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          rngs=rngs,
+          **kwargs,
+      )
+    else:
+      layer_linen = decoder_layer_class(
+          config=self.config,
+          mesh=self.mesh,
+          quant=self.quant,
+          model_mode=self.model_mode,
+          **kwargs,
+      )
+      return nnx_wrappers.ToNNX(layer_linen, rngs=rngs)
 
   def _create_scanned_layers(
       self,
@@ -1587,7 +1597,12 @@ class NNXDecoder(nnx.Module):
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
-      embedding_table = shared_embedding.embedding[...]
+      if isinstance(shared_embedding, nnx.Module):
+        embedding_table = shared_embedding.embedding[...]
+      else:
+        embedding_table = shared_embedding.variables["params"]["embedding"]
+      if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
+        embedding_table = embedding_table.unbox()
       attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
       logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config, out_sharding)
 

@@ -41,6 +41,7 @@ from jax.sharding import AxisType, Mesh
 from maxtext.common import train_state_nnx
 from maxtext.common.common_types import ShardMode
 from maxtext.configs import pyconfig
+from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.pre_train import train
@@ -53,6 +54,8 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 
 # pylint: disable=too-many-positional-arguments
+
+Transformer = models.transformer_as_linen
 
 
 def validate_config(config):

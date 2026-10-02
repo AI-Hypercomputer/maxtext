@@ -26,7 +26,8 @@ from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.kernels.mhc import api as mhc_kernel
-from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.normalizations import RMSNorm
 
 
@@ -436,3 +437,9 @@ class DeepSeek4HyperHead(nnx.Module):
     x_f32 = x.astype(jnp.float32)
     out = jnp.sum(pre[:, :, :, None] * x_f32, axis=2)
     return out.astype(self.dtype)
+
+
+DeepSeek4HyperHeadToLinen = nnx_wrappers.to_linen_class(
+    DeepSeek4HyperHead,
+    base_metadata_fn=variable_to_logically_partitioned,
+)

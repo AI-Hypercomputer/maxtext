@@ -33,11 +33,12 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.layers import nnx_wrappers
+from maxtext.layers import pipeline
+from maxtext.models import deepseek
 from maxtext.models import simple_layer
 from maxtext.utils import maxtext_utils
 from maxtext.trainers.pre_train.train import main as train_main
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
-from tests.utils import linen_wrappers
 import pytest
 
 pytestmark = [pytest.mark.integration_test, pytest.mark.tpu_only]
@@ -111,11 +112,11 @@ class PipelineParallelismTest(unittest.TestCase):
     mesh = Mesh(devices_array, config.mesh_axes)
     model_mode = MODEL_MODE_TRAIN
 
-    # `single_pipeline_stage_class` (when provided, e.g. `linen_wrappers.DeepSeekMoELayerToLinen`
+    # `single_pipeline_stage_class` (when provided, e.g. `deepseek.DeepSeekMoELayerToLinen`
     # for the deepseek test) controls BOTH the pipeline and the per-layer reference path.
     rngs = nnx.Rngs(params=0)
     if single_pipeline_stage_class is None:
-      single_pipeline_stage = linen_wrappers.SimpleDecoderLayerToLinen(
+      single_pipeline_stage = simple_layer.SimpleDecoderLayerToLinen(
           config=config, mesh=mesh, model_mode=model_mode, rngs=rngs
       )
       raw_stage_class = simple_layer.SimpleDecoderLayer
@@ -154,7 +155,7 @@ class PipelineParallelismTest(unittest.TestCase):
     def stage_factory(stage_rngs):
       return raw_stage_class(config=config, mesh=mesh, model_mode=model_mode, rngs=stage_rngs)
 
-    my_pipeline = linen_wrappers.create_pipeline(config=config, layers=stage_factory, mesh=mesh)
+    my_pipeline = pipeline.create_pipeline(config=config, layers=stage_factory, mesh=mesh)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
       init_pipeline_params = my_pipeline.init(
           jax.random.PRNGKey(0), inputs, inputs_segmentation, inputs_position, deterministic, model_mode
@@ -339,7 +340,7 @@ class PipelineParallelismTest(unittest.TestCase):
         shared_experts=1,
     )
     self.assert_pipeline_matches_sequential_output_and_grad(
-        config, single_pipeline_stage_class=linen_wrappers.DeepSeekMoELayerToLinen
+        config, single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen
     )
 
   @pytest.mark.scheduled_only
@@ -373,7 +374,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_same_output_and_grad(
         config,
-        single_pipeline_stage_class=linen_wrappers.DeepSeekMoELayerToLinen,
+        single_pipeline_stage_class=deepseek.DeepSeekMoELayerToLinen,
     )
 
   def test_circular_ag_once(self):

@@ -39,7 +39,6 @@ from maxtext.trainers.pre_train import train
 from maxtext.utils import maxtext_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from tests.utils.test_helpers import get_test_config_path
-from tests.utils import linen_wrappers
 
 
 def reference_megatron_seq_aux_loss(logits, topk, coeff):
@@ -256,8 +255,7 @@ def _run_routed_moe(cfg, params=None):
     ((output, lb_loss, bias_updates, intermediates), grads, params, inputs).
   """
   mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-  model = linen_wrappers.to_linen(
-      moe.RoutedMoE,
+  model = moe.get_routed_moe(
       name="MoeBlock",
       config=cfg,
       num_experts=cfg.num_experts,

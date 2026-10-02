@@ -31,7 +31,6 @@ from maxtext.configs import pyconfig
 from maxtext.configs import types
 from maxtext.layers import moe
 from tests.utils.test_helpers import get_test_config_path
-from tests.utils import linen_wrappers
 
 _REQUIRED_CPU_DEVICES = 8
 
@@ -318,8 +317,7 @@ class DeferredMeshTest(unittest.TestCase):
           defer_small_all_reduces=defer,
       )
       mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-      model = linen_wrappers.to_linen(
-          moe.RoutedMoE,
+      model = moe.get_routed_moe(
           name="MoeBlock",
           config=cfg,
           num_experts=cfg.num_experts,

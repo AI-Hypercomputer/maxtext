@@ -32,7 +32,7 @@ from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Arra
 from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.layers import normalizations
-from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, Initializer
+from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned, Initializer
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -78,13 +78,40 @@ dequantize_weight = quantizations.dequantize_weight
 WeightQuantConfig = quantizations.WeightQuantConfig
 
 
+def _compute_dot_general(
+    inputs,
+    kernel,
+    kernel_axes,
+    axis,
+    contract_ind,
+    matmul_precision,
+    quant,
+    kernel_scale: Array | None = None,
+    compute_dtype: DType | None = None,
+):
+  """Computes a dot_general operation that may be quantized."""
+  dot_general = lax.dot_general
+  matmul_precision = lax.Precision(matmul_precision)
+  if quant:
+    dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
+    dot_general = dot_general_cls()
+    return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+
+  if kernel_scale is not None or is_fp8_dtype(getattr(kernel, "dtype", None)):
+    if compute_dtype is None:
+      compute_dtype = inputs.dtype
+    kernel = dequantize_weight(kernel, kernel_scale, compute_dtype=compute_dtype)
+
+  return dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision)
+
+
 def _compute_dot_general_nnx(
     inputs,
     kernel,
     axis,
     contract_ind,
     matmul_precision,
-    quant_dot_general: nnx.Module | None,
+    quant_dot_general: nnx_wrappers.ToNNX | None,
     initializing: bool,
     out_sharding: NamedSharding | None = None,
     kernel_scale: Array | None = None,
@@ -97,12 +124,9 @@ def _compute_dot_general_nnx(
   dot_general = lax.dot_general
   matmul_precision = lax.Precision(matmul_precision)
   if quant_dot_general is not None:
-    dimension_numbers = ((axis, contract_ind), ((), ()))
-    if not isinstance(quant_dot_general, nnx_wrappers.ToNNX):
-      return quant_dot_general(inputs, kernel, dimension_numbers, precision=None)
     if initializing:
-      quant_dot_general.lazy_init(inputs, kernel, dimension_numbers, precision=None)
-    return quant_dot_general(inputs, kernel, dimension_numbers, precision=None, mutable=["aqt"])
+      quant_dot_general.lazy_init(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None)
+    return quant_dot_general(inputs, kernel, ((axis, contract_ind), ((), ())), precision=None, mutable=["aqt"])
 
   if compute_dtype is None:
     compute_dtype = inputs.dtype
@@ -314,21 +338,22 @@ class DenseGeneral(nnx.Module):
 
     if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
       # Native FP8 compute runs in _compute_dot_general_nnx; no Linen quantizer needed.
-      self._quant_dot_general_name, quant_dot_general = quantizations.make_dot_general(quant, kernel_axes, rngs)
+      dot_general_cls = quant.dot_general_cls(mesh_axes=kernel_axes)
+      dot_general_linen = dot_general_cls()
+      quant_dot_general = nnx_wrappers.ToNNX(dot_general_linen, rngs=rngs)
+      self._quant_dot_general_name = f"{type(dot_general_linen).__name__}_0"
       setattr(self, self._quant_dot_general_name, quant_dot_general)
-      if isinstance(quant_dot_general, nnx_wrappers.ToNNX):
-        # A bridged Linen quantizer creates its state on the first call.
-        block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE MXFP8
-        dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
-        self(dummy_inputs, _initializing=True)
-        # Backends that never draw at apply time leave dead RNG state in the model.
-        if not quant.needs_apply_rngs:
-          quant_dot_general.release_rngs()
+      block_size = getattr(quant, "get_block_size", lambda: 1)()  # needed for TE MXFP8
+      dummy_inputs = jnp.zeros((block_size, *self.in_features_shape), dtype=self.dtype)
+      self(dummy_inputs, _initializing=True)
+      # Backends that never draw at apply time leave dead RNG state in the model.
+      if not quant.needs_apply_rngs:
+        quant_dot_general.release_rngs()
     else:
       self._quant_dot_general_name = None
 
   @property
-  def quant_dot_general(self) -> nnx.Module | None:
+  def quant_dot_general(self) -> nnx_wrappers.ToNNX | None:
     if self._quant_dot_general_name is None:
       return None
     return getattr(self, self._quant_dot_general_name)
@@ -471,6 +496,92 @@ class DenseGeneral(nnx.Module):
         bias = bias[..., begin:end]
       output += bias
     return output
+
+
+def dense_general(
+    *,
+    inputs_shape: tuple[int, ...] | None = None,
+    in_features_shape: tuple[int, ...] | int | None = None,
+    out_features_shape: Iterable[int] | int,
+    axis: Iterable[int] | int = -1,
+    weight_dtype: DType = jnp.float32,
+    dtype: DType = jnp.float32,
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+    kernel_axes: tuple[None | str, ...] = (),
+    quant: None | Quant = None,
+    use_bias: bool = False,
+    shard_mode: ShardMode = ShardMode.AUTO,
+    matmul_precision: str = "default",
+    parameter_memory_host_offload: bool = False,
+    has_scale: bool | None = None,
+    kernel_scale_init: Initializer | None = None,
+    scale_shape: Shape | None = None,
+    scale_axes: tuple[None | str, ...] | None = None,
+    scale_dtype: DType = jnp.float32,
+    block_size: int | tuple[int, ...] | None = None,
+    weight_quant: quantizations.WeightQuantConfig | None = None,
+    name: None | str = None,
+):
+  """Creates a DenseGeneral Linen module using nnx.bridge.to_linen.
+
+  Args:
+    inputs_shape: tuple with the shape of the inputs
+    in_features_shape: tuple with numbers of input features for axes specified in
+      'axis'.
+    out_features_shape: tuple with numbers of output features.
+    axis: tuple with axes to apply the transformation on.
+    weight_dtype: the dtype of the weights (default: float32).
+    dtype: the dtype of the computation (default: float32).
+    kernel_init: initializer function for the weight matrix.
+    kernel_axes: logical axes for partitioning the kernel.
+    quant: quantization config, defaults to None implying no quantization.
+    use_bias: whether to add bias in linear transformation.
+    shard_mode: indicating the shard mode
+    matmul_precision: Precision for matrix multiplication.
+    parameter_memory_host_offload: Determines whether to offload params to host
+    has_scale: whether to initialize a separate scale parameter (kernel_scale).
+    kernel_scale_init: initializer function for kernel_scale.
+    scale_shape: explicit shape for kernel_scale.
+    scale_axes: logical axes for partitioning kernel_scale.
+    scale_dtype: dtype of kernel_scale (default: float32).
+    block_size: block size for block-wise quantization scales.
+    weight_quant: optional WeightQuantConfig decoupling weight quantization settings.
+    name: name passed to the ToLinen Module
+  """
+  if not (inputs_shape is not None) ^ (in_features_shape is not None):
+    raise ValueError("Exactly one of inputs_shape or in_features must be specified.")
+
+  if inputs_shape is not None:
+    axis = canonicalize_tuple(axis)
+    in_features_shape = tuple(inputs_shape[ax] for ax in normalize_axes(axis, len(inputs_shape)))
+  else:
+    assert in_features_shape is not None
+  module = nnx_wrappers.to_linen(
+      DenseGeneral,
+      in_features_shape=in_features_shape,
+      out_features_shape=out_features_shape,
+      axis=axis,
+      weight_dtype=weight_dtype,
+      dtype=dtype,
+      kernel_init=kernel_init,
+      kernel_axes=kernel_axes,
+      quant=quant,
+      use_bias=use_bias,
+      shard_mode=shard_mode,
+      matmul_precision=matmul_precision,
+      parameter_memory_host_offload=parameter_memory_host_offload,
+      has_scale=has_scale,
+      kernel_scale_init=kernel_scale_init,
+      scale_shape=scale_shape,
+      scale_axes=scale_axes,
+      scale_dtype=scale_dtype,
+      block_size=block_size,
+      weight_quant=weight_quant,
+      name=name,
+      metadata_fn=variable_to_logically_partitioned,
+      abstract_init=False,
+  )
+  return module
 
 
 class Dropout(nnx.Dropout):
@@ -719,6 +830,46 @@ class MlpBlock(nnx.Module):
     return output
 
 
+def mlp_block(
+    *,
+    config: Config,
+    mesh: Mesh,
+    in_features: int,
+    intermediate_dim: int = 2048,
+    activations: Sequence[str | Callable[..., Any]] = ("relu",),
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+    intermediate_dropout_rate: float = 0.1,
+    dtype: Any = jnp.float32,
+    weight_dtype: Any = jnp.float32,
+    use_bias: bool = False,
+    use_pre_norm: bool = False,
+    quant: None | Quant = None,
+    model_mode: None | str = None,
+    name: None | str = None,
+):
+  """Creates a MlpBlock Linen module using nnx.bridge.to_linen."""
+  module = nnx_wrappers.to_linen(
+      MlpBlock,
+      config=config,
+      mesh=mesh,
+      in_features=in_features,
+      intermediate_dim=intermediate_dim,
+      activations=activations,
+      kernel_init=kernel_init,
+      intermediate_dropout_rate=intermediate_dropout_rate,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      use_bias=use_bias,
+      use_pre_norm=use_pre_norm,
+      quant=quant,
+      model_mode=model_mode,
+      name=name,
+      metadata_fn=variable_to_logically_partitioned,
+      abstract_init=False,
+  )
+  return module
+
+
 class DeepSeekV4GroupedLinear(nnx.Module):
   """Block-diagonal grouped linear used by the grouped output projection in DeepSeek-V4.
 
@@ -825,3 +976,35 @@ class DeepSeekV4GroupedLinear(nnx.Module):
     output = jnp.einsum("...gi,gio->...go", inputs, kernel, precision=lax.Precision(self.matmul_precision))
 
     return output
+
+
+def deepseek_v4_grouped_linear(
+    *,
+    in_features_per_group: int,
+    out_features: int,
+    n_groups: int,
+    weight_dtype: DType = jnp.float32,
+    dtype: DType = jnp.float32,
+    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
+    kernel_axes: tuple[None | str, ...] = ("groups", "embed", "mlp"),
+    matmul_precision: str = "default",
+    parameter_memory_host_offload: bool = False,
+    name: None | str = None,
+):
+  """Creates a DeepSeekV4GroupedLinear Linen module using nnx.bridge.to_linen."""
+  module = nnx_wrappers.to_linen(
+      DeepSeekV4GroupedLinear,
+      in_features_per_group=in_features_per_group,
+      out_features=out_features,
+      n_groups=n_groups,
+      weight_dtype=weight_dtype,
+      dtype=dtype,
+      kernel_init=kernel_init,
+      kernel_axes=kernel_axes,
+      matmul_precision=matmul_precision,
+      parameter_memory_host_offload=parameter_memory_host_offload,
+      name=name,
+      metadata_fn=variable_to_logically_partitioned,
+      abstract_init=False,
+  )
+  return module

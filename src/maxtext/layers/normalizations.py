@@ -22,7 +22,8 @@ from jax import lax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 from maxtext.common.common_types import Array, DType, ShardMode, is_fp8_dtype
-from maxtext.layers.initializers import Initializer
+from maxtext.layers import nnx_wrappers
+from maxtext.layers.initializers import Initializer, variable_to_logically_partitioned
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import truncate_out_sharding
@@ -251,6 +252,36 @@ class Qwen3NextRMSNormGated(nnx.Module):
     return gated_states.astype(self.dtype)
 
 
+def rms_norm(
+    num_features: int,
+    epsilon: float = 1e-6,
+    dtype: Any = jnp.float32,
+    weight_dtype: Any = jnp.float32,
+    shard_mode: ShardMode = ShardMode.AUTO,
+    kernel_axes: tuple[None | str, ...] = (),
+    scale_init: Initializer = jax.nn.initializers.ones,
+    name: None | str = None,
+    parameter_memory_host_offload: bool = False,
+    with_scale: bool = True,
+):
+  """Creates a RMSNorm module."""
+  module = nnx_wrappers.to_linen(
+      RMSNorm,
+      num_features=num_features,
+      epsilon=epsilon,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      shard_mode=shard_mode,
+      kernel_axes=kernel_axes,
+      scale_init=scale_init,
+      parameter_memory_host_offload=parameter_memory_host_offload,
+      with_scale=with_scale,
+      name=name,
+      metadata_fn=variable_to_logically_partitioned,
+  )
+  return module
+
+
 def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
   """L2 normalization function. Normalizes a vector to have a length of 1.
 
@@ -265,3 +296,11 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 
   inv_norm = jax.lax.rsqrt((x * x).sum(axis=dim, keepdims=True) + jnp.array(eps, dtype=x.dtype))
   return x * inv_norm
+
+
+Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
+    RMSNorm,
+    base_metadata_fn=variable_to_logically_partitioned,
+    scale_init=jax.nn.initializers.zeros,
+    scale_offset=1.0,
+)
