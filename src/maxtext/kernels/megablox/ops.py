@@ -121,7 +121,7 @@ def gmm(
       nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
-  return gmm_fwd_bwd(
+  out, rhs_out = gmm_fwd_bwd(
       lhs,
       rhs,
       group_sizes,
@@ -142,6 +142,7 @@ def gmm(
       partial_sum,
       return_rhs,
   )
+  return (out, rhs_out) if return_rhs else out
 
 
 # ==============================================================================
@@ -180,7 +181,7 @@ def _gmm_fwd(
     partial_sum: jnp.ndarray | None = None,
     return_rhs: bool = False,
 ) -> tuple[
-    jnp.ndarray,
+    tuple[jnp.ndarray, jnp.ndarray | qpl.QArray],
     tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -195,6 +196,9 @@ def _gmm_fwd(
 
   - lhs: [m, k]
   - rhs: [g, k, n] if transpose_rhs=False. [g, n, k] if transpose_rhs=True
+
+  Always returns (out, rhs) so the output structure does not depend on return_rhs;
+  gmm() drops rhs unless return_rhs=True.
   """
 
   # Track whether operands arrived as QArray (e.g. from token all-gather quantization
@@ -251,8 +255,7 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  fwd_out = (out, rhs) if return_rhs else out
-  return fwd_out, (
+  return (out, rhs), (
       lhs,
       rhs,
       group_sizes,
@@ -540,9 +543,10 @@ def _gmm_bwd(
   num_actual_groups = residual_rhs.shape[0]
   # With return_rhs, the cotangent of the returned rhs is the weight gradient already accumulated
   # by its downstream consumers (e.g. later MoE token chunks). tgmm adds this drhs onto it in place.
-  drhs_partial_sum = None
-  if return_rhs:
-    grad, drhs_partial_sum = grad
+  grad, drhs_partial_sum = grad
+  if not return_rhs:
+    drhs_partial_sum = None
+  else:
     if isinstance(drhs_partial_sum, qpl.QArray):
       drhs_partial_sum = drhs_partial_sum.qvalue
     if transpose_rhs:
