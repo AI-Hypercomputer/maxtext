@@ -257,6 +257,32 @@ class PyconfigTest(unittest.TestCase):
     self.assertTrue(cfg_rl.use_gdn_kernel)
     self.assertEqual(cfg_rl.max_seq_token_per_tpu, 4096)
 
+  def test_gdn_kernel_rejects_packed_rows_without_packing(self):
+    """With packing=False the kernel skips its segment path, so inputs that still pack rows must say packing=True."""
+
+    def init_rl(**kwargs):
+      return pyconfig.initialize(
+          ["", get_post_train_test_config_path("rl")],
+          skip_jax_distributed_system=True,
+          config_class=config_types.RLConfig,
+          model_name="qwen3-next-80b-a3b",
+          max_target_length=1024,
+          use_gdn_kernel=True,
+          max_seq_token_per_tpu=4096,
+          **kwargs,
+      )
+
+    with self.assertRaisesRegex(ValueError, "max_seq_token_per_tpu > 0 requires packing=True"):
+      init_rl(packing=False)
+    self.assertTrue(init_rl(packing=True).packing)
+
+    mmap = {"dataset_type": "grain", "grain_file_type": "mmap_npy", "grain_train_files": "/idx|/data/prefix"}
+    with self.assertRaisesRegex(ValueError, "grain_file_type='mmap_npy' and reset_attention_mask=True requires packing"):
+      self._init_qwen3_next_packing(packing=False, use_gdn_kernel=True, **mmap)
+    self.assertTrue(self._init_qwen3_next_packing(packing=True, use_gdn_kernel=True, **mmap).packing)
+    self._init_qwen3_next_packing(packing=False, use_gdn_kernel=True, reset_attention_mask=False, **mmap)
+    self._init_qwen3_next_packing(packing=False, use_gdn_kernel=False, **mmap)
+
   def test_gdn_kernel_fast_fail_constraints(self):
     """Verifies fast-fail ValueErrors for unsupported GDN kernel configurations."""
     # use_gdn_kernel=True with tensor parallelism > 1 raises ValueError on both MaxTextConfig and RLConfig.

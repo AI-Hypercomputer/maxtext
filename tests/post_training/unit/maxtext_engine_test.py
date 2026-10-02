@@ -1026,6 +1026,28 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     prepared_prop = t_no_gen._prepare_batch(prop_payload)
     self.assertIn("tokens", prepared_prop)
 
+  def test_prepare_batch_rejects_packed_payload_for_unpacked_gdn_kernel(self):
+    """With packing=False the GDN kernel ignores segment IDs in training, so a packed payload must be refused."""
+
+    def payload(segment_ids=None):
+      return datatypes.RLTrainerPayload(
+          prompt_ids=jnp.zeros((1, 0), jnp.int32),
+          prompt_mask=jnp.zeros((1, 0), jnp.int32),
+          completion_ids=jnp.zeros((1, 4), jnp.int32),
+          completion_mask=jnp.ones((1, 4), jnp.int32),
+          advantages=jnp.zeros((1,)),
+          segment_ids=segment_ids,
+      )
+
+    packed = payload(jnp.array([[1, 1, 2, 2]], jnp.int32))
+    unpacked_gdn = maxtext_engine.MaxTextTrainingEngine(self.setup_config(use_gdn_kernel=True, packing=False))
+    with self.assertRaisesRegex(ValueError, "Set packing=True"):
+      unpacked_gdn._prepare_batch(packed)
+    self.assertIn("completion_ids", unpacked_gdn._prepare_batch(payload()))
+    for overrides in ({"use_gdn_kernel": True, "packing": True}, {"use_gdn_kernel": False, "packing": False}):
+      engine = maxtext_engine.MaxTextTrainingEngine(self.setup_config(**overrides))
+      self.assertIn("segment_ids", engine._prepare_batch(packed))
+
   def test_prepare_batch_prevents_recompilation_on_metadata_change(self):
     """Payload metadata changes must not alter the Treedef or trigger recompilation."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
