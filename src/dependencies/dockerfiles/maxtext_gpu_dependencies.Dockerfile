@@ -19,11 +19,12 @@ FROM $BASEIMAGE
 
 ARG USE_AIRLOCK=false
 ENV DEBIAN_FRONTEND=noninteractive
-COPY --from=airlock-bootstrap /airlock-apt-methods/ /usr/lib/apt/methods/
 
 # Install Python 3.12, build tools, and network/DNS utilities on Ubuntu 24.04 (uses Airlock apt repo when USE_AIRLOCK=true)
-RUN --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
+RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
+    --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
     if [ "$USE_AIRLOCK" = "true" ]; then \
+        if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
         rm -f /etc/apt/sources.list.d/ubuntu.sources && \
         printf "deb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble noble main restricted universe multiverse\ndeb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble-updates noble-updates main restricted universe multiverse\ndeb [trusted=yes] ar+https://us-apt.pkg.dev/remote/artifact-foundry-prod/ubuntu-3p-remote-noble-security noble-security main restricted universe multiverse\n" > /etc/apt/sources.list; \
@@ -33,7 +34,7 @@ RUN --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,requ
         python3 python3-dev python3-pip python3-venv \
         build-essential gcc-12 g++-12 cmake ninja-build pkg-config \
         git curl gnupg ca-certificates iproute2 ethtool lsof bind9-dnsutils && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && rm -f /usr/lib/apt/methods/ar+https
 
 # Set default python/python3 and gcc/g++ alternatives
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
@@ -53,9 +54,14 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list
 
 # Install the Google Cloud SDK
-RUN --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
-    if [ "$USE_AIRLOCK" = "true" ] && [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
-    apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
+    --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
+    if [ "$USE_AIRLOCK" = "true" ]; then \
+        if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
+        if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi; \
+    fi && \
+    apt-get update && apt-get install -y google-cloud-cli && \
+    rm -rf /var/lib/apt/lists/* && rm -f /usr/lib/apt/methods/ar+https
 
 # Upgrade pip, setuptools, wheel, uv, install nvidia-nvtx-cu12/nvidia-nccl-cu12 for transformer-engine-jax build, and clean up ensurepip cache
 RUN python3 -m pip install --upgrade --no-cache-dir --ignore-installed pip setuptools wheel uv keyrings.google-artifactregistry-auth nvidia-nvtx-cu12 nvidia-nccl-cu12 && \
@@ -104,8 +110,10 @@ COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 # Install dependencies (including CUDA and JAX wheels from Airlock when USE_AIRLOCK=true)
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE} TF=${ENV_TF}"
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
     --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
     if [ "$USE_AIRLOCK" = "true" ]; then \
+        if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
         TOKEN=$(gcloud auth application-default print-access-token 2>/dev/null || gcloud auth print-access-token 2>/dev/null || true) && \
         if [ -n "$TOKEN" ] && curl -fsSL -H "Authorization: Bearer ${TOKEN}" "https://us-python.pkg.dev/artifact-foundry-prod/python-3p-trusted/simple/" >/dev/null 2>&1; then \
@@ -128,6 +136,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$USE_AIRLOCK" = "true" ]; then \
         echo "deb http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse" > /etc/apt/sources.list; \
     fi && \
+    rm -f /usr/lib/apt/methods/ar+https && \
     find /usr/local/lib -type d -path "*/nvidia/*/lib" > /etc/ld.so.conf.d/nvidia-wheels.conf && \
     ldconfig
 
