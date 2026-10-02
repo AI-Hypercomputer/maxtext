@@ -1477,6 +1477,18 @@ class DeepSeekMoE(BaseModel):
       False,
       description="Whether to use Lineage DeepSeek-V3 execution.",
   )
+  lineage_quantization: Literal["none", "fp8_full"] = Field(
+      "none",
+      description=("Quantization of the Lineage sparse-layer routed experts. Only used" " if use_lineage is True."),
+  )
+
+  @classmethod
+  def _lineage_quantization_none(cls, v: Any) -> Any:
+    """pyconfig converts the string "none" to None; map it back."""
+    return "none" if v is None else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues
+  _validate_lineage_quantization = field_validator("lineage_quantization", mode="before")(_lineage_quantization_none)
 
 
 class Qwen3Next(BaseModel):

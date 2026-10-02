@@ -392,6 +392,7 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 use_batch_split_schedule: false # a flag if splitting batch into micro-batches to hide communications that yields performance benefits.
 batch_split_factor: 1 # the factor by which to split the batch. Only used if use_batch_split_schedule is true.
 use_lineage: false # a flag to use Lineage DeepSeek-V3 execution.
+lineage_quantization: "none" # "none" or "fp8_full": quantization of the Lineage routed experts. Only used if use_lineage is true.
 
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]
