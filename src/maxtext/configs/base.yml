@@ -62,6 +62,12 @@ async_checkpointing_timeout_secs: 1200
 # Set to true to abandon such a save instead: the failure is logged, training continues with its
 # state intact and the next save proceeds normally; the failed step is simply not restorable.
 abandon_failed_checkpoint_saves: false
+# Training engine only. By default a save requested while the previous async save is still being
+# written waits for it and then saves. Set to true to skip such a request instead (logged at WARNING;
+# the skipped step is not restorable), so at most one save is ever in flight and training is never
+# blocked by a slow save. A forced save (the final one on close, or after resuming mid-step) still waits.
+# Needs a single JAX process (e.g. Pathways); refused at startup otherwise.
+skip_checkpoint_save_if_in_progress: false
 checkpoint_period: 10_000
 max_num_checkpoints_to_keep: None
 enable_continuous_checkpointing: false
