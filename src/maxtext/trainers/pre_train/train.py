@@ -81,8 +81,12 @@ from maxtext.utils import qk_clip_utils
 from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
+from maxtext.utils.gradient_accumulation import (
+    get_num_microbatches,
+    gradient_accumulation_loss_and_grad,
+    should_accumulate_fractional_batch,
+)
 from maxtext.utils import mllog_utils
-from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 
 
@@ -144,7 +148,13 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       if data[mask_name].shape != target_shape:
         raise ValueError(f"{mask_name} must match targets shape; got {data[mask_name].shape} and {target_shape}")
 
-  # decimate proportion of data when per_device_batch_size<1
+  # Keep only the rows this forward pass owns. The dataloader hands us
+  # `global_batch_size_to_load` rows, which is larger than the real batch when
+  # `expansion_factor_real_data > 1`: only a subset of hosts read real data and
+  # the remaining rows are placeholder batches. The real rows lead each
+  # microbatch, so trimming here drops exactly the placeholders. When
+  # expansion is off this slice is a no-op, because the microbatch handed in is
+  # already `micro_batch_size_to_train_on`/`micro_batch_size_to_eval_on` rows.
   if is_train:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_train_on, :]
@@ -277,7 +287,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # Zero1+GA to reduce communication overhead.
   # EPS was used to avoid division by zero, but it's not needed when gradient
   # accumulation is enabled since there's no division.
-  manual_gradient_accumulation = config.gradient_accumulation_steps > 1 and not config.use_tunix_gradient_accumulation
+  manual_gradient_accumulation = (
+      config.gradient_accumulation_steps > 1 or should_accumulate_fractional_batch(config, is_train=is_train)
+  ) and not config.use_tunix_gradient_accumulation
   if manual_gradient_accumulation:
     loss = xent_sum
   else:
@@ -497,7 +509,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   loss_model, loss_params, loss_rng = state.model, None, None
 
   # --- Gradient computation ---
-  if config.gradient_accumulation_steps > 1:
+  if config.gradient_accumulation_steps > 1 or should_accumulate_fractional_batch(config):
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
         loss_fn,
         config,
@@ -747,15 +759,75 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   return out_state, metrics
 
 
+_AVERAGED_EVAL_KEYS = ("z_loss", "moe_lb_loss", "indexer_loss", "mtp_loss")
+_ACCUMULATED_EVAL_KEYS = ("xent_sum", "total_weights") + _AVERAGED_EVAL_KEYS
+# Boolean flags, true if any microbatch raised them, rather than summed.
+_ANY_EVAL_KEYS = ("has_moe_overflow",)
+
+
+def _fractional_batch_eval(single_eval_fn, data, num_microbatches):
+  """Accumulates eval metrics across microbatches for fractional batch sizes without backprop.
+
+  `xent_sum` and `total_weights` are summed over microbatches; the keys in
+  `_AVERAGED_EVAL_KEYS` are per-microbatch quantities and are averaged, which
+  matches how `gradient_accumulation_loss_and_grad` reduces them.
+  """
+
+  def reshape_to_microbatch_accumulations(batch_arr):
+    microbatch_shape = (
+        batch_arr.shape[0] // num_microbatches,
+        num_microbatches,
+    ) + batch_arr.shape[1:]
+    reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
+    return jnp.swapaxes(reshaped_batch_arr, 0, 1)
+
+  micro_data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
+
+  def accumulate_eval(acc, micro_batch):
+    _, aux = single_eval_fn(micro_batch)
+    new_acc = {k: acc[k] + aux[k] for k in _ACCUMULATED_EVAL_KEYS}
+    new_acc.update({k: jnp.logical_or(acc[k], aux[k]) for k in _ANY_EVAL_KEYS})
+    return new_acc, None
+
+  init_acc = {k: 0.0 for k in _ACCUMULATED_EVAL_KEYS}
+  init_acc.update({k: jnp.bool_(False) for k in _ANY_EVAL_KEYS})
+  acc, _ = jax.lax.scan(accumulate_eval, init_acc, micro_data, length=num_microbatches)
+
+  total_weights = acc["total_weights"]
+  denominator = jnp.maximum(total_weights, 1)
+  aux = dict(acc)
+  for key in _AVERAGED_EVAL_KEYS:
+    aux[key] = acc[key] / num_microbatches
+  loss = aux["xent_sum"] / denominator + aux["moe_lb_loss"] + aux["indexer_loss"] + aux["mtp_loss"]
+  loss = jnp.where(total_weights > 0, loss, 0.0)
+  return loss, aux
+
+
 def eval_step(model, config, state, data, dropout_rng=None):
   """eval_step no backprop and new state compared with train_step."""
   del dropout_rng  # unused for NNX (kept for jit signature parity)
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
-  loss, aux = loss_fn(state.model, config, data, None, None, is_train=False)
 
   mtp_acceptance_rate = 0.0
-  if config.mtp_eval_target_module > 0:
-    mtp_acceptance_rate = calculate_mtp_acceptance_rate(aux["intermediate_outputs"], config)
+
+  def single_eval_fn(d):
+    return loss_fn(state.model, config, d, None, None, is_train=False)
+
+  if should_accumulate_fractional_batch(config, is_train=False):
+    # The acceptance rate is derived from per-microbatch intermediates that the
+    # accumulation scan does not carry out, so it would silently read as 0.
+    if config.mtp_eval_target_module > 0:
+      raise ValueError(
+          "mtp_eval_target_module > 0 is not supported with "
+          "eval_per_device_batch_size < 1: the MTP acceptance rate cannot be "
+          "accumulated across microbatches. Set eval_per_device_batch_size >= 1."
+      )
+    num_microbatches = get_num_microbatches(config, is_train=False)
+    loss, aux = _fractional_batch_eval(single_eval_fn, data, num_microbatches)
+  else:
+    loss, aux = single_eval_fn(data)
+    if config.mtp_eval_target_module > 0:
+      mtp_acceptance_rate = calculate_mtp_acceptance_rate(aux["intermediate_outputs"], config)
 
   xent_sum = aux["xent_sum"]
   z_loss = aux.get("z_loss", 0.0)

@@ -27,6 +27,39 @@ from maxtext.layers.moe import load_balance_updates_from_counts
 from maxtext.utils.sharding import maybe_shard_with_name
 
 
+def should_accumulate_fractional_batch(config, is_train: bool = True) -> bool:
+  """Returns True if micro-batches should be accumulated due to fractional batch size."""
+  key = "per_device_batch_size" if is_train else "eval_per_device_batch_size"
+  return getattr(config, key, 1.0) < 1.0
+
+
+def get_num_microbatches(config, is_train: bool = True) -> int:
+  """Calculates the number of microbatches to accumulate over for train or eval.
+
+  The count is derived from the *real* global batch size, not
+  `global_batch_size_to_load`. The latter is inflated by
+  `expansion_factor_real_data`, whose extra rows are placeholder data that
+  `loss_fn` trims away; counting them here would spend microbatches on
+  placeholders and silently change the microbatch count for existing
+  expansion runs.
+
+  This preserves the invariant
+  `num_microbatches * micro_batch_size == global_batch_size`, so it returns
+  `gradient_accumulation_steps` for every `per_device_batch_size >= 1` config,
+  exactly as before.
+  """
+  batch_key = "global_batch_size_to_train_on" if is_train else "global_batch_size_to_eval_on"
+  mbs_key = "micro_batch_size_to_train_on" if is_train else "micro_batch_size_to_eval_on"
+  global_batch = getattr(config, batch_key, None)
+  mbs = getattr(config, mbs_key, None)
+  steps = getattr(config, "gradient_accumulation_steps", 1) if is_train else 1
+  # An inexact split would drop the remainder rows, so fall back to `steps`
+  # rather than silently losing data or failing the reshape inside jit.
+  if global_batch and mbs and mbs > 0 and global_batch % mbs == 0:
+    return max(steps, global_batch // mbs)
+  return steps
+
+
 def gradient_accumulation_loss_and_grad(
     _loss_fn,
     config,
@@ -158,9 +191,10 @@ def gradient_accumulation_loss_and_grad(
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
     return acc_grad_and_loss, aux
 
+  num_microbatches = get_num_microbatches(config)
+
   def reshape_to_microbatch_accumulations(batch_arr):
     """Reshape global batch to microbatches, assuming batch axis is leading."""
-    num_microbatches = config.gradient_accumulation_steps
     microbatch_shape = (batch_arr.shape[0] // num_microbatches, num_microbatches) + batch_arr.shape[1:]
     reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
     return jnp.swapaxes(reshaped_batch_arr, 0, 1)
@@ -180,16 +214,14 @@ def gradient_accumulation_loss_and_grad(
   if is_nnx:
     init_grad_and_loss["rest_state"] = rest  # pyrefly: ignore[unbound-name]
 
-  grad_and_loss, aux = jax.lax.scan(
-      accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
-  )
+  grad_and_loss, aux = jax.lax.scan(accumulate_gradient, init_grad_and_loss, data, length=num_microbatches)
   has_weights = grad_and_loss["total_weights"] > 0
   denominator = jnp.maximum(grad_and_loss["total_weights"], 1)
   loss = (
       grad_and_loss["loss"] / denominator
-      + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["indexer_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
+      + grad_and_loss["moe_lb_loss"] / num_microbatches
+      + grad_and_loss["indexer_loss"] / num_microbatches
+      + grad_and_loss["mtp_loss"] / num_microbatches
   )
   loss = jnp.where(has_weights, loss, 0.0)
   raw_grads = grad_and_loss["grad"]
@@ -200,7 +232,7 @@ def gradient_accumulation_loss_and_grad(
     unreduced_shardings = jax.tree.map(update_sharding_for_unreduced, params_shardings)
     raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, unreduced_shardings)
   raw_grads = jax.tree.map(_maybe_shard_with_name, raw_grads, params_shardings)
-  divisor = config.gradient_accumulation_steps if use_tunix_ga else denominator * loss_scale
+  divisor = num_microbatches if use_tunix_ga else denominator * loss_scale
   raw_grads = jax.tree_util.tree_map(
       lambda arr: jnp.where(has_weights, (arr / divisor).astype(arr.dtype), jnp.zeros_like(arr)),
       raw_grads,
@@ -211,7 +243,7 @@ def gradient_accumulation_loss_and_grad(
   # above), not their sum, so the logged learning/{moe_lb,indexer,mtp}_loss match GA=1.
   for key in ("moe_lb_loss", "indexer_loss", "mtp_loss"):
     if key in aux:
-      aux[key] = aux[key] / config.gradient_accumulation_steps
+      aux[key] = aux[key] / num_microbatches
   if getattr(config, "routed_bias", False) and getattr(config, "routed_bias_update_rate", 0.0) > 0.0:
     # RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1;
     # convert the counts summed across microbatches into a single full-batch sign() update.
