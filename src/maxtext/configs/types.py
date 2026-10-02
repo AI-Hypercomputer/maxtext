@@ -1279,7 +1279,8 @@ class MoEGeneral(BaseModel):
   shard_exp_on_fsdp: bool = Field(
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
-      "and recommended only when num_experts is a multiple of fsdp_parallelism",
+      "and recommended only when num_experts is a multiple of fsdp_parallelism. "
+      "With te_moe_block, shard over (expert, fsdp) and require num_experts to be divisible by EP * FSDP.",
   )
   shard_embed_moe_on_fsdp: bool = Field(
       False,
@@ -1625,6 +1626,7 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     ["activation_exp", ["expert"]],
     # MoE Weights
     ["exp", "expert"],
+    ["expert_weight_fsdp", ["expert", "fsdp"]],
     ["mlp_moe", ["fsdp_transpose", "tensor", "tensor_sequence", "autoregressive"]],
     ["embed_moe", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses"]],
     ["embed_moe", ["fsdp", "context", "context_usp_ulysses"]],

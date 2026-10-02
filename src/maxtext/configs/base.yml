@@ -370,6 +370,7 @@ return_routed_experts: false
 moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
+# With te_moe_block, shard over (expert, fsdp); num_experts must be divisible by EP * FSDP.
 shard_exp_on_fsdp: false
 # Keep embed_moe sharded so we can manually QAG it over FSDP.
 # Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
@@ -692,6 +693,7 @@ logical_axis_rules: [
                       ['activation_exp', ['expert']],
                       # MoE Weights
                       ['exp', 'expert'],
+                      ['expert_weight_fsdp', ['expert', 'fsdp']],
                       ['mlp_moe', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],
                       ['embed_moe', ['fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses']],
                       ['embed_moe', ['fsdp', 'context', 'context_usp_ulysses']],
