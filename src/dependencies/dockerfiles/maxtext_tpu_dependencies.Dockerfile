@@ -16,11 +16,12 @@ RUN mkdir -p /airlock-apt-methods && \
 
 FROM $BASEIMAGE
 ARG USE_AIRLOCK=false
-COPY --from=airlock-bootstrap /airlock-apt-methods/ /usr/lib/apt/methods/
 
 # Install system dependencies including C++20 compiler for vLLM (uses Airlock apt repo when USE_AIRLOCK=true)
-RUN --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
+RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
+    --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
     if [ "$USE_AIRLOCK" = "true" ]; then \
+        if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
         CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-trixie}") && \
         rm -f /etc/apt/sources.list.d/debian.sources && \
@@ -28,7 +29,7 @@ RUN --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,requ
     fi && \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && rm -f /usr/lib/apt/methods/ar+https
 
 # Add the Google Cloud SDK package repository
 RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-key.gpg && \
@@ -37,9 +38,14 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list
 
 # Install the Google Cloud SDK
-RUN --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
-    if [ "$USE_AIRLOCK" = "true" ] && [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
-    apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
+    --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
+    if [ "$USE_AIRLOCK" = "true" ]; then \
+        if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
+        if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi; \
+    fi && \
+    apt-get update && apt-get install -y google-cloud-cli && \
+    rm -rf /var/lib/apt/lists/* && rm -f /usr/lib/apt/methods/ar+https
 
 # Set the default Python version to 3.12 and default GCC/G++ to 12 (matching bookworm)
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.12 1 && \
@@ -98,8 +104,10 @@ COPY libtpu.so* /root/custom_libtpu/
 # Install dependencies - these steps are cached unless the copied files change
 RUN echo "Running command: bash setup.sh MODE=$ENV_MODE WORKFLOW=$ENV_WORKFLOW JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE} TF=${ENV_TF}"
 RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
     --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
     if [ "$USE_AIRLOCK" = "true" ]; then \
+        if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
         TOKEN=$(gcloud auth application-default print-access-token 2>/dev/null || gcloud auth print-access-token 2>/dev/null || true) && \
         if [ -n "$TOKEN" ] && curl -fsSL -H "Authorization: Bearer ${TOKEN}" "https://us-python.pkg.dev/artifact-foundry-prod/python-3p-trusted/simple/" >/dev/null 2>&1; then \
@@ -113,7 +121,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$USE_AIRLOCK" = "true" ]; then \
         CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-trixie}") && \
         echo "deb http://deb.debian.org/debian ${CODENAME} main" > /etc/apt/sources.list; \
-    fi
+    fi && \
+    rm -f /usr/lib/apt/methods/ar+https
 
 # Now copy the remaining code (source files that may change frequently)
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/

@@ -223,7 +223,7 @@ typing-extensions>=4.16.0
 typing-inspection>=0.4.4
 tzdata>=2026.4 ; sys_platform == 'emscripten' or sys_platform == 'win32'
 uritemplate>=4.2.0
-urllib3>=2.7.0
+urllib3>=2.8.0
 uvicorn>=0.53.0
 uvloop>=0.22.1
 virtualenv>=21.9.0
