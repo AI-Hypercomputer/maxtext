@@ -23,17 +23,21 @@
 #   0. FORCE_ALL_TESTS=true: Bypasses all rules and enables every test suite and
 #      notebook (used by the `scheduled-only` PR label).
 #   1. Non-PR Events: If not a pull request, enables all test suites and notebooks.
-#   2. Empty Diff / Error: If no files are detected or diff fails, runs everything 
-#      as a fail-safe.
-#   3. Default State: All individual test and notebook flags are initialized to 'false'.
-#   4. File Evaluation Loop: Iterates through each changed file:
-#      - Evaluates against specific domain rules (notebook workflows, pathways, 
-#        TPU pre/post-training dependencies, GPU files, inference, etc.) and 
+#   2. Changed-file source: Uses the GitHub REST API (paginated `pulls/N/files`) when
+#      PR_NUMBER, GITHUB_REPOSITORY and the gh CLI are available; falls back to
+#      `git diff origin/<base>...HEAD` if the API is unavailable, fails, returns no
+#      files, or hits its 3000-file cap.
+#   3. Empty Diff / Error: If no files are detected or diff fails, runs all core
+#      test suites (excluding expensive notebook tests) as a fail-safe.
+#   4. Default State: All individual test and notebook flags are initialized to 'false'.
+#   5. File Evaluation Loop: Iterates through each changed file:
+#      - Evaluates against specific domain rules (notebook workflows, pathways,
+#        TPU pre/post-training dependencies, GPU files, inference, etc.) and
 #        cumulatively enables corresponding flags.
 #      - Tracks any unmatched files.
-#   5. Exclusion Filtering: Filters out pre-configured excluded patterns/directories 
+#   6. Exclusion Filtering: Filters out pre-configured excluded patterns/directories
 #      from the unmatched file list.
-#   6. Fallback Check: If any truly unmatched files remain, triggers a general fallback 
+#   7. Fallback Check: If any truly unmatched files remain, triggers a general fallback
 #      enabling all core test suites (excluding notebooks).
 
 set -e
@@ -99,18 +103,96 @@ if [ "$EVENT_NAME" != "pull_request" ]; then
   exit 0
 fi
 
-if ! git rev-parse --verify "origin/$BASE_REF" > /dev/null 2>&1; then
-  git fetch origin "$BASE_REF" 2>/dev/null || true
+# GitHub's "List pull requests files" REST endpoint returns at most this many files.
+MAX_API_FILES=3000
+
+CHANGED_FILES=""
+DIFF_SOURCE=""
+
+# Preferred source: ask GitHub for the PR's changed files. The paginated REST endpoint
+# is used on purpose; `gh pr view --json files` silently truncates at 100 files.
+# Returns non-zero (and leaves CHANGED_FILES empty) whenever the list cannot be trusted.
+list_changed_files_via_api() {
+  if [[ -z "${PR_NUMBER:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
+    return 1
+  fi
+  if ! command -v gh > /dev/null 2>&1; then
+    echo "Note: gh CLI not found; listing changed files with git diff instead."
+    return 1
+  fi
+  local api_files api_count
+  # stderr is not captured so it can never be parsed as a filename; it still reaches the log.
+  if ! api_files=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[].filename'); then
+    echo "Warning: GitHub API file listing failed for PR #${PR_NUMBER} (see gh error above); falling back to git diff."
+    return 1
+  fi
+  api_count=$(grep -c . <<< "$api_files" || true)
+  if (( api_count == 0 )); then
+    echo "Warning: GitHub API returned no files for PR #${PR_NUMBER}; falling back to git diff."
+    return 1
+  fi
+  if (( api_count >= MAX_API_FILES )); then
+    echo "Warning: GitHub API returned ${api_count} files, at the endpoint's ${MAX_API_FILES}-file cap, so the list may be truncated; falling back to git diff."
+    return 1
+  fi
+  CHANGED_FILES="$api_files"
+  DIFF_SOURCE="GitHub API, PR #${PR_NUMBER}"
+}
+
+# Fallback source: diff against the base branch in the local clone.
+list_changed_files_via_git() {
+  local diff_target="origin/$BASE_REF"
+  local fetch_ok="true"
+  local fetch_err fetch_errors diff_error
+  if ! git rev-parse --verify "$diff_target" > /dev/null 2>&1; then
+    fetch_ok="false"
+    fetch_errors=""
+    # Attempt 1: explicit refspec so the remote-tracking ref is created even on
+    # clones whose fetch refspec does not cover the base branch.
+    if fetch_err=$(git fetch origin "${BASE_REF}:refs/remotes/origin/${BASE_REF}" 2>&1); then
+      fetch_ok="true"
+    else
+      fetch_errors="refspec fetch: ${fetch_err}"
+      # Attempt 2: plain fetch (updates FETCH_HEAD, and on modern git the tracking ref too).
+      if fetch_err=$(git fetch origin "$BASE_REF" 2>&1); then
+        fetch_ok="true"
+      else
+        fetch_errors="${fetch_errors}; plain fetch: ${fetch_err}"
+        echo "Warning: unable to fetch base ref '${BASE_REF}' from origin: ${fetch_errors}"
+      fi
+    fi
+  fi
+  # Only trust FETCH_HEAD if one of OUR fetches succeeded; otherwise it may be a stale
+  # ref left by actions/checkout (e.g. the PR merge ref), which would yield a wrong diff.
+  if [[ "$fetch_ok" == "true" ]] && ! git rev-parse --verify "$diff_target" > /dev/null 2>&1; then
+    if git rev-parse --verify "FETCH_HEAD" > /dev/null 2>&1; then
+      echo "Warning: ${diff_target} is not available; falling back to FETCH_HEAD ($(git rev-parse --short FETCH_HEAD))."
+      diff_target="FETCH_HEAD"
+    fi
+  fi
+
+  diff_error=""
+  if ! CHANGED_FILES=$(git diff --name-only "${diff_target}...HEAD" 2>/dev/null); then
+    diff_error=$(git diff --name-only "${diff_target}...HEAD" 2>&1) || true
+    CHANGED_FILES=""
+  fi
+
+  if [[ -n "$diff_error" ]]; then
+    echo "Warning: git diff encountered an error: $diff_error"
+  fi
+  DIFF_SOURCE="git diff against ${diff_target}"
+}
+
+if ! list_changed_files_via_api; then
+  list_changed_files_via_git
 fi
 
-CHANGED_FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD" 2>/dev/null || true)
-
-echo "Changed files against origin/${BASE_REF}:"
+echo "Changed files (source: ${DIFF_SOURCE}):"
 echo "$CHANGED_FILES"
 
 if [ -z "$CHANGED_FILES" ]; then
-  echo "No files detected or diff failed. Running everything as a fail-safe."
-  set_test_flags "true" "true"
+  echo "No files detected or diff failed. Running core test suites (excluding notebooks) as a fail-safe."
+  set_test_flags "true" "false"
   exit 0
 fi
 

@@ -62,6 +62,10 @@ jobs:
       github.event.label.name == 'scheduled-only'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      # Needed to list the PR's changed files via the GitHub REST API.
+      pull-requests: read
     outputs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
@@ -80,6 +84,8 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           # A `scheduled-only` PR mirrors a scheduled run, so run every suite
           # regardless of which files the PR touched.
           FORCE_ALL_TESTS: ${{ contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
