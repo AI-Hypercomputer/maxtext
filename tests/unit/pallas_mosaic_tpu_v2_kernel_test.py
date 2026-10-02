@@ -238,7 +238,7 @@ class GmmDispatchTest(parameterized.TestCase):
     # None exercises the public helper default for backward compatibility.
     kwargs = {} if use_dlhs_transpose_rhs is None else {"use_dlhs_transpose_rhs": use_dlhs_transpose_rhs}
     with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", return_value=expected) as gmm_v2_mock:
-      actual = megablox_ops._dlhs_run_tokamax_v2(  # pylint: disable=protected-access
+      actual, lhs_scale_applied = megablox_ops._dlhs_run_tokamax_v2(  # pylint: disable=protected-access
           dlhs_dout=dlhs_dout,
           rhs=rhs,
           group_sizes=group_sizes,
@@ -256,6 +256,7 @@ class GmmDispatchTest(parameterized.TestCase):
     )
     expected_rhs = rhs if transpose_rhs or expected_transpose_rhs else rhs.swapaxes(1, 2)
     self.assertIs(actual, expected)
+    self.assertFalse(lhs_scale_applied)
     self.assertEqual(call_kwargs["transpose_rhs"], expected_transpose_rhs)
     self.assertTrue(bool(jnp.array_equal(call_kwargs["rhs"], expected_rhs)))
     expected_tiling = (
