@@ -288,6 +288,39 @@ class GmmTest(parameterized.TestCase):
     )
     assert_arrays_all_close(actual, expected)
 
+  @parameterized.product(
+      lhs_dtype=[jnp.bfloat16, jnp.float8_e4m3fn],
+      has_partial_sum=[True, False],
+      group_offset=[0, 2],
+  )
+  def test_gmm_post_matmul_lhs_scale(self, lhs_dtype, has_partial_sum, group_offset):
+    """With maybe_quantize_lhs=False, lhs_scale multiplies the matmul result before partial_sum is added."""
+    batch_size, in_size, out_size, num_groups = 128, 512, 512, 4
+    num_local_groups = num_groups - group_offset
+    k0, k1, k2 = jax.random.split(jax.random.key(0), 3)
+
+    lhs = jax.random.normal(k0, (batch_size, in_size), dtype=jnp.bfloat16).astype(lhs_dtype)
+    rhs = jax.random.normal(k1, (num_local_groups, in_size, out_size), dtype=jnp.bfloat16)
+    lhs_scale = jnp.full((1, 1), 0.5, dtype=jnp.float32)
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+    ps = jax.random.normal(k2, (batch_size, out_size), dtype=jnp.bfloat16) if has_partial_sum else None
+
+    # Scaling lhs is the same as scaling the matmul result, and reference_gmm adds partial_sum afterwards.
+    scaled_lhs = (lhs.astype(jnp.float32) * lhs_scale).astype(jnp.bfloat16)
+    expected = reference_gmm(scaled_lhs, rhs, group_sizes, partial_sum=ps, group_offset=group_offset)
+    actual = gmm_backend.gmm_v2(
+        lhs,
+        rhs,
+        group_sizes,
+        partial_sum=ps,
+        group_offset=group_offset,
+        lhs_scale=lhs_scale,
+        preferred_element_type=jnp.bfloat16,
+        maybe_quantize_lhs=False,
+    )
+    assert_arrays_all_close(actual, expected)
+
   @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(
       batch_size=[128, 1024],
