@@ -108,6 +108,11 @@ def gmm(
           act_calibration_method="absmax",
       )
 
+  if return_rhs and not (use_tokamax_backend and use_gmm_v2):
+    # The cotangent of the returned rhs is accumulated into drhs via tgmm_v2 partial_sum,
+    # which other backends do not support; they would silently drop it.
+    raise ValueError("return_rhs=True requires use_tokamax_backend=True and use_gmm_v2=True.")
+
   lhs_dtype = preferred_element_type if isinstance(lhs, qpl.QArray) else lhs.dtype
   rhs_dtype = preferred_element_type if isinstance(rhs, qpl.QArray) else rhs.dtype
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
@@ -533,13 +538,15 @@ def _gmm_bwd(
       rhs_is_qarray,
   ) = residual
   num_actual_groups = residual_rhs.shape[0]
+  # With return_rhs, the cotangent of the returned rhs is the weight gradient already accumulated
+  # by its downstream consumers (e.g. later MoE token chunks). tgmm adds this drhs onto it in place.
   drhs_partial_sum = None
   if return_rhs:
     grad, drhs_partial_sum = grad
-  if isinstance(drhs_partial_sum, qpl.QArray):
-    drhs_partial_sum = drhs_partial_sum.qvalue
-  if transpose_rhs and drhs_partial_sum is not None:
-    drhs_partial_sum = drhs_partial_sum.swapaxes(1, 2)
+    if isinstance(drhs_partial_sum, qpl.QArray):
+      drhs_partial_sum = drhs_partial_sum.qvalue
+    if transpose_rhs:
+      drhs_partial_sum = drhs_partial_sum.swapaxes(1, 2)
 
   # Jargon used here:
   #  - lhs: input activation in forward pass, possibly quantized.

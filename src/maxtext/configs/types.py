@@ -1076,7 +1076,13 @@ class MoEGeneral(BaseModel):
   )
   moe_accumulate_chunk_wgrad: bool = Field(
       False,
-      description="Accumulate MoE weight gradients in-place across token chunks via tgmm_v2 partial_sum.",
+      description=(
+          "With num_moe_token_chunks>1, chain the expert weights through the token chunks: chunk 0 gathers and"
+          " quantizes them once and later chunks reuse the result. In the backward pass each chunk's weight-gradient"
+          " tgmm accumulates in place onto the later chunks' gradient (tgmm_v2 partial_sum) instead of"
+          " materializing and summing one gradient per chunk. Requires use_tokamax_gmm=True, use_gmm_v2=True,"
+          " num_moe_emb_chunks=0 and prefuse_moe_weights=False."
+      ),
   )
   moe_chunk_barrier: bool = Field(
       False,
@@ -5548,6 +5554,14 @@ class MaxTextConfig(
             f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
             f"max_target_length={self.max_target_length}."
         )
+
+    if self.moe_accumulate_chunk_wgrad and not (
+        self.use_tokamax_gmm and self.use_gmm_v2 and self.num_moe_emb_chunks == 0 and not self.prefuse_moe_weights
+    ):
+      raise ValueError(
+          "moe_accumulate_chunk_wgrad=True requires use_tokamax_gmm=True, use_gmm_v2=True, num_moe_emb_chunks=0"
+          " and prefuse_moe_weights=False."
+      )
 
     if self.use_lineage:
       if not self.scan_layers:
