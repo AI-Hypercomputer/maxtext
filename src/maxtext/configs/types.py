@@ -1074,6 +1074,10 @@ class MoEGeneral(BaseModel):
           " use_ring_of_experts=True."
       ),
   )
+  moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
+      False,
+      description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
+  )
   moe_chunk_barrier: bool = Field(
       False,
       description=(

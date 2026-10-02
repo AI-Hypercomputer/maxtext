@@ -472,7 +472,7 @@ def inner_kernel(
 
     def rhs_block(start_k: int, end_k: int, start_n: int, end_n: int):
       if cfgs.transpose_rhs:
-        return tiled_rhs[start_n:end_n, start_k:end_k].T
+        return tiled_rhs[start_n:end_n, start_k:end_k]
       return tiled_rhs[start_k:end_k, start_n:end_n]
 
     # Step 2: Matmul.
@@ -490,11 +490,21 @@ def inner_kernel(
           start_k = b_id * rhs_qbs  # pyrefly: ignore[unsupported-operation]
           end_k = start_k + rhs_qbs  # pyrefly: ignore[unsupported-operation]
 
-          block_acc = jnp.matmul(
-              tiled_lhs[:, start_k:end_k],
-              rhs_block(start_k, end_k, start_n, end_n),
-              preferred_element_type=jnp.float32,
-          ).astype(acc_ref.dtype)
+          block_lhs = tiled_lhs[:, start_k:end_k]
+          block_rhs = rhs_block(start_k, end_k, start_n, end_n)
+          if cfgs.transpose_rhs:
+            block_acc = lax.dot_general(
+                block_lhs,
+                block_rhs,
+                (((1,), (1,)), ((), ())),
+                preferred_element_type=jnp.float32,
+            ).astype(acc_ref.dtype)
+          else:
+            block_acc = jnp.matmul(
+                block_lhs,
+                block_rhs,
+                preferred_element_type=jnp.float32,
+            ).astype(acc_ref.dtype)
 
           if cfgs.rhs_cfgs.should_dequantize_after_matmul:
             tiled_rhs_scale = tiled_rhs_ref.get_scale()
@@ -564,11 +574,19 @@ def inner_kernel(
           if not tpu_info.is_matmul_supported(lhs_q_dtype, block_rhs.dtype):
             block_rhs = block_rhs.astype(lhs_q_dtype)
 
-          block_acc = jnp.matmul(
-              block_lhs_q,
-              block_rhs,
-              preferred_element_type=preferred_element_type,
-          ).astype(acc_ref.dtype)
+          if cfgs.transpose_rhs:
+            block_acc = lax.dot_general(
+                block_lhs_q,
+                block_rhs,
+                (((1,), (1,)), ((), ())),
+                preferred_element_type=preferred_element_type,
+            ).astype(acc_ref.dtype)
+          else:
+            block_acc = jnp.matmul(
+                block_lhs_q,
+                block_rhs,
+                preferred_element_type=preferred_element_type,
+            ).astype(acc_ref.dtype)
 
           block_acc *= block_scale.astype(acc_ref.dtype)
 
