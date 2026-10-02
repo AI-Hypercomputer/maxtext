@@ -23,6 +23,8 @@ import sys
 import types
 import unittest
 import copy
+import contextlib
+import dataclasses
 from unittest import mock
 
 from absl.testing import parameterized
@@ -571,6 +573,8 @@ def _create_mock_flash_op(
     eval_block_size=None,
     eval_qkv_layout="HEAD_DIM_MINOR",
     use_tokamax_splash=False,
+    qk_diag_skip=False,
+    config_overrides=None,
 ):
   """Helper method to construct a mock AttentionOp for flash testing."""
   # `eval_sa_*` mirrors base.yml: the evaluation knobs fall back to the
@@ -602,6 +606,7 @@ def _create_mock_flash_op(
       use_splash_scheduler=False,
       sa_fuse_reciprocal=False,
       sa_use_base2_exp=False,
+      sa_qk_diag_skip=qk_diag_skip,
       use_tokamax_splash=use_tokamax_splash,
       use_jax_splash=False,
       cost_estimate_flops_fwd=-1,
@@ -611,6 +616,8 @@ def _create_mock_flash_op(
       shard_mode="none",
       debug_sharding=False,
   )
+  for name, value in (config_overrides or {}).items():
+    setattr(config, name, value)
   device = types.SimpleNamespace(platform="cpu")
   mesh = types.SimpleNamespace(
       devices=np.asarray([device] * context_parallel_size, dtype=object),
@@ -709,6 +716,7 @@ class BlockCausalMaskTest(unittest.TestCase):
         use_splash_scheduler=False,
         sa_fuse_reciprocal=False,
         sa_use_base2_exp=False,
+        sa_qk_diag_skip=False,
         use_tokamax_splash=False,
         use_jax_splash=False,
     )
@@ -1346,6 +1354,133 @@ class HCAStaticMaskTest(unittest.TestCase):
       op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=None)
     with self.assertRaisesRegex(ValueError, "compress_ratio must be provided for AttentionType.COMPRESSED"):
       op.tpu_flash_attention(query, key, key, decoder_segment_ids=None, compress_ratio=0)
+
+
+@dataclasses.dataclass(frozen=True)
+class _StubSplashConfig:
+  """The `SplashConfig` fields the `sa_qk_diag_skip` wiring reads or writes.
+
+  Standing in for the real config keeps the test independent of the installed
+  Tokamax release. `qk_diag_grid_fwd` marks a release whose forward skip
+  supports block_kv_compute < block_kv.
+  """
+
+  block_q: int
+  block_kv: int
+  block_kv_compute: int
+  block_q_dkv: int
+  block_kv_dkv: int
+  block_kv_dkv_compute: int
+  qk_diag_skip: bool = False
+  qk_diag_grid: int | tuple[tuple[int, int], tuple[int, int]] = 2
+
+  @property
+  def qk_diag_grid_fwd(self):
+    return (2, 2)
+
+
+def _make_stub_splash_config(**kwargs):
+  fields = {f.name for f in dataclasses.fields(_StubSplashConfig)}
+  return _StubSplashConfig(**{k: v for k, v in kwargs.items() if k in fields})
+
+
+@dataclasses.dataclass(frozen=True)
+class _LegacyStubSplashConfig:
+  """A Tokamax release whose `qk_diag_skip` needs square tiles in both phases."""
+
+  block_q: int
+  block_kv: int
+  block_kv_compute: int
+  block_q_dkv: int
+  block_kv_dkv: int
+  block_kv_dkv_compute: int
+  qk_diag_skip: bool = False
+  qk_diag_grid: int = 2
+
+
+def _make_legacy_stub_splash_config(**kwargs):
+  fields = {f.name for f in dataclasses.fields(_LegacyStubSplashConfig)}
+  return _LegacyStubSplashConfig(**{k: v for k, v in kwargs.items() if k in fields})
+
+
+class TokamaxQkDiagSkipTest(unittest.TestCase):
+  """Tests when `sa_qk_diag_skip` turns on `qk_diag_skip` in the Tokamax splash config."""
+
+  def _capture_sa_config(
+      self,
+      *,
+      attention_type=AttentionType.GLOBAL,
+      qk_diag_skip=True,
+      make_config=_make_stub_splash_config,
+      **config_overrides,
+  ):
+    """Runs `tpu_flash_attention` until the splash kernel is built and returns its config.
+
+    `make_config` stands in for `SplashConfig`; pass None to use the installed one.
+    """
+    op = _create_mock_flash_op(
+        attention_type=attention_type,
+        use_tokamax_splash=True,
+        qk_diag_skip=qk_diag_skip,
+        config_overrides={"ulysses_context_sharding": "ulysses", **config_overrides},
+    )
+    query = jnp.zeros((1, 8, 1, 8))
+    splash_config_patch = (
+        mock.patch.object(attention_op.tokamax_splash_kernel, "SplashConfig", side_effect=make_config)
+        if make_config is not None
+        else contextlib.nullcontext()
+    )
+    with (
+        mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+        splash_config_patch,
+        mock.patch.object(
+            attention_op.tokamax_splash_kernel,
+            "make_splash_mha",
+            side_effect=RuntimeError("config captured"),
+        ) as make_splash_mha,
+        self.assertRaisesRegex(RuntimeError, "config captured"),
+    ):
+      op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+    return make_splash_mha.call_args.kwargs["config"]
+
+  def test_square_tiles_enable_skip(self):
+    sa_config = self._capture_sa_config()
+    self.assertTrue(sa_config.qk_diag_skip)
+    self.assertEqual(sa_config.qk_diag_grid, ((2, 2), (4, 4)))  # Tuned (forward, dkv) grids.
+
+  def test_non_square_forward_enables_skip(self):
+    """block_kv_compute < block_kv (the production forward tiling) is supported."""
+    self.assertTrue(self._capture_sa_config(sa_block_kv_compute=2).qk_diag_skip)
+
+  def test_config_untouched_when_unsupported(self):
+    cases = (
+        ("non-square dkv tiles", {"sa_block_kv_dkv_compute": 2}),
+        ("block_q != block_kv", {"sa_block_kv": 2, "sa_block_kv_compute": 2}),
+        ("flag off", {"qk_diag_skip": False}),
+        ("not a pure causal mask", {"attention_type": AttentionType.BLOCK_DIFFUSION}),
+    )
+    for name, kwargs in cases:
+      with self.subTest(name):
+        sa_config = self._capture_sa_config(**kwargs)
+        self.assertFalse(sa_config.qk_diag_skip)
+        self.assertEqual(sa_config.qk_diag_grid, 2)
+
+  def test_legacy_tokamax_needs_square_forward(self):
+    """Without `qk_diag_grid_fwd` the forward tile must be square as well."""
+    sa_config = self._capture_sa_config(make_config=_make_legacy_stub_splash_config)
+    self.assertTrue(sa_config.qk_diag_skip)
+    self.assertEqual(sa_config.qk_diag_grid, 2)  # Legacy releases take an int grid only.
+    sa_config = self._capture_sa_config(make_config=_make_legacy_stub_splash_config, sa_block_kv_compute=2)
+    self.assertFalse(sa_config.qk_diag_skip)
+
+  def test_installed_tokamax_accepts_the_config(self):
+    """The real `SplashConfig` validates whatever the wiring produces."""
+    non_square_fwd = hasattr(attention_op.tokamax_splash_kernel.SplashConfig, "qk_diag_grid_fwd")
+    self.assertTrue(self._capture_sa_config(make_config=None).qk_diag_skip)
+    self.assertEqual(
+        self._capture_sa_config(make_config=None, sa_block_kv_compute=2).qk_diag_skip,
+        non_square_fwd,
+    )
 
 
 class AttentionTypeResolutionTest(unittest.TestCase):
