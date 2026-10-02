@@ -28,6 +28,8 @@ from maxtext.integration.vllm.convert_utils import (
     is_verify_weights_enabled,
     pad_to_tpu_lanes,
     resolve_prefuse_moe_weights,
+    resolve_rollout_kv_tp,
+    resolve_rollout_moe_tp,
     resolve_rollout_tp,
 )
 
@@ -196,6 +198,70 @@ class ConvertUtilsTest(unittest.TestCase):
       rollout_tensor_parallelism = 2
 
     self.assertEqual(resolve_rollout_tp(DummyConfig()), 2)
+
+  def test_resolve_rollout_kv_tp(self):
+    # Explicit override takes precedence, even when set to 1 with tp > 1
+    self.assertEqual(resolve_rollout_kv_tp(None, kv_tp_size=4, tp=1), 4)
+    self.assertEqual(resolve_rollout_kv_tp(None, kv_tp_size=1, tp=4), 1)
+
+    # Config value > 0 is respected
+    class ConfigWithKvTp:
+      kv_tp_size = 2
+      rollout_tensor_parallelism = 4
+      rollout_expert_parallelism = 2
+
+    self.assertEqual(resolve_rollout_kv_tp(ConfigWithKvTp(), kv_tp_size=None, tp=1), 2)
+
+    # Config kv_tp_size=1 is respected even when rollout TP > 1 and EP > 1
+    class ConfigWithKvTp1:
+      kv_tp_size = 1
+      rollout_tensor_parallelism = 4
+      rollout_expert_parallelism = 2
+
+    self.assertEqual(resolve_rollout_kv_tp(ConfigWithKvTp1(), kv_tp_size=None, tp=1), 1)
+
+    # Config value 0 (default sentinel) falls back to rollout TP * EP
+    class ConfigWithDefaultKvTp:
+      kv_tp_size = 0
+      rollout_tensor_parallelism = 4
+
+    self.assertEqual(resolve_rollout_kv_tp(ConfigWithDefaultKvTp(), kv_tp_size=None, tp=1), 4)
+    self.assertEqual(resolve_rollout_kv_tp(None, kv_tp_size=None, tp=4), 4)
+
+    # Config value 0 with ep > 1 falls back to tp * ep
+    class ConfigWithDefaultKvTpAndEp:
+      kv_tp_size = 0
+      rollout_tensor_parallelism = 2
+      rollout_expert_parallelism = 4
+
+    self.assertEqual(resolve_rollout_kv_tp(ConfigWithDefaultKvTpAndEp(), kv_tp_size=None), 8)
+
+  def test_resolve_rollout_moe_tp(self):
+    # Explicit override takes precedence, even when set to 1 with tp > 1
+    self.assertEqual(resolve_rollout_moe_tp(None, moe_mlp_tp_size=4, tp=1), 4)
+    self.assertEqual(resolve_rollout_moe_tp(None, moe_mlp_tp_size=1, tp=4), 1)
+
+    # Config value > 0 is respected
+    class ConfigWithMoeTp:
+      moe_mlp_tp_size = 2
+      rollout_tensor_parallelism = 4
+
+    self.assertEqual(resolve_rollout_moe_tp(ConfigWithMoeTp(), moe_mlp_tp_size=None, tp=1), 2)
+
+    # Config moe_mlp_tp_size=1 is respected even when rollout TP > 1
+    class ConfigWithMoeTp1:
+      moe_mlp_tp_size = 1
+      rollout_tensor_parallelism = 4
+
+    self.assertEqual(resolve_rollout_moe_tp(ConfigWithMoeTp1(), moe_mlp_tp_size=None, tp=1), 1)
+
+    # Config value 0 (default sentinel) falls back to rollout TP
+    class ConfigWithDefaultMoeTp:
+      moe_mlp_tp_size = 0
+      rollout_tensor_parallelism = 4
+
+    self.assertEqual(resolve_rollout_moe_tp(ConfigWithDefaultMoeTp(), moe_mlp_tp_size=None, tp=1), 4)
+    self.assertEqual(resolve_rollout_moe_tp(None, moe_mlp_tp_size=None, tp=4), 4)
 
 
 if __name__ == "__main__":

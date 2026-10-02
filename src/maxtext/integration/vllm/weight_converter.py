@@ -38,6 +38,8 @@ from maxtext.integration.vllm.convert_utils import (
     _sharding_summary,
     normalize_dtype,
     pad_to_tpu_lanes,
+    resolve_rollout_kv_tp,
+    resolve_rollout_moe_tp,
     resolve_rollout_tp,
 )
 
@@ -258,8 +260,8 @@ class WeightConverter:
       self,
       rules: Optional[List[Rule]] = None,
       tp: int = 1,
-      kv_tp_size: int = 1,
-      moe_mlp_tp_size: int = 1,
+      kv_tp_size: Optional[int] = None,
+      moe_mlp_tp_size: Optional[int] = None,
       num_kv_heads: Optional[int] = None,
       head_dim: Optional[int] = None,
       config: Any = None,
@@ -282,8 +284,8 @@ class WeightConverter:
       )
     self.rules = rules
     self.tp = resolve_rollout_tp(config, tp)
-    self.kv_tp_size = kv_tp_size or getattr(config, "kv_tp_size", 1) or self.tp
-    self.moe_mlp_tp_size = moe_mlp_tp_size or getattr(config, "moe_mlp_tp_size", 1) or self.tp
+    self.kv_tp_size = resolve_rollout_kv_tp(config, kv_tp_size, self.tp)
+    self.moe_mlp_tp_size = resolve_rollout_moe_tp(config, moe_mlp_tp_size, self.tp)
 
     # Read by the rollout engine to decide whether to trace the reshard
     # step that runs after conversion.
@@ -685,13 +687,13 @@ class MaxTextToMaxTextConverter:
       debug: bool = False,
       prefuse_moe_weights: Optional[bool] = None,
       target_dtype: Optional[Any] = None,
-      kv_tp_size: int = 1,
-      moe_mlp_tp_size: int = 1,
+      kv_tp_size: Optional[int] = None,
+      moe_mlp_tp_size: Optional[int] = None,
   ):
     self.config = config
     self.tp = resolve_rollout_tp(config, tp)
-    self.kv_tp_size = kv_tp_size or getattr(config, "kv_tp_size", 1) or self.tp
-    self.moe_mlp_tp_size = moe_mlp_tp_size or getattr(config, "moe_mlp_tp_size", 1) or self.tp
+    self.kv_tp_size = resolve_rollout_kv_tp(config, kv_tp_size, self.tp)
+    self.moe_mlp_tp_size = resolve_rollout_moe_tp(config, moe_mlp_tp_size, self.tp)
     self.moe_fused_layout = moe_fused_layout
     self.allow_unused_source_keys = allow_unused_source_keys
     self.debug = debug
