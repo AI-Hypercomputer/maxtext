@@ -14,13 +14,15 @@
 
 """Unit tests for utils_rl.extract_answer (CPU-only).
 
-Covers the two-part contract of the boxed-extraction change:
+Covers the answer-extraction contract:
   1. `\\boxed{N}` is extracted (with/without <answer> tags, nested LaTeX,
      multiple boxed, whitespace, negatives, and answer-tag scoping).
   2. Legacy plain-text answers inside the solution tags still work, so
      existing recipes that do not emit `\\boxed` are unaffected.
+  3. Untagged native final prose does not bypass the configured answer format.
 """
 
+import random
 import unittest
 from types import SimpleNamespace
 
@@ -67,6 +69,38 @@ class ExtractAnswerTest(unittest.TestCase):
     got = utils_rl.extract_answer("first \\boxed{1} then \\boxed{99}", self.config)
     self.assertEqual(got, "99")
 
+  def test_nested_boxed_returns_outer(self):
+    got = utils_rl.extract_answer("\\boxed{a \\boxed{b}}", self.config)
+    self.assertEqual(got, "a \\boxed{b}")
+
+  def test_unclosed_boxed_is_ignored(self):
+    got = utils_rl.extract_answer("\\boxed{ {x } then \\boxed{5}", self.config)
+    self.assertEqual(got, "5")
+
+  def test_matches_reference_stack_scan(self):
+    """Fuzz the linear scan against the previous stack-based implementation."""
+
+    def reference(content):
+      boxed_matches = []
+      stack = []
+      for i, ch in enumerate(content):
+        if ch == "{":
+          stack.append(i)
+        elif ch == "}":
+          if not stack:
+            continue
+          op = stack.pop()
+          if content[:op].endswith("\\boxed"):
+            boxed_matches.append(content[op + 1 : i].strip())
+      return boxed_matches[-1] if boxed_matches else None
+
+    rng = random.Random(0)
+    alphabet = ["{", "}", "\\boxed{", "\\frac{1}{2}", "x", " ", "\\boxed"]
+    for _ in range(5000):
+      content = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 24)))
+      got = utils_rl._last_balanced_boxed(content)  # pylint: disable=protected-access
+      self.assertEqual(got, reference(content), content)
+
   def test_boxed_strips_whitespace(self):
     got = utils_rl.extract_answer("<answer>\\boxed{ 7 }</answer>", self.config)
     self.assertEqual(got, "7")
@@ -101,6 +135,23 @@ class ExtractAnswerTest(unittest.TestCase):
   def test_legacy_last_answer_wins(self):
     got = utils_rl.extract_answer("<answer>1</answer> ... <answer>5</answer>", self.config)
     self.assertEqual(got, "5")
+
+  @pytest.mark.cpu_only
+  def test_qwen_native_final_answer_without_custom_tags_is_not_rewarded(self):
+    """Native prose must not bypass the recipe's required answer tags."""
+    config = SimpleNamespace(
+        reasoning_start_token="<think>",
+        reasoning_end_token="</think>",
+        reasoning_start_token_in_prompt=True,
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+    )
+    response = "We calculate 6 * 7.</think>\nThe final answer is 42."
+
+    self.assertEqual(
+        utils_rl.extract_answer(response, config),
+        utils_rl.FALLBACK_ANSWER,
+    )
 
   # ---- no answer ----
 

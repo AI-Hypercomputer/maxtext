@@ -19,18 +19,19 @@
 # See github.com/google/maxtext/issues/20 for more
 
 import datetime
-from functools import partial
 import os
+import time
 from typing import Sequence
 
 from absl import app
 from flax import nnx
+from flax.core.spmd import logical_axis_rules
 import jax
 from jax import numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
+from maxtext.common import emergency_checkpointing
 from maxtext.common import train_state_nnx
-from maxtext.models import models
 from maxtext.trainers.pre_train.train import get_first_step
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
@@ -40,7 +41,12 @@ from maxtext.utils import train_utils
 from maxtext.utils.model_creation_utils import from_config
 import numpy as np
 
-Transformer = models.transformer_as_linen
+
+def _as_abstract_leaf(leaf):
+  """Shape/dtype/sharding stand-in for a concrete leaf, as an Orbax restore target."""
+  if isinstance(leaf, jax.Array):
+    return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=leaf.sharding)
+  return leaf
 
 
 def checkpoint_loop(config, state=None):
@@ -51,47 +57,59 @@ def checkpoint_loop(config, state=None):
   on the configured cadence. Works on both Linen and NNX state shapes.
   """
   init_rng = jax.random.PRNGKey(config.init_weights_seed)
-  if config.pure_nnx:
-    mesh = maxtext_utils.get_mesh_from_config(config)
-    rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
-    model = from_config(config, mesh=mesh, rngs=rngs)
-    _, tx = train_utils.create_training_optimizer(config, model)
-    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  mesh = maxtext_utils.get_mesh_from_config(config)
+  rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=init_rng)
+  model = from_config(config, mesh=mesh, rngs=rngs)
+  _, tx = train_utils.create_training_optimizer(config, model)
+  _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
-    def init_state_fn():
-      nnx_model = _create_model_partial()
-      wrt = (
-          getattr(nnx, "LoRAParam", nnx.Param)
-          if getattr(getattr(config, "lora", None), "enable_lora", False)
-          else nnx.Param
-      )
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
-      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-  else:
-    model = from_config(config)
-    mesh = model.mesh
-    _, tx = train_utils.create_training_optimizer(config, model)
-    init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, init_rng)
+  def init_state_fn():
+    nnx_model = _create_model_partial()
+    wrt = (
+        getattr(nnx, "LoRAParam", nnx.Param)
+        if getattr(getattr(config, "lora", None), "enable_lora", False)
+        else nnx.Param
+    )
+    optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
+    return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
   checkpoint_manager = train_utils.create_checkpoint_manager(config, mesh, init_state_fn)
 
   # A barrier to sync all hosts before starting to restore checkpoint
   jax.experimental.multihost_utils.sync_global_devices("Barrier before load")
 
-  checkpoint_load_start = datetime.datetime.now()
-  # Delegate checkpoint restoration or state initialization to setup_training_state
-  state, _, _, _, was_restored = maxtext_utils.setup_training_state(None, config, mesh, checkpoint_manager, init_state_fn)
-  jax.block_until_ready(state)
-  checkpoint_load_end = datetime.datetime.now()
+  state = None
 
-  if was_restored:
-    if jax.process_index() == 0:
-      max_logging.log(
-          "STANDALONE CHECKPOINTER : Checkpoint restored in :" f" {checkpoint_load_end - checkpoint_load_start}"
+  if config.standalone_checkpointer_start_from_checkpoint:
+    unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, is_training=True)
+    with logical_axis_rules(config.logical_axis_rules):
+      loaded_state, _ = checkpointing.load_state_if_possible(
+          checkpoint_manager,
+          None,
+          config.load_parameters_path,
+          config.load_full_state_path,
+          config.checkpoint_storage_concurrent_gb,
+          unboxed_abstract_state,
+          config.enable_single_replica_ckpt_restoring,
+          config.dataset_type,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_orbax_v1=config.enable_orbax_v1,
+          checkpoint_conversion_fn=config.checkpoint_conversion_fn,
+          source_checkpoint_layout=config.source_checkpoint_layout,
+          expansion_factor_real_data=config.expansion_factor_real_data,
+          maxtext_config=config,
       )
-  else:  # Checkpoint was unavailable, fresh state needs to be perturbed with entropy
-    state = add_entropy_to_checkpoint(state)
+      if loaded_state:
+        state = loaded_state.get("items", loaded_state)
+
+  if state is None:
+    # Delegate checkpoint restoration or state initialization to setup_training_state
+    state, _, _, _, _ = maxtext_utils.setup_training_state(model, config, mesh, checkpoint_manager, init_state_fn)
+
+  jax.block_until_ready(state)
+
+  state = add_entropy_to_checkpoint(state)
 
   start_step = get_first_step(model, state)  # this is the start_step for training
   for step in np.arange(start_step, config.steps):
@@ -99,7 +117,7 @@ def checkpoint_loop(config, state=None):
       start_time = datetime.datetime.now()
       # A barrier to sync all hosts before starting to save checkpoint
       jax.experimental.multihost_utils.sync_global_devices("Barrier before save")
-      state_to_save = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict()) if config.pure_nnx else state
+      state_to_save = train_state_nnx.to_linen_checkpoint_dict(state.to_pure_dict())
       if checkpointing.save_checkpoint(checkpoint_manager, int(step), state_to_save):
         checkpointing.wait_until_finished(checkpoint_manager)
         end_time = datetime.datetime.now()
@@ -107,6 +125,45 @@ def checkpoint_loop(config, state=None):
           max_logging.log(
               "STANDALONE CHECKPOINTER : Checkpoint saved in" f" {end_time - start_time} ,step {step}, on host 0"
           )
+          elapsed_time = datetime.datetime.now() - start_time
+          time_to_wait = config.standalone_checkpointer_per_step_interval - elapsed_time.total_seconds()
+          if time_to_wait > 0:
+            time.sleep(time_to_wait)
+        jax.experimental.multihost_utils.sync_global_devices("Barrier after step")
+
+        if config.standalone_checkpointer_enable_restore_in_loop:
+          # Optional OS Page Cache Eviction (for Checkpointing Benchmarks):
+          # When saving a checkpoint to storage and immediately restoring it on the same host,
+          # the Linux kernel OS page cache holds the newly written blocks in RAM.
+          # Without dropping the cache, the restore operation will read from host RAM rather
+          # than actual backing storage (e.g., GCS / Lustre / persistent disk), which artificially
+          # inflates restore speeds and distorts storage benchmark metrics.
+          #
+          # NOTE: Executing this command requires `sudo` privileges on Linux:
+          # `sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'`.
+          # It defaults to False for compatibility with standard non-sudo MaxText environments,
+          # and should only be enabled in dedicated benchmarking environments.
+          if jax.process_index() == 0 and config.standalone_checkpointer_drop_page_cache_before_restore:
+            max_logging.log("STANDALONE CHECKPOINTER : Dropping OS page cache before restore...")
+          if config.standalone_checkpointer_drop_page_cache_before_restore:
+            os.system("sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'")
+
+          restore_start = datetime.datetime.now()
+          # Restore against the saved sharding, else the timing below is not a real restore.
+          abstract_state = jax.tree_util.tree_map(_as_abstract_leaf, state_to_save)
+          if isinstance(
+              checkpoint_manager,
+              (checkpointing.EmergencyCheckpointManager, checkpointing.EmergencyReplicatorCheckpointManager),
+          ):
+            restored_state = emergency_checkpointing.restore(checkpoint_manager, int(step), abstract_state)
+          else:
+            restored_state = checkpoint_manager.load_checkpointables(int(step), {"items": abstract_state})["items"]
+          jax.block_until_ready(restored_state)
+          restore_end = datetime.datetime.now()
+          if jax.process_index() == 0:
+            max_logging.log(
+                f"STANDALONE CHECKPOINTER : Checkpoint restored in {restore_end - restore_start} ,step {step}, on host 0"
+            )
 
   return state
 
@@ -119,8 +176,8 @@ def add_entropy_to_checkpoint(state):
     * Linen `TrainState`: `state.params` + `state.opt_state` (tuple).
     * NNX `TrainStateNNX` (Module): `state.model` is an `nnx.Module`; the
       optimizer's `opt_state` is the optax tuple of NamedTuples.
-    * NNX `nnx.State` (post-split, what `setup_training_state` returns under
-      `pure_nnx`): `state.model` and `state.optimizer.opt_state` are sub-States;
+    * NNX `nnx.State` (post-split, what `setup_training_state` returns):
+      `state.model` and `state.optimizer.opt_state` are sub-States;
       `opt_state[0].mu`/`nu` are themselves States that can be reassigned.
   """
   if hasattr(state, "model"):

@@ -20,6 +20,7 @@ import unittest.mock
 from absl.testing import absltest
 from maxtext.configs import pyconfig
 from maxtext.configs import types
+from maxtext.layers import quantizations
 from maxtext.utils import globals as maxtext_globals
 import pydantic
 
@@ -95,6 +96,121 @@ class ConfigTest(absltest.TestCase):
     argv = ["", _BASE_CONFIG_PATH, "steps=-5"]
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
+
+  def test_enable_mllog_without_eval_warns(self):
+    """enable_mllog with eval_interval <= 0 is allowed (for measuring eval impact) and logs a warning."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=-1"]
+    with unittest.mock.patch("maxtext.utils.max_logging.warning") as mock_warning:
+      config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+    self.assertTrue(
+        any("enable_mllog=True with eval_interval=" in str(call.args[0]) for call in mock_warning.call_args_list)
+    )
+
+  def test_enable_mllog_accepted_with_eval(self):
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=1"]
+    config = pyconfig.initialize(argv)
+    self.assertTrue(config.enable_mllog)
+
+  def test_te_moe_block_rejects_unsupported_options_during_config_validation(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_no_quant",
+        # Prevent the general EP validation from masking the more specific
+        # te_moe_block/use_random_routing incompatibility under test.
+        "override_logical_axis_rules": True,
+    }
+    invalid_configs = (
+        ({"norm_topk_prob": True}, "te_moe_block=True does not currently support norm_topk_prob=True."),
+        ({"use_random_routing": True}, "te_moe_block=True does not support use_random_routing=True."),
+        (
+            {"decoder_block": types.DecoderBlockType.LLAMA4},
+            "te_moe_block=True does not currently support Llama4 routing semantics.",
+        ),
+        (
+            {"te_gmm_quantization": ""},
+            "te_gmm_quantization must be specified when te_moe_block=True.",
+        ),
+    )
+
+    for overrides, expected_error in invalid_configs:
+      with self.subTest(overrides=overrides):
+        with self.assertRaises(pydantic.ValidationError) as context:
+          types.MaxTextConfig(**{**common_config, **overrides})
+        self.assertIn(expected_error, str(context.exception))
+
+  def test_te_moe_block_uses_ragged_buffer_factor_validation(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_no_quant",
+    }
+
+    # TE accepts the native worst-case sentinel and a finite factor even when
+    # EP is not enabled in the MaxText logical rules.
+    for factor in (-1.0, 0.0, 1.0, 1.5):
+      with self.subTest(factor=factor):
+        config = types.MaxTextConfig(**common_config, ragged_buffer_factor=factor)
+        self.assertEqual(config.ragged_buffer_factor, factor)
+
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**common_config, ragged_buffer_factor=0.5)
+    self.assertIn("te_moe_block=True requires ragged_buffer_factor >= 1.0", str(context.exception))
+
+    # Native ring-of-experts keeps its existing ragged-sort restriction, while
+    # TE MoEBlock bypasses that native implementation and its validation.
+    native_ring_config = {
+        **common_config,
+        "te_moe_block": False,
+        "te_gmm_quantization": "",
+        "override_logical_axis_rules": True,
+        "use_ring_of_experts": True,
+        "ragged_buffer_factor": 1.5,
+    }
+    with self.assertRaises(pydantic.ValidationError) as context:
+      types.MaxTextConfig(**native_ring_config)
+    self.assertIn("Ragged buffer factor is currently only supported with", str(context.exception))
+
+    te_ring_config = {**native_ring_config, "te_moe_block": True, "te_gmm_quantization": "te_no_quant"}
+    config = types.MaxTextConfig(**te_ring_config)
+    self.assertEqual(config.ragged_buffer_factor, 1.5)
+
+  def test_moe_dropless_fallback_modes(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 8,
+        "base_mlp_dim": 64,
+        "base_moe_mlp_dim": 64,
+        "override_logical_axis_rules": True,
+        "use_ring_of_experts": True,
+        "use_ragged_sort": True,
+        "ragged_buffer_factor": 1.5,
+    }
+    for mode in (None, "step", "layer"):
+      with self.subTest(moe_dropless_fallback=mode):
+        config = types.MaxTextConfig(**common_config, moe_dropless_fallback=mode)
+        self.assertEqual(config.moe_dropless_fallback, mode)
+
+    # YAML/CLI "none" reaches pydantic as None, so it must mean "off".
+    for raw in ("none", "None"):
+      with self.subTest(raw=raw):
+        raw_keys = {**common_config, "moe_dropless_fallback": raw}
+        kwargs = pyconfig._prepare_for_pydantic(raw_keys)  # pylint: disable=protected-access
+        self.assertIsNone(types.MaxTextConfig(**kwargs).moe_dropless_fallback)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.MaxTextConfig(**common_config, moe_dropless_fallback="both")
 
   def test_tpu_tokamax_ring_config_validation_accepts_initial_config(self):
     argv = [
@@ -211,6 +327,56 @@ class ConfigTest(absltest.TestCase):
     self.assertTrue(config.context_parallel_load_balance)
     self.assertTrue(config.packing)
 
+  def test_tpu_tokamax_ring_config_validation_accepts_indexer(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_indexer=True",
+        "q_lora_rank=1",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.use_indexer)
+    self.assertEqual(config.attention_type, "mla")
+
+  def test_indexer_all_gather_context_parallelism_rejects_attention_sink(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=mla",
+        "use_indexer=True",
+        "q_lora_rank=1",
+        "attention_sink=True",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=all_gather",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "does not support attention sinks"):
+        pyconfig.initialize(argv)
+
   def test_tpu_tokamax_ring_config_validation_rejects_unsupported_configs(self):
     base_args = [
         "",
@@ -262,7 +428,6 @@ class ConfigTest(absltest.TestCase):
         ),
         (["use_ragged_attention=True"], [], "ragged attention"),
         (["attention_sink=True"], [], "attention sinks"),
-        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
         (["use_chunked_prefill=True"], [], "chunked prefill"),
         (["moba=True"], [], "MoBA"),
         (["use_multimodal=True"], [], "multimodal"),
@@ -277,6 +442,72 @@ class ConfigTest(absltest.TestCase):
         with unittest.mock.patch("jax.devices", return_value=mock_devices):
           with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
             pyconfig.initialize(argv)
+
+  def test_compressed_attention_rejects_context_parallelism(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "compress_ratios=[0, 128]",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "Context parallelism .* is not supported with attention_type='compressed'"):
+        pyconfig.initialize(argv)
+
+  def test_compressed_attention_allows_context_parallelism_when_all_ratios_are_zero(self):
+    """A compress_ratio of 0 downgrades the layer to local sliding, so CP stays legal."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "compress_ratios=[0, 0]",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "ici_context_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+    self.assertEqual(config.attention_type, "compressed")
+
+  def test_compressed_attention_rejects_unsupported_dq_reduction_steps(self):
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=compressed",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(ValueError, "requires dq_reduction_steps to be 0 or 3"):
+        pyconfig.initialize(base_args + ["dq_reduction_steps=2"])
+      # 0 (unset) and 3 both remain valid.
+      for valid in ("dq_reduction_steps=0", "dq_reduction_steps=3"):
+        with self.subTest(valid=valid):
+          pyconfig.initialize(base_args + [valid])
 
   def test_tpu_ulysses_config_validation_accepts_initial_config(self):
     argv = [
@@ -389,7 +620,7 @@ class ConfigTest(absltest.TestCase):
         (["context_sharding=expert"], [], "context_sharding"),
         (["use_ragged_attention=True"], [], "ragged attention"),
         (["attention_sink=True"], [], "attention sinks"),
-        (["use_indexer=True", "q_lora_rank=1"], [], "sparse indexer"),
+        (["use_indexer=True", "attention_type=mla", "q_lora_rank=1"], [], "sparse indexer"),
         (["use_chunked_prefill=True"], [], "chunked prefill"),
         (["moba=True"], [], "MoBA"),
         (["use_multimodal=True"], [], "multimodal"),
@@ -397,6 +628,176 @@ class ConfigTest(absltest.TestCase):
         (["context_parallel_strategy=ulysess"], ["context_parallel_strategy=ulysses"], "context_parallel_strategy"),
         (["hardware=gpu"], ["hardware=tpu"], "only supported on TPU"),
         (["hardware=gpu_multiprocess"], ["hardware=tpu"], "only supported on TPU"),
+        (["hardware=cpu"], ["hardware=tpu"], "only supported on TPU"),
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for bad_args, args_to_remove, expected_regex in cases:
+      with self.subTest(bad_args=bad_args):
+        argv = [arg for arg in base_args if arg not in args_to_remove]
+        argv.extend(bad_args)
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+            pyconfig.initialize(argv)
+
+  def test_tpu_usp_config_validation_accepts_initial_config(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=usp",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "ici_context_usp_ulysses_parallelism=2",
+        "ring_scan_unroll=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.context_parallel_strategy, "usp")
+    self.assertEqual(config.ici_context_parallelism, 2)
+    self.assertEqual(config.ici_context_usp_ulysses_parallelism, 2)
+    self.assertEqual(config.ring_scan_unroll, 2)
+    self.assertEqual(config.ulysses_context_sharding, "context_usp_ulysses")
+    context_usp_ulysses_index = config.mesh_axes.index("context_usp_ulysses")
+    self.assertEqual(context_usp_ulysses_index, config.mesh_axes.index("context") + 1)
+    self.assertEqual(config.ici_parallelism[context_usp_ulysses_index], 2)
+    self.assertEqual(types.infer_cp_axes(config.logical_axis_rules), ("context", "context_usp_ulysses"))
+    self.assertEqual(types.infer_cp_axes(config.logical_axis_rules_for_eval), ("context", "context_usp_ulysses"))
+
+  def test_tpu_usp_config_validation_accepts_packing(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=usp",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "ici_context_usp_ulysses_parallelism=2",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.packing)
+
+  def test_tpu_usp_config_validation_accepts_load_balance(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=usp",
+        "context_parallel_load_balance=True",
+        "ici_context_parallelism=2",
+        "ici_context_usp_ulysses_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertTrue(config.context_parallel_load_balance)
+
+  def test_context_usp_ulysses_parallelism_requires_usp(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "ici_context_usp_ulysses_parallelism=2",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      with self.assertRaisesRegex(
+          (ValueError, pydantic.ValidationError), "only supported when context_parallel_strategy='usp'"
+      ):
+        pyconfig.initialize(argv)
+
+  def test_tpu_usp_config_validation_rejects_unsupported_configs(self):
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=usp",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=2",
+        "ici_context_usp_ulysses_parallelism=2",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    cases = [
+        (
+            ["context_parallel_load_balance=True", "ici_context_parallelism=3"],
+            ["context_parallel_load_balance=False", "ici_context_parallelism=2"],
+            "even ici_context_parallelism",
+        ),
+        (["attention=dot_product"], ["attention=flash"], "attention=flash"),
+        (["use_tokamax_splash=False"], ["use_tokamax_splash=True"], "use_tokamax_splash"),
+        (["use_jax_splash=True"], ["use_jax_splash=False"], "use_jax_splash"),
+        (["attention_type=mla"], [], "global causal attention"),
+        (["use_ragged_attention=True"], [], "ragged attention"),
+        (["attention_sink=True"], [], "attention sinks"),
+        (["use_indexer=True", "attention_type=mla", "q_lora_rank=1"], [], "sparse indexer"),
+        (["use_chunked_prefill=True"], [], "chunked prefill"),
+        (["use_multimodal=True"], [], "multimodal"),
+        (["dropout_rate=0.1"], [], "dropout"),
+        (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
+        (["use_qk_clip=True"], [], "QK-Clip"),
+        (["context_sharding=expert"], [], "context_sharding"),
+        (["ulysses_context_sharding=expert"], [], "ulysses_context_sharding"),
+        (["custom_mesh_and_rule=pure-fsdp"], [], "mesh axis 'context' in"),
+        (["custom_mesh_and_rule=cp-as-ep"], [], "mesh axis 'context_usp_ulysses' in"),
+        (["logical_axis_rules=[['activation_length',['context']]]"], [], r"in logical_axis_rules\."),
+        (["custom_mesh_and_rule_for_eval=pure-fsdp"], [], "logical_axis_rules_for_eval"),
+        (["ici_context_parallelism=1"], ["ici_context_parallelism=2"], "ring dimension"),
+        (["ici_context_usp_ulysses_parallelism=1"], ["ici_context_usp_ulysses_parallelism=2"], "Ulysses dimension"),
+        (["ici_context_parallelism=-1"], ["ici_context_parallelism=2"], "explicit positive"),
+        (["ici_context_usp_ulysses_parallelism=-1"], ["ici_context_usp_ulysses_parallelism=2"], "explicit positive"),
+        (["dcn_context_parallelism=2"], [], "dcn context parallelism"),
+        (["dcn_context_usp_ulysses_parallelism=2"], [], "dcn context parallelism"),
+        (["dcn_context_parallelism=-1"], [], "explicit positive"),
+        (["dcn_context_usp_ulysses_parallelism=-1"], [], "explicit positive"),
+        (["mtp_num_layers=1"], [], "multi-token prediction"),
+        (["sa_bwd_dkv_megacore=True"], [], "sa_bwd_dkv_megacore"),
+        (["max_target_length=2050"], [], "total context parallelism"),
+        (["ici_context_parallelism=4", "max_target_length=2056"], ["ici_context_parallelism=2"], "squared"),
+        (
+            ["base_num_query_heads=18", "ici_context_usp_ulysses_parallelism=4"],
+            ["ici_context_usp_ulysses_parallelism=2"],
+            "requires num_query_heads",
+        ),
+        (["base_num_kv_heads=1"], [], "MQA"),
+        (
+            ["base_num_kv_heads=10", "ici_context_usp_ulysses_parallelism=4"],
+            ["ici_context_usp_ulysses_parallelism=2"],
+            "requires num_kv_heads",
+        ),
+        (["hardware=gpu"], ["hardware=tpu"], "only supported on TPU"),
         (["hardware=cpu"], ["hardware=tpu"], "only supported on TPU"),
     ]
     mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
@@ -482,6 +883,108 @@ class ConfigTest(absltest.TestCase):
     config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "steps=1"])
 
     self.assertEqual(config.attention_type, "global")
+    self.assertEqual(config.training_objective, "causal_lm")
+    self.assertEqual(config.block_diffusion_mask_id, -1)
+
+  def test_block_diffusion_pretraining_config(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "training_objective=block_diffusion",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=7",
+            "block_diffusion_mask_id=100",
+            "block_diffusion_min_noise=0.05",
+            "vocab_size=256",
+            "max_target_length=2048",
+            "packing=False",
+            "dataset_type=hf",
+            "hf_path=parquet",
+            "hardware=cpu",
+        ]
+    )
+
+    self.assertEqual(config.training_objective, "block_diffusion")
+    self.assertEqual(config.block_diffusion_mask_id, 100)
+    self.assertEqual(config.block_diffusion_min_noise, 0.05)
+    self.assertEqual(config.block_diffusion_logit_alignment, "same_position")
+    self.assertEqual(config.block_diffusion_canvas_policy, "all_masked")
+
+  def test_block_diffusion_pretraining_rejects_incompatible_config(self):
+    base_overrides = {
+        "run_name": "test",
+        "steps": 1,
+        "training_objective": "block_diffusion",
+        "attention": "dot_product",
+        "attention_type": "block_diffusion",
+        "causal_block_size": 32,
+        "block_diffusion_mask_id": 100,
+        "block_diffusion_min_noise": 0.05,
+        "vocab_size": 256,
+        "max_target_length": 2048,
+        "packing": False,
+        "dataset_type": "hf",
+        "hf_path": "parquet",
+        "hardware": "cpu",
+    }
+    cases = (
+        ({"attention_type": "global"}, "attention_type='block_diffusion'"),
+        ({"block_diffusion_mask_id": -1}, "block_diffusion_mask_id"),
+        ({"block_diffusion_mask_id": 256}, "block_diffusion_mask_id"),
+        ({"block_diffusion_min_noise": 0.0}, "block_diffusion_min_noise"),
+        ({"packing": True}, "packing=False"),
+        ({"mtp_num_layers": 1}, "MTP"),
+        ({"num_vocab_tiling": 2}, "vocabulary tiling"),
+        ({"dataset_type": "grain"}, "dataset_type='hf'"),
+        ({"use_dpo": True}, "DPO"),
+        ({"use_sft": True}, "pre-training only"),
+        ({"use_multimodal": True}, "text-only"),
+        ({"block_diffusion_logit_alignment": "shifted"}, "seed_and_mask"),
+        ({"block_diffusion_canvas_policy": "seed_and_mask"}, "same_position/all_masked"),
+        (
+            {
+                "causal_block_size": 1,
+                "block_diffusion_logit_alignment": "shifted",
+                "block_diffusion_canvas_policy": "seed_and_mask",
+            },
+            "causal_block_size >= 2",
+        ),
+    )
+    for overrides, expected_regex in cases:
+      with self.subTest(overrides=overrides):
+        values = base_overrides | overrides
+        argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in values.items())]
+        with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+          pyconfig.initialize(argv)
+
+  def test_shifted_block_diffusion_requires_seeded_canvas(self):
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "training_objective=block_diffusion",
+            "attention=dot_product",
+            "attention_type=block_diffusion",
+            "causal_block_size=8",
+            "block_diffusion_mask_id=100",
+            "block_diffusion_logit_alignment=shifted",
+            "block_diffusion_canvas_policy=seed_and_mask",
+            "vocab_size=256",
+            "packing=False",
+            "dataset_type=hf",
+            "hf_path=parquet",
+            "hardware=cpu",
+        ]
+    )
+
+    self.assertEqual(config.block_diffusion_logit_alignment, "shifted")
+    self.assertEqual(config.block_diffusion_canvas_policy, "seed_and_mask")
 
   @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
@@ -554,6 +1057,7 @@ class ConfigTest(absltest.TestCase):
         _BASE_CONFIG_PATH,
         "run_name=test",
         "use_indexer=true",
+        "attention_type=mla",
         "q_lora_rank=1536",
         "attention=dot_product",
         "remat_policy=custom",
@@ -568,6 +1072,7 @@ class ConfigTest(absltest.TestCase):
         _BASE_CONFIG_PATH,
         "run_name=test",
         "use_indexer=true",
+        "attention_type=mla",
         "q_lora_rank=1536",
         "attention=dot_product",
         "remat_policy=custom",
@@ -598,6 +1103,77 @@ class ConfigTest(absltest.TestCase):
     ]
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
+
+  def test_serve_fp8_weight_accepts_valid_config(self):
+    """Tests valid serve_fp8_weight configuration."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+    ]
+    config = pyconfig.initialize(argv)
+    self.assertEqual(config.quantization, "serve_fp8_weight")
+
+  def test_serve_fp8_weight_threads_act_calibration_method(self):
+    """Tests that serve_fp8_weight picks up act_quantization_calibration_method."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "act_quantization_calibration_method=fixed,-224,224",
+    ]
+    quant = quantizations.configure_quantization(pyconfig.initialize(argv))
+    self.assertIsInstance(quant, quantizations.ServeFp8WeightQuantization)
+    self.assertEqual(quant.act_calibration_method, "fixed,-224,224")
+
+  def test_serve_fp8_weight_requires_fp8_weight_dtype(self):
+    """Tests that serve_fp8_weight requires an FP8 weight_dtype."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=bfloat16",
+    ]
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "requires weight_dtype to be an FP8 dtype"):
+      pyconfig.initialize(argv)
+
+  def test_serve_fp8_weight_rejects_qwix_quantization(self):
+    """Tests that serve_fp8_weight rejects use_qwix_quantization=True."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "enable_checkpointing=false",
+        "quantization=serve_fp8_weight",
+        "weight_dtype=float8_e4m3fn",
+        "use_qwix_quantization=true",
+    ]
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with use_qwix_quantization=True"):
+      pyconfig.initialize(argv)
+
+
+class MMapDatasetConfigTest(absltest.TestCase):
+  """Tests for mmap-specific configuration defaults and accepted values."""
+
+  def test_default_is_25_preserving_prior_behavior(self):
+    config = types.MMapDataset()
+    self.assertEqual(config.packing_max_segments_per_sample, 25)
+
+  def test_custom_value_is_accepted(self):
+    config = types.MMapDataset(packing_max_segments_per_sample=64)
+    self.assertEqual(config.packing_max_segments_per_sample, 64)
+
+  def test_zero_disables_merging_round_trip(self):
+    config = types.MMapDataset(packing_max_segments_per_sample=0)
+    self.assertEqual(config.packing_max_segments_per_sample, 0)
 
 
 if __name__ == "__main__":

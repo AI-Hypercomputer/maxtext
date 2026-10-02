@@ -42,7 +42,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/lora \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \
-    steps=5 \
+    steps=2 \
     scan_layers=true \
     model_name=${MODEL_NAME} \
     learning_rate=3e-6 \
@@ -59,7 +59,7 @@ python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     lora.enable_lora=True \
-    lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY}/lora/${run_id}/checkpoints/5/model_params \
+    lora.lora_restore_path=${BASE_OUTPUT_DIRECTORY}/lora/${run_id}/checkpoints/2/model_params \
     lora.lora_rank=16 \
     lora.lora_alpha=32.0 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \

@@ -35,7 +35,7 @@ DeepSeek is a novel family of open-weights sparse MoE models by DeepSeek AI. The
 
 ## Checkpoint conversion
 To get started, follow the instructions at HuggingFace ([V3](https://huggingface.co/deepseek-ai/DeepSeek-V3), [V2-Lite](https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite)) to download the model. Currently for V3, V3.1, and R1, it uses mixed precision fp8 & bf16 weights. To convert all FP8 weights to BF16, use the script [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/deepseek_dequantize.py). Once downloaded and converted to BF16:
-* run [convert_deepseek_family_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) for training and fine-tuning. When converting a checkpoint with MTP layers (like DeepSeek-V3), be sure to add the `--enable_mtp` flag to process them correctly.
+* run [convert_deepseek_family_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_ckpt.py) to convert the checkpoint for MaxText compatibility in [Orbax](https://orbax.readthedocs.io/en/latest/guides/checkpoint/orbax_checkpoint_101.html) for training and fine-tuning. When converting a checkpoint with MTP layers (like DeepSeek-V3), be sure to add the `--enable_mtp` flag to process them correctly. The conversion script maps the MTP-specific final normalization layer (`model.layers.61.shared_head.norm.weight`) to `mtp_block.mtp_layer_1.mtp_1_final_norm.scale`, while sharing the vocabulary embedding and output projection head with the base model.
 * run [convert_deepseek_family_unscanned_ckpt.py](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/checkpoint_conversion/standalone_scripts/convert_deepseek_family_unscanned_ckpt.py) to convert the checkpoint to unscanned version in Orbax for decoding.
 
 ### Checkpoint conversion for V3.2 and V4
@@ -115,7 +115,9 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     weight_dtype=bfloat16 \
     megablox=False \
     sparse_matmul=False \
-    dataset_type=synthetic
+    dataset_type=grain \
+    grain_file_type=tfrecord \
+    dataset_path=${DATASET_PATH?}
 ```
 
 ## Fine-tuning
@@ -128,6 +130,8 @@ One example command to run general finetuning with V3 on v5p-256.
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     run_name=matmul_fine_tuning \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH?} \
     load_parameters_path=${SCANNED_CKPT_PATH?} \
     per_device_batch_size=1 \
@@ -149,10 +153,22 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 
 Fine-tuning with MTP on v5p-256
 
+DeepSeek-V3 Multi-Token Prediction (MTP) predicts additional future tokens using auxiliary transformer blocks. Each MTP block:
+1. Combines representations via dual input normalization (`embedding_norm`, `hidden_state_norm`) and linear projection (`projection`).
+2. Processes tokens through a full Transformer decoder layer (MLA + MoE).
+3. Applies a dedicated MTP final RMSNorm (`final_norm` / `shared_head.norm`) before projecting through the shared embedding output head to compute MTP loss.
+
+The total training loss combines the base model loss and scaled MTP auxiliary loss:
+```
+total_loss = main_model_loss + (mtp_loss_scaling_factor * mtp_loss)
+```
+
 ```sh
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
     run_name=deepseek_mtp_finetuning \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH?} \
     load_parameters_path=${SCANNED_CKPT_PATH?} \
     per_device_batch_size=1 \
@@ -251,6 +267,91 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     # Indexer training specific flags
     indexer_loss_scaling_factor=0.01 \  
     indexer_sparse_training=True
+```
+
+## Pre-training for DeepSeek-V4
+
+DeepSeek-V4 employs a hybrid attention architecture across its layers, interleaving Sliding Window Attention (SWA), Highly Compressed Attention (HCA), and **Compressed Sparse Attention (CSA)**. The CSA layers incorporate a **Lightning Indexer** that selects top-k compressed blocks. Note that the indexer is activated only if `max_target_length // 4` > `indexer_topk`.
+
+As described in the DeepSeek-V4 technical report (Section 4.2.2), sparse attention pre-training follows a three-stage strategy: **Dense Pre-training**, **Lightning Indexer Warm-up**, and **Sparse Pre-training**.
+
+1. **Dense Pre-training Stage**
+The model is pre-trained with standard dense attention across all tokens (first 1T tokens) before attention sparsity is introduced.
+```sh
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    run_name=dsv4_dense_pretraining \
+    model_name=deepseek4-284b \
+    tokenizer_type=huggingface \
+    tokenizer_path=deepseek-ai/DeepSeek-V4-Flash \
+    per_device_batch_size=1 \
+    enable_checkpointing=false \
+    async_checkpointing=false \
+    ici_fsdp_parallelism=-1 \
+    opt_type=sgd \
+    steps=20 \
+    max_target_length=4096 \
+    attention=dot_product \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    dataset_type=synthetic \
+    # Standard dense pre-training flags
+    override_model_config=true \
+    use_indexer=false \
+    indexer_loss_scaling_factor=0.0
+```
+
+2. **Lightning Indexer Warmup Stage**
+When attention sparsity is introduced, the lightning indexer undergoes a short warmup stage via KL divergence distillation while the main model parameters remain frozen and language modeling loss is skipped.
+```sh
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    run_name=dsv4_indexer_warmup \
+    model_name=deepseek4-284b \
+    tokenizer_type=huggingface \
+    tokenizer_path=deepseek-ai/DeepSeek-V4-Flash \
+    load_parameters_path=${SCANNED_CKPT_PATH?} \
+    per_device_batch_size=1 \
+    enable_checkpointing=false \
+    async_checkpointing=false \
+    ici_fsdp_parallelism=-1 \
+    opt_type=sgd \
+    steps=20 \
+    max_target_length=4096 \
+    attention=dot_product \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    dataset_type=synthetic \
+    # Indexer training specific flags (inherits use_indexer=true from deepseek4-284b.yml)
+    indexer_sparse_training=false \
+    indexer_loss_scaling_factor=1.0 \
+    trainable_parameters_mask=['.*indexer.*']
+```
+
+3. **Sparse Pre-training Stage**
+The model trains with sparse attention for the remainder of pre-training, where core attention attends only to the top-k selected compressed blocks and the indexer continues to train jointly.
+```sh
+python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+    run_name=dsv4_sparse_pretraining \
+    model_name=deepseek4-284b \
+    tokenizer_type=huggingface \
+    tokenizer_path=deepseek-ai/DeepSeek-V4-Flash \
+    load_parameters_path=${SCANNED_CKPT_PATH?} \
+    per_device_batch_size=1 \
+    enable_checkpointing=false \
+    async_checkpointing=false \
+    ici_fsdp_parallelism=-1 \
+    opt_type=sgd \
+    steps=20 \
+    max_target_length=4096 \
+    attention=dot_product \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    dataset_type=synthetic \
+    # Indexer training specific flags (inherits use_indexer=true from deepseek4-284b.yml)
+    indexer_sparse_training=true \
+    indexer_loss_scaling_factor=1.0
 ```
 
 ## Decoding

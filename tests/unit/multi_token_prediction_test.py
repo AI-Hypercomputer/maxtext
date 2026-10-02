@@ -14,12 +14,16 @@
 """multi_token_prediction_test"""
 
 import unittest
+from unittest import mock
 import functools
+from types import SimpleNamespace
+from absl import logging as absl_logging
 
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh
 from flax import nnx
 
@@ -30,10 +34,12 @@ from maxtext.layers import quantizations
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.common_types import Config
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
+from maxtext.models import models
 from maxtext.trainers.pre_train import train as pre_train
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import model_creation_utils
 
 from tests.utils.test_helpers import get_test_config_path
 
@@ -125,6 +131,17 @@ class MultiTokenPredictionLayerTest(unittest.TestCase):
     max_logging.log(f"  Config Batch: {self.batch_size}, SeqLen: {self.seq_len}, EmbedDim: {self.embed_dim}")
     max_logging.log(f"  Output shape: {output_hidden_state.shape}")
 
+  def test_multi_token_prediction_layer_final_norm(self):
+    """Tests that final_norm is instantiated, accessible via property, and operational."""
+    self.assertTrue(hasattr(self.mtp_layer, "final_norm"))
+    self.assertTrue(hasattr(self.mtp_layer, f"mtp_{TEST_LAYER_NUM}_final_norm"))
+    self.assertIs(self.mtp_layer.final_norm, getattr(self.mtp_layer, f"mtp_{TEST_LAYER_NUM}_final_norm"))
+
+    norm_output = self.mtp_layer.final_norm(self.prev_hidden_state)
+    self.assertEqual(norm_output.shape, self.prev_hidden_state.shape)
+    self.assertEqual(norm_output.dtype, self.cfg.dtype)
+    self.assertFalse(jnp.isnan(norm_output).any())
+
 
 class _MockDecoderForMTP:
   """A mock decoder that simulates the behavior needed by MTPBlock."""
@@ -132,14 +149,16 @@ class _MockDecoderForMTP:
   def __init__(self, config: Config):
     self.config = config
     self.model_mode = MODEL_MODE_TRAIN
+    self.last_normalize_y = None
 
   def _apply_embedding(self, _shared_embedding, input_ids, _position_ids, _deterministic, model_mode):
     """Returns a zero tensor with the correct embedding shape."""
     batch_size, seq_len = input_ids.shape
     return jnp.zeros((batch_size, seq_len, self.config.base_emb_dim), dtype=self.config.dtype)
 
-  def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode):
+  def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode, normalize_y=True):
     """Returns a zero tensor with the correct logit shape."""
+    self.last_normalize_y = normalize_y
     batch_size, seq_len, _ = hidden_state.shape
     return jnp.zeros((batch_size, seq_len, self.config.vocab_size), dtype=self.config.dtype)
 
@@ -266,6 +285,79 @@ class MultiTokenPredictionBlockTest(unittest.TestCase):
 
     self.assertEqual(len(losses_val), self.cfg.mtp_num_layers)
     self.assertEqual(len(weights_val), self.cfg.mtp_num_layers)
+
+  def test_final_norm_in_mtp_block_forward(self):
+    """Verifies that MTPBlock executes final_norm and passes normalize_y=False to apply_output_head."""
+    _ = self.test_model(
+        main_hidden_state=self.main_hidden_state,
+        input_ids=self.input_ids,
+        target_ids=self.target_ids,
+        target_mask=self.target_mask,
+        position_ids=self.position_ids,
+        decoder_segment_ids=self.decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+    self.assertFalse(self.test_model.decoder.last_normalize_y)
+    state = nnx.state(self.test_model)
+    for k in range(1, self.cfg.mtp_num_layers + 1):
+      mtp_layer_state = getattr(state.mtp_block, f"mtp_layer_{k}")
+      self.assertTrue(hasattr(mtp_layer_state, f"mtp_{k}_final_norm"))
+      final_norm_scale = getattr(mtp_layer_state, f"mtp_{k}_final_norm").scale.value
+      self.assertEqual(final_norm_scale.shape, (self.cfg.base_emb_dim,))
+
+  def _forward(self, model):
+    return model(
+        main_hidden_state=self.main_hidden_state,
+        input_ids=self.input_ids,
+        target_ids=self.target_ids,
+        target_mask=self.target_mask,
+        position_ids=self.position_ids,
+        decoder_segment_ids=self.decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+
+  def _model_on_a_cp_mesh(self, **overrides):
+    """A test model whose MTP block believes it sits on a 4-way CP mesh.
+
+    Both guards read `self.mesh` and raise before anything downstream touches it,
+    so a stub is enough and the test does not need four devices.
+    """
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="mtp_cp_guard_test",
+        skip_jax_distributed_system=True,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=128,
+        vocab_size=128,
+        **overrides,
+    )
+    model = MTPBlockTestModel(config=cfg, mesh=self.mesh, rngs=nnx.Rngs(params=self.rng, dropout=self.rng))
+    model.mtp_block.mesh = SimpleNamespace(shape={cfg.context_sharding: 4})
+    return model
+
+  def test_cp_guards_fire_on_a_cp_mesh(self):
+    """The CP extent lives on the mesh, so the guards have to read it from there.
+
+    They used to read `getattr(cfg, "context_parallel_size", 1)`; no such config
+    field exists, so both always saw 1 and never fired however the mesh looked.
+    """
+    with self.subTest("load balance"):
+      # DUAL_CHUNK_SWAP order breaks MTP's shift-by-one neighbour fetch.
+      model = self._model_on_a_cp_mesh(mtp_num_layers=1, context_parallel_load_balance=True)
+      with self.assertRaisesRegex(ValueError, "context_parallel_load_balance"):
+        self._forward(model)
+
+    with self.subTest("multi-layer packing"):
+      # load_balance off isolates this guard from the one above.
+      model = self._model_on_a_cp_mesh(mtp_num_layers=2, packing=True, context_parallel_load_balance=False)
+      with self.assertRaisesRegex(ValueError, "only supports mtp_num_layers=1"):
+        self._forward(model)
 
   def test_loss_aggregation_logic(self):
     """
@@ -595,8 +687,6 @@ class MaybeQuantizeModelMTPTest(unittest.TestCase):
         head_dim=8,
         max_target_length=16,
         vocab_size=32,
-        pure_nnx=True,
-        pure_nnx_decoder=True,
         use_qwix_quantization=True,
         quantization="int8",
         enable_dropout=False,
@@ -623,6 +713,42 @@ class MaybeQuantizeModelMTPTest(unittest.TestCase):
     with mesh:
       quantized = quantizations.maybe_quantize_model(model, cfg)
     self.assertIsNotNone(quantized)
+
+
+class MTPQwixInterceptionTest(unittest.TestCase):
+
+  def _assert_mtp_interception(self, quantize_mtp: bool, expected_rule: str):
+    """Verifies Qwix interception behavior for MTP layers."""
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek3-671b",
+            "quantization=fp8_full",
+            "use_qwix_quantization=true",
+            "per_device_batch_size=1",
+            "max_target_length=16",
+            "mtp_num_layers=1",
+            f"quantize_mtp={quantize_mtp}",
+        ],
+        run_name="deepseek3_mtp_quantize_test",
+        skip_jax_distributed_system=True,
+    )
+    with self.assertLogs(absl_logging.get_absl_logger(), level="DEBUG") as cm:
+      # Create abstract model using nnx.eval_shape (0 FLOPs, 0 device allocation)
+      _, _ = model_creation_utils.create_nnx_abstract_model(cfg)
+    mtp_logs = [log for log in cm.output if "module='mtp_block" in log and "op=dot_general" in log]
+    self.assertTrue(mtp_logs, "Expected MTP dot_general operations to be traced by Qwix")
+    for log in mtp_logs:
+      self.assertIn(expected_rule, log)
+
+  def test_deepseek3_quantize_mtp_true_intercepts_mtp_ops(self):
+    """DeepSeek3 with quantize_mtp=True must intercept mtp_block dot_general operations."""
+    self._assert_mtp_interception(quantize_mtp=True, expected_rule="rule=0")
+
+  def test_deepseek3_quantize_mtp_false_skips_mtp_ops(self):
+    """DeepSeek3 with quantize_mtp=False must leave mtp_block dot_general unquantized (rule=None)."""
+    self._assert_mtp_interception(quantize_mtp=False, expected_rule="rule=None")
 
 
 try:
@@ -973,6 +1099,95 @@ class CrossEntropyWithIntegerLabelsTest(unittest.TestCase):
 
     np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(actual_grad, expected_grad, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.tpu_only
+class MTPReuseInputEmbeddingTest(unittest.TestCase):
+  """mtp_reuse_input_embedding on the full Transformer.
+
+  Loss and every gradient are bitwise identical to the flag-off run, except the embedding table gradient, whose
+  terms are now summed before the lookup's transpose.
+  """
+
+  def _run(self, **flags):
+    """Returns (loss, mtp_loss, flat grads, #embedding lookups)."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="mtp_reuse_input_embedding_test",
+        skip_jax_distributed_system=True,
+        mtp_num_layers=1,
+        attention="dot_product",
+        enable_dropout=False,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        base_num_decoder_layers=2,
+        max_target_length=16,
+        per_device_batch_size=1,
+        vocab_size=64,
+        # float32 activations: with bfloat16, XLA's excess-precision fusion choices differ between the two graphs.
+        dtype="float32",
+        **flags,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = models.Transformer(cfg, mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=0))
+    batch, seq = jax.device_count(), cfg.max_target_length
+    k1, k2 = jax.random.split(jax.random.PRNGKey(7))
+    # Token 0 in the inputs too, so a rolled-in id 0 is not the only use of row 0.
+    inputs = jax.random.randint(k1, (batch, seq), 0, cfg.vocab_size)
+    segments = jnp.ones((batch, seq), dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32), (batch, seq))
+    data = {
+        "inputs": inputs,
+        "inputs_position": positions,
+        "inputs_segmentation": segments,
+        "targets": jax.random.randint(k2, (batch, seq), 0, cfg.vocab_size),
+        "targets_segmentation": segments,
+    }
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    def loss(p):
+      loss_value, aux = pre_train.loss_fn(nnx.merge(graphdef, p, rest), cfg, data, None, None, is_train=True)
+      return loss_value, aux["mtp_loss"]
+
+    embed_calls = 0
+    real_embed = embeddings.Embed.__call__
+
+    def count_embed(*args, **kwargs):
+      nonlocal embed_calls
+      embed_calls += 1
+      return real_embed(*args, **kwargs)
+
+    with mock.patch.object(embeddings.Embed, "__call__", count_embed):
+      (loss_value, mtp_loss), grads = jax.value_and_grad(loss, has_aux=True)(params)
+    self.assertGreater(float(mtp_loss), 0.0)
+    flat = {jax.tree_util.keystr(k): np.asarray(v) for k, v in jax.tree_util.tree_leaves_with_path(grads)}
+    return np.asarray(loss_value), np.asarray(mtp_loss), flat, embed_calls
+
+  def _check(self):
+    """Compares flag on vs off: loss and every gradient but the embedding table's must be bitwise equal.
+
+    Returns the number of embedding lookups (off, on).
+    """
+    ref_loss, ref_mtp, ref_grads, ref_embeds = self._run()
+    loss, mtp, grads, embeds = self._run(mtp_reuse_input_embedding=True)
+    np.testing.assert_array_equal(loss, ref_loss)
+    np.testing.assert_array_equal(mtp, ref_mtp)
+    self.assertEqual(grads.keys(), ref_grads.keys())
+    matched = 0
+    for name, ref in ref_grads.items():
+      if "token_embedder" in name:
+        matched += 1
+        np.testing.assert_allclose(grads[name], ref, rtol=1e-4, atol=1e-7, err_msg=name)
+      else:
+        np.testing.assert_array_equal(grads[name], ref, err_msg=name)
+    self.assertEqual(matched, 1)
+    return ref_embeds, embeds
+
+  def test_reuse_input_embedding(self):
+    self.assertEqual(self._check(), (2, 1))
 
 
 if __name__ == "__main__":

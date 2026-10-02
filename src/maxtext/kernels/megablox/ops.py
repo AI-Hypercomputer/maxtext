@@ -47,7 +47,7 @@ def gmm(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
     tiling: tuple[int, int, int, int, int, int, int, int, int] = (
         128,
         128,
@@ -74,6 +74,7 @@ def gmm(
     qwix_rule: qwix.QtRule | None = None,
     use_manual_quantization: bool = False,  # used in batchsplit
     use_gmm_v2: bool = False,
+    use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation."""
@@ -90,8 +91,12 @@ def gmm(
     #   get_current_rule has to be called outside of the _gmm_fwd function.
     # 2. for batchsplit, explicitly pass the rule
     quantization_rule = qwix_rule if qwix_rule else qpl.get_current_rule("gmm")
-    if not quantization_rule or not isinstance(quantization_rule, qwix.QtRule):
-      raise ValueError(f"Expect a QtRule for quantized training. But get quantization_rule={quantization_rule} for gmm.")
+    # Only "fp8_full" defines a Qwix rule for GMM.
+    # quantization_rule is None when:
+    # 1. Quantization scheme does not target GMM (e.g., "fp8", "int8").
+    # 2. Module is excluded from quantization (e.g., MTP when quantize_mtp=False).
+    if quantization_rule and not isinstance(quantization_rule, qwix.QtRule):
+      raise ValueError("Expect a QtRule for quantized training.")
   else:
     # Handcraft a rule that matches the AQT's behavior.
     if lhs_quantize_dtype or rhs_quantize_dtype:
@@ -105,7 +110,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
@@ -125,6 +130,7 @@ def gmm(
       lhs_vma_axes,
       rhs_vma_axes,
       use_gmm_v2,
+      use_gmm_v2_heuristic_tiling,
       partial_sum,
   )
 
@@ -138,7 +144,7 @@ def _gmm_fwd(
     lhs: jnp.ndarray,
     rhs: jnp.ndarray,
     group_sizes: jnp.ndarray,
-    preferred_element_type: jnp.dtype = jnp.float32,
+    preferred_element_type: jnp.dtype = jnp.float32,  # pyrefly: ignore[bad-function-definition]
     tiling: tuple[int, int, int, int, int, int, int, int, int] = (
         128,
         128,
@@ -161,6 +167,7 @@ def _gmm_fwd(
     lhs_vma_axes: tuple = tuple(),
     rhs_vma_axes: tuple = tuple(),
     use_gmm_v2: bool = False,
+    use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
 ) -> tuple[
     jnp.ndarray,
@@ -170,6 +177,8 @@ def _gmm_fwd(
         jnp.ndarray,
         jnp.ndarray | None,
         jnp.ndarray | None,
+        bool,
+        bool,
     ],
 ]:
   """Forward function for GMM VJP.
@@ -177,6 +186,11 @@ def _gmm_fwd(
   - lhs: [m, k]
   - rhs: [g, k, n] if transpose_rhs=False. [g, n, k] if transpose_rhs=True
   """
+
+  # Track whether operands arrived as QArray (e.g. from token all-gather quantization
+  # or gathered weights) to return matching cotangent containers in backward pass.
+  lhs_is_qarray = isinstance(lhs, qpl.QArray)
+  rhs_is_qarray = isinstance(rhs, qpl.QArray)
 
   # Quantize activation and weight
   if quantization_rule:
@@ -207,6 +221,7 @@ def _gmm_fwd(
         group_sizes,
         preferred_element_type,
         tiling,
+        use_gmm_v2_heuristic_tiling,
         group_offset,
         partial_sum,
         transpose_rhs,
@@ -226,7 +241,15 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  return out, (lhs, rhs, group_sizes, group_offset, partial_sum)  # pyrefly: ignore[bad-return]
+  return out, (
+      lhs,
+      rhs,
+      group_sizes,
+      group_offset,
+      partial_sum,
+      lhs_is_qarray,
+      rhs_is_qarray,
+  )
 
 
 def _fwd_quantize_activation_and_weight(
@@ -366,6 +389,7 @@ def _fwd_run_tokamax_v2(
     group_sizes: jnp.ndarray,
     preferred_element_type: jnp.dtype,
     tiling: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
     group_offset: jnp.ndarray | None,
     partial_sum: jnp.ndarray | None,
     transpose_rhs: bool,
@@ -382,23 +406,46 @@ def _fwd_run_tokamax_v2(
     rhs_operand = rhs_operand.qvalue
     rhs_scale = _fwd_prepare_rhs_scale(rhs, transpose_rhs=transpose_rhs)
 
-  custom_fwd_tiling = gmm_v2.TileSizes(
-      tile_m=tiling[0],
-      tile_k=tiling[1],
-      tile_n=tiling[2],
-  )
+  # When lhs is already a QArray (e.g. from quantized token all-gather), extract raw
+  # qvalue buffer and skip redundant internal quantization inside gmm_v2.
+  if isinstance(lhs, qpl.QArray):
+    if partial_sum is not None:
+      raise NotImplementedError(
+          "partial_sum is not supported with pre-quantized lhs QArray because"
+          " scaling output by lhs.scale would erroneously rescale partial_sum."
+      )
+    lhs_operand = lhs.qvalue
+    lhs_scale = None
+    maybe_quantize_lhs = False
+  else:
+    lhs_operand = lhs
+    lhs_scale = _fwd_prepare_lhs_scale(quantization_rule)
+    maybe_quantize_lhs = True
 
-  return gmm_v2.gmm_v2(
-      lhs=lhs,  # pyrefly: ignore[bad-argument-type]
+  if use_gmm_v2_heuristic_tiling:
+    fwd_tiling = gmm_v2.calculate_tiling
+  else:
+    fwd_tiling = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
+
+  out = gmm_v2.gmm_v2(
+      lhs=lhs_operand,  # pyrefly: ignore[bad-argument-type]
       rhs=rhs_operand,  # pyrefly: ignore[bad-argument-type]
       group_sizes=group_sizes,
       rhs_scale=rhs_scale,
-      tile_info=custom_fwd_tiling,
+      tile_info=fwd_tiling,
       preferred_element_type=preferred_element_type,
       partial_sum=partial_sum,
       group_offset=group_offset,
-      lhs_scale=_fwd_prepare_lhs_scale(quantization_rule),
+      lhs_scale=lhs_scale,
+      maybe_quantize_lhs=maybe_quantize_lhs,
   )
+
+  # gmm_v2 only rescales output when it quantizes lhs internally; for pre-quantized QArray
+  # inputs, apply lhs.scale to the accumulated output here.
+  if isinstance(lhs, qpl.QArray):
+    out = out * (lhs.scale.squeeze() if lhs.scale.size == 1 else lhs.scale).astype(out.dtype)
+
+  return out
 
 
 def _fwd_run_megablox(
@@ -449,19 +496,36 @@ def _gmm_bwd(
     lhs_vma_axes: tuple,
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
+    use_gmm_v2_heuristic_tiling: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
         jnp.ndarray,
         jnp.ndarray | None,
         jnp.ndarray | None,
+        bool,
+        bool,
     ],
     grad: jnp.ndarray,
-) -> tuple[jnp.ndarray, jnp.ndarray, None, None, jnp.ndarray | None, jnp.ndarray | None]:
+) -> tuple[
+    jnp.ndarray | qpl.QArray,
+    jnp.ndarray | qpl.QArray,
+    None,
+    None,
+    jnp.ndarray | None,
+    jnp.ndarray | None,
+]:
   """Backward function for throughput GMM VJP."""
-  del preferred_element_type
-  lhs, rhs, group_sizes, group_offset, partial_sum_fwd = residual
-  num_actual_groups = rhs.shape[0]
+  (
+      residual_lhs,
+      residual_rhs,
+      group_sizes,
+      group_offset,
+      partial_sum_fwd,
+      lhs_is_qarray,
+      rhs_is_qarray,
+  ) = residual
+  num_actual_groups = residual_rhs.shape[0]
 
   # Jargon used here:
   #  - lhs: input activation in forward pass, possibly quantized.
@@ -474,7 +538,13 @@ def _gmm_bwd(
 
   # 1. Scale Application & QArray Unwrapping
   dlhs_dout, drhs_dout, lhs, rhs = _bwd_prepare_inputs(
-      grad, lhs, rhs, group_sizes, use_gmm_v2, transpose_rhs, quantization_rule
+      grad,
+      residual_lhs,
+      residual_rhs,
+      group_sizes,
+      use_gmm_v2,
+      transpose_rhs,
+      quantization_rule,
   )
 
   # 2. Backward Pass Quantization
@@ -495,6 +565,7 @@ def _gmm_bwd(
       use_manual_quantization,
       interpret,
       lhs_vma_axes,
+      use_gmm_v2_heuristic_tiling,
   )
 
   # 4. DRHS Gradient Execution
@@ -513,6 +584,7 @@ def _gmm_bwd(
       interpret,
       rhs_vma_axes,
       quantization_rule,
+      use_gmm_v2_heuristic_tiling,
   )
 
   # 5. Output Formatting
@@ -523,6 +595,27 @@ def _gmm_bwd(
   drhs = drhs.swapaxes(1, 2) if transpose_rhs else drhs
   dpartial_sum = grad if partial_sum_fwd is not None else None
   d_existing_out = None if use_tokamax_backend else grad
+
+  # If forward inputs were QArray, wrap cotangents in QArray to match JAX pytree container
+  # structure expected by autodiff.
+  if lhs_is_qarray and isinstance(residual_lhs, qpl.QArray):
+    # Scale dlhs by lhs_scale to propagate chain rule through pre-quantized QArray input.
+    lhs_scale = (residual_lhs.scale.squeeze() if residual_lhs.scale.size == 1 else residual_lhs.scale).astype(dlhs.dtype)
+    dlhs = qpl.QArray(
+        qvalue=dlhs * lhs_scale,
+        scale=jnp.zeros_like(residual_lhs.scale),
+        zero_point=jnp.zeros_like(residual_lhs.zero_point) if residual_lhs.zero_point is not None else None,
+        qtype=residual_lhs.qtype,
+    )
+  if rhs_is_qarray and isinstance(residual_rhs, qpl.QArray):
+    # Keep drhs.qvalue in full-precision float for accurate optimizer updates (do not cast
+    # or quantize weight gradients to the quantized dtype, e.g. FP8). Scale gradient is zero.
+    drhs = qpl.QArray(
+        qvalue=drhs,
+        scale=jnp.zeros_like(residual_rhs.scale),
+        zero_point=jnp.zeros_like(residual_rhs.zero_point) if residual_rhs.zero_point is not None else None,
+        qtype=residual_rhs.qtype,
+    )
 
   return dlhs, drhs, None, None, d_existing_out, dpartial_sum
 
@@ -574,7 +667,7 @@ def _bwd_prepare_inputs(
   # Apply lhs.scale to drhs_dout, as axis m will disappear in drhs.
   if isinstance(lhs, qpl.QArray):
     # lhs - qvalue: [m, k] scale: [m, 1]
-    drhs_dout *= lhs.scale.astype(grad.dtype)
+    drhs_dout = drhs_dout * (lhs.scale.squeeze() if lhs.scale.size == 1 else lhs.scale).astype(grad.dtype)
     lhs = lhs.qvalue
 
   return dlhs_dout, drhs_dout, lhs, rhs
@@ -622,6 +715,7 @@ def _compute_dlhs(
     use_manual_quantization: bool,
     interpret: bool,
     lhs_vma_axes: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
 ) -> jnp.ndarray:
   """Routes execution of DLHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -634,7 +728,9 @@ def _compute_dlhs(
         use_manual_quantization,
     )
   elif use_tokamax_backend and use_gmm_v2:
-    return _dlhs_run_tokamax_v2(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs)
+    return _dlhs_run_tokamax_v2(
+        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, use_gmm_v2_heuristic_tiling, transpose_rhs
+    )
   else:
     return _dlhs_run_megablox(
         dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, transpose_rhs, interpret, lhs_vma_axes
@@ -707,12 +803,17 @@ def _dlhs_run_tokamax_v2(
     group_offset: jnp.ndarray | None,
     lhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
     transpose_rhs: bool,
 ) -> jnp.ndarray:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
   dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
 
-  custom_dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+  if use_gmm_v2_heuristic_tiling:
+    dlhs_tiling = gmm_v2.calculate_tiling
+  else:
+    dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+
   kernel_transpose_rhs = not transpose_rhs
   dlhs_rhs = rhs
   # Sub-byte packing only supports the standard [group, k, n] RHS layout.
@@ -726,14 +827,17 @@ def _dlhs_run_tokamax_v2(
       group_sizes=group_sizes,
       # rhs scale is already applied to dlhs_lhs
       rhs_scale=None,
-      tile_info=custom_dlhs_tiling,
+      tile_info=dlhs_tiling,
       preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
       transpose_rhs=kernel_transpose_rhs,
+      # Bypass internal quantization if incoming dlhs_dout is already a QArray.
+      maybe_quantize_lhs=not isinstance(dlhs_dout, qpl.QArray),
   )
 
+  # Rescale dlhs by dlhs_dout.scale when incoming gradient was pre-quantized QArray.
   if isinstance(dlhs_dout, qpl.QArray):
-    dlhs *= dlhs_dout.scale.astype(dlhs.dtype)
+    dlhs = dlhs * (dlhs_dout.scale.squeeze() if dlhs_dout.scale.size == 1 else dlhs_dout.scale).astype(dlhs.dtype)
 
   return dlhs
 
@@ -783,12 +887,15 @@ def _compute_drhs(
     interpret: bool,
     rhs_vma_axes: tuple,
     quantization_rule: qwix.QtRule | None,
+    use_gmm_v2_heuristic_tiling: bool,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
     drhs = _drhs_run_tokamax_v1(drhs_dout, lhs, group_sizes, rhs_dtype, use_manual_quantization)
   elif use_tokamax_backend and use_gmm_v2:
-    drhs = _drhs_run_tokamax_v2(drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling)
+    drhs = _drhs_run_tokamax_v2(
+        drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, use_gmm_v2_heuristic_tiling
+    )
   else:
     drhs = _drhs_run_megablox(
         drhs_dout, lhs, group_sizes, group_offset, num_actual_groups, rhs_dtype, tiling, interpret, rhs_vma_axes
@@ -855,6 +962,7 @@ def _drhs_run_tokamax_v2(
     num_actual_groups: int,
     rhs_dtype: jax.typing.DTypeLike,
     tiling: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
 ) -> jnp.ndarray:
   """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
@@ -864,7 +972,10 @@ def _drhs_run_tokamax_v2(
   if isinstance(drhs_dout, qpl.QArray):
     rhs_scale = _drhs_prepare_bwd_scale(drhs_dout)
 
-  custom_drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
+  if use_gmm_v2_heuristic_tiling:
+    drhs_tiling = tgmm_v2.calculate_tgmm_tiling
+  else:
+    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
 
   return tgmm_v2.tgmm_v2(
       lhs=drhs_lhs,
@@ -875,7 +986,7 @@ def _drhs_run_tokamax_v2(
       precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=rhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
-      tile_info=custom_drhs_tiling,
+      tile_info=drhs_tiling,
   )
 
 

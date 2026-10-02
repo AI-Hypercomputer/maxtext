@@ -117,8 +117,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     per_device_batch_size="${PER_DEVICE_BATCH_SIZE?}" \
     max_target_length="${MAX_TARGET_LENGTH?}" \
     learning_rate="${LEARNING_RATE?}" \
-    enable_nnx=True \
-    pure_nnx_decoder=True \
     lora.enable_lora=True \
     lora.lora_rank="${LORA_RANK?}" \
     lora.lora_alpha="${LORA_ALPHA?}"
@@ -174,8 +172,6 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     per_device_batch_size="${PER_DEVICE_BATCH_SIZE?}" \
     max_target_length="${MAX_TARGET_LENGTH?}" \
     learning_rate="${LEARNING_RATE?}" \
-    enable_nnx=True \
-    pure_nnx_decoder=True \
     lora.enable_lora=True \
     lora.lora_rank="${LORA_RANK?}" \
     lora.lora_alpha="${LORA_ALPHA?}"

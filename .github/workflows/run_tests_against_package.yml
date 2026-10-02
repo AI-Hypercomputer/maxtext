@@ -28,6 +28,11 @@ on:
       device_name:
         required: true
         type: string
+      repository_name:
+        description: 'Artifact Registry repository name'
+        required: false
+        type: string
+        default: 'maxtext-images'
       base_image:
         required: true
         type: string
@@ -88,12 +93,19 @@ jobs:
   run:
     name: ${{ inputs.flavor }}
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
+    timeout-minutes: 90
     container:
-      image: gcr.io/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || 'maxtext-images' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
         TPU_SKIP_MDS_QUERY: ${{ inputs.device_type == 'cpu' && '1' || '' }}
+        # cpu-unit runs the hardware-agnostic bulk (every test auto-marked cpu_only), and it is the
+        # only job that runs them. On one device a test whose batch is smaller than the mesh, or that
+        # never enters an axis_rules context, passes for the wrong reason; 4 virtual devices make the
+        # sharding real so those bugs surface here instead of on accelerator runners. Also lets the
+        # tests that self-skip below 2 devices actually run.
+        XLA_FLAGS: ${{ inputs.flavor == 'cpu-unit' && '--xla_force_host_platform_device_count=4' || '' }}
         VLLM_TARGET_DEVICE: "tpu"
         UV_TORCH_BACKEND: "cpu"
         MAXTEXT_PACKAGE_EXTRA: >-
@@ -130,9 +142,9 @@ jobs:
               echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
               if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
                 echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
-                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || true
+                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build)
               else
-                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || true
+                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build)
               fi
             fi
             install_tpu_post_train_extra_deps
@@ -150,6 +162,13 @@ jobs:
       - name: Copy test assets files
         if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets
+      - name: Download Converted Test Durations
+        if: inputs.total_workers > 1
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: test-durations-${{ github.run_id }}-${{ inputs.flavor }}
+          path: .
+        continue-on-error: true
       - name: Run Tests
         shell: bash
         run: |
@@ -220,11 +239,18 @@ jobs:
           fi
           if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split
-            if [ "${INPUTS_DEVICE_TYPE}" = "tpu" ]; then
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP}"
+            if [ -f .test_durations ]; then
+              echo "Using downloaded .test_durations with least_duration splitting algorithm."
+              SPLIT_ALGO="--splitting-algorithm least_duration"
             else
+              echo "Warning: .test_durations not found. Falling back to default split."
+              SPLIT_ALGO=""
+            fi
+            if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
               $PYTHON_EXE -m pip install --quiet pytest-xdist
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto"
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n auto ${SPLIT_ALGO}"
+            else
+              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
             fi
           else
             SPLIT_ARGS=""
@@ -244,7 +270,13 @@ jobs:
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} &
             PYTEST_PID=$!
-            wait "$PYTEST_PID"
+            PYTEST_EXIT_CODE=0
+            wait "$PYTEST_PID" || PYTEST_EXIT_CODE=$?
+            if [ "$PYTEST_EXIT_CODE" -eq 5 ]; then
+              echo "No tests collected for worker group ${INPUTS_WORKER_GROUP} (pytest exit code 5), treating as success."
+            elif [ "$PYTEST_EXIT_CODE" -ne 0 ]; then
+              exit "$PYTEST_EXIT_CODE"
+            fi
           fi
 
         env:

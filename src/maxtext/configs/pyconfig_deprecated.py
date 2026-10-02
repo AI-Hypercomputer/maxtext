@@ -194,8 +194,7 @@ def validate_expert_shard_attention_option(expert_shard_attention_option: str) -
     )
 
 
-def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int, enable_nnx: bool):
-  del enable_nnx  # NNX vocab tiling supported via vocab_tiling_nnx_loss in vocabulary_tiling.py
+def validate_vocab_tiling(num_vocab_tiling: int, per_device_batch_size: int, max_target_length: int):
   if (per_device_batch_size * max_target_length) % num_vocab_tiling != 0:
     raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
 
@@ -239,9 +238,7 @@ def validate_keys(keys):
   validate_model_call_mode(keys["model_call_mode"])
   validate_prefill_and_target_lengths(keys["max_prefill_predict_length"], keys["max_target_length"])
   validate_rope_type(keys["rope_type"])
-  validate_vocab_tiling(
-      keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"], keys["enable_nnx"]
-  )
+  validate_vocab_tiling(keys["num_vocab_tiling"], keys["per_device_batch_size"], keys["max_target_length"])
   if keys["enable_rampup_batch_size"]:
     validate_rampup_batch_size(
         keys["per_device_batch_size_start"],
@@ -265,9 +262,11 @@ def validate_keys(keys):
         "Please disable MTP by setting mtp_num_layers=0 for inference."
     )
 
-  assert (keys["load_parameters_path"] == "" and keys["load_full_state_path"] == "") or keys[
-      "enable_checkpointing"
-  ], "You must set enable_checkpointing to load a checkpoint"
+  # Kept in sync with `types.MaxTextConfig`: only a full-state resume reads through the
+  # CheckpointManager. `load_parameters_path` warm starts through its own `ocp.Checkpointer`.
+  assert (
+      keys["load_full_state_path"] == "" or keys["enable_checkpointing"]
+  ), "You must set enable_checkpointing to resume from load_full_state_path"
   assert (
       keys["load_parameters_path"] == "" or keys["load_full_state_path"] == ""
   ), "At most one of `load_parameters_path` or `load_full_state_path` should be set"
@@ -705,7 +704,7 @@ class _HyperParameters:
   def user_init(raw_keys):
     """Transformations between the config data and configs used at runtime"""
     if raw_keys["run_name"] == "":
-      raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # using XPK default
+      raw_keys["run_name"] = os.environ.get("JOBSET_NAME")  # set by some JobSet launchers, e.g. for Pathways
       if raw_keys["run_name"] == "":
         now = datetime.datetime.now()
         timestamp = now.strftime("%Y-%m-%d-%H-%M")

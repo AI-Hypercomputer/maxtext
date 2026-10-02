@@ -15,6 +15,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 if [ -z "$1" ]; then
   echo "Error: run_id argument is required."
   exit 1
@@ -51,18 +56,19 @@ DATASET_PATH=gs://maxtext-dataset
 # Note that scanned checkpoint helps with efficient training
 python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/train \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH} \
     tokenizer_type="huggingface" \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_target_length=1024 \
-    steps=5 \
+    steps=2 \
     weight_dtype=bfloat16 \
     async_checkpointing=false \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
-    ici_fsdp_parallelism=64 \
     model_name=${MODEL_NAME} \
     scan_layers=false \
     use_multimodal=false
@@ -71,7 +77,7 @@ python3 -m maxtext.trainers.pre_train.train \
     python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
     tokenizer_type="huggingface" \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_prefill_predict_length=8 \

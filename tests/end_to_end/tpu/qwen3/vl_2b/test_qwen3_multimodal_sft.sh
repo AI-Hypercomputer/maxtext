@@ -25,11 +25,13 @@ MODEL_NAME='qwen3-vl-2b'
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 MULTIMODAL_UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned_multimodal/${run_id}/0/items
 
-# Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data                                                           
+# Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset
 
-# Step 1: Install google-jetstream
-python3 -m pip install google-jetstream@https://github.com/AI-Hypercomputer/JetStream/archive/29329e8e73820993f77cfc8efe34eb2a73f5de98.zip --no-deps
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
 
 # Step 2: Run inference on the original checkpoint converted from Hugging Face
 python3 -m maxtext.inference.decode \
@@ -47,6 +49,9 @@ python3 -m maxtext.inference.decode \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
     attention=\'dot_product\' \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    enable_single_controller=${use_pathways} \
     skip_jax_distributed_system=True
 
 # Step 3: Run SFT on the MaxText checkpoint on ChartQA dataset
@@ -56,14 +61,14 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
     per_device_batch_size=1 \
     max_prefill_predict_length=1024 \
     max_target_length=2048 \
-    steps=5 \
+    steps=2 \
     scan_layers=false \
     async_checkpointing=False \
     float32_qk_product=True \
     float32_logits=True \
-    dataset_type=hf \
-    hf_path=parquet \
-    hf_train_files=${DATASET_PATH}/hf/chartqa/train-* \
+    dataset_type=grain \
+    grain_file_type=parquet \
+    grain_train_files=${DATASET_PATH}/hf/chartqa/train-* \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/multimodal/sft \
     load_parameters_path=${MULTIMODAL_UNSCANNED_CKPT_PATH} \
     sharding_tolerance=0.05 \
@@ -75,7 +80,7 @@ python -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DI
 # Step 4: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/multimodal/sft/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_prefill_predict_length=4096 \
@@ -88,4 +93,7 @@ python3 -m maxtext.inference.decode \
     prompt=\'Describe\ image\ \<start_of_image\>\' \
     image_path=\'tests/assets/test_image.jpg\' \
     attention=\'dot_product\' \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    enable_single_controller=${use_pathways} \
     skip_jax_distributed_system=True

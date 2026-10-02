@@ -16,7 +16,6 @@ from typing import Any
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 
@@ -29,7 +28,6 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import create_sharding
 from maxtext.models.qwen3 import AttentionWithNorm
 from maxtext.layers.normalizations import RMSNorm
 
@@ -44,7 +42,7 @@ class Qwen3CustomAttention(Attention):
 
     in_features = (self.num_query_heads, self.head_dim)
     out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed_attn")
     )
     axis = (-2, -1)
 
@@ -128,6 +126,7 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
         num_features=config.attention_output_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         epsilon=config.normalization_layer_epsilon,
         rngs=rngs,
@@ -166,8 +165,6 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
     else:
       self.layer_up_projection = None
 
-    self.out_sharding = create_sharding(self.mesh, self.activation_axis_names)
-
   def apply_attention_with_norm(
       self,
       inputs: jnp.ndarray,
@@ -180,10 +177,10 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
   ):
     """Applies attention layer with pre/post normalization."""
 
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
-    lnx = self.pre_self_attention_layer_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=self.out_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
     attention_lnx, kv_cache = self.self_attention(
         lnx,
         lnx,
@@ -191,10 +188,11 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
         model_mode=model_mode,
+        out_sharding=self.out_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
     return inputs, attention_lnx, kv_cache
 
   def __call__(
@@ -240,17 +238,17 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
         attention_metadata=attention_metadata,
     )
 
-    attention_lnx = self.latent_norm(attention_lnx)
+    attention_lnx = self.latent_norm(attention_lnx, out_sharding=self.out_sharding)
     mlp_lnx, load_balance_loss, _ = self.moe_block(attention_lnx, out_sharding=self.out_sharding)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
 
     layer_output = mlp_lnx
     if self.layer_up_projection is not None:
-      layer_output = self.layer_up_projection(layer_output)
-      layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+      layer_output = self.layer_up_projection(layer_output, out_sharding=self.out_sharding)
+      layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     layer_output = inputs + layer_output
 

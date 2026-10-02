@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# pylint: disable=unbalanced-tuple-unpacking
 """Unit tests for nnx_decoders module.
 
 Tests cover:
@@ -21,6 +22,7 @@ Tests cover:
                 get_remat_policy, minimal_policy, and full forward pass)
 """
 
+# pylint: disable=unbalanced-tuple-unpacking
 import sys
 from types import SimpleNamespace
 import unittest
@@ -47,11 +49,12 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.layers import linears
+from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
 from maxtext.layers.nnx_decoders import NNXDecoder, NNXDecoderLayer, deepstack_process
 from maxtext.layers.normalizations import RMSNorm
-from maxtext.models import gemma4, gemma4_small
+from maxtext.models import gemma4, gemma4_small, qwen3, qwen3_5
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx
@@ -624,7 +627,9 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         _deterministic,
         _model_mode,
         multimodal_input=None,
+        decoder_input_embeddings=None,
     ):
+      del decoder_input_embeddings
       captured["multimodal_input"] = multimodal_input
       batch = self.cfg.global_batch_size_to_train_on
       seq_len = self.cfg.max_target_length
@@ -653,6 +658,26 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
     self.assertTrue(jnp.array_equal(forwarded.audio_embeddings, sentinel_aud_emb))
     self.assertTrue(jnp.array_equal(forwarded.audio_masks, sentinel_aud_mask))
     self.assertTrue(jnp.array_equal(forwarded.bidirectional_mask, sentinel_bidir))
+
+  def test_precomputed_embeddings_bypass_initial_multimodal_merge(self):
+    """Complete input embeddings must not be merged with vision embeddings again."""
+    ids, _, positions = self._make_token_inputs()
+    embeddings = jnp.ones(
+        (self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length, self.cfg.emb_dim),
+        dtype=self.cfg.dtype,
+    )
+
+    result = self.decoder._apply_embedding(  # pylint: disable=protected-access
+        lambda *_args, **_kwargs: self.fail("token embedding should be bypassed"),
+        ids,
+        positions,
+        True,
+        MODEL_MODE_TRAIN,
+        multimodal_input=object(),
+        decoder_input_embeddings=embeddings,
+    )
+
+    self.assertTrue(jnp.array_equal(result, embeddings))
 
   def test_different_random_seeds_produce_different_logits(self):
     """Two randomly-initialised decoders should not produce identical logits."""
@@ -714,6 +739,98 @@ class TestNNXDecoderForwardPass(unittest.TestCase):
         model_mode=MODEL_MODE_TRAIN,
     )
     self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+
+
+class TestNNXDecoderServeFp8WeightForwardPass(unittest.TestCase):
+  """End-to-end forward pass with quantization="serve_fp8_weight" (native, no-dequantize
+  FP8 compute -- see quantizations.native_fp8_dot_general / ServeFp8WeightQuantization).
+  """
+
+  # weight_block_size must divide contracted dims in _BASE_CONFIG.
+  _FP8_OVERRIDES = {
+      "weight_dtype": "float8_e4m3fn",
+      "weight_block_size": 16,
+  }
+
+  def setUp(self):
+    super().setUp()
+    self.rng = jax.random.PRNGKey(0)
+
+  def _make_token_inputs(self, cfg):
+    """Generates dummy token inputs for decoder test."""
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(self.rng, (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+    return ids, segment_ids, positions
+
+  def _build(self, cfg, mesh, rngs):
+    """Builds test decoder and shared embedding."""
+    quant = quantizations.configure_quantization(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, quant=quant, rngs=rngs)
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        embedding_init=nn.initializers.normal(stddev=1.0),
+        config=cfg,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    return decoder, shared_embedding
+
+  def test_forward_pass_shapes_and_finite(self):
+    """A serve_fp8_weight decoder must produce correctly-shaped, finite logits."""
+    cfg = _make_config(quantization="serve_fp8_weight", **self._FP8_OVERRIDES)
+    mesh = _make_mesh(cfg)
+    rngs = nnx.Rngs(params=0, dropout=1)
+    decoder, shared_embedding = self._build(cfg, mesh, rngs)
+    ids, segment_ids, positions = self._make_token_inputs(cfg)
+
+    logits, hidden_state, *_ = decoder(
+        shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(logits.shape, (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.vocab_size))
+    self.assertEqual(hidden_state.shape, (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.emb_dim))
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+
+  def test_matches_dequantize_baseline(self):
+    """Native fp8 compute must closely match the existing dequantize-then-matmul path.
+
+    Both decoders store the same fp8-quantized weights (weight_dtype=float8_e4m3fn);
+    only the compute strategy differs (quantization="serve_fp8_weight" vs unset). State
+    is explicitly synced after construction rather than relied on via matching RNG draws.
+    """
+    baseline_cfg = _make_config(**self._FP8_OVERRIDES)
+    native_cfg = _make_config(quantization="serve_fp8_weight", **self._FP8_OVERRIDES)
+    mesh = _make_mesh(baseline_cfg)
+
+    baseline_decoder, baseline_embedding = self._build(baseline_cfg, mesh, nnx.Rngs(params=0, dropout=1))
+    native_decoder, native_embedding = self._build(native_cfg, mesh, nnx.Rngs(params=0, dropout=1))
+    nnx.update(native_decoder, nnx.state(baseline_decoder))
+    nnx.update(native_embedding, nnx.state(baseline_embedding))
+
+    ids, segment_ids, positions = self._make_token_inputs(baseline_cfg)
+    call_kwargs = {
+        "decoder_segment_ids": segment_ids,
+        "deterministic": True,
+        "model_mode": MODEL_MODE_TRAIN,
+    }
+    baseline_logits, _, *_ = baseline_decoder(baseline_embedding, ids, positions, **call_kwargs)
+    native_logits, _, *_ = native_decoder(native_embedding, ids, positions, **call_kwargs)
+
+    baseline_logits = np.asarray(baseline_logits, dtype=np.float32)
+    native_logits = np.asarray(native_logits, dtype=np.float32)
+    self.assertEqual(baseline_logits.shape, native_logits.shape)
+    relerr = float(np.max(np.abs(baseline_logits - native_logits)) / (np.max(np.abs(baseline_logits)) + 1e-12))
+    # Loose tolerance: compares native FP8 forward pass against dequantized baseline.
+    self.assertLess(relerr, 0.1, f"serve_fp8_weight vs dequantize baseline relerr={relerr:.3e}")
 
 
 class _StatefulGemma4DecoderLayer(nnx.Module):
@@ -841,6 +958,206 @@ class TestGemma4ScannableBlock(unittest.TestCase):
     )
     np.testing.assert_array_equal(block.global_layer.call_count.value, 1)
     np.testing.assert_array_equal(block.global_layer.received_attention_metadata.value, True)
+
+
+# Qwen3-Next blocks read enough of the config (GatedDeltaNet head dims, MoE sizing)
+# that a SimpleNamespace stand-in is not workable, so these use a real tiny config.
+_QWEN3_NEXT_CONFIG = {
+    "run_name": "qwen3_next_scannable_block_test",
+    "model_name": "qwen3-next-80b-a3b",
+    "max_target_length": 8,
+    "base_emb_dim": 64,
+    "base_num_decoder_layers": 4,
+    "base_num_query_heads": 2,
+    "base_num_kv_heads": 2,
+    "head_dim": 32,
+    "base_mlp_dim": 128,
+    "base_moe_mlp_dim": 32,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "vocab_size": 32,
+    "gdn_num_key_heads": 2,
+    "gdn_num_value_heads": 4,
+    "gdn_key_head_dim": 16,
+    "gdn_value_head_dim": 16,
+    "gdn_chunk_size": 4,
+    "sparse_matmul": True,
+    "megablox": False,
+    "dtype": "float32",
+    "weight_dtype": "float32",
+}
+
+
+def _build_qwen3_next_block(layer_idx_offset=0, **overrides):
+  """Builds one Qwen3-Next scannable block; overrides go to the config."""
+  cfg = _make_config(**{**_QWEN3_NEXT_CONFIG, **overrides})
+  block = qwen3.Qwen3NextScannableBlock(
+      config=cfg,
+      mesh=_make_mesh(cfg),
+      model_mode=MODEL_MODE_TRAIN,
+      layer_idx_offset=layer_idx_offset,
+      rngs=nnx.Rngs(0),
+  )
+  return cfg, block
+
+
+class TestQwen3NextScannableBlock(unittest.TestCase):
+  """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
+
+  @classmethod
+  def setUpClass(cls):
+    """Builds the block once; it costs several seconds and no test here mutates it."""
+    cls.cfg, cls.block = _build_qwen3_next_block()
+
+  def _inputs(self, cfg):
+    inputs = jax.random.normal(jax.random.PRNGKey(1), (1, cfg.max_target_length, cfg.emb_dim), dtype=jnp.float32)
+    positions = jnp.arange(cfg.max_target_length)[None, :]
+    segment_ids = jnp.ones((1, cfg.max_target_length), dtype=jnp.int32)
+    return inputs, segment_ids, positions
+
+  def test_block_splits_cycle_into_local_stack_plus_one_global(self):
+    """A block covers one attention period: cycle-1 stacked linear layers and one full-attention layer."""
+    cfg, block = self.cfg, self.block
+    self.assertEqual(block.num_local, cfg.inhomogeneous_layer_cycle_interval - 1)
+    self.assertEqual(block.num_global, 1)
+    self.assertIsNotNone(block.global_layer)
+
+    # The linear-attention layers are stacked along param_scan_axis, not stored per layer.
+    _, params, _ = nnx.split(block.local_layers, nnx.Param, ...)
+    leaves = [v.value for _, v in params.flat_state()]
+    self.assertTrue(leaves)
+    for leaf in leaves:
+      self.assertEqual(leaf.shape[cfg.param_scan_axis], block.num_local)
+
+  def test_nested_scan_matches_sequential_unroll(self):
+    """Scanning the local layers then the global layer equals applying them one by one."""
+    cfg, block = self.cfg, self.block
+    inputs, segment_ids, positions = self._inputs(cfg)
+
+    scanned = block(inputs, segment_ids, positions, True, MODEL_MODE_TRAIN)
+
+    # Reference: pull each stacked local layer out by index and run it, then the global layer.
+    # Under jit, so that the unrolled sub-layers are traced once instead of dispatched op by op.
+    local_graphdef, params, rest = nnx.split(block.local_layers, nnx.Param, ...)
+    global_graphdef, global_state = nnx.split(block.global_layer)
+
+    @jax.jit
+    def unrolled(params, rest, global_state, y):
+      if cfg.param_scan_axis != 0:
+        params = jax.tree.map(lambda x: jnp.moveaxis(x, cfg.param_scan_axis, 0), params)
+      for i in range(block.num_local):
+        layer = nnx.merge(
+            local_graphdef,
+            jax.tree.map(lambda x, i=i: x[i], params),
+            jax.tree.map(lambda x, i=i: x[i], rest),
+        )
+        y = layer(y, segment_ids, positions, True, MODEL_MODE_TRAIN)[0]
+      return nnx.merge(global_graphdef, global_state)(y, segment_ids, positions, True, MODEL_MODE_TRAIN)[0]
+
+    expected = unrolled(params, rest, global_state, inputs)
+
+    np.testing.assert_allclose(np.asarray(scanned), np.asarray(expected), rtol=1e-5, atol=1e-5)
+
+  def test_rejects_block_whose_global_layer_is_not_last(self):
+    """The local scan runs before the global layer, so any other ordering must be refused.
+
+    A block starting off a cycle boundary straddles two periods -- with a cycle of
+    4, layers 1..4 put the full-attention layer third of four. Applying it as
+    local-scan-then-global would silently reorder the model, so it is rejected.
+    """
+    with self.assertRaisesRegex(ValueError, "full-attention layer last"):
+      _build_qwen3_next_block(layer_idx_offset=1)
+
+
+class TestNNXDecoderQwen3Next(unittest.TestCase):
+  """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
+
+  def _build(self, num_decoder_layers, **overrides):
+    """Builds a scanned Qwen3-Next decoder and its shared embedding."""
+    cfg = _make_config(
+        **{**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
+    )
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        config=cfg,
+        mesh=mesh,
+        rngs=nnx.Rngs(params=0),
+    )
+    return cfg, decoder, shared_embedding
+
+  def _run(self, cfg, decoder, shared_embedding, kv_caches=None):
+    """Runs one TRAIN-mode forward pass and returns the logits."""
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
+    logits, _, _ = decoder(
+        shared_embedding,
+        ids,
+        decoder_positions=positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+        kv_caches=kv_caches,
+    )
+    return logits
+
+  def test_decoder_regroups_flat_kv_caches_per_block(self):
+    """A flat per-layer kv cache list must be regrouped per block and written back in order.
+
+    The scan runs over blocks, not layers, so passing the flat list straight
+    through would hand block i only ``kv_caches[i]``. Guards
+    ``_apply_qwen3_next_scanned_blocks``, which must also keep
+    ``skip_block_remat=True`` on this path rather than falling back to the
+    generic (block-rematerialized) branch.
+
+    The external-cache path is a static unroll, so its cost is per sub-layer;
+    a cycle of 2 keeps two blocks -- the minimum that can regroup wrongly --
+    at half the layers of the stock cycle of 4.
+    """
+    cfg, decoder, shared_embedding = self._build(4, inhomogeneous_layer_cycle_interval=2)
+    # Every layer is inside the scan, so there is no remainder block.
+    self.assertFalse(hasattr(decoder, "layers_remainder"))
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+
+    # Distinct sentinel per layer: regrouping errors show up as caches landing on
+    # the wrong layer, which the pass-through in TRAIN mode makes visible.
+    kv_caches = [jnp.full((batch, seq), float(i)) for i in range(cfg.num_decoder_layers)]
+    self._run(cfg, decoder, shared_embedding, kv_caches=kv_caches)
+
+    self.assertEqual(len(kv_caches), cfg.num_decoder_layers)
+    for i, cache in enumerate(kv_caches):
+      np.testing.assert_array_equal(np.asarray(cache), np.full((batch, seq), float(i)))
+
+  def test_decoder_keeps_layers_past_the_last_whole_block(self):
+    """Layers left over by the block scan must still be built and applied.
+
+    ``num_decoder_layers // inhomogeneous_layer_cycle_interval`` blocks cover
+    only a whole number of periods, so with 6 layers and a period of 4 the last
+    two would be silently dropped -- the model would quietly run 4 layers. They
+    go into ``layers_remainder`` instead; perturbing only that block's weights
+    has to move the output, which it cannot do if the block is never applied.
+    """
+    cfg, decoder, shared_embedding = self._build(6)
+    self.assertEqual(decoder.layers_remainder.num_local, 2)
+    # The remainder starts on a period boundary, so it holds no full-attention layer.
+    self.assertEqual(decoder.layers_remainder.num_global, 0)
+
+    before = self._run(cfg, decoder, shared_embedding)
+    _, params, rest = nnx.split(decoder.layers_remainder, nnx.Param, ...)
+    nnx.update(decoder.layers_remainder, jax.tree.map(lambda x: x + 0.1, params), rest)
+    after = self._run(cfg, decoder, shared_embedding)
+
+    self.assertFalse(
+        np.allclose(np.asarray(before), np.asarray(after)),
+        "the remainder block's weights did not affect the output, so it was not applied",
+    )
 
 
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
@@ -1163,6 +1480,7 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
             "model_name=gemma4-e2b",
             "scan_layers=False",
             "attention=dot_product",
+            "remat_policy=none",
             "num_decoder_layers=3",
             "num_kv_shared_layers=1",
             "base_emb_dim=128",
@@ -1315,6 +1633,167 @@ class TestApplyLayersSequentiallyMetadataAxisName(unittest.TestCase):
       )
     finally:
       maxtext_utils_nnx.nnx_add_and_sync_scan_axis = original_add_scan_axis
+
+
+class TestNNXDecoderFP8WeightOnly(unittest.TestCase):
+  """Tests for NNXDecoder with FP8 weight-only storage and dynamic dequantization."""
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = _make_config(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        unquantized_modules=["token_embedder", "logits_dense"],
+    )
+    self.mesh = _make_mesh(self.cfg)
+    self.rngs = nnx.Rngs(params=0, dropout=1)
+    self.decoder = NNXDecoder(
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+    self.shared_embedding = Embed(
+        num_embeddings=self.cfg.vocab_size,
+        num_features=self.cfg.emb_dim,
+        dtype=self.cfg.dtype,
+        embedding_init=jax.nn.initializers.normal(stddev=1.0),
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+
+  def test_fp8_weights_and_unquantized_layers(self):
+    """Verifies that dense linear weights are FP8 while embedding and norms are BF16."""
+    layer_0 = self.decoder.layers_0
+    self.assertEqual(layer_0.self_attention.query.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertIsNotNone(layer_0.self_attention.query.kernel_scale)
+    self.assertEqual(layer_0.mlp.wi_0.kernel[...].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(self.shared_embedding.embedding[...].dtype, jnp.bfloat16)
+    self.assertEqual(self.decoder.decoder_norm.scale[...].dtype, jnp.bfloat16)
+
+  def test_fp8_forward_pass_execution(self):
+    """Verifies that an end-to-end forward pass with dynamic FP8 dequantization executes and produces valid logits."""
+    cfg = self.cfg
+    batch = cfg.global_batch_size_to_train_on
+    seq_len = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
+
+    logits, hidden_state, _ = self.decoder(
+        self.shared_embedding,
+        ids,
+        positions,
+        decoder_segment_ids=segment_ids,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+
+    self.assertEqual(logits.shape, (batch, seq_len, cfg.vocab_size))
+    self.assertEqual(hidden_state.shape, (batch, seq_len, cfg.emb_dim))
+    self.assertTrue(jnp.all(jnp.isfinite(logits)))
+
+
+# Unbound forward of the Qwen3.5 scannable block. It is invoked below against a
+# stand-in `self` rather than a real instance, so it is bound here once instead
+# of being called as a dunder at each call site.
+_QWEN3_5_BLOCK_FORWARD = qwen3_5.Qwen3_5ScannableBlock.__call__
+
+
+class Qwen3_5ScannableBlockKVCacheTest(unittest.TestCase):
+  """Qwen3.5 must thread vLLM's externally-managed KV caches through its block.
+
+  `Qwen3_5ScannableBlock.__call__` only touches `self.config` and its
+  `layer_{i}` attributes, so it is exercised here against a stand-in `self`.
+  That keeps the test on CPU and focused on the cache plumbing rather than on
+  building a real MoE block.
+  """
+
+  CYCLE = 4
+
+  def _fake_block(self):
+    """Builds a stand-in block whose sub-layers record the kwargs they receive."""
+    calls = []
+
+    def make_layer(idx):
+      def layer(x, *args, **kwargs):
+        calls.append({"idx": idx, "args": args, "kwargs": kwargs})
+        return x + 1, f"updated_kv_{idx}"
+
+      return layer
+
+    block = SimpleNamespace(config=SimpleNamespace(inhomogeneous_layer_cycle_interval=self.CYCLE))
+    for i in range(self.CYCLE):
+      setattr(block, f"layer_{i}", make_layer(i))
+    return block, calls
+
+  def _call(self, block, **kwargs):
+    return _QWEN3_5_BLOCK_FORWARD(
+        block,
+        0,  # carry
+        None,  # decoder_segment_ids
+        None,  # decoder_positions
+        True,  # deterministic
+        MODEL_MODE_AUTOREGRESSIVE,
+        **kwargs,
+    )
+
+  @pytest.mark.cpu_only
+  def test_each_sublayer_gets_its_own_cache_and_updates_are_returned(self):
+    block, calls = self._fake_block()
+    kv_cache = tuple(f"kv_{i}" for i in range(self.CYCLE))
+
+    carry, updated = self._call(block, kv_cache=kv_cache, attention_metadata={"meta": 1})
+
+    self.assertEqual(carry, self.CYCLE)  # every sub-layer ran exactly once
+    self.assertEqual(updated, tuple(f"updated_kv_{i}" for i in range(self.CYCLE)))
+    self.assertEqual([c["kwargs"]["kv_cache"] for c in calls], list(kv_cache))
+    # attention_metadata must reach the sub-layers; without it the attention
+    # kernel cannot address vLLM's paged cache.
+    self.assertTrue(all(c["kwargs"]["attention_metadata"] == {"meta": 1} for c in calls))
+
+  @pytest.mark.cpu_only
+  def test_training_path_returns_none_and_passes_no_cache(self):
+    block, calls = self._fake_block()
+
+    carry, updated = self._call(block)
+
+    self.assertEqual(carry, self.CYCLE)
+    self.assertIsNone(updated)
+    self.assertTrue(all(c["kwargs"]["kv_cache"] is None for c in calls))
+
+  @pytest.mark.cpu_only
+  def test_shorter_cache_does_not_index_out_of_range(self):
+    block, calls = self._fake_block()
+
+    _, updated = self._call(block, kv_cache=("kv_0",))
+
+    self.assertEqual([c["kwargs"]["kv_cache"] for c in calls], ["kv_0", None, None, None])
+    self.assertEqual(len(updated), self.CYCLE)
+
+  @pytest.mark.cpu_only
+  def test_flat_per_layer_caches_survive_the_per_block_round_trip(self):
+    """vLLM hands over one cache per layer; the scan runs over 4-layer blocks."""
+    num_layers = 8
+    scan_length = num_layers // self.CYCLE
+    kv_caches = [f"kv_{i}" for i in range(num_layers)]
+
+    grouped = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, self.CYCLE, stack=False)
+    self.assertEqual(grouped, [("kv_0", "kv_1", "kv_2", "kv_3"), ("kv_4", "kv_5", "kv_6", "kv_7")])
+
+    # Mimic _apply_layers_sequentially replacing each block entry with the
+    # tuple the block returned.
+    for block_idx in range(scan_length):
+      fake_block, _ = self._fake_block()
+      _, updated = self._call(fake_block, kv_cache=grouped[block_idx])
+      grouped[block_idx] = tuple(f"{kv}_b{block_idx}" for kv in updated)
+
+    maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped, scan_length, self.CYCLE, stacked=False)
+
+    self.assertEqual(
+        kv_caches,
+        [f"updated_kv_{i % self.CYCLE}_b{i // self.CYCLE}" for i in range(num_layers)],
+    )
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ from typing import Any, Callable, overload
 from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
+from flax.core.spmd import logical_axis_rules
 import flax.linen as nn
 from huggingface_hub import get_token
 import jax
@@ -49,10 +50,11 @@ from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
+from maxtext.integration.vllm.convert_utils import _partition_size
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
-from maxtext.utils import max_utils, maxtext_utils, maxtext_utils_nnx, sharding
+from maxtext.utils import maxtext_utils, maxtext_utils_nnx, sharding
 import numpy as np
 from orbax import checkpoint as ocp
 
@@ -179,6 +181,9 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
         "If the checkpoint was saved with scan_layers=True (stacked layers), convert it to "
         "unscanned format before loading with vLLM (vllm.yml sets scan_layers=False)."
     )
+  if len(ckpt_shape) == 2 and ckpt_shape == model_shape[::-1]:
+    return jax.device_put(jnp.transpose(ckpt_arr), model_arr.sharding)
+
   axes = _normalize_logical_axes(logical_axes)
   if axes is None or len(axes) != len(model_shape):
     axes = (None,) * len(model_shape)
@@ -308,21 +313,6 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
     return new_node
 
   return jax.tree_util.tree_map_with_path(_maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site)
-
-
-def _partition_size(partition, mesh):
-  """Total mesh-axis size used to shard a single tensor axis.
-
-  ``partition`` is a single PartitionSpec entry: ``None`` (unsharded), a single
-  mesh-axis name (str), or a tuple of mesh-axis names.
-  """
-  if partition is None:
-    return 1
-  names = (partition,) if isinstance(partition, str) else tuple(partition)
-  size = 1
-  for n in names:
-    size *= mesh.shape[n]
-  return size
 
 
 def _stored_shape_evenly_shardable(restore_arg, stored_shape):
@@ -541,6 +531,11 @@ def create_model(
     config, mesh, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None, *, quant_mode_str: str = "train"
 ):
   """Instantiates and returns the model object, sharded across the mesh."""
+  if config.use_m3_model:
+    from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+
+    return m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+
   # Model definition
   quant = quantizations.configure_quantization(config, quant_mode_str=quant_mode_str)
   model = get_transformer_model(config, mesh, quant, model_mode=model_mode, rngs=rngs)
@@ -573,7 +568,7 @@ def create_nnx_abstract_model(
       abstract_model: The stateful NNX model instance in an abstract state.
   """
 
-  with nn.logical_axis_rules(config.logical_axis_rules):
+  with logical_axis_rules(config.logical_axis_rules):
     _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
     # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
@@ -594,60 +589,6 @@ def create_nnx_abstract_model(
         named_sharding_state,
     )
     return _create_model, nnx.merge(graphdef, abstract_state)
-
-
-def create_nnx_sharded_model_hybrid(config, mesh=None, devices=None, model_mode=MODEL_MODE_TRAIN, rng_key=None):
-  """Creates a sharded model for hybrid NNX modules containing Linen sub-modules.
-
-  DEPRECATED: This function is a transitional utility for the Linen-to-NNX
-  migration. It should be removed once all model components are ported to
-  pure NNX modules.
-
-  This function specifically handles the complexity of "mixed" state initialization,
-  where logical sharding annotations must be resolved for both NNX native
-  Parameters and legacy Linen variables wrapped via the NNX-Linen bridge.
-  It ensures that both systems correctly respect the provided mesh and
-  logical axis rules during the abstraction/sharding planning phase.
-  """
-  _create_model_partial = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key)
-
-  with nn.logical_axis_rules(config.logical_axis_rules):
-    abstract_model = nnx.eval_shape(_create_model_partial)
-  graphdef, abstract_state = nnx.split(abstract_model)
-  specs = nnx.get_partition_spec(abstract_state)
-
-  if mesh is None:
-    mesh = abstract_model.mesh
-
-  # JIT a function that creates the model state with proper sharding from the start.
-  # By providing out_shardings, we instruct JAX to produce sharded output directly,
-  # avoiding a large intermediate allocation on a single device.
-  with nn.logical_axis_rules(config.logical_axis_rules):
-    out_shardings = nn.logical_to_mesh_sharding(specs, mesh)
-
-  @partial(jax.jit, out_shardings=out_shardings)
-  def create_sharded_state():
-    # This will be JIT-compiled. JAX knows the output sharding and can
-    # initialize the parameters directly on the target devices in a sharded way.
-    model = _create_model_partial()
-    return nnx.state(model)
-
-  with mesh:
-    # Create the model with sharded parameters.
-    with nn.logical_axis_rules(config.logical_axis_rules):
-      sharded_state = create_sharded_state()
-    model = nnx.merge(graphdef, sharded_state)
-
-    # print weights sharding info under debug sharding mode
-    if config.debug_sharding:
-      max_utils.print_non_trivial_mesh_axis(model.mesh)
-      maxtext_utils.print_shardings_params(
-          params=sharded_state,
-          params_sharding=out_shardings,
-          mesh=model.mesh,
-          logical_annotations=specs,
-      )
-    return model
 
 
 def setup_configs_and_devices(
@@ -748,6 +689,66 @@ def setup_configs_and_devices(
     raise ValueError("num_trainer_slices and num_samplers_slices should be both -1 or positive")
 
   return trainer_config, sampler_config, trainer_devices, sampler_devices
+
+
+def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
+  """Get rollout kwargs for vLLM rollout when using data parallelism."""
+  dp = sampler_config.rollout_data_parallelism
+  tp = sampler_config.rollout_tensor_parallelism
+  ep = sampler_config.rollout_expert_parallelism
+
+  # -1 means "auto-derive from the other two". At most one can be -1.
+  num_auto = sum(1 for x in [tp, dp, ep] if x == -1)
+  if num_auto > 1:
+    raise ValueError(
+        "At most one of rollout_tensor_parallelism, rollout_data_parallelism, "
+        "rollout_expert_parallelism can be -1 (auto-derived).\n"
+        f"Currently resolved values:\n"
+        f"  - rollout_tensor_parallelism = {tp}\n"
+        f"  - rollout_data_parallelism = {dp}\n"
+        f"  - rollout_expert_parallelism = {ep}\n\n"
+        "To fix this, you must explicitly define at least two of these parameters in your command line arguments.\n"
+        "For example, try adding 'rollout_tensor_parallelism=4' to your command."
+    )
+
+  if dp == -1:
+    if num_sampler_devices % (tp * ep) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_tensor_parallelism({tp}) * rollout_expert_parallelism({ep}) "
+          f"when rollout_data_parallelism is -1."
+      )
+    dp = num_sampler_devices // tp // ep
+  elif tp == -1:
+    if num_sampler_devices % (dp * ep) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_data_parallelism({dp}) * rollout_expert_parallelism({ep}) "
+          f"when rollout_tensor_parallelism is -1."
+      )
+    tp = num_sampler_devices // dp // ep
+  elif ep == -1:
+    if num_sampler_devices % (tp * dp) != 0:
+      raise ValueError(
+          f"num_sampler_devices({num_sampler_devices}) must be divisible by "
+          f"rollout_tensor_parallelism({tp}) * rollout_data_parallelism({dp}) "
+          f"when rollout_expert_parallelism is -1."
+      )
+    ep = num_sampler_devices // tp // dp
+  elif tp * dp * ep != num_sampler_devices:
+    raise ValueError(
+        f"rollout_tensor_parallelism({tp}) * "
+        f"rollout_data_parallelism({dp}) * "
+        f"rollout_expert_parallelism({ep}) "
+        f"!= len(sampler_devices)({num_sampler_devices})"
+    )
+
+  rollout_kwargs = {}
+  rollout_kwargs["tensor_parallel_size"] = tp
+  rollout_kwargs["data_parallel_size"] = dp
+  rollout_kwargs["expert_parallel_size"] = ep
+
+  return rollout_kwargs
 
 
 def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices, tokenizer_pad_id=None):
@@ -928,11 +929,8 @@ def from_pretrained(
   _, _abs_state_for_specs = nnx.split(abstract_model)
   specs = nnx.get_partition_spec(_abs_state_for_specs)
 
-  if config.pure_nnx:
-    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
-    # TODO: print debug_sharding info
-  else:
-    model = create_nnx_sharded_model_hybrid(config, mesh, devices, model_mode, rng_key)
+  model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+  # TODO: print debug_sharding info
 
   sharded_state = nnx.state(model)
 

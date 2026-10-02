@@ -4,7 +4,7 @@ echo "Running 512b.sh"
 #
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
-# RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
+# RUN_NAME (Required, unless run_name is already set in base.yml or the JOBSET_NAME environment variable is set)
 # PLATFORM (Optional, can be "gke" or "gce", default is "gce")
 #
 # Example to invoke this script:

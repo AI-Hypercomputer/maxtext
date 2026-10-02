@@ -14,4 +14,5 @@
 
 """Attention kernels."""
 
+from maxtext.kernels.attention import csa_streamindex
 from maxtext.kernels.attention import splash_attention_kernel

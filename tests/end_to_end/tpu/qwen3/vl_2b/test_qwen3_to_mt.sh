@@ -23,7 +23,7 @@ HF_GOLDEN_MODEL=Qwen/Qwen3-VL-2B-Instruct
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
 
 # Step 1: Install torch
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 python3 -m pip install decord
 
 # Step 2: Convert to scanned multimodal checkpoint (for multimodal training)
@@ -70,6 +70,8 @@ python3 -m tests.utils.forward_pass_logit_checker \
     attention=dot_product \
     prompt="${TEST_PROMPT}" \
     image_path=${TEST_IMAGE} \
-    --max_kl_div=0.1 \
+    --max_kl_div=0.03 \
     --golden_logits_path=${GOLDEN_LOGITS_PATH} \
-    override_model_config=true
+    override_model_config=true \
+    hardware=cpu \
+    skip_jax_distributed_system=True

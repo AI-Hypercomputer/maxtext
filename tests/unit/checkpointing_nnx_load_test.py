@@ -240,8 +240,8 @@ class TestManagerRestoreParity(unittest.TestCase):
   """
 
   def _manager(self, restored):
-    manager = mock.MagicMock(spec=ocp.CheckpointManager)
-    manager.restore.return_value = restored
+    manager = mock.MagicMock(spec=checkpointing.ocp.training.Checkpointer)
+    manager.load_checkpointables.return_value = restored
     return manager
 
   def _linen_abstract(self):
@@ -273,7 +273,7 @@ class TestManagerRestoreParity(unittest.TestCase):
     restored, _ = self._load(manager, abstract)
 
     # Going in: the manager is asked for the Linen on-disk layout, not the NNX one.
-    item = manager.restore.call_args.kwargs["args"]["items"].item
+    item = manager.load_checkpointables.call_args.args[1]["items"]
     self.assertEqual(set(item) & {"params", "step"}, {"params", "step"})
     self.assertNotIn("model", item)
     # Coming out: reshaped back under `items`, the same key the Linen path returns.
@@ -287,34 +287,32 @@ class TestManagerRestoreParity(unittest.TestCase):
 
     restored, _ = self._load(manager, abstract)
 
-    self.assertIs(manager.restore.call_args.kwargs["args"]["items"].item, abstract)
+    self.assertIs(manager.load_checkpointables.call_args.args[1]["items"], abstract)
     self.assertIs(restored, sentinel)  # returned exactly as the manager gave it
 
   def test_grain_case_converts_items_and_passes_the_iterator_through(self):
-    """The grain branch is shared too: NNX only reshapes `items`, leaving the iterator element alone."""
+    """The grain branch is shared too: NNX only reshapes `items`; the iterator restores in place."""
     abstract = _abstract_nnx_state()
     saved = {"params": {"params": {"linear": {"kernel": jnp.ones((2, 1)), "bias": jnp.array([5.0])}}}}
-    manager = self._manager(None)
+    manager = self._manager({"items": saved, "iter": mock.Mock()})
 
-    with mock.patch.object(
-        checkpointing.grain_utility, "restore_grain_iterator", return_value=({"items": saved}, None)
-    ) as m:
+    with mock.patch.object(checkpointing.grain_utility, "for_restore", return_value=mock.Mock()) as m:
       restored, iterator = self._load(manager, abstract, dataset_type="grain", data_iterator=mock.MagicMock())
-
     m.assert_called_once()
+    # The iterator checkpointable was requested alongside the state.
+    self.assertIn("iter", manager.load_checkpointables.call_args.args[1])
     self.assertIsNone(iterator)
     self.assertIsInstance(restored["items"], nnx.State)
     self.assertTrue(jnp.array_equal(restored["items"].to_pure_dict()["model"]["linear"]["bias"], jnp.array([5.0])))
 
   def test_grain_case_is_untouched_for_linen(self):
     abstract = self._linen_abstract()
-    sentinel = ({"items": {"params": abstract.params}}, None)
-    manager = self._manager(None)
+    sentinel = {"items": {"params": abstract.params}}
+    manager = self._manager(sentinel)
 
-    with mock.patch.object(checkpointing.grain_utility, "restore_grain_iterator", return_value=sentinel):
+    with mock.patch.object(checkpointing.grain_utility, "for_restore", return_value=mock.Mock()):
       restored, iterator = self._load(manager, abstract, dataset_type="grain", data_iterator=mock.MagicMock())
-
-    self.assertIs(restored, sentinel[0])
+    self.assertIs(restored, sentinel)
     self.assertIsNone(iterator)
 
   def test_missing_weight_raises_on_the_standard_path(self):
@@ -336,10 +334,9 @@ class TestManagerRestoreParity(unittest.TestCase):
     self.assertIn("linear/bias", str(ctx.exception))
 
   def test_no_step_in_manager_falls_through_to_the_load_paths(self):
-    """An empty manager (latest_step() is None) must not restore -- it falls through, for both types."""
-    manager = mock.MagicMock(spec=ocp.CheckpointManager)
-    manager.latest_step.return_value = None
-
+    """An empty manager (latest is None) must not restore -- it falls through, for both types."""
+    manager = mock.MagicMock(spec=checkpointing.ocp.training.Checkpointer)
+    manager.latest = None
     for abstract in (_abstract_nnx_state(), self._linen_abstract()):
       restored, params = checkpointing.load_state_if_possible(
           checkpoint_manager=manager,
@@ -351,7 +348,7 @@ class TestManagerRestoreParity(unittest.TestCase):
       )
       self.assertIsNone(restored)
       self.assertIsNone(params)
-      manager.restore.assert_not_called()
+      manager.load_checkpointables.assert_not_called()
 
 
 class TestResolveConversionFn(unittest.TestCase):
@@ -444,15 +441,16 @@ class TestSafetensorsFullStateIntoNNX(unittest.TestCase):
   def _load(self, converted, abstract):
     """Runs the v1 safetensors branch, stubbing the read so only the conversion is under test."""
     with (
-        mock.patch.object(checkpointing, "ocp_v1") as v1,
+        mock.patch.object(checkpointing, "ocp") as v1,
         mock.patch.object(checkpointing, "sharding_utils") as shardings,
+        mock.patch.object(checkpointing, "checkpoint_context") as context,
     ):
-      v1.pytree_metadata.return_value = mock.Mock(metadata={"w": jax.ShapeDtypeStruct((1,), jnp.float32)})
+      v1.metadata.return_value = mock.Mock(metadata={"w": jax.ShapeDtypeStruct((1,), jnp.float32)})
       shardings.construct_maximal_shardings.return_value = {"w": None}
+      context.build_context.return_value = mock.MagicMock()  # a with-able context
       return checkpointing._load_full_state_from_path(  # pylint: disable=protected-access
           path="gs://does-not-exist/hf",
           abstract_unboxed_pre_state=abstract,
-          enable_orbax_v1=True,
           checkpoint_conversion_fn=lambda _: converted,
           source_checkpoint_layout="safetensors",
           checkpoint_storage_concurrent_gb=8,
@@ -710,6 +708,33 @@ class TestWeightMismatch(unittest.TestCase):
     self.assertEqual(sorted(problems), ["a/b", "a/c"])
     self.assertIn("missing", problems["a/b"])
     self.assertIn("shape", problems["a/c"])
+
+  def test_weight_mismatches_ignores_missing_when_check_missing_is_false(self):
+    want = {
+        "a": {
+            "k": jax.ShapeDtypeStruct((2,), jnp.float32),
+            "b": jax.ShapeDtypeStruct((1,), jnp.float32),
+            "c": jax.ShapeDtypeStruct((3,), jnp.float32),
+        }
+    }
+    # b absent, c wrong shape
+    have = {"a": {"k": jnp.ones((2,)), "c": jnp.ones((4,))}}
+    problems = dict(checkpointing._weight_mismatches(want, have, check_missing=False))  # pylint: disable=protected-access
+    self.assertEqual(list(problems.keys()), ["a/c"])
+    self.assertIn("shape", problems["a/c"])
+
+  def test_weight_mismatches_detects_structural_mismatch(self):
+    want = {
+        "a": {
+            "k": jax.ShapeDtypeStruct((2,), jnp.float32),
+        }
+    }
+    # k is a dictionary instead of a tensor
+    have = {"a": {"k": {"nested_dict_instead": 1}}}
+    problems = dict(checkpointing._weight_mismatches(want, have))  # pylint: disable=protected-access
+    self.assertEqual(list(problems.keys()), ["a/k"])
+    self.assertIn("structural mismatch", problems["a/k"])
+    self.assertIn("dict", problems["a/k"])
 
   def test_expected_and_restored_params_splits_by_param_type(self):
     """Only nnx.Param weights land in `want`; rngs/dropout (nnx.RngState) are excluded from the check."""

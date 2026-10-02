@@ -22,9 +22,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from maxtext.configs import pyconfig
-from maxtext.common.gcloud_stub import is_decoupled
+from maxtext.common.gcloud_stub import is_decoupled, jetstream
 
 pytestmark = [pytest.mark.external_serving]
+
+config_lib, _, _, _, _ = jetstream()
+if getattr(config_lib, "_IS_STUB", False):
+  pytest.skip("JetStream is not installed (stubbed)", allow_module_level=True)
 
 # Conditional import: only load when not in decoupled mode to avoid collection errors.
 # offline_engine depends on prefill_packing, which requires JetStream.

@@ -35,18 +35,18 @@ Training:
     eval_interval=-1 steps=10 profiler=xplane
 """
 
-import inspect
 from typing import Any, Sequence
 
 from absl import app
 import os
 import jax
+import jax.numpy as jnp
 import optax
 import pathwaysutils
 
 from flax import nnx
 from flax.nnx import tracers
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 
 from orbax import checkpoint as ocp
 
@@ -68,6 +68,7 @@ from maxtext.trainers.post_train.sft import hooks
 from maxtext.utils import lora_utils
 from maxtext.utils import max_utils
 from maxtext.utils import max_logging
+# Placeholder: internal
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
@@ -94,26 +95,26 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
     is_lora_enabled = self._lora_enabled
     wrt = nnx.LoRAParam if is_lora_enabled else nnx.Param
 
-    # Detect whether Tunix's train() expects (loss, aux, grad_norm) or just
-    # (loss, aux) by inspecting the source of PeftTrainer._train_step.
-    tunix_expects_grad_norm = False
-    try:
-      source = inspect.getsource(peft_trainer.PeftTrainer._train_step)  # pylint: disable=protected-access
-      tunix_expects_grad_norm = "grad_norm" in source
-    except (TypeError, OSError):
-      pass
-
     # Capture the graphdef once outside of JIT so that split/merge inside
     # jax.value_and_grad can use a stable (non-traced) structural descriptor.
     nnx.pop(self.model, nnx.Intermediate)
     graphdef, _, _ = nnx.split(self.model, wrt, ...)
+    _uses_gradient_accumulation = not (
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1 and self.config.max_seq_token_per_tpu is None
+    )
 
     def train_step(
         model: nnx.Module,
         optimizer: nnx.Optimizer,
-        inputs: Any,
         grad_accumulator: Any = None,
+        inputs: Any = None,
+        is_update_step: Any = True,
     ):
+      if inputs is None and grad_accumulator is not None:
+        # In Tunix versions where train_step only receives (model, optimizer, inputs)
+        inputs = grad_accumulator
+        grad_accumulator = getattr(self, "grad_accumulator", None)
+
       inputs = gen_fn(inputs)
 
       # Split model into differentiable params and non-differentiable rest.
@@ -157,14 +158,38 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
 
       nnx.update(model, new_rest)
 
-      # Apply optimizer update. grads has the same nnx.State(wrt) structure
-      # as diff_params, which is compatible with optimizer.update.
-      optimizer.update(model, grads)
+      # Handle gradient accumulation and conditional/direct optimizer update
+      if not _uses_gradient_accumulation:
+        if isinstance(grads, dict) and not isinstance(grads, nnx.State):
+          grads = nnx.State(grads)
+        optimizer.update(model, grads)
+        grad_norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), grads))
+      else:
+        grad_accumulator.add(grads)
+
+        def apply_updates(model, optimizer, grad_accumulator):
+          acc_grads = grad_accumulator.get()
+          norm = optax.global_norm(jax.tree_util.tree_map(lambda x: x.astype(jnp.float32), acc_grads))
+          if isinstance(acc_grads, dict) and not isinstance(acc_grads, nnx.State):
+            acc_grads = nnx.State(acc_grads)
+          optimizer.update(model, acc_grads)
+          grad_accumulator.reset()
+          return norm
+
+        def skip_updates(model, optimizer, grad_accumulator):
+          return jnp.array(0.0, dtype=jnp.float32)
+
+        grad_norm = nnx.cond(
+            is_update_step,
+            apply_updates,
+            skip_updates,
+            model,
+            optimizer,
+            grad_accumulator,
+        )
 
       aux_out = aux if has_aux else None
-      if tunix_expects_grad_norm:
-        return out_val, aux_out, optax.global_norm(grads)
-      return out_val, aux_out
+      return out_val, aux_out, grad_norm
 
     return train_step
 
@@ -230,26 +255,35 @@ def use_maxtext_loss_function(trainer, mt_config):
     The trainer configured with the MaxText loss function.
   """
 
-  def loss_func(
-      model,
-      inputs,
-      inputs_position,
-      inputs_segmentation,
-      targets,
-      targets_position,
-      targets_segmentation,
-  ):
-    data = {
-        "inputs": inputs,
-        "inputs_position": inputs_position,
-        "inputs_segmentation": inputs_segmentation,
-        "targets": targets,
-        "targets_position": targets_position,
-        "targets_segmentation": targets_segmentation,
-    }
-    return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=True)
+  def make_loss_func(is_train):
+    def loss_func(
+        model,
+        inputs,
+        inputs_position,
+        inputs_segmentation,
+        targets,
+        targets_position,
+        targets_segmentation,
+    ):
+      data = {
+          "inputs": inputs,
+          "inputs_position": inputs_position,
+          "inputs_segmentation": inputs_segmentation,
+          "targets": targets,
+          "targets_position": targets_position,
+          "targets_segmentation": targets_segmentation,
+      }
+      return loss_fn(model, mt_config, data, dropout_rng=None, params=None, is_train=is_train)
 
-  trainer = trainer.with_loss_fn(loss_func, has_aux=True)
+    return loss_func
+
+  # Tunix PeftTrainer.with_loss_fn() defaults `eval_loss_fn` to the same callable
+  # as `loss_fn`. We override `eval_loss_fn` with `is_train=False` so that evaluation:
+  #   - Disables dropout to ensure deterministic eval loss / perplexity.
+  #   - Excludes auxiliary Multi-Token Prediction (MTP) loss from the reported eval loss.
+  #   - Prevents updating running sparsity statistics (`batch_stats`) during eval.
+  trainer = trainer.with_loss_fn(make_loss_func(is_train=True), has_aux=True)
+  trainer.eval_loss_fn = make_loss_func(is_train=False)
   return trainer
 
 
@@ -270,7 +304,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.from_pretrained(mt_config)
 
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     if mt_config.lora.enable_lora:
       model = lora_utils.apply_lora_to_model(model, mesh, mt_config)
 
@@ -301,7 +335,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
 
 def train_model(mt_config, trainer, mesh):
   """Runs the SFT training loop in Tunix."""
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
+  with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     # Disable NNX graph caching for MoE models (where experts > 1) to allow
     # necessary dynamic metadata synchronization during forward passes (e.g., in jax.lax.scan).
     enable_nnx_cache = mt_config.num_experts <= 1

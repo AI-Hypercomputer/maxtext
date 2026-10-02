@@ -63,9 +63,8 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
 )
 
-from maxtext.layers import nnx_wrappers
 from maxtext.layers.attentions import Attention
-from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned
+from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -76,6 +75,10 @@ from maxtext.utils.globals import EPS
 
 
 PLACEHOLDER_SEQ_LEN = 1
+
+
+class indexer_losses(nnx.Variable):  # pylint: disable=invalid-name,abstract-method
+  """Variable type for storing Indexer loss components -> bypasses nnx.Intermediate scan filters."""
 
 
 class Indexer(nnx.Module):
@@ -143,7 +146,7 @@ class Indexer(nnx.Module):
         out_features_shape=self.head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "kv"),
+        kernel_axes=("embed_attn", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -162,7 +165,7 @@ class Indexer(nnx.Module):
         out_features_shape=self.n_heads,
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "q_heads"),
+        kernel_axes=("embed_attn", "q_heads"),
         dtype=jnp.float32,
         weight_dtype=jnp.float32,
         quant=None,
@@ -361,7 +364,7 @@ class Indexer(nnx.Module):
 
     # NOTE: If the total available sequence length <= topk, indexer always selects all tokens.
     if k.shape[1] <= self.indexer_topk:
-      return None, None, None
+      return attention_mask, cached_s, attention_mask
 
     # Compute head weights: project from input, [b, t, embed_dim] -> [b, t, h]
     weights = self.weights_proj(inputs_q)
@@ -448,141 +451,6 @@ class Indexer(nnx.Module):
     return indexer_mask, topk_indices, indexer_score
 
 
-def mla_as_linen(
-    *,
-    config: Config,
-    num_query_heads: int,
-    num_kv_heads: int,
-    head_dim: int,
-    max_target_length: int,
-    mesh: Mesh,
-    attention_kernel: str,
-    inputs_q_shape: Tuple,
-    inputs_kv_shape: Tuple,
-    dtype: DType = jnp.float32,
-    weight_dtype: DType = jnp.float32,
-    max_prefill_predict_length: int = -1,
-    dropout_rate: float = 0.0,
-    kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "normal"),
-    float32_qk_product: bool = False,  # computes logits in float32 for stability.
-    float32_logits: bool = False,  # cast logits in float32 for stability.
-    quant: Optional[Quant] = None,
-    kv_quant: Optional[KVQuant] = None,
-    attention_type: AttentionType = AttentionType.MLA,  # Default to MLA attention
-    attn_logits_soft_cap: float | None = None,
-    sliding_window_size: int | None = None,
-    use_ragged_attention: bool = False,
-    ragged_block_size: int = 256,
-    use_qk_norm: bool = False,
-    query_pre_attn_scalar: float | None = None,
-    use_bias_in_projections: bool = False,  # Set to True will enable bias in q, k, v, o projections
-    # Temperature tuning parameters used for Llama4
-    temperature_tuning: bool = False,
-    temperature_tuning_scale: float = 0.1,
-    temperature_tuning_floor_scale: float = 8192.0,
-    # Shard the query activation as the same as the key and value.
-    # TODO: Find a better sharding axis name.
-    # TODO: Further break down the Training and Inference axes for the q, k, v.
-    prefill_query_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_key_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    prefill_value_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, KV_HEAD, KV_HEAD_DIM),
-    query_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    key_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    value_axis_names: AxisNames = (KV_BATCH, LENGTH, KV_HEAD, KV_HEAD_DIM),
-    input_axis_names: AxisNames = (BATCH_ATTN, LENGTH, EMBED),
-    out_axis_names: AxisNames = (BATCH_ATTN, LENGTH, HEAD, D_KV),
-    prefill_input_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, EMBED),
-    decode_input_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, EMBED),
-    prefill_out_axis_names: AxisNames = (PREFILL_KV_BATCH, PREFILL_LENGTH, HEAD, D_KV),
-    decode_out_axis_names: AxisNames = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV),
-    prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-    ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3),
-    compute_axis_order: AxisIdxes = (0, 1, 2, 3),
-    reshape_q: bool = False,
-    is_nope_layer: bool = False,
-    is_vision: bool = False,
-    model_mode: str = MODEL_MODE_TRAIN,
-    q_lora_rank: int = 0,
-    kv_lora_rank: int = 512,
-    qk_nope_head_dim: int = 128,
-    qk_rope_head_dim: int = 64,
-    v_head_dim: int = 128,
-    max_position_embeddings: int = 4096 * 4,
-    original_max_position_embeddings: int = 4096,
-    mscale: float = 1.0,  # scaling factor for softmax
-    rope_factor: float = 40.0,  # rotary embedding factor
-    name: str | None = None,
-):
-  """A factory function to create an MLA as a Linen module.
-
-  This function serves as a bridge to use the NNX-based `MLA` within a
-  Linen model.
-  """
-  return nnx_wrappers.to_linen(
-      MLA,
-      config=config,
-      num_query_heads=num_query_heads,
-      num_kv_heads=num_kv_heads,
-      head_dim=head_dim,
-      max_target_length=max_target_length,
-      mesh=mesh,
-      attention_kernel=attention_kernel,
-      inputs_q_shape=inputs_q_shape,
-      inputs_kv_shape=inputs_kv_shape,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      max_prefill_predict_length=max_prefill_predict_length,
-      dropout_rate=dropout_rate,
-      kernel_init=kernel_init,
-      float32_qk_product=float32_qk_product,
-      float32_logits=float32_logits,
-      quant=quant,
-      kv_quant=kv_quant,
-      attention_type=attention_type,
-      attn_logits_soft_cap=attn_logits_soft_cap,
-      sliding_window_size=sliding_window_size,
-      use_ragged_attention=use_ragged_attention,
-      ragged_block_size=ragged_block_size,
-      use_qk_norm=use_qk_norm,
-      query_pre_attn_scalar=query_pre_attn_scalar,
-      use_bias_in_projections=use_bias_in_projections,
-      temperature_tuning=temperature_tuning,
-      temperature_tuning_scale=temperature_tuning_scale,
-      temperature_tuning_floor_scale=temperature_tuning_floor_scale,
-      prefill_query_axis_names=prefill_query_axis_names,
-      prefill_key_axis_names=prefill_key_axis_names,
-      prefill_value_axis_names=prefill_value_axis_names,
-      query_axis_names=query_axis_names,
-      key_axis_names=key_axis_names,
-      value_axis_names=value_axis_names,
-      input_axis_names=input_axis_names,
-      out_axis_names=out_axis_names,
-      prefill_input_axis_names=prefill_input_axis_names,
-      decode_input_axis_names=decode_input_axis_names,
-      prefill_out_axis_names=prefill_out_axis_names,
-      decode_out_axis_names=decode_out_axis_names,
-      prefill_cache_axis_order=prefill_cache_axis_order,
-      ar_cache_axis_order=ar_cache_axis_order,
-      compute_axis_order=compute_axis_order,
-      reshape_q=reshape_q,
-      is_nope_layer=is_nope_layer,
-      is_vision=is_vision,
-      model_mode=model_mode,
-      q_lora_rank=q_lora_rank,
-      kv_lora_rank=kv_lora_rank,
-      qk_nope_head_dim=qk_nope_head_dim,
-      qk_rope_head_dim=qk_rope_head_dim,
-      v_head_dim=v_head_dim,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      mscale=mscale,
-      rope_factor=rope_factor,
-      name=name,
-      metadata_fn=variable_to_logically_partitioned,
-      abstract_init=False,
-  )
-
-
 class MLA(Attention):
   """Multi-Head Latent Attention (MLA) layer."""
 
@@ -662,6 +530,7 @@ class MLA(Attention):
     base_kv_cache = config.attention != "paged" and config.mla_naive_kvcache
 
     # Setting these before call to super because a field is used in super
+    self.use_absorbed_mqa = getattr(config, "use_mla_absorbed_mqa", False)
     self.q_lora_rank = q_lora_rank
     self.kv_lora_rank = kv_lora_rank
     self.qk_nope_head_dim = qk_nope_head_dim
@@ -798,7 +667,7 @@ class MLA(Attention):
           out_features_shape=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
-          kernel_axes=("embed", "q_heads", "kv"),
+          kernel_axes=("embed_attn", "q_heads", "kv"),
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           quant=self.quant,
@@ -813,7 +682,7 @@ class MLA(Attention):
           out_features_shape=self.q_lora_rank,
           axis=-1,
           kernel_init=self.kernel_init,
-          kernel_axes=("embed", "q_lora_up_proj"),
+          kernel_axes=("embed_attn", "q_lora_up_proj"),
           dtype=self.dtype,
           weight_dtype=self.weight_dtype,
           quant=self.quant,
@@ -849,7 +718,7 @@ class MLA(Attention):
         out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "kv_lora_up_proj"),
+        kernel_axes=("embed_attn", "kv_lora_up_proj"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -890,9 +759,54 @@ class MLA(Attention):
 
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
 
+  def _attention_op_num_kv_heads(self) -> int:
+    if self.use_absorbed_mqa:
+      return 1
+    return self.num_kv_heads
+
   @property
   def out_head_dim(self) -> int:
     return self.v_head_dim
+
+  def _absorbed_weights(self, dtype: DType) -> tuple[Array, Array]:
+    """Splits wkv_b kernel cleanly into W_UK and W_UV with logical sharding."""
+    w_uk, w_uv = jnp.split(self.wkv_b.kernel.astype(dtype), [self.qk_nope_head_dim], axis=-1)
+    w_uk = self._maybe_shard_with_logical(w_uk, ("kv_lora", "q_heads", None))
+    w_uv = self._maybe_shard_with_logical(w_uv, ("kv_lora", "q_heads", None))
+    return w_uk, w_uv
+
+  def absorb_query(self, q_nope: Array, q_pe: Array, w_uk: Optional[Array] = None) -> Array:
+    """Absorbs W_UK into Query: Q_absorbed = Q_nope @ W_UK -> [B, T, H, D_c + D_rope]."""
+    if w_uk is None:
+      w_uk, _ = self._absorbed_weights(q_nope.dtype)
+    q_absorbed = jnp.einsum("bthd, chd -> bthc", q_nope, w_uk, precision=self.config.matmul_precision)
+    q_absorbed = q_absorbed.astype(q_nope.dtype)
+    q_absorbed = self._maybe_shard_with_logical(
+        q_absorbed, ("activation_batch", "activation_length", "activation_heads", None)
+    )
+    return jnp.concatenate([q_absorbed, q_pe], axis=-1)
+
+  def get_kv_latent(self, low_rank_main: Array, key_rope: Array) -> tuple[Array, Array]:
+    """Constructs 1-head compressed latent KV: [B, S, 1, D_c + D_rope] and value [B, S, 1, D_c]."""
+    c_kv = low_rank_main[:, :, None, :]
+    key = jnp.concatenate([c_kv, key_rope], axis=-1)
+    return key, c_kv
+
+  def absorb_output(self, out_latent: Array, w_uv: Optional[Array] = None) -> Array:
+    """Absorbs W_UV into Output: O = O_latent @ W_UV -> [B, T, H, D_v]."""
+    if w_uv is None:
+      _, w_uv = self._absorbed_weights(out_latent.dtype)
+    out = jnp.einsum("bthc, chv -> bthv", out_latent, w_uv, precision=self.config.matmul_precision)
+    out = out.astype(out_latent.dtype)
+    return self._maybe_shard_with_logical(
+        out, ("activation_batch", "activation_length", "activation_heads", "activation_kv")
+    )
+
+  def _build_key_value(self, low_rank_main: Array, key_rope: Array, model_mode: str) -> tuple[Array, Array]:
+    """Dispatches key and value construction based on absorption mode."""
+    if self.use_absorbed_mqa:
+      return self.get_kv_latent(low_rank_main, key_rope)
+    return self.mla_get_key_value(low_rank_main, key_rope, model_mode)
 
   def mla_query_projection(
       self, inputs_q: Array, inputs_positions: Array, model_mode
@@ -948,7 +862,11 @@ class MLA(Attention):
     q_pe = self._maybe_shard_with_logical(q_pe, query_logical_name)
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
-    query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+    if self.use_absorbed_mqa:
+      query = self.absorb_query(q_nope, q_pe) * self.softmax_scale
+      query_logical_name = query_logical_name[:-1] + (None,)
+    else:
+      query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 
     if self.config.experimental_sa_quant_q_fp8:
       query = query.astype(jnp.float8_e4m3fn)
@@ -1069,14 +987,14 @@ class MLA(Attention):
 
     if prefill_mla_cache:
       low_rank_main, key_rope, decoder_segment_ids = prefill_mla_cache
-      key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
+      key, value = self._build_key_value(low_rank_main, key_rope, model_mode)
       prefill_kv_cache = key, value, decoder_segment_ids
     else:
       prefill_kv_cache = None
 
     if ar_mla_cache:
       low_rank_main, key_rope, decoder_segment_ids, lengths = ar_mla_cache
-      key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
+      key, value = self._build_key_value(low_rank_main, key_rope, model_mode)
       ar_kv_cache = key, value, decoder_segment_ids, lengths
     else:
       ar_kv_cache = None
@@ -1098,7 +1016,7 @@ class MLA(Attention):
     key_rope = jnp.expand_dims(low_rank_rope, axis=2)
     key_rope = self.apply_rotary_embedding(key_rope, inputs_positions=inputs_positions)
 
-    key, value = self.mla_get_key_value(low_rank_main, key_rope, model_mode)
+    key, value = self._build_key_value(low_rank_main, key_rope, model_mode)
     cached_values = [None, None]
     if self.config.attention != "paged" and model_mode != MODEL_MODE_TRAIN:
       if self.config.mla_naive_kvcache:
@@ -1160,6 +1078,12 @@ class MLA(Attention):
     indexer_probs = jax.nn.softmax(indexer_score.astype(jnp.float32), axis=-1)
 
     batch, q_len, heads, dim = query.shape
+    # is_1_kv_head is True when:
+    # 1. use_mla_absorbed_mqa is active: the key is the 1-head compressed latent [B, S, 1, D_c + D_rope].
+    # 2. Any single-KV-head configuration (e.g. num_query_heads == 1).
+    # In these cases, contracting query against squeezed key [B, S, D] directly ("bthd, bsd -> bhts")
+    # avoids materializing a broadcasted [B, S, H, D] key tensor in HBM.
+    is_1_kv_head = key.shape[2] == 1
 
     # Chunk across the 'heads' dimension manually using jax.lax.scan
     # Control the HBM footprint of QK tensor: [batch, q_len, s_len, heads]
@@ -1172,19 +1096,32 @@ class MLA(Attention):
       # Transpose and reshape to put chunk dimension first for jax.lax.scan
       # query: [b, t, h, d] -> [h, b, t, d] -> [num_chunks, head_chunk_size, b, t, d]
       q_h = query.transpose(2, 0, 1, 3).reshape(num_chunks, head_chunk_size, batch, q_len, dim)
-      k_h = key.transpose(2, 0, 1, 3).reshape(num_chunks, head_chunk_size, batch, key.shape[1], dim)
+
+      if is_1_kv_head:
+        k_squeezed = key.squeeze(2)  # [b, s, d]
+        scan_inputs = {"q": q_h}
+      else:
+        k_h = key.transpose(2, 0, 1, 3).reshape(num_chunks, head_chunk_size, batch, key.shape[1], dim)
+        scan_inputs = {"q": q_h, "k": k_h}
 
       def scan_body_heads(carry, xs):
         q_c = xs["q"]  # [h_chunk, b, t, d]
-        k_c = xs["k"]  # [h_chunk, b, s, d]
-
-        # Directly use the chunked shapes in einsum to avoid transposes inside the loop
-        attn_chunk = jnp.einsum(
-            "hbtd, hbsd -> bhts",
-            q_c,
-            k_c,
-            precision=self.config.matmul_precision,
-        )
+        if is_1_kv_head:
+          attn_chunk = jnp.einsum(
+              "hbtd, bsd -> bhts",
+              q_c,
+              k_squeezed,
+              precision=self.config.matmul_precision,
+          )
+        else:
+          k_c = xs["k"]  # [h_chunk, b, s, d]
+          # Directly use the chunked shapes in einsum to avoid transposes inside the loop
+          attn_chunk = jnp.einsum(
+              "hbtd, hbsd -> bhts",
+              q_c,
+              k_c,
+              precision=self.config.matmul_precision,
+          )
 
         if sparse_loss:
           attn_chunk = attn_chunk + indexer_mask[:, None, :, :]
@@ -1197,16 +1134,24 @@ class MLA(Attention):
         return carry + probs_chunk_sum, None
 
       init_probs = jnp.zeros((batch, q_len, key.shape[1]), dtype=jnp.float32)
-      attention_probs, _ = jax.lax.scan(scan_body_heads, init_probs, {"q": q_h, "k": k_h})
+      attention_probs, _ = jax.lax.scan(scan_body_heads, init_probs, scan_inputs)
 
     else:
       # Native implementation (default) if chunking is disabled
-      attention_scores = jnp.einsum(
-          "bthd, bshd -> bhts",
-          query,
-          key,
-          precision=self.config.matmul_precision,
-      )
+      if is_1_kv_head:
+        attention_scores = jnp.einsum(
+            "bthd, bsd -> bhts",
+            query,
+            key.squeeze(2),
+            precision=self.config.matmul_precision,
+        )
+      else:
+        attention_scores = jnp.einsum(
+            "bthd, bshd -> bhts",
+            query,
+            key,
+            precision=self.config.matmul_precision,
+        )
       if sparse_loss:
         attention_scores = attention_scores + indexer_mask[:, None, :, :]
       elif attention_mask is not None:
@@ -1287,7 +1232,13 @@ class MLA(Attention):
     if self.use_indexer:
       # generate mask: with 0 and large negative, [b, 1, 1, q_len, kv_len] -> [b, q_len, kv_len]
       attention_mask = self.attention_op.generate_attention_mask(
-          query, key, decoder_segment_ids, model_mode, previous_chunk, bidirectional_mask
+          query,
+          key,
+          decoder_segment_ids,
+          model_mode,
+          previous_chunk,
+          bidirectional_mask,
+          segment_positions=inputs_positions,
       )
       if attention_mask is not None:
         attention_mask = attention_mask.squeeze(axis=(1, 2))
@@ -1314,7 +1265,7 @@ class MLA(Attention):
             sparse_loss=self.config.indexer_sparse_training,
             scaling_factor=self.config.indexer_loss_scaling_factor,
         )
-        self.indexer_loss = nnx.Intermediate(indexer_loss)
+        self.indexer_loss = indexer_losses(indexer_loss)
 
     # Check if we need QK Clip stats
     use_qk_clip = self.model_mode == MODEL_MODE_TRAIN and self.config.use_qk_clip
@@ -1330,6 +1281,9 @@ class MLA(Attention):
         indexer_mask=indexer_mask,
         record_max_logits=use_qk_clip,
     )
+
+    if self.use_absorbed_mqa:
+      out = self.absorb_output(out)
 
     out = self._maybe_shard_with_logical(out, self.out_axis_names)
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")

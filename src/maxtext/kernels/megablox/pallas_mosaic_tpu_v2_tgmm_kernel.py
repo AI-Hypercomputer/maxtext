@@ -331,9 +331,9 @@ def tgmm_inner_kernel(
     # If there are no NaNs, masking both lhs and rhs shouldn't be necessary.
     # But without masking both, we sometimes see the result contain NaNs so we
     # decide to mask both to be safe.
-    rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)
+    rhs_iota = lax.broadcasted_iota(jnp.int32, tiled_rhs_ref.shape, 0)  # pyrefly: ignore[missing-attribute]
     rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
-    rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)
+    rhs_masked = jnp.where(rhs_mask, tiled_rhs_ref[...], 0)  # pyrefly: ignore[bad-index]
 
     acc = jax.lax.dot_general(
         lhs_masked,
@@ -787,7 +787,7 @@ def tgmm_v2(
       cost_estimate=get_cost_estimate(cfgs),
       # the metadata here is for profiling, debugging, and cost modeling.
       # It does not affect the kernel's computation.
-      metadata=gmm_v2.get_metadata(cfgs),
+      metadata=gmm_v2.get_metadata(cfgs),  # pyrefly: ignore[bad-argument-type]
       input_output_aliases=input_output_aliases,
   )(group_sizes, group_offset, lhs, rhs, partial_sum)[:, : dims.size_k, : dims.size_n]
 

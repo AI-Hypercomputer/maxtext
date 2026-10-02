@@ -15,9 +15,13 @@
 """Tests for Hugging Face data processing."""
 
 import sys
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 import os.path
+from unittest.mock import MagicMock
 
+import datasets
 import jax
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -25,6 +29,7 @@ from jax.experimental import mesh_utils
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import hf_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
@@ -122,6 +127,181 @@ class HfDataProcessingTest(unittest.TestCase):
     train_batch2 = get_first_batch(self.train_iter)
     self.assertTrue((train_batch1["inputs"] == train_batch2["inputs"]).all())  # pytype: disable=unsupported-operands
     self.assertTrue((train_batch1["targets"] == train_batch2["targets"]).all())  # pytype: disable=unsupported-operands
+
+  def test_add_default_prompt_if_missing(self):
+    config = MagicMock(default_prompt="")
+
+    # When prompt column is missing, default_prompt is added
+    ds = datasets.Dataset.from_dict({"image": [b"img"], "captions": ["a cat"]})
+    ds = hf_data_processing.add_default_prompt_if_missing(ds, ["prompt", "captions"], config)
+    self.assertEqual(ds[0]["prompt"], "")
+
+    # When prompt column already exists, existing prompt is preserved
+    ds_with_prompt = datasets.Dataset.from_dict({"prompt": ["Custom prompt"], "captions": ["a cat"]})
+    ds_with_prompt = hf_data_processing.add_default_prompt_if_missing(ds_with_prompt, ["prompt", "captions"], config)
+    self.assertEqual(ds_with_prompt[0]["prompt"], "Custom prompt")
+
+    # When streaming IterableDataset is used, default_prompt is added
+    iterable_ds = ds.to_iterable_dataset()
+    iterable_ds = hf_data_processing.add_default_prompt_if_missing(iterable_ds, ["prompt", "captions"], config)
+    first_item = next(iter(iterable_ds))
+    self.assertEqual(first_item["prompt"], "")
+
+
+class TrainingObjectiveTransformTest(unittest.TestCase):
+  """Tests the pre-training objective boundary in the HF pipeline."""
+
+  def _block_diffusion_config(self):
+    return SimpleNamespace(
+        elastic_enabled=False,
+        training_objective="block_diffusion",
+        causal_block_size=4,
+        block_diffusion_mask_id=99,
+        block_diffusion_min_noise=0.05,
+        block_diffusion_canvas_policy="seed_and_mask",
+        block_diffusion_logit_alignment="shifted",
+    )
+
+  def _pipeline_operations(self, config, *, shift):
+    """Builds the lightweight non-packing pipeline and returns its operations."""
+    dataset = mock.MagicMock()
+    dataset.select_columns.return_value = dataset
+    tokenizer = SimpleNamespace(pad_token_id=0, unk_token_id=1, bos_token_id=2)
+    data_source = [object()]
+    dataloader = object()
+    iterator = object()
+    mesh = SimpleNamespace(size=1)
+
+    with (
+        mock.patch.object(hf_data_processing.transformers.AutoTokenizer, "from_pretrained", return_value=tokenizer),
+        mock.patch.object(hf_data_processing.input_pipeline_utils, "HFDataSource", return_value=data_source),
+        mock.patch.object(hf_data_processing.grain, "DataLoader", return_value=dataloader) as data_loader,
+        mock.patch.object(
+            hf_data_processing.multihost_dataloading,
+            "MultiHostDataLoadIterator",
+            return_value=iterator,
+        ),
+    ):
+      result = hf_data_processing.preprocessing_pipeline(
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          global_mesh=mesh,
+          dataset=dataset,
+          config=config,
+          data_column_names=("text",),
+          tokenize=False,
+          tokenizer_path="unused",
+          hf_access_token=None,
+          global_batch_size=1,
+          max_target_length=8,
+          shuffle=False,
+          data_shuffle_seed=0,
+          packing=False,
+          shift=shift,
+          use_dpo=False,
+          use_sft=False,
+      )
+
+    self.assertIs(result, iterator)
+    return data_loader.call_args.kwargs["operations"]
+
+  def test_default_objective_keeps_next_token_shift(self):
+    transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+        SimpleNamespace(),
+        shift=True,
+        use_dpo=False,
+        use_sft=False,
+        packing=False,
+        pad_id=0,
+        bos_token_id=1,
+    )
+
+    self.assertIsInstance(transform, input_pipeline_utils.ShiftData)
+    self.assertEqual(transform.ignored_ids, [0, 1])
+
+  def test_causal_objective_without_shift_has_no_transform(self):
+    transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+        SimpleNamespace(training_objective="causal_lm"),
+        shift=False,
+        use_dpo=False,
+        use_sft=False,
+        packing=False,
+        pad_id=0,
+        bos_token_id=1,
+    )
+
+    self.assertIsNone(transform)
+
+  def test_unknown_objective_is_rejected(self):
+    with self.assertRaisesRegex(ValueError, "Unsupported training objective"):
+      hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+          SimpleNamespace(training_objective="unknown"),
+          shift=False,
+          use_dpo=False,
+          use_sft=False,
+          packing=False,
+          pad_id=0,
+          bos_token_id=1,
+      )
+
+  def test_block_diffusion_replaces_next_token_shift(self):
+    transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+        self._block_diffusion_config(),
+        shift=True,
+        use_dpo=False,
+        use_sft=False,
+        packing=False,
+        pad_id=0,
+        bos_token_id=1,
+    )
+
+    self.assertIsInstance(transform, input_pipeline_utils.BlockDiffusionCorruption)
+    self.assertEqual(transform.block_size, 4)
+    self.assertEqual(transform.mask_id, 99)
+    self.assertEqual(transform.min_noise, 0.05)
+    self.assertEqual(transform.logit_alignment, "shifted")
+    self.assertEqual(transform.canvas_policy, "seed_and_mask")
+
+  def test_preprocessing_pipeline_installs_block_diffusion_transform(self):
+    operations = self._pipeline_operations(self._block_diffusion_config(), shift=True)
+
+    self.assertTrue(any(isinstance(operation, input_pipeline_utils.PadOrTrimToMaxLength) for operation in operations))
+    self.assertIsInstance(operations[-1], input_pipeline_utils.BlockDiffusionCorruption)
+
+  def test_preprocessing_pipeline_omits_disabled_causal_shift(self):
+    operations = self._pipeline_operations(
+        SimpleNamespace(elastic_enabled=False, training_objective="causal_lm"),
+        shift=False,
+    )
+
+    self.assertTrue(any(isinstance(operation, input_pipeline_utils.PadOrTrimToMaxLength) for operation in operations))
+    self.assertFalse(
+        any(
+            isinstance(operation, (input_pipeline_utils.BlockDiffusionCorruption, input_pipeline_utils.ShiftData))
+            for operation in operations
+        )
+    )
+
+  def test_block_diffusion_rejects_packing_and_post_training_modes(self):
+    base_args = {
+        "shift": True,
+        "use_dpo": False,
+        "use_sft": False,
+        "packing": False,
+        "pad_id": 0,
+        "bos_token_id": 1,
+    }
+    cases = (
+        ({"packing": True}, "packing=False"),
+        ({"use_sft": True}, "pre-training only"),
+        ({"use_dpo": True}, "not compatible with DPO"),
+    )
+    for overrides, expected_message in cases:
+      with self.subTest(overrides=overrides), self.assertRaisesRegex(ValueError, expected_message):
+        hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+            self._block_diffusion_config(),
+            **(base_args | overrides),
+        )
 
 
 if __name__ == "__main__":

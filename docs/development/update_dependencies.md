@@ -80,7 +80,7 @@ overrides. You will need to do this separately for the TPU and GPU environments.
 
 ### TPU Pre-Training
 
-> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-requirements.txt` in the repository was generated using JAX build commit hash: [31c559c7744105009f5d5fcfc3919e505db37f8b](https://github.com/jax-ml/jax/commit/31c559c7744105009f5d5fcfc3919e505db37f8b). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
+> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-requirements.txt` in the repository was generated using JAX build commit hash: [ab4c9b943c70bcb42baf4d379036a19c8aa2689d](https://github.com/jax-ml/jax/commit/ab4c9b943c70bcb42baf4d379036a19c8aa2689d). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
 
 If you have made changes to TPU pre-training dependencies in `src/dependencies/requirements/base_requirements/tpu-requirements.txt`, you need to regenerate the pinned pre-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
 
@@ -89,7 +89,7 @@ bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/tpu-requirements.txt \
 --generated-requirements tpu-requirements.txt \
 --override-requirements src/dependencies/extra_deps/tpu_overrides.txt \
---seed-commit 31c559c7744105009f5d5fcfc3919e505db37f8b
+--seed-commit ab4c9b943c70bcb42baf4d379036a19c8aa2689d
 
 # Copy generated requirements to src/dependencies/requirements/generated_requirements
 mv generated_artifacts/python3_12/tpu-requirements.txt \
@@ -117,7 +117,7 @@ mv generated_artifacts/python3_12/tpu-post-train-requirements.txt \
 
 ### GPU Pre-Training
 
-> **Note:** The current `src/dependencies/requirements/generated_requirements/cuda12-requirements.txt` in the repository was generated using JAX build commit hash: [efd6cf797ee9c4f29c6c6d5e91ae4432209063be](https://github.com/jax-ml/jax/commit/efd6cf797ee9c4f29c6c6d5e91ae4432209063be). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
+> **Note:** The current `src/dependencies/requirements/generated_requirements/cuda12-requirements.txt` in the repository was generated using JAX build commit hash: [ab4c9b943c70bcb42baf4d379036a19c8aa2689d](https://github.com/jax-ml/jax/commit/ab4c9b943c70bcb42baf4d379036a19c8aa2689d). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
 
 If you have made changes to the GPU pre-training dependencies in `src/dependencies/requirements/base_requirements/cuda12-requirements.txt`, you need to regenerate the pinned pre-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
 
@@ -125,7 +125,7 @@ If you have made changes to the GPU pre-training dependencies in `src/dependenci
 bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/cuda12-requirements.txt \
 --generated-requirements cuda12-requirements.txt \
---seed-commit efd6cf797ee9c4f29c6c6d5e91ae4432209063be \
+--seed-commit ab4c9b943c70bcb42baf4d379036a19c8aa2689d \
 --override-requirements src/dependencies/extra_deps/cuda12_overrides.txt \
 --hardware cuda12
 
@@ -143,6 +143,19 @@ python3 src/dependencies/scripts/generate_decoupled_requirements.py
 ```
 
 The `decoupled-requirements` pre-commit hook fails when a change under `src/dependencies/requirements/` leaves this file stale.
+
+### Optional TensorFlow and JetStream dependencies
+
+Optional TensorFlow, SeqIO, and JetStream dependencies are listed with pinned versions in `src/dependencies/extra_deps/tf_requirements.txt` and installed with `--no-deps` when `--with-tf` is passed to `install_pre_train_extra_deps.py`.
+
+To update `src/dependencies/extra_deps/tf_requirements.txt` when upgrading TensorFlow or JetStream, run `src/dependencies/scripts/generate_tf_requirements.py`. This script invokes `uv pip compile` using `tpu-requirements.txt` as a strict constraint file (`-c`) to prevent conflicts with core MaxText dependencies and writes only the pinned delta to `src/dependencies/extra_deps/tf_requirements.txt`:
+
+```bash
+python3 src/dependencies/scripts/generate_tf_requirements.py \
+  --tensorflow-version 2.20.0 \
+  --tensorflow-text-version 2.20.1 \
+  --jetstream-commit 29329e8e73820993f77cfc8efe34eb2a73f5de98
+```
 
 ## Step 4: Verify the new dependencies
 

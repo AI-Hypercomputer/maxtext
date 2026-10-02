@@ -66,6 +66,9 @@ fi
 if [[ -z ${INCLUDE_TEST_ASSETS} ]]; then
   export INCLUDE_TEST_ASSETS=false
 fi
+if [[ -z ${TF} ]]; then
+  export TF=false
+fi
 
 # Create docker build arguments array
 docker_build_args=(
@@ -75,6 +78,7 @@ docker_build_args=(
   "JAX_VERSION=${JAX_VERSION}"
   "PACKAGE_DIR=${PACKAGE_DIR}"
   "INCLUDE_TEST_ASSETS=${INCLUDE_TEST_ASSETS}"
+  "TF=${TF}"
 )
 
 run_docker_build() {
@@ -86,7 +90,7 @@ run_docker_build() {
 # Function to build image for GPUs
 build_gpu_image() {
   if [[ ${MODE} == "pinned" ]]; then
-    local base_image=ghcr.io/nvidia/jax:base-2024-12-04
+    local base_image=ubuntu:24.04
     docker_build_args+=("BASEIMAGE=${base_image}")
   fi
 
@@ -128,4 +132,6 @@ echo "docker run -v $(pwd):/deps --rm -it --privileged --entrypoint bash ${LOCAL
 echo ""
 echo "You can run MaxText and your development tests inside of the docker image. Changes to your workspace will automatically
 be reflected inside the docker container."
-echo "Once you want to upload your docker container to GCR, run 'upload_maxtext_docker_image CLOUD_IMAGE_NAME=your_image_name'."
+echo "Once you want to upload your docker container to Artifact Registry, 
+run 'upload_maxtext_docker_image CLOUD_IMAGE_NAME=LOCATION-docker.pkg.dev/PROJECT_ID/REPOSITORY_NAME/IMAGE_NAME'."
+echo "(e.g., CLOUD_IMAGE_NAME=us-docker.pkg.dev/my-project/my-repo/my-image)."

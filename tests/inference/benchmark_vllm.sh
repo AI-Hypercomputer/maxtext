@@ -81,7 +81,7 @@ $PYTHON_EXEC -m vllm.entrypoints.cli.main bench throughput \
   --gpu-memory-utilization "$GPU_MEM_UTIL" \
   --load-format "$LOAD_FORMAT" \
   --hf-overrides '{"architectures": ["MaxTextForCausalLM"]}' \
-  --additional-config "{\"maxtext_config\": {\"model_name\": \"$MODEL_NAME\", \"weight_dtype\": \"bfloat16\", \"attention\": \"$ATTENTION\", \"allow_split_physical_axes\": true, \"scan_layers\": true, \"enable_nnx\": true, \"pure_nnx_decoder\": true}}" \
+  --additional-config "{\"maxtext_config\": {\"model_name\": \"$MODEL_NAME\", \"weight_dtype\": \"bfloat16\", \"attention\": \"$ATTENTION\", \"allow_split_physical_axes\": true, \"scan_layers\": true}}" \
   --dataset-name random \
   --random-input-len "$INPUT_LEN" \
   --random-output-len "$OUTPUT_LEN" \

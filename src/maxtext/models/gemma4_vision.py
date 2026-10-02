@@ -18,15 +18,12 @@
 from typing import cast
 import jax
 import jax.numpy as jnp
-from flax import linen as nn
 from flax import nnx
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, AttentionType
 from maxtext.layers import attentions
-from maxtext.layers import initializers
 from maxtext.layers import linears
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import normalizations
 
 
@@ -636,15 +633,3 @@ class Gemma4VisionProjector(nnx.Module):
     x_normed = self.norm(x)
     x_projected = self.projection(x_normed)
     return x_projected
-
-
-def gemma4_vision_encoder_as_linen(config: Config, mesh: Mesh) -> nn.Module:
-  """Wraps the Gemma 4 Vision Encoder as a Linen module."""
-  return nnx_wrappers.to_linen(
-      Gemma4VisionEncoderLayer,
-      config=config,
-      mesh=mesh,
-      name="Gemma4VisionEncoderLayer",
-      abstract_init=False,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )

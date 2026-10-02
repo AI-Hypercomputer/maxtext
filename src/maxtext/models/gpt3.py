@@ -54,7 +54,7 @@ class Gpt3LayerNorm(nnx.Module):
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
       kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.zeros,
+      scale_init: Initializer = jax.nn.initializers.zeros,
       use_bias: bool = True,
       reductions_in_fp32: bool = False,
       parameter_memory_host_offload: bool = False,
@@ -111,51 +111,6 @@ class Gpt3LayerNorm(nnx.Module):
       bias = jnp.asarray(bias, self.dtype)
       output += bias
     return output
-
-
-def gpt3_layer_norm(
-    *,
-    num_features: int,
-    epsilon: float = 1e-6,
-    dtype: Any = jnp.float32,
-    weight_dtype: Any = jnp.float32,
-    kernel_axes: tuple[None | str, ...] = (),
-    scale_init: Initializer = nn.initializers.zeros,
-    use_bias: bool = True,
-    reductions_in_fp32: bool = False,
-    parameter_memory_host_offload: bool = False,
-    name: None | str = None,
-):
-  """Initializes the gpt3_layer_norm module.
-
-  Args:
-    num_features: the number of features.
-    epsilon: the epsilon for the layer norm.
-    dtype: the dtype of the computation (default: float32).
-    weight_dtype: the dtype of the weights (default: float32).
-    kernel_axes: logical axes for partitioning the kernel.
-    scale_init: initializer for the scale.
-    use_bias: whether to add bias in linear transformation.
-    reductions_in_fp32: whether to do reductions in fp32.
-    parameter_memory_host_offload: Determines whether to offload params to host
-    name: name passed to the ToLinen Module
-  """
-
-  module = nnx_wrappers.to_linen(
-      Gpt3LayerNorm,
-      num_features=num_features,
-      epsilon=epsilon,
-      dtype=dtype,
-      weight_dtype=weight_dtype,
-      kernel_axes=kernel_axes,
-      scale_init=scale_init,
-      use_bias=use_bias,
-      reductions_in_fp32=reductions_in_fp32,
-      parameter_memory_host_offload=parameter_memory_host_offload,
-      name=name,
-      metadata_fn=initializers.variable_to_logically_partitioned,
-  )
-  return module
 
 
 # -----------------------------------------
@@ -244,14 +199,18 @@ class Gpt3MultiHeadAttention(nnx.Module):
     self.KVCache_0 = self.init_kv_caches(inputs_kv_shape=feature_dim) if self.model_mode != MODEL_MODE_TRAIN else None
     if self.fused_qkv:
       self.qkv_proj = self.create_projection_layer(
-          feature_dim, (3, self.num_heads, self.head_dim), ("embed", "qkv", "heads", "kv")
+          feature_dim, (3, self.num_heads, self.head_dim), ("embed_attn", "qkv", "heads", "kv")
       )
     else:
-      self.query = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
-      self.key = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
-      self.value = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed", "heads", "kv"))
+      self.query = self.create_projection_layer(
+          feature_dim, (self.num_heads, self.head_dim), ("embed_attn", "heads", "kv")
+      )
+      self.key = self.create_projection_layer(feature_dim, (self.num_heads, self.head_dim), ("embed_attn", "heads", "kv"))
+      self.value = self.create_projection_layer(
+          feature_dim, (self.num_heads, self.head_dim), ("embed_attn", "heads", "kv")
+      )
     self.out = self.create_projection_layer(
-        (self.num_heads, self.head_dim), feature_dim[-1], ("heads", "kv", "embed"), axis=(-2, -1)
+        (self.num_heads, self.head_dim), feature_dim[-1], ("heads", "kv", "embed_attn"), axis=(-2, -1)
     )
     self.attention_op = AttentionOp(
         config=config,

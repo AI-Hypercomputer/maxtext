@@ -14,12 +14,13 @@
 
 """Specialised layers for Gemma 3."""
 
+import functools
+
 import jax
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
@@ -30,8 +31,8 @@ from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral, MlpBlock, Dropout
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-from maxtext.layers.initializers import variable_to_logically_partitioned
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
 
 
 GEMMA3_ATTENTION_PATTERN = (
@@ -96,6 +97,7 @@ class Gemma3DecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -133,6 +135,7 @@ class Gemma3DecoderLayer(nnx.Module):
           num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -143,6 +146,7 @@ class Gemma3DecoderLayer(nnx.Module):
         num_features=config.emb_dim,
         dtype=config.dtype,
         weight_dtype=config.weight_dtype,
+        shard_mode=config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -166,6 +170,7 @@ class Gemma3DecoderLayer(nnx.Module):
           num_features=config.emb_dim,
           dtype=config.dtype,
           weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
@@ -177,6 +182,14 @@ class Gemma3DecoderLayer(nnx.Module):
       self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
+
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=self.mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+        extra_stack_level=1,
+    )
 
   def __call__(
       self,
@@ -202,11 +215,12 @@ class Gemma3DecoderLayer(nnx.Module):
       is_scan_carry = True
     elif isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
-    lnx = self.pre_self_attention_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx_sharding = create_sharding(self.mesh, self.activation_axis_names)
+    lnx = self.pre_self_attention_norm(inputs, out_sharding=lnx_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
 
     # Self-attention block
     attention_lnx, kv_cache = self.self_attention(
@@ -219,29 +233,36 @@ class Gemma3DecoderLayer(nnx.Module):
         previous_chunk=previous_chunk,
         slot=slot,
         bidirectional_mask=bidirectional_mask,
+        out_sharding=lnx_sharding,
         kv_cache=kv_cache,
         attention_metadata=attention_metadata,
     )
     if cfg.use_post_attn_norm:
-      attention_lnx = self.post_self_attention_norm(attention_lnx)
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+      attention_lnx = self.post_self_attention_norm(attention_lnx, out_sharding=lnx_sharding)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
 
     attention_lnx += inputs
     residual = attention_lnx
 
-    attn_output = self.pre_ffw_norm(attention_lnx)
+    attn_output = self.pre_ffw_norm(attention_lnx, out_sharding=lnx_sharding)
 
     # MLP block.
-    mlp_lnx = self.mlp(attn_output, deterministic=deterministic)
+    mlp_intermediate_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", "activation_mlp"))
+    mlp_lnx = self.mlp(
+        attn_output,
+        deterministic=deterministic,
+        intermediate_sharding=mlp_intermediate_sharding,
+        out_sharding=lnx_sharding,
+    )
     if cfg.use_post_ffw_norm:
-      mlp_lnx = self.post_ffw_norm(mlp_lnx)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+      mlp_lnx = self.post_ffw_norm(mlp_lnx, out_sharding=lnx_sharding)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
     next_layer_addition_dropped_out = self.dropout(next_layer_addition, deterministic=deterministic)
 
     layer_output = next_layer_addition_dropped_out
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
     if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
@@ -313,6 +334,14 @@ class Gemma3ScannableBlock(nnx.Module):
       )
       setattr(self, layer_name, layer)
 
+    self._maybe_shard_with_logical = functools.partial(
+        maybe_shard_with_logical,
+        mesh=self.mesh,
+        shard_mode=config.shard_mode,
+        debug_sharding=config.debug_sharding,
+        extra_stack_level=1,
+    )
+
   def __call__(
       self,
       inputs,
@@ -329,7 +358,7 @@ class Gemma3ScannableBlock(nnx.Module):
   ):
 
     cfg = self.config
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = self._maybe_shard_with_logical(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
 
@@ -576,21 +605,6 @@ class VisionEmbedder(nnx.Module):
     return x
 
 
-def visionembedder_as_linen(
-    config: Config,
-    mesh: Mesh,
-):
-  """Creates a VisionEmbedder module."""
-  return nnx_wrappers.to_linen(
-      VisionEmbedder,
-      config,
-      mesh=mesh,
-      name="VisionEmbedder_0",
-      abstract_init=False,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-
-
 class VisionExit(nnx.Module):
   """The vision exit layer.
 
@@ -621,11 +635,6 @@ class VisionExit(nnx.Module):
     x = nnx.avg_pool(x, window_shape=window_shape, strides=window_shape)
     batch_size, height, width, embed_dim = x.shape
     return jnp.reshape(x, (batch_size, height * width, embed_dim))
-
-
-def vision_exit_as_linen(x: jax.Array, output_length: int) -> jax.Array:
-  """A wrapper to use VisionExit as a function."""
-  return nnx.bridge.to_linen(VisionExit, output_length=output_length)(x)
 
 
 class Gemma3VisionEncoderLayer(nnx.Module):
@@ -714,19 +723,3 @@ class Gemma3VisionEncoderLayer(nnx.Module):
     bn, l, c = x.shape
     x = jnp.reshape(x, [b, n, l, c])
     return x
-
-
-def gemma3visionencoder_as_linen(
-    config: Config,
-    mesh: Mesh,
-):
-  """Creates a Gemma3VisionEncoder module."""
-  module = nnx_wrappers.to_linen(
-      Gemma3VisionEncoderLayer,
-      config=config,
-      mesh=mesh,
-      name="Gemma3VisionEncoderLayer_0",
-      abstract_init=False,
-      metadata_fn=variable_to_logically_partitioned,
-  )
-  return module

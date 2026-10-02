@@ -31,9 +31,9 @@ LLAMA_OVERRIDES=(
 )
 
 echo "=========================================================================="
-echo "=== [Steps 1-3] Eager Mode Evaluation on simple_mlp                    ==="
+echo "=== [Steps 1-3] Eager Mode Evaluation on default (Tiny MLP)            ==="
 echo "=========================================================================="
-python3 tests/end_to_end/tpu/compare_training_engine.py model_name=simple_mlp test_suite=eager_all
+python3 tests/end_to_end/tpu/compare_training_engine.py model_name=default test_suite=eager_all
 
 echo ""
 echo "=========================================================================="

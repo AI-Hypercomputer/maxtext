@@ -249,7 +249,7 @@ def handle_skip_on_tpu7x(request):
     except Exception:  # pylint: disable=broad-exception-caught
       is_tpu7x = False
     if is_tpu7x:
-      pytest.skip("AOT tests do not support TPU7x platform")
+      pytest.skip("Skipped: test is marked skip_on_tpu7x (unsupported or under investigation on TPU7x)")
 
 
 @pytest.fixture(autouse=True)

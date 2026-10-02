@@ -19,6 +19,9 @@ name: MaxText CI Tests on Docker Images
 on:
   workflow_call:
     inputs:
+      repository_name:
+        required: true
+        type: string
       image_name:
         required: true
         type: string
@@ -31,11 +34,6 @@ on:
       workflow:
         required: true
         type: string
-      additional_image_to_tag:
-        description: 'Optional additional image to tag as latest if tests pass.'
-        required: false
-        type: string
-        default: ''
 permissions:
   contents: read
 
@@ -54,8 +52,9 @@ jobs:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           IMAGE_NAME: ${{ inputs.image_name }}
           IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
         run: |
-          if gcloud container images describe "gcr.io/${PROJECT_NAME}/${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
+          if gcloud container images describe "us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${IMAGE_NAME}:${IMAGE_TAG}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
@@ -71,12 +70,13 @@ jobs:
         flavor: >-
             ${{ fromJSON('{
               "gpu-pre-training": ["gpu-unit", "gpu-integration"],
-              "tpu-post-training": ["tpu-post-training-unit", "tpu-post-training-integration", "cpu-post-training-unit"],
+              "tpu-post-training": ["tpu-post-training-unit", "tpu-post-training-integration", "cpu-post-training-unit", "cpu-post-training-integration"],
               "tpu-pre-training": ["tpu-unit", "tpu-integration", "cpu-unit", "cpu-integration"]
             }')[format('{0}-{1}', inputs.device, inputs.workflow)] }}
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: ${{ matrix.flavor }}
+      repository_name: ${{ inputs.repository_name }}
       base_image: ${{ inputs.image_name }}:${{ inputs.image_tag }}
       is_scheduled_run: true
       maxtext_installed: true
@@ -89,7 +89,7 @@ jobs:
     container: google/cloud-sdk:524.0.0
     steps:
       - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev,gcr.io -q
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
       - name: Add tags
         shell: bash
         env:
@@ -97,23 +97,12 @@ jobs:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           IMAGE_NAME_EXPR: ${{ inputs.image_name }}
           IMAGE_TAG_EXPR: ${{ inputs.image_tag }}
-          ADDITIONAL_IMAGE_TO_TAG: ${{ inputs.additional_image_to_tag }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
         run: |
           image_name="$IMAGE_NAME_EXPR"
           image_tag="$IMAGE_TAG_EXPR"
-          SOURCE_IMAGE="gcr.io/${PROJECT_NAME}/${image_name}"
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${image_name}"
 
           # Add the traceability tag to confirm it passed validation suite
           gcloud container images add-tag "${SOURCE_IMAGE}:${image_tag}" \
-            "${SOURCE_IMAGE}:verified-${image_tag}" --quiet
-
-          # TODO: This is a workaround, to be removed when promote_docker_image.yml workflow is stable
-          # Add "latest" tag
-          gcloud container images add-tag "${SOURCE_IMAGE}:${image_tag}" "${SOURCE_IMAGE}:latest" --quiet
-
-          # Add "latest" tag to additional image if specified
-          if [ -n "$ADDITIONAL_IMAGE_TO_TAG" ]; then
-            ADDITIONAL_IMAGE="gcr.io/${PROJECT_NAME}/${ADDITIONAL_IMAGE_TO_TAG}"
-            echo "Tagging ${ADDITIONAL_IMAGE}:${image_tag} as ${ADDITIONAL_IMAGE}:latest"
-            gcloud container images add-tag "${ADDITIONAL_IMAGE}:${image_tag}" "${ADDITIONAL_IMAGE}:latest" --quiet
-          fi
+            "${SOURCE_IMAGE}:verified-ci-${image_tag}" --quiet

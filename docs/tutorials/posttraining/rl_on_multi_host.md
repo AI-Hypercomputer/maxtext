@@ -48,7 +48,7 @@ rely on the vLLM library.
 - [Setup Environment Variables](#setup-environment-variables)
 - [Get Your Model Checkpoint](#get-your-model-checkpoint)
 - [Submit your RL workload via Pathways](#submit-your-rl-workload-via-pathways)
-- [Managing Workloads](#managing-workloads)
+- [Monitor and clean up](#monitor-and-clean-up)
 - [Troubleshooting](#troubleshooting)
 
 ## Prerequisites
@@ -61,9 +61,9 @@ Before starting, ensure you have:
   - **Artifact Registry Writer** (`roles/artifactregistry.writer`) to upload Docker images.
   - **Storage Admin** (`roles/storage.admin`) or **Storage Object Admin** (`roles/storage.objectAdmin`) combined with **Storage Legacy Bucket Reader** (`roles/storage.legacyBucketReader`) on your GCS bucket to read/write checkpoints and logs. (Note: A bucket-level read permission like `storage.buckets.get` is required by JAX/TensorStore to verify bucket existence and metadata; using `roles/storage.objectAdmin` alone will cause a misleading "bucket not found" error).
 - A Hugging Face account with an access token for downloading models.
-- Prerequisites for XPK installed (follow [official documentation](https://github.com/AI-Hypercomputer/xpk/blob/main/docs/installation.md#1-prerequisites)).
-  - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-sdk-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
-- A Pathways-ready GKE cluster (see [create GKE cluster](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster)).
+- Cluster Toolkit installed and configured. Follow [Running MaxText with Cluster Toolkit](../../run_maxtext/run_maxtext_via_cluster_toolkit.md) for `gcluster` setup.
+  - **Important:** Modern GKE clusters require the GKE auth plugin. If you encounter `gke-gcloud-auth-plugin not found` when running `kubectl` commands, you must install it locally (e.g., `sudo apt-get install google-cloud-cli-gke-gcloud-auth-plugin` for `apt` installations, or `gcloud components install gke-gcloud-auth-plugin` for standalone archive installations).
+- A Pathways-ready GKE cluster configured for Cluster Toolkit, with healthy Kueue and JobSet components (see [create a GKE cluster with Pathways](https://docs.cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/create-gke-cluster) and [Cluster Toolkit documentation](https://cloud.google.com/cluster-toolkit/docs/overview)).
 - **Docker** installed and configured for sudoless use. Follow the steps to [configure sudoless Docker](https://docs.docker.com/engine/install/linux-postinstall/).
 
 ## Build and upload MaxText Docker image
@@ -94,7 +94,7 @@ export BASE_OUTPUT_DIRECTORY=<GCS_BUCKET> # e.g., gs://my-bucket/maxtext-runs
 
 # An arbitrary string to identify this specific run.
 # We recommend to include the model, user, and timestamp.
-# Note: Kubernetes requires workload names to be valid DNS labels (lowercase, no underscores or periods).
+# Note: Workload names cannot exceed 28 characters (or 22 characters when using Pathways due to Kubernetes 63-byte coordinator label limits) and must be valid DNS labels (lowercase alphanumeric and hyphens).
 export RUN_NAME=<RUN_NAME>
 
 # The directory containing the MaxText-compatible model checkpoint.
@@ -111,22 +111,21 @@ export PROJECT_ID=<PROJECT_ID>
 # The GCP location (listed as "Location" in the UI) and name of your
 # TPU-enabled GKE cluster. Both can be found on the
 # [Cloud Console](https://console.cloud.google.com/kubernetes/list).
-export ZONE=<ZONE> # e.g., 'us-central1' or 'us-central1-a'
+export LOCATION=<LOCATION> # e.g., 'us-central1' or 'us-central1-a'
 export GKE_CLUSTER=<CLUSTER_NAME>
 
-# For a full list of MaxText-supported TPU types, see: `src/maxtext/utils/accelerator_to_spec_map.py`. To see the TPU type
-# of your cluster:
+# Cluster Toolkit workload placement. Specify the compute type (machine type)
+# and topology matching your TPU node pool.
+# For example:
+#   - v5p-128: COMPUTE_TYPE='ct5p-hightpu-4t', TOPOLOGY='4x4x4'
+#   - v6e-256: COMPUTE_TYPE='ct6e-hightpu-4t', TOPOLOGY='16x16'
+# To inspect the accelerator and topology labels on your GKE cluster nodes:
+# kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o custom-columns=NAME:.metadata.name,ACCELERATOR:.metadata.labels.cloud\\.google\\.com/gke-tpu-accelerator,TOPOLOGY:.metadata.labels.cloud\\.google\\.com/gke-tpu-topology
+export COMPUTE_TYPE=<COMPUTE_TYPE>
+export TOPOLOGY=<TOPOLOGY>
 
-# 1. Connect to the cluster (required for kubectl commands later):
-# gcloud container clusters get-credentials ${GKE_CLUSTER?} --location ${ZONE?} --project ${PROJECT_ID?}
-
-# 2. Find your TPU type (e.g., 'v5p-128') by checking the accelerator labels on your nodes:
-# kubectl get nodes -l cloud.google.com/gke-tpu-accelerator -o jsonpath='{.items[*].metadata.labels.cloud\.google\.com/gke-tpu-accelerator}' | tr ' ' '\n' | sort -u
-export TPU_TYPE=<TPU_TYPE>
-
-# The Docker image you pushed in the prerequisite step
-export CLOUD_IMAGE_NAME=<IMAGE_NAME>
-export DOCKER_IMAGE="gcr.io/${PROJECT_ID?}/${CLOUD_IMAGE_NAME?}"
+# The Docker image you pushed in the previous step
+export DOCKER_IMAGE=<IMAGE_NAME>
 ```
 
 ## Get Your Model Checkpoint
@@ -161,38 +160,30 @@ export MAXTEXT_CKPT_PATH=<CKPT_PATH> # e.g., gs://my-bucket/my-model-checkpoint/
 See the **Troubleshooting** section for concise instructions on how to retry or
 resume a failed workload.
 
-Ensure you have a Pathways-ready GKE cluster (as mentioned in Prerequisites) and
-submit the `train_rl.py` script via XPK.
+Configure `kubectl` and `gcluster` for the target cluster before submitting:
 
-> **Note:** XPK v0.14.0+ automatically discovers your cluster's location from
-> GCP. You don't need to specify `--zone` in the commands below. If using an
-> older XPK version, add `--zone=<ZONE>` to the workload commands.
+```bash
+gcloud config set project ${PROJECT_ID?}
+gcloud container clusters get-credentials ${GKE_CLUSTER?} \
+  --location ${LOCATION?} \
+  --project ${PROJECT_ID?}
+gcluster job config set project ${PROJECT_ID?}
+gcluster job config set cluster ${GKE_CLUSTER?}
+gcluster job config set location ${LOCATION?}
+```
 
 ### Submit GRPO workload
 
 ```bash
-xpk workload create-pathways --workload ${RUN_NAME?} \
---docker-image ${DOCKER_IMAGE?} --cluster ${GKE_CLUSTER?} \
---tpu-type=${TPU_TYPE?} --num-slices=1 \
---project=${PROJECT_ID?} --priority=high \
---command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
-python3 -m maxtext.trainers.post_train.rl.train_rl \
-  model_name=${MODEL?} \
-  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
-  run_name=${RUN_NAME?} \
-  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
-  rollout_tensor_parallelism=8 \
-  hf_access_token=${HF_TOKEN?}"
-```
-
-### Submit GSPO workload
-
-```bash
-xpk workload create-pathways --workload ${RUN_NAME?} \
---docker-image ${DOCKER_IMAGE?} --cluster ${GKE_CLUSTER?} \
---tpu-type=${TPU_TYPE?} --num-slices=1 \
---project=${PROJECT_ID?} --priority=high \
---command "HF_TOKEN=${HF_TOKEN?} TF_CPP_MIN_LOG_LEVEL=0 JAX_PLATFORMS=proxy JAX_BACKEND_TARGET=grpc://127.0.0.1:29000 ENABLE_PATHWAYS_PERSISTENCE='1' \
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --pathways \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=1 \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command="ENABLE_PATHWAYS_PERSISTENCE=1 \
 python3 -m maxtext.trainers.post_train.rl.train_rl \
   model_name=${MODEL?} \
   load_parameters_path=${MAXTEXT_CKPT_PATH?} \
@@ -200,21 +191,49 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
   rollout_tensor_parallelism=8 \
   hf_access_token=${HF_TOKEN?} \
-  loss_algo=gspo-token"
+  enable_single_controller=True"
 ```
 
-## Managing Workloads
+### Submit GSPO workload
 
-- **Monitor workload status**: Check Pathways job status: `kubectl get pathwaysjob`. Check pod status: `kubectl get pods`.
-- **Delete a workload**: To remove a failed or unwanted Pathways job, use XPK:
-  ```bash
-  xpk workload delete \
-      --workload ${RUN_NAME?} \
-      --cluster ${GKE_CLUSTER?} \
-      --project ${PROJECT_ID?}
-  ```
-  In case the job still lingers on, you can use
-  `kubectl get pods` to obtain the name of the pod and then run: `kubectl delete pod <POD_NAME>`.
+```bash
+gcluster job submit \
+  --image=${DOCKER_IMAGE?} \
+  --name=${RUN_NAME?} \
+  --pathways \
+  --compute-type=${COMPUTE_TYPE?} \
+  --topology=${TOPOLOGY?} \
+  --num-slices=1 \
+  --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
+  --command="ENABLE_PATHWAYS_PERSISTENCE=1 \
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+  model_name=${MODEL?} \
+  load_parameters_path=${MAXTEXT_CKPT_PATH?} \
+  run_name=${RUN_NAME?} \
+  base_output_directory=${BASE_OUTPUT_DIRECTORY?} \
+  rollout_tensor_parallelism=8 \
+  hf_access_token=${HF_TOKEN?} \
+  rl.loss_algo=gspo-token \
+  enable_single_controller=True"
+```
+
+## Monitor and clean up
+
+```bash
+gcluster job list
+# Note: For Pathways workloads (> 5 pods), specify --main-only=false to retrieve logs from all pods:
+gcluster job logs ${RUN_NAME?} --main-only=false
+gcluster job cancel ${RUN_NAME?}
+```
+
+You can also inspect the Kubernetes resources directly:
+
+```bash
+kubectl get jobset -l gcluster.google.com/workload=${RUN_NAME?}
+# In Pathways workloads, use the jobset-name label to select all pods (both pathways-head and worker pods):
+kubectl get pods -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?}
+kubectl logs -f -l jobset.sigs.k8s.io/jobset-name=${RUN_NAME?} --all-containers=true --max-log-requests=64
+```
 
 ## Troubleshooting
 
@@ -230,9 +249,13 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   - **Solution**: Explicitly pass at least one of them in your training command (e.g., `rollout_tensor_parallelism=8` as shown in the example commands above).
 - **Workload retry / resume**:
   - **Retry (fresh run)**: Use a unique run name to avoid overwriting
-    outputs: `export RUN_NAME=${RUN_NAME?}-retry1 export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items`. Then
-    submit the XPK workload. If "workload already exists" error occurs, pick
-    a new name or list jobs: `kubectl get pathwaysjob`.
+    outputs:
+    ```bash
+    export MAXTEXT_CKPT_PATH=${BASE_OUTPUT_DIRECTORY?}/${RUN_NAME?}/0/items
+    export RUN_NAME=${RUN_NAME?}-retry1
+    ```
+    Then submit the Cluster Toolkit workload. If a "workload already exists" error occurs, pick
+    a new name or cancel the previous job (`gcluster job cancel ${RUN_NAME?}`).
   - **Resume from checkpoint**: Keep the same `RUN_NAME` and set the
     checkpoint path: `export load_parameters_path=${MAXTEXT_CKPT_PATH?}/checkpoint-0000`. Then submit
     the workload again.
@@ -241,4 +264,4 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 
 For more detailed troubleshooting, refer to the
 [MaxText documentation](../../index.md) and
-[XPK documentation](https://github.com/AI-Hypercomputer/xpk).
+[Cluster Toolkit guide](../../run_maxtext/run_maxtext_via_cluster_toolkit.md).

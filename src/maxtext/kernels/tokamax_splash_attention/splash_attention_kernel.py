@@ -823,7 +823,7 @@ def _splash_attention_forward(
             kv_steps=kv_steps,
             bq=bq,
             bkv=bkv,
-            bkv_compute=bkv_compute,
+            bkv_compute=bkv_compute,  # pyrefly: ignore[bad-argument-type]
             head_dim_v=head_dim_v,
             # note: fuse_reciprocal can only be False if save_residuals is True
             # fuse_reciprocal = (config.fuse_reciprocal or not save_residuals)
@@ -2108,7 +2108,11 @@ def _make_dynamic_splash_attention(
 
     dkv_mask_info = None
     if config.has_backward_blocks:
-      dkv_mask_info = process_mask_fn(mask, (config.block_q_dkv, config.block_kv_dkv), is_dkv=True)
+      dkv_mask_info = process_mask_fn(
+          mask,
+          (config.block_q_dkv, config.block_kv_dkv),  # pyrefly: ignore[bad-argument-type]
+          is_dkv=True,
+      )
 
     return fwd_mask_info, dkv_mask_info
 

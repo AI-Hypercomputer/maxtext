@@ -14,6 +14,11 @@
 
 set -xe
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 RUN_NAME=sft-$(date +%Y-%m-%d-%H-%M-%S)
 PER_DEVICE_BATCH_SIZE=1
 LOSS_THRESHOLD=100.0 # Set to large value so test is guaranteed to pass

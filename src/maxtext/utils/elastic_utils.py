@@ -15,13 +15,13 @@
 """Utility functions for Elastic Training."""
 
 from collections import Counter
-import functools
 from types import SimpleNamespace
 
 import jax
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 import pathwaysutils
+from pathwaysutils.elastic import elastic
 from pathwaysutils.elastic import manager
 
 elastic_manager: manager.Manager | None = None
@@ -39,11 +39,11 @@ def record_slice_state(recorder, active_slices_override: int | None = None) -> N
   ):
     return
 
-  available_slices = len(pathwaysutils.elastic.get_active_slice_indices())
+  available_slices = len(elastic.get_active_slice_indices())
   active_slices = (
       active_slices_override if active_slices_override is not None else len(elastic_manager.active_slice_indices)
   )
-  total_slices = len(pathwaysutils.elastic.get_slice_to_devices(jax.devices()))
+  total_slices = len(elastic.get_slice_to_devices(jax.devices()))
 
   recorder.record_elastic_slice_counts(
       available_slices=available_slices,
@@ -57,7 +57,7 @@ def record_elastic_event_start(recorder, config) -> None:
   global pending_elastic_event_type
   event_type = "elastic_scale_up" if is_scale_up_event(config) else "elastic_slice_down"
   pending_elastic_event_type = event_type
-  if recorder:
+  if recorder and hasattr(recorder, "record_elastic_wait_start_time"):
     recorder.record_elastic_wait_start_time(event_type=event_type)
     record_slice_state(recorder, active_slices_override=0)
 
@@ -69,7 +69,7 @@ def record_elastic_wait_end_and_reinit_start(recorder) -> None:
     return
   event_type = pending_elastic_event_type
   pending_elastic_event_type = None
-  if recorder:
+  if recorder and hasattr(recorder, "record_elastic_wait_end_time"):
     recorder.record_elastic_wait_end_time(event_type=event_type)
     recorder.record_elastic_reinit_start_time()
     record_slice_state(recorder)
@@ -79,10 +79,10 @@ def record_elastic_wait_end_and_reinit_start(recorder) -> None:
 def record_elastic_reinit_end() -> None:
   """Records end of elastic reinitialization event."""
   global pending_reinit_recorder
-  if pending_reinit_recorder is not None:
+  if pending_reinit_recorder is not None and hasattr(pending_reinit_recorder, "record_elastic_reinit_end_time"):
     pending_reinit_recorder.record_elastic_reinit_end_time()
     record_slice_state(pending_reinit_recorder)
-    pending_reinit_recorder = None
+  pending_reinit_recorder = None
 
 
 def elastic_enabled(config) -> bool:
@@ -232,12 +232,20 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
   ensure_elastic_manager_initialized(config)
   assert elastic_manager is not None
 
-  cleanup_partial = functools.partial(clean_up_checkpoints, config.checkpoint_dir)
+  def cleanup_iterators_and_checkpoints():
+    # pylint: disable=import-outside-toplevel, broad-exception-caught
+    try:
+      from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
+
+      cleanup_all_iterators()
+    except Exception as e:
+      max_logging.log(f"Failed to cleanup iterators during elastic scale up: {e}")
+    clean_up_checkpoints(config.checkpoint_dir)
 
   if callback_fn is None:
-    effective_callback = cleanup_partial
+    effective_callback = cleanup_iterators_and_checkpoints
   else:
-    effective_callback = chain_callbacks(cleanup_partial, callback_fn)
+    effective_callback = chain_callbacks(cleanup_iterators_and_checkpoints, callback_fn)
 
   return elastic_manager.elastic_retry(
       max_retries=config.elastic_max_retries,
@@ -277,6 +285,13 @@ def maybe_elastic_scale_up(config, checkpoint_manager):
       else:
         checkpoint_manager.wait_until_finished()
     max_logging.log("Checkpoint save completed. Interrupting")
+    # pylint: disable=import-outside-toplevel, broad-exception-caught
+    try:
+      from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
+
+      cleanup_all_iterators()
+    except Exception as e:
+      max_logging.log(f"Error in maybe_elastic_scale_up cleanup: {e}")
     raise manager.ScaleUpSignalError()
 
 

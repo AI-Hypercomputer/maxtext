@@ -19,7 +19,6 @@ distill_alpha: 0.5
 distill_temperature: 1.0
 distill_beta: 0
 distill_layer_indices: []
-enable_nnx: True
 load_balance_loss_weight: 0.001
 
 # Megablox grouped-matmul m-tile (batch_seq). The k/n dims already default to

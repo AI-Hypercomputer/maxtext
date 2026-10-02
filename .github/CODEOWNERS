@@ -10,12 +10,12 @@ src/maxtext/models @parambole @shuningjin @RissyRan @jiangjy1982 @gobbleturk @bv
 # Features
 src/maxtext/experimental/rl @A9isha @khatwanimohit @xuefgu @gagika @richjames0 @shralex @darisoy @shuwenf @igorts-git
 src/maxtext/input_pipeline @aireenmei @SurbhiJainUSC @richjames0 @shralex @darisoy @shuwenf @igorts-git
-src/maxtext/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @jesselu-google @darisoy @shuwenf @igorts-git @shuningjin
+src/maxtext/kernels/megablox @RissyRan @michelle-yooh @gagika @richjames0 @shralex @jesselu-google @darisoy @shuwenf @igorts-git @shuningjin @zxhe-sean
 src/maxtext/kernels/ragged_attention.py @patemotter @vipannalla @richjames0 @shralex @darisoy @shuwenf @igorts-git
 src/maxtext/layers/pipeline.py @gobbleturk @richjames0 @shralex @NuojCheng @darisoy @shuwenf @igorts-git
-src/maxtext/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex @jesselu-google @darisoy @shuwenf @igorts-git @shuningjin
-src/maxtext/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex @darisoy @shuwenf @igorts-git @shuningjin
-src/maxtext/layers/quantizations.py @khatwanimohit @shuningjin @jshin1394 @liudangyi @richjames0 @shralex @darisoy @shuwenf @igorts-git
+src/maxtext/layers/moe.py @RissyRan @michelle-yooh @gagika @richjames0 @shralex @jesselu-google @darisoy @shuwenf @igorts-git @shuningjin @zxhe-sean
+src/maxtext/layers/multi_token_prediction.py @parambole @RissyRan @gagika @richjames0 @shralex @darisoy @shuwenf @igorts-git @shuningjin @zxhe-sean
+src/maxtext/layers/quantizations.py @khatwanimohit @shuningjin @jshin1394 @liudangyi @richjames0 @shralex @darisoy @shuwenf @igorts-git @zxhe-sean
 
 # vLLM eval framework
 src/maxtext/eval/ @dipannita08 @hengtaoguo @igorts-git

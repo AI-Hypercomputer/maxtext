@@ -41,9 +41,10 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     run_name=${run_id} rl.loss_algo='grpo' scan_layers=true \
-    num_batches=5 batch_size=1 num_test_batches=5 \
+    num_batches=2 batch_size=1 num_test_batches=2 \
     model_name=${MODEL_NAME} tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     enable_single_controller=${use_pathways} \
+    remat_policy=full \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     rollout_tensor_parallelism=4 \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
@@ -53,7 +54,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 # Step 3: Run inference on the checkpoint generated from the previous run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/5/model_params \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.6 \

@@ -15,19 +15,36 @@
 """Common LoRA utils needed to support LoRA adapters."""
 
 from collections.abc import Mapping
-from functools import partial
+from functools import lru_cache
 import json
 import os
 import re
 from typing import Optional
 
-from flax import nnx, linen as nn
-from flax.linen import partitioning as nn_partitioning
+from flax import nnx
+from flax.core.spmd import logical_axis_rules
 from flax.training import train_state
 import jax
 import jax.numpy as jnp
 from orbax import checkpoint as ocp
 import qwix
+
+try:
+  from qwix._src.utils import flax_util as _qwix_flax_util  # pylint: disable=g-import-not-at-top
+
+  _orig_qwix_find_param = _qwix_flax_util.find_param
+
+  def _safe_qwix_find_param(x, ptq_array_type=None):
+    try:
+      return _orig_qwix_find_param(x, ptq_array_type)
+    except AttributeError as e:
+      if "shape" in str(e):
+        return None
+      raise
+
+  _qwix_flax_util.find_param = _safe_qwix_find_param
+except (ImportError, AttributeError):
+  pass
 
 from maxtext.common import checkpointing
 from maxtext.configs import pyconfig
@@ -57,7 +74,8 @@ def apply_lora_on_base_params(base_params, lora_params, lora_scale_factor=1.0):
 
   def lora_update_or_base(base_weight, lora_a, lora_b):
     if lora_a is not None and lora_b is not None:
-      return base_weight + jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+      delta = (jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor).astype(base_weight.dtype)
+      return (base_weight + delta).astype(base_weight.dtype)
     else:
       return base_weight  # Keep the base weight if no Lora update
 
@@ -96,7 +114,8 @@ def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.
 
   def lora_update_or_base(base_weight, lora_a, lora_b):
     if lora_a is not None and lora_b is not None:
-      return base_weight - jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor
+      delta = (jnp.einsum("br,rnd->bnd", lora_b, lora_a) * lora_scale_factor).astype(base_weight.dtype)
+      return (base_weight - delta).astype(base_weight.dtype)
     else:
       return base_weight  # Keep the base weight if no Lora update
 
@@ -122,9 +141,8 @@ def unapply_lora_from_base_params(base_params, lora_params, lora_scale_factor=1.
 def load_adapter(config, base_abstract_state_params, adapter_config_path, adapter_weights_path):
   """Load a LoRA adapter from disk and return its parameters.
 
-  When `config.pure_nnx` is True, `base_abstract_state_params` is the NNX
-  abstract param state (no outer `params` wrapper) and the returned
-  `lora_params` follows the same shape. Otherwise both use the Linen tree.
+  `base_abstract_state_params` is the NNX abstract param state (no outer
+  `params` wrapper) and the returned `lora_params` follows the same shape.
 
   Args:
     config: Top-level MaxText config.
@@ -142,22 +160,21 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
   if adapter_config_path:
     if adapter_config_path.startswith("gs://"):
       lora_config = gcs_utils.read_json_from_gcs(adapter_config_path)
+      commit_success = gcs_utils.gcs_path_exists(f"{adapter_weights_path}/commit_success.txt")
     else:
       with open(adapter_config_path, "rt", encoding="utf8") as f:
         lora_config = json.load(f)
+      commit_success = os.path.exists(f"{adapter_weights_path}/commit_success.txt")
 
     if lora_config is None:
       raise FileNotFoundError(f"Failed to read lora_config from {adapter_config_path}.")
 
-    if not gcs_utils.gcs_path_exists(f"{adapter_weights_path}/commit_success.txt"):
+    if not commit_success:
       raise FileNotFoundError(f"Failed to read lora_weights from {adapter_weights_path}.")
 
-    if config.pure_nnx:
-      lora_state, _ = get_lora_abstract_state_nnx(base_abstract_state_params, lora_config)
-    else:
-      lora_state, _ = get_lora_abstract_state(base_abstract_state_params, lora_config)
+    lora_state, _ = get_lora_abstract_state_nnx(base_abstract_state_params, lora_config)
 
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       lora_params = checkpointing.load_params_from_path(
           adapter_weights_path,
           lora_state.params,
@@ -169,20 +186,17 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
   return lora_params, lora_config
 
 
-def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path):
+def setup_initial_lora_state(data_iterator, tx, config, mesh, checkpoint_manager, lora_adapter_path):
   """Initialize the LoRA train state and optionally restore it from a checkpoint.
 
-  On the NNX path, `model` is unused; the abstract state is built from
-  `model_creation_utils.create_nnx_abstract_model` and `lora_state.params`
-  follows the NNX shape. On the Linen path the existing `{"params": ...}`
-  tree shape is preserved.
+  The abstract state is built from
+  `model_creation_utils.create_nnx_abstract_model`, so `lora_state.params`
+  follows the NNX shape.
 
   Args:
-    model: Linen `nn.Module` used on the Linen path; ignored on NNX.
     data_iterator: Data iterator passed through to `load_state_if_possible`.
     tx: Optax gradient transformation for the optimizer.
     config: Top-level MaxText config.
-    rng: PRNG key used for the Linen init.
     mesh: JAX device mesh.
     checkpoint_manager: Orbax `CheckpointManager` for the adapter.
     lora_adapter_path: Path to the adapter directory containing
@@ -199,41 +213,35 @@ def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkp
 
   if lora_adapter_path:
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
-    if config.pure_nnx:
-      # pylint: disable=import-outside-toplevel
-      from maxtext.common import train_state_nnx
-      from maxtext.utils import model_creation_utils
+    # pylint: disable=import-outside-toplevel
+    from maxtext.common import train_state_nnx
+    from maxtext.utils import model_creation_utils
 
-      _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
-      def create_train_state_fn():
-        nnx_model = _create_model_partial()
-        wrt = (
-            getattr(nnx, "LoRAParam", nnx.Param)
-            if getattr(getattr(config, "lora", None), "enable_lora", False)
-            else nnx.Param
-        )
-        optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
-        return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+    def create_train_state_fn():
+      nnx_model = _create_model_partial()
+      wrt = (
+          getattr(nnx, "LoRAParam", nnx.Param)
+          if getattr(getattr(config, "lora", None), "enable_lora", False)
+          else nnx.Param
+      )
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
+      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, True, rng)
+    init_state_fn = create_train_state_fn
     unboxed_abstract_state, _, _ = maxtext_utils.get_abstract_state(config, mesh, init_state_fn, True)
 
     lora_config_path = lora_adapter_path + "adapter_config.json"
 
     lora_config = gcs_utils.read_json_from_gcs(lora_config_path)
 
-    if config.pure_nnx:
-      base_abstract_params = _nnx_param_subtree(unboxed_abstract_state)
-      lora_state, lora_state_annotations = get_lora_abstract_state_nnx(base_abstract_params, lora_config)
-    else:
-      lora_state, lora_state_annotations = get_lora_abstract_state(unboxed_abstract_state.params, lora_config)
+    base_abstract_params = _nnx_param_subtree(unboxed_abstract_state)
+    lora_state, lora_state_annotations = get_lora_abstract_state_nnx(base_abstract_params, lora_config)
 
     lora_weights_path = f"{lora_adapter_path}/0/items"
 
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
+    with logical_axis_rules(config.logical_axis_rules):
       restored_lora, raw_lora_params = checkpointing.load_state_if_possible(
           checkpoint_manager,
           data_iterator,
@@ -419,13 +427,19 @@ def get_lora_abstract_state(base_abstract_params, lora_config):
 # --- Qwix LoRA Utils ---
 
 
+@lru_cache(maxsize=1)
+def _load_lora_module_configs() -> dict:
+  """Loads and caches default LoRA module path mapping config."""
+  config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "lora_module_path.yml")
+  return pyconfig._load_config(config_path)  # pylint: disable=protected-access
+
+
 def _get_lora_module_path(mt_config: pyconfig.HyperParameters) -> str:
   """Gets the regex for modules to apply LoRA on from config, architecture map, or fallback."""
   if mt_config.lora.lora_module_path:
     return mt_config.lora.lora_module_path
 
-  config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "lora_module_path.yml")
-  lora_configs = pyconfig._load_config(config_path)  # pylint: disable=protected-access
+  lora_configs = _load_lora_module_configs()
   model_name = mt_config.model_name.lower()
 
   # Find the first matching architecture prefix or use 'default'
@@ -458,22 +472,27 @@ def _build_lora_provider(mt_config: pyconfig.HyperParameters) -> qwix.LoraProvid
       "weight_qtype": mt_config.lora.lora_weight_qtype,
       "tile_size": mt_config.lora.lora_tile_size,
   }
-  # Distinguish between standard LoRA and QLoRA in logs
   lora_type = "QLoRA" if mt_config.lora.lora_weight_qtype else "LoRA"
-
   max_logging.log(
       f"{lora_type} configured: rank={mt_config.lora.lora_rank} alpha={mt_config.lora.lora_alpha} "
       f"qtype={mt_config.lora.lora_weight_qtype} tile_size={mt_config.lora.lora_tile_size}"
   )
-
   max_logging.log(f"Using lora_module_path: {lora_module_path}")
   return qwix.LoraProvider(**lora_kwargs)
 
 
-def _prepare_dummy_inputs(dummy_bs: int = 1) -> tuple[jnp.ndarray, jnp.ndarray]:
-  """Builds dummy decoder inputs used to materialize LoRA parameters."""
-  # Keep LoRA warmup as small as possible to minimize compile/memory overhead.
-  seq_len = 1
+def _prepare_dummy_inputs(
+    mesh: Optional[jax.sharding.Mesh] = None,
+    dummy_bs: int = 1,
+    seq_len: int = 1,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """Builds minimal dummy decoder inputs partitioned appropriately for the mesh."""
+  if mesh is not None:
+    for axis in ("data", "fsdp", "fsdp_transpose", "expert"):
+      dummy_bs *= mesh.shape.get(axis, 1)
+    for axis in ("tensor_sequence", "context"):
+      seq_len *= mesh.shape.get(axis, 1)
+
   decoder_input_tokens = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   decoder_positions = jnp.zeros((dummy_bs, seq_len), dtype=jnp.int32)
   return decoder_input_tokens, decoder_positions
@@ -487,20 +506,22 @@ def is_lora_enabled(model: nnx.Module) -> bool:
   return False
 
 
-def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperParameters) -> None:
+def _verify_lora_parameters(
+    lora_model: nnx.Module,
+    mt_config: pyconfig.HyperParameters,
+    matched_modules: Optional[set[str]] = None,
+) -> None:
   """Validates that LoRA is active or that target modules were matched."""
+  if matched_modules is None:
+    matched_modules = {
+        "/".join(str(p) for p in path[:-1])
+        for path, value in nnx.iter_graph(lora_model)
+        if isinstance(value, nnx.LoRAParam) and len(path) > 1
+    }
 
-  enabled = is_lora_enabled(lora_model)
-  if enabled:
-    wrapped_modules = set()
-    for path, value in nnx.iter_graph(lora_model):
-      if isinstance(value, nnx.LoRAParam):
-        if len(path) > 1:
-          parent_path = "/".join(str(p) for p in path[:-1])
-          wrapped_modules.add(parent_path)
-
+  if matched_modules or is_lora_enabled(lora_model):
+    wrapped_modules = sorted(list(matched_modules))
     if wrapped_modules:
-      wrapped_modules = sorted(list(wrapped_modules))
       max_logging.log(
           f"LoRA configured: module_path='{_get_lora_module_path(mt_config)}' successfully matched "
           f"{len(wrapped_modules)} target submodules."
@@ -515,17 +536,16 @@ def _verify_lora_parameters(lora_model: nnx.Module, mt_config: pyconfig.HyperPar
   lora_module_path = _get_lora_module_path(mt_config)
   compiled_module_path = re.compile(lora_module_path)
 
-  matched_module_paths = []
-  for path, _ in nnx.iter_modules(lora_model):
-    module_path = "/".join(str(p) for p in path)
-    if module_path and compiled_module_path.search(module_path):
-      matched_module_paths.append(module_path)
+  matched_module_paths = [
+      "/".join(str(p) for p in path)
+      for path, _ in nnx.iter_modules(lora_model)
+      if path and compiled_module_path.search("/".join(str(p) for p in path))
+  ]
 
   if not matched_module_paths:
     max_logging.log(f"Error: LoRA module_path='{lora_module_path}' did not match any weights.")
     raise ValueError("LoRA enabled but no LoRA parameters found in decoder/model state.")
 
-  # Simplify matched paths by replacing numeric layer indices with "*" to avoid redundant output
   simplified_matches = sorted(
       {"/".join("*" if p.isdigit() else p for p in path.split("/")) for path in matched_module_paths}
   )
@@ -585,8 +605,6 @@ def apply_lora_to_model(
     mt_config: pyconfig.HyperParameters,
 ) -> nnx.Module:
   """Optionally applies LoRA/QLoRA to a MaxText model using Qwix."""
-  # pylint: disable=protected-access
-  # Skip Qwix LoRA if MaxText LoRA adapters are loaded
   if mt_config.lora_input_adapters_path:
     max_logging.log("MaxText LoRA adapters loaded, skipping Qwix LoRA application")
     return model
@@ -594,16 +612,10 @@ def apply_lora_to_model(
   if not mt_config.lora.enable_lora:
     return model
 
-  # Dynamically detect and set LoRA rank before model creation if restoring
-
   lora_provider = _build_lora_provider(mt_config)
-
-  dp_size = 1
-  if mesh is not None and "data" in mesh.shape:
-    dp_size = mesh.shape["data"]
-
-  model_rngs = getattr(model.decoder, "rngs", None)  # pyrefly: ignore[missing-attribute]
-  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(dummy_bs=dp_size)
+  decoder = getattr(model, "decoder", model)
+  model_rngs = getattr(decoder, "rngs", None)
+  decoder_input_tokens, decoder_positions = _prepare_dummy_inputs(mesh)
 
   lora_model = qwix.apply_lora_to_model(
       model,
@@ -613,41 +625,27 @@ def apply_lora_to_model(
       rngs=model_rngs,
   )
 
-  if mesh is not None:
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(mt_config.logical_axis_rules):
-      graph_def, state = nnx.split(lora_model)
+  replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec()) if mesh is not None else None
+  matched_modules = set()
 
-      # We handle explicit replication for LoRA to ensure safety and efficiency.
-      state = jax.tree_util.tree_map(
-          lambda x: x.replace(sharding=jax.sharding.PartitionSpec(), out_sharding=None, sharding_names=None)
-          if isinstance(x, nnx.LoRAParam)
-          else x,
-          state,
-          is_leaf=lambda x: isinstance(x, nnx.Variable),
-      )
+  for path, val in nnx.iter_graph(lora_model):
+    if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
+      del val.qwix_rngs
 
-      # Use logical_to_mesh_sharding to correctly map logical axes like 'embed'
-      # to physical mesh axes.
-      dst_shardings = nn.logical_to_mesh_sharding(nnx.get_partition_spec(state), mesh, mt_config.logical_axis_rules)
+    if isinstance(val, nnx.LoRAParam):
+      if len(path) > 1:
+        matched_modules.add("/".join(str(p) for p in path[:-1]))
 
-      def _safe_reshard(var, sharding_spec):
-        if not isinstance(var, nnx.Variable) or not isinstance(sharding_spec, jax.sharding.Sharding):
-          return var
-        val = var.get_value()
-        if not isinstance(val, jax.Array):
-          return var
-        # make_array_from_callback natively constructs a globally sharded array
-        # from the local host arrays, bypassing backend-specific device_put issues
-        # on both Pathways and McJAX.
-        resharded_val = jax.make_array_from_callback(val.shape, sharding_spec, lambda idx: val[idx])
-        return var.replace(value=resharded_val)
+      val.set_metadata(sharding=jax.sharding.PartitionSpec(), out_sharding=None, sharding_names=None)
 
-      state = jax.tree_util.tree_map(_safe_reshard, state, dst_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable))
+      if replicated_sharding is not None:
+        arr = val.get_value()
+        if isinstance(arr, jax.Array) and arr.sharding != replicated_sharding:
+          arr_jnp = jnp.asarray(arr)
+          resharded_arr = jax.make_array_from_callback(arr.shape, replicated_sharding, lambda idx, v=arr_jnp: v[idx])
+          val.set_value(resharded_arr)
 
-      lora_model = nnx.merge(graph_def, state)
-
-  _verify_lora_parameters(lora_model, mt_config)  # pyrefly: ignore[bad-argument-type]
-
+  _verify_lora_parameters(lora_model, mt_config, matched_modules)
   return lora_model  # pyrefly: ignore[bad-return]
 
 
@@ -681,15 +679,36 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
 
   sync_lora_metadata(mt_config)
 
+  mesh = getattr(model, "mesh", None)
+  if mesh is None:
+    try:
+      mesh = maxtext_utils.get_mesh_from_config(mt_config)
+    except Exception:  # pylint: disable=broad-exception-caught
+      mesh = None
+
   abstract_lora_params = nnx.state(model, nnx.LoRAParam)
 
+  def _build_target_leaf(v):
+    val = v.get_value() if hasattr(v, "get_value") else getattr(v, "value", v)
+    pspec = getattr(v, "sharding", None)
+    if not isinstance(pspec, jax.sharding.PartitionSpec):
+      pspec = jax.sharding.PartitionSpec()
+    if mesh is not None:
+      sharding = jax.sharding.NamedSharding(mesh, pspec)
+    else:
+      sharding = getattr(val, "sharding", None)
+
+    if hasattr(val, "shape") and hasattr(val, "dtype"):
+      return {"value": jax.ShapeDtypeStruct(shape=val.shape, dtype=val.dtype, sharding=sharding)}
+    return {"value": val}
+
   target_for_restore = jax.tree.map(
-      lambda v: {"value": v.value},
+      _build_target_leaf,
       abstract_lora_params,
       is_leaf=lambda n: isinstance(n, nnx.Variable),
   )
 
-  sharding_tree = jax.tree.map(lambda x: x.sharding if hasattr(x, "sharding") else None, target_for_restore)
+  sharding_tree = jax.tree.map(lambda x: getattr(x, "sharding", None), target_for_restore)
   restore_args_tree = ocp.checkpoint_utils.construct_restore_args(target_for_restore, sharding_tree)
 
   try:
@@ -724,26 +743,40 @@ def restore_lora_from_path(model: nnx.Module, mt_config: pyconfig.HyperParameter
 
     if isinstance(curr, dict) and "value" in curr:
       matched_val = curr["value"]
+    elif hasattr(curr, "get_value"):
+      matched_val = curr.get_value()
     elif hasattr(curr, "value"):
       matched_val = getattr(curr, "value")
     else:
       matched_val = curr
 
+    if isinstance(matched_val, jax.ShapeDtypeStruct):
+      raise ValueError(f"Parameter at path {'/'.join(str_path)} was not restored from checkpoint.")
+
     target_sharding = getattr(variable, "sharding", None)
-    if target_sharding is None:
+    if not isinstance(target_sharding, jax.sharding.Sharding):
       try:
-        mesh = maxtext_utils.get_mesh_from_config(mt_config)
+        mesh = getattr(model, "mesh", None) or maxtext_utils.get_mesh_from_config(mt_config)
         if mesh:
-          target_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+          if isinstance(target_sharding, jax.sharding.PartitionSpec):
+            pspec = target_sharding
+          else:
+            pspec = jax.sharding.PartitionSpec()
+          target_sharding = jax.sharding.NamedSharding(mesh, pspec)
+        else:
+          target_sharding = None
       except Exception:  # pylint: disable=broad-exception-caught
-        pass
+        target_sharding = None
 
     if target_sharding is not None:
       try:
         matched_val = jax.device_put(matched_val, target_sharding)
       except Exception:  # pylint: disable=broad-exception-caught
         pass
-    variable.value = matched_val
+    if hasattr(variable, "set_value"):
+      variable.set_value(matched_val)
+    else:
+      variable.value = matched_val
 
   jax.tree_util.tree_map_with_path(
       _map_to_state,
@@ -795,7 +828,8 @@ def apply_lora_on_base_params_nnx(base_params, lora_params, lora_scale_factor=1.
       lora_a = lora_node["lora_a.kernel"]
       lora_b = lora_node["lora_b.kernel"]
       if lora_a is not None and lora_b is not None:
-        base_node["kernel"] = base_node["kernel"] + jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor
+        delta = (jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor).astype(base_node["kernel"].dtype)
+        base_node["kernel"] = (base_node["kernel"] + delta).astype(base_node["kernel"].dtype)
       return
     for name, lora_child in lora_node.items():
       if _is_nnx_branch(lora_child):
@@ -819,7 +853,8 @@ def unapply_lora_from_base_params_nnx(base_params, lora_params, lora_scale_facto
       lora_a = lora_node["lora_a.kernel"]
       lora_b = lora_node["lora_b.kernel"]
       if lora_a is not None and lora_b is not None:
-        base_node["kernel"] = base_node["kernel"] - jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor
+        delta = (jnp.einsum("er,rnd->end", lora_a, lora_b) * lora_scale_factor).astype(base_node["kernel"].dtype)
+        base_node["kernel"] = (base_node["kernel"] - delta).astype(base_node["kernel"].dtype)
       return
     for name, lora_child in lora_node.items():
       if _is_nnx_branch(lora_child):

@@ -40,7 +40,7 @@ export LOCAL_PATH=<your_local_path>/hf/${MODEL_NAME}/${idx}
 
 
 # Installing torch for deps in forward_pass_logit_checker.py
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 python3 -m pip install decord
 
 # Check point conversion

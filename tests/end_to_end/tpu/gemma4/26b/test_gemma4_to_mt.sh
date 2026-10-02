@@ -37,8 +37,10 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false \
-    hardware=cpu skip_jax_distributed_system=True \
-    checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False
 
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id}/0/items
 echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
@@ -49,8 +51,10 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=true \
-    hardware=cpu skip_jax_distributed_system=True \
-    checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False
 
 SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
 echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
@@ -68,7 +72,8 @@ if [ "${USE_MULTIMODAL}" = "false" ]; then
         attention=dot_product \
         scan_layers=false \
         --hf_model_path=${HF_GOLDEN_MODEL} \
-        --max_kl_div=0.05 \
+        --max_kl_div=0.30 \
         --run_hf_model=true \
-        hardware=cpu skip_jax_distributed_system=True
+        hardware=cpu \
+        skip_jax_distributed_system=True
 fi

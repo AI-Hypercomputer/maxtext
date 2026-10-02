@@ -20,6 +20,8 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 
+from maxtext.utils import max_logging
+
 
 class TrainStateNNX(nnx.Module):
   """A unified container for NNX models and optimizers.
@@ -58,7 +60,7 @@ class TrainStateNNX(nnx.Module):
 
 # On-disk checkpoint format.
 #
-# A pure_nnx run saves in the same on-disk layout as a Linen run, so the two are
+# A run saves in the same on-disk layout that Linen used, so old and new checkpoints are
 # interchangeable. The NNX state pure dict differs from Linen's in three ways, all
 # reshaped below at save time:
 #   1. top-level keys: {model, optimizer:{step, opt_state}} -> {params:{params:...}, step, opt_state}
@@ -232,7 +234,7 @@ def to_checkpoint_dict(state: nnx.State | nnx.Module):
   """Reshapes an nnx.State into the on-disk checkpoint layout.
 
   Weights (nnx.Param) map to the Linen `params` collection and the optimizer to
-  opt_state/step, so pure_nnx and Linen checkpoints stay interchangeable. Everything else that
+  opt_state/step, so NNX and Linen checkpoints stay interchangeable. Everything else that
   must persist -- rngs/dropout, batch stats, and any custom variable -- goes under an `nnx_aux`
   subtree. Works on a concrete state (save) or an abstract state (restore target).
   """
@@ -245,3 +247,32 @@ def to_checkpoint_dict(state: nnx.State | nnx.Module):
   if aux:
     linen_dict["nnx_aux"] = aux
   return linen_dict
+
+
+def apply_checkpoint_aux(aux_state: nnx.State, nnx_aux: dict[str, Any]) -> None:
+  """Fills `aux_state` from a checkpoint's `nnx_aux`, skipping entries it no longer has.
+
+  `split_for_checkpoint` routes every persistent non-Param variable to `nnx_aux`, so a
+  checkpoint carries whatever RNG streams, batch stats and custom variables the model held
+  when it was written. A model that has since stopped holding one of them -- a module that
+  no longer keeps an `nnx.Rngs`, say -- would otherwise fail the resume outright with
+  "key in pure_dict not available in state".
+
+  Restore is already tolerant in the other direction: an entry the checkpoint lacks keeps
+  its fresh init value. This makes it tolerant both ways. Only `nnx_aux` is filtered;
+  weights still go through `replace_by_pure_dict` directly, so a genuinely missing weight
+  keeps raising.
+  """
+  present = {tuple(path) for path, _ in nnx.to_flat_state(aux_state)}
+  flat = nnx.traversals.flatten_mapping(nnx_aux)
+  kept = {path: value for path, value in flat.items() if path in present}
+  dropped = [path for path in flat if path not in present]
+  if dropped:
+    # Log the paths, not just a count: skipping an RNG stream a module stopped holding
+    # is routine, but skipping a batch stat or a custom variable means the model and the
+    # checkpoint have genuinely diverged, and that should be visible in the log.
+    shown = ", ".join("/".join(str(k) for k in path) for path in sorted(dropped)[:20])
+    more = f" (+{len(dropped) - 20} more)" if len(dropped) > 20 else ""
+    max_logging.log(f"Skipping {len(dropped)} nnx_aux entries absent from this model: {shown}{more}")
+  if kept:
+    nnx.replace_by_pure_dict(aux_state, nnx.traversals.unflatten_mapping(kept))

@@ -302,11 +302,11 @@ class GmmTest(parameterized.TestCase):
     self.assertTrue(bool(jnp.all(jnp.isfinite(out_native))))
     self.assertTrue(bool(jnp.array_equal(out_swap, out_native)))
 
-  @parameterized.named_parameters(
-      ("int4_materialized", jnp.int4, False),
-      ("int8_native", jnp.int8, True),
+  @parameterized.product(
+      rhs_dtype=(jnp.int4, jnp.int8),
+      use_gmm_v2_heuristic_tiling=(False, True),
   )
-  def test_dlhs_rhs_transpose_dispatch_by_dtype(self, rhs_dtype, expected_transpose_rhs):
+  def test_dlhs_rhs_transpose_dispatch_by_dtype(self, rhs_dtype, use_gmm_v2_heuristic_tiling):
     """DLHS materializes sub-byte RHS transposes before calling GMM v2."""
     num_groups, out_size, in_size, batch_size = 16, 1024, 2048, 4096
     dlhs_dout = jnp.ones((batch_size, in_size), dtype=jnp.bfloat16)
@@ -323,15 +323,19 @@ class GmmTest(parameterized.TestCase):
           group_offset=None,
           lhs_dtype=jnp.bfloat16,
           tiling=tiling,
+          use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
           transpose_rhs=False,
       )
 
     call_kwargs = gmm_v2_mock.call_args.kwargs
+    expected_transpose_rhs = rhs_dtype == jnp.int8
     expected_rhs = rhs if expected_transpose_rhs else rhs.swapaxes(1, 2)
     self.assertIs(actual, expected)
     self.assertEqual(call_kwargs["transpose_rhs"], expected_transpose_rhs)
     self.assertTrue(bool(jnp.array_equal(call_kwargs["rhs"], expected_rhs)))
-    self.assertEqual(call_kwargs["tile_info"], gmm_backend.TileSizes(512, 1024, 512))
+    expected_tiling = gmm_backend.calculate_tiling if use_gmm_v2_heuristic_tiling else gmm_backend.TileSizes(512, 1024, 512)
+    self.assertEqual(call_kwargs["tile_info"], expected_tiling)
+    self.assertTrue(call_kwargs["maybe_quantize_lhs"])
 
   @parameterized.product(
       input_dtype=(jnp.bfloat16, jnp.float8_e4m3fn),

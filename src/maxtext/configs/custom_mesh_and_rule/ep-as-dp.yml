@@ -61,6 +61,7 @@ logical_axis_rules: [
                       ['exp', 'expert'],
                       ['mlp_moe', ['fsdp_transpose']],
                       ['embed_moe', ['fsdp']],
+                      ['embed_router', ['fsdp']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
@@ -76,6 +77,7 @@ logical_axis_rules: [
                       ['mlp', ['fsdp_transpose']],
                       ['embed', ['fsdp', 'fsdp_transpose']],
                       ['embed', ['fsdp']],
+                      ['embed_attn', ['fsdp', 'fsdp_transpose']],
                       # ==========================================
                       # Deprecated / Scheduled for Removal
                       # ==========================================

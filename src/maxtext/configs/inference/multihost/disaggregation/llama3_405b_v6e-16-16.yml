@@ -12,6 +12,7 @@ inference_server: "ExperimentalMaxtextDisaggregatedServer"
 
 logical_axis_rules: [
                       ['embed', []],
+                      ['embed_attn', []],
                       ['vocab', ['tensor', 'autoregressive']],
                       ['activation_batch', []],
                       ['activation_length', []],

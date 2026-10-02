@@ -38,7 +38,17 @@ partial = functools.partial
 
 SegmentIds = base.SegmentIds
 SplashConfig = splash_kernel.SplashConfig
-SplashResidualsType = base.SplashResidualsType
+RingSplashResidualsType = tuple[
+    jax.Array,  # q
+    jax.Array,  # k
+    jax.Array,  # v
+    SegmentIds | None,  # segment_ids
+    jax.Array | None,  # sinks
+    jax.Array,  # out
+    jax.Array,  # logsumexp
+    MaskInfo | None,  # dkv_mask_info
+    jax.Array | None,  # indexer_mask
+]
 SplashCustomReturnType = base.SplashCustomReturnType
 MaskFunctionType = splash_kernel.MaskFunctionType
 _splash_attention_forward = splash_kernel._splash_attention_forward  # pylint: disable=protected-access
@@ -60,8 +70,62 @@ def _validate_ring_axis_size(ring_axis: str, ring_axis_size: int, expected_ring_
     )
 
 
+def _inject_local_indexer_mask(
+    local_mask_info: MaskInfo,
+    local_idx_mask: jax.Array | None,
+    block_shape: tuple[int | None, int | None] = (128, 128),
+    is_dkv: bool = False,
+) -> MaskInfo:
+  """Injects a pre-sliced dynamic Indexer mask shard into local MaskInfo for the current ring step."""
+  if local_idx_mask is None:
+    return local_mask_info
+
+  bq, bkv = block_shape
+  assert bq is not None and bkv is not None, "block_shape must not be None"
+  if local_idx_mask.ndim == 3:
+    local_idx_mask = local_idx_mask[0]
+
+  q_len, kv_len = local_idx_mask.shape
+  # Since causal and padding masks are already fully integrated into the global indexer_mask
+  # tensor (via indexer_mask += attention_mask in attention_mla.py) before slicing,
+  # local_idx_mask already contains the complete causally-masked top-k selection for this ring hop.
+  combined_mask = local_idx_mask
+
+  # Pack flat 2D mask into physical 4D hardware grid chunks [q_blocks, bq, kv_blocks, bkv]
+  # output layout mapping: [q_blocks, kv_blocks, bq, bkv]
+  q_blocks = q_len // bq
+  kv_blocks = kv_len // bkv
+  num_blocks = q_blocks * kv_blocks
+
+  blocks = combined_mask.reshape(q_blocks, bq, kv_blocks, bkv)
+  blocks = blocks.swapaxes(1, 2)  # [q_blocks, kv_blocks, bq, bkv]
+
+  if is_dkv:
+    # SplashAttention backward (dkv) grids are scheduled as KV-major (kv_blocks, q_blocks).
+    # We transpose both the macroscopic block grid and microscopic intra-block axes
+    # to perfectly match the Pallas backward grid_idx order.
+    blocks = blocks.swapaxes(0, 1)  # [kv_blocks, q_blocks, bq, bkv]
+    blocks = blocks.swapaxes(-1, -2)  # [kv_blocks, q_blocks, bkv, bq]
+
+  blocks = blocks.reshape(num_blocks, blocks.shape[-2], blocks.shape[-1])
+  blocks = blocks.astype(jnp.int8)
+
+  mask_next = jnp.arange(num_blocks, dtype=jnp.int32)
+  # Wipe Splash's default coordinate-based rules entirely and forcefully
+  # inject our boolean tiles as the absolute source of truth.
+  return local_mask_info._replace(
+      mask_next=mask_next,
+      active_rows=None,
+      active_cols=None,
+      block_mask=None,
+      num_active_blocks=None,
+      partial_mask_blocks=blocks,
+  )
+
+
 def _ring_attention_forward(
     fwd_mask_info: MaskInfo,
+    indexer_mask: jax.Array | None,
     q: jax.Array,
     k: jax.Array,
     v: jax.Array,
@@ -118,12 +182,44 @@ def _ring_attention_forward(
   l_init = jnp.zeros((o_shape[0], o_shape[1]), jnp.float32)
   m_init = jnp.full_like(l_init, mask_value, dtype=jnp.float32)
 
-  def body(carry, i: int):
-    m_prev, l_prev, o_prev, k_current, v_current, segment_ids_current = carry
+  if indexer_mask is not None:
+    # Reshape global indexer mask to [..., ring_axis_size, kv_shard_len] for dynamic step slicing.
+    kv_shard_len = k.shape[-2]
+    mask_4d = indexer_mask.reshape(*indexer_mask.shape[:-1], ring_axis_size, kv_shard_len)
+  else:
+    mask_4d = None
 
+  if mask_4d is not None:
+    # Pre-slice and stack all mask chunks BEFORE the lax.scan loop.
+    # Attempting dynamic slicing inside lax.scan causes severe XLA compiler overhead.
+    i_vals = jnp.arange(0, ring_axis_size)
+    # Use modulo math to calculate exactly which KV block arrives at this TPU at ring step 'i'
+    target_indices = (ring_axis_idx - i_vals) % ring_axis_size
+    mask_ring_steps = mask_4d[..., target_indices, :]
+    mask_ring_steps = jnp.moveaxis(mask_ring_steps, -2, 0)
+    xs = (i_vals, mask_ring_steps)
+  else:
+    xs = jnp.arange(0, ring_axis_size)
+
+  def body(carry, xs_arg):
+    if mask_4d is not None:
+      i, local_idx_mask = xs_arg
+    else:
+      i = xs_arg
+      local_idx_mask = None
+
+    m_prev, l_prev, o_prev, k_current, v_current, segment_ids_current = carry
     current_kv_shard_idx = (ring_axis_idx - i) % ring_axis_size
+
     local_fwd_mask_info = _dynamic_slice_mask_info(fwd_mask_info, current_kv_shard_idx, ring_axis_size)
     local_fwd_mask_info = _offset_q_sequence_for_kv_shard(local_fwd_mask_info, current_kv_shard_idx, k_current.shape[-2])
+    # Intercept the local mask info just before hardware execution and inject the exact sparse boolean chunk
+    local_fwd_mask_info = _inject_local_indexer_mask(
+        local_fwd_mask_info,
+        local_idx_mask,
+        block_shape=(config.block_q, config.block_kv),
+        is_dkv=False,
+    )
     k_next = shift(k_current)
     v_next = shift(v_current)
 
@@ -168,7 +264,7 @@ def _ring_attention_forward(
   (m_final, l_final, o_final, _, _, _), _ = lax.scan(
       body,
       initial_carry,
-      xs=jnp.arange(0, ring_axis_size),
+      xs=xs,
       length=ring_axis_size,
       unroll=config.ring_scan_unroll,
   )  # type: ignore[arg-type]
@@ -198,7 +294,7 @@ def _ring_attention_bwd(
     do: jax.Array,
 ):
   del save_residuals
-  (q, k, v, segment_ids, sinks, out, logsumexp, dkv_mask_info) = res
+  (q, k, v, segment_ids, sinks, out, logsumexp, dkv_mask_info, indexer_mask) = res
   do = do.astype(jnp.float32)
   if dkv_mask_info is None:
     raise ValueError("Need to specify backward blocks.")
@@ -229,10 +325,35 @@ def _ring_attention_bwd(
       segment_ids_next = None
     return k_next, v_next, segment_ids_next
 
-  def compute_step(i: int, k_current, v_current, segment_ids_current, dq_accum):
+  if indexer_mask is not None:
+    # Reshape global indexer mask to [..., ring_axis_size, kv_shard_len] for backward rotation slicing.
+    kv_shard_len = k.shape[-2]
+    mask_4d = indexer_mask.reshape(*indexer_mask.shape[:-1], ring_axis_size, kv_shard_len)
+
+    step0_mask_idx = (ring_axis_idx - 0) % ring_axis_size
+    step0_mask = mask_4d[..., step0_mask_idx, :]
+
+    i_vals = jnp.arange(1, ring_axis_size)
+    target_indices = (ring_axis_idx - i_vals) % ring_axis_size
+    mask_ring_steps = mask_4d[..., target_indices, :]
+    mask_ring_steps = jnp.moveaxis(mask_ring_steps, -2, 0)
+    xs = (i_vals, mask_ring_steps)
+  else:
+    mask_4d = None
+    step0_mask = None
+    xs = jnp.arange(1, ring_axis_size)
+
+  def compute_step(i, local_idx_mask, k_current, v_current, segment_ids_current, dq_accum):
     current_kv_shard_idx = (ring_axis_idx - i) % ring_axis_size
     local_dkv_mask_info = _dynamic_slice_mask_info(dkv_mask_info, current_kv_shard_idx, ring_axis_size)
     local_dkv_mask_info = _offset_q_sequence_for_kv_shard(local_dkv_mask_info, current_kv_shard_idx, k_current.shape[-2])
+    # Intercept MaskInfo and enforce our sparse true/false chunks.
+    local_dkv_mask_info = _inject_local_indexer_mask(
+        local_dkv_mask_info,
+        local_idx_mask,
+        block_shape=(config.block_q_dkv, config.block_kv_dkv),
+        is_dkv=True,
+    )
 
     residuals_for_chunk = (
         q,
@@ -266,11 +387,16 @@ def _ring_attention_bwd(
       dq_i = dq_accum + dq_i.astype(jnp.float32)
     return dq_i, dk_i, dv_i, dsinks
 
-  dq_i, dk_pending, dv_pending, dsinks = compute_step(0, k, v, segment_ids, dq_accum)
+  dq_i, dk_pending, dv_pending, dsinks = compute_step(0, step0_mask, k, v, segment_ids, dq_accum)
   dq_accum = dq_i
   k_current, v_current, segment_ids_current = rotate_kv(k, v, segment_ids)
 
-  def body(carry, i: int):
+  def body(carry, xs_arg):
+    if mask_4d is not None:
+      i, local_idx_mask = xs_arg
+    else:
+      i = xs_arg
+      local_idx_mask = None
     (
         dq_accum,
         dk_accum,
@@ -285,7 +411,7 @@ def _ring_attention_bwd(
     dk_next = shift(dk_accum + dk_pending.astype(jnp.float32))
     dv_next = shift(dv_accum + dv_pending.astype(jnp.float32))
     k_next, v_next, segment_ids_next = rotate_kv(k_current, v_current, segment_ids_current)
-    dq_i, dk_i, dv_i, dsinks = compute_step(i, k_current, v_current, segment_ids_current, dq_accum)
+    dq_i, dk_i, dv_i, dsinks = compute_step(i, local_idx_mask, k_current, v_current, segment_ids_current, dq_accum)
     dq_accum = dq_i
     return (
         dq_accum,
@@ -313,7 +439,7 @@ def _ring_attention_bwd(
   (dq, dk, dv, dk_pending, dv_pending, _, _, _, dsinks), _ = lax.scan(
       body,
       initial_carry,
-      xs=jnp.arange(1, ring_axis_size),
+      xs=xs,
       length=ring_axis_size - 1,
       unroll=config.ring_scan_unroll,
   )
@@ -333,6 +459,7 @@ def _ring_attention_bwd(
       dv.astype(v.dtype),
       None,
       dsinks,
+      None,  # indexer_mask
   )
 
 
@@ -344,6 +471,7 @@ def _ring_attention_fwd(
     v: jax.Array,
     segment_ids: SegmentIds | None,
     sinks: jax.Array | None,
+    indexer_mask: jax.Array | None,
     # nondiff_args
     mask_value: float,  # 1
     is_mqa: bool,  # 2
@@ -354,7 +482,7 @@ def _ring_attention_fwd(
     save_residuals: bool,  # 7
     ring_axis: str,  # 8
     expected_ring_size: int,  # 9
-) -> tuple[jax.Array, SplashResidualsType]:
+) -> tuple[jax.Array, RingSplashResidualsType]:
   """Forward pass for the custom VJP of ring attention.
 
   This function is used by `jax.custom_vjp` to define the forward pass
@@ -380,7 +508,7 @@ def _ring_attention_fwd(
   Returns:
     A tuple containing:
       - The output of the ring attention computation.
-      - Residuals needed for the backward pass (`SplashResidualsType`).
+      - Residuals needed for the backward pass (`RingSplashResidualsType`).
   """
   del dkv_mask_sparsity
   if save_residuals:
@@ -388,6 +516,7 @@ def _ring_attention_fwd(
 
   out, (logsumexp, max_logits) = _ring_attention_forward(
       fwd_mask_info,
+      indexer_mask,
       q,
       k,
       v,
@@ -405,7 +534,17 @@ def _ring_attention_fwd(
   if config.residual_checkpoint_name is not None:
     out = ad_checkpoint.checkpoint_name(out, name=config.residual_checkpoint_name)
     logsumexp = ad_checkpoint.checkpoint_name(logsumexp, name=config.residual_checkpoint_name)
-  residuals = (q, k, v, segment_ids, sinks, out, logsumexp, dkv_mask_info)
+  residuals = (
+      q,
+      k,
+      v,
+      segment_ids,
+      sinks,
+      out,
+      logsumexp,
+      dkv_mask_info,
+      indexer_mask,
+  )
   return out, residuals
 
 
@@ -431,6 +570,7 @@ def _ring_attention_custom(
     v: jax.Array,
     segment_ids: SegmentIds | None,
     sinks: jax.Array | None,
+    indexer_mask: jax.Array | None,
     mask_value: float,
     is_mqa: bool,
     config: SplashConfig,
@@ -468,6 +608,7 @@ def _ring_attention_custom(
   del dkv_mask_info, dkv_mask_sparsity
   out, _ = _ring_attention_forward(
       fwd_mask_info,
+      indexer_mask,
       q,
       k,
       v,
@@ -509,6 +650,7 @@ def _ring_attention(
     v: jax.Array,
     segment_ids: SegmentIds | None = None,
     sinks: jax.Array | None = None,
+    indexer_mask: jax.Array | None = None,
     *,
     is_mqa: bool,
     config: SplashConfig,
@@ -548,6 +690,9 @@ def _ring_attention(
   Raises:
     ValueError: If the specified `ring_axis` does not exist.
   """
+  if indexer_mask is not None and indexer_mask.dtype != jnp.bool_:
+    indexer_mask = jnp.isclose(indexer_mask, 0.0)
+
   if not _has_axis(ring_axis):
     raise ValueError(f"Ring axis {ring_axis} does not exist")
 
@@ -559,6 +704,7 @@ def _ring_attention(
       v,
       segment_ids,
       sinks,
+      indexer_mask,
       is_mqa=is_mqa,
       config=config,
       mask_value=mask_value,
@@ -636,20 +782,19 @@ class RingSplashAttentionKernel:
     def mask_info_spec(mask_info):
       if mask_info is None:
         return None
-      return MaskInfo(  # pytype: disable=wrong-arg-types
+      return MaskInfo(  # pytype: disable=wrong-arg-types,bad-argument-type
           mask_next=_resolve_spec(mask_info.mask_next),  # pyrefly: ignore[bad-argument-type]
           active_rows=_resolve_spec(mask_info.active_rows),  # pyrefly: ignore[bad-argument-type]
           active_cols=_resolve_spec(mask_info.active_cols),  # pyrefly: ignore[bad-argument-type]
           num_active_blocks=_resolve_spec(mask_info.num_active_blocks),  # pyrefly: ignore[bad-argument-type]
           block_mask=_resolve_spec(mask_info.block_mask),  # pyrefly: ignore[bad-argument-type]
-          partial_mask_blocks=jax.sharding.PartitionSpec()  # replicated  # pyrefly: ignore[bad-argument-type]
+          partial_mask_blocks=jax.sharding.PartitionSpec()  # pyrefly: ignore[bad-argument-type]
           if mask_info.partial_mask_blocks is not None
           else None,
           q_sequence=_resolve_spec(mask_info.q_sequence),  # pyrefly: ignore[bad-argument-type]
-          # pyrefly: ignore[bad-argument-type]
-          kv_sequence=jax.sharding.PartitionSpec()
+          kv_sequence=jax.sharding.PartitionSpec()  # pyrefly: ignore[bad-argument-type]
           if mask_info.kv_sequence is not None
-          else None,  # pyrefly: ignore[bad-argument-type]
+          else None,
       )
 
     return RingSplashAttentionKernel(

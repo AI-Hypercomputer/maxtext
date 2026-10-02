@@ -67,7 +67,7 @@ from maxtext.configs.types import DType
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
-from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns
+from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.layers import quantizations
@@ -83,8 +83,69 @@ try:
 except ImportError:
   torch = None
 
-
 absl.logging.set_verbosity(absl.logging.INFO)  # for max_logging.log
+
+
+def resolve_scale_key(key: str, container) -> str:
+  """Resolves fallback keys from .weight_scale to .weight_scale_inv."""
+  if key in container:
+    return key
+  if key.endswith(".weight_scale"):
+    alt_key = key + "_inv"
+    if alt_key in container:
+      return alt_key
+  return key
+
+
+def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray:
+  """Converts a PyTorch tensor or NumPy array to the target NumPy format.
+
+  Args:
+    tensor: Input tensor from PyTorch/safetensors or NumPy array.
+    save_dtype: Target checkpoint storage dtype for weights (e.g. "bfloat16", "float8_e4m3fn").
+      For FP8 checkpoints (save_dtype="float8_e4m3fn"), only quantized weights are stored as FP8.
+      Every other tensor keeps its source precision: companion scale tensors are stored in
+      whatever dtype the source checkpoint provides (e.g. bfloat16 for Qwen3.5-35B-A3B-FP8),
+      and unquantized modules (e.g. embeddings, router gates) remain in their native precision.
+      Source dtypes that are neither FP8, bfloat16, nor float32 are upcast to float32.
+  """
+  if torch is not None and isinstance(tensor, torch.Tensor):
+    tensor = tensor.detach().cpu()
+    # If target is float32, convert all tensors to float32
+    if save_dtype in ("float32", DType.FLOAT32):
+      return tensor.to(torch.float32).numpy()
+
+    # Target is float8_e4m3fn (weight-only quantization mode):
+    # In an FP8 checkpoint, only quantized weights are stored as FP8. We preserve each
+    # tensor's source precision: companion scales keep whatever dtype the source provides
+    # (bfloat16 for Qwen3.5-35B-A3B-FP8), and unquantized modules (e.g. embeddings, router
+    # gates) remain in bfloat16.
+    if save_dtype in ("float8_e4m3fn", DType.FLOAT8_E4M3FN):
+      if tensor.dtype == torch.float8_e4m3fn:
+        return tensor.view(torch.uint8).numpy().view(ml_dtypes.float8_e4m3fn)
+      elif tensor.dtype == torch.bfloat16:
+        return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
+      elif tensor.dtype == torch.float32:
+        return tensor.numpy()
+      else:
+        return tensor.to(torch.float32).numpy()
+
+    # Target is bfloat16
+    if save_dtype in ("bfloat16", DType.BFLOAT16):
+      if tensor.dtype == torch.bfloat16:
+        return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
+      elif tensor.dtype == torch.float8_e4m3fn:
+        return tensor.to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
+      else:
+        return tensor.to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
+
+    return tensor.numpy()
+
+  if isinstance(tensor, np.ndarray):
+    if save_dtype in ("float32", DType.FLOAT32) and tensor.dtype != np.float32:
+      return tensor.astype(np.float32)
+    return tensor
+  return np.asarray(tensor)
 
 
 class LazyHFLoader:
@@ -108,10 +169,11 @@ class LazyHFLoader:
   can still occur in parallel.
   """
 
-  def __init__(self, model_id, token, revision=None):
+  def __init__(self, model_id, token, revision=None, save_dtype: str = "bfloat16"):
     self.model_id = model_id
     self.token = token
     self.revision = revision
+    self.save_dtype = save_dtype
     # Whether loads from local directory
     self.is_local = os.path.isdir(self.model_id)
     self.shard_map = {}
@@ -178,7 +240,9 @@ class LazyHFLoader:
     and reads only the required tensor's data from disk.
     """
     # Handle single-file models (shard map key might be None or we just know the filename)
-    shard_name = self.shard_map.get(key)
+    resolved_key = resolve_scale_key(key, self.shard_map)
+    shard_name = self.shard_map.get(resolved_key)
+
     if shard_name is None and None in self.shard_map:
       shard_name = self.shard_map[None]
     elif shard_name is None:
@@ -205,8 +269,10 @@ class LazyHFLoader:
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
-      with safe_open(local_path, framework="np", device="cpu") as f:
-        return f.get_tensor(key)
+      framework = "pt" if torch is not None else "np"
+      with safe_open(local_path, framework=framework, device="cpu") as f:
+        t = f.get_tensor(resolved_key)
+        return _convert_tensor_to_numpy(t, self.save_dtype)
 
 
 class LazyTensor:
@@ -224,7 +290,16 @@ class LazyTensor:
   ):
     self._load_fn = load_fn
     self.shape = shape
-    self.dtype = np.dtype(dtype)
+    try:
+      self.dtype = np.dtype(dtype)
+    except (TypeError, ValueError):
+      dtype_str = str(dtype)
+      if "float8_e4m3fn" in dtype_str:
+        self.dtype = np.dtype(ml_dtypes.float8_e4m3fn)
+      elif "bfloat16" in dtype_str:
+        self.dtype = np.dtype(ml_dtypes.bfloat16)
+      else:
+        self.dtype = np.dtype(np.float32)
     self.ndim = len(shape)
     self.name = name
 
@@ -317,11 +392,9 @@ def get_maxtext_model_info(config):
   quant = quantizations.configure_quantization(config)
   maxtext_model_flax = models.transformer_as_linen(config, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
 
-  # Get abstract model structure (name, shape) without materializing the weights to save memory.
-  # Extract the 'params' collection from the abstract model state. This focuses checkpoint
-  # conversion on trainable model parameters; variables outside the 'params' collection
-  # (such as non-trainable state or optimizer buffers) are not included.
-  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)["params"]
+  # Get abstract model structure (name, shape) without materializing the weights to save memory
+  # Keeps all collections (e.g. 'params', 'Tid2EidVar') in the tree structure
+  abstract_params_tree = maxtext_utils.get_abstract_param(maxtext_model_flax, config)
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(
       abstract_params_tree,
@@ -333,7 +406,7 @@ def get_maxtext_model_info(config):
   # preprocess state
   maxtext_abstract_dict = {}
   for mt_target_idx, (path_tuple, abstract_leaf_value) in enumerate(abstract_params_flat):
-    mt_param_key = "params-" + "-".join(param_key_parts_from_path(path_tuple))
+    mt_param_key = "-".join(param_key_parts_from_path(path_tuple))
     if isinstance(abstract_leaf_value, nn.LogicallyPartitioned):
       mt_target_shape = abstract_leaf_value.value.shape
     else:
@@ -344,66 +417,59 @@ def get_maxtext_model_info(config):
 
 
 def _build_multi_axis_stacked_tensor(
-    hf_source_keys: List[List[str]],
+    hf_source_keys: List[Any],
     tensor_getter_fn: Callable[[str], np.ndarray],
     hook_fns: Any,
     target_shape: tuple,
     config,
     mt_key: str = "",
 ) -> np.ndarray:
-  """Builds a MaxText tensor by stacking HF weights along two axes.
+  """Builds a MaxText tensor by stacking HF weights along several axes.
 
-  Two cases share this helper:
+  Three layouts share this helper, distinguished by how deeply ``hf_source_keys``
+  is nested and by whether ``mt_key`` names a nested block scan:
     * MoE expert stacking: outer=experts, inner=layers, placed at the LEADING two
       axes -> shape (num_experts, num_layers, ...).
-    * Gemma4 nested block scan (``scanned_blocks-local_layers``): the block's local
-      layers are an inner scan nested inside the outer block scan, so the two
-      stacked axes live at ``(param_scan_axis, param_scan_axis + 1)`` rather than
-      the leading axes, e.g. (emb, blocks, local, ...).
+    * Nested block scan (``...-local_layers-...``, gemma4 and qwen3-next): the
+      block's local layers are an inner scan nested inside the outer block scan,
+      so the two stacked axes live at ``(param_scan_axis, param_scan_axis + 1)``
+      rather than the leading axes, e.g. (emb, blocks, local, ...).
+    * Both at once (qwen3-next's routed experts, which are expert-stacked inside
+      a nested block scan): three axes at ``(0, param_scan_axis,
+      param_scan_axis + 1)``, e.g. (experts, blocks, local, ...).
 
   Args:
-      hf_source_keys: A nested (2D) list of Hugging Face parameter names.
-                      The outer list is the outer stack axis, the inner list the
-                      inner stack axis.
+      hf_source_keys: A nested list of Hugging Face parameter names, one level of
+        nesting per stacked axis, outermost axis first. A ``tuple`` of names is a
+        composite HF source that the hook fuses into a single leaf, not an axis.
       tensor_getter_fn: A callable that takes a HF key and returns the tensor (as numpy array).
       hook_fns: The hook function(s) to apply to each individual weight.
       target_shape: The final shape of the target MaxText tensor.
       config: The MaxText pyconfig object.
-      mt_key: The MaxText parameter key, used to detect the gemma4 nested-scan case.
+      mt_key: The MaxText parameter key, used to detect the nested-scan case.
 
   Returns:
       The final, assembled NumPy array for the MaxText parameter.
   """
-  # Gemma4's local layers are an inner scan nested inside the block scan, so the
-  # two stacked axes go at (param_scan_axis, param_scan_axis + 1); everything else
-  # (MoE experts/layers) stacks at the leading axes.
-  if isinstance(mt_key, str) and "scanned_blocks-local_layers" in mt_key:
-    outer_axis, inner_axis = config.param_scan_axis, config.param_scan_axis + 1
-  else:
-    outer_axis, inner_axis = 0, 1
-
+  depth = nesting_depth(hf_source_keys)
+  axes = stacked_axes(mt_key, config, depth)
   # The hook function needs the shape of an individual slice: target_shape with
-  # the two stacked axes removed.
-  stacked_axes = {outer_axis, inner_axis}
-  mt_slice_shape = tuple(d for i, d in enumerate(target_shape) if i not in stacked_axes)
+  # the stacked axes removed.
+  mt_slice_shape = slice_shape(target_shape, axes)
 
-  all_outer_tensors = []
-  # Outer loop iterates the outer stack axis (experts, or blocks for gemma4 local)
-  for inner_keys in hf_source_keys:
-    inner_tensors = []
-    # Inner loop iterates the inner stack axis (layers, or local layers for gemma4)
-    for hf_key_single in inner_keys:
-      if isinstance(hf_key_single, (list, tuple)):
-        hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
+  def gather(keys, level):
+    if level == depth:
+      if isinstance(keys, (list, tuple)):
+        raw = tuple(tensor_getter_fn(k) for k in keys)
       else:
-        hf_tensor_numpy = tensor_getter_fn(hf_key_single)
-      inner_tensors.append(apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns))
-    all_outer_tensors.append(np.stack(inner_tensors, axis=0))
-  stacked = np.stack(all_outer_tensors, axis=0)  # (outer, inner, *slice)
+        raw = tensor_getter_fn(keys)
+      return apply_hook_fns(raw, mt_slice_shape, hook_fns)
+    # Stack with the axes leading, outermost first; they are moved into place below.
+    return np.stack([gather(sub, level + 1) for sub in keys], axis=0)
 
-  # Move the (outer, inner) axes from leading positions to their targets.
-  if (outer_axis, inner_axis) != (0, 1):
-    stacked = np.moveaxis(stacked, (0, 1), (outer_axis, inner_axis))
+  stacked = gather(hf_source_keys, 0)
+  if axes != tuple(range(depth)):
+    stacked = np.moveaxis(stacked, tuple(range(depth)), axes)
   return stacked
 
 
@@ -413,6 +479,7 @@ def _build_single_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
+    mt_key: str = "",
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along a single axis.
 
@@ -431,9 +498,16 @@ def _build_single_axis_stacked_tensor(
   """
   tensors_to_stack = []
 
+  axis_to_stack = 0
   if config.scan_layers:
-    # If it's a standard scanned layer, we use the configured param_scan_axis.
-    axis_to_stack = config.param_scan_axis
+    is_var_collection = "MoEBiasVar" in mt_key or "Tid2EidVar" in mt_key
+    is_unscanned_moe = "MoeBlock" in mt_key and "scanned_blocks" not in mt_key
+    if not (is_var_collection or is_unscanned_moe):
+      # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
+      # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar
+      # quantization scales like Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)), stack along axis 0
+      # because axis 1 does not exist on 1D tensors and stacking scalars along axis 0 produces the 1D vector.
+      axis_to_stack = config.param_scan_axis if len(target_shape) > config.param_scan_axis else 0
   else:
     # Otherwise, if an unscanned MoE layer, and we stack along the expert axis (0).
     axis_to_stack = 0
@@ -474,6 +548,8 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, shape, hook):
+      if key is None:
+        return apply_hook_fns(None, shape, hook)
       if isinstance(key, (list, tuple)):
         tensors = tuple(getter(k) for k in key)
         return apply_hook_fns(tensors, shape, hook)
@@ -496,6 +572,7 @@ def _get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_t
         hook_fn,
         mt_target_shape_or_shapes,
         config,
+        mt_key,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
@@ -732,7 +809,7 @@ def convert_lora_to_maxtext_adapter(
 
   mt_adapter_tree = {}
   mapped_count = 0
-  target_dtype = ml_dtypes.bfloat16 if save_dtype == "bfloat16" else np.float32
+  target_dtype = ml_dtypes.bfloat16 if save_dtype in ("bfloat16", "float8_e4m3fn") else np.float32
 
   collected_weights = {}
 
@@ -857,6 +934,37 @@ def _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revisi
   return _merged_getter
 
 
+def _extract_conversion_args(args: Sequence[str]) -> tuple[dict[str, Any], list[str]]:
+  """Extracts known checkpoint conversion args and returns remaining args."""
+  conversion_arg_names = {
+      "save_dtype",
+      "hf_model_path",
+      "lazy_load_tensors",
+      "eager_load_method",
+      "revision",
+      "simulated_cpu_devices_count",
+  }
+  extracted = {}
+  cleaned_args = []
+  for arg_item in args:
+    matched = False
+    for name in conversion_arg_names:
+      key_prefix = f"{name}="
+      if arg_item.startswith(key_prefix) or arg_item.startswith(f"--{key_prefix}"):
+        val = arg_item.split("=", 1)[1]
+        if name == "lazy_load_tensors":
+          extracted[name] = str2bool(val)
+        elif name == "simulated_cpu_devices_count":
+          extracted[name] = int(val)
+        else:
+          extracted[name] = val
+        matched = True
+        break
+    if not matched:
+      cleaned_args.append(arg_item)
+  return extracted, cleaned_args
+
+
 def main(
     args: Sequence[str],
     lazy_load_tensors: bool = True,
@@ -867,9 +975,17 @@ def main(
     simulated_cpu_devices_count: int = 16,
 ) -> None:
   overall_start = time.time()
+  extracted, cleaned_args = _extract_conversion_args(args)
+  save_dtype = extracted.get("save_dtype", save_dtype)
+  hf_model_path = extracted.get("hf_model_path", hf_model_path)
+  lazy_load_tensors = extracted.get("lazy_load_tensors", lazy_load_tensors)
+  eager_load_method = extracted.get("eager_load_method", eager_load_method)
+  revision = extracted.get("revision", revision)
+  simulated_cpu_devices_count = extracted.get("simulated_cpu_devices_count", simulated_cpu_devices_count)
+  args = cleaned_args
   # Check if the user is using an Instruct version. If so, use the base model architecture
-  for i, arg in enumerate(args):
-    if arg.startswith("model_name="):
+  for i, raw_param in enumerate(args):
+    if raw_param.startswith("model_name="):
       model_name_arg = args[i].split("=")[1]
       model_name_original = model_name_arg
       if "-Instruct" in model_name_arg:
@@ -912,6 +1028,7 @@ def main(
     jax_weights = convert_lora_to_maxtext_adapter(config, lora_weights, save_dtype)
     adapter_name = os.path.basename(os.path.normpath(hf_lora_adapter_path))
     output_directory = os.path.join(output_directory, model_name_for_path, adapter_name)
+    state_params = jax_weights
   else:
 
     if lazy_load_tensors and config.use_multimodal:
@@ -923,7 +1040,7 @@ def main(
     # Define the appropriate tensor getter based on mode
     if lazy_load_tensors:
       max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
-      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision)
+      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, save_dtype=save_dtype)
 
       print_ram_usage("After LazyLoader init")
       tensor_getter = hf_loader.get_tensor
@@ -983,22 +1100,14 @@ def main(
           }
 
       def _eager_getter(key):
-        if key not in hf_state_dict_numpy:
+        if key is None:
+          return None
+        resolved_key = resolve_scale_key(key, hf_state_dict_numpy)
+        if resolved_key not in hf_state_dict_numpy:
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
-        v = hf_state_dict_numpy[key]
-        # target dtype is "float32"
-        if save_dtype == DType.FLOAT32:
-          return v.to(torch.float32).numpy()
-        # target dtype is "bfloat16"
-        elif save_dtype == DType.BFLOAT16:
-          # - torch.bfloat16 -> torch.float32 -> np.float32 -> ml_dtypes.bfloat16
-          #   As numpy doesn't accept bfloat16 directly, we convert to float32 first
-          # - torch.float16 -> np.float16 -> ml_dtypes.bfloat16
-          # - torch.float32 -> np.float32 -> ml_dtypes.bfloat16
-          if v.dtype == torch.bfloat16:
-            v = v.to(torch.float32)
-          return v.numpy().astype(ml_dtypes.bfloat16)
-        raise NotImplementedError(f"Save dtype {save_dtype} is not currently implemented.")
+
+        v = hf_state_dict_numpy[resolved_key]
+        return _convert_tensor_to_numpy(v, save_dtype)
 
       tensor_getter = _eager_getter
 
@@ -1080,11 +1189,19 @@ def main(
     max_logging.log(f"Elapse for transform: {(time.time() - start) / 60:.2f} min")
     print_ram_usage("Before creating full JAX tree")
 
-    # Create final MaxText parameters tree
+    max_logging.log(f"Length of final_mt_weights: {len(final_mt_weights)}")
+    max_logging.log(f"Treedef num_leaves: {abstract_params_treedef.num_leaves}")
+    # Create final MaxText parameters tree containing all collections
     jax_weights = jax.tree_util.tree_unflatten(abstract_params_treedef, final_mt_weights)
     del final_mt_weights, abstract_params_treedef
 
+    state_params = jax_weights
+
   print_ram_usage("Before saving")
+  leaves = jax.tree_util.tree_leaves(state_params)
+  max_logging.log(f"Length of state_params leaves: {len(leaves)}")
+  if leaves:
+    max_logging.log(f"Type of first leaf before saving: {type(leaves[0])}")
   if lazy_load_tensors and not is_adapter_only:
     max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
   else:
@@ -1095,7 +1212,7 @@ def main(
   # and sharded across virtual devices.
   save_weights_to_checkpoint(
       output_directory,
-      jax_weights,
+      state_params,
       simulated_cpu_devices_count,
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
@@ -1160,7 +1277,7 @@ if __name__ == "__main__":
       type=str,
       required=False,
       default="bfloat16",
-      choices=["float32", "bfloat16"],
+      choices=["float32", "bfloat16", "float8_e4m3fn"],
       help="Save MaxText weights in specified dtype",
   )
   # Determines the logical sharding of the output checkpoint by partitioning
@@ -1179,6 +1296,23 @@ if __name__ == "__main__":
   parser.add_argument(
       "--simulated_cpu_devices_count", type=int, required=False, default=16, help="Sharding of checkpoint"
   )
+  # Normalize key=value CLI arguments for local_args if passed without leading dashes
+  normalized_argv = [sys.argv[0]]
+  for raw_cli_arg in sys.argv[1:]:
+    for cli_prefix in (
+        "save_dtype=",
+        "hf_model_path=",
+        "lazy_load_tensors=",
+        "eager_load_method=",
+        "revision=",
+        "simulated_cpu_devices_count=",
+    ):
+      if raw_cli_arg.startswith(cli_prefix):
+        raw_cli_arg = "--" + raw_cli_arg
+        break
+    normalized_argv.append(raw_cli_arg)
+  sys.argv = normalized_argv
+
   # Parse local arguments
   # Parse known args returns the namespace AND the list of remaining arguments
   local_args, remaining_args = parser.parse_known_args()

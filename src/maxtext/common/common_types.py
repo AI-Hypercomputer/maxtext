@@ -14,6 +14,7 @@
 
 """Common types."""
 import enum
+import fnmatch
 from typing import Any, Sequence
 
 import numpy as np
@@ -28,8 +29,32 @@ PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
 
+
+def is_fp8_dtype(dtype: Any) -> bool:
+  """Checks whether a dtype is FP8."""
+  return dtype in (
+      "float8_e4m3fn",
+      "float8_e5m2",
+      jnp.float8_e4m3fn,
+      jnp.float8_e5m2,
+  )
+
+
+def get_weight_dtype(config: Config, module_name: str) -> DType:
+  """Resolves parameter storage dtype for a submodule, honoring unquantized_modules."""
+  if not is_fp8_dtype(config.weight_dtype):
+    return config.weight_dtype
+  unquantized = getattr(config, "unquantized_modules", None) or ()
+  leaf_name = module_name.rsplit(".", 1)[-1]
+  if any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized):
+    return config.dtype
+  return config.weight_dtype
+
+
 AxisNames = tuple[str, ...]
 AxisIdxes = tuple[int, ...]
+
+SEGMENT_ID_BATCH = "segment_ids_batch"
 
 BATCH = "activation_batch"
 BATCH_ATTN = "activation_batch_attn"
@@ -162,6 +187,8 @@ class HyperConnectionType(enum.Enum):
 
 
 class CustomRule(enum.Enum):
+  """Custom mesh and logical axis rule sets, each backed by a yml in configs/custom_mesh_and_rule."""
+
   DEFAULT = ""
   PURE_FSDP = "pure-fsdp"
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
@@ -170,3 +197,4 @@ class CustomRule(enum.Enum):
   FSDP_2D = "2d-fsdp"
   EP_AS_DP = "ep-as-dp"
   SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
+  FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"

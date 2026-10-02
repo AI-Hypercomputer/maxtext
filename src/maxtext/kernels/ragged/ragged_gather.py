@@ -410,7 +410,7 @@ def ragged_gather(
 
   # Guard against eager initialization on non-TPU hardware (e.g. during CPU tests).
   # pltpu.get_tpu_info() expects TPU hardware and will crash if executed on CPU.
-  if enforce_fallback or jax.devices()[0].platform != "tpu":
+  if enforce_fallback or not pltpu.is_tpu_device():
     return _fallback_implementation(x, indices, weights, has_weights)
 
   sc_info = pltpu.get_tpu_info().sparse_core
@@ -456,7 +456,6 @@ def ragged_gather(
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
-          needs_layout_passes=False,
       ),
       cost_estimate=get_cost_estimate(
           out_size=out_size + out_pad_size,

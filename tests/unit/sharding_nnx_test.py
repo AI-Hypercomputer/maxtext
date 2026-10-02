@@ -30,7 +30,6 @@ import optax
 
 @dataclass
 class _Cfg:
-  pure_nnx: bool = True
   shard_optimizer_over_data: bool = False
 
 
@@ -51,6 +50,18 @@ def _create_2d_test_mesh(axis_names=("data", "model")):
   else:
     mesh_devices = np.array(devices[:1]).reshape(1, 1)
   return Mesh(devices=mesh_devices, axis_names=axis_names)
+
+
+def _create_size_one_test_mesh(axis_names):
+  """A mesh with every axis of size one, whatever the runner has.
+
+  TestNnxConstructNamedSharding only checks which axis *name* a logical axis resolves
+  to, and its arrays are deliberately small and odd-shaped (e.g. shape (3,)). Sizing the
+  axes off the ambient device count would make those arrays indivisible as soon as
+  another test module in the same pytest process raises it — for example by setting
+  XLA_FLAGS=--xla_force_host_platform_device_count.
+  """
+  return Mesh(devices=np.array(jax.local_devices()[:1]).reshape((1,) * len(axis_names)), axis_names=axis_names)
 
 
 def _build_state_mesh_shardings(model, tx):
@@ -83,9 +94,9 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
   def setUp(self):
     self.model = _LinearNNX(rngs=nnx.Rngs(0))
 
-  def test_dispatch_from_main_helper_when_pure_nnx(self):
+  def test_dispatch_from_main_helper(self):
     """maybe_update_params_sharding_with_opt should dispatch to the NNX variant."""
-    cfg = _Cfg(pure_nnx=True, shard_optimizer_over_data=False)
+    cfg = _Cfg(shard_optimizer_over_data=False)
     state_mesh_shardings = _build_state_mesh_shardings(self.model, optax.adam(1e-3))
     prev, updated = sharding.maybe_update_params_sharding_with_opt(cfg, state_mesh_shardings)
     # prev is the param-only view (no rngs / non-Param nodes)
@@ -168,6 +179,29 @@ class TestMaybeUpdateParamsShardingWithOptNNX(unittest.TestCase):
     )
     self.assertEqual(n_prev, n_after)
 
+  def test_zero1_partitioned_optimizer_filters_masked_nodes(self):
+    """Partitioned optimizers (Muon + Adam) with MaskedNode must update all branch params without error."""
+    cfg = _Cfg(shard_optimizer_over_data=True)
+    partitioned_opt = optax.partition(
+        transforms={
+            "muon": optax.adam(1e-3),
+            "adam": optax.adam(1e-3),
+        },
+        param_labels=lambda p: jax.tree.map(
+            lambda v: "muon" if "kernel" in getattr(v, "tag", "") else "adam",
+            p,
+        ),
+    )
+    state_mesh_shardings = _build_state_mesh_shardings(self.model, partitioned_opt)
+    prev, updated = sharding.maybe_update_params_sharding_with_opt_nnx(cfg, state_mesh_shardings)
+    self.assertIsInstance(prev, nnx.State)
+    self.assertIsInstance(updated, nnx.State)
+    # Ensure no MaskedNode leaked into updated.model
+    leaves = jax.tree.leaves(updated.model, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    self.assertGreater(len(leaves), 0)
+    for leaf in leaves:
+      self.assertIsInstance(leaf.get_value(), NamedSharding)
+
 
 class TestNnxConstructNamedSharding(unittest.TestCase):
   """Unit tests for nnx_construct_named_sharding covering every branch.
@@ -181,8 +215,8 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
 
   def setUp(self):
     # Mesh needs to contain every axis name the tests reference in partition specs.
-    self.mesh = _create_2d_test_mesh(axis_names=("fsdp", "stage"))
-    # In local test environments (e.g. single-device CPU), all mesh axes have size 1.
+    self.mesh = _create_size_one_test_mesh(axis_names=("fsdp", "stage"))
+    # All mesh axes have size 1.
     # We stub remove_size_one_mesh_axis to act as a no-op so that resolved physical PartitionSpecs
     # are returned unreduced (e.g. retaining "fsdp", "stage", etc.), allowing us to verify naming
     # resolution. The actual size-one axis removal is tested separately in TestGetNNXNamedShardingSizeOneAxes.
@@ -284,11 +318,12 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
         ("embed", "fsdp"),
         ("mlp", "fsdp"),
     )
+    v = nnx.Param(
+        jnp.zeros((3, 4)),
+        out_sharding=("embed", "mlp"),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(rules):
-      v = nnx.Param(
-          jnp.zeros((3, 4)),
-          out_sharding=("embed", "mlp"),
-      )
       out = self._run(self._build_state(w=v))
       result_sharding = out["w"].get_value()
       self.assertIsInstance(result_sharding, NamedSharding)
@@ -305,11 +340,12 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
         ("mlp", "fsdp"),
         ("mlp", "stage"),
     )
+    v = nnx.Param(
+        jnp.zeros((3, 4)),
+        out_sharding=("embed", "mlp"),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(rules):
-      v = nnx.Param(
-          jnp.zeros((3, 4)),
-          out_sharding=("embed", "mlp"),
-      )
       out = self._run(self._build_state(w=v))
       result_sharding = out["w"].get_value()
       self.assertIsInstance(result_sharding, NamedSharding)
@@ -327,6 +363,7 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
           jnp.zeros((3,)),
           out_sharding=("embed",),
           sharding_rules=(("embed", "fsdp"),),
+          eager_sharding=False,
       )
     out = self._run(self._build_state(w=v))
     result_sharding = out["w"].get_value()
@@ -354,13 +391,14 @@ class TestNnxConstructNamedSharding(unittest.TestCase):
     # Local rules map 'embed' to 'stage'. Context rules map 'embed' to 'fsdp'.
     # Because local rules come first, 'embed' should resolve to 'stage'.
     context_rules = (("embed", "fsdp"),)
+    v = nnx.Param(
+        jnp.zeros((3,)),
+        out_sharding=("embed",),
+        sharding_rules=(("embed", "stage"),),
+        eager_sharding=False,
+    )
     with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(context_rules):
-      v = nnx.Param(
-          jnp.zeros((3,)),
-          out_sharding=("embed",),
-          sharding_rules=(("embed", "stage"),),
-      )
-    out = self._run(self._build_state(w=v))
+      out = self._run(self._build_state(w=v))
     result_sharding = out["w"].get_value()
     self.assertEqual(result_sharding.spec, PartitionSpec("stage"))
 
@@ -438,6 +476,31 @@ class TruncateOutShardingTest(unittest.TestCase):
     spec = ("data", "model", None, None)
     truncated = sharding.truncate_out_sharding(spec, 2)
     self.assertEqual(truncated, ("data", "model"))
+
+  def test_truncate_out_sharding_keeps_unreduced_annotation(self):
+    """Truncating must preserve `unreduced`, which describes the array, not a dimension.
+
+    Gradient accumulation marks gradients unreduced over "data" before resharding them,
+    so specs carrying the annotation reach this helper for every parameter, including
+    ones with fewer dimensions than the spec has entries (a 1-D bias, say).
+    """
+    # `unreduced` is only legal on Explicit mesh axes, which is exactly the mode
+    # get_mesh_from_config builds under shard_mode=explicit.
+    explicit_mesh = Mesh(
+        self.mesh.devices,
+        self.mesh.axis_names,
+        axis_types=(jax.sharding.AxisType.Explicit,) * len(self.mesh.axis_names),
+    )
+    ns = NamedSharding(explicit_mesh, PartitionSpec("model", None, unreduced={"data"}))
+    truncated = sharding.truncate_out_sharding(ns, 1)
+    self.assertEqual(truncated.spec.partitions, ("model",))
+    self.assertEqual(truncated.spec.unreduced, frozenset({"data"}))
+
+  def test_truncate_out_sharding_pspec_keeps_reduced_annotation(self):
+    pspec = PartitionSpec("model", None, None, reduced={"data"})
+    truncated = sharding.truncate_out_sharding(pspec, 2)
+    self.assertEqual(truncated.partitions, ("model", None))
+    self.assertEqual(truncated.reduced, frozenset({"data"}))
 
 
 if __name__ == "__main__":

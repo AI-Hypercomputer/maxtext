@@ -118,7 +118,7 @@ def main(argv: Sequence[str]) -> None:
   if test_scenario == "metrics_average":
     assert_metric_average(*test_vars)
   elif test_scenario == "checkpoint_save_restore":
-    test_checkpointing(*test_vars, dataset_type="tfds")
+    test_checkpointing(*test_vars, dataset_type="grain")
   elif test_scenario == "grain_checkpoint_save_restore":
     test_checkpointing(*test_vars, dataset_type="grain")
   elif test_scenario == "determinism":

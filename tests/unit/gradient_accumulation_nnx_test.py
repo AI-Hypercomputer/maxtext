@@ -14,6 +14,8 @@
 
 """Unit tests for the NNX branch of gradient_accumulation_loss_and_grad."""
 
+# pylint: disable=too-many-positional-arguments
+
 import unittest
 from dataclasses import dataclass
 
@@ -22,6 +24,7 @@ import jax.numpy as jnp
 import numpy as np
 from flax import nnx
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from qwix._src.core import qarray
 
 from maxtext.common.common_types import ShardMode
 from maxtext.utils import gradient_accumulation
@@ -30,10 +33,13 @@ from maxtext.utils import gradient_accumulation
 @dataclass
 class _Cfg:
   gradient_accumulation_steps: int = 2
+  use_tunix_gradient_accumulation: bool = False
   shard_optimizer_over_data: bool = False
   shard_mode: int = ShardMode.AUTO
   ici_data_parallelism: int = 1
   debug_sharding: bool = False
+  training_objective: str = "causal_lm"
+  use_tunix_gradient_accumulation: bool = False
 
 
 class _TinyNNX(nnx.Module):
@@ -64,7 +70,73 @@ def _fake_loss_fn(model, config, data, dropout_rng, params, is_train=True):
       "indexer_loss": jnp.array(0.0),
       "mtp_loss": jnp.array(0.0),
   }
-  return xent_sum / total_weights, aux
+  return xent_sum, aux
+
+
+def _zero_weight_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+  """Produces model-dependent sums with a zero token denominator."""
+  del config, dropout_rng, params, is_train
+  xent_sum = jnp.sum(model(data["inputs"]) ** 2) + 1.0
+  aux = {
+      "xent_sum": xent_sum,
+      "total_weights": jnp.array(0.0),
+      "moe_lb_loss": jnp.array(0.0),
+      "indexer_loss": jnp.array(0.0),
+      "mtp_loss": jnp.array(0.0),
+  }
+  return xent_sum, aux
+
+
+def _normalized_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+  """Produces the per-microbatch normalized loss used by Tunix accumulation."""
+  xent_sum, aux = _fake_loss_fn(model, config, data, dropout_rng, params, is_train=is_train)
+  return xent_sum / aux["total_weights"], aux
+
+
+def _make_cotangent_clip(bound):
+  """Identity forward; the backward clips the cotangent to [-bound, bound].
+
+  This stands in for a static (fixed-range) fp8 calibration of backward cotangents, e.g.
+  bwd_quantization_calibration_method=fixed,0.01, which saturates values outside the range.
+  """
+
+  @jax.custom_vjp
+  def clip(x):
+    return x
+
+  def fwd(x):
+    return x, None
+
+  def bwd(_, g):
+    return (jnp.clip(g, -bound, bound),)
+
+  clip.defvjp(fwd, bwd)
+  return clip
+
+
+def _make_fixed_fp8_bwd_probe(seen, quantize=True):
+  """Identity forward; the backward records its cotangent, then (if quantize) quantizes it with qwix e5m2 `fixed,0.01`.
+
+  This is the recipe's backward calibration (bwd_quantization_calibration_method=fixed,0.01): a static per-tensor
+  range, so a cotangent larger than the range saturates.
+  """
+
+  @jax.custom_vjp
+  def probe(x):
+    return x
+
+  def fwd(x):
+    return x, None
+
+  def bwd(_, g):
+    jax.debug.callback(lambda v: seen.append(np.asarray(v)), g)
+    if not quantize:
+      return (g,)
+    how = qarray.HowToQuantize(qtype=jnp.float8_e5m2, tiled_axes={}, calibration_method="fixed,0.01")
+    return (qarray.dequantize(qarray.quantize(g, how)).astype(g.dtype),)
+
+  probe.defvjp(fwd, bwd)
+  return probe
 
 
 class TestGradientAccumulationNNX(unittest.TestCase):
@@ -114,6 +186,176 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     for g in grad_leaves:
       self.assertTrue(jnp.all(jnp.isfinite(g)))
 
+  def test_positive_weights_match_direct_causal_batch(self):
+    """The guarded denominator preserves ordinary causal accumulation."""
+    kernel = self.model.linear.kernel.get_value()
+    bias = self.model.linear.bias.get_value()
+
+    def direct_loss(kernel, bias):
+      predictions = self.data["inputs"] @ kernel + bias
+      return jnp.mean((predictions - self.data["targets"]) ** 2)
+
+    expected_loss, expected_grads = jax.value_and_grad(direct_loss, argnums=(0, 1))(kernel, bias)
+    loss, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _fake_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+
+    np.testing.assert_allclose(loss, expected_loss, rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
+  def test_backward_cotangents_keep_ga1_magnitude(self):
+    """A range-limited backward sees the same cotangents under GA as without it.
+
+    The manual GA loss is the token-summed xent. Differentiated as is, its cotangents are W times the GA=1 ones and a
+    fixed-range backward calibration saturates them. The accumulation scales the differentiated loss by 1 / (token
+    capacity), so the GA=2 gradient equals the GA=1 gradient of the same batch through the same clipped backward.
+    """
+    self.cfg.global_batch_size_to_train_on = 4
+    self.cfg.max_target_length = 1  # token capacity 4 = total_weights of the 4-example batch
+    kernel = self.model.linear.kernel.get_value()
+    bias = self.model.linear.bias.get_value()
+    preds = self.data["inputs"] @ kernel + bias
+    ga1_cotangent = jnp.max(jnp.abs(2.0 * (preds - self.data["targets"]) / 4.0))
+    bound = float(1.5 * ga1_cotangent)
+    # The unscaled xent_sum cotangent (4x the GA=1 one) must exceed the bound, or this test checks nothing.
+    self.assertGreater(float(jnp.max(jnp.abs(2.0 * (preds - self.data["targets"])))), bound)
+    clip = _make_cotangent_clip(bound)
+
+    def direct_loss(kernel, bias):
+      predictions = clip(self.data["inputs"] @ kernel + bias)
+      return jnp.mean((predictions - self.data["targets"]) ** 2)
+
+    def clipped_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+      del config, dropout_rng, params, is_train
+      per_sample_loss = jnp.mean((clip(model(data["inputs"])) - data["targets"]) ** 2, axis=-1)
+      xent_sum = jnp.sum(per_sample_loss)
+      aux = {
+          "xent_sum": xent_sum,
+          "total_weights": jnp.array(per_sample_loss.shape[0], dtype=jnp.float32),
+          "moe_lb_loss": jnp.array(0.0),
+          "indexer_loss": jnp.array(0.0),
+          "mtp_loss": jnp.array(0.0),
+      }
+      return xent_sum, aux
+
+    expected_grads = jax.grad(direct_loss, argnums=(0, 1))(kernel, bias)
+    _, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        clipped_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+    np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
+  def test_ga2_cotangent_at_fixed_quantizer_matches_total_batch(self):
+    """GA=2 feeds a fixed-range fp8 backward quantizer the GA=1 cotangent of the concatenated batch.
+
+    With 2N = 8 sequences of one token, the GA=1 loss is the mean over 8, so the cotangent of each per-token loss is
+    1/(2N) = 0.125. Under GA=2 the accumulation scales each microbatch's token-summed loss by 1/S with
+    S = global_batch_size_to_train_on (8, which includes the GA factor) x max_target_length (1), so the cotangent
+    must be 0.125 as well (it was 1 before the fix); that probe only records. A second probe with the recipe's e5m2
+    `fixed,0.01` quantizer sits on the predictions, and the final gradient must equal the GA=1 gradient of the
+    concatenated batch.
+    """
+    self.cfg.global_batch_size_to_train_on = 8
+    self.cfg.max_target_length = 1
+    inputs = jnp.linspace(-1.0, 1.0, 16, dtype=jnp.float32).reshape(8, 2)
+    kernel = self.model.linear.kernel.get_value()
+    bias = self.model.linear.bias.get_value()
+    preds = inputs @ kernel + bias
+    residual = jnp.linspace(-0.03, 0.035, 8, dtype=jnp.float32).reshape(8, 1)
+    data = {"inputs": inputs, "targets": preds - residual}
+    # d(mean over 8 of r^2)/d pred = 2r/8, at most 0.00875 < 0.01; unscaled (2r, up to 0.07) it would saturate.
+    self.assertLess(float(jnp.max(jnp.abs(2.0 * residual / 8.0))), 0.01)
+    self.assertGreater(float(jnp.max(jnp.abs(2.0 * residual))), 0.01)
+
+    seen_ga1_tok, seen_ga1_pred, seen_ga2_tok, seen_ga2_pred = [], [], [], []
+
+    def direct_loss(kernel, bias):
+      tok_probe = _make_fixed_fp8_bwd_probe(seen_ga1_tok, quantize=False)
+      pred_probe = _make_fixed_fp8_bwd_probe(seen_ga1_pred)
+      predictions = pred_probe(inputs @ kernel + bias)
+      per_token = tok_probe(jnp.mean((predictions - data["targets"]) ** 2, axis=-1))
+      return jnp.mean(per_token)
+
+    def probed_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+      del config, dropout_rng, params, is_train
+      tok_probe = _make_fixed_fp8_bwd_probe(seen_ga2_tok, quantize=False)
+      pred_probe = _make_fixed_fp8_bwd_probe(seen_ga2_pred)
+      per_token = tok_probe(jnp.mean((pred_probe(model(data["inputs"])) - data["targets"]) ** 2, axis=-1))
+      xent_sum = jnp.sum(per_token)
+      aux = {
+          "xent_sum": xent_sum,
+          "total_weights": jnp.array(per_token.shape[0], dtype=jnp.float32),
+          "moe_lb_loss": jnp.array(0.0),
+          "indexer_loss": jnp.array(0.0),
+          "mtp_loss": jnp.array(0.0),
+      }
+      return xent_sum, aux
+
+    expected_grads = jax.grad(direct_loss, argnums=(0, 1))(kernel, bias)
+    _, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        probed_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=data,
+        dropout_rng=None,
+    )
+    jax.effects_barrier()
+
+    # Per-token cotangent: GA=1 on the 8-sequence batch sees 1/8 on every token; GA=2 sees the same, twice.
+    self.assertEqual(len(seen_ga1_tok), 1)
+    self.assertEqual(len(seen_ga2_tok), 2)
+    np.testing.assert_array_equal(seen_ga1_tok[0], np.full((8,), 0.125, np.float32))
+    for tok in seen_ga2_tok:
+      np.testing.assert_array_equal(tok, np.full((4,), 0.125, np.float32))
+    # Cotangent at the fp8 quantizer on the predictions. The accumulation splits the batch with a stride of GA
+    # (microbatch k holds rows k, k + GA, ...), so microbatch k must see rows k::2 of the GA=1 cotangent.
+    self.assertEqual(len(seen_ga2_pred), 2)
+    for k, pred_cot in enumerate(seen_ga2_pred):
+      np.testing.assert_allclose(pred_cot, seen_ga1_pred[0][k::2], rtol=1e-6, atol=0)
+    self.assertLess(float(np.max(np.abs(seen_ga1_pred[0]))), 0.01)
+    np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
+  def test_tunix_block_diffusion_uses_accumulation_step_divisor(self):
+    self.cfg.training_objective = "block_diffusion"
+    self.cfg.use_tunix_gradient_accumulation = True
+    kernel = self.model.linear.kernel.get_value()
+    bias = self.model.linear.bias.get_value()
+
+    def direct_loss(kernel, bias):
+      predictions = self.data["inputs"] @ kernel + bias
+      return jnp.mean((predictions - self.data["targets"]) ** 2)
+
+    expected_loss, expected_grads = jax.value_and_grad(direct_loss, argnums=(0, 1))(kernel, bias)
+    loss, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _normalized_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+
+    np.testing.assert_allclose(loss, expected_loss, rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
   def test_nnx_path_updates_model_rest_state_after_scan(self):
     """After accumulation, nnx.update is called on the model with the rest_state from the scan.
 
@@ -150,6 +392,30 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     self.assertTrue(jnp.isfinite(loss))
     for g in jax.tree.leaves(raw_grads):
       self.assertTrue(jnp.all(jnp.isfinite(g)))
+
+  def test_zero_total_weights_returns_zero_loss_and_gradients(self):
+    for training_objective in ("causal_lm", "block_diffusion"):
+      for use_tunix_gradient_accumulation in (False, True):
+        with self.subTest(
+            training_objective=training_objective,
+            use_tunix_gradient_accumulation=use_tunix_gradient_accumulation,
+        ):
+          self.cfg.training_objective = training_objective
+          self.cfg.use_tunix_gradient_accumulation = use_tunix_gradient_accumulation
+          loss, _, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+              _zero_weight_loss_fn,
+              self.cfg,
+              self.model,
+              params=None,
+              params_shardings=self._params_shardings(),
+              data=self.data,
+              dropout_rng=None,
+          )
+
+          self.assertEqual(float(loss), 0.0)
+          for gradient in jax.tree.leaves(raw_grads):
+            self.assertTrue(jnp.all(jnp.isfinite(gradient)))
+            self.assertTrue(jnp.all(gradient == 0))
 
 
 if __name__ == "__main__":

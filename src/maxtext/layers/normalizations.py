@@ -16,19 +16,43 @@
 
 from typing import Any
 
-from flax import linen as nn
 from flax import nnx
-from flax.linen import initializers as linen_initializers
 import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
-from maxtext.common.common_types import Array, DType, ShardMode
+from maxtext.common.common_types import Array, DType, ShardMode, is_fp8_dtype
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import Initializer, variable_to_logically_partitioned
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import truncate_out_sharding
+
+
+def _align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
+  """Reshards a 1-D norm scale to match the sharding of the axis it normalizes.
+
+  The scale is stored with the `kernel_axes` layout, which is picked for the
+  usual case of normalizing over the embedding axis (`norm` -> `tensor`). A
+  per-head QK norm instead normalizes over `head_dim`, which is unsharded while
+  the neighbouring `heads` axis is the one on `tensor`. Multiplying those
+  directly under `ShardMode.EXPLICIT` would place `tensor` on two axes of the
+  result, which JAX rejects, so align the scale with the activation instead.
+
+  This is a no-op whenever the two already agree, which includes every
+  auto-sharding-equivalent layout for the ordinary layer norms.
+  """
+  # Read through `.partitions`: a scale carrying a reduced/unreduced tag (the deferred
+  # data-parallel all-reduce under gradient accumulation) rejects direct indexing. The tags
+  # are carried over to the new spec so the scale keeps its place on the deferred path.
+  activation_axis = jax.typeof(y).sharding.spec.partitions[-1]
+  scale_spec = jax.typeof(scale).sharding.spec
+  if scale_spec.partitions[-1] == activation_axis:
+    return scale
+  return jax.sharding.reshard(
+      scale,
+      jax.sharding.PartitionSpec(activation_axis, unreduced=scale_spec.unreduced, reduced=scale_spec.reduced),
+  )
 
 
 class RMSNorm(nnx.Module):
@@ -42,7 +66,7 @@ class RMSNorm(nnx.Module):
       weight_dtype: Any = jnp.float32,
       shard_mode: ShardMode = ShardMode.AUTO,
       kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.ones,
+      scale_init: Initializer = jax.nn.initializers.ones,
       parameter_memory_host_offload: bool = False,
       scale_offset: float = 0.0,
       with_scale: bool = True,
@@ -52,7 +76,7 @@ class RMSNorm(nnx.Module):
     self.num_features = num_features
     self.epsilon = epsilon
     self.dtype = dtype
-    self.weight_dtype = weight_dtype
+    self.weight_dtype = dtype if is_fp8_dtype(weight_dtype) else weight_dtype
     self.shard_mode = shard_mode
     self.kernel_axes = kernel_axes
     self.scale_init = scale_init
@@ -61,7 +85,7 @@ class RMSNorm(nnx.Module):
     self.with_scale = with_scale
     if self.with_scale:
       self.scale = nnx.Param(
-          scale_init(rngs.params(), (num_features,), weight_dtype),
+          scale_init(rngs.params(), (num_features,), self.weight_dtype),
           out_sharding=kernel_axes,
       )
     else:
@@ -91,8 +115,17 @@ class RMSNorm(nnx.Module):
       max_logging.log("normalizations.py: Moving scale parameter to device")
       scale = jax.device_put(scale, max_utils.device_space())
 
-    scale = jnp.asarray(scale, self.dtype)
-    effective_scale = scale + self.scale_offset
+    scale_fp32 = jnp.asarray(scale, jnp.float32)
+    effective_scale = scale_fp32 + self.scale_offset
+    if self.shard_mode == ShardMode.EXPLICIT:
+      effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
+
+    if self.scale_offset != 0.0:
+      normed_fp32 = x * lax.rsqrt(mean2 + self.epsilon)
+      y = jnp.einsum("...k,k->...k", normed_fp32, effective_scale, out_sharding=out_sharding)
+      return jnp.asarray(y, self.dtype)
+
+    effective_scale = jnp.asarray(effective_scale, self.dtype)
     return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
 
 
@@ -129,25 +162,24 @@ def Qwen3NextRMSNorm(
     *,
     rngs: nnx.Rngs,
 ):
-  """
-  Used for input and post attention layernorms
-  in Qwen3NextDecoderLayer.
+  """Used for input and post attention layernorms in Qwen3NextDecoderLayer.
 
   This normalization layer is specific to Qwen3-Next. Key characteristics:
-  1.  The learnable scale parameter `scale` is initialized to ZEROS.
-  2.  The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
-      This matches the PyTorch implementation of Qwen3NextRMSNorm.
-
+  1. The learnable scale parameter `scale` is initialized to ZEROS.
+  2. The scale is applied as `(1.0 + self.scale)`, making the initial scale effectively 1.0.
+     This matches the PyTorch implementation of Qwen3NextRMSNorm.
   """
-
   return nnx.data(
       RMSNorm(
           num_features=num_features,
           epsilon=epsilon,
           dtype=dtype,
           weight_dtype=weight_dtype,
-          scale_init=linen_initializers.zeros,
+          shard_mode=shard_mode if shard_mode is not None else ShardMode.AUTO,
+          kernel_axes=kernel_axes if kernel_axes is not None else (),
+          scale_init=jax.nn.initializers.zeros,
           scale_offset=1.0,
+          parameter_memory_host_offload=bool(parameter_memory_host_offload),
           rngs=rngs,
       )
   )
@@ -168,7 +200,16 @@ class Qwen3NextRMSNormGated(nnx.Module):
     weight_dtype: The datatype of the internal RMSNorm scale.
   """
 
-  def __init__(self, num_features: int, epsilon: float, dtype: DType, weight_dtype: DType, *, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      num_features: int,
+      epsilon: float,
+      dtype: DType,
+      weight_dtype: DType,
+      shard_mode: ShardMode = ShardMode.AUTO,
+      *,
+      rngs: nnx.Rngs,
+  ):
     self.num_features = num_features
     self.epsilon = epsilon
     self.dtype = dtype
@@ -177,26 +218,33 @@ class Qwen3NextRMSNormGated(nnx.Module):
         RMSNorm(
             num_features=num_features,
             epsilon=self.epsilon,
-            dtype=dtype,
+            dtype=jnp.float32,
             weight_dtype=weight_dtype,
+            shard_mode=shard_mode,
             scale_init=nnx.initializers.ones,
             rngs=rngs,
         )
     )
 
-  def __call__(self, hidden_states: Array, gate: Array) -> Array:
-    """
-    Applies RMSNorm and then a SiLU gate.
+  def __call__(
+      self,
+      hidden_states: Array,
+      gate: Array,
+      out_sharding: NamedSharding | None = None,
+  ) -> Array:
+    """Applies RMSNorm and then a SiLU gate.
 
     Args:
       hidden_states: The input array to be normalized (o). Shape: (..., F)
-      gate: The gating array for the activation (z). Shape: (..., F)
-            where F is num_features.
+      gate: The gating array for the activation (z). Shape: (..., F) where F is
+        num_features.
+      out_sharding: Optional layout for the normalized states, honoured only
+        under `ShardMode.EXPLICIT`.
 
     Returns:
       The normalized and gated output array. Shape: (..., F)
     """
-    normalized_states = self.rms_norm(hidden_states)
+    normalized_states = self.rms_norm(hidden_states, out_sharding=out_sharding)
 
     # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
     gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))
@@ -211,7 +259,7 @@ def rms_norm(
     weight_dtype: Any = jnp.float32,
     shard_mode: ShardMode = ShardMode.AUTO,
     kernel_axes: tuple[None | str, ...] = (),
-    scale_init: Initializer = nn.initializers.ones,
+    scale_init: Initializer = jax.nn.initializers.ones,
     name: None | str = None,
     parameter_memory_host_offload: bool = False,
     with_scale: bool = True,
@@ -253,6 +301,6 @@ def l2norm(x: Array, dim: int = -1, eps: float = 1e-6) -> Array:
 Qwen3NextRMSNormLinen = nnx_wrappers.to_linen_class(
     RMSNorm,
     base_metadata_fn=variable_to_logically_partitioned,
-    scale_init=linen_initializers.zeros,
+    scale_init=jax.nn.initializers.zeros,
     scale_offset=1.0,
 )

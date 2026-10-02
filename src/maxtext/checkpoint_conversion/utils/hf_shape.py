@@ -153,6 +153,39 @@ def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   return shapes
 
 
+def _get_gemma4_layer_attention_dims(text_cfg: dict, layer_idx: int, is_global: bool):
+  """Extracts (q_dim, kv_dim, norm_dim) for a Gemma 4 layer accounting for per_layer_config overrides."""
+  num_attention_heads = text_cfg["num_attention_heads"]
+  num_key_value_heads = text_cfg["num_key_value_heads"]
+  head_dim = text_cfg["head_dim"]
+  global_head_dim = text_cfg.get("global_head_dim") or head_dim
+  num_global_key_value_heads = text_cfg.get("num_global_key_value_heads") or num_key_value_heads
+
+  per_layer_config = text_cfg.get("per_layer_config") or {}
+  if isinstance(per_layer_config, list):
+    layer_override = (
+        per_layer_config[layer_idx]
+        if layer_idx < len(per_layer_config) and isinstance(per_layer_config[layer_idx], dict)
+        else {}
+    )
+  elif isinstance(per_layer_config, dict):
+    layer_override = (
+        per_layer_config.get(layer_idx)
+        or per_layer_config.get(str(layer_idx))
+        or per_layer_config.get(f"{layer_idx:02d}")
+        or {}
+    )
+  else:
+    layer_override = {}
+
+  l_heads = layer_override.get("num_attention_heads") or num_attention_heads
+  l_kv_heads = layer_override.get("num_key_value_heads") or (
+      num_global_key_value_heads if is_global else num_key_value_heads
+  )
+  l_head_dim = layer_override.get("head_dim") or (global_head_dim if is_global else head_dim)
+  return l_heads * l_head_dim, l_kv_heads * l_head_dim, l_head_dim
+
+
 def GEMMA4_HF_WEIGHTS_TO_SHAPE(config):
   """Generates shape mapping for Hugging Face Gemma4 parameters.
 
@@ -179,33 +212,22 @@ def GEMMA4_HF_WEIGHTS_TO_SHAPE(config):
   hidden_size = text_cfg["hidden_size"]
   intermediate_size = text_cfg["intermediate_size"]
   num_hidden_layers = text_cfg["num_hidden_layers"]
-  num_attention_heads = text_cfg["num_attention_heads"]
-  num_key_value_heads = text_cfg["num_key_value_heads"]
-  num_global_key_value_heads = text_cfg.get("num_global_key_value_heads", num_key_value_heads)
-  head_dim = text_cfg["head_dim"]
-  global_head_dim = text_cfg.get("global_head_dim", head_dim)
   vocab_size = text_cfg["vocab_size"]
 
   num_experts = text_cfg.get("num_experts")
   num_experts = num_experts if num_experts is not None else 1
   # "moe_intermediate_size" is the canonical key in Gemma4 config; fall back to "expert_intermediate_size"
   expert_intermediate_size = text_cfg.get("moe_intermediate_size") or text_cfg.get("expert_intermediate_size")
+  layer_types = text_cfg.get("layer_types", [])
 
   shapes[f"{text_base}.embed_tokens.weight"] = [vocab_size, hidden_size]
   shapes[f"{text_base}.norm.weight"] = [hidden_size]
 
   for i in range(num_hidden_layers):
     hf_prefix = f"{text_base}.layers.{i}"
-    is_global = (i % 6) == 5
+    is_global = (i < len(layer_types) and layer_types[i] == "full_attention") if layer_types else (i % 6) == 5
 
-    if is_global:
-      q_dim = num_attention_heads * global_head_dim
-      kv_dim = num_global_key_value_heads * global_head_dim
-      norm_dim = global_head_dim
-    else:
-      q_dim = num_attention_heads * head_dim
-      kv_dim = num_key_value_heads * head_dim
-      norm_dim = head_dim
+    q_dim, kv_dim, norm_dim = _get_gemma4_layer_attention_dims(text_cfg, i, is_global)
 
     shapes[f"{hf_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
     shapes[f"{hf_prefix}.self_attn.k_proj.weight"] = [kv_dim, hidden_size]
@@ -291,7 +313,7 @@ def GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE(config):
     * derives global-vs-sliding from the per-model ``layer_types`` list
       (E2B has period-5, E4B has period-6),
     * emits the Per-Layer-Embedding parameters when ``hidden_size_per_layer_input`` > 0,
-    * omits k_proj/v_proj/k_norm/v_norm shapes on KV-shared layers, and
+      * omits k_proj/v_proj/k_norm/v_norm shapes on KV-shared layers, and
     * doubles ``intermediate_size`` on shared layers when ``use_double_wide_mlp``
       is set (E2B).
   """
@@ -304,11 +326,6 @@ def GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE(config):
   hidden_size = text_cfg["hidden_size"]
   intermediate_size = text_cfg["intermediate_size"]
   num_hidden_layers = text_cfg["num_hidden_layers"]
-  num_attention_heads = text_cfg["num_attention_heads"]
-  num_key_value_heads = text_cfg["num_key_value_heads"]
-  num_global_key_value_heads = text_cfg.get("num_global_key_value_heads") or num_key_value_heads
-  head_dim = text_cfg["head_dim"]
-  global_head_dim = text_cfg.get("global_head_dim", head_dim)
   vocab_size = text_cfg["vocab_size"]
   layer_types = text_cfg.get("layer_types", [])
 
@@ -330,15 +347,7 @@ def GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE(config):
     hf_prefix = f"{text_base}.layers.{i}"
     is_global = i < len(layer_types) and layer_types[i] == "full_attention"
     is_shared = num_kv_shared > 0 and i >= first_shared
-
-    if is_global:
-      q_dim = num_attention_heads * global_head_dim
-      kv_dim = num_global_key_value_heads * global_head_dim
-      norm_dim = global_head_dim
-    else:
-      q_dim = num_attention_heads * head_dim
-      kv_dim = num_key_value_heads * head_dim
-      norm_dim = head_dim
+    q_dim, kv_dim, norm_dim = _get_gemma4_layer_attention_dims(text_cfg, i, is_global)
 
     shapes[f"{hf_prefix}.self_attn.q_proj.weight"] = [q_dim, hidden_size]
     shapes[f"{hf_prefix}.self_attn.o_proj.weight"] = [hidden_size, q_dim]
@@ -1165,104 +1174,94 @@ def QWEN3_VL_HF_WEIGHTS_TO_SHAPE(config):
 
 
 def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
-  """Returns a dictionary mapping HuggingFace weight names to shapes for DeepSeek V4."""
+  """Returns the HuggingFace parameter shapes for DeepSeek V4."""
   hidden_size = config["hidden_size"]
   vocab_size = config["vocab_size"]
   num_hidden_layers = config["num_hidden_layers"]
   q_lora_rank = config.get("q_lora_rank", 1024)
-  kv_lora_rank = config.get("kv_lora_rank", 512)
-  # MaxText scales o_lora_rank by o_groups to get o_a_out_features (8192)
   o_lora_rank = config.get("o_lora_rank", 1024) * config.get("o_groups", 8)
   num_attention_heads = config["num_attention_heads"]
   head_dim = config["head_dim"]
-
   moe_intermediate_size = config["moe_intermediate_size"]
   n_routed_experts = config["n_routed_experts"]
-
-  # Dynamic hyperparameters replacing hardcoded literals:
-  hc_mult = config.get("hc_mult", 4)
-  hc_dim = (2 * hc_mult) + (hc_mult**2)  # 2(4) + 16 = 24
-  num_hash_layers = config.get("num_hash_layers", 3)  # 3
-  index_n_heads = config.get("index_n_heads", 64)  # 64
-  index_head_dim = config.get("index_head_dim", 128)  # 128
+  hc_mult = config.get("hc_mult", config.get("mhc_expansion_rate", 4))
+  hc_dim = (2 * hc_mult) + (hc_mult**2)
+  num_hash_layers = config.get("num_hash_layers", config.get("first_num_hash_layers", 3))
+  index_n_heads = config.get("index_n_heads", config.get("indexer_n_heads", 64))
+  index_head_dim = config.get("index_head_dim", config.get("indexer_head_dim", 128))
 
   mapping = {
-      "model.embed_tokens.weight": [vocab_size, hidden_size],
-      "model.norm.weight": [hidden_size],
+      "embed.weight": [vocab_size, hidden_size],
+      "norm.weight": [hidden_size],
       "head.weight": [vocab_size, hidden_size],
-      "model.hc_head.hc_fn": [hc_mult, hidden_size * hc_mult],
-      "model.hc_head.hc_base": [hc_mult],
-      "model.hc_head.hc_scale": [1],
+      "hc_head_fn": [hc_mult, hidden_size * hc_mult],
+      "hc_head_base": [hc_mult],
+      "hc_head_scale": [1],
   }
 
-  for layer_idx in range(num_hidden_layers):
-    layer_prefix = f"model.layers.{layer_idx}"
-    layer_mapping = {
-        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.q_a_norm.weight": [q_lora_rank],
-        f"{layer_prefix}.self_attn.q_b_proj.weight": [num_attention_heads * head_dim, q_lora_rank],
-        f"{layer_prefix}.self_attn.kv_proj.weight": [kv_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.kv_norm.weight": [kv_lora_rank],
-        f"{layer_prefix}.self_attn.sinks": [num_attention_heads],
-        f"{layer_prefix}.self_attn.o_a_proj.weight": [o_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.o_b_proj.weight": [hidden_size, o_lora_rank],
-        # MHC
-        f"{layer_prefix}.attn_hc.fn": [hc_dim, hidden_size * hc_mult],
-        f"{layer_prefix}.attn_hc.base": [hc_dim],
-        f"{layer_prefix}.attn_hc.scale": [num_hash_layers],
-        f"{layer_prefix}.ffn_hc.fn": [hc_dim, hidden_size * hc_mult],
-        f"{layer_prefix}.ffn_hc.base": [hc_dim],
-        f"{layer_prefix}.ffn_hc.scale": [num_hash_layers],
-        # MLP / MoE Block
-        f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
-        f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
-        f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [moe_intermediate_size, hidden_size],
-        f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [moe_intermediate_size, hidden_size],
-        f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, moe_intermediate_size],
+  def _compressor_shapes(comp_prefix, comp_dim, norm_dim, r):
+    return {
+        f"{comp_prefix}.wgate.weight": [comp_dim, hidden_size],
+        f"{comp_prefix}.wkv.weight": [comp_dim, hidden_size],
+        f"{comp_prefix}.norm.weight": [norm_dim],
+        f"{comp_prefix}.ape": [r, comp_dim],
     }
 
-    # Experts
-    for e in range(n_routed_experts):
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w1.weight"] = [moe_intermediate_size, hidden_size]
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w3.weight"] = [moe_intermediate_size, hidden_size]
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w2.weight"] = [hidden_size, moe_intermediate_size]
+  for layer_idx in range(num_hidden_layers):
+    layer_prefix = f"layers.{layer_idx}"
+    layer_mapping = {
+        f"{layer_prefix}.attn_norm.weight": [hidden_size],
+        f"{layer_prefix}.ffn_norm.weight": [hidden_size],
+        f"{layer_prefix}.attn.wq_a.weight": [q_lora_rank, hidden_size],
+        f"{layer_prefix}.attn.q_norm.weight": [q_lora_rank],
+        f"{layer_prefix}.attn.wq_b.weight": [num_attention_heads * head_dim, q_lora_rank],
+        f"{layer_prefix}.attn.wkv.weight": [
+            config.get("num_key_value_heads", 1) * config.get("head_dim", 64),
+            hidden_size,
+        ],
+        f"{layer_prefix}.attn.kv_norm.weight": [head_dim],
+        f"{layer_prefix}.attn.attn_sink": [num_attention_heads],
+        f"{layer_prefix}.attn.wo_a.weight": [
+            o_lora_rank,
+            (num_attention_heads * head_dim) // config.get("o_groups", 8),
+        ],
+        f"{layer_prefix}.attn.wo_b.weight": [hidden_size, o_lora_rank],
+        f"{layer_prefix}.hc_attn_fn": [hc_dim, hidden_size * hc_mult],
+        f"{layer_prefix}.hc_attn_base": [hc_dim],
+        f"{layer_prefix}.hc_attn_scale": [3],
+        f"{layer_prefix}.hc_ffn_fn": [hc_dim, hidden_size * hc_mult],
+        f"{layer_prefix}.hc_ffn_base": [hc_dim],
+        f"{layer_prefix}.hc_ffn_scale": [3],
+        f"{layer_prefix}.ffn.gate.weight": [n_routed_experts, hidden_size],
+        f"{layer_prefix}.ffn.gate.bias": [n_routed_experts],
+    }
+    if layer_idx < num_hash_layers:
+      layer_mapping[f"{layer_prefix}.ffn.gate.tid2eid"] = [vocab_size, config.get("num_experts_per_tok", 2)]
 
-    # Compressors
-    if layer_idx >= 2:
-      c_type = "csa" if (layer_idx % 2 == 0) else "hca"
-      if c_type == "csa":
+    compress_ratios = config.get("compress_ratios")
+    if compress_ratios and layer_idx < len(compress_ratios):
+      ratio = compress_ratios[layer_idx]
+    else:
+      ratio = 0 if layer_idx < 2 else (4 if layer_idx % 2 == 0 else 128)
+
+    if ratio > 0:
+      comp_dim = 2 * head_dim if ratio == 4 else head_dim
+      layer_mapping.update(_compressor_shapes(f"{layer_prefix}.attn.compressor", comp_dim, head_dim, ratio))
+      if ratio == 4:
         layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.kv_proj.weight": [1024, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.gate_proj.weight": [1024, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.position_bias": [4, 1024],
-                f"{layer_prefix}.self_attn.compressor.kv_norm.weight": [512],
-            }
+            _compressor_shapes(f"{layer_prefix}.attn.indexer.compressor", 2 * index_head_dim, index_head_dim, ratio)
         )
-        layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.indexer.gate_proj.weight": [256, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.kv_proj.weight": [256, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.q_b_proj.weight": [
-                    index_n_heads * index_head_dim,
-                    q_lora_rank,
-                ],
-                f"{layer_prefix}.self_attn.compressor.indexer.scorer.weights_proj.weight": [index_n_heads, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.position_bias": [4, 256],
-                f"{layer_prefix}.self_attn.compressor.indexer.kv_norm.weight": [128],
-            }
-        )
-      else:  # hca
-        layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.kv_proj.weight": [512, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.gate_proj.weight": [512, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.position_bias": [128, 512],
-                f"{layer_prefix}.self_attn.compressor.kv_norm.weight": [512],
-            }
-        )
+        layer_mapping[f"{layer_prefix}.attn.indexer.weights_proj.weight"] = [index_n_heads, hidden_size]
+        layer_mapping[f"{layer_prefix}.attn.indexer.wq_b.weight"] = [index_n_heads * index_head_dim, q_lora_rank]
+
+    for exp_idx in range(n_routed_experts):
+      layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w1.weight"] = [moe_intermediate_size, hidden_size]
+      layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w2.weight"] = [hidden_size, moe_intermediate_size]
+      layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w3.weight"] = [moe_intermediate_size, hidden_size]
+
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w1.weight"] = [moe_intermediate_size, hidden_size]
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w3.weight"] = [moe_intermediate_size, hidden_size]
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w2.weight"] = [hidden_size, moe_intermediate_size]
 
     mapping.update(layer_mapping)
   return mapping
@@ -1308,6 +1307,9 @@ HF_SHAPE = {
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.5-35b-a3b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.5-35b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.5-397b-a17b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
 }

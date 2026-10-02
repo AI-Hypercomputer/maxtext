@@ -126,6 +126,7 @@ class UlyssesAttentionTest(absltest.TestCase):
                 axis_names_kv=(None, None, "context", None),
                 dkv_dim_q=3,
                 dkv_dim_kv=3,
+                attention_label="TPU Ulysses attention",
             ),
         ),
         (
@@ -139,6 +140,7 @@ class UlyssesAttentionTest(absltest.TestCase):
                 head_dim_q=1,
                 head_dim_kv=1,
                 ulysses_size=4,
+                attention_label="TPU Ulysses attention",
             ),
         ),
         (
@@ -152,6 +154,7 @@ class UlyssesAttentionTest(absltest.TestCase):
                 head_dim_q=1,
                 head_dim_kv=1,
                 ulysses_size=4,
+                attention_label="TPU Ulysses attention",
             ),
         ),
         (
@@ -165,10 +168,11 @@ class UlyssesAttentionTest(absltest.TestCase):
                 head_dim_q=1,
                 head_dim_kv=1,
                 ulysses_size=4,
+                attention_label="TPU Ulysses attention",
             ),
         ),
         (
-            r"local query heads \(8\) to be divisible by context_parallel_size",
+            r"local query heads \(8\) to be divisible by the Ulysses exchange size",
             lambda: ulysses_attention.validate_head_sharding(
                 axis_names_q=(None, None, "context", None),
                 axis_names_kv=(None, None, "context", None),
@@ -178,6 +182,7 @@ class UlyssesAttentionTest(absltest.TestCase):
                 head_dim_q=1,
                 head_dim_kv=1,
                 ulysses_size=16,
+                attention_label="TPU Ulysses attention",
             ),
         ),
     ]
@@ -198,6 +203,7 @@ class UlyssesAttentionTest(absltest.TestCase):
         head_dim_q=1,
         head_dim_kv=1,
         ulysses_size=4,
+        attention_label="TPU Ulysses attention",
     )
 
     with self.assertRaisesRegex(ValueError, "local KV heads"):
@@ -210,6 +216,7 @@ class UlyssesAttentionTest(absltest.TestCase):
           head_dim_q=1,
           head_dim_kv=1,
           ulysses_size=4,
+          attention_label="TPU Ulysses attention",
       )
 
   def test_validate_head_sharding_rejects_mqa(self):
@@ -225,6 +232,7 @@ class UlyssesAttentionTest(absltest.TestCase):
           head_dim_q=1,
           head_dim_kv=1,
           ulysses_size=4,
+          attention_label="TPU Ulysses attention",
       )
 
   def test_validate_head_sharding_requires_q_and_kv_head_axes_to_match(self):
@@ -240,6 +248,7 @@ class UlyssesAttentionTest(absltest.TestCase):
           head_dim_q=1,
           head_dim_kv=1,
           ulysses_size=4,
+          attention_label="TPU Ulysses attention",
       )
 
   def test_ulysses_all_to_all_moves_heads_to_sequence(self):

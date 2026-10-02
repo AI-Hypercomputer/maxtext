@@ -25,22 +25,22 @@ message during this compilation
 as you would on the target hardware.
 """
 
+import contextlib
 import functools
 import os
 from typing import Sequence
 
 from absl import app
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules as axis_rules
 import jax
 from jax.experimental.serialize_executable import serialize
 from jax.experimental.topologies import get_topology_desc
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh
 from maxtext.common import train_state_nnx
-from maxtext.common.common_types import MODEL_MODE_TRAIN, ShardMode
+from maxtext.common.common_types import ShardMode
 from maxtext.configs import pyconfig
-from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
@@ -123,75 +123,56 @@ def _collect_nnx_activation_shardings(create_model_fn, config, mesh):
         enable_dropout=False,
     )
 
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
+  with jax.set_mesh(mesh), axis_rules(config.logical_axis_rules):
     jax.eval_shape(_nnx_forward, abstract_input, abstract_input, abstract_input)
 
 
 def get_shaped_inputs(topology_mesh, config):
   """Get shaped abstractions of inputs to train_step: state, batch and rng"""
   # Construct the model and optimizer to get shaped versions of the state
-  quant = quantizations.configure_quantization(config)
-  if config.pure_nnx:
-    _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, topology_mesh)
-  else:
-    model = Transformer(config, topology_mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
+  _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, topology_mesh)
   # The learning_rate_schedule is baked into the compiled object.
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
-  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=topology_mesh)
 
-  # Shaped RNG keys
-  _, example_rng = jax.random.split(jax.random.PRNGKey(0), 2)
-  shaped_rng = jax.ShapeDtypeStruct(example_rng.shape, example_rng.dtype)
+  def create_train_state_fn():
+    nnx_model = _create_model_partial()
+    wrt = (
+        getattr(nnx, "LoRAParam", nnx.Param)
+        if getattr(getattr(config, "lora", None), "enable_lora", False)
+        else nnx.Param
+    )
+    optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
+    return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
-  if config.pure_nnx:
-
-    def create_train_state_fn():
-      nnx_model = _create_model_partial()
-      wrt = (
-          getattr(nnx, "LoRAParam", nnx.Param)
-          if getattr(getattr(config, "lora", None), "enable_lora", False)
-          else nnx.Param
-      )
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
-      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-    init_state_fn = create_train_state_fn
-  else:
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, config, True, example_rng)
+  init_state_fn = create_train_state_fn
 
   # Shaped state
   abstract_state, _, state_mesh_shardings = maxtext_utils.get_abstract_state(config, topology_mesh, init_state_fn, True)
 
-  if config.pure_nnx:
-    # NNX doesn't use Linen logical annotations; derive PartitionSpecs from the physical shardings.
-    logical_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
-    # For NNX, get_functional_train_with_signature expects the graphdef (static structure),
-    # not the raw model — mirroring how the training loop does nnx.split(train_state).
-    with nn_partitioning.axis_rules(config.logical_axis_rules):
-      abs_train_state = nnx.eval_shape(init_state_fn)
-      graphdef, _ = nnx.split(abs_train_state)
-    model = graphdef
-  else:
-    # unsharded logical annotations
-    logical_annotations = maxtext_utils.get_logical_annotations(config, topology_mesh, init_state_fn)
+  # NNX doesn't use Linen logical annotations; derive PartitionSpecs from the physical shardings.
+  logical_annotations = maxtext_utils_nnx.get_partition_spec_nnx(state_mesh_shardings)
+  # For NNX, get_functional_train_with_signature expects the graphdef (static structure),
+  # not the raw model — mirroring how the training loop does nnx.split(train_state).
+  with axis_rules(config.logical_axis_rules):
+    abs_train_state = nnx.eval_shape(init_state_fn)
+    graphdef, _ = nnx.split(abs_train_state)
+  model = graphdef
 
   # Shaped batch
   data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
   shaped_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding)
 
-  if config.pure_nnx:
-    shaped_train_args = (
-        abstract_state,
-        shaped_batch,
-    )  # NNX doesn't use dropout_rng
-  else:
-    shaped_train_args = (abstract_state, shaped_batch, shaped_rng)
+  shaped_train_args = (
+      abstract_state,
+      shaped_batch,
+  )  # NNX doesn't use dropout_rng
   shaped_train_kwargs = {}
 
   # Collect NNX activation shardings via an abstract forward pass (must run
   # after get_abstract_state, which only traces __init__).
-  if config.debug_sharding and config.pure_nnx:
+  if config.debug_sharding:
     _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)  # pyrefly: ignore[unbound-name]
 
   return (
@@ -216,9 +197,9 @@ def jit_and_compile(
     logical_axis_rules,
 ):
   """Jit, lower, and compile func."""
-  # Use both jax.set_mesh (new API) and `with mesh:` (old API) so that drjax,
-  # which reads from pxla.thread_resources.env.physical_mesh, can find the mesh.
-  with jax.set_mesh(mesh), mesh, logical_axis_rules:
+  # `with mesh:` is only needed for drjax (enable_diloco); omit it otherwise to match train.py.
+  mesh_ctx = mesh if config.enable_diloco else contextlib.nullcontext()
+  with jax.set_mesh(mesh), mesh_ctx, logical_axis_rules:
     jitted = jax.jit(
         func,
         in_shardings=in_shardings,
@@ -300,7 +281,7 @@ def is_oom(argv: Sequence[str]) -> bool:
         static_argnums,
         donate_argnums,
         config,
-        nn_partitioning.axis_rules(config.logical_axis_rules),
+        axis_rules(config.logical_axis_rules),
     )
     return False
   except Exception as e:
@@ -392,20 +373,12 @@ def main(argv: Sequence[str]) -> None:
   # print weights sharding info under debug sharding mode
   if config.debug_sharding:
     max_utils.print_non_trivial_mesh_axis(topology_mesh)
-    if config.pure_nnx:
-      maxtext_utils.print_shardings_params(
-          shaped_train_args[0],
-          state_mesh_shardings,
-          topology_mesh,
-          logical_annotations,
-      )
-    else:
-      maxtext_utils.print_shardings_params(
-          shaped_train_args[0].params,
-          state_mesh_shardings.params,
-          topology_mesh,
-          logical_annotations.params,
-      )
+    maxtext_utils.print_shardings_params(
+        shaped_train_args[0],
+        state_mesh_shardings,
+        topology_mesh,
+        logical_annotations,
+    )
 
   # Compile
   print("Jitting and compiling train step...", flush=True)
@@ -419,7 +392,7 @@ def main(argv: Sequence[str]) -> None:
       static_argnums,
       donate_argnums,
       config,
-      nn_partitioning.axis_rules(config.logical_axis_rules),
+      axis_rules(config.logical_axis_rules),
   )
   print("Jitting and compilation complete!", flush=True)
 

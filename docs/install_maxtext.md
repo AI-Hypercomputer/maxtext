@@ -53,6 +53,8 @@ This is the easiest way to get started with the latest stable version.
      ```bash
      uv pip install maxtext[tpu]=={{version}} --resolution=lowest
      install_tpu_pre_train_extra_deps
+     # Pass --with-tf to install optional TensorFlow/TFDS and JetStream dependencies if needed:
+     # install_tpu_pre_train_extra_deps --with-tf
      ```
 
    - **Option 2:** Install `maxtext[cuda12]`, used for pre-training and decoding
@@ -61,6 +63,8 @@ This is the easiest way to get started with the latest stable version.
      ```bash
      uv pip install maxtext[cuda12]=={{version}} --resolution=lowest
      install_cuda12_pre_train_extra_deps
+     # Pass --with-tf to install optional TensorFlow/TFDS and JetStream dependencies if needed:
+     # install_cuda12_pre_train_extra_deps --with-tf
      ```
 
    - **Option 3:** Install `maxtext[tpu-post-train]`, used for post-training on
@@ -72,13 +76,12 @@ This is the easiest way to get started with the latest stable version.
      install_tpu_post_train_extra_deps
      ```
 
-   - **Option 4:** Install `maxtext[runner]`, used for building MaxText's Docker
-     images and scheduling workloads through XPK. Once installed, you will have
-     access to the `build_maxtext_docker_image`, `upload_maxtext_docker_image`,
-     and `xpk` commands. For more details on building and uploading Docker
-     images, see the
-     [Build MaxText Docker Image](build-docker)
-     guide.
+   - **Option 4:** Install `maxtext[runner]`, used for building and uploading
+     MaxText's Docker images. Once installed, you will have access to the
+     `build_maxtext_docker_image` and `upload_maxtext_docker_image` commands.
+     For GKE job submission, install the `gcluster` CLI separately as described in
+     the [Cluster Toolkit guide](run-cluster-toolkit). For more details on building
+     and uploading Docker images, see the [Build MaxText Docker Image](build-docker) guide.
 
      ```bash
      uv pip install maxtext[runner]=={{version}} --resolution=lowest
@@ -130,6 +133,8 @@ environment to avoid dependency conflicts.
      ```bash
      uv pip install -e .[tpu] --resolution=lowest
      install_tpu_pre_train_extra_deps
+     # Pass --with-tf to install optional TensorFlow/TFDS and JetStream dependencies if needed:
+     # install_tpu_pre_train_extra_deps --with-tf
      ```
 
    - **Option 2:** Install `.[cuda12]`
@@ -137,6 +142,8 @@ environment to avoid dependency conflicts.
      ```bash
      uv pip install -e .[cuda12] --resolution=lowest
      install_cuda12_pre_train_extra_deps
+     # Pass --with-tf to install optional TensorFlow/TFDS and JetStream dependencies if needed:
+     # install_cuda12_pre_train_extra_deps --with-tf
      ```
 
    - **Option 3:** Install `.[tpu-post-train]`

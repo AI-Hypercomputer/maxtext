@@ -135,13 +135,14 @@ def validate_dkv_sharding(
     axis_names_kv: Any,
     dkv_dim_q: int,
     dkv_dim_kv: int,
+    attention_label: str,
 ) -> None:
-  """Validates that the head-dim/D_KV dimension stays local for Ulysses attention."""
+  """Validates that the head-dim/D_KV dimension stays local for the head exchange."""
   q_dkv_axes = sharding.mesh_axes_for_dim(axis_names_q[dkv_dim_q])
   kv_dkv_axes = sharding.mesh_axes_for_dim(axis_names_kv[dkv_dim_kv])
   if q_dkv_axes or kv_dkv_axes:
     raise ValueError(
-        "TPU Ulysses attention does not support sharding the D_KV/head-dim "
+        f"{attention_label} does not support sharding the D_KV/head-dim "
         f"dimension; got Q axes {q_dkv_axes} and K/V axes {kv_dkv_axes}."
     )
 
@@ -156,28 +157,29 @@ def validate_head_sharding(
     head_dim_q: int,
     head_dim_kv: int,
     ulysses_size: int,
+    attention_label: str,
 ) -> None:
   """Validates local head counts before the Ulysses head/sequence exchange."""
   q_head_axes = sharding.mesh_axes_for_dim(axis_names_q[head_dim_q])
   kv_head_axes = sharding.mesh_axes_for_dim(axis_names_kv[head_dim_kv])
-  q_head_shards = sharding.mesh_axes_size(mesh, q_head_axes, label="TPU Ulysses attention")
-  kv_head_shards = sharding.mesh_axes_size(mesh, kv_head_axes, label="TPU Ulysses attention")
+  q_head_shards = sharding.mesh_axes_size(mesh, q_head_axes, label=attention_label)
+  kv_head_shards = sharding.mesh_axes_size(mesh, kv_head_axes, label=attention_label)
   if num_query_heads % q_head_shards != 0:
     raise ValueError(
-        "TPU Ulysses attention requires num_query_heads "
+        f"{attention_label} requires num_query_heads "
         f"({num_query_heads}) to be divisible by Q head shards ({q_head_shards})."
     )
   if num_kv_heads % kv_head_shards != 0:
     raise ValueError(
-        "TPU Ulysses attention requires num_kv_heads "
+        f"{attention_label} requires num_kv_heads "
         f"({num_kv_heads}) to be divisible by KV head shards ({kv_head_shards})."
     )
 
   if num_kv_heads == 1:
-    raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
+    raise ValueError(f"{attention_label} does not support MQA with a Ulysses exchange size > 1.")
   if q_head_axes != kv_head_axes:
     raise ValueError(
-        "TPU Ulysses attention requires Q and KV head sharding to match for MHA/GQA, "
+        f"{attention_label} requires Q and KV head sharding to match for MHA/GQA, "
         f"got Q head axes {q_head_axes} and KV head axes {kv_head_axes}."
     )
 
@@ -185,18 +187,18 @@ def validate_head_sharding(
   local_kv_heads = num_kv_heads // kv_head_shards
   if local_query_heads % local_kv_heads != 0:
     raise ValueError(
-        "TPU Ulysses attention requires local query heads "
+        f"{attention_label} requires local query heads "
         f"({local_query_heads}) to be divisible by local KV heads ({local_kv_heads})."
     )
   if local_query_heads % ulysses_size != 0:
     raise ValueError(
-        "TPU Ulysses attention requires local query heads "
-        f"({local_query_heads}) to be divisible by context_parallel_size ({ulysses_size})."
+        f"{attention_label} requires local query heads "
+        f"({local_query_heads}) to be divisible by the Ulysses exchange size ({ulysses_size})."
     )
   if local_kv_heads % ulysses_size != 0:
     raise ValueError(
-        "TPU Ulysses attention requires local KV heads "
-        f"({local_kv_heads}) to be divisible by context_parallel_size ({ulysses_size})."
+        f"{attention_label} requires local KV heads "
+        f"({local_kv_heads}) to be divisible by the Ulysses exchange size ({ulysses_size})."
     )
 
 

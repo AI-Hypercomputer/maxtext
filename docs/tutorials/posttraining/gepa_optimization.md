@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document explains how to use **GEPA** (Generic Evaluation and Prompt Adaptation) to optimize system prompts for MaxText models. GEPA is an evolutionary framework ([GitHub Repository](https://github.com/gepa-ai/gepa), [Paper](https://arxiv.org/abs/2507.19457)) that iteratively refines prompts based on evaluation feedback, helping models perform better on specific tasks. A complete, runnable example notebook is provided in the repository at [maxtext_with_gepa.ipynb](../../../src/maxtext/examples/maxtext_with_gepa.ipynb).
+This document explains how to use **GEPA** (Generic Evaluation and Prompt Adaptation) to optimize system prompts for MaxText models. GEPA is an evolutionary framework ([GitHub Repository](https://github.com/gepa-ai/gepa), [Paper](https://arxiv.org/abs/2507.19457)) that iteratively refines prompts based on evaluation feedback, helping models perform better on specific tasks. A complete, runnable example notebook is provided in the repository at [maxtext_with_gepa.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/maxtext_with_gepa.ipynb).
 
 ## How GEPA Optimization Works
 
@@ -44,7 +44,7 @@ Prompt optimization frameworks like GEPA are highly sensitive to the reward sign
 ## Tutorial Notebook
 
 A complete, runnable tutorial is available in the repository as a Jupyter Notebook:
-[maxtext_with_gepa.ipynb](../../../src/maxtext/examples/maxtext_with_gepa.ipynb) (provided as an example)
+[maxtext_with_gepa.ipynb](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/maxtext_with_gepa.ipynb) (provided as an example)
 
 This notebook walks through:
 

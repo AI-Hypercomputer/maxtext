@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Integration test for setup_train_loop with pure_nnx=True.
+"""Integration test for setup_train_loop on the NNX path.
 
 setup_train_loop wires together create_nnx_abstract_model, the training
 optimizer,
@@ -31,7 +31,7 @@ import jax
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.utils.train_utils import setup_train_loop
+from maxtext.utils import train_utils
 from tests.utils.test_helpers import get_test_config_path
 import pytest
 
@@ -43,7 +43,6 @@ def _tiny_nnx_pyconfig(**overrides):
       "enable_checkpointing": False,
       "dataset_type": "synthetic",
       "model_name": "default",
-      "pure_nnx": True,
       "per_device_batch_size": 1.0,
       "base_emb_dim": 8,
       "base_num_query_heads": 4,
@@ -68,7 +67,7 @@ def _tiny_nnx_pyconfig(**overrides):
 class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
   """End-to-end check that setup_train_loop returns a usable TrainStateNNX."""
 
-  def test_pure_nnx_setup_returns_train_state_nnx(self):
+  def test_setup_returns_train_state_nnx(self):
     config = _tiny_nnx_pyconfig()
 
     (
@@ -83,7 +82,7 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
         rampup_manager,
         eval_data_iterator,
         train_state,
-    ) = setup_train_loop(config, recorder=None)
+    ) = train_utils.setup_train_loop(config, recorder=None)
 
     # The NNX path returns a fully-merged TrainStateNNX (lines 352-354 in train_utils.py).
     self.assertIsInstance(train_state, train_state_nnx.TrainStateNNX)
@@ -109,13 +108,30 @@ class SetupTrainLoopNNXIntegrationTest(unittest.TestCase):
     # flag them as unused — they're part of the public return contract.
     del checkpoint_manager, rampup_manager, eval_data_iterator
 
-  def test_pure_nnx_setup_param_only_split_matches_model(self):
+  def test_load_balanced_cp_keeps_checkpoint_iterator_unwrapped(self):
+    """The reordered view goes to the DataLoader and eval; the original iterator goes to checkpointing."""
+    config = _tiny_nnx_pyconfig(
+        ici_context_parallelism=2,
+        context_parallel_load_balance=True,
+        packing=False,
+        eval_interval=1,
+    )
+
+    *_, data_iterator, data_loader, _, eval_data_iterator, _ = train_utils.setup_train_loop(config, recorder=None)
+
+    # pylint: disable=protected-access
+    self.assertIsInstance(data_loader.data_iterator, train_utils._ReorderedDataIterator)
+    self.assertIs(data_loader.data_iterator.data_iterator, data_iterator)
+    self.assertNotIsInstance(data_iterator, train_utils._ReorderedDataIterator)
+    self.assertIsInstance(eval_data_iterator, train_utils._ReorderedDataIterator)
+
+  def test_setup_param_only_split_matches_model(self):
     """nnx.split(state.model, nnx.Param, ...) must yield a non-empty Param tree
 
     whose structure matches state_mesh_shardings.model after the same split.
     """
     config = _tiny_nnx_pyconfig()
-    *_, state_mesh_shardings, model, _, _, _, _, _, _, train_state = setup_train_loop(config, recorder=None)
+    *_, state_mesh_shardings, model, _, _, _, _, _, _, train_state = train_utils.setup_train_loop(config, recorder=None)
 
     _, params, _ = nnx.split(train_state.model, nnx.Param, ...)
     _, params_shardings, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)

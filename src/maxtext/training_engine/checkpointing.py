@@ -14,7 +14,9 @@
 
 """Checkpointing utilities for MaxText training engine."""
 
+from collections.abc import Mapping
 import dataclasses
+import os
 from typing import Any, List
 
 from absl import logging
@@ -33,6 +35,67 @@ class CheckpointState:
   optimizer: nnx.optimizer.Optimizer | None = None
   accumulated_metrics: List[abstract_engine.MetricsBuffer] | None = None
   accumulated_grads: Any = None
+  # How many micro-batches of `step` are folded into `accumulated_grads`. 0 for a complete
+  # step, whose gradients have already been applied and discarded.
+  micro_step_count: int = 0
+
+
+_PATHWAYS_PERSISTENCE_REGISTERED = False
+
+
+def _maybe_register_pathways_persistence() -> None:
+  """Registers Orbax Pathways persistence array handler, if applicable.
+
+  When ENABLE_PATHWAYS_PERSISTENCE=1, delegates checkpoint saving directly
+  from TPU workers to storage (GCS), bypassing host RAM staging.
+  """
+  global _PATHWAYS_PERSISTENCE_REGISTERED
+  if _PATHWAYS_PERSISTENCE_REGISTERED:
+    return
+  if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
+    return
+
+  _PATHWAYS_PERSISTENCE_REGISTERED = True
+  try:
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    import orbax.checkpoint.pathways as ocp_pathways
+    from orbax.checkpoint._src.metadata import array_metadata_store as array_metadata_store_lib
+    from orbax.checkpoint._src.serialization import type_handler_registry
+
+    # pylint: enable=g-import-not-at-top,import-outside-toplevel
+
+    ocp_pathways.register_type_handlers(
+        use_single_replica_array_handler=False,
+        checkpointing_impl=ocp_pathways.CheckpointingImpl.PERSISTENCE,
+        # Preserve array metadata store required for pytrees with typed PRNG keys.
+        array_metadata_store=array_metadata_store_lib.Store(),
+    )
+
+    handler = type_handler_registry.get_type_handler(jax.Array)
+    handler_name = type(handler).__name__
+    store = getattr(handler, "_array_metadata_store", None)
+    if handler_name in ("CloudPathwaysArrayHandler", "PathwaysPersistenceArrayHandler"):
+      if store is None:
+        logging.error(
+            "Registered %s but array metadata store is None; saving may fail on typed PRNG keys.",
+            handler_name,
+        )
+      else:
+        logging.info(
+            "Registered Pathways persistence array handler (%s, store=%s); TPUs will write directly to storage.",
+            handler_name,
+            type(store).__name__,
+        )
+    else:
+      logging.warning(
+          "Pathways persistence registration fell back: jax.Array is handled by %s, not a persistence handler.",
+          handler_name,
+      )
+  except (ImportError, AttributeError, ModuleNotFoundError, NotImplementedError) as e:
+    logging.warning(
+        "Pathways persistence requested but unavailable on this backend (%s). Falling back to host-staged checkpointing.",
+        e,
+    )
 
 
 class CheckpointManager:
@@ -51,13 +114,30 @@ class CheckpointManager:
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if checkpoint_dir:
+      _maybe_register_pathways_persistence()
+
+      # Use configured array format (e.g. use_ocdbt=False for Pathways).
+      # Build a fresh handler per item as Orbax handlers carry per-item state.
+      def _pytree_handler() -> ocp.PyTreeCheckpointHandler:
+        return ocp.PyTreeCheckpointHandler(
+            use_ocdbt=config.checkpoint_storage_use_ocdbt,
+            use_zarr3=config.checkpoint_storage_use_zarr3,
+            save_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
+        )
+
       self._checkpoint_manager = ocp.CheckpointManager(
           directory=checkpoint_dir,
           options=ocp.CheckpointManagerOptions(
-              save_interval_steps=getattr(config, "checkpoint_period", 1),
-              max_to_keep=getattr(config, "max_num_checkpoints_to_keep", None),
-              enable_async_checkpointing=getattr(config, "async_checkpointing", True),
+              save_interval_steps=config.checkpoint_period,
+              max_to_keep=config.max_num_checkpoints_to_keep,
+              enable_async_checkpointing=config.async_checkpointing,
           ),
+          item_handlers={
+              "model_params": _pytree_handler(),
+              "optimizer_state": _pytree_handler(),
+              "accumulated_metrics": _pytree_handler(),
+              "accumulated_grads": _pytree_handler(),
+          },
       )
 
   def get_latest_step(self) -> int | None:
@@ -71,12 +151,67 @@ class CheckpointManager:
     if self._checkpoint_manager:
       self._checkpoint_manager.wait_until_finished()
 
+  def get_saved_micro_step_count(self, step: int) -> int:
+    """Returns how far into `step` the checkpoint already on disk got.
+
+    Args:
+      step: The step whose saved checkpoint should be inspected.
+
+    Returns:
+      0 if that checkpoint covers a complete step, otherwise the number of micro-batches
+      accumulated into it.
+    """
+    if self._checkpoint_manager is None:
+      return 0
+    try:
+      metadata = self._checkpoint_manager.metadata(step)
+    except Exception as e:  # pylint: disable=broad-except
+      logging.warning("Could not read metadata for step %d, treating it as complete: %s", step, e)
+      return 0
+    custom_metadata = getattr(metadata, "custom_metadata", None)
+    if not isinstance(custom_metadata, Mapping):
+      return 0
+    saved = custom_metadata.get("micro_step_count", 0)
+    return saved if isinstance(saved, int) else 0
+
+  def _supersedes_saved_checkpoint(self, step: int, micro_step_count: int) -> bool:
+    """Returns whether a new checkpoint is more complete than the one saved at `step`.
+
+    A complete step is never superseded: once the optimizer update for `step` has been
+    checkpointed there is nothing more to record for it. A partial one is superseded by a
+    complete step, and by a partial one that got further through the same step.
+
+    Args:
+      step: The step both checkpoints belong to.
+      micro_step_count: The new checkpoint's progress through `step`.
+
+    Returns:
+      Whether the new checkpoint should replace the saved one.
+    """
+    saved_micro_step_count = self.get_saved_micro_step_count(step)
+    if saved_micro_step_count == 0:
+      return False
+    return micro_step_count == 0 or micro_step_count > saved_micro_step_count
+
+  def _delete_saved_step(self, step: int) -> None:
+    """Deletes the checkpoint at `step` to make room for a more complete one.
+
+    Orbax refuses to write a step that already exists, so superseding one means removing it
+    first. An async save for this step may still be in flight, so drain before deleting.
+
+    Args:
+      step: The step to delete.
+    """
+    logging.info("Deleting intra-step checkpoint at step %d so a more complete one can replace it.", step)
+    self._checkpoint_manager.wait_until_finished()
+    self._checkpoint_manager.delete(step)
+
   def save_checkpoint(
       self,
       step: int,
       checkpoint_state: CheckpointState,
       custom_metadata: Any = None,
-      force_ckpt_save: bool = False,
+      **kwargs,
   ) -> bool:
     """Saves the params for the given step along with optional intra-step state.
 
@@ -85,7 +220,6 @@ class CheckpointManager:
       checkpoint_state: CheckpointState object containing model, optimizer, and
         optional intra_step_state.
       custom_metadata: Custom metadata to save with the checkpoint.
-      force_ckpt_save: Whether to force save the checkpoint.
 
     Returns:
       Whether the checkpoint was saved.
@@ -94,13 +228,25 @@ class CheckpointManager:
       logging.info("Checkpointing is disabled, skipping save.")
       return False
 
-    # Check if the checkpoint already exists at the current step.
-    if not force_ckpt_save and self.get_latest_step() == step:
-      logging.info(
-          "Checkpoint already saved at step %d, skipping save.",
-          step,
-      )
-      return False
+    # Record micro_step_count on every checkpoint, complete or not, so that a later save at the same step
+    # can tell whether it supersedes what is already on disk.
+    custom_metadata = dict(custom_metadata) if custom_metadata else {}
+    custom_metadata["micro_step_count"] = checkpoint_state.micro_step_count
+
+    # A checkpoint already exists at this step. Skip, unless this one is more complete --
+    # the case that matters is a step resumed from an intra-step checkpoint and then run to
+    # completion, whose finished state would otherwise never reach disk.
+    if self.get_latest_step() == step:
+      if not self._supersedes_saved_checkpoint(step, checkpoint_state.micro_step_count):
+        logging.info(
+            "Checkpoint already saved at step %d, skipping save.",
+            step,
+        )
+        return False
+      self._delete_saved_step(step)
+      # Orbax's save-interval policy declines a step it has already saved, so the
+      # replacement has to be forced through.
+      kwargs["force"] = True
 
     params = nnx.state(checkpoint_state.model)
     jax.block_until_ready(params)
@@ -119,7 +265,7 @@ class CheckpointManager:
       )
       save_args["optimizer_state"] = optimizer_cp_args
 
-    if checkpoint_state.accumulated_metrics is not None:
+    if checkpoint_state.accumulated_metrics:
       jax.block_until_ready(checkpoint_state.accumulated_metrics)
       metrics_cp_args = ocp.args.PyTreeSave(
           item=checkpoint_state.accumulated_metrics,
@@ -145,7 +291,7 @@ class CheckpointManager:
         step=step,
         args=ocp.args.Composite(**save_args),
         custom_metadata=custom_metadata,
-        force=force_ckpt_save,
+        **kwargs,
     )
 
   def restore_checkpoint(

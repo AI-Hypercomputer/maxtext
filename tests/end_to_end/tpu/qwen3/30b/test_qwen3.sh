@@ -16,6 +16,11 @@
 
 set -ex
 
+# Ensure JetStream and dependencies are installed for inference.decode
+if ! python3 -c "import jetstream" &>/dev/null; then
+    python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
+fi
+
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='qwen3-30b-a3b-base'
 
@@ -46,30 +51,32 @@ python3 -m maxtext.inference.decode \
 # Step 2: Run pre-training starting from the pre-converted checkpoint
 python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/train \
+    dataset_type=grain \
+    grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH} \
     tokenizer_type="huggingface" \
     load_parameters_path=${SCANNED_CKPT_PATH} \
-    per_device_batch_size=0.25 \
+    per_device_batch_size=1 \
     run_name=${run_id} \
     max_target_length=64 \
-    steps=5 \
+    steps=2 \
     async_checkpointing=false \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
     model_name=${MODEL_NAME} \
     scan_layers=true \
     remat_policy=full \
-    ici_tensor_parallelism=4 \
-    ici_fsdp_parallelism=16 \
     weight_dtype=bfloat16 \
     dtype=bfloat16 \
+    ici_expert_parallelism=8 \
     opt_type=sgd
+
 
 # Step 3: Run inference on the checkpoint produced by the pre-training run
 python3 -m maxtext.inference.decode \
     model_name=${MODEL_NAME} \
     tokenizer_type="huggingface" \
-    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/4/items \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 \
     run_name=${run_id} \
     max_prefill_predict_length=8 \

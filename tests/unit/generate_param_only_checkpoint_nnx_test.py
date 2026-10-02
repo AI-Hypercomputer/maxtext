@@ -92,7 +92,6 @@ class PossiblyUnrollParamsNNXTest(unittest.TestCase):
     config = SimpleNamespace(
         scan_layers=True,
         force_unroll=True,
-        pure_nnx=True,
         param_scan_axis=0,
         decoder_block=DecoderBlockType.LLAMA2,
         num_decoder_layers=num_layers,
@@ -133,7 +132,6 @@ class PossiblyUnrollParamsNNXTest(unittest.TestCase):
     config = SimpleNamespace(
         scan_layers=True,
         force_unroll=True,
-        pure_nnx=True,
         param_scan_axis=0,
         decoder_block=DecoderBlockType.DEEPSEEK,
         num_decoder_layers=5,
@@ -184,7 +182,6 @@ class PossiblyUnrollLoraParamsNNXTest(unittest.TestCase):
     config = SimpleNamespace(
         scan_layers=True,
         force_unroll=True,
-        pure_nnx=True,
         param_scan_axis=0,
         decoder_block=DecoderBlockType.LLAMA2,
         num_decoder_layers=num_layers,

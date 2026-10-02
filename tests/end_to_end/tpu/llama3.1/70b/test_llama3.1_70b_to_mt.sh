@@ -69,5 +69,6 @@ if [ "${USE_MULTIMODAL}" = "false" ]; then
         --max_kl_div=0.03 \
         --run_hf_model=true \
         attention=dot_product \
-        hardware=cpu skip_jax_distributed_system=True
+        hardware=cpu \
+        skip_jax_distributed_system=True
 fi

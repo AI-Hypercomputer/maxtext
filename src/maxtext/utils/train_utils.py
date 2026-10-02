@@ -16,13 +16,17 @@
 """Utils that are only interesting for training in MaxText."""
 
 import subprocess
+import time
 import jax
+import numpy as np
+import optax
 import functools
 import orbax.checkpoint.pathways as ocp_pathways
-from functools import partial
+
+from jax.experimental import multihost_utils
 
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
+from flax.core.spmd import logical_axis_rules
 
 from maxtext.common import checkpointing
 from maxtext.common import emergency_checkpointing
@@ -30,8 +34,10 @@ from maxtext.common import train_state_nnx
 from maxtext.common.common_types import ReorderStrategy
 from maxtext.common.data_loader import create_dataloader
 from maxtext.common.goodput import GoodputEvent, maybe_record_goodput
+from maxtext.input_pipeline import multihost_dataloading
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
+from maxtext.utils import diloco_sharding
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -41,18 +47,63 @@ from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
 
 
-def create_training_optimizer(config, model):
+def prepare_before_run_start(config, state, learning_rate_schedule, start_step, mesh, data_loader, shaped_batch):
+  """Optional setup that runs before init_stop/run_start and never touches the dataset.
+
+  MLPerf starts the clock before any part of the system touches the dataset, so everything here uses only the
+  model state, the config and synthetic (all-zero) inputs. The two flags are independent.
+  """
+  timings = []
+
+  if config.warm_input_reshard_before_run_start:
+    # The loader builds each host batch as a global array sharded over all mesh axes
+    # (multihost_dataloading._form_global_array) and then device_puts it to the input sharding, which compiles a
+    # reshard program on first use. Warm that path with an all-zero synthetic batch (no training data).
+    t = time.perf_counter()
+    local_rows = config.global_batch_size_to_load // jax.process_count()
+
+    def _synthetic_global(leaf):
+      local = np.zeros((local_rows,) + tuple(leaf.shape[1:]), dtype=leaf.dtype)
+      return multihost_dataloading._form_global_array((), local, mesh)  # pylint: disable=protected-access
+
+    warm = jax.device_put(jax.tree.map(_synthetic_global, shaped_batch), data_loader.input_data_shardings)
+    jax.block_until_ready(warm)
+    del warm
+    timings.append(f"input reshard warm {time.perf_counter() - t:.3f} s")
+
+  if config.block_state_before_run_start:
+    # Wait for the restored/initialized train state so it is not paid for inside step 0.
+    t = time.perf_counter()
+    jax.block_until_ready(state)
+    timings.append(f"state ready {time.perf_counter() - t:.3f} s")
+    # The metric logger evaluates learning_rate_schedule(step) eagerly after every step; the first call compiles a
+    # handful of tiny eager ops. Do it once here so step 0 does not pay for it.
+    t = time.perf_counter()
+    jax.block_until_ready(learning_rate_schedule(start_step))
+    timings.append(f"lr schedule warm {time.perf_counter() - t:.3f} s")
+    # Make all hosts log run_start together instead of process 0 starting the clock while others are still in init.
+    t = time.perf_counter()
+    multihost_utils.sync_global_devices("pre_run_start")
+    timings.append(f"barrier {time.perf_counter() - t:.3f} s")
+
+  if timings:
+    max_logging.log("Pre-run_start setup: " + ", ".join(timings))
+
+
+def create_training_optimizer(config, model, mesh=None):
   """Creates the optimizer and learning rate schedule."""
   learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
   # pass in model for muon
-  tx = optimizers.get_optimizer(config, learning_rate_schedule, model)
+  tx = optimizers.get_optimizer(config, learning_rate_schedule, model, mesh=mesh)
   return learning_rate_schedule, tx
 
 
 def create_checkpoint_manager(config, mesh, init_state_fn):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
   # pass in model for muon
-  logger = checkpointing.setup_checkpoint_logger(config)
+  # `setup_checkpoint_logger` only emits a deprecation warning now (Orbax v1 logs
+  # internally) and always returns None; we still pass it through for API parity.
+  logger = checkpointing.setup_checkpoint_logger(config)  # pylint: disable=assignment-from-no-return
   if config.enable_multi_tier_checkpointing:
     checkpoint_manager = emergency_checkpointing.create_replicator_checkpoint_manager(
         config.local_checkpoint_directory,
@@ -96,6 +147,7 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.enable_autocheckpoint,
         config.checkpoint_todelete_subdir,
         config.checkpoint_todelete_full_path,
+        config.checkpoint_storage_target_data_file_size_bytes,
     )
 
   # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
@@ -138,7 +190,10 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
     execution_mesh = mesh if mesh is not None else model.mesh
     execution_devices = execution_mesh.devices.flatten().tolist()
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    p_train_step = maxtext_utils.load_compiled(config, functional_train, state, execution_devices)
+    with jax.set_mesh(execution_mesh), logical_axis_rules(config.logical_axis_rules):
+      p_train_step = maxtext_utils.load_compiled(
+          config, functional_train, state, execution_devices, data_sharding=data_sharding
+      )
     max_logging.log("Loaded compiled function!")
   else:
     p_train_step = jax.jit(
@@ -202,6 +257,30 @@ def jit_train_and_eval_step(
   return p_train_step, p_eval_step
 
 
+class _ReorderedDataIterator:
+  """Applies a reorder function to each batch."""
+
+  def __init__(self, reorder_fn, data_iterator):
+    self.reorder_fn = reorder_fn
+    self.data_iterator = data_iterator
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    return self.reorder_fn(next(self.data_iterator))
+
+  def reset(self):
+    self.data_iterator.reset()
+
+
+def _reorder_data_iterator_for_loader(reorder_fn, data_iterator):
+  """Wraps the data iterator, or each element of an iterator list, with the reorder view."""
+  if isinstance(data_iterator, list):
+    return [_ReorderedDataIterator(reorder_fn, iterator) for iterator in data_iterator]
+  return _ReorderedDataIterator(reorder_fn, data_iterator)
+
+
 def setup_train_loop(config, recorder, devices=None):
   """Set up prerequisites for the training loop -
 
@@ -226,32 +305,25 @@ def setup_train_loop(config, recorder, devices=None):
   from maxtext.input_pipeline.input_pipeline_interface import create_data_iterator
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
-    is_training = True
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
     mesh = maxtext_utils.get_mesh_from_config(config, devices)
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
-    if config.pure_nnx:
-      # Create abstract NNX model.
-      _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
-    else:
-      model = model_creation_utils.from_config(config, devices)
-    learning_rate_schedule, tx = create_training_optimizer(config, model)
+    # Create abstract NNX model.
+    _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
+    learning_rate_schedule, tx = create_training_optimizer(config, model, mesh=mesh)
 
-    if config.pure_nnx:
-      # For NNX, the train state is wrapped in the TrainStateNNX module.
-      def create_train_state_fn():
-        model = _create_model_partial()
-        wrt = (
-            getattr(nnx, "LoRAParam", nnx.Param)
-            if getattr(getattr(config, "lora", None), "enable_lora", False)
-            else nnx.Param
-        )
-        optimizer = nnx.Optimizer(model, tx, wrt=wrt)
-        return train_state_nnx.TrainStateNNX(model, optimizer)
+    # The train state is wrapped in the TrainStateNNX module.
+    def create_train_state_fn():
+      model = _create_model_partial()
+      wrt = (
+          getattr(nnx, "LoRAParam", nnx.Param)
+          if getattr(getattr(config, "lora", None), "enable_lora", False)
+          else nnx.Param
+      )
+      optimizer = nnx.Optimizer(model, tx, wrt=wrt)
+      return train_state_nnx.TrainStateNNX(model, optimizer)
 
-      init_state_fn = create_train_state_fn
-    else:
-      init_state_fn = partial(maxtext_utils.init_initial_state, model, tx, config, is_training, init_rng)
+    init_state_fn = create_train_state_fn
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)
     if checkpoint_manager is not None:
       checkpoint_step = checkpointing.latest_step(checkpoint_manager)
@@ -264,10 +336,10 @@ def setup_train_loop(config, recorder, devices=None):
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()
     if context_parallel_size > 1 and config.packing:
-      if context_parallel_strategy not in ("all_gather", "ring", "ulysses"):
+      if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
         raise ValueError(
             "Context parallelism with sequence packing supports context_parallel_strategy='all_gather', 'ring', "
-            "or 'ulysses'."
+            "'ulysses', or 'usp'."
         )
       if (
           config.hardware in ("gpu", "gpu_multiprocess")
@@ -276,9 +348,14 @@ def setup_train_loop(config, recorder, devices=None):
       ):
         raise ValueError("Packing is only supported for load balanced ring attention with context parallelism for GPU.")
 
-    # Apply reordering wrapper to data iterators if context parallelism is enabled
+    # Apply reordering wrapper to data iterators if context parallelism is enabled.
+    # `reordered_cp_size` is the single source of truth for the permutation the
+    # batch carries; consumers that assume it (the LoadBalanced* Splash masks,
+    # MTP's shift-by-one) read the same helper rather than re-deriving it.
+    data_iterator_for_loader = data_iterator
+    reorder_cp_size = max_utils.reordered_cp_size(config, mesh)
     with jax.set_mesh(mesh):
-      if context_parallel_size > 1 and config.context_parallel_load_balance:
+      if reorder_cp_size > 1:
 
         # Determine load balancing reorder strategy.
         if config.context_parallel_reorder_strategy == ReorderStrategy.AUTO:
@@ -295,56 +372,75 @@ def setup_train_loop(config, recorder, devices=None):
           reorder_strategy = config.context_parallel_reorder_strategy
 
         reorder_fn = maxtext_utils.get_reorder_callable(
-            context_parallel_size, config.shard_mode, reorder_strategy, config.hardware
+            reorder_cp_size, config.shard_mode, reorder_strategy, config.hardware
         )
-        data_iterator = map(reorder_fn, data_iterator)
+        # data_iterator itself stays unwrapped because checkpointing dispatches on
+        # its concrete type; only batch consumers receive the reordered view.
+        data_iterator_for_loader = _reorder_data_iterator_for_loader(reorder_fn, data_iterator)
         if eval_data_iterator:
-          eval_data_iterator = map(reorder_fn, eval_data_iterator)
+          eval_data_iterator = _ReorderedDataIterator(reorder_fn, eval_data_iterator)
 
     # Create data_loader AFTER reordering wrapper is applied
-    data_loader = create_dataloader(config, mesh, data_iterator, recorder, rampup_manager)
+    data_loader = create_dataloader(config, mesh, data_iterator_for_loader, recorder, rampup_manager)
+
+    shaped_batch = maxtext_utils.get_shaped_batch(config)
+    max_utils.maybe_bootstrap_te_moe(config, mesh, shaped_batch)
 
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
         data_iterator, config, mesh, checkpoint_manager, init_state_fn
     )
-    if config.pure_nnx:
-      if getattr(getattr(config, "lora", None), "enable_lora", False) and getattr(config.lora, "lora_restore_path", None):
-        # Restore standalone LoRA adapter weights onto the base model state after initialization.
-        target_model_state = (
-            state["model"]
-            if (isinstance(state, (nnx.State, dict)) and "model" in state)
-            else getattr(state, "model", state)
-        )
-        # pyrefly: ignore[bad-argument-type]
-        lora_utils.restore_lora_from_path(target_model_state, config)
-        _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
-      with nn_partitioning.axis_rules(config.logical_axis_rules):
-        # We only need the graphdef here; it's merged with state below. Avoid
-        # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable
-        # under jax.set_mesh(mesh) and rejects any logical name missing from
-        # logical_axis_rules (e.g. concat_embed on the MTP kernel). Tracing shapes
-        # without a mesh skips sharding resolution, so it avoids the crash.
-        state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
+    if getattr(getattr(config, "lora", None), "enable_lora", False) and getattr(config.lora, "lora_restore_path", None):
+      # Restore standalone LoRA adapter weights onto the base model state after initialization.
+      target_model_state = (
+          state["model"]
+          if (isinstance(state, (nnx.State, dict)) and "model" in state)
+          else getattr(state, "model", state)
+      )
+      # pyrefly: ignore[bad-argument-type]
+      lora_utils.restore_lora_from_path(target_model_state, config)
+      _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
+    with logical_axis_rules(config.logical_axis_rules):
+      # We only need the graphdef here; it's merged with state below. Avoid
+      # nnx.get_abstract_model: it eagerly builds a NamedSharding for every variable
+      # under jax.set_mesh(mesh) and rejects any logical name missing from
+      # logical_axis_rules (e.g. concat_embed on the MTP kernel). Tracing shapes
+      # without a mesh skips sharding resolution, so it avoids the crash.
+      state_graphdef = nnx.graphdef(nnx.eval_shape(init_state_fn))
+
+    if isinstance(state, diloco.DiLoCoTrainState):
+      state_params = state.params
+      if hasattr(state_mesh_shardings, "model"):
+        _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
+      else:
+        state_mesh_shardings_params = state_mesh_shardings.params
+    else:
+      with logical_axis_rules(config.logical_axis_rules):
         _, state_params, _ = nnx.split(state.model, nnx.Param, ...)
         _, state_mesh_shardings_params, _ = nnx.split(state_mesh_shardings.model, nnx.Param, ...)
-    else:
-      state_params = state.params
-      state_mesh_shardings_params = state_mesh_shardings.params
 
     if config.enable_diloco:
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(config.logical_axis_rules):
-        state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
+      with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules):
+        outer_params_sharding = (
+            state_mesh_shardings_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
+            if isinstance(state_mesh_shardings_params, nnx.State)
+            else state_mesh_shardings_params
+        )
+        if not isinstance(state, diloco.DiLoCoTrainState):
+          state, outer_opt_state_sharding = diloco.build_diloco_state(config, lambda: state, mesh=mesh)
+        else:
+          outer_opt_state_sharding = (
+              optax.TraceState(trace=outer_params_sharding),
+              optax.EmptyState(),
+          )
 
         # create state_mesh_shardings for the DilocoState
-        step_mesh = state_mesh_shardings.optimizer.step.mesh if config.pure_nnx else state_mesh_shardings.step.mesh
-        inner_state_shardings = diloco.add_diloco_to_sharding(state_mesh_shardings)
+        step_mesh = state_mesh_shardings.optimizer.step.mesh
+        inner_state_shardings = diloco_sharding.add_diloco_to_sharding(state_mesh_shardings)
         state_mesh_shardings = diloco.DiLoCoTrainState(
             inner_state_shardings,
             # Match the outer params' pure-dict structure (build_diloco_state stores
             # outer_params via to_pure_dict), so the sharding tree matches the state tree.
-            state_mesh_shardings_params.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-            if config.pure_nnx
-            else state_mesh_shardings_params,
+            outer_params_sharding,
             outer_opt_state_sharding,
             jax.sharding.NamedSharding(  # pyrefly: ignore[bad-argument-type]
                 mesh=step_mesh, spec=jax.sharding.PartitionSpec()
@@ -358,28 +454,21 @@ def setup_train_loop(config, recorder, devices=None):
 
     # print weights sharding info under debug sharding mode
     if config.debug_sharding:
-      if config.pure_nnx:
-        # TODO: Study how to get logical annotations of NNX module. Because of eager sharding, we
-        # probably already lost the logical partition info at this moment.
-        logical_annotations_params = None
-      else:
-        logical_annotations = maxtext_utils.get_logical_annotations(config, mesh, init_state_fn)
-        logical_annotations_params = logical_annotations.params
+      # TODO: Study how to get logical annotations of NNX module. Because of eager sharding, we
+      # probably already lost the logical partition info at this moment.
+      logical_annotations_params = None
 
       max_utils.print_non_trivial_mesh_axis(model.mesh)  # pyrefly: ignore[missing-attribute]
       maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
 
-  if config.pure_nnx:
-    if config.enable_diloco:
-      # Don't merge the DiLoCoTrainState into the plain-model graphdef. The inner
-      # train step needs that graphdef as jit_model; the wrapper passes through as state.
-      train_state = state
-      model = state_graphdef  # pyrefly: ignore[unbound-name]
-    else:
-      train_state = nnx.merge(state_graphdef, state)  # pyrefly: ignore[unbound-name]
-      model = train_state.model
-  else:
+  if config.enable_diloco:
+    # Don't merge the DiLoCoTrainState into the plain-model graphdef. The inner
+    # train step needs that graphdef as jit_model; the wrapper passes through as state.
     train_state = state
+    model = state_graphdef  # pyrefly: ignore[unbound-name]
+  else:
+    train_state = nnx.merge(state_graphdef, state)  # pyrefly: ignore[unbound-name]
+    model = train_state.model
 
   return (
       init_rng,

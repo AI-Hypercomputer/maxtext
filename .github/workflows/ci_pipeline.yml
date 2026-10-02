@@ -18,7 +18,11 @@
 name: MaxText Package Tests
 
 on:
+  # `labeled` lets contributors re-run the pipeline as a scheduled run by adding
+  # the `scheduled-only` label to a PR. `labeled` fires for any label, so the entry
+  # jobs are gated on the label name and adding any other label is a no-op.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
   workflow_call:
     inputs:
       maxtext_sha:
@@ -50,7 +54,14 @@ permissions:
 jobs:
   analyze_code_changes:
     name: Analyze Code Changes for Test Orchestration
+    # `labeled` fires for every label, so ignore label events other than the one
+    # that opts the PR into a scheduled run. Pushes and scheduled runs are unaffected.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'scheduled-only'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
@@ -69,17 +80,28 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_BASE_REF: ${{ github.base_ref }}
+          # A `scheduled-only` PR mirrors a scheduled run, so run every suite
+          # regardless of which files the PR touched.
+          FORCE_ALL_TESTS: ${{ contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
         run: |
           bash .github/scripts/analyze_code_changes.sh
 
   code_quality_check:
     name: Code Quality Check
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'scheduled-only'
     uses: ./.github/workflows/code_quality.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   docs_build_check:
     name: Documentation Build Check
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.action != 'labeled' ||
+      github.event.label.name == 'scheduled-only'
     uses: ./.github/workflows/check_docs_build.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
@@ -105,14 +127,16 @@ jobs:
     if: |
       always() &&
       needs.analyze_code_changes.outputs.run_notebooks == 'true' &&
-      needs.build_and_upload_maxtext_package.result == 'success'
+      needs.build_and_upload_maxtext_package.result == 'success' &&
+      (github.event_name != 'pull_request' ||
+        (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]'))
     uses: ./.github/workflows/run_jupyter_notebooks.yml
     strategy:
         fail-fast: false
     with:
       device_type: tpu
       device_name: v6e-8
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       cloud_runner: linux-x86-ct6e-180-8tpu
       maxtext_sha: ${{ needs.build_and_upload_maxtext_package.outputs.maxtext_sha }}
     secrets:
@@ -126,6 +150,7 @@ jobs:
       needs.analyze_code_changes.outputs.run_tests == 'true' &&
       needs.build_and_upload_maxtext_package.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       total_workers: ${{ steps.set-params.outputs.total_workers }}
       worker_groups: ${{ steps.set-params.outputs.worker_groups }}
@@ -153,8 +178,8 @@ jobs:
         flavor: [tpu-unit, tpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      base_image: maxtext-unit-test-tpu:py312-bookworm
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   tpu-posttrain-tests:
@@ -168,11 +193,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [tpu-post-training-unit]
+        flavor: [tpu-post-training-unit, tpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      base_image: maxtext-unit-test-tpu:py312-bookworm
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
 
@@ -182,7 +207,8 @@ jobs:
     if: |
       always() &&
       needs.gate_test_run.result == 'success' &&
-      github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      (github.event_name != 'pull_request' ||
+        contains(github.event.pull_request.labels.*.name, 'scheduled-only'))
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -190,8 +216,8 @@ jobs:
         flavor: [tpu7x-unit, tpu7x-integration, tpu7x-post-training-unit]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      base_image: maxtext-unit-test-tpu:py312-bookworm
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   gpu-tests:
@@ -209,7 +235,7 @@ jobs:
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-cuda12:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-pretrain-tests:
@@ -226,8 +252,8 @@ jobs:
         flavor: [cpu-unit, cpu-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      base_image: maxtext-unit-test-tpu:py312-bookworm
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-posttrain-tests:
@@ -241,11 +267,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [cpu-post-training-unit]
+        flavor: [cpu-post-training-unit, cpu-post-training-integration]
     with:
       flavor: ${{ matrix.flavor }}
-      base_image: maxtext-unit-test-tpu:py312
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      base_image: maxtext-unit-test-tpu:py312-bookworm
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
@@ -263,14 +289,14 @@ jobs:
     with:
       device_type: tpu
       device_name: v6e-4
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and not integration_test and not post_training'
       pytest_addopts: '--ignore=tests/post_training'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
       total_workers: ${{ needs.gate_test_run.outputs.total_workers || '2' }}
       worker_group: ${{ matrix.group }}
@@ -288,14 +314,14 @@ jobs:
     with:
       device_type: tpu
       device_name: v6e-4
-      base_image: maxtext-unit-test-tpu:py312
+      base_image: maxtext-unit-test-tpu:py312-bookworm
       cloud_runner: linux-x86-ct6e-180-4tpu
       pytest_marker: 'not cpu_only and not gpu_only and integration_test and not post_training'
       pytest_addopts: '--ignore=tests/post_training --ignore=tests/integration/hlo_diff_test.py'
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' }}
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   all_tests_passed:
@@ -303,6 +329,7 @@ jobs:
     needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check test results
         run: |
@@ -346,6 +373,7 @@ jobs:
     needs: [analyze_code_changes, build_and_upload_maxtext_package, maxtext_jupyter_notebooks]
     if: always()
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Check notebooks results
         run: |
@@ -375,10 +403,14 @@ jobs:
     needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: ${{ always() }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       issues: write
+    outputs:
+      issue_number: ${{ steps.create_issue.outputs.issue-number }}
     steps:
       - name: Check whether one of the jobs failed
+        id: create_issue
         if: ${{ contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
         with:
@@ -397,6 +429,7 @@ jobs:
       actions: 'read'
     with:
       failed_run_id: '${{ github.run_id }}'
+      tracking_issue_number: '${{ needs.notify_failure.outputs.issue_number }}'
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 

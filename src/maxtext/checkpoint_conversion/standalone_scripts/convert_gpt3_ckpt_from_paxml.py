@@ -35,24 +35,18 @@ python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_gpt3_ckpt_fr
 """
 
 import argparse
-import functools
 import gc
 import os
 import sys
 
 from flax import nnx
-from flax import serialization
 import jax
 from jax import random
 from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.common import checkpointing
-from maxtext.common.common_types import MODEL_MODE_TRAIN
-from maxtext.layers import quantizations
 from maxtext.common import train_state_nnx
-from maxtext.models.models import transformer_as_linen
-from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
@@ -93,23 +87,15 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   devices_array = maxtext_utils.create_device_mesh(cfg)
   mesh = Mesh(devices_array, cfg.mesh_axes)
 
-  if cfg.pure_nnx:
-    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=init_rng)
-    model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs)
-    _, tx = train_utils.create_training_optimizer(cfg, model)
-    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(cfg, mesh)
+  rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=init_rng)
+  model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs)
+  _, tx = train_utils.create_training_optimizer(cfg, model)
+  _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(cfg, mesh)
 
-    def init_state_fn():
-      nnx_model = _create_model_partial()
-      optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
-      return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
-
-  else:
-    quant = quantizations.configure_quantization(cfg)
-    model = transformer_as_linen(cfg, mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(cfg)
-    tx = optimizers.get_optimizer(cfg, learning_rate_schedule)
-    init_state_fn = functools.partial(maxtext_utils.init_initial_state, model, tx, cfg, True, init_rng)
+  def init_state_fn():
+    nnx_model = _create_model_partial()
+    optimizer = nnx.Optimizer(nnx_model, tx, wrt=nnx.Param)
+    return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       cfg.checkpoint_dir,
@@ -119,11 +105,8 @@ def convert(paxml_ckpt_path, maxtext_model_name, base_output_directory, run_name
   )
 
   state, _, _, _, _ = maxtext_utils.setup_training_state(None, cfg, mesh, checkpoint_manager, init_state_fn)
-  if cfg.pure_nnx:
-    state = train_state_nnx.to_checkpoint_dict(state)
-    state.pop("nnx_aux", None)
-  else:
-    state = serialization.to_state_dict(state)
+  state = train_state_nnx.to_checkpoint_dict(state)
+  state.pop("nnx_aux", None)
 
   max_logging.log("start")
   max_utils.print_mem_stats("After params initialized")

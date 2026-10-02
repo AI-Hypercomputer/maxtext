@@ -91,16 +91,6 @@ class L2Norm(nnx.Module):
     return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
 
 
-def l2_norm_as_linen(self, eps: float = 1e-6):
-  """
-  Initializes the L2Norm module and returns it as a Linen module.
-
-  Args:
-    eps: float, epsilon used for numerical stability (default value should be ok for most cases).
-  """
-  return nnx_wrappers.to_linen(L2Norm, eps=eps, metadata_fn=variable_to_logically_partitioned)
-
-
 def attention_as_linen(
     *,
     config: Config,
@@ -457,7 +447,7 @@ class Attention(nnx.Module):
         quant=self.quant,
         kv_quant=self.kv_quant,
         num_query_heads=self.num_query_heads,
-        num_kv_heads=self.num_kv_heads,
+        num_kv_heads=self._attention_op_num_kv_heads(),
         dropout_rate=self.dropout_rate,
         dtype=self.dtype,
         compute_axis_order=self.compute_axis_order,
@@ -524,6 +514,7 @@ class Attention(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
       self.key_norm = Qwen3NextRMSNorm(
@@ -531,6 +522,7 @@ class Attention(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           dtype=self.config.dtype,
           weight_dtype=self.config.weight_dtype,
+          shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
     else:
@@ -565,6 +557,9 @@ class Attention(nnx.Module):
     logical_rules = None if self.config.using_pipeline_parallelism else self.config.logical_axis_rules
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
 
+  def _attention_op_num_kv_heads(self) -> int:
+    return self.num_kv_heads
+
   def _validate_kv_heads(self) -> None:
     """Validates the number of key/value heads."""
     if self.num_kv_heads == -1:
@@ -572,6 +567,78 @@ class Attention(nnx.Module):
 
     if self.num_query_heads % self.num_kv_heads != 0:
       raise ValueError("Invalid num_kv_heads for GQA.")
+
+  def _validate_kv_head_sharding(
+      self,
+      kernel_axes: Tuple[Optional[str], ...],
+  ) -> None:
+    """Validates that the key/value head dimension can be sharded evenly.
+
+    Attention heads are atomic under tensor parallelism.  The `kv_heads`
+    logical axis of the key/value projection is split across whichever mesh
+    axes `logical_axis_rules` maps it to -- by default `tensor`,
+    `tensor_sequence` and `autoregressive` -- so the KV head count has to be
+    divisible by their combined size.  Note that `num_kv_heads` is the
+    per-layer count, which for models such as Gemma 4 is `global_num_kv_heads`
+    on global attention layers and `num_kv_heads` elsewhere.
+
+    Ulysses context parallelism shards the KV heads a second time, over the
+    context axis, using a runtime all-to-all rather than the weight's logical
+    axes, so that axis is folded in explicitly.  `types.py` separately requires
+    `num_kv_heads` to be divisible by the context-parallel size on its own;
+    checking the product here is what catches a head count that clears each
+    factor individually but not both together.
+
+    Without this check an over-sharded mesh fails much later, either with an
+    opaque XLA divisibility error or by silently leaving the projection
+    unsharded until `assert_params_sufficiently_sharded` trips.
+
+    Args:
+      kernel_axes: Logical axis names of the key/value projection kernel.
+
+    Raises:
+      ValueError: If the KV heads cannot be split evenly across the mesh.
+    """
+    if "kv_heads" not in kernel_axes:
+      # The projection is replicated, so the head count is unconstrained.
+      return
+
+    # Size-one mesh axes are already dropped, so this is the exact shard count.
+    # An empty result means no logical rule shards the heads; that is not an
+    # early exit, because Ulysses below can still shard them over the context
+    # axis. An unsharded head dimension just leaves `kv_parallelism` at 1.
+    kv_heads_index = kernel_axes.index("kv_heads")
+    kv_head_axes = self._logical_to_mesh_axes(kernel_axes)[kv_heads_index]
+    if kv_head_axes is None:
+      kv_head_axes = ()
+    elif isinstance(kv_head_axes, str):
+      kv_head_axes = (kv_head_axes,)
+    kv_head_axes = list(kv_head_axes)
+
+    # Ulysses exchanges sequence ownership for head ownership through an
+    # all-to-all, so the context axis shards KV heads too even though no
+    # logical rule says so.
+    if self.config.context_parallel_strategy.lower() == "ulysses":
+      ulysses_axis = self.config.context_sharding
+      if ulysses_axis not in kv_head_axes:
+        kv_head_axes.append(ulysses_axis)
+
+    kv_parallelism = 1
+    for axis in kv_head_axes:
+      kv_parallelism *= self.mesh.shape.get(axis, 1)
+
+    if self.num_kv_heads % kv_parallelism != 0:
+      raise ValueError(
+          f"num_kv_heads ({self.num_kv_heads}) for {self.attention_type}"
+          f" attention layers must be divisible by {kv_parallelism}, the"
+          f" combined size of the mesh axes {kv_head_axes} that shard KV heads."
+          " Attention heads are atomic under tensor parallelism and cannot be"
+          " split across more shards than there are heads. Either reduce the"
+          " parallelism on those axes, raise the KV head count"
+          " (`base_num_kv_heads`, or `global_num_kv_heads` for global attention"
+          " layers), or move the parallelism onto an axis that does not shard"
+          " KV heads (e.g. fsdp)."
+      )
 
   def _init_projections(self, inputs_q_shape: Tuple, inputs_kv_shape: Tuple) -> None:
     """Initializes the query, key, value, and output projections."""
@@ -605,7 +672,7 @@ class Attention(nnx.Module):
       return self.kernel_init(*args) / depth_scaling
 
     kernel_axes = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed", "q_heads", "kv")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("embed_attn", "q_heads", "kv")
     )
     in_features = self.convert_dense_general_inputs_shape(inputs_q_shape)
     out_features = (self.num_query_heads, self.head_dim)
@@ -613,6 +680,7 @@ class Attention(nnx.Module):
     if self.is_qwen3_hybrid:
       out_features = (self.num_query_heads, self.head_dim * 2)
 
+    block_size = getattr(self.config, "weight_block_size", None)
     return DenseGeneral(
         in_features_shape=in_features,
         out_features_shape=out_features,
@@ -625,6 +693,7 @@ class Attention(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         shard_mode=self.config.shard_mode,
+        block_size=block_size,
         rngs=self.rngs,
     )
 
@@ -647,9 +716,11 @@ class Attention(nnx.Module):
     kernel_axes = (
         (None, None, None)
         if self.config.ici_context_autoregressive_parallelism > 1
-        else ("embed", "kv_heads", "kv_head_dim")
+        else ("embed_attn", "kv_heads", "kv_head_dim")
     )
+    self._validate_kv_head_sharding(kernel_axes)
 
+    block_size = getattr(self.config, "weight_block_size", None)
     return DenseGeneral(
         in_features_shape=self.convert_dense_general_inputs_shape(inputs_kv_shape),
         out_features_shape=(self.num_kv_heads, self.head_dim),
@@ -662,6 +733,7 @@ class Attention(nnx.Module):
         shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
+        block_size=block_size,
         rngs=self.rngs,
     )
 
@@ -696,7 +768,7 @@ class Attention(nnx.Module):
         out_features_shape=(self.num_query_heads + 2 * self.num_kv_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
-        kernel_axes=("embed", "heads", "kv"),
+        kernel_axes=("embed_attn", "heads", "kv"),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         quant=self.quant,
@@ -737,15 +809,16 @@ class Attention(nnx.Module):
     in_features = (self.num_query_heads, self.out_head_dim)
     out_features = output_dim
     out_kernel_axis = (
-        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed")
+        (None, None, None) if self.config.ici_context_autoregressive_parallelism > 1 else ("heads", "kv", "embed_attn")
     )
     axis = (-2, -1)
 
     if self.is_qwen3_hybrid:
       in_features = self.num_query_heads * self.out_head_dim
-      out_kernel_axis = ("mlp", "embed")
+      out_kernel_axis = ("mlp", "embed_attn")
       axis = (-1,)
 
+    block_size = getattr(self.config, "weight_block_size", None)
     return DenseGeneral(
         in_features_shape=in_features,
         out_features_shape=out_features,
@@ -758,6 +831,7 @@ class Attention(nnx.Module):
         shard_mode=self.config.shard_mode,
         matmul_precision=self.config.matmul_precision,
         use_bias=False if self.is_qwen2 else self.use_bias_in_projections,
+        block_size=block_size,
         rngs=self.rngs,
     )
 
@@ -821,7 +895,7 @@ class Attention(nnx.Module):
     rope_type = self.rope_type
     rope_use_scale = self.config.rope_use_scale
     if self.is_vision:
-      if self.config.model_name.startswith("qwen3"):
+      if self.config.model_name.startswith("qwen3") or self.config.model_name.startswith("weaver"):
         rotary_embedding = Qwen3OmniMoeVisionRotaryEmbedding(
             hidden_size=self.config.hidden_size_for_vit,
             num_attention_heads=self.config.num_attention_heads_for_vit,
@@ -1062,9 +1136,9 @@ class Attention(nnx.Module):
           "vLLM RPA attention ops require the vllm-tpu package. Please install it with `pip install vllm-tpu`."
       ) from e
 
-    query = query.reshape(-1, query.shape[2], query.shape[3])
-    key = key.reshape(-1, key.shape[2], key.shape[3])
-    value = value.reshape(-1, value.shape[2], value.shape[3])
+    query = query.reshape(-1, query.shape[2], query.shape[3]).astype(self.dtype)
+    key = key.reshape(-1, key.shape[2], key.shape[3]).astype(self.dtype)
+    value = value.reshape(-1, value.shape[2], value.shape[3]).astype(self.dtype)
 
     if rpa_kv_cache is None or rpa_metadata is None:
       # Return dummy values for dry runs (e.g. during model initialization or JIT tracing)

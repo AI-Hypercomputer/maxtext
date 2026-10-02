@@ -1,0 +1,108 @@
+#!/bin/bash
+
+# Validates the Qwen3.5-35B RL pipeline using a pre-converted MaxText checkpoint.
+
+# The flow of this script is as follows:
+# 1. Run inference on the pre-converted checkpoint.
+# 2. Run RL starting from the pre-converted checkpoint.
+# 3. Run inference on the checkpoint produced by the RL run.
+
+# Usage:
+# export HF_TOKEN=<your Hugging Face access token>
+# export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
+# bash test_qwen3.5_to_mt.sh $RUN_ID
+# bash test_qwen3.5_rl.sh $RUN_ID
+
+set -ex
+
+export VLLM_WORKER_MULTIPROC_METHOD=spawn
+export PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=upb
+export VLLM_RAY_EXTRA_ENV_VARS_TO_COPY="PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"
+export VLLM_ENABLE_V1_MULTIPROCESSING=0
+export JAX_RANDOM_WEIGHTS=1
+export SKIP_JAX_PRECOMPILE=1
+export NEW_MODEL_DESIGN=1
+export TPU_MIN_LOG_LEVEL=0
+export TF_CPP_MIN_LOG_LEVEL=0
+export TPU_STDERR_LOG_LEVEL=0
+
+# Force Python to use "spawn" instead of "fork" for multiprocessing to prevent gRPC socket corruption
+cat << 'EOF' > usercustomize.py
+import multiprocessing
+try:
+    multiprocessing.set_start_method("spawn", force=True)
+except Exception:
+    pass
+EOF
+PYTHONPATH="${PYTHONPATH:-.}:$(pwd)"
+export PYTHONPATH
+run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
+MODEL_NAME='qwen3.5-35b-a3b'
+
+BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
+SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
+
+# Step 1: Run inference on the pre-converted checkpoint
+python3 -m maxtext.inference.vllm_decode \
+    model_name=${MODEL_NAME} \
+    load_parameters_path=${SCANNED_CKPT_PATH} \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    hbm_utilization_vllm=0.75 \
+    prompt='Suggest some famous landmarks in London.' \
+    max_target_length=128 \
+    max_num_batched_tokens=128 \
+    ici_tensor_parallelism=2 \
+    ici_expert_parallelism=8 \
+    allow_split_physical_axes=True \
+    prefuse_moe_weights=True \
+    use_chat_template=True \
+    scan_layers=True \
+    enable_single_controller=True
+
+# Step 2: Run RL starting from the pre-converted checkpoint
+python3 -m maxtext.trainers.post_train.rl.train_rl \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/rl \
+    load_parameters_path=${SCANNED_CKPT_PATH} \
+    run_name=${run_id} \
+    rl.loss_algo='grpo' \
+    scan_layers=True \
+    num_batches=2 \
+    batch_size=4 \
+    train_micro_batch_size=1 \
+    num_test_batches=2 \
+    model_name=${MODEL_NAME} \
+    enable_single_controller=True \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    rollout_tensor_parallelism=4 \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "log_config": false, "allow_split_physical_axes": true, "prefuse_moe_weights": true}}' \
+    remat_policy=full \
+    hbm_utilization_vllm=0.55 \
+    use_pathways=True \
+    chips_per_vm=4 \
+    max_target_length=512 \
+    weight_dtype=bfloat16 \
+    dtype=bfloat16 \
+    opt_type=sgd \
+    enable_tunix_perf_metrics=True \
+    rl.num_generations=16 \
+    debug=False \
+    rl.reshard_chunk_size=1 
+
+# Step 3: Run inference on the checkpoint produced by the RL run
+python3 -m maxtext.inference.vllm_decode \
+    model_name=${MODEL_NAME} \
+    load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
+    vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
+    hbm_utilization_vllm=0.75 \
+    prompt='Suggest some famous landmarks in London.' \
+    max_target_length=128 \
+    max_num_batched_tokens=128 \
+    ici_tensor_parallelism=2 \
+    ici_expert_parallelism=8 \
+    allow_split_physical_axes=True \
+    prefuse_moe_weights=True \
+    use_chat_template=True \
+    scan_layers=True \
+    enable_single_controller=True

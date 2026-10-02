@@ -16,9 +16,10 @@
 
 import functools
 import json
+import math
 import qwix.pallas as qpl
 import re
-from typing import Tuple, Sequence, Callable
+from typing import ClassVar, Tuple, Sequence, Callable
 from dataclasses import dataclass
 
 from aqt.jax.v2 import config as aqt_config
@@ -31,10 +32,12 @@ import qwix
 from qwix._src.core import numerics
 from qwix._src.core import dot_general_qt
 from qwix._src.core import sparsity
+from qwix._src import interception as qwix_interception
 
 import jax
 import jax.numpy as jnp
 from jax.tree_util import tree_flatten_with_path, tree_unflatten
+from jax.sharding import NamedSharding
 
 from flax.linen import fp8_ops
 from flax.linen import initializers as flax_initializers
@@ -46,11 +49,27 @@ try:
   from qwix._src.utils import flax_util
 except ImportError:
   from qwix._src import flax_util  # pytype: disable=import-error
+
+try:
+  _orig_find_param = flax_util.find_param
+
+  def _safe_find_param(x, ptq_array_type=None):
+    try:
+      return _orig_find_param(x, ptq_array_type)
+    except AttributeError as e:
+      if "shape" in str(e):
+        return None
+      raise
+
+  flax_util.find_param = _safe_find_param
+except (NameError, AttributeError):
+  pass
 from maxtext.layers import nnx_wrappers
 
 from maxtext.configs.types import TeCommGemmOverlapPolicy
-from maxtext.common.common_types import DType, Config
+from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype
 from maxtext.inference.kvcache import KVQuant
+from maxtext.utils import max_logging
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -61,15 +80,221 @@ _A_SCALE = "a_scale"  # Clipping scale for activations
 _TILE_SIZE = "tile_size"  # Tile size for subchannel
 
 
+@dataclass(frozen=True)
+class WeightQuantConfig:
+  """Configuration for weight-only quantization and dynamic dequantization."""
+
+  quant_type: str = "none"
+  weight_dtype: DType = jnp.float8_e4m3fn
+  scale_dtype: DType = jnp.float32
+  block_size: int | tuple[int, ...] | None = None
+
+
+def get_weight_quant_config(config: Config, module_name: str) -> WeightQuantConfig | None:
+  """Constructs a WeightQuantConfig for module_name if quantized, else returns None."""
+  if not is_fp8_dtype(config.weight_dtype):
+    return None
+  resolved_weight_dtype = get_weight_dtype(config, module_name)
+  if not is_fp8_dtype(resolved_weight_dtype):
+    return None
+  return WeightQuantConfig(
+      quant_type="fp8",
+      weight_dtype=resolved_weight_dtype,
+      scale_dtype=jnp.float32,
+      block_size=getattr(config, "weight_block_size", None),
+  )
+
+
+def dequantize_weight(
+    w: Array,
+    scale: Array | None,
+    compute_dtype: DType = jnp.bfloat16,
+) -> Array:
+  """Dequantizes weight tensor `w` dynamically to `compute_dtype` using `scale`.
+
+  Supports:
+    1. No scale (scale is None): casts w to compute_dtype.
+    2. Per-tensor scalar scale: scalar broadcast multiplication.
+    3. Block-wise scale: 2D/3D block broadcast multiplication.
+    4. General broadcastable scale: standard JAX broadcasting.
+  """
+  if scale is None:
+    return w.astype(compute_dtype)
+
+  w_c = w.astype(compute_dtype)
+  scale_c = jnp.asarray(scale, compute_dtype)
+
+  # Per-tensor scalar scale or matching shape
+  if scale_c.ndim == 0 or scale_c.shape == w.shape or scale_c.size == 1:
+    return w_c * scale_c.reshape(()) if scale_c.size == 1 else w_c * scale_c
+
+  # Block-wise scale (e.g. 2D for Dense, 3D for MoE)
+  if scale_c.ndim == w.ndim and any(s > 1 and s != d for s, d in zip(scale_c.shape, w.shape)):
+    if not all(d % s == 0 for d, s in zip(w.shape, scale_c.shape)):
+      raise ValueError(
+          f"Block scaling requires weight dimensions {w.shape} to be divisible by scale dimensions {scale_c.shape}."
+      )
+    interleaved_shape = tuple(dim for s, w_d in zip(scale_c.shape, w.shape) for dim in (s, w_d // s))
+    scale_shape = tuple(dim for s in scale_c.shape for dim in (s, 1))
+    return (w_c.reshape(interleaved_shape) * scale_c.reshape(scale_shape)).reshape(w.shape)
+
+  # Leading-dimension scale (e.g. per-expert (num_experts,) on (num_experts, in_dim, out_dim))
+  if scale_c.ndim < w.ndim and w.ndim >= 3 and w.shape[: scale_c.ndim] == scale_c.shape:
+    scale_c = scale_c.reshape(scale_c.shape + (1,) * (w.ndim - scale_c.ndim))
+
+  # Standard JAX broadcasting handles per-channel or broadcastable shapes
+  return w_c * scale_c
+
+
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
+
+  # Whether this backend's dot_general draws RNGs at apply time, as AQT and NVFP4
+  # stochastic rounding do. False lets the Linen->NNX bridge drop its forked Rngs after
+  # init; the default makes opting out deliberate.
+  needs_apply_rngs: ClassVar[bool] = True
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Placeholder for dot_general implementation in subclasses."""
 
   def einsum(self, dtype: DType = jnp.float32):
     """Placeholder for einsum implementation in subclasses."""
+
+
+def infer_scale_granularity(scale_shape: Tuple[int, ...]) -> Tuple[str, int | None]:
+  """Infers quantization scheme ('per_tensor', 'per_channel', or 'block_wise') from scale shape."""
+  nontrivial_axes = [i for i, s in enumerate(scale_shape) if s > 1]
+  if not nontrivial_axes:
+    return "per_tensor", None
+  if len(nontrivial_axes) == 1:
+    return "per_channel", nontrivial_axes[0]
+  return "block_wise", None
+
+
+def native_fp8_dot_general(
+    inputs: jnp.ndarray,
+    quantized_kernel: jnp.ndarray,
+    kernel_scale: jnp.ndarray,
+    scale_block_size: int | Tuple[int, ...] | None,
+    axis: Tuple[int, ...],
+    contract_ind: Tuple[int, ...],
+    compute_dtype: DType = jnp.bfloat16,
+    precision: jax.lax.PrecisionLike = None,
+    out_sharding: NamedSharding | None = None,
+    act_calibration_method: str = "absmax",
+) -> jnp.ndarray:
+  """Computes dot_general with pre-quantized FP8 weights without dequantization."""
+  if len(axis) != 1 or len(contract_ind) != 1:
+    raise NotImplementedError(
+        "native_fp8_dot_general only supports a single contracted axis per "
+        f"operand, got axis={axis}, contract_ind={contract_ind}."
+    )
+  lhs_axis = axis[0]
+  rhs_axis = contract_ind[0]
+
+  # Qwix requires scale.ndim == qvalue.ndim. Determine scheme before reshaping minimal-rank scales.
+  if kernel_scale.ndim == quantized_kernel.ndim:
+    scheme, _ = infer_scale_granularity(kernel_scale.shape)
+  elif kernel_scale.size == 1:
+    scheme = "per_tensor"
+    kernel_scale = kernel_scale.reshape((1,) * quantized_kernel.ndim)
+  else:
+    # Reshape flattened per-channel scale over output axes.
+    scheme = "per_channel"
+    out_axes_shape = tuple(d for i, d in enumerate(quantized_kernel.shape) if i != rhs_axis)
+    if kernel_scale.size != math.prod(out_axes_shape):
+      raise ValueError(
+          f"kernel_scale with shape {kernel_scale.shape} does not match the "
+          f"kernel's non-contracted output shape {out_axes_shape} (kernel "
+          f"shape {quantized_kernel.shape}, contracted axis {rhs_axis})."
+      )
+    kernel_scale = jnp.expand_dims(kernel_scale.reshape(out_axes_shape), axis=rhs_axis)
+
+  rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
+  if scheme == "per_tensor":
+    channelwise_axes = []
+    tiled_axes = {}
+  elif scheme == "per_channel":
+    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+    tiled_axes = {}
+  else:
+    rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
+    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+    tiled_axes = {lhs_axis: rhs_block_size}
+  if is_static_calibration(act_calibration_method):
+    channelwise_axes = []
+    tiled_axes = {}
+  lhs = qwix.quantize(
+      jnp.asarray(inputs, compute_dtype),
+      jnp.float8_e4m3fn,
+      channelwise_axes=channelwise_axes,
+      tiled_axes=tiled_axes,
+      calibration_method=act_calibration_method,
+  )
+  dimension_numbers = (((lhs_axis,), (rhs_axis,)), ((), ()))
+  out = qwix.dot_general(lhs, rhs, dimension_numbers, precision=precision, preferred_element_type=jnp.float32)
+  out = out.astype(compute_dtype)
+  if out_sharding is not None:
+    out = jax.lax.with_sharding_constraint(out, out_sharding)
+  return out
+
+
+@dataclass
+class ServeFp8WeightQuantization(Quantization):
+  """Marks a layer as using native FP8 compute without weight dequantization.
+
+  Weights are FP8 with static scales loaded from the checkpoint. Activations (matmul
+  inputs) are quantized to FP8 according to `act_calibration_method`:
+
+    - "absmax" (default): dynamic scale computed from the activation at runtime.
+    - "fixed,-A,A" or "fixed,A": static per-tensor scale A / 448, no runtime reduction.
+
+  The setting applies to the dense layers (`native_fp8_dot_general`) and to the routed
+  experts on the tpu-inference fused MoE path (`static_act_scale`).
+  """
+
+  quant_mode = None
+  act_calibration_method: str = "absmax"
+
+  def __post_init__(self):
+    if is_static_calibration(self.act_calibration_method):
+      # Fail at config time on e.g. an asymmetric range instead of at trace time.
+      get_static_scale(jnp.float8_e4m3fn, self.act_calibration_method)
+
+  def static_act_scale(self) -> jax.Array | None:
+    """Returns the static per-tensor activation scale as a float32 [1, 1] array.
+
+    Returns None when activations use dynamic scaling.
+    """
+    if not is_static_calibration(self.act_calibration_method):
+      return None
+    scale = get_static_scale(jnp.float8_e4m3fn, self.act_calibration_method)
+    return jnp.full((1, 1), scale, dtype=jnp.float32)
+
+
+def is_static_calibration(calibration_method: str | None) -> bool:
+  """Whether `calibration_method` is a fixed-range (static scale) calibration."""
+  return bool(calibration_method) and calibration_method.lower().startswith("fixed")
+
+
+def prepare_fused_gmm_scale(scale: jnp.ndarray, kernel_shape: Tuple[int, ...]) -> jnp.ndarray:
+  """Expands a per-expert weight scale to gmm_v2's rhs_scale
+  layout: (num_experts, num_k_blocks, 1, n_dim). This kernel needs a scale per
+  output (N) channel, unlike gmm v2 elsewhere -- N-axis groups that
+  shared one value in the checkpoint are expanded by repeating it (lossless).
+  """
+  num_experts, k_dim, n_dim = kernel_shape
+  if scale.ndim == 1:
+    scale = scale.reshape(num_experts, 1, 1)
+  if scale.ndim != 3 or scale.shape[0] != num_experts:
+    raise ValueError(f"Unexpected weight scale shape {scale.shape} for kernel shape {kernel_shape}.")
+  _, k_blocks, n_blocks = scale.shape
+  if k_dim % k_blocks != 0 or n_dim % n_blocks != 0:
+    raise ValueError(f"Weight scale shape {scale.shape} does not evenly divide kernel shape {kernel_shape}.")
+  n_repeat = n_dim // n_blocks
+  scale = jnp.repeat(scale.astype(jnp.float32), n_repeat, axis=2)  # (E, k_blocks, n_dim)
+  return jnp.expand_dims(scale, axis=2)  # (E, k_blocks, 1, n_dim)
 
 
 def _tiling_fn(lhs, rhs, dimension_numbers, tile_size):
@@ -128,6 +353,10 @@ def _rhs_axis_metadata_wrapper(
 @dataclass
 class AqtQuantization:
   """Configures AQT quantization github.com/google/aqt."""
+
+  # Declared, not inherited: this class sits outside the Quantization hierarchy. AQT
+  # sets rng_type="jax.uniform" and stochastic rounding draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = True
 
   quant_dg: aqt_config.DotGeneral
   quant_mode: aqt_flax.QuantMode = aqt_flax.QuantMode.TRAIN
@@ -211,6 +440,9 @@ class AqtQuantization:
 class QwixQuantization:
   """Configures Qwix quantization github.com/google/qwix, for training only."""
 
+  # Declared, not inherited: this class sits outside the Quantization hierarchy.
+  needs_apply_rngs: ClassVar[bool] = True
+
   quant_mode = "train"  # needed by external call
   act_calibration_method: str = "absmax"
   weight_calibration_method: str = "absmax"
@@ -291,7 +523,13 @@ class QwixEinsum(nn.Module):
 class Fp8Quantization(Quantization):
   """Configures Fp8 quantization for NVIDIA GPUs"""
 
+  # Flax's fp8 ops scale from amax history, never from make_rng at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
   quant_mode = "train"
+  # The forward dtype, for callers that quantize an operand themselves rather than through
+  # `dot_general_cls` or `einsum`, such as the grouped matmul in MoE.
+  quantize_dtype = jnp.float8_e4m3fn
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
@@ -380,11 +618,19 @@ class Fp8Einsum(nn.Module):
 class NANOOFp8Quantization(Quantization):
   """Configures NANOO Fp8 quantization for AMD MI300/MI325 GPUs"""
 
+  # Same as Fp8Quantization: nn.NANOOFp8DotGeneralOp never draws at apply time.
+  needs_apply_rngs: ClassVar[bool] = False
+
   quant_mode = "train"
+  quantize_dtype = jnp.float8_e4m3fnuz
 
   def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
     """Returns dot_general configured with aqt params."""
     return nn.NANOOFp8DotGeneralOp
+
+  def einsum(self, dtype: DType = jnp.float32):
+    """Returns an einsum using the NANOO (fnuz) fp8 formats of AMD MI300/MI325."""
+    return Fp8Einsum(dtype=dtype, e4m3_dtype=jnp.float8_e4m3fnuz, e5m2_dtype=jnp.float8_e5m2fnuz)
 
 
 def _get_int8_quant_config(config):
@@ -649,6 +895,9 @@ def get_quant_mode(quant_mode_str: str = "train"):
 
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
+  if config.quantization == "serve_fp8_weight":
+    return ServeFp8WeightQuantization(act_calibration_method=config.act_quantization_calibration_method)
+
   if getattr(config, "use_batch_split_schedule", False) and config.quantization:
     # The older version of batch-split that fully uses qwix quantization.
     if config.quantization == "fp8_full" and not config.use_manual_quantization:
@@ -753,6 +1002,59 @@ def _apply_linen_module_in_nnx(linen_module_cls, op_id, *args, **kwargs):
     return linen_module_cls(name=op_id)(*args, **kwargs)
 
 
+def create_fp8_einsum(quant: Quantization, dtype: DType, rngs: nnx.Rngs) -> nnx_wrappers.ToNNX:
+  """Creates an fp8 einsum that an `nnx.Module` can call.
+
+  An fp8 einsum holds its scaling factors and amax histories in Linen variables, which can
+  only be created while the module is bound to a Linen scope. The bridge into NNX therefore
+  has to happen while the parent module is being built; creating the state on the first call
+  instead would grow the module graph inside the scanned layer loop, which NNX rejects.
+
+  The state has a fixed shape, so a canonical pair of operands is enough to materialize it.
+  The returned einsum still accepts operands of any shape.
+
+  Args:
+    quant: The fp8 quantization providing the einsum.
+    dtype: The computation dtype of the einsum.
+    rngs: The `nnx.Rngs` of the parent module.
+  """
+  wrapper = nnx_wrappers.ToNNX(quant.einsum(dtype=dtype), rngs=rngs)  # pytype: disable=attribute-error
+  dummy_operand = jnp.zeros((1, 1), dtype=dtype)
+  wrapper.lazy_init("ab,bc->ac", dummy_operand, dummy_operand)
+  return wrapper
+
+
+def apply_einsum_in_nnx(parent: nnx.Module, op_id: str, einsum, mutable: Sequence[str], *args):
+  """Applies a quantized Linen einsum from within an NNX parent module.
+
+  A Linen module cannot be called unbound, which is all an `nnx.Module` can offer it, so the
+  einsum is bridged into NNX on first use and the bridged instance is reused afterwards.
+  `op_id` must be unique per call site: two call sites sharing an id would also share
+  quantization state. Bridging here rather than while building the parent needs the operands,
+  so it only suits einsums whose state is shaped after them, such as AQT.
+
+  Args:
+    parent: The NNX module hosting the einsum; it must carry an `rngs` attribute.
+    op_id: Stable identifier for the call site.
+    einsum: The einsum returned by a `Quantization`, either a Linen module or a callable.
+    mutable: Variable collections the einsum writes to.
+    *args: Arguments forwarded to the einsum.
+  """
+  linen_einsum = einsum.func if isinstance(einsum, functools.partial) else einsum
+  if not isinstance(linen_einsum, nn.Module):
+    return einsum(*args)
+
+  # The name must not start with an underscore: NNX treats such attributes as static,
+  # which cannot hold the bridged module's variables.
+  attr_name = f"quant_einsum_{op_id}"
+  wrapper = getattr(parent, attr_name, None)
+  if wrapper is None:
+    wrapper = nnx_wrappers.ToNNX(linen_einsum, rngs=parent.rngs)
+    wrapper.lazy_init(*args)
+    setattr(parent, attr_name, wrapper)
+  return wrapper(*args, mutable=list(mutable))
+
+
 class NvidaFp8Provider(qwix.QtProvider):
   """Wraps nn.Fp8DirectDotGeneralOp with Qwix's provider interface."""
 
@@ -780,7 +1082,32 @@ class NANOOFp8Provider(qwix.QtProvider):
     return _apply_linen_module_in_nnx(nn.NANOOFp8DotGeneralOp, op_id, *args, **kwargs)
 
 
+def _get_router_proj_unquantized_rule() -> qwix.QtRule:
+  """Returns a Qwix rule that keeps the MoE router (gate) projection unquantized.
+
+  Setting all qtypes to None bypasses quantization, falling back to standard
+  unquantized jax.lax.dot_general for both forward and backward passes.
+
+  Note: Because Qwix rules are evaluated in a first-match way, this rule must be
+  placed before broader layer catch-all rules (e.g., 'decoder/.*layers.*').
+  """
+  return qwix.QtRule(
+      module_path=r".*/gate$",
+      weight_qtype=None,
+      act_qtype=None,
+      bwd_qtype=None,
+      op_names=("dot_general",),
+  )
+
+
+def _drhs_grad_calibration_override(config: Config) -> dict:
+  """Qwix DotGeneralQtConfig override for the weight-gradient arm's cotangent calibration (see types.py)."""
+  m = getattr(config, "drhs_grad_quantization_calibration_method", None)
+  return {"drhs_grad_calibration_method": m} if m else {}
+
+
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
+  """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
   if config.weight_sparsity_n and config.weight_sparsity_m:
     sparsity_rule = sparsity.SparsityRule(
@@ -789,26 +1116,57 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
         weight_sparsity_update_step=config.weight_sparsity_update_step,
         weight_sparsity_start_step=config.weight_sparsity_start_step,
     )
-  return [
+
+  rules = []
+  if not config.quantize_router_proj:
+    rules.append(_get_router_proj_unquantized_rule())
+
+  if config.quantize_logits_proj:
+    logits_calib = config.logits_proj_quant_calibration_method or None
+    rules.append(
+        qwix.QtRule(
+            module_path="decoder/logits_dense.*",
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=jnp.float8_e5m2,
+            weight_calibration_method=logits_calib or config.weight_quantization_calibration_method,
+            act_calibration_method=logits_calib or config.act_quantization_calibration_method,
+            bwd_calibration_method=config.bwd_quantization_calibration_method,
+            additional_qt_config=_drhs_grad_calibration_override(config) or None,
+            op_names=("dot_general",),
+        )
+    )
+
+  paths = ["decoder/.*layers.*"]  # Main transformer layers
+  if config.quantize_mtp:
+    paths.append("mtp_block/.*")  # Multi-token prediction block
+  # Disjunct regex paths, e.g. "(path1|path2|...)"
+  module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
+
+  rules.append(
       qwix.QtRule(
-          module_path="decoder/.*layers.*",
+          module_path=module_path,
           weight_qtype=jnp.float8_e4m3fn,
           act_qtype=jnp.float8_e4m3fn,
           bwd_qtype=jnp.float8_e5m2,
           weight_calibration_method=config.weight_quantization_calibration_method,
           act_calibration_method=config.act_quantization_calibration_method,
           bwd_calibration_method=config.bwd_quantization_calibration_method,
-          additional_qt_config={"sparsity_rule": sparsity_rule},
+          additional_qt_config={"sparsity_rule": sparsity_rule, **_drhs_grad_calibration_override(config)},
           op_names=("dot_general", "gmm", "ragged_dot"),
-      ),
-  ]
+      )
+  )
+  return rules
 
 
 def get_quantization_rule(config: Config):
   """Returns a list of qwix.QtRule from `dtype`."""
 
   def make_qt_rule(dtype) -> list[qwix.QtRule]:
-    return [
+    rules = []
+    if not config.quantize_router_proj:
+      rules.append(_get_router_proj_unquantized_rule())
+    rules.append(
         qwix.QtRule(
             module_path="decoder/.*layers.*",
             weight_qtype=dtype,
@@ -818,7 +1176,8 @@ def get_quantization_rule(config: Config):
             disable_channelwise_axes=False,
             op_names=("dot_general",),
         )
-    ]
+    )
+    return rules
 
   match config.quantization:
     case "int4":
@@ -862,33 +1221,100 @@ def maybe_quantize_model(model, config):
   if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
-      if config.pure_nnx:
-        input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
-        dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
-        dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
-        # The MTP block reads the decoder targets, so the qwix forward pass needs them.
-        # The Linen path supplies them from the is_initializing() guard in Transformer.
-        dummy_targets = {}
-        if config.mtp_num_layers > 0:
-          dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
-          dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
-        model = qwix.quantize_model(
-            model,
-            quantization_provider,
-            dummy_tokens,
-            dummy_positions,
-            dummy_segment_ids,
-            enable_dropout=False,
-            **dummy_targets,
-        )
-        # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
-        # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
-        # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
-        nnx.pop(model, nnx.Intermediate)
-      else:
-        model = qwix.quantize_model(model, quantization_provider)
+      input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
+      dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)
+      dummy_segment_ids = jnp.ones(input_shape, dtype=jnp.int32)
+      # The MTP block reads the decoder targets, so the qwix forward pass needs them.
+      dummy_targets = {}
+      if config.mtp_num_layers > 0:
+        dummy_targets["decoder_target_tokens"] = jnp.ones(input_shape, dtype=jnp.int32)
+        dummy_targets["decoder_target_mask"] = jnp.ones(input_shape, dtype=jnp.int32)
+      model = qwix.quantize_model(
+          model,
+          quantization_provider,
+          dummy_tokens,
+          dummy_positions,
+          dummy_segment_ids,
+          enable_dropout=False,
+          **dummy_targets,
+      )
+      # Qwix quantization runs a forward pass during tracing, which sows transient nnx.Intermediate variables
+      # (e.g. max_logits from QK-Clip, MTP losses) into the model. Popping them here prevents structural mismatches
+      # between the initial setup GraphDef/state_mesh_shardings and the stripped states during train steps.
+      nnx.pop(model, nnx.Intermediate)
+      for _, val in nnx.graph.iter_graph(model):
+        if hasattr(val, "__dict__") and "qwix_rngs" in val.__dict__:
+          del val.qwix_rngs
   return model
+
+
+# Quantized weight dtypes that tpu-inference's fused MoE kernel (gmm_v2) takes with
+# per-block scales and dequantizes in-kernel. Any other qtype keeps the expert weights
+# unquantized on the fused path.
+FUSED_MOE_KERNEL_WEIGHT_QTYPES = (jnp.dtype(jnp.float8_e4m3fn), jnp.dtype(jnp.int8))
+
+
+def get_fused_moe_rule() -> qwix.QuantizationRule | None:
+  """Returns the qwix rule that governs the fused MoE grouped matmul, if any.
+
+  The fused kernel is the same grouped matmul that MaxText's own megablox / ragged_dot
+  paths implement, so it takes its rule from the "gmm" op exactly like they do. Rules
+  that only list "dot_general" (the plain fp8 / int8 recipes) leave the experts
+  unquantized on every MoE path, including this one.
+  """
+  return qpl.get_current_rule("gmm")
+
+
+def quantize_weight_for_fused_moe(
+    kernel: jax.Array, rule: qwix.QuantizationRule | None
+) -> tuple[jax.Array, jax.Array | None]:
+  """Quantizes an [E, K, N] expert weight for tpu-inference's fused MoE kernel.
+
+  The kernel contracts over K, dequantizes after the matmul with scales laid out as
+  [E, num_blocks, 1, N] (blocks along K), and quantizes the activations itself with a
+  32-bit accumulator. Scale granularity follows the qwix rule: channelwise over (E, N),
+  plus blockwise along K when the rule sets tile_size.
+
+  Returns the (possibly unchanged) weight and its scale, or None when the rule does not
+  ask for a weight dtype the kernel supports.
+  """
+
+  weight_qtype = getattr(rule, "weight_qtype", None) if rule is not None else None
+  if weight_qtype is None:
+    return kernel, None
+  qtype = jnp.dtype(weight_qtype)
+  if qtype not in FUSED_MOE_KERNEL_WEIGHT_QTYPES:
+    max_logging.log(f"fused MoE kernel does not take {qtype} weights; keeping expert weights in {kernel.dtype}.")
+    return kernel, None
+  if kernel.ndim != 3:
+    raise ValueError(f"fused MoE expert weights must be [E, K, N], got {kernel.shape}")
+
+  tile_size = getattr(rule, "tile_size", None)
+  tiled_axes = {1: tile_size} if tile_size else {}
+  cal_method = getattr(rule, "weight_calibration_method", None)
+  quant_kwargs = {"calibration_method": cal_method} if cal_method is not None else {}
+
+  quantized = qpl.quantize(
+      kernel,
+      qtype,
+      channelwise_axes=(0, 2),
+      tiled_axes=tiled_axes,
+      scale_dtype=jnp.float32,
+      **quant_kwargs,
+  )
+  scale = jnp.expand_dims(quantized.scale, axis=2)
+  return quantized.qvalue, scale
+
+
+def without_qwix_interception(fn: Callable) -> Callable:
+  """Returns `fn` wrapped so that qwix's op interception is off while it runs.
+
+  For ops that do their own quantization (tpu-inference's fused MoE), the qwix rule is
+  applied once up front to their inputs and the op itself is opaque to qwix: neither
+  the routing math around the kernel nor anything traced inside it gets rewritten.
+  """
+  return qwix_interception.disable_interceptions(fn)
 
 
 def _cast_reduced_from(arr, reduced_arr):
@@ -1002,6 +1428,7 @@ class TransformerEngineQuantization(Quantization):
     from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
 
     RECIPES = {
+        "te_no_quant": lambda: None,
         "te_fp8_delayedscaling": recipe.DelayedScaling,
         "te_fp8_currentscaling": recipe.Float8CurrentScaling,
         "te_mxfp8": recipe.MXFP8BlockScaling,
@@ -1011,6 +1438,19 @@ class TransformerEngineQuantization(Quantization):
     if recipe_name not in RECIPES:
       raise ValueError(f"Invalid TransformerEngine recipe: {recipe_name}")
     return RECIPES[recipe_name]()
+
+  @property
+  def needs_apply_rngs(self) -> bool:
+    """Whether this recipe draws RNGs at apply time.
+
+    Only NVFP4 does, and only while stochastic rounding is on: TE draws ``sr_rng`` for
+    the DGRAD quantizer. The other recipes take their scales from the tensors.
+    """
+    from transformer_engine.common import recipe  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+    if not isinstance(self._recipe, recipe.NVFP4BlockScaling):  # pytype: disable=module-attr
+      return False
+    return not self._recipe.disable_stochastic_rounding
 
   def get_block_size(self):
     """Get the block size for quantization for recipes that require blocks.
@@ -1091,13 +1531,14 @@ class TransformerEngineQuantization(Quantization):
           # CGEMM in MLP layer (up projection, down projection)
           if mesh_axes[0] == "embed" and mesh_axes[-1] == "mlp":
             return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
-          elif mesh_axes[0] == "mlp" and mesh_axes[-1] == "embed":
+          elif mesh_axes[0] == "mlp" and mesh_axes[-1] in ("embed", "embed_attn"):
+            # 'embed_attn' covers the flattened attention output projection of Qwen3 hybrid models.
             return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
           elif overlap_policy == TeCommGemmOverlapPolicy.FULL:
             # CGEMM also in Attention layer (QKV projection, output projection)
-            if mesh_axes[0] == "embed" and mesh_axes[-1].startswith("kv"):
+            if mesh_axes[0] == "embed_attn" and mesh_axes[-1].startswith("kv"):
               return tex.CollectiveOpSet.create(tex.CollectiveOp.ALL_GATHER)
-            elif mesh_axes[0] == "heads" and mesh_axes[-1] == "embed":
+            elif mesh_axes[0] == "heads" and mesh_axes[-1] == "embed_attn":
               return tex.CollectiveOpSet.create(tex.CollectiveOp.REDUCE_SCATTER)
 
         return tex.noop_collective_op_set
@@ -1135,7 +1576,66 @@ class TransformerEngineQuantization(Quantization):
 
     return self._wrap(te_dot_general, "dot_general")
 
-  def einsum(self, dtype: DType = jnp.float32):
+  def einsum(self, *args, **kwargs):
     """Placeholder for einsum implementation in subclasses."""
     # quant.einsum is only required for MoE or for inference with KVCache.
     raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
+
+  def get_moe_block_quantizer_set(
+      self,
+      te_gmm_quantization_recipe_name: str,
+      n_token_groups: int,
+      n_expert_groups: int,
+  ):
+    """Create a TransformerEngine quantizer set for TE MoEBlock grouped GEMMs."""
+    from transformer_engine.jax.quantize import (  # pylint: disable=import-outside-toplevel
+        QuantizerFactory,
+        QuantizerSet,
+        ScalingMode,
+    )
+
+    if te_gmm_quantization_recipe_name == "te_no_quant":
+      return QuantizerFactory.create_set(scaling_mode=ScalingMode.NO_SCALING, is_2x2x=False)
+    if te_gmm_quantization_recipe_name != "te_mxfp8":
+      raise ValueError(f"Invalid TransformerEngine GMM quantization recipe name: {te_gmm_quantization_recipe_name}")
+    if n_token_groups <= 0 or n_expert_groups <= 0:
+      raise ValueError(
+          "TE MoEBlock quantizer group counts must be positive, got "
+          f"n_token_groups={n_token_groups}, n_expert_groups={n_expert_groups}."
+      )
+
+    token_quantizer_set = QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e4m3fn,
+        is_2x2x=True,
+        n_groups=n_token_groups,
+    )
+    expert_quantizer_set = QuantizerFactory.create_set(
+        scaling_mode=ScalingMode.MXFP8_1D_SCALING,
+        fwd_dtype=jnp.float8_e4m3fn,
+        bwd_dtype=jnp.float8_e4m3fn,
+        is_2x2x=True,
+        n_groups=n_expert_groups,
+    )
+    return QuantizerSet(
+        x=token_quantizer_set.x,
+        kernel=expert_quantizer_set.kernel,
+        dgrad=token_quantizer_set.dgrad,
+    )
+
+  def get_moe_block_quantizer_sets(
+      self,
+      te_gmm_quantization_recipe_name: str,
+      n_token_groups: int,
+      n_expert_groups: int,
+  ):
+    """Create independent FC1 and FC2 quantizer sets for TE's MoE custom VJP."""
+    return tuple(
+        self.get_moe_block_quantizer_set(
+            te_gmm_quantization_recipe_name,
+            n_token_groups=n_token_groups,
+            n_expert_groups=n_expert_groups,
+        )
+        for _ in range(2)
+    )

@@ -35,9 +35,7 @@ if [[ "${CKPT_PATH,,}" == *lora* ]]; then
         lora.lora_restore_path=${LORA_RESTORE_PATH} \
         base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
         use_multimodal=${USE_MULTIMODAL} \
-        scan_layers=${SCAN_LAYERS} \
-        enable_nnx=True \
-        pure_nnx_decoder=True
+        scan_layers=${SCAN_LAYERS}
 
 else
     python3 -m maxtext.checkpoint_conversion.to_huggingface \

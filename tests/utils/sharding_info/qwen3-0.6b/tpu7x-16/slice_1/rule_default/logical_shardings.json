@@ -69,7 +69,7 @@
   },
   ".params/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "kv_heads",
       "kv_head_dim"
@@ -96,7 +96,7 @@
       "heads",
       "layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -107,7 +107,7 @@
   },
   ".params/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "q_heads",
       "kv"
@@ -131,7 +131,7 @@
   },
   ".params/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "kv_heads",
       "kv_head_dim"
@@ -223,7 +223,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "kv_heads",
       "kv_head_dim"
@@ -250,7 +250,7 @@
       "heads",
       "layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -261,7 +261,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "q_heads",
       "kv"
@@ -285,7 +285,7 @@
   },
   ".opt_state/[0]/.mu/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "kv_heads",
       "kv_head_dim"
@@ -373,7 +373,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['key']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "kv_heads",
       "kv_head_dim"
@@ -400,7 +400,7 @@
       "heads",
       "layers",
       "kv",
-      "embed"
+      "embed_attn"
     ],
     "shape": [
       16,
@@ -411,7 +411,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['query']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "q_heads",
       "kv"
@@ -435,7 +435,7 @@
   },
   ".opt_state/[0]/.nu/['params']/['decoder']/['layers']/['self_attention']/['value']/['kernel']": {
     "partition_spec": [
-      "embed",
+      "embed_attn",
       "layers",
       "kv_heads",
       "kv_head_dim"
