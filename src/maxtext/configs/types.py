@@ -5141,6 +5141,7 @@ class MaxTextConfig(
           "simple",
           "simple_mlp",
           "llama2",
+          "llama4",
           "deepseek",
           "mistral",
           "mixtral",
