@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Ragged gather kernel implementation from tpu-inference."""
+
 # Source from https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/kernels/sparse_core/ragged_gather.py
 
 import functools
@@ -252,6 +253,145 @@ def main_kernel(
   inner_kernel()
 
 
+def pipelined_kernel(
+    # Inputs.
+    start_ref: jax.Ref,
+    end_ref: jax.Ref,
+    in_hbm_ref: jax.Ref,
+    indices_hbm_ref: jax.Ref,
+    weights_hbm_ref: jax.Ref,
+    # Outputs.
+    out_hbm_ref: jax.Ref,
+    # Scratch.
+    start_vmem_ref: jax.Ref,
+    end_vmem_ref: jax.Ref,
+    idx_vmem_ref: jax.Ref,
+    weights_vmem_ref: jax.Ref,
+    sem_ref: jax.Ref,
+    *,
+    core_axis_name: str,
+    subcore_axis_name: str,
+    has_weights: bool,
+    col_chunk_size: int,
+    max_tiles_per_worker: int,
+    debug_dma_only: bool,
+):
+  """Ragged gather built on an indirect-stream ``emit_pipeline``.
+
+  Each worker (vector subcore) owns a contiguous range of 16-row output tiles
+  inside ``[start, end)``. Per (tile, column chunk) step, the pipeline issues a
+  single indirect gather of 16 source rows and a single contiguous write of the
+  packed output tile; both are double-buffered so reads of step ``i + 1``
+  overlap the repack of step ``i`` and the write of step ``i - 1``.
+  """
+  sc_info = pltpu.get_tpu_info().sparse_core
+  assert sc_info is not None
+  num_simd_lanes = sc_info.num_lanes
+  num_workers = jax.lax.axis_size((core_axis_name, subcore_axis_name))
+  worker_id = jax.lax.axis_index((core_axis_name, subcore_axis_name))
+  hidden_size = in_hbm_ref.shape[-1]
+  num_col_chunks = hidden_size // col_chunk_size
+
+  dtype = out_hbm_ref.dtype
+  dtype_bits = jax.dtypes.itemsize_bits(dtype)
+  packing = 32 // dtype_bits
+  out_rows_per_tile = num_simd_lanes // packing
+  sem = sem_ref.at[0]
+
+  # Valid range -> this worker's contiguous slice of 16-row tiles.
+  dmas = [
+      pltpu.make_async_copy(start_ref.at[:1], start_vmem_ref.at[:1], sem),
+      pltpu.make_async_copy(end_ref.at[:1], end_vmem_ref.at[:1], sem),
+  ]
+  jax.tree.map(lambda d: d.start(), dmas)
+  jax.tree.map(lambda d: d.wait(), dmas)
+  start = start_vmem_ref[...][0]
+  end = end_vmem_ref[...][0]
+  tile_start = start // num_simd_lanes
+  tile_end = jnp.where(end > start, pl.cdiv(end, num_simd_lanes), tile_start)
+  tiles_per_worker = pl.cdiv(tile_end - tile_start, num_workers)
+  first_tile = tile_start + worker_id * tiles_per_worker
+  num_tiles = jnp.clip(tile_end - first_tile, 0, tiles_per_worker)
+
+  # Stage this worker's indices (and weights) in VMEM once; the wrapper pads
+  # the HBM arrays so this fixed-size copy never goes out of bounds.
+  max_rows = max_tiles_per_worker * num_simd_lanes
+  row0 = first_tile * num_simd_lanes
+  dmas = [pltpu.make_async_copy(indices_hbm_ref.at[pl.ds(row0, max_rows)], idx_vmem_ref, sem)]
+  if has_weights:
+    dmas.append(pltpu.make_async_copy(weights_hbm_ref.at[pl.ds(row0, max_rows)], weights_vmem_ref, sem))
+  jax.tree.map(lambda d: d.start(), dmas)
+  jax.tree.map(lambda d: d.wait(), dmas)
+
+  def gather_index_map(t, c):
+    rows = idx_vmem_ref[pl.ds(t * num_simd_lanes, num_simd_lanes)]
+    if packing > 1:
+      rows = jax.lax.div(rows, packing)
+    return rows, c
+
+  def body(gather_ref, out_ref):
+    if debug_dma_only:
+      return
+    t = pl.program_id(0)
+    tile_rows = pl.ds(t * num_simd_lanes, num_simd_lanes)
+    indices = idx_vmem_ref[tile_rows]
+    weights = weights_vmem_ref[tile_rows] if has_weights else None
+    # Bit offset of each wanted row inside its packed 32-bit word.
+    shifts = (indices % packing) * dtype_bits if packing > 1 else None
+
+    @plsc.parallel_loop(0, col_chunk_size, step=num_simd_lanes)
+    def _(col):
+      cols = pl.ds(col, num_simd_lanes)
+      for q in range(out_rows_per_tile):
+        out = None
+        for k in range(packing):
+          r = q * packing + k
+          data = gather_ref[r, cols]
+          if packing > 1:
+            assert shifts is not None
+            data = jnp.bitwise_and(jnp.bitwise_right_shift(data, shifts[r]), 2**dtype_bits - 1)
+          if has_weights:
+            assert weights is not None
+            if packing == 1:
+              data_f32 = jax.lax.bitcast_convert_type(data, jnp.float32) * weights[r]
+              data = jax.lax.bitcast_convert_type(data_f32, jnp.uint32)
+            else:  # bf16 (packing == 2 is enforced by the wrapper).
+              data_f32 = jax.lax.bitcast_convert_type(jnp.bitwise_left_shift(data, 16), jnp.float32) * weights[r]
+              data = jnp.bitwise_right_shift(jax.lax.bitcast_convert_type(data_f32, jnp.uint32), 16)
+          if k > 0:
+            data = jnp.bitwise_left_shift(data, k * dtype_bits)
+          out = data if out is None else jnp.bitwise_or(out, data)
+        out_ref[q, cols] = out
+
+  pltpu.emit_pipeline(
+      body,
+      grid=(num_tiles, num_col_chunks),
+      in_specs=pl.BlockSpec((pl.Indirect(num_simd_lanes), col_chunk_size), gather_index_map),
+      out_specs=pl.BlockSpec((out_rows_per_tile, col_chunk_size), lambda t, c: (first_tile + t, c)),
+  )(
+      in_hbm_ref.bitcast(jnp.uint32), out_hbm_ref.bitcast(jnp.uint32)
+  )  # pyrefly: ignore[missing-attribute]
+
+
+def _pipelined_col_chunk_size(hidden_size: int, packing: int, num_simd_lanes: int, reserved_bytes: int) -> int:
+  """Largest 128-multiple divisor of ``hidden_size`` whose buffers fit in VMEM."""
+  match pltpu.get_tpu_info().generation:
+    case 6:
+      budget = int(256 * 1024 * 0.9)
+    case 7:
+      budget = int(512 * 1024 * 0.9)
+    case _:
+      budget = int(128 * 1024 * 0.9)
+  budget -= reserved_bytes
+  # Double-buffered uint32 gather tile (L rows) + double-buffered output tile (L / packing rows).
+  bytes_per_col = 2 * num_simd_lanes * 4 + 2 * (num_simd_lanes // packing) * 4
+  best = 128
+  for chunk in range(128, hidden_size + 1, 128):
+    if hidden_size % chunk == 0 and chunk * bytes_per_col <= budget:
+      best = chunk
+  return best
+
+
 def get_cost_estimate(
     out_size: int,
     hidden_size: int,
@@ -352,6 +492,8 @@ def calculate_col_size(hidden_size: int) -> int:
         "flops_override",
         "bytes_accessed_override",
         "use_single_sparsecore",
+        "use_pipelined_kernel",
+        "debug_dma_only",
     ),
 )
 def ragged_gather(
@@ -365,6 +507,8 @@ def ragged_gather(
     flops_override: int = -1,
     bytes_accessed_override: int = -1,
     use_single_sparsecore: bool = False,
+    use_pipelined_kernel: bool = True,
+    debug_dma_only: bool = False,
 ) -> jax.Array:
   """Perform gather on indices within dynamic array start and end.
 
@@ -387,6 +531,11 @@ def ragged_gather(
       of auto-computing.  -1 (default) means auto-compute.
     use_single_sparsecore: Static bool flag. When True, launch the kernel
       on 1 SparseCore instead of all SparseCores.
+    use_pipelined_kernel: Static bool flag. When True (default), use the
+      indirect-stream pipelined kernel; otherwise use the original per-row DMA
+      kernel.
+    debug_dma_only: Static bool flag for benchmarking only. Skips the in-VMEM
+      repack so only data movement is timed; the output is NOT valid.
 
   Returns:
     Gathered output of shape ``(indices_size, hidden_size)``.
@@ -425,10 +574,70 @@ def ragged_gather(
   num_sc_cores = 1 if use_single_sparsecore else sc_info.num_cores
   num_cores = num_sc_cores * sc_info.num_subcores
   block_size = num_simd_lanes * num_cores
-  col_size = calculate_col_size(hidden_size)
+
+  packing = 32 // jax.dtypes.itemsize_bits(dtype)
+  if has_weights and packing > 2:
+    raise NotImplementedError(f"ragged_gather with weights does not support {dtype}.")
 
   # Pad to align to the block size.
   out_pad_size = pl.cdiv(out_size, block_size) * block_size - out_size
+
+  vector_mesh = plsc.VectorSubcoreMesh(
+      num_cores=num_sc_cores,
+      num_subcores=sc_info.num_subcores,
+      core_axis_name="core",
+      subcore_axis_name="subcore",
+  )
+  cost_estimate = get_cost_estimate(
+      out_size=out_size + out_pad_size,
+      hidden_size=hidden_size,
+      dtype_bytes=jax.dtypes.itemsize_bits(dtype) // 8,
+      has_weights=has_weights,
+      flops_override=flops_override,
+      bytes_accessed_override=bytes_accessed_override,
+  )
+
+  if use_pipelined_kernel and hidden_size % 128 == 0:
+    max_tiles_per_worker = (out_size + out_pad_size) // block_size
+    max_rows = max_tiles_per_worker * num_simd_lanes
+    # Extra tail padding keeps each worker's fixed-size index copy in bounds.
+    indices = jnp.pad(indices, (0, out_pad_size + max_rows))
+    if has_weights:
+      weights = jnp.pad(weights, (0, out_pad_size + max_rows), constant_values=1.0)  # pyrefly: ignore[bad-argument-type]
+    else:
+      weights = jnp.ones((num_simd_lanes,), dtype=jnp.float32)  # Unused.
+    col_chunk_size = _pipelined_col_chunk_size(
+        hidden_size, packing, num_simd_lanes, reserved_bytes=2 * max_rows * 4 + 16 * 1024
+    )
+    out = pl.kernel(  # pytype: disable=wrong-keyword-args
+        functools.partial(
+            pipelined_kernel,
+            core_axis_name=vector_mesh.core_axis_name,
+            subcore_axis_name=vector_mesh.subcore_axis_name,
+            has_weights=has_weights,
+            col_chunk_size=col_chunk_size,
+            max_tiles_per_worker=max_tiles_per_worker,
+            debug_dma_only=debug_dma_only,
+        ),
+        out_type=jax.ShapeDtypeStruct((out_size + out_pad_size, hidden_size), dtype),
+        compiler_params=pltpu.CompilerParams(
+            use_tc_tiling_on_sc=True,
+            disable_bounds_checks=True,
+        ),
+        cost_estimate=cost_estimate,
+        scratch_types=[
+            pltpu.VMEM((num_simd_lanes,), jnp.int32),
+            pltpu.VMEM((num_simd_lanes,), jnp.int32),
+            pltpu.VMEM((max_rows,), jnp.int32),
+            pltpu.VMEM((max_rows if has_weights else num_simd_lanes,), jnp.float32),
+            pltpu.SemaphoreType.DMA((1,)),
+        ],
+        mesh=vector_mesh,
+        name="sc_ragged_gather_pipelined",
+    )(start, end, x, indices, weights)
+    return out[:out_size]
+
+  col_size = calculate_col_size(hidden_size)
   indices = jnp.pad(indices, ((0, out_pad_size)))
 
   if has_weights:
@@ -438,13 +647,6 @@ def ragged_gather(
     weights = jnp.ones((out_size + out_pad_size,), dtype=jnp.float32)
 
   aligned_hidden_size = pl.cdiv(hidden_size, col_size) * col_size
-
-  vector_mesh = plsc.VectorSubcoreMesh(
-      num_cores=num_sc_cores,
-      num_subcores=sc_info.num_subcores,
-      core_axis_name="core",
-      subcore_axis_name="subcore",
-  )
   return pl.kernel(  # pytype: disable=wrong-keyword-args
       functools.partial(
           main_kernel,
