@@ -2349,16 +2349,18 @@ class RoutedMoE(nnx.Module):
             padding_amount,
         )
 
-      output, lhs_out = output if return_lhs else (output, None)
-      if padding_amount > 0:
-        output = output[: orig_inputs_shape[0]]
-        if return_lhs:
-          # Mirror the padding above: only the qvalue of a QArray was padded.
-          if isinstance(lhs_out, qpl.QArray):
-            lhs_out = dataclasses.replace(lhs_out, qvalue=lhs_out.qvalue[: orig_inputs_shape[0]])
-          else:
-            lhs_out = lhs_out[: orig_inputs_shape[0]]
-      return (output, lhs_out) if return_lhs else output
+      def unpad(t):
+        if padding_amount == 0:
+          return t
+        # Mirror the padding above: only the qvalue of a QArray was padded.
+        if isinstance(t, qpl.QArray):
+          return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]])
+        return t[: orig_inputs_shape[0]]
+
+      if return_lhs:
+        output, lhs_out = output
+        return unpad(output), unpad(lhs_out)
+      return unpad(output)
 
     def is_batch_sharded_by_ep(input_activation):
       # The batch is sharded by expert, except during inference decoding (where batch size == 1).
