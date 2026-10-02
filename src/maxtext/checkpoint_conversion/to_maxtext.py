@@ -182,7 +182,7 @@ class LazyHFLoader:
     # Cache for resolved local shard paths
     self._local_shard_paths = {}
     # Use a lock to serialize heavy RAM operations, but NOT downloads
-    self._ram_lock = threading.Lock()
+    self._ram_lock = threading.RLock()
     self._initialize_index()
 
   def __getstate__(self):
@@ -194,7 +194,7 @@ class LazyHFLoader:
   def __setstate__(self, state):
     """Restores state after pickling/copying and recreates a new lock."""
     self.__dict__.update(state)
-    self._ram_lock = threading.Lock()
+    self._ram_lock = threading.RLock()
 
   def _initialize_index(self):
     """Fetches and parses the Hugging Face model index file to build a shard map."""
@@ -228,26 +228,12 @@ class LazyHFLoader:
       index_data = json.load(f)
     self.shard_map = index_data["weight_map"]
 
-  def get_tensor(self, key: str) -> np.ndarray:
-    """
-    Retrieves a specific tensor by name, lazily loading its shard if necessary.
-
-    This is the main entry point for accessing model weights. It determines
-    which shard file contains the tensor, ensures it's downloaded, and then
-    reads the tensor data.
-
-    For safetensors, this is extremely efficient as it memory-maps the file
-    and reads only the required tensor's data from disk.
-    """
-    # Handle single-file models (shard map key might be None or we just know the filename)
-    resolved_key = resolve_scale_key(key, self.shard_map)
-    shard_name = self.shard_map.get(resolved_key)
-
+  def _get_raw_tensor(self, key: str):
+    """Read a tensor before dtype conversion or decompression."""
+    shard_name = self.shard_map.get(key)
     if shard_name is None and None in self.shard_map:
       shard_name = self.shard_map[None]
     elif shard_name is None:
-      # Fallback: sometimes keys in index don't perfectly match requested keys if there are prefix mismatches.
-      # You might need advanced fuzzy matching here if you encounter errors.
       raise ValueError(f"Key {key} not found in HF checkpoint index.")
 
     if shard_name in self._local_shard_paths:
@@ -256,8 +242,6 @@ class LazyHFLoader:
       if self.is_local:
         local_path = os.path.join(self.model_id, shard_name)
       else:
-        # STEP 1: Download outside the lock.
-        # multiple threads can download different shards at the same time.
         local_path = hf_hub_download(
             repo_id=self.model_id,
             filename=shard_name,
@@ -266,13 +250,29 @@ class LazyHFLoader:
         )
       self._local_shard_paths[shard_name] = local_path
 
-    # STEP 2: Lock ONLY the reading into RAM.
-    # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
       framework = "pt" if torch is not None else "np"
       with safe_open(local_path, framework=framework, device="cpu") as f:
-        t = f.get_tensor(resolved_key)
-        return _convert_tensor_to_numpy(t, self.save_dtype)
+        return f.get_tensor(key)
+
+  def get_tensor(self, key: str) -> np.ndarray:
+    """Load and convert a tensor, including packed MXFP4 weights."""
+    with self._ram_lock:
+      resolved_key = resolve_scale_key(key, self.shard_map)
+      if resolved_key not in self.shard_map and None not in self.shard_map:
+        packed_key = resolved_key.replace(".weight", ".weight_packed")
+        scale_key = resolved_key.replace(".weight", ".weight_scale")
+        if packed_key in self.shard_map and scale_key in self.shard_map:
+          t_packed = self._get_raw_tensor(packed_key)
+          t_scale = self._get_raw_tensor(scale_key)
+          from compressed_tensors.compressors.mxfp4 import MXFP4PackedCompressor  # pylint: disable=import-outside-toplevel
+
+          decomp = MXFP4PackedCompressor.decompress({"weight_packed": t_packed, "weight_scale": t_scale}, None)
+          return _convert_tensor_to_numpy(decomp["weight"], self.save_dtype)
+        raise ValueError(f"Key {key} not found in HF checkpoint index.")
+
+      t = self._get_raw_tensor(resolved_key)
+      return _convert_tensor_to_numpy(t, self.save_dtype)
 
 
 class LazyTensor:
@@ -1104,6 +1104,17 @@ def main(
           return None
         resolved_key = resolve_scale_key(key, hf_state_dict_numpy)
         if resolved_key not in hf_state_dict_numpy:
+          # Check for compressed mxfp4 weights
+          packed_key = resolved_key.replace(".weight", ".weight_packed")
+          scale_key = resolved_key.replace(".weight", ".weight_scale")
+          if packed_key in hf_state_dict_numpy and scale_key in hf_state_dict_numpy:
+            from compressed_tensors.compressors.mxfp4 import MXFP4PackedCompressor  # pylint: disable=import-outside-toplevel
+
+            decomp = MXFP4PackedCompressor.decompress(
+                {"weight_packed": hf_state_dict_numpy[packed_key], "weight_scale": hf_state_dict_numpy[scale_key]}, None
+            )
+            v = decomp["weight"]
+            return _convert_tensor_to_numpy(v, save_dtype)
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
 
         v = hf_state_dict_numpy[resolved_key]

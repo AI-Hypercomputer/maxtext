@@ -293,6 +293,7 @@ ModelName = Literal[
     "weaver-mini",
     "weaver-max",
     "qwen3-next-80b-a3b",
+    "kimi-k3",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-35b-a3b",
@@ -1508,6 +1509,20 @@ class Qwen3Next(BaseModel):
 
 
 # ----------------------------------------------------------------------------
+
+
+class KimiK3(BaseModel):
+  """Configuration specific to Kimi-K3 models."""
+
+  kda_head_dim: int = Field(128, description="Head dimension for KDA in Kimi-K3.")
+  kda_num_heads: int = Field(96, description="Number of heads for KDA in Kimi-K3.")
+  kda_gate_lower_bound: float = Field(-5.0, description="Gate lower bound for KDA.")
+  attn_res_block_size: int = Field(12, description="Attention residual block size.")
+  activation_situ_beta: float = Field(4.0, description="Situ activation beta.")
+  activation_situ_linear_beta: float = Field(25.0, description="Situ activation linear beta.")
+  routed_expert_hidden_size: int = Field(3584, description="Routed expert hidden size for Kimi-K3.")
+
+
 # Default Mesh Axes, Data Sharding, and Logical Axis Rules
 # ----------------------------------------------------------------------------
 
@@ -1924,6 +1939,9 @@ class Tokenizer(BaseModel):
   tokenizer_path: None | PathStr = Field(
       None,
       description="Path to the tokenizer model file.",
+  )
+  tokenizer_trust_remote_code: bool = Field(
+      False, description="Allow execution of custom Hugging Face tokenizer/config code."
   )
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
@@ -3703,6 +3721,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    KimiK3,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -5713,6 +5732,7 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
+    KimiK3,
     MultimodalGeneral,
     Muon,
     FineTuning,
