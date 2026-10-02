@@ -23,20 +23,21 @@ import pickle
 import sys
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
-import grain
-import numpy as np
-import pytest
-from types import SimpleNamespace
-import jax
 
+import grain
+import jax
+from maxtext.configs import types
 from maxtext.trainers.post_train.rl import train_rl
 from maxtext.trainers.post_train.rl import utils_rl
+from maxtext.utils import model_creation_utils
+import numpy as np
+import pydantic
+import pytest
 
 pytestmark = [pytest.mark.post_training]
-from maxtext.configs import types
-from maxtext.utils import model_creation_utils
 
 
 def _echo_reward(prompts, completions, tmvp_config=None, **kwargs):
@@ -1018,6 +1019,454 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     # Verify apply_chat_template now runs successfully and renders correct content
     rendered = tokenizer.apply_chat_template([{"role": "user", "content": "Hello!"}])
     self.assertEqual(rendered, "Hello!")
+
+  def test_rl_config_profiler_defaults_and_validation(self):
+    """Verifies RL profiler configuration defaults and validation bounds."""
+    # Verify defaults on RL BaseModel
+    rl_default = types.RL()
+    self.assertEqual(rl_default.profiler_start_step, 2)
+    self.assertEqual(rl_default.profiler_num_steps, 1)
+
+    # Verify defaults on RLConfig
+    config = types.RLConfig(model_name="gemma4-26b")
+    self.assertEqual(config.rl.profiler_start_step, 2)
+    self.assertEqual(config.rl.profiler_num_steps, 1)
+
+    # Verify valid custom values
+    rl_custom = types.RL(profiler_start_step=0, profiler_num_steps=5)
+    self.assertEqual(rl_custom.profiler_start_step, 0)
+    self.assertEqual(rl_custom.profiler_num_steps, 5)
+
+    config_custom = types.RLConfig(
+        model_name="gemma4-26b",
+        rl={"profiler_start_step": 4, "profiler_num_steps": 2},
+    )
+    self.assertEqual(config_custom.rl.profiler_start_step, 4)
+    self.assertEqual(config_custom.rl.profiler_num_steps, 2)
+
+    # Verify flat key mapping into nested RL model
+    config_flat = types.RLConfig(
+        model_name="gemma4-26b",
+        profiler_start_step=4,
+        profiler_num_steps=3,
+    )
+    self.assertEqual(config_flat.rl.profiler_start_step, 4)
+    self.assertEqual(config_flat.rl.profiler_num_steps, 3)
+
+    # Validation bounds: profiler_start_step must be >= 0 (ge=0)
+    with self.assertRaises(pydantic.ValidationError):
+      types.RL(profiler_start_step=-1)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.RLConfig(
+          model_name="gemma4-26b",
+          rl={"profiler_start_step": -1},
+      )
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.RLConfig(
+          model_name="gemma4-26b",
+          profiler_start_step=-1,
+      )
+
+    # Validation bounds: profiler_num_steps must be >= 1 (ge=1)
+    with self.assertRaises(pydantic.ValidationError):
+      types.RL(profiler_num_steps=0)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.RL(profiler_num_steps=-1)
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.RLConfig(
+          model_name="gemma4-26b",
+          rl={"profiler_num_steps": 0},
+      )
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.RLConfig(
+          model_name="gemma4-26b",
+          rl={"profiler_num_steps": -1},
+      )
+
+    with self.assertRaises(pydantic.ValidationError):
+      types.RLConfig(
+          model_name="gemma4-26b",
+          profiler_num_steps=0,
+      )
+
+  def test_create_rl_components_profiler_routing(self):
+    """Verifies profiler routing logic in create_rl_components."""
+    mock_optimizer = mock.MagicMock()
+    mock_vllm_config = mock.MagicMock(logical_axis_rules=[])
+    mock_learner = mock.MagicMock()
+
+    # 1. When profiler == "xplane", RLProfileConfig is constructed with
+    # start_step, num_steps, and Tunix default timeout_secs = 60.0,
+    # while profiler_options remains None.
+    trainer_config = types.RLConfig(
+        model_name="gemma4-26b",
+        enable_checkpointing=False,
+        profiler="xplane",
+        tensorboard_dir="/tmp/test_tensorboard",
+        rl={"profiler_start_step": 3, "profiler_num_steps": 2},
+    )
+    sampler_config = mock.MagicMock()
+    sampler_config.enable_expert_parallel = False
+
+    with (
+        mock.patch.object(train_rl.utils_rl, "get_optimizer", return_value=mock_optimizer),
+        mock.patch.object(train_rl.pyconfig, "initialize", return_value=mock_vllm_config),
+        mock.patch.object(train_rl, "get_rollout_kwargs_for_parallelism", return_value={}),
+        mock.patch.object(train_rl.rl_cluster_lib, "RLCluster", return_value=mock.MagicMock()) as mock_cluster,
+        mock.patch.object(train_rl, "build_reward_fns", return_value=[]),
+        mock.patch.object(train_rl, "GrpoLearner", return_value=mock_learner),
+    ):
+      train_rl.create_rl_components(
+          trainer_config=trainer_config,
+          sampler_config=sampler_config,
+          sampler_devices=[mock.MagicMock()],
+          actor_model=mock.MagicMock(),
+          actor_mesh=mock.MagicMock(),
+          reference_model=mock.MagicMock(),
+          reference_mesh=mock.MagicMock(),
+          rollout_mesh=mock.MagicMock(),
+          model_tokenizer=mock.MagicMock(),
+      )
+
+      cluster_config = mock_cluster.call_args.kwargs["cluster_config"]
+      training_config = cluster_config.training_config
+
+      # profiler_options must be None
+      self.assertIsNone(training_config.profiler_options)
+      # rl_profiler_config must be populated
+      self.assertIsNotNone(training_config.rl_profiler_config)
+      self.assertEqual(training_config.rl_profiler_config.start_step, 3)
+      self.assertEqual(training_config.rl_profiler_config.num_steps, 2)
+      self.assertEqual(training_config.rl_profiler_config.timeout_secs, 60.0)
+      self.assertEqual(training_config.rl_profiler_config.output_dir, "/tmp/test_tensorboard")
+      self.assertFalse(training_config.rl_profiler_config.managed_mldiagnostics)
+      self.assertEqual(training_config.rl_profiler_config.mldiagnostics_dir, "")
+
+    # 2. When profiler != "xplane", both profiler_options and rl_profiler_config remain None.
+    trainer_config_no_profiler = types.RLConfig(
+        model_name="gemma4-26b",
+        enable_checkpointing=False,
+        profiler="",
+    )
+
+    with (
+        mock.patch.object(train_rl.utils_rl, "get_optimizer", return_value=mock_optimizer),
+        mock.patch.object(train_rl.pyconfig, "initialize", return_value=mock_vllm_config),
+        mock.patch.object(train_rl, "get_rollout_kwargs_for_parallelism", return_value={}),
+        mock.patch.object(train_rl.rl_cluster_lib, "RLCluster", return_value=mock.MagicMock()) as mock_cluster,
+        mock.patch.object(train_rl, "build_reward_fns", return_value=[]),
+        mock.patch.object(train_rl, "GrpoLearner", return_value=mock_learner),
+    ):
+      train_rl.create_rl_components(
+          trainer_config=trainer_config_no_profiler,
+          sampler_config=sampler_config,
+          sampler_devices=[mock.MagicMock()],
+          actor_model=mock.MagicMock(),
+          actor_mesh=mock.MagicMock(),
+          reference_model=mock.MagicMock(),
+          reference_mesh=mock.MagicMock(),
+          rollout_mesh=mock.MagicMock(),
+          model_tokenizer=mock.MagicMock(),
+      )
+
+      cluster_config = mock_cluster.call_args.kwargs["cluster_config"]
+      training_config = cluster_config.training_config
+
+      self.assertIsNone(training_config.profiler_options)
+      self.assertIsNone(training_config.rl_profiler_config)
+
+    # 3. When managed_mldiagnostics=True and managed_mldiagnostics_dir is set,
+    # verify mldiagnostics_dir and managed_mldiagnostics are correctly passed.
+    trainer_config_mldiag = types.RLConfig(
+        model_name="gemma4-26b",
+        enable_checkpointing=False,
+        profiler="xplane",
+        tensorboard_dir="/tmp/test_tensorboard",
+        managed_mldiagnostics=True,
+        managed_mldiagnostics_dir="gs://custom-bucket/traces",
+    )
+
+    with (
+        mock.patch.object(train_rl.utils_rl, "get_optimizer", return_value=mock_optimizer),
+        mock.patch.object(train_rl.pyconfig, "initialize", return_value=mock_vllm_config),
+        mock.patch.object(train_rl, "get_rollout_kwargs_for_parallelism", return_value={}),
+        mock.patch.object(train_rl.rl_cluster_lib, "RLCluster", return_value=mock.MagicMock()) as mock_cluster,
+        mock.patch.object(train_rl, "build_reward_fns", return_value=[]),
+        mock.patch.object(train_rl, "GrpoLearner", return_value=mock_learner),
+    ):
+      train_rl.create_rl_components(
+          trainer_config=trainer_config_mldiag,
+          sampler_config=sampler_config,
+          sampler_devices=[mock.MagicMock()],
+          actor_model=mock.MagicMock(),
+          actor_mesh=mock.MagicMock(),
+          reference_model=mock.MagicMock(),
+          reference_mesh=mock.MagicMock(),
+          rollout_mesh=mock.MagicMock(),
+          model_tokenizer=mock.MagicMock(),
+      )
+
+      cluster_config = mock_cluster.call_args.kwargs["cluster_config"]
+      training_config = cluster_config.training_config
+
+      self.assertIsNone(training_config.profiler_options)
+      self.assertIsNotNone(training_config.rl_profiler_config)
+      self.assertTrue(training_config.rl_profiler_config.managed_mldiagnostics)
+      self.assertEqual(
+          training_config.rl_profiler_config.mldiagnostics_dir,
+          "gs://custom-bucket/traces",
+      )
+
+    # 4. When managed_mldiagnostics=True and managed_mldiagnostics_storage_path is set,
+    # verify fallback to managed_mldiagnostics_storage_path when managed_mldiagnostics_dir is empty.
+    trainer_config_storage = types.RLConfig(
+        model_name="gemma4-26b",
+        enable_checkpointing=False,
+        profiler="xplane",
+        tensorboard_dir="/tmp/test_tensorboard",
+        managed_mldiagnostics=True,
+        managed_mldiagnostics_dir="",
+        managed_mldiagnostics_storage_path="gs://storage-bucket/traces",
+    )
+
+    with (
+        mock.patch.object(train_rl.utils_rl, "get_optimizer", return_value=mock_optimizer),
+        mock.patch.object(train_rl.pyconfig, "initialize", return_value=mock_vllm_config),
+        mock.patch.object(train_rl, "get_rollout_kwargs_for_parallelism", return_value={}),
+        mock.patch.object(train_rl.rl_cluster_lib, "RLCluster", return_value=mock.MagicMock()) as mock_cluster,
+        mock.patch.object(train_rl, "build_reward_fns", return_value=[]),
+        mock.patch.object(train_rl, "GrpoLearner", return_value=mock_learner),
+    ):
+      train_rl.create_rl_components(
+          trainer_config=trainer_config_storage,
+          sampler_config=sampler_config,
+          sampler_devices=[mock.MagicMock()],
+          actor_model=mock.MagicMock(),
+          actor_mesh=mock.MagicMock(),
+          reference_model=mock.MagicMock(),
+          reference_mesh=mock.MagicMock(),
+          rollout_mesh=mock.MagicMock(),
+          model_tokenizer=mock.MagicMock(),
+      )
+
+      cluster_config = mock_cluster.call_args.kwargs["cluster_config"]
+      training_config = cluster_config.training_config
+
+      self.assertIsNone(training_config.profiler_options)
+      self.assertIsNotNone(training_config.rl_profiler_config)
+      self.assertTrue(training_config.rl_profiler_config.managed_mldiagnostics)
+      self.assertEqual(
+          training_config.rl_profiler_config.mldiagnostics_dir,
+          "gs://storage-bucket/traces",
+      )
+
+
+class PathwaysMultihostProfilerPatchTest(unittest.TestCase):
+  """Tests for install_pathways_multihost_profiler_patch."""
+
+  def setUp(self):
+    super().setUp()
+    self._orig_start_trace = jax.profiler.start_trace
+    self._orig_src_start_trace = getattr(getattr(jax, "_src", None), "profiler", None)
+    self._orig_src_start_trace_fn = None
+    if self._orig_src_start_trace is not None:
+      self._orig_src_start_trace_fn = getattr(self._orig_src_start_trace, "start_trace", None)
+
+  def tearDown(self):
+    jax.profiler.start_trace = self._orig_start_trace
+    if self._orig_src_start_trace is not None and self._orig_src_start_trace_fn is not None:
+      self._orig_src_start_trace.start_trace = self._orig_src_start_trace_fn
+    super().tearDown()
+
+  def _make_mock_pathways_start_trace(self):
+    """Returns a mock matching pathwaysutils.profiling.start_trace signature."""
+
+    def _mock_fn(
+        log_dir,
+        create_perfetto_link=False,
+        create_perfetto_trace=False,
+        profiler_options=None,
+        max_num_hosts=1,
+    ):
+      pass
+
+    return mock.MagicMock(side_effect=_mock_fn)
+
+  def test_injects_max_num_hosts_when_pathways_used(self):
+    mock_base = self._make_mock_pathways_start_trace()
+    jax.profiler.start_trace = mock_base
+
+    with (
+        mock.patch.object(
+            train_rl.pathwaysutils,
+            "is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch.dict(os.environ, {}, clear=True),
+    ):
+      train_rl.install_pathways_multihost_profiler_patch()
+      jax.profiler.start_trace("gs://bucket/traces", profiler_options=None)
+
+      mock_base.assert_called_once_with("gs://bucket/traces", profiler_options=None, max_num_hosts=1000)
+
+  def test_respects_custom_pathways_max_num_hosts_env(self):
+    mock_base = self._make_mock_pathways_start_trace()
+    jax.profiler.start_trace = mock_base
+
+    with (
+        mock.patch.object(
+            train_rl.pathwaysutils,
+            "is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch.dict(os.environ, {"PATHWAYS_MAX_NUM_HOSTS": "128"}),
+    ):
+      train_rl.install_pathways_multihost_profiler_patch()
+      jax.profiler.start_trace("gs://bucket/traces")
+
+      mock_base.assert_called_once_with("gs://bucket/traces", max_num_hosts=128)
+
+  def test_sanitizes_invalid_or_negative_env_max_hosts(self):
+    mock_base = self._make_mock_pathways_start_trace()
+    jax.profiler.start_trace = mock_base
+
+    for invalid_val in ["-5", "0", "not_a_number"]:
+      mock_base.reset_mock()
+      # Reset patch flag so re-installation applies under new env
+      setattr(mock_base, "_is_pathways_multihost_patched", False)
+      with (
+          mock.patch.object(
+              train_rl.pathwaysutils,
+              "is_pathways_backend_used",
+              return_value=True,
+          ),
+          mock.patch.dict(os.environ, {"PATHWAYS_MAX_NUM_HOSTS": invalid_val}),
+      ):
+        train_rl.install_pathways_multihost_profiler_patch()
+        jax.profiler.start_trace("gs://bucket/traces")
+
+        mock_base.assert_called_once_with("gs://bucket/traces", max_num_hosts=1000)
+
+  def test_preserves_explicit_max_num_hosts_kwargs(self):
+    mock_base = self._make_mock_pathways_start_trace()
+    jax.profiler.start_trace = mock_base
+
+    with (
+        mock.patch.object(
+            train_rl.pathwaysutils,
+            "is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch.dict(os.environ, {}, clear=True),
+    ):
+      train_rl.install_pathways_multihost_profiler_patch()
+      jax.profiler.start_trace("gs://bucket/traces", max_num_hosts=4)
+
+      mock_base.assert_called_once_with("gs://bucket/traces", max_num_hosts=4)
+
+  def test_preserves_explicit_max_num_hosts_positional(self):
+    mock_base = self._make_mock_pathways_start_trace()
+    jax.profiler.start_trace = mock_base
+
+    with (
+        mock.patch.object(
+            train_rl.pathwaysutils,
+            "is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch.dict(os.environ, {}, clear=True),
+    ):
+      train_rl.install_pathways_multihost_profiler_patch()
+      # 5 positional args: (log_dir, create_perfetto_link, create_perfetto_trace, profiler_options, max_num_hosts)
+      jax.profiler.start_trace("gs://bucket/traces", False, False, None, 8)
+
+      mock_base.assert_called_once_with("gs://bucket/traces", False, False, None, 8)
+
+  def test_safe_on_unpatched_jax_without_max_num_hosts(self):
+    # Standard JAX start_trace signature does NOT have max_num_hosts
+    def _unpatched_start_trace(
+        log_dir,
+        create_perfetto_link=False,
+        create_perfetto_trace=False,
+        profiler_options=None,
+    ):
+      pass
+
+    mock_unpatched = mock.MagicMock(side_effect=_unpatched_start_trace)
+    jax.profiler.start_trace = mock_unpatched
+
+    with (
+        mock.patch.object(
+            train_rl.pathwaysutils,
+            "is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch.dict(os.environ, {}, clear=True),
+    ):
+      train_rl.install_pathways_multihost_profiler_patch()
+      # Must not raise TypeError: unexpected keyword argument 'max_num_hosts'
+      jax.profiler.start_trace("gs://bucket/traces")
+
+      mock_unpatched.assert_called_once_with("gs://bucket/traces")
+
+  def test_patches_jax_src_profiler_start_trace(self):
+    mock_base = self._make_mock_pathways_start_trace()
+    jax.profiler.start_trace = mock_base
+
+    with (
+        mock.patch.object(
+            train_rl.pathwaysutils,
+            "is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch.dict(os.environ, {}, clear=True),
+    ):
+      train_rl.install_pathways_multihost_profiler_patch()
+      jax_src = getattr(jax, "_src", None)
+      if jax_src is not None and hasattr(jax_src, "profiler"):
+        jax_src.profiler.start_trace("gs://bucket/traces")
+        mock_base.assert_called_once_with("gs://bucket/traces", max_num_hosts=1000)
+
+  def test_idempotent_installation(self):
+    mock_base = self._make_mock_pathways_start_trace()
+    jax.profiler.start_trace = mock_base
+
+    with (
+        mock.patch.object(
+            train_rl.pathwaysutils,
+            "is_pathways_backend_used",
+            return_value=True,
+        ),
+        mock.patch.dict(os.environ, {}, clear=True),
+    ):
+      train_rl.install_pathways_multihost_profiler_patch()
+      patched_fn_1 = jax.profiler.start_trace
+      train_rl.install_pathways_multihost_profiler_patch()
+      patched_fn_2 = jax.profiler.start_trace
+
+      self.assertIs(patched_fn_1, patched_fn_2)
+
+  def test_no_op_when_not_pathways(self):
+    mock_base = self._make_mock_pathways_start_trace()
+    jax.profiler.start_trace = mock_base
+
+    with (
+        mock.patch.object(
+            train_rl.pathwaysutils,
+            "is_pathways_backend_used",
+            return_value=False,
+        ),
+        mock.patch.dict(os.environ, {"JAX_PLATFORMS": "tpu"}),
+    ):
+      train_rl.install_pathways_multihost_profiler_patch()
+      jax.profiler.start_trace("gs://bucket/traces")
+
+      mock_base.assert_called_once_with("gs://bucket/traces")
 
 
 if __name__ == "__main__":

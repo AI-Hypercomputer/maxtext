@@ -14,13 +14,13 @@
 
 """Unit tests for ManagedMLDiagnostics."""
 
-import unittest
 from unittest import mock
 
+from absl.testing import absltest
 from maxtext.common.managed_mldiagnostics import ManagedMLDiagnostics, mldiag
 
 
-class ManagedMLDiagnosticsTest(unittest.TestCase):
+class ManagedMLDiagnosticsTest(absltest.TestCase):
   # pylint: disable=protected-access
 
   def setUp(self):
@@ -78,6 +78,62 @@ class ManagedMLDiagnosticsTest(unittest.TestCase):
           region="us-east1",
       )
 
+  def test_sampler_config_merging_differing_keys(self):
+    mock_config = mock.MagicMock()
+    mock_config.managed_mldiagnostics = True
+    mock_config.managed_mldiagnostics_region = ""
+    mock_config.run_name = "test_run"
+    mock_config.managed_mldiagnostics_run_group = "test_group"
+    mock_config.managed_mldiagnostics_dir = "gs://test_dir"
+    mock_config.managed_mldiagnostics_on_demand_profiling = False
+    mock_config.get_keys.return_value = {"key1": "val1", "num_slices": 1}
+
+    mock_sampler_config = mock.MagicMock()
+    mock_sampler_config.get_keys.return_value = {
+        "key1": "val1",
+        "num_slices": 2,
+    }
+
+    with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
+      ManagedMLDiagnostics(mock_config, sampler_config=mock_sampler_config)
+      mock_run.assert_called_once_with(
+          name="test_run",
+          run_group="test_group",
+          configs={"key1": "val1", "num_slices": 1, "sampler.num_slices": 2},
+          gcs_path="gs://test_dir",
+          on_demand_xprof=False,
+          region=None,
+      )
+
+  def test_sampler_config_same_object_no_prefix(self):
+    mock_config = mock.MagicMock()
+    mock_config.managed_mldiagnostics = True
+    mock_config.managed_mldiagnostics_region = ""
+    mock_config.run_name = "test_run"
+    mock_config.managed_mldiagnostics_run_group = "test_group"
+    mock_config.managed_mldiagnostics_dir = "gs://test_dir"
+    mock_config.managed_mldiagnostics_on_demand_profiling = False
+    mock_config.get_keys.return_value = {"key1": "val1"}
+
+    with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
+      ManagedMLDiagnostics(mock_config, sampler_config=mock_config)
+      mock_run.assert_called_once_with(
+          name="test_run",
+          run_group="test_group",
+          configs={"key1": "val1"},
+          gcs_path="gs://test_dir",
+          on_demand_xprof=False,
+          region=None,
+      )
+
+  def test_missing_mldiag_raises_runtime_error(self):
+    mock_config = mock.MagicMock()
+    mock_config.managed_mldiagnostics = True
+
+    with mock.patch("maxtext.src.maxtext.common.managed_mldiagnostics.mldiag", None):
+      with self.assertRaisesRegex(RuntimeError, "google_cloud_mldiagnostics is not available"):
+        ManagedMLDiagnostics(mock_config)
+
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
