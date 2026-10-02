@@ -15,7 +15,11 @@
 """Unit tests for process_test_results.py."""
 
 import importlib.util
+import json
+import os
+import tempfile
 import unittest
+from unittest import mock
 import xml.etree.ElementTree as ET
 import pytest
 
@@ -33,7 +37,10 @@ class ProcessTestResultsTest(unittest.TestCase):
   def test_extract_job_name(self):
     self.assertEqual(extract_job_name("test-results-gpu-unit-1.xml"), "gpu-unit")
     self.assertEqual(extract_job_name("test-results-tpu-unit-1.xml"), "tpu-unit")
-    self.assertEqual(extract_job_name("test-results-cpu-torch-reference-1.xml"), "cpu-torch-reference")
+    self.assertEqual(
+        extract_job_name("test-results-cpu-torch-reference-1.xml"),
+        "cpu-torch-reference",
+    )
     self.assertEqual(
         extract_job_name("test-results-tpu7x-post-training-unit-2.xml"),
         "tpu7x-post-training-unit",
@@ -66,7 +73,7 @@ class ProcessTestResultsTest(unittest.TestCase):
         baseline_data,
         new_baseline,
     )
-    self.assertFalse(failed)
+    self.assertIs(failed, False)
     self.assertIn(
         "gpu-unit::tests.unit.qk_clip_test.QKClipMLATest.test_mla_dot_product_integration",
         new_baseline,
@@ -76,8 +83,8 @@ class ProcessTestResultsTest(unittest.TestCase):
         15.99,
     )
 
-  def test_process_testcase_regression_detection(self):
-    """Verifies that a genuine regression within the same flavor is detected."""
+  def test_process_testcase_regression_enforced_for_non_excluded_module(self):
+    """Verifies that a genuine regression in a non-excluded module returns True."""
     baseline_data = {
         "gpu-unit::tests.unit.slow_test.SlowTest.test_slow": 1.0,
     }
@@ -99,7 +106,148 @@ class ProcessTestResultsTest(unittest.TestCase):
         baseline_data,
         new_baseline,
     )
-    self.assertTrue(failed)
+    self.assertIs(failed, True)
+
+  def test_process_testcase_regression_warn_only_for_excluded_module(self):
+    """Verifies that a regression in an excluded module (moe_test) returns False."""
+    baseline_data = {
+        "tpu-unit::tests.unit.moe_test.RoutedMoeTest.test_ragged_sort": 25.0,
+    }
+    new_baseline = {}
+
+    testcase_xml = ET.Element(
+        "testcase",
+        {
+            "name": "test_ragged_sort",
+            "classname": "tests.unit.moe_test.RoutedMoeTest",
+            "time": "130.0",
+        },
+    )
+
+    failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1.xml",
+        "tpu-unit",
+        baseline_data,
+        new_baseline,
+    )
+    self.assertIs(failed, False)
+
+  def test_process_testcase_regression_warn_only_for_attention_test(self):
+    """Verifies that a regression in attention_test (excluded) returns False."""
+    baseline_data = {
+        "tpu-unit::tests.unit.attention_test.AttentionTest.test_ring_cp": 5.0,
+    }
+    new_baseline = {}
+
+    testcase_xml = ET.Element(
+        "testcase",
+        {
+            "name": "test_ring_cp",
+            "classname": "tests.unit.attention_test.AttentionTest",
+            "time": "40.0",
+        },
+    )
+
+    failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1.xml",
+        "tpu-unit",
+        baseline_data,
+        new_baseline,
+    )
+    self.assertIs(failed, False)
+
+  def test_process_testcase_skipped_returns_false(self):
+    """Verifies that skipped tests return False and do not update baseline."""
+    testcase_xml = ET.Element(
+        "testcase",
+        {"name": "test_skip", "classname": "tests.unit.foo.Bar", "time": "0.0"},
+    )
+    ET.SubElement(testcase_xml, "skipped")
+    new_baseline = {}
+
+    failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1.xml",
+        "tpu-unit",
+        {},
+        new_baseline,
+    )
+    self.assertIs(failed, False)
+    self.assertEqual(new_baseline, {})
+
+  def test_process_testcase_failed_returns_false(self):
+    """Verifies that failed tests return False and do not update baseline."""
+    testcase_xml = ET.Element(
+        "testcase",
+        {"name": "test_fail", "classname": "tests.unit.foo.Bar", "time": "5.0"},
+    )
+    ET.SubElement(testcase_xml, "failure")
+    new_baseline = {}
+
+    failed = process_testcase(
+        testcase_xml,
+        "test-results-tpu-unit-1.xml",
+        "tpu-unit",
+        {},
+        new_baseline,
+    )
+    self.assertIs(failed, False)
+    self.assertEqual(new_baseline, {})
+
+  def test_main_adding_new_test_in_module_does_not_trigger_module_regression(self):
+    """Verifies that adding new tests to a module does not trigger a per-module regression alert."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      xml_path = os.path.join(tmpdir, "test-results-tpu-unit-1.xml")
+      suite = ET.Element("testsuite")
+      ET.SubElement(
+          suite,
+          "testcase",
+          {
+              "name": "test_existing",
+              "classname": "tests.unit.some_test.SomeTest",
+              "time": "20.0",
+          },
+      )
+      ET.SubElement(
+          suite,
+          "testcase",
+          {
+              "name": "test_newly_added",
+              "classname": "tests.unit.some_test.SomeTest",
+              "time": "30.0",
+          },
+      )
+      ET.ElementTree(suite).write(xml_path)
+
+      baseline_path = os.path.join(tmpdir, "baseline.json")
+      with open(baseline_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "tpu-unit::tests.unit.some_test.SomeTest.test_existing": 20.0,
+                "tpu-unit::MODULE::tests.unit.some_test": 20.0,
+            },
+            f,
+        )
+
+      save_baseline_path = os.path.join(tmpdir, "new_baseline.json")
+      argv = [
+          "process_test_results.py",
+          tmpdir,
+          "--baseline",
+          baseline_path,
+          "--save-baseline",
+          save_baseline_path,
+      ]
+      with mock.patch("sys.argv", argv):
+        with self.assertRaises(SystemExit) as cm:
+          process_test_results.main()
+      self.assertEqual(cm.exception.code, 0)
+
+      with open(save_baseline_path, "r", encoding="utf-8") as f:
+        saved = json.load(f)
+      self.assertNotIn("tpu-unit::MODULE::tests.unit.some_test", saved)
 
   def test_cpu_excluded_from_macro_benchmarks(self):
     """Verifies that CPU suites are skipped when building macro-level benchmark entries."""
