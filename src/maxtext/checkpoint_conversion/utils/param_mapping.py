@@ -3949,9 +3949,202 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
   return mapping
 
 
+def _resolve_weaver_num_layers(config, maxtext_config) -> int:
+  """Resolves the number of decoder layers for Weaver parameter mapping."""
+  for attr in ("num_decoder_layers", "base_num_decoder_layers", "num_hidden_layers"):
+    val = getattr(maxtext_config, attr, None)
+    if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+      return val
+  if isinstance(config, dict):
+    if "num_hidden_layers" in config:
+      return int(config["num_hidden_layers"])
+    if "text_config" in config and "num_hidden_layers" in config["text_config"]:
+      return int(config["text_config"]["num_hidden_layers"])
+  return 36
+
+
+def _is_strict_weaver_omni_mode(config, maxtext_config) -> bool:
+  """Returns True when mapping exclusively for WeaverOmniTransformer (`decoder_block == 'weaver'`)."""
+  decoder_block = getattr(maxtext_config, "decoder_block", None)
+  if str(decoder_block).lower() in ("weaver", "decoderblocktype.weaver"):
+    return True
+  model_name = getattr(maxtext_config, "model_name", None)
+  if isinstance(model_name, str) and "diffuser" in model_name:
+    return True
+  if isinstance(config, dict) and "text_config" not in config:
+    return True
+  return False
+
+
+def _weaver_omni_param_mapping(config, maxtext_config, scan_layers=False):
+  """Returns MaxText-to-HF parameter mapping for WeaverOmniTransformer."""
+  n_layers = _resolve_weaver_num_layers(config, maxtext_config)
+
+  qk_norm_for_text = True
+  if isinstance(config, dict) and "qk_norm_for_text" in config:
+    qk_norm_for_text = bool(config["qk_norm_for_text"])
+  elif isinstance(getattr(maxtext_config, "qk_norm_for_text", None), bool):
+    qk_norm_for_text = getattr(maxtext_config, "qk_norm_for_text")
+  elif isinstance(getattr(maxtext_config, "use_qk_norm", None), bool):
+    qk_norm_for_text = getattr(maxtext_config, "use_qk_norm")
+
+  qk_norm_for_diffusion = True
+  if isinstance(config, dict) and "qk_norm_for_diffusion" in config:
+    qk_norm_for_diffusion = bool(config["qk_norm_for_diffusion"])
+  elif isinstance(getattr(maxtext_config, "qk_norm_for_diffusion", None), bool):
+    qk_norm_for_diffusion = getattr(maxtext_config, "qk_norm_for_diffusion")
+
+  use_und_k_norm_for_gen = False
+  if isinstance(config, dict) and "use_und_k_norm_for_gen" in config:
+    use_und_k_norm_for_gen = bool(config["use_und_k_norm_for_gen"])
+  elif isinstance(getattr(maxtext_config, "use_und_k_norm_for_gen", None), bool):
+    use_und_k_norm_for_gen = getattr(maxtext_config, "use_und_k_norm_for_gen")
+
+  hidden_act = "silu"
+  if isinstance(config, dict) and "hidden_act" in config:
+    hidden_act = config["hidden_act"]
+  elif isinstance(getattr(maxtext_config, "mlp_activations", None), (list, tuple)):
+    if "relu2" in getattr(maxtext_config, "mlp_activations"):
+      hidden_act = "relu2"
+  has_gate_proj = hidden_act != "relu2"
+
+  mapping = {
+      # Token embedding & final pathway norms
+      "params-embed_tokens-embedding": "embed_tokens.weight",
+      "params-norm-scale": "norm.weight",
+      "params-norm_moe_gen-scale": "norm_moe_gen.weight",
+      # Modality projections (proj_in, proj_out, time_embedder)
+      "params-proj_in-kernel": "proj_in.weight",
+      "params-proj_in-bias": "proj_in.bias",
+      "params-proj_out-kernel": "proj_out.weight",
+      "params-proj_out-bias": "proj_out.bias",
+      "params-time_embedder-mlp_0-kernel": "time_embedder.linear_1.weight",
+      "params-time_embedder-mlp_0-bias": "time_embedder.linear_1.bias",
+      "params-time_embedder-mlp_2-kernel": "time_embedder.linear_2.weight",
+      "params-time_embedder-mlp_2-bias": "time_embedder.linear_2.bias",
+  }
+
+  def _layer_entries(prefix, hf_fn):
+    entries = {
+        # Understanding & generation layer norms
+        f"{prefix}-input_layernorm-scale": hf_fn("input_layernorm.weight"),
+        f"{prefix}-post_attention_layernorm-scale": hf_fn("post_attention_layernorm.weight"),
+        f"{prefix}-input_layernorm_moe_gen-scale": hf_fn("input_layernorm_moe_gen.weight"),
+        f"{prefix}-post_attention_layernorm_moe_gen-scale": hf_fn("post_attention_layernorm_moe_gen.weight"),
+        # Understanding attention linear projections
+        f"{prefix}-self_attn-q_proj-kernel": hf_fn("self_attn.to_q.weight"),
+        f"{prefix}-self_attn-k_proj-kernel": hf_fn("self_attn.to_k.weight"),
+        f"{prefix}-self_attn-v_proj-kernel": hf_fn("self_attn.to_v.weight"),
+        f"{prefix}-self_attn-o_proj-kernel": hf_fn("self_attn.to_out.weight"),
+        # Generation attention linear projections
+        f"{prefix}-self_attn-q_proj_gen-kernel": hf_fn("self_attn.add_q_proj.weight"),
+        f"{prefix}-self_attn-k_proj_gen-kernel": hf_fn("self_attn.add_k_proj.weight"),
+        f"{prefix}-self_attn-v_proj_gen-kernel": hf_fn("self_attn.add_v_proj.weight"),
+        f"{prefix}-self_attn-o_proj_gen-kernel": hf_fn("self_attn.to_add_out.weight"),
+        # Understanding & generation MLP projections
+        f"{prefix}-mlp-up_proj-kernel": hf_fn("mlp.up_proj.weight"),
+        f"{prefix}-mlp-down_proj-kernel": hf_fn("mlp.down_proj.weight"),
+        f"{prefix}-mlp_moe_gen-up_proj-kernel": hf_fn("mlp_moe_gen.up_proj.weight"),
+        f"{prefix}-mlp_moe_gen-down_proj-kernel": hf_fn("mlp_moe_gen.down_proj.weight"),
+    }
+    if has_gate_proj:
+      entries[f"{prefix}-mlp-gate_proj-kernel"] = hf_fn("mlp.gate_proj.weight")
+      entries[f"{prefix}-mlp_moe_gen-gate_proj-kernel"] = hf_fn("mlp_moe_gen.gate_proj.weight")
+    if qk_norm_for_text:
+      entries[f"{prefix}-self_attn-q_norm-scale"] = hf_fn("self_attn.norm_q.weight")
+      entries[f"{prefix}-self_attn-k_norm-scale"] = hf_fn("self_attn.norm_k.weight")
+    if qk_norm_for_diffusion:
+      entries[f"{prefix}-self_attn-q_norm_gen-scale"] = hf_fn("self_attn.norm_added_q.weight")
+      entries[f"{prefix}-self_attn-k_norm_gen-scale"] = hf_fn("self_attn.norm_added_k.weight")
+    if use_und_k_norm_for_gen:
+      entries[f"{prefix}-self_attn-k_norm_und_for_gen-scale"] = hf_fn("self_attn.k_norm_und_for_gen.weight")
+    return entries
+
+  if scan_layers:
+    mapping.update(
+        _layer_entries(
+            "params-scanned_layers",
+            lambda suffix: [f"layers.{i}.{suffix}" for i in range(n_layers)],
+        )
+    )
+  else:
+    for layer_idx in range(n_layers):
+      mapping.update(
+          _layer_entries(
+              f"params-layers_{layer_idx}",
+              lambda suffix, idx=layer_idx: f"layers.{idx}.{suffix}",
+          )
+      )
+
+  return mapping
+
+
+def _weaver_omni_param_hook_fn(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Returns hook functions for WeaverOmniTransformer weights (2D transpose & embedding pad)."""
+  n_layers = _resolve_weaver_num_layers(config, maxtext_config)
+
+  def pad_embedding_layer(input_tensor, target_shape):
+    """Pads or truncates embedding layer along vocabulary axis."""
+    source_vocab_size = input_tensor.shape[0]
+    target_vocab_size = target_shape[0]
+    if source_vocab_size == target_vocab_size:
+      return input_tensor
+    if saving_to_hf:
+      return input_tensor[:target_vocab_size, :]
+    padded = np.zeros(target_shape, dtype=input_tensor.dtype)
+    padded[:source_vocab_size, :] = input_tensor[:target_vocab_size, :]
+    return padded
+
+  def reshape_kernel(input_tensor, target_shape):
+    """Transposes 2D linear weights between PyTorch (out_dim, in_dim) and Flax (in_dim, out_dim)."""
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    return input_tensor.T.reshape(target_shape)
+
+  hooks = {
+      "params-embed_tokens-embedding": pad_embedding_layer,
+      "params-proj_in-kernel": reshape_kernel,
+      "params-proj_out-kernel": reshape_kernel,
+      "params-time_embedder-mlp_0-kernel": reshape_kernel,
+      "params-time_embedder-mlp_2-kernel": reshape_kernel,
+  }
+
+  def _attach_layer_hooks(prefix):
+    for subkey in (
+        "self_attn-q_proj-kernel",
+        "self_attn-k_proj-kernel",
+        "self_attn-v_proj-kernel",
+        "self_attn-o_proj-kernel",
+        "self_attn-q_proj_gen-kernel",
+        "self_attn-k_proj_gen-kernel",
+        "self_attn-v_proj_gen-kernel",
+        "self_attn-o_proj_gen-kernel",
+        "mlp-gate_proj-kernel",
+        "mlp-up_proj-kernel",
+        "mlp-down_proj-kernel",
+        "mlp_moe_gen-gate_proj-kernel",
+        "mlp_moe_gen-up_proj-kernel",
+        "mlp_moe_gen-down_proj-kernel",
+    ):
+      hooks[f"{prefix}-{subkey}"] = reshape_kernel
+
+  if scan_layers:
+    _attach_layer_hooks("params-scanned_layers")
+  else:
+    for layer_idx in range(n_layers):
+      _attach_layer_hooks(f"params-layers_{layer_idx}")
+
+  return hooks
+
+
 def WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Returns mapping from MaxText to HuggingFace Weaver weight paths."""
-  # 1. Reuse QWEN3_VL mapping
+  omni_mapping = _weaver_omni_param_mapping(config, maxtext_config, scan_layers=scan_layers)
+  if _is_strict_weaver_omni_mode(config, maxtext_config):
+    return omni_mapping
+
+  # Legacy Qwen3-VL text backbone mapping for decoder_block="qwen3" configs
   qwen3_vl_mapping = QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
 
   mapping = {}
@@ -3981,13 +4174,19 @@ def WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False
   for key, value in qwen3_vl_mapping.items():
     mapping[key] = translate_hf_key(value)
 
+  mapping.update(omni_mapping)
   return mapping
 
 
 def WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Creates parameter transformation functions for Weaver."""
-  # Hooks operate on MaxText Parameter paths, which are identical to Qwen3-VL
-  return QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf)
+  omni_hooks = _weaver_omni_param_hook_fn(config, maxtext_config, scan_layers=scan_layers, saving_to_hf=saving_to_hf)
+  if _is_strict_weaver_omni_mode(config, maxtext_config):
+    return omni_hooks
+
+  hooks = QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf)
+  hooks.update(omni_hooks)
+  return hooks
 
 
 def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
@@ -4446,6 +4645,7 @@ PARAM_MAPPING = {
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "weaver-mini": WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING,
     "weaver-max": WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "weaver-nano-diffuser": WEAVER_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4505,6 +4705,7 @@ HOOK_FNS = {
     "qwen3-vl-30b-a3b": QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "weaver-mini": WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "weaver-max": WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "weaver-nano-diffuser": WEAVER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-8b-Instruct": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "llama3.1-70b": LLAMA31_MAXTEXT_TO_HF_PARAM_HOOK_FN,
