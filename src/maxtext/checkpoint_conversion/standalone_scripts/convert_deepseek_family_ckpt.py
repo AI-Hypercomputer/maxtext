@@ -601,8 +601,6 @@ def _convert_huggingface_to_jax_weights(base_model_path, model_params, mem_info,
         moe["shared_experts"]["wo"]["kernel"][layer_idx, ...] = shared_wo
 
       # re-order
-      if q_lora_rank != 0:
-        moe["MoeBlock_0"]["gate"]["bias"] = np.transpose(moe["MoeBlock_0"]["gate"]["bias"], axes=(1, 0))
       moe["MoeBlock_0"]["gate"]["kernel"] = np.transpose(moe["MoeBlock_0"]["gate"]["kernel"], axes=(1, 0, 2))
       moe["shared_experts"]["wi_0"]["kernel"] = np.transpose(moe["shared_experts"]["wi_0"]["kernel"], axes=(1, 0, 2))
       moe["shared_experts"]["wi_1"]["kernel"] = np.transpose(moe["shared_experts"]["wi_1"]["kernel"], axes=(1, 0, 2))

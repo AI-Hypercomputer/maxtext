@@ -1084,6 +1084,10 @@ class MoEGeneral(BaseModel):
           " num_moe_emb_chunks=0 and prefuse_moe_weights=False."
       ),
   )
+  moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
+      False,
+      description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
+  )
   moe_chunk_barrier: bool = Field(
       False,
       description=(
@@ -1487,6 +1491,18 @@ class DeepSeekMoE(BaseModel):
       False,
       description="Whether to use Lineage DeepSeek-V3 execution.",
   )
+  lineage_quantization: Literal["none", "fp8_full"] = Field(
+      "none",
+      description=("Quantization of the Lineage sparse-layer routed experts. Only used" " if use_lineage is True."),
+  )
+
+  @classmethod
+  def _lineage_quantization_none(cls, v: Any) -> Any:
+    """pyconfig converts the string "none" to None; map it back."""
+    return "none" if v is None else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues
+  _validate_lineage_quantization = field_validator("lineage_quantization", mode="before")(_lineage_quantization_none)
 
 
 class Qwen3Next(BaseModel):
@@ -5064,10 +5080,10 @@ class MaxTextConfig(
               f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
           )
 
-    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
+    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with scanned layers.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
       raise ValueError(
-          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
+          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with scanned layers)."
       )
     if self.use_multimodal:
       # Gemma 4 small (E2B / E4B) only supports text for now; multimodal

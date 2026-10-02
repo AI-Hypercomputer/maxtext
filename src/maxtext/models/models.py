@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
+from flax.core import FrozenDict
 from flax import nnx
 
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
@@ -69,7 +69,7 @@ def transformer_as_linen(
   return TransformerLinen(
       Transformer,
       args=(),
-      kwargs=nn.FrozenDict(
+      kwargs=FrozenDict(
           {
               "mesh": mesh,
               "config": config,
@@ -129,7 +129,7 @@ class Transformer(nnx.Module):
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
+        embedding_init=jax.nn.initializers.normal(stddev=1.0),
         config=cfg,
         rngs=rngs,
     )

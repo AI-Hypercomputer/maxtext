@@ -235,7 +235,7 @@ class GptOssScannableBlock(nnx.Module):
 
     This block applies multiple decoder layers sequentially, using the attention
     pattern defined by GPT_OSS_ATTENTION_PATTERN. It's designed to be
-    used with `nn.scan` for efficient compilation.
+    used with `jax.lax.scan` for efficient compilation.
 
   Attributes:
     config: Config, MaxText model config

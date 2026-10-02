@@ -72,7 +72,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
 
     # DeepSeek V4 applies Hash Routing to the first `config.first_num_hash_layers` layers.
     # For the unscannable prefix layers, we can safely determine this using `layer_idx`.
-    # However, for layers inside `nn.scan` blocks, `layer_idx` is a dynamic JAX tracer
+    # However, for layers inside scanned blocks, `layer_idx` is a dynamic JAX tracer
     # and cannot be evaluated as a boolean condition. Since all scannable layers occur
     # after the hash-routed prefix, the scannable block explicitly passes
     # `is_hash_routing=False` to safely bypass this check.
@@ -176,7 +176,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
 
   DeepSeek V4 layers alternate `compress_ratio=128` (HCA) and `compress_ratio=4` (CSA)
   throughout the middle of the network. This block encapsulates one full `[128, 4]`
-  cycle so it can be perfectly scanned using JAX `nn.scan`.
+  cycle so it can be perfectly scanned using `jax.lax.scan`.
   """
 
   def __init__(

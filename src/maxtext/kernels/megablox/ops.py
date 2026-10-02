@@ -77,6 +77,7 @@ def gmm(
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
     return_rhs: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   if interpret is None:
@@ -118,7 +119,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, rhs_out = gmm_fwd_bwd(
@@ -141,6 +142,7 @@ def gmm(
       use_gmm_v2_heuristic_tiling,
       partial_sum,
       return_rhs,
+      use_dlhs_transpose_rhs,
   )
   return (out, rhs_out) if return_rhs else out
 
@@ -180,6 +182,7 @@ def _gmm_fwd(
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
     return_rhs: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -200,6 +203,8 @@ def _gmm_fwd(
   Always returns (out, rhs) so the output structure does not depend on return_rhs;
   gmm() drops rhs unless return_rhs=True.
   """
+
+  del use_dlhs_transpose_rhs  # Only affects the custom backward pass.
 
   # Track whether operands arrived as QArray (e.g. from token all-gather quantization
   # or gathered weights) to return matching cotangent containers in backward pass.
@@ -512,6 +517,7 @@ def _gmm_bwd(
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
     return_rhs: bool,
+    use_dlhs_transpose_rhs: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -591,6 +597,7 @@ def _gmm_bwd(
       interpret,
       lhs_vma_axes,
       use_gmm_v2_heuristic_tiling,
+      use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
   )
 
   # 4. DRHS Gradient Execution
@@ -742,6 +749,7 @@ def _compute_dlhs(
     interpret: bool,
     lhs_vma_axes: tuple,
     use_gmm_v2_heuristic_tiling: bool,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DLHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -755,7 +763,15 @@ def _compute_dlhs(
     )
   elif use_tokamax_backend and use_gmm_v2:
     return _dlhs_run_tokamax_v2(
-        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, use_gmm_v2_heuristic_tiling, transpose_rhs
+        dlhs_dout,
+        rhs,
+        group_sizes,
+        group_offset,
+        lhs_dtype,
+        tiling,
+        use_gmm_v2_heuristic_tiling,
+        transpose_rhs,
+        use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
     )
   else:
     return _dlhs_run_megablox(
@@ -831,16 +847,26 @@ def _dlhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     transpose_rhs: bool,
+    use_dlhs_transpose_rhs: bool = False,
 ) -> jnp.ndarray:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
-  # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs support.
-  dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
   dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
 
   if use_gmm_v2_heuristic_tiling:
     dlhs_tiling = gmm_v2.calculate_tiling
   else:
     dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+
+  if use_dlhs_transpose_rhs:
+    kernel_transpose_rhs = not transpose_rhs
+    dlhs_rhs = rhs
+  else:
+    kernel_transpose_rhs = False
+    dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
+  # Sub-byte packing only supports the standard [group, k, n] RHS layout.
+  if kernel_transpose_rhs and jax.dtypes.itemsize_bits(rhs.dtype) < 8:
+    dlhs_rhs = rhs.swapaxes(1, 2)
+    kernel_transpose_rhs = False
 
   dlhs = gmm_v2.gmm_v2(
       lhs=dlhs_lhs,
@@ -851,6 +877,7 @@ def _dlhs_run_tokamax_v2(
       tile_info=dlhs_tiling,
       preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
       group_offset=group_offset,
+      transpose_rhs=kernel_transpose_rhs,
       # Bypass internal quantization if incoming dlhs_dout is already a QArray.
       maybe_quantize_lhs=not isinstance(dlhs_dout, qpl.QArray),
   )
