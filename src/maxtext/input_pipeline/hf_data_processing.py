@@ -518,12 +518,15 @@ def make_hf_train_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
+  dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
+      config, process_indices_train
+  )
   if config.use_sft and config.use_multimodal:
     train_iter = vision_sft_preprocessing_pipeline(
         dataset=train_ds,
         config=config,
-        dataloading_host_index=process_indices_train.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_train),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         global_mesh=global_mesh,
         text_columns=config.train_data_columns,
         image_column=config.train_image_column,
@@ -531,8 +534,8 @@ def make_hf_train_iterator(
     )
   else:
     train_iter = preprocessing_pipeline(
-        dataloading_host_index=process_indices_train.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_train),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         global_mesh=global_mesh,
         dataset=train_ds,
         config=config,
@@ -581,12 +584,15 @@ def make_hf_eval_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
+  dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
+      config, process_indices_eval
+  )
   if config.use_sft and config.use_multimodal:
     eval_iter = vision_sft_preprocessing_pipeline(
         dataset=eval_ds,
         config=config,
-        dataloading_host_index=process_indices_eval.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_eval),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         global_mesh=global_mesh,
         text_columns=config.eval_data_columns,
         image_column=config.eval_image_column,
@@ -594,8 +600,8 @@ def make_hf_eval_iterator(
     )
   else:
     eval_iter = preprocessing_pipeline(
-        dataloading_host_index=process_indices_eval.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_eval),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         global_mesh=global_mesh,
         dataset=eval_ds,
         config=config,

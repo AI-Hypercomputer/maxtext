@@ -244,7 +244,13 @@ def jit_train_and_eval_step(
   """Returns a JIT-compiled train and eval step function."""
   if config.enable_diloco:
     train_step_partial = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
-    train_step = diloco.build_diloco_train_step(config, train_step_partial, mesh=mesh)
+    if not isinstance(state_mesh_shardings, diloco.DiLoCoTrainState):
+      raise TypeError(
+          f"enable_diloco requires state_mesh_shardings to be a DiLoCoTrainState, got {type(state_mesh_shardings)}."
+      )
+    train_step = diloco.build_diloco_train_step(
+        config, train_step_partial, mesh=mesh, outer_params_shardings=state_mesh_shardings.params
+    )
   data_sharding_for_train = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
   data_sharding_for_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
   p_train_step = jit_train_step(
@@ -281,13 +287,17 @@ def _reorder_data_iterator_for_loader(reorder_fn, data_iterator):
   return _ReorderedDataIterator(reorder_fn, data_iterator)
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, mesh=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
-  Args: config recorder
+  Args:
+    config: The training config.
+    recorder: Goodput recorder.
+    devices: Devices to build the mesh from; defaults to all devices.
+    mesh: A prebuilt mesh to train on instead of the one derived from `config` (e.g. a submesh of the devices).
 
   Returns:
     init_rng:
@@ -306,7 +316,8 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    if mesh is None:
+      mesh = maxtext_utils.get_mesh_from_config(config, devices)
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     # Create abstract NNX model.
     _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
@@ -397,7 +408,7 @@ def setup_train_loop(config, recorder, devices=None):
           else getattr(state, "model", state)
       )
       # pyrefly: ignore[bad-argument-type]
-      lora_utils.restore_lora_from_path(target_model_state, config)
+      lora_utils.restore_lora_from_path(target_model_state, config, mesh=mesh)
       _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
     with logical_axis_rules(config.logical_axis_rules):
       # We only need the graphdef here; it's merged with state below. Avoid
