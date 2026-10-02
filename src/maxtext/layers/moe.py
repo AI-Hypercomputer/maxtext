@@ -2348,8 +2348,7 @@ class RoutedMoE(nnx.Module):
             padding_amount,
         )
 
-      if return_rhs:
-        output, rhs_out = output
+      output, rhs_out = output if return_rhs else (output, None)
       if padding_amount > 0:
         output = output[: orig_inputs_shape[0]]
       return (output, rhs_out) if return_rhs else output
