@@ -76,6 +76,42 @@ def _deep_merge_dicts(target: dict[str, Any], source: dict[str, Any]) -> dict[st
   return out
 
 
+def _group_leaves_by_collection(state: nnx.State) -> dict[str, dict[str, Any]]:
+  """Splits an NNX state into `{collection name: nested weight tree}`.
+
+  A Variable's on-disk Flax collection is derived from its class
+  (`variable_name_from_type`): `nnx.Param` lands in `params`, while custom
+  subclasses such as `MoEBiasVar` / `Tid2EidVar` get a collection of their own.
+  Non-Variable leaves are treated as `params`.
+  """
+  collection_leaves = collections.defaultdict(dict)
+  for path_tuple, leaf in nnx.to_flat_state(state):
+    if isinstance(leaf, nnx.Variable):
+      col = variablelib.variable_name_from_type(leaf.type, allow_register=True)
+      val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
+    else:
+      col = "params"
+      val = leaf
+    collection_leaves[col][tuple(path_tuple)] = val
+  return {col: nnx.traversals.unflatten_mapping(d) for col, d in collection_leaves.items()}
+
+
+def _merge_restored_collections(restored_collection: dict[str, Any]) -> dict[str, Any]:
+  """Merges a restored `{collection name: tree}` mapping into one path-keyed tree.
+
+  `params` is merged first so a custom collection always overwrites a stale legacy
+  copy of the same weight left behind in `params`.
+  """
+  merged = {}
+  for col_key in sorted(restored_collection, key=lambda k: (k != "params", k)):
+    col_val = restored_collection[col_key]
+    if isinstance(col_val, dict):
+      merged = _deep_merge_dicts(merged, col_val)
+    else:
+      merged[col_key] = col_val
+  return merged
+
+
 def _weight_mismatches(want, have, path=(), check_missing: bool = True, is_quantized_param: bool = False):
   """Returns `(path, problem)` for each weight in `want` that `have` didn't restore.
 
@@ -980,17 +1016,7 @@ def load_params_from_path(
     # into a hard restore failure for a checkpoint that is perfectly valid.
     stored_collections = set(stored_params_meta.keys()) if stored_params_meta else None
 
-    collection_leaves = collections.defaultdict(dict)
-    for path_tuple, leaf in nnx.to_flat_state(abstract_unboxed_params):
-      if isinstance(leaf, nnx.Variable):
-        col = variablelib.variable_name_from_type(leaf.type, allow_register=True)
-        val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
-      else:
-        col = "params"
-        val = leaf
-      collection_leaves[col][tuple(path_tuple)] = val
-
-    params_collection = {col: nnx.traversals.unflatten_mapping(d) for col, d in collection_leaves.items()}
+    params_collection = _group_leaves_by_collection(abstract_unboxed_params)
     if "params" not in params_collection:
       params_collection["params"] = want
 
@@ -1074,15 +1100,8 @@ def load_params_from_path(
   if restore_key in ("model_params", "model"):
     restored_weights = restored_collection
   elif is_nnx:
-    restored_weights = {}
     if isinstance(restored_collection, dict):
-      # Process "params" first so custom collection weights always overwrite stale legacy copies.
-      for col_key in sorted(restored_collection, key=lambda k: (k != "params", k)):
-        col_val = restored_collection[col_key]
-        if isinstance(col_val, dict):
-          restored_weights = _deep_merge_dicts(restored_weights, col_val)
-        else:
-          restored_weights[col_key] = col_val
+      restored_weights = _merge_restored_collections(restored_collection)
     else:
       restored_weights = restored_collection
   else:
