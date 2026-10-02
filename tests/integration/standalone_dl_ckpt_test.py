@@ -18,7 +18,6 @@ import pytest
 from maxtext.utils.standalone_checkpointer import main as sckpt_main
 from maxtext.utils.standalone_dataloader import main as sdl_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
-from maxtext.common.gcloud_stub import is_decoupled
 
 from datetime import datetime
 import random
@@ -33,13 +32,8 @@ class Standalone_DL_CKPT(unittest.TestCase):
 
   def setUp(self):
     """Set up test fixtures before each test method."""
-    decoupled = is_decoupled()
     self.dataset_path = get_test_dataset_path()
-    self.base_output_directory = (
-        os.environ.get("LOCAL_BASE_OUTPUT", get_test_base_output_directory())
-        if decoupled
-        else get_test_base_output_directory()
-    )
+    self.base_output_directory = get_test_base_output_directory()
 
   def _get_random_test_name(self, test_name):
     now = datetime.now()

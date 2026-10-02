@@ -86,7 +86,7 @@ class DecodeTests(unittest.TestCase):
       "decode_sampling": [
           None,
           get_test_config_path(),
-          "base_output_directory=gs://runner-maxtext-logs",
+          f"base_output_directory={_base_output_directory}",
           "run_name=runner_test",
           f"load_parameters_path={GEMMA_2B_CKPT_PATH}",
           "per_device_batch_size=1",
@@ -104,7 +104,7 @@ class DecodeTests(unittest.TestCase):
       "deepseek32": [  # tests decode for deepseek3.2-671b full EP
           None,
           get_test_config_path(),
-          "base_output_directory=gs://runner-maxtext-logs",
+          f"base_output_directory={_base_output_directory}",
           "run_name=decode",
           "model_name=deepseek3.2-671b",
           "override_model_config=True",
