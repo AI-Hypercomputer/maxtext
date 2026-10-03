@@ -620,6 +620,27 @@ class MLA(Attention):
     # Module attribute names must match names previously passed to Linen for checkpointing
     self.MlaKVCache_0 = self.init_mla_kv_caches(inputs_kv_shape) if model_mode != MODEL_MODE_TRAIN else None
 
+  def init_kv_caches(self, inputs_kv_shape: Tuple):
+    """Allocate expanded MLA keys and values with their distinct head sizes."""
+    return kvcache.KVCache(
+        max_prefill_length=self.max_prefill_predict_length,
+        max_target_length=self.max_target_length,
+        batch=inputs_kv_shape[0],
+        key_seq_len=PLACEHOLDER_SEQ_LEN,
+        value_seq_len=PLACEHOLDER_SEQ_LEN,
+        key_heads=self.num_kv_heads,
+        value_heads=self.num_kv_heads,
+        key_head_size=self.qk_head_dim,
+        value_head_size=self.v_head_dim,
+        dtype=self.dtype,
+        kv_quant=self.kv_quant,
+        prefill_cache_axis_order=self.prefill_cache_axis_order,
+        ar_cache_axis_order=self.ar_cache_axis_order,
+        use_chunked_prefill=self.config.use_chunked_prefill,
+        model_mode=self.model_mode,
+        rngs=self.rngs,
+    )
+
   def init_indexer_cache(self, inputs_kv_shape: Tuple):
     """Initializes Indexer Cache."""
     batch_size, _, _ = inputs_kv_shape
@@ -863,16 +884,20 @@ class MLA(Attention):
     # Query projection is scaled by self.softmax_scale to be consistent MaxText implementation.
     # DeepSeek v3 was doing it in attention score computation.
     if self.use_absorbed_mqa:
-      query = self.absorb_query(q_nope, q_pe) * self.softmax_scale
+      query = self.scale_mla_query(self.absorb_query(q_nope, q_pe))
       query_logical_name = query_logical_name[:-1] + (None,)
     else:
-      query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
+      query = self.scale_mla_query(jnp.concatenate([q_nope, q_pe], axis=-1))
 
     if self.config.experimental_sa_quant_q_fp8:
       query = query.astype(jnp.float8_e4m3fn)
 
     query = self._maybe_shard_with_logical(query, query_logical_name)
     return query, low_rank_q
+
+  def scale_mla_query(self, query):
+    """Default MLA scales queries before the attention dot product."""
+    return query * self.softmax_scale
 
   def mla_get_key_value(self, low_rank_main, key_rope, model_mode):
     """get (key,value) pair from mla"""
@@ -1185,6 +1210,7 @@ class MLA(Attention):
       rope_kwargs: dict | None = None,
       kv_cache: Optional[Array] = None,
       attention_metadata: Optional[dict[str, Any]] = None,
+      output_gate: Optional[Array] = None,
   ) -> tuple[Array, Optional[Array]]:
     """Forward pass for MLA, reusing `AttentionOp` for the actual attention.
 
@@ -1284,6 +1310,9 @@ class MLA(Attention):
 
     if self.use_absorbed_mqa:
       out = self.absorb_output(out)
+
+    if output_gate is not None:
+      out = out * output_gate
 
     out = self._maybe_shard_with_logical(out, self.out_axis_names)
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")

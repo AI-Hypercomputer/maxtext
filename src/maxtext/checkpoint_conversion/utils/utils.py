@@ -1310,6 +1310,7 @@ def save_weights_to_checkpoint(
       use_zarr3=use_zarr3,
       # Sets Orbax-V1 I/O write timeout to 60 minutes (up from 20-minute default) to facilitate large model saving.
       enable_continuous_checkpointing=True,
+      checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb if config is not None else 96,
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")

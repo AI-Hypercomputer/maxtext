@@ -1723,7 +1723,22 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     elif metadata.tokenizer_type == TokenizerType.sentencepiece:  # pyrefly: ignore[missing-attribute]
       return token_utils.SentencePieceTokenizer(metadata)
     elif metadata.tokenizer_type == TokenizerType.huggingface:  # pyrefly: ignore[missing-attribute]
-      tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
+      if self.config.tokenizer_trust_remote_code:
+        # JetStream's wrapper does not expose Transformers loader options.
+        # Preserve its encode/decode behavior while opting into custom code.
+        from transformers import AutoTokenizer  # pylint: disable=import-outside-toplevel
+
+        class TrustedHFTokenizer(token_utils.HuggingFaceTokenizer):
+
+          def __init__(self, tokenizer_metadata):
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer_metadata.path, token=tokenizer_metadata.access_token, trust_remote_code=True
+            )
+            self.metadata = tokenizer_metadata
+
+        tokenizer_model = TrustedHFTokenizer(metadata)
+      else:
+        tokenizer_model = token_utils.HuggingFaceTokenizer(metadata)
       if tokenizer_model.tokenizer.pad_token_id is None:
         if tokenizer_model.tokenizer.unk_token_id is not None:
           tokenizer_model.tokenizer.pad_token_id = tokenizer_model.tokenizer.unk_token_id

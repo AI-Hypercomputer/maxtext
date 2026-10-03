@@ -4416,6 +4416,177 @@ DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN
 
 
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Returns mapping from MaxText to HuggingFace Kimi-K3 weight paths."""
+  num_main_layers = config["num_hidden_layers"]
+  num_experts = config["num_experts"]
+
+  mapping = {
+      "params-token_embedder-embedding": "model.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": "model.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+      "params-decoder-output_attn_res_proj-kernel": "model.output_attn_res_proj.weight",
+      "params-decoder-output_attn_res_norm-scale": "model.output_attn_res_norm.weight",
+  }
+
+  for i in range(num_main_layers):
+    prefix = f"params-decoder-layers_{i}"
+    hf_prefix = f"model.layers.{i}"
+
+    mapping.update(
+        {
+            f"{prefix}-input_layernorm-scale": f"{hf_prefix}.input_layernorm.weight",
+            f"{prefix}-post_attention_layernorm-scale": f"{hf_prefix}.post_attention_layernorm.weight",
+            f"{prefix}-self_attention_res_norm-scale": f"{hf_prefix}.self_attention_res_norm.weight",
+            f"{prefix}-self_attention_res_proj-kernel": f"{hf_prefix}.self_attention_res_proj.weight",
+            f"{prefix}-mlp_res_norm-scale": f"{hf_prefix}.mlp_res_norm.weight",
+            f"{prefix}-mlp_res_proj-kernel": f"{hf_prefix}.mlp_res_proj.weight",
+        }
+    )
+
+    full_attn_layers = config.get("linear_attn_config", {}).get("full_attn_layers")
+    is_kda = (i + 1) not in full_attn_layers if full_attn_layers is not None else (i + 1) % 4 != 0
+    if is_kda:
+      mapping.update(
+          {
+              f"{prefix}-self_attention-q_proj-kernel": f"{hf_prefix}.self_attn.q_proj.weight",
+              f"{prefix}-self_attention-k_proj-kernel": f"{hf_prefix}.self_attn.k_proj.weight",
+              f"{prefix}-self_attention-v_proj-kernel": f"{hf_prefix}.self_attn.v_proj.weight",
+              f"{prefix}-self_attention-q_conv1d-kernel": f"{hf_prefix}.self_attn.q_conv1d.weight",
+              f"{prefix}-self_attention-k_conv1d-kernel": f"{hf_prefix}.self_attn.k_conv1d.weight",
+              f"{prefix}-self_attention-v_conv1d-kernel": f"{hf_prefix}.self_attn.v_conv1d.weight",
+              f"{prefix}-self_attention-A_log": f"{hf_prefix}.self_attn.A_log",
+              f"{prefix}-self_attention-dt_bias": f"{hf_prefix}.self_attn.dt_bias",
+              f"{prefix}-self_attention-f_a_proj-kernel": f"{hf_prefix}.self_attn.f_a_proj.weight",
+              f"{prefix}-self_attention-f_b_proj-kernel": f"{hf_prefix}.self_attn.f_b_proj.weight",
+              f"{prefix}-self_attention-b_proj-kernel": f"{hf_prefix}.self_attn.b_proj.weight",
+              f"{prefix}-self_attention-g_proj-kernel": f"{hf_prefix}.self_attn.g_proj.weight",
+              f"{prefix}-self_attention-o_norm-scale": f"{hf_prefix}.self_attn.o_norm.weight",
+              f"{prefix}-self_attention-o_proj-kernel": f"{hf_prefix}.self_attn.o_proj.weight",
+          }
+      )
+    else:
+      mapping.update(
+          {
+              f"{prefix}-self_attention-wq_a-kernel": f"{hf_prefix}.self_attn.q_a_proj.weight",
+              f"{prefix}-self_attention-q_norm-scale": f"{hf_prefix}.self_attn.q_a_layernorm.weight",
+              f"{prefix}-self_attention-wq_b-kernel": f"{hf_prefix}.self_attn.q_b_proj.weight",
+              f"{prefix}-self_attention-wkv_a-kernel": f"{hf_prefix}.self_attn.kv_a_proj_with_mqa.weight",
+              f"{prefix}-self_attention-kv_norm-scale": f"{hf_prefix}.self_attn.kv_a_layernorm.weight",
+              f"{prefix}-self_attention-wkv_b-kernel": f"{hf_prefix}.self_attn.kv_b_proj.weight",
+              f"{prefix}-self_attention-out-kernel": f"{hf_prefix}.self_attn.o_proj.weight",
+              f"{prefix}-self_attention-g_proj-kernel": f"{hf_prefix}.self_attn.g_proj.weight",
+          }
+      )
+
+    if i < 1:
+      # Dense MLP
+      mapping.update(
+          {
+              f"{prefix}-mlp-gate_proj-kernel": f"{hf_prefix}.mlp.gate_proj.weight",
+              f"{prefix}-mlp-up_proj-kernel": f"{hf_prefix}.mlp.up_proj.weight",
+              f"{prefix}-mlp-down_proj-kernel": f"{hf_prefix}.mlp.down_proj.weight",
+          }
+      )
+    else:
+      # MoE
+      mapping.update(
+          {
+              f"{prefix}-mlp-routed_expert_down_proj-kernel": f"{hf_prefix}.block_sparse_moe.routed_expert_down_proj.weight",
+              f"{prefix}-mlp-routed_expert_norm-scale": f"{hf_prefix}.block_sparse_moe.routed_expert_norm.weight",
+              f"{prefix}-mlp-routed_expert_up_proj-kernel": f"{hf_prefix}.block_sparse_moe.routed_expert_up_proj.weight",
+              f"{prefix}-mlp-MoeBlock_0-gate-kernel": f"{hf_prefix}.block_sparse_moe.gate.weight",
+              f"{prefix}-mlp-MoeBlock_0-gate-bias": f"{hf_prefix}.block_sparse_moe.gate.e_score_correction_bias",
+              f"{prefix}-mlp-shared_experts-gate_proj-kernel": (
+                  f"{hf_prefix}.block_sparse_moe.shared_experts." "gate_proj.weight"
+              ),
+              f"{prefix}-mlp-shared_experts-up_proj-kernel": f"{hf_prefix}.block_sparse_moe.shared_experts.up_proj.weight",
+              f"{prefix}-mlp-shared_experts-down_proj-kernel": (
+                  f"{hf_prefix}.block_sparse_moe.shared_experts." "down_proj.weight"
+              ),
+              f"{prefix}-mlp-MoeBlock_0-wi_0": [
+                  f"{hf_prefix}.block_sparse_moe.experts.{e}.w1.weight" for e in range(num_experts)
+              ],
+              f"{prefix}-mlp-MoeBlock_0-wi_1": [
+                  f"{hf_prefix}.block_sparse_moe.experts.{e}.w3.weight" for e in range(num_experts)
+              ],
+              f"{prefix}-mlp-MoeBlock_0-wo": [
+                  f"{hf_prefix}.block_sparse_moe.experts.{e}.w2.weight" for e in range(num_experts)
+              ],
+          }
+      )
+
+  return mapping
+
+
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transformation hooks for Kimi-K3 parameters."""
+
+  def transpose(input_tensor, target_shape=None):
+    return input_tensor.T
+
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      flipped_target_shape = np.flip(np.array(target_shape))
+      return input_tensor.reshape(flipped_target_shape).T
+    else:
+      return input_tensor.T.reshape(target_shape)
+
+  def permute_conv(input_tensor, target_shape=None):
+    # HF: [C, 1, K] <-> MT: [K, 1, C]
+    return input_tensor.transpose(2, 1, 0)
+
+  hooks = {
+      "params-decoder-logits_dense-kernel": transpose,
+      "params-decoder-output_attn_res_proj-kernel": transpose,
+  }
+
+  num_main_layers = config["num_hidden_layers"]
+  for i in range(num_main_layers):
+    prefix = f"params-decoder-layers_{i}"
+    hooks[f"{prefix}-self_attention_res_proj-kernel"] = transpose
+    hooks[f"{prefix}-mlp_res_proj-kernel"] = transpose
+
+    full_attn_layers = config.get("linear_attn_config", {}).get("full_attn_layers")
+    is_kda = (i + 1) not in full_attn_layers if full_attn_layers is not None else (i + 1) % 4 != 0
+    if is_kda:
+      hooks[f"{prefix}-self_attention-q_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-k_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-v_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-q_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-k_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-v_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-f_a_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-f_b_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-b_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-g_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-o_proj-kernel"] = transpose
+    else:
+      hooks[f"{prefix}-self_attention-wq_a-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-wq_b-kernel"] = reshape_kernel
+      hooks[f"{prefix}-self_attention-wkv_a-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-wkv_b-kernel"] = reshape_kernel
+      hooks[f"{prefix}-self_attention-out-kernel"] = reshape_kernel
+      hooks[f"{prefix}-self_attention-g_proj-kernel"] = reshape_kernel
+
+    if i < 1:
+      hooks[f"{prefix}-mlp-gate_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-up_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-down_proj-kernel"] = transpose
+    else:
+      hooks[f"{prefix}-mlp-routed_expert_down_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-routed_expert_up_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-MoeBlock_0-gate-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_experts-gate_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_experts-up_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_experts-down_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-MoeBlock_0-wi_0"] = transpose
+      hooks[f"{prefix}-mlp-MoeBlock_0-wi_1"] = transpose
+      hooks[f"{prefix}-mlp-MoeBlock_0-wo"] = transpose
+
+  return hooks
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4462,6 +4633,7 @@ PARAM_MAPPING = {
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-397b-a17b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4527,6 +4699,7 @@ HOOK_FNS = {
     "qwen3.5-35b-a3b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-35b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
