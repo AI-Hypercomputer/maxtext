@@ -1470,6 +1470,8 @@ gdn_num_key_heads: 16
 gdn_num_value_heads: 32
 # Chunk size for the parallel scan algorithm in the Gated Delta Net.
 gdn_chunk_size: 64
+# Gated DeltaNet chunked delta-rule implementation: 'default' or 'fast' (TPU-oriented: block inverse + bf16 matmuls).
+gdn_chunk_impl: "default"
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
