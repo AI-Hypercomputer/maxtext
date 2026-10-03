@@ -1207,8 +1207,14 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
         f"{comp_prefix}.ape": [r, comp_dim],
     }
 
-  for layer_idx in range(num_hidden_layers):
-    layer_prefix = f"layers.{layer_idx}"
+  def _layer_shapes(layer_prefix, is_hash, ratio):
+    """Returns the HF shapes for one DeepSeek-V4 transformer layer under `layer_prefix`.
+
+    Args:
+      layer_prefix: HF key prefix, e.g. `layers.3` or `mtp.0`.
+      is_hash: Whether the layer uses hash routing (emits `tid2eid` instead of a gate bias).
+      ratio: Compression ratio; 0 means the layer has no compressor weights.
+    """
     layer_mapping = {
         f"{layer_prefix}.attn_norm.weight": [hidden_size],
         f"{layer_prefix}.ffn_norm.weight": [hidden_size],
@@ -1235,14 +1241,8 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
         f"{layer_prefix}.ffn.gate.weight": [n_routed_experts, hidden_size],
         f"{layer_prefix}.ffn.gate.bias": [n_routed_experts],
     }
-    if layer_idx < num_hash_layers:
+    if is_hash:
       layer_mapping[f"{layer_prefix}.ffn.gate.tid2eid"] = [vocab_size, config.get("num_experts_per_tok", 2)]
-
-    compress_ratios = config.get("compress_ratios")
-    if compress_ratios and layer_idx < len(compress_ratios):
-      ratio = compress_ratios[layer_idx]
-    else:
-      ratio = 0 if layer_idx < 2 else (4 if layer_idx % 2 == 0 else 128)
 
     if ratio > 0:
       comp_dim = 2 * head_dim if ratio == 4 else head_dim
@@ -1263,7 +1263,48 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
     layer_mapping[f"{layer_prefix}.ffn.shared_experts.w3.weight"] = [moe_intermediate_size, hidden_size]
     layer_mapping[f"{layer_prefix}.ffn.shared_experts.w2.weight"] = [hidden_size, moe_intermediate_size]
 
-    mapping.update(layer_mapping)
+    return layer_mapping
+
+  compress_ratios = config["compress_ratios"]
+  for layer_idx in range(num_hidden_layers):
+    mapping.update(
+        _layer_shapes(
+            f"layers.{layer_idx}",
+            is_hash=layer_idx < num_hash_layers,
+            ratio=compress_ratios[layer_idx],
+        )
+    )
+
+  # Multi-Token Prediction heads. Each MTP depth owns a full DeepSeek-V4 decoder layer,
+  # built as DeepSeek4DecoderLayer(compress_ratio=0, is_hash_routing=False), so it has
+  # neither compressor weights nor hash routing but does carry a MoE gate bias. On top of
+  # that it has its own norms, a fused input projection and a hyper-connection head.
+  mtp_num_layers = config.get(
+      "num_nextn_predict_layers",
+      config.get("num_mtp_layers", config.get("mtp_num_layers", 0)),
+  )
+  for mtp_idx in range(mtp_num_layers):
+    mtp_prefix = f"mtp.{mtp_idx}"
+    mapping.update(_layer_shapes(mtp_prefix, is_hash=False, ratio=0))
+    mapping.update(
+        {
+            f"{mtp_prefix}.enorm.weight": [hidden_size],
+            f"{mtp_prefix}.hnorm.weight": [hidden_size],
+            f"{mtp_prefix}.norm.weight": [hidden_size],
+            f"{mtp_prefix}.e_proj.weight": [hidden_size, hidden_size],
+            f"{mtp_prefix}.h_proj.weight": [hidden_size, hidden_size],
+            # MaxText fuses these two into a single [2 * emb, emb] kernel, so the export
+            # splits one MaxText param into two HF params via this composite key.
+            (f"{mtp_prefix}.e_proj.weight", f"{mtp_prefix}.h_proj.weight"): (
+                [hidden_size, hidden_size],
+                [hidden_size, hidden_size],
+            ),
+            f"{mtp_prefix}.hc_head_fn": [hc_mult, hidden_size * hc_mult],
+            f"{mtp_prefix}.hc_head_base": [hc_mult],
+            f"{mtp_prefix}.hc_head_scale": [1],
+        }
+    )
+
   return mapping
 
 
