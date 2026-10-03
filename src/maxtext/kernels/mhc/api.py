@@ -27,6 +27,7 @@ MhcCoeffParams = common.MhcCoeffParams
 MhcCoeffOutputs = common.MhcCoeffOutputs
 MhcCoeffGradients = common.MhcCoeffGradients
 hbm_specs = common.hbm_specs
+compute_sigmoid_gate = common.compute_sigmoid_gate
 
 
 def _validate_implementation(
