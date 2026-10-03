@@ -58,6 +58,7 @@ log_moe_bias_norms: false
 # --- Attention configuration ---
 attention_type: 'compressed'
 use_indexer: true
+indexer_sparse_training: true  # Keeps the LM loss; false (dense warm-up) needs indexer_loss_scaling_factor > 0
 q_lora_rank: 16
 o_groups: 4
 o_lora_rank: 16

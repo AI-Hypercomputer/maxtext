@@ -62,6 +62,7 @@ routed_scaling_factor: 1.5
 attention: "dot_product"  # use_indexer requires dot_product, or flash with use_tokamax_splash
 attention_type: 'compressed'
 use_indexer: true
+indexer_sparse_training: true  # Keeps the LM loss; false (dense warm-up) needs indexer_loss_scaling_factor > 0
 q_lora_rank: 1024
 o_groups: 8
 o_lora_rank: 1024
