@@ -72,6 +72,9 @@ class Profiler:
           }
       )
 
+    if self.mode == "xplane" and config.enable_continuous_profiling:
+      advanced_config["enable_continuous_profiling"] = True
+
     if advanced_config:
       self.profiling_options.advanced_configuration = advanced_config
 
