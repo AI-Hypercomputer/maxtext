@@ -41,6 +41,8 @@ from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
+from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
+from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from maxtext.utils import max_logging
@@ -117,6 +119,8 @@ class RouteOutput:
   # Inverse of sorted_selected_experts on the ring-of-experts ragged path, so the unsort backward does not re-sort to
   # get it. Only set when moe_routing_maps is not "remat".
   topk_argsort_indices: Optional[jax.Array] = None
+  # moe_tc_ragged_sort: TcRouting shared by the TensorCore ragged sort and unsort of this chunk.
+  tc_routing: Optional[Any] = None
 
 
 def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
@@ -1557,6 +1561,8 @@ class RoutedMoE(nnx.Module):
     use_ragged_in_permute = self.config.use_ragged_sort and self.config.use_ring_of_experts
     buffer_size = None
     topk_argsort_indices = None
+    use_tc_sort = False
+    tc_routing = None
     if use_ragged_in_permute:
       topk_indices_2d = jnp.reshape(selected_experts, (bsz_times_seq_len, selected_experts.shape[2]))
       if forced_routed_experts is not None:
@@ -1582,6 +1588,34 @@ class RoutedMoE(nnx.Module):
       else:
         buffer_size = None
 
+      use_tc_sort = (
+          getattr(self.config, "moe_tc_ragged_sort", False)
+          and buffer_size is not None
+          and buffer_size < bsz_times_seq_len * self.num_experts_per_tok
+      )
+      if getattr(self.config, "moe_tc_ragged_sort", False) and not use_tc_sort:
+        # E.g. the dropless program (force_dropless / moe_dropless_fallback) or a buffer covering every slot.
+        max_logging.warning(
+            "moe_tc_ragged_sort=True but the TensorCore ragged sort needs a truncated buffer "
+            f"(buffer_size={buffer_size}, total slots={bsz_times_seq_len * self.num_experts_per_tok}); "
+            "using the SparseCore ragged sort for this call."
+        )
+    if use_ragged_in_permute and use_tc_sort:
+      sorted_inputs, group_size, sorted_selected_experts, tc_routing = ring_ragged_sort_tc(
+          inputs_2d,
+          topk_indices_2d,
+          self.config.num_experts,
+          self.num_experts_per_tok,
+          self._expert_parallelism_name,
+          num_expert_parallelism,
+          buffer_size,
+          gather_block_size=self.config.moe_tc_ragged_gather_block_size,
+          reduce_block_size=self.config.moe_tc_ragged_reduce_block_size,
+          mask_padding=self.config.moe_tc_ragged_mask_padding,
+          flatten_block_size=self.config.moe_tc_ragged_flatten_block_size,
+          tag_routing_fn=routing_tag_fn(self.config),
+      )
+    elif use_ragged_in_permute:
       tag_routing_fn = routing_tag_fn(self.config)
       sorted_inputs, group_size, sorted_selected_experts, topk_argsort_indices = ring_ragged_sort(
           inputs_2d,
@@ -1692,6 +1726,7 @@ class RoutedMoE(nnx.Module):
         has_overflow,
         max_load_ratio,
         topk_argsort_indices,
+        tc_routing,
     )
 
   def unpermute(
@@ -1704,10 +1739,21 @@ class RoutedMoE(nnx.Module):
       use_custom_sort_vjp=True,
       group_sizes=None,
       topk_argsort_indices=None,
+      tc_routing=None,
   ):
     """Unpermute tokens to original order and combine weights."""
 
-    if self.config.use_ragged_sort and self.config.use_ring_of_experts:
+    if tc_routing is not None:
+      output = ring_ragged_unsort_tc(
+          intermediate,
+          tc_routing,
+          self.num_experts_per_tok,
+          jnp.ravel(weights).astype(jnp.float32),
+          gather_block_size=self.config.moe_tc_ragged_gather_block_size,
+          mask_padding=self.config.moe_tc_ragged_mask_padding,
+          flatten_block_size=self.config.moe_tc_ragged_flatten_block_size,
+      )
+    elif self.config.use_ragged_sort and self.config.use_ring_of_experts:
       local_num_experts = self.config.num_experts // self.get_expert_parallelism_size()
       # Build the flat routing weights in the same layout as
       # topk_argsort_revert_indices (i.e. the flat token×topk order before
@@ -2649,6 +2695,7 @@ class RoutedMoE(nnx.Module):
           has_overflow,
           max_load_ratio,
           topk_argsort_indices,
+          tc_routing,
       ) = self.permute(
           x,
           logits,
@@ -2683,6 +2730,7 @@ class RoutedMoE(nnx.Module):
               required_rbf=required_rbf,
               max_load_ratio=max_load_ratio,
               topk_argsort_indices=topk_argsort_indices,
+              tc_routing=tc_routing,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -2714,6 +2762,7 @@ class RoutedMoE(nnx.Module):
           lb_loss,
           bias_updates,
           local_group_sizes,
+          _,
           _,
           _,
           _,
@@ -3304,6 +3353,7 @@ class RoutedMoE(nnx.Module):
             use_custom_sort_vjp=self.config.use_custom_sort_vjp,
             group_sizes=routing.group_sizes,
             topk_argsort_indices=routing.topk_argsort_indices,
+            tc_routing=routing.tc_routing,
         )
 
         # Sum up the partial outputs across the expert shards.
