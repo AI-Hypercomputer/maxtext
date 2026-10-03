@@ -560,8 +560,6 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         system_prompt=trainer_config.rl.system_prompt,
         epsilon_high=trainer_config.rl.epsilon_high,
         use_rollout_logps=trainer_config.rl.use_rollout_logps,
-        force_on_policy_ratio=trainer_config.rl.force_on_policy_ratio,
-        log_sampler_trainer_agreement=(trainer_config.rl.log_sampler_trainer_agreement),
         **_kwargs_supported_by(
             AgenticGrpoConfig,
             reward_num_workers=trainer_config.reward_num_workers,
