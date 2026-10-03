@@ -13,12 +13,22 @@
 # limitations under the License.
 # ==============================================================================
 
-# pylint: disable=missing-module-docstring
+"""VMEM load/store pre-processing logic."""
+
 import jax
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import config
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import memory_ref
+
+try:
+  from maxtext.models.kernels.gdn import config
+  from maxtext.models.kernels.gdn import memory_ref
+except (ImportError, ModuleNotFoundError):
+  try:
+    from maxtext.src.maxtext.models.kernels.gdn import config
+    from maxtext.src.maxtext.models.kernels.gdn import memory_ref
+  except (ImportError, ModuleNotFoundError):
+    from . import config
+    from . import memory_ref
 
 
 def load_as_qkv_large(qkv_vmem_ref: jax.Ref, cfgs: config.GDNConfig) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -174,9 +184,10 @@ def load_and_select_states(
   prev_recurrent_state_list = []
 
   for idx in range(cfg.seq_tile_size):
-    s_idx = metadata_ref.p_id_to_s_idx[p_id, idx]
-    real_sizes = metadata_ref.p_id_to_r_size[p_id, idx]
-    is_first_tile = metadata_ref.p_id_is_first_tile[p_id, idx]
+    record = metadata_ref.get_record(p_id, idx)
+    s_idx = record.s_idx
+    real_sizes = record.r_size
+    is_first_tile = record.is_first_tile
     has_initial_state = metadata_ref.s_idx_has_initial_state[s_idx]
 
     # NOTE: Conv1D mandates fp32 due to its usage of compact layout.
