@@ -253,7 +253,8 @@ def init_print(config):
   mllogger.event(mllog.constants.GLOBAL_BATCH_SIZE, config.global_batch_size_to_train_on)
   mllogger.event(mllog.constants.GRADIENT_ACCUMULATION_STEPS, config.gradient_accumulation_steps)
   mllogger.event(mllog.constants.MAX_SEQUENCE_LENGTH, config.max_target_length)
-  mllogger.event(mllog.constants.EVAL_SAMPLES, config.global_batch_size_to_eval_on * config.eval_steps)
+  # The eval set has 1024 sequences; larger eval batches only repeat them.
+  mllogger.event(mllog.constants.EVAL_SAMPLES, min(config.global_batch_size_to_eval_on * config.eval_steps, 1024))
   mllogger.event(mllog.constants.TRAIN_SAMPLES, 1574207408)
   mllogger.event(mllog.constants.INIT_CHECKPOINT_STEP, 0)
   mllogger.event(mllog.constants.OPT_NAME, mllog.constants.ADAMW)
@@ -282,6 +283,10 @@ def init_print(config):
   expert_parallelism = _axis_product(config, "ici_expert_parallelism", "dcn_expert_parallelism")
   quantization = getattr(config, "quantization", None)
   token_all_gather_quantized = quantization and getattr(config, "moe_quantize_token_all_gather", False)
+  attn_quantized = bool(
+      getattr(config, "experimental_sa_quant_q_fp8", False)
+      or getattr(config, "experimental_sa_quant_k_fp8", False)
+  )
   if use_lineage:
     # Lineage runs on a physical mesh where every ici_*_parallelism field is 1.
     # Its MLA projections are head-sharded across the `activation_length`
@@ -291,15 +296,17 @@ def init_print(config):
     tensor_parallelism = _rule_parallelism(config, "activation_length")
     quantization = quantization or config.lineage_quantization
     token_all_gather_quantized = True
+    attn_quantized = attn_quantized or "splash_qk" in (config.lineage_quantization or "")
   dtype_str = _mllog_precision(getattr(config, "dtype", "bfloat16"))
   linear_prec = _mllog_precision(quantization, fallback=dtype_str)
+  attn_prec = _lowest_precision(dtype_str, "fp8") if attn_quantized else dtype_str
   comm_precisions = [_mllog_precision(getattr(config, "grad_dtype", None), fallback=dtype_str)]
   if token_all_gather_quantized and expert_parallelism > 1:
     # The EP token all-gather sends tokens in the GMM activation qtype.
     comm_precisions.append(linear_prec)
   comm_prec = _lowest_precision(*comm_precisions)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_LINEAR, linear_prec)
-  mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_ATTN, dtype_str)
+  mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_ATTN, attn_prec)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_COMM, comm_prec)
   mllogger.event(mllog.constants.TENSOR_PARALLELISM, tensor_parallelism)
   mllogger.event(

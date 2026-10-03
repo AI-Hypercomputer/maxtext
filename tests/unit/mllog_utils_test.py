@@ -324,11 +324,27 @@ class MllogUtilsTest(unittest.TestCase):
         _CONSTANTS.TENSOR_PARALLELISM: 2,
         _CONSTANTS.CONTEXT_PARALLELISM: 1,
         _CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_LINEAR: "fp8",
+        _CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_ATTN: "bfloat16",
         _CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM: "fp8",
         _CONSTANTS.CONFIG_FILENAME: "deepseek3-671b-lineage.yml",
     }
     for key, value in expected.items():
       self.assertEqual(self.mllogger.value_of(key), value, key)
+
+    self.mllogger.events.clear()
+    config.lineage_quantization = "fp8_full_splash_qk_e3"
+    mllog_utils.init_print(config)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_ATTN), "fp8")
+
+  def test_init_print_attn_precision_includes_quantized_splash_qk(self):
+    config = self.setup_local(experimental_sa_quant_q_fp8=True)
+    mllog_utils.init_print(config)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_ATTN), "fp8")
+
+  def test_init_print_eval_samples_is_capped_at_eval_set_size(self):
+    config = self.setup_local(global_batch_size_to_eval_on=16384)
+    mllog_utils.init_print(config)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.EVAL_SAMPLES), 1024)
 
   def test_init_print_comm_precision_includes_quantized_token_all_gather(self):
     config = self.setup_local(moe_quantize_token_all_gather=True)
