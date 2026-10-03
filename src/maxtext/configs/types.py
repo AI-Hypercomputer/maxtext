@@ -1541,6 +1541,15 @@ class DeepSeekMoE(BaseModel):
 
   # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues
   _validate_lineage_quantization = field_validator("lineage_quantization", mode="before")(_lineage_quantization_none)
+  lineage_expert_permutation: None | Literal["lpt"] = Field(
+      None,
+      description=(
+          "Per-layer expert permutation algorithm for the Lineage sparse and MTP layers (see `dsv3.dsv3`'s"
+          " `expert_permutation`). None disables expert shuffling. 'lpt' computes each step's permutation on device"
+          " from the previous step's per-expert token counts with `dsv3_expert_shuffle.lpt_expert_permutation`; the"
+          " first step uses the identity."
+      ),
+  )
 
 
 class Qwen3Next(BaseModel):
