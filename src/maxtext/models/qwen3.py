@@ -43,6 +43,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_TRAIN,
     ShardMode,
+    get_quant,
     get_weight_dtype,
 )
 from maxtext.inference import kvcache
@@ -676,12 +677,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         in_features_shape=in_features,
         out_features_shape=(self.key_dim * 2 + self.value_dim * 2),
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "in_proj_qkvz"),
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
-        quant=self.quant,
+        quant=get_quant(cfg, "in_proj_qkvz", self.quant),
         rngs=rngs,
     )
     self.in_proj_ba = DenseGeneral(
@@ -692,7 +693,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
-        quant=self.quant,
+        quant=get_quant(cfg, "in_proj_ba", self.quant),
         rngs=rngs,
     )
 
@@ -741,12 +742,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         in_features_shape=self.value_dim,
         out_features_shape=(in_features,),
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "out_proj"),
         kernel_axes=("gdn_head", "embed_attn"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
-        quant=self.quant,
+        quant=get_quant(cfg, "out_proj", self.quant),
         rngs=rngs,
     )
 
@@ -1628,6 +1629,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
           dtype=jnp.float32 if cfg.float32_gate_logits else cfg.dtype,
           weight_dtype=jnp.float32 if cfg.float32_gate_logits else get_weight_dtype(cfg, "shared_expert_gate"),
+          quant=get_quant(cfg, "shared_expert_gate", self.quant),
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
           matmul_precision=jax.lax.Precision.HIGHEST if cfg.float32_gate_logits else cfg.matmul_precision,

@@ -29,7 +29,7 @@ from jax.ad_checkpoint import checkpoint_name
 from flax import nnx
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode, DType, Array, Config, Shape, is_fp8_dtype
-from maxtext.common.common_types import MODEL_MODE_PREFILL
+from maxtext.common.common_types import MODEL_MODE_PREFILL, get_quant, get_weight_dtype, is_module_unquantized
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.layers import normalizations
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bias_init, variable_to_logically_partitioned, Initializer
@@ -229,6 +229,8 @@ class DenseGeneral(nnx.Module):
       scale_dtype = weight_quant.scale_dtype
       if block_size is None:
         block_size = weight_quant.block_size
+    if isinstance(quant, quantizations.ServeFp8WeightQuantization) and not is_fp8_dtype(weight_dtype):
+      quant = None
 
     self.in_features_shape = canonicalize_tuple(in_features_shape)
     self.out_features_shape = canonicalize_tuple(out_features_shape)
@@ -649,6 +651,10 @@ class MlpBlock(nnx.Module):
       quant: Optional quantization config, no quantization if None.
       out_sharding: Named sharding of outputs
     """
+    if is_module_unquantized(config, "mlp"):
+      weight_dtype = get_weight_dtype(config, "mlp")
+      quant = get_quant(config, "mlp", quant)
+
     self.config = config
     self.mesh = mesh
     self.in_features = in_features
