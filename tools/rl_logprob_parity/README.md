@@ -175,66 +175,65 @@ docker run --net=host --ipc=host --privileged \
   bash
 ```
 
-Inside the container, run any of the three benchmark configurations:
+Inside the container, run any of the benchmark configurations using `tools/rl_logprob_parity/run_parity_audit.py` (which sets all required TPU/vLLM environment variables, audits live NNX weights/scales/kernel execution paths, captures contiguous router replay, and computes Tunix IS/OOB metrics):
 
-#### 1. Pure BFloat16 Long-Sequence Parity Run (Both Sampler & Trainer)
+#### 1. Pure BFloat16 Parity & Audit Run (`bf16` Sampler vs. `bf16` Trainer)
 ```bash
-python tools/rl_logprob_parity/compare_trainer_sampler.py \
-  --sampler adapter \
-  --model-type bf16 \
-  --router-replay \
-  --logits-dot-fp32 \
-  --enable-prefix-caching \
-  --mamba-cache-mode align \
-  --trainer-tp 4 \
-  --trainer-kv-heads 4 \
-  --trainer-micro-batch 2 \
-  --prompts-file tools/rl_logprob_parity/r2e_prompts_32.jsonl \
-  --prompt-len 4096 \
-  --gen-tokens 4096 \
-  --no-stop-at-eos \
-  --out-dir ./parity_out_bf16
+python tools/rl_logprob_parity/run_parity_audit.py \
+  --sampler-mode bf16 \
+  --trainer-mode bf16 \
+  --out-dir /workspace/audit_bf16sampler_bf16trainer
 ```
 
-#### 2. MoE-Only FP8 Long-Sequence Parity Run (Both Sampler & Trainer)
+#### 2. MoE-Only FP8 Parity & Audit Run (`fp8moe` / `fp8_moe` Sampler vs. `fp8moe` / `fp8_moe` Trainer)
 ```bash
-python tools/rl_logprob_parity/compare_trainer_sampler.py \
-  --sampler adapter \
-  --model-type bf16 \
-  --fp8-moe \
-  --router-replay \
-  --logits-dot-fp32 \
-  --enable-prefix-caching \
-  --mamba-cache-mode align \
-  --trainer-tp 4 \
-  --trainer-kv-heads 4 \
-  --trainer-micro-batch 2 \
-  --prompts-file tools/rl_logprob_parity/r2e_prompts_32.jsonl \
-  --prompt-len 4096 \
-  --gen-tokens 4096 \
-  --no-stop-at-eos \
-  --out-dir ./parity_out_fp8
+python tools/rl_logprob_parity/run_parity_audit.py \
+  --sampler-mode fp8moe \
+  --trainer-mode fp8moe \
+  --out-dir /workspace/audit_fp8moesampler_fp8moetrainer
 ```
 
-#### 3. Cross-Precision Long-Sequence Parity Run (MoE FP8 Sampler, Pure BF16 Trainer)
+#### 3. Cross-Precision Parity & Audit Run (`fp8moe` Sampler vs. `bf16` Trainer)
 ```bash
-python tools/rl_logprob_parity/compare_trainer_sampler.py \
-  --sampler adapter \
-  --model-type bf16 \
-  --fp8-moe \
-  --no-trainer-fp8-moe \
-  --router-replay \
-  --logits-dot-fp32 \
-  --enable-prefix-caching \
-  --mamba-cache-mode align \
-  --trainer-tp 4 \
-  --trainer-kv-heads 4 \
-  --trainer-micro-batch 2 \
-  --prompts-file tools/rl_logprob_parity/r2e_prompts_32.jsonl \
-  --prompt-len 4096 \
-  --gen-tokens 4096 \
-  --no-stop-at-eos \
-  --out-dir ./parity_out_cross_prec
+python tools/rl_logprob_parity/run_parity_audit.py \
+  --sampler-mode fp8moe \
+  --trainer-mode bf16 \
+  --out-dir /workspace/audit_fp8moesampler_bf16trainer
+```
+
+#### 4. Full FP8 Checkpoint Parity & Audit Run (`fp8` / `fp8_ckpt` Sampler vs. `fp8` / `bf16` Trainer)
+```bash
+python tools/rl_logprob_parity/run_parity_audit.py \
+  --sampler-mode fp8 \
+  --trainer-mode fp8 \
+  --out-dir /workspace/audit_fp8sampler_fp8trainer
+```
+
+#### 5. Native FP8 GMM Trainer (`fp8moe` Sampler vs. `fp8_moe_native` Trainer)
+```bash
+python tools/rl_logprob_parity/run_parity_audit.py \
+  --sampler-mode fp8moe \
+  --trainer-mode fp8_moe_native \
+  --out-dir /workspace/audit_fp8moesampler_fp8moenativetrainer
+```
+
+#### 6. Layer-by-Layer & Submodule Divergence Probing (`--probe-modules` + `--mlperf-v5p`)
+```bash
+# Run with non-invasive in-situ module probing (Isolated + Cumulative divergence across all 40 layers)
+# aligned with mlperf_35b_128_v5p.sh + mlperf_base.sh (sampler EP=4/TP=1, trainer TP=2/EP=1, 1D packing):
+python tools/rl_logprob_parity/run_parity_audit.py \
+  --sampler-mode fp8moe \
+  --trainer-mode bf16 \
+  --mlperf-v5p \
+  --probe-modules \
+  --probe-max-tokens 64 \
+  --out-dir /workspace/audit_probe_mlperf_v5p
+```
+
+#### 7. Fast CPU Unit Tests
+```bash
+# Run pytest unit test suite (verifies quantization, audit_model, router replay, Tunix OOB metrics, and module divergence probes):
+pytest tools/rl_logprob_parity/run_parity_audit_test.py -v
 ```
 
 ### Running on Cloud DevKit (CDK TPU v7x-8)
