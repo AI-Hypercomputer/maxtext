@@ -1237,6 +1237,13 @@ class MoEGeneral(BaseModel):
   moe_tc_ragged_mask_padding: bool = Field(
       True, description="Zero TC ragged-gather buffer rows past the valid count (the kernel leaves them uninitialized)."
   )
+  moe_tc_ragged_weights_on_activation: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort: multiply routing weights into the expert activation (buffer, mlp)"
+          " before the wo matmul instead of into the (buffer, emb) expert output before the unsort."
+      ),
+  )
   moe_tc_ragged_flatten_block_size: int = Field(
       0,
       description=(

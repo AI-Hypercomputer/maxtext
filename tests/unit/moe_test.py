@@ -1202,6 +1202,7 @@ class RoutedMoeTest(parameterized.TestCase):
       ragged_buffer_factor: float = 1.5,
       ref_overrides: dict | None = None,
       common_overrides: dict | None = None,
+      randomize_biases: bool = False,
       **tc_overrides,
   ):
     """Loss and gradient correctness for the moe_tc_ragged_sort flag and its options.
@@ -1211,6 +1212,7 @@ class RoutedMoeTest(parameterized.TestCase):
     SparseCore ragged sort with the same ragged buffer; `ref_overrides` changes it (e.g. to the TC sort without
     the option under test). `common_overrides` apply to both runs. All variants truncate each shard's slots to
     the same buffer, so loss, hidden-state gradient and parameter gradients must match within bf16 tolerance.
+    `randomize_biases` replaces the zero-initialized biases with random values (for mlp_bias=True).
     """
 
     def _build_cfg(moe_tc_ragged_sort: bool):
@@ -1275,6 +1277,19 @@ class RoutedMoeTest(parameterized.TestCase):
     model_ref = _build_model(cfg_ref, mesh_ref)
     with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
       variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      if randomize_biases:
+        # Biases are zero-initialized; make them nonzero so the mlp_bias path is actually checked.
+        path_leaves, treedef = jax.tree_util.tree_flatten_with_path(variables)
+        keys = jax.random.split(jax.random.PRNGKey(7), len(path_leaves))
+        variables = jax.tree_util.tree_unflatten(
+            treedef,
+            [
+                (0.1 * jax.random.normal(k, x.shape, jnp.float32)).astype(x.dtype)
+                if "bias" in jax.tree_util.keystr(path)
+                else x
+                for k, (path, x) in zip(keys, path_leaves)
+            ],
+        )
       loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
 
     # Target run: TensorCore ragged sort, sharing variables with the reference.
@@ -1562,6 +1577,26 @@ class RoutedMoeTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   def test_tc_ragged_sort_loss_and_grad_small_blocks(self):
     self._run_tc_ragged_sort_loss_and_grad(moe_tc_ragged_gather_block_size=128, moe_tc_ragged_reduce_block_size=128)
+
+  @pytest.mark.tpu_only
+  def test_tc_ragged_sort_weights_on_activation(self):
+    self._run_tc_ragged_sort_loss_and_grad(moe_tc_ragged_weights_on_activation=True)
+
+  @pytest.mark.tpu_only
+  def test_tc_ragged_sort_weights_on_activation_truncated_flatten(self):
+    self._run_tc_ragged_sort_loss_and_grad(
+        ragged_buffer_factor=0.75, moe_tc_ragged_weights_on_activation=True, moe_tc_ragged_flatten_block_size=256
+    )
+
+  @pytest.mark.tpu_only
+  @parameterized.named_parameters(("weights_on_output", False), ("weights_on_activation", True))
+  def test_tc_ragged_sort_mlp_bias(self, weights_on_activation):
+    """With mlp_bias the wo bias must also be weighted by the routing weight (incl. weights on the activation)."""
+    self._run_tc_ragged_sort_loss_and_grad(
+        common_overrides={"mlp_bias": True},
+        randomize_biases=True,
+        moe_tc_ragged_weights_on_activation=weights_on_activation,
+    )
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(

@@ -81,6 +81,7 @@ class RaggedSortTcTest(parameterized.TestCase):
       mask_padding=True,
       dtype=jnp.bfloat16,
       skewed=False,
+      prescaled=False,
   ):
     """Runs the TC sort -> f -> unsort per shard and checks it against the reference; returns (counts, cap)."""
     devices = jax.devices()
@@ -120,14 +121,20 @@ class RaggedSortTcTest(parameterized.TestCase):
           mask_padding=mask_padding,
           flatten_block_size=flatten_block_size,
       )
+      h = f(buf)
+      if prescaled:
+        # Routing weights applied to the buffer rows (as on the expert activation), then an unweighted combine.
+        w_rows = ragged_sort_tc.tc_buffer_row_weights(routing, w.reshape(-1), buf.shape[0])
+        h = (h.astype(jnp.float32) * w_rows[:, None]).astype(h.dtype)
       y = ragged_sort_tc.ring_ragged_unsort_tc(
-          f(buf),
+          h,
           routing,
           topk,
           w.reshape(-1),
           gather_block_size=gather_block_size,
           mask_padding=mask_padding,
           flatten_block_size=flatten_block_size,
+          prescaled=prescaled,
       )
       count = routing.count
       return buf[None], group_sizes[None], y[None], count[None]
@@ -225,6 +232,16 @@ class RaggedSortTcTest(parameterized.TestCase):
   def test_sort_unsort_dsv3_hidden(self):
     """DeepSeek-V3 hidden size (7168 = 56 x 128) with top-8 routing."""
     self._run(num_tokens=256, hidden=7168, num_experts=32, topk=8, buffer_factor=1.25, skewed=True)
+
+  @pytest.mark.tpu_only
+  @parameterized.named_parameters(
+      ("default", {}),
+      ("truncated_flatten", {"buffer_factor": 0.75, "flatten_block_size": 256}),
+      ("no_mask_padding", {"mask_padding": False}),
+  )
+  def test_sort_unsort_prescaled(self, kwargs):
+    """Routing weights applied to the buffer rows (moe_tc_ragged_weights_on_activation) + unweighted unsort."""
+    self._run(prescaled=True, skewed=True, **kwargs)
 
 
 if __name__ == "__main__":
