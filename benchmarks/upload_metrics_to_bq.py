@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -275,7 +275,7 @@ def update_config_with_tuning_params(base_config: omegaconf.DictConfig, tuning_p
 
 def main(argv: Sequence[str]) -> None:
   is_pathways = os.environ.get("JAX_PLATFORMS", "") == "proxy"
-  is_mcjax_0th_worker = int(os.environ.get("TPU_WORKER_ID", -1)) == 0
+  is_mcjax_0th_worker = int(os.environ.get("TPU_WORKER_ID", os.environ.get("JOB_COMPLETION_INDEX", -1))) == 0
 
   # Only write once for McJAX. Pathways is single controller,
   # so only can write once.
