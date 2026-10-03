@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791016999700,
+  "lastUpdate": 1791036699780,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -43216,6 +43216,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
             "value": 96.906,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Daniel Mandragona",
+            "username": "dandragona",
+            "email": "dandragona@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "e3f76fbd3faec253b34637358278fafc3a0c9a10",
+          "message": "[MaxText] Fix the MLPerf parallelism, precision and config_filename mllog disclosure for Lineage runs\n\n`mllog_utils.init_print` derived the v6.1 disclosure keys from the named\n`ici_*_parallelism` and `quantization` fields. The Lineage recipe\n(`deepseek3-671b-lineage.yml`) uses neither: it runs on a physical\n`[dcn, x, y, z, core]` mesh with explicit `logical_axis_rules` and quantizes\nthrough `lineage_quantization`. The 2026-10-01 Lineage runs therefore logged\n`expert_parallelism=1`, `bfloat16` for linear/comm, and every run logged the\nplaceholder `config_filename=config.yml`.\n\nFor `use_lineage` runs:\n\n- **expert_parallelism** is the mesh size of the `exp` rule\n  (`x * y * core` = 32).\n- **tensor_parallelism** is the mesh size of the `activation_length` rule\n  (the TensorCore pair, 2). Lineage's MLA up/out projections are head-sharded\n  across it, and the splash kernel sees the full sequence (Megatron TP + SP),\n  so this is not context parallelism.\n- **precision** falls back to `lineage_quantization`. `fp8_full` quantizes\n  the routed-expert GMMs and the EP token all-gather\n  (`QuantConfig.routed_experts`, `dsv3_sparse_layer.ubatch_dispatch`), so both\n  linear and comm log `fp8`.\n\nFor all runs, **config_filename** is `<model_name>.yml`.\n\nNon-Lineage parallelism and precision are unchanged.\n\nPiperOrigin-RevId: 992750871",
+          "timestamp": "2026-10-03T07:42:41Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/e3f76fbd3faec253b34637358278fafc3a0c9a10"
+        },
+        "date": 1791036698930,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 105.11,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 37,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4790.874,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 262,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 198.498,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 4207.813,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 262,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 286.581,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 51,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 156.079,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 782.865,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 66,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1452.275,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 20.720000000000045,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 90,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.672,
             "unit": "sec"
           },
           {
