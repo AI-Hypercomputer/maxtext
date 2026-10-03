@@ -16,6 +16,7 @@
 # pylint: disable=protected-access
 
 import dataclasses
+import os
 import types
 from typing import Any
 from unittest import mock
@@ -612,6 +613,200 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertEqual(t.train_step, 10)
     self.assertEqual(restored_metadata, dummy_metadata)
     mock_orbax_mgr.restore.assert_called_once()
+
+  def test_restore_checkpoint_without_additional_metadata_returns_step_dict(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=8)
+
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = mock_metadata
+
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+    }
+
+    restored_metadata = t.restore_checkpoint(step=8)
+    self.assertEqual(t.train_step, 8)
+    self.assertEqual(restored_metadata, {"step": 8})
+
+  def test_restore_checkpoint_with_custom_directory(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    orig_orbax_mgr = self._mock_orbax_manager(t, latest_step=None)
+
+    temp_orbax_mgr = mock.MagicMock()
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"additional_metadata": {"step": 6}}
+    temp_orbax_mgr.metadata.return_value = mock_metadata
+
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    temp_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+    }
+
+    base_restore_dir = self.create_tempdir().full_path
+    nested_ckpt_dir = f"{base_restore_dir}/{mock_config.run_name}/checkpoints"
+    os.makedirs(nested_ckpt_dir, exist_ok=True)
+
+    with (
+        mock.patch.object(
+            t._checkpoint_manager,
+            "_create_orbax_checkpoint_manager",
+            return_value=temp_orbax_mgr,
+        ) as mock_create_temp,
+        self.assertLogs(level="INFO") as logs,
+    ):
+      restored_metadata = t.restore_checkpoint(step=6, directory=base_restore_dir)
+
+    self.assertEqual(t.train_step, 6)
+    self.assertEqual(restored_metadata, {"step": 6})
+    mock_create_temp.assert_called_once_with(nested_ckpt_dir)
+    temp_orbax_mgr.restore.assert_called_once()
+    temp_orbax_mgr.close.assert_called_once()
+    orig_orbax_mgr.restore.assert_not_called()
+    self.assertIs(t._checkpoint_manager._checkpoint_manager, orig_orbax_mgr)
+    self.assertTrue(
+        any(
+            f"Restoring step 6 from restore directory {nested_ckpt_dir}; future checkpoints will be written to"
+            f" root directory {mock_config.checkpoint_dir}." in line
+            for line in logs.output
+        ),
+        logs.output,
+    )
+
+  def test_restore_checkpoint_with_custom_directory_when_checkpointing_is_disabled(self):
+    mock_config = self.setup_config()
+    # An empty checkpoint directory disables Orbax, so nothing is saved after the restore.
+    with mock.patch.object(maxtext_engine.MaxTextTrainingEngine, "_checkpoint_dir", return_value=""):
+      t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    self.assertIsNone(t._checkpoint_manager._checkpoint_manager)
+
+    temp_orbax_mgr = mock.MagicMock()
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"additional_metadata": {"step": 6}}
+    temp_orbax_mgr.metadata.return_value = mock_metadata
+
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    temp_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+    }
+
+    restore_dir = self.create_tempdir().full_path
+    with (
+        mock.patch.object(
+            t._checkpoint_manager,
+            "_create_orbax_checkpoint_manager",
+            return_value=temp_orbax_mgr,
+        ) as mock_create_temp,
+        self.assertLogs(level="INFO") as logs,
+    ):
+      restored_metadata = t.restore_checkpoint(step=6, directory=restore_dir)
+
+    self.assertEqual(t.train_step, 6)
+    self.assertEqual(restored_metadata, {"step": 6})
+    mock_create_temp.assert_called_once_with(restore_dir)
+    temp_orbax_mgr.restore.assert_called_once()
+    temp_orbax_mgr.close.assert_called_once()
+    self.assertTrue(
+        any(
+            f"Restoring step 6 from restore directory {restore_dir}; no checkpoint directory is configured, so"
+            " checkpoint saving is disabled." in line
+            for line in logs.output
+        ),
+        logs.output,
+    )
+
+  def test_restore_checkpoint_prefers_root_directory_after_preemption_restart(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    orig_orbax_mgr = self._mock_orbax_manager(t, latest_step=12)
+
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"additional_metadata": {"step": 12}}
+    orig_orbax_mgr.metadata.return_value = mock_metadata
+
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    orig_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+    }
+
+    base_restore_dir = self.create_tempdir().full_path
+    with mock.patch.object(
+        t._checkpoint_manager,
+        "_create_orbax_checkpoint_manager",
+    ) as mock_create_temp:
+      restored_metadata = t.restore_checkpoint(step=6, directory=base_restore_dir)
+
+    self.assertEqual(t.train_step, 12)
+    self.assertEqual(restored_metadata, {"step": 12})
+    mock_create_temp.assert_not_called()
+    orig_orbax_mgr.restore.assert_called_once()
+    self.assertEqual(orig_orbax_mgr.restore.call_args.kwargs["step"], 12)
+
+  def test_restore_checkpoint_rejects_non_latest_step_from_root_directory(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    orig_orbax_mgr = self._mock_orbax_manager(t, latest_step=12)
+
+    # Checkpoints saved after restoring step 6 would be mixed with step 12.
+    with self.assertRaisesRegex(ValueError, "whose latest step is 12"):
+      t.restore_checkpoint(step=6, directory=mock_config.checkpoint_dir)
+    orig_orbax_mgr.restore.assert_not_called()
+
+  def test_restore_checkpoint_from_root_directory_resumes_latest_step(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    orig_orbax_mgr = self._mock_orbax_manager(t, latest_step=12)
+
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"additional_metadata": {"step": 12}}
+    orig_orbax_mgr.metadata.return_value = mock_metadata
+
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    orig_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+    }
+
+    for step in (None, 12):
+      with self.subTest(step=step):
+        orig_orbax_mgr.restore.reset_mock()
+        with (
+            mock.patch.object(t._checkpoint_manager, "_create_orbax_checkpoint_manager") as mock_create_temp,
+            self.assertLogs(level="INFO") as logs,
+        ):
+          # A trailing slash still refers to the root checkpoint directory.
+          restored_metadata = t.restore_checkpoint(step=step, directory=os.path.join(mock_config.checkpoint_dir, ""))
+
+        self.assertEqual(t.train_step, 12)
+        self.assertEqual(restored_metadata, {"step": 12})
+        mock_create_temp.assert_not_called()
+        orig_orbax_mgr.restore.assert_called_once()
+        self.assertEqual(orig_orbax_mgr.restore.call_args.kwargs["step"], 12)
+        self.assertTrue(
+            any(
+                "is the same as the root checkpoint directory; resuming from its latest step (12)." in line
+                for line in logs.output
+            ),
+            logs.output,
+        )
 
   def test_restore_intra_step_checkpoint(self):
     mock_config = self.setup_config(enable_checkpointing=True)

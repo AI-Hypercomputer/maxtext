@@ -2100,6 +2100,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       The metadata PyTree of the restored checkpoint.
     """
     step = kwargs.get("step", None)
+    directory = kwargs.get("directory", None)
     checkpoint_state = checkpointing.CheckpointState(
         model=self.model,
         optimizer=self.optimizer,
@@ -2114,9 +2115,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         accumulated_grads=self._accumulated_grads,
     )
 
+    restore_kwargs: dict[str, Any] = {
+        "checkpoint_state": checkpoint_state,
+        "step": step,
+    }
+    if directory is not None:
+      restore_kwargs["directory"] = directory
     restored_step, restored_checkpoint_state, restored_metadata = self._checkpoint_manager.restore_checkpoint(
-        checkpoint_state=checkpoint_state,
-        step=step,
+        **restore_kwargs
     )
     if restored_step is None:
       return None
@@ -2218,6 +2224,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           denominator = denominator + jnp.sum(cached_loss.denominator).astype(jnp.float32)
         self._accumulated_denominator = denominator
 
+    if restored_additional_metadata is None:
+      return {"step": self.train_step}
     return restored_additional_metadata
 
   def record_metrics(
