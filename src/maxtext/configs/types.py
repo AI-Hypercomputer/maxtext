@@ -574,6 +574,15 @@ class Quantization(BaseModel):
           " `act_quantization_calibration_method`. Set to e.g. 'absmax' to force absmax calibration."
       ),
   )
+  logits_proj_bwd_quant_calibration_method: str = Field(
+      "",
+      description=(
+          "Backward (gradient) calibration method for the output logits (logits_dense) projection when"
+          " `quantize_logits_proj=True`. Applies to both the activation-gradient and weight-gradient arms. If empty"
+          " (default), inherits `bwd_quantization_calibration_method` and `drhs_grad_quantization_calibration_method`."
+          " Set to e.g. 'absmax' to force absmax calibration."
+      ),
+  )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
@@ -1074,6 +1083,29 @@ class MoEGeneral(BaseModel):
           " use_ring_of_experts=True."
       ),
   )
+  moe_accumulate_chunk_wgrad: bool = Field(
+      False,
+      description=(
+          "With num_moe_token_chunks>1, chain the expert weights through the token chunks: chunk 0 gathers and"
+          " quantizes them once and later chunks reuse the result. In the backward pass each chunk's weight-gradient"
+          " tgmm accumulates in place onto the later chunks' gradient (tgmm_v2 partial_sum) instead of"
+          " materializing and summing one gradient per chunk. Requires use_tokamax_gmm=True, use_gmm_v2=True,"
+          " num_moe_emb_chunks=0 and prefuse_moe_weights=False."
+      ),
+  )
+  moe_accumulate_wi_dlhs: bool = Field(
+      False,
+      description=(
+          "Route the routed-MoE wi_1 GMM input through the wi_0 GMM so that in the backward pass the wi_1 DLHS"
+          " is accumulated in place into the wi_0 DLHS (gmm_v2 partial_sum) instead of summed by a separate add."
+          " Also folds per-tensor DLHS scales into the gmm_v2 kernel for all MoE GMMs. Requires"
+          " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+      ),
+  )
+  moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
+      False,
+      description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
+  )
   moe_chunk_barrier: bool = Field(
       False,
       description=(
@@ -1191,6 +1223,26 @@ class MoEGeneral(BaseModel):
   ragged_sort_use_single_sparsecore: bool = Field(
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
+  )
+  moe_tc_ragged_sort: bool = Field(
+      False,
+      description=(
+          "Ring-of-experts ragged sort/unsort on TensorCore (DMA Pallas kernels ported from lineage)"
+          " instead of the SparseCore ragged_gather / ragged_gather_reduce kernels. Requires"
+          " use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0."
+      ),
+  )
+  moe_tc_ragged_gather_block_size: int = Field(1024, description="Rows per grid step of the TC ragged gather.")
+  moe_tc_ragged_reduce_block_size: int = Field(896, description="VMEM rows per block of the TC ragged gather-reduce.")
+  moe_tc_ragged_mask_padding: bool = Field(
+      True, description="Zero TC ragged-gather buffer rows past the valid count (the kernel leaves them uninitialized)."
+  )
+  moe_tc_ragged_flatten_block_size: int = Field(
+      0,
+      description=(
+          "If > 0, relayout (N, D/128, 128) <-> (N, D) around the TC ragged kernels with a Pallas kernel over"
+          " only the valid rows (lineage ragged_flatten), this many rows per grid step. 0 uses XLA reshapes."
+      ),
   )
   moe_use_direct_token_gather: bool = Field(
       False,
@@ -1477,6 +1529,18 @@ class DeepSeekMoE(BaseModel):
       False,
       description="Whether to use Lineage DeepSeek-V3 execution.",
   )
+  lineage_quantization: Literal["none", "fp8_full"] = Field(
+      "none",
+      description=("Quantization of the Lineage sparse-layer routed experts. Only used" " if use_lineage is True."),
+  )
+
+  @classmethod
+  def _lineage_quantization_none(cls, v: Any) -> Any:
+    """pyconfig converts the string "none" to None; map it back."""
+    return "none" if v is None else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues
+  _validate_lineage_quantization = field_validator("lineage_quantization", mode="before")(_lineage_quantization_none)
 
 
 class Qwen3Next(BaseModel):
@@ -3875,6 +3939,17 @@ class MaxTextConfig(
           " use_ring_of_experts=True and use_ragged_sort=True."
       )
 
+  def validate_moe_tc_ragged_sort(self):
+    """Validates that moe_tc_ragged_sort is used with the truncated-buffer ring-of-experts ragged sort."""
+    if not self.moe_tc_ragged_sort:
+      return
+    if not self.use_ring_of_experts:
+      raise ValueError("moe_tc_ragged_sort=True requires use_ring_of_experts=True.")
+    if not self.use_ragged_sort:
+      raise ValueError("moe_tc_ragged_sort=True requires use_ragged_sort=True.")
+    if self.ragged_buffer_factor <= 0:
+      raise ValueError("moe_tc_ragged_sort=True requires ragged_buffer_factor > 0.0.")
+
   def validate_moe_topk_before_ep_all_gather(self):
     """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
     if self.moe_topk_before_ep_all_gather and not (self.sparse_matmul and self.use_ring_of_experts):
@@ -5036,6 +5111,7 @@ class MaxTextConfig(
       self.validate_ragged_buffer_factor()
       self.validate_moe_dropless_fallback()
       self.validate_moe_log_max_load_ratio()
+      self.validate_moe_tc_ragged_sort()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_moe_topk_before_ep_all_gather()
@@ -5054,10 +5130,10 @@ class MaxTextConfig(
               f"(num_diloco_fragments - 1) ({num_transformer_fragments}) when enable_streaming_diloco is True."
           )
 
-    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with nn.scan.
+    # Gemma 4 small (E2B / E4B) uses per-layer KV sharing, which is incompatible with scanned layers.
     if self.model_name in ("gemma4-e2b", "gemma4-e4b") and self.scan_layers:
       raise ValueError(
-          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with nn.scan)."
+          f"{self.model_name} requires scan_layers=False (per-layer KV sharing is incompatible with scanned layers)."
       )
     if self.use_multimodal:
       # Gemma 4 small (E2B / E4B) only supports text for now; multimodal
@@ -5544,6 +5620,19 @@ class MaxTextConfig(
             f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
             f"max_target_length={self.max_target_length}."
         )
+
+    if self.moe_accumulate_chunk_wgrad and not (
+        self.use_tokamax_gmm and self.use_gmm_v2 and self.num_moe_emb_chunks == 0 and not self.prefuse_moe_weights
+    ):
+      raise ValueError(
+          "moe_accumulate_chunk_wgrad=True requires use_tokamax_gmm=True, use_gmm_v2=True, num_moe_emb_chunks=0"
+          " and prefuse_moe_weights=False."
+      )
+
+    if self.moe_accumulate_wi_dlhs and not (self.use_tokamax_gmm and self.use_gmm_v2 and not self.prefuse_moe_weights):
+      raise ValueError(
+          "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+      )
 
     if self.use_lineage:
       if not self.scan_layers:

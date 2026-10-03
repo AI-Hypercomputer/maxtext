@@ -67,6 +67,7 @@ Following a new MaxText release on PyPI, pre-built Docker images undergo securit
 
 | MaxText Version | Container Image                                                            |
 | :-------------- | :------------------------------------------------------------------------- |
+| `0.2.5`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.5` |
 | `0.2.4`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.4` |
 | `0.2.3`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:0.2.3` |
 
@@ -74,6 +75,7 @@ Following a new MaxText release on PyPI, pre-built Docker images undergo securit
 
 | MaxText Version | Container Image                                                             |
 | :-------------- | :-------------------------------------------------------------------------- |
+| `0.2.5`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:0.2.5` |
 | `0.2.4`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:0.2.4` |
 | `0.2.3`         | `us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_post_training:0.2.3` |
 

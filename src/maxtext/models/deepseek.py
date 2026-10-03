@@ -31,7 +31,6 @@ from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import mhc
 from maxtext.layers import moe
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.linears import Dropout
 from maxtext.layers.engram import Engram
@@ -401,12 +400,6 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
     return self.post_process(layer_output, None, None, kv_cache)
 
 
-DeepSeekDenseLayerToLinen = nnx_wrappers.to_linen_class(
-    DeepSeekDenseLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
-
-
 class DeepSeekMoELayer(DeepSeekGenericLayer):
   """DeepSeek-style MoE layer with Multi-Head Latent Attention.
 
@@ -622,9 +615,3 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         x, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
-
-
-DeepSeekMoELayerToLinen = nnx_wrappers.to_linen_class(
-    DeepSeekMoELayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

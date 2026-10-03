@@ -19,8 +19,7 @@ from jax.sharding import Mesh
 
 from flax import nnx
 from maxtext.common.common_types import Config, ShardMode
-from maxtext.layers import quantizations, nnx_wrappers
-from maxtext.layers.initializers import variable_to_logically_partitioned
+from maxtext.layers import quantizations
 from maxtext.utils.sharding import create_sharding
 
 
@@ -76,12 +75,6 @@ class SimpleDecoderLayer(nnx.Module):
     if self.config.scan_layers:
       return jnp.dot(inputs, self.weights.astype(inputs.dtype), out_sharding=self.out_sharding), None
     return jnp.dot(inputs, self.weights.astype(inputs.dtype), out_sharding=self.out_sharding)
-
-
-SimpleDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    SimpleDecoderLayer,
-    base_metadata_fn=variable_to_logically_partitioned,
-)
 
 
 class SimpleMlpDecoderLayer(nnx.Module):
@@ -142,9 +135,3 @@ class SimpleMlpDecoderLayer(nnx.Module):
     if self.config.scan_layers:
       return output, None
     return output
-
-
-SimpleMlpDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    SimpleMlpDecoderLayer,
-    base_metadata_fn=variable_to_logically_partitioned,
-)
