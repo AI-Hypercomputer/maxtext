@@ -1224,6 +1224,26 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
   )
+  moe_tc_ragged_sort: bool = Field(
+      False,
+      description=(
+          "Ring-of-experts ragged sort/unsort on TensorCore (DMA Pallas kernels ported from lineage)"
+          " instead of the SparseCore ragged_gather / ragged_gather_reduce kernels. Requires"
+          " use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0."
+      ),
+  )
+  moe_tc_ragged_gather_block_size: int = Field(1024, description="Rows per grid step of the TC ragged gather.")
+  moe_tc_ragged_reduce_block_size: int = Field(896, description="VMEM rows per block of the TC ragged gather-reduce.")
+  moe_tc_ragged_mask_padding: bool = Field(
+      True, description="Zero TC ragged-gather buffer rows past the valid count (the kernel leaves them uninitialized)."
+  )
+  moe_tc_ragged_flatten_block_size: int = Field(
+      0,
+      description=(
+          "If > 0, relayout (N, D/128, 128) <-> (N, D) around the TC ragged kernels with a Pallas kernel over"
+          " only the valid rows (lineage ragged_flatten), this many rows per grid step. 0 uses XLA reshapes."
+      ),
+  )
   moe_use_direct_token_gather: bool = Field(
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
@@ -3919,6 +3939,17 @@ class MaxTextConfig(
           " use_ring_of_experts=True and use_ragged_sort=True."
       )
 
+  def validate_moe_tc_ragged_sort(self):
+    """Validates that moe_tc_ragged_sort is used with the truncated-buffer ring-of-experts ragged sort."""
+    if not self.moe_tc_ragged_sort:
+      return
+    if not self.use_ring_of_experts:
+      raise ValueError("moe_tc_ragged_sort=True requires use_ring_of_experts=True.")
+    if not self.use_ragged_sort:
+      raise ValueError("moe_tc_ragged_sort=True requires use_ragged_sort=True.")
+    if self.ragged_buffer_factor <= 0:
+      raise ValueError("moe_tc_ragged_sort=True requires ragged_buffer_factor > 0.0.")
+
   def validate_moe_topk_before_ep_all_gather(self):
     """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
     if self.moe_topk_before_ep_all_gather and not (self.sparse_matmul and self.use_ring_of_experts):
@@ -5080,6 +5111,7 @@ class MaxTextConfig(
       self.validate_ragged_buffer_factor()
       self.validate_moe_dropless_fallback()
       self.validate_moe_log_max_load_ratio()
+      self.validate_moe_tc_ragged_sort()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_moe_topk_before_ep_all_gather()

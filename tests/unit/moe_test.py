@@ -14,6 +14,7 @@
 """Mixture of Experts (MoE) tests."""
 
 import functools
+import re
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -30,6 +31,7 @@ import qwix
 from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Config, DType
 from maxtext.configs import pyconfig
+from maxtext.configs import types as maxtext_types
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
@@ -1195,6 +1197,124 @@ class RoutedMoeTest(parameterized.TestCase):
           ),
       )
 
+  def _run_tc_ragged_sort_loss_and_grad(
+      self,
+      ragged_buffer_factor: float = 1.5,
+      ref_overrides: dict | None = None,
+      common_overrides: dict | None = None,
+      **tc_overrides,
+  ):
+    """Loss and gradient correctness for the moe_tc_ragged_sort flag and its options.
+
+    Compares a ring-of-experts EP run with the TensorCore ragged sort (moe_tc_ragged_sort=True plus
+    `tc_overrides`) against a reference run, sharing model variables and inputs. By default the reference is the
+    SparseCore ragged sort with the same ragged buffer; `ref_overrides` changes it (e.g. to the TC sort without
+    the option under test). `common_overrides` apply to both runs. All variants truncate each shard's slots to
+    the same buffer, so loss, hidden-state gradient and parameter gradients must match within bf16 tolerance.
+    """
+
+    def _build_cfg(moe_tc_ragged_sort: bool):
+      overrides = {"moe_tc_ragged_sort": moe_tc_ragged_sort, **(common_overrides or {})}
+      overrides.update(tc_overrides if moe_tc_ragged_sort else (ref_overrides or {}))
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=f"moe_block_tc_ragged_sort_{moe_tc_ragged_sort}_test",
+          enable_checkpointing=False,
+          model_name="mixtral-8x7b",
+          override_model_config=True,
+          base_emb_dim=7168,
+          base_mlp_dim=256,
+          base_moe_mlp_dim=256,
+          dtype="bfloat16",
+          megablox=True,
+          sparse_matmul=True,
+          per_device_batch_size=4,
+          ici_expert_parallelism=2,
+          use_ring_of_experts=True,
+          max_target_length=128,
+          float32_gate_logits=True,
+          use_ragged_sort=True,
+          ragged_buffer_factor=ragged_buffer_factor,
+          **overrides,
+      )
+
+    def _build_model(cfg, mesh):
+      return linen_wrappers.to_linen(
+          moe.RoutedMoE,
+          name="MoeBlock",
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.mlp_dim,
+          dtype=cfg.dtype,
+      )
+
+    def _loss_and_grad(model, variables, hidden_states):
+      def loss_fn(params, x):
+        out, lb_loss, _ = model.apply({"params": params}, x)
+        loss = jnp.mean(out.astype(jnp.float32) ** 2)
+        if lb_loss is not None:
+          loss = loss + lb_loss.astype(jnp.float32)
+        return loss
+
+      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1)))(variables["params"], hidden_states)
+
+    rng_model, rng_hidden_states = jax.random.split(jax.random.PRNGKey(2345))
+
+    # Reference run: SparseCore ragged sort.
+    cfg_ref = _build_cfg(moe_tc_ragged_sort=False)
+    hidden_states = jax.random.uniform(
+        rng_hidden_states,
+        (int(cfg_ref.per_device_batch_size) * jax.device_count(), cfg_ref.max_target_length, cfg_ref.base_emb_dim),
+        dtype=cfg_ref.dtype,
+    )
+    mesh_ref = Mesh(maxtext_utils.create_device_mesh(cfg_ref), cfg_ref.mesh_axes)
+    model_ref = _build_model(cfg_ref, mesh_ref)
+    with jax.set_mesh(mesh_ref), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
+      variables = model_ref.init({"params": rng_model, "dropout": rng_model}, hidden_states)
+      loss_ref, (grads_ref, x_grad_ref) = _loss_and_grad(model_ref, variables, hidden_states)
+
+    # Target run: TensorCore ragged sort, sharing variables with the reference.
+    cfg_tc = _build_cfg(moe_tc_ragged_sort=True)
+    mesh_tc = Mesh(maxtext_utils.create_device_mesh(cfg_tc), cfg_tc.mesh_axes)
+    model_tc = _build_model(cfg_tc, mesh_tc)
+    with jax.set_mesh(mesh_tc), nn_partitioning.axis_rules(cfg_tc.logical_axis_rules):
+      loss_tc, (grads_tc, x_grad_tc) = _loss_and_grad(model_tc, variables, hidden_states)
+
+    self.assertTrue(
+        jnp.allclose(loss_tc, loss_ref, rtol=1e-2, atol=1e-2),
+        msg=f"Loss mismatch: tc={loss_tc} sc={loss_ref}",
+    )
+
+    # The hidden-state cotangent flows through the TC sort's custom_vjp backward (the TC gather-reduce).
+    self.assertEqual(x_grad_ref.shape, x_grad_tc.shape, "Hidden-state grad shape mismatch")
+    x_ref32 = x_grad_ref.astype(jnp.float32)
+    x_tc32 = x_grad_tc.astype(jnp.float32)
+    x_atol = 8e-2 * jnp.max(jnp.abs(x_ref32))
+    self.assertTrue(
+        jnp.allclose(x_tc32, x_ref32, rtol=1e-2, atol=x_atol),
+        msg=f"Hidden-state gradient mismatch: max abs diff={jnp.max(jnp.abs(x_tc32 - x_ref32))}",
+    )
+
+    leaves_ref, treedef_ref = jax.tree_util.tree_flatten(grads_ref)
+    leaves_tc, treedef_tc = jax.tree_util.tree_flatten(grads_tc)
+    self.assertEqual(treedef_ref, treedef_tc, "Gradient pytree structures differ")
+    for i, (g_ref, g_tc) in enumerate(zip(leaves_ref, leaves_tc)):
+      self.assertEqual(g_ref.shape, g_tc.shape, f"Grad shape mismatch at leaf {i}")
+      g_ref32 = g_ref.astype(jnp.float32)
+      g_tc32 = g_tc.astype(jnp.float32)
+      atol = 8e-2 * jnp.max(jnp.abs(g_ref32))
+      self.assertTrue(
+          jnp.allclose(g_tc32, g_ref32, rtol=1e-2, atol=atol),
+          msg=(
+              f"Gradient mismatch at leaf {i} (shape={g_ref.shape}): "
+              f"max abs diff={jnp.max(jnp.abs(g_tc32 - g_ref32))}, {atol=}"
+          ),
+      )
+
   def _run_topk_before_ep_all_gather_loss_and_grad(self, **overrides):
     """moe_topk_before_ep_all_gather=True matches the gathered-logits top-k in loss and gradients."""
 
@@ -1299,7 +1419,7 @@ class RoutedMoeTest(parameterized.TestCase):
         ragged_gather_reduce_fallback=False,
     )
 
-  def _moe_routing_maps_cfg(self, moe_routing_maps: str):
+  def _moe_routing_maps_cfg(self, moe_routing_maps: str, **overrides):
     """Tiny ring-of-experts ragged-sort MoE config (EP2) for the moe_routing_maps test."""
     kwargs = {
         "enable_checkpointing": False,
@@ -1323,11 +1443,16 @@ class RoutedMoeTest(parameterized.TestCase):
         "ragged_gather_fallback": True,
         "ragged_gather_reduce_fallback": True,
         "moe_routing_maps": moe_routing_maps,
+        **overrides,
     }
     return pyconfig.initialize([None, get_test_config_path()], run_name=f"moe_routing_maps_{moe_routing_maps}", **kwargs)
 
   @pytest.mark.tpu_only
-  def test_moe_routing_maps_remat_loss_and_grad(self):
+  @parameterized.named_parameters(
+      ("sparsecore_ragged_sort", {}),
+      ("tc_ragged_sort", {"moe_tc_ragged_sort": True}),
+  )
+  def test_moe_routing_maps_remat_loss_and_grad(self, overrides):
     """moe_routing_maps=device under a remat that saves only "moe_routing_maps": bit-identical loss and gradients."""
 
     def _loss_and_grad(cfg, variables, hidden_states):
@@ -1361,14 +1486,16 @@ class RoutedMoeTest(parameterized.TestCase):
         (loss, lb_loss), grads = step(variables["params"], hidden_states)
       return variables, loss, lb_loss, grads
 
-    cfg_ref = self._moe_routing_maps_cfg("remat")
+    cfg_ref = self._moe_routing_maps_cfg("remat", **overrides)
     hidden_states = jax.random.uniform(
         jax.random.PRNGKey(2345),
         (int(cfg_ref.per_device_batch_size) * jax.device_count(), cfg_ref.max_target_length, cfg_ref.base_emb_dim),
         dtype=cfg_ref.dtype,
     )
     variables, loss_ref, lb_ref, grads_ref = _loss_and_grad(cfg_ref, None, hidden_states)
-    _, loss_new, lb_new, grads_new = _loss_and_grad(self._moe_routing_maps_cfg("device"), variables, hidden_states)
+    _, loss_new, lb_new, grads_new = _loss_and_grad(
+        self._moe_routing_maps_cfg("device", **overrides), variables, hidden_states
+    )
 
     # Only integer index maps are saved instead of recomputed, so every value is bit-identical.
     np.testing.assert_array_equal(loss_new, loss_ref)
@@ -1414,6 +1541,27 @@ class RoutedMoeTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   def test_ragged_sort_single_sparsecore_no_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False, ragged_sort_use_single_sparsecore=True)
+
+  @pytest.mark.tpu_only
+  def test_tc_ragged_sort_loss_and_grad(self):
+    self._run_tc_ragged_sort_loss_and_grad()
+
+  @pytest.mark.tpu_only
+  def test_tc_ragged_sort_loss_and_grad_truncated_buffer(self):
+    # A buffer smaller than the balanced load, so shards drop slots exactly as the SparseCore sort does.
+    self._run_tc_ragged_sort_loss_and_grad(ragged_buffer_factor=0.75)
+
+  @pytest.mark.tpu_only
+  def test_tc_ragged_sort_loss_and_grad_flatten(self):
+    self._run_tc_ragged_sort_loss_and_grad(moe_tc_ragged_flatten_block_size=256)
+
+  @pytest.mark.tpu_only
+  def test_tc_ragged_sort_loss_and_grad_no_mask_padding(self):
+    self._run_tc_ragged_sort_loss_and_grad(moe_tc_ragged_mask_padding=False)
+
+  @pytest.mark.tpu_only
+  def test_tc_ragged_sort_loss_and_grad_small_blocks(self):
+    self._run_tc_ragged_sort_loss_and_grad(moe_tc_ragged_gather_block_size=128, moe_tc_ragged_reduce_block_size=128)
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
@@ -2644,6 +2792,35 @@ class QuantizedMoeTest(parameterized.TestCase):
     tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states)
 
     compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.25)
+
+
+class TcRaggedSortConfigTest(parameterized.TestCase):
+  """moe_tc_ragged_sort is rejected unless it can run (truncated-buffer ring-of-experts ragged sort)."""
+
+  _CONFIG = {
+      "run_name": "tc_ragged_sort_config_test",
+      "num_experts": 8,
+      "base_mlp_dim": 64,
+      "base_moe_mlp_dim": 64,
+      "override_logical_axis_rules": True,
+      "ici_expert_parallelism": 2,
+      "use_ring_of_experts": True,
+      "use_ragged_sort": True,
+      "ragged_buffer_factor": 1.5,
+  }
+
+  def test_accepts_ring_of_experts_ragged_sort(self):
+    self.assertTrue(maxtext_types.MaxTextConfig(**self._CONFIG, moe_tc_ragged_sort=True).moe_tc_ragged_sort)
+
+  @parameterized.named_parameters(
+      ("no_ring_of_experts", {"use_ring_of_experts": False}, "requires use_ring_of_experts=True"),
+      # ragged_buffer_factor > 0 already requires use_ragged_sort elsewhere.
+      ("no_ragged_sort", {"use_ragged_sort": False, "ragged_buffer_factor": -1.0}, "requires use_ragged_sort=True"),
+      ("dropless_buffer", {"ragged_buffer_factor": -1.0}, "requires ragged_buffer_factor > 0.0"),
+  )
+  def test_rejects_unsupported(self, overrides, msg):
+    with self.assertRaisesRegex(ValueError, re.escape("moe_tc_ragged_sort=True " + msg)):
+      maxtext_types.MaxTextConfig(**{**self._CONFIG, **overrides}, moe_tc_ragged_sort=True)
 
 
 class GetRaggedBufferFactorTest(parameterized.TestCase):
