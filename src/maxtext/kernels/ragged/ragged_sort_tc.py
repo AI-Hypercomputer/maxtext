@@ -325,6 +325,7 @@ def ring_ragged_unsort_tc(
     gather_block_size=1024,
     mask_padding=True,
     flatten_block_size=0,
+    prescaled=False,
 ):
   """TC version of `ring_ragged_unsort`: weighted top-k combine of this shard's slots.
 
@@ -332,7 +333,9 @@ def ring_ragged_unsort_tc(
     sorted_tokens_local: [buffer_size, hidden] expert outputs.
     routing: TcRouting from `ring_ragged_sort_tc`.
     topk: routing top-k.
-    topk_weights: flat [N * topk] routing weights (differentiated).
+    topk_weights: flat [N * topk] routing weights (differentiated). Unused if prescaled.
+    prescaled: rows are already multiplied by their routing weight (e.g. on the expert
+      activation, see `tc_buffer_row_weights`), so only the unweighted combine is done.
 
   Returns:
     [N, hidden] partial combine for this shard's experts.
@@ -340,6 +343,9 @@ def ring_ragged_unsort_tc(
   cap = sorted_tokens_local.shape[0]
   n = routing.slot_order.shape[0]
   num_out_tokens = n // topk
-  w_rows = tc_buffer_row_weights(routing, topk_weights, cap)
-  scaled = (sorted_tokens_local.astype(jnp.float32) * w_rows[:, None]).astype(sorted_tokens_local.dtype)
+  if prescaled:
+    scaled = sorted_tokens_local
+  else:
+    w_rows = tc_buffer_row_weights(routing, topk_weights, cap)
+    scaled = (sorted_tokens_local.astype(jnp.float32) * w_rows[:, None]).astype(sorted_tokens_local.dtype)
   return tc_unsort_reduce(scaled, routing, num_out_tokens, topk, (gather_block_size, flatten_block_size), mask_padding)

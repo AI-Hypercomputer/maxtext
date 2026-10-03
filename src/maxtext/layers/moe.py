@@ -43,6 +43,7 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
+from maxtext.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from maxtext.utils import max_logging
@@ -1740,6 +1741,7 @@ class RoutedMoE(nnx.Module):
       group_sizes=None,
       topk_argsort_indices=None,
       tc_routing=None,
+      tc_prescaled=False,
   ):
     """Unpermute tokens to original order and combine weights."""
 
@@ -1752,6 +1754,7 @@ class RoutedMoE(nnx.Module):
           gather_block_size=self.config.moe_tc_ragged_gather_block_size,
           mask_padding=self.config.moe_tc_ragged_mask_padding,
           flatten_block_size=self.config.moe_tc_ragged_flatten_block_size,
+          prescaled=tc_prescaled,
       )
     elif self.config.use_ragged_sort and self.config.use_ring_of_experts:
       local_num_experts = self.config.num_experts // self.get_expert_parallelism_size()
@@ -3316,7 +3319,18 @@ class RoutedMoE(nnx.Module):
         else:
           output0, output1 = up_res  # pylint: disable=unbalanced-tuple-unpacking
 
+      tc_prescaled = (
+          self.config.use_ring_of_experts
+          and getattr(routing, "tc_routing", None) is not None
+          and self.config.moe_tc_ragged_weights_on_activation
+      )
+      if tc_prescaled:
+        # Routing weights applied on the (buffer, mlp) activation (fuses into silu * mul), as in
+        # lineage ragged_silu_mul, instead of on the (buffer, emb) expert output before the unsort.
+        w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
       intermediate_layer = self.apply_ffn_activation(output0, output1)
+      if tc_prescaled:
+        intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       if not gather_weights:
         wo_gather_axes = []
@@ -3338,6 +3352,9 @@ class RoutedMoE(nnx.Module):
         )
       if self.config.mlp_bias:
         mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(intermediate_output, routing, route_metadata)
+        if tc_prescaled:
+          # The unsort skips the routing weights, so weight the bias too: w * (h @ wo + b) = (w * h) @ wo + w * b.
+          wo_bias = (wo_bias * w_rows[:, None]).astype(wo_bias.dtype)
         intermediate_output = intermediate_output + wo_bias
         intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
       intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
@@ -3354,6 +3371,7 @@ class RoutedMoE(nnx.Module):
             group_sizes=routing.group_sizes,
             topk_argsort_indices=routing.topk_argsort_indices,
             tc_routing=routing.tc_routing,
+            tc_prescaled=tc_prescaled,
         )
 
         # Sum up the partial outputs across the expert shards.
