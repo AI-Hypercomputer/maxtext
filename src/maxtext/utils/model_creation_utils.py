@@ -219,6 +219,19 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
   return jax.device_put(result, model_arr.sharding)
 
 
+def _intersect_with_metadata(target, meta_tree):
+  """Returns the sub-tree of `target` whose paths exist in checkpoint `meta_tree`."""
+  if not hasattr(target, "items"):
+    return target
+  out = {}
+  for k, v in target.items():
+    if hasattr(meta_tree, "items") and k in meta_tree:
+      sub_tree = _intersect_with_metadata(v, meta_tree[k])
+      if not hasattr(sub_tree, "items") or sub_tree:
+        out[k] = sub_tree
+  return out
+
+
 def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
   """Fuse separate wi_0/wi_1 checkpoint entries into a single wi when model uses fused layout.
 
@@ -1030,15 +1043,23 @@ def from_pretrained(
             target_for_restore, metadata.item_metadata.tree["params"]["params"], False
         )
 
+        # Linen checkpoints keep non-trainable variables (e.g. `Tid2EidVar`) in
+        # collections beside "params"; restore the model leaves they hold too.
+        ckpt_collections = metadata.item_metadata.tree["params"]
         item_to_restore = {"params": {"params": target_for_restore}}
-        base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+        for col, col_meta in ckpt_collections.items():
+          if col != "params":
+            col_target = _intersect_with_metadata(target_for_restore, col_meta)
+            if col_target:
+              item_to_restore["params"][col] = col_target
         restore_args = {
             "params": {
-                "params": _fix_restore_args_for_shape_mismatch(
-                    base_restore_args,
-                    metadata.item_metadata.tree["params"]["params"],
+                col: _fix_restore_args_for_shape_mismatch(
+                    ocp.checkpoint_utils.construct_restore_args(col_target),
+                    ckpt_collections[col],
                     mesh,
                 )
+                for col, col_target in item_to_restore["params"].items()
             }
         }
       else:
@@ -1136,6 +1157,9 @@ def from_pretrained(
         )
       else:
         checkpoint = restored["params"]["params"]
+        for col, col_tree in restored["params"].items():
+          if col != "params":
+            checkpoint = checkpointing._deep_merge_dicts(checkpoint, col_tree)  # pylint: disable=protected-access
 
       if checkpoint:
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
@@ -1204,6 +1228,16 @@ def from_pretrained(
 
         checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
         nnx.update(model, checkpoint)
+        unrestored = [
+            jax.tree_util.keystr(path)
+            for path, leaf in jax.tree_util.tree_flatten_with_path(nnx.state(model))[0]
+            if isinstance(leaf, jax.Array) and leaf.is_deleted()
+        ]
+        if unrestored:
+          raise ValueError(
+              f"Checkpoint '{config.load_parameters_path}' has no value for {len(unrestored)} model "
+              f"variables: {unrestored[:5]}"
+          )
       else:
         raise ValueError(
             f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "

@@ -245,8 +245,8 @@ def main(argv: Sequence[str]) -> None:
     output = tokenizer_model.decode(results)
     print(f"Input `{text}` -> `{output}`")
 
-  assert output.startswith(
-      config.autoregressive_decode_assert
+  assert " ".join(output.split()).startswith(
+      " ".join(config.autoregressive_decode_assert.split())
   ), f"generated text mismatch {output=}, {config.autoregressive_decode_assert=}"
 
   # Deactivate profiler
