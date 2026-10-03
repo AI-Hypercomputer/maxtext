@@ -41,7 +41,6 @@ from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
 from flax.core.spmd import logical_axis_rules
-import flax.linen as nn
 from huggingface_hub import get_token
 import jax
 import jax.numpy as jnp
@@ -51,6 +50,7 @@ from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TR
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.integration.vllm.convert_utils import _partition_size
+from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
@@ -478,7 +478,7 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: None = None,
     quant_mode_str: str = "train",
-) -> nn.Module:
+) -> nnx_wrappers.ToLinen:
   ...
 
 
@@ -503,7 +503,7 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
     quant_mode_str: str = "train",
-) -> nn.Module | models.Transformer:
+) -> nnx_wrappers.ToLinen | models.Transformer:
   """Load a pretrained MaxText model from checkpoint.
 
   With `rngs` this returns the NNX `Transformer`. Without it, it returns the
@@ -1151,7 +1151,7 @@ def from_pretrained(
         )
         # ``specs`` (nnx.get_partition_spec(abstract_state) at the top of from_pretrained)
         # is the source of truth for logical axis names — it's the input to
-        # nn.logical_to_mesh_sharding.  Each leaf is a PartitionSpec whose entries are
+        # the logical-to-mesh sharding conversion.  Each leaf is a PartitionSpec whose entries are
         # logical axis names (or None / nested tuples).  Reuse it for repeat/zero-pad
         # dispatch in _align_checkpoint_to_model_shapes.
         # nnx.get_partition_spec returns Variables wrapping PartitionSpecs at the leaves;

@@ -112,7 +112,6 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       maybe_shard_with_name,
       shard_mode=config.shard_mode,
       debug_sharding=config.debug_sharding,
-      extra_stack_level=1,
   )
 
   def _reshape(inputs, out_shape, out_sharding):
