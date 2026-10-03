@@ -729,6 +729,15 @@ assert train._TF_AVAILABLE is False
               **{flag_name: bad_value},
           )
 
+  def test_mhc_split_axis_contraction_requires_tp(self):
+    """mhc_split_axis_contraction=True must raise when tensor parallelism is 1."""
+    with self.assertRaises(ValueError):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          mhc_split_axis_contraction=True,
+      )
+
   def test_cp_as_ep_infer_axes(self):
     """cp-as-ep: exp -> ['context', 'expert'], so ici_context_parallelism contributes to EP rank."""
     cp_as_ep_rules = [
