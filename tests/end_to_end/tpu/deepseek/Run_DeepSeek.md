@@ -275,6 +275,8 @@ DeepSeek-V4 employs a hybrid attention architecture across its layers, interleav
 
 As described in the DeepSeek-V4 technical report (Section 4.2.2), sparse attention pre-training follows a three-stage strategy: **Dense Pre-training**, **Lightning Indexer Warm-up**, and **Sparse Pre-training**.
 
+`deepseek4-284b.yml` sets `use_indexer: true` and `indexer_sparse_training: true`, so a plain `model_name=deepseek4-284b` run is sparse pre-training on the LM loss. Enabling the indexer loss (`indexer_loss_scaling_factor > 0`) requires `indexer_topk` (512) < `max_target_length // 4`, i.e. `max_target_length >= 4096`. `use_indexer=true` with `indexer_sparse_training=false` and `indexer_loss_scaling_factor=0.0` is rejected at startup because it zeroes the whole training objective. Keys that differ from `deepseek4-284b.yml` (e.g. `use_indexer`, `indexer_sparse_training`) need `override_model_config=true`.
+
 1. **Dense Pre-training Stage**
 The model is pre-trained with standard dense attention across all tokens (first 1T tokens) before attention sparsity is introduced.
 ```sh
@@ -295,7 +297,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     dataset_type=synthetic \
-    # Standard dense pre-training flags
     override_model_config=true \
     use_indexer=false \
     indexer_loss_scaling_factor=0.0
@@ -322,7 +323,7 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     dataset_type=synthetic \
-    # Indexer training specific flags (inherits use_indexer=true from deepseek4-284b.yml)
+    override_model_config=true \
     indexer_sparse_training=false \
     indexer_loss_scaling_factor=1.0 \
     trainable_parameters_mask=['.*indexer.*']
@@ -349,8 +350,6 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
     dtype=bfloat16 \
     weight_dtype=bfloat16 \
     dataset_type=synthetic \
-    # Indexer training specific flags (inherits use_indexer=true from deepseek4-284b.yml)
-    indexer_sparse_training=true \
     indexer_loss_scaling_factor=1.0
 ```
 
@@ -469,8 +468,16 @@ python3 -m tests.utils.forward_pass_logit_checker \
     override_model_config=True \
     indexer_topk=4 \
     --golden_logits_path=golden_data_deepseek4-284b_proper_512.jsonl \
-    --max_kl_div=0.75
+    --max_kl_div=0.42
 ```
+
+### End-to-end test for V4-284b
+
+[`v4-284b/2_test_deepseek.sh`](v4-284b/2_test_deepseek.sh) runs three stages against a converted checkpoint. Each can be skipped with `RUN_LOGIT`, `RUN_PRETRAIN` or `RUN_DECODE=false`.
+
+1. **Logit check**: `forward_pass_logit_checker` on the unscanned checkpoint with `indexer_topk=4`, compared against `gs://maxtext-test-assets/golden_data_deepseek4-284b.jsonl`. Fails if the max per-token KL divergence exceeds `MAX_KL_DIV` (default `0.42`).
+2. **Pre-train**: 20 steps of sparse pre-training (`indexer_sparse_training=true`, `indexer_loss_scaling_factor=1.0`, `max_target_length=4096`) from the scanned checkpoint. Fails unless the final `loss` and `lm_loss` are finite and strictly positive.
+3. **Decode**: `maxtext.inference.decode` on the unscanned checkpoint. Fails unless the output starts with `DECODE_ASSERT`.
 
 ## MLA Optimization
 
