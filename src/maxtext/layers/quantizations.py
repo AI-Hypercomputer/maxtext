@@ -67,7 +67,7 @@ except (NameError, AttributeError):
 from maxtext.layers import nnx_wrappers
 
 from maxtext.configs.types import TeCommGemmOverlapPolicy
-from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype
+from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype, get_quant
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils import max_logging
 
@@ -212,15 +212,11 @@ def native_fp8_dot_general(
     kernel_scale = jnp.expand_dims(kernel_scale.reshape(out_axes_shape), axis=rhs_axis)
 
   rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
-  if scheme == "per_tensor":
-    channelwise_axes = []
-    tiled_axes = {}
-  elif scheme == "per_channel":
-    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+  channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
+  if scheme in ("per_tensor", "per_channel"):
     tiled_axes = {}
   else:
     rhs_block_size = scale_block_size[rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
-    channelwise_axes = [d for d in range(inputs.ndim) if d != lhs_axis]
     tiled_axes = {lhs_axis: rhs_block_size}
   if is_static_calibration(act_calibration_method):
     channelwise_axes = []
