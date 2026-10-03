@@ -698,12 +698,13 @@ class YarnRotaryEmbedding(nnx.Module):
     # Compute the complex “cis” values: exp(i * theta).
     return jnp.exp(1j * freqs)  # shape [max_position_embeddings, half_dim]
 
-  def _find_correction_dim(self, num_rotations: float, dim: int, base: float, max_position_embeddings: int) -> float:
+  @staticmethod
+  def _find_correction_dim(num_rotations: float, dim: int, base: float, max_position_embeddings: int) -> float:
     """Compute the correction dimension for a given number of rotations."""
     return dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi)) / (2 * math.log(base))
 
+  @staticmethod
   def _find_correction_range(
-      self,
       low_rot: float,
       high_rot: float,
       dim: int,
@@ -724,8 +725,8 @@ class YarnRotaryEmbedding(nnx.Module):
     Returns:
         tuple[int, int]: The range of correction dimensions (low, high), clamped to valid indices.
     """
-    low = self._find_correction_dim(low_rot, dim, base, max_position_embeddings)
-    high = self._find_correction_dim(high_rot, dim, base, max_position_embeddings)
+    low = YarnRotaryEmbedding._find_correction_dim(low_rot, dim, base, max_position_embeddings)
+    high = YarnRotaryEmbedding._find_correction_dim(high_rot, dim, base, max_position_embeddings)
     if truncate:
       low = math.floor(low)
       high = math.ceil(high)
@@ -733,7 +734,8 @@ class YarnRotaryEmbedding(nnx.Module):
     high = min(high, dim - 1)
     return low, high
 
-  def _linear_ramp_factor(self, min_val: float, max_val: float, dim: int) -> Array:
+  @staticmethod
+  def _linear_ramp_factor(min_val: float, max_val: float, dim: int) -> Array:
     """Computes a linear ramp over the dimension.
 
     Returns a jax.Array of shape (dim,) with values between 0 and 1.
@@ -1672,6 +1674,12 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
       min_timescale: int = 10000,
       max_timescale: int = 10000,
       mesh: Any = None,
+      rope_type: str = "default",
+      rope_factor: float = 16.0,
+      beta_fast: float = 32.0,
+      beta_slow: float = 1.0,
+      original_max_position_embeddings: int = 65536,
+      truncate: bool = True,
       **kwargs,
   ):
     super().__init__(
@@ -1685,16 +1693,37 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
     self.partial_rotary_factor = partial_rotary_factor
     self.rope_theta = rope_theta
     self.fprop_dtype = fprop_dtype
+    self.rope_type = rope_type
+    self.rope_factor = rope_factor
+    self.beta_fast = beta_fast
+    self.beta_slow = beta_slow
+    self.original_max_position_embeddings = original_max_position_embeddings
+    self.truncate = truncate
 
     # Compute the partial rotary dimension (rope_head_dim)
     self.dim = int(head_dim * partial_rotary_factor)
 
   @property
   def inv_freq(self):
+    """Computes inverse frequencies with optional YaRN scaling."""
     # Compute base inverse frequencies for half of self.dim
     half_dim = self.dim // 2
     fraction = 2 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.dim
-    return 1.0 / (self.rope_theta**fraction)
+    freqs = 1.0 / (self.rope_theta**fraction)
+    if self.rope_type != "yarn":
+      return freqs
+
+    # pylint: disable=protected-access
+    low, high = YarnRotaryEmbedding._find_correction_range(
+        self.beta_fast,
+        self.beta_slow,
+        self.dim,
+        self.rope_theta,
+        self.original_max_position_embeddings,
+        self.truncate,
+    )
+    smooth = 1 - YarnRotaryEmbedding._linear_ramp_factor(low, high, half_dim)
+    return freqs / self.rope_factor * (1 - smooth) + freqs * smooth
 
   def get_freqs(self, position_ids: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
     # position_ids: [B, S]
