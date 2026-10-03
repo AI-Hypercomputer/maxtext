@@ -33,8 +33,11 @@ from maxtext.layers.embeddings import Embed
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.models import weaver
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_logging
+
+WeaverOmniTransformer = weaver.WeaverOmniTransformer
 
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions
