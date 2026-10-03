@@ -32,7 +32,6 @@ from maxtext.utils import maxtext_utils
 from maxtext.configs import pyconfig
 import numpy as np
 from tests.utils.test_helpers import get_test_config_path
-from tests.utils import linen_wrappers
 
 Attention = attentions.Attention
 
@@ -649,8 +648,7 @@ class Llama4VisionAttentionTest(unittest.TestCase):
     attn_output_pt, _ = model_pt(hidden_states_pt, freqs_ci=freqs_ci)
 
     lnx = to_jax(hidden_states_pt)
-    attention_layer = linen_wrappers.to_linen(
-        attentions.Attention,
+    attention_layer = attentions.attention_as_linen(
         config=self.cfg,
         num_query_heads=self.cfg.num_attention_heads_for_vit,
         num_kv_heads=self.cfg.num_attention_heads_for_vit,

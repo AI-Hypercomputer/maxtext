@@ -656,10 +656,10 @@ class MoEQuantizedEinsumTest(unittest.TestCase):
   def test_create_fp8_einsum(self):
     for quant_str in ("fp8", "nanoo_fp8"):
       quant = _configure_quantization(quant_str=quant_str)
-      einsum = quantizations.create_fp8_einsum(quant, jnp.float32, nnx.Rngs(0))
+      wrapper = quantizations.create_fp8_einsum(quant, jnp.float32, nnx.Rngs(0))
       lhs = jnp.ones((4, 8))
       rhs = jnp.ones((8, 16))
-      result = einsum("ab,bc->ac", lhs, rhs)
+      result = wrapper("ab,bc->ac", lhs, rhs, mutable=["_overwrite_with_gradient"])
       self.assertEqual(result.shape, (4, 16))
 
   def test_apply_einsum_in_nnx_plain_callable(self):

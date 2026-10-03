@@ -34,7 +34,6 @@ from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.utils import maxtext_utils
 from tests.utils import test_helpers
-from tests.utils import linen_wrappers
 
 pytestmark = [pytest.mark.tpu_only]
 
@@ -62,8 +61,7 @@ def build_cfg(n_chunks):
 
 
 def build_model(cfg, mesh):
-  return linen_wrappers.to_linen(
-      moe.RoutedMoE,
+  return moe.get_routed_moe(
       name="MoeBlock",
       config=cfg,
       num_experts=cfg.num_experts,

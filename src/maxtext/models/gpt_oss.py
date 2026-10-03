@@ -31,6 +31,7 @@ from maxtext.layers import attentions
 from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import moe
+from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.normalizations import RMSNorm
@@ -223,6 +224,12 @@ class GptOssDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
+GptOssDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    GptOssDecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
+
+
 class GptOssScannableBlock(nnx.Module):
   """A repeatable block of GPT OSS decoder layers.
 
@@ -294,3 +301,9 @@ class GptOssScannableBlock(nnx.Module):
           attention_metadata=attention_metadata,
       )
     return y, kv_cache
+
+
+GptOssScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    GptOssScannableBlock,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)

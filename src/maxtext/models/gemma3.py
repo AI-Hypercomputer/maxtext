@@ -25,6 +25,8 @@ from flax import nnx
 
 from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
 from maxtext.layers import quantizations
+from maxtext.layers import nnx_wrappers
+from maxtext.layers import initializers
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral, MlpBlock, Dropout
 from maxtext.layers.normalizations import RMSNorm
@@ -284,6 +286,12 @@ class Gemma3DecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
+Gemma3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Gemma3DecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
+
+
 class Gemma3ScannableBlock(nnx.Module):
   """A repeatable block of Gemma3 decoder layers."""
 
@@ -378,6 +386,12 @@ class Gemma3ScannableBlock(nnx.Module):
       return y, None
     else:
       return y
+
+
+Gemma3ScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    Gemma3ScannableBlock,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+)
 
 
 def _posemb_sincos_2d(

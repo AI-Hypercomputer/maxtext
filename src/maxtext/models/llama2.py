@@ -24,6 +24,8 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Config
 from maxtext.common.common_types import MODEL_MODE_PREFILL
+from maxtext.layers import initializers
+from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout, MlpBlock
@@ -31,6 +33,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import create_sharding, maybe_shard_with_logical
+from maxtext.layers.learn_to_init_layer import apply_lti_modification
 
 # -----------------------------------------
 # The Decoder Layer specific for Llama2
@@ -221,3 +224,10 @@ class LlamaDecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output, kv_cache
+
+
+LlamaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    LlamaDecoderLayer,
+    base_metadata_fn=initializers.variable_to_logically_partitioned,
+    nnx_module_augment_fn=apply_lti_modification,
+)

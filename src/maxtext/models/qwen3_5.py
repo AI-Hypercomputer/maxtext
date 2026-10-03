@@ -23,6 +23,8 @@ from flax import nnx
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config, ShardMode, get_weight_dtype
+from maxtext.layers import initializers as max_initializers
+from maxtext.layers import nnx_wrappers
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models.qwen3 import (
@@ -301,3 +303,15 @@ class Qwen3_5DecoderLayer(nnx.Module):
         self.activation_axis_names,
     )
     return layer_output, new_kv_cache
+
+
+Qwen3_5DecoderLayerToLinen = nnx_wrappers.to_linen_class(
+    Qwen3_5DecoderLayer,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
+
+
+Qwen3_5ScannableBlockToLinen = nnx_wrappers.to_linen_class(
+    Qwen3_5ScannableBlock,
+    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
+)
