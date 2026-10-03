@@ -390,6 +390,17 @@ class Checkpointing(BaseModel):
           " its state intact; the next save proceeds normally and the failed step is simply not restorable."
       ),
   )
+  skip_checkpoint_save_if_in_progress: bool = Field(
+      False,
+      description=(
+          "Training engine only. If False (default), a checkpoint save requested while the previous async save"
+          " is still being written waits for it and then saves. If True, such a request is skipped instead"
+          " (logged at WARNING; the skipped step is not restorable), so at most one save is ever in flight and"
+          " training is never blocked by a slow save. A forced save (the final one on close, or the one after"
+          " resuming mid-step) still waits. Needs a single JAX process (e.g. Pathways); refused at startup"
+          " otherwise."
+      ),
+  )
   checkpoint_period: int = Field(10_000, description="The frequency (in steps) at which to save checkpoints.")
   max_num_checkpoints_to_keep: int | None = Field(None, description="Maximum number of checkpoints to keep.")
   enable_single_replica_ckpt_restoring: bool = Field(
