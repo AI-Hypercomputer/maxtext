@@ -606,6 +606,8 @@ class GateLogit(nnx.Module):
       quant: The quantization configuration. If None, no quantization is applied.
       matmul_precision: The precision level for the matrix multiplication.
     """
+    if isinstance(quant, quantizations.ServeFp8WeightQuantization) and not ctypes.is_fp8_dtype(weight_dtype):
+      quant = None
     self.in_features_shape = linears.canonicalize_tuple(in_features_shape)
     self.out_features_shape = linears.canonicalize_tuple(out_features_shape)
     self.model_name = model_name
@@ -884,6 +886,9 @@ class RoutedMoE(nnx.Module):
     """
     if weight_quant is not None:
       weight_dtype = weight_quant.weight_dtype
+    elif ctypes.is_module_unquantized(config, "routed_experts"):
+      weight_dtype = ctypes.get_weight_dtype(config, "routed_experts")
+      quant = ctypes.get_quant(config, "routed_experts", quant)
 
     self.config = config
     self.force_dropless = force_dropless
@@ -970,7 +975,7 @@ class RoutedMoE(nnx.Module):
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
         weight_dtype=ctypes.get_weight_dtype(self.config, "gate"),
-        quant=self.quant,
+        quant=ctypes.get_quant(self.config, "gate", self.quant),
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
         use_bias=self.config.routed_bias and not self.is_hash_routing,

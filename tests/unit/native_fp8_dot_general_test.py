@@ -233,8 +233,9 @@ class InferScaleGranularityTest(unittest.TestCase):
 
 
 class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
-  """Validates native_fp8_dot_general's auto-detected per-tensor path -- both operands
-  quantized with a single global scale, no per-token/per-block granularity at all.
+  """Validates native_fp8_dot_general's auto-detected per-tensor weight path -- weight
+  quantized with a single global scale, and per-token activation quantization along
+  the contracting axis.
   """
 
   def _run_family(self, key_w, key_s, batch=8, seed=0):
@@ -264,7 +265,7 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
     lhs = qwix.quantize(
         act_jax.astype(jnp.float32),
         jnp.float8_e4m3fn,
-        channelwise_axes=[],
+        channelwise_axes=[0],
         tiled_axes={},
         calibration_method="absmax",
     )
@@ -283,6 +284,100 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
 
   def test_moe_expert_gate_proj(self):
     self._run_family("moe_w", "moe_s")
+
+  def test_unquantized_module_clears_serve_fp8_quant(self):
+    """Verifies get_quant returns None for modules in unquantized_modules (including
+    single-string config), and DenseGeneral, MlpBlock, and RoutedMoE clear
+    ServeFp8WeightQuantization when unquantized."""
+    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+    from maxtext.common.common_types import ShardMode, get_quant, get_weight_dtype, is_module_unquantized  # pylint: disable=import-outside-toplevel
+
+    cfg_str = SimpleNamespace(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        unquantized_modules="in_proj_ba",
+    )
+    self.assertTrue(is_module_unquantized(cfg_str, "in_proj_ba"))
+    self.assertFalse(is_module_unquantized(cfg_str, "in_proj"))
+
+    cfg = SimpleNamespace(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        unquantized_modules=["in_proj_ba", "gate", "mlp", "routed_experts"],
+        float32_gate_logits=False,
+        fused_mlp=False,
+        shard_mode=ShardMode.AUTO,
+        matmul_precision="default",
+        dense_fsdp_use_two_stage_all_gather=False,
+        debug_sharding=False,
+        weight_block_size=128,
+        emb_dim=16,
+        moe_expert_input_dim=16,
+        shard_exp_on_fsdp=False,
+        use_2d_fsdp_sharding=False,
+        use_batch_split_schedule=False,
+        attention="autoselected",
+        enable_dp_attention=False,
+        custom_mesh_and_rule="default",
+        model_name="test",
+        routed_bias=False,
+        routed_score_func="softmax",
+        mlp_activations=["silu", "linear"],
+        padded_base_moe_mlp_dim=None,
+        prefuse_moe_weights=False,
+        mlp_bias=False,
+        decoder_block="qwen3_5",
+    )
+    serve_quant = quantizations.ServeFp8WeightQuantization()
+    self.assertIsNone(get_quant(cfg, "in_proj_ba", serve_quant))
+    self.assertIs(get_quant(cfg, "in_proj_qkvz", serve_quant), serve_quant)
+
+    layer = linears.DenseGeneral(
+        in_features_shape=16,
+        out_features_shape=8,
+        weight_dtype=get_weight_dtype(cfg, "in_proj_ba"),
+        dtype=jnp.bfloat16,
+        quant=serve_quant,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertIsNone(layer.quant)
+    self.assertIsNone(layer.kernel_scale)
+
+    mlp = linears.MlpBlock(
+        config=cfg,
+        mesh=None,
+        in_features=16,
+        intermediate_dim=32,
+        activations=("silu", "linear"),
+        dtype=jnp.bfloat16,
+        weight_dtype=cfg.weight_dtype,
+        quant=serve_quant,
+        rngs=nnx.Rngs(params=0, dropout=1),
+    )
+    self.assertEqual(mlp.weight_dtype, "bfloat16")
+    self.assertIsNone(mlp.quant)
+    self.assertIsNone(mlp.wi_0.quant)
+    self.assertIsNone(mlp.wi_0.kernel_scale)
+    self.assertIsNone(mlp.wo.quant)
+    self.assertIsNone(mlp.wo.kernel_scale)
+
+    routed_moe = moe.RoutedMoE(
+        config=cfg,
+        num_experts=4,
+        num_experts_per_tok=2,
+        mesh=None,
+        kernel_init=nnx.initializers.lecun_normal(),
+        kernel_axes=("embed", None),
+        intermediate_dim=32,
+        weight_dtype=cfg.weight_dtype,
+        dtype=jnp.bfloat16,
+        quant=serve_quant,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertEqual(routed_moe.weight_dtype, "bfloat16")
+    self.assertIsNone(routed_moe.quant)
+    self.assertIsNone(routed_moe.wi_0_scale)
+    self.assertIsNone(routed_moe.wo_scale)
 
   def test_accepts_genuine_scalar_scale(self):
     """DenseGeneral's own true per-tensor convention (weight_block_size=None,
