@@ -1102,6 +1102,19 @@ class MoEGeneral(BaseModel):
           " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
       ),
   )
+  moe_flat_fsdp_weights: bool = Field(
+      False,
+      description=(
+          "Store every routed-expert weight as a 2D [num_experts * rows, cols] matrix whose first dim is"
+          " sharded over (expert, fsdp) instead of the 3D [E, rows, cols] layout sharded (expert | fsdp | -)."
+          " The per-device FSDP shard is then a contiguous, tile-aligned row block at every FSDP size, the fp8"
+          " weight all-gather / weight-grad reduce-scatter run on the major dim, and the gathered weight is a free"
+          " bitcast of the [E, rows, cols] operand the gmm kernels expect (no relayout copies, no 7/8 sublane"
+          " padding). Requires shard_embed_moe_on_fsdp with fixed weight calibration (explicit QAG) and the"
+          " tokamax gmm_v2 custom-VJP path. 3D checkpoints loaded via load_parameters_path are converted to the flat"
+          " layout on load; full-state resumes must come from a flat checkpoint."
+      ),
+  )
   moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
@@ -1237,11 +1250,38 @@ class MoEGeneral(BaseModel):
   moe_tc_ragged_mask_padding: bool = Field(
       True, description="Zero TC ragged-gather buffer rows past the valid count (the kernel leaves them uninitialized)."
   )
+  moe_tc_ragged_weights_on_activation: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort: multiply routing weights into the expert activation (buffer, mlp)"
+          " before the wo matmul instead of into the (buffer, emb) expert output before the unsort."
+      ),
+  )
   moe_tc_ragged_flatten_block_size: int = Field(
       0,
       description=(
           "If > 0, relayout (N, D/128, 128) <-> (N, D) around the TC ragged kernels with a Pallas kernel over"
           " only the valid rows (lineage ragged_flatten), this many rows per grid step. 0 uses XLA reshapes."
+      ),
+  )
+  moe_tc_ragged_3d_gmm: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort (tokamax gmm_v2): keep the sorted token buffer in the TC kernels' 3D layout"
+          " (buffer, emb // 128, 128). The wi gmm_v2 / tgmm_v2 kernels consume it and the wo gmm_v2 produces it"
+          " directly (relayout in VMEM), removing the (N, D/128, 128) <-> (N, D) relayouts around the sorted"
+          " buffer. Embed-dim GMM tiles must be multiples of 128 that divide the embed dim; tiles that are not"
+          " multiples of 1024 (e.g. 3584 / 1792) DMA whole (emb // 128, 128) slabs and relayout the window in VMEM."
+      ),
+  )
+  moe_tc_ragged_3d_dispatch: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort and moe_tc_ragged_3d_gmm under ring of experts: reshape the local tokens to"
+          " (batch, seq, emb // 128, 128) before the expert-parallel all-gather, and keep the TC unsort output and"
+          " the combine reduce-scatter in that layout (only the local result is reshaped back). This removes the"
+          " full-size (N, D/128, 128) <-> (N, D) relayouts of the gathered tokens and of the combine output, in"
+          " both the forward and the backward pass. Raises if it cannot apply (e.g. emb not a multiple of 128)."
       ),
   )
   moe_use_direct_token_gather: bool = Field(
@@ -3941,6 +3981,9 @@ class MaxTextConfig(
 
   def validate_moe_tc_ragged_sort(self):
     """Validates that moe_tc_ragged_sort is used with the truncated-buffer ring-of-experts ragged sort."""
+    if self.moe_tc_ragged_3d_dispatch and not (self.moe_tc_ragged_sort and self.moe_tc_ragged_3d_gmm):
+      # The remaining requirements of the 3D dispatch are those of moe_tc_ragged_sort / moe_tc_ragged_3d_gmm below.
+      raise ValueError("moe_tc_ragged_3d_dispatch=True requires moe_tc_ragged_sort=True and moe_tc_ragged_3d_gmm=True.")
     if not self.moe_tc_ragged_sort:
       return
     if not self.use_ring_of_experts:
@@ -3949,6 +3992,16 @@ class MaxTextConfig(
       raise ValueError("moe_tc_ragged_sort=True requires use_ragged_sort=True.")
     if self.ragged_buffer_factor <= 0:
       raise ValueError("moe_tc_ragged_sort=True requires ragged_buffer_factor > 0.0.")
+    if self.moe_tc_ragged_3d_gmm:
+      if not (self.use_tokamax_gmm and self.use_gmm_v2):
+        raise ValueError("moe_tc_ragged_3d_gmm=True requires use_tokamax_gmm=True and use_gmm_v2=True.")
+      unsupported = ["mlp_bias"] if self.mlp_bias else []
+      if self.ici_tensor_parallelism > 1 or self.dcn_tensor_parallelism > 1:
+        unsupported.append("tensor parallelism")
+      if self.num_moe_emb_chunks > 0:
+        unsupported.append("num_moe_emb_chunks > 0")
+      if unsupported:
+        raise ValueError(f"moe_tc_ragged_3d_gmm=True does not support: {', '.join(unsupported)}.")
 
   def validate_moe_topk_before_ep_all_gather(self):
     """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
@@ -5633,6 +5686,31 @@ class MaxTextConfig(
       raise ValueError(
           "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
       )
+
+    if self.moe_flat_fsdp_weights:
+      if not (
+          self.sparse_matmul
+          and self.shard_embed_moe_on_fsdp
+          and self.use_tokamax_gmm
+          and self.use_gmm_v2
+          and not self.prefuse_moe_weights
+      ):
+        raise ValueError(
+            "moe_flat_fsdp_weights=True requires sparse_matmul=True, shard_embed_moe_on_fsdp=True,"
+            " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+        )
+      # These either pick their own 3D expert weight layout or carry per-expert params that assume it.
+      if (
+          self.shard_exp_on_fsdp
+          or self.use_2d_fsdp_sharding
+          or self.use_batch_split_schedule
+          or self.weight_dtype in (DType.FLOAT8_E4M3FN, DType.FLOAT8_E5M2)
+          or self.decoder_block == DecoderBlockType.GEMMA4
+      ):
+        raise ValueError(
+            "moe_flat_fsdp_weights=True is incompatible with shard_exp_on_fsdp, use_2d_fsdp_sharding,"
+            " use_batch_split_schedule, fp8 weight_dtype and the gemma4 decoder block."
+        )
 
     if self.use_lineage:
       if not self.scan_layers:
