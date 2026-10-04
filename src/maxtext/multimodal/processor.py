@@ -23,6 +23,7 @@ _MODEL_TO_BLOCKS = {
     "gemma3-12b": ("gemma3", "gemma3"),
     "gemma3-27b": ("gemma3", "gemma3"),
     # Gemma 4
+    "gemma4-12b": ("gemma4", "gemma4"),
     "gemma4-26b": ("gemma4", "gemma4"),
     "gemma4-31b": ("gemma4", "gemma4"),
     "gemma4-e2b": ("gemma4", "gemma4_small"),

@@ -22,7 +22,10 @@ import pytest
 pytestmark = [pytest.mark.decoupled_target]
 
 
-from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
+from maxtext.checkpoint_conversion.to_maxtext import (
+    _build_multi_axis_stacked_tensor,
+    _build_single_axis_stacked_tensor,
+)
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import utils
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
@@ -405,6 +408,123 @@ class ParamMappingTest(unittest.TestCase):
     for b in range(num_blocks):
       for l in range(num_local):
         np.testing.assert_array_equal(out[f"b{b}_l{l}"], value_of(b, l))
+
+  def test_gemma4_12b_mapping(self):
+    """Verifies gemma4-12b mapping in unscanned mode with share_kv_projections=True."""
+    config = {
+        "num_hidden_layers": 12,
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.share_kv_projections = True
+    maxtext_config.use_multimodal = False
+    maxtext_config.v_norm_with_scale = False
+    mapping = param_mapping.PARAM_MAPPING["gemma4-12b"](config, maxtext_config, scan_layers=False)
+    self.assertIn("params-token_embedder-embedding", mapping)
+    # Local layers 0..4 and 6..10 have value-kernel
+    for l in [0, 1, 2, 3, 4, 6, 7, 8, 9, 10]:
+      self.assertIn(f"params-decoder-layers_{l}-self_attention-value-kernel", mapping)
+      self.assertIn(f"params-decoder-layers_{l}-self_attention-key-kernel", mapping)
+      self.assertIn(f"params-decoder-layers_{l}-self_attention-query-kernel", mapping)
+    # Global layers 5 and 11 omit value-kernel due to share_kv_projections=True
+    for gl in [5, 11]:
+      self.assertNotIn(f"params-decoder-layers_{gl}-self_attention-value-kernel", mapping)
+      self.assertIn(f"params-decoder-layers_{gl}-self_attention-key-kernel", mapping)
+      self.assertIn(f"params-decoder-layers_{gl}-self_attention-query-kernel", mapping)
+
+  def test_gemma4_12b_mapping_scanned(self):
+    """Verifies gemma4-12b mapping in scanned mode with share_kv_projections=True."""
+    config = {
+        "num_hidden_layers": 12,
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.share_kv_projections = True
+    maxtext_config.use_multimodal = False
+    maxtext_config.v_norm_with_scale = False
+    mapping = param_mapping.PARAM_MAPPING["gemma4-12b"](config, maxtext_config, scan_layers=True)
+    # Local layers have value projection
+    self.assertIn("params-decoder-scanned_blocks-local_layers-self_attention-value-kernel", mapping)
+    # Global layer omits value projection due to share_kv_projections=True
+    self.assertNotIn("params-decoder-scanned_blocks-global_layer-self_attention-value-kernel", mapping)
+    self.assertIn("params-decoder-scanned_blocks-global_layer-self_attention-key-kernel", mapping)
+    # Check structure
+    num_blocks = config["num_hidden_layers"] // 6
+    local_v = mapping["params-decoder-scanned_blocks-local_layers-self_attention-value-kernel"]
+    global_k = mapping["params-decoder-scanned_blocks-global_layer-self_attention-key-kernel"]
+    self.assertEqual(len(local_v), num_blocks)
+    self.assertEqual(len(local_v[0]), 5)
+    self.assertEqual(len(global_k), num_blocks)
+
+  def test_gemma4_12b_stack_unstack_roundtrip(self):
+    """Tests stacking and unstacking roundtrip for gemma4-12b with local and global layers."""
+    num_blocks, num_local = 2, 5
+    slice_shape = (4, 3)
+    cfg = mock.Mock()
+    cfg.param_scan_axis = 1
+    cfg.scan_layers = True
+    cfg.weight_dtype = "float32"
+    cfg.rope_type = ""
+    cfg.model_name = "gemma4-12b"
+    cfg.share_kv_projections = True
+
+    # 1. Local layers roundtrip
+    mt_local_key = "params-decoder-scanned_blocks-local_layers-self_attention-query-kernel"
+    def value_of(b, l):
+      return np.full(slice_shape, b * 100 + l, dtype=np.float32)
+
+    hf_names_local = [[f"b{b}_l{l}" for l in range(num_local)] for b in range(num_blocks)]
+    def getter_local(name):
+      b_idx, l_idx = name.split("_")
+      return value_of(int(b_idx[1:]), int(l_idx[1:]))
+
+    target_shape_local = (slice_shape[0], num_blocks, num_local, slice_shape[1])
+    stacked_local = _build_multi_axis_stacked_tensor(
+        hf_names_local, getter_local, None, target_shape_local, cfg, mt_local_key
+    )
+    self.assertEqual(stacked_local.shape, target_shape_local)
+
+    param_map_local = {mt_local_key: hf_names_local}
+    hf_shape_map_local = {f"b{b}_l{l}": slice_shape for b in range(num_blocks) for l in range(num_local)}
+    out_local = dict(process_maxtext_param(mt_local_key, stacked_local, param_map_local, {}, hf_shape_map_local, cfg))
+    self.assertEqual(len(out_local), num_blocks * num_local)
+    for b in range(num_blocks):
+      for l in range(num_local):
+        np.testing.assert_array_equal(out_local[f"b{b}_l{l}"], value_of(b, l))
+
+    # 2. Global layer roundtrip (single scan axis across blocks)
+    mt_global_key = "params-decoder-scanned_blocks-global_layer-self_attention-key-kernel"
+    global_slice_shape = (4, 6)
+    hf_names_global = [f"global_b{b}" for b in range(num_blocks)]
+    def getter_global(name):
+      b_idx = int(name.replace("global_b", ""))
+      return np.full(global_slice_shape, b_idx * 50.0, dtype=np.float32)
+
+    target_shape_global = (global_slice_shape[0], num_blocks, global_slice_shape[1])
+    stacked_global = _build_single_axis_stacked_tensor(
+        hf_names_global, getter_global, None, target_shape_global, cfg, mt_global_key
+    )
+    self.assertEqual(stacked_global.shape, target_shape_global)
+
+    param_map_global = {mt_global_key: hf_names_global}
+    hf_shape_map_global = {f"global_b{b}": global_slice_shape for b in range(num_blocks)}
+    out_global = dict(process_maxtext_param(mt_global_key, stacked_global, param_map_global, {}, hf_shape_map_global, cfg))
+    self.assertEqual(len(out_global), num_blocks)
+    for b in range(num_blocks):
+      np.testing.assert_array_equal(out_global[f"global_b{b}"], np.full(global_slice_shape, b * 50.0, dtype=np.float32))
+
+  def test_gemma4_12b_hooks(self):
+    """Verifies hook functions for gemma4-12b in scanned and unscanned modes."""
+    config = {
+        "num_hidden_layers": 12,
+        "text_config": {"num_hidden_layers": 12, "hidden_size": 3840},
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.share_kv_projections = True
+    maxtext_config.use_multimodal = False
+    maxtext_config.v_norm_with_scale = False
+    hooks_scanned = param_mapping.HOOK_FNS["gemma4-12b"](config, maxtext_config, scan_layers=True, saving_to_hf=False)
+    self.assertIn("params-decoder-scanned_blocks-local_layers-self_attention-query-kernel", hooks_scanned)
+    self.assertIn("params-decoder-scanned_blocks-global_layer-self_attention-key-kernel", hooks_scanned)
+    self.assertNotIn("params-decoder-scanned_blocks-global_layer-self_attention-value-kernel", hooks_scanned)
 
   # Specific tests with assertions
   def test_reshape_kernel_hook(self):

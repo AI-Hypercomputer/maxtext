@@ -15,6 +15,7 @@
 """Input pipeline for synthetic dataset."""
 
 from collections.abc import Callable
+import functools
 from typing import Any
 
 import numpy as np
@@ -79,8 +80,15 @@ class SyntheticDataIterator:
     self.mesh = mesh
     self.config = config
     data_pspec_shardings = sharding.get_input_data_sharding(config, mesh)
+    enable_diloco = bool(config.enable_diloco)
+    num_diloco_replicas = int(config.num_diloco_replicas)
     self.data_generator = jax.jit(
-        SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
+        functools.partial(
+            SyntheticDataIterator.raw_generate_synthetic_data,
+            enable_diloco,
+            num_diloco_replicas,
+        ),
+        out_shardings=data_pspec_shardings,
     )
 
     tokens = jax.random.randint(
@@ -113,10 +121,10 @@ class SyntheticDataIterator:
 
   def __next__(self):
     with self.mesh:
-      return self.data_generator(self.config, self.data)  # pylint: disable=not-callable
+      return self.data_generator(self.data)  # pylint: disable=not-callable
 
   @staticmethod
-  def raw_generate_synthetic_data(config: pyconfig.HyperParameters, data):
+  def raw_generate_synthetic_data(enable_diloco: bool, num_diloco_replicas: int, data):
     """Generates a single batch of synthetic data"""
     tokens, positions, segmentation = data
 
@@ -127,8 +135,8 @@ class SyntheticDataIterator:
     output["targets"] = tokens[:, 1:]
     output["targets_position"] = positions[:, 1:]
     output["targets_segmentation"] = segmentation
-    if config.enable_diloco:
-      output = reshape_first_axis_with_diloco(config.num_diloco_replicas, output)
+    if enable_diloco:
+      output = reshape_first_axis_with_diloco(num_diloco_replicas, output)
     return output
 
 

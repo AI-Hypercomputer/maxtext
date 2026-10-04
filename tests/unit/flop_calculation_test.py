@@ -638,6 +638,11 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertAlmostEqual(learnable_weight_tflops, expected_learnable_tflops, places=5)
 
+  def test_calculate_gemma4_12b_tflops(self):
+    """Test calculate_gemma4_tflops with gemma4-12b configuration."""
+    self._verify_flops("gemma4-12b", max_target_length=1)
+    self._verify_flops("gemma4-12b", max_target_length=8192)
+
   def test_calculate_llama4_attention_tflops(self):
     """Test calculate_llama4_attention_tflops."""
     config = MagicMock()
@@ -1201,6 +1206,7 @@ class FlopCalculation(parameterized.TestCase):
       ("gemma3-4b",),
       ("gemma3-12b",),
       ("gemma3-27b",),
+      ("gemma4-12b",),
       ("gemma4-26b",),
       ("gemma4-31b",),
       ("gpt-oss-20b",),
@@ -1222,6 +1228,7 @@ class FlopCalculation(parameterized.TestCase):
       ("gemma3-4b",),
       ("gemma3-12b",),
       ("gemma3-27b",),
+      ("gemma4-12b",),
       ("gemma4-26b",),
       ("gemma4-31b",),
       ("gpt-oss-20b",),

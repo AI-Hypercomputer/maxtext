@@ -118,6 +118,32 @@ gemma4_26b_dict = {
 }
 
 
+gemma4_12b_dict = gemma4_26b_dict.copy()
+gemma4_12b_dict["text_config"] = gemma4_26b_dict["text_config"].copy()
+gemma4_12b_dict["text_config"].update(  # pyrefly: ignore[no-matching-overload]
+    {
+        "enable_moe_block": False,
+        "hidden_size": 3840,
+        "intermediate_size": 15360,
+        "layer_types": [
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "sliding_attention",
+            "full_attention",
+        ]
+        * 8,
+        "num_attention_heads": 16,
+        "num_experts": None,
+        "num_global_key_value_heads": 1,
+        "num_hidden_layers": 48,
+        "num_key_value_heads": 8,
+        "top_k_experts": None,
+    }
+)
+
+
 gemma4_31b_dict = gemma4_26b_dict.copy()
 gemma4_31b_dict["text_config"] = gemma4_26b_dict["text_config"].copy()
 gemma4_31b_dict["text_config"].update(  # pyrefly: ignore[no-matching-overload]
@@ -265,12 +291,14 @@ gemma4_e4b_dict["text_config"].update(
 
 try:
   # Will execute successfully if Transformers is updated with Gemma 4 support
+  gemma4_12b_config = transformers.Gemma4Config(**gemma4_12b_dict)  # pyrefly: ignore[missing-attribute]
   gemma4_26b_config = transformers.Gemma4Config(**gemma4_26b_dict)  # pyrefly: ignore[missing-attribute]
   gemma4_31b_config = transformers.Gemma4Config(**gemma4_31b_dict)  # pyrefly: ignore[missing-attribute]
   gemma4_e2b_config = transformers.Gemma4Config(**gemma4_e2b_dict)  # pyrefly: ignore[missing-attribute]
   gemma4_e4b_config = transformers.Gemma4Config(**gemma4_e4b_dict)  # pyrefly: ignore[missing-attribute]
 except AttributeError:
   # Graceful fallback to raw dict-based PTConfig if Gemma 4 natively is missing
+  gemma4_12b_config = PTConfig(**gemma4_12b_dict)  # pytype: disable=wrong-arg-types
   gemma4_26b_config = PTConfig(**gemma4_26b_dict)  # pytype: disable=wrong-arg-types
   gemma4_31b_config = PTConfig(**gemma4_31b_dict)  # pytype: disable=wrong-arg-types
   gemma4_e2b_config = PTConfig(**gemma4_e2b_dict)  # pytype: disable=wrong-arg-types
@@ -1992,6 +2020,7 @@ HF_MODEL_CONFIGS = {
     "gemma3-4b": gemma3_4b_config,
     "gemma3-12b": gemma3_12b_config,
     "gemma3-27b": gemma3_27b_config,
+    "gemma4-12b": gemma4_12b_config,
     "gemma4-26b": gemma4_26b_config,
     "gemma4-31b": gemma4_31b_config,
     "gemma4-e2b": gemma4_e2b_config,
