@@ -59,6 +59,10 @@ Different with the rule in `base.yml`, this rule configures expert physical axis
 
 Built on `ep-as-dp.yml` for large-scale training where the FSDP rank is large enough that small-weight all-gathers become latency bound. Attention weights (`q_lora`, `kv_lora`, `embed_attn`) are sharded on the smaller `expert` axis and replicated over `fsdp` / `fsdp_transpose`, the tiny MoE router weight (`embed_router`) is fully replicated (`[]`), and the larger routed and shared expert weights remain sharded on `fsdp` / `fsdp_transpose`.
 
+### `fsdp-as-dp-for-attn-rf.yml`
+
+Identical to `fsdp-as-dp-for-attn.yml` except that the MoE router weight (`embed_router`) is sharded on `fsdp` (as in `ep-as-dp.yml`) instead of being fully replicated. With a replicated router, GSPMD reduces the `bf16[embed, num_experts]` router gradient with a synchronous TensorCore all-reduce over every device inside the backward scan loop; sharding it on `fsdp` does not remove the reduction (the gradient is still a partial sum over every batch axis, including `expert`), but splits it into a reduce-scatter over `fsdp` plus an all-reduce of only the `[embed / fsdp, num_experts]` shard over the remaining batch axes (`data`, `fsdp_transpose`, `expert`), at the cost of a small forward/remat all-gather. Prefer this variant at large FSDP ranks when the router-gradient all-reduce shows up as exposed time in the backward pass.
+
 ### `shard-exp-on-fsdp`
 
 When enabled, this shards the expert dimension of the MoE weights across the FSDP axis. It requires `num_experts` to be a multiple of FSDP rank and is particularly useful when using the Muon optimizer.

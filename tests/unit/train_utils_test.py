@@ -29,6 +29,7 @@ import numpy as np
 from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from orbax.checkpoint import v1 as ocp
+import pytest
 
 from maxtext.common import grain_utility
 from maxtext.input_pipeline import multihost_dataloading
@@ -174,6 +175,48 @@ class TestReorderedDataIterator(unittest.TestCase):
     # A for loop without an explicit reset still starts from the first batch.
     self.assertEqual([int(b["x"][0, 0]) for b in eval_iterator], [0, 1])
     self.assertEqual(_CountingLoader.builds, 4)
+
+
+class TestEvalCachePrefill(unittest.TestCase):
+  """Tests for start_eval_cache_prefill (eval_cache_prefill_in_background)."""
+
+  # pylint: disable=protected-access
+
+  @staticmethod
+  def _counting_tf_dataset(reads):
+    """A tf.data pipeline shaped like the c4_mlperf eval loader (... -> cache -> prefetch) that counts source reads."""
+    tf = pytest.importorskip("tensorflow")
+
+    def _read(x):
+      reads.append(int(x))
+      return np.full((2, 2), int(x), dtype=np.int32)
+
+    ds = tf.data.Dataset.range(3)
+    ds = ds.map(lambda x: {"x": tf.py_function(_read, [x], tf.int32)})
+    return ds.cache().prefetch(1)
+
+  def test_prefill_commits_tf_data_cache_through_reorder_view(self):
+    reads = []
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    eval_iterator = multihost_dataloading.MultiHostDataLoadIterator(self._counting_tf_dataset(reads), mesh)
+    view = train_utils._ReorderedDataIterator(lambda batch: batch, eval_iterator)
+
+    thread = train_utils.start_eval_cache_prefill(view)
+    self.assertIsNotNone(thread)
+    thread.join(timeout=60)
+    self.assertFalse(thread.is_alive())
+    self.assertEqual(reads, [0, 1, 2])
+    # The eval loop resets and re-iterates the same dataset object: the cache is now served from memory.
+    view.reset()
+    self.assertEqual(len(list(itertools.islice(view, 3))), 3)
+    self.assertEqual(reads, [0, 1, 2])
+
+  def test_prefill_skips_non_tf_data_loaders(self):
+    mesh = Mesh(mesh_utils.create_device_mesh((len(jax.devices()),)), ("data",))
+    batches = [{"x": np.zeros((len(jax.devices()), 2), dtype=np.int32)}]
+    eval_iterator = multihost_dataloading.MultiHostDataLoadIterator(batches, mesh)
+    self.assertIsNone(train_utils.start_eval_cache_prefill(eval_iterator))
+    self.assertIsNone(train_utils.start_eval_cache_prefill(_FakeIterator([1])))
 
 
 class TestValidateTrainConfig(unittest.TestCase):
