@@ -31,6 +31,15 @@ Routing (shared by sort and unsort of one MoE chunk):
 Forward sort:    buf[i] = x[token_ids_sorted[start + i]], i < count (else 0).
 Forward unsort:  y[t] = sum_{i < count, token_ids_sorted[start+i] == t} w_i * buf[i].
 Each op's transpose is the other op, implemented with the other TC kernel.
+
+keep_3d (moe_tc_ragged_3d_gmm): the sorted buffer stays in the kernels' 3D layout
+(cap, D // 128, 128) on both sides (sort output / unsort input and their
+cotangents), for GMM kernels that consume / produce that layout directly. As in
+the 2D path, mask_padding zeros the buffer rows past `count` (the sort output and
+the unsort-input cotangent). Without it they are left uninitialized: the 3D
+gmm_v2 / tgmm_v2 consumers only use rows < sum(group_sizes) == count, but
+whole-tensor statistics (e.g. absmax quantization of the gmm lhs or of the
+backward gradient) would see the uninitialized rows.
 """
 
 import dataclasses
@@ -159,9 +168,13 @@ def _tc_unflatten(x, num_rows, block):
   )(n, x)
 
 
+def _keep_3d(blocks):
+  return len(blocks) > 2 and bool(blocks[2])
+
+
 def _gather(x2d, routing, cap, blocks, mask_padding):
-  """TC ragged gather of the shard's sorted slots into a [cap, D] buffer (rows past count zeroed if mask_padding)."""
-  block_size, flat_block = blocks
+  """TC ragged gather of the shard's sorted slots into a [cap, D] buffer ([cap, D // 128, 128] with keep_3d)."""
+  block_size, flat_block = blocks[:2]
   if flat_block:
     x3d = _tc_unflatten(x2d, x2d.shape[0], flat_block)
   else:
@@ -174,6 +187,11 @@ def _gather(x2d, routing, cap, blocks, mask_padding):
       max_out_tokens=cap,
       block_size=block_size,
   )
+  if _keep_3d(blocks):
+    if mask_padding:
+      valid = jnp.arange(cap, dtype=jnp.int32) < routing.count
+      out = jnp.where(valid[:, None, None], out, jnp.zeros((), out.dtype))
+    return out
   if flat_block:
     return _tc_flatten(out, routing.count, flat_block, zero_fill=mask_padding)
   out = _to2d(out)
@@ -186,7 +204,9 @@ def _gather(x2d, routing, cap, blocks, mask_padding):
 def _gather_reduce(buf2d, routing, num_out_tokens, topk, blocks):
   """TC ragged gather-reduce: sums each token's valid buffer rows into a [num_out_tokens, D] output."""
   flat_block = blocks[1]
-  if flat_block:
+  if buf2d.ndim == 3:
+    buf3d = buf2d
+  elif flat_block:
     buf3d = _tc_unflatten(buf2d, routing.count, flat_block)
   else:
     buf3d = _to3d(buf2d)
@@ -252,6 +272,7 @@ def ring_ragged_sort_tc(
     mask_padding=True,
     flatten_block_size=0,
     tag_routing_fn=None,
+    keep_3d=False,
 ):
   """TC version of `ring_ragged_sort` for the truncated-buffer case.
 
@@ -295,7 +316,9 @@ def ring_ragged_sort_tc(
     group_sizes_local = tag_routing_fn(group_sizes_local)
     topk_argsort_revert_indices = tag_routing_fn(topk_argsort_revert_indices)
   del num_tokens_local
-  x = tc_sort_gather(hidden_states_local, routing, cap, topk, (gather_block_size, flatten_block_size), mask_padding)
+  x = tc_sort_gather(
+      hidden_states_local, routing, cap, topk, (gather_block_size, flatten_block_size, keep_3d), mask_padding
+  )
   return x, group_sizes_local, topk_argsort_revert_indices, routing
 
 
@@ -330,7 +353,8 @@ def ring_ragged_unsort_tc(
   """TC version of `ring_ragged_unsort`: weighted top-k combine of this shard's slots.
 
   Args:
-    sorted_tokens_local: [buffer_size, hidden] expert outputs.
+    sorted_tokens_local: [buffer_size, hidden] expert outputs, or [buffer_size, hidden // 128, 128]
+      (moe_tc_ragged_3d_gmm), which is fed to the TC gather-reduce without a relayout.
     routing: TcRouting from `ring_ragged_sort_tc`.
     topk: routing top-k.
     topk_weights: flat [N * topk] routing weights (differentiated). Unused if prescaled.
@@ -347,5 +371,9 @@ def ring_ragged_unsort_tc(
     scaled = sorted_tokens_local
   else:
     w_rows = tc_buffer_row_weights(routing, topk_weights, cap)
-    scaled = (sorted_tokens_local.astype(jnp.float32) * w_rows[:, None]).astype(sorted_tokens_local.dtype)
-  return tc_unsort_reduce(scaled, routing, num_out_tokens, topk, (gather_block_size, flatten_block_size), mask_padding)
+    w_rows = w_rows.reshape(-1, *([1] * (sorted_tokens_local.ndim - 1)))
+    scaled = (sorted_tokens_local.astype(jnp.float32) * w_rows).astype(sorted_tokens_local.dtype)
+  keep_3d = sorted_tokens_local.ndim == 3
+  return tc_unsort_reduce(
+      scaled, routing, num_out_tokens, topk, (gather_block_size, flatten_block_size, keep_3d), mask_padding
+  )

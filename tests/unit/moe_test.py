@@ -669,6 +669,10 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
   assert captured["out_specs"][3] == P(batch_partition)
 
 
+# The TC ragged sort tests' moe_mlp_dim (256) is smaller than the default 1024 gmm_v2 mlp tiles.
+_GMM_V2_SMALL_MLP_TILES = {f"{w}_tile_{p}_mlp_dim": 256 for w in ("wi", "wo") for p in ("fwd", "dlhs", "drhs")}
+
+
 class RoutedMoeTest(parameterized.TestCase):
   """Routed Mixture of Experts test."""
 
@@ -1596,6 +1600,36 @@ class RoutedMoeTest(parameterized.TestCase):
         common_overrides={"mlp_bias": True},
         randomize_biases=True,
         moe_tc_ragged_weights_on_activation=weights_on_activation,
+    )
+
+  @pytest.mark.tpu_only
+  @parameterized.named_parameters(
+      ("default", 1.5, {}),
+      ("truncated", 0.75, {}),
+      ("weights_on_activation", 1.5, {"moe_tc_ragged_weights_on_activation": True}),
+      ("accumulate_wi_dlhs", 1.5, {"moe_accumulate_wi_dlhs": True}),
+      ("dlhs_transpose_rhs", 1.5, {"moe_gmm_v2_dlhs_transpose_rhs": True}),
+      ("accumulate_chunk_wgrad", 1.5, {"moe_accumulate_chunk_wgrad": True, "num_moe_token_chunks": 2}),
+      (
+          "all_gmm_options",
+          1.5,
+          {
+              "moe_accumulate_wi_dlhs": True,
+              "moe_gmm_v2_dlhs_transpose_rhs": True,
+              "moe_accumulate_chunk_wgrad": True,
+              "num_moe_token_chunks": 2,
+              "moe_tc_ragged_weights_on_activation": True,
+          },
+      ),
+  )
+  def test_tc_ragged_sort_3d_gmm(self, ragged_buffer_factor, extra):
+    """moe_tc_ragged_3d_gmm (3D-layout gmm_v2 / tgmm_v2) matches the TC sort with the 2D gmm_v2 kernels."""
+    self._run_tc_ragged_sort_loss_and_grad(
+        ragged_buffer_factor=ragged_buffer_factor,
+        common_overrides={**_GMM_V2_SMALL_MLP_TILES, "use_tokamax_gmm": True, "use_gmm_v2": True},
+        ref_overrides={"moe_tc_ragged_sort": True, **extra},
+        moe_tc_ragged_3d_gmm=True,
+        **extra,
     )
 
   @pytest.mark.tpu_only
@@ -2856,6 +2890,30 @@ class TcRaggedSortConfigTest(parameterized.TestCase):
   def test_rejects_unsupported(self, overrides, msg):
     with self.assertRaisesRegex(ValueError, re.escape("moe_tc_ragged_sort=True " + msg)):
       maxtext_types.MaxTextConfig(**{**self._CONFIG, **overrides}, moe_tc_ragged_sort=True)
+
+  _CONFIG_3D = {**_CONFIG, "moe_tc_ragged_sort": True, "use_tokamax_gmm": True, "use_gmm_v2": True}
+
+  def test_accepts_3d_gmm(self):
+    self.assertTrue(maxtext_types.MaxTextConfig(**self._CONFIG_3D, moe_tc_ragged_3d_gmm=True).moe_tc_ragged_3d_gmm)
+
+  def test_accepts_3d_gmm_with_gmm_options(self):
+    cfg = maxtext_types.MaxTextConfig(
+        **self._CONFIG_3D,
+        moe_tc_ragged_3d_gmm=True,
+        moe_accumulate_wi_dlhs=True,
+        moe_accumulate_chunk_wgrad=True,
+        moe_gmm_v2_dlhs_transpose_rhs=True,
+    )
+    self.assertTrue(cfg.moe_tc_ragged_3d_gmm)
+
+  @parameterized.named_parameters(
+      ("no_gmm_v2", {"use_gmm_v2": False}, "requires use_tokamax_gmm=True and use_gmm_v2=True"),
+      ("mlp_bias", {"mlp_bias": True}, "does not support: mlp_bias"),
+      ("emb_chunks", {"num_moe_emb_chunks": 2}, "does not support: num_moe_emb_chunks > 0"),
+  )
+  def test_3d_gmm_rejects_unsupported(self, overrides, msg):
+    with self.assertRaisesRegex(ValueError, re.escape("moe_tc_ragged_3d_gmm=True " + msg)):
+      maxtext_types.MaxTextConfig(**{**self._CONFIG_3D, **overrides}, moe_tc_ragged_3d_gmm=True)
 
 
 class GetRaggedBufferFactorTest(parameterized.TestCase):

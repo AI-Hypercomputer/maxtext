@@ -1395,7 +1395,7 @@ def maybe_pad(inputs, tile_size):
     inputs = jax.lax.pad(
         inputs,
         jnp.array(0.0, dtype=inputs.dtype),
-        [(0, padding_amount, 0), (0, 0, 0)],
+        [(0, padding_amount, 0)] + [(0, 0, 0)] * (inputs.ndim - 1),
     )
   return inputs, padding_amount
 

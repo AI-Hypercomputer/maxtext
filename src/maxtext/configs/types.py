@@ -1251,6 +1251,16 @@ class MoEGeneral(BaseModel):
           " only the valid rows (lineage ragged_flatten), this many rows per grid step. 0 uses XLA reshapes."
       ),
   )
+  moe_tc_ragged_3d_gmm: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort (tokamax gmm_v2): keep the sorted token buffer in the TC kernels' 3D layout"
+          " (buffer, emb // 128, 128). The wi gmm_v2 / tgmm_v2 kernels consume it and the wo gmm_v2 produces it"
+          " directly (relayout in VMEM), removing the (N, D/128, 128) <-> (N, D) relayouts around the sorted"
+          " buffer. Embed-dim GMM tiles must be multiples of 128 that divide the embed dim; tiles that are not"
+          " multiples of 1024 (e.g. 3584 / 1792) DMA whole (emb // 128, 128) slabs and relayout the window in VMEM."
+      ),
+  )
   moe_use_direct_token_gather: bool = Field(
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
@@ -3956,6 +3966,16 @@ class MaxTextConfig(
       raise ValueError("moe_tc_ragged_sort=True requires use_ragged_sort=True.")
     if self.ragged_buffer_factor <= 0:
       raise ValueError("moe_tc_ragged_sort=True requires ragged_buffer_factor > 0.0.")
+    if self.moe_tc_ragged_3d_gmm:
+      if not (self.use_tokamax_gmm and self.use_gmm_v2):
+        raise ValueError("moe_tc_ragged_3d_gmm=True requires use_tokamax_gmm=True and use_gmm_v2=True.")
+      unsupported = ["mlp_bias"] if self.mlp_bias else []
+      if self.ici_tensor_parallelism > 1 or self.dcn_tensor_parallelism > 1:
+        unsupported.append("tensor parallelism")
+      if self.num_moe_emb_chunks > 0:
+        unsupported.append("num_moe_emb_chunks > 0")
+      if unsupported:
+        raise ValueError(f"moe_tc_ragged_3d_gmm=True does not support: {', '.join(unsupported)}.")
 
   def validate_moe_topk_before_ep_all_gather(self):
     """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
