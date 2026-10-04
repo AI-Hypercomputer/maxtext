@@ -1102,6 +1102,19 @@ class MoEGeneral(BaseModel):
           " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
       ),
   )
+  moe_flat_fsdp_weights: bool = Field(
+      False,
+      description=(
+          "Store every routed-expert weight as a 2D [num_experts * rows, cols] matrix whose first dim is"
+          " sharded over (expert, fsdp) instead of the 3D [E, rows, cols] layout sharded (expert | fsdp | -)."
+          " The per-device FSDP shard is then a contiguous, tile-aligned row block at every FSDP size, the fp8"
+          " weight all-gather / weight-grad reduce-scatter run on the major dim, and the gathered weight is a free"
+          " bitcast of the [E, rows, cols] operand the gmm kernels expect (no relayout copies, no 7/8 sublane"
+          " padding). Requires shard_embed_moe_on_fsdp with fixed weight calibration (explicit QAG) and the"
+          " tokamax gmm_v2 custom-VJP path. 3D checkpoints loaded via load_parameters_path are converted to the flat"
+          " layout on load; full-state resumes must come from a flat checkpoint."
+      ),
+  )
   moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
@@ -5660,6 +5673,31 @@ class MaxTextConfig(
       raise ValueError(
           "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
       )
+
+    if self.moe_flat_fsdp_weights:
+      if not (
+          self.sparse_matmul
+          and self.shard_embed_moe_on_fsdp
+          and self.use_tokamax_gmm
+          and self.use_gmm_v2
+          and not self.prefuse_moe_weights
+      ):
+        raise ValueError(
+            "moe_flat_fsdp_weights=True requires sparse_matmul=True, shard_embed_moe_on_fsdp=True,"
+            " use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
+        )
+      # These either pick their own 3D expert weight layout or carry per-expert params that assume it.
+      if (
+          self.shard_exp_on_fsdp
+          or self.use_2d_fsdp_sharding
+          or self.use_batch_split_schedule
+          or self.weight_dtype in (DType.FLOAT8_E4M3FN, DType.FLOAT8_E5M2)
+          or self.decoder_block == DecoderBlockType.GEMMA4
+      ):
+        raise ValueError(
+            "moe_flat_fsdp_weights=True is incompatible with shard_exp_on_fsdp, use_2d_fsdp_sharding,"
+            " use_batch_split_schedule, fp8 weight_dtype and the gemma4 decoder block."
+        )
 
     if self.use_lineage:
       if not self.scan_layers:

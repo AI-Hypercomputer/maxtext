@@ -368,10 +368,33 @@ def nnx_construct_named_sharding(abs_var_state: nnx.State, mesh) -> nnx.State:
   )
 
 
+class CompoundLogicalAxis(tuple):
+  """Logical name of one dimension sharded over several logical axes, e.g. CompoundLogicalAxis(("exp", "embed_moe")).
+
+  The dimension is sharded over the concatenation of the mesh axes each name resolves to. Only this type is resolved
+  this way: a plain tuple entry keeps Flax's meaning (already-physical mesh axes, passed through unchanged).
+  """
+
+
+# NNX walks every tuple as a pytree node, so JAX must flatten this subclass too (it treats unregistered ones as leaves).
+jax.tree_util.register_pytree_node(
+    CompoundLogicalAxis, lambda x: (tuple(x), None), lambda _, children: CompoundLogicalAxis(children)
+)
+
+
 def logical_to_mesh_axes(logical_names, mesh, rules=None):
   """Remove size one mesh axes given logical names."""
-  tensor_spec = nn.logical_to_mesh_axes(logical_names, rules=rules)
-  return remove_size_one_mesh_axis(tensor_spec, mesh)
+  if logical_names is None or not any(isinstance(name, CompoundLogicalAxis) for name in logical_names):
+    return remove_size_one_mesh_axis(nn.logical_to_mesh_axes(logical_names, rules=rules), mesh)
+  groups = [tuple(name) if isinstance(name, CompoundLogicalAxis) else (name,) for name in logical_names]
+  # Resolve all names in one call so a mesh axis is still used by at most one logical name.
+  flat_spec = list(nn.logical_to_mesh_axes(tuple(n for group in groups for n in group), rules=rules))
+  grouped = []
+  for group in groups:
+    resolved, flat_spec = flat_spec[: len(group)], flat_spec[len(group) :]
+    axes = [ax for item in resolved if item is not None for ax in ((item,) if isinstance(item, str) else item)]
+    grouped.append(None if not axes else axes[0] if len(axes) == 1 else tuple(axes))
+  return remove_size_one_mesh_axis(P(*grouped), mesh)
 
 
 def logical_to_mesh(tree, mesh, rules=None):

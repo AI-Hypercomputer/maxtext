@@ -50,6 +50,7 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
+    CompoundLogicalAxis,
     create_sharding,
     get_logical_axis_rules,
     logical_to_mesh_axes,
@@ -939,6 +940,13 @@ class RoutedMoE(nnx.Module):
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
       self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
+      if self.config.moe_flat_fsdp_weights:
+        # Flat layout: wi [E * embed, mlp], wo [E * mlp, embed]; dim 0 is sharded over (expert, fsdp) via the
+        # compound logical axis ("exp", "embed_moe") so every FSDP shard is a contiguous tile-aligned row block
+        # and the FSDP-gathered weight is a free bitcast of the [E_local, rows, cols] operand the gmm kernels pin.
+        # wo's rows are mlp but reuse the "embed_moe" logical name to get the same (expert, fsdp) dim-0 sharding.
+        self.wi_kernel_axes = (CompoundLogicalAxis(("exp", "embed_moe")), "mlp_moe")
+        self.wo_kernel_axes = (CompoundLogicalAxis(("exp", "embed_moe")), None)
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
       # vLLM uses 'model' as the tensor parallelism axis name
@@ -1057,38 +1065,25 @@ class RoutedMoE(nnx.Module):
           out_sharding=self.wo_kernel_axes,
       )
     else:
+
+      def _init_expert_kernel(shape, dtype):
+        # Always init in 3D [E, rows, cols] so the fan-in/out (and RNG draw) match the 3D layout, then view it
+        # as the flat [E * rows, cols] matrix under moe_flat_fsdp_weights (see wi_kernel_axes above).
+        kernel = self.kernel_init(self.rngs.params(), shape, dtype, kernel_in_axis, kernel_out_axis)
+        if self.config.moe_flat_fsdp_weights:
+          kernel = kernel.reshape(shape[0] * shape[1], shape[2])
+        return kernel
+
       self.wi_0 = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
+          _init_expert_kernel((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype),
           out_sharding=self.wi_kernel_axes,
       )
       self.wi_1 = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
-              weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
+          _init_expert_kernel((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype),
           out_sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
-          self.kernel_init(
-              self.rngs.params(),
-              (
-                  self.num_experts,
-                  moe_intermediate_dim,
-                  self.moe_expert_input_dim,
-              ),
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
+          _init_expert_kernel((self.num_experts, moe_intermediate_dim, self.moe_expert_input_dim), self.weight_dtype),
           out_sharding=self.wo_kernel_axes,
       )
 
@@ -2367,6 +2362,26 @@ class RoutedMoE(nnx.Module):
         )
       elif use_custom_vjp_gmm:
         # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
+        flat_fsdp_shard = None
+        if self.config.moe_flat_fsdp_weights and not is_native_kernel and kernel.ndim == 2:
+          # `kernel` is the local [rows_local, cols] block of the flat (expert, fsdp)-sharded weight. After the
+          # dim-0 FSDP all-gather it holds this shard's E_local experts back to back: a free bitcast to
+          # [E_local, rows, cols]. With no FSDP gather axis the local block already is the whole expert group.
+          num_local_experts = self.num_experts // self.get_expert_parallelism_size()
+          gather_factor = 1
+          for axis_name, axis_idx in weight_gather_axes:
+            if axis_idx == 0:
+              gather_factor *= self.mesh.shape[axis_name]
+          gathered_rows = kernel.shape[0] * gather_factor
+          if gathered_rows % num_local_experts != 0:
+            raise ValueError(
+                f"moe_flat_fsdp_weights: {gathered_rows} gathered rows not divisible by {num_local_experts} experts"
+            )
+          gathered_shape = (num_local_experts, gathered_rows // num_local_experts, kernel.shape[1])
+          if weight_gather_axes:
+            flat_fsdp_shard = gathered_shape
+          else:
+            kernel = kernel.reshape(gathered_shape)
         output = mblx.gmm(
             lhs=inputs,
             rhs=kernel,
@@ -2389,6 +2404,7 @@ class RoutedMoE(nnx.Module):
             return_lhs=return_lhs,
             fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
             return_rhs=return_rhs,
+            flat_fsdp_shard=flat_fsdp_shard,
             **({"out_is_3d": True} if out_is_3d else {}),
         )
       else:
@@ -2501,9 +2517,15 @@ class RoutedMoE(nnx.Module):
         wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
       elif self.config.shard_embed_moe_on_fsdp and explicitly_weight_ag():
         # Keep embed_moe sharded so we can manually QAG it over FSDP
-        w0_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
-        w1_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
-        wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
+        if self.config.moe_flat_fsdp_weights:
+          # Flat [E * rows, cols] weights: keep the (expert, fsdp) row sharding; gmm QAGs dim 0 over FSDP.
+          w0_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
+          w1_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), "mlp_no_fsdp"))
+          wo_pspec = self._logical_to_mesh_axes((CompoundLogicalAxis(("exp", "embed_moe")), None))
+        else:
+          w0_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
+          w1_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
+          wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
       else:
         # Tell XLA to automatically gather the D dimension (e.g. for dynamic absmax scaling)
         w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
@@ -2529,6 +2551,11 @@ class RoutedMoE(nnx.Module):
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
     weight_gather = explicitly_weight_ag()
+    if self.config.moe_flat_fsdp_weights and not weight_gather:
+      raise NotImplementedError(
+          "moe_flat_fsdp_weights needs the explicit fp8 weight all-gather"
+          " (shard_embed_moe_on_fsdp + fixed weight calibration)."
+      )
     (
         batch_logical_axis,
         input_partition_pspec,
@@ -2901,6 +2928,15 @@ class RoutedMoE(nnx.Module):
             forced_routed_experts=forced_routed_experts,
         )
 
+    def non_expert_axes(pspec_dim_axes):
+      """Drops the expert-parallel mesh axis name(s) from one PartitionSpec entry (flat dim 0 = (expert, fsdp))."""
+      if pspec_dim_axes is None:
+        return None
+      ep = self._expert_parallelism_name
+      ep_names = set(ep) if isinstance(ep, tuple) else {ep}
+      axes = (pspec_dim_axes,) if isinstance(pspec_dim_axes, str) else tuple(pspec_dim_axes)
+      return tuple(ax for ax in axes if ax not in ep_names)
+
     def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
       if pspec_dim_axes is None:
         return []
@@ -2915,14 +2951,19 @@ class RoutedMoE(nnx.Module):
       wi_gather_axes = []
       if weight_gather:
         # weight_gather implies either exp or embed_moe is sharded.
-        if self.config.shard_exp_on_fsdp:
-          # wi [Experts, In, Hidden] -> Gather Exp(0)
-          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
-        else:
-          # Gather In(1) where embed_moe is sharded.
+        if self.config.moe_flat_fsdp_weights:
+          # Flat wi [E * In, Hidden]: gather the non-expert (FSDP) axes of dim 0, then Hidden(1).
+          wi_gather_axes.extend(get_active_sharding_axes(non_expert_axes(w0_pspec[0]), 0))
           wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[1], 1))
-        # Gather Hidden(2)
-        wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
+        else:
+          if self.config.shard_exp_on_fsdp:
+            # wi [Experts, In, Hidden] -> Gather Exp(0)
+            wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[0], 0))
+          else:
+            # Gather In(1) where embed_moe is sharded.
+            wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[1], 1))
+          # Gather Hidden(2)
+          wi_gather_axes.extend(get_active_sharding_axes(w0_pspec[2], 2))
       wi_tile_size = (
           fwd_tile("wi_tile_fwd_batch_seq"),  # m (LHS batch)
           fwd_tile("wi_tile_fwd_embed_dim"),  # k  (contracting)
@@ -2940,14 +2981,19 @@ class RoutedMoE(nnx.Module):
       wo_gather_axes = []
       if weight_gather:
         # weight_gather implies either exp or embed_moe is sharded.
-        if self.config.shard_exp_on_fsdp:
-          # wo [Experts, Hidden, Out] -> Gather Exp(0)
-          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+        if self.config.moe_flat_fsdp_weights:
+          # Flat wo [E * Hidden, Out]: gather the non-expert (FSDP) axes of dim 0, then Out(1).
+          wo_gather_axes.extend(get_active_sharding_axes(non_expert_axes(wo_pspec[0]), 0))
+          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
         else:
-          # Gather Out(2) where embed_moe is sharded.
-          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[2], 2))
-        # Gather Hidden(1)
-        wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
+          if self.config.shard_exp_on_fsdp:
+            # wo [Experts, Hidden, Out] -> Gather Exp(0)
+            wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[0], 0))
+          else:
+            # Gather Out(2) where embed_moe is sharded.
+            wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[2], 2))
+          # Gather Hidden(1)
+          wo_gather_axes.extend(get_active_sharding_axes(wo_pspec[1], 1))
       wo_tile_size = (
           fwd_tile("wo_tile_fwd_batch_seq"),  # m (LHS batch)
           fwd_tile("wo_tile_fwd_mlp_dim"),  # k (contracting)
