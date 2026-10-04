@@ -4731,6 +4731,14 @@ class RoutedMoE(nnx.Module):
           "te_moe_block=True requires TransformerEngine JAX MoE support. "
           "Please upgrade to the latest version of TransformerEngine."
       ) from exc
+    try:
+      from importlib.metadata import version  # pylint: disable=import-outside-toplevel
+      from packaging.version import Version as PkgVersion  # pylint: disable=import-outside-toplevel
+    except ImportError as exc:
+      raise ImportError(
+          "te_moe_block=True requires the `importlib.metadata` and `packaging` packages "
+          "for backwards compatibility checks. Please ensure they are installed."
+      ) from exc
 
     if self.quant is None or not hasattr(self.quant, "get_moe_block_quantizer_sets"):
       raise ValueError("te_moe_block=True requires TransformerEngine quantization or te_gmm_quantization=te_no_quant.")
@@ -4753,30 +4761,50 @@ class RoutedMoE(nnx.Module):
         n_expert_groups=self.num_experts,
     )
 
-    if self.is_hash_routing:
-      router_info = te_moe.RoutingMapInfo(
-          routing_indices=routing_indices,
-          routing_weights=routing_weights,
-      )
-      collect_expert_counts = False
+    # Support older moe(...) interface for older TE versions
+    te_version = PkgVersion(version("transformer-engine"))
+    if te_version < PkgVersion("2.21") and self.is_hash_routing:
+      raise ImportError("transformer-engine version 2.21 or newer is required for hash routing. Please upgrade TE.")
+    elif te_version < PkgVersion("2.21"):
+      router_kwargs = {
+          "gate_kernel": gate_kernel,
+          "num_experts_per_tok": self.num_experts_per_tok,
+          "expert_bias": expert_bias,
+          "score_function": self.config.routed_score_func or "softmax",
+          "use_pre_softmax": False,
+          "num_groups": None if self.config.n_routing_groups <= 0 else self.config.n_routing_groups,
+          "group_topk": None if self.config.topk_routing_group <= 0 else self.config.topk_routing_group,
+          "scaling_factor": self.config.routed_scaling_factor,
+          "aux_loss_coeff": self.config.load_balance_loss_weight,
+          "gate_kernel_axes": self.kernel_axes,
+      }
+    elif self.is_hash_routing:
+      router_kwargs = {
+          "router_info": te_moe.RoutingMapInfo(
+              routing_indices=routing_indices,
+              routing_weights=routing_weights,
+          ),
+          "collect_expert_counts": False,
+      }
     else:
-      router_info = te_moe.RouterComputationInfo(
-          gate_kernel=gate_kernel,
-          num_experts_per_tok=self.num_experts_per_tok,
-          expert_bias=expert_bias,
-          score_function=self.config.routed_score_func or "softmax",
-          use_pre_softmax=False,
-          num_groups=None if self.config.n_routing_groups <= 0 else self.config.n_routing_groups,
-          group_topk=None if self.config.topk_routing_group <= 0 else self.config.topk_routing_group,
-          scaling_factor=self.config.routed_scaling_factor,
-          aux_loss_coeff=self.config.load_balance_loss_weight,
-          gate_kernel_axes=self.kernel_axes,
-      )
-      collect_expert_counts = self.should_update_load_balance()
+      router_kwargs = {
+          "router_info": te_moe.RouterComputationInfo(
+              gate_kernel=gate_kernel,
+              num_experts_per_tok=self.num_experts_per_tok,
+              expert_bias=expert_bias,
+              score_function=self.config.routed_score_func or "softmax",
+              use_pre_softmax=False,
+              num_groups=None if self.config.n_routing_groups <= 0 else self.config.n_routing_groups,
+              group_topk=None if self.config.topk_routing_group <= 0 else self.config.topk_routing_group,
+              scaling_factor=self.config.routed_scaling_factor,
+              aux_loss_coeff=self.config.load_balance_loss_weight,
+              gate_kernel_axes=self.kernel_axes,
+          ),
+          "collect_expert_counts": self.should_update_load_balance(),
+      }
 
     output, lb_loss, total_recv_tokens, expert_counts = te_moe.moe(
         inputs,
-        router_info,
         wi_kernel,
         wo_kernel,
         w0_bias,
@@ -4793,7 +4821,7 @@ class RoutedMoE(nnx.Module):
         wo_kernel_axes=self.wo_kernel_axes,
         dtype=self.dtype,
         recv_capacity_per_rank=max_utils.get_te_moe_recv_capacity_per_rank(),
-        collect_expert_counts=collect_expert_counts,
+        **router_kwargs,
     )
     recv_capacity_per_rank = max_utils.get_te_moe_recv_capacity_per_rank()
     output = output.astype(self.dtype)
