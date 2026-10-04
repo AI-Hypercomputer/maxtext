@@ -88,6 +88,7 @@ HF_IDS = {
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
     "qwen3.5-35b-a3b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",
     "qwen3.5-35b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",
+    "qwen3.8-2.4t-a95b": "Qwen/Qwen3.8-2.4T-A95B",
     "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "mistral-7b": "mistralai/Mistral-7B-v0.1",
     "mixtral-8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",

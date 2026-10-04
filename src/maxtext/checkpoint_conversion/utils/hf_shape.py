@@ -801,6 +801,29 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def _qwen3_8_rewrite_hf_key(key):
+  """Rewrites `model.language_model.*` HF keys (or tuples of keys) to `model.*`."""
+  if isinstance(key, tuple):
+    return tuple(_qwen3_8_rewrite_hf_key(k) for k in key)
+  prefix = "model.language_model."
+  if isinstance(key, str) and key.startswith(prefix):
+    return "model." + key[len(prefix) :]
+  return key
+
+
+def QWEN3_8_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace Qwen3.8 (text-only) weights path and their shape.
+
+  Qwen3.8 shares the Qwen3.5 MoE text architecture, but its checkpoint is text-only
+  (`Qwen3_5MoeForCausalLM`), so weights live under `model.*` instead of
+  `model.language_model.*`.
+  """
+  if "text_config" not in config:
+    config = {"text_config": config}
+  shapes = QWEN3_5_HF_WEIGHTS_TO_SHAPE(config)
+  return {_qwen3_8_rewrite_hf_key(k): v for k, v in shapes.items()}
+
+
 def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace GptOss weights path and their shape."""
   # --- Extract Core Config Values ---
@@ -1311,5 +1334,6 @@ HF_SHAPE = {
     "qwen3.5-35b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.8-2.4t-a95b": QWEN3_8_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
 }
