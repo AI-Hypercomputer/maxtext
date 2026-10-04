@@ -49,6 +49,32 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_step_dropless_fallback_rejects_unreplayable_combinations(self):
+    def initialize(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          model_name="mixtral-8x7b",
+          megablox=True,
+          sparse_matmul=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=True,
+          ici_expert_parallelism=2,
+          ragged_buffer_factor=1.0,
+          moe_dropless_fallback="step",
+          **kwargs,
+      )
+
+    self.assertEqual(initialize().moe_dropless_fallback, "step")
+    for overrides, message in (
+        ({"enable_diloco": True, "dcn_diloco_parallelism": 2}, "not supported with enable_diloco"),
+        ({"compiled_trainstep_file": "/tmp/train_step.pickle"}, "not supported with compiled_trainstep_file"),
+        ({"optimizer_memory_host_offload": True}, "not supported with optimizer_memory_host_offload"),
+        ({"parameter_memory_host_offload": True}, "or parameter_memory_host_offload"),
+    ):
+      with self.subTest(**overrides), self.assertRaisesRegex(ValueError, message):
+        initialize(**overrides)
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 

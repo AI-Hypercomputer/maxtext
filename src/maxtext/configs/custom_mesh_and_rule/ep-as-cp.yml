@@ -60,6 +60,7 @@ logical_axis_rules: [
                       # MoE Weights
                       ['exp', 'expert'],
                       ['embed_moe', ['fsdp']],
+                      ['embed_router', ['fsdp']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================

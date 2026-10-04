@@ -3,7 +3,8 @@
 # SPMD Streaming DiLoCo Multi-Slice Training Runner
 # ==============================================================================
 # This script builds a container image with local MaxText workspace code and submits
-# a multi-slice SPMD Streaming DiLoCo training workload on GKE TPU clusters via XPK.
+# a multi-slice SPMD Streaming DiLoCo training workload on GKE TPU clusters via
+# Cluster Toolkit (gcluster). See docs/run_maxtext/run_maxtext_via_cluster_toolkit.md.
 #
 # Reference Paper:
 #   "Streaming DiLoCo with overlapping communication: Towards a Distributed Free Lunch"
@@ -14,39 +15,43 @@
 #   - Fragment: Model weights partitioned into K disjoint subsets (num_diloco_fragments).
 #   - Streaming Sync: Communicates 1 fragment per inner step to overlap DCN all-reduce with compute.
 #
+# Note: TPU reservations are configured on the cluster's node pools when the cluster
+# is created, so there is no per-workload reservation flag.
+#
 # ------------------------------------------------------------------------------
 # Example Invocations:
 # ------------------------------------------------------------------------------
 # 1. Standard Multi-Slice Pretraining (2x v5p-128, Qwen3-8B):
-#      CLUSTER="mlperf-v5p" ZONE="europe-west4-b" PROJECT="cloud-tpu-multipod-dev" \
+#      CLUSTER="your-cluster-name" LOCATION="your-cluster-location" PROJECT="your-project-id" \
 #      DEVICE_TYPE="v5p-128" NUM_SLICES="2" RUNNAME="dlco-qwen8b-01" \
-#      BASE_OUTPUT_DIRECTORY="gs://chriszuo-maxtext-logs" DATASET_PATH="gs://chriszuo-maxtext-datasets" \
-#      RESERVATION="cloudtpu-20240716121201-595617744" \
+#      BASE_OUTPUT_DIRECTORY="gs://your-bucket/maxtext-logs" DATASET_PATH="gs://your-bucket/maxtext-datasets" \
 #      STEPS="1000" CHECKPOINT_PERIOD="100" DILOCO_SYNC_PERIOD="37" DILOCO_NUM_FRAGMENTS="37" \
 #      bash src/maxtext/trainers/diloco/scripts/run_spmd_streaming_diloco.sh
 #
-# 2. Fast Smoke / Integration Test Run (2x v5p-16, short workload name < 20 chars):
-#      CLUSTER="mlperf-v5p" ZONE="europe-west4-b" PROJECT="cloud-tpu-multipod-dev" \
-#      DEVICE_TYPE="v5p-16" NUM_SLICES="2" RUNNAME="dlco-smk-01" XPK_WORKLOAD="dlco-smk-01" \
-#      BASE_OUTPUT_DIRECTORY="gs://chriszuo-maxtext-logs" DATASET_PATH="gs://chriszuo-maxtext-datasets" \
-#      RESERVATION="cloudtpu-20240716121201-595617744" \
+# 2. Fast Smoke / Integration Test Run (2x v5p-16, workload name <= 28 chars):
+#      CLUSTER="your-cluster-name" LOCATION="your-cluster-location" PROJECT="your-project-id" \
+#      DEVICE_TYPE="v5p-16" NUM_SLICES="2" RUNNAME="dlco-smk-01" WORKLOAD_NAME="dlco-smk-01" \
+#      BASE_OUTPUT_DIRECTORY="gs://your-bucket/maxtext-logs" DATASET_PATH="gs://your-bucket/maxtext-datasets" \
 #      STEPS="20" CHECKPOINT_PERIOD="10" DILOCO_SYNC_PERIOD="3" DILOCO_NUM_FRAGMENTS="3" \
 #      bash src/maxtext/trainers/diloco/scripts/run_spmd_streaming_diloco.sh
 #
 # 3. Automatic Checkpoint Resumption (Reuse same RUNNAME, zero explicit path flags):
-#      CLUSTER="mlperf-v5p" ZONE="europe-west4-b" PROJECT="cloud-tpu-multipod-dev" \
-#      DEVICE_TYPE="v5p-16" NUM_SLICES="2" RUNNAME="dlco-smk-01" XPK_WORKLOAD="dlco-resm-01" \
-#      BASE_OUTPUT_DIRECTORY="gs://chriszuo-maxtext-logs" DATASET_PATH="gs://chriszuo-maxtext-datasets" \
-#      RESERVATION="cloudtpu-20240716121201-595617744" \
+#      CLUSTER="your-cluster-name" LOCATION="your-cluster-location" PROJECT="your-project-id" \
+#      DEVICE_TYPE="v5p-16" NUM_SLICES="2" RUNNAME="dlco-smk-01" WORKLOAD_NAME="dlco-resm-01" \
+#      BASE_OUTPUT_DIRECTORY="gs://your-bucket/maxtext-logs" DATASET_PATH="gs://your-bucket/maxtext-datasets" \
 #      STEPS="40" CHECKPOINT_PERIOD="10" LOAD_FULL_STATE_PATH="" \
 #      bash src/maxtext/trainers/diloco/scripts/run_spmd_streaming_diloco.sh
 # ==============================================================================
 set -e
 
-# cluster
-CLUSTER="${CLUSTER:-mlperf-v5p}"
-PROJECT="${PROJECT:-cloud-tpu-multipod-dev}"
-ZONE="${ZONE:-europe-west4-b}"
+# Required: GKE cluster name, project, and cluster location
+# (LOCATION is the cluster's region for regional clusters, or its zone for zonal ones).
+for var in CLUSTER PROJECT LOCATION; do
+  if [ -z "${!var:-}" ]; then
+    echo "Error: ${var} is not set. Please set CLUSTER, PROJECT and LOCATION (e.g. CLUSTER=your-cluster-name PROJECT=your-project-id LOCATION=your-cluster-location)."
+    exit 1
+  fi
+done
 
 # specify resource
 NUM_SLICES="${NUM_SLICES:-2}"
@@ -54,9 +59,13 @@ DEVICE_TYPE="${DEVICE_TYPE:-v5p-128}"
 
 # command
 RUNNAME="${RUNNAME:-spmd-dlco-$(date +%H%M)}"
-XPK_WORKLOAD="${XPK_WORKLOAD:-$RUNNAME}"
-DOCKER_IMAGE_BASE="${DOCKER_IMAGE_BASE:-us-docker.pkg.dev/tpu-prod-env-multipod/maxtext-images/maxtext_jax_stable:latest}"
-MY_IMAGE="gcr.io/${PROJECT}/$(whoami)-runner:${XPK_WORKLOAD}"
+WORKLOAD_NAME="${WORKLOAD_NAME:-$RUNNAME}" # gcluster limits workload names to 28 characters
+if [ "${#WORKLOAD_NAME}" -gt 28 ]; then
+  echo "Error: WORKLOAD_NAME '${WORKLOAD_NAME}' exceeds the 28-character limit for gcluster workload names."
+  exit 1
+fi
+DOCKER_IMAGE_BASE="${DOCKER_IMAGE_BASE:-us-docker.pkg.dev/cloud-tpu-images/maxtext-images/tpu_pre_training:latest}"
+MY_IMAGE="gcr.io/${PROJECT}/$(whoami)-runner:${WORKLOAD_NAME}"
 
 if [ -z "${BASE_OUTPUT_DIRECTORY:-}" ]; then
   echo "Error: BASE_OUTPUT_DIRECTORY is not set. Please set it as an environment variable (e.g. export BASE_OUTPUT_DIRECTORY=gs://your-bucket/maxtext-logs)."
@@ -167,23 +176,20 @@ EOF
 echo "Pushing image ${MY_IMAGE}..."
 docker push "${MY_IMAGE}"
 
-# 2. Create the workload directly using xpk
-echo "Creating workload: ${XPK_WORKLOAD}"
-XPK_ARGS=(
-  --workload "${XPK_WORKLOAD}"
-  --docker-image "${MY_IMAGE}"
+# 2. Submit the workload using Cluster Toolkit (gcluster)
+echo "Submitting workload: ${WORKLOAD_NAME}"
+GCLUSTER_ARGS=(
+  --name "${WORKLOAD_NAME}"
+  --image "${MY_IMAGE}"
   --command "${CMD}"
   --num-slices "${NUM_SLICES}"
   --priority "${PRIORITY:-medium}"
-  --enable-debug-logs
+  --restarts "${MAX_RESTARTS:-0}"
+  --verbose
   --cluster "${CLUSTER}"
-  --tpu-type "${DEVICE_TYPE}"
+  --compute-type "${DEVICE_TYPE}"
   --project "${PROJECT}"
-  --zone "${ZONE}"
+  --location "${LOCATION}"
 )
 
-if [ -n "${RESERVATION:-}" ] && [ "${RESERVATION}" != "NONE" ]; then
-  XPK_ARGS+=(--reservation "${RESERVATION}")
-fi
-
-xpk workload create "${XPK_ARGS[@]}"
+gcluster job submit "${GCLUSTER_ARGS[@]}"

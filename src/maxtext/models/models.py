@@ -22,7 +22,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
-from flax import linen as nn
+from flax.core import FrozenDict
 from flax import nnx
 
 from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
@@ -34,6 +34,7 @@ from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.multimodal import processor as mm_processor
+from maxtext.utils import max_logging
 
 # ------------------------------------------------------------------------------
 # The network: Transformer Definitions
@@ -48,12 +49,12 @@ def transformer_as_linen(
     *,
     name: str | None = None,
 ) -> nnx_wrappers.ToLinen:
-  """Constructs an NNX Transformer wrapped as a Linen module.
+  """Constructs an NNX Transformer wrapped as a Linen module. Deprecated.
 
   Returns a `TransformerLinen` that wraps the NNX-style Transformer so it can be
-  driven through the Linen init/apply API (checkpoint conversion, AOT compile,
-  the inference engine). Pure-NNX call sites build `Transformer` directly via
-  `model_creation_utils.from_config`.
+  driven through the Linen init/apply API. Nothing in MaxText needs this anymore;
+  it is kept for callers of `model_creation_utils.from_config` without `rngs`.
+  Pass `rngs` to `from_config` to get the NNX `Transformer` instead.
 
   Args:
     config (Config): The configuration object specifying model hyperparameters and options.
@@ -66,10 +67,14 @@ def transformer_as_linen(
   Returns:
     nnx_wrappers.ToLinen: An NNX Transformer wrapped as a Linen module.
   """
+  max_logging.log(
+      "WARNING: models.transformer_as_linen, and model_creation_utils.from_config without rngs, are deprecated."
+      " Please pass rngs=nnx.Rngs(...) to from_config to get the NNX Transformer."
+  )
   return TransformerLinen(
       Transformer,
       args=(),
-      kwargs=nn.FrozenDict(
+      kwargs=FrozenDict(
           {
               "mesh": mesh,
               "config": config,
@@ -129,7 +134,7 @@ class Transformer(nnx.Module):
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=nn.initializers.normal(stddev=1.0),
+        embedding_init=jax.nn.initializers.normal(stddev=1.0),
         config=cfg,
         rngs=rngs,
     )
@@ -282,6 +287,18 @@ class Transformer(nnx.Module):
           bidirectional_mask_video=bidirectional_mask_video,
       )
 
+    # With mtp_reuse_input_embedding, look up the token embeddings once here; the MTP block shifts them instead of
+    # looking up the shifted tokens again, and the embedding table gets a single gradient.
+    mtp_token_embeddings = None
+    if (
+        getattr(self.config, "mtp_reuse_input_embedding", False)
+        and getattr(self.config, "mtp_num_layers", 0) > 0
+        and decoder_input_embeddings is None
+        and multimodal_input is None
+    ):
+      decoder_input_embeddings = self.decoder.embed_tokens(self.token_embedder, decoder_input_tokens, model_mode)
+      mtp_token_embeddings = decoder_input_embeddings
+
     res = self.decoder(
         shared_embedding=self.token_embedder,
         decoder_input_tokens=decoder_input_tokens,
@@ -334,6 +351,7 @@ class Transformer(nnx.Module):
           decoder_segment_ids=decoder_segment_ids,
           deterministic=not enable_dropout,
           model_mode=model_mode,
+          main_token_embeddings=mtp_token_embeddings,
       )
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):

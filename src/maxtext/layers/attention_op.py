@@ -623,6 +623,8 @@ class AttentionOp(nnx.Module):
     self.max_target_length = max_target_length
     self.num_query_heads = num_query_heads
     self.num_kv_heads = num_kv_heads
+    self.attention_type = _resolve_attention_type(self.config, attention_type)
+    self.is_absorbed_mqa = getattr(config, "use_mla_absorbed_mqa", False) and self.attention_type == AttentionType.MLA
     self.float32_qk_product = float32_qk_product
     self.max_prefill_predict_length = max_prefill_predict_length
     self.float32_logits = float32_logits
@@ -641,7 +643,6 @@ class AttentionOp(nnx.Module):
     self.dtype = dtype
     self.quant = quant
     self.kv_quant = kv_quant
-    self.attention_type = _resolve_attention_type(self.config, attention_type)
     self.causal_block_size = getattr(self.config, "causal_block_size", None)
     if self.attention_type == AttentionType.BLOCK_DIFFUSION:
       if self.causal_block_size is None or self.causal_block_size <= 0:
@@ -2974,34 +2975,45 @@ class AttentionOp(nnx.Module):
 
     # special sharding for decode
     q_seq_len = query.shape[1]
-    prefill_qkv_sharding = (BATCH_ATTN, PREFILL_LENGTH, HEAD, D_KV)
-    decode_qkv_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
+    if self.is_absorbed_mqa:
+      prefill_q_sharding = (BATCH_ATTN, PREFILL_LENGTH, HEAD, None)
+      decode_q_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, None)
+      prefill_kv_sharding = (BATCH_ATTN, PREFILL_LENGTH, None, None)
+      decode_kv_sharding = (DECODE_BATCH, DECODE_LENGTH, None, None)
+      weights_decode_shd = (KV_LENGTH, None, HEAD, None, None)
+      weights_prefill_shd = (BATCH_ATTN, None, HEAD, PREFILL_LENGTH, KV_LENGTH)
+    else:
+      prefill_q_sharding = (BATCH_ATTN, PREFILL_LENGTH, HEAD, D_KV)
+      decode_q_sharding = (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV)
+      prefill_kv_sharding = prefill_q_sharding
+      decode_kv_sharding = decode_q_sharding
+      weights_decode_shd = (KV_LENGTH, HEAD, None, None, None)
+      weights_prefill_shd = (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH)
+
     if self.is_partition_in_decode(q_seq_len):
-      query = partitioning.with_sharding_constraint(query, decode_qkv_sharding)
+      query = partitioning.with_sharding_constraint(query, decode_q_sharding)
       # avoid sharding scale tensor when using kv cache quantization
       if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, decode_qkv_sharding)
-        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, decode_qkv_sharding)
+        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, decode_kv_sharding)
+        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, decode_kv_sharding)
       else:
-        key = partitioning.with_sharding_constraint(key, decode_qkv_sharding)
-        value = partitioning.with_sharding_constraint(value, decode_qkv_sharding)
+        key = partitioning.with_sharding_constraint(key, decode_kv_sharding)
+        value = partitioning.with_sharding_constraint(value, decode_kv_sharding)
     elif model_mode == MODEL_MODE_PREFILL:
-      query = partitioning.with_sharding_constraint(query, prefill_qkv_sharding)
+      query = partitioning.with_sharding_constraint(query, prefill_q_sharding)
       # avoid sharding scale tensor when using kv cache quantization
       if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, prefill_qkv_sharding)
-        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, prefill_qkv_sharding)
+        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, prefill_kv_sharding)
+        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, prefill_kv_sharding)
       else:
-        key = partitioning.with_sharding_constraint(key, prefill_qkv_sharding)
-        value = partitioning.with_sharding_constraint(value, prefill_qkv_sharding)
+        key = partitioning.with_sharding_constraint(key, prefill_kv_sharding)
+        value = partitioning.with_sharding_constraint(value, prefill_kv_sharding)
 
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode, qk_product_einsum)
     if self.is_partition_in_decode(q_seq_len):
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, (KV_LENGTH, HEAD, None, None, None))
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, weights_decode_shd)
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_weights = partitioning.with_sharding_constraint(
-          attn_weights, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH)
-      )
+      attn_weights = partitioning.with_sharding_constraint(attn_weights, weights_prefill_shd)
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -3096,7 +3108,7 @@ class AttentionOp(nnx.Module):
     """
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
-    assert n_kv == self.num_kv_heads
+    assert n_kv == self.num_kv_heads and n % n_kv == 0
     precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (
         0,

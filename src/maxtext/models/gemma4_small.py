@@ -23,8 +23,6 @@ from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
-from maxtext.layers import initializers
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral, MlpBlock
@@ -162,7 +160,7 @@ class Gemma4SmallPLE(nnx.Module):
     vocab_ple = config.vocab_size_per_layer_input
 
     self.embed_tokens_per_layer = nnx.Param(
-        nn.initializers.normal(stddev=ple_dim**-0.5)(
+        jax.nn.initializers.normal(stddev=ple_dim**-0.5)(
             rngs.params(),
             (vocab_ple, num_layers * ple_dim),
             config.weight_dtype,
@@ -216,12 +214,6 @@ class Gemma4SmallPLE(nnx.Module):
 
     out = (identity + context) * inv_sqrt2
     return out.astype(cfg.dtype)
-
-
-PLEToLinen = nnx_wrappers.to_linen_class(
-    Gemma4SmallPLE,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
 
 
 class Gemma4SmallDecoderLayer(nnx.Module):
@@ -476,9 +468,3 @@ class Gemma4SmallDecoderLayer(nnx.Module):
     h = nn.with_logical_constraint(h, self.activation_axis_names)
 
     return h, kv_cache
-
-
-Gemma4SmallDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Gemma4SmallDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

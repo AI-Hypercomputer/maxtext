@@ -40,7 +40,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
-from maxtext.layers import nnx_scan, nnx_wrappers
+from maxtext.layers import nnx_scan
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -454,7 +454,7 @@ class NNXDecoder(nnx.Module):
           num_embeddings=config.trainable_position_size,
           num_features=config.emb_dim,
           dtype=config.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
+          embedding_init=jax.nn.initializers.normal(stddev=1.0),
           config=config,
           mesh=self.mesh,
           rngs=rngs,
@@ -508,7 +508,7 @@ class NNXDecoder(nnx.Module):
 
     if self.is_gemma4_small:
       # Gemma4 E2B/E4B: per-layer-index KV-share donor threading and a distinct attention_type
-      # per layer are not expressible inside nn.scan; pipeline parallelism is also unsupported.
+      # per layer are not expressible inside jax.lax.scan; pipeline parallelism is also unsupported.
       if getattr(config, "using_pipeline_parallelism", False) or getattr(config, "scan_layers", False):
         raise ValueError("gemma4_small (Gemma4 E2B/E4B) does not support pipeline parallelism or scan_layers.")
       self._init_gemma4_small_layers(rngs)
@@ -955,25 +955,15 @@ class NNXDecoder(nnx.Module):
     setattr(self, attr_name, layer)
 
   def _create_single_layer(self, decoder_layer_class, rngs, **kwargs):
-    """Helper to create a single layer (Linen or NNX)."""
-    if issubclass(decoder_layer_class, nnx.Module):
-      return decoder_layer_class(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-          rngs=rngs,
-          **kwargs,
-      )
-    else:
-      layer_linen = decoder_layer_class(
-          config=self.config,
-          mesh=self.mesh,
-          quant=self.quant,
-          model_mode=self.model_mode,
-          **kwargs,
-      )
-      return nnx_wrappers.ToNNX(layer_linen, rngs=rngs)
+    """Helper to create a single layer."""
+    return decoder_layer_class(
+        config=self.config,
+        mesh=self.mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        rngs=rngs,
+        **kwargs,
+    )
 
   def _create_scanned_layers(
       self,
@@ -1458,7 +1448,7 @@ class NNXDecoder(nnx.Module):
     y = (
         decoder_input_embeddings
         if decoder_input_embeddings is not None
-        else shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+        else self.embed_tokens(shared_embedding, decoder_input_tokens, model_mode)
     )
 
     # Precomputed embeddings are complete (including any multimodal replacements),
@@ -1551,6 +1541,10 @@ class NNXDecoder(nnx.Module):
 
     return y
 
+  def embed_tokens(self, shared_embedding, decoder_input_tokens, model_mode):
+    """Looks up the token embeddings, before dropout and positional embeddings."""
+    return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
+
   def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
     """Applies final normalization and projects hidden states to logits.
 
@@ -1593,12 +1587,7 @@ class NNXDecoder(nnx.Module):
     # [batch, length, emb_dim] -> [batch, length, vocab_size]
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
-      if isinstance(shared_embedding, nnx.Module):
-        embedding_table = shared_embedding.embedding[...]
-      else:
-        embedding_table = shared_embedding.variables["params"]["embedding"]
-      if isinstance(embedding_table, nn.spmd.LogicallyPartitioned):
-        embedding_table = embedding_table.unbox()
+      embedding_table = shared_embedding.embedding[...]
       attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
       logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config, out_sharding)
 
@@ -1986,7 +1975,7 @@ class NNXDecoder(nnx.Module):
           elif cfg.use_lineage:
             if lineage_adapter is None:
               raise ImportError("use_lineage=True requires the Google-internal lineage_adapter.")
-            y, lineage_lb_loss = lineage_adapter.run_lineage_dsv3(
+            y, lineage_lb_loss, lineage_bias_updates = lineage_adapter.run_lineage_dsv3(
                 inputs=y,
                 dense_params=self._build_linen_params(self.dense_layers),
                 sparse_params=self._build_linen_params(self.moe_layers),
@@ -1997,6 +1986,8 @@ class NNXDecoder(nnx.Module):
             )
             if lineage_lb_loss is not None:
               self.sow(nnx.Intermediate, "moe_lb_loss", lineage_lb_loss)
+            if lineage_bias_updates is not None:
+              self.sow(nnx.Intermediate, "moe_bias_updates", lineage_bias_updates)
           else:
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,

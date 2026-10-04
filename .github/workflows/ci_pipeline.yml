@@ -406,8 +406,11 @@ jobs:
     timeout-minutes: 15
     permissions:
       issues: write
+    outputs:
+      issue_number: ${{ steps.create_issue.outputs.issue-number }}
     steps:
       - name: Check whether one of the jobs failed
+        id: create_issue
         if: ${{ contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
         uses: jayqi/failed-build-issue-action@1a893bbf43ef1c2a8705e2b115cd4f0fe3c5649b  # v1.2.0
         with:
@@ -426,6 +429,7 @@ jobs:
       actions: 'read'
     with:
       failed_run_id: '${{ github.run_id }}'
+      tracking_issue_number: '${{ needs.notify_failure.outputs.issue_number }}'
     secrets:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 

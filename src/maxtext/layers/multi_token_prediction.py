@@ -294,7 +294,7 @@ class MultiTokenPredictionLayer(nnx.Module):
     """
     if self.config.use_lineage:
       # Lineage runs everything but `final_norm`, which the block applies.
-      out, mtp_lb_loss = lineage_adapter.run_lineage_mtp_layer(
+      out, mtp_lb_loss, mtp_bias_updates = lineage_adapter.run_lineage_mtp_layer(
           prev_hidden_state=prev_hidden_state,
           target_token_embedding=target_token_embedding,
           mtp_params=nnx.state(self, (nnx.Param, moe.MoEBiasVar)),
@@ -306,6 +306,8 @@ class MultiTokenPredictionLayer(nnx.Module):
       )
       if mtp_lb_loss is not None:
         self.sow(nnx.Intermediate, "moe_lb_loss", mtp_lb_loss)
+      if mtp_bias_updates is not None:
+        self.sow(nnx.Intermediate, "moe_bias_updates", mtp_bias_updates)
       return out
 
     target_token_embedding = sharding.maybe_shard_with_logical(
@@ -462,7 +464,22 @@ class MultiTokenPredictionBlock(nnx.Module):
       decoder_segment_ids,
       model_mode,
       deterministic,
+      main_token_embeddings=None,
   ) -> dict:
+    """Runs the MTP layers and sows their losses.
+
+    Args:
+      shared_embedding: Shared token embedding, used for the MTP input embeddings and the output head.
+      main_hidden_state: Final (pre-norm) hidden state of the main decoder.
+      input_ids: Main decoder input tokens.
+      target_ids: Main decoder target tokens.
+      target_mask: Main decoder target mask or packed segment ids.
+      position_ids: Main decoder positions.
+      decoder_segment_ids: Main decoder segment ids.
+      model_mode: Operational mode.
+      deterministic: Whether dropout is disabled.
+      main_token_embeddings: Token embeddings of ``input_ids`` from the main decoder (mtp_reuse_input_embedding).
+    """
     cfg = self.config
     cp_size = self.mesh.shape.get(cfg.context_sharding, 1) if self.mesh is not None else 1
 
@@ -522,7 +539,22 @@ class MultiTokenPredictionBlock(nnx.Module):
     mtp_preds_list = []
     mtp_masks_list = []
 
+    # Token embeddings of rolled_input_ids, when shifted from the main decoder's embeddings.
+    rolled_token_embeddings = main_token_embeddings
+    if main_token_embeddings is not None:
+      # Rolled-in positions hold token id 0, so they take the embedding of token 0.
+      token_zero_embedding = shared_embedding.embed_single_token(0)
+      not_filled = jnp.ones(input_ids.shape, dtype=jnp.int32)
+
     for k in range(1, cfg.mtp_num_layers + 1):
+      if main_token_embeddings is not None:
+        # roll_and_mask_by_segment zero-fills the positions whose token id it replaces with 0.
+        is_filled = roll_and_mask_by_segment(not_filled, rolled_segment_ids) == 0
+        rolled_token_embeddings = jnp.where(
+            is_filled[..., None],
+            token_zero_embedding,
+            roll_and_mask_by_segment(rolled_token_embeddings, rolled_segment_ids),
+        )
       rolled_input_ids = roll_and_mask_by_segment(rolled_input_ids, rolled_segment_ids)
       rolled_target_ids = roll_and_mask_by_segment(rolled_target_ids, rolled_segment_ids)
       rolled_target_mask = roll_and_mask_by_segment(rolled_target_mask, rolled_segment_ids)
@@ -531,12 +563,14 @@ class MultiTokenPredictionBlock(nnx.Module):
       if rolled_segment_ids is not None:
         rolled_segment_ids = roll_and_mask(rolled_segment_ids)
 
+      embedding_kwargs = {} if main_token_embeddings is None else {"decoder_input_embeddings": rolled_token_embeddings}
       target_token_embedding = self.decoder._apply_embedding(
           shared_embedding,
           rolled_input_ids,
           rolled_position_id,
           deterministic,
           model_mode=self.decoder.model_mode,
+          **embedding_kwargs,
       )
 
       mtp_layer = getattr(self, f"mtp_layer_{k}")

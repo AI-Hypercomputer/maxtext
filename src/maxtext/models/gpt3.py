@@ -29,7 +29,7 @@ from flax import nnx
 
 from maxtext.common.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
 from maxtext.inference import kvcache
-from maxtext.layers import initializers, nnx_wrappers
+from maxtext.layers import initializers
 from maxtext.layers.linears import DenseGeneral, MlpBlock, canonicalize_tuple, normalize_axes
 from maxtext.layers import quantizations
 from maxtext.layers import linears
@@ -54,7 +54,7 @@ class Gpt3LayerNorm(nnx.Module):
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
       kernel_axes: tuple[None | str, ...] = (),
-      scale_init: Initializer = nn.initializers.zeros,
+      scale_init: Initializer = jax.nn.initializers.zeros,
       use_bias: bool = True,
       reductions_in_fp32: bool = False,
       parameter_memory_host_offload: bool = False,
@@ -481,9 +481,3 @@ class Gpt3DecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output, kv_cache
-
-
-Gpt3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Gpt3DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

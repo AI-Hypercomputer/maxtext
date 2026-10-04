@@ -23,8 +23,6 @@ from jax.sharding import Mesh
 import jax.numpy as jnp
 
 from maxtext.common.common_types import Config
-from maxtext.layers import initializers
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout, MlpBlock
@@ -199,9 +197,3 @@ class GemmaDecoderLayer(nnx.Module):
       return layer_output, None
     else:
       return layer_output, kv_cache
-
-
-GemmaDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    GemmaDecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

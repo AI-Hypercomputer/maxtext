@@ -22,7 +22,6 @@ from jax.ad_checkpoint import checkpoint_name
 from maxtext.common.common_types import Config
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.layers.attentions import Attention
@@ -256,9 +255,3 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
       return layer_output, None
     else:
       return layer_output, kv_cache
-
-
-Qwen3CustomMoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3CustomMoeDecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)

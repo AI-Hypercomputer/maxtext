@@ -14,6 +14,7 @@ limitations under the License.
 """Utils for MLPerf submission compliance."""
 
 import atexit
+import math
 import os
 import threading
 import time
@@ -198,6 +199,41 @@ def _axis_product(config, *names) -> int:
   return product
 
 
+def _rule_parallelism(config, logical_axis) -> int:
+  """Returns the mesh size (ICI x DCN) that `logical_axis` is sharded over."""
+  sizes = {
+      axis: max(ici, 1) * max(dcn, 1)
+      for axis, ici, dcn in zip(config.mesh_axes, config.ici_parallelism, config.dcn_parallelism)
+  }
+  axes = dict(config.logical_axis_rules).get(logical_axis) or ()
+  if isinstance(axes, str):
+    axes = (axes,)
+  return math.prod(sizes.get(axis, 1) for axis in axes)
+
+
+# Bits per element of the MLPerf pre-approved numerical formats, used to pick the lowest of several.
+_PRECISION_BITS = {
+    "fp64": 64,
+    "fp32": 32,
+    "tf32": 19,
+    "fp16": 16,
+    "bfloat16": 16,
+    "fp8": 8,
+    "int8": 8,
+    "uint8": 8,
+    "mxfp6": 6,
+    "nvfp4": 4,
+    "mxfp4": 4,
+    "int4": 4,
+    "uint4": 4,
+}
+
+
+def _lowest_precision(*precisions: str) -> str:
+  """Returns the precision with the fewest bits (the first on ties); unknown formats rank lowest, so they surface."""
+  return min(precisions, key=lambda p: _PRECISION_BITS.get(p, 0))
+
+
 def init_print(config):
   """Logs the static submission and hyperparameter events for compliance checking."""
   setup_mllog(config)
@@ -235,22 +271,37 @@ def init_print(config):
   mllogger.event("target_accuracy", config.target_eval_loss)
 
   # MLPerf v6.1 mandatory precision, parallelism, micro-batch size, and config filename disclosure.
+  use_lineage = getattr(config, "use_lineage", False)
+  tensor_parallelism = _axis_product(
+      config,
+      "ici_tensor_parallelism",
+      "dcn_tensor_parallelism",
+      "ici_tensor_sequence_parallelism",
+      "dcn_tensor_sequence_parallelism",
+  )
+  expert_parallelism = _axis_product(config, "ici_expert_parallelism", "dcn_expert_parallelism")
+  quantization = getattr(config, "quantization", None)
+  token_all_gather_quantized = quantization and getattr(config, "moe_quantize_token_all_gather", False)
+  if use_lineage:
+    # Lineage runs on a physical mesh where every ici_*_parallelism field is 1.
+    # Its MLA projections are head-sharded across the `activation_length`
+    # (TensorCore) axis while attention sees the full sequence: TP + SP, not
+    # CP. fp8_full also quantizes the EP token all-gather.
+    expert_parallelism = _rule_parallelism(config, "exp")
+    tensor_parallelism = _rule_parallelism(config, "activation_length")
+    quantization = quantization or config.lineage_quantization
+    token_all_gather_quantized = True
   dtype_str = _mllog_precision(getattr(config, "dtype", "bfloat16"))
-  linear_prec = _mllog_precision(getattr(config, "quantization", None), fallback=dtype_str)
-  comm_prec = _mllog_precision(getattr(config, "grad_dtype", None), fallback=dtype_str)
+  linear_prec = _mllog_precision(quantization, fallback=dtype_str)
+  comm_precisions = [_mllog_precision(getattr(config, "grad_dtype", None), fallback=dtype_str)]
+  if token_all_gather_quantized and expert_parallelism > 1:
+    # The EP token all-gather sends tokens in the GMM activation qtype.
+    comm_precisions.append(linear_prec)
+  comm_prec = _lowest_precision(*comm_precisions)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_LINEAR, linear_prec)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_ATTN, dtype_str)
   mllogger.event(mllog.constants.LOWEST_NUMERICAL_PRECISION_IN_COMM, comm_prec)
-  mllogger.event(
-      mllog.constants.TENSOR_PARALLELISM,
-      _axis_product(
-          config,
-          "ici_tensor_parallelism",
-          "dcn_tensor_parallelism",
-          "ici_tensor_sequence_parallelism",
-          "dcn_tensor_sequence_parallelism",
-      ),
-  )
+  mllogger.event(mllog.constants.TENSOR_PARALLELISM, tensor_parallelism)
   mllogger.event(
       mllog.constants.PIPELINE_PARALLELISM,
       _axis_product(config, "ici_pipeline_parallelism", "dcn_pipeline_parallelism"),
@@ -259,19 +310,13 @@ def init_print(config):
       mllog.constants.CONTEXT_PARALLELISM,
       _axis_product(config, "ici_context_parallelism", "dcn_context_parallelism"),
   )
-  mllogger.event(
-      mllog.constants.EXPERT_PARALLELISM,
-      _axis_product(config, "ici_expert_parallelism", "dcn_expert_parallelism"),
-  )
+  mllogger.event(mllog.constants.EXPERT_PARALLELISM, expert_parallelism)
   # TPU v7x exposes 2 JAX devices (TensorCores) per chip, while system descriptions count chips.
   mllogger.event(
       mllog.constants.MICRO_BATCH_SIZE,
       max(1, int(round(getattr(config, "per_device_batch_size", 1) * 2))),
   )
-  mllogger.event(
-      mllog.constants.CONFIG_FILENAME,
-      getattr(config, "mllog_config_filename", "") or "config.yml",
-  )
+  mllogger.event(mllog.constants.CONFIG_FILENAME, f"{config.model_name}.yml")
 
 
 def init_stop():
