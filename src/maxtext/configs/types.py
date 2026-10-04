@@ -2455,6 +2455,22 @@ class TrainingLoop(BaseModel):
           "sharding path as the data loader, so the reshard program is compiled outside the timer. No dataset access."
       ),
   )
+  warm_eval_input_reshard_before_run_start: bool = Field(
+      False,
+      description=(
+          "Before init_stop/run_start: device_put an all-zero synthetic eval batch through the eval loop's "
+          "host->global->eval-input sharding path (the same jax.device_put the eval loop performs), so the eval "
+          "reshard program is compiled outside the timer. No dataset access."
+      ),
+  )
+  eval_cache_prefill_in_background: bool = Field(
+      False,
+      description=(
+          "Right after run_start (inside the timed region): a daemon thread iterates the eval tf.data pipeline once "
+          "so its in-memory cache() is complete before the first eval; the eval file reads then overlap training "
+          "steps instead of being paid serially inside the first eval. tf.data (c4_mlperf) eval loaders only."
+      ),
+  )
   train_shard_in_read: bool = Field(
       False,
       description=(

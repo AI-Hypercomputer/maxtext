@@ -909,6 +909,13 @@ def training_loop_iteration(
   )
   if ran_eval:
     assert eval_data_iterator
+    prefill_thread = python_vars.get("eval_prefill_thread")
+    if prefill_thread is not None and prefill_thread.is_alive():
+      # Let the background cache pass commit before building the eval iterator (never a race in practice:
+      # the first eval is tens of steps after run_start).
+      wait_t = time.perf_counter()
+      prefill_thread.join(timeout=600)
+      max_logging.log(f"eval cache prefill: waited {time.perf_counter() - wait_t:.3f} s before eval")
     # Explicitly reset the eval iterator and counters before starting the eval loop
     if hasattr(eval_data_iterator, "reset"):
       eval_data_iterator.reset()
@@ -1264,14 +1271,17 @@ def train_loop(config, recorder, state=None):
       if p_train_step_first_phase is not None:
         aot_compile_step(p_train_step_first_phase, lower_args, compiler_options, prefix="train_first_phase")
 
+  if p_eval_step is not None:
+    # Also used by warm_eval_input_reshard_before_run_start, which applies with a pre-compiled train step too.
+    with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules_for_eval):
+      data_sharding_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+      shaped_eval_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding_eval, is_eval=True)
   # Ahead-of-time compile the evaluation step alongside the training step to
   # warm up the XLA executable cache and avoid JIT compilation pause on the
   # first eval step.
   if p_eval_step is not None and config.compiled_trainstep_file == "" and not jax.config.jax_enable_pgle:
     with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules_for_eval):
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
-      data_sharding_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
-      shaped_eval_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding_eval, is_eval=True)
       if config.enable_diloco:
         eval_lower_args = (state, shaped_eval_batch, init_rng)
       else:
@@ -1390,11 +1400,23 @@ def train_loop(config, recorder, state=None):
   te_moe_overflow_window = []
   try:
     train_utils.prepare_before_run_start(
-        config, state, learning_rate_schedule, start_step, mesh, data_loader, shaped_batch
+        config,
+        state,
+        learning_rate_schedule,
+        start_step,
+        mesh,
+        data_loader,
+        shaped_batch,
+        shaped_eval_batch=shaped_eval_batch,
     )
     python_vars["last_step_completion"] = datetime.datetime.now()
 
     start_run_clock(config, start_step, warmup_fn=warmup_fn, python_vars=python_vars)
+
+    # Inside the timed region: overlap the eval pipeline's file reads with the first training steps.
+    python_vars["eval_prefill_thread"] = None
+    if config.eval_cache_prefill_in_background and eval_data_iterator is not None:
+      python_vars["eval_prefill_thread"] = train_utils.start_eval_cache_prefill(eval_data_iterator)
 
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
