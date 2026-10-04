@@ -233,8 +233,9 @@ class InferScaleGranularityTest(unittest.TestCase):
 
 
 class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
-  """Validates native_fp8_dot_general's auto-detected per-tensor path -- both operands
-  quantized with a single global scale, no per-token/per-block granularity at all.
+  """Validates native_fp8_dot_general's auto-detected per-tensor weight path -- weight
+  quantized with a single global scale, and per-token activation quantization along
+  the contracting axis.
   """
 
   def _run_family(self, key_w, key_s, batch=8, seed=0):
@@ -264,7 +265,7 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
     lhs = qwix.quantize(
         act_jax.astype(jnp.float32),
         jnp.float8_e4m3fn,
-        channelwise_axes=[],
+        channelwise_axes=[0],
         tiled_axes={},
         calibration_method="absmax",
     )
@@ -283,6 +284,35 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
 
   def test_moe_expert_gate_proj(self):
     self._run_family("moe_w", "moe_s")
+
+  def test_unquantized_module_clears_serve_fp8_quant(self):
+    """Verifies get_quant returns None for modules in unquantized_modules and DenseGeneral
+    clears ServeFp8WeightQuantization when weight_dtype is not FP8."""
+    from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+    from flax import nnx  # pylint: disable=import-outside-toplevel
+    from maxtext.common.common_types import get_quant, get_weight_dtype  # pylint: disable=import-outside-toplevel
+    from maxtext.layers import linears  # pylint: disable=import-outside-toplevel
+
+    cfg = SimpleNamespace(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        unquantized_modules=["in_proj_ba", "gate"],
+        float32_gate_logits=False,
+    )
+    serve_quant = quantizations.ServeFp8WeightQuantization()
+    self.assertIsNone(get_quant(cfg, "in_proj_ba", serve_quant))
+    self.assertIs(get_quant(cfg, "in_proj_qkvz", serve_quant), serve_quant)
+
+    layer = linears.DenseGeneral(
+        in_features_shape=16,
+        out_features_shape=8,
+        weight_dtype=get_weight_dtype(cfg, "in_proj_ba"),
+        dtype=jnp.bfloat16,
+        quant=serve_quant,
+        rngs=nnx.Rngs(0),
+    )
+    self.assertIsNone(layer.quant)
+    self.assertIsNone(layer.kernel_scale)
 
   def test_accepts_genuine_scalar_scale(self):
     """DenseGeneral's own true per-tensor convention (weight_block_size=None,

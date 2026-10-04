@@ -40,15 +40,27 @@ def is_fp8_dtype(dtype: Any) -> bool:
   )
 
 
+def is_module_unquantized(config: Config, module_name: str) -> bool:
+  """Checks whether module_name matches any pattern in config.unquantized_modules."""
+  unquantized = getattr(config, "unquantized_modules", None) or ()
+  leaf_name = module_name.rsplit(".", 1)[-1]
+  return any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized)
+
+
 def get_weight_dtype(config: Config, module_name: str) -> DType:
   """Resolves parameter storage dtype for a submodule, honoring unquantized_modules."""
   if not is_fp8_dtype(config.weight_dtype):
     return config.weight_dtype
-  unquantized = getattr(config, "unquantized_modules", None) or ()
-  leaf_name = module_name.rsplit(".", 1)[-1]
-  if any(fnmatch.fnmatch(module_name, p) or fnmatch.fnmatch(leaf_name, p) for p in unquantized):
+  if is_module_unquantized(config, module_name):
     return config.dtype
   return config.weight_dtype
+
+
+def get_quant(config: Config, module_name: str, quant: Any) -> Any:
+  """Resolves quantization object for a submodule, returning None if in unquantized_modules."""
+  if is_module_unquantized(config, module_name):
+    return None
+  return quant
 
 
 AxisNames = tuple[str, ...]

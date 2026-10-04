@@ -207,6 +207,8 @@ class DenseGeneral(nnx.Module):
       scale_dtype = weight_quant.scale_dtype
       if block_size is None:
         block_size = weight_quant.block_size
+    if isinstance(quant, quantizations.ServeFp8WeightQuantization) and not is_fp8_dtype(weight_dtype):
+      quant = None
 
     self.in_features_shape = canonicalize_tuple(in_features_shape)
     self.out_features_shape = canonicalize_tuple(out_features_shape)
