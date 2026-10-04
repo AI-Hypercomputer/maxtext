@@ -1070,6 +1070,8 @@ init_weights_seed: 0
 # Step-0 / MLPerf time-to-train options (all off by default).
 block_state_before_run_start: false # before run_start: block_until_ready(state), warm the LR schedule, cross-host barrier. No data access.
 warm_input_reshard_before_run_start: false # before run_start: device_put a synthetic zero batch to compile the input reshard program. No data access.
+warm_eval_input_reshard_before_run_start: false # before run_start: device_put a synthetic zero EVAL batch to compile the eval input reshard program. No data access.
+eval_cache_prefill_in_background: false # after run_start: background thread iterates the eval tf.data pipeline once so cache() is complete before the first eval.
 train_shard_in_read: false # c4_mlperf train: shard by file in tfds instead of read-all-then-ds.shard (needs >= n_hosts files).
 train_interleave_cycle_length: -1 # c4_mlperf train: number of files each host reads concurrently (tfds interleave_cycle_length). Applies with or without train_shard_in_read; -1 keeps the tfds default (16). With train_shard_in_read, set it below files-per-host so data_shuffle_seed changes which files are read first.
 

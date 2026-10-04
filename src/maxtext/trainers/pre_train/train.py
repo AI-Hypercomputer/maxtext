@@ -909,6 +909,13 @@ def training_loop_iteration(
   )
   if ran_eval:
     assert eval_data_iterator
+    prefill_thread = python_vars.get("eval_prefill_thread")
+    if prefill_thread is not None and prefill_thread.is_alive():
+      # Let the background cache pass commit before building the eval iterator (never a race in practice:
+      # the first eval is tens of steps after run_start).
+      wait_t = time.perf_counter()
+      prefill_thread.join(timeout=600)
+      max_logging.log(f"eval cache prefill: waited {time.perf_counter() - wait_t:.3f} s before eval")
     # Explicitly reset the eval iterator and counters before starting the eval loop
     if hasattr(eval_data_iterator, "reset"):
       eval_data_iterator.reset()
@@ -1390,11 +1397,28 @@ def train_loop(config, recorder, state=None):
   te_moe_overflow_window = []
   try:
     train_utils.prepare_before_run_start(
-        config, state, learning_rate_schedule, start_step, mesh, data_loader, shaped_batch
+        config,
+        state,
+        learning_rate_schedule,
+        start_step,
+        mesh,
+        data_loader,
+        shaped_batch,
+        shaped_eval_batch=shaped_eval_batch,
+        eval_input_sharding=(
+            sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+            if shaped_eval_batch is not None
+            else None
+        ),
     )
     python_vars["last_step_completion"] = datetime.datetime.now()
 
     start_run_clock(config, start_step, warmup_fn=warmup_fn, python_vars=python_vars)
+
+    # Inside the timed region: overlap the eval pipeline's file reads with the first training steps.
+    python_vars["eval_prefill_thread"] = None
+    if getattr(config, "eval_cache_prefill_in_background", False) and eval_data_iterator is not None:
+      python_vars["eval_prefill_thread"] = train_utils.start_eval_cache_prefill(eval_data_iterator)
 
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
