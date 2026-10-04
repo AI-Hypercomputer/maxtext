@@ -589,6 +589,12 @@ def inner_kernel(
       k_axis = 1 if cfgs.transpose_rhs else 0
       mask_rhs = lax.broadcasted_iota(jnp.int32, tiled_rhs.shape, k_axis) < valid_k
       tiled_rhs = jnp.where(mask_rhs, tiled_rhs, 0)
+      # The lhs block past size_k is stale VMEM too: zeroing only rhs still lets a NaN / Inf there poison the
+      # accumulator (NaN * 0 = NaN) and the in-kernel lhs quantization's block absmax. Only the 2D lhs path gets
+      # here: 3D lhs requires size_k % tile_k == 0 (make_gmm_configs).
+      if not cfgs.lhs_is_3d:
+        mask_lhs = lax.broadcasted_iota(jnp.int32, tiled_lhs.shape, 1) < valid_k
+        tiled_lhs = jnp.where(mask_lhs, tiled_lhs, 0)
 
     def rhs_block(start_k: int, end_k: int, start_n: int, end_n: int):
       if cfgs.transpose_rhs:
