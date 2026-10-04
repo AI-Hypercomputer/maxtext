@@ -1615,6 +1615,7 @@ class RoutedMoE(nnx.Module):
           mask_padding=self.config.moe_tc_ragged_mask_padding,
           flatten_block_size=self.config.moe_tc_ragged_flatten_block_size,
           tag_routing_fn=routing_tag_fn(self.config),
+          keep_3d=self.config.moe_tc_ragged_3d_gmm,
       )
     elif use_ragged_in_permute:
       tag_routing_fn = routing_tag_fn(self.config)
@@ -2291,6 +2292,7 @@ class RoutedMoE(nnx.Module):
         partial_sum=None,
         return_lhs=False,
         return_rhs=False,
+        out_is_3d=False,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2326,7 +2328,7 @@ class RoutedMoE(nnx.Module):
       else:
         inputs, padding_amount = max_utils.maybe_pad(inputs, fwd_tile("wi_tile_fwd_batch_seq"))
       if padding_amount > 0 and partial_sum is not None:
-        partial_sum = jnp.pad(partial_sum, ((0, padding_amount), (0, 0)))
+        partial_sum = jnp.pad(partial_sum, ((0, padding_amount),) + ((0, 0),) * (partial_sum.ndim - 1))
       if not isinstance(inputs, qpl.QArray):
         inputs = inputs.astype(self.dtype)
       if not is_native_kernel:
@@ -2387,6 +2389,7 @@ class RoutedMoE(nnx.Module):
             return_lhs=return_lhs,
             fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
             return_rhs=return_rhs,
+            **({"out_is_3d": True} if out_is_3d else {}),
         )
       else:
         # jax.lax.ragged_dot
@@ -3334,12 +3337,18 @@ class RoutedMoE(nnx.Module):
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       if not gather_weights:
         wo_gather_axes = []
+      # moe_tc_ragged_3d_gmm: the TC sort left the token buffer in the (buffer, emb // 128, 128) layout;
+      # the wo gmm then also writes its output in that layout for the TC unsort.
+      x_is_3d = self.config.num_moe_emb_chunks <= 0 and (x.qvalue if isinstance(x, qpl.QArray) else x).ndim == 3
+      if x_is_3d and (self.get_tensor_parallelism_size() > 1 or self.config.mlp_bias):
+        raise NotImplementedError("moe_tc_ragged_3d_gmm does not support tensor parallelism or mlp_bias.")
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
           tiling=wo_tile_size,
           weight_gather_axes=wo_gather_axes,
           return_rhs=return_weights,
+          **({"out_is_3d": True} if x_is_3d else {}),
       )
       if return_weights:
         intermediate_output, wo = intermediate_output
