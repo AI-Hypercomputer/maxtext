@@ -695,6 +695,30 @@ def save_model_files(
       # Save config.json
       save_config_file(config, current_save_path, output_dir, SAFE_TENSORS_CONFIG_FILE, remove_local_copy)
 
+      # For Laya models (ModernBert encoder + decision head), also write the
+      # subdirectory structure expected by `laya.Agent(output_dir)` if saving locally.
+      if not output_dir.startswith(("gs://", "hf://")) and "head.opt_proj.weight" in weight_arrays:
+        enc_dir = os.path.join(current_save_path, "encoder")
+        os.makedirs(enc_dir, exist_ok=True)
+        config.to_json_file(os.path.join(enc_dir, SAFE_TENSORS_CONFIG_FILE))
+        if tokenizer is not None:
+          tok_dir = os.path.join(current_save_path, "tokenizer")
+          os.makedirs(tok_dir, exist_ok=True)
+          tokenizer.save_pretrained(tok_dir)
+        rl_cfg_path = os.path.join(current_save_path, "rl_agent_config.json")
+        if not os.path.exists(rl_cfg_path):
+          with open(rl_cfg_path, "wt", encoding="utf8") as f:
+            json.dump(
+                {
+                    "enc_dim": getattr(config, "hidden_size", 1024),
+                    "head_dim": 256,
+                    "max_len": getattr(config, "max_position_embeddings", 8192),
+                    "num_qtypes": 5,
+                },
+                f,
+                indent=2,
+            )
+
     # Save .safetensors files (sharding can be outside process guard if weights are replicated)
     # The actual file saving within save_weight_files is guarded.
     # Unwrap nested dict if needed

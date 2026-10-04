@@ -520,7 +520,18 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
   hf_tokenizer_id = FLAGS.hf_model_path or HF_IDS[model_key]
-  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
+  try:
+    tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
+  except Exception:  # pylint: disable=broad-exception-caught
+    subfolder_map = {
+        "laya": "tokenizer",
+        "laya-multilingual": "multilingual/tokenizer",
+        "laya-typed-decisions": "typed-decisions/tokenizer",
+    }
+    subfolder = subfolder_map.get(model_key, "tokenizer")
+    if os.path.isdir(hf_tokenizer_id) and os.path.isdir(os.path.join(hf_tokenizer_id, "tokenizer")):
+      subfolder = "tokenizer"
+    tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, subfolder=subfolder, token=hf_token)
 
   # For multi-modal case:
   processor = AutoProcessor.from_pretrained(hf_tokenizer_id, token=hf_token) if config.use_multimodal else None

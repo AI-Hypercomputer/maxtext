@@ -378,7 +378,24 @@ def main(config, test_args):  # pylint: disable=W0621
       tokenizer = AutoTokenizer.from_pretrained(path, token=hf_token, trust_remote_code=test_args.trust_remote_code)
       break
     except Exception as e:  # pylint: disable=broad-except,broad-exception-caught
-      last_exception = e
+      if config.model_name.startswith("laya"):
+        subfolder_map = {
+            "laya": "tokenizer",
+            "laya-multilingual": "multilingual/tokenizer",
+            "laya-typed-decisions": "typed-decisions/tokenizer",
+        }
+        sub = subfolder_map.get(config.model_name, "tokenizer")
+        if os.path.isdir(str(path)) and os.path.isdir(os.path.join(str(path), "tokenizer")):
+          sub = "tokenizer"
+        try:
+          tokenizer = AutoTokenizer.from_pretrained(
+              path, subfolder=sub, token=hf_token, trust_remote_code=test_args.trust_remote_code
+          )
+          break
+        except Exception as sub_e:  # pylint: disable=broad-except,broad-exception-caught
+          last_exception = sub_e
+      else:
+        last_exception = e
       max_logging.log(f"Failed to load tokenizer from {path}: {e}")
 
   if tokenizer is None:
@@ -617,12 +634,66 @@ def main(config, test_args):  # pylint: disable=W0621
       from transformers import Qwen3VLForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
       model_class = Qwen3VLForConditionalGeneration
+      hf_model = model_class.from_pretrained(
+          test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
+      )
+    elif config.model_name.startswith("laya"):
+      from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+      from safetensors.torch import load_file as load_safetensors_file  # pylint: disable=import-outside-toplevel
+      from transformers import ModernBertConfig, ModernBertModel  # pylint: disable=import-outside-toplevel
+
+      class _LayaHFLogitsWrapper(torch.nn.Module):
+        """Wraps Laya's ModernBertModel encoder and tied embedding projection to expose .logits."""
+
+        def __init__(self, model_path: str, model_name: str, dtype: torch.dtype, token: str | None):
+          super().__init__()
+          enc_sub_map = {
+              "laya": "encoder",
+              "laya-multilingual": "multilingual/encoder",
+              "laya-typed-decisions": "typed-decisions/encoder",
+          }
+          weights_sub_map = {
+              "laya": "",
+              "laya-multilingual": "multilingual",
+              "laya-typed-decisions": "typed-decisions",
+          }
+          if os.path.isdir(model_path):
+            if os.path.exists(os.path.join(model_path, "encoder", "config.json")):
+              hf_cfg = ModernBertConfig.from_pretrained(os.path.join(model_path, "encoder"))
+            else:
+              hf_cfg = ModernBertConfig.from_pretrained(model_path)
+            st_path = os.path.join(model_path, "model.safetensors")
+          else:
+            from huggingface_hub import hf_hub_download  # pylint: disable=import-outside-toplevel
+
+            hf_cfg = ModernBertConfig.from_pretrained(
+                model_path, subfolder=enc_sub_map.get(model_name, "encoder"), token=token
+            )
+            w_sub = weights_sub_map.get(model_name, "")
+            st_path = hf_hub_download(
+                repo_id=model_path,
+                filename="model.safetensors",
+                subfolder=w_sub if w_sub else None,
+                token=token,
+            )
+          hf_cfg._attn_implementation = "eager"
+          self.encoder = ModernBertModel(hf_cfg)
+          raw_sd = load_safetensors_file(st_path)
+          enc_sd = {k[len("encoder.") :]: v.to(dtype) for k, v in raw_sd.items() if k.startswith("encoder.")}
+          self.encoder.load_state_dict(enc_sd, strict=True)
+          self.encoder.to(dtype).eval()
+
+        def forward(self, input_ids, attention_mask=None, **kwargs):
+          hidden = self.encoder(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
+          logits = F.linear(hidden.float(), self.encoder.embeddings.tok_embeddings.weight.float())
+          return SimpleNamespace(logits=logits)
+
+      hf_model = _LayaHFLogitsWrapper(test_args.hf_model_path, config.model_name, torch_dtype, hf_token)
     else:
       model_class = AutoModelForCausalLM
-
-    hf_model = model_class.from_pretrained(
-        test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
-    )
+      hf_model = model_class.from_pretrained(
+          test_args.hf_model_path, torch_dtype=torch_dtype, token=hf_token, trust_remote_code=test_args.trust_remote_code
+      )
     hf_lora_path = config.hf_lora_adapter_path
     if hf_lora_path:
       max_logging.log(f"Loading HF PEFT LoRA adapter from {hf_lora_path}")
