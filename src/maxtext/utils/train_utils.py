@@ -16,6 +16,7 @@
 """Utils that are only interesting for training in MaxText."""
 
 import subprocess
+import threading
 import time
 import jax
 import numpy as np
@@ -47,7 +48,17 @@ from maxtext.utils import sharding
 from maxtext.utils.rampup_batch import create_rampup_manager
 
 
-def prepare_before_run_start(config, state, learning_rate_schedule, start_step, mesh, data_loader, shaped_batch):
+def prepare_before_run_start(
+    config,
+    state,
+    learning_rate_schedule,
+    start_step,
+    mesh,
+    data_loader,
+    shaped_batch,
+    shaped_eval_batch=None,
+    eval_input_sharding=None,
+):
   """Optional setup that runs before init_stop/run_start and never touches the dataset.
 
   MLPerf starts the clock before any part of the system touches the dataset, so everything here uses only the
@@ -71,6 +82,26 @@ def prepare_before_run_start(config, state, learning_rate_schedule, start_step, 
     del warm
     timings.append(f"input reshard warm {time.perf_counter() - t:.3f} s")
 
+  if (
+      getattr(config, "warm_eval_input_reshard_before_run_start", False)
+      and shaped_eval_batch is not None
+      and eval_input_sharding is not None
+  ):
+    # The eval loop forms each host batch as a global array over all mesh axes
+    # (MultiHostDataLoadIterator._get_next_batch_sharded -> _form_global_array) and then device_puts it to the eval
+    # input sharding (train.py eval loop). Warm that path with an all-zero synthetic eval batch (no eval data).
+    t = time.perf_counter()
+    local_rows_eval = config.global_batch_size_to_load_eval // jax.process_count()
+
+    def _synthetic_global_eval(leaf):
+      local = np.zeros((local_rows_eval,) + tuple(leaf.shape[1:]), dtype=leaf.dtype)
+      return multihost_dataloading._form_global_array((), local, mesh)  # pylint: disable=protected-access
+
+    warm_eval = jax.device_put(jax.tree.map(_synthetic_global_eval, shaped_eval_batch), eval_input_sharding)
+    jax.block_until_ready(warm_eval)
+    del warm_eval
+    timings.append(f"eval input reshard warm {time.perf_counter() - t:.3f} s")
+
   if config.block_state_before_run_start:
     # Wait for the restored/initialized train state so it is not paid for inside step 0.
     t = time.perf_counter()
@@ -88,6 +119,45 @@ def prepare_before_run_start(config, state, learning_rate_schedule, start_step, 
 
   if timings:
     max_logging.log("Pre-run_start setup: " + ", ".join(timings))
+
+
+def start_eval_cache_prefill(eval_data_iterator):
+  """eval_cache_prefill_in_background: iterate the eval tf.data pipeline once on a daemon thread.
+
+  The c4_mlperf eval dataset ends in `.cache()`; tf.data's in-memory cache belongs to the dataset object and is
+  shared by every iterator created from it, but it is only committed by an iterator that reads the dataset to the
+  end. Doing that full pass here (right after run_start, overlapped with the first training steps) means the
+  first eval's `reset()` iterator reads from memory instead of paying the per-host eval file reads serially.
+  Returns the thread (joined before the first eval) or None when the loader is not a tf.data pipeline.
+  """
+  # Unwrap view wrappers (e.g. _ReorderedDataIterator.data_iterator) down to the MultiHostDataLoadIterator, whose
+  # `.dataloader` is the tf.data Dataset. Hosts that load no real eval data hold a PlaceHolderDataIterator: skip.
+  inner = eval_data_iterator
+  for _ in range(8):
+    if hasattr(inner, "dataloader") or not hasattr(inner, "data_iterator"):
+      break
+    inner = inner.data_iterator
+  ds = getattr(inner, "dataloader", None)
+  if ds is None or not hasattr(ds, "as_numpy_iterator"):
+    max_logging.log(
+        f"eval_cache_prefill_in_background: eval loader {type(eval_data_iterator).__name__} -> {type(inner).__name__} "
+        "is not a tf.data pipeline; skipped"
+    )
+    return None
+
+  def _run():
+    t = time.perf_counter()
+    n = 0
+    try:
+      for _ in ds.as_numpy_iterator():
+        n += 1
+      max_logging.log(f"eval cache prefill: {n} batches in {time.perf_counter() - t:.3f} s")
+    except Exception as e:  # pylint: disable=broad-except
+      max_logging.log(f"eval cache prefill failed ({e!r}); the first eval will read the eval files itself")
+
+  thread = threading.Thread(target=_run, name="eval_cache_prefill", daemon=True)
+  thread.start()
+  return thread
 
 
 def create_training_optimizer(config, model, mesh=None):
