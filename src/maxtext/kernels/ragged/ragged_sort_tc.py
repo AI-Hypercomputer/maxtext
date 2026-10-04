@@ -172,10 +172,17 @@ def _keep_3d(blocks):
   return len(blocks) > 2 and bool(blocks[2])
 
 
+def _tokens_3d(blocks):
+  """Token-side tensors (sort input / unsort output) are already in the (N, D // 128, 128) layout."""
+  return len(blocks) > 3 and bool(blocks[3])
+
+
 def _gather(x2d, routing, cap, blocks, mask_padding):
   """TC ragged gather of the shard's sorted slots into a [cap, D] buffer ([cap, D // 128, 128] with keep_3d)."""
   block_size, flat_block = blocks[:2]
-  if flat_block:
+  if x2d.ndim == 3:
+    x3d = x2d
+  elif flat_block:
     x3d = _tc_unflatten(x2d, x2d.shape[0], flat_block)
   else:
     x3d = _to3d(x2d)
@@ -216,6 +223,8 @@ def _gather_reduce(buf2d, routing, num_out_tokens, topk, blocks):
       num_out_tokens=num_out_tokens,
       top_k=topk,
   )
+  if _tokens_3d(blocks):
+    return out
   if flat_block:
     return _tc_flatten(out, num_out_tokens, flat_block)
   return _to2d(out)
@@ -316,8 +325,16 @@ def ring_ragged_sort_tc(
     group_sizes_local = tag_routing_fn(group_sizes_local)
     topk_argsort_revert_indices = tag_routing_fn(topk_argsort_revert_indices)
   del num_tokens_local
+  # A 3D (N, D // 128, 128) input (moe_tc_ragged_3d_dispatch) is gathered without a relayout, and its
+  # cotangent is produced in the same layout.
+  tokens_3d = hidden_states_local.ndim == 3
   x = tc_sort_gather(
-      hidden_states_local, routing, cap, topk, (gather_block_size, flatten_block_size, keep_3d), mask_padding
+      hidden_states_local,
+      routing,
+      cap,
+      topk,
+      (gather_block_size, flatten_block_size, keep_3d, tokens_3d),
+      mask_padding,
   )
   return x, group_sizes_local, topk_argsort_revert_indices, routing
 
@@ -349,6 +366,7 @@ def ring_ragged_unsort_tc(
     mask_padding=True,
     flatten_block_size=0,
     prescaled=False,
+    out_3d=False,
 ):
   """TC version of `ring_ragged_unsort`: weighted top-k combine of this shard's slots.
 
@@ -360,9 +378,11 @@ def ring_ragged_unsort_tc(
     topk_weights: flat [N * topk] routing weights (differentiated). Unused if prescaled.
     prescaled: rows are already multiplied by their routing weight (e.g. on the expert
       activation, see `tc_buffer_row_weights`), so only the unweighted combine is done.
+    out_3d: return the combine in the TC kernels' (N, hidden // 128, 128) layout (no relayout);
+      the cotangent is then expected in that layout too.
 
   Returns:
-    [N, hidden] partial combine for this shard's experts.
+    [N, hidden] (or [N, hidden // 128, 128] if out_3d) partial combine for this shard's experts.
   """
   cap = sorted_tokens_local.shape[0]
   n = routing.slot_order.shape[0]
@@ -375,5 +395,10 @@ def ring_ragged_unsort_tc(
     scaled = (sorted_tokens_local.astype(jnp.float32) * w_rows).astype(sorted_tokens_local.dtype)
   keep_3d = sorted_tokens_local.ndim == 3
   return tc_unsort_reduce(
-      scaled, routing, num_out_tokens, topk, (gather_block_size, flatten_block_size, keep_3d), mask_padding
+      scaled,
+      routing,
+      num_out_tokens,
+      topk,
+      (gather_block_size, flatten_block_size, keep_3d, out_3d),
+      mask_padding,
   )
