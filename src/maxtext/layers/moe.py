@@ -726,6 +726,7 @@ def _all_gather_quantized_payload(
     tiled: bool,
     method: str,
     qtype: jnp.dtype = jnp.float8_e5m2,
+    num_feature_axes: int = 1,
 ) -> jax.Array:
   """jax.lax.all_gather with a quantized wire payload; returns dequantized x.dtype.
 
@@ -738,20 +739,25 @@ def _all_gather_quantized_payload(
       'fixed,<b>': static per-tensor scale b/qmax. The scale is identical on all
         shards, so only qvalues are gathered. For E5M2, |x| > ~b saturates and
         |x| < ~1.3e-10*b flushes to zero.
-      'rowwise': dynamic per-token absmax scale over all leading axes (e.g.
-        (batch, seq) for 3D, (tokens,) for 2D), matching the per-row gradient
-        quantization in megablox `_bwd_quantize_gradient`. Scales differ per
-        shard, so they are gathered alongside qvalues.
+      'rowwise': dynamic per-token absmax scale over the token axes (all but
+        the trailing `num_feature_axes`, e.g. (batch, seq) for 3D, (tokens,)
+        for 2D), matching the per-row gradient quantization in megablox
+        `_bwd_quantize_gradient`. Scales differ per shard, so they are
+        gathered alongside qvalues.
     qtype: Wire dtype of the quantized payload.
+    num_feature_axes: Number of trailing axes that form one token's features.
+      'rowwise' computes one scale per token over these axes, e.g. 2 for the
+      (batch, seq, emb // 128, 128) layout of moe_tc_ragged_3d_dispatch.
 
   Returns:
     The gathered, dequantized array in `x.dtype`.
   """
   static = method.startswith("fixed")
+  token_axes = tuple(range(x.ndim - num_feature_axes))
   if not static and method != "rowwise":
     raise ValueError(f"Unsupported method: {method!r}. Supported: 'rowwise', 'fixed,<bound>'.")
-  if not static and axis in (x.ndim - 1, -1):
-    raise ValueError(f"'rowwise' requires gathering along a leading axis, got axis={axis}.")
+  if not static and axis % x.ndim not in token_axes:
+    raise ValueError(f"'rowwise' requires gathering along a token axis, got axis={axis}.")
 
   x_f32 = x.astype(jnp.float32)
   if static:
@@ -766,7 +772,7 @@ def _all_gather_quantized_payload(
     x_q = qpl.quantize(
         x_f32,
         qtype=qtype,
-        channelwise_axes=tuple(range(x.ndim - 1)),
+        channelwise_axes=token_axes,
         calibration_method="absmax",
     )
     scale = jax.lax.all_gather(x_q.scale, axis_name=axis_name, axis=axis, tiled=tiled)
@@ -794,6 +800,7 @@ def _moe_combine_psum_scatter(
       grads: [local_batch, sequence_length, hidden_dim], incoming cotangent.
       Output: [global_batch, sequence_length, hidden_dim], gathered along
         scatter_dimension=0.
+    With moe_tc_ragged_3d_dispatch, hidden_dim is split as (hidden_dim // 128, 128).
   """
   return jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled)
 
@@ -822,7 +829,11 @@ def _moe_combine_psum_scatter_bwd(
     gathered_grads = jax.lax.all_gather(grads, axis_name=axis_name, tiled=tiled, axis=scatter_dimension)
     return (gathered_grads,)
 
-  gathered_grads = _all_gather_quantized_payload(grads, axis_name, axis=scatter_dimension, tiled=tiled, method=bwd_method)
+  # The combine tensor is (batch, seq, *features): features are (emb,) or, with moe_tc_ragged_3d_dispatch,
+  # (emb // 128, 128). 'rowwise' keeps one scale per token in both layouts.
+  gathered_grads = _all_gather_quantized_payload(
+      grads, axis_name, axis=scatter_dimension, tiled=tiled, method=bwd_method, num_feature_axes=grads.ndim - 2
+  )
   return (gathered_grads,)
 
 
@@ -1506,7 +1517,8 @@ class RoutedMoE(nnx.Module):
     # reshape inputs (batch, sequence, emb) to (batch * sequence, emb)
     inputs_shape = raw_inputs.shape
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
-    inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, inputs_shape[2]))
+    # moe_tc_ragged_3d_dispatch: inputs arrive as (batch, seq, emb // 128, 128) and stay 3D for the TC sort.
+    inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, *inputs_shape[2:]))
     if precomputed_topk is not None:
       weights, selected_experts = precomputed_topk
     else:
@@ -1596,6 +1608,9 @@ class RoutedMoE(nnx.Module):
             f"(buffer_size={buffer_size}, total slots={bsz_times_seq_len * self.num_experts_per_tok}); "
             "using the SparseCore ragged sort for this call."
         )
+    if inputs_2d.ndim == 3 and not use_tc_sort:
+      # 3D dispatch layout but this call does not use the TC sort (e.g. dropless fallback): back to 2D.
+      inputs_2d = jnp.reshape(inputs_2d, (bsz_times_seq_len, -1))
     if use_ragged_in_permute and use_tc_sort:
       sorted_inputs, group_size, sorted_selected_experts, tc_routing = ring_ragged_sort_tc(
           inputs_2d,
@@ -1738,8 +1753,13 @@ class RoutedMoE(nnx.Module):
       topk_argsort_indices=None,
       tc_routing=None,
       tc_prescaled=False,
+      tc_out_3d=False,
   ):
-    """Unpermute tokens to original order and combine weights."""
+    """Unpermute tokens to original order and combine weights.
+
+    With tc_out_3d (moe_tc_ragged_3d_dispatch), the TC combine stays in the (emb // 128, 128) layout and
+    the result is (batch, seq, emb // 128, 128).
+    """
 
     if tc_routing is not None:
       output = ring_ragged_unsort_tc(
@@ -1751,7 +1771,11 @@ class RoutedMoE(nnx.Module):
           mask_padding=self.config.moe_tc_ragged_mask_padding,
           flatten_block_size=self.config.moe_tc_ragged_flatten_block_size,
           prescaled=tc_prescaled,
+          out_3d=tc_out_3d,
       )
+      if tc_out_3d:
+        # Rows cover the EP-gathered batch (batch_size is the local batch), so the leading dim is inferred.
+        return output.reshape(-1, sequence_length, *output.shape[1:]).astype(self.dtype)
     elif self.config.use_ragged_sort and self.config.use_ring_of_experts:
       local_num_experts = self.config.num_experts // self.get_expert_parallelism_size()
       # Build the flat routing weights in the same layout as
@@ -2616,6 +2640,28 @@ class RoutedMoE(nnx.Module):
     # axes the per-layer psum would have used) and loss_fn reduces the stacked arrays once after the layer loop.
     defer_small_ars = bool(getattr(self.config, "defer_small_all_reduces", False)) and self.config.use_ring_of_experts
 
+    def use_tc_3d_dispatch():
+      """moe_tc_ragged_3d_dispatch: tokens are all-gathered, TC-sorted and combined in (emb // 128, 128) layout.
+
+      Raises instead of silently falling back to the 2D layout when the flag is set but cannot apply.
+      """
+      if not self.config.moe_tc_ragged_3d_dispatch:
+        return False
+      requirements = {
+          "moe_tc_ragged_sort=True": self.config.moe_tc_ragged_sort,
+          "moe_tc_ragged_3d_gmm=True": self.config.moe_tc_ragged_3d_gmm,
+          "use_ring_of_experts=True": self.config.use_ring_of_experts,
+          "use_ragged_sort=True": self.config.use_ragged_sort,
+          "num_moe_emb_chunks <= 0": self.config.num_moe_emb_chunks <= 0,
+          "no tensor parallelism": self.get_tensor_parallelism_size() == 1,
+          "mlp_bias=False": not self.config.mlp_bias,
+          f"MoE expert input dim ({self.moe_expert_input_dim}) % 128 == 0": self.moe_expert_input_dim % 128 == 0,
+      }
+      unmet = [name for name, ok in requirements.items() if not ok]
+      if unmet:
+        raise ValueError(f"moe_tc_ragged_3d_dispatch=True requires: {', '.join(unmet)}.")
+      return True
+
     def quantize_and_all_gather_tokens(
         x: jax.Array,
         axis_name: str,
@@ -2673,6 +2719,15 @@ class RoutedMoE(nnx.Module):
         def _ep_all_gather(z):
           return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
 
+      if use_tc_3d_dispatch():
+        # moe_tc_ragged_3d_dispatch: all-gather the tokens in the TC kernels' (emb // 128, 128) layout; the
+        # reshape is on the local tokens, so the gathered tensor needs no relayout before the TC sort.
+        def token_all_gather(z):
+          return _ep_all_gather(z.reshape(*z.shape[:-1], z.shape[-1] // 128, 128))
+
+      else:
+        token_all_gather = _ep_all_gather
+
       # Duplicate token inputs across all expert shards.
       if self.config.moe_quantize_token_all_gather:
         # If enabled, tokens are quantized to FP8 before all-gather to minimize bandwidth.
@@ -2681,10 +2736,10 @@ class RoutedMoE(nnx.Module):
             x,
             axis_name=self._expert_parallelism_name,
             calibration_method=self.config.act_quantization_calibration_method,
-            all_gather_fn=_ep_all_gather,
+            all_gather_fn=token_all_gather,
         )
       else:
-        x = _ep_all_gather(x)
+        x = token_all_gather(x)
 
       local_tokens = logits.shape[0] * logits.shape[1]
       precomputed_topk = None
@@ -3427,17 +3482,23 @@ class RoutedMoE(nnx.Module):
             topk_argsort_indices=routing.topk_argsort_indices,
             tc_routing=routing.tc_routing,
             tc_prescaled=tc_prescaled,
+            tc_out_3d=x_is_3d and use_tc_3d_dispatch(),
         )
 
         # Sum up the partial outputs across the expert shards.
-        output = jnp.reshape(
-            output,
-            (
-                -1,
-                sequence_length,
-                self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
-            ),
-        )
+        if output.ndim == 4:
+          # moe_tc_ragged_3d_dispatch: reduce-scatter in the (emb // 128, 128) layout; only the local result is
+          # reshaped back below.
+          output = jnp.reshape(output, (-1, sequence_length, *output.shape[2:]))
+        else:
+          output = jnp.reshape(
+              output,
+              (
+                  -1,
+                  sequence_length,
+                  self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
+              ),
+          )
         combine_bwd_method = self.config.moe_quantize_combine_bwd_method
         if combine_bwd_method:
           output = _moe_combine_psum_scatter(
@@ -3454,6 +3515,8 @@ class RoutedMoE(nnx.Module):
               scatter_dimension=0,
               tiled=True,
           )
+        if output.ndim == 4:
+          output = jnp.reshape(output, (*output.shape[:2], -1))
         return (
             output,
             routing.lb_loss,

@@ -85,6 +85,7 @@ class RaggedSortTcTest(parameterized.TestCase):
       skewed=False,
       prescaled=False,
       keep_3d=False,
+      tokens_3d=False,
   ):
     """Runs the TC sort -> f -> unsort per shard and checks it against the reference; returns (counts, cap)."""
     devices = jax.devices()
@@ -111,6 +112,9 @@ class RaggedSortTcTest(parameterized.TestCase):
       return jnp.tanh(buf.astype(jnp.float32) * m.reshape(buf.shape[1:])).astype(buf.dtype)
 
     def tc_shard(x, topk_indices, w, with_dh=True):
+      if tokens_3d:
+        # moe_tc_ragged_3d_dispatch: tokens arrive (and the combine leaves) in the (N, hidden // 128, 128) layout.
+        x = x.reshape(x.shape[0], -1, 128)
       buf, group_sizes, _, routing = ragged_sort_tc.ring_ragged_sort_tc(
           x,
           topk_indices,
@@ -141,13 +145,18 @@ class RaggedSortTcTest(parameterized.TestCase):
             mask_padding=mask_padding,
             flatten_block_size=flatten_block_size,
             prescaled=prescaled,
+            out_3d=tokens_3d,
         )
 
       if not with_dh:
-        return unsort(h)[None]
+        y = unsort(h)
+        return y.reshape(y.shape[0], -1)[None]
       y, unsort_vjp = jax.vjp(unsort, h)
+      if tokens_3d:
+        assert y.ndim == 3, y.shape
       # Cotangent of the unsort input (the expert output buffer), produced by the TC gather.
-      (dh,) = unsort_vjp(ct[jax.lax.axis_index("expert")].astype(y.dtype))
+      (dh,) = unsort_vjp(ct[jax.lax.axis_index("expert")].reshape(y.shape).astype(y.dtype))
+      y = y.reshape(y.shape[0], -1)
       count = routing.count
       return (
           buf.reshape(buf.shape[0], -1)[None],
@@ -277,6 +286,18 @@ class RaggedSortTcTest(parameterized.TestCase):
   def test_sort_unsort_keep_3d(self, kwargs):
     """moe_tc_ragged_3d_gmm: the sorted buffer stays in the (cap, hidden // 128, 128) layout."""
     self._run(keep_3d=True, skewed=True, **kwargs)
+
+  @pytest.mark.tpu_only
+  @parameterized.named_parameters(
+      ("keep_3d", {"keep_3d": True}),
+      ("keep_3d_prescaled_truncated", {"keep_3d": True, "prescaled": True, "buffer_factor": 0.75}),
+      ("2d_buffer", {}),
+      ("2d_buffer_flatten", {"flatten_block_size": 256}),
+      ("dsv3_hidden", {"keep_3d": True, "num_tokens": 256, "hidden": 7168, "num_experts": 32, "topk": 8}),
+  )
+  def test_sort_unsort_tokens_3d(self, kwargs):
+    """moe_tc_ragged_3d_dispatch: 3D-layout token input / combine output (and their cotangents)."""
+    self._run(tokens_3d=True, skewed=True, **kwargs)
 
 
 if __name__ == "__main__":

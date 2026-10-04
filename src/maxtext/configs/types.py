@@ -1274,6 +1274,16 @@ class MoEGeneral(BaseModel):
           " multiples of 1024 (e.g. 3584 / 1792) DMA whole (emb // 128, 128) slabs and relayout the window in VMEM."
       ),
   )
+  moe_tc_ragged_3d_dispatch: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort and moe_tc_ragged_3d_gmm under ring of experts: reshape the local tokens to"
+          " (batch, seq, emb // 128, 128) before the expert-parallel all-gather, and keep the TC unsort output and"
+          " the combine reduce-scatter in that layout (only the local result is reshaped back). This removes the"
+          " full-size (N, D/128, 128) <-> (N, D) relayouts of the gathered tokens and of the combine output, in"
+          " both the forward and the backward pass. Raises if it cannot apply (e.g. emb not a multiple of 128)."
+      ),
+  )
   moe_use_direct_token_gather: bool = Field(
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
@@ -3971,6 +3981,9 @@ class MaxTextConfig(
 
   def validate_moe_tc_ragged_sort(self):
     """Validates that moe_tc_ragged_sort is used with the truncated-buffer ring-of-experts ragged sort."""
+    if self.moe_tc_ragged_3d_dispatch and not (self.moe_tc_ragged_sort and self.moe_tc_ragged_3d_gmm):
+      # The remaining requirements of the 3D dispatch are those of moe_tc_ragged_sort / moe_tc_ragged_3d_gmm below.
+      raise ValueError("moe_tc_ragged_3d_dispatch=True requires moe_tc_ragged_sort=True and moe_tc_ragged_3d_gmm=True.")
     if not self.moe_tc_ragged_sort:
       return
     if not self.use_ring_of_experts:
