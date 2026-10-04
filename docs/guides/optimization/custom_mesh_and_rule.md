@@ -61,7 +61,7 @@ Built on `ep-as-dp.yml` for large-scale training where the FSDP rank is large en
 
 ### `fsdp-as-dp-for-attn-rf.yml`
 
-Identical to `fsdp-as-dp-for-attn.yml` except that the MoE router weight (`embed_router`) is sharded on `fsdp` (as in `ep-as-dp.yml`) instead of being fully replicated. With a replicated router, GSPMD reduces the `bf16[embed, num_experts]` router gradient with a synchronous TensorCore all-reduce over every device inside the backward scan loop; sharding it turns that reduction into a reduce-scatter (plus a small forward/remat all-gather). Prefer this variant at large FSDP ranks when the router-gradient all-reduce shows up as exposed time in the backward pass.
+Identical to `fsdp-as-dp-for-attn.yml` except that the MoE router weight (`embed_router`) is sharded on `fsdp` (as in `ep-as-dp.yml`) instead of being fully replicated. With a replicated router, GSPMD reduces the `bf16[embed, num_experts]` router gradient with a synchronous TensorCore all-reduce over every device inside the backward scan loop; sharding it on `fsdp` does not remove the reduction (the gradient is still a partial sum over every batch axis, including `expert`), but splits it into a reduce-scatter over `fsdp` plus an all-reduce of only the `[embed / fsdp, num_experts]` shard over the remaining batch axes (`data`, `fsdp_transpose`, `expert`), at the cost of a small forward/remat all-gather. Prefer this variant at large FSDP ranks when the router-gradient all-reduce shows up as exposed time in the backward pass.
 
 ### `shard-exp-on-fsdp`
 

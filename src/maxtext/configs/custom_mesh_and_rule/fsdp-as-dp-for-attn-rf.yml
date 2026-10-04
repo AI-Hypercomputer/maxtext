@@ -87,8 +87,11 @@ logical_axis_rules: [
                       ['embed_moe', ['fsdp']],
                       # 'rf' variant: shard the router weight on fsdp (as in ep-as-dp) instead of replicating it.
                       # A replicated router makes GSPMD reduce the bf16[embed, num_experts] router gradient with a
-                      # synchronous TensorCore all-reduce over every device inside the backward scan loop; the fsdp
-                      # sharding turns it into a reduce-scatter at the cost of a small forward/remat all-gather.
+                      # synchronous TensorCore all-reduce over every device inside the backward scan loop. The fsdp
+                      # sharding does not remove the reduction (the gradient is still a partial sum over all batch
+                      # axes, including expert): it becomes a reduce-scatter over fsdp plus an all-reduce of only the
+                      # [embed / fsdp, num_experts] shard over data / fsdp_transpose / expert, at the cost of a small
+                      # forward/remat all-gather.
                       ['embed_router', ['fsdp']],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
