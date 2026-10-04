@@ -633,6 +633,8 @@ def permutation_matrices(streams: int) -> np.ndarray:
   Built once per process and returned as a read-only NumPy array, never a JAX
   array: the matrices are fixed, so under `jit`, `shard_map` or `custom_vjp` they
   must be a compile-time constant rather than a traced operand.
+
+  Reference: mHC-lite: https://openreview.net/pdf?id=5IJX6kvOif
   """
   perms = np.array(list(itertools.permutations(range(streams))))
   matrices = np.eye(streams, dtype=np.float32)[perms]

@@ -28,16 +28,6 @@ from maxtext.kernels.mhc import common as mhc_kernel_common
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes
-import numpy as np
-
-
-def get_permutation_matrices(k: int) -> np.ndarray:
-  """Returns all permutation matrices of size k, shared with the Pallas kernel.
-
-  Reference: mHC-lite: https://openreview.net/pdf?id=5IJX6kvOif
-  Shape: (k!, k, k)
-  """
-  return mhc_kernel_common.permutation_matrices(k)
 
 
 def get_functions(expansion_rate: int):
@@ -298,7 +288,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       # Use float32 for numerical stability during softmax
       weights = jax.nn.softmax(intermediate.astype(jnp.float32), axis=-1).astype(self.dtype)
       # Sum the permutation matrices with the weights
-      permutation_matrices = get_permutation_matrices(self.k).astype(self.dtype)
+      permutation_matrices = mhc_kernel_common.permutation_matrices(self.k).astype(self.dtype)
       output = jnp.einsum(
           "bsn,nkm -> bskm",
           weights,
