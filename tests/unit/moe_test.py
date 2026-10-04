@@ -38,8 +38,9 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.moe import _moe_combine_psum_scatter
 from maxtext.layers.initializers import NdInitializer, nd_dense_init, variable_to_logically_partitioned
 from maxtext.layers.quantizations import Fp8Quantization, WeightQuantConfig, configure_quantization
-from maxtext.utils import max_logging, maxtext_utils
+from maxtext.utils import max_logging, maxtext_utils, sharding
 from maxtext.utils.sharding import remove_expert_from_partition_spec
+from tests.unit.moe_megatron_aux_loss_test import _tiny_deepseek_config
 from tests.utils.test_helpers import get_test_config_path
 from tests.utils import linen_wrappers
 import pytest
@@ -616,6 +617,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
           check_vma=False,
           moe_fsdp_use_two_stage_all_gather=False,
           moe_pin_sparse_core_all_gathers=False,
+          moe_flat_fsdp_weights=False,
           moe_dropless_fallback=None,
           load_balance_loss_weight=0.0,
       ),
@@ -4186,6 +4188,149 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
     # The required factor is the smallest that keeps get_ragged_buffer_size >= the shard's token count.
     self.assertEqual(moe.RoutedMoE.get_ragged_buffer_size(8, 2, 4, 2, 1.5), 12)
     self.assertLess(moe.RoutedMoE.get_ragged_buffer_size(8, 2, 4, 2, 1.49), 12)
+
+
+def _flat_fsdp_config(**overrides):
+  """Tiny DeepSeek config on the tokamax gmm_v2 fp8 path with the explicit weight all-gather over FSDP."""
+  return _tiny_deepseek_config(
+      "flat_fsdp_" + "_".join(f"{k}{v}" for k, v in sorted(overrides.items())),
+      ici_expert_parallelism=2,
+      ici_fsdp_parallelism=jax.device_count() // 2,
+      shard_embed_moe_on_fsdp=True,
+      use_tokamax_gmm=True,
+      use_gmm_v2=True,
+      quantization="fp8_full",
+      use_qwix_quantization=True,
+      weight_quantization_calibration_method="fixed,-224,224",
+      act_quantization_calibration_method="fixed,-224,224",
+      bwd_quantization_calibration_method="fixed,-1,1",
+      # The tiny config sets float32_gate_logits=True, which is rejected with a quantized router projection.
+      quantize_router_proj=False,
+      # gmm_v2 only quantizes the lhs (which the fixed act scale requires) when the contraction dim is at least the
+      # MXU width; with smaller K it dequantizes the rhs instead and rejects the lhs scale.
+      base_emb_dim=256,
+      base_moe_mlp_dim=256,
+      **overrides,
+  )
+
+
+@pytest.mark.tpu_only
+class FlatFsdpWeightsGraphTest(unittest.TestCase):
+  """RoutedMoE with moe_flat_fsdp_weights builds an abstract model the training path can shard."""
+
+  def test_abstract_model_and_shardings(self):
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for expert parallelism 2 and FSDP >= 2.")
+    cfg = _flat_fsdp_config(moe_flat_fsdp_weights=True)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    # As get_abstract_state_nnx: eval_shape under the axis rules (no global mesh), shardings resolved by MaxText.
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      model = nnx.eval_shape(
+          lambda: moe.RoutedMoE(
+              config=cfg,
+              num_experts=cfg.num_experts,
+              num_experts_per_tok=cfg.num_experts_per_tok,
+              mesh=mesh,
+              kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+              kernel_axes=("embed", "mlp"),
+              intermediate_dim=cfg.moe_mlp_dim,
+              dtype=cfg.dtype,
+              rngs=nnx.Rngs(0),
+          )
+      )
+      # The qwix fix-up in Linen-wrapped init walks the NNX graph, which descends into the kernel axes.
+      self.assertIn(("wi_kernel_axes", 0, 0), [path for path, _ in nnx.iter_graph(model)])
+      _, abs_state, _ = nnx.split(model, nnx.Param, ...)
+      shardings = sharding.nnx_construct_named_sharding(abs_state, mesh)
+
+    num_experts, emb, mlp = cfg.num_experts, cfg.base_emb_dim, cfg.moe_mlp_dim
+    for name, shape in (
+        ("wi_0", (num_experts * emb, mlp)),
+        ("wi_1", (num_experts * emb, mlp)),
+        ("wo", (num_experts * mlp, emb)),
+    ):
+      self.assertEqual(abs_state[name].shape, shape, name)
+      self.assertEqual(shardings[name].get_value().spec[0], ("expert", "fsdp"), name)
+
+
+@pytest.mark.tpu_only
+class FlatFsdpWeightsParityTest(unittest.TestCase):
+  """RoutedMoE with flat 2D (expert, fsdp) expert weights matches the 3D layout."""
+
+  def setUp(self):
+    super().setUp()
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for expert parallelism 2 and FSDP >= 2.")
+
+  def _run(self, **overrides):
+    """Runs RoutedMoE forward and backward under fp8 gmm rules, so both layouts take the explicit weight QAG.
+
+    The block runs as an NNX module, as in training: Linen-wrapped params are unboxed with Flax's logical-axis
+    resolution, which does not know CompoundLogicalAxis.
+
+    Returns:
+      (output, lb_loss, grads, params), with grads and params as pure dicts.
+    """
+    cfg = _flat_fsdp_config(**overrides)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        weight_calibration_method=cfg.weight_quantization_calibration_method,
+        act_calibration_method=cfg.act_quantization_calibration_method,
+        bwd_calibration_method=cfg.bwd_quantization_calibration_method,
+        op_names=("gmm", "ragged_dot"),
+    )
+    inputs = jax.random.normal(
+        jax.random.PRNGKey(1), (cfg.per_device_batch_size * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim)
+    )
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      # As create_model: built under the axis rules (no global mesh), shardings resolved by MaxText.
+      model = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.moe_mlp_dim,
+          dtype=cfg.dtype,
+          rngs=nnx.Rngs(7),
+      )
+      # Fixed calibrations keep no quant stats, so the eager init call qwix makes is not needed.
+      model = qwix.quantize_model(model, qwix.QtProvider([rule]), inputs, skip_nnx_init=True)
+      graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+      shardings = sharding.nnx_construct_named_sharding(params, mesh)
+      params = jax.tree.map(jax.device_put, params, shardings)
+
+      def loss_fn(params):
+        out, lb_loss, _ = nnx.merge(graphdef, params, rest)(inputs)
+        return jnp.mean(out**2) + lb_loss, (out, lb_loss)
+
+      with jax.set_mesh(mesh):
+        (_, (out, lb_loss)), grads = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(params)
+    return out, lb_loss, nnx.to_pure_dict(grads), nnx.to_pure_dict(params)
+
+  def test_weights_loss_and_grads_match(self):
+    out_ref, lb_ref, grads_ref, params_ref = self._run(moe_flat_fsdp_weights=False)
+    out, lb, grads, params = self._run(moe_flat_fsdp_weights=True)
+
+    # Same init: each flat [E * rows, cols] weight is the 3D [E, rows, cols] one viewed as 2D.
+    for (path, p), p_ref in zip(
+        jax.tree_util.tree_leaves_with_path(params), jax.tree_util.tree_leaves(params_ref), strict=True
+    ):
+      np.testing.assert_array_equal(np.reshape(p, p_ref.shape), p_ref, err_msg=jax.tree_util.keystr(path))
+
+    np.testing.assert_allclose(out, out_ref, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(lb, lb_ref, rtol=1e-6)
+    for (path, g), g_ref in zip(
+        jax.tree_util.tree_leaves_with_path(grads), jax.tree_util.tree_leaves(grads_ref), strict=True
+    ):
+      np.testing.assert_allclose(
+          np.reshape(g, g_ref.shape), g_ref, rtol=1e-4, atol=1e-6, err_msg=jax.tree_util.keystr(path)
+      )
 
 
 if __name__ == "__main__":

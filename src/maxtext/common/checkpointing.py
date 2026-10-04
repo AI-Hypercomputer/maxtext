@@ -783,6 +783,7 @@ def load_state_if_possible(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
         enable_single_replica_ckpt_restoring=bool(enable_single_replica_ckpt_restoring),
+        convert_flat_moe_weights=bool(getattr(maxtext_config, "moe_flat_fsdp_weights", False)),
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -930,6 +931,107 @@ def maybe_dequantize_restored_params(restored_weights: Any, expected_param_pytre
   return out
 
 
+_FLAT_MOE_LEAVES = ("wi_0", "wi_1", "wo")
+
+
+def _flat_moe_restore_plan(want, stored_weights):
+  """Finds routed-expert weights the model wants flat (moe_flat_fsdp_weights) but the checkpoint stores 3D.
+
+  Returns {path: (flat_target_sds, stored_shape_sds)} for every leaf named wi_0/wi_1/wo whose expected shape is
+  the flat [E * rows, (L,) cols] view of a stored [E, (L,) rows, cols] array. `stored_shape_sds` carries the stored
+  shape with the (expert | fsdp)-style sharding derived from the flat target's (expert, fsdp) dim-0 sharding, so
+  Orbax restores the 3D/4D array directly in a layout that `_flat_moe_convert` turns into the flat one.
+  """
+  plan = {}
+
+  def _walk(w, s, path):
+    if isinstance(w, dict):
+      for k, v in w.items():
+        _walk(v, s.get(k) if isinstance(s, dict) else None, path + (k,))
+      return
+    if not path or path[-1] not in _FLAT_MOE_LEAVES or s is None:
+      return
+    want_shape = tuple(getattr(w, "shape", ()) or ())
+    stored_shape = tuple(getattr(s, "shape", ()) or ())
+    if not want_shape or not stored_shape or want_shape == stored_shape or len(want_shape) != len(stored_shape) - 1:
+      return
+    if len(stored_shape) == 4:  # scanned: [E, L, rows, cols] -> [E * rows, L, cols]
+      e, l, r, c = stored_shape
+      flat_shape = (e * r, l, c)
+    elif len(stored_shape) == 3:  # unscanned (e.g. MTP): [E, rows, cols] -> [E * rows, cols]
+      e, r, c = stored_shape
+      flat_shape = (e * r, c)
+    else:
+      return
+    if want_shape != flat_shape:
+      return
+    sharding = getattr(w, "sharding", None)
+    mesh = getattr(sharding, "mesh", None)
+    spec = getattr(sharding, "spec", None)
+    if mesh is None or spec is None:
+      return
+    dim0 = spec[0] if len(spec) > 0 else None
+    dim0_axes = () if dim0 is None else ((dim0,) if isinstance(dim0, str) else tuple(dim0))
+    # Dim 0 is (expert, fsdp...) minus size-one axes. With a single axis left we can't tell which it is, so shard
+    # the stored rows dim on it: rows (embed/mlp) divide any mesh axis, the expert count may not.
+    expert_axis = dim0_axes[0] if len(dim0_axes) > 1 else None
+    rest = dim0_axes[1:] if len(dim0_axes) > 1 else dim0_axes
+    rest_spec = None if not rest else (rest[0] if len(rest) == 1 else rest)
+    tail = tuple(spec)[1:] + (None,) * max(0, len(flat_shape) - len(spec))
+    if len(stored_shape) == 4:
+      stored_spec = jax.sharding.PartitionSpec(expert_axis, tail[0], rest_spec, tail[1])
+    else:
+      stored_spec = jax.sharding.PartitionSpec(expert_axis, rest_spec, tail[0])
+    stored_sds = jax.ShapeDtypeStruct(stored_shape, w.dtype, sharding=jax.sharding.NamedSharding(mesh, stored_spec))
+    plan[path] = (w, stored_sds)
+
+  _walk(want, stored_weights, ())
+  return plan
+
+
+def _set_path(tree, path, value):
+  node = tree
+  for key in path[:-1]:
+    if not isinstance(node, dict) or key not in node:
+      return False
+    node = node[key]
+  if not isinstance(node, dict) or path[-1] not in node:
+    return False
+  node[path[-1]] = value
+  return True
+
+
+def _flat_moe_convert(x, target):
+  """Reshards a restored [E, (L,) rows, cols] weight into the flat [E * rows, (L,) cols] target.
+
+  The merge of the expert dim with the FSDP-sharded row dim is a real data movement (each device's flat block is a
+  contiguous run of one expert's rows), so it is done as a jit with `out_shardings`, one layer at a time to bound the
+  transient memory, and the layers are stacked back along the scan axis.
+  """
+  out_sharding = target.sharding
+  mesh = out_sharding.mesh
+  # PartitionSpec may be shorter than the rank (e.g. P() when replicated); pad with None.
+  spec = tuple(out_sharding.spec) + (None,) * (len(target.shape) - len(out_sharding.spec))
+  if x.ndim == 4:
+    e, l, r, c = x.shape
+    layer_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(spec[0], spec[2]))
+
+    def _layer_fn(a, idx):
+      return jax.lax.dynamic_index_in_dim(a, idx, axis=1, keepdims=False).reshape(e * r, c).astype(target.dtype)
+
+    _layer = jax.jit(_layer_fn, out_shardings=layer_sharding)
+    layers = [_layer(x, jnp.int32(i)) for i in range(l)]
+    x.delete()
+    stacked = jax.jit(lambda *ys: jnp.stack(ys, axis=1), out_shardings=out_sharding)(*layers)
+    for y in layers:
+      y.delete()
+    return stacked
+  e, r, c = x.shape
+  y = jax.jit(lambda a: a.reshape(e * r, c).astype(target.dtype), out_shardings=out_sharding)(x)
+  x.delete()
+  return y
+
+
 def load_params_from_path(
     load_parameters_from_path,
     abstract_unboxed_params,
@@ -937,8 +1039,13 @@ def load_params_from_path(
     use_ocdbt=True,
     use_zarr3=True,
     enable_single_replica_ckpt_restoring: bool = False,
+    convert_flat_moe_weights: bool = False,
 ):
-  """Load decode params from checkpoint at specified path."""
+  """Load decode params from checkpoint at specified path.
+
+  With `convert_flat_moe_weights` (moe_flat_fsdp_weights), 3D/4D routed-expert weights in the checkpoint are converted
+  to the flat [E * rows, (L,) cols] layout the model expects.
+  """
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
 
@@ -967,6 +1074,25 @@ def load_params_from_path(
     max_logging.log(f"Skipping pre-load shape check, checkpoint metadata unreadable: {e}")
     stored = None
 
+  # Flat routed-expert weights (moe_flat_fsdp_weights): restore the checkpoint's 3D/4D arrays, convert after the load.
+  flat_moe_plan = {}
+  if convert_flat_moe_weights and isinstance(stored, dict):
+    stored_root = stored.get(restore_key)
+    # An NNX `want` is bare weights, so drop the stored `params` collection level; a Linen `want` keeps it.
+    stored_params = (
+        stored_root.get("params")
+        if is_nnx and isinstance(stored_root, dict) and isinstance(stored_root.get("params"), dict)
+        else stored_root
+    )
+    flat_moe_plan = _flat_moe_restore_plan(want, stored_params)
+    for wpath, (_, stored_sds) in flat_moe_plan.items():
+      _set_path(want, wpath, stored_sds)
+    if flat_moe_plan:
+      max_logging.log(
+          f"moe_flat_fsdp_weights: {len(flat_moe_plan)} routed-expert weights will be restored in the checkpoint's"
+          f" 3D layout and converted to the flat layout: {['/'.join(map(str, p)) for p in flat_moe_plan]}"
+      )
+
   aliased_collections = {}
   if restore_key in ("model_params", "model"):
     params_collection = want
@@ -993,6 +1119,9 @@ def load_params_from_path(
     params_collection = {col: nnx.traversals.unflatten_mapping(d) for col, d in collection_leaves.items()}
     if "params" not in params_collection:
       params_collection["params"] = want
+    for wpath, (_, stored_sds) in flat_moe_plan.items():
+      for col_tree in params_collection.values():
+        _set_path(col_tree, wpath, stored_sds)
 
     # Augment "params" collection with companion scales from checkpoint metadata if present (FP8 dequantize-on-load)
     if "params" in params_collection:
@@ -1093,6 +1222,19 @@ def load_params_from_path(
     # as missing. Only the NNX branch above needs per-collection flattening.
     restored_weights = restored_collection
 
+  # Convert the restored 3D/4D routed-expert weights to the flat layout the model expects.
+  for wpath, (flat_sds, stored_sds) in flat_moe_plan.items():
+    arr = _lookup_path(restored_weights, wpath)
+    if not isinstance(arr, jax.Array):
+      continue
+    t0 = time.time()
+    converted = _flat_moe_convert(arr, flat_sds)
+    assert _set_path(restored_weights, wpath, converted)
+    _set_path(want, wpath, flat_sds)
+    max_logging.log(
+        f"moe_flat_fsdp_weights: converted {'/'.join(map(str, wpath))} {tuple(stored_sds.shape)} ->"
+        f" {tuple(converted.shape)} in {time.time() - t0:.1f}s"
+    )
   # Dequantize if checkpoint had companion kernel_scale and target want is unquantized.
   restored_weights = maybe_dequantize_restored_params(restored_weights, want)
   # Validate against everything the model needs. Rebuilding the expectation from the

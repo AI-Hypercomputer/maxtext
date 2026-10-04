@@ -80,6 +80,7 @@ def gmm(
     return_lhs: bool = False,
     fuse_dlhs_scale: bool = False,
     use_dlhs_transpose_rhs: bool = False,
+    flat_fsdp_shard: tuple[int, int, int] | None = None,
     out_is_3d: bool = False,
 ):
   """Grouped matrix multiplication operation.
@@ -138,7 +139,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -164,6 +165,7 @@ def gmm(
       return_lhs,
       fuse_dlhs_scale,
       use_dlhs_transpose_rhs,
+      flat_fsdp_shard,
       out_is_3d,
   )
   if return_lhs and return_rhs:
@@ -223,6 +225,7 @@ def _gmm_fwd(
     return_lhs: bool = False,
     fuse_dlhs_scale: bool = False,
     use_dlhs_transpose_rhs: bool = False,
+    flat_fsdp_shard: tuple[int, int, int] | None = None,
     out_is_3d: bool = False,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
@@ -252,12 +255,30 @@ def _gmm_fwd(
   # or gathered weights) to return matching cotangent containers in backward pass.
   lhs_is_qarray = isinstance(lhs, qpl.QArray)
   rhs_is_qarray = isinstance(rhs, qpl.QArray)
+  if flat_fsdp_shard is not None:
+    if rhs_is_qarray or transpose_rhs or rhs.ndim != 2 or not weight_gather_axes:
+      raise NotImplementedError("flat_fsdp_shard needs a plain 2D rhs block, transpose_rhs=False and weight_gather_axes.")
+    if any(axis_idx != 0 for _, axis_idx in weight_gather_axes):
+      raise ValueError("flat_fsdp_shard: the flat rhs is gathered on dim 0 only.")
+    if not (
+        use_tokamax_backend
+        and quantization_rule
+        and quantization_rule.bwd_qtype
+        and quantization_rule.weight_calibration_method.startswith("fixed")
+    ):
+      raise NotImplementedError("flat_fsdp_shard requires the tokamax QAG path (fixed weight calibration, bwd_qtype).")
 
   # Quantize activation and weight
   if quantization_rule:
     # pyrefly: ignore[bad-assignment]
     lhs, rhs = _fwd_quantize_activation_and_weight(
-        lhs, rhs, quantization_rule, use_gmm_v2, use_manual_quantization, transpose_rhs
+        lhs,
+        rhs,
+        quantization_rule,
+        use_gmm_v2,
+        use_manual_quantization,
+        transpose_rhs,
+        rhs_is_flat2d=flat_fsdp_shard is not None,
     )
 
   # Quantization All-Gather (QAG) for weight: only supported for following conditions
@@ -270,7 +291,7 @@ def _gmm_fwd(
       and weight_gather_axes
   ):
     # pyrefly: ignore[bad-assignment]
-    rhs = _fwd_gather_weight(rhs, weight_gather_axes)
+    rhs = _fwd_gather_weight(rhs, weight_gather_axes, gathered_shape=flat_fsdp_shard)
 
   # Backend Execution Routing
   if use_tokamax_backend and not use_gmm_v2:
@@ -322,6 +343,7 @@ def _fwd_quantize_activation_and_weight(
     use_gmm_v2: bool,
     use_manual_quantization: bool,
     transpose_rhs: bool,
+    rhs_is_flat2d: bool = False,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
   if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
@@ -341,7 +363,11 @@ def _fwd_quantize_activation_and_weight(
           # If only considering the fwd pass, we could also enable channelwise
           # axes for the group axis, i.e., [0, 1 or 2]. However, this makes the
           # bwd pass unable to reuse the scale easily.
-          channelwise_axes=([] if quantization_rule.disable_channelwise_axes else ([1] if transpose_rhs else [2])),
+          channelwise_axes=(
+              []
+              if quantization_rule.disable_channelwise_axes
+              else ([1] if (transpose_rhs or rhs_is_flat2d) else [2])  # flat 2D [rows, cols]: cols is the N axis
+          ),
           calibration_method=quantization_rule.weight_calibration_method,
       )
     else:
@@ -353,13 +379,34 @@ def _fwd_quantize_activation_and_weight(
   return lhs, rhs
 
 
-def _fwd_gather_weight(rhs: qpl.QArray, weight_gather_axes: List[Tuple[str, int]]) -> qpl.QArray:
-  """Applies QAG (Quantization All-Gather) to RHS weights during forward pass."""
+def _fwd_gather_weight(
+    rhs: qpl.QArray,
+    weight_gather_axes: List[Tuple[str, int]],
+    gathered_shape: tuple[int, ...] | None = None,
+) -> qpl.QArray:
+  """Applies QAG (Quantization All-Gather) to RHS weights during forward pass.
+
+  With `gathered_shape` (moe_flat_fsdp_weights) the gathered 2D [G * rows, cols]
+  qvalue is bitcast to (G, rows, cols) and a per-channel [1, cols] scale to [1, 1, cols].
+  """
+  if gathered_shape is None:
+    for axis_name, axis_idx in weight_gather_axes:
+      rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
+      # replace the qvalue with the gathered qvalue in the QArray
+      rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
+    return rhs
+
+  qvalue = rhs.qvalue
   for axis_name, axis_idx in weight_gather_axes:
-    rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
-    # replace the qvalue with the gathered qvalue in the QArray
-    rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
-  return rhs
+    qvalue = jax.lax.all_gather(qvalue, axis_name, axis=axis_idx, tiled=True)
+  qvalue = qvalue.reshape(gathered_shape)
+
+  def _expand(s):
+    if s is None or s.ndim == 0 or s.ndim == len(gathered_shape):
+      return s
+    return s.reshape((1,) * (len(gathered_shape) - s.ndim) + tuple(s.shape))
+
+  return dataclasses.replace(rhs, qvalue=qvalue, scale=_expand(rhs.scale), zero_point=_expand(rhs.zero_point))
 
 
 def _fwd_run_tokamax_v1(
@@ -566,6 +613,7 @@ def _gmm_bwd(
     return_lhs: bool,
     fuse_dlhs_scale: bool,
     use_dlhs_transpose_rhs: bool,
+    flat_fsdp_shard: tuple[int, int, int] | None,
     out_is_3d: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
@@ -685,6 +733,7 @@ def _gmm_bwd(
       quantization_rule,
       use_gmm_v2_heuristic_tiling,
       partial_sum=drhs_partial_sum,
+      flat_rhs_shard=flat_fsdp_shard is not None,
   )
 
   # 5. Output Formatting
@@ -1052,6 +1101,7 @@ def _compute_drhs(
     quantization_rule: qwix.QtRule | None,
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
+    flat_rhs_shard: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -1074,13 +1124,23 @@ def _compute_drhs(
     )
 
   if use_tokamax_backend and quantization_rule and quantization_rule.bwd_qtype and weight_gather_axes:
-    drhs = _drhs_scatter_weight(drhs, weight_gather_axes)
+    drhs = _drhs_scatter_weight(drhs, weight_gather_axes, flat_rhs_shard=flat_rhs_shard)
 
   return drhs
 
 
-def _drhs_scatter_weight(drhs: jnp.ndarray, weight_gather_axes: List[Tuple[str, int]]) -> jnp.ndarray:
-  """Scatters the DRHS output back in the reverse order of the forward gather."""
+def _drhs_scatter_weight(
+    drhs: jnp.ndarray,
+    weight_gather_axes: List[Tuple[str, int]],
+    flat_rhs_shard: bool = False,
+) -> jnp.ndarray:
+  """Scatters the DRHS output back in the reverse order of the forward gather.
+
+  With `flat_rhs_shard` (moe_flat_fsdp_weights) the (G, rows, cols) grad is first
+  bitcast to the flat [G * rows, cols] matrix so the reduce-scatter runs on the major dim.
+  """
+  if flat_rhs_shard:
+    drhs = drhs.reshape(-1, drhs.shape[-1])
   for axis_name, axis_idx in reversed(weight_gather_axes):
     drhs = jax.lax.psum_scatter(drhs, axis_name, scatter_dimension=axis_idx, tiled=True)
   return drhs
