@@ -779,7 +779,6 @@ def _run_pipeline_reference(x, weights: mhc_kernel_common.MhcWeights, permutatio
 def _run_pipeline_api(
     x,
     weights: mhc_kernel_common.MhcWeights,
-    permutations,
     implementation=None,
     config: mhc_kernel_common.MhcKernelConfig | None = None,
     interpret=True,
@@ -792,7 +791,6 @@ def _run_pipeline_api(
   layer_input, context = mhc_kernel.pre(
       x,
       weights,
-      permutations,
       config=config,
       implementation=implementation,
   )
@@ -803,12 +801,11 @@ class TestMhcKernelsFwd(parameterized.TestCase):
   """Unit tests for MaxText mHC-lite Pallas forward kernel."""
 
   def test_doubly_stochastic(self):
-    x, weights, permutations, _ = _make_kernel_inputs(batch=1, sequence=128, streams=4, embedding=128)
+    x, weights, _, _ = _make_kernel_inputs(batch=1, sequence=128, streams=4, embedding=128)
     config = mhc_kernel.MhcKernelConfig(interpret=True)
     _, context = mhc_kernel.pre(
         x,
         weights,
-        permutations,
         config=config,
     )
     row_sums = jnp.sum(context.residual, axis=-1)
@@ -826,20 +823,18 @@ class TestMhcKernelsFwd(parameterized.TestCase):
     actual = _run_pipeline_api(
         x,
         weights,
-        permutations,
         implementation=implementation,
         interpret=True,
     )
     np.testing.assert_allclose(actual, expected, rtol=5e-2, atol=5e-2)
 
   def test_unsupported_shape_raises_error(self):
-    x, weights, permutations, _ = _make_kernel_inputs(batch=1, sequence=16, streams=2, embedding=128)
+    x, weights, _, _ = _make_kernel_inputs(batch=1, sequence=16, streams=2, embedding=128)
     config = mhc_kernel.MhcKernelConfig(interpret=True)
     with self.assertRaises(mhc_kernel_common.UnsupportedInputError):
       mhc_kernel.pre(
           x,
           weights,
-          permutations,
           config=config,
       )
 
@@ -857,7 +852,7 @@ class TestMhcKernelsBwd(parameterized.TestCase):
     expected_dx, expected_dw = expected_vjp_fn(cotangent)
 
     actual_out, actual_vjp_fn = jax.vjp(
-        lambda x_, w_: _run_pipeline_api(x_, w_, permutations, implementation=None, interpret=True),
+        lambda x_, w_: _run_pipeline_api(x_, w_, implementation=None, interpret=True),
         x,
         weights,
     )
@@ -890,7 +885,7 @@ class TestMhcKernelsBwd(parameterized.TestCase):
     expected_dx, expected_dw = expected_vjp_fn(cotangent)
 
     actual_out, actual_vjp_fn = jax.vjp(
-        lambda x_, w_: _run_pipeline_api(x_, w_, permutations, config=config, interpret=True),
+        lambda x_, w_: _run_pipeline_api(x_, w_, config=config, interpret=True),
         x,
         weights,
     )
@@ -910,6 +905,73 @@ class TestMhcKernelsBwd(parameterized.TestCase):
           rtol=0.0,
           atol=tol * scale,
           err_msg=f"Feature-tiled gradient leaf {i} mismatch",
+      )
+
+  @pytest.mark.tpu_only
+  def test_token_sharded_backward_matches_unsharded_tpu(self):
+    """Gradients under a token-sharded shard_map (check_vma=True) match a single-device run.
+
+    Mirrors `ManifoldConstrainedHyperConnections._sharded_kernel_call`: `pre`
+    and `post` each run in their own shard_map with tokens sharded over two mesh
+    axes and weights replicated, so the weight gradients must be psummed by the
+    kernels' custom VJP. Interpret mode cannot run this on a multi-device CPU
+    mesh, hence TPU only.
+    """
+    num_devices = jax.device_count()
+    if num_devices < 2 or num_devices % 2:
+      self.skipTest(f"Needs an even number of devices >= 2, got {num_devices}.")
+    x, weights, _, cotangent = _make_kernel_inputs(batch=num_devices, sequence=128, streams=4, embedding=256)
+    config = mhc_kernel.MhcKernelConfig()
+
+    def pre_fn(x_, w_):
+      layer_input, context = mhc_kernel.pre(x_, w_, config=config)
+      return layer_input, context.x, context.h_post, context.residual
+
+    def post_fn(layer_output, context_x, h_post, residual):
+      context = mhc_kernel.MhcContext(x=context_x, h_post=h_post, residual=residual, implementation="mosaic")
+      return (mhc_kernel.post(layer_output, context, config=config),)
+
+    def loss(pre, post, x_, w_):
+      layer_input, context_x, h_post, residual = pre(x_, w_)
+      (output,) = post(jnp.tanh(layer_input), context_x, h_post, residual)
+      return jnp.sum(output.astype(jnp.float32) * cotangent.astype(jnp.float32))
+
+    def grad_fn(pre, post):
+      return jax.jit(jax.grad(lambda x_, w_: loss(pre, post, x_, w_), argnums=(0, 1)))
+
+    expected_dx, expected_dw = grad_fn(pre_fn, post_fn)(x, weights)
+
+    mesh = jax.make_mesh((2, num_devices // 2), ("data", "fsdp"))
+
+    def spec(rank):
+      return jax.sharding.PartitionSpec() if rank is None else jax.sharding.PartitionSpec(("data", "fsdp"))
+
+    def token_sharded(fn, in_ranks, out_ranks):
+      return jax.shard_map(
+          fn,
+          mesh=mesh,
+          in_specs=tuple(spec(rank) for rank in in_ranks),
+          out_specs=tuple(spec(rank) for rank in out_ranks),
+      )
+
+    actual_dx, actual_dw = grad_fn(
+        token_sharded(pre_fn, (4, None), (3, 4, 3, 4)),
+        token_sharded(post_fn, (3, 4, 3, 4), (4,)),
+    )(
+        jax.device_put(x, jax.sharding.NamedSharding(mesh, spec(4))),
+        jax.device_put(weights, jax.sharding.NamedSharding(mesh, spec(None))),
+    )
+
+    actual_grads = (actual_dx,) + tuple(jax.tree_util.tree_leaves(actual_dw))
+    expected_grads = (expected_dx,) + tuple(jax.tree_util.tree_leaves(expected_dw))
+    for i, (actual_g, expected_g) in enumerate(zip(actual_grads, expected_grads)):
+      scale = max(float(np.max(np.abs(np.asarray(expected_g, np.float32)))), 1e-7)
+      np.testing.assert_allclose(
+          np.asarray(actual_g, np.float32),
+          np.asarray(expected_g, np.float32),
+          rtol=0.0,
+          atol=0.02 * scale,
+          err_msg=f"Token-sharded gradient leaf {i} mismatch",
       )
 
 

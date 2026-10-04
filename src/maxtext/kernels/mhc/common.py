@@ -15,11 +15,14 @@
 
 import contextlib
 import dataclasses
+import functools
+import itertools
 from typing import Any
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
+import numpy as np
 
 
 @contextlib.contextmanager
@@ -433,6 +436,29 @@ def feature_tiled_block_spec(
   )
 
 
+def token_out_shape(shape: tuple[int, ...], dtype: Any, like: jax.Array) -> jax.ShapeDtypeStruct:
+  """Returns a `pallas_call` out_shape that varies over the same manual mesh axes as `like`.
+
+  Under `jax.shard_map(..., check_vma=True)`, `pallas_call` requires every
+  `out_shape` to state its varying manual axes. Every mHC output is computed
+  from the token-major activation `like`, so it varies wherever `like` does.
+  Outside a `shard_map` the axis set is empty and this is a plain struct.
+  """
+  return jax.ShapeDtypeStruct(shape, dtype, manual_axis_type=jax.typeof(like).mat)
+
+
+def psum_to_primal_vma(grad: jax.Array, primal: jax.Array) -> jax.Array:
+  """Sums `grad` over the manual mesh axes it varies on but `primal` does not.
+
+  A replicated weight's gradient comes out of the kernels as one partial sum per
+  token shard. A custom-VJP rule must return cotangents with the primal's vma,
+  so those partial sums are reduced here. A no-op outside a `shard_map` and
+  under `check_vma=False`, where the `shard_map` transpose does the reduction.
+  """
+  axes = tuple(sorted(jax.typeof(grad).mat.varying - jax.typeof(primal).mat.varying))
+  return jax.lax.psum(grad, axes) if axes else grad
+
+
 def fold_norm_scale(norm_scale, pre_alpha, post_alpha, res_alpha) -> jax.Array:
   """Folds the RMSNorm channel scale into the three projections."""
   alpha = jnp.concatenate((pre_alpha, post_alpha, res_alpha), axis=-1)
@@ -600,10 +626,25 @@ def validate_feature_block_size(embedding: int, block_size: int) -> None:
     )
 
 
+@functools.lru_cache(maxsize=None)
+def permutation_matrices(streams: int) -> np.ndarray:
+  """Returns all `streams!` permutation matrices, shape `(streams!, streams, streams)`.
+
+  Built once per process and returned as a read-only NumPy array, never a JAX
+  array: the matrices are fixed, so under `jit`, `shard_map` or `custom_vjp` they
+  must be a compile-time constant rather than a traced operand.
+
+  Reference: mHC-lite: https://openreview.net/pdf?id=5IJX6kvOif
+  """
+  perms = np.array(list(itertools.permutations(range(streams))))
+  matrices = np.eye(streams, dtype=np.float32)[perms]
+  matrices.setflags(write=False)
+  return matrices
+
+
 def validate_inputs(
     x: jax.Array,
     block_size: int,
-    permutations_shape: tuple[int, ...] | None = None,
     *,
     block_size_name: str = "block_size",
 ) -> None:
@@ -613,11 +654,10 @@ def validate_inputs(
   if x.ndim != 4:
     raise UnsupportedInputError("Expected x to have shape (batch, sequence, streams, embedding); got" f" {x.shape}.")
   batch, sequence, streams, embedding = x.shape
-  if streams != 4 or (permutations_shape is not None and permutations_shape != (24, 4, 4)):
+  if streams != 4:
     raise UnsupportedInputError(
         "The optimized mHC Pallas kernel currently supports mHC-lite with"
-        f" expansion rate 4 only; got x.shape={x.shape} and"
-        f" permutations.shape={permutations_shape}."
+        f" expansion rate 4 only; got x.shape={x.shape}."
     )
   if embedding % 128:
     raise UnsupportedInputError(f"The embedding dimension must be divisible by 128; got {embedding}.")
