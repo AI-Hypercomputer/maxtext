@@ -273,7 +273,7 @@ cdk job create wenxindong-vllm-conda-test \
 * `--probe-modules / --no-probe-modules`: Capture layer-by-layer and module-by-module activations and compute isolated + cumulative divergence (defaults to `False`).
 * `--probe-layers all|0,1,2,...`: Comma-separated layer indices or range specification for module divergence probing (defaults to `all`).
 * `--probe-max-tokens 64`: Maximum number of token positions to capture per sequence during module probing (defaults to `64`).
-* `--mlperf-v5p`: Apply `mlperf_35b_128_v5p.sh` + `mlperf_base.sh` topology and packing defaults (`sampler_ep=4, trainer_tp=2, trainer_ep=1, pack_sequences=True`).
+* `--mlperf-v5p`: Apply `mlperf_35b_128_v5p.sh` + `mlperf_base.sh` topology and packing defaults (`sampler_ep=4, trainer_tp=2, trainer_ep=1, pack=True`).
 * `--stage tokenize|sampler|trainer|compare|all`: Run individual stages independently using cached `.npz` handoffs.
 
 ---
@@ -674,7 +674,3 @@ In realistic production RL deployment, rollouts are generated using an FP8 MoE s
   seq geomean mean/min/max              0.99898 / 0.99664 / 1.00165                        -
   argmax agree (prompt)                                      98.95%                        -
 ```
-
-
-
-
