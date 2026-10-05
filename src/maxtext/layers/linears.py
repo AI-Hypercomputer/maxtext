@@ -44,6 +44,24 @@ from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
 
 
+# SiTU betas used by Kimi-K3; they come from the HF config keys `activation_situ_beta`
+# and `activation_situ_linear_beta` (HF `SituAndMul`) and are not configurable here.
+KIMI_K3_SITU_BETA = 4.0
+KIMI_K3_SITU_LINEAR_BETA = 25.0
+
+
+def situ_gate(x: Array, beta: float = KIMI_K3_SITU_BETA) -> Array:
+  """SiTU gate activation: beta * tanh(x / beta) * sigmoid(x), computed in fp32."""
+  x32 = x.astype(jnp.float32)
+  return (beta * jnp.tanh(x32 / beta) * jax.nn.sigmoid(x32)).astype(x.dtype)
+
+
+def situ_linear(x: Array, beta: float = KIMI_K3_SITU_LINEAR_BETA) -> Array:
+  """SiTU soft-capped linear (up-branch) activation: beta * tanh(x / beta), computed in fp32."""
+  x32 = x.astype(jnp.float32)
+  return (beta * jnp.tanh(x32 / beta)).astype(x.dtype)
+
+
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
@@ -51,6 +69,11 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   elif fn_or_string == "sqrtsoftplus":
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
+  # SiTU activations used by the Kimi-K3 MLP/experts (gate and up branches)
+  elif fn_or_string == "situ_gate":
+    return situ_gate
+  elif fn_or_string == "situ_linear":
+    return situ_linear
   elif isinstance(fn_or_string, str):
     return getattr(jax.nn, fn_or_string)
   elif callable(fn_or_string):
