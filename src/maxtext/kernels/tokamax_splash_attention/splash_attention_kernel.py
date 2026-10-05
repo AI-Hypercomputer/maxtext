@@ -236,7 +236,7 @@ def _apply_mask_and_soft_cap(
             # pyrefly: ignore[unsupported-operation]
             q_sequence_ref[...],
             (1, repeats),
-        )  # [bq, k_slice.size]  # pyrefly: ignore[unsupported-operation]
+        )  # [bq, k_slice.size]
       else:
         assert q_sequence_ref.shape == (NUM_SUBLANES, bq)  # pyrefly: ignore[missing-attribute]
 
@@ -251,7 +251,7 @@ def _apply_mask_and_soft_cap(
         q_sequence = jnp.broadcast_to(q_sequence, (k_slice.size, bq))
 
       assert q_sequence.shape == k_sequence.shape
-      computed_mask = mask_function(q_sequence, k_sequence)  # pytype: disable=wrong-arg-count
+      computed_mask = mask_function(q_sequence, k_sequence)
       if computed_mask.dtype != jnp.dtype(jnp.bool_):
         raise ValueError("Mask function must return a boolean-valued array, but got:" f" {computed_mask.dtype}")
       masks.append(computed_mask)
@@ -386,11 +386,11 @@ def flash_attention_kernel(
       exp = jnp.exp2 if config.use_base2_exp else jnp.exp
       m_scratch_ref[...] = jnp.full_like(m_scratch_ref, max_logit_estimate)  # pyrefly: ignore[bad-argument-type]
       l_scratch_ref[...] = exp(
-          # pyrefly: ignore[bad-argument-type, unsupported-operation]
+          # pyrefly: ignore[unsupported-operation]
           sink
           # pyrefly: ignore[bad-argument-type]
           - jnp.full_like(l_scratch_ref, max_logit_estimate)
-      )  # pyrefly: ignore[bad-argument-type, unsupported-operation]
+      )
 
   def body(kv_compute_index, _, has_partial_mask=False):
     slice_k = pl.ds(kv_compute_index * bkv_compute, bkv_compute)
@@ -430,7 +430,7 @@ def flash_attention_kernel(
     qk, mask = apply_mask_and_soft_cap()
 
     if max_logit_estimate is None:
-      m_curr = qk.max(axis=-1)[:, None]  # pytype: disable=attribute-error
+      m_curr = qk.max(axis=-1)[:, None]
       assert m_curr.shape == (bq, 1)
       m_next = jnp.maximum(m_prev, m_curr)
       assert m_next.shape == (bq, NUM_LANES)
@@ -798,7 +798,6 @@ def _splash_attention_forward(
       kv_segment_ids,
       mask_info.partial_mask_blocks,
   ]
-  # pyrefly: ignore[bad-argument-count]
   cost_estimate = config.fwd_cost_estimate or _fwd_cost_estimate(
       # pyrefly: ignore[bad-argument-type]
       *vmem_inputs,
@@ -954,7 +953,7 @@ def _splash_attention_custom(
   # device.
   del dkv_mask_info
 
-  ret = _splash_attention_forward(  # pytype: disable=wrong-arg-types
+  ret = _splash_attention_forward(
       fwd_mask_info,
       q,
       k,
@@ -1000,7 +999,7 @@ def _splash_attention_fwd(
   # if save_residuals:
   #   raise NotImplementedError("Higher-order AD not supported.")
 
-  out, stats = _splash_attention_forward(  # pytype: disable=wrong-arg-types
+  out, stats = _splash_attention_forward(
       fwd_mask_info,
       q,
       k,
@@ -1102,7 +1101,7 @@ def _flash_attention_dq_kernel(
         q_segment_ids_ref,
         kv_segment_ids_ref,
         attn_logits_soft_cap=attn_logits_soft_cap,
-        k_slice=pl.ds(0, bkv),  # pyrefly: ignore[bad-argument-type]
+        k_slice=pl.ds(0, bkv),
         k_offset=kv_index * bkv,
         bq=bq,
         mask_function=mask_function,
@@ -1275,7 +1274,7 @@ def _flash_attention_dkv_kernel(
         q_segment_ids_ref,
         kv_segment_ids_ref,
         attn_logits_soft_cap=attn_logits_soft_cap,
-        k_slice=slice_k,  # pyrefly: ignore[bad-argument-type]
+        k_slice=slice_k,
         k_offset=kv_index * bkv + i * bkv_compute,
         bq=bq,
         k_in_lanes=False,
@@ -1840,7 +1839,7 @@ def _splash_attention_bwd(
   q, k, v, segment_ids, sinks, o, logsumexp, dkv_mask_info = res
 
   # di: [num_heads, q_seq_len]
-  di = jnp.einsum("hsd,hsd->hs", o.astype(jnp.float32), do.astype(jnp.float32))  # pytype: disable=attribute-error
+  di = jnp.einsum("hsd,hsd->hs", o.astype(jnp.float32), do.astype(jnp.float32))  # pyrefly: ignore[missing-attribute]
   dq, dk, dv = _splash_attention_bwd_dkv(
       q,
       k,
@@ -1971,7 +1970,7 @@ class SplashAttentionKernel:
     def mask_info_spec(mask_info):
       if mask_info is None:
         return None
-      return MaskInfo(  # pytype: disable=wrong-arg-types
+      return MaskInfo(
           mask_next=_resolve_spec(mask_info.mask_next),  # pyrefly: ignore[bad-argument-type]
           active_rows=_resolve_spec(mask_info.active_rows),  # pyrefly: ignore[bad-argument-type]
           active_cols=_resolve_spec(mask_info.active_cols),  # pyrefly: ignore[bad-argument-type]
@@ -2132,7 +2131,7 @@ def _make_dynamic_splash_attention(
     kernel = SplashAttentionKernel(fwd_mask_info, dkv_mask_info, **kwargs)
     return kernel
 
-  mask_info_specs = MaskInfo(  # pytype: disable=wrong-arg-types
+  mask_info_specs = MaskInfo(
       mask_next=mask_spec,  # pyrefly: ignore[bad-argument-type]
       active_rows=None,
       active_cols=None,

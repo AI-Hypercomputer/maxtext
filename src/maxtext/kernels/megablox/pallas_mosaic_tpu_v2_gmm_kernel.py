@@ -1224,7 +1224,7 @@ def calculate_tiling(
         # pyrefly: ignore[unsupported-operation]
         tk % rhs_cfgs.quant_block_size != 0
         and rhs_cfgs.quant_block_size % tk != 0  # pyrefly: ignore[unsupported-operation]
-    ):  # pyrefly: ignore[unsupported-operation]
+    ):
       return False
     return True
 

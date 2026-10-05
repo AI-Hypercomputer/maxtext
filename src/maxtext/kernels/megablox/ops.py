@@ -347,7 +347,7 @@ def _fwd_quantize_activation_and_weight(
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
   if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
-    lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
+    lhs = qpl.quantize(
         lhs,
         quantization_rule.act_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
@@ -357,7 +357,7 @@ def _fwd_quantize_activation_and_weight(
 
   if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
     if not use_manual_quantization:
-      rhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
+      rhs = qpl.quantize(
           rhs,
           quantization_rule.weight_qtype,
           # If only considering the fwd pass, we could also enable channelwise
@@ -371,7 +371,7 @@ def _fwd_quantize_activation_and_weight(
           calibration_method=quantization_rule.weight_calibration_method,
       )
     else:
-      rhs = quantizations.manual_quantize(  # pyrefly: ignore[bad-assignment]
+      rhs = quantizations.manual_quantize(
           rhs,
           quantization_rule.weight_qtype,
           calibration_method=quantization_rule.weight_calibration_method,
@@ -539,8 +539,8 @@ def _fwd_run_tokamax_v2(
     fwd_tiling = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
 
   out = gmm_v2.gmm_v2(
-      lhs=lhs_operand,  # pyrefly: ignore[bad-argument-type]
-      rhs=rhs_operand,  # pyrefly: ignore[bad-argument-type]
+      lhs=lhs_operand,
+      rhs=rhs_operand,
       group_sizes=group_sizes,
       rhs_scale=rhs_scale,
       tile_info=fwd_tiling,
@@ -804,10 +804,9 @@ def _bwd_prepare_inputs(
   # GMM2 FWD performs lhs quantization inside kernel, lhs is stored as unquantized dtype
   # in the residual tuple. In BWD, we explicitly quantize lhs.
   if quantization_rule and quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray):
-    lhs = qpl.quantize(  # pyrefly: ignore[bad-assignment]
+    lhs = qpl.quantize(
         lhs,
         quantization_rule.act_qtype,
-        # pyrefly: ignore[bad-argument-type]
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
         # pyrefly: ignore[bad-argument-type]
         calibration_method=quantization_rule.act_calibration_method,
@@ -1031,7 +1030,7 @@ def _dlhs_run_tokamax_v2(
       rhs_scale=None,
       partial_sum=kernel_partial_sum,
       tile_info=dlhs_tiling,
-      preferred_element_type=lhs_dtype,  # pyrefly: ignore[bad-argument-type]
+      preferred_element_type=lhs_dtype,
       group_offset=group_offset,
       lhs_scale=kernel_lhs_scale,
       transpose_rhs=kernel_transpose_rhs,
@@ -1221,7 +1220,7 @@ def _drhs_run_tokamax_v2(
       rhs_scale=rhs_scale,
       partial_sum=partial_sum,
       precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=rhs_dtype,  # pyrefly: ignore[bad-argument-type]
+      preferred_element_type=rhs_dtype,
       group_offset=group_offset,
       tile_info=drhs_tiling,
   )

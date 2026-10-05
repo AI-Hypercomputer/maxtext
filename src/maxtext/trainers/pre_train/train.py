@@ -729,12 +729,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "scalars": {},
   }
   if config.moe_dropless_fallback == "step":
-    metrics["has_moe_overflow"] = (  # pyrefly: ignore[bad-assignment]
+    metrics["has_moe_overflow"] = (
         has_moe_overflow if has_moe_overflow is not None else jnp.bool_(False)  # pyrefly: ignore[bad-assignment]
     )
   if getattr(config, "log_required_ragged_buffer_factor", False) and "moe_required_rbf" in aux:
     # Top-level (not "scalar"): a per-layer vector, read by training_loop_iteration for the REQUIRED_RBF line.
-    metrics["moe_required_rbf"] = aux["moe_required_rbf"]  # pyrefly: ignore[bad-assignment]
+    metrics["moe_required_rbf"] = aux["moe_required_rbf"]
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 

@@ -170,7 +170,7 @@ def get_shaped_inputs(topology_mesh, config):
   # Collect NNX activation shardings via an abstract forward pass (must run
   # after get_abstract_state, which only traces __init__).
   if config.debug_sharding:
-    _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)  # pyrefly: ignore[unbound-name]
+    _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)
 
   return (
       shaped_train_args,
