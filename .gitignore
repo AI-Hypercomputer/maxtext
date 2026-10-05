@@ -158,3 +158,6 @@ gha-creds-*.json
 maxtext.code-workspace
 maxtext_output/
 maxtext_local_output/
+
+# Kimi-K3 HuggingFace reference checkout used by parity tests (~61MB, fetched locally)
+kimi-k3-hf-reference/
