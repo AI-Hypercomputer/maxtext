@@ -1864,6 +1864,23 @@ class KimiK3(BaseModel):
       0, description="Shared expert count read by the Kimi-K3 layers; must equal shared_experts if set."
   )
   short_conv_kernel_size: PositiveInt = Field(4, description="Kernel size for the KDA short convolution.")
+  kda_gate_lower_bound: Optional[float] = Field(
+      -5.0,
+      lt=0.0,
+      description=(
+          "KDA decay-gate lower bound (must be negative). When set, the gate is the bounded sigmoid "
+          "`lb * sigmoid(exp(A_log) * (g + dt_bias))` (as in fla); None selects the softplus gate."
+      ),
+  )
+  kda_chunk_size: int = Field(64, gt=0, description="Chunk size of the KDA chunked (WY) prefill/train core.")
+  kda_compute_dtype: Literal["float32", "bfloat16"] = Field(
+      "float32",
+      description=(
+          "Precision of the KDA q/k/v inputs to the core (and of the q/k L2-norm). The decay gate, its "
+          "cumsum, the chunked WY solve and the recurrent state are always float32, as in fla. The output "
+          "is cast back to `dtype`."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_kimi_k3_alias_pairs(self):
