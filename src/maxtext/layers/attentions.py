@@ -1149,6 +1149,14 @@ class Attention(nnx.Module):
       attention_chunk_size = None
 
     q_scale, k_scale, v_scale = None, None, None
+    kv_cache_dtype = getattr(rpa_kv_cache, "dtype", None)
+    if kv_cache_dtype is not None and kv_cache_dtype != self.dtype:
+      # pylint: disable=import-outside-toplevel
+      # pytype: disable=import-error
+      from tpu_inference.layers.common.quantization import quantize_kv
+
+      k_scale = v_scale = 1.0
+      key, value = quantize_kv(kv_cache_dtype, key, value, k_scale, v_scale)
 
     md = rpa_metadata
 

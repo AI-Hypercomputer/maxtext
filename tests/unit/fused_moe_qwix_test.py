@@ -205,9 +205,12 @@ class FusedMoeMatmulTest(unittest.TestCase):
         self.num_experts = test.num_experts
         self.num_experts_per_tok = test.top_k
         self.mesh = mesh
+        self._expert_parallelism_name = ("attn_dp_expert", "expert")
 
       def get_expert_parallelism_size(self):
-        return 1
+        if self.mesh is None:
+          return 1
+        return moe.RoutedMoE.get_expert_parallelism_size(self)
 
       def __call__(self, inputs, gate_logits):
         with mock.patch.dict(sys.modules, test._fake_tpu_inference(calls)):
@@ -269,6 +272,24 @@ class FusedMoeMatmulTest(unittest.TestCase):
         mesh = types.SimpleNamespace(shape=shape)
         self._make_layer(calls, mesh=mesh)(inputs, gate_logits)
         self.assertEqual(calls[0]["scatter_results"], expected)
+
+  def test_use_ep_reflects_both_expert_axes(self):
+    """Either expert or attn_dp_expert above size 1 enables expert parallelism."""
+    inputs, gate_logits = self._inputs()
+    cases = [
+        ({"attn_dp_expert": 1, "expert": 1, "model": 4}, False),
+        ({"attn_dp_expert": 1, "expert": 4, "model": 1}, True),
+        ({"attn_dp_expert": 2, "expert": 2, "model": 1}, True),
+        ({"attn_dp_expert": 4, "expert": 1, "model": 1}, True),
+        ({"expert": 4, "model": 1}, True),
+        ({"attn_dp_expert": 4, "model": 1}, True),
+    ]
+    for shape, expected in cases:
+      with self.subTest(shape=shape):
+        calls = []
+        mesh = types.SimpleNamespace(shape=shape)
+        self._make_layer(calls, mesh=mesh)(inputs, gate_logits)
+        self.assertEqual(calls[0]["use_ep"], expected)
 
   def test_fp8_rule_prequantizes_weights_outside_qwix(self):
     calls = []

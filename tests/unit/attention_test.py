@@ -3396,6 +3396,71 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(jnp.allclose(output, expected_output))
     self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
 
+  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
+  @pytest.mark.tpu_only
+  @mock.patch("tpu_inference.layers.common.quantization.quantize_kv", create=True)
+  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
+  def test_forward_serve_vllm_fp8_kv_cache(self, mock_sharded_ragged_paged_attention, mock_quantize_kv):
+    """Tests that forward_serve_vllm quantizes K/V when the KV cache dtype is FP8."""
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_rpa"
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
+    mock_kv_cache = jnp.ones((1,), dtype=jnp.float8_e4m3fn)
+
+    mock_attention_metadata = mock.Mock()
+    mock_attention_metadata.seq_lens = jnp.array([1] * self.global_batch_size)
+    mock_attention_metadata.block_tables = jnp.array([[0]] * self.global_batch_size)
+    mock_attention_metadata.query_start_loc = jnp.array(list(range(self.global_batch_size)))
+    mock_attention_metadata.request_distribution = jnp.array([self.global_batch_size])
+
+    total_tokens = self.global_batch_size * seq_len
+    mock_output = jnp.ones((total_tokens, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    mock_updated_kv_cache = jnp.zeros((1,), dtype=jnp.float8_e4m3fn)
+    mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
+    mock_quantize_kv.side_effect = lambda dtype, k, v, ks, vs: (k.astype(dtype), v.astype(dtype))
+
+    attention_vllm(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        kv_cache=mock_kv_cache,
+        attention_metadata=mock_attention_metadata,
+    )
+
+    mock_quantize_kv.assert_called_once()
+    call_args = mock_sharded_ragged_paged_attention.call_args[0]
+    self.assertEqual(call_args[2].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(call_args[3].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(call_args[13], 1.0)
+    self.assertEqual(call_args[14], 1.0)
+
 
 class MLATest(attention_test_util.MLATestBase):
   """Test for the Multi-Headed Latent Attention"""
