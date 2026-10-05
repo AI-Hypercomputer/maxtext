@@ -21,6 +21,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
+from maxtext.layers import moe
 
 _HF_PREFIX = "language_model."
 
@@ -40,6 +41,17 @@ def _find_state_dict_key(hf_key: str, pt_state_dict: Mapping[str, Any]) -> Optio
     return hf_key[len(_HF_PREFIX) :]
   candidates = [k for k in pt_state_dict if hf_key.endswith("." + k)]
   return max(candidates, key=len) if candidates else None
+
+
+_NON_PARAM_COLLECTION_PREFIXES = ("MoEBiasVar-",)
+
+
+def _to_params_key(mt_key: str) -> str:
+  """`MoEBiasVar-decoder-...` -> `params-decoder-...`; other keys unchanged."""
+  for collection_prefix in _NON_PARAM_COLLECTION_PREFIXES:
+    if mt_key.startswith(collection_prefix):
+      return "params-" + mt_key[len(collection_prefix) :]
+  return mt_key
 
 
 def _to_numpy(tensor: Any) -> np.ndarray:
@@ -72,7 +84,8 @@ def convert_pytorch_module_to_maxtext_params(
     target_shapes: Optional MaxText key -> target shape, forwarded to the hooks.
 
   Returns:
-    A dictionary mapping MaxText parameter keys to transformed NumPy arrays.
+    A dictionary mapping MaxText parameter keys to transformed NumPy arrays. Keys of non-`nnx.Param`
+    collections (`MoEBiasVar-...`) are returned under `params-...`, i.e. by module path.
   """
   param_map = PARAM_MAPPING["kimi-k3"](hf_config, maxtext_config, scan_layers=False)
   hook_map = HOOK_FNS["kimi-k3"](hf_config, maxtext_config, scan_layers=False, saving_to_hf=False)
@@ -88,15 +101,18 @@ def convert_pytorch_module_to_maxtext_params(
     return tensor_np
 
   converted_params = {}
-  for mt_key, hf_target in param_map.items():
+  for map_key, hf_target in param_map.items():
+    # Non-`nnx.Param` collections (Kimi-K3's `MoEBiasVar` router bias) are keyed under `params-` here,
+    # so callers can address every weight by its module path (see `load_params_into_nnx`).
+    mt_key = _to_params_key(map_key)
     if prefix_filter and not mt_key.startswith(prefix_filter):
       continue
     if isinstance(hf_target, str):
-      tensor_np = _convert(mt_key, hf_target)
+      tensor_np = _convert(map_key, hf_target)
       if tensor_np is not None:
         converted_params[mt_key] = tensor_np
     else:  # Routed experts: one HF tensor per expert, stacked on a leading expert axis.
-      stacked = [t for t in (_convert(mt_key, k) for k in hf_target) if t is not None]
+      stacked = [t for t in (_convert(map_key, k) for k in hf_target) if t is not None]
       if stacked:
         converted_params[mt_key] = np.stack(stacked, axis=0)
 
@@ -135,7 +151,8 @@ def load_params_into_nnx(
   loaded: list[str] = []
   missing: list[str] = []
   for path, node in nnx.iter_graph(module):
-    if not isinstance(node, nnx.Param):
+    # Kimi-K3's router bias is a `moe.MoEBiasVar` (outside `nnx.Param`, like DeepSeek's).
+    if not isinstance(node, (nnx.Param, moe.MoEBiasVar)):
       continue
     key = f"{prefix}-{_path_to_key(path)}"
     if key not in converted:

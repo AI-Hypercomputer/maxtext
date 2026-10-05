@@ -1273,6 +1273,14 @@ class MoEGeneral(BaseModel):
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
   )
+  moe_router_input_dim: int = Field(
+      -1,
+      description=(
+          "Dimension of the router (gate) input when it differs from the expert input, e.g. a latent MoE that"
+          " routes on the full hidden state but runs experts on a down-projected latent (pass the router input"
+          " as `gate_inputs`). If < 0, defaults to the expert input dim."
+      ),
+  )
   base_moe_mlp_dim: int = Field(-1, description="Intermediate dimension at MoE layer.")
   padded_base_moe_mlp_dim: Optional[int] = Field(
       None,
