@@ -109,12 +109,42 @@ def maybe_monitor_goodput(config):
 
     goodput_monitor = _construct_goodput_monitor(config, common_kwargs)
     goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
-    yield
+    max_logging.log("Started Cumulative Goodput upload to Tensorboard & GCM in the background!")
+    with maybe_monitor_rolling_window_goodput(goodput_monitor, config):
+      yield
   finally:
     if goodput_monitor:
       goodput_monitor.stop_goodput_uploader()
-      max_logging.log("Flushed final metrics and safe exited from Goodput monitoring.")
+      max_logging.log("Flushed final metrics and safe exited from cumulative Goodput monitoring.")
+
+
+@contextlib.contextmanager
+def maybe_monitor_rolling_window_goodput(goodput_monitor, config):
+  """Monitor rolling window goodput if enabled on the lead host.
+
+  Failures to start or stop the rolling window uploader are logged and
+  swallowed so that monitoring degrades gracefully and never interrupts
+  training. Exceptions raised by the wrapped block are not caught here.
+  """
+  if _GOODPUT_STUB or not goodput_monitor or not config.enable_rolling_window_goodput:
+    yield
+    return
+  started = False
+  try:
+    goodput_monitor.start_rolling_window_goodput_uploader(config.rolling_windows_seconds)
+    started = True
+    max_logging.log("Started Rolling Window Goodput upload to Tensorboard & GCM in the background!")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Goodput: failed to start rolling window goodput uploader, continuing without it: {e}")
+  try:
+    yield
+  finally:
+    if started:
+      try:
+        goodput_monitor.stop_rolling_window_goodput_uploader()
+        max_logging.log("Flushed final metrics and safe exited from rolling window Goodput monitoring.")
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        max_logging.log(f"Goodput: failed to stop rolling window goodput uploader cleanly: {e}")
 
 
 @contextlib.contextmanager
