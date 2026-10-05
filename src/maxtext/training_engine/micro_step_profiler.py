@@ -45,6 +45,10 @@ class MicroStepProfiler:
       )
       return
     self.profiling_options = jax.profiler.ProfileOptions()
+    if config.enable_continuous_profiling:
+      self.profiling_options.advanced_configuration = {
+          "enable_continuous_profiling": True,
+      }
     self.profile_active: bool = False
     # profiler_period is the distance between successive profiling window,
     # profiler_steps=3, profiler_period=4 gives [1,3], [5,7], [9,11].
