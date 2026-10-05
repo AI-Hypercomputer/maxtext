@@ -86,6 +86,8 @@ rope_type: "yarn"
 decoder_block: "kimi_linear"
 # The hybrid KDA/MLA stack is unscanned-only (checkpoint conversion raises on scan_layers=True).
 scan_layers: false
+# KDA layers ignore decoder_segment_ids, so packed documents would leak recurrent state.
+packing: false
 enable_dropout: false
 logits_via_embedding: false
 tokenizer_type: "tiktoken"

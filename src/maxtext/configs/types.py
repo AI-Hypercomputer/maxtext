@@ -5575,6 +5575,13 @@ class MaxTextConfig(
       raise ValueError("`grain_use_elastic_iterator=True` requires `packing=False`.")
     if self.use_dpo and self.packing:
       raise ValueError("DPO does not support packing. Set `packing=False`.")
+    if self.decoder_block == DecoderBlockType.KIMI_LINEAR and self.packing:
+      # KDA's recurrence and short conv ignore `decoder_segment_ids`, so packed documents would
+      # leak state into each other in 69 of the 93 layers.
+      raise ValueError(
+          "decoder_block=kimi_linear (Kimi-K3) does not support packed sequences yet: KDA layers ignore "
+          "segment ids. Set `packing=False`."
+      )
     if self.grain_use_elastic_iterator and not self.use_truncation:
       raise ValueError(
           "`grain_use_elastic_iterator=True` requires `use_truncation=True`. "
@@ -6067,6 +6074,23 @@ class MaxTextConfig(
     context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
+    if self.decoder_block == DecoderBlockType.KIMI_LINEAR and any(
+        deg > 1
+        for deg in (
+            context_parallel_size,
+            self.ici_context_parallelism,
+            self.dcn_context_parallelism,
+            self.ici_context_usp_ulysses_parallelism,
+            self.dcn_context_usp_ulysses_parallelism,
+            self.ici_context_autoregressive_parallelism,
+            self.dcn_context_autoregressive_parallelism,
+        )
+    ):
+      raise ValueError(
+          "decoder_block=kimi_linear (Kimi-K3) does not support context parallelism yet: "
+          "KDA layers do not propagate recurrent/conv state across sequence shards or unpermute "
+          "load-balanced (DUAL_CHUNK_SWAP) batches."
+      )
     if self.attention_type == AttentionType.COMPRESSED.value:
       # `compress_ratios` is per-layer and a ratio of 0 downgrades that layer to local sliding
       # attention (see CompressedAttention.__init__), so context parallelism stays legal when no
