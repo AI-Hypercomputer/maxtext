@@ -89,7 +89,7 @@ def _resolve_or_infer_config(argv: list[str] | None = None, **kwargs) -> tuple[s
   # if passing at least two arguments via list (no kwargs), then we have to specify
   # first one as either "" or python script like train_rl.py or train.py
   # the second argument is the yaml file
-  if len(argv) >= 2 and argv[1].endswith(".yml"):
+  if len(argv) >= 2 and argv[1].lower().endswith((".yml", ".yaml")):
     return resolve_config_path(argv[1]), argv[2:]
   module = _module_from_path(argv[0]) if len(argv) > 0 else None
   if module not in _CONFIG_FILE_MAPPING:
