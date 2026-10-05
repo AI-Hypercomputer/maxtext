@@ -266,6 +266,7 @@ def test_qwen_configs(config_file):
 
 KIMI_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "kimi-k2-1t.yml"),
+    os.path.join(CONFIGS_DIR, "models", "kimi-k3.yml"),
 ]
 
 
