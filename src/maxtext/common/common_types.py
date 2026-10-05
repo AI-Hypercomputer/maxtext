@@ -157,6 +157,7 @@ class DecoderBlockType(enum.Enum):
   ENVY = "envy"
   WEAVER = "weaver"
   MING = "ming"
+  KIMI_LINEAR = "kimi_linear"
 
 
 class VisionEncoderBlockType(enum.Enum):
