@@ -20,6 +20,7 @@ VllmSampler, TrainerWorker, GRPOAdapter, and BatchAssembler primitives.
 
 import argparse
 import contextlib
+import dataclasses
 import gc
 import glob
 import json
@@ -28,6 +29,7 @@ import subprocess
 import sys
 import time
 from unittest import mock
+
 import numpy as np
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -48,9 +50,7 @@ import module_divergence_probe as mdp
 
 MODEL_HF_BF16 = os.environ.get("MAXTEXT_HF_BF16", "Qwen/Qwen3.5-35B-A3B")
 MODEL_MAXTEXT_BF16 = os.environ.get("MAXTEXT_MODEL_BF16", "qwen3.5-35b-a3b")
-CKPT_BF16 = os.environ.get(
-    "MAXTEXT_CKPT_BF16", "gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/unscanned/0/items"
-)
+CKPT_BF16 = os.environ.get("MAXTEXT_CKPT_BF16", "gs://maxtext-model-checkpoints/qwen3.5-35b-a3b/unscanned/0/items")
 
 MODEL_HF_FP8 = os.environ.get("MAXTEXT_HF_FP8", "Qwen/Qwen3.5-35B-A3B-FP8")
 MODEL_MAXTEXT_FP8 = os.environ.get("MAXTEXT_MODEL_FP8", "qwen3.5-35b-a3b-fp8")
@@ -72,7 +72,7 @@ def log(*a):
   print(f"[{time.time() - t0:5.0f}s]", *a, flush=True)
 
 
-def set_tpu_env(hf_home):
+def set_tpu_env(hf_home: str) -> None:
   """Sets runtime environment variables matching mlperf_35b_128_v5p.sh + mlperf_base.sh."""
   os.environ["NEW_MODEL_DESIGN"] = "1"
   os.environ["MODEL_IMPL_TYPE"] = "flax_nnx"
@@ -106,7 +106,7 @@ def set_tpu_env(hf_home):
     os.environ.setdefault(k, v)
 
 
-def get_tokenizer(hf_home):
+def get_tokenizer(hf_home: str):
   from transformers import AutoTokenizer
 
   for name in ("models--Qwen--Qwen3.5-35B-A3B", "models--Qwen--Qwen3.5-35B-A3B-FP8"):
@@ -122,25 +122,22 @@ def _load_npz_dict(path: str) -> dict[str, np.ndarray]:
     return {k: np.array(data[k]) for k in data.files}
 
 
+def _delete_jax_buffers(*trees) -> None:
+  import jax
+
+  with contextlib.suppress(Exception):
+    for x in jax.tree.leaves(trees):
+      if hasattr(x, "delete"):
+        x.delete()
+  gc.collect()
+  jax.clear_caches()
+
+
 # --------------------------------------------------------- Quantization & Model Audit
 
 
-def _iter_decoder_layers(decoder):
-  """Yields `(name, layer)` across both unscanned (`layers_i`) and scanned (`layers.*`) decoders."""
-  _, num_layers, is_scanned, _, sublayers = mdp.discover_decoder_structure(decoder)
-  for idx, layer in sublayers:
-    prefix = "layers.sublayer" if is_scanned else "layers"
-    yield f"{prefix}_{idx}", layer
-  rem = getattr(decoder, "layers_remainder", None)
-  if rem is not None:
-    for i in range(num_layers):
-      layer = getattr(rem, f"layers_{i}", None)
-      if layer is not None:
-        yield f"layers_remainder.layers_{i}", layer
-
-
 def quantize_moe_fp8(model, scale_mode="per_channel", weight_qtype=None, set_serve_quant=False, block_size=128):
-  """Quantize RoutedMoE weights in-place via MaxText's quantize_weight_for_fused_moe or qwix.pallas.quantize."""
+  """Quantizes RoutedMoE weights in-place via MaxText's `quantize_weight_for_fused_moe` or `qwix.pallas.quantize`."""
   from flax import nnx
   import jax
   import jax.numpy as jnp
@@ -151,22 +148,19 @@ def quantize_moe_fp8(model, scale_mode="per_channel", weight_qtype=None, set_ser
   if scale_mode not in VALID_SCALE_MODES:
     raise ValueError(f"Unsupported scale_mode={scale_mode!r}; expected one of {VALID_SCALE_MODES}")
   qtype = jnp.dtype(weight_qtype) if weight_qtype is not None else jnp.dtype(jnp.float8_e4m3fn)
-  base = getattr(model, "base", model)
-  decoder = getattr(base, "decoder", base)
+  _, _, _, _, sublayers = mdp.discover_decoder_structure(model)
   count = 0
-  for _, layer in _iter_decoder_layers(decoder):
+  for _, layer in sublayers:
     routed = getattr(getattr(layer, "mlp", None), "routed_experts", None)
     if routed is None:
       continue
-    wi_axes = getattr(routed, "wi_kernel_axes", None)
-    wo_axes = getattr(routed, "wo_kernel_axes", None)
-    weight_specs = [
+    wi_axes, wo_axes = getattr(routed, "wi_kernel_axes", None), getattr(routed, "wo_kernel_axes", None)
+    for w_name, s_name, w_ax in [
         ("wo", "wo_scale", wo_axes),
         ("wi", "wi_scale", wi_axes),
         ("wi_0", "wi_0_scale", wi_axes),
         ("wi_1", "wi_1_scale", wi_axes),
-    ]
-    for w_name, s_name, w_ax in weight_specs:
+    ]:
       p = getattr(routed, w_name, None)
       if p is None:
         continue
@@ -186,28 +180,35 @@ def quantize_moe_fp8(model, scale_mode="per_channel", weight_qtype=None, set_ser
         return qw3, jnp.squeeze(s4, axis=2)
 
       qw, qs = _quant_3d(w_orig) if w_orig.ndim == 3 else jax.vmap(_quant_3d)(w_orig)
-      if w_ax and len(w_ax) >= 3:
-        s_ax = (
-            tuple(None if idx == len(w_ax) - 2 else ax for idx, ax in enumerate(w_ax))
-            if qs.shape[-2] == 1
-            else tuple(w_ax)
-        )
-      else:
-        s_ax = None
+      s_ax = (
+          (tuple(None if idx == len(w_ax) - 2 else ax for idx, ax in enumerate(w_ax)) if qs.shape[-2] == 1 else tuple(w_ax))
+          if (w_ax and len(w_ax) >= 3)
+          else None
+      )
       setattr(routed, w_name, nnx.data(nnx.Param(qw, out_sharding=w_ax)))
       setattr(routed, s_name, nnx.data(nnx.Param(qs, out_sharding=s_ax)))
     routed.weight_dtype = qtype
     if set_serve_quant:
       routed.quant = quantizations.ServeFp8WeightQuantization()
     count += 1
-  log(
-      f"quantize_moe_fp8: quantized {count} RoutedMoE layers"
-      f" (dtype={qtype}, scale={scale_mode}, serve={set_serve_quant})"
-  )
+  log(f"quantize_moe_fp8: quantized {count} RoutedMoE layers (dtype={qtype}, scale={scale_mode}, serve={set_serve_quant})")
   return count
 
 
-def _param_summary(p):
+def _quantize_in_place_if_needed(model, mode: str, scale_mode: str) -> None:
+  """Runs `quantize_moe_fp8` when `mode` is in `IN_PLACE_MOE_MODES`."""
+  if mode in IN_PLACE_MOE_MODES:
+    import jax.numpy as jnp
+
+    quantize_moe_fp8(
+        model,
+        scale_mode=scale_mode,
+        weight_qtype=jnp.int8 if mode == "int8_moe" else jnp.float8_e4m3fn,
+        set_serve_quant=(mode == "fp8_moe_native"),
+    )
+
+
+def _param_summary(p) -> dict[str, object] | None:
   if p is None:
     return None
   arr = p[...] if hasattr(p, "__getitem__") else getattr(p, "value", p)
@@ -221,46 +222,10 @@ def _param_summary(p):
   }
 
 
-def audit_model(model, role: str, expected_mode: str, out_dir: str):
-  """Inspect live NNX parameters and execution kernel paths."""
+def _classify_execution_paths(cfg, routed0, qkvz_mod, wi_info, wi_scale_info, qkvz_info, qkvz_scale_info):
+  """Determines the active MoE and dense linear kernel execution paths for `audit_model`."""
   from maxtext.common import common_types as ctypes
   from maxtext.layers import quantizations
-
-  base = getattr(model, "base", model)
-  decoder = getattr(base, "decoder", base)
-  cfg = getattr(decoder, "config", None)
-  l0 = getattr(decoder, "layers_0", None)
-  l3 = getattr(decoder, "layers_3", None)
-  scanned = getattr(decoder, "layers", None)
-  if l0 is None and scanned is not None:
-    local_layers = getattr(scanned, "local_layers", None)
-    l0 = local_layers[0] if local_layers else getattr(scanned, "layer_0", None)
-  if l3 is None and scanned is not None:
-    l3 = getattr(scanned, "global_layer", None) or getattr(scanned, "layer_3", None)
-
-  l0_mlp = getattr(l0, "mlp", None)
-  routed0 = getattr(l0_mlp, "routed_experts", None)
-  shared0 = getattr(l0_mlp, "shared_expert", None)
-  qkvz_mod = getattr(getattr(l0, "attention", None), "in_proj_qkvz", None)
-  attn3_wrap = getattr(l3, "attention", None) if l3 is not None else None
-  attn3 = getattr(attn3_wrap, "attention", attn3_wrap)
-
-  wi_attr = "wi" if getattr(routed0, "wi", None) is not None else "wi_0"
-  wi_s_attr = "wi_scale" if getattr(routed0, "wi_scale", None) is not None else "wi_0_scale"
-  modules = {
-      name: {"weight": _param_summary(getattr(mod, w_a, None)), "scale": _param_summary(getattr(mod, s_a, None))}
-      for name, mod, w_a, s_a in [
-          ("layers_0.gdn.in_proj_qkvz", qkvz_mod, "kernel", "kernel_scale"),
-          ("layers_0.mlp.shared_expert.wi_0", getattr(shared0, "wi_0", None), "kernel", "kernel_scale"),
-          ("layers_0.mlp.routed_experts.wi", routed0, wi_attr, wi_s_attr),
-          ("layers_0.mlp.routed_experts.wo", routed0, "wo", "wo_scale"),
-          ("layers_3.attn.query", getattr(attn3, "query", None), "kernel", "kernel_scale"),
-      ]
-  }
-  wi_info = modules["layers_0.mlp.routed_experts.wi"]["weight"]
-  wi_scale_info = modules["layers_0.mlp.routed_experts.wi"]["scale"]
-  qkvz_info = modules["layers_0.gdn.in_proj_qkvz"]["weight"]
-  qkvz_scale_info = modules["layers_0.gdn.in_proj_qkvz"]["scale"]
 
   is_fused_moe = getattr(cfg, "attention", "") in ("vllm_rpa", "vllm_batched_rpa") and not getattr(
       routed0, "is_hash_routing", False
@@ -307,6 +272,40 @@ def audit_model(model, role: str, expected_mode: str, out_dir: str):
     dense_path = f"DENSE_DEQUANT_TO_BF16 (dequantize_weight -> BF16 dot_general, scale={q_s})"
   else:
     dense_path = "DENSE_PURE_BF16 (BF16 dot_general)"
+  return moe_path, dense_path, is_fused_moe, wi_is_fp8, wi_is_int8
+
+
+def audit_model(model, role: str, expected_mode: str, out_dir: str):
+  """Inspects live NNX parameters and execution kernel paths."""
+  decoder, _, _, _, sublayers = mdp.discover_decoder_structure(model)
+  cfg = getattr(decoder, "config", None)
+  sub_dict = dict(sublayers)
+  l0 = sub_dict.get(0)
+  l3 = sub_dict.get(3) or (sublayers[-1][1] if len(sublayers) > 1 else None)
+
+  l0_mlp = getattr(l0, "mlp", None)
+  routed0, shared0 = getattr(l0_mlp, "routed_experts", None), getattr(l0_mlp, "shared_expert", None)
+  qkvz_mod = getattr(getattr(l0, "attention", None), "in_proj_qkvz", None)
+  attn3_wrap = getattr(l3, "attention", None) if l3 is not None else None
+  attn3 = getattr(attn3_wrap, "attention", attn3_wrap)
+
+  wi_attr = "wi" if getattr(routed0, "wi", None) is not None else "wi_0"
+  wi_s_attr = "wi_scale" if getattr(routed0, "wi_scale", None) is not None else "wi_0_scale"
+  modules = {
+      name: {"weight": _param_summary(getattr(mod, w_a, None)), "scale": _param_summary(getattr(mod, s_a, None))}
+      for name, mod, w_a, s_a in [
+          ("layers_0.gdn.in_proj_qkvz", qkvz_mod, "kernel", "kernel_scale"),
+          ("layers_0.mlp.shared_expert.wi_0", getattr(shared0, "wi_0", None), "kernel", "kernel_scale"),
+          ("layers_0.mlp.routed_experts.wi", routed0, wi_attr, wi_s_attr),
+          ("layers_0.mlp.routed_experts.wo", routed0, "wo", "wo_scale"),
+          ("layers_3.attn.query", getattr(attn3, "query", None), "kernel", "kernel_scale"),
+      ]
+  }
+  wi_info, wi_scale_info = modules["layers_0.mlp.routed_experts.wi"]["weight"], modules["layers_0.mlp.routed_experts.wi"]["scale"]
+  qkvz_info, qkvz_scale_info = modules["layers_0.gdn.in_proj_qkvz"]["weight"], modules["layers_0.gdn.in_proj_qkvz"]["scale"]
+  moe_path, dense_path, is_fused_moe, wi_is_fp8, wi_is_int8 = _classify_execution_paths(
+      cfg, routed0, qkvz_mod, wi_info, wi_scale_info, qkvz_info, qkvz_scale_info
+  )
 
   cfg_summary = {
       k: getattr(cfg, k, None) if k in ("model_name", "attention") else str(getattr(cfg, k, None))
@@ -329,17 +328,13 @@ def audit_model(model, role: str, expected_mode: str, out_dir: str):
   print("=" * 84 + "\n", flush=True)
 
   if expected_mode in ("fp8", "fp8moe", "fp8_ckpt", "fp8_serve", "fp8_moe", "fp8_moe_native"):
-    assert wi_is_fp8 and wi_scale_info is not None and wi_info["sample_absmax"] > 1.0, (
-        f"[{role}] Invalid FP8 MoE: {wi_info}"
-    )
+    assert wi_is_fp8 and wi_scale_info is not None and wi_info["sample_absmax"] > 1.0, f"[{role}] Invalid FP8 MoE: {wi_info}"
     if expected_mode == "fp8_moe_native" and not is_fused_moe:
       assert moe_path.startswith("GMM_V2_NATIVE_FP8"), f"[{role}] Expected GMM_V2_NATIVE_FP8, got {moe_path}"
     if expected_mode == "fp8_serve":
       assert dense_path.startswith("DENSE_NATIVE_FP8"), f"[{role}] Expected DENSE_NATIVE_FP8, got {dense_path}"
   elif expected_mode == "int8_moe":
-    assert wi_is_int8 and wi_scale_info is not None and wi_info["sample_absmax"] > 1.0, (
-        f"[{role}] Invalid INT8 MoE: {wi_info}"
-    )
+    assert wi_is_int8 and wi_scale_info is not None and wi_info["sample_absmax"] > 1.0, f"[{role}] Invalid INT8 MoE: {wi_info}"
   elif expected_mode == "bf16":
     assert wi_info is not None and "bfloat16" in wi_info["dtype"], f"[{role}] Expected bfloat16 MoE, got {wi_info}"
 
@@ -364,7 +359,6 @@ def _safe_pad_id(pad_id: int, *token_arrays) -> int:
 
 def _concat_packed_payloads(chunks):
   """Concatenates multiple `AssembledBatch` chunks from `SequencePackedBatchAssembler` along axis 0."""
-  import dataclasses
   from tunix.experimental.common import datatypes
 
   if len(chunks) == 1:
@@ -376,9 +370,8 @@ def _concat_packed_payloads(chunks):
       continue
     vals = [getattr(c.payload, f.name) for c in chunks]
     fields[f.name] = None if vals[0] is None else (max(vals) if np.ndim(vals[0]) == 0 else np.concatenate(vals, axis=0))
-  traj_ids = tuple(tid for c in chunks for tid in c.payload.metadata.get("trajectory_ids", ()))
   meta = dict(p0.metadata)
-  meta["trajectory_ids"] = traj_ids
+  meta["trajectory_ids"] = tuple(tid for c in chunks for tid in c.payload.metadata.get("trajectory_ids", ()))
   return datatypes.RLTrainerPayload(**fields, metadata=meta)
 
 
@@ -536,25 +529,13 @@ def stage_tokenize(args, hf_home, out_dir):
   return tokens
 
 
-def stage_sampler(args, hf_home, maxtext_root, out_dir):
-  """Runs in-process rollout sampling via `tunix.generate.vllm_sampler.VllmSampler`."""
-  import jax.numpy as jnp
+def _build_vllm_config(args, tok_name: str, prompt_len: int, ckpt_path: str):
+  """Constructs `VllmConfig` and `additional_config` for `VllmSampler`."""
   from tunix.generate import vllm_sampler as tunix_vllm_sampler
   from tunix.utils import maxtext_utils as tunix_maxtext_utils
 
   mode = args.sampler_mode
   is_fp8_ckpt, in_place_moe = mode in FP8_CKPT_MODES, mode in IN_PLACE_MOE_MODES
-  ckpt_path = args.sampler_ckpt or (CKPT_FP8 if is_fp8_ckpt else CKPT_BF16)
-  tokens = _load_npz_dict(os.path.join(out_dir, "tokens.npz"))["tokens"]
-  n_seqs, prompt_len = tokens.shape
-  tok, tok_name = get_tokenizer(hf_home)
-  pad_id = tunix_maxtext_utils.get_tokenizer_pad_id(tok_name, tok_name, tok_name)
-
-  sys.path.insert(0, os.path.join(maxtext_root, "src", "maxtext", "integration", "vllm"))
-  import maxtext_vllm_adapter
-
-  maxtext_vllm_adapter.register()
-
   additional_config = tunix_maxtext_utils.build_vllm_maxtext_additional_config(
       model_name=MODEL_MAXTEXT_FP8 if is_fp8_ckpt else MODEL_MAXTEXT_BF16,
       attention="vllm_rpa",
@@ -590,10 +571,7 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
           "enable_dp_attention": True,
       }
   }
-
-  num_turns = max(1, int(args.num_turns))
-  env_toks_total = (num_turns - 1) * max(0, int(args.env_tokens_per_turn))
-  vllm_cfg = tunix_vllm_sampler.VllmConfig(
+  return tunix_vllm_sampler.VllmConfig(
       server_mode=False,
       init_with_random_weights=False,
       return_logprobs=True,
@@ -611,7 +589,7 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
           "tokenizer": tok_name,
           "trust_remote_code": True,
           "dtype": "bfloat16",
-          "max_model_len": max(4096, prompt_len + args.gen_tokens + env_toks_total + 64),
+          "max_model_len": max(4096, prompt_len + args.gen_tokens + 64),
           "max_num_seqs": 16,
           "max_num_batched_tokens": int(getattr(args, "max_num_batched_tokens", 2048)),
           "block_size": 256,
@@ -627,25 +605,63 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
           "hf_overrides": dict(tunix_maxtext_utils.VLLM_MAXTEXT_HF_OVERRIDES),
       },
   )
+
+
+def _save_sampler_module_probes(sa_tap, init_probe_pos: np.ndarray, seq0_full: np.ndarray, args, out_dir: str) -> None:
+  """Filters unfilled probe slots on `sa_tap`, captures boundary head probes, and saves `sampler_module_probes.npz`."""
+  valid_mask = init_probe_pos < len(seq0_full)
+  if getattr(sa_tap, "_filled_slots", None):
+    any_filled = np.any(np.stack(list(sa_tap._filled_slots.values()), axis=0), axis=0)
+    if np.any(any_filled):
+      valid_mask = valid_mask & any_filled
+  if not np.all(valid_mask):
+    sa_tap.probe_positions = init_probe_pos[valid_mask]
+    sa_tap.gen_len = max(0, len(seq0_full) - sa_tap.prompt_len)
+    for k in list(sa_tap._buffers.keys()):
+      sa_tap._buffers[k] = sa_tap._buffers[k][valid_mask]
+  p_pos = sa_tap.probe_positions
+  sa_probes = sa_tap.get_probes(
+      target_next_tokens=seq0_full[np.minimum(p_pos + 1, len(seq0_full) - 1)],
+      prompt_tokens_probe=seq0_full[p_pos],
+      temperature=float(args.gen_temperature) if args.gen_tokens > 0 else 1.0,
+  )
+  np.savez(os.path.join(out_dir, "sampler_module_probes.npz"), **sa_probes)
+  log(f"sampler: saved {len(sa_probes)} module probe entries ({len(p_pos)} positions) -> sampler_module_probes.npz")
+
+
+def stage_sampler(args, hf_home, maxtext_root, out_dir):
+  """Runs in-process rollout sampling via `tunix.generate.vllm_sampler.VllmSampler`."""
+  from flax import nnx
+  import jax
+  from tunix.generate import vllm_sampler as tunix_vllm_sampler
+  from tunix.utils import maxtext_utils as tunix_maxtext_utils
+
+  mode = args.sampler_mode
+  is_fp8_ckpt, in_place_moe = mode in FP8_CKPT_MODES, mode in IN_PLACE_MOE_MODES
+  ckpt_path = args.sampler_ckpt or (CKPT_FP8 if is_fp8_ckpt else CKPT_BF16)
+  tokens = _load_npz_dict(os.path.join(out_dir, "tokens.npz"))["tokens"]
+  n_seqs, prompt_len = tokens.shape
+  tok, tok_name = get_tokenizer(hf_home)
+  pad_id = tunix_maxtext_utils.get_tokenizer_pad_id(tok_name, tok_name, tok_name)
+
+  sys.path.insert(0, os.path.join(maxtext_root, "src", "maxtext", "integration", "vllm"))
+  import maxtext_vllm_adapter
+
+  maxtext_vllm_adapter.register()
+  vllm_cfg = _build_vllm_config(args, tok_name, prompt_len, ckpt_path)
   total_gen = max(1, args.gen_tokens)
   do_probe = bool(getattr(args, "probe_modules", False))
   init_probe_pos = (
-      mdp.select_probe_positions(
-          prompt_len, total_gen + env_toks_total, max_tokens=int(getattr(args, "probe_max_tokens", 64))
-      )
+      mdp.select_probe_positions(prompt_len, total_gen, max_tokens=int(getattr(args, "probe_max_tokens", 64)))
       if do_probe
       else None
   )
-  quantized_in_hook = False
-  sa_tap_in_hook = None
+  sa_tap = None
   adapter_cls = getattr(maxtext_vllm_adapter, "MaxTextForCausalLM", None)
   orig_load_weights = getattr(adapter_cls, "load_weights", None) if adapter_cls is not None else None
 
   def _load_and_quantize(self, *l_args, **l_kwargs):
-    from flax import nnx
-    import jax
-
-    nonlocal quantized_in_hook, sa_tap_in_hook
+    nonlocal sa_tap
     orig_load_weights(self, *l_args, **l_kwargs)
     if in_place_moe:
       rules_ctx = (
@@ -654,24 +670,17 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
           else contextlib.nullcontext()
       )
       with jax.set_mesh(self.mesh), rules_ctx:
-        quantize_moe_fp8(
-            self.model,
-            scale_mode=args.moe_scale_mode,
-            weight_qtype=jnp.int8 if mode == "int8_moe" else jnp.float8_e4m3fn,
-            set_serve_quant=(mode == "fp8_moe_native"),
-        )
-      quantized_in_hook = True
-    if do_probe and sa_tap_in_hook is None:
-      sa_tap_in_hook = mdp.ModuleProbeTap(
+        _quantize_in_place_if_needed(self.model, mode, args.moe_scale_mode)
+    if do_probe and sa_tap is None:
+      sa_tap = mdp.ModuleProbeTap(
           self.model,
           role="sampler",
           probe_positions=init_probe_pos,
           prompt_len=prompt_len,
-          gen_len=total_gen + env_toks_total,
+          gen_len=total_gen,
           layer_indices=mdp.parse_probe_layers(getattr(args, "probe_layers", "all")),
           recording_enabled=False,
-      )
-      sa_tap_in_hook.__enter__()
+      ).__enter__()
 
   if (in_place_moe or do_probe) and adapter_cls is not None and orig_load_weights is not None:
     with mock.patch.object(adapter_cls, "load_weights", _load_and_quantize):
@@ -685,22 +694,6 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       obj.uses_mrope = False
   runner.get_mrope_input_positions_fn = runner.model.get_mrope_input_positions
 
-  if in_place_moe and not quantized_in_hook:
-    from flax import nnx
-    import jax
-
-    quantize_moe_fp8(
-        runner.model.model,
-        scale_mode=args.moe_scale_mode,
-        weight_qtype=jnp.int8 if mode == "int8_moe" else jnp.float8_e4m3fn,
-        set_serve_quant=(mode == "fp8_moe_native"),
-    )
-    if hasattr(runner, "state"):
-      runner.state = nnx.state(runner.model)
-    if hasattr(sampler, "refresh_state_leaves"):
-      sampler.refresh_state_leaves()
-    elif hasattr(runner, "state"):
-      runner.state_leaves = jax.tree.leaves(runner.state)
   state_leaves = getattr(runner, "state_leaves", None)
   if state_leaves:
     exp_sub = "int8" if mode == "int8_moe" else ("float8" if mode != "bf16" else "bfloat16")
@@ -710,113 +703,59 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
   audit_model(runner.model.model, role="sampler", expected_mode=mode, out_dir=out_dir)
 
   def _cleanup_sampler():
-    import jax
-
-    nonlocal sa_tap_in_hook
-    if sa_tap_in_hook is not None:
+    nonlocal sa_tap
+    if sa_tap is not None:
       with contextlib.suppress(Exception):
-        sa_tap_in_hook.stop_recording()
-        sa_tap_in_hook.__exit__(None, None, None)
-      sa_tap_in_hook = None
+        sa_tap.stop_recording()
+        sa_tap.__exit__(None, None, None)
+      sa_tap = None
     for fn in (getattr(sampler, "delete_cache", None), getattr(sampler, "stop", None)):
       if callable(fn):
         with contextlib.suppress(Exception):
           fn()
-    for x in jax.tree.leaves((getattr(runner, "state_leaves", None), getattr(runner, "state", None))):
-      if hasattr(x, "delete"):
-        with contextlib.suppress(Exception):
-          x.delete()
-    gc.collect()
-    jax.clear_caches()
+    _delete_jax_buffers(getattr(runner, "state_leaves", None), getattr(runner, "state", None))
 
   if args.audit_only:
     _cleanup_sampler()
-    del runner, sampler
     return
 
-  toks_per_turn = max(1, total_gen // num_turns)
-  curr_prompts = [list(map(int, row)) for row in tokens]
-  acc_comp_ids, acc_logps, acc_masks = ([[] for _ in range(n_seqs)] for _ in range(3))
-  acc_routed = [None for _ in range(n_seqs)]
+  if sa_tap is not None:
+    sa_tap.start_recording(reset=True)
   no_stop = not getattr(args, "stop_at_eos", False) and args.gen_tokens > 0
+  out = sampler(
+      prompt_token_ids=[list(map(int, row)) for row in tokens],
+      max_generation_steps=total_gen,
+      max_prompt_length=prompt_len,
+      temperature=args.gen_temperature if args.gen_tokens > 0 else 0.0,
+      top_p=1.0,
+      top_k=-1,
+      routed_experts_prompt_start=0,
+      ignore_eos=no_stop,
+      stop_token_ids=[] if no_stop else [248046, 248044],
+      _eos_token_id=None if no_stop else getattr(tok, "eos_token_id", None),
+      min_tokens=total_gen if no_stop else 1,
+  )
 
-  if sa_tap_in_hook is not None:
-    sa_tap_in_hook.start_recording(reset=True)
-    probe_ctx = contextlib.nullcontext(sa_tap_in_hook)
-  elif do_probe:
-    probe_ctx = mdp.ModuleProbeTap(
-        runner.model.model,
-        role="sampler",
-        probe_positions=init_probe_pos,
-        prompt_len=prompt_len,
-        gen_len=total_gen + env_toks_total,
-        layer_indices=mdp.parse_probe_layers(getattr(args, "probe_layers", "all")),
-    )
-  else:
-    probe_ctx = contextlib.nullcontext()
-
-  with probe_ctx as sa_tap:
-    for turn_idx in range(num_turns):
-      turn_steps = total_gen - toks_per_turn * (num_turns - 1) if turn_idx == num_turns - 1 else toks_per_turn
-      re_start = 0 if turn_idx == 0 else [len(r) if r is not None else 0 for r in acc_routed]
-      out = sampler(
-          prompt_token_ids=curr_prompts,
-          max_generation_steps=turn_steps,
-          max_prompt_length=max(len(p) for p in curr_prompts),
-          temperature=args.gen_temperature if args.gen_tokens > 0 else 0.0,
-          top_p=1.0,
-          top_k=-1,
-          routed_experts_prompt_start=re_start,
-          ignore_eos=no_stop,
-          stop_token_ids=[] if no_stop else [248046, 248044],
-          _eos_token_id=None if no_stop else getattr(tok, "eos_token_id", None),
-          min_tokens=turn_steps if no_stop else 1,
-      )
-      for i in range(n_seqs):
-        t_ids, t_lps = [int(x) for x in out.tokens[i]], [float(x) for x in out.logprobs[i]]
-        acc_comp_ids[i].extend(t_ids)
-        acc_logps[i].extend(t_lps)
-        acc_masks[i].extend([1.0] * len(t_ids))
-        curr_prompts[i].extend(t_ids)
-        if args.router_replay and out.routed_experts and out.routed_experts[i] is not None:
-          re_arr = np.asarray(out.routed_experts[i], dtype=np.int16)
-          acc_routed[i] = re_arr if acc_routed[i] is None else np.concatenate([acc_routed[i], re_arr], axis=0)
-        if turn_idx < num_turns - 1 and args.env_tokens_per_turn > 0:
-          env_ids = [100] * int(args.env_tokens_per_turn)
-          acc_comp_ids[i].extend(env_ids)
-          acc_logps[i].extend([np.nan] * len(env_ids))
-          acc_masks[i].extend([0.0] * len(env_ids))
-          curr_prompts[i].extend(env_ids)
-
-  if sa_tap_in_hook is not None:
-    sa_tap_in_hook.stop_recording()
-    sa_tap_in_hook.__exit__(None, None, None)
-    sa_tap_in_hook = None
+  acc_comp_ids = [[int(x) for x in out.tokens[i]] for i in range(n_seqs)]
+  acc_logps = [[float(x) for x in out.logprobs[i]] for i in range(n_seqs)]
+  acc_masks = [[1.0] * len(acc_comp_ids[i]) for i in range(n_seqs)]
+  acc_routed = (
+      [
+          np.asarray(out.routed_experts[i], dtype=np.int16)
+          if (out.routed_experts and out.routed_experts[i] is not None)
+          else None
+          for i in range(n_seqs)
+      ]
+      if args.router_replay
+      else None
+  )
 
   if do_probe and sa_tap is not None:
+    sa_tap.stop_recording()
     seq0_full = np.concatenate([tokens[0, :prompt_len], np.asarray(acc_comp_ids[0], dtype=np.int32)])
-    valid_mask = init_probe_pos < len(seq0_full)
-    if getattr(sa_tap, "_filled_slots", None):
-      any_filled = np.any(np.stack(list(sa_tap._filled_slots.values()), axis=0), axis=0)
-      if np.any(any_filled):
-        valid_mask = valid_mask & any_filled
-    if not np.all(valid_mask):
-      sa_tap.probe_positions = init_probe_pos[valid_mask]
-      sa_tap.gen_len = len(acc_comp_ids[0])
-      for k in list(sa_tap._buffers.keys()):
-        sa_tap._buffers[k] = sa_tap._buffers[k][valid_mask]
-    p_pos = sa_tap.probe_positions
-    sa_probes = sa_tap.get_probes(
-        target_next_tokens=seq0_full[np.minimum(p_pos + 1, len(seq0_full) - 1)],
-        prompt_tokens_probe=seq0_full[p_pos],
-        temperature=float(args.gen_temperature) if args.gen_tokens > 0 else 1.0,
-    )
-    np.savez(os.path.join(out_dir, "sampler_module_probes.npz"), **sa_probes)
-    log(f"sampler: saved {len(sa_probes)} module probe entries ({len(p_pos)} positions) -> sampler_module_probes.npz")
+    _save_sampler_module_probes(sa_tap, init_probe_pos, seq0_full, args, out_dir)
 
   _cleanup_sampler()
-  del runner, sampler
-
   comp_lens = np.array([len(t) for t in acc_comp_ids], dtype=np.int32)
   _, batch = build_algo_and_batch(
       tokens,
@@ -824,7 +763,7 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
       acc_logps,
       completion_lens=comp_lens,
       conversation_masks=acc_masks,
-      routed_experts=acc_routed if args.router_replay else None,
+      routed_experts=acc_routed,
       temperature=args.gen_temperature,
       pad_id=_safe_pad_id(pad_id, tokens, acc_comp_ids),
   )
@@ -843,69 +782,25 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
     )
 
 
-def stage_trainer(args, hf_home, maxtext_root, out_dir):
-  """Scores trajectories on the trainer via `run_trainer_node._create_maxtext_trainer_factory` + `TrainerWorker`."""
-  del maxtext_root
-  from flax import nnx
-  import jax
-  import jax.numpy as jnp
-  import optax
-  from tunix.experimental.common import datatypes
+def _configure_trainer_args(
+    args,
+    tok_name: str,
+    ckpt_path: str,
+    out_dir: str,
+    *,
+    dp_fsdp: int,
+    micro: int,
+    logps_mb: int,
+    n_padded: int,
+    n_prompt: int,
+    max_resp_len: int,
+    eff_max_seq_token: int,
+):
+  """Sets `MAXTEXT_EXTRA_FLAGS` and returns parsed `run_trainer_node` arguments."""
   from tunix.experimental.examples.common import run_trainer_node
-  from tunix.experimental.worker import trainer_worker
-  from tunix.utils import maxtext_utils as tunix_maxtext_utils
 
   mode = args.trainer_mode
   is_fp8_ckpt = mode in FP8_CKPT_MODES
-  ckpt_path = args.trainer_ckpt or (CKPT_FP8 if is_fp8_ckpt else CKPT_BF16)
-
-  sa_path = os.path.join(out_dir, "sampler_logprobs.npz")
-  if not args.audit_only and os.path.exists(sa_path):
-    sa = _load_npz_dict(sa_path)
-    prompt_np, gen_ids, sa_gen_logp = sa["tokens"], sa["gen_ids"], sa["gen_logp"]
-    gen_lens = sa.get("gen_lens")
-    conv_masks = sa.get("conversation_masks")
-  else:
-    prompt_np = _load_npz_dict(os.path.join(out_dir, "tokens.npz"))["tokens"]
-    gen_ids = np.zeros((prompt_np.shape[0], max(1, args.gen_tokens)), dtype=np.int32)
-    sa_gen_logp = np.zeros_like(gen_ids, dtype=np.float32)
-    gen_lens = conv_masks = None
-
-  n_rows, n_prompt = prompt_np.shape
-  comp_len = gen_ids.shape[1]
-  max_resp_len = max(1, comp_len + ((512 - ((n_prompt + comp_len) % 512)) % 512))
-  dp_fsdp = max(1, len(jax.devices()) // max(1, args.trainer_tp * args.trainer_ep))
-  pack_size = max(1, dp_fsdp * args.trainer_ep)
-  micro = ((max(args.trainer_micro_batch, dp_fsdp) + dp_fsdp - 1) // dp_fsdp) * dp_fsdp
-  n_padded = ((n_rows + micro - 1) // micro) * micro
-  use_packing = args.max_seq_token_per_tpu is not None and args.max_seq_token_per_tpu > 0
-  eff_max_seq_token = max(int(args.max_seq_token_per_tpu), n_prompt + max_resp_len) if use_packing else 0
-
-  tok, tok_name = get_tokenizer(hf_home)
-  pad_id = tunix_maxtext_utils.get_tokenizer_pad_id(tok_name, tok_name, tok_name)
-  eff_pad_id = _safe_pad_id(pad_id, prompt_np, gen_ids)
-  eos_id = int(getattr(tok, "eos_token_id", None) or pad_id)
-
-  fre_path = os.path.join(out_dir, "router_indices.npz")
-  raw_fre = (
-      _load_npz_dict(fre_path)["experts"]
-      if (not args.audit_only and args.router_replay and os.path.exists(fre_path))
-      else None
-  )
-
-  _, batch = build_algo_and_batch(
-      prompt_np,
-      gen_ids,
-      sa_gen_logp,
-      completion_lens=gen_lens,
-      conversation_masks=conv_masks,
-      routed_experts=raw_fre,
-      temperature=args.gen_temperature,
-      pad_id=eff_pad_id,
-      target_batch_size=n_padded,
-      max_seq_token_per_tpu=eff_max_seq_token or None,
-      pack_size=pack_size,
-  )
   extra_flags = [
       f"tokenizer_path={tok_name}",
       f"scan_layers={'scanned/' in ckpt_path and 'unscanned' not in ckpt_path}",
@@ -941,8 +836,7 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
     extra_flags.append("quantization=serve_fp8_weight")
   os.environ["MAXTEXT_EXTRA_FLAGS"] = " ".join(extra_flags)
 
-  logps_mb = pack_size if use_packing else micro
-  trainer_args = run_trainer_node._parse_args([
+  return run_trainer_node._parse_args([
       "--trainer_backend=maxtext",
       "--worker_id=rl_parity_audit",
       f"--model_id={tok_name}",
@@ -967,25 +861,139 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       f"--prefuse_moe_weights={not (is_fp8_ckpt or mode == 'fp8_moe_native')}",
       "--checkpoint_save_interval_steps=0",
   ])
+
+
+def _save_trainer_module_probes(
+    model,
+    worker,
+    mesh,
+    tr_tap,
+    sa_probes: dict[str, np.ndarray] | None,
+    probe_pos: np.ndarray,
+    probe_layers,
+    prompt_np: np.ndarray,
+    gen_ids: np.ndarray,
+    n_prompt: int,
+    c_len_0: int,
+    args,
+    out_dir: str,
+) -> None:
+  """Captures boundary head probes on `tr_tap`, runs isolated submodule replay, and writes `.npz` artifacts."""
+  import jax
+
+  seq0_full = np.concatenate([prompt_np[0, :n_prompt], np.asarray(gen_ids[0, :c_len_0], dtype=np.int32)])
+  valid_pos = np.minimum(probe_pos, len(seq0_full) - 1)
+  prompt_tokens_probe = seq0_full[valid_pos]
+  target_next_tokens = seq0_full[np.minimum(valid_pos + 1, len(seq0_full) - 1)]
+  temp_val = float(args.gen_temperature) if args.gen_tokens > 0 else 1.0
+  sharding_ctx = (
+      worker._trainer._sharding_ctx()
+      if hasattr(worker._trainer, "_sharding_ctx")
+      else (jax.set_mesh(mesh) if mesh is not None else contextlib.nullcontext())
+  )
+  with sharding_ctx:
+    tr_probes = tr_tap.get_probes(
+        target_next_tokens=target_next_tokens,
+        prompt_tokens_probe=prompt_tokens_probe,
+        temperature=temp_val,
+    )
+    np.savez(os.path.join(out_dir, "trainer_module_probes.npz"), **tr_probes)
+    if sa_probes is not None:
+      tr_iso_probes = mdp.run_isolated_trainer_replay(
+          model,
+          sa_probes,
+          target_next_tokens=target_next_tokens,
+          prompt_tokens_probe=prompt_tokens_probe,
+          temperature=temp_val,
+          layer_indices=probe_layers,
+      )
+      np.savez(os.path.join(out_dir, "trainer_isolated_probes.npz"), **tr_iso_probes)
+  log(f"trainer: saved {len(tr_probes)} module probe entries -> trainer_module_probes.npz (isolated={sa_probes is not None})")
+
+
+def stage_trainer(args, hf_home, maxtext_root, out_dir):
+  """Scores trajectories on the trainer via `run_trainer_node._create_maxtext_trainer_factory` + `TrainerWorker`."""
+  del maxtext_root
+  from flax import nnx
+  import jax
+  import optax
+  from tunix.experimental.common import datatypes
+  from tunix.experimental.examples.common import run_trainer_node
+  from tunix.experimental.worker import trainer_worker
+  from tunix.utils import maxtext_utils as tunix_maxtext_utils
+
+  mode = args.trainer_mode
+  ckpt_path = args.trainer_ckpt or (CKPT_FP8 if mode in FP8_CKPT_MODES else CKPT_BF16)
+  sa_path = os.path.join(out_dir, "sampler_logprobs.npz")
+  if not args.audit_only and os.path.exists(sa_path):
+    sa = _load_npz_dict(sa_path)
+    prompt_np, gen_ids, sa_gen_logp = sa["tokens"], sa["gen_ids"], sa["gen_logp"]
+    gen_lens, conv_masks = sa.get("gen_lens"), sa.get("conversation_masks")
+  else:
+    prompt_np = _load_npz_dict(os.path.join(out_dir, "tokens.npz"))["tokens"]
+    gen_ids = np.zeros((prompt_np.shape[0], max(1, args.gen_tokens)), dtype=np.int32)
+    sa_gen_logp = np.zeros_like(gen_ids, dtype=np.float32)
+    gen_lens = conv_masks = None
+
+  n_rows, n_prompt = prompt_np.shape
+  comp_len = gen_ids.shape[1]
+  max_resp_len = max(1, comp_len + ((512 - ((n_prompt + comp_len) % 512)) % 512))
+  dp_fsdp = max(1, len(jax.devices()) // max(1, args.trainer_tp * args.trainer_ep))
+  pack_size = max(1, dp_fsdp * args.trainer_ep)
+  micro = ((max(args.trainer_micro_batch, dp_fsdp) + dp_fsdp - 1) // dp_fsdp) * dp_fsdp
+  n_padded = ((n_rows + micro - 1) // micro) * micro
+  use_packing = args.max_seq_token_per_tpu is not None and args.max_seq_token_per_tpu > 0
+  eff_max_seq_token = max(int(args.max_seq_token_per_tpu), n_prompt + max_resp_len) if use_packing else 0
+
+  tok, tok_name = get_tokenizer(hf_home)
+  pad_id = tunix_maxtext_utils.get_tokenizer_pad_id(tok_name, tok_name, tok_name)
+  eff_pad_id = _safe_pad_id(pad_id, prompt_np, gen_ids)
+  eos_id = int(getattr(tok, "eos_token_id", None) or pad_id)
+
+  fre_path = os.path.join(out_dir, "router_indices.npz")
+  raw_fre = (
+      _load_npz_dict(fre_path)["experts"]
+      if (not args.audit_only and args.router_replay and os.path.exists(fre_path))
+      else None
+  )
+  _, batch = build_algo_and_batch(
+      prompt_np,
+      gen_ids,
+      sa_gen_logp,
+      completion_lens=gen_lens,
+      conversation_masks=conv_masks,
+      routed_experts=raw_fre,
+      temperature=args.gen_temperature,
+      pad_id=eff_pad_id,
+      target_batch_size=n_padded,
+      max_seq_token_per_tpu=eff_max_seq_token or None,
+      pack_size=pack_size,
+  )
+
+  logps_mb = pack_size if use_packing else micro
+  trainer_args = _configure_trainer_args(
+      args,
+      tok_name,
+      ckpt_path,
+      out_dir,
+      dp_fsdp=dp_fsdp,
+      micro=micro,
+      logps_mb=logps_mb,
+      n_padded=n_padded,
+      n_prompt=n_prompt,
+      max_resp_len=max_resp_len,
+      eff_max_seq_token=eff_max_seq_token,
+  )
   trainer_factory, mesh = run_trainer_node._create_maxtext_trainer_factory(trainer_args)
   _, maxtext_engine, _ = tunix_maxtext_utils.maxtext_modules()
   orig_nnx_opt = nnx.Optimizer
   orig_build_model = maxtext_engine.MaxTextTrainingEngine._build_model
-  quantized_in_hook = False
 
   def _build_and_quantize_model(self, *b_args, **b_kwargs):
-    nonlocal quantized_in_hook
     res = orig_build_model(self, *b_args, **b_kwargs)
     model_obj = res[0] if isinstance(res, tuple) else res
-    if mode in IN_PLACE_MOE_MODES:
-      with self._sharding_ctx() if hasattr(self, "_sharding_ctx") else contextlib.nullcontext():
-        quantize_moe_fp8(
-            model_obj,
-            scale_mode=args.moe_scale_mode,
-            weight_qtype=jnp.int8 if mode == "int8_moe" else jnp.float8_e4m3fn,
-            set_serve_quant=(mode == "fp8_moe_native"),
-        )
-      quantized_in_hook = True
+    with self._sharding_ctx() if hasattr(self, "_sharding_ctx") else contextlib.nullcontext():
+      _quantize_in_place_if_needed(model_obj, mode, args.moe_scale_mode)
     return res
 
   with (
@@ -1006,29 +1014,9 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
     )
 
   model = worker._trainer._model
-  if mode in IN_PLACE_MOE_MODES and not quantized_in_hook:
-    quantize_moe_fp8(
-        model,
-        scale_mode=args.moe_scale_mode,
-        weight_qtype=jnp.int8 if mode == "int8_moe" else jnp.float8_e4m3fn,
-        set_serve_quant=(mode == "fp8_moe_native"),
-    )
-    worker._trainer._optimizer = orig_nnx_opt(model, optax.identity(), wrt=nnx.Param)
-    worker._trainer._state = None
-    if hasattr(worker._trainer, "_invalidate_pure_state"):
-      worker._trainer._invalidate_pure_state()
   audit_model(model, role="trainer", expected_mode=mode, out_dir=out_dir)
-
-  def _cleanup_trainer():
-    with contextlib.suppress(Exception):
-      for x in jax.tree.leaves(nnx.state(model)):
-        if hasattr(x, "delete"):
-          x.delete()
-    gc.collect()
-    jax.clear_caches()
-
   if args.audit_only:
-    _cleanup_trainer()
+    _delete_jax_buffers(nnx.state(model))
     return
 
   req_kwargs = dict(
@@ -1041,25 +1029,22 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
       segment_ids=batch.segment_ids,
       segment_positions=batch.segment_positions,
   )
+  mb_val = logps_mb if batch.segment_ids is not None else None
   if "micro_batch_size" in getattr(datatypes.LogprobsRequest, "__dataclass_fields__", ()):
-    req_kwargs["micro_batch_size"] = logps_mb if batch.segment_ids is not None else None
+    req_kwargs["micro_batch_size"] = mb_val
   req = datatypes.LogprobsRequest(**req_kwargs)
   if not hasattr(req, "micro_batch_size"):
-    req.micro_batch_size = logps_mb if batch.segment_ids is not None else None
+    req.micro_batch_size = mb_val
 
   do_probe = bool(getattr(args, "probe_modules", False))
   sa_probe_path = os.path.join(out_dir, "sampler_module_probes.npz")
   sa_probes = _load_npz_dict(sa_probe_path) if (do_probe and os.path.exists(sa_probe_path)) else None
   c_len_0 = int(gen_lens[0]) if gen_lens is not None else comp_len
-  if sa_probes is not None and "probe_positions" in sa_probes:
-    probe_pos = np.asarray(sa_probes["probe_positions"], dtype=np.int32)
-  elif do_probe:
-    probe_pos = mdp.select_probe_positions(
-        n_prompt, c_len_0, max_tokens=int(getattr(args, "probe_max_tokens", 64))
-    )
-  else:
-    probe_pos = None
-
+  probe_pos = (
+      np.asarray(sa_probes["probe_positions"], dtype=np.int32)
+      if (sa_probes is not None and "probe_positions" in sa_probes)
+      else (mdp.select_probe_positions(n_prompt, c_len_0, max_tokens=int(getattr(args, "probe_max_tokens", 64))) if do_probe else None)
+  )
   probe_layers = mdp.parse_probe_layers(getattr(args, "probe_layers", "all")) if do_probe else None
   global_row0, packed_pos0 = _find_packed_seq0_location(batch) if do_probe else (0, None)
   eff_mb = int(getattr(req, "micro_batch_size", None) or logps_mb or max(1, batch.prompt_ids.shape[0]))
@@ -1083,37 +1068,8 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
     resp = worker.per_token_logps(req)
 
   if do_probe and tr_tap is not None:
-    seq0_full = np.concatenate([prompt_np[0, :n_prompt], np.asarray(gen_ids[0, :c_len_0], dtype=np.int32)])
-    valid_pos = np.minimum(probe_pos, len(seq0_full) - 1)
-    prompt_tokens_probe = seq0_full[valid_pos]
-    target_next_tokens = seq0_full[np.minimum(valid_pos + 1, len(seq0_full) - 1)]
-    temp_val = float(args.gen_temperature) if args.gen_tokens > 0 else 1.0
-    if hasattr(worker._trainer, "_sharding_ctx"):
-      sharding_ctx = worker._trainer._sharding_ctx()
-    elif mesh is not None:
-      sharding_ctx = jax.set_mesh(mesh)
-    else:
-      sharding_ctx = contextlib.nullcontext()
-    with sharding_ctx:
-      tr_probes = tr_tap.get_probes(
-          target_next_tokens=target_next_tokens,
-          prompt_tokens_probe=prompt_tokens_probe,
-          temperature=temp_val,
-      )
-      np.savez(os.path.join(out_dir, "trainer_module_probes.npz"), **tr_probes)
-      if sa_probes is not None:
-        tr_iso_probes = mdp.run_isolated_trainer_replay(
-            model,
-            sa_probes,
-            target_next_tokens=target_next_tokens,
-            prompt_tokens_probe=prompt_tokens_probe,
-            temperature=temp_val,
-            layer_indices=probe_layers,
-        )
-        np.savez(os.path.join(out_dir, "trainer_isolated_probes.npz"), **tr_iso_probes)
-    log(
-        f"trainer: saved {len(tr_probes)} module probe entries -> trainer_module_probes.npz "
-        f"(isolated={sa_probes is not None})"
+    _save_trainer_module_probes(
+        model, worker, mesh, tr_tap, sa_probes, probe_pos, probe_layers, prompt_np, gen_ids, n_prompt, c_len_0, args, out_dir
     )
 
   saved_tr = dict(
@@ -1126,15 +1082,130 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
   if conv_masks is not None:
     saved_tr["conversation_masks"] = conv_masks
   np.savez(os.path.join(out_dir, "trainer_logprobs.npz"), **saved_tr)
-  _cleanup_trainer()
+  _delete_jax_buffers(nnx.state(model))
 
 
-def stage_compare(args, out_dir):
-  """Computes parity and TIS/OOB diagnostics via `GRPOAdapter.loss_fn()` + `rl_common.sampler_trainer_agreement`."""
+def _score_and_print_band(
+    label: str,
+    tag: str,
+    args,
+    p_ids,
+    c_ids,
+    sa_lp,
+    tr_lp,
+    *,
+    c_lens=None,
+    c_masks=None,
+    temp: float = 1.0,
+) -> dict[str, float]:
+  """Evaluates a completion logprob band via `GRPOAdapter.loss_fn()` and prints formatted diagnostics."""
   from flax import nnx
   import jax.numpy as jnp
   from tunix.rl import common as rl_common
 
+  eff_pad_id = _safe_pad_id(0, p_ids, c_ids)
+  algo, batch = build_algo_and_batch(
+      p_ids,
+      c_ids,
+      sa_lp,
+      completion_lens=c_lens,
+      conversation_masks=c_masks,
+      temperature=temp,
+      pad_id=eff_pad_id,
+      max_seq_token_per_tpu=getattr(args, "max_seq_token_per_tpu", None),
+  )
+  tr_lp_arr = np.asarray(tr_lp, dtype=np.float32)
+  tr_padded = np.zeros_like(batch.completion_mask, dtype=np.float32)
+  if batch.segment_ids is None:
+    tr_padded[: tr_lp_arr.shape[0], : tr_lp_arr.shape[1]] = np.nan_to_num(tr_lp_arr, nan=0.0)
+  else:
+    for row_idx, seq_idx, seg_comp_pos in _iter_packed_segments(batch, c_lens, tr_lp_arr.shape[1]):
+      vals = np.nan_to_num(tr_lp_arr[seq_idx, : len(seg_comp_pos)], nan=0.0)
+      tr_padded[row_idx, seg_comp_pos[: len(vals)]] = vals
+
+  with mock.patch.object(
+      rl_common,
+      "compute_per_token_logps",
+      return_value=(jnp.asarray(tr_padded), jnp.zeros_like(jnp.asarray(tr_padded))),
+  ):
+    loss_out = algo.loss_fn()(nnx.Module(), batch, algo.algo_config, pad_id=eff_pad_id, eos_id=eff_pad_id)
+
+  aux = {k: float(v.compute() if hasattr(v, "compute") else np.asarray(v)) for k, v in loss_out.aux_metrics.items()}
+  mask = np.asarray(batch.completion_mask) > 0
+  agree, _, _ = rl_common.sampler_trainer_agreement(
+      np.where(mask, batch.rollout_per_token_logps, 0.0),
+      np.where(mask, tr_padded, 0.0),
+      batch.completion_mask,
+  )
+  for k, v in agree.items():
+    aux[k] = float(v[0])
+  aux["is_oob_ratio"] = aux["tis/is_oob_ratio"]
+
+  seq_lens = np.asarray(c_lens, dtype=np.int32) if c_lens is not None else np.sum(np.isfinite(sa_lp), axis=1)
+  med_len = int(np.median(seq_lens)) if len(seq_lens) else 0
+  is_oob, kept_frac = aux["tis/is_oob_ratio"], aux["sample_mask/kept_frac"]
+  valid_2d_all = np.isfinite(sa_lp) & np.isfinite(tr_lp)
+  dlogp_2d = np.where(valid_2d_all, np.asarray(tr_lp, dtype=np.float32) - np.asarray(sa_lp, dtype=np.float32), 0.0)
+  seq_counts = np.maximum(np.sum(valid_2d_all, axis=1), 1)
+  seq_geomeans = np.exp(np.clip(np.sum(dlogp_2d, axis=1) / seq_counts, -20.0, 20.0))
+  n_below, n_above = int(np.sum(seq_geomeans < RATIO_MIN)), int(np.sum(seq_geomeans > RATIO_MAX))
+  n_in = len(seq_geomeans) - n_below - n_above
+  abs_dlogp = np.abs(dlogp_2d[valid_2d_all]) if np.any(valid_2d_all) else np.zeros(1, dtype=np.float32)
+
+  print(f"\n### {tag} — {label}")
+  print(
+      f"  tokens={int(mask.sum())}  seqs={len(p_ids)}  "
+      f"seq_len(min/med/max)={int(np.min(seq_lens))}/{med_len}/{int(np.max(seq_lens))}  "
+      f"band=[{RATIO_MIN}, {RATIO_MAX}]"
+  )
+  print(
+      f"  >>> is_oob_ratio (seq-mask-tis)      = {is_oob:.4f} ({is_oob:.2%})  "
+      f"[in-band={n_in}/{len(seq_geomeans)}, below<{RATIO_MIN}={n_below}, above>{RATIO_MAX}={n_above}]"
+  )
+  print(f"      sample_mask/kept_frac            = {kept_frac:.4f} ({kept_frac:.2%})")
+  print(
+      f"      seq_geomean (min/med/max)        = "
+      f"{float(np.min(seq_geomeans)):.5f} / {float(np.median(seq_geomeans)):.5f} / {float(np.max(seq_geomeans)):.5f}"
+  )
+  print(
+      f"      |dlogp| (med / p99 / max)        = "
+      f"{float(np.median(abs_dlogp)):.4f} / {float(np.percentile(abs_dlogp, 99)):.4f} / {float(np.max(abs_dlogp)):.4f}"
+  )
+  if med_len < 512 and int(getattr(args, "gen_tokens", 4096)) >= 512:
+    print(
+        f"      [WARNING] Short completions (median={med_len} tokens vs --gen-tokens={args.gen_tokens}): "
+        f"per-seq SE = sigma/sqrt(N) dominates the 0.3% [{RATIO_MIN}, {RATIO_MAX}] TIS band. "
+        "Re-run sampler without --stop-at-eos to generate full-length rollouts."
+    )
+  for k in (
+      "sample_mask/mult_prob_error_mean",
+      "sample_mask/mult_prob_error_max",
+      "sampler_is/token_logdiff_mean",
+      "sampler_is/token_logdiff_absmean",
+      "sampler_is/token_logdiff_abs_max",
+      "sampler_is/token_outlier_frac",
+      "sampler_is/seq_geomean_mean",
+      "sampler_trainer/logp_diff_mean",
+  ):
+    fmt = "+.6f" if k.endswith("_mean") and "logdiff" in k else (".6e" if "outlier" in k else ".6f")
+    print(f"      {k:<32} = {aux[k]:{fmt}}")
+
+  diff_abs = np.where(mask, np.abs(tr_padded - batch.rollout_per_token_logps), -1.0)
+  print("  Top-5 Worst Token Divergences:")
+  for idx in np.argsort(diff_abs.ravel())[::-1][:5]:
+    r, c = divmod(int(idx), diff_abs.shape[1])
+    if diff_abs[r, c] < 0:
+      break
+    print(
+        f"    row={r:02d} pos={c:04d} id={int(batch.completion_ids[r, c]):<7d} "
+        f"sa={float(batch.rollout_per_token_logps[r, c]):+.4f} tr={float(tr_padded[r, c]):+.4f} "
+        f"|diff|={diff_abs[r, c]:.4f}"
+    )
+  return aux
+
+
+def stage_compare(args, out_dir):
+  """Computes parity and TIS/OOB diagnostics via `GRPOAdapter.loss_fn()` + `rl_common.sampler_trainer_agreement`."""
   for role in ("sampler", "trainer"):
     ap = os.path.join(out_dir, f"audit_{role}.json")
     if os.path.exists(ap):
@@ -1150,166 +1221,32 @@ def stage_compare(args, out_dir):
   assert np.array_equal(tr["tokens"], sa["tokens"]), "Token mismatch between sampler and trainer!"
   tag = f"Sampler={args.sampler_mode.upper()} vs Trainer={args.trainer_mode.upper()}"
 
-  def _eval_band(label, p_ids, c_ids, sa_lp, tr_lp, sa_t1=None, tr_t1=None, c_lens=None, c_masks=None, temp=1.0):
-    eff_pad_id = _safe_pad_id(0, p_ids, c_ids)
-    algo, batch = build_algo_and_batch(
-        p_ids,
-        c_ids,
-        sa_lp,
-        completion_lens=c_lens,
-        conversation_masks=c_masks,
-        temperature=temp,
-        pad_id=eff_pad_id,
-        max_seq_token_per_tpu=getattr(args, "max_seq_token_per_tpu", None),
-    )
-    tr_lp_arr = np.asarray(tr_lp, dtype=np.float32)
-    tr_padded = np.zeros_like(batch.completion_mask, dtype=np.float32)
-    if batch.segment_ids is None:
-      tr_padded[: tr_lp_arr.shape[0], : tr_lp_arr.shape[1]] = np.nan_to_num(tr_lp_arr, nan=0.0)
-    else:
-      for row_idx, seq_idx, seg_comp_pos in _iter_packed_segments(batch, c_lens, tr_lp_arr.shape[1]):
-        vals = np.nan_to_num(tr_lp_arr[seq_idx, : len(seg_comp_pos)], nan=0.0)
-        tr_padded[row_idx, seg_comp_pos[: len(vals)]] = vals
+  mg = _score_and_print_band(
+      "OUTPUT tokens (decode)",
+      tag,
+      args,
+      sa["tokens"],
+      sa["gen_ids"],
+      sa["gen_logp"],
+      tr["gen_logp"],
+      c_lens=sa.get("gen_lens"),
+      c_masks=sa.get("conversation_masks"),
+      temp=args.gen_temperature,
+  )
 
-    with mock.patch.object(
-        rl_common,
-        "compute_per_token_logps",
-        return_value=(jnp.asarray(tr_padded), jnp.zeros_like(jnp.asarray(tr_padded))),
-    ):
-      loss_out = algo.loss_fn()(nnx.Module(), batch, algo.algo_config, pad_id=eff_pad_id, eos_id=eff_pad_id)
-
-    aux = {k: float(v.compute() if hasattr(v, "compute") else np.asarray(v)) for k, v in loss_out.aux_metrics.items()}
-    mask = np.asarray(batch.completion_mask) > 0
-    agree, _, _ = rl_common.sampler_trainer_agreement(
-        np.where(mask, batch.rollout_per_token_logps, 0.0),
-        np.where(mask, tr_padded, 0.0),
-        batch.completion_mask,
-    )
-    for k, v in agree.items():
-      aux[k] = float(v[0])
-
-    aux["is_oob_ratio"] = aux["tis/is_oob_ratio"]
-    if sa_t1 is not None and tr_t1 is not None:
-      valid_2d = np.isfinite(sa_lp) & np.isfinite(tr_lp)
-      aux["top1_agree"] = float(np.mean(sa_t1[valid_2d] == tr_t1[valid_2d])) if np.any(valid_2d) else 0.0
-
-    seq_lens = np.asarray(c_lens, dtype=np.int32) if c_lens is not None else np.sum(np.isfinite(sa_lp), axis=1)
-    med_len = int(np.median(seq_lens)) if len(seq_lens) else 0
-    is_oob, kept_frac = aux["tis/is_oob_ratio"], aux["sample_mask/kept_frac"]
-    valid_2d_all = np.isfinite(sa_lp) & np.isfinite(tr_lp)
-    dlogp_2d = np.where(valid_2d_all, np.asarray(tr_lp, dtype=np.float32) - np.asarray(sa_lp, dtype=np.float32), 0.0)
-    seq_counts = np.maximum(np.sum(valid_2d_all, axis=1), 1)
-    seq_geomeans = np.exp(np.clip(np.sum(dlogp_2d, axis=1) / seq_counts, -20.0, 20.0))
-    n_below = int(np.sum(seq_geomeans < RATIO_MIN))
-    n_above = int(np.sum(seq_geomeans > RATIO_MAX))
-    n_in = len(seq_geomeans) - n_below - n_above
-    abs_dlogp = np.abs(dlogp_2d[valid_2d_all]) if np.any(valid_2d_all) else np.zeros(1, dtype=np.float32)
-    print(f"\n### {tag} — {label}")
-    print(
-        f"  tokens={int(mask.sum())}  seqs={len(p_ids)}  "
-        f"seq_len(min/med/max)={int(np.min(seq_lens))}/{med_len}/{int(np.max(seq_lens))}  "
-        f"band=[{RATIO_MIN}, {RATIO_MAX}]"
-    )
-    print(
-        f"  >>> is_oob_ratio (seq-mask-tis)      = {is_oob:.4f} ({is_oob:.2%})  "
-        f"[in-band={n_in}/{len(seq_geomeans)}, below<{RATIO_MIN}={n_below}, above>{RATIO_MAX}={n_above}]"
-    )
-    print(f"      sample_mask/kept_frac            = {kept_frac:.4f} ({kept_frac:.2%})")
-    print(
-        f"      seq_geomean (min/med/max)        = "
-        f"{float(np.min(seq_geomeans)):.5f} / {float(np.median(seq_geomeans)):.5f} / "
-        f"{float(np.max(seq_geomeans)):.5f}"
-    )
-    print(
-        f"      |dlogp| (med / p99 / max)        = "
-        f"{float(np.median(abs_dlogp)):.4f} / {float(np.percentile(abs_dlogp, 99)):.4f} / "
-        f"{float(np.max(abs_dlogp)):.4f}"
-    )
-    if "OUTPUT" in label and med_len < 512 and int(getattr(args, "gen_tokens", 4096)) >= 512:
-      print(
-          f"      [WARNING] Short completions (median={med_len} tokens vs --gen-tokens={args.gen_tokens}): "
-          f"per-seq SE = sigma/sqrt(N) dominates the 0.3% [{RATIO_MIN}, {RATIO_MAX}] TIS band. "
-          "Re-run sampler without --stop-at-eos to generate full-length rollouts."
-      )
-    for k in (
-        "sample_mask/mult_prob_error_mean",
-        "sample_mask/mult_prob_error_max",
-        "sampler_is/token_logdiff_mean",
-        "sampler_is/token_logdiff_absmean",
-        "sampler_is/token_logdiff_abs_max",
-        "sampler_is/token_outlier_frac",
-        "sampler_is/seq_geomean_mean",
-        "sampler_trainer/logp_diff_mean",
-    ):
-      fmt = "+.6f" if k.endswith("_mean") and "logdiff" in k else (".6e" if "outlier" in k else ".6f")
-      print(f"      {k:<32} = {aux[k]:{fmt}}")
-    if "top1_agree" in aux:
-      print(f"      {'top1_agree':<32} = {aux['top1_agree']:.4f}")
-
-    diff_abs = np.where(mask, np.abs(tr_padded - batch.rollout_per_token_logps), -1.0)
-    print("  Top-5 Worst Token Divergences:")
-    for idx in np.argsort(diff_abs.ravel())[::-1][:5]:
-      r, c = divmod(int(idx), diff_abs.shape[1])
-      if diff_abs[r, c] < 0:
-        break
-      sa_val = float(batch.rollout_per_token_logps[r, c])
-      tr_val = float(tr_padded[r, c])
-      print(
-          f"    row={r:02d} pos={c:04d} id={int(batch.completion_ids[r, c]):<7d} "
-          f"sa={sa_val:+.4f} tr={tr_val:+.4f} |diff|={diff_abs[r, c]:.4f}"
-      )
-    return aux
-
-  mp = None
-  if "logp" in sa and "logp" in tr:
-    p_toks = sa["tokens"]
-    p_len = p_toks.shape[1]
-    mp = _eval_band(
-        "PROMPT tokens (prefill)",
-        p_toks[:, :1],
-        p_toks[:, 1:p_len],
-        sa["logp"][:, 1:p_len],
-        tr["logp"][:, : p_len - 1],
-        sa_t1=sa["top1"][:, 1:p_len] if "top1" in sa else None,
-        tr_t1=tr["top1"][:, : p_len - 1] if "top1" in tr else None,
-        temp=1.0,
-    )
-
-  mg = None
-  if "gen_logp" in sa and "gen_logp" in tr:
-    mg = _eval_band(
-        "OUTPUT tokens (decode)",
-        sa["tokens"],
-        sa["gen_ids"],
-        sa["gen_logp"],
-        tr["gen_logp"],
-        sa_t1=sa.get("gen_top1"),
-        tr_t1=tr.get("gen_top1"),
-        c_lens=sa.get("gen_lens"),
-        c_masks=sa.get("conversation_masks"),
-        temp=args.gen_temperature,
-    )
-
-  mod_div = None
+  res = {"decode": mg, **mg}
   sa_probe_path = os.path.join(out_dir, "sampler_module_probes.npz")
   tr_probe_path = os.path.join(out_dir, "trainer_module_probes.npz")
   if os.path.exists(sa_probe_path) and os.path.exists(tr_probe_path):
     iso_probe_path = os.path.join(out_dir, "trainer_isolated_probes.npz")
-    sa_probes = _load_npz_dict(sa_probe_path)
-    tr_probes = _load_npz_dict(tr_probe_path)
-    iso_probes = _load_npz_dict(iso_probe_path) if os.path.exists(iso_probe_path) else None
-    mod_div = mdp.compare_module_probes(
-        sa_probes,
-        tr_probes,
-        iso_probes,
+    res["module_divergence"] = mdp.compare_module_probes(
+        _load_npz_dict(sa_probe_path),
+        _load_npz_dict(tr_probe_path),
+        _load_npz_dict(iso_probe_path) if os.path.exists(iso_probe_path) else None,
         tag=tag,
         out_dir=out_dir,
         probe_layers=getattr(args, "probe_layers", "all"),
     )
-
-  res = {"prompt": mp, "decode": mg, **(mg or mp or {})}
-  if mod_div is not None:
-    res["module_divergence"] = mod_div
   return res
 
 
@@ -1322,9 +1259,7 @@ def main(argv=None):
   ap.add_argument("--trainer-mode", default="bf16", choices=VALID_MODES)
   ap.add_argument("--moe-scale-mode", default="per_channel", choices=VALID_SCALE_MODES)
   ap.add_argument("--audit-only", action="store_true")
-  ap.add_argument(
-      "--in-process", action="store_true", help="Run sampler and trainer in the same process during --stage all"
-  )
+  ap.add_argument("--in-process", action="store_true", help="Run sampler and trainer in the same process during --stage all")
   for flag in ("--out-dir", "--hf-home", "--maxtext-root", "--sampler-ckpt", "--trainer-ckpt", "--prompts-file"):
     ap.add_argument(flag, default=None)
   for flag, default in (
@@ -1336,58 +1271,35 @@ def main(argv=None):
       ("--trainer-ep", 1),
       ("--trainer-tp", 4),
       ("--trainer-micro-batch", 2),
-      ("--num-turns", 1),
-      ("--env-tokens-per-turn", 64),
       ("--probe-max-tokens", 64),
   ):
     ap.add_argument(flag, type=int, default=default)
   ap.add_argument("--gen-temperature", type=float, default=1.0)
   ap.add_argument("--router-replay", action=argparse.BooleanOptionalAction, default=True)
-  ap.add_argument(
-      "--stop-at-eos",
-      action=argparse.BooleanOptionalAction,
-      default=False,
-      help="Allow early termination at EOS (<|im_end|>, <|endoftext|>) instead of generating full --gen-tokens",
-  )
-  ap.add_argument(
-      "--pack-sequences",
-      action="store_true",
-      help="Enable Tunix 1D SequencePackedBatchAssembler matching mlperf_base.sh",
-  )
-  ap.add_argument(
-      "--max-seq-token-per-tpu",
-      type=int,
-      default=None,
-      help="Max packed tokens per row (defaults to 65536 when --pack-sequences is set)",
-  )
-  ap.add_argument(
-      "--probe-modules",
-      action=argparse.BooleanOptionalAction,
-      default=False,
-      help="Capture layer-by-layer and module-by-module activations and compute isolated + cumulative divergence",
-  )
-  ap.add_argument("--probe-layers", default="all", help="Comma-separated layer indices or 'all' for module probing")
-  ap.add_argument(
-      "--mlperf-v5p",
-      action="store_true",
-      help="Apply mlperf_35b_128_v5p.sh + mlperf_base.sh defaults (sampler_ep=4, trainer_tp=2, pack_sequences=True)",
-  )
+  ap.add_argument("--stop-at-eos", action=argparse.BooleanOptionalAction, default=False)
+  ap.add_argument("--pack-sequences", action="store_true")
+  ap.add_argument("--max-seq-token-per-tpu", type=int, default=None)
+  ap.add_argument("--probe-modules", action=argparse.BooleanOptionalAction, default=False)
+  ap.add_argument("--probe-layers", default="all")
+  ap.add_argument("--mlperf-v5p", action="store_true")
   ap.add_argument("--retokenize", action="store_true")
   args = ap.parse_args(raw_argv)
 
   if args.mlperf_v5p:
-    if not any(a == "--sampler-ep" or a.startswith("--sampler-ep=") for a in raw_argv):
-      args.sampler_ep = 4
-    if not any(a == "--trainer-tp" or a.startswith("--trainer-tp=") for a in raw_argv):
-      args.trainer_tp = 2
-    if not any(a == "--trainer-ep" or a.startswith("--trainer-ep=") for a in raw_argv):
-      args.trainer_ep = 1
+    for flag, attr, val in (
+        ("--sampler-ep", "sampler_ep", 4),
+        ("--trainer-tp", "trainer_tp", 2),
+        ("--trainer-ep", "trainer_ep", 1),
+    ):
+      if not any(a == flag or a.startswith(f"{flag}=") for a in raw_argv):
+        setattr(args, attr, val)
     if "--pack-sequences" not in raw_argv:
       args.pack_sequences = True
   if args.pack_sequences and args.max_seq_token_per_tpu is None:
     args.max_seq_token_per_tpu = 65536
   if args.mode:
     args.sampler_mode = args.trainer_mode = args.mode
+
   maxtext_root = args.maxtext_root or _MAXTEXT_ROOT
   hf_home = (
       args.hf_home
@@ -1403,9 +1315,7 @@ def main(argv=None):
   )
   out_dir = args.out_dir or os.path.join(hf_home, "rl_logprob_parity_audit")
   os.makedirs(out_dir, exist_ok=True)
-  args.prompts_file = args.prompts_file or os.path.join(
-      maxtext_root, "tools", "rl_logprob_parity", "r2e_prompts_32.jsonl"
-  )
+  args.prompts_file = args.prompts_file or os.path.join(maxtext_root, "tools", "rl_logprob_parity", "r2e_prompts_32.jsonl")
 
   if args.stage == "compare":
     return stage_compare(args, out_dir)
