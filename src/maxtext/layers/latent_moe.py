@@ -14,6 +14,7 @@
 
 """Latent MoE and SiTU-activated MLP layers for Kimi-K3."""
 
+import math
 from typing import Optional
 
 from flax import nnx
@@ -22,6 +23,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 
 from maxtext.common.common_types import Array, DType, ShardMode
+from maxtext.layers import mxfp4
 from maxtext.layers.initializers import NdInitializer, nd_dense_init
 from maxtext.layers.linears import DenseGeneral, situ_gate, situ_linear
 from maxtext.layers.normalizations import RMSNorm
@@ -113,6 +115,14 @@ EXPERT_KERNEL_AXES = {
     "wi_1": ("exp", "embed_moe", "mlp_moe"),
     "wo": ("exp", "mlp_moe", "embed_moe"),
 }
+# MXFP4 packed codes / E8M0 scales: same layout, but the quantized contraction axis (-2) is
+# left unsharded so 32-element MXFP4 groups never straddle devices (and d/32 need not divide
+# the mesh); only the expert and output axes are sharded.
+EXPERT_PACKED_AXES = {
+    "wi_0": ("exp", None, "mlp_moe"),
+    "wi_1": ("exp", None, "mlp_moe"),
+    "wo": ("exp", None, "embed_moe"),
+}
 
 
 class KimiMoERouter(nnx.Module):
@@ -180,11 +190,21 @@ class KimiMoERouter(nnx.Module):
     return topk_idx, topk_weight
 
 
+ROUTED_EXPERT_WEIGHT_FORMATS = ("bf16", "mxfp4")
+
+
 class KimiRoutedExperts(nnx.Module):
   """Routed experts with SiTU activation.
 
-  Keeps dense float kernels `wi_0/wi_1: [E, d, m]`, `wo: [E, m, d]`
-  (the dense dtype is `weight_dtype`).
+  `weight_format="bf16"` keeps dense float kernels `wi_0/wi_1: [E, d, m]`, `wo: [E, m, d]`
+  (the name refers to the checkpoint format; the dense dtype is `weight_dtype`).
+
+  `weight_format="mxfp4"` keeps the released MXFP4 form instead, in MaxText orientation and
+  quantized along each kernel's contraction axis (-2):
+    `wi_{0,1}_packed: uint8 [E, d/2, m]`, `wi_{0,1}_scale: uint8 [E, d/32, m]`,
+    `wo_packed: uint8 [E, m/2, d]`, `wo_scale: uint8 [E, m/32, d]`.
+  The packed bytes are gathered per token and only the selected top-k experts are
+  dequantized, so a dense copy of all experts never exists.
   """
 
   def __init__(
@@ -198,14 +218,18 @@ class KimiRoutedExperts(nnx.Module):
       moe_renormalize: bool = True,
       dtype: DType = jnp.float32,
       weight_dtype: DType = jnp.float32,
+      weight_format: str = "bf16",
       *,
       rngs: nnx.Rngs,
   ):
+    if weight_format not in ROUTED_EXPERT_WEIGHT_FORMATS:
+      raise ValueError(f"weight_format must be one of {ROUTED_EXPERT_WEIGHT_FORMATS}, got {weight_format!r}")
     self.num_experts = num_experts
     self.in_features = in_features
     self.intermediate_dim = intermediate_dim
     self.dtype = dtype
     self.weight_dtype = weight_dtype
+    self.weight_format = weight_format
 
     self.gate = KimiMoERouter(
         hidden_size=hidden_size,
@@ -226,11 +250,37 @@ class KimiRoutedExperts(nnx.Module):
         "wo": ((num_experts, intermediate_dim, in_features), scale_inter),
     }
     for name, (shape, init_scale) in shapes.items():
-      kernel = jax.random.normal(rngs.params(), shape, dtype=weight_dtype) * init_scale
-      setattr(self, name, nnx.Param(kernel, out_sharding=EXPERT_KERNEL_AXES[name]))
+      if weight_format == "mxfp4":
+        packed, scale = self._init_mxfp4(rngs.params(), shape, init_scale)
+        setattr(self, f"{name}_packed", nnx.Param(packed, out_sharding=EXPERT_PACKED_AXES[name]))
+        setattr(self, f"{name}_scale", nnx.Param(scale, out_sharding=EXPERT_PACKED_AXES[name]))
+      else:
+        kernel = jax.random.normal(rngs.params(), shape, dtype=weight_dtype) * init_scale
+        setattr(self, name, nnx.Param(kernel, out_sharding=EXPERT_KERNEL_AXES[name]))
+
+  @staticmethod
+  def _init_mxfp4(key, shape, init_scale):
+    """Random packed init with roughly the same magnitude as the dense init.
+
+    Codes are uniform over the 16 E2M1 values (std ~2.9); the shared E8M0 exponent is
+    chosen so the decoded std is ~`init_scale`. Only used for from-scratch init; real
+    runs restore the released packed bytes.
+    """
+    if shape[-2] % mxfp4.MXFP4_GROUP_SIZE:
+      raise ValueError(f"contraction dim {shape[-2]} must be a multiple of {mxfp4.MXFP4_GROUP_SIZE} for mxfp4")
+    packed_shape = shape[:-2] + (shape[-2] // 2, shape[-1])
+    scale_shape = shape[:-2] + (shape[-2] // mxfp4.MXFP4_GROUP_SIZE, shape[-1])
+    packed = jax.random.randint(key, packed_shape, 0, 256, dtype=jnp.int32).astype(jnp.uint8)
+    exponent = int(round(math.log2(init_scale / 2.9)))
+    scale = jnp.full(scale_shape, mxfp4.E8M0_BIAS + exponent, dtype=jnp.uint8)
+    return packed, scale
 
   def _selected(self, name: str, topk_idx: Array) -> Array:
-    """Returns the gathered kernel `[N, top_k, ...]` for `name`."""
+    """Returns the gathered kernel `[N, top_k, ...]` for `name`, dequantizing if packed."""
+    if self.weight_format == "mxfp4":
+      packed = getattr(self, f"{name}_packed").value[topk_idx]
+      scale = getattr(self, f"{name}_scale").value[topk_idx]
+      return mxfp4.dequantize_mxfp4(packed, scale, axis=-2, dtype=self.dtype)
     return getattr(self, name).value[topk_idx]
 
   def __call__(
@@ -286,6 +336,7 @@ class KimiLatentMoEBlock(nnx.Module):
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
       mesh: Optional[Mesh] = None,
+      routed_experts_weight_format: str = "bf16",
       *,
       rngs: nnx.Rngs,
   ):
@@ -324,6 +375,7 @@ class KimiLatentMoEBlock(nnx.Module):
         moe_renormalize=moe_renormalize,
         dtype=dtype,
         weight_dtype=weight_dtype,
+        weight_format=routed_experts_weight_format,
         rngs=rngs,
     )
 

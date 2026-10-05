@@ -1143,7 +1143,9 @@ deepseek4_284b_config = DeepseekV4Config(**deepseek4_284b_dict)
 
 
 # from https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json (`text_config`, flattened).
-# The release stores routed experts as compressed-tensors `mxfp4-pack-quantized`.
+# The release stores routed experts as compressed-tensors `mxfp4-pack-quantized`
+# (`*.weight_packed` + `*.weight_scale`); `quantization_config` is omitted here because
+# `to_maxtext` dequantizes those pairs on the fly (see `utils/mxfp4.py`).
 # `linear_attn_config.full_attn_layers` / `kda_layers` are 1-indexed, as in the HF config;
 # `param_mapping._resolve_kimi_k3_full_attn_layers` converts them to MaxText's 0-index.
 kimi_k3_dict = {

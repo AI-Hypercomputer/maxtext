@@ -129,7 +129,10 @@ class KimiK3Group3MoETest(unittest.TestCase):
     np.testing.assert_allclose(weight_sums, np.ones_like(weight_sums), rtol=1e-5, atol=1e-5)
 
   def test_routed_expert_params_have_sharding_axes(self):
-    """Router and routed-expert params carry logical sharding axes (else they replicate per chip)."""
+    """Router and routed-expert params carry logical sharding axes (else they replicate per chip).
+
+    MXFP4 packed codes / scales leave the quantized contraction axis (-2) unsharded.
+    """
     expected = {
         "bf16": {
             "gate/kernel": ("embed", None),
@@ -137,6 +140,12 @@ class KimiK3Group3MoETest(unittest.TestCase):
             "wi_0": ("exp", "embed_moe", "mlp_moe"),
             "wi_1": ("exp", "embed_moe", "mlp_moe"),
             "wo": ("exp", "mlp_moe", "embed_moe"),
+        },
+        "mxfp4": {
+            "gate/kernel": ("embed", None),
+            "gate/e_score_correction_bias": (None,),
+            **{f"{n}_{s}": ("exp", None, "mlp_moe") for n in ("wi_0", "wi_1") for s in ("packed", "scale")},
+            **{f"wo_{s}": ("exp", None, "embed_moe") for s in ("packed", "scale")},
         },
     }
     for fmt, want in expected.items():
@@ -147,6 +156,7 @@ class KimiK3Group3MoETest(unittest.TestCase):
             intermediate_dim=32,
             hidden_size=self.hidden_size,
             top_k=2,
+            weight_format=fmt,
             rngs=nnx.Rngs(0),
         )
         got = {

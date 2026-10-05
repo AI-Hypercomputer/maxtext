@@ -208,6 +208,7 @@ class KimiK3DecoderLayer(nnx.Module):
           shard_mode=self.config.shard_mode,
           matmul_precision=self.config.matmul_precision,
           mesh=mesh,
+          routed_experts_weight_format=self.config.routed_experts_weight_format,
           rngs=rngs,
       )
     else:
