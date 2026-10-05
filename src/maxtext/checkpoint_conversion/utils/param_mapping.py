@@ -4854,8 +4854,9 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping.update(
           {
               f"{prefix}-mlp-routed_experts-gate-kernel": f"language_model.model.layers.{i}.block_sparse_moe.gate.weight",
-              # moe.RoutedMoE's router bias param is `gate/bias`.
-              f"{prefix}-mlp-routed_experts-gate-bias": (
+              # The router bias is `gate/bias`; for kimi-k3 it is a `moe.MoEBiasVar`, so (as for
+              # DeepSeek) it lives in the `MoEBiasVar` collection.
+              f"{prefix.replace('params-', 'MoEBiasVar-')}-mlp-routed_experts-gate-bias": (
                   f"language_model.model.layers.{i}.block_sparse_moe.gate.e_score_correction_bias"
               ),
               f"{prefix}-mlp-routed_expert_down_proj-kernel": (
