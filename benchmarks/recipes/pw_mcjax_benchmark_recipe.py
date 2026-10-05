@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,19 +13,18 @@
 # limitations under the License.
 
 """Used to perf benchmarks between Pathways and McJax."""
-import os
+import argparse
+import dataclasses
 import sys
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
+from google.cloud import storage
+
 from benchmarks.recipes import args_helper as helper
 from benchmarks.recipes import parser_utils
 from benchmarks.recipes.pw_utils import check_and_create_bucket
 from benchmarks.recipes.runner_utils import generate_and_run_workloads
-from benchmarks.recipes.user_configs import UserConfig
 from benchmarks.recipes.user_configs import USER_CONFIG
-import argparse
-from google.cloud import storage
+from benchmarks.recipes.user_configs import UserConfig
 
 
 def main(user_config) -> int:
@@ -45,9 +44,10 @@ def main(user_config) -> int:
     An integer exit code from the workload execution (0 for success, non-zero for failure).
   """
   storage_client = storage.Client(project=user_config.project)
+  bucket_name = user_config.base_output_directory.removeprefix("gs://").split("/")[0]
   gcs_bucket = check_and_create_bucket(
       storage_client,
-      user_config.base_output_directory[5:].split("/")[0],
+      bucket_name,
       user_config.region,
   )
   if not gcs_bucket:
@@ -75,39 +75,20 @@ def main_cli_execution() -> None:
   """
   parser = argparse.ArgumentParser(description="Used to perf benchmarks between Pathways and McJax.")
   parser_utils.add_arguments(parser)
+  parser.set_defaults(**{f.name: getattr(USER_CONFIG, f.name) for f in dataclasses.fields(USER_CONFIG) if f.init})
   args = parser.parse_args()
+  user_config = UserConfig(**vars(args))
 
-  if len(sys.argv) > 2:
-    print("Multiple command line arguments detected. Custom configuration will be used.")
-    user_config = UserConfig(**vars(args))
-    should_continue = helper.handle_cmd_args(
-        user_config.cluster_config,
-        is_delete=user_config.delete,
-        user=user_config.user,
-        xpk_path=user_config.xpk_path,
-    )
-    if not should_continue:
-      sys.exit(0)
+  should_continue = helper.handle_cmd_args(
+      user_config.cluster_config,
+      is_delete=user_config.delete,
+      user=user_config.user,
+  )
+  if not should_continue:
+    sys.exit(0)
 
-    return_code = main(user_config)
-    sys.exit(return_code)
-
-  else:
-    print("No command line or only a single --delete argument was detected. The default configuration will be used.")
-    user_config = USER_CONFIG
-    if "--delete" in sys.argv:
-      user_config.delete = True
-      should_continue = helper.handle_cmd_args(
-          user_config.cluster_config,
-          is_delete=user_config.delete,
-          user=user_config.user,
-          xpk_path=user_config.xpk_path,
-      )
-      if not should_continue:
-        sys.exit(0)
-
-    return_code = main(user_config)
-    sys.exit(return_code)
+  return_code = main(user_config)
+  sys.exit(return_code)
 
 
 if __name__ == "__main__":

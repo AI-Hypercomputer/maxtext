@@ -25,9 +25,7 @@ import os
 import subprocess
 
 from benchmarks.ctk_configs import ClusterConfig
-
-# Constants for defining supported actions
-DELETE = "delete"
+from benchmarks.recipes.runner_utils import isolated_kubeconfig
 
 
 def _handle_delete(cluster_config: ClusterConfig, user: str, **kwargs) -> int:
@@ -41,13 +39,10 @@ def _handle_delete(cluster_config: ClusterConfig, user: str, **kwargs) -> int:
   del kwargs
   first_three_chars = user[:3]
   location = getattr(cluster_config, "location", None) or cluster_config.zone
-  get_jobs_cmd = (
-      f"gcloud container clusters get-credentials {cluster_config.cluster_name} "
-      f"--location={location} --project={cluster_config.project} && "
-      "kubectl get jobset -o custom-columns=NAME:.metadata.name --no-headers"
-  )
+  get_jobs_cmd = "kubectl get jobset -o custom-columns=NAME:.metadata.name --no-headers"
   try:
-    output = subprocess.check_output(get_jobs_cmd, shell=True, text=True)
+    with isolated_kubeconfig(cluster_config.cluster_name, cluster_config.project, location):
+      output = subprocess.check_output(get_jobs_cmd, shell=True, text=True)
   except subprocess.CalledProcessError as e:
     print(f"Failed to fetch jobs from cluster {cluster_config.cluster_name}: {e}")
     return 1
@@ -88,20 +83,23 @@ def handle_delete_specific_workload(cluster_config: ClusterConfig, workload_name
   return os.system(delete_command)
 
 
-def handle_cmd_args(cluster_config: ClusterConfig, is_delete: bool, user: str, **kwargs) -> bool:
+def handle_cmd_args(cluster_config: ClusterConfig, is_delete: bool = False, user: str | None = None, **kwargs) -> bool:
   """Parses command-line arguments and executes the specified actions.
 
   Args:
       cluster_config: Contains Cluster configuration information that's helpful
         for running the actions.
       is_delete: A boolean indicating whether the delete action should be
-                 performed.
+        performed.
+      user: Optional user string whose 3-character prefix filters jobs to delete.
+        Defaults to `os.environ.get("USER", "user")`.
       **kwargs: Optional keyword arguments to be passed to action handlers.
   """
   # Handle actions
   should_continue = True
   if is_delete:
-    _handle_delete(cluster_config, user, **kwargs)
+    resolved_user = user or os.environ.get("USER", "user")
+    _handle_delete(cluster_config, resolved_user, **kwargs)
     should_continue = False
 
   return should_continue
