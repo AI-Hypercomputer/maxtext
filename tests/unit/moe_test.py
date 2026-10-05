@@ -4095,5 +4095,132 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
     self.assertLess(moe.RoutedMoE.get_ragged_buffer_size(8, 2, 4, 2, 1.49), 12)
 
 
+class RoutedMoeRouterInputAndUpActivationTest(parameterized.TestCase):
+  """`moe_router_input_dim` (router reads `gate_inputs`) and `mlp_activations[1]` on the up branch."""
+
+  _EMB, _LATENT, _MLP, _E, _K, _SEQ = 32, 16, 8, 4, 2, 8
+
+  def _cfg(self, **overrides):
+    """Tiny mixtral-based RoutedMoE config."""
+    kwargs = {
+        "run_name": "moe_router_input_dim_test",
+        "enable_checkpointing": False,
+        "model_name": "mixtral-8x7b",
+        "override_model_config": True,
+        "base_emb_dim": self._EMB,
+        "base_mlp_dim": self._MLP,
+        "base_moe_mlp_dim": self._MLP,
+        "base_num_decoder_layers": 1,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 2,
+        "head_dim": 16,
+        "num_experts": self._E,
+        "num_experts_per_tok": self._K,
+        "per_device_batch_size": 1,
+        "max_target_length": self._SEQ,
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "matmul_precision": "highest",
+        "float32_gate_logits": True,
+        "megablox": False,
+    }
+    kwargs.update(overrides)
+    return pyconfig.initialize([None, get_test_config_path()], **kwargs)
+
+  @staticmethod
+  def _block(cfg):
+    """Builds a RoutedMoE and its mesh from `cfg`."""
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    block = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", None),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        rngs=nnx.Rngs(0),
+    )
+    return block, mesh
+
+  def test_apply_ffn_activation_up_branch(self):
+    """`mlp_activations[1]` is applied to the up (`wi_1`) branch; "linear" keeps the old behavior."""
+    w0 = jnp.linspace(-30.0, 30.0, 24).reshape(2, 3, 4)
+    w1 = jnp.linspace(40.0, -40.0, 24).reshape(2, 3, 4)
+    cases = {
+        # Every existing config: identity on the up branch (unchanged behavior).
+        ("silu", "linear"): jax.nn.silu(w0) * w1,
+        # Kimi-K3: SiTU on both branches.
+        ("situ_gate", "situ_linear"): linears.situ_gate(w0) * linears.situ_linear(w1),
+    }
+    for (act0, act1), expected in cases.items():
+      ns = SimpleNamespace(
+          config=SimpleNamespace(decoder_block=None, mlp_activations_limit=0.0),
+          activation_fn=linears._convert_to_activation_function(act0),  # pylint: disable=protected-access
+          up_activation_fn=linears._convert_to_activation_function(act1),  # pylint: disable=protected-access
+          dtype=jnp.float32,
+      )
+      np.testing.assert_allclose(moe.RoutedMoE.apply_ffn_activation(ns, w0, w1), expected, rtol=1e-6)
+
+  def test_up_activation_defaults_to_linear_and_fused_paths_reject_it(self):
+    """A one-element `mlp_activations` means linear; fused kernels reject a non-linear up activation."""
+    block, _ = self._block(self._cfg(mlp_activations=["silu"]))
+    self.assertEqual(block.up_activation_name, "linear")
+
+    class _WithOverrides:
+      """Config proxy: `te_moe_block=True` is rejected by config validation on CPU hosts."""
+
+      def __init__(self, base, **overrides):
+        self._base, self._overrides = base, overrides
+
+      def __getattr__(self, name):
+        return self._overrides[name] if name in self._overrides else getattr(self._base, name)
+
+    situ_cfg = self._cfg(mlp_activations=["situ_gate", "situ_linear"])
+    with self.assertRaisesRegex(ValueError, "fused MoE kernels"):
+      self._block(_WithOverrides(situ_cfg, te_moe_block=True))
+
+  @parameterized.named_parameters(("sparse_ragged_dot", True), ("dense", False))
+  def test_router_reads_gate_inputs_of_a_different_width(self, sparse_matmul):
+    """The router reads `gate_inputs` (width `moe_router_input_dim`); experts read the latent input."""
+    cfg = self._cfg(
+        moe_expert_input_dim=self._LATENT,
+        moe_router_input_dim=self._EMB,
+        mlp_activations=["situ_gate", "situ_linear"],
+        sparse_matmul=sparse_matmul,
+    )
+    block, mesh = self._block(cfg)
+    self.assertEqual(block.gate.kernel.shape, (self._EMB, self._E))
+    self.assertEqual(block.wi_0.shape, (self._E, self._LATENT, self._MLP))
+
+    batch = int(cfg.per_device_batch_size) * jax.device_count()
+    k1, k2 = jax.random.split(jax.random.PRNGKey(0))
+    x = jax.random.normal(k1, (batch, self._SEQ, self._LATENT), jnp.float32)
+    h = jax.random.normal(k2, (batch, self._SEQ, self._EMB), jnp.float32)
+    with mesh:
+      out, _, _ = block(x, gate_inputs=h)
+
+    # Reference: Mixtral routing (top-k on the router logits, softmax over the selected k) on
+    # `h`, SiTU experts on `x`.
+    logits = jnp.einsum("bsd,de->bse", h, block.gate.kernel[...])
+    top_w, top_i = jax.lax.top_k(logits, self._K)
+    top_w = jax.nn.softmax(top_w, axis=-1)
+    gate = jnp.einsum("bsd,edm->bsem", x, block.wi_0[...])
+    up = jnp.einsum("bsd,edm->bsem", x, block.wi_1[...])
+    per_expert = jnp.einsum("bsem,emd->bsed", linears.situ_gate(gate) * linears.situ_linear(up), block.wo[...])
+    selected = jnp.take_along_axis(per_expert, top_i[..., None], axis=2)
+    expected = jnp.einsum("bsk,bskd->bsd", top_w, selected)
+    np.testing.assert_allclose(out, expected, rtol=1e-4, atol=1e-5)
+
+  def test_kimi_k3_uses_deepseek_routing_with_a_param_bias(self):
+    """kimi-k3 uses DeepSeek-V3 routing but keeps its router bias as an `nnx.Param`."""
+    self.assertTrue("kimi-k3".startswith(moe.DEEPSEEK_V3_ROUTING_MODEL_PREFIXES))
+    self.assertFalse("kimi-k3".startswith(moe.MOE_BIAS_VAR_MODEL_PREFIXES))
+    for name in ("deepseek3-671b", "deepseek4-284b", "kimi-k2-1t"):
+      self.assertTrue(name.startswith(moe.MOE_BIAS_VAR_MODEL_PREFIXES))
+
+
 if __name__ == "__main__":
   absltest.main()
