@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,12 +15,13 @@
 """
 This module provides utility functions for Pathways-related benchmark recipes.
 It includes helpers for building lists of model configurations based on user
-selections and for generating `XpkClusterConfig` and `PathwaysConfig` objects.
+selections and for generating `ClusterConfig` and `PathwaysConfig` objects.
 """
 
 import typing
 
-import benchmarks.maxtext_xpk_runner as mxr
+from benchmarks.ctk_configs import ClusterConfig
+import benchmarks.maxtext_ctk_runner as mcr
 from google.api_core.exceptions import (
     NotFound,
     Conflict,
@@ -82,14 +83,15 @@ def build_user_models(
   return models
 
 
-def get_cluster_config(cluster_name, project, zone, device_type):
+def get_cluster_config(cluster_name, project, zone, device_type, location=None):
   """
   Generates Cluster configuration objects from a UserConfig.
   """
-  cluster_config = mxr.XpkClusterConfig(
+  cluster_config = ClusterConfig(
       cluster_name=cluster_name,
       project=project,
       zone=zone,
+      location=location,
       device_type=device_type,
   )
 
@@ -109,7 +111,7 @@ def get_pathways_config(
   """
   Generates Pathways configuration objects from a UserConfig.
   """
-  pathways_config = mxr.PathwaysConfig(
+  pathways_config = mcr.PathwaysConfig(
       server_image=server_image,
       proxy_server_image=proxy_image,
       runner_image=runner,

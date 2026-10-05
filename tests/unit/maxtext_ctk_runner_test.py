@@ -392,6 +392,71 @@ class CtkRunnerTest(unittest.TestCase):
     self.assertEqual(ret, 1)
     mock_system.assert_not_called()
 
+  def test_recipes_user_config_and_runner_utils(self):
+    import sys  # pylint: disable=import-outside-toplevel
+    import types  # pylint: disable=import-outside-toplevel
+
+    try:
+      import google.api_core.exceptions  # pylint: disable=import-outside-toplevel,unused-import
+    except ModuleNotFoundError:
+      for mod_name in ["google", "google.api_core", "google.api_core.exceptions"]:
+        sys.modules.setdefault(mod_name, types.ModuleType(mod_name))
+      setattr(sys.modules["google"], "api_core", sys.modules["google.api_core"])
+      setattr(sys.modules["google.api_core"], "exceptions", sys.modules["google.api_core.exceptions"])
+      for exc in ["NotFound", "Conflict", "Forbidden", "PermissionDenied"]:
+        setattr(sys.modules["google.api_core.exceptions"], exc, Exception)
+
+    from benchmarks.recipes import parser_utils, pw_headless_mode, runner_utils, user_configs  # pylint: disable=import-outside-toplevel
+
+    uc_zonal = user_configs.UserConfig(zone="us-east5-b")
+    self.assertEqual(uc_zonal.cluster_config.location, "us-east5-b")
+    self.assertEqual(uc_zonal.cluster_config.zone, "us-east5-b")
+    self.assertEqual(uc_zonal.region, "us-east5")
+
+    uc_regional = user_configs.UserConfig(location="us-east5")
+    self.assertEqual(uc_regional.cluster_config.location, "us-east5")
+    self.assertEqual(uc_regional.cluster_config.zone, "")
+    self.assertEqual(uc_regional.region, "us-east5")
+
+    parser = argparse.ArgumentParser()
+    parser_utils.add_arguments(parser)
+    parsed = parser.parse_args(
+        [
+            "--location=us-central2",
+            "--selected_model_names=llama3_1_8b_8192",
+            "--device_type=v6e-256",
+            "--base_output_directory=gs://custom-bucket/runs",
+            "--xpk_path=/deprecated/xpk",
+        ]
+    )
+    uc_cli = user_configs.UserConfig(**vars(parsed))
+    self.assertEqual(uc_cli.cluster_config.location, "us-central2")
+    self.assertEqual(uc_cli.cluster_config.zone, "")
+    self.assertEqual(uc_cli.region, "us-central2")
+    self.assertEqual(uc_cli.base_output_directory, "gs://custom-bucket/runs/")
+    self.assertEqual(uc_cli.xpk_path, "/deprecated/xpk")
+    self.assertEqual(uc_cli.proxy_image, "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server")
+
+    with mock.patch("benchmarks.recipes.runner_utils.mcr.ctk_benchmark_runner") as mock_runner:
+      ret = runner_utils.generate_and_run_workloads(uc_zonal, [2], 20)
+      self.assertEqual(ret, 0)
+      mock_runner.assert_called_once()
+      wl_configs = mock_runner.call_args.kwargs["workload_configs"]
+      self.assertEqual(len(wl_configs), 1)
+      self.assertIsNone(wl_configs[0].base_docker_image)
+
+    with (
+        mock.patch("benchmarks.recipes.pw_headless_mode.helper.handle_cmd_args", return_value=True),
+        mock.patch("benchmarks.recipes.pw_headless_mode.mcr.run_command_with_updates", return_value=0) as mock_run,
+    ):
+      ret = pw_headless_mode.main()
+      self.assertEqual(ret, 0)
+      mock_run.assert_called_once()
+      self.assertIn("gcluster job submit", mock_run.call_args[0][0])
+      self.assertIn("--pathways-headless", mock_run.call_args[0][0])
+      self.assertFalse(user_configs.USER_CONFIG.headless)
+      self.assertFalse(user_configs.USER_CONFIG.pathways_config.headless)
+
 
 if __name__ == "__main__":
   unittest.main()

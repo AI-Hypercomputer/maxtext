@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Used to perf benchmarks between Pathways and McJax."""
+import dataclasses
 import os
 import sys
 
@@ -77,14 +78,13 @@ def main_cli_execution() -> None:
   parser_utils.add_arguments(parser)
   args = parser.parse_args()
 
-  if len(sys.argv) > 2:
-    print("Multiple command line arguments detected. Custom configuration will be used.")
+  if len(sys.argv) > 1 and sys.argv[1:] != ["--delete"]:
+    print("Command line arguments detected. Custom configuration will be used.")
     user_config = UserConfig(**vars(args))
     should_continue = helper.handle_cmd_args(
         user_config.cluster_config,
         is_delete=user_config.delete,
         user=user_config.user,
-        xpk_path=user_config.xpk_path,
     )
     if not should_continue:
       sys.exit(0)
@@ -96,12 +96,11 @@ def main_cli_execution() -> None:
     print("No command line or only a single --delete argument was detected. The default configuration will be used.")
     user_config = USER_CONFIG
     if "--delete" in sys.argv:
-      user_config.delete = True
+      user_config = dataclasses.replace(USER_CONFIG, delete=True)
       should_continue = helper.handle_cmd_args(
           user_config.cluster_config,
           is_delete=user_config.delete,
           user=user_config.user,
-          xpk_path=user_config.xpk_path,
       )
       if not should_continue:
         sys.exit(0)
