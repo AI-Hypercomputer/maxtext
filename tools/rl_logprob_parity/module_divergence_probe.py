@@ -28,6 +28,7 @@ Provides:
 from __future__ import annotations
 
 import collections
+from collections.abc import Sequence
 import contextlib
 import inspect
 import json
@@ -395,10 +396,6 @@ class ModuleProbeTap:
 
     self.decoder, self.num_layers, self.is_scanned, self.cycle_interval, self.sublayers = discover_decoder_structure(model)
     self.scan_length = max(1, self.num_layers // max(1, self.cycle_interval)) if self.is_scanned else 1
-
-    self._pos_to_slot: dict[int, int] = {int(pos): idx for idx, pos in enumerate(self.probe_positions)}
-    self._min_probe_pos = int(np.min(self.probe_positions)) if self.probe_positions.size else 0
-    self._max_probe_pos = int(np.max(self.probe_positions)) if self.probe_positions.size else -1
 
     if self.packed_seq0_positions is not None and self.probe_positions.size > 0:
       self._trainer_gather_cols = np.asarray(self.packed_seq0_positions[self.probe_positions], dtype=np.int32)
@@ -990,14 +987,16 @@ def run_isolated_trainer_replay(
       if callable(post_ln):
         iso_norm2 = _call_mod(post_ln, sa_post_attn_res)
         iso[f"{p}.post_attention_layernorm"] = np.asarray(iso_norm2[0], dtype=np.float32)
+        norm2_dtype = iso_norm2.dtype
       else:
         iso_norm2 = sa_post_attn_res
+        norm2_dtype = gate_dtype
 
       # 4. MLP: Router Gate, Routed Experts, Shared Expert, Shared Expert Gate
       sa_norm2 = (
-          _safe_input_3d(sampler_probes[f"{p}.post_attention_layernorm"], model_dtype, mesh, b_pad)
+          _safe_input_3d(sampler_probes[f"{p}.post_attention_layernorm"], norm2_dtype, mesh, b_pad)
           if f"{p}.post_attention_layernorm" in sampler_probes
-          else iso_norm2.astype(model_dtype)
+          else iso_norm2.astype(norm2_dtype)
       )
       sa_norm2_pad = _pad_seq_3d(sa_norm2, k_pad)
       mlp = getattr(tr_layer, "mlp", None)
@@ -1270,10 +1269,8 @@ def compare_module_probes(
   prompt_mask = probe_positions < prompt_len if probe_positions.size else None
   decode_mask = probe_positions >= prompt_len if probe_positions.size else None
 
-  if probe_layers == "all" or not probe_layers:
-    visible_layers = set(range(num_layers))
-  else:
-    visible_layers = {int(x.strip()) for x in probe_layers.split(",") if x.strip().isdigit()}
+  parsed_layers = parse_probe_layers(probe_layers)
+  visible_layers = set(range(num_layers)) if parsed_layers is None else parsed_layers
 
   records: list[dict[str, Any]] = []
   family_Buckets: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)

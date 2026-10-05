@@ -219,7 +219,7 @@ python tools/rl_logprob_parity/run_parity_audit.py \
 
 #### 6. Layer-by-Layer & Submodule Divergence Probing (`--probe-modules` + `--mlperf-v5p`)
 ```bash
-# Run with non-invasive in-situ module probing (Isolated + Cumulative divergence across all 40 layers)
+# Run with non-invasive in-situ module probing (Isolated + Cumulative divergence across all decoder layers)
 # aligned with mlperf_35b_128_v5p.sh + mlperf_base.sh (sampler EP=4/TP=1, trainer TP=2/EP=1, 1D packing):
 python tools/rl_logprob_parity/run_parity_audit.py \
   --sampler-mode fp8moe \
@@ -242,38 +242,39 @@ For Cloud DevKit users:
 ```bash
 # Pure BF16 run:
 cdk job create wenxindong-vllm-conda-test \
-  "COMMAND=python /workspace/tools/rl_logprob_parity/compare_trainer_sampler.py --model-type bf16 --router-replay --logits-dot-fp32 --enable-prefix-caching --mamba-cache-mode align --trainer-tp 4 --trainer-kv-heads 4 --trainer-micro-batch 2 --prompts-file /workspace/tools/rl_logprob_parity/r2e_prompts_32.jsonl --prompt-len 4096 --gen-tokens 4096 --no-stop-at-eos --out-dir /cdk-outputs/bf16" \
+  "COMMAND=python /workspace/tools/rl_logprob_parity/run_parity_audit.py --sampler-mode bf16 --trainer-mode bf16 --prompt-len 4096 --gen-tokens 4096 --out-dir /cdk-outputs/bf16" \
   --map-dir $PWD:/workspace \
   --active-deadline-seconds 7200 \
   -t agent-jobs,jetski,bf16-parity
 
 # MoE FP8 (Both) run:
 cdk job create wenxindong-vllm-conda-test \
-  "COMMAND=python /workspace/tools/rl_logprob_parity/compare_trainer_sampler.py --model-type bf16 --fp8-moe --router-replay --logits-dot-fp32 --enable-prefix-caching --mamba-cache-mode align --trainer-tp 4 --trainer-kv-heads 4 --trainer-micro-batch 2 --prompts-file /workspace/tools/rl_logprob_parity/r2e_prompts_32.jsonl --prompt-len 4096 --gen-tokens 4096 --no-stop-at-eos --out-dir /cdk-outputs/fp8" \
+  "COMMAND=python /workspace/tools/rl_logprob_parity/run_parity_audit.py --sampler-mode fp8moe --trainer-mode fp8moe --prompt-len 4096 --gen-tokens 4096 --out-dir /cdk-outputs/fp8" \
   --map-dir $PWD:/workspace \
   --active-deadline-seconds 7200 \
   -t agent-jobs,jetski,fp8-parity
 
 # MoE FP8 Sampler + Pure BF16 Trainer run:
 cdk job create wenxindong-vllm-conda-test \
-  "COMMAND=python /workspace/tools/rl_logprob_parity/compare_trainer_sampler.py --model-type bf16 --fp8-moe --no-trainer-fp8-moe --router-replay --logits-dot-fp32 --enable-prefix-caching --mamba-cache-mode align --trainer-tp 4 --trainer-kv-heads 4 --trainer-micro-batch 2 --prompts-file /workspace/tools/rl_logprob_parity/r2e_prompts_32.jsonl --prompt-len 4096 --gen-tokens 4096 --no-stop-at-eos --out-dir /cdk-outputs/cross_prec" \
+  "COMMAND=python /workspace/tools/rl_logprob_parity/run_parity_audit.py --sampler-mode fp8moe --trainer-mode bf16 --prompt-len 4096 --gen-tokens 4096 --out-dir /cdk-outputs/cross_prec" \
   --map-dir $PWD:/workspace \
   --active-deadline-seconds 7200 \
   -t agent-jobs,jetski,cross-prec-parity
 ```
 
-### Script CLI Options:
-* `--sampler adapter`: Exclusively uses the MaxText-in-vLLM adapter (`MODEL_IMPL_TYPE=flax_nnx`).
-* `--model-type bf16|fp8`: Base model checkpoint precision (`bf16` or `fp8`, defaults to `bf16`).
-* `--fp8-moe`: Quantize only MoE expert layers to FP8 per-channel on top of BF16 base model.
-* `--trainer-fp8-moe / --no-trainer-fp8-moe`: Toggle MoE FP8 quantization independently in trainer (defaults to value of `--fp8-moe`).
+### Script CLI Options (`run_parity_audit.py`):
+* `--sampler-mode bf16|fp8moe|fp8_moe|fp8_moe_native|fp8|fp8_ckpt|fp8_serve|int8_moe`: Sampler precision mode (defaults to `bf16`).
+* `--trainer-mode bf16|fp8moe|fp8_moe|fp8_moe_native|fp8|fp8_ckpt|fp8_serve|int8_moe`: Trainer precision mode (defaults to `bf16`).
+* `--moe-scale-mode per_channel|subchannel128|block128`: MoE weight quantization scale granularity (defaults to `per_channel`).
 * `--prompt-len 4096`: Prompt tokens per sequence (defaults to `4096`, matching MLPerf `max_prompt_length`).
-* `--gen-tokens 1024`: Rollout tokens per sequence (defaults to `1024`).
-* `--router-replay`: Record sampler routing decisions and replay them identically on trainer (defaults to `True`).
-* `--logits-dot-fp32`: Compute final `lm_head` projection in FP32 on both trainer and sampler (defaults to `True`).
-* `--mamba-cache-mode align`: Retains FP32 precision for GDN recurrent state accumulation across decode steps (defaults to `align`).
-* `--enable-prefix-caching`: Enables prefix caching in vLLM sampler (defaults to `True`).
-* `--stage sampler|trainer|compare|all`: Run individual stages independently using cached `.npz` handoffs.
+* `--gen-tokens 4096`: Rollout tokens per sequence (defaults to `4096`).
+* `--router-replay / --no-router-replay`: Record sampler routing decisions and replay them identically on trainer (defaults to `True`).
+* `--stop-at-eos / --no-stop-at-eos`: Allow early termination at EOS instead of generating full `--gen-tokens` (defaults to `False`).
+* `--probe-modules / --no-probe-modules`: Capture layer-by-layer and module-by-module activations and compute isolated + cumulative divergence (defaults to `False`).
+* `--probe-layers all|0,1,2,...`: Comma-separated layer indices or range specification for module divergence probing (defaults to `all`).
+* `--probe-max-tokens 64`: Maximum number of token positions to capture per sequence during module probing (defaults to `64`).
+* `--mlperf-v5p`: Apply `mlperf_35b_128_v5p.sh` + `mlperf_base.sh` topology and packing defaults (`sampler_ep=4, trainer_tp=2, trainer_ep=1, pack_sequences=True`).
+* `--stage tokenize|sampler|trainer|compare|all`: Run individual stages independently using cached `.npz` handoffs.
 
 ---
 
@@ -393,7 +394,7 @@ bash /usr/local/google/home/wenxindong/.gemini/config/skills/cdk-jobs/scripts/cd
    - **Sequence Breakdown (Why 30/31 Out-of-Band):**
      - Total prompts: 32.
      - **Tunix Sample Mask (`mult_prob_err <= 2.0`):** Retained **31 of 32 sequences** (96.88% `kept_frac`), dropping 1 sequence that exceeded the multiplicative probability error threshold.
-     - **Tunix TIS Evaluation:** Evaluated across the 31 active sequences. **1 sequence** fell inside the narrow $[0.999, 1.002]$ band (in-band) and **30 sequences** fell outside (22 below, 9 above).
+     - **Tunix TIS Evaluation:** Evaluated across the 31 active sequences. **1 sequence** fell inside the narrow $[0.999, 1.002]$ band (in-band) and **30 active sequences** fell outside (31/32 total: 22 below, 9 above, including the 1 sample-masked sequence).
      - **`is_oob_ratio` (Out-of-Band Ratio):** $\frac{30}{31} = 96.77\%$.
      - Short decode lengths on synthetic prompts (median 14 tokens) cause standard error $\approx 5.5\%$ to dominate over the narrow $0.3\%$ tolerance band. Full production MLPerf training with long rollouts brings this within the expected $\sim 10\%$ range.
 

@@ -867,24 +867,28 @@ import module_divergence_probe as mdp
 class _ToyLinear(nnx.Module):
 
   def __init__(self, kernel: np.ndarray, dtype=jnp.bfloat16):
+    self.dtype = dtype
     self.kernel = nnx.Param(jnp.asarray(kernel, dtype=dtype))
     self.kernel_scale = None
 
   def __call__(self, x):
+    x_in = x.astype(self.dtype).astype(jnp.float32)
     w = self.kernel[...].astype(jnp.float32)
-    return jnp.matmul(x.astype(jnp.float32), w).astype(x.dtype)
+    return jnp.matmul(x_in, w).astype(self.dtype)
 
 
 class _ToyRMSNorm(nnx.Module):
 
-  def __init__(self, scale: np.ndarray, eps: float = 1e-6):
+  def __init__(self, scale: np.ndarray, eps: float = 1e-6, dtype=None):
+    self.dtype = dtype
     self.scale = nnx.Param(jnp.asarray(scale, dtype=jnp.float32))
     self.eps = eps
 
   def __call__(self, x):
     xf = x.astype(jnp.float32)
     rms = jnp.sqrt(jnp.mean(xf * xf, axis=-1, keepdims=True) + self.eps)
-    return (xf / rms * self.scale[...]).astype(x.dtype)
+    out_dtype = self.dtype if self.dtype is not None else x.dtype
+    return (xf / rms * self.scale[...]).astype(out_dtype)
 
 
 class _ToyGDN(nnx.Module):
@@ -934,9 +938,10 @@ class _ToySharedExpert(nnx.Module):
     self.wo = _ToyLinear(wo)
 
   def __call__(self, x):
-    h0 = jax.nn.silu(self.wi_0(x).astype(jnp.float32))
-    h1 = self.wi_1(x).astype(jnp.float32)
-    return self.wo((h0 * h1).astype(x.dtype))
+    x_bf16 = x.astype(jnp.bfloat16)
+    h0 = jax.nn.silu(self.wi_0(x_bf16).astype(jnp.float32))
+    h1 = self.wi_1(x_bf16).astype(jnp.float32)
+    return self.wo((h0 * h1).astype(jnp.bfloat16))
 
 
 class _ToyRoutedMoE(nnx.Module):
@@ -984,7 +989,7 @@ class _ToyRoutedMoE(nnx.Module):
     del kwargs
     orig_shape = inputs.shape
     d = orig_shape[-1]
-    x_flat = jnp.reshape(inputs.astype(jnp.float32), (-1, d))
+    x_flat = jnp.reshape(inputs.astype(jnp.bfloat16).astype(jnp.float32), (-1, d))
     gate_logits = self.gate(jnp.reshape(inputs, orig_shape)).astype(jnp.float32)
     probs = jax.nn.softmax(jnp.reshape(gate_logits, (-1, gate_logits.shape[-1])), axis=-1)
     k = self.config.num_experts_per_tok
@@ -1011,7 +1016,7 @@ class _ToyRoutedMoE(nnx.Module):
     h1 = jnp.einsum("td,tkdm->tkm", x_flat, w1_sel)
     exp_out = jnp.einsum("tkm,tkmd->tkd", h0 * h1, wo_sel)
     combined = jnp.sum(exp_out * top_w[:, :, None], axis=1)
-    return jnp.reshape(combined.astype(inputs.dtype), orig_shape), gate_logits
+    return jnp.reshape(combined.astype(jnp.bfloat16), orig_shape), gate_logits
 
 
 class _ToySparseMoeBlock(nnx.Module):
@@ -1019,14 +1024,14 @@ class _ToySparseMoeBlock(nnx.Module):
   def __init__(self, routed: _ToyRoutedMoE, shared: _ToySharedExpert, shared_gate_w: np.ndarray):
     self.routed_experts = routed
     self.shared_expert = shared
-    self.shared_expert_gate = _ToyLinear(shared_gate_w)
+    self.shared_expert_gate = _ToyLinear(shared_gate_w, dtype=jnp.float32)
 
   def __call__(self, inputs, deterministic=False, forced_routed_experts=None, **kwargs):
     del deterministic, kwargs
     routed_out, _ = self.routed_experts(inputs, forced_routed_experts=forced_routed_experts)
     shared_out = self.shared_expert(inputs)
     gate_val = jax.nn.sigmoid(self.shared_expert_gate(inputs).astype(jnp.float32))
-    return (routed_out.astype(jnp.float32) + gate_val * shared_out.astype(jnp.float32)).astype(inputs.dtype)
+    return (routed_out.astype(jnp.float32) + gate_val * shared_out.astype(jnp.float32)).astype(jnp.bfloat16)
 
 
 class _ToyDecoderLayer(nnx.Module):
@@ -1101,7 +1106,7 @@ def _build_hybrid_qwen3_5_toy_model(
   layers_list = []
   for i in range(num_layers):
     in_ln = _ToyRMSNorm((1.0 + rng.standard_normal((emb_dim,)) * 0.05).astype(np.float32))
-    post_ln = _ToyRMSNorm((1.0 + rng.standard_normal((emb_dim,)) * 0.05).astype(np.float32))
+    post_ln = _ToyRMSNorm((1.0 + rng.standard_normal((emb_dim,)) * 0.05).astype(np.float32), dtype=jnp.float32)
     if i < num_layers - 1:
       ltype = "linear_attention"
       w_qkvz = (rng.standard_normal((emb_dim, emb_dim * 2)) * 0.06).astype(np.float32)
@@ -1512,8 +1517,12 @@ class ModuleDivergenceProbeTest(unittest.TestCase):
 
       buf = io.StringIO()
       with redirect_stdout(buf):
-        res = audit_mod.main(["--stage", "compare", "--mlperf-v5p", "--probe-modules", "--out-dir", tmp, "--max-seq-token-per-tpu", "512"])
+        res = audit_mod.main(["--stage", "compare", "--mlperf-v5p", "--probe-modules", "--probe-layers", "0,3", "--out-dir", tmp, "--max-seq-token-per-tpu", "512"])
+      out_str = buf.getvalue()
       self.assertIn("module_divergence", res)
+      self.assertIn("  00 | input_layernorm", out_str)
+      self.assertIn("  03 | input_layernorm", out_str)
+      self.assertNotIn("  01 | input_layernorm", out_str)
       self.assertEqual(res["module_divergence"]["logprob_divergence"]["top1_agree"], 1.0)
       for rec in res["module_divergence"]["records"]:
         self.assertLess(rec["cumulative"]["all"]["rel_l2"], 1e-6)

@@ -481,7 +481,8 @@ def _unpack_trainer_logps(resp_logps: np.ndarray, batch, comp_lens, n_rows: int,
 def stage_tokenize(args, hf_home, out_dir):
   path = os.path.join(out_dir, "tokens.npz")
   if os.path.exists(path) and not args.retokenize:
-    return np.load(path)["tokens"]
+    with np.load(path) as data:
+      return data["tokens"]
   tok, _ = get_tokenizer(hf_home)
   rows = []
   with open(args.prompts_file, encoding="utf-8") as f:
@@ -507,7 +508,8 @@ def stage_sampler(args, hf_home, maxtext_root, out_dir):
   mode = args.sampler_mode
   is_fp8_ckpt, in_place_moe = mode in FP8_CKPT_MODES, mode in IN_PLACE_MOE_MODES
   ckpt_path = args.sampler_ckpt or (CKPT_FP8 if is_fp8_ckpt else CKPT_BF16)
-  tokens = np.load(os.path.join(out_dir, "tokens.npz"))["tokens"]
+  with np.load(os.path.join(out_dir, "tokens.npz")) as tok_data:
+    tokens = tok_data["tokens"]
   n_seqs, prompt_len = tokens.shape
   tok, tok_name = get_tokenizer(hf_home)
   pad_id = tunix_maxtext_utils.get_tokenizer_pad_id(tok_name, tok_name, tok_name)
@@ -815,12 +817,13 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
 
   sa_path = os.path.join(out_dir, "sampler_logprobs.npz")
   if not args.audit_only and os.path.exists(sa_path):
-    sa = np.load(sa_path)
-    prompt_np, gen_ids, sa_gen_logp = sa["tokens"], sa["gen_ids"], sa["gen_logp"]
-    gen_lens = sa["gen_lens"] if "gen_lens" in sa else None
-    conv_masks = sa["conversation_masks"] if "conversation_masks" in sa else None
+    with np.load(sa_path) as sa:
+      prompt_np, gen_ids, sa_gen_logp = sa["tokens"], sa["gen_ids"], sa["gen_logp"]
+      gen_lens = sa["gen_lens"] if "gen_lens" in sa else None
+      conv_masks = sa["conversation_masks"] if "conversation_masks" in sa else None
   else:
-    prompt_np = np.load(os.path.join(out_dir, "tokens.npz"))["tokens"]
+    with np.load(os.path.join(out_dir, "tokens.npz")) as tok_data:
+      prompt_np = tok_data["tokens"]
     gen_ids = np.zeros((prompt_np.shape[0], max(1, args.gen_tokens)), dtype=np.int32)
     sa_gen_logp = np.zeros_like(gen_ids, dtype=np.float32)
     gen_lens = conv_masks = None
@@ -841,7 +844,11 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
   eos_id = int(getattr(tok, "eos_token_id", None) or pad_id)
 
   fre_path = os.path.join(out_dir, "router_indices.npz")
-  raw_fre = np.load(fre_path)["experts"] if (not args.audit_only and args.router_replay and os.path.exists(fre_path)) else None
+  if not args.audit_only and args.router_replay and os.path.exists(fre_path):
+    with np.load(fre_path) as fre_data:
+      raw_fre = fre_data["experts"]
+  else:
+    raw_fre = None
 
   _, batch = build_algo_and_batch(
       prompt_np,
@@ -994,7 +1001,11 @@ def stage_trainer(args, hf_home, maxtext_root, out_dir):
 
   do_probe = bool(getattr(args, "probe_modules", False))
   sa_probe_path = os.path.join(out_dir, "sampler_module_probes.npz")
-  sa_probes = dict(np.load(sa_probe_path)) if (do_probe and os.path.exists(sa_probe_path)) else None
+  if do_probe and os.path.exists(sa_probe_path):
+    with np.load(sa_probe_path) as sa_probe_f:
+      sa_probes = dict(sa_probe_f)
+  else:
+    sa_probes = None
   c_len_0 = int(gen_lens[0]) if gen_lens is not None else comp_len
   probe_pos = (
       np.asarray(sa_probes["probe_positions"], dtype=np.int32)
@@ -1075,8 +1086,10 @@ def stage_compare(args, out_dir):
         r = json.load(f)
       print(f"[{role.upper()} AUDIT] mode={r['expected_mode']} | MoE={r['execution_paths']['routed_moe']} | Dense={r['execution_paths']['dense_linear']}")
 
-  tr = np.load(os.path.join(out_dir, "trainer_logprobs.npz"))
-  sa = np.load(os.path.join(out_dir, "sampler_logprobs.npz"))
+  with np.load(os.path.join(out_dir, "trainer_logprobs.npz")) as tr_f:
+    tr = dict(tr_f)
+  with np.load(os.path.join(out_dir, "sampler_logprobs.npz")) as sa_f:
+    sa = dict(sa_f)
   assert np.array_equal(tr["tokens"], sa["tokens"]), "Token mismatch between sampler and trainer!"
   tag = f"Sampler={args.sampler_mode.upper()} vs Trainer={args.trainer_mode.upper()}"
 
@@ -1221,10 +1234,23 @@ def stage_compare(args, out_dir):
   tr_probe_path = os.path.join(out_dir, "trainer_module_probes.npz")
   if os.path.exists(sa_probe_path) and os.path.exists(tr_probe_path):
     iso_probe_path = os.path.join(out_dir, "trainer_isolated_probes.npz")
-    sa_probes = dict(np.load(sa_probe_path))
-    tr_probes = dict(np.load(tr_probe_path))
-    iso_probes = dict(np.load(iso_probe_path)) if os.path.exists(iso_probe_path) else None
-    mod_div = mdp.compare_module_probes(sa_probes, tr_probes, iso_probes, tag=tag, out_dir=out_dir)
+    with np.load(sa_probe_path) as sa_p_f:
+      sa_probes = dict(sa_p_f)
+    with np.load(tr_probe_path) as tr_p_f:
+      tr_probes = dict(tr_p_f)
+    if os.path.exists(iso_probe_path):
+      with np.load(iso_probe_path) as iso_p_f:
+        iso_probes = dict(iso_p_f)
+    else:
+      iso_probes = None
+    mod_div = mdp.compare_module_probes(
+        sa_probes,
+        tr_probes,
+        iso_probes,
+        tag=tag,
+        out_dir=out_dir,
+        probe_layers=getattr(args, "probe_layers", "all"),
+    )
 
   res = {"prompt": mp, "decode": mg, **(mg or mp or {})}
   if mod_div is not None:
@@ -1266,7 +1292,6 @@ def main(argv=None):
   ap.add_argument("--probe-modules", action=argparse.BooleanOptionalAction, default=False, help="Capture layer-by-layer and module-by-module activations and compute isolated + cumulative divergence")
   ap.add_argument("--probe-layers", default="all", help="Comma-separated layer indices or 'all' for module divergence probing")
   ap.add_argument("--mlperf-v5p", action="store_true", help="Apply mlperf_35b_128_v5p.sh + mlperf_base.sh topology and packing defaults (sampler_ep=4, trainer_tp=2, trainer_ep=1, pack_sequences=True)")
-  ap.add_argument("--weight-sync", action="store_true", help="Enable direct trainer-to-sampler weight sync verification via transfer_state_directly")
   ap.add_argument("--retokenize", action="store_true")
   args = ap.parse_args(raw_argv)
 
