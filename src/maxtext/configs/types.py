@@ -5575,6 +5575,17 @@ class MaxTextConfig(
       raise ValueError("`grain_use_elastic_iterator=True` requires `packing=False`.")
     if self.use_dpo and self.packing:
       raise ValueError("DPO does not support packing. Set `packing=False`.")
+    if (
+        self.decoder_block == DecoderBlockType.KIMI_LINEAR
+        and self.packing
+        and getattr(self, "kda_max_num_segments", 0) <= 0
+    ):
+      # KDA's recurrence and short conv ignore `decoder_segment_ids`, so packed documents would
+      # leak state into each other in 70 of the 93 layers.
+      raise ValueError(
+          "decoder_block=kimi_linear (Kimi-K3) does not support packed sequences yet: KDA layers ignore "
+          "segment ids. Set `packing=False`."
+      )
     if self.grain_use_elastic_iterator and not self.use_truncation:
       raise ValueError(
           "`grain_use_elastic_iterator=True` requires `use_truncation=True`. "
