@@ -18,12 +18,13 @@
 
 import dataclasses
 import functools
-from typing import List, Literal, Tuple
+from typing import List, Literal, NamedTuple, Tuple
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
+from maxtext.kernels.ragged import ragged_sort_tc
 from maxtext.layers import quantizations
 import qwix
 import qwix.pallas as qpl
@@ -41,6 +42,21 @@ DRHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     lhs_ragged_dimensions=[0],
     rhs_group_dimensions=[],
 )
+
+
+class TcUnsortCfg(NamedTuple):
+  """Static config to fuse the TC unsort-reduce (and optionally the EP combine) into the GMM custom VJP.
+
+  The forward reduces the GMM's expert-slot rows back to token order; the backward quantizes the smaller
+  token-order cotangent first and gathers it into expert slots afterwards.
+  """
+
+  unpadded_cap: int  # GMM output rows that hold expert slots; the rest is tile padding.
+  num_out_tokens: int
+  topk: int
+  blocks: tuple  # ragged_sort_tc blocks: (gather_block_size, flatten_block_size, keep_3d, tokens_3d).
+  mask_padding: bool
+  combine_rs_cfg: tuple[str, int] | None = None  # (ep_axis_name, seq_len): also fuse the EP psum_scatter.
 
 
 def gmm(
@@ -82,6 +98,9 @@ def gmm(
     use_dlhs_transpose_rhs: bool = False,
     flat_fsdp_shard: tuple[int, int, int] | None = None,
     out_is_3d: bool = False,
+    fuse_3d_dlhs_ps: bool = False,
+    tc_routing: object = None,
+    tc_unsort_cfg: TcUnsortCfg | None = None,
 ):
   """Grouped matrix multiplication operation.
 
@@ -139,7 +158,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20, 21, 22, 23, 24, 26),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -167,6 +186,9 @@ def gmm(
       use_dlhs_transpose_rhs,
       flat_fsdp_shard,
       out_is_3d,
+      fuse_3d_dlhs_ps,
+      tc_routing,
+      tc_unsort_cfg,
   )
   if return_lhs and return_rhs:
     return out, lhs_out, rhs_out
@@ -227,6 +249,9 @@ def _gmm_fwd(
     use_dlhs_transpose_rhs: bool = False,
     flat_fsdp_shard: tuple[int, int, int] | None = None,
     out_is_3d: bool = False,
+    fuse_3d_dlhs_ps: bool = False,
+    tc_routing: object = None,
+    tc_unsort_cfg: TcUnsortCfg | None = None,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -237,6 +262,7 @@ def _gmm_fwd(
         jnp.ndarray | None,
         bool,
         bool,
+        object,
     ],
 ]:
   """Forward function for GMM VJP.
@@ -324,7 +350,19 @@ def _gmm_fwd(
         lhs_vma_axes,
     )
 
-  del return_rhs, return_lhs, fuse_dlhs_scale  # Only used by gmm() and _gmm_bwd.
+  if tc_unsort_cfg is not None:
+    cfg = tc_unsort_cfg
+    out = ragged_sort_tc._gather_reduce(  # pylint: disable=protected-access
+        out[: cfg.unpadded_cap], tc_routing, cfg.num_out_tokens, cfg.topk, cfg.blocks
+    )
+    if cfg.combine_rs_cfg is not None:
+      # Reduce-scatter the [tokens, D // 128, 128] combine over EP into the local [batch, seq, D].
+      ep_axis_name, seq_len = cfg.combine_rs_cfg
+      out = out.reshape(-1, seq_len, *out.shape[1:]).astype(preferred_element_type)
+      out = jax.lax.psum_scatter(out, ep_axis_name, scatter_dimension=0, tiled=True)
+      out = out.reshape(*out.shape[:2], -1)
+
+  del return_rhs, return_lhs, fuse_dlhs_scale, fuse_3d_dlhs_ps  # Only used by gmm() and _gmm_bwd.
   return (out, lhs, rhs), (
       lhs,
       rhs,
@@ -333,6 +371,7 @@ def _gmm_fwd(
       partial_sum,
       lhs_is_qarray,
       rhs_is_qarray,
+      tc_routing,
   )
 
 
@@ -615,6 +654,8 @@ def _gmm_bwd(
     use_dlhs_transpose_rhs: bool,
     flat_fsdp_shard: tuple[int, int, int] | None,
     out_is_3d: bool,
+    fuse_3d_dlhs_ps: bool,
+    tc_unsort_cfg: TcUnsortCfg | None,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -623,6 +664,7 @@ def _gmm_bwd(
         jnp.ndarray | None,
         bool,
         bool,
+        object,
     ],
     grad: jnp.ndarray,
 ) -> tuple[
@@ -632,6 +674,7 @@ def _gmm_bwd(
     None,
     jnp.ndarray | None,
     jnp.ndarray | None,
+    None,
 ]:
   """Backward function for throughput GMM VJP."""
   (
@@ -642,6 +685,7 @@ def _gmm_bwd(
       partial_sum_fwd,
       lhs_is_qarray,
       rhs_is_qarray,
+      tc_routing,
   ) = residual
   num_actual_groups = residual_rhs.shape[0]
   grad, dlhs_partial_sum, drhs_partial_sum = grad
@@ -663,6 +707,11 @@ def _gmm_bwd(
   # 3D layouts: the incoming grad matches the (possibly 3D) forward output and dlhs is
   # produced in the layout of the forward lhs.
   lhs_is_3d = (residual_lhs.qvalue if isinstance(residual_lhs, qpl.QArray) else residual_lhs).ndim == 3
+  if tc_unsort_cfg is not None:
+    _check_tc_unsort_bwd_supported(residual_lhs, residual_rhs, quantization_rule, tc_unsort_cfg)
+    if tc_unsort_cfg.combine_rs_cfg is not None:
+      # The fused forward returned the local [batch, seq, D] combine; go back to the TC token layout.
+      grad = grad.reshape(-1, grad.shape[-1] // 128, 128)
   del out_is_3d  # grad.ndim carries it.
 
   # Jargon used here:
@@ -689,6 +738,26 @@ def _gmm_bwd(
   if quantization_rule:
     dlhs_dout, drhs_dout = _bwd_quantize_gradient(dlhs_dout, drhs_dout, quantization_rule)
 
+  # 2b. Fused TC unsort: gather the (already scaled / quantized) token-order cotangent into expert slots.
+  if tc_unsort_cfg is not None:
+    cfg = tc_unsort_cfg
+    padded_cap = (residual_lhs.qvalue if isinstance(residual_lhs, qpl.QArray) else residual_lhs).shape[0]
+
+    def _unsort_gather_arr(arr):
+      if cfg.combine_rs_cfg is not None:
+        arr = jax.lax.all_gather(arr, cfg.combine_rs_cfg[0], axis=0, tiled=True)
+      arr = ragged_sort_tc._gather(arr, tc_routing, cfg.unpadded_cap, cfg.blocks, cfg.mask_padding)  # pylint: disable=protected-access
+      return jnp.pad(arr, [(0, padded_cap - arr.shape[0])] + [(0, 0)] * (arr.ndim - 1))
+
+    def _unsort_gather_maybe_qa(x):
+      if isinstance(x, qpl.QArray):
+        return dataclasses.replace(x, qvalue=_unsort_gather_arr(x.qvalue))
+      return _unsort_gather_arr(x)
+
+    same_dout = dlhs_dout is drhs_dout
+    dlhs_dout = _unsort_gather_maybe_qa(dlhs_dout)
+    drhs_dout = dlhs_dout if same_dout else _unsort_gather_maybe_qa(drhs_dout)
+
   lhs_scale_for_dlhs = None
   if lhs_is_qarray and isinstance(residual_lhs, qpl.QArray):
     lhs_scale_for_dlhs = residual_lhs.scale
@@ -713,6 +782,7 @@ def _gmm_bwd(
       fuse_dlhs_scale=fuse_dlhs_scale,
       use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
       dlhs_is_3d=lhs_is_3d,
+      fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
   )
 
   # 4. DRHS Gradient Execution
@@ -767,7 +837,70 @@ def _gmm_bwd(
         qtype=residual_rhs.qtype,
     )
 
-  return dlhs, drhs, None, None, d_existing_out, dpartial_sum
+  return dlhs, drhs, None, None, d_existing_out, dpartial_sum, None
+
+
+def _check_tc_unsort_bwd_supported(
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
+    quantization_rule: qwix.QtRule | None,
+    tc_unsort_cfg: TcUnsortCfg,
+):
+  """The fused TC unsort scales and quantizes the cotangent in token order, before the gather into expert slots."""
+  # Per-row lhs and per-expert rhs scales are laid out by expert slot, so they can't be applied in token order.
+  for name, x in (("lhs", lhs), ("rhs", rhs)):
+    if isinstance(x, qpl.QArray) and x.scale.size != 1:
+      raise NotImplementedError(f"tc_unsort_cfg requires a per-tensor {name} scale, got shape {x.scale.shape}.")
+  if quantization_rule is None:
+    return
+  if (
+      quantization_rule.act_qtype
+      and not isinstance(lhs, qpl.QArray)
+      and not quantization_rule.disable_channelwise_axes
+      and not quantizations.is_static_calibration(quantization_rule.act_calibration_method)
+  ):
+    raise NotImplementedError("tc_unsort_cfg requires a per-tensor act scale (fixed or disable_channelwise_axes).")
+  if tc_unsort_cfg.combine_rs_cfg is not None:
+    # Each EP shard applies the rhs / lhs scales to its local cotangent and quantizes it before the all-gather, so
+    # every scale must be the same on all shards; a dynamic one is computed from the shard's own experts and rows.
+    for name, qtype, method in (
+        ("weight", quantization_rule.weight_qtype, quantization_rule.weight_calibration_method),
+        ("act", quantization_rule.act_qtype, quantization_rule.act_calibration_method),
+        ("bwd", quantization_rule.bwd_qtype, quantization_rule.bwd_calibration_method),
+    ):
+      if qtype and not quantizations.is_static_calibration(method):
+        raise NotImplementedError(
+            f"tc_unsort_cfg with combine_rs_cfg requires a fixed {name}_calibration_method, got {method!r}."
+        )
+  if not quantization_rule.bwd_qtype or quantizations.is_static_calibration(quantization_rule.bwd_calibration_method):
+    return
+  # A dynamic per-row cotangent scale would be in token order, so it can't be gathered like the qvalue.
+  if not quantization_rule.disable_channelwise_axes:
+    raise NotImplementedError("tc_unsort_cfg requires a per-tensor bwd scale (fixed or disable_channelwise_axes).")
+
+
+def _lhs_rhs_share_fixed_scale(
+    quantization_rule: qwix.QtRule | None,
+    lhs: qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
+) -> bool:
+  """True when lhs and rhs carry the same fixed per-tensor scale, so grad * rhs.scale == grad * lhs.scale.
+
+  Scale equality is inferred from the rule, not the (traced) arrays: qwix builds a fixed scale from the
+  calibration bound in the quantized array's dtype, so the scales match only if both operands were quantized
+  under this rule's calibration at the same dtype. A pre-quantized lhs (moe_quantize_token_all_gather) is
+  checked to use the rule's act_calibration_method; a scale dtype mismatch falls back to applying lhs.scale.
+  """
+  return (
+      isinstance(rhs, qpl.QArray)
+      and quantization_rule is not None
+      and quantization_rule.weight_qtype == quantization_rule.act_qtype
+      and quantizations.is_static_calibration(quantization_rule.weight_calibration_method)
+      and quantization_rule.weight_calibration_method == quantization_rule.act_calibration_method
+      and lhs.scale.size == 1
+      and rhs.scale.size == 1
+      and lhs.scale.dtype == rhs.scale.dtype
+  )
 
 
 def _bwd_prepare_inputs(
@@ -784,6 +917,7 @@ def _bwd_prepare_inputs(
   # dlhs_dout and drhs_dout can be different when quantization is enabled.
   dlhs_dout = grad
   drhs_dout = grad
+  orig_rhs = rhs
 
   # Apply rhs.scale to dlhs_dout, dlhs_dout[m, n] @ rhs_transpose[g, n, k] = dlhs[m, k]
   # Assume channelwise scale on rhs n.
@@ -816,7 +950,10 @@ def _bwd_prepare_inputs(
   # Apply lhs.scale to drhs_dout, as axis m will disappear in drhs.
   if isinstance(lhs, qpl.QArray):
     # lhs - qvalue: [m, k] scale: [m, 1]
-    drhs_dout = drhs_dout * _scale_like(lhs.scale, drhs_dout, grad.dtype)
+    if _lhs_rhs_share_fixed_scale(quantization_rule, lhs, orig_rhs):
+      drhs_dout = dlhs_dout
+    else:
+      drhs_dout = drhs_dout * _scale_like(lhs.scale, drhs_dout, grad.dtype)
     lhs = lhs.qvalue
 
   return dlhs_dout, drhs_dout, lhs, rhs
@@ -829,20 +966,25 @@ def _bwd_quantize_gradient(
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Applies backward quantization to incoming gradients."""
   if quantization_rule.bwd_qtype:
+    bwd_cal = quantization_rule.bwd_calibration_method
+    share_quantized_grad = dlhs_dout is drhs_dout and quantizations.is_static_calibration(bwd_cal)
     dlhs_dout = qpl.quantize(
         # pyrefly: ignore[bad-argument-type]
         dlhs_dout,
         quantization_rule.bwd_qtype,
         channelwise_axes=[] if quantization_rule.disable_channelwise_axes else [0],
-        calibration_method=quantization_rule.bwd_calibration_method,
+        calibration_method=bwd_cal,
     )
-    drhs_dout = qpl.quantize(
-        # pyrefly: ignore[bad-argument-type]
-        drhs_dout,
-        quantization_rule.bwd_qtype,
-        channelwise_axes=[] if quantization_rule.disable_channelwise_axes else list(range(1, drhs_dout.ndim)),
-        calibration_method=quantization_rule.bwd_calibration_method,
-    )
+    if share_quantized_grad:
+      drhs_dout = dlhs_dout
+    else:
+      drhs_dout = qpl.quantize(
+          # pyrefly: ignore[bad-argument-type]
+          drhs_dout,
+          quantization_rule.bwd_qtype,
+          channelwise_axes=[] if quantization_rule.disable_channelwise_axes else list(range(1, drhs_dout.ndim)),
+          calibration_method=bwd_cal,
+      )
   return dlhs_dout, drhs_dout
 
 
@@ -870,6 +1012,7 @@ def _compute_dlhs(
     fuse_dlhs_scale: bool = False,
     use_dlhs_transpose_rhs: bool = False,
     dlhs_is_3d: bool = False,
+    fuse_3d_dlhs_ps: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Routes execution of DLHS based on backend choices.
 
@@ -901,6 +1044,7 @@ def _compute_dlhs(
         fuse_dlhs_scale=fuse_dlhs_scale,
         use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
         out_is_3d=dlhs_is_3d,
+        fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
     )
   else:
     dlhs = _dlhs_run_megablox(
@@ -986,6 +1130,7 @@ def _dlhs_run_tokamax_v2(
     fuse_dlhs_scale: bool = False,
     use_dlhs_transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    fuse_3d_dlhs_ps: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
   is_qarray_dout = isinstance(dlhs_dout, qpl.QArray)
@@ -1037,6 +1182,7 @@ def _dlhs_run_tokamax_v2(
       # Bypass internal quantization if incoming dlhs_dout is already a QArray, or when lhs_scale is a
       # post-matmul scale rather than a quantization scale.
       maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,
+      zero_initialize=not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
       out_is_3d=out_is_3d,
   )
 

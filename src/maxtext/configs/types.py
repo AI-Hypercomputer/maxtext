@@ -1119,6 +1119,31 @@ class MoEGeneral(BaseModel):
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
   )
+  moe_bwd_prequant_before_unsort: bool = Field(
+      False,
+      description=(
+          "Fuse the TC unsort-reduce into the wo GMM custom VJP so backward quantization runs on the smaller"
+          " [N_tokens, D // 128, 128] cotangent before the TC unsort-gather into the expert buffer."
+          " With quantization, needs fixed weight, act and bwd calibration (per-tensor scales applied in token order)."
+      ),
+  )
+  moe_combine_bwd_direct_qarray: bool = Field(
+      False,
+      description=(
+          "With moe_bwd_prequant_before_unsort=True, fuse the EP combine psum_scatter into the wo GMM custom VJP"
+          " so backward quantizes the local cotangent once before the EP all-gather and TC unsort-gather."
+          " Incompatible with moe_quantize_combine_bwd_method. Each EP shard scales its cotangent before the all-gather, so"
+          " the fixed weight, act and bwd calibration required by moe_bwd_prequant_before_unsort must match across"
+          " shards."
+      ),
+  )
+  moe_3d_dlhs_partial_sum: bool = Field(
+      False,
+      description=(
+          "Skip redundant zero-initialization in 3D DLHS gmm_v2 when accumulating onto an existing 3D partial_sum"
+          " (e.g. wi_0 DLHS accumulating onto wi_1 DLHS)."
+      ),
+  )
   moe_chunk_barrier: bool = Field(
       False,
       description=(
@@ -4047,8 +4072,8 @@ class MaxTextConfig(
         self.moe_tc_ragged_sort and self.moe_tc_ragged_weights_on_activation
     ):
       raise ValueError(
-          f"moe_tc_routing_checkpoint={RematLocation(self.moe_tc_routing_checkpoint).value} requires moe_tc_ragged_sort=True "
-          "and moe_tc_ragged_weights_on_activation=True; use moe_tc_routing_checkpoint=remat."
+          f"moe_tc_routing_checkpoint={RematLocation(self.moe_tc_routing_checkpoint).value} requires"
+          " moe_tc_ragged_sort=True and moe_tc_ragged_weights_on_activation=True; use moe_tc_routing_checkpoint=remat."
       )
     if self.moe_tc_window_routing and not self.moe_tc_ragged_sort:
       raise ValueError("moe_tc_window_routing=True requires moe_tc_ragged_sort=True.")
@@ -5755,6 +5780,39 @@ class MaxTextConfig(
       raise ValueError(
           "moe_accumulate_wi_dlhs=True requires use_tokamax_gmm=True, use_gmm_v2=True and prefuse_moe_weights=False."
       )
+
+    if self.moe_bwd_prequant_before_unsort and not (
+        self.moe_tc_ragged_3d_dispatch and self.moe_tc_ragged_weights_on_activation
+    ):
+      raise ValueError(
+          "moe_bwd_prequant_before_unsort=True requires moe_tc_ragged_3d_dispatch=True and"
+          " moe_tc_ragged_weights_on_activation=True."
+      )
+    if self.moe_combine_bwd_direct_qarray and not self.moe_bwd_prequant_before_unsort:
+      raise ValueError("moe_combine_bwd_direct_qarray=True requires moe_bwd_prequant_before_unsort=True.")
+    if self.moe_bwd_prequant_before_unsort and self.quantization:
+      # The fused unsort applies the weight / act / bwd scales to the token-order cotangent, so they must be
+      # per-tensor; the config's qwix rule keeps channelwise axes, so only fixed calibration gives that. With
+      # moe_combine_bwd_direct_qarray, each EP shard also scales its cotangent before the all-gather, so a dynamic
+      # (shard-local) scale would differ across shards.
+      dynamic = [
+          f"{name}_quantization_calibration_method={method!r}"
+          for name in ("weight", "act", "bwd")
+          if not (method := getattr(self, f"{name}_quantization_calibration_method")).lower().startswith("fixed")
+      ]
+      if dynamic:
+        raise ValueError(
+            "moe_bwd_prequant_before_unsort=True with quantization requires fixed weight, act and bwd calibration,"
+            f" got {', '.join(dynamic)}."
+        )
+    if self.moe_combine_bwd_direct_qarray and self.moe_quantize_combine_bwd_method:
+      raise ValueError(
+          f"moe_quantize_combine_bwd_method={self.moe_quantize_combine_bwd_method!r} has no effect with"
+          " moe_combine_bwd_direct_qarray=True: the fused EP combine quantizes the cotangent with the gmm bwd rule."
+          " Unset moe_quantize_combine_bwd_method."
+      )
+    if self.moe_3d_dlhs_partial_sum and not (self.moe_accumulate_wi_dlhs and self.moe_tc_ragged_3d_gmm):
+      raise ValueError("moe_3d_dlhs_partial_sum=True requires moe_accumulate_wi_dlhs=True and moe_tc_ragged_3d_gmm=True.")
 
     if self.moe_flat_fsdp_weights:
       if not (

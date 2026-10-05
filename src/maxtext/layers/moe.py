@@ -2315,6 +2315,8 @@ class RoutedMoE(nnx.Module):
         return_lhs=False,
         return_rhs=False,
         out_is_3d=False,
+        tc_routing=None,
+        tc_unsort_cfg=None,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2432,7 +2434,9 @@ class RoutedMoE(nnx.Module):
             fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
             return_rhs=return_rhs,
             flat_fsdp_shard=flat_fsdp_shard,
+            fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
             **({"out_is_3d": True} if out_is_3d else {}),
+            **({"tc_routing": tc_routing, "tc_unsort_cfg": tc_unsort_cfg} if tc_unsort_cfg is not None else {}),
         )
       else:
         # jax.lax.ragged_dot
@@ -2453,17 +2457,19 @@ class RoutedMoE(nnx.Module):
           return dataclasses.replace(t, qvalue=t.qvalue[: orig_inputs_shape[0]])
         return t[: orig_inputs_shape[0]]
 
+      # With tc_unsort_cfg the output is already reduced to token order, so it has no padding rows.
+      unpad_out = (lambda t: t) if tc_unsort_cfg is not None else unpad
       # The returned lhs is padded like the output; the returned rhs (weights) is not.
       if return_lhs and return_rhs:
         output, lhs_out, rhs_out = output
-        return unpad(output), unpad(lhs_out), rhs_out
+        return unpad_out(output), unpad(lhs_out), rhs_out
       if return_lhs:
         output, lhs_out = output
-        return unpad(output), unpad(lhs_out)
+        return unpad_out(output), unpad(lhs_out)
       if return_rhs:
         output, rhs_out = output
-        return unpad(output), rhs_out
-      return unpad(output)
+        return unpad_out(output), rhs_out
+      return unpad_out(output)
 
     def is_batch_sharded_by_ep(input_activation):
       # The batch is sharded by expert, except during inference decoding (where batch size == 1).
@@ -2682,6 +2688,13 @@ class RoutedMoE(nnx.Module):
       quantization_rule = qpl.get_current_rule("gmm")
       if quantization_rule is None:
         raise ValueError("Quantization rule is None, cannot quantize activation.")
+      # The gmm backward (ops._lhs_rhs_share_fixed_scale) assumes this QArray's fixed scale is the rule's act
+      # scale, so it must be quantized with the rule's act calibration.
+      if calibration_method != quantization_rule.act_calibration_method:
+        raise ValueError(
+            f"moe_quantize_token_all_gather calibration {calibration_method!r} must match the gmm rule's"
+            f" act_calibration_method {quantization_rule.act_calibration_method!r}."
+        )
       act_qtype = quantization_rule.act_qtype
 
       # Quantize local token activations using the GMM activation quantization rule.
@@ -3448,6 +3461,31 @@ class RoutedMoE(nnx.Module):
       x_is_3d = self.config.num_moe_emb_chunks <= 0 and (x.qvalue if isinstance(x, qpl.QArray) else x).ndim == 3
       if x_is_3d and (self.get_tensor_parallelism_size() > 1 or self.config.mlp_bias):
         raise NotImplementedError("moe_tc_ragged_3d_gmm does not support tensor parallelism or mlp_bias.")
+      # moe_bwd_prequant_before_unsort: fuse the TC unsort (and with moe_combine_bwd_direct_qarray, the EP
+      # combine) into the wo gmm so its backward quantizes the token-order cotangent before the TC gather.
+      # The config validation guarantees the 3D TC dispatch with routing weights on the activation.
+      use_fused_tc_unsort = self.config.moe_bwd_prequant_before_unsort and tc_prescaled and x_is_3d
+      use_fused_combine_bwd_qarray = use_fused_tc_unsort and self.config.moe_combine_bwd_direct_qarray
+      tc_unsort_kwargs = {}
+      if use_fused_tc_unsort:
+        tc_unsort_kwargs = {
+            "tc_routing": routing.tc_routing,
+            "tc_unsort_cfg": mblx.TcUnsortCfg(
+                unpadded_cap=intermediate_layer.shape[0],
+                num_out_tokens=routing.tc_routing.num_out_tokens,
+                topk=self.num_experts_per_tok,
+                blocks=(
+                    self.config.moe_tc_ragged_gather_block_size,
+                    self.config.moe_tc_ragged_flatten_block_size,
+                    True,
+                    True,
+                ),
+                mask_padding=self.config.moe_tc_ragged_mask_padding,
+                combine_rs_cfg=(
+                    (self._expert_parallelism_name, sequence_length) if use_fused_combine_bwd_qarray else None
+                ),
+            ),
+        }
       intermediate_output = gmm_fn(
           intermediate_layer,
           wo,
@@ -3455,6 +3493,7 @@ class RoutedMoE(nnx.Module):
           weight_gather_axes=wo_gather_axes,
           return_rhs=return_weights,
           **({"out_is_3d": True} if x_is_3d else {}),
+          **tc_unsort_kwargs,
       )
       if return_weights:
         intermediate_output, wo = intermediate_output
@@ -3475,53 +3514,59 @@ class RoutedMoE(nnx.Module):
       intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
 
       if self.config.use_ring_of_experts:
-        # Unsort and deduplicate the outputs locally.
-        output = self.unpermute(
-            intermediate_output,
-            routing.sorted_selected_experts,
-            routing.weights,
-            batch_size=batch_size,
-            sequence_length=sequence_length,
-            use_custom_sort_vjp=self.config.use_custom_sort_vjp,
-            group_sizes=routing.group_sizes,
-            topk_argsort_indices=routing.topk_argsort_indices,
-            tc_routing=routing.tc_routing,
-            tc_prescaled=tc_prescaled,
-            tc_out_3d=x_is_3d and use_tc_3d_dispatch(),
-        )
+        if use_fused_combine_bwd_qarray:
+          output = intermediate_output
+        else:
+          if use_fused_tc_unsort:
+            output = intermediate_output.reshape(-1, sequence_length, *intermediate_output.shape[1:]).astype(self.dtype)
+          else:
+            # Unsort and deduplicate the outputs locally.
+            output = self.unpermute(
+                intermediate_output,
+                routing.sorted_selected_experts,
+                routing.weights,
+                batch_size=batch_size,
+                sequence_length=sequence_length,
+                use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+                group_sizes=routing.group_sizes,
+                topk_argsort_indices=routing.topk_argsort_indices,
+                tc_routing=routing.tc_routing,
+                tc_prescaled=tc_prescaled,
+                tc_out_3d=x_is_3d and use_tc_3d_dispatch(),
+            )
 
-        # Sum up the partial outputs across the expert shards.
-        if output.ndim == 4:
-          # moe_tc_ragged_3d_dispatch: reduce-scatter in the (emb // 128, 128) layout; only the local result is
-          # reshaped back below.
-          output = jnp.reshape(output, (-1, sequence_length, *output.shape[2:]))
-        else:
-          output = jnp.reshape(
-              output,
-              (
-                  -1,
-                  sequence_length,
-                  self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
-              ),
-          )
-        combine_bwd_method = self.config.moe_quantize_combine_bwd_method
-        if combine_bwd_method:
-          output = _moe_combine_psum_scatter(
-              output,
-              self._expert_parallelism_name,
-              scatter_dimension=0,
-              tiled=True,
-              bwd_method=combine_bwd_method,
-          )
-        else:
-          output = jax.lax.psum_scatter(
-              output,
-              self._expert_parallelism_name,
-              scatter_dimension=0,
-              tiled=True,
-          )
-        if output.ndim == 4:
-          output = jnp.reshape(output, (*output.shape[:2], -1))
+          # Sum up the partial outputs across the expert shards.
+          if output.ndim == 4:
+            # moe_tc_ragged_3d_dispatch: reduce-scatter in the (emb // 128, 128) layout; only the local result is
+            # reshaped back below.
+            output = jnp.reshape(output, (-1, sequence_length, *output.shape[2:]))
+          else:
+            output = jnp.reshape(
+                output,
+                (
+                    -1,
+                    sequence_length,
+                    self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
+                ),
+            )
+          combine_bwd_method = self.config.moe_quantize_combine_bwd_method
+          if combine_bwd_method:
+            output = _moe_combine_psum_scatter(
+                output,
+                self._expert_parallelism_name,
+                scatter_dimension=0,
+                tiled=True,
+                bwd_method=combine_bwd_method,
+            )
+          else:
+            output = jax.lax.psum_scatter(
+                output,
+                self._expert_parallelism_name,
+                scatter_dimension=0,
+                tiled=True,
+            )
+          if output.ndim == 4:
+            output = jnp.reshape(output, (*output.shape[:2], -1))
         return (
             output,
             routing.lb_loss,
