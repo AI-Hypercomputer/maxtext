@@ -158,13 +158,30 @@ _FULL_PRECISION_SUBSTRINGS = (
     "-self_attention-indexer-weights_proj-",
 )
 
+# Per-model MaxText key suffixes kept in float32: tensors the HF release itself stores in F32.
+# Kimi-K3: the KDA decay/conv/norm parameters (`self_attn.{A_log,dt_bias,{q,k,v}_conv1d.weight,
+# o_norm.weight}`, F32 in the moonshotai/Kimi-K3 safetensors); bf16 would shift exp(A_log).
+_FULL_PRECISION_SUFFIXES_BY_MODEL = {
+    "kimi-k3": (
+        "-self_attention-A_log",
+        "-self_attention-dt_bias",
+        "-self_attention-q_conv1d-kernel",
+        "-self_attention-k_conv1d-kernel",
+        "-self_attention-v_conv1d-kernel",
+        "-self_attention-o_norm-scale",
+    ),
+}
 
-def _param_save_dtype(mt_param_key_or_keys, save_dtype: str) -> str:
-  """Returns float32 for full-precision router/HC/sink/indexer state when saving bfloat16."""
+
+def _param_save_dtype(mt_param_key_or_keys, save_dtype: str, model_name: str | None = None) -> str:
+  """Returns float32 for full-precision router/HC/sink/indexer state (and per-model F32 tensors) when saving bfloat16."""
   if save_dtype not in ("bfloat16", DType.BFLOAT16):
     return save_dtype
   keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
   if any(k.startswith(_FULL_PRECISION_PREFIXES) or any(sub in k for sub in _FULL_PRECISION_SUBSTRINGS) for k in keys):
+    return "float32"
+  suffixes = _FULL_PRECISION_SUFFIXES_BY_MODEL.get(model_name, ())
+  if suffixes and any(k.endswith(suffixes) for k in keys):
     return "float32"
   return save_dtype
 
@@ -1188,7 +1205,7 @@ def main(
 
       # Step 2: Determine the loading function for hf key
       # based on hf_key form (unscanned, scanned, unscanned with expert stacking, or scanned with expert stacking)
-      param_save_dtype = _param_save_dtype(mt_param_key_or_keys, save_dtype)
+      param_save_dtype = _param_save_dtype(mt_param_key_or_keys, save_dtype, model_key)
       getter = tensor_getter if param_save_dtype == save_dtype else partial(tensor_getter, dtype=param_save_dtype)
       load_fn = _get_hf_loading_function(
           hf_source_keys_or_key,
