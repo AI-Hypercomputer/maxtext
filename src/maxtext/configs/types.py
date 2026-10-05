@@ -834,6 +834,7 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+  mla_use_output_gate: bool = Field(False, description="Whether to use output gate in MLA attention.")
   use_sliced_mla_proj: bool = Field(
       False,
       description=(
@@ -1587,6 +1588,21 @@ class KimiK3(BaseModel):
   first_k_dense_replace: int = Field(0, description="Number of initial dense layers (alias for first_num_dense_layers).")
   short_conv_kernel_size: int = Field(4, description="Kernel size for KDA short convolution.")
   use_full_rank_gate: bool = Field(True, description="Whether KDA uses full rank gating.")
+  gate_lower_bound: Optional[float] = Field(
+      -5.0,
+      description=(
+          "KDA decay-gate lower bound. When set, the gate is the bounded sigmoid "
+          "`lb * sigmoid(exp(A_log) * (g + dt_bias))` (as in fla); None selects the softplus gate."
+      ),
+  )
+  kda_compute_dtype: Literal["float32", "bfloat16"] = Field(
+      "float32",
+      description=(
+          "Precision of the KDA core (q/k L2-norm, decay cumsum, chunked WY solve and recurrent "
+          "state). 'float32' matches the fla kernels the reference model uses; the output is cast "
+          "back to `dtype`."
+      ),
+  )
   rope_theta: float = Field(500000.0, description="Base frequency for RoPE (alias for rope_max_timescale).")
 
 
