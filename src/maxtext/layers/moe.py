@@ -454,17 +454,17 @@ def routing_tag_fn(config):
 
 
 def uses_megatron_seq_aux_loss(config) -> bool:
-  """Whether the MoE aux loss is Megatron-LM's sigmoid-router seq_aux_loss.
+  """Whether the MoE aux loss is Megatron-LM's sequence-wise seq_aux_loss (DeepSeek-V3 Eqs 17-20).
 
-  When moe_use_megatron_seq_aux_loss=True, sigmoid routers (DeepSeek-V3 family) use it:
-  fp32 per-token normalized sigmoid scores, token fractions from an unbiased, ungrouped top-k,
-  one loss per full sequence, summed over MoE layers. By default (moe_use_megatron_seq_aux_loss=False),
-  and for other routers or te_moe_block (whose aux loss TransformerEngine computes), MaxText uses
-  the per-layer Switch-style loss averaged over MoE layers.
+  When moe_use_megatron_seq_aux_loss=True, sigmoid routers (DeepSeek-V3 family) and Sqrt(Softplus)
+  routers (DeepSeek-V4) use it: fp32 per-token normalized affinity scores, token fractions from an
+  unbiased, ungrouped top-k, one loss per full sequence, summed over MoE layers. By default
+  (moe_use_megatron_seq_aux_loss=False), and for other routers or te_moe_block (whose aux loss
+  TransformerEngine computes), MaxText uses the per-layer Switch-style loss averaged over MoE layers.
   """
   return (
       getattr(config, "moe_use_megatron_seq_aux_loss", False)
-      and getattr(config, "routed_score_func", "") == "sigmoid"
+      and getattr(config, "routed_score_func", "") in ("sigmoid", "sqrtsoftplus")
       and not getattr(config, "te_moe_block", False)
   )
 
@@ -473,12 +473,13 @@ def megatron_aux_loss_inputs(scores, num_experts_per_tok):
   """Aux-loss probabilities and token assignments of the Megatron-LM sigmoid router.
 
   Mirrors Megatron-LM `compute_routing_scores_for_aux_loss(score_function="sigmoid")`: the
-  probabilities are the fp32 sigmoid scores normalized per token, and the token assignments
+  probabilities are the fp32 affinity scores (sigmoid, or Sqrt(Softplus) for DeepSeek-V4)
+  normalized per token, and the token assignments
   come from a plain top-k over the scores, i.e. without the expert bias and without the
   group-limited mask used for dispatch.
 
   Args:
-      scores: Sigmoid router scores before the expert bias, shape (batch, sequence, num_experts).
+      scores: Router affinity scores before the expert bias, shape (batch, sequence, num_experts).
       num_experts_per_tok: Router top-k.
 
   Returns:
@@ -2675,7 +2676,7 @@ class RoutedMoE(nnx.Module):
     # Exclude the EP axis so psum doesn't redundantly reduce and scale counts by num_ep
     # for calculate_load_balance_updates().
     roe_bias_axis_names = _filter_axis_names(bias_update_axis_names, self._expert_parallelism_name)
-    # Sigmoid routers use Megatron-LM's seq_aux_loss, computed once on the full sequences after the
+    # Sigmoid and Sqrt(Softplus) routers use Megatron-LM's seq_aux_loss, computed once on the full sequences after the
     # shard_map (below), so the per-chunk loss inside the ring-of-experts loop is skipped.
     use_megatron_seq_aux_loss = (
         self.config.load_balance_loss_weight > 0.0
@@ -4288,11 +4289,11 @@ class RoutedMoE(nnx.Module):
   def megatron_seq_aux_loss(self, scores) -> jax.Array:
     """Sequence-wise aux loss of the Megatron-LM sigmoid router (seq_aux_loss).
 
-    Used for sigmoid routers (see `uses_megatron_seq_aux_loss`). Pass whole sequences: the token
+    Used for sigmoid and Sqrt(Softplus) routers (see `uses_megatron_seq_aux_loss`). Pass whole sequences: the token
     fractions and probabilities are per-sequence statistics.
 
     Args:
-      scores: Sigmoid router scores before the expert bias, shape (batch, sequence, num_experts).
+      scores: Router affinity scores before the expert bias, shape (batch, sequence, num_experts).
 
     Returns:
       Scalar loss averaged over the batch, already scaled by load_balance_loss_weight.
@@ -4402,14 +4403,13 @@ class RoutedMoE(nnx.Module):
     # These layers route deterministically based on token IDs and do not generate auxiliary loss.
     if self.config.model_call_mode != "inference" and not self.is_hash_routing:
       if self.config.load_balance_loss_weight > 0.0 and uses_megatron_seq_aux_loss(self.config):
-        # Same loss as sparse_matmul: Megatron-LM's seq_aux_loss on the pre-bias sigmoid scores.
+        # Same loss as sparse_matmul: Megatron-LM's seq_aux_loss on the pre-bias affinity scores.
         lb_loss = self.megatron_seq_aux_loss(pre_bias_logits if pre_bias_logits is not None else gate_logits)
       else:
         softmax_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         lb_loss = (
             self.load_balance_loss(top_k_indices, softmax_probs) if self.config.load_balance_loss_weight > 0.0 else None
         )
-      # TODO(dipakg-lang, b/521990776): Add sequence-wise balance loss * 0.0001
     else:
       lb_loss = None
 
