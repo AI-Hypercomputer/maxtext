@@ -209,6 +209,20 @@ class PyconfigTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
 
+  def test_rope_direct_position_freqs_requires_positions_in_table(self):
+    def make_config(max_target_length):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          rope_direct_position_freqs=True,
+          max_position_embeddings=4096,
+          max_target_length=max_target_length,
+      )
+
+    self.assertTrue(make_config(4096).rope_direct_position_freqs)
+    with self.assertRaises(ValueError):
+      make_config(4097)
+
   def _zero1_config(self, **kwargs):
     return pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],

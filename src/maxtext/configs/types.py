@@ -2773,11 +2773,29 @@ class YarnRope(BaseModel):
           "and 2 represents the real/imag coordinates, returning interleaved RoPE."
       ),
   )
+  rope_direct_position_freqs: bool = Field(
+      False,
+      description=(
+          "Compute YaRN RoPE angles directly from position * inv_freqs "
+          "instead of indexing a [max_position_embeddings, half_dim] lookup table. "
+          "Outputs differ for positions >= max_position_embeddings: the table lookup clamps them "
+          "to the last row, while the direct computation uses the true angle."
+      ),
+  )
+  rope_dot_pairwise: bool = Field(
+      False,
+      description=(
+          "Keep rank-4 [batch, seq, heads, dim] tensor intact during pairwise RoPE "
+          "via a block-skew matmul on the minor dimension instead of reshaping to rank-5."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_rope_pairwise(self) -> "YarnRope":
     if self.rope_pairwise and not self.rope_interleave:
       raise ValueError("rope_pairwise=True requires rope_interleave=True.")
+    if self.rope_dot_pairwise and not self.rope_pairwise:
+      raise ValueError("rope_dot_pairwise=True requires rope_pairwise=True.")
     return self
 
 
@@ -5739,6 +5757,14 @@ class MaxTextConfig(
         raise ValueError(f"use_lineage=True requires rope_type='yarn', got rope_type={self.rope_type!r}.")
       if self.capacity_factor <= 0:
         raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
+
+    # The freqs_cis table lookup clamps positions >= max_position_embeddings to the last row, while
+    # rope_direct_position_freqs uses the true angle; keep positions in range so both settings agree.
+    if self.rope_direct_position_freqs and self.max_target_length > self.max_position_embeddings:
+      raise ValueError(
+          "rope_direct_position_freqs=True requires max_target_length <= max_position_embeddings, got "
+          f"max_target_length={self.max_target_length}, max_position_embeddings={self.max_position_embeddings}."
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
