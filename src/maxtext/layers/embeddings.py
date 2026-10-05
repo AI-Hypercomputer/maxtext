@@ -596,13 +596,13 @@ class YarnRotaryEmbedding(nnx.Module):
        when `rope_factor > 1`. This scaling can be applied within this layer (if `attention_scaling=True`)
        or externally.
   - RoPE Implementation Details (General):
-    - Arithmetic: Uses complex number arithmetic. Real number arithmetic is not implemented here,
-      though the resulting embeddings would be equivalent.
+    - Arithmetic: Uses complex number arithmetic by default. `pairwise=True` uses real number arithmetic
+      on (real, imag) pairs instead; the resulting embeddings are equivalent.
     - Input Layout: Supports both interleaved (`interleave=True`, e.g., [real1, img1, real2, img2]) and
       concatenated (`interleave=False`, e.g., [real1, real2, img1, img2]) formats.
-    - Output Layout: Always returns concatenated format ([real, imag]). Interleaved output is not
-      implemented: While the embedding is different, attention scores are invariant, as long as we apply
-      the same output layout for Q and K.
+    - Output Layout: Returns concatenated format ([real, imag]) by default, or interleaved format when
+      `pairwise=True`. While the embedding is different, attention scores are invariant, as long as we
+      apply the same output layout for Q and K.
 
   Attributes:
     embedding_dims: Dimension of the embedding to be generated.
@@ -617,6 +617,14 @@ class YarnRotaryEmbedding(nnx.Module):
     rope_interleave: Whether complex representation is interleaved or concatenated.
     rope_truncate: Whether or not to floor lower bound and ceil upper bound for correction range.
     rope_attention_scaling: Whether or not to scale the rotary embedding output.
+    pairwise: Whether to rotate interleaved inputs as real (real, imag) pairs and return interleaved output.
+      Requires `interleave=True`.
+    direct_position_freqs: Whether to compute angles directly as `position * inv_freqs` instead of
+      gathering from a precomputed [max_position_embeddings, half_dim] table. Outputs match for positions
+      < max_position_embeddings. Beyond that, the table gather clamps every position to the last row, while
+      the direct computation keeps using the true angle.
+    dot_pairwise: Whether to keep the pairwise rotation in rank 4 by applying the pair swap as a block-skew
+      matmul instead of reshaping to rank 5. Requires `pairwise=True`.
     rngs: rng keys passed in by nnx.bridge.to_linen.
   """
 
@@ -637,6 +645,8 @@ class YarnRotaryEmbedding(nnx.Module):
       truncate=True,
       attention_scaling=False,
       pairwise=False,
+      direct_position_freqs=False,
+      dot_pairwise=False,
       # Not used in YarnRotaryEmbedding but passed in by nnx.bridge.to_linen.
       # TODO: Remove when bridge no longer needed
       rngs: nnx.Rngs = None,
@@ -657,9 +667,13 @@ class YarnRotaryEmbedding(nnx.Module):
     self.shard_mode = shard_mode
     self.attention_scaling = attention_scaling
     self.pairwise = pairwise
+    self.direct_position_freqs = direct_position_freqs
+    self.dot_pairwise = dot_pairwise
 
     if self.pairwise and not self.interleave:
       raise ValueError("rope_pairwise=True requires rope_interleave=True.")
+    if self.dot_pairwise and not self.pairwise:
+      raise ValueError("rope_dot_pairwise=True requires rope_pairwise=True.")
 
     self.freqs_sharding = (
         create_sharding(mesh, ("activation_batch", "activation_length", "q_heads"))
@@ -671,8 +685,8 @@ class YarnRotaryEmbedding(nnx.Module):
       raise ValueError("Embedding dim for rotary position embedding must be a multiple of 2.")
 
   @property
-  def freqs_cis(self):
-    """Frequencies for rotary embedding."""
+  def inv_freqs(self) -> Array:
+    """1D base inverse frequencies of shape [half_dim] in float32."""
     half_dim = self.embedding_dims // 2
     # Compute base frequencies for each (even-indexed) dimension.
     # (Note: We use jnp.arange with float32 for precision.)
@@ -688,7 +702,12 @@ class YarnRotaryEmbedding(nnx.Module):
     )
     smooth = 1 - self._linear_ramp_factor(low, high, half_dim)
     # The corrected frequency is a weighted mix of the scaled and base values.
-    freqs = freqs / self.rope_factor * (1 - smooth) + freqs * smooth
+    return freqs / self.rope_factor * (1 - smooth) + freqs * smooth
+
+  @property
+  def freqs_cis(self):
+    """Frequencies for rotary embedding."""
+    freqs = self.inv_freqs
 
     # Precompute frequencies for all positions by taking the outer product.
     t = jnp.arange(self.max_position_embeddings, dtype=jnp.float32)  # shape [max_position_embeddings]
@@ -743,6 +762,34 @@ class YarnRotaryEmbedding(nnx.Module):
     linear_func = (jnp.arange(dim, dtype=jnp.float32) - min_val) / (max_val - min_val)
     return jnp.clip(linear_func, 0, 1)
 
+  def _position_angles(self, position: Array, inv_freqs: Array) -> Array:
+    """Computes float32 RoPE angles position * inv_freqs of shape [B, S, 1, len(inv_freqs)]."""
+    return (
+        position.astype(jnp.float32)[:, :, jnp.newaxis, jnp.newaxis] * inv_freqs[jnp.newaxis, jnp.newaxis, jnp.newaxis, :]
+    )
+
+  def _gather_freqs_cis(self, position: Array) -> Array:
+    """Looks up precomputed complex frequencies, returning shape [B, S, 1, half_dim]."""
+    freqs = self.freqs_cis.at[position].get(out_sharding=self.freqs_sharding)  # shape: [B, S, half_dim]
+    return freqs[:, :, jnp.newaxis, :]
+
+  def _cos_sin(self, position: Array, repeat_interleave: bool = False) -> tuple[Array, Array]:
+    """Returns float32 (cos, sin) of the RoPE angles, each of shape [B, S, 1, half_dim].
+
+    With repeat_interleave=True, each frequency is repeated twice ([f_0, f_0, f_1, f_1, ...]) to match the
+    interleaved layout, giving shape [B, S, 1, dim].
+    """
+    if self.direct_position_freqs:
+      inv_freqs = jnp.repeat(self.inv_freqs, 2) if repeat_interleave else self.inv_freqs
+      angles = self._position_angles(position, inv_freqs)
+      return jnp.cos(angles), jnp.sin(angles)
+    freqs = self._gather_freqs_cis(position)
+    cos, sin = jnp.real(freqs), jnp.imag(freqs)
+    if repeat_interleave:
+      cos = jnp.repeat(cos, 2, axis=-1)
+      sin = jnp.repeat(sin, 2, axis=-1)
+    return cos, sin
+
   def __call__(self, inputs: Array, position: None | Array = None) -> Array:
     """Applies the rotary positional embedding using the precomputed complex frequencies.
 
@@ -767,29 +814,47 @@ class YarnRotaryEmbedding(nnx.Module):
     else:
       position = position.astype(jnp.int32)
 
-    # Lookup the precomputed frequencies using the position indices.
-    # self.freqs_cis has shape [max_position_embeddings, half_dim] so we use jnp.take along axis 0.
-    # After indexing, shape becomes [B, S, half_dim]; we then add an axis for the heads.
-    freqs = self.freqs_cis.at[position].get(out_sharding=self.freqs_sharding)  # shape: [B, S, half_dim]
-    freqs = freqs[:, :, jnp.newaxis, :]  # shape: [B, S, 1, half_dim]
-
     if self.interleave and self.pairwise:
       with jax.named_scope("rope_pairwise"):
         b, s, n, h = inputs.shape
         half_dim = h // 2
-        pairs = inputs.reshape(b, s, n, half_dim, 2)
-        pairs = pairs.astype(jnp.float32)
-        cos = jnp.real(freqs)[..., jnp.newaxis]
-        sin = jnp.imag(freqs)[..., jnp.newaxis]
-        if self.shard_mode == ShardMode.EXPLICIT:
-          rotated_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", None, None, None))
-          cos = jnp.broadcast_to(cos, pairs.shape, out_sharding=rotated_sharding)
-          sin = jnp.broadcast_to(sin, pairs.shape, out_sharding=rotated_sharding)
-        swapped = jnp.flip(pairs, axis=-1)
-        sign = jnp.asarray([-1.0, 1.0], dtype=jnp.float32)
-        rotated_pairs = pairs * cos + swapped * sin * sign
-        output = rotated_pairs.reshape(b, s, n, h)
+        if self.dot_pairwise:
+          cos, sin = self._cos_sin(position, repeat_interleave=True)  # shape: [B, S, 1, dim]
+          if self.shard_mode == ShardMode.EXPLICIT:
+            rotated_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
+            cos = jnp.broadcast_to(cos, inputs.shape, out_sharding=rotated_sharding)
+            sin = jnp.broadcast_to(sin, inputs.shape, out_sharding=rotated_sharding)
+          # Swap-and-sign [x_0, x_1, ...] -> [-x_1, x_0, ...] as a matmul against the block-skew
+          # matrix I_{half_dim} (x) [[0, 1], [-1, 0]], avoiding the rank-5 reshape relayout copies.
+          p_swap = jnp.kron(jnp.eye(half_dim, dtype=inputs.dtype), jnp.asarray([[0, 1], [-1, 0]], dtype=inputs.dtype))
+          swapped_signed = jax.lax.dot_general(
+              inputs,
+              p_swap,
+              (((3,), (0,)), ((), ())),
+              # The default precision rounds non-bf16 inputs to bf16 on the TPU MXU; p_swap is exact in any dtype.
+              precision=None if inputs.dtype == jnp.bfloat16 else jax.lax.Precision.HIGHEST,
+              preferred_element_type=jnp.float32,
+          )
+          output = inputs.astype(jnp.float32) * cos + swapped_signed * sin
+        else:
+          pairs = inputs.reshape(b, s, n, half_dim, 2)
+          pairs = pairs.astype(jnp.float32)
+          cos, sin = self._cos_sin(position)  # shape: [B, S, 1, half_dim]
+          cos = cos[..., jnp.newaxis]
+          sin = sin[..., jnp.newaxis]
+          if self.shard_mode == ShardMode.EXPLICIT:
+            rotated_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", None, None, None))
+            cos = jnp.broadcast_to(cos, pairs.shape, out_sharding=rotated_sharding)
+            sin = jnp.broadcast_to(sin, pairs.shape, out_sharding=rotated_sharding)
+          swapped = jnp.flip(pairs, axis=-1)
+          sign = jnp.asarray([-1.0, 1.0], dtype=jnp.float32)
+          rotated_pairs = pairs * cos + swapped * sin * sign
+          output = rotated_pairs.reshape(b, s, n, h)
     else:
+      if self.direct_position_freqs:
+        freqs = jnp.exp(1j * self._position_angles(position, self.inv_freqs))  # shape: [B, S, 1, half_dim]
+      else:
+        freqs = self._gather_freqs_cis(position)  # shape: [B, S, 1, half_dim]
       if self.interleave:
         # Inputs with interleaved format [real1, img1, real2, img2, ...] at last dimension
         # Convert the last dimension into a complex representation.

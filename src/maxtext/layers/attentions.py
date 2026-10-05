@@ -832,6 +832,8 @@ class Attention(nnx.Module):
           truncate=self.config.rope_truncate,
           attention_scaling=self.config.rope_attention_scaling,
           pairwise=self.config.rope_pairwise,
+          direct_position_freqs=self.config.rope_direct_position_freqs,
+          dot_pairwise=self.config.rope_dot_pairwise,
           shard_mode=self.config.shard_mode,
           rngs=self.rngs,
       )
