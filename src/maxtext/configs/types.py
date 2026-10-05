@@ -834,6 +834,7 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+  mla_use_output_gate: bool = Field(False, description="Whether to use output gate in MLA attention.")
   use_sliced_mla_proj: bool = Field(
       False,
       description=(
