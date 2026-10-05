@@ -14,6 +14,8 @@
 
 """Provides op for tokenizing a dataset."""
 
+import json
+import os
 from typing import Literal, Sequence, Collection
 from pathlib import Path
 from maxtext.utils import max_logging
@@ -21,6 +23,26 @@ import transformers
 import tiktoken
 from tiktoken.load import load_tiktoken_bpe
 from sentencepiece import SentencePieceProcessor
+
+# Kimi-K3 Tiktoken pattern for Han character splitting matching encoding_k3.py / tokenization_kimi.py
+KIMI_K3_TIKTOKEN_PAT_STR = "|".join(
+    [
+        r"""[\p{Han}]+""",
+        (
+            r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*"""
+            r"""[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?"""
+        ),
+        (
+            r"""[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+"""
+            r"""[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?"""
+        ),
+        r"""\p{N}{1,3}""",
+        r""" ?[^\s\p{L}\p{N}]+[\r\n]*""",
+        r"""\s*[\r\n]+""",
+        r"""\s+(?!\S)""",
+        r"""\s+""",
+    ]
+)
 
 
 class TikTokenTokenizer:
@@ -34,32 +56,93 @@ class TikTokenTokenizer:
 
   pat_str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"  # pylint: disable=line-too-long
 
-  def __init__(self, model_path: str, add_bos: bool, add_eos: bool):
+  def __init__(
+      self,
+      model_path: str,
+      add_bos: bool = False,
+      add_eos: bool = False,
+      pat_str: str | None = None,
+      special_tokens: dict[str, int] | None = None,
+  ):
     """
     Initializes the Tokenizer with a Tiktoken model.
 
     Args:
         model_path (str): The path to the Tiktoken model file.
+        add_bos (bool): Whether to prepend the beginning-of-sequence token.
+        add_eos (bool): Whether to append the end-of-sequence token.
+        pat_str (str, optional): Custom regex pattern for tokenization splitting.
+        special_tokens (dict[str, int], optional): Custom mapping of special token strings to IDs.
     """
+    is_kimi = "kimi" in str(model_path).lower()
+
+    if pat_str is not None:
+      self.pat_str = pat_str
+    elif is_kimi:
+      self.pat_str = KIMI_K3_TIKTOKEN_PAT_STR
 
     try:
       mergeable_ranks = load_tiktoken_bpe(model_path)
     except Exception as e:
       raise ValueError(f"Failed to load tiktoken tokenizer from {model_path}: {e}") from e
     num_base_tokens = len(mergeable_ranks)
-    special_tokens = [
-        "<|begin_of_text|>",
-        "<|end_of_text|>",
-        "<|reserved_special_token_0|>",
-        "<|reserved_special_token_1|>",
-        "<|reserved_special_token_2|>",
-        "<|reserved_special_token_3|>",
-        "<|start_header_id|>",
-        "<|end_header_id|>",
-        "<|reserved_special_token_4|>",
-        "<|eot_id|>",  # end of turn
-    ] + [f"<|reserved_special_token_{i}|>" for i in range(5, self.num_reserved_special_tokens - 5)]
-    self.special_tokens = {token: num_base_tokens + i for i, token in enumerate(special_tokens)}
+
+    if special_tokens is not None:
+      self.special_tokens = special_tokens
+    elif is_kimi:
+      # Load from tokenizer_config.json if available in parent directory
+      added_tokens_mapping = {}
+      model_dir = Path(model_path).parent if os.path.isfile(model_path) else Path(model_path)
+      cfg_path = model_dir / "tokenizer_config.json"
+      if cfg_path.is_file():
+        try:
+          with open(cfg_path, "r", encoding="utf-8") as f:
+            tok_cfg = json.load(f)
+          added_tokens = tok_cfg.get("added_tokens_decoder", {})
+          for k_id, token_info in added_tokens.items():
+            content = token_info.get("content") if isinstance(token_info, dict) else str(token_info)
+            added_tokens_mapping[int(k_id)] = content
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+
+      # Standard Kimi-K3 special tokens
+      default_kimi_special = {
+          num_base_tokens: "[BOS]",
+          num_base_tokens + 1: "[EOS]",
+          num_base_tokens + 2: "<|end_of_msg|>",
+          num_base_tokens + 3: "<|open|>",
+          num_base_tokens + 4: "<|close|>",
+          num_base_tokens + 5: "<|sep|>",
+          num_base_tokens + 6: "[start_header_id]",
+          num_base_tokens + 7: "[end_header_id]",
+          num_base_tokens + 9: "[EOT]",
+          num_base_tokens + 18: "<|media_begin|>",
+          num_base_tokens + 19: "<|media_content|>",
+          num_base_tokens + 20: "<|media_end|>",
+          num_base_tokens + 21: "<|media_pad|>",
+          num_base_tokens + 65: "<osagent_mode>",
+          num_base_tokens + 254: "[UNK]",
+          num_base_tokens + 255: "[PAD]",
+      }
+      self.special_tokens = {}
+      for i in range(num_base_tokens, num_base_tokens + self.num_reserved_special_tokens):
+        tok_str = added_tokens_mapping.get(i, default_kimi_special.get(i, f"<|reserved_token_{i}|>"))
+        self.special_tokens[tok_str] = i
+    else:
+      special_tokens_list = [
+          "<|begin_of_text|>",
+          "<|end_of_text|>",
+          "<|reserved_special_token_0|>",
+          "<|reserved_special_token_1|>",
+          "<|reserved_special_token_2|>",
+          "<|reserved_special_token_3|>",
+          "<|start_header_id|>",
+          "<|end_header_id|>",
+          "<|reserved_special_token_4|>",
+          "<|eot_id|>",  # end of turn
+      ] + [f"<|reserved_special_token_{i}|>" for i in range(5, self.num_reserved_special_tokens - 5)]
+      self.special_tokens = {token: num_base_tokens + i for i, token in enumerate(special_tokens_list)}
+
     self.model = tiktoken.Encoding(
         name=Path(model_path).name,
         pat_str=self.pat_str,
@@ -72,13 +155,24 @@ class TikTokenTokenizer:
 
     self.n_words: int = self.model.n_vocab
     # BOS / EOS token IDs
-    self.bos_id: int = self.special_tokens["<|begin_of_text|>"]
-    self.eos_id: int = self.special_tokens["<|end_of_text|>"]
-    self.pad_id: int = -1
-    self.stop_tokens = {
-        self.special_tokens["<|end_of_text|>"],
-        self.special_tokens["<|eot_id|>"],
-    }
+    if is_kimi:
+      self.bos_id: int = self.special_tokens.get("[BOS]", num_base_tokens)
+      self.eos_id: int = self.special_tokens.get("[EOS]", num_base_tokens + 1)
+      self.pad_id: int = self.special_tokens.get("[PAD]", num_base_tokens + 255)
+      self.unk_id: int = self.special_tokens.get("[UNK]", num_base_tokens + 254)
+      self.stop_tokens = {
+          self.eos_id,
+          self.special_tokens.get("<|end_of_msg|>", self.eos_id),
+          self.special_tokens.get("[EOT]", self.eos_id),
+      }
+    else:
+      self.bos_id: int = self.special_tokens["<|begin_of_text|>"]
+      self.eos_id: int = self.special_tokens["<|end_of_text|>"]
+      self.pad_id: int = -1
+      self.stop_tokens = {
+          self.special_tokens["<|end_of_text|>"],
+          self.special_tokens["<|eot_id|>"],
+      }
     max_logging.log(f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}")
 
   def encode(
@@ -246,10 +340,23 @@ class HFTokenizer:
     return self.tokenizer.decode(t)
 
 
+class KimiTikTokenTokenizer(TikTokenTokenizer):
+  """
+  Tiktoken tokenizer specifically configured for Kimi-K3 with Han character splitting.
+  """
+
+  pat_str = KIMI_K3_TIKTOKEN_PAT_STR
+
+  def __init__(self, model_path: str, add_bos: bool = False, add_eos: bool = False):
+    super().__init__(model_path, add_bos=add_bos, add_eos=add_eos, pat_str=KIMI_K3_TIKTOKEN_PAT_STR)
+
+
 def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token):
   """Loads the tokenizer at `tokenizer_path`"""
   max_logging.log(f"Tokenizer path: {tokenizer_path}")
-  if tokenizer_type == "tiktoken":
+  if tokenizer_type in ("tiktoken", "kimi_tiktoken", "kimi"):
+    if "kimi" in tokenizer_path.lower() or tokenizer_type in ("kimi_tiktoken", "kimi"):
+      return KimiTikTokenTokenizer(tokenizer_path, add_bos, add_eos)
     assert "tiktoken" in tokenizer_path, f"Invalid tokenizer type: {tokenizer_type} chosen for {tokenizer_path}"
     return TikTokenTokenizer(tokenizer_path, add_bos, add_eos)
   elif tokenizer_type == "huggingface":
