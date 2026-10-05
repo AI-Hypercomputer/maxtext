@@ -4722,6 +4722,176 @@ def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_
   return mapping
 
 
+def _resolve_kimi_k3_full_attn_layers(config) -> set[int]:
+  """Returns the 0-indexed set of full-attention (MLA) layer indices.
+
+  Two sources are accepted, with an explicit index base for each rather than sniffing:
+    * `config["linear_attn_config"]["full_attn_layers"]` -- the Hugging Face field. It is
+      1-indexed by definition (`KimiLinearConfig.is_kda_layer` tests `layer_idx + 1`) and
+      is authoritative when present.
+    * `config["full_attn_layers"]` at the top level -- the MaxText convention used by
+      `kimi-k3.yml` and by test configs, 0-indexed.
+  There is no default layout: a config with neither field (or without `num_hidden_layers`)
+  raises, so a reduced config cannot silently pick up the production KDA/MLA split.
+  """
+  if config.get("num_hidden_layers") is None:
+    raise ValueError("kimi-k3 param mapping requires `num_hidden_layers` in the HF config")
+  num_layers = int(config["num_hidden_layers"])
+  linear_cfg = config.get("linear_attn_config") or {}
+  if linear_cfg.get("full_attn_layers") is not None:
+    full_attn_layers = {int(x) - 1 for x in linear_cfg["full_attn_layers"]}
+  elif config.get("full_attn_layers") is not None:
+    full_attn_layers = {int(x) for x in config["full_attn_layers"]}
+  else:
+    raise ValueError(
+        "kimi-k3 param mapping requires `linear_attn_config.full_attn_layers` (HF, 1-indexed) "
+        "or a top-level `full_attn_layers` (0-indexed)"
+    )
+  bad = sorted(i for i in full_attn_layers if not 0 <= i < num_layers)
+  if bad:
+    raise ValueError(f"kimi-k3 full_attn_layers resolved to out-of-range 0-indexed layers {bad} for {num_layers} layers")
+  return full_attn_layers
+
+
+def _check_kimi_k3_unscanned(scan_layers):
+  """Kimi-K3's hybrid KDA/MLA stack is unscanned-only; emit per-layer `layers_{i}` keys."""
+  if scan_layers:
+    raise NotImplementedError("kimi-k3 checkpoint conversion only supports scan_layers=False")
+
+
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates parameter mapping from MaxText to Hugging Face for Kimi-K3 (unscanned layers only)."""
+  _check_kimi_k3_unscanned(scan_layers)
+  num_main_layers = config.get("num_hidden_layers", 93)
+  first_num_dense_layers = config.get("first_k_dense_replace", 1)
+  num_experts = config.get("num_experts", 896)
+  full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+
+  mapping = {}
+
+  # =========================================================================
+  # Embeddings, Final Norm, LM Head & Output AttnRes
+  # =========================================================================
+  mapping.update(
+      {
+          "params-token_embedder-embedding": "language_model.model.embed_tokens.weight",
+          "params-decoder-decoder_norm-scale": "language_model.model.norm.weight",
+          "params-decoder-logits_dense-kernel": "language_model.lm_head.weight",
+          "params-decoder-output_attn_res_norm-scale": "language_model.model.output_attn_res_norm.weight",
+          "params-decoder-output_attn_res_proj-kernel": "language_model.model.output_attn_res_proj.weight",
+      }
+  )
+
+  # =========================================================================
+  # Per-layer mappings (unscanned)
+  # =========================================================================
+  for i in range(num_main_layers):
+    prefix = f"params-decoder-layers_{i}"
+    is_full_attn = i in full_attn_layers
+
+    # --- Pre/Post Norms & AttnRes ---
+    mapping.update(
+        {
+            f"{prefix}-pre_self_attention_layer_norm-scale": f"language_model.model.layers.{i}.input_layernorm.weight",
+            f"{prefix}-post_self_attention_layer_norm-scale": (
+                f"language_model.model.layers.{i}.post_attention_layernorm.weight"
+            ),
+            f"{prefix}-self_attention_res_norm-scale": f"language_model.model.layers.{i}.self_attention_res_norm.weight",
+            f"{prefix}-self_attention_res_proj-kernel": f"language_model.model.layers.{i}.self_attention_res_proj.weight",
+            f"{prefix}-mlp_res_norm-scale": f"language_model.model.layers.{i}.mlp_res_norm.weight",
+            f"{prefix}-mlp_res_proj-kernel": f"language_model.model.layers.{i}.mlp_res_proj.weight",
+        }
+    )
+
+    # --- Self-Attention (KDA vs MLA) ---
+    if is_full_attn:
+      # Gated MLA
+      mapping.update(
+          {
+              f"{prefix}-self_attention-wq_a-kernel": f"language_model.model.layers.{i}.self_attn.q_a_proj.weight",
+              f"{prefix}-self_attention-q_norm-scale": f"language_model.model.layers.{i}.self_attn.q_a_layernorm.weight",
+              f"{prefix}-self_attention-wq_b-kernel": f"language_model.model.layers.{i}.self_attn.q_b_proj.weight",
+              f"{prefix}-self_attention-wkv_a-kernel": (
+                  f"language_model.model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight"
+              ),
+              f"{prefix}-self_attention-kv_norm-scale": f"language_model.model.layers.{i}.self_attn.kv_a_layernorm.weight",
+              f"{prefix}-self_attention-wkv_b-kernel": f"language_model.model.layers.{i}.self_attn.kv_b_proj.weight",
+              f"{prefix}-self_attention-g_proj-kernel": f"language_model.model.layers.{i}.self_attn.g_proj.weight",
+              f"{prefix}-self_attention-out-kernel": f"language_model.model.layers.{i}.self_attn.o_proj.weight",
+          }
+      )
+    else:
+      # KDA (Linear Attention)
+      mapping.update(
+          {
+              f"{prefix}-self_attention-q_proj-kernel": f"language_model.model.layers.{i}.self_attn.q_proj.weight",
+              f"{prefix}-self_attention-q_conv1d-kernel": f"language_model.model.layers.{i}.self_attn.q_conv1d.weight",
+              f"{prefix}-self_attention-k_proj-kernel": f"language_model.model.layers.{i}.self_attn.k_proj.weight",
+              f"{prefix}-self_attention-k_conv1d-kernel": f"language_model.model.layers.{i}.self_attn.k_conv1d.weight",
+              f"{prefix}-self_attention-v_proj-kernel": f"language_model.model.layers.{i}.self_attn.v_proj.weight",
+              f"{prefix}-self_attention-v_conv1d-kernel": f"language_model.model.layers.{i}.self_attn.v_conv1d.weight",
+              f"{prefix}-self_attention-f_a_proj-kernel": f"language_model.model.layers.{i}.self_attn.f_a_proj.weight",
+              f"{prefix}-self_attention-f_b_proj-kernel": f"language_model.model.layers.{i}.self_attn.f_b_proj.weight",
+              f"{prefix}-self_attention-A_log": f"language_model.model.layers.{i}.self_attn.A_log",
+              f"{prefix}-self_attention-dt_bias": f"language_model.model.layers.{i}.self_attn.dt_bias",
+              f"{prefix}-self_attention-b_proj-kernel": f"language_model.model.layers.{i}.self_attn.b_proj.weight",
+              f"{prefix}-self_attention-g_proj-kernel": f"language_model.model.layers.{i}.self_attn.g_proj.weight",
+              f"{prefix}-self_attention-o_norm-scale": f"language_model.model.layers.{i}.self_attn.o_norm.weight",
+              f"{prefix}-self_attention-out-kernel": f"language_model.model.layers.{i}.self_attn.o_proj.weight",
+          }
+      )
+
+    # --- FFN (Dense MLP for the first layers, Latent MoE for the rest) ---
+    if i < first_num_dense_layers:
+      # Layer 0 Dense MLP
+      mapping.update(
+          {
+              f"{prefix}-mlp-wi_0-kernel": f"language_model.model.layers.{i}.mlp.gate_proj.weight",
+              f"{prefix}-mlp-wi_1-kernel": f"language_model.model.layers.{i}.mlp.up_proj.weight",
+              f"{prefix}-mlp-wo-kernel": f"language_model.model.layers.{i}.mlp.down_proj.weight",
+          }
+      )
+    else:
+      # Layers 1..92 Latent MoE
+      mapping.update(
+          {
+              f"{prefix}-mlp-routed_experts-gate-kernel": f"language_model.model.layers.{i}.block_sparse_moe.gate.weight",
+              # moe.RoutedMoE's router bias param is `gate/bias`.
+              f"{prefix}-mlp-routed_experts-gate-bias": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.gate.e_score_correction_bias"
+              ),
+              f"{prefix}-mlp-routed_expert_down_proj-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.routed_expert_down_proj.weight"
+              ),
+              f"{prefix}-mlp-routed_expert_norm-scale": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.routed_expert_norm.weight"
+              ),
+              f"{prefix}-mlp-routed_expert_up_proj-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.routed_expert_up_proj.weight"
+              ),
+              f"{prefix}-mlp-shared_expert-wi_0-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.shared_experts.gate_proj.weight"
+              ),
+              f"{prefix}-mlp-shared_expert-wi_1-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.shared_experts.up_proj.weight"
+              ),
+              f"{prefix}-mlp-shared_expert-wo-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.shared_experts.down_proj.weight"
+              ),
+          }
+      )
+      # Routed experts: dense `.weight` kernels.
+      expert_suffixes = (("", ".weight"),)
+      for mt_name, hf_name in (("wi_0", "w1"), ("wi_1", "w3"), ("wo", "w2")):
+        for mt_suffix, hf_suffix in expert_suffixes:
+          mapping[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = [
+              f"language_model.model.layers.{i}.block_sparse_moe.experts.{e}.{hf_name}{hf_suffix}"
+              for e in range(num_experts)
+          ]
+
+  return mapping
+
+
 def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """Returns hook functions for transforming weights between MaxText and HuggingFace for Qwen3.8-Flash-Next."""
   config = _qwen3_8_flash_next_hf_config_dict(config)
@@ -4830,7 +5000,138 @@ def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_
   return hooks
 
 
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transformation hooks for Kimi-K3 parameters (unscanned layers only)."""
+  _check_kimi_k3_unscanned(scan_layers)
+  hidden_size = config.get("hidden_size", 7168)
+  num_heads = config.get("num_attention_heads", 96)
+  q_lora_rank = config.get("q_lora_rank", 1536)
+  kv_lora_rank = config.get("kv_lora_rank", 512)
+  qk_nope_head_dim = config.get("qk_nope_head_dim", 128)
+  qk_rope_head_dim = config.get("qk_rope_head_dim", 64)
+  v_head_dim = config.get("v_head_dim", 128)
+  qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+
+  def transpose(input_tensor, target_shape=None):
+    if input_tensor.ndim == 3:
+      return np.transpose(input_tensor, (0, 2, 1))
+    if target_shape is not None and input_tensor.T.shape != tuple(target_shape):
+      if saving_to_hf:
+        return input_tensor.reshape((input_tensor.shape[0] if len(input_tensor.shape) <= 2 else -1, -1)).T
+      return input_tensor.T.reshape(target_shape)
+    return input_tensor.T
+
+  def reshape_transpose_wq_b(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape((input_tensor.shape[0], -1)).T
+    target = target_shape if target_shape is not None else (q_lora_rank, num_heads, qk_head_dim)
+    return input_tensor.T.reshape(target)
+
+  def reshape_transpose_wkv_b(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape((input_tensor.shape[0], -1)).T
+    target = target_shape if target_shape is not None else (kv_lora_rank, num_heads, qk_nope_head_dim + v_head_dim)
+    return input_tensor.T.reshape(target)
+
+  def reshape_transpose_g_proj(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape((input_tensor.shape[0], -1)).T
+    target = target_shape if target_shape is not None else (hidden_size, num_heads, v_head_dim)
+    return input_tensor.T.reshape(target)
+
+  def reshape_transpose_out(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape((-1, input_tensor.shape[-1])).T
+    target = target_shape if target_shape is not None else (num_heads, v_head_dim, hidden_size)
+    return input_tensor.T.reshape(target)
+
+  def permute_conv(input_tensor, target_shape=None):
+    # MaxText 1D conv: [K, 1, C] <-> PyTorch/HF 1D conv: [C, 1, K]
+    return input_tensor.transpose(2, 1, 0)
+
+  def slice_a_log(input_tensor, target_shape=None):
+    """Drops the zero padding on the released KDA `A_log`.
+
+    `modeling_kimi_linear.py` declares `A_log` as `[num_heads]` (96), but the moonshotai/Kimi-K3
+    safetensors store it as `[head_dim]` (128): the 96 per-head log-decays followed by 32 exact
+    zeros. Slice to the MaxText shape and refuse to silently drop anything that is not padding.
+    HF -> MaxText only; on the way back the HF modeling code's own `[num_heads]` shape is kept.
+    """
+    if saving_to_hf or target_shape is None:
+      return input_tensor
+    n = int(target_shape[0])
+    if input_tensor.shape[0] == n:
+      return input_tensor
+    if input_tensor.shape[0] < n:
+      raise ValueError(f"A_log has {input_tensor.shape[0]} entries, fewer than num_heads={n}")
+    tail = np.asarray(input_tensor[n:])
+    if np.any(tail != 0):
+      raise ValueError(f"A_log has {input_tensor.shape[0]} entries but only {n} heads and the extra entries are not zero")
+    return input_tensor[:n]
+
+  hooks = {
+      "params-decoder-logits_dense-kernel": transpose,
+      "params-decoder-output_attn_res_proj-kernel": transpose,
+  }
+
+  num_main_layers = config.get("num_hidden_layers", 93)
+  first_num_dense_layers = config.get("first_k_dense_replace", 1)
+  full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+
+  for i in range(num_main_layers):
+    prefix = f"params-decoder-layers_{i}"
+    is_full_attn = i in full_attn_layers
+
+    # --- Pre/Post Norms & AttnRes ---
+    hooks[f"{prefix}-self_attention_res_proj-kernel"] = transpose
+    hooks[f"{prefix}-mlp_res_proj-kernel"] = transpose
+
+    # --- Self-Attention (KDA vs MLA) ---
+    if is_full_attn:
+      # Gated MLA
+      hooks[f"{prefix}-self_attention-wq_a-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-wq_b-kernel"] = reshape_transpose_wq_b
+      hooks[f"{prefix}-self_attention-wkv_a-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-wkv_b-kernel"] = reshape_transpose_wkv_b
+      hooks[f"{prefix}-self_attention-g_proj-kernel"] = reshape_transpose_g_proj
+      hooks[f"{prefix}-self_attention-out-kernel"] = reshape_transpose_out
+    else:
+      # KDA (Linear Attention)
+      hooks[f"{prefix}-self_attention-q_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-q_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-k_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-k_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-v_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-v_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-f_a_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-f_b_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-b_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-g_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-out-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-A_log"] = slice_a_log
+
+    # --- FFN (Dense MLP for the first layers, Latent MoE for the rest) ---
+    if i < first_num_dense_layers:
+      hooks[f"{prefix}-mlp-wi_0-kernel"] = transpose
+      hooks[f"{prefix}-mlp-wi_1-kernel"] = transpose
+      hooks[f"{prefix}-mlp-wo-kernel"] = transpose
+    else:
+      hooks[f"{prefix}-mlp-routed_experts-gate-kernel"] = transpose
+      hooks[f"{prefix}-mlp-routed_expert_down_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-routed_expert_up_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_expert-wo-kernel"] = transpose
+      for mt_name in ("wi_0", "wi_1", "wo"):
+        # HF [out, in] (dense) -> MaxText [in.., out].
+        for mt_suffix in ("",):
+          hooks[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = transpose
+
+  return hooks
+
+
 PARAM_MAPPING = {
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4895,6 +5196,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
