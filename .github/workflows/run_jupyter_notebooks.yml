@@ -126,6 +126,17 @@ jobs:
       - name: Install MaxText and Dependencies
         shell: bash
         run: |
+          # Log container memory limits/usage to help diagnose intermittent install failures (b/570028987).
+          log_mem() {
+            echo "::group::Memory ($1)"
+            free -m || true
+            cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory.current 2>/dev/null || \
+              cat /sys/fs/cgroup/memory/memory.limit_in_bytes /sys/fs/cgroup/memory/memory.usage_in_bytes 2>/dev/null || true
+            df -h . /tmp 2>/dev/null || true
+            echo "::endgroup::"
+          }
+          log_mem "start"
+
           # 1. Create virtual environment
           python3 -m uv venv --seed
           source .venv/bin/activate
@@ -141,7 +152,22 @@ jobs:
               (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build)
             fi
           fi
-          uv pip install "${maxtext_wheel}[tpu-post-train]" --resolution=lowest
+          # Limit parallel wheel downloads to reduce memory/network pressure and retry transient failures
+          # (b/570028987: install intermittently dies mid-download on some runners).
+          export UV_CONCURRENT_DOWNLOADS=4
+          for attempt in 1 2 3; do
+            echo "uv pip install attempt ${attempt}/3"
+            if uv pip install "${maxtext_wheel}[tpu-post-train]" --resolution=lowest; then
+              break
+            fi
+            log_mem "after failed attempt ${attempt}"
+            if [ "${attempt}" -eq 3 ]; then
+              echo "uv pip install failed after 3 attempts"
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+          log_mem "after uv pip install"
           install_tpu_post_train_extra_deps
 
           python3 -m pip freeze
