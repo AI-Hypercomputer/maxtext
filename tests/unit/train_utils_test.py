@@ -189,7 +189,7 @@ class TestEvalCachePrefill(unittest.TestCase):
 
     def _read(x):
       reads.append(int(x))
-      return np.full((2, 2), int(x), dtype=np.int32)
+      return np.full((jax.local_device_count(), 2), int(x), dtype=np.int32)
 
     ds = tf.data.Dataset.range(3)
     ds = ds.map(lambda x: {"x": tf.py_function(_read, [x], tf.int32)})
