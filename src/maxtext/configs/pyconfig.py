@@ -359,6 +359,33 @@ class HyperParameters:
     new_pydantic_config = copy.deepcopy(self._pydantic_config, memo)
     return HyperParameters(new_pydantic_config)
 
+  def with_num_slices(self, num_slices: int) -> "HyperParameters":
+    """Returns a copy of this config re-validated for a different slice count.
+
+    Elastic training uses this after slices are lost or regained. Re-running
+    validation
+    recomputes everything derived from the topology (num_target_devices, the
+    global batch
+    sizes, rampup, dcn_parallelism) exactly as at startup. This config is left
+    unchanged.
+
+    Args:
+      num_slices: The number of slices the job now runs on.
+
+    Returns:
+      A new HyperParameters for `num_slices` slices.
+    """
+    old = self._pydantic_config
+    updates = {"num_slices": num_slices}
+    # -1 means "fill in at mesh creation" (fill_unspecified_mesh_axes); leave it that way.
+    if old.dcn_data_parallelism != -1:
+      updates["dcn_data_parallelism"] = num_slices
+    new = type(old).model_validate({**old.model_dump(), **updates})
+    object.__setattr__(
+        new, "__pydantic_fields_set__", set(old.model_fields_set) | set(updates)
+    )
+    return HyperParameters(new)
+
   def tree_flatten(self):
     return (), self
 
