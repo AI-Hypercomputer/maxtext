@@ -588,11 +588,13 @@ class Attention(nnx.Module):
     """
     self._validate_kv_heads()
 
-    kernel_axes = (
-        (None, None, None)
-        if self.config.ici_context_autoregressive_parallelism > 1
-        else ("embed_attn", "kv_heads", "kv_head_dim")
-    )
+    if self.config.ici_context_autoregressive_parallelism > 1:
+      kernel_axes = (None, None, None)
+    elif self.num_kv_heads == 1:
+      # MQA: a single K/V head cannot be split across head shards, so replicate it on every shard.
+      kernel_axes = ("embed_attn", None, "kv_head_dim")
+    else:
+      kernel_axes = ("embed_attn", "kv_heads", "kv_head_dim")
     self._validate_kv_head_sharding(kernel_axes)
 
     block_size = getattr(self.config, "weight_block_size", None)
@@ -654,6 +656,12 @@ class Attention(nnx.Module):
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
     )
+
+  def _kv_activation_axis_names(self, axis_names: AxisNames) -> AxisNames:
+    """For MQA, replicates the single K/V head across head shards instead of splitting it."""
+    if self.num_kv_heads != 1:
+      return axis_names
+    return tuple(None if name == KV_HEAD else name for name in axis_names)
 
   def qkv_projection(self, inputs: Array, proj_name: str, out_sharding: NamedSharding | None = None):
     """Fused QKV projection"""
@@ -1209,16 +1217,17 @@ class Attention(nnx.Module):
 
     if model_mode == MODEL_MODE_PREFILL:
       query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names)
+      key = self._maybe_shard_with_logical(key, self._kv_activation_axis_names(self.prefill_key_axis_names))
+      value = self._maybe_shard_with_logical(value, self._kv_activation_axis_names(self.prefill_value_axis_names))
     elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
       query = self._maybe_shard_with_logical(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = self._maybe_shard_with_logical(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = self._maybe_shard_with_logical(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      kv_decode_axis_names = self._kv_activation_axis_names((DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      key = self._maybe_shard_with_logical(key, kv_decode_axis_names)
+      value = self._maybe_shard_with_logical(value, kv_decode_axis_names)
     else:
       query = self._maybe_shard_with_logical(query, self.query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.value_axis_names)
+      key = self._maybe_shard_with_logical(key, self._kv_activation_axis_names(self.key_axis_names))
+      value = self._maybe_shard_with_logical(value, self._kv_activation_axis_names(self.value_axis_names))
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
