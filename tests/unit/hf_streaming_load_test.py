@@ -36,6 +36,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.checkpoint_conversion.utils import param_mapping
+from maxtext.checkpoint_conversion.utils import safetensors_reader
 import numpy as np
 import safetensors.flax
 
@@ -220,10 +221,15 @@ class PackGroupsTest(parameterized.TestCase):
 class StreamingLoadTest(parameterized.TestCase):
   """The streamed weights must equal the in-memory reference transform, bit for bit."""
 
-  def _load(self, model, scan_layers, dtype=jnp.float32, skip_hf=(), edit_maps=None, **load_kwargs):
-    """Writes a tiny HF checkpoint and streams it into MaxText weights of `dtype`."""
+  def _load(self, model, scan_layers, dtype=jnp.float32, skip_hf=(), edit_maps=None, extra_hf=None, **load_kwargs):
+    """Writes a tiny HF checkpoint and streams it into MaxText weights of `dtype`.
+
+    `extra_hf(hf_tensors)` may return more HF tensors, saved in a third file.
+    """
     ckpt_dir = self.create_tempdir().full_path
     hf_tensors = _write_checkpoint(ckpt_dir, _hf_shapes(model), skip=skip_hf)
+    if extra_hf:
+      safetensors.flax.save_file(extra_hf(hf_tensors), os.path.join(ckpt_dir, "model-extra.safetensors"))
     config = _config(scan_layers)
     param_map, hook_map = _maps(model, config)
     if edit_maps:
@@ -239,10 +245,11 @@ class StreamingLoadTest(parameterized.TestCase):
       scan_layers=(True, False),
       dtype=(jnp.float32, jnp.bfloat16),
       read_bytes_per_host=(0, None),  # One read call per layer, or one call for everything.
+      prefetch=(True, False),
   )
-  def test_matches_in_memory_transform(self, model, scan_layers, dtype, read_bytes_per_host):
+  def test_matches_in_memory_transform(self, model, scan_layers, dtype, read_bytes_per_host, prefetch):
     got, target_tree, hf_tensors, param_map, hook_map, config = self._load(
-        model, scan_layers, dtype, read_bytes_per_host=read_bytes_per_host
+        model, scan_layers, dtype, read_bytes_per_host=read_bytes_per_host, prefetch=prefetch
     )
     want = load_dynamic.transform_hf_state_to_mt_state(dict(hf_tensors), target_tree, param_map, hook_map, config)
 
@@ -260,16 +267,57 @@ class StreamingLoadTest(parameterized.TestCase):
             np.asarray(flat_got[name], np.float32), np.asarray(flat_want[name].astype(target.dtype), np.float32)
         )
 
+  @parameterized.parameters(True, False)
+  def test_tuple_mt_key_splits_one_hf_tensor(self, scan_layers):
+    """One fused HF tensor feeds two MaxText weights, as Qwen3.5's gate_up_proj -> (wi_0, wi_1) does."""
+
+    def fuse(hf_tensors):
+      return {
+          f"model.layers.{i}.mlp.gate_up_proj.weight": jnp.concatenate(
+              [hf_tensors[f"model.layers.{i}.mlp.gate_proj.weight"], hf_tensors[f"model.layers.{i}.mlp.up_proj.weight"]]
+          )
+          for i in range(_LAYERS)
+      }
+
+    def split_gate_up(x, target_shape):
+      del target_shape
+      gate, up = jnp.split(x, 2, axis=-2)
+      return jnp.stack([gate.T, up.T], axis=-1)
+
+    def use_fused(param_map, hook_map):
+      for wi_0 in [k for k in param_map if isinstance(k, str) and k.endswith("mlp-wi_0-kernel")]:
+        wi_1 = wi_0.replace("wi_0", "wi_1")
+        source = param_map.pop(wi_0)
+        del param_map[wi_1]
+        hook_map.pop(wi_0, None)
+        hook_map.pop(wi_1, None)
+        fused = [s.replace("gate_proj", "gate_up_proj") for s in source] if isinstance(source, list) else None
+        param_map[(wi_0, wi_1)] = fused or source.replace("gate_proj", "gate_up_proj")
+        hook_map[(wi_0, wi_1)] = split_gate_up
+
+    got, target_tree, hf_tensors, *_ = self._load("llama", scan_layers, edit_maps=use_fused, extra_hf=fuse)
+    config = _config(scan_layers)
+    param_map, hook_map = _maps("llama", config)
+    want = load_dynamic.transform_hf_state_to_mt_state(dict(hf_tensors), target_tree, param_map, hook_map, config)
+    flat_got = flax.traverse_util.flatten_dict(got, sep=".")
+    flat_want = flax.traverse_util.flatten_dict(want, sep=".")
+    mlp = [name for name in flat_got if ".mlp.wi_" in name]
+    self.assertLen(mlp, 2 if scan_layers else 2 * _LAYERS)
+    for name, array in flat_got.items():
+      with self.subTest(name):
+        self.assertIsInstance(array, jax.Array)
+        np.testing.assert_array_equal(np.asarray(array), np.asarray(flat_want[name], np.float32))
+
   def _read_calls(self, **load_kwargs):
-    """Streams the tiny Mixtral checkpoint and returns the request of each Orbax read call, in order."""
-    real_load = hf_streaming_load.ocp_v1.load
+    """Streams the tiny Mixtral checkpoint and returns the request of each read call, in order."""
+    real_fetch = safetensors_reader.SafetensorsReader.fetch
     requests = []
 
-    def spy(path, request, *args, **kwargs):
+    def spy(reader, request, *args, **kwargs):
       requests.append(dict(request))
-      return real_load(path, request, *args, **kwargs)
+      return real_fetch(reader, request, *args, **kwargs)
 
-    with mock.patch.object(hf_streaming_load.ocp_v1, "load", side_effect=spy):
+    with mock.patch.object(safetensors_reader.SafetensorsReader, "fetch", autospec=True, side_effect=spy):
       self._load("mixtral", scan_layers=True, **load_kwargs)
     return requests
 
@@ -340,6 +388,93 @@ class StreamingLoadTest(parameterized.TestCase):
 
     with self.assertRaisesRegex(ValueError, "Hooks for params-decoder-logits_dense-kernel"):
       self._load("llama", scan_layers=True, edit_maps=identity_hook)
+
+  @parameterized.parameters(True, False)
+  def test_none_hf_key_uses_hook_alone(self, scan_layers):
+    """A mapping with no HF tensor gets its value from the hook alone, as DeepSeek-V4's mhc_norm scales do."""
+
+    def no_hf_norm(param_map, hook_map):
+      param_map["params-decoder-decoder_norm-scale"] = None
+      hook_map["params-decoder-decoder_norm-scale"] = lambda x, shape: np.full(shape, 2.0, np.float32)
+
+    restored, target_tree, *_ = self._load("llama", scan_layers, dtype=jnp.bfloat16, edit_maps=no_hf_norm)
+    got = restored["params"]["decoder"]["decoder_norm"]["scale"]
+    want = target_tree["params"]["decoder"]["decoder_norm"]["scale"]
+    self.assertEqual((got.dtype, got.sharding), (want.dtype, want.sharding))
+    np.testing.assert_array_equal(np.asarray(got, np.float32), np.full(want.shape, 2.0, np.float32))
+
+  def test_none_hf_key_without_hook_raises(self):
+    def no_hf_norm(param_map, hook_map):
+      param_map["params-decoder-decoder_norm-scale"] = None
+      hook_map.pop("params-decoder-decoder_norm-scale", None)
+
+    with self.assertRaisesRegex(ValueError, "no HF tensor for params-decoder-decoder_norm-scale"):
+      self._load("llama", scan_layers=True, edit_maps=no_hf_norm)
+
+
+class DeepSeekV4LayoutTest(parameterized.TestCase):
+  """DeepSeek-V4 layouts with scanned layers that stack a flat HF key list along axis 0, as `to_maxtext` does."""
+
+  @parameterized.named_parameters(
+      ("routing_bias_layers_first", "MoEBiasVar-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-gate-bias", (20, 8), 0),
+      ("hash_table_layers_first", "Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid", (4, 6), 0),
+      ("experts_of_unscanned_layer", "params-decoder-layers_1-mlp-MoeBlock_0-wi_0", (8, 16, 24), 0),
+      ("scanned_block_weight", "params-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-gate-kernel", (16, 20, 8), 1),
+      ("scanned_layer_weight", "params-decoder-layers-self_attention-query-kernel", (16, 3, 4, 8), 1),
+      ("rank_1_weight", "params-decoder-layers-pre_self_attention_layer_norm-scale", (3,), 0),
+  )
+  def test_flat_list_axis(self, mt_key, shape, axis):
+    config = _config(scan_layers=True)
+    self.assertEqual(hf_streaming_load._stacked_axes(mt_key, shape, 1, config), (axis,))  # pylint: disable=protected-access
+
+  @parameterized.named_parameters(
+      ("linen_collection", "MoEBiasVar.decoder.layers_3.mlp.MoeBlock_0.gate.bias"),
+      ("nnx_without_collection", "decoder.layers_3.mlp.MoeBlock_0.gate.bias"),
+  )
+  def test_resolves_other_collections(self, flat_key):
+    """A Linen tree keeps the `MoEBiasVar` collection name; an NNX tree holds the weight beside the rest."""
+    flat_target = {flat_key: None, "decoder.layers_3.mlp.MoeBlock_0.gate.kernel": None}
+    mt_key = "MoEBiasVar-decoder-layers_3-mlp-MoeBlock_0-gate-bias"
+    self.assertEqual(hf_streaming_load.resolve_target_name(mt_key, flat_target), flat_key)
+
+  def test_collections_beside_params_are_loaded_and_kept(self):
+    """A routing bias in `MoEBiasVar` and the experts of an unscanned layer, with scanned layers."""
+    ckpt_dir = self.create_tempdir().full_path
+    rng = np.random.default_rng(0)
+    hf = {f"layers.{i}.ffn.gate.bias": rng.standard_normal((_EXPERTS,), np.float32) for i in range(_LAYERS)}
+    hf |= {
+        f"layers.0.ffn.experts.{e}.w1.weight": rng.standard_normal((_MLP, _EMBED), np.float32) for e in range(_EXPERTS)
+    }
+    safetensors.flax.save_file({k: jnp.asarray(v) for k, v in hf.items()}, os.path.join(ckpt_dir, "model.safetensors"))
+    param_map = {
+        "MoEBiasVar-decoder-layers-MoeBlock_0-gate-bias": [f"layers.{i}.ffn.gate.bias" for i in range(_LAYERS)],
+        "params-decoder-layers_0-MoeBlock_0-wi_0": [f"layers.0.ffn.experts.{e}.w1.weight" for e in range(_EXPERTS)],
+    }
+    hook_map = {"params-decoder-layers_0-MoeBlock_0-wi_0": lambda x, shape: x.T}
+    mesh = _mesh()
+    shapes = {
+        "MoEBiasVar.decoder.layers.MoeBlock_0.gate.bias": (_LAYERS, _EXPERTS),
+        "params.decoder.layers_0.MoeBlock_0.wi_0": (_EXPERTS, _EMBED, _MLP),
+    }
+    target_tree = flax.traverse_util.unflatten_dict(
+        {
+            k: jax.ShapeDtypeStruct(s, jnp.float32, sharding=NamedSharding(mesh, _spec(s, mesh)))
+            for k, s in shapes.items()
+        },
+        sep=".",
+    )
+    restored = hf_streaming_load.load_hf_params_streaming(
+        ckpt_dir, target_tree, param_map, hook_map, _config(scan_layers=True), min_bytes_to_split=0
+    )
+    self.assertEqual(set(restored), {"params", "MoEBiasVar"})
+    np.testing.assert_array_equal(
+        np.asarray(restored["MoEBiasVar"]["decoder"]["layers"]["MoeBlock_0"]["gate"]["bias"]),
+        np.stack([hf[f"layers.{i}.ffn.gate.bias"] for i in range(_LAYERS)]),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(restored["params"]["decoder"]["layers_0"]["MoeBlock_0"]["wi_0"]),
+        np.stack([hf[f"layers.0.ffn.experts.{e}.w1.weight"].T for e in range(_EXPERTS)]),
+    )
 
 
 if __name__ == "__main__":

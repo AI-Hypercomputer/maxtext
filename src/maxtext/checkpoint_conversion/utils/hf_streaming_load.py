@@ -15,31 +15,29 @@
 """Streams a HuggingFace SafeTensors checkpoint straight into sharded MaxText weights.
 
 The checkpoint is read a few decoder layers at a time: whole layers are packed
-into Orbax read calls of about `READ_BYTES_PER_HOST` per host, starting with the
+into read calls of about `READ_BYTES_PER_HOST` per host, starting with the
 tensors outside the decoder layers (embeddings, final norm, lm_head). For each
 read call:
 
-1. Orbax reads only that call's HF tensors from storage into HBM, each split
-   along dim 0 across the TPU chips. SafeTensors is row-major, so every piece is
-   one unbroken byte range in the file.
+1. `safetensors_reader` reads only that call's HF tensors from storage into HBM,
+   each split along dim 0 across the TPU chips. SafeTensors is row-major, so
+   every piece is one unbroken byte range in the file.
 2. The HF->MaxText hooks from `param_mapping.py` (transpose, reshape, RoPE
    permutation, ...) run on the TPU chips, exactly as in the offline conversion.
 3. A jitted writer casts each result to the MaxText dtype, moves it into the
    MaxText sharding, and writes it in place into the preallocated MaxText weight
    (stacked along the layer and/or expert axes where the mapping says so).
 
-Peak HBM is therefore about the final MaxText weights plus one call's HF
-tensors, and peak host RAM about one call's HF tensors, instead of the whole HF
-checkpoint.
-
-Requires orbax-checkpoint>=0.12.3, whose SafeTensors loader reads only the
-requested tensors and only the byte ranges each process's TPU chips need.
+While one call's tensors are converted (steps 2-3), the next call's tensors are
+read in a background thread. Peak HBM is therefore about the final MaxText
+weights plus two calls' HF tensors, and peak host RAM about one call's HF
+tensors, instead of the whole HF checkpoint.
 """
 
 import collections
+import concurrent.futures
 import dataclasses
 import functools
-import importlib.metadata
 import math
 import re
 import time
@@ -48,28 +46,24 @@ from typing import Any, Iterator
 import flax.traverse_util
 import jax
 import jax.numpy as jnp
+from maxtext.checkpoint_conversion.utils import safetensors_reader
 from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.utils import max_logging
 import numpy as np
-from orbax.checkpoint import v1 as ocp_v1
 
 # HF tensors smaller than this get a full copy on every TPU chip: splitting them
-# saves almost no memory and costs extra read requests.
+# saves almost no memory.
 MIN_BYTES_TO_SPLIT = 1 << 20
 
-# Every Orbax read call has a fixed cost (it re-reads the header of every file),
-# and one call keeps at most 2 GiB of reads in flight. Packing whole decoder
-# layers into calls of about this many bytes per host keeps enough reads in
-# flight and pays that cost rarely, while HBM and host RAM hold only one call's
-# HF tensors at a time. On a v4-8 host this read Qwen3-8B (16 GB) in ~13 s; one
-# layer per call took ~80 s, and one call for everything ~11 s.
+# Whole decoder layers are packed into read calls of about this many bytes per
+# host. Bigger calls leave fewer idle read threads at the end of each call;
+# smaller calls hold fewer HF tensors in HBM (two calls' worth with read-ahead).
 READ_BYTES_PER_HOST = 4 << 30
 
-# Size of each ranged read Orbax sends to storage. On a v4-8 host, 32 MiB was
-# ~15% faster than Orbax's 128 MiB default; 16 MiB was slower than both.
-READ_CHUNK_BYTES = 32 << 20
+READ_CHUNK_BYTES = safetensors_reader.READ_CHUNK_BYTES
+READ_THREADS = safetensors_reader.READ_THREADS
+MIN_PIECE_BYTES = safetensors_reader.MIN_PIECE_BYTES
 
-_MIN_ORBAX_VERSION = (0, 12, 3)
 _LOAD_MESH_AXES = ("rows", "copies")
 # "model.layers.12.self_attn.q_proj.weight" -> ("model.", "12").
 _LAYER_KEY = re.compile(r"^(.*?\.)?layers\.(\d+)\.")
@@ -133,11 +127,20 @@ class _Target:
 
 @dataclasses.dataclass(frozen=True)
 class _Write:
-  """Writes the hooked HF tensor(s) `hf_source` into `target` at `index` (one entry per stacked axis)."""
+  """Writes the hooked HF tensor(s) `hf_source` into `targets` at `index` (one entry per stacked axis).
 
-  target: _Target
+  Usually there is one target. A tuple MaxText key in the param mapping (e.g. HF
+  `gate_up_proj` -> MaxText `(wi_0, wi_1)`) gives several: the hooks then return
+  them stacked along a new last axis, in key order, as in `to_maxtext`.
+  """
+
+  targets: tuple[_Target, ...]
   index: tuple[int, ...]
   hf_source: str | tuple[str, ...]  # One HF key, or a tuple the hook fuses into one tensor.
+
+  @property
+  def target(self) -> _Target:
+    return self.targets[0]
 
   @property
   def hf_keys(self) -> tuple[str, ...]:
@@ -151,12 +154,19 @@ class LoadPlan:
   targets: list[_Target]
   groups: list[list[_Write]]
   unmatched_mt_keys: list[str]  # Mapping entries with no weight in the target tree.
+  # Weights whose mapping has no HF tensor (HF key None): the hook makes the whole value
+  # from nothing (e.g. DeepSeek-V4's `mhc_norm` scales are all ones), as in `to_maxtext`.
+  generated: list[_Target] = dataclasses.field(default_factory=list)
 
 
 def resolve_target_name(mt_key: str, flat_target: dict) -> str | None:
   """Finds the key in the flattened target tree that a param-mapping key refers to."""
   mt_name = mt_key.replace("params-", "").replace("-", ".")
-  for candidate in (mt_name, f"params.{mt_name}", mt_key.replace("-", ".")):
+  candidates = [mt_name, f"params.{mt_name}", mt_key.replace("-", ".")]
+  # An NNX tree holds weights of other Flax collections (e.g. `Tid2EidVar`) beside the rest,
+  # without the collection name.
+  candidates += [mt_key[len(c) :].replace("-", ".") for c in _LAYER_FIRST_COLLECTIONS if mt_key.startswith(c)]
+  for candidate in candidates:
     if candidate in flat_target:
       return candidate
   return None
@@ -168,13 +178,34 @@ def _stacked_axes(mt_key: str, shape: tuple, depth: int, config) -> tuple[int, .
   Matches `tensor_handling`: a flat list stacks along `param_scan_axis` for
   scanned layers (or axis 0 for rank-1 weights and unscanned MoE experts), and
   deeper nesting follows `tensor_handling.stacked_axes`.
+
+  Two flat-list cases stack along axis 0 even with scanned layers, as in
+  `to_maxtext`: weights outside the `params` collection (`MoEBiasVar`,
+  `Tid2EidVar`), which put the layer axis first, and the expert list of a single
+  unscanned layer (`...-layers_<i>-...-MoeBlock...`, e.g. DeepSeek-V4's first
+  layers), which has no layer axis at all.
   """
   if depth == 0:
     return ()
   if depth == 1:
     scan_axis = config.param_scan_axis
-    return (scan_axis,) if config.scan_layers and len(shape) > scan_axis else (0,)
+    if not config.scan_layers or len(shape) <= scan_axis or _stacks_on_axis_0(mt_key):
+      return (0,)
+    return (scan_axis,)
   return tuple(tensor_handling.stacked_axes(mt_key, config, depth))
+
+
+# A single unscanned decoder layer, e.g. "params-decoder-layers_2-mlp-...".
+_UNSCANNED_LAYER_KEY = re.compile(r"-layers_\d+-")
+# Flax collections other than `params` whose stacked weights put the layer axis first.
+_LAYER_FIRST_COLLECTIONS = ("MoEBiasVar-", "Tid2EidVar-")
+
+
+def _stacks_on_axis_0(mt_key: str) -> bool:
+  """Whether a flat HF key list for `mt_key` stacks along axis 0 with scanned layers (see `_stacked_axes`)."""
+  if mt_key.startswith(_LAYER_FIRST_COLLECTIONS):
+    return True
+  return "MoeBlock" in mt_key and "scanned_blocks" not in mt_key and bool(_UNSCANNED_LAYER_KEY.search(mt_key))
 
 
 def _enumerate_sources(hf_source: Any, target: _Target) -> Iterator[tuple[tuple[int, ...], Any]]:
@@ -293,32 +324,48 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
     The load plan.
   """
   flat_target = flax.traverse_util.flatten_dict(target_tree, sep=".")
-  targets, writes, unmatched = [], [], []
+  targets, writes, unmatched, generated = [], [], [], []
   for mt_key, hf_source in param_map.items():
-    name = resolve_target_name(mt_key, flat_target)
-    if name is None:
-      unmatched.append(mt_key)
+    # A tuple MaxText key: the hooks give all its weights at once, stacked on a new last axis.
+    mt_keys = mt_key if isinstance(mt_key, tuple) else (mt_key,)
+    names = [resolve_target_name(key, flat_target) for key in mt_keys]
+    if None in names:
+      unmatched.extend(key for key, name in zip(mt_keys, names) if name is None)
       continue
-    leaf = flat_target[name]
-    shape = tuple(leaf.shape)
-    axes = _stacked_axes(mt_key, shape, tensor_handling.nesting_depth(hf_source), config)
-    target = _Target(
-        name=name,
-        mt_key=mt_key,
-        shape=shape,
-        dtype=np.dtype(leaf.dtype),
-        sharding=_target_sharding(leaf, name),
-        axes=axes,
-        hook_shape=tensor_handling.slice_shape(shape, axes),
-        hooks=hook_map.get(mt_key),
-    )
-    targets.append(target)
-    writes.extend(_Write(target, index, source) for index, source in _enumerate_sources(hf_source, target))
+    depth = tensor_handling.nesting_depth(hf_source)
+    parts = []
+    for key, name in zip(mt_keys, names):
+      leaf = flat_target[name]
+      shape = tuple(leaf.shape)
+      axes = _stacked_axes(key, shape, depth, config)
+      parts.append(
+          _Target(
+              name=name,
+              mt_key=key,
+              shape=shape,
+              dtype=np.dtype(leaf.dtype),
+              sharding=_target_sharding(leaf, name),
+              axes=axes,
+              hook_shape=tensor_handling.slice_shape(shape, axes),
+              hooks=hook_map.get(mt_key),
+          )
+      )
+    if len({(p.shape, p.axes) for p in parts}) > 1:
+      raise ValueError(f"The MaxText weights of {mt_key} differ in shape: {[p.shape for p in parts]}.")
+    if hf_source is None:
+      if len(parts) > 1 or parts[0].hooks is None:
+        raise ValueError(f"Param mapping gives no HF tensor for {mt_key}, so it needs exactly one weight and a hook.")
+      generated.append(parts[0])
+      continue
+    targets.extend(parts)
+    writes.extend(_Write(tuple(parts), index, source) for index, source in _enumerate_sources(hf_source, parts[0]))
 
   groups = collections.defaultdict(list)
   for write in writes:
     groups[_layer_group(write.hf_keys[0])].append(write)
-  return LoadPlan(targets=targets, groups=[groups[k] for k in sorted(groups)], unmatched_mt_keys=unmatched)
+  return LoadPlan(
+      targets=targets, groups=[groups[k] for k in sorted(groups)], unmatched_mt_keys=unmatched, generated=generated
+  )
 
 
 @functools.lru_cache(maxsize=None)
@@ -348,18 +395,6 @@ def _write_fn(dtype, sharding, axes, ndim):
   return jax.jit(write, donate_argnums=0, out_shardings=sharding)
 
 
-def _check_orbax_version():
-  try:
-    version = tuple(int(part) for part in importlib.metadata.version("orbax-checkpoint").split(".")[:3])
-  except (importlib.metadata.PackageNotFoundError, ValueError):
-    return  # Unknown or pre-release version; assume it is recent enough.
-  if version < _MIN_ORBAX_VERSION:
-    raise RuntimeError(
-        f"Streaming SafeTensors loading needs orbax-checkpoint>={'.'.join(map(str, _MIN_ORBAX_VERSION))}"
-        f" (found {'.'.join(map(str, version))}). Older versions read every file in full on each call."
-    )
-
-
 def _check_sources(plan: LoadPlan, hf_metadata: dict):
   """Raises if a mapped HF tensor is missing from the checkpoint; logs HF tensors nothing reads."""
   needed = {}
@@ -382,43 +417,66 @@ def _check_sources(plan: LoadPlan, hf_metadata: dict):
 
 
 def _load_request(call: list[_Write], hf_metadata: dict, min_bytes_to_split: int) -> dict:
-  """The flat abstract tree that makes Orbax read this call's HF tensors, split by rows."""
+  """The request that makes the reader read this call's HF tensors, split by rows."""
   request = {}
   for write in call:
     devices = _devices_of(write.target.sharding)
     for key in write.hf_keys:
       if key not in request:
         meta = hf_metadata[key]
-        # Request the file's own dtype: Orbax would otherwise cast on the host.
+        # Request the file's own dtype: the reader never casts.
         sharding = choose_load_sharding(meta.shape, meta.dtype, devices, min_bytes_to_split)
         request[key] = jax.ShapeDtypeStruct(meta.shape, meta.dtype, sharding=sharding)
   return request
 
 
 def _apply_write(write: _Write, hf_arrays: dict, results: dict):
-  """Hooks one HF source, then casts and writes it into its MaxText weight."""
-  target = write.target
+  """Hooks one HF source, then casts and writes it into its MaxText weight(s)."""
+  first = write.target
   if isinstance(write.hf_source, tuple):
     raw = tuple(hf_arrays[key] for key in write.hf_source)
   else:
     raw = hf_arrays[write.hf_source]
+  # A tuple MaxText key: the hooks stack its weights along a new last axis.
+  hook_shape = first.hook_shape + ((len(write.targets),) if len(write.targets) > 1 else ())
   # The hooks run op by op, as in the offline conversion. Tracing them into one
   # jitted program would let XLA skip intermediate roundings (e.g. a bf16 cast
   # inside a hook), so the result could differ from `to_maxtext` in the last bits.
-  x = tensor_handling.apply_hook_fns(raw, target.hook_shape, target.hooks)
-  if tuple(x.shape) != target.hook_shape:
+  try:
+    x = tensor_handling.apply_hook_fns(raw, hook_shape, first.hooks)
+  except RuntimeError as e:
+    if jax.process_count() > 1 and "non-addressable" in str(e):
+      raise RuntimeError(
+          f"A hook for {first.mt_key} ({first.hooks}) copied an HF tensor to host numpy (e.g. np.concatenate)."
+          " With several hosts each host holds only part of the tensor, so hooks must use jnp ops or array"
+          " methods on jax.Arrays (see `param_mapping._array_module`)."
+      ) from e
+    raise
+  if tuple(x.shape) != hook_shape:
     raise ValueError(
-        f"Hooks for {target.mt_key} turned {write.hf_source} into shape {tuple(x.shape)}, but MaxText weight"
-        f" {target.name} needs {target.hook_shape} per entry (full shape {target.shape})."
+        f"Hooks for {first.mt_key} turned {write.hf_source} into shape {tuple(x.shape)}, but MaxText weight"
+        f" {first.name} needs {hook_shape} per entry (full shape {first.shape})."
     )
-  if isinstance(x, jax.Array) and x.sharding.device_set != target.sharding.device_set:
-    # Only when the target lives on a different set of devices than we loaded onto.
-    x = jax.device_put(x, _replicated_sharding(_devices_of(target.sharding)))
-  if target.axes:
-    write_fn = _write_fn(target.dtype, target.sharding, target.axes, len(target.shape))
-    results[target.name] = write_fn(results[target.name], x, *write.index)
-  else:
-    results[target.name] = _cast_fn(target.dtype, target.sharding)(x)
+  parts = [x[..., i] for i in range(len(write.targets))] if len(write.targets) > 1 else [x]
+  for target, part in zip(write.targets, parts):
+    if isinstance(part, jax.Array) and part.sharding.device_set != target.sharding.device_set:
+      # Only when the target lives on a different set of devices than we loaded onto.
+      part = jax.device_put(part, _replicated_sharding(_devices_of(target.sharding)))
+    if target.axes:
+      write_fn = _write_fn(target.dtype, target.sharding, target.axes, len(target.shape))
+      results[target.name] = write_fn(results[target.name], part, *write.index)
+    else:
+      results[target.name] = _cast_fn(target.dtype, target.sharding)(part)
+
+
+def _generate(target: _Target) -> jax.Array:
+  """Makes a weight whose mapping has no HF tensor: the hook gets None and the full shape, as in `to_maxtext`."""
+  x = tensor_handling.apply_hook_fns(None, target.shape, target.hooks)
+  if tuple(x.shape) != target.shape:
+    raise ValueError(
+        f"Hooks for {target.mt_key} made shape {tuple(x.shape)} from no HF tensor, but {target.name} is {target.shape}."
+    )
+  return _cast_fn(target.dtype, target.sharding)(x)
 
 
 def _peak_hbm_gb() -> float | None:
@@ -435,6 +493,9 @@ def load_hf_params_streaming(
     min_bytes_to_split: int = MIN_BYTES_TO_SPLIT,
     read_bytes_per_host: int | None = READ_BYTES_PER_HOST,
     read_chunk_bytes: int = READ_CHUNK_BYTES,
+    read_threads: int = READ_THREADS,
+    min_piece_bytes: int = MIN_PIECE_BYTES,
+    prefetch: bool = True,
 ) -> dict:
   """Loads an HF SafeTensors checkpoint into MaxText weights, a few decoder layers at a time.
 
@@ -446,54 +507,80 @@ def load_hf_params_streaming(
     hook_map: MaxText key -> hook function(s), from `param_mapping.HOOK_FNS[model]`.
     config: The MaxText config (`scan_layers` and `param_scan_axis` are read).
     min_bytes_to_split: HF tensors smaller than this are loaded as a full copy on every TPU chip.
-    read_bytes_per_host: About how many bytes of HF tensors each host reads per Orbax call.
+    read_bytes_per_host: About how many bytes of HF tensors each host reads per read call.
       Whole decoder layers are packed up to this; None reads the whole checkpoint in one call.
-    read_chunk_bytes: Size of each ranged read Orbax sends to storage.
+    read_chunk_bytes: Size of each ranged read sent to storage.
+    read_threads: How many ranged reads each host keeps in flight.
+    min_piece_bytes: Groups of same-shape HF tensors whose per-chip pieces would be smaller
+      than this are read whole and rearranged on the TPU chips (see `safetensors_reader`).
+    prefetch: Read the next call while the current one is converted. Faster, but holds
+      up to two calls of HF tensors in HBM instead of one.
 
   Returns:
-    `{"params": weights}`, the same structure `transform_hf_state_to_mt_state` returns.
+    `target_tree` filled in, wrapped as `{"params": weights}` if it isn't already (an NNX pure
+    dict); a Linen tree keeps any collections beside `params`.
     Weights no mapping covers are left as their abstract leaf, so the caller's
     weight-mismatch check reports them.
   """
-  _check_orbax_version()
   t_start = time.time()
   plan = build_plan(param_map, hook_map, target_tree, config)
-  context = ocp_v1.Context(
-      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS,
-      safetensors_options=ocp_v1.options.SafetensorsOptions(read_chunk_bytes=read_chunk_bytes),
-  )
-  with context:
-    hf_metadata = ocp_v1.metadata(path).metadata
+  with (
+      safetensors_reader.SafetensorsReader(
+          path, num_threads=read_threads, chunk_bytes=read_chunk_bytes, min_piece_bytes=min_piece_bytes
+      ) as reader,
+      concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="hf_prefetch") as prefetcher,
+  ):
+    hf_metadata = reader.metadata
     _check_sources(plan, hf_metadata)
     # Each host reads only the pieces its own TPU chips need, so a call of N bytes
     # reads about N / process_count on each host.
     max_bytes = None if read_bytes_per_host is None else read_bytes_per_host * jax.process_count()
     spans = pack_groups([_group_bytes(group, hf_metadata) for group in plan.groups], max_bytes)
     calls = [[write for i in span for write in plan.groups[i]] for span in spans]
+    requests = [_load_request(call, hf_metadata, min_bytes_to_split) for call in calls]
     max_logging.log(
         f"Streaming {sum(len(g) for g in plan.groups)} HF sources into {len(plan.targets)} MaxText weights"
         f" in {len(calls)} read calls from {path}"
+        + (f"; {len(plan.generated)} more weights come from hooks alone" if plan.generated else "")
     )
 
     results = {t.name: _alloc_fn(t.shape, t.dtype, t.sharding)() for t in plan.targets if t.axes}
+    for target in plan.generated:
+      results[target.name] = _generate(target)
     total_bytes = 0
-    for call_index, call in enumerate(calls):
-      t_call = time.time()
-      request = _load_request(call, hf_metadata, min_bytes_to_split)
-      hf_arrays = ocp_v1.load(path, request)
-      t_read = time.time()
-      for write in call:
-        _apply_write(write, hf_arrays, results)
-      # Finish this call's writes before the next read, so at most one call's HF
-      # tensors are ever held in HBM.
-      jax.block_until_ready([results[write.target.name] for write in call])
-      del hf_arrays
-      call_bytes = sum(_nbytes(sds) for sds in request.values())
-      total_bytes += call_bytes
-      max_logging.log(
-          f"[{call_index + 1}/{len(calls)}] {_call_name(call)}: {len(request)} HF tensors,"
-          f" {call_bytes / 1e9:.3f} GB, read {t_read - t_call:.2f}s, convert {time.time() - t_read:.2f}s"
-      )
+    # Only reads and their copies into HBM (`fetch`) run on the background thread. The
+    # jitted rearranging (`unpack`) and writes stay on this thread in a fixed order, so
+    # every host issues the same programs in the same order.
+    future = prefetcher.submit(reader.fetch, requests[0]) if calls else None
+    try:
+      for call_index, call in enumerate(calls):
+        t_wait = time.time()
+        fetched = future.result()
+        t_read = time.time()
+        has_next = call_index + 1 < len(calls)
+        if prefetch and has_next:
+          future = prefetcher.submit(reader.fetch, requests[call_index + 1])
+        hf_arrays = reader.unpack(fetched)
+        del fetched
+        for write in call:
+          _apply_write(write, hf_arrays, results)
+        # Finish this call's writes before dropping its HF tensors, so at most one
+        # call (two with prefetch) of HF tensors is held in HBM.
+        jax.block_until_ready([results[t.name] for write in call for t in write.targets])
+        del hf_arrays
+        t_done = time.time()
+        if not prefetch and has_next:
+          future = prefetcher.submit(reader.fetch, requests[call_index + 1])
+        call_bytes = sum(_nbytes(sds) for sds in requests[call_index].values())
+        total_bytes += call_bytes
+        max_logging.log(
+            f"[{call_index + 1}/{len(calls)}] {_call_name(call)}: {len(requests[call_index])} HF tensors,"
+            f" {call_bytes / 1e9:.3f} GB, waited {t_read - t_wait:.2f}s for read, convert {t_done - t_read:.2f}s"
+        )
+    except BaseException:
+      if future is not None:
+        future.cancel()
+      raise
 
   elapsed = time.time() - t_start
   peak = _peak_hbm_gb()
@@ -506,5 +593,6 @@ def load_hf_params_streaming(
   flat_restored = flax.traverse_util.flatten_dict(target_tree, sep=".")
   flat_restored.update(results)
   restored = flax.traverse_util.unflatten_dict(flat_restored, sep=".")
-  # A Linen tree carries the `params` collection; return it wrapped exactly once.
-  return {"params": restored.get("params", restored)}
+  # A Linen tree carries the `params` collection, and maybe others beside it (e.g. DeepSeek-V4's
+  # `MoEBiasVar` and `Tid2EidVar`): return it as is. An NNX pure dict has bare weights: wrap them once.
+  return restored if "params" in restored else {"params": restored}

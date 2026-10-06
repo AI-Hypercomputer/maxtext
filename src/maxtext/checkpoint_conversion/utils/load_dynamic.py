@@ -19,8 +19,9 @@ directly during MaxText training or evaluation runs. The checkpoint is streamed
 a few decoder layers at a time (see `hf_streaming_load`): each read call's
 tensors are read straight into HBM, converted on the TPU chips, and written into
 the sharded MaxText weights. This avoids offline pre-conversion steps and holds
-only one read call of HF tensors (about 4 GiB per host) in host RAM and HBM at a
-time, on top of the final weights.
+at most two read calls of HF tensors (about 4 GiB per host each: the one being
+converted and the next one being read) in host RAM and HBM at a time, on top of
+the final weights.
 
 Usage:
   To load Hugging Face checkpoints directly, configure the following flags:
@@ -371,8 +372,9 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
   target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params
 
   t1 = time.time()
-  # Read, convert, and place the weights a few decoder layers at a time, so only
-  # one read call of HF tensors (about 4 GiB per host) is in host RAM / HBM at once.
+  # Read, convert, and place the weights a few decoder layers at a time. The next
+  # read call is fetched while the current one is converted, so at most two calls
+  # of HF tensors (about 4 GiB per host each) are in host RAM / HBM at once.
   restored_params = hf_streaming_load.load_hf_params_streaming(
       path, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config
   )
