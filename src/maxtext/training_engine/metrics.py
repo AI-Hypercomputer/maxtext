@@ -23,6 +23,7 @@ from typing import Any
 
 from absl import logging
 import jax
+import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.utils import max_logging, max_utils, maxtext_utils
@@ -47,9 +48,15 @@ _DEFAULT_MAX_BUFFERED_STEPS = 128
 
 
 def _concat_1d(items: list[Any]) -> jax.Array:
-  """Ravels each item to 1-D and concatenates them in order (same layout as repeated append)."""
-  arrays = [jax.numpy.ravel(jax.numpy.asarray(x)) for x in items]
-  return arrays[0] if len(arrays) == 1 else jax.numpy.concatenate(arrays)
+  """Ravels each item to 1-D and concatenates them in order (same layout as repeated append).
+
+  A list of scalars, one per microbatch and the usual case, is a single `jnp.stack`: a ravel
+  per item plus the concatenate would be one eager launch per microbatch per metric.
+  """
+  if len(items) > 1 and all(jnp.ndim(x) == 0 for x in items):
+    return jnp.stack(items)
+  arrays = [jnp.ravel(jnp.asarray(x)) for x in items]
+  return arrays[0] if len(arrays) == 1 else jnp.concatenate(arrays)
 
 
 class Mode(str, enum.Enum):

@@ -2506,10 +2506,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         checkpoint_state=checkpointing.CheckpointState(
             model=self.model,
             optimizer=self.optimizer if save_optimizer_state else None,
-            # Only intra-step checkpoints (micro_step_count > 0) carry partial
-            # accumulated_metrics; completed-step checkpoints must not serialize
-            # undrained step buffers when save_checkpoint runs before
-            # get_metrics.
+            # Only intra-step checkpoints (micro_step_count > 0) carry accumulated_metrics:
+            # the recorder's undrained history, which includes the partial step restore
+            # resumes. A completed-step checkpoint must not serialize undrained buffers
+            # when save_checkpoint runs before get_metrics.
             accumulated_metrics=(
                 self._metrics_recorder.get_metrics_history(clear_cache=False) if self._micro_step_count > 0 else []
             ),
