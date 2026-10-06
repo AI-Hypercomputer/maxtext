@@ -276,6 +276,14 @@ use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the Mo
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
+# Implementation of the MoE "combine" (unpermute + Top-K weighted sum of the expert outputs) in the sparse
+# matmul path without expert parallelism:
+#   "xla": gather the expert outputs back into token order and einsum with the routing weights (default).
+#   "tc":  fused TensorCore Pallas kernel (kernels/moe_combine_tc.py) that never materializes the
+#          [tokens * top_k, emb] unsorted copy; f32 accumulation (same arithmetic as float32_weight_sum=true).
+#          Requires sparse_matmul=true, use_ring_of_experts=false and use_ragged_sort=false; falls back to "xla"
+#          at runtime with expert parallelism, Llama4 routing or shapes the kernel does not support.
+moe_combine_kernel: "xla"
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.

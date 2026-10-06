@@ -1087,6 +1087,16 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
   )
+  moe_combine_kernel: Literal["xla", "tc"] = Field(
+      "xla",
+      description=(
+          "Implementation of the MoE combine (unpermute + Top-K weighted sum) in the sparse matmul path without"
+          " expert parallelism. 'xla': gather back into token order and einsum (default). 'tc': fused TensorCore"
+          " Pallas kernel (kernels/moe_combine_tc.py) with f32 accumulation that never materializes the"
+          " [tokens * top_k, emb] unsorted copy. Requires sparse_matmul=True, use_ring_of_experts=False and"
+          " use_ragged_sort=False; falls back to 'xla' at runtime when the kernel preconditions do not hold."
+      ),
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -5190,6 +5200,12 @@ class MaxTextConfig(
 
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
+
+    if self.moe_combine_kernel == "tc":
+      if not self.sparse_matmul:
+        raise ValueError("`moe_combine_kernel='tc'` requires `sparse_matmul=True`.")
+      if self.use_ring_of_experts or self.use_ragged_sort:
+        raise ValueError("`moe_combine_kernel='tc'` requires `use_ring_of_experts=False` and `use_ragged_sort=False`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

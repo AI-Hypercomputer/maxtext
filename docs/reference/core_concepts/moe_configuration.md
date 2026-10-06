@@ -126,6 +126,8 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `prefuse_moe_weights`: If enabled alongside `sparse_matmul=True`, fuses the two FFN1 grouped GEMMs (wi_0 and wi_1) into a single grouped GEMM call. Expert weights are stored in a concatenated `(num_experts, embed_dim, 2 * mlp_dim)` shape, so input activations are loaded from HBM once per forward pass instead of twice. Backend-agnostic (works with Megablox, JAX Ragged Dot, and Tokamax). When used with `attention=vllm_rpa`, the fused weight tensor is passed directly to the vLLM-TPU serving kernel without splitting.
 
+`moe_combine_kernel` (default: `"xla"`): Implementation of the MoE combine (unpermute + Top-K weighted sum of the expert outputs) in the sparse matmul path without expert parallelism. `"xla"` gathers the expert outputs back into token order and contracts them with the routing weights in an einsum. `"tc"` uses a fused TensorCore Pallas kernel (`kernels/moe_combine_tc.py`) with f32 accumulation (the same arithmetic as `float32_weight_sum=True`) that never materializes the `[tokens * top_k, emb]` unsorted copy and provides a custom VJP; it processes tokens in blocks and DMAs one contiguous row window per (block, expert) because the expert sort is stable. Requires `sparse_matmul=True`, `use_ring_of_experts=False` and `use_ragged_sort=False`; falls back to `"xla"` at runtime with expert parallelism, Llama4 routing or shapes the kernel does not support (see `kernel_supported`).
+
 `use_batch_split_schedule` (experimental): If enabled, split batch into micro-batches to hide communications that yields performance benefits.
 
 #### TransformerEngine MoEBlock

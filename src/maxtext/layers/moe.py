@@ -35,6 +35,7 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import moe_combine_tc
 from maxtext.kernels import sort_activations
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
@@ -1345,6 +1346,18 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
+    elif self._use_fused_combine(intermediate, weights, group_sizes):
+      # moe_combine_kernel="tc": fused unpermute + top-k weighted sum (f32
+      # accumulation, same arithmetic as float32_weight_sum=True). Never
+      # materializes the [tokens*top_k, emb] unsorted copy; see
+      # kernels/moe_combine_tc.py.
+      with jax.named_scope("moe_combine"):
+        output = moe_combine_tc.combine(
+            intermediate,
+            sorted_selected_experts,
+            jnp.reshape(weights, (-1, self.num_experts_per_tok)),
+            group_sizes,
+        )
     else:
       unsort_intermediate = _sort_activations(
           intermediate,
@@ -1371,6 +1384,23 @@ class RoutedMoE(nnx.Module):
             precision=matmul_precision,
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
+
+  def _use_fused_combine(self, intermediate, weights, group_sizes) -> bool:
+    """True iff `moe_combine_kernel="tc"` is configured and the fused combine is valid here.
+
+    Valid only for the plain local sort: every token*top_k row is present in
+    `intermediate` in stable expert-sorted order and `group_sizes` sums to the
+    row count (no expert parallelism, no truncated/ragged buffers).
+    """
+    if self.config.moe_combine_kernel != "tc" or group_sizes is None:
+      return False
+    if not isinstance(intermediate, jax.Array) or intermediate.ndim != 2:
+      return False
+    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+      return False
+    if self.get_expert_parallelism_size() != 1 or self.config.use_ring_of_experts:
+      return False
+    return intermediate.shape[0] == math.prod(weights.shape) and group_sizes.ndim == 1
 
   @staticmethod
   def _maybe_truncate_local_group_size(

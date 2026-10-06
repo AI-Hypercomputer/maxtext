@@ -49,6 +49,25 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_moe_combine_kernel_tc_requires_sparse_matmul(self):
+    with self.assertRaisesRegex(ValueError, "`moe_combine_kernel='tc'` requires `sparse_matmul=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_combine_kernel="tc",
+          sparse_matmul=False,
+      )
+
+  def test_moe_combine_kernel_tc_rejects_ring_of_experts(self):
+    with self.assertRaisesRegex(ValueError, "requires `use_ring_of_experts=False`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_combine_kernel="tc",
+          sparse_matmul=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=True,
+          ici_expert_parallelism=2,
+      )
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
