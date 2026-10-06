@@ -1097,6 +1097,17 @@ class MoEGeneral(BaseModel):
           " use_ragged_sort=False; falls back to 'xla' at runtime when the kernel preconditions do not hold."
       ),
   )
+  moe_permute_kernel: Literal["xla", "tc"] = Field(
+      "xla",
+      description=(
+          "Implementation of the MoE token permute (gather into expert-sorted order) when"
+          " moe_use_direct_token_gather=True. 'xla': XLA gather (default). 'tc': fused TensorCore Pallas kernel"
+          " (kernels/moe_combine_tc.py `permute`, forward and backward). Requires moe_use_direct_token_gather=True"
+          " and use_ring_of_experts=False; falls back to 'xla' at runtime when the kernel preconditions do not"
+          " hold. Intended for use with --xla_tpu_offload_gather_to_sparsecore=false"
+          " --xla_tpu_offload_all_supported_gathers_to_sparsecore=false."
+      ),
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -5206,6 +5217,12 @@ class MaxTextConfig(
         raise ValueError("`moe_combine_kernel='tc'` requires `sparse_matmul=True`.")
       if self.use_ring_of_experts or self.use_ragged_sort:
         raise ValueError("`moe_combine_kernel='tc'` requires `use_ring_of_experts=False` and `use_ragged_sort=False`.")
+
+    if self.moe_permute_kernel == "tc":
+      if not self.moe_use_direct_token_gather:
+        raise ValueError("`moe_permute_kernel='tc'` requires `moe_use_direct_token_gather=True`.")
+      if self.use_ring_of_experts:
+        raise ValueError("`moe_permute_kernel='tc'` requires `use_ring_of_experts=False`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

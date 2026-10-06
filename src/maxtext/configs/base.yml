@@ -284,6 +284,16 @@ moe_use_direct_token_gather: false # whether to gather tokens directly in expert
 #          Requires sparse_matmul=true, use_ring_of_experts=false and use_ragged_sort=false; falls back to "xla"
 #          at runtime with expert parallelism, Llama4 routing or shapes the kernel does not support.
 moe_combine_kernel: "xla"
+# Implementation of the MoE token permute (gather of the [tokens, emb] activations into expert-sorted
+# [tokens * top_k, emb] order) when moe_use_direct_token_gather=true:
+#   "xla": XLA gather (default; offloaded to SparseCore on v6e when the XLA gather-offload flags are on).
+#   "tc":  fused TensorCore Pallas kernel (kernels/moe_combine_tc.py `permute`, fwd + bwd) sharing the combine
+#          kernel's block / row-window DMA scheme. Requires moe_use_direct_token_gather=true and
+#          use_ring_of_experts=false; falls back to "xla" at runtime with expert parallelism, quantized
+#          activations or unsupported shapes. Intended to be used together with the XLA flags
+#          --xla_tpu_offload_gather_to_sparsecore=false --xla_tpu_offload_all_supported_gathers_to_sparsecore=false
+#          so that no MoE gather is serialized on SparseCore behind the expert-weight all-gathers.
+moe_permute_kernel: "xla"
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.

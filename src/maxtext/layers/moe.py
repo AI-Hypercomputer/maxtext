@@ -1247,8 +1247,24 @@ class RoutedMoE(nnx.Module):
         flatten_selected_experts_safe = flatten_selected_experts
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
+      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        sorted_inputs = None
+        if self._use_fused_permute(is_qarray):
+          # moe_permute_kernel="tc": gather the tokens into expert-sorted order on
+          # the TensorCore (fwd one-hot MXU selection, bwd = combine forward with
+          # unit weights); see kernels/moe_combine_tc.py. Returns None when the
+          # kernel preconditions do not hold.
+          with jax.named_scope("moe_permute"):
+            sorted_inputs = moe_combine_tc.permute(
+                inputs_2d.astype(self.dtype),
+                sorted_selected_experts,
+                group_size,
+                self.num_experts_per_tok,
+            )
+        if sorted_inputs is None:
+          sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -1257,8 +1273,6 @@ class RoutedMoE(nnx.Module):
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
-
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1401,6 +1415,16 @@ class RoutedMoE(nnx.Module):
     if self.get_expert_parallelism_size() != 1 or self.config.use_ring_of_experts:
       return False
     return intermediate.shape[0] == math.prod(weights.shape) and group_sizes.ndim == 1
+
+  def _use_fused_permute(self, is_qarray: bool) -> bool:
+    """True iff `moe_permute_kernel="tc"` is configured and the fused permute is valid here.
+
+    Valid only for the plain local sort of unquantized activations (no expert
+    parallelism, no ring-of-experts).
+    """
+    if self.config.moe_permute_kernel != "tc" or is_qarray:
+      return False
+    return self.get_expert_parallelism_size() == 1 and not self.config.use_ring_of_experts
 
   @staticmethod
   def _maybe_truncate_local_group_size(

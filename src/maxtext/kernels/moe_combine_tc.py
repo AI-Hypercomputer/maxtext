@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Fused TensorCore (Pallas) MoE "combine" kernel.
+"""Fused TensorCore (Pallas) MoE "combine" and "permute" kernels.
 
 `combine` computes, for expert outputs `x` [R = T*K, E] stored in expert-sorted
 order (row r holds flat token-slot `sort_idx[r]`, `sort_idx = argsort(experts)`):
@@ -23,6 +23,10 @@ with f32 accumulation, plus a custom VJP:
 
     d_x[inv[t*K+k]] = w[t, k] * dy[t]            (a permutation, no scatter-add)
     d_w[t, k]       = <dy[t], x[inv[t*K+k]]>     (f32)
+
+`permute` is the transpose with unit weights: forward y[r] = x[sort_idx[r] // K]
+(the token gather into expert-sorted order), backward dx[t] = sum of the K rows
+of token t (the combine forward with unit weights).
 
 Why not a per-row DMA gather: on v6e a TensorCore row-gather is bound by
 ~20 ns per row DMA, i.e. ~5 ms for 262144 rows, no better than SparseCore.
@@ -54,7 +58,7 @@ delta a multiple of A). Windows of the same block that share a granule are
 coalesced into one segment (constant delta), so every x row has a single
 buffer position per block.
 
-Scatter direction (combine bwd): the output windows are written
+Scatter direction (combine bwd, permute fwd): the output windows are written
 whole, so a granule that contains a range boundary (a "partial granule") may
 hold rows owned by another token block and is read-modify-written. Each grid
 step owns one slot of the output buffer `obuf`, and the partial granules of a
@@ -79,15 +83,15 @@ Precision: all products are exact (bf16 x bf16 -> f32) and accumulation is
 f32, i.e. the same arithmetic as the `float32_weight_sum=True` einsum. If the
 routing weights are not bf16, S is split into bf16 hi + lo parts (2 matmuls).
 
-Requirements for the kernel path (otherwise `combine` uses a pure-jnp
-reference): x is 2-D bf16 with
+Requirements for the kernel path (otherwise `combine` uses a pure-jnp reference
+and `permute` returns None so the caller can fall back): x is 2-D bf16 with
 E % 128 == 0; T % block_tokens == 0; block_tokens % 128 == 0; T <= 65280;
 T*K % align == 0; `group_sizes` sums to R; `sort_idx` is a *stable* argsort of
 the flat expert ids (jnp.argsort default).
 
-Tuned constants (Gemma4-26B-A4B on v6e): 256 tokens per grid step, 512-row
-forward contraction buckets, 256-wide output column chunks, 1024-row backward
-compute chunks.
+Tuned constants (Gemma4-26B-A4B on v6e): 256 tokens per grid step for combine
+and 512 for permute (which holds no x window), 512-row forward contraction
+buckets, 256-wide output column chunks, 1024-row scatter compute chunks.
 """
 
 import functools
@@ -99,15 +103,16 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 
-__all__ = ["combine", "combine_reference", "kernel_supported"]
+__all__ = ["combine", "combine_reference", "kernel_supported", "permute"]
 
 _LANES = 128
 _CHUNK_ROWS = 128  # rows per full-size range DMA (static-chunk fallback)
 _WAIT_ROWS = 256  # rows per full-size semaphore wait (static-chunk fallback)
-_DEFAULT_BLOCK_TOKENS = 256  # tokens per grid step
+_DEFAULT_BLOCK_TOKENS = 256  # combine: tokens per grid step
+_DEFAULT_PERMUTE_BLOCK_TOKENS = 512  # permute: no x window in VMEM, so larger blocks fit
 _COL_CHUNK = 256  # output / dy column chunk per MXU dot
 _FWD_BUCKET_ROWS = 512  # forward contraction-size bucket in buffer rows
-_SCATTER_ROWS_PER_CHUNK = 1024  # backward: buffer rows per compute chunk
+_SCATTER_ROWS_PER_CHUNK = 1024  # scatter direction: buffer rows per compute chunk
 _VMEM_LIMIT = 120 * 1024 * 1024
 
 # Rows of the per-block scalar table (each row has G entries, one per expert).
@@ -585,7 +590,7 @@ def _chunk_tokens(ibuf, slot, q0, rq, c, t0, used):
 
 
 def _chunk_start(q, rq, jrows):
-  """Start row of backward compute chunk q, clamped so the last chunk stays inside the buffer."""
+  """Start row of scatter compute chunk q, clamped so the last chunk stays inside the buffer."""
   return _al(jnp.minimum(q * rq, jrows - rq), 256)
 
 
@@ -637,7 +642,7 @@ def _common_specs(nb, ntab, c):
 
 
 # ---------------------------------------------------------------------------
-# forward kernel
+# forward kernel (also the permute backward with unit weights)
 # ---------------------------------------------------------------------------
 
 
@@ -662,8 +667,9 @@ def _fwd_kernel(
     a,
     upcast,
     dynamic_dma,
+    unit_w=False,
 ):
-  """y_blk = S @ buf for one token block (S built from the row info)."""
+  """y_blk = S @ buf for one token block (S built from the row info; unit_w: S is 0/1)."""
   mm = functools.partial(_mm, upcast=upcast)
   c = y_ref.shape[0]
   reads = (_WindowRead(x_hbm, buf, xsem, fill=0), _WindowRead(info_hbm, ibuf, isem, fill=_INFO_FILL))
@@ -676,7 +682,7 @@ def _fwd_kernel(
   jb = jnp.int32(buckets[-1])
   for size in reversed(buckets[:-1]):
     jb = jnp.where(used <= size, jnp.int32(size), jb)
-  w_hi, w_lo = _split_w(w_ref, split, s_hi_ref.dtype)
+  w_hi, w_lo = (None, None) if unit_w else _split_w(w_ref, split, s_hi_ref.dtype)
   iota_c = lax.broadcasted_iota(jnp.int32, (c, jq), 0)
   t0 = pl.program_id(0) * c  # (program_id is not allowed inside loops in interpret mode)
 
@@ -685,10 +691,13 @@ def _fwd_kernel(
     q0 = _al(q * jq, jq)
     tokrow, krow = _chunk_info(ibuf, slot, q0, jq, c, t0, used)
     m = iota_c == tokrow
-    sel_hi, sel_lo = _row_weights(mm, w_hi, w_lo, krow, jq, s_hi_ref.dtype)
-    s_hi_ref[:, pl.ds(q0, jq)] = jnp.where(m, sel_hi, 0.0).astype(s_hi_ref.dtype)
-    if split:
-      s_lo_ref[:, pl.ds(q0, jq)] = jnp.where(m, sel_lo, 0.0).astype(s_lo_ref.dtype)
+    if unit_w:
+      s_hi_ref[:, pl.ds(q0, jq)] = m.astype(s_hi_ref.dtype)
+    else:
+      sel_hi, sel_lo = _row_weights(mm, w_hi, w_lo, krow, jq, s_hi_ref.dtype)
+      s_hi_ref[:, pl.ds(q0, jq)] = jnp.where(m, sel_hi, 0.0).astype(s_hi_ref.dtype)
+      if split:
+        s_lo_ref[:, pl.ds(q0, jq)] = jnp.where(m, sel_lo, 0.0).astype(s_lo_ref.dtype)
     return carry
 
   lax.fori_loop(0, jb // jq, s_body, 0)
@@ -702,7 +711,7 @@ def _fwd_kernel(
         n0 = _al(n * en, en)
         xb = buf[slot, pl.ds(0, size), pl.ds(n0, en)]  # [size, en]
         acc = mm(s_hi_ref[:, pl.ds(0, size)], xb)
-        if split:
+        if split and not unit_w:
           acc = acc + mm(s_lo_ref[:, pl.ds(0, size)], xb)
         y_ref[:, pl.ds(n0, en)] = acc.astype(y_ref.dtype)
         return carry
@@ -757,12 +766,12 @@ def _fwd_call(x, w_pad, tab, info, *, block_tokens, num_groups, split, interpret
 
 
 # ---------------------------------------------------------------------------
-# scatter direction: output windows written back by DMA (combine bwd)
+# scatter direction: output windows written back by DMA (combine bwd, permute fwd)
 # ---------------------------------------------------------------------------
 
 
 class _Scatter(NamedTuple):
-  """Output side of the backward (scatter) kernel.
+  """Output side of a scatter kernel.
 
   `obuf[slot]` holds the output rows of the block processed in grid step
   `slot` at the same buffer positions as its x rows (buffer row = x row +
@@ -1083,6 +1092,283 @@ def _bwd_call(x, w_pad, tab, info, dy, *, block_tokens, num_groups, split, inter
       interpret=interpret,
       name="moe_combine_bwd",
   )(tab, tab, w_pad, dy, x, info)
+
+
+# ---------------------------------------------------------------------------
+# permute forward & backward kernels (unit-weight transpose of combine)
+# ---------------------------------------------------------------------------
+
+
+def _permute_bwd_kernel(
+    tab_cur,
+    tab_nxt,
+    dy_hbm,
+    info_hbm,
+    dx_ref,
+    buf,
+    ibuf,
+    s_hi_ref,
+    s_lo_ref,
+    xsem,
+    isem,
+    *,
+    g,
+    jrows,
+    e,
+    a,
+    upcast,
+    dynamic_dma,
+):
+  """dx[t] = sum of the K rows of token t: the combine forward with unit weights."""
+  _fwd_kernel(
+      tab_cur,
+      tab_nxt,
+      None,
+      dy_hbm,
+      info_hbm,
+      dx_ref,
+      buf,
+      ibuf,
+      s_hi_ref,
+      s_lo_ref,
+      xsem,
+      isem,
+      g=g,
+      jrows=jrows,
+      e=e,
+      split=False,
+      a=a,
+      upcast=upcast,
+      dynamic_dma=dynamic_dma,
+      unit_w=True,
+  )
+
+
+def _permute_bwd_call(dy, tab, info, *, num_tokens, block_tokens, num_groups, interpret, align):
+  r, e = dy.shape
+  t = num_tokens
+  c, g = block_tokens, num_groups
+  nb = t // c
+  k = r // t
+  jrows = _buffer_rows(c, k, g, align)
+  ntab = _tab_stride(g)
+  upcast, dynamic_dma = _kernel_modes(interpret)
+  in_specs = _table_specs(nb, ntab) + [pl.BlockSpec(memory_space=pl.ANY), pl.BlockSpec(memory_space=pl.ANY)]
+  out_spec = pl.BlockSpec((c, e), lambda b: (b, 0))
+  itemsize = jnp.dtype(dy.dtype).itemsize
+  vmem = (
+      2 * jrows * (e + _LANES) * itemsize  # buf + row info
+      + 2 * c * e * itemsize  # out blocks
+      + c * jrows * itemsize  # S
+      + 16 * 1024 * 1024  # dot operands / temporaries, compiler scratch
+  )
+  kernel = functools.partial(_permute_bwd_kernel, g=g, jrows=jrows, e=e, a=align, upcast=upcast, dynamic_dma=dynamic_dma)
+  (tab, dy, info), mat = _match_vma(tab, dy, info)
+  return pl.pallas_call(
+      kernel,
+      out_shape=_out_struct((t, e), dy.dtype, mat),
+      grid_spec=pltpu.PrefetchScalarGridSpec(
+          num_scalar_prefetch=0,
+          grid=(nb,),
+          in_specs=in_specs,
+          out_specs=out_spec,
+          scratch_shapes=[
+              pltpu.VMEM((2, jrows, e), dy.dtype),  # buf
+              pltpu.VMEM((2, jrows, _LANES), info.dtype),  # row info
+              pltpu.VMEM((c, jrows), dy.dtype),  # S (0/1)
+              pltpu.VMEM((8, _LANES), dy.dtype),  # S lo (unused)
+              pltpu.SemaphoreType.DMA((2,)),
+              pltpu.SemaphoreType.DMA((2,)),
+          ],
+      ),
+      compiler_params=_compiler_params(min(vmem, _VMEM_LIMIT)),
+      interpret=interpret,
+      name="moe_permute_bwd",
+  )(tab, tab, dy, info)
+
+
+def _permute_fwd_kernel(
+    tab_cur,
+    tab_nxt,
+    x_ref,
+    info_hbm,
+    out_hbm,
+    ibuf,
+    obuf,
+    isem,
+    wsem,
+    ssem,
+    wcount,
+    scount,
+    *,
+    g,
+    jrows,
+    e,
+    a,
+    upcast,
+    dynamic_dma,
+):
+  """y[r] = x[token(r)] for the rows of one token block: one-hot selection on the MXU + window DMAs."""
+  mm = functools.partial(_mm, upcast=upcast)
+  b = pl.program_id(0)
+  reads = (_WindowRead(info_hbm, ibuf, isem, fill=_INFO_FILL),)
+  slot = _read_pipeline(tab_cur, tab_nxt, reads, g, jrows, a, dynamic_dma)
+  sc = _Scatter(out_hbm, obuf, wsem, ssem, wcount, scount, g, jrows, a, dynamic_dma)
+  _scatter_prologue(sc, tab_cur, slot)
+
+  used = _used_rows(tab_cur, g)
+  en = _col_chunk(e)
+  rq = _scatter_row_chunk(jrows)
+  nq = (used + (rq - 1)) // rq
+  c = x_ref.shape[0]
+  t0 = b * c
+  iota_c = lax.broadcasted_iota(jnp.int32, (rq, c), 1)
+
+  # Same chunking as _bwd_compute; S[j, c] = [tok_j = c] selects the x row of each buffer row.
+  def q_body(q, carry):
+    q0 = _chunk_start(q, rq, jrows)
+    tokc, _ = _chunk_tokens(ibuf, slot, q0, rq, c, t0, used)  # [RQ, 1]
+    s = (iota_c == tokc).astype(x_ref.dtype)  # [RQ, C]
+    own = tokc >= 0
+
+    def n_body(n, carry2):
+      n0 = _al(n * en, en)
+      _store_owned_rows(obuf, slot, pl.ds(q0, rq), pl.ds(n0, en), own, mm(s, x_ref[:, pl.ds(n0, en)]))
+      return carry2
+
+    lax.fori_loop(0, e // en, n_body, 0)
+    return carry
+
+  lax.fori_loop(0, nq, q_body, 0)
+  _scatter_epilogue(sc, tab_cur, tab_nxt, slot)
+
+
+def _permute_fwd_call(x, tab, info, *, num_rows, block_tokens, num_groups, interpret, align):
+  t, e = x.shape
+  r = num_rows
+  c, g = block_tokens, num_groups
+  nb = t // c
+  k = r // t
+  jrows = _buffer_rows(c, k, g, align)
+  ntab = _tab_stride(g)
+  upcast, dynamic_dma = _kernel_modes(interpret)
+  in_specs = _table_specs(nb, ntab) + [pl.BlockSpec((c, e), lambda b: (b, 0)), pl.BlockSpec(memory_space=pl.ANY)]
+  out_spec = pl.BlockSpec(memory_space=pl.ANY)
+  itemsize = jnp.dtype(x.dtype).itemsize
+  vmem = (
+      2 * jrows * e * itemsize  # obuf
+      + 2 * jrows * _LANES * itemsize  # row info
+      + 2 * c * e * itemsize  # x blocks
+      + 20 * 1024 * 1024  # chunk temporaries, compiler scratch
+  )
+  kernel = functools.partial(_permute_fwd_kernel, g=g, jrows=jrows, e=e, a=align, upcast=upcast, dynamic_dma=dynamic_dma)
+  (tab, x, info), mat = _match_vma(tab, x, info)
+  return pl.pallas_call(
+      kernel,
+      out_shape=_out_struct((r, e), x.dtype, mat),
+      grid_spec=pltpu.PrefetchScalarGridSpec(
+          num_scalar_prefetch=0,
+          grid=(nb,),
+          in_specs=in_specs,
+          out_specs=out_spec,
+          scratch_shapes=[
+              pltpu.VMEM((2, jrows, _LANES), info.dtype),  # row info
+              pltpu.VMEM((2, jrows, e), x.dtype),  # obuf (+ partial-granule staging)
+              pltpu.SemaphoreType.DMA((2,)),  # row-info reads
+              pltpu.SemaphoreType.DMA((2,)),  # writes
+              pltpu.SemaphoreType.DMA((2,)),  # partial-granule staging
+              pltpu.SMEM((2,), jnp.int32),  # rows written per slot
+              pltpu.SMEM((2,), jnp.int32),  # rows staged per slot
+          ],
+      ),
+      compiler_params=_compiler_params(min(vmem, _VMEM_LIMIT)),
+      interpret=interpret,
+      name="moe_permute_fwd",
+  )(tab, tab, x, info)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
+def _permute_vjp(x, sort_idx, tab, cfg):
+  return _permute_fwd_impl(x, sort_idx, tab, cfg)
+
+
+def _permute_fwd_impl(x, sort_idx, tab, cfg):
+  kcfg = dict(cfg)
+  k = kcfg.pop("k")
+  return _permute_fwd_call(x, tab, _row_info(sort_idx, k), num_rows=x.shape[0] * k, **kcfg)
+
+
+def _permute_vjp_fwd(x, sort_idx, tab, cfg):
+  return _permute_fwd_impl(x, sort_idx, tab, cfg), (sort_idx, tab)
+
+
+def _permute_vjp_bwd(cfg, res, dy):
+  sort_idx, tab = res
+  kcfg = dict(cfg)
+  k = kcfg.pop("k")
+  t = sort_idx.shape[0] // k
+  dx = _permute_bwd_call(dy, tab, _row_info(sort_idx, k), num_tokens=t, **kcfg)
+  return dx, None, None
+
+
+_permute_vjp.defvjp(_permute_vjp_fwd, _permute_vjp_bwd)
+
+
+def permute(
+    x,
+    sort_idx,
+    group_sizes,
+    num_experts_per_tok: int,
+    *,
+    block_tokens=None,
+    interpret=None,
+    align=8,
+):
+  """Permute token activations `x` [T, E] into expert-sorted order [T*K, E] on the TensorCore.
+
+  Forward: y[r] = x[sort_idx[r] // K] built with the same block / row-window DMA
+  scheme as `combine` but with unit weights (one-hot selection on the MXU).
+  Backward: dx[t] = sum over the K rows of t in dy, i.e. the combine forward
+  with unit weights.
+
+  Intended configuration: `moe_permute_kernel="tc"` together with the XLA flags
+  --xla_tpu_offload_gather_to_sparsecore=false
+  --xla_tpu_offload_all_supported_gathers_to_sparsecore=false, so that neither
+  the permute nor the remaining small gathers are serialized on SparseCore
+  behind the expert-weight all-gathers.
+
+  Args:
+    x: [T, E] bf16 token activations.
+    sort_idx: [T*K] int, stable argsort of the flat (token-major) expert ids.
+    group_sizes: [G] int, rows per expert group (must sum to T*K).
+    num_experts_per_tok: K.
+    block_tokens: tokens per grid step (default: 512 or the largest power-of-two divisor of T >= 128).
+    interpret: Pallas interpret mode (default: Mosaic interpreter off-TPU).
+    align: DMA / VMEM row alignment, a power of two >= 8.
+
+  Returns:
+    [T*K, E] array in x.dtype, differentiable w.r.t. x; or None when the kernel
+    preconditions (see kernel_supported) do not hold so the caller can fall back.
+  """
+  t, e = x.shape
+  k = int(num_experts_per_tok)
+  r = t * k
+  align = _check_align(align)
+  if block_tokens is None:
+    block_tokens = _default_block_tokens(t, _DEFAULT_PERMUTE_BLOCK_TOKENS)
+  if interpret is None:
+    interpret = _default_interpret()
+  if group_sizes is None or not kernel_supported((r, e), x.dtype, t, k, block_tokens, align):
+    return None
+  tab = _metadata(sort_idx, group_sizes, t, k, block_tokens, align)
+  cfg = (
+      ("k", k),
+      ("block_tokens", block_tokens),
+      ("num_groups", int(group_sizes.shape[0])),
+      ("interpret", interpret),
+      ("align", align),
+  )
+  return _permute_vjp(x, sort_idx, tab, cfg)
 
 
 # ---------------------------------------------------------------------------

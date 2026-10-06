@@ -231,6 +231,29 @@ class MoeCombineTest(parameterized.TestCase):
     y = moe_combine_tc.combine(x, sort_idx, w, gs, block_tokens=128, interpret=True)
     np.testing.assert_array_equal(np.asarray(y), np.asarray(moe_combine_tc.combine_reference(x, sort_idx, w)))
 
+  @parameterized.named_parameters(
+      ("uniform", 0.0),
+      ("skewed", 0.8),
+  )
+  def test_permute_fwd_bwd(self, skew):
+    t, k, g, e, c = 256, 8, 16, 256, 128
+    dy, sort_idx, _, gs, x = _problem(7, t, k, g, e, skew)
+    y_ref = x[sort_idx // k]
+    unsorted_dy = dy.astype(jnp.float32)[jnp.argsort(sort_idx)]
+    dx_ref = jnp.sum(unsorted_dy.reshape(t, k, e), axis=1).astype(jnp.bfloat16)
+    f = functools.partial(moe_combine_tc.permute, num_experts_per_tok=k, block_tokens=c, interpret=_interpret())
+    y, vjp = jax.vjp(lambda a: f(a, sort_idx, gs), x)
+    (dx,) = vjp(dy)
+    _assert_no_races(self)
+    np.testing.assert_array_equal(_f32(y), _f32(y_ref))
+    np.testing.assert_allclose(_f32(dx), _f32(dx_ref), rtol=1e-2, atol=1e-2)
+
+  def test_permute_unsupported_shape_returns_none(self):
+    x = jnp.zeros((100, 128), jnp.bfloat16)
+    sort_idx = jnp.argsort(jnp.zeros((800,), jnp.int32))
+    gs = jnp.array([800] + [0] * 15, jnp.int32)
+    self.assertIsNone(moe_combine_tc.permute(x, sort_idx, gs, 8, block_tokens=128, interpret=True))
+
 
 if __name__ == "__main__":
   absltest.main()

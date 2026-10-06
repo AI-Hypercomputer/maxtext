@@ -68,6 +68,14 @@ class PyconfigTest(unittest.TestCase):
           ici_expert_parallelism=2,
       )
 
+  def test_moe_permute_kernel_tc_requires_direct_token_gather(self):
+    with self.assertRaisesRegex(ValueError, "`moe_permute_kernel='tc'` requires `moe_use_direct_token_gather=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_permute_kernel="tc",
+          moe_use_direct_token_gather=False,
+      )
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
