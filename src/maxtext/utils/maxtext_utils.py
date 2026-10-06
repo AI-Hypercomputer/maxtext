@@ -2046,7 +2046,14 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if getattr(config, "use_lineage", False) and lineage_adapter is not None:
+  ring_axis = getattr(config, "mesh_ring_axis", "")
+  if ring_axis and num_slices > 1:
+    raise ValueError("mesh_ring_axis lays out the ICI mesh of one slice; it is not implemented for multi-slice.")
+  use_lineage = getattr(config, "use_lineage", False) and lineage_adapter is not None
+  if ring_axis and use_lineage:
+    raise ValueError("mesh_ring_axis is not supported with use_lineage, which builds its own device mesh.")
+
+  if use_lineage:
     dcn_parallelism = (
         max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
     )
@@ -2056,6 +2063,8 @@ def create_device_mesh(config, devices=None):
         dcn_parallelism=dcn_parallelism,
         allow_split_physical_axes=allow_split_physical_axes,
     )
+  elif ring_axis:
+    mesh = max_utils.create_ring_axis_device_mesh(ici_parallelism, config.mesh_axes, devices, ring_axis)
   elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")
