@@ -1284,6 +1284,14 @@ class MoEGeneral(BaseModel):
           " both the forward and the backward pass. Raises if it cannot apply (e.g. emb not a multiple of 128)."
       ),
   )
+  moe_tc_window_routing: bool = Field(
+      False,
+      description=(
+          "With moe_tc_ragged_sort: keep only this shard's [start, start + cap) window of the sorted slots (so the "
+          "combine metadata sorts cap instead of N * topk slots), skip the unused inverse permutation, use uint32 "
+          "bit-packed sorts, and gather buffer row weights with unique_indices=True (no backward scatter-sort)."
+      ),
+  )
   moe_use_direct_token_gather: bool = Field(
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
@@ -1966,8 +1974,16 @@ class RematAndOffload(BaseModel):
   moe_routing_maps: RematLocation = Field(
       RematLocation.REMAT,
       description=(
-          "Remat policy for the MoE routing index maps only (top-k expert ids, ragged-sort permutations, sorted token "
-          "indices and group sizes)."
+          "Remat policy for the MoE routing maps (top-k expert ids, ragged-sort permutations, sorted token indices "
+          "and group sizes)."
+      ),
+  )
+  # TODO: Update to moe_tc_routing_weights.
+  moe_tc_routing_checkpoint: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the TC per-buffer-row routing weights (moe_tc_ragged_sort with "
+          "moe_tc_ragged_weights_on_activation); 'device' saves them so the backward skips the weight gather."
       ),
   )
   mlpwo: RematLocation = Field(
@@ -4018,6 +4034,17 @@ class MaxTextConfig(
     if self.moe_tc_ragged_3d_dispatch and not (self.moe_tc_ragged_sort and self.moe_tc_ragged_3d_gmm):
       # The remaining requirements of the 3D dispatch are those of moe_tc_ragged_sort / moe_tc_ragged_3d_gmm below.
       raise ValueError("moe_tc_ragged_3d_dispatch=True requires moe_tc_ragged_sort=True and moe_tc_ragged_3d_gmm=True.")
+    # The per-buffer-row routing weights only exist (and are only tagged) on the TC path with weights on activation;
+    # otherwise a non-remat moe_tc_routing_checkpoint would be silently ignored.
+    if self.moe_tc_routing_checkpoint != RematLocation.REMAT and not (
+        self.moe_tc_ragged_sort and self.moe_tc_ragged_weights_on_activation
+    ):
+      raise ValueError(
+          f"moe_tc_routing_checkpoint={RematLocation(self.moe_tc_routing_checkpoint).value} requires moe_tc_ragged_sort=True "
+          "and moe_tc_ragged_weights_on_activation=True; use moe_tc_routing_checkpoint=remat."
+      )
+    if self.moe_tc_window_routing and not self.moe_tc_ragged_sort:
+      raise ValueError("moe_tc_window_routing=True requires moe_tc_ragged_sort=True.")
     if not self.moe_tc_ragged_sort:
       return
     if not self.use_ring_of_experts:
@@ -4686,6 +4713,7 @@ class MaxTextConfig(
           "moe_mlpwi_0",
           "moe_x_sorted",
           "moe_routing_maps",
+          "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",
@@ -6189,6 +6217,7 @@ class RLConfig(
           "moe_mlpwi_0",
           "moe_x_sorted",
           "moe_routing_maps",
+          "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
           "mlpwi_0",

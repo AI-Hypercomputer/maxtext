@@ -1478,15 +1478,24 @@ class RoutedMoeTest(parameterized.TestCase):
         "moe_routing_maps": moe_routing_maps,
         **overrides,
     }
+    if kwargs.get("moe_tc_ragged_weights_on_activation"):
+      kwargs["moe_tc_routing_checkpoint"] = moe_routing_maps
     return pyconfig.initialize([None, get_test_config_path()], run_name=f"moe_routing_maps_{moe_routing_maps}", **kwargs)
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
       ("sparsecore_ragged_sort", {}),
       ("tc_ragged_sort", {"moe_tc_ragged_sort": True}),
+      # moe_tc_routing_checkpoint also saves the per-buffer-row routing weights.
+      ("tc_ragged_sort_weights_on_activation", {"moe_tc_ragged_sort": True, "moe_tc_ragged_weights_on_activation": True}),
+      # Window routing also saves the group sizes.
+      (
+          "tc_ragged_sort_window_weights_on_activation",
+          {"moe_tc_ragged_sort": True, "moe_tc_window_routing": True, "moe_tc_ragged_weights_on_activation": True},
+      ),
   )
   def test_moe_routing_maps_remat_loss_and_grad(self, overrides):
-    """moe_routing_maps=device under a remat that saves only "moe_routing_maps": bit-identical loss and gradients."""
+    """moe_routing_maps=moe_tc_routing_checkpoint=device under a remat saving only those names: bit-identical results."""
 
     def _loss_and_grad(cfg, variables, hidden_states):
       mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
@@ -1503,8 +1512,11 @@ class RoutedMoeTest(parameterized.TestCase):
           dtype=cfg.dtype,
       )
 
-      # Same remat as the custom policy with only moe_routing_maps=device.
-      @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.save_only_these_names("moe_routing_maps"))
+      # Same remat as the custom policy with only moe_routing_maps=moe_tc_routing_checkpoint=device.
+      @functools.partial(
+          jax.checkpoint,
+          policy=jax.checkpoint_policies.save_only_these_names("moe_routing_maps", "moe_tc_routing_checkpoint"),
+      )
       def apply(params, x):
         return model.apply({"params": params}, x)
 
@@ -1530,7 +1542,7 @@ class RoutedMoeTest(parameterized.TestCase):
         self._moe_routing_maps_cfg("device", **overrides), variables, hidden_states
     )
 
-    # Only integer index maps are saved instead of recomputed, so every value is bit-identical.
+    # Saved values equal the recomputed ones, so every value is bit-identical.
     np.testing.assert_array_equal(loss_new, loss_ref)
     np.testing.assert_array_equal(lb_new, lb_ref)
     leaves_ref, treedef_ref = jax.tree_util.tree_flatten(grads_ref)
@@ -2980,6 +2992,27 @@ class TcRaggedSortConfigTest(parameterized.TestCase):
   def test_3d_dispatch_rejects_unsupported(self, overrides, msg):
     with self.assertRaisesRegex(ValueError, re.escape(msg)):
       maxtext_types.MaxTextConfig(**{**self._CONFIG_3D, **overrides}, moe_tc_ragged_3d_dispatch=True)
+
+  @parameterized.named_parameters(("device", "device"), ("offload", "offload"))
+  def test_accepts_routing_weights(self, location):
+    cfg = maxtext_types.MaxTextConfig(
+        **self._CONFIG_3D, moe_tc_ragged_weights_on_activation=True, moe_tc_routing_checkpoint=location
+    )
+    self.assertEqual(cfg.moe_tc_routing_checkpoint, location)
+
+  def test_window_routing_requires_tc_ragged_sort(self):
+    msg = "moe_tc_window_routing=True requires moe_tc_ragged_sort=True."
+    with self.assertRaisesRegex(ValueError, re.escape(msg)):
+      maxtext_types.MaxTextConfig(**{**self._CONFIG_3D, "moe_tc_ragged_sort": False}, moe_tc_window_routing=True)
+
+  @parameterized.named_parameters(
+      ("no_weights_on_activation", {}),
+      ("no_tc_sort", {"moe_tc_ragged_sort": False, "moe_tc_ragged_weights_on_activation": True}),
+  )
+  def test_routing_weights_rejects_unsupported(self, overrides):
+    msg = "moe_tc_routing_checkpoint=device requires moe_tc_ragged_sort=True and moe_tc_ragged_weights_on_activation=True"
+    with self.assertRaisesRegex(ValueError, re.escape(msg)):
+      maxtext_types.MaxTextConfig(**{**self._CONFIG_3D, **overrides}, moe_tc_routing_checkpoint="device")
 
 
 class GetRaggedBufferFactorTest(parameterized.TestCase):

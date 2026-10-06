@@ -429,11 +429,11 @@ def finalize_deferred_intermediates(intermediate_outputs, config):
 
 
 def routing_tag_fn(config):
-  """Returns the checkpoint_name tagger for the integer routing arrays, or None under moe_routing_maps=remat.
+  """Returns the checkpoint_name tagger for the routing arrays, or None under moe_routing_maps=remat.
 
   With moe_routing_maps=device (or offload) and remat_policy=custom, the tagged top-k expert ids and the ragged-sort
-  permutations are saved across the remat boundary, so the backward re-runs neither top-k nor the sorts. These
-  are integer index maps, so saving them instead of recomputing them does not change any value.
+  permutations (and, on the TC path with moe_tc_window_routing, the group sizes) are saved across the remat boundary,
+  so the backward re-runs neither top-k nor the sorts. Saving them instead of recomputing them does not change any value.
   """
   if getattr(config, "moe_routing_maps", "remat") == "remat":
     return None
@@ -1626,6 +1626,7 @@ class RoutedMoE(nnx.Module):
           flatten_block_size=self.config.moe_tc_ragged_flatten_block_size,
           tag_routing_fn=routing_tag_fn(self.config),
           keep_3d=self.config.moe_tc_ragged_3d_gmm,
+          window_routing=self.config.moe_tc_window_routing,
       )
     elif use_ragged_in_permute:
       tag_routing_fn = routing_tag_fn(self.config)
@@ -1707,6 +1708,8 @@ class RoutedMoE(nnx.Module):
       # Clamp local_group_size to buffer_size to ensure we don't exceed buffer
       # capacity by leveraging the helper _truncate_matrix.
       local_group_size = _truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
+      if use_tc_sort and self.config.moe_tc_window_routing and (tag_fn := routing_tag_fn(self.config)):
+        local_group_size = tag_fn(local_group_size)
       expert_indices = jnp.arange(local_num_experts)
       sorted_experts = jnp.repeat(
           expert_indices,
@@ -3432,6 +3435,8 @@ class RoutedMoE(nnx.Module):
         # Routing weights applied on the (buffer, mlp) activation (fuses into silu * mul), as in
         # lineage ragged_silu_mul, instead of on the (buffer, emb) expert output before the unsort.
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
+        if self.config.moe_tc_routing_checkpoint != "remat":
+          w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
       intermediate_layer = self.apply_ffn_activation(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)

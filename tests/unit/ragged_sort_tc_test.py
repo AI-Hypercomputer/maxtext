@@ -86,8 +86,13 @@ class RaggedSortTcTest(parameterized.TestCase):
       prescaled=False,
       keep_3d=False,
       tokens_3d=False,
+      window_routing=False,
   ):
-    """Runs the TC sort -> f -> unsort per shard and checks it against the reference; returns (counts, cap)."""
+    """Runs the TC sort -> f -> unsort per shard and checks it against the reference.
+
+    Returns:
+      (counts, cap, TC outputs dict of buf, group_sizes, y, count, dh, dx and dw).
+    """
     devices = jax.devices()
     ep_size = max(d for d in (8, 4, 2, 1) if len(devices) % d == 0 and num_experts % d == 0)
     mesh = Mesh(np.asarray(devices[:ep_size]), ("expert",))
@@ -128,6 +133,7 @@ class RaggedSortTcTest(parameterized.TestCase):
           mask_padding=mask_padding,
           flatten_block_size=flatten_block_size,
           keep_3d=keep_3d,
+          window_routing=window_routing,
       )
       h = f(buf)
       if prescaled:
@@ -223,7 +229,8 @@ class RaggedSortTcTest(parameterized.TestCase):
       g_ref = np.asarray(g_ref, np.float32)
       atol = tol["atol"] * max(1.0, float(np.max(np.abs(g_ref))))
       np.testing.assert_allclose(np.asarray(g_tc, np.float32), g_ref, rtol=tol["rtol"], atol=atol)
-    return np.asarray(count_tc), buffer_size
+    outputs = {"buf": buf_tc, "group_sizes": gs_tc, "y": y_tc, "count": count_tc, "dh": dh_tc, "dx": dx_tc, "dw": dw_tc}
+    return np.asarray(count_tc), buffer_size, jax.tree.map(np.asarray, outputs)
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
@@ -236,7 +243,7 @@ class RaggedSortTcTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   def test_sort_unsort_truncated_buffer(self):
     """Skewed routing with a small buffer: some shards drop slots past the buffer."""
-    counts, buffer_size = self._run(buffer_factor=0.75, skewed=True)
+    counts, buffer_size, _ = self._run(buffer_factor=0.75, skewed=True)
     self.assertTrue(np.any(counts == buffer_size), msg=f"expected an overflowing shard, got counts {counts}")
 
   @pytest.mark.tpu_only
@@ -298,6 +305,101 @@ class RaggedSortTcTest(parameterized.TestCase):
   def test_sort_unsort_tokens_3d(self, kwargs):
     """moe_tc_ragged_3d_dispatch: 3D-layout token input / combine output (and their cotangents)."""
     self._run(tokens_3d=True, skewed=True, **kwargs)
+
+  @pytest.mark.tpu_only
+  @parameterized.named_parameters(
+      ("2d", {}),
+      ("2d_truncated", {"buffer_factor": 0.75}),
+      ("2d_no_mask_padding", {"mask_padding": False}),
+      ("2d_flatten", {"flatten_block_size": 256}),
+      ("2d_prescaled", {"prescaled": True}),
+      ("keep_3d_prescaled_truncated", {"keep_3d": True, "prescaled": True, "buffer_factor": 0.75}),
+      ("tokens_3d_prescaled", {"keep_3d": True, "tokens_3d": True, "prescaled": True}),
+  )
+  def test_sort_unsort_window_routing(self, kwargs):
+    """moe_tc_window_routing matches the reference and is bit-identical to window_routing=False."""
+    _, _, off = self._run(skewed=True, **kwargs)
+    _, _, on = self._run(window_routing=True, skewed=True, **kwargs)
+    for name in ("group_sizes", "count", "y", "dx", "dw"):
+      np.testing.assert_array_equal(on[name], off[name], err_msg=name)
+    # Buffer rows (and their cotangent) past count are unspecified without mask_padding.
+    for s, c in enumerate(off["count"]):
+      rows = slice(None) if kwargs.get("mask_padding", True) else slice(0, int(c))
+      for name in ("buf", "dh"):
+        np.testing.assert_array_equal(on[name][s][rows], off[name][s][rows], err_msg=f"{name}[{s}]")
+
+
+class RaggedSortTcWindowCpuTest(parameterized.TestCase):
+  """CPU tests for moe_tc_window_routing: packed sort, windowed combine metadata and row weights."""
+
+  @parameterized.parameters((8, 4), (1 << 20, 1 << 12), (1 << 20, 1 << 13))
+  def test_packed_stable_sort(self, n, max_key):
+    """The packed uint32 sort (and its tuple-sort fallback when it does not fit 32 bits) is a stable sort."""
+    key = jax.random.randint(jax.random.PRNGKey(0), (n,), 0, max_key + 1, dtype=jnp.int32)
+    sorted_key, positions = ragged_sort_tc.tc.packed_stable_sort(key, max_key)
+    expected = np.argsort(np.asarray(key), kind="stable")
+    np.testing.assert_array_equal(np.asarray(positions), expected)
+    np.testing.assert_array_equal(np.asarray(sorted_key), np.asarray(key)[expected])
+
+  def test_packed_stable_sort_logs_fallback(self):
+    """The tuple-sort fallback (20 position bits + 14 key bits > 32) is logged once per shape."""
+    ragged_sort_tc.tc._warn_packed_sort_fallback.cache_clear()  # pylint: disable=protected-access
+    key = jnp.zeros((1 << 20,), jnp.int32)
+    with self.assertLogs(level="WARNING") as logs:
+      ragged_sort_tc.tc.packed_stable_sort(key, 1 << 13)
+      ragged_sort_tc.tc.packed_stable_sort(key, 1 << 13)
+    self.assertLen(logs.output, 1)
+    self.assertIn("falling back to the (key, position) tuple sort", logs.output[0])
+
+  @parameterized.parameters(48, 45)
+  def test_windowed_metadata_and_unique_row_weights(self, cap):
+    num_tokens, topk, num_experts, block_size = 32, 4, 8, 64
+    topk_indices = jax.random.randint(jax.random.PRNGKey(0), (num_tokens, topk), 0, num_experts, dtype=jnp.int32)
+    weights = jax.random.uniform(jax.random.PRNGKey(1), (num_tokens, topk), dtype=jnp.float32)
+    order = jnp.argsort(topk_indices.reshape(-1), stable=True).astype(jnp.int32)
+    start = jnp.int32(16)
+    count = jnp.int32(min(36, cap))
+
+    full_tokens = order // topk
+    meta_full = ragged_sort_tc.tc.ragged_gather_reduce_tc_metadata(
+        full_tokens, start, count, top_k=topk, block_size=block_size
+    )
+    window_order = jax.lax.dynamic_slice_in_dim(jnp.pad(order, (0, cap)), start, cap, axis=0)
+    window_tokens = window_order // topk
+    meta_win = ragged_sort_tc.tc.ragged_gather_reduce_tc_metadata(
+        window_tokens, 0, count, top_k=topk, block_size=block_size, num_out_tokens=num_tokens, packed_sort=True
+    )
+    n_valid = int(count)
+    np.testing.assert_array_equal(np.asarray(meta_win.src_rows)[:n_valid], np.asarray(meta_full.src_rows)[:n_valid])
+    np.testing.assert_array_equal(np.asarray(meta_win.tokens)[:n_valid], np.asarray(meta_full.tokens)[:n_valid])
+    # The windowed metadata passes the combine kernel's layout check (traced only, not run).
+    jax.eval_shape(
+        functools.partial(ragged_sort_tc.tc.ragged_gather_reduce_tc, num_out_tokens=num_tokens, top_k=topk),
+        jax.ShapeDtypeStruct((cap, 1, 128), jnp.float32),
+        meta_win,
+    )
+
+    def routing(slot_order, tokens, routing_start, meta, windowed):
+      return ragged_sort_tc.TcRouting(
+          token_ids_sorted=tokens,
+          slot_order=slot_order,
+          start=routing_start,
+          count=count,
+          reduce_meta=meta,
+          num_out_tokens=num_tokens,
+          windowed=windowed,
+      )
+
+    routing_full = routing(order, full_tokens, start, meta_full, False)
+    routing_win = routing(window_order, window_tokens, jnp.int32(0), meta_win, True)
+
+    def row_weights_loss(r, w):
+      return jnp.sum(ragged_sort_tc.tc_buffer_row_weights(r, w.reshape(-1), cap) * jnp.arange(cap))
+
+    w_full, g_full = jax.value_and_grad(functools.partial(row_weights_loss, routing_full))(weights)
+    w_win, g_win = jax.value_and_grad(functools.partial(row_weights_loss, routing_win))(weights)
+    np.testing.assert_allclose(np.asarray(w_win), np.asarray(w_full), rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(g_win), np.asarray(g_full), rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":
