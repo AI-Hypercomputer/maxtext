@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-import dataclasses
 import enum
 import os
 from typing import Any
@@ -45,6 +44,12 @@ _METRICS_TO_LOG = [
 # engine's step path removes one, so unbounded history grows HBM, and checkpoint size with
 # it. A window rather than Tunix's single prior step, so batched readers still work.
 _DEFAULT_MAX_BUFFERED_STEPS = 128
+
+
+def _concat_1d(items: list[Any]) -> jax.Array:
+  """Ravels each item to 1-D and concatenates them in order (same layout as repeated append)."""
+  arrays = [jax.numpy.ravel(jax.numpy.asarray(x)) for x in items]
+  return arrays[0] if len(arrays) == 1 else jax.numpy.concatenate(arrays)
 
 
 class Mode(str, enum.Enum):
@@ -75,6 +80,13 @@ class MetricsRecorder:
         as new steps start. Zero or less retains everything.
     """
     self._metrics_buffer: list[abstract_engine.MetricsBuffer] = []
+    # Items recorded but not yet materialized, per live buffer. Keyed by the buffer object's
+    # identity rather than its step id: `buffer_metrics` only compares against the newest
+    # buffer, so the history may hold two buffers with the same id (the eager `jnp.append`
+    # code kept them apart), and they must not share a list. Every place a buffer leaves
+    # `_metrics_buffer` drops its key, so an identity is never reused while an entry exists.
+    self._pending_weighted: dict[int, dict[str, list[abstract_engine.WeightedMetric]]] = {}
+    self._pending_scalar: dict[int, dict[str, list[Any]]] = {}
     self._mode = mode
     self._max_buffered_steps = max_buffered_steps
     self._dropped_buffer_count = 0
@@ -83,17 +95,21 @@ class MetricsRecorder:
       self,
       train_step: int,
       name: str,
-      metric: jax.Array | float | int | None = None,
+      metric: abstract_engine.WeightedMetric | jax.Array | float | int | None = None,
       aggregation_fn: Callable[[jax.Array], Any] | None = None,
-  ):
-    """Buffers metrics for the given train step.
+  ) -> None:
+    """Buffers a metric for the given train step (host-side; no device work until flush).
 
     Args:
       train_step: The train step for which to buffer metrics.
       name: The name of the metric.
-      metric: The metric to buffer.
+      metric: The metric to buffer. `None` is a no-op (nothing is recorded and no
+        buffer is opened for the step).
       aggregation_fn: Optional aggregation function to apply to the metric.
     """
+    if metric is None:
+      return
+
     if not self._metrics_buffer or self._metrics_buffer[-1].id != train_step:
       new_buffer = abstract_engine.MetricsBuffer(id=train_step, mode=self._mode)
       self._metrics_buffer.append(new_buffer)
@@ -111,6 +127,9 @@ class MetricsRecorder:
       return
     num_dropped = len(self._metrics_buffer) - self._max_buffered_steps
     oldest_dropped_id = self._metrics_buffer[0].id
+    for evicted in self._metrics_buffer[:num_dropped]:
+      self._pending_weighted.pop(id(evicted), None)
+      self._pending_scalar.pop(id(evicted), None)
     del self._metrics_buffer[:num_dropped]
     self._dropped_buffer_count += num_dropped
     logging.log_every_n(
@@ -130,7 +149,7 @@ class MetricsRecorder:
       metric: abstract_engine.WeightedMetric | jax.Array | float | int,
       aggregation_fn: Callable[[jax.Array], Any] | None = None,
   ) -> None:
-    """Records a metric into the buffer, appending to JAX arrays.
+    """Records a metric into the step's pending Python list without launching XLA kernels.
 
     Args:
       name: The name of the metric.
@@ -138,29 +157,55 @@ class MetricsRecorder:
       aggregation_fn: The aggregation function to apply to the metric.
     """
     buffer = self._metrics_buffer[-1]
+    key = id(buffer)
 
     if aggregation_fn is not None:
       buffer.aggregation_fns[name] = aggregation_fn
 
     if isinstance(metric, abstract_engine.WeightedMetric):
-      if name not in buffer.weighted_metrics:
-        buffer.weighted_metrics[name] = abstract_engine.WeightedMetric(
-            unreduced_sum=jax.numpy.atleast_1d(metric.unreduced_sum),
-            denominator=jax.numpy.atleast_1d(metric.denominator),
-            eps=metric.eps,
-            min_denom=metric.min_denom,
-        )
-      else:
-        current_val = buffer.weighted_metrics[name]
-        new_sum = jax.numpy.append(current_val.unreduced_sum, metric.unreduced_sum)
-        new_denom = jax.numpy.append(current_val.denominator, metric.denominator)
-        buffer.weighted_metrics[name] = dataclasses.replace(current_val, unreduced_sum=new_sum, denominator=new_denom)
+      self._pending_weighted.setdefault(key, {}).setdefault(name, []).append(metric)
     else:
-      if name not in buffer.scalar_metrics:
-        buffer.scalar_metrics[name] = jax.numpy.atleast_1d(jax.numpy.asarray(metric))
-      else:
-        buffer.scalar_metrics[name] = jax.numpy.append(buffer.scalar_metrics[name], metric)
-    self._metrics_buffer[-1] = buffer
+      self._pending_scalar.setdefault(key, {}).setdefault(name, []).append(metric)
+
+  def _flush_buffer(self, buffer: abstract_engine.MetricsBuffer) -> None:
+    """Materializes pending Python lists into 1D JAX arrays on `buffer`.
+
+    All-or-nothing: every pending item is converted first, and `buffer` and the pending
+    dicts are only updated once all conversions succeed. An item that `jnp.asarray` rejects
+    therefore raises without dropping the step's other pending metrics, and a retry sees the
+    same pending state.
+
+    Args:
+      buffer: A live entry of `_metrics_buffer` whose pending items should be materialized.
+    """
+    key = id(buffer)
+    pending_w = self._pending_weighted.get(key)
+    pending_s = self._pending_scalar.get(key)
+    if not pending_w and not pending_s:
+      return
+
+    new_weighted: dict[str, abstract_engine.WeightedMetric] = {}
+    for name, items in (pending_w or {}).items():
+      existing = buffer.weighted_metrics.get(name)
+      prefix = [existing] if existing is not None else []
+      template = existing if existing is not None else items[0]
+      new_weighted[name] = abstract_engine.WeightedMetric(
+          unreduced_sum=_concat_1d([m.unreduced_sum for m in prefix + items]),
+          denominator=_concat_1d([m.denominator for m in prefix + items]),
+          eps=template.eps,
+          min_denom=template.min_denom,
+      )
+
+    new_scalar: dict[str, jax.Array] = {}
+    for name, items in (pending_s or {}).items():
+      prefix = [buffer.scalar_metrics[name]] if name in buffer.scalar_metrics else []
+      new_scalar[name] = _concat_1d(prefix + items)
+
+    # Commit point: nothing above mutated `buffer` or the pending dicts.
+    buffer.weighted_metrics.update(new_weighted)
+    buffer.scalar_metrics.update(new_scalar)
+    self._pending_weighted.pop(key, None)
+    self._pending_scalar.pop(key, None)
 
   def get_metrics_history(self, clear_cache: bool = True) -> list[abstract_engine.MetricsBuffer]:
     """Returns every cached step buffer and optionally clears the metrics cache.
@@ -175,24 +220,49 @@ class MetricsRecorder:
     Returns:
       One on-device MetricsBuffer per retained train step, oldest first.
     """
+    for buf in self._metrics_buffer:
+      self._flush_buffer(buf)
     metrics_to_return = self._metrics_buffer
     if clear_cache:
       # Clear the metrics buffer.
       self._metrics_buffer = []
+      self._pending_weighted.clear()
+      self._pending_scalar.clear()
     return metrics_to_return
 
   def get_step_metrics(self, step: int) -> abstract_engine.MetricsBuffer | None:
-    """Returns the latest metrics from the metrics buffer."""
+    """Returns the latest flushed metrics buffer if its ID matches `step`.
+
+    Args:
+      step: The train step ID to retrieve.
+
+    Returns:
+      The flushed `MetricsBuffer` for `step`, or `None` if the latest buffer
+      does not match `step`.
+    """
     if not self._metrics_buffer:
       return None
     latest = self._metrics_buffer[-1]
     if latest.id == step:
+      self._flush_buffer(latest)
       return latest
     return None
+
+  def restore_buffers(self, buffers: list[abstract_engine.MetricsBuffer]) -> None:
+    """Replaces the buffered metrics history and clears any pending lists.
+
+    Args:
+      buffers: Restored metrics buffers from a checkpoint.
+    """
+    self._metrics_buffer = list(buffers)
+    self._pending_weighted.clear()
+    self._pending_scalar.clear()
 
   def cleanup(self) -> None:
     """Cleans up the metrics recorder."""
     self._metrics_buffer = []
+    self._pending_weighted.clear()
+    self._pending_scalar.clear()
 
 
 class MetricsLogger:

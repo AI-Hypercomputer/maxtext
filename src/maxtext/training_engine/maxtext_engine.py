@@ -2506,9 +2506,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         checkpoint_state=checkpointing.CheckpointState(
             model=self.model,
             optimizer=self.optimizer if save_optimizer_state else None,
-            # The full history, not `get_metrics()`: CheckpointState.accumulated_metrics is
-            # a list, and restore_checkpoint iterates it back into the recorder's buffer.
-            accumulated_metrics=self._metrics_recorder.get_metrics_history(clear_cache=False),
+            # Only intra-step checkpoints (micro_step_count > 0) carry partial
+            # accumulated_metrics; completed-step checkpoints must not serialize
+            # undrained step buffers when save_checkpoint runs before
+            # get_metrics.
+            accumulated_metrics=(
+                self._metrics_recorder.get_metrics_history(clear_cache=False) if self._micro_step_count > 0 else []
+            ),
             accumulated_grads=self._reduced_accumulated_grads(),
             # Recorded by the CheckpointManager into custom_metadata, so that a later save
             # at this same step can tell it supersedes this one.
@@ -2581,7 +2585,25 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if not self._compiled:
       self._invalidate_pure_state()
 
-    if restored_checkpoint_state.accumulated_metrics:
+    restored_additional_metadata = None
+    # Checkpoint with no metadata says nothing about how far into its step it
+    # got, and must not inherit the count from whatever this engine was doing before.
+    self._micro_step_count = 0
+    restored_denominator = None
+    if restored_metadata:
+      self._micro_step_count = restored_metadata.get("micro_step_count", 0)
+      restored_denominator = restored_metadata.get("accumulated_denominator", None)
+      restored_additional_metadata = restored_metadata.get("additional_metadata", None)
+
+    # Whatever this engine accumulated before the restore belongs to a different run: reset the
+    # recorder, the spike-skip loss cache and the gradient accumulator (`fwd_bwd` branches on
+    # `_accumulated_grads is None`, so a stale accumulator would absorb the first post-restore
+    # microbatch). The intra-step branch below rebuilds all of them from the checkpoint.
+    self._metrics_recorder.cleanup()
+    self._cached_losses.clear()
+    self._accumulated_grads = None
+    self._accumulated_denominator = None
+    if self._micro_step_count > 0 and restored_checkpoint_state.accumulated_metrics:
       buffers = []
       for b in restored_checkpoint_state.accumulated_metrics:
         if isinstance(b, dict):
@@ -2593,7 +2615,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               wms[k] = wm
           buffers.append(
               abstract_engine.MetricsBuffer(
-                  id=b.get("id", 0),
+                  id=int(b.get("id", 0)),
                   mode=b.get("mode", "train"),
                   weighted_metrics=wms,
                   scalar_metrics=b.get("scalar_metrics", {}),
@@ -2602,18 +2624,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           )
         else:
           buffers.append(b)
-      # pylint: disable-next=protected-access
-      self._metrics_recorder._metrics_buffer = buffers
-
-    restored_additional_metadata = None
-    # Checkpoint with no metadata says nothing about how far into its step it
-    # got, and must not inherit the count from whatever this engine was doing before.
-    self._micro_step_count = 0
-    restored_denominator = None
-    if restored_metadata:
-      self._micro_step_count = restored_metadata.get("micro_step_count", 0)
-      restored_denominator = restored_metadata.get("accumulated_denominator", None)
-      restored_additional_metadata = restored_metadata.get("additional_metadata", None)
+      self._metrics_recorder.restore_buffers(buffers)
 
     if self._micro_step_count > 0:
       logging.info(
@@ -2649,7 +2660,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
       rebuilt_losses = None
       if self._metrics_recorder._metrics_buffer:  # pylint: disable=protected-access
-        active_buf = self._metrics_recorder.get_step_metrics(restored_step)
+        # The partial step's microbatches were recorded under the pre-increment step, which is
+        # `self.train_step` (= restored_step - 1) again now; the next fwd_bwd merges into that
+        # same buffer. A buffer under any other id would be orphaned by the next microbatch, so
+        # it must not seed the loss cache either.
+        active_buf = self._metrics_recorder.get_step_metrics(self.train_step)
+        if active_buf is None:
+          logging.warning(
+              "Restored accumulated_metrics carry step id %s but the resumed step is %d;"
+              " partial-step losses will not be rebuilt.",
+              self._metrics_recorder._metrics_buffer[-1].id,  # pylint: disable=protected-access
+              self.train_step,
+          )
         if active_buf and "loss" in active_buf.weighted_metrics:
           wm = active_buf.weighted_metrics["loss"]
           if wm.unreduced_sum.ndim > 0:
@@ -2684,7 +2706,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       aggregation_fn: Callable[[jax.Array], Any] | None = None,
       mode: metrics_module.Mode = metrics_module.Mode.TRAIN,
   ) -> None:
-    """Records a metric into the buffer, appending to JAX arrays.
+    """Records a metric into the step's buffer (host-side; concatenated once at flush time).
 
     Args:
       name: The name of the metric.
@@ -2997,7 +3019,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return True
 
   def close(self) -> None:
-    """Closes the trainer, writes buffered metrics and final checkpoint."""
+    """Closes the trainer: writes the final checkpoint, drains pending metrics, frees resources.
+
+    Note: a final checkpoint written at a step boundary carries no metrics buffers (completed
+    steps are logged by the throttler drain inside `save_checkpoint`, not serialized); only a
+    close mid-step still carries the partial step's buffer for resumption.
+    """
     if self._profiler is not None:
       state_pure = self._read_state_pure() if self._state is not None else None
       self._profiler.close(blocking_object=(state_pure, self._accumulated_grads))
@@ -3016,6 +3043,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Write the metrics and cleanup metrics logger resources
     self._throttler.cleanup()
 
-    # Cleanup metrics recorder resources after saving the checkpoint, ensuring all buffered metrics are saved properly
+    # Reset the recorder only after the checkpoint (a mid-step close serializes its partial buffer)
+    # and after the throttler drain above has logged every completed step.
     self._metrics_recorder.cleanup()
     self._metrics_logger.cleanup()

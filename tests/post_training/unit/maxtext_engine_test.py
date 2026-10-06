@@ -705,7 +705,13 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
     t.close()
 
-    self.assertEqual(mock_orbax_mgr.save.call_args.kwargs["step"], 5)
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    self.assertEqual(call_kwargs["step"], 5)
+    # Mid-step, the partial buffer rides along -- flushed into arrays before serialization.
+    saved_items = {name: arg.item for name, arg in call_kwargs["args"].items()}
+    self.assertIn("accumulated_metrics", saved_items)
+    self.assertEqual(saved_items["accumulated_metrics"][-1].id, 4)
+    self.assertEqual(saved_items["accumulated_metrics"][-1].scalar_metrics["loss"].shape, (1,))
 
   def test_restore_checkpoint_no_checkpoint_returns_defaults(self):
     mock_config = self.setup_config(enable_checkpointing=True)
@@ -755,7 +761,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_metadata.custom_metadata = {"micro_step_count": 2, "additional_metadata": dummy_metadata}
     mock_orbax_mgr.metadata.return_value = mock_metadata
 
-    metrics_buf = abstract_engine.MetricsBuffer(id=5, mode="train")
+    # A canonical intra-step save at step 5 recorded its microbatches under train_step 4:
+    # save_checkpoint uses train_step + 1 mid-step and restore sets train_step = restored_step - 1.
+    metrics_buf = abstract_engine.MetricsBuffer(id=4, mode="train")
     # `weighted_metrics` is a plain dict; pylint cannot resolve that through
     # flax.struct.dataclass and wrongly reports it as unsubscriptable.
     # pylint: disable-next=unsupported-assignment-operation
@@ -776,6 +784,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
 
     _ = t.restore_checkpoint(step=5)
+    self.assertEqual(t.train_step, 4)
     self.assertEqual(t._micro_step_count, 2)
     # Flags the partial checkpoint at step 5 for replacement once that step completes.
     self.assertTrue(t._resumed_mid_step)
@@ -784,6 +793,185 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertTrue(isinstance(t._cached_losses[0], abstract_engine.WeightedMetric))
     self.assertAlmostEqual(float(t._cached_losses[0].unreduced_sum), 4.0)
     self.assertAlmostEqual(float(t._cached_losses[1].unreduced_sum), 6.0)
+
+    # The next microbatch of the resumed step must land in the restored buffer, not a new one.
+    t.record_metrics("loss", abstract_engine.WeightedMetric(unreduced_sum=jnp.array(8.0), denominator=jnp.array(2.0)))
+    resumed_buf = t._metrics_recorder.get_step_metrics(4)
+    self.assertIsNotNone(resumed_buf)
+    np.testing.assert_array_equal(resumed_buf.weighted_metrics["loss"].unreduced_sum, jnp.array([4.0, 6.0, 8.0]))
+    self.assertLen(t._metrics_recorder._metrics_buffer, 1)
+
+  def test_intra_step_checkpoint_round_trip_continues_the_partial_step(self):
+    """Two microbatches saved mid-step resume in a fresh engine and finish as ONE step.
+
+    fwd_bwd x2 -> save_checkpoint (intra-step) -> restore into a fresh engine from exactly what
+    was handed to Orbax -> fwd_bwd -> update -> get_metrics: the restored microbatches and the
+    new one share a single step buffer (3 losses), which only holds if the saved buffer id is
+    the `train_step` the resumed engine records under.
+    """
+
+    def loss_fn(*args, **kwargs):
+      del args, kwargs
+      return abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0)), {}
+
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    t.with_loss_fn(loss_fn)
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    t.fwd_bwd(payload)
+    t.fwd_bwd(payload)
+    t.save_checkpoint(metadata=None)
+
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    # Mid-step: saved under train_step + 1, while the metrics were recorded under train_step.
+    self.assertEqual(call_kwargs["step"], 1)
+    self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 2)
+    saved_items = {name: arg.item for name, arg in call_kwargs["args"].items()}
+    self.assertIn("accumulated_metrics", saved_items)
+    self.assertIn("accumulated_grads", saved_items)
+    self.assertEqual(saved_items["accumulated_metrics"][-1].id, 0)
+    self.assertEqual(saved_items["accumulated_metrics"][-1].weighted_metrics["loss"].unreduced_sum.shape, (2,))
+
+    # Resume in a fresh engine from exactly what was saved.
+    t2 = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    t2.with_loss_fn(loss_fn)
+    mock_orbax_mgr2 = self._mock_orbax_manager(t2, latest_step=1)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {name: {} for name in saved_items}
+    saved_metadata.custom_metadata = call_kwargs["custom_metadata"]
+    mock_orbax_mgr2.metadata.return_value = saved_metadata
+    mock_orbax_mgr2.restore.return_value = saved_items
+
+    t2.restore_checkpoint(step=1)
+    self.assertEqual(t2.train_step, 0)
+    self.assertEqual(t2._micro_step_count, 2)
+    self.assertTrue(t2._resumed_mid_step)
+    self.assertLen(t2._cached_losses, 2)
+
+    t2.fwd_bwd(payload)
+    self.assertEqual(t2.update(), 1)
+    self.assertEqual(t2._micro_step_count, 0)
+    self.assertFalse(t2._resumed_mid_step)
+    # The finished step replaced the partial checkpoint at the same step.
+    mock_orbax_mgr2.delete.assert_called_once_with(1)
+    self.assertEqual(mock_orbax_mgr2.save.call_args.kwargs["step"], 1)
+    self.assertEqual(mock_orbax_mgr2.save.call_args.kwargs["custom_metadata"]["micro_step_count"], 0)
+
+    step_metrics: Any = t2.get_metrics(clear_cache=True)
+    self.assertEqual(step_metrics.id, 0)
+    np.testing.assert_array_equal(step_metrics.weighted_metrics["loss"].unreduced_sum, jnp.array([4.0, 4.0, 4.0]))
+    np.testing.assert_array_equal(step_metrics.weighted_metrics["loss"].denominator, jnp.array([2.0, 2.0, 2.0]))
+
+  def test_restore_completed_step_checkpoint_ignores_legacy_accumulated_metrics(self):
+    """A completed-step checkpoint that still carries metrics buffers must not resurrect them.
+
+    Checkpoints written before `save_checkpoint` gated on `micro_step_count` serialized every
+    undrained buffer; restoring those would re-surface an already-logged step.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
+    # Pre-restore state from "another run" that must not survive the restore either.
+    t.record_metrics("loss", abstract_engine.WeightedMetric(unreduced_sum=jnp.array(1.0), denominator=jnp.array(1.0)))
+    t._cached_losses.append(abstract_engine.WeightedMetric(unreduced_sum=jnp.array(1.0), denominator=jnp.array(1.0)))
+
+    legacy_buf = abstract_engine.MetricsBuffer(id=6, mode="train")
+    # pylint: disable-next=unsupported-assignment-operation
+    legacy_buf.weighted_metrics["loss"] = abstract_engine.WeightedMetric(
+        unreduced_sum=jnp.array([4.0]), denominator=jnp.array([2.0])
+    )
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}, "accumulated_metrics": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+        "accumulated_metrics": [legacy_buf],
+    }
+
+    t.restore_checkpoint(step=7)
+    self.assertEqual(t.train_step, 7)
+    self.assertEqual(t._micro_step_count, 0)
+    self.assertFalse(t._resumed_mid_step)
+    self.assertEmpty(t._metrics_recorder._metrics_buffer)
+    self.assertEmpty(t._cached_losses)
+    self.assertEqual(t.get_metrics(clear_cache=True).id, maxtext_engine.EMPTY_METRICS_BUFFER_ID)
+
+  def test_restore_intra_step_checkpoint_without_metrics_item(self):
+    """An intra-step checkpoint whose recorder was empty at save time restores without error."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=5)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}, "accumulated_grads": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 1, "accumulated_denominator": 2.0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+    dummy_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+        "accumulated_grads": dummy_grads,
+    }
+
+    t.restore_checkpoint(step=5)
+    self.assertEqual(t.train_step, 4)
+    self.assertEqual(t._micro_step_count, 1)
+    self.assertTrue(t._resumed_mid_step)
+    self.assertEqual(t._accumulated_grads, dummy_grads)
+    self.assertAlmostEqual(float(t._accumulated_denominator), 2.0)
+    self.assertEmpty(t._metrics_recorder._metrics_buffer)
+    self.assertEmpty(t._cached_losses)
+
+  def test_restore_completed_step_checkpoint_resets_partial_step_state(self):
+    """A completed-step restore on a dirty engine drops the partial step it interrupted.
+
+    `fwd_bwd` branches on `_accumulated_grads is None`, so a stale accumulator would be merged
+    into the first post-restore microbatch, and a stale `_cached_losses` entry would skew the
+    spike-skip mean of a step it never belonged to.
+    """
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0)),
+            {},
+        )
+    )
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t.fwd_bwd(payload)  # Dirty: one microbatch of step 0 is accumulated but not applied.
+    self.assertIsNotNone(t._accumulated_grads)
+    self.assertLen(t._cached_losses, 1)
+
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+    }
+
+    t.restore_checkpoint(step=7)
+    self.assertEqual(t.train_step, 7)
+    self.assertEqual(t._micro_step_count, 0)
+    self.assertIsNone(t._accumulated_grads)
+    self.assertIsNone(t._accumulated_denominator)
+    self.assertEmpty(t._cached_losses)
+    self.assertEmpty(t._metrics_recorder._metrics_buffer)
+    # Nothing is left to apply, so `update` is the no-op it is on a clean engine.
+    self.assertEqual(t.update(), 7)
+
+    # The first post-restore microbatch starts a fresh accumulation of its own.
+    t.fwd_bwd(payload)
+    self.assertEqual(t._micro_step_count, 1)
+    self.assertLen(t._cached_losses, 1)
+    self.assertIsNotNone(t._accumulated_grads)
 
   def test_record_and_get_metrics(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
@@ -819,6 +1007,250 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(step0_metrics.scalar_metrics["lr"], jnp.array([0.002]))
     self.assertIn("lr", step0_metrics.aggregation_fns)
     self.assertEqual(step0_metrics.aggregation_fns["lr"](jnp.array([0.002])), 0.002)
+
+  def test_metrics_recorder_buffers_in_python_list_until_flushed(self):
+    recorder = metrics_module.MetricsRecorder()
+    # Passing metric=None is a safe no-op.
+    recorder.buffer_metrics(train_step=0, name="ignored", metric=None)
+    self.assertEmpty(recorder._metrics_buffer)
+
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(10.0), denominator=jnp.array(2.0)),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(20.0), denominator=jnp.array(4.0)),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="grad_norm",
+        metric=jnp.array(1.5),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="grad_norm",
+        metric=jnp.array(2.5),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="per_layer_norm",
+        metric=jnp.array([1.0, 2.0]),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="per_layer_norm",
+        metric=jnp.array([3.0, 4.0]),
+    )
+
+    # Prior to flush, metrics are accumulated in Python lists with no device
+    # array concatenation. Pending lists are keyed by the live buffer object.
+    pending_key = id(recorder._metrics_buffer[-1])
+    self.assertLen(recorder._pending_weighted[pending_key]["loss"], 2)
+    self.assertLen(recorder._pending_scalar[pending_key]["grad_norm"], 2)
+    self.assertLen(recorder._pending_scalar[pending_key]["per_layer_norm"], 2)
+    self.assertEmpty(recorder._metrics_buffer[-1].weighted_metrics)
+    self.assertEmpty(recorder._metrics_buffer[-1].scalar_metrics)
+
+    step_buf = recorder.get_step_metrics(0)
+    self.assertIsNotNone(step_buf)
+    self.assertEmpty(recorder._pending_weighted)
+    self.assertEmpty(recorder._pending_scalar)
+    np.testing.assert_array_equal(
+        step_buf.weighted_metrics["loss"].unreduced_sum,
+        jnp.array([10.0, 20.0]),
+    )
+    np.testing.assert_array_equal(
+        step_buf.weighted_metrics["loss"].denominator,
+        jnp.array([2.0, 4.0]),
+    )
+    np.testing.assert_array_equal(
+        step_buf.scalar_metrics["grad_norm"],
+        jnp.array([1.5, 2.5]),
+    )
+    np.testing.assert_array_equal(
+        step_buf.scalar_metrics["per_layer_norm"],
+        jnp.array([1.0, 2.0, 3.0, 4.0]),
+    )
+
+    # Additional microbatches on the same step after a mid-step flush (or
+    # checkpoint restore via restore_buffers) concatenate cleanly with the
+    # already-materialized step buffer.
+    restored_recorder = metrics_module.MetricsRecorder()
+    restored_recorder.restore_buffers([step_buf])
+    restored_recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(30.0), denominator=jnp.array(6.0)),
+    )
+    restored_recorder.buffer_metrics(
+        train_step=0,
+        name="grad_norm",
+        metric=jnp.array(3.5),
+    )
+    step_buf_after = restored_recorder.get_step_metrics(0)
+    np.testing.assert_array_equal(
+        step_buf_after.weighted_metrics["loss"].unreduced_sum,
+        jnp.array([10.0, 20.0, 30.0]),
+    )
+    np.testing.assert_array_equal(
+        step_buf_after.weighted_metrics["loss"].denominator,
+        jnp.array([2.0, 4.0, 6.0]),
+    )
+    np.testing.assert_array_equal(
+        step_buf_after.scalar_metrics["grad_norm"],
+        jnp.array([1.5, 2.5, 3.5]),
+    )
+
+  def test_metrics_recorder_flattens_multidim_metrics_on_flush(self):
+    """Flushing ravels every item: one slot per element, in microbatch order."""
+    recorder = metrics_module.MetricsRecorder()
+    # A single 2-D item comes out 1-D; a second one concatenates behind it.
+    recorder.buffer_metrics(train_step=0, name="grid", metric=jnp.array([[1.0, 2.0], [3.0, 4.0]]))
+    step_buf = recorder.get_step_metrics(0)
+    self.assertEqual(step_buf.scalar_metrics["grid"].shape, (4,))
+    np.testing.assert_array_equal(step_buf.scalar_metrics["grid"], [1.0, 2.0, 3.0, 4.0])
+    recorder.buffer_metrics(train_step=0, name="grid", metric=jnp.array([[5.0, 6.0], [7.0, 8.0]]))
+    step_buf = recorder.get_step_metrics(0)
+    self.assertEqual(step_buf.scalar_metrics["grid"].shape, (8,))
+    np.testing.assert_array_equal(step_buf.scalar_metrics["grid"], [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+
+    # Weighted metrics with 1-D per-example sums flatten the same way and mix with 0-d ones.
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array([1.0, 2.0]), denominator=jnp.array([1.0, 1.0])),
+    )
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(3.0), denominator=jnp.array(1.0)),
+    )
+    step_buf = recorder.get_step_metrics(0)
+    self.assertEqual(step_buf.weighted_metrics["loss"].unreduced_sum.shape, (3,))
+    self.assertEqual(step_buf.weighted_metrics["loss"].denominator.shape, (3,))
+    np.testing.assert_array_equal(step_buf.weighted_metrics["loss"].unreduced_sum, [1.0, 2.0, 3.0])
+
+    # A lone 0-d item is still 1-D with one slot (asserted on `.shape`: assert_array_equal
+    # accepts a 0-d array against shape (1,)).
+    recorder.buffer_metrics(train_step=1, name="grad_norm", metric=jnp.array(0.5))
+    step_buf = recorder.get_step_metrics(1)
+    self.assertEqual(step_buf.scalar_metrics["grad_norm"].shape, (1,))
+
+  def test_restore_buffers_discards_pending_metrics_of_the_dirty_recorder(self):
+    """Restoring over a recorder with unflushed items keeps only the checkpointed values."""
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(40.0), denominator=jnp.array(4.0)),
+    )
+    recorder.buffer_metrics(train_step=0, name="grad_norm", metric=jnp.array(9.0))
+    self.assertLen(recorder._pending_weighted[id(recorder._metrics_buffer[-1])]["loss"], 1)
+
+    restored = abstract_engine.MetricsBuffer(id=0, mode="train")
+    # pylint: disable-next=unsupported-assignment-operation
+    restored.weighted_metrics["loss"] = abstract_engine.WeightedMetric(
+        unreduced_sum=jnp.array([4.0, 8.0]), denominator=jnp.array([4.0, 4.0])
+    )
+    recorder.restore_buffers([restored])
+    self.assertEmpty(recorder._pending_weighted)
+    self.assertEmpty(recorder._pending_scalar)
+    self.assertLen(recorder._metrics_buffer, 1)
+
+    # Resuming the step continues from the checkpointed values only.
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(12.0), denominator=jnp.array(4.0)),
+    )
+    step_buf = recorder.get_step_metrics(0)
+    np.testing.assert_array_equal(step_buf.weighted_metrics["loss"].unreduced_sum, [4.0, 8.0, 12.0])
+    self.assertNotIn("grad_norm", step_buf.scalar_metrics)
+
+  def test_metrics_recorder_keeps_same_id_buffers_apart(self):
+    """Two history buffers with the same step id never share pending items.
+
+    `buffer_metrics` opens a new buffer whenever the newest one has a different id, so
+    recording for step 1, then 2, then 1 again yields three buffers with ids [1, 2, 1].
+    The eager-append code kept their arrays apart; the pending lists must too.
+    """
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(train_step=1, name="m", metric=1.0)
+    recorder.buffer_metrics(train_step=2, name="m", metric=2.0)
+    recorder.buffer_metrics(train_step=1, name="m", metric=3.0)
+
+    history = recorder.get_metrics_history(clear_cache=False)
+    self.assertEqual([b.id for b in history], [1, 2, 1])
+    np.testing.assert_array_equal(history[0].scalar_metrics["m"], [1.0])
+    np.testing.assert_array_equal(history[1].scalar_metrics["m"], [2.0])
+    np.testing.assert_array_equal(history[2].scalar_metrics["m"], [3.0])
+    self.assertEmpty(recorder._pending_scalar)
+
+  def test_metrics_recorder_flush_failure_keeps_pending_items(self):
+    """A flush that fails to materialize one item leaves every pending item in place."""
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(
+        train_step=0,
+        name="loss",
+        metric=abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(1.0)),
+    )
+    recorder.buffer_metrics(train_step=0, name="bad", metric=object())
+    recorder.buffer_metrics(train_step=0, name="grad_norm", metric=jnp.array(1.5))
+    buffer = recorder._metrics_buffer[-1]
+
+    # Both attempts fail the same way and nothing is committed to the buffer.
+    for _ in range(2):
+      with self.assertRaises(TypeError):
+        recorder.get_step_metrics(0)
+      self.assertEmpty(buffer.weighted_metrics)
+      self.assertEmpty(buffer.scalar_metrics)
+      self.assertLen(recorder._pending_weighted[id(buffer)]["loss"], 1)
+      self.assertLen(recorder._pending_scalar[id(buffer)]["grad_norm"], 1)
+
+    # Once the offending item is gone the retained items flush normally.
+    del recorder._pending_scalar[id(buffer)]["bad"]
+    step_buf = recorder.get_step_metrics(0)
+    np.testing.assert_array_equal(step_buf.weighted_metrics["loss"].unreduced_sum, [4.0])
+    np.testing.assert_array_equal(step_buf.scalar_metrics["grad_norm"], [1.5])
+    self.assertEmpty(recorder._pending_weighted)
+    self.assertEmpty(recorder._pending_scalar)
+
+  def test_save_checkpoint_before_get_metrics_does_not_serialize_completed_step_metrics(
+      self,
+  ):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0)),
+            {},
+        )
+    )
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t.compile(payload)
+    t.fwd_bwd(payload)
+    t.update()
+
+    # Save checkpoint BEFORE get_metrics() is called (matches RLProgram
+    # deferred get_metrics ordering).
+    t.save_checkpoint(metadata={"step": 1})
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    save_args = call_kwargs["args"]
+    if hasattr(save_args, "items") and callable(save_args.items):
+      args_dict = dict(save_args.items())
+    else:
+      args_dict = save_args.__dict__
+    self.assertNotIn("accumulated_metrics", args_dict)
+
+    # Subsequent get_metrics() still returns the completed step's metrics.
+    step_metrics: Any = t.get_metrics(clear_cache=True)
+    self.assertIsNotNone(step_metrics)
+    self.assertIn("loss", step_metrics.weighted_metrics)
 
   def test_update_with_inflight_throttling(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
