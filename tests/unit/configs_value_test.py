@@ -107,6 +107,51 @@ class ConfigTest(absltest.TestCase):
         any("enable_mllog=True with eval_interval=" in str(call.args[0]) for call in mock_warning.call_args_list)
     )
 
+  def test_splash_diag_skip_rejects_invalid_grid(self):
+    for grid in (1, 3, 6):
+      with self.subTest(grid=grid):
+        argv = ["", _BASE_CONFIG_PATH, "run_name=test", f"sa_qk_diag_grid={grid}"]
+        with self.assertRaisesRegex(pydantic.ValidationError, "sa_qk_diag_grid must be a power of 2"):
+          pyconfig.initialize(argv)
+
+  def test_splash_diag_skip_rejects_non_square_eval_blocks(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_tokamax_splash=True",
+        "sa_qk_diag_skip=True",
+        "custom_mesh_and_rule_for_eval=pure-fsdp",
+        "eval_sa_block_q=512",
+        "eval_sa_block_kv=512",
+        "eval_sa_block_kv_compute=256",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "require square eval blocks"):
+      pyconfig.initialize(argv)
+
+  def test_splash_diag_skip_warns_when_disabled(self):
+    common = ["", _BASE_CONFIG_PATH, "run_name=test", "use_tokamax_splash=True", "sa_sv_diag_skip=True"]
+    # (overrides, expected warning substring or None)
+    cases = (
+        ([], None),
+        (["attention_type=full"], "attention_type='full'"),
+        (["ici_context_parallelism=2", "context_parallel_load_balance=True"], "load-balanced all_gather"),
+        (["ici_context_parallelism=2", "context_parallel_load_balance=False"], None),
+    )
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for overrides, expected in cases:
+      with self.subTest(overrides=overrides):
+        with (
+            unittest.mock.patch("jax.devices", return_value=mock_devices),
+            unittest.mock.patch("maxtext.utils.max_logging.warning") as mock_warning,
+        ):
+          pyconfig.initialize(common + overrides)
+        messages = [str(call.args[0]) for call in mock_warning.call_args_list if "sa_sv_diag_skip" in str(call.args[0])]
+        if expected is None:
+          self.assertEqual(messages, [])
+        else:
+          self.assertTrue(any(expected in m for m in messages), messages)
+
   def test_enable_mllog_accepted_with_eval(self):
     argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=1"]
     config = pyconfig.initialize(argv)

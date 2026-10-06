@@ -943,6 +943,9 @@ class SplashAttention(BaseModel):
   )
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
+  sa_qk_diag_skip: bool = Field(False, description="Maps to qk_diag_skip in SplashConfig.")
+  sa_sv_diag_skip: bool = Field(False, description="Maps to sv_diag_skip in SplashConfig.")
+  sa_qk_diag_grid: int = Field(2, description="Maps to qk_diag_grid in SplashConfig.")
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
@@ -4252,6 +4255,39 @@ class MaxTextConfig(
           "at least one eval_accuracy event)."
       )
 
+  def validate_splash_diag_skip(self):
+    """Validates Tokamax Splash diagonal sub-tile skipping and warns when it cannot take effect."""
+    if self.sa_qk_diag_grid < 2 or (self.sa_qk_diag_grid & (self.sa_qk_diag_grid - 1)) != 0:
+      raise ValueError(f"sa_qk_diag_grid must be a power of 2 and >= 2, got {self.sa_qk_diag_grid}.")
+    if not (self.use_tokamax_splash and (self.sa_qk_diag_skip or self.sa_sv_diag_skip)):
+      return
+    # Tokamax checks square training blocks when the kernel is built at startup, but `eval_sa_*` blocks are
+    # only used under custom eval rules and first traced at the first eval step, so check them here.
+    uses_eval_sa_blocks = bool(self.logical_axis_rules_for_eval) and (
+        self.logical_axis_rules_for_eval != self.logical_axis_rules
+    )
+    if uses_eval_sa_blocks and not self.eval_sa_block_q == self.eval_sa_block_kv == self.eval_sa_block_kv_compute:
+      raise ValueError(
+          "sa_qk_diag_skip/sa_sv_diag_skip with custom eval logical axis rules require square eval blocks "
+          "(eval_sa_block_q == eval_sa_block_kv == eval_sa_block_kv_compute); got "
+          f"{self.eval_sa_block_q}/{self.eval_sa_block_kv}/{self.eval_sa_block_kv_compute}."
+      )
+    # The skip only runs when the Splash kernel gets a pure `CausalMask`; otherwise it is silently disabled.
+    cp_size = self.ici_context_parallelism * self.dcn_context_parallelism
+    strategy = self.context_parallel_strategy.lower()
+    if self.attention_type not in (AttentionType.GLOBAL.value, AttentionType.MLA.value):
+      reason = f"attention_type={self.attention_type!r} (only 'global' and 'mla' are supported)"
+    elif cp_size > 1 and strategy in ("ring", "usp"):
+      reason = f"context_parallel_strategy={strategy!r} (ring/USP attention does not use the flags)"
+    elif cp_size > 1 and strategy == "all_gather" and self.context_parallel_load_balance:
+      reason = "load-balanced all_gather context parallelism (it uses LoadBalancedCausalMask)"
+    else:
+      return
+    max_logging.warning(
+        f"sa_qk_diag_skip={self.sa_qk_diag_skip}, sa_sv_diag_skip={self.sa_sv_diag_skip} have no effect with "
+        f"{reason}. Diagonal sub-tile skipping requires a pure causal mask."
+    )
+
   def validate_num_moe_emb_chunks(self):
     """
     Validates that num_moe_emb_chunks is used with supported settings.
@@ -5264,6 +5300,7 @@ class MaxTextConfig(
     self.validate_moe_topk_before_ep_all_gather()
     self.validate_moe_quantize_combine_bwd_method()
     self.validate_mllog()
+    self.validate_splash_diag_skip()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
 
     if self.enable_streaming_diloco:
