@@ -1604,6 +1604,14 @@ class KimiK3(BaseModel):
       ),
   )
   rope_theta: float = Field(500000.0, description="Base frequency for RoPE (alias for rope_max_timescale).")
+  routed_experts_weight_format: Literal["bf16", "mxfp4"] = Field(
+      "bf16",
+      description=(
+          "Storage format of the Kimi latent-MoE routed experts. 'bf16' keeps dense float kernels "
+          "(dtype = weight_dtype); 'mxfp4' keeps the released MXFP4 packed uint8 codes + E8M0 scales "
+          "and dequantizes only the gathered top-k experts in the forward pass."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------

@@ -66,6 +66,7 @@ import jax
 from maxtext.configs import pyconfig
 from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+from maxtext.checkpoint_conversion.utils import mxfp4
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
@@ -93,6 +94,65 @@ def resolve_scale_key(key: str, container) -> str:
     if alt_key in container:
       return alt_key
   return key
+
+
+def _maybe_load_mxfp4_weight(key: str, has_key, fetch_raw, save_dtype: str):
+  """Materializes `X.weight` from a `compressed-tensors` MXFP4 pair if present.
+
+  Checkpoints in `mxfp4-pack-quantized` format (e.g. Kimi-K3 routed experts) ship
+  `X.weight_packed` + `X.weight_scale` instead of `X.weight`. MaxText keeps expert
+  weights in a dense float dtype, so we dequantize on the fly and return the result
+  through the regular dtype-conversion path. Returns None when `key` is not backed by
+  such a pair, so callers fall through to their normal lookup.
+  """
+  pair = mxfp4.resolve_mxfp4_pair(key, has_key)
+  if pair is None:
+    return None
+  packed_key, scale_key = pair
+  packed = _to_uint8_numpy(fetch_raw(packed_key))
+  scale = _to_uint8_numpy(fetch_raw(scale_key))
+  # Dequantized experts are dense; store them in the checkpoint's float dtype.
+  # (FP8 save mode keeps *pre-quantized* FP8 sources as FP8; a dequantized MXFP4
+  # weight has no FP8 source, so it is stored as bf16 like any other bf16 tensor.)
+  target = np.float32 if save_dtype in ("float32", DType.FLOAT32) else ml_dtypes.bfloat16
+  return mxfp4.dequantize_mxfp4_packed(packed, scale, dtype=target)
+
+
+def _to_uint8_numpy(t) -> np.ndarray:
+  if torch is not None and isinstance(t, torch.Tensor):
+    return t.detach().cpu().contiguous().view(torch.uint8).numpy()
+  return np.asarray(t).view(np.uint8)
+
+
+def _is_uint8(t) -> bool:
+  if torch is not None and isinstance(t, torch.Tensor):
+    return t.dtype == torch.uint8
+  return getattr(t, "dtype", None) == np.uint8
+
+
+def _convert_hf_tensor(key: str, tensor, save_dtype: str) -> np.ndarray:
+  """`_convert_tensor_to_numpy`, except raw MXFP4 sidecars stay byte-exact uint8.
+
+  When routed experts are kept packed (`routed_experts_weight_format=mxfp4`) the mapping
+  requests `X.weight_packed` / `X.weight_scale` directly; casting those codes to a float
+  dtype would destroy them. Float-valued `weight_scale` tensors of other formats (e.g.
+  compressed-tensors FP8) are not uint8 and keep the normal conversion.
+  """
+  if mxfp4.is_mxfp4_sidecar_key(key) and _is_uint8(tensor):
+    return _to_uint8_numpy(tensor)
+  return _convert_tensor_to_numpy(tensor, save_dtype)
+
+
+def _is_mxfp4_passthrough(hf_source_keys_or_key, config) -> bool:
+  """True when a MaxText param is assembled from raw MXFP4 sidecars (stored as uint8)."""
+  if getattr(config, "routed_experts_weight_format", "bf16") != "mxfp4":
+    return False
+  first = hf_source_keys_or_key
+  while isinstance(first, (list, tuple)):
+    if not first:
+      return False
+    first = first[0]
+  return isinstance(first, str) and mxfp4.is_mxfp4_sidecar_key(first)
 
 
 def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray:
@@ -205,8 +265,11 @@ class LazyHFLoader:
     if "model.safetensors.index.json" in files:
       index_file = "model.safetensors.index.json"
     elif "model.safetensors" in files:
-      # Single file case
-      self.shard_map = {None: "model.safetensors"}
+      # Single file case: enumerate its keys so `get_tensor` (and the MXFP4 pair
+      # lookup, which needs `key in shard_map`) behave exactly like the sharded case.
+      single_shard = "model.safetensors"
+      with safe_open(self._local_shard_path(single_shard), framework="np", device="cpu") as f:
+        self.shard_map = {k: single_shard for k in f.keys()}
       return
     else:
       raise ValueError("Could not find recognized model weights (safetensors) in HF repo.")
@@ -237,32 +300,25 @@ class LazyHFLoader:
     For safetensors, this is extremely efficient as it memory-maps the file
     and reads only the required tensor's data from disk.
     """
-    # Handle single-file models (shard map key might be None or we just know the filename)
     resolved_key = resolve_scale_key(key, self.shard_map)
     shard_name = self.shard_map.get(resolved_key)
 
-    if shard_name is None and None in self.shard_map:
-      shard_name = self.shard_map[None]
-    elif shard_name is None:
+    if shard_name is None:
+      # `compressed-tensors` MXFP4 checkpoints store `X.weight_packed` + `X.weight_scale`
+      # in place of `X.weight`; dequantize the pair on the fly.
+      dense = _maybe_load_mxfp4_weight(
+          key,
+          has_key=lambda k: k in self.shard_map,
+          fetch_raw=self._read_raw_tensor,
+          save_dtype=self.save_dtype,
+      )
+      if dense is not None:
+        return dense
       # Fallback: sometimes keys in index don't perfectly match requested keys if there are prefix mismatches.
       # You might need advanced fuzzy matching here if you encounter errors.
       raise ValueError(f"Key {key} not found in HF checkpoint index.")
 
-    if shard_name in self._local_shard_paths:
-      local_path = self._local_shard_paths[shard_name]
-    else:
-      if self.is_local:
-        local_path = os.path.join(self.model_id, shard_name)
-      else:
-        # STEP 1: Download outside the lock.
-        # multiple threads can download different shards at the same time.
-        local_path = hf_hub_download(
-            repo_id=self.model_id,
-            filename=shard_name,
-            token=self.token,
-            revision=self.revision,
-        )
-      self._local_shard_paths[shard_name] = local_path
+    local_path = self._local_shard_path(shard_name)
 
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
@@ -270,7 +326,33 @@ class LazyHFLoader:
       framework = "pt" if torch is not None else "np"
       with safe_open(local_path, framework=framework, device="cpu") as f:
         t = f.get_tensor(resolved_key)
-        return _convert_tensor_to_numpy(t, self.save_dtype)
+        return _convert_hf_tensor(resolved_key, t, self.save_dtype)
+
+  def _local_shard_path(self, shard_name: str) -> str:
+    """Returns the local path of a shard, downloading it first for remote repos."""
+    if shard_name in self._local_shard_paths:
+      return self._local_shard_paths[shard_name]
+    if self.is_local:
+      local_path = os.path.join(self.model_id, shard_name)
+    else:
+      # STEP 1: Download outside the lock.
+      # multiple threads can download different shards at the same time.
+      local_path = hf_hub_download(
+          repo_id=self.model_id,
+          filename=shard_name,
+          token=self.token,
+          revision=self.revision,
+      )
+    self._local_shard_paths[shard_name] = local_path
+    return local_path
+
+  def _read_raw_tensor(self, key: str):
+    """Reads a tensor exactly as stored (no dtype conversion), for MXFP4 sidecars."""
+    local_path = self._local_shard_path(self.shard_map[key])
+    with self._ram_lock:
+      framework = "pt" if torch is not None else "np"
+      with safe_open(local_path, framework=framework, device="cpu") as f:
+        return f.get_tensor(key)
 
 
 class LazyTensor:
@@ -1103,10 +1185,18 @@ def main(
           return None
         resolved_key = resolve_scale_key(key, hf_state_dict_numpy)
         if resolved_key not in hf_state_dict_numpy:
+          dense = _maybe_load_mxfp4_weight(
+              key,
+              has_key=lambda k: k in hf_state_dict_numpy,
+              fetch_raw=hf_state_dict_numpy.__getitem__,
+              save_dtype=save_dtype,
+          )
+          if dense is not None:
+            return dense
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
 
         v = hf_state_dict_numpy[resolved_key]
-        return _convert_tensor_to_numpy(v, save_dtype)
+        return _convert_hf_tensor(resolved_key, v, save_dtype)
 
       tensor_getter = _eager_getter
 
@@ -1179,7 +1269,7 @@ def main(
           mt_target_shape_or_shapes,
           mt_param_key_or_keys,
           final_mt_weights,
-          save_dtype,
+          np.uint8 if _is_mxfp4_passthrough(hf_source_keys_or_key, config) else save_dtype,
           lazy_load_tensors,
       )
 

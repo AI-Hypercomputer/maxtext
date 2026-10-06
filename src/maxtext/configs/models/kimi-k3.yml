@@ -66,6 +66,9 @@ num_shared_experts: 2
 routed_scaling_factor: 1.0
 routed_score_func: "sigmoid"
 routed_bias: true
+# Routed-expert storage: "bf16" (dense kernels) or "mxfp4" (released packed uint8 codes +
+# E8M0 scales, dequantized after the top-k gather; ~4x smaller routed-expert footprint).
+routed_experts_weight_format: "bf16"
 
 # Sequence Length & RoPE
 # Kimi-K3 uses NoPE for its MLA layers (HF `mla_use_nope: true`) and ships no
