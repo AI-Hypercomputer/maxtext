@@ -68,7 +68,9 @@ class KVQuant:
     if self.axis_cfg == "dkv":
       return axis_names.index(CACHE_KV)
     if self.axis_cfg == "heads_and_dkv":
-      return (axis_names.index(CACHE_HEADS), axis_names.index(CACHE_KV))
+      # The heads axis is CACHE_HEADS_NONE when it is replicated (e.g. MQA's single head).
+      heads_axis = CACHE_HEADS if CACHE_HEADS in axis_names else CACHE_HEADS_NONE
+      return (axis_names.index(heads_axis), axis_names.index(CACHE_KV))
     raise ValueError(f"Invalid KV quant axis cfg: {self.axis_cfg}")
 
   def quantize(self, kv: Array, axis_names: AxisNames):
