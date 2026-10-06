@@ -367,6 +367,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     if moe_overflow_flags:
       has_moe_overflow = jnp.any(jnp.stack([jnp.any(x) for x in moe_overflow_flags]))
   aux["has_moe_overflow"] = has_moe_overflow
+  if getattr(config, "log_required_ragged_buffer_factor", False):
+    # Probe: the smallest ragged_buffer_factor that would not have dropped tokens this step, max over MoE layers.
+    required_rbf_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_required_rbf")
+    if required_rbf_values:
+      aux["moe_required_rbf"] = jnp.max(jnp.concatenate([x.astype(jnp.float32) for x in required_rbf_values]))
   return loss, aux
 
 
@@ -587,6 +592,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             "learning/te_moe_recv_capacity_per_rank": aux["te_moe_recv_capacity_per_rank"],
         }
     )
+  if "moe_required_rbf" in aux:
+    scalar_metrics["learning/moe_required_rbf"] = aux["moe_required_rbf"]
   scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
     new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)

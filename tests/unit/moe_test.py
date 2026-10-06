@@ -568,7 +568,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
     del function, mesh, check_vma
     captured["in_specs"] = in_specs
     captured["out_specs"] = out_specs
-    return lambda x, *_args: (x, None, None, jnp.bool_(False))
+    return lambda x, *_args: (x, None, None, jnp.bool_(False), jnp.float32(0.0))
 
   with mock.patch.object(jax, "shard_map", side_effect=fake_shard_map):
     output, _, _ = moe.RoutedMoE.sparse_matmul(
@@ -2223,6 +2223,30 @@ class QuantizedMoeTest(parameterized.TestCase):
     tree_tgt = self._run_moe_loss_and_grad(cfg_tgt, rng_model, hidden_states)
 
     compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.22)
+
+
+class RequiredRaggedBufferFactorTest(parameterized.TestCase):
+  """Tests the log_required_ragged_buffer_factor probe against permute()'s ragged buffer drop condition."""
+
+  @parameterized.named_parameters(("ep1", 1), ("ep2", 2), ("ep4", 4), ("ep8", 8))
+  def test_exceeds_factor_iff_buffer_drops(self, num_ep):
+    num_experts, top_k, tokens = 16, 4, 256
+    module = SimpleNamespace(config=SimpleNamespace(num_experts=num_experts), num_experts_per_tok=top_k, mesh=None)
+    balanced = (tokens // num_ep) * top_k
+    local_experts = num_experts // num_ep
+    rng = np.random.default_rng(num_ep)
+    for _ in range(20):
+      p = rng.dirichlet(np.ones(num_experts) * rng.uniform(0.1, 5.0))
+      group_sizes = np.bincount(rng.choice(num_experts, size=tokens * top_k, p=p), minlength=num_experts)
+      for shard in range(num_ep):
+        required = float(
+            moe.RoutedMoE.required_ragged_buffer_factor(module, jnp.asarray(group_sizes), tokens, num_ep, shard)
+        )
+        local = group_sizes[shard * local_experts : (shard + 1) * local_experts].sum()
+        self.assertAlmostEqual(required, local / balanced, places=5)
+        for factor in (0.5, 1.0, 1.25, 1.5, 2.0, 3.0):
+          buffer_size = moe.RoutedMoE.get_ragged_buffer_size(balanced, num_ep, num_experts, top_k, factor)
+          self.assertEqual(local > buffer_size, required > factor + 1e-6)
 
 
 class GetEinsumTest(parameterized.TestCase):
