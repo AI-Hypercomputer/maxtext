@@ -1303,6 +1303,15 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  use_gmm_v2_transposed_rhs_dlhs: bool = Field(
+      False,
+      description=(
+          "Whether the backward dlhs of the Tokamax GMM v2 path uses the transposed-RHS kernel"
+          " (kernels/megablox/gmm_v2_trhs.py) that reads the forward weight in place (NT matmul) instead of"
+          " gmm_v2 on W.swapaxes(1, 2), which XLA materializes as a weight-sized transpose copy."
+          " Requires use_gmm_v2=True and no quantization."
+      ),
+  )
 
 
 class DeepSeekMoE(BaseModel):
@@ -5190,6 +5199,12 @@ class MaxTextConfig(
 
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
+
+    if self.use_gmm_v2_transposed_rhs_dlhs:
+      if not self.use_gmm_v2:
+        raise ValueError("`use_gmm_v2_transposed_rhs_dlhs=True` requires `use_gmm_v2=True`.")
+      if self.quantization:
+        raise ValueError("`use_gmm_v2_transposed_rhs_dlhs=True` is not supported with quantization.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:

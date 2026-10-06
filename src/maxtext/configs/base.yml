@@ -327,6 +327,12 @@ use_gmm_v2: false
 # Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
 # When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
 use_gmm_v2_heuristic_tiling: false
+# Whether the backward dlhs (= dout @ W^T) of the Tokamax GMM v2 path uses the transposed-RHS kernel
+# (kernels/megablox/gmm_v2_trhs.py) that reads the forward weight [experts, k, n] in place as an NT matmul,
+# instead of gmm_v2 on W.swapaxes(1, 2), which XLA materializes as a weight-sized transpose copy per gmm
+# (inside the remat, so once more in the backward). Requires use_gmm_v2=true and no quantization.
+use_gmm_v2_transposed_rhs_dlhs: false
+
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 

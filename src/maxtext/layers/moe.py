@@ -1898,6 +1898,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
+            use_gmm_v2_transposed_rhs_dlhs=self.config.use_gmm_v2_transposed_rhs_dlhs,
         )
       else:
         # jax.lax.ragged_dot

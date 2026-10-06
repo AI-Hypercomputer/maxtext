@@ -22,6 +22,7 @@ from typing import List, Literal, Tuple
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
+from maxtext.kernels.megablox import gmm_v2_trhs
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.layers import quantizations
@@ -76,8 +77,17 @@ def gmm(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    use_gmm_v2_transposed_rhs_dlhs: bool = False,
 ):
-  """Grouped matrix multiplication operation."""
+  """Grouped matrix multiplication operation.
+
+  Args:
+    use_gmm_v2_transposed_rhs_dlhs: With the Tokamax GMM v2 backend, compute the backward
+      dlhs = dout @ rhs^T with the transposed-RHS kernel (`gmm_v2_trhs.gmm_v2(...,
+      transpose_rhs=True)`) that reads `rhs` in place, instead of calling gmm_v2 on
+      `rhs.swapaxes(1, 2)`, which XLA materializes as a full transpose copy of the weight.
+      Only used when `transpose_rhs=False` and the weight is not quantized.
+  """
   if interpret is None:
     # Default to native (TPU) lowering. `jax.devices()[0]` is NOT the compile TARGET:
     # during train_compile the local backend is CPU (JAX_PLATFORMS=cpu) while the mesh
@@ -110,7 +120,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
@@ -132,6 +142,7 @@ def gmm(
       use_gmm_v2,
       use_gmm_v2_heuristic_tiling,
       partial_sum,
+      use_gmm_v2_transposed_rhs_dlhs,
   )
 
 
@@ -169,6 +180,7 @@ def _gmm_fwd(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    use_gmm_v2_transposed_rhs_dlhs: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -186,6 +198,7 @@ def _gmm_fwd(
   - lhs: [m, k]
   - rhs: [g, k, n] if transpose_rhs=False. [g, n, k] if transpose_rhs=True
   """
+  del use_gmm_v2_transposed_rhs_dlhs  # Backward-only option.
 
   # Track whether operands arrived as QArray (e.g. from token all-gather quantization
   # or gathered weights) to return matching cotangent containers in backward pass.
@@ -497,6 +510,7 @@ def _gmm_bwd(
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
+    use_gmm_v2_transposed_rhs_dlhs: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -566,6 +580,7 @@ def _gmm_bwd(
       interpret,
       lhs_vma_axes,
       use_gmm_v2_heuristic_tiling,
+      use_gmm_v2_transposed_rhs_dlhs,
   )
 
   # 4. DRHS Gradient Execution
@@ -716,6 +731,7 @@ def _compute_dlhs(
     interpret: bool,
     lhs_vma_axes: tuple,
     use_gmm_v2_heuristic_tiling: bool,
+    use_gmm_v2_transposed_rhs_dlhs: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DLHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -729,7 +745,15 @@ def _compute_dlhs(
     )
   elif use_tokamax_backend and use_gmm_v2:
     return _dlhs_run_tokamax_v2(
-        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, use_gmm_v2_heuristic_tiling, transpose_rhs
+        dlhs_dout,
+        rhs,
+        group_sizes,
+        group_offset,
+        lhs_dtype,
+        tiling,
+        use_gmm_v2_heuristic_tiling,
+        transpose_rhs,
+        use_gmm_v2_transposed_rhs_dlhs,
     )
   else:
     return _dlhs_run_megablox(
@@ -805,18 +829,26 @@ def _dlhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     transpose_rhs: bool,
+    use_gmm_v2_transposed_rhs_dlhs: bool = False,
 ) -> jnp.ndarray:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
-  # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs support.
-  dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
   dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
+  # The forward weight [g, k, n] has to be read as [g, n, k] for dlhs. The transposed-RHS
+  # kernel does that in place (NT matmul on the MXU); otherwise gmm_v2 lacks native
+  # transpose_rhs support and the swapaxes is materialized by XLA as a weight-sized copy.
+  use_trhs_kernel = (
+      use_gmm_v2_transposed_rhs_dlhs and not transpose_rhs and not isinstance(rhs, qpl.QArray) and rhs.ndim == 3
+  )
+  kernel_module = gmm_v2_trhs if use_trhs_kernel else gmm_v2
+  dlhs_rhs = rhs if (transpose_rhs or use_trhs_kernel) else rhs.swapaxes(1, 2)
 
   if use_gmm_v2_heuristic_tiling:
-    dlhs_tiling = gmm_v2.calculate_tiling
+    dlhs_tiling = kernel_module.calculate_tiling
   else:
-    dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+    dlhs_tiling = kernel_module.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
 
-  dlhs = gmm_v2.gmm_v2(
+  extra_kwargs = {"transpose_rhs": True} if use_trhs_kernel else {}
+  dlhs = kernel_module.gmm_v2(
       lhs=dlhs_lhs,
       rhs=dlhs_rhs,
       group_sizes=group_sizes,
@@ -827,6 +859,7 @@ def _dlhs_run_tokamax_v2(
       group_offset=group_offset,
       # Bypass internal quantization if incoming dlhs_dout is already a QArray.
       maybe_quantize_lhs=not isinstance(dlhs_dout, qpl.QArray),
+      **extra_kwargs,
   )
 
   # Rescale dlhs by dlhs_dout.scale when incoming gradient was pre-quantized QArray.
