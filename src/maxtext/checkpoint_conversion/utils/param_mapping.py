@@ -1262,6 +1262,15 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   return mapping
 
 
+def _array_module(x):
+  """`jnp` for a `jax.Array`, else `np`.
+
+  Hooks that run on `jax.Array`s must not go through host numpy: on several
+  hosts an array is split across hosts and can't be copied to one host's RAM.
+  """
+  return jnp if isinstance(x, jax.Array) else np
+
+
 def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
   """
   Transformation hooks for parameters using hyphenated 'params-' MaxText keys.
@@ -1321,14 +1330,15 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       # 2. HF -> MaxText (Splitting)
       # input_tensor is the massive HF gate_up_proj. Shape: (..., out, in)
       # Split into gate and up along the output dimension (axis=-2 for transposed shape logic)
-      gate, up = np.split(input_tensor, 2, axis=-2)
+      xp = _array_module(input_tensor)
+      gate, up = xp.split(input_tensor, 2, axis=-2)
 
       # Swap the last two dimensions
       gate = gate.swapaxes(-1, -2)
       up = up.swapaxes(-1, -2)
 
       # Stack them along a new final dimension so the base conversion script can iterate and split them
-      return np.stack([gate, up], axis=-1)
+      return xp.stack([gate, up], axis=-1)
 
   text_cfg = config.get("text_config", config)
   H_k = text_cfg["linear_num_key_heads"]
@@ -1372,7 +1382,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       z_r = z_m.reshape(H_k, V_per_K * D_v, -1)
 
       # Concat along the feature dim (axis 1) so they are interleaved per Key-head
-      interleaved = np.concatenate([q_r, k_r, v_r, z_r], axis=1)
+      interleaved = _array_module(qkv_m).concatenate([q_r, k_r, v_r, z_r], axis=1)
       return interleaved.reshape(-1, qkv_m.shape[-1]).T
 
   raw_block_size = getattr(maxtext_config, "weight_block_size", None)
@@ -1410,7 +1420,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       v_scale_r = v_scale.reshape(H_k, d_v_blocks, -1)
       z_scale_r = z_scale.reshape(H_k, d_v_blocks, -1)
 
-      interleaved = np.concatenate([q_scale_r, k_scale_r, v_scale_r, z_scale_r], axis=1)
+      interleaved = _array_module(qkv_scale).concatenate([q_scale_r, k_scale_r, v_scale_r, z_scale_r], axis=1)
       return interleaved.reshape(-1, qkv_scale.shape[-1]).T
 
   def concat_ba_and_transpose(input_tensor, target_shape=None):
@@ -1429,7 +1439,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       b_m, a_m = input_tensor
       b_r = b_m.reshape(H_k, V_per_K, -1)
       a_r = a_m.reshape(H_k, V_per_K, -1)
-      interleaved = np.concatenate([b_r, a_r], axis=1)
+      interleaved = _array_module(b_m).concatenate([b_r, a_r], axis=1)
       return interleaved.reshape(-1, b_m.shape[-1]).T
 
   is_quantized = getattr(maxtext_config, "weight_dtype", None) == "float8_e4m3fn"
