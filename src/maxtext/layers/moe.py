@@ -707,8 +707,8 @@ class RoutedMoE(nnx.Module):
     else:
       self._tensor_parallelism_name = "tensor"
 
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and self.config.enable_dp_attention:
-      self._expert_parallelism_name = "attn_dp_expert"
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      self._expert_parallelism_name = ("attn_dp_expert", "expert")
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
@@ -883,7 +883,7 @@ class RoutedMoE(nnx.Module):
     else:
       self.per_expert_scale = None
 
-    if not quantizations.in_serve_mode(self.quant) and ctypes.is_fp8_dtype(self.weight_dtype):
+    if not quantizations.in_serve_mode(self.quant) and (getattr(self.config, "fp8_moe", False) or ctypes.is_fp8_dtype(self.weight_dtype)):
       resolved_weight_quant = (
           self.weight_quant
           if self.weight_quant is not None
@@ -3963,8 +3963,31 @@ class RoutedMoE(nnx.Module):
       # pytype: disable=import-error
       from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
       from tpu_inference import envs as tpu_inference_envs
+      from tpu_inference.layers.common.sharding import ShardingAxisName
     except ImportError as e:
       raise ImportError("fused_moe_matmul requires the tpu-inference package.") from e
+
+    # Align tpu_inference ShardingAxisName with current device mesh
+    if self.mesh is not None:
+      valid_axes = set(self.mesh.axis_names)
+      overrides = {}
+      for attr in ("EXPERT", "MLP_DATA", "ATTN_DATA", "EXPERT_DATA", "MLP_TENSOR", "MOE_TENSOR"):
+        val = getattr(ShardingAxisName, attr, None)
+        if isinstance(val, (tuple, list)):
+          filtered = tuple(a for a in val if a in valid_axes)
+          if filtered:
+            overrides[attr] = filtered[0] if len(filtered) == 1 else filtered
+          elif "expert" in valid_axes and "EXPERT" in attr:
+            overrides[attr] = "expert"
+          elif "data" in valid_axes and "DATA" in attr:
+            overrides[attr] = "data"
+        elif isinstance(val, str) and val not in valid_axes:
+          if "expert" in valid_axes and "EXPERT" in attr:
+            overrides[attr] = "expert"
+          elif "data" in valid_axes and "DATA" in attr:
+            overrides[attr] = "data"
+      if overrides:
+        ShardingAxisName.override(**overrides)
 
     # Reshape 3D [B, S, D] -> 2D [T, D] (fused_moe_func expects 2D input)
     batch_size, seq_len, emb_dim = inputs.shape
@@ -4227,15 +4250,18 @@ class RoutedMoE(nnx.Module):
 
     is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
 
+    is_fp8_moe = (
+        getattr(cfg, "fp8_moe", False)
+        or ctypes.is_fp8_dtype(self.weight_dtype)
+        or isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+    )
     native_gmm = (
         isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
         and cfg.sparse_matmul
         and cfg.use_gmm_v2
         and not is_fused_moe_path
     )
-    is_kernel_quantized = (
-        isinstance(self.quant, quantizations.ServeFp8WeightQuantization) or getattr(cfg, "fp8_moe", False)
-    ) and is_fused_moe_path
+    is_kernel_quantized = is_fp8_moe and is_fused_moe_path
 
     def _maybe_native_gmm_weight(kernel, scale):
       """Non-fused (gmm_v2) path: a qpl.QArray wrapping kernel+scale when
