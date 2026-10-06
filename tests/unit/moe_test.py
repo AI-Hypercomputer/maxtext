@@ -25,13 +25,16 @@ import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
+from jax.experimental.pallas import tpu as pltpu
 import ml_dtypes
 import numpy as np
 import qwix
+import qwix.pallas as qpl
 from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Config, DType
 from maxtext.configs import pyconfig
 from maxtext.configs import types as maxtext_types
+from maxtext.kernels.megablox import ops as mblx_ops
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
@@ -1210,6 +1213,8 @@ class RoutedMoeTest(parameterized.TestCase):
       common_overrides: dict | None = None,
       randomize_biases: bool = False,
       check_jaxprs=None,
+      quantization_rule: list | None = None,
+      exact: bool = False,
       **tc_overrides,
   ):
     """Loss and gradient correctness for the moe_tc_ragged_sort flag and its options.
@@ -1222,6 +1227,8 @@ class RoutedMoeTest(parameterized.TestCase):
     `randomize_biases` replaces the zero-initialized biases with random values (for mlp_bias=True).
     `check_jaxprs(ref_jaxpr, tc_jaxpr)`, if given, is called with the printed loss-and-grad jaxprs of both runs
     (e.g. to check that a layout option actually changed the collectives).
+    `quantization_rule`, if given, qwix-quantizes both models with these rules. `exact` requires loss and all
+    gradients to be bit-identical instead of within bf16 tolerance.
     """
 
     def _build_cfg(moe_tc_ragged_sort: bool):
@@ -1250,7 +1257,10 @@ class RoutedMoeTest(parameterized.TestCase):
       )
 
     def _build_model(cfg, mesh):
-      return linen_wrappers.to_linen(
+      if not quantization_rule:
+        # Same RoutedMoE as QuantizedMoeTest; with quantization=fp8_full it also applies the Qwix FP8 gmm rule.
+        return QuantizedMoeTest._build_and_quantize_moe_model(cfg, mesh)  # pylint: disable=protected-access
+      model = linen_wrappers.to_linen(
           moe.RoutedMoE,
           name="MoeBlock",
           config=cfg,
@@ -1262,6 +1272,7 @@ class RoutedMoeTest(parameterized.TestCase):
           intermediate_dim=cfg.mlp_dim,
           dtype=cfg.dtype,
       )
+      return qwix.quantize_model(model, qwix.QtProvider(quantization_rule))
 
     def _loss_and_grad_fn(model):
       def loss_fn(params, x):
@@ -1316,6 +1327,28 @@ class RoutedMoeTest(parameterized.TestCase):
       loss_tc, (grads_tc, x_grad_tc) = _loss_and_grad(model_tc, variables, hidden_states)
       if check_jaxprs:
         check_jaxprs(jaxpr_ref, _jaxpr(model_tc, variables, hidden_states))
+
+    # An all-zero gradient (e.g. an fp8 bwd quantization that flushed the cotangent) would pass trivially.
+    self.assertGreater(
+        float(jnp.max(jnp.abs(x_grad_ref.astype(jnp.float32)))), 0.0, "Reference hidden-state gradient is all zero"
+    )
+    if exact:
+      np.testing.assert_array_equal(np.asarray(loss_tc), np.asarray(loss_ref), err_msg="Loss mismatch")
+      np.testing.assert_array_equal(
+          np.asarray(x_grad_tc.astype(jnp.float32)),
+          np.asarray(x_grad_ref.astype(jnp.float32)),
+          err_msg="Hidden-state gradient mismatch",
+      )
+      leaves_ref, treedef_ref = jax.tree_util.tree_flatten_with_path(grads_ref)
+      leaves_tc, treedef_tc = jax.tree_util.tree_flatten_with_path(grads_tc)
+      self.assertEqual(treedef_ref, treedef_tc, "Gradient pytree structures differ")
+      for (path, g_ref), (_, g_tc) in zip(leaves_ref, leaves_tc):
+        np.testing.assert_array_equal(
+            np.asarray(g_tc.astype(jnp.float32)),
+            np.asarray(g_ref.astype(jnp.float32)),
+            err_msg=f"Gradient mismatch at {jax.tree_util.keystr(path)}",
+        )
+      return
 
     self.assertTrue(
         jnp.allclose(loss_tc, loss_ref, rtol=1e-2, atol=1e-2),
@@ -1689,6 +1722,179 @@ class RoutedMoeTest(parameterized.TestCase):
         check_jaxprs=check_jaxprs,
         moe_tc_ragged_3d_dispatch=True,
     )
+
+  @pytest.mark.tpu_only
+  @parameterized.named_parameters(
+      ("prequant_before_unsort", {"moe_bwd_prequant_before_unsort": True}),
+      ("combine_bwd_direct_qarray", {"moe_bwd_prequant_before_unsort": True, "moe_combine_bwd_direct_qarray": True}),
+      ("3d_dlhs_partial_sum", {"moe_3d_dlhs_partial_sum": True}),
+      ("no_mask_padding", {"moe_bwd_prequant_before_unsort": True, "moe_tc_ragged_mask_padding": False}),
+      ("prequant_window_routing", {"moe_bwd_prequant_before_unsort": True, "moe_tc_window_routing": True}),
+      ("fp8_prequant_before_unsort", {"fp8": True, "moe_bwd_prequant_before_unsort": True}),
+      (
+          "fp8_all",
+          {
+              "fp8": True,
+              "moe_bwd_prequant_before_unsort": True,
+              "moe_combine_bwd_direct_qarray": True,
+              "moe_3d_dlhs_partial_sum": True,
+          },
+      ),
+  )
+  def test_tc_ragged_sort_3d_dispatch_bwd_fusions(self, flags):
+    """The fused TC unsort / EP combine backward and the 3D DLHS partial_sum match the unfused 3D dispatch."""
+    common = {
+        **_GMM_V2_SMALL_MLP_TILES,
+        "use_tokamax_gmm": True,
+        "use_gmm_v2": True,
+        "moe_tc_ragged_sort": True,
+        "moe_tc_ragged_3d_gmm": True,
+        "moe_tc_ragged_3d_dispatch": True,
+        "moe_tc_ragged_weights_on_activation": True,
+        "moe_accumulate_wi_dlhs": True,
+        "moe_tc_ragged_mask_padding": flags.get("moe_tc_ragged_mask_padding", True),
+        # Small TC blocks keep the gather / gather-reduce VMEM scratch (~4 / ~7 MiB at emb 7168) within the
+        # default scoped VMEM of every TPU generation; the default 1024-row gather block needs ~29 MiB.
+        "moe_tc_ragged_gather_block_size": 128,
+        "moe_tc_ragged_reduce_block_size": 128,
+    }
+    if flags.get("fp8"):
+      if pltpu.get_tpu_info().fp8_ops_per_second == 0:
+        # gmm_v2 only applies a static lhs scale when it can quantize lhs for an fp8 matmul.
+        self.skipTest("A fixed act scale in gmm_v2 needs fp8 matmul hardware.")
+      # FP8 with fixed per-tensor scales (the only scales the fused combine supports): exercises the fused fp8
+      # QArray TC gather / EP all-gather. The bwd bound is sized to this test's ~1e-8 output cotangents
+      # (mean-reduced loss) so e5m2 does not flush them to zero. The router is not covered by the Qwix gmm rule,
+      # and float32_gate_logits=True requires quantize_router_proj=False.
+      common.update(
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          weight_quantization_calibration_method="fixed,-224,224",
+          act_quantization_calibration_method="fixed,-224,224",
+          bwd_quantization_calibration_method="fixed,1e-5",
+          quantize_router_proj=False,
+      )
+    self._run_tc_ragged_sort_loss_and_grad(
+        ragged_buffer_factor=0.75,
+        common_overrides=common,
+        ref_overrides={},
+        **{k: v for k, v in flags.items() if k not in ("moe_tc_ragged_mask_padding", "fp8")},
+    )
+
+  def _fp8_bwd_fusion_overrides(self, act_calibration_method: str, disable_channelwise_axes: bool):
+    """3D TC dispatch overrides plus an fp8 qwix rule (fixed weight / bwd scales) for the fused-unsort tests."""
+    common = {
+        **_GMM_V2_SMALL_MLP_TILES,
+        "use_tokamax_gmm": True,
+        "use_gmm_v2": True,
+        "moe_tc_ragged_sort": True,
+        "moe_tc_ragged_3d_gmm": True,
+        "moe_tc_ragged_3d_dispatch": True,
+        "moe_tc_ragged_weights_on_activation": True,
+        "moe_tc_ragged_gather_block_size": 128,
+        "moe_tc_ragged_reduce_block_size": 128,
+        # No config quantization: the test applies its own qwix rule (which may disable channelwise axes, unlike
+        # the config's rule), and use_qwix_quantization routes the gmm through it.
+        "use_qwix_quantization": True,
+        "weight_quantization_calibration_method": "fixed,-224,224",
+        "act_quantization_calibration_method": act_calibration_method,
+        # Sized to the ~1e-8 output cotangents (mean-reduced loss) so e5m2 does not flush them to zero.
+        "bwd_quantization_calibration_method": "fixed,1e-5",
+    }
+    rule = [
+        qwix.QtRule(
+            module_path=".*",
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=jnp.float8_e5m2,
+            weight_calibration_method=common["weight_quantization_calibration_method"],
+            act_calibration_method=act_calibration_method,
+            bwd_calibration_method=common["bwd_quantization_calibration_method"],
+            disable_channelwise_axes=disable_channelwise_axes,
+            op_names=("gmm", "ragged_dot"),
+        )
+    ]
+    return common, rule
+
+  @pytest.mark.tpu_only
+  @parameterized.named_parameters(
+      ("fixed_act", "fixed,-224,224", False, {}),
+      ("fixed_act_no_channelwise", "fixed,-224,224", True, {}),
+      ("absmax_act_no_channelwise", "absmax", True, {}),
+      ("absmax_act_window_routing", "absmax", True, {"moe_tc_window_routing": True}),
+  )
+  def test_tc_ragged_sort_3d_dispatch_bwd_prequant_fp8(self, act_calibration_method, disable_channelwise_axes, flags):
+    """With a fixed fp8 bwd scale, quantizing the cotangent before the TC unsort-gather is bit-identical to after."""
+    if act_calibration_method.startswith("fixed") and pltpu.get_tpu_info().fp8_ops_per_second == 0:
+      # gmm_v2 only applies a static lhs scale when it can quantize lhs for an fp8 matmul.
+      self.skipTest("A fixed act scale in gmm_v2 needs fp8 matmul hardware.")
+    common, rule = self._fp8_bwd_fusion_overrides(act_calibration_method, disable_channelwise_axes)
+    self._run_tc_ragged_sort_loss_and_grad(
+        ragged_buffer_factor=0.75,
+        common_overrides=common,
+        ref_overrides={},
+        quantization_rule=rule,
+        exact=True,
+        moe_bwd_prequant_before_unsort=True,
+        **flags,
+    )
+
+  _COMBINE = ("expert", 128)
+
+  @parameterized.named_parameters(
+      ("per_row_bwd", {"bwd": "absmax"}, False, None, "requires a per-tensor bwd scale"),
+      ("per_tensor_dynamic_bwd", {"bwd": "absmax"}, True, None, None),
+      ("per_tensor_dynamic_weight_act", {"weight": "absmax", "act": "absmax"}, True, None, None),
+      ("dynamic_bwd_with_combine", {"bwd": "absmax"}, True, _COMBINE, "requires a fixed bwd_calibration_method"),
+      ("dynamic_weight_with_combine", {"weight": "absmax"}, True, _COMBINE, "requires a fixed weight_calibration_method"),
+      ("dynamic_act_with_combine", {"act": "absmax"}, True, _COMBINE, "requires a fixed act_calibration_method"),
+      ("fixed_with_combine", {}, False, _COMBINE, None),
+  )
+  def test_tc_unsort_bwd_rejects_dynamic_scales(self, dynamic, no_channelwise, combine, error):
+    """The fused unsort backward refuses scales it can't apply in token order or before the EP all-gather."""
+    calibration = {name: dynamic.get(name, "fixed,-224,224") for name in ("weight", "act", "bwd")}
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        weight_calibration_method=calibration["weight"],
+        act_calibration_method=calibration["act"],
+        bwd_calibration_method=calibration["bwd"],
+        disable_channelwise_axes=no_channelwise,
+        op_names=("gmm",),
+    )
+    cfg = mblx_ops.TcUnsortCfg(
+        unpadded_cap=8, num_out_tokens=4, topk=2, blocks=(128, 0, True, True), mask_padding=True, combine_rs_cfg=combine
+    )
+    lhs, rhs = jnp.zeros((8, 128), jnp.bfloat16), jnp.zeros((2, 128, 128), jnp.bfloat16)
+    if error is None:
+      mblx_ops._check_tc_unsort_bwd_supported(lhs, rhs, rule, cfg)  # pylint: disable=protected-access
+    else:
+      with self.assertRaisesRegex(NotImplementedError, error):
+        mblx_ops._check_tc_unsort_bwd_supported(lhs, rhs, rule, cfg)  # pylint: disable=protected-access
+
+  @parameterized.named_parameters(
+      ("same_dtype", jnp.bfloat16, jnp.bfloat16, True),
+      ("scale_dtype_mismatch", jnp.bfloat16, jnp.float32, False),
+  )
+  def test_lhs_rhs_share_fixed_scale_requires_same_scale_dtype(self, lhs_dtype, rhs_dtype, expected):
+    """A fixed scale is built in the quantized array's dtype, so scales of different dtypes are not shared."""
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        weight_calibration_method="fixed,-200,200",
+        act_calibration_method="fixed,-200,200",
+        op_names=("gmm",),
+    )
+    lhs = qpl.quantize(
+        jnp.ones((8, 128), lhs_dtype), jnp.float8_e4m3fn, channelwise_axes=[], calibration_method="fixed,-200,200"
+    )
+    rhs = qpl.quantize(
+        jnp.ones((2, 128, 128), rhs_dtype), jnp.float8_e4m3fn, channelwise_axes=[], calibration_method="fixed,-200,200"
+    )
+    self.assertEqual(mblx_ops._lhs_rhs_share_fixed_scale(rule, lhs, rhs), expected)  # pylint: disable=protected-access
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
@@ -2587,7 +2793,8 @@ class RoutedMoeTest(parameterized.TestCase):
 class QuantizedMoeTest(parameterized.TestCase):
   """Tests for quantized Mixture of Experts (MoE) execution and gradients."""
 
-  def _build_and_quantize_moe_model(self, cfg: Config, mesh: Mesh):
+  @staticmethod
+  def _build_and_quantize_moe_model(cfg: Config, mesh: Mesh):
     """Instantiates and optionally applies Qwix FP8 quantization rules to RoutedMoE."""
     model = linen_wrappers.to_linen(
         moe.RoutedMoE,
@@ -2972,6 +3179,50 @@ class TcRaggedSortConfigTest(parameterized.TestCase):
   def test_3d_gmm_rejects_unsupported(self, overrides, msg):
     with self.assertRaisesRegex(ValueError, re.escape("moe_tc_ragged_3d_gmm=True " + msg)):
       maxtext_types.MaxTextConfig(**{**self._CONFIG_3D, **overrides}, moe_tc_ragged_3d_gmm=True)
+
+  _BWD_PREQUANT_FP8 = {
+      "moe_tc_ragged_3d_gmm": True,
+      "moe_tc_ragged_3d_dispatch": True,
+      "moe_tc_ragged_weights_on_activation": True,
+      "moe_bwd_prequant_before_unsort": True,
+      "quantization": "fp8_full",
+      "use_qwix_quantization": True,
+      "quantize_router_proj": False,
+      "weight_quantization_calibration_method": "fixed,-224,224",
+      "act_quantization_calibration_method": "fixed,-224,224",
+      "bwd_quantization_calibration_method": "fixed,-224,224",
+  }
+
+  @parameterized.parameters(False, True)
+  def test_bwd_prequant_accepts_fixed_calibration(self, combine):
+    cfg = maxtext_types.MaxTextConfig(**self._CONFIG_3D, **self._BWD_PREQUANT_FP8, moe_combine_bwd_direct_qarray=combine)
+    self.assertTrue(cfg.moe_bwd_prequant_before_unsort)
+
+  @parameterized.product(name=["weight", "act", "bwd"], combine=[False, True])
+  def test_bwd_prequant_rejects_dynamic_calibration(self, name, combine):
+    overrides = {
+        **self._BWD_PREQUANT_FP8,
+        "moe_combine_bwd_direct_qarray": combine,
+        f"{name}_quantization_calibration_method": "absmax",
+    }
+    with self.assertRaisesRegex(ValueError, re.escape(f"got {name}_quantization_calibration_method='absmax'")):
+      maxtext_types.MaxTextConfig(**self._CONFIG_3D, **overrides)
+
+  def test_bwd_prequant_without_quantization_skips_calibration_check(self):
+    overrides = {**self._BWD_PREQUANT_FP8, "quantization": "", "act_quantization_calibration_method": "absmax"}
+    self.assertTrue(maxtext_types.MaxTextConfig(**self._CONFIG_3D, **overrides).moe_bwd_prequant_before_unsort)
+
+  def test_combine_bwd_direct_qarray_rejects_combine_bwd_method(self):
+    with self.assertRaisesRegex(ValueError, re.escape("moe_quantize_combine_bwd_method='rowwise' has no effect")):
+      maxtext_types.MaxTextConfig(
+          **self._CONFIG_3D,
+          moe_tc_ragged_3d_gmm=True,
+          moe_tc_ragged_3d_dispatch=True,
+          moe_tc_ragged_weights_on_activation=True,
+          moe_bwd_prequant_before_unsort=True,
+          moe_combine_bwd_direct_qarray=True,
+          moe_quantize_combine_bwd_method="rowwise",
+      )
 
   def test_accepts_3d_dispatch(self):
     cfg = maxtext_types.MaxTextConfig(**self._CONFIG_3D, moe_tc_ragged_3d_gmm=True, moe_tc_ragged_3d_dispatch=True)
