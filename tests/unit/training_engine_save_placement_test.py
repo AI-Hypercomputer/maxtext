@@ -33,6 +33,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
+from maxtext.training_engine import checkpointing
 from maxtext.training_engine.maxtext_engine import MaxTextTrainingEngine
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
@@ -163,6 +164,101 @@ class TrainingEngineSavePlacementTest(unittest.TestCase):
     if mesh.shape.get("data", 1) > 1:
       self.assertGreater(data_sharded_leaves, 0)
     self.assertEqual(int(engine._optimizer.step.value), 42)
+
+  def test_colocated_python_async_save_stages_params_to_pinned_host(self):
+    engine, mesh = _create_engine(self.ckpt_dir)
+    # Inject dummy PRNG key into model state to verify PRNG key leaves are not staged.
+    replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    engine.model._dummy_key = jax.device_put(nnx.Rngs(42).params(), replicated_sharding)
+
+    saved_items = {}
+    mock_inner_mgr = mock.MagicMock()
+
+    def fake_save(step, args, custom_metadata=None, **kwargs):
+      for k, v in args._items.items():
+        saved_items[k] = v.item
+      return True
+
+    mock_inner_mgr.save.side_effect = fake_save
+    mock_inner_mgr.should_save.return_value = True
+
+    mgr = engine._checkpoint_manager
+    mgr._checkpoint_manager = mock_inner_mgr
+    mgr._async_checkpointing = True
+
+    with mock.patch.object(checkpointing, "_REGISTERED_IMPL", checkpointing._COLOCATED_PYTHON):
+      success = mgr.save_checkpoint(
+          step=1,
+          checkpoint_state=checkpointing.CheckpointState(model=engine.model),
+      )
+
+    self.assertTrue(success)
+    self.assertIn("model_params", saved_items)
+    staged_params = saved_items["model_params"]
+
+    # Verify model_params arrays are staged to pinned_host while PRNG keys are not.
+    staged_array_leaves = 0
+    key_leaves = 0
+    for leaf in jax.tree.leaves(staged_params):
+      if isinstance(leaf, jax.Array):
+        if jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key):
+          key_leaves += 1
+          self.assertEqual(getattr(leaf.sharding, "memory_kind", None), "device")
+        else:
+          staged_array_leaves += 1
+          self.assertEqual(getattr(leaf.sharding, "memory_kind", None), "pinned_host")
+
+    self.assertGreaterEqual(staged_array_leaves, 5)
+    self.assertGreaterEqual(key_leaves, 1)
+
+    # Verify checkpoint_state.model's live leaves remain on device.
+    live_device_leaves = 0
+    for leaf in jax.tree.leaves(nnx.state(engine.model)):
+      if isinstance(leaf, jax.Array):
+        live_device_leaves += 1
+        self.assertEqual(getattr(leaf.sharding, "memory_kind", None), "device")
+    self.assertGreaterEqual(live_device_leaves, staged_array_leaves)
+
+  def test_colocated_python_sync_or_other_impl_does_not_stage_to_pinned_host(self):
+    engine, mesh = _create_engine(self.ckpt_dir)
+    saved_items = {}
+    mock_inner_mgr = mock.MagicMock()
+
+    def fake_save(step, args, custom_metadata=None, **kwargs):
+      for k, v in args._items.items():
+        saved_items[k] = v.item
+      return True
+
+    mock_inner_mgr.save.side_effect = fake_save
+    mock_inner_mgr.should_save.return_value = True
+
+    mgr = engine._checkpoint_manager
+    mgr._checkpoint_manager = mock_inner_mgr
+
+    # Case 1: colocated_python but async_checkpointing = False
+    mgr._async_checkpointing = False
+    with mock.patch.object(checkpointing, "_REGISTERED_IMPL", checkpointing._COLOCATED_PYTHON):
+      mgr.save_checkpoint(
+          step=1,
+          checkpoint_state=checkpointing.CheckpointState(model=engine.model),
+      )
+
+    for leaf in jax.tree.leaves(saved_items["model_params"]):
+      if isinstance(leaf, jax.Array):
+        self.assertEqual(getattr(leaf.sharding, "memory_kind", None), "device")
+
+    # Case 2: async_checkpointing = True but _REGISTERED_IMPL != colocated_python
+    saved_items.clear()
+    mgr._async_checkpointing = True
+    with mock.patch.object(checkpointing, "_REGISTERED_IMPL", checkpointing._PERSISTENCE):
+      mgr.save_checkpoint(
+          step=2,
+          checkpoint_state=checkpointing.CheckpointState(model=engine.model),
+      )
+
+    for leaf in jax.tree.leaves(saved_items["model_params"]):
+      if isinstance(leaf, jax.Array):
+        self.assertEqual(getattr(leaf.sharding, "memory_kind", None), "device")
 
 
 if __name__ == "__main__":

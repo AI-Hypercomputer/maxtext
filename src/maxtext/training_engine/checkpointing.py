@@ -403,6 +403,21 @@ def _assert_uniform_device_set(tree: Any, *, item: str) -> None:
     )
 
 
+def _stage_to_pinned_host(tree: Any) -> Any:
+  """Stages jax.Array leaves with non-pinned_host sharding to pinned_host."""
+  def _stage_leaf(x: Any) -> Any:
+    if isinstance(x, jax.Array) and not jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key):
+      sharding = getattr(x, "sharding", None)
+      if sharding is not None and getattr(sharding, "memory_kind", None) != "pinned_host":
+        try:
+          return jax.device_put(x, sharding.with_memory_kind("pinned_host"))
+        except (ValueError, RuntimeError):
+          pass
+    return x
+
+  return jax.tree.map(_stage_leaf, tree)
+
+
 class CheckpointManager:
   """CheckpointManager wrapper for MaxText training engine."""
 
@@ -418,6 +433,7 @@ class CheckpointManager:
       config: The training configuration.
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
+    self._async_checkpointing = bool(config.async_checkpointing)
     # Whether a background save that fails is raised from the next checkpoint call (False, the
     # default) or logged and dropped (True). See `_drain_in_flight_save`.
     self._abandon_failed_saves = config.abandon_failed_checkpoint_saves
@@ -707,18 +723,22 @@ class CheckpointManager:
     params = nnx.state(checkpoint_state.model)
     if _REGISTERED_IMPL == _COLOCATED_PYTHON:
       _assert_uniform_device_set(params, item="model_params")
-    jax.block_until_ready(params)
-    model_cp_args = ocp.args.PyTreeSave(
-        item=params,
-        save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params),
-    )
-    save_args = {"model_params": model_cp_args}
+
     # Taken from the values handed to Orbax, before the async upload overlaps the next step, so
     # restore can prove the persisted bytes are exactly these.
     fingerprints_enabled = _orbax_fingerprint_enabled()
     fingerprint_start = time.perf_counter()
     fingerprints = {"model_params": _tree_fingerprint(params)} if fingerprints_enabled else {}
     fingerprint_seconds = time.perf_counter() - fingerprint_start
+
+    if _REGISTERED_IMPL == _COLOCATED_PYTHON and self._async_checkpointing:
+      params = _stage_to_pinned_host(params)
+    jax.block_until_ready(params)
+    model_cp_args = ocp.args.PyTreeSave(
+        item=params,
+        save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params),
+    )
+    save_args = {"model_params": model_cp_args}
 
     if checkpoint_state.optimizer:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
