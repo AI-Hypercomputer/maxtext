@@ -802,6 +802,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # resumed into completes and its finished state has been checkpointed.
     self._resumed_mid_step = False
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
+    # Readiness tokens for Tunix's TrainerWorker step timer (TRAINER_STEP_TIMING): arrays that
+    # become ready when the last microbatch's / optimizer step's device work has finished.
+    self.last_fwd_bwd_token: jax.Array | None = None
+    self.last_update_token: jax.Array | None = None
     # `create_training_optimizer` returns a raw optax GradientTransformation. `TrainStateNNX.apply_gradients`
     # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
     # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. `wrt=nnx.Param`
@@ -2139,6 +2143,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           self.record_metrics(key, value)
 
     self._cached_losses.append(loss)
+    # The loss rather than the running sums: the next microbatch's accumulate donates those.
+    self.last_fwd_bwd_token = loss.unreduced_sum if isinstance(loss, abstract_engine.WeightedMetric) else loss
     self._accumulated_grads = acc_grads
     self._accumulated_denominator = acc_denom
     self._micro_step_count += 1
@@ -2206,6 +2212,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # Back to pinned host memory, where the compiled update's `out_shardings` would put it.
       self._offload_optimizer_state()
 
+    # Same readiness signal the throttler uses below: the norm comes out of the update executable.
+    self.last_update_token = grad_norm
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
     if is_skipped is not None:
