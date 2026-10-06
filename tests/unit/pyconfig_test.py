@@ -415,6 +415,19 @@ class PyconfigTest(unittest.TestCase):
       finally:
         os.chdir(orig)
 
+  def test_resolve_or_infer_config_accepts_yaml_suffix(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      for suffix in (".yml", ".yaml", ".YAML"):
+        with self.subTest(suffix=suffix):
+          config_path = os.path.join(tmpdir, f"model{suffix}")
+          with open(config_path, "w", encoding="utf-8") as f:
+            f.write("steps: 1\n")
+          resolved, remaining = pyconfig._resolve_or_infer_config(  # pylint: disable=protected-access
+              ["train.py", config_path, "steps=2"]
+          )
+          self.assertEqual(resolved, config_path)
+          self.assertEqual(remaining, ["steps=2"])
+
   def test_config_file_mapping(self):
     for module, relative_path in _CONFIG_FILE_MAPPING.items():
       full_path = os.path.join(MAXTEXT_CONFIGS_DIR, relative_path)
