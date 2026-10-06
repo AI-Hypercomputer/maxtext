@@ -1345,6 +1345,15 @@ use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax
 sa_use_base2_exp: true # defaults to true in Tokamax
+# Diagonal sub-tile skipping (requires tokamax>=0.0.15 and use_tokamax_splash=true). Square blocks are required:
+# sa_block_q == sa_block_kv == sa_block_kv_compute, sa_block_q_dkv == sa_block_kv_dkv == sa_block_kv_dkv_compute,
+# and eval_sa_block_q == eval_sa_block_kv == eval_sa_block_kv_compute under custom eval rules.
+# Only applies when the kernel gets a pure causal mask: global/mla attention layers with q_len == kv_len. Disabled
+# for local_sliding/chunk/full/compressed/block_diffusion layers, decode, ring/USP context parallelism and
+# load-balanced all_gather context parallelism (context_parallel_load_balance: true, the default).
+sa_qk_diag_skip: false # skip strictly causal-masked sub-tiles in diagonal QK blocks
+sa_sv_diag_skip: false # skip zeroed strictly causal-masked sub-tiles in diagonal SV blocks
+sa_qk_diag_grid: 2 # sub-grid split factor for diagonal skip (power of 2 >= 2)
 # local_sa_* variants apply to local (sliding window) attention layers;
 # if None, each inherits from the corresponding global sa_* flag.
 local_sa_block_q: None  # inherits from sa_block_q if None

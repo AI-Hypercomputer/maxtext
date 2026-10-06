@@ -680,6 +680,9 @@ class AttentionOp(nnx.Module):
         self.use_splash_scheduler = self.config.local_use_splash_scheduler
         self.fuse_reciprocal = self.config.local_sa_fuse_reciprocal
         self.use_base2_exp = self.config.local_sa_use_base2_exp
+        # Diagonal sub-tile skipping requires a pure causal mask.
+        self.qk_diag_skip = False
+        self.sv_diag_skip = False
       else:
         self.block_q = self.config.sa_block_q
         self.block_kv = self.config.sa_block_kv
@@ -702,6 +705,8 @@ class AttentionOp(nnx.Module):
         self.use_splash_scheduler = self.config.use_splash_scheduler
         self.fuse_reciprocal = self.config.sa_fuse_reciprocal
         self.use_base2_exp = self.config.sa_use_base2_exp
+        self.qk_diag_skip = self.config.sa_qk_diag_skip
+        self.sv_diag_skip = self.config.sa_sv_diag_skip
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.chunk_attn_window_size = chunk_attn_window_size
@@ -2038,6 +2043,21 @@ class AttentionOp(nnx.Module):
     # create_splash_attention config
     def create_sa_config(config, query, key, attn_logits_soft_cap):
       if config.use_tokamax_splash:
+        # Tokamax only allows diagonal sub-tile skipping with a pure `CausalMask`, which
+        # GLOBAL/MLA get unless load-balanced context parallelism permutes the sequence.
+        use_diag_skip = (
+            self.attention_type in (AttentionType.GLOBAL, AttentionType.MLA)
+            and query.shape[2] == key.shape[2]
+            and not (cp_size > 1 and load_balanced_context_parallel)
+        )
+        diag_skip_kwargs = {}
+        if use_diag_skip and (self.qk_diag_skip or self.sv_diag_skip):
+          # Only passed when enabled so older Tokamax releases (< 0.0.15) keep working by default.
+          diag_skip_kwargs = {
+              "qk_diag_skip": self.qk_diag_skip,
+              "sv_diag_skip": self.sv_diag_skip,
+              "qk_diag_grid": config.sa_qk_diag_grid,
+          }
         sa_config = tokamax_splash_kernel.SplashConfig(
             block_q=min(block_q, query.shape[2]),
             block_kv=min(block_kv, key.shape[2]),
@@ -2076,6 +2096,7 @@ class AttentionOp(nnx.Module):
                 else (_COMPRESSED_DQ_REDUCTION_STEPS if self.attention_type == AttentionType.COMPRESSED else None)
             ),
             use_experimental_scheduler=self.use_splash_scheduler,
+            **diag_skip_kwargs,
         )
       else:
         sa_config = splash_attention_kernel.BlockSizes(

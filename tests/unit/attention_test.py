@@ -602,6 +602,9 @@ def _create_mock_flash_op(
       use_splash_scheduler=False,
       sa_fuse_reciprocal=False,
       sa_use_base2_exp=False,
+      sa_qk_diag_skip=False,
+      sa_sv_diag_skip=False,
+      sa_qk_diag_grid=2,
       use_tokamax_splash=use_tokamax_splash,
       use_jax_splash=False,
       cost_estimate_flops_fwd=-1,
@@ -678,6 +681,10 @@ class BlockCausalMaskTest(unittest.TestCase):
       mesh_shape=None,
       eval_block_size=4,
       eval_qkv_layout="HEAD_DIM_MINOR",
+      use_tokamax_splash=False,
+      sa_qk_diag_skip=False,
+      sa_sv_diag_skip=False,
+      sa_qk_diag_grid=2,
   ):
     """Builds a minimal flash-attention operator for dispatch tests."""
     config = types.SimpleNamespace(
@@ -709,8 +716,15 @@ class BlockCausalMaskTest(unittest.TestCase):
         use_splash_scheduler=False,
         sa_fuse_reciprocal=False,
         sa_use_base2_exp=False,
-        use_tokamax_splash=False,
+        sa_qk_diag_skip=sa_qk_diag_skip,
+        sa_sv_diag_skip=sa_sv_diag_skip,
+        sa_qk_diag_grid=sa_qk_diag_grid,
+        use_tokamax_splash=use_tokamax_splash,
         use_jax_splash=False,
+        cost_estimate_flops_fwd=-1,
+        cost_estimate_flops_bwd=-1,
+        dq_reduction_steps=-1,
+        local_sliding_window_size=4,
     )
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
@@ -959,6 +973,48 @@ class BlockCausalMaskTest(unittest.TestCase):
     with nn_partitioning.axis_rules(op.config.logical_axis_rules_for_eval):
       eval_kw = capture_block_sizes()
     self.assertEqual((eval_kw["block_q"], eval_kw["q_layout"]), (8, qkv_layout["SEQ_MINOR"]))
+
+  def test_tpu_tokamax_splash_wires_diag_skip_flags(self):
+    def capture_splash_config(op, query, key):
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.tokamax_splash_kernel, "SplashConfig", side_effect=RuntimeError("splash config captured")
+          ) as make_splash_config,
+          self.assertRaisesRegex(RuntimeError, "splash config captured"),
+      ):
+        op.tpu_flash_attention(query, key, key, decoder_segment_ids=None)
+      return make_splash_config.call_args.kwargs
+
+    query = jnp.zeros((2, 16, 1, 8))
+    decode_query = jnp.zeros((2, 4, 1, 8))
+    # (attention_type, query, cp_size, load_balanced, expect_diag_skip)
+    cases = (
+        (AttentionType.GLOBAL, query, 1, False, True),
+        (AttentionType.MLA, query, 1, False, True),
+        # Tokamax rejects diagonal skipping for any mask other than a pure CausalMask.
+        (AttentionType.COMPRESSED, query, 1, False, False),
+        (AttentionType.BLOCK_DIFFUSION, query, 1, False, False),
+        (AttentionType.GLOBAL, query, 2, True, False),
+        (AttentionType.GLOBAL, decode_query, 1, False, False),
+    )
+    for attention_type, q, cp_size, load_balanced, expect_diag_skip in cases:
+      with self.subTest(attention_type=attention_type, q_len=q.shape[1], cp_size=cp_size):
+        op = self._make_flash_op(
+            attention_type=attention_type,
+            context_parallel_size=cp_size,
+            context_parallel_load_balance=load_balanced,
+            use_tokamax_splash=True,
+            sa_qk_diag_skip=True,
+            sa_sv_diag_skip=True,
+            sa_qk_diag_grid=4,
+        )
+        kw = capture_splash_config(op, q, query)
+        if expect_diag_skip:
+          self.assertEqual((kw["qk_diag_skip"], kw["sv_diag_skip"], kw["qk_diag_grid"]), (True, True, 4))
+        else:
+          self.assertNotIn("qk_diag_skip", kw)
+          self.assertNotIn("sv_diag_skip", kw)
 
   def _capture_splash_mask(self, op, query, q_axis="context"):
     """Runs `tpu_flash_attention` far enough to see which mask it built."""
