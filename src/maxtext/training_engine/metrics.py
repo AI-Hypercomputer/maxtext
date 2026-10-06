@@ -39,14 +39,19 @@ _METRICS_TO_LOG = [
     "step_skipped",
     "step_time",
     "tflops",
-    # log_required_ragged_buffer_factor probe: smallest ragged_buffer_factor that would not have dropped tokens.
+    # log_required_ragged_buffer_factor probe: smallest ragged_buffer_factor that would not have dropped tokens,
+    # and the (token, expert) rows dropped (most by one EP shard in one layer, and in total).
     "moe_required_rbf",
+    "moe_dropped_rows_max",
+    "moe_dropped_rows_total",
 ]
 
 # Reductions over a step's recorded values (one per micro-step) for metrics where the mean is wrong.
 _DEFAULT_AGGREGATION_FNS = {
     # The step needs the largest factor any micro-step needed.
     "moe_required_rbf": np.max,
+    "moe_dropped_rows_max": np.max,
+    "moe_dropped_rows_total": np.sum,
 }
 
 # Completed step buffers to keep resident. Each holds live device arrays and nothing on the
@@ -248,10 +253,10 @@ class MetricsLogger:
     """
     if mode == Mode.TRAIN:
       log_message = [f"Train step: {step}"]
-      for k in ["loss", "perplexity", "moe_required_rbf"]:
+      for k in ["loss", "perplexity", "moe_required_rbf", "moe_dropped_rows_max", "moe_dropped_rows_total"]:
         if k in metrics:
           val = metrics[k]
-          log_message.append(f"{k}: {val:.3f}")
+          log_message.append(f"{k}: {val:.0f}" if k.startswith("moe_dropped_rows") else f"{k}: {val:.3f}")
       if len(log_message) > 1:
         logging.info(", ".join(log_message))
     elif mode == Mode.EVAL:

@@ -1025,7 +1025,9 @@ class MoEGeneral(BaseModel):
       description=(
           "Probe: record per step the smallest ragged_buffer_factor that would not have dropped tokens, max over "
           "MoE layers, as the learning/moe_required_rbf metric (aux key moe_required_rbf). Values above "
-          "ragged_buffer_factor mean that step dropped tokens. Requires use_ring_of_experts=True and "
+          "ragged_buffer_factor mean that step dropped tokens. Also records the (token, expert) rows dropped: "
+          "moe_dropped_rows_max (most by one EP shard in one layer's forward pass) and moe_dropped_rows_total "
+          "(summed over shards, layers and microbatches). Requires use_ring_of_experts=True and "
           "use_ragged_sort=True."
       ),
   )
@@ -4160,8 +4162,7 @@ class MaxTextConfig(
     if self.pathways_checkpointing_impl == "colocated_python":
       if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
         raise ValueError(
-            "pathways_checkpointing_impl='colocated_python' requires "
-            "ENABLE_PATHWAYS_PERSISTENCE=1 in the environment."
+            "pathways_checkpointing_impl='colocated_python' requires " "ENABLE_PATHWAYS_PERSISTENCE=1 in the environment."
         )
       if (
           self.checkpoint_storage_device_host_concurrent_gb is None

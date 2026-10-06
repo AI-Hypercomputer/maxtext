@@ -106,9 +106,36 @@ class RouteOutput:
   # Shape [local experts], tracks number of local tokens routed to every local expert.
   local_group_sizes: Optional[jax.Array] = None
   has_overflow: bool | jax.Array = False
-  # log_required_ragged_buffer_factor probe: smallest ragged_buffer_factor that would have avoided drops, max over
-  # the mesh (float32 scalar), or None when the probe is off.
-  required_rbf: Optional[jax.Array] = None
+  # log_required_ragged_buffer_factor probe (see MOE_BUFFER_PROBE_METRICS), reduced over the mesh, or None when the
+  # probe is off.
+  buffer_probe: Optional[jax.Array] = None
+
+
+# log_required_ragged_buffer_factor probe: the layout of the float32 vector each MoE layer sows as
+# "moe_buffer_probe", with each entry's reduction over devices, chunks, layers and microbatches:
+#   moe_required_rbf: smallest ragged_buffer_factor that would not have dropped tokens (max).
+#   moe_dropped_rows_max: most (token, expert) rows one EP shard dropped in one layer's forward pass (max).
+#   moe_dropped_rows_total: (token, expert) rows dropped, summed (sum).
+MOE_BUFFER_PROBE_METRICS = ("moe_required_rbf", "moe_dropped_rows_max", "moe_dropped_rows_total")
+MOE_BUFFER_PROBE_REDUCTIONS = ("max", "max", "sum")
+
+
+def reduce_moe_buffer_probe(values) -> jax.Array:
+  """Reduces probe vectors of any leading shape [..., 3] (or a list of them) to one [3] vector."""
+  if isinstance(values, (list, tuple)):
+    values = jnp.concatenate([jnp.reshape(v, (-1, len(MOE_BUFFER_PROBE_METRICS))) for v in values])
+  values = jnp.reshape(values, (-1, len(MOE_BUFFER_PROBE_METRICS))).astype(jnp.float32)
+  return jnp.stack(
+      [
+          jnp.max(values[:, i]) if reduction == "max" else jnp.sum(values[:, i])
+          for i, reduction in enumerate(MOE_BUFFER_PROBE_REDUCTIONS)
+      ]
+  )
+
+
+def moe_buffer_probe_metrics(probe: jax.Array) -> dict[str, jax.Array]:
+  """Splits a reduced [3] probe vector into its named metrics."""
+  return {name: probe[i] for i, name in enumerate(MOE_BUFFER_PROBE_METRICS)}
 
 
 def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
@@ -400,6 +427,17 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=
   direction = jnp.sign(average_load - expert_counts)
   output = direction * rate
   return output
+
+
+def token_replication_of(pspec, mesh) -> int:
+  """The number of devices holding each token of an input partitioned by pspec: mesh size / sharded axes' size."""
+  if mesh is None or not mesh.axis_names:
+    return 1
+  sharded = 1
+  for dim in pspec or ():
+    for axis in (dim,) if isinstance(dim, str) else (dim or ()):
+      sharded *= mesh.shape[axis]
+  return mesh.size // sharded
 
 
 def _batch_axis_names(pspec) -> tuple[str, ...] | None:
@@ -1808,23 +1846,39 @@ class RoutedMoE(nnx.Module):
     """Selects bias values for a variable number of bias tensors based on chosen experts."""
     return tuple(bias[experts_index] for bias in biases)
 
-  def required_ragged_buffer_factor(self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id):
-    """log_required_ragged_buffer_factor probe: the smallest ragged_buffer_factor that would not have dropped tokens.
+  def ragged_buffer_probe(
+      self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id, force_dropless=False, token_replication=1
+  ):
+    """log_required_ragged_buffer_factor probe: buffer factor needed and rows dropped (see MOE_BUFFER_PROBE_METRICS).
 
     group_sizes are the global per-expert token counts of the (EP-gathered) batch, as ring_ragged_sort computes them
     for the overflow check in permute(). The per-shard buffer is int(balanced_size * factor) rows, so a shard drops
-    tokens iff sum(local group sizes) > balanced_size * factor. The result is max over all devices of
-    sum(local group sizes) / balanced_size: one float32 scalar max all-reduce over the mesh axes (no other change).
+    sum(local group sizes) - buffer_size rows when that is positive, and needs a factor of at least
+    sum(local group sizes) / balanced_size. Returns [max required factor, max dropped, total dropped] over all
+    devices: one max and one sum all-reduce of float32 over the mesh axes (no other change). The sum counts each
+    device that holds the same tokens (token_replication of them: the mesh axes the MoE input is not sharded over)
+    once.
     """
     local_num_experts = self.config.num_experts // num_ep
     local_group_sizes = jax.lax.dynamic_slice_in_dim(
         group_sizes, expert_shard_id * local_num_experts, local_num_experts, axis=0
     )
+    local_tokens = jnp.sum(local_group_sizes)
     balanced_size = (bsz_times_seq_len // num_ep) * self.num_experts_per_tok
-    required = jnp.sum(local_group_sizes).astype(jnp.float32) / jnp.float32(balanced_size)
+    required = local_tokens.astype(jnp.float32) / jnp.float32(balanced_size)
+    if force_dropless or self.config.ragged_buffer_factor <= 0.0:
+      dropped = jnp.float32(0.0)
+    else:
+      buffer_size = self.get_ragged_buffer_size(
+          balanced_size, num_ep, self.config.num_experts, self.num_experts_per_tok, self.config.ragged_buffer_factor
+      )
+      dropped = jnp.maximum(local_tokens - buffer_size, 0).astype(jnp.float32)
+    maxima, total = jnp.stack([required, dropped]), dropped
     if self.mesh is not None and self.mesh.axis_names:
-      required = jax.lax.pmax(required, tuple(self.mesh.axis_names))
-    return required
+      axis_names = tuple(self.mesh.axis_names)
+      maxima = jax.lax.pmax(maxima, axis_names)
+      total = jax.lax.psum(total, axis_names) / jnp.float32(token_replication)
+    return jnp.concatenate([maxima, total[None]])
 
   @staticmethod
   def get_ragged_buffer_size(local_batch, ep_degree, global_experts, top_k, ragged_buffer_factor):
@@ -2332,9 +2386,16 @@ class RoutedMoE(nnx.Module):
           mesh_axis_names=roe_bias_axis_names,
           topk=topk,
       )
-      required_rbf = None
+      buffer_probe = None
       if getattr(self.config, "log_required_ragged_buffer_factor", False):
-        required_rbf = self.required_ragged_buffer_factor(group_sizes, x_shape[0] * x_shape[1], num_ep, expert_shard_id)
+        buffer_probe = self.ragged_buffer_probe(
+            group_sizes,
+            x_shape[0] * x_shape[1],
+            num_ep,
+            expert_shard_id,
+            force_dropless=force_dropless,
+            token_replication=token_replication_of(input_partition_pspec, self.mesh),
+        )
       return (
           x,
           RouteOutput(
@@ -2346,7 +2407,7 @@ class RoutedMoE(nnx.Module):
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
               has_overflow=has_overflow,
-              required_rbf=required_rbf,
+              buffer_probe=buffer_probe,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -2893,9 +2954,11 @@ class RoutedMoE(nnx.Module):
           tiled=True,
       )
 
-    def _required_rbf(routing):
-      """The routing's log_required_ragged_buffer_factor probe value, 0.0 when the probe is off."""
-      return jnp.float32(0.0) if routing.required_rbf is None else routing.required_rbf
+    def _buffer_probe(routing):
+      """The routing's log_required_ragged_buffer_factor probe vector, zeros when the probe is off."""
+      if routing.buffer_probe is None:
+        return jnp.zeros((len(MOE_BUFFER_PROBE_METRICS),), jnp.float32)
+      return routing.buffer_probe
 
     def _moe_body(
         x,
@@ -2944,7 +3007,7 @@ class RoutedMoE(nnx.Module):
 
       if self.config.use_ring_of_experts:
         output = _ring_reduce_scatter(_ring_unpermute(intermediate_output, routing, batch_size, sequence_length))
-        return output, routing.lb_loss, routing.bias_updates, routing.has_overflow, _required_rbf(routing)
+        return output, routing.lb_loss, routing.bias_updates, routing.has_overflow, _buffer_probe(routing)
 
       if self.get_expert_parallelism_size() > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
@@ -2976,7 +3039,7 @@ class RoutedMoE(nnx.Module):
           group_sizes=routing.group_sizes,
       )
 
-      return output, routing.lb_loss, routing.bias_updates, routing.has_overflow, _required_rbf(routing)
+      return output, routing.lb_loss, routing.bias_updates, routing.has_overflow, _buffer_probe(routing)
 
     @functools.partial(
         jax.shard_map,
@@ -3003,7 +3066,7 @@ class RoutedMoE(nnx.Module):
             P(),  # Handle None or replicate the output
             P(),  # Handle None or replicate the output
             P(),  # has_overflow: replicated scalar, all-reduced across entire mesh
-            P(),  # required_rbf (probe): replicated scalar, max-reduced across entire mesh (0.0 when off)
+            P(),  # buffer_probe: replicated [3] vector, reduced across entire mesh (zeros when off)
         ),
         check_vma=self.config.check_vma,
     )
@@ -3093,7 +3156,7 @@ class RoutedMoE(nnx.Module):
           return (routed,) + tuple(dispatched_c[1:])
 
         dispatched = [_dispatch(0, x[:, 0:chunk, :])] + [None] * (n_chunks - 1)
-        outs, lb_losses, bias_updates_list, has_overflows, required_rbfs = [], [], [], [], []
+        outs, lb_losses, bias_updates_list, has_overflows, buffer_probes = [], [], [], [], []
         unpermuted = None  # the previous chunk's combine input, not yet reduce-scattered
         for c in range(n_chunks):
           if c + 1 < n_chunks:
@@ -3129,13 +3192,13 @@ class RoutedMoE(nnx.Module):
           lb_losses.append(routing.lb_loss)
           bias_updates_list.append(routing.bias_updates)
           has_overflows.append(routing.has_overflow)
-          required_rbfs.append(_required_rbf(routing))
+          buffer_probes.append(_buffer_probe(routing))
         outs.append(_ring_reduce_scatter(unpermuted))
         output = jnp.concatenate(outs, axis=1)
         lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
         bias_updates = None if bias_updates_list[0] is None else sum(bias_updates_list) / n_chunks
         has_overflow = jnp.any(jnp.stack(has_overflows))
-        return output, lb_loss, bias_updates, has_overflow, jnp.max(jnp.stack(required_rbfs))
+        return output, lb_loss, bias_updates, has_overflow, reduce_moe_buffer_probe(buffer_probes)
 
       def _route_and_compute(force_dropless):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
@@ -3167,7 +3230,7 @@ class RoutedMoE(nnx.Module):
         # load-balance loss / bias updates are averaged across chunks.
         seq_len = x.shape[1]
         chunk = seq_len // n_chunks
-        outs, lb_losses, bias_updates_list, has_overflows, required_rbfs = [], [], [], [], []
+        outs, lb_losses, bias_updates_list, has_overflows, buffer_probes = [], [], [], [], []
         _prev = None
         for c in range(n_chunks):
           sl = slice(c * chunk, (c + 1) * chunk)
@@ -3178,7 +3241,7 @@ class RoutedMoE(nnx.Module):
           # loss stays bit-exact.
           if barrier_enabled and _prev is not None:
             x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
-          out_c, lb_c, bu_c, ov_c, rbf_c = _moe_body(
+          out_c, lb_c, bu_c, ov_c, probe_c = _moe_body(
               x_c,
               logits[:, sl, :],
               None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
@@ -3199,12 +3262,12 @@ class RoutedMoE(nnx.Module):
           lb_losses.append(lb_c)
           bias_updates_list.append(bu_c)
           has_overflows.append(ov_c)
-          required_rbfs.append(rbf_c)
+          buffer_probes.append(probe_c)
         output = jnp.concatenate(outs, axis=1)
         lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
         bias_updates = None if bias_updates_list[0] is None else sum(bias_updates_list) / n_chunks
         has_overflow = jnp.any(jnp.stack(has_overflows))
-        return output, lb_loss, bias_updates, has_overflow, jnp.max(jnp.stack(required_rbfs))
+        return output, lb_loss, bias_updates, has_overflow, reduce_moe_buffer_probe(buffer_probes)
 
       force_dropless = getattr(self, "force_dropless", False)
       return _route_and_compute(force_dropless=force_dropless)
@@ -3320,7 +3383,7 @@ class RoutedMoE(nnx.Module):
           backward=prefetch == "forward_backward",
       )
 
-    output, lb_loss, bias_updates, has_overflow, required_rbf = sparse_matmul_route_and_compute(
+    output, lb_loss, bias_updates, has_overflow, buffer_probe = sparse_matmul_route_and_compute(
         inputs,
         gate_logits,
         pre_bias_logits,
@@ -3336,7 +3399,7 @@ class RoutedMoE(nnx.Module):
     )
     self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
     if getattr(self.config, "log_required_ragged_buffer_factor", False):
-      self.sow(nnx.Intermediate, "moe_required_rbf", required_rbf)
+      self.sow(nnx.Intermediate, "moe_buffer_probe", buffer_probe)
     return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices, safe_updates=False):

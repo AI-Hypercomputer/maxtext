@@ -98,30 +98,34 @@ def _segment_ids_from_attention_mask(attention_mask: Array, input_tokens: Array)
   return attention_mask[:, -1, :].astype(jnp.int32)
 
 
-# log_required_ragged_buffer_factor probe values seen by `TunixMaxTextAdapter.__call__`, or None when no
+# log_required_ragged_buffer_factor probe vectors seen by `TunixMaxTextAdapter.__call__`, or None when no
 # one is collecting. Tunix losses call the model on a copy (`nnx.merge(*nnx.split(model))`) and discard it,
 # so what the MoE layers `sow` never reaches the caller; the adapter reports it here instead.
-_moe_required_rbf_values: Optional[list] = None
+_moe_buffer_probe_values: Optional[list] = None
 
 
 @contextlib.contextmanager
-def collect_moe_required_rbf():
-  """Collects the probe values of every adapter forward pass inside the block, in the same trace."""
-  global _moe_required_rbf_values
-  previous, _moe_required_rbf_values = _moe_required_rbf_values, []
+def collect_moe_buffer_probe():
+  """Collects the probe vectors of every adapter forward pass inside the block, in the same trace.
+
+  Reduce them with `moe.reduce_moe_buffer_probe`. A loss that runs the model more than once per batch reports
+  each pass, so moe_dropped_rows_total counts each of them.
+  """
+  global _moe_buffer_probe_values
+  previous, _moe_buffer_probe_values = _moe_buffer_probe_values, []
   try:
-    yield _moe_required_rbf_values
+    yield _moe_buffer_probe_values
   finally:
-    _moe_required_rbf_values = previous
+    _moe_buffer_probe_values = previous
 
 
-def _report_moe_required_rbf(model: nnx.Module) -> None:
-  if _moe_required_rbf_values is None:
+def _report_moe_buffer_probe(model: nnx.Module) -> None:
+  if _moe_buffer_probe_values is None:
     return
   for path, value in nnx.state(model, nnx.Intermediate).flat_state():
-    if path and path[-1] == "moe_required_rbf":
+    if path and path[-1] == "moe_buffer_probe":
       leaves = value.value if hasattr(value, "value") else value
-      _moe_required_rbf_values.extend(jnp.ravel(x).astype(jnp.float32) for x in jax.tree.leaves(leaves))
+      _moe_buffer_probe_values.extend(jax.tree.leaves(leaves))
 
 
 class TunixMaxTextAdapter(nnx.Module):
@@ -192,7 +196,7 @@ class TunixMaxTextAdapter(nnx.Module):
         forced_routed_experts=forced_routed_experts,
         skip_lm_head=skip_lm_head,
     )
-    _report_moe_required_rbf(self.base)
+    _report_moe_buffer_probe(self.base)
     return outputs, None
 
   def compute_final_logits(self, hidden_states: Array) -> Array:

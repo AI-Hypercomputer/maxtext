@@ -39,6 +39,7 @@ from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
 from maxtext.integration.tunix import tunix_adapter
+from maxtext.layers import moe
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
 from maxtext.integration.vllm.convert_utils import (
     is_verify_weights_enabled,
@@ -1372,7 +1373,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # log_required_ragged_buffer_factor probe: a Tunix loss runs the model on a copy and drops what it sows,
       # so the adapter reports the probe values here (MaxText's loss_fn puts them in its aux itself).
       collect_probe = getattr(self._config, "log_required_ragged_buffer_factor", False)
-      with tunix_adapter.collect_moe_required_rbf() if collect_probe else contextlib.nullcontext() as required_rbfs:
+      with tunix_adapter.collect_moe_buffer_probe() if collect_probe else contextlib.nullcontext() as probe_values:
         if self._gen_model_input_fn is not None:
           # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
           # `with_gen_model_input_fn` -- so its output is unpacked rather than passed as the
@@ -1390,10 +1391,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       _, _, new_r = nnx.split(mdl, nnx.Param, ...)
 
       loss_out = _normalize_loss_output(out, self._has_aux)
-      if required_rbfs and "moe_required_rbf" not in loss_out.aux_metrics:
-        loss_out = loss_out.replace(
-            aux_metrics={**loss_out.aux_metrics, "moe_required_rbf": jnp.max(jnp.concatenate(required_rbfs))}
-        )
+      if probe_values and "moe_required_rbf" not in loss_out.aux_metrics:
+        probe_metrics = moe.moe_buffer_probe_metrics(moe.reduce_moe_buffer_probe(probe_values))
+        loss_out = loss_out.replace(aux_metrics={**loss_out.aux_metrics, **probe_metrics})
       return loss_out.primary_loss.unreduced_sum, (loss_out, new_r)
 
     if self._reduced_params_shardings is not None:

@@ -568,7 +568,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
     del function, mesh, check_vma
     captured["in_specs"] = in_specs
     captured["out_specs"] = out_specs
-    return lambda x, *_args: (x, None, None, jnp.bool_(False), jnp.float32(0.0))
+    return lambda x, *_args: (x, None, None, jnp.bool_(False), jnp.zeros((3,), jnp.float32))
 
   with mock.patch.object(jax, "shard_map", side_effect=fake_shard_map):
     output, _, _ = moe.RoutedMoE.sparse_matmul(
@@ -2225,28 +2225,69 @@ class QuantizedMoeTest(parameterized.TestCase):
     compare_tree(tree_ref, tree_tgt, relative_norm_diff_threshold=0.22)
 
 
-class RequiredRaggedBufferFactorTest(parameterized.TestCase):
+class RaggedBufferProbeTest(parameterized.TestCase):
   """Tests the log_required_ragged_buffer_factor probe against permute()'s ragged buffer drop condition."""
 
+  @staticmethod
+  def _module(num_experts, top_k, factor):
+    return SimpleNamespace(
+        config=SimpleNamespace(num_experts=num_experts, ragged_buffer_factor=factor),
+        num_experts_per_tok=top_k,
+        mesh=None,
+        get_ragged_buffer_size=moe.RoutedMoE.get_ragged_buffer_size,
+    )
+
   @parameterized.named_parameters(("ep1", 1), ("ep2", 2), ("ep4", 4), ("ep8", 8))
-  def test_exceeds_factor_iff_buffer_drops(self, num_ep):
+  def test_matches_buffer_drops(self, num_ep):
     num_experts, top_k, tokens = 16, 4, 256
-    module = SimpleNamespace(config=SimpleNamespace(num_experts=num_experts), num_experts_per_tok=top_k, mesh=None)
     balanced = (tokens // num_ep) * top_k
     local_experts = num_experts // num_ep
     rng = np.random.default_rng(num_ep)
     for _ in range(20):
       p = rng.dirichlet(np.ones(num_experts) * rng.uniform(0.1, 5.0))
-      group_sizes = np.bincount(rng.choice(num_experts, size=tokens * top_k, p=p), minlength=num_experts)
+      group_sizes = jnp.asarray(np.bincount(rng.choice(num_experts, size=tokens * top_k, p=p), minlength=num_experts))
       for shard in range(num_ep):
-        required = float(
-            moe.RoutedMoE.required_ragged_buffer_factor(module, jnp.asarray(group_sizes), tokens, num_ep, shard)
-        )
-        local = group_sizes[shard * local_experts : (shard + 1) * local_experts].sum()
-        self.assertAlmostEqual(required, local / balanced, places=5)
+        local = int(group_sizes[shard * local_experts : (shard + 1) * local_experts].sum())
         for factor in (0.5, 1.0, 1.25, 1.5, 2.0, 3.0):
+          module = self._module(num_experts, top_k, factor)
+          required, dropped_max, dropped_total = np.asarray(
+              moe.RoutedMoE.ragged_buffer_probe(module, group_sizes, tokens, num_ep, shard)
+          )
           buffer_size = moe.RoutedMoE.get_ragged_buffer_size(balanced, num_ep, num_experts, top_k, factor)
+          self.assertAlmostEqual(required, local / balanced, places=5)
+          self.assertEqual(dropped_max, max(0, local - buffer_size))
+          self.assertEqual(dropped_total, dropped_max)
           self.assertEqual(local > buffer_size, required > factor + 1e-6)
+
+  @parameterized.named_parameters(("dropless", True, 2.0), ("no_factor", False, -1.0))
+  def test_no_drops_without_truncated_buffer(self, force_dropless, factor):
+    group_sizes = jnp.asarray([64, 0, 0, 0])  # Every row on shard 0: 4x the balanced size.
+    probe = moe.RoutedMoE.ragged_buffer_probe(
+        self._module(4, 1, factor), group_sizes, 64, 2, 0, force_dropless=force_dropless
+    )
+    np.testing.assert_allclose(probe, [2.0, 0.0, 0.0])
+
+  def test_reduce(self):
+    # Two layers' [layers, 3] sows plus a single [3]: max, max, sum.
+    values = [
+        jnp.asarray([[1.5, 3.0, 4.0], [2.5, 1.0, 1.0]]),
+        jnp.asarray([2.0, 7.0, 2.0]),
+    ]
+    probe = moe.reduce_moe_buffer_probe(values)
+    np.testing.assert_allclose(probe, [2.5, 7.0, 7.0])
+    self.assertEqual(
+        {k: float(v) for k, v in moe.moe_buffer_probe_metrics(probe).items()},
+        {"moe_required_rbf": 2.5, "moe_dropped_rows_max": 7.0, "moe_dropped_rows_total": 7.0},
+    )
+
+  def test_token_replication(self):
+    mesh = SimpleNamespace(
+        axis_names=("data", "fsdp", "tensor", "expert"), shape={"data": 2, "fsdp": 4, "tensor": 2, "expert": 2}, size=32
+    )
+    self.assertEqual(moe.token_replication_of(P(("data", "fsdp", "expert"), None, None), mesh), 2)
+    self.assertEqual(moe.token_replication_of(P(("fsdp", "expert"), "tensor", None), mesh), 2)
+    self.assertEqual(moe.token_replication_of(P(None, None, None), mesh), 32)
+    self.assertEqual(moe.token_replication_of(P("data"), None), 1)
 
 
 class GetEinsumTest(parameterized.TestCase):

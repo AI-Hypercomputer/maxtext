@@ -192,9 +192,10 @@ def gradient_accumulation_loss_and_grad(
     aux["te_moe_capacity_overflow"] = jnp.any(scanned_aux["te_moe_capacity_overflow"], axis=0)
     aux["te_moe_max_total_recv_tokens"] = jnp.max(scanned_aux["te_moe_max_total_recv_tokens"], axis=0)
     aux["te_moe_recv_capacity_per_rank"] = jnp.min(scanned_aux["te_moe_recv_capacity_per_rank"], axis=0)
-  if "moe_required_rbf" in scanned_aux:
-    # log_required_ragged_buffer_factor probe: the step needs the largest factor over microbatches.
-    aux["moe_required_rbf"] = jnp.max(scanned_aux["moe_required_rbf"], axis=0)
+  # log_required_ragged_buffer_factor probe: maxima over microbatches (moe_dropped_rows_total keeps the sum).
+  for name in ("moe_required_rbf", "moe_dropped_rows_max"):
+    if name in scanned_aux:
+      aux[name] = jnp.max(scanned_aux[name], axis=0)
 
   if is_nnx:
     nnx.update(model, grad_and_loss["rest_state"])
