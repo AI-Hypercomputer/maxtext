@@ -4,7 +4,7 @@ ARG BASEIMAGE=ubuntu:24.04
 # Stage 0: Bootstrap apt-transport-artifact-registry when USE_AIRLOCK=true
 FROM $BASEIMAGE AS airlock-bootstrap
 ARG USE_AIRLOCK=false
-RUN mkdir -p /airlock-apt-methods && \
+RUN mkdir -p /airlock-apt-methods /airlock-ssl-certs && \
     if [ "$USE_AIRLOCK" = "true" ]; then \
         apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends curl gnupg ca-certificates && \
         curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-key.gpg && \
@@ -13,6 +13,7 @@ RUN mkdir -p /airlock-apt-methods && \
         echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt apt-transport-artifact-registry-stable main" > /etc/apt/sources.list.d/artifact-registry.list && \
         apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends apt-transport-artifact-registry && \
         cp -a /usr/lib/apt/methods/ar+https /airlock-apt-methods/ 2>/dev/null || true; \
+        cp /etc/ssl/certs/ca-certificates.crt /airlock-ssl-certs/; \
     fi
 
 FROM $BASEIMAGE
@@ -20,6 +21,9 @@ FROM $BASEIMAGE
 ARG USE_AIRLOCK=false
 ENV DEBIAN_FRONTEND=noninteractive
 COPY --from=airlock-bootstrap /airlock-apt-methods/ /usr/lib/apt/methods/
+# ubuntu:24.04 ships without CA certificates, so the Go-based ar+https apt transport cannot
+# verify TLS to us-apt.pkg.dev. Reuse the CA bundle from the bootstrap stage (empty when USE_AIRLOCK=false).
+COPY --from=airlock-bootstrap /airlock-ssl-certs/ /etc/ssl/certs/
 
 # Install Python 3.12, build tools, and network/DNS utilities on Ubuntu 24.04 (uses Airlock apt repo when USE_AIRLOCK=true)
 RUN --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
