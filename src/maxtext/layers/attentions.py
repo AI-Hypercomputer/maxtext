@@ -53,6 +53,12 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     MODEL_MODE_PREFILL,
     AttentionType,
+    CACHE_BATCH,
+    CACHE_BATCH_PREFILL,
+    CACHE_HEADS,
+    CACHE_HEADS_NONE,
+    CACHE_KV,
+    CACHE_SEQUENCE,
     ShardMode,
 )
 from maxtext.kernels import fused_qkv
@@ -462,6 +468,7 @@ class Attention(nnx.Module):
   def _validate_kv_head_sharding(
       self,
       kernel_axes: Tuple[Optional[str], ...],
+      heads_axis: str = "kv_heads",
   ) -> None:
     """Validates that the key/value head dimension can be sharded evenly.
 
@@ -485,12 +492,14 @@ class Attention(nnx.Module):
     unsharded until `assert_params_sufficiently_sharded` trips.
 
     Args:
-      kernel_axes: Logical axis names of the key/value projection kernel.
+      kernel_axes: Logical axis names of the key/value projection kernel, or of
+        the KV cache, which is built first in prefill and decode modes.
+      heads_axis: The logical name of the KV head axis within `kernel_axes`.
 
     Raises:
       ValueError: If the KV heads cannot be split evenly across the mesh.
     """
-    if "kv_heads" not in kernel_axes:
+    if heads_axis not in kernel_axes:
       # The projection is replicated, so the head count is unconstrained.
       return
 
@@ -498,7 +507,7 @@ class Attention(nnx.Module):
     # An empty result means no logical rule shards the heads; that is not an
     # early exit, because Ulysses below can still shard them over the context
     # axis. An unsharded head dimension just leaves `kv_parallelism` at 1.
-    kv_heads_index = kernel_axes.index("kv_heads")
+    kv_heads_index = kernel_axes.index(heads_axis)
     kv_head_axes = self._logical_to_mesh_axes(kernel_axes)[kv_heads_index]
     if kv_head_axes is None:
       kv_head_axes = ()
@@ -605,11 +614,13 @@ class Attention(nnx.Module):
     """
     self._validate_kv_heads()
 
-    kernel_axes = (
-        (None, None, None)
-        if self.config.ici_context_autoregressive_parallelism > 1
-        else ("embed_attn", "kv_heads", "kv_head_dim")
-    )
+    if self.config.ici_context_autoregressive_parallelism > 1:
+      kernel_axes = (None, None, None)
+    elif self.num_kv_heads == 1:
+      # MQA: a single K/V head cannot be split across head shards, so replicate it on every shard.
+      kernel_axes = ("embed_attn", None, "kv_head_dim")
+    else:
+      kernel_axes = ("embed_attn", "kv_heads", "kv_head_dim")
     self._validate_kv_head_sharding(kernel_axes)
 
     block_size = getattr(self.config, "weight_block_size", None)
@@ -671,6 +682,12 @@ class Attention(nnx.Module):
         use_bias=self.use_bias_in_projections,
         rngs=self.rngs,
     )
+
+  def _kv_activation_axis_names(self, axis_names: AxisNames) -> AxisNames:
+    """For MQA, replicates the single K/V head across head shards instead of splitting it."""
+    if self.num_kv_heads != 1:
+      return axis_names
+    return tuple(None if name == KV_HEAD else name for name in axis_names)
 
   def qkv_projection(self, inputs: Array, proj_name: str, out_sharding: NamedSharding | None = None):
     """Fused QKV projection"""
@@ -1125,6 +1142,11 @@ class Attention(nnx.Module):
     # We can use a placeholder value. The correct fix might involve refactoring
     # KVCache.
     placeholder_seq_len = 1
+    # A single K/V head (MQA) cannot be split across shards, so replicate the cache's head axis.
+    cache_heads = CACHE_HEADS_NONE if self.num_kv_heads == 1 else CACHE_HEADS
+    # The cache is built before the K/V projections, so check its head sharding here to fail with a
+    # clear error rather than an XLA divisibility error.
+    self._validate_kv_head_sharding((CACHE_BATCH, CACHE_SEQUENCE, cache_heads, CACHE_KV), heads_axis=CACHE_HEADS)
 
     return kvcache.KVCache(
         max_prefill_length=self.max_prefill_predict_length,
@@ -1138,6 +1160,8 @@ class Attention(nnx.Module):
         value_head_size=self.head_dim,
         dtype=self.dtype,
         kv_quant=self.kv_quant,
+        prefill_cache_logical_axis_names=(CACHE_BATCH_PREFILL, CACHE_SEQUENCE, cache_heads, CACHE_KV),
+        cache_logical_axis_names=(CACHE_BATCH, CACHE_SEQUENCE, cache_heads, CACHE_KV),
         prefill_cache_axis_order=self.prefill_cache_axis_order,
         ar_cache_axis_order=self.ar_cache_axis_order,
         use_chunked_prefill=self.config.use_chunked_prefill,
@@ -1701,16 +1725,17 @@ class Attention(nnx.Module):
 
       if model_mode == MODEL_MODE_PREFILL:
         query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)
-        key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names)
-        value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names)
+        key = self._maybe_shard_with_logical(key, self._kv_activation_axis_names(self.prefill_key_axis_names))
+        value = self._maybe_shard_with_logical(value, self._kv_activation_axis_names(self.prefill_value_axis_names))
       elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
         query = self._maybe_shard_with_logical(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-        key = self._maybe_shard_with_logical(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-        value = self._maybe_shard_with_logical(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+        kv_decode_axis_names = self._kv_activation_axis_names((DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+        key = self._maybe_shard_with_logical(key, kv_decode_axis_names)
+        value = self._maybe_shard_with_logical(value, kv_decode_axis_names)
       else:
         query = self._maybe_shard_with_logical(query, self.query_axis_names)
-        key = self._maybe_shard_with_logical(key, self.key_axis_names)
-        value = self._maybe_shard_with_logical(value, self.value_axis_names)
+        key = self._maybe_shard_with_logical(key, self._kv_activation_axis_names(self.key_axis_names))
+        value = self._maybe_shard_with_logical(value, self._kv_activation_axis_names(self.value_axis_names))
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
