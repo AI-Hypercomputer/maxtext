@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791277103848,
+  "lastUpdate": 1791291480977,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -45260,6 +45260,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
             "value": 98.04300000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "d7c5d1a8bacdbf7351080380d388c16db0f866e9",
+          "message": "Merge pull request #5539 from AI-Hypercomputer:ranran/dev/sa-diag-skip\n\nPiperOrigin-RevId: 994173879",
+          "timestamp": "2026-10-06T07:18:31Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/d7c5d1a8bacdbf7351080380d388c16db0f866e9"
+        },
+        "date": 1791291479993,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7699.5380000000005,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 478,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1131.834,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 199.06,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 200.543,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 157.688,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 42.471000000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1463.737,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 2391.0549999999985,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 161,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 19.737000000000045,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 96,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.214,
             "unit": "sec"
           },
           {
