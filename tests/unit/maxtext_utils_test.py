@@ -1380,11 +1380,19 @@ class TestGetDenseMoeLayers(unittest.TestCase):
     self.assertEqual(dense, 0)
     self.assertEqual(moe, 8)
 
-  def test_qwen3_5_block(self):
+  def test_qwen3_5_moe_block(self):
     cfg = self._make_cfg(DecoderBlockType.QWEN3_5, num_decoder_layers=8)
+    cfg.num_experts = 256
     dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
     self.assertEqual(dense, 0)
     self.assertEqual(moe, 8)
+
+  def test_qwen3_5_dense_block(self):
+    cfg = self._make_cfg(DecoderBlockType.QWEN3_5, num_decoder_layers=8)
+    cfg.num_experts = 1
+    dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
+    self.assertEqual(dense, 8)
+    self.assertEqual(moe, 0)
 
   def test_unsupported_block_raises(self):
     cfg = self._make_cfg(DecoderBlockType.DEFAULT)

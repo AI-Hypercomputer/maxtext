@@ -358,7 +358,10 @@ class PyconfigTest(unittest.TestCase):
 
       with self.subTest(decoder_block=decoder_block):
         with self.assertRaisesRegex(Exception, "requires `sparse_matmul=True`"):
-          initialize(sparse_matmul=False, megablox=False)
+          initialize(num_experts=2, base_mlp_dim=128, base_moe_mlp_dim=128, sparse_matmul=False, megablox=False)
+
+        config = initialize(num_experts=1, sparse_matmul=False, megablox=False)
+        self.assertEqual(config.num_experts, 1)
 
         with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_parallelism=2)
