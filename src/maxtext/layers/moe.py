@@ -71,6 +71,30 @@ WI_1 = "wi_1"
 WO = "wo"
 
 
+@jax.custom_vjp
+def _split_gate_up(out: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Split the fused [rows, 2N] gmm output into (gate, up) halves.
+
+  Plain slicing makes XLA assemble the cotangent with two dynamic-update-slices
+  (pad + add) in backward; the custom VJP concatenates the two half-gradients
+  once, which fuses into the following tgmm/gmm input.
+  """
+  n = out.shape[-1] // 2
+  return out[:, :n], out[:, n:]
+
+
+def _split_gate_up_fwd(out: jax.Array) -> tuple[tuple[jax.Array, jax.Array], None]:
+  return _split_gate_up(out), None
+
+
+def _split_gate_up_bwd(_residuals: None, grads: tuple[jax.Array, jax.Array]) -> tuple[jax.Array]:
+  grad_gate, grad_up = grads
+  return (jnp.concatenate([grad_gate, grad_up], axis=-1),)
+
+
+_split_gate_up.defvjp(_split_gate_up_fwd, _split_gate_up_bwd)
+
+
 @struct.dataclass
 class RouteMetadata:
   """EP communication state needed to undo the forward all-to-all after expert computation."""
@@ -2420,8 +2444,7 @@ class RoutedMoE(nnx.Module):
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        layer_w0, layer_w1 = _split_gate_up(out)
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
