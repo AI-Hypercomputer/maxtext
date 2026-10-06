@@ -38,6 +38,7 @@ from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
+from maxtext.integration.tunix import tunix_adapter
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
 from maxtext.integration.vllm.convert_utils import (
     is_verify_weights_enabled,
@@ -1368,23 +1369,31 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     def diff_wrapper(p, r, b):
       mdl = nnx.merge(self._model_graphdef, p, r, copy=True)
-      if self._gen_model_input_fn is not None:
-        # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
-        # `with_gen_model_input_fn` -- so its output is unpacked rather than passed as the
-        # positional `data`. This is how Tunix invokes losses
-        # (`loss_fn(model, **gen_model_input_fn(payload))`), which lets a Tunix loss such
-        # as `algo_core.grpo_loss_fn` be used with no adapter.
-        if not isinstance(b, dict):
-          raise TypeError(
-              "gen_model_input_fn must return a dict of loss-fn keyword arguments, got " f"{type(b).__name__}."
-          )
-        out = loss_callable(mdl, **b)
-      else:
-        # No adapter set: the loss is a MaxText one, called MaxText's way.
-        out = loss_callable(mdl, self._config, b, None, None, is_train=True)
+      # log_required_ragged_buffer_factor probe: a Tunix loss runs the model on a copy and drops what it sows,
+      # so the adapter reports the probe values here (MaxText's loss_fn puts them in its aux itself).
+      collect_probe = getattr(self._config, "log_required_ragged_buffer_factor", False)
+      with tunix_adapter.collect_moe_required_rbf() if collect_probe else contextlib.nullcontext() as required_rbfs:
+        if self._gen_model_input_fn is not None:
+          # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
+          # `with_gen_model_input_fn` -- so its output is unpacked rather than passed as the
+          # positional `data`. This is how Tunix invokes losses
+          # (`loss_fn(model, **gen_model_input_fn(payload))`), which lets a Tunix loss such
+          # as `algo_core.grpo_loss_fn` be used with no adapter.
+          if not isinstance(b, dict):
+            raise TypeError(
+                "gen_model_input_fn must return a dict of loss-fn keyword arguments, got " f"{type(b).__name__}."
+            )
+          out = loss_callable(mdl, **b)
+        else:
+          # No adapter set: the loss is a MaxText one, called MaxText's way.
+          out = loss_callable(mdl, self._config, b, None, None, is_train=True)
       _, _, new_r = nnx.split(mdl, nnx.Param, ...)
 
       loss_out = _normalize_loss_output(out, self._has_aux)
+      if required_rbfs and "moe_required_rbf" not in loss_out.aux_metrics:
+        loss_out = loss_out.replace(
+            aux_metrics={**loss_out.aux_metrics, "moe_required_rbf": jnp.max(jnp.concatenate(required_rbfs))}
+        )
       return loss_out.primary_loss.unreduced_sum, (loss_out, new_r)
 
     if self._reduced_params_shardings is not None:
