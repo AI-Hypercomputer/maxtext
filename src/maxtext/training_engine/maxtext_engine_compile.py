@@ -1032,7 +1032,15 @@ def main(argv: Sequence[str]) -> None:
       scan_axis=config.param_scan_axis,
       use_weight_converter=config.use_weight_converter,
   )
-  print(format_memory_report(memory_report(compiled, state), staging), flush=True)
+  update_kernels = {name: compiled[name] for name in KERNEL_NAMES}
+  print(format_memory_report(memory_report(update_kernels, state), staging), flush=True)
+
+  dropless = compiled.get(maxtext_engine.DROPLESS_FWD_BWD)
+  if dropless is not None:
+    # retry_when_tokens_dropped: a micro-batch whose ragged buffer overflows is rerun through this kernel in place
+    # of fwd_bwd (the overflowed gradients are freed first), so a step with a replay peaks at this report's.
+    print(f"WITH A DROPLESS REPLAY ({maxtext_engine.DROPLESS_FWD_BWD} in place of fwd_bwd):")
+    print(format_memory_report(memory_report({**update_kernels, "fwd_bwd": dropless}, state), staging), flush=True)
 
   print("Finished training_engine/maxtext_engine_compile.py successfully!", flush=True)
 

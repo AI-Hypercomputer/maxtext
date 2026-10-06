@@ -1020,6 +1020,13 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
   )
+  retry_num_moe_token_chunks: PositiveInt = Field(
+      2,
+      description=(
+          "Token chunks of the retry_when_tokens_dropped dropless replay program, run as a lax.scan in the training"
+          " engine, each rematerialized, so its backward holds one chunk's worst-case buffers at a time."
+      ),
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -5572,6 +5579,11 @@ class MaxTextConfig(
             f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
             f"max_target_length={self.max_target_length}."
         )
+    if self.retry_when_tokens_dropped and self.max_target_length % self.retry_num_moe_token_chunks != 0:
+      raise ValueError(
+          f"retry_num_moe_token_chunks={self.retry_num_moe_token_chunks} must evenly divide "
+          f"max_target_length={self.max_target_length}."
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
