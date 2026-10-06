@@ -529,13 +529,20 @@ def create_orbax_checkpoint_manager(
     use_zarr3: bool = True,
     enable_continuous_checkpointing: bool = False,
     max_num_checkpoints_to_keep: int = 10,
-    checkpoint_storage_concurrent_gb: int = 96,
+    checkpoint_storage_concurrent_gb: float = 96,
     enable_autocheckpoint: bool = False,
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
     ocdbt_target_data_file_size_bytes: int | None = None,
+    checkpointables_registry: Any = None,
+    async_timeout_secs: int | None = None,
 ):
-  """Returns an Orbax v1 training ``Checkpointer``, or None if checkpointing is disabled."""
+  """Returns an Orbax v1 training ``Checkpointer``, or None if checkpointing is disabled.
+
+  ``checkpointables_registry`` optionally overrides Orbax's checkpointable-handler
+  registry and ``async_timeout_secs`` the save-commit deadline (see
+  ``checkpoint_context.build_context``).
+  """
   if not enable_checkpointing:
     max_logging.log("Checkpointing disabled, not creating checkpoint manager.")
     return None
@@ -570,6 +577,8 @@ def create_orbax_checkpoint_manager(
       todelete_full_path=todelete_full_path,
       todelete_subdir=todelete_subdir,
       partial_load=True,
+      checkpointables_registry=checkpointables_registry,
+      async_timeout_secs=async_timeout_secs,
   )
 
   manager = ocp.training.Checkpointer(

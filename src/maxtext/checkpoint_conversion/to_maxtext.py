@@ -1208,7 +1208,9 @@ def main(
 
   # Save the converted weights to a MaxText checkpoint.
   # If simulated_cpu_devices_count > 1, weights are promoted from NumPy to JAX arrays
-  # and sharded across virtual devices.
+  # and sharded across virtual devices. With simulated_cpu_devices_count=1 and lazy
+  # loading, weights are loaded just in time during the save, at most
+  # `checkpoint_storage_concurrent_gb` GB at a time, which bounds peak host memory.
   save_weights_to_checkpoint(
       output_directory,
       state_params,
@@ -1216,6 +1218,7 @@ def main(
       config.checkpoint_storage_use_ocdbt,
       config.checkpoint_storage_use_zarr3,
       config=config,
+      checkpoint_storage_concurrent_gb=config.checkpoint_storage_concurrent_gb,
   )
 
   print_ram_usage("Program Ends")
