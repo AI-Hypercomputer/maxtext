@@ -142,6 +142,27 @@ class TrainSFTTest(unittest.TestCase):
       self.assertIs(eval_args[1], mt_config)
       self.assertEqual(eval_args[2], batch)
 
+  def test_train_model_disables_cache_for_diffusion_internal_metrics(self):
+    mt_config = SimpleNamespace(
+        logical_axis_rules=[],
+        num_experts=1,
+        training_objective="block_diffusion",
+        record_internal_nn_metrics=True,
+    )
+    trainer = mock.MagicMock()
+    trainer.data_hooks.train_data_iterator = "train_iter"
+    trainer.data_hooks.eval_data_iterator = "eval_iter"
+    mesh = mock.MagicMock()
+
+    with mock.patch("jax.set_mesh"):
+      train_sft.train_model(mt_config, trainer, mesh)
+
+    trainer.train.assert_called_once_with(
+        "train_iter",
+        "eval_iter",
+        cache_nnx_graph=False,
+    )
+
 
 if __name__ == "__main__":
   unittest.main()
