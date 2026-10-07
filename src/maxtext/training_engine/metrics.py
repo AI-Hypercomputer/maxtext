@@ -39,7 +39,20 @@ _METRICS_TO_LOG = [
     "step_skipped",
     "step_time",
     "tflops",
+    # log_required_ragged_buffer_factor probe: smallest ragged_buffer_factor that would not have dropped tokens,
+    # and the (token, expert) rows dropped (most by one EP shard in one layer, and in total).
+    "moe_required_rbf",
+    "moe_dropped_rows_max",
+    "moe_dropped_rows_total",
 ]
+
+# Reductions over a step's recorded values (one per micro-step) for metrics where the mean is wrong.
+_DEFAULT_AGGREGATION_FNS = {
+    # The step needs the largest factor any micro-step needed.
+    "moe_required_rbf": np.max,
+    "moe_dropped_rows_max": np.max,
+    "moe_dropped_rows_total": np.sum,
+}
 
 # Completed step buffers to keep resident. Each holds live device arrays and nothing on the
 # engine's step path removes one, so unbounded history grows HBM, and checkpoint size with
@@ -240,10 +253,10 @@ class MetricsLogger:
     """
     if mode == Mode.TRAIN:
       log_message = [f"Train step: {step}"]
-      for k in ["loss", "perplexity"]:
+      for k in ["loss", "perplexity", "moe_required_rbf", "moe_dropped_rows_max", "moe_dropped_rows_total"]:
         if k in metrics:
           val = metrics[k]
-          log_message.append(f"{k}: {val:.3f}")
+          log_message.append(f"{k}: {val:.0f}" if k.startswith("moe_dropped_rows") else f"{k}: {val:.3f}")
       if len(log_message) > 1:
         logging.info(", ".join(log_message))
     elif mode == Mode.EVAL:
@@ -324,6 +337,8 @@ class MetricsLogger:
       host_val = np.asarray(scalar_val)
       if name in metrics.aggregation_fns:
         host_val = metrics.aggregation_fns[name](host_val)
+      elif name in _DEFAULT_AGGREGATION_FNS:
+        host_val = _DEFAULT_AGGREGATION_FNS[name](host_val)
       elif host_val.size > 1:
         host_val = np.mean(host_val)
       if isinstance(host_val, (np.ndarray, jax.Array)):

@@ -1020,6 +1020,17 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
   )
+  log_required_ragged_buffer_factor: bool = Field(
+      False,
+      description=(
+          "Probe: record per step the smallest ragged_buffer_factor that would not have dropped tokens, max over "
+          "MoE layers, as the learning/moe_required_rbf metric (aux key moe_required_rbf). Values above "
+          "ragged_buffer_factor mean that step dropped tokens. Also records the (token, expert) rows dropped: "
+          "moe_dropped_rows_max (most by one EP shard in one layer's forward pass) and moe_dropped_rows_total "
+          "(summed over shards, layers and microbatches). Requires use_ring_of_experts=True and "
+          "use_ragged_sort=True."
+      ),
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -3834,6 +3845,18 @@ class MaxTextConfig(
       if self.num_moe_emb_chunks > 0:
         raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
 
+  def validate_log_required_ragged_buffer_factor(self):
+    """Validates prerequisites for the log_required_ragged_buffer_factor probe."""
+    if self.log_required_ragged_buffer_factor:
+      if self.te_moe_block:
+        raise ValueError("log_required_ragged_buffer_factor=True is not supported with te_moe_block=True.")
+      if not (self.use_ring_of_experts and self.use_ragged_sort):
+        raise ValueError(
+            "log_required_ragged_buffer_factor=True requires use_ring_of_experts=True and use_ragged_sort=True."
+        )
+      if self.num_moe_emb_chunks > 0:
+        raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
+
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor is used with supported settings."""
     if self.te_moe_block:
@@ -4139,8 +4162,7 @@ class MaxTextConfig(
     if self.pathways_checkpointing_impl == "colocated_python":
       if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
         raise ValueError(
-            "pathways_checkpointing_impl='colocated_python' requires "
-            "ENABLE_PATHWAYS_PERSISTENCE=1 in the environment."
+            "pathways_checkpointing_impl='colocated_python' requires " "ENABLE_PATHWAYS_PERSISTENCE=1 in the environment."
         )
       if (
           self.checkpoint_storage_device_host_concurrent_gb is None
@@ -4235,6 +4257,7 @@ class MaxTextConfig(
             "use_random_routing": False,
             "use_ragged_sort": False,
             "retry_when_tokens_dropped": False,
+            "log_required_ragged_buffer_factor": False,
             "use_ring_of_experts": False,
             "num_moe_emb_chunks": 0,
         }
@@ -5065,6 +5088,7 @@ class MaxTextConfig(
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
       self.validate_retry_when_tokens_dropped()
+      self.validate_log_required_ragged_buffer_factor()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_moe_expert_weight_prefetch()
