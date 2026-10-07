@@ -184,6 +184,9 @@ class LoadPlan:
   targets: list[_Target]
   groups: list[list[_Write]]
   unmatched_mt_keys: list[str]  # Mapping entries with no weight in the target tree.
+  # Weights whose mapping has no HF tensor (HF key None): the hook makes the whole value
+  # from nothing (e.g. DeepSeek-V4's `mhc_norm` scales are all ones), as in `to_maxtext`.
+  generated: list[_Target] = dataclasses.field(default_factory=list)
 
 
 def resolve_target_name(mt_key: str, flat_target: dict) -> str | None:
@@ -347,7 +350,7 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
       for key in param_map
       if not isinstance(key, tuple) and tensor_handling.is_variable_collection_key(key)
   } - {None}
-  targets, writes, unmatched = [], [], []
+  targets, writes, unmatched, generated = [], [], [], []
   for mt_key, hf_source in param_map.items():
     # A tuple MaxText key: the hooks give all its weights at once, stacked on a new last axis.
     mt_keys = mt_key if isinstance(mt_key, tuple) else (mt_key,)
@@ -381,13 +384,20 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
       )
     if len({(p.shape, p.axes) for p in parts}) > 1:
       raise ValueError(f"The MaxText weights of {mt_key} differ in shape: {[p.shape for p in parts]}.")
+    if hf_source is None:
+      if len(parts) > 1 or parts[0].hooks is None:
+        raise ValueError(f"Param mapping gives no HF tensor for {mt_key}, so it needs exactly one weight and a hook.")
+      generated.append(parts[0])
+      continue
     targets.extend(parts)
     writes.extend(_Write(tuple(parts), index, source) for index, source in _enumerate_sources(hf_source, parts[0]))
 
   groups = collections.defaultdict(list)
   for write in writes:
     groups[_layer_group(write.hf_keys[0])].append(write)
-  return LoadPlan(targets=targets, groups=[groups[k] for k in sorted(groups)], unmatched_mt_keys=unmatched)
+  return LoadPlan(
+      targets=targets, groups=[groups[k] for k in sorted(groups)], unmatched_mt_keys=unmatched, generated=generated
+  )
 
 
 @functools.lru_cache(maxsize=None)
@@ -506,6 +516,16 @@ def _apply_write(write: _Write, hf_arrays: dict, results: dict):
       results[target.name] = _cast_fn(target.dtype, target.sharding)(part)
 
 
+def _generate(target: _Target) -> jax.Array:
+  """Makes a weight whose mapping has no HF tensor: the hook gets None and the full shape, as in `to_maxtext`."""
+  x = tensor_handling.apply_hook_fns(None, target.shape, target.hooks)
+  if tuple(x.shape) != target.shape:
+    raise ValueError(
+        f"Hooks for {target.mt_key} made shape {tuple(x.shape)} from no HF tensor, but {target.name} is {target.shape}."
+    )
+  return _cast_fn(target.dtype, target.sharding)(x)
+
+
 def _peak_hbm_gb() -> float | None:
   """Peak HBM in use on this host's first TPU chip, or None where the backend doesn't report it."""
   try:
@@ -590,9 +610,12 @@ def load_hf_params_streaming(
     max_logging.log(
         f"Streaming {sum(len(g) for g in plan.groups)} HF sources into {len(plan.targets)} MaxText weights"
         f" in {len(calls)} read calls from {path}"
+        + (f"; {len(plan.generated)} more weights come from hooks alone" if plan.generated else "")
     )
 
     results = {t.name: _alloc_fn(t.shape, t.dtype, t.sharding)() for t in plan.targets if t.axes}
+    for target in plan.generated:
+      results[target.name] = _generate(target)
     total_bytes = 0
     # Only reads and their copies into HBM (`fetch`) run on the background thread. The
     # jitted rearranging (`unpack`) and writes stay on this thread in a fixed order, so
@@ -639,6 +662,6 @@ def load_hf_params_streaming(
   flat_restored = flax.traverse_util.flatten_dict(target_tree, sep=".")
   flat_restored.update(results)
   restored = flax.traverse_util.unflatten_dict(flat_restored, sep=".")
-  # A Linen tree carries the `params` collection, and maybe others beside it: return it as is.
-  # An NNX pure dict has bare weights: wrap them once.
+  # A Linen tree carries the `params` collection, and maybe others beside it (e.g. DeepSeek-V4's
+  # `MoEBiasVar` and `Tid2EidVar`): return it as is. An NNX pure dict has bare weights: wrap them once.
   return restored if "params" in restored else {"params": restored}
