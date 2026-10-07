@@ -34,6 +34,7 @@ Architecture Overview:
 """
 
 import inspect
+import itertools
 import logging
 import shlex
 from typing import Sequence, Callable, Any
@@ -276,7 +277,15 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):  # pyrefly: ignore[bad-override]
+  def _train_step(
+      self,
+      model,
+      optimizer,
+      grad_accumulator=None,
+      inputs=None,
+      is_update_step=True,
+      **kwargs,
+  ):  # pyrefly: ignore[bad-override]
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -285,6 +294,11 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       ValueError: The graph structure of a node added to cached_partial was
       mutated inside the transformation.
     """
+    if inputs is None and grad_accumulator is not None:
+      # In Tunix versions or tests where _train_step only receives (model, optimizer, inputs)
+      inputs = grad_accumulator
+      grad_accumulator = getattr(self, "grad_accumulator", None)
+
     batch = self.gen_model_input_fn(inputs)
     student = model.student_model
     teacher = model.teacher_model
@@ -789,7 +803,13 @@ def train_distill(
     trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
 
     # 7. Create Iterator Wrappers (Use Utils)
-    train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
+    train_iter: Any = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
+    if isinstance(student_config.steps, int) and isinstance(trainer._train_steps, int):  # pylint: disable=protected-access
+      grad_accum = (
+          student_config.gradient_accumulation_steps if isinstance(student_config.gradient_accumulation_steps, int) else 1
+      )
+      remaining_microsteps = max(0, (student_config.steps - trainer._train_steps) * grad_accum)  # pylint: disable=protected-access
+      train_iter = itertools.islice(train_iter, remaining_microsteps)
 
     eval_iter = None
     if raw_eval_iter is not None:
@@ -901,7 +921,8 @@ def main(argv: Sequence[str]) -> None:
 
   # 3. Initialize TEACHER Config
   # We isolate the Teacher from Student CLI arguments (like pruning params).
-  teacher_overrides = global_config.teacher_overrides
+  teacher_overrides = dict(global_config.teacher_overrides)
+  teacher_overrides.setdefault("distill_beta", global_config.distill_beta)
 
   # Ensure load_parameters_path is set in overrides
   if not is_offline and not teacher_overrides.get("load_parameters_path"):
