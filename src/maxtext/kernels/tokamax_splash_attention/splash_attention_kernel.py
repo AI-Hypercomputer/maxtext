@@ -971,8 +971,8 @@ def _splash_attention_custom(
   if save_residuals:
     out, stats = ret
     if config.use_base2_exp:  # for user, output values in natural base
-      stats = _base2_stats_to_natural_base(stats, mask_value)
-    return out, stats
+      stats = _base2_stats_to_natural_base(stats, mask_value)  # pyrefly: ignore[bad-argument-type]
+    return out, stats  # pyrefly: ignore[bad-return]
   else:
     return ret
 
@@ -1016,7 +1016,7 @@ def _splash_attention_fwd(
   )
   logsumexp = stats["logsumexp"]  # save in the config base for the bwd pass
   if config.use_base2_exp:  # for user, output values in natural base
-    stats = _base2_stats_to_natural_base(stats, mask_value)
+    stats = _base2_stats_to_natural_base(stats, mask_value)  # pyrefly: ignore[bad-argument-type]
   residuals = q, k, v, segment_ids, sinks, out, logsumexp, dkv_mask_info
   if save_residuals:
     return (out, stats), residuals  # pyrefly: ignore[bad-return]
