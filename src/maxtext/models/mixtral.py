@@ -70,7 +70,6 @@ class MixtralDecoderLayer(nnx.Module):
         mesh=mesh,
         shard_mode=config.shard_mode,
         debug_sharding=config.debug_sharding,
-        extra_stack_level=1,
     )
 
     self.pre_self_attention_layer_norm = RMSNorm(
