@@ -921,7 +921,7 @@ def main(argv: Sequence[str]) -> None:
 
   # 3. Initialize TEACHER Config
   # We isolate the Teacher from Student CLI arguments (like pruning params).
-  teacher_overrides = dict(global_config.teacher_overrides)
+  teacher_overrides = dict(global_config.teacher_overrides or {})
   teacher_overrides.setdefault("distill_beta", global_config.distill_beta)
 
   # Ensure load_parameters_path is set in overrides
