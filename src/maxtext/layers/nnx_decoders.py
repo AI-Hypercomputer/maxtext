@@ -827,7 +827,14 @@ class NNXDecoder(nnx.Module):
     """Initializes scanned generic decoder layers."""
     config = self.config
     layer_cls = decoder_block_classes[0]
-    num_layers = int(config.num_decoder_layers / config.inhomogeneous_layer_cycle_interval)
+    cycle_interval = config.inhomogeneous_layer_cycle_interval
+    if config.num_decoder_layers % cycle_interval:
+      raise ValueError(
+          f"num_decoder_layers ({config.num_decoder_layers}) must be a multiple of"
+          f" inhomogeneous_layer_cycle_interval ({cycle_interval}) to scan {config.decoder_block.value} layers:"
+          " each scan step builds one whole cycle, so the remaining layers would be dropped."
+      )
+    num_layers = config.num_decoder_layers // cycle_interval
     layer_kwargs = {}
     if config.decoder_block == DecoderBlockType.LLAMA4:
       layer_kwargs = {
