@@ -325,6 +325,353 @@ class JaxFlashAttentionTest(unittest.TestCase):
         atol=1e-3,
     )
 
+  def test_flash_attention_bwd_mha(self):
+    batch, heads, q_len, kv_len, head_dim = 2, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(42)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_attn(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_attn(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_gqa(self):
+    batch, q_heads, kv_heads, q_len, kv_len, head_dim = 2, 4, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(123)
+
+    q = jnp.asarray(rng.normal(size=(batch, q_heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, kv_heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, kv_heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, q_heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_gqa(query, key, value):
+      head_mult = q_heads // kv_heads
+      key_rep = jnp.repeat(key, head_mult, axis=1)
+      value_rep = jnp.repeat(value, head_mult, axis=1)
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key_rep)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value_rep)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_gqa(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_causal(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(456)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask_obj = splash_attention_mask.CausalMask((q_len, kv_len))
+    mask_arr = mask_obj[:, :]
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask_obj,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask_obj,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+        is_causal=True,
+    )
+
+    def dense_causal(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      logits = jnp.where(mask_arr[None, None, :, :], logits, -1e30)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_causal(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_soft_cap(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    cap = 5.0
+    rng = np.random.default_rng(789)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        cap=cap,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        cap=cap,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_capped(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      logits = jnp.tanh(logits / cap) * cap
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_capped(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_segment_ids(self):
+    batch, heads, q_len, kv_len, head_dim = 1, 2, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(999)
+
+    q = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(batch, heads, kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(batch, heads, q_len, head_dim)), dtype=jnp.float32)
+
+    q_seg = jnp.array([[0] * 16 + [1] * 16], dtype=jnp.int32)
+    kv_seg = jnp.array([[0] * 16 + [1] * 16], dtype=jnp.int32)
+    segment_ids = jax_flash_attention.SegmentIds(q=q_seg, kv=kv_seg)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q,
+        k,
+        v,
+        segment_ids=segment_ids,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output,
+        do=do,
+        logsumexp=stats["logsumexp"],
+        mask=mask,
+        segment_ids=segment_ids,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    def dense_segmented(query, key, value):
+      logits = jnp.einsum("bhqd,bhkd->bhqk", query, key)
+      seg_mask = q_seg[:, None, :, None] == kv_seg[:, None, None, :]
+      logits = jnp.where(seg_mask, logits, -1e30)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("bhqk,bhkd->bhqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_segmented(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+  def test_flash_attention_bwd_3d_mqa(self):
+    q_heads, q_len, kv_len, head_dim = 4, 32, 32, 16
+    block_q, block_kv = 16, 16
+    rng = np.random.default_rng(101)
+
+    q = jnp.asarray(rng.normal(size=(q_heads, q_len, head_dim)), dtype=jnp.float32)
+    k = jnp.asarray(rng.normal(size=(kv_len, head_dim)), dtype=jnp.float32)
+    v = jnp.asarray(rng.normal(size=(kv_len, head_dim)), dtype=jnp.float32)
+    do = jnp.asarray(rng.normal(size=(q_heads, q_len, head_dim)), dtype=jnp.float32)
+
+    mask = jnp.ones((q_len, kv_len), dtype=bool)
+
+    output, stats = jax_flash_attention.flash_attention_block_masked(
+        q[None, :],
+        k[None, None, :],
+        v[None, None, :],
+        segment_ids=None,
+        block_kv=block_kv,
+        block_q=block_q,
+        mask=mask,
+        mask_value=-1e30,
+        save_residuals=True,
+        logits_dtype=jnp.float32,
+        loop_unroll=False,
+    )
+    output_3d = jnp.squeeze(output, axis=0)
+    lse_3d = jnp.squeeze(stats["logsumexp"], axis=0)
+
+    dq, dk, dv = jax_flash_attention.flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=output_3d,
+        do=do,
+        logsumexp=lse_3d,
+        mask=mask,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+    )
+
+    self.assertEqual(dq.shape, q.shape)
+    self.assertEqual(dk.shape, k.shape)
+    self.assertEqual(dv.shape, v.shape)
+
+    def dense_mqa(query, key, value):
+      logits = jnp.einsum("hqd,kd->hqk", query, key)
+      probs = jax.nn.softmax(logits, axis=-1)
+      return jnp.einsum("hqk,kd->hqd", probs, value)
+
+    grad_fn = jax.grad(
+        lambda q_, k_, v_: jnp.sum(dense_mqa(q_, k_, v_) * do),
+        argnums=(0, 1, 2),
+    )
+    dq_ref, dk_ref, dv_ref = grad_fn(q, k, v)
+
+    np.testing.assert_allclose(np.asarray(dq), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dk), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(dv), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
 
 class SplashLocalMaskTest(unittest.TestCase):
   """Tests for Splash local masks."""
