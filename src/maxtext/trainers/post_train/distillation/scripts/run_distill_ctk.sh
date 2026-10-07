@@ -19,16 +19,16 @@
 # Treat this as a starting template — copy it, adapt the env vars and
 # `--command` body for your cluster + run, and submit from CI / a tmux / screen.
 #
-# The script expects a base image at $DOCKER_IMAGE (or $CTK_BASE_IMAGE). Build
-# the MaxText base with:
-#   sudo bash src/dependencies/scripts/docker_build_dependency_image.sh \
-#     MODE=stable WORKFLOW=post-training
-#
-# Optionally layer a custom Tunix pin on top via `prep_image` (below), and bake
-# your local `./src` into a runner image pushed to GCR via `upload_runner`.
+# The script expects a base image at $DOCKER_IMAGE (or $CTK_BASE_IMAGE). `prep_image`
+# (below) builds the MaxText TPU post-training Docker image as described in
+# https://maxtext.readthedocs.io/en/latest/tutorials/build_maxtext.html#tpu-post-training-docker-image
+# (equivalent to running `build_maxtext_docker_image WORKFLOW=post-training` from
+# an activated MaxText virtual environment). Post-training dependencies such as
+# Tunix come from the pins in src/dependencies/extra_deps/post_train_github_deps.txt.
+# Then bake your local `./src` into a runner image pushed to GCR via `upload_runner`.
 #
 # Usage:
-#   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh prep_image          # one-time image layering
+#   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh prep_image          # one-time image build
 #   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh upload_runner       # bake workspace + push to GCR
 #   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh submit             # fire-and-forget job submission
 #   bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh monitor            # stream logs for the last submit
@@ -106,13 +106,6 @@
 #                          requires scan_layers=True)
 #   DISTILL_LAYER_INDICES  default: [0,1,2,3,4,5,6,7]  (no spaces inside brackets)
 #
-# Image pinning (used by prep_image):
-#   TUNIX_SOURCE  pip-installable spec for tunix.
-#                 default: git+https://github.com/google/tunix@a8d70582f1e2f1fb65973210989e0e148b5ef7ad
-#   JAX_PIN       default: 0.10.0  — version to pin back after tunix deps resolve.
-#   JAXLIB_PIN    default: 0.10.0
-#   LIBTPU_PIN    default: 0.0.39
-#
 # upload_runner env vars:
 #   CTK_RUNNER_IMAGE_NAME  default: maxtext_base_image — GCR short name.
 #   CTK_RUNNER_IMAGE_TAG   default: ${USER}-distill — per-user tag avoids
@@ -161,12 +154,6 @@ export BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-${CTK_BASE_OUTPUT_DIR:-}}
 : "${DISTILL_TEMPERATURE:=1.0}"
 : "${DISTILL_BETA:=1.0}"
 : "${DISTILL_LAYER_INDICES:=[0,1,2,3,4,5,6,7]}"
-
-# Image pinning (used by prep_image).
-: "${TUNIX_SOURCE:=git+https://github.com/google/tunix@a8d70582f1e2f1fb65973210989e0e148b5ef7ad}"
-: "${JAX_PIN:=0.10.0}"
-: "${JAXLIB_PIN:=0.10.0}"
-: "${LIBTPU_PIN:=0.0.39}"
 
 OUTPUT_DIR="${BASE_OUTPUT_DIRECTORY:-}"
 OUTPUT_DIR="${OUTPUT_DIR%/}/${CTK_WORKLOAD}"
@@ -250,28 +237,25 @@ configure_cluster() {
 }
 
 # -------------------------- prep_image --------------------------
+# Builds the MaxText TPU post-training Docker image following
+# https://maxtext.readthedocs.io/en/latest/tutorials/build_maxtext.html#tpu-post-training-docker-image.
+# `build_maxtext_docker_image` always produces a local image named
+# `maxtext_base_image`; it is retagged as $CTK_BASE_IMAGE if that differs.
+# Must be run from the MaxText repo root with the MaxText virtual environment
+# activated (it provides the `build_maxtext_docker_image` console script).
 prep_image() {
-  echo "== layering on ${CTK_BASE_IMAGE} =="
-  echo "  tunix   : ${TUNIX_SOURCE}"
-  echo "  jax     : ${JAX_PIN}"
-  echo "  jaxlib  : ${JAXLIB_PIN}"
-  echo "  libtpu  : ${LIBTPU_PIN}"
-  if ! sudo docker image inspect "$CTK_BASE_IMAGE" >/dev/null 2>&1; then
-    echo "ERROR: base image $CTK_BASE_IMAGE not found locally. Build it first:" >&2
-    echo "  sudo bash src/dependencies/scripts/docker_build_dependency_image.sh MODE=stable WORKFLOW=post-training" >&2
+  if ! command -v build_maxtext_docker_image >/dev/null 2>&1; then
+    echo "ERROR: build_maxtext_docker_image not found in PATH. Activate the MaxText virtual environment first;" >&2
+    echo "  see https://maxtext.readthedocs.io/en/latest/tutorials/build_maxtext.html" >&2
     exit 1
   fi
-  local tmp; tmp=$(mktemp -d)
-  cat > "$tmp/Dockerfile" <<EOF
-FROM $CTK_BASE_IMAGE
-# 1. Install tunix WITH deps (google-metrax + kagglehub are runtime requirements).
-RUN pip install --no-cache-dir --force-reinstall "$TUNIX_SOURCE"
-# 2. Repin jax/libtpu so the image's libtpu and the installed jax stay compatible.
-RUN pip install --no-cache-dir --force-reinstall --no-deps \\
-      "jax==$JAX_PIN" "jaxlib==$JAXLIB_PIN" "libtpu==$LIBTPU_PIN"
-EOF
-  sudo docker build -t "$CTK_BASE_IMAGE" -f "$tmp/Dockerfile" "$tmp"
-  rm -rf "$tmp"
+  echo "== building TPU post-training image -> ${CTK_BASE_IMAGE} =="
+  # Run under sudo like the other docker calls in this script; keep PATH so the
+  # venv console script (and its python) is still found.
+  sudo env "PATH=$PATH" build_maxtext_docker_image WORKFLOW=post-training
+  if [ "$CTK_BASE_IMAGE" != "maxtext_base_image" ]; then
+    sudo docker tag maxtext_base_image "$CTK_BASE_IMAGE"
+  fi
   # Sanity check: verify the installed shard_input carries the upstream fix.
   sudo docker run --rm "$CTK_BASE_IMAGE" python -c "
 import inspect, tunix
