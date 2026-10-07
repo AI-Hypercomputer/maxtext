@@ -4397,6 +4397,19 @@ class MaxTextConfig(
       if cp_axes:
         self.context_sharding = cp_axes[0]
 
+    if self.custom_mesh_and_rule is CustomRule.TP_AS_EP:
+      # tp-as-ep only rewires the sparse routed-MoE path; reject paths that ignore or override its shardings.
+      if not self.sparse_matmul:
+        raise ValueError("custom_mesh_and_rule=tp-as-ep requires sparse_matmul=True.")
+      if self.attention in ("vllm_rpa", "vllm_batched_rpa"):
+        raise ValueError("custom_mesh_and_rule=tp-as-ep is not supported with vLLM attention.")
+      for flag_name in ("shard_exp_on_fsdp", "use_2d_fsdp_sharding", "use_batch_split_schedule", "mlp_bias"):
+        if getattr(self, flag_name):
+          raise ValueError(f"custom_mesh_and_rule=tp-as-ep is not compatible with {flag_name}=True.")
+      tp_size = self.ici_tensor_parallelism * self.dcn_tensor_parallelism
+      if tp_size == 1:
+        raise ValueError("custom_mesh_and_rule=tp-as-ep requires tensor parallelism > 1.")
+
     # Skip EP check if logical rule is overridden by user. Otherwise, ensure that EP rank is 1 when EP is disabled.
     if not self.override_logical_axis_rules:
       ep_is_enabled = ep_enabled(self)

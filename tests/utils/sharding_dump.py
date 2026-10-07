@@ -64,6 +64,13 @@ TEST_CASES = [
     ),
     (
         "deepseek2-16b",
+        "v6e-16",
+        1,
+        "tp-as-ep",
+        ("ici_fsdp_parallelism=-1", "ici_expert_parallelism=4", "ici_tensor_parallelism=4"),
+    ),
+    (
+        "deepseek2-16b",
         "tpu7x-16",
         1,
         "ep-as-dp",
