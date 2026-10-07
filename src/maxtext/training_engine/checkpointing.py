@@ -20,6 +20,7 @@ import os
 from typing import Any, List
 
 from absl import logging
+from etils import epath
 from flax import nnx
 import jax
 from maxtext.configs import pyconfig
@@ -112,33 +113,115 @@ class CheckpointManager:
       checkpoint_dir: The root directory for saving checkpoints.
       config: The training configuration.
     """
+    self._config = config
+    self._checkpoint_dir = checkpoint_dir
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     if checkpoint_dir:
-      _maybe_register_pathways_persistence()
+      self._checkpoint_manager = self._create_orbax_checkpoint_manager(checkpoint_dir)
 
-      # Use configured array format (e.g. use_ocdbt=False for Pathways).
-      # Build a fresh handler per item as Orbax handlers carry per-item state.
-      def _pytree_handler() -> ocp.PyTreeCheckpointHandler:
-        return ocp.PyTreeCheckpointHandler(
-            use_ocdbt=config.checkpoint_storage_use_ocdbt,
-            use_zarr3=config.checkpoint_storage_use_zarr3,
-            save_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
-        )
+  def _create_orbax_checkpoint_manager(
+      self,
+      checkpoint_dir: str,
+  ) -> ocp.CheckpointManager:
+    """Creates an Orbax CheckpointManager for the given directory."""
+    _maybe_register_pathways_persistence()
 
-      self._checkpoint_manager = ocp.CheckpointManager(
-          directory=checkpoint_dir,
-          options=ocp.CheckpointManagerOptions(
-              save_interval_steps=config.checkpoint_period,
-              max_to_keep=config.max_num_checkpoints_to_keep,
-              enable_async_checkpointing=config.async_checkpointing,
-          ),
-          item_handlers={
-              "model_params": _pytree_handler(),
-              "optimizer_state": _pytree_handler(),
-              "accumulated_metrics": _pytree_handler(),
-              "accumulated_grads": _pytree_handler(),
-          },
+    # Use configured array format (e.g. use_ocdbt=False for Pathways).
+    # Build a fresh handler per item as Orbax handlers carry per-item state.
+    def _pytree_handler() -> ocp.PyTreeCheckpointHandler:
+      return ocp.PyTreeCheckpointHandler(
+          use_ocdbt=self._config.checkpoint_storage_use_ocdbt,
+          use_zarr3=self._config.checkpoint_storage_use_zarr3,
+          save_device_host_concurrent_gb=self._config.checkpoint_storage_device_host_concurrent_gb,
       )
+
+    return ocp.CheckpointManager(
+        directory=checkpoint_dir,
+        options=ocp.CheckpointManagerOptions(
+            save_interval_steps=self._config.checkpoint_period,
+            max_to_keep=self._config.max_num_checkpoints_to_keep,
+            enable_async_checkpointing=self._config.async_checkpointing,
+        ),
+        item_handlers={
+            "model_params": _pytree_handler(),
+            "optimizer_state": _pytree_handler(),
+            "accumulated_metrics": _pytree_handler(),
+            "accumulated_grads": _pytree_handler(),
+        },
+    )
+
+  def _resolve_restore_directory(self, directory: str) -> str:
+    """Resolves a checkpoint restore directory, handling nested MaxText paths."""
+    run_name = getattr(self._config, "run_name", None)
+    candidates = []
+    if run_name:
+      candidates.append(os.path.join(directory, str(run_name), "checkpoints"))
+    candidates.append(os.path.join(directory, "checkpoints"))
+    for candidate in candidates:
+      try:
+        if epath.Path(candidate).is_dir():
+          return candidate
+      except OSError:
+        if os.path.isdir(candidate):
+          return candidate
+    return directory
+
+  def _resolve_restore_source(self, directory: str, step: int | None) -> tuple[str | None, int | None]:
+    """Resolves the directory and step that `restore_checkpoint` reads from.
+
+    Args:
+      directory: The requested checkpoint restore directory.
+      step: The requested step, or None for the latest step.
+
+    Returns:
+      A tuple (directory, step). `directory` is None when the restore should read from the configured
+      checkpoint directory.
+
+    Raises:
+      ValueError: If `directory` resolves to the configured checkpoint directory and `step` is not its
+        latest step.
+    """
+    resolved_dir = self._resolve_restore_directory(directory)
+    root_latest_step = self.get_latest_step()
+    if self._checkpoint_dir and epath.Path(resolved_dir) == epath.Path(self._checkpoint_dir):
+      if step is not None and step != root_latest_step:
+        raise ValueError(
+            f"Cannot restore step {step} from {directory}: it is also the checkpoint root directory, whose"
+            f" latest step is {root_latest_step}. Checkpoints saved after restoring an older step would be"
+            " mixed with the newer ones already there. Use a different checkpoint directory, or leave the"
+            " step unset to resume from the latest step."
+        )
+      logging.info(
+          "Checkpoint restore directory %s is the same as the root checkpoint directory; resuming from its"
+          " latest step (%s).",
+          directory,
+          root_latest_step,
+      )
+      return None, root_latest_step
+    if root_latest_step is not None:
+      logging.info(
+          "Root checkpoint directory already has checkpoint at step %d; resuming from root directory instead"
+          " of restore directory %s.",
+          root_latest_step,
+          directory,
+      )
+      return None, root_latest_step
+    source = "the latest checkpoint" if step is None else f"step {step}"
+    if self._checkpoint_dir:
+      logging.info(
+          "Restoring %s from restore directory %s; future checkpoints will be written to root directory %s.",
+          source,
+          resolved_dir,
+          self._checkpoint_dir,
+      )
+    else:
+      logging.info(
+          "Restoring %s from restore directory %s; no checkpoint directory is configured, so checkpoint saving"
+          " is disabled.",
+          source,
+          resolved_dir,
+      )
+    return resolved_dir, step
 
   def get_latest_step(self) -> int | None:
     """Returns the latest checkpoint step."""
@@ -298,77 +381,102 @@ class CheckpointManager:
       self,
       checkpoint_state: CheckpointState,
       step: int | None = None,
+      directory: str | None = None,
   ) -> tuple[int | None, CheckpointState, Any]:
     """Restores items from the checkpoint at the given step.
 
     Args:
       checkpoint_state: CheckpointState object containing model and optimizer.
       step: Optional step index to restore from.
+      directory: Optional directory to restore checkpoints from. Defaults to the
+        manager's configured checkpoint directory. If it resolves to the
+        configured checkpoint directory, `step` must be None or the latest step,
+        and the latest checkpoint is restored. Otherwise, if the configured
+        checkpoint directory already contains checkpoints (e.g., after a
+        preemption restart), its latest checkpoint takes precedence over
+        `directory` and `step`.
 
     Returns:
       A tuple of (step, checkpoint_state, custom metadata).
+
+    Raises:
+      ValueError: If `directory` resolves to the configured checkpoint directory
+        and `step` is not its latest step.
     """
-    if self._checkpoint_manager is None:
+    temp_manager: ocp.CheckpointManager | None = None
+    if directory:
+      directory, step = self._resolve_restore_source(directory, step)
+    if directory:
+      temp_manager = self._create_orbax_checkpoint_manager(directory)
+      checkpoint_manager = temp_manager
+    else:
+      checkpoint_manager = self._checkpoint_manager
+
+    if checkpoint_manager is None:
       logging.info("Checkpointing is disabled, skipping restore.")
       return None, checkpoint_state, None
 
-    if step is None:
-      step = self.get_latest_step()
-      if step is None:
-        logging.info("No checkpoint found, skipping restore.")
-        return None, checkpoint_state, None
-
-    metadata = self._checkpoint_manager.metadata(step)
-    restore_args: dict[str, Any] = {}
-
-    abstract_params = nnx.state(checkpoint_state.model)
-    restore_args["model_params"] = ocp.args.PyTreeRestore(
-        item=abstract_params,
-        restore_args=ocp.checkpoint_utils.construct_restore_args(target=abstract_params),
-    )
-
-    if checkpoint_state.optimizer is not None and "optimizer_state" in metadata.item_metadata:
-      optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
-      restore_args["optimizer_state"] = ocp.args.PyTreeRestore(
-          item=optimizer_state,
-          restore_args=ocp.checkpoint_utils.construct_restore_args(
-              target=nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
-          ),
-      )
-
-    if "accumulated_metrics" in metadata.item_metadata:
-      restore_args["accumulated_metrics"] = ocp.args.PyTreeRestore()
-
-    if "accumulated_grads" in metadata.item_metadata:
-      accumulated_grads_target = nnx.state(checkpoint_state.model, nnx.Param)
-      restore_args["accumulated_grads"] = ocp.args.PyTreeRestore(
-          item=accumulated_grads_target,
-          restore_args=ocp.checkpoint_utils.construct_restore_args(target=accumulated_grads_target),
-      )
-
-    custom_metadata = None
-    if metadata and hasattr(metadata, "custom_metadata"):
-      custom_metadata = metadata.custom_metadata
-
     try:
-      restored_items = self._checkpoint_manager.restore(
-          step=step,
-          args=ocp.args.Composite(**restore_args),
+      if step is None:
+        step = checkpoint_manager.latest_step()
+        if step is None:
+          logging.info("No checkpoint found, skipping restore.")
+          return None, checkpoint_state, None
+
+      metadata = checkpoint_manager.metadata(step)
+      restore_args: dict[str, Any] = {}
+
+      abstract_params = nnx.state(checkpoint_state.model)
+      restore_args["model_params"] = ocp.args.PyTreeRestore(
+          item=abstract_params,
+          restore_args=ocp.checkpoint_utils.construct_restore_args(target=abstract_params),
       )
-    except Exception as e:  # pylint: disable=broad-except
-      logging.exception("Failed to restore checkpoint: %s", e)
-      return None, None, None
 
-    if "model_params" in restored_items:
-      nnx.update(checkpoint_state.model, restored_items["model_params"])
-    if checkpoint_state.optimizer is not None and "optimizer_state" in restored_items:
-      nnx.update(checkpoint_state.optimizer, restored_items["optimizer_state"])
-    if "accumulated_metrics" in restored_items:
-      checkpoint_state.accumulated_metrics = restored_items["accumulated_metrics"]
-    if "accumulated_grads" in restored_items:
-      checkpoint_state.accumulated_grads = restored_items["accumulated_grads"]
+      if checkpoint_state.optimizer is not None and "optimizer_state" in metadata.item_metadata:
+        optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
+        restore_args["optimizer_state"] = ocp.args.PyTreeRestore(
+            item=optimizer_state,
+            restore_args=ocp.checkpoint_utils.construct_restore_args(
+                target=nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
+            ),
+        )
 
-    return step, checkpoint_state, custom_metadata
+      if "accumulated_metrics" in metadata.item_metadata:
+        restore_args["accumulated_metrics"] = ocp.args.PyTreeRestore()
+
+      if "accumulated_grads" in metadata.item_metadata:
+        accumulated_grads_target = nnx.state(checkpoint_state.model, nnx.Param)
+        restore_args["accumulated_grads"] = ocp.args.PyTreeRestore(
+            item=accumulated_grads_target,
+            restore_args=ocp.checkpoint_utils.construct_restore_args(target=accumulated_grads_target),
+        )
+
+      custom_metadata = None
+      if metadata and hasattr(metadata, "custom_metadata"):
+        custom_metadata = metadata.custom_metadata
+
+      try:
+        restored_items = checkpoint_manager.restore(
+            step=step,
+            args=ocp.args.Composite(**restore_args),
+        )
+      except Exception as e:  # pylint: disable=broad-except
+        logging.exception("Failed to restore checkpoint: %s", e)
+        return None, None, None
+
+      if "model_params" in restored_items:
+        nnx.update(checkpoint_state.model, restored_items["model_params"])
+      if checkpoint_state.optimizer is not None and "optimizer_state" in restored_items:
+        nnx.update(checkpoint_state.optimizer, restored_items["optimizer_state"])
+      if "accumulated_metrics" in restored_items:
+        checkpoint_state.accumulated_metrics = restored_items["accumulated_metrics"]
+      if "accumulated_grads" in restored_items:
+        checkpoint_state.accumulated_grads = restored_items["accumulated_grads"]
+
+      return step, checkpoint_state, custom_metadata
+    finally:
+      if temp_manager is not None:
+        temp_manager.close()
 
   def close(self) -> None:
     """Closes the checkpoint manager."""
