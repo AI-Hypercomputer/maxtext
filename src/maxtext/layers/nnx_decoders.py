@@ -40,7 +40,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
-from maxtext.layers import nnx_scan
+from maxtext.layers import fsdp_prefetch, nnx_scan
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -1061,6 +1061,14 @@ class NNXDecoder(nnx.Module):
       (final_carry, updated_layers) when kv_caches_stacked is None.
       (final_carry, updated_layers, returned_kv_stacked) otherwise.
     """
+    if (
+        self.config.prefetch_fsdp_weights
+        and kv_caches_stacked is None
+        and forced_routed_experts_scanned is None
+        and not self.config.parameter_memory_host_offload
+        and not getattr(self, "disable_quant_stats_update", False)
+    ):
+      return self._apply_layers_sequentially_prefetch(layers, x_in, *args, length=length, **kwargs)
     if length == 0:
       return (
           x_in,
@@ -1209,6 +1217,12 @@ class NNXDecoder(nnx.Module):
       out_layers = layers
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
+
+  def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
+    """Runs the scanned layer stack with FSDP weight prefetching (see `fsdp_prefetch`)."""
+    return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+        layers, x_in, *args, length=length, mesh=self.mesh, config=self.config, **kwargs
+    )
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""

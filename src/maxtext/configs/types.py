@@ -1901,6 +1901,14 @@ class LayoutAndSharding(BaseModel):
   )
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
   compile_xla_flags: str = Field("", description="Compiler options for compilation only.")
+  prefetch_fsdp_weights: bool = Field(
+      False,
+      description=(
+          "Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in"
+          " both the forward and backward pass. Requires scan_layers=True; the backward always rematerializes"
+          " each layer in full (remat_policy is ignored). See docs/guides/optimization/fsdp_prefetch.md."
+      ),
+  )
 
 
 class DcnParallelism(BaseModel):
