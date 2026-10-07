@@ -1161,8 +1161,8 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(ValueError):
       pyconfig.initialize(argv_invalid)
 
-  def test_sliced_mla_proj_disallows_quantization(self):
-    """Tests that use_sliced_mla_proj=True is incompatible with quantization."""
+  def test_sliced_mla_proj_disallows_non_qwix_quantization(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with module-level (non-Qwix) quantization."""
     argv = [
         "",
         _BASE_CONFIG_PATH,
@@ -1170,7 +1170,35 @@ class ConfigTest(absltest.TestCase):
         "use_sliced_mla_proj=true",
         "quantization=int8",
     ]
-    with self.assertRaises(pydantic.ValidationError):
+    with self.assertRaisesRegex(pydantic.ValidationError, "only supported via Qwix interception"):
+      pyconfig.initialize(argv)
+
+  def test_sliced_mla_proj_allows_qwix_quantization(self):
+    """Tests that use_sliced_mla_proj=True is allowed with Qwix interception quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=int8",
+        "use_qwix_quantization=true",
+    ]
+    config = pyconfig.initialize(argv)
+    self.assertTrue(config.use_sliced_mla_proj)
+    self.assertTrue(config.use_qwix_quantization)
+
+  def test_sliced_mla_proj_disallows_qwix_quantization_with_batch_split(self):
+    """Tests that use_sliced_mla_proj=True is incompatible with batch-split Qwix quantization."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "use_sliced_mla_proj=true",
+        "quantization=fp8_full",
+        "use_qwix_quantization=true",
+        "use_batch_split_schedule=true",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "only supported via Qwix interception"):
       pyconfig.initialize(argv)
 
   def test_serve_fp8_weight_accepts_valid_config(self):

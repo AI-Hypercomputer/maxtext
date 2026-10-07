@@ -5758,8 +5758,14 @@ class MaxTextConfig(
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":
       raise ValueError("`share_kv_projections` is not compatible with `attention_type='mla'`.")
-    if self.use_sliced_mla_proj and (self.quantization or self.use_qwix_quantization):
-      raise ValueError("`use_sliced_mla_proj` is not supported with quantization.")
+    if self.use_sliced_mla_proj and self.quantization:
+      # Qwix interception still quantizes the sliced dot_general; module-level quant
+      # (AQT / Fp8 / TE / batch split) would silently fall back to the unsliced path.
+      if not self.use_qwix_quantization or self.use_batch_split_schedule:
+        raise ValueError(
+            "`use_sliced_mla_proj` with quantization is only supported via Qwix interception "
+            "(use_qwix_quantization=True, use_batch_split_schedule=False)."
+        )
 
     if self.use_manual_quantization and not self.use_batch_split_schedule:
       raise ValueError("manual quantization is only used when `use_batch_split_schedule=True`.")
