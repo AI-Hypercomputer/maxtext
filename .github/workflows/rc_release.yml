@@ -1,0 +1,196 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow builds and tests the MaxText package, builds and tags TPU
+# Release Candidate Docker images (:maxtext_${SHA_RC}_${YYYYMMDD}, :${SHA_RC},
+# and :latest-rc), and triggers Airflow E2E functional tests on a weekly
+# schedule or on-demand via workflow_dispatch.
+
+name: MaxText Release Candidate Pipeline
+
+on:
+  schedule:
+    # Runs every Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      maxtext_sha:
+        description: 'Optional MaxText commit SHA to build and validate as a Release Candidate (defaults to HEAD of main).'
+        required: false
+        type: string
+      repository_name:
+        description: 'The name of the repository where the Docker images will be pushed'
+        required: false
+        type: string
+        default: 'maxtext-test-images'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  get_maxtext_sha:
+    name: Resolve MaxText SHA
+    runs-on: ubuntu-latest
+    outputs:
+      maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+      short_sha: ${{ steps.vars.outputs.short_sha }}
+    steps:
+      - name: Checkout MaxText
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve SHA
+        id: vars
+        shell: bash
+        env:
+          TARGET_REF: ${{ inputs.maxtext_sha || github.sha }}
+        run: |
+          MAXTEXT_SHA=$(git rev-parse "${TARGET_REF}")
+          SHORT_SHA=$(git rev-parse --short "${TARGET_REF}")
+          echo "Using MaxText SHA: ${MAXTEXT_SHA} (short: ${SHORT_SHA})"
+          echo "maxtext_sha=${MAXTEXT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+  build_maxtext_package:
+    name: Build MaxText Package
+    needs: [get_maxtext_sha]
+    if: |
+      always() &&
+      needs.get_maxtext_sha.result == 'success'
+    uses: ./.github/workflows/build_package.yml
+    with:
+      device_type: tpu
+      device_name: v4-8
+      cloud_runner: linux-x86-n2-16-buildkit
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+
+  build_release_candidate_images:
+    name: Build ${{ matrix.name }} Docker Image
+    needs: [build_maxtext_package, get_maxtext_sha]
+    if: |
+      always() &&
+      needs.get_maxtext_sha.result == 'success' &&
+      needs.build_maxtext_package.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 'TPU Pre-Training'
+            device: tpu
+            image_name: tpu_pre_training
+            workflow: pre-training
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
+          - name: 'TPU Post-Training'
+            device: tpu
+            image_name: tpu_post_training
+            workflow: post-training
+            dockerfile: maxtext_tpu_dependencies.Dockerfile
+    uses: ./.github/workflows/build_and_push_docker_image.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      repository_name: ${{ inputs.repository_name || 'maxtext-images-staging' }}
+      device: ${{ matrix.device }}
+      build_mode: stable
+      workflow: ${{ matrix.workflow }}
+      dockerfile: ${{ matrix.dockerfile }}
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      include_test_assets: true
+    secrets:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+
+  tag_release_candidate_images:
+    name: Tag ${{ matrix.name }} Docker Image
+    needs: [build_release_candidate_images, get_maxtext_sha]
+    if: |
+      always() &&
+      needs.get_maxtext_sha.result == 'success' &&
+      needs.build_release_candidate_images.result == 'success'
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 'TPU Pre-Training'
+            image_name: tpu_pre_training
+          - name: 'TPU Post-Training'
+            image_name: tpu_post_training
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+      - name: Add tags to Docker image
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          REPOSITORY_NAME: ${{ inputs.repository_name || 'maxtext-images-staging' }}
+          DOCKER_IMAGE_NAME: ${{ matrix.image_name }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          SHA_RC: ${{ needs.get_maxtext_sha.outputs.short_sha }}
+          TAG_LATEST_RC: ${{ github.event_name == 'schedule' || inputs.repository_name == 'maxtext-images-staging' }}
+        run: |
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${DOCKER_IMAGE_NAME}"
+
+          IMAGE_DATE="$(date +%Y-%m-%d)"
+          clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
+          gcloud container images add-tag \
+            "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
+            "${SOURCE_IMAGE}:maxtext_${SHA_RC}_${clean_date}" \
+            --quiet
+
+          if [ "${TAG_LATEST_RC}" = "true" ]; then
+            gcloud container images add-tag \
+              "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
+              "${SOURCE_IMAGE}:latest-rc" \
+              --quiet
+          else
+            echo "Skipping :latest-rc tag (performance tests disabled for this manual run)."
+          fi
+
+  run_ci_tests:
+    name: Run ${{ matrix.name }} CI Tests
+    needs: build_release_candidate_images
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.repository_name == 'maxtext-images-staging')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "TPU Pre-Training"
+            device: tpu
+            image_name: tpu_pre_training
+            workflow: pre-training
+          - name: "TPU Post-Training"
+            device: tpu
+            image_name: tpu_post_training
+            workflow: post-training
+    uses: ./.github/workflows/run_ci_tests.yml
+    with:
+      image_name: ${{ matrix.image_name }}
+      repository_name: ${{ inputs.repository_name || 'maxtext-images-staging' }}
+      image_tag: ${{ github.run_id }}
+      device: ${{ matrix.device }}
+      workflow: ${{ matrix.workflow }}
+
+  run_e2e_tests:
+    name: Run E2E tests
+    needs: [get_maxtext_sha, build_release_candidate_images]
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.repository_name == 'maxtext-images-staging')
+    uses: ./.github/workflows/run_e2e_tests.yml
+    with:
+      mode: stable
+      run_id: ${{ github.run_id }}
+      maxtext_sha: ${{ needs.get_maxtext_sha.outputs.short_sha }}
+    secrets:
+      AIRFLOW_CALLBACK_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
