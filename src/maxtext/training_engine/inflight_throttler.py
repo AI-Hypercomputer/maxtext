@@ -42,10 +42,14 @@ class InflightThrottler:
     self._inflight_queue.put((jax.tree.leaves(computation), metrics))
     # Flushed here, not in `wait_for_next`: the caller has just dispatched, so the blocking
     # read inside `write_metrics` overlaps that work instead of an idle device.
-    self._flush_pending_metrics()
+    self.flush_pending_metrics()
 
-  def _flush_pending_metrics(self) -> None:
-    """Writes the buffer stashed by the last `wait_for_next`, if any."""
+  def flush_pending_metrics(self) -> None:
+    """Writes the buffer stashed by the last `wait_for_next`, if any.
+
+    Never blocks on inflight computations: the stashed buffer belongs to one that has
+    already finished.
+    """
     if self._pending_metrics is None:
       return
     metrics, self._pending_metrics = self._pending_metrics, None
@@ -62,7 +66,7 @@ class InflightThrottler:
       jax.block_until_ready(computation)
       if metrics is not None:
         # Never hold two, or a caller attaching metrics to every computation loses a buffer.
-        self._flush_pending_metrics()
+        self.flush_pending_metrics()
         self._pending_metrics = metrics
 
   def wait_for_all(self) -> None:
@@ -72,10 +76,10 @@ class InflightThrottler:
       jax.block_until_ready(computation)
       # Write metrics for the completed computation.
       if metrics is not None:
-        self._flush_pending_metrics()
+        self.flush_pending_metrics()
         self._pending_metrics = metrics
     # A drain must not leave a write outstanding.
-    self._flush_pending_metrics()
+    self.flush_pending_metrics()
 
   def cleanup(self) -> None:
     """Wait for all inflight computations to finish and log their metrics."""
