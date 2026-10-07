@@ -17,6 +17,7 @@
 
 import collections
 import contextlib
+import dataclasses
 import importlib
 import os
 import time
@@ -47,6 +48,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_logging
 from maxtext.utils import sharding as maxtext_sharding
+from orbax.checkpoint import logging as ocp_logging
 from orbax.checkpoint import v1 as ocp
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
@@ -541,12 +543,6 @@ def create_orbax_checkpoint_manager(
     return None
 
   # TODO: b/529622681 - Remove deprecated settings.
-  if orbax_logger is not None:
-    max_logging.warning(
-        "Cloud logging (enable_checkpoint_cloud_logger) is disabled because"
-        " Orbax v1 now configures its own logger internally. This config"
-        " setting is ignored and will be removed."
-    )
   if dataset_type is not None:
     max_logging.warning(
         "Specifying dataset_type upon checkpointer creation is deprecated and"
@@ -586,9 +582,81 @@ def create_orbax_checkpoint_manager(
   )
   # Necessary bridge to support v0 backward compatibility.
   manager.use_async = use_async  # pyrefly: ignore[missing-attribute]
+  if orbax_logger is not None:
+    _attach_checkpoint_logger(manager, orbax_logger)
 
   max_logging.log("Checkpoint manager created!")
   return manager
+
+
+def _attach_checkpoint_logger(manager: ocp.training.Checkpointer, orbax_logger: Any) -> None:
+  """Routes Orbax checkpoint step statistics to `orbax_logger` (e.g. Goodput).
+
+  The Orbax v1 `Checkpointer` does not expose a `logger` argument and builds its
+  internal v0 `CheckpointManager` with the default `StandardLogger`, so save
+  statistics never reach Cloud Logging. Attach the logger to the internal
+  manager so v0-compatible save step statistics are emitted again.
+
+  TODO: b/529622681 - Pass the logger via the public v1 API once Orbax supports it.
+
+  Args:
+    manager: The Orbax v1 training `Checkpointer`.
+    orbax_logger: An Orbax `AbstractLogger`, e.g. `ocp_logging.CloudLogger`.
+  """
+  internal_manager = getattr(manager, "_manager", None)
+  if internal_manager is None or not hasattr(internal_manager, "_logger"):
+    max_logging.warning(
+        "Could not attach checkpoint logger: Orbax v1 Checkpointer internals changed."
+        " Checkpoint save/restore statistics will not be sent to Cloud Logging."
+    )
+    return
+  try:
+    internal_manager._logger = orbax_logger  # pylint: disable=protected-access
+    # v1 `load_checkpointables` bypasses the internal manager's restore logging,
+    # so keep a handle to log restore statistics from `load_state_if_possible`.
+    manager.orbax_logger = orbax_logger  # pyrefly: ignore[missing-attribute]
+  except AttributeError as e:
+    max_logging.warning(
+        f"Could not attach checkpoint logger: {e}."
+        " Checkpoint save/restore statistics will not be sent to Cloud Logging."
+    )
+    return
+  max_logging.log("Attached checkpoint logger to Orbax v1 Checkpointer.")
+
+
+def _load_checkpointables_with_logging(
+    checkpoint_manager: ocp.training.Checkpointer,
+    step: int,
+    abstract_checkpointables: dict[str, Any],
+) -> dict[str, Any]:
+  """Loads checkpointables and logs v0-compatible restore step statistics."""
+  orbax_logger = getattr(checkpoint_manager, "orbax_logger", None)
+  if orbax_logger is None:
+    return checkpoint_manager.load_checkpointables(step, abstract_checkpointables)
+
+  # Logging is auxiliary: failures here must never block the restore itself.
+  step_stats = None
+  try:
+    step_stats = ocp_logging.step_statistics.RestoreStepStatistics()
+    step_stats.step = step
+    step_stats.directory = str(checkpoint_manager.directory)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(f"Failed to initialize checkpoint restore statistics: {e}")
+
+  start_time = time.time()
+  restored = checkpoint_manager.load_checkpointables(step, abstract_checkpointables)
+  end_time = time.time()
+
+  if step_stats is not None:
+    try:
+      step_stats.checkpoint_manager_start_time = start_time
+      step_stats.checkpointer_start_time = start_time
+      step_stats.checkpointer_duration_secs = end_time - start_time
+      step_stats.checkpoint_manager_duration_secs = end_time - start_time
+      orbax_logger.log_entry(dataclasses.asdict(step_stats))
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.warning(f"Failed to log checkpoint restore statistics: {e}")
+  return restored
 
 
 def print_save_message(step, async_checkpointing):
@@ -746,7 +814,7 @@ def load_state_if_possible(
         abstract_checkpointables["iter"] = grain_utility.for_restore(
             checkpoint_manager, step, data_iterator, expansion_factor_real_data
         )
-      restored = checkpoint_manager.load_checkpointables(step, abstract_checkpointables)
+      restored = _load_checkpointables_with_logging(checkpoint_manager, step, abstract_checkpointables)
       if is_diloco:
         restored_items = diloco_checkpoint_utils.from_diloco_checkpoint_dict(
             restored["items"], abstract_unboxed_pre_state, config=maxtext_config
@@ -806,14 +874,36 @@ def load_state_if_possible(
 
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
-  """DEPRECATED: Setup checkpoint logger."""
-  # TODO: b/529622681 - Remove this config option entirely.
-  if config.enable_checkpoint_cloud_logger:
+  """Sets up the Orbax checkpoint Cloud Logger used by ML Goodput.
+
+  Args:
+    config: MaxText config.
+
+  Returns:
+    An Orbax `CloudLogger` writing to the `goodput_<run_name>` log if
+    `enable_checkpoint_cloud_logger` is set, otherwise None.
+  """
+  if not config.enable_checkpoint_cloud_logger:
+    return None
+  max_logging.log("Setting up checkpoint logger...")
+  cloud_logger_cls = getattr(ocp_logging, "CloudLogger", None)
+  cloud_logger_options_cls = getattr(ocp_logging, "CloudLoggerOptions", None)
+  if cloud_logger_cls is None or cloud_logger_options_cls is None:
     max_logging.warning(
-        "Cloud logging (enable_checkpoint_cloud_logger) is disabled because"
-        " Orbax v1 now configures its own logger internally. This config"
-        " setting is ignored and will be removed."
+        "enable_checkpoint_cloud_logger is set but Orbax CloudLogger is unavailable"
+        " (is google-cloud-logging installed?). Checkpoint logs are disabled."
     )
+    return None
+  logger_name = f"goodput_{config.run_name}"
+  try:
+    orbax_cloud_logger = cloud_logger_cls(
+        options=cloud_logger_options_cls(job_name=config.run_name, logger_name=logger_name)
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(f"Failed to initialize Orbax CloudLogger: {e}. Checkpoint logs are disabled.")
+    return None
+  max_logging.log(f"Successfully set up checkpoint cloud logger: {logger_name}")
+  return orbax_cloud_logger
 
 
 def _scale_sharding(weight_sharding, scale_shape):
