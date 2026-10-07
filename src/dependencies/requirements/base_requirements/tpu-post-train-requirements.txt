@@ -16,6 +16,7 @@ llguidance<1.8.0
 loguru
 lxml
 mistral_common
+ml-goodput-measurement>=0.2.3
 model-hosting-container-standards
 openai
 openai-harmony
