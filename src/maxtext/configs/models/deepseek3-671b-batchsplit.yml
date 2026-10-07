@@ -70,6 +70,7 @@ logical_axis_rules: [
     ['activation_embed_and_logits_batch', ['data', 'fsdp', 'expert', 'context']],
     ['activation_kv_batch', ['data', 'fsdp', 'expert', 'context']],
     ['activation_norm_length', []],
+    ['activation_norm_length_routed', []],
     ['activation_norm_length_moe', []],
     ['activation_heads', []],
     ['embed', ['fsdp']],

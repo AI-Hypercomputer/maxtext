@@ -153,6 +153,7 @@ logical_axis_rules: [
   ['activation_batch_moe', ['x', 'y']],
   ['activation_length', ['core']],
   ['activation_norm_length', ['core']],
+  ['activation_norm_length_routed', ['core']],
   ['activation_exp', ['x', 'core']],
   ['activation_embed_and_logits_batch', ['dcn', 'x', 'y', 'z']],
   # Flattened (batch * sequence) axis used by vocabulary_tiling.py. It must cover
