@@ -1370,10 +1370,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     def diff_wrapper(p, r, b):
       mdl = nnx.merge(self._model_graphdef, p, r, copy=True)
-      # log_required_ragged_buffer_factor probe: a Tunix loss runs the model on a copy and drops what it sows,
-      # so the adapter reports the probe values here (MaxText's loss_fn puts them in its aux itself).
+      # log_required_ragged_buffer_factor probe: a Tunix loss runs the model on a copy inside its own jit and
+      # drops what it sows, so the adapter reports the probe values here (MaxText's loss_fn puts them in its
+      # aux itself).
       collect_probe = getattr(self._config, "log_required_ragged_buffer_factor", False)
-      with tunix_adapter.collect_moe_buffer_probe() if collect_probe else contextlib.nullcontext() as probe_values:
+      with tunix_adapter.collect_moe_buffer_probe(mdl) if collect_probe else contextlib.nullcontext() as probe:
         if self._gen_model_input_fn is not None:
           # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
           # `with_gen_model_input_fn` -- so its output is unpacked rather than passed as the
@@ -1391,8 +1392,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       _, _, new_r = nnx.split(mdl, nnx.Param, ...)
 
       loss_out = _normalize_loss_output(out, self._has_aux)
-      if probe_values and "moe_required_rbf" not in loss_out.aux_metrics:
-        probe_metrics = moe.moe_buffer_probe_metrics(moe.reduce_moe_buffer_probe(probe_values))
+      if probe is not None and probe.reported and "moe_required_rbf" not in loss_out.aux_metrics:
+        probe_metrics = moe.moe_buffer_probe_metrics(probe.ref[...])
         loss_out = loss_out.replace(aux_metrics={**loss_out.aux_metrics, **probe_metrics})
       return loss_out.primary_loss.unreduced_sum, (loss_out, new_r)
 

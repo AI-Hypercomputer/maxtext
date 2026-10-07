@@ -22,6 +22,8 @@ It also handles weight mapping for compatibility with Hugging Face models.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
+import itertools
 from typing import Any, Optional, Tuple
 
 import jax.numpy as jnp
@@ -29,6 +31,7 @@ from flax import nnx
 from jax import Array
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
 from maxtext.integration.tunix.utils import VllmWeightMapping
+from maxtext.layers import moe
 from maxtext.models.models import Transformer
 
 
@@ -98,34 +101,67 @@ def _segment_ids_from_attention_mask(attention_mask: Array, input_tokens: Array)
   return attention_mask[:, -1, :].astype(jnp.int32)
 
 
-# log_required_ragged_buffer_factor probe vectors seen by `TunixMaxTextAdapter.__call__`, or None when no
-# one is collecting. Tunix losses call the model on a copy (`nnx.merge(*nnx.split(model))`) and discard it,
-# so what the MoE layers `sow` never reaches the caller; the adapter reports it here instead.
-_moe_buffer_probe_values: Optional[list] = None
+# Attribute `collect_moe_buffer_probe` stamps on the model copy the loss runs (see there).
+MOE_BUFFER_PROBE_TRACE_ID_ATTR = "moe_buffer_probe_trace_id"
+
+
+@dataclasses.dataclass
+class MoeBufferProbeCollector:
+  """log_required_ragged_buffer_factor probe values reported by adapter forward passes, reduced in `ref`."""
+
+  trace_id: int
+  ref: Any  # jax Ref holding the reduced [len(moe.MOE_BUFFER_PROBE_METRICS)] float32 vector.
+  reported: bool = False  # Whether any forward pass reported (known at trace time).
+
+
+_moe_buffer_probe_collector: Optional[MoeBufferProbeCollector] = None
+_moe_buffer_probe_trace_ids = itertools.count(1)
 
 
 @contextlib.contextmanager
-def collect_moe_buffer_probe():
-  """Collects the probe vectors of every adapter forward pass inside the block, in the same trace.
+def collect_moe_buffer_probe(model: nnx.Module):
+  """Collects the probe values of every forward pass of `model` (or a copy of it) inside the block.
 
-  Reduce them with `moe.reduce_moe_buffer_probe`. A loss that runs the model more than once per batch reports
-  each pass, so moe_dropped_rows_total counts each of them.
+  Tunix losses do not run `model` itself: they split it and run a copy inside their own `jax.jit` (e.g.
+  `common.compute_per_token_logps`), so what the MoE layers `sow` never reaches the caller, and a value taken
+  out of that inner trace by a Python side channel escapes its scope (UnexpectedTracerError). Instead the
+  adapter folds each pass's values into a JAX Ref created here, in the caller's trace; JAX carries Ref writes
+  across jit boundaries. `model` is stamped with a per-block trace id: it is part of the graphdef a Tunix loss
+  passes to its jitted function as a static argument, so that function is retraced, with the Ref, rather
+  than reusing a trace cached by a call outside the block (e.g. old log-probs), which would report nothing.
+
+  Read `collector.ref[...]` (reduced like `moe.reduce_moe_buffer_probe`) when `collector.reported`. A loss
+  that runs the model more than once per batch reports each pass, so moe_dropped_rows_total counts each.
   """
-  global _moe_buffer_probe_values
-  previous, _moe_buffer_probe_values = _moe_buffer_probe_values, []
+  global _moe_buffer_probe_collector
+  collector = MoeBufferProbeCollector(
+      trace_id=next(_moe_buffer_probe_trace_ids),
+      ref=jax.new_ref(jnp.zeros((len(moe.MOE_BUFFER_PROBE_METRICS),), jnp.float32)),
+  )
+  setattr(model, MOE_BUFFER_PROBE_TRACE_ID_ATTR, collector.trace_id)
+  previous, _moe_buffer_probe_collector = _moe_buffer_probe_collector, collector
   try:
-    yield _moe_buffer_probe_values
+    yield collector
   finally:
-    _moe_buffer_probe_values = previous
+    _moe_buffer_probe_collector = previous
 
 
-def _report_moe_buffer_probe(model: nnx.Module) -> None:
-  if _moe_buffer_probe_values is None:
+def _report_moe_buffer_probe(adapter: nnx.Module) -> None:
+  """Folds the probe values the last forward pass sowed into the active collector's Ref, if it is ours."""
+  collector = _moe_buffer_probe_collector
+  if collector is None or getattr(adapter, MOE_BUFFER_PROBE_TRACE_ID_ATTR, None) != collector.trace_id:
     return
-  for path, value in nnx.state(model, nnx.Intermediate).flat_state():
+  values = []
+  for path, value in nnx.state(adapter.base, nnx.Intermediate).flat_state():
     if path and path[-1] == "moe_buffer_probe":
-      leaves = value.value if hasattr(value, "value") else value
-      _moe_buffer_probe_values.extend(jax.tree.leaves(leaves))
+      if hasattr(value, "get_value"):
+        value = value.get_value()
+      elif hasattr(value, "value"):
+        value = value.value
+      values.extend(jax.tree.leaves(value))
+  if values:
+    collector.ref[...] = moe.reduce_moe_buffer_probe([collector.ref[...]] + values)
+    collector.reported = True
 
 
 class TunixMaxTextAdapter(nnx.Module):
@@ -196,7 +232,7 @@ class TunixMaxTextAdapter(nnx.Module):
         forced_routed_experts=forced_routed_experts,
         skip_lm_head=skip_lm_head,
     )
-    _report_moe_buffer_probe(self.base)
+    _report_moe_buffer_probe(self)
     return outputs, None
 
   def compute_final_logits(self, hidden_states: Array) -> Array:
