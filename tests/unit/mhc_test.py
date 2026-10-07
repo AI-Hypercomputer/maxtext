@@ -200,7 +200,7 @@ class TestMHC(parameterized.TestCase):
       output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_MOE)
       # metadata includes load_balance_loss & moe_bias_updates
       self.assertLen(metadata, 2)
-      for key, value in metadata.items():
+      for key, value in metadata.items():  # pyrefly: ignore[missing-attribute]
         self.assertIsNotNone(value, f"Key '{key}' has a value of None")
       self.assertEqual(output.shape, (b, s, k, d))
 
