@@ -123,6 +123,23 @@ jobs:
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
+      - name: Verify the MaxText wheel
+        id: verify_wheel
+        continue-on-error: true
+        shell: bash
+        run: |
+          # A truncated artifact download leaves a corrupt wheel that uv cannot read, and retrying the
+          # install does not help (b/570028987). Validate it and delete it if corrupt so it is re-downloaded.
+          python3 -m zipfile -t maxtext-*-py3-none-any.whl > /dev/null || { rm -f maxtext-*-py3-none-any.whl; exit 1; }
+      - name: Re-download the MaxText wheel
+        if: steps.verify_wheel.outcome == 'failure'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel
+      - name: Re-verify the MaxText wheel
+        if: steps.verify_wheel.outcome == 'failure'
+        shell: bash
+        run: python3 -m zipfile -t maxtext-*-py3-none-any.whl > /dev/null
       - name: Install MaxText and Dependencies
         shell: bash
         run: |
@@ -168,7 +185,20 @@ jobs:
             sleep $((attempt * 15))
           done
           log_mem "after uv pip install"
-          install_tpu_post_train_extra_deps
+          # install_tpu_post_train_extra_deps fetches vLLM from GitHub via git, which intermittently fails
+          # with connection resets on CI runners (b/570028987). Retry it and drop any partial vLLM fetch.
+          for attempt in 1 2 3; do
+            echo "install_tpu_post_train_extra_deps attempt ${attempt}/3"
+            if install_tpu_post_train_extra_deps; then
+              break
+            fi
+            if [ "${attempt}" -eq 3 ]; then
+              echo "install_tpu_post_train_extra_deps failed after 3 attempts"
+              exit 1
+            fi
+            uv cache clean vllm || true
+            sleep $((attempt * 30))
+          done
 
           python3 -m pip freeze
       - name: Run Post-Training Notebook
