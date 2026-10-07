@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791323138496,
+  "lastUpdate": 1791336580145,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -45616,6 +45616,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
             "value": 97.371,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "HT.Guo",
+            "username": "hengtaoguo",
+            "email": "hengtaoguo@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "d9073270667985014211b55165f5f77a282166c1",
+          "message": "PR #5354: Qwen3.5-9B base model\n\nImported from GitHub PR https://github.com/AI-Hypercomputer/maxtext/pull/5354\n\n# Description\n\nQwen3.5-9B text-only model.\n\nDetailed handover doc: [internal link]\n\n# Tests\n\n```\n# unscanned ckpt conversion\npython -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml model_name=qwen3.5-9b base_output_directory=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-9b/unscanned/2026-09-23 use_multimodal=false scan_layers=false weight_dtype=bfloat16 hardware=cpu skip_jax_distributed_system=True checkpoint_storage_use_ocdbt=False checkpoint_storage_use_zarr3=False --lazy_load_tensors=true hf_access_token=xxx\n\n# decode run\npython -m maxtext.inference.decode src/maxtext/configs/base.yml run_name=decode model_name=qwen3.5-9b tokenizer_path=Qwen/Qwen3.5-9B load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-9b/unscanned/2026-09-23/0/items tokenizer_type=huggingface prompt=\\'Paris\\ is\\ the\\' max_prefill_predict_length=16 max_target_length=32 per_device_batch_size=1 ici_tensor_parallelism=4 scan_layers=false weight_dtype=bfloat16 hf_access_token=xxx\n\n# logits test\npython -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml run_name=ht_test model_name=qwen3.5-9b tokenizer_path=Qwen/Qwen3.5-9B load_parameters_path=gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-9b/unscanned/2026-09-23/0/items --hf_model_path=Qwen/Qwen3.5-9B scan_layers=false attention=dot_product hf_access_token=xxx --run_hf_model=true --max_kl_div=0.1\n```\n\n```\nInput `Paris is the` -> ` capital of France and the most populous city in the country. It is located in the`\n```\n\n<details>\n  <summary>Logits Check Logs</summary>\n\n```\nINFO:absl:[process=0] [sync] Finished load in 98.97 seconds @ gs://hengtaoguo-maxtext-logs/checkpoints/qwen3.5-9b/unscanned/2026-09-23/0/items\nINFO:absl:\n--- Prompt: I love to ---\nINFO:absl:\n--- MaxText model top 10 tokens ---\nINFO:absl:| Token ID   | Token                | Score      |\n|------------|----------------------|------------|\n| 1301       | read                 | 15.4375    |\n| 4155       | cook                 | 15.3750    |\n| 3165       | write                | 15.1250    |\n| 3609       | watch                | 15.1250    |\n| 5640       | travel               | 14.8750    |\n| 7923       | eat                  | 14.8125    |\n| 1436       | see                  | 14.7500    |\n| 1432       | play                 | 14.7500    |\n| 1236       | make                 | 14.6250    |\n| 635        | do                   | 14.3125    |\n\nINFO:absl:\n--- HF model top 10 tokens ---\nINFO:absl:| Token ID   | Token                | Score      |\n|------------|----------------------|------------|\n| 1301       | read                 | 15.4375    |\n| 4155       | cook                 | 15.3750    |\n| 3165       | write                | 15.1875    |\n| 3609       | watch                | 15.1250    |\n| 5640       | travel               | 14.8750    |\n| 7923       | eat                  | 14.8125    |\n| 1432       | play                 | 14.8125    |\n| 1436       | see                  | 14.7500    |\n| 1236       | make                 | 14.5625    |\n| 635        | do                   | 14.3125    |\n\nINFO:absl:\n--- Similarity Metrics of Top Tokens ---\nINFO:absl:| Metric                         | Value   |\n|--------------------------------|----------------------|\n| overlap_count                  | 10/10                |\n| jaccard_similarity             | 1.0                  |\n| rank_agreement_percentage      | 80.0                 |\n\nINFO:absl:\nAverage KL divergence per token (D_KL(P_golden || Q_model)): 1.52e-03\nINFO:absl:Per-token KL Divergences:\n['2.29e-03', '2.47e-04', '2.04e-03']\nINFO:absl:\nMax KL divergence for a single token in the set: 2.29e-03\nINFO:absl:\n--- Prompt: Today is a ---\nINFO:absl:\n--- MaxText model top 10 tokens ---\nINFO:absl:| Token ID   | Token                | Score      |\n|------------|----------------------|------------|\n| 3175       | special              | 15.1250    |\n| 1834       | day                  | 14.6250    |\n| 1546       | very                 | 14.5000    |\n| 4927       | significant          | 14.2500    |\n| 2172       | great                | 14.2500    |\n| 1603       | good                 | 14.1875    |\n| 2330       | big                  | 14.0000    |\n| 6037       | beautiful            | 13.8750    |\n| 4574       | perfect              | 13.3750    |\n| 12872      | holiday              | 13.1875    |\n\nINFO:absl:\n--- HF model top 10 tokens ---\nINFO:absl:| Token ID   | Token                | Score      |\n|------------|----------------------|------------|\n| 3175       | special              | 15.1250    |\n| 1834       | day                  | 14.6875    |\n| 1546       | very                 | 14.5000    |\n| 4927       | significant          | 14.2500    |\n| 2172       | great                | 14.2500    |\n| 1603       | good                 | 14.1875    |\n| 2330       | big                  | 14.0625    |\n| 6037       | beautiful            | 13.9375    |\n| 4574       | perfect              | 13.3750    |\n| 12872      | holiday              | 13.2500    |\n\nINFO:absl:\n--- Similarity Metrics of Top Tokens ---\nINFO:absl:| Metric                         | Value   |\n|--------------------------------|----------------------|\n| overlap_count                  | 10/10                |\n| jaccard_similarity             | 1.0                  |\n| rank_agreement_percentage      | 100.0                |\n\nINFO:absl:\nAverage KL divergence per token (D_KL(P_golden || Q_model)): 1.12e-04\nINFO:absl:Per-token KL Divergences:\n['-1.14e-03', '1.98e-03', '-5.06e-04']\nINFO:absl:\nMax KL divergence for a single token in the set: 1.98e-03\nINFO:absl:\n--- Prompt: What is the ---\nINFO:absl:\n--- MaxText model top 10 tokens ---\nINFO:absl:| Token ID   | Token                | Score      |\n|------------|----------------------|------------|\n| 803        | name                 | 14.6875    |\n| 7193       | purpose              | 14.5000    |\n| 2192       | title                | 14.2500    |\n| 5839       | primary              | 14.2500    |\n| 4864       | relationship         | 14.1250    |\n| 1822       | main                 | 13.9375    |\n| 7044       | definition           | 13.8750    |\n| 3364       | role                 | 13.8125    |\n| 24556      | significance         | 13.7500    |\n| 14377      | formula              | 13.6250    |\n\nINFO:absl:\n--- HF model top 10 tokens ---\nINFO:absl:| Token ID   | Token                | Score      |\n|------------|----------------------|------------|\n| 803        | name                 | 14.6875    |\n| 7193       | purpose              | 14.4375    |\n| 5839       | primary              | 14.3125    |\n| 2192       | title                | 14.2500    |\n| 4864       | relationship         | 14.1250    |\n| 1822       | main                 | 13.9375    |\n| 24556      | significance         | 13.8125    |\n| 7044       | definition           | 13.8125    |\n| 3364       | role                 | 13.7500    |\n| 14377      | formula              | 13.6250    |\n\nINFO:absl:\n--- Similarity Metrics of Top Tokens ---\nINFO:absl:| Metric                         | Value   |\n|--------------------------------|----------------------|\n| overlap_count                  | 10/10                |\n| jaccard_similarity             | 1.0                  |\n| rank_agreement_percentage      | 50.0                 |\n\nINFO:absl:\nAverage KL divergence per token (D_KL(P_golden || Q_model)): 8.11e-04\nINFO:absl:Per-token KL Divergences:\n['1.46e-03', '1.32e-03', '-3.50e-04']\nINFO:absl:\nMax KL divergence for a single token in the set: 1.46e-03\nINFO:absl:\n--- Prompt: The city of Lyon sits at the confluence of the Rhone and Saone rivers in eastern... ---\nINFO:absl:\n--- MaxText model top 10 tokens ---\nINFO:absl:| Token ID   | Token                | Score      |\n|------------|----------------------|------------|\n| 38620      | silk                 | 19.0000    |\n| 25         | :                    | 17.5000    |\n| 40391      | merchants            | 16.2500    |\n| 271        |                      | 16.2500    |\n| 198        |                      | 15.0000    |\n| 248046     | <|im_end|>           | 14.9375    |\n| 30         | ?                    | 14.8750    |\n| 1092       | what                 | 14.7500    |\n| 1259       | __                   | 14.6250    |\n| 31586      | ______               | 14.4375    |\n\nINFO:absl:\n--- HF model top 10 tokens ---\nINFO:absl:| Token ID   | Token                | Score      |\n|------------|----------------------|------------|\n| 38620      | silk                 | 18.8750    |\n| 25         | :                    | 17.5000    |\n| 40391      | merchants            | 16.2500    |\n| 271        |                      | 16.1250    |\n| 198        |                      | 14.9375    |\n| 248046     | <|im_end|>           | 14.8750    |\n| 30         | ?                    | 14.8125    |\n| 1092       | what                 | 14.7500    |\n| 1259       | __                   | 14.5625    |\n| 31586      | ______               | 14.4375    |\n\nINFO:absl:\n--- Similarity Metrics of Top Tokens ---\nINFO:absl:| Metric                         | Value   |\n|--------------------------------|----------------------|\n| overlap_count                  | 10/10                |\n| jaccard_similarity             | 1.0                  |\n| rank_agreement_percentage      | 100.0                |\n\nINFO:absl:\nAverage KL divergence per token (D_KL(P_golden || Q_model)): 4.93e-04\nINFO:absl:Per-token KL Divergences:\n['4.22e-03', '-7.08e-04', '7.38e-03', '5.88e-04', '5.39e-04', '-3.58e-04', '3.14e-03', '6.59e-04', '-1.21e-03', '1.61e-03', '8.09e-04', '1.09e-03', '1.72e-03', '2.29e-03', '1.34e-03', '1.91e-03', '-3.16e-04', '8.23e-04', '-3.60e-04', '1.21e-03', '2.47e-03', '-2.42e-04', '-1.44e-03', '1.93e-03', '5.25e-03', '1.58e-03', '1.86e-03', '-1.73e-03', '-4.67e-04', '9.97e-04', '1.43e-03', '3.62e-03', '4.11e-03', '-5.15e-04', '2.89e-03', '-7.13e-04', '6.91e-04', '2.66e-03', '1.31e-03', '-9.80e-04', '4.12e-03', '5.89e-04', '1.66e-03', '5.75e-03', '-1.70e-04', '1.38e-03', '8.96e-04', '7.06e-04', '3.00e-03', '2.24e-03', '-2.43e-04', '1.89e-03', '-3.41e-04', '2.23e-03', '6.66e-03', '-3.55e-03', '-1.57e-03', '-3.33e-06', '3.21e-03', '3.50e-04', '-3.81e-04', '6.79e-04', '2.06e-04', '-6.07e-04', '6.83e-04', '-3.98e-04', '2.82e-03', '5.76e-03', '-1.11e-03', '-1.62e-03', '-1.53e-03', '1.88e-03', '-1.73e-03', '2.15e-04', '4.71e-04', '6.72e-04', '1.13e-03', '7.45e-03', '3.80e-03', '-1.21e-04', '-1.78e-03', '2.73e-04', '7.02e-05', '1.63e-03', '-5.37e-04', '4.89e-04', '3.51e-03', '3.30e-03', '-3.59e-03', '-8.29e-04', '-6.61e-04', '2.42e-03', '-1.74e-03', '2.55e-03', '2.03e-03', '9.91e-04', '9.67e-04','-5.75e-04', '6.43e-03', '-1.53e-04', '-2.11e-04', '1.26e-03','5.93e-04', '-6.22e-04', '9.61e-04', '-2.04e-04', '-1.14e-03','-9.51e-04', '1.97e-03', '7.99e-06', '1.45e-03', '4.97e-04', '1.67e-03', '1.11e-03', '-6.15e-05', '1.09e-03', '9.26e-04', '1.10e-03', '-1.69e-03', '1.48e-03', '-1.62e-03', '-1.61e-03', '1.04e-03', '3.41e-04', '-1.50e-03', '-1.08e-03', '1.71e-03', '1.67e-03', '5.22e-04', '7.23e-04', '5.59e-04', '1.95e-03', '-3.40e-04', '6.95e-04', '9.57e-04', '-1.93e-03', '7.42e-04', '3.00e-04', '-7.10e-04', '1.03e-03', '-1.92e-03', '-1.91e-03', '9.56e-05', '4.33e-04', '4.19e-04', '-4.91e-04', '2.30e-04', '3.14e-04', '-3.13e-04', '-1.90e-03', '6.97e-04', '1.87e-04', '5.27e-04','-1.93e-03', '2.97e-04', '1.26e-03', '-1.19e-03', '-6.44e-04','1.28e-03', '4.01e-04', '1.15e-03', '1.29e-03', '1.49e-03', '8.71e-05', '1.36e-04', '-6.79e-04', '4.04e-04', '-1.67e-03', '3.18e-04', '4.42e-05', '-4.24e-04', '1.51e-03', '9.56e-04', '4.43e-04', '3.84e-04', '1.04e-03', '1.45e-03', '1.68e-03', '3.63e-04', '3.70e-04', '6.55e-04', '1.58e-03', '-1.69e-03', '6.33e-04', '1.78e-03', '4.28e-04', '2.65e-04', '5.21e-04', '-1.93e-03', '6.01e-04', '2.46e-03', '1.25e-03', '-6.07e-04', '1.20e-03', '5.52e-04', '3.17e-04', '7.34e-04', '9.63e-05', '3.12e-04', '4.50e-04', '8.91e-04', '1.52e-03', '1.34e-04', '7.04e-04', '1.49e-03', '4.95e-04', '5.64e-04', '1.79e-03', '2.36e-04', '-1.27e-03', '-9.84e-04', '3.66e-04', '8.03e-05', '8.59e-04', '2.46e-04', '1.61e-04', '1.11e-03', '1.19e-04', '5.38e-05', '1.04e-03', '8.25e-04', '6.35e-04', '3.60e-04', '1.55e-04', '1.68e-05', '1.12e-04', '2.05e-04', '9.10e-04', '8.84e-05', '1.05e-04', '1.72e-03', '3.46e-04', '6.02e-04', '-9.74e-04', '1.35e-04', '1.44e-04','4.25e-04', '1.46e-05', '5.66e-05', '6.20e-05', '4.42e-04', '2.88e-05', '9.34e-05', '4.20e-04', '1.21e-04', '1.27e-04', '3.30e-05', '1.48e-04', '1.23e-04', '1.32e-04', '3.33e-04', '1.28e-03', '1.79e-03', '7.52e-05', '4.66e-04', '2.41e-04', '2.34e-04','1.55e-04', '3.72e-05', '1.66e-05', '2.46e-04', '9.33e-05', '2.17e-04', '5.94e-05', '1.94e-05', '4.78e-04', '3.87e-04', '1.84e-04', '1.35e-04', '8.89e-05', '1.75e-04', '1.67e-04', '2.41e-04', '1.35e-04', '6.95e-05', '7.76e-05', '2.23e-04', '4.24e-04','1.27e-04', '9.65e-05', '1.02e-04', '7.85e-05', '5.87e-04', '1.26e-03', '2.28e-03', '-1.51e-05', '-6.38e-04', '-6.04e-04', '1.94e-03', '5.98e-04', '3.83e-04', '1.22e-03', '8.59e-05', '3.38e-04', '6.13e-04', '-1.60e-03', '1.11e-03', '2.18e-04', '1.62e-03', '-1.89e-03', '8.47e-04', '1.20e-03', '1.41e-03', '3.75e-04', '-6.88e-04', '-1.15e-03', '3.60e-04', '8.91e-05', '4.81e-04', '2.89e-04', '1.96e-04', '2.15e-03', '1.01e-04', '1.32e-04', '1.68e-03', '1.25e-03', '1.77e-03', '6.03e-04', '4.74e-04', '8.33e-04', '1.21e-04', '3.38e-04', '9.45e-04', '1.02e-04', '1.18e-04', '1.73e-03', '3.62e-04', '6.63e-04', '-2.85e-04', '1.82e-04', '1.52e-04', '5.87e-04', '1.61e-05', '7.25e-05', '5.78e-05', '1.40e-03', '4.55e-05', '9.54e-05', '6.26e-04', '3.32e-04', '1.35e-04', '1.21e-04', '7.20e-05', '3.15e-04', '9.12e-05', '3.74e-04', '1.45e-03', '1.45e-03', '8.82e-05', '5.63e-04', '2.95e-04', '2.93e-04', '2.68e-04', '2.72e-05', '9.42e-06', '2.03e-04', '1.10e-04', '2.29e-04', '5.66e-05', '4.10e-05', '9.53e-04', '1.00e-03', '2.95e-04', '1.84e-04', '1.03e-04', '2.20e-04', '2.46e-04', '1.96e-04', '1.75e-04', '7.57e-05', '9.46e-05', '3.15e-04', '3.81e-04', '1.91e-04', '1.29e-04', '1.33e-04', '7.13e-05', '1.03e-03', '-4.43e-04', '-1.97e-03', '-1.33e-03', '5.62e-04', '1.74e-03', '-1.05e-04', '4.67e-04', '2.48e-04', '-1.34e-03', '1.54e-04', '4.96e-04', '2.14e-04', '-9.41e-04', '8.90e-04', '2.38e-04', '1.12e-03', '1.55e-03', '7.47e-04', '7.72e-04', '1.15e-03', '2.56e-04', '-1.66e-03', '1.89e-03', '1.83e-04', '9.38e-05', '-1.78e-03', '4.46e-04', '1.82e-04', '1.07e-03', '2.99e-04', '1.85e-04', '1.09e-03', '1.55e-03', '-1.55e-03', '3.91e-04', '2.06e-04', '5.79e-04', '1.08e-04', '1.80e-04', '8.07e-04', '6.65e-05', '7.81e-05', '9.94e-05', '1.92e-04', '4.63e-04', '7.50e-04', '1.56e-04', '1.40e-04', '7.93e-04', '1.15e-05', '7.01e-05', '5.97e-05', '1.43e-03', '4.15e-05', '1.61e-04', '6.85e-04', '2.37e-04', '1.57e-04', '6.68e-05', '4.42e-05', '2.07e-04', '9.93e-05', '4.35e-04', '1.63e-03', '1.32e-03', '9.51e-05', '5.30e-04', '3.22e-04', '2.96e-04', '4.05e-04', '2.19e-05', '6.74e-06', '2.05e-04', '1.14e-04', '2.48e-04', '5.80e-05', '1.71e-05', '8.26e-04', '-1.31e-03', '1.99e-04', '1.58e-04', '1.28e-04', '1.59e-04', '3.02e-04', '2.46e-04', '1.79e-04', '6.81e-05', '9.48e-05', '2.72e-04', '3.88e-04', '1.66e-04', '1.29e-04', '1.22e-04', '6.04e-05', '4.22e-04', '-1.00e-04', '-4.06e-04', '-3.20e-03', '1.98e-03', '-1.61e-03', '3.60e-04', '2.38e-04', '-1.02e-03', '1.17e-03', '3.53e-03', '1.72e-03', '2.16e-04', '4.27e-03', '1.81e-03', '1.79e-04', '2.66e-03', '1.07e-03', '8.87e-04', '5.45e-04', '-8.61e-04']\nINFO:absl:\nMax KL divergence for a single token in the set: 7.45e-03\n```\n\n</details>\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nCopybara import of the project:\n\n--\n790b68e0ec88d7e3f7cfcbcf0fd7a9f21d04ab58 by hengtaoguo <hengtaoguo@google.com>:\n\nAdd Qwen3.5-9B config\n\nfix CI\n\nMerging this change closes #5354\n\nCOPYBARA_INTEGRATE_REVIEW=https://github.com/AI-Hypercomputer/maxtext/pull/5354 from AI-Hypercomputer:hengtaoguo-q35-9b 790b68e0ec88d7e3f7cfcbcf0fd7a9f21d04ab58\nPiperOrigin-RevId: 994666096",
+          "timestamp": "2026-10-06T22:31:35Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/d9073270667985014211b55165f5f77a282166c1"
+        },
+        "date": 1791336579190,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 106.75200000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 37,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7671.227000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 478,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1119.882,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.333,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 6654.508999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 478,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 285.029,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 51,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 157.388,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1502.848,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 24.66300000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 97,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.331,
             "unit": "sec"
           },
           {
