@@ -159,6 +159,7 @@ quantize_router_proj: true # set to false to exclude the moe router (gate) proje
 quantize_logits_proj: false # set to true to quantize output logits projection (logits_dense) when quantization is enabled. requires quantization=fp8_full, logits_via_embedding=false, num_vocab_tiling=1. also covers the mtp logits projection, which reuses the same head.
 logits_proj_quant_calibration_method: "" # calibration method for logits_dense when quantize_logits_proj=true. if empty, inherits weight/act_quantization_calibration_method. e.g. "absmax"
 logits_proj_bwd_quant_calibration_method: "" # bwd (gradient) calibration method for logits_dense when quantize_logits_proj=true, applied to both dlhs and drhs gradients. if empty, inherits bwd_quantization_calibration_method and drhs_grad_quantization_calibration_method. e.g. "absmax"
+sa_qproj_bwd_bf16: false # keep self-attention query projection backward pass in bfloat16 instead of fp8 when fp8_full quantization is enabled.
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint
 # saves params quantized on fly at following path
 save_quantized_params_path: ""

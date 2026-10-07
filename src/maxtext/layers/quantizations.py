@@ -1200,6 +1200,21 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   # Disjunct regex paths, e.g. "(path1|path2|...)"
   module_path = f"({'|'.join(paths)})" if len(paths) > 1 else paths[0]
 
+  if config.sa_qproj_bwd_bf16:
+    rules.append(
+        qwix.QtRule(
+            module_path=(rf"{module_path}/(self_)?attention\w*/(query|wq_a|wq_b)"),
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=None,
+            weight_calibration_method=config.weight_quantization_calibration_method,
+            act_calibration_method=config.act_quantization_calibration_method,
+            bwd_calibration_method=config.bwd_quantization_calibration_method,
+            additional_qt_config={"sparsity_rule": sparsity_rule},
+            op_names=("dot_general",),
+        )
+    )
+
   rules.append(
       qwix.QtRule(
           module_path=module_path,
