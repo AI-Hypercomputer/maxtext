@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791393782250,
+  "lastUpdate": 1791413517446,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -46226,6 +46226,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
             "value": 97.108,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Jingwei Zuo",
+            "username": "Dr-Left",
+            "email": "jzuo@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "ec157e58ed74149066ee1ca638d0a881e34e60bc",
+          "message": "DiLoCo fragmenter: optionally bucketize non-scanned matrices across layer fragments.\n\n# Description\n\nStreaming DiLoCo always puts every non-scanned parameter (embedding, output head,\nfinal norm) into fragment 0, so the step that syncs fragment 0 moves far more data\nthan the layer steps: for Qwen3-8B the 151936 x 4096 embedding and head together\nexceed a decoder layer several times over. With `diloco_bucketize_non_scanned`, a\nnon-scanned leaf with ndim >= 2 is split across the layer fragments along its\nlongest *unsharded* axis that has at least `num_diloco_fragments - 1` indices\n(vocab for both the embedding (vocab, embed) and the head (embed, vocab) under\nFSDP). There is no size threshold. A leaf whose long axes are all sharded (e.g.\nvocab under tensor parallelism) stays whole in fragment 0, because slicing a\nsharded axis makes XLA gather the whole leaf at every sync.\n\n-   `FragmentedTreeManipulator.create(params, config, shardings=None)` picks the\n    split axis from `shardings`, or from the leaves' `NamedSharding` when they are\n    concrete. Each bucketized leaf is described by a `BucketSpec(chunk_size,\n    remainder, axis)`; flat fragment keys use `#bucket` / `#remainder`, and the\n    remainder stays in fragment 0. One line per bucketized (or skipped) leaf is logged.\n-   `diloco.build_diloco_train_step` and `build_streaming_diloco_train_step` take\n    `outer_params_shardings`, since the SPMD step builds the manipulator from tracers,\n    which carry no sharding. `train_utils.jit_train_and_eval_step` and\n    `train_compile.py` (AOT) pass the outer param shardings. Bucketizing without them\n    raises `ValueError`.\n-   `apply_flat_fragment` casts the slices it writes to the dtype of the target\n    leaf (it now uses `dynamic_update_slice`, which requires equal dtypes), and\n    `get_flat_fragment` / `apply_flat_fragment` reject out-of-range fragment indices.\n    `shardings` must match the parameter tree key by key.\n-   New config field `diloco_bucketize_non_scanned` (default `False`). With the\n    default, fragment contents and the SPMD streaming trajectory are unchanged.\n    Validation: requires `enable_streaming_diloco` and `num_diloco_fragments >= 3`\n    (with one layer fragment every bucketized leaf would just move whole), and is\n    rejected with `shard_optimizer_over_data`, because AOT derives the outer param\n    shardings after the Zero-1 overlay and the runtime path before it. A warning\n    gives the effective sync period when `diloco_sync_period` is not a multiple of\n    `num_diloco_fragments` (pre-existing rounding in `get_streaming_schedule`).\n\nTesting:\n\n-   New `tests/unit/diloco_fragmenter_test.py` (device-dependent tests need 4 CPU devices, as in CI):\n    -   Fragmenter: extract/apply round trips and an exactly-once membership count on\n        every leaf, over 2/3/5 fragments x sequential/strided layers x bucketize\n        on/off; bucket keys, shapes and owners; split-axis choice under FSDP, tensor\n        parallelism, vocab-only sharding and `UNCONSTRAINED`; shardings from concrete\n        leaves; creation on tracers with and without `shardings`; dtype casting on\n        every write path; tree-structure and fragment-index errors; the warning.\n    -   SPMD sync: one pass over all fragments equals one full-tree Nesterov step.\n    -   SPMD streaming train step: `build_diloco_train_step` with a toy inner step, on a\n        (diloco 2, fsdp 2, tensor 1) mesh with an FSDP layout (embedding and head split\n        along vocab) and a (diloco 2, fsdp 1, tensor 2) mesh with a tensor-parallel layout\n        (vocab sharded, so both are split along embed). The compiled step has no\n        all-gather / collective-permute / all-to-all, while the tensor-parallel\n        control without shardings has them. Six steps (two periods), each checked\n        against a host-side outer step on that step's fragment (params, momentum and\n        every replica's inner params).\n    -   Mutations, each of which makes at least one test fail: raise in, or drop the\n        shardings from, the streaming step's `create()` call; drop the dtype cast;\n        overlap the remainder; drop the bounds check; flip the pseudo-gradient sign.\n-   `tests/integration/diloco_test.py`: AOT compile of the bucketized SPMD streaming\n    step for 2x tpu7x-8 (needs a TPU-enabled jax, skipped on CPU), config validation\n    and default-off tests.\n-   Hardware: streaming DiLoCo, 2x v6e-8, Qwen3-8B, 37 fragments (one per step),\n    200 steps, synthetic data. All runs exit 0 on both pods with finite losses.\n    -   FSDP only, SPMD: the log shows the embedding and head bucketized along vocab\n        (`BucketSpec(chunk_size=4220, remainder=16, axis=0/1)`). Wall time over steps\n        20-199: 1.3768 s/step off, 1.3841 and 1.3719 s/step in two runs on. The two\n        \"on\" runs have identical losses at all 200 steps, so their 0.9% difference\n        is run-to-run noise, and the on/off difference is within it.\n    -   Tensor parallelism 2, SPMD: the log shows both leaves left whole (\"every axis\n        with >= 36 indices is sharded\"). Losses identical to bucketization off at all\n        200 steps; 1.6825 vs 1.6791 s/step (+0.2%). Before the sharding-aware split\n        this case cost +3.9% (1.7448 s/step).\n    -   The runs above used an image built before the last round of guards. Rerun on\n        an image built from the final stack, bucketization on: SPMD FSDP, SPMD tensor\n        parallelism 2 and threaded FSDP (CL5) all exit 0 with 0 errors and give losses\n        identical at all 200 steps (each learner, for threaded) to the earlier runs\n        of the same configs, with the same bucketizing / not bucketizing log lines.\n        Wall time over steps 20-199: 1.3716, 1.6813 s/step (SPMD); 0.8931 / 0.9001\n        s/step per learner (threaded).\n\n# PR Series for threaded Streaming DiLoCo\n\nhttps://github.com/AI-Hypercomputer/maxtext/pull/5392\nhttps://github.com/AI-Hypercomputer/maxtext/pull/5393\nhttps://github.com/AI-Hypercomputer/maxtext/pull/5394\nhttps://github.com/AI-Hypercomputer/maxtext/pull/5503\nhttps://github.com/AI-Hypercomputer/maxtext/pull/5504\nhttps://github.com/AI-Hypercomputer/maxtext/pull/5505\nhttps://github.com/AI-Hypercomputer/maxtext/pull/5506\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 995405833",
+          "timestamp": "2026-10-07T22:47:36Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/ec157e58ed74149066ee1ca638d0a881e34e60bc"
+        },
+        "date": 1791413516032,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 106.904,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 37,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7875.807000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 481,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1166.02,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.44600000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 6895.3460000000005,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 481,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 284.224,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 51,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 156.782,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1457.9689999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 21.190000000000037,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 97,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.95,
             "unit": "sec"
           },
           {
