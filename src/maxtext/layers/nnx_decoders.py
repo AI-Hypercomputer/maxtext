@@ -59,6 +59,7 @@ from maxtext.models import (
     gemma4_small,
     gpt3,
     gpt_oss,
+    laya,
     llama2,
     llama4,
     mistral,
@@ -500,6 +501,23 @@ class NNXDecoder(nnx.Module):
           rngs=self.rngs,
       )
 
+    if config.decoder_block == DecoderBlockType.LAYA:
+      self.embedding_norm = laya.LayaLayerNorm(
+          num_features=config.emb_dim,
+          epsilon=config.normalization_layer_epsilon,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("norm",),
+          use_bias=False,
+          parameter_memory_host_offload=config.parameter_memory_host_offload,
+          rngs=rngs,
+      )
+      self.decision_head = laya.LayaDecisionHead(
+          config=config,
+          mesh=self.mesh,
+          rngs=rngs,
+      )
+
     self._init_decoder_layers(decoder_block_classes, rngs, mesh)
 
   def _init_decoder_layers(self, decoder_block_classes, rngs, mesh):
@@ -883,6 +901,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.LAYA,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1238,6 +1257,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
+        DecoderBlockType.LAYA: [laya.LayaDecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1425,6 +1445,13 @@ class NNXDecoder(nnx.Module):
           shard_mode=self.config.shard_mode,
           rngs=rngs,
       )
+    elif self.config.decoder_block == DecoderBlockType.LAYA:
+      return functools.partial(
+          laya.LayaLayerNorm,
+          num_features=num_features,
+          use_bias=False,
+          rngs=rngs,
+      )
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
@@ -1530,6 +1557,8 @@ class NNXDecoder(nnx.Module):
         else:
           raise ValueError(f"Unsupported model_name for audio: {cfg.model_name}")
 
+    if cfg.decoder_block == DecoderBlockType.LAYA:
+      y = self.embedding_norm(y)
     y = self.dropout(y, deterministic=deterministic)
     y = y.astype(cfg.dtype)
 

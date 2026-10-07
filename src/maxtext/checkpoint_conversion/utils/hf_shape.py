@@ -1277,6 +1277,62 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def LAYA_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping from HuggingFace Laya safetensors weight names to shapes."""
+  hidden_size = config["hidden_size"]
+  intermediate_size = config["intermediate_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  vocab_size = config["vocab_size"]
+
+  mapping = {
+      "encoder.embeddings.tok_embeddings.weight": [vocab_size, hidden_size],
+      "encoder.embeddings.norm.weight": [hidden_size],
+      "encoder.final_norm.weight": [hidden_size],
+      "type_emb.weight": [3, hidden_size],
+      "scorer.0.weight": [hidden_size],
+      "scorer.0.bias": [hidden_size],
+      "scorer.1.weight": [hidden_size, hidden_size],
+      "scorer.1.bias": [hidden_size],
+      "scorer.3.weight": [1, hidden_size],
+      "scorer.3.bias": [1],
+      "act_head.0.weight": [256, hidden_size + 4],
+      "act_head.0.bias": [256],
+      "act_head.2.weight": [2, 256],
+      "act_head.2.bias": [2],
+      "temperature": [3],
+  }
+  for hi in range(2):
+    mapping.update(
+        {
+            f"head.layers.{hi}.norm1.weight": [hidden_size],
+            f"head.layers.{hi}.norm1.bias": [hidden_size],
+            f"head.layers.{hi}.self_attn.in_proj_weight": [3 * hidden_size, hidden_size],
+            f"head.layers.{hi}.self_attn.in_proj_bias": [3 * hidden_size],
+            f"head.layers.{hi}.self_attn.out_proj.weight": [hidden_size, hidden_size],
+            f"head.layers.{hi}.self_attn.out_proj.bias": [hidden_size],
+            f"head.layers.{hi}.norm2.weight": [hidden_size],
+            f"head.layers.{hi}.norm2.bias": [hidden_size],
+            f"head.layers.{hi}.linear1.weight": [4 * hidden_size, hidden_size],
+            f"head.layers.{hi}.linear1.bias": [4 * hidden_size],
+            f"head.layers.{hi}.linear2.weight": [hidden_size, 4 * hidden_size],
+            f"head.layers.{hi}.linear2.bias": [hidden_size],
+        }
+    )
+  for layer_idx in range(num_hidden_layers):
+    if layer_idx > 0:
+      mapping[f"encoder.layers.{layer_idx}.attn_norm.weight"] = [hidden_size]
+    mapping.update(
+        {
+            f"encoder.layers.{layer_idx}.attn.Wqkv.weight": [3 * hidden_size, hidden_size],
+            f"encoder.layers.{layer_idx}.attn.Wo.weight": [hidden_size, hidden_size],
+            f"encoder.layers.{layer_idx}.mlp_norm.weight": [hidden_size],
+            f"encoder.layers.{layer_idx}.mlp.Wi.weight": [2 * intermediate_size, hidden_size],
+            f"encoder.layers.{layer_idx}.mlp.Wo.weight": [hidden_size, intermediate_size],
+        }
+    )
+  return mapping
+
+
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1323,4 +1379,7 @@ HF_SHAPE = {
     "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
+    "laya": LAYA_HF_WEIGHTS_TO_SHAPE,
+    "laya-multilingual": LAYA_HF_WEIGHTS_TO_SHAPE,
+    "laya-typed-decisions": LAYA_HF_WEIGHTS_TO_SHAPE,
 }
