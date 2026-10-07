@@ -81,17 +81,32 @@ jobs:
     environment: release
     if: needs.build_maxtext_package.result == 'success' && inputs.publish
     permissions:
-      id-token: write # required for PyPI Trusted Publishing (OIDC)
+      id-token: write # required for PyPI Trusted Publishing (OIDC) & Sigstore attestations
+      attestations: write
       contents: read
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
           path: dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel-sbom
+          path: sbom/
+      - name: Generate signed SLSA build provenance attestation for wheel
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: 'dist/*.whl'
+      - name: Generate signed SPDX SBOM attestation for wheel
+        uses: actions/attest-sbom@115c3be05ff3974bcbd596578934b3f9ce39bf68 # v2.2.0
+        with:
+          subject-path: 'dist/*.whl'
+          sbom-path: 'sbom/maxtext-wheel.spdx.json'
       - name: Publish MaxText wheel to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist/
+          attestations: true
 
   get_latest_maxtext_pypi_version:
     name: Get latest MaxText PyPI version
@@ -128,7 +143,12 @@ jobs:
     steps:
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev -q
-      - name: Add tags to Docker image
+      - name: Download wheel and SPDX SBOM for SCILo ingestion
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel-sbom
+          path: sbom/
+      - name: Promote Docker image from staging to production and add PyPI version tag
         shell: bash
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
@@ -136,8 +156,84 @@ jobs:
           GITHUB_RUN_ID: ${{ inputs.run_id }}
           PYPI_VERSION: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
         run: |
-          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${IMAGE_NAME}"
-          gcloud container images add-tag \
-            "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
-            "${SOURCE_IMAGE}:${PYPI_VERSION}" \
-            --quiet
+          STAGING_REPO="maxtext-images-staging"
+          PROD_REPO="maxtext-images"
+          STAGING_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${STAGING_REPO}/${IMAGE_NAME}"
+          PROD_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${PROD_REPO}/${IMAGE_NAME}"
+
+          # Resolve image digest from staging (or fall back to prod if built prior to staging migration)
+          IMAGE_DIGEST=$(gcloud container images describe "${STAGING_IMAGE}:${GITHUB_RUN_ID}" \
+            --format="value(image_summary.digest)" 2>/dev/null || true)
+
+          if [[ -n "${IMAGE_DIGEST}" ]]; then
+            echo "Uploading wheel SPDX SBOM reference to Container Analysis / SCILo for ${STAGING_IMAGE}@${IMAGE_DIGEST}..."
+            if [[ -f "sbom/maxtext-wheel.spdx.json" ]]; then
+              if [[ "${PROJECT_NAME}" == "cloud-tpu-images" ]]; then
+                SBOM_BUCKET="gs://artifactanalysis-us-189282287250"
+              else
+                SBOM_BUCKET="gs://artifactanalysis-us-770040921623"
+              fi
+              gcloud artifacts sbom load \
+                --project="${PROJECT_NAME}" \
+                --source=sbom/maxtext-wheel.spdx.json \
+                --uri="${STAGING_IMAGE}@${IMAGE_DIGEST}" \
+                --destination="${SBOM_BUCKET}" \
+                --quiet || echo "Warning: gcloud artifacts sbom load for wheel SBOM returned non-zero."
+            fi
+
+            echo "Promoting ${STAGING_IMAGE}@${IMAGE_DIGEST} to ${PROD_IMAGE} via Exit Gate..."
+            ACCESS_TOKEN="$(gcloud auth print-access-token)"
+            PROMOTE_URL="https://artifactregistry.googleapis.com/v1/projects/${PROJECT_NAME}/locations/us/repositories/${PROD_REPO}:promoteArtifact"
+            SOURCE_REPO="projects/${PROJECT_NAME}/locations/us/repositories/${STAGING_REPO}"
+            SOURCE_VERSION="${SOURCE_REPO}/packages/${IMAGE_NAME}/versions/${IMAGE_DIGEST}"
+            export SOURCE_REPO SOURCE_VERSION
+
+            PAYLOAD=$(python3 -c 'import json, os
+            print(json.dumps({
+                "source_repository": os.environ["SOURCE_REPO"],
+                "source_version": os.environ["SOURCE_VERSION"],
+                "attachment_behavior": "PUBLIC_BCID_VSA_ONLY",
+            }))')
+
+            RESPONSE=$(curl -s -w "\n%{http_code}" \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -X POST "${PROMOTE_URL}" \
+              -d "${PAYLOAD}")
+
+            HTTP_STATUS=$(echo "${RESPONSE}" | tail -n 1)
+            BODY=$(echo "${RESPONSE}" | sed '$d')
+            echo "Promote API response (HTTP ${HTTP_STATUS}): ${BODY}"
+
+            if [[ "${HTTP_STATUS}" -ge 200 && "${HTTP_STATUS}" -lt 300 ]]; then
+              OP_NAME=$(echo "${BODY}" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("name", ""))')
+              for _ in $(seq 1 60); do
+                OP_STATUS=$(curl -s \
+                  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+                  -H "Content-Type: application/json" \
+                  "https://artifactregistry.googleapis.com/v1/${OP_NAME}")
+                DONE=$(echo "${OP_STATUS}" | python3 -c 'import json, sys; print(str(json.load(sys.stdin).get("done", False)).lower())')
+                if [[ "${DONE}" == "true" ]]; then
+                  break
+                fi
+                sleep 5
+              done
+            elif ! echo "${BODY}" | grep -qi "already exists"; then
+              echo "Error: promoteArtifact API failed with HTTP ${HTTP_STATUS}"
+              exit 1
+            fi
+
+            gcloud container images add-tag \
+              "${PROD_IMAGE}@${IMAGE_DIGEST}" \
+              "${PROD_IMAGE}:${PYPI_VERSION}" \
+              --quiet
+            gcloud container images add-tag \
+              "${STAGING_IMAGE}:${GITHUB_RUN_ID}" \
+              "${STAGING_IMAGE}:${PYPI_VERSION}" \
+              --quiet
+          else
+            gcloud container images add-tag \
+              "${PROD_IMAGE}:${GITHUB_RUN_ID}" \
+              "${PROD_IMAGE}:${PYPI_VERSION}" \
+              --quiet
+          fi

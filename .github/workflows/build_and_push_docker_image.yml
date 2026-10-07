@@ -107,6 +107,17 @@ jobs:
           echo "image_name: $IMAGE_NAME"
           echo "dockerfile: $DOCKERFILE"
 
+      - name: Install Syft SBOM generator
+        run: |
+          python3 -c '
+          import os, stat, tarfile, urllib.request
+          url = "https://github.com/anchore/syft/releases/download/v1.20.0/syft_1.20.0_linux_amd64.tar.gz"
+          urllib.request.urlretrieve(url, "/tmp/syft.tar.gz")
+          with tarfile.open("/tmp/syft.tar.gz", "r:gz") as tar:
+              tar.extract("syft", path="/usr/local/bin")
+          os.chmod("/usr/local/bin/syft", os.stat("/usr/local/bin/syft").st_mode | stat.S_IEXEC)
+          '
+
       - name: Checkout MaxText
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -163,15 +174,32 @@ jobs:
           cp -r "${PWD}/tests" .venv/lib/python3.12/site-packages/
           cp "${PWD}/pytest.ini" .venv/lib/python3.12/site-packages/
 
+      - name: Determine staging and target repositories
+        id: repo_config
+        shell: bash
+        env:
+          INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
+        run: |
+          if [[ "${INPUTS_REPOSITORY_NAME}" == "maxtext-images" ]]; then
+            echo "build_repo=maxtext-images-staging" >> "$GITHUB_OUTPUT"
+            echo "should_promote=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_repo=${INPUTS_REPOSITORY_NAME}" >> "$GITHUB_OUTPUT"
+            echo "should_promote=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Build and push Docker image
+        id: build_push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           push: true
           context: .
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
-          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ inputs.repository_name }}/${{ inputs.image_name }}:${{ github.run_id }}
+          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ steps.repo_config.outputs.build_repo }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
-          outputs: type=image,compression=zstd,force-compression=true
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,push=true,compression=zstd,force-compression=true
           secret-files: |
             credentials=/tmp/airlock/credentials.json
           build-args: |
@@ -183,23 +211,179 @@ jobs:
             PACKAGE_DIR=.venv/lib/python3.12/site-packages
             INCLUDE_TEST_ASSETS=${{ inputs.include_test_assets }}
 
+      - name: Generate SPDX SBOM and upload to Container Analysis / SCILo
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          BUILD_REPO: ${{ steps.repo_config.outputs.build_repo }}
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ steps.build_push.outputs.digest }}
+        run: |
+          STAGING_IMAGE_URI="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}@${IMAGE_DIGEST}"
+          if [[ "${PROJECT_NAME}" == "cloud-tpu-images" ]]; then
+            SBOM_BUCKET="gs://artifactanalysis-us-189282287250"
+          else
+            SBOM_BUCKET="gs://artifactanalysis-us-770040921623"
+          fi
+          echo "Generating SPDX JSON SBOM for ${STAGING_IMAGE_URI}..."
+
+          if syft "registry:${STAGING_IMAGE_URI}" -o spdx-json=/tmp/sbom.spdx.json; then
+            echo "Uploading SPDX SBOM reference to Container Analysis / SCILo..."
+            gcloud artifacts sbom load \
+              --project="${PROJECT_NAME}" \
+              --source=/tmp/sbom.spdx.json \
+              --uri="${STAGING_IMAGE_URI}" \
+              --destination="${SBOM_BUCKET}" \
+              --quiet || echo "Warning: gcloud artifacts sbom load returned non-zero; continuing with sbom export."
+          fi
+
+          echo "Triggering Artifact Analysis SBOM export for BCID / SCILo ingestion..."
+          for attempt in $(seq 1 9); do
+            if EXPORT_OUT=$(gcloud artifacts sbom export \
+              --project="${PROJECT_NAME}" \
+              --uri="${STAGING_IMAGE_URI}" \
+              --quiet 2>&1); then
+              echo "${EXPORT_OUT}"
+              break
+            elif [[ "${EXPORT_OUT}" == *"SCANNING"* || "${EXPORT_OUT}" == *"NOT_FOUND"* ]] && [[ "${attempt}" -lt 9 ]]; then
+              echo "Artifact Analysis scan still in progress (attempt ${attempt}/9); waiting 10s..."
+              sleep 10
+            else
+              echo "Warning: gcloud artifacts sbom export returned non-zero: ${EXPORT_OUT}"
+              break
+            fi
+          done
+
+      - name: Promote Docker image from staging to production via Exit Gate
+        if: steps.repo_config.outputs.should_promote == 'true'
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          STAGING_REPO: ${{ steps.repo_config.outputs.build_repo }}
+          PROD_REPO: ${{ inputs.repository_name }}
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ steps.build_push.outputs.digest }}
+        run: |
+          echo "Promoting ${INPUTS_IMAGE_NAME}@${IMAGE_DIGEST} from ${STAGING_REPO} to ${PROD_REPO}..."
+          ACCESS_TOKEN="$(gcloud auth print-access-token)"
+          PROMOTE_URL="https://artifactregistry.googleapis.com/v1/projects/${PROJECT_NAME}/locations/us/repositories/${PROD_REPO}:promoteArtifact"
+          SOURCE_REPO="projects/${PROJECT_NAME}/locations/us/repositories/${STAGING_REPO}"
+          SOURCE_VERSION="${SOURCE_REPO}/packages/${INPUTS_IMAGE_NAME}/versions/${IMAGE_DIGEST}"
+
+          export SOURCE_REPO SOURCE_VERSION
+          PAYLOAD=$(python3 -c 'import json, os
+          print(json.dumps({
+              "source_repository": os.environ["SOURCE_REPO"],
+              "source_version": os.environ["SOURCE_VERSION"],
+              "attachment_behavior": "PUBLIC_BCID_VSA_ONLY",
+          }))')
+
+          RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -X POST "${PROMOTE_URL}" \
+            -d "${PAYLOAD}")
+
+          HTTP_STATUS=$(echo "${RESPONSE}" | tail -n 1)
+          BODY=$(echo "${RESPONSE}" | sed '$d')
+          echo "Promote API response (HTTP ${HTTP_STATUS}): ${BODY}"
+
+          if [[ "${HTTP_STATUS}" -lt 200 || "${HTTP_STATUS}" -ge 300 ]]; then
+            if echo "${BODY}" | grep -qi "already exists"; then
+              echo "Image digest ${IMAGE_DIGEST} already exists in ${PROD_REPO}; continuing."
+              exit 0
+            fi
+            echo "Error: promoteArtifact API failed with HTTP ${HTTP_STATUS}"
+            exit 1
+          fi
+
+          OP_NAME=$(echo "${BODY}" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("name", ""))')
+          if [[ -z "${OP_NAME}" ]]; then
+            echo "Error: Could not parse operation name from response."
+            exit 1
+          fi
+
+          echo "Waiting for promotion operation ${OP_NAME} to complete..."
+          for _ in $(seq 1 60); do
+            OP_STATUS=$(curl -s \
+              -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+              -H "Content-Type: application/json" \
+              "https://artifactregistry.googleapis.com/v1/${OP_NAME}")
+            DONE=$(echo "${OP_STATUS}" | python3 -c 'import json, sys; print(str(json.load(sys.stdin).get("done", False)).lower())')
+            if [[ "${DONE}" == "true" ]]; then
+              echo "Final operation status: ${OP_STATUS}"
+              HAS_ERR=$(echo "${OP_STATUS}" | python3 -c '
+          import json, sys
+          data = json.load(sys.stdin)
+          err = data.get("error")
+          if not err:
+              print("ok")
+          elif err.get("code") == 6 and "already exists" in err.get("message", "").lower():
+              print("ok")
+          else:
+              print(err.get("message", "unknown error"))
+          ')
+              if [[ "${HAS_ERR}" == "ok" ]]; then
+                echo "Artifact promotion succeeded."
+                if [[ -f /tmp/sbom.spdx.json ]]; then
+                  PROD_IMAGE_URI="us-docker.pkg.dev/${PROJECT_NAME}/${PROD_REPO}/${INPUTS_IMAGE_NAME}@${IMAGE_DIGEST}"
+                  if [[ "${PROJECT_NAME}" == "cloud-tpu-images" ]]; then
+                    SBOM_BUCKET="gs://artifactanalysis-us-189282287250"
+                  else
+                    SBOM_BUCKET="gs://artifactanalysis-us-770040921623"
+                  fi
+                  echo "Uploading SPDX SBOM reference for promoted image ${PROD_IMAGE_URI}..."
+                  gcloud artifacts sbom load \
+                    --project="${PROJECT_NAME}" \
+                    --source=/tmp/sbom.spdx.json \
+                    --uri="${PROD_IMAGE_URI}" \
+                    --destination="${SBOM_BUCKET}" \
+                    --quiet || echo "Warning: gcloud artifacts sbom load on promoted image returned non-zero."
+                fi
+                exit 0
+              else
+                echo "Error: Artifact promotion failed: ${HAS_ERR}"
+                exit 1
+              fi
+            fi
+            echo "Promotion still in progress, retrying in 5 seconds..."
+            sleep 5
+          done
+
+          echo "Error: Timed out waiting for promotion operation ${OP_NAME}."
+          exit 1
+
       - name: Add tags to Docker image
         shell: bash
         run: |
+          STAGING_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}"
           SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${INPUTS_REPOSITORY_NAME}/${INPUTS_IMAGE_NAME}"
-          TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
+          TEMP_IMG="${SOURCE_IMAGE}:${GITHUB_RUN_ID}"
+
+          # Ensure run_id tag is applied to the digest in the target repository
+          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${TEMP_IMG}" --quiet
 
           # Add date tag
           IMAGE_DATE="$(date +%Y-%m-%d)"
-          gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
+          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
 
           # Convert date to YYYYMMDD format
           clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
 
           # Add MaxText tag
           MAXTEXT_SHA=$(git rev-parse --short HEAD)
-          gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
+          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
+
+          # Also keep staging tags in sync when promoting
+          if [[ "${SHOULD_PROMOTE}" == "true" ]]; then
+            gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${IMAGE_DATE}" --quiet
+            gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
+          fi
         env:
+          BUILD_REPO: ${{ steps.repo_config.outputs.build_repo }}
+          SHOULD_PROMOTE: ${{ steps.repo_config.outputs.should_promote }}
+          IMAGE_DIGEST: ${{ steps.build_push.outputs.digest }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
           INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
           INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}

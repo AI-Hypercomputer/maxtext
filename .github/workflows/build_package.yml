@@ -68,8 +68,27 @@ jobs:
       - name: Build maxtext wheel
         run: |
           uv build --wheel
+      - name: Generate SPDX SBOM for maxtext wheel
+        shell: bash
+        run: |
+          mkdir -p sbom
+          python3 -c '
+          import os, shutil, stat, tarfile, urllib.request
+          url = "https://github.com/anchore/syft/releases/download/v1.20.0/syft_1.20.0_linux_amd64.tar.gz"
+          urllib.request.urlretrieve(url, "/tmp/syft.tar.gz")
+          with tarfile.open("/tmp/syft.tar.gz", "r:gz") as tar:
+              tar.extract("syft", path="/usr/local/bin")
+          os.chmod("/usr/local/bin/syft", os.stat("/usr/local/bin/syft").st_mode | stat.S_IEXEC)
+          '
+          WHEEL_FILE=$(ls dist/maxtext-*.whl)
+          syft "${WHEEL_FILE}" -o spdx-json=sbom/maxtext-wheel.spdx.json
       - name: Upload the built maxtext wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: maxtext-wheel
-          path: dist/*
+          path: dist/*.whl
+      - name: Upload the maxtext wheel SPDX SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maxtext-wheel-sbom
+          path: sbom/maxtext-wheel.spdx.json

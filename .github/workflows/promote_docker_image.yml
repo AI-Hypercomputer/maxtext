@@ -148,6 +148,58 @@ jobs:
           STABLE_IMAGE_NAME: ${{ matrix.stable_image_name }}
           NIGHTLY_IMAGE_NAME: ${{ matrix.nightly_image_name }}
         run: |
+          promote_from_staging() {
+            local img_name="$1"
+            local staging_img="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images-staging/${img_name}"
+            local prod_img="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${img_name}"
+            local digest
+            digest=$(gcloud container images describe "${staging_img}:${CALLER_RUN_ID}" \
+              --format="value(image_summary.digest)" 2>/dev/null || true)
+            if [ -n "$digest" ]; then
+              echo "Promoting ${staging_img}@${digest} to ${prod_img} via Exit Gate..."
+              local token
+              token="$(gcloud auth print-access-token)"
+              local promote_url="https://artifactregistry.googleapis.com/v1/projects/${PROJECT_NAME}/locations/us/repositories/maxtext-images:promoteArtifact"
+              local src_repo="projects/${PROJECT_NAME}/locations/us/repositories/maxtext-images-staging"
+              local src_ver="${src_repo}/packages/${img_name}/versions/${digest}"
+              local payload
+              payload=$(SRC_REPO="$src_repo" SRC_VER="$src_ver" python3 -c 'import json, os
+          print(json.dumps({
+              "source_repository": os.environ["SRC_REPO"],
+              "source_version": os.environ["SRC_VER"],
+              "attachment_behavior": "PUBLIC_BCID_VSA_ONLY",
+          }))')
+              local resp
+              resp=$(curl -s -w "\n%{http_code}" \
+                -H "Authorization: Bearer ${token}" \
+                -H "Content-Type: application/json" \
+                -X POST "${promote_url}" \
+                -d "${payload}")
+              local status
+              status=$(echo "$resp" | tail -n 1)
+              local body
+              body=$(echo "$resp" | sed '$d')
+              if [ "$status" -ge 200 ] && [ "$status" -lt 300 ]; then
+                local op_name
+                op_name=$(echo "$body" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("name", ""))')
+                for _ in $(seq 1 60); do
+                  local op_status
+                  op_status=$(curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+                    "https://artifactregistry.googleapis.com/v1/${op_name}")
+                  local done_flag
+                  done_flag=$(echo "$op_status" | python3 -c 'import json, sys; print(str(json.load(sys.stdin).get("done", False)).lower())')
+                  if [ "$done_flag" = "true" ]; then
+                    break
+                  fi
+                  sleep 5
+                done
+              elif ! echo "$body" | grep -qi "already exists"; then
+                echo "Warning: promoteArtifact returned HTTP ${status}: ${body}"
+              fi
+              gcloud container images add-tag "${prod_img}@${digest}" "${prod_img}:${CALLER_RUN_ID}" --quiet || true
+            fi
+          }
+
           tag_image() {
             local img="$1"
             local tag="$2"
@@ -162,7 +214,8 @@ jobs:
 
           tagged_any=false
 
-          # 1. Check if stable image exists and tag it
+          # 1. Check if stable image exists (or can be promoted from staging) and tag it
+          promote_from_staging "${STABLE_IMAGE_NAME}"
           STABLE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${STABLE_IMAGE_NAME}"
           if gcloud container images describe "${STABLE_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
             echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} exists. Tagging stable image..."
@@ -173,7 +226,8 @@ jobs:
             echo "Stable image ${STABLE_IMAGE}:${CALLER_RUN_ID} does not exist. Skipping stable image tagging."
           fi
 
-          # 2. Check if nightly image exists and tag it
+          # 2. Check if nightly image exists (or can be promoted from staging) and tag it
+          promote_from_staging "${NIGHTLY_IMAGE_NAME}"
           NIGHTLY_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${NIGHTLY_IMAGE_NAME}"
           if gcloud container images describe "${NIGHTLY_IMAGE}:${CALLER_RUN_ID}" >/dev/null 2>&1; then
             echo "Nightly image ${NIGHTLY_IMAGE}:${CALLER_RUN_ID} exists. Tagging nightly image..."
