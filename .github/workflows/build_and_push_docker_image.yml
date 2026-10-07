@@ -211,15 +211,13 @@ jobs:
         shell: bash
         run: |
           uv venv --seed
-          source .venv/bin/activate
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          uv pip install "${maxtext_wheel}[runner]" --resolution=lowest
+          uv pip install --python .venv/bin/python "${maxtext_wheel}[runner]" --resolution=lowest
 
       - name: Copy tests assets to package directory
         if: inputs.include_test_assets == true
         shell: bash
         run: |
-          source .venv/bin/activate
           cp -r "${PWD}/tests" .venv/lib/python3.12/site-packages/
           cp "${PWD}/pytest.ini" .venv/lib/python3.12/site-packages/
 
