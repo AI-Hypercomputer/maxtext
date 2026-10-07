@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Multimodal VAE and processor utilities package."""
+"""Model-agnostic diffusion pipeline utilities and base classes."""
