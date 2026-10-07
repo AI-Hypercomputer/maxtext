@@ -16,9 +16,11 @@
 
 import os
 import tempfile
+import types
 import unittest
 from unittest import mock
 
+from absl.testing import parameterized
 from etils import epath
 from flax import nnx
 from flax.training import train_state
@@ -26,6 +28,8 @@ import jax
 import jax.numpy as jnp
 from maxtext.common import checkpointing
 from maxtext.common import train_state_nnx
+from maxtext.utils import model_creation_utils
+import numpy as np
 import optax
 import orbax.checkpoint as ocp
 
@@ -746,6 +750,97 @@ class TestWeightMismatch(unittest.TestCase):
     self.assertNotIn("dropout", want)
     self.assertEqual(have, restored["params"]["params"])
     checkpointing._raise_on_weight_mismatch(want, have)  # pylint: disable=protected-access
+
+
+class _Projector(nnx.Module):
+
+  def __init__(self, rngs: nnx.Rngs):
+    self.custom_linear = nnx.Linear(2, 2, rngs=rngs)
+
+
+class _VisionEncoder(nnx.Module):
+
+  def __init__(self, rngs: nnx.Rngs):
+    self.projector = _Projector(rngs)
+
+
+class _ModelWithNewWeights(nnx.Module):
+  """A model with weights no HF checkpoint has: a new custom vision projector and a LoRA adapter."""
+
+  def __init__(self, rngs: nnx.Rngs):
+    self.linear = nnx.Linear(2, 1, rngs=rngs)
+    self.lora_a = nnx.Param(jnp.full((2, 1), 7.0))
+    self.vision_encoder = _VisionEncoder(rngs)
+
+
+class TestFromPretrainedSafetensorsDynamic(parameterized.TestCase):
+  """`from_pretrained`'s safetensors_dynamic branch, which the forward-pass logit checker uses."""
+
+  def _load(self, model, restored):
+    config = types.SimpleNamespace(load_parameters_path=epath.Path("gs://does-not-exist/hf"), lora=None)
+    init = nnx.state(model).to_pure_dict()
+    with mock.patch.object(checkpointing, "load_safetensors_dynamic_state", return_value=(None, restored)) as m:
+      model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), config)  # pylint: disable=protected-access
+    return m, init
+
+  def test_streams_weights_into_the_model(self):
+    model = _ModelDropout(nnx.Rngs(0))
+    weights = {"linear": {"kernel": jnp.full((2, 1), 3.0), "bias": jnp.array([5.0])}}
+    m, init = self._load(model, {"params": weights})
+
+    path, target, _ = m.call_args[0]
+    self.assertEqual(path, "gs://does-not-exist/hf")
+    # The loader gets the weights as shape/dtype/sharding only, without the dropout rngs.
+    self.assertEqual(set(target), {"linear"})
+    kernel = target["linear"]["kernel"]
+    self.assertIsInstance(kernel, jax.ShapeDtypeStruct)
+    self.assertEqual((kernel.shape, kernel.sharding), ((2, 1), init["linear"]["kernel"].sharding))
+    # The initial weights were freed before the load; the rngs were kept.
+    self.assertTrue(init["linear"]["kernel"].is_deleted())
+    self.assertFalse(init["dropout"]["rngs"]["key"].is_deleted())
+    loaded = nnx.state(model).to_pure_dict()
+    self.assertTrue(jnp.array_equal(loaded["linear"]["kernel"], weights["linear"]["kernel"]))
+    self.assertTrue(jnp.array_equal(loaded["linear"]["bias"], weights["linear"]["bias"]))
+
+  def test_unmapped_weight_raises(self):
+    unmapped = {"linear": {"kernel": jnp.ones((2, 1)), "bias": jax.ShapeDtypeStruct((1,), jnp.float32)}}
+    with self.assertRaisesRegex(ValueError, "linear/bias"):
+      self._load(_ModelDropout(nnx.Rngs(0)), {"params": unmapped})
+
+  def test_weights_not_in_the_checkpoint_keep_their_initial_values(self):
+    """A new custom projector and LoRA adapters stay as initialized, as in the Orbax branch."""
+    model = _ModelWithNewWeights(nnx.Rngs(0))
+    init = nnx.state(model).to_pure_dict()
+    initial_projector = np.asarray(init["vision_encoder"]["projector"]["custom_linear"]["kernel"])
+    weights = {"kernel": jnp.full((2, 1), 3.0), "bias": jnp.array([5.0])}
+    restored = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), init)
+    restored["linear"] = weights
+    self._load(model, {"params": restored})
+
+    loaded = nnx.state(model).to_pure_dict()
+    self.assertTrue(jnp.array_equal(loaded["linear"]["kernel"], weights["kernel"]))
+    self.assertTrue(init["linear"]["kernel"].is_deleted())
+    projector = loaded["vision_encoder"]["projector"]["custom_linear"]["kernel"]
+    self.assertIsInstance(projector, jax.Array)
+    np.testing.assert_array_equal(np.asarray(projector), initial_projector)
+    np.testing.assert_array_equal(np.asarray(loaded["lora_a"]), np.full((2, 1), 7.0))
+
+  def test_empty_path_loads_the_model_repo(self):
+    """An empty `load_parameters_path` is passed on, so the loader uses `HF_IDS[model_name]`."""
+    model = _ModelDropout(nnx.Rngs(0))
+    weights = {"linear": {"kernel": jnp.ones((2, 1)), "bias": jnp.array([5.0])}}
+    config = types.SimpleNamespace(load_parameters_path="", lora=None)
+    with mock.patch.object(checkpointing, "load_safetensors_dynamic_state", return_value=(None, weights)) as m:
+      model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), config)  # pylint: disable=protected-access
+    self.assertEqual(m.call_args[0][0], "")
+
+  @parameterized.parameters("use_m3_model", "prefuse_moe_weights")
+  def test_unsupported_options_raise(self, option):
+    config = types.SimpleNamespace(load_parameters_path="gs://does-not-exist/hf", lora=None, **{option: True})
+    model = _ModelDropout(nnx.Rngs(0))
+    with self.assertRaisesRegex(NotImplementedError, "use_m3_model or prefuse_moe_weights"):
+      model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), config)  # pylint: disable=protected-access
+    self.assertFalse(nnx.state(model).to_pure_dict()["linear"]["kernel"].is_deleted())
 
 
 if __name__ == "__main__":
