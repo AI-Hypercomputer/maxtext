@@ -28,11 +28,22 @@ difference in three places, which this reader avoids:
    Here each tensor is moved as soon as its bytes are in, while later reads
    continue.
 
-Each host reads only the rows its own TPU chips need. Neighbouring byte ranges
-are merged and fetched as `chunk_bytes` ranged reads.
+Two ways to read a tensor:
 
-`fetch` does the GCS reads and copies onto this host's own TPU chips, with no
-communication between hosts, so it is safe on a background thread.
+* By rows: each host reads only the rows its own TPU chips need. Neighbouring
+  byte ranges are merged and fetched as `chunk_bytes` ranged reads.
+* Whole, then rearranged ("stacked"): with many TPU chips, a tensor's rows per
+  chip get tiny (a 16 MB DeepSeek-V4 expert over 256 chips is 64 KB per chip),
+  and reading by rows turns into millions of tiny GCS requests. So a group of
+  same-shape tensors whose pieces would be smaller than `min_piece_bytes` is
+  read as whole tensors instead, spread over the TPU chips (each tensor on one
+  chip, so each host reads whole tensors with large requests), and then
+  rearranged into the requested sharding on the TPU chips, over ICI.
+
+`read` = `fetch` + `unpack`. `fetch` does the GCS reads and copies onto this
+host's own TPU chips, with no communication between hosts, so it is safe on a
+background thread. `unpack` runs the jitted rearranging, which every host must
+run in the same order, so it belongs on the main thread.
 
 Once Orbax's loader fixes these, `hf_streaming_load` can switch back to it.
 """
@@ -59,9 +70,15 @@ READ_CHUNK_BYTES = 32 << 20
 # Read threads per host. On a v4-8 host, 32-64 threads reached ~2.3 GB/s from GCS
 # with this reader; 128 was slower.
 READ_THREADS = 64
+# Groups of same-shape tensors whose per-chip pieces would be smaller than this are
+# read whole and rearranged on the TPU chips (see the module docstring).
+MIN_PIECE_BYTES = 4 << 20
 # Byte ranges closer together than this are fetched as one range: reading a small
 # gap is cheaper than another request.
 _MERGE_GAP_BYTES = 1 << 20
+# Most tensors split out of a stack by one program. A program per tensor costs a launch each
+# (DeepSeek-V4 has ~34k tensors), while one program for thousands of tensors compiles slowly.
+_SPLIT_CHUNK = 256
 _SUFFIX = ".safetensors"
 _DTYPES = {
     "BOOL": np.bool_,
@@ -120,11 +137,34 @@ class _Block:
 
 @dataclasses.dataclass(eq=False)
 class _Unit:
-  """A tensor, built once all its pieces are read."""
+  """What is built once all its pieces are read: a tensor read by rows, or one TPU chip's part of a stack."""
 
   pieces: list[_Piece]
   build: Callable[[], None]
   blocks_left: int = 0
+
+
+@dataclasses.dataclass(eq=False)
+class _Stack:
+  """Same-shape tensors read whole, `per_chip` consecutive tensors on each TPU chip, then rearranged."""
+
+  names: list[str]  # In stack order; the stack is padded with zeros to a multiple of the chip count.
+  shape: tuple[int, ...]  # Of one tensor.
+  dtype: np.dtype
+  sharding: jax.sharding.NamedSharding  # Requested sharding of each tensor.
+  stacked_sharding: jax.sharding.NamedSharding  # How the stack is read: split along the stack axis.
+  num_padded: int
+  shards: dict = dataclasses.field(default_factory=dict)  # Device -> its part of the stack.
+  array: jax.Array | None = None
+
+
+@dataclasses.dataclass
+class Fetched:
+  """Tensors read onto this host's TPU chips by `SafetensorsReader.fetch`, before `unpack`."""
+
+  names: list[str]  # Requested order.
+  arrays: dict[str, jax.Array]  # Tensors read by rows: already in their requested sharding.
+  stacks: list[_Stack]
 
 
 def _bounds(index: tuple, shape: tuple[int, ...]) -> tuple[tuple[int, int], ...]:
@@ -159,6 +199,23 @@ def _read_header(path: str) -> tuple[dict, int, int]:
   return header, 8 + header_len, p.stat().length
 
 
+@functools.lru_cache(maxsize=None)
+def _reshard_fn(sharding: jax.sharding.Sharding):
+  return jax.jit(lambda x: x, out_shardings=sharding)
+
+
+@functools.lru_cache(maxsize=None)
+def _split_fn(sharding: jax.sharding.NamedSharding, num: int):
+  """One program that splits `num` tensors, from `start`, out of a stack already in `P(None, *spec)`."""
+
+  def split(x, start):
+    x = jax.lax.dynamic_slice_in_dim(x, start, num, axis=0)
+    return tuple(x[i] for i in range(num))
+
+  # `start` is traced, so every full chunk of a stack reuses one compiled program.
+  return jax.jit(split, out_shardings=(sharding,) * num)
+
+
 class SafetensorsReader:
   """Reads tensors from a SafeTensors checkpoint into sharded `jax.Array`s.
 
@@ -173,6 +230,7 @@ class SafetensorsReader:
       path: str,
       num_threads: int = READ_THREADS,
       chunk_bytes: int = READ_CHUNK_BYTES,
+      min_piece_bytes: int = MIN_PIECE_BYTES,
   ):
     """Finds the `.safetensors` files at `path` (a file or a directory) and reads their headers.
 
@@ -180,10 +238,13 @@ class SafetensorsReader:
       path: A `.safetensors` file, or a directory of them (local or gs://).
       num_threads: Read threads per host.
       chunk_bytes: Size of each ranged read sent to storage.
+      min_piece_bytes: Groups of same-shape tensors whose per-chip pieces would be smaller than
+        this are read whole and rearranged on the TPU chips. 0 always reads by rows.
     """
     if chunk_bytes <= 0:
       raise ValueError(f"chunk_bytes must be positive, got {chunk_bytes}.")
     self._chunk_bytes = chunk_bytes
+    self._min_piece_bytes = min_piece_bytes
     self._pool = concurrent.futures.ThreadPoolExecutor(num_threads, thread_name_prefix="safetensors_read")
     try:
       self._index = self._read_index(path, num_threads, chunk_bytes)
@@ -281,6 +342,44 @@ class SafetensorsReader:
       )
     return pieces
 
+  def _stackable(self, names: list[str], request: jax.ShapeDtypeStruct) -> bool:
+    """Whether a group of same-shape tensors is read whole and rearranged instead of by rows."""
+    sharding = request.sharding
+    num_devices = len(sharding.device_set)
+    if not isinstance(sharding, jax.sharding.NamedSharding) or num_devices == 1 or not request.shape:
+      return False
+    piece_bytes = math.prod(sharding.shard_shape(request.shape)) * np.dtype(request.dtype).itemsize
+    # Padding the stack to a multiple of the chip count may at most double it.
+    return 0 < piece_bytes < self._min_piece_bytes and 2 * len(names) >= num_devices
+
+  def _plan_stack(self, names: list[str], request: jax.ShapeDtypeStruct, units: list[_Unit]) -> _Stack:
+    """Spreads whole tensors over the TPU chips, `per_chip` consecutive ones (in file order) each."""
+    sharding = request.sharding
+    num_devices = len(sharding.device_set)
+    names = sorted(names, key=lambda n: (self._index[n].path, self._index[n].start))
+    num_padded = -len(names) % num_devices
+    mesh = sharding.mesh
+    stack = _Stack(
+        names=names,
+        shape=tuple(request.shape),
+        dtype=np.dtype(request.dtype),
+        sharding=sharding,
+        stacked_sharding=jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(tuple(mesh.axis_names))),
+        num_padded=num_padded,
+    )
+    stacked_shape = (len(names) + num_padded,) + stack.shape
+    for device, index in stack.stacked_sharding.addressable_devices_indices_map(stacked_shape).items():
+      first, last = _bounds(index[:1], stacked_shape[:1])[0]
+      pieces = [self._whole(names[i], [device]) for i in range(first, min(last, len(names)))]
+      units.append(_Unit(pieces, functools.partial(self._build_stack_part, stack, device, first, last, pieces)))
+    return stack
+
+  def _build_stack_part(self, stack: _Stack, device, first: int, last: int, pieces: list[_Piece]):
+    part = np.zeros((last - first,) + stack.shape, stack.dtype)
+    for i, piece in enumerate(pieces):
+      part[i] = self._rows(piece)
+    stack.shards[device] = jax.device_put(part, device)
+
   def _rows(self, piece: _Piece) -> np.ndarray:
     block = piece.block
     entry = self._index[piece.name]
@@ -303,8 +402,8 @@ class SafetensorsReader:
     block.buf[offset - block.start : offset - block.start + length] = np.frombuffer(data, np.uint8)
     return time.perf_counter() - t
 
-  def fetch(self, request: dict[str, jax.ShapeDtypeStruct]) -> dict[str, jax.Array]:
-    """Reads this host's part of the requested tensors onto its TPU chips.
+  def fetch(self, request: dict[str, jax.ShapeDtypeStruct]) -> Fetched:
+    """Reads this host's part of the requested tensors onto its TPU chips; finish with `unpack`.
 
     No communication between hosts, so this is safe to run on a background thread.
 
@@ -313,17 +412,28 @@ class SafetensorsReader:
         sharding to load it with.
 
     Returns:
-      Tensor name -> `jax.Array`, in the order of `request`.
+      What `unpack` turns into the requested arrays.
     """
     t_start = time.perf_counter()
-    arrays, units = {}, []
+    groups = collections.defaultdict(list)
     for name, sds in request.items():
       self._check(name, sds)
-      pieces = self._row_pieces(name, sds.sharding)
-      if pieces:
-        units.append(_Unit(pieces, functools.partial(self._build, name, sds, pieces, arrays)))
-      else:  # None of this host's TPU chips hold any of it.
-        arrays[name] = jax.make_array_from_single_device_arrays(sds.shape, sds.sharding, [], dtype=sds.dtype)
+      groups[(tuple(sds.shape), np.dtype(sds.dtype), sds.sharding)].append(name)
+
+    arrays, stacks, units = {}, [], []
+    for names in groups.values():
+      sds = request[names[0]]
+      if self._stackable(names, sds):
+        stacks.append(self._plan_stack(names, sds, units))
+        continue
+      for name in names:
+        pieces = self._row_pieces(name, request[name].sharding)
+        if pieces:
+          units.append(_Unit(pieces, functools.partial(self._build, name, request[name], pieces, arrays)))
+        else:  # None of this host's TPU chips hold any of it.
+          arrays[name] = jax.make_array_from_single_device_arrays(
+              request[name].shape, request[name].sharding, [], dtype=request[name].dtype
+          )
 
     by_file = collections.defaultdict(list)
     for unit in units:
@@ -368,6 +478,9 @@ class SafetensorsReader:
         futures[self._pool.submit(self._read_range, block, offset, length)] = block
     read_seconds, t_last_read = 0.0, t_start
     try:
+      for unit in units:
+        if not unit.pieces:  # A TPU chip that holds only stack padding.
+          build(unit)
       for block in blocks:
         if not block.reads_left:  # Zero-byte tensors.
           finish(block)
@@ -383,21 +496,49 @@ class SafetensorsReader:
         future.cancel()
       raise
 
+    for stack in stacks:
+      stacked_shape = (len(stack.names) + stack.num_padded,) + stack.shape
+      local = stack.stacked_sharding.addressable_devices_indices_map(stacked_shape)
+      stack.array = jax.make_array_from_single_device_arrays(
+          stacked_shape, stack.stacked_sharding, [stack.shards.pop(device) for device in local]
+      )
     fetched_bytes = sum(b.end - b.start for b in blocks)
     wall = max(t_last_read - t_start, 1e-9)
+    stacked = sum(len(s.names) for s in stacks)
     if jax.process_index() == 0:
       max_logging.log(
-          f"SafetensorsReader host 0: {len(request)} tensors, {sum(len(u.pieces) for u in units)} pieces in"
-          f" {len(blocks)} byte ranges over"
+          f"SafetensorsReader host 0: {len(request)} tensors ({stacked} read whole in"
+          f" {len(stacks)} stacks), {sum(len(u.pieces) for u in units)} pieces in {len(blocks)} byte ranges over"
           f" {len(by_file)} files, {len(futures)} ranged reads, {fetched_bytes / 1e9:.3f} GB in {wall:.2f}s"
           f" ({fetched_bytes / 1e9 / wall:.2f} GB/s); avg read {read_seconds / max(len(futures), 1):.3f}s,"
           f" {read_seconds / wall:.1f} reads in flight on average; into HBM {build_seconds:.2f}s;"
           f" total {time.perf_counter() - t_start:.2f}s"
       )
-    return {name: arrays[name] for name in request}
+    return Fetched(names=list(request), arrays=arrays, stacks=stacks)
+
+  def unpack(self, fetched: Fetched) -> dict[str, jax.Array]:
+    """Rearranges stacked tensors into their requested shardings on the TPU chips.
+
+    Every host must call this for the same `fetch` results in the same order.
+
+    Returns:
+      Tensor name -> `jax.Array`, in the order of the request.
+    """
+    arrays = dict(fetched.arrays)
+    for stack in fetched.stacks:
+      # Rearrange so every TPU chip holds its piece of every tensor (one all-to-all over ICI);
+      # splitting the tensors out is then local to each chip.
+      by_piece = jax.sharding.NamedSharding(stack.sharding.mesh, jax.sharding.PartitionSpec(None, *stack.sharding.spec))
+      stacked, stack.array = _reshard_fn(by_piece)(stack.array), None
+      for start in range(0, len(stack.names), _SPLIT_CHUNK):
+        names = stack.names[start : start + _SPLIT_CHUNK]
+        arrays.update(zip(names, _split_fn(stack.sharding, len(names))(stacked, start)))
+      del stacked
+    fetched.stacks = []
+    return {name: arrays[name] for name in fetched.names}
 
   def read(self, request: dict[str, jax.ShapeDtypeStruct]) -> dict[str, jax.Array]:
-    """Reads the requested tensors, each with the sharding it is requested with.
+    """Reads the requested tensors, each with the sharding it is requested with (`fetch` + `unpack`).
 
     Args:
       request: Tensor name -> `jax.ShapeDtypeStruct` with the checkpoint's shape and dtype and the
@@ -406,4 +547,4 @@ class SafetensorsReader:
     Returns:
       Tensor name -> `jax.Array`, in the order of `request`.
     """
-    return self.fetch(request)
+    return self.unpack(self.fetch(request))
