@@ -555,6 +555,35 @@ class MoeBufferProbeCollectorTest(unittest.TestCase):
     self.assertFalse(probe.reported)
     model(jnp.ones((4,)))  # No collector at all.
 
+  def test_direct_calls_count_each_pass_once(self):
+    # Calling the stamped model itself (no split/merge) twice makes `sow` append a second entry to the same
+    # variable; the earlier pass must not be reported again, or moe_dropped_rows_total counts it twice.
+    model = _ProbeAdapter()
+    xs = (jnp.asarray([1.0, 2.0, 3.0, 4.0]), jnp.ones((4,)))
+    with tunix_adapter_module.collect_moe_buffer_probe(model) as probe:
+      for x in xs:
+        model(x)
+    sown = np.concatenate([np.stack([np.asarray(x)[:3], np.asarray(x)[1:]]) for x in xs])
+    np.testing.assert_allclose(probe.ref[...], [sown[:, 0].max(), sown[:, 1].max(), sown[:, 2].sum()])
+
+  def test_collects_on_eager_path(self):
+    # MaxTextTrainingEngine runs `value_and_grad(diff_wrapper)` with no outer jit until `compile()` is called.
+    model = _ProbeAdapter()
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    def diff_wrapper(p, r, x):
+      mdl = nnx.merge(graphdef, p, r, copy=True)
+      with tunix_adapter_module.collect_moe_buffer_probe(mdl) as probe:
+        loss = _tunix_style_forward(*nnx.split(mdl), x)
+      self.assertTrue(probe.reported)
+      return loss, probe.ref[...]
+
+    for x in (jnp.asarray([1.0, 4.0, 2.0, 3.0]), jnp.asarray([5.0, 1.0, 1.0, 2.0])):
+      (_, probe), grads = jax.value_and_grad(diff_wrapper, has_aux=True)(params, rest, x)
+      sown = np.stack([np.asarray(x)[:3], np.asarray(x)[1:]])
+      np.testing.assert_allclose(probe, [sown[:, 0].max(), sown[:, 1].max(), sown[:, 2].sum()])
+      np.testing.assert_allclose(grads["base"]["w"][...], x)
+
 
 if __name__ == "__main__":
   unittest.main()

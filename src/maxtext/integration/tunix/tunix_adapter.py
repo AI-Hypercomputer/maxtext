@@ -158,7 +158,11 @@ def _report_moe_buffer_probe(adapter: nnx.Module) -> None:
         value = value.get_value()
       elif hasattr(value, "value"):
         value = value.value
-      values.extend(jax.tree.leaves(value))
+      # `sow` appends one entry per forward pass through this module and earlier passes were already folded into
+      # the Ref, so only the newest entry is new. (A Tunix loss's split/merge copy holds a single entry.)
+      leaves = jax.tree.leaves(value)
+      if leaves:
+        values.append(leaves[-1])
   if values:
     collector.ref[...] = moe.reduce_moe_buffer_probe([collector.ref[...]] + values)
     collector.reported = True
