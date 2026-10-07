@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791363457387,
+  "lastUpdate": 1791377946017,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -45982,6 +45982,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
             "value": 97.71800000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Suraj Kolla",
+            "username": "CaptainO5",
+            "email": "surajkolla@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "148624808ace201465742c71eba4dab13d91f600",
+          "message": "Allow `use_sliced_mla_proj` with Qwix interception quantization.\n\n`use_sliced_mla_proj` slices the single `wq_b` / `wkv_b` kernel param before a plain `lax.dot_general` (see `DenseGeneral(slice_bounds=...)`). With Qwix interception quantization (`use_qwix_quantization=True`), the layers keep `quant=None`, and Qwix intercepts that dot_general by module path. So the sliced projections are still quantized in both forward and backward. The current config check rejects every quantized config, which blocks sliced MLA projections for Qwix-quantized (e.g. fp8) training.\n\n# Tests\n\nUpdated `tests/unit/configs_value_test.py` (non-Qwix quantization still rejected, Qwix allowed, Qwix + batch split rejected).\n\n#### Auxiliary Test (similar to [PR#5141](https://github.com/AI-Hypercomputer/maxtext/pull/5141))\nSliced MLA (`use_sliced_mla_proj`) + Qwix: interception correct. [internal link] [full [internal link]\n\n```\n# use_sliced_mla_proj=false\n[QWIX] module='decoder/moe_layers/self_attention/wq_b' op=dot_general0 rule=0\n---\n[QWIX] module='decoder/moe_layers/self_attention/wkv_b' op=dot_general0 rule=0\n---\n[QWIX] module='mtp_block/mtp_layer_1/mtp_1_transformer_layer/self_attention/wq_b' op=dot_general0 rule=0\n---\n[QWIX] module='mtp_block/mtp_layer_1/mtp_1_transformer_layer/self_attention/wkv_b' op=dot_general0 rule=0\n\n# use_sliced_mla_proj=true\n[QWIX] module='decoder/moe_layers/self_attention/wq_b' op=dot_general0 rule=0\n[QWIX] module='decoder/moe_layers/self_attention/wq_b' op=dot_general1 rule=0\n---\n[QWIX] module='decoder/moe_layers/self_attention/wkv_b' op=dot_general0 rule=0\n[QWIX] module='decoder/moe_layers/self_attention/wkv_b' op=dot_general1 rule=0\n---\n[QWIX] module='mtp_block/mtp_layer_1/mtp_1_transformer_layer/self_attention/wq_b' op=dot_general0 rule=0\n[QWIX] module='mtp_block/mtp_layer_1/mtp_1_transformer_layer/self_attention/wq_b' op=dot_general1 rule=0\n---\n[QWIX] module='mtp_block/mtp_layer_1/mtp_1_transformer_layer/self_attention/wkv_b' op=dot_general0 rule=0\n[QWIX] module='mtp_block/mtp_layer_1/mtp_1_transformer_layer/self_attention/wkv_b' op=dot_general1 rule=0\n```\n# Checklist\n- [X] I have performed a self-review of my code.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed.\n\nPiperOrigin-RevId: 994917175",
+          "timestamp": "2026-10-07T07:58:57Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/148624808ace201465742c71eba4dab13d91f600"
+        },
+        "date": 1791377945626,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 105.191,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 37,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7852.472000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 481,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1121.465,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 201.73600000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 6883.772000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 481,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 284.57099999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 51,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 153.208,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1465.9180000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 20.752000000000038,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 97,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 99.236,
             "unit": "sec"
           },
           {
