@@ -163,13 +163,36 @@ jobs:
           cp -r "${PWD}/tests" .venv/lib/python3.12/site-packages/
           cp "${PWD}/pytest.ini" .venv/lib/python3.12/site-packages/
 
+      # Compute all image tags up front so they are pushed atomically by BuildKit,
+      # instead of re-tagging afterwards with `gcloud container images add-tag`.
+      - name: Compute image tags
+        id: image_tags
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${INPUTS_REPOSITORY_NAME}/${INPUTS_IMAGE_NAME}"
+          IMAGE_DATE="$(date -u +%Y-%m-%d)"
+          CLEAN_DATE="$(date -u +%Y%m%d)"
+          MAXTEXT_SHA="$(git rev-parse --short HEAD)"
+          {
+            echo "tags<<EOF"
+            echo "${SOURCE_IMAGE}:${RUN_ID}"
+            echo "${SOURCE_IMAGE}:${IMAGE_DATE}"
+            echo "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${CLEAN_DATE}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Build and push Docker image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           push: true
           context: .
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
-          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ inputs.repository_name }}/${{ inputs.image_name }}:${{ github.run_id }}
+          tags: ${{ steps.image_tags.outputs.tags }}
           cache-from: type=gha
           outputs: type=image,compression=zstd,force-compression=true
           secret-files: |
@@ -182,24 +205,3 @@ jobs:
             WORKFLOW=${{ inputs.workflow }}
             PACKAGE_DIR=.venv/lib/python3.12/site-packages
             INCLUDE_TEST_ASSETS=${{ inputs.include_test_assets }}
-
-      - name: Add tags to Docker image
-        shell: bash
-        run: |
-          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${INPUTS_REPOSITORY_NAME}/${INPUTS_IMAGE_NAME}"
-          TEMP_IMG="${SOURCE_IMAGE}:${{ github.run_id }}"
-
-          # Add date tag
-          IMAGE_DATE="$(date +%Y-%m-%d)"
-          gcloud container images add-tag "${TEMP_IMG}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
-
-          # Convert date to YYYYMMDD format
-          clean_date=$(echo "$IMAGE_DATE" | sed 's/[-:]//g' | cut -c1-8)
-
-          # Add MaxText tag
-          MAXTEXT_SHA=$(git rev-parse --short HEAD)
-          gcloud container images add-tag "${TEMP_IMG}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
-        env:
-          INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
-          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
-          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
