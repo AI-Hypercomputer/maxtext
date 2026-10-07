@@ -502,6 +502,10 @@ parameter_memory_host_offload: false
 # Whether to use jax.lax.scan over layers (stacked/unstacked checkpoint). We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations. When resuming from a checkpoint, this flag is auto-determined from metadata.
 scan_layers: true
 param_scan_axis: 1
+# Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in both the
+# forward and backward pass. Requires scan_layers=True. The backward pass always rematerializes each layer in full
+# (remat_policy is ignored). See docs/guides/optimization/fsdp_prefetch.md for the recommended XLA flags.
+prefetch_fsdp_weights: false
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
