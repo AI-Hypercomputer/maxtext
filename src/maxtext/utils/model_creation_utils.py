@@ -1099,6 +1099,54 @@ def verify_and_sync_scan_layers(config):
   return config
 
 
+def _keeps_initial_value(path) -> bool:
+  """Whether a weight keeps its initial value instead of coming from the HF checkpoint.
+
+  A newly attached custom vision projector (`custom_linear`) and LoRA adapters are not in the
+  checkpoint, as in the Orbax branch of `from_pretrained`.
+  """
+  names = [str(getattr(p, "key", p)) for p in path]
+  return any(part in name for name in names for part in ("custom_linear", "lora_a", "lora_b"))
+
+
+def _load_safetensors_dynamic(model, sharded_state, config):
+  """Streams the HF SafeTensors checkpoint at `config.load_parameters_path` into the model's weights.
+
+  The NNX counterpart of the `safetensors_dynamic` branch in `checkpointing.load_state_if_possible`:
+  the model's weights (each with its sharding) are the target, read, converted and placed a few
+  decoder layers at a time by `hf_streaming_load`. An empty `load_parameters_path` loads the HF repo
+  of `config.model_name`, as there.
+  """
+  if getattr(config, "use_m3_model", False) or getattr(config, "prefuse_moe_weights", False):
+    raise NotImplementedError(
+        "source_checkpoint_layout=safetensors_dynamic doesn't support use_m3_model or prefuse_moe_weights yet;"
+        " convert the checkpoint to Orbax, or turn these options off."
+    )
+  param_state = sharded_state.filter(
+      lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+  )
+  weights = param_state.to_pure_dict()
+  target = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), weights)
+  # Free the freshly initialized weights first, to make room in HBM for the loaded ones; keep the
+  # ones that are not in the checkpoint.
+  kept = {}
+  for path, leaf in jax.tree_util.tree_flatten_with_path(weights)[0]:
+    if _keeps_initial_value(path):
+      kept[path] = leaf
+    elif isinstance(leaf, jax.Array) and not leaf.is_deleted():
+      leaf.delete()
+  del weights
+  max_logging.log(f"Dynamic On-the-Fly Formatting: Loading SafeTensors from {config.load_parameters_path}")
+  _, restored = checkpointing.load_safetensors_dynamic_state(str(config.load_parameters_path), target, config)
+  restored = checkpointing._bare_weights(restored)  # pylint: disable=protected-access
+  # A weight no HF mapping covered comes back unmaterialized; same check the Orbax load makes.
+  checkpointing._raise_on_weight_mismatch(target, restored, config=config)  # pylint: disable=protected-access
+  restored = jax.tree_util.tree_map_with_path(
+      lambda path, x: kept.get(path, x) if isinstance(x, jax.ShapeDtypeStruct) else x, restored
+  )
+  nnx.update(model, restored)
+
+
 # pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
@@ -1200,7 +1248,9 @@ def from_pretrained(
     mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
-    if config.load_parameters_path:
+    if config.source_checkpoint_layout == "safetensors_dynamic":
+      _load_safetensors_dynamic(model, sharded_state, config)
+    elif config.load_parameters_path:
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
