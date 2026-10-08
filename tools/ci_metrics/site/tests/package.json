@@ -1,0 +1,7 @@
+{
+  "name": "ci-pulse-checks",
+  "private": true,
+  "description": "jsdom checks for the CI Pulse static dashboard (tools/ci_metrics/site/index.html)",
+  "scripts": { "test": "node run_all.js" },
+  "devDependencies": { "jsdom": "^29.1.1" }
+}
