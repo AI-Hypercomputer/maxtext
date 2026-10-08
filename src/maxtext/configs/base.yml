@@ -420,6 +420,7 @@ batch_split_factor: 1 # the factor by which to split the batch. Only used if use
 use_lineage: false # a flag to use Lineage DeepSeek-V3 execution.
 lineage_quantization: "none" # "none" or "fp8_full": quantization of the Lineage routed experts. Only used if use_lineage is true.
 lineage_expert_permutation: None # per-layer expert permutation for Lineage sparse/MTP layers: None (no shuffling) or "lpt" (on-device LPT load balancing from the previous step's expert counts).
+lineage_integration: "legacy" # "legacy" (MaxText NNX model + Lineage layers) or "native" (Lineage-native model; Google-internal).
 
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]

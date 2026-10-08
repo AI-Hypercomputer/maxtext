@@ -85,6 +85,12 @@ from maxtext.utils import mllog_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 
+try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter  # pylint: disable=g-import-not-at-top
+except ImportError:
+  lineage_adapter = None
+
 
 class EncoderKwargs(TypedDict, total=False):
   """Multimodal encoder arguments forwarded to the model."""
@@ -151,6 +157,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  if lineage_adapter is not None and lineage_adapter.is_native(config):
+    return lineage_adapter.loss_and_aux(model, config, data, is_train=is_train)
   # Only forward the kwarg when router replay is actually in use, so models
   # and adapters whose __call__ predates the feature keep working.
   forced_routing_kwargs = (
@@ -618,7 +626,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
   # pylint: disable=too-many-nested-blocks
-  if config.routed_bias and config.routed_bias_update_rate > 0.0:
+  if lineage_adapter is not None and lineage_adapter.is_native(config):
+    diag_bias_values = list(aux.get("diag_bias_values", ()))
+    diag_bias_updates = list(aux.get("diag_bias_updates", ()))
+  elif config.routed_bias and config.routed_bias_update_rate > 0.0:
     if getattr(config, "model_name", "").startswith("deepseek4"):
       max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
       flat_intermediates = traverse_util.flatten_dict(aux.get("intermediate_outputs", {}))

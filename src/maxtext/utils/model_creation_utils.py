@@ -59,6 +59,12 @@ import numpy as np
 from orbax import checkpoint as ocp
 
 try:
+  # lineage_adapter is Google-internal and excluded from the open-source export.
+  from maxtext.experimental.lineage import lineage_adapter  # pylint: disable=g-import-not-at-top
+except ImportError:
+  lineage_adapter = None
+
+try:
   from orbax.checkpoint.metadata import ArrayMetadata as _OrbaxArrayMetadata
 
   def _is_orbax_array_metadata(x):
@@ -537,6 +543,8 @@ def from_config(
 
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""
+  if rngs is not None and lineage_adapter is not None and lineage_adapter.is_native(config):
+    return lineage_adapter.LineageTransformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   if rngs is not None:
     return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   else:

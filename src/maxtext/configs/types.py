@@ -1653,6 +1653,15 @@ class DeepSeekMoE(BaseModel):
           " first step uses the identity."
       ),
   )
+  lineage_integration: Literal["legacy", "native"] = Field(
+      "legacy",
+      description=(
+          "Lineage DeepSeek-V3 integration mode when use_lineage is True:"
+          " 'legacy' runs the MaxText NNX Transformer with Lineage decoder/MTP"
+          " layer hooks; 'native' runs LineageTransformer with parameters"
+          " stored in Lineage layout and the full step in Lineage."
+      ),
+  )
 
 
 class Qwen3Next(BaseModel):
@@ -5959,6 +5968,8 @@ class MaxTextConfig(
         raise ValueError(f"use_lineage=True requires rope_type='yarn', got rope_type={self.rope_type!r}.")
       if self.capacity_factor <= 0:
         raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
+    elif self.lineage_integration != "legacy":
+      raise ValueError("lineage_integration='native' requires use_lineage=True.")
 
     # The freqs_cis table lookup clamps positions >= max_position_embeddings to the last row, while
     # rope_direct_position_freqs uses the true angle; keep positions in range so both settings agree.

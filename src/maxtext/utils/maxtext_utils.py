@@ -1709,10 +1709,11 @@ def setup_initial_state(
 
   # Initialization
   with axis_rules(config.logical_axis_rules):
+    native = lineage_adapter is not None and lineage_adapter.is_native(config)
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
-        config.load_parameters_path,
+        "" if native else config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
         unboxed_abstract_state,
@@ -1726,6 +1727,17 @@ def setup_initial_state(
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
     )
+    if native and restored is None and raw_params is None and config.load_parameters_path:
+      # The Lineage-native model restores MaxText-layout params against its own abstract target.
+      assert lineage_adapter is not None
+      raw_params = checkpointing.load_params_from_path(
+          config.load_parameters_path,
+          lineage_adapter.maxtext_restore_target(config, mesh),
+          config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_single_replica_ckpt_restoring=bool(config.enable_single_replica_ckpt_restoring),
+      )
     # Partial or fully restored
     was_restored = bool(restored is not None or raw_params is not None)
 
@@ -1740,7 +1752,11 @@ def setup_initial_state(
         in_shardings=None,
         out_shardings=state_mesh_shardings,
     )()
-    if raw_params:
+    if raw_params and native:
+      # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
+      assert lineage_adapter is not None
+      lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
+    elif raw_params:
       # Params-only load (base model weights): overlay restored weights, keep init for everything else.
       target_model = (
           state["model"]
