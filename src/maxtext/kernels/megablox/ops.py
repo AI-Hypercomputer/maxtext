@@ -29,6 +29,17 @@ import qwix
 import qwix.pallas as qpl
 import tokamax
 
+# Private tokamax internals, needed only for `tokamax_gmm_tile_m`. The public
+# `tokamax.ragged_dot` takes no tiling argument, so pinning the ragged tile means
+# reaching the op object and its config. Imported defensively: a tokamax upgrade
+# that moves these must not break training for the default path, which does not
+# use them, so the failure is deferred to the point of use.
+try:
+  from tokamax._src.ops.ragged_dot import api as _tokamax_rd_api  # pylint: disable=g-import-not-at-top
+  from tokamax._src.ops.ragged_dot import base as _tokamax_rd_base  # pylint: disable=g-import-not-at-top
+except ImportError:  # pragma: no cover
+  _tokamax_rd_api = _tokamax_rd_base = None
+
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     dot_dimension_numbers=(([1], [2]), ([], [])),
@@ -76,6 +87,7 @@ def gmm(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    dlhs_transpose_in_kernel: bool = False,
 ):
   """Grouped matrix multiplication operation."""
   if interpret is None:
@@ -110,7 +122,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs.dtype, rhs.dtype))
   return gmm_fwd_bwd(
@@ -132,6 +144,7 @@ def gmm(
       use_gmm_v2,
       use_gmm_v2_heuristic_tiling,
       partial_sum,
+      dlhs_transpose_in_kernel,
   )
 
 
@@ -169,6 +182,7 @@ def _gmm_fwd(
     use_gmm_v2: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     partial_sum: jnp.ndarray | None = None,
+    dlhs_transpose_in_kernel: bool = False,
 ) -> tuple[
     jnp.ndarray,
     tuple[
@@ -299,6 +313,63 @@ def _fwd_gather_weight(rhs: qpl.QArray, weight_gather_axes: List[Tuple[str, int]
   return rhs
 
 
+def tokamax_ragged_dot_v1(
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
+    group_sizes,
+    preferred_element_type: jnp.dtype,
+    *,
+    tile_m: int = 0,
+    **kwargs,
+) -> jnp.ndarray:
+  """`tokamax.ragged_dot` on the mosaic backend, with an optional ragged-tile override.
+
+  `tile_m` of 0 calls the public API unchanged, which lets tokamax pick the tiling.
+  Its TPU heuristic uses `tile_m = min(total_rows, 1024)` and shrinks it only to fit
+  VMEM, never to land on a group boundary, so whenever an expert gets fewer than 1024
+  rows every m-tile spans several expert groups and the kernel is re-run per group it
+  touches. `tokamax.ragged_dot` has no tiling argument, so the only way to say
+  otherwise is to build the op and pin its config.
+
+  Only `tile_m` is replaced. `tile_k`, `tile_n` and the buffer count are taken from
+  whatever tokamax itself would have used for these shapes, which keeps its VMEM
+  accounting intact, and since this is only ever used to lower `tile_m`, VMEM use can
+  only fall. The result is numerically unchanged: tiling picks the loop structure, not
+  the accumulation order within a group.
+  """
+  if not tile_m:
+    return tokamax.ragged_dot(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=preferred_element_type,
+        # `group_offset` is not yet supported
+        group_offset=None,
+        implementation="mosaic",
+        **kwargs,
+    )
+
+  if _tokamax_rd_api is None:
+    raise ImportError(
+        "tokamax_gmm_tile_m requires tokamax._src.ops.ragged_dot, which is not importable "
+        "in this tokamax build. Set tokamax_gmm_tile_m=0 to use tokamax's own heuristic."
+    )
+  # "mosaic" is a per-platform alias inside the public API; on TPU it resolves to
+  # "mosaic_tpu". Resolve it here because we need the op, not the dispatcher.
+  op = _tokamax_rd_api.IMPLEMENTATIONS["mosaic_tpu"]
+  op_kwargs = {
+      "group_sizes": group_sizes,
+      "ragged_dot_dimension_numbers": _tokamax_rd_base.DEFAULT_RAGGED_DOT_DIM_NUMS,
+      "precision": jax.lax.Precision.DEFAULT,
+      "preferred_element_type": preferred_element_type,
+      **kwargs,
+  }
+  config = op.bind(lhs, rhs, **op_kwargs).default_config
+  op = op.replace(config=dataclasses.replace(config, tile_m=tile_m))
+  return op(lhs, rhs, **op_kwargs)
+
+
 def _fwd_run_tokamax_v1(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -317,15 +388,15 @@ def _fwd_run_tokamax_v1(
   if transpose_rhs:
     rhs = rhs.swapaxes(1, 2)
 
-  return tokamax.ragged_dot(
+  # `tiling` is not threaded here: this entry point is reached through `gmm`'s
+  # custom VJP, whose `tiling` tuple is the megablox one and means something else.
+  # The override is wired at the `moe.py` call site, which is the path the tokamax
+  # v1 kernel actually runs on.
+  return tokamax_ragged_dot_v1(
       lhs=lhs,
       rhs=rhs,
       group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=preferred_element_type,
-      # `group_offset` is not yet supported
-      group_offset=None,
-      implementation="mosaic",
       **out_kwargs,
   )
 
@@ -351,6 +422,23 @@ def _fwd_prepare_rhs_scale(rhs: qpl.QArray, transpose_rhs: bool = False) -> jnp.
 
   num_quant_blocks = rhs_scale.shape[1] if rhs_scale.ndim > 1 else 1
   return jnp.broadcast_to(rhs_scale, (G, num_quant_blocks, 1, N))
+
+
+def _clamp_tiles(tile_m: int, tile_k: int, tile_n: int, m: int, k: int, n: int) -> tuple[int, int, int]:
+  """Clamps GMM v2 tile sizes to the operand extents they index.
+
+  A tile larger than its dimension is not a harmless over-request. gmm_v2 indexes
+  the operands by tile, so `tile_k > k` walks off the contracting extent and the
+  kernel returns NaN with no error: measured on tpu7x with olmo35-tiny, whose
+  latent is 512 against the 1024 default of `wi_tile_fwd_embed_dim`. Training
+  aborts on a NaN loss at step 1, while megablox and tokamax GMM v1 are clean at
+  the identical config. On a smaller-VMEM part the same over-request surfaces as
+  CompileTimeScopedVmemOom instead, which is how it stayed hidden.
+
+  `jax_ragged_dot_gmm` in `layers/moe.py` already clamps this way; the tokamax v2
+  path did not, and `wi_tile_*`/`wo_tile_*` reach it unmodified.
+  """
+  return min(tile_m, m), min(tile_k, k), min(tile_n, n)
 
 
 def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array | None:
@@ -425,7 +513,10 @@ def _fwd_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     fwd_tiling = gmm_v2.calculate_tiling
   else:
-    fwd_tiling = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
+    tm, tk, tn = _clamp_tiles(
+        tiling[0], tiling[1], tiling[2], lhs_operand.shape[0], lhs_operand.shape[1], rhs_operand.shape[2]
+    )
+    fwd_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   out = gmm_v2.gmm_v2(
       lhs=lhs_operand,  # pyrefly: ignore[bad-argument-type]
@@ -497,6 +588,7 @@ def _gmm_bwd(
     rhs_vma_axes: tuple,
     use_gmm_v2: bool,
     use_gmm_v2_heuristic_tiling: bool,
+    dlhs_transpose_in_kernel: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -566,6 +658,7 @@ def _gmm_bwd(
       interpret,
       lhs_vma_axes,
       use_gmm_v2_heuristic_tiling,
+      dlhs_transpose_in_kernel,
   )
 
   # 4. DRHS Gradient Execution
@@ -716,6 +809,7 @@ def _compute_dlhs(
     interpret: bool,
     lhs_vma_axes: tuple,
     use_gmm_v2_heuristic_tiling: bool,
+    dlhs_transpose_in_kernel: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DLHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -729,7 +823,15 @@ def _compute_dlhs(
     )
   elif use_tokamax_backend and use_gmm_v2:
     return _dlhs_run_tokamax_v2(
-        dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, use_gmm_v2_heuristic_tiling, transpose_rhs
+        dlhs_dout,
+        rhs,
+        group_sizes,
+        group_offset,
+        lhs_dtype,
+        tiling,
+        use_gmm_v2_heuristic_tiling,
+        transpose_rhs,
+        dlhs_transpose_in_kernel,
     )
   else:
     return _dlhs_run_megablox(
@@ -805,16 +907,21 @@ def _dlhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     transpose_rhs: bool,
+    dlhs_transpose_in_kernel: bool = False,
 ) -> jnp.ndarray:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
-  # NOTE: We manually transpose RHS here because gmm_v2 lacks native transpose_rhs support.
-  dlhs_rhs = rhs if transpose_rhs else rhs.swapaxes(1, 2)
+  # Without dlhs_transpose_in_kernel, RHS is transposed in HBM, a full copy of the
+  # gathered weight per layer. With it, gmm_v2 reads [g, k, n] and transposes in-core.
+  in_kernel = dlhs_transpose_in_kernel and not transpose_rhs
+  dlhs_rhs = rhs if (transpose_rhs or in_kernel) else rhs.swapaxes(1, 2)
   dlhs_lhs = dlhs_dout.qvalue if isinstance(dlhs_dout, qpl.QArray) else dlhs_dout
+  dlhs_n = dlhs_rhs.shape[1] if in_kernel else dlhs_rhs.shape[2]
 
   if use_gmm_v2_heuristic_tiling:
     dlhs_tiling = gmm_v2.calculate_tiling
   else:
-    dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+    tm, tk, tn = _clamp_tiles(tiling[3], tiling[4], tiling[5], dlhs_lhs.shape[0], dlhs_lhs.shape[1], dlhs_n)
+    dlhs_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   dlhs = gmm_v2.gmm_v2(
       lhs=dlhs_lhs,
@@ -827,6 +934,7 @@ def _dlhs_run_tokamax_v2(
       group_offset=group_offset,
       # Bypass internal quantization if incoming dlhs_dout is already a QArray.
       maybe_quantize_lhs=not isinstance(dlhs_dout, qpl.QArray),
+      transpose_rhs=in_kernel,
   )
 
   # Rescale dlhs by dlhs_dout.scale when incoming gradient was pre-quantized QArray.
@@ -969,7 +1077,8 @@ def _drhs_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     drhs_tiling = tgmm_v2.calculate_tgmm_tiling
   else:
-    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
+    tm, tk, tn = _clamp_tiles(tiling[6], tiling[7], tiling[8], drhs_lhs.shape[0], drhs_lhs.shape[1], drhs_rhs.shape[1])
+    drhs_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   return tgmm_v2.tgmm_v2(
       lhs=drhs_lhs,

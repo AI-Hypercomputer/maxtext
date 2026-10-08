@@ -123,6 +123,8 @@ save_config_to_gcs: false
 
 # gradient dtype
 grad_dtype: "float32"
+# Cast large fp32 weights to dtype before the forward pass, so FSDP moves them in bf16.
+cast_params_to_compute_dtype: false
 
 # activation dtypes.
 dtype: "bfloat16"
@@ -265,6 +267,14 @@ log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
+# EMo document-pool routing (OLMoE3): restrict each document's top-k to a per-document
+# expert pool (size sampled from [min, max] in training, fixed at eval). arxiv 2605.06663
+emo_enabled: false
+emo_min_document_expert_pool: 16
+emo_max_document_expert_pool: 512
+emo_eval_document_expert_pool: 512
+# With moe_lean_routing, find the EMo pool threshold by bisection instead of a sort.
+emo_threshold_by_bisection: false
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
 router_topk_matmul_vjp: false # deepseek routing: dense one-hot VJP for the top-k weight gather (no scatter-add in the backward)
@@ -337,6 +347,14 @@ use_gmm_v2: false
 # Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
 # When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
 use_gmm_v2_heuristic_tiling: false
+# Transpose the expert weight inside the GMM v2 dlhs kernel instead of copying it in HBM.
+gmm_v2_dlhs_transpose_in_kernel: false
+# Override the m-tile of the Tokamax v1 ragged-dot kernel; 0 keeps tokamax's heuristic.
+# The wi_tile_*/wo_tile_* knobs above do not reach that kernel, since tokamax.ragged_dot
+# takes no tiling argument. Its heuristic uses tile_m = min(total_rows, 1024) and never
+# aligns to a group boundary, so below 1024 rows per expert each m-tile straddles several
+# expert groups. Set to seq_len * per_device_batch_size * top_k / num_experts to align.
+tokamax_gmm_tile_m: 0
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
@@ -1434,6 +1452,29 @@ gdn_num_key_heads: 16
 gdn_num_value_heads: 32
 # Chunk size for the parallel scan algorithm in the Gated Delta Net.
 gdn_chunk_size: 64
+# dtype for the chunked delta-rule state and matmul operands; the decay algebra stays float32.
+gdn_state_dtype: "float32"
+# Fused tokamax Kimi Delta Attention kernel (experimental; Pallas Mosaic on TPU >= gen6).
+use_tokamax_kda: false
+# Reference beta in [0, 2) via allow_neg_eigval; False clamps to [0, 1] (diagnostic).
+kda_allow_neg_eigval: true
+# Max packed documents/sequence for the KDA kernel (pads to seq + 63*bound; keep near the
+# real packing max to bound HBM). Ignored when packing=false.
+tokamax_kda_max_num_segments: 32
+# Floor (nats) on per-step KDA log-decay fed to the tokamax kernel; it NaNs past ~30. 0 disables.
+tokamax_kda_log_decay_floor: 20.0
+# Do the KDA q/k L2-norm outside the tokamax kernel, where XLA can fuse it.
+tokamax_kda_l2norm_outside: false
+# Same MoE routing with fewer sorts, and routing indices saved for the bwd.
+moe_lean_routing: false
+# With moe_lean_routing, top-k by bisection on the logit bits instead of a sort.
+moe_topk_by_bisection: false
+# With moe_lean_routing, top-k with a Pallas max-and-mask kernel instead of a sort.
+moe_topk_pallas: false
+# Cast the KDA short-conv weight to the activation dtype so q/k/v stay bf16.
+kda_conv_in_compute_dtype: false
+# Rematerialize each OLMoE3 layer on its own instead of per mixer cycle.
+olmoe3_per_layer_remat: false
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on

@@ -36,6 +36,7 @@ from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.kernels import sort_activations
+from maxtext.kernels import topk as topk_kernel
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -130,6 +131,41 @@ def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax
   return jnp.diff(clamped_cumsum_extended, axis=0)
 
 
+def keep_top_by_bisection(scores: jax.Array, k) -> jax.Array:
+  """Mask of the ``k`` largest entries on the last axis, ties lowest index first, without a sort.
+
+  Equals ``argsort(argsort(-scores)) < k`` (stable). The k-th largest value is
+  found by 32 counting passes over order-preserving uint32 keys of the scores,
+  one bit at a time from the top. ``k`` is an int or broadcasts to
+  ``scores.shape[:-1] + (1,)``.
+  """
+  scores = scores.astype(jnp.float32)
+  scores = jnp.where(scores == 0, 0.0, scores)  # -0.0 ties +0.0, as in the float compare
+  bits = jax.lax.bitcast_convert_type(scores, jnp.int32)
+  # Negative floats flip their magnitude bits, then the sign bit flips, so
+  # unsigned order matches float order.
+  key = jax.lax.bitcast_convert_type(bits ^ ((bits >> 31) & 0x7FFFFFFF), jnp.uint32) ^ jnp.uint32(0x80000000)
+  want = jnp.broadcast_to(jnp.asarray(k, jnp.int32), scores.shape[:-1] + (1,))
+
+  def step(i, thr):
+    cand = thr | (jnp.uint32(1) << (31 - i).astype(jnp.uint32))
+    return jnp.where(jnp.sum(key >= cand, axis=-1, keepdims=True) >= want, cand, thr)
+
+  thr = jax.lax.fori_loop(0, 32, step, jnp.zeros(want.shape, jnp.uint32))
+  above = key > thr
+  at = key == thr
+  slots = want - jnp.sum(above, axis=-1, keepdims=True)
+  return above | (at & (jnp.cumsum(at, axis=-1) <= slots))
+
+
+def mask_to_indices(keep: jax.Array, k: int) -> jax.Array:
+  """Ascending positions of the ``k`` set entries per row of a mask with exactly ``k`` set."""
+  slot = jnp.where(keep, jnp.cumsum(keep, axis=-1, dtype=jnp.int32) - 1, -1)
+  idx = jax.lax.broadcasted_iota(jnp.int32, keep.shape, keep.ndim - 1)
+  onehot = slot[..., None] == jnp.arange(k, dtype=jnp.int32)
+  return jnp.sum(jnp.where(onehot, idx[..., None], 0), axis=-2)
+
+
 def _sort_activations(
     inputs: jax.Array,
     sort_indices: jax.Array,
@@ -222,11 +258,36 @@ def _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g):
 take_along_last_axis_dense_vjp.defvjp(_take_along_last_axis_dense_vjp_fwd, _take_along_last_axis_dense_vjp_bwd)
 
 
+@jax.custom_vjp
+def _permute_rows(inputs: jax.Array, indices: jax.Array, inverse: jax.Array) -> jax.Array:
+  """`inputs[indices]` whose bwd gathers with a known inverse instead of argsorting."""
+  return inputs[indices, ...]
+
+
+def _permute_rows_fwd(inputs: jax.Array, indices: jax.Array, inverse: jax.Array) -> tuple[jax.Array, jax.Array]:
+  return inputs[indices, ...], inverse
+
+
+def _permute_rows_bwd(inverse: jax.Array, grads: jax.Array) -> tuple[jax.Array, None, None]:
+  return grads[inverse, ...], None, None
+
+
+_permute_rows.defvjp(_permute_rows_fwd, _permute_rows_bwd)
+
+
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
       ("expert_only", None, "embed_moe"),
   )
+
+
+def _fp8_full_gmm_rule(config):
+  """Explicit GMM QtRule for fp8_full (interception is lost under shard_map)."""
+  if config.quantization != "fp8_full" or not config.use_qwix_quantization:
+    return None
+  rules = quantizations.get_quantization_rule(config)
+  return rules[0] if rules else None
 
 
 def random_routing(rng_key, gate_logits, num_experts_per_tok):
@@ -1046,6 +1107,25 @@ class RoutedMoE(nnx.Module):
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
         top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+      elif self.config.moe_lean_routing:
+        # Gather the weights with the saved indices so the bwd reuses them
+        # instead of rerunning top_k (a full sort over the experts on TPU).
+        if self.config.moe_topk_by_bisection:
+          # Same experts in ascending index order instead of by score; the combine
+          # sums over them, so only its summation order changes.
+          keep = keep_top_by_bisection(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
+          top_k_indices = mask_to_indices(keep, self.num_experts_per_tok)
+        elif self.config.moe_topk_pallas:
+          # Same indices as lax.top_k from k max-and-mask rounds in VMEM, not a sort.
+          top_k_indices = topk_kernel.topk_indices(
+              jax.lax.stop_gradient(gate_logits),
+              self.num_experts_per_tok,
+              interpret=jax.devices()[0].platform != "tpu",
+          )
+        else:
+          _, top_k_indices = jax.lax.top_k(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
+        top_k_indices = adc.checkpoint_name(top_k_indices, "moe_routing")
+        top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -1208,6 +1288,9 @@ class RoutedMoE(nnx.Module):
     bsz_times_seq_len = inputs_shape[0] * inputs_shape[1]
     inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, inputs_shape[2]))
     weights, selected_experts = self.get_topk(gate_logits, pre_bias_logits, rngs, input_ids, forced_routed_experts)
+    # Remat names: saving these routing artifacts spares their bwd recompute.
+    weights = adc.checkpoint_name(weights, "moe_routing")
+    selected_experts = adc.checkpoint_name(selected_experts, "moe_routing")
     lb_loss = None
     # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
     probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
@@ -1301,19 +1384,26 @@ class RoutedMoE(nnx.Module):
       else:
         flatten_selected_experts_safe = flatten_selected_experts
 
-      sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
+      sorted_selected_experts = adc.checkpoint_name(jnp.argsort(flatten_selected_experts_safe), "moe_routing")
       if self.config.moe_use_direct_token_gather:
         sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+        if self.config.moe_lean_routing:
+          inverse = adc.checkpoint_name(jnp.argsort(sorted_selected_experts), "moe_routing")
+          sorted_inputs = _permute_rows(replicated_inputs_2d, sorted_selected_experts, inverse)
+        else:
+          sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
 
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
+      sorted_inputs = adc.checkpoint_name(sorted_inputs, "moe_dispatch")
 
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+      group_size = adc.checkpoint_name(
+          jnp.bincount(flatten_selected_experts_safe, length=self.num_experts), "moe_routing"
+      )
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1402,11 +1492,16 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
-      unsort_intermediate = _sort_activations(
-          intermediate,
-          jnp.argsort(sorted_selected_experts),
-          use_custom_sort_vjp,
-      )
+      if self.config.moe_lean_routing:
+        # Same argsort as in permute(), so XLA CSEs it when both are in one computation.
+        inverse = adc.checkpoint_name(jnp.argsort(sorted_selected_experts), "moe_routing")
+        unsort_intermediate = _permute_rows(intermediate, inverse, sorted_selected_experts)
+      else:
+        unsort_intermediate = _sort_activations(
+            intermediate,
+            jnp.argsort(sorted_selected_experts),
+            use_custom_sort_vjp,
+        )
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
       reshaped_intermediate = jnp.reshape(
           unsort_intermediate,
@@ -1972,16 +2067,17 @@ class RoutedMoE(nnx.Module):
       use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox
 
       if is_tokamax_v1_unquantized:
-        # tokamax v1 (unquantized)
-        output = tokamax.ragged_dot(
+        # tokamax v1 (unquantized). Note this path ignores `tiling`: the public
+        # `tokamax.ragged_dot` has no such argument, so the `wi_tile_*`/`wo_tile_*`
+        # config lands nowhere here and tokamax's own heuristic picks the tiles.
+        # `tokamax_gmm_tile_m` is the one override, for the ragged dimension, where
+        # that heuristic goes wrong: it never aligns the m-tile to a group boundary.
+        output = mblx.tokamax_ragged_dot_v1(
             lhs=inputs,
             rhs=kernel,
             group_sizes=tokamax_group_sizes,
-            precision=jax.lax.Precision.DEFAULT,
             preferred_element_type=self.dtype,
-            implementation="mosaic",
-            # `group_offset` is not yet supported
-            group_offset=None,
+            tile_m=self.config.tokamax_gmm_tile_m,
         )
       elif use_custom_vjp_gmm:
         # tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
@@ -1994,7 +2090,12 @@ class RoutedMoE(nnx.Module):
             group_offset=group_offset,
             lhs_quantize_dtype=lhs_quantize_dtype,
             rhs_quantize_dtype=rhs_quantize_dtype,
-            use_qwix_quantization=self.config.use_qwix_quantization,
+            # Only "fp8_full" quantizes GMM; other schemes (e.g. "fp8", "int8")
+            # do not define a GMM quantization rule.
+            use_qwix_quantization=bool(self.config.quantization == "fp8_full") and self.config.use_qwix_quantization,
+            # Pass the rule explicitly: qwix interception context does not
+            # survive shard_map, so get_current_rule("gmm") returns None there.
+            qwix_rule=_fp8_full_gmm_rule(self.config),
             use_tokamax_backend=self.config.use_tokamax_gmm,
             weight_gather_axes=weight_gather_axes,
             lhs_vma_axes=lhs_vma_axes,
@@ -2002,6 +2103,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2=self.config.use_gmm_v2,
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             partial_sum=partial_sum,
+            dlhs_transpose_in_kernel=self.config.gmm_v2_dlhs_transpose_in_kernel,
             interpret=megablox_interpret,
         )
       else:
@@ -4054,6 +4156,7 @@ class RoutedMoE(nnx.Module):
       )
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
+    gate_logits = adc.checkpoint_name(gate_logits, "moe_router_logits")
 
     is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
 

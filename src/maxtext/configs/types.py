@@ -311,6 +311,19 @@ ModelName = Literal[
     "olmo3-7b",
     "olmo3-7b-pt",
     "olmo3-32b",
+    "olmoe3-30m",
+    "olmoe3-3p5b",
+    # OLMo 3.5 partner family (allenai/OLMo-core@codex/partner-model-family-20260914).
+    "olmo35-tiny",
+    "olmo35-small",
+    "olmo35-medium",
+    "olmo35-large",
+    # Scaling ladder for the architecture ablation study; see olmoe3-arch-ablations.md.
+    "olmoe3-ladder-d512",
+    "olmoe3-ladder-d768",
+    "olmoe3-ladder-d1024",
+    "olmoe3-ladder-d1536",
+    "olmoe3-ladder-d2048",
     "envy-test",
     "envy-switch-base",
     "envy-switch-large",
@@ -500,6 +513,14 @@ class DataTypes(BaseModel):
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
+  cast_params_to_compute_dtype: bool = Field(
+      False,
+      description=(
+          "Cast large fp32 weights to `dtype` once per step, before the forward pass. The fp32 master"
+          " and optimizer are unchanged, but FSDP gathers weights and reduce-scatters their gradients"
+          " in the compute dtype. Router kernels and small tensors stay fp32."
+      ),
+  )
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
       description="Precision level for matrix multiplications.",
@@ -640,6 +661,17 @@ class ModelArchitecture(BaseModel):
   base_mlp_dim: int = Field(7168, description="Base dimension of the MLP layer.")
   dense_init_scale: float = Field(1.0, description="Initialization scale for dense layers")
   base_num_decoder_layers: int = Field(16, description="Base number of decoder layers.")
+  scale_embeddings_by_sqrt_emb_dim: bool = Field(
+      False,
+      description="Multiply the token embeddings by sqrt(emb_dim) before the decoder stack.",
+  )
+  use_embedding_norm: bool = Field(
+      False,
+      description=(
+          "Apply an RMSNorm to the token embeddings before the decoder stack. "
+          "Runs after scale_embeddings_by_sqrt_emb_dim when both are set."
+      ),
+  )
   head_dim: int = Field(
       128,
       description="Model query and key head dimension.",
@@ -672,6 +704,23 @@ class ModelArchitecture(BaseModel):
   v_norm_with_scale: bool = Field(
       True,
       description="Whether to apply scale on value normalization (default True).",
+  )
+  qk_norm_per_head: bool = Field(
+      False,
+      description=(
+          "Give the query/key RMSNorm an independent learned gain per head "
+          "([heads, head_dim]) instead of one gain shared across heads "
+          "([head_dim]). OLMoE3's reference uses per-head gains."
+      ),
+  )
+  use_scalable_softmax: bool = Field(
+      False,
+      description=(
+          "Scalable softmax (SSMax): scale the query by log(visible causal span) "
+          "times a learned per-query-head gain, before the usual 1/sqrt(head_dim). "
+          "The span is taken from the decoder positions, so packed documents that "
+          "restart positions also restart the span."
+      ),
   )
 
 
@@ -1075,7 +1124,28 @@ class MoEGeneral(BaseModel):
       None,
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
+  base_shared_expert_mlp_dim: int = Field(
+      -1,
+      description=(
+          "Intermediate dimension of the shared (always-on) expert on MoE layers. "
+          "If < 0, defaults to base_moe_mlp_dim, i.e. the shared expert is as wide as a routed expert."
+      ),
+  )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  emo_enabled: bool = Field(
+      False,
+      description="EMo document-pool routing (OLMoE3): restrict each packed document's top-k to a per-document expert pool.",
+  )
+  emo_min_document_expert_pool: int = Field(
+      16, description="Smallest EMo training pool size (must be >= num_experts_per_tok)."
+  )
+  emo_max_document_expert_pool: int = Field(512, description="Largest EMo training pool size (must be <= num_experts).")
+  emo_eval_document_expert_pool: int = Field(512, description="Fixed EMo pool size outside training.")
+  emo_threshold_by_bisection: bool = Field(
+      False,
+      description="With moe_lean_routing, find the EMo pool threshold by bisecting on the score bits"
+      " (32 counting passes) instead of sorting every token's expert scores.",
+  )
   use_custom_sort_vjp: bool = Field(
       True,
       description="Whether to use a custom VJP sort for efficient backward pass processing in sparse matmul.",
@@ -1356,6 +1426,31 @@ class MoEKernels(BaseModel):
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
 
+  gmm_v2_dlhs_transpose_in_kernel: bool = Field(
+      False,
+      description=(
+          "In the GMM v2 bwd, read the weight as stored and transpose it inside the dlhs kernel,"
+          " instead of writing a transposed copy of the gathered expert weights to HBM every layer."
+      ),
+  )
+
+  tokamax_gmm_tile_m: NonNegativeInt = Field(
+      0,
+      description=(
+          "Override the m-tile (the ragged dimension) of the Tokamax v1 ragged-dot kernel. "
+          "0 leaves Tokamax's own heuristic alone. The `wi_tile_*`/`wo_tile_*` knobs do NOT "
+          "reach this kernel: the v1 path calls `tokamax.ragged_dot`, whose public API takes "
+          "no tiling argument, so on that path the `tiling` tuple is silently ignored. The "
+          "heuristic sets tile_m = min(total_rows, 1024) and only ever shrinks it for VMEM, "
+          "never to match a group boundary, so at fewer than 1024 rows per expert every "
+          "m-tile straddles several expert groups and the kernel pays for each. Set this to "
+          "the expected rows per expert, seq_len * per_device_batch_size * top_k / "
+          "num_experts, to align them. Only tile_m is overridden; tile_k, tile_n and the "
+          "buffer count stay with Tokamax's VMEM-aware choice, and lowering tile_m only "
+          "lowers VMEM, so the override cannot push the kernel over budget."
+      ),
+  )
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -1400,6 +1495,77 @@ class Qwen3Next(BaseModel):
   gdn_value_head_dim: int = Field(128, description="Head dimension for the value in the Gated Delta Net.")
   gdn_num_key_heads: int = Field(16, description="Number of key/query heads in the Gated Delta Net.")
   gdn_num_value_heads: int = Field(32, description="Number of value heads in the Gated Delta Net.")
+  gdn_state_dtype: str = Field(
+      "float32",
+      description="dtype for the chunked delta-rule state and matmul operands. The decay algebra stays float32 either way.",
+  )
+  use_tokamax_kda: bool = Field(
+      False,
+      description=(
+          "Use the fused tokamax Kimi Delta Attention kernel (experimental; requires a tokamax build with the KDA op)."
+      ),
+  )
+  kda_allow_neg_eigval: bool = Field(
+      True,
+      description=(
+          "beta in [0,2) via allow_neg_eigval (reference). False clamps beta to [0,1], the only range the tokamax"
+          " Mosaic KDA kernel is validated for (non-reference; kernel fallback/diagnostic only)."
+      ),
+  )
+  tokamax_kda_max_num_segments: int = Field(
+      32,
+      description=(
+          "Static bound on packed documents per sequence for the tokamax KDA kernel; the kernel pads seq by "
+          "(chunk-1)*bound positions, so keep it close to the real packing maximum."
+      ),
+  )
+  tokamax_kda_log_decay_floor: float = Field(
+      20.0,
+      description=(
+          "Floor, in nats, on the per-step KDA log-decay passed to the tokamax kernel. The kernel overflows"
+          " fp32 exp once a step decays past ~30 nats, returning NaN; a floor of 20 changes the output by"
+          " under exp(-20) per step. 0 disables it and lets the kernel activate the gate itself."
+      ),
+  )
+  tokamax_kda_l2norm_outside: bool = Field(
+      False,
+      description=(
+          "Do the KDA q/k L2-norm in MaxText, in [B,T,H,D] layout, instead of inside the tokamax kernel."
+          " Same formula; lets XLA fuse the norm and its bwd with the neighbouring ops."
+      ),
+  )
+  olmoe3_per_layer_remat: bool = Field(
+      False,
+      description=(
+          "Rematerialize each OLMoE3 layer on its own instead of per mixer cycle. Without it the"
+          " unrolled first cycle is not rematerialized at all and the scanned cycles remat as a block."
+      ),
+  )
+  moe_lean_routing: bool = Field(
+      False,
+      description=(
+          "Same routing, fewer sorts: the EMo pool mask from one value sort instead of two argsorts,"
+          " the routing inverse permutation computed once, and top-k indices and the EMo mask saved"
+          " under the moe_routing remat name so the bwd does not recompute them."
+      ),
+  )
+  moe_topk_by_bisection: bool = Field(
+      False,
+      description="With moe_lean_routing, pick the top-k experts by bisecting on the logit bits instead of"
+      " lax.top_k (a sort on TPU). Same experts, returned in ascending index order.",
+  )
+  moe_topk_pallas: bool = Field(
+      False,
+      description="With moe_lean_routing, pick the top-k experts with the Pallas kernel in kernels/topk.py"
+      " instead of lax.top_k (a sort on TPU). Same indices in the same order.",
+  )
+  kda_conv_in_compute_dtype: bool = Field(
+      False,
+      description=(
+          "Cast the KDA short-conv weight to the activation dtype, so q/k/v reach the kernel in bf16"
+          " instead of being promoted to fp32 by the fp32 weight. Halves their residuals."
+      ),
+  )
   gdn_chunk_size: int = Field(
       64,
       description="Chunk size for the parallel scan algorithm in the Gated Delta Net.",
@@ -1776,6 +1942,22 @@ class RematAndOffload(BaseModel):
   moe_mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MoE layer's output.",
+  )
+  moe_routing: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for MoE routing artifacts (top-k weights and indices, dispatch "
+          "sort order, group sizes). Saving them keeps the backward pass from recomputing "
+          "routing; they are a few MB per layer."
+      ),
+  )
+  moe_router_logits: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MoE router logits (needed by the aux-loss backward).",
+  )
+  moe_dispatch: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the dispatched (expert-sorted) MoE inputs.",
   )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
@@ -3279,6 +3461,10 @@ class DerivedValues(BaseModel):
       None,
       description="Effective MLP dimension for MoE layers, scaled by `global_parameter_scale`.",
   )
+  shared_expert_mlp_dim: None | int = Field(
+      None,
+      description="Effective shared-expert MLP dimension, scaled by `global_parameter_scale`.",
+  )
   num_decoder_layers: None | int = Field(
       None,
       description="Effective number of decoder layers, scaled by `global_parameter_scale`.",
@@ -4185,6 +4371,10 @@ class MaxTextConfig(
     self.num_kv_heads = (2**num_head_scale) * self.base_num_kv_heads
     self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
+    # A shared expert defaults to routed-expert width; widen it to shift capacity
+    # from the routed (comm-heavy) path to the dense (compute-bound) path.
+    base_shared = self.base_shared_expert_mlp_dim
+    self.shared_expert_mlp_dim = (2**mlp_dim_scale) * (base_shared if base_shared > 0 else self.base_moe_mlp_dim)
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
@@ -4338,6 +4528,9 @@ class MaxTextConfig(
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routing",
+          "moe_router_logits",
+          "moe_dispatch",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -5341,6 +5534,22 @@ class MaxTextConfig(
       if self.capacity_factor <= 0:
         raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
 
+    # `shard_exp_on_fsdp` gives the routed expert kernels the logical axes
+    # ("embed_moe", None, "mlp_moe"), so the expert dimension rides the fsdp axis
+    # and num_experts must divide the fsdp size. Without this, the failure is an
+    # `IndivisibleError` raised inside jit at trace time, after the whole model
+    # has been built. `pyconfig_deprecated.py` carries the same guard; this keeps
+    # the pydantic path from being the laxer of the two. A negative
+    # ici_fsdp_parallelism is the auto-fill sentinel and is resolved later.
+    if self.shard_exp_on_fsdp and self.ici_fsdp_parallelism > 0 and self.num_experts > 0:
+      if self.num_experts % self.ici_fsdp_parallelism != 0:
+        raise ValueError(
+            f"shard_exp_on_fsdp=True requires num_experts ({self.num_experts}) to be divisible by "
+            f"ici_fsdp_parallelism ({self.ici_fsdp_parallelism}). Split the mesh instead of shrinking "
+            f"fsdp, e.g. ici_data_parallelism={self.ici_fsdp_parallelism // self.num_experts} "
+            f"ici_fsdp_parallelism={self.num_experts}, which holds the global batch."
+        )
+
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
         "diloco": self.ici_diloco_parallelism,
@@ -5734,6 +5943,10 @@ class RLConfig(
     self.num_kv_heads = int((2**num_head_scale) * self.base_num_kv_heads)
     self.mlp_dim = int((2**mlp_dim_scale) * self.base_mlp_dim)
     self.moe_mlp_dim = int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0))
+    base_shared = getattr(self, "base_shared_expert_mlp_dim", -1)
+    self.shared_expert_mlp_dim = int(
+        (2**mlp_dim_scale) * (base_shared if base_shared > 0 else getattr(self, "base_moe_mlp_dim", 0))
+    )
     self.num_decoder_layers = int((2**layer_scale) * self.base_num_decoder_layers)
 
     # Mirror into internal MaxText fields for backward compatibility.
@@ -5753,6 +5966,9 @@ class RLConfig(
           "moe_mlpwi_0",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routing",
+          "moe_router_logits",
+          "moe_dispatch",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
