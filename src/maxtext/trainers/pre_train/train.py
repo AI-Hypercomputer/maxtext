@@ -892,6 +892,8 @@ def training_loop_iteration(
             # The attempt rolled its update back, so `state` is still the pre-step state.
             state, metrics = p_train_step_dropless(state, example_batch, *step_rng_args)
             _maybe_log_required_rbf(config, step, metrics, "dropless")
+        if prof.is_active(step):
+          jax.tree_util.tree_map(lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x, metrics)
 
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
