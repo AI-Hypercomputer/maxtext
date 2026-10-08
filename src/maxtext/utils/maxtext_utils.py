@@ -745,15 +745,28 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
   shared_experts_flops = (
       calculate_ffn_mamtul_tflops_per_device(config, get_shared_expert_mlp_dim(config)) * config.shared_experts
   )
-  routed_experts_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
-  moe_ffn_flops = (gate_flops + shared_experts_flops + routed_experts_flops) * num_moe_layers
+  routed_in_dim = (
+      config.moe_expert_input_dim
+      if config.decoder_block == DecoderBlockType.OLMOE3 and getattr(config, "moe_expert_input_dim", 0) > 0
+      else config.emb_dim
+  )
+  routed_experts_flops = (
+      calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim, in_dim=routed_in_dim)
+      * config.num_experts_per_tok
+  )
+  latent_proj_flops = (
+      2 * (2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * routed_in_dim)
+      if config.decoder_block == DecoderBlockType.OLMOE3 and routed_in_dim != config.emb_dim
+      else 0
+  )
+  moe_ffn_flops = (gate_flops + latent_proj_flops + shared_experts_flops + routed_experts_flops) * num_moe_layers
   total_ffn_flops = dense_ffn_flops + moe_ffn_flops
   return total_ffn_flops
 
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.OLMOE3):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -775,6 +788,43 @@ def get_dense_moe_layers(config):
     num_dense_layers = config.num_decoder_layers
 
   return num_dense_layers, num_moe_layers
+
+
+def calculate_olmoe3_kda_flops_per_device(config):
+  """Calculates the FLOPs for a single OLMoE3 Kimi Delta Attention (KDA) layer."""
+  B = config.per_device_batch_size
+  S = config.max_target_length
+  E = config.emb_dim
+
+  H_k = config.gdn_num_key_heads
+  H_v = config.gdn_num_value_heads
+  D_k = config.gdn_key_head_dim
+  D_v = config.gdn_value_head_dim
+  K_conv = config.gdn_conv_kernel_dim
+
+  K_dim = H_k * D_k
+  V_dim = H_v * D_v
+
+  # 1. Projections: w_q (E->K), w_k (E->K), w_v (E->V), f_proj_1/2 (E->D_v->K),
+  #    w_b (E->H_v), g_proj_1/2 (E->D_v->V), w_out (V->E)
+  flops_qkv = 2 * B * S * E * (2 * K_dim + V_dim)
+  flops_f = 2 * B * S * (E * D_v + D_v * K_dim)
+  flops_b = 2 * B * S * E * H_v
+  flops_g = 2 * B * S * (E * D_v + D_v * V_dim)
+  flops_out = 2 * B * S * V_dim * E
+  flops_projections = flops_qkv + flops_f + flops_b + flops_g + flops_out
+
+  # 2. Causal Depthwise Conv1D on q, k, v
+  flops_conv = 2 * B * S * K_conv * (2 * K_dim + V_dim)
+
+  # 3. Core KDA recurrence (inter-chunk state + readout: 4 O(D_k * D_v) FMA ops,
+  #    plus intra-chunk WY factors, (I+M)^-1, and intra-chunk QK/KK/delta matmuls)
+  C = max(getattr(config, "gdn_chunk_size", 64), 1)
+  flops_inter_chunk = B * S * H_v * (D_k * D_v) * 8
+  flops_intra_chunk = B * S * H_v * C * (4 * D_k + 4 * D_v + 4 * C)
+  flops_core = flops_inter_chunk + flops_intra_chunk
+
+  return flops_projections + flops_conv, flops_core
 
 
 def calculate_gated_delta_net_flops_per_device(config):
@@ -1167,6 +1217,7 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.QWEN3_5,
         DecoderBlockType.GEMMA4,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.OLMOE3,
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
@@ -1306,6 +1357,31 @@ def calculate_tflops_training_per_device(config, log=True):
 
     # Attention TFLOPs:
     total_attn = (causal_attention_flops * num_full_attn_layers) + (gdn_attn_flops_per_layer * num_linear_attn_layers)
+    attention_tflops = total_attn * 3 / 10**12
+  elif config.decoder_block == DecoderBlockType.OLMOE3:
+    kda_weight_flops_per_layer, kda_attn_flops_per_layer = calculate_olmoe3_kda_flops_per_device(config)
+    cycle_interval = config.inhomogeneous_layer_cycle_interval
+    num_full_attn_layers = config.num_decoder_layers // cycle_interval
+    num_linear_attn_layers = config.num_decoder_layers - num_full_attn_layers
+
+    # OLMoE3 full attention widens query projection to 2 * head_dim for the sigmoid output gate.
+    olmoe3_qkv_flops = (
+        2
+        * config.per_device_batch_size
+        * config.max_target_length
+        * config.emb_dim
+        * (2 * config.num_query_heads + 2 * config.num_kv_heads)
+        * config.head_dim
+    )
+    total_weights = (
+        total_ffn_flops_all_layers
+        + embedding_flops
+        + (olmoe3_qkv_flops + projection_flops) * num_full_attn_layers
+        + kda_weight_flops_per_layer * num_linear_attn_layers
+    )
+    learnable_weight_tflops = total_weights * 3 / 10**12
+
+    total_attn = (causal_attention_flops * num_full_attn_layers) + (kda_attn_flops_per_layer * num_linear_attn_layers)
     attention_tflops = total_attn * 3 / 10**12
   else:
     # multiply by 3 for both feed forward and back propagation flops

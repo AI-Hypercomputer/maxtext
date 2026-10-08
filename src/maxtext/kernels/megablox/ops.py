@@ -18,7 +18,7 @@
 
 import dataclasses
 import functools
-from typing import List, Literal, NamedTuple, Tuple
+from typing import Any, List, Literal, NamedTuple, Tuple
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
@@ -29,6 +29,17 @@ from maxtext.layers import quantizations
 import qwix
 import qwix.pallas as qpl
 import tokamax
+
+# Private tokamax internals, needed only for `tokamax_gmm_tile_m`. The public
+# `tokamax.ragged_dot` takes no tiling argument, so pinning the ragged tile means
+# reaching the op object and its config. Imported defensively: a tokamax upgrade
+# that moves these must not break training for the default path, which does not
+# use them, so the failure is deferred to the point of use.
+try:
+  from tokamax._src.ops.ragged_dot import api as _tokamax_rd_api  # pylint: disable=g-import-not-at-top
+  from tokamax._src.ops.ragged_dot import base as _tokamax_rd_base  # pylint: disable=g-import-not-at-top
+except ImportError:  # pragma: no cover
+  _tokamax_rd_api = _tokamax_rd_base = None
 
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
@@ -101,6 +112,7 @@ def gmm(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    dlhs_transpose_in_kernel: bool = False,
 ):
   """Grouped matrix multiplication operation.
 
@@ -111,6 +123,7 @@ def gmm(
   `out_is_3d`, a forward `partial_sum` must also be 3D; with `return_lhs`, the
   cotangent of the returned (3D) lhs is accumulated into the 3D dlhs in place.
   """
+  use_dlhs_transpose_rhs = use_dlhs_transpose_rhs or dlhs_transpose_in_kernel
   lhs_ndim = (lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs).ndim
   if (lhs_ndim == 3 or out_is_3d) and not (use_tokamax_backend and use_gmm_v2):
     raise NotImplementedError("3D lhs / out requires use_tokamax_backend=True and use_gmm_v2=True.")
@@ -448,6 +461,47 @@ def _fwd_gather_weight(
   return dataclasses.replace(rhs, qvalue=qvalue, scale=_expand(rhs.scale), zero_point=_expand(rhs.zero_point))
 
 
+def tokamax_ragged_dot_v1(
+    lhs: jnp.ndarray | qpl.QArray,
+    rhs: jnp.ndarray | qpl.QArray,
+    group_sizes,
+    preferred_element_type: jnp.dtype,
+    *,
+    tile_m: int = 0,
+    **kwargs,
+) -> jnp.ndarray:
+  """`tokamax.ragged_dot` on the mosaic backend, with an optional ragged-tile override."""
+  if not tile_m:
+    return tokamax.ragged_dot(
+        lhs=lhs,
+        rhs=rhs,
+        group_sizes=group_sizes,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=preferred_element_type,
+        # `group_offset` is not yet supported
+        group_offset=None,
+        implementation="mosaic",
+        **kwargs,
+    )
+
+  if _tokamax_rd_api is None or _tokamax_rd_base is None:
+    raise ImportError(
+        "tokamax_gmm_tile_m requires tokamax._src.ops.ragged_dot, which is not importable "
+        "in this tokamax build. Set tokamax_gmm_tile_m=0 to use tokamax's own heuristic."
+    )
+  op: Any = _tokamax_rd_api.IMPLEMENTATIONS["mosaic_tpu"]
+  op_kwargs = {
+      "group_sizes": group_sizes,
+      "ragged_dot_dimension_numbers": _tokamax_rd_base.DEFAULT_RAGGED_DOT_DIM_NUMS,
+      "precision": jax.lax.Precision.DEFAULT,
+      "preferred_element_type": preferred_element_type,
+      **kwargs,
+  }
+  config = op.bind(lhs, rhs, **op_kwargs).default_config
+  op = op.replace(config=dataclasses.replace(config, tile_m=tile_m))
+  return op(lhs, rhs, **op_kwargs)
+
+
 def _fwd_run_tokamax_v1(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -466,15 +520,11 @@ def _fwd_run_tokamax_v1(
   if transpose_rhs:
     rhs = rhs.swapaxes(1, 2)
 
-  return tokamax.ragged_dot(
+  return tokamax_ragged_dot_v1(
       lhs=lhs,
       rhs=rhs,
       group_sizes=group_sizes,
-      precision=jax.lax.Precision.DEFAULT,
       preferred_element_type=preferred_element_type,
-      # `group_offset` is not yet supported
-      group_offset=None,
-      implementation="mosaic",
       **out_kwargs,
   )
 
@@ -532,6 +582,11 @@ def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array |
   return jnp.full((1, 1), scale_val, jnp.float32)
 
 
+def _clamp_tiles(tile_m: int, tile_k: int, tile_n: int, m: int, k: int, n: int) -> tuple[int, int, int]:
+  """Clamps GMM v2 tile sizes to the operand extents they index."""
+  return min(tile_m, m), min(tile_k, k), min(tile_n, n)
+
+
 def _fwd_run_tokamax_v2(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -575,7 +630,10 @@ def _fwd_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     fwd_tiling = gmm_v2.calculate_tiling
   else:
-    fwd_tiling = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
+    tm, tk, tn = _clamp_tiles(
+        tiling[0], tiling[1], tiling[2], lhs_operand.shape[0], lhs_operand.shape[1], rhs_operand.shape[2]
+    )
+    fwd_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   out = gmm_v2.gmm_v2(
       lhs=lhs_operand,
@@ -1139,7 +1197,9 @@ def _dlhs_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     dlhs_tiling = gmm_v2.calculate_tiling
   else:
-    dlhs_tiling = gmm_v2.TileSizes(tile_m=tiling[3], tile_k=tiling[4], tile_n=tiling[5])
+    dlhs_n = rhs.shape[1] if (use_dlhs_transpose_rhs and not transpose_rhs and jax.dtypes.itemsize_bits(rhs.dtype) >= 8) else (rhs.shape[2] if transpose_rhs else rhs.shape[1])
+    tm, tk, tn = _clamp_tiles(tiling[3], tiling[4], tiling[5], dlhs_lhs.shape[0], dlhs_lhs.shape[1], dlhs_n)
+    dlhs_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   if use_dlhs_transpose_rhs:
     kernel_transpose_rhs = not transpose_rhs
@@ -1356,7 +1416,8 @@ def _drhs_run_tokamax_v2(
   if use_gmm_v2_heuristic_tiling:
     drhs_tiling = tgmm_v2.calculate_tgmm_tiling
   else:
-    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
+    tm, tk, tn = _clamp_tiles(tiling[6], tiling[7], tiling[8], drhs_lhs.shape[0], drhs_lhs.shape[1], drhs_rhs.shape[1])
+    drhs_tiling = gmm_v2.TileSizes(tile_m=tm, tile_k=tk, tile_n=tn)
 
   return tgmm_v2.tgmm_v2(
       lhs=drhs_lhs,
