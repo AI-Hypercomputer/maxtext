@@ -48,15 +48,41 @@ _DEFAULT_MAX_BUFFERED_STEPS = 128
 
 
 def _concat_1d(items: list[Any]) -> jax.Array:
-  """Ravels each item to 1-D and concatenates them in order (same layout as repeated append).
+  """Joins the items in order, with the layout the eager `jnp.append` path produced.
 
-  A list of scalars, one per microbatch and the usual case, is a single `jnp.stack`: a ravel
-  per item plus the concatenate would be one eager launch per microbatch per metric.
+  A single item keeps its shape (`atleast_1d`, as that path stored a step's first item); two
+  or more are raveled and concatenated. A list of scalars, one per microbatch and the usual
+  case, is a single `jnp.stack`: a ravel per item plus the concatenate would be one eager
+  launch per microbatch per metric.
   """
-  if len(items) > 1 and all(jnp.ndim(x) == 0 for x in items):
+  if len(items) == 1:
+    return jnp.atleast_1d(jnp.asarray(items[0]))
+  if all(jnp.ndim(x) == 0 for x in items):
     return jnp.stack(items)
-  arrays = [jnp.ravel(jnp.asarray(x)) for x in items]
-  return arrays[0] if len(arrays) == 1 else jnp.concatenate(arrays)
+  return jnp.concatenate([jnp.ravel(jnp.asarray(x)) for x in items])
+
+
+def weighted_metric_bounds(buffers: list[abstract_engine.MetricsBuffer]) -> dict[str, dict[str, float | None]]:
+  """Returns each weighted metric's `eps` and `min_denom`, for a checkpoint's JSON metadata.
+
+  Both are static (non-pytree) fields of `WeightedMetric`, so Orbax does not save them with
+  the arrays; a restore rebuilds them from this.
+
+  Args:
+    buffers: The metrics buffers being checkpointed.
+
+  Returns:
+    `{name: {"eps": ..., "min_denom": ...}}` for every weighted metric that sets either.
+  """
+  bounds: dict[str, dict[str, float | None]] = {}
+  for buffer in buffers:
+    for name, wm in buffer.weighted_metrics.items():
+      if name not in bounds and (wm.eps is not None or wm.min_denom is not None):
+        bounds[name] = {
+            "eps": None if wm.eps is None else float(wm.eps),
+            "min_denom": None if wm.min_denom is None else float(wm.min_denom),
+        }
+  return bounds
 
 
 class Mode(str, enum.Enum):
@@ -195,7 +221,9 @@ class MetricsRecorder:
     for name, items in (pending_w or {}).items():
       existing = buffer.weighted_metrics.get(name)
       prefix = [existing] if existing is not None else []
-      template = existing if existing is not None else items[0]
+      # The live items carry the metric's eps/min_denom; a buffer restored from a checkpoint
+      # that predates `weighted_metric_bounds` has none.
+      template = items[0]
       new_weighted[name] = abstract_engine.WeightedMetric(
           unreduced_sum=_concat_1d([m.unreduced_sum for m in prefix + items]),
           denominator=_concat_1d([m.denominator for m in prefix + items]),

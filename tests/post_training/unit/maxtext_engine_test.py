@@ -681,6 +681,33 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertNotIn("accumulated_metrics", args_dict)
     self.assertIn("accumulated_grads", args_dict)
 
+  def test_intra_step_checkpoint_records_weighted_metric_bounds_in_metadata(self):
+    """eps/min_denom do not survive Orbax with the arrays, so an intra-step save puts them in the metadata."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    t.train_step = 10
+    t.record_metrics(
+        "kl",
+        abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(2.0), eps=1e-6, min_denom=1.0),
+    )
+    t.record_metrics("loss", abstract_engine.WeightedMetric(unreduced_sum=jnp.array(4.0), denominator=jnp.array(2.0)))
+    t._micro_step_count = 1
+    t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+    t._accumulated_denominator = jnp.float32(2.0)
+
+    t.save_checkpoint(metadata=None)
+
+    # Only metrics that set a bound are listed; the values are JSON-ready floats.
+    self.assertEqual(
+        mock_orbax_mgr.save.call_args.kwargs["custom_metadata"]["metric_bounds"],
+        {"kl": {"eps": 1e-6, "min_denom": 1.0}},
+    )
+
+    # A completed-step checkpoint carries no metrics, so no bounds either.
+    t._micro_step_count = 0
+    t.save_checkpoint(metadata=None)
+    self.assertNotIn("metric_bounds", mock_orbax_mgr.save.call_args.kwargs["custom_metadata"])
+
   def test_close_writes_final_checkpoint(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
     mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=3)
@@ -1104,14 +1131,15 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         jnp.array([1.5, 2.5, 3.5]),
     )
 
-  def test_metrics_recorder_flattens_multidim_metrics_on_flush(self):
-    """Flushing ravels every item: one slot per element, in microbatch order."""
+  def test_metrics_recorder_matches_the_eager_append_layout_on_flush(self):
+    """A lone item keeps its shape, as `atleast_1d` did; two or more are raveled, as `jnp.append` did."""
     recorder = metrics_module.MetricsRecorder()
-    # A single 2-D item comes out 1-D; a second one concatenates behind it.
+    # A once-per-step 2-D metric reaches its aggregation_fn with its shape; a second item
+    # concatenates behind it, raveled.
     recorder.buffer_metrics(train_step=0, name="grid", metric=jnp.array([[1.0, 2.0], [3.0, 4.0]]))
     step_buf = recorder.get_step_metrics(0)
-    self.assertEqual(step_buf.scalar_metrics["grid"].shape, (4,))
-    np.testing.assert_array_equal(step_buf.scalar_metrics["grid"], [1.0, 2.0, 3.0, 4.0])
+    self.assertEqual(step_buf.scalar_metrics["grid"].shape, (2, 2))
+    np.testing.assert_array_equal(step_buf.scalar_metrics["grid"], [[1.0, 2.0], [3.0, 4.0]])
     recorder.buffer_metrics(train_step=0, name="grid", metric=jnp.array([[5.0, 6.0], [7.0, 8.0]]))
     step_buf = recorder.get_step_metrics(0)
     self.assertEqual(step_buf.scalar_metrics["grid"].shape, (8,))
@@ -1138,6 +1166,33 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     recorder.buffer_metrics(train_step=1, name="grad_norm", metric=jnp.array(0.5))
     step_buf = recorder.get_step_metrics(1)
     self.assertEqual(step_buf.scalar_metrics["grad_norm"].shape, (1,))
+
+  def test_metrics_recorder_flush_keeps_the_live_items_eps_and_min_denom(self):
+    """A buffer restored without eps/min_denom takes them back from the live items on flush."""
+    recorder = metrics_module.MetricsRecorder()
+    # What a restore from a checkpoint without `metric_bounds` holds: the arrays only.
+    recorder.restore_buffers(
+        [
+            abstract_engine.MetricsBuffer(
+                id=4,
+                weighted_metrics={
+                    "kl": abstract_engine.WeightedMetric(unreduced_sum=jnp.array([0.5]), denominator=jnp.array([2.0]))
+                },
+            )
+        ]
+    )
+    recorder.buffer_metrics(
+        train_step=4,
+        name="kl",
+        metric=abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.array(0.25), denominator=jnp.array(2.0), eps=1e-6, min_denom=1.0
+        ),
+    )
+
+    kl = recorder.get_step_metrics(4).weighted_metrics["kl"]
+    self.assertEqual(kl.eps, 1e-6)
+    self.assertEqual(kl.min_denom, 1.0)
+    np.testing.assert_array_equal(kl.unreduced_sum, [0.5, 0.25])
 
   def test_restore_buffers_discards_pending_metrics_of_the_dirty_recorder(self):
     """Restoring over a recorder with unflushed items keeps only the checkpointed values."""
@@ -1387,6 +1442,48 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     np.testing.assert_array_equal(resumed.weighted_metrics["loss"].unreduced_sum, [4.0, 6.0, 8.0])
     np.testing.assert_array_equal(resumed.scalar_metrics["grad_norm"], [1.5])
 
+  def test_restore_intra_step_checkpoint_puts_back_weighted_metric_bounds(self):
+    """eps/min_denom come back from `metric_bounds`, on the buffer and on the rebuilt loss cache."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=5)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {
+        "model_params": {},
+        "optimizer_state": {},
+        "accumulated_metrics": {},
+        "accumulated_grads": {},
+    }
+    saved_metadata.custom_metadata = {
+        "micro_step_count": 2,
+        "metric_bounds": {"loss": {"eps": None, "min_denom": 1.0}, "kl": {"eps": 1e-6, "min_denom": 1.0}},
+    }
+    mock_orbax_mgr.metadata.return_value = saved_metadata
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+        "accumulated_metrics": [
+            {
+                "id": 4,
+                "weighted_metrics": {
+                    "loss": {"unreduced_sum": jnp.array([4.0, 6.0]), "denominator": jnp.array([2.0, 2.0])},
+                    "kl": {"unreduced_sum": jnp.array([0.5, 0.5]), "denominator": jnp.array([2.0, 2.0])},
+                },
+                "scalar_metrics": {},
+            }
+        ],
+        "accumulated_grads": {"params": {"w": jnp.array([0.5, 0.5])}},
+    }
+
+    t.restore_checkpoint(step=5)
+
+    restored = t._metrics_recorder._metrics_buffer[-1].weighted_metrics
+    self.assertEqual((restored["loss"].eps, restored["loss"].min_denom), (None, 1.0))
+    self.assertEqual((restored["kl"].eps, restored["kl"].min_denom), (1e-6, 1.0))
+    self.assertLen(t._cached_losses, 2)
+    self.assertTrue(all(loss.min_denom == 1.0 for loss in t._cached_losses))
+
   def test_restore_intra_step_checkpoint_ignores_losses_of_a_buffer_from_another_step(self):
     """Only a buffer recorded under the resumed step may seed the spike-skip loss cache.
 
@@ -1542,6 +1639,30 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         4.0,
         places=4,
     )
+
+  def test_update_stops_before_the_optimizer_step_on_an_unconvertible_metric(self):
+    """A recorded value the flush cannot convert raises in update() with nothing applied."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    payload = DummyPayload()
+
+    def _loss_fn(model, *args, **kwargs):
+      return abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(1.0)), {}
+
+    t.with_loss_fn(_loss_fn)
+    t.fwd_bwd(payload)
+    # What an uncompiled loss function could hand back as an aux value.
+    t.record_metrics("bad", object())
+    weights_before = np.asarray(t.model.weights.value)
+
+    with self.assertRaises(TypeError):
+      t.update()
+
+    # The optimizer step did not run, and the step is still fully accumulated, so fixing the
+    # metric and retrying applies it exactly once.
+    np.testing.assert_array_equal(np.asarray(t.model.weights.value), weights_before)
+    self.assertEqual(t.train_step, 0)
+    self.assertEqual(t._micro_step_count, 1)
+    self.assertIsNotNone(t._accumulated_grads)
 
   def test_fwd_bwd_with_loss_and_aux_dict_tuple(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
