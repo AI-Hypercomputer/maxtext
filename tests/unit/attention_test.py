@@ -4063,7 +4063,7 @@ class MLATest(attention_test_util.MLATestBase):
     decode_total_length = cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
 
-    mla_full, _ = mla(
+    mla_full, _, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -4076,7 +4076,7 @@ class MLATest(attention_test_util.MLATestBase):
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    mla_prefill, _ = mla(
+    mla_prefill, _, _ = mla(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -4092,7 +4092,7 @@ class MLATest(attention_test_util.MLATestBase):
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      mla_idx, _ = mla(
+      mla_idx, _, _ = mla(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -4127,7 +4127,7 @@ class MLATest(attention_test_util.MLATestBase):
     prefill_length = cfg.max_prefill_predict_length
     decode_total_length = cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_full, _ = mla(
+    mla_full, _, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -4140,7 +4140,7 @@ class MLATest(attention_test_util.MLATestBase):
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    mla_prefill, _ = mla(
+    mla_prefill, _, _ = mla(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -4156,7 +4156,7 @@ class MLATest(attention_test_util.MLATestBase):
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      mla_idx, _ = mla(
+      mla_idx, _, _ = mla(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -4185,7 +4185,7 @@ class MLATest(attention_test_util.MLATestBase):
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_normal, cfg_normal.dtype)
 
     def loss_fn(model, x):
-      out, _ = model(
+      out, _, _ = model(
           x,
           x,
           decoder_segment_ids=decoder_segment_ids,
@@ -4227,7 +4227,7 @@ class MLATest(attention_test_util.MLATestBase):
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    out_normal_prefill, _ = mla_normal(
+    out_normal_prefill, _, _ = mla_normal(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -4236,7 +4236,7 @@ class MLATest(attention_test_util.MLATestBase):
         model_mode=MODEL_MODE_PREFILL,
     )
 
-    out_sliced_prefill, _ = mla_sliced(
+    out_sliced_prefill, _, _ = mla_sliced(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -4252,7 +4252,7 @@ class MLATest(attention_test_util.MLATestBase):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
-      out_normal_idx, _ = mla_normal(
+      out_normal_idx, _, _ = mla_normal(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -4260,7 +4260,7 @@ class MLATest(attention_test_util.MLATestBase):
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
 
-      out_sliced_idx, _ = mla_sliced(
+      out_sliced_idx, _, _ = mla_sliced(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -4377,7 +4377,7 @@ class MLATest(attention_test_util.MLATestBase):
     cfg, mla = self.init_mla(config_arguments, rope_type="default")
     lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
     # Dot product
-    mla_generic_output, _ = mla(
+    mla_generic_output, _, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -4473,7 +4473,7 @@ class MLATest(attention_test_util.MLATestBase):
 
     cfg, mla = self.init_mla(config_arguments, rope_type="default")
     lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
+    mla_generic_output, _, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -4614,7 +4614,7 @@ class MLATest(attention_test_util.MLATestBase):
 
     def generic_loss(lnx):
       mla_merged = nnx.merge(generic_graphdef, generic_state)
-      output, _ = mla_merged(
+      output, _, _ = mla_merged(
           lnx,
           lnx,
           decoder_segment_ids=decoder_segment_ids,
@@ -4634,7 +4634,7 @@ class MLATest(attention_test_util.MLATestBase):
         ring_decoder_segment_ids = decoder_segment_ids
         ring_decoder_positions = decoder_positions
       ring_merged = nnx.merge(ring_graphdef, ring_state)
-      output, _ = ring_merged(
+      output, _, _ = ring_merged(
           lnx,
           lnx,
           decoder_segment_ids=ring_decoder_segment_ids,
@@ -4694,7 +4694,7 @@ class MLATest(attention_test_util.MLATestBase):
 
     cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
+    mla_generic_output, _, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -4811,7 +4811,7 @@ class MLATest(attention_test_util.MLATestBase):
 
     cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
+    mla_generic_output, _, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -4924,7 +4924,7 @@ class MLATest(attention_test_util.MLATestBase):
 
     cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
+    mla_generic_output, _, _ = mla(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -5079,7 +5079,7 @@ class MLATest(attention_test_util.MLATestBase):
 
     def generic_loss(lnx):
       mla_merged = nnx.merge(generic_graphdef, generic_state)
-      output, _ = mla_merged(
+      output, _, _ = mla_merged(
           lnx,
           lnx,
           decoder_segment_ids=decoder_segment_ids,
@@ -5099,7 +5099,7 @@ class MLATest(attention_test_util.MLATestBase):
         ring_decoder_segment_ids = decoder_segment_ids
         ring_decoder_positions = decoder_positions
       ring_merged = nnx.merge(ring_graphdef, ring_state)
-      output, _ = ring_merged(
+      output, _, _ = ring_merged(
           lnx,
           lnx,
           decoder_segment_ids=ring_decoder_segment_ids,
@@ -5239,7 +5239,7 @@ class MLATest(attention_test_util.MLATestBase):
         lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
 
         # Run forward pass which triggers indexer
-        out, _ = mla(
+        out, _, _ = mla(
             lnx,
             lnx,
             decoder_segment_ids=decoder_segment_ids,
@@ -6995,7 +6995,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
 
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_fp32, "float32")
     with jax.set_mesh(mla_dense.mesh), nn_partitioning.axis_rules(cfg_fp32.logical_axis_rules):
-      out_dense, _ = mla_dense(
+      out_dense, _, _ = mla_dense(
           lnx,
           lnx,
           decoder_segment_ids=decoder_segment_ids,
@@ -7003,7 +7003,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      out_mqa, _ = mla_mqa(
+      out_mqa, _, _ = mla_mqa(
           lnx,
           lnx,
           decoder_segment_ids=decoder_segment_ids,
@@ -7028,7 +7028,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
 
     lnx_bf16, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_bf16_dense, "bfloat16")
     with jax.set_mesh(mla_dense_bf16.mesh), nn_partitioning.axis_rules(cfg_bf16_dense.logical_axis_rules):
-      out_dense_bf16, _ = mla_dense_bf16(
+      out_dense_bf16, _, _ = mla_dense_bf16(
           lnx_bf16,
           lnx_bf16,
           decoder_segment_ids=decoder_segment_ids,
@@ -7036,7 +7036,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      out_mqa_bf16, _ = mla_mqa_bf16(
+      out_mqa_bf16, _, _ = mla_mqa_bf16(
           lnx_bf16,
           lnx_bf16,
           decoder_segment_ids=decoder_segment_ids,
@@ -7061,7 +7061,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     cotangent = jax.random.normal(jax.random.PRNGKey(7), lnx.shape, dtype=jnp.float32)
 
     def loss_fn(model, x):
-      out, _ = model(
+      out, _, _ = model(
           x,
           x,
           decoder_segment_ids=decoder_segment_ids,
@@ -7211,7 +7211,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    out_prefill_dense, _ = mla_dense(
+    out_prefill_dense, _, _ = mla_dense(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -7219,7 +7219,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
         deterministic=True,
         model_mode=MODEL_MODE_PREFILL,
     )
-    out_prefill_mqa, _ = mla_mqa(
+    out_prefill_mqa, _, _ = mla_mqa(
         lnx_prefill,
         lnx_prefill,
         decoder_segment_ids=decoder_segment_ids_prefill,
@@ -7235,14 +7235,14 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
-      out_ar_dense, _ = mla_dense(
+      out_ar_dense, _, _ = mla_dense(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
           deterministic=True,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
-      out_ar_mqa, _ = mla_mqa(
+      out_ar_mqa, _, _ = mla_mqa(
           lnx_idx,
           lnx_idx,
           inputs_positions=decoder_positions_idx,
@@ -7267,7 +7267,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     nnx.update(mla_sliced, nnx.state(mla_normal))
 
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_obj_normal, "float32")
-    out_normal, _ = mla_normal(
+    out_normal, _, _ = mla_normal(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -7275,7 +7275,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
         deterministic=True,
         model_mode=MODEL_MODE_TRAIN,
     )
-    out_sliced, _ = mla_sliced(
+    out_sliced, _, _ = mla_sliced(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -7347,7 +7347,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     def fwd_train(m, x, seg, pos):
       return m(x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_TRAIN)
 
-    out_train, _ = fwd_train(mla, lnx, decoder_segment_ids, decoder_positions)
+    out_train, _, _ = fwd_train(mla, lnx, decoder_segment_ids, decoder_positions)
     self.assertEqual(out_train.shape, lnx.shape)
     self.assertFalse(jnp.isnan(out_train).any())
 
@@ -7361,7 +7361,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     def fwd_prefill(m, x, seg, pos):
       return m(x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_PREFILL)
 
-    out_prefill, _ = fwd_prefill(mla, lnx_prefill, seg_prefill, pos_prefill)
+    out_prefill, _, _ = fwd_prefill(mla, lnx_prefill, seg_prefill, pos_prefill)
     self.assertEqual(out_prefill.shape, lnx_prefill.shape)
     self.assertFalse(jnp.isnan(out_prefill).any())
 
@@ -7373,7 +7373,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     def fwd_decode(m, x, pos):
       return m(x, x, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_AUTOREGRESSIVE)
 
-    out_ar, _ = fwd_decode(mla, lnx_ar, pos_ar)
+    out_ar, _, _ = fwd_decode(mla, lnx_ar, pos_ar)
     self.assertEqual(out_ar.shape, lnx_ar.shape)
     self.assertFalse(jnp.isnan(out_ar).any())
 
@@ -7465,7 +7465,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_dense, "float32")
 
     # Native implementation parity
-    _, _ = mla_dense(
+    _, _, _ = mla_dense(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -7475,7 +7475,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     )
     loss_dense = float(mla_dense.indexer_loss[...])
 
-    _, _ = mla_mqa(
+    _, _, _ = mla_mqa(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -7495,7 +7495,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     _, mla_mqa_chunk = self.init_mla(cfg_mqa_chunk_args, rope_type="default")
     nnx.update(mla_mqa_chunk, nnx.state(mla_dense_chunk))
 
-    _, _ = mla_dense_chunk(
+    _, _, _ = mla_dense_chunk(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
@@ -7505,7 +7505,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     )
     loss_dense_chunk = float(mla_dense_chunk.indexer_loss[...])
 
-    _, _ = mla_mqa_chunk(
+    _, _, _ = mla_mqa_chunk(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,

@@ -85,6 +85,7 @@ from maxtext.checkpoint_conversion.utils.param_mapping import (
 )
 from maxtext.checkpoint_conversion.utils.hf_shape import HF_SHAPE
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
+from maxtext.checkpoint_conversion.utils.tensor_handling import single_stack_axis
 from maxtext.checkpoint_conversion.utils.utils import (
     validate_and_filter_param_map_keys,
     process_maxtext_param,
@@ -95,12 +96,12 @@ from maxtext.checkpoint_conversion.utils.utils import (
     print_peak_memory,
     save_adapter_files,
 )
+from maxtext.utils import index_share_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils.globals import HF_IDS
 from maxtext.utils.lora_utils import sync_lora_metadata
 from maxtext.utils.model_creation_utils import verify_and_sync_scan_layers
-
 
 flags.DEFINE_bool(
     "override_model_architecture",
@@ -185,7 +186,10 @@ def _get_model_mappings(
   if model_name not in PARAM_MAPPING or model_name not in HF_SHAPE or model_name not in HOOK_FNS:
     raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
 
-  param_mapping = PARAM_MAPPING[model_name](hf_config_dict, maxtext_config, scan_layers)
+  if model_name in ("glm5.1-744b", "glm5.2-744b"):
+    param_mapping = PARAM_MAPPING[model_name](hf_config_dict, maxtext_config, scan_layers, saving_to_hf=True)
+  else:
+    param_mapping = PARAM_MAPPING[model_name](hf_config_dict, maxtext_config, scan_layers)
   hook_fn_mapping = HOOK_FNS[model_name](hf_config_dict, maxtext_config, scan_layers, saving_to_hf=True)
 
   # Promote composite hook keys into param_mapping.
@@ -351,6 +355,8 @@ def _transform_weights_to_adapter(param_map, state_dict):
   processed_params_list = []
   found_hf_modules = set()
   for mt_key, hf_paths in param_map.items():
+    if hf_paths is None:
+      continue
     a_key, b_key = mt_key + "_lora_a", mt_key + "_lora_b"
     if a_key not in state_dict and mt_key.startswith("params-"):
       a_key, b_key = mt_key[7:] + "_lora_a", mt_key[7:] + "_lora_b"
@@ -394,6 +400,47 @@ def _transform_weights_to_adapter(param_map, state_dict):
   return dict(processed_params_list), found_hf_modules
 
 
+def _slice_scanned_shared_indexer_for_export(key, weight, param_map, config):
+  """Slices scanned IndexShare indexer tensors to Full-layer indices only when exporting to HuggingFace."""
+  if (
+      not isinstance(key, str)
+      or "-self_attention-indexer-" not in key
+      or getattr(config, "use_index_share", None) is not True
+      or getattr(config, "scan_layers", None) is not True
+  ):
+    return weight
+
+  hf_targets = param_map.get(key)
+  if not isinstance(hf_targets, list):
+    return weight
+
+  axis_to_slice = single_stack_axis(key, config, weight.shape)
+  if weight.shape[axis_to_slice] == len(hf_targets):
+    return weight
+
+  num_layers = getattr(config, "num_decoder_layers", None)
+  if not (isinstance(num_layers, int) and not isinstance(num_layers, bool)):
+    num_layers = getattr(config, "base_num_decoder_layers", None)
+  first_dense = getattr(config, "first_num_dense_layers", 0)
+  pattern_tuple = index_share_utils.parse_index_share_pattern(config.index_share_pattern, num_layers)
+
+  if "-dense_layers-" in key:
+    layer_range = range(first_dense)
+  elif "-moe_layers-" in key:
+    layer_range = range(first_dense, num_layers)
+  else:
+    layer_range = range(num_layers)
+
+  full_indices = [
+      idx for idx, layer_i in enumerate(layer_range) if not index_share_utils.is_shared_layer(layer_i, pattern_tuple)
+  ]
+  if len(full_indices) != len(hf_targets):
+    raise ValueError(
+        f"Full-layer index count ({len(full_indices)}) does not match HF target count ({len(hf_targets)}) for {key}."
+    )
+  return jnp.take(weight, jnp.asarray(full_indices, dtype=jnp.int32), axis=axis_to_slice)
+
+
 def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, param_map, hook_fn_map, shape_map):
   """Transforms MaxText weights to HF full model format, with optional LoRA merging."""
   processed_params_list = []
@@ -410,6 +457,7 @@ def _transform_weights_to_full_model(config, filtered_map_keys, state_dict, para
           delta = delta.reshape(weight.shape)
         weight = (jnp.asarray(weight, dtype=jnp.float32) + delta).astype(weight.dtype)
     if weight is not None:
+      weight = _slice_scanned_shared_indexer_for_export(key, weight, param_map, config)
       processed_params_list.extend(process_maxtext_param(key, weight, param_map, hook_fn_map, shape_map, config))
       del weight
       del delta
@@ -511,8 +559,12 @@ def main(argv: Sequence[str]) -> None:
   # Validate architecture consistency (raising ValueError on mismatch) or override HF config if specified.
   _validate_or_update_architecture(hf_config_obj, config, override=FLAGS.override_model_architecture)
 
-  # Ensure YaRN rope params are preserved if specified in the maxtext config
-  if getattr(config, "rope_type", None) == "yarn":
+  # Ensure YaRN rope params are preserved if specified in the maxtext config.
+  # GLM-5.1/5.2 set MaxText rope_type="yarn" with rope_factor=1.0 for unscaled interleaved RoPE,
+  # whereas canonical HF GlmMoeDsaConfig uses rope_type="default".
+  if getattr(config, "rope_type", None) == "yarn" and not (
+      model_key in ("glm5.1-744b", "glm5.2-744b") and getattr(config, "rope_factor", None) == 1.0
+  ):
     _apply_yarn_rope_config(hf_config_obj, config)
 
   # 2. Load Tokenizer

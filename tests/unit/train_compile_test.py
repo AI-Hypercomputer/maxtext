@@ -1720,3 +1720,58 @@ class TrainCompile(parameterized.TestCase):
             "override_model_config=True",
         )
     )
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "glm5_1_scanned",
+          "model_name": "glm5.1-744b",
+          "scan_layers": "true",
+          "extra_args": (),
+      },
+      {
+          "testcase_name": "glm5_2_scanned",
+          "model_name": "glm5.2-744b",
+          "scan_layers": "true",
+          "extra_args": (),
+      },
+      {
+          "testcase_name": "glm5_2_unscanned_pruned",
+          "model_name": "glm5.2-744b",
+          "scan_layers": "false",
+          "extra_args": (
+              "base_num_decoder_layers=6",
+              "first_num_dense_layers=2",
+              "index_share_pattern=FFSSFS",
+          ),
+      },
+  )
+  @pytest.mark.cpu_only
+  def test_glm5_compile(self, model_name, scan_layers, extra_args):
+    """AOT compilation test for GLM-5.1 and GLM-5.2 (scanned and unscanned pruned IndexShare)."""
+    compiled_trainstep_file = os.path.join(gettempdir(), f"test_{model_name}_{scan_layers}.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-1024",
+            "compile_topology_num_slices=1",
+            "use_iota_embed=true",
+            f"model_name={model_name}",
+            "override_model_config=true",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=64",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=true",
+            "megablox=true",
+            f"scan_layers={scan_layers}",
+            "attention=dot_product",
+            "indexer_sparse_training=true",
+            "indexer_loss_scaling_factor=0.1",
+            "routed_bias_update_rate=0.001",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            *extra_args,
+        )
+    )

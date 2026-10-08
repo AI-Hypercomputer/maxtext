@@ -1415,6 +1415,8 @@ class FlopCalculation(parameterized.TestCase):
       ("qwen3-8b",),
       ("qwen3-next-80b-a3b",),
       ("deepseek3-671b",),
+      ("glm5.1-744b",),
+      ("glm5.2-744b",),
   )
   def test_short_sequence_flops(self, model_name):
     """
@@ -1443,6 +1445,37 @@ class FlopCalculation(parameterized.TestCase):
     plus expected attention flops for various standard models with a long sequence length.
     """
     self._verify_long_sequence_flops(model_name)
+
+  def test_glm5_and_index_share_flops(self):
+    """Verifies GLM-5.1 and GLM-5.2 TFLOP calculation including 21/78 IndexShare scaling."""
+    # 1. Short sequence (max_target_length == indexer_topk == 2048): indexer is bypassed, so 5.1 == 5.2.
+    cfg_51_short = self._initialize_model_config("glm5.1-744b", max_target_length=2048, per_device_batch_size=1)
+    cfg_52_short = self._initialize_model_config("glm5.2-744b", max_target_length=2048, per_device_batch_size=1)
+    self.assertEqual(maxtext_utils.get_dense_moe_layers(cfg_51_short), (3, 75))
+    self.assertEqual(maxtext_utils.get_dense_moe_layers(cfg_52_short), (3, 75))
+
+    short_51 = calculate_tflops_training_per_device(cfg_51_short)
+    short_52 = calculate_tflops_training_per_device(cfg_52_short)
+    for val_51, val_52 in zip(short_51, short_52):
+      self.assertFlopsAlmostEqual(val_51, val_52)
+
+    # 2. Long sequence (max_target_length=4096 > indexer_topk=2048): GLM-5.2 scales indexer FLOPs by 21/78.
+    cfg_51_long = self._initialize_model_config("glm5.1-744b", max_target_length=4096, per_device_batch_size=1)
+    cfg_52_long = self._initialize_model_config("glm5.2-744b", max_target_length=4096, per_device_batch_size=1)
+    total_51, weight_51, attn_51 = calculate_tflops_training_per_device(cfg_51_long)
+    total_52, weight_52, attn_52 = calculate_tflops_training_per_device(cfg_52_long)
+
+    indexer_proj_flops, indexer_scoring_flops = maxtext_utils.calculate_indexer_tflops_per_device(cfg_51_long)
+    num_layers = cfg_51_long.num_decoder_layers  # 78
+    shared_layer_fraction = (78 - 21) / 78  # 57 / 78 Shared layers skip indexer compute
+
+    expected_weight_savings = 3 * num_layers * indexer_proj_flops * shared_layer_fraction / 1e12
+    expected_attn_savings = 3 * num_layers * indexer_scoring_flops * shared_layer_fraction / 1e12
+
+    self.assertGreater(total_51, total_52)
+    self.assertFlopsAlmostEqual(weight_51 - weight_52, expected_weight_savings)
+    self.assertFlopsAlmostEqual(attn_51 - attn_52, expected_attn_savings)
+    self.assertFlopsAlmostEqual(total_51 - total_52, expected_weight_savings + expected_attn_savings)
 
 
 class DeepSeekV4ProConfigSmokeTest(unittest.TestCase):

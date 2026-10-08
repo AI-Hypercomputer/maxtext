@@ -2544,8 +2544,115 @@ ming_3_0_audio_tiny_dict = {
 }
 ming_3_0_audio_tiny_config = PTConfig(**ming_3_0_audio_tiny_dict)
 
+glm5_1_744b_dict = {
+    "architectures": ["GlmMoeDsaForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "dtype": "bfloat16",
+    "first_k_dense_replace": 3,
+    "hidden_act": "silu",
+    "hidden_size": 6144,
+    "index_head_dim": 128,
+    "index_n_heads": 32,
+    "index_topk": 2048,
+    "index_topk_freq": 1,
+    "indexer_rope_interleave": True,
+    "indexer_types": ["full"] * 78,
+    "initializer_range": 0.02,
+    "intermediate_size": 12288,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 202752,
+    "mlp_layer_types": ["dense"] * 3 + ["sparse"] * 75,
+    "model_type": "glm_moe_dsa",
+    "moe_intermediate_size": 2048,
+    "n_group": 1,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 64,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 78,
+    "num_key_value_heads": 64,
+    "q_lora_rank": 2048,
+    "qk_nope_head_dim": 192,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-05,
+    "rope_interleave": True,
+    "rope_parameters": {
+        "rope_theta": 1000000.0,
+        "rope_type": "default",
+    },
+    "routed_scaling_factor": 2.5,
+    "scoring_func": "sigmoid",
+    "tie_word_embeddings": False,
+    "topk_group": 1,
+    "use_cache": True,
+    "v_head_dim": 256,
+    "vocab_size": 154880,
+}
+try:
+  # pyrefly: ignore[missing-attribute]
+  glm5_1_744b_config = transformers.GlmMoeDsaConfig(**glm5_1_744b_dict)
+except AttributeError:
+  glm5_1_744b_config = PTConfig(**glm5_1_744b_dict)  # pytype: disable=wrong-arg-types
+
+glm5_2_744b_dict = {
+    "architectures": ["GlmMoeDsaForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "dtype": "bfloat16",
+    "first_k_dense_replace": 3,
+    "hidden_act": "silu",
+    "hidden_size": 6144,
+    "index_head_dim": 128,
+    "index_n_heads": 32,
+    "index_skip_topk_offset": 3,
+    "index_topk": 2048,
+    "index_topk_freq": 4,
+    "indexer_rope_interleave": True,
+    "indexer_types": ["full", "full", "full"] + ["full" if (i - 2) % 4 == 0 else "shared" for i in range(3, 78)],
+    "initializer_range": 0.02,
+    "intermediate_size": 12288,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 1048576,
+    "mlp_layer_types": ["dense"] * 3 + ["sparse"] * 75,
+    "model_type": "glm_moe_dsa",
+    "moe_intermediate_size": 2048,
+    "n_group": 1,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 64,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 78,
+    "num_key_value_heads": 64,
+    "q_lora_rank": 2048,
+    "qk_nope_head_dim": 192,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-05,
+    "rope_interleave": True,
+    "rope_parameters": {
+        "rope_theta": 8000000.0,
+        "rope_type": "default",
+    },
+    "routed_scaling_factor": 2.5,
+    "scoring_func": "sigmoid",
+    "tie_word_embeddings": False,
+    "topk_group": 1,
+    "use_cache": True,
+    "v_head_dim": 256,
+    "vocab_size": 154880,
+}
+try:
+  # pyrefly: ignore[missing-attribute]
+  glm5_2_744b_config = transformers.GlmMoeDsaConfig(**glm5_2_744b_dict)
+except AttributeError:
+  glm5_2_744b_config = PTConfig(**glm5_2_744b_dict)  # pytype: disable=wrong-arg-types
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
+    "glm5.1-744b": glm5_1_744b_config,
+    "glm5.2-744b": glm5_2_744b_config,
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
     "gemma2-27b": gemma2_27b_config,
