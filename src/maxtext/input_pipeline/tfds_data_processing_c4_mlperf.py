@@ -362,6 +362,12 @@ def chunk_token_stream(dataset, feature_key="targets", sequence_length=4096, eod
   Appends the delimiter eod_id token to each document before unbatching so that document
   boundaries are clearly delineated in the continuous stream, preserving all valid token IDs
   (including 0) and guaranteeing 0% padding waste.
+
+  Each chunk holds sequence_length + 1 tokens and consecutive chunks start sequence_length
+  tokens apart, so the last token of a chunk is also the first token of the next one. This
+  matches the MLPerf reference (Megatron GPTDataset with add_extra_token_to_sequence=True):
+  the extra token is the label of the last input position, so every label is a real next
+  token. A stream of N tokens yields (N - 1) // sequence_length chunks.
   """
   if eod_id is not None:
     eod_tensor = tf.constant([eod_id], dtype=tf.int32)
@@ -373,20 +379,22 @@ def chunk_token_stream(dataset, feature_key="targets", sequence_length=4096, eod
     ds = dataset.map(lambda x: tf.cast(x[feature_key], tf.int32), num_parallel_calls=AUTOTUNE)
 
   ds = ds.unbatch()
-  ds = ds.batch(sequence_length, drop_remainder=True)
+  ds = ds.window(sequence_length + 1, shift=sequence_length, drop_remainder=True)
+  ds = ds.flat_map(lambda window: window.batch(sequence_length + 1, drop_remainder=True))
   return ds.map(lambda tokens: {feature_key: tokens}, num_parallel_calls=AUTOTUNE)
 
 
-def format_continuous_stream_fn(x, max_target_length: int, eod_id: int = 1):
-  """Format function for continuous token stream chunks.
+def format_continuous_stream_fn(x, max_target_length: int):
+  """Format function for continuous token stream chunks of max_target_length + 1 tokens.
 
-  Sets monotonic position IDs 0..max_target_length-1, uniform 1s for segmentation
-  to allow standard causal cross-document attention, shifts targets left by 1 with
-  eod_id appended at the chunk boundary, and ensures 100% loss participation.
+  Uses the first max_target_length tokens as inputs and the last max_target_length tokens
+  as targets, so every target is the real next token. Sets monotonic position IDs
+  0..max_target_length-1 and uniform 1s for segmentation to allow standard causal
+  cross-document attention and 100% loss participation.
   """
-  targets_raw = tf.cast(x["targets"], tf.int32)
-  inputs = targets_raw
-  targets = tf.concat([targets_raw[1:], [eod_id]], axis=0)
+  tokens = tf.cast(x["targets"], tf.int32)
+  inputs = tokens[:-1]
+  targets = tokens[1:]
 
   inputs_position = tf.range(max_target_length, dtype=tf.int32)
   targets_position = inputs_position
@@ -430,14 +438,16 @@ def preprocess_train_dataset(
   if use_stream_chunking:
     # Continuous stream chunking:
     # 1. Shuffle documents before chunking to maximize global token diversity across contiguous windows.
-    # 2. Append eod_id to each document and flatten token streams into contiguous max_target_length chunks (0% padding).
-    # 3. Shift targets left by 1 and append the eod_id token as the final target of each chunk.
+    # 2. Append eod_id to each document and flatten token streams into max_target_length + 1 token
+    #    chunks at stride max_target_length (0% padding).
+    # 3. Inputs are the first max_target_length tokens, targets the last max_target_length tokens,
+    #    so every target is the real next token.
     # 4. Set monotonic position IDs: [0, 1, ..., max_target_length - 1].
     # 5. Uniform 1s for segmentation to allow cross-document causal attention and 100% loss participation.
     train_ds = train_ds.shuffle(shuffle_buffer_size, seed=data_shuffle_seed)
     train_ds = chunk_token_stream(train_ds, feature_key="targets", sequence_length=max_target_length, eod_id=eod_id)
     train_ds = train_ds.map(
-        lambda x: format_continuous_stream_fn(x, max_target_length=max_target_length, eod_id=eod_id),
+        lambda x: format_continuous_stream_fn(x, max_target_length=max_target_length),
         num_parallel_calls=AUTOTUNE,
     )
   else:
@@ -498,13 +508,15 @@ def preprocess_eval_dataset(
 
   if use_stream_chunking:
     # Continuous stream chunking:
-    # 1. Append eod_id to each document and flatten token streams into contiguous max_target_length chunks (0% padding).
-    # 2. Shift targets left by 1 and append the eod_id token as the final target of each chunk.
+    # 1. Append eod_id to each document and flatten token streams into max_target_length + 1 token
+    #    chunks at stride max_target_length (0% padding).
+    # 2. Inputs are the first max_target_length tokens, targets the last max_target_length tokens,
+    #    so every target is the real next token.
     # 3. Set monotonic position IDs: [0, 1, ..., max_target_length - 1].
     # 4. Uniform 1s for segmentation to allow cross-document causal attention and 100% loss participation.
     eval_ds = chunk_token_stream(eval_ds, feature_key="targets", sequence_length=max_target_length, eod_id=eod_id)
     eval_ds = eval_ds.map(
-        lambda x: format_continuous_stream_fn(x, max_target_length=max_target_length, eod_id=eod_id),
+        lambda x: format_continuous_stream_fn(x, max_target_length=max_target_length),
         num_parallel_calls=AUTOTUNE,
     )
   else:
