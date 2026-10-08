@@ -126,18 +126,60 @@ jobs:
           - name: 'TPU Post-Training Stable'
             image_name: maxtext_post_training_stable
     steps:
+      - name: Checkout MaxText
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev -q
-      - name: Add tags to Docker image
+      - name: Download wheel SPDX SBOM for SCILo ingestion
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel-sbom
+          path: sbom/
+      - name: Promote Docker image from staging to production and add PyPI version tag
         shell: bash
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          SBOM_BUCKET: ${{ vars.SBOM_BUCKET }}
           IMAGE_NAME: ${{ matrix.image_name }}
           GITHUB_RUN_ID: ${{ inputs.run_id }}
           PYPI_VERSION: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
         run: |
-          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images/${IMAGE_NAME}"
-          gcloud container images add-tag \
-            "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
-            "${SOURCE_IMAGE}:${PYPI_VERSION}" \
-            --quiet
+          STAGING_REPO="maxtext-images-staging"
+          PROD_REPO="maxtext-images"
+          STAGING_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${STAGING_REPO}/${IMAGE_NAME}"
+          PROD_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${PROD_REPO}/${IMAGE_NAME}"
+
+          # Resolve image digest from staging (or fall back to prod if built prior to staging migration)
+          IMAGE_DIGEST=$(gcloud container images describe "${STAGING_IMAGE}:${GITHUB_RUN_ID}" \
+            --format="value(image_summary.digest)" 2>/dev/null || true)
+
+          if [[ -n "${IMAGE_DIGEST}" ]]; then
+            if [[ -f "sbom/maxtext-wheel.spdx.json" ]]; then
+              echo "Uploading wheel SPDX SBOM reference to Container Analysis / SCILo for ${STAGING_IMAGE}@${IMAGE_DIGEST}..."
+              gcloud artifacts sbom load \
+                --project="${PROJECT_NAME}" \
+                --source=sbom/maxtext-wheel.spdx.json \
+                --uri="${STAGING_IMAGE}@${IMAGE_DIGEST}" \
+                --destination="${SBOM_BUCKET}" \
+                --quiet || echo "Warning: gcloud artifacts sbom load for wheel SBOM returned non-zero."
+            fi
+
+            bash .github/scripts/promote_artifacts.sh \
+              "${PROJECT_NAME}" "${STAGING_REPO}" "${PROD_REPO}" "${IMAGE_NAME}" "${IMAGE_DIGEST}"
+
+            gcloud container images add-tag \
+              "${PROD_IMAGE}@${IMAGE_DIGEST}" \
+              "${PROD_IMAGE}:${PYPI_VERSION}" \
+              --quiet
+            gcloud container images add-tag \
+              "${STAGING_IMAGE}:${GITHUB_RUN_ID}" \
+              "${STAGING_IMAGE}:${PYPI_VERSION}" \
+              --quiet
+          else
+            gcloud container images add-tag \
+              "${PROD_IMAGE}:${GITHUB_RUN_ID}" \
+              "${PROD_IMAGE}:${PYPI_VERSION}" \
+              --quiet
+          fi

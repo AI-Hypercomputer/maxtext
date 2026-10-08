@@ -1,0 +1,104 @@
+# Copyright 2023-2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This workflow promotes customer-facing MaxText TPU Docker images
+# (tpu_pre_training and tpu_post_training) in the cloud-tpu-images project
+# from maxtext-images-staging to maxtext-images via the Artifact Registry
+# :promoteArtifact Exit Gate API.
+
+name: Promote Public MaxText TPU Docker Images
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag (e.g., 0.2.5) or sha256 digest of the image in cloud-tpu-images/maxtext-images-staging to promote'
+        required: true
+        type: string
+      image_type:
+        description: 'Public image variant to promote (all, tpu_pre_training, or tpu_post_training)'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - tpu_pre_training
+          - tpu_post_training
+      mark_latest:
+        description: 'Whether to also apply the latest tag on the promoted image in maxtext-images'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  promote_public_images:
+    name: Promote ${{ matrix.image_name }} in cloud-tpu-images
+    runs-on: linux-x86-n2-16-buildkit
+    container: google/cloud-sdk:524.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_name: tpu_pre_training
+          - image_name: tpu_post_training
+    steps:
+      - name: Checkout MaxText
+        if: inputs.image_type == 'all' || inputs.image_type == matrix.image_name
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Configure Docker
+        if: inputs.image_type == 'all' || inputs.image_type == matrix.image_name
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+
+      - name: Promote image from staging to production via Exit Gate
+        if: inputs.image_type == 'all' || inputs.image_type == matrix.image_name
+        shell: bash
+        env:
+          PROJECT_ID: cloud-tpu-images
+          STAGING_REPO: maxtext-images-staging
+          PROD_REPO: maxtext-images
+          IMAGE_NAME: ${{ matrix.image_name }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          MARK_LATEST: ${{ inputs.mark_latest }}
+        run: |
+          STAGING_IMAGE="us-docker.pkg.dev/${PROJECT_ID}/${STAGING_REPO}/${IMAGE_NAME}"
+          PROD_IMAGE="us-docker.pkg.dev/${PROJECT_ID}/${PROD_REPO}/${IMAGE_NAME}"
+
+          if [[ "${IMAGE_TAG}" == sha256:* ]]; then
+            IMAGE_DIGEST="${IMAGE_TAG}"
+          else
+            IMAGE_DIGEST=$(gcloud container images describe "${STAGING_IMAGE}:${IMAGE_TAG}" \
+              --format="value(image_summary.digest)")
+          fi
+
+          if [[ -z "${IMAGE_DIGEST}" ]]; then
+            echo "Error: Could not resolve digest for ${STAGING_IMAGE}:${IMAGE_TAG}"
+            exit 1
+          fi
+
+          bash .github/scripts/promote_artifacts.sh \
+            "${PROJECT_ID}" "${STAGING_REPO}" "${PROD_REPO}" "${IMAGE_NAME}" "${IMAGE_DIGEST}"
+
+          if [[ "${IMAGE_TAG}" != sha256:* ]]; then
+            gcloud container images add-tag "${PROD_IMAGE}@${IMAGE_DIGEST}" "${PROD_IMAGE}:${IMAGE_TAG}" --quiet
+            gcloud container images add-tag "${PROD_IMAGE}@${IMAGE_DIGEST}" "${PROD_IMAGE}:public-image-${IMAGE_TAG}" --quiet
+          fi
+          if [[ "${MARK_LATEST}" == "true" ]]; then
+            gcloud container images add-tag "${PROD_IMAGE}@${IMAGE_DIGEST}" "${PROD_IMAGE}:latest" --quiet
+          fi
