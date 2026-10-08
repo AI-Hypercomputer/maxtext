@@ -18,7 +18,7 @@
 # different environments (stable, nightly) and use cases (pre-training, post-training).
 # IMPORTANT: This script must be executed from the root directory of the MaxText repository.
 
-# For instructions on building the MaxText Docker image, please refer to the https://maxtext.readthedocs.io/en/latest/build_maxtext.html.
+# For instructions on building the MaxText Docker image, please refer to https://maxtext.readthedocs.io/page/tutorials/build_maxtext.html.
 
 PACKAGE_DIR="${PACKAGE_DIR:-src}"
 echo "PACKAGE_DIR: $PACKAGE_DIR"

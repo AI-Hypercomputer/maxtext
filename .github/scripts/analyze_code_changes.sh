@@ -22,6 +22,8 @@
 # Behavior & Logic Flow:
 #   0. FORCE_ALL_TESTS=true: Bypasses all rules and enables every test suite and
 #      notebook (used by the `scheduled-only` PR label).
+#      SKIP_CI_TESTS=true: Bypasses all rules and disables every test suite and
+#      notebook (used by the `skip-ci-tests` PR label).
 #   1. Non-PR Events: If not a pull request, enables all test suites and notebooks.
 #   2. Changed-file source: Uses the GitHub REST API (paginated `pulls/N/files`) when
 #      PR_NUMBER, GITHUB_REPOSITORY and the gh CLI are available; falls back to
@@ -91,9 +93,26 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS:-false}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS,,}"
 
+# Set to "true" to bypass the per-file rules and disable all tests and notebooks,
+# e.g. when a PR carries the `skip-ci-tests` label.
+SKIP_CI_TESTS="${SKIP_CI_TESTS:-false}"
+# Lowercased so that values such as "True" from manual runs are also honored.
+SKIP_CI_TESTS="${SKIP_CI_TESTS,,}"
+
+if [[ "$FORCE_ALL_TESTS" == "true" && "$SKIP_CI_TESTS" == "true" ]]; then
+  echo "ERROR: Both FORCE_ALL_TESTS and SKIP_CI_TESTS are set to true, which is contradictory." >&2
+  exit 1
+fi
+
 if [[ "$FORCE_ALL_TESTS" == "true" ]]; then
   echo "FORCE_ALL_TESTS is set, running all tests and notebooks"
   set_test_flags "true" "true"
+  exit 0
+fi
+
+if [[ "$SKIP_CI_TESTS" == "true" ]]; then
+  echo "SKIP_CI_TESTS is set, disabling all tests and notebooks"
+  set_test_flags "false" "false"
   exit 0
 fi
 

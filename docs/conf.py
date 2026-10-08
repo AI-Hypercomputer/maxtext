@@ -167,7 +167,7 @@ linkcheck_allowed_redirects = {
     r"https://jax\.readthedocs\.io/.*": r"https://docs\.jax\.dev/.*",
     r"https://twitter\.com/.*": r"https://x\.com/.*",
     r"https://www\.sphinx-doc\.org": r"https://www\.sphinx-doc\.org/en/master/.*",
-    r"https://.*\.readthedocs\.io": r"https://.*\.readthedocs\.io/en/.*",
+    r"https://.*\.readthedocs\.io(/page/.*)?": r"https://.*\.readthedocs\.io/en/.*",
 }
 
 # Ignore specific links that are known to be inaccessible during the build process
