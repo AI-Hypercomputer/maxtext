@@ -16,6 +16,13 @@ Optimized model tiers (Gold, Silver) for various TPU generations.
 
 List of all supported models and architectures.
 :::
+
+:::{grid-item-card} 🧩 GLM-5.1 & GLM-5.2
+:link: models/glm5
+:link-type: doc
+
+744B MoE models with Multi-Head Latent Attention, Dynamic Sparse Attention Indexer, and Cross-Layer IndexShare.
+:::
 ::::
 
 ```{toctree}
@@ -25,4 +32,5 @@ maxdepth: 1
 ---
 models/tiering.md
 models/supported_models_and_architectures.md
+models/glm5.md
 ```

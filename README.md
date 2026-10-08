@@ -48,6 +48,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 
 ## 🔥 Latest news 🔥
 
+- [November 13, 2026] GLM-5.1 (744B) and GLM-5.2 (744B) with Cross-Layer IndexShare are now supported. See the [GLM-5.1 & GLM-5.2 model card](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/models/glm5.md) for checkpoint conversion, pre-training, unrolling, and decoding details.
 - [November 19, 2026] Coming soon: **m3 (Modern MaxText Models)**, a simpler modeling stack where each model is self-contained and easy to read. See the [design doc](https://github.com/AI-Hypercomputer/maxtext/blob/48913f1809db2d095febff23556e2bdbb6faf7eb/src/maxtext/m3/DESIGN.md) for details.
 - [November 17, 2026] MaxText now has an [agent skills library](https://github.com/AI-Hypercomputer/maxtext/blob/main/.agents/README.md) of reusable workflows that AI coding assistants such as Codex, Claude Code, and GitHub Copilot can follow when working in MaxText:
   - [`model-bringup`](https://github.com/AI-Hypercomputer/maxtext/blob/main/.agents/skills/model-bringup/SKILL.md) guides bringing a new Hugging Face LLM or VLM into MaxText, from porting its layers to JAX through checkpoint conversion, logit verification, and benchmarking, and its [troubleshooting wiki](https://github.com/AI-Hypercomputer/maxtext/blob/main/.agents/skills/model-bringup/references/wiki/index.md) shows how to fit verification runs into limited TPU HBM.
@@ -160,6 +161,8 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
 - Moonshot AI
   - Kimi K2 (1T), Kimi K2-Thinking (1T)
   - Kimi K2.5 (text), Kimi K2.6 (text)
+- Z.ai (Zhipu AI)
+  - GLM-5.1 (744B), GLM-5.2 (744B)
 - Meta
   - Llama 4 Scout (109B) & Maverick (400B)
   - Llama 3.3 (70B), 3.1 (8B, 70B, 405B), 3.0 (8B, 70B, 405B)

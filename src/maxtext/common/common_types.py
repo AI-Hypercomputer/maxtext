@@ -164,6 +164,7 @@ class DecoderBlockType(enum.Enum):
   MING = "ming"
   HY4 = "hy4"
   KIMI_LINEAR = "kimi_linear"
+  GLM5 = "glm5"
 
 
 class VisionEncoderBlockType(enum.Enum):
