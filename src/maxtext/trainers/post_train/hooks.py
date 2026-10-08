@@ -219,9 +219,12 @@ class BaseDataHooks(DataHooks):
     """Loads the next batch of data for training."""
     try:
       self.train_batch = self.train_data_loader.load_next_batch()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      max_logging.log(f"Exception in load_next_train_batch: {str(e)}")
-      self.train_batch = None
+    except exceptions.StopTraining as e:
+      if isinstance(e.__cause__ or e.__context__, StopIteration):
+        max_logging.log(f"Training data exhausted: {str(e)}")
+        self.train_batch = None
+      else:
+        raise
     return self.train_batch
 
   @override
@@ -236,7 +239,7 @@ class BaseDataHooks(DataHooks):
         self.eval_batch = None
       else:
         self.eval_batch = next(self.eval_data_iterator)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      max_logging.log(f"Exception in load_next_eval_batch: {str(e)}")
+    except StopIteration as e:
+      max_logging.log(f"Evaluation data exhausted: {str(e)}")
       self.eval_batch = None
     return self.eval_batch
