@@ -1856,6 +1856,13 @@ class HardwareAndMesh(BaseModel):
       "all_gather",
       description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
   )
+  local_context_parallel_strategy: str = Field(
+      "",
+      description=(
+          "Optional context parallel strategy override for LOCAL_SLIDING attention layers "
+          "('', 'all_gather', or 'halo')."
+      ),
+  )
   context_parallel_reorder_strategy: ReorderStrategy = Field(
       ReorderStrategy.AUTO,
       description="Reorder strategy for load-balanced context parallelism.",
@@ -5515,6 +5522,14 @@ class MaxTextConfig(
     if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
       raise ValueError("context_parallel_strategy must be one of 'all_gather', 'ring', 'ulysses', or 'usp'.")
     self.context_parallel_strategy = context_parallel_strategy
+    local_context_parallel_strategy = self.local_context_parallel_strategy.lower()
+    if local_context_parallel_strategy not in ("", "all_gather", "halo"):
+      raise ValueError("local_context_parallel_strategy must be one of '', 'all_gather', or 'halo'.")
+    self.local_context_parallel_strategy = local_context_parallel_strategy
+    if local_context_parallel_strategy == "halo" and (
+        self.sliding_window_size is None or self.sliding_window_size <= 0
+    ):
+      raise ValueError("Halo context parallelism requires sliding_window_size > 0.")
     if (
         context_parallel_strategy == "ring"
         and "gpu" not in self.hardware
@@ -5631,12 +5646,17 @@ class MaxTextConfig(
             "TPU Ulysses attention requires num_query_heads "
             f"({self.num_query_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
-      if self.num_kv_heads == 1:
+      ulysses_num_kv_heads = (
+          self.global_num_kv_heads
+          if self.global_num_kv_heads > 0 and local_context_parallel_strategy
+          else self.num_kv_heads
+      )
+      if ulysses_num_kv_heads == 1:
         raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
-      if self.num_kv_heads % context_parallel_size != 0:
+      if ulysses_num_kv_heads % context_parallel_size != 0:
         raise ValueError(
             "TPU Ulysses attention requires num_kv_heads "
-            f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+            f"({ulysses_num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
     self._validate_usp_context_parallelism()
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.

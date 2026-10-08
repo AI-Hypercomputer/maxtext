@@ -492,7 +492,7 @@ class Attention(nnx.Module):
     # Ulysses exchanges sequence ownership for head ownership through an
     # all-to-all, so the context axis shards KV heads too even though no
     # logical rule says so.
-    if self.config.context_parallel_strategy.lower() == "ulysses":
+    if self.attention_op.context_parallel_strategy == "ulysses":
       ulysses_axis = self.config.context_sharding
       if ulysses_axis not in kv_head_axes:
         kv_head_axes.append(ulysses_axis)
