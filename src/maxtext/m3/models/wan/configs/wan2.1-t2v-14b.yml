@@ -13,3 +13,149 @@
 # limitations under the License.
 
 # Wan 2.1 Text-to-Video 14B Configuration Scaffolding.
+
+# Model Identity and Architecture
+pretrained_model_name_or_path: 'Wan-AI/Wan2.1-T2V-14B-Diffusers'
+model_name: wan2.1
+model_type: 'T2V'
+wan_transformer_pretrained_model_name_or_path: ${pretrained_model_name_or_path}
+
+# Model dtypes
+weights_dtype: 'bfloat16'
+activations_dtype: 'bfloat16'
+text_encoder_dtype: 'float32'
+compile_text_encoder: False
+max_sequence_length: 512
+
+# VAE parameters
+vae_weights_dtype: 'float32'
+vae_dtype: 'float32'
+replicate_vae: False
+vae_decode_chunk: 1
+vae_encode_chunk: 4
+vae_spatial: -1
+
+# Noise Scheduler parameters
+scheduler_dtype: 'float32'
+use_experimental_scheduler: True
+flow_shift: 5.0
+prediction_type: "flow_prediction"
+guidance_scale: 5.0
+guidance_rescale: 0.0
+
+# Execution & Attention parameters
+precision: "DEFAULT"
+scan_layers: True
+scan_diffusion_loop: False
+jit_initializers: True
+from_pt: True
+split_head_dim: True
+attention: 'flash'
+use_base2_exp: True
+ulysses_shards: -1
+ulysses_attention_chunks: 1
+flash_min_seq_length: 4096
+dropout: 0.0
+mask_padding_tokens: True
+attention_sharding_uniform: True
+norm_num_groups: 32
+remat_policy: "NONE"
+names_which_can_be_saved: []
+names_which_can_be_offloaded: []
+enable_jax_named_scopes: False
+use_batched_text_encoder: False
+quantization: ''
+
+flash_block_sizes:
+  block_q: 512
+  block_kv_compute: 512
+  block_kv: 512
+  block_q_dkv: 512
+  block_kv_dkv: 512
+  block_kv_dkv_compute: 512
+  block_q_dq: 512
+  block_kv_dq: 512
+  use_fused_bwd_kernel: False
+
+# Inference & Generation parameters
+prompt_file: ""
+prompt: "A cat and a dog baking a cake together in a kitchen. The cat is carefully measuring flour, while the dog is stirring the batter with a wooden spoon. The kitchen is cozy, with sunlight streaming through the window."
+prompt_2: "A cat and a dog baking a cake together in a kitchen. The cat is carefully measuring flour, while the dog is stirring the batter with a wooden spoon. The kitchen is cozy, with sunlight streaming through the window."
+negative_prompt: "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards"
+do_classifier_free_guidance: True
+height: 720
+width: 1280
+num_frames: 81
+num_inference_steps: 50
+fps: 16
+seed: 0
+
+# Device, Mesh Topology & SPMD Partitioning
+hardware: 'tpu'
+skip_jax_distributed_system: False
+jax_cache_dir: ''
+mesh_axes: ['data', 'fsdp', 'context', 'tensor']
+logical_axis_rules: [
+  ['batch', ['data', 'fsdp']],
+  ['activation_batch', ['data', 'fsdp']],
+  ['activation_self_attn_heads', ['context', 'tensor']],
+  ['activation_cross_attn_q_length', ['context', 'tensor']],
+  ['activation_length', 'context'],
+  ['activation_heads', 'tensor'],
+  ['mlp','tensor'],
+  ['embed', ['context', 'fsdp']],
+  ['heads', 'tensor'],
+  ['norm', 'tensor'],
+  ['conv_batch', ['data', 'context', 'fsdp']],
+  ['out_channels', 'tensor'],
+  ['conv_out', 'context'],
+  ['layers_per_stage', null],
+]
+
+vae_logical_axis_rules: [
+  ['activation_batch', 'redundant'],
+  ['activation_length', 'vae_spatial'],
+  ['activation_heads', null],
+  ['activation_kv_length', null],
+  ['embed', null],
+  ['heads', null],
+  ['norm', null],
+  ['conv_batch', 'redundant'],
+  ['out_channels', 'vae_spatial'],
+  ['conv_out', 'vae_spatial'],
+  ['conv_in', 'vae_spatial'],
+]
+
+data_sharding: [['data', 'fsdp', 'context', 'tensor']]
+dcn_data_parallelism: 1
+dcn_fsdp_parallelism: 1
+dcn_context_parallelism: -1
+dcn_tensor_parallelism: 1
+ici_data_parallelism: 1
+ici_fsdp_parallelism: 1
+ici_context_parallelism: -1
+ici_tensor_parallelism: 1
+allow_split_physical_axes: False
+compile_topology_num_slices: -1
+num_slices: 1
+quantization_local_shard_count: 1
+per_device_batch_size: 1.0
+
+# Checkpoint, Paths & Orbax
+run_name: ''
+base_output_directory: ""
+checkpoint_directory: ""
+output_dir: ""
+checkpoint_every: -1
+checkpoint_dir: ""
+save_final_checkpoint: False
+save_config_to_gcs: False
+enable_single_replica_ckpt_restoring: False
+pretrained_orbax_dir: ""
+aot_cache_dir: ""
+revision: ""
+
+# Profiling
+enable_profiler: False
+skip_first_n_steps_for_profiler: 1
+profiler_steps: 1
