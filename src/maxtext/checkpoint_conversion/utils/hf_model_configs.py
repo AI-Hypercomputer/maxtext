@@ -1142,6 +1142,106 @@ class DeepseekV4Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
 deepseek4_284b_config = DeepseekV4Config(**deepseek4_284b_dict)
 
 
+# from https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json (`text_config`, flattened).
+# The release stores routed experts as compressed-tensors `mxfp4-pack-quantized`.
+# `linear_attn_config.full_attn_layers` / `kda_layers` are 1-indexed, as in the HF config;
+# `param_mapping._resolve_kimi_k3_full_attn_layers` converts them to MaxText's 0-index.
+kimi_k3_dict = {
+    "architectures": ["KimiLinearForCausalLM"],
+    "activation_situ_beta": 4.0,
+    "activation_situ_linear_beta": 25.0,
+    "attn_res_block_size": 12,
+    "bos_token_id": 163584,
+    "dtype": "bfloat16",
+    "eos_token_id": 163586,
+    "first_k_dense_replace": 1,
+    "hidden_act": "situ",
+    "hidden_size": 7168,
+    "initializer_range": 0.02,
+    "intermediate_size": 33792,
+    "kv_lora_rank": 512,
+    "latent_moe_use_norm": True,
+    "linear_attn_config": {
+        "full_attn_layers": [
+            4,
+            8,
+            12,
+            16,
+            20,
+            24,
+            28,
+            32,
+            36,
+            40,
+            44,
+            48,
+            52,
+            56,
+            60,
+            64,
+            68,
+            72,
+            76,
+            80,
+            84,
+            88,
+            92,
+            93,
+        ],
+        "gate_lower_bound": -5.0,
+        "head_dim": 128,
+        "kda_layers": [i for i in range(1, 94) if i % 4 != 0 and i != 93],
+        "num_heads": 96,
+        "short_conv_kernel_size": 4,
+        "use_full_rank_gate": True,
+    },
+    "max_position_embeddings": 1048576,
+    "mla_use_nope": True,
+    "mla_use_output_gate": True,
+    "model_type": "kimi_linear",
+    "moe_intermediate_size": 3072,
+    "moe_layer_freq": 1,
+    "moe_renormalize": True,
+    "moe_router_activation_func": "sigmoid",
+    "num_attention_heads": 96,
+    "num_expert_group": 1,
+    "num_experts": 896,
+    "num_experts_per_token": 16,
+    "num_hidden_layers": 93,
+    "num_key_value_heads": 96,
+    "num_nextn_predict_layers": 0,
+    "num_shared_experts": 2,
+    "pad_token_id": 163839,
+    "q_lora_rank": 1536,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-05,
+    "routed_expert_hidden_size": 3584,
+    "routed_scaling_factor": 1.0,
+    "tie_word_embeddings": False,
+    "topk_group": 1,
+    "topk_method": "noaux_tc",
+    "transformers_version": "4.56.2",
+    "use_cache": True,
+    "use_grouped_topk": True,
+    "v_head_dim": 128,
+    "vocab_size": 163840,
+}
+
+
+class KimiK3Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
+  """Minimal stand-in for `configuration_kimi_k3.KimiLinearConfig` (not in transformers)."""
+
+  model_type = "kimi_linear"
+
+  def __init__(self, **kwargs):
+    self.max_position_embeddings = kwargs.get("max_position_embeddings", 1048576)
+    super().__init__(**kwargs)
+
+
+kimi_k3_config = KimiK3Config(**kimi_k3_dict)
+
+
 # from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
 gpt_oss_20b_dict = {
@@ -2107,6 +2207,7 @@ HF_MODEL_CONFIGS = {
     "deepseek3-671b": deepseek3_671b_config,
     "deepseek3.2-671b": deepseek32_671b_config,
     "deepseek4-284b": deepseek4_284b_config,
+    "kimi-k3": kimi_k3_config,
     "gpt-oss-20b": gpt_oss_20b_config,
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,

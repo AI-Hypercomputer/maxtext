@@ -43,6 +43,16 @@ from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
 
 
+def situ_gate(x: Array) -> Array:
+  """SiTU gate activation: 4.0 * tanh(x / 4.0) * sigmoid(x)."""
+  return 4.0 * jnp.tanh(x / 4.0) * jax.nn.sigmoid(x)
+
+
+def situ_linear(x: Array) -> Array:
+  """SiTU linear activation: 25.0 * tanh(x / 25.0)."""
+  return 25.0 * jnp.tanh(x / 25.0)
+
+
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
@@ -50,6 +60,10 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   elif fn_or_string == "sqrtsoftplus":
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
+  elif fn_or_string == "situ_gate":
+    return situ_gate
+  elif fn_or_string == "situ_linear":
+    return situ_linear
   elif isinstance(fn_or_string, str):
     return getattr(jax.nn, fn_or_string)
   elif callable(fn_or_string):

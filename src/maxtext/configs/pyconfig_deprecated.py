@@ -448,6 +448,7 @@ def validate_model_name(s: str) -> bool:
       "deepseek3-test",
       "deepseek3-tiny",
       "kimi-k2-1t",
+      "kimi-k3",
       "gemma-7b",
       "gemma-2b",
       "gemma2-2b",
