@@ -16,6 +16,8 @@
 
 import math
 
+from maxtext.utils import index_share_utils
+
 
 def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   """Generates a shape mapping for Hugging Face Gemma3 parameters.
@@ -611,6 +613,59 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
     mapping.update(layer_mapping)
 
   return mapping
+
+
+def _normalize_glm_hf_config(config) -> dict:
+  """Normalizes a GLM-5.1/5.2 HF config (dict or PreTrainedConfig) for DeepSeek-compatible shape helpers."""
+  cfg = config.to_dict() if hasattr(config, "to_dict") else dict(config)
+  if cfg.get("first_k_dense_replace") is None:
+    mlp_layer_types = cfg.get("mlp_layer_types")
+    if isinstance(mlp_layer_types, (list, tuple)):
+      first_dense = 0
+      for layer_type in mlp_layer_types:
+        if layer_type == "dense":
+          first_dense += 1
+        else:
+          break
+      cfg["first_k_dense_replace"] = first_dense
+    else:
+      cfg["first_k_dense_replace"] = min(3, int(cfg["num_hidden_layers"]))
+  return cfg
+
+
+def _get_glm5_2_shared_layers(cfg: dict) -> set[int]:
+  """Returns the set of Shared (S) layer indices for a GLM-5.2 HF config dictionary."""
+  num_hidden_layers = int(cfg["num_hidden_layers"])
+  indexer_types = cfg.get("indexer_types")
+  if isinstance(indexer_types, (list, tuple)):
+    if len(indexer_types) != num_hidden_layers:
+      raise ValueError(f"indexer_types length ({len(indexer_types)}) must match num_hidden_layers ({num_hidden_layers}).")
+    return {i for i, t in enumerate(indexer_types) if t == "shared"}
+
+  pattern = cfg.get("index_share_pattern")
+  if isinstance(pattern, str) and pattern:
+    pattern_tuple = index_share_utils.parse_index_share_pattern(pattern, num_hidden_layers)
+    return {i for i in range(num_hidden_layers) if index_share_utils.is_shared_layer(i, pattern_tuple)}
+
+  freq = max(int(cfg.get("index_topk_freq", 4)), 1)
+  offset = int(cfg.get("index_skip_topk_offset", cfg.get("first_k_dense_replace", 3)))
+  return {i for i in range(num_hidden_layers) if (max(i - offset + 1, 0) % freq) != 0}
+
+
+def GLM5_1_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns HuggingFace parameter shapes for GLM-5.1 (all decoder layers carry full DSA indexer weights)."""
+  return DEEPSEEK_HF_WEIGHTS_TO_SHAPE(_normalize_glm_hf_config(config))
+
+
+def GLM5_2_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns HuggingFace parameter shapes for GLM-5.2 (indexer weights emitted only on Full layers)."""
+  cfg = _normalize_glm_hf_config(config)
+  shapes = DEEPSEEK_HF_WEIGHTS_TO_SHAPE(cfg)
+  shared_layers = _get_glm5_2_shared_layers(cfg)
+  if not shared_layers:
+    return shapes
+  shared_indexer_prefixes = tuple(f"model.layers.{i}.self_attn.indexer." for i in sorted(shared_layers))
+  return {k: v for k, v in shapes.items() if not (isinstance(k, str) and k.startswith(shared_indexer_prefixes))}
 
 
 def QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE(config):
@@ -1702,6 +1757,8 @@ HF_SHAPE = {
     "deepseek4-284b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
     "deepseek4-1600b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
     "hy4-preview": HY4_HF_WEIGHTS_TO_SHAPE,
+    "glm5.1-744b": GLM5_1_HF_WEIGHTS_TO_SHAPE,
+    "glm5.2-744b": GLM5_2_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,

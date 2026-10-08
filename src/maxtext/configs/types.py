@@ -33,6 +33,7 @@ from typing import Any, Literal, NewType, Optional
 import jax
 from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from maxtext.utils import gcs_utils
+from maxtext.utils import index_share_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
@@ -270,6 +271,8 @@ ModelName = Literal[
     "deepseek4-284b",
     "deepseek4-1600b",
     "deepseek-custom",
+    "glm5.1-744b",
+    "glm5.2-744b",
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",
@@ -948,6 +951,56 @@ class CompressedAttention(BaseModel):
   )
 
 
+def _resolve_and_validate_index_share(cfg: Any) -> None:
+  """Resolves `prune_shared_indexers` and validates GLM5 / IndexShare invariants."""
+  if cfg.prune_shared_indexers is None:
+    cfg.prune_shared_indexers = (not cfg.scan_layers) if cfg.use_index_share else False
+
+  if cfg.prune_shared_indexers and cfg.scan_layers:
+    raise ValueError(
+        "`prune_shared_indexers=True` is incompatible with `scan_layers=True` because scanned layers require "
+        "identical PyTree structures across all layers. Set `scan_layers=False` to prune Shared-layer indexers "
+        "or `prune_shared_indexers=False` (or leave it unset) for scanned execution."
+    )
+
+  if (cfg.decoder_block == DecoderBlockType.GLM5 or cfg.use_index_share) and getattr(cfg, "mhc_expansion_rate", 1) > 1:
+    raise ValueError(
+        f"`mhc_expansion_rate > 1` (got {cfg.mhc_expansion_rate}) is not supported with "
+        "`decoder_block='glm5'` or `use_index_share=True`."
+    )
+
+  if cfg.use_index_share:
+    if not cfg.use_indexer:
+      raise ValueError("`use_index_share=True` requires `use_indexer=True`.")
+    if cfg.decoder_block != DecoderBlockType.GLM5:
+      decoder_block_val = getattr(cfg.decoder_block, "value", cfg.decoder_block)
+      raise ValueError(
+          f"`use_index_share=True` requires `decoder_block='{DecoderBlockType.GLM5.value}'`, "
+          f"got `decoder_block='{decoder_block_val}'`."
+      )
+    if cfg.attention_type != AttentionType.MLA.value:
+      raise ValueError(
+          f"`use_index_share=True` requires `attention_type='{AttentionType.MLA.value}'`, "
+          f"got `attention_type='{cfg.attention_type}'`."
+      )
+    if cfg.indexer_topk <= 0:
+      raise ValueError(f"`use_index_share=True` requires `indexer_topk > 0`, got {cfg.indexer_topk}.")
+    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      raise ValueError(f"`use_index_share=True` is not supported with `attention='{cfg.attention}'`.")
+    if cfg.ici_pipeline_parallelism > 1 or cfg.dcn_pipeline_parallelism > 1:
+      raise ValueError(
+          "`use_index_share=True` is not supported with pipeline parallelism "
+          f"(`ici_pipeline_parallelism={cfg.ici_pipeline_parallelism}`, "
+          f"`dcn_pipeline_parallelism={cfg.dcn_pipeline_parallelism}`), because cross-layer indexer state "
+          "is not propagated across pipeline stages."
+      )
+    if getattr(cfg, "engram_layers", None):
+      raise ValueError("`use_index_share=True` is not supported with `engram_layers`.")
+    if getattr(cfg, "use_batch_split_schedule", False):
+      raise ValueError("`use_index_share=True` is not supported with `use_batch_split_schedule=True`.")
+    index_share_utils.parse_index_share_pattern(cfg.index_share_pattern, cfg.num_decoder_layers)
+
+
 class AttentionIndexer(BaseModel):
   """Configuration for DeepSeek Sparse Attention (DSA): MLA or Compressed Attention with indexer."""
 
@@ -958,6 +1011,10 @@ class AttentionIndexer(BaseModel):
   indexer_sparse_training: bool = Field(
       False,
       description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
+  )
+  indexer_rope_interleave: bool = Field(
+      False,
+      description="Whether to interleave rotary embedding dimensions for the indexer. Defaults to False.",
   )
   indexer_loss_scaling_factor: float = Field(0.0, description="Multiplier for the indexer KL divergence loss.")
   indexer_use_approx_top_k: bool = Field(
@@ -970,6 +1027,20 @@ class AttentionIndexer(BaseModel):
           "When True, enforces that exactly k elements are unmasked by the indexer under boundary ties."
           " When False, uses raw thresholding which is faster but may unmask > k elements"
           " during ties."
+      ),
+  )
+  use_index_share: bool = Field(
+      False, description="Whether to enable cross-layer index cache sharing (GLM-5.2 IndexShare)."
+  )
+  index_share_pattern: str = Field(
+      "FSSS",
+      description="Cross-layer pattern string for IndexShare (e.g. 'FSSS', 'F,S,S,S', 'FFFSSSFSSS...').",
+  )
+  prune_shared_indexers: None | bool = Field(
+      None,
+      description=(
+          "Whether to prune indexer parameters on Shared (S) layers when use_index_share is enabled. "
+          "If None, resolves to (not scan_layers) when use_index_share=True, otherwise False."
       ),
   )
 
@@ -5526,13 +5597,14 @@ class MaxTextConfig(
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
     if self.pipeline_parallel_layers == -1:
-      if self.decoder_block == DecoderBlockType.DEEPSEEK:
+      if self.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5):
         moe_layers = self.num_decoder_layers - self.first_num_dense_layers
         self.pipeline_parallel_layers = moe_layers
       else:
         self.pipeline_parallel_layers = self.num_decoder_layers
 
     self.using_pipeline_parallelism = self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1
+    _resolve_and_validate_index_share(self)
     if self.using_pipeline_parallelism:
       num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
       if self.num_pipeline_repeats == -1:
@@ -6079,9 +6151,9 @@ class MaxTextConfig(
       if (
           self.routed_bias
           and self.routed_bias_update_rate > 0.0
-          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4)
+          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4, DecoderBlockType.GLM5)
       ):
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+        raise ValueError("Loss-free load balancing is only supported for the DeepSeek/GLM decoder block.")
       if self.te_moe_block and not self.sparse_matmul:
         raise ValueError("te_moe_block=True requires sparse_matmul=True.")
       if self.te_moe_quantize_before_fsdp_all_gather:
@@ -7316,6 +7388,7 @@ class RLConfig(
     self.mlp_dim = int((2**mlp_dim_scale) * self.base_mlp_dim)
     self.moe_mlp_dim = int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0))
     self.num_decoder_layers = int((2**layer_scale) * self.base_num_decoder_layers)
+    _resolve_and_validate_index_share(self)
 
     # Mirror into internal MaxText fields for backward compatibility.
     train_micro_batch_size = getattr(self.dataset, "train_micro_batch_size", -1)

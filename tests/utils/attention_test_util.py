@@ -217,7 +217,7 @@ def forward_with_context_expert_parallelism(
     decoder_segment_ids = jax.device_put(decoder_segment_ids, pos_sharding)
     decoder_positions = jax.device_put(decoder_positions, pos_sharding)
 
-    attention_cp_output, _ = attention_cp(
+    attention_cp_output, *_ = attention_cp(
         lnx,
         lnx,
         decoder_segment_ids=decoder_segment_ids,
