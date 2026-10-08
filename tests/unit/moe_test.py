@@ -4720,5 +4720,53 @@ class FlatFsdpWeightsParityTest(unittest.TestCase):
       )
 
 
+class MoeSpreadExpertsOverFsdpTest(parameterized.TestCase):
+  """moe_spread_experts_over_fsdp: (expert, fsdp) forms the routed-MoE expert-parallel group."""
+
+  @parameterized.named_parameters(("ep2_fsdp4", 2, 4, 1), ("ep2_fsdp2_tp2", 2, 2, 2))
+  def test_expert_parallel_group(self, ep, fsdp, tp):
+    if jax.device_count() < ep * fsdp * tp:
+      self.skipTest(f"needs {ep * fsdp * tp} devices")
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()], run_name="moe_spread_test", enable_checkpointing=False,
+        model_name="mixtral-8x7b", num_experts=8, moe_spread_experts_over_fsdp=True,
+        ici_expert_parallelism=ep, ici_fsdp_parallelism=fsdp, ici_tensor_parallelism=tp,
+        max_target_length=64, per_device_batch_size=1, skip_jax_distributed_system=True,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = moe.RoutedMoE(
+        config=cfg, num_experts=cfg.num_experts, num_experts_per_tok=cfg.num_experts_per_tok, mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"), kernel_axes=("embed", "mlp"),
+        dtype=cfg.dtype, rngs=nnx.Rngs(params=0),
+    )
+    self.assertEqual(model._expert_parallelism_name, ("expert", "fsdp"))  # pylint: disable=protected-access
+    self.assertEqual(model.get_expert_parallelism_size(), ep * fsdp)
+    self.assertEqual(cfg.num_experts // model.get_expert_parallelism_size(), 8 // (ep * fsdp))
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      # expert weights / activations shard over the same (expert, fsdp) order as the EP axis index
+      self.assertEqual(tuple(nn.logical_to_mesh_axes(("exp",))[0]), ("expert", "fsdp"))
+      self.assertEqual(tuple(nn.logical_to_mesh_axes(("activation_exp",))[0]), ("expert", "fsdp"))
+      self.assertIn("tensor", tuple(nn.logical_to_mesh_axes(("mlp_moe",))[0]))  # TP still applies to MoE
+
+
+  def test_autofill_fsdp_checks_divisibility_on_mesh(self):
+    """With ici_fsdp_parallelism=-1 the config cannot check divisibility; the MoE layer must."""
+    if jax.device_count() != 8:
+      self.skipTest("needs exactly 8 devices")
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()], run_name="moe_spread_autofill", enable_checkpointing=False,
+        model_name="mixtral-8x7b", num_experts=12, override_model_config=True, moe_spread_experts_over_fsdp=True,
+        ici_expert_parallelism=1, ici_fsdp_parallelism=-1, max_target_length=64, per_device_batch_size=1,
+        skip_jax_distributed_system=True,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with self.assertRaisesRegex(ValueError, "divisible"):
+      moe.RoutedMoE(
+          config=cfg, num_experts=cfg.num_experts, num_experts_per_tok=cfg.num_experts_per_tok, mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"), kernel_axes=("embed", "mlp"),
+          dtype=cfg.dtype, rngs=nnx.Rngs(params=0),
+      )
+
+
 if __name__ == "__main__":
   absltest.main()
