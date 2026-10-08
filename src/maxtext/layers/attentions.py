@@ -1118,9 +1118,9 @@ class Attention(nnx.Module):
       query: Array,
       key: Array,
       value: Array,
-      rpa_kv_cache: list[Array] | None = None,
+      rpa_kv_cache: Array | list[Array] | None = None,
       rpa_metadata: dict[str, Any] | None = None,
-  ) -> tuple[Array, list[Array]]:
+  ) -> tuple[Array, Array | list[Array]]:
     """Forward function for vLLM serving with RPA attention."""
     if self.config.attention == "vllm_batched_rpa":
       os.environ["USE_BATCHED_RPA_KERNEL"] = "1"
@@ -1149,12 +1149,19 @@ class Attention(nnx.Module):
       attention_chunk_size = None
 
     q_scale, k_scale, v_scale = None, None, None
-    kv_cache_dtype = getattr(rpa_kv_cache, "dtype", None)
+    kv_cache_arr = (
+        rpa_kv_cache[0] if isinstance(rpa_kv_cache, (list, tuple)) and rpa_kv_cache else rpa_kv_cache
+    )
+    kv_cache_dtype = getattr(kv_cache_arr, "dtype", None)
     if kv_cache_dtype is not None and kv_cache_dtype != self.dtype:
       k_scale = v_scale = 1.0
-      finfo = jnp.finfo(kv_cache_dtype)
-      key = jnp.clip(key, float(finfo.min), float(finfo.max)).astype(kv_cache_dtype)
-      value = jnp.clip(value, float(finfo.min), float(finfo.max)).astype(kv_cache_dtype)
+      info = (
+          jnp.iinfo(kv_cache_dtype)
+          if jnp.issubdtype(kv_cache_dtype, jnp.integer)
+          else jnp.finfo(kv_cache_dtype)
+      )
+      key = jnp.clip(key, float(info.min), float(info.max)).astype(kv_cache_dtype)
+      value = jnp.clip(value, float(info.min), float(info.max)).astype(kv_cache_dtype)
 
     md = rpa_metadata
 
