@@ -106,6 +106,8 @@ HF_IDS = {
     "olmo3-32b": "allenai/Olmo-3-32B-Think",
     "weaver-mini": "Qwen/Qwen3-VL-4B-Instruct",
     "weaver-max": "Qwen/Qwen3-VL-8B-Instruct",
+    "glm5.1-744b": "zai-org/GLM-5.1",
+    "glm5.2-744b": "zai-org/GLM-5.2",
     "glm5.3-flash": "zai-org/GLM-5.3-Flash",
     "granite-3.0-1b-a400m": "ibm-granite/granite-3.0-1b-a400m-instruct",
     "ming-3.0-audio-tiny": "inclusionAI/Ming-3.0-audio-tiny",

@@ -48,6 +48,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 
 ## 🔥 Latest news 🔥
 
+- [November 13, 2026] GLM-5.1 (744B) and GLM-5.2 (744B) with Cross-Layer IndexShare are now supported. See the [GLM-5.1 & GLM-5.2 model card](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/reference/models/glm5.md) for checkpoint conversion, pre-training, unrolling, and decoding details.
 - [October 23, 2026] DeepSeek V4 Pro (1600B) is now supported. See the [user guide](tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) for checkpoint conversion, pre-training, and evaluation details.
 - [October 15, 2026] Qwen3.8 2.4T is now [supported](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md).
 - [October 8, 2026] MaxText now supports JEV-style decision scoring on TPU via vLLM; see the [Decision Models tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/decision_models.html) for a Qwen3.5-9B example with Bespoke-Nimble LoRA weights.
@@ -152,6 +153,8 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
 - Moonshot AI
   - Kimi K2 (1T), Kimi K2-Thinking (1T)
   - Kimi K2.5 (text), Kimi K2.6 (text)
+- Z.ai (Zhipu AI)
+  - GLM-5.1 (744B), GLM-5.2 (744B)
 - Meta
   - Llama 4 Scout (109B) & Maverick (400B)
   - Llama 3.3 (70B), 3.1 (8B, 70B, 405B), 3.0 (8B, 70B, 405B)

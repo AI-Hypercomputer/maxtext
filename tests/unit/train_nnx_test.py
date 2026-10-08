@@ -31,6 +31,7 @@ from flax import nnx
 from flax.nnx import variablelib
 import jax
 import jax.numpy as jnp
+from maxtext.layers import moe
 from maxtext.layers import nnx_scan
 import numpy as np
 from maxtext.common import train_state_nnx
@@ -63,6 +64,7 @@ class _Cfg:
   moe_dropless_fallback: str | None = None
   routed_bias: bool = False
   routed_bias_update_rate: float = 0.0
+  scan_layers: bool = True
   mtp_num_layers: int = 0
   mtp_eval_target_module: int = 0
   use_qk_clip: bool = False
@@ -123,10 +125,84 @@ class _CustomGradientModel(nnx.Module):
 
 
 class GateLogit(nnx.Module):
-  """Router gate stub holding bias parameter."""
+  """Router gate stub holding bias parameter or MoEBiasVar."""
 
-  def __init__(self, bias_shape):
-    self.bias = nnx.Param(jnp.zeros(bias_shape))
+  def __init__(self, bias_shape, *, use_moe_bias_var: bool = False, init_val: float = 0.0):
+    init = jnp.full(bias_shape, init_val, dtype=jnp.float32)
+    self.bias = moe.MoEBiasVar(init) if use_moe_bias_var else nnx.Param(init)
+
+
+class _UnscannedRoutedMoeBlock(nnx.Module):
+  """Nested MoeBlock_0 stub holding a GateLogit with MoEBiasVar."""
+
+  def __init__(self, num_experts: int, init_val: float = 0.0):
+    self.gate = GateLogit((num_experts,), use_moe_bias_var=True, init_val=init_val)
+
+
+class _UnscannedDeepSeekMoeBlock(nnx.Module):
+  """Nested DeepSeekMoeBlock_0 stub matching DeepSeek/GLM5 unscanned MoE layer paths."""
+
+  def __init__(self, num_experts: int, init_val: float = 0.0):
+    self.MoeBlock_0 = _UnscannedRoutedMoeBlock(num_experts, init_val=init_val)
+
+
+class _UnscannedMoELayerStub(nnx.Module):
+  """Unscanned `moe_layers_i` stub that sows a 1-D `moe_bias_updates` vector."""
+
+  def __init__(self, num_experts: int, update_vec, init_val: float = 0.0):
+    self.DeepSeekMoeBlock_0 = _UnscannedDeepSeekMoeBlock(num_experts, init_val=init_val)
+    self.update_vec = jnp.asarray(update_vec)
+
+  def __call__(self):
+    self.sow(nnx.Intermediate, "moe_bias_updates", self.update_vec)
+
+
+class _UnscannedDecoderStack(nnx.Module):
+  """Unscanned decoder stub with `dense_layers_0` and `moe_layers_0..N-1`."""
+
+  def __init__(self, hidden: int, num_experts: int, layer_updates, init_val: float, rngs: nnx.Rngs):
+    self.dense_layers_0 = nnx.Linear(hidden, hidden, rngs=rngs)
+    self.num_moe_layers = len(layer_updates)
+    for i, upd in enumerate(layer_updates):
+      setattr(self, f"moe_layers_{i}", _UnscannedMoELayerStub(num_experts, upd, init_val=init_val))
+
+  def __call__(self, h):
+    h = self.dense_layers_0(h)
+    for i in range(self.num_moe_layers):
+      getattr(self, f"moe_layers_{i}")()
+    return h
+
+
+class _TinyDecoderUnscannedMoEBias(_TinyDecoder):
+  """`_TinyDecoder` with unscanned `moe_layers_0..N-1` (plus optional MTP) for `scan_layers=False`."""
+
+  def __init__(
+      self,
+      vocab_size: int,
+      hidden: int,
+      num_experts: int,
+      layer_updates,
+      rngs: nnx.Rngs,
+      *,
+      init_val: float = 0.5,
+      mtp_update=None,
+      mesh: jax.sharding.Mesh | None = None,
+  ):
+    super().__init__(vocab_size, hidden, rngs=rngs)
+    if mesh is not None:
+      self.mesh = mesh
+    self.decoder = _UnscannedDecoderStack(hidden, num_experts, layer_updates, init_val=init_val, rngs=rngs)
+    self.has_mtp = mtp_update is not None
+    if self.has_mtp:
+      self.mtp_block = nnx.Dict({"mtp_layer_1": _UnscannedMoELayerStub(num_experts, mtp_update, init_val=init_val)})
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    del decoder_positions, kwargs
+    h = self.embed(decoder_input_tokens)
+    h = self.decoder(h)
+    if self.has_mtp:
+      self.mtp_block["mtp_layer_1"]()
+    return self.proj(h)
 
 
 class _MoEBiasStub(nnx.Module):
@@ -665,6 +741,138 @@ class TestRoutedBiasReadNNX(unittest.TestCase):
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     _, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
     self.assertIsNone(aux["moe_bias_updates"])
+
+  def test_train_step_updates_all_unscanned_moe_layers_and_diagnostics(self):
+    """When scan_layers=False, train_step must update MoEBiasVar on every moe_layers_0..N (not just moe_layers_0)."""
+    n_dev = jax.device_count()
+    mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape((1, n_dev, 1, 1)), ("data", "fsdp", "expert", "context"))
+    cfg = _Cfg(
+        routed_bias=True,
+        routed_bias_update_rate=0.01,
+        scan_layers=False,
+        num_experts=4,
+        mtp_num_layers=1,
+    )
+    cfg.global_batch_size_to_train_on = max(2, n_dev)
+    cfg.micro_batch_size_to_train_on = cfg.global_batch_size_to_train_on
+    cfg.log_step_diagnostics = True
+    cfg.log_moe_bias_norms = True
+
+    layer_updates = [
+        jnp.array([0.01, -0.01, 0.01, -0.01], dtype=jnp.float32),
+        jnp.array([-0.01, 0.01, 0.01, 0.0], dtype=jnp.float32),
+        jnp.array([0.01, 0.01, -0.01, 0.01], dtype=jnp.float32),
+    ]
+    mtp_update = jnp.array([-0.01, -0.01, 0.01, 0.01], dtype=jnp.float32)
+    init_val = 0.5
+
+    with jax.set_mesh(mesh):
+      model = _TinyDecoderUnscannedMoEBias(
+          cfg.vocab_size,
+          hidden=4,
+          num_experts=cfg.num_experts,
+          layer_updates=layer_updates,
+          rngs=nnx.Rngs(0),
+          init_val=init_val,
+          mtp_update=mtp_update,
+          mesh=mesh,
+      )
+      # AdamW with nonzero weight decay must not decay MoEBiasVar, while train_step updates every layer's bias.
+      optimizer = nnx.Optimizer(model, optax.adamw(learning_rate=0.01, weight_decay=0.1), wrt=nnx.Param)
+      ts = train_state_nnx.TrainStateNNX(model, optimizer)
+      state_graphdef, state_pure = nnx.split(ts)
+      data = _make_data(batch=cfg.global_batch_size_to_train_on, vocab=cfg.vocab_size)
+      new_state, metrics = pre_train.train_step(
+          state_graphdef,
+          cfg,
+          state_mesh_shardings=None,
+          params_shardings=None,
+          state=state_pure,
+          data=data,
+      )
+      updated = nnx.merge(state_graphdef, new_state)
+
+    for i, expected_upd in enumerate(layer_updates):
+      layer_mod = getattr(updated.model.decoder, f"moe_layers_{i}")
+      bias_var = layer_mod.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
+      self.assertIsInstance(bias_var, moe.MoEBiasVar)
+      np.testing.assert_allclose(
+          np.asarray(bias_var.get_value()),
+          init_val + np.asarray(expected_upd),
+          rtol=1e-6,
+          atol=1e-7,
+          err_msg=f"moe_layers_{i}",
+      )
+      self.assertIn(f"learning/moe_bias_before_norm_decoder-moe_layers_{i}", metrics["scalar"])
+      self.assertIn(f"learning/moe_bias_update_norm_decoder-moe_layers_{i}", metrics["scalar"])
+
+    mtp_bias_var = updated.model.mtp_block["mtp_layer_1"].DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
+    np.testing.assert_allclose(np.asarray(mtp_bias_var.get_value()), init_val + np.asarray(mtp_update), rtol=1e-6)
+
+    expected_checksum = sum(float(np.sum(init_val + np.asarray(u))) for u in [*layer_updates, mtp_update])
+    expected_nonzero = sum(int(np.sum(np.asarray(u) != 0)) for u in [*layer_updates, mtp_update])
+    self.assertAlmostEqual(float(metrics["scalar"]["diag/moe_bias_checksum"]), expected_checksum, places=5)
+    self.assertEqual(float(metrics["scalar"]["diag/moe_bias_update_nonzero"]), float(expected_nonzero))
+
+  def test_train_step_unscanned_moe_layers_with_gradient_accumulation(self):
+    """Under GA>1 and scan_layers=False, integer per-microbatch counts decode to +-rate across all unscanned layers."""
+    n_dev = jax.device_count()
+    mesh = jax.sharding.Mesh(np.array(jax.devices()).reshape((1, n_dev, 1, 1)), ("data", "fsdp", "expert", "context"))
+    rate = 0.02
+    micro_batch = max(2, n_dev)
+    ga_steps = 2
+    cfg = _Cfg(
+        routed_bias=True,
+        routed_bias_update_rate=rate,
+        scan_layers=False,
+        num_experts=3,
+        gradient_accumulation_steps=ga_steps,
+        micro_batch_size_to_train_on=micro_batch,
+    )
+    cfg.global_batch_size_to_train_on = micro_batch * ga_steps
+    cfg.max_target_length = 4
+
+    # Per-microbatch int32 counts; summed over 2 microbatches -> [6, 2, 4] (mean=4) and [0, 6, 6] (mean=4).
+    layer_counts = [
+        jnp.array([3, 1, 2], dtype=jnp.int32),
+        jnp.array([0, 3, 3], dtype=jnp.int32),
+        jnp.array([1, 4, 1], dtype=jnp.int32),
+    ]
+    expected_deltas = [
+        np.array([-rate, rate, 0.0], dtype=np.float32),
+        np.array([rate, -rate, -rate], dtype=np.float32),
+        np.array([rate, -rate, rate], dtype=np.float32),
+    ]
+    init_val = 0.25
+
+    with jax.set_mesh(mesh):
+      model = _TinyDecoderUnscannedMoEBias(
+          cfg.vocab_size,
+          hidden=4,
+          num_experts=cfg.num_experts,
+          layer_updates=layer_counts,
+          rngs=nnx.Rngs(0),
+          init_val=init_val,
+          mesh=mesh,
+      )
+      params_shardings = _params_shardings(model)
+      optimizer = nnx.Optimizer(model, optax.adamw(learning_rate=0.01, weight_decay=0.1), wrt=nnx.Param)
+      ts = train_state_nnx.TrainStateNNX(model, optimizer)
+      state_graphdef, state_pure = nnx.split(ts)
+      data = _make_data(batch=cfg.global_batch_size_to_train_on, seq=cfg.max_target_length, vocab=cfg.vocab_size)
+      new_state, _ = pre_train.train_step(
+          state_graphdef,
+          cfg,
+          state_mesh_shardings=None,
+          params_shardings=params_shardings,
+          state=state_pure,
+          data=data,
+      )
+      updated = nnx.merge(state_graphdef, new_state)
+
+    for i, expected_delta in enumerate(expected_deltas):
+      bias_val = getattr(updated.model.decoder, f"moe_layers_{i}").DeepSeekMoeBlock_0.MoeBlock_0.gate.bias.get_value()
+      np.testing.assert_allclose(np.asarray(bias_val), init_val + expected_delta, rtol=1e-6, err_msg=f"moe_layers_{i}")
 
 
 class _AuxLossMTPBlock(nnx.Module):

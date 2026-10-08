@@ -58,6 +58,9 @@ import jax
 import jax.numpy as jnp
 from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 
+from maxtext.checkpoint_conversion.utils import hf_shape
+from maxtext.utils import index_share_utils
+
 
 def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Generates a parameter mapping from MaxText to Hugging Face for Gemma3.
@@ -2019,6 +2022,118 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 def DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN():
   """Creates parameter transformation functions for Deepseek."""
   return {}
+
+
+_GLM_INDEXER_KEY_MAP = {
+    "self_attention-indexer-k_norm-bias": "self_attn.indexer.k_norm.bias",
+    "self_attention-indexer-k_norm-scale": "self_attn.indexer.k_norm.weight",
+    "self_attention-indexer-weights_proj-kernel": "self_attn.indexer.weights_proj.weight",
+    "self_attention-indexer-wk-kernel": "self_attn.indexer.wk.weight",
+    "self_attention-indexer-wq_b-kernel": "self_attn.indexer.wq_b.weight",
+}
+
+
+def _resolve_glm_index_share_pattern(cfg: dict, maxtext_config, num_main_layers: int) -> tuple[str, ...] | None:
+  """Returns the ('F'/'S', ...) IndexShare pattern tuple when IndexShare is active, or None for full-indexer GLM-5.1."""
+  mt_use_index_share = getattr(maxtext_config, "use_index_share", None)
+  if isinstance(mt_use_index_share, bool):
+    if not mt_use_index_share:
+      return None
+    mt_pattern = getattr(maxtext_config, "index_share_pattern", None)
+    if isinstance(mt_pattern, str) and mt_pattern:
+      return index_share_utils.parse_index_share_pattern(mt_pattern, num_main_layers)
+
+  indexer_types = cfg.get("indexer_types")
+  if isinstance(indexer_types, (list, tuple)) and "shared" in indexer_types[:num_main_layers]:
+    if len(indexer_types) < num_main_layers:
+      raise ValueError(
+          f"indexer_types length ({len(indexer_types)}) is smaller than num_main_layers ({num_main_layers})."
+      )
+    pattern_str = "".join("S" if t == "shared" else "F" for t in indexer_types[:num_main_layers])
+    return index_share_utils.parse_index_share_pattern(pattern_str, num_main_layers)
+
+  cfg_pattern = cfg.get("index_share_pattern")
+  if isinstance(cfg_pattern, str) and cfg_pattern:
+    return index_share_utils.parse_index_share_pattern(cfg_pattern, num_main_layers)
+
+  if mt_use_index_share is True:
+    raise ValueError("use_index_share=True requires a non-empty index_share_pattern or HF indexer_types.")
+  return None
+
+
+def GLM_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Generates parameter mapping between MaxText GLM-5.1/5.2 and HuggingFace GlmMoeDsa weight paths."""
+  cfg = hf_shape.normalize_glm_hf_config(config)
+  mapping = DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(cfg, maxtext_config, scan_layers=scan_layers)
+
+  mt_num_layers = getattr(maxtext_config, "num_decoder_layers", None)
+  num_main_layers = (
+      mt_num_layers
+      if isinstance(mt_num_layers, int) and not isinstance(mt_num_layers, bool)
+      else int(cfg["num_hidden_layers"])
+  )
+  mt_first_dense = getattr(maxtext_config, "first_num_dense_layers", None)
+  first_num_dense_layers = (
+      mt_first_dense
+      if isinstance(mt_first_dense, int) and not isinstance(mt_first_dense, bool)
+      else int(cfg["first_k_dense_replace"])
+  )
+
+  pattern_tuple = _resolve_glm_index_share_pattern(cfg, maxtext_config, num_main_layers)
+  if pattern_tuple is None:
+    return mapping
+
+  mt_prune = getattr(maxtext_config, "prune_shared_indexers", None)
+  prune_shared = mt_prune if isinstance(mt_prune, bool) else (not scan_layers)
+
+  if scan_layers:
+    for group_name, layer_range in (
+        ("dense_layers", range(first_num_dense_layers)),
+        ("moe_layers", range(first_num_dense_layers, num_main_layers)),
+    ):
+      for subkey, hf_suffix in _GLM_INDEXER_KEY_MAP.items():
+        mt_key = f"params-decoder-{group_name}-{subkey}"
+        if mt_key not in mapping:
+          continue
+        if saving_to_hf:
+          full_targets = [
+              f"model.layers.{i}.{hf_suffix}"
+              for i in layer_range
+              if not index_share_utils.is_shared_layer(i, pattern_tuple)
+          ]
+          mapping[mt_key] = full_targets if full_targets else None  # pyrefly: ignore[bad-assignment]
+        else:
+          mapping[mt_key] = [  # pyrefly: ignore[bad-assignment]
+              f"model.layers.{index_share_utils.get_donor_layer_idx(i, pattern_tuple)}.{hf_suffix}" for i in layer_range
+          ]
+  else:
+    for i in range(num_main_layers):
+      if not index_share_utils.is_shared_layer(i, pattern_tuple):
+        continue
+      layer_prefix = (
+          f"params-decoder-dense_layers_{i}"
+          if i < first_num_dense_layers
+          else f"params-decoder-moe_layers_{i - first_num_dense_layers}"
+      )
+      donor_idx = index_share_utils.get_donor_layer_idx(i, pattern_tuple)
+      for subkey, hf_suffix in _GLM_INDEXER_KEY_MAP.items():
+        mt_key = f"{layer_prefix}-{subkey}"
+        if saving_to_hf:
+          mapping[mt_key] = None  # pyrefly: ignore[bad-assignment]
+        elif prune_shared:
+          mapping.pop(mt_key, None)
+        else:
+          mapping[mt_key] = f"model.layers.{donor_idx}.{hf_suffix}"
+
+  return mapping
+
+
+def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation hooks for GLM-5.1 & GLM-5.2 by reusing DeepSeek hooks."""
+  cfg = hf_shape.normalize_glm_hf_config(config)
+  hooks = DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(cfg, maxtext_config, scan_layers=scan_layers, saving_to_hf=saving_to_hf)
+  param_map = GLM_MAXTEXT_TO_HF_PARAM_MAPPING(cfg, maxtext_config, scan_layers=scan_layers, saving_to_hf=saving_to_hf)
+  return {k: fn for k, fn in hooks.items() if param_map.get(k) is not None}
 
 
 def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -5467,6 +5582,8 @@ PARAM_MAPPING = {
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-1600b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.1-744b": GLM_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.2-744b": GLM_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -5535,6 +5652,8 @@ HOOK_FNS = {
     "deepseek4-tiny": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-1600b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.1-744b": GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.2-744b": GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,

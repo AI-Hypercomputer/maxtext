@@ -46,7 +46,7 @@ from maxtext.common.common_types import (
     DEFAULT_MASK_VALUE,
     Q_LENGTH,
 )
-from maxtext.layers.attention_mla import MLA
+from maxtext.layers.attention_mla import IndexerShareState, MLA
 from maxtext.layers import attention_compressed
 from maxtext.layers.attention_compressed import CompressedAttention
 from maxtext.layers import attention_op
@@ -5658,6 +5658,222 @@ class MLATest(attention_test_util.MLATestBase):
     )
 
     np.testing.assert_allclose(loss_native, loss_chunked, rtol=1e-5, atol=1e-5)
+
+  def test_mla_return_indexer_state_and_index_share_tuple_contract(self):
+    """Verifies MLA.__call__ returns a 2-tuple by default and a 3-tuple when return_indexer_state=True."""
+    # 1. Standard MLA (use_index_share=False), including @nnx.jit and forward_with_context_expert_parallelism callers.
+    std_args = {
+        **self.config_arguments,
+        "attention": "dot_product",
+        "max_target_length": 16,
+        "max_prefill_predict_length": 8,
+        "base_emb_dim": 64,
+        "base_num_query_heads": 4,
+        "base_num_kv_heads": 4,
+        "head_dim": 32,
+        "q_lora_rank": 16,
+        "kv_lora_rank": 16,
+        "qk_nope_head_dim": 16,
+        "qk_rope_head_dim": 16,
+        "v_head_dim": 32,
+        "use_indexer": True,
+        "use_index_share": False,
+        "indexer_n_heads": 4,
+        "indexer_head_dim": 32,
+        "indexer_topk": 4,
+    }
+    cfg, mla = self.init_mla(std_args, rope_type="default")
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+
+    with jax.set_mesh(mla.mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      res_default = mla(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      self.assertIsInstance(res_default, tuple)
+      self.assertLen(res_default, 2)
+      out_2, kv_cache_2 = res_default
+      self.assertIsNone(kv_cache_2)
+      self.assertEqual(out_2.shape, lnx.shape)
+
+      @nnx.jit
+      def _jitted_mla_generic(module, x, seg_ids, pos):
+        mla_generic_output, _ = module(
+            x,
+            x,
+            decoder_segment_ids=seg_ids,
+            inputs_positions=pos,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+        return mla_generic_output
+
+      out_jit = _jitted_mla_generic(mla, lnx, decoder_segment_ids, decoder_positions)
+      np.testing.assert_allclose(np.asarray(out_jit), np.asarray(out_2), rtol=1e-5, atol=1e-5)
+
+      batch_spec = nn_partitioning.logical_to_mesh_axes(
+          ("activation_batch", "activation_length", "activation_embed"),
+          nn_partitioning.get_axis_rules(),
+      )
+      pos_spec = nn_partitioning.logical_to_mesh_axes((None, "activation_length"), nn_partitioning.get_axis_rules())
+      lnx_sharded = jax.device_put(lnx, NamedSharding(mla.mesh, batch_spec))
+      seg_sharded = jax.device_put(decoder_segment_ids, NamedSharding(mla.mesh, pos_spec))
+      pos_sharded = jax.device_put(decoder_positions, NamedSharding(mla.mesh, pos_spec))
+
+      @nnx.jit(static_argnames=("model_mode", "deterministic"))
+      def _jitted_attention_call(module, q, k, **kwargs):
+        return module(q, k, **kwargs)
+
+      executable = _jitted_attention_call.lower(
+          mla,
+          lnx_sharded,
+          lnx_sharded,
+          decoder_segment_ids=seg_sharded,
+          inputs_positions=pos_sharded,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      ).compile()
+
+      def _executable_wrapper(q, k, **kwargs):
+        kwargs.pop("deterministic", None)
+        kwargs.pop("model_mode", None)
+        return executable(mla, q, k, **kwargs)
+
+      res_3 = mla(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          return_indexer_state=True,
+      )
+      self.assertIsInstance(res_3, tuple)
+      self.assertLen(res_3, 3)
+      out_3, kv_cache_3, idx_state_3 = res_3  # pylint: disable=unbalanced-tuple-unpacking
+      self.assertIsNone(kv_cache_3)
+      self.assertIsNone(idx_state_3)
+      np.testing.assert_allclose(np.asarray(out_3), np.asarray(out_2), rtol=1e-6, atol=1e-6)
+
+    out_cp_helper = attention_test_util.forward_with_context_expert_parallelism(
+        cfg,
+        mla.mesh,
+        _executable_wrapper,
+        lnx,
+        decoder_segment_ids,
+        decoder_positions,
+    )
+    np.testing.assert_allclose(np.asarray(out_cp_helper), np.asarray(out_2), rtol=1e-5, atol=1e-5)
+
+    # 2. Cross-layer IndexShare MLA (use_index_share=True): default call still returns 2-tuple unless opted in.
+    index_share_args = {
+        **std_args,
+        "decoder_block": "glm5",
+        "use_index_share": True,
+        "index_share_pattern": "FS",
+        "base_num_decoder_layers": 2,
+        "scan_layers": False,
+        "prune_shared_indexers": True,
+        "stack_prefill_result_cache": False,
+    }
+    cfg_is = pyconfig.initialize([sys.argv[0], get_test_config_path()], **index_share_args, rope_type="yarn")
+    mesh_is = Mesh(maxtext_utils.create_device_mesh(cfg_is), cfg_is.mesh_axes)
+    lnx_is, seg_is, pos_is = self.get_structured_data(cfg_is, cfg_is.dtype)
+
+    mla_kw = {
+        "config": cfg_is,
+        "num_query_heads": cfg_is.num_query_heads,
+        "num_kv_heads": cfg_is.num_kv_heads,
+        "head_dim": cfg_is.head_dim,
+        "inputs_q_shape": lnx_is.shape,
+        "inputs_kv_shape": lnx_is.shape,
+        "max_target_length": cfg_is.max_target_length,
+        "max_prefill_predict_length": cfg_is.max_prefill_predict_length,
+        "mesh": mesh_is,
+        "attention_kernel": "dot_product",
+        "dtype": cfg_is.dtype,
+        "dropout_rate": cfg_is.dropout_rate,
+        "attention_type": cfg_is.attention_type,
+        "q_lora_rank": cfg_is.q_lora_rank,
+        "kv_lora_rank": cfg_is.kv_lora_rank,
+        "qk_nope_head_dim": cfg_is.qk_nope_head_dim,
+        "qk_rope_head_dim": cfg_is.qk_rope_head_dim,
+        "v_head_dim": cfg_is.v_head_dim,
+        "model_mode": MODEL_MODE_TRAIN,
+    }
+    with jax.set_mesh(mesh_is), nn_partitioning.axis_rules(cfg_is.logical_axis_rules):
+      mla_full = MLA(**mla_kw, is_shared_layer=False, served_group_size=2, rngs=nnx.Rngs(params=7))
+      mla_shared = MLA(**mla_kw, is_shared_layer=True, served_group_size=1, rngs=nnx.Rngs(params=8))
+      self.assertIsNone(mla_shared.indexer)
+
+      res_full_2 = mla_full(
+          lnx_is,
+          lnx_is,
+          decoder_segment_ids=seg_is,
+          inputs_positions=pos_is,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      self.assertLen(res_full_2, 2)
+      out_full_2, _ = res_full_2
+      out_full_jit = _jitted_mla_generic(mla_full, lnx_is, seg_is, pos_is)
+      np.testing.assert_allclose(np.asarray(out_full_jit), np.asarray(out_full_2), rtol=1e-5, atol=1e-5)
+
+      @nnx.jit(static_argnames=("return_indexer_state",))
+      def _jitted_with_flag(module, x, seg_ids, pos, *, return_indexer_state: bool = False):
+        return module(
+            x,
+            x,
+            decoder_segment_ids=seg_ids,
+            inputs_positions=pos,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+            return_indexer_state=return_indexer_state,
+        )
+
+      res_full_jit_2 = _jitted_with_flag(mla_full, lnx_is, seg_is, pos_is, return_indexer_state=False)
+      self.assertLen(res_full_jit_2, 2)
+      res_full_3 = _jitted_with_flag(mla_full, lnx_is, seg_is, pos_is, return_indexer_state=True)
+      self.assertLen(res_full_3, 3)
+      out_full_3, _, donor_state = res_full_3  # pylint: disable=unbalanced-tuple-unpacking
+      self.assertIsInstance(donor_state, IndexerShareState)
+      self.assertEqual(
+          donor_state.topk_indices.shape,
+          (cfg_is.global_batch_size_to_train_on, cfg_is.max_target_length, cfg_is.indexer_topk),
+      )
+      np.testing.assert_allclose(np.asarray(out_full_3), np.asarray(out_full_2), rtol=1e-5, atol=1e-5)
+
+      res_shared_2 = mla_shared(
+          lnx_is,
+          lnx_is,
+          decoder_segment_ids=seg_is,
+          inputs_positions=pos_is,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          cached_indexer_state=donor_state,
+      )
+      self.assertLen(res_shared_2, 2)
+      out_shared_2, _ = res_shared_2
+
+      res_shared_3 = mla_shared(
+          lnx_is,
+          lnx_is,
+          decoder_segment_ids=seg_is,
+          inputs_positions=pos_is,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          cached_indexer_state=donor_state,
+          return_indexer_state=True,
+      )
+      self.assertLen(res_shared_3, 3)
+      out_shared_3, _, shared_state = res_shared_3  # pylint: disable=unbalanced-tuple-unpacking
+      self.assertIsInstance(shared_state, IndexerShareState)
+      np.testing.assert_array_equal(np.asarray(shared_state.topk_indices), np.asarray(donor_state.topk_indices))
+      np.testing.assert_allclose(np.asarray(out_shared_3), np.asarray(out_shared_2), rtol=1e-6, atol=1e-6)
 
 
 class Qwen3NextGatedDeltaNetTest(unittest.TestCase):

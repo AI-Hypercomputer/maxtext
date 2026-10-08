@@ -53,6 +53,7 @@ import argparse
 from functools import partial
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -70,7 +71,8 @@ from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MA
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, single_stack_axis, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
-from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
+from maxtext.utils import checkpoint_dtype_utils
+from maxtext.utils import index_share_utils, max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
@@ -146,27 +148,47 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
   return np.asarray(tensor)
 
 
-# Router state bf16 cannot hold exactly: the fp32 routing bias and integer
-# token-to-expert ids (bf16 rounds integers above 256).
-_FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
-_FULL_PRECISION_SUBSTRINGS = (
-    "-attn_hc-",
-    "-ffn_hc-",
-    "-hc_head-",
-    "-self_attention-sinks",
-    "-self_attention-indexer-k_norm-",
-    "-self_attention-indexer-weights_proj-",
-)
+_FULL_PRECISION_PREFIXES = checkpoint_dtype_utils.FULL_PRECISION_PREFIXES
+_FULL_PRECISION_SUBSTRINGS = checkpoint_dtype_utils.FULL_PRECISION_SUBSTRINGS
+_param_save_dtype = checkpoint_dtype_utils.param_save_dtype
 
 
-def _param_save_dtype(mt_param_key_or_keys, save_dtype: str) -> str:
-  """Returns float32 for full-precision router/HC/sink/indexer state when saving bfloat16."""
-  if save_dtype not in ("bfloat16", DType.BFLOAT16):
-    return save_dtype
-  keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
-  if any(k.startswith(_FULL_PRECISION_PREFIXES) or any(sub in k for sub in _FULL_PRECISION_SUBSTRINGS) for k in keys):
-    return "float32"
-  return save_dtype
+def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any], config: Any = None) -> Any:
+  """Resolves missing indexer parameters for GLM-5.2 Shared (S) layers from their exact Full (F) donor layer.
+
+  Only resolves keys of the form ``model.layers.<layer_idx>.self_attn.indexer.<rest>`` when
+  ``config.use_index_share`` is ``True`` and ``layer_idx`` is a Shared (S) layer in
+  ``config.index_share_pattern``. Missing Full (F) layer keys return ``None`` so the caller
+  re-raises the original missing-key error; missing donor weights on a Shared layer raise a
+  descriptive ``ValueError``.
+  """
+  if config is None or getattr(config, "use_index_share", None) is not True:
+    return None
+  str_key = str(key)
+  m = re.match(r"^model\.layers\.(\d+)\.(self_attn\.indexer\..+)$", str_key)
+  if not m:
+    return None
+  layer_idx = int(m.group(1))
+  rest = m.group(2)
+  pattern = getattr(config, "index_share_pattern", None)
+  num_layers = getattr(config, "num_decoder_layers", None)
+  if not isinstance(num_layers, int) or isinstance(num_layers, bool):
+    num_layers = getattr(config, "base_num_decoder_layers", None)
+  if not isinstance(pattern, str) or not pattern or not isinstance(num_layers, int) or isinstance(num_layers, bool):
+    raise ValueError(
+        f"Cannot resolve shared indexer weight '{str_key}': valid index_share_pattern and num_decoder_layers are required."
+    )
+  pattern_tuple = index_share_utils.parse_index_share_pattern(pattern, num_layers)
+  if not index_share_utils.is_shared_layer(layer_idx, pattern_tuple):
+    return None
+  donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern_tuple)
+  donor_key = f"model.layers.{donor_idx}.{rest}"
+  try:
+    return getter_fn(donor_key)
+  except (KeyError, ValueError, FileNotFoundError) as exc:
+    raise ValueError(
+        f"Missing donor indexer weight '{donor_key}' required by shared layer {layer_idx} (key '{str_key}')."
+    ) from exc
 
 
 class LazyHFLoader:
@@ -1120,6 +1142,21 @@ def main(
         return _convert_tensor_to_numpy(v, dtype or save_dtype)
 
       tensor_getter = _eager_getter
+
+    if getattr(config, "use_index_share", None) is True:
+      orig_tensor_getter = tensor_getter
+
+      def _index_share_tensor_getter(key, dtype=None):
+        getter_with_dtype = orig_tensor_getter if dtype is None else partial(orig_tensor_getter, dtype=dtype)
+        try:
+          return getter_with_dtype(key)
+        except (ValueError, KeyError) as e:
+          donor_tensor = _resolve_shared_indexer_tensor(key, getter_with_dtype, config=config)
+          if donor_tensor is not None:
+            return donor_tensor
+          raise e
+
+      tensor_getter = _index_share_tensor_getter
 
     if is_merge_mode:
       tensor_getter = _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revision)
