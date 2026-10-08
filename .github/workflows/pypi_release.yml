@@ -33,6 +33,10 @@ on:
         required: false
         default: true
         type: boolean
+    secrets:
+      READTHEDOCS_TOKEN:
+        description: 'Read the Docs API token to trigger documentation builds.'
+        required: false
   workflow_dispatch:
     inputs:
       run_id:
@@ -67,6 +71,9 @@ jobs:
   build_maxtext_package:
     needs: release_approval
     uses: ./.github/workflows/build_package.yml
+    if: |
+      always() &&
+      (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     with:
       device_type: tpu
       device_name: v4-8
@@ -97,6 +104,9 @@ jobs:
     name: Get latest MaxText PyPI version
     needs: publish_maxtext_to_pypi
     runs-on: ubuntu-latest
+    if: |
+      always() &&
+      (needs.publish_maxtext_to_pypi.result == 'success' || needs.publish_maxtext_to_pypi.result == 'skipped')
     outputs:
       latest_pypi_version: ${{ steps.get_version.outputs.version }}
     steps:
@@ -112,10 +122,109 @@ jobs:
           echo "Latest MaxText version on PyPI: $latest_version"
           echo "version=$latest_version" >> "$GITHUB_OUTPUT"
 
+  publish_docs:
+    name: Publish MaxText Documentation
+    needs: [get_latest_maxtext_pypi_version]
+    runs-on: ubuntu-latest
+    if: always() && needs.get_latest_maxtext_pypi_version.result == 'success'
+    timeout-minutes: 15
+    steps:
+      - name: Trigger Read the Docs build
+        shell: bash
+        env:
+          READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}
+          PYPI_VERSION: ${{ needs.get_latest_maxtext_pypi_version.outputs.latest_pypi_version }}
+        run: |
+          if [ -z "$READTHEDOCS_TOKEN" ]; then
+            echo "Error: READTHEDOCS_TOKEN secret is not set."
+            exit 1
+          fi
+
+          RTD_PROJECT="maxtext"
+          RTD_VERSION="maxtext-v${PYPI_VERSION}"
+          API_BASE="https://app.readthedocs.org/api/v3/projects/${RTD_PROJECT}"
+
+          # Sync the latest version on Read the Docs database to ensure the new version is recognized.
+          echo "Syncing versions on Read the Docs..."
+          curl -f -sS -X POST \
+            -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+            "${API_BASE}/sync-versions/"
+          for i in {1..12}; do
+            STATUS=$(curl -sS -o /dev/null -w "%{http_code}" \
+              -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+              "${API_BASE}/versions/${RTD_VERSION}/")
+            if [ "$STATUS" = "200" ]; then
+              break
+            fi
+            echo "Waiting for version ${RTD_VERSION} to appear in Read the Docs (attempt ${i}/12)..."
+            sleep 5
+          done
+
+          IS_ACTIVE=$(curl -f -sS \
+            -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+            "${API_BASE}/versions/${RTD_VERSION}/" | \
+            python3 -c "import sys, json; print(json.load(sys.stdin)['active'])")
+
+          BUILD_ID=""
+          if [ "$IS_ACTIVE" != "True" ]; then
+            echo "Activating version ${RTD_VERSION} on Read the Docs..."
+            curl -f -sS -X PATCH \
+              -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d '{"active": true, "hidden": false}' \
+              "${API_BASE}/versions/${RTD_VERSION}/"
+            sleep 5
+            BUILD_ID=$(curl -f -sS \
+              -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+              "${API_BASE}/versions/${RTD_VERSION}/builds/?running=true&limit=1" | \
+              python3 -c "import sys, json; results = json.load(sys.stdin).get('results', []); print(results[0]['id'] if results else '')")
+          fi
+
+          if [ -z "$BUILD_ID" ]; then
+            echo "Triggering Read the Docs build for ${RTD_VERSION}..."
+            BUILD_RESPONSE=$(curl -f -sS -X POST \
+              -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+              "${API_BASE}/versions/${RTD_VERSION}/builds/")
+            BUILD_ID=$(echo "$BUILD_RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin)['build']['id'])")
+          fi
+
+          echo "Waiting for Read the Docs build ${BUILD_ID} to finish..."
+          while true; do
+            BUILD_STATUS=$(curl -f -sS \
+              -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+              "${API_BASE}/builds/${BUILD_ID}/")
+            STATE=$(echo "$BUILD_STATUS" | python3 -c "import sys, json; print(json.load(sys.stdin)['state']['code'])")
+            SUCCESS=$(echo "$BUILD_STATUS" | python3 -c "import sys, json; print(json.load(sys.stdin)['success'])")
+
+            echo "Build ${BUILD_ID} state: ${STATE} (success: ${SUCCESS})"
+            if [ "$STATE" = "finished" ]; then
+              if [ "$SUCCESS" = "True" ]; then
+                echo "Read the Docs build ${BUILD_ID} succeeded."
+                break
+              else
+                echo "Error: Read the Docs build ${BUILD_ID} failed."
+                exit 1
+              fi
+            elif [ "$STATE" = "cancelled" ]; then
+              echo "Error: Read the Docs build ${BUILD_ID} was cancelled."
+              exit 1
+            fi
+            sleep 15
+          done
+
+          echo "Setting ${RTD_VERSION} as the default version on Read the Docs..."
+          curl -f -sS -X PATCH \
+            -H "Authorization: Token ${READTHEDOCS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"default_version\": \"${RTD_VERSION}\"}" \
+            "${API_BASE}/"
+          echo "Successfully published and set ${RTD_VERSION} as default on Read the Docs."
+
   promote_docker_images:
     name: Promote ${{ matrix.name }} Docker Image
     needs: [get_latest_maxtext_pypi_version]
     runs-on: linux-x86-n2-16-buildkit
+    if: always() && needs.get_latest_maxtext_pypi_version.result == 'success'
     container: google/cloud-sdk:524.0.0
     strategy:
       fail-fast: false
