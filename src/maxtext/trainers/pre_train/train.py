@@ -1364,8 +1364,12 @@ def train_loop(config, recorder, state=None):
         warmup_list += [
             ("train", "train", p_train_step),
             ("train_first_phase", "train", p_train_step_first_phase),
-            ("train_dropless", "train", p_train_step_dropless),
         ]
+        if config.warmup_skip_train_dropless:
+          if p_train_step_dropless is not None:
+            max_logging.log("warmup_programs_in_init: skipping train_dropless (warmup_skip_train_dropless=True)")
+        else:
+          warmup_list.append(("train_dropless", "train", p_train_step_dropless))
       if precompiled_eval:
         warmup_list += [("eval", "eval", p_eval_step), ("eval_dropless", "eval", p_eval_step_dropless)]
       # Same shardings as the loop's batches: the loader's device_put sharding for train, the eval rules for eval.

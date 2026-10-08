@@ -281,6 +281,7 @@ retry_dropless_first_steps: 0 # with moe_dropless_fallback=step, run steps with 
 first_phase_ragged_buffer_factor: 0.0 # with moe_dropless_fallback=step and retry_dropless_first_steps=N, the first N steps use this ragged buffer factor (drops replay dropless). 0 = off.
 log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the min ragged_buffer_factor avoiding drops (REQUIRED_RBF).
 warmup_programs_in_init: false # before init_stop/run_start, run each precompiled train/eval program once on a synthetic batch (state unchanged), then a cross-host barrier.
+warmup_skip_train_dropless: false # requires warmup_programs_in_init=true; do not warm the train_dropless program (its warmup holds a second copy of the train state in HBM and can OOM). Use only when that warmup OOMs; the first dropless replay then pays the program's first load.
 log_step_diagnostics: false # append grad/param norms, max |grad|, routed-bias checksum, nonzero bias updates and the overflow flag to every training step log line
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.

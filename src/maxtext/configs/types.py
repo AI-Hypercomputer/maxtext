@@ -1094,6 +1094,15 @@ class MoEGeneral(BaseModel):
           "precompiled (compiled_trainstep_file or AutoPGLE)."
       ),
   )
+  warmup_skip_train_dropless: bool = Field(
+      False,
+      description=(
+          "Requires warmup_programs_in_init=True. Skips the train_dropless program in that warmup (other programs are "
+          "still warmed). Its warmup runs on a copy of the donated train state, so HBM holds two state copies plus "
+          "the dropless program reservation, which can OOM. Use only when that warmup OOMs: skipping moves the "
+          "dropless program's first load and execution cost into the first dropless replay, if any."
+      ),
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -5353,6 +5362,8 @@ class MaxTextConfig(
     self.validate_mllog()
     self.validate_splash_diag_skip()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
+    if self.warmup_skip_train_dropless and not self.warmup_programs_in_init:
+      raise ValueError("warmup_skip_train_dropless=True requires warmup_programs_in_init=True.")
 
     if self.enable_streaming_diloco:
       if not self.scan_layers:
