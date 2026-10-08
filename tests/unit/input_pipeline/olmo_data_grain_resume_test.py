@@ -42,6 +42,7 @@ from maxtext.input_pipeline.olmo_data_grain import (
     OlmoIndexSampler,
     make_olmo_grain_data_loader,
 )
+from maxtext.input_pipeline.olmo_grain_data_processing import _detect_resumed_step
 
 
 def _write_raw_uint32(tmpdir: str, name: str, values: np.ndarray) -> str:
@@ -190,6 +191,22 @@ class LoaderResumeViaInitialStepTest(unittest.TestCase):
       for i, (a, b) in enumerate(zip(ref_batches[10:], res_batches)):
         _assert_batch_equal(a, b, msg=f"epoch-cross batch {i}")
 
+  def test_detect_resumed_step_accounts_for_zero_indexed_checkpoint_dirs(self):
+    """MaxText saves checkpoint directory S after completing step S (S + 1 steps total)."""
+    class _Cfg:
+      enable_checkpointing = True
+      checkpoint_dir = ""
+
+    with tempfile.TemporaryDirectory() as d:
+      cfg = _Cfg()
+      cfg.checkpoint_dir = d
+      self.assertEqual(_detect_resumed_step(cfg), 0)
+      os.makedirs(os.path.join(d, "0"))
+      self.assertEqual(_detect_resumed_step(cfg), 1)
+      os.makedirs(os.path.join(d, "2"))
+      self.assertEqual(_detect_resumed_step(cfg), 3)
+
 
 if __name__ == "__main__":
-  unittest.main()
+  from absl.testing import absltest
+  absltest.main()

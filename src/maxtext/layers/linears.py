@@ -216,6 +216,183 @@ def _compute_dot_general_nnx(
   )
 
 
+def _ep_axes_from_spec_entry(entry) -> tuple[str, ...]:
+  if entry is None or entry == PartitionSpec.UNCONSTRAINED:
+    return ()
+  if isinstance(entry, str):
+    return (entry,)
+  return tuple(a for a in entry if a is not None)
+
+
+def dot_general_with_gathered_kernel(
+    inputs: Array,
+    kernel: Array,
+    norm_axis: tuple[int, ...],
+    contract_ind: tuple[int, ...],
+    matmul_precision: str,
+    mesh: Mesh,
+    kernel_axes: tuple[None | str, ...],
+    shard_mode: ShardMode = ShardMode.AUTO,
+    out_sharding: NamedSharding | None = None,
+    save_gathered_kernel: bool = True,
+    out_checkpoint_name: str | None = None,
+) -> Array:
+  """Contracts `inputs` and `kernel` with `gathered_weights` residual and 2-stage DP/EP bwd reduction.
+
+  When `DP > 1` (`mesh.shape['data'] > 1`) and `EP > 1` (`mesh.shape['expert'] > 1`) and `kernel`
+  is sharded across `'expert'`, standard GSPMD emits a single combined `all-reduce` over
+  `('data', 'expert')` (`DP * EP` chips) followed by a `dynamic-slice` into `EP` shards. Because
+  `group_size (DP * EP) != num_shards (EP)`, XLA's `TpuAllReduceScatterFusion` rejects the
+  `reduce-scatter` fusion and falls back to a full-matrix `all-reduce` across all `DP * EP` chips.
+
+  This function decomposes the weight-gradient reduction into two 2D stages inside `shard_map`:
+    1. A 2D `psum` + `dynamic_slice_in_dim` over the `'expert'` axes (`EP` chips, `group_size == num_shards == EP`),
+       which `TpuAllReduceScatterFusion` fuses into a 2D `%scatter_custom_fusion` (`reduce-scatter`).
+    2. A 2D `psum` (`all-reduce`) over `'data'` (`DP` chips) on the `1 / EP`-sized weight shard.
+  """
+  if out_sharding is not None:
+    out_ndim = (inputs.ndim - len(norm_axis)) + (kernel.ndim - len(contract_ind))
+    out_sharding = truncate_out_sharding(out_sharding, out_ndim)
+  prec = lax.Precision(matmul_precision)
+
+  dp_size = mesh.shape.get("data", 1)
+  ep_size = mesh.shape.get("expert", 1)
+  n_in = len(norm_axis)
+  use_two_stage = False
+  shard_on_in = False
+  ep_axes: tuple[str, ...] = ()
+  ep_total = 1
+  kernel_sharding: NamedSharding | None = None
+
+  if (
+      ep_size > 1
+      and kernel_axes
+      and inputs.ndim > n_in
+      and norm_axis == tuple(range(inputs.ndim - n_in, inputs.ndim))
+      and contract_ind == tuple(range(n_in))
+  ):
+    kernel_sharding = get_physical_spec_without_axes(PartitionSpec(*kernel_axes), mesh, ())
+    k_pspec = tuple(kernel_sharding.spec) + (None,) * (kernel.ndim - len(kernel_sharding.spec))
+    in_axes = _ep_axes_from_spec_entry(k_pspec[0])
+    out_axes = _ep_axes_from_spec_entry(k_pspec[-1])
+    if "expert" in in_axes and "data" not in in_axes and all(s is None for s in k_pspec[1:]):
+      ep_axes = in_axes
+      shard_on_in = True
+    elif "expert" in out_axes and "data" not in out_axes and all(s is None for s in k_pspec[:-1]):
+      ep_axes = out_axes
+      shard_on_in = False
+    if ep_axes and all(mesh.shape[a] == 1 for a in mesh.axis_names if a != "data" and a not in ep_axes):
+      ep_total = int(np.prod([mesh.shape[a] for a in ep_axes]))
+      d_in = int(np.prod(kernel.shape[:n_in]))
+      d_out = int(np.prod(kernel.shape[n_in:]))
+      sharded_dim = d_in if shard_on_in else d_out
+      d_other = d_out if shard_on_in else d_in
+      if (
+          dp_size >= 8
+          and ep_total > 1
+          and inputs.shape[0] % (dp_size * ep_total) == 0
+          and sharded_dim % ep_total == 0
+          and d_in >= ep_total
+          and d_out >= ep_total
+          and (shard_on_in or (d_in == 1792 and d_out == 768))
+      ):
+        use_two_stage = True
+
+  if not use_two_stage or kernel_sharding is None:
+    if save_gathered_kernel:
+      kernel = lax.with_sharding_constraint(kernel, NamedSharding(mesh, PartitionSpec()))
+      kernel = checkpoint_name(kernel, "gathered_weights")
+    y = lax.dot_general(
+        inputs, kernel, ((norm_axis, contract_ind), ((), ())), precision=prec, out_sharding=out_sharding
+    )
+    if out_checkpoint_name is not None:
+      y = checkpoint_name(y, out_checkpoint_name)
+    return y
+
+  kernel_sharded = maybe_shard_with_name(kernel, kernel_sharding, shard_mode=shard_mode)
+  kernel_gathered = lax.with_sharding_constraint(kernel_sharded, NamedSharding(mesh, PartitionSpec()))
+  if save_gathered_kernel:
+    kernel_gathered = checkpoint_name(kernel_gathered, "gathered_weights")
+
+  ep_axis_arg = ep_axes[0] if len(ep_axes) == 1 else ep_axes
+  act_spec = PartitionSpec(("data", *ep_axes) if dp_size > 1 else ep_axis_arg, *([None] * (inputs.ndim - 1)))
+  dk_2d_spec = PartitionSpec(ep_axis_arg, None) if shard_on_in else PartitionSpec(None, ep_axis_arg)
+  d_in = int(np.prod(kernel.shape[:n_in]))
+  d_out = int(np.prod(kernel.shape[n_in:]))
+  k_shape = kernel.shape
+
+  @jax.custom_vjp
+  def _attach_2stage_dk(y_val, x, k_sharded):
+    del x, k_sharded
+    return y_val
+
+  def _fwd(y_val, x, k_sharded):
+    return y_val, (x, k_sharded)
+
+  def _bwd(residuals, dy):
+    x, _ = residuals
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(act_spec, act_spec),
+        out_specs=dk_2d_spec,
+        check_vma=False,
+    )
+    def _dk_fn(x_loc, dy_loc):
+      x_2d = x_loc.reshape((-1, d_in))
+      dy_2d = dy_loc.reshape((-1, d_out))
+      if shard_on_in:
+        dk_loc = lax.dot_general(x_2d, dy_2d, (((0,), (0,)), ((), ())), precision=prec)
+        shard_rows, d_other = d_in // ep_total, d_out
+      else:
+        # Contract to [d_out, d_in] so the scattered dimension is major dim 0.
+        dk_loc = lax.dot_general(dy_2d, x_2d, (((0,), (0,)), ((), ())), precision=prec)
+        shard_rows, d_other = d_out // ep_total, d_in
+
+      pad_rows = ((shard_rows + 7) // 8) * 8
+      if pad_rows != shard_rows:
+        dk_loc = jnp.pad(
+            dk_loc.reshape((ep_total, shard_rows, d_other)),
+            ((0, 0), (0, pad_rows - shard_rows), (0, 0)),
+        ).reshape((ep_total * pad_rows, d_other))
+
+      def _reduce_chunk(mat):
+        sh = lax.psum_scatter(mat, ep_axis_arg, scatter_dimension=0, tiled=True)
+        if dp_size > 1:
+          sh = lax.psum(sh, "data")
+        if pad_rows != shard_rows:
+          sh = lax.optimization_barrier(sh)[:shard_rows, :]
+        return sh
+
+      split_col = (d_other // 256) * 256
+      if d_other > 256 and d_other != split_col:
+        s1 = _reduce_chunk(dk_loc[:, :split_col])
+        s2 = _reduce_chunk(dk_loc[:, split_col:])
+        dk_shard = jnp.concatenate([s1, s2], axis=1)
+      else:
+        dk_shard = _reduce_chunk(dk_loc)
+      if not shard_on_in:
+        dk_shard = dk_shard.T
+      return dk_shard
+
+    dk_2d = _dk_fn(x, dy)
+    dk = lax.with_sharding_constraint(dk_2d.reshape(k_shape), kernel_sharding)
+    return dy, None, dk
+
+  _attach_2stage_dk.defvjp(_fwd, _bwd)
+  y = lax.dot_general(
+      inputs,
+      lax.stop_gradient(kernel_gathered),
+      ((norm_axis, contract_ind), ((), ())),
+      precision=prec,
+      out_sharding=out_sharding,
+  )
+  if out_checkpoint_name is not None:
+    y = checkpoint_name(y, out_checkpoint_name)
+  return _attach_2stage_dk(y, inputs, kernel_sharded)
+
+
 class DenseGeneral(nnx.Module):
   """A linear transformation with flexible axes."""
 
@@ -313,6 +490,10 @@ class DenseGeneral(nnx.Module):
     self.block_size = block_size
     self.weight_quant = weight_quant
     self.weight_grad_in_kernel_order = weight_grad_in_kernel_order
+
+    # Set by a model (e.g. OLMoE3 with gathered_weights=device) to keep the all-gathered kernel as a named
+    # residual across a custom remat boundary, so the bwd reuses it instead of all-gathering again.
+    self.save_gathered_kernel = False
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -513,7 +694,16 @@ class DenseGeneral(nnx.Module):
       # _compute_dot_general_nnx, so that the all-gather moves 8-bit values.
       is_fp8_weight = kernel_scale is not None or is_fp8_dtype(getattr(kernel, "dtype", None))
       if not is_fp8_weight:
+        raw_dtype = getattr(kernel, "dtype", None)
         kernel = jnp.asarray(kernel, self.dtype)
+        if raw_dtype is not None and raw_dtype != self.dtype and self.kernel_axes and self.mesh is not None:
+          kernel = maybe_shard_with_logical(
+              kernel,
+              self.kernel_axes,
+              self.mesh,
+              self.shard_mode,
+              debug_sharding=self.debug_sharding,
+          )
 
     if slice_bounds is not None:
       if self.quant is not None:
@@ -533,36 +723,59 @@ class DenseGeneral(nnx.Module):
       out_sharding = None
 
     contract_ind = tuple(range(0, len(self.axis)))
-    native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
-    quant_dot_general = self.quant_dot_general if slice_bounds is None else None
-    # The auto-axes region only buys anything where XLA refuses to fold the
-    # transpose away, and it has to own the whole dot to do it -- so it is off
-    # under auto sharding and under any quantized path. `self.quant` only covers
-    # AQT; weight-only fp8 leaves it None and is identified by the scale instead.
-    weight_grad_in_kernel_order = (
-        self.weight_grad_in_kernel_order
-        and self.shard_mode == ShardMode.EXPLICIT
+    if (
+        self.save_gathered_kernel
+        and self.mesh is not None
+        and not _initializing
         and self.quant is None
-        and quant_dot_general is None
         and kernel_scale is None
-        and not is_fp8_dtype(getattr(kernel, "dtype", None))
-    )
-    output = _compute_dot_general_nnx(
-        inputs,
-        kernel,
-        norm_axis,
-        contract_ind,
-        self.matmul_precision,
-        quant_dot_general,
-        _initializing,
-        out_sharding,
-        kernel_scale=kernel_scale,
-        compute_dtype=self.dtype,
-        native_fp8_compute=native_fp8_compute,
-        scale_block_size=self.block_size,
-        act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
-        weight_grad_in_kernel_order=weight_grad_in_kernel_order,
-    )
+        and slice_bounds is None
+    ):
+      output = dot_general_with_gathered_kernel(
+          inputs,
+          kernel,
+          norm_axis,
+          contract_ind,
+          self.matmul_precision,
+          self.mesh,
+          self.kernel_axes,
+          self.shard_mode,
+          out_sharding,
+      )
+    else:
+      if self.save_gathered_kernel and self.mesh is not None and not _initializing:
+        kernel = jax.lax.with_sharding_constraint(kernel, NamedSharding(self.mesh, PartitionSpec()))
+        kernel = checkpoint_name(kernel, "gathered_weights")
+      native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+      quant_dot_general = self.quant_dot_general if slice_bounds is None else None
+      # The auto-axes region only buys anything where XLA refuses to fold the
+      # transpose away, and it has to own the whole dot to do it -- so it is off
+      # under auto sharding and under any quantized path. `self.quant` only covers
+      # AQT; weight-only fp8 leaves it None and is identified by the scale instead.
+      weight_grad_in_kernel_order = (
+          self.weight_grad_in_kernel_order
+          and self.shard_mode == ShardMode.EXPLICIT
+          and self.quant is None
+          and quant_dot_general is None
+          and kernel_scale is None
+          and not is_fp8_dtype(getattr(kernel, "dtype", None))
+      )
+      output = _compute_dot_general_nnx(
+          inputs,
+          kernel,
+          norm_axis,
+          contract_ind,
+          self.matmul_precision,
+          quant_dot_general,
+          _initializing,
+          out_sharding,
+          kernel_scale=kernel_scale,
+          compute_dtype=self.dtype,
+          native_fp8_compute=native_fp8_compute,
+          scale_block_size=self.block_size,
+          act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
+          weight_grad_in_kernel_order=weight_grad_in_kernel_order,
+      )
 
     if self.bias is not None:
       bias = jnp.asarray(self.bias[...], self.dtype)
@@ -762,6 +975,7 @@ class MlpBlock(nnx.Module):
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
+        DecoderBlockType.OLMOE3,
     ):
       return functools.partial(normalizations.RMSNorm, num_features=num_features)
     elif self.config.decoder_block == DecoderBlockType.GPT3:
