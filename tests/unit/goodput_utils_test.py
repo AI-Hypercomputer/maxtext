@@ -14,16 +14,26 @@
 
 """Tests for goodput_utils.py"""
 
+import os
+import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 import pytest
 
-goodput = pytest.importorskip("ml_goodput_measurement.goodput")
-goodput_elastic = pytest.importorskip("ml_goodput_measurement.goodput_elastic")
-monitoring = pytest.importorskip("ml_goodput_measurement.monitoring")
-monitoring_elastic = pytest.importorskip("ml_goodput_measurement.monitoring_elastic")
+ml_goodput_measurement = pytest.importorskip("ml_goodput_measurement")
+goodput = ml_goodput_measurement.goodput
+goodput_elastic = ml_goodput_measurement.goodput_elastic
+monitoring = ml_goodput_measurement.monitoring
+monitoring_elastic = ml_goodput_measurement.monitoring_elastic
+checkpoint_badput_calculator = ml_goodput_measurement.checkpoint_badput_calculator
+
+
+import jax
+import jax.numpy as jnp
+from maxtext.common import checkpointing
 
 from maxtext.configs import pyconfig
 from maxtext.common.goodput import (
@@ -436,6 +446,131 @@ class GoodputUtilsTest(unittest.TestCase):
     self.assertEqual(cfg.run_name, "shared-run")
     self.assertEqual(cfg.goodput_job_name, "llama3-pre-shared-run")
     self.assertEqual(get_goodput_job_name(cfg), "llama3-pre-shared-run")
+
+
+class _RecordingLogger:
+  """Minimal Orbax `AbstractLogger` that records every logged entry."""
+
+  def __init__(self):
+    self.entries = []
+
+  def log_entry(self, entry):
+    self.entries.append(entry)
+
+
+def _entries_of_type(logger, event_type):
+  return [e for e in logger.entries if e.get("event_type") == event_type]
+
+
+class CheckpointGoodputLoggerTest(unittest.TestCase):
+  """Checkpoint step statistics must reach the Goodput logger (b/568044767).
+
+  With `enable_checkpoint_cloud_logger=true`, Orbax save/restore step statistics
+  feed Goodput's checkpoint save/restore badput. The Orbax v1 migration silently
+  dropped them, so these tests drive a real on-disk save -> restore through
+  create_orbax_checkpoint_manager + load_state_if_possible.
+  """
+
+  def setUp(self):
+    super().setUp()
+    self._dir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, self._dir, ignore_errors=True)
+    self.state = {"w": jnp.arange(8, dtype=jnp.float32)}
+    self.abstract_state = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), self.state)
+
+  def _manager(self, logger, use_async=False):
+    """Creates an Orbax v1 Checkpointer in the test dir with `logger` attached."""
+    return checkpointing.create_orbax_checkpoint_manager(
+        os.path.join(self._dir, "ckpt"),
+        enable_checkpointing=True,
+        use_async=use_async,
+        save_interval_steps=1,
+        orbax_logger=logger,
+    )
+
+  def _restore(self, manager):
+    """Restores the latest step through load_state_if_possible."""
+    restored, _ = checkpointing.load_state_if_possible(
+        manager,
+        data_iterator=None,
+        load_parameters_from_path="",
+        load_full_state_from_path="",
+        checkpoint_storage_concurrent_gb=8,
+        abstract_unboxed_pre_state=self.abstract_state,
+        dataset_type="tfds",
+    )
+    return restored
+
+  def _save_and_restore(self, logger, use_async=False, step=0):
+    """Saves `self.state` at `step`, then restores it with a fresh manager like a resumed run."""
+    manager = self._manager(logger, use_async=use_async)
+    self.assertTrue(checkpointing.save_checkpoint(manager, step, self.state))
+    checkpointing.wait_until_finished(manager)
+    return self._restore(self._manager(logger, use_async=use_async))
+
+  def _assert_step_statistics_emitted(self, use_async):
+    """Asserts one save and one restore entry with positive durations reach the logger."""
+    logger = _RecordingLogger()
+
+    restored = self._save_and_restore(logger, use_async=use_async, step=3)
+
+    self.assertTrue(jnp.array_equal(restored["items"]["w"], self.state["w"]))
+    saves = _entries_of_type(logger, "save")
+    restores = _entries_of_type(logger, "restore")
+    self.assertEqual(len(saves), 1, f"expected one save entry, got {logger.entries}")
+    self.assertEqual(len(restores), 1, f"expected one restore entry, got {logger.entries}")
+    self.assertEqual(saves[0]["step"], 3)
+    self.assertEqual(restores[0]["step"], 3)
+    self.assertGreater(saves[0]["checkpoint_manager_blocking_duration_secs"], 0)
+    self.assertGreater(restores[0]["checkpoint_manager_duration_secs"], 0)
+    self.assertGreater(restores[0]["checkpointer_duration_secs"], 0)
+
+  def test_sync_save_and_restore_emit_step_statistics(self):
+    self._assert_step_statistics_emitted(use_async=False)
+
+  def test_async_save_and_restore_emit_step_statistics(self):
+    self._assert_step_statistics_emitted(use_async=True)
+
+  def test_entries_produce_goodput_checkpoint_badput(self):
+    logger = _RecordingLogger()
+    self._save_and_restore(logger)
+
+    # Same wiring as GoodputCalculator: entries read from the Goodput log are
+    # handed to the checkpoint badput calculator.
+    calc = checkpoint_badput_calculator.CheckpointBadputCalculator(
+        checkpoint_badput_calculator.CheckpointLoggerOptions(use_goodput_logger=True)
+    )
+    calc.entries = logger.entries
+    save_stats = calc.calculate_save_operation_checkpoint_manager_blocking_time()
+    restore_stats = calc.calculate_restore_operation_checkpoint_manager_blocking_time()
+
+    self.assertGreater(save_stats.total_checkpoint_manager_blocking_time, 0)
+    self.assertGreater(restore_stats.total_checkpoint_manager_time, 0)
+
+  def test_no_logger_emits_nothing_and_still_restores(self):
+    manager = self._manager(None)
+    self.assertIsNone(getattr(manager, "orbax_logger", None))
+    self.assertTrue(checkpointing.save_checkpoint(manager, 0, self.state))
+    checkpointing.wait_until_finished(manager)
+
+    restored = self._restore(manager)
+
+    self.assertTrue(jnp.array_equal(restored["items"]["w"], self.state["w"]))
+
+  def test_setup_checkpoint_logger_flag_off_returns_none(self):
+    config = SimpleNamespace(enable_checkpoint_cloud_logger=False, run_name="run")
+    self.assertIsNone(checkpointing.setup_checkpoint_logger(config))
+
+  def test_setup_checkpoint_logger_flag_on_uses_goodput_log(self):
+    config = SimpleNamespace(enable_checkpoint_cloud_logger=True, run_name="run")
+    with (
+        mock.patch.object(checkpointing.ocp_logging, "CloudLogger", create=True) as cloud_logger,
+        mock.patch.object(checkpointing.ocp_logging, "CloudLoggerOptions", create=True) as options,
+    ):
+      logger = checkpointing.setup_checkpoint_logger(config)
+
+    self.assertIs(logger, cloud_logger.return_value)
+    options.assert_called_once_with(job_name="run", logger_name="goodput_run")
 
 
 if __name__ == "__main__":
