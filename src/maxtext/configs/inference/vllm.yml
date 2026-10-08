@@ -39,25 +39,25 @@ logical_axis_rules: [
                       # Vocab Activations
                       ['activation_embed_and_logits_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_embed_and_logits_batch_sequence', ['data', 'attn_dp', 'attn_dp_expert']],
-                      ['activation_vocab', ['model', 'expert']],
+                      ['activation_vocab', ['model', 'expert', 'dcp']],
                       # Vocab Weights
-                      ['vocab', ['model', 'expert']],
+                      ['vocab', ['model', 'expert', 'dcp']],
                       ['embed_vocab', []],
                       # ==========================================
                       # Attention
                       # ==========================================
                       # Attention Activations
                       ['activation_batch_attn', ['data', 'attn_dp', 'attn_dp_expert']],
-                      ['activation_heads', ['model', 'expert']],
+                      ['activation_heads', ['model', 'expert', 'dcp']],
                       ['activation_kv_heads', ['model', 'expert']],
                       ['activation_embed_attn', []],
                       ['activation_kv', []],
                       ['activation_kv_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_kv_head_dim', []],
                       # Attention Weights
-                      ['heads', ['model', 'expert']],
-                      ['gdn_head', ['model', 'expert']],
-                      ['q_heads', ['model', 'expert']],
+                      ['heads', ['model', 'expert', 'dcp']],
+                      ['gdn_head', ['model', 'expert', 'dcp']],
+                      ['q_heads', ['model', 'expert', 'dcp']],
                       ['kv_heads', ['model', 'expert']],
                       ['qkv', []],
                       ['kv', []],
@@ -73,21 +73,22 @@ logical_axis_rules: [
                       ['activation_batch_moe', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_embed_moe', ['attn_dp', 'model']],
                       ['activation_mlp_moe', ['attn_dp', 'model']],
-                      ['activation_exp', ['attn_dp_expert', 'expert']],
+                      ['activation_exp', ['attn_dp_expert', 'expert', 'dcp']],
                       # MoE Weights
-                      ['exp', ['attn_dp_expert', 'expert']],
+                      ['exp', ['attn_dp_expert', 'expert', 'dcp']],
                       ['mlp_moe', ['attn_dp', 'model']],
                       ['embed_moe', []],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
                       # Dense Activations
-                      ['activation_mlp', ['attn_dp', 'model', 'expert']],
+                      ['activation_mlp', ['attn_dp', 'model', 'expert', 'dcp']],
+                      ['activation_mlp', ['model', 'expert', 'dcp']],
                       # Note activation batch and length also get used in attention and vocab
                       ['activation_batch', ['data', 'attn_dp', 'attn_dp_expert']],
                       ['activation_embed', []],
                       # General Weights
-                      ['mlp', ['attn_dp', 'model', 'expert']],
+                      ['mlp', ['attn_dp', 'model', 'expert', 'dcp']],
                       ['embed', []],
                       ['embed_attn', []],
                       ['norm', []],
@@ -111,5 +112,5 @@ logical_axis_rules: [
                       ['tokens_per_page', []],
                       ['paged_kv_head_dim_size', []],
                   ]
-data_sharding: [['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert']]
+data_sharding: [['data', 'attn_dp', 'model', 'expert', 'attn_dp_expert', 'dcp']]
 input_data_sharding_logical_axes: ['activation_embed_and_logits_batch']
