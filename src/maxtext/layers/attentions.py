@@ -430,7 +430,7 @@ class Attention(nnx.Module):
         self.init_kv_caches(inputs_kv_shape=inputs_kv_shape)
         if self.model_mode != MODEL_MODE_TRAIN
         and base_kv_cache
-        and config.attention not in ("vllm_rpa", "vllm_batched_rpa")
+        and config.attention not in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx")
         else None
     )
 
@@ -1122,7 +1122,9 @@ class Attention(nnx.Module):
       rpa_metadata: dict[str, Any] | None = None,
   ) -> tuple[Array, list[Array]]:
     """Forward function for vLLM serving with RPA attention."""
-    if self.config.attention == "vllm_batched_rpa":
+    if self.config.attention == "vllm_batched_rpa_long_ctx":
+      os.environ["USE_BATCHED_RPA_LONG_CTX_KERNEL"] = "1"
+    elif self.config.attention == "vllm_batched_rpa":
       os.environ["USE_BATCHED_RPA_KERNEL"] = "1"
     try:
       # pylint: disable=import-outside-toplevel
@@ -1334,7 +1336,7 @@ class Attention(nnx.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and model_mode != MODEL_MODE_TRAIN:
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and model_mode != MODEL_MODE_TRAIN:
       batch, seq_len, num_heads, head_dim = query.shape
       attn_out, updated_kv = self.forward_serve_vllm(
           query, key, value, rpa_kv_cache=kv_cache, rpa_metadata=attention_metadata
