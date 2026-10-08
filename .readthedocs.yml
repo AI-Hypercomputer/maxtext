@@ -9,6 +9,19 @@ build:
   os: ubuntu-22.04
   tools:
     python: "3.12"
+  jobs:
+    pre_build:
+      # Cancel the build cleanly (exit 183) if triggered by a tag whose version is not yet published on PyPI.
+      - |
+        if [ "$READTHEDOCS_VERSION_TYPE" = "tag" ]; then
+          VERSION="${READTHEDOCS_VERSION_NAME#maxtext-v}"
+          VERSION="${VERSION#v}"
+          HTTP_STATUS=$(curl -sS --retry 3 --retry-delay 5 -o /dev/null -w "%{http_code}" "https://pypi.org/pypi/maxtext/${VERSION}/json")
+          if [ "$HTTP_STATUS" != "200" ]; then
+            echo "MaxText version '${VERSION}' (tag '${READTHEDOCS_VERSION_NAME}') is not published on PyPI (HTTP ${HTTP_STATUS}). Cancelling build."
+            exit 183
+          fi
+        fi
 
 # Build documentation in the "docs/" directory with Sphinx
 sphinx:
