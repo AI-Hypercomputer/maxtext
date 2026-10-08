@@ -66,7 +66,7 @@ from maxtext.layers.embeddings import (
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, variable_to_logically_partitioned, default_bias_init
 from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
 from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNorm
-from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import AqtQuantization as Quant, fake_quantize_kv_fp8
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
@@ -1149,6 +1149,12 @@ class Attention(nnx.Module):
       attention_chunk_size = None
 
     q_scale, k_scale, v_scale = None, None, None
+    kv_cache_dtype = getattr(rpa_kv_cache, "dtype", None)
+    if kv_cache_dtype is not None and kv_cache_dtype != self.dtype:
+      k_scale = v_scale = 1.0
+      finfo = jnp.finfo(kv_cache_dtype)
+      key = jnp.clip(key, float(finfo.min), float(finfo.max)).astype(kv_cache_dtype)
+      value = jnp.clip(value, float(finfo.min), float(finfo.max)).astype(kv_cache_dtype)
 
     md = rpa_metadata
 
@@ -1346,6 +1352,9 @@ class Attention(nnx.Module):
       cached_values = [None, None]
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+      elif getattr(self.config, "fp8_kv_fake_quant", False):
+        key = fake_quantize_kv_fp8(key)
+        value = fake_quantize_kv_fp8(value)
       out = self.attention_op(
           query,
           key,

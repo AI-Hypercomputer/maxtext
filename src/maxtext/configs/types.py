@@ -1279,6 +1279,13 @@ class MoEGeneral(BaseModel):
           " on weight sync. Activations stay in dtype."
       ),
   )
+  fp8_kv_fake_quant: bool = Field(
+      False,
+      description=(
+          "Keep attention key/value activations in dtype but round them in the training forward pass to the"
+          " float8_e4m3fn grid a vLLM fp8 KV cache stores them on, with straight-through gradients."
+      ),
+  )
   rollout_fp8_moe: bool = Field(
       False,
       description=(
