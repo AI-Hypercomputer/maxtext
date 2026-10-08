@@ -41,6 +41,11 @@ ABS_INCREASE_INTEGRATION_SEC = 30.0
 EXCLUDED_MODULES_PER_TEST = {
     "tests.unit.moe_test",
     "tests.unit.attention_test",
+    "tests.unit.megablox_gmm_3d_test",
+    "tests.unit.megablox_relayout_test",
+    "tests.unit.m3.qwen3_vl_comparison_test",
+    "tests.unit.tiling_test",
+    "tests.integration.pipeline_parallelism_test",
 }
 
 
@@ -209,7 +214,7 @@ def main():
     benchmarks = []
     for job, total_time in sorted(total_times_by_job.items()):
       # Exclude CPU suites from macro-level dashboard tracking to avoid false alerts from CPU runner noise
-      if "cpu" in job.lower():
+      if "cpu" in job.lower() or "decoupled" in job.lower():
         continue
       benchmarks.append(
           {

@@ -1037,6 +1037,25 @@ class Attention(nnx.Module):
     # position. Only the donor writes the cache; shared layers read it as-is.
     update_kv_cache = not self.share_kv_layer
 
+    sinks = self.sinks.astype(jnp.float32) if self.sinks is not None else None
+    if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
+      from tpu_inference.layers.common.cp_attention import dcp_forward  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+      kv_cache, output = dcp_forward(
+          self.mesh,
+          query,
+          key,
+          value,
+          rpa_kv_cache,
+          md,
+          sm_scale=1.0,
+          attention_chunk_size=attention_chunk_size,
+          q_scale=q_scale,
+          k_scale=k_scale,
+          v_scale=v_scale,
+      )
+      return output, kv_cache
+
     output, kv_cache = rpa_ops(
         self.mesh,
         query,
@@ -1047,7 +1066,7 @@ class Attention(nnx.Module):
         md.block_tables,
         md.query_start_loc,
         md.request_distribution,
-        self.sinks.astype(jnp.float32) if self.sinks is not None else None,
+        sinks,
         1.0,
         attention_chunk_size,
         q_scale,

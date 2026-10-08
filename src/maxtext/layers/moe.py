@@ -973,8 +973,11 @@ class RoutedMoE(nnx.Module):
     else:
       self._tensor_parallelism_name = "tensor"
 
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and self.config.enable_dp_attention:
-      self._expert_parallelism_name = "attn_dp_expert"
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      expert_axes = ["attn_dp_expert", "expert"]
+      if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
+        expert_axes.append("dcp")
+      self._expert_parallelism_name = tuple(expert_axes)
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
