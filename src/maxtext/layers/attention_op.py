@@ -1001,6 +1001,28 @@ class AttentionOp(nnx.Module):
         extra_stack_level=1,
     )
 
+  def _decode_cache_positions(self, segment_positions, decoder_segment_ids, s_len, kv_cache_part):
+    """Absolute query and key positions for a single-token decode step over one KV cache.
+
+    Prefill cache slot i holds position i. The AR cache is written in order from
+    the first decode step, so its newest valid slot holds the query token.
+
+    Returns:
+      (abs_q [batch, 1, 1], abs_k [batch, 1, s_len]), or None when the cache part,
+      the query position or the AR cache segment ids are unknown.
+    """
+    if kv_cache_part is None or segment_positions is None:
+      return None
+    abs_q = segment_positions[:, :, None]
+    slots = jnp.arange(s_len)[None, None, :]
+    if kv_cache_part == "prefill":
+      return abs_q, jnp.broadcast_to(slots, abs_q.shape[:2] + (s_len,))
+    if decoder_segment_ids is None:
+      return None
+    valid = decoder_segment_ids[:, :s_len] == DECODING_ACTIVE_SEQUENCE_INDICATOR
+    newest = jnp.max(jnp.where(valid, jnp.arange(s_len)[None, :], -1), axis=-1)[:, None, None]
+    return abs_q, abs_q - newest + slots
+
   def generate_attention_mask(
       self,
       query,
@@ -1014,6 +1036,7 @@ class AttentionOp(nnx.Module):
       pad_kv_total: int = 0,
       decoder_segment_ids_kv: Optional[Array] = None,
       attention_type: AttentionType | None = None,
+      kv_cache_part: str | None = None,
   ) -> Array | None:
     """Generates a combined attention mask for Transformer models.
 
@@ -1089,6 +1112,10 @@ class AttentionOp(nnx.Module):
         this call. Lets a caller ask for a subset of the usual mask, e.g. a
         kernel that applies causality and the sliding window itself and only
         needs sequence separation. Defaults to `self.attention_type`.
+      kv_cache_part: In single-token decode, which KV cache `key` comes from:
+        "prefill" or "ar". With `segment_positions`, the sliding window is then
+        measured between true query and key positions. None keeps the
+        slot-index approximation.
 
     Returns:
       An `Array` representing the attention mask, with shape
@@ -1183,6 +1210,11 @@ class AttentionOp(nnx.Module):
       )
       if use_segment_positions:
         sliding_mask = sliding_mask[:, None, None, :, :]
+      if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+        decode_positions = self._decode_cache_positions(segment_positions, decoder_segment_ids, kv_seq_len, kv_cache_part)
+        if decode_positions is not None:
+          distance = decode_positions[0] - decode_positions[1]
+          sliding_mask = ((distance >= 0) & (distance < self.sliding_window_size))[:, None, None, :, :]
       output_mask = sliding_mask * output_mask
     elif attention_type == AttentionType.COMPRESSED:
       # DeepSeek-V4 Compressed Attention decomposes the full KV sequence of length
@@ -1231,6 +1263,11 @@ class AttentionOp(nnx.Module):
         """
         if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
           # --- CASE 1: Single-token Autoregressive Decoding ---
+          decode_positions = self._decode_cache_positions(segment_positions, decoder_segment_ids, s_len, kv_cache_part)
+          if decode_positions is not None:
+            distance = decode_positions[0] - decode_positions[1]
+            in_window = (distance < self.sliding_window_size) if self.sliding_window_size is not None else True
+            return in_window & (distance >= 0)
           # Safely use segment_positions if provided, or fall back to next_pos
           if segment_positions is not None:
             abs_q = segment_positions[:, :, None]
@@ -1601,6 +1638,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
+      kv_cache_part: str | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -1677,6 +1715,7 @@ class AttentionOp(nnx.Module):
           compressed_mask=compressed_mask,
           record_max_logits=record_max_logits,
           decoder_segment_ids_kv=decoder_segment_ids_kv,
+          kv_cache_part=kv_cache_part,
           qk_product_einsum=qk_product_einsum,
           wv_product_einsum=wv_product_einsum,
       )
@@ -2986,6 +3025,7 @@ class AttentionOp(nnx.Module):
       compressed_mask: Optional[Array] = None,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
+      kv_cache_part: str | None = None,
       *,
       qk_product_einsum: Callable[..., Array],
       wv_product_einsum: Callable[..., Array],
@@ -3059,6 +3099,7 @@ class AttentionOp(nnx.Module):
         compressed_mask=compressed_mask,
         segment_positions=segment_positions,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
+        kv_cache_part=kv_cache_part,
     )
 
     if self.config.moba:
@@ -3327,6 +3368,7 @@ class AttentionOp(nnx.Module):
         decoder_segment_ids_kv=decoder_segment_ids_kv,
         pad_kv_total=pad_kv_total,
         compress_ratio=compress_ratio,
+        kv_cache_part="prefill" if model_mode == MODEL_MODE_AUTOREGRESSIVE else None,
     )
 
     if ar_kv_cache is None:
@@ -3352,6 +3394,7 @@ class AttentionOp(nnx.Module):
         bidirectional_mask=bidirectional_mask,
         indexer_mask=indexer_mask_ar,
         compressed_mask=compressed_mask,
+        kv_cache_part="ar",
         qk_product_einsum=self.AqtEinsum_2,
         wv_product_einsum=self.AqtEinsum_3,
     )
