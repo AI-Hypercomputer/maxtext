@@ -4039,6 +4039,9 @@ class RoutedMoE(nnx.Module):
         use_gmm_fused_rs_kernel=tpu_inference_envs.USE_GMM_FUSED_RS_KERNEL,
         onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
         moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
+        ragged_gather_reduce_version=getattr(
+            tpu_inference_envs, "RAGGED_GATHER_REDUCE_VERSION", None
+        ),
         scatter_results=(
             getattr(self, "mesh", None) is not None
             and (
