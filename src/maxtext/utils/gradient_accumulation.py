@@ -80,11 +80,26 @@ def gradient_accumulation_loss_and_grad(
   param_mesh = jax.tree.leaves(params_shardings)[0].mesh
   data_parallel_active = config.shard_mode == ShardMode.EXPLICIT and param_mesh.shape.get("data", 1) > 1
   if data_parallel_active:
-    # reduced/unreduced PartitionSpecs are rejected inside a jax.lax.scan carry: scan
-    # traces its body against an AbstractMesh whose axis types are all Auto, and the
-    # annotations require Explicit axes. Keep plain params_shardings in the carry and
-    # apply the data-parallel all-reduce to the gradients after the scan instead.
     ga_params_shardings = params_shardings
+    grad_shardings = params_shardings
+  elif config.shard_optimizer_over_data and param_mesh.shape.get("data", 1) > 1:
+    def _strip_data_axis(s):
+      if not isinstance(s, NamedSharding):
+        return s
+      new_dims = []
+      changed = False
+      for d in s.spec:
+        if d == "data":
+          new_dims.append(None)
+          changed = True
+        elif isinstance(d, tuple) and "data" in d:
+          rem = tuple(ax for ax in d if ax != "data")
+          new_dims.append(rem[0] if len(rem) == 1 else (rem if rem else None))
+          changed = True
+        else:
+          new_dims.append(d)
+      return NamedSharding(s.mesh, jax.sharding.PartitionSpec(*new_dims)) if changed else s
+    ga_params_shardings = jax.tree.map(_strip_data_axis, params_shardings)
     grad_shardings = params_shardings
   else:
     ga_params_shardings = grad_shardings = params_shardings
@@ -94,14 +109,16 @@ def gradient_accumulation_loss_and_grad(
 
   # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
   # so that all-gather is done once in the lower precision before the gradient accumulation loop
-  if config.shard_optimizer_over_data:
+  if config.shard_optimizer_over_data or getattr(config, "cast_params_to_compute_dtype", False):
 
-    def convert_to_bf16(param):
-      if param.dtype == jnp.float32:
-        return param.astype(jnp.bfloat16)
-      return param
+    def _cast_large_non_gate_to_compute_dtype(path, x):
+      if not hasattr(x, "dtype") or x.dtype != jnp.float32 or x.size < (1 << 22):
+        return x
+      if any(getattr(k, "key", None) == "gate" for k in path):
+        return x
+      return x.astype(getattr(config, "dtype", jnp.bfloat16))
 
-    ga_params = jax.tree_util.tree_map(convert_to_bf16, params)
+    ga_params = jax.tree_util.tree_map_with_path(_cast_large_non_gate_to_compute_dtype, params)
   else:
     ga_params = params
 
@@ -131,6 +148,12 @@ def gradient_accumulation_loss_and_grad(
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
+    if getattr(config, "ga_params_loop_barrier", False):
+      # ga_params passes through the carry unchanged, so XLA may treat work on it (FSDP all-gathers, casts) as
+      # loop-invariant and hoist it out of the loop, keeping its results live across micro-batches. Tying the
+      # params to this micro-batch's data makes them loop-variant. On olmo35-tiny at v4-2048, GA=2, this cut the
+      # compiled temporaries from 49.9 to 44.3 GB.
+      ga_params, data = jax.lax.optimization_barrier((ga_params, data))
     # Scope double-buffering to model scans, not the enclosing gradient
     # accumulation scan. `_xla_loop_unroll_strategy` is only read by XLA:GPU
     # (https://github.com/openxla/xla/pull/43468); enable it with
