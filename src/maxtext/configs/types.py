@@ -2285,6 +2285,13 @@ class OlmoGrainDataset(BaseModel):
       description="Replacement prefix used together with olmo_path_remap_from (e.g. /mnt/disks/.../).",
   )
   olmo_apply_ngram_filter: bool = Field(True, description="Mask repetitive instances per OLMo-core's repetition filter.")
+  olmo_global_indices_path: PathStr = Field(
+      "",
+      description=(
+          "If set, train in OLMo-core's batch order: a headerless uint32 permutation of the index's instances, as"
+          " written by OLMo-core's NumpyFSLDataLoader. Replaces the data_shuffle_seed shuffle for training."
+      ),
+  )
 
 
 class DPO(BaseModel):

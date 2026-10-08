@@ -22,6 +22,7 @@ plus a deterministic global-shuffle sampler. See
 from __future__ import annotations
 
 import hashlib
+import os
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -323,6 +324,107 @@ class OlmoIndexSampler:
     )
 
 
+class OlmoCoreOrderSampler:
+  """Sampler that reproduces OLMo-core's global batches from a precomputed order.
+
+  OLMo-core's ``NumpyFSLDataLoader`` shuffles ``arange(total_instances)`` once
+  per epoch and takes global batch ``k`` as rows ``[k*B, (k+1)*B)`` of that
+  permutation, split across data-parallel ranks with a stride. This sampler
+  reads that permutation from a headerless ``uint32`` file (written by
+  OLMo-core itself, so the order matches by construction rather than by
+  re-implementing its RNG) and assigns host ``h`` of ``H`` the instances
+  ``perm[k*B + h + j*H]`` for ``j`` in ``[0, B/H)``. Every global step
+  therefore trains on exactly OLMo-core's batch ``k``; only the placement of
+  instances across hosts differs, which doesn't change the summed loss.
+
+  ``__getitem__`` takes this host's own record position ``i``, so the Grain
+  DataLoader must not shard on top (``make_olmo_grain_data_loader`` gives it a
+  single shard). The file covers a single epoch. Asking for a step past its
+  last full global batch raises ``IndexError``, which ends Grain's iteration.
+
+  Args:
+    global_indices_path: Headerless ``uint32`` permutation of
+      ``[0, total_instances)``. Read through ``np.memmap``, so only the rows a
+      step needs are touched.
+    total_instances: ``index.total_instances``; the file must hold exactly
+      this many entries.
+    batch_size: Per-host batch size ``b``. The global batch is ``b * shard_count``.
+    shard_index: This data-loading host.
+    shard_count: Number of data-loading hosts.
+    initial_step: Same offset as :class:`OlmoIndexSampler`: per-host records
+      to skip, i.e. ``train_step * batch_size`` on resume.
+  """
+
+  def __init__(
+      self,
+      *,
+      global_indices_path: str,
+      total_instances: int,
+      batch_size: int,
+      shard_index: int = 0,
+      shard_count: int = 1,
+      initial_step: int = 0,
+  ):
+    if shard_count <= 0 or shard_index < 0 or shard_index >= shard_count:
+      raise ValueError(f"Invalid shard config: shard_index={shard_index} of {shard_count}")
+    if batch_size <= 0:
+      raise ValueError(f"batch_size must be positive, got {batch_size}")
+    if initial_step < 0:
+      raise ValueError(f"initial_step must be non-negative, got {initial_step}")
+    n_entries = os.path.getsize(global_indices_path) // np.dtype(np.uint32).itemsize
+    if n_entries != total_instances:
+      raise ValueError(
+          f"{global_indices_path} holds {n_entries} indices but the OLMo index has "
+          f"total_instances={total_instances}. Was it built for a different mix or sequence length?"
+      )
+    self._path = global_indices_path
+    self._total = int(total_instances)
+    self._batch_size = int(batch_size)
+    self._shard_index = int(shard_index)
+    self._shard_count = int(shard_count)
+    self._initial_step = int(initial_step)
+    self._global_batch = self._batch_size * self._shard_count
+    self._num_batches = self._total // self._global_batch
+    self._indices: Optional[np.memmap] = None
+
+  @property
+  def num_global_batches(self) -> int:
+    """Full global batches in the epoch; OLMo-core drops the remainder too."""
+    return self._num_batches
+
+  def _get_indices(self) -> np.memmap:
+    if self._indices is None:
+      self._indices = np.memmap(self._path, dtype=np.uint32, mode="r")
+    return self._indices
+
+  def __getstate__(self):
+    # Reopen the memmap in each forked Grain worker.
+    state = self.__dict__.copy()
+    state["_indices"] = None
+    return state
+
+  def __getitem__(self, index: int) -> grain.RecordMetadata:
+    if index < 0:
+      raise IndexError(f"sampler index must be non-negative, got {index}")
+    absolute = index + self._initial_step
+    step, slot = divmod(absolute, self._batch_size)
+    if step >= self._num_batches:
+      raise IndexError(
+          f"Global batch {step} is past the end of {self._path} "
+          f"({self._num_batches} batches of {self._global_batch}); only one epoch is precomputed."
+      )
+    position = step * self._global_batch + self._shard_index + slot * self._shard_count
+    record_key = int(self._get_indices()[position])
+    return grain.RecordMetadata(index=index, record_key=record_key)
+
+  def __repr__(self) -> str:
+    # Stable across processes and resumes; see OlmoIndexSampler.__repr__.
+    return (
+        f"OlmoCoreOrderSampler(global_indices_path={self._path!r}, total_instances={self._total}, "
+        f"batch_size={self._batch_size}, shard_index={self._shard_index}, shard_count={self._shard_count})"
+    )
+
+
 def _combine_seed_epoch(seed: int, epoch: int) -> int:
   """Stable 64-bit mix of (seed, epoch) for the per-epoch shuffle RNG.
 
@@ -442,6 +544,7 @@ def make_olmo_grain_data_loader(
     grain_worker_count: int = 0,
     grain_worker_buffer_size: int = 1,
     initial_step: int = 0,
+    global_indices_path: str = "",
 ):
   """Build a Grain ``DataLoader`` for OLMo-style fixed-seq-length training.
 
@@ -463,18 +566,37 @@ def make_olmo_grain_data_loader(
       lookup is shifted by ``initial_step``. Set this to ``train_step *
       batch_size`` on resume to pick up the data stream where it left off
       *without* needing Grain's iterator-state checkpointing.
+    global_indices_path: If set, take the order from this OLMo-core global
+      indices file with :class:`OlmoCoreOrderSampler` instead of shuffling
+      with ``seed``.
 
   Returns:
     A ``grain.DataLoader``.
   """
   source = OlmoNpyDataSource(index, path_remap=path_remap)
-  sampler = OlmoIndexSampler(
-      total_instances=index.total_instances,
-      seed=seed,
-      shard_index=shard_index,
-      shard_count=shard_count,
-      initial_step=initial_step,
-  )
+  if global_indices_path:
+    if grain_worker_count > 1:
+      # Each Grain worker batches every worker_count-th record, so a batch would mix records from several
+      # OLMo-core steps.
+      raise ValueError(
+          f"olmo_global_indices_path needs grain_worker_count of 0 or 1 to keep OLMo-core's batches, got {grain_worker_count}."
+      )
+    sampler = OlmoCoreOrderSampler(
+        global_indices_path=global_indices_path,
+        total_instances=index.total_instances,
+        batch_size=batch_size,
+        shard_index=shard_index,
+        shard_count=shard_count,
+        initial_step=initial_step,
+    )
+  else:
+    sampler = OlmoIndexSampler(
+        total_instances=index.total_instances,
+        seed=seed,
+        shard_index=shard_index,
+        shard_count=shard_count,
+        initial_step=initial_step,
+    )
 
   ops: List[Any] = []
   if apply_ngram_filter:
@@ -487,6 +609,10 @@ def make_olmo_grain_data_loader(
   # on the Sampler). Our sampler already does the shard-by-rank slicing, but
   # Grain still requires this object to validate checkpoint compatibility.
   shard_options = grain.sharding.ShardOptions(shard_index=shard_index, shard_count=shard_count, drop_remainder=True)
+  if global_indices_path:
+    # The DataLoader shards too: it asks the sampler for index ``i * shard_count + shard_index`` for this host's
+    # i-th record. OlmoCoreOrderSampler expects i itself, so hand Grain a single shard.
+    shard_options = grain.sharding.ShardOptions(shard_index=0, shard_count=1, drop_remainder=True)
   return grain.DataLoader(
       data_source=source,
       sampler=sampler,

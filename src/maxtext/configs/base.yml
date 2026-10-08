@@ -954,6 +954,7 @@ olmo_index_path: '' # JSON from tools/data_generation/build_olmo_npy_index.py
 olmo_path_remap_from: '' # rewrite index paths starting with this prefix...
 olmo_path_remap_to: ''   # ...to this one (e.g. gs://bucket/ -> /mnt/.../ for gcsfuse).
 olmo_apply_ngram_filter: true # mask instances with repetitive n-grams (OLMo-core filter)
+olmo_global_indices_path: '' # OLMo-core global indices (uint32) to train in its batch order instead of data_shuffle_seed
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
