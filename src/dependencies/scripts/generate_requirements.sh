@@ -137,10 +137,11 @@ if [[ "$BASE_REQUIREMENTS" == *post-train* ]]; then
   git -C vllm checkout "${VLLM_COMMIT}"
 
   echo "=== Adding tpu-inference and vllm requirements to lock file ==="
-  # Exclude tpu-inference (handled separately) and nixl (CUDA-only, not needed for TPU).
+  # Exclude tpu-inference (handled separately), nixl (CUDA-only, not needed for TPU),
+  # and setuptools (<81.0.0 in vllm conflicts with setuptools>=84.0.0 security floor).
   mapfile -t _vllm_pkgs < <(
     expand_requirements "$WORK_DIR/vllm/requirements/tpu.txt" \
-      | grep -viE '^(tpu-inference|nixl)' \
+      | grep -viE '^(tpu-inference|nixl|setuptools([=<>!~; ]|$))' \
       | strip_exact_pins
   )
   mapfile -t _tpu_pkgs < <(

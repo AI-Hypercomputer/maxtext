@@ -3,7 +3,7 @@ aqtp
 array-record
 chex
 cloud-accelerator-diagnostics
-datasets
+datasets>=5.0.1
 drjax>=0.2.1
 flax
 gcsfs

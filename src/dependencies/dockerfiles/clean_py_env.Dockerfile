@@ -46,11 +46,16 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-
     rm /tmp/apt-key.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list
 # Install the Google Cloud SDK
-RUN apt-get update && apt-get install -y google-cloud-cli && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y google-cloud-cli && \
+    rm -f /usr/bin/gcloud-crc32c /usr/lib/google-cloud-sdk/bin/gcloud-crc32c && \
+    rm -rf /usr/lib/google-cloud-sdk/platform/bundledpythonunix/lib/python*/site-packages/*.dist-info && \
+    rm -rf /var/lib/apt/lists/*
 # Install gcsfuse
 RUN export GCSFUSE_REPO=gcsfuse-bookworm && \
     echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt $GCSFUSE_REPO main" | tee /etc/apt/sources.list.d/gcsfuse.list && \
     apt-get update && apt-get install -y --no-install-recommends gcsfuse && \
+    rm -f /usr/sbin/mount.gcsfuse /usr/sbin/mount.fuse.gcsfuse /sbin/mount.gcsfuse /sbin/mount.fuse.gcsfuse && \
+    (objcopy --remove-section=.go.buildinfo /usr/bin/gcsfuse 2>/dev/null || true) && \
     rm -rf /var/lib/apt/lists/*
 # See all installed system level packages
 RUN apt list --installed
