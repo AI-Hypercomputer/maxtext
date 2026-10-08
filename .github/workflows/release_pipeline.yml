@@ -250,6 +250,7 @@ jobs:
       needs.wait_for_tests_verification.result == 'success'
     permissions:
       id-token: write
+      attestations: write
       contents: read
     uses: ./.github/workflows/pypi_release.yml
     with:
