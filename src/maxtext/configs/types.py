@@ -1512,6 +1512,35 @@ class Qwen3Next(BaseModel):
           " Mosaic KDA kernel is validated for (non-reference; kernel fallback/diagnostic only)."
       ),
   )
+  kda_fused_input_proj: bool = Field(
+      False,
+      description=(
+          "Compute the KDA layer's six projections of x (q, k, v, decay and gate low-rank inputs, beta) as one"
+          " matmul over their concatenated kernels. Same parameters and math; fewer, wider matmuls."
+      ),
+  )
+  kda_chunked_impl: Literal["pairwise", "subblock"] = Field(
+      "pairwise",
+      description=(
+          "Pure-JAX chunked KDA (use_tokamax_kda=False, e.g. TPU v4). 'subblock' factors the intra-chunk decay"
+          " through sub-block pivots onto the MXU, inverts by block doubling, and hoists the WY products out"
+          " of the scan; 'pairwise' builds the full per-pair decay tensor."
+      ),
+  )
+  kda_sub_block: int = Field(
+      16,
+      description="Sub-block KDA: rows per diagonal sub-block of the intra-chunk matrices (divides gdn_chunk_size).",
+  )
+  kda_fused_proj_reduce_scatter: bool = Field(
+      False,
+      description="With kda_fused_input_proj, constrain the concatenated kernel to the weights' embed sharding so"
+      " its gradient is reduce-scattered instead of all-reduced in full.",
+  )
+  kda_pallas_scan: bool = Field(
+      False,
+      description="Sub-block KDA: run the chunk-state recurrence as the Pallas kernel in kernels/kda_scan.py, with"
+      " the state resident in VMEM and a hand-written backward. Needs gdn_state_dtype=bfloat16.",
+  )
   tokamax_kda_max_num_segments: int = Field(
       32,
       description=(
@@ -1525,6 +1554,15 @@ class Qwen3Next(BaseModel):
           "Floor, in nats, on the per-step KDA log-decay passed to the tokamax kernel. The kernel overflows"
           " fp32 exp once a step decays past ~30 nats, returning NaN; a floor of 20 changes the output by"
           " under exp(-20) per step. 0 disables it and lets the kernel activate the gate itself."
+      ),
+  )
+  tokamax_kda_resets_in_gate: bool = Field(
+      False,
+      description=(
+          "Mark packed-document starts by setting that token's KDA log-decay to -tokamax_kda_log_decay_floor"
+          " and call the tokamax kernel without segment ids. This skips the varlen path, which pads each"
+          " sequence by (chunk-1)*tokamax_kda_max_num_segments positions. The previous document's state"
+          " leaks in at exp(-floor) (4.5e-5 at floor 10), below bf16 rounding. Needs a floor > 0."
       ),
   )
   tokamax_kda_l2norm_outside: bool = Field(
@@ -1558,6 +1596,18 @@ class Qwen3Next(BaseModel):
       False,
       description="With moe_lean_routing, pick the top-k experts with the Pallas kernel in kernels/topk.py"
       " instead of lax.top_k (a sort on TPU). Same indices in the same order.",
+  )
+  moe_a2a_token_chunks: int = Field(
+      1,
+      description="Run the all-to-all MoE path (not ring-of-experts) in this many sequence chunks. Routing runs"
+      " once over the whole sequence and each chunk reuses its slice as forced experts, so EMo pools still see"
+      " whole documents. Smaller dispatch buffers keep the permute gathers inside v4's 128 MiB CMEM at seq 8192.",
+  )
+  moe_a2a_expert_major: bool = Field(
+      False,
+      description="With expert parallelism over a batch-sharded input, send one ragged all-to-all slice per"
+      " (destination shard, local expert) so received tokens are already grouped by local expert. Removes the"
+      " local permute row gather on the dispatch and combine sides (and their bwd scatters).",
   )
   kda_conv_in_compute_dtype: bool = Field(
       False,
@@ -1959,6 +2009,27 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the dispatched (expert-sorted) MoE inputs.",
   )
+  moe_combine: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the expert-parallel MoE combine output (after the return all-to-all) and the"
+          " unpermuted layer output. Saving them skips the wo GMM and the combine all-to-all in the bwd."
+      ),
+  )
+  kda_wy: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the KDA intra-chunk inverse and the masked q-k scores. Saving them lets the remat"
+          " forward skip the intra-chunk build and the triangular inverse."
+      ),
+  )
+  moe_x_sorted: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the expert-local MoE tokens after the expert-parallel dispatch all-to-all and"
+          " local sort. Saving them skips the dispatch all-to-all in the bwd."
+      ),
+  )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
   value_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the value projection.")
@@ -2027,6 +2098,17 @@ class DatasetGeneral(BaseModel):
   """General configuration for dataset and data loading."""
 
   dataset_type: DatasetType = Field(DatasetType.SYNTHETIC, description="The type of the data loading pipeline.")
+  norm_metrics: Literal["all", "grad", "none"] = Field(
+      "all",
+      description="Norm metrics per step. 'all': grad, raw grad and param norms (three full passes). 'grad': the"
+      " raw grad norm shared with gradient clipping, and the clipped norm derived from it (no param norm)."
+      " 'none': skip them. Training is unchanged; only the logged metrics differ.",
+  )
+  synthetic_data_reuse_batch: bool = Field(
+      False,
+      description="With dataset_type=synthetic, generate the (fixed) batch once and return it every step, so the"
+      " per-step reshard of the synthetic arrays stays out of the step time. Same values as regenerating.",
+  )
   per_device_batch_size: int | float = Field(12, description="The batch size per device.")
   eval_per_device_batch_size: int | float = Field(
       0.0,
@@ -4531,6 +4613,9 @@ class MaxTextConfig(
           "moe_routing",
           "moe_router_logits",
           "moe_dispatch",
+          "moe_x_sorted",
+          "moe_combine",
+          "kda_wy",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -5969,6 +6054,9 @@ class RLConfig(
           "moe_routing",
           "moe_router_logits",
           "moe_dispatch",
+          "moe_x_sorted",
+          "moe_combine",
+          "kda_wy",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",

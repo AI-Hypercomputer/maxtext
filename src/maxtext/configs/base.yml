@@ -884,6 +884,10 @@ sft_train_on_completion_only: false
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md
 dataset_type: synthetic
+# synthetic only: build the fixed batch once and reuse it, keeping its per-step reshard out of the step time.
+synthetic_data_reuse_batch: false
+# Norm metrics per step: all (grad, raw grad, param norms), grad (one shared norm), none.
+norm_metrics: "all"
 # for TFDS input pipeline (dataset_type=tfds)
 dataset_path: "" # your path given as argument in download_dataset.sh, e.g. "gs://my-maxtext-dataset/"
 dataset_name: 'c4/en:3.1.0'
@@ -1454,6 +1458,16 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 # dtype for the chunked delta-rule state and matmul operands; the decay algebra stays float32.
 gdn_state_dtype: "float32"
+# Pure-JAX chunked KDA: "subblock" (MXU sub-block factorization, hoisted WY) or "pairwise".
+kda_chunked_impl: "pairwise"
+# Sub-block KDA: rows per diagonal sub-block of the intra-chunk matrices.
+kda_sub_block: 16
+# Sub-block KDA: run the chunk-state recurrence as the Pallas kernel in kernels/kda_scan.py (bf16 state).
+kda_pallas_scan: false
+# With kda_fused_input_proj, constrain the concatenated kernel to the weights' embed sharding.
+kda_fused_proj_reduce_scatter: false
+# Fuse the KDA layer's six input projections of x into one matmul (same params).
+kda_fused_input_proj: false
 # Fused tokamax Kimi Delta Attention kernel (experimental; Pallas Mosaic on TPU >= gen6).
 use_tokamax_kda: false
 # Reference beta in [0, 2) via allow_neg_eigval; False clamps to [0, 1] (diagnostic).
@@ -1463,6 +1477,9 @@ kda_allow_neg_eigval: true
 tokamax_kda_max_num_segments: 32
 # Floor (nats) on per-step KDA log-decay fed to the tokamax kernel; it NaNs past ~30. 0 disables.
 tokamax_kda_log_decay_floor: 20.0
+# Reset KDA state at packed-document starts through the log-decay gate (needs a floor > 0)
+# instead of the kernel's varlen path, which pads seq by 63*tokamax_kda_max_num_segments.
+tokamax_kda_resets_in_gate: false
 # Do the KDA q/k L2-norm outside the tokamax kernel, where XLA can fuse it.
 tokamax_kda_l2norm_outside: false
 # Same MoE routing with fewer sorts, and routing indices saved for the bwd.
@@ -1471,6 +1488,12 @@ moe_lean_routing: false
 moe_topk_by_bisection: false
 # With moe_lean_routing, top-k with a Pallas max-and-mask kernel instead of a sort.
 moe_topk_pallas: false
+# EP dispatch/combine all-to-all with one slice per (shard, local expert), so tokens arrive grouped by
+# expert and neither side needs the local permute (a row gather).
+moe_a2a_expert_major: false
+# Run the all-to-all MoE path in this many token chunks, routing once over the whole sequence first (EMo
+# pools need whole documents). Keeps v4's permute gathers under the 128 MiB CMEM at seq 8192.
+moe_a2a_token_chunks: 1
 # Cast the KDA short-conv weight to the activation dtype so q/k/v stay bf16.
 kda_conv_in_compute_dtype: false
 # Rematerialize each OLMoE3 layer on its own instead of per mixer cycle.

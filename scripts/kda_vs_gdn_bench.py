@@ -15,6 +15,8 @@ Implementations timed, all at the OLMo 3.5 tiny per-device shape:
   gdn_naive        maxtext.models.qwen3.naive_jax_chunk_gated_delta_rule (HIGHEST precision)
   kda_jnp          maxtext.models.olmoe3._delta_rule_chunked (pure JAX KDA, fp32 state)
   kda_jnp_bf16     the same with bf16 state
+  kda_sub          maxtext.models.olmoe3._delta_rule_chunked_subblock (sub-block MXU KDA, hoisted WY)
+  kda_sub_bf16     the same with bf16 state
 
 The tokamax precision switches (TOKAMAX_KDA_BF16_FWD/BWD, DENSE_PAIRS) are read at
 import, so run the script once per setting:
@@ -103,17 +105,17 @@ def build(name, chunk):
 
     return f, "gdn"
 
-  if name in ("kda_jnp", "kda_jnp_bf16"):
+  if name in ("kda_jnp", "kda_jnp_bf16", "kda_sub", "kda_sub_bf16"):
     from maxtext.models import olmoe3  # pylint: disable=import-outside-toplevel
 
     state_dtype = "bfloat16" if name.endswith("bf16") else "float32"
+    # pylint: disable=protected-access
+    rule = olmoe3._delta_rule_chunked_subblock if name.startswith("kda_sub") else olmoe3._delta_rule_chunked
 
     def f(q, k, v, g, beta):
       scale = q.shape[-1] ** -0.5
       resets = jnp.zeros(q.shape[:2], bool)
-      return olmoe3._delta_rule_chunked(  # pylint: disable=protected-access
-          l2n(q) * scale, l2n(k), v, g, beta.astype(jnp.float32), resets, chunk, state_dtype
-      )
+      return rule(l2n(q) * scale, l2n(k), v, g, beta.astype(jnp.float32), resets, chunk, state_dtype)
 
     return f, "kda"
 

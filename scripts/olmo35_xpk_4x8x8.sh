@@ -27,6 +27,8 @@ DURATION=${DURATION:-90}
 
 # Read straight off the idle pool's node labels; do not guess these.
 TOPOLOGY=${TOPOLOGY:-4x4x4}
+# tpu-v4-podslice for the v4-128 slices on v4-128-bodaborg-us-central2-b.
+ACCEL=${ACCEL:-tpu7x}
 NODES=${NODES:-16}
 PLACEMENT_POLICY=${PLACEMENT_POLICY-tpu7x-128-4x4x4-placement-policy}
 RESERVATION=${RESERVATION-cloudtpu-20260710003900-159478293}
@@ -41,6 +43,10 @@ OUT=${OUT:-gs://agagik-us/olmo35/4x4x4}
 RUN=${RUN:-o35x$(date +%m%d%H%M)}
 MODELS=${MODELS:-olmo35-tiny}
 STEPS=${STEPS:-20}
+
+# Flags every arm starts from (the arm's own flags come after and win). BASE_FLAGS="" runs a tree with
+# only base.yml defaults under the arm flags, e.g. to reproduce another branch's launch script exactly.
+BASE_FLAGS=${BASE_FLAGS-dtype=bfloat16 weight_dtype=float32 ici_fsdp_parallelism=-1 remat_policy=full sparse_matmul=True use_tokamax_kda=True megablox=False use_tokamax_gmm=True use_gmm_v2=True shard_exp_on_fsdp=True num_vocab_tiling=8}
 
 # The hill climb, as `name|pdb|seq|extra maxtext flags`, arms separated by `;`.
 # One admission runs all of it, because getting a 4x4x4 is the scarce resource
@@ -70,7 +76,8 @@ gcloud container clusters get-credentials $CLUSTER --region=$REGION --project=$P
 
 # Ironwood XLA flags from run_olmo3_7b_stage1.sh (27% -> 44.5% on OLMo3-7B).
 # Unlike SPS, here the workers are ours, so these actually reach the compiler.
-LIBTPU='--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_bf16_emission_mode=NATIVE_EMISSION --xla_tpu_dvfs_p_state=7 --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_use_tc_device_shape_on_sc=True --xla_sc_disable_megacore_partitioning=True --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false'
+# LIBTPU_ARGS replaces them for other chips (the SparseCore flags are v7x-only).
+LIBTPU=${LIBTPU_ARGS:-'--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_bf16_emission_mode=NATIVE_EMISSION --xla_tpu_dvfs_p_state=7 --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_use_tc_device_shape_on_sc=True --xla_sc_disable_megacore_partitioning=True --xla_tpu_enable_async_collective_fusion_fuse_all_gather=false'}
 
 # Single-host pools carry no placement policy; only emit the selector when set.
 PP_LINE=""
@@ -133,7 +140,7 @@ spec:
             restartPolicy: Never
             priorityClassName: $PRIORITY
             nodeSelector:
-              cloud.google.com/gke-tpu-accelerator: tpu7x
+              cloud.google.com/gke-tpu-accelerator: $ACCEL
               cloud.google.com/gke-tpu-topology: $TOPOLOGY
 $PP_LINE$RES_SEL$EXTRA_SEL
             tolerations:
@@ -218,18 +225,23 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                       sed -i "s/^  BC = min(4, BT)/  BC = min(\$BC, BT)/" \$KD/pallas_mosaic_tpu_bwd_kernel.py
                       echo "KDA_BC=\$BC: \$(grep -c "BC = \$BC  # kda8" \$KD/pallas_mosaic_tpu_fwd_kernel.py) fwd, \$(grep -c "BC = min(\$BC, BT)" \$KD/pallas_mosaic_tpu_bwd_kernel.py) bwd"
                     fi
+                    # Algebraic WY backward, selected per arm by TOKAMAX_KDA_WY_ALGEBRA=1.
+                    [ -f /wt/scripts/kda_wy_algebra_patch.py ] && python3 /wt/scripts/kda_wy_algebra_patch.py \$KD/pallas_mosaic_tpu_bwd_kernel.py
+                    # A failed arm can leave the TPU busy for a moment, and the next arm then aborts in
+                    # make_tpu_client; retry that case once after a pause.
+                    for TRY in 1 2; do
                     env LIBTPU_INIT_ARGS="\$LX" \$EV python3 -m maxtext.trainers.pre_train.train \
                       /wt/src/maxtext/configs/base.yml \
                       model_name=\$M run_name=$RUN-\$M-\$NAME steps=$STEPS \
                       dataset_type=synthetic enable_checkpointing=False async_checkpointing=False \
                       per_device_batch_size=\$P max_target_length=\$S \
-                      dtype=bfloat16 weight_dtype=float32 \
-                      ici_fsdp_parallelism=-1 remat_policy=full \
-                      sparse_matmul=True use_tokamax_kda=True \
-                      megablox=False use_tokamax_gmm=True use_gmm_v2=True \
-                      shard_exp_on_fsdp=True num_vocab_tiling=8 \
+                      $BASE_FLAGS \
                       base_output_directory=$OUT \$XTRA > \$LOG 2>&1
                     EX=\$?
+                    if [ "\$EX" = "134" ] && grep -q make_tpu_client \$LOG; then echo "TPU init abort, retrying"; sleep 60; continue; fi
+                    break
+                    done
+                    [ "\$EX" != "0" ] && sleep 30
                     # Pod-local output dies with the pod; park the capture where the harvester looks.
                     find $OUT -path "*$RUN-\$M-\$NAME*" -name '*.xplane.pb' -exec cp {} /tmp/hc/\$M-\$NAME.xplane.pb \; 2>/dev/null
                     # Median of the last 10 steps, so compile and warmup do not count.
@@ -253,6 +265,8 @@ $RES_TOL            - key: cloud.google.com/gke-spot
                 done
                 echo "=== RESULTS ==="; cat \$RES; push
                 echo END \$(date)
+                # HOLD_S keeps the pod up so a pod-local profile can be copied out with kubectl cp.
+                sleep ${HOLD_S:-0}
 YAMLEOF
 
 if [ "${DRYRUN:-0}" = "1" ]; then echo "rendered $YAML"; exit 0; fi

@@ -42,12 +42,14 @@ from typing import Any
 from jax.sharding import Mesh, PartitionSpec
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from flax import linen as nn
 from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 
 from maxtext.common.common_types import Config, BATCH, LENGTH, EMBED
+from maxtext.kernels import kda_scan
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -187,6 +189,8 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
         rngs=rngs,
     )
     self.w_out = _dense(cfg, value_width, cfg.emb_dim, ("mlp", "embed"), quant, rngs)
+    # Quantized kernels go through DenseGeneral's own dot_general, so they stay separate.
+    self.fused_input_proj = bool(cfg.kda_fused_input_proj) and quant is None
 
   def __call__(self, x: jnp.ndarray, decoder_segment_ids: None | jnp.ndarray = None) -> jnp.ndarray:
     batch, seq_len, _ = x.shape
@@ -195,14 +199,22 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     # An fp32 conv weight otherwise promotes q/k/v (and their kernel residuals) to fp32.
     cast = self.config.kda_conv_in_compute_dtype
     q_conv, k_conv, v_conv = (w[...].astype(x.dtype) if cast else w[...] for w in (self.q_conv, self.k_conv, self.v_conv))
-    q = causal_depthwise_conv(self.w_q(x), q_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dk)
-    k = causal_depthwise_conv(self.w_k(x), k_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dk)
-    v = causal_depthwise_conv(self.w_v(x), v_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dv)
+    if self.fused_input_proj:
+      q_in, k_in, v_in, f_in, g_in, b_in = self._fused_input_proj(x)
+    else:
+      q_in, k_in, v_in = self.w_q(x), self.w_k(x), self.w_v(x)
+      f_in, g_in, b_in = self.f_proj_1(x), self.g_proj_1(x), self.w_b(x)
+    # Named so the custom remat policy can keep the projections (query/key/value_proj=device)
+    # and skip recomputing them and their weight all-gathers in the bwd.
+    q_in, k_in, v_in = (checkpoint_name(t, n) for t, n in ((q_in, "query_proj"), (k_in, "key_proj"), (v_in, "value_proj")))
+    q = causal_depthwise_conv(q_in, q_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dk)
+    k = causal_depthwise_conv(k_in, k_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dk)
+    v = causal_depthwise_conv(v_in, v_conv, decoder_segment_ids).reshape(batch, seq_len, heads, dv)
 
-    raw_g = self.f_proj_2(self.f_proj_1(x)).reshape(batch, seq_len, heads, dk)
+    raw_g = self.f_proj_2(f_in).reshape(batch, seq_len, heads, dk)
     # Reference uses allow_neg_eigval (beta in [0, 2)); False clamps to [0, 1].
     beta_scale = 2.0 if self.config.kda_allow_neg_eigval else 1.0
-    beta = beta_scale * jax.nn.sigmoid(self.w_b(x).astype(jnp.float32))
+    beta = beta_scale * jax.nn.sigmoid(b_in.astype(jnp.float32))
 
     if self.config.use_tokamax_kda:
       out = self._tokamax_kda(q, k, v, raw_g, beta, decoder_segment_ids)
@@ -222,15 +234,69 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
 
       chunk = self.config.gdn_chunk_size
       if chunk > 0 and seq_len % chunk == 0:
-        out = _delta_rule_chunked(
-            q, k, v.astype(jnp.float32), log_decay, beta, resets, chunk, self.config.gdn_state_dtype
-        )
+        if self.config.kda_chunked_impl == "subblock":
+          out = _delta_rule_chunked_subblock(
+              q,
+              k,
+              v.astype(jnp.float32),
+              log_decay,
+              beta,
+              resets,
+              chunk,
+              self.config.gdn_state_dtype,
+              sub_block=self.config.kda_sub_block,
+              state_scan=self._pallas_state_scan if self.config.kda_pallas_scan else None,
+          )
+        else:
+          out = _delta_rule_chunked(q, k, v.astype(jnp.float32), log_decay, beta, resets, chunk, self.config.gdn_state_dtype)
       else:
         out = _delta_rule_scan(q, k, v.astype(jnp.float32), jnp.exp(log_decay), beta, resets)
 
-    gate = jax.nn.sigmoid(self.g_proj_2(self.g_proj_1(x)).reshape(batch, seq_len, heads, dv))
+    gate = jax.nn.sigmoid(self.g_proj_2(g_in).reshape(batch, seq_len, heads, dv))
     out = self.o_norm(out.astype(x.dtype)) * gate
     return self.w_out(out.reshape(batch, seq_len, heads * dv))
+
+  def _pallas_state_scan(self, uw, k_carry, decay_last):
+    """`kda_scan.kda_state_scan` on `[B, H, N, ...]` operands, split over the batch axes only.
+
+    Pallas kernels can't be auto-partitioned; batch rows are independent, so each shard scans its own.
+    """
+    batch_axes = nn.logical_to_mesh_axes(("activation_batch",), self.config.logical_axis_rules)[0]
+    spec = PartitionSpec(batch_axes)
+    interpret = jax.devices()[0].platform != "tpu"
+
+    @functools.partial(jax.shard_map, mesh=self.mesh, in_specs=(spec,) * 3, out_specs=(spec, spec), check_vma=False)
+    def scan(uw_, kc_, dl_):
+      b, h, n = uw_.shape[:3]
+      flat = lambda t: t.reshape(b * h, n, *t.shape[3:])
+      states, delta = kda_scan.kda_state_scan(flat(uw_), flat(kc_), flat(dl_)[..., None], interpret)
+      return states.reshape(b, h, n, *states.shape[2:]), delta.reshape(b, h, n, *delta.shape[2:])
+
+    return scan(uw, k_carry, decay_last)
+
+  def _fused_input_proj(self, x):
+    """The six projections of x as one matmul over the concatenated kernels.
+
+    Same parameters and the same arithmetic per output column, so checkpoints are
+    unchanged; one wide matmul fills the MXU better than six narrow ones and
+    turns six bwd input-gradient matmuls into one.
+    """
+    mods = (self.w_q, self.w_k, self.w_v, self.f_proj_1, self.g_proj_1, self.w_b)
+    dtype = self.config.dtype
+    kernels = [jnp.asarray(m.kernel[...], dtype) for m in mods]
+    kernel = jnp.concatenate(kernels, axis=-1)
+    if self.config.kda_fused_proj_reduce_scatter:
+      # Keep the concatenated kernel sharded like its parts (embed axis), so its gradient is reduce-scattered;
+      # unconstrained, XLA all-reduces the whole [emb, 9224] gradient and then slices it.
+      kernel = nn.with_logical_constraint(kernel, ("embed", None))
+    out = jax.lax.dot_general(
+        jnp.asarray(x, dtype),
+        kernel,
+        (((x.ndim - 1,), (0,)), ((), ())),
+        precision=self.config.matmul_precision,
+    )
+    bounds = np.cumsum([k.shape[-1] for k in kernels])[:-1]
+    return jnp.split(out, bounds, axis=-1)
 
   def _tokamax_kda(self, q, k, v, raw_g, beta, decoder_segment_ids) -> jnp.ndarray:
     """Fused KDA via tokamax (PR #1103, experimental). Raw q/k/v/gate in: the
@@ -254,6 +320,9 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     max_num_segments = int(self.config.tokamax_kda_max_num_segments)
     decay_floor = float(self.config.tokamax_kda_log_decay_floor)
     l2norm_outside = bool(self.config.tokamax_kda_l2norm_outside)
+    resets_in_gate = has_segments and bool(self.config.tokamax_kda_resets_in_gate)
+    if resets_in_gate and decay_floor <= 0:
+      raise ValueError("tokamax_kda_resets_in_gate needs tokamax_kda_log_decay_floor > 0")
 
     @functools.partial(
         jax.shard_map,
@@ -267,7 +336,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
         return t.transpose(2, 0, 1, 3)
 
       seg_kwargs = {}
-      if has_segments:
+      if has_segments and not resets_in_gate:
         # tokamax expects 1-indexed segment ids with 0 reserved for padding,
         # which is MaxText's packed-data convention already.
         seg_kwargs = {"segment_ids": rest[0], "max_num_segments": max_num_segments}
@@ -282,6 +351,13 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
         )
         gate_kwargs = {"use_gate_in_kernel": False}
         g_hf = jnp.maximum(log_decay, -decay_floor)
+        if resets_in_gate:
+          # A document's first token decays the carried state by exp(-floor) in every channel,
+          # which stands in for the varlen reset. Its own decay only ever multiplies a zero
+          # state, so pinning it loses no gradient the exact reset would keep.
+          seg = rest[0]
+          starts = seg != jnp.pad(seg, ((0, 0), (1, 0)), constant_values=-1)[:, :-1]
+          g_hf = jnp.where(starts[None, :, :, None], -decay_floor, g_hf)
       else:
         gate_kwargs = {"use_gate_in_kernel": True, "a_log": a_log_, "delta_time_bias": dt_bias_}
       if l2norm_outside:
@@ -429,6 +505,213 @@ def _delta_rule_chunked(q, k, v, log_decay, beta, resets, chunk_size: int, state
   return outputs.transpose(1, 0, 3, 2, 4).reshape(batch, seq_len, heads, dv)
 
 
+@jax.custom_vjp
+def _invert_unit_lower(m: jnp.ndarray) -> jnp.ndarray:
+  """(I + M)^-1 for strictly lower triangular M over the last two axes.
+
+  Block doubling from 16 x 16: each diagonal block's inverse is a power series
+  that ends because M is nilpotent, then [[A, 0], [C, D]]^-1 = [[A^-1, 0],
+  [-D^-1 C A^-1, D^-1]] doubles the block size. All batched matmuls; the
+  analytic VJP below replaces differentiating through the iterations.
+  """
+  return _invert_unit_lower_fwd(m)[0]
+
+
+def _invert_unit_lower_fwd(m):
+  c = m.shape[-1]
+  base = min(16, c)
+  lead = m.shape[:-2]
+  nb = c // base
+  f32 = jnp.float32
+  # Tiny matrices: full precision costs little, and a 1-pass bf16 inverse drifts.
+  mm = functools.partial(jnp.matmul, precision=jax.lax.Precision.HIGHEST)
+  blocks = m.reshape(*lead, nb, base, nb, base)
+  diag = jnp.einsum("...rirj->...rij", blocks).astype(f32)
+  eye = jnp.eye(base, dtype=f32)
+  # (I + N)^-1 = (I - N)(I + N^2)(I + N^4)... until N^base = 0.
+  p = -diag
+  inv = eye + p
+  power = 1
+  while 2 * power < base:
+    p = mm(p, p)
+    inv = mm(inv, eye + p)
+    power *= 2
+  size = base
+  while size < c:
+    n2 = inv.shape[-3] // 2
+    inv = inv.reshape(*lead, n2, 2, size, size)
+    a_inv, d_inv = inv[..., 0, :, :], inv[..., 1, :, :]
+    # The lower-left block of the 2*size block that starts at row 2*k*size.
+    lower = m.reshape(*lead, n2, 2 * size, c)
+    lower = jnp.stack([lower[..., i, size:, 2 * i * size : (2 * i + 1) * size] for i in range(n2)], axis=-3).astype(f32)
+    off = -mm(mm(d_inv, lower), a_inv)
+    zeros = jnp.zeros_like(off)
+    top = jnp.concatenate([a_inv, zeros], axis=-1)
+    bottom = jnp.concatenate([off, d_inv], axis=-1)
+    inv = jnp.concatenate([top, bottom], axis=-2)
+    size *= 2
+  x = inv.reshape(*lead, c, c)
+  return x, x
+
+
+def _invert_unit_lower_bwd(x, dx):
+  # d(T^-1) = -X dT X, so dT = -X^T dX X^T; T's free entries are strictly lower.
+  xt = jnp.swapaxes(x, -1, -2)
+  mm = functools.partial(jnp.matmul, precision=jax.lax.Precision.HIGHEST)
+  dm = -mm(mm(xt, dx.astype(jnp.float32)), xt)
+  return (jnp.tril(dm, k=-1),)
+
+
+_invert_unit_lower.defvjp(_invert_unit_lower_fwd, _invert_unit_lower_bwd)
+
+
+def _kda_intra_chunk(q, k, g, sub_block: int, compute_dtype):
+  """Per-chunk ``sum_d a_id b_jd exp(g_id - g_jd)`` for (a, b) = (q, k) and (k, k).
+
+  Shapes ``[..., C, d]`` in, ``[..., C, C]`` out (unmasked, f32). ``g`` is the
+  cumulative log-decay from the chunk start, so it is non-increasing in time.
+
+  Rows are split into sub-blocks of ``sub_block``. Against an earlier column,
+  a row's decay factors through its sub-block's first row p: exp(g_i - g_j) =
+  exp(g_i - g_p) exp(g_p - g_j), and both exponents are <= 0 because g only
+  falls. That turns every below-diagonal sub-block into a matmul that cannot
+  overflow. Only the diagonal sub-blocks need the exact per-pair tensor, which
+  is 1/(C/sub_block) of the full one.
+  """
+  c, d = k.shape[-2], k.shape[-1]
+  s = min(sub_block, c)
+  nb = c // s
+  lead = k.shape[:-2]
+  f32 = jnp.float32
+  pos = jnp.arange(c)
+  piv = jnp.arange(nb) * s
+  g_piv = g[..., piv, :]  # [..., nb, d]
+  # Right operand for row block r: column j scaled by exp(g_p - g_j), kept only for j < p.
+  right_exp = jnp.where((pos[None, :] < piv[:, None])[..., None], g_piv[..., :, None, :] - g[..., None, :, :], -jnp.inf)
+  right = (k[..., None, :, :].astype(f32) * jnp.exp(right_exp)).astype(compute_dtype)  # [..., nb, C, d]
+  g_rows = g.reshape(*lead, nb, s, d)
+  left_scale = jnp.exp(g_rows - g_piv[..., :, None, :])
+  # q and k share the right operand and the per-pair decays, so they are stacked on a
+  # leading axis: one matmul with twice the rows, and one pass over the pair tensor.
+  k_rows = k.reshape(*lead, nb, s, d).astype(f32)
+  qk_rows = jnp.stack([q.reshape(*lead, nb, s, d).astype(f32), k_rows], axis=-4)  # [..., 2, nb, s, d]
+  lqk = (qk_rows * left_scale[..., None, :, :, :]).astype(compute_dtype)
+  off = jnp.einsum("...xrsd,...rjd->...xrsj", lqk, right, preferred_element_type=f32).reshape(*lead, 2, c, c)
+  # Diagonal sub-blocks: exact per pair, masked before the exp (upper pairs can be +inf).
+  tri = jnp.tril(jnp.ones((s, s), dtype=bool))
+  pair = jnp.exp(jnp.where(tri[..., None], g_rows[..., :, None, :] - g_rows[..., None, :, :], -jnp.inf))
+  diag = jnp.einsum("...xrid,...rjd,...rijd->...xrij", qk_rows, k_rows, pair)
+  eye_nb = jnp.eye(nb, dtype=f32)
+  both = off + jnp.einsum("...xrij,rq->...xriqj", diag, eye_nb).reshape(*lead, 2, c, c)
+  return both[..., 0, :, :], both[..., 1, :, :]
+
+
+def _delta_rule_chunked_subblock(
+    q,
+    k,
+    v,
+    log_decay,
+    beta,
+    resets,
+    chunk_size: int,
+    state_dtype: str = "float32",
+    sub_block: int = 16,
+    state_scan=None,
+) -> jnp.ndarray:
+  """``_delta_rule_chunked`` restructured for the MXU. Same math, same contract.
+
+  Three changes. The intra-chunk matrices use ``_kda_intra_chunk``'s sub-block
+  factorization instead of the full per-pair decay tensor. ``(I + M)^-1`` uses
+  block doubling with an analytic VJP. And everything that does not depend on
+  the carried state (the matrices, the inverse, the WY products u and w, the
+  output readout) runs for all chunks at once outside the scan, which keeps
+  only two matmuls per chunk on the sequential path. The scan returns each
+  chunk's incoming state and delta; the readout uses them afterwards.
+
+  ``state_scan(uw, k_carry, decay)`` replaces that scan when given (bf16 state only), e.g. the Pallas
+  kernel in ``kernels/kda_scan.py``; ``uw`` is u and w side by side, and ``decay`` is already zeroed for
+  chunks that hold a reset.
+  """
+  batch, seq_len, heads, dk = q.shape
+  dv = v.shape[-1]
+  c = chunk_size
+  n = seq_len // c
+  f32 = jnp.float32
+  compute_dtype = jnp.bfloat16 if state_dtype == "bfloat16" else f32
+
+  def to_chunks(x):  # [B, T, H, D] -> [B, H, N, C, D]
+    return x.reshape(batch, n, c, heads, -1).transpose(0, 3, 1, 2, 4)
+
+  # Cast before chunking so the saved activations are in the compute dtype.
+  q_c, k_c, v_c = (to_chunks(t.astype(compute_dtype)) for t in (q, k, v))
+  # Cumulative decay as a lower-triangular matmul: jnp.cumsum lowers to an O(C^2) reduce_window on TPU.
+  tri_ones = jnp.tril(jnp.ones((c, c), f32))
+  g = jnp.einsum("ij,...jd->...id", tri_ones, to_chunks(log_decay).astype(f32), precision=jax.lax.Precision.HIGHEST)
+  beta_c = beta.reshape(batch, n, c, heads).transpose(0, 3, 1, 2).astype(f32)[..., None]
+  # Named "context" so a custom remat policy (context=device) can keep the chunked inputs and the
+  # intra-chunk results below; the bwd then skips the projections, conv, norm, decay activation,
+  # intra-chunk build and inverse that per-layer remat would otherwise recompute.
+  q_c, k_c, v_c, g, beta_c = (checkpoint_name(t, "context") for t in (q_c, k_c, v_c, g, beta_c))
+
+  # Segment layout per chunk, broadcast over heads.
+  seg = jnp.cumsum(resets.reshape(batch, n, c).astype(jnp.int32), axis=-1)[:, None]  # [B, 1, N, C]
+  same_doc = seg[..., :, None] == seg[..., None, :]
+  causal = jnp.tril(jnp.ones((c, c), dtype=bool))
+  strict = jnp.tril(jnp.ones((c, c), dtype=bool), k=-1)
+  from_prev = (seg == 0)[..., None].astype(f32)
+  last_seg = (seg == seg[..., -1:])[..., None]
+  any_reset = seg[..., -1] > 0  # [B, 1, N]
+
+  # The [.., nb, C, d] and per-pair intermediates are large; recompute them in the bwd.
+  intra = jax.checkpoint(
+      functools.partial(_kda_intra_chunk, sub_block=sub_block, compute_dtype=compute_dtype),
+      policy=jax.checkpoint_policies.nothing_saveable,
+  )
+  scores, kk = intra(q_c, k_c, g)
+  scores = jnp.where(causal & same_doc, scores, 0.0)
+  m = jnp.where(strict & same_doc, kk, 0.0) * beta_c
+  x = _invert_unit_lower(m)
+
+  # WY: delta = X diag(beta) (v - from_prev * (k e^g) S) = u - w S.
+  eg = jnp.exp(g)
+  rhs = jnp.concatenate([v_c.astype(f32) * beta_c, k_c.astype(f32) * eg * beta_c * from_prev], axis=-1)
+  uw = jnp.einsum("...ij,...jd->...id", x.astype(compute_dtype), rhs.astype(compute_dtype), preferred_element_type=f32)
+  # Saved as kda_wy=device (34 MB per layer at seq 4096), the remat forward skips the intra-chunk build and the
+  # inverse; the intra-chunk VJP still recomputes its own forward.
+  x, scores = (checkpoint_name(t, "kda_wy") for t in (x, scores))
+  uw = checkpoint_name(uw, "context")
+  u, w = uw[..., :dv], uw[..., dv:]
+  # Only the chunk's last segment writes the carried state.
+  g_last = g[..., -1:, :]
+  k_carry = k_c.astype(f32) * jnp.exp(jnp.where(last_seg, g_last - g, -jnp.inf))
+  decay_last = jnp.exp(g_last[..., 0, :])  # [B, H, N, dk]
+
+  def scan_layout(t):  # [B, H, N, ...] -> [N, B, H, ...]
+    return jnp.moveaxis(t, 2, 0)
+
+  def body(state, xs):
+    u_i, w_i, kc_i, dl_i, reset_i = xs
+    delta = u_i - jnp.einsum("bhcd,bhdv->bhcv", w_i.astype(compute_dtype), state, preferred_element_type=f32)
+    delta = delta.astype(compute_dtype)
+    kept = jnp.where(reset_i[:, :, None, None], 0.0, state.astype(f32) * dl_i[..., None])
+    new_state = kept + jnp.einsum("bhcd,bhcv->bhdv", kc_i.astype(compute_dtype), delta, preferred_element_type=f32)
+    return new_state.astype(compute_dtype), (state, delta)
+
+  if state_scan is not None and compute_dtype == jnp.bfloat16:
+    decay = jnp.where(any_reset[..., None], 0.0, decay_last)
+    states, delta = state_scan(uw, k_carry.astype(compute_dtype), decay)
+  else:
+    xs = tuple(scan_layout(t) for t in (u, w, k_carry, decay_last, any_reset))
+    init_state = jnp.zeros((batch, heads, dk, dv), compute_dtype)
+    _, (states, delta) = jax.lax.scan(body, init_state, xs)
+    states, delta = jnp.moveaxis(states, 0, 2), jnp.moveaxis(delta, 0, 2)  # [B, H, N, ...]
+
+  qg = (q_c.astype(f32) * eg * from_prev).astype(compute_dtype)
+  out = jnp.einsum("...cd,...dv->...cv", qg, states, preferred_element_type=f32)
+  out = out + jnp.einsum("...ij,...jv->...iv", scores.astype(compute_dtype), delta, preferred_element_type=f32)
+  return out.transpose(0, 2, 3, 1, 4).reshape(batch, seq_len, heads, dv)
+
+
 def _delta_rule_scan(q, k, v, decay, beta, resets) -> jnp.ndarray:
   """Unfused delta-rule recurrence, scanned over time.
 
@@ -547,7 +830,10 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     logits leave that unchanged: every selected expert is inside the pool, so
     the gathered scores are the unmasked ones.
     """
-    if self.config.emo_enabled:
+    # Forced experts arrive already routed (moe_a2a_token_chunks reuses the full-sequence EMo routing per
+    # chunk). They lie inside their pools, so masking again changes nothing but would rebuild the pools from a
+    # partial sequence.
+    if self.config.emo_enabled and forced_routed_experts is None:
       gate_logits = self._emo_mask_logits(gate_logits, input_ids, rngs)
     top_k_weights, top_k_indices = super().get_topk(
         gate_logits, pre_bias_logits, rngs, input_ids=None, forced_routed_experts=forced_routed_experts

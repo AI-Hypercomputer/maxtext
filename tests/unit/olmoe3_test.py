@@ -25,6 +25,7 @@ import unittest
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from jax.sharding import Mesh
 
 from maxtext.configs import pyconfig
@@ -332,6 +333,46 @@ class OLMoE3RoutingTest(unittest.TestCase):
     for a, b in zip(jax.tree_util.tree_leaves(g0), jax.tree_util.tree_leaves(g1)):
       self.assertTrue(bool(jnp.array_equal(a, b)))
 
+  def test_a2a_token_chunks_match_unchunked(self):
+    """``moe_a2a_token_chunks`` routes once over the whole sequence, so chunking changes no routing.
+
+    The second document spans both chunks, so per-chunk EMo pools would differ; only the gradient sums over
+    the chunks reassociate.
+    """
+    pool, seq_len = 20, 32
+    outs = []
+    for chunks in (1, 2):
+      cfg = _config(
+          "olmoe3-30m",
+          max_target_length=seq_len,
+          extra=(
+              "override_model_config=True",
+              f"emo_min_document_expert_pool={pool}",
+              f"emo_max_document_expert_pool={pool}",
+              f"emo_eval_document_expert_pool={pool}",
+              "sparse_matmul=True",
+              "moe_lean_routing=True",
+              f"moe_a2a_token_chunks={chunks}",
+          ),
+      )
+      mesh, model = _build(cfg)
+      tokens = (jnp.arange(seq_len, dtype=jnp.int32)[None, :] * 7) % 101 + 1
+      positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
+      segments = jnp.concatenate([jnp.ones((1, 12), jnp.int32), jnp.full((1, seq_len - 12), 2, jnp.int32)], axis=1)
+      with mesh:
+        params = model.init({"params": jax.random.PRNGKey(0)}, tokens, positions, segments)
+
+        def loss(p, model=model):
+          out = model.apply(p, tokens, positions, segments, enable_dropout=False)
+          logits = out[0] if isinstance(out, tuple) else out
+          return jnp.sum(jnp.sin(logits))
+
+        outs.append(jax.value_and_grad(loss)(params))
+    (v0, g0), (v1, g1) = outs
+    np.testing.assert_allclose(float(v0), float(v1), rtol=1e-6)
+    for a, b in zip(jax.tree_util.tree_leaves(g0), jax.tree_util.tree_leaves(g1)):
+      np.testing.assert_allclose(np.asarray(a), np.asarray(b), rtol=1e-4, atol=1e-6)
+
   def test_topk_by_bisection_matches_lax_top_k(self):
     """Bisection top-k picks the same expert set as ``lax.top_k``, in ascending index order."""
     # pylint: disable=g-import-not-at-top,import-outside-toplevel
@@ -503,6 +544,42 @@ class OLMoE3TokamaxKDATest(unittest.TestCase):
     segment_ids = jnp.concatenate([jnp.full((2, 30), 1, jnp.int32), jnp.full((2, 34), 2, jnp.int32)], axis=1)
     self._compare(segment_ids)
 
+  def test_resets_in_gate_matches_unfused_packed(self):
+    """Gate resets reproduce the exact packed rule, with the boundary mid-chunk."""
+    segment_ids = jnp.concatenate([jnp.full((2, 30), 1, jnp.int32), jnp.full((2, 34), 2, jnp.int32)], axis=1)
+    x = jax.random.normal(jax.random.PRNGKey(3), (2, 64, 128), jnp.float32)
+    expected = self._layer_out(False, x, segment_ids)
+    # Floor 10 is the production setting and the loosest one: the old state leaks at exp(-10).
+    extra = ("tokamax_kda_resets_in_gate=True", "tokamax_kda_log_decay_floor=10.0")
+    actual = self._layer_out(True, x, segment_ids, extra=extra)
+    rel = jnp.max(jnp.abs(actual - expected)) / jnp.max(jnp.abs(expected))
+    self.assertLess(float(rel), 2e-3, f"gate-reset KDA relative error {rel:.2e}")
+
+  def test_resets_in_gate_grads_match_varlen(self):
+    """Gate resets give the varlen path's loss and input gradients."""
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from flax import nnx
+    from maxtext.models.olmoe3 import OLMoE3KimiDeltaAttention
+
+    segment_ids = jnp.concatenate(
+        [jnp.full((2, 30), 1, jnp.int32), jnp.full((2, 20), 2, jnp.int32), jnp.full((2, 14), 3, jnp.int32)], axis=1
+    )
+    x = jax.random.normal(jax.random.PRNGKey(3), (2, 64, 128), jnp.float32)
+    results = []
+    for in_gate in (False, True):
+      extra = ("use_tokamax_kda=True", "tokamax_kda_log_decay_floor=10.0", f"tokamax_kda_resets_in_gate={in_gate}")
+      cfg = _config("olmoe3-30m", extra=extra)
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      with mesh:
+        layer = OLMoE3KimiDeltaAttention(cfg, mesh, None, rngs=nnx.Rngs(params=0))
+        loss = lambda x_, layer=layer: jnp.sum(layer(x_, segment_ids) ** 2)
+        out, grad = jax.jit(jax.value_and_grad(loss))(x)
+      results.append((float(out), jax.device_get(grad)))
+    (out_varlen, grad_varlen), (out_gate, grad_gate) = results
+    self.assertAlmostEqual(out_varlen, out_gate, delta=1e-4 * abs(out_varlen))
+    rel = jnp.max(jnp.abs(grad_gate - grad_varlen)) / jnp.max(jnp.abs(grad_varlen))
+    self.assertLess(float(rel), 1e-3, f"gate-reset grad relative error {rel:.2e}")
+
   def test_l2norm_outside_matches_in_kernel(self):
     """The MaxText-side q/k L2-norm gives the kernel's output and input grads."""
     # pylint: disable=g-import-not-at-top,import-outside-toplevel
@@ -664,6 +741,168 @@ class OLMoE3ChunkedDeltaRuleTest(unittest.TestCase):
     the option is wired correctly, not that it is free.
     """
     self._assert_matches(128, 32, state_dtype="bfloat16", tol=5e-2)
+
+
+class OLMoE3SubblockDeltaRuleTest(unittest.TestCase):
+  """``kda_chunked_impl=subblock`` must be the scan too, forward and backward.
+
+  The sub-block factorization, the block-doubling inverse with its hand-written
+  VJP, and the WY products moved out of the scan are each a place where a
+  plausible-looking mistake still trains, so every one is pinned to the scan.
+  """
+
+  def setUp(self):
+    super().setUp()
+    jax.config.update("jax_default_matmul_precision", "highest")
+    self.addCleanup(jax.config.update, "jax_default_matmul_precision", None)
+
+  def _inputs(self, seq_len, resets_at=(), strong=False):
+    keys = jax.random.split(jax.random.PRNGKey(0), 5)
+    batch, heads, dk, dv = 2, 3, 16, 32
+    q = jax.random.normal(keys[0], (batch, seq_len, heads, dk)) * 0.5
+    k = jax.random.normal(keys[1], (batch, seq_len, heads, dk)) * 0.5
+    v = jax.random.normal(keys[2], (batch, seq_len, heads, dv))
+    if strong:  # per-step log-decay up to ~-50 nats, the reference init's range
+      log_decay = -jnp.exp(jax.random.uniform(keys[3], q.shape, minval=-3.0, maxval=3.9))
+    else:
+      log_decay = jnp.log(jax.nn.sigmoid(jax.random.normal(keys[3], q.shape)) * 0.4 + 0.55)
+    beta = 2.0 * jax.nn.sigmoid(jax.random.normal(keys[4], (batch, seq_len, heads)))
+    resets = jnp.zeros((batch, seq_len), bool)
+    for idx in resets_at:
+      resets = resets.at[:, idx].set(True)
+    return q, k, v, log_decay, beta, resets
+
+  def _rules(self, chunk, sub_block, resets):
+    # pylint: disable=import-outside-toplevel,protected-access
+    from maxtext.models import olmoe3
+
+    def scan(q, k, v, log_decay, beta):
+      return olmoe3._delta_rule_scan(q, k, v, jnp.exp(log_decay), beta, resets)
+
+    def subblock(q, k, v, log_decay, beta):
+      return olmoe3._delta_rule_chunked_subblock(q, k, v, log_decay, beta, resets, chunk, "float32", sub_block)
+
+    return scan, jax.jit(subblock)
+
+  def _assert_matches(self, seq_len, chunk, sub_block=16, resets_at=(), strong=False, grads=False):
+    args = self._inputs(seq_len, resets_at, strong)
+    scan, subblock = self._rules(chunk, sub_block, args[-1])
+    expected, actual = scan(*args[:-1]), subblock(*args[:-1])
+    self.assertTrue(bool(jnp.isfinite(actual).all()), "sub-block delta rule returned non-finite output")
+    rel = jnp.max(jnp.abs(actual - expected)) / jnp.max(jnp.abs(expected))
+    self.assertLess(float(rel), 2e-5, f"chunk={chunk} sub={sub_block}: rel err {rel:.2e}")
+    if grads:
+      w = jax.random.normal(jax.random.PRNGKey(9), expected.shape)
+      g_ref = jax.grad(lambda *a: jnp.sum(scan(*a) * w), argnums=(0, 1, 2, 3, 4))(*args[:-1])
+      g_sub = jax.grad(lambda *a: jnp.sum(subblock(*a) * w), argnums=(0, 1, 2, 3, 4))(*args[:-1])
+      for name, a, b in zip(("q", "k", "v", "log_decay", "beta"), g_ref, g_sub):
+        self.assertTrue(bool(jnp.isfinite(b).all()), f"non-finite d{name}")
+        rel = jnp.max(jnp.abs(a - b)) / jnp.max(jnp.abs(a))
+        self.assertLess(float(rel), 1e-4, f"d{name}: rel err {rel:.2e}")
+
+  def test_matches_scan_across_chunk_and_sub_block_sizes(self):
+    for chunk, sub_block in ((16, 16), (32, 16), (64, 16), (64, 8)):
+      self._assert_matches(128, chunk, sub_block, resets_at=(45, 64))
+
+  def test_gradients_match_scan_with_packed_documents(self):
+    # Boundaries mid-chunk, on a chunk edge, and at the first and last token of a chunk.
+    self._assert_matches(256, 64, resets_at=(0, 5, 63, 64, 100, 128), grads=True)
+
+  def test_reference_scale_decay_stays_finite(self):
+    """Pivot factors are exp of non-positive numbers, so strong decay cannot overflow."""
+    self._assert_matches(256, 64, resets_at=(17,), strong=True, grads=True)
+
+  def test_pallas_state_scan_matches_lax_scan(self):
+    """``kda_pallas_scan``: the Pallas chunk-state kernel (interpret mode here) equals the bf16 lax.scan.
+
+    The forward runs the same bf16 arithmetic; the hand-written backward rounds its cotangents at different
+    points than autodiff, so gradients agree to bf16 accuracy only (on v4 both sit 0.5-0.8% from an f32
+    reference, the kernel slightly closer).
+    """
+    # pylint: disable=import-outside-toplevel,protected-access
+    from maxtext.kernels import kda_scan
+    from maxtext.models import olmoe3
+
+    args = self._inputs(256, resets_at=(0, 5, 63, 64, 100, 128))
+    resets = args[-1]
+
+    def pallas_scan(uw, kc, dl):
+      b, h, n = uw.shape[:3]
+      flat = lambda t: t.reshape(b * h, n, *t.shape[3:])
+      states, delta = kda_scan.kda_state_scan(flat(uw), flat(kc), flat(dl)[..., None], True)
+      return states.reshape(b, h, n, *states.shape[2:]), delta.reshape(b, h, n, *delta.shape[2:])
+
+    def rule(state_scan):
+      def f(q, k, v, log_decay, beta):
+        return olmoe3._delta_rule_chunked_subblock(
+            q, k, v, log_decay, beta, resets, 64, "bfloat16", 16, state_scan=state_scan
+        ).astype(jnp.float32)
+
+      return jax.jit(f)
+
+    ref, ker = rule(None), rule(pallas_scan)
+    # Bit-identical on TPU; the CPU interpreter reorders a few f32 sums.
+    np.testing.assert_allclose(np.asarray(ref(*args[:-1])), np.asarray(ker(*args[:-1])), rtol=1e-5, atol=1e-6)
+    w = jax.random.normal(jax.random.PRNGKey(9), (2, 256, 3, 32))
+    g_ref = jax.grad(lambda *a: jnp.sum(ref(*a) * w), argnums=(0, 1, 2, 3, 4))(*args[:-1])
+    g_ker = jax.grad(lambda *a: jnp.sum(ker(*a) * w), argnums=(0, 1, 2, 3, 4))(*args[:-1])
+    for name, a, b in zip(("q", "k", "v", "log_decay", "beta"), g_ref, g_ker):
+      rel = jnp.linalg.norm(a - b) / jnp.linalg.norm(a)
+      self.assertLess(float(rel), 2e-2, f"d{name}: rel err {rel:.2e}")
+
+  def test_block_doubling_inverse_and_vjp(self):
+    """``_invert_unit_lower`` equals the triangular solve, and so does its gradient."""
+    # pylint: disable=import-outside-toplevel,protected-access
+    from maxtext.models import olmoe3
+
+    for c in (16, 32, 64):
+      keys = jax.random.split(jax.random.PRNGKey(c), 2)
+      m = jnp.tril(jax.random.normal(keys[0], (2, 3, c, c)) * 0.2, k=-1)
+      eye = jnp.eye(c)
+
+      def solve(m_):
+        return jax.scipy.linalg.solve_triangular(eye + m_, jnp.broadcast_to(eye, m_.shape), lower=True)
+
+      x = olmoe3._invert_unit_lower(m)
+      rel = jnp.max(jnp.abs(x - solve(m))) / jnp.max(jnp.abs(solve(m)))
+      self.assertLess(float(rel), 1e-5, f"c={c}: inverse rel err {rel:.2e}")
+      w = jax.random.normal(keys[1], m.shape)
+      g_ref = jnp.tril(jax.grad(lambda m_: jnp.sum(solve(m_) * w))(m), k=-1)
+      g_new = jax.grad(lambda m_: jnp.sum(olmoe3._invert_unit_lower(m_) * w))(m)
+      rel = jnp.max(jnp.abs(g_new - g_ref)) / jnp.max(jnp.abs(g_ref))
+      self.assertLess(float(rel), 1e-4, f"c={c}: inverse VJP rel err {rel:.2e}")
+
+
+class OLMoE3FusedInputProjTest(unittest.TestCase):
+  """``kda_fused_input_proj`` is the six separate projections, with the same parameters."""
+
+  def test_matches_separate_projections(self):
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from flax import nnx
+    from maxtext.models.olmoe3 import OLMoE3KimiDeltaAttention
+
+    x = jax.random.normal(jax.random.PRNGKey(3), (2, 128, 128), jnp.float32)
+    segments = jnp.concatenate([jnp.full((2, 50), 1, jnp.int32), jnp.full((2, 78), 2, jnp.int32)], axis=1)
+    results = []
+    for fused in (False, True):
+      cfg = _config("olmoe3-30m", extra=("use_tokamax_kda=False", f"kda_fused_input_proj={fused}"))
+      mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      with mesh:
+        layer = OLMoE3KimiDeltaAttention(cfg, mesh, None, rngs=nnx.Rngs(params=0))
+        graphdef, state = nnx.split(layer)
+
+        def loss(state_, x_, graphdef=graphdef):
+          return jnp.sum(nnx.merge(graphdef, state_)(x_, segments) ** 2)
+
+        value, grads = jax.jit(jax.value_and_grad(loss, argnums=(0, 1)))(state, x)
+      leaves = jax.tree_util.tree_leaves(nnx.to_pure_dict(grads[0])) + [grads[1]]
+      results.append((float(value), leaves))
+    (v_sep, g_sep), (v_fused, g_fused) = results
+    self.assertAlmostEqual(v_sep, v_fused, delta=1e-6 * abs(v_sep))
+    for a, b in zip(g_sep, g_fused):
+      # dt_bias and A_log gradients are cancellation-heavy sums, so accumulation order shows up there first.
+      rel = jnp.max(jnp.abs(a - b)) / (jnp.max(jnp.abs(a)) + 1e-30)
+      self.assertLess(float(rel), 2e-3, f"fused projection grad rel err {rel:.2e}")
 
 
 class OLMoE3SharedExpertWidthTest(unittest.TestCase):

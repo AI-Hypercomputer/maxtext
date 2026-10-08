@@ -85,6 +85,8 @@ class RouteMetadata:
   # Shape [num_ep, num_ep]. all_gather of reshaped_group_sizes across EP shards.
   # [i, j] = number of tokens from batch shard i sent to expert shard j.
   all_shards_group_sizes: Optional[jax.Array]
+  # Inverse of local_sorted_indices when it was built without a sort (moe_lean_routing); None otherwise.
+  local_inverse: Optional[jax.Array] = None
 
 
 @struct.dataclass
@@ -256,6 +258,103 @@ def _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g):
 
 
 take_along_last_axis_dense_vjp.defvjp(_take_along_last_axis_dense_vjp_fwd, _take_along_last_axis_dense_vjp_bwd)
+
+
+def take_along_last_axis_dense(x: jax.Array, indices: jax.Array) -> jax.Array:
+  """`jnp.take_along_axis(x, indices, axis=-1)` as one compare-select-reduce: no gather, and a dense bwd.
+
+  Exact: each output sums one selected element and zeros. On v4 at [4096, 512] logits and top-16 it is 3x
+  faster forward than the gather and 2x faster forward plus backward.
+  """
+  iota = jax.lax.broadcasted_iota(indices.dtype, (1,) * indices.ndim + (x.shape[-1],), indices.ndim)
+  hit = indices[..., None] == iota
+  return jnp.sum(jnp.where(hit, x[..., None, :], jnp.zeros((), x.dtype)), axis=-1)
+
+
+def _count_ids(ids: jax.Array, length: int) -> jax.Array:
+  """`jnp.bincount(ids, length=length)` as a compare-and-sum, which XLA fuses; bincount lowers to a scatter."""
+  return jnp.sum((ids.reshape(-1)[:, None] == jnp.arange(length, dtype=ids.dtype)).astype(jnp.int32), axis=0)
+
+
+def _ids_from_group_sizes(group_sizes: jax.Array, rows: int) -> jax.Array:
+  """Group id of each of `rows` rows laid out group after group, like `jnp.repeat(arange, group_sizes)`.
+
+  Counts the group ends at or before each row instead of `jnp.repeat`, which lowers to a gather. Rows past the
+  last group get the last id, as `jnp.repeat` with `total_repeat_length` does.
+  """
+  ends = jnp.cumsum(group_sizes)[:-1]
+  return jnp.sum((jnp.arange(rows, dtype=ends.dtype)[:, None] >= ends[None, :]).astype(jnp.int32), axis=1)
+
+
+def _lookup_small(table: jax.Array, idx: jax.Array) -> jax.Array:
+  """`table[idx]` for a short table as a compare-select-sum; XLA lowers the gather to a much slower kernel."""
+  hit = idx[:, None] == jnp.arange(table.shape[0], dtype=idx.dtype)[None, :]
+  return jnp.sum(jnp.where(hit, table[None, :], jnp.zeros((), table.dtype)), axis=1)
+
+
+def _block_transpose_indices(sizes: jax.Array, rows: int):
+  """Reorders rows laid out in blocks (s, j) to (j, s): gather indices, their inverse, and each output row's j.
+
+  `sizes` is `[S, J]`. Equals the stable argsort of the per-row j (and the argsort of that), built from
+  compare-and-sum passes over the S * J block ends instead of a `jnp.repeat` gather and two sorts: 2x faster on
+  v4 at 74K rows. Rows past the blocks (buffer padding) map to themselves with id J - 1, as the argsort leaves
+  them.
+  """
+  num_s, num_j = sizes.shape
+  src, dst = sizes.reshape(-1), sizes.T.reshape(-1)
+  src_end, dst_end = jnp.cumsum(src), jnp.cumsum(dst)
+  src_start, dst_start = src_end - src, dst_end - dst
+  row = jnp.arange(rows, dtype=src_end.dtype)
+  valid = row < src_end[-1]
+
+  def block_of(ends):  # zero-size blocks end at their start, so they are counted as passed
+    return jnp.minimum(jnp.sum((row[:, None] >= ends[None, :]).astype(jnp.int32), axis=1), num_s * num_j - 1)
+
+  b_out = block_of(dst_end)
+  j_out, s_out = b_out // num_s, b_out % num_s
+  gather = jnp.where(valid, _lookup_small(src_start, s_out * num_j + j_out) + row - _lookup_small(dst_start, b_out), row)
+  b_in = block_of(src_end)
+  s_in, j_in = b_in // num_j, b_in % num_j
+  inverse = jnp.where(valid, _lookup_small(dst_start, j_in * num_s + s_in) + row - _lookup_small(src_start, b_in), row)
+  return gather, inverse, jnp.where(valid, j_out, num_j - 1)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
+def _ragged_a2a_paired(x, fwd_params, bwd_params, out_rows, in_rows, axis_name, zero_fill):
+  """`ragged_all_to_all` into `out_rows` rows whose transpose is the one given by `bwd_params`.
+
+  The generic transpose rule all-to-alls the offsets to the peers before sending the cotangent back. Every
+  shard already holds the all-gathered group sizes, so the bwd just runs the reverse exchange (the dispatch's
+  transpose is the combine, and the combine's is the dispatch). `zero_fill=False` leaves unwritten forward
+  rows uninitialized, as the dispatch buffer always was; the bwd always zero-fills.
+  """
+  del bwd_params, in_rows
+  return jax.lax.ragged_all_to_all(
+      x, _zeros_varying_like(x, out_rows, zero_fill), *fwd_params, axis_name=axis_name
+  )
+
+
+def _zeros_varying_like(ref, rows, zero_fill=True):
+  """Zeros (or uninitialized) of `ref`'s trailing shape and dtype with `rows` rows, varying like `ref`."""
+  shape = (rows,) + ref.shape[1:]
+  buf = jnp.zeros(shape, ref.dtype) if zero_fill else jax.lax.empty(shape, dtype=ref.dtype)
+  vma = tuple(jax.typeof(ref).manual_axis_type.varying)
+  return jax.lax.pcast(buf, vma, to="varying") if vma else buf
+
+
+def _ragged_a2a_paired_fwd(x, fwd_params, bwd_params, out_rows, in_rows, axis_name, zero_fill):
+  out = _ragged_a2a_paired(x, fwd_params, bwd_params, out_rows, in_rows, axis_name, zero_fill)
+  return out, (bwd_params, x[:0])
+
+
+def _ragged_a2a_paired_bwd(out_rows, in_rows, axis_name, zero_fill, res, g):
+  del out_rows, zero_fill
+  bwd_params, x_ref = res
+  dx = jax.lax.ragged_all_to_all(g, _zeros_varying_like(x_ref, in_rows), *bwd_params, axis_name=axis_name)
+  return dx, None, None
+
+
+_ragged_a2a_paired.defvjp(_ragged_a2a_paired_fwd, _ragged_a2a_paired_bwd)
 
 
 @jax.custom_vjp
@@ -1079,6 +1178,8 @@ class RoutedMoE(nnx.Module):
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
+      elif self.config.moe_lean_routing:
+        top_k_weights = take_along_last_axis_dense(gate_logits, gather_indices)
       else:
         top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
     else:
@@ -1125,7 +1226,7 @@ class RoutedMoE(nnx.Module):
         else:
           _, top_k_indices = jax.lax.top_k(jax.lax.stop_gradient(gate_logits), self.num_experts_per_tok)
         top_k_indices = adc.checkpoint_name(top_k_indices, "moe_routing")
-        top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
+        top_k_weights = take_along_last_axis_dense(gate_logits, top_k_indices)
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -1401,9 +1502,11 @@ class RoutedMoE(nnx.Module):
         sorted_inputs = sorted_inputs.astype(self.dtype)
       sorted_inputs = adc.checkpoint_name(sorted_inputs, "moe_dispatch")
 
-      group_size = adc.checkpoint_name(
-          jnp.bincount(flatten_selected_experts_safe, length=self.num_experts), "moe_routing"
-      )
+      if self.config.moe_lean_routing:
+        group_size = _count_ids(flatten_selected_experts_safe, self.num_experts)
+      else:
+        group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+      group_size = adc.checkpoint_name(group_size, "moe_routing")
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1658,6 +1761,48 @@ class RoutedMoE(nnx.Module):
         local_group_size,
         sorted_experts_ids,
     )
+
+  @staticmethod
+  def get_expert_major_all_to_all_params(global_group_sizes, shard_id, local_expert_size, buffer_size, is_dispatch=True):
+    """ragged_all_to_all params that land the received tokens already grouped by local expert.
+
+    One slice per (destination shard, local expert) instead of one per destination, so the receiver buffer is
+    ordered [local expert][source shard] and neither the dispatch nor the combine side needs a local permute.
+
+    Args:
+      global_group_sizes: `[num_shards, num_experts]` rows each source shard holds for each global expert, in
+        its expert-sorted send buffer.
+      shard_id: this shard's index on the expert axis.
+      local_expert_size: experts per shard.
+      buffer_size: receiver buffer rows; overflow is dropped from the end of the [expert][source] order.
+      is_dispatch: dispatch (to the experts) or combine (back to the source shards).
+
+    Returns:
+      input_offsets, send_sizes, output_offsets, recv_sizes, and the `[local_expert_size]` kept group sizes.
+    """
+    num_shards = global_group_sizes.shape[0]
+    # sizes[d, j, s]: rows source shard s sends to local expert j of shard d.
+    sizes = global_group_sizes.reshape(num_shards, num_shards, local_expert_size).transpose(1, 2, 0)
+    end = jnp.minimum(jnp.cumsum(sizes.reshape(num_shards, -1), axis=1), buffer_size)
+    start = jnp.concatenate([jnp.zeros_like(end[:, :1]), end[:, :-1]], axis=1)
+    kept = (end - start).reshape(sizes.shape)
+    start = start.reshape(sizes.shape)
+    # Where each global expert's rows begin in every source shard's send buffer, as [s, d, j].
+    src_start = (jnp.cumsum(global_group_sizes, axis=1) - global_group_sizes).reshape(
+        num_shards, num_shards, local_expert_size
+    )
+    local_group_sizes = jnp.sum(kept[shard_id], axis=-1)
+    if is_dispatch:
+      input_offsets = src_start[shard_id].reshape(-1)
+      send_sizes = kept[:, :, shard_id].reshape(-1)
+      output_offsets = start[:, :, shard_id].reshape(-1)
+      recv_sizes = kept[shard_id].T.reshape(-1)
+    else:
+      input_offsets = start[shard_id].T.reshape(-1)
+      send_sizes = kept[shard_id].T.reshape(-1)
+      output_offsets = src_start[:, shard_id, :].reshape(-1)
+      recv_sizes = kept[:, :, shard_id].reshape(-1)
+    return input_offsets, send_sizes, output_offsets, recv_sizes, local_group_sizes
 
   @staticmethod
   def get_all_to_all_params(
@@ -2334,9 +2479,11 @@ class RoutedMoE(nnx.Module):
       # Duplicate routing inputs across all expert shards. Routing evaluates
       # the full gathered batch; logits, pre_bias_logits, and
       # forced_routed_experts must follow the identical all-gather so expert
-      # assignments align across shards.
-      logits, pre_bias_logits, forced_routed_experts = tuple(
-          _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
+      # assignments align across shards. input_ids too: routers that read them
+      # (hash routing, OLMoE3 EMo document masks) must see the gathered batch.
+      logits, pre_bias_logits, forced_routed_experts, input_ids = tuple(
+          _ep_all_gather(z) if z is not None else None
+          for z in (logits, pre_bias_logits, forced_routed_experts, input_ids)
       )
 
       # "Route" tokens within each shard.
@@ -2398,10 +2545,12 @@ class RoutedMoE(nnx.Module):
         rngs,
         input_ids=None,
         forced_routed_experts=None,
+        shard_group_sizes=None,
     ):
       local_sorted_indices = None
       all_shards_group_sizes = None
       reshaped_group_sizes = None
+      local_inverse = None
       (
           x,
           sorted_selected_experts,
@@ -2430,8 +2579,11 @@ class RoutedMoE(nnx.Module):
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         global_group_sizes = group_sizes
 
-        if is_batch_sharded_by_expert:
-          all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
+        if is_batch_sharded_by_expert and self.config.moe_a2a_expert_major:
+          # all_shards_group_sizes carries the full [shard, expert] counts to the combine.
+          if shard_group_sizes is None:
+            shard_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
+          all_shards_group_sizes = adc.checkpoint_name(shard_group_sizes, "moe_routing")
           buffer_size = self.get_ragged_buffer_size(
               jnp.shape(x)[0],
               num_ep,
@@ -2439,35 +2591,85 @@ class RoutedMoE(nnx.Module):
               self.config.num_experts_per_tok,
               self.get_ragged_buffer_factor(),
           )
-          input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
+          *dispatch_params, group_sizes = RoutedMoE.get_expert_major_all_to_all_params(
+              all_shards_group_sizes, expert_shard_id, local_expert_size, buffer_size
+          )
+          combine_params = RoutedMoE.get_expert_major_all_to_all_params(
+              all_shards_group_sizes, expert_shard_id, local_expert_size, buffer_size, is_dispatch=False
+          )[:4]
+          x = _ragged_a2a_paired(
+              x, tuple(dispatch_params), combine_params, buffer_size, x.shape[0], self._expert_parallelism_name, True
+          )
+          selected_experts = _ids_from_group_sizes(group_sizes, buffer_size)
+          x = adc.checkpoint_name(x, "moe_x_sorted")
+          group_sizes, selected_experts = (adc.checkpoint_name(t, "moe_routing") for t in (group_sizes, selected_experts))
+        elif is_batch_sharded_by_expert:
+          all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
+          # The combine all-to-all reuses these; saved (moe_routing=device) they never force
+          # the bwd to rerun routing.
+          reshaped_group_sizes, all_shards_group_sizes = (
+              adc.checkpoint_name(t, "moe_routing") for t in (reshaped_group_sizes, all_shards_group_sizes)
+          )
+          buffer_size = self.get_ragged_buffer_size(
+              jnp.shape(x)[0],
+              num_ep,
+              self.config.num_experts,
+              self.config.num_experts_per_tok,
+              self.get_ragged_buffer_factor(),
+          )
+          dispatch_params = RoutedMoE.get_all_to_all_params(
               all_shards_group_sizes,
               expert_shard_id,
               num_ep,
               ragged_buffer_factor=self.get_ragged_buffer_factor(),
               buffer_size=buffer_size,
           )
-
-          output_shape = jax.lax.empty((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
-
-          x = jax.lax.ragged_all_to_all(
-              x,
-              output_shape,
-              input_offsets,
-              send_sizes,
-              output_offsets,
-              recv_sizes,
-              axis_name=self._expert_parallelism_name,
-          )
+          if self.config.moe_lean_routing:
+            combine_params = RoutedMoE.get_all_to_all_params(
+                all_shards_group_sizes,
+                expert_shard_id,
+                num_ep,
+                ragged_buffer_factor=self.get_ragged_buffer_factor(),
+                buffer_size=buffer_size,
+                is_dispatch=False,
+            )
+            x = _ragged_a2a_paired(
+                x, dispatch_params, combine_params, buffer_size, x.shape[0], self._expert_parallelism_name, False
+            )
+          else:
+            output_shape = jax.lax.empty((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
+            x = jax.lax.ragged_all_to_all(x, output_shape, *dispatch_params, axis_name=self._expert_parallelism_name)
           global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
-          x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
-              x,
-              global_group_sizes,
-              local_expert_size,
-              shard_index=expert_shard_id,
-              use_custom_sort_vjp=self.config.use_custom_sort_vjp,
-              use_ragged_sort=self.config.use_ragged_sort,
-              ragged_buffer_factor=self.get_ragged_buffer_factor(),
-              use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+          if self.config.moe_lean_routing and not self.config.use_ragged_sort:
+            # Received rows are blocks (source shard, local expert); reorder them to (local expert, source)
+            # with sort-free indices, and keep the inverse for the combine and both bwd gathers.
+            sizes = jax.lax.dynamic_slice_in_dim(
+                global_group_sizes, expert_shard_id * local_expert_size, local_expert_size, axis=1
+            )
+            if self.get_ragged_buffer_factor() > 0.0:
+              ends = jnp.minimum(jnp.cumsum(sizes.reshape(-1)), x.shape[0])
+              sizes = jnp.diff(ends, prepend=jnp.zeros((1,), ends.dtype)).reshape(sizes.shape)
+            local_sorted_indices, local_inverse, selected_experts = _block_transpose_indices(sizes, x.shape[0])
+            local_inverse = adc.checkpoint_name(local_inverse, "moe_routing")
+            x = _permute_rows(x, local_sorted_indices, local_inverse)
+            group_sizes = jnp.sum(sizes, axis=0)
+          else:
+            x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
+                x,
+                global_group_sizes,
+                local_expert_size,
+                shard_index=expert_shard_id,
+                use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+                use_ragged_sort=self.config.use_ragged_sort,
+                ragged_buffer_factor=self.get_ragged_buffer_factor(),
+                use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+            )
+          # Saving the expert-local tokens (moe_x_sorted=device) lets the bwd skip the
+          # dispatch all-to-all and the local sort; the small routing metadata rides on
+          # moe_routing so recomputing it never needs the pre-all-to-all tokens.
+          x = adc.checkpoint_name(x, "moe_x_sorted")
+          local_sorted_indices, group_sizes, selected_experts = (
+              adc.checkpoint_name(t, "moe_routing") for t in (local_sorted_indices, group_sizes, selected_experts)
           )
         else:
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
@@ -2499,6 +2701,7 @@ class RoutedMoE(nnx.Module):
               local_sorted_indices=local_sorted_indices,
               all_shards_group_sizes=all_shards_group_sizes,
               reshaped_group_sizes=reshaped_group_sizes,
+              local_inverse=local_inverse,
           ),
       )
 
@@ -2510,6 +2713,7 @@ class RoutedMoE(nnx.Module):
         input_ids=None,
         forced_routed_experts=None,
         force_dropless=False,
+        shard_group_sizes=None,
     ):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -2537,6 +2741,7 @@ class RoutedMoE(nnx.Module):
             rngs,
             input_ids=input_ids,
             forced_routed_experts=forced_routed_experts,
+            shard_group_sizes=shard_group_sizes,
         )
 
     def get_active_sharding_axes(pspec_dim_axes, tensor_dim_index):
@@ -2697,6 +2902,26 @@ class RoutedMoE(nnx.Module):
         is_batch_sharded_by_expert,
     ):
       """Unsort tokens and return them to original shards using ragged all-to-all."""
+      if is_batch_sharded_by_expert and self.config.moe_a2a_expert_major:
+        params = [
+            RoutedMoE.get_expert_major_all_to_all_params(
+                route_metadata.all_shards_group_sizes,
+                route_metadata.expert_shard_id,
+                self.config.num_experts // self.get_expert_parallelism_size(),
+                intermediate_output.shape[0],
+                is_dispatch=dispatch,
+            )[:4]
+            for dispatch in (False, True)
+        ]
+        return _ragged_a2a_paired(
+            intermediate_output,
+            params[0],
+            params[1],
+            output_shape.shape[0],
+            intermediate_output.shape[0],
+            self._expert_parallelism_name,
+            True,
+        )
       if is_batch_sharded_by_expert:
         # locally unpermute back to the original order
         if self.config.use_ragged_sort:
@@ -2710,6 +2935,10 @@ class RoutedMoE(nnx.Module):
               valid_end,
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
+        elif route_metadata.local_inverse is not None:
+          local_output = _permute_rows(
+              intermediate_output, route_metadata.local_inverse, route_metadata.local_sorted_indices
+          )
         else:
           local_output = _sort_activations(
               intermediate_output,
@@ -2718,22 +2947,29 @@ class RoutedMoE(nnx.Module):
           )
 
         buffer_size = intermediate_output.shape[0]
-        input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
-            route_metadata.all_shards_group_sizes,
-            route_metadata.expert_shard_id,
-            self.get_expert_parallelism_size(),
-            ragged_buffer_factor=self.get_ragged_buffer_factor(),
-            buffer_size=buffer_size,
-            is_dispatch=False,
-        )
+        params = [
+            RoutedMoE.get_all_to_all_params(
+                route_metadata.all_shards_group_sizes,
+                route_metadata.expert_shard_id,
+                self.get_expert_parallelism_size(),
+                ragged_buffer_factor=self.get_ragged_buffer_factor(),
+                buffer_size=buffer_size,
+                is_dispatch=dispatch,
+            )
+            for dispatch in (False, True)
+        ]
+        if self.config.moe_lean_routing:
+          return _ragged_a2a_paired(
+              local_output,
+              params[0],
+              params[1],
+              output_shape.shape[0],
+              buffer_size,
+              self._expert_parallelism_name,
+              True,
+          )
         return jax.lax.ragged_all_to_all(
-            local_output,
-            output_shape,
-            input_offsets,
-            send_sizes,
-            output_offsets,
-            recv_sizes,
-            axis_name=self._expert_parallelism_name,
+            local_output, output_shape, *params[0], axis_name=self._expert_parallelism_name
         )
 
       # If batch is replicated across EP shards then each shard should send
@@ -2870,6 +3106,7 @@ class RoutedMoE(nnx.Module):
         rngs,
         forced_routed_experts=None,
         force_dropless=False,
+        shard_group_sizes=None,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
@@ -2896,6 +3133,7 @@ class RoutedMoE(nnx.Module):
             input_ids=sharded_input_ids,
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
+            shard_group_sizes=shard_group_sizes,
         )
         mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
@@ -2959,7 +3197,11 @@ class RoutedMoE(nnx.Module):
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if routing.sorted_selected_experts.shape[0] != original_inputs_first_dim:
           raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
-        output_shape = jax.lax.empty(
+        # A capped ragged buffer (ragged_buffer_factor > 0) drops overflow tokens,
+        # and the return all-to-all never writes their rows. Zero the buffer then,
+        # so dropped tokens contribute 0 instead of uninitialized memory (NaN).
+        alloc = jnp.zeros if self.get_ragged_buffer_factor() > 0.0 else jax.lax.empty
+        output_shape = alloc(
             (
                 original_inputs_first_dim,
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
@@ -2974,6 +3216,9 @@ class RoutedMoE(nnx.Module):
             output_shape,
             is_batch_sharded_by_expert,
         )
+        # unpermute's bwd reads its input for the gate-weight gradient; saving it
+        # (moe_combine=device) keeps the bwd from rerunning the wo GMM and the combine all-to-all.
+        intermediate_output = adc.checkpoint_name(intermediate_output, "moe_combine")
 
       output = self.unpermute(
           intermediate_output,
@@ -2984,6 +3229,7 @@ class RoutedMoE(nnx.Module):
           use_custom_sort_vjp=self.config.use_custom_sort_vjp,
           group_sizes=routing.group_sizes,
       )
+      output = adc.checkpoint_name(output, "moe_combine")
 
       return output, routing.lb_loss, routing.bias_updates, routing.has_overflow, routing.required_rbf
 
@@ -3041,9 +3287,66 @@ class RoutedMoE(nnx.Module):
       if barrier_enabled is None:
         barrier_enabled = self.config.moe_chunk_barrier
 
+      def _route_once_dispatch_in_chunks(force_dropless):
+        """The all-to-all path in `moe_a2a_token_chunks` sequence chunks, routed once over the whole sequence.
+
+        EMo pools are per document, so routing needs every token: it runs once here and each chunk reuses its
+        slice as forced experts. The load-balance loss also comes from the full routing, so it equals the
+        unchunked one. What the chunks buy is smaller dispatch buffers: on v4 a row gather whose source exceeds
+        the 128 MiB CMEM runs ~3.5x slower, and at seq 8192 every MoE permute does.
+        """
+        num = self.config.moe_a2a_token_chunks
+        _, top_k_indices = self.get_topk(logits, pre_bias_logits, rngs, sharded_input_ids, None)
+        top_k_indices = adc.checkpoint_name(top_k_indices, "moe_routing")
+        lb_loss = None
+        if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
+          probs_logits = pre_bias_logits if pre_bias_logits is not None else logits
+          probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+          lb_loss = self.load_balance_loss(top_k_indices, probs)
+        chunk = x.shape[1] // num
+        shard_sizes = None
+        if self.config.moe_a2a_expert_major and self.get_expert_parallelism_size() > 1:
+          # Every chunk's per-expert counts in one all-gather instead of one small, latency-bound gather per
+          # chunk; the counts are the same compare-and-sum permute() does on the chunk's forced experts.
+          counts = jnp.stack(
+              [
+                  _count_ids(top_k_indices[:, c * chunk : (c + 1) * chunk, :], self.config.num_experts)
+                  for c in range(num)
+              ]
+          )
+          shard_sizes = jax.lax.all_gather(counts, axis_name=self._expert_parallelism_name)  # [S, num, E]
+        outs, bias_updates_list, has_overflows, required_rbfs = [], [], [], []
+        for c in range(num):
+          sl = slice(c * chunk, (c + 1) * chunk)
+          out_c, _, bu_c, ov_c, req_c = _moe_body(
+              x[:, sl, :],
+              logits[:, sl, :],
+              None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
+              w0,
+              w1,
+              wo,
+              w0_bias,
+              w1_bias,
+              wo_bias,
+              None,
+              rngs,
+              top_k_indices[:, sl, :],
+              force_dropless=force_dropless,
+              shard_group_sizes=None if shard_sizes is None else shard_sizes[:, c, :],
+          )
+          outs.append(out_c)
+          bias_updates_list.append(bu_c)
+          has_overflows.append(ov_c)
+          required_rbfs.append(req_c)
+        bias_updates = None if bias_updates_list[0] is None else sum(bias_updates_list) / num
+        required_rbf = None if required_rbfs[0] is None else jnp.max(jnp.stack(required_rbfs))
+        return jnp.concatenate(outs, axis=1), lb_loss, bias_updates, jnp.any(jnp.stack(has_overflows)), required_rbf
+
       def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
         if n_chunks <= 1 or not self.config.use_ring_of_experts:
+          if self.config.moe_a2a_token_chunks > 1 and forced_routed_experts is None:
+            return _route_once_dispatch_in_chunks(force_dropless)
           return _moe_body(
               x,
               logits,
@@ -3120,6 +3423,11 @@ class RoutedMoE(nnx.Module):
 
       # In-layer dropless fallback: calculate the overflow, then run either the
       # normal capped path or a chunked dropless path for this layer only (no step replay).
+      # Draw one key up front: an nnx.Rngs can't be advanced inside the lax.cond
+      # branches (TraceContextError), and routers that sample (e.g. EMo pools)
+      # then use the same key in the check and in both branches.
+      if rngs is not None and callable(getattr(rngs, "params", None)):
+        rngs = rngs.params()
       took_fallback = self._check_ragged_overflow(
           logits, pre_bias_logits, rngs, sharded_input_ids, forced_routed_experts, n_chunks
       )

@@ -39,6 +39,7 @@ except ImportError:
 
 import jax
 import jax.numpy as jnp
+import optax
 from jax.sharding import NamedSharding
 
 from flax import nnx, traverse_util
@@ -628,7 +629,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
 
-  if not config.optimizer_memory_host_offload:
+  if not config.optimizer_memory_host_offload and config.norm_metrics == "grad":
+    # One norm instead of three full passes over the parameters. optax.global_norm is the expression
+    # clip_by_global_norm evaluates, so XLA shares it; the clipped norm follows from it.
+    raw_norm = optax.global_norm(raw_grads)
+    scalar_metrics["learning/raw_grad_norm"] = raw_norm
+    if config.gradient_clipping_threshold > 0:
+      scalar_metrics["learning/grad_norm"] = jnp.minimum(raw_norm, config.gradient_clipping_threshold)
+    else:
+      scalar_metrics["learning/grad_norm"] = raw_norm
+  elif not config.optimizer_memory_host_offload and config.norm_metrics == "all":
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
     model_params = nnx.state(new_state.model, nnx.Param)

@@ -1224,13 +1224,15 @@ class RoutedMoeTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
-      ("overflow", 0.1, True),
-      ("dropless", -1.0, False),
+      ("overflow", 0.1, True, True),
+      ("dropless", -1.0, False, True),
+      ("overflow_all_to_all", 0.1, None, False),
+      ("dropless_all_to_all", -1.0, None, False),
   )
-  def test_ragged_sort_overflow_detection(self, ragged_buffer_factor, expect_overflow):
+  def test_ragged_sort_overflow_detection(self, ragged_buffer_factor, expect_overflow, use_ring_of_experts):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name=f"moe_overflow_detection_{ragged_buffer_factor}",
+        run_name=f"moe_overflow_detection_{ragged_buffer_factor}_{use_ring_of_experts}",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         override_model_config=True,
@@ -1242,7 +1244,7 @@ class RoutedMoeTest(parameterized.TestCase):
         sparse_matmul=True,
         per_device_batch_size=4,
         ici_expert_parallelism=2,
-        use_ring_of_experts=True,
+        use_ring_of_experts=use_ring_of_experts,
         max_target_length=128,
         float32_gate_logits=True,
         use_ragged_sort=True,
@@ -1274,8 +1276,14 @@ class RoutedMoeTest(parameterized.TestCase):
 
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
       variables = model.init({"params": rng_model, "dropout": rng_model}, hidden_states)
-      _, mutated = model.apply({"params": variables["params"]}, hidden_states, mutable=["intermediates"])
+      output, mutated = model.apply({"params": variables["params"]}, hidden_states, mutable=["intermediates"])
 
+    # Dropped tokens must contribute zero, not uninitialized buffer rows.
+    output = output[0] if isinstance(output, tuple) else output
+    self.assertTrue(bool(jnp.all(jnp.isfinite(output))), "MoE output has non-finite values.")
+
+    if expect_overflow is None:  # the all-to-all path does not report overflow
+      return
     has_overflow = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_has_overflow")
     self.assertTrue(has_overflow, "Expected a moe_has_overflow intermediate to be sown.")
     any_overflow = bool(jnp.any(jnp.array([jnp.any(x) for x in has_overflow])))
@@ -2059,6 +2067,80 @@ class RoutedMoeTest(parameterized.TestCase):
       self.assertTrue(
           jnp.array_equal(recv_sz, exp_recv_sz), f"Unsharded Batch: Receive sizes mismatch for shard {expert_shard_id}"
       )
+
+  def test_block_transpose_indices_match_local_permute(self):
+    """The sort-free local permute indices equal local_permute's argsort, with and without buffer truncation."""
+    num_shards, local_experts = 8, 4
+    rng = np.random.default_rng(3)
+    for rbf, rows in ((-1.0, 400), (1.0, 120), (1.0, 300)):
+      for shard in (0, 3, 7):
+        sizes_all = jnp.asarray(rng.integers(0, 4, size=(num_shards, num_shards * local_experts)), jnp.int32)
+        x = jnp.asarray(rng.standard_normal((rows, 5)), jnp.float32)
+        _, ref_idx, ref_gs, ref_ids = moe.RoutedMoE.local_permute(
+            x, sizes_all, local_experts, shard, ragged_buffer_factor=rbf
+        )
+        sizes = jax.lax.dynamic_slice_in_dim(sizes_all, shard * local_experts, local_experts, axis=1)
+        if rbf > 0:
+          ends = jnp.minimum(jnp.cumsum(sizes.reshape(-1)), rows)
+          sizes = jnp.diff(ends, prepend=jnp.zeros((1,), ends.dtype)).reshape(sizes.shape)
+        gather, inverse, ids = moe._block_transpose_indices(sizes, rows)  # pylint: disable=protected-access
+        valid = int(jnp.sum(ref_gs))
+        np.testing.assert_array_equal(gather, ref_idx)
+        np.testing.assert_array_equal(inverse, jnp.argsort(ref_idx))
+        np.testing.assert_array_equal(ids[:valid], ref_ids[:valid])
+        np.testing.assert_array_equal(jnp.sum(sizes, axis=0), ref_gs)
+
+  def test_get_expert_major_all_to_all_params(self):
+    """Expert-major dispatch lands rows grouped by local expert, and the combine returns them in place."""
+    num_shards, local_experts = 4, 2
+    num_experts = num_shards * local_experts
+    sizes = np.random.default_rng(0).integers(0, 7, size=(num_shards, num_experts)).astype(np.int32)
+    rows = int(sizes.sum(1).max())
+    # Each source buffer holds its rows sorted by global expert; a row's value names (source, expert, k), 0 = empty.
+    src = np.zeros((num_shards, rows), np.int32)
+    for s_ in range(num_shards):
+      src[s_, : sizes[s_].sum()] = [1 + 1000 * s_ + 10 * e + k for e in range(num_experts) for k in range(sizes[s_, e])]
+
+    def a2a(bufs, out_rows, params):
+      # ragged_all_to_all as documented: slice i of a caller goes to device i // slices_per_device.
+      out = np.zeros((num_shards, out_rows), np.int32)
+      per = len(params[0][0]) // num_shards
+      for me in range(num_shards):
+        in_off, send, out_off, _ = (np.asarray(t) for t in params[me])
+        for i in range(len(in_off)):
+          out[i // per, out_off[i] : out_off[i] + send[i]] = bufs[me, in_off[i] : in_off[i] + send[i]]
+      return out
+
+    for buffer_size in (64, 12):
+      fwd = [
+          moe.RoutedMoE.get_expert_major_all_to_all_params(jnp.array(sizes), d, local_experts, buffer_size)
+          for d in range(num_shards)
+      ]
+      for d in range(num_shards):  # send sizes match the receivers' recv sizes
+        for s_ in range(num_shards):
+          np.testing.assert_array_equal(
+              np.asarray(fwd[s_][1]).reshape(num_shards, -1)[d], np.asarray(fwd[d][3]).reshape(num_shards, -1)[s_]
+          )
+      recv = a2a(src, buffer_size, [p[:4] for p in fwd])
+      for d in range(num_shards):
+        expected = [
+            1 + 1000 * s_ + 10 * (d * local_experts + j) + k
+            for j in range(local_experts)
+            for s_ in range(num_shards)
+            for k in range(sizes[s_, d * local_experts + j])
+        ][:buffer_size]
+        np.testing.assert_array_equal(recv[d, : len(expected)], expected)
+        self.assertEqual(int(np.asarray(fwd[d][4]).sum()), len(expected))
+      bwd = [
+          moe.RoutedMoE.get_expert_major_all_to_all_params(
+              jnp.array(sizes), d, local_experts, buffer_size, is_dispatch=False
+          )
+          for d in range(num_shards)
+      ]
+      back = a2a(recv, rows, [p[:4] for p in bwd])
+      kept = back != 0
+      np.testing.assert_array_equal(back[kept], src[kept])
+      self.assertEqual(int(kept.sum()), sum(int(np.asarray(p[4]).sum()) for p in fwd))
 
   def test_ragged_buffer_balanced(self):
     ragged_buffer_factor = 1.0
