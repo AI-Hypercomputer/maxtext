@@ -41,6 +41,7 @@ jobs:
     outputs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
       short_sha: ${{ steps.vars.outputs.short_sha }}
+      parent_sha: ${{ steps.vars.outputs.parent_sha }}
     steps:
       - name: Checkout MaxText
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -52,9 +53,9 @@ jobs:
         shell: bash
         run: |
           MAXTEXT_SHA=$(git rev-parse HEAD)
-          echo "Using MaxText SHA: ${MAXTEXT_SHA}"
+          PARENT_SHA=$(git rev-parse "HEAD~1")
           echo "maxtext_sha=${MAXTEXT_SHA}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${MAXTEXT_SHA:0:7}" >> "$GITHUB_OUTPUT"
+          echo "parent_sha=${PARENT_SHA}" >> "$GITHUB_OUTPUT"
 
   release_approval:
     name: Approve Release Candidate
@@ -99,10 +100,11 @@ jobs:
       - name: Verify Release Candidate Images
         shell: bash
         env:
-          TARGET_REF: ${{ inputs.release_tag }}
-          MAXTEXT_SHA: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           REPOSITORY_NAME: 'maxtext-images-staging'
+          DOCKER_IMAGE_NAME: ${{ matrix.image_name }}
+          MAXTEXT_SHA: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+          PARENT_SHA: ${{ needs.get_maxtext_sha.outputs.parent_sha }}
         run: |
           SOURCE_IMAGE=us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${DOCKER_IMAGE_NAME}
           # Verify that the image with the tested SHA exists
@@ -111,17 +113,17 @@ jobs:
             exit 1
           fi
 
-          # verify that the image with the current run ID has the correct release tag label
-          IMAGE_TAG=$(gcloud container images describe "${SOURCE_IMAGE}:${PARENT_SHA}" --format='get(image_summary.digest)' --show-labels | grep "verified-e2e-${TARGET_REF}" | cut -d'=' -f2)
-          if [ "$IMAGE_TAG" != "$TARGET_REF" ]; then
-            echo "Error: Docker image ${SOURCE_IMAGE}:${PARENT_SHA} has label release_tag=${IMAGE_TAG}, expected ${TARGET_REF}."
+          # verify that the image has the correct verified-e2e-${PARENT_SHA} label
+          IMAGE_TAG=$(gcloud container images describe "${SOURCE_IMAGE}:${PARENT_SHA}" --format='get(image_summary.digest)' --show-labels | grep "verified-e2e-${PARENT_SHA}" | cut -d'=' -f2)
+          if [ "$IMAGE_TAG" != "$PARENT_SHA" ]; then
+            echo "Error: Docker image ${SOURCE_IMAGE}:${PARENT_SHA} has label release_tag=${IMAGE_TAG}, expected ${PARENT_SHA}."
             exit 1
           fi
 
-          # verify that the image with the current run ID has the correct release tag label
-          IMAGE_TAG=$(gcloud container images describe "${SOURCE_IMAGE}:${PARENT_SHA}" --format='get(image_summary.digest)' --show-labels | grep "verified-e2e-${TARGET_REF}" | cut -d'=' -f2)
-          if [ "$IMAGE_TAG" != "$TARGET_REF" ]; then
-            echo "Error: Docker image ${SOURCE_IMAGE}:${PARENT_SHA} has label release_tag=${IMAGE_TAG}, expected ${TARGET_REF}."
+          # verify that the image has the correct verified-perf-${PARENT_SHA} label
+          IMAGE_TAG=$(gcloud container images describe "${SOURCE_IMAGE}:${PARENT_SHA}" --format='get(image_summary.digest)' --show-labels | grep "verified-perf-${PARENT_SHA}" | cut -d'=' -f2)
+          if [ "$IMAGE_TAG" != "$PARENT_SHA" ]; then
+            echo "Error: Docker image ${SOURCE_IMAGE}:${PARENT_SHA} has label release_tag=${IMAGE_TAG}, expected ${PARENT_SHA}."
             exit 1
           fi
 
