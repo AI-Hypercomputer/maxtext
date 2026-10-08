@@ -129,8 +129,12 @@ jobs:
                   ],
                   "includeTools": [
                     "add_comment_to_pending_review",
+                    "get_commit",
+                    "get_file_contents",
+                    "issue_read",
                     "pull_request_read",
-                    "pull_request_review_write"
+                    "pull_request_review_write",
+                    "search_code"
                   ],
                   "env": {
                     "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
