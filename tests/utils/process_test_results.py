@@ -28,6 +28,21 @@ REL_REGRESSION_OTHER_RATIO = 1.20
 ABS_INCREASE_UNIT_SEC = 15.0
 ABS_INCREASE_INTEGRATION_SEC = 30.0
 
+# TODO: Remove this exclusion list once pytest-split is fixed to avoid cold-compile noise on first test in shard.
+# Modules excluded from per-test regression enforcement.
+# These modules have heavy XLA compilation costs that are shared across tests
+# within the same pytest-split shard. Because pytest-split randomly redistributes
+# tests across shards on every run, the first test in each shard pays a cold-compile
+# penalty (~30-130s) while subsequent tests reuse the cache (~4-25s). This creates
+# massive false-positive duration swings (e.g. 5s -> 130s) depending on shard
+# position, not code changes. Per-test regressions in these modules are logged as
+# warnings for visibility but do not fail the CI run.
+# See: https://github.com/AI-Hypercomputer/maxtext/pull/5308
+EXCLUDED_MODULES_PER_TEST = {
+    "tests.unit.moe_test",
+    "tests.unit.attention_test",
+}
+
 
 def extract_job_name(xml_file):
   """Extracts job/flavor name from XML filename."""
@@ -57,6 +72,7 @@ def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_d
   name = testcase.get("name", "unknown")
   classname = testcase.get("classname", "unknown")
   full_name = f"{classname}.{name}"
+  module_name = classname.rsplit(".", 1)[0] if "." in classname else classname
 
   # Parse custom properties to extract markers
   markers = set()
@@ -91,7 +107,15 @@ def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_d
       ratio = time_val / base_time
       increase = time_val - base_time
       if ratio >= rel_regression_ratio and increase > abs_noise_threshold:
-        print(f"::error::[REGRESSION ALERT] {test_type} significantly degraded!")
+        is_excluded = module_name in EXCLUDED_MODULES_PER_TEST
+        if is_excluded:
+          print(
+              f"::warning::[PER-TEST REGRESSION ALERT] {test_type} significantly degraded"
+              + " (Warn-only: module excluded due to pytest-split sharding noise)."
+          )
+        else:
+          print(f"::error::[REGRESSION ALERT] {test_type} significantly degraded!")
+          failed = True
         print(f"  Test: {full_name}")
         print(f"  Flavor: {job_name}")
         print(f"  File: {os.path.basename(xml_file)}")
@@ -100,7 +124,6 @@ def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_d
         print(f"  Increase: +{increase:.2f}s ({(ratio - 1) * 100:.1f}%)")
         print(f"  Thresholds: >{(rel_regression_ratio - 1) * 100:.0f}% AND >{abs_noise_threshold}s")
         print("-" * 50)
-        failed = True
 
   return failed
 
@@ -131,7 +154,7 @@ def main():
   )
   args = parser.parse_args()
 
-  xml_files = glob.glob(os.path.join(args.xml_dir, "*.xml"))
+  xml_files = sorted(glob.glob(os.path.join(args.xml_dir, "*.xml")))
   if not xml_files:
     print(f"No XML files found in {args.xml_dir}")
     sys.exit(0)
@@ -145,7 +168,9 @@ def main():
       print(f"Error loading baseline {args.baseline}: {e}")
 
   # Initialize with existing baseline data, filtering out old legacy keys without flavor separator '::'
-  new_baseline_data = {k: v for k, v in baseline_data.items() if "::" in k and isinstance(v, (int, float))}
+  new_baseline_data = {
+      k: v for k, v in baseline_data.items() if "::" in k and "::MODULE::" not in k and isinstance(v, (int, float))
+  }
   has_regression = False
   has_errors = False
 
@@ -167,7 +192,7 @@ def main():
         time_val = float(testcase.get("time", 0.0))
         job_time += time_val
 
-        # Micro-level regression check
+        # Micro-level regression check (enforced for non-excluded modules, warn-only for excluded)
         if process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
           has_regression = True
 
@@ -182,7 +207,7 @@ def main():
   # Output macro-level benchmark JSON if requested
   if args.output_benchmark:
     benchmarks = []
-    for job, total_time in total_times_by_job.items():
+    for job, total_time in sorted(total_times_by_job.items()):
       # Exclude CPU suites from macro-level dashboard tracking to avoid false alerts from CPU runner noise
       if "cpu" in job.lower():
         continue
