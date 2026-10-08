@@ -27,7 +27,7 @@ import jax
 from jax.experimental import pallas as pl
 import numpy as np
 
-from maxtext.common.common_types import MODEL_MODE_TRAIN
+from maxtext.common.common_types import AttentionType, MODEL_MODE_TRAIN
 from maxtext.kernels.tokamax_splash_attention import ring_attention_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
@@ -35,8 +35,15 @@ from maxtext.utils import max_utils
 from maxtext.utils import sharding
 
 
-def is_context_parallel_ring_requested(config: Any) -> bool:
+def is_context_parallel_ring_requested(
+    config: Any, attention_type: AttentionType | None = None
+) -> bool:
   """Returns True when the config requests ring context parallelism."""
+  if (
+      attention_type == AttentionType.LOCAL_SLIDING
+      and getattr(config, "local_context_parallel_strategy", "")
+  ):
+    return False
   return config.context_parallel_strategy.lower() == "ring"
 
 

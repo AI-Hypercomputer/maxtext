@@ -51,6 +51,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_PREFILL,
     AttentionType,
 )
+from maxtext.kernels.attention import ulysses_attention
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type
 from maxtext.layers.embeddings import (
@@ -615,7 +616,7 @@ class Attention(nnx.Module):
     # Ulysses exchanges sequence ownership for head ownership through an
     # all-to-all, so the context axis shards KV heads too even though no
     # logical rule says so.
-    if self.config.context_parallel_strategy.lower() == "ulysses":
+    if ulysses_attention.is_context_parallel_ulysses_requested(self.config, self.attention_type):
       ulysses_axis = self.config.context_sharding
       if ulysses_axis not in kv_head_axes:
         kv_head_axes.append(ulysses_axis)
