@@ -13,3 +13,7 @@
 # limitations under the License.
 
 """Diffusion noise schedulers package."""
+
+from .scheduling_unipc_multistep import FlaxUniPCMultistepScheduler
+from .scheduling_flow_match import FlaxFlowMatchScheduler
+from .scheduling_utils import FlaxSchedulerMixin, FlaxSchedulerOutput

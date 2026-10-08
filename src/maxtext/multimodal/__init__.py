@@ -13,3 +13,6 @@
 # limitations under the License.
 
 """Multimodal VAE and processor utilities package."""
+
+from maxtext.multimodal.processor_vae_image import VaeImageProcessor, VaeImageProcessorLDM3D, PipelineImageInput
+from maxtext.multimodal.processor_vae_video import VaeVideoProcessor, VideoProcessor
