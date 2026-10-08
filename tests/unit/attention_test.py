@@ -3245,11 +3245,26 @@ class AttentionTest(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
-  @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
-  def test_forward_serve_vllm(self, mock_sharded_ragged_paged_attention):
+  @staticmethod
+  def _stub_tpu_inference_attention(mock_rpa_ops=None, mock_dcp_forward=None):
+    pkg = types.ModuleType("tpu_inference")
+    layers = types.ModuleType("tpu_inference.layers")
+    common = types.ModuleType("tpu_inference.layers.common")
+    attn_iface = types.ModuleType("tpu_inference.layers.common.attention_interface")
+    cp_attn = types.ModuleType("tpu_inference.layers.common.cp_attention")
+    attn_iface.sharded_ragged_paged_attention = mock_rpa_ops or mock.MagicMock()
+    cp_attn.dcp_forward = mock_dcp_forward or mock.MagicMock()
+    return {
+        "tpu_inference": pkg,
+        "tpu_inference.layers": layers,
+        "tpu_inference.layers.common": common,
+        "tpu_inference.layers.common.attention_interface": attn_iface,
+        "tpu_inference.layers.common.cp_attention": cp_attn,
+    }
+
+  def test_forward_serve_vllm(self):
     """Tests the forward_serve_vllm method with mocked RPA attention."""
+    mock_sharded_ragged_paged_attention = mock.MagicMock()
     # Setup config for vLLM RPA
     vllm_config_arguments = self.config_arguments.copy()
     vllm_config_arguments["attention"] = "vllm_rpa"
@@ -3298,17 +3313,20 @@ class AttentionTest(parameterized.TestCase):
 
     mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
 
-    # Call the attention layer
-    output, updated_kv_cache = attention_vllm(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        kv_cache=mock_kv_cache,
-        attention_metadata=mock_attention_metadata,
-    )
+    with mock.patch.dict(
+        sys.modules, self._stub_tpu_inference_attention(mock_rpa_ops=mock_sharded_ragged_paged_attention)
+    ):
+      # Call the attention layer
+      output, updated_kv_cache = attention_vllm(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=mock_kv_cache,
+          attention_metadata=mock_attention_metadata,
+      )
 
     # Assertions
     mock_sharded_ragged_paged_attention.assert_called_once()
@@ -3320,11 +3338,9 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(jnp.allclose(output, expected_output))
     self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
 
-  @pytest.mark.skip(reason="Requires `vllm-tpu` package which is not yet a MaxText dependency.")
-  @pytest.mark.tpu_only
-  @mock.patch("tpu_inference.layers.common.attention_interface.sharded_ragged_paged_attention", create=True)
-  def test_forward_serve_vllm_batched_rpa(self, mock_sharded_ragged_paged_attention):
+  def test_forward_serve_vllm_batched_rpa(self):
     """Tests the forward_serve_vllm method with mocked batched RPA attention."""
+    mock_sharded_ragged_paged_attention = mock.MagicMock()
     # Setup config for vLLM Batched RPA
     vllm_config_arguments = self.config_arguments.copy()
     vllm_config_arguments["attention"] = "vllm_batched_rpa"
@@ -3373,17 +3389,20 @@ class AttentionTest(parameterized.TestCase):
 
     mock_sharded_ragged_paged_attention.return_value = (mock_output, mock_updated_kv_cache)
 
-    # Call the attention layer
-    output, updated_kv_cache = attention_vllm(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_AUTOREGRESSIVE,
-        kv_cache=mock_kv_cache,
-        attention_metadata=mock_attention_metadata,
-    )
+    with mock.patch.dict(
+        sys.modules, self._stub_tpu_inference_attention(mock_rpa_ops=mock_sharded_ragged_paged_attention)
+    ):
+      # Call the attention layer
+      output, updated_kv_cache = attention_vllm(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          kv_cache=mock_kv_cache,
+          attention_metadata=mock_attention_metadata,
+      )
 
     # Assertions
     mock_sharded_ragged_paged_attention.assert_called_once()
@@ -3395,6 +3414,66 @@ class AttentionTest(parameterized.TestCase):
     expected_output = attention_vllm.out_projection(reshaped_mock_output)
     self.assertTrue(jnp.allclose(output, expected_output))
     self.assertEqual(output.shape, (self.global_batch_size, seq_len, self.embed_dim))
+
+  def test_forward_serve_vllm_dcp(self):
+    """Tests that forward_serve_vllm dispatches to dcp_forward when mesh has dcp > 1."""
+    mock_rpa_ops = mock.MagicMock()
+    mock_dcp_forward = mock.MagicMock()
+
+    vllm_config_arguments = self.config_arguments.copy()
+    vllm_config_arguments["attention"] = "vllm_rpa"
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        **vllm_config_arguments,
+    )
+
+    seq_len = self.max_target_length
+    dummy_inputs_q = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    dummy_inputs_kv = jnp.ones((self.global_batch_size, seq_len, self.embed_dim))
+    attention_vllm = Attention(
+        config=config,
+        num_query_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        max_target_length=self.max_target_length,
+        max_prefill_predict_length=self.max_prefill_predict_length,
+        inputs_q_shape=dummy_inputs_q.shape,
+        inputs_kv_shape=dummy_inputs_kv.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=self.dtype,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+        rngs=self.nnx_rng,
+    )
+
+    total_tokens = self.global_batch_size * seq_len
+    query = jnp.ones((self.global_batch_size, seq_len, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    key = jnp.ones((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    value = jnp.ones((self.global_batch_size, seq_len, self.num_kv_heads, self.head_dim), dtype=self.dtype)
+    mock_kv_cache = [jnp.ones((1,))]
+    mock_attention_metadata = mock.Mock()
+    mock_output = jnp.ones((total_tokens, self.num_query_heads, self.head_dim), dtype=self.dtype)
+    mock_updated_kv_cache = [jnp.zeros((1,))]
+    mock_dcp_forward.return_value = (mock_updated_kv_cache, mock_output)
+
+    attention_vllm.mesh = types.SimpleNamespace(shape={"dcp": 2})
+
+    with mock.patch.dict(
+        sys.modules,
+        self._stub_tpu_inference_attention(mock_rpa_ops=mock_rpa_ops, mock_dcp_forward=mock_dcp_forward),
+    ):
+      output, updated_kv_cache = attention_vllm.forward_serve_vllm(
+          query,
+          key,
+          value,
+          rpa_kv_cache=mock_kv_cache,
+          rpa_metadata=mock_attention_metadata,
+      )
+
+    mock_dcp_forward.assert_called_once()
+    mock_rpa_ops.assert_not_called()
+    self.assertEqual(updated_kv_cache, mock_updated_kv_cache)
+    self.assertTrue(jnp.allclose(output, mock_output))
 
 
 class MLATest(attention_test_util.MLATestBase):
