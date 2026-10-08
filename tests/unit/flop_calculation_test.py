@@ -518,6 +518,25 @@ class FlopCalculation(parameterized.TestCase):
     # The auxiliary MTP layer is real extra compute, so it must show up in the estimate.
     self.assertGreater(tflops_with_mtp, tflops_no_mtp)
 
+  def test_deepseek4_1600b_flops(self):
+    """Test DeepSeek V4 1600B MFU FLOP calculation"""
+    cfg = self._initialize_model_config(
+        "deepseek4-1600b",
+        max_target_length=4096,
+        per_device_batch_size=1,
+        attention="dot_product",
+    )
+    B = cfg.per_device_batch_size
+    S = cfg.max_target_length
+
+    # DeepSeek-V4-Pro has ~48.4B active parameters per token (6 routed + 1 shared expert).
+    golden_param_size = 48.4e9
+    calculated_total, calculated_weight, calculated_attn = calculate_tflops_training_per_device(cfg, log=False)
+    golden_weight_flops = 6 * B * S * golden_param_size / 1e12
+    golden_total_flops = golden_weight_flops + calculated_attn
+    self.assertFlopsAlmostEqual(calculated_total, golden_total_flops)
+    self.assertFlopsAlmostEqual(calculated_weight, golden_weight_flops)
+
   def test_custom_engram_flops(self):
     """Test model with Engram Flops calculation"""
     cfg = self._initialize_model_config(
@@ -1313,6 +1332,24 @@ class FlopCalculation(parameterized.TestCase):
     plus expected attention flops for various standard models with a long sequence length.
     """
     self._verify_long_sequence_flops(model_name)
+
+
+class DeepSeekV4ProConfigSmokeTest(unittest.TestCase):
+  """Validates deepseek4-1600b config and component initialization."""
+
+  def test_deepseek4_1600b_config(self):
+    cfg = pyconfig.initialize_pydantic(
+        ["", "src/maxtext/configs/base.yml", "model_name=deepseek4-1600b", "enable_checkpointing=false"]
+    )
+    self.assertEqual(cfg.model_name, "deepseek4-1600b")
+    self.assertEqual(cfg.emb_dim, 7168)
+    self.assertEqual(cfg.num_decoder_layers, 61)
+    self.assertEqual(cfg.num_experts, 384)
+    self.assertEqual(cfg.num_experts_per_tok, 6)
+    self.assertEqual(cfg.indexer_topk, 1024)
+    self.assertEqual(cfg.mhc_expansion_rate, 4)
+    self.assertTrue(cfg.float32_gate_logits)
+    self.assertTrue(cfg.indexer_sparse_training)
 
 
 if __name__ == "__main__":
