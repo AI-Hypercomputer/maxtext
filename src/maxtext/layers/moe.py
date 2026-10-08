@@ -609,13 +609,13 @@ class RoutedMoE(nnx.Module):
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
       self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
 
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
       # vLLM uses 'model' as the tensor parallelism axis name
       self._tensor_parallelism_name = ("model", "attn_dp")
     else:
       self._tensor_parallelism_name = "tensor"
 
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and self.config.enable_dp_attention:
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and self.config.enable_dp_attention:
       self._expert_parallelism_name = "attn_dp_expert"
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
@@ -651,7 +651,7 @@ class RoutedMoE(nnx.Module):
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
-        score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else self.config.routed_score_func,
+        score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") else self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
@@ -1794,7 +1794,7 @@ class RoutedMoE(nnx.Module):
     def get_tokamax_group_sizes(group_sizes, inputs, _kernel):
       if self.config.quantization and self.config.use_qwix_quantization:
         return group_sizes
-      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      elif self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
         return group_sizes
       else:
         return tokamax.RaggedDotGroupSizes(
@@ -3920,7 +3920,7 @@ class RoutedMoE(nnx.Module):
     fused_kernel = None
     w0_kernel = None
     w1_kernel = None
-    if cfg.prefuse_moe_weights and cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
+    if cfg.prefuse_moe_weights and cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and not self.is_hash_routing:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       fused_kernel = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
     elif cfg.prefuse_moe_weights:
@@ -3939,7 +3939,7 @@ class RoutedMoE(nnx.Module):
     # scales at init, we must apply them to wo_kernel here because
     # fused_moe_func doesn't support them. Other paths (dense/sparse
     # matmul) apply them to top_k_weights in get_topk.
-    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
+    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and not self.is_hash_routing
     if is_fused_moe_path:
       if self.per_expert_scale is not None and not (cfg.model_call_mode == "inference" and cfg.fuse_expert_scales):
         wo_kernel = wo_kernel * jnp.asarray(self.per_expert_scale[...], self.dtype)[:, None, None]
@@ -3959,7 +3959,7 @@ class RoutedMoE(nnx.Module):
     # The fused MoE kernel currently only supports standard Top-K routing with associated
     # weights. Hash routed layers bypass this kernel and fall back
     # to the sparse matmul implementation.
-    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing:
+    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and not self.is_hash_routing:
       output, lb_loss, bias_updates = self.fused_moe_matmul(
           inputs,
           gate_logits,

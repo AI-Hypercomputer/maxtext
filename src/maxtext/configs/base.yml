@@ -330,7 +330,7 @@ norm_topk_prob: false # boolean to enable the top-k probability normalization. q
 
 # Record each MoE layer's routing decisions as a `selected_experts` intermediate, which the decoder
 # returns alongside the hidden state as `expert_indices`. Only read on the vLLM fused MoE path
-# (attention: vllm_rpa / vllm_batched_rpa), so in practice only the vLLM sampler in RL sets it, to
+# (attention: vllm_rpa / vllm_batched_rpa / vllm_batched_rpa_long_ctx), so in practice only the vLLM sampler in RL sets it, to
 # capture routing for router replay; off by default so standard serving does not pay for the extra
 # top-k.
 return_routed_experts: false
