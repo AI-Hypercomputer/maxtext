@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791442910909,
+  "lastUpdate": 1791455553142,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -46592,6 +46592,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
             "value": 97.29700000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Shuning Jin",
+            "username": "shuningjin",
+            "email": "shuningjin@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "7f61615fe0cc791023d3513b723b237a042577d7",
+          "message": "Add allow skip train_dropless for warmup_programs_in_init\n\n# Description\n\n**Problem**: `warmup_programs_in_init` is introduced by [PR#5406](https://github.com/AI-Hypercomputer/maxtext/pull/5406). When `true`, warming the `train_dropless` program runs on a copy of the donated train state, so HBM holds two state copies plus the dropless program reservation. On DeepSeek-V3 671B at 512 chips (tpu7x 4x8x16 and 8x8x8, pdb 4, GA 4) this runs out of HBM during init, so 512 runs could not use warmup at all. Skipping only that program keeps the other warmups; the cost is that the first dropless replay, if any, pays the dropless program's first load and execution inside the scored window.\n\n**Fix**: The new flag `warmup_skip_train_dropless` (default false, no behavior change) drops only `train_dropless` from the warmup list; `train`, `train_first_phase`, `eval` and `eval_dropless` are still warmed. Use it only when that warmup OOMs. It requires `warmup_programs_in_init=true`; config validation raises a `ValueError` if it is set without it.\n\nBUGS: b/571165275\n\n# Tests\n\nTested on DeepSeek-V3 in b/571165275#comment3\n- With the flag on, 512-chip runs initialize, converge in 47 steps with 0 dropless replays\n\nPiperOrigin-RevId: 995655670",
+          "timestamp": "2026-10-08T08:16:19Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/7f61615fe0cc791023d3513b723b237a042577d7"
+        },
+        "date": 1791455552471,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 106.006,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 37,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7813.0419999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 481,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1134.409,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 198.033,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 6829.309000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 481,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 286.331,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 51,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 156.68200000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 73,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1444.3669999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 100,
+            "unit": "count"
+          },
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 23.298000000000034,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 97,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 97.649,
             "unit": "sec"
           },
           {
