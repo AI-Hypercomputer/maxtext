@@ -210,13 +210,28 @@ def _build_single_axis_stacked_tensor(
 
 
 def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_target_leaf, config, mt_key=""):
-  """Determine the loading function for HF keys."""
+  """Returns a function that builds one MaxText weight from its HF tensors.
+
+  The function takes no arguments. If `mt_target_leaf` has a sharding, the weight is returned in the
+  leaf's dtype and sharding.
+
+  Args:
+    hf_source_keys_or_key: A single HF key, or a list of HF keys to stack, nested once per stacked
+      axis.
+    tensor_getter: A function that returns the HF tensor for a key.
+    hook_fn: A hook function, or a list of them, applied to each HF tensor. None means no hook.
+    mt_target_leaf: The target leaf, for example a `jax.ShapeDtypeStruct` with a sharding.
+    config: The MaxText config.
+    mt_key: The MaxText parameter key, used to place the axes of nested block scans.
+  """
   if not isinstance(hf_source_keys_or_key, list):
     # Case 1: Single hf key (str)
     def _loader(getter, key, leaf, hook):
       if hasattr(leaf, "sharding"):
         array = apply_hook_fns(getter(key), leaf.shape, hook)
-        return jax.device_put(array, device=leaf.sharding)
+        # Cast to the target dtype, as the stacked cases do. Otherwise a bf16 checkpoint stays bf16
+        # even when weight_dtype is float32.
+        return jax.device_put(array.astype(leaf.dtype), device=leaf.sharding)
       else:
         return apply_hook_fns(getter(key), leaf, hook)
 
