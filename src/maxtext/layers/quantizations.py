@@ -1244,7 +1244,9 @@ def get_quantization_rule(config: Config):
             weight_qtype=dtype,
             act_qtype=dtype,
             bwd_qtype=dtype,
-            bwd_weight_grad_tile_size=1 / config.quantization_local_shard_count,
+            bwd_weight_grad_tile_size=(
+                1 / config.qwix_bwd_weight_grad_tile_count if config.qwix_bwd_weight_grad_tile_count > 1 else None
+            ),
             disable_channelwise_axes=False,
             op_names=("dot_general",),
         )

@@ -174,8 +174,14 @@ weight_quantization_calibration_method: "absmax"
 act_quantization_calibration_method: "absmax"
 bwd_quantization_calibration_method: "absmax"
 drhs_grad_quantization_calibration_method: null  # weight-gradient-arm cotangent calibration; null = bwd_quantization_calibration_method
-# shard the range finding operation for quantization. by default this is set to number of slices.
+# AQT only (use_qwix_quantization=false, quantization=int8): number of local shards along the contraction
+# axis of weight-gradient matmuls, each with its own scale. -1 = jax.local_device_count(); 0 = do not
+# quantize the weight-gradient matmul. Qwix uses qwix_bwd_weight_grad_tile_count instead.
 quantization_local_shard_count: -1
+# Qwix only (use_qwix_quantization=true): number of tiles along the contraction axis of weight-gradient matmuls, each with its own scale.
+# 1 = no tiling; >1 makes XLA all-reduce the full weight gradient under FSDP instead of reduce-scattering it.
+# Applies to quantization=int8, fp8, etc.; ignored by fp8_full, which never tiles weight gradients (same as 1).
+qwix_bwd_weight_grad_tile_count: 1
 # The 'N' in N:M sparsity, representing the maximum number of non-zero values in each block.
 weight_sparsity_n: null
 # The 'M' in N:M sparsity, representing the number of values in each block.

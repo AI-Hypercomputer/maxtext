@@ -593,7 +593,17 @@ class Quantization(BaseModel):
   )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
-  quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
+  quantization_local_shard_count: int = Field(
+      -1,
+      description="AQT int8 only: number of local shards along the contraction axis of weight-gradient matmuls, each"
+      " with its own scale. -1 means jax.local_device_count(); 0 leaves the weight-gradient matmul unquantized.",
+  )
+  qwix_bwd_weight_grad_tile_count: PositiveInt = Field(
+      1,
+      description="Qwix: split the contraction axis of each weight-gradient matmul into this many tiles, each with"
+      " its own quantization scale. 1 disables tiling. Tiles are summed after the matmul, so under FSDP tiling"
+      " makes XLA all-reduce the full weight gradient instead of reduce-scattering it. fp8_full ignores it.",
+  )
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
       False,
