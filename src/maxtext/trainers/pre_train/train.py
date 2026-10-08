@@ -40,6 +40,7 @@ except ImportError:
 
 import jax
 import jax.numpy as jnp
+import optax
 from jax.experimental import multihost_utils
 from jax.sharding import NamedSharding
 
@@ -85,6 +86,7 @@ from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils import mllog_utils
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
+from maxtext.utils.vocabulary_tiling import fused_lm_head_ce_nnx_loss
 from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 
 
@@ -246,6 +248,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     # there is no indexer loss either and the total objective would be zero.
     xent_sum = 0.0
     total_z_loss = 0.0
+  elif getattr(config, "fused_lm_head_ce", False) and not is_block_diffusion:
+    hidden_state_key = ("decoder", "hidden_states")
+    hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+    xent_sum, total_z_loss = fused_lm_head_ce_nnx_loss(model, hidden_states, data, config, is_train)
   elif config.num_vocab_tiling > 1:
     hidden_state_key = ("decoder", "hidden_states")
     hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
@@ -348,10 +354,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if config.num_experts > 1:
     moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
     if moe_lb_losses:
-      lb_losses = jnp.concatenate(moe_lb_losses)
       # Megatron-LM (MoEAuxLossAutoScaler) adds every MoE layer's aux loss to the objective, so routers
-      # that use its seq_aux_loss sum over layers (decoder + MTP); other routers keep the average.
-      moe_lb_loss = jnp.sum(lb_losses) if moe.uses_megatron_seq_aux_loss(config) else jnp.mean(lb_losses)
+      # that use its seq_aux_loss sum over layers (decoder + MTP); otherwise use moe_aux_loss_reduction.
+      reduction = "sum" if moe.uses_megatron_seq_aux_loss(config) else getattr(config, "moe_aux_loss_reduction", "mean")
+      moe_lb_loss = maxtext_utils.reduce_moe_aux_losses(moe_lb_losses, reduction)
       loss = _add_aux_loss(loss, moe_lb_loss)
     else:
       max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
@@ -495,6 +501,24 @@ def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
   return None
 
 
+def _cast_params_for_compute(params, dtype, min_size=1 << 22):
+  """Casts large fp32 weights to the compute dtype.
+
+  Runs on the sharded fp32 master, so the FSDP all-gathers inside the layer scan
+  move bf16 and the weight gradients are reduce-scattered in bf16. Router kernels
+  (`gate`) and small tensors (norms, convs, decay parameters) keep fp32.
+  """
+
+  def cast(path, x):
+    if x.dtype != jnp.float32 or x.size < min_size:
+      return x
+    if any(getattr(k, "key", None) == "gate" for k in path):
+      return x
+    return x.astype(dtype)
+
+  return jax.tree_util.tree_map_with_path(cast, params)
+
+
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
   """Training step for the NNX model.
 
@@ -576,6 +600,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       nnx.update(state.model, curr_params)
 
     def diff_wrapper(curr_params, custom_params, rest, config, data):
+      if config.cast_params_to_compute_dtype:
+        curr_params = _cast_params_for_compute(curr_params, config.dtype)
       local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
       loss, aux = loss_fn(local_model, config, data, None, None, is_train=True)
       # Exclude parameters, custom-gradient state, and intermediates. Custom-
@@ -733,7 +759,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
 
-  if not config.optimizer_memory_host_offload:
+  if not config.optimizer_memory_host_offload and config.norm_metrics == "grad":
+    # One norm instead of three full passes over the parameters. optax.global_norm is the expression
+    # clip_by_global_norm evaluates, so XLA shares it; the clipped norm follows from it.
+    raw_norm = optax.global_norm(raw_grads)
+    scalar_metrics["learning/raw_grad_norm"] = raw_norm
+    if config.gradient_clipping_threshold > 0:
+      scalar_metrics["learning/grad_norm"] = jnp.minimum(raw_norm, config.gradient_clipping_threshold)
+    else:
+      scalar_metrics["learning/grad_norm"] = raw_norm
+  elif not config.optimizer_memory_host_offload and config.norm_metrics == "all":
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
     model_params = nnx.state(new_state.model, nnx.Param)
