@@ -107,6 +107,10 @@ jobs:
           echo "image_name: $IMAGE_NAME"
           echo "dockerfile: $DOCKERFILE"
 
+      - name: Set up Syft
+        id: download_syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
       - name: Checkout MaxText
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -164,6 +168,7 @@ jobs:
           cp "${PWD}/pytest.ini" .venv/lib/python3.12/site-packages/
 
       - name: Build and push Docker image
+        id: build_push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           push: true
@@ -171,7 +176,9 @@ jobs:
           file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
           tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ inputs.repository_name }}/${{ inputs.image_name }}:${{ github.run_id }}
           cache-from: type=gha
-          outputs: type=image,compression=zstd,force-compression=true
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,push=true,compression=zstd,force-compression=true
           secret-files: |
             credentials=/tmp/airlock/credentials.json
           build-args: |
@@ -182,6 +189,46 @@ jobs:
             WORKFLOW=${{ inputs.workflow }}
             PACKAGE_DIR=.venv/lib/python3.12/site-packages
             INCLUDE_TEST_ASSETS=${{ inputs.include_test_assets }}
+
+      - name: Generate SPDX SBOM and upload to Container Analysis / SCILo
+        shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          SBOM_BUCKET: ${{ vars.SBOM_BUCKET }}
+          INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
+          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ steps.build_push.outputs.digest }}
+          SYFT_CMD: ${{ steps.download_syft.outputs.cmd }}
+        run: |
+          IMAGE_URI="us-docker.pkg.dev/${PROJECT_NAME}/${INPUTS_REPOSITORY_NAME}/${INPUTS_IMAGE_NAME}@${IMAGE_DIGEST}"
+          echo "Generating SPDX JSON SBOM for ${IMAGE_URI}..."
+
+          if "${SYFT_CMD}" "registry:${IMAGE_URI}" -o spdx-json=/tmp/sbom.spdx.json; then
+            echo "Uploading SPDX SBOM reference to Container Analysis / SCILo..."
+            gcloud artifacts sbom load \
+              --project="${PROJECT_NAME}" \
+              --source=/tmp/sbom.spdx.json \
+              --uri="${IMAGE_URI}" \
+              --destination="${SBOM_BUCKET}" \
+              --quiet || echo "Warning: gcloud artifacts sbom load returned non-zero; continuing with sbom export."
+          fi
+
+          echo "Triggering Artifact Analysis SBOM export for BCID / SCILo ingestion..."
+          for attempt in $(seq 1 9); do
+            if EXPORT_OUT=$(gcloud artifacts sbom export \
+              --project="${PROJECT_NAME}" \
+              --uri="${IMAGE_URI}" \
+              --quiet 2>&1); then
+              echo "${EXPORT_OUT}"
+              break
+            elif [[ "${EXPORT_OUT}" == *"SCANNING"* || "${EXPORT_OUT}" == *"NOT_FOUND"* ]] && [[ "${attempt}" -lt 9 ]]; then
+              echo "Artifact Analysis scan still in progress (attempt ${attempt}/9); waiting 10s..."
+              sleep 10
+            else
+              echo "Warning: gcloud artifacts sbom export returned non-zero: ${EXPORT_OUT}"
+              break
+            fi
+          done
 
       - name: Add tags to Docker image
         shell: bash
