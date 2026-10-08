@@ -32,7 +32,7 @@ import numpy as np
 import qwix
 import qwix.pallas as qpl
 from jax.sharding import Mesh, PartitionSpec as P
-from maxtext.common.common_types import Config, DType
+from maxtext.common.common_types import Config, DType, DecoderBlockType
 from maxtext.configs import pyconfig
 from maxtext.configs import types as maxtext_types
 from maxtext.kernels.megablox import ops as mblx_ops
@@ -984,6 +984,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
           use_2d_fsdp_sharding=False,
           shard_embed_moe_on_fsdp=False,
           model_name="qwen3.5-35b-a3b",
+          decoder_block=DecoderBlockType.QWEN3_5,
           check_vma=False,
           moe_fsdp_use_two_stage_all_gather=False,
           moe_pin_sparse_core_all_gathers=False,
@@ -1065,6 +1066,7 @@ def test_sparse_matmul_pins_expert_kernel_all_gather_when_the_upcast_is_an_ident
           use_2d_fsdp_sharding=False,
           shard_embed_moe_on_fsdp=False,
           model_name="qwen3.5-35b-a3b",
+          decoder_block=DecoderBlockType.QWEN3_5,
           check_vma=False,
           moe_fsdp_use_two_stage_all_gather=False,
           moe_pin_sparse_core_all_gathers=False,
@@ -6808,8 +6810,6 @@ class RoutedMoeRouterInputAndUpActivationTest(parameterized.TestCase):
 
   def test_up_activation_defaults_to_linear_and_unsupported_paths_reject_it(self):
     """A one-element `mlp_activations` means linear; paths that ignore `mlp_activations[1]` reject it."""
-    from maxtext.common.common_types import DecoderBlockType  # pylint: disable=import-outside-toplevel
-
     block, _ = self._block(self._cfg(mlp_activations=["silu"]))
     self.assertEqual(block.up_activation_name, "linear")
 
