@@ -58,6 +58,7 @@ from maxtext.models import (
     gemma4,
     gemma4_small,
     gpt3,
+    kimi_k3,
     gpt_oss,
     llama2,
     llama4,
@@ -476,6 +477,7 @@ class NNXDecoder(nnx.Module):
           out_features_shape=config.vocab_size,
           weight_dtype=get_weight_dtype(config, "logits_dense"),
           dtype=jnp.float32 if config.logits_dot_in_fp32 else config.dtype,
+          accumulate_in_float32=config.decoder_block == DecoderBlockType.KIMI_K3,
           kernel_axes=("embed_vocab", "vocab"),
           shard_mode=config.shard_mode,
           matmul_precision=self.config.matmul_precision,
@@ -492,6 +494,32 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
     self.is_qwen3_5 = self.config.decoder_block == DecoderBlockType.QWEN3_5
+    self.is_kimi_k3 = self.config.decoder_block == DecoderBlockType.KIMI_K3
+
+    if self.is_kimi_k3:
+      if config.scan_layers or getattr(config, "using_pipeline_parallelism", False):
+        raise ValueError("Kimi-K3 currently requires unscanned layers without pipeline parallelism.")
+      self.output_attn_res_norm = RMSNorm(
+          num_features=config.emb_dim,
+          epsilon=config.normalization_layer_epsilon,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          shard_mode=config.shard_mode,
+          kernel_axes=("norm",),
+          rngs=rngs,
+      )
+      self.output_attn_res_proj = linears.DenseGeneral(
+          in_features_shape=config.emb_dim,
+          out_features_shape=1,
+          axis=-1,
+          use_bias=False,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          kernel_axes=("embed", None),
+          matmul_precision=config.matmul_precision,
+          shard_mode=config.shard_mode,
+          rngs=rngs,
+      )
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -897,6 +925,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.KIMI_K3,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1252,6 +1281,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
+        DecoderBlockType.KIMI_K3: [kimi_k3.KimiDecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1414,6 +1444,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
+        DecoderBlockType.KIMI_K3,
     }:
       return functools.partial(
           RMSNorm,
@@ -1613,6 +1644,11 @@ class NNXDecoder(nnx.Module):
         logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
       logits = self.logits_dense(y, out_sharding=out_sharding)
+
+    if self.is_kimi_k3 and jnp.dtype(cfg.dtype) == jnp.bfloat16 and not cfg.logits_dot_in_fp32:
+      # HF's BF16 LM head rounds before greedy selection. A cast pair alone
+      # can be folded away by XLA's excess-precision optimizations.
+      logits = kimi_k3.round_bfloat16_logits(logits).astype(logits.dtype)
 
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
@@ -2158,21 +2194,31 @@ class NNXDecoder(nnx.Module):
         prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
         dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
 
-        def pure_layer_fn(graphdef_in, state_in, y_in, kv_in, valid_kwargs):
+        block_residual = None
+        if self.is_kimi_k3:
+          batch_size, seq_len = y.shape[:2]
+          block_residual = jnp.zeros((batch_size * seq_len, 0, y.shape[-1]), dtype=y.dtype)
+
+        def pure_layer_fn(graphdef_in, state_in, y_in, kv_in, valid_kwargs, blk_res_in=None):
           if cfg.parameter_memory_host_offload:
             state_in = jax.tree.map(
                 lambda x: jax.device_put(x, max_utils.device_space()),
                 state_in,
             )
           merged_layer = nnx.merge(graphdef_in, state_in)
-          out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
+          if self.is_kimi_k3:
+            layer_out = merged_layer(y_in, *layer_args, kv_cache=kv_in, block_residual=blk_res_in, **valid_kwargs)
+            out_y, out_kv, out_blk_res = layer_out[0], layer_out[1], layer_out[2]
+          else:
+            out_y, out_kv = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
+            out_blk_res = None
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
             new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
-            return out_y, out_kv, state_out, new_graphdef
+            return out_y, out_kv, state_out, new_graphdef, out_blk_res
           else:
-            return out_y, out_kv, state_out, graphdef_in
+            return out_y, out_kv, state_out, graphdef_in, out_blk_res
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
 
@@ -2228,8 +2274,6 @@ class NNXDecoder(nnx.Module):
 
           routed_experts = current_kwargs.pop("forced_routed_experts", None)
           if routed_experts is not None:
-            # Every supported decoder_block is homogeneous-MoE, so the layer
-            # axis is just `lyr`.
             if routed_experts.ndim not in (3, 4):
               raise ValueError(
                   "forced_routed_experts must be [batch, seq, top_k] (3D,"
@@ -2238,8 +2282,6 @@ class NNXDecoder(nnx.Module):
                   f" with shape {routed_experts.shape}."
               )
             if routed_experts.ndim == 4 and routed_experts.shape[2] != cfg.num_decoder_layers:
-              # jnp clamps an out-of-range static index, so a short layer axis
-              # would silently replay the last slice on every later layer.
               raise ValueError(
                   "forced_routed_experts layer axis must equal"
                   f" num_decoder_layers ({cfg.num_decoder_layers}); got"
@@ -2251,9 +2293,13 @@ class NNXDecoder(nnx.Module):
             )
 
           if cfg.remat_policy != "none":
-            y, kv_cache, new_state, new_graphdef = checkpointed_fn(graphdef, state, y, kv_cache, current_kwargs)
+            y, kv_cache, new_state, new_graphdef, block_residual = checkpointed_fn(
+                graphdef, state, y, kv_cache, current_kwargs, blk_res_in=block_residual
+            )
           else:
-            y, kv_cache, new_state, new_graphdef = pure_layer_fn(graphdef, state, y, kv_cache, current_kwargs)
+            y, kv_cache, new_state, new_graphdef, block_residual = pure_layer_fn(
+                graphdef, state, y, kv_cache, current_kwargs, blk_res_in=block_residual
+            )
 
           if dynamic_graph_init:
             new_layer = nnx.merge(new_graphdef, new_state)
@@ -2290,6 +2336,22 @@ class NNXDecoder(nnx.Module):
               y = deepstack_process(y, bidirectional_mask, visual_embeds)
 
     assert isinstance(y, jax.Array)
+
+    if self.is_kimi_k3 and block_residual is not None and block_residual.shape[1] > 0:
+      batch, seq_len, hidden_size = y.shape
+      tokens = batch * seq_len
+      flat_y = jnp.reshape(y, (tokens, hidden_size))
+      # v: [Tokens, NumBlocks + 1, D]
+      v = jnp.concatenate([block_residual, flat_y[:, None, :]], axis=1)
+      v_f = v.astype(jnp.float32)
+      var = jnp.mean(v_f**2, axis=-1, keepdims=True)
+      k = v_f * jax.lax.rsqrt(var + self.output_attn_res_norm.epsilon)
+      w_norm = self.output_attn_res_norm.scale[...].astype(jnp.float32)
+      w_proj = self.output_attn_res_proj.kernel[...].squeeze(-1).astype(jnp.float32)
+      scores = jnp.sum(k * (w_norm * w_proj), axis=-1)
+      probs = jax.nn.softmax(scores, axis=-1)[:, :, None]
+      flat_y_out = jnp.sum(probs * v_f, axis=1)
+      y = jnp.reshape(flat_y_out.astype(y.dtype), (batch, seq_len, hidden_size))
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
     if getattr(cfg, "mhc_expansion_rate", 1) > 1:

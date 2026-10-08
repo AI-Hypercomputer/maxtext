@@ -1277,6 +1277,116 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def KIMI_K3_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace Kimi-K3 weight paths and their shapes."""
+  hidden_size = config["hidden_size"]
+  num_hidden_layers = config["num_hidden_layers"]
+  vocab_size = config["vocab_size"]
+  num_attention_heads = config["num_attention_heads"]
+  kda_head_dim = config.get("linear_attn_config", {}).get("head_dim", 128)
+  kda_num_heads = config.get("linear_attn_config", {}).get("num_heads", 96)
+  q_lora_rank = config["q_lora_rank"]
+  kv_lora_rank = config["kv_lora_rank"]
+  qk_nope_head_dim = config["qk_nope_head_dim"]
+  qk_rope_head_dim = config["qk_rope_head_dim"]
+  v_head_dim = config["v_head_dim"]
+  num_experts = config["num_experts"]
+  moe_intermediate_size = config["moe_intermediate_size"]
+  shared_intermediate_size = moe_intermediate_size * config.get("num_shared_experts", 2)
+  routed_expert_hidden_size = config.get("routed_expert_hidden_size", 3584)
+  intermediate_size = config["intermediate_size"]
+
+  kda_proj_size = kda_num_heads * kda_head_dim
+
+  mapping = {
+      "model.embed_tokens.weight": [vocab_size, hidden_size],
+      "model.norm.weight": [hidden_size],
+      "lm_head.weight": [vocab_size, hidden_size],
+      "model.output_attn_res_proj.weight": [1, hidden_size],
+      "model.output_attn_res_norm.weight": [hidden_size],
+  }
+
+  for layer_idx in range(num_hidden_layers):
+    layer_prefix = f"model.layers.{layer_idx}"
+    mapping[f"{layer_prefix}.input_layernorm.weight"] = [hidden_size]
+    mapping[f"{layer_prefix}.post_attention_layernorm.weight"] = [hidden_size]
+    mapping[f"{layer_prefix}.self_attention_res_norm.weight"] = [hidden_size]
+    mapping[f"{layer_prefix}.self_attention_res_proj.weight"] = [1, hidden_size]
+    mapping[f"{layer_prefix}.mlp_res_norm.weight"] = [hidden_size]
+    mapping[f"{layer_prefix}.mlp_res_proj.weight"] = [1, hidden_size]
+
+    full_attn_layers = config.get("linear_attn_config", {}).get("full_attn_layers")
+    is_kda = (layer_idx + 1) not in full_attn_layers if full_attn_layers is not None else (layer_idx + 1) % 4 != 0
+    if is_kda:
+      mapping[f"{layer_prefix}.self_attn.q_proj.weight"] = [kda_proj_size, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.k_proj.weight"] = [kda_proj_size, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.v_proj.weight"] = [kda_proj_size, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.q_conv1d.weight"] = [kda_proj_size, 1, 4]
+      mapping[f"{layer_prefix}.self_attn.k_conv1d.weight"] = [kda_proj_size, 1, 4]
+      mapping[f"{layer_prefix}.self_attn.v_conv1d.weight"] = [kda_proj_size, 1, 4]
+      mapping[f"{layer_prefix}.self_attn.A_log"] = [kda_head_dim]
+      mapping[f"{layer_prefix}.self_attn.dt_bias"] = [kda_proj_size]
+      mapping[f"{layer_prefix}.self_attn.f_a_proj.weight"] = [kda_head_dim, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.f_b_proj.weight"] = [kda_proj_size, kda_head_dim]
+      mapping[f"{layer_prefix}.self_attn.b_proj.weight"] = [kda_num_heads, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.g_proj.weight"] = [kda_proj_size, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.o_norm.weight"] = [kda_head_dim]
+      mapping[f"{layer_prefix}.self_attn.o_proj.weight"] = [hidden_size, kda_proj_size]
+    else:
+      mapping[f"{layer_prefix}.self_attn.q_a_proj.weight"] = [q_lora_rank, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.q_a_layernorm.weight"] = [q_lora_rank]
+      mapping[f"{layer_prefix}.self_attn.q_b_proj.weight"] = [
+          num_attention_heads * (qk_nope_head_dim + qk_rope_head_dim),
+          q_lora_rank,
+      ]
+      mapping[f"{layer_prefix}.self_attn.kv_a_proj_with_mqa.weight"] = [kv_lora_rank + qk_rope_head_dim, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.kv_a_layernorm.weight"] = [kv_lora_rank]
+      mapping[f"{layer_prefix}.self_attn.kv_b_proj.weight"] = [
+          num_attention_heads * (qk_nope_head_dim + v_head_dim),
+          kv_lora_rank,
+      ]
+      mapping[f"{layer_prefix}.self_attn.g_proj.weight"] = [num_attention_heads * v_head_dim, hidden_size]
+      mapping[f"{layer_prefix}.self_attn.o_proj.weight"] = [hidden_size, num_attention_heads * v_head_dim]
+
+    if layer_idx < 1:
+      mapping[f"{layer_prefix}.mlp.gate_proj.weight"] = [intermediate_size, hidden_size]
+      mapping[f"{layer_prefix}.mlp.up_proj.weight"] = [intermediate_size, hidden_size]
+      mapping[f"{layer_prefix}.mlp.down_proj.weight"] = [hidden_size, intermediate_size]
+    else:
+      mapping[f"{layer_prefix}.block_sparse_moe.routed_expert_down_proj.weight"] = [
+          routed_expert_hidden_size,
+          hidden_size,
+      ]
+      mapping[f"{layer_prefix}.block_sparse_moe.routed_expert_norm.weight"] = [routed_expert_hidden_size]
+      mapping[f"{layer_prefix}.block_sparse_moe.routed_expert_up_proj.weight"] = [hidden_size, routed_expert_hidden_size]
+      mapping[f"{layer_prefix}.block_sparse_moe.gate.weight"] = [num_experts, hidden_size]
+      mapping[f"{layer_prefix}.block_sparse_moe.gate.e_score_correction_bias"] = [num_experts]
+      mapping[f"{layer_prefix}.block_sparse_moe.shared_experts.gate_proj.weight"] = [
+          shared_intermediate_size,
+          hidden_size,
+      ]
+      mapping[f"{layer_prefix}.block_sparse_moe.shared_experts.up_proj.weight"] = [shared_intermediate_size, hidden_size]
+      mapping[f"{layer_prefix}.block_sparse_moe.shared_experts.down_proj.weight"] = [
+          hidden_size,
+          shared_intermediate_size,
+      ]
+      for e in range(num_experts):
+        mapping[f"{layer_prefix}.block_sparse_moe.experts.{e}.w1.weight"] = [
+            moe_intermediate_size,
+            routed_expert_hidden_size,
+        ]
+        mapping[f"{layer_prefix}.block_sparse_moe.experts.{e}.w3.weight"] = [
+            moe_intermediate_size,
+            routed_expert_hidden_size,
+        ]
+        mapping[f"{layer_prefix}.block_sparse_moe.experts.{e}.w2.weight"] = [
+            routed_expert_hidden_size,
+            moe_intermediate_size,
+        ]
+
+  return mapping
+
+
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1323,4 +1433,5 @@ HF_SHAPE = {
     "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
+    "kimi-k3": KIMI_K3_HF_WEIGHTS_TO_SHAPE,
 }

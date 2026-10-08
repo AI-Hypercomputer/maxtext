@@ -47,6 +47,8 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   """Convert a string to an activation function."""
   if fn_or_string == "linear":
     return lambda x: x
+  elif fn_or_string == "situ":
+    return lambda x: 4.0 * jnp.tanh(x / 4.0) * jax.nn.sigmoid(x)
   elif fn_or_string == "sqrtsoftplus":
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
@@ -92,6 +94,7 @@ def _compute_dot_general_nnx(
     native_fp8_compute: bool = False,
     scale_block_size: int | tuple[int, ...] | None = None,
     act_calibration_method: str = "absmax",
+    preferred_element_type: DType | None = None,
 ):
   """Computes a dot_general operation that may be quantized."""
   dot_general = lax.dot_general
@@ -136,7 +139,12 @@ def _compute_dot_general_nnx(
     kernel = dequantize_weight(kernel, kernel_scale, compute_dtype=compute_dtype)
 
   return dot_general(
-      inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
+      inputs,
+      kernel,
+      ((axis, contract_ind), ((), ())),
+      precision=matmul_precision,
+      out_sharding=out_sharding,
+      preferred_element_type=preferred_element_type,
   )
 
 
@@ -169,6 +177,7 @@ class DenseGeneral(nnx.Module):
       weight_quant: quantizations.WeightQuantConfig | None = None,
       *,  # Following arguments are keyword-only
       rngs: nnx.Rngs = None,
+      accumulate_in_float32: bool = False,
   ):
     """Initializes the DenseGeneral module.
 
@@ -213,6 +222,7 @@ class DenseGeneral(nnx.Module):
     self.axis = canonicalize_tuple(axis)
     self.weight_dtype = weight_dtype
     self.dtype = dtype
+    self.accumulate_in_float32 = accumulate_in_float32
     self.kernel_init = kernel_init
     self.kernel_axes = kernel_axes
     self.quant = quant
@@ -448,6 +458,13 @@ class DenseGeneral(nnx.Module):
 
     contract_ind = tuple(range(0, len(self.axis)))
     native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+    preserve_accumulation = (
+        self.accumulate_in_float32
+        and jnp.dtype(self.dtype) == jnp.bfloat16
+        and self.quant is None
+        and kernel_scale is None
+        and not is_fp8_dtype(kernel.dtype)
+    )
     output = _compute_dot_general_nnx(
         inputs,
         kernel,
@@ -462,7 +479,12 @@ class DenseGeneral(nnx.Module):
         native_fp8_compute=native_fp8_compute,
         scale_block_size=self.block_size,
         act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
+        preferred_element_type=jnp.float32 if preserve_accumulation else None,
     )
+
+    if preserve_accumulation:
+      # Round once after the complete dot, including cross-device partial sums.
+      output = lax.reduce_precision(output, exponent_bits=8, mantissa_bits=7).astype(self.dtype)
 
     if self.bias is not None:
       bias = jnp.asarray(self.bias[...], self.dtype)
