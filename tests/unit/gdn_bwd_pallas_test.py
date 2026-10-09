@@ -720,7 +720,17 @@ class GdnBwdPallasTest(absltest.TestCase):
           with self.subTest(output=name):
             self.assertEqual(x_opt.dtype, x_ref.dtype)
             np.testing.assert_array_equal(np.asarray(x_opt), np.asarray(x_ref))
-        grad_names = ("d_qkv", "d_b", "d_a", "d_conv_weight", "d_conv_bias", "d_a_log", "d_dt_bias", "d_conv_state", "d_h0")
+        grad_names = (
+            "d_qkv",
+            "d_b",
+            "d_a",
+            "d_conv_weight",
+            "d_conv_bias",
+            "d_a_log",
+            "d_dt_bias",
+            "d_conv_state",
+            "d_h0",
+        )
         for name, g_ref, g_opt in zip(grad_names, grads_ref, grads_opt):
           with self.subTest(gradient=name):
             self.assertEqual(g_opt.dtype, g_ref.dtype)

@@ -481,13 +481,9 @@ def compose_bwd_local_from_t_inv(
       q_orig = q_orig * scale
     q_h = jnp.repeat(q_orig, repeats, axis=2)  # [N_c, B, H_v, C, d_k]
     k_h = jnp.repeat(k_orig, repeats, axis=2)  # [N_c, B, H_v, C, d_k]
-    do_h = _head_major(do.reshape(batch, seq_len, num_v_heads * head_v_dim), num_v_heads, head_v_dim).astype(
-        jnp.float32
-    )
+    do_h = _head_major(do.reshape(batch, seq_len, num_v_heads * head_v_dim), num_v_heads, head_v_dim).astype(jnp.float32)
   else:
-    q_orig = (
-        qkv_conv[:, :, :q_size].reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim).astype(jnp.float32)
-    )
+    q_orig = qkv_conv[:, :, :q_size].reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim).astype(jnp.float32)
     k_orig = (
         qkv_conv[:, :, q_size : q_size + k_size]
         .reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim)

@@ -248,9 +248,9 @@ def _bwd_gdn_pipeline_body(
     # in the (tokens, dv) vreg layout the head-major `do_h` needs, so stacking
     # the slices is free; a reshape + transpose would cost two relayouts.
     do_val = None
-    do_h = jnp.stack(
-        [do_ref[:, h * v_head_dim : (h + 1) * v_head_dim] for h in range(num_v_heads)], axis=0
-    ).astype(jnp.float32)
+    do_h = jnp.stack([do_ref[:, h * v_head_dim : (h + 1) * v_head_dim] for h in range(num_v_heads)], axis=0).astype(
+        jnp.float32
+    )
   else:
     do_val = do_ref[...].astype(jnp.float32)
     do_h = None
@@ -843,9 +843,7 @@ def pallas_gdn_bwd_kernel(
     ]
     if has_dht:
       in_args.append(
-          d_recurrent_state.astype(jnp.float32).reshape(
-              batch_size, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim
-          )
+          d_recurrent_state.astype(jnp.float32).reshape(batch_size, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim)
       )
     in_specs, out_specs, num_pipe_in, num_pipe_out = make_bwd_block_specs_natural(
         num_chunks=num_chunks,

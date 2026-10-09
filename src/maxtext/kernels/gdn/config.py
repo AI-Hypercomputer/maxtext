@@ -137,6 +137,7 @@ class GDNConfig:
     return pl.cdiv(self.num_v_heads + extra_lanes, num_lanes) * num_lanes
 
   def get_kernel_name(self) -> str:
+    """Kernel name encoding the mode, tiling and enabled variants (shows up in profiles)."""
     name = f"fused_conv1d_gdn_{self.mode.value}_b{self.seq_tile_size}" f"_c{self.chunk_size}"
     if self.bf16_qkv_input:
       name += "_bf16in"
@@ -189,7 +190,5 @@ class GDNConfig:
       # f32 "compact" ([chunk, 1, dim], 1x128 tiled) copy of the current tile,
       # filled in-kernel from the bf16 VMEM slot. It replaces the f32 qkv slot
       # as the conv1d input / conv1d output staging buffer.
-      ret["qkv_compact_scratch_ref"] = pltpu.VMEM(
-          (self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32
-      )
+      ret["qkv_compact_scratch_ref"] = pltpu.VMEM((self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32)
     return ret
