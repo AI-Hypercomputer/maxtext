@@ -185,7 +185,5 @@ class GDNConfig:
       # f32 "compact" ([chunk, 1, dim], 1x128 tiled) copy of the current tile,
       # filled in-kernel from the bf16 VMEM slot. It replaces the f32 qkv slot
       # as the conv1d input / conv1d output staging buffer.
-      ret["qkv_compact_scratch_ref"] = pltpu.VMEM(
-          (self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32
-      )
+      ret["qkv_compact_scratch_ref"] = pltpu.VMEM((self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32)
     return ret
