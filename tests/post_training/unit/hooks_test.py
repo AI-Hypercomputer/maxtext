@@ -33,7 +33,7 @@ import numpy as np
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.trainers.post_train.hooks import BaseTrainingHooks
+from maxtext.trainers.post_train.hooks import BaseTrainingHooks, GoodputTrainingHooks
 from maxtext.common.metric_logger import MetricLogger
 from maxtext.utils import maxtext_utils
 
@@ -149,6 +149,20 @@ class BaseHooksTest(unittest.TestCase):
   def test_on_train_end_asserts_if_on_train_start_not_called(self):
     with self.assertRaises(AssertionError):
       self.training_hooks.on_train_end(self.mock_train_ctx)
+
+  def test_goodput_training_hooks(self):
+    mock_recorder = MagicMock()
+    mock_cfg = MagicMock()
+    mock_cfg.enable_goodput_recording = True
+    hooks = GoodputTrainingHooks(mock_cfg, mock_recorder)
+    self.mock_train_ctx.train_steps = 3
+    hooks.on_train_start(self.mock_train_ctx)
+    hooks.on_train_step_start(self.mock_train_ctx)
+    hooks.on_train_step_end(self.mock_train_ctx, train_step=4, train_loss=1.5)
+    hooks.on_eval_step_start(self.mock_train_ctx)
+    hooks.on_eval_step_end(self.mock_train_ctx, eval_loss=1.2)
+    hooks.on_train_end(self.mock_train_ctx)
+    mock_recorder.record_step_start_time.assert_called_once_with(3)
 
 
 if __name__ == "__main__":
