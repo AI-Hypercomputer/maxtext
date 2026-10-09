@@ -27,42 +27,42 @@ Usage:
 Examples:
   A. Load from a Google Cloud Storage (GCS) directory containing `.safetensors`:
      ```
-     python3 maxtext/trainers/pre_train/train.py \
-         maxtext/configs/base.yml \
+     python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=my_run \
          model_name=llama3.1-8b \
          source_checkpoint_layout="safetensors_dynamic" \
          load_parameters_path="gs://my-bucket/path/to/safetensors_directory/"
      ```
 
-  B. Load directly from the Hugging Face Hub (automatically cached to GCS):
+  B. Load directly from the Hugging Face Hub (automatically cached to GCS). The repo must match
+     `model_name`:
      ```
-     python3 maxtext/trainers/pre_train/train.py \
-         maxtext/configs/base.yml \
+     python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=my_run \
          model_name=llama3.1-8b \
          source_checkpoint_layout="safetensors_dynamic" \
-         load_parameters_path="hf://meta-llama/Meta-Llama-3-8B" \
-         hf_access_token="<your_token>" \
+         load_parameters_path="hf://meta-llama/Llama-3.1-8B" \
          base_output_directory="gs://my-bucket/output/"
      ```
 
-  C. Load from Hugging Face Hub using automatic model_name resolution:
+  C. Load from the Hugging Face Hub repo listed in `HF_IDS[model_name]`. Leave
+     `load_parameters_path` unset; an empty value fails config validation.
      ```
-     python3 maxtext/trainers/pre_train/train.py \
-         maxtext/configs/base.yml \
+     python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
          run_name=my_run \
          model_name=llama3.1-8b \
          source_checkpoint_layout="safetensors_dynamic" \
-         load_parameters_path="" \
-         hf_access_token="<your_token>" \
          base_output_directory="gs://my-bucket/output/"
      ```
 
 Note:
-  - Hugging Face weights from HF Hub are cached to `base_output_directory`.
-  - When loading from Hugging Face Hub, `base_output_directory` must start with
-    "gs://" and `hf_access_token` is required if downloading gated models.
+  - Weights from the Hugging Face Hub are cached under `<base_output_directory>/hf_cache/`, so
+    `base_output_directory` must start with "gs://".
+  - `hf_access_token` is required if downloading gated models.
+  - Loaded weights use `weight_dtype`, regardless of the checkpoint dtype.
+  - Only the training restore (`load_state_if_possible`) supports this layout; `from_pretrained` does
+    not.
+  - The Pathways backend is not supported.
 """
 
 import concurrent.futures
@@ -257,26 +257,40 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
 
 
 def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
-  """Main entry point to dynamically build and load safetensors into MaxText format.
+  """Loads HF safetensors and converts them into MaxText weights on device.
 
-  `abstract_params` is the weights of the target state -- Linen's `params` collection, or the
-  NNX params state -- not the full train state; the HF param mappings name weights only.
+  Reads every tensor sharded across `jax.devices()`, then maps, transforms and stacks the tensors into
+  the target layout.
 
-  Splits execution into:
-  1. Deriving Mappings
-  2. Loading Sharded arrays directly to TPUs
-  3. Processing the transformations natively on TPUs
+  Args:
+    path: The safetensors source: a `gs://` or local directory, or an HF repo ID with or without the
+      `hf://` prefix. If empty, `HF_IDS[maxtext_config.model_name]` is used. An HF repo is first
+      copied to `<base_output_directory>/hf_cache/` by host 0.
+    abstract_params: The target weights: Linen's `params` collection or the NNX params state, not the
+      full train state.
+    maxtext_config: The MaxText config.
+
+  Returns:
+    A tuple `(None, {"params": weights})`. Each weight has the dtype and sharding of its leaf in
+    `abstract_params`.
+
+  Raises:
+    ValueError: If `maxtext_config` is None, if `path` is empty and `HF_IDS` has no entry for the
+      model, or if an HF repo is used without a `gs://` `base_output_directory`.
   """
   if maxtext_config is None:
     raise ValueError("maxtext_config must be provided for safetensors_dynamic loading.")
 
   model_name = maxtext_config.model_name
-  if "-Instruct" in model_name:
-    model_name = model_name.replace("-Instruct", "")
 
   if not path:
+    # Use the exact name: -Instruct variants have their own HF_IDS entries, and stripping the suffix
+    # would load the base model's weights.
     if model_name not in maxtext_globals.HF_IDS:
-      raise ValueError(f"Unsupported model name for automatic HF repo resolution: {model_name}.")
+      raise ValueError(
+          f"No HF repo for model_name={model_name} in HF_IDS; set load_parameters_path to the safetensors"
+          " location (a gs:// or local directory, or hf://<repo>)."
+      )
     path = maxtext_globals.HF_IDS[model_name]
 
   if path.startswith("hf://"):
