@@ -44,6 +44,12 @@ class GDNKernelOptions:
   reproduce the original kernel behavior bit-for-bit.
 
   Attributes:
+    bf16_qkv_input: Feed the forward kernel the bf16 (post-projection) qkv
+      directly and up-cast to f32 inside VMEM, instead of materializing an f32
+      copy in HBM. Besides halving the qkv read, this keeps qkv in its natural
+      `{2,1,0}` layout; the f32 `astype + reshape(N, 1, dim)` otherwise forces a
+      `{2,0,1}` tiled layout that XLA propagates into every consumer of qkv in
+      the backward program (notably the pure-JAX conv1d backward).
     cp_pass1_states_only: In sequence-sharded CP, pass 1 only needs the per-chunk
       recurrent states to compose the global prefix; skip computing / writing
       `out` and `chunk_states` in that pass.
@@ -51,6 +57,10 @@ class GDNKernelOptions:
       triangular inverse `t_inv` produced by pass 1 (it is identical: it only
       depends on q/k/b within a chunk) instead of recomputing the Gram matrix
       and the serial 16-block inverse.
+    bwd_natural_layout: The backward kernel reads `chunk_states` / `t_inv` /
+      `do` and writes dq/dk/dv through BlockSpecs on their natural layouts
+      instead of requiring the XLA glue to transpose/concat to and from the
+      kernel's compact layout.
     cp_m_local_in_kernel: In sequence-sharded CP, pass 1 also produces the local
       state transition `M_local` (the [d_k, d_k] map from the incoming state to
       the outgoing one) by carrying an identity block next to the recurrent
@@ -62,8 +72,10 @@ class GDNKernelOptions:
       so results differ from the default at that level (not bit-exact).
   """
 
+  bf16_qkv_input: bool = False
   cp_pass1_states_only: bool = False
   cp_pass2_reuse_t_inv: bool = False
+  bwd_natural_layout: bool = False
   cp_m_local_in_kernel: bool = False
 
 
@@ -188,6 +200,7 @@ def _run_local_gdn_decoupled_fwd(
     segment_ids: Optional[jax.Array] = None,
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
+    bf16_qkv_input: bool = False,
     states_only: bool = False,
     t_inv_in: Optional[jax.Array] = None,
     transition_in_state: bool = False,
@@ -199,6 +212,7 @@ def _run_local_gdn_decoupled_fwd(
   """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU.
 
   Experimental (Pallas path only; defaults keep the original behavior):
+    bf16_qkv_input: F4, feed bf16 qkv to the kernel (cast in VMEM).
     states_only: F2, skip `out` and `chunk_states` (both returned as None).
     t_inv_in: F3, [batch, num_chunks, num_v_heads, chunk, chunk] t_inv from a
       previous pass; skips the Gram matrix + triangular inverse.
@@ -332,6 +346,7 @@ def _run_local_gdn_decoupled_fwd(
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=bf16_qkv_input and qkv.dtype == jnp.bfloat16,
       states_only=states_only,
       t_inv_in=t_inv_in_flat,
       transition_in_state=transition_in_state,
@@ -413,6 +428,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
     segment_ids: Optional[jax.Array] = None,
     seg_metadata: Optional[Tuple[Optional[jax.Array], Optional[jax.Array], Optional[jax.Array]]] = None,
     cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
+    bf16_qkv_input: bool = False,
     pass1_states_only: bool = False,
     pass2_reuse_t_inv: bool = False,
     m_local_in_kernel: bool = False,
@@ -420,6 +436,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
   """Runs 2-pass sequence-sharded CP forward for GDN.
 
   Experimental (defaults keep the original behavior):
+    bf16_qkv_input: F4, both passes take bf16 qkv directly.
     pass1_states_only: F2, pass 1 only produces states + t_inv.
     pass2_reuse_t_inv: F3, pass 2 reuses pass 1's t_inv.
     m_local_in_kernel: F5, pass 1 also returns the local transition M_local
@@ -487,6 +504,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
       segment_ids=s_enc_local,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=bf16_qkv_input,
       states_only=pass1_states_only,
       transition_in_state=m_local_in_kernel,
   )
@@ -555,6 +573,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
       segment_ids=s_enc_local,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=bf16_qkv_input,
       t_inv_in=t_inv if pass2_reuse_t_inv else None,
   )
   if s_enc_local is not None:
@@ -597,7 +616,7 @@ def gdn_decoupled_conv1d(
 
   `cp_matmul_precision` sets the precision of the f32 matmuls that compose the recurrent state across
   sequence-sharded CP ranks (`cp_gdn`); it is unused without CP. `options` (static) selects the
-  opt-in kernel variants; see `GDNKernelOptions`.
+  opt-in kernel layout variants; see `GDNKernelOptions`.
   """
   options = options or DEFAULT_GDN_KERNEL_OPTIONS
   if _is_cp_active(cp_axis_name):
@@ -622,6 +641,7 @@ def gdn_decoupled_conv1d(
         cp_axis_name=cp_axis_name,
         segment_ids=segment_ids,
         cp_matmul_precision=cp_matmul_precision,
+        bf16_qkv_input=options.bf16_qkv_input,
         pass1_states_only=options.cp_pass1_states_only,
         pass2_reuse_t_inv=options.cp_pass2_reuse_t_inv,
         m_local_in_kernel=options.cp_m_local_in_kernel,
@@ -652,6 +672,7 @@ def gdn_decoupled_conv1d(
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=options.bf16_qkv_input,
   )
   return out, states
 
@@ -748,6 +769,7 @@ def _gdn_decoupled_conv1d_fwd(
         segment_ids=segment_ids,
         seg_metadata=seg_metadata,
         cp_matmul_precision=cp_matmul_precision,
+        bf16_qkv_input=options.bf16_qkv_input,
         pass1_states_only=options.cp_pass1_states_only,
         pass2_reuse_t_inv=options.cp_pass2_reuse_t_inv,
         m_local_in_kernel=options.cp_m_local_in_kernel,
@@ -794,6 +816,7 @@ def _gdn_decoupled_conv1d_fwd(
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=options.bf16_qkv_input,
   )
   out = checkpoint_name(out, "gdn_core_attn_out")
   seg_bundle = (segment_ids, conv_halo_seg, init_seg) if segment_ids is not None else None
@@ -838,7 +861,7 @@ def _gdn_decoupled_conv1d_bwd(
     residuals = trailing[res_idx]
     cotangents = trailing[res_idx + 1]
     cp_axis_name, cp_matmul_precision, options = trailing[:res_idx] + [None, cp_gdn.DEFAULT_PRECISION, None][res_idx:]
-  del options  # No backward-side kernel options in this change.
+  options = options or DEFAULT_GDN_KERNEL_OPTIONS
 
   m_local_fwd = None
   seg_slot = None
@@ -1036,6 +1059,9 @@ def _gdn_decoupled_conv1d_bwd(
         segment_ids=segment_ids,
         init_seg=init_seg,
         precision=cp_matmul_precision,
+        # Only the natural (token-major) kernel layout lets XLA push the head-major relayout past
+        # the GQA broadcast; the legacy layout already gets head-major glue from the dot operands.
+        head_major_glue=options.bwd_natural_layout,
     )
     dht_local, _ = cp_gdn.incoming_grad_state(
         dm_local, ds_ext_local, dht_final, cp_axis_name, precision=cp_matmul_precision
@@ -1058,6 +1084,7 @@ def _gdn_decoupled_conv1d_bwd(
         init_seg=init_seg,
         d_recurrent_state=dht_local,
         return_dh0=need_dh0,
+        natural_layout=options.bwd_natural_layout,
     )
     if need_dh0:
       dy_conv, d_b, d_a, d_a_log, d_dt_bias, dh0_local = bwd_out
@@ -1143,6 +1170,7 @@ def _gdn_decoupled_conv1d_bwd(
       init_seg=init_seg,
       d_recurrent_state=d_recurrent_state,
       return_dh0=need_dh0,
+      natural_layout=options.bwd_natural_layout,
   )
   # pylint: disable=unbalanced-tuple-unpacking
   if need_dh0:

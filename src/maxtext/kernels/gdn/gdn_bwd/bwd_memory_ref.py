@@ -129,3 +129,135 @@ def make_bwd_block_specs(
         )
     )
   return in_specs, out_specs, len(in_specs), len(out_specs)
+
+
+def make_bwd_block_specs_natural(
+    num_chunks: int,
+    chunk_size: int,
+    q_size: int,
+    k_size: int,
+    tile_q_size: int,
+    tile_k_size: int,
+    tile_v_size: int,
+    num_v_heads: int,
+    kq_head_dim: int,
+    v_head_dim: int,
+    padded_num_v_heads: int | None = None,
+    has_dht: bool = False,
+    has_dh0: bool = False,
+) -> Tuple[list[pl.BlockSpec], list[pl.BlockSpec], int, int]:
+  """Reverse-scan emit_pipeline specs reading / writing the natural layouts (B4).
+
+  Pipeline operand order (the caller passes the same `qkv_conv` HBM ref for
+  the first three inputs and the same `dy_conv` HBM ref for the first three
+  outputs):
+
+    in:  q, k, v [B, S, dim] windows, b, a [B, G, C, cs, Hp], do [B, S, Hv*dv] windows,
+         chunk_states [B, C, Hv, dk, dv], t_inv [B, C, Hv, cs, cs],
+         a_log, dt_bias [B, G, 1, Hp], reset [B, G, C, 1, 128], (dht [B, Hv, dk, dv])
+    out: dq, dk, dv [B, S, dim] windows, db, da, dal, ddt, (dh0 [B, Hv, dk, dv])
+
+  `num_v_heads` is the per-group head tile; the head group `g` selects the
+  channel block (q: g, k: q_size/tile_k + g, v: (q_size+k_size)/tile_v + g)
+  or the head block `g` for the head-major operands.
+  """
+  if padded_num_v_heads is None:
+    padded_num_v_heads = ((num_v_heads + 127) // 128) * 128
+  assert q_size % tile_k_size == 0 and (q_size + k_size) % tile_v_size == 0
+  k_block_off = q_size // tile_k_size
+  v_block_off = (q_size + k_size) // tile_v_size
+
+  def rc(c):
+    return num_chunks - 1 - c
+
+  in_specs = [
+      # 0: q window of qkv_conv [B, S, dim]
+      pl.BlockSpec((None, chunk_size, tile_q_size), lambda b, g, c: (b, rc(c), g)),
+      # 1: k window of qkv_conv
+      pl.BlockSpec((None, chunk_size, tile_k_size), lambda b, g, c: (b, rc(c), k_block_off + g)),
+      # 2: v window of qkv_conv
+      pl.BlockSpec((None, chunk_size, tile_v_size), lambda b, g, c: (b, rc(c), v_block_off + g)),
+      # 3: b [B, G, C, chunk_size, padded_num_v_heads]
+      pl.BlockSpec(
+          (None, None, None, chunk_size, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
+      ),
+      # 4: a [B, G, C, chunk_size, padded_num_v_heads]
+      pl.BlockSpec(
+          (None, None, None, chunk_size, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
+      ),
+      # 5: do [B, S, Hv * v_head_dim] window (same 2D token-major view as the
+      # q / k / v windows, so the pallas_call operand keeps the layout of the
+      # surrounding matmuls instead of forcing a (Hv, dv)-tiled 4D layout).
+      pl.BlockSpec((None, chunk_size, tile_v_size), lambda b, g, c: (b, rc(c), g)),
+      # 6: chunk_states [B, C, Hv, kq_head_dim, v_head_dim]
+      pl.BlockSpec(
+          (None, None, num_v_heads, kq_head_dim, v_head_dim),
+          lambda b, g, c: (b, rc(c), g, 0, 0),
+      ),
+      # 7: t_inv [B, C, Hv, chunk_size, chunk_size]
+      pl.BlockSpec(
+          (None, None, num_v_heads, chunk_size, chunk_size),
+          lambda b, g, c: (b, rc(c), g, 0, 0),
+      ),
+      # 8: a_log [B, G, 1, padded_num_v_heads]
+      pl.BlockSpec(
+          (None, None, 1, padded_num_v_heads),
+          lambda b, g, c: (b, g, 0, 0),
+      ),
+      # 9: dt_bias [B, G, 1, padded_num_v_heads]
+      pl.BlockSpec(
+          (None, None, 1, padded_num_v_heads),
+          lambda b, g, c: (b, g, 0, 0),
+      ),
+      # 10: reset [B, G, C, 1, 128]
+      pl.BlockSpec(
+          (None, None, None, 1, 128),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
+      ),
+  ]
+  if has_dht:
+    in_specs.append(
+        # 11: dht [B, Hv, kq_head_dim, v_head_dim]
+        pl.BlockSpec(
+            (None, num_v_heads, kq_head_dim, v_head_dim),
+            lambda b, g, c: (b, g, 0, 0),
+        )
+    )
+
+  out_specs = [
+      # 0-2: dq / dk / dv windows of dy_conv [B, S, dim]
+      pl.BlockSpec((None, chunk_size, tile_q_size), lambda b, g, c: (b, rc(c), g)),
+      pl.BlockSpec((None, chunk_size, tile_k_size), lambda b, g, c: (b, rc(c), k_block_off + g)),
+      pl.BlockSpec((None, chunk_size, tile_v_size), lambda b, g, c: (b, rc(c), v_block_off + g)),
+      # 3: db [B, G, C, chunk_size, padded_num_v_heads]
+      pl.BlockSpec(
+          (None, None, None, chunk_size, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
+      ),
+      # 4: da [B, G, C, chunk_size, padded_num_v_heads]
+      pl.BlockSpec(
+          (None, None, None, chunk_size, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
+      ),
+      # 5: dal [B, G, C, 1, padded_num_v_heads]
+      pl.BlockSpec(
+          (None, None, None, 1, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
+      ),
+      # 6: ddt [B, G, C, 1, padded_num_v_heads]
+      pl.BlockSpec(
+          (None, None, None, 1, padded_num_v_heads),
+          lambda b, g, c: (b, g, rc(c), 0, 0),
+      ),
+  ]
+  if has_dh0:
+    out_specs.append(
+        # 7: dh0 [B, Hv, kq_head_dim, v_head_dim]
+        pl.BlockSpec(
+            (None, num_v_heads, kq_head_dim, v_head_dim),
+            lambda b, g, c: (b, g, 0, 0),
+        )
+    )
+  return in_specs, out_specs, len(in_specs), len(out_specs)

@@ -109,7 +109,7 @@ def inner_kernel(
   `refs` holds the pipeline slots in `alloc_names` order (see
   memory_ref.create_allocs) followed by the scratches:
   (metadata_ref, weights_ref, carry_conv_scratch_ref,
-  carry_recurrent_scratch_ref).
+  carry_recurrent_scratch_ref, qkv_compact_scratch_ref).
   """
   del kwargs
   num_slots = len(alloc_names)
@@ -119,8 +119,9 @@ def inner_kernel(
   weights_ref = scratches[1]
   carry_conv_scratch_ref = scratches[2] if len(scratches) > 2 else None
   carry_recurrent_scratch_ref = scratches[3] if len(scratches) > 3 else None
+  qkv_compact_scratch_ref = scratches[4] if len(scratches) > 4 else None
 
-  qkv_slot_ref = slots["qkv"]  # [seq, chunk, 1, dim_size]
+  qkv_slot_ref = slots["qkv"]  # [seq, chunk, 1, dim_size] (f32) or [seq, chunk, dim_size] (bf16)
   b_slot_ref = slots["b"]  # [seq, chunk, 1, num_v_heads]
   a_slot_ref = slots["a"]  # [seq, chunk, 1, num_v_heads]
   conv_state_slot_ref = slots["conv"]  # [seq, prev_kernel_size, 1, dim_size]
@@ -144,7 +145,20 @@ def inner_kernel(
   )
 
   # Step 1: Conv1D.
-  qkv_in_compact = qkv_slot_ref[...].astype(jnp.float32)
+  if cfg.bf16_qkv_input:
+    # F4: bf16 rows were DMA'd in their native [chunk, dim] tiling. Cast to f32
+    # in VMEM and stage them in the compact [chunk, 1, dim] layout that the
+    # conv1d and the strided head loads below consume.
+    assert qkv_compact_scratch_ref is not None
+    for idx in range(cfg.seq_tile_size):
+      vmem_ldst.store_native_as_compact(
+          qkv_slot_ref[idx].astype(jnp.float32),
+          qkv_compact_scratch_ref.at[idx],
+      )
+    qkv_stage_ref = qkv_compact_scratch_ref
+  else:
+    qkv_stage_ref = qkv_slot_ref
+  qkv_in_compact = qkv_stage_ref[...].astype(jnp.float32)
   qkv_in_compact = jnp.concat([prev_conv, qkv_in_compact], axis=1)
 
   # Prepare conv1d weights.
@@ -179,7 +193,7 @@ def inner_kernel(
     assert not cfg.states_only and t_inv_in_slot_ref is None
     q_compact, k_compact, v_compact, b_compact, a_compact = vmem_ldst.load_activation_as_compact(
         qkv_vreg=qkv_out_compact,
-        qkv_vmem_ref=qkv_slot_ref,
+        qkv_vmem_ref=qkv_stage_ref,
         b_vmem_ref=b_slot_ref,
         a_vmem_ref=a_slot_ref,
         cfgs=cfg,
@@ -200,7 +214,7 @@ def inner_kernel(
   else:
     q_large, k_large, v_large, b_large, a_large = vmem_ldst.load_activation_as_large(
         qkv_vreg=qkv_out_compact,
-        qkv_vmem_ref=qkv_slot_ref,
+        qkv_vmem_ref=qkv_stage_ref,
         b_vmem_ref=b_slot_ref,
         a_vmem_ref=a_slot_ref,
         cfgs=cfg,
@@ -237,6 +251,7 @@ def outer_kernel(
     *args,
     carry_conv_scratch_ref: jax.Array | None = None,
     carry_recurrent_scratch_ref: jax.Array | None = None,
+    qkv_compact_scratch_ref: jax.Array | None = None,
     cfg: config.GDNConfig,
     has_in_act: bool = True,
     **kwargs,
@@ -319,6 +334,7 @@ def outer_kernel(
             weights_ref,
             carry_conv_scratch_ref,
             carry_recurrent_scratch_ref,
+            qkv_compact_scratch_ref,
         ),
         allocations=allocations,
     )
@@ -341,6 +357,7 @@ def outer_kernel(
         "compute_precision",
         "is_prefill_only",
         "use_qk_norm_in_gdn",
+        "bf16_qkv_input",
         "states_only",
         "transition_in_state",
     ),
@@ -374,6 +391,7 @@ def fused_conv1d_gdn(
     segment_ids: jax.Array | None = None,
     conv_halo_seg: jax.Array | None = None,
     init_seg: jax.Array | None = None,
+    bf16_qkv_input: bool = False,
     states_only: bool = False,
     t_inv_in: jax.Array | None = None,  # [num_chunks, n_v, chunk, chunk]
     transition_in_state: bool = False,
@@ -381,6 +399,9 @@ def fused_conv1d_gdn(
   """Perform conv1d and gdn in a single fused kernel, returning (out, states, t_inv, chunk_states).
 
   Experimental options (all default to the original behavior):
+    bf16_qkv_input: (F4) keep `qkv` in bf16 for the kernel and cast to f32 in
+      VMEM instead of casting in XLA. Requires bf16 `qkv`, a prefill-only call
+      and batch_size % mixed_tile_size == 0.
     states_only: (F2) skip `out` / `chunk_states` (returned as None) and the
       q-dependent compute; only conv/recurrent states and t_inv are produced.
     t_inv_in: (F3) reuse a previously computed `t_inv` (same layout as the
@@ -396,7 +417,11 @@ def fused_conv1d_gdn(
   recurrent_out_dtype = recurrent_state.dtype
   assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
-  qkv = qkv.astype(jnp.float32)
+  if bf16_qkv_input:
+    assert qkv.dtype == jnp.bfloat16, qkv.dtype
+    assert is_prefill_only, "bf16_qkv_input requires a prefill-only call"
+  else:
+    qkv = qkv.astype(jnp.float32)
   if transition_in_state:
     assert states_only and is_prefill_only, "transition_in_state requires states_only, prefill-only"
     assert recurrent_state.shape[-1] == d_v + d_k, (recurrent_state.shape, d_v, d_k)
@@ -482,7 +507,12 @@ def fused_conv1d_gdn(
     b = b.at[:batch_size, n_v].set(s_enc_flat)
     b = b.at[:batch_size, n_v + 1].set(seg_aux_flat)
 
-  qkv = qkv.reshape(padded_batch_size, 1, -1)
+  if bf16_qkv_input:
+    # F4: keep the natural bf16 [batch, dim] layout; the kernel DMAs whole
+    # chunk-aligned row blocks (see memory_ref.InBufferedRef).
+    assert padded_batch_size % mixed_tile_size == 0, (padded_batch_size, mixed_tile_size)
+  else:
+    qkv = qkv.reshape(padded_batch_size, 1, -1)
   b = b.reshape(padded_batch_size, 1, -1)
   a = a.reshape(padded_batch_size, 1, -1)
 
@@ -536,6 +566,7 @@ def fused_conv1d_gdn(
             recurrent_state=in_recurrent_state.dtype,
             conv_state=in_conv_state.dtype,
         ),
+        bf16_qkv_input=is_per_seq and bf16_qkv_input,
         states_only=is_per_seq and states_only,
         t_inv_input=use_t_inv_in,
         transition_in_state=is_per_seq and transition_in_state,
@@ -631,8 +662,10 @@ def fused_conv1d_gdn(
     return r_out, r_conv, r_rec, r_t_inv, r_chunk_states
 
   if not is_prefill_only:
-    if states_only or t_inv_in is not None or transition_in_state:
-      raise ValueError("states_only / t_inv_in / transition_in_state are only supported for prefill-only calls.")
+    if bf16_qkv_input or states_only or t_inv_in is not None or transition_in_state:
+      raise ValueError(
+          "bf16_qkv_input / states_only / t_inv_in / transition_in_state are only supported for prefill-only calls."
+      )
     out_act, out_conv_state, out_recurrent_state, _, _ = call_kernel(
         conv_state, recurrent_state, None, config.GDNMode.BATCHED
     )

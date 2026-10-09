@@ -255,6 +255,12 @@ class InBufferedRef(BaseBufferedRef):
       record = self.metadata_ref.get_record(p_id, idx)
       r_base = record.r_base
       dma_size = record.r_size
+      if self._is_tiled_rows():
+        # bf16 [batch, dim] operand, (16, 128)-tiled: rows must be DMA'd at a
+        # tile-aligned offset with a static row count (see fused_conv1d_gdn,
+        # which requires batch % chunk_size == 0 in this mode).
+        r_base = pl.multiple_of(r_base, self.cfg.chunk_size)
+        dma_size = self.cfg.chunk_size
       pltpu.make_async_copy(
           src_ref.at[pl.ds(r_base, dma_size)],
           vmem_ref.at[idx, pl.ds(0, dma_size)],  # pyrefly: ignore[missing-attribute]
@@ -272,13 +278,21 @@ class InBufferedRef(BaseBufferedRef):
 
     dma_size = 0
     for idx in range(self.cfg.seq_tile_size):
-      dma_size += self.metadata_ref.get_record(p_id, idx).r_size
+      if self._is_tiled_rows():
+        dma_size += self.cfg.chunk_size
+      else:
+        dma_size += self.metadata_ref.get_record(p_id, idx).r_size
 
     pltpu.make_async_copy(
         vmem_ref.at[0, pl.ds(0, dma_size)],  # pyrefly: ignore[missing-attribute]
         vmem_ref.at[0, pl.ds(0, dma_size)],  # pyrefly: ignore[missing-attribute]
         sem,
     ).wait()
+
+  def _is_tiled_rows(self) -> bool:
+    """True for the bf16 [seq, chunk, dim] qkv slot (rows on a tiled dim)."""
+    assert self.window_ref is not None
+    return self.cfg.bf16_qkv_input and len(self.window_ref.shape) == 4
 
 
 @jax.tree_util.register_dataclass
@@ -545,7 +559,11 @@ def create_allocs(
   t_inv_in when `cfg.t_inv_input`), followed by outputs (out unless
   `cfg.states_only`, t_inv, chunk_states).
   """
-  qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.dim_size)
+  if cfg.bf16_qkv_input:
+    # bf16 [batch, dim] operand -> [seq, chunk, dim] slot (native bf16 tiling).
+    qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, cfg.dim_size)
+  else:
+    qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.dim_size)
   ba_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.aligned_num_v_heads)
 
   out_shape = (

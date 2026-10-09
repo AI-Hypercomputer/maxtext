@@ -71,6 +71,8 @@ _GDN_SAVED_NAMES = frozenset(
 def gdn_kernel_options_from_config(cfg: Any) -> GDNKernelOptions:
   """Builds the static GDN kernel options from the MaxText config (all default off)."""
   return GDNKernelOptions(
+      bf16_qkv_input=bool(getattr(cfg, "gdn_kernel_bf16_qkv_input", False)),
+      bwd_natural_layout=bool(getattr(cfg, "gdn_kernel_bwd_natural_layout", False)),
       cp_pass1_states_only=bool(getattr(cfg, "gdn_kernel_cp_pass1_states_only", False)),
       cp_pass2_reuse_t_inv=bool(getattr(cfg, "gdn_kernel_cp_pass2_reuse_t_inv", False)),
       cp_m_local_in_kernel=bool(getattr(cfg, "gdn_kernel_cp_m_local_in_kernel", False)),

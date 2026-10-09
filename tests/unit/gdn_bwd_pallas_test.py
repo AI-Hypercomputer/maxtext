@@ -654,6 +654,78 @@ class GdnBwdPallasTest(absltest.TestCase):
       if g_none is not None and g_cached_all is not None:
         np.testing.assert_allclose(g_none, g_cached_all, rtol=1e-5, atol=1e-5)
 
+  def test_layout_options_match_default_bitwise(self):
+    """bf16_qkv_input / bwd_natural_layout reproduce the default kernels' outputs and gradients bit for bit."""
+    if jax.default_backend() != "tpu":
+      self.skipTest("bf16_qkv_input / bwd_natural_layout are Pallas TPU kernel options")
+    batch_size = 2
+    chunk_size = 64
+    num_chunks = 3
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(909), batch_size, seq_len, dim_size, num_v_heads, head_v_dim, conv_kernel_size
+    )
+    k_cs, k_rs, k_dcs, k_drs = jax.random.split(jax.random.PRNGKey(910), 4)
+    # Incoming conv halo and recurrent state, and cotangents on the outgoing ones, as a seq-CP shard sees them.
+    conv_state = 0.1 * jax.random.normal(k_cs, (batch_size, conv_kernel_size - 1, dim_size), jnp.float32)
+    recurrent_state = 0.1 * jax.random.normal(k_rs, (batch_size, num_v_heads, head_k_dim, head_v_dim), jnp.float32)
+    d_next_cs = jax.random.normal(k_dcs, conv_state.shape, jnp.float32)
+    d_next_rs = jax.random.normal(k_drs, recurrent_state.shape, jnp.float32)
+    layout_options = gdn_bwd_pallas.GDNKernelOptions(bf16_qkv_input=True, bwd_natural_layout=True)
+
+    for compute_dtype in (jnp.float32, jnp.bfloat16):
+      with self.subTest(compute_dtype=jnp.dtype(compute_dtype).name):
+        # The model feeds the kernel its bf16 projection output; bf16_qkv_input only engages on bf16 qkv.
+        qkv_c, b_c, a_c, cs_c = (x.astype(jnp.bfloat16) for x in (qkv, b, a, conv_state))
+
+        def run(options, qkv_c=qkv_c, b_c=b_c, a_c=a_c, cs_c=cs_c, compute_dtype=compute_dtype):
+          def f(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in):
+            out, (next_cs, next_rs) = gdn_bwd_pallas.gdn_decoupled_conv1d(
+                qkv_in,
+                b_in,
+                a_in,
+                cw_in,
+                cb_in,
+                al_in,
+                dt_in,
+                cs_in,
+                rs_in,
+                num_k_heads=num_k_heads,
+                num_v_heads=num_v_heads,
+                head_k_dim=head_k_dim,
+                head_v_dim=head_v_dim,
+                conv_kernel_size=conv_kernel_size,
+                chunk_size=chunk_size,
+                use_qk_norm_in_gdn=True,
+                compute_dtype=compute_dtype,
+                options=options,
+            )
+            return out, next_cs, next_rs
+
+          primals = (qkv_c, b_c, a_c, conv_weight, conv_bias, a_log, dt_bias, cs_c, recurrent_state)
+          outs, vjp_fn = jax.vjp(f, *primals)
+          cotangents = (do.astype(outs[0].dtype), d_next_cs.astype(outs[1].dtype), d_next_rs.astype(outs[2].dtype))
+          return jax.block_until_ready((outs, vjp_fn(cotangents)))
+
+        outs_ref, grads_ref = run(None)
+        outs_opt, grads_opt = run(layout_options)
+        for name, x_ref, x_opt in zip(("out", "next_conv_state", "next_recurrent_state"), outs_ref, outs_opt):
+          with self.subTest(output=name):
+            self.assertEqual(x_opt.dtype, x_ref.dtype)
+            np.testing.assert_array_equal(np.asarray(x_opt), np.asarray(x_ref))
+        grad_names = ("d_qkv", "d_b", "d_a", "d_conv_weight", "d_conv_bias", "d_a_log", "d_dt_bias", "d_conv_state", "d_h0")
+        for name, g_ref, g_opt in zip(grad_names, grads_ref, grads_opt):
+          with self.subTest(gradient=name):
+            self.assertEqual(g_opt.dtype, g_ref.dtype)
+            np.testing.assert_array_equal(np.asarray(g_opt), np.asarray(g_ref))
+
   def test_run_local_gdn_decoupled_fwd_returns_cached_chunk_states(self):
     """Verifies _run_local_gdn_decoupled_fwd returns properly shaped chunk_states."""
     is_tpu = jax.default_backend() == "tpu"

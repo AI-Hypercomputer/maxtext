@@ -83,6 +83,9 @@ class GDNConfig:
   has_seg_ids: bool = False
   use_qk_norm_in_gdn: bool = True
   # Experimental "less work" options (all default to the original behavior).
+  # F4: the qkv HBM operand is bf16 [batch, dim] (no XLA-side f32 cast); the
+  # kernel DMAs bf16 rows into VMEM and casts to f32 in-kernel.
+  bf16_qkv_input: bool = False
   # F2: states-only pass (seq-CP pass 1): skips `out` / `chunk_states`
   # (no HBM buffers, no writes) and all q-dependent compute.
   states_only: bool = False
@@ -135,6 +138,8 @@ class GDNConfig:
 
   def get_kernel_name(self) -> str:
     name = f"fused_conv1d_gdn_{self.mode.value}_b{self.seq_tile_size}" f"_c{self.chunk_size}"
+    if self.bf16_qkv_input:
+      name += "_bf16in"
     if self.states_only:
       name += "_states_only"
     if self.t_inv_input:
@@ -176,7 +181,15 @@ class GDNConfig:
       carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
       carry_recurrent_scratch = pltpu.VMEM(recurrent_shape, jnp.float32)
 
-    return {
+    ret = {
         "carry_conv_scratch_ref": carry_conv_scratch,
         "carry_recurrent_scratch_ref": carry_recurrent_scratch,
     }
+    if self.bf16_qkv_input:
+      # f32 "compact" ([chunk, 1, dim], 1x128 tiled) copy of the current tile,
+      # filled in-kernel from the bf16 VMEM slot. It replaces the f32 qkv slot
+      # as the conv1d input / conv1d output staging buffer.
+      ret["qkv_compact_scratch_ref"] = pltpu.VMEM(
+          (self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32
+      )
+    return ret

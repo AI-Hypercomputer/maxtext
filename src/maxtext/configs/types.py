@@ -1471,6 +1471,22 @@ class Qwen3Next(BaseModel):
           " HIGHEST) or with head-sharded context parallelism."
       ),
   )
+  gdn_kernel_bf16_qkv_input: bool = Field(
+      False,
+      description=(
+          "GDN Pallas kernel: feed the forward kernel the bf16 qkv directly and up-cast in VMEM instead of "
+          "materializing an f32 copy in HBM (also keeps qkv in its natural layout for the backward program). "
+          "Bit-exact with the default. Requires use_gdn_kernel=True."
+      ),
+  )
+  gdn_kernel_bwd_natural_layout: bool = Field(
+      False,
+      description=(
+          "GDN Pallas kernel: the backward kernel reads chunk_states and writes dq/dk/dv in the natural [B, S, C] "
+          "layout via BlockSpecs, removing the transpose/concat relayout copies around the kernel. "
+          "Bit-exact with the default. Requires use_gdn_kernel=True."
+      ),
+  )
   gdn_kernel_cp_pass1_states_only: bool = Field(
       False,
       description=(
