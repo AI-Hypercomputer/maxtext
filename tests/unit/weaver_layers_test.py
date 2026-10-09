@@ -20,6 +20,7 @@ backbone.
 """
 
 import dataclasses
+import gc
 import os
 import subprocess
 from typing import Any
@@ -1592,7 +1593,7 @@ class WeaverOmniTransformerGoldenParityTest(parameterized.TestCase):
 @pytest.mark.tpu_only
 @pytest.mark.scheduled_only
 class WeaverOmniTransformerTPUTest(parameterized.TestCase):
-  """Scheduled nightly TPU v5 test for full 36-layer WeaverOmniTransformer."""
+  """Scheduled nightly TPU v5p/TPU7x test for full 36-layer WeaverOmniTransformer."""
 
   @parameterized.named_parameters(
       ("unscanned", False),
@@ -1600,6 +1601,9 @@ class WeaverOmniTransformerTPUTest(parameterized.TestCase):
   )
   def test_full_36_layer_backbone_forward_tpu(self, scan_layers: bool):
     """Executes full 36-layer WeaverOmniTransformer on TPU with random weights."""
+    if any(k in d.device_kind for d in jax.devices() for k in ("TPU v6", "TPU v5 lite", "TPU v4")):
+      self.skipTest("Full 36-layer WeaverOmniTransformer (~31 GB) requires >32 GB HBM per chip (e.g. v5p or TPU7x).")
+
     cfg = pyconfig.initialize(
         [
             None,
@@ -1638,6 +1642,10 @@ class WeaverOmniTransformerTPUTest(parameterized.TestCase):
     output = forward(state, input_ids, latents, timesteps)
     self.assertEqual(output.shape, (batch_size, 48, t_lat, h_lat, w_lat))
     self.assertTrue(bool(jnp.all(jnp.isfinite(output))))
+
+    del model, state, output
+    jax.clear_caches()
+    gc.collect()
 
 
 if __name__ == "__main__":
