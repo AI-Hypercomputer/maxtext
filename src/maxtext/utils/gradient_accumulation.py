@@ -188,6 +188,18 @@ def gradient_accumulation_loss_and_grad(
   )
   scanned_aux = aux
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
+  # loss_fn hands back per-micro-batch means for these (z_loss over the micro-batch's tokens, the aux losses
+  # over the micro-batch), so the plain sum above logged them gradient_accumulation_steps times too large
+  # (learning/z_loss, learning/moe_lb_loss). Reduce them the way the loss is: the aux losses as the mean over
+  # micro-batches, z_loss per token over the whole batch.
+  for name in ("moe_lb_loss", "indexer_loss", "mtp_loss"):
+    if name in aux:
+      aux[name] = aux[name] / config.gradient_accumulation_steps
+  if "z_loss" in scanned_aux:
+    weights = scanned_aux["total_weights"].astype(jnp.float32)
+    aux["z_loss"] = jnp.sum(scanned_aux["z_loss"] * weights) / jnp.maximum(jnp.sum(weights), 1.0)
+  if "has_moe_overflow" in scanned_aux:
+    aux["has_moe_overflow"] = jnp.any(scanned_aux["has_moe_overflow"], axis=0)
   if "te_moe_capacity_overflow" in scanned_aux:
     aux["te_moe_capacity_overflow"] = jnp.any(scanned_aux["te_moe_capacity_overflow"], axis=0)
     aux["te_moe_max_total_recv_tokens"] = jnp.max(scanned_aux["te_moe_max_total_recv_tokens"], axis=0)

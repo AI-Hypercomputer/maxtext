@@ -92,6 +92,19 @@ def _normalized_loss_fn(model, config, data, dropout_rng, params, is_train=True)
   return xent_sum / aux["total_weights"], aux
 
 
+def _metrics_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+  """The fake loss with the per-micro-batch metrics the production loss_fn reports.
+
+  z_loss is a per-token mean over the micro-batch (here the micro-batch's mean loss), moe_lb_loss a
+  per-micro-batch mean, has_moe_overflow a flag; the step must report them for the whole batch, not summed.
+  """
+  xent_sum, aux = _fake_loss_fn(model, config, data, dropout_rng, params, is_train=is_train)
+  aux["z_loss"] = xent_sum / aux["total_weights"]
+  aux["moe_lb_loss"] = jnp.array(0.25)
+  aux["has_moe_overflow"] = jnp.any(data["inputs"] > 5.0)
+  return xent_sum, aux
+
+
 class TestGradientAccumulationNNX(unittest.TestCase):
   """Cover the NNX path of gradient_accumulation_loss_and_grad."""
 
@@ -162,6 +175,28 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     np.testing.assert_allclose(loss, expected_loss, rtol=1e-6)
     np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
     np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
+  def test_per_microbatch_metrics_are_reported_for_the_whole_batch(self):
+    """Metrics loss_fn gives as micro-batch means come out as batch means, not sums over micro-batches.
+
+    Pins a logging bug: learning/z_loss and learning/moe_lb_loss were gradient_accumulation_steps times
+    too large under accumulation (the loss itself was right), and the overflow flag was an integer count.
+    """
+    loss, aux, _ = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _metrics_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+    # z_loss here is the per-token loss, so over the whole batch it is the (lb-free) loss itself.
+    np.testing.assert_allclose(aux["z_loss"], loss - 0.25, rtol=1e-6)
+    np.testing.assert_allclose(aux["moe_lb_loss"], 0.25, rtol=1e-6)
+    self.assertEqual(aux["has_moe_overflow"].dtype, jnp.bool_)
+    self.assertTrue(bool(aux["has_moe_overflow"]))  # only the second micro-batch has inputs above 5
+    np.testing.assert_allclose(aux["xent_sum"] / aux["total_weights"], loss - 0.25, rtol=1e-6)
 
   def test_tunix_block_diffusion_uses_accumulation_step_divisor(self):
     self.cfg.training_objective = "block_diffusion"
