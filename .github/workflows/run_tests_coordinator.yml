@@ -180,7 +180,7 @@ jobs:
             "tpu-integration": "",
             "tpu-post-training-unit": "tests/post_training/unit tests/unit",
             "tpu-post-training-integration": "tests/post_training/integration",
-            "tpu7x-unit": "",
+            "tpu7x-unit": "tests/unit/moe_test.py",
             "tpu7x-integration": "",
             "tpu7x-post-training-unit": "tests/post_training/unit tests/unit",
             "tpu7x-post-training-integration": "tests/post_training/integration",
