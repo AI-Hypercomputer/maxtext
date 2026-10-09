@@ -382,6 +382,25 @@ class HyperParameters:
     """Returns the configuration as a flat dictionary for backward compatibility."""
     return self._flat_config
 
+  def replace(self, **updates: Any) -> "HyperParameters":
+    """Returns a copy with `updates` applied verbatim.
+
+    Validation and derived fields are not recomputed, so callers must pass consistent values for every field they
+    change (e.g. both a batch size and the global batch sizes derived from it). In particular, changing `run_name`
+    keeps the paths derived from the old one: `checkpoint_dir`, `metrics_dir`, `tensorboard_dir`,
+    `managed_mldiagnostics_dir`, `mllog_file`, `dump_hlo_gcs_dir` and `dump_jaxpr_gcs_dir`. Only the data-replica
+    checks (`DatasetGeneral.validate_data_replica_index`) are re-run.
+
+    Raises:
+      ValueError: If a key is not a config field, or the data-replica fields are inconsistent.
+    """
+    unknown = sorted(set(updates) - set(type(self._pydantic_config).model_fields))
+    if unknown:
+      raise ValueError(f"Unknown config fields: {unknown}.")
+    pydantic_config = self._pydantic_config.model_copy(update=updates, deep=True)
+    pydantic_config.validate_data_replica_index()
+    return HyperParameters(pydantic_config)
+
 
 def _handle_config_exception(e: Exception):
   """Handles configuration exceptions, prints to stderr, writes log, and exits or raises."""

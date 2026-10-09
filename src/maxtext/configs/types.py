@@ -2170,6 +2170,18 @@ class DatasetGeneral(BaseModel):
   )
   num_epoch: int = Field(1, description="Number of epochs to train for.")
   expansion_factor_real_data: float = Field(-1.0, description="Factor for partial data loading on hosts.")
+  num_data_replicas_per_process: PositiveInt = Field(
+      1,
+      description=(
+          "Number of independent data-parallel replicas fed by each data-loading process, each with its own input"
+          " pipeline and a `global_batch_size_to_load` of its own. Each replica loads its own slice of the process's"
+          " data shard, so per-host file sharding (e.g. the grain tfrecord/parquet `grain_worker_count` limit) sees"
+          " this many times as many shards. Not supported by colocated_python_data_input, c4_mlperf or olmo_grain."
+      ),
+  )
+  data_replica_index: NonNegativeInt = Field(
+      0, description="Which of the `num_data_replicas_per_process` replicas this input pipeline feeds."
+  )
   reuse_example_batch: int = Field(0, description="For performance testing, repeatedly uses the same batch.")
   generate_padding_batch_train: bool = Field(
       False,
@@ -2184,6 +2196,23 @@ class DatasetGeneral(BaseModel):
   per_device_batch_size_increment: float = Field(2.0, description="Increment for per device batch size for rampup.")
   global_rampup_samples: int = Field(500, description="Target number of training samples for rampup.")
   colocated_python_data_input: bool = Field(False, description="Experimental feature for Pathways.")
+
+  @model_validator(mode="after")
+  def validate_data_replica_index(self) -> "DatasetGeneral":
+    """Checks the data-replica fields; `HyperParameters.replace` re-runs this check."""
+    if self.data_replica_index >= self.num_data_replicas_per_process:
+      raise ValueError(
+          f"data_replica_index ({self.data_replica_index}) must be < num_data_replicas_per_process"
+          f" ({self.num_data_replicas_per_process})."
+      )
+    if self.num_data_replicas_per_process > 1:
+      # These pipelines shard by process only, so every replica would read the same data.
+      if self.colocated_python_data_input:
+        raise ValueError("num_data_replicas_per_process > 1 does not support colocated_python_data_input.")
+      dataset_type = DatasetType(self.dataset_type)  # `HyperParameters.replace` does not coerce strings.
+      if dataset_type in (DatasetType.C4MLPERF, DatasetType.OLMO_GRAIN):
+        raise ValueError(f"num_data_replicas_per_process > 1 does not support dataset_type={dataset_type.value}.")
+    return self
 
 
 class TfdsDataset(BaseModel):

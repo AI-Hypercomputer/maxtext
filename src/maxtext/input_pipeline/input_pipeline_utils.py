@@ -24,6 +24,7 @@ if TYPE_CHECKING:
   import tensorflow as tf
 
 import grain.python as grain
+import jax
 import numpy as np
 from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator  # pylint: disable=protected-access
 from grain.experimental import TFRecordIterDataset
@@ -1579,3 +1580,44 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       element.pop("second_per_grids", None)
 
     return element
+
+
+def get_data_replica(config) -> tuple[int, int]:
+  """Returns `(data_replica_index, num_data_replicas_per_process)` of the data replica `config` loads for.
+
+  Configs without these fields (e.g. duck-typed test configs) load for a single replica.
+
+  Raises:
+    ValueError: If the index is not in `[0, num_data_replicas_per_process)`.
+  """
+  num_replicas = getattr(config, "num_data_replicas_per_process", 1)
+  replica_index = getattr(config, "data_replica_index", 0)
+  if num_replicas < 1 or not 0 <= replica_index < num_replicas:
+    raise ValueError(
+        f"data_replica_index ({replica_index}) must be in [0, num_data_replicas_per_process ({num_replicas}))."
+    )
+  return replica_index, num_replicas
+
+
+def get_all_replicas_batch_size(config, batch_size: int) -> int:
+  """Returns the per-step batch of all `num_data_replicas_per_process` replicas, given one replica's `batch_size`.
+
+  A config's global batch sizes (e.g. `global_batch_size_to_load`) are those of its own replica, but the shards of
+  `get_dataloading_shard` cover all replicas. Anything sized for the whole shard set, such as ElasticIterator's
+  global batch or the mmap_npy sample budget, must use this total.
+  """
+  return batch_size * get_data_replica(config)[1]
+
+
+def get_dataloading_shard(config, process_indices: list[int], shard_offset: int = 0, shards_per_host: int = 1):
+  """Returns `(shard_index, shard_count)` of the data this process and data replica should load.
+
+  Loading host `h` (its position in `process_indices`) owns shards `shard_offset * num_hosts + h` for
+  `shard_offset < shards_per_host`; each of those is further split among the process's
+  `num_data_replicas_per_process` replicas. Consumers that size batches or sample budgets for all
+  `shard_count` shards must scale the replica's batch with `get_all_replicas_batch_size`.
+  """
+  replica_index, num_replicas = get_data_replica(config)
+  num_hosts = len(process_indices)
+  host_shard = shard_offset * num_hosts + process_indices.index(jax.process_index())
+  return host_shard * num_replicas + replica_index, num_hosts * shards_per_host * num_replicas

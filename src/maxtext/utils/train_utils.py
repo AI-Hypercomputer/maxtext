@@ -353,13 +353,17 @@ def _reorder_data_iterator_for_loader(reorder_fn, data_iterator):
   return _ReorderedDataIterator(reorder_fn, data_iterator)
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, mesh=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
-  Args: config recorder
+  Args:
+    config: The training config.
+    recorder: Goodput recorder.
+    devices: Devices to build the mesh from; defaults to all devices.
+    mesh: A prebuilt mesh to train on instead of the one derived from `config` (e.g. a submesh of the devices).
 
   Returns:
     init_rng:
@@ -378,7 +382,8 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    if mesh is None:
+      mesh = maxtext_utils.get_mesh_from_config(config, devices)
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     # Create abstract NNX model.
     _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
@@ -469,7 +474,7 @@ def setup_train_loop(config, recorder, devices=None):
           else getattr(state, "model", state)
       )
       # pyrefly: ignore[bad-argument-type]
-      lora_utils.restore_lora_from_path(target_model_state, config)
+      lora_utils.restore_lora_from_path(target_model_state, config, mesh=mesh)
       _, _, state_mesh_shardings = maxtext_utils.get_abstract_state_nnx(config, mesh, init_state_fn, True)
     with logical_axis_rules(config.logical_axis_rules):
       # We only need the graphdef here; it's merged with state below. Avoid
