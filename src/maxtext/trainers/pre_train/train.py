@@ -1157,8 +1157,19 @@ def start_run_clock(config, start_step, warmup_fn=None, barrier_fn=None, python_
   mllog_utils.block_start(config, start_step)
 
 
-def train_loop(config, recorder, state=None):
-  """Main Training loop."""
+def train_loop(config, recorder, state=None, elastic_retry_cache=None):
+  """Main Training loop.
+
+  Args:
+    config: Config object.
+    recorder: Goodput recorder.
+    state: Optional initial train state.
+    elastic_retry_cache: Optional `elastic_utils.RetryCache`. An elastic retry on the same slices reuses the setup and the
+      compiled steps cached in it instead of building them again.
+
+  Returns:
+    The final train state.
+  """
   (
       init_rng,
       checkpoint_manager,
@@ -1171,7 +1182,7 @@ def train_loop(config, recorder, state=None):
       rampup_manager,
       eval_data_iterator,
       state,
-  ) = train_utils.setup_train_loop(config, recorder)
+  ) = train_utils.setup_train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
   # Throttling is applied only if configured (dcn_bandwidth_limit is set).
   # The default flag value is empty, meaning no throttling is applied by default.
@@ -1201,16 +1212,24 @@ def train_loop(config, recorder, state=None):
   else:
     params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
-  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config,
-      jit_model,
-      mesh,
-      state,
-      state_mesh_shardings,
-      train_step,
-      eval_step,
-      eval_data_iterator,
-      params_shardings,
+  # Jit the train and eval steps, or reuse the ones compiled by the previous elastic attempt. A pause/resume retry
+  # comes back on the same slices, so the compiled programs still fit and the retrace, lowering and compile are
+  # skipped. After a replica resize the cache has been emptied, so the steps are compiled again for the new mesh.
+  p_train_step, p_eval_step = elastic_utils.get_or_build(
+      elastic_retry_cache,
+      "train_and_eval_step",
+      functools.partial(
+          train_utils.jit_train_and_eval_step,
+          config,
+          jit_model,
+          mesh,
+          state,
+          state_mesh_shardings,
+          train_step,
+          eval_step,
+          eval_data_iterator,
+          params_shardings,
+      ),
   )
 
   if jit_model_eval is not None and p_eval_step is not None:
@@ -1542,10 +1561,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   return config, recorder
 
 
-def run(config, recorder):
+def run(config, recorder, elastic_retry_cache=None):
   """Run the job given hyperparameters and utilities."""
   with (max_utils.maybe_get_transformer_engine_context(config),):
-    train_loop(config, recorder)
+    train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
 
 def get_train_func(config, recorder, argv):
@@ -1553,24 +1572,38 @@ def get_train_func(config, recorder, argv):
   if config.elastic_enabled:
     max_logging.log("Elastic utils: Elastic training enabled.")
 
-    def on_elastic_event():
-      elastic_utils.record_elastic_event_start(recorder, config)
+    # Setup that an elastic retry on the same slices can reuse: the `initialize` result, the mesh, the abstract
+    # model and the jitted steps. `elastic_retry` turns it on for the run and empties it when the slices change,
+    # so a pause/resume retry reuses everything and a replica resize rebuilds everything. It is shared by
+    # `elastic_retry` and the attempts it runs, and is passed down to `train_loop` and `setup_train_loop`. It
+    # can't live in the config: the config built for an attempt is itself one of the cached objects.
+    elastic_retry_cache = elastic_utils.RetryCache()
+
+    def on_elastic_event(scale_up):
+      elastic_utils.record_elastic_event_start(recorder, scale_up=scale_up)
 
     def on_slices_ready():
       elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)
 
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
-      elastic_config, elastic_recorder = initialize(argv)
+      # Reuse the config and goodput recorder from the previous attempt if it ran on the same slices. After a
+      # replica resize `initialize` runs again so the config picks up the new slice count.
+      elastic_config, elastic_recorder = elastic_utils.get_or_build(
+          elastic_retry_cache, "initialize", functools.partial(initialize, argv)
+      )
       run(
           elastic_config,
           elastic_recorder,
+          elastic_retry_cache=elastic_retry_cache,
       )
 
+    # Every attempt goes through `elastic_train_wrapper`; the cache decides how much of it is skipped.
     train_func = elastic_utils.elastic_retry(
         config,
         callback_fn=on_elastic_event,
         pre_callback_fn=on_slices_ready,
+        retry_cache=elastic_retry_cache,
     )(functools.partial(elastic_train_wrapper, argv=argv))
   else:
     # Use the already initialized variables

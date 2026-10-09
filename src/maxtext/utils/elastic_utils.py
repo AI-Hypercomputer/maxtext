@@ -15,7 +15,10 @@
 """Utility functions for Elastic Training."""
 
 from collections import Counter
+import dataclasses
+import functools
 from types import SimpleNamespace
+from typing import Any, Callable
 
 import jax
 from maxtext.utils import gcs_utils
@@ -52,10 +55,19 @@ def record_slice_state(recorder, active_slices_override: int | None = None) -> N
   )
 
 
-def record_elastic_event_start(recorder, config) -> None:
-  """Records start of an elastic scale up event."""
+def record_elastic_event_start(recorder, scale_up: bool) -> None:
+  """Records the start of an elastic event.
+
+  Args:
+    recorder: Goodput recorder.
+    scale_up: True if the attempt was interrupted by `maybe_elastic_scale_up` because new slices are available, False
+      if it failed because a slice went down.
+  """
   global pending_elastic_event_type
-  event_type = "elastic_scale_up" if is_scale_up_event(config) else "elastic_slice_down"
+  if scale_up:
+    event_type = "elastic_scale_up"
+  else:
+    event_type = "elastic_slice_down"
   pending_elastic_event_type = event_type
   if recorder and hasattr(recorder, "record_elastic_wait_start_time"):
     recorder.record_elastic_wait_start_time(event_type=event_type)
@@ -111,7 +123,7 @@ def should_use_elastic(config) -> bool:
   return config is not None and elastic_enabled(config)
 
 
-def clean_up_checkpoints(checkpoint_dir: str):
+def clean_up_incomplete_checkpoints(checkpoint_dir: str):
   """Cleans up incomplete checkpoints after an elastic event."""
   max_logging.log("Elastic utils: Checking for incomplete checkpoint after an elastic event...")
   checkpoint_dir = gcs_utils.add_trailing_slash(checkpoint_dir)
@@ -150,6 +162,24 @@ def ensure_elastic_manager_initialized(config):
   global elastic_manager
   if should_use_elastic(config) and elastic_manager is None:
     elastic_manager = manager.Manager()
+
+
+def is_pause_resume(config) -> bool:
+  """Returns whether every attempt waits for all the slices in the jobset, i.e. pause/resume rather than resize.
+
+  In pause/resume every attempt comes back on the same slices, so the compiled steps still fit and the setup of the
+  previous attempt can be reused. `elastic_min_slice_count` is -1 (wait for every slice) or equals the number of
+  slices in the jobset. `total_slice_count` counts every slice in the jobset, live or not; `config.num_slices` can't
+  be used here because it only counts the live slices.
+
+  Args:
+    config: Config object.
+  """
+  ensure_elastic_manager_initialized(config)
+  assert elastic_manager is not None
+  if config.elastic_min_slice_count == -1:
+    return True
+  return config.elastic_min_slice_count == elastic_manager.total_slice_count
 
 
 def get_local_batch_size(config) -> int:
@@ -201,19 +231,139 @@ def chain_callbacks(*funcs):
   return wrapper
 
 
-def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
+class RetryCache:
+  """Setup objects that a retry on the same slices can reuse, e.g. the config, mesh and compiled steps.
+
+  `elastic_retry` turns the cache on for the duration of one elastic run and empties it whenever the active slices
+  change, so an entry is only ever returned to an attempt on the same slices as the attempt that stored it.
+
+  In practice only pause/resume (see `is_pause_resume`) gets cache hits: every attempt runs on the same slices, so
+  the config, mesh and compiled steps of the previous attempt are reused. In replica-resize mode every elastic event
+  changes the active slices, so the cache is emptied before the next attempt and everything is rebuilt. Every
+  elastic run still gets a cache, so both modes share one code path.
+
+  Don't cache the train state or other large arrays: they would keep the previous attempt's memory alive. The one
+  deliberate exception is `snapshotter`, which is not a cache entry: it is set once for the run, outlives every
+  attempt and every slice change, and is reset by the elastic event callback rather than by this class.
+  """
+
+  def __init__(self):
+    # Whether `get` and `put` do anything. Only `elastic_retry` changes it: it is set to True when the decorated
+    # function starts and back to False in its `finally` block, once the run is over. While it is False, `get`
+    # always misses and `put` is a no-op, so a `train_loop` that is not running under `elastic_retry` never caches.
+    self._enabled = False
+    self._slices: frozenset[int] | None = None
+    self._values: dict[str, Any] = {}
+    # Host-memory snapshots of the train state for `elastic_backup_kind: snapshot`. Not wired up yet: it stays None
+    # until snapshot save and restore land, and `reset` and `clear_if_slices_changed` never touch it.
+    self.snapshotter: Any = None
+
+  @property
+  def enabled(self) -> bool:
+    return self._enabled
+
+  def reset(self, enabled: bool) -> None:
+    """Empties the cache and turns it on or off."""
+    self._enabled = enabled
+    self._slices = None
+    self._values.clear()
+
+  def clear_if_slices_changed(self, active_slices: frozenset[int]) -> None:
+    """Empties the cache if this attempt runs on different slices than the previous one.
+
+    Args:
+      active_slices: The slices the attempt about to start runs on.
+    """
+    if self._slices != active_slices:
+      self._values.clear()
+      self._slices = active_slices
+
+  def contains(self, name: str) -> bool:
+    """Returns whether an earlier attempt on the same slices cached an object under `name`.
+
+    Use this rather than `get(name) is None` to test for a hit: a cached value may itself be None.
+    """
+    return self._enabled and name in self._values
+
+  def get(self, name: str) -> Any:
+    """Returns the object cached under `name` by an earlier attempt on the same slices, or None.
+
+    None is also returned when the cache is off or the entry is missing; use `contains` to tell these apart.
+    """
+    if not self._enabled:
+      return None
+    return self._values.get(name)
+
+  def put(self, name: str, value: Any) -> None:
+    """Caches `value` under `name`, so that a retry on the same slices can reuse it. A no-op while the cache is off.
+
+    Args:
+      name: The name to cache `value` under.
+      value: The object to reuse, for example a mesh or a jitted step.
+    """
+    if self._enabled:
+      self._values[name] = value
+
+
+def get_or_build(retry_cache: RetryCache | None, name: str, build_fn: Callable[[], Any]) -> Any:
+  """Returns the object cached under `name`, or builds it with `build_fn` and caches it for the next attempt.
+
+  Args:
+    retry_cache: The cache of the current elastic run, or None when training is not elastic. With None, `build_fn`
+      is simply called.
+    name: The name the object is cached under.
+    build_fn: Builds the object when there is no cached one.
+  """
+  if retry_cache is None:
+    return build_fn()
+  if retry_cache.contains(name):
+    return retry_cache.get(name)
+  value = build_fn()
+  retry_cache.put(name, value)
+  return value
+
+
+@dataclasses.dataclass
+class _AttemptOutcome:
+  """Why the last attempt of an elastic run ended, for the elastic event callback.
+
+  pathwaysutils resets `available_inactive_slices` before it runs the elastic event callback, so the callback can't
+  tell a scale-up from a slice-down by looking at the manager. The attempt itself records it here on the way out.
+  """
+
+  scale_up: bool = False
+
+
+def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=None):
   """Decorator for elastic retry.
 
   If an elastic event occurs, the decorator will retry the decorated function
   up to `config.elastic_max_retries` times.
   Before each retry, it cleans up partial checkpoints by calling
-  `clean_up_checkpoints`. If `callback_fn` is provided, it is
-  called after `clean_up_checkpoints`.
+  `clean_up_incomplete_checkpoints`. If `callback_fn` is provided, it is
+  called after `clean_up_incomplete_checkpoints`.
+
+  The decorator covers both ways of coming back from an elastic event:
+
+  *   Pause/resume: `elastic_min_slice_count` equals the number of slices in the jobset, or is -1, which means the
+      same. Every attempt waits for all the slices, so it always comes back on the same slices and the compiled steps
+      cached in `retry_cache` are not compiled again.
+  *   Replica resize: `elastic_min_slice_count` is smaller than the number of slices in the jobset. An attempt can
+      come back on fewer slices (slice-down) or on more (scale-up). The retry cache is emptied whenever the slices
+      change, so the next attempt rebuilds the config, mesh and compiled steps for the slices it has.
+
+  The device memory of a failed attempt is freed by JAX once the attempt has unwound and nothing references its
+  arrays any more; nothing is deleted explicitly.
 
   Args:
     config: Config object.
-    callback_fn: Optional callback function to be called after
-      `clean_up_checkpoints` on an elastic event.
+    callback_fn: Optional callback called after `clean_up_incomplete_checkpoints` on an elastic event, as
+      `callback_fn(scale_up=...)`: True if the attempt was interrupted by `maybe_elastic_scale_up` because new slices
+      are available, False if a slice went down.
+    pre_callback_fn: Optional callback function to be called before each attempt, once the slices are ready.
+    retry_cache: Optional `RetryCache` shared with the decorated function. It is turned on for the duration of the
+      elastic run and emptied whenever the active slices change. The caller owns it rather than `config` because
+      the config built for an attempt is itself one of the cached objects. Without it nothing is reused.
 
   Returns:
     A decorator for elastic retry.
@@ -240,20 +390,82 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None):
       cleanup_all_iterators()
     except Exception as e:
       max_logging.log(f"Failed to cleanup iterators during elastic scale up: {e}")
-    clean_up_checkpoints(config.checkpoint_dir)
+    clean_up_incomplete_checkpoints(config.checkpoint_dir)
 
-  if callback_fn is None:
-    effective_callback = cleanup_iterators_and_checkpoints
+  outcome = _AttemptOutcome()
+
+  def effective_callback():
+    scale_up = outcome.scale_up
+    # `scale_up` only decides the goodput label of this event (`elastic_scale_up` vs `elastic_slice_down`). Only
+    # `attempt` sets it, and only to True when the attempt raised `ScaleUpSignalError`; a slice-down leaves it
+    # untouched. Clear it here so it describes just the event being reported: otherwise a slice-down that follows a
+    # scale-up in the same run would be reported to goodput as a second scale-up.
+    outcome.scale_up = False
+    cleanup_iterators_and_checkpoints()
+    if callback_fn is not None:
+      callback_fn(scale_up=scale_up)
+
+  def effective_pre_callback():
+    if retry_cache is not None:
+      # Objects built for other slices are stale after a resize.
+      retry_cache.clear_if_slices_changed(frozenset(elastic_manager.active_slice_indices))
+    if pre_callback_fn is not None:
+      pre_callback_fn()
+
+  if config.elastic_min_slice_count == -1:
+    minimum_slice_count = None  # Wait for every slice in the jobset.
   else:
-    effective_callback = chain_callbacks(cleanup_iterators_and_checkpoints, callback_fn)
+    minimum_slice_count = config.elastic_min_slice_count
+  if minimum_slice_count is not None and minimum_slice_count > elastic_manager.total_slice_count:
+    raise ValueError(
+        f"elastic_min_slice_count ({minimum_slice_count}) is larger than the number of slices in the jobset"
+        f" ({elastic_manager.total_slice_count})."
+    )
+  if not is_pause_resume(config) and config.dataset_type == "grain" and not config.grain_use_elastic_iterator:
+    # The regular grain iterator checkpoints one state file per host, which can't be restored onto a different
+    # number of hosts. Only `ElasticIterator`, whose state is a single global position, survives a resize.
+    raise ValueError(
+        "Replica resize (elastic_min_slice_count smaller than the number of slices in the jobset) restores the data"
+        " iterator onto a different number of hosts, which only grain's ElasticIterator supports. Set"
+        " grain_use_elastic_iterator=True."
+    )
 
-  return elastic_manager.elastic_retry(
+  pathways_retry = elastic_manager.elastic_retry(
       max_retries=config.elastic_max_retries,
       timeout=config.elastic_timeout_seconds,
-      minimum_slice_count=None if config.elastic_min_slice_count == -1 else config.elastic_min_slice_count,
-      pre_callback=pre_callback_fn,
+      minimum_slice_count=minimum_slice_count,
+      pre_callback=effective_pre_callback,
       on_elastic_event_callback=effective_callback,
   )
+
+  def decorator(func):
+    @functools.wraps(func)
+    def attempt(*args, **kwargs):
+      try:
+        return func(*args, **kwargs)
+      except manager.ScaleUpSignalError:
+        # pathwaysutils runs the elastic event callback next; let it know this was a scale-up.
+        outcome.scale_up = True
+        raise
+
+    retried_func = pathways_retry(attempt)
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+      if retry_cache is not None:
+        # The cache lives for one elastic run, so a later run in the same process starts empty.
+        retry_cache.reset(enabled=True)
+      try:
+        return retried_func(*args, **kwargs)
+      finally:
+        if retry_cache is not None:
+          retry_cache.reset(enabled=False)
+        # A scale-up that ended the run (retries exhausted) must not label the next run's first event.
+        outcome.scale_up = False
+
+    return wrapper
+
+  return decorator
 
 
 def is_scale_up_event(config) -> bool:

@@ -48,6 +48,9 @@ class FakeConfig:
     self.global_batch_size_to_load = 64
     self.per_device_batch_size = 4
     self.elastic_min_slice_count = 1
+    self.elastic_backup_kind = "checkpoint"
+    self.dataset_type = "grain"
+    self.grain_use_elastic_iterator = True
 
 
 class ElasticUtilsTest(parameterized.TestCase):
@@ -73,6 +76,7 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.fake_jax = create_autospec(self.original_jax)
     self.fake_manager = create_autospec(self.original_manager_class, instance=True)
     self.fake_manager.available_inactive_slices = set()
+    self.fake_manager.total_slice_count = 2
     self.fake_elastic = create_autospec(self.original_elastic)
 
     # Configure default behaviors if needed
@@ -146,24 +150,24 @@ class ElasticUtilsTest(parameterized.TestCase):
 
   def test_clean_up_checkpoints_no_checkpoints(self):
     self.fake_gcs_utils.gcs_list_directories.return_value = []
-    elastic_utils.clean_up_checkpoints("gs://test_bucket/checkpoints")
+    elastic_utils.clean_up_incomplete_checkpoints("gs://test_bucket/checkpoints")
     self.fake_gcs_utils.gcs_delete_directory.assert_not_called()
 
   def test_clean_up_checkpoints_incomplete(self):
-    """Tests clean_up_checkpoints when the latest checkpoint is incomplete."""
+    """Tests clean_up_incomplete_checkpoints when the latest checkpoint is incomplete."""
     checkpoint_dir = "gs://test_bucket/checkpoints"
     self.fake_gcs_utils.gcs_list_directories.return_value = ["1", "2", "10"]
     self.fake_gcs_utils.gcs_glob_pattern.return_value = []
     # No commit_success for "10"
-    elastic_utils.clean_up_checkpoints(checkpoint_dir)
+    elastic_utils.clean_up_incomplete_checkpoints(checkpoint_dir)
     self.fake_gcs_utils.gcs_delete_directory.assert_called_once_with(f"{checkpoint_dir}/10/")
 
   def test_clean_up_checkpoints_complete(self):
-    """Tests clean_up_checkpoints when the latest checkpoint is complete."""
+    """Tests clean_up_incomplete_checkpoints when the latest checkpoint is complete."""
     checkpoint_dir = "gs://test_bucket/checkpoints"
     self.fake_gcs_utils.gcs_list_directories.return_value = ["1", "2", "10"]
     self.fake_gcs_utils.gcs_glob_pattern.return_value = [f"{checkpoint_dir}/10/commit_success_0"]
-    elastic_utils.clean_up_checkpoints(checkpoint_dir)
+    elastic_utils.clean_up_incomplete_checkpoints(checkpoint_dir)
     self.fake_gcs_utils.gcs_delete_directory.assert_not_called()
 
   def test_live_devices_no_pathways(self):
@@ -353,6 +357,14 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     self.assertTrue(cm.wait_called)
 
+  def test_elastic_retry_rejects_min_slices_above_total(self):
+    config = FakeConfig()
+    config.elastic_min_slice_count = 3
+    elastic_utils.elastic_manager = self.fake_manager
+
+    with self.assertRaisesRegex(ValueError, "larger than the number of slices"):
+      elastic_utils.elastic_retry(config)
+
   def test_elastic_retry_default_min_slices(self):
     """Tests that elastic_retry passes None when elastic_min_slice_count is -1."""
     config = FakeConfig()
@@ -367,36 +379,266 @@ class ElasticUtilsTest(parameterized.TestCase):
     kwargs = self.fake_manager.elastic_retry.call_args.kwargs
     self.assertIsNone(kwargs["minimum_slice_count"])
 
-  def test_elastic_retry_pre_callback_none_by_default(self):
-    """pre_callback must be None when pre_callback_fn is not supplied."""
+  def test_elastic_retry_pre_callback_without_pre_callback_fn(self):
+    """pre_callback still works when pre_callback_fn is not supplied."""
     config = FakeConfig()
     elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0, 1}
 
     elastic_utils.elastic_retry(config)
 
     kwargs = self.fake_manager.elastic_retry.call_args.kwargs
-    self.assertIsNone(kwargs["pre_callback"])
+    kwargs["pre_callback"]()  # Must not raise.
 
   def test_elastic_retry_pre_callback_forwarded(self):
-    """pre_callback_fn must be forwarded as pre_callback to the manager."""
+    """The manager's pre_callback must call pre_callback_fn."""
     config = FakeConfig()
     elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0, 1}
 
     fake_pre_callback = Mock()
     elastic_utils.elastic_retry(config, pre_callback_fn=fake_pre_callback)
 
     kwargs = self.fake_manager.elastic_retry.call_args.kwargs
-    self.assertIs(kwargs["pre_callback"], fake_pre_callback)
+    kwargs["pre_callback"]()
+    fake_pre_callback.assert_called_once()
+
+  @parameterized.named_parameters(("all_slices", -1, True), ("min_equals_total", 2, True), ("min_below_total", 1, False))
+  def test_is_pause_resume(self, min_slice_count, expected):
+    config = FakeConfig()
+    config.elastic_min_slice_count = min_slice_count
+    elastic_utils.elastic_manager = self.fake_manager
+
+    self.assertEqual(elastic_utils.is_pause_resume(config), expected)
+
+  @parameterized.named_parameters(
+      ("resize_regular_grain_iterator", 1, "grain", False, True),
+      ("resize_elastic_iterator", 1, "grain", True, False),
+      ("resize_non_grain", 1, "tfds", False, False),
+      ("pause_resume_regular_grain_iterator", -1, "grain", False, False),
+  )
+  def test_elastic_retry_resize_requires_elastic_iterator(
+      self, min_slice_count, dataset_type, use_elastic_iterator, expect_error
+  ):
+    """A replica resize with the regular grain iterator is rejected: its state can't move to another host count."""
+    config = FakeConfig()
+    config.elastic_min_slice_count = min_slice_count
+    config.dataset_type = dataset_type
+    config.grain_use_elastic_iterator = use_elastic_iterator
+    elastic_utils.elastic_manager = self.fake_manager
+
+    if expect_error:
+      with self.assertRaisesRegex(ValueError, "grain_use_elastic_iterator=True"):
+        elastic_utils.elastic_retry(config)
+    else:
+      elastic_utils.elastic_retry(config)
+      self.fake_manager.elastic_retry.assert_called_once()
+
+  def _fake_pathways_retry_with_one_retry(self):
+    """Makes the fake manager retry once after an elastic error, running the event callback in between.
+
+    Like pathwaysutils, it lets an error from the last attempt propagate.
+    """
+
+    def fake_pathways_retry(**kwargs):
+      on_elastic_event_callback = kwargs["on_elastic_event_callback"]
+
+      def decorator(func):
+        def run_with_one_retry():
+          try:
+            return func()
+          except (ScaleUpSignalError, MockJaxRuntimeError):
+            on_elastic_event_callback()
+          return func()
+
+        return run_with_one_retry
+
+      return decorator
+
+    self.fake_manager.elastic_retry.side_effect = fake_pathways_retry
+    self.fake_gcs_utils.gcs_list_directories.return_value = []
+
+  @parameterized.named_parameters(("scale_up", ScaleUpSignalError, True), ("slice_down", MockJaxRuntimeError, False))
+  def test_elastic_retry_tells_callback_the_event_kind(self, error_cls, expected_scale_up):
+    """The event callback learns from the failed attempt itself whether it was a scale-up or a slice-down."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    callback_fn = Mock()
+    attempts = []
+
+    def train():
+      attempts.append(len(attempts))
+      if len(attempts) == 1:
+        raise error_cls()
+
+    self._fake_pathways_retry_with_one_retry()
+
+    elastic_utils.elastic_retry(config, callback_fn=callback_fn)(train)()
+
+    callback_fn.assert_called_once_with(scale_up=expected_scale_up)
+    self.assertLen(attempts, 2)
+
+  def test_elastic_retry_scale_up_does_not_leak_into_next_run(self):
+    """A scale-up that ended one run (retries exhausted) doesn't label the first event of the next run."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    callback_fn = Mock()
+    errors = [ScaleUpSignalError(), ScaleUpSignalError(), MockJaxRuntimeError(), None]
+
+    def train():
+      error = errors.pop(0)
+      if error is not None:
+        raise error
+
+    self._fake_pathways_retry_with_one_retry()
+    train_func = elastic_utils.elastic_retry(config, callback_fn=callback_fn)(train)
+
+    with self.assertRaises(ScaleUpSignalError):
+      train_func()  # Both attempts are scale-ups; the second one propagates.
+    callback_fn.reset_mock()
+
+    train_func()  # Slice-down, then success.
+
+    callback_fn.assert_called_once_with(scale_up=False)
+
+  def test_retry_cache_class(self):
+    """A fresh cache is off; entries survive attempts on the same slices and are dropped on a slice change."""
+    cache = elastic_utils.RetryCache()
+    self.assertFalse(cache.enabled)
+    cache.put("mesh", "ignored")
+    self.assertIsNone(cache.get("mesh"))
+
+    cache.reset(enabled=True)
+    cache.clear_if_slices_changed(frozenset({0, 1}))
+    cache.put("mesh", "mesh_a")
+    cache.clear_if_slices_changed(frozenset({0, 1}))
+    self.assertEqual(cache.get("mesh"), "mesh_a")
+
+    cache.clear_if_slices_changed(frozenset({0}))
+    self.assertIsNone(cache.get("mesh"))
+    cache.put("mesh", "mesh_b")
+    self.assertEqual(cache.get("mesh"), "mesh_b")
+
+    cache.reset(enabled=False)
+    self.assertFalse(cache.enabled)
+    self.assertIsNone(cache.get("mesh"))
+
+  def test_retry_cache_snapshotter_survives_reset_and_slice_change(self):
+    """The snapshotter slot is not a cache entry: neither a slice change nor a reset clears it."""
+    cache = elastic_utils.RetryCache()
+    self.assertIsNone(cache.snapshotter)
+
+    snapshotter = Mock()
+    cache.snapshotter = snapshotter
+    cache.reset(enabled=True)
+    cache.clear_if_slices_changed(frozenset({0, 1}))
+    cache.clear_if_slices_changed(frozenset({0}))
+    cache.reset(enabled=False)
+
+    self.assertIs(cache.snapshotter, snapshotter)
+    self.assertIsNone(cache.get("snapshotter"))
+
+  def test_get_or_build(self):
+    """Builds every time without a cache; with one, builds on a miss and reuses on a hit."""
+    builds = []
+
+    def build_mesh():
+      builds.append(len(builds))
+      return f"mesh_{builds[-1]}"
+
+    self.assertEqual(elastic_utils.get_or_build(None, "mesh", build_mesh), "mesh_0")
+    self.assertEqual(elastic_utils.get_or_build(None, "mesh", build_mesh), "mesh_1")
+
+    cache = elastic_utils.RetryCache()
+    cache.reset(enabled=True)
+    self.assertEqual(elastic_utils.get_or_build(cache, "mesh", build_mesh), "mesh_2")
+    self.assertEqual(elastic_utils.get_or_build(cache, "mesh", build_mesh), "mesh_2")
+    self.assertEqual(builds, [0, 1, 2])
+
+  def test_get_or_build_caches_none(self):
+    """A build that returns None is cached too, so it is not repeated on the next attempt."""
+    builds = []
+
+    def build_none():
+      # Returns None implicitly: the point of the test is that None is a cacheable value.
+      builds.append(len(builds))
+
+    cache = elastic_utils.RetryCache()
+    cache.reset(enabled=True)
+    self.assertFalse(cache.contains("optional"))
+    self.assertIsNone(elastic_utils.get_or_build(cache, "optional", build_none))
+    self.assertTrue(cache.contains("optional"))
+    self.assertIsNone(elastic_utils.get_or_build(cache, "optional", build_none))
+    self.assertEqual(builds, [0])
+
+    cache.reset(enabled=False)
+    self.assertFalse(cache.contains("optional"))
+
+  def _run_three_attempts_through_fake_pathways_retry(self):
+    """Makes the fake manager run the decorated function on slices {0, 1}, {0, 1} and then {0}."""
+
+    def fake_pathways_retry(**kwargs):
+      pre_callback = kwargs["pre_callback"]
+
+      def decorator(func):
+        def run_three_attempts():
+          for active_slices in ({0, 1}, {0, 1}, {0}):
+            self.fake_manager.active_slice_indices = active_slices
+            pre_callback()
+            func()
+
+        return run_three_attempts
+
+      return decorator
+
+    self.fake_manager.elastic_retry.side_effect = fake_pathways_retry
+
+  def test_retry_cache_reused_on_same_slices_and_rebuilt_after_resize(self):
+    """Attempts on the same slices reuse cached objects, and an attempt on other slices rebuilds them."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    retry_cache = elastic_utils.RetryCache()
+    built_meshes = []
+
+    def setup_mesh():
+      self.assertTrue(retry_cache.enabled)
+      mesh = retry_cache.get("mesh")
+      if mesh is None:
+        mesh = f"mesh_{len(built_meshes)}"
+        built_meshes.append(mesh)
+        retry_cache.put("mesh", mesh)
+
+    self._run_three_attempts_through_fake_pathways_retry()
+
+    elastic_utils.elastic_retry(config, retry_cache=retry_cache)(setup_mesh)()
+
+    self.assertEqual(built_meshes, ["mesh_0", "mesh_1"])
+    # The cache is turned off again once the elastic run is over.
+    self.assertFalse(retry_cache.enabled)
+    self.assertIsNone(retry_cache.get("mesh"))
+
+  def test_elastic_retry_without_retry_cache(self):
+    """Without a cache every attempt runs the decorated function in full."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    attempts = []
+
+    def setup_mesh():
+      attempts.append(set(self.fake_manager.active_slice_indices))
+
+    self._run_three_attempts_through_fake_pathways_retry()
+
+    elastic_utils.elastic_retry(config)(setup_mesh)()
+
+    self.assertEqual(attempts, [{0, 1}, {0, 1}, {0}])
 
   def test_record_elastic_event_start(self):
     """Tests recording an elastic slice down start."""
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.available_inactive_slices = set()
     self.fake_manager.slice_to_devices = {0: [FakeDevice()], 1: [FakeDevice()]}
     fake_recorder = Mock()
-    config = FakeConfig()
 
-    elastic_utils.record_elastic_event_start(fake_recorder, config)
+    elastic_utils.record_elastic_event_start(fake_recorder, scale_up=False)
 
     fake_recorder.record_elastic_wait_start_time.assert_called_once_with(event_type="elastic_slice_down")
     fake_recorder.record_elastic_slice_counts.assert_called_once()
@@ -405,12 +647,10 @@ class ElasticUtilsTest(parameterized.TestCase):
   def test_record_elastic_event_start_scale_up(self):
     """Tests recording an elastic slice scale up start."""
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.available_inactive_slices = {1}
     self.fake_manager.slice_to_devices = {0: [FakeDevice()], 1: [FakeDevice()]}
     fake_recorder = Mock()
-    config = FakeConfig()
 
-    elastic_utils.record_elastic_event_start(fake_recorder, config)
+    elastic_utils.record_elastic_event_start(fake_recorder, scale_up=True)
 
     fake_recorder.record_elastic_wait_start_time.assert_called_once_with(event_type="elastic_scale_up")
     fake_recorder.record_elastic_slice_counts.assert_called_once()
@@ -465,11 +705,9 @@ class ElasticUtilsTest(parameterized.TestCase):
   def test_record_elastic_event_start_non_elastic_recorder_noop(self):
     """A recorder lacking the elastic API (e.g. the ImportError fallback) must not raise."""
     elastic_utils.elastic_manager = self.fake_manager
-    self.fake_manager.available_inactive_slices = set()
     non_elastic_recorder = Mock(spec=[])  # No record_elastic_* attributes.
-    config = FakeConfig()
 
-    elastic_utils.record_elastic_event_start(non_elastic_recorder, config)  # Must not raise.
+    elastic_utils.record_elastic_event_start(non_elastic_recorder, scale_up=False)  # Must not raise.
 
     self.assertEqual(elastic_utils.pending_elastic_event_type, "elastic_slice_down")
 

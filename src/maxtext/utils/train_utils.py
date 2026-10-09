@@ -39,6 +39,7 @@ from maxtext.input_pipeline import multihost_dataloading
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
 from maxtext.utils import diloco_sharding
+from maxtext.utils import elastic_utils
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -353,13 +354,18 @@ def _reorder_data_iterator_for_loader(reorder_fn, data_iterator):
   return _ReorderedDataIterator(reorder_fn, data_iterator)
 
 
-def setup_train_loop(config, recorder, devices=None):
+def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None):
   """Set up prerequisites for the training loop -
 
       checkpoint_manager, PRNG keys, Mesh, Model and optimizer.
       Set up data iterator and tokenizer, initialize the model.
 
-  Args: config recorder
+  Args:
+    config:
+    recorder:
+    devices:
+    elastic_retry_cache: Optional `elastic_utils.RetryCache`. An elastic retry on the same slices reuses the mesh and
+      abstract model cached in it instead of building them again.
 
   Returns:
     init_rng:
@@ -378,10 +384,19 @@ def setup_train_loop(config, recorder, devices=None):
 
   with maybe_record_goodput(recorder, GoodputEvent.TPU_INIT):
     init_rng = jax.random.PRNGKey(config.init_weights_seed)
-    mesh = maxtext_utils.get_mesh_from_config(config, devices)
+    # Build the mesh, or take the one from the previous elastic attempt if it ran on the same slices.
+    # `elastic_retry_cache` is None outside elastic training, in which case the mesh is simply built.
+    mesh = elastic_utils.get_or_build(
+        elastic_retry_cache, "mesh", functools.partial(maxtext_utils.get_mesh_from_config, config, devices)
+    )
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
-    # Create abstract NNX model.
-    _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh, devices)
+    # Create abstract NNX model. Like the mesh, it is reused across elastic attempts on the same slices: it holds
+    # only shapes and the graphdef, no device arrays, so it survives the cleanup after an elastic event.
+    _create_model_partial, model = elastic_utils.get_or_build(
+        elastic_retry_cache,
+        "abstract_model",
+        functools.partial(model_creation_utils.create_nnx_abstract_model, config, mesh, devices),
+    )
     learning_rate_schedule, tx = create_training_optimizer(config, model, mesh=mesh)
 
     # The train state is wrapped in the TrainStateNNX module.
