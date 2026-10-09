@@ -54,6 +54,7 @@ from maxtext.layers.attention_op import (
     AttentionOp,
     BlockCausalMask,
     ChunkedCausalMask,
+    topk_to_mask,
     _generate_block_causal_attention_mask,
     _generate_chunk_attention_mask,
     _make_bidirectional_block_mask,
@@ -7262,6 +7263,168 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
       diff_ar = float(jnp.max(jnp.abs(out_ar_dense - out_ar_mqa)))
       self.assertLessEqual(diff_ar, 1e-4, f"AR decode parity failed at step {idx}: {diff_ar} > 1e-4")
 
+  def test_mla_absorbed_mqa_with_indexer_prefill_to_decode(self):
+    """Verifies AR decode masking correctness and parity with indexer under absorbed MQA (catching A1 / D1)."""
+    cfg_indexer_args = self.config_arguments.copy()
+    cfg_indexer_args.update(
+        {
+            "use_indexer": True,
+            "indexer_n_heads": 4,
+            "indexer_head_dim": 64,
+            "indexer_topk": 4,
+            "q_lora_rank": 16,
+            "max_target_length": 32,
+            "max_prefill_predict_length": 16,
+        }
+    )
+    cfg_dense, mla_dense = self.init_mla(cfg_indexer_args, rope_type="default")
+    cfg_mqa_args = cfg_indexer_args.copy()
+    cfg_mqa_args["use_mla_absorbed_mqa"] = True
+    _, mla_mqa = self.init_mla(cfg_mqa_args, rope_type="default")
+    nnx.update(mla_mqa, nnx.state(mla_dense))
+
+    prefill_length = cfg_dense.max_prefill_predict_length
+    decode_total_length = cfg_dense.max_target_length
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_dense, "float32")
+
+    # Prefill step
+    lnx_prefill = lnx[:, 0:prefill_length, :]
+    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
+    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
+
+    out_prefill_dense, _ = mla_dense(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+    out_prefill_mqa, _ = mla_mqa(
+        lnx_prefill,
+        lnx_prefill,
+        decoder_segment_ids=decoder_segment_ids_prefill,
+        inputs_positions=decoder_positions_prefill,
+        deterministic=True,
+        model_mode=MODEL_MODE_PREFILL,
+    )
+    diff_prefill = float(jnp.max(jnp.abs(out_prefill_dense - out_prefill_mqa)))
+    self.assertLessEqual(diff_prefill, 1e-4, f"Indexer Prefill parity failed: {diff_prefill} > 1e-4")
+
+    # AR steps
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
+      lnx_idx = lnx[:, idx : idx + 1, :]
+      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
+
+      out_ar_dense, _ = mla_dense(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+      out_ar_mqa, _ = mla_mqa(
+          lnx_idx,
+          lnx_idx,
+          inputs_positions=decoder_positions_idx,
+          deterministic=True,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+      self.assertFalse(jnp.isnan(out_ar_mqa).any())
+      diff_ar = float(jnp.max(jnp.abs(out_ar_dense - out_ar_mqa)))
+      self.assertLessEqual(diff_ar, 1e-4, f"Indexer AR decode parity failed at step {idx}: {diff_ar} > 1e-4")
+
+  def test_mla_absorbed_mqa_with_indexer(self):
+    """Verifies Indexer bypasses dense mask materialization and plumbs topk_indices in sparse mode (catching A8 / D2)."""
+    config_args = self.config_arguments.copy()
+    config_args.update(
+        {
+            "use_indexer": True,
+            "indexer_n_heads": 4,
+            "indexer_head_dim": 64,
+            "indexer_topk": 4,  # seqlen=32 > topk=4, ensuring early return is NOT triggered
+            "q_lora_rank": 16,
+            "use_mla_absorbed_mqa": True,
+            "max_target_length": 32,
+            "max_prefill_predict_length": 16,
+        }
+    )
+    cfg_mqa, mla_mqa = self.init_mla(config_args, rope_type="default")
+    config_dense_args = config_args.copy()
+    config_dense_args["use_mla_absorbed_mqa"] = False
+    _, mla_dense = self.init_mla(config_dense_args, rope_type="default")
+    nnx.update(mla_mqa, nnx.state(mla_dense))
+
+    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg_mqa, "float32")
+
+    # 1. Forward pass parity between dense indexer mask and sparse top-k
+    out_mqa, _ = mla_mqa(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    out_dense, _ = mla_dense(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=MODEL_MODE_TRAIN,
+    )
+    self.assertEqual(out_mqa.shape, lnx.shape)
+    self.assertFalse(jnp.isnan(out_mqa).any(), "NaN detected in output with indexer")
+    diff = float(jnp.max(jnp.abs(out_dense - out_mqa)))
+    self.assertLessEqual(diff, 1e-4, f"Indexer sparse vs dense output diff: {diff} > 1e-4")
+
+    # 2. Verify Indexer return contract for seqlen > topk
+    # Dense path returns (indexer_mask, topk_indices, score)
+    bsz = lnx.shape[0]
+    mask_dense, topk_dense, _ = mla_dense.indexer(
+        inputs_q=lnx,
+        low_rank_q=jnp.zeros((bsz, 32, 16)),
+        inputs_kv=lnx,
+        inputs_positions=decoder_positions,
+        generate_dense_mask=True,
+    )
+    self.assertIsNotNone(mask_dense)
+    self.assertIsNotNone(topk_dense)
+
+    # Sparse path (generate_dense_mask=False) returns (None, topk_indices, score)
+    mask_sparse, topk_sparse, _ = mla_mqa.indexer(
+        inputs_q=lnx,
+        low_rank_q=jnp.zeros((bsz, 32, 16)),
+        inputs_kv=lnx,
+        inputs_positions=decoder_positions,
+        generate_dense_mask=False,
+    )
+    self.assertIsNone(mask_sparse, "Indexer in sparse mode must return None for indexer_mask")
+    self.assertIsNotNone(topk_sparse)
+    np.testing.assert_array_equal(topk_dense, topk_sparse)
+
+    # 3. Verify early return contract when seqlen <= topk
+    lnx_short = lnx[:, :3, :]
+    pos_short = decoder_positions[:, :3]
+    _, topk_short_dense, _ = mla_dense.indexer(
+        inputs_q=lnx_short,
+        low_rank_q=jnp.zeros((bsz, 3, 16)),
+        inputs_kv=lnx_short,
+        inputs_positions=pos_short,
+        generate_dense_mask=True,
+    )
+    self.assertIsNone(topk_short_dense)
+    mask_short_sparse, topk_short_sparse, _ = mla_mqa.indexer(
+        inputs_q=lnx_short,
+        low_rank_q=jnp.zeros((bsz, 3, 16)),
+        inputs_kv=lnx_short,
+        inputs_positions=pos_short,
+        generate_dense_mask=False,
+    )
+    self.assertIsNone(mask_short_sparse, "Short sequence with generate_dense_mask=False must return indexer_mask=None")
+    self.assertIsNone(topk_short_sparse)
+
   def test_mla_absorbed_mqa_sliced_proj(self):
     """Verifies that use_sliced_mla_proj works with exact parity under use_mla_absorbed_mqa."""
     cfg = self.config_arguments.copy()
@@ -7345,6 +7508,36 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     cfg_args.update({"use_mla_absorbed_mqa": True, "quantization": "int8"})
     with self.assertRaisesRegex(ValueError, "incompatible with quantization"):
       pyconfig.initialize([sys.argv[0], get_test_config_path()], **cfg_args)
+
+  def test_indexer_tie_semantics_and_exact_topk(self):
+    """Verifies that indexer tie-breaking with indexer_mask_exact_topk matches topk_indices count (catching A8)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update(
+        {
+            "use_indexer": True,
+            "indexer_n_heads": 4,
+            "indexer_head_dim": 64,
+            "indexer_topk": 4,
+            "q_lora_rank": 16,
+            "indexer_mask_exact_topk": True,
+            "max_target_length": 32,
+        }
+    )
+    cfg, mla = self.init_mla(cfg_args, rope_type="default")
+    lnx, _, decoder_positions = self.get_structured_data(cfg, "float32")
+    bsz = lnx.shape[0]
+
+    mask_dense, topk_indices, _ = mla.indexer(
+        inputs_q=lnx,
+        low_rank_q=jnp.zeros((bsz, 32, 16)),
+        inputs_kv=lnx,
+        inputs_positions=decoder_positions,
+        generate_dense_mask=True,
+    )
+    # Under exact top-k, each query unmasks exactly k tokens
+    unmasked_count_dense = jnp.sum(mask_dense == 0.0, axis=-1)
+    np.testing.assert_array_equal(unmasked_count_dense, np.full(unmasked_count_dense.shape, 4))
+    self.assertEqual(topk_indices.shape[-1], 4)
 
   def test_mla_absorbed_mqa_sharded_mesh_compilation(self):
     """Verifies that MLA absorbed MQA compiles and executes across modes on a sharded mesh (catching B2 / D6)."""
@@ -7561,6 +7754,38 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
         self.assertFalse(jnp.isnan(loss_d))
         self.assertFalse(jnp.isnan(loss_q))
 
+  def test_topk_to_mask_bounds_and_degeneracy(self):
+    """Verifies topk_to_mask handles negative indices, out-of-bounds, duplicates, and kv_len=0 cleanly."""
+    expected_masked = float(jnp.array(DEFAULT_MASK_VALUE, dtype=jnp.float32))
+
+    # 1. Normal indices within range
+    indices = jnp.array([[[1, 3], [0, 2]]])  # shape [1, 2, 2]
+    mask = topk_to_mask(indices, kv_len=4)
+    self.assertEqual(mask.shape, (1, 2, 4))
+    self.assertEqual(float(mask[0, 0, 1]), 0.0)
+    self.assertEqual(float(mask[0, 0, 3]), 0.0)
+    self.assertEqual(float(mask[0, 0, 0]), expected_masked)
+    self.assertEqual(float(mask[0, 0, 2]), expected_masked)
+
+    # 2. Out-of-bounds negative indices (-1) and overflow indices (>= kv_len)
+    oob_indices = jnp.array([[[-1, 10, 2]]])  # shape [1, 1, 3]
+    mask_oob = topk_to_mask(oob_indices, kv_len=4)
+    self.assertEqual(mask_oob.shape, (1, 1, 4))
+    self.assertEqual(float(mask_oob[0, 0, 2]), 0.0)
+    self.assertEqual(float(mask_oob[0, 0, 0]), expected_masked)
+    self.assertEqual(float(mask_oob[0, 0, 1]), expected_masked)
+    self.assertEqual(float(mask_oob[0, 0, 3]), expected_masked)
+
+    # 3. Duplicate indices
+    dup_indices = jnp.array([[[2, 2, 2]]])
+    mask_dup = topk_to_mask(dup_indices, kv_len=4)
+    self.assertEqual(float(mask_dup[0, 0, 2]), 0.0)
+    self.assertEqual(int(jnp.sum(mask_dup == 0.0)), 1)
+
+    # 4. Zero kv_len
+    mask_empty = topk_to_mask(indices, kv_len=0)
+    self.assertEqual(mask_empty.shape, (1, 2, 0))
+
   def test_apply_attention_dot_kv_quant_sharding_paths(self):
     """Verifies KVTensor sharding branches in apply_attention_dot for prefill and decode modes."""
     cfg_args = self.config_arguments.copy()
@@ -7640,6 +7865,34 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
       )
       self.assertEqual(out_ar.shape, q_ar.shape)
       self.assertFalse(jnp.isnan(out_ar).any())
+
+  def test_mla_absorbed_mqa_decode_partitioning_sharding(self):
+    """Verifies apply_attention_dot topk_indices sharding under decode partitioning (catching B5)."""
+    cfg_args = self.config_arguments.copy()
+    cfg_args.update({"use_mla_absorbed_mqa": True, "ici_context_autoregressive_parallelism": 1})
+    cfg, mla = self.init_mla(cfg_args, rope_type="default")
+    self.assertTrue(mla.attention_op.is_absorbed_mqa)
+
+    batch_size = cfg.global_batch_size_to_train_on
+    with jax.set_mesh(mla.mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      # Decode step: q_seq_len == 1, triggers is_partition_in_decode(1) == True
+      q = jnp.zeros((batch_size, 1, cfg.num_query_heads, 576), dtype=jnp.float32)
+      k = jnp.zeros((batch_size, 16, 1, 576), dtype=jnp.float32)
+      v = jnp.zeros((batch_size, 16, 1, 512), dtype=jnp.float32)
+      topk = jnp.broadcast_to(jnp.array([[[0, 2, 4, 8]]], dtype=jnp.int32), (batch_size, 1, 4))
+
+      out, _, _ = mla.attention_op.apply_attention_dot(
+          query=q,
+          key=k,
+          value=v,
+          decoder_segment_ids=None,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          topk_indices=topk,
+          qk_product_einsum=jnp.einsum,
+          wv_product_einsum=jnp.einsum,
+      )
+    self.assertEqual(out.shape, (batch_size, 1, cfg.num_query_heads, 512))
+    self.assertFalse(jnp.isnan(out).any())
 
 
 if __name__ == "__main__":
