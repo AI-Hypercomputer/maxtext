@@ -39,6 +39,7 @@ from maxtext.utils.sharding import (
 )
 from . import compute_conv1d as gdn_compute_conv1d
 from .gdn_bwd_pallas import gdn_decoupled_conv1d
+from .gdn_bwd_pallas import GDNKernelOptions
 
 try:
   from jax.extend.core.primitives import name_p
@@ -65,6 +66,15 @@ _GDN_SAVED_NAMES = frozenset(
         "gdn_conv_out",
     }
 )
+
+
+def gdn_kernel_options_from_config(cfg: Any) -> GDNKernelOptions:
+  """Builds the static GDN kernel options from the MaxText config (all default off)."""
+  return GDNKernelOptions(
+      cp_pass1_states_only=bool(getattr(cfg, "gdn_kernel_cp_pass1_states_only", False)),
+      cp_pass2_reuse_t_inv=bool(getattr(cfg, "gdn_kernel_cp_pass2_reuse_t_inv", False)),
+      cp_m_local_in_kernel=bool(getattr(cfg, "gdn_kernel_cp_m_local_in_kernel", False)),
+  )
 
 
 def _default_gdn_context_axes(cfg: Any) -> tuple[str, ...]:
@@ -606,6 +616,7 @@ def run_gdn_kernel_layer(
 ) -> tuple[Array, Array | None, Array | None]:
   """Executes the fused/decoupled Pallas GDN conv1d + delta-rule kernel with CP support."""
   cfg = layer.config
+  kernel_options = gdn_kernel_options_from_config(cfg)
   batch, seq_len = query.shape[:2]
 
   cp_axes = tuple(
@@ -887,6 +898,7 @@ def run_gdn_kernel_layer(
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=state_dtype,
             segment_ids=seg_val,
+            options=kernel_options,
         )
 
         if next_cs is not None:
@@ -926,6 +938,7 @@ def run_gdn_kernel_layer(
           cp_axis_name=cp_axis_name if use_seq_sharded_cp else None,
           segment_ids=seg_val,
           cp_matmul_precision=cp_matmul_precision,
+          options=kernel_options,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -968,6 +981,7 @@ def run_gdn_kernel_layer(
         use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
         compute_dtype=state_dtype,
         segment_ids=decoder_segment_ids,
+        options=kernel_options,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")

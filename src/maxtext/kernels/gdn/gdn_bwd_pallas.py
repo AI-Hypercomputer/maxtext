@@ -15,6 +15,8 @@
 """Canonical Gated Delta Net (GDN) backward pass facade re-exporting from .gdn_bwd."""
 
 from .gdn_bwd.api import (
+    DEFAULT_GDN_KERNEL_OPTIONS,
+    GDNKernelOptions,
     _gdn_decoupled_conv1d_bwd,
     _gdn_decoupled_conv1d_fwd,
     _run_local_gdn_decoupled_fwd,
@@ -58,7 +60,9 @@ from .gdn_bwd.runtime_utils import (
 )
 
 __all__ = [
+    "DEFAULT_GDN_KERNEL_OPTIONS",
     "GDNBackwardConfig",
+    "GDNKernelOptions",
     "_bwd_gdn_pipeline_body",
     "_compute_forward_conv_and_states",
     "_gdn_decoupled_conv1d_bwd",
