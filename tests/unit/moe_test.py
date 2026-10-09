@@ -2893,7 +2893,6 @@ class QuantizedMoeTest(parameterized.TestCase):
           ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, True),
       ]
   )
-  @pytest.mark.skip_on_tpu7x  # TODO(b/543017989): Investigate correctness failures
   @pytest.mark.tpu_only
   def test_gmm_grad_equivalence(
       self,

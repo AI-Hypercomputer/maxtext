@@ -93,21 +93,15 @@ jobs:
           bash .github/scripts/analyze_code_changes.sh
 
   code_quality_check:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: Code Quality Check
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.action != 'labeled' ||
-      github.event.label.name == 'scheduled-only'
     uses: ./.github/workflows/code_quality.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   docs_build_check:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: Documentation Build Check
-    if: >-
-      github.event_name != 'pull_request' ||
-      github.event.action != 'labeled' ||
-      github.event.label.name == 'scheduled-only'
     uses: ./.github/workflows/check_docs_build.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
@@ -128,14 +122,9 @@ jobs:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   maxtext_jupyter_notebooks:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: Jupyter Notebook Tests
     needs: [analyze_code_changes, build_and_upload_maxtext_package]
-    if: |
-      always() &&
-      needs.analyze_code_changes.outputs.run_notebooks == 'true' &&
-      needs.build_and_upload_maxtext_package.result == 'success' &&
-      (github.event_name != 'pull_request' ||
-        (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]'))
     uses: ./.github/workflows/run_jupyter_notebooks.yml
     strategy:
         fail-fast: false
@@ -171,12 +160,9 @@ jobs:
           echo "worker_groups=${TPU_UNIT_WORKER_GROUPS}" >> "$GITHUB_OUTPUT"
 
   tpu-pretrain-tests:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: TPU Pretrain Tests
     needs: [gate_test_run, analyze_code_changes]
-    if: |
-      always() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -189,12 +175,9 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   tpu-posttrain-tests:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: TPU Posttrain Tests
     needs: [gate_test_run, analyze_code_changes]
-    if: |
-      always() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -219,7 +202,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        flavor: [tpu7x-unit, tpu7x-integration, tpu7x-post-training-unit]
+        flavor: [tpu7x-unit]  # DEBUG b/543017989
     with:
       flavor: ${{ matrix.flavor }}
       base_image: maxtext-unit-test-tpu:py312-bookworm
@@ -227,12 +210,9 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   gpu-tests:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: GPU Tests
     needs: [gate_test_run, analyze_code_changes]
-    if: |
-      always() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_gpu_tests == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -245,12 +225,9 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-pretrain-tests:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: CPU Pretrain Tests
     needs: [gate_test_run, analyze_code_changes]
-    if: |
-      always() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -263,12 +240,9 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-posttrain-tests:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: CPU Posttrain Tests
     needs: [gate_test_run, analyze_code_changes]
-    if: |
-      always() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
       fail-fast: false
@@ -281,12 +255,9 @@ jobs:
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: TPU Pathways Unit Tests
     needs: [gate_test_run, analyze_code_changes]
-    if: |
-      always() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -308,12 +279,9 @@ jobs:
       worker_group: ${{ matrix.group }}
 
   maxtext_tpu_pathways_integration_tests:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: TPU Pathways Integration Tests
     needs: [gate_test_run, analyze_code_changes]
-    if: |
-      always() &&
-      needs.gate_test_run.result == 'success' &&
-      needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
     strategy:
         fail-fast: false
@@ -375,9 +343,9 @@ jobs:
           NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}
 
   all_notebooks_passed:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: All Notebooks Passed
     needs: [analyze_code_changes, build_and_upload_maxtext_package, maxtext_jupyter_notebooks]
-    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -405,9 +373,9 @@ jobs:
           NEEDS_MAXTEXT_JUPYTER_NOTEBOOKS_RESULT: ${{ needs.maxtext_jupyter_notebooks.result }}
 
   notify_failure:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
     needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
-    if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -423,9 +391,9 @@ jobs:
           github-token: ${{ github.token }}
 
   investigate_failure:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
     needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
-    if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:
       contents: 'read'
@@ -440,9 +408,9 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
   track_performance:
+    if: false  # DEBUG b/543017989: run only tpu7x-unit moe_test
     name: Track Test Performance
     needs: [tpu-pretrain-tests, tpu-posttrain-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
-    if: ${{ always() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success') }}
     uses: ./.github/workflows/track_performance.yml
     permissions:
       contents: write
