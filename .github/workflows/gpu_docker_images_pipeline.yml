@@ -116,7 +116,7 @@ jobs:
       include_test_assets: true
       fast_rebuild: ${{ inputs.mode == 'fast-rebuild' }}
       source_run_id: ${{ needs.resolve_source.outputs.source_run_id || inputs.source_run_id }}
-      allow_dependency_drift: ${{ inputs.allow_dependency_drift }}
+      allow_dependency_drift: ${{ inputs.allow_dependency_drift == true }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
