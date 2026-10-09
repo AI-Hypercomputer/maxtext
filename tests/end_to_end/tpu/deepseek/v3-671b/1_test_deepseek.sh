@@ -35,8 +35,45 @@ if [ -z "${CKPT_DISK_LOCATION}" ]; then
   export CKPT_DISK_LOCATION=/tmp/hf
 fi
 
-# 1.1 Convert checkpoint to `scanned` format, more suitable for training 
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/scanned --model_size ${MODEL_NAME}
+# Convert checkpoint to `scanned` format, more suitable for training
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    --hf_model_path=${CKPT_DISK_LOCATION} \
+    base_output_directory=${BASE_OUTPUT_PATH}/scanned \
+    scan_layers=true \
+    hardware=cpu \
+    skip_jax_distributed_system=True
+export SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/0/items
+echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 
-# 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/unscanned --model_size ${MODEL_NAME}
+# Convert checkpoint to `unscanned` format, more suitable for decoding
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    --hf_model_path=${CKPT_DISK_LOCATION} \
+    base_output_directory=${BASE_OUTPUT_PATH}/unscanned \
+    scan_layers=false \
+    hardware=cpu \
+    skip_jax_distributed_system=True
+export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned/0/items
+echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
+
+# Test whether the forward pass logits match the golden logits
+# default golden_logits_path=/deps/tests/assets/golden_logits/golden_data_{MODEL_NAME}.jsonl, copied from gs://maxtext-test-assets/golden_data_${MODEL_NAME}.jsonl
+GOLDEN_LOGITS_DISK_LOCATION="/deps/tests/assets/golden_logits/golden_data_${MODEL_NAME}.jsonl"
+if [ ! -f "${GOLDEN_LOGITS_DISK_LOCATION}" ]; then
+  GOLDEN_LOGITS_PATH="gs://maxtext-test-assets/golden_data_${MODEL_NAME}.jsonl"
+  GOLDEN_LOGITS_DISK_LOCATION=/tmp/${MODEL_NAME}_golden_data.jsonl
+  gcloud storage cp ${GOLDEN_LOGITS_PATH} ${GOLDEN_LOGITS_DISK_LOCATION}
+fi
+
+python3 -m tests.utils.forward_pass_logit_checker \
+    load_parameters_path=${SCANNED_CKPT_PATH} \
+    scan_layers=true \
+    attention=dot_product \
+    model_name=${MODEL_NAME} \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    --golden_logits_path=${GOLDEN_LOGITS_DISK_LOCATION} \
+    --atol=1e-4 \
+    --rtol=1e-4 \
+    --max_kl_div=5e-6

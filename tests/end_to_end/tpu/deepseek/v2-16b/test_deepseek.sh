@@ -36,25 +36,29 @@ echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 
 # Step 1: Checkpoint conversion
 # You can use the HuggingFace checkpoint at https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite (bf16)
-# Assume HF checkpoints are uploaded to GCS bucket at CKPT_BUCKET
-# Non-Googlers please remember to point `CKPT_BUCKET` to GCS buckets that you own
-# Copying the HF checkpoint into a local directory `/tmp` -- you are free to use a different directory
-if [ -z "${CKPT_DISK_LOCATION}" ]; then
-  export CKPT_BUCKET=gs://maxtext-deepseek/deepseek2-16b/hf
-  gcloud storage cp -r ${CKPT_BUCKET} /tmp
-  export CKPT_DISK_LOCATION=/tmp/hf
-fi
 
 # 1.1 Convert checkpoint to `scanned` format, more suitable for training
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/scanned --model_size ${MODEL_NAME}
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    --hf_model_path=${TOKENIZER_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH}/scanned \
+    scan_layers=true \
+    hardware=cpu \
+    skip_jax_distributed_system=True
+export SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/0/items
+echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 
 # 1.2 Convert checkpoint to `unscanned` format, more suitable for decoding
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.standalone_scripts.convert_deepseek_family_unscanned_ckpt --base_model_path ${CKPT_DISK_LOCATION} --maxtext_model_path ${BASE_OUTPUT_PATH}/unscanned --model_size ${MODEL_NAME}
-
-# Step 2:
-# We define the checkpoint paths. This way it is easier to use these paths in the `train.py` and `decode.py` commands
-export SCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/scanned/0/items
+python3 -m maxtext.checkpoint_conversion.to_maxtext \
+    model_name=${MODEL_NAME} \
+    --hf_model_path=${TOKENIZER_PATH} \
+    base_output_directory=${BASE_OUTPUT_PATH}/unscanned \
+    scan_layers=false \
+    hardware=cpu \
+    skip_jax_distributed_system=True
 export UNSCANNED_CKPT_PATH=${BASE_OUTPUT_PATH}/unscanned/0/items
+echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
+
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 export DATASET_PATH=gs://maxtext-dataset
 
@@ -63,18 +67,72 @@ export DATASET_PATH=gs://maxtext-dataset
 GOLDEN_LOGITS_DISK_LOCATION="/deps/tests/assets/golden_logits/golden_data_${MODEL_NAME}.jsonl"
 if [ ! -f "${GOLDEN_LOGITS_DISK_LOCATION}" ]; then
   GOLDEN_LOGITS_PATH="gs://maxtext-test-assets/golden_data_${MODEL_NAME}.jsonl"
-  GOLDEN_LOGITS_DISK_LOCATION=/tmp/golden_data.jsonl
+  GOLDEN_LOGITS_DISK_LOCATION=/tmp/${MODEL_NAME}_golden_data.jsonl
   gcloud storage cp ${GOLDEN_LOGITS_PATH} ${GOLDEN_LOGITS_DISK_LOCATION}
 fi
 
-python3 -m tests.utils.forward_pass_logit_checker ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=forward_logits_check load_parameters_path=${SCANNED_CKPT_PATH} scan_layers=true attention=dot_product per_device_batch_size=1 model_name=${MODEL_NAME} max_prefill_predict_length=4 max_target_length=4 async_checkpointing=false sparse_matmul=false ici_fsdp_parallelism=1 ici_expert_parallelism=4 checkpoint_storage_concurrent_gb=1024 weight_dtype=float32 dtype=float32 activations_in_float32=true matmul_precision=highest float32_logits=true float32_qk_product=true --golden_logits_path=${GOLDEN_LOGITS_DISK_LOCATION} --atol=1e-4 --rtol=1e-4 --max_kl_div=5e-6
+python3 -m tests.utils.forward_pass_logit_checker \
+    load_parameters_path=${SCANNED_CKPT_PATH} \
+    scan_layers=true \
+    attention=dot_product \
+    model_name=${MODEL_NAME} \
+    hardware=cpu \
+    skip_jax_distributed_system=True \
+    sparse_matmul=false weight_dtype=float32 dtype=float32 \
+    activations_in_float32=true matmul_precision=highest \
+    float32_logits=true float32_qk_product=true \
+    --golden_logits_path=${GOLDEN_LOGITS_DISK_LOCATION} \
+    --atol=1e-4 \
+    --rtol=1e-4 \
+    --max_kl_div=5e-6
 
 # Run pre-training - tokamax_gmm implementation
-python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=tokamax_gmm_pre_training model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} dataset_type=grain grain_file_type=tfrecord dataset_path=${DATASET_PATH} enable_checkpointing=false attention=flash sparse_matmul=True use_tokamax_gmm=True dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=4 steps=5 max_target_length=1024 ici_fsdp_parallelism=4
+python3 -m maxtext.trainers.pre_train.train \
+    base_output_directory=${BASE_OUTPUT_PATH} \
+    run_name=tokamax_gmm_pre_training \
+    model_name=${MODEL_NAME} \
+    tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} \
+    dataset_type=grain grain_file_type=tfrecord dataset_path=${DATASET_PATH} \
+    enable_checkpointing=false \
+    attention=flash sparse_matmul=True use_tokamax_gmm=True \
+    dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=4 \
+    steps=5 max_target_length=1024 ici_fsdp_parallelism=4
 
 # Run fine-tuning - tokamax_gmm implementation
-python3 -m maxtext.trainers.pre_train.train "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=tokamax_gmm_fine_tuning model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} dataset_type=grain grain_file_type=tfrecord dataset_path=${DATASET_PATH} enable_checkpointing=true async_checkpointing=false load_parameters_path=${SCANNED_CKPT_PATH} scan_layers=True attention=flash sparse_matmul=True use_tokamax_gmm=True dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=4 steps=5 max_target_length=1024 ici_fsdp_parallelism=1 ici_expert_parallelism=4 checkpoint_storage_concurrent_gb=1024
+python3 -m maxtext.trainers.pre_train.train \
+    base_output_directory=${BASE_OUTPUT_PATH} \
+    run_name=tokamax_gmm_fine_tuning \
+    model_name=${MODEL_NAME} \
+    tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} \
+    dataset_type=grain grain_file_type=tfrecord dataset_path=${DATASET_PATH} \
+    enable_checkpointing=true async_checkpointing=false load_parameters_path=${SCANNED_CKPT_PATH} \
+    scan_layers=True attention=flash sparse_matmul=True use_tokamax_gmm=True \
+    dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=4 \
+    steps=5 max_target_length=1024 \
+    ici_fsdp_parallelism=1 ici_expert_parallelism=4 checkpoint_storage_concurrent_gb=1024
 
 # Run decoding - tokamax_gmm implementation
 # Note decode requires the access token for huggingface tokenizer even if the model is not gated
-python3 -m maxtext.inference.decode ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=decode model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} hf_access_token=${HF_TOKEN} load_parameters_path=${UNSCANNED_CKPT_PATH} scan_layers=False attention=dot_product sparse_matmul=True use_tokamax_gmm=True dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=1 max_prefill_predict_length=512 max_target_length=1024 ici_fsdp_parallelism=1 ici_tensor_parallelism=4 ici_expert_parallelism=1 checkpoint_storage_concurrent_gb=1024 mla_naive_kvcache=false prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is "
+python3 -m maxtext.inference.decode \
+    base_output_directory=${BASE_OUTPUT_PATH} \
+    run_name=decode \
+    model_name=${MODEL_NAME} \
+    tokenizer_type=huggingface \
+    tokenizer_path=${TOKENIZER_PATH} \
+    hf_access_token=${HF_TOKEN} \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    scan_layers=False \
+    attention=dot_product \
+    sparse_matmul=True \
+    use_tokamax_gmm=True \
+    dtype=bfloat16 \
+    weight_dtype=bfloat16 \
+    per_device_batch_size=1 \
+    max_prefill_predict_length=512 \
+    max_target_length=1024 \
+    ici_fsdp_parallelism=1 \
+    ici_tensor_parallelism=4 \
+    ici_expert_parallelism=1 \
+    checkpoint_storage_concurrent_gb=1024 \
+    mla_naive_kvcache=false \
+    prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is "
