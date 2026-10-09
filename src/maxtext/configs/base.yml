@@ -115,6 +115,10 @@ colocated_python_checkpointing: false
 # versions match the head image exactly). This is NOT the same switch as
 # `colocated_python_checkpointing` above, which drives pre-train Multi-Tier Checkpointing.
 pathways_checkpointing_impl: "persistence"
+# When true under pathways_checkpointing_impl="colocated_python" + async_checkpointing, stages
+# optimizer_state to private pinned_host buffers so the next update() does not wait for GCS upload.
+# Keep false when Host RAM cannot hold a second copy of an offloaded optimizer (e.g. 397B on v5p).
+colocated_python_stage_optimizer_state: false
 
 # enables autocheckpoint, which saves a checkpoint at the preemption step.
 enable_autocheckpoint: false

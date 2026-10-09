@@ -308,6 +308,20 @@ def _configure_colocated_python_handler(handler: Any, *, d2h_concurrent_gb: floa
   lock = threading.Lock()
   orig_dispatch = dispatcher.dispatch
 
+  def _is_optimizer_infos(infos: Any) -> bool:
+    return bool(infos) and os.path.basename(str(getattr(infos[0], "parent_dir", ""))).startswith("optimizer_state")
+
+  orig_serialize = getattr(handler, "serialize", None)
+  if callable(orig_serialize):
+
+    async def _prioritized_serialize(values: Any, infos: Any, args: Any = None) -> Any:
+      futures = await orig_serialize(values, infos, args)
+      if _is_optimizer_infos(infos) and futures:
+        handler._opt_serialize_future = futures[-1]
+      return futures
+
+    handler.serialize = _prioritized_serialize
+
   def _run_dispatch(func: Any, input_arrays: Any, specs: Any, func_args: Any, kw: Any) -> Any:
     res = orig_dispatch(func, input_arrays=input_arrays, result_specs=specs, func_args=func_args, func_kwargs=kw)
     try:
@@ -324,6 +338,17 @@ def _configure_colocated_python_handler(handler: Any, *, d2h_concurrent_gb: floa
       func_args: Any = (),
       func_kwargs: Any = None,
   ) -> Any:
+    if (
+        getattr(func, "__name__", "") == "_worker_serialize_arrays"
+        and func_kwargs is not None
+        and not _is_optimizer_infos(func_kwargs.get("infos"))
+    ):
+      opt_fut = getattr(handler, "_opt_serialize_future", None)
+      if opt_fut is not None:
+        try:
+          opt_fut.result()
+        except Exception:  # pylint: disable=broad-except
+          pass
     with lock:
       if (
           getattr(func, "__name__", "") == "_sync_deserialize_arrays"
@@ -403,16 +428,22 @@ def _assert_uniform_device_set(tree: Any, *, item: str) -> None:
     )
 
 
-def _stage_to_pinned_host(tree: Any) -> Any:
-  """Stages jax.Array leaves with non-pinned_host sharding to pinned_host."""
+def _stage_to_pinned_host(tree: Any, *, copy_pinned: bool = False) -> Any:
+  """Stages jax.Array leaves to private pinned_host buffers."""
   def _stage_leaf(x: Any) -> Any:
     if isinstance(x, jax.Array) and not jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key):
       sharding = getattr(x, "sharding", None)
-      if sharding is not None and getattr(sharding, "memory_kind", None) != "pinned_host":
-        try:
-          return jax.device_put(x, sharding.with_memory_kind("pinned_host"))
-        except (ValueError, RuntimeError):
-          pass
+      if sharding is not None:
+        if getattr(sharding, "memory_kind", None) != "pinned_host":
+          try:
+            return jax.device_put(x, sharding.with_memory_kind("pinned_host"))
+          except (ValueError, RuntimeError):
+            pass
+        elif copy_pinned:
+          try:
+            return jax.device_put(x, sharding.with_memory_kind("pinned_host"), may_alias=False)
+          except (ValueError, RuntimeError, TypeError):
+            pass
     return x
 
   return jax.tree.map(_stage_leaf, tree)
@@ -434,12 +465,14 @@ class CheckpointManager:
     """
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     self._async_checkpointing = bool(config.async_checkpointing)
+    self._stage_optimizer_state = bool(getattr(config, "colocated_python_stage_optimizer_state", False))
     # Whether a background save that fails is raised from the next checkpoint call (False, the
     # default) or logged and dropped (True). See `_drain_in_flight_save`.
     self._abandon_failed_saves = config.abandon_failed_checkpoint_saves
     # The step of the save most recently handed to Orbax, so a failure that surfaces later can
     # be attributed to it.
     self._in_flight_step: int | None = None
+    self._in_flight_has_optimizer: bool = False
     # The failure dropped by the most recent abandonment, if no later save has replaced it in
     # Orbax; the one failure a wait with no save in flight may drop again (see `_drain_in_flight_save`).
     self._abandoned_failure: BaseException | None = None
@@ -476,12 +509,22 @@ class CheckpointManager:
               async_options=ocp.AsyncOptions(timeout_secs=config.async_checkpointing_timeout_secs),
           ),
           item_handlers={
-              "model_params": _pytree_handler(),
               "optimizer_state": _pytree_handler(),
+              "model_params": _pytree_handler(),
               "accumulated_metrics": _pytree_handler(),
               "accumulated_grads": _pytree_handler(),
           },
       )
+      comp_handler = getattr(getattr(self._checkpoint_manager, "_checkpointer", None), "_handler", None)
+      orig_get_tmp = getattr(comp_handler, "_get_item_temporary_paths", None)
+      if callable(orig_get_tmp):
+        comp_handler._get_item_temporary_paths = lambda directory, args: {
+            k: v
+            for k, v in sorted(
+                orig_get_tmp(directory, args).items(),
+                key=lambda kv: (kv[0] != "optimizer_state", kv[0]),
+            )
+        }
 
   def get_latest_step(self) -> int | None:
     """Returns the latest checkpoint step."""
@@ -492,6 +535,33 @@ class CheckpointManager:
   def wait_until_finished(self) -> None:
     """Waits for any ongoing async checkpoint save; a failed one is raised or abandoned (see `_drain_in_flight_save`)."""
     self._drain_in_flight_save("explicit wait")
+
+  def wait_before_donation(self) -> None:
+    """Under colocated_python async, blocks until the in-flight save no longer reads the live train state.
+
+    `update()` donates the whole train state. `model_params` is staged to a private pinned_host copy
+    at save time, so a weights-only save (`save_optimizer_state=False`) needs no wait here. When
+    `optimizer_state` is saved, it is handed to Orbax live (with `optimizer_memory_host_offload` it
+    already sits on pinned_host and a private copy would double the host-resident optimizer), so a
+    save still running when the next `update()` arrives is waited for here; otherwise the donation
+    frees buffers Orbax is still serializing ("Array has been deleted"). No-op when nothing with
+    `optimizer_state` is in flight or for other checkpointing impls (Pathways persistence takes its
+    own references).
+    """
+    if (
+        self._in_flight_step is None
+        or not self._in_flight_has_optimizer
+        or not (_REGISTERED_IMPL == _COLOCATED_PYTHON and self._async_checkpointing)
+    ):
+      return
+    step = self._in_flight_step
+    start = time.perf_counter()
+    self._drain_in_flight_save("before update() donates the train state")
+    logging.info(
+        "update() waited %.2fs for the async checkpoint save at step %s to finish reading the train state.",
+        time.perf_counter() - start,
+        step,
+    )
 
   def _drain_in_flight_save(self, reason: str) -> bool:
     """Blocks until the save most recently handed to Orbax has finished, attributing its failure to its step.
@@ -532,6 +602,7 @@ class CheckpointManager:
       self._checkpoint_manager.wait_until_finished()
     except Exception as e:  # pylint: disable=broad-except
       self._in_flight_step = None
+      self._in_flight_has_optimizer = False
       if step is None:
         if e is self._abandoned_failure:
           logging.warning(
@@ -571,6 +642,7 @@ class CheckpointManager:
       )
       return False
     self._in_flight_step = None
+    self._in_flight_has_optimizer = False
     return True
 
   def get_saved_micro_step_count(self, step: int) -> int:
@@ -738,22 +810,26 @@ class CheckpointManager:
         item=params,
         save_args=jax.tree.map(lambda _: ocp.SaveArgs(), params),
     )
-    save_args = {"model_params": model_cp_args}
+    save_args: dict[str, Any] = {"model_params": model_cp_args}
 
+    optimizer_staged = False
     if checkpoint_state.optimizer:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
       if _REGISTERED_IMPL == _COLOCATED_PYTHON:
         _assert_uniform_device_set(optimizer_state, item="optimizer_state")
+      if fingerprints_enabled:
+        fingerprint_start = time.perf_counter()
+        fingerprints["optimizer_state"] = _tree_fingerprint(optimizer_state)
+        fingerprint_seconds += time.perf_counter() - fingerprint_start
+      if _REGISTERED_IMPL == _COLOCATED_PYTHON and self._async_checkpointing and self._stage_optimizer_state:
+        optimizer_state = _stage_to_pinned_host(optimizer_state, copy_pinned=True)
+        optimizer_staged = True
       jax.block_until_ready(optimizer_state)
       optimizer_cp_args = ocp.args.PyTreeSave(
           item=optimizer_state,
           save_args=jax.tree.map(lambda _: ocp.SaveArgs(), optimizer_state),
       )
-      save_args["optimizer_state"] = optimizer_cp_args
-      if fingerprints_enabled:
-        fingerprint_start = time.perf_counter()
-        fingerprints["optimizer_state"] = _tree_fingerprint(optimizer_state)
-        fingerprint_seconds += time.perf_counter() - fingerprint_start
+      save_args = {"optimizer_state": optimizer_cp_args, **save_args}
     if fingerprints_enabled:
       custom_metadata[_FINGERPRINT_KEY] = fingerprints
 
@@ -787,6 +863,7 @@ class CheckpointManager:
     )
     if saved:
       self._in_flight_step = step
+      self._in_flight_has_optimizer = "optimizer_state" in save_args and not optimizer_staged
       self._abandoned_failure = None  # Orbax's finalize thread is replaced; the old failure cannot surface again.
     if saved and not fingerprints_enabled:
       logging.info("Checkpoint step=%d saved without fingerprints (ENABLE_ORBAX_FINGERPRINT=0).", step)

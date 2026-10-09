@@ -2166,6 +2166,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     # Wait for previous computations to finish before dispatching the update step to TPU.
     self._throttler.wait_for_next()
+    # The compiled update donates the train state; an async colocated_python save may still be
+    # serializing the live optimizer_state (only model_params is staged to a private copy).
+    self._checkpoint_manager.wait_before_donation()
 
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)

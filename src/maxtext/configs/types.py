@@ -462,6 +462,15 @@ class Checkpointing(BaseModel):
           "enable_single_controller."
       ),
   )
+  colocated_python_stage_optimizer_state: bool = Field(
+      False,
+      description=(
+          "When True under pathways_checkpointing_impl='colocated_python' and async_checkpointing=True, "
+          "stages optimizer_state to private pinned_host buffers before saving so the next update() "
+          "does not block on wait_before_donation(). Leave False when Host RAM cannot fit a staged "
+          "copy of optimizer_state."
+      ),
+  )
   enable_autocheckpoint: bool = Field(
       False,
       description="If True, enables autocheckpoint or preemption induced checkpointing.",
