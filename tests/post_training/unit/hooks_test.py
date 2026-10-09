@@ -20,7 +20,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -33,8 +33,9 @@ import numpy as np
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.trainers.post_train.hooks import BaseTrainingHooks
+from maxtext.trainers.post_train.hooks import BaseDataHooks, BaseTrainingHooks
 from maxtext.common.metric_logger import MetricLogger
+from maxtext.utils import exceptions
 from maxtext.utils import maxtext_utils
 
 
@@ -149,6 +150,49 @@ class BaseHooksTest(unittest.TestCase):
   def test_on_train_end_asserts_if_on_train_start_not_called(self):
     with self.assertRaises(AssertionError):
       self.training_hooks.on_train_end(self.mock_train_ctx)
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_load_next_train_batch_stop_iteration_returns_none(self, mock_create_data_iterator):
+    mock_train_iter = MagicMock()
+    mock_train_iter.__next__.side_effect = StopIteration()
+    mock_create_data_iterator.return_value = (mock_train_iter, None)
+
+    data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+    batch = data_hooks.load_next_train_batch(self.mock_train_ctx)
+    self.assertIsNone(batch)
+    self.assertIsNone(data_hooks.train_batch)
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_load_next_train_batch_propagates_unexpected_exception(self, mock_create_data_iterator):
+    mock_train_iter = MagicMock()
+    mock_train_iter.__next__.side_effect = IndexError("list index out of range")
+    mock_create_data_iterator.return_value = (mock_train_iter, None)
+
+    data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+    with self.assertRaises(exceptions.StopTraining) as cm:
+      data_hooks.load_next_train_batch(self.mock_train_ctx)
+    self.assertIsInstance(cm.exception.__cause__, IndexError)
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_load_next_eval_batch_stop_iteration_returns_none(self, mock_create_data_iterator):
+    mock_eval_iter = MagicMock()
+    mock_eval_iter.__next__.side_effect = StopIteration()
+    mock_create_data_iterator.return_value = (MagicMock(), mock_eval_iter)
+
+    data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+    batch = data_hooks.load_next_eval_batch(self.mock_train_ctx)
+    self.assertIsNone(batch)
+    self.assertIsNone(data_hooks.eval_batch)
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_load_next_eval_batch_propagates_unexpected_exception(self, mock_create_data_iterator):
+    mock_eval_iter = MagicMock()
+    mock_eval_iter.__next__.side_effect = RuntimeError("eval data stream failed")
+    mock_create_data_iterator.return_value = (MagicMock(), mock_eval_iter)
+
+    data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+    with self.assertRaises(RuntimeError):
+      data_hooks.load_next_eval_batch(self.mock_train_ctx)
 
 
 if __name__ == "__main__":
