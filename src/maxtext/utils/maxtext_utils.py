@@ -1737,6 +1737,7 @@ def setup_initial_state(
           use_ocdbt=config.checkpoint_storage_use_ocdbt,
           use_zarr3=config.checkpoint_storage_use_zarr3,
           enable_single_replica_ckpt_restoring=bool(config.enable_single_replica_ckpt_restoring),
+          colocated_python_checkpointing=bool(config.enable_single_controller and config.colocated_python_checkpointing),
       )
     # Partial or fully restored
     was_restored = bool(restored is not None or raw_params is not None)

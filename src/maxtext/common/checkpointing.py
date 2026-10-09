@@ -365,6 +365,7 @@ def _load_linen_checkpoint_into_nnx(
       checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
       partial_load=True,
       enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+      colocated_python_checkpointing=bool(getattr(config, "colocated_python_checkpointing", False)),
   )
   # Orbax v1 refuses to read an item subdirectory directly (the step root carries the
   # checkpoint indicator); normalize the documented ".../<step>/items" form to its root
@@ -487,6 +488,7 @@ def _load_full_state_from_path(
         checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
         checkpoint_layout=ocp.options.CheckpointLayout.ORBAX,
         enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+        colocated_python_checkpointing=bool(getattr(maxtext_config, "colocated_python_checkpointing", False)),
     )
     with context:
       return ocp.load(path, abstract_unboxed_pre_state)
@@ -536,6 +538,7 @@ def create_orbax_checkpoint_manager(
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
     ocdbt_target_data_file_size_bytes: int | None = None,
+    colocated_python_checkpointing: bool = False,
 ):
   """Returns an Orbax v1 training ``Checkpointer``, or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -566,6 +569,7 @@ def create_orbax_checkpoint_manager(
       todelete_full_path=todelete_full_path,
       todelete_subdir=todelete_subdir,
       partial_load=True,
+      colocated_python_checkpointing=colocated_python_checkpointing,
   )
 
   manager = ocp.training.Checkpointer(
@@ -852,6 +856,7 @@ def load_state_if_possible(
         use_zarr3=use_zarr3,
         enable_single_replica_ckpt_restoring=bool(enable_single_replica_ckpt_restoring),
         convert_flat_moe_weights=bool(getattr(maxtext_config, "moe_flat_fsdp_weights", False)),
+        colocated_python_checkpointing=bool(getattr(maxtext_config, "colocated_python_checkpointing", False)),
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -1130,11 +1135,13 @@ def load_params_from_path(
     use_zarr3=True,
     enable_single_replica_ckpt_restoring: bool = False,
     convert_flat_moe_weights: bool = False,
+    colocated_python_checkpointing: bool = False,
 ):
   """Load decode params from checkpoint at specified path.
 
   With `convert_flat_moe_weights` (moe_flat_fsdp_weights), 3D/4D routed-expert weights in the checkpoint are converted
-  to the flat [E * rows, (L,) cols] layout the model expects.
+  to the flat [E * rows, (L,) cols] layout the model expects. With `colocated_python_checkpointing` (Pathways single
+  controller only), the restore runs on the workers through the Orbax colocated-Python dispatcher.
   """
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
@@ -1158,8 +1165,16 @@ def load_params_from_path(
   # Orbax v1 fails a mid-load shape mismatch itself, with an error that reports the
   # shapes but not which weight; compare the stored metadata first so the error names
   # it. A metadata read failure falls through to the load (worst case: Orbax's error).
+  # With colocated Python, read the metadata under the same checkpointing implementation
+  # as the load: outside a Context, Orbax on Pathways requires remote Python instead.
+  metadata_context = (
+      checkpoint_context.build_context(colocated_python_checkpointing=True)
+      if colocated_python_checkpointing
+      else contextlib.nullcontext()
+  )
   try:
-    stored = ocp.metadata(path, checkpointable_name=checkpointable_name).metadata
+    with metadata_context:
+      stored = ocp.metadata(path, checkpointable_name=checkpointable_name).metadata
   except Exception as e:  # pylint: disable=broad-except
     max_logging.log(f"Skipping pre-load shape check, checkpoint metadata unreadable: {e}")
     stored = None
@@ -1251,6 +1266,7 @@ def load_params_from_path(
       checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
       partial_load=True,
       enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+      colocated_python_checkpointing=colocated_python_checkpointing,
   )
   # Dispatch on the on-disk layout instead of assuming a step root: callers pass step roots,
   # v0-style pytree dirs (normalized above), and v0 flat params-only checkpoints
