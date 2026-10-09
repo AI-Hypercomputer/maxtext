@@ -12,4 +12,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Multimodal VAE and processor utilities package."""
+"""Continuous-time Flow Match diffusion noise scheduler."""
