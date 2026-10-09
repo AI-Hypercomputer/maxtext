@@ -98,14 +98,17 @@ def remove_gathered_mesh_axes(pps, is_moe_block_0, axes_to_remove):
     pps: A single `jax.sharding.PartitionSpec` object.
     is_moe_block_0: Boolean indicating if the target is the routed MoE block. The 'expert'
                     mesh axis is only retained for the routed block.
-    axes_to_remove: physical axes that we should remove from current physical partition axes
+    axes_to_remove: physical axes that we should remove from current physical partition axes.
+                    This sequence is not modified.
 
   Returns:
     A new `PartitionSpec` with the gathered axes removed, or the original object if it
     was not a PartitionSpec.
   """
   if not is_moe_block_0:
-    axes_to_remove.append("expert")
+    # Build a new list instead of appending: callers share one `axes_to_remove` across every leaf, so
+    # mutating it would also strip 'expert' from the routed MoE block of any leaf visited afterwards.
+    axes_to_remove = [*axes_to_remove, "expert"]
 
   if isinstance(pps, P):
     new_spec = []
