@@ -306,7 +306,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if config.num_experts > 1:
     moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
     if moe_lb_losses:
-      moe_lb_loss = jnp.mean(jnp.concatenate(moe_lb_losses))
+      moe_lb_loss = maxtext_utils.reduce_moe_aux_losses(moe_lb_losses, config.moe_aux_loss_reduction)
       loss += moe_lb_loss
     else:
       max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")

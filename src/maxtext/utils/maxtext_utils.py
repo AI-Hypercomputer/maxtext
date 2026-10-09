@@ -2189,6 +2189,19 @@ def create_device_mesh(config, devices=None):
 # -----------------------------------------------------------------------------
 
 
+def reduce_moe_aux_losses(losses, reduction: str):
+  """Combines the per-layer MoE auxiliary losses (a list of arrays) into one scalar.
+
+  'mean' is MaxText's convention; 'sum' is OLMo-core's, where every router's weighted loss is attached to the
+  graph on its own, so a model with L MoE layers trains with L times the balancing gradient at the same weight.
+  """
+  if reduction == "sum":
+    return jnp.sum(jnp.concatenate(losses))
+  if reduction == "mean":
+    return jnp.mean(jnp.concatenate(losses))
+  raise ValueError(f"moe_aux_loss_reduction must be 'mean' or 'sum', got {reduction!r}")
+
+
 def create_learning_rate_schedule(config):
   """Creates a learning rate schedule with warmup and decay.
 

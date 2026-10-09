@@ -1058,6 +1058,15 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
+  moe_aux_loss_reduction: Literal["mean", "sum"] = Field(
+      "mean",
+      description=(
+          "How the per-layer MoE auxiliary losses (moe_lb_loss intermediates: load balance plus any router z term) "
+          "combine into the training loss. 'mean' is MaxText's: load_balance_loss_weight weights the average over "
+          "MoE layers. 'sum' weights each layer by it, as OLMo-core does (attach_auxiliary_loss per router), so the "
+          "balancing gradient is num_moe_layers times stronger at the same weight."
+      ),
+  )
   moe_dropless_fallback: Literal["step", "layer"] | None = Field(
       None,
       description=(

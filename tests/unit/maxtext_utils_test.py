@@ -802,6 +802,17 @@ class TestCalculateBytesFromPytree(unittest.TestCase):
     self.assertEqual(max_utils.calculate_bytes_from_pytree({}), 0)
 
 
+class TestReduceMoeAuxLosses(unittest.TestCase):
+  """moe_aux_loss_reduction: 'mean' is MaxText's convention, 'sum' is OLMo-core's."""
+
+  def test_mean_and_sum(self):
+    losses = [jnp.array([1.0, 2.0]), jnp.array([3.0])]  # a scanned block's layers plus one unscanned layer
+    self.assertAlmostEqual(float(maxtext_utils.reduce_moe_aux_losses(losses, "mean")), 2.0, places=6)
+    self.assertAlmostEqual(float(maxtext_utils.reduce_moe_aux_losses(losses, "sum")), 6.0, places=6)
+    with self.assertRaises(ValueError):
+      maxtext_utils.reduce_moe_aux_losses(losses, "max")
+
+
 class TestLearningRateSchedules(unittest.TestCase):
   """Test suite for learning rate schedule functions."""
 
