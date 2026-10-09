@@ -2,4 +2,6 @@ google-cloud-filestore
 kubernetes
 omegaconf
 packaging==24.2
+setuptools>=84.0.0
+wheel>=0.48.0
 xpk>=1.8.0

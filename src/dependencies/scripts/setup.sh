@@ -223,8 +223,18 @@ install_maxtext_package_without_deps() {
 
 cleanup_unneeded_build_artifacts() {
     echo "Cleaning up build artifacts that trigger security scanners..."
-    # Clean up flaxlib_src Cargo.lock / unneeded source files
-    rm -rf /usr/local/lib/python3*/site-packages/flaxlib_src
+    local py_purelib py_platlib
+    py_purelib=$(python3 -c "import sysconfig; print(sysconfig.get_path('purelib'))" 2>/dev/null || true)
+    py_platlib=$(python3 -c "import sysconfig; print(sysconfig.get_path('platlib'))" 2>/dev/null || true)
+    # Clean up flaxlib_src Cargo.lock / unneeded source files and unused cross-language Java Ray worker JAR
+    if [ -n "$py_purelib" ]; then
+        rm -rf "$py_purelib/flaxlib_src"
+        rm -f "$py_purelib/ray/jars/ray_dist.jar"
+    fi
+    if [ -n "$py_platlib" ] && [ "$py_platlib" != "$py_purelib" ]; then
+        rm -rf "$py_platlib/flaxlib_src"
+        rm -f "$py_platlib/ray/jars/ray_dist.jar"
+    fi
     # Clean up embedded virtualenv seed wheels if virtualenv was installed
     find /usr/local /root -name "*.whl" -path "*/virtualenv/seed/wheels/embed/*" -delete 2>/dev/null || true
 }
@@ -320,6 +330,7 @@ if [[ $MODE == "nightly" ]]; then
 
     # Install Flax HEAD to maintain compatibility with JAX nightly
     python3 -m uv pip install -U --no-deps git+https://github.com/google/flax.git
+    cleanup_unneeded_build_artifacts
 
     # Uninstall existing jax, jaxlib and libtpu
     python3 -m uv pip show jax && python3 -m uv pip uninstall jax
