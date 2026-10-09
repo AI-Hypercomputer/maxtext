@@ -320,6 +320,7 @@ class TestLossFnNNX(unittest.TestCase):
     cfg, ts = _build_state()
     cfg.use_indexer = True
     cfg.indexer_sparse_training = False
+    cfg.indexer_loss_scaling_factor = 0.1
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     loss, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
     # When dense warm-up is active the loss_fn skips the main loss entirely.
@@ -333,11 +334,24 @@ class TestLossFnNNX(unittest.TestCase):
     cfg, ts = _build_state()
     cfg.use_indexer = True
     cfg.indexer_sparse_training = False
+    cfg.indexer_loss_scaling_factor = 0.1
     cfg.num_vocab_tiling = 2
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     loss, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
     self.assertEqual(float(aux["xent_sum"]), 0.0)
     self.assertEqual(float(loss), 0.0)
+
+  def test_indexer_without_indexer_loss_keeps_xent(self):
+    # With indexer_loss_scaling_factor == 0 there is no indexer loss, so the LM loss must be kept;
+    # skipping it would make the total objective zero.
+    cfg, ts = _build_state()
+    cfg.use_indexer = True
+    cfg.indexer_sparse_training = False
+    cfg.indexer_loss_scaling_factor = 0.0
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    loss, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+    self.assertGreater(float(aux["xent_sum"]), 0.0)
+    self.assertGreater(float(loss), 0.0)
 
   def test_indexer_losses_harvested_and_injected_into_loss(self):
     cfg = _Cfg()
