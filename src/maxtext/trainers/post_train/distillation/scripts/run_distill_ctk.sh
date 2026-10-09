@@ -21,7 +21,7 @@
 #
 # The script expects a base image at $DOCKER_IMAGE (or $CTK_BASE_IMAGE). `prep_image`
 # (below) builds the MaxText TPU post-training Docker image as described in
-# https://maxtext.readthedocs.io/en/latest/tutorials/build_maxtext.html#tpu-post-training-docker-image
+# https://maxtext.readthedocs.io/page/tutorials/build_maxtext.html#tpu-post-training-docker-image
 # (equivalent to running `build_maxtext_docker_image WORKFLOW=post-training` from
 # an activated MaxText virtual environment). Post-training dependencies such as
 # Tunix come from the pins in src/dependencies/extra_deps/post_train_github_deps.txt.
@@ -238,7 +238,7 @@ configure_cluster() {
 
 # -------------------------- prep_image --------------------------
 # Builds the MaxText TPU post-training Docker image following
-# https://maxtext.readthedocs.io/en/latest/tutorials/build_maxtext.html#tpu-post-training-docker-image.
+# https://maxtext.readthedocs.io/page/tutorials/build_maxtext.html#tpu-post-training-docker-image.
 # `build_maxtext_docker_image` always produces a local image named
 # `maxtext_base_image`; it is retagged as $CTK_BASE_IMAGE if that differs.
 # Must be run from the MaxText repo root with the MaxText virtual environment
@@ -246,7 +246,7 @@ configure_cluster() {
 prep_image() {
   if ! command -v build_maxtext_docker_image >/dev/null 2>&1; then
     echo "ERROR: build_maxtext_docker_image not found in PATH. Activate the MaxText virtual environment first;" >&2
-    echo "  see https://maxtext.readthedocs.io/en/latest/tutorials/build_maxtext.html" >&2
+    echo "  see https://maxtext.readthedocs.io/page/tutorials/build_maxtext.html" >&2
     exit 1
   fi
   echo "== building TPU post-training image -> ${CTK_BASE_IMAGE} =="

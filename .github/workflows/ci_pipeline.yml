@@ -54,12 +54,13 @@ permissions:
 jobs:
   analyze_code_changes:
     name: Analyze Code Changes for Test Orchestration
-    # `labeled` fires for every label, so ignore label events other than the one
-    # that opts the PR into a scheduled run. Pushes and scheduled runs are unaffected.
+    # `labeled` fires for every label, so ignore label events other than the ones
+    # that opt the PR into a scheduled run or skip CI tests. Pushes and scheduled runs are unaffected.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.action != 'labeled' ||
-      github.event.label.name == 'scheduled-only'
+      github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'skip-ci-tests'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -89,6 +90,8 @@ jobs:
           # A `scheduled-only` PR mirrors a scheduled run, so run every suite
           # regardless of which files the PR touched.
           FORCE_ALL_TESTS: ${{ contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+          # A `skip-ci-tests` PR disables all tests and notebooks, regardless of which files the PR touched.
+          SKIP_CI_TESTS: ${{ contains(github.event.pull_request.labels.*.name, 'skip-ci-tests') }}
         run: |
           bash .github/scripts/analyze_code_changes.sh
 
@@ -97,7 +100,8 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.action != 'labeled' ||
-      github.event.label.name == 'scheduled-only'
+      github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'skip-ci-tests'
     uses: ./.github/workflows/code_quality.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
@@ -107,7 +111,8 @@ jobs:
     if: >-
       github.event_name != 'pull_request' ||
       github.event.action != 'labeled' ||
-      github.event.label.name == 'scheduled-only'
+      github.event.label.name == 'scheduled-only' ||
+      github.event.label.name == 'skip-ci-tests'
     uses: ./.github/workflows/check_docs_build.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
