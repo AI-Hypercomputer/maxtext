@@ -172,7 +172,11 @@ class ConfigTest(absltest.TestCase):
         "override_logical_axis_rules": True,
     }
     invalid_configs = (
-        ({"norm_topk_prob": True}, "te_moe_block=True does not currently support norm_topk_prob=True."),
+        (
+            {"norm_topk_prob": True},
+            "te_moe_block=True does not currently support norm_topk_prob=True "
+            "when routed_score_func is not 'sqrtsoftplus' or 'sigmoid'.",
+        ),
         ({"use_random_routing": True}, "te_moe_block=True does not support use_random_routing=True."),
         (
             {"decoder_block": types.DecoderBlockType.LLAMA4},

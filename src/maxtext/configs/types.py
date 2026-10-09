@@ -5336,10 +5336,11 @@ class MaxTextConfig(
         raise ValueError("te_moe_block=True requires sparse_matmul=True.")
       if self.te_moe_block and not self.prefuse_moe_weights:
         raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
-      if self.te_moe_block and self.routed_bias_update_rate > 0.0:
-        raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
-      if self.te_moe_block and self.norm_topk_prob:
-        raise ValueError("te_moe_block=True does not currently support norm_topk_prob=True.")
+      if self.te_moe_block and self.norm_topk_prob and self.routed_score_func not in ["sqrtsoftplus", "sigmoid"]:
+        raise ValueError(
+            "te_moe_block=True does not currently support norm_topk_prob=True "
+            "when routed_score_func is not 'sqrtsoftplus' or 'sigmoid'."
+        )
       if self.te_moe_block and self.use_random_routing:
         raise ValueError("te_moe_block=True does not support use_random_routing=True.")
       if self.te_moe_block and self.decoder_block == DecoderBlockType.LLAMA4:
