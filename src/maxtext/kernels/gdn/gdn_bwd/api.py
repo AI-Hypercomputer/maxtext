@@ -837,7 +837,7 @@ def _gdn_decoupled_conv1d_bwd(
   if res_idx < 3:
     residuals = trailing[res_idx]
     cotangents = trailing[res_idx + 1]
-    cp_axis_name, cp_matmul_precision, options = (trailing[:res_idx] + [None, cp_gdn.DEFAULT_PRECISION, None][res_idx:])
+    cp_axis_name, cp_matmul_precision, options = trailing[:res_idx] + [None, cp_gdn.DEFAULT_PRECISION, None][res_idx:]
   del options  # No backward-side kernel options in this change.
 
   m_local_fwd = None

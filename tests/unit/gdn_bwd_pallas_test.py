@@ -757,21 +757,21 @@ class GdnBwdPallasTest(absltest.TestCase):
     for compute_dtype, act_dtype, tol in ((jnp.float32, jnp.float32, 2e-4), (jnp.bfloat16, jnp.bfloat16, 2e-2)):
       with self.subTest(compute_dtype=jnp.dtype(compute_dtype).name):
         qkv_c, b_c, a_c = (x.astype(act_dtype) for x in (qkv, b, a))
-        common = dict(
-            conv_weight=conv_weight,
-            conv_bias=conv_bias,
-            a_log=a_log,
-            dt_bias=dt_bias,
-            conv_state=conv_halo.astype(act_dtype),
-            num_k_heads=num_k_heads,
-            num_v_heads=num_v_heads,
-            head_k_dim=head_k_dim,
-            head_v_dim=head_v_dim,
-            conv_kernel_size=conv_kernel_size,
-            chunk_size=chunk_size,
-            use_qk_norm_in_gdn=True,
-            compute_dtype=compute_dtype,
-        )
+        common = {
+            "conv_weight": conv_weight,
+            "conv_bias": conv_bias,
+            "a_log": a_log,
+            "dt_bias": dt_bias,
+            "conv_state": conv_halo.astype(act_dtype),
+            "num_k_heads": num_k_heads,
+            "num_v_heads": num_v_heads,
+            "head_k_dim": head_k_dim,
+            "head_v_dim": head_v_dim,
+            "conv_kernel_size": conv_kernel_size,
+            "chunk_size": chunk_size,
+            "use_qk_norm_in_gdn": True,
+            "compute_dtype": compute_dtype,
+        }
         # Default pass 1 (states only) + the XLA reference composition.
         (_, (_, s_ext_ref)), t_inv, _ = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
             qkv_c, b_c, a_c, recurrent_state=zero_rs, states_only=True, **common
@@ -843,21 +843,21 @@ class GdnBwdPallasTest(absltest.TestCase):
     for compute_dtype, act_dtype in ((jnp.float32, jnp.float32), (jnp.bfloat16, jnp.bfloat16)):
       with self.subTest(compute_dtype=jnp.dtype(compute_dtype).name):
         qkv_c, b_c, a_c = (x.astype(act_dtype) for x in (qkv, b, a))
-        common = dict(
-            conv_weight=conv_weight,
-            conv_bias=conv_bias,
-            a_log=a_log,
-            dt_bias=dt_bias,
-            conv_state=conv_halo.astype(act_dtype),
-            num_k_heads=num_k_heads,
-            num_v_heads=num_v_heads,
-            head_k_dim=head_k_dim,
-            head_v_dim=head_v_dim,
-            conv_kernel_size=conv_kernel_size,
-            chunk_size=chunk_size,
-            use_qk_norm_in_gdn=True,
-            compute_dtype=compute_dtype,
-        )
+        common = {
+            "conv_weight": conv_weight,
+            "conv_bias": conv_bias,
+            "a_log": a_log,
+            "dt_bias": dt_bias,
+            "conv_state": conv_halo.astype(act_dtype),
+            "num_k_heads": num_k_heads,
+            "num_v_heads": num_v_heads,
+            "head_k_dim": head_k_dim,
+            "head_v_dim": head_v_dim,
+            "conv_kernel_size": conv_kernel_size,
+            "chunk_size": chunk_size,
+            "use_qk_norm_in_gdn": True,
+            "compute_dtype": compute_dtype,
+        }
         (out_ref, (cs_ref, rs_ref)), t_inv_ref, chunk_states_ref = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
             qkv_c, b_c, a_c, recurrent_state=h0, **common
         )
