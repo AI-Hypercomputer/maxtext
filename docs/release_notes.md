@@ -22,9 +22,41 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ## Unreleased
 
-**Last Updated**: 28def1589
+**Last Updated**: 56d4bb517
 
 <!-- Add new unreleased changes below this line -->
+
+#### Changes
+
+##### Models
+
+- **Flax NNX Migration**: Converted FP8 ops (`Fp8DirectDotGeneralOp`, `NANOOFp8DotGeneralOp`, `Fp8Einsum`, `QwixDotGeneral`, `QwixEinsum`) and HuggingFace checkpoint parameter conversion (`to_maxtext.py`) to native Flax NNX modules, and deleted legacy `ToLinen` layer wrappers and factories.
+
+##### Pre-Training
+
+- **YaRN RoPE Optimizations**: Added `rope_direct_position_freqs` to compute YaRN RoPE angles directly from position frequencies in 4D float32 without lookup tables, and added `rope_dot_pairwise` using a 4D block-skew contraction matrix to preserve rank-4 activations during pairwise rotation and eliminate layout copy overhead.
+
+##### Performance
+
+- **TensorCore Ragged Sort & 3D Layout Pipeline for Ring-of-Experts MoE**: Added a TensorCore ragged sort implementation for Ring-of-Experts MoE, applied MoE routing weights to activations alongside the ragged sort, maintained the sorted MoE token buffer in 3D layout through GMM v2 kernels, and enabled token all-gather and combine in the TensorCore kernels' native 3D layout.
+- **In-Place MoE Gradient Accumulation**: Added `moe_accumulate_wi_dlhs` to accumulate `wi_0` and `wi_1` backward DLHS gradients in-place via `gmm_v2` `partial_sum` with fused DLHS scale, and introduced `moe_accumulate_chunk_wgrad` to accumulate weight gradients across token chunks in-place via `tgmm_v2` `partial_sum`.
+- **GMM v2 Native Transpose RHS**: Added native `transpose_rhs` support to Tokamax GMM v2 block specs and tiled matmuls to consume expert weights in their existing layout and eliminate RHS layout copies.
+- **FP8 Quantization**: Added `logits_proj_bwd_quant_calibration_method` allowing custom backward quantization calibration overrides for logits projections ([quantization](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/quantization.html)), and added the `lineage_quantization` (`none` or `fp8_full`) option to support quantization for Lineage DeepSeek-V3 routed experts.
+- **MLPerf DeepSeek-V3 Optimization**: Added the `fsdp-as-dp-for-attn-rf` custom mesh and sharding rule to shard MoE router weights on FSDP and overlap gradient communication with GMM backward execution ([custom mesh and rule](https://maxtext.readthedocs.io/en/latest/guides/optimization/custom_mesh_and_rule.html)), and added `warm_eval_input_reshard_before_run_start` and `eval_cache_prefill_in_background` flags to overlap eval input caching with initial training steps.
+
+##### Usability
+
+- **Dependencies & Compatibility**: Updated pre-training dependency requirements to require `flax>=0.12.10` to ensure compatibility with JAX 0.11.2 ([update dependencies](https://maxtext.readthedocs.io/en/latest/development/update_dependencies.html)).
+
+#### Bug Fixes
+
+- Fixed `gmm_v2` partial K tail handling when `tile_k` does not divide `size_k` by masking stale VMEM in the LHS operand, preventing NaN/Inf poisoning of the accumulator and block absmax quantization.
+- Fixed MLPerf parallelism, precision, and config filename MLLog disclosure logging for Lineage DeepSeek-V3 runs.
+- Fixed SFT evaluation invoking the loss function with `is_train=True`, ensuring dropout, MTP loss, and sparsity `batch_stats` updates are disabled during eval.
+
+#### Deprecations
+
+- Deprecated calling `from_config()` without explicit `rngs` and deprecated `models.transformer_as_linen` in favor of native Flax NNX module initialization.
 
 ## Releases
 
