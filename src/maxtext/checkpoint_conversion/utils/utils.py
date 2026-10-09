@@ -288,11 +288,20 @@ def process_maxtext_param(
       max_logging.log("\tscan")
       # Case 2: Standard scanned layer. Stacked on layer axis (param_scan_axis) for multidimensional
       # weights or 2D block scales, or axis 0 for 1D tensors (e.g. per-layer scalar scales like
-      # Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)).
-      weight_sample = maxtext_param_weight[0] if isinstance(maxtext_param_weight, list) else maxtext_param_weight
-      axis_to_slice = (
-          maxtext_config.param_scan_axis if getattr(weight_sample, "ndim", 0) > maxtext_config.param_scan_axis else 0
+      # Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)) and non-Param variable collections
+      # (`MoEBiasVar`, `Tid2EidVar`) or unscanned MoE prefix layers.
+      key_str = maxtext_param_key[0] if isinstance(maxtext_param_key, tuple) else maxtext_param_key
+      is_var_collection = "MoEBiasVar" in key_str or "Tid2EidVar" in key_str
+      is_unscanned_moe = "MoeBlock" in key_str and not any(
+          s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
       )
+      weight_sample = maxtext_param_weight[0] if isinstance(maxtext_param_weight, list) else maxtext_param_weight
+      if is_var_collection or is_unscanned_moe:
+        axis_to_slice = 0
+      else:
+        axis_to_slice = (
+            maxtext_config.param_scan_axis if getattr(weight_sample, "ndim", 0) > maxtext_config.param_scan_axis else 0
+        )
     else:
       max_logging.log("\tunscan moe")
       # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.

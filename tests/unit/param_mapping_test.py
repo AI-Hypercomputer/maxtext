@@ -299,6 +299,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
     self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("MoEBiasVar-decoder-moe_layers_0-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias", mapping)
 
   def test_deepseek_mapping_scanned(self):
     config = {
@@ -309,6 +310,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-dense_layers-self_attention-query-kernel", mapping)
+    self.assertIn("MoEBiasVar-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias", mapping)
 
   def test_gpt_oss_mapping(self):
     config = {

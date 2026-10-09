@@ -1908,6 +1908,11 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)
       ]
+    mapping["MoEBiasVar-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias"] = (
+        [  # pyrefly: ignore[bad-assignment]
+            f"model.layers.{i}.mlp.gate.e_score_correction_bias" for i in range(first_num_dense_layers, num_main_layers)
+        ]
+    )
 
     for maxtext_key, hf_key in moe_expert_keys.items():
       mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
@@ -1925,6 +1930,9 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
 
       for maxtext_key, hf_key in moe_layer_keys.items():
         mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+      mapping[f"MoEBiasVar-decoder-moe_layers_{moe_layer_idx}-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias"] = (
+          f"model.layers.{i}.mlp.gate.e_score_correction_bias"
+      )
 
       for maxtext_key, hf_key in moe_expert_keys.items():
         mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
