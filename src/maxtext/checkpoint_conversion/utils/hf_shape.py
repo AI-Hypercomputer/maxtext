@@ -692,7 +692,7 @@ def QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE(config):
       )
 
 
-def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
+def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config, *, hf_prefix: str = "model.language_model"):
   """Returns mapping between HuggingFace Qwen3.5 weights path and their shape."""
 
   if "text_config" in config:
@@ -726,13 +726,13 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
 
   # --- Initialize Mapping ---
   mapping = {
-      "model.language_model.embed_tokens.weight": [vocab_size, hidden_size],
-      "model.language_model.norm.weight": [hidden_size],
+      f"{hf_prefix}.embed_tokens.weight": [vocab_size, hidden_size],
+      f"{hf_prefix}.norm.weight": [hidden_size],
       "lm_head.weight": [vocab_size, hidden_size],
   }
 
   for layer_idx in range(num_hidden_layers):
-    layer_prefix = f"model.language_model.layers.{layer_idx}"
+    layer_prefix = f"{hf_prefix}.layers.{layer_idx}"
 
     # Standard Layer Norms
     mapping[f"{layer_prefix}.input_layernorm.weight"] = [hidden_size]
@@ -811,27 +811,9 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
-def _qwen3_8_rewrite_hf_key(key):
-  """Rewrites `model.language_model.*` HF keys (or tuples of keys) to `model.*`."""
-  if isinstance(key, tuple):
-    return tuple(_qwen3_8_rewrite_hf_key(k) for k in key)
-  prefix = "model.language_model."
-  if isinstance(key, str) and key.startswith(prefix):
-    return "model." + key[len(prefix) :]
-  return key
-
-
 def QWEN3_8_HF_WEIGHTS_TO_SHAPE(config):
-  """Returns mapping between HuggingFace Qwen3.8 (text-only) weights path and their shape.
-
-  Qwen3.8 shares the Qwen3.5 MoE text architecture, but its checkpoint is text-only
-  (`Qwen3_5MoeForCausalLM`), so weights live under `model.*` instead of
-  `model.language_model.*`.
-  """
-  if "text_config" not in config:
-    config = {"text_config": config}
-  shapes = QWEN3_5_HF_WEIGHTS_TO_SHAPE(config)
-  return {_qwen3_8_rewrite_hf_key(k): v for k, v in shapes.items()}
+  """Returns HF weight shapes for the text-only Qwen3.8 checkpoint."""
+  return QWEN3_5_HF_WEIGHTS_TO_SHAPE(config, hf_prefix="model")
 
 
 def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
