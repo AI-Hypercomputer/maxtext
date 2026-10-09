@@ -16,6 +16,7 @@
 
 import dataclasses
 import unittest
+from unittest import mock
 from types import SimpleNamespace
 
 import numpy as np
@@ -549,6 +550,39 @@ class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
     # None pixel_values raises ValueError
     with self.assertRaisesRegex(ValueError, "must have pixel_values"):
       unreg_transform._pad_image_and_mask(mm_utils.PreprocessorOutput(pixel_values=None))  # pylint: disable=protected-access
+
+
+class GetDataloadingShardTest(unittest.TestCase):
+  """Tests for input_pipeline_utils.get_dataloading_shard."""
+
+  def _shard(self, process_index, process_indices, replicas=1, replica=0, **kwargs):
+    config = SimpleNamespace(num_data_replicas_per_process=replicas, data_replica_index=replica)
+    with mock.patch.object(input_pipeline_utils.jax, "process_index", return_value=process_index):
+      return input_pipeline_utils.get_dataloading_shard(config, process_indices, **kwargs)
+
+  def test_one_replica_matches_host_position(self):
+    self.assertEqual(self._shard(5, [1, 3, 5, 7]), (2, 4))
+
+  def test_replicas_split_the_host_shard(self):
+    shards = {self._shard(p, [0, 1], replicas=2, replica=r) for p in (0, 1) for r in (0, 1)}
+    self.assertEqual(shards, {(0, 4), (1, 4), (2, 4), (3, 4)})
+
+  def test_multiple_shards_per_host(self):
+    self.assertEqual(self._shard(1, [0, 1], replicas=2, replica=1, shard_offset=1, shards_per_host=3), (7, 12))
+
+  def test_config_without_replica_fields_loads_one_replica(self):
+    with mock.patch.object(input_pipeline_utils.jax, "process_index", return_value=3):
+      self.assertEqual(input_pipeline_utils.get_dataloading_shard(SimpleNamespace(), [1, 3]), (1, 2))
+
+  def test_rejects_replica_index_out_of_range(self):
+    for replicas, replica in ((2, 2), (2, -1), (0, 0)):
+      with self.subTest(replicas=replicas, replica=replica), self.assertRaisesRegex(ValueError, "data_replica_index"):
+        self._shard(0, [0], replicas=replicas, replica=replica)
+
+  def test_all_replicas_batch_size(self):
+    config = SimpleNamespace(num_data_replicas_per_process=4, data_replica_index=1)
+    self.assertEqual(input_pipeline_utils.get_all_replicas_batch_size(config, 6), 24)
+    self.assertEqual(input_pipeline_utils.get_all_replicas_batch_size(SimpleNamespace(), 6), 6)
 
 
 if __name__ == "__main__":
