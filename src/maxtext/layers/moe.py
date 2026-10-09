@@ -568,17 +568,6 @@ class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
 
 
-class ExpertPermutationVar(nnx.BatchStat):
-  """Lineage per-layer routed expert permutation (`lineage_expert_permutation`).
-
-  Stored as float32 for the same reason as `Tid2EidVar` and cast to int32 at use.
-  The Lineage forward pass overwrites it with the permutation for the next step.
-  A `BatchStat` (runtime state, like running statistics): full-state checkpoints
-  keep it, while params-only loads (`load_parameters_path`) skip it and leave it
-  at its identity initialisation.
-  """
-
-
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -953,12 +942,6 @@ class RoutedMoE(nnx.Module):
       self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
     elif self.config.use_batch_split_schedule:
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
-      if self.config.use_lineage:
-        # Lineage all-gathers the routed `wo` over its FSDP axis inside every
-        # sparse layer and expects it sharded on the hidden (mlp) dim. Storing
-        # it sharded on the embed dim lands the gathered weight in a transposed
-        # layout that costs a relayout copy per use.
-        self.wo_kernel_axes = ("expert_only", "embed_moe", None)
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
       self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")

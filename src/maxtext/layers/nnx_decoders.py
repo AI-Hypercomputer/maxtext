@@ -71,11 +71,6 @@ from maxtext.models import (
     simple_layer,
 )
 
-try:
-  # lineage_adapter is Google-internal and excluded from the open-source export.
-  from maxtext.experimental.lineage import lineage_adapter
-except ImportError:
-  lineage_adapter = None
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from maxtext.utils.sharding import create_sharding
@@ -705,13 +700,6 @@ class NNXDecoder(nnx.Module):
     )
     num_moe = config.num_decoder_layers - config.first_num_dense_layers
     self.moe_layers = self._create_scanned_layers(moe_cls, length=num_moe, metadata_axis_name="moe_layers", rngs=rngs)
-    if config.use_lineage and config.lineage_expert_permutation is not None:
-      # Starts as the identity; each Lineage forward pass overwrites it with the
-      # permutation for the next step (see `lineage_adapter.run_lineage_dsv3`).
-      self.lineage_expert_permutation = moe.ExpertPermutationVar(
-          jnp.tile(jnp.arange(config.num_experts, dtype=jnp.float32), (num_moe, 1)),
-          out_sharding=None,
-      )
 
   def _init_scanned_gemma3(self, decoder_block_classes, rngs, mesh):
     """Initializes scanned Gemma3 layers."""
@@ -1622,7 +1610,7 @@ class NNXDecoder(nnx.Module):
   def _build_linen_params(self, moe_stack: nnx.Module) -> dict:
     """
     Bridges NNX to Linen by creating a dictionary that mimics the exact variable
-    structure expected by `deepseek_batchsplit.fetch_weights` and `lineage_adapter`.
+    structure expected by `deepseek_batchsplit.fetch_weights`.
     """
     state_dict = nnx.state(moe_stack, (nnx.Param, moe.MoEBiasVar))
     moe_block = state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0"))
@@ -1986,28 +1974,6 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 **common_kwargs,
             )
-          elif cfg.use_lineage:
-            if lineage_adapter is None:
-              raise ImportError("use_lineage=True requires the Google-internal lineage_adapter.")
-            expert_permutation_var = getattr(self, "lineage_expert_permutation", None)
-            y, lineage_lb_loss, lineage_bias_updates, next_expert_permutation = lineage_adapter.run_lineage_dsv3(
-                inputs=y,
-                dense_params=self._build_linen_params(self.dense_layers),
-                sparse_params=self._build_linen_params(self.moe_layers),
-                decoder_positions=decoder_positions,
-                mesh=self.mesh,
-                cfg=cfg,
-                decoder_segment_ids=decoder_segment_ids,
-                expert_permutation=(
-                    None if expert_permutation_var is None else expert_permutation_var.value.astype(jnp.int32)
-                ),
-            )
-            if lineage_lb_loss is not None:
-              self.sow(nnx.Intermediate, "moe_lb_loss", lineage_lb_loss)
-            if lineage_bias_updates is not None:
-              self.sow(nnx.Intermediate, "moe_bias_updates", lineage_bias_updates)
-            if expert_permutation_var is not None and next_expert_permutation is not None:
-              expert_permutation_var.value = next_expert_permutation.astype(jnp.float32)
           else:
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,

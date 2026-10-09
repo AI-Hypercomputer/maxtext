@@ -32,12 +32,6 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils.globals import EPS
 
-try:
-  # lineage_adapter is Google-internal and excluded from the open-source export.
-  from maxtext.experimental.lineage import lineage_adapter  # pylint: disable=g-import-not-at-top
-except ImportError:
-  lineage_adapter = None
-
 
 # Custom Variable types for MTP intermediate outputs
 # These will be automatically converted to Linen mutable collections by ToLinen wrapper
@@ -227,13 +221,6 @@ class MultiTokenPredictionLayer(nnx.Module):
         kernel_axes=("norm",),
         rngs=rngs,
     )
-    if cfg.use_lineage and cfg.lineage_expert_permutation is not None:
-      # Starts as the identity; each Lineage forward pass overwrites it with the
-      # permutation for the next step (see `lineage_adapter.run_lineage_mtp_layer`).
-      self.lineage_expert_permutation = moe.ExpertPermutationVar(
-          jnp.arange(cfg.num_experts, dtype=jnp.float32),
-          out_sharding=None,
-      )
 
   @property
   def embedding_norm(self):
@@ -299,28 +286,6 @@ class MultiTokenPredictionLayer(nnx.Module):
     Returns:
         Processed hidden state. Shape [batch, seq_len, hidden_size].
     """
-    if self.config.use_lineage:
-      # Lineage runs everything but `final_norm`, which the block applies.
-      expert_permutation_var = getattr(self, "lineage_expert_permutation", None)
-      out, mtp_lb_loss, mtp_bias_updates, next_expert_permutation = lineage_adapter.run_lineage_mtp_layer(
-          prev_hidden_state=prev_hidden_state,
-          target_token_embedding=target_token_embedding,
-          mtp_params=nnx.state(self, (nnx.Param, moe.MoEBiasVar)),
-          layer_number=self.layer_number,
-          decoder_positions=position_ids,
-          mesh=self.mesh,
-          cfg=self.config,
-          decoder_segment_ids=decoder_segment_ids,
-          expert_permutation=(None if expert_permutation_var is None else expert_permutation_var.value.astype(jnp.int32)),
-      )
-      if mtp_lb_loss is not None:
-        self.sow(nnx.Intermediate, "moe_lb_loss", mtp_lb_loss)
-      if mtp_bias_updates is not None:
-        self.sow(nnx.Intermediate, "moe_bias_updates", mtp_bias_updates)
-      if expert_permutation_var is not None and next_expert_permutation is not None:
-        expert_permutation_var.value = next_expert_permutation.astype(jnp.float32)
-      return out
-
     target_token_embedding = sharding.maybe_shard_with_logical(
         target_token_embedding,
         ("activation_batch", "activation_length", "activation_embed"),
