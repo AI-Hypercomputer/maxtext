@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,9 +15,9 @@
 """A recipe for running a long-running MaxText benchmark using Pathways.
 
 This script is designed for stability and long-duration runs. It configures
-and launches a workload on a GKE cluster using XPK, with a high number of
-restarts enabled. It defines the cluster, Docker images, and model
-configurations for a Pathways-based run.
+and launches a workload on a GKE cluster using Cluster Toolkit (gcluster), with
+a high number of restarts enabled. It defines the cluster, Docker images, and
+model configurations for a Pathways-based run.
 """
 
 import datetime
@@ -28,9 +28,10 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(parent_dir)
 
 import benchmarks.maxtext_trillium_model_configs as model_configs
-import benchmarks.maxtext_xpk_runner as mxr
+import benchmarks.maxtext_ctk_runner as mcr
 import benchmarks.recipes.args_helper as helper
-from benchmarks.xpk_configs import XpkClusterConfig
+from benchmarks.ctk_configs import ClusterConfig
+from benchmarks.recipes import user_configs
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
@@ -45,7 +46,6 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_long_run/"
 
@@ -55,7 +55,7 @@ BENCHMARK_STEPS = 10_000_000
 
 def main():
   # V6e cluster config
-  cluster_config = XpkClusterConfig(
+  cluster_config = ClusterConfig(
       cluster_name=CLUSTER,
       project=PROJECT,
       zone=ZONE,
@@ -63,7 +63,8 @@ def main():
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, USER, xpk_path=XPK_PATH)
+  is_delete = user_configs.USER_CONFIG.delete or ("--delete" in sys.argv)
+  should_continue = helper.handle_cmd_args(cluster_config, is_delete, USER)
 
   if not should_continue:
     return
@@ -76,7 +77,7 @@ def main():
       model_configs.llama3_1_70b_8192_iter_synthetic,
   ]
 
-  pathways_config = mxr.PathwaysConfig(
+  pathways_config = mcr.PathwaysConfig(
       server_image=SERVER_IMAGE,
       proxy_server_image=PROXY_IMAGE,
       runner_image=RUNNER,
@@ -90,8 +91,8 @@ def main():
   )
   num_slices_list = [2]
 
-  xpk_workload_cmds = []
-  xpk_workload_names = []
+  workload_cmds = []
+  workload_names = []
 
   for model in model_list:
     # Run workloads on the below clusters
@@ -108,7 +109,7 @@ def main():
 
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
-        wl_config = mxr.WorkloadConfig(
+        wl_config = mcr.WorkloadConfig(
             model=model,
             num_slices=num_slices,
             device_type=cluster_config.device_type,
@@ -118,24 +119,23 @@ def main():
             libtpu_nightly_version="",
             base_docker_image=None,
             pathways_config=pathways_config,
-            xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
             priority="medium",
         )
-        command, name = mxr.generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
+        command, name = mcr.generate_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
         print(f"Name of the workload is: {name} \n")
-        xpk_workload_names.append(name)
+        workload_names.append(name)
 
-        print(f"XPK command to be used is: {command} \n")
-        xpk_workload_cmds.append(command)
+        print(f"gcluster command to be used is: {command} \n")
+        workload_cmds.append(command)
 
-  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
+  for workload_name, workload_cmd in zip(workload_names, workload_cmds):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command:" f" {xpk_workload_cmd}")
-    return_code = mxr.run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
+    print(f"[{timestamp}] Running workload: {workload_name} with command: {workload_cmd}")
+    return_code = mcr.run_command_with_updates(workload_cmd, workload_name)
     if return_code != 0:
-      print(f"Unable to run xpk workload: {xpk_workload_name}")
+      print(f"Unable to run gcluster workload: {workload_name}")
 
 
 if __name__ == "__main__":

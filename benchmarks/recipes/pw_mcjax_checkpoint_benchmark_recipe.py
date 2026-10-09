@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,11 +22,13 @@
 import datetime
 import dataclasses
 import os
+import sys
 
-import benchmarks.maxtext_xpk_runner as mxr
+import benchmarks.maxtext_ctk_runner as mcr
 from benchmarks import maxtext_trillium_model_configs as model_configs
 from benchmarks.recipes import args_helper as helper
-from benchmarks.xpk_configs import XpkClusterConfig
+from benchmarks.recipes import user_configs
+from benchmarks.ctk_configs import ClusterConfig
 
 PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
 SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
@@ -40,7 +42,6 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")  # We're running this script from the maxtext directory
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/pw_mcjax_benchmarking/"
 # This needs to be set to True to test restore and if you want to restore from
@@ -67,26 +68,25 @@ RESUME_CHECKPOINT_NAMES = {
 }
 
 
-def _get_xpk_commands(
+def _get_workload_commands(
     models,
     cluster_config,
     pathways_config,
     num_steps=BENCHMARK_STEPS,
 ):
-  """Generates xpk commands for the given models and configurations.
+  """Generates Cluster Toolkit (gcluster) commands for the given models and configurations.
 
   Args:
     models: A dictionary of model lists, keyed by infrastructure type.
     cluster_config: The cluster configuration.
-    num_slices_list: A list of the number of slices to use for each workload.
     pathways_config: The pathways configuration.
     num_steps: Number of steps for the workload.
 
   Returns:
-    A list of tuples, where each tuple contains the xpk workload name, the
-    xpk command, and the workload config.
+    A list of tuples, where each tuple contains the workload name, the
+    gcluster command, and the workload config.
   """
-  xpk_workloads = []
+  workloads = []
 
   current_time = datetime.datetime.now()
   timestamp_str = current_time.strftime("%Y%m%d_%H%M%S")
@@ -111,7 +111,7 @@ def _get_xpk_commands(
             base_output_directory = RESUME_CHECKPOINT_NAMES[infra][num_slices]["base_output_directory"]
             num_steps = RESUME_CHECKPOINT_NAMES[infra][num_slices]["num_steps"]
 
-        wl_config = mxr.WorkloadConfig(
+        wl_config = mcr.WorkloadConfig(
             model=model,
             num_slices=num_slices,
             device_type=config.device_type,
@@ -121,27 +121,26 @@ def _get_xpk_commands(
             libtpu_nightly_version="",
             base_docker_image=RUNNER if infra == "mcjax" else None,
             pathways_config=pathways_config if infra == "pathways" else None,
-            xpk_path=XPK_PATH,
             num_steps=num_steps,
             priority="medium",
             run_name=run_name,
         )
-        command, name = mxr.generate_xpk_workload_cmd(cluster_config=config, wl_config=wl_config, workload_name=run_name)
+        command, name = mcr.generate_workload_cmd(cluster_config=config, wl_config=wl_config, workload_name=run_name)
 
         print(f"Name of the workload is: {name} \n")
-        print(f"XPK command to be used is: {command} \n")
-        xpk_workloads.append((name, command, wl_config))
+        print(f"gcluster command to be used is: {command} \n")
+        workloads.append((name, command, wl_config))
 
-  return xpk_workloads
+  return workloads
 
 
-def _run_workloads_async(xpk_workloads, cluster_config, run_type="Initial"):
-  """Runs the given xpk workloads asynchronously and yields workload names as they complete.
+def _run_workloads_async(workloads, cluster_config, run_type="Initial"):
+  """Runs the given Cluster Toolkit workloads asynchronously and yields workload names as they complete.
 
   Args:
-    xpk_workloads: A list of tuples, each containing workload name, command and
+    workloads: A list of tuples, each containing workload name, command and
       wl_config.
-    cluster_config: The XPK cluster configuration.
+    cluster_config: The ClusterConfig configuration.
     run_type: String to indicate if it's "Initial" or "Restore" run for logging.
 
   Yields:
@@ -152,14 +151,14 @@ def _run_workloads_async(xpk_workloads, cluster_config, run_type="Initial"):
 
   workload_configs_dict = {}  # Store wl_config by workload_name
   workload_names = []
-  for workload_name, workload_cmd, wl_config in xpk_workloads:
+  for workload_name, workload_cmd, wl_config in workloads:
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Launching {run_type} workload: {workload_name} with" f" command: {workload_cmd}")
-    return_code = mxr.run_command_with_updates(workload_cmd, workload_name)
+    print(f"[{timestamp}] Launching {run_type} workload: {workload_name} with command: {workload_cmd}")
+    return_code = mcr.run_command_with_updates(workload_cmd, workload_name)
 
     if return_code != 0:
       print(
-          f"Warning: Unable to start {run_type} xpk workload:"
+          f"Warning: Unable to start {run_type} gcluster workload:"
           f" {workload_name}. Creation command failed, but continuing to"
           " launch others."
       )
@@ -169,7 +168,7 @@ def _run_workloads_async(xpk_workloads, cluster_config, run_type="Initial"):
 
   # Wait for completion asynchronously and yield names and return codes as they
   # complete
-  completed_workloads = mxr.wait_for_xpk_workloads_completion_async(cluster_config, workload_names, xpk_path=XPK_PATH)
+  completed_workloads = mcr.wait_for_workloads_completion_async(cluster_config, workload_names)
 
   for completed_workload_name, return_code in completed_workloads:
     yield completed_workload_name, return_code, workload_configs_dict[completed_workload_name]
@@ -177,7 +176,7 @@ def _run_workloads_async(xpk_workloads, cluster_config, run_type="Initial"):
 
 def main() -> int:
   # V6e cluster config
-  cluster_config = XpkClusterConfig(
+  cluster_config = ClusterConfig(
       cluster_name=CLUSTER,
       project=PROJECT,
       zone=ZONE,
@@ -185,7 +184,8 @@ def main() -> int:
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(cluster_config, helper.DELETE, os.environ["USER"], xpk_path=XPK_PATH)
+  is_delete = user_configs.USER_CONFIG.delete or ("--delete" in sys.argv)
+  should_continue = helper.handle_cmd_args(cluster_config, is_delete, os.environ["USER"])
 
   if not should_continue:
     return 0
@@ -208,7 +208,7 @@ def main() -> int:
           ],
       },
   }
-  pathways_config = mxr.PathwaysConfig(
+  pathways_config = mcr.PathwaysConfig(
       server_image=SERVER_IMAGE,
       proxy_server_image=PROXY_IMAGE,
       runner_image=RUNNER,
@@ -220,7 +220,7 @@ def main() -> int:
 
   # --- Initial Run for Benchmark Steps ---
   print("\n--- Starting Initial Benchmark Run ---")
-  xpk_workloads_initial = _get_xpk_commands(
+  workloads_initial = _get_workload_commands(
       models,
       cluster_config,
       pathways_config,
@@ -232,7 +232,7 @@ def main() -> int:
 
   # Iterate through completed workloads as they yield
   for completed_workload_name, return_code, wl_config in _run_workloads_async(
-      xpk_workloads_initial, cluster_config, run_type="Initial"
+      workloads_initial, cluster_config, run_type="Initial"
   ):
     print(f"\n--- Initial Workload '{completed_workload_name}' COMPLETED with" f" code: {return_code}. ---\n")
     if return_code == 0:
@@ -246,7 +246,7 @@ def main() -> int:
       print(f"\n--- Starting Restore Run for '{completed_workload_name}' ---")
 
       # First delete the workload so we can restore it from scratch.
-      helper.handle_delete_specific_workload(cluster_config, completed_workload_name, xpk_path=XPK_PATH)
+      helper.handle_delete_specific_workload(cluster_config, completed_workload_name)
 
       original_wl_config = initial_workload_configs[completed_workload_name]
 
@@ -256,7 +256,7 @@ def main() -> int:
           num_steps=original_wl_config.num_steps + RESTORE_BENCHMARK_STEPS,
       )
 
-      restore_command, _ = mxr.generate_xpk_workload_cmd(
+      restore_command, _ = mcr.generate_workload_cmd(
           cluster_config=cluster_config,
           wl_config=restore_wl_config,
           workload_name=completed_workload_name,
@@ -264,7 +264,7 @@ def main() -> int:
       print(f"Restore command for '{completed_workload_name}': {restore_command}")
 
       print(f"Launching restore workload: {completed_workload_name}")
-      restore_return_code = mxr.run_command_with_updates(restore_command, f"Restore {completed_workload_name}")
+      restore_return_code = mcr.run_command_with_updates(restore_command, f"Restore {completed_workload_name}")
       if restore_return_code == 0:
         print(f"\n--- Restore Workload for '{completed_workload_name}' launched" " successfully. ---")
       else:

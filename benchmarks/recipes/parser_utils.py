@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -58,7 +58,21 @@ def add_arguments(parser: argparse.ArgumentParser):
       help="Name of the TPU cluster.",
   )
   parser.add_argument("--project", type=str, default="cloud-tpu-cluster", help="GCP project ID.")
-  parser.add_argument("--zone", type=str, default="us-south1-a", help="GCP zone for the cluster.")
+  parser.add_argument(
+      "--zone",
+      type=str,
+      default="us-south1-a",
+      help="GCP zone for the cluster (e.g., us-south1-a). For regional GKE clusters, pass the region via --location.",
+  )
+  parser.add_argument(
+      "--location",
+      type=str,
+      default=None,
+      help=(
+          "GCP location (zone or region) for the cluster (e.g., us-central2 for regional clusters or us-south1-a for"
+          " zonal clusters)."
+      ),
+  )
   parser.add_argument(
       "--device_type",
       type=str,
@@ -72,19 +86,25 @@ def add_arguments(parser: argparse.ArgumentParser):
       default="medium",
       help="Priority of the job.",
   )
+  parser.add_argument(
+      "--base_output_directory",
+      type=str,
+      default=None,
+      help="GCS bucket path for benchmark outputs.",
+  )
 
   # Image Configuration
   parser.add_argument(
       "--server_image",
       type=str,
       default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server",
-      help="Docker image for the proxy server.",
+      help="Docker image for the server.",
   )
   parser.add_argument(
       "--proxy_image",
       type=str,
-      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_serve",
-      help="Docker image for the server.",
+      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
+      help="Docker image for the proxy server.",
   )
   parser.add_argument(
       "--runner",
@@ -155,12 +175,17 @@ def add_arguments(parser: argparse.ArgumentParser):
       "--skip-validation",
       action="store_true",
       default=False,
-      help="Skip xpk health checks and system dependency validation during workload execution",
+      help="Skip gcluster prerequisite and dependency validation during workload execution",
   )
 
   # Other configurations
-  parser.add_argument("--xpk_path", type=str, default="~/xpk", help="Path to xpk.")
+  parser.add_argument(
+      "--xpk_path",
+      type=str,
+      default=None,
+      help="Deprecated (no-op): retained for backward compatibility.",
+  )
   parser.add_argument("--delete", action="store_true", help="Delete the cluster workload")
   parser.add_argument("--max_restarts", type=int, default=0, help="Maximum number of restarts")
   parser.add_argument("--temp_key", type=str, default=None, help="Temporary placeholder code")
-  parser.add_argument("--workload_id", type=str, default=None, help="Optional custom name for the XPK workload.")
+  parser.add_argument("--workload_id", type=str, default=None, help="Optional custom name for the workload.")

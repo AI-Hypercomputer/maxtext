@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Utilities for generating and running XPK workloads."""
+"""Utilities for generating and running Cluster Toolkit (gcluster) workloads."""
 
 import logging
 
-from benchmarks import maxtext_xpk_runner as mxr
+from benchmarks import maxtext_ctk_runner as mcr
 from benchmarks.benchmark_utils import Framework
 from benchmarks.disruption_management.disruption_manager import construct_disruption_configs
 
@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 def _create_workload_config(
     framework: str, model, num_slices: int, user_config, num_steps: int, priority: str, **kwargs
-) -> mxr.WorkloadConfig:
+) -> mcr.WorkloadConfig:
   """Creates a single, unified WorkloadConfig object."""
   config_args = {
       "model": model,
@@ -41,7 +41,6 @@ def _create_workload_config(
       "libtpu_nightly_version": "",
       "base_docker_image": (user_config.runner if Framework(framework) == Framework.MCJAX else None),
       "pathways_config": (user_config.pathways_config if Framework(framework) == Framework.PATHWAYS else None),
-      "xpk_path": user_config.xpk_path,
       "run_name": user_config.workload_id,
       "num_steps": num_steps,
       "priority": priority,
@@ -52,7 +51,7 @@ def _create_workload_config(
   }
   # Add any extra arguments, like disruption_configs, if they exist
   config_args.update(kwargs)
-  return mxr.WorkloadConfig(**config_args)
+  return mcr.WorkloadConfig(**config_args)
 
 
 def _generate_workloads(
@@ -84,7 +83,7 @@ def generate_and_run_workloads(
     user_config, num_slices_list, num_steps, priority="medium", disruption_method="", disruptions=None
 ):
   """
-  Generates and executes XPK workloads, with or without disruptions.
+  Generates and executes Cluster Toolkit (gcluster) workloads, with or without disruptions.
   """
   if user_config.bq_enable and (not user_config.bq_db_project or not user_config.bq_db_dataset):
     logging.error("Validation FAILED: BigQuery is enabled, but 'bq_db_project' or 'bq_db_dataset' is missing.")
@@ -105,7 +104,7 @@ def generate_and_run_workloads(
     logging.warning("No workloads were generated. Exiting.")
     return 0
 
-  disruption_manager = mxr.xpk_benchmark_runner(
+  disruption_manager = mcr.ctk_benchmark_runner(
       cluster_config=user_config.cluster_config,
       workload_configs=workload_configs,
       user=user_config.user,

@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,12 +14,14 @@
 
 """A recipe for running an elastic training benchmark with disruptions.
 
-This script configures and launches a MaxText workload on a GKE cluster using XPK,
-and then introduces disruptions (e.g., killing pods) to test the resilience
-and recovery capabilities of the training job. It can be configured to run
-with both Pathways and McJAX to compare their elastic training behavior.
+This script configures and launches a MaxText workload on a GKE cluster using
+Cluster Toolkit (gcluster), and then introduces disruptions (e.g., killing pods)
+to test the resilience and recovery capabilities of the training job. It can be
+configured to run with both Pathways and McJAX to compare their elastic training
+behavior.
 """
 
+import dataclasses
 import os
 import sys
 
@@ -31,7 +33,6 @@ from benchmarks.recipes import args_helper as helper
 from benchmarks.recipes import user_configs
 from benchmarks.recipes.runner_utils import generate_and_run_workloads
 
-user_configs.USER_CONFIG.max_restarts = 10
 COMPARE_WITH_MCJAX = True
 
 DISRUPTION_METHOD = DisruptionMethod.SIGILL
@@ -41,21 +42,20 @@ DISRUPTIONS = {
 }
 
 
-def main() -> None:
+def main() -> int:
   """Main function to run the elastic training disruption test."""
-  user_configs.USER_CONFIG.headless = False
-  should_continue = helper.handle_cmd_args(
-      user_configs.USER_CONFIG.cluster_config, user_configs.USER_CONFIG.delete, user_configs.USER_CONFIG.user
-  )
+  user_config = dataclasses.replace(user_configs.USER_CONFIG, max_restarts=10, headless=False)
+  is_delete = user_config.delete or ("--delete" in sys.argv)
+  should_continue = helper.handle_cmd_args(user_config.cluster_config, is_delete, user_config.user)
 
   if not should_continue:
     return 0
 
   return_code = generate_and_run_workloads(
-      user_configs.USER_CONFIG,
-      user_configs.USER_CONFIG.num_slices_list,
-      user_configs.USER_CONFIG.benchmark_steps,
-      user_configs.USER_CONFIG.priority,
+      user_config,
+      user_config.num_slices_list,
+      user_config.benchmark_steps,
+      user_config.priority,
       DISRUPTION_METHOD,
       DISRUPTIONS,
   )

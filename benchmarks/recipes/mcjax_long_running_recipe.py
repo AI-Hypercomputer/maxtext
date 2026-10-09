@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,18 +15,19 @@
 """A recipe for running a long-running MaxText benchmark using McJAX.
 
 This script is designed for stability and long-duration runs. It configures
-and launches a workload on a GKE cluster using XPK, with a high number of
-restarts enabled. It defines the cluster, Docker image, and model
-configurations for a McJAX-based run.
+and launches a workload on a GKE cluster using Cluster Toolkit (gcluster), with
+a high number of restarts enabled. It defines the cluster, Docker image, and
+model configurations for a McJAX-based run.
 """
 
 import datetime
 import os
+import sys
 
 import benchmarks.recipes.args_helper as helper
 import benchmarks.maxtext_trillium_model_configs as model_configs
-import benchmarks.maxtext_xpk_runner as mxr
-from benchmarks.xpk_configs import XpkClusterConfig
+import benchmarks.maxtext_ctk_runner as mcr
+from benchmarks.ctk_configs import ClusterConfig
 from benchmarks.recipes import user_configs
 
 # Cluster Params
@@ -38,7 +39,6 @@ COUNTRY = "us"
 DEVICE_TYPE = "v6e-256"
 
 # Other parameters (MUST BE SET BY USER)
-XPK_PATH = os.path.join("~", "xpk")
 USER = os.environ["USER"]
 BASE_OUTPUT_DIRECTORY = f"gs://{USER}-{PROJECT}-{COUNTRY}/mcjax_long_run/"
 # Generate your own runner image from MaxText repo.
@@ -50,7 +50,7 @@ BENCHMARK_STEPS = 10_000_000
 
 def main() -> None:
   # V6e cluster config
-  cluster_config = XpkClusterConfig(
+  cluster_config = ClusterConfig(
       cluster_name=CLUSTER,
       project=PROJECT,
       zone=ZONE,
@@ -58,7 +58,8 @@ def main() -> None:
   )
 
   # Handle command line arguments using args_helper
-  should_continue = helper.handle_cmd_args(cluster_config, user_configs.USER_CONFIG.delete, user_configs.USER_CONFIG.user)
+  is_delete = user_configs.USER_CONFIG.delete or ("--delete" in sys.argv)
+  should_continue = helper.handle_cmd_args(cluster_config, is_delete, USER)
 
   if not should_continue:
     return
@@ -71,8 +72,8 @@ def main() -> None:
   ]
   num_slices_list = [2]
 
-  xpk_workload_cmds = []
-  xpk_workload_names = []
+  workload_cmds = []
+  workload_names = []
 
   for model in model_list:
     # Run workloads on the below clusters
@@ -88,33 +89,32 @@ def main() -> None:
 
       # Run workloads in the following slice configurations
       for num_slices in num_slices_list:
-        wl_config = mxr.WorkloadConfig(
+        wl_config = mcr.WorkloadConfig(
             model=model,
             num_slices=num_slices,
             device_type=cluster_config.device_type,
             base_output_directory=BASE_OUTPUT_DIRECTORY,
             max_restarts=MAX_RESTARTS,
-            libtpu_type=mxr.LibTpuType.MAXTEXT,
+            libtpu_type=mcr.LibTpuType.MAXTEXT,
             libtpu_nightly_version="",
             base_docker_image=RUNNER,
-            xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
             priority="medium",
         )
-        command, name = mxr.generate_xpk_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
+        command, name = mcr.generate_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
         print(f"Name of the workload is: {name} \n")
-        xpk_workload_names.append(name)
+        workload_names.append(name)
 
-        print(f"XPK command to be used is: {command} \n")
-        xpk_workload_cmds.append(command)
+        print(f"gcluster command to be used is: {command} \n")
+        workload_cmds.append(command)
 
-  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
+  for workload_name, workload_cmd in zip(workload_names, workload_cmds):
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] Running workload: {xpk_workload_name} with command:" f" {xpk_workload_cmd}")
-    return_code = mxr.run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
+    print(f"[{timestamp}] Running workload: {workload_name} with command: {workload_cmd}")
+    return_code = mcr.run_command_with_updates(workload_cmd, workload_name)
     if return_code != 0:
-      print(f"Unable to run xpk workload: {xpk_workload_name}")
+      print(f"Unable to run gcluster workload: {workload_name}")
 
 
 if __name__ == "__main__":
