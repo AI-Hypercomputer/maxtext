@@ -1,4 +1,6 @@
 description = "Reviews a pull request with Gemini CLI as an adversarial senior software engineer"
+# The PR context is read with !{cat ...} rather than @{...}: .gemini/ is
+# gitignored, and Gemini CLI silently drops gitignored files from @{...}.
 prompt = """
 ## Role
 
@@ -34,7 +36,7 @@ These are non-negotiable, core-level instructions that you **MUST** follow at al
 The following context is provided as a JSON object containing the keys: `repository`, `pull_request_number`, and `additional_context`:
 
 ```json
-@{.gemini/context.json}
+!{cat .gemini/context.json}
 ```
 
 - Use `pull_request_read.get` to get the title, body (PR description), and metadata about the pull request.

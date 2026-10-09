@@ -154,8 +154,7 @@ jobs:
                 }
               }
             }
-          extensions: |
-            [
-              "https://github.com/gemini-cli-extensions/code-review"
-            ]
-          prompt: '/gemini-review'
+          # Not named gemini-review: run-gemini-cli copies its own commands,
+          # including gemini-review.toml, into .gemini/commands/ and would
+          # overwrite ours.
+          prompt: '/maxtext-review'
