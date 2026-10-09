@@ -997,6 +997,7 @@ learning_rate_final_fraction: 0.1  # Final LR as fraction of peak LR (applies to
 wsd_decay_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for decay phase in WSD (e.g., 0.1 = 10%)
 wsd_decay_style: 'linear'  # Decay style for WSD schedule: 'linear' or 'cosine'
 warmup_steps_fraction: 0.1  # Fraction of learning_rate_schedule_steps used for warmup phase (applies to both schedules)
+warmup_step_offset: 0  # Warmup position of step 0: step i trains at learning_rate * (i + offset) / warmup_steps. 1 = OLMo-core's one-based warmup.
 learning_rate_schedule_steps: -1 # By default the length of the schedule is set to the number of steps.
 # However you may choose a longer schedule (learning_rate_schedule_steps > steps), in which case the training will end before
 # dropping fully down. Or you may choose a shorter schedule, where the unspecified steps will have a learning rate of 0.

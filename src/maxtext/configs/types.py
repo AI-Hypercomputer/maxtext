@@ -2659,6 +2659,14 @@ class Optimizer(BaseModel):
       description="The decay style for WSD schedule ('linear' or 'cosine').",
   )
   warmup_steps_fraction: float = Field(0.1, ge=0.0, le=1.0, description="Fraction of total steps for LR warmup.")
+  warmup_step_offset: int = Field(
+      0,
+      ge=0,
+      description=(
+          "Warmup position of the first training step: step i trains at learning_rate * (i + offset) / warmup_steps. "
+          "0 is MaxText's warmup from zero; 1 matches trainers that count steps from one, such as OLMo-core."
+      ),
+  )
   learning_rate_schedule_steps: int = Field(
       -1,
       ge=-1,

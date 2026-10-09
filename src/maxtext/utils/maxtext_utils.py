@@ -2223,8 +2223,14 @@ def create_learning_rate_schedule(config):
   pieces = []
   boundaries = []
 
+  # With an offset, step i trains at lr * (i + offset) / warmup_steps, so the first step is not wasted at zero and the
+  # schedule reaches lr at step warmup_steps - offset, as a trainer that counts steps from one does (OLMo-core).
+  offset = min(getattr(config, "warmup_step_offset", 0), warmup_steps)
+  warmup_steps -= offset
   if warmup_steps > 0:
-    warmup_schedule = optax.linear_schedule(init_value=0.0, end_value=lr, transition_steps=warmup_steps)
+    warmup_schedule = optax.linear_schedule(
+        init_value=lr * offset / (warmup_steps + offset), end_value=lr, transition_steps=warmup_steps
+    )
     pieces.append(warmup_schedule)
     boundaries.append(warmup_steps)
 

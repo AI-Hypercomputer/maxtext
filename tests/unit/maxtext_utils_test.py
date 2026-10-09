@@ -805,6 +805,30 @@ class TestCalculateBytesFromPytree(unittest.TestCase):
 class TestLearningRateSchedules(unittest.TestCase):
   """Test suite for learning rate schedule functions."""
 
+  def test_warmup_step_offset_counts_steps_from_one(self):
+    """warmup_step_offset=1 gives step i the rate of a one-based warmup's step i + 1, as OLMo-core trains.
+
+    Without it step 0 trains at zero and every warmup step lags the one-based schedule by one increment.
+    The peak is reached one step earlier and the constant tail (final fraction 1) is unchanged.
+    """
+    learning_rate, warmup_steps = 1.1e-3, 2000
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        learning_rate=learning_rate,
+        learning_rate_schedule_steps=1_000_000,
+        steps=1000,
+        warmup_steps_fraction=warmup_steps / 1_000_000,
+        lr_schedule_type="cosine",
+        learning_rate_final_fraction=1.0,
+        warmup_step_offset=1,
+    )
+    schedule_fn = maxtext_utils.create_learning_rate_schedule(config)
+    for step in (0, 1, 2, 999, 1998, 1999):
+      expected = learning_rate * min(step + 1, warmup_steps) / warmup_steps
+      self.assertAlmostEqual(float(schedule_fn(step)), expected, delta=1e-3 * expected, msg=f"step {step}")  # fp32 schedule
+    self.assertAlmostEqual(float(schedule_fn(5000)), learning_rate, delta=1e-9)
+
   def test_cosine_schedule(self):
     """Tests cosine learning rate schedule."""
     learning_rate = 1e-3
