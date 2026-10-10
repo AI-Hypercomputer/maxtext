@@ -17,6 +17,7 @@
 # pylint: disable=no-name-in-module
 
 import functools
+import os
 from typing import Any, cast
 
 from flax import nnx
@@ -154,6 +155,9 @@ class Qwen3_5DecoderLayer(nnx.Module):
         "activation_mlp",
     )
 
+    self.tpu_attn_moe_overlap = os.environ.get("TPU_ATTN_MOE_OVERLAP", "0").strip().lower() in ("1", "true", "yes", "on")
+    self.tpu_attn_moe_overlap_min_tokens = int(os.environ.get("TPU_ATTN_MOE_OVERLAP_MIN_TOKENS", "1024") or "1024")
+
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
     # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
     if cfg.shard_mode == ShardMode.EXPLICIT:
@@ -161,6 +165,18 @@ class Qwen3_5DecoderLayer(nnx.Module):
       self.mlp_intermediate_sharding = create_sharding(
           mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules()
       )
+      if self.tpu_attn_moe_overlap:
+        self.overlap_activation_axis_names = (
+            "activation_batch",
+            "activation_norm_length_moe",
+            "activation_embed",
+        )
+        self.overlap_out_sharding = create_sharding(
+            mesh, self.overlap_activation_axis_names, rules=get_logical_axis_rules()
+        )
+      else:
+        self.overlap_activation_axis_names = None
+        self.overlap_out_sharding = None
       self._maybe_shard_with_logical = functools.partial(
           maybe_shard_with_logical,
           mesh=mesh,
@@ -171,6 +187,16 @@ class Qwen3_5DecoderLayer(nnx.Module):
     else:
       self.out_sharding = None
       self.mlp_intermediate_sharding = None
+      if self.tpu_attn_moe_overlap:
+        self.overlap_activation_axis_names = (
+            "activation_batch",
+            "activation_norm_length_moe",
+            "activation_embed",
+        )
+        self.overlap_out_sharding = None
+      else:
+        self.overlap_activation_axis_names = None
+        self.overlap_out_sharding = None
       self._maybe_shard_with_logical = lambda inputs, *args, **kwargs: inputs
 
     # First LayerNorm, applied before the attention block.
@@ -279,9 +305,18 @@ class Qwen3_5DecoderLayer(nnx.Module):
     # Prepare for the MoE block by capturing the new residual
     residual = hidden_states
 
-    # Second LayerNorm, applied before the MoE block.
-    hidden_states = self.post_attention_layernorm(hidden_states, out_sharding=self.out_sharding)
-    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    num_tokens = hidden_states.shape[0] * hidden_states.shape[1] if hidden_states.ndim >= 2 else 0
+    if self.tpu_attn_moe_overlap and num_tokens >= self.tpu_attn_moe_overlap_min_tokens:
+      # TPU_ATTN_MOE_OVERLAP: shard activations across tensor/model axis before post-attention
+      # layernorm to fuse reduce-scatter into attention, run layernorm locally, and then
+      # all-gather into MoE, enabling SparseCore async all-gather offload.
+      hidden_states_sharded = self._maybe_shard_with_logical(hidden_states, self.overlap_activation_axis_names)
+      normed_sharded = self.post_attention_layernorm(hidden_states_sharded, out_sharding=self.overlap_out_sharding)
+      hidden_states = self._maybe_shard_with_logical(normed_sharded, self.activation_axis_names)
+    else:
+      # Second LayerNorm, applied before the MoE block.
+      hidden_states = self.post_attention_layernorm(hidden_states, out_sharding=self.out_sharding)
+      hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # Instantiate and call our `Qwen3_5SparseMoEBlock`.
     mlp_output, load_balance_loss = self.mlp(
