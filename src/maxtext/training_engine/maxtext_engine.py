@@ -470,6 +470,17 @@ def _to_aval(value: Any) -> Any:
   return jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=getattr(value, "sharding", None))
 
 
+@dataclasses.dataclass(frozen=True)
+class PreparedFwdBwdInput:
+  """A micro-batch already mapped to loss inputs and placed on the mesh.
+
+  Made by `MaxTextTrainingEngine.prepare_fwd_bwd_input`; `fwd_bwd` takes it in place of
+  the payload it came from.
+  """
+
+  batch: Any
+
+
 def _row_and_mask(payload: abstract_engine.RLTrainerPayload) -> tuple[jax.Array, jax.Array]:
   """Returns the `[batch, seq]` model row and its mask, prompt part then completion part.
 
@@ -2404,17 +2415,41 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     cast = iter(self._cast_uncast_grads([g for g, is_uncast in zip(leaves, uncast) if is_uncast]))
     return treedef.unflatten([next(cast) if is_uncast else g for g, is_uncast in zip(leaves, uncast)])
 
-  @_profiled_step("fwd_bwd", control_profile=True)
-  def fwd_bwd(self, payload: abstract_engine.TrainerPayload, **kwargs: Any) -> None:
-    """Executes a micro-batch forward-backward pass and accumulates gradients.
+  def prepare_fwd_bwd_input(self, payload: abstract_engine.TrainerPayload) -> PreparedFwdBwdInput:
+    """Maps a micro-batch to loss inputs and places them on the mesh, ahead of its `fwd_bwd`.
+
+    For a caller that receives the micro-batch early (Tunix's `TrainerWorker.stage_fwd_bwd`,
+    while the device still computes the previous step's last micro-batch and update): the
+    input mapping and the host-to-device copy run here, and `fwd_bwd(prepared)` later
+    dispatches without moving data. The traced inputs go to exactly the shardings `fwd_bwd`
+    compiles them onto (`_batch_data_shardings`), with the closed-over half untouched, so the
+    kernel, its inputs and the result are those of `fwd_bwd(payload)`. Holds one micro-batch
+    of inputs in device memory until that `fwd_bwd`.
 
     Args:
       payload: Packed micro-batch training input.
+
+    Returns:
+      The input to pass to `fwd_bwd` instead of `payload`.
+    """
+    batch = self._prepare_batch(payload)
+    if self._mesh is not None and isinstance(batch, dict):
+      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
+      dynamic_batch = jax.device_put(dynamic_batch, self._batch_data_shardings(dynamic_batch))
+      batch = {**dynamic_batch, **static_batch}
+    return PreparedFwdBwdInput(batch=batch)
+
+  @_profiled_step("fwd_bwd", control_profile=True)
+  def fwd_bwd(self, payload: abstract_engine.TrainerPayload | PreparedFwdBwdInput, **kwargs: Any) -> None:
+    """Executes a micro-batch forward-backward pass and accumulates gradients.
+
+    Args:
+      payload: Packed micro-batch training input, or what `prepare_fwd_bwd_input` made of it.
       **kwargs: Implementation-specific options. `apply_optimizer` (bool), which Tunix passes as the
         orchestrator's flag for the step's final micro-batch, selects the final micro-batch's dropless program
         under `retry_dropless_final_micro_batch`; everything else is ignored.
     """
-    batch = self._prepare_batch(payload)
+    batch = payload.batch if isinstance(payload, PreparedFwdBwdInput) else self._prepare_batch(payload)
     apply_optimizer = kwargs.get("apply_optimizer")
     final = False
     if self._dropless_replay and self._final_dropless:
