@@ -217,6 +217,42 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
   enable_single_controller=True"
 ```
 
+## Profiling and ML Diagnostics
+
+The RL trainer profiles through tunix's targeted RL profiler, which captures one
+trace per role: `actor` (`update_actor`) and `rollout` (`generate`). The window
+is counted in **role invocations**, not training steps (`update_actor` runs once
+per micro-batch; eval actor passes share the actor counter):
+
+```bash
+profiler=xplane \
+rl.profiler_start_invocation=2 \
+rl.profiler_num_invocations=1
+```
+
+The step-window flags used by pretraining and SFT (`skip_first_n_steps_for_profiler`,
+`profiler_steps`, `profile_periodically_period`, `upload_all_profiler_results`, ...)
+are **not accepted** by `train_rl`; passing one fails at config time with the list
+of valid fields.
+
+- Without ML Diagnostics, traces are written to
+  `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/tensorboard/plugins/profile/<role>_invocation_<n>/`.
+- With `managed_mldiagnostics=true managed_mldiagnostics_on_demand_profiling=false`,
+  MaxText creates one ML Diagnostics run (trainer config plus `sampler.<key>` for
+  sampler-side differences), streams every scalar to **both** ML Diagnostics and
+  TensorBoard, and uploads traces under
+  `${BASE_OUTPUT_DIRECTORY}/${RUN_NAME}/managed-mldiagnostics/<run id>/plugins/profile/`.
+  The `<run id>` is assigned by the SDK (on GKE it is derived from
+  `GKE_DIAGON_IDENTIFIER`, not from `run_name`); the pod log line
+  `xprof initialized. Profiling output path set to: ...` prints it. The run only
+  appears in the console when the launcher sets `GKE_DIAGON_IDENTIFIER` and
+  `GKE_DIAGON_METADATA`.
+- **Pathways traces cover worker 0 only by default.** On a disaggregated topology
+  the vLLM sampler runs on another worker, so its TPU activity is missing from the
+  `rollout` trace unless the launch command exports
+  `PATHWAYS_MAX_NUM_HOSTS` (for example `PATHWAYS_MAX_NUM_HOSTS=1000` to trace
+  every worker) before `python3 -m maxtext.trainers.post_train.rl.train_rl`.
+
 ## Monitor and clean up
 
 ```bash

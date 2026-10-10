@@ -70,6 +70,19 @@ rl:
   # If null, the entire model is resharded at once.
   reshard_chunk_size: null
 
+  # ====== Targeted profiling (profiler=xplane) ======
+  # One trace per RL role (`actor` = update_actor, `rollout` = generate), written as
+  # `<role>_invocation_<n>`. The window counts role invocations, not training steps:
+  # update_actor runs once per micro-batch and eval actor passes share the actor counter.
+  # Traces go to tensorboard_dir, or under managed_mldiagnostics_dir/<run id> when
+  # managed_mldiagnostics=true (set managed_mldiagnostics_on_demand_profiling=false then).
+  # On Pathways only worker 0 is traced unless the launcher exports PATHWAYS_MAX_NUM_HOSTS
+  # (e.g. 1000 to include the sampler worker on a disaggregated topology).
+  profiler_start_invocation: 2
+  profiler_num_invocations: 1
+  # Seconds to wait for the background trace stop/upload before the next trace or shutdown.
+  profiler_timeout_secs: 60.0
+
 # ====== Models ======
 # for MaxText
 # Model and Tokenizer Configuration
