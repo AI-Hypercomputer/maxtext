@@ -655,6 +655,8 @@ class RoutedMoE(nnx.Module):
 
     self.config = config
     self.force_dropless = force_dropless
+    # Set by the training engine's dropless replay program: its force_dropless token chunks run as a lax.scan.
+    self.dropless_scan_chunks = False
     self.num_experts = num_experts
     self.num_experts_per_tok = num_experts_per_tok
     self.mesh = mesh
@@ -3105,8 +3107,53 @@ class RoutedMoE(nnx.Module):
         has_overflow = jnp.any(jnp.stack(has_overflows))
         return output, lb_loss, bias_updates, has_overflow
 
+      def _scanned_dropless_chunks():
+        """The dropless chunks as a `lax.scan`, each chunk rematerialized on its own (the dropless replay program).
+
+        A dropless chunk's buffers are sized for the worst case, and every chunk's backward produces a gradient of
+        the gathered expert weights. Unrolled, the layer's backward holds every chunk's buffers and weight gradients
+        at once; scanned, with nothing saved from a chunk, one chunk's buffers are live at a time and the weight
+        gradients are summed in the scan's carry. Same chunks, same per-chunk math as the unrolled loop.
+        """
+        seq_len = x.shape[1]
+        chunk = seq_len // n_chunks
+
+        def split(a):  # [batch, seq, ...] -> [n_chunks, batch, chunk, ...]
+          if a is None:
+            return None
+          return jnp.moveaxis(a.reshape(a.shape[0], n_chunks, chunk, *a.shape[2:]), 1, 0)
+
+        @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
+        def body(carry, xs_c):
+          x_c, logits_c, pre_bias_logits_c, input_ids_c, forced_c = xs_c
+          out_c, lb_c, bu_c, ov_c = _moe_body(
+              x_c,
+              logits_c,
+              pre_bias_logits_c,
+              w0,
+              w1,
+              wo,
+              w0_bias,
+              w1_bias,
+              wo_bias,
+              input_ids_c,
+              rngs,
+              forced_c,
+              force_dropless=True,
+          )
+          return carry, (out_c, lb_c, bu_c, jnp.asarray(ov_c, dtype=jnp.bool_))
+
+        xs = tuple(split(a) for a in (x, logits, pre_bias_logits, sharded_input_ids, forced_routed_experts))
+        _, (outs, lb, bu, ov) = jax.lax.scan(body, None, xs)
+        output = jnp.moveaxis(outs, 0, 1).reshape(outs.shape[1], seq_len, *outs.shape[3:])
+        lb_loss = None if lb is None else jnp.mean(lb, axis=0)
+        bias_updates = None if bu is None else jnp.mean(bu, axis=0)
+        return output, lb_loss, bias_updates, jnp.any(ov)
+
       def _route_and_compute(force_dropless):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
+        if force_dropless and n_chunks > 1 and self.config.use_ring_of_experts and self.dropless_scan_chunks:
+          return _scanned_dropless_chunks()
         if pipeline_enabled:
           return _pipelined_route_and_compute(force_dropless)
         if n_chunks <= 1 or not self.config.use_ring_of_experts:

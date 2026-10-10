@@ -21,6 +21,7 @@ the MaxRL AbstractTrainer interface without running an outer loop.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
+import concurrent.futures
 import contextlib
 import dataclasses
 import functools
@@ -39,6 +40,8 @@ from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
+from maxtext.layers import moe
+from maxtext.layers import nnx_decoders
 from maxtext.integration.vllm.convert_utils import (
     is_verify_weights_enabled,
     resolve_prefuse_moe_weights,
@@ -77,6 +80,11 @@ _DEVICE_MEMORY_KIND = "device"
 # The kernels an update is made of, in the order a step runs them. `compile_kernels()` is
 # keyed by these, and so is the ahead-of-time entry point in `maxtext_engine_compile`.
 KERNEL_NAMES = ("fwd_bwd", "accumulate", "update")
+
+# Under `retry_when_tokens_dropped`, the `fwd_bwd` a micro-batch whose MoE ragged buffer overflowed is rerun
+# through: the same kernel on the dropless graphdef (see `fwd_bwd`). Not one of `KERNEL_NAMES`: no update runs it
+# unless a buffer overflows, so it is added only when the replay is on.
+DROPLESS_FWD_BWD = "fwd_bwd_dropless"
 
 _PURE_STATE_FALLBACK_WARNING = (
     "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
@@ -664,6 +672,41 @@ def _profiled_step(name: str, control_profile: bool = False) -> Callable[..., An
   return decorator
 
 
+def apply_dropless_overrides(config: pyconfig.HyperParameters, root: Any) -> None:
+  """Turns `root`, an NNX module graph, into the dropless replay program, in place.
+
+  Every RoutedMoE drops no token and runs `retry_num_moe_token_chunks` token chunks as a `lax.scan`, each
+  rematerialized, so only one chunk's worst-case buffers are live at a time; the decoder runs full remat, as
+  `pre_train/train.py`'s replay program intends.
+  """
+  for _, module in nnx.iter_graph(root):
+    if isinstance(module, moe.RoutedMoE):
+      module.force_dropless = True
+      module.num_moe_token_chunks = config.retry_num_moe_token_chunks
+      module.dropless_scan_chunks = True
+    elif isinstance(module, nnx_decoders.NNXDecoder):
+      module.remat_policy_override = "full"
+
+
+@dataclasses.dataclass(frozen=True)
+class _PendingOverflowCheck:
+  """A micro-batch `fwd_bwd` accumulated before its MoE overflow flag reached the host.
+
+  Everything a dropless rerun of it needs, and the loss and metrics recorded once its flag is read.
+  """
+
+  has_overflow: jax.Array
+  params: Any
+  rest: Any
+  inputs: Any
+  loss: Any
+  aux: Any
+  # None on the compiled path, which reruns through `_join_dropless_compile()`.
+  dropless_kernel: Callable[..., Any] | None
+  accumulate_kernel: Callable[..., Any]
+  micro_step: int
+
+
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   """Concrete trainer wrapping MaxText single-step SPMD execution for NNX models."""
 
@@ -798,6 +841,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._micro_step_count = 0
     # Every micro step this run has ever folded in across optimizer steps.
     self._total_micro_steps = 0
+    # retry_when_tokens_dropped: `fwd_bwd` reruns a micro-batch whose MoE ragged buffer overflowed through a
+    # dropless copy of the fwd/bwd kernel (`_dropless_graphdef`, see `apply_dropless_overrides`).
+    # `_dropless_replays` counts the reruns of the current update, recorded as `moe_dropless_replays`.
+    self._dropless_replay = training_config.retry_when_tokens_dropped
+    self._dropless_graphdef: Any = None
+    # The graphdef `_dropless_graphdef` was built from (see `_dropless_graphdef_for`, used on every path); it is
+    # rebuilt when the model is re-split into a different one.
+    self._dropless_source_graphdef: Any = None
+    self._compiled_fwd_bwd_dropless: Any = None
+    # The compiled path compiles `fwd_bwd_dropless` on a background thread from the first micro-batch, and joins it
+    # before the first rerun or the update, whichever comes first.
+    self._dropless_compile: concurrent.futures.Future | None = None
+    self._dropless_compile_executor: concurrent.futures.ThreadPoolExecutor | None = None
+    self._dropless_replays = 0
+    # The last micro-batch, whose overflow flag is read after the next one is dispatched (or in `update`).
+    self._pending_overflow_check: _PendingOverflowCheck | None = None
     # Set when this run resumed from an intra-step checkpoint, cleared once the step it
     # resumed into completes and its finished state has been checkpointed.
     self._resumed_mid_step = False
@@ -1351,23 +1410,28 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return x
     return x.astype(self._config.grad_dtype)
 
-  def _fwd_bwd_kernel(self, params, rest, batch):
+  def _fwd_bwd_kernel(self, params, rest, batch, graphdef=None):
     """Executes a single forward and backward pass.
 
     Args:
       params: Pure `nnx.Param` state to differentiate against.
       rest: The model's remaining (non-parameter) pure state.
       batch: Loss-function inputs for this micro-batch.
+      graphdef: The model graphdef to run, `_model_graphdef` by default; the dropless replay passes the
+        dropless one (the compiled path the `dropless_graphdef` bound in `_compile_for_batch`).
 
     Returns:
       `(primary_loss, aux_metrics, new_rest, grads, denominator)`: this micro-batch's gradients,
       not yet normalized, in the accumulation dtype except the leaves in `_uncast_grad_mask`, which
-      keep the parameters' dtype; and the loss denominator to normalize them by.
+      keep the parameters' dtype; and the loss denominator to normalize them by. Under
+      `retry_when_tokens_dropped`, followed by `has_moe_overflow`: whether any MoE layer's ragged
+      buffer dropped tokens, in which case the gradients and denominator are zero and `fwd_bwd`
+      reruns the micro-batch once the flag reaches the host.
     """
     loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
     def diff_wrapper(p, r, b):
-      mdl = nnx.merge(self._model_graphdef, p, r, copy=True)
+      mdl = nnx.merge(graphdef if graphdef is not None else self._model_graphdef, p, r, copy=True)
       if self._gen_model_input_fn is not None:
         # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
         # `with_gen_model_input_fn` -- so its output is unpacked rather than passed as the
@@ -1382,10 +1446,36 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       else:
         # No adapter set: the loss is a MaxText one, called MaxText's way.
         out = loss_callable(mdl, self._config, b, None, None, is_train=True)
-      _, _, new_r = nnx.split(mdl, nnx.Param, ...)
-
       loss_out = _normalize_loss_output(out, self._has_aux)
-      return loss_out.primary_loss.unreduced_sum, (loss_out, new_r)
+      has_overflow = None
+      if self._dropless_replay:
+        # RoutedMoE sows its overflow flag. MaxText's loss pops it into its aux as `has_moe_overflow`, and so do
+        # Tunix's GRPO/PPO losses (google/tunix#2721); a loss that leaves it on the model is read from there. The
+        # aux is read even under has_aux=False, which only stops it being recorded.
+        intermediates = nnx.state(mdl, nnx.Intermediate).to_pure_dict()
+        flags = [jnp.any(f) for f in maxtext_utils.collect_intermediates_by_suffix(intermediates, "moe_has_overflow")]
+        aux = _normalize_loss_output(out, has_aux=True).aux_metrics
+        if isinstance(aux, dict) and aux.get("has_moe_overflow") is not None:
+          flags.append(jnp.asarray(aux["has_moe_overflow"], dtype=jnp.bool_))
+        if not flags:
+          # RoutedMoE always sows the flag, so none here means it was lost and the replay could never fire.
+          raise ValueError(
+              "retry_when_tokens_dropped=True, but the loss neither left `moe_has_overflow` on the model nor "
+              "returned `has_moe_overflow` in its aux. A loss that runs the forward on a split/merged copy of "
+              "the model, as Tunix's GRPO/PPO losses do, must return it in its aux (see google/tunix#2721)."
+          )
+        has_overflow = jnp.any(jnp.stack(flags))
+        # Not model state: popped so `rest` keeps the structure `fwd_bwd` was compiled for.
+        nnx.pop(mdl, nnx.Intermediate)
+      _, _, new_r = nnx.split(mdl, nnx.Param, ...)
+      differentiated = loss_out.primary_loss.unreduced_sum
+      if has_overflow is not None:
+        # Zero for a micro-batch that overflowed, and the backward is linear in it, so its gradients come back zero
+        # and `fwd_bwd` can accumulate it before the flag reaches the host. Masked here rather than on the
+        # gradients, which may be `unreduced`, and neither `where` nor `mul` takes those. A non-finite capped forward
+        # can still turn the zero cotangent into NaN (0 * inf), which `skip_step_on_nan` then catches.
+        differentiated = jnp.where(has_overflow, jnp.zeros_like(differentiated), differentiated)
+      return differentiated, (loss_out, new_r, has_overflow)
 
     if self._reduced_params_shardings is not None:
       # Tag the differentiated parameters `reduced` over the data axis, so their cotangents
@@ -1399,7 +1489,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Every non-raising branch of `diff_wrapper` builds a LossOutput, so `loss_out` is always
     # one. The value returned by `value_and_grad` is the unreduced sum that was
     # differentiated, which `loss_out.primary_loss` already carries, so it is discarded here.
-    (_, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
+    (_, (loss_out, new_rest, has_overflow)), micro_grads = grad_func(params, rest, batch)
 
     # Summed in `grad_accumulation_dtype` (default `grad_dtype`), by `_accumulate_kernel`, and
     # cast to `grad_dtype` once, in `_update_kernel`. `train.py` sums in the parameters' dtype, or
@@ -1421,7 +1511,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # per-micro-batch means, which overweights short micro-batches. Same as
     # `gradient_accumulation.py` in the pre-train path.
     denominator = loss_out.primary_loss.denominator.astype(jnp.float32)
+    if self._dropless_replay:
+      denominator = jnp.where(has_overflow, jnp.float32(0.0), denominator)
+      return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads, denominator, has_overflow
     return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads, denominator
+
+  def _dropless_graphdef_for(self, graphdef: Any, params_pure: Any, rest_pure: Any) -> Any:
+    """`graphdef` with `apply_dropless_overrides` applied, edited on a copy of the model.
+
+    Cached until the model is re-split into a different graphdef. The training replay, `eval_step` and
+    `model_scope` all run it, so every forward pass of a `retry_when_tokens_dropped` run drops no token.
+    """
+    if self._dropless_graphdef is None or self._dropless_source_graphdef != graphdef:
+      mdl = nnx.merge(graphdef, params_pure, rest_pure, copy=True)
+      apply_dropless_overrides(self._config, mdl)
+      self._dropless_graphdef, _, _ = nnx.split(mdl, nnx.Param, ...)
+      self._dropless_source_graphdef = graphdef
+    return self._dropless_graphdef
 
   @staticmethod
   def _accumulate_kernel(acc_grads, acc_denom, grads, denominator):
@@ -1570,14 +1676,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return new_state_pure, grad_norm, is_skipped_val
     return state_pure, grad_norm, is_skipped_val
 
-  def _eval_kernel(self, params, rest, batch):
+  def _eval_kernel(self, params, rest, batch, graphdef=None):
     """Executes a single forward pass, returning the loss and its aux metrics.
+
+    `graphdef` defaults to `_model_graphdef`; under `retry_when_tokens_dropped` the dropless one is passed.
 
     Returns:
       `(primary_loss, aux_metrics)` -- a `WeightedMetric` and a dict.
     """
     loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
-    mdl = nnx.merge(self._model_graphdef, params, rest, copy=True)
+    mdl = nnx.merge(graphdef if graphdef is not None else self._model_graphdef, params, rest, copy=True)
     if self._gen_model_input_fn is not None:
       if not isinstance(batch, dict):
         raise TypeError(
@@ -1817,6 +1925,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
       fwd_bwd_in_shardings = (params_shardings, rest_shardings, batch_shardings)
       fwd_bwd_out_shardings = (None, None, rest_shardings, grad_shardings, replicated)
+      if self._dropless_replay:
+        fwd_bwd_out_shardings += (replicated,)  # has_moe_overflow
       # The running sums, then the micro-batch's gradients and denominator, laid out alike.
       accumulate_out_shardings = (grad_shardings, replicated)
       accumulate_in_shardings = accumulate_out_shardings * 2
@@ -1870,6 +1980,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         in_shardings=fwd_bwd_in_shardings,
         out_shardings=fwd_bwd_out_shardings,
     )
+    # The dropless replay's `fwd_bwd`: same signature, shardings and outputs, on the dropless graphdef.
+    self._compiled_fwd_bwd_dropless = None
+    # A compile still pending or running belongs to the kernel being replaced.
+    self._discard_dropless_compile()
+    if self._dropless_replay:
+      # Bound here: the kernel may be traced later, on the background compile thread.
+      dropless_graphdef = self._dropless_graphdef_for(self._model_graphdef, params_pure, rest_pure)
+
+      def fwd_bwd_dropless(params, rest, dynamic):
+        batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
+        return self._fwd_bwd_kernel(params, rest, batch, graphdef=dropless_graphdef)
+
+      self._compiled_fwd_bwd_dropless = jax.jit(
+          fwd_bwd_dropless,
+          in_shardings=fwd_bwd_in_shardings,
+          out_shardings=fwd_bwd_out_shardings,
+      )
     self._compiled_accumulate = jax.jit(
         accumulate,
         in_shardings=accumulate_in_shardings,
@@ -1897,16 +2024,21 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         "accumulate": self._compiled_accumulate,
         "update": self._compiled_update,
     }
+    if self._compiled_fwd_bwd_dropless is not None:
+      self._jitted_kernels[DROPLESS_FWD_BWD] = self._compiled_fwd_bwd_dropless
     self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
     self._compiled = True
 
   def _compile_eval_for_batch(self, dynamic_batch: Any, static_batch: dict[str, Any]) -> None:
     """JIT-compiles the forward-only eval kernel for one batch structure."""
     self._model_graphdef, params_pure, rest_pure = nnx.split(self._model, nnx.Param, ...)
+    graphdef = (
+        self._dropless_graphdef_for(self._model_graphdef, params_pure, rest_pure) if self._dropless_replay else None
+    )
 
     def kernel(params, rest, dynamic):
       batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
-      return self._eval_kernel(params, rest, batch)
+      return self._eval_kernel(params, rest, batch, graphdef=graphdef)
 
     if self._mesh is not None:
       params_shardings = jax.tree.map(self._mesh_sharding, params_pure)
@@ -1958,6 +2090,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_fwd_bwd = compiled["fwd_bwd"]
     self._compiled_accumulate = compiled["accumulate"]
     self._compiled_update = compiled["update"]
+    if DROPLESS_FWD_BWD in compiled:
+      self._compiled_fwd_bwd_dropless = compiled[DROPLESS_FWD_BWD]
     self._compile_eval(dummy_data, compiler_options)
 
   def compile_kernels(
@@ -1976,12 +2110,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       compiler_options: XLA options, defaulting to `config.compile_xla_flags`.
 
     Returns:
-      `{kernel name: jax.stages.Compiled}`, keyed by `KERNEL_NAMES`.
+      `{kernel name: jax.stages.Compiled}`, keyed by `KERNEL_NAMES`, plus `DROPLESS_FWD_BWD` under
+      `retry_when_tokens_dropped`.
     """
     options = self._xla_options(compiler_options)
     lowered = self._lower_kernels(dummy_data)
     with self._sharding_ctx():
-      return {name: lowered[name].compile(compiler_options=options) for name in KERNEL_NAMES}
+      return {name: kernel.compile(compiler_options=options) for name, kernel in lowered.items()}
 
   def _xla_options(self, compiler_options: dict[str, Any] | None) -> dict[str, Any] | None:
     """Returns the XLA options to compile with: the caller's, or `config.compile_xla_flags`."""
@@ -2035,6 +2170,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           "compile_kernels() needs a dummy payload -- unlike compile(), it cannot defer to the first real batch."
       )
     dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
+    # Settled first: its rerun and add run on the kernels and accumulator layout being replaced.
+    self._resolve_overflow_check()
     self._compile_for_batch(dynamic_batch, static_batch)
 
     state_aval = jax.tree.map(_to_aval, self._read_state_pure())
@@ -2048,17 +2185,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       fwd_bwd = self._jitted_kernels["fwd_bwd"].lower(params_aval, rest_aval, batch_aval)
       # Off the kernel's own outputs, not predicted from the parameters: the gradients differ by
       # the accumulation dtype and, under deferral, an `unreduced` tag.
-      _, _, _, grads_aval, denominator_aval = fwd_bwd.out_info
+      grads_aval, denominator_aval = fwd_bwd.out_info[3], fwd_bwd.out_info[4]
       # The running sum holds every leaf in the accumulation dtype, including those `fwd_bwd`
       # returns uncast.
       acc_grads_aval = jax.tree.map(self._to_accumulation_dtype, grads_aval)
-      return {
+      lowered = {
           "fwd_bwd": fwd_bwd,
           "accumulate": self._jitted_kernels["accumulate"].lower(
               acc_grads_aval, denominator_aval, grads_aval, denominator_aval
           ),
           "update": self._jitted_kernels["update"].lower(state_aval, acc_grads_aval, denominator_aval, mean_loss_aval),
       }
+      if DROPLESS_FWD_BWD in self._jitted_kernels:
+        lowered[DROPLESS_FWD_BWD] = self._jitted_kernels[DROPLESS_FWD_BWD].lower(params_aval, rest_aval, batch_aval)
+      return lowered
 
   def _start_running_sum(self, grads: Any) -> Any:
     """Returns the first micro-batch's gradients as the running sum, every leaf in the accumulation dtype.
@@ -2103,18 +2243,36 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # for the first, and silently use stale values for the second.
       signature = _batch_signature(dynamic_batch, static_batch)
       if not self._compiled or self._needs_recompile(signature, self._compiled_signature):
+        # Settled first: its rerun and add run on the kernels and accumulator layout being replaced.
+        self._resolve_overflow_check()
         self._compile_for_batch(dynamic_batch, static_batch)
       # The compiled `fwd_bwd` closes over the static half, so it is passed the traced one only.
       fwd_bwd_kernel, accumulate_kernel, inputs = self._compiled_fwd_bwd, self._compiled_accumulate, dynamic_batch
+      dropless_kernel = None
     else:
       # The eager path honours `optimizer_memory_host_offload` too, as `_compile_for_batch` does.
       self._offload_optimizer_state()
       fwd_bwd_kernel, accumulate_kernel, inputs = self._fwd_bwd_kernel, self._accumulate_kernel, batch
+      dropless_kernel = None
     # After any recompile, not before: reading first would hand the new kernel a pure
     # state split against the old graph.
     params, rest = self._read_model_pure(model)
+    if self._dropless_replay and not self._compile_requested:
+      dropless_kernel = functools.partial(
+          self._fwd_bwd_kernel, graphdef=self._dropless_graphdef_for(self._model_graphdef, params, rest)
+      )
     with self._sharding_ctx():
-      loss, aux, new_rest, grads, denominator = fwd_bwd_kernel(params, rest, inputs)
+      outputs = fwd_bwd_kernel(params, rest, inputs)
+      if (
+          self._dropless_replay
+          and self._compile_requested
+          and self._dropless_compile is None
+          and not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled)
+      ):
+        # On a background thread while the device runs this `fwd_bwd`, rather than at the first overflow in the
+        # middle of a step or ahead of the first `fwd_bwd` on the startup path.
+        self._start_dropless_compile(self._compiled_fwd_bwd_dropless, params, rest, inputs)
+      loss, aux, new_rest, grads, denominator = outputs[:5]
       if self._accumulated_grads is None:
         acc_grads, acc_denom = self._start_running_sum(grads), denominator
       else:
@@ -2129,6 +2287,34 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # the update step.
     self._throttler.add_computation(computation=loss, metrics=None)
 
+    self._accumulated_grads = acc_grads
+    self._accumulated_denominator = acc_denom
+    if self._dropless_replay:
+      # Accumulated already, as zero if it overflowed (see `_fwd_bwd_kernel`). Its flag is read after the next
+      # micro-batch is dispatched, or in `update`, so the replay holds no dispatch back.
+      outputs[5].copy_to_host_async()
+      check = _PendingOverflowCheck(
+          has_overflow=outputs[5],
+          params=params,
+          rest=rest,
+          inputs=inputs,
+          loss=loss,
+          aux=aux,
+          dropless_kernel=dropless_kernel,
+          accumulate_kernel=accumulate_kernel,
+          micro_step=self._micro_step_count,
+      )
+      # Dropped before the previous micro-batch's rerun, so this one's gradients are not live beside it.
+      del outputs, grads, acc_grads
+      self._resolve_overflow_check()
+      self._pending_overflow_check = check
+    else:
+      self._record_micro_batch(loss, aux)
+    self._micro_step_count += 1
+    self._total_micro_steps += 1
+
+  def _record_micro_batch(self, loss: Any, aux: Any) -> None:
+    """Records a micro-batch's loss and auxiliary metrics, and caches its loss for `update`."""
     if isinstance(loss, abstract_engine.WeightedMetric):
       self.record_metrics("loss", loss)
 
@@ -2139,10 +2325,78 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           self.record_metrics(key, value)
 
     self._cached_losses.append(loss)
-    self._accumulated_grads = acc_grads
-    self._accumulated_denominator = acc_denom
-    self._micro_step_count += 1
-    self._total_micro_steps += 1
+
+  def _start_dropless_compile(self, jitted: Any, params: Any, rest: Any, inputs: Any) -> None:
+    """Lowers and compiles `fwd_bwd_dropless` for this batch on a background thread."""
+    avals = jax.tree.map(_to_aval, (params, rest, inputs))
+    options = self._xla_options(None)
+
+    def compile_kernel():
+      # The mesh and the logical axis rules are per thread, so they are entered here as well. Only `_sharding_ctx()`
+      # is re-entered: other thread-local JAX or flax contexts the caller holds do not apply on this thread.
+      with self._sharding_ctx():
+        return jitted.lower(*avals).compile(compiler_options=options)
+
+    if self._dropless_compile_executor is None:
+      self._dropless_compile_executor = concurrent.futures.ThreadPoolExecutor(
+          max_workers=1, thread_name_prefix="dropless-compile"
+      )
+    self._dropless_compile = self._dropless_compile_executor.submit(compile_kernel)
+
+  def _discard_dropless_compile(self) -> None:
+    """Drops a background compile of a kernel being replaced, so the next compile does not queue behind it."""
+    future, self._dropless_compile = self._dropless_compile, None
+    if future is None or future.cancel():
+      return
+    # Already running, and a thread cannot be stopped: its result is discarded, its error only logged, and the next
+    # compile gets a fresh thread rather than waiting for this one.
+    future.add_done_callback(
+        lambda f: f.exception() and logging.warning("Discarded fwd_bwd_dropless compile failed: %s", f.exception())
+    )
+    if not future.done():
+      self._dropless_compile_executor.shutdown(wait=False)
+      self._dropless_compile_executor = None
+
+  def _join_dropless_compile(self) -> Any:
+    """Waits for the background compile, installs `fwd_bwd_dropless` and returns it; re-raises a compile error."""
+    if self._dropless_compile is not None:
+      future, self._dropless_compile = self._dropless_compile, None
+      self._compiled_fwd_bwd_dropless = future.result()
+    return self._compiled_fwd_bwd_dropless
+
+  def _resolve_overflow_check(self) -> None:
+    """Reads the pending micro-batch's overflow flag, reruns it dropless if it is set, and records it.
+
+    `fwd_bwd` accumulated it as zero gradients and denominator, so the rerun's are added in their
+    place. The rerun starts from the parameters, state and batch it ran from: parameters change only
+    in `update`, and `fwd_bwd` donates nothing. The state the rerun returns is dropped, since the
+    micro-batches after it already ran from the capped run's, which differs at most in RNG counts.
+    """
+    check, self._pending_overflow_check = self._pending_overflow_check, None
+    if check is None:
+      return
+    loss, aux = check.loss, check.aux
+    if bool(check.has_overflow):
+      logging.info(
+          "MoE ragged buffer overflow in micro step %d of train step %d; rerunning it with the dropless kernel.",
+          check.micro_step,
+          self.train_step,
+      )
+      # Counted against the in-flight limit like any other dispatch.
+      self._throttler.wait_for_next()
+      with self._sharding_ctx():
+        dropless_kernel = check.dropless_kernel or self._join_dropless_compile()
+        loss, aux, _, grads, denominator, rerun_overflow = dropless_kernel(check.params, check.rest, check.inputs)
+        self._accumulated_grads, self._accumulated_denominator = check.accumulate_kernel(
+            self._accumulated_grads, self._accumulated_denominator, grads, denominator
+        )
+      self._throttler.add_computation(computation=loss, metrics=None)
+      if bool(rerun_overflow):
+        raise RuntimeError(
+            f"The dropless rerun of micro step {check.micro_step} still overflowed; check apply_dropless_overrides."
+        )
+      self._dropless_replays += 1
+    self._record_micro_batch(loss, aux)
 
   @_profiled_step("update")
   def update(self, **kwargs: Any) -> int:
@@ -2157,6 +2411,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       The train step count after this update. Unchanged when there is nothing to apply.
     """
+    # The last micro-batch's rerun, if it overflowed, belongs to the sums applied below.
+    self._resolve_overflow_check()
+    # A compile error surfaces at the first update, not at the first overflow, which may be much later.
+    self._join_dropless_compile()
     if self._accumulated_grads is None:
       return self.train_step
 
@@ -2208,6 +2466,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
+    if self._dropless_replay:
+      self.record_metrics("moe_dropless_replays", self._dropless_replays)
+      self._dropless_replays = 0
     if is_skipped is not None:
       self.record_metrics("step_skipped", is_skipped)
 
@@ -2288,7 +2549,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           self._compile_eval_for_batch(dynamic_batch, static_batch)
         loss, aux = self._compiled_eval(params, rest, dynamic_batch)
       else:
-        loss, aux = self._eval_kernel(params, rest, batch)
+        graphdef = self._dropless_graphdef_for(self._model_graphdef, params, rest) if self._dropless_replay else None
+        loss, aux = self._eval_kernel(params, rest, batch, graphdef=graphdef)
 
     # No metrics attached: eval metrics are buffered by `_eval_metrics_recorder` and written
     # in EVAL mode when `eval_context` exits.
@@ -2405,6 +2667,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     model = getattr(self._state, _MODEL_STATE_KEY, self._model)
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+    if self._dropless_replay:
+      # Scored on the dropless graph over the same weights, so old and reference log-probs come from the forward
+      # pass the replayed training step runs, not from one that may drop tokens.
+      graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+      model = nnx.merge(self._dropless_graphdef_for(graphdef, params, rest), params, rest)
 
     # Bound the dispatch queue as every other entry point does. Not a correctness
     # barrier -- JAX orders reads of the weights against the writes already queued --
@@ -2460,6 +2727,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       logging.info("Checkpointing is disabled in config; skipping save_checkpoint.")
       return
 
+    # An intra-step checkpoint saves the running sums, which a pending rerun belongs to.
+    self._resolve_overflow_check()
     # Drain all inflight computations and log pending metrics before checkpointing.
     self._throttler.wait_for_all()
     # Settle uncompiled state onto the mesh before Orbax serializes it.
@@ -2609,6 +2878,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Checkpoint with no metadata says nothing about how far into its step it
     # got, and must not inherit the count from whatever this engine was doing before.
     self._micro_step_count = 0
+    # Nor a micro-batch left pending: its rerun would add to the sums this restore replaces.
+    self._pending_overflow_check = None
     restored_denominator = None
     if restored_metadata:
       self._micro_step_count = restored_metadata.get("micro_step_count", 0)
@@ -3012,6 +3283,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._config.enable_checkpointing and self._checkpoint_dir() and self._checkpoint_manager:
       self.save_checkpoint(metadata=None, force=True)
       self._checkpoint_manager.close()
+
+    if self._dropless_compile_executor is not None:
+      # Cancels a compile not yet started; one already running cannot be stopped, and interpreter exit joins it.
+      self._dropless_compile_executor.shutdown(wait=False, cancel_futures=True)
+      self._dropless_compile_executor = None
 
     # Write the metrics and cleanup metrics logger resources
     self._throttler.cleanup()

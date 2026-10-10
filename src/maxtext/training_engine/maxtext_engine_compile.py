@@ -121,11 +121,13 @@ _OPTIMIZER_KEY = maxtext_engine._OPTIMIZER_STATE_KEY  # pylint: disable=protecte
 # Per kernel, the top-level train-state subtrees that stay allocated while it runs but are not
 # among its arguments, so its `memory_analysis()` cannot see them. From the signatures
 # `_compile_for_batch` jits: `fwd_bwd` takes the model state and a batch but never the optimizer,
-# `accumulate` takes gradients only, and `update` takes the whole state.
+# `accumulate` takes gradients only, and `update` takes the whole state. The dropless replay's
+# `fwd_bwd` has `fwd_bwd`'s signature.
 STATE_NOT_PASSED = {
     "fwd_bwd": (_OPTIMIZER_KEY,),
     "accumulate": (_MODEL_KEY, _OPTIMIZER_KEY),
     "update": (),
+    maxtext_engine.DROPLESS_FWD_BWD: (_OPTIMIZER_KEY,),
 }
 
 # The running gradient sum is not train state, but it stays allocated from an update's first
@@ -134,7 +136,7 @@ STATE_NOT_PASSED = {
 # outputs. Charged whether or not a run accumulates: the caller picks the number of micro-batches
 # per update at run time.
 ACCUMULATOR = "gradient accumulator"
-ACCUMULATOR_NOT_PASSED = ("fwd_bwd",)
+ACCUMULATOR_NOT_PASSED = ("fwd_bwd", maxtext_engine.DROPLESS_FWD_BWD)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -437,8 +439,8 @@ def format_memory_report(rows: Sequence[KernelMemory], staging: WeightSyncStagin
       "both arg and out, and alias is what they share. +state = what is in device memory while the kernel",
       "runs without being one of its arguments, so its memory analysis cannot see it: train state and, for",
       "the fwd_bwd of a later micro-batch, the gradient accumulator. The host columns are the same",
-      "quantities in host memory (pinned_host), which XLA:CPU counts as device. The peak below is these",
-      "three kernels' only. NOT included: weight-sync staging (a copy of the parameters in the rollout's",
+      "quantities in host memory (pinned_host), which XLA:CPU counts as device. The peak below covers",
+      "the reported kernels only. NOT included: weight-sync staging (a copy of the parameters in the rollout's",
       "layout, held until release_weight_sync), fwd_only/model_scope scoring, the eval kernel, generated",
       "code, and anything the caller holds. It assumes gradient accumulation, so fwd_bwd is charged with",
       "the accumulator even though a step of one micro-batch has none, and accumulate does not run then.",
@@ -1018,7 +1020,7 @@ def main(argv: Sequence[str]) -> None:
       pre_train_compile.save_compiled(compiled[name], save_path)
       print(f"Successfully saved compiled {name} kernel as {save_path}")
 
-  for name in KERNEL_NAMES:
+  for name in compiled:
     print(f"--- {name} ---")
     print(f"Cost analysis: {compiled[name].cost_analysis()}")
     print(f"Memory analysis: {compiled[name].memory_analysis()}")
@@ -1032,6 +1034,8 @@ def main(argv: Sequence[str]) -> None:
       scan_axis=config.param_scan_axis,
       use_weight_converter=config.use_weight_converter,
   )
+  # Under retry_when_tokens_dropped, `fwd_bwd_dropless` is one more row: a rerun runs beside the running sums
+  # as `fwd_bwd` does, so a step with a replay peaks at the larger of the two.
   print(format_memory_report(memory_report(compiled, state), staging), flush=True)
 
   print("Finished training_engine/maxtext_engine_compile.py successfully!", flush=True)

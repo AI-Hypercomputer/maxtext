@@ -511,7 +511,10 @@ class MemoryReportTest(absltest.TestCase):
 
   def test_every_kernel_has_state_entry(self):
     """A kernel added to the engine must be classified here, or the report refuses to run."""
-    self.assertEqual(sorted(maxtext_engine_compile.STATE_NOT_PASSED), sorted(maxtext_engine_compile.KERNEL_NAMES))
+    self.assertEqual(
+        sorted(maxtext_engine_compile.STATE_NOT_PASSED),
+        sorted((*maxtext_engine_compile.KERNEL_NAMES, maxtext_engine.DROPLESS_FWD_BWD)),
+    )
 
 
 def _tiny_overrides(data_parallelism: int) -> list[str]:
