@@ -1553,6 +1553,29 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # This form carries no aux, so nothing beyond the loss is recorded.
     self.assertEmpty(metrics.scalar_metrics)
 
+  def test_readiness_tokens_track_last_microbatch_and_update(self):
+    """`last_fwd_bwd_token` / `last_update_token` are the arrays Tunix's step timer waits on."""
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    self.assertIsNone(t.last_fwd_bwd_token)
+    self.assertIsNone(t.last_update_token)
+    t.with_loss_fn(
+        lambda model, *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(model.weights[...]), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    payload = DummyPayload()
+    t.fwd_bwd(payload)
+    first = t.last_fwd_bwd_token
+    t.fwd_bwd(payload)
+    # A plain array (the WeightedMetric's sum), replaced by each microbatch.
+    self.assertIsInstance(t.last_fwd_bwd_token, jax.Array)
+    self.assertIsNot(t.last_fwd_bwd_token, first)
+    self.assertIs(t.last_fwd_bwd_token, t._cached_losses[-1].unreduced_sum)
+    t.update()
+    self.assertIsInstance(t.last_update_token, jax.Array)
+    jax.block_until_ready((t.last_fwd_bwd_token, t.last_update_token))
+
   def test_fwd_bwd_with_tunix_spelled_loss_output(self):
     """A loss written against Tunix's API behaves identically to the MaxText spelling.
 
