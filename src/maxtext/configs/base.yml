@@ -938,13 +938,13 @@ hf_access_token: ''
 # Path to grain data files. Can be a single pattern or multiple patterns with weights.
 # For multiple patterns, use semicolon (;) to separate and comma (,) to specify weights.
 # Example: "path/to/data1.array_record*,0.3;path/to/data2.array_record*,0.7"
-# Semicolon mixtures are supported by ArrayRecord and Megatron mmap/mmap_npy;
+# Semicolon mixtures are supported by ArrayRecord, Bagz and Megatron mmap/mmap_npy;
 # see their guides because the mixture and ordering semantics differ by format.
 # For more details, see https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline/data_input_grain.md
 grain_train_files: ''
 grain_eval_files: ''
-grain_train_mixture_config_path: '' # ArrayRecord-only JSON mixture configuration.
-grain_file_type: 'arrayrecord' # arrayrecord, tfrecord, parquet, mmap, or mmap_npy
+grain_train_mixture_config_path: '' # ArrayRecord/Bagz-only JSON mixture configuration.
+grain_file_type: 'arrayrecord' # arrayrecord, bagz, tfrecord, parquet, mmap, or mmap_npy
 grain_packing_type: 'first_fit' # 'first_fit', 'best_fit' or 'concat_then_split'. See details of the corresponding module in https://google-grain.readthedocs.io/en/latest/grain.experimental.html
 grain_worker_count: 1 # Set to -1 to enable auto-tuning: automatically determines optimal worker count. See https://google-grain.readthedocs.io/en/latest/_autosummary/grain.experimental.pick_performance_config.html
 grain_per_worker_buffer_size: 1
@@ -960,7 +960,7 @@ grain_ram_budget_mb: 1024 # RAM budget (MB) for auto-tuning worker count. Only u
 grain_num_threads_eval: 16
 grain_prefetch_buffer_size_eval: 500
 grain_data_source_max_workers: 16  # Max workers for ThreadPoolExecutor when mixing multiple Grain data sources.
-# ArrayRecord index storage: null (reader default), 'in_memory', or 'offloaded'.
+# ArrayRecord/Bagz index storage: null (reader default), 'in_memory', or 'offloaded'.
 # Do not use 'offloaded' with direct gs:// paths because it can significantly degrade input performance.
 # For Cloud Storage, use a filesystem with metadata caching, such as GCSFUSE.
 grain_index_storage_option: null
