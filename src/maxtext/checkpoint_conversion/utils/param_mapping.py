@@ -855,7 +855,13 @@ def QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
   return mapping
 
 
-def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(
+    config,
+    maxtext_config,
+    scan_layers=False,
+    *,
+    hf_prefix: str = "model.language_model",
+):
   """
   Returns:
     dict: A mapping where keys are `atomic_mt_key` (single MaxText parameter) or
@@ -877,8 +883,8 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
 
   # 1. Non-layer specific weight mappings
   mapping = {
-      "params-token_embedder-embedding": "model.language_model.embed_tokens.weight",
-      "params-decoder-decoder_norm-scale": "model.language_model.norm.weight",
+      "params-token_embedder-embedding": f"{hf_prefix}.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": f"{hf_prefix}.norm.weight",
       "params-decoder-logits_dense-kernel": "lm_head.weight",
   }
 
@@ -890,10 +896,10 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
 
       # Layer norms
       mapping[f"{prefix}-input_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
-          f"model.language_model.layers.{i}.input_layernorm.weight" for i in hf_indices
+          f"{hf_prefix}.layers.{i}.input_layernorm.weight" for i in hf_indices
       ]
       mapping[f"{prefix}-post_attention_layernorm-scale"] = [  # pyrefly: ignore[bad-assignment]
-          f"model.language_model.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
+          f"{hf_prefix}.layers.{i}.post_attention_layernorm.weight" for i in hf_indices
       ]
 
       # Handle Interleaved Attention (Linear vs Full)
@@ -903,22 +909,22 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
         mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 f"{prefix}-attention-attention-query-kernel": [
-                    f"model.language_model.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.self_attn.q_proj.weight" for i in hf_indices
                 ],
                 f"{prefix}-attention-attention-key-kernel": [
-                    f"model.language_model.layers.{i}.self_attn.k_proj.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.self_attn.k_proj.weight" for i in hf_indices
                 ],
                 f"{prefix}-attention-attention-value-kernel": [
-                    f"model.language_model.layers.{i}.self_attn.v_proj.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.self_attn.v_proj.weight" for i in hf_indices
                 ],
                 f"{prefix}-attention-attention-out-kernel": [
-                    f"model.language_model.layers.{i}.self_attn.o_proj.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.self_attn.o_proj.weight" for i in hf_indices
                 ],
                 f"{prefix}-attention-attention-query_norm-scale": [
-                    f"model.language_model.layers.{i}.self_attn.q_norm.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.self_attn.q_norm.weight" for i in hf_indices
                 ],
                 f"{prefix}-attention-attention-key_norm-scale": [
-                    f"model.language_model.layers.{i}.self_attn.k_norm.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.self_attn.k_norm.weight" for i in hf_indices
                 ],
             }
         )
@@ -926,16 +932,16 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
           mapping.update(
               {
                   f"{prefix}-attention-attention-query-kernel_scale": [
-                      f"model.language_model.layers.{i}.self_attn.q_proj.weight_scale_inv" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.self_attn.q_proj.weight_scale_inv" for i in hf_indices
                   ],
                   f"{prefix}-attention-attention-key-kernel_scale": [
-                      f"model.language_model.layers.{i}.self_attn.k_proj.weight_scale_inv" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.self_attn.k_proj.weight_scale_inv" for i in hf_indices
                   ],
                   f"{prefix}-attention-attention-value-kernel_scale": [
-                      f"model.language_model.layers.{i}.self_attn.v_proj.weight_scale_inv" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.self_attn.v_proj.weight_scale_inv" for i in hf_indices
                   ],
                   f"{prefix}-attention-attention-out-kernel_scale": [
-                      f"model.language_model.layers.{i}.self_attn.o_proj.weight_scale_inv" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.self_attn.o_proj.weight_scale_inv" for i in hf_indices
                   ],
               }
           )
@@ -946,31 +952,29 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
                 # Provide a tuple of HF keys so MaxText concatenates them into qkvz
                 f"{prefix}-attention-in_proj_qkvz-kernel": [
                     (
-                        f"model.language_model.layers.{i}.linear_attn.in_proj_qkv.weight",
-                        f"model.language_model.layers.{i}.linear_attn.in_proj_z.weight",
+                        f"{hf_prefix}.layers.{i}.linear_attn.in_proj_qkv.weight",
+                        f"{hf_prefix}.layers.{i}.linear_attn.in_proj_z.weight",
                     )
                     for i in hf_indices
                 ],
                 # Provide a tuple of HF keys so MaxText concatenates them into ba
                 f"{prefix}-attention-in_proj_ba-kernel": [
                     (
-                        f"model.language_model.layers.{i}.linear_attn.in_proj_b.weight",
-                        f"model.language_model.layers.{i}.linear_attn.in_proj_a.weight",
+                        f"{hf_prefix}.layers.{i}.linear_attn.in_proj_b.weight",
+                        f"{hf_prefix}.layers.{i}.linear_attn.in_proj_a.weight",
                     )
                     for i in hf_indices
                 ],
                 f"{prefix}-attention-conv1d-kernel": [
-                    f"model.language_model.layers.{i}.linear_attn.conv1d.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.linear_attn.conv1d.weight" for i in hf_indices
                 ],
-                f"{prefix}-attention-A_log": [f"model.language_model.layers.{i}.linear_attn.A_log" for i in hf_indices],
-                f"{prefix}-attention-dt_bias": [
-                    f"model.language_model.layers.{i}.linear_attn.dt_bias" for i in hf_indices
-                ],
+                f"{prefix}-attention-A_log": [f"{hf_prefix}.layers.{i}.linear_attn.A_log" for i in hf_indices],
+                f"{prefix}-attention-dt_bias": [f"{hf_prefix}.layers.{i}.linear_attn.dt_bias" for i in hf_indices],
                 f"{prefix}-attention-norm-rms_norm-scale": [
-                    f"model.language_model.layers.{i}.linear_attn.norm.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.linear_attn.norm.weight" for i in hf_indices
                 ],
                 f"{prefix}-attention-out_proj-kernel": [
-                    f"model.language_model.layers.{i}.linear_attn.out_proj.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.linear_attn.out_proj.weight" for i in hf_indices
                 ],
             }
         )
@@ -979,13 +983,13 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               {
                   f"{prefix}-attention-in_proj_qkvz-kernel_scale": [
                       (
-                          f"model.language_model.layers.{i}.linear_attn.in_proj_qkv.weight_scale_inv",
-                          f"model.language_model.layers.{i}.linear_attn.in_proj_z.weight_scale_inv",
+                          f"{hf_prefix}.layers.{i}.linear_attn.in_proj_qkv.weight_scale_inv",
+                          f"{hf_prefix}.layers.{i}.linear_attn.in_proj_z.weight_scale_inv",
                       )
                       for i in hf_indices
                   ],
                   f"{prefix}-attention-out_proj-kernel_scale": [
-                      f"model.language_model.layers.{i}.linear_attn.out_proj.weight_scale_inv" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.linear_attn.out_proj.weight_scale_inv" for i in hf_indices
                   ],
               }
           )
@@ -995,19 +999,19 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
         mapping.update(  # pyrefly: ignore[no-matching-overload]
             {
                 f"{prefix}-mlp-routed_experts-gate-kernel": [
-                    f"model.language_model.layers.{i}.mlp.gate.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.mlp.gate.weight" for i in hf_indices
                 ],
                 f"{prefix}-mlp-shared_expert-wi_0-kernel": [
-                    f"model.language_model.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.mlp.shared_expert.gate_proj.weight" for i in hf_indices
                 ],
                 f"{prefix}-mlp-shared_expert-wi_1-kernel": [
-                    f"model.language_model.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.mlp.shared_expert.up_proj.weight" for i in hf_indices
                 ],
                 f"{prefix}-mlp-shared_expert-wo-kernel": [
-                    f"model.language_model.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.mlp.shared_expert.down_proj.weight" for i in hf_indices
                 ],
                 f"{prefix}-mlp-shared_expert_gate-kernel": [
-                    f"model.language_model.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices
+                    f"{hf_prefix}.layers.{i}.mlp.shared_expert_gate.weight" for i in hf_indices
                 ],
             }
         )
@@ -1015,13 +1019,13 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
           mapping.update(
               {
                   f"{prefix}-mlp-shared_expert-wi_0-kernel_scale": [
-                      f"model.language_model.layers.{i}.mlp.shared_expert.gate_proj.weight_scale_inv" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.mlp.shared_expert.gate_proj.weight_scale_inv" for i in hf_indices
                   ],
                   f"{prefix}-mlp-shared_expert-wi_1-kernel_scale": [
-                      f"model.language_model.layers.{i}.mlp.shared_expert.up_proj.weight_scale_inv" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.mlp.shared_expert.up_proj.weight_scale_inv" for i in hf_indices
                   ],
                   f"{prefix}-mlp-shared_expert-wo-kernel_scale": [
-                      f"model.language_model.layers.{i}.mlp.shared_expert.down_proj.weight_scale_inv" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.mlp.shared_expert.down_proj.weight_scale_inv" for i in hf_indices
                   ],
               }
           )
@@ -1032,27 +1036,27 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
           mapping.update(
               {
                   f"{prefix}-mlp-routed_experts-wi_0": [
-                      [f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices]
+                      [f"{hf_prefix}.layers.{i}.mlp.experts.{e}.gate_proj.weight" for i in hf_indices]
                       for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wi_0_scale": [
-                      [f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv" for i in hf_indices]
+                      [f"{hf_prefix}.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv" for i in hf_indices]
                       for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wi_1": [
-                      [f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight" for i in hf_indices]
+                      [f"{hf_prefix}.layers.{i}.mlp.experts.{e}.up_proj.weight" for i in hf_indices]
                       for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wi_1_scale": [
-                      [f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv" for i in hf_indices]
+                      [f"{hf_prefix}.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv" for i in hf_indices]
                       for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wo": [
-                      [f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in hf_indices]
+                      [f"{hf_prefix}.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in hf_indices]
                       for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wo_scale": [
-                      [f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv" for i in hf_indices]
+                      [f"{hf_prefix}.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv" for i in hf_indices]
                       for e in range(num_experts)
                   ],
               }
@@ -1061,21 +1065,19 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
           mapping.update(  # pyrefly: ignore[no-matching-overload]
               {
                   f"{prefix}-mlp-routed_experts-wo": [
-                      f"model.language_model.layers.{i}.mlp.experts.down_proj" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.mlp.experts.down_proj" for i in hf_indices
                   ],
                   (f"{prefix}-mlp-routed_experts-wi_0", f"{prefix}-mlp-routed_experts-wi_1"): [
-                      f"model.language_model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
+                      f"{hf_prefix}.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices
                   ],
               }
           )
       else:
         mapping.update(
             {
-                f"{prefix}-mlp-wi_0-kernel": [
-                    f"model.language_model.layers.{i}.mlp.gate_proj.weight" for i in hf_indices
-                ],
-                f"{prefix}-mlp-wi_1-kernel": [f"model.language_model.layers.{i}.mlp.up_proj.weight" for i in hf_indices],
-                f"{prefix}-mlp-wo-kernel": [f"model.language_model.layers.{i}.mlp.down_proj.weight" for i in hf_indices],
+                f"{prefix}-mlp-wi_0-kernel": [f"{hf_prefix}.layers.{i}.mlp.gate_proj.weight" for i in hf_indices],
+                f"{prefix}-mlp-wi_1-kernel": [f"{hf_prefix}.layers.{i}.mlp.up_proj.weight" for i in hf_indices],
+                f"{prefix}-mlp-wo-kernel": [f"{hf_prefix}.layers.{i}.mlp.down_proj.weight" for i in hf_indices],
             }
         )
   else:
@@ -1084,10 +1086,8 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       prefix = f"params-decoder-layers_{i}"
 
       # Layer Norms
-      mapping[f"{prefix}-input_layernorm-scale"] = f"model.language_model.layers.{i}.input_layernorm.weight"
-      mapping[f"{prefix}-post_attention_layernorm-scale"] = (
-          f"model.language_model.layers.{i}.post_attention_layernorm.weight"
-      )
+      mapping[f"{prefix}-input_layernorm-scale"] = f"{hf_prefix}.layers.{i}.input_layernorm.weight"
+      mapping[f"{prefix}-post_attention_layernorm-scale"] = f"{hf_prefix}.layers.{i}.post_attention_layernorm.weight"
 
       block_idx = i % layer_cycle_interval
       is_full_attention_layer = (block_idx + 1) % layer_cycle_interval == 0
@@ -1095,28 +1095,28 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       if is_full_attention_layer:
         mapping.update(
             {
-                f"{prefix}-attention-attention-query-kernel": f"model.language_model.layers.{i}.self_attn.q_proj.weight",
-                f"{prefix}-attention-attention-key-kernel": f"model.language_model.layers.{i}.self_attn.k_proj.weight",
-                f"{prefix}-attention-attention-value-kernel": f"model.language_model.layers.{i}.self_attn.v_proj.weight",
-                f"{prefix}-attention-attention-out-kernel": f"model.language_model.layers.{i}.self_attn.o_proj.weight",
-                f"{prefix}-attention-attention-query_norm-scale": f"model.language_model.layers.{i}.self_attn.q_norm.weight",
-                f"{prefix}-attention-attention-key_norm-scale": f"model.language_model.layers.{i}.self_attn.k_norm.weight",
+                f"{prefix}-attention-attention-query-kernel": f"{hf_prefix}.layers.{i}.self_attn.q_proj.weight",
+                f"{prefix}-attention-attention-key-kernel": f"{hf_prefix}.layers.{i}.self_attn.k_proj.weight",
+                f"{prefix}-attention-attention-value-kernel": f"{hf_prefix}.layers.{i}.self_attn.v_proj.weight",
+                f"{prefix}-attention-attention-out-kernel": f"{hf_prefix}.layers.{i}.self_attn.o_proj.weight",
+                f"{prefix}-attention-attention-query_norm-scale": f"{hf_prefix}.layers.{i}.self_attn.q_norm.weight",
+                f"{prefix}-attention-attention-key_norm-scale": f"{hf_prefix}.layers.{i}.self_attn.k_norm.weight",
             }
         )
         if is_quantized:
           mapping.update(
               {
                   f"{prefix}-attention-attention-query-kernel_scale": (
-                      f"model.language_model.layers.{i}.self_attn.q_proj.weight_scale_inv"
+                      f"{hf_prefix}.layers.{i}.self_attn.q_proj.weight_scale_inv"
                   ),
                   f"{prefix}-attention-attention-key-kernel_scale": (
-                      f"model.language_model.layers.{i}.self_attn.k_proj.weight_scale_inv"
+                      f"{hf_prefix}.layers.{i}.self_attn.k_proj.weight_scale_inv"
                   ),
                   f"{prefix}-attention-attention-value-kernel_scale": (
-                      f"model.language_model.layers.{i}.self_attn.v_proj.weight_scale_inv"
+                      f"{hf_prefix}.layers.{i}.self_attn.v_proj.weight_scale_inv"
                   ),
                   f"{prefix}-attention-attention-out-kernel_scale": (
-                      f"model.language_model.layers.{i}.self_attn.o_proj.weight_scale_inv"
+                      f"{hf_prefix}.layers.{i}.self_attn.o_proj.weight_scale_inv"
                   ),
               }
           )
@@ -1126,36 +1126,36 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
             {
                 # Provide a tuple of HF keys so MaxText concatenates them into qkvz
                 f"{prefix}-attention-in_proj_qkvz-kernel": (
-                    f"model.language_model.layers.{i}.linear_attn.in_proj_qkv.weight",
-                    f"model.language_model.layers.{i}.linear_attn.in_proj_z.weight",
+                    f"{hf_prefix}.layers.{i}.linear_attn.in_proj_qkv.weight",
+                    f"{hf_prefix}.layers.{i}.linear_attn.in_proj_z.weight",
                 ),
                 # Provide a tuple of HF keys so MaxText concatenates them into ba
                 f"{prefix}-attention-in_proj_ba-kernel": (
-                    f"model.language_model.layers.{i}.linear_attn.in_proj_b.weight",
-                    f"model.language_model.layers.{i}.linear_attn.in_proj_a.weight",
+                    f"{hf_prefix}.layers.{i}.linear_attn.in_proj_b.weight",
+                    f"{hf_prefix}.layers.{i}.linear_attn.in_proj_a.weight",
                 ),
-                f"{prefix}-attention-conv1d-kernel": f"model.language_model.layers.{i}.linear_attn.conv1d.weight",
-                f"{prefix}-attention-A_log": f"model.language_model.layers.{i}.linear_attn.A_log",
-                f"{prefix}-attention-dt_bias": f"model.language_model.layers.{i}.linear_attn.dt_bias",
-                f"{prefix}-attention-norm-rms_norm-scale": f"model.language_model.layers.{i}.linear_attn.norm.weight",
-                f"{prefix}-attention-out_proj-kernel": f"model.language_model.layers.{i}.linear_attn.out_proj.weight",
+                f"{prefix}-attention-conv1d-kernel": f"{hf_prefix}.layers.{i}.linear_attn.conv1d.weight",
+                f"{prefix}-attention-A_log": f"{hf_prefix}.layers.{i}.linear_attn.A_log",
+                f"{prefix}-attention-dt_bias": f"{hf_prefix}.layers.{i}.linear_attn.dt_bias",
+                f"{prefix}-attention-norm-rms_norm-scale": f"{hf_prefix}.layers.{i}.linear_attn.norm.weight",
+                f"{prefix}-attention-out_proj-kernel": f"{hf_prefix}.layers.{i}.linear_attn.out_proj.weight",
             }
         )
         if is_quantized:
           mapping.update(
               {
                   f"{prefix}-attention-in_proj_qkvz-kernel_scale": (
-                      f"model.language_model.layers.{i}.linear_attn.in_proj_qkv.weight_scale_inv",
-                      f"model.language_model.layers.{i}.linear_attn.in_proj_z.weight_scale_inv",
+                      f"{hf_prefix}.layers.{i}.linear_attn.in_proj_qkv.weight_scale_inv",
+                      f"{hf_prefix}.layers.{i}.linear_attn.in_proj_z.weight_scale_inv",
                   ),
                   f"{prefix}-attention-out_proj-kernel_scale": (
-                      f"model.language_model.layers.{i}.linear_attn.out_proj.weight_scale_inv"
+                      f"{hf_prefix}.layers.{i}.linear_attn.out_proj.weight_scale_inv"
                   ),
               }
           )
 
       # MLP: Gates and Shared Experts (MoE) or Dense MLP
-      hf_mlp = f"model.language_model.layers.{i}.mlp"
+      hf_mlp = f"{hf_prefix}.layers.{i}.mlp"
 
       if num_experts > 1:
         mapping.update(
@@ -1182,36 +1182,33 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
           mapping.update(
               {
                   f"{prefix}-mlp-routed_experts-wi_0": [
-                      f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)
+                      f"{hf_prefix}.layers.{i}.mlp.experts.{e}.gate_proj.weight" for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wi_0_scale": [
-                      f"model.language_model.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv"
-                      for e in range(num_experts)
+                      f"{hf_prefix}.layers.{i}.mlp.experts.{e}.gate_proj.weight_scale_inv" for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wi_1": [
-                      f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight" for e in range(num_experts)
+                      f"{hf_prefix}.layers.{i}.mlp.experts.{e}.up_proj.weight" for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wi_1_scale": [
-                      f"model.language_model.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv"
-                      for e in range(num_experts)
+                      f"{hf_prefix}.layers.{i}.mlp.experts.{e}.up_proj.weight_scale_inv" for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wo": [
-                      f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight" for e in range(num_experts)
+                      f"{hf_prefix}.layers.{i}.mlp.experts.{e}.down_proj.weight" for e in range(num_experts)
                   ],
                   f"{prefix}-mlp-routed_experts-wo_scale": [
-                      f"model.language_model.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv"
-                      for e in range(num_experts)
+                      f"{hf_prefix}.layers.{i}.mlp.experts.{e}.down_proj.weight_scale_inv" for e in range(num_experts)
                   ],
               }
           )
         else:
           mapping.update(  # pyrefly: ignore[no-matching-overload]
               {
-                  f"{prefix}-mlp-routed_experts-wo": f"model.language_model.layers.{i}.mlp.experts.down_proj",
+                  f"{prefix}-mlp-routed_experts-wo": f"{hf_prefix}.layers.{i}.mlp.experts.down_proj",
                   (
                       f"{prefix}-mlp-routed_experts-wi_0",
                       f"{prefix}-mlp-routed_experts-wi_1",
-                  ): f"model.language_model.layers.{i}.mlp.experts.gate_up_proj",
+                  ): f"{hf_prefix}.layers.{i}.mlp.experts.gate_up_proj",
               }
           )
       else:
@@ -2620,6 +2617,42 @@ def QWEN3_NNX_TO_VLLM_PARAM_HOOK_FN(target_shape=None):
       transformation functions.
   """
   return {}
+
+
+def _qwen3_8_wrap_config(config):
+  """Wraps a flat HuggingFace text config in a text_config dictionary if not already present."""
+  if "text_config" in config:
+    return config
+  return {"text_config": config}
+
+
+def QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(
+    config,
+    maxtext_config,
+    scan_layers=False,
+):
+  """Returns parameter mappings for the text-only Qwen3.8 checkpoint."""
+  return QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(
+      _qwen3_8_wrap_config(config),
+      maxtext_config,
+      scan_layers=scan_layers,
+      hf_prefix="model",
+  )
+
+
+def QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+    config,
+    maxtext_config,
+    scan_layers=False,
+    saving_to_hf=False,
+):
+  """Creates parameter transformation functions for Qwen3.8 between MaxText and HuggingFace formats."""
+  return QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+      _qwen3_8_wrap_config(config),
+      maxtext_config,
+      scan_layers,
+      saving_to_hf,
+  )
 
 
 def LLAMA31_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -4554,6 +4587,7 @@ PARAM_MAPPING = {
     "qwen3.5-35b-a3b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-9b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "qwen3.8-2.4t-a95b": QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_MAPPING,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4615,6 +4649,7 @@ HOOK_FNS = {
     "qwen3.5-35b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.5-9b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "qwen3.8-2.4t-a95b": QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,

@@ -791,6 +791,307 @@ class ParamMappingTest(unittest.TestCase):
     np.testing.assert_array_equal(extracted["Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid"], np.zeros((4, 2)))
     np.testing.assert_array_equal(extracted["MoEBiasVar-decoder-layers_3-mlp-MoeBlock_0-gate-bias"], np.ones((4,)))
 
+  def _make_qwen3_text_config(self, num_hidden_layers=8, num_experts=2):
+    """Builds a minimal Qwen3.5/Qwen3.8 HF text config for testing."""
+    return {
+        "vocab_size": 1024,
+        "hidden_size": 128,
+        "num_hidden_layers": num_hidden_layers,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 32,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "linear_key_head_dim": 16,
+        "linear_value_head_dim": 16,
+        "linear_conv_kernel_dim": 4,
+        "moe_intermediate_size": 64,
+        "shared_expert_intermediate_size": 64,
+        "num_experts": num_experts,
+        "full_attention_interval": 4,
+    }
+
+  def _make_qwen3_maxtext_config(
+      self,
+      num_experts=2,
+      cycle_interval=4,
+      weight_dtype="bfloat16",
+      use_multimodal=False,
+  ):
+    """Builds a mock MaxText config for Qwen3.5/Qwen3.8 mapping tests."""
+    maxtext_config = mock.Mock()
+    maxtext_config.num_decoder_layers = None
+    maxtext_config.weight_block_size = None
+    maxtext_config.num_experts = num_experts
+    maxtext_config.inhomogeneous_layer_cycle_interval = cycle_interval
+    maxtext_config.weight_dtype = weight_dtype
+    maxtext_config.use_multimodal = use_multimodal
+    return maxtext_config
+
+  def test_qwen3_5_regression_scanned_and_unscanned(self):
+    """Verifies Qwen3.5 mappings and shape tables across scanned/unscanned and BF16/FP8."""
+    text_cfg = self._make_qwen3_text_config(num_hidden_layers=8, num_experts=2)
+    wrapped_cfg = {"text_config": text_cfg}
+
+    for scan_layers in (False, True):
+      for weight_dtype in ("bfloat16", "float8_e4m3fn"):
+        mt_cfg = self._make_qwen3_maxtext_config(weight_dtype=weight_dtype)
+        mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(wrapped_cfg, mt_cfg, scan_layers=scan_layers)
+        self.assertEqual(
+            mapping["params-token_embedder-embedding"],
+            "model.language_model.embed_tokens.weight",
+        )
+        self.assertEqual(
+            mapping["params-decoder-decoder_norm-scale"],
+            "model.language_model.norm.weight",
+        )
+        self.assertEqual(
+            mapping["params-decoder-logits_dense-kernel"],
+            "lm_head.weight",
+        )
+
+        if scan_layers:
+          gdn_prefix = "params-decoder-layers-layer_0"
+          attn_prefix = "params-decoder-layers-layer_3"
+          self.assertEqual(
+              mapping[f"{gdn_prefix}-attention-in_proj_qkvz-kernel"],
+              [
+                  (
+                      "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+                      "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+                  ),
+                  (
+                      "model.language_model.layers.4.linear_attn.in_proj_qkv.weight",
+                      "model.language_model.layers.4.linear_attn.in_proj_z.weight",
+                  ),
+              ],
+          )
+          self.assertEqual(
+              mapping[f"{attn_prefix}-attention-attention-query-kernel"],
+              [
+                  "model.language_model.layers.3.self_attn.q_proj.weight",
+                  "model.language_model.layers.7.self_attn.q_proj.weight",
+              ],
+          )
+          if weight_dtype == "float8_e4m3fn":
+            self.assertEqual(
+                mapping[f"{gdn_prefix}-mlp-routed_experts-wo_scale"],
+                [
+                    [
+                        "model.language_model.layers.0.mlp.experts.0.down_proj.weight_scale_inv",
+                        "model.language_model.layers.4.mlp.experts.0.down_proj.weight_scale_inv",
+                    ],
+                    [
+                        "model.language_model.layers.0.mlp.experts.1.down_proj.weight_scale_inv",
+                        "model.language_model.layers.4.mlp.experts.1.down_proj.weight_scale_inv",
+                    ],
+                ],
+            )
+          else:
+            self.assertEqual(
+                mapping[
+                    (
+                        f"{gdn_prefix}-mlp-routed_experts-wi_0",
+                        f"{gdn_prefix}-mlp-routed_experts-wi_1",
+                    )
+                ],
+                [
+                    "model.language_model.layers.0.mlp.experts.gate_up_proj",
+                    "model.language_model.layers.4.mlp.experts.gate_up_proj",
+                ],
+            )
+        else:
+          self.assertEqual(
+              mapping["params-decoder-layers_0-attention-in_proj_qkvz-kernel"],
+              (
+                  "model.language_model.layers.0.linear_attn.in_proj_qkv.weight",
+                  "model.language_model.layers.0.linear_attn.in_proj_z.weight",
+              ),
+          )
+          self.assertEqual(
+              mapping["params-decoder-layers_3-attention-attention-query-kernel"],
+              "model.language_model.layers.3.self_attn.q_proj.weight",
+          )
+          if weight_dtype == "float8_e4m3fn":
+            self.assertEqual(
+                mapping["params-decoder-layers_0-mlp-routed_experts-wo_scale"],
+                [
+                    "model.language_model.layers.0.mlp.experts.0.down_proj.weight_scale_inv",
+                    "model.language_model.layers.0.mlp.experts.1.down_proj.weight_scale_inv",
+                ],
+            )
+          else:
+            self.assertEqual(
+                mapping[
+                    (
+                        "params-decoder-layers_0-mlp-routed_experts-wi_0",
+                        "params-decoder-layers_0-mlp-routed_experts-wi_1",
+                    )
+                ],
+                "model.language_model.layers.0.mlp.experts.gate_up_proj",
+            )
+
+    shapes = hf_shape.QWEN3_5_HF_WEIGHTS_TO_SHAPE(wrapped_cfg)
+    self.assertIn("model.language_model.embed_tokens.weight", shapes)
+    self.assertIn("model.language_model.norm.weight", shapes)
+    self.assertIn("lm_head.weight", shapes)
+    qkv_key = "model.language_model.layers.0.linear_attn.in_proj_qkv.weight"
+    z_key = "model.language_model.layers.0.linear_attn.in_proj_z.weight"
+    self.assertEqual(shapes[(qkv_key, z_key)], (shapes[qkv_key], shapes[z_key]))
+
+  def test_qwen3_8_naming_and_composite_destinations(self):
+    """Verifies Qwen3.8 model.* naming and composite destination ordering."""
+    text_cfg = self._make_qwen3_text_config(num_hidden_layers=8, num_experts=2)
+    mt_cfg_bf16 = self._make_qwen3_maxtext_config(weight_dtype="bfloat16")
+    mt_cfg_fp8 = self._make_qwen3_maxtext_config(weight_dtype="float8_e4m3fn")
+
+    mapping_unscanned = param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg_bf16, scan_layers=False)
+    mapping_unscanned_fp8 = param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg_fp8, scan_layers=False)
+    self.assertEqual(
+        mapping_unscanned["params-token_embedder-embedding"],
+        "model.embed_tokens.weight",
+    )
+    self.assertEqual(
+        mapping_unscanned["params-decoder-decoder_norm-scale"],
+        "model.norm.weight",
+    )
+    self.assertEqual(
+        mapping_unscanned["params-decoder-logits_dense-kernel"],
+        "lm_head.weight",
+    )
+    self.assertEqual(
+        mapping_unscanned["params-decoder-layers_3-attention-attention-query-kernel"],
+        "model.layers.3.self_attn.q_proj.weight",
+    )
+    self.assertEqual(
+        mapping_unscanned_fp8["params-decoder-layers_0-mlp-routed_experts-wo"],
+        [
+            "model.layers.0.mlp.experts.0.down_proj.weight",
+            "model.layers.0.mlp.experts.1.down_proj.weight",
+        ],
+    )
+
+    # Composite GDN destinations preserve (qkv, z) and (b, a) ordering.
+    self.assertEqual(
+        mapping_unscanned["params-decoder-layers_0-attention-in_proj_qkvz-kernel"],
+        (
+            "model.layers.0.linear_attn.in_proj_qkv.weight",
+            "model.layers.0.linear_attn.in_proj_z.weight",
+        ),
+    )
+    self.assertEqual(
+        mapping_unscanned["params-decoder-layers_0-attention-in_proj_ba-kernel"],
+        (
+            "model.layers.0.linear_attn.in_proj_b.weight",
+            "model.layers.0.linear_attn.in_proj_a.weight",
+        ),
+    )
+
+    # Composite MaxText keys for expert gate/up projections remain unchanged.
+    unscanned_wi_key = (
+        "params-decoder-layers_0-mlp-routed_experts-wi_0",
+        "params-decoder-layers_0-mlp-routed_experts-wi_1",
+    )
+    self.assertEqual(
+        mapping_unscanned[unscanned_wi_key],
+        "model.layers.0.mlp.experts.gate_up_proj",
+    )
+
+    # Shape table atomic and composite destination lookups.
+    shapes = hf_shape.QWEN3_8_HF_WEIGHTS_TO_SHAPE(text_cfg)
+    self.assertEqual(shapes["model.embed_tokens.weight"], [1024, 128])
+    self.assertEqual(shapes["model.norm.weight"], [128])
+    self.assertEqual(shapes["lm_head.weight"], [1024, 128])
+
+    qkv_key = "model.layers.0.linear_attn.in_proj_qkv.weight"
+    z_key = "model.layers.0.linear_attn.in_proj_z.weight"
+    self.assertEqual(shapes[(qkv_key, z_key)], (shapes[qkv_key], shapes[z_key]))
+
+    b_key = "model.layers.0.linear_attn.in_proj_b.weight"
+    a_key = "model.layers.0.linear_attn.in_proj_a.weight"
+    self.assertEqual(shapes[(b_key, a_key)], (shapes[b_key], shapes[a_key]))
+
+  def test_qwen3_8_scanned_ordering(self):
+    """Verifies Qwen3.8 scanned block ordering across a four-layer cycle."""
+    text_cfg = self._make_qwen3_text_config(num_hidden_layers=8, num_experts=2)
+    mt_cfg = self._make_qwen3_maxtext_config(cycle_interval=4, weight_dtype="bfloat16")
+    mt_cfg_fp8 = self._make_qwen3_maxtext_config(cycle_interval=4, weight_dtype="float8_e4m3fn")
+    mapping = param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg, scan_layers=True)
+    mapping_fp8 = param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg_fp8, scan_layers=True)
+
+    expected_layer_groups = {
+        0: [0, 4],
+        1: [1, 5],
+        2: [2, 6],
+        3: [3, 7],
+    }
+    for block_idx, hf_indices in expected_layer_groups.items():
+      prefix = f"params-decoder-layers-layer_{block_idx}"
+      self.assertEqual(
+          mapping[f"{prefix}-input_layernorm-scale"],
+          [f"model.layers.{i}.input_layernorm.weight" for i in hf_indices],
+      )
+      scanned_wi_key = (
+          f"{prefix}-mlp-routed_experts-wi_0",
+          f"{prefix}-mlp-routed_experts-wi_1",
+      )
+      self.assertEqual(
+          mapping[scanned_wi_key],
+          [f"model.layers.{i}.mlp.experts.gate_up_proj" for i in hf_indices],
+      )
+      self.assertEqual(
+          mapping_fp8[f"{prefix}-mlp-routed_experts-wi_0"],
+          [
+              [f"model.layers.{i}.mlp.experts.0.gate_proj.weight" for i in hf_indices],
+              [f"model.layers.{i}.mlp.experts.1.gate_proj.weight" for i in hf_indices],
+          ],
+      )
+
+  def test_qwen3_5_and_qwen3_8_namespace_boundaries_and_config_forms(self):
+    """Verifies vision namespace preservation and flat/wrapped config compatibility."""
+    text_cfg = self._make_qwen3_text_config(num_hidden_layers=4, num_experts=2)
+    wrapped_cfg = {
+        "text_config": text_cfg,
+        "vision_config": {"depth": 2},
+    }
+    mt_cfg_mm = self._make_qwen3_maxtext_config(use_multimodal=True)
+    mm_mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(wrapped_cfg, mt_cfg_mm, scan_layers=False)
+    self.assertEqual(
+        mm_mapping["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-patch_embed-proj-kernel"],
+        "model.visual.patch_embed.proj.weight",
+    )
+    self.assertEqual(
+        mm_mapping["params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_0-attn-attn-query-kernel"],
+        "model.visual.blocks.0.attn.qkv.weight",
+    )
+
+    # Qwen3.8 wrappers accept both flat and wrapped configs.
+    mt_cfg = self._make_qwen3_maxtext_config(use_multimodal=False)
+    for scan_layers in (False, True):
+      self.assertEqual(
+          param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING(text_cfg, mt_cfg, scan_layers=scan_layers),
+          param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_MAPPING({"text_config": text_cfg}, mt_cfg, scan_layers=scan_layers),
+      )
+      self.assertEqual(
+          set(
+              param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+                  text_cfg, mt_cfg, scan_layers=scan_layers, saving_to_hf=False
+              ).keys()
+          ),
+          set(
+              param_mapping.QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+                  {"text_config": text_cfg},
+                  mt_cfg,
+                  scan_layers=scan_layers,
+                  saving_to_hf=False,
+              ).keys()
+          ),
+      )
+    self.assertEqual(
+        hf_shape.QWEN3_8_HF_WEIGHTS_TO_SHAPE(text_cfg),
+        hf_shape.QWEN3_8_HF_WEIGHTS_TO_SHAPE({"text_config": text_cfg}),
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

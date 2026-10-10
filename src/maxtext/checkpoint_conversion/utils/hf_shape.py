@@ -692,7 +692,7 @@ def QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE(config):
       )
 
 
-def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
+def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config, *, hf_prefix: str = "model.language_model"):
   """Returns mapping between HuggingFace Qwen3.5 weights path and their shape."""
 
   if "text_config" in config:
@@ -726,13 +726,13 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
 
   # --- Initialize Mapping ---
   mapping = {
-      "model.language_model.embed_tokens.weight": [vocab_size, hidden_size],
-      "model.language_model.norm.weight": [hidden_size],
+      f"{hf_prefix}.embed_tokens.weight": [vocab_size, hidden_size],
+      f"{hf_prefix}.norm.weight": [hidden_size],
       "lm_head.weight": [vocab_size, hidden_size],
   }
 
   for layer_idx in range(num_hidden_layers):
-    layer_prefix = f"model.language_model.layers.{layer_idx}"
+    layer_prefix = f"{hf_prefix}.layers.{layer_idx}"
 
     # Standard Layer Norms
     mapping[f"{layer_prefix}.input_layernorm.weight"] = [hidden_size]
@@ -809,6 +809,11 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
       )
 
   return mapping
+
+
+def QWEN3_8_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns HF weight shapes for the text-only Qwen3.8 checkpoint."""
+  return QWEN3_5_HF_WEIGHTS_TO_SHAPE(config, hf_prefix="model")
 
 
 def GPT_OSS_HF_WEIGHTS_TO_SHAPE(config):
@@ -1363,5 +1368,6 @@ HF_SHAPE = {
     "qwen3.5-35b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-397b-a17b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.8-2.4t-a95b": QWEN3_8_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
 }
