@@ -1129,6 +1129,7 @@ class Attention(nnx.Module):
     try:
       # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
+      from tpu_inference.layers.common.attention_interface import attention as attention_op
       from tpu_inference.layers.common.attention_interface import sharded_ragged_paged_attention as rpa_ops
     except ImportError as e:
       raise ImportError(
@@ -1161,42 +1162,44 @@ class Attention(nnx.Module):
     update_kv_cache = not self.share_kv_layer
 
     sinks = self.sinks.astype(jnp.float32) if self.sinks is not None else None
-    if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
-      from tpu_inference.layers.common.cp_attention import dcp_forward  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
-
-      kv_cache, output = dcp_forward(
-          self.mesh,
+    if self.mesh is not None and (
+        ("dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1)
+        or ("pcp" in self.mesh.shape and self.mesh.shape["pcp"] > 1)
+    ):
+      kv_cache, output = attention_op(
+          rpa_kv_cache,
           query,
           key,
           value,
-          rpa_kv_cache,
           md,
+          self.mesh,
           sm_scale=1.0,
           attention_chunk_size=attention_chunk_size,
           q_scale=q_scale,
           k_scale=k_scale,
           v_scale=v_scale,
+          sinks=sinks,
+          update_kv_cache=update_kv_cache,
       )
-      return output, kv_cache
-
-    output, kv_cache = rpa_ops(
-        self.mesh,
-        query,
-        key,
-        value,
-        rpa_kv_cache,
-        md.seq_lens,
-        md.block_tables,
-        md.query_start_loc,
-        md.request_distribution,
-        sinks,
-        1.0,
-        attention_chunk_size,
-        q_scale,
-        k_scale,
-        v_scale,
-        update_kv_cache=update_kv_cache,
-    )
+    else:
+      output, kv_cache = rpa_ops(
+          self.mesh,
+          query,
+          key,
+          value,
+          rpa_kv_cache,
+          md.seq_lens,
+          md.block_tables,
+          md.query_start_loc,
+          md.request_distribution,
+          sinks,
+          1.0,
+          attention_chunk_size,
+          q_scale,
+          k_scale,
+          v_scale,
+          update_kv_cache=update_kv_cache,
+      )
     return output, kv_cache
 
   def __call__(
