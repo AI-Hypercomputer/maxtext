@@ -253,8 +253,8 @@ lm_head_weight_grad_in_kernel_order: None  # on for an untied model under shard_
 # not under training_objective: block_diffusion (whose logits paths, the shifted-alignment gather in pre-training and
 # Tunix's diffusion loss in SFT, have not been validated with vocab-sharded logits). None also stays off under a
 # custom_mesh_and_rule and with expert or context parallelism, which it has not been measured on (true still applies
-# it there). It ships off (false) for now: set it to None, or true, to opt in.
-lm_head_vocab_parallel: false
+# it there).
+lm_head_vocab_parallel: None
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.

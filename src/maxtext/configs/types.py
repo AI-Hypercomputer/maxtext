@@ -742,7 +742,7 @@ class LogitsAndLoss(BaseModel):
       ),
   )
   lm_head_vocab_parallel: bool | None = Field(
-      False,
+      None,
       description=(
           "Shard the untied LM head on its vocab dimension instead of its embed dimension, so that the per-step "
           "FSDP all-gather of the head kernel and the reduce-scatter of its gradient move onto the hidden state "
@@ -752,7 +752,7 @@ class LogitsAndLoss(BaseModel):
           "layout fix rather than a shard_mode feature -- auto reaches the same layout and the same speedup -- so "
           "None means on under either shard_mode wherever it applies: an untied head, without MTP, vocab tiling "
           "or training_objective=block_diffusion, and only with the default rule set and no expert or context "
-          "parallelism, the setting it was measured on. Defaults to False for now, so it is opt-in."
+          "parallelism, the setting it was measured on."
       ),
   )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
@@ -6251,11 +6251,10 @@ class MaxTextConfig(
     `_vocab_parallel_head_default_applies`). An explicit True still applies it there.
 
     Unlike the two kernel-order flags, this one is not about `shard_mode` at all: it is a
-    layout fix, and `auto` reaches the same layout and the same speedup when asked to. So
-    `None` resolves to on in **both** modes, although the field itself still defaults to
-    `False` (opt-in). Under explicit the orientation is a guarantee and under auto it is a
-    request that GSPMD has honoured on every model measured; the fallback if it ever does
-    not is the default orientation, i.e. today's behaviour.
+    layout fix, and `auto` reaches the same layout and the same speedup when asked to. It
+    therefore defaults on in **both** modes. Under explicit the orientation is a guarantee
+    and under auto it is a request that GSPMD has honoured on every model measured; the
+    fallback if it ever does not is the default orientation, i.e. today's behaviour.
     """
     head_is_fp8 = is_fp8_dtype(get_weight_dtype(self, "logits_dense"))
     applicable = (
