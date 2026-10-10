@@ -36,12 +36,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.configs import types
-
-try:
-  # lineage_adapter is Google-internal and excluded from the open-source export.
-  from maxtext.experimental.lineage import lineage_adapter
-except ImportError:
-  lineage_adapter = None
+from maxtext.experimental.lineage import lineage_adapter
 from maxtext.multimodal import processor as mm_processor
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
@@ -1710,7 +1705,7 @@ def setup_initial_state(
 
   # Initialization
   with axis_rules(config.logical_axis_rules):
-    native = lineage_adapter is not None and lineage_adapter.is_native(config)
+    native = lineage_adapter.is_native(config)
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
@@ -1730,7 +1725,6 @@ def setup_initial_state(
     )
     if native and restored is None and raw_params is None and config.load_parameters_path:
       # The Lineage-native model restores MaxText-layout params against its own abstract target.
-      assert lineage_adapter is not None
       raw_params = checkpointing.load_params_from_path(
           config.load_parameters_path,
           lineage_adapter.maxtext_restore_target(config, mesh),
@@ -1756,7 +1750,6 @@ def setup_initial_state(
     )()
     if raw_params and native:
       # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
-      assert lineage_adapter is not None
       lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
     elif raw_params:
       # Params-only load (base model weights): overlay restored weights, keep init for everything else.
@@ -2064,7 +2057,7 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if getattr(config, "use_lineage", False) and lineage_adapter is not None:
+  if getattr(config, "use_lineage", False):
     dcn_parallelism = (
         max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
     )

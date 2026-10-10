@@ -48,6 +48,7 @@ from jax.sharding import Mesh
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
+from maxtext.experimental.lineage import lineage_adapter
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.integration.vllm.convert_utils import _partition_size
 from maxtext.layers import nnx_wrappers
@@ -57,12 +58,6 @@ from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx, sharding
 import numpy as np
 from orbax import checkpoint as ocp
-
-try:
-  # lineage_adapter is Google-internal and excluded from the open-source export.
-  from maxtext.experimental.lineage import lineage_adapter  # pylint: disable=g-import-not-at-top
-except ImportError:
-  lineage_adapter = None
 
 try:
   from orbax.checkpoint.metadata import ArrayMetadata as _OrbaxArrayMetadata
@@ -543,7 +538,7 @@ def from_config(
 
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""
-  if rngs is not None and lineage_adapter is not None and lineage_adapter.is_native(config):
+  if rngs is not None and lineage_adapter.is_native(config):
     return lineage_adapter.LineageTransformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   if rngs is not None:
     return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)

@@ -1,0 +1,149 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# model config for DeepSeek V3 - 671B that uses Lineage
+
+# For DeepSeek default device-limited routing,
+# please set n_routing_groups=8 and topk_routing_group=4 in your command-line arguments.
+
+base_emb_dim: 7168
+base_num_query_heads: 128
+base_num_kv_heads: 128
+base_mlp_dim: 18432
+base_moe_mlp_dim: 2048
+base_num_decoder_layers: 61
+first_num_dense_layers: 3
+mlp_activations: ["silu","linear"]
+vocab_size: 129280
+enable_dropout: false
+logits_via_embedding: false
+normalization_layer_epsilon: 1.0e-6
+num_experts: 256
+num_experts_per_tok: 8
+n_routing_groups: 8
+topk_routing_group: 4
+shared_experts: 1
+routed_scaling_factor: 2.5
+routed_score_func: "sigmoid"
+# Loss-free load balancing: each step adds
+# routed_bias_update_rate * sign(mean_load - load) to the routed gate bias.
+routed_bias: true
+routed_bias_update_rate: 0.001
+# Megatron-LM sigmoid-router seq_aux_loss (MaxText PR #5401): one loss per MoE
+# layer from the fp32 pre-bias scores, summed over the decoder and MTP MoE
+# layers into moe_lb_loss, weighted by load_balance_loss_weight.
+moe_use_megatron_seq_aux_loss: true
+load_balance_loss_weight: 0.01
+# fp32 expert selection: the bf16 router projection accumulates in fp32 and the
+# sigmoid, bias add and top-k run in fp32. The router weights stay bf16.
+float32_gate_logits: true
+decoder_block: "deepseek"
+# MLA
+attention_type: "mla"
+q_lora_rank: 1536
+kv_lora_rank: 512
+qk_nope_head_dim: 128
+qk_rope_head_dim: 64
+v_head_dim: 128
+mscale: 1.0
+sa_q_layout: "SEQ_MINOR"
+sa_k_layout: "SEQ_MINOR"
+sa_v_layout: "HEAD_DIM_MINOR"
+# RoPE
+rope_type: "yarn"
+rope_max_timescale: 10_000 # DeepSeek uses  "rope_theta": 10000
+max_position_embeddings: 163840
+original_max_position_embeddings: 4096
+rope_factor: 40
+beta_fast: 32
+rope_interleave: true
+rope_truncate: true
+rope_attention_scaling: false
+use_lineage: true
+lineage_expert_permutation: "lpt"
+# fp8 routed-expert GMMs, mirroring MaxText's qwix fp8_full ("none" for bf16).
+lineage_quantization: "fp8_full"
+allow_split_physical_axes: true
+# Lineage MoE chunk size: each chunk processes capacity_factor times the average
+# local-expert tokens per device (the MoE stays dropless).
+capacity_factor: 3.0
+# MTP materializes its full logits; keep num_vocab_tiling=1 while it is on.
+mtp_num_layers: 1
+num_vocab_tiling: 1
+# MTP shifts the main decoder's token embeddings instead of looking the shifted
+# tokens up again. This saves a second embedding-table all-gather and a second
+# full-table gradient per step.
+mtp_reuse_input_embedding: true
+eval_per_device_batch_size: 1
+checkpoint_storage_concurrent_gb: 1024
+# Every slice reads the checkpoint from GCS itself instead of reading on slice 0
+# and broadcasting over DCN.
+enable_single_replica_ckpt_restoring: false
+# Run each precompiled train and eval program once on a synthetic batch during
+# initialization (the train state is unchanged). Reads no training data.
+warmup_programs_in_init: true
+# Runtime XLA flags (keep on a single double-quoted line):
+# - --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=128MiB, which lets XLA
+#   merge each layer's 12-13 per-tensor DCN gradient all-reduces (0.5-28 MiB
+#   each, above the 256 KiB default) into one ~62 MiB cross-slice collective
+#   (multi-slice only).
+# - --xla_tpu_dvfs_p_state=7, which sets the TPU's DVFS P-state to 7 (the
+#   default, -1, sets none).
+# - --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false and
+#   --xla_tpu_force_async_all_to_all=true, which keep the expert-shuffle ragged
+#   all-to-all async on the TensorCore instead of queueing it behind the FSDP
+#   all-gathers on SparseCore.
+# Never add --xla_tpu_aggressive_opt_barrier_removal; it strips the optimization
+# barriers Lineage's backward pass depends on.
+compile_xla_flags: "--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_offloading_copy_to_sparsecore=false --xla_tpu_enable_sparse_core_collective_offload_dense_all_to_all=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=500000 --xla_all_gather_latency_bound_threshold_in_bytes=1000000 --xla_tpu_pipeline_memory_host_transfers=false --xla_tpu_enable_data_parallel_all_reduce_opt=false --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=134217728 --xla_tpu_dvfs_p_state=7 --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false --xla_tpu_force_async_all_to_all=true"
+shard_mode: "explicit"
+sharding_tolerance: 1.0
+remove_size_one_mesh_axis_from_type: false
+override_logical_axis_rules: true
+# Physical (x, y, z, core) TPU v7x torus with a leading DCN axis. The DCN axis
+# has size num_slices (1 for a single slice; it is kept in the type because
+# remove_size_one_mesh_axis_from_type is false) and carries pure data
+# parallelism: MaxText-side activations split their batch over it, while
+# Lineage's logical axes below (activation_batch_attn -> fsdp_attention,
+# exp -> expert, embed_moe -> fsdp_moe) deliberately exclude it so that FSDP
+# and expert parallelism stay inside a slice and weights are replicated across
+# slices. The DCN gradient all-reduce is issued by Lineage's weight collection
+# (collect_along_axis over "dcn").
+mesh_axes: ['dcn', 'x', 'y', 'z', 'core']
+ici_parallelism: [1, 4, 4, 16, 2]
+dcn_parallelism: [-1, 1, 1, 1, 1]
+data_sharding: [['dcn', 'x', 'y', 'z'], ['core']]
+logical_axis_rules: [
+  ['embed', ['x', 'y', 'z', 'core']],
+  ['embed_vocab', ['x', 'y', 'z', 'core']],
+  ['embed_attn', ['x', 'y', 'z', 'core']],
+  ['q_lora', ['x', 'y', 'z', 'core']],
+  ['kv_lora', ['x', 'y', 'z', 'core']],
+  ['exp', ['x', 'y']],
+  ['expert_only', ['x', 'y']],
+  ['embed_moe', ['core', 'z']],
+  ['activation_batch', ['dcn', 'x', 'y', 'z']],
+  ['activation_batch_attn', ['x', 'y', 'z']],
+  ['activation_batch_moe', ['x', 'y']],
+  ['activation_length', ['core']],
+  ['activation_norm_length', ['core']],
+  ['activation_exp', ['x', 'y']],
+  ['activation_embed_and_logits_batch', ['dcn', 'x', 'y', 'z']],
+  # Flattened (batch * sequence) axis used by vocabulary_tiling.py. It must cover
+  # every axis that shards batch ('dcn','x','y','z') and sequence ('core'); Flax
+  # silently resolves unmatched logical names to None, which would replicate the
+  # per-chunk logits on all 512 devices instead of sharding them.
+  ['activation_embed_and_logits_batch_sequence', ['dcn', 'x', 'y', 'z', 'core']],
+  ['activation_kv_batch', ['dcn', 'x', 'y', 'z']],
+]
