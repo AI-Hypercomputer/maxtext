@@ -933,7 +933,12 @@ class RoutedMoE(nnx.Module):
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
 
-    if self.config.shard_exp_on_fsdp:
+    if self.config.shard_exp_on_fsdp and self.config.te_moe_block:
+      # Keep each expert matrix intact locally; gather the FSDP expert shards
+      # at TE's EP-only FFN boundary. Axis order is EP, then FSDP.
+      self.wi_kernel_axes = ("expert_weight_fsdp", None, "mlp_moe")
+      self.wo_kernel_axes = ("expert_weight_fsdp", "mlp_moe", None)
+    elif self.config.shard_exp_on_fsdp:
       # special sharding for dsv3
       self.wi_kernel_axes = ("embed_moe", None, "mlp_moe")
       self.wo_kernel_axes = ("embed_moe", "mlp_moe", None)
@@ -4783,6 +4788,13 @@ class RoutedMoE(nnx.Module):
 
     fsdp_size = self.mesh.shape.get("fsdp", 1)
     ep_size = self.mesh.shape.get(self._expert_parallelism_name, 1)
+    if self.config.shard_exp_on_fsdp:
+      if self._expert_parallelism_name != "expert":
+        raise ValueError("TE expert FSDP sharding currently requires the standard expert mesh axis.")
+      if self.num_experts % (ep_size * fsdp_size) != 0:
+        raise ValueError(
+            f"num_experts={self.num_experts} must be divisible by EP x FSDP={ep_size * fsdp_size}."
+        )
     if self.num_experts % ep_size != 0:
       raise ValueError(f"num_experts={self.num_experts} must be divisible by EP size={ep_size}.")
 
