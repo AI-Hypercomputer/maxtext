@@ -233,6 +233,43 @@ class NNXDecoderLayer(nnx.Module):
       return layer_output, kv_cache
 
 
+def forced_routed_experts_per_layer(forced_routed_experts: jax.Array, num_layers: int) -> jax.Array:
+  """Normalizes a batch's forced_routed_experts to a per-decoder-layer stack.
+
+  Every supported architecture is homogeneous-MoE, so the layer axis is simply
+  the decoder layer index.
+
+  Args:
+    forced_routed_experts: `[batch, seq, num_layers, top_k]` (per-layer) or
+      `[batch, seq, top_k]` (broadcast to every layer).
+    num_layers: Total decoder layers.
+
+  Returns:
+    Array shaped `[num_layers, batch, seq, top_k]`.
+
+  Raises:
+    ValueError: If forced_routed_experts is not 3D or 4D, or its layer axis
+      does not match `num_layers`.
+  """
+  fre = forced_routed_experts
+  if fre.ndim not in (3, 4):
+    raise ValueError(
+        "forced_routed_experts must be [batch, seq, top_k] (3D, broadcast to"
+        " every layer) or [batch, seq, num_layers, top_k] (4D, per-layer); got"
+        f" ndim={fre.ndim} with shape {fre.shape}."
+    )
+  if fre.ndim == 4:
+    if fre.shape[2] != num_layers:
+      raise ValueError(
+          "forced_routed_experts layer axis must equal the number of decoder"
+          f" layers ({num_layers}); got {fre.shape[2]} (shape {fre.shape})."
+      )
+    # [batch, seq, num_layers, top_k] -> [num_layers, batch, seq, top_k]
+    return jnp.moveaxis(fre, 2, 0)
+  # [batch, seq, top_k]: same forced routing for every layer.
+  return jnp.broadcast_to(fre[None], (num_layers,) + fre.shape)
+
+
 def reshape_forced_routed_experts_for_scan(
     forced_routed_experts: jax.Array,
     num_layers: int,
@@ -242,8 +279,7 @@ def reshape_forced_routed_experts_for_scan(
   """Reshapes a batch's forced_routed_experts into jax.lax.scan's xs layout.
 
   The outer scan runs `scan_length` iterations, each covering a cycle of
-  `layers_per_cycle` decoder layers. Every supported architecture is
-  homogeneous-MoE, so the layer axis is simply the decoder layer index.
+  `layers_per_cycle` decoder layers.
 
   Args:
     forced_routed_experts: `[batch, seq, num_layers, top_k]` (per-layer) or
@@ -258,20 +294,15 @@ def reshape_forced_routed_experts_for_scan(
   Raises:
     ValueError: If forced_routed_experts is not 3D or 4D.
   """
-  fre = forced_routed_experts
-  if fre.ndim not in (3, 4):
-    raise ValueError(
-        "forced_routed_experts must be [batch, seq, top_k] (3D, broadcast to"
-        " every layer) or [batch, seq, num_layers, top_k] (4D, per-layer); got"
-        f" ndim={fre.ndim} with shape {fre.shape}."
-    )
-  if fre.ndim == 4:
-    # [batch, seq, num_layers, top_k] -> [num_layers, batch, seq, top_k]
-    fre = jnp.moveaxis(fre, 2, 0)
-  else:
-    # [batch, seq, top_k]: same forced routing for every layer.
-    fre = jnp.broadcast_to(fre[None], (num_layers,) + fre.shape)
+  fre = forced_routed_experts_per_layer(forced_routed_experts, num_layers)
   return jnp.reshape(fre, (scan_length, layers_per_cycle) + fre.shape[1:])
+
+
+def _qwen3_hybrid_block_class(config):
+  """Returns the nested-scan block class for a Qwen3-Next-style hybrid decoder."""
+  if config.decoder_block == DecoderBlockType.QWEN3_5:
+    return qwen3_5.Qwen3_5ScannableBlock
+  return qwen3.Qwen3NextScannableBlock
 
 
 def deepstack_process(hidden_states, bidirectional_mask, visual_embeds):
@@ -486,8 +517,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
-    self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
-    self.is_qwen3_5 = self.config.decoder_block == DecoderBlockType.QWEN3_5
+    self.is_qwen3_hybrid = self.config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5)
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -598,8 +628,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
       self._init_scanned_gemma4(decoder_block_classes, rngs, mesh)
-    elif self.is_qwen3_next:
-      self._init_scanned_qwen3_next(rngs, mesh)
+    elif self.is_qwen3_hybrid:
+      self._init_scanned_qwen3_hybrid(rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
 
@@ -770,8 +800,8 @@ class NNXDecoder(nnx.Module):
         rngs=rngs,
     )
 
-  def _init_scanned_qwen3_next(self, rngs, mesh):
-    """Initializes scanned Qwen3-Next blocks with per-layer (rather than per-block) remat.
+  def _init_scanned_qwen3_hybrid(self, rngs, mesh):
+    """Initializes scanned Qwen3-Next/Qwen3.5 blocks with per-layer (rather than per-block) remat.
 
     Mirrors _init_scanned_gemma4: each block covers one period of the hybrid
     attention pattern and rematerializes its own sub-layers, so the outer apply
@@ -780,13 +810,14 @@ class NNXDecoder(nnx.Module):
     keep producing the same parameter tree.
     """
     config = self.config
+    block_cls = _qwen3_hybrid_block_class(config)
     block_length = config.inhomogeneous_layer_cycle_interval
     scan_length = config.num_decoder_layers // block_length
     num_remaining_layers = config.num_decoder_layers % block_length
     policy = self.get_remat_policy()
     if scan_length > 0:
       self.layers = self._create_scanned_layers(
-          qwen3.Qwen3NextScannableBlock,
+          block_cls,
           length=scan_length,
           metadata_axis_name="layers",
           rngs=rngs,
@@ -797,7 +828,7 @@ class NNXDecoder(nnx.Module):
     if num_remaining_layers > 0:
       # The remainder starts on a period boundary, so it holds only the leading
       # linear-attention layers of a period -- the full-attention layer is last.
-      self.layers_remainder = qwen3.Qwen3NextScannableBlock(
+      self.layers_remainder = block_cls(
           config=config,
           mesh=mesh,
           quant=self.quant,
@@ -2076,8 +2107,8 @@ class NNXDecoder(nnx.Module):
               layer_kwargs,
               kv_caches=kv_caches,
           )
-        elif self.is_qwen3_next:
-          y = self._apply_qwen3_next_scanned_blocks(
+        elif self.is_qwen3_hybrid:
+          y = self._apply_qwen3_hybrid_scanned_blocks(
               y,
               layer_args,
               layer_kwargs,
@@ -2117,30 +2148,14 @@ class NNXDecoder(nnx.Module):
             # Pass the kv_caches list directly to avoid copying in jnp.stack,
             # which breaks vLLM PagedAttention in-place memory updates.
             # The _apply_layers_sequentially function will handle it by statically unrolling.
-            #
-            # Qwen3.5 is the exception: one scan step is a Qwen3_5ScannableBlock
-            # spanning `cycle_interval` decoder layers, while vLLM hands us one
-            # cache per layer. Group them per block before the scan and write the
-            # returned per-block tuples back afterwards, as
-            # _apply_qwen3_next_scanned_blocks does for Qwen3-Next.
-            group_blocks = self.is_qwen3_5 and cycle_interval > 1
-            grouped_kv_caches = (
-                maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, cycle_interval, stack=False)
-                if group_blocks
-                else kv_caches
-            )
             y, self.layers, _ = self._apply_layers_sequentially(
                 self.layers,
                 y,
                 *layer_args,
                 length=scan_length,
-                kv_caches_stacked=grouped_kv_caches,
+                kv_caches_stacked=kv_caches,
                 **layer_kwargs,
             )
-            if group_blocks:
-              maxtext_utils.update_kv_caches_after_scan(
-                  kv_caches, grouped_kv_caches, scan_length, cycle_interval, stacked=False
-              )
             # kv_caches list is updated in-place inside _apply_layers_sequentially
           else:
             y, self.layers, _ = self._apply_layers_sequentially(
@@ -2474,8 +2489,8 @@ class NNXDecoder(nnx.Module):
 
     return y
 
-  def _apply_qwen3_next_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
-    """Applies the Qwen3-Next scanned blocks.
+  def _apply_qwen3_hybrid_scanned_blocks(self, y, layer_args, layer_kwargs, kv_caches=None):
+    """Applies the Qwen3-Next / Qwen3.5 scanned blocks.
 
     Qwen3NextScannableBlock rematerializes its own sub-layers (a scan over the
     linear-attention layers plus a trip-count-one scan over the full-attention
@@ -2495,6 +2510,25 @@ class NNXDecoder(nnx.Module):
     cfg = self.config
     block_length = cfg.inhomogeneous_layer_cycle_interval
     scan_length = cfg.num_decoder_layers // block_length
+    num_scanned_layers = scan_length * block_length
+
+    layer_kwargs = dict(layer_kwargs)
+    forced_routed_experts = layer_kwargs.pop("forced_routed_experts", None)
+    forced_routed_experts_scanned = None
+    remainder_forced_routed_experts = None
+    if forced_routed_experts is not None:
+      if kv_caches is not None:
+        # _apply_layers_sequentially threads either kv caches or scan xs, not both.
+        raise NotImplementedError(
+            "Forced routing is not supported together with externally-managed (vLLM) kv_caches in scanned layers."
+        )
+      per_layer = forced_routed_experts_per_layer(forced_routed_experts, cfg.num_decoder_layers)
+      if scan_length > 0:
+        forced_routed_experts_scanned = jnp.reshape(
+            per_layer[:num_scanned_layers], (scan_length, block_length) + per_layer.shape[1:]
+        )
+      remainder_forced_routed_experts = per_layer[num_scanned_layers:]
+
     if scan_length > 0:
       grouped_kv_caches = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length, block_length, stack=False)
       y, self.layers, _ = self._apply_layers_sequentially(
@@ -2504,19 +2538,22 @@ class NNXDecoder(nnx.Module):
           length=scan_length,
           kv_caches_stacked=grouped_kv_caches,
           skip_block_remat=True,
+          forced_routed_experts_scanned=forced_routed_experts_scanned,
           **layer_kwargs,
       )
       maxtext_utils.update_kv_caches_after_scan(kv_caches, grouped_kv_caches, scan_length, block_length, stacked=False)
 
     num_remaining_layers = cfg.num_decoder_layers % block_length
     if num_remaining_layers > 0:
+      if remainder_forced_routed_experts is not None:
+        layer_kwargs["forced_routed_experts"] = remainder_forced_routed_experts
       y = self._apply_remainder_block(
           self.layers_remainder,
           y,
           layer_args,
           layer_kwargs,
           kv_caches=kv_caches,
-          start_idx=scan_length * block_length,
+          start_idx=num_scanned_layers,
           num_remaining_layers=num_remaining_layers,
       )
     return y

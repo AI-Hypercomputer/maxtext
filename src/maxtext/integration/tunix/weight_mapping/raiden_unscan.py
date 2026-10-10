@@ -62,11 +62,14 @@ def unscan_layers(
     scan_axis: The axis along which layers are scanned (default 1).
     cycle_interval: `config.inhomogeneous_layer_cycle_interval`. When > 1 the
       trainer scans a *block* of this many heterogeneous layers (qwen3.5's
-      GDN/attention cycle is 4), so the tree carries an extra `layer_<slot>`
-      level under `layer_container` and the scan axis is
-      `num_layers // cycle_interval` repeats rather than `num_layers`. Slot `j`
-      of repeat `i` is physical layer `i * cycle_interval + j`, which is the
-      flat `layers_<n>` name the unscanned rollout model uses.
+      GDN/attention cycle is 4), so the tree carries an extra level under
+      `layer_container` and the scan axis is `num_layers // cycle_interval`
+      repeats rather than `num_layers`. That level is either one `layer_<slot>`
+      per cycle slot, or the nested `Qwen3NextScannableBlock` layout (Qwen3-Next
+      and Qwen3.5), where `local_layers` stacks slots `0..cycle_interval-2` on
+      `scan_axis + 1` and `global_layer` is the last slot. Slot `j` of repeat
+      `i` is physical layer `i * cycle_interval + j`, which is the flat
+      `layers_<n>` name the unscanned rollout model uses.
 
   Returns:
     A nested dict with `layer_container` keys replaced by `f"{layer_container}_{i}"` for each layer `i`, each holding
@@ -111,25 +114,32 @@ def unscan_layers(
     idx = key.index(layer_container)
     prefix = key[:idx]
     suffix = key[idx + 1 :]
-    # A scanned inhomogeneous block nests one `layer_<slot>` level under
-    # `layers`; the rollout has no such level, so drop it and fold the slot
-    # into the physical layer number below.
-    slot = None
+    # A scanned inhomogeneous block nests one cycle-slot level under `layers`;
+    # the rollout has no such level, so drop it and fold the slot into the
+    # physical layer number below. `slots` pairs each cycle slot this leaf holds
+    # with its index along the nested `local_layers` slot axis (None if none).
+    slots = ((0, None),)
     if cycle_interval > 1:
-      m = re.fullmatch(r"layer_(\d+)", suffix[0]) if suffix else None
-      if not m:
-        prefix_str = suffix[0] if suffix else "<empty>"
-        raise ValueError(
-            f"unscan_layers: cycle_interval={cycle_interval} > 1, but key {'.'.join(key)!r} "
-            f"does not have a 'layer_<slot>' cycle prefix under {layer_container!r} "
-            f"(got {prefix_str!r})."
-        )
-      slot = int(m.group(1))
-      if slot >= cycle_interval:
-        raise ValueError(
-            f"unscan_layers: slot {slot} parsed from key {'.'.join(key)!r} "
-            f"must be less than cycle_interval {cycle_interval}."
-        )
+      token = suffix[0] if suffix else "<empty>"
+      if token == "local_layers":
+        slots = tuple((j, j) for j in range(cycle_interval - 1))
+      elif token == "global_layer":
+        slots = ((cycle_interval - 1, None),)
+      else:
+        m = re.fullmatch(r"layer_(\d+)", token)
+        if not m:
+          raise ValueError(
+              f"unscan_layers: cycle_interval={cycle_interval} > 1, but key {'.'.join(key)!r} "
+              f"does not have a 'layer_<slot>' cycle prefix (or a nested 'local_layers'/'global_layer' "
+              f"level) under {layer_container!r} (got {token!r})."
+          )
+        slot = int(m.group(1))
+        if slot >= cycle_interval:
+          raise ValueError(
+              f"unscan_layers: slot {slot} parsed from key {'.'.join(key)!r} "
+              f"must be less than cycle_interval {cycle_interval}."
+          )
+        slots = ((slot, None),)
       suffix = suffix[1:]
     arr = getattr(value, "value", value)
 
@@ -144,18 +154,29 @@ def unscan_layers(
     del value
 
     # Each slot is scanned over the repeats of the cycle, not over all layers.
-    expected = num_layers // cycle_interval if slot is not None else num_layers
+    expected = num_layers // cycle_interval
     if arr.shape[scan_axis] != expected:
       raise ValueError(
           f"unscan_layers: {'.'.join(key)!r} has shape {arr.shape}, expected axis {scan_axis} to be"
           f" {expected} (num_layers={num_layers}, cycle_interval={cycle_interval})."
       )
+    nested = slots[0][1] is not None
+    if nested and (arr.ndim <= scan_axis + 1 or arr.shape[scan_axis + 1] != len(slots)):
+      raise ValueError(
+          f"unscan_layers: {'.'.join(key)!r} has shape {arr.shape}, expected axis {scan_axis + 1} to hold"
+          f" the {len(slots)} 'local_layers' cycle slots (cycle_interval={cycle_interval})."
+      )
 
     for i in range(expected):
-      sliced = jax.lax.index_in_dim(arr, i, axis=scan_axis, keepdims=False)
-      layer_no = i * cycle_interval + slot if slot is not None else i
-      new_key = prefix + (f"{layer_container}_{layer_no}",) + suffix
-      new_flat[new_key] = sliced
+      block = jax.lax.index_in_dim(arr, i, axis=scan_axis, keepdims=False)
+      for slot, local_index in slots:
+        sliced = block
+        if local_index is not None:
+          # Dropping the repeat axis moved the nested slot axis down to `scan_axis`.
+          sliced = jax.lax.index_in_dim(block, local_index, axis=scan_axis, keepdims=False)
+        new_key = prefix + (f"{layer_container}_{i * cycle_interval + slot}",) + suffix
+        new_flat[new_key] = sliced
+      del block
     del arr
     unscanned_count += 1
 

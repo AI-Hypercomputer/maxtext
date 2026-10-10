@@ -63,6 +63,8 @@ def stacked_axes(mt_key: str, config, depth: int) -> tuple:
     routed experts): the expert axis still leads, giving
     ``(0, param_scan_axis, param_scan_axis + 1)``.
   """
+  if isinstance(mt_key, tuple) and mt_key:
+    mt_key = mt_key[0]
   if isinstance(mt_key, str) and "-local_layers" in mt_key:
     param_scan_axis = config.param_scan_axis
     nested_axes = (param_scan_axis, param_scan_axis + 1)

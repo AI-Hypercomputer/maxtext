@@ -3903,6 +3903,10 @@ class RoutedMoE(nnx.Module):
           return w
         return self._maybe_shard_with_pspec(w, pspec)
 
+    if jnp.dtype(self.weight_dtype) == jnp.dtype(self.dtype):
+      # Without this, XLA rewrites all_gather(dynamic_slice(w)) into dynamic_slice(all_gather(w)) and hoists the
+      # gather out of the scanned decoder, keeping every layer's experts live; the dtype cast normally blocks that.
+      w0_kernel, w1_kernel, wo_kernel = jax.lax.optimization_barrier((w0_kernel, w1_kernel, wo_kernel))
     w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
     w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
     wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
