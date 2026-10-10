@@ -49,14 +49,17 @@ from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_den
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import sparsecore
 from maxtext.utils.sharding import (
     CompoundLogicalAxis,
+    all_gather_axes_between_pspecs,
     create_sharding,
     get_logical_axis_rules,
     logical_to_mesh_axes,
     maybe_shard_with_logical,
     maybe_shard_with_pspec,
     mesh_axes_for_dim,
+    mesh_axes_in_pspec,
     remove_expert_from_partition_spec,
     remove_incompatible_mesh_axes_from_partition_spec,
     remove_mesh_axes_from_partition_spec,
@@ -1240,6 +1243,59 @@ class RoutedMoE(nnx.Module):
         logical_axes=logical_axes,
     )
 
+  def _sparse_core_offload_targets(self):
+    """The MoE ops the config asks to run on the SparseCore, minus any this chip cannot serve."""
+    return sparsecore.supported_offload_targets(
+        self.config.moe_sparse_core_offload_targets, self.config.compile_topology, self.config.hardware
+    )
+
+  def _offload_to_sparse_core(self, target, collective=None):
+    """Context manager running the ops traced inside it on the SparseCore, if `target` is enabled.
+
+    Args:
+      target: the `moe_sparse_core_offload_targets` entry that owns these ops.
+      collective: the collective traced inside the block, if any. Passed through
+        so the annotation is skipped on a chip whose SparseCore cannot run it;
+        see `sparsecore.offload`.
+    """
+    if target not in self._sparse_core_offload_targets():
+      return sparsecore.offload(False)
+    return sparsecore.offload(
+        True,
+        collective=collective,
+        compile_topology=self.config.compile_topology,
+        hardware=self.config.hardware,
+    )
+
+  def _offload_ragged_sort_index_math(self):
+    """Whether the ragged sort/unsort helpers should offload their index math."""
+    return sparsecore.RAGGED_SORT in self._sparse_core_offload_targets()
+
+  def _fsdp_weight_all_gather_plan(self, source_logical_axes, target_pspec, ndim=3):
+    """Plan for gathering a MoE weight from `source_logical_axes` to `target_pspec`.
+
+    The MoE has always let GSPMD synthesize this all-gather: the weights enter the
+    `sparse_matmul` shard_map with an `in_spec` that drops the FSDP mesh axes, and
+    the partitioner inserts the collective at that boundary. An implicit collective
+    has no op to annotate, so for the `fsdp_all_gather` offload target we instead
+    hand the weights to the shard_map still FSDP-sharded and perform the very same
+    gather inside the manual region, where it is a real `all_gather` that can carry
+    a SparseCore compute type. Making the gather explicit also improves the
+    backward pass on its own: the weight gradients come back as reduce-scatters
+    (the transpose of the manual all-gather) instead of all-reduces.
+
+    The caller decides whether the target is on; this only works out the gathers.
+
+    Returns:
+      A `(dim, axes)` list for `manual_all_gather_weights` -- empty when this
+      weight is already in its target layout -- or `None` to keep the implicit
+      boundary gather because the transition is not a pure all-gather.
+    """
+    source_pspec = self._logical_to_mesh_axes(source_logical_axes)
+    if source_pspec is None or target_pspec is None:
+      return None
+    return all_gather_axes_between_pspecs(source_pspec, target_pspec, ndim)
+
   def _maybe_shard_moe_dispatch(self, inputs, logical_axis, peel_expert):
     """Shard a MoE dispatch/MLP activation. When `peel_expert` is set, drop the 'expert'
     mesh axis from the batch dim (index 1) so the GEMM stays expert-parallel (AllToAll)
@@ -1640,6 +1696,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           tag_routing_fn=tag_routing_fn,
+          offload_index_math=self._offload_ragged_sort_index_math(),
       )
       if tag_routing_fn is None:
         # moe_routing_maps=remat: unpermute re-derives the permutation in its backward (existing behavior).
@@ -1795,6 +1852,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
+          offload_index_math=self._offload_ragged_sort_index_math(),
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -1860,6 +1918,7 @@ class RoutedMoE(nnx.Module):
       use_ragged_sort=False,
       ragged_buffer_factor=-1.0,
       use_single_sparsecore=False,
+      offload_index_math=False,
   ):
     """Permutes tokens locally within an expert shard.
 
@@ -1888,6 +1947,8 @@ class RoutedMoE(nnx.Module):
         (`a2a_ragged_sort`) to sort only the valid prefix of `inputs`. The
         ragged buffer can be much larger than the actually-routed token count,
         so this avoids touching the padded tail in both forward and backward.
+      offload_index_math: Run the local routing index math (group-size slicing,
+        expert-index construction and the argsort) on the TPU SparseCore.
 
     Returns:
       A tuple containing:
@@ -1899,59 +1960,63 @@ class RoutedMoE(nnx.Module):
         inputs.
     """
 
-    # Slice the count of local expert IDs in each batch shard.
-    # all_shard_local_sizes.shape: [expert_shard, local_expert_size]
-    all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
-        global_group_sizes,
-        shard_index * local_expert_size,
-        local_expert_size,
-        axis=1,
-    )
-    local_sizes = all_shard_local_sizes.reshape(-1)
-
-    # Total count of the local expert IDs is the sum of the counts across all
-    # batch shards, since all batch shards will send their contributions to the
-    # current expert shard.
-    local_group_size = RoutedMoE._maybe_truncate_local_group_size(
-        all_shard_local_sizes, inputs.shape[0], ragged_buffer_factor
-    )
-
-    # In this case, the data that needs to be processed by the local shard
-    # does not start from row 0 but actually starts at
-    # (jnp.concatenate((jnp.array([0]),
-    #  jnp.cumsum(local_group_sizes[:-1]))[shard_id]).
-    # This happens if batches (`inputs`) are replicated across expert shards and
-    # pre-sorted by global Expert ID (via permute()).
-    if is_offset:
-      divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
-      expert_indices = jnp.where(
-          divided_assignments == shard_index,
-          jnp.mod(global_sorted_experts, local_expert_size),
+    with sparsecore.offload(offload_index_math):
+      # Slice the count of local expert IDs in each batch shard.
+      # all_shard_local_sizes.shape: [expert_shard, local_expert_size]
+      all_shard_local_sizes = jax.lax.dynamic_slice_in_dim(
+          global_group_sizes,
+          shard_index * local_expert_size,
           local_expert_size,
+          axis=1,
+      )
+      local_sizes = all_shard_local_sizes.reshape(-1)
+
+      # Total count of the local expert IDs is the sum of the counts across all
+      # batch shards, since all batch shards will send their contributions to the
+      # current expert shard.
+      local_group_size = RoutedMoE._maybe_truncate_local_group_size(
+          all_shard_local_sizes, inputs.shape[0], ragged_buffer_factor
       )
 
-    # In this case the `input` data has been received from the batch shards and
-    # needs to be reorganized in order of local Expert IDs.
-    else:
-      base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
-      expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
+      # In this case, the data that needs to be processed by the local shard
+      # does not start from row 0 but actually starts at
+      # (jnp.concatenate((jnp.array([0]),
+      #  jnp.cumsum(local_group_sizes[:-1]))[shard_id]).
+      # This happens if batches (`inputs`) are replicated across expert shards and
+      # pre-sorted by global Expert ID (via permute()).
+      if is_offset:
+        divided_assignments = jnp.floor_divide(global_sorted_experts, local_expert_size)
+        expert_indices = jnp.where(
+            divided_assignments == shard_index,
+            jnp.mod(global_sorted_experts, local_expert_size),
+            local_expert_size,
+        )
 
-    sorted_indices = jnp.argsort(expert_indices)
+      # In this case the `input` data has been received from the batch shards and
+      # needs to be reorganized in order of local Expert IDs.
+      else:
+        base_indices = jnp.mod(jnp.arange(local_sizes.shape[0]), local_expert_size)
+        expert_indices = jnp.repeat(base_indices, local_sizes, total_repeat_length=inputs.shape[0])
+
+      sorted_indices = jnp.argsort(expert_indices)
+      sorted_experts_ids = expert_indices[sorted_indices]
+
     if use_ragged_sort:
       # Only the first `valid_end` rows of `inputs` carry actual tokens for
       # this shard (`local_group_size.sum()`), the remainder is padding from
       # the worst-case ragged buffer. Restricting the gather to that prefix
       # makes both forward and backward proportional to the routed token count.
-      valid_end = jnp.sum(local_group_size).astype(jnp.int32)
+      with sparsecore.offload(offload_index_math):
+        valid_end = jnp.sum(local_group_size).astype(jnp.int32)
       sorted_inputs = a2a_ragged_sort(
           inputs,
           sorted_indices,
           valid_end,
           use_single_sparsecore=use_single_sparsecore,
+          offload_index_math=offload_index_math,
       )
     else:
       sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
-    sorted_experts_ids = expert_indices[sorted_indices]
     return (
         sorted_inputs,
         sorted_indices,
@@ -2702,6 +2767,85 @@ class RoutedMoE(nnx.Module):
       x_gathered_qval = all_gather_fn(x_input.qvalue)
       return dataclasses.replace(x_input, qvalue=x_gathered_qval)
 
+    # SparseCore offload of the FSDP weight all-gather. `w{0,1,o}_in_pspec` is the
+    # layout the weights are handed to the shard_map in; when a plan is present it
+    # keeps the FSDP axes so the gather happens inside the manual region (see
+    # `_fsdp_weight_all_gather_plan`), otherwise it is `w{0,1,o}_pspec` and the
+    # partitioner inserts the gather at the boundary exactly as before.
+    # Everything below is skipped unless the target is on, so with the default
+    # config this method reads and computes exactly what it did before. The
+    # target is also dropped on a chip whose SparseCore cannot offload an
+    # all-gather (`sparsecore.supported_offload_targets`), so the graph is never
+    # restructured for an annotation that would not survive.
+    weight_ag_plans = None
+    # `moe_pin_sparse_core_{all,fsdp_all}_gathers` already run this gather on a
+    # dedicated SparseCore, through `compute_on` at the shard_map boundary below.
+    fsdp_all_gathers_pinned = self.config.moe_pin_sparse_core_all_gathers or getattr(
+        self.config, "moe_pin_sparse_core_fsdp_all_gathers", False
+    )
+    # Quantized weights carry their own scales and, under `explicitly_weight_ag()`,
+    # their own hand-written gather inside the shard_map; leave both alone, and
+    # leave a pinned gather to the pin.
+    if (
+        sparsecore.FSDP_ALL_GATHER in self._sparse_core_offload_targets()
+        and not fsdp_all_gathers_pinned
+        and not explicitly_weight_ag()
+        and not any(isinstance(k, aqt.QTensor) for k in (w0_kernel, w1_kernel, wo_kernel))
+    ):
+      if self.config.moe_fsdp_use_two_stage_all_gather:
+        # The two-stage path already gathered the FSDP axes off above.
+        wi_source_axes = ("exp_with_fsdp", None, "mlp_no_fsdp")
+        wo_source_axes = ("exp_with_fsdp", "mlp_no_fsdp", None)
+      else:
+        wi_source_axes = self.wi_kernel_axes
+        wo_source_axes = self.wo_kernel_axes
+      plans = (
+          self._fsdp_weight_all_gather_plan(wi_source_axes, w0_pspec),
+          self._fsdp_weight_all_gather_plan(wi_source_axes, w1_pspec),
+          self._fsdp_weight_all_gather_plan(wo_source_axes, wo_pspec),
+      )
+      # A `None` means that weight's transition is not a pure all-gather, so the
+      # whole triple falls back; an empty plan just means that weight is already
+      # in its target layout, which is fine as long as some other one is not.
+      gathered_axes = {axis for plan in plans if plan for _, axes in plan for axis in axes}
+      # `all_gather(to="varying")` makes the shard_map's output vary over every
+      # gathered axis, so with `check_vma` on the out_specs have to still name
+      # them. `maybe_replicate_incompatible_batch` can strip exactly those axes
+      # off the batch dim, and shard_map then rejects the region outright.
+      out_axes = mesh_axes_in_pspec(output_pspec)
+      if all(plan is not None for plan in plans) and gathered_axes and gathered_axes <= out_axes:
+        weight_ag_plans = plans
+      else:
+        max_logging.log(
+            f"moe_sparse_core_offload_targets requests {sparsecore.FSDP_ALL_GATHER!r}, but this sharding does not "
+            "reduce to an all-gather of the MoE weights inside the sparse_matmul shard_map. Leaving the gather to "
+            "the partitioner, i.e. on the TensorCore; results are unaffected."
+        )
+    if weight_ag_plans is None:
+      w0_in_pspec, w1_in_pspec, wo_in_pspec = w0_pspec, w1_pspec, wo_pspec
+    else:
+      w0_in_pspec = w1_in_pspec = self._logical_to_mesh_axes(wi_source_axes)
+      wo_in_pspec = self._logical_to_mesh_axes(wo_source_axes)
+
+    def manual_all_gather_weights(w0, w1, wo):
+      """Runs `weight_ag_plans` inside the shard_map, tagged for the SparseCore.
+
+      This is the same collective the sharding constraint used to produce, so the
+      forward value is unchanged. The default `to="varying"` is what keeps the
+      backward pass correct too: its transpose is the `psum_scatter` that reduces
+      each shard's partial weight gradient. (`to="invarying"` would transpose to a
+      bare slice, silently dropping that reduction.)
+      """
+      if weight_ag_plans is None:
+        return w0, w1, wo
+      gathered = []
+      with self._offload_to_sparse_core(sparsecore.FSDP_ALL_GATHER, collective=sparsecore.ALL_GATHER):
+        for w, plan in zip((w0, w1, wo), weight_ag_plans):
+          for dim, axes in plan:
+            w = jax.lax.all_gather(w, axes, axis=dim, tiled=True)
+          gathered.append(w)
+      return tuple(gathered)
+
     def roe_ag_and_route(
         x,
         logits,
@@ -2727,7 +2871,10 @@ class RoutedMoE(nnx.Module):
       else:
 
         def _ep_all_gather(z):
-          return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+          # `ep_collectives` SparseCore offload. The pinned branch above already runs this collective on a
+          # dedicated SparseCore through `compute_on`, so the per-op annotation is only applied when unpinned.
+          with self._offload_to_sparse_core(sparsecore.EP_COLLECTIVES, collective=sparsecore.ALL_GATHER):
+            return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
 
       if use_tc_3d_dispatch():
         # moe_tc_ragged_3d_dispatch: all-gather the tokens in the TC kernels' (emb // 128, 128) layout; the
@@ -2885,7 +3032,8 @@ class RoutedMoE(nnx.Module):
         global_group_sizes = group_sizes
 
         if is_batch_sharded_by_expert:
-          all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
+          with self._offload_to_sparse_core(sparsecore.EP_COLLECTIVES, collective=sparsecore.ALL_GATHER):
+            all_shards_group_sizes = jax.lax.all_gather(reshaped_group_sizes, axis_name=batch_axis)
           buffer_size = self.get_ragged_buffer_size(
               jnp.shape(x)[0],
               num_ep,
@@ -2903,16 +3051,18 @@ class RoutedMoE(nnx.Module):
 
           output_shape = jax.lax.empty((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
-          x = jax.lax.ragged_all_to_all(
-              x,
-              output_shape,
-              input_offsets,
-              send_sizes,
-              output_offsets,
-              recv_sizes,
-              axis_name=self._expert_parallelism_name,
-          )
-          global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
+          with self._offload_to_sparse_core(sparsecore.EP_COLLECTIVES, collective=sparsecore.RAGGED_ALL_TO_ALL):
+            x = jax.lax.ragged_all_to_all(
+                x,
+                output_shape,
+                input_offsets,
+                send_sizes,
+                output_offsets,
+                recv_sizes,
+                axis_name=self._expert_parallelism_name,
+            )
+          with self._offload_to_sparse_core(sparsecore.EP_COLLECTIVES, collective=sparsecore.ALL_GATHER):
+            global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
               x,
               global_group_sizes,
@@ -2922,6 +3072,7 @@ class RoutedMoE(nnx.Module):
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.get_ragged_buffer_factor(),
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+              offload_index_math=self._offload_ragged_sort_index_math(),
           )
         else:
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
@@ -2935,6 +3086,7 @@ class RoutedMoE(nnx.Module):
               use_ragged_sort=self.config.use_ragged_sort,
               ragged_buffer_factor=self.get_ragged_buffer_factor(),
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+              offload_index_math=self._offload_ragged_sort_index_math(),
           )
 
       return (
@@ -3205,6 +3357,7 @@ class RoutedMoE(nnx.Module):
               jnp.argsort(route_metadata.local_sorted_indices),  # pylint: disable=undefined-variable
               valid_end,
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+              offload_index_math=self._offload_ragged_sort_index_math(),
           )
         else:
           local_output = _sort_activations(
@@ -3222,15 +3375,16 @@ class RoutedMoE(nnx.Module):
             buffer_size=buffer_size,
             is_dispatch=False,
         )
-        return jax.lax.ragged_all_to_all(
-            local_output,
-            output_shape,
-            input_offsets,
-            send_sizes,
-            output_offsets,
-            recv_sizes,
-            axis_name=self._expert_parallelism_name,
-        )
+        with self._offload_to_sparse_core(sparsecore.EP_COLLECTIVES, collective=sparsecore.RAGGED_ALL_TO_ALL):
+          return jax.lax.ragged_all_to_all(
+              local_output,
+              output_shape,
+              input_offsets,
+              send_sizes,
+              output_offsets,
+              recv_sizes,
+              axis_name=self._expert_parallelism_name,
+          )
 
       # If batch is replicated across EP shards then each shard should send
       # 0..local_shard_size data to the other shards and receive the
@@ -3242,15 +3396,16 @@ class RoutedMoE(nnx.Module):
           is_batch_sharded=False,
           is_dispatch=False,
       )
-      return jax.lax.ragged_all_to_all(
-          intermediate_output,
-          output_shape,
-          input_offsets,
-          send_sizes,
-          output_offsets,
-          recv_sizes,
-          axis_name=self._expert_parallelism_name,
-      )
+      with self._offload_to_sparse_core(sparsecore.EP_COLLECTIVES, collective=sparsecore.RAGGED_ALL_TO_ALL):
+        return jax.lax.ragged_all_to_all(
+            intermediate_output,
+            output_shape,
+            input_offsets,
+            send_sizes,
+            output_offsets,
+            recv_sizes,
+            axis_name=self._expert_parallelism_name,
+        )
 
     def moe_emb_chunking(
         x,
@@ -3544,21 +3699,22 @@ class RoutedMoE(nnx.Module):
                 ),
             )
           combine_bwd_method = self.config.moe_quantize_combine_bwd_method
-          if combine_bwd_method:
-            output = _moe_combine_psum_scatter(
-                output,
-                self._expert_parallelism_name,
-                scatter_dimension=0,
-                tiled=True,
-                bwd_method=combine_bwd_method,
-            )
-          else:
-            output = jax.lax.psum_scatter(
-                output,
-                self._expert_parallelism_name,
-                scatter_dimension=0,
-                tiled=True,
-            )
+          with self._offload_to_sparse_core(sparsecore.EP_COLLECTIVES, collective=sparsecore.REDUCE_SCATTER):
+            if combine_bwd_method:
+              output = _moe_combine_psum_scatter(
+                  output,
+                  self._expert_parallelism_name,
+                  scatter_dimension=0,
+                  tiled=True,
+                  bwd_method=combine_bwd_method,
+              )
+            else:
+              output = jax.lax.psum_scatter(
+                  output,
+                  self._expert_parallelism_name,
+                  scatter_dimension=0,
+                  tiled=True,
+              )
           if output.ndim == 4:
             output = jnp.reshape(output, (*output.shape[:2], -1))
         return (
@@ -3615,9 +3771,9 @@ class RoutedMoE(nnx.Module):
         input_partition_pspec,
         gate_logits_pspec,
         pre_bias_logits_pspec,
-        w0_pspec,
-        w1_pspec,
-        wo_pspec,
+        w0_in_pspec,
+        w1_in_pspec,
+        wo_in_pspec,
         w0_bias_pspec,
         w1_bias_pspec,
         wo_bias_pspec,
@@ -3666,8 +3822,10 @@ class RoutedMoE(nnx.Module):
     ):
       # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
-      # drops fsdp -> GSPMD inserts the boundary all-gather) and reused across all
-      # chunks of the ring-of-experts pipeline below.
+      # drops fsdp -> GSPMD inserts the boundary all-gather; explicitly here when
+      # the gather is offloaded to the SparseCore) and reused across all chunks of
+      # the ring-of-experts pipeline below.
+      w0, w1, wo = manual_all_gather_weights(w0, w1, wo)
       override_chunks = getattr(self, "num_moe_token_chunks", None)
       n_chunks = override_chunks if override_chunks is not None else self.config.num_moe_token_chunks
       barrier_enabled = getattr(self, "moe_chunk_barrier", None)
@@ -3861,7 +4019,7 @@ class RoutedMoE(nnx.Module):
           logical_axes=gate_logits_logical_axes,
       )
 
-    if self.config.moe_pin_sparse_core_all_gathers or getattr(self.config, "moe_pin_sparse_core_fsdp_all_gathers", False):
+    if fsdp_all_gathers_pinned:
       fwd_only = getattr(self.config, "moe_pin_sparse_core_fsdp_all_gathers_fwd_only", False)
 
       def _fsdp_all_gather(w, pspec):
@@ -3903,9 +4061,9 @@ class RoutedMoE(nnx.Module):
           return w
         return self._maybe_shard_with_pspec(w, pspec)
 
-    w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
-    w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
-    wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
+    w0_kernel = _fsdp_all_gather(w0_kernel, w0_in_pspec)
+    w1_kernel = _fsdp_all_gather(w1_kernel, w1_in_pspec)
+    wo_kernel = _fsdp_all_gather(wo_kernel, wo_in_pspec)
     if w0_bias is not None:
       w0_bias = _fsdp_all_gather(w0_bias, w0_bias_pspec)
     if w1_bias is not None:
