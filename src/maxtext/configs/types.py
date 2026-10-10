@@ -4195,6 +4195,25 @@ class MaxTextConfig(
       )
     if not cfg.use_qk_norm_in_gdn:
       raise ValueError("use_gdn_kernel=True requires use_qk_norm_in_gdn=True.")
+    # With packing=False the kernel skips its segment-aware path in training, so reject the inputs that still
+    # put several documents in one row.
+    if not cfg.packing:
+      if is_rl_config and cfg.max_seq_token_per_tpu > 0:
+        raise ValueError(
+            "use_gdn_kernel=True with max_seq_token_per_tpu > 0 requires packing=True: packed rows hold several "
+            "sequences, and with packing=False the kernel ignores their segment IDs in training."
+        )
+      if (
+          not is_rl_config
+          and cfg.dataset_type == DatasetType.GRAIN
+          and cfg.grain_file_type in ("mmap", "mmap_npy")
+          and cfg.reset_attention_mask
+      ):
+        raise ValueError(
+            f"use_gdn_kernel=True with grain_file_type={cfg.grain_file_type!r} and reset_attention_mask=True "
+            "requires packing=True: those rows hold several documents split at EOD, and with packing=False the "
+            "kernel ignores their segment IDs in training."
+        )
     seq_lens = {"max_target_length": cfg.max_target_length}
     if is_rl_config and cfg.max_seq_token_per_tpu > 0:
       seq_lens["max_seq_token_per_tpu"] = cfg.max_seq_token_per_tpu

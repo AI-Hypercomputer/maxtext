@@ -641,6 +641,11 @@ def run_gdn_kernel_layer(
     qkv = jnp.where(mask.reshape(mask.shape + (1,) * (qkv.ndim - mask.ndim)), qkv, 0.0)
     a = jnp.where(mask[..., None], a, jnp.asarray(-1e4, dtype=a.dtype))
     b = jnp.where(mask[..., None], b, jnp.asarray(-1e4, dtype=b.dtype))
+    if model_mode == MODEL_MODE_TRAIN and not getattr(cfg, "packing", True):
+      # packing=False means one sequence per row, whose padding the mask above already makes a no-op, so the
+      # kernel's segment path adds work and changes nothing. Other modes keep it: it also ends the carried conv
+      # state at the last valid token.
+      decoder_segment_ids = None
 
   batch, seq_len = qkv.shape[:2]
   conv_kernel_size = cfg.gdn_conv_kernel_dim
