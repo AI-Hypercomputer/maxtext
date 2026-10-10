@@ -338,7 +338,7 @@ class Transformer(nnx.Module):
           model_mode=model_mode,
       )
 
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa"):
+    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
       # In vLLM, logits are computed separately after updating the KV cache.
       if expert_indices is not None:
         return hidden_state, kv_caches, expert_indices

@@ -227,7 +227,7 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
   slice of both wi_0 and wi_1. It also applies any necessary MLP-dim padding
   on a per-shard basis to satisfy kernel constraints.
   """
-  is_vllm_rpa = getattr(config, "attention", "") in ("vllm_rpa", "vllm_batched_rpa")
+  is_vllm_rpa = getattr(config, "attention", "") in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx")
 
   def _is_fusion_site(node):
     """A ckpt-side dict that holds wi_0/wi_1 leaf siblings — the parent of a fusion."""

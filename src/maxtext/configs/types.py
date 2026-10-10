@@ -756,7 +756,7 @@ class Attention(BaseModel):
 
   attention: str = Field(
       "autoselected",
-      description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
+      description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, vllm_batched_rpa_long_ctx, etc).",
   )
   attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
       "global", description="The variant of attention to use."

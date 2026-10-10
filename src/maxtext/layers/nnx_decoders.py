@@ -2170,6 +2170,7 @@ class NNXDecoder(nnx.Module):
                 not in (
                     "vllm_rpa",
                     "vllm_batched_rpa",
+                    "vllm_batched_rpa_long_ctx",
                 )
             ):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
@@ -2246,6 +2247,7 @@ class NNXDecoder(nnx.Module):
                 not in (
                     "vllm_rpa",
                     "vllm_batched_rpa",
+                    "vllm_batched_rpa_long_ctx",
                 )
             ):
               if (lyr + 1) % cfg.inhomogeneous_layer_cycle_interval == 0:
@@ -2272,7 +2274,7 @@ class NNXDecoder(nnx.Module):
       hidden_state = y
 
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
-    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa"):
+    if cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
       logits = None
 
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection

@@ -654,6 +654,7 @@ class AttentionOp(nnx.Module):
         "paged",
         "vllm_rpa",
         "vllm_batched_rpa",
+        "vllm_batched_rpa_long_ctx",
         "cudnn_flash_te",
         "cudnn_flash_jax",
     ):
@@ -1700,7 +1701,7 @@ class AttentionOp(nnx.Module):
         or (self.attention_kernel == "autoselected" and length < 128)
         or (self.attention_kernel == "autoselected" and target_hardware == "cpu")
         or (self.attention_kernel == "paged")
-        or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa"))
+        or (self.attention_kernel in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"))
     ):
       return self.apply_attention_dot(
           query,
