@@ -2439,6 +2439,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       batch = {**dynamic_batch, **static_batch}
     return PreparedFwdBwdInput(batch=batch)
 
+  def wait_for_device(self) -> float:
+    """Blocks until the computations dispatched so far have finished; returns the seconds waited.
+
+    For a caller that did work after dispatching and wants to know whether it hid behind the
+    device (Tunix's `TrainerWorker.stage_fwd_bwd` reports it): ~0 means the device was already
+    idle. A blocking wait, not an `is_ready()` poll: under Pathways a readiness check is an RPC
+    to the proxy, so a poll can read "not ready" for work that has finished. Changes no state:
+    the in-flight queue and its pending metrics are left as they were (see
+    `InflightThrottler.block_until_ready`).
+    """
+    start = time.monotonic()
+    self._throttler.block_until_ready()
+    return time.monotonic() - start
+
   @_profiled_step("fwd_bwd", control_profile=True)
   def fwd_bwd(self, payload: abstract_engine.TrainerPayload | PreparedFwdBwdInput, **kwargs: Any) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.

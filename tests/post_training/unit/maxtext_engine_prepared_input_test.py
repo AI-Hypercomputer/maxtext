@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for MaxTextTrainingEngine.prepare_fwd_bwd_input.
+"""Tests for MaxTextTrainingEngine.prepare_fwd_bwd_input and wait_for_device.
 
 A micro-batch prepared ahead (mapped and placed on the mesh while earlier work
 still runs) must train exactly like the payload it came from: same compiled
-kernel, same inputs, bit-identical weights and metrics.
+kernel, same inputs, bit-identical weights and metrics. Waiting for the device
+afterwards (what Tunix's `TrainerWorker.stage_fwd_bwd` does, to report whether
+the transfer hid behind the device) must change nothing either.
 """
 
 import dataclasses
+import types
 from typing import Any
 from unittest import mock
 
@@ -30,6 +33,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
+from maxtext.training_engine import inflight_throttler
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -124,15 +128,18 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
       engine.compile(_payload(0))
     return engine
 
-  def _train(self, engine, payloads, prepare_at: set[int]):
+  def _train(self, engine, payloads, prepare_at: set[int], wait: bool = False):
     """Two steps of two micro-batches; micro-batches in `prepare_at` go in prepared.
 
     A prepared micro-batch is prepared before the previous update is applied, as
     `TrainerWorker.stage_fwd_bwd` does while that update is still on the device.
+    With `wait`, `wait_for_device` follows each prepare, as it does there too.
     """
     prepared = {i: None for i in prepare_at}
     if 0 in prepared:
       prepared[0] = engine.prepare_fwd_bwd_input(payloads[0])
+      if wait:
+        engine.wait_for_device()
     metrics = []
     for step in range(2):
       for j in range(2):
@@ -140,6 +147,11 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
         engine.fwd_bwd(prepared[i] if i in prepared else payloads[i])
         if j == 1 and i + 1 in prepared:
           prepared[i + 1] = engine.prepare_fwd_bwd_input(payloads[i + 1])
+          if wait:
+            queued = engine._throttler._inflight_queue.qsize()
+            self.assertGreaterEqual(engine.wait_for_device(), 0.0)
+            # The in-flight queue is left for the update to drain as before.
+            self.assertEqual(engine._throttler._inflight_queue.qsize(), queued)
       engine.update()
       buffer = engine.get_metrics(clear_cache=True)
       metrics.append({k: np.asarray(v).tolist() for k, v in sorted(buffer.scalar_metrics.items())})
@@ -162,6 +174,46 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
       # No kernel was rebuilt for a prepared input.
       self.assertEqual(ref_compiles.call_count, new_compiles.call_count)
       self.assertEqual(new.train_step, 2)
+
+  def test_waiting_for_the_device_changes_nothing(self):
+    payloads = [_payload(s) for s in (1, 2, 3, 4)]
+    for compiled in (True, False):
+      ref = self._engine(compiled)
+      new = self._engine(compiled)
+      with (
+          mock.patch.object(new, "_compile_for_batch", wraps=new._compile_for_batch) as new_compiles,
+          mock.patch.object(ref, "_compile_for_batch", wraps=ref._compile_for_batch) as ref_compiles,
+          mock.patch.object(new._metrics_logger, "write_metrics", wraps=new._metrics_logger.write_metrics) as new_w,
+          mock.patch.object(ref._metrics_logger, "write_metrics", wraps=ref._metrics_logger.write_metrics) as ref_w,
+      ):
+        ref_weights, ref_m = self._train(ref, payloads, prepare_at=set())
+        new_weights, new_m = self._train(new, payloads, prepare_at={0, 2}, wait=True)
+      np.testing.assert_array_equal(ref_weights, new_weights)
+      self.assertEqual(ref_m, new_m)
+      self.assertEqual(ref_compiles.call_count, new_compiles.call_count)
+      # The same metrics writes, in the same order (the wait writes none).
+      self.assertEqual(
+          [c.args[0].id for c in ref_w.call_args_list],
+          [c.args[0].id for c in new_w.call_args_list],
+      )
+
+  def test_wait_for_device_waits_for_the_update_and_keeps_the_queue(self):
+    engine = self._engine(True)
+    engine.fwd_bwd(_payload(1))
+    engine.fwd_bwd(_payload(2))
+    engine.update()
+    queue = engine._throttler._inflight_queue
+    queued = list(queue.queue)
+    self.assertNotEmpty(queued)
+    waited = engine.wait_for_device()
+    self.assertIsInstance(waited, float)
+    self.assertGreaterEqual(waited, 0.0)
+    self.assertEqual(list(queue.queue), queued)
+    # Everything dispatched before the wait, the update included, is done.
+    for leaves, _ in queued:
+      for leaf in leaves:
+        if isinstance(leaf, jax.Array):
+          self.assertTrue(leaf.is_ready())
 
   def test_the_comparison_sees_a_one_token_difference(self):
     payloads = [_payload(s) for s in (1, 2, 3, 4)]
@@ -190,7 +242,9 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
         for i, payload in enumerate(payloads):
           request = datatypes.TrainRequest(request_id=f"r{i}", payload=payload)
           if stage and i % 2 == 0:
-            worker.stage_fwd_bwd(request)
+            resp = worker.stage_fwd_bwd(request)
+            # The engine's wait_for_device answered how long the device ran on.
+            self.assertGreaterEqual(resp.metadata["device_wait_s"], 0.0)
             worker.fwd_bwd_staged(f"r{i}")
           else:
             worker.fwd_bwd(request)
@@ -227,6 +281,53 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
     )
     self.assertEqual(before[:2], after[:2])
     np.testing.assert_array_equal(before[2], after[2])
+
+
+class _Metrics:
+
+  def __init__(self):
+    self.written = []
+
+  def write_metrics(self, metrics, **kwargs):
+    del kwargs
+    self.written.append(metrics)
+
+
+class InflightThrottlerBlockUntilReadyTest(absltest.TestCase):
+
+  def _throttler(self):
+    logger = _Metrics()
+    config = types.SimpleNamespace(max_inflight_computations=2)
+    return inflight_throttler.InflightThrottler(config, logger), logger
+
+  def test_block_until_ready_neither_dequeues_nor_writes(self):
+    throttler, logger = self._throttler()
+    throttler.add_computation(jnp.ones(3) * 2, "m1")
+    throttler.add_computation(jnp.ones(3) * 3, None)
+    throttler.block_until_ready()
+    self.assertEqual(throttler._inflight_queue.qsize(), 2)
+    self.assertEqual(logger.written, [])
+    for leaves, _ in list(throttler._inflight_queue.queue):
+      self.assertTrue(all(leaf.is_ready() for leaf in leaves))
+
+  def test_a_drain_after_it_writes_what_it_would_have(self):
+    written = []
+    for block_first in (False, True):
+      throttler, logger = self._throttler()
+      throttler.add_computation(jnp.ones(3), "m1")
+      throttler.add_computation(jnp.ones(3), "m2")
+      if block_first:
+        throttler.block_until_ready()
+      throttler.wait_for_all()
+      written.append(logger.written)
+      self.assertTrue(throttler._inflight_queue.empty())
+    self.assertEqual(written[0], ["m1", "m2"])
+    self.assertEqual(written[0], written[1])
+
+  def test_block_until_ready_on_an_empty_queue_returns(self):
+    throttler, logger = self._throttler()
+    throttler.block_until_ready()
+    self.assertEqual(logger.written, [])
 
 
 if __name__ == "__main__":
