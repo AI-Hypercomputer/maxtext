@@ -70,10 +70,10 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
       Doc 3: [70, 80, 0]
     With eod_id=-1 and sequence_length=4:
       Document stream with delimiters: [0, 10, 20, 0, 30, -1, 40, 0, 50, 60, -1, 70, 80, 0, -1]
-      Chunks produced (drop_remainder=True):
-        Chunk 0: [0, 10, 20, 0]
-        Chunk 1: [30, -1, 40, 0]
-        Chunk 2: [50, 60, -1, 70]
+      Chunks of sequence_length + 1 tokens at stride sequence_length (drop_remainder=True):
+        Chunk 0: [0, 10, 20, 0, 30]
+        Chunk 1: [30, -1, 40, 0, 50]
+        Chunk 2: [50, 60, -1, 70, 80]
     """
     docs = [
         [0, 10, 20, 0, 30],  # len 5
@@ -88,9 +88,9 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
     chunks = list(chunked_ds.as_numpy_iterator())
 
     self.assertEqual(len(chunks), 3)
-    np.testing.assert_array_equal(chunks[0]["targets"], np.array([0, 10, 20, 0], dtype=np.int32))
-    np.testing.assert_array_equal(chunks[1]["targets"], np.array([30, -1, 40, 0], dtype=np.int32))
-    np.testing.assert_array_equal(chunks[2]["targets"], np.array([50, 60, -1, 70], dtype=np.int32))
+    np.testing.assert_array_equal(chunks[0]["targets"], np.array([0, 10, 20, 0, 30], dtype=np.int32))
+    np.testing.assert_array_equal(chunks[1]["targets"], np.array([30, -1, 40, 0, 50], dtype=np.int32))
+    np.testing.assert_array_equal(chunks[2]["targets"], np.array([50, 60, -1, 70, 80], dtype=np.int32))
 
   def test_reduce_concat_tokens_drops_token_zero(self):
     """Demonstrates why reduce_concat_tokens cannot be reused: it drops token ID 0."""
@@ -110,16 +110,16 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
   def test_format_continuous_stream_fn_monotonic_positions_and_loss_mask(self):
     """Verifies monotonic position IDs, 0% padding, and 100% loss participation."""
     seq_len = 8
-    eod_id = 99
-    chunk = {"targets": tf.constant([10, 20, 30, 40, 50, 60, 70, 80], dtype=tf.int32)}
-    formatted = format_continuous_stream_fn(chunk, max_target_length=seq_len, eod_id=eod_id)
+    # A chunk holds seq_len + 1 tokens: the extra token is the label of the last input position.
+    chunk = {"targets": tf.constant([10, 20, 30, 40, 50, 60, 70, 80, 90], dtype=tf.int32)}
+    formatted = format_continuous_stream_fn(chunk, max_target_length=seq_len)
 
-    # 1. Inputs equal raw targets
+    # 1. Inputs are the first seq_len tokens
     np.testing.assert_array_equal(formatted["inputs"].numpy(), np.array([10, 20, 30, 40, 50, 60, 70, 80], dtype=np.int32))
 
-    # 2. Targets are shifted left with eod_id at the end
+    # 2. Targets are the last seq_len tokens: every label is the real next token
     np.testing.assert_array_equal(
-        formatted["targets"].numpy(), np.array([20, 30, 40, 50, 60, 70, 80, 99], dtype=np.int32)
+        formatted["targets"].numpy(), np.array([20, 30, 40, 50, 60, 70, 80, 90], dtype=np.int32)
     )
 
     # 3. Position IDs count monotonically 0..seq_len-1
@@ -147,12 +147,12 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
 
   def test_preprocess_train_dataset_tokenized_stream_end_to_end(self):
     """Verifies end-to-end preprocess_train_dataset with is_tokenized_dataset=True."""
-    # 4 documents: 9, 7, 7, 5 tokens. With 4 eod_id delimiters appended, total = 32 tokens.
+    # 4 documents: 9, 7, 7, 6 tokens. With 4 eod_id delimiters appended, total = 33 tokens.
     docs = [
         list(range(0, 9)),  # 9 tokens
         list(range(9, 16)),  # 7 tokens
         list(range(16, 23)),  # 7 tokens
-        list(range(23, 28)),  # 5 tokens
+        list(range(23, 29)),  # 6 tokens
     ]
     dataset = self._make_dataset_from_docs(docs)
 
@@ -170,7 +170,7 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
     )
 
     batches = list(processed_ds.as_numpy_iterator())
-    # 32 tokens total // (batch_size 2 * seq_len 8 = 16 tokens/batch) = 2 batches
+    # (33 - 1) // seq_len 8 = 4 chunks of 9 tokens at stride 8; 4 chunks // batch_size 2 = 2 batches
     self.assertEqual(len(batches), 2)
 
     for b in batches:
@@ -195,7 +195,7 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
 
   def test_preprocess_eval_dataset_tokenized_stream_end_to_end(self):
     """Verifies end-to-end preprocess_eval_dataset with is_tokenized_dataset=True."""
-    # 2 documents: 15 and 15 tokens. With 2 eod_id delimiters appended, total = 32 tokens.
+    # 2 documents: 15 and 15 tokens. With 2 eod_id delimiters appended, total = 32 tokens -> 3 chunks.
     docs = [
         list(range(0, 15)),
         list(range(15, 30)),
@@ -229,17 +229,17 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
         [],
         [30, 40, 50],
         [],
-        [60, 70, 80],
+        [60, 70, 80, 90],
     ]
     dataset = self._make_dataset_from_docs(docs)
     seq_len = 4
     chunked_ds = chunk_token_stream(dataset, feature_key="targets", sequence_length=seq_len)
     chunks = list(chunked_ds.as_numpy_iterator())
 
-    # Total tokens = 8 -> 2 chunks of length 4
+    # Total tokens = 9 -> (9 - 1) // 4 = 2 chunks of length 5 at stride 4
     self.assertEqual(len(chunks), 2)
-    np.testing.assert_array_equal(chunks[0]["targets"], np.array([10, 20, 30, 40], dtype=np.int32))
-    np.testing.assert_array_equal(chunks[1]["targets"], np.array([50, 60, 70, 80], dtype=np.int32))
+    np.testing.assert_array_equal(chunks[0]["targets"], np.array([10, 20, 30, 40, 50], dtype=np.int32))
+    np.testing.assert_array_equal(chunks[1]["targets"], np.array([50, 60, 70, 80, 90], dtype=np.int32))
 
   def test_chunk_token_stream_handles_documents_exceeding_sequence_length(self):
     """Verifies that documents larger than sequence_length (e.g. 10,000 tokens) chunk seamlessly."""
@@ -249,10 +249,10 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
     chunked_ds = chunk_token_stream(dataset, feature_key="targets", sequence_length=seq_len)
     chunks = list(chunked_ds.as_numpy_iterator())
 
-    # 10,000 tokens // 4096 = 2 chunks (8192 tokens); trailing 1808 tokens dropped by drop_remainder=True
+    # (10,000 - 1) // 4096 = 2 chunks of 4097 tokens at stride 4096; the trailing tokens are dropped
     self.assertEqual(len(chunks), 2)
-    np.testing.assert_array_equal(chunks[0]["targets"], np.arange(4096, dtype=np.int32))
-    np.testing.assert_array_equal(chunks[1]["targets"], np.arange(4096, 8192, dtype=np.int32))
+    np.testing.assert_array_equal(chunks[0]["targets"], np.arange(4097, dtype=np.int32))
+    np.testing.assert_array_equal(chunks[1]["targets"], np.arange(4096, 8193, dtype=np.int32))
 
   def test_chunk_token_stream_drops_remainder_cleanly(self):
     """Verifies that token counts not divisible by sequence_length drop the trailing partial chunk."""
@@ -262,10 +262,10 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
     chunked_ds = chunk_token_stream(dataset, feature_key="targets", sequence_length=seq_len)
     chunks = list(chunked_ds.as_numpy_iterator())
 
-    # 10 // 4 = 2 chunks (tokens 1..8); tokens 9 and 10 dropped
+    # (10 - 1) // 4 = 2 chunks (tokens 1..9); token 10 dropped
     self.assertEqual(len(chunks), 2)
-    np.testing.assert_array_equal(chunks[0]["targets"], np.array([1, 2, 3, 4], dtype=np.int32))
-    np.testing.assert_array_equal(chunks[1]["targets"], np.array([5, 6, 7, 8], dtype=np.int32))
+    np.testing.assert_array_equal(chunks[0]["targets"], np.array([1, 2, 3, 4, 5], dtype=np.int32))
+    np.testing.assert_array_equal(chunks[1]["targets"], np.array([5, 6, 7, 8, 9], dtype=np.int32))
 
   def test_format_continuous_stream_fn_preserves_llama3_quote_token(self):
     """Verifies that token ID 1 (quotation mark in Llama-3) is not masked from loss.
@@ -286,31 +286,37 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
     self.assertIn(0, legacy_formatted["targets_segmentation"].numpy())
 
     # New continuous stream format preserves 100% loss participation (all 1s)
-    continuous_formatted = format_continuous_stream_fn(chunk, max_target_length=seq_len, eod_id=1)
+    stream_chunk = {"targets": tf.constant([1, 42, 1, 99, 1, 7, 8, 1, 1], dtype=tf.int32)}
+    continuous_formatted = format_continuous_stream_fn(stream_chunk, max_target_length=seq_len)
     np.testing.assert_array_equal(continuous_formatted["targets_segmentation"].numpy(), np.ones(seq_len, dtype=np.int32))
 
   def test_chunk_boundary_and_document_boundary_shifting(self):
-    """Demonstrates next-token shifting behavior across document boundaries vs chunk boundaries."""
+    """Demonstrates next-token shifting behavior across document boundaries and chunk boundaries."""
     # Document 1: [10, 20, 30] (ends with 30)
-    # Document 2: [40, 50, 60] (starts with 40)
-    docs = [[10, 20, 30], [40, 50, 60]]
+    # Document 2: [40, 50, 60, 70, 80, 90] (starts with 40)
+    docs = [[10, 20, 30], [40, 50, 60, 70, 80, 90]]
     dataset = self._make_dataset_from_docs(docs)
     seq_len = 4
     chunked_ds = chunk_token_stream(dataset, sequence_length=seq_len)
-    formatted_ds = chunked_ds.map(lambda x: format_continuous_stream_fn(x, max_target_length=seq_len, eod_id=999))
+    formatted_ds = chunked_ds.map(lambda x: format_continuous_stream_fn(x, max_target_length=seq_len))
     chunks = list(formatted_ds.as_numpy_iterator())
+    self.assertEqual(len(chunks), 2)
+    c0, c1 = chunks
 
-    c0 = chunks[0]
-    # Chunk 0 contains [10, 20, 30, 40]
+    # Chunk 0 inputs are [10, 20, 30, 40], chunk 1 inputs are [50, 60, 70, 80]
     np.testing.assert_array_equal(c0["inputs"], np.array([10, 20, 30, 40], dtype=np.int32))
+    np.testing.assert_array_equal(c1["inputs"], np.array([50, 60, 70, 80], dtype=np.int32))
     # Inner transition: token 30 (end of doc 1) correctly predicts token 40 (start of doc 2)
     self.assertEqual(c0["targets"][2], 40)
-    # Chunk boundary transition: token 40 (end of chunk) predicts eod_id (999) because next token is in chunk 1
-    self.assertEqual(c0["targets"][3], 999)
+    # Chunk boundary transition: token 40 (end of chunk 0) predicts the real next token 50,
+    # which is the first input of chunk 1 (as in the MLPerf reference)
+    self.assertEqual(c0["targets"][3], 50)
+    self.assertEqual(c0["targets"][3], c1["inputs"][0])
+    np.testing.assert_array_equal(c1["targets"], np.array([60, 70, 80, 90], dtype=np.int32))
 
   def test_eval_pipeline_padding_masks_loss_on_padded_batches(self):
     """Verifies that _pad_to_batch_size sets targets_segmentation to 0 for padded eval examples."""
-    docs = [[1, 2, 3, 4], [5, 6, 7, 8]]  # 2 chunks of length 4
+    docs = [[1, 2, 3, 4], [5, 6, 7, 8, 9]]  # 9 tokens -> 2 chunks of length 5 at stride 4
     dataset = self._make_dataset_from_docs(docs)
     seq_len = 4
     chunked_ds = chunk_token_stream(dataset, sequence_length=seq_len)
