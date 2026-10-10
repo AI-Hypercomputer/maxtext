@@ -14,7 +14,7 @@
 
 """DeepSeek MoE router implementation."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import dataclasses
 import functools
 import math
@@ -112,6 +112,40 @@ def _psum_scatter_sc0(
     return tuple(jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=0, tiled=True) for x in xs)
 
   return _rs(*operands)
+
+
+def _psum_scatter_and_reduce_sc0(
+    *operands: jax.Array,
+    axis_name: str | tuple[str, ...],
+    reduce_fn: Callable[[Any], Any],
+    reduce_operand: Any,
+) -> tuple[tuple[jax.Array, ...], Any]:
+  """Executes psum_scatter, then `reduce_fn(reduce_operand)`, on SparseCore 0.
+
+  Both run in one SparseCore block, so `reduce_fn`'s collectives start as soon
+  as the psum_scatters are done.
+
+  Args:
+    *operands: Arrays to psum_scatter along dimension 0.
+    axis_name: Mesh axis name(s) to psum_scatter over.
+    reduce_fn: Function applied to `reduce_operand` after the psum_scatters,
+      typically issuing further collectives.
+    reduce_operand: Pytree passed to `reduce_fn`.
+
+  Returns:
+    A tuple of the scattered operands and `reduce_fn(reduce_operand)`.
+  """
+
+  @compute_on(
+      compute_type="tpu_sparsecore",
+      out_memory_spaces=jax.memory.Space.Device,
+      compiler_options={"sparse_core_config": {"core_ids": [0]}},
+  )
+  def _rs_then_reduce(xs: tuple[jax.Array, ...], reduce_operand: Any) -> tuple[tuple[jax.Array, ...], Any]:
+    scattered = tuple(jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=0, tiled=True) for x in xs)
+    return scattered, reduce_fn(reduce_operand)
+
+  return _rs_then_reduce(operands, reduce_operand)
 
 
 def _gather_sc0(
@@ -877,6 +911,21 @@ def dsv3_unsort_coeff_grads(
   )(grad_sorted_coeffs, metadata.sort_indices, metadata.group_sizes)
 
 
+def _reshape_combined_grads(
+    grad_x_local: jax.Array,
+    grad_coeffs_local: jax.Array,
+    *,
+    local_seq_length: int,
+    num_experts_per_tok: int,
+) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"]]:
+  """Reshapes the local psum_scatter outputs of the combine."""
+  grad_x = jnp.reshape(
+      grad_x_local,
+      (-1, local_seq_length, grad_x_local.shape[-2] * grad_x_local.shape[-1]),
+  )
+  return grad_x, jnp.reshape(grad_coeffs_local, (-1, num_experts_per_tok))
+
+
 def _combine_with_coeff_grads_impl(
     grad_x_ag: jt.Num[jax.Array, "NBT D0 D1"],
     grad_coeffs_ag: jt.Num[jax.Array, "R C"],
@@ -889,11 +938,12 @@ def _combine_with_coeff_grads_impl(
   """Per-shard body of `dsv3_combine_with_coeff_grads`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
   grad_x_local, grad_coeffs_local = _psum_scatter_sc0(grad_x_ag, grad_coeffs_ag, axis_name=physical_expert_axis_name)
-  grad_x = jnp.reshape(
+  return _reshape_combined_grads(
       grad_x_local,
-      (-1, local_seq_length, grad_x_local.shape[-2] * grad_x_local.shape[-1]),
+      grad_coeffs_local,
+      local_seq_length=local_seq_length,
+      num_experts_per_tok=num_experts_per_tok,
   )
-  return grad_x, jnp.reshape(grad_coeffs_local, (-1, num_experts_per_tok))
 
 
 @jax.named_call
@@ -947,6 +997,105 @@ def dsv3_combine_with_coeff_grads(
       out_specs=(out_specs_phys, coeffs_spec),
       check_vma=False,
   )(grad_x_ag, grad_coeffs_ag)
+
+
+def _combine_with_coeff_grads_and_reduce_impl(
+    grad_x_ag: jt.Num[jax.Array, "NBT D0 D1"],
+    grad_coeffs_ag: jt.Num[jax.Array, "R C"],
+    reduce_operand: list[jax.Array],
+    *,
+    local_seq_length: int,
+    num_experts_per_tok: int,
+    expert_axis_name: str,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+    reduce_fn: Callable[[list[jax.Array]], list[jax.Array]],
+) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"], list[jax.Array]]:
+  """Per-shard body of `dsv3_combine_with_coeff_grads_and_reduce`."""
+  physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
+  (grad_x_local, grad_coeffs_local), reduced = _psum_scatter_and_reduce_sc0(
+      grad_x_ag,
+      grad_coeffs_ag,
+      axis_name=physical_expert_axis_name,
+      reduce_fn=reduce_fn,
+      reduce_operand=reduce_operand,
+  )
+  grad_x, grad_coeffs = _reshape_combined_grads(
+      grad_x_local,
+      grad_coeffs_local,
+      local_seq_length=local_seq_length,
+      num_experts_per_tok=num_experts_per_tok,
+  )
+  return grad_x, grad_coeffs, reduced
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def dsv3_combine_with_coeff_grads_and_reduce(
+    grad_x_ag: jt.Num[jax.Array, "NBT D0 D1"],
+    grad_coeffs_ag: jt.Num[jax.Array, "R C"],
+    metadata: RouterMetadata[jax.Array],
+    deferred_reduce: ops.DeferredReduce | None,
+    *,
+    local_seq_length: int,
+    num_experts_per_tok: int,
+    expert_axis_name: str,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+    mesh: jax.sharding.Mesh,
+    out_specs: jax.sharding.PartitionSpec,
+) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"], Any]:
+  """`dsv3_combine_with_coeff_grads` that also runs a `DeferredReduce`.
+
+  The reduction runs in the same SparseCore block as the psum_scatter, right
+  after it, so it starts as soon as the psum_scatter is done rather than when
+  the TensorCore compute that it overlaps with reaches a point where it could
+  be issued. The token and coefficient gradients are then available only once
+  the reduction is done too.
+
+  Args:
+    grad_x_ag: Cotangent of the all-gathered tokens, shape (NBT, D0, D1).
+    grad_coeffs_ag: Output of `dsv3_unsort_coeff_grads`.
+    metadata: Router metadata of the microbatch.
+    deferred_reduce: Reduction to run after the psum_scatter, or `None`.
+    local_seq_length: Sequence length per shard.
+    num_experts_per_tok: Number of experts selected per token.
+    expert_axis_name: Name of the logical expert axis.
+    axis_mapping: Mapping from logical to physical mesh axes.
+    mesh: JAX mesh over which the data and model are sharded.
+    out_specs: Output PartitionSpec for the (B, T, D) token gradients.
+
+  Returns:
+    The outputs of `dsv3_combine_with_coeff_grads`, and the output of
+    `deferred_reduce.finish` (`None` if `deferred_reduce` is `None`).
+  """
+  if deferred_reduce is None:
+    grad_x, grad_coeffs = dsv3_combine_with_coeff_grads(
+        grad_x_ag,
+        grad_coeffs_ag,
+        metadata,
+        local_seq_length=local_seq_length,
+        num_experts_per_tok=num_experts_per_tok,
+        expert_axis_name=expert_axis_name,
+        axis_mapping=axis_mapping,
+        mesh=mesh,
+        out_specs=out_specs,
+    )
+    return grad_x, grad_coeffs, None
+  out_specs_phys = ops.physical_pspec(out_specs, axis_mapping)
+  coeffs_spec = jax.typeof(metadata.selected_experts).sharding.spec
+  grad_x, grad_coeffs, reduced = jax.shard_map(
+      functools.partial(
+          _combine_with_coeff_grads_and_reduce_impl,
+          local_seq_length=local_seq_length,
+          num_experts_per_tok=num_experts_per_tok,
+          expert_axis_name=expert_axis_name,
+          axis_mapping=axis_mapping,
+          reduce_fn=deferred_reduce.local_fn,
+      ),
+      mesh=mesh,
+      out_specs=(out_specs_phys, coeffs_spec, deferred_reduce.out_specs),
+      check_vma=False,
+  )(grad_x_ag, grad_coeffs_ag, deferred_reduce.operand)
+  return grad_x, grad_coeffs, deferred_reduce.finish(reduced)
 
 
 def _dense_selected_coeffs(

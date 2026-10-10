@@ -20,11 +20,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tokamax._src.ops.experimental.tpu.splash_attention import base
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as mask_lib
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info as mask_info_lib
 
-# Re-export core types and constants from Tokamax.
+from maxtext.experimental.lineage import splash_attention_kernel as tokamax_splash
+
+# Re-export core types and constants. The kernel is the lineage branch of the
+# Tokamax splash kernel (splash_attention_kernel.py in this directory).
 SplashConfig = tokamax_splash.SplashConfig
 QKVLayout = tokamax_splash.QKVLayout
 SegmentIds = base.SegmentIds

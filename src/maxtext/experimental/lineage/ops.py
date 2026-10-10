@@ -14,7 +14,7 @@
 
 """Common operations shared across models."""
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 import dataclasses
 import functools
 import math
@@ -253,6 +253,30 @@ def collect_along_axis(
   )(xs)
 
 
+@dataclasses.dataclass(frozen=True)
+class DeferredReduce:
+  """A reduction that the caller runs inside its own `shard_map`.
+
+  `finish(jax.shard_map(local_fn, mesh=mesh, out_specs=out_specs)(operand))` is
+  the output of the `reduce_along_axis` call that returned this. Running the
+  reduction in the caller's `shard_map` lets it share, e.g., a SparseCore block
+  with other collectives.
+
+  Attributes:
+    operand: The arrays to reduce. The arrays needing no reduction are left out,
+      so they add no dependency to the caller's `shard_map`.
+    local_fn: Per-shard reduction of `operand`.
+    out_specs: PartitionSpecs of the outputs of `local_fn`.
+    finish: Merges the outputs of the `shard_map` with the arrays left out of
+      `operand` into the output of `reduce_along_axis`.
+  """
+
+  operand: list[jax.Array]
+  local_fn: Callable[[list[jax.Array]], list[jax.Array]]
+  out_specs: list[jax.sharding.PartitionSpec]
+  finish: Callable[[list[jax.Array]], Any]
+
+
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def reduce_along_axis(
     xs: jt.Num[jax.Array, "*input_dims"] | jt.PyTree[jt.Num[jax.Array, "..."]],
@@ -260,9 +284,11 @@ def reduce_along_axis(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     like: jt.Shaped[jax.Array, "..."] | jt.PyTree[jt.Shaped[jax.Array, "..."]],
     *,
+    axes: Collection[str] | None = None,
+    defer: bool = False,
     compute_type: str | None = None,
     compiler_options: dict[str, Any] | None = None,
-) -> jt.Num[jax.Array, "*input_dims"] | jt.PyTree[jt.Num[jax.Array, "..."]]:
+) -> jt.Num[jax.Array, "*input_dims"] | jt.PyTree[jt.Num[jax.Array, "..."]] | DeferredReduce:
   """Reduces cotangents of `collect_along_axis` back to its input shardings.
 
   `reduce_along_axis(ct, axis_name, axis_mapping, like=w)` is the VJP of
@@ -272,20 +298,39 @@ def reduce_along_axis(
   sharded along in `like` and all-reduced along the ones it is replicated
   along.
 
+  The reduction can be split by mesh axis into calls issued separately, e.g.
+  on different SparseCores or in different scan steps: `axes` restricts a call
+  to the collected axes in it and leaves the arrays unreduced along the other
+  collected axes for a later call. A call only reduces along the collected
+  axes its input is still unreduced along, so the calls compose in any order.
+
   Args:
     xs: Cotangents of the `collect_along_axis` outputs, unreduced along the
-      collected axes.
+      collected axes that no earlier call reduced.
     axis_name: Axis names passed to `collect_along_axis`.
     axis_mapping: Mapping from logical to physical mesh axes.
     like: Array or pytree of arrays with the shardings of the
       `collect_along_axis` inputs.
+    axes: Optional physical mesh axes to reduce along in this call; `None` for
+      all the collected axes. The collected axes sharding a dimension of `like`
+      together must be all in or all out of `axes`, since reduce-scattering
+      along only some of them would scramble the shards.
+    defer: Whether to return the reduction as a `DeferredReduce` to run inside
+      the caller's `shard_map`, instead of issuing it. Requires no
+      `compute_type`.
     compute_type: Optional `compute_on` target (e.g., `"tpu_sparsecore"`) to
       apply inside `shard_map`.
     compiler_options: Optional compiler options for `compute_on`.
 
   Returns:
-    The reduced cotangents, with the cotangent shardings of `like`.
+    The reduced cotangents, with the cotangent shardings of `like`, except
+    unreduced along the collected axes left out of `axes`. A `DeferredReduce`
+    of them if `defer`.
   """
+  if defer and compute_type is not None:
+    raise ValueError("defer runs the reduction in the caller's shard_map, which rules out" " compute_type.")
+  if axes is not None:
+    axes = frozenset(axes)
 
   def _to_tuple(m: str | Sequence[str]) -> tuple[str, ...]:
     if isinstance(m, str):
@@ -307,9 +352,19 @@ def reduce_along_axis(
           names.append(ax)
     return tuple(names), frozenset(names)
 
+  def _nothing_to_reduce() -> Any:
+    if not defer:
+      return xs
+    return DeferredReduce(
+        operand=[],
+        local_fn=lambda operand: operand,
+        out_specs=[],
+        finish=lambda reduced: xs,
+    )
+
   leaves = jax.tree.leaves(xs)
   if not leaves:
-    return xs
+    return _nothing_to_reduce()
 
   physical_axes_tree = jax.tree.map(
       lambda spec, sub_xs: jax.tree.map(lambda _: _get_physical_axes(spec), sub_xs),
@@ -322,38 +377,133 @@ def reduce_along_axis(
       is_leaf=lambda x: (isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], frozenset)),
   )
   if not any(names for names, _ in flat_physical_axes):
-    return xs
+    return _nothing_to_reduce()
 
   mesh = jax.typeof(leaves[0]).sharding.mesh
   in_specs = jax.tree.map(lambda arr: jax.typeof(arr).sharding.spec, xs)
   like_specs = jax.tree.map(lambda arr: jax.typeof(arr).sharding.spec, like)
-  out_specs = jax.tree.map(lambda spec: spec.to_ct_spec(), like_specs)
 
-  def _reduce_leaf(
-      arr,
+  def _leaf_collectives(
+      in_spec: jax.sharding.PartitionSpec,
       like_spec: jax.sharding.PartitionSpec,
       physical_axes: tuple[tuple[str, ...], frozenset[str]],
-  ):
-    # Transposes `collect_along_axis`'s `_collect_leaf` in reverse order.
+  ) -> tuple[list[tuple[int, str]], list[str], frozenset[str]]:
+    """Plans a leaf's collectives in this call.
+
+    Args:
+      in_spec: Sharding spec of the leaf of `xs`.
+      like_spec: Sharding spec of the leaf of `like`.
+      physical_axes: Physical axes the leaf is collected along, in order and as
+        a set.
+
+    Returns:
+      The `(dimension, axis)` pairs to reduce-scatter along, the axes to
+      all-reduce along, and the collected axes left unreduced for a later call.
+      Only the collected axes the leaf is still unreduced along are pending: an
+      earlier call may have reduced the others.
+    """
     physical_axis_names, physical_axis_set = physical_axes
+    pending = physical_axis_set & in_spec.unreduced
+    selected = pending if axes is None else pending & axes
     sharded_axes = set()
-    for part in like_spec.partitions:
-      if part is not None:
-        sharded_axes.update((part,) if isinstance(part, str) else part)
-    for ax in reversed(physical_axis_names):
-      if ax not in sharded_axes and ax not in like_spec.reduced and ax not in like_spec.unreduced:
-        arr = jax.lax.psum(arr, ax)
+    scatters = []
+    # Transposes `collect_along_axis`'s `_collect_leaf` in reverse order.
     for dim_idx, part in reversed(list(enumerate(like_spec.partitions))):
       if part is None:
         continue
       part_axes = (part,) if isinstance(part, str) else part
-      for ax in part_axes:
-        if ax in physical_axis_set:
-          arr = jax.lax.psum_scatter(arr, ax, scatter_dimension=dim_idx, tiled=True)
+      sharded_axes.update(part_axes)
+      dim_pending = [ax for ax in part_axes if ax in pending]
+      dim_selected = [ax for ax in dim_pending if ax in selected]
+      if dim_selected and len(dim_selected) < len(dim_pending):
+        raise ValueError(
+            f"Reduce-scattering along only {dim_selected} of {dim_pending},"
+            f" which shard dimension {dim_idx} of {like_spec} together, would"
+            " scramble the shards."
+        )
+      scatters.extend((dim_idx, ax) for ax in dim_selected)
+    psums = [
+        ax
+        for ax in reversed(physical_axis_names)
+        if ax in selected and ax not in sharded_axes and ax not in like_spec.reduced and ax not in like_spec.unreduced
+    ]
+    return scatters, psums, pending - selected
+
+  def _out_spec(
+      in_spec: jax.sharding.PartitionSpec,
+      like_spec: jax.sharding.PartitionSpec,
+      physical_axes: tuple[tuple[str, ...], frozenset[str]],
+  ) -> jax.sharding.PartitionSpec:
+    spec = like_spec.to_ct_spec()
+    _, _, skipped = _leaf_collectives(in_spec, like_spec, physical_axes)
+    if not skipped:
+      return spec
+
+    def _unscattered(part):
+      if part is None or isinstance(part, str):
+        return None if part in skipped else part
+      return tuple(ax for ax in part if ax not in skipped) or None
+
+    # Stays unscattered along the skipped axes `like` is sharded along, and
+    # unreduced along all of them.
+    return jax.sharding.PartitionSpec(
+        *map(_unscattered, spec.partitions),
+        reduced=spec.reduced,
+        unreduced=spec.unreduced | skipped,
+    )
+
+  out_specs = jax.tree.map(_out_spec, in_specs, like_specs, physical_axes_tree)
+
+  def _reduce_leaf(
+      arr,
+      in_spec: jax.sharding.PartitionSpec,
+      like_spec: jax.sharding.PartitionSpec,
+      physical_axes: tuple[tuple[str, ...], frozenset[str]],
+  ):
+    scatters, psums, _ = _leaf_collectives(in_spec, like_spec, physical_axes)
+    # The reduce-scatters first: they shrink the all-reduces, which commute
+    # with them as they are along other axes.
+    for dim_idx, ax in scatters:
+      arr = jax.lax.psum_scatter(arr, ax, scatter_dimension=dim_idx, tiled=True)
+    for ax in psums:
+      arr = jax.lax.psum(arr, ax)
     return arr
 
+  if defer:
+    xs_leaves, xs_treedef = jax.tree.flatten(xs)
+    leaf_specs = list(
+        zip(
+            xs_treedef.flatten_up_to(in_specs),
+            xs_treedef.flatten_up_to(like_specs),
+            xs_treedef.flatten_up_to(physical_axes_tree),
+        )
+    )
+    leaf_out_specs = xs_treedef.flatten_up_to(out_specs)
+    # The arrays this call reduces along no axis need no collective.
+    reduced_idxs = []
+    for i, specs in enumerate(leaf_specs):
+      scatters, psums, _ = _leaf_collectives(*specs)
+      if scatters or psums:
+        reduced_idxs.append(i)
+
+    def _local_fn(operand):
+      return [_reduce_leaf(arr, *leaf_specs[i]) for arr, i in zip(operand, reduced_idxs)]
+
+    def _finish(reduced):
+      merged = list(xs_leaves)
+      for i, arr in zip(reduced_idxs, reduced):
+        merged[i] = arr
+      return xs_treedef.unflatten(merged)
+
+    return DeferredReduce(
+        operand=[xs_leaves[i] for i in reduced_idxs],
+        local_fn=_local_fn,
+        out_specs=[leaf_out_specs[i] for i in reduced_idxs],
+        finish=_finish,
+    )
+
   def _reduce_pytree(xs_local):
-    return jax.tree.map(_reduce_leaf, xs_local, like_specs, physical_axes_tree)
+    return jax.tree.map(_reduce_leaf, xs_local, in_specs, like_specs, physical_axes_tree)
 
   if compute_type is not None:
     _reduce_pytree = jax.experimental.compute_on.compute_on(
@@ -692,7 +842,7 @@ def _fwd_step_xs(w: Any, w_aux: Any, layers: slice | int, shifted: bool) -> tupl
 
 @functools.partial(
     jax.custom_vjp,
-    nondiff_argnums=(0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 14, 15),
+    nondiff_argnums=(0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16),
 )
 def w_collect_pipelined_scan_prologue_epilogue(
     prologue_fn: PipelinedScanLayer,
@@ -703,7 +853,8 @@ def w_collect_pipelined_scan_prologue_epilogue(
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici_fwd: Callable[..., AnyJaxArrayOrPyTree],
     reduce_fn_dcn: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
-    reduce_fn_ici: Callable[..., AnyJaxArrayOrPyTree],
+    reduce_fn_ici_first: Callable[..., AnyJaxArrayOrPyTree],
+    reduce_fn_ici_second: Callable[..., AnyJaxArrayOrPyTree],
     collect_fn_ici_bwd: Callable[..., AnyJaxArrayOrPyTree] | None = None,
     quantize_fn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None = None,
     offload_fn: Callable[[Any], Any] = lambda res: res,
@@ -720,8 +871,24 @@ def w_collect_pipelined_scan_prologue_epilogue(
       (x_grad, w_mla_grad)`.
     scan_body_fn: PipelinedScanLayer to execute at each scan iteration with
       signatures `fwd(carry, w_curr, w_next) -> ((carry, aux_step), res)` and
-      `bwd(res, (carry_grad, aux_step_grad), w_curr, w_next) -> (carry_grad,
-      w_curr_expert_grad, w_next_mla_grad)`.
+      `bwd(res, (carry_grad, aux_step_grad), w_curr, w_next, w_next_expert_grad,
+      reduce_ici_first, w_pending_grad_partial, reduce_ici_second) ->
+      (carry_grad, w_curr_expert_grad, w_next_grad_partial, w_pending_grad)`.
+      `bwd` completes the unreduced gradient of `w_next` by combining (see
+      `combine_w_grads`) its own contribution with `w_next_expert_grad`, the
+      `w_curr_expert_grad` returned by the previous backward step (that of
+      `w_next`'s layer). It then reduces it over the ICI axes in two stages,
+      each placed by the step that runs it: `reduce_ici_first(grad) ->
+      w_next_grad_partial`, which the next backward step gets as
+      `w_pending_grad_partial` (`None` for the first), then
+      `reduce_ici_second(w_pending_grad_partial) -> w_pending_grad`.
+      `reduce_ici_second(w_pending_grad_partial, defer=True)` instead defers the
+      second stage (e.g. as `DeferredReduce`s, see `reduce_along_axis`) for
+      `bwd` to run inside the `shard_map`s of other collectives and finish into
+      `w_pending_grad`; the keyword is forwarded to `reduce_fn_ici_second`.
+      `w_next_grad_partial` is only available once the weights that the step
+      ICI-collects for the next one are too, which lets that collective be
+      issued ahead of the first stage on a shared queue.
     epilogue_fn: PipelinedScanLayer to execute for the last layer with
       signatures `fwd(carry, w) -> ((out, aux_last), res)` and `bwd(res,
       (out_grad, aux_last_grad), w) -> (carry_grad, w_expert_grad)`.
@@ -734,8 +901,15 @@ def w_collect_pipelined_scan_prologue_epilogue(
     reduce_fn_dcn: Dual of `collect_fn_dcn` with signature `(grad, like) ->
       grad_reduced`, reducing the gradient of a layer's DCN-collected weights to
       the sharding of `like`, that layer's uncollected weights.
-    reduce_fn_ici: Dual of `collect_fn_ici_bwd`, with the same signature as
-      `reduce_fn_dcn` and `like` the layer's DCN-collected weights.
+    reduce_fn_ici_first: First stage of the dual of `collect_fn_ici_bwd`, with
+      the same signature as `reduce_fn_dcn` and `like` the layer's DCN-collected
+      weights. It reduces the gradient over a part of the ICI axes and leaves it
+      unreduced over the ones `reduce_fn_ici_second` reduces.
+    reduce_fn_ici_second: Second stage of the dual of `collect_fn_ici_bwd`, with
+      the same signature as `reduce_fn_ici_first`, taking its output as `grad`,
+      so that `reduce_fn_ici_second(reduce_fn_ici_first(grad, like), like)` is
+      the dual of `collect_fn_ici_bwd`. The scan body's `reduce_ici_second` also
+      passes it keyword arguments, such as `defer`.
     collect_fn_ici_bwd: Function to collect weights over the ICI axes in
       backward pass.
     quantize_fn: Optional function applied once to all of `w` before any
@@ -748,9 +922,10 @@ def w_collect_pipelined_scan_prologue_epilogue(
       have the layer dimension first and are sliced alongside `w`. When given,
       each layer's slice is passed as keyword argument `w_aux` to
       `collect_fn_pre`, `reduce_fn_pre`, `collect_fn_ici_fwd`,
-      `collect_fn_ici_bwd` and `reduce_fn_ici` (the slice of the collected or
-      reduced layer) and to the `fwd`/`bwd` of `prologue_fn`, `scan_body_fn`
-      (the slice of `w_curr`) and `epilogue_fn`. Its cotangent is `None`.
+      `collect_fn_ici_bwd`, `reduce_fn_ici_first` and `reduce_fn_ici_second`
+      (the slice of the collected or reduced layer) and to the `fwd`/`bwd` of
+      `prologue_fn`, `scan_body_fn` (the slice of `w_curr`) and `epilogue_fn`.
+      Its cotangent is `None`.
     collect_fn_pre: Optional linear per-layer transform applied to the
       DCN-collected, still ICI-sharded weights before the ICI collect, so that a
       layer is collected as `collect_fn_ici(collect_fn_pre(collect_fn_dcn(w)))`
@@ -759,20 +934,23 @@ def w_collect_pipelined_scan_prologue_epilogue(
       that ICI-collects the layer and carried across, so both collectives
       overlap with a full step of compute.
     reduce_fn_pre: Dual of `collect_fn_pre` with signature `grad -> grad`,
-      required with it. It is applied to the layer's gradient after the ICI
-      reduction and before the DCN reduction.
+      required with it. It is applied to the layer's gradient after the first
+      stage of the ICI reduction, so it must commute with `reduce_fn_ici_second`
+      (e.g. by only transforming leaves that `reduce_fn_ici_second` leaves
+      unchanged).
 
   The last scan body step is peeled out of the scan so that the backward pass
-  can pipeline the DCN gradient reduction: a layer's gradient is reduced over
-  the ICI axes in the step that completes it and over the DCN axis one step
-  later, overlapping the reduction with the next layer's backward compute.
+  can pipeline the gradient reduction: a layer's gradient is reduced over a
+  part of the ICI axes in the step that completes it, then over the rest of
+  them and the DCN axis in the next step, overlapping the reduction with that
+  step's backward compute.
 
   Returns:
     A tuple of (output, aux) where aux is the stacked auxiliary outputs across
     all scan iterations.
   """
-  del offload_fn, load_fn, collect_fn_ici_bwd, reduce_fn_dcn, reduce_fn_ici
-  del reduce_fn_pre
+  del offload_fn, load_fn, collect_fn_ici_bwd, reduce_fn_dcn
+  del reduce_fn_ici_first, reduce_fn_ici_second, reduce_fn_pre
   num_layers = jax.tree.leaves(w)[0].shape[0]
   assert num_layers >= 3, (
       "there must be at least three layers to perform a pipelined scan with a" " peeled prologue and epilogue"
@@ -862,7 +1040,8 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici_fwd: Callable[..., AnyJaxArrayOrPyTree],
     reduce_fn_dcn: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
-    reduce_fn_ici: Callable[..., AnyJaxArrayOrPyTree],
+    reduce_fn_ici_first: Callable[..., AnyJaxArrayOrPyTree],
+    reduce_fn_ici_second: Callable[..., AnyJaxArrayOrPyTree],
     collect_fn_ici_bwd: Callable[..., AnyJaxArrayOrPyTree] | None = None,
     quantize_fn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None = None,
     offload_fn: Callable[[Any], Any] = lambda res: res,
@@ -872,7 +1051,8 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
     reduce_fn_pre: Callable[..., AnyJaxArrayOrPyTree] | None = None,
 ) -> tuple[tuple[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], Any]:
   """Forward pass of w_collect_pipelined_scan_prologue_epilogue."""
-  del load_fn, collect_fn_ici_bwd, reduce_fn_dcn, reduce_fn_ici
+  del load_fn, collect_fn_ici_bwd, reduce_fn_dcn
+  del reduce_fn_ici_first, reduce_fn_ici_second
   num_layers = jax.tree.leaves(w)[0].shape[0]
   assert num_layers >= 3, (
       "there must be at least three layers to perform a pipelined scan and its"
@@ -1041,7 +1221,8 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici_fwd: Callable[..., AnyJaxArrayOrPyTree],
     reduce_fn_dcn: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
-    reduce_fn_ici: Callable[..., AnyJaxArrayOrPyTree],
+    reduce_fn_ici_first: Callable[..., AnyJaxArrayOrPyTree],
+    reduce_fn_ici_second: Callable[..., AnyJaxArrayOrPyTree],
     collect_fn_ici_bwd: Callable[..., AnyJaxArrayOrPyTree] | None,
     quantize_fn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None,
     offload_fn: Callable[[Any], Any],
@@ -1106,14 +1287,22 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
 
   # Every layer's weights share the last layer's shardings, which are all the
   # reductions read from them (`collect_fn_pre` preserves shardings).
-  def _reduce_ici(w_unreduced, w_aux_layer):
-    """Reduces a layer's gradient over the ICI axes."""
-    return reduce_fn_ici(w_unreduced, w_last_dcn, **_w_aux_kwargs(w_aux_layer))
+  def _reduce_ici_first(w_unreduced, w_aux_layer):
+    """First stage of reducing a layer's gradient over the ICI axes."""
+    return reduce_fn_ici_first(w_unreduced, w_last_dcn, **_w_aux_kwargs(w_aux_layer))
 
-  def _reduce_dcn(w_ici, w_aux_layer):
-    """Applies `reduce_fn_pre` (if any), then reduces over the DCN axis."""
-    if reduce_fn_pre is not None:
-      w_ici = reduce_fn_pre(w_ici, **_w_aux_kwargs(w_aux_layer))
+  def _reduce_ici_second(w_partial, w_aux_layer, **kwargs):
+    """Second stage of reducing a layer's gradient over the ICI axes."""
+    return reduce_fn_ici_second(w_partial, w_last_dcn, **_w_aux_kwargs(w_aux_layer), **kwargs)
+
+  def _reduce_pre(w_partial, w_aux_layer):
+    """Applies `reduce_fn_pre` (if any) to a partially reduced gradient."""
+    if reduce_fn_pre is None:
+      return w_partial
+    return reduce_fn_pre(w_partial, **_w_aux_kwargs(w_aux_layer))
+
+  def _reduce_dcn(w_ici):
+    """Reduces an ICI-reduced gradient over the DCN axis."""
     return reduce_fn_dcn(w_ici, w_last_sharded)
 
   with jax.named_scope("epilogue_bwd"):
@@ -1130,12 +1319,14 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
 
   # 2. Reverse scan body backward.
   #
-  # Each step completes one layer's gradient and reduces it over the ICI axes,
-  # but defers its DCN reduction to the next step, which issues the collective
-  # before its own backward compute so that the two overlap. `w_pending` is
-  # the ICI-reduced gradient of the layer completed by the previous step (with
-  # the layer's `w_aux`), and is `None` only for the peeled step that primes
-  # the pipeline.
+  # Each step completes one layer's gradient and runs the first stage of its
+  # ICI reduction, but defers the rest of its reduction to the next step: that
+  # step applies `reduce_fn_pre` to it before its own backward compute so that
+  # the two overlap, runs the second stage of its ICI reduction (where its scan
+  # body places that) and then reduces it over the DCN axis.
+  # `w_partial_pending` is the partially reduced gradient of the layer
+  # completed by the previous step (with the layer's `w_aux`), and is `None`
+  # only for the peeled step that primes the pipeline.
   #
   # Each step also ICI-collects the weights of the layer whose backward pass
   # runs in the next step. Without `collect_fn_pre`, the step is given that
@@ -1151,7 +1342,7 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         w_aux_curr,
         w_aux_next,
         res_curr_loaded,
-        w_pending,
+        w_partial_pending,
         pre_carry,
     ) = carry
     (
@@ -1163,9 +1354,9 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         pre_idx,
     ) = xs
 
-    # Reduce the previous step's layer over the DCN axis concurrently with this
-    # step's backward compute.
-    w_pending_reduced = None if w_pending is None else _reduce_dcn(*w_pending)
+    w_partial_pending_grad, w_aux_partial_pending = (None, None) if w_partial_pending is None else w_partial_pending
+    if w_partial_pending is not None:
+      w_partial_pending_grad = _reduce_pre(w_partial_pending_grad, w_aux_partial_pending)
 
     # Load previous iteration's offloaded residuals to device
     res_prev_loaded = _load(res_prev_host)
@@ -1178,20 +1369,35 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
     w_prev_collected = fns.collect_ici(w_prev_pre, w_aux_prev)
     pre_carry = fns.pre_carry(pre_idx)
 
+    def _reduce_ici_first_with_collect(w_unreduced):
+      # Collectives on a SparseCore queue complete in the order they were
+      # issued. `scan_body_fn` needs the first reduction stage early in the
+      # step, but nothing needs the all-gather above before the next step, so
+      # the reduction would be due first and the all-gather could only start
+      # behind it. Tying the all-gather's result to the reduction's gives both
+      # the same deadline, which lets the all-gather, whose operand is
+      # available first, be issued first.
+      w_partial = _reduce_ici_first(w_unreduced, w_aux_next)
+      w_partial, _ = jax.lax.optimization_barrier((w_partial, w_prev_collected))
+      return w_partial
+
     (
         carry_grad,
         w_curr_expert_grad_unreduced,
-        w_next_mla_grad_unreduced,
+        w_next_grad_partial,
+        w_partial_pending_grad_ici,
     ) = scan_body_fn.bwd(
         res_curr_full,
         (carry_grad, aux_step_grad),
         w_curr,
         w_next,
+        w_prev_expert_grad_unreduced,
+        _reduce_ici_first_with_collect,
+        w_partial_pending_grad,
+        functools.partial(_reduce_ici_second, w_aux_layer=w_aux_partial_pending),
         **_w_aux_kwargs(w_aux_curr),
     )
-
-    w_layer_unreduced = combine_w_grads(w_next_mla_grad_unreduced, w_prev_expert_grad_unreduced)
-    w_layer_ici = _reduce_ici(w_layer_unreduced, w_aux_next)
+    w_pending_reduced = None if w_partial_pending is None else _reduce_dcn(w_partial_pending_grad_ici)
 
     return (
         carry_grad,
@@ -1201,19 +1407,14 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         w_aux_prev,
         w_aux_curr,
         res_prev_loaded,
-        (w_layer_ici, w_aux_next),
+        (w_next_grad_partial, w_aux_next),
         pre_carry,
     ), w_pending_reduced
 
   def _step_xs(res_curr_device, res_prev_host, layers, aux_step_grad):
     """Inputs of backward steps ICI-collecting `layers`."""
     if shifted:
-      # Clamp like the slice case: with 3 or 4 layers the last unscanned step
-      # pre-collects layer 0 (unused), so that the zero-length scan that follows
-      # is still traced with a valid `pre_carry`.
       pre_idx = _shifted_indices(layers, -1, num_layers)
-      if pre_idx is None:
-        pre_idx = 0
       return (
           res_curr_device,
           res_prev_host,
@@ -1270,9 +1471,10 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
       pre_carry,
   )
 
-  # Peeled scan body step. It completes the last layer and only reduces it over
-  # the ICI axes, priming the pipeline so that every scan step below emits the
-  # DCN reduction of the layer completed by the step before it.
+  # Peeled scan body step. It completes the last layer and only runs the first
+  # stage of its ICI reduction, priming the pipeline so that every step below
+  # emits the fully reduced gradient of the layer completed by the step before
+  # it.
   with jax.named_scope("scan_step_bwd_last"):
     carry_bwd, _ = _scan_step_bwd(
         carry_bwd,
@@ -1294,41 +1496,28 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
     )
     carry_bwd, w_rem_reduced = _scan_step_bwd(carry_bwd, xs_rem)
 
-  even = slice(0, 2 * num_pairs, 2)
-  odd = slice(1, 1 + 2 * num_pairs, 2)
-  aux_even_grad = jax.tree.map(lambda g: g[0 : 2 * num_pairs : 2], aux_scanned_grad)
-  aux_odd_grad = jax.tree.map(lambda g: g[1 : 2 * num_pairs : 2], aux_scanned_grad)
-
-  xs_0 = _step_xs(res_curr_0_scanned_device, res_prev_0_scanned_host, even, aux_even_grad)
-  xs_1 = _step_xs(res_curr_1_scanned_device, res_prev_1_scanned_host, odd, aux_odd_grad)
-
-  carry_bwd, (w_0_reduced_scanned, w_1_reduced_scanned) = jax.lax.scan(
-      body_bwd,
-      carry_bwd,
-      (xs_0, xs_1),
-      reverse=True,
-  )
-
+  w_grads_reduced = None
   if num_pairs > 0:
-    w_scanned_grads = jax.tree.map(
+    even = slice(0, 2 * num_pairs, 2)
+    odd = slice(1, 1 + 2 * num_pairs, 2)
+    aux_even_grad = jax.tree.map(lambda g: g[0 : 2 * num_pairs : 2], aux_scanned_grad)
+    aux_odd_grad = jax.tree.map(lambda g: g[1 : 2 * num_pairs : 2], aux_scanned_grad)
+
+    xs_0 = _step_xs(res_curr_0_scanned_device, res_prev_0_scanned_host, even, aux_even_grad)
+    xs_1 = _step_xs(res_curr_1_scanned_device, res_prev_1_scanned_host, odd, aux_odd_grad)
+
+    carry_bwd, (w_0_reduced_scanned, w_1_reduced_scanned) = jax.lax.scan(
+        body_bwd,
+        carry_bwd,
+        (xs_0, xs_1),
+        reverse=True,
+    )
+
+    w_grads_reduced = jax.tree.map(
         _interleave_arrays,
         w_0_reduced_scanned,
         w_1_reduced_scanned,
     )
-  else:
-    w_scanned_grads = w_0_reduced_scanned
-
-  if num_scanned % 2 == 1:
-    if num_pairs == 0:
-      w_grads_reduced = jax.tree.map(lambda r: r[jnp.newaxis], w_rem_reduced)
-    else:
-      w_grads_reduced = jax.tree.map(
-          lambda s, r: jnp.concatenate([s, r[jnp.newaxis]], axis=0),
-          w_scanned_grads,
-          w_rem_reduced,
-      )
-  else:
-    w_grads_reduced = w_scanned_grads
 
   (
       carry_grad,
@@ -1338,50 +1527,66 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
       w_aux_0,
       w_aux_1,
       res_sb_0_loaded,
-      w_pending,
+      (w_third_grad_partial, w_aux_2),
       _,
   ) = carry_bwd
 
-  # 3. Scan body 0 backward: reduce the third layer over the DCN axis and load
-  # the prologue residuals, both concurrently with this step's compute.
+  # 3. Scan body 0 backward: apply `reduce_fn_pre` to the third layer and load
+  # the prologue residuals, both concurrently with this step's compute, then
+  # finish reducing the third layer once its scan body ran the second stage of
+  # its ICI reduction.
   with jax.named_scope("scan_step_bwd_0"):
-    w_third_grad_reduced = _reduce_dcn(*w_pending)
+    w_third_grad_partial = _reduce_pre(w_third_grad_partial, w_aux_2)
     res_prologue_device = load_fn(res_prologue_host)
     res_sb_0_full = _merge_offloaded(res_sb_0_loaded, res_sb_0_device)
 
     (
         carry_grad,
         w_0_expert_grad_unreduced,
-        w_1_mla_grad_unreduced,
+        w_second_grad_partial,
+        w_third_grad_ici,
     ) = scan_body_fn.bwd(
         res_sb_0_full,
         (carry_grad, aux_step_0),
         w_0,
         w_1,
+        w_second_expert_grad_unreduced,
+        functools.partial(_reduce_ici_first, w_aux_layer=w_aux_1),
+        w_third_grad_partial,
+        functools.partial(_reduce_ici_second, w_aux_layer=w_aux_2),
         **_w_aux_kwargs(w_aux_0),
     )
+    w_third_grad_reduced = _reduce_dcn(w_third_grad_ici)
 
-    w_1_unreduced = combine_w_grads(w_1_mla_grad_unreduced, w_second_expert_grad_unreduced)
-    w_second_grad_ici = _reduce_ici(w_1_unreduced, w_aux_1)
-
-  # 4. Prologue backward: the second layer's DCN reduction overlaps the
-  # prologue compute and the first layer's ICI reduction, which leaves only the
-  # first layer's DCN reduction to drain the pipeline.
+  # 4. Prologue backward: the second layer's reduction overlaps the prologue
+  # compute, which leaves only the first layer's reduction to drain the
+  # pipeline.
   with jax.named_scope("prologue_bwd"):
-    w_second_grad_reduced = _reduce_dcn(w_second_grad_ici, w_aux_1)
+    w_second_grad_reduced = _reduce_dcn(_reduce_ici_second(_reduce_pre(w_second_grad_partial, w_aux_1), w_aux_1))
 
     x_grad, w_0_mla_grad_unreduced = prologue_fn.bwd(res_prologue_device, carry_grad, w_0, **_w_aux_kwargs(w_aux_0))
 
     w_0_unreduced = combine_w_grads(w_0_mla_grad_unreduced, w_0_expert_grad_unreduced)
-    w_first_grad_reduced = _reduce_dcn(_reduce_ici(w_0_unreduced, w_aux_0), w_aux_0)
+    w_first_grad_reduced = _reduce_dcn(
+        _reduce_ici_second(
+            _reduce_pre(_reduce_ici_first(w_0_unreduced, w_aux_0), w_aux_0),
+            w_aux_0,
+        )
+    )
 
-  w_grad = jax.tree.map(
-      lambda x, y, z, s: jnp.concatenate([x[jnp.newaxis], y[jnp.newaxis], z[jnp.newaxis], s], axis=0),
-      w_first_grad_reduced,
-      w_second_grad_reduced,
-      w_third_grad_reduced,
-      w_grads_reduced,
-  )
+  w_grad_parts = [
+      jax.tree.map(lambda x: x[jnp.newaxis], g)
+      for g in (
+          w_first_grad_reduced,
+          w_second_grad_reduced,
+          w_third_grad_reduced,
+      )
+  ]
+  if w_grads_reduced is not None:
+    w_grad_parts.append(w_grads_reduced)
+  if w_rem_reduced is not None:
+    w_grad_parts.append(jax.tree.map(lambda x: x[jnp.newaxis], w_rem_reduced))
+  w_grad = jax.tree.map(lambda *parts: jnp.concatenate(parts, axis=0), *w_grad_parts)
   return x_grad, w_grad, None
 
 
@@ -2347,12 +2552,12 @@ def _pallas_ragged_write(
   )(dst_offset, src_offset, slice_size, dst, src, src)
 
 
-@jt.jaxtyped(typechecker=typeguard.typechecked)
 @functools.partial(
     jax.jit,
     donate_argnums=(0,),
     static_argnames=("block_size_tokens",),
 )
+@jt.jaxtyped(typechecker=typeguard.typechecked)
 def ragged_write(
     dst: jt.Num[jax.Array, "dst_tokens embedding_dim"],
     src: jt.Num[jax.Array, "src_tokens embedding_dim"],
