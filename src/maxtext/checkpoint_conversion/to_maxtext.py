@@ -64,12 +64,13 @@ from flax.nnx import variablelib
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
 from maxtext.configs import pyconfig
-from maxtext.configs.types import DType
+from maxtext.configs.types import DecoderBlockType, DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
+from maxtext.models import weaver
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
@@ -387,20 +388,25 @@ def get_maxtext_model_info(config):
   mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
   max_logging.log("Initializing MaxText abstract model...")
-  # Get abstract model structure (name, shape) without materializing the weights to save memory
-  _, abstract_model = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  decoder_block = getattr(config, "decoder_block", None)
+  if decoder_block == DecoderBlockType.WEAVER or str(decoder_block).lower() == "weaver":
+    abstract_model = nnx.eval_shape(lambda: weaver.WeaverOmniTransformer.from_config(config, rngs=nnx.Rngs(0)))
+    abstract_params_tree = {"params": nnx.state(abstract_model, nnx.Param).to_pure_dict()}
+  else:
+    # Get abstract model structure (name, shape) without materializing the weights to save memory
+    _, abstract_model = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
-  # Lay the variables out the way the checkpoint stores them: one collection per variable type
-  # (e.g. 'params', 'Tid2EidVar'), then the module path with Linen-style names ("layers_0").
-  abstract_params_tree = {}
-  for path, variable in nnx.to_flat_state(nnx.state(abstract_model)):
-    if isinstance(variable, nnx.RngState):
-      continue
-    node = abstract_params_tree.setdefault(variablelib.variable_name_from_type(type(variable), allow_register=True), {})
-    *parents, name = param_key_parts_from_path(path)
-    for part in parents:
-      node = node.setdefault(part, {})
-    node[name] = variable.get_value()
+    # Lay the variables out the way the checkpoint stores them: one collection per variable type
+    # (e.g. 'params', 'Tid2EidVar'), then the module path with Linen-style names ("layers_0").
+    abstract_params_tree = {}
+    for path, variable in nnx.to_flat_state(nnx.state(abstract_model)):
+      if isinstance(variable, nnx.RngState):
+        continue
+      node = abstract_params_tree.setdefault(variablelib.variable_name_from_type(type(variable), allow_register=True), {})
+      *parents, name = param_key_parts_from_path(path)
+      for part in parents:
+        node = node.setdefault(part, {})
+      node[name] = variable.get_value()
 
   abstract_params_flat, abstract_params_treedef = jax.tree_util.tree_flatten_with_path(abstract_params_tree)
 
@@ -1030,7 +1036,9 @@ def main(
     state_params = jax_weights
   else:
 
-    if lazy_load_tensors and config.use_multimodal:
+    decoder_block = getattr(config, "decoder_block", None)
+    is_weaver = decoder_block == DecoderBlockType.WEAVER or str(decoder_block).lower() == "weaver"
+    if lazy_load_tensors and config.use_multimodal and not is_weaver:
       raise ValueError("lazy loading of HF tensors is not supported for multimodal models yet.")
 
     hf_state_dict_numpy = None
@@ -1072,10 +1080,13 @@ def main(
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/config.json#L54
         hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, revision=revision, dtype="auto")
       elif eager_load_method == "safetensors":
-        max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
+        st_framework = "pt" if torch is not None else "np"
+        max_logging.log(f"Eager load with Safetensors backend, safe_open with {st_framework} framework")
         # For safe_open, loaded dtype is the same as original safetensor
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/model.safetensors.index.json
-        hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, token=hf_token, revision=revision, framework="pt")
+        hf_state_dict_numpy = load_hf_dict_from_safetensors(
+            model_id, token=hf_token, revision=revision, framework=st_framework
+        )
       else:
         raise NotImplementedError
 

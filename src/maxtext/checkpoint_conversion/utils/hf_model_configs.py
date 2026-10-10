@@ -2063,6 +2063,36 @@ weaver_max_dict = {
 }
 weaver_max_config = PTConfig(**weaver_max_dict)
 
+weaver_mini_diffuser_dict = {
+    "architectures": ["WeaverOmniTransformer2DModel"],
+    "model_type": "weaver_omni",
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "dtype": "bfloat16",
+    "head_dim": 128,
+    "hidden_act": "silu",
+    "hidden_size": 4096,
+    "in_channels": 48,
+    "intermediate_size": 12288,
+    "mrope_section": [24, 20, 20],
+    "num_attention_heads": 32,
+    "num_hidden_layers": 36,
+    "num_key_value_heads": 8,
+    "patch_size": 2,
+    "qk_norm_for_diffusion": True,
+    "qk_norm_for_text": True,
+    "rms_norm_eps": 1e-06,
+    "rope_theta": 5000000.0,
+    "time_embed_in_channels": 256,
+    "timestep_scale": 0.001,
+    "tie_word_embeddings": True,
+    "use_und_k_norm_for_gen": False,
+    "vocab_size": 151936,
+    "text_config": weaver_mini_dict["text_config"],
+    "vision_config": weaver_mini_dict["vision_config"],
+}
+weaver_mini_diffuser_config = PTConfig(**weaver_mini_diffuser_dict)
+
 
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
@@ -2095,6 +2125,7 @@ HF_MODEL_CONFIGS = {
     "qwen3-vl-30b-a3b": qwen3_vl_30b_a3b_config,
     "weaver-mini": weaver_mini_config,
     "weaver-max": weaver_max_config,
+    "weaver-mini-diffuser": weaver_mini_diffuser_config,
     "llama3.1-8b": llama31_8b_config,
     "llama3.1-8b-Instruct": llama31_8b_config,
     "llama3.1-70b": llama31_70b_config,
