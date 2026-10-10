@@ -622,6 +622,13 @@ class Quantization(BaseModel):
   )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
   kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
+  fp8_kv_fake_quant: bool = Field(
+      False,
+      description=(
+          "Keep attention key/value activations in dtype but round them in the training forward pass to the"
+          " float8_e4m3fn grid a vLLM fp8 KV cache stores them on, with straight-through gradients."
+      ),
+  )
   quantization_local_shard_count: int = Field(-1, description="Shards the range finding operation for quantization.")
   use_qwix_quantization: bool = Field(False, description="Whether to use qwix for quantization.")
   use_manual_quantization: bool = Field(
