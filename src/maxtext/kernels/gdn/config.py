@@ -82,6 +82,23 @@ class GDNConfig:
   num_buffers: int = 2
   has_seg_ids: bool = False
   use_qk_norm_in_gdn: bool = True
+  # Experimental "less work" options (all default to the original behavior).
+  # F4: the qkv HBM operand is bf16 [batch, dim] (no XLA-side f32 cast); the
+  # kernel DMAs bf16 rows into VMEM and casts to f32 in-kernel.
+  bf16_qkv_input: bool = False
+  # F2: states-only pass (seq-CP pass 1): skips `out` / `chunk_states`
+  # (no HBM buffers, no writes) and all q-dependent compute.
+  states_only: bool = False
+  # F3: t_inv is provided as an input (seq-CP pass 2); skips the Gram matrix
+  # and the block-triangular inverse.
+  t_inv_input: bool = False
+  # F5: the recurrent state carries the local state transition (seq-CP pass 1).
+  # The state's last dim is v_head_dim + kq_head_dim: the extra
+  # [kq_head_dim, kq_head_dim] block starts as the identity (set by the caller)
+  # and is multiplied by every chunk's transition M_c = g_last*I - K_g^T W,
+  # exactly like S itself (S_new = M_c S + U_c), so the kernel returns
+  # M_local = M_{N-1} ... M_0 next to S_ext. Requires `states_only`.
+  transition_in_state: bool = False
 
   @property
   def chunk_size(self) -> int:
@@ -108,6 +125,11 @@ class GDNConfig:
     return self.num_v_heads // self.num_kq_heads
 
   @property
+  def state_v_dim(self) -> int:
+    """Last dim of the recurrent state: v_head_dim, plus kq_head_dim for the F5 transition block."""
+    return self.v_head_dim + (self.kq_head_dim if self.transition_in_state else 0)
+
+  @property
   def aligned_num_v_heads(self) -> int:
     tpu_info = pltpu.get_tpu_info()
     num_lanes = tpu_info.num_lanes
@@ -115,7 +137,17 @@ class GDNConfig:
     return pl.cdiv(self.num_v_heads + extra_lanes, num_lanes) * num_lanes
 
   def get_kernel_name(self) -> str:
-    return f"fused_conv1d_gdn_{self.mode.value}_b{self.seq_tile_size}" f"_c{self.chunk_size}"
+    """Kernel name encoding the mode, tiling and enabled variants (shows up in profiles)."""
+    name = f"fused_conv1d_gdn_{self.mode.value}_b{self.seq_tile_size}" f"_c{self.chunk_size}"
+    if self.bf16_qkv_input:
+      name += "_bf16in"
+    if self.states_only:
+      name += "_states_only"
+    if self.t_inv_input:
+      name += "_tinv_in"
+    if self.transition_in_state:
+      name += "_mloc"
+    return name
 
   def get_metadata(self) -> dict[str, str | int | float]:
     cfgs_dict = dataclasses.asdict(self)
@@ -140,7 +172,7 @@ class GDNConfig:
         self.seq_tile_size,
         self.num_v_heads,
         self.kq_head_dim,
-        self.v_head_dim,
+        self.state_v_dim,
     )
 
     carry_conv_scratch = carry_recurrent_scratch = None
@@ -150,7 +182,13 @@ class GDNConfig:
       carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
       carry_recurrent_scratch = pltpu.VMEM(recurrent_shape, jnp.float32)
 
-    return {
+    ret = {
         "carry_conv_scratch_ref": carry_conv_scratch,
         "carry_recurrent_scratch_ref": carry_recurrent_scratch,
     }
+    if self.bf16_qkv_input:
+      # f32 "compact" ([chunk, 1, dim], 1x128 tiled) copy of the current tile,
+      # filled in-kernel from the bf16 VMEM slot. It replaces the f32 qkv slot
+      # as the conv1d input / conv1d output staging buffer.
+      ret["qkv_compact_scratch_ref"] = pltpu.VMEM((self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32)
+    return ret

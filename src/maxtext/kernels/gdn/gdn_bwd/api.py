@@ -14,6 +14,7 @@
 
 """Model-facing API and custom VJP boundary for GDN backward kernel."""
 
+import dataclasses
 import functools
 from typing import Any, Optional, Tuple
 
@@ -32,6 +33,53 @@ from .jax_compute_gdn_states import pure_jax_decoupled_conv1d_gdn
 from .pallas_mosaic_tpu_bwd import pallas_gdn_bwd_kernel
 from .runtime_utils import pallas_unsupported_reason
 from .runtime_utils import target_platform
+
+
+@dataclasses.dataclass(frozen=True)
+class GDNKernelOptions:
+  """Static, opt-in options for the GDN Pallas kernel path.
+
+  Passed to `gdn_decoupled_conv1d` as a non-differentiable argument (it must be
+  hashable), so it is part of the jit/custom_vjp static signature. All defaults
+  reproduce the original kernel behavior bit-for-bit.
+
+  Attributes:
+    bf16_qkv_input: Feed the forward kernel the bf16 (post-projection) qkv
+      directly and up-cast to f32 inside VMEM, instead of materializing an f32
+      copy in HBM. Besides halving the qkv read, this keeps qkv in its natural
+      `{2,1,0}` layout; the f32 `astype + reshape(N, 1, dim)` otherwise forces a
+      `{2,0,1}` tiled layout that XLA propagates into every consumer of qkv in
+      the backward program (notably the pure-JAX conv1d backward).
+    cp_pass1_states_only: In sequence-sharded CP, pass 1 only needs the per-chunk
+      recurrent states to compose the global prefix; skip computing / writing
+      `out` and `chunk_states` in that pass.
+    cp_pass2_reuse_t_inv: In sequence-sharded CP, pass 2 reuses the block
+      triangular inverse `t_inv` produced by pass 1 (it is identical: it only
+      depends on q/k/b within a chunk) instead of recomputing the Gram matrix
+      and the serial 16-block inverse.
+    bwd_natural_layout: The backward kernel reads `chunk_states` / `t_inv` /
+      `do` and writes dq/dk/dv through BlockSpecs on their natural layouts
+      instead of requiring the XLA glue to transpose/concat to and from the
+      kernel's compact layout.
+    cp_m_local_in_kernel: In sequence-sharded CP, pass 1 also produces the local
+      state transition `M_local` (the [d_k, d_k] map from the incoming state to
+      the outgoing one) by carrying an identity block next to the recurrent
+      state through the kernel's own per-chunk update. This replaces the XLA
+      `compose_local_from_t_inv` tree (per-chunk f32 [d_k, d_k] transitions
+      materialized in HBM and folded pairwise at HIGHEST precision) and the
+      K-slice conv1d that feeds it. Requires `cp_pass1_states_only`. `M_local`
+      is computed with the kernel's bf16-operand / f32-accumulate arithmetic,
+      so results differ from the default at that level (not bit-exact).
+  """
+
+  bf16_qkv_input: bool = False
+  cp_pass1_states_only: bool = False
+  cp_pass2_reuse_t_inv: bool = False
+  bwd_natural_layout: bool = False
+  cp_m_local_in_kernel: bool = False
+
+
+DEFAULT_GDN_KERNEL_OPTIONS = GDNKernelOptions()
 
 
 def decoupled_conv1d_gdn_bwd_kernel(
@@ -152,12 +200,29 @@ def _run_local_gdn_decoupled_fwd(
     segment_ids: Optional[jax.Array] = None,
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
+    bf16_qkv_input: bool = False,
+    states_only: bool = False,
+    t_inv_in: Optional[jax.Array] = None,
+    transition_in_state: bool = False,
 ) -> Tuple[
-    Tuple[jax.Array, Tuple[jax.Array, jax.Array]],
+    Tuple[Optional[jax.Array], Tuple[jax.Array, jax.Array]],
     Optional[jax.Array],
     Optional[jax.Array],
 ]:
-  """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU."""
+  """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU.
+
+  Experimental (Pallas path only; defaults keep the original behavior):
+    bf16_qkv_input: F4, feed bf16 qkv to the kernel (cast in VMEM).
+    states_only: F2, skip `out` and `chunk_states` (both returned as None).
+    t_inv_in: F3, [batch, num_chunks, num_v_heads, chunk, chunk] t_inv from a
+      previous pass; skips the Gram matrix + triangular inverse.
+    transition_in_state: F5, `recurrent_state` is [batch, num_v_heads, head_k_dim,
+      head_v_dim + head_k_dim] whose extra block (identity on input) is carried
+      through the chunk recurrence and comes back as the local transition
+      M_local. Requires `states_only`; TPU only.
+  """
+  if transition_in_state and not states_only:
+    raise ValueError("transition_in_state requires states_only.")
   batch_size, seq_len, dim_size = qkv.shape
   if seq_len % chunk_size != 0:
     raise ValueError(
@@ -168,6 +233,8 @@ def _run_local_gdn_decoupled_fwd(
   fallback_reason = pallas_unsupported_reason(head_k_dim=head_k_dim, head_v_dim=head_v_dim, chunk_size=chunk_size)
   if not on_cpu and fallback_reason is not None:
     raise ValueError(f"GDN Pallas TPU forward kernel does not support {fallback_reason}.")
+  if on_cpu and transition_in_state:
+    raise ValueError("transition_in_state is only supported by the Pallas TPU kernel.")
   if on_cpu:
     out, states = pure_jax_decoupled_conv1d_gdn(
         qkv=qkv,
@@ -236,12 +303,17 @@ def _run_local_gdn_decoupled_fwd(
   else:
     tokamax_conv_state = conv_state
 
+  state_v_dim = head_v_dim + (head_k_dim if transition_in_state else 0)
   if recurrent_state is None:
-    tokamax_recurrent_state = jnp.zeros((num_seqs + 1, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
+    tokamax_recurrent_state = jnp.zeros((num_seqs + 1, num_v_heads, head_k_dim, state_v_dim), dtype=jnp.float32)
   elif recurrent_state.shape[0] == num_seqs:
     tokamax_recurrent_state = jnp.pad(recurrent_state.astype(jnp.float32), ((1, 0), (0, 0), (0, 0), (0, 0)))
   else:
     tokamax_recurrent_state = recurrent_state.astype(jnp.float32)
+
+  t_inv_in_flat = None
+  if t_inv_in is not None:
+    t_inv_in_flat = t_inv_in.reshape(batch_size * num_chunks, num_v_heads, chunk_size, chunk_size)
 
   (
       core_attn_out_flat,
@@ -274,14 +346,24 @@ def _run_local_gdn_decoupled_fwd(
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=bf16_qkv_input and qkv.dtype == jnp.bfloat16,
+      states_only=states_only,
+      t_inv_in=t_inv_in_flat,
+      transition_in_state=transition_in_state,
   )
 
-  core_attn_out = core_attn_out_flat.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
+  core_attn_out = None
+  if core_attn_out_flat is not None:
+    core_attn_out = core_attn_out_flat.reshape(batch_size, seq_len, num_v_heads, head_v_dim).astype(qkv.dtype)
   t_inv = t_inv_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, chunk_size, chunk_size)
-  chunk_states = chunk_states_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, head_k_dim, head_v_dim)
+  chunk_states = None
+  if chunk_states_raw is not None:
+    chunk_states = chunk_states_raw.astype(jnp.float32).reshape(
+        batch_size, num_chunks, num_v_heads, head_k_dim, head_v_dim
+    )
   return (
       (
-          core_attn_out.astype(qkv.dtype),
+          core_attn_out,
           (
               new_conv_state[1:].astype(qkv.dtype),
               new_recurrent_state[1:].astype(jnp.float32),
@@ -346,8 +428,23 @@ def _run_cp_gdn_decoupled_fwd_impl(
     segment_ids: Optional[jax.Array] = None,
     seg_metadata: Optional[Tuple[Optional[jax.Array], Optional[jax.Array], Optional[jax.Array]]] = None,
     cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
+    bf16_qkv_input: bool = False,
+    pass1_states_only: bool = False,
+    pass2_reuse_t_inv: bool = False,
+    m_local_in_kernel: bool = False,
 ):
-  """Runs 2-pass sequence-sharded CP forward for GDN."""
+  """Runs 2-pass sequence-sharded CP forward for GDN.
+
+  Experimental (defaults keep the original behavior):
+    bf16_qkv_input: F4, both passes take bf16 qkv directly.
+    pass1_states_only: F2, pass 1 only produces states + t_inv.
+    pass2_reuse_t_inv: F3, pass 2 reuses pass 1's t_inv.
+    m_local_in_kernel: F5, pass 1 also returns the local transition M_local
+      (identity block carried next to the state), replacing the K-slice conv1d
+      and the XLA `compose_local_from_t_inv` tree. Requires pass1_states_only.
+  """
+  if m_local_in_kernel and not pass1_states_only:
+    raise ValueError("m_local_in_kernel requires pass1_states_only.")
   batch_size = qkv.shape[0]
   if seg_metadata is not None:
     s_enc_local, conv_halo_seg, init_seg = seg_metadata
@@ -376,6 +473,14 @@ def _run_cp_gdn_decoupled_fwd_impl(
   # the pass-2 replay.
   conv_halo = checkpoint_name(conv_halo, "gdn_cp_conv_halo")
   zero_rs = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
+  if m_local_in_kernel:
+    # F5: start pass 1 from [0 | I] so the kernel's recurrence returns [S_ext_local | M_local].
+    eye = jnp.broadcast_to(
+        jnp.eye(head_k_dim, dtype=jnp.float32)[None, None], (batch_size, num_v_heads, head_k_dim, head_k_dim)
+    )
+    pass1_rs = jnp.concatenate([zero_rs, eye], axis=-1)
+  else:
+    pass1_rs = zero_rs
 
   # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv and S_ext_local
   (_, states_pass1), t_inv, _ = _run_local_gdn_decoupled_fwd(
@@ -387,7 +492,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
       a_log,
       dt_bias,
       conv_halo,
-      zero_rs,
+      pass1_rs,
       num_k_heads=num_k_heads,
       num_v_heads=num_v_heads,
       head_k_dim=head_k_dim,
@@ -399,39 +504,47 @@ def _run_cp_gdn_decoupled_fwd_impl(
       segment_ids=s_enc_local,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=bf16_qkv_input,
+      states_only=pass1_states_only,
+      transition_in_state=m_local_in_kernel,
   )
 
-  # Convolve only the K channel slice (1/6th of qkv) needed by compose_local_from_t_inv
-  q_size = num_k_heads * head_k_dim
-  k_size = num_k_heads * head_k_dim
-  _, k_conv = conv1d_silu_fwd(
-      qkv=qkv[:, :, q_size : q_size + k_size],
-      conv_weight=conv_weight[:, :, q_size : q_size + k_size],
-      conv_bias=(conv_bias[q_size : q_size + k_size] if conv_bias is not None else None),
-      kernel_size=conv_kernel_size,
-      conv_state=conv_halo[:, :, q_size : q_size + k_size],
-      segment_ids=s_enc_local,
-      conv_halo_seg=conv_halo_seg,
-      output_dtype=jnp.float32,
-  )
-  m_local, s_ext_local = cp_gdn.compose_local_from_t_inv(
-      qkv_conv=k_conv,
-      b=b,
-      a=a,
-      a_log=a_log,
-      dt_bias=dt_bias,
-      t_inv=t_inv,
-      num_k_heads=num_k_heads,
-      num_v_heads=num_v_heads,
-      head_k_dim=head_k_dim,
-      head_v_dim=head_v_dim,
-      chunk_size=chunk_size,
-      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-      s_ext_pass1=states_pass1[1],
-      segment_ids=s_enc_local,
-      init_seg=init_seg,
-      precision=cp_matmul_precision,
-  )
+  if m_local_in_kernel:
+    # F5: [S_ext_local | M_local] straight from the kernel; no K conv1d, no composition tree.
+    s_ext_local = states_pass1[1][..., :head_v_dim]
+    m_local = states_pass1[1][..., head_v_dim:]
+  else:
+    # Convolve only the K channel slice (1/6th of qkv) needed by compose_local_from_t_inv
+    q_size = num_k_heads * head_k_dim
+    k_size = num_k_heads * head_k_dim
+    _, k_conv = conv1d_silu_fwd(
+        qkv=qkv[:, :, q_size : q_size + k_size],
+        conv_weight=conv_weight[:, :, q_size : q_size + k_size],
+        conv_bias=(conv_bias[q_size : q_size + k_size] if conv_bias is not None else None),
+        kernel_size=conv_kernel_size,
+        conv_state=conv_halo[:, :, q_size : q_size + k_size],
+        segment_ids=s_enc_local,
+        conv_halo_seg=conv_halo_seg,
+        output_dtype=jnp.float32,
+    )
+    m_local, s_ext_local = cp_gdn.compose_local_from_t_inv(
+        qkv_conv=k_conv,
+        b=b,
+        a=a,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        t_inv=t_inv,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        s_ext_pass1=states_pass1[1],
+        segment_ids=s_enc_local,
+        init_seg=init_seg,
+        precision=cp_matmul_precision,
+    )
   m_local = checkpoint_name(m_local, "gdn_cp_m_local")
 
   h_init = recurrent_state.astype(jnp.float32) if recurrent_state is not None else zero_rs
@@ -460,6 +573,8 @@ def _run_cp_gdn_decoupled_fwd_impl(
       segment_ids=s_enc_local,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=bf16_qkv_input,
+      t_inv_in=t_inv if pass2_reuse_t_inv else None,
   )
   if s_enc_local is not None:
     # Owner = last rank with a valid local token (rank 0 if none). A rank whose
@@ -473,7 +588,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
   return (out, states), t_inv_2, chunk_states, conv_halo, s_in_r, m_local
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 19))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20))
 def gdn_decoupled_conv1d(
     qkv: jax.Array,
     b: jax.Array,
@@ -495,12 +610,15 @@ def gdn_decoupled_conv1d(
     cp_axis_name: str | tuple[str, ...] | None = None,
     segment_ids: Optional[jax.Array] = None,
     cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
+    options: GDNKernelOptions | None = None,
 ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
   """Decoupled Conv1D + GDN with Pallas backward pass and optional sequence-sharded CP.
 
   `cp_matmul_precision` sets the precision of the f32 matmuls that compose the recurrent state across
-  sequence-sharded CP ranks (`cp_gdn`); it is unused without CP.
+  sequence-sharded CP ranks (`cp_gdn`); it is unused without CP. `options` (static) selects the
+  opt-in kernel layout variants; see `GDNKernelOptions`.
   """
+  options = options or DEFAULT_GDN_KERNEL_OPTIONS
   if _is_cp_active(cp_axis_name):
     (out, states), _, _, _, _, _ = _run_cp_gdn_decoupled_fwd_impl(
         qkv,
@@ -523,6 +641,10 @@ def gdn_decoupled_conv1d(
         cp_axis_name=cp_axis_name,
         segment_ids=segment_ids,
         cp_matmul_precision=cp_matmul_precision,
+        bf16_qkv_input=options.bf16_qkv_input,
+        pass1_states_only=options.cp_pass1_states_only,
+        pass2_reuse_t_inv=options.cp_pass2_reuse_t_inv,
+        m_local_in_kernel=options.cp_m_local_in_kernel,
     )
     return out, states
 
@@ -550,6 +672,7 @@ def gdn_decoupled_conv1d(
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=options.bf16_qkv_input,
   )
   return out, states
 
@@ -585,8 +708,10 @@ def _gdn_decoupled_conv1d_fwd(
     cp_axis_name: str | tuple[str, ...] | None = None,
     segment_ids: Optional[jax.Array] = None,
     cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
+    options: GDNKernelOptions | None = None,
 ):
   """Forward rule for custom_vjp registration of gdn_decoupled_conv1d."""
+  options = options or DEFAULT_GDN_KERNEL_OPTIONS
   (
       qkv,
       b,
@@ -644,6 +769,10 @@ def _gdn_decoupled_conv1d_fwd(
         segment_ids=segment_ids,
         seg_metadata=seg_metadata,
         cp_matmul_precision=cp_matmul_precision,
+        bf16_qkv_input=options.bf16_qkv_input,
+        pass1_states_only=options.cp_pass1_states_only,
+        pass2_reuse_t_inv=options.cp_pass2_reuse_t_inv,
+        m_local_in_kernel=options.cp_m_local_in_kernel,
     )
     out = checkpoint_name(out, "gdn_core_attn_out")
     residuals = (
@@ -687,6 +816,7 @@ def _gdn_decoupled_conv1d_fwd(
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      bf16_qkv_input=options.bf16_qkv_input,
   )
   out = checkpoint_name(out, "gdn_core_attn_out")
   seg_bundle = (segment_ids, conv_halo_seg, init_seg) if segment_ids is not None else None
@@ -718,18 +848,20 @@ def _gdn_decoupled_conv1d_bwd(
     compute_dtype: jnp.dtype,
     cp_axis_name: str | tuple[str, ...] | None = None,
     cp_matmul_precision: Any = cp_gdn.DEFAULT_PRECISION,
+    options: GDNKernelOptions | None = None,
     residuals: tuple[Any, ...] | None = None,
     cotangents: tuple[Any, ...] | None = None,
 ):
   """Backward rule for custom_vjp registration of gdn_decoupled_conv1d."""
-  # Support positional calls that omit the trailing nondiff arguments: 10 args (no cp_axis_name,
-  # no cp_matmul_precision) or 11 args (no cp_matmul_precision).
-  if residuals is None and cotangents is None and isinstance(cp_axis_name, tuple) and len(cp_axis_name) >= 10:
-    residuals, cotangents = cp_axis_name, cp_matmul_precision
-    cp_axis_name, cp_matmul_precision = None, cp_gdn.DEFAULT_PRECISION
-  elif cotangents is None and isinstance(cp_matmul_precision, tuple) and len(cp_matmul_precision) >= 10:
-    residuals, cotangents = cp_matmul_precision, residuals
-    cp_matmul_precision = cp_gdn.DEFAULT_PRECISION
+  # Support positional calls that omit trailing nondiff arguments (cp_axis_name,
+  # cp_matmul_precision, options): the residuals are the first >= 10-tuple among the trailing slots.
+  trailing = [cp_axis_name, cp_matmul_precision, options, residuals, cotangents]
+  res_idx = next(i for i, v in enumerate(trailing) if isinstance(v, tuple) and len(v) >= 10)
+  if res_idx < 3:
+    residuals = trailing[res_idx]
+    cotangents = trailing[res_idx + 1]
+    cp_axis_name, cp_matmul_precision, options = trailing[:res_idx] + [None, cp_gdn.DEFAULT_PRECISION, None][res_idx:]
+  options = options or DEFAULT_GDN_KERNEL_OPTIONS
 
   m_local_fwd = None
   seg_slot = None
@@ -927,6 +1059,9 @@ def _gdn_decoupled_conv1d_bwd(
         segment_ids=segment_ids,
         init_seg=init_seg,
         precision=cp_matmul_precision,
+        # Only the natural (token-major) kernel layout lets XLA push the head-major relayout past
+        # the GQA broadcast; the legacy layout already gets head-major glue from the dot operands.
+        head_major_glue=options.bwd_natural_layout,
     )
     dht_local, _ = cp_gdn.incoming_grad_state(
         dm_local, ds_ext_local, dht_final, cp_axis_name, precision=cp_matmul_precision
@@ -949,6 +1084,7 @@ def _gdn_decoupled_conv1d_bwd(
         init_seg=init_seg,
         d_recurrent_state=dht_local,
         return_dh0=need_dh0,
+        natural_layout=options.bwd_natural_layout,
     )
     if need_dh0:
       dy_conv, d_b, d_a, d_a_log, d_dt_bias, dh0_local = bwd_out
@@ -1034,6 +1170,7 @@ def _gdn_decoupled_conv1d_bwd(
       init_seg=init_seg,
       d_recurrent_state=d_recurrent_state,
       return_dh0=need_dh0,
+      natural_layout=options.bwd_natural_layout,
   )
   # pylint: disable=unbalanced-tuple-unpacking
   if need_dh0:
@@ -1092,6 +1229,8 @@ gdn_decoupled_conv1d.defvjp(
 )
 
 __all__ = [
+    "DEFAULT_GDN_KERNEL_OPTIONS",
+    "GDNKernelOptions",
     "decoupled_conv1d_gdn_bwd_kernel",
     "gdn_decoupled_conv1d",
     "pallas_gdn_bwd_kernel",

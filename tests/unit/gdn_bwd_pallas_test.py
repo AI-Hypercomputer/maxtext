@@ -654,6 +654,88 @@ class GdnBwdPallasTest(absltest.TestCase):
       if g_none is not None and g_cached_all is not None:
         np.testing.assert_allclose(g_none, g_cached_all, rtol=1e-5, atol=1e-5)
 
+  def test_layout_options_match_default_bitwise(self):
+    """bf16_qkv_input / bwd_natural_layout reproduce the default kernels' outputs and gradients bit for bit."""
+    if jax.default_backend() != "tpu":
+      self.skipTest("bf16_qkv_input / bwd_natural_layout are Pallas TPU kernel options")
+    batch_size = 2
+    chunk_size = 64
+    num_chunks = 3
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(909), batch_size, seq_len, dim_size, num_v_heads, head_v_dim, conv_kernel_size
+    )
+    k_cs, k_rs, k_dcs, k_drs = jax.random.split(jax.random.PRNGKey(910), 4)
+    # Incoming conv halo and recurrent state, and cotangents on the outgoing ones, as a seq-CP shard sees them.
+    conv_state = 0.1 * jax.random.normal(k_cs, (batch_size, conv_kernel_size - 1, dim_size), jnp.float32)
+    recurrent_state = 0.1 * jax.random.normal(k_rs, (batch_size, num_v_heads, head_k_dim, head_v_dim), jnp.float32)
+    d_next_cs = jax.random.normal(k_dcs, conv_state.shape, jnp.float32)
+    d_next_rs = jax.random.normal(k_drs, recurrent_state.shape, jnp.float32)
+    layout_options = gdn_bwd_pallas.GDNKernelOptions(bf16_qkv_input=True, bwd_natural_layout=True)
+
+    for compute_dtype in (jnp.float32, jnp.bfloat16):
+      with self.subTest(compute_dtype=jnp.dtype(compute_dtype).name):
+        # The model feeds the kernel its bf16 projection output; bf16_qkv_input only engages on bf16 qkv.
+        qkv_c, b_c, a_c, cs_c = (x.astype(jnp.bfloat16) for x in (qkv, b, a, conv_state))
+
+        def run(options, qkv_c=qkv_c, b_c=b_c, a_c=a_c, cs_c=cs_c, compute_dtype=compute_dtype):
+          def f(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in):
+            out, (next_cs, next_rs) = gdn_bwd_pallas.gdn_decoupled_conv1d(
+                qkv_in,
+                b_in,
+                a_in,
+                cw_in,
+                cb_in,
+                al_in,
+                dt_in,
+                cs_in,
+                rs_in,
+                num_k_heads=num_k_heads,
+                num_v_heads=num_v_heads,
+                head_k_dim=head_k_dim,
+                head_v_dim=head_v_dim,
+                conv_kernel_size=conv_kernel_size,
+                chunk_size=chunk_size,
+                use_qk_norm_in_gdn=True,
+                compute_dtype=compute_dtype,
+                options=options,
+            )
+            return out, next_cs, next_rs
+
+          primals = (qkv_c, b_c, a_c, conv_weight, conv_bias, a_log, dt_bias, cs_c, recurrent_state)
+          outs, vjp_fn = jax.vjp(f, *primals)
+          cotangents = (do.astype(outs[0].dtype), d_next_cs.astype(outs[1].dtype), d_next_rs.astype(outs[2].dtype))
+          return jax.block_until_ready((outs, vjp_fn(cotangents)))
+
+        outs_ref, grads_ref = run(None)
+        outs_opt, grads_opt = run(layout_options)
+        for name, x_ref, x_opt in zip(("out", "next_conv_state", "next_recurrent_state"), outs_ref, outs_opt):
+          with self.subTest(output=name):
+            self.assertEqual(x_opt.dtype, x_ref.dtype)
+            np.testing.assert_array_equal(np.asarray(x_opt), np.asarray(x_ref))
+        grad_names = (
+            "d_qkv",
+            "d_b",
+            "d_a",
+            "d_conv_weight",
+            "d_conv_bias",
+            "d_a_log",
+            "d_dt_bias",
+            "d_conv_state",
+            "d_h0",
+        )
+        for name, g_ref, g_opt in zip(grad_names, grads_ref, grads_opt):
+          with self.subTest(gradient=name):
+            self.assertEqual(g_opt.dtype, g_ref.dtype)
+            np.testing.assert_array_equal(np.asarray(g_opt), np.asarray(g_ref))
+
   def test_run_local_gdn_decoupled_fwd_returns_cached_chunk_states(self):
     """Verifies _run_local_gdn_decoupled_fwd returns properly shaped chunk_states."""
     is_tpu = jax.default_backend() == "tpu"
@@ -725,6 +807,164 @@ class GdnBwdPallasTest(absltest.TestCase):
     tol = 5e-3 if is_tpu else 1e-5
     np.testing.assert_allclose(chunk_states, exp_chunk_states, rtol=tol, atol=tol)
     np.testing.assert_allclose(t_inv, exp_t_inv, rtol=tol, atol=tol)
+
+  def test_cp_pass1_transition_in_state_matches_compose_local(self):
+    """F5: the kernel's [S | A] carry returns M_local equal to compose_local_from_t_inv's tree."""
+    if jax.default_backend() != "tpu":
+      self.skipTest("transition_in_state is a Pallas TPU kernel option")
+    batch_size = 2
+    chunk_size = 64
+    num_chunks = 5  # odd: exercises the tree's remainder branch in the reference
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+    q_size = k_size = num_k_heads * head_k_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias = _init_fwd_inputs(
+        jax.random.PRNGKey(505), batch_size, seq_len, dim_size, num_v_heads, conv_kernel_size
+    )
+    # Mimic seq-CP pass 1: a (here zero) conv halo so the call has an initial state, and
+    # the recurrent state [0 | I] whose identity block becomes M_local.
+    conv_halo = jnp.zeros((batch_size, conv_kernel_size - 1, dim_size), dtype=qkv.dtype)
+    zero_rs = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
+    eye = jnp.broadcast_to(
+        jnp.eye(head_k_dim, dtype=jnp.float32)[None, None], (batch_size, num_v_heads, head_k_dim, head_k_dim)
+    )
+    pass1_rs = jnp.concatenate([zero_rs, eye], axis=-1)
+
+    for compute_dtype, act_dtype, tol in ((jnp.float32, jnp.float32, 2e-4), (jnp.bfloat16, jnp.bfloat16, 2e-2)):
+      with self.subTest(compute_dtype=jnp.dtype(compute_dtype).name):
+        qkv_c, b_c, a_c = (x.astype(act_dtype) for x in (qkv, b, a))
+        common = {
+            "conv_weight": conv_weight,
+            "conv_bias": conv_bias,
+            "a_log": a_log,
+            "dt_bias": dt_bias,
+            "conv_state": conv_halo.astype(act_dtype),
+            "num_k_heads": num_k_heads,
+            "num_v_heads": num_v_heads,
+            "head_k_dim": head_k_dim,
+            "head_v_dim": head_v_dim,
+            "conv_kernel_size": conv_kernel_size,
+            "chunk_size": chunk_size,
+            "use_qk_norm_in_gdn": True,
+            "compute_dtype": compute_dtype,
+        }
+        # Default pass 1 (states only) + the XLA reference composition.
+        (_, (_, s_ext_ref)), t_inv, _ = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
+            qkv_c, b_c, a_c, recurrent_state=zero_rs, states_only=True, **common
+        )
+        _, k_conv = gdn_bwd_pallas.conv1d_silu_fwd(
+            qkv=qkv_c[:, :, q_size : q_size + k_size],
+            conv_weight=conv_weight[:, :, q_size : q_size + k_size],
+            conv_bias=conv_bias[q_size : q_size + k_size],
+            kernel_size=conv_kernel_size,
+            conv_state=conv_halo[:, :, q_size : q_size + k_size].astype(act_dtype),
+            output_dtype=jnp.float32,
+        )
+        m_ref, s_ext_ref2 = gdn_bwd_pallas.compose_local_from_t_inv(
+            qkv_conv=k_conv,
+            b=b_c,
+            a=a_c,
+            a_log=a_log,
+            dt_bias=dt_bias,
+            t_inv=t_inv,
+            num_k_heads=num_k_heads,
+            num_v_heads=num_v_heads,
+            head_k_dim=head_k_dim,
+            head_v_dim=head_v_dim,
+            chunk_size=chunk_size,
+            use_qk_norm_in_gdn=True,
+            s_ext_pass1=s_ext_ref,
+            precision=jax.lax.Precision.HIGHEST,
+        )
+        np.testing.assert_array_equal(s_ext_ref2, s_ext_ref)
+
+        # F5 pass 1: [S_ext | M_local] from the kernel.
+        (_, (_, aug)), t_inv_f5, chunk_states_f5 = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
+            qkv_c, b_c, a_c, recurrent_state=pass1_rs, states_only=True, transition_in_state=True, **common
+        )
+        self.assertIsNone(chunk_states_f5)
+        self.assertEqual(aug.shape, (batch_size, num_v_heads, head_k_dim, head_v_dim + head_k_dim))
+        s_ext_f5, m_f5 = aug[..., :head_v_dim], aug[..., head_v_dim:]
+        np.testing.assert_array_equal(t_inv_f5, t_inv)
+        # The S half follows the same arithmetic as the default states-only pass.
+        np.testing.assert_allclose(s_ext_f5, s_ext_ref, rtol=tol, atol=tol * float(jnp.abs(s_ext_ref).max()))
+        # The A half is the product of the per-chunk transitions, compared against the f32
+        # HIGHEST tree. M_local entries are O(1) (decayed identity) so an absolute tolerance is apt.
+        self.assertLess(float(jnp.abs(m_f5 - m_ref).max()), tol, f"max|M_f5 - M_ref| too large ({compute_dtype})")
+        # M_local must not be the (unchanged) identity: the chunks did act on it.
+        self.assertGreater(float(jnp.abs(m_ref - eye).max()), 1e-2)
+
+  def test_cp_pass_states_only_and_t_inv_reuse_are_bitwise(self):
+    """F2/F3: a states-only pass and a t_inv-reusing pass reproduce the default pass bit for bit."""
+    if jax.default_backend() != "tpu":
+      self.skipTest("states_only / t_inv_in are Pallas TPU kernel options")
+    batch_size = 2
+    chunk_size = 64
+    num_chunks = 3
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias = _init_fwd_inputs(
+        jax.random.PRNGKey(606), batch_size, seq_len, dim_size, num_v_heads, conv_kernel_size
+    )
+    conv_halo = jnp.zeros((batch_size, conv_kernel_size - 1, dim_size), dtype=qkv.dtype)
+    # A non-zero incoming state, as pass 2 of seq-CP sees it.
+    h0 = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (batch_size, num_v_heads, head_k_dim, head_v_dim), jnp.float32)
+
+    for compute_dtype, act_dtype in ((jnp.float32, jnp.float32), (jnp.bfloat16, jnp.bfloat16)):
+      with self.subTest(compute_dtype=jnp.dtype(compute_dtype).name):
+        qkv_c, b_c, a_c = (x.astype(act_dtype) for x in (qkv, b, a))
+        common = {
+            "conv_weight": conv_weight,
+            "conv_bias": conv_bias,
+            "a_log": a_log,
+            "dt_bias": dt_bias,
+            "conv_state": conv_halo.astype(act_dtype),
+            "num_k_heads": num_k_heads,
+            "num_v_heads": num_v_heads,
+            "head_k_dim": head_k_dim,
+            "head_v_dim": head_v_dim,
+            "conv_kernel_size": conv_kernel_size,
+            "chunk_size": chunk_size,
+            "use_qk_norm_in_gdn": True,
+            "compute_dtype": compute_dtype,
+        }
+        (out_ref, (cs_ref, rs_ref)), t_inv_ref, chunk_states_ref = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
+            qkv_c, b_c, a_c, recurrent_state=h0, **common
+        )
+        self.assertIsNotNone(out_ref)
+        self.assertIsNotNone(chunk_states_ref)
+
+        # F2: states-only pass -> no out / chunk_states, identical states and t_inv.
+        (out_so, (cs_so, rs_so)), t_inv_so, chunk_states_so = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
+            qkv_c, b_c, a_c, recurrent_state=h0, states_only=True, **common
+        )
+        self.assertIsNone(out_so)
+        self.assertIsNone(chunk_states_so)
+        np.testing.assert_array_equal(cs_so, cs_ref)
+        np.testing.assert_array_equal(rs_so, rs_ref)
+        np.testing.assert_array_equal(t_inv_so, t_inv_ref)
+
+        # F3: feeding the pass-1 t_inv back in reproduces every output bit for bit.
+        (out_ti, (cs_ti, rs_ti)), t_inv_ti, chunk_states_ti = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
+            qkv_c, b_c, a_c, recurrent_state=h0, t_inv_in=t_inv_so, **common
+        )
+        np.testing.assert_array_equal(out_ti, out_ref)
+        np.testing.assert_array_equal(cs_ti, cs_ref)
+        np.testing.assert_array_equal(rs_ti, rs_ref)
+        np.testing.assert_array_equal(t_inv_ti, t_inv_ref)
+        np.testing.assert_array_equal(chunk_states_ti, chunk_states_ref)
 
   def test_decoupled_conv1d_gdn_kernel_gradient_with_initial_states(self):
     """Verifies custom VJP gradients when initial conv_state and recurrent_state are provided."""

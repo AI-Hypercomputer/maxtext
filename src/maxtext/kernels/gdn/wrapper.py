@@ -94,17 +94,9 @@ def _pack_fwd_segment_metadata(
 
 
 def inner_kernel(
-    # Inputs.
-    qkv_slot_ref: jax.Ref,  # [seq, chunk, 1, dim_size]
-    b_slot_ref: jax.Ref,  # [seq, chunk, 1, num_v_heads]
-    a_slot_ref: jax.Ref,  # [seq, chunk, 1, num_v_heads]
-    conv_state_slot_ref: jax.Ref,  # [seq, prev_kernel_size, 1, dim_size]
-    recurrent_slot_ref: jax.Ref,  # [seq, num_v_heads, kq_head, v_head]
-    # Outputs.
-    out_slot_ref: jax.Array,  # [seq * chunk, num_v_heads, v_head]
-    t_inv_slot_ref: jax.Array,  # [seq, num_v_heads, chunk, chunk]
-    *args,
+    *refs,
     cfg: config.GDNConfig,
+    alloc_names: tuple[str, ...],
     **kwargs,
 ) -> None:
   """Orchestrates computation of Conv1D and GDN for a single tile.
@@ -113,19 +105,31 @@ def inner_kernel(
   operates VMEM reference without knowledge on DMA logic. Furthermore, the
   kernel invokes vmem_ldst to pre-processes data needed for compute and
   invokes compute_conv1d and compute_gdn for actual compute.
+
+  `refs` holds the pipeline slots in `alloc_names` order (see
+  memory_ref.create_allocs) followed by the scratches:
+  (metadata_ref, weights_ref, carry_conv_scratch_ref,
+  carry_recurrent_scratch_ref, qkv_compact_scratch_ref).
   """
-  if cfg.mode == config.GDNMode.PER_SEQ:
-    chunk_states_slot_ref = args[0]
-    metadata_ref = args[1]
-    weights_ref = args[2]
-    carry_conv_scratch_ref = args[3] if len(args) > 3 else None
-    carry_recurrent_scratch_ref = args[4] if len(args) > 4 else None
-  else:
-    chunk_states_slot_ref = None
-    metadata_ref = args[0]
-    weights_ref = args[1]
-    carry_conv_scratch_ref = args[2] if len(args) > 2 else None
-    carry_recurrent_scratch_ref = args[3] if len(args) > 3 else None
+  del kwargs
+  num_slots = len(alloc_names)
+  slots = dict(zip(alloc_names, refs[:num_slots]))
+  scratches = refs[num_slots:]
+  metadata_ref = scratches[0]
+  weights_ref = scratches[1]
+  carry_conv_scratch_ref = scratches[2] if len(scratches) > 2 else None
+  carry_recurrent_scratch_ref = scratches[3] if len(scratches) > 3 else None
+  qkv_compact_scratch_ref = scratches[4] if len(scratches) > 4 else None
+
+  qkv_slot_ref = slots["qkv"]  # [seq, chunk, 1, dim_size] (f32) or [seq, chunk, dim_size] (bf16)
+  b_slot_ref = slots["b"]  # [seq, chunk, 1, num_v_heads]
+  a_slot_ref = slots["a"]  # [seq, chunk, 1, num_v_heads]
+  conv_state_slot_ref = slots["conv"]  # [seq, prev_kernel_size, 1, dim_size]
+  recurrent_slot_ref = slots["recurrent"]  # [seq, num_v_heads, kq_head, v_head]
+  t_inv_in_slot_ref = slots.get("t_inv_in")  # [seq, num_v_heads, chunk, chunk]
+  out_slot_ref = slots.get("out")  # [seq * chunk, num_v_heads, v_head]
+  t_inv_slot_ref = slots["t_inv"]  # [seq, num_v_heads, chunk, chunk]
+  chunk_states_slot_ref = slots.get("chunk_states")
 
   p_id = pl.program_id(0)
 
@@ -141,7 +145,20 @@ def inner_kernel(
   )
 
   # Step 1: Conv1D.
-  qkv_in_compact = qkv_slot_ref[...].astype(jnp.float32)
+  if cfg.bf16_qkv_input:
+    # F4: bf16 rows were DMA'd in their native [chunk, dim] tiling. Cast to f32
+    # in VMEM and stage them in the compact [chunk, 1, dim] layout that the
+    # conv1d and the strided head loads below consume.
+    assert qkv_compact_scratch_ref is not None
+    for idx in range(cfg.seq_tile_size):
+      vmem_ldst.store_native_as_compact(
+          qkv_slot_ref[idx].astype(jnp.float32),
+          qkv_compact_scratch_ref.at[idx],
+      )
+    qkv_stage_ref = qkv_compact_scratch_ref
+  else:
+    qkv_stage_ref = qkv_slot_ref
+  qkv_in_compact = qkv_stage_ref[...].astype(jnp.float32)
   qkv_in_compact = jnp.concat([prev_conv, qkv_in_compact], axis=1)
 
   # Prepare conv1d weights.
@@ -173,9 +190,10 @@ def inner_kernel(
   dt_bias = jnp.pad(weights_ref.gdn.dt_bias[...], ((0, padding_size)))
 
   if cfg.chunk_size == 1:
+    assert not cfg.states_only and t_inv_in_slot_ref is None
     q_compact, k_compact, v_compact, b_compact, a_compact = vmem_ldst.load_activation_as_compact(
         qkv_vreg=qkv_out_compact,
-        qkv_vmem_ref=qkv_slot_ref,
+        qkv_vmem_ref=qkv_stage_ref,
         b_vmem_ref=b_slot_ref,
         a_vmem_ref=a_slot_ref,
         cfgs=cfg,
@@ -196,7 +214,7 @@ def inner_kernel(
   else:
     q_large, k_large, v_large, b_large, a_large = vmem_ldst.load_activation_as_large(
         qkv_vreg=qkv_out_compact,
-        qkv_vmem_ref=qkv_slot_ref,
+        qkv_vmem_ref=qkv_stage_ref,
         b_vmem_ref=b_slot_ref,
         a_vmem_ref=a_slot_ref,
         cfgs=cfg,
@@ -213,10 +231,13 @@ def inner_kernel(
         dt_bias=dt_bias,
         cfg=cfg,
         real_sizes=real_sizes,
+        t_inv_in=t_inv_in_slot_ref[...] if t_inv_in_slot_ref is not None else None,
     )
 
   # Store output, recurrent, and t_inv to vmem.
-  out_slot_ref[...] = out.astype(out_slot_ref.dtype)
+  if out_slot_ref is not None:
+    assert out is not None
+    out_slot_ref[...] = out.astype(out_slot_ref.dtype)
   recurrent_slot_ref[...] = new_recurrent_state.astype(recurrent_slot_ref.dtype)
   t_inv_slot_ref[...] = t_inv.astype(t_inv_slot_ref.dtype)
   if chunk_states_slot_ref is not None:
@@ -227,32 +248,43 @@ def inner_kernel(
 
 
 def outer_kernel(
-    # Inputs.
-    metadata_ref: memory_ref.MetadataRef,
-    qkv_ref: jax.Array,
-    b_ref: jax.Array,
-    a_ref: jax.Array,
-    conv_state_ref: jax.Array,
-    recurrent_state_ref: jax.Array,
-    _: jax.Array,
-    weights_ref: memory_ref.WeightRefs,
-    # Outputs.
-    out_ref: jax.Array,
-    conv_state_out_ref: jax.Array,
-    recurrent_state_out_ref: jax.Array,
-    t_inv_ref: jax.Array,
     *args,
     carry_conv_scratch_ref: jax.Array | None = None,
     carry_recurrent_scratch_ref: jax.Array | None = None,
+    qkv_compact_scratch_ref: jax.Array | None = None,
     cfg: config.GDNConfig,
+    has_in_act: bool = True,
     **kwargs,
 ) -> None:
-  """Setup memory allocations and emit pipeline for running inner_kernel."""
-  del conv_state_out_ref, recurrent_state_out_ref
+  """Setup memory allocations and emit pipeline for running inner_kernel.
 
-  chunk_states_ref = args[0] if (len(args) > 0 and cfg.mode == config.GDNMode.PER_SEQ) else None
+  Positional refs: metadata_ref, qkv_ref, b_ref, a_ref, conv_state_ref,
+  recurrent_state_ref, [in_act], [t_inv_in_ref], weights_ref, then outputs
+  [out_ref], conv_state_out_ref, recurrent_state_out_ref, t_inv_ref,
+  [chunk_states_ref]. Bracketed refs are present depending on `cfg` flags.
+  """
+  del kwargs
+  args = list(args)
+  metadata_ref: memory_ref.MetadataRef = args.pop(0)
+  qkv_ref = args.pop(0)
+  b_ref = args.pop(0)
+  a_ref = args.pop(0)
+  conv_state_ref = args.pop(0)
+  recurrent_state_ref = args.pop(0)
+  del has_in_act  # A None operand still occupies a positional slot.
+  args.pop(0)  # in_act (aliased to out) or None.
+  t_inv_in_ref = args.pop(0) if cfg.t_inv_input else None
+  weights_ref: memory_ref.WeightRefs = args.pop(0)
+  # Outputs.
+  out_ref = None if cfg.states_only else args.pop(0)
+  args.pop(0)  # conv_state_out_ref (aliased).
+  args.pop(0)  # recurrent_state_out_ref (aliased).
+  t_inv_ref = args.pop(0)
+  has_chunk_states = cfg.mode == config.GDNMode.PER_SEQ and not cfg.states_only
+  chunk_states_ref = args.pop(0) if has_chunk_states else None
+  assert not args, len(args)
 
-  allocs = memory_ref.create_allocs(
+  allocs, alloc_names = memory_ref.create_allocs(
       metadata_ref=metadata_ref,
       qkv_ref=qkv_ref,
       b_ref=b_ref,
@@ -263,55 +295,46 @@ def outer_kernel(
       cfg=cfg,
       t_inv_ref=t_inv_ref,
       chunk_states_ref=chunk_states_ref,
+      t_inv_in_ref=t_inv_in_ref,
   )
-  qkv_alloc = allocs[0]
-  b_alloc = allocs[1]
-  a_alloc = allocs[2]
-  conv_alloc = allocs[3]
-  recurrent_alloc = allocs[4]
-  out_alloc = allocs[5]
-  t_inv_alloc = allocs[6]
-  chunk_states_alloc = allocs[7] if len(allocs) > 7 else None
+  hbm_refs = {
+      "qkv": qkv_ref,
+      "b": b_ref,
+      "a": a_ref,
+      "conv": conv_state_ref,
+      "recurrent": recurrent_state_ref,
+      "t_inv_in": t_inv_in_ref,
+      "out": out_ref,
+      "t_inv": t_inv_ref,
+      "chunk_states": chunk_states_ref,
+  }
+  num_inputs = alloc_names.index("out") if "out" in alloc_names else alloc_names.index("t_inv")
+  in_specs = tuple(alloc.spec for alloc in allocs[:num_inputs])
+  out_specs = tuple(alloc.spec for alloc in allocs[num_inputs:])
 
   num_tiles = metadata_ref.num_tiles[...]
-
-  out_specs = [out_alloc.spec, t_inv_alloc.spec]
-  if chunk_states_alloc is not None:
-    out_specs.append(chunk_states_alloc.spec)
 
   pipeline_func = pltpu.emit_pipeline(
       body=functools.partial(
           inner_kernel,
           cfg=cfg,
+          alloc_names=alloc_names,
       ),
       grid=(num_tiles,),
-      in_specs=(
-          qkv_alloc.spec,
-          b_alloc.spec,
-          a_alloc.spec,
-          conv_alloc.spec,
-          recurrent_alloc.spec,
-      ),
-      out_specs=tuple(out_specs),
+      in_specs=in_specs,
+      out_specs=out_specs,
   )
 
   @pl.with_scoped(allocations=allocs)
   def _run(allocations):
-    out_args = [out_ref, t_inv_ref]
-    if chunk_states_ref is not None:
-      out_args.append(chunk_states_ref)
     pipeline_func(
-        qkv_ref,
-        b_ref,
-        a_ref,
-        conv_state_ref,
-        recurrent_state_ref,
-        *out_args,
+        *(hbm_refs[name] for name in alloc_names),
         scratches=(
             metadata_ref,
             weights_ref,
             carry_conv_scratch_ref,
             carry_recurrent_scratch_ref,
+            qkv_compact_scratch_ref,
         ),
         allocations=allocations,
     )
@@ -334,6 +357,9 @@ def outer_kernel(
         "compute_precision",
         "is_prefill_only",
         "use_qk_norm_in_gdn",
+        "bf16_qkv_input",
+        "states_only",
+        "transition_in_state",
     ),
 )
 def fused_conv1d_gdn(
@@ -365,15 +391,40 @@ def fused_conv1d_gdn(
     segment_ids: jax.Array | None = None,
     conv_halo_seg: jax.Array | None = None,
     init_seg: jax.Array | None = None,
-) -> tuple[jax.Array, tuple[jax.Array, jax.Array], jax.Array, jax.Array]:
-  """Perform conv1d and gdn in a single fused kernel, returning (out, states, t_inv, chunk_states)."""
+    bf16_qkv_input: bool = False,
+    states_only: bool = False,
+    t_inv_in: jax.Array | None = None,  # [num_chunks, n_v, chunk, chunk]
+    transition_in_state: bool = False,
+) -> tuple[jax.Array | None, tuple[jax.Array, jax.Array], jax.Array, jax.Array | None]:
+  """Perform conv1d and gdn in a single fused kernel, returning (out, states, t_inv, chunk_states).
+
+  Experimental options (all default to the original behavior):
+    bf16_qkv_input: (F4) keep `qkv` in bf16 for the kernel and cast to f32 in
+      VMEM instead of casting in XLA. Requires bf16 `qkv`, a prefill-only call
+      and batch_size % mixed_tile_size == 0.
+    states_only: (F2) skip `out` / `chunk_states` (returned as None) and the
+      q-dependent compute; only conv/recurrent states and t_inv are produced.
+    t_inv_in: (F3) reuse a previously computed `t_inv` (same layout as the
+      returned one) instead of recomputing the Gram matrix and its inverse.
+    transition_in_state: (F5) `recurrent_state` is [num_states, n_v, d_k, d_v + d_k];
+      the extra [d_k, d_k] block is carried through the same per-chunk update as
+      the state, so (starting from the identity) it returns the local state
+      transition M_local. Requires `states_only`.
+  """
   act_in_dtype = qkv.dtype
   act_out_dtype = qkv.dtype
   conv_out_dtype = conv_state.dtype
   recurrent_out_dtype = recurrent_state.dtype
   assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
-  qkv = qkv.astype(jnp.float32)
+  if bf16_qkv_input:
+    assert qkv.dtype == jnp.bfloat16, qkv.dtype
+    assert is_prefill_only, "bf16_qkv_input requires a prefill-only call"
+  else:
+    qkv = qkv.astype(jnp.float32)
+  if transition_in_state:
+    assert states_only and is_prefill_only, "transition_in_state requires states_only, prefill-only"
+    assert recurrent_state.shape[-1] == d_v + d_k, (recurrent_state.shape, d_v, d_k)
   b = b.astype(jnp.float32)
   a = a.astype(jnp.float32)
   conv_state = conv_state.astype(jnp.float32)
@@ -456,7 +507,12 @@ def fused_conv1d_gdn(
     b = b.at[:batch_size, n_v].set(s_enc_flat)
     b = b.at[:batch_size, n_v + 1].set(seg_aux_flat)
 
-  qkv = qkv.reshape(padded_batch_size, 1, -1)
+  if bf16_qkv_input:
+    # F4: keep the natural bf16 [batch, dim] layout; the kernel DMAs whole
+    # chunk-aligned row blocks (see memory_ref.InBufferedRef).
+    assert padded_batch_size % mixed_tile_size == 0, (padded_batch_size, mixed_tile_size)
+  else:
+    qkv = qkv.reshape(padded_batch_size, 1, -1)
   b = b.reshape(padded_batch_size, 1, -1)
   a = a.reshape(padded_batch_size, 1, -1)
 
@@ -482,11 +538,14 @@ def fused_conv1d_gdn(
       in_recurrent_state: jax.Array,
       in_act: jax.Array | None,
       mode: config.GDNMode,
-  ) -> tuple[jax.Array, ...]:
+  ) -> tuple[jax.Array | None, jax.Array, jax.Array, jax.Array, jax.Array | None]:
     if mode == config.GDNMode.BATCHED:
       tile_size = decode_tile_size
     else:
       tile_size = mixed_tile_size
+    # The experimental options only apply to the chunked (PER_SEQ) kernel.
+    is_per_seq = mode == config.GDNMode.PER_SEQ
+    use_t_inv_in = is_per_seq and t_inv_in is not None
 
     cfg = config.GDNConfig(
         mode=mode,
@@ -507,6 +566,10 @@ def fused_conv1d_gdn(
             recurrent_state=in_recurrent_state.dtype,
             conv_state=in_conv_state.dtype,
         ),
+        bf16_qkv_input=is_per_seq and bf16_qkv_input,
+        states_only=is_per_seq and states_only,
+        t_inv_input=use_t_inv_in,
+        transition_in_state=is_per_seq and transition_in_state,
     )
 
     if mode == config.GDNMode.BATCHED:
@@ -534,7 +597,11 @@ def fused_conv1d_gdn(
     input_output_aliases = {len(metadata_obj) + 3: 1, len(metadata_obj) + 4: 2}
     out_shape = cfg.get_out_shape()
 
-    if in_act is None and zero_initialize_out:
+    if cfg.states_only:
+      # F2: no `out` buffer at all.
+      in_act = None
+      out_shape = None
+    elif in_act is None and zero_initialize_out:
       in_act = jnp.zeros_like(out_shape)
     if in_act is not None:
       out_shape = in_act
@@ -547,41 +614,34 @@ def fused_conv1d_gdn(
         cfg.dtypes.compute,
     )
 
-    if mode == config.GDNMode.PER_SEQ:
+    out_shape_list = [] if cfg.states_only else [out_shape]
+    out_shape_list += [in_conv_state, in_recurrent_state, t_inv_shape]
+    if cfg.states_only:
+      # Aliased outputs moved up by one (no `out`).
+      input_output_aliases = {len(metadata_obj) + 3: 0, len(metadata_obj) + 4: 1}
+    if is_per_seq and not cfg.states_only:
       chunk_states_shape = jax.ShapeDtypeStruct(
           (num_chunks, cfg.num_v_heads, cfg.kq_head_dim, cfg.v_head_dim),
           cfg.dtypes.compute,
       )
-      out_shape_tuple = (
-          out_shape,
-          in_conv_state,
-          in_recurrent_state,
-          t_inv_shape,
-          chunk_states_shape,
-      )
-      out_specs_tuple = (hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec)
-    else:
-      out_shape_tuple = (
-          out_shape,
-          in_conv_state,
-          in_recurrent_state,
-          t_inv_shape,
-      )
-      out_specs_tuple = (hbm_spec, hbm_spec, hbm_spec, hbm_spec)
+      out_shape_list.append(chunk_states_shape)
+    out_shape_tuple = tuple(out_shape_list)
+    out_specs_tuple = tuple(hbm_spec for _ in out_shape_tuple)
 
-    return pl.pallas_call(
-        functools.partial(outer_kernel, cfg=cfg),
+    in_specs = [metadata_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, hbm_spec, in_out_spec]
+    operands = [metadata_obj, qkv, b, a, in_conv_state, in_recurrent_state, in_act]
+    if use_t_inv_in:
+      assert t_inv_in is not None
+      assert t_inv_in.shape == t_inv_shape.shape, (t_inv_in.shape, t_inv_shape.shape)
+      in_specs.append(hbm_spec)
+      operands.append(t_inv_in)
+    in_specs.append(weights_spec)
+    operands.append(weights)
+
+    results = pl.pallas_call(
+        functools.partial(outer_kernel, cfg=cfg, has_in_act=in_act is not None),
         out_shape=out_shape_tuple,
-        in_specs=(
-            metadata_spec,
-            hbm_spec,
-            hbm_spec,
-            hbm_spec,
-            hbm_spec,
-            hbm_spec,
-            in_out_spec,
-            weights_spec,
-        ),
+        in_specs=tuple(in_specs),
         out_specs=out_specs_tuple,
         scratch_shapes=cfg.get_scratch_shape_dict(),
         input_output_aliases=input_output_aliases,
@@ -591,19 +651,22 @@ def fused_conv1d_gdn(
         ),
         name=cfg.get_kernel_name(),
         metadata=cfg.get_metadata(),
-    )(
-        metadata_obj,
-        qkv,
-        b,
-        a,
-        in_conv_state,
-        in_recurrent_state,
-        in_act,
-        weights,
-    )
+    )(*operands)
+
+    results = list(results)
+    r_out = None if cfg.states_only else results.pop(0)
+    r_conv = results.pop(0)
+    r_rec = results.pop(0)
+    r_t_inv = results.pop(0)
+    r_chunk_states = results.pop(0) if results else None
+    return r_out, r_conv, r_rec, r_t_inv, r_chunk_states
 
   if not is_prefill_only:
-    out_act, out_conv_state, out_recurrent_state, _ = call_kernel(
+    if bf16_qkv_input or states_only or t_inv_in is not None or transition_in_state:
+      raise ValueError(
+          "bf16_qkv_input / states_only / t_inv_in / transition_in_state are only supported for prefill-only calls."
+      )
+    out_act, out_conv_state, out_recurrent_state, _, _ = call_kernel(
         conv_state, recurrent_state, None, config.GDNMode.BATCHED
     )
   else:
@@ -615,7 +678,8 @@ def fused_conv1d_gdn(
       out_conv_state, out_recurrent_state, out_act, config.GDNMode.PER_SEQ
   )
 
-  out_act = out_act.reshape(padded_batch_size, -1)[:batch_size]
+  if out_act is not None:
+    out_act = out_act.reshape(padded_batch_size, -1)[:batch_size]
   out_conv_state = out_conv_state.astype(conv_out_dtype)
   out_conv_state = out_conv_state.reshape(conv_state_shape)
   if has_seg_ids and segment_ids is not None:

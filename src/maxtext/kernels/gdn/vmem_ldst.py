@@ -134,6 +134,26 @@ def load_compact_to_large(vmem_ref: jax.Ref) -> jax.Array:
   return jnp.concat(vreg_list, axis=-1).reshape(new_shape)
 
 
+def store_native_as_compact(x: jax.Array, compact_ref: jax.Ref) -> None:
+  """Writes a natively tiled [rows, cols] f32 value into a compact [rows, 1, cols] ref.
+
+  The compact ref is (1, 128)-tiled, so flat row ``r * lanes_per_row + j`` holds
+  row ``r``, lane block ``j``. Each 128-lane column block of ``x`` is therefore
+  written with one sublane-strided store (the inverse of the strided loads in
+  ``load_as_qkv_large``). Used by the bf16-input path (F4) to stage the f32
+  copy of the tile that the compact-layout conv1d consumes.
+  """
+  assert x.dtype.itemsize == 4
+  assert compact_ref.shape[-2] == 1
+  rows, cols = x.shape
+  assert compact_ref.shape[-1] == cols and compact_ref.shape[-3] == rows, (compact_ref.shape, x.shape)
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  lanes_per_row = cols // num_lanes
+  flat_ref = compact_ref.reshape(-1, num_lanes)  # pyrefly: ignore[missing-attribute]
+  for j in range(lanes_per_row):
+    flat_ref[j::lanes_per_row] = x[:, j * num_lanes : (j + 1) * num_lanes]
+
+
 def load_and_select_states(
     metadata_ref: memory_ref.MetadataRef,
     p_id: jax.Array,

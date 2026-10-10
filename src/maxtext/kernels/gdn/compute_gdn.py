@@ -114,7 +114,8 @@ def chunked_gdn_per_seq(
     cfg: config.GDNConfig,
     seg_c_col: jax.Array | None = None,  # [1, chunk, 1]
     seg_aux_col: jax.Array | None = None,  # [1, chunk, 1]
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    t_inv_in: jax.Array | None = None,  # [num_v_heads, chunk, chunk]
+) -> tuple[jax.Array | None, jax.Array, jax.Array]:
   """Perform chunked GDN over input [num_heads, chunk, head_dim]."""
   # bf16 activations keep single-pass MXU matmuls even with an f32 compute dtype
   # (HIGHEST would triple the forward MXU cost); HIGHEST needs f32 activations and compute.
@@ -202,19 +203,25 @@ def chunked_gdn_per_seq(
   # [num_v_heads, chunk, kq_head_dim]
   k_beta_repeat = k_repeat * beta_large
 
-  # [num_v_heads, chunk, chunk]
-  beta_k_k_t = jax.lax.dot(
-      k_beta_repeat,
-      k_repeat,
-      dimension_numbers=(((2,), (2,)), ((0,), (0,))),
-      precision=dot_prec,
-      preferred_element_type=jnp.float32,
-  ).astype(cfg.dtypes.compute)
-  gating_beta_k_k_t = gating_map_masked * beta_k_k_t
-  t = jnp.where(identity_mask, 1, gating_beta_k_k_t)
+  if t_inv_in is not None:
+    # F3: precomputed triangular inverse (identical to what this pass would
+    # compute: it depends only on k, beta, gating, which do not depend on the
+    # incoming state).
+    t_inv = t_inv_in.astype(cfg.dtypes.compute)
+  else:
+    # [num_v_heads, chunk, chunk]
+    beta_k_k_t = jax.lax.dot(
+        k_beta_repeat,
+        k_repeat,
+        dimension_numbers=(((2,), (2,)), ((0,), (0,))),
+        precision=dot_prec,
+        preferred_element_type=jnp.float32,
+    ).astype(cfg.dtypes.compute)
+    gating_beta_k_k_t = gating_map_masked * beta_k_k_t
+    t = jnp.where(identity_mask, 1, gating_beta_k_k_t)
 
-  # [num_v_heads, chunk, chunk]
-  t_inv = invert_triangular_matrix(t, precision=dot_prec)
+    # [num_v_heads, chunk, chunk]
+    t_inv = invert_triangular_matrix(t, precision=dot_prec)
 
   # [num_v_heads, chunk, v_head_dim]
   v_beta_large = v_large * beta_large
@@ -236,23 +243,42 @@ def chunked_gdn_per_seq(
   # [num_v_heads, chunk, v_head_dim]
   u, w = jnp.split(merged_uw, [cfg.v_head_dim], axis=-1)
 
-  # [num_v_heads, chunk, kq_head_dim]
-  q_large_gating = q_repeat * gating_forward
-  # NOTE: Concatenate lhs with same rhs to leverage weight
-  # stationary architecture.
-  # [num_v_heads, 2 * chunk, kq_head_dim]
-  merged_w_q = jnp.concat([w, q_large_gating], axis=1)
-  # [num_v_heads, 2 * chunk, v_head_dim]
-  merged_ws_out_updated = jax.lax.dot(
-      merged_w_q,
-      state_prev,
-      dimension_numbers=(((2,), (1,)), ((0,), (0,))),
-      precision=dot_prec,
-      preferred_element_type=jnp.float32,
-  )
+  if cfg.transition_in_state:
+    # F5: the state is [S | A] along lanes. A (the running transition) gets no
+    # value input, so pad u with zeros; the ws / state_new matmuls below then
+    # apply S_new = g_last*S - K_g^T (W S) + K_g^T U to both halves at once,
+    # i.e. A_new = (g_last*I - K_g^T W) A = M_c A.
+    assert cfg.states_only
+    u = jnp.concat([u, jnp.zeros((u.shape[0], u.shape[1], cfg.kq_head_dim), u.dtype)], axis=-1)
 
-  # NOTE: Splitting along non sublane/lane dim is free.
-  ws, out_updated = jnp.split(merged_ws_out_updated, 2, axis=1)
+  if cfg.states_only:
+    # F2: only the state path is needed: ws = w @ S (no q half).
+    ws = jax.lax.dot(
+        w,
+        state_prev,
+        dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+        precision=dot_prec,
+        preferred_element_type=jnp.float32,
+    )
+    out_updated = None
+  else:
+    # [num_v_heads, chunk, kq_head_dim]
+    q_large_gating = q_repeat * gating_forward
+    # NOTE: Concatenate lhs with same rhs to leverage weight
+    # stationary architecture.
+    # [num_v_heads, 2 * chunk, kq_head_dim]
+    merged_w_q = jnp.concat([w, q_large_gating], axis=1)
+    # [num_v_heads, 2 * chunk, v_head_dim]
+    merged_ws_out_updated = jax.lax.dot(
+        merged_w_q,
+        state_prev,
+        dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+        precision=dot_prec,
+        preferred_element_type=jnp.float32,
+    )
+
+    # NOTE: Splitting along non sublane/lane dim is free.
+    ws, out_updated = jnp.split(merged_ws_out_updated, 2, axis=1)
   ws = ws.astype(cfg.dtypes.compute)
 
   # [num_v_heads, chunk, v_head_dim]
@@ -273,6 +299,9 @@ def chunked_gdn_per_seq(
   # [num_v_heads, kq_head_dim, v_head_dim]
   state_updated = state_prev * gating_last
   state = state_updated + state_new
+
+  if cfg.states_only:
+    return None, state, t_inv
 
   # [num_kq_heads, chunk, chunk]
   out_qk = jax.lax.dot(
@@ -314,7 +343,8 @@ def chunked_gdn(
     a_log: jax.Array,
     dt_bias: jax.Array,
     cfg: config.GDNConfig,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
+    t_inv_in: jax.Array | None = None,  # [seq, num_v_heads, chunk, chunk]
+) -> tuple[jax.Array | None, jax.Array, jax.Array]:
   """Perform chunked GDN over input [seq, num_heads, chunk, head_dim]."""
 
   mask_dtype = get_mask_dtype(cfg.dtypes.compute)
@@ -372,11 +402,13 @@ def chunked_gdn(
         cfg,
         seg_c_col=seg_c_per_seq[idx] if cfg.has_seg_ids else None,
         seg_aux_col=seg_aux_per_seq[idx] if cfg.has_seg_ids else None,
+        t_inv_in=t_inv_in[idx] if t_inv_in is not None else None,
     )
-    out_list.append(out.swapaxes(0, 1))
+    if out is not None:
+      out_list.append(out.swapaxes(0, 1))
     state_list.append(state)
     t_inv_list.append(t_inv)
-  out = jnp.stack(out_list, axis=0)
+  out = jnp.stack(out_list, axis=0) if out_list else None
   state = jnp.stack(state_list, axis=0)
   t_inv = jnp.stack(t_inv_list, axis=0)
   return out, state, t_inv
