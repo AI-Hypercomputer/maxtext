@@ -34,6 +34,7 @@ from collections.abc import Sequence
 import dataclasses
 from functools import partial
 import os
+import re
 import subprocess
 import sys
 from typing import Any, Callable, overload
@@ -316,9 +317,122 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
     # Flatten the n_shards dimension back out to match the final model shape, drop wi_0/wi_1.
     new_node = {k: v for k, v in ckpt_node.items() if k not in ("wi_0", "wi_1")}
     new_node["wi"] = wi_interleaved.reshape(*wi_model.shape)
+
+    # Immediately release raw wi_0 and wi_1 device buffers to prevent OOM
+    if hasattr(ckpt_node["wi_0"], "delete"):
+      ckpt_node["wi_0"].delete()
+    if hasattr(ckpt_node["wi_1"], "delete"):
+      ckpt_node["wi_1"].delete()
+
     return new_node
 
   return jax.tree_util.tree_map_with_path(_maybe_fuse, ckpt_tree, is_leaf=_is_fusion_site)
+
+
+def _maybe_quantize_moe_fp8(ckpt_tree, model_arrays_tree):
+  """Quantize unquantized MoE weights to FP8 if the model expects FP8 weights and scales."""
+
+  def _is_moe_layer(node):
+    return (
+        isinstance(node, dict)
+        and any(k in node for k in ("wi", "wi_0", "wo"))
+        and any(not isinstance(node[k], dict) for k in ("wi", "wi_0", "wo") if k in node)
+    )
+
+  def _key_str(key):
+    if hasattr(key, "key"):
+      return key.key
+    if hasattr(key, "attr"):
+      return key.attr
+    if hasattr(key, "name"):
+      return key.name
+    return key
+
+  def _lookup_model(path):
+    node = model_arrays_tree
+    for key in path:
+      name = _key_str(key)
+      if isinstance(node, dict) and name in node:
+        node = node[name]
+      else:
+        return None
+    return node
+
+  def _quantize_weight(w, scale_shape):
+    FP8_MAX = 448.0
+    input_w = w.astype(jnp.float32) if (hasattr(w, "dtype") and w.dtype == jnp.float8_e4m3fn) else w
+    if scale_shape is None:
+      # Fallback to per-channel along axis 2
+      reduce_axes = tuple(d for d in range(input_w.ndim) if d not in (0, 2))
+      amax = jnp.max(jnp.abs(input_w), axis=reduce_axes, keepdims=True)
+      scale = jnp.maximum(amax / FP8_MAX, 1e-12).astype(jnp.float32)
+      q_w = jnp.clip(input_w / scale, -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
+      return q_w, scale
+
+    if len(scale_shape) == 1:
+      # Per-expert scale: (num_experts,)
+      amax = jnp.max(jnp.abs(input_w), axis=(1, 2))
+      scale = jnp.maximum(amax / FP8_MAX, 1e-12).astype(jnp.float32)
+      q_w = jnp.clip(input_w / scale[:, None, None], -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
+      return q_w, scale
+
+    if len(scale_shape) == 3:
+      num_experts, in_dim, out_dim = input_w.shape
+      _, blocks1, blocks2 = scale_shape
+      if blocks1 == 1 and blocks2 == out_dim:
+        # Per-channel scale: (num_experts, 1, out_dim)
+        amax = jnp.max(jnp.abs(input_w), axis=1, keepdims=True)
+        scale = jnp.maximum(amax / FP8_MAX, 1e-12).astype(jnp.float32)
+        q_w = jnp.clip(input_w / scale, -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
+        return q_w, scale
+      elif blocks1 == 1 and blocks2 == 1:
+        # Per-expert scale with keepdims: (num_experts, 1, 1)
+        amax = jnp.max(jnp.abs(input_w), axis=(1, 2), keepdims=True)
+        scale = jnp.maximum(amax / FP8_MAX, 1e-12).astype(jnp.float32)
+        q_w = jnp.clip(input_w / scale, -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
+        return q_w, scale
+      else:
+        # Block-wise scale: (num_experts, blocks1, blocks2)
+        b1 = in_dim // blocks1
+        b2 = out_dim // blocks2
+        w_reshaped = input_w.reshape(num_experts, blocks1, b1, blocks2, b2)
+        amax = jnp.max(jnp.abs(w_reshaped), axis=(2, 4))
+        scale = jnp.maximum(amax / FP8_MAX, 1e-12).astype(jnp.float32)
+        scale_expanded = scale[:, :, None, :, None]
+        q_w = (
+            jnp.clip(w_reshaped / scale_expanded, -FP8_MAX, FP8_MAX)
+            .reshape(num_experts, in_dim, out_dim)
+            .astype(jnp.float8_e4m3fn)
+        )
+        return q_w, scale
+
+    raise ValueError(f"Unsupported scale shape: {scale_shape} for weight with shape {input_w.shape}")
+
+  def _quantize_layer(path, ckpt_node):
+    if not _is_moe_layer(ckpt_node):
+      return ckpt_node
+    model_node = _lookup_model(path)
+    if not isinstance(model_node, dict):
+      return ckpt_node
+
+    new_node = dict(ckpt_node)
+    for w_name in ("wi", "wi_0", "wi_1", "wo"):
+      scale_name = f"{w_name}_scale"
+      if w_name in new_node and scale_name in model_node:
+        w = new_node[w_name]
+        is_scale_deleted = (
+            scale_name in new_node and hasattr(new_node[scale_name], "is_deleted") and new_node[scale_name].is_deleted()
+        )
+        if scale_name not in new_node or is_scale_deleted or (hasattr(w, "dtype") and w.dtype != jnp.float8_e4m3fn):
+          scale_shape = getattr(model_node[scale_name], "shape", None)
+          q_w, scale = _quantize_weight(w, scale_shape)
+          if hasattr(w, "delete"):
+            w.delete()
+          new_node[w_name] = q_w
+          new_node[scale_name] = scale
+    return new_node
+
+  return jax.tree_util.tree_map_with_path(_quantize_layer, ckpt_tree, is_leaf=_is_moe_layer)
 
 
 def _stored_shape_evenly_shardable(restore_arg, stored_shape):
@@ -974,30 +1088,45 @@ def from_pretrained(
         new_target = {}
         for k, v in target.items():
           if k == "wi" and "wi" not in meta_tree and "wi_0" in meta_tree and "wi_1" in meta_tree:
+            meta_dtype = meta_tree["wi_0"].dtype if _is_orbax_array_metadata(meta_tree.get("wi_0")) else None
             if not is_nnx:
               arr = v
+              dtype = meta_dtype or arr.dtype
               half_dim = arr.shape[-1] // 2
               new_target["wi_0"] = jax.ShapeDtypeStruct(
-                  shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                  shape=arr.shape[:-1] + (half_dim,), dtype=dtype, sharding=arr.sharding
               )
               new_target["wi_1"] = jax.ShapeDtypeStruct(
-                  shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
+                  shape=arr.shape[:-1] + (half_dim,), dtype=dtype, sharding=arr.sharding
               )
             else:
               arr = v["value"]
+              dtype = meta_dtype or arr.dtype
               half_dim = arr.shape[-1] // 2
               new_target["wi_0"] = {
-                  "value": jax.ShapeDtypeStruct(
-                      shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
-                  )
+                  "value": jax.ShapeDtypeStruct(shape=arr.shape[:-1] + (half_dim,), dtype=dtype, sharding=arr.sharding)
               }
               new_target["wi_1"] = {
-                  "value": jax.ShapeDtypeStruct(
-                      shape=arr.shape[:-1] + (half_dim,), dtype=arr.dtype, sharding=arr.sharding
-                  )
+                  "value": jax.ShapeDtypeStruct(shape=arr.shape[:-1] + (half_dim,), dtype=dtype, sharding=arr.sharding)
               }
+          elif k not in meta_tree and (k != "wi" or "wi_0" not in meta_tree):
+            continue
           else:
-            new_target[k] = _adjust_target_for_moe_fusion(v, meta_tree.get(k, {}), is_nnx)
+            adjusted_v = _adjust_target_for_moe_fusion(v, meta_tree.get(k, {}), is_nnx)
+            meta_k = meta_tree.get(k)
+            if _is_orbax_array_metadata(meta_k):
+              if not is_nnx and hasattr(adjusted_v, "dtype") and adjusted_v.dtype != meta_k.dtype:
+                adjusted_v = jax.ShapeDtypeStruct(
+                    adjusted_v.shape, meta_k.dtype, sharding=getattr(adjusted_v, "sharding", None)
+                )
+              elif is_nnx and isinstance(adjusted_v, dict) and "value" in adjusted_v:
+                val = adjusted_v["value"]
+                if hasattr(val, "dtype") and val.dtype != meta_k.dtype:
+                  adjusted_v = dict(adjusted_v)
+                  adjusted_v["value"] = jax.ShapeDtypeStruct(
+                      val.shape, meta_k.dtype, sharding=getattr(val, "sharding", None)
+                  )
+            new_target[k] = adjusted_v
 
         return new_target
 
@@ -1119,97 +1248,152 @@ def from_pretrained(
 
       jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
 
-      restored = ckptr.restore(
-          epath.Path(config.load_parameters_path),
-          item=item_to_restore,
-          transforms={},
-          restore_args=restore_args,
+      # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
+      # `v[...]` fails on Variables wrapping QTensors. Use `get_value()` to
+      # access the inner value directly without index-style descent.
+      def _unwrap_for_align(v):
+        return v.get_value() if hasattr(v, "get_value") else v[...]
+
+      model_arrays = jax.tree.map(
+          _unwrap_for_align,
+          sharded_state,
+          is_leaf=lambda n: isinstance(n, nnx.Variable),
+      )
+      # ``specs`` (nnx.get_partition_spec(abstract_state) at the top of from_pretrained)
+      # is the source of truth for logical axis names — it's the input to
+      # nn.logical_to_mesh_sharding.  Each leaf is a PartitionSpec whose entries are
+      # logical axis names (or None / nested tuples).  Reuse it for repeat/zero-pad
+      # dispatch in _align_checkpoint_to_model_shapes.
+      # nnx.get_partition_spec returns Variables wrapping PartitionSpecs at the leaves;
+      # unwrap to raw PartitionSpecs so _normalize_logical_axes can read them.
+      logical_axes_tree = jax.tree.map(
+          lambda v: v.get_value(),
+          specs,
+          is_leaf=lambda n: isinstance(n, nnx.Variable),
       )
 
-      if is_nnx_checkpoint:
-        restored_root = restored["base"] if has_base_key else restored  # pyrefly: ignore[unbound-name]
-        checkpoint = jax.tree.map(
-            lambda v: v["value"],
-            restored_root,
-            is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+      def to_dict(tree):
+        if hasattr(tree, "items"):
+          return {k: to_dict(v) for k, v in tree.items()}
+        return tree
+
+      model_arrays = to_dict(model_arrays)
+      logical_axes_tree = to_dict(logical_axes_tree)
+
+      def _filter_to_model_keys(ckpt, model):
+        """Recursively keep only keys present in model, dropping checkpoint-only fields (e.g. to_nnx__rngs)."""
+        if not hasattr(ckpt, "items") or not hasattr(model, "items"):
+          return ckpt
+        return {k: _filter_to_model_keys(ckpt[k], model[k]) for k in model if k in ckpt}
+
+      def _walk_align(ckpt, model_arr, axes):
+        if isinstance(ckpt, dict):
+          return {
+              k: _walk_align(
+                  v,
+                  model_arr[k],
+                  axes.get(k) if isinstance(axes, dict) else None,
+              )
+              for k, v in ckpt.items()
+          }
+        # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree of
+        # qvalue+scale arrays), not a single jax.Array. Shape alignment
+        # only makes sense for full-precision kernels — quantized payloads
+        # are saved in the exact shape the model expects, so pass through.
+        if not isinstance(ckpt, (jax.Array, jax.ShapeDtypeStruct, np.ndarray)):
+          return ckpt
+        return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
+
+      # Helper to extract subsets of nested dicts for partial restore
+      def _subset_dict(full_dict, target_keys_dict):
+        if not isinstance(full_dict, dict) or not isinstance(target_keys_dict, dict):
+          return full_dict
+        return {k: _subset_dict(full_dict[k], target_keys_dict[k]) for k in target_keys_dict if k in full_dict}
+
+      def _restore_and_update(target_subset, is_partial=True):
+        if is_nnx_checkpoint:
+          item = {"base": target_subset} if has_base_key else target_subset
+          raw_args = restore_args["base"] if has_base_key else restore_args
+          sub_args = _subset_dict(raw_args, target_subset)
+          args = {"base": sub_args} if has_base_key else sub_args
+        else:
+          item = {"params": {"params": target_subset}}
+          sub_args = _subset_dict(restore_args["params"]["params"], target_subset)
+          args = {"params": {"params": sub_args}}
+
+        restored = ckptr.restore(
+            epath.Path(config.load_parameters_path),
+            item=item,
+            restore_args=args,
+            partial_restore=is_partial,
         )
-      else:
-        checkpoint = restored["params"]["params"]
 
-      if checkpoint:
-        # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
-        # `v[...]` fails on Variables wrapping QTensors. Use `get_value()` to
-        # access the inner value directly without index-style descent.
-        def _unwrap_for_align(v):
-          return v.get_value() if hasattr(v, "get_value") else v[...]
+        if is_nnx_checkpoint:
+          restored_root = restored["base"] if has_base_key else restored
+          ckpt = jax.tree.map(
+              lambda v: v["value"],
+              restored_root,
+              is_leaf=lambda x: isinstance(x, dict) and "value" in x and not isinstance(x.get("value"), dict),
+          )
+        else:
+          ckpt = restored["params"]["params"]
 
-        model_arrays = jax.tree.map(
-            _unwrap_for_align,
-            sharded_state,
-            is_leaf=lambda n: isinstance(n, nnx.Variable),
-        )
-        # ``specs`` (nnx.get_partition_spec(abstract_state) at the top of from_pretrained)
-        # is the source of truth for logical axis names — it's the input to
-        # nn.logical_to_mesh_sharding.  Each leaf is a PartitionSpec whose entries are
-        # logical axis names (or None / nested tuples).  Reuse it for repeat/zero-pad
-        # dispatch in _align_checkpoint_to_model_shapes.
-        # nnx.get_partition_spec returns Variables wrapping PartitionSpecs at the leaves;
-        # unwrap to raw PartitionSpecs so _normalize_logical_axes can read them.
-        logical_axes_tree = jax.tree.map(
-            lambda v: v.get_value(),
-            specs,
-            is_leaf=lambda n: isinstance(n, nnx.Variable),
-        )
+        if not ckpt:
+          raise ValueError(
+              f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "
+              "This usually means the checkpoint format is incompatible with the model configuration "
+              "(e.g. a scanned checkpoint loaded with scan_layers=False, or vice versa). "
+              "Please ensure the checkpoint format matches the scan_layers setting."
+          )
 
-        def to_dict(tree):
-          if hasattr(tree, "items"):
-            return {k: to_dict(v) for k, v in tree.items()}
-          return tree
-
-        model_arrays = to_dict(model_arrays)
-        checkpoint = to_dict(checkpoint)
-        logical_axes_tree = to_dict(logical_axes_tree)
-
-        checkpoint = _fuse_moe_weights(checkpoint, model_arrays, config=config)
-        # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
-        # This prevents the replicated intermediate copies from persisting until function return.
+        ckpt = to_dict(ckpt)
+        ckpt = _fuse_moe_weights(ckpt, model_arrays, config=config)
+        ckpt = _maybe_quantize_moe_fp8(ckpt, model_arrays)
         del restored
+        ckpt = _filter_to_model_keys(ckpt, model_arrays)
+        ckpt = _walk_align(ckpt, model_arrays, logical_axes_tree)
+        nnx.update(model, ckpt)
+        del ckpt
 
-        def _filter_to_model_keys(ckpt, model):
-          """Recursively keep only keys present in model, dropping checkpoint-only fields (e.g. to_nnx__rngs)."""
-          if not hasattr(ckpt, "items") or not hasattr(model, "items"):
-            return ckpt
-          return {k: _filter_to_model_keys(ckpt[k], model[k]) for k in model if k in ckpt}
+      decoder_target = target_for_restore.get("decoder", {}) if isinstance(target_for_restore, dict) else {}
+      layer_keys = [k for k in decoder_target.keys() if re.match(r"^(layers?_\d+|layer_\d+)$", k)]
 
-        checkpoint = _filter_to_model_keys(checkpoint, model_arrays)
+      def _layer_idx(k):
+        m = re.search(r"\d+", k)
+        return int(m.group()) if m else 0
 
-        def _walk_align(ckpt, model_arr, axes):
-          if isinstance(ckpt, dict):
-            return {
-                k: _walk_align(
-                    v,
-                    model_arr[k],
-                    axes.get(k) if isinstance(axes, dict) else None,
-                )
-                for k, v in ckpt.items()
-            }
-          # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree of
-          # qvalue+scale arrays), not a single jax.Array. Shape alignment
-          # only makes sense for full-precision kernels — quantized payloads
-          # are saved in the exact shape the model expects, so pass through.
-          if not isinstance(ckpt, (jax.Array, jax.ShapeDtypeStruct, np.ndarray)):
-            return ckpt
-          return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
+      layer_keys.sort(key=_layer_idx)
 
-        checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
-        nnx.update(model, checkpoint)
-      else:
-        raise ValueError(
-            f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "
-            "This usually means the checkpoint format is incompatible with the model configuration "
-            "(e.g. a scanned checkpoint loaded with scan_layers=False, or vice versa). "
-            "Please ensure the checkpoint format matches the scan_layers setting."
+      use_chunked_restore = len(layer_keys) > 1 and not getattr(config, "scan_layers", False)
+
+      if use_chunked_restore:
+        # Step 1: Restore non-layer parameters (token_embedder, decoder_norm, logits_dense, etc.)
+        non_layer_target = {k: v for k, v in target_for_restore.items() if k != "decoder"}
+        non_layer_decoder_keys = [k for k in decoder_target.keys() if k not in layer_keys]
+        if non_layer_decoder_keys:
+          non_layer_target["decoder"] = {k: decoder_target[k] for k in non_layer_decoder_keys}
+        if non_layer_target:
+          _restore_and_update(non_layer_target, is_partial=True)
+
+        # Step 2: Restore layer chunks
+        chunk_size = getattr(config, "checkpoint_restore_chunk_size", 4)
+        num_layers = len(layer_keys)
+        num_chunks = (num_layers + chunk_size - 1) // chunk_size
+        max_logging.log(
+            f"Chunked restore: loading {num_layers} layers in {num_chunks} chunks of {chunk_size} layers "
+            "with partial_restore=True to avoid host/device OOM."
         )
+
+        for chunk_idx in range(num_chunks):
+          chunk_layer_keys = layer_keys[chunk_idx * chunk_size : (chunk_idx + 1) * chunk_size]
+          chunk_target = {"decoder": {k: decoder_target[k] for k in chunk_layer_keys}}
+          _restore_and_update(chunk_target, is_partial=True)
+          max_logging.log(
+              f"Restored and processed layer chunk {chunk_idx + 1}/{num_chunks} "
+              f"({chunk_layer_keys[0]} to {chunk_layer_keys[-1]})."
+          )
+      else:
+        _restore_and_update(target_for_restore, is_partial=False)
 
     if wrap_with_tunix_adapter:
       with mesh:
