@@ -38,6 +38,7 @@ from maxtext.utils.model_creation_utils import (
     _align_checkpoint_to_model_shapes,
     _fix_restore_args_for_shape_mismatch,
     _fuse_moe_weights,
+    _quantize_fp8_moe_weights,
     _stored_shape_evenly_shardable,
     _zero_pad_axis,
 )
@@ -1119,3 +1120,67 @@ class TestFromPretrainedAuth(unittest.TestCase):
       model_creation_utils.from_pretrained(config, mesh)
 
     mock_run.assert_not_called()
+
+
+class TestQuantizeFp8MoeWeights(unittest.TestCase):
+  """Tests for on-the-fly FP8 MoE quantization when loading unquantized BF16 checkpoints."""
+
+  def test_quantize_per_channel_3d_scales(self):
+    wi_bf16 = jnp.array(
+        [[[224.0, -448.0, 112.0, 56.0], [448.0, -224.0, 56.0, 112.0]]],
+        dtype=jnp.bfloat16,
+    )
+    wo_bf16 = jnp.array(
+        [[[448.0, -112.0], [224.0, -224.0]]],
+        dtype=jnp.bfloat16,
+    )
+    expected_wi = np.asarray(wi_bf16.astype(jnp.float32))
+    expected_wo = np.asarray(wo_bf16.astype(jnp.float32))
+    ckpt = {
+        "decoder": {
+            "layers_0": {
+                "mlp": {
+                    "routed_experts": {
+                        "gate": {"kernel": jnp.ones((2, 1), dtype=jnp.bfloat16)},
+                        "wi": wi_bf16,
+                        "wo": wo_bf16,
+                    }
+                }
+            }
+        }
+    }
+    model = {
+        "decoder": {
+            "layers_0": {
+                "mlp": {
+                    "routed_experts": {
+                        "gate": {"kernel": jax.ShapeDtypeStruct((2, 1), jnp.bfloat16)},
+                        "wi": jax.ShapeDtypeStruct((1, 2, 4), jnp.float8_e4m3fn),
+                        "wi_scale": jax.ShapeDtypeStruct((1, 1, 4), jnp.float32),
+                        "wo": jax.ShapeDtypeStruct((1, 2, 2), jnp.float8_e4m3fn),
+                        "wo_scale": jax.ShapeDtypeStruct((1, 1, 2), jnp.float32),
+                    }
+                }
+            }
+        }
+    }
+    out = _quantize_fp8_moe_weights(ckpt, model)
+    routed = out["decoder"]["layers_0"]["mlp"]["routed_experts"]
+    self.assertEqual(routed["wi"].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(routed["wo"].dtype, jnp.float8_e4m3fn)
+    self.assertEqual(routed["wi_scale"].shape, (1, 1, 4))
+    self.assertEqual(routed["wo_scale"].shape, (1, 1, 2))
+    self.assertEqual(routed["wi_scale"].dtype, jnp.float32)
+    self.assertEqual(routed["wo_scale"].dtype, jnp.float32)
+    self.assertTrue(wi_bf16.is_deleted())
+    self.assertTrue(wo_bf16.is_deleted())
+    np.testing.assert_allclose(
+        np.asarray(routed["wi"].astype(jnp.float32) * routed["wi_scale"]),
+        expected_wi,
+        rtol=5e-2,
+    )
+    np.testing.assert_allclose(
+        np.asarray(routed["wo"].astype(jnp.float32) * routed["wo_scale"]),
+        expected_wo,
+        rtol=5e-2,
+    )
