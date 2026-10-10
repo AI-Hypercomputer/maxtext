@@ -1932,6 +1932,20 @@ class LayoutAndSharding(BaseModel):
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
   )
+  dense_weight_grad_in_kernel_order: bool | None = Field(
+      None,
+      description=(
+          "Trace the per-layer attention and MLP projection dots inside a jax.sharding.auto_axes region so that "
+          "XLA folds the transpose back into the gradient dot and each weight gradient comes out in its kernel's "
+          "stored axis order. This is the in-loop counterpart of lm_head_weight_grad_in_kernel_order and, like it, "
+          "None means on wherever it can act: shard_mode=explicit, where the Sharding custom-call on every dot "
+          "output blocks that fold. Without it explicit is 0.33%-1.48% slower than auto at every measured layer "
+          "count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere "
+          "(docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels, their initialization "
+          "and the arithmetic are untouched, so gradients are bit-identical to the default rule. No effect under "
+          "shard_mode=auto, where XLA folds the transpose itself, or on quantized layers."
+      ),
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",
@@ -4465,6 +4479,20 @@ class MaxTextConfig(
       raise ValueError(
           "lm_head_weight_grad_in_kernel_order only applies to the untied LM head, but logits_via_embedding is True."
       )
+    return self
+
+  @model_validator(mode="after")
+  def resolve_dense_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the in-loop counterpart of the LM-head flag.
+
+    Same barrier, same shape of fix, same default rule: on wherever it can act.
+    The two are independent and additive -- on llama2 at 18 layers, explicit
+    costs +1.098% against auto with neither flag, +0.621% with this one alone,
+    +0.429% with the LM-head flag alone and +0.005% with both
+    (docs/guides/optimization/shard_mode_performance.md section 4.8).
+    """
+    if self.dense_weight_grad_in_kernel_order is None:
+      self.dense_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT
     return self
 
   @model_validator(mode="after")
