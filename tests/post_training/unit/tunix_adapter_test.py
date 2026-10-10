@@ -60,7 +60,7 @@ class _CallableStubBase:
   """Stub MaxText Transformer that records the kwargs it is called with."""
 
   def __init__(self):
-    self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME)
+    self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME, lm_head_vocab_parallel=False)
     self.captured = {}
 
   def __call__(self, *, decoder_input_tokens, decoder_positions, decoder_segment_ids, forced_routed_experts=None):
