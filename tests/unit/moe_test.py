@@ -34,6 +34,7 @@ from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Config, DType
 from maxtext.configs import pyconfig
 from maxtext.configs import types as maxtext_types
+from maxtext.kernels import sort_activations
 from maxtext.kernels.megablox import ops as mblx_ops
 from maxtext.layers import linears
 from maxtext.layers import moe
@@ -4718,6 +4719,50 @@ class FlatFsdpWeightsParityTest(unittest.TestCase):
       np.testing.assert_allclose(
           np.reshape(g, g_ref.shape), g_ref, rtol=1e-4, atol=1e-6, err_msg=jax.tree_util.keystr(path)
       )
+
+
+class InvertPermutationTest(unittest.TestCase):
+  """Tests the scatter-based permutation inverse used by the MoE sort backward passes."""
+
+  # pylint: disable=protected-access
+
+  def test_matches_argsort(self):
+    rng = np.random.default_rng(0)
+    for n in (1, 7, 1024):
+      perm = jnp.asarray(rng.permutation(n), dtype=jnp.int32)
+      np.testing.assert_array_equal(sort_activations.invert_permutation(perm), jnp.argsort(perm))
+
+  def test_sort_activations_vjp_matches_autodiff(self):
+    """The custom backward pass must match JAX's own transpose of the gather."""
+    rng = np.random.default_rng(1)
+    for dtype in (jnp.float32, jnp.bfloat16):
+      with self.subTest(dtype=dtype):
+        x = jnp.asarray(rng.standard_normal((48, 16)), dtype=dtype)
+        perm = jnp.asarray(rng.permutation(48), dtype=jnp.int32)
+        ct = jnp.asarray(rng.standard_normal((48, 16)), dtype=dtype)
+        _, ref_vjp = jax.vjp(lambda a, p=perm: moe._sort_activations(a, p, False), x)
+        _, new_vjp = jax.vjp(lambda a, p=perm: moe._sort_activations(a, p, True), x)
+        np.testing.assert_array_equal(ref_vjp(ct)[0], new_vjp(ct)[0])
+
+  def test_route_and_unroute_match_argsort_inverse(self):
+    """`unroute` and the `route` backward pass must be unchanged from the double-argsort version."""
+    rng = np.random.default_rng(2)
+    num_tokens, hidden, num_experts, top_k = 24, 16, 8, 6
+    selected_experts = jnp.asarray(rng.integers(0, num_experts, size=(num_tokens, top_k)), dtype=jnp.int32)
+    old_inds = jnp.argsort(jnp.argsort(jnp.ravel(selected_experts)))
+
+    def old_unroute(tokens):
+      return jnp.sum(jnp.reshape(tokens[old_inds, ...], (-1, top_k) + tokens.shape[1:]), axis=1)
+
+    for dtype in (jnp.float32, jnp.bfloat16):
+      with self.subTest(dtype=dtype):
+        routed = jnp.asarray(rng.standard_normal((num_tokens * top_k, hidden)), dtype=dtype)
+        np.testing.assert_array_equal(sort_activations.unroute(routed, selected_experts, False), old_unroute(routed))
+
+        tokens = jnp.asarray(rng.standard_normal((num_tokens, hidden)), dtype=dtype)
+        ct = jnp.asarray(rng.standard_normal((num_tokens * top_k, hidden)), dtype=dtype)
+        _, route_vjp = jax.vjp(lambda t: sort_activations.route(t, selected_experts, False), tokens)
+        np.testing.assert_array_equal(route_vjp(ct)[0], old_unroute(ct))
 
 
 if __name__ == "__main__":

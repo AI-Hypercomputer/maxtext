@@ -154,7 +154,7 @@ def _sort_activations(
 
   If `use_custom_vjp=True`, then we use a custom backward pass that
   reverses the sort order. Specifically, this unsort operation is simply a sort
-  with `jnp.argsort(sort_indices)` as the sort indices. This is only needed in
+  with the inverse permutation of `sort_indices` as the sort indices. This is only needed in
   the case where the compiler generates a less efficient backward pass op.
 
   Note that `use_custom_vjp=True` assumes that `sort_indices` is a permutation
@@ -200,7 +200,7 @@ def _sort_activations_custom_fwd(inputs: jax.Array, sort_indices: jax.Array) -> 
 def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tuple[jax.Array, None]:
   """Backward pass of the custom vjp for `_sort_activations()`."""
   sort_indices = residuals
-  return _sort_activations_custom(grads, jnp.argsort(sort_indices)), None
+  return _sort_activations_custom(grads, sort_activations.invert_permutation(sort_indices)), None
 
 
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
