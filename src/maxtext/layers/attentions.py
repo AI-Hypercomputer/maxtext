@@ -16,7 +16,6 @@
 
 import dataclasses
 import functools
-import os
 from typing import Any, Iterable, Optional, Tuple, Union, cast
 
 from jax.ad_checkpoint import checkpoint_name
@@ -1122,12 +1121,14 @@ class Attention(nnx.Module):
       rpa_metadata: dict[str, Any] | None = None,
   ) -> tuple[Array, list[Array]]:
     """Forward function for vLLM serving with RPA attention."""
-    if self.config.attention == "vllm_batched_rpa_long_ctx":
-      os.environ["USE_BATCHED_RPA_LONG_CTX_KERNEL"] = "1"
-    elif self.config.attention == "vllm_batched_rpa":
-      os.environ["USE_BATCHED_RPA_KERNEL"] = "1"
+    # pylint: disable=import-outside-toplevel
+    from maxtext.integration.vllm import rpa_kernel_env
+
+    # tpu-inference picks its RPA kernel from the environment; derive it from
+    # `attention` before the kernel is resolved (and rebind an already-imported
+    # attention_interface on older tpu-inference versions).
+    rpa_kernel_env.select_rpa_kernel(self.config.attention)
     try:
-      # pylint: disable=import-outside-toplevel
       # pytype: disable=import-error
       from tpu_inference.layers.common.attention_interface import sharded_ragged_paged_attention as rpa_ops
     except ImportError as e:
@@ -1336,7 +1337,10 @@ class Attention(nnx.Module):
 
     assert not self.config.quantize_kvcache or self.kv_quant
 
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and model_mode != MODEL_MODE_TRAIN:
+    if (
+        self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx")
+        and model_mode != MODEL_MODE_TRAIN
+    ):
       batch, seq_len, num_heads, head_dim = query.shape
       attn_out, updated_kv = self.forward_serve_vllm(
           query, key, value, rpa_kv_cache=kv_cache, rpa_metadata=attention_metadata

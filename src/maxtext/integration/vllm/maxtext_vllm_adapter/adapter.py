@@ -25,6 +25,7 @@ import numpy as np
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
 from maxtext.integration.vllm.convert_utils import DEFAULT_TPU_NUM_LANES, compute_padded_moe_mlp_dim
+from maxtext.integration.vllm import rpa_kernel_env
 from maxtext.integration.vllm.hybrid_cache_utils import (
     build_qwen_gdn_cache_layout,
     call_with_supported_kwargs,
@@ -102,10 +103,10 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       )
       overrides["load_parameters_path"] = None
 
-  if overrides.get("attention") == "vllm_batched_rpa_long_ctx":
-    os.environ["USE_BATCHED_RPA_LONG_CTX_KERNEL"] = "1"
-  elif overrides.get("attention") == "vllm_batched_rpa" or overrides.get("use_batched_rpa", False):
-    os.environ["USE_BATCHED_RPA_KERNEL"] = "1"
+  # tpu-inference picks its RPA kernel from the environment; derive it from
+  # `attention` (and rebind an already-imported attention_interface on older
+  # tpu-inference versions, see rpa_kernel_env.py).
+  rpa_kernel_env.select_rpa_kernel(overrides.get("attention"), overrides.get("use_batched_rpa", False))
 
   # Add base config path to positional args
   base_config_path = os.path.join(MAXTEXT_CONFIGS_DIR, "inference", "vllm.yml")
