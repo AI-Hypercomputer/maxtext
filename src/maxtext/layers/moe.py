@@ -77,6 +77,30 @@ WI_1 = "wi_1"
 WO = "wo"
 
 
+@jax.custom_vjp
+def _split_gate_up(out: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Split the fused [rows, 2N] gmm output into (gate, up) halves.
+
+  Plain slicing makes XLA assemble the cotangent with two dynamic-update-slices
+  (pad + add) in backward; the custom VJP concatenates the two half-gradients
+  once, which fuses into the following tgmm/gmm input.
+  """
+  n = out.shape[-1] // 2
+  return out[:, :n], out[:, n:]
+
+
+def _split_gate_up_fwd(out: jax.Array) -> tuple[tuple[jax.Array, jax.Array], None]:
+  return _split_gate_up(out), None
+
+
+def _split_gate_up_bwd(_residuals: None, grads: tuple[jax.Array, jax.Array]) -> tuple[jax.Array]:
+  grad_gate, grad_up = grads
+  return (jnp.concatenate([grad_gate, grad_up], axis=-1),)
+
+
+_split_gate_up.defvjp(_split_gate_up_fwd, _split_gate_up_bwd)
+
+
 @struct.dataclass
 class RouteMetadata:
   """EP communication state needed to undo the forward all-to-all after expert computation."""
@@ -1326,7 +1350,10 @@ class RoutedMoE(nnx.Module):
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-        top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+        hit = top_k_indices[..., None] == jnp.arange(self.num_experts, dtype=top_k_indices.dtype)
+        top_k_weights = jnp.sum(
+            jnp.where(hit, router_probs[..., None, :], jnp.zeros((), router_probs.dtype)), axis=-1
+        ).astype(self.dtype)
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -1356,7 +1383,12 @@ class RoutedMoE(nnx.Module):
       if self.per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
       ):
-        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
+        # Compare/select + reduce on the TensorCore instead of a tiny
+        # take_along_axis gather (which XLA offloads to SparseCore). Exact:
+        # exactly one term is non-zero; its VJP is a reduction, not a scatter.
+        scale = self.per_expert_scale.value
+        hit = top_k_indices[..., None] == jnp.arange(scale.shape[0], dtype=top_k_indices.dtype)
+        per_expert_scale_topk = jnp.sum(jnp.where(hit, scale, jnp.zeros((), scale.dtype)), axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return top_k_weights, top_k_indices
@@ -1675,7 +1707,15 @@ class RoutedMoE(nnx.Module):
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
 
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+      if self.num_experts <= 256:
+        group_size = jnp.sum(
+            flatten_selected_experts_safe[:, None]
+            == jnp.arange(self.num_experts, dtype=flatten_selected_experts_safe.dtype),
+            axis=0,
+            dtype=jnp.int32,
+        )
+      else:
+        group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -3094,8 +3134,7 @@ class RoutedMoE(nnx.Module):
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        layer_w0, layer_w1 = _split_gate_up(out)
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias

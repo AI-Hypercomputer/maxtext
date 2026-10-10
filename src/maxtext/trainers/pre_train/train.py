@@ -188,9 +188,19 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         "encoder_images": encoder_images,
         "encoder_image_masks": encoder_image_masks,
     }
+  early_total_weights = None
+  decoder_input_tokens = data["inputs"]
+  if not is_block_diffusion:
+    # Compute total_weights before the model forward and tie it (via a zero-valued
+    # term) to the decoder inputs, so its scalar all-reduce is issued early and
+    # overlaps with layer 0 instead of sitting after the loss on the critical path.
+    early_total_weights = jnp.sum(data["targets_segmentation"] != 0)
+    decoder_input_tokens = decoder_input_tokens + jnp.minimum(
+        jnp.maximum(jax.lax.stop_gradient(early_total_weights), 0), 0
+    ).astype(decoder_input_tokens.dtype)
   # Flax NNX model: forward pass, then pop Intermediates sown during it.
   logits = model(
-      decoder_input_tokens=data["inputs"],
+      decoder_input_tokens=decoder_input_tokens,
       decoder_positions=data["inputs_position"],
       decoder_segment_ids=data["inputs_segmentation"],
       **encoder_kwargs,
@@ -278,6 +288,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if is_block_diffusion:
     assert targets_loss_mask is not None
     total_weights = jnp.sum(targets_loss_mask)
+  elif early_total_weights is not None:
+    total_weights = early_total_weights
   else:
     total_weights = jnp.sum(data["targets_segmentation"] != 0)
   # If gradient accumulation is enabled, we don't need to divide xent_sum

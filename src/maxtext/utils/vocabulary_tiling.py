@@ -25,6 +25,7 @@ from maxtext.utils.sharding import (
     create_sharding,
     get_logical_axis_rules,
     get_physical_spec_without_axes,
+    logical_to_mesh_sharding,
     FSDP_MESH_AXES,
 )
 from maxtext.common.common_types import ShardMode
@@ -130,16 +131,14 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   graphdef, head_params, other_params, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
 
   if config.vocab_tiling_ag_once:
-    # all gather the output head over the embed-sharding axes; doing it before
-    # the custom_vjp lets the backward reuse the gathered table instead of
-    # re-gathering it for every chunk
+    head_logical_spec = nnx.get_partition_spec(head_params)
+    head_sharded_spec = logical_to_mesh_sharding(head_logical_spec, mesh=model.mesh, rules=get_logical_axis_rules())
     head_physical_spec = get_physical_spec_without_axes(
-        nnx.get_partition_spec(head_params),
+        head_logical_spec,
         model.mesh,
         FSDP_MESH_AXES + ("context", "context_usp_ulysses", "expert"),
         get_logical_axis_rules(),
     )
-    head_params = maybe_shard_with_name(head_params, head_physical_spec, shard_mode=config.shard_mode)
 
   def _logits_for_chunk(chunk_head_params, chunk_other_params, chunk_rest, hidden_chunk):
     local_model = nnx.merge(graphdef, chunk_head_params, chunk_other_params, chunk_rest, copy=True)
@@ -157,13 +156,32 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       chunk_head_params, chunk_other_params, chunk_rest, hidden_states, labels, segmentation
   ):
     batch_size, seq_len, emb_dim = hidden_states.shape
-    vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
+    num_tiles = config.num_vocab_tiling
+    vocab_tile_size = (batch_size * seq_len) // num_tiles
+    if config.vocab_tiling_ag_once:
+      chunk_head_params = _maybe_shard_with_name(chunk_head_params, head_physical_spec)
 
-    reshaped_hidden_states = _reshape(
-        hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
-    )
-    reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
-    reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    if seq_len % num_tiles == 0:
+      seq_per_tile = seq_len // num_tiles
+      reshaped_hidden_states = _reshape(
+          jnp.swapaxes(hidden_states.reshape(batch_size, num_tiles, seq_per_tile, emb_dim), 0, 1),
+          (num_tiles, vocab_tile_size, emb_dim),
+          reshaped_hidden_spec,
+      )
+      reshaped_labels = _reshape(
+          jnp.swapaxes(labels.reshape(batch_size, num_tiles, seq_per_tile), 0, 1),
+          (num_tiles, vocab_tile_size),
+          reshaped_data_spec,
+      )
+      reshaped_segmentation = _reshape(
+          jnp.swapaxes(segmentation.reshape(batch_size, num_tiles, seq_per_tile), 0, 1),
+          (num_tiles, vocab_tile_size),
+          reshaped_data_spec,
+      )
+    else:
+      reshaped_hidden_states = _reshape(hidden_states, (num_tiles, vocab_tile_size, emb_dim), reshaped_hidden_spec)
+      reshaped_labels = _reshape(labels, (num_tiles, vocab_tile_size), reshaped_data_spec)
+      reshaped_segmentation = _reshape(segmentation, (num_tiles, vocab_tile_size), reshaped_data_spec)
 
     def _fwd_scan_body(accumulators, chunk_data):
       loss_accumulator, z_loss_accumulator = accumulators
@@ -199,6 +217,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
         batch_size,
         seq_len,
         emb_dim,
+        total_loss,
     )
     return (total_loss, total_z_loss), residuals
 
@@ -216,7 +235,11 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
         batch_size,
         seq_len,
         emb_dim,
+        total_loss,
     ) = residuals
+
+    if config.vocab_tiling_ag_once:
+      reshaped_hidden_states, _ = jax.lax.optimization_barrier((reshaped_hidden_states, total_loss))
 
     def _single_chunk_loss_fn(input_head_params, input_hidden_chunk, input_label_chunk, input_segmentation_chunk):
       chunk_logits = _logits_for_chunk(input_head_params, chunk_other_params, chunk_rest, input_hidden_chunk)
@@ -245,10 +268,26 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
         _bwd_scan_body, initial_grad_head, (reshaped_hidden_states, reshaped_labels, reshaped_segmentation)
     )
     grad_reshaped_hidden_states = _maybe_shard_with_name(grad_reshaped_hidden_states, reshaped_hidden_spec)
+    if config.vocab_tiling_ag_once:
+      grad_head = _maybe_shard_with_name(grad_head, head_sharded_spec)
+      grad_head, grad_reshaped_hidden_states = jax.lax.optimization_barrier((grad_head, grad_reshaped_hidden_states))
     grad_head = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_head)
     grad_reshaped_hidden_states *= loss_cotangent
     grad_head = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), chunk_head_params, grad_head)
-    grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
+    num_tiles = config.num_vocab_tiling
+    if seq_len % num_tiles == 0:
+      seq_per_tile = seq_len // num_tiles
+      grad_reshaped_hidden_states = _reshape(
+          jnp.swapaxes(
+              grad_reshaped_hidden_states.reshape(num_tiles, batch_size, seq_per_tile, emb_dim),
+              0,
+              1,
+          ),
+          (batch_size, seq_len, emb_dim),
+          hidden_spec,
+      )
+    else:
+      grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
 
     # Return explicit zeros for other_params and rest, not None. With None, JAX builds
     # the zero cotangents with the wrong layer-axis order for scanned params, and the
