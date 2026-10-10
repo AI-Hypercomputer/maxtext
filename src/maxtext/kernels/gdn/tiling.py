@@ -18,13 +18,7 @@
 from jax.experimental import pallas as pl
 import jax.numpy as jnp
 
-try:
-  from maxtext.models.kernels.gdn import config
-except (ImportError, ModuleNotFoundError):
-  try:
-    from maxtext.src.maxtext.models.kernels.gdn import config
-  except (ImportError, ModuleNotFoundError):
-    from . import config
+from . import config
 
 
 def align_to(x: int, alignment: int) -> int:
