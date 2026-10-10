@@ -1778,6 +1778,7 @@ class NNXDecoder(nnx.Module):
       multimodal_input: None | MultimodalInput = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings=None,
+      skip_lm_head: bool = False,
   ):
     cfg = self.config
     assert decoder_input_tokens.ndim == 2  # [batch, len]
@@ -2324,6 +2325,9 @@ class NNXDecoder(nnx.Module):
       # sow a collapsed copy and leave `hidden_state` itself 4D, so MTP still receives the
       # full stream state when both features are enabled.
       self.sow(nnx.Intermediate, "hidden_states", self._reduce_mhc_streams(hidden_state))
+
+    elif skip_lm_head:
+      logits = None
 
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
