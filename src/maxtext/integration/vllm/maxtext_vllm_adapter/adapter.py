@@ -339,6 +339,16 @@ class MaxTextForCausalLM(nnx.Module):
       positions = _input_positions
     input_positions = normalize_vllm_input_positions(positions)
 
+    # Propagate is_decode from shared_attention_metadata if present
+    shared_attn_md = kwargs.get("shared_attention_metadata", None)
+    if shared_attn_md is not None and hasattr(shared_attn_md, "is_decode"):
+      if isinstance(attention_metadata, dict):
+        for sub_md in attention_metadata.values():
+          if hasattr(sub_md, "is_decode"):
+            sub_md.is_decode = shared_attn_md.is_decode
+      elif hasattr(attention_metadata, "is_decode"):
+        attention_metadata.is_decode = shared_attn_md.is_decode
+
     # Filter kwargs to only those accepted by self.model.
     model_kwargs = dict(kwargs)
     for extra_key in (
