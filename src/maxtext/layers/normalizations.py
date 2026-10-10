@@ -59,7 +59,7 @@ class RMSNorm(nnx.Module):
 
   def __init__(
       self,
-      num_features: int,
+      num_features: int | tuple[int, ...],
       epsilon: float = 1e-6,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
@@ -83,8 +83,11 @@ class RMSNorm(nnx.Module):
     self.scale_offset = scale_offset
     self.with_scale = with_scale
     if self.with_scale:
+      # A tuple gives one gain per leading slot, e.g. (heads, head_dim) for the
+      # per-head QK norm OLMoE3 uses. Normalization is still over the last axis.
+      scale_shape = tuple(num_features) if isinstance(num_features, (tuple, list)) else (num_features,)
       self.scale = nnx.Param(
-          scale_init(rngs.params(), (num_features,), self.weight_dtype),
+          scale_init(rngs.params(), scale_shape, self.weight_dtype),
           out_sharding=kernel_axes,
       )
     else:
@@ -116,16 +119,19 @@ class RMSNorm(nnx.Module):
 
     scale_fp32 = jnp.asarray(scale, jnp.float32)
     effective_scale = scale_fp32 + self.scale_offset
-    if self.shard_mode == ShardMode.EXPLICIT:
+    # A 2-D gain is one scale per head, [heads, head_dim], as OLMoE3's per-head QK
+    # norm uses. Normalization is still over the last axis either way.
+    spec = "...k,k->...k" if effective_scale.ndim == 1 else "...hk,hk->...hk"
+    if self.shard_mode == ShardMode.EXPLICIT and effective_scale.ndim == 1:
       effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
 
     if self.scale_offset != 0.0:
       normed_fp32 = x * lax.rsqrt(mean2 + self.epsilon)
-      y = jnp.einsum("...k,k->...k", normed_fp32, effective_scale, out_sharding=out_sharding)
+      y = jnp.einsum(spec, normed_fp32, effective_scale, out_sharding=out_sharding)
       return jnp.asarray(y, self.dtype)
 
     effective_scale = jnp.asarray(effective_scale, self.dtype)
-    return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
+    return jnp.einsum(spec, y, effective_scale, out_sharding=out_sharding)
 
 
 class GlobalRMSNorm(RMSNorm):

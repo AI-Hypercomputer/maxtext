@@ -123,6 +123,8 @@ save_config_to_gcs: false
 
 # gradient dtype
 grad_dtype: "float32"
+# Cast large fp32 weights to dtype before the forward pass, so FSDP moves them in bf16.
+cast_params_to_compute_dtype: false
 
 # activation dtypes.
 dtype: "bfloat16"
@@ -286,6 +288,14 @@ log_step_diagnostics: false # append grad/param norms, max |grad|, routed-bias c
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
+# EMo document-pool routing (OLMoE3): restrict each document's top-k to a per-document
+# expert pool (size sampled from [min, max] in training, fixed at eval). arxiv 2605.06663
+emo_enabled: false
+emo_min_document_expert_pool: 16
+emo_max_document_expert_pool: 512
+emo_eval_document_expert_pool: 512
+# With moe_lean_routing, find the EMo pool threshold by bisection instead of a sort.
+emo_threshold_by_bisection: false
 moe_use_megatron_seq_aux_loss: false # when true, sigmoid routers (routed_score_func="sigmoid") use Megatron-LM's sequence-wise aux loss summed over MoE layers; false (default) uses the Switch-style loss averaged over MoE layers.
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
@@ -380,6 +390,10 @@ use_gmm_v2: false
 # Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
 # When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
 use_gmm_v2_heuristic_tiling: false
+# Transpose the expert weight inside the GMM v2 dlhs kernel instead of copying it in HBM.
+gmm_v2_dlhs_transpose_in_kernel: false
+# Override the m-tile of the Tokamax v1 ragged-dot kernel; 0 keeps tokamax's heuristic.
+tokamax_gmm_tile_m: 0
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
@@ -488,6 +502,9 @@ mlpwo: 'remat'
 moe_mlpwi_0: 'remat'
 moe_mlpwi_1: 'remat'
 moe_mlpwo: 'remat'
+moe_routing: 'remat'
+moe_router_logits: 'remat'
+moe_dispatch: 'remat'
 moe_x_sorted: 'remat' # routed (expert-sorted) MoE input plus its routing metadata; 'device' keeps it in HBM (tokens x top-k x emb per layer) so the backward skips the dispatch all-gather and ragged sort, 'offload' moves it to host, 'remat' recomputes it. Not supported with num_moe_emb_chunks > 0.
 moe_routing_maps: 'remat' # MoE routing maps (top-k expert ids, ragged-sort permutations, sorted token indices and group sizes); with moe_tc_window_routing, also the TC group sizes
 # TODO: Update to moe_tc_routing_weights.
@@ -1517,6 +1534,18 @@ gdn_num_key_heads: 16
 gdn_num_value_heads: 32
 # Chunk size for the parallel scan algorithm in the Gated Delta Net.
 gdn_chunk_size: 64
+gdn_state_dtype: "float32"
+use_tokamax_kda: false
+kda_allow_neg_eigval: true
+tokamax_kda_max_num_segments: 32
+tokamax_kda_log_decay_floor: 20.0
+tokamax_kda_l2norm_outside: false
+moe_lean_routing: false
+moe_topk_by_bisection: false
+moe_topk_pallas: false
+use_fused_latent_moe: false
+kda_conv_in_compute_dtype: false
+olmoe3_per_layer_remat: false
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on

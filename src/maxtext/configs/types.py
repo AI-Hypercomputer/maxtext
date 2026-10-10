@@ -313,6 +313,17 @@ ModelName = Literal[
     "olmo3-7b",
     "olmo3-7b-pt",
     "olmo3-32b",
+    "olmoe3-30m",
+    "olmoe3-3p5b",
+    "olmo35-tiny",
+    "olmo35-small",
+    "olmo35-medium",
+    "olmo35-large",
+    "olmoe3-ladder-d512",
+    "olmoe3-ladder-d768",
+    "olmoe3-ladder-d1024",
+    "olmoe3-ladder-d1536",
+    "olmoe3-ladder-d2048",
     "envy-test",
     "envy-switch-base",
     "envy-switch-large",
@@ -502,6 +513,7 @@ class DataTypes(BaseModel):
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
+  cast_params_to_compute_dtype: bool = Field(False, description="Cast large fp32 weights to dtype before forward.")
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
       description="Precision level for matrix multiplications.",
@@ -668,6 +680,8 @@ class ModelArchitecture(BaseModel):
   base_mlp_dim: int = Field(7168, description="Base dimension of the MLP layer.")
   dense_init_scale: float = Field(1.0, description="Initialization scale for dense layers")
   base_num_decoder_layers: int = Field(16, description="Base number of decoder layers.")
+  scale_embeddings_by_sqrt_emb_dim: bool = Field(False, description="Multiply token embeddings by sqrt(emb_dim).")
+  use_embedding_norm: bool = Field(False, description="Apply RMSNorm to token embeddings before decoder stack.")
   head_dim: int = Field(
       128,
       description="Model query and key head dimension.",
@@ -701,6 +715,8 @@ class ModelArchitecture(BaseModel):
       True,
       description="Whether to apply scale on value normalization (default True).",
   )
+  qk_norm_per_head: bool = Field(False, description="Independent QK RMSNorm gain per head.")
+  use_scalable_softmax: bool = Field(False, description="Scalable softmax query scaling.")
 
 
 class MTP(BaseModel):
@@ -1208,7 +1224,13 @@ class MoEGeneral(BaseModel):
       None,
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
+  base_shared_expert_mlp_dim: int = Field(-1, description="Intermediate dim of shared expert on MoE layers.")
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  emo_enabled: bool = Field(False, description="EMo document-pool routing (OLMoE3).")
+  emo_min_document_expert_pool: int = Field(16, description="Smallest EMo training pool size.")
+  emo_max_document_expert_pool: int = Field(512, description="Largest EMo training pool size.")
+  emo_eval_document_expert_pool: int = Field(512, description="Fixed EMo pool size outside training.")
+  emo_threshold_by_bisection: bool = Field(False, description="Find EMo pool threshold by bisection.")
   moe_use_megatron_seq_aux_loss: bool = Field(
       False,
       description=(
@@ -1585,6 +1607,8 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  gmm_v2_dlhs_transpose_in_kernel: bool = Field(False, description="Transpose weight inside GMM v2 dlhs kernel.")
+  tokamax_gmm_tile_m: NonNegativeInt = Field(0, description="Override m-tile of Tokamax v1 ragged-dot kernel.")
 
 
 class DeepSeekMoE(BaseModel):
@@ -1664,6 +1688,20 @@ class Qwen3Next(BaseModel):
   gdn_value_head_dim: int = Field(128, description="Head dimension for the value in the Gated Delta Net.")
   gdn_num_key_heads: int = Field(16, description="Number of key/query heads in the Gated Delta Net.")
   gdn_num_value_heads: int = Field(32, description="Number of value heads in the Gated Delta Net.")
+  gdn_state_dtype: str = Field("float32", description="dtype for chunked delta-rule state.")
+  use_tokamax_kda: bool = Field(False, description="Use fused tokamax KDA kernel.")
+  kda_allow_neg_eigval: bool = Field(True, description="beta in [0,2) via allow_neg_eigval.")
+  tokamax_kda_max_num_segments: int = Field(32, description="Static bound on packed documents per sequence.")
+  tokamax_kda_log_decay_floor: float = Field(20.0, description="Floor in nats on per-step KDA log-decay.")
+  tokamax_kda_l2norm_outside: bool = Field(False, description="Do KDA q/k L2-norm outside tokamax kernel.")
+  olmoe3_per_layer_remat: bool = Field(False, description="Remat each OLMoE3 layer on its own.")
+  moe_lean_routing: bool = Field(False, description="Same routing, fewer sorts.")
+  moe_topk_by_bisection: bool = Field(False, description="With moe_lean_routing, top-k by bisection.")
+  moe_topk_pallas: bool = Field(False, description="With moe_lean_routing, top-k with Pallas kernel.")
+  use_fused_latent_moe: bool = Field(
+      False, description="Use hybrid XLA-fwd + VMEM-fused Pallas-bwd kernel for LatentMoE."
+  )
+  kda_conv_in_compute_dtype: bool = Field(False, description="Cast KDA short-conv weight to activation dtype.")
   gdn_chunk_size: int = Field(
       64,
       description="Chunk size for the parallel scan algorithm in the Gated Delta Net.",
@@ -2067,6 +2105,9 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second MoE layer's output.",
   )
+  moe_routing: RematLocation = Field(RematLocation.REMAT, description="Remat policy for MoE routing artifacts.")
+  moe_router_logits: RematLocation = Field(RematLocation.REMAT, description="Remat policy for MoE router logits.")
+  moe_dispatch: RematLocation = Field(RematLocation.REMAT, description="Remat policy for dispatched MoE inputs.")
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
   value_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the value projection.")
@@ -3672,6 +3713,10 @@ class DerivedValues(BaseModel):
       None,
       description="Effective MLP dimension for MoE layers, scaled by `global_parameter_scale`.",
   )
+  shared_expert_mlp_dim: None | int = Field(
+      None,
+      description="Effective shared-expert MLP dimension, scaled by `global_parameter_scale`.",
+  )
   num_decoder_layers: None | int = Field(
       None,
       description="Effective number of decoder layers, scaled by `global_parameter_scale`.",
@@ -4691,6 +4736,8 @@ class MaxTextConfig(
     self.num_kv_heads = (2**num_head_scale) * self.base_num_kv_heads
     self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
+    base_shared = self.base_shared_expert_mlp_dim
+    self.shared_expert_mlp_dim = (2**mlp_dim_scale) * (base_shared if base_shared > 0 else self.base_moe_mlp_dim)
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
@@ -4847,6 +4894,9 @@ class MaxTextConfig(
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routing",
+          "moe_router_logits",
+          "moe_dispatch",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -6371,6 +6421,10 @@ class RLConfig(
     self.num_kv_heads = int((2**num_head_scale) * self.base_num_kv_heads)
     self.mlp_dim = int((2**mlp_dim_scale) * self.base_mlp_dim)
     self.moe_mlp_dim = int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0))
+    base_shared = getattr(self, "base_shared_expert_mlp_dim", -1)
+    self.shared_expert_mlp_dim = int(
+        (2**mlp_dim_scale) * (base_shared if base_shared > 0 else getattr(self, "base_moe_mlp_dim", 0))
+    )
     self.num_decoder_layers = int((2**layer_scale) * self.base_num_decoder_layers)
 
     # Mirror into internal MaxText fields for backward compatibility.
@@ -6393,6 +6447,9 @@ class RLConfig(
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routing",
+          "moe_router_logits",
+          "moe_dispatch",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
