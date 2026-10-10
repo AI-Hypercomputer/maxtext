@@ -1578,6 +1578,7 @@ mhc_pallas_kernel_fwd_block_size: 256
 mhc_pallas_kernel_bwd_block_size: 128
 # Feature block size for backward pass of MHC Pallas kernel.
 mhc_pallas_kernel_bwd_feature_block_size: 1024
+mhc_split_axis_contraction: False
 
 ################################## DeepSeek Engram ##################################
 # Indices of transformer layers where Engram are integrated; leave empty [] to disable.
