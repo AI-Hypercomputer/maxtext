@@ -1490,6 +1490,10 @@ gdn_cp_mode: "auto"
 # ('highest' = 6 bf16 passes on TPU, 'high' = 3 passes). Only used with use_gdn_kernel: true and
 # sequence-sharded GDN CP (gdn_cp_mode 'seq', or 'auto' when it does not pick head sharding); a no-op otherwise.
 gdn_cp_matmul_precision: "highest"
+# Opt-in "less work" variants of the GDN Pallas kernel path (all default off; need use_gdn_kernel).
+gdn_kernel_cp_pass1_states_only: false # seq-CP pass 1 computes only the chunk recurrent states
+gdn_kernel_cp_pass2_reuse_t_inv: false # seq-CP pass 2 reuses pass-1 t_inv (skips Gram + serial inverse)
+gdn_kernel_cp_m_local_in_kernel: false # seq-CP pass 1 returns M_local from the kernel (no XLA transition tree); needs gdn_kernel_cp_pass1_states_only
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

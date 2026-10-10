@@ -1471,6 +1471,29 @@ class Qwen3Next(BaseModel):
           " HIGHEST) or with head-sharded context parallelism."
       ),
   )
+  gdn_kernel_cp_pass1_states_only: bool = Field(
+      False,
+      description=(
+          "GDN Pallas kernel, sequence-sharded CP only: pass 1 computes only the per-chunk recurrent states "
+          "(skips out / chunk_states). Bit-exact with the default."
+      ),
+  )
+  gdn_kernel_cp_pass2_reuse_t_inv: bool = Field(
+      False,
+      description=(
+          "GDN Pallas kernel, sequence-sharded CP only: pass 2 reuses the block-triangular inverse t_inv from "
+          "pass 1 instead of recomputing the Gram matrix and the serial inverse. Bit-exact with the default."
+      ),
+  )
+  gdn_kernel_cp_m_local_in_kernel: bool = Field(
+      False,
+      description=(
+          "GDN Pallas kernel, sequence-sharded CP only: pass 1 also returns the local state transition M_local by "
+          "carrying an identity block next to the recurrent state, replacing the XLA per-chunk transition tree "
+          "(compose_local_from_t_inv) and its K-slice conv1d. Requires gdn_kernel_cp_pass1_states_only=True. "
+          "M_local is computed with the kernel's bf16-operand arithmetic (not bit-exact with the default)."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
