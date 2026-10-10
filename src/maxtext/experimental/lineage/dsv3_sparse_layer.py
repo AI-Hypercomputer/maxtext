@@ -14,7 +14,7 @@
 
 """Single DeepSeekV3 sparse layer."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import dataclasses
 import functools
 import math
@@ -2585,6 +2585,13 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_outputs: Any,
     w_curr: dsv3_types.DSv3SparseLayerWeightsPytree,
     w_next: dsv3_types.DSv3SparseLayerWeightsPytree,
+    w_next_expert_grad_unreduced: dsv3_types.DSv3SparseLayerWeightsPytree,
+    reduce_ici_first_fn: Callable[
+        [dsv3_types.DSv3SparseLayerWeightsPytree],
+        dsv3_types.DSv3SparseLayerWeightsPytree,
+    ],
+    w_pending_grad_partial: dsv3_types.DSv3SparseLayerWeightsPytree | None,
+    reduce_ici_second_fn: Callable[..., tuple[ops.DeferredReduce, ops.DeferredReduce]],
     *,
     yarn_freqs: tuple[
         tuple[
@@ -2628,8 +2635,28 @@ def dsv3_sparse_layer_scan_body_bwd(
     Any,
     dsv3_types.DSv3SparseLayerWeightsPytree,
     dsv3_types.DSv3SparseLayerWeightsPytree,
+    dsv3_types.DSv3SparseLayerWeightsPytree | None,
 ]:
-  """Performs backward pass for DSv3 sparse layer scan body."""
+  """Performs backward pass for DSv3 sparse layer scan body.
+
+  Besides the layer's backward pass, it completes the gradient of `w_next`, the
+  next layer's weights: the mb0 MLA gradients computed in phase 2 are added to
+  `w_next_expert_grad_unreduced`, the rest of it, which is the second output of
+  the previous call. The completed gradient then goes through the first stage
+  of its ICI reduction, `reduce_ici_first_fn` (SparseCore 1), during phases 3
+  to 8, and the next call runs the second stage on it as its
+  `w_pending_grad_partial` with `reduce_ici_second_fn(..., defer=True)`
+  (SparseCore 0): the attention half in phase 5 and the MoE half in phase 7,
+  each in the same SparseCore block as the reduce-scatter of a microbatch's
+  token gradients, which it follows. Its input thus depends on none of that
+  call's compute.
+
+  Returns:
+    The gradient of the previous layer's outputs, the gradient of `w_curr`
+    without its mb0 MLA part (which the next call adds, see above), the
+    partially reduced gradient of `w_next`, and the ICI-reduced
+    `w_pending_grad_partial` (`None` if it is).
+  """
   quant_rule = quant.routed_experts if quant else None
   mla_rule = quant.mla if quant else None
   w_routed_q = None if quant_rule is None else _quantize_routed_weights(w_curr.moe.routed, quant_rule)
@@ -2691,7 +2718,11 @@ def dsv3_sparse_layer_scan_body_bwd(
 
   @jax.named_call
   @program_order(enforce=False)
-  def phase2(grad_outputs_mla_next_0_wait, grad_x_next_1):
+  def phase2(
+      grad_outputs_mla_next_0_wait,
+      grad_x_next_1,
+      w_next_expert_grad_unreduced,
+  ):
     """Phase 2: mb0 next layer mla backward; mb1 dispatch remat & combine transpose."""
     assert res.mb0.mla is not None
     grad_out_proj_out_next_0, grad_orig_x_next_0 = grad_outputs_mla_next_0_wait
@@ -2732,6 +2763,18 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_x_norm_next_0, grad_pre_attn_norm_scale_next_0 = vjp_pre_norm_next_0(grad_norm_x_next_0)
     grad_x_next_0 = grad_x_norm_next_0 + grad_orig_x_next_0
 
+    # Completes the next layer's gradient, whose other contributions come from
+    # its own backward step.
+    w_next_grad_unreduced = ops.combine_w_grads(
+        dsv3_types.DSv3SparseLayerWeightsPytree(
+            pre_attn_norm_scale=grad_pre_attn_norm_scale_next_0,
+            mla=grad_w_mla_next_0,
+            post_attn_norm_scale=None,
+            moe=dsv3_types.DSv3MoEWeightsPytree(),
+        ),
+        w_next_expert_grad_unreduced,
+    )
+
     x_ag_1, grad_y_ag_1 = dsv3_router.dsv3_aggregated_dispatches(
         _quantize_act(moe_in_curr_1, quant_rule),
         grad_x_next_1,
@@ -2740,12 +2783,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         mesh=mesh,
     )
     return (
-        (
-            grad_x_next_0,
-            grad_pre_attn_norm_scale_next_0,
-            grad_w_mla_next_0,
-            grad_yarn_freqs_next_0,
-        ),
+        (grad_x_next_0, w_next_grad_unreduced, grad_yarn_freqs_next_0),
         (x_ag_1, grad_y_ag_1),
     ), ()
 
@@ -2834,8 +2872,9 @@ def dsv3_sparse_layer_scan_body_bwd(
       grad_w_routed_1,
       bank_0,
       bank_offset_0,
+      w_pending_grad_partial,
   ):
-    """Phase 5: mb0 expert backward, accumulating onto mb1's routed weight gradients; mb1 dispatch transpose."""
+    """Phase 5: mb0 expert backward, accumulating onto mb1's routed weight gradients; mb1 dispatch transpose and attention weight reduction."""
     assert res.mb0.moe is not None
     assert res.mb1 is not None
     assert res.mb1.moe is not None
@@ -2882,10 +2921,17 @@ def dsv3_sparse_layer_scan_body_bwd(
         w_routed_q=w_routed_q,
     )
 
-    grad_moe_in_routed_1, grad_coeffs_1 = dsv3_router.dsv3_combine_with_coeff_grads(
+    # Runs the second ICI reduction stage (SparseCore 0) of the attention half
+    # of the weight gradient the previous call partially reduced, in the same
+    # SparseCore block as mb1's token gradient reduce-scatter, right after it.
+    # It then overlaps with mb0's expert backward and mb1's router backward
+    # from as soon as the reduce-scatter is done, instead of having to wait for
+    # a later phase to issue it.
+    grad_moe_in_routed_1, grad_coeffs_1, w_pending_grad_attention = dsv3_router.dsv3_combine_with_coeff_grads_and_reduce(
         grad_x_ag_1,
         grad_coeffs_ag_1,
         res.mb1.moe.router_metadata,
+        None if w_pending_grad_partial is None else reduce_ici_second_fn(w_pending_grad_partial, defer=True)[0],
         local_seq_length=local_seq_length,
         num_experts_per_tok=num_experts_per_tok,
         expert_axis_name=expert_axis_name,
@@ -2903,6 +2949,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         ),
         (grad_moe_in_routed_1, grad_coeffs_1),
         (bank_0, bank_offset_0),
+        w_pending_grad_attention,
     ), ()
 
   @jax.named_call
@@ -2951,8 +2998,9 @@ def dsv3_sparse_layer_scan_body_bwd(
       grad_x_ag_0,
       grad_sorted_coeffs_0,
       grad_mla_out_total_1,
+      w_pending_grad_partial,
   ):
-    """Phase 7: mb0 dispatch transpose; mb1 pre_norm and MLA backward."""
+    """Phase 7: mb0 dispatch transpose and MoE weight reduction; mb1 pre_norm and MLA backward."""
     assert res.mb1 is not None
     assert res.mb1.mla is not None
     assert res.mb0 is not None
@@ -2964,10 +3012,17 @@ def dsv3_sparse_layer_scan_body_bwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
     )
-    grad_moe_in_routed_0, grad_coeffs_0 = dsv3_router.dsv3_combine_with_coeff_grads(
+    # Runs the second ICI reduction stage (SparseCore 0) of the MoE half of the
+    # weight gradient the previous call partially reduced, in the same
+    # SparseCore block as mb0's token gradient reduce-scatter, right after it.
+    # It then overlaps with mb1's MLA backward from as soon as the
+    # reduce-scatter is done, instead of having to wait for a later phase to
+    # issue it.
+    grad_moe_in_routed_0, grad_coeffs_0, w_pending_grad_moe = dsv3_router.dsv3_combine_with_coeff_grads_and_reduce(
         grad_x_ag_0,
         grad_coeffs_ag_0,
         res.mb0.moe.router_metadata,
+        None if w_pending_grad_partial is None else reduce_ici_second_fn(w_pending_grad_partial, defer=True)[1],
         local_seq_length=local_seq_length,
         num_experts_per_tok=num_experts_per_tok,
         expert_axis_name=expert_axis_name,
@@ -3016,6 +3071,7 @@ def dsv3_sparse_layer_scan_body_bwd(
     return (
         (grad_moe_in_routed_0, grad_coeffs_0),
         (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_yarn_freqs_1),
+        w_pending_grad_moe,
     ), ()
 
   @jax.named_call
@@ -3066,6 +3122,8 @@ def dsv3_sparse_layer_scan_body_bwd(
       bank_offset_0,
       bank_1,
       bank_offset_1,
+      w_next_expert_grad_unreduced,
+      w_pending_grad_partial,
   ):
     (
         (
@@ -3078,14 +3136,13 @@ def dsv3_sparse_layer_scan_body_bwd(
     ) = phase1(grad_outputs_mla_next_0, grad_x_next_1)
 
     (
-        (
-            grad_x_next_0,
-            grad_pre_attn_norm_scale_next_0,
-            grad_w_mla_next_0,
-            grad_yarn_freqs_next_0,
-        ),
+        (grad_x_next_0, w_next_grad_unreduced, _),
         (x_ag_1, grad_y_ag_1),
-    ), _ = phase2(grad_outputs_mla_next_0_wait, grad_x_next_1_p1)
+    ), _ = phase2(
+        grad_outputs_mla_next_0_wait,
+        grad_x_next_1_p1,
+        w_next_expert_grad_unreduced,
+    )
 
     (
         (
@@ -3125,6 +3182,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         ),
         (grad_moe_in_routed_1, grad_coeffs_1),
         (bank_0, bank_offset_0),
+        w_pending_grad_attention,
     ), _ = phase5(
         x_ag_0,
         grad_y_ag_0,
@@ -3134,6 +3192,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         grad_w_routed_1,
         bank_0,
         bank_offset_0,
+        w_pending_grad_partial,
     )
 
     (
@@ -3162,11 +3221,13 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_mla_out_total_1 = grad_mla_out_unpermute_1 + grad_mla_out_norm_1
     (
         (grad_moe_in_routed_0, grad_coeffs_0),
-        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_yarn_freqs_1),
+        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, _),
+        w_pending_grad_moe,
     ), _ = phase7(
         grad_x_ag_0_w,
         grad_sorted_coeffs_0_w,
         grad_mla_out_total_1,
+        w_pending_grad_partial,
     )
 
     (
@@ -3182,9 +3243,8 @@ def dsv3_sparse_layer_scan_body_bwd(
 
     grad_mla_out_total_0 = grad_mla_out_unpermute_0_w + grad_mla_out_norm_0
 
-    grad_yarn_freqs = (grad_yarn_freqs_next_0, grad_yarn_freqs_1)
-
     return (
+        w_next_grad_unreduced,
         grad_mla_out_total_0,
         grad_mb1_wait,
         bank_0,
@@ -3193,7 +3253,6 @@ def dsv3_sparse_layer_scan_body_bwd(
         bank_offset_1,
         grad_pre_attn_norm_scale_1,
         grad_w_mla_1,
-        grad_yarn_freqs,
         grad_post_attn_norm_scale_0,
         grad_post_attn_norm_scale_1,
         grad_w_router_0,
@@ -3201,11 +3260,12 @@ def dsv3_sparse_layer_scan_body_bwd(
         grad_w_routed,
         grad_w_shared_0,
         grad_w_shared_1,
-        grad_pre_attn_norm_scale_next_0,
-        grad_w_mla_next_0,
+        w_pending_grad_attention,
+        w_pending_grad_moe,
     )
 
   (
+      w_next_grad_unreduced,
       grad_mla_out_total_0,
       grad_mb1_wait,
       bank_0,
@@ -3214,7 +3274,6 @@ def dsv3_sparse_layer_scan_body_bwd(
       bank_offset_1,
       grad_pre_attn_norm_scale_1,
       grad_w_mla_1,
-      _,
       grad_post_attn_norm_scale_0,
       grad_post_attn_norm_scale_1,
       grad_w_router_0,
@@ -3222,8 +3281,8 @@ def dsv3_sparse_layer_scan_body_bwd(
       grad_w_routed,
       grad_w_shared_0,
       grad_w_shared_1,
-      grad_pre_attn_norm_scale_next_0,
-      grad_w_mla_next_0,
+      w_pending_grad_attention,
+      w_pending_grad_moe,
   ) = _scan_body_bwd(
       grad_outputs_mla_next_0,
       grad_x_next_1,
@@ -3231,6 +3290,19 @@ def dsv3_sparse_layer_scan_body_bwd(
       bank_offset_0,
       bank_1,
       bank_offset_1,
+      w_next_expert_grad_unreduced,
+      w_pending_grad_partial,
+  )
+
+  # Runs the first ICI reduction stage of the next layer's weight gradient
+  # outside of `_scan_body_bwd`, whose `program_order` chain would only start
+  # it once phase 8 is done. It only depends on phase 2, so it can run during
+  # phases 3 to 8. Only the next call runs the second stage, so nothing here
+  # waits on it.
+  w_next_grad_partial = reduce_ici_first_fn(w_next_grad_unreduced)
+
+  w_pending_grad = (
+      None if w_pending_grad_partial is None else ops.combine_w_grads(w_pending_grad_attention, w_pending_grad_moe)
   )
 
   grad_outputs_mla_curr = (
@@ -3253,14 +3325,12 @@ def dsv3_sparse_layer_scan_body_bwd(
       ),
   )
 
-  grad_w_next = dsv3_types.DSv3SparseLayerWeightsPytree(
-      pre_attn_norm_scale=grad_pre_attn_norm_scale_next_0,
-      mla=grad_w_mla_next_0,
-      post_attn_norm_scale=None,
-      moe=dsv3_types.DSv3MoEWeightsPytree(),
+  return (
+      grad_outputs_mla_curr,
+      grad_w_curr,
+      w_next_grad_partial,
+      w_pending_grad,
   )
-
-  return grad_outputs_mla_curr, grad_w_curr, grad_w_next
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=tuple(range(6, 30)))
@@ -3701,6 +3771,17 @@ _SC1_KWARGS = dict(
     compute_type="tpu_sparsecore",
     compiler_options={"sparse_core_config": {"core_ids": [1]}},
 )
+_SC0_KWARGS = dict(
+    compute_type="tpu_sparsecore",
+    compiler_options={"sparse_core_config": {"core_ids": [0]}},
+)
+# Physical mesh axes of the first stage of the weight gradient ICI reduction
+# (`reduce_w_ici_sc1`); the second stage (`reduce_w_ici_sc0`) reduces along the
+# other ones. In production the weights are sharded along `core` and `z` and
+# replicated along `x` and `y`, so the first stage is mostly reduce-scatters
+# and the second one the all-reduces, which the pipelined layer scan hides
+# behind the next layer's backward pass.
+_SC1_REDUCE_AXES = frozenset({"core", "z"})
 
 
 def _w_ici_axes() -> dsv3_types.DSv3SparseLayerWeightsPytree:
@@ -3872,16 +3953,42 @@ def collect_w_ici(
   )
 
 
+def _split_w_attention_moe(
+    w: dsv3_types.DSv3SparseLayerWeightsPytree,
+) -> tuple[
+    dsv3_types.DSv3SparseLayerWeightsPytree,
+    dsv3_types.DSv3SparseLayerWeightsPytree,
+]:
+  """Splits `w` into its attention and MoE halves, `None` elsewhere.
+
+  The halves mirror `collect_w_ici(split=True)` and merge back with
+  `ops.combine_w_grads`.
+
+  Args:
+    w: Sparse layer weights or weight gradients.
+
+  Returns:
+    The attention half (`pre_attn_norm_scale` and `mla`) and the MoE half
+    (`post_attn_norm_scale` and `moe`) of `w`.
+  """
+  masked = jax.tree.map(lambda _: None, w)
+  attention = dataclasses.replace(masked, pre_attn_norm_scale=w.pre_attn_norm_scale, mla=w.mla)
+  moe = dataclasses.replace(masked, post_attn_norm_scale=w.post_attn_norm_scale, moe=w.moe)
+  return attention, moe
+
+
 @jt.jaxtyped(typechecker=typeguard.typechecked)
-def reduce_w_ici(
+def reduce_w_ici_sc1(
     grad_w: dsv3_types.DSv3SparseLayerWeightsPytree,
     like: dsv3_types.DSv3SparseLayerWeightsPytree,
     *,
     axis_mapping: Mapping[str, str | tuple[str, ...]],
 ) -> dsv3_types.DSv3SparseLayerWeightsPytree:
-  """Reduces sparse layer weight gradients across ICI mesh axes.
+  """Reduces sparse layer weight gradients along the `_SC1_REDUCE_AXES`.
 
-  The dual of `collect_w_ici(split=False)`.
+  The first stage of the dual of `collect_w_ici(split=False)`, on SparseCore 1.
+  The gradients stay unreduced along the other collected ICI axes until
+  `reduce_w_ici_sc0`.
 
   Args:
     grad_w: Gradients of the `collect_w_ici` outputs.
@@ -3889,6 +3996,57 @@ def reduce_w_ici(
     axis_mapping: Mapping from logical to physical mesh axes.
 
   Returns:
-    The reduced gradients, sharded like `like`.
+    The partially reduced gradients, sharded like `like` along the
+    `_SC1_REDUCE_AXES`.
   """
-  return ops.reduce_along_axis(grad_w, _w_ici_axes(), axis_mapping, like, **_SC1_KWARGS)
+  return ops.reduce_along_axis(
+      grad_w,
+      _w_ici_axes(),
+      axis_mapping,
+      like,
+      axes=_SC1_REDUCE_AXES,
+      **_SC1_KWARGS,
+  )
+
+
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def reduce_w_ici_sc0(
+    grad_w: dsv3_types.DSv3SparseLayerWeightsPytree,
+    like: dsv3_types.DSv3SparseLayerWeightsPytree,
+    *,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+    defer: bool = False,
+) -> dsv3_types.DSv3SparseLayerWeightsPytree | tuple[ops.DeferredReduce, ops.DeferredReduce]:
+  """Reduces sparse layer weight gradients along the remaining ICI axes.
+
+  The second stage of the dual of `collect_w_ici(split=False)`, on SparseCore 0:
+  `reduce_w_ici_sc0(reduce_w_ici_sc1(grad_w, like), like)` is that dual.
+
+  Args:
+    grad_w: Outputs of `reduce_w_ici_sc1`.
+    like: Weights with the shardings of the `collect_w_ici` inputs.
+    axis_mapping: Mapping from logical to physical mesh axes.
+    defer: Whether to return the reduction as a pair of `ops.DeferredReduce`s,
+      of the attention and the MoE weights (see `_split_w_attention_moe`), for
+      the caller to run in SparseCore 0 blocks it already has (e.g. after
+      reduce-scatters), instead of in one of this function's.
+
+  Returns:
+    The reduced gradients, sharded like `like`. The pair of `ops.DeferredReduce`
+    of their halves if `defer`, whose outputs merge with `ops.combine_w_grads`.
+  """
+  mesh = jax.typeof(jax.tree.leaves(like)[0]).sharding.mesh
+  axes = frozenset(mesh.axis_names) - _SC1_REDUCE_AXES
+  if not defer:
+    return ops.reduce_along_axis(grad_w, _w_ici_axes(), axis_mapping, like, axes=axes, **_SC0_KWARGS)
+  return tuple(
+      ops.reduce_along_axis(
+          grad_w_half,
+          _w_ici_axes(),
+          axis_mapping,
+          like_half,
+          axes=axes,
+          defer=True,
+      )
+      for grad_w_half, like_half in zip(_split_w_attention_moe(grad_w), _split_w_attention_moe(like))
+  )

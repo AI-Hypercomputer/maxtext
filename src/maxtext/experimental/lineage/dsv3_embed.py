@@ -245,6 +245,60 @@ def lm_head(
 
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
+def collect_head_kernel(
+    kernel: jt.Num[jax.Array, "D V"],
+    *,
+    dtype: jax.typing.DTypeLike,
+) -> jt.Num[jax.Array, "D V"]:
+  """All-gathers the LM head kernel, sharded on its embedding dim, explicitly.
+
+  Left to the SPMD partitioner, every use of the sharded kernel all-gathers it
+  and all-reduces its full `[emb, vocab]` cotangent. Collecting it once here
+  lets the main and MTP heads share one all-gather, and the backward pass sums
+  their cotangents before a single reduce-scatter onto the kernel shards.
+
+  Args:
+    kernel: Head kernel `[emb, vocab]`, sharded on its embedding dim only.
+    dtype: Dtype of the matmul; the kernel is cast to it before the gather.
+
+  Returns:
+    The kernel in `dtype`, replicated (`reduced`) over the mesh axes it was
+    sharded on and over a `dcn` axis.
+  """
+  spec = jax.typeof(kernel).sharding.spec
+  if len(spec) > 1 and spec[1] is not None:
+    raise ValueError(f"The vocab dim of the kernel must be replicated: {kernel}")
+  emb_axes = spec[0] if spec else None
+  emb_axes = (emb_axes,) if isinstance(emb_axes, str) else tuple(emb_axes or ())
+  mesh = jax.typeof(kernel).sharding.mesh
+  dcn_axes = tuple(ax for ax in ("dcn",) if ax in mesh.axis_names and ax not in emb_axes)
+  if not emb_axes and not dcn_axes:
+    return jnp.asarray(kernel, dtype)
+
+  def _gather(kernel_local):
+    kernel_local = jnp.asarray(kernel_local, dtype)
+    for ax in dcn_axes:
+      kernel_local = jax.lax.pcast(kernel_local, ax, to="reduced")
+    if not emb_axes:
+      return kernel_local
+    # Stack whole `[emb / shards, vocab]` shards on a new leading dim, so the
+    # transpose reduce-scatters whole shards: a tiled gather along the
+    # embedding dim (not tile-aligned per shard) is legalized into an
+    # all-reduce.
+    return jax.lax.all_gather(kernel_local, emb_axes, axis=0, to="reduced")
+
+  out_ndim = 2 if not emb_axes else 3
+  collected = jax.shard_map(
+      _gather,
+      mesh=mesh,
+      in_specs=(spec,),
+      out_specs=jax.sharding.PartitionSpec(*(None,) * out_ndim, reduced=frozenset(emb_axes + dcn_axes)),
+  )(kernel)
+  return collected.reshape(kernel.shape)
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
 def tied_lm_head(
     x: jt.Num[jax.Array, "*batch D"],
     table: jt.Num[jax.Array, "V D"],
