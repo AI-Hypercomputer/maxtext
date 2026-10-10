@@ -374,6 +374,36 @@ class YarnRotaryEmbeddingTest(unittest.TestCase):
     default_outputs = default_layer(inputs, position=position)
     np.testing.assert_allclose(outputs, default_outputs, atol=1e-5)
 
+  def test_direct_position_freqs_matches_indexing_the_table(self):
+    """`direct_position_freqs` computes the rows the table lookup would read, bit for bit.
+
+    Row `p` of `freqs_cis` is `exp(1j * p * inv_freqs)`, so for every in-range position
+    the direct computation and the table lookup agree exactly — `arange(max_position_embeddings)[p]`
+    is exactly `float(p)` for every representable position — on every rotation path.
+    """
+    inputs = jax.random.normal(jax.random.PRNGKey(0), (1, 128, 2, 64), dtype=jnp.float32)
+    for interleave, pairwise in ((True, False), (False, False), (True, True)):
+      table_layer, direct_layer = (
+          embeddings.YarnRotaryEmbedding(
+              embedding_dims=64,
+              mesh=self.mesh,
+              max_position_embeddings=163840,
+              original_max_position_embeddings=4096,
+              interleave=interleave,
+              pairwise=pairwise,
+              direct_position_freqs=direct,
+              fprop_dtype=jnp.float32,
+              rngs=self.rngs,
+          )
+          for direct in (False, True)
+      )
+      self.assertEqual(table_layer.freqs_cis.shape, (163840, 32))
+      # Sample the bottom, the middle and the very top of the table.
+      for lo in (0, 4096, 163840 - 128):
+        with self.subTest(interleave=interleave, pairwise=pairwise, lo=lo):
+          position = jnp.arange(lo, lo + 128, dtype=jnp.int32)[jnp.newaxis, :]
+          np.testing.assert_array_equal(direct_layer(inputs, position=position), table_layer(inputs, position=position))
+
   def test_pairwise_explicit_shard_mode_call(self):
     layer = embeddings.YarnRotaryEmbedding(
         embedding_dims=4,
