@@ -1668,6 +1668,13 @@ class Qwen3Next(BaseModel):
       64,
       description="Chunk size for the parallel scan algorithm in the Gated Delta Net.",
   )
+  gdn_chunk_impl: Literal["default", "fast"] = Field(
+      "default",
+      description=(
+          "Gated DeltaNet chunked delta-rule implementation. 'fast' replaces the per-chunk solve_triangular with a"
+          " recursive block inverse and runs the large matmuls with bf16 inputs and fp32 accumulation."
+      ),
+  )
   use_qk_norm_in_gdn: bool = Field(
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
