@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,29 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Defines the XpkClusterConfig dataclass.
+"""Backward-compatible re-export shim for benchmarks.ctk_configs."""
 
-This file is separated to prevent circular dependencies between modules that
-both need to reference cluster configuration details (e.g., maxtext_xpk_runner
-and disruption_manager).
-"""
-
-import dataclasses
-
-
-# This is needed to prevent circular imports.
-@dataclasses.dataclass
-class XpkClusterConfig:
-  """Holds details for an XPK cluster to run workloads on.
-
-  Attributes:
-    cluster_name: The name of the GKE cluster.
-    project: The Google Cloud project where the cluster is located.
-    zone: The zone where the cluster is located.
-    device_type: The type of TPU device in the cluster (e.g., 'v5litepod-256').
-  """
-
-  cluster_name: str
-  project: str
-  zone: str
-  device_type: str
+# pylint: disable=unused-import,wildcard-import,unused-wildcard-import
+from benchmarks.ctk_configs import *  # noqa: F401,F403
+from benchmarks.ctk_configs import ClusterConfig, XpkClusterConfig
