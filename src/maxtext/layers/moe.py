@@ -1403,7 +1403,31 @@ class RoutedMoE(nnx.Module):
           local_num_experts,
           axis=0,
       )
-      local_overflow = (jnp.sum(local_group_size) > buffer_size).astype(jnp.int32)
+      local_tokens = jnp.sum(local_group_size)
+      local_overflow = (local_tokens > buffer_size).astype(jnp.int32)
+      required_rbf = local_tokens.astype(jnp.float32) / jnp.float32(balanced_size)
+
+      def _log_overflow(s_idx, actual, cap, req_rbf):
+        jax.debug.print(
+            "⚠️ [MoE Buffer Overflow] EP shard {}: required RBF was {:.2f} (exceeds buffer factor {:.1f})! Tokens received: {} > buffer capacity: {} | Dropped tokens: {}",
+            s_idx,
+            req_rbf,
+            self.config.ragged_buffer_factor,
+            actual,
+            cap,
+            actual - cap,
+        )
+
+      jax.lax.cond(
+          local_overflow > 0,
+          _log_overflow,
+          lambda s, a, c, r: None,
+          shard_idx,
+          local_tokens,
+          buffer_size,
+          required_rbf,
+      )
+
       # Clamp local_group_size to buffer_size to ensure we don't exceed buffer
       # capacity by leveraging the helper _truncate_matrix.
       local_group_size = _truncate_matrix(local_group_size[:, None], buffer_size)[:, 0]
