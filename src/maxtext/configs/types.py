@@ -30,7 +30,7 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -1944,6 +1944,23 @@ class LayoutAndSharding(BaseModel):
           "(docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels, their initialization "
           "and the arithmetic are untouched, so gradients are bit-identical to the default rule. No effect under "
           "shard_mode=auto, where XLA folds the transpose itself, or on quantized layers."
+      ),
+  )
+  save_fsdp_gathered_weights: bool = Field(
+      False,
+      description=(
+          "Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the "
+          "gathered value as a remat residual so the backward pass reads it instead of re-gathering. Mode-neutral: "
+          "auto and explicit get the same answer to within half a point. Whether it is a win depends on how much of "
+          "the backward pass is FSDP all-gather rather than activation traffic, so it has a sign condition: measured "
+          "on v5p with the production SparseCore libtpu flags it is worth -3% to -8% at up to 2,048 tokens per "
+          "device-step (mixtral-8x7b -8.3%, llama2-7b -5.2%, qwen3-8b -4.7%, and -6.3% at base_emb_dim 4096), but it "
+          "costs +0.5% to +1.0% above ~4,096 tokens per device-step and regresses the gemma2/gemma3 family at any "
+          "size, whose 256K-vocab logits dominate the step. See "
+          "docs/guides/optimization/shard_mode_performance.md section 4.11 for the full table and the rule. Off by "
+          "default for that reason and because the residuals grow HLO temporaries by 25%-75% (deepseek2-16b runs "
+          "without it and OOMs with it); measure both step time and peak HBM before enabling. Numerics are "
+          "unchanged -- only kernels are touched, and every consumer already casts them to config.dtype."
       ),
   )
   internal_compile: bool = Field(
@@ -4493,6 +4510,25 @@ class MaxTextConfig(
     """
     if self.dense_weight_grad_in_kernel_order is None:
       self.dense_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT
+    return self
+
+  @model_validator(mode="after")
+  def validate_save_fsdp_gathered_weights(self) -> "MaxTextConfig":
+    """Reject the three configurations the gathered-weight residual cannot serve."""
+    if self.save_fsdp_gathered_weights and self.quantization:
+      raise ValueError("save_fsdp_gathered_weights casts kernels to config.dtype, which is not valid when quantizing.")
+    if self.save_fsdp_gathered_weights and is_fp8_dtype(self.weight_dtype):
+      # Weight-only fp8 leaves `quantization` unset, so the check above misses it. The hoisted
+      # gather casts to config.dtype, which would upcast the kernel before the all-gather -- the
+      # opposite of what fp8 weights are for -- and separate it from its kernel_scale.
+      raise ValueError(
+          "save_fsdp_gathered_weights casts kernels to config.dtype, which discards the fp8 encoding "
+          f"of weight_dtype={self.weight_dtype}."
+      )
+    if self.save_fsdp_gathered_weights and self.parameter_memory_host_offload:
+      raise ValueError(
+          "save_fsdp_gathered_weights keeps gathered kernels in HBM, which defeats parameter_memory_host_offload."
+      )
     return self
 
   @model_validator(mode="after")
