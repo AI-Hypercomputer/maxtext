@@ -477,6 +477,7 @@ class NNXDecoder(nnx.Module):
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=config.parameter_memory_host_offload,
           weight_quant=quantizations.get_weight_quant_config(config, "logits_dense"),
+          weight_grad_in_kernel_order=config.lm_head_weight_grad_in_kernel_order,
           rngs=rngs,
       )
 
