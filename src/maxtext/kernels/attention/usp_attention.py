@@ -19,21 +19,14 @@ from typing import Any
 
 import jax
 
-from maxtext.common.common_types import AttentionType, MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.kernels.attention import ulysses_attention
 from maxtext.utils import sharding
 
 
-def is_context_parallel_usp_requested(
-    config: Any, attention_type: AttentionType | None = None
-) -> bool:
+def is_context_parallel_usp_requested(config: Any) -> bool:
   """Returns True when the config requests USP context parallelism."""
-  if (
-      attention_type == AttentionType.LOCAL_SLIDING
-      and getattr(config, "local_context_parallel_strategy", "")
-  ):
-    return False
   return config.context_parallel_strategy == "usp"
 
 

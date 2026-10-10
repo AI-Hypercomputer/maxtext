@@ -4866,10 +4866,11 @@ class MaxTextConfig(
     if local_context_parallel_strategy not in ("", "all_gather", "halo"):
       raise ValueError("local_context_parallel_strategy must be one of '', 'all_gather', or 'halo'.")
     self.local_context_parallel_strategy = local_context_parallel_strategy
-    if local_context_parallel_strategy == "halo" and (
-        self.sliding_window_size is None or self.sliding_window_size <= 0
-    ):
-      raise ValueError("Halo context parallelism requires sliding_window_size > 0.")
+    if local_context_parallel_strategy == "halo":
+      if self.sliding_window_size is None or self.sliding_window_size <= 0:
+        raise ValueError("Halo context parallelism requires sliding_window_size > 0.")
+      if not self.use_tokamax_splash:
+        raise ValueError("Halo context parallelism requires use_tokamax_splash=True.")
     if (
         context_parallel_strategy == "ring"
         and "gpu" not in self.hardware
@@ -4986,6 +4987,9 @@ class MaxTextConfig(
             "TPU Ulysses attention requires num_query_heads "
             f"({self.num_query_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
+      # With a local_context_parallel_strategy override, Ulysses only runs on the global
+      # layers, so the head-divisibility constraint applies to their KV head count
+      # (global_num_kv_heads, when the model distinguishes it) rather than num_kv_heads.
       ulysses_num_kv_heads = (
           self.global_num_kv_heads
           if self.global_num_kv_heads > 0 and local_context_parallel_strategy

@@ -19,19 +19,12 @@ from typing import Any
 
 import jax
 
-from maxtext.common.common_types import AttentionType, MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.utils import sharding
 
 
-def is_context_parallel_ulysses_requested(
-    config: Any, attention_type: AttentionType | None = None
-) -> bool:
+def is_context_parallel_ulysses_requested(config: Any) -> bool:
   """Returns True when the config requests Ulysses context parallelism."""
-  if (
-      attention_type == AttentionType.LOCAL_SLIDING
-      and getattr(config, "local_context_parallel_strategy", "")
-  ):
-    return False
   return config.context_parallel_strategy == "ulysses"
 
 
