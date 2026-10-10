@@ -707,7 +707,10 @@ class RoutedMoE(nnx.Module):
     else:
       self._tensor_parallelism_name = "tensor"
 
-    if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and self.config.enable_dp_attention:
+    if (
+        self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx")
+        and self.config.enable_dp_attention
+    ):
       self._expert_parallelism_name = "attn_dp_expert"
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
@@ -739,7 +742,9 @@ class RoutedMoE(nnx.Module):
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
-        score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") else self.config.routed_score_func,
+        score_func=""
+        if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx")
+        else self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
@@ -4010,6 +4015,23 @@ class RoutedMoE(nnx.Module):
       rule = quantizations.get_fused_moe_rule()
       quantized_w1, w1_scale = quantizations.quantize_weight_for_fused_moe(fused_kernel, rule)
       quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
+    num_valid_tokens = None
+    if getattr(tpu_inference_envs, "TPU_MOE_SKIP_PADDED_TOKENS", False) or getattr(
+        tpu_inference_envs, "MOE_ROUTE_PADDING_TO_EXPERT0", False
+    ):
+      try:
+        from vllm.forward_context import get_forward_context  # pylint: disable=import-outside-toplevel
+
+        fc = get_forward_context()
+        am = fc.attn_metadata
+        if isinstance(am, dict):
+          am = next(iter(am.values()))
+        qsl = getattr(am, "query_start_loc", None)
+        if qsl is not None:
+          num_valid_tokens = qsl[-1]
+      except Exception:  # pylint: disable=broad-except
+        pass
+
     fused_moe = quantizations.without_qwix_interception(fused_moe_func)
 
     output_2d = fused_moe(
@@ -4039,6 +4061,7 @@ class RoutedMoE(nnx.Module):
         use_gmm_fused_rs_kernel=tpu_inference_envs.USE_GMM_FUSED_RS_KERNEL,
         onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
         moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
+        num_valid_tokens=num_valid_tokens,
         scatter_results=(
             getattr(self, "mesh", None) is not None
             and (
@@ -4225,7 +4248,9 @@ class RoutedMoE(nnx.Module):
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and not self.is_hash_routing
+    is_fused_moe_path = (
+        cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and not self.is_hash_routing
+    )
 
     native_gmm = (
         isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
