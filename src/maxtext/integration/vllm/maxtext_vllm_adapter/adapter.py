@@ -563,7 +563,7 @@ def patch_kv_cache_manager():
       from tpu_inference.layers.common.sharding import ShardingAxisName
       from tpu_inference import utils as common_utils
 
-      tp_axis_name = ShardingAxisName.ATTN_HEAD
+      tp_axis_name = getattr(ShardingAxisName, "KV_HEAD", ShardingAxisName.ATTN_HEAD)
       model_cnt = common_utils.get_mesh_shape_product(self.runner.mesh, tp_axis_name)
 
       model_config = self.runner.model_config
@@ -635,8 +635,8 @@ def patch_kv_cache_manager():
 
     if decoder_block_str in ("qwen3_next", "qwen3_5"):
       for i in range(cfg.base_num_decoder_layers):
+        layer_name = f"layer.{i}"
         if (i + 1) % interval != 0:
-          layer_name = f"layer.{i}"
           if layer_name in kv_cache_spec:
             kv_cache_spec[layer_name] = MambaSpec(
                 block_size=kv_cache_spec[layer_name].block_size,
@@ -645,6 +645,13 @@ def patch_kv_cache_manager():
                 page_size_padded=self._hybrid_uniform_page_size_bytes,
                 mamba_cache_mode=mamba_cache_mode,
             )
+        elif layer_name in kv_cache_spec:
+          kv_cache_spec[layer_name] = self._create_attention_spec(
+              kv_cache_spec[layer_name].block_size,
+              num_kv_heads,
+              head_size,
+              sliding_window=getattr(kv_cache_spec[layer_name], "sliding_window", None),
+          )
 
     return kv_cache_spec
 
