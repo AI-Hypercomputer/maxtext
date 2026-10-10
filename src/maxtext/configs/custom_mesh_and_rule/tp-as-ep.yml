@@ -1,0 +1,95 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This rule uses data, stage, FSDP, context, tensor, and expert. Tensor axis acts as tensor
+# parallelism in attention and dense layers, and as expert parallelism in the core routed MoE part
+# (between EP all2all). Routed experts are not sharded on their hidden (mlp) dimension, which
+# removes tensor-axis collectives from expert-expanded activations.
+#
+# At the MoE boundary (`activation_norm_length_routed` / `activation_embed_routed`), tokens are split over
+# the tensor axis on the sequence dimension so each expert x tensor shard dispatches distinct tokens. Requires sparse_matmul, no mlp_bias, and
+# num_experts divisible by expert x tensor parallelism.
+mesh_axes: ['data', 'stage', 'fsdp', 'context', 'tensor', 'expert']
+data_sharding: [['data', 'stage', 'fsdp', 'context', 'tensor', 'expert']]
+logical_axis_rules: [
+                      # ==========================================
+                      # Vocabulary Embedding
+                      # ==========================================
+                      # Vocab Activations
+                      ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'expert']],
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'context', 'expert']],
+                      ['activation_vocab', ['tensor']],
+                      # Vocab Weights
+                      ['vocab', ['tensor']],
+                      ['embed_vocab', ['fsdp', 'context', 'expert']],
+                      # ==========================================
+                      # Attention
+                      # ==========================================
+                      # Attention Activations
+                      ['activation_batch_attn', ['data', 'fsdp', 'expert']],
+                      ['activation_input_length_attn', ['context']],
+                      ['activation_heads', ['tensor']],
+                      ['activation_kv_heads', ['tensor']],
+                      ['activation_length_attn', ['context']],
+                      ['activation_q_length', ['context']],
+                      ['activation_embed_attn', ['tensor']],
+                      ['activation_kv', ['tensor']],
+                      ['activation_kv_batch', ['data', 'fsdp', 'expert']],
+                      ['activation_kv_head_dim', ['tensor']],
+                      # Attention Weights
+                      ['heads', ['tensor']],
+                      ['q_heads', ['tensor']],
+                      ['kv_heads', ['tensor']],
+                      ['q_lora', ['fsdp', 'context', 'expert']],
+                      ['kv_lora', ['fsdp', 'context', 'expert']],
+                      ['embed_attn', ['fsdp', 'context', 'expert']],
+                      ['cache_heads', ['tensor']],
+                      ['paged_kv_heads', ['tensor']],
+                      # ==========================================
+                      # Mixture of Experts (MoE)
+                      # ==========================================
+                      # MoE Activations
+                      ['activation_batch_moe', ['data', 'fsdp', 'expert']],
+                      # MoE boundary: tensor joins the sequence split so each expert x tensor shard owns distinct
+                      # tokens, and the embed dim is whole (the residual keeps its TP layout outside the MoE).
+                      ['activation_norm_length_routed', ['context', 'tensor']],
+                      ['activation_embed_routed', []],
+                      ['activation_exp', ['expert', 'tensor']],
+                      # MoE Weights
+                      # Axis order must match _expert_parallelism_name in moe.py.
+                      ['exp', ['expert', 'tensor']],
+                      ['mlp_moe', []],
+                      ['mlp_no_fsdp', []],
+                      ['embed_moe', ['fsdp', 'context']],
+                      ['embed_router', ['fsdp', 'context']],
+                      ['exp_with_fsdp', 'fsdp'],
+                      # ==========================================
+                      # Standard MLP / Dense Layers / Model Structure
+                      # ==========================================
+                      # Dense Activations
+                      ['segment_ids_batch', ['data', 'fsdp', 'expert']],
+                      ['activation_batch', ['data', 'fsdp', 'expert']],
+                      ['activation_length', ['context']],
+                      ['activation_norm_length', ['context']],
+                      ['activation_embed', ['tensor']],
+                      ['activation_mlp', ['tensor']],
+                      ['activation_stage', 'stage'],
+                      # General Weights
+                      ['mlp', ['tensor']],
+                      ['gdn_head', ['tensor']],
+                      ['embed', ['fsdp', 'context', 'expert']],
+                      ['norm', ['tensor']],
+                      ['layers', 'stage'],
+                      ['engram_dim', ['tensor']],
+                  ]
