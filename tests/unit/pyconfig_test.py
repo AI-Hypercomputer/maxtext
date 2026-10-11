@@ -440,6 +440,144 @@ class PyconfigTest(unittest.TestCase):
     self.assertFalse(resolve(shard_mode="explicit", dense_weight_grad_in_kernel_order=False))
     self.assertTrue(resolve(shard_mode="auto", dense_weight_grad_in_kernel_order=True))
 
+  def test_lm_head_vocab_parallel_default(self):
+    """Off by default; set to None, on where the head can be turned sideways at all."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          **kwargs,
+      ).lm_head_vocab_parallel
+
+    # Opt-in for now: left at its shipped default, the flag is off in both modes.
+    self.assertFalse(resolve(shard_mode="explicit"))
+    self.assertFalse(resolve(shard_mode="auto"))
+    # None means "on wherever it applies". A layout fix rather than a shard_mode feature: auto
+    # reaches the same layout and the same speedup, so what None resolves to does not depend on the mode.
+    unset = {"lm_head_vocab_parallel": None}
+    self.assertTrue(resolve(shard_mode="explicit", **unset))
+    self.assertTrue(resolve(shard_mode="auto", **unset))
+    # A tied head is the embedding table, already sharded on vocab.
+    self.assertFalse(resolve(shard_mode="explicit", logits_via_embedding=True, **unset))
+    self.assertFalse(resolve(shard_mode="auto", logits_via_embedding=True, **unset))
+    # MTP reshards the logits back to batch-sharded, and vocab tiling already chunks vocab.
+    self.assertFalse(resolve(shard_mode="explicit", model_name="deepseek3-test", mtp_num_layers=1, **unset))
+    self.assertFalse(resolve(shard_mode="explicit", num_vocab_tiling=2, **unset))
+    # Block diffusion's logits paths have not been validated with vocab-sharded logits. The rest
+    # of the dict is what the block-diffusion objective itself requires.
+    block_diffusion = {
+        "training_objective": "block_diffusion",
+        "attention_type": "block_diffusion",
+        "attention": "dot_product",
+        "block_diffusion_mask_id": 0,
+        "packing": False,
+        "dataset_type": "hf",
+        "hf_path": "parquet",
+    }
+    self.assertFalse(resolve(shard_mode="explicit", **block_diffusion, **unset))
+    self.assertFalse(resolve(shard_mode="auto", **block_diffusion, **unset))
+    # Writing it out still wins over the default, in both directions and both modes.
+    self.assertFalse(resolve(shard_mode="explicit", lm_head_vocab_parallel=False))
+    self.assertFalse(resolve(shard_mode="auto", lm_head_vocab_parallel=False))
+    self.assertTrue(resolve(shard_mode="explicit", lm_head_vocab_parallel=True))
+    self.assertTrue(resolve(shard_mode="auto", lm_head_vocab_parallel=True))
+    # But asking for it where the logits' layout is spoken for is an error, not a silent no-op.
+    for kwargs in (
+        {"logits_via_embedding": True},
+        {"model_name": "deepseek3-test", "mtp_num_layers": 1},
+        {"num_vocab_tiling": 2},
+        block_diffusion,
+    ):
+      with self.subTest(**kwargs), self.assertRaisesRegex(Exception, "lm_head_vocab_parallel needs an untied LM head"):
+        resolve(shard_mode="explicit", lm_head_vocab_parallel=True, **kwargs)
+    with self.assertRaisesRegex(Exception, "training_objective: block_diffusion"):
+      resolve(shard_mode="auto", lm_head_vocab_parallel=True, **block_diffusion)
+
+  def test_lm_head_vocab_parallel_default_stays_in_the_measured_setting(self):
+    """None turns the head sideways only with the default rule set and no expert or context parallelism."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          compile_topology="v6e-4",
+          compile_topology_num_slices=1,
+          **{"lm_head_vocab_parallel": None, **kwargs},
+      ).lm_head_vocab_parallel
+
+    self.assertTrue(resolve())
+    # A custom rule set brings its own batch and length rules, which the injected ones can collide with.
+    self.assertFalse(resolve(custom_mesh_and_rule="pure-fsdp"))
+    # The rotated kernel is replicated over expert and context, which the default embed_vocab rule shards.
+    self.assertFalse(resolve(ici_fsdp_parallelism=2, ici_expert_parallelism=2))
+    self.assertFalse(resolve(ici_fsdp_parallelism=2, ici_context_parallelism=2))
+    # Asking for it explicitly still applies it there.
+    self.assertTrue(resolve(custom_mesh_and_rule="pure-fsdp", lm_head_vocab_parallel=True))
+    self.assertTrue(resolve(ici_fsdp_parallelism=2, ici_expert_parallelism=2, lm_head_vocab_parallel=True))
+
+  def test_lm_head_vocab_parallel_needs_a_divisible_vocab(self):
+    """The rotated head adds the FSDP axes to the vocab split, which not every vocab size survives."""
+
+    def resolve(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          compile_topology="v6e-4",
+          compile_topology_num_slices=1,
+          **kwargs,
+      ).lm_head_vocab_parallel
+
+    # olmo3's vocab size. The default orientation leaves it whole here, since the tensor axes
+    # this mesh has are all 1; the rotated one asks the four-way fsdp axis to split it.
+    self.assertFalse(resolve(vocab_size=100278, lm_head_vocab_parallel=None))
+    self.assertTrue(resolve(vocab_size=100352, lm_head_vocab_parallel=None))
+    # Asking for it anyway is an error rather than a silent fallback.
+    with self.assertRaisesRegex(Exception, "does not divide vocab_size 100278"):
+      resolve(vocab_size=100278, lm_head_vocab_parallel=True)
+
+  def test_lm_head_vocab_parallel_injects_its_rules(self):
+    """The four rules the sideways head needs are added to a rule set that lacks them, and only then."""
+    expected = {
+        "activation_embed_and_logits_batch_no_fsdp": ["data", "stage", "expert"],
+        "activation_vocab_fsdp": ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"],
+        "vocab_fsdp": ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"],
+        "embed_vocab_replicated": [],
+    }
+
+    def rules_of(**kwargs):
+      config = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_mode="explicit",
+          **kwargs,
+      )
+      return [(rule[0], list(rule[1])) for rule in config.logical_axis_rules]
+
+    # A rule set that predates the flag: only the axes the default orientation needs. It has to
+    # replace base.yml's wholesale, the way a custom mesh-and-rule file does, or the four would
+    # merely be inherited.
+    predates_flag = {
+        "override_logical_axis_rules": True,
+        "logical_axis_rules": [
+            ["activation_embed_and_logits_batch", ["data", "stage", "fsdp", "expert"]],
+            ["activation_length", []],
+            ["activation_embed", []],
+            ["activation_vocab", ["tensor", "tensor_sequence"]],
+            ["embed_vocab", ["fsdp"]],
+            ["vocab", ["tensor", "tensor_sequence", "autoregressive"]],
+        ],
+    }
+    # base.yml already carries all four, so there the validator must be a no-op.
+    for rules in (rules_of(lm_head_vocab_parallel=True, **predates_flag), rules_of(lm_head_vocab_parallel=True)):
+      for name, axes in expected.items():
+        self.assertEqual([r for r in rules if r[0] == name], [(name, axes)])
+    # Off, nothing is added -- whether written out or left at the shipped default.
+    for off in (rules_of(lm_head_vocab_parallel=False, **predates_flag), rules_of(**predates_flag)):
+      self.assertNotIn("vocab_fsdp", [r[0] for r in off])
+
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
     self.assertEqual(resolve_config_path(__file__), __file__)

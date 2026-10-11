@@ -30,7 +30,7 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, get_weight_dtype, is_fp8_dtype
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -739,6 +739,20 @@ class LogitsAndLoss(BaseModel):
           "axis order. Recovers the weight-gradient reduce-scatter that shard_mode=explicit otherwise loses, "
           "leaving the stored kernel, its initialization and the arithmetic untouched. No effect under "
           "shard_mode=auto. None means on for an untied model under shard_mode=explicit and off everywhere else."
+      ),
+  )
+  lm_head_vocab_parallel: bool | None = Field(
+      False,
+      description=(
+          "Shard the untied LM head on its vocab dimension instead of its embed dimension, so that the per-step "
+          "FSDP all-gather of the head kernel and the reduce-scatter of its gradient move onto the hidden state "
+          "-- vocab_size/(batch*length) times less traffic -- and the weight gradient needs no collective at all. The "
+          "logits come out vocab-sharded, so the loss builds its one-hot targets against a vocab-sharded iota "
+          "rather than gathering them. Arithmetic is unchanged; the stored kernel's sharding is not. This is a "
+          "layout fix rather than a shard_mode feature -- auto reaches the same layout and the same speedup -- so "
+          "None means on under either shard_mode wherever it applies: an untied head, without MTP, vocab tiling "
+          "or training_objective=block_diffusion, and only with the default rule set and no expert or context "
+          "parallelism, the setting it was measured on. Defaults to False for now, so it is opt-in."
       ),
   )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
@@ -1746,6 +1760,13 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     # Vocab Weights
     ["vocab", ["tensor", "tensor_sequence", "autoregressive"]],
     ["embed_vocab", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    # The four rules below are only used when lm_head_vocab_parallel is on; they rotate the
+    # untied LM head off its embed dimension and onto its vocab dimension, so the FSDP axes
+    # gather the hidden state (batch x length x embed) instead of the kernel (embed x vocab).
+    ["activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]],
+    ["activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]],
+    ["vocab_fsdp", ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"]],
+    ["embed_vocab_replicated", []],
     # ==========================================
     # Attention
     # ==========================================
@@ -3949,8 +3970,8 @@ def _resolve_parallelism(configured: list[int] | None, axis_map: dict[str, int],
   return [axis_map.get(axis, 1) for axis in mesh_axes]
 
 
-def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
-  """Combined size of the fsdp mesh axes, resolving a `-1` the way mesh creation will.
+def _resolved_axis_product(axes, mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
+  """Combined size of `axes`, resolving a `-1` the way mesh creation will.
 
   `maxtext_utils.fill_unspecified_mesh_axes` hands the single -1 entry whatever devices the
   other axes leave over, so config validation has to do the same to see the sizes a run will
@@ -3960,7 +3981,12 @@ def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_device
   specified = prod(size for size in parallelism if size != -1)
   leftover = num_devices // specified if specified > 0 and num_devices > 0 and num_devices % specified == 0 else 1
   sizes = {axis: leftover if size == -1 else size for axis, size in zip(mesh_axes, parallelism)}
-  return max(sizes.get("fsdp", 1), 1) * max(sizes.get("fsdp_transpose", 1), 1)
+  return prod(max(sizes.get(axis, 1), 1) for axis in axes)
+
+
+def _resolved_fsdp_size(mesh_axes: list[str], parallelism: list[int], num_devices: int) -> int:
+  """Combined size of the fsdp mesh axes."""
+  return _resolved_axis_product(("fsdp", "fsdp_transpose"), mesh_axes, parallelism, num_devices)
 
 
 # ----------------------------------------------------------------------------
@@ -6192,6 +6218,123 @@ class MaxTextConfig(
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
     return self
+
+  @model_validator(mode="after")
+  def resolve_lm_head_vocab_parallel(self) -> "MaxTextConfig":
+    """Resolve the tri-state flag and make sure the rules it needs are in scope.
+
+    Runs last so that it sees the final `logical_axis_rules`: a custom mesh-and-rule
+    file replaces the list wholesale, and the pipelining path rewrites entries in it.
+    The four rules the vocab-parallel head needs are appended if they are missing,
+    which keeps the flag usable with a custom rule set without asking every such file
+    to carry them.
+
+    The head is turned sideways only where that is both useful and expressible:
+      - an untied head, since a tied one is the embedding table and is already
+        sharded on vocab.
+      - no MTP, which reshards its logits straight back to batch-sharded, and no
+        vocab tiling, which already chunks the vocab dimension itself.
+      - not the block-diffusion objective, whose logits paths have not been validated with
+        vocab-sharded logits: the shifted-alignment gather in its pre-training loss
+        (train.py), and Tunix's diffusion loss in SFT (integration/tunix/diffusion_sft.py),
+        which skips the batch-sharded reshard the Tunix adapter gives other losses.
+      - a vocab dimension the rotated head's axes divide evenly. The default orientation
+        only splits vocab over the tensor axes, so a mesh that adds FSDP to that split can
+        make an otherwise fine vocab size indivisible (olmo3's 100278 over fsdp 4, say).
+      - an unquantized head. A weight-only fp8 head carries a block-scale grid whose axes
+        are inherited from the kernel's, so rotating the kernel rotates the scale grid with
+        it onto a vocab extent of `vocab_size // block_size` -- a different divisibility
+        question from the one checked below, and one nothing here has measured.
+
+    Left unset (`None`) it also stays off outside the setting it was measured on: under a
+    custom mesh-and-rule file, and with expert or context parallelism (see
+    `_vocab_parallel_head_default_applies`). An explicit True still applies it there.
+
+    Unlike the two kernel-order flags, this one is not about `shard_mode` at all: it is a
+    layout fix, and `auto` reaches the same layout and the same speedup when asked to. So
+    `None` resolves to on in **both** modes, although the field itself still defaults to
+    `False` (opt-in). Under explicit the orientation is a guarantee and under auto it is a
+    request that GSPMD has honoured on every model measured; the fallback if it ever does
+    not is the default orientation, i.e. today's behaviour.
+    """
+    head_is_fp8 = is_fp8_dtype(get_weight_dtype(self, "logits_dense"))
+    applicable = (
+        not self.logits_via_embedding
+        and self.mtp_num_layers == 0
+        and self.num_vocab_tiling <= 1
+        and self.training_objective != "block_diffusion"
+        and not head_is_fp8
+    )
+    if self.lm_head_vocab_parallel and not applicable:
+      raise ValueError(
+          "lm_head_vocab_parallel needs an untied LM head (logits_via_embedding: False) with neither MTP "
+          f"(mtp_num_layers: {self.mtp_num_layers}) nor vocab tiling (num_vocab_tiling: {self.num_vocab_tiling}) "
+          f"nor block diffusion (training_objective: {self.training_objective}) "
+          f"nor fp8 weights on the head (weight_dtype: {self.weight_dtype}; add 'logits_dense' to "
+          "unquantized_modules to keep the head in compute precision)."
+      )
+    shards = self._vocab_parallel_head_shards()
+    if applicable and self.vocab_size % shards:
+      if self.lm_head_vocab_parallel:
+        raise ValueError(
+            f"lm_head_vocab_parallel splits the LM head's vocab dimension {shards} ways, which does not "
+            f"divide vocab_size {self.vocab_size}. Leave the flag unset to fall back to the default "
+            "orientation, or pick a mesh whose tensor and fsdp axes divide the vocab size."
+        )
+      applicable = False
+    if self.lm_head_vocab_parallel is None:
+      self.lm_head_vocab_parallel = applicable and self._vocab_parallel_head_default_applies()
+    if self.lm_head_vocab_parallel:
+      named = {rule[0] for rule in self.logical_axis_rules if rule}
+      mesh_axes = set(self.mesh_axes)
+      for name, axes in _VOCAB_PARALLEL_LM_HEAD_RULES:
+        if name not in named:
+          # A custom mesh-and-rule file brings its own, usually much shorter, `mesh_axes`, and
+          # a spec naming an axis that mesh does not have raises when it reaches the mesh.
+          self.logical_axis_rules.append([name, [axis for axis in axes if axis in mesh_axes]])
+    return self
+
+  def _vocab_parallel_head_shards(self) -> int:
+    """How many ways the rotated LM head would split its vocab dimension."""
+    rules = {rule[0]: rule[1] for rule in self.logical_axis_rules if rule}
+    axes = rules.get("vocab_fsdp", dict(_VOCAB_PARALLEL_LM_HEAD_RULES)["vocab_fsdp"])
+    axes = [axes] if isinstance(axes, str) else axes
+    ici_devices = self.num_target_devices // max(self.num_slices, 1)
+    return _resolved_axis_product(axes, self.mesh_axes, self.ici_parallelism, ici_devices) * _resolved_axis_product(
+        axes, self.mesh_axes, self.dcn_parallelism, self.num_slices
+    )
+
+  def _vocab_parallel_head_default_applies(self) -> bool:
+    """Whether a `None` flag may resolve on: the default rule set, no expert or context parallelism.
+
+    That is the setting the rotated head was measured on. A custom mesh-and-rule file brings its
+    own batch and length rules, which the four fixed rules can collide with (ep-as-cp maps
+    `activation_length` to `expert`, leaving the head's batch dimension unsharded), and the rotated
+    kernel is replicated over `expert` and `context`, which the default `embed_vocab` rule shards.
+    Setting the flag to True still applies it there.
+    """
+    if self.custom_mesh_and_rule != CustomRule.DEFAULT:
+      return False
+    axes = ("context", "context_usp_ulysses", "expert")
+    ici_devices = self.num_target_devices // max(self.num_slices, 1)
+    return (
+        _resolved_axis_product(axes, self.mesh_axes, self.ici_parallelism, ici_devices)
+        * _resolved_axis_product(axes, self.mesh_axes, self.dcn_parallelism, self.num_slices)
+        == 1
+    )
+
+
+# Appended to `logical_axis_rules` when lm_head_vocab_parallel is on and a rule set does not
+# already define them, narrowed to the axes the mesh actually has; base.yml carries the same
+# four so the common case is a no-op. Together they put the head's [embed, vocab] kernel on the
+# FSDP axes along vocab instead of embed, and take those axes off the batch dimension of
+# everything the head touches.
+_VOCAB_PARALLEL_LM_HEAD_RULES = (
+    ("activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]),
+    ("activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]),
+    ("vocab_fsdp", ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"]),
+    ("embed_vocab_replicated", []),
+)
 
 
 class RLConfig(
