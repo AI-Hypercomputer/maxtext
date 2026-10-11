@@ -56,6 +56,7 @@ from maxtext.utils import elastic_utils
 # pylint: disable=too-many-positional-arguments
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
 from maxtext.layers.attention_mla import indexer_losses
+from maxtext.layers import moe
 from maxtext.common import checkpointing, profiler
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -367,6 +368,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     if moe_overflow_flags:
       has_moe_overflow = jnp.any(jnp.stack([jnp.any(x) for x in moe_overflow_flags]))
   aux["has_moe_overflow"] = has_moe_overflow
+  if getattr(config, "log_required_ragged_buffer_factor", False):
+    # Probe: the smallest ragged_buffer_factor that would not have dropped tokens this step and the (token, expert)
+    # rows dropped, over MoE layers (see moe.MOE_BUFFER_PROBE_METRICS).
+    probe_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_buffer_probe")
+    if probe_values:
+      aux.update(moe.moe_buffer_probe_metrics(moe.reduce_moe_buffer_probe(probe_values)))
   return loss, aux
 
 
@@ -587,6 +594,9 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             "learning/te_moe_recv_capacity_per_rank": aux["te_moe_recv_capacity_per_rank"],
         }
     )
+  for name in moe.MOE_BUFFER_PROBE_METRICS:
+    if name in aux:
+      scalar_metrics[f"learning/{name}"] = aux[name]
   scalar_metrics.update(bias_metrics)
   if config.use_qk_clip:
     new_state = qk_clip_utils.apply_qk_clip_nnx(new_state, intermediate_outputs, config)

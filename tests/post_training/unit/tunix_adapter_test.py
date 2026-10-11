@@ -24,6 +24,7 @@ import pytest
 import jax
 import jax.numpy as jnp
 import numpy as np
+from flax import nnx
 
 from tunix.rl import common as tunix_common
 
@@ -84,9 +85,7 @@ class _CallableStubBase:
     # Return dummy logits shaped [B, L, V=2] so the adapter has something to forward.
     return jnp.zeros((b, l, 2), dtype=jnp.float32)
 
-  def logits_from_hidden_states_for_vocab_tiling(
-      self, hidden_states, deterministic, model_mode
-  ):
+  def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode):
     self.captured["vocab_tiling_deterministic"] = deterministic
     self.captured["vocab_tiling_model_mode"] = model_mode
     return jnp.zeros((*hidden_states.shape[:-1], 2), dtype=jnp.float32)
@@ -375,16 +374,10 @@ class _NNXLinearBase(tunix_adapter_module.nnx.Module):
     self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME)
     self.model_mode = "train"
     self.embed = tunix_adapter_module.nnx.Param(
-        jnp.arange(vocab_size * emb_dim, dtype=jnp.float32).reshape(
-            vocab_size, emb_dim
-        )
-        * 0.1
+        jnp.arange(vocab_size * emb_dim, dtype=jnp.float32).reshape(vocab_size, emb_dim) * 0.1
     )
     self.head = tunix_adapter_module.nnx.Param(
-        jnp.arange(emb_dim * vocab_size, dtype=jnp.float32).reshape(
-            emb_dim, vocab_size
-        )
-        * 0.1
+        jnp.arange(emb_dim * vocab_size, dtype=jnp.float32).reshape(emb_dim, vocab_size) * 0.1
     )
 
   def __call__(
@@ -396,19 +389,12 @@ class _NNXLinearBase(tunix_adapter_module.nnx.Module):
       forced_routed_experts=None,
       skip_lm_head=False,
   ):
-    hidden = (
-        self.embed[...][decoder_input_tokens]
-        + decoder_positions[..., None].astype(jnp.float32) * 0.01
-    )
+    hidden = self.embed[...][decoder_input_tokens] + decoder_positions[..., None].astype(jnp.float32) * 0.01
     if skip_lm_head:
       return hidden
-    return self.logits_from_hidden_states_for_vocab_tiling(
-        hidden, deterministic=True, model_mode=self.model_mode
-    )
+    return self.logits_from_hidden_states_for_vocab_tiling(hidden, deterministic=True, model_mode=self.model_mode)
 
-  def logits_from_hidden_states_for_vocab_tiling(
-      self, hidden_states, deterministic, model_mode
-  ):
+  def logits_from_hidden_states_for_vocab_tiling(self, hidden_states, deterministic, model_mode):
     del deterministic, model_mode
     return jnp.einsum("bse,ev->bsv", hidden_states, self.head[...])
 
@@ -418,9 +404,7 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
 
   def setUp(self):
     super().setUp()
-    weight_mapping_patcher = mock.patch.object(
-        tunix_adapter_module, "VllmWeightMapping"
-    )
+    weight_mapping_patcher = mock.patch.object(tunix_adapter_module, "VllmWeightMapping")
     weight_mapping_patcher.start()
     self.addCleanup(weight_mapping_patcher.stop)
 
@@ -457,9 +441,7 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
     graphdef, state = tunix_adapter_module.nnx.split(adapter)
 
     prompt_tokens = jnp.array([[1, 2, 3], [2, 3, 4]], dtype=jnp.int32)
-    completion_tokens = jnp.array(
-        [[4, 5, 6, 7, 1], [5, 6, 7, 1, 2]], dtype=jnp.int32
-    )
+    completion_tokens = jnp.array([[4, 5, 6, 7, 1], [5, 6, 7, 1, 2]], dtype=jnp.int32)
 
     expected_logps, expected_entropy = tunix_common.compute_per_token_logps(
         graphdef,
@@ -487,12 +469,8 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
           temperature=0.8,
           chunk_size=chunk_size,
       )
-      np.testing.assert_allclose(
-          chunked_logps, expected_logps, rtol=1e-5, atol=1e-5
-      )
-      np.testing.assert_allclose(
-          chunked_entropy, expected_entropy, rtol=1e-5, atol=1e-5
-      )
+      np.testing.assert_allclose(chunked_logps, expected_logps, rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(chunked_entropy, expected_entropy, rtol=1e-5, atol=1e-5)
 
     def _loss(s, csize):
       lps, ent = tunix_common.compute_per_token_logps(
@@ -511,10 +489,100 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
 
     grad_unchunked = jax.grad(_loss)(state, 0)
     grad_chunked = jax.grad(_loss)(state, 2)
-    for g0, g1 in zip(
-        jax.tree.leaves(grad_unchunked), jax.tree.leaves(grad_chunked)
-    ):
+    for g0, g1 in zip(jax.tree.leaves(grad_unchunked), jax.tree.leaves(grad_chunked)):
       np.testing.assert_allclose(g1, g0, rtol=1e-5, atol=1e-5)
+
+
+class _ProbeBase(nnx.Module):
+  """Sows a log_required_ragged_buffer_factor probe vector per call, like two scanned MoE blocks."""
+
+  def __init__(self):
+    self.w = nnx.Param(jnp.ones((4,), jnp.float32))
+
+  def __call__(self, x):
+    y = x * self.w[...]
+    # [blocks=2, 3]: required factor, dropped max, dropped total.
+    self.sow(nnx.Intermediate, "moe_buffer_probe", jnp.stack([y[:3], y[1:]]))
+    return y
+
+
+class _ProbeAdapter(nnx.Module):
+  """The part of TunixMaxTextAdapter.__call__ the probe uses: run base, then report what it sowed."""
+
+  def __init__(self):
+    self.base = _ProbeBase()
+
+  def __call__(self, x):
+    out = self.base(x)
+    tunix_adapter_module._report_moe_buffer_probe(self)  # pylint: disable=protected-access
+    return out
+
+
+@jax.jit
+def _tunix_style_forward(graphdef, state, x):
+  """Like tunix common.compute_per_token_logps: runs a merged copy of the model inside its own jit."""
+  return nnx.merge(graphdef, state)(x).sum()
+
+
+class MoeBufferProbeCollectorTest(unittest.TestCase):
+  """The probe crosses a Tunix loss's inner jit (it used to escape it: UnexpectedTracerError)."""
+
+  def test_collects_across_inner_jit_with_warm_cache(self):
+    model = _ProbeAdapter()
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+    # A call outside the collector (e.g. old log-probs) caches the inner trace first.
+    _tunix_style_forward(*nnx.split(model), jnp.ones((4,)))
+
+    def diff_wrapper(p, r, x):
+      mdl = nnx.merge(graphdef, p, r, copy=True)
+      with tunix_adapter_module.collect_moe_buffer_probe(mdl) as probe:
+        # Two passes per loss, each through the inner jit, as Tunix losses split and run the model.
+        loss = _tunix_style_forward(*nnx.split(mdl), x) + _tunix_style_forward(*nnx.split(mdl), 2 * x)
+      self.assertTrue(probe.reported)
+      return loss, probe.ref[...]
+
+    step = jax.jit(jax.value_and_grad(diff_wrapper, has_aux=True))
+    for x in (jnp.asarray([1.0, 4.0, 2.0, 3.0]), jnp.asarray([5.0, 1.0, 1.0, 2.0])):
+      (_, probe), grads = step(params, rest, x)
+      sown = np.concatenate([np.stack([v[:3], v[1:]]) for v in (np.asarray(x), 2 * np.asarray(x))])
+      np.testing.assert_allclose(probe, [sown[:, 0].max(), sown[:, 1].max(), sown[:, 2].sum()])
+      np.testing.assert_allclose(grads["base"]["w"][...], 3 * x)
+
+  def test_reports_nothing_outside_a_collector(self):
+    model = _ProbeAdapter()
+    with tunix_adapter_module.collect_moe_buffer_probe(_ProbeAdapter()) as probe:
+      model(jnp.ones((4,)))  # Not the stamped copy: its passes are not this collector's.
+    self.assertFalse(probe.reported)
+    model(jnp.ones((4,)))  # No collector at all.
+
+  def test_direct_calls_count_each_pass_once(self):
+    # Calling the stamped model itself (no split/merge) twice makes `sow` append a second entry to the same
+    # variable; the earlier pass must not be reported again, or moe_dropped_rows_total counts it twice.
+    model = _ProbeAdapter()
+    xs = (jnp.asarray([1.0, 2.0, 3.0, 4.0]), jnp.ones((4,)))
+    with tunix_adapter_module.collect_moe_buffer_probe(model) as probe:
+      for x in xs:
+        model(x)
+    sown = np.concatenate([np.stack([np.asarray(x)[:3], np.asarray(x)[1:]]) for x in xs])
+    np.testing.assert_allclose(probe.ref[...], [sown[:, 0].max(), sown[:, 1].max(), sown[:, 2].sum()])
+
+  def test_collects_on_eager_path(self):
+    # MaxTextTrainingEngine runs `value_and_grad(diff_wrapper)` with no outer jit until `compile()` is called.
+    model = _ProbeAdapter()
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    def diff_wrapper(p, r, x):
+      mdl = nnx.merge(graphdef, p, r, copy=True)
+      with tunix_adapter_module.collect_moe_buffer_probe(mdl) as probe:
+        loss = _tunix_style_forward(*nnx.split(mdl), x)
+      self.assertTrue(probe.reported)
+      return loss, probe.ref[...]
+
+    for x in (jnp.asarray([1.0, 4.0, 2.0, 3.0]), jnp.asarray([5.0, 1.0, 1.0, 2.0])):
+      (_, probe), grads = jax.value_and_grad(diff_wrapper, has_aux=True)(params, rest, x)
+      sown = np.stack([np.asarray(x)[:3], np.asarray(x)[1:]])
+      np.testing.assert_allclose(probe, [sown[:, 0].max(), sown[:, 1].max(), sown[:, 2].sum()])
+      np.testing.assert_allclose(grads["base"]["w"][...], x)
 
 
 if __name__ == "__main__":
