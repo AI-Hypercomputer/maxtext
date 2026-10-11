@@ -441,7 +441,7 @@ class PyconfigTest(unittest.TestCase):
     self.assertTrue(resolve(shard_mode="auto", dense_weight_grad_in_kernel_order=True))
 
   def test_lm_head_vocab_parallel_default(self):
-    """Off by default; set to None, on where the head can be turned sideways at all."""
+    """On where the head can be turned sideways at all, off where the logits' layout is spoken for."""
 
     def resolve(**kwargs):
       return pyconfig.initialize(
@@ -450,20 +450,16 @@ class PyconfigTest(unittest.TestCase):
           **kwargs,
       ).lm_head_vocab_parallel
 
-    # Opt-in for now: left at its shipped default, the flag is off in both modes.
-    self.assertFalse(resolve(shard_mode="explicit"))
-    self.assertFalse(resolve(shard_mode="auto"))
-    # None means "on wherever it applies". A layout fix rather than a shard_mode feature: auto
-    # reaches the same layout and the same speedup, so what None resolves to does not depend on the mode.
-    unset = {"lm_head_vocab_parallel": None}
-    self.assertTrue(resolve(shard_mode="explicit", **unset))
-    self.assertTrue(resolve(shard_mode="auto", **unset))
+    # A layout fix rather than a shard_mode feature: auto reaches the same layout and the
+    # same speedup, so the default does not depend on the mode.
+    self.assertTrue(resolve(shard_mode="explicit"))
+    self.assertTrue(resolve(shard_mode="auto"))
     # A tied head is the embedding table, already sharded on vocab.
-    self.assertFalse(resolve(shard_mode="explicit", logits_via_embedding=True, **unset))
-    self.assertFalse(resolve(shard_mode="auto", logits_via_embedding=True, **unset))
+    self.assertFalse(resolve(shard_mode="explicit", logits_via_embedding=True))
+    self.assertFalse(resolve(shard_mode="auto", logits_via_embedding=True))
     # MTP reshards the logits back to batch-sharded, and vocab tiling already chunks vocab.
-    self.assertFalse(resolve(shard_mode="explicit", model_name="deepseek3-test", mtp_num_layers=1, **unset))
-    self.assertFalse(resolve(shard_mode="explicit", num_vocab_tiling=2, **unset))
+    self.assertFalse(resolve(shard_mode="explicit", model_name="deepseek3-test", mtp_num_layers=1))
+    self.assertFalse(resolve(shard_mode="explicit", num_vocab_tiling=2))
     # Block diffusion's logits paths have not been validated with vocab-sharded logits. The rest
     # of the dict is what the block-diffusion objective itself requires.
     block_diffusion = {
@@ -475,12 +471,11 @@ class PyconfigTest(unittest.TestCase):
         "dataset_type": "hf",
         "hf_path": "parquet",
     }
-    self.assertFalse(resolve(shard_mode="explicit", **block_diffusion, **unset))
-    self.assertFalse(resolve(shard_mode="auto", **block_diffusion, **unset))
+    self.assertFalse(resolve(shard_mode="explicit", **block_diffusion))
+    self.assertFalse(resolve(shard_mode="auto", **block_diffusion))
     # Writing it out still wins over the default, in both directions and both modes.
     self.assertFalse(resolve(shard_mode="explicit", lm_head_vocab_parallel=False))
     self.assertFalse(resolve(shard_mode="auto", lm_head_vocab_parallel=False))
-    self.assertTrue(resolve(shard_mode="explicit", lm_head_vocab_parallel=True))
     self.assertTrue(resolve(shard_mode="auto", lm_head_vocab_parallel=True))
     # But asking for it where the logits' layout is spoken for is an error, not a silent no-op.
     for kwargs in (
@@ -532,8 +527,8 @@ class PyconfigTest(unittest.TestCase):
 
     # olmo3's vocab size. The default orientation leaves it whole here, since the tensor axes
     # this mesh has are all 1; the rotated one asks the four-way fsdp axis to split it.
-    self.assertFalse(resolve(vocab_size=100278, lm_head_vocab_parallel=None))
-    self.assertTrue(resolve(vocab_size=100352, lm_head_vocab_parallel=None))
+    self.assertFalse(resolve(vocab_size=100278))
+    self.assertTrue(resolve(vocab_size=100352))
     # Asking for it anyway is an error rather than a silent fallback.
     with self.assertRaisesRegex(Exception, "does not divide vocab_size 100278"):
       resolve(vocab_size=100278, lm_head_vocab_parallel=True)
@@ -571,12 +566,12 @@ class PyconfigTest(unittest.TestCase):
         ],
     }
     # base.yml already carries all four, so there the validator must be a no-op.
-    for rules in (rules_of(lm_head_vocab_parallel=True, **predates_flag), rules_of(lm_head_vocab_parallel=True)):
+    for rules in (rules_of(**predates_flag), rules_of()):
       for name, axes in expected.items():
         self.assertEqual([r for r in rules if r[0] == name], [(name, axes)])
-    # Off, nothing is added -- whether written out or left at the shipped default.
-    for off in (rules_of(lm_head_vocab_parallel=False, **predates_flag), rules_of(**predates_flag)):
-      self.assertNotIn("vocab_fsdp", [r[0] for r in off])
+    # Off, nothing is added.
+    off = rules_of(lm_head_vocab_parallel=False, **predates_flag)
+    self.assertNotIn("vocab_fsdp", [r[0] for r in off])
 
   def test_resolve_config_path(self):
     self.assertEqual(resolve_config_path("foo"), os.path.join("src", "foo"))
