@@ -34,6 +34,21 @@ from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding, trunca
 _MAX_WAVELENGTH = 10_000
 
 
+def _cis(theta: Array) -> Array:
+  """`exp(1j * theta)` for real `theta`, written as `cos(theta) + 1j*sin(theta)`.
+
+  Bit-identical to `jnp.exp(1j * theta)` for every angle RoPE produces (the two
+  differ only in the sign of a zero imaginary part at `theta == -0.0`), but it
+  does not go through XLA's overflow-safe complex `exponential` expansion, which
+  evaluates `exp(real(1j*theta)) == exp(0)` over the whole tensor. Under
+  `shard_mode: explicit` it evaluates it *twice*: the `Sharding` custom-call on
+  the broadcast `1j` keeps the simplifier from commuting the constant to the
+  right, so the reassociation that lets CSE merge the two `exponential`s never
+  fires.
+  """
+  return jax.lax.complex(jnp.cos(theta), jnp.sin(theta))
+
+
 def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> Array:
   """Moves embedding table to device if parameter offloading is enabled."""
   if config.parameter_memory_host_offload:
@@ -706,16 +721,11 @@ class YarnRotaryEmbedding(nnx.Module):
 
   @property
   def freqs_cis(self):
-    """Frequencies for rotary embedding."""
-    freqs = self.inv_freqs
-
+    """Frequencies for every position, shape [max_position_embeddings, half_dim]."""
     # Precompute frequencies for all positions by taking the outer product.
     t = jnp.arange(self.max_position_embeddings, dtype=jnp.float32)  # shape [max_position_embeddings]
     # This gives a [max_position_embeddings, half_dim] tensor with rows as time steps.
-    freqs = jnp.outer(t, freqs)
-
-    # Compute the complex “cis” values: exp(i * theta).
-    return jnp.exp(1j * freqs)  # shape [max_position_embeddings, half_dim]
+    return _cis(jnp.outer(t, self.inv_freqs))
 
   @staticmethod
   def _find_correction_dim(num_rotations: float, dim: int, base: float, max_position_embeddings: int) -> float:
@@ -854,7 +864,7 @@ class YarnRotaryEmbedding(nnx.Module):
           output = rotated_pairs.reshape(b, s, n, h)
     else:
       if self.direct_position_freqs:
-        freqs = jnp.exp(1j * self._position_angles(position, self.inv_freqs))  # shape: [B, S, 1, half_dim]
+        freqs = _cis(self._position_angles(position, self.inv_freqs))  # shape: [B, S, 1, half_dim]
       else:
         freqs = self._gather_freqs_cis(position)  # shape: [B, S, 1, half_dim]
       if self.interleave:
