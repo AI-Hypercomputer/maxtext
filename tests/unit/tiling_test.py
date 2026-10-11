@@ -134,6 +134,7 @@ class VocabTilingNNXTest(unittest.TestCase):
       z_loss_multiplier=1e-4,
       ici_context_parallelism=1,
       vocab_tiling_ag_once=False,
+      vocab_tiling_seq_major=False,
   ):
     """Build a pyconfig + matching NNX `Transformer` for the test."""
     cfg = pyconfig.initialize(
@@ -151,6 +152,7 @@ class VocabTilingNNXTest(unittest.TestCase):
         z_loss_multiplier=z_loss_multiplier,
         ici_context_parallelism=ici_context_parallelism,
         vocab_tiling_ag_once=vocab_tiling_ag_once,
+        vocab_tiling_seq_major=vocab_tiling_seq_major,
     )
     mesh = maxtext_utils.get_mesh_from_config(cfg)
     rngs = maxtext_utils_nnx.create_nnx_rngs(cfg)
@@ -226,13 +228,16 @@ class VocabTilingNNXTest(unittest.TestCase):
     """grad wrapped in jit — see `_vg`."""
     return jax.jit(jax.grad(fn, argnums=argnums))
 
-  def _run_parity(self, *, logits_via_embedding, ici_context_parallelism=1, vocab_tiling_ag_once=False):
+  def _run_parity(
+      self, *, logits_via_embedding, ici_context_parallelism=1, vocab_tiling_ag_once=False, vocab_tiling_seq_major=False
+  ):
     """Compare full-vocab xent loss/grads against the tiled custom_vjp path."""
     cfg, model = self._build_cfg_and_model(
         num_vocab_tiling=4,
         logits_via_embedding=logits_via_embedding,
         ici_context_parallelism=ici_context_parallelism,
         vocab_tiling_ag_once=vocab_tiling_ag_once,
+        vocab_tiling_seq_major=vocab_tiling_seq_major,
     )
     hidden_states, labels, segmentation = self._make_inputs(cfg)
     graphdef, params, rest = self._split_and_axes(cfg, model)
@@ -265,6 +270,11 @@ class VocabTilingNNXTest(unittest.TestCase):
   def test_nnx_vocab_tiling_gradient_context_parallelism(self):
     """custom_vjp parity when the mesh shards the context axis."""
     self._run_parity(logits_via_embedding=False, ici_context_parallelism=4, vocab_tiling_ag_once=True)
+
+  @pytest.mark.tpu_only
+  def test_nnx_vocab_tiling_seq_major(self):
+    """custom_vjp parity when the tiles are cut along the sequence (vocab_tiling_seq_major)."""
+    self._run_parity(logits_via_embedding=False, vocab_tiling_seq_major=True)
 
   # ---------- Coverage expansion ----------
 
