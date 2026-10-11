@@ -840,6 +840,16 @@ shard_optimizer_over_data: false
 # when dense MLP weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
 dense_fsdp_use_two_stage_all_gather: false
 
+# The in-loop counterpart of lm_head_weight_grad_in_kernel_order: trace the attention q/k/v/out and MLP wi/wo dots
+# inside a jax.sharding.auto_axes region so that XLA folds the transpose back into the gradient dot and each weight
+# gradient comes out in its kernel's stored orientation. Same barrier as the LM head flag, same default rule -- None
+# means on wherever it can act, i.e. under shard_mode: explicit. Without it explicit is 0.33%-1.48% slower than auto
+# at every measured layer count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere,
+# and the two flags are additive (see docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels,
+# their initialization and the arithmetic are untouched, so gradients are bit-identical to the default rule and no
+# checkpoint conversion is needed. No effect under shard_mode: auto or on quantized layers.
+dense_weight_grad_in_kernel_order: None  # on under shard_mode: explicit if None
+
 # Unless explicitly specified, the number of TPU slices is automatically determined. It should only be set for
 # disaggregated reinforcement learning workloads using multiple slices. For ahead of time compilation,
 # you should set compile_toplogy_num_slices, which will in turn set this value. For non-TPU environments this is set to 1.
