@@ -155,8 +155,6 @@ jobs:
             python3 -m pip install --quiet torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu --no-deps
             python3 -c "import torch; print(f'torch {torch.__version__}')"
           fi
-          # DEBUG b/543017989: override PyPI qwix 0.1.8 with qwix GitHub head.
-          uv pip install --force-reinstall --no-deps git+https://github.com/google/qwix
           python3 --version
           python3 -m pip freeze
         env:
@@ -221,6 +219,11 @@ jobs:
           # omit this libtpu init args for gpu tests
           if [ "${INPUTS_DEVICE_TYPE}" != "cuda12" ]; then
             export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=65536'
+            if [[ "${INPUTS_FLAVOR}" == tpu7x-* ]]; then
+              # b/543017989: keep gathers on the SparseCore on TPU7x (validation of the workaround PR).
+              export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS} --xla_tpu_offload_all_supported_gathers_to_sparsecore=true"
+            fi
+            echo "LIBTPU_INIT_ARGS=${LIBTPU_INIT_ARGS}"
           else
             # For cuda12, explicitly point to the pip-installed CUDA libraries
             # to avoid conflicts with system-level installations on the runner.
