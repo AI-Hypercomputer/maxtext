@@ -123,6 +123,7 @@ jobs:
   run_ci_tests:
     name: Run ${{ matrix.name }} CI Tests
     needs: build_and_push_docker_images
+    if: ${{ !cancelled() && needs.build_and_push_docker_images.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
