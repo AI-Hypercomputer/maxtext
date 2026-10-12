@@ -114,9 +114,45 @@ jobs:
               return
             }
 
+            // A PR that starts without the `ready_for_full_ci` label gets a failing "Full CI Gatekeeper"
+            // and "All Required Tests Passed" from that run. After the label is added, a later run on the
+            // same commit can pass, but GitHub keeps the earlier check runs. So once a newer "All Required
+            // Tests Passed" succeeded in a run that really ran the pipeline (its Code Quality check
+            // succeeded; runs triggered by unrelated labels skip it and report an all-skipped success),
+            // ignore those two checks from earlier runs in which the gatekeeper failed. Every other check,
+            // including those two from runs that were not gated, is still evaluated as before.
+            // These check names must match the job names in ci_pipeline.yml and code_quality.yml.
+            const ATP_CHECK = 'All Required Tests Passed'
+            const GATEKEEPER_CHECK = 'Full CI Gatekeeper'
+            const CODE_QUALITY_CHECK = 'Code Quality Check / Pre-commit Linters'
+            const listChecksNamed = (name) => github.paginate(github.rest.checks.listForRef, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: last_commit_sha,
+              check_name: name,
+              per_page: 100,
+            })
+            const suitesWhere = (runs, conclusion) => new Set(runs
+              .filter(run => run.status === 'completed' && run.conclusion === conclusion)
+              .map(run => run.check_suite?.id)
+              .filter(id => id !== undefined))
+            const pipelineRanSuites = suitesWhere(await listChecksNamed(CODE_QUALITY_CHECK), 'success')
+            const gatedSuites = suitesWhere(await listChecksNamed(GATEKEEPER_CHECK), 'failure')
+            const supersedingAtpId = Math.max(0, ...(await listChecksNamed(ATP_CHECK))
+              .filter(run => run.status === 'completed' && run.conclusion === 'success' &&
+                pipelineRanSuites.has(run.check_suite?.id))
+              .map(run => run.id))
+            const isStaleGateFailure = (run) => (run.name === GATEKEEPER_CHECK || run.name === ATP_CHECK) &&
+              run.id < supersedingAtpId && gatedSuites.has(run.check_suite?.id)
+            core.info(`Newest passing full-pipeline "${ATP_CHECK}" id: ${supersedingAtpId || 'none'}; gated runs: ${gatedSuites.size}`)
+
             for (const checkRun of checkRuns.check_runs) {
               // Ignore the current running workflow and test duration tracking
               if (checkRun.name.endsWith(context.job) || checkRun.name.includes('Track Test Duration')) continue
+              if (isStaleGateFailure(checkRun)) {
+                core.info(`Ignoring stale check from an earlier gated run: ${checkRun.name} (id ${checkRun.id})`)
+                continue
+              }
 
               if (checkRun.status !== 'completed' || !['success', 'skipped'].includes(checkRun.conclusion)) {
                 core.info(`Waiting for check: ${checkRun.name} (Status: ${checkRun.status}, Conclusion: ${checkRun.conclusion})`);

@@ -30,7 +30,7 @@ ______________________________________________________________________
 
 ## How the Test Works
 
-This test runs automatically as part of the [`tpu-integration`](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml) CI test suite on every Pull Request.
+This test runs automatically as part of the [`tpu-integration`](https://github.com/AI-Hypercomputer/maxtext/actions/workflows/ci_pipeline.yml) CI test suite in scheduled runs and on every Pull Request that is marked "Ready for review" and has the `ready_for_full_ci` label.
 
 When the test method executes, it performs the following sequence of actions:
 
