@@ -1130,6 +1130,7 @@ managed_mldiagnostics_on_demand_profiling: true # Enable on-demand profiling ser
 managed_mldiagnostics_run_group: ""  # Optional. Used to group multiple runs.
 managed_mldiagnostics_region: "" # Optional. GCP region for managed mldiagnostics. If empty, it will be auto-detected by the SDK.
 managed_mldiagnostics_storage_path: "" # Optional parameter to use a separate storage path for mldiagnostic data (profile, telemetry etc.) than the base directory path.
+managed_mldiagnostics_metric_only_run: false # Optional. Whether to create a metric-only run (disabling profiling).
 
 # Dump HLO and jaxpr options
 dump_hlo: false

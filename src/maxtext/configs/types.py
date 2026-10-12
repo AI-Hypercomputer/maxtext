@@ -3238,6 +3238,10 @@ class ManagedMLDiagnostics(BaseModel):
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
   managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
   managed_mldiagnostics_storage_path: str = Field("", description="Storage path for mldiagnostics (profiles, metrics)")
+  managed_mldiagnostics_metric_only_run: bool = Field(
+      False,
+      description="Whether to create a metric-only run.",
+  )
 
 
 class Goodput(BaseModel):
