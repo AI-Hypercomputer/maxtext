@@ -4964,8 +4964,8 @@ class MaxTextConfig(
           f"'tensor' (got ici_tensor_parallelism={cfg.ici_tensor_parallelism}, "
           f"dcn_tensor_parallelism={cfg.dcn_tensor_parallelism})."
       )
-    if cfg.gdn_chunk_size != 64:
-      raise ValueError(f"use_gdn_kernel=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}.")
+    if cfg.gdn_chunk_size not in (64, 128):
+      raise ValueError(f"use_gdn_kernel=True requires gdn_chunk_size in (64, 128), got {cfg.gdn_chunk_size}.")
     if cfg.gdn_key_head_dim % 128 or cfg.gdn_value_head_dim % 128:
       raise ValueError(
           "use_gdn_kernel=True requires gdn_key_head_dim and gdn_value_head_dim to be multiples of 128, "
