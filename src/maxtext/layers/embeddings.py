@@ -772,8 +772,14 @@ class YarnRotaryEmbedding(nnx.Module):
 
   def _gather_freqs_cis(self, position: Array) -> Array:
     """Looks up precomputed complex frequencies, returning shape [B, S, 1, half_dim]."""
-    freqs = self.freqs_cis.at[position].get(out_sharding=self.freqs_sharding)  # shape: [B, S, half_dim]
-    return freqs[:, :, jnp.newaxis, :]
+    clamped_position = jnp.clip(
+        jnp.where(
+            position < 0, position + self.max_position_embeddings, position
+        ),
+        0,
+        self.max_position_embeddings - 1,
+    )
+    return jnp.exp(1j * self._position_angles(clamped_position, self.inv_freqs))
 
   def _cos_sin(self, position: Array, repeat_interleave: bool = False) -> tuple[Array, Array]:
     """Returns float32 (cos, sin) of the RoPE angles, each of shape [B, S, 1, half_dim].
