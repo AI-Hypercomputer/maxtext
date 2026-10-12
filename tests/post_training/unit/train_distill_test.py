@@ -204,7 +204,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.strategy.compute_loss.return_value = (mock.Mock(), {})
 
     # 6. Execute outer function & trigger inner loss_wrapper_pure
-    trainer._train_step(model_bundle, optimizer, inputs)
+    trainer._train_step(model_bundle, optimizer, None, inputs)
     loss_wrapper = mock_value_and_grad.call_args[0][0]
     # loss_wrapper_pure signature is (diff_params, rest), not (student, teacher, batch)
     loss_wrapper(mock_diff_params, mock_rest)
@@ -268,7 +268,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.strategy.compute_loss.return_value = (mock.Mock(), {})
 
     # 6. Execute outer function & trigger inner loss_wrapper_pure
-    train_step_out = trainer._train_step(model_bundle, optimizer, inputs)
+    train_step_out = trainer._train_step(model_bundle, optimizer, None, inputs)
     loss_wrapper = mock_value_and_grad.call_args[0][0]
     # loss_wrapper_pure signature is (diff_params, rest), not (student, teacher, batch)
     loss_wrapper(mock_diff_params, mock_rest)
@@ -355,7 +355,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.strategy.compute_loss.return_value = (mock.Mock(), {})
 
     # 6. Execute outer function & trigger inner loss_wrapper_pure
-    trainer._train_step(model_bundle, optimizer, inputs)
+    trainer._train_step(model_bundle, optimizer, None, inputs)
     loss_wrapper = mock_value_and_grad.call_args[0][0]
     # loss_wrapper_pure signature is (diff_params, rest), not (student, teacher, batch)
     loss_wrapper(mock_diff_params, mock_rest)
@@ -822,7 +822,7 @@ class TrainDistillTest(unittest.TestCase):
     trainer.strategy.compute_loss.side_effect = lambda s_out, t_out, labels, step=None: (jnp.sum(s_out), {"aux": 1.0})
 
     # --- EXECUTE PASS 1 ---
-    trainer._train_step(model_bundle, nnx_opt, dummy_batch)
+    trainer._train_step(model_bundle, nnx_opt, None, dummy_batch)
 
     # ASSERTIONS AFTER PASS 1:
     # Verify exactly ONE forward pass happened
@@ -834,7 +834,7 @@ class TrainDistillTest(unittest.TestCase):
     )
 
     # --- EXECUTE PASS 2 ---
-    trainer._train_step(model_bundle, nnx_opt, dummy_batch)
+    trainer._train_step(model_bundle, nnx_opt, None, dummy_batch)
 
     # ASSERTIONS AFTER PASS 2:
     # Verify exactly TWO forward passes have now happened
@@ -1354,7 +1354,7 @@ class TrainDistillTest(unittest.TestCase):
     dummy_batch = {"input_tokens": jnp.ones((1, 2))}
 
     # 5. Execute Pass
-    trainer._train_step(model_bundle, trainer.optimizer, dummy_batch)
+    trainer._train_step(model_bundle, trainer.optimizer, None, dummy_batch)
 
     # 6. Verify layer1 is unchanged (frozen)
     np.testing.assert_allclose(
