@@ -22,8 +22,6 @@
 # Behavior & Logic Flow:
 #   0. FORCE_ALL_TESTS=true: Bypasses all rules and enables every test suite and
 #      notebook (used by the `scheduled-only` PR label).
-#      SKIP_CI_TESTS=true: Bypasses all rules and disables every test suite and
-#      notebook (used by the `skip-ci-tests` PR label).
 #   1. Non-PR Events: If not a pull request, enables all test suites and notebooks.
 #   2. Changed-file source: Uses the GitHub REST API (paginated `pulls/N/files`) when
 #      PR_NUMBER, GITHUB_REPOSITORY and the gh CLI are available; falls back to
@@ -41,13 +39,20 @@
 #      from the unmatched file list.
 #   7. Fallback Check: If any truly unmatched files remain, triggers a general fallback
 #      enabling all core test suites (excluding notebooks).
+#   8. Heavy-Test Gate: Every successful run ends by writing run_heavy_tests,
+#      heavy_tests_gated and heavy_tests_gate_message, which skip the heavy TPU/GPU
+#      suites on drafts and while a PR has `skip-ci-tests` (see gate_heavy_tests).
 
 set -e
+
+# The latest value of each flag, for the heavy-test gate (GITHUB_OUTPUT keeps the last value written).
+declare -A FLAG_VALUES=()
 
 # Helper to output a key-value flag to GITHUB_OUTPUT (if set) and stdout
 emit_flag() {
   local key="$1"
   local val="$2"
+  FLAG_VALUES["$key"]="$val"
   # Only log if value is true
   if [[ "$val" == "true" ]]; then
     echo "$key=$val"
@@ -85,6 +90,79 @@ matches_pattern() {
   [[ "$changed_file" =~ $pattern ]]
 }
 
+# Heavy-test gate (b/571566462): decides whether the heavy TPU/GPU suites (the TPU/GPU jobs and the
+# notebooks in ci_pipeline.yml) may run, and writes run_heavy_tests, heavy_tests_gated and
+# heavy_tests_gate_message. Non-PR events always run them. For a PR, the first matching rule wins:
+#   1. Drafts never run them. The message says whether marking the PR ready is enough.
+#   2. `scheduled-only` (FORCE_ALL_TESTS) runs them: it asks for the full scheduled pipeline.
+#   3. `skip-ci-tests` skips them. add_skip_ci_tests_label.yml adds it to new PRs; auto_label_pr.yml
+#      removes it when the PR gets the "pull ready" label, and the author can remove it sooner.
+#   4. The first run of a new PR (`opened`) skips them: the labeler adds the label in parallel, so
+#      this run's payload doesn't have it yet. The labeler skips the PRs that Copybara exports
+#      (Copybara merges them itself, without approvals here), so they run every suite.
+#   5. Otherwise they run.
+gate_heavy_tests() {
+  local run_heavy_tests=true heavy_tests_gated=false message="" gets_label_now=false
+  local needs_heavy_tests=false flag
+  if [[ "$EVENT_NAME" == "pull_request" ]]; then
+    if [[ "${EVENT_ACTION:-}" == "opened" && "${IS_COPYBARA_PR:-}" != "true" ]]; then
+      gets_label_now=true
+    fi
+    if [[ "${IS_DRAFT:-}" == "true" ]]; then
+      run_heavy_tests=false
+      # Once the PR is ready, rule 2 or 5 runs all tests; under rule 3 or 4 it has, or is getting, the label.
+      if [[ "$FORCE_ALL_TESTS" == "true" ]] ||
+        [[ "${HAS_SKIP_CI_TESTS_LABEL:-}" != "true" && "$gets_label_now" != "true" ]]; then
+        message="Heavy tests skipped because this PR is a draft. Mark it 'Ready for review' to run all tests before merging."
+      else
+        message="Heavy tests skipped because this PR is a draft. Mark it 'Ready for review'; they then run once the PR gets the 'pull ready' label, which a bot adds after 2 approvals (a maintainer adds it to PRs from forks)."
+      fi
+    elif [[ "$FORCE_ALL_TESTS" == "true" ]]; then
+      run_heavy_tests=true
+    elif [[ "${HAS_SKIP_CI_TESTS_LABEL:-}" == "true" ]]; then
+      run_heavy_tests=false
+      message="Heavy tests skipped because this PR has the 'skip-ci-tests' label. They run once the PR gets the 'pull ready' label, which a bot adds after 2 approvals (a maintainer adds it to PRs from forks). To run them sooner, remove 'skip-ci-tests' or ask a maintainer to."
+    elif [[ "$gets_label_now" == "true" ]]; then
+      run_heavy_tests=false
+      message="Heavy tests skipped on the first run of a new PR, which gets the 'skip-ci-tests' label. They run once the PR gets the 'pull ready' label, which a bot adds after 2 approvals (a maintainer adds it to PRs from forks). To run them sooner, remove 'skip-ci-tests' or ask a maintainer to."
+    fi
+    # Only a change that needs the heavy suites is gated: notebooks run on TPUs, and the test suites that
+    # have a TPU/GPU flavor run when run_tests is true (the flags that the heavy jobs check). If you add a
+    # heavy job or change the flags a heavy job depends on, update this rule too.
+    if [[ "${FLAG_VALUES[run_notebooks]:-}" == "true" ]]; then
+      needs_heavy_tests=true
+    elif [[ "${FLAG_VALUES[run_tests]:-}" == "true" ]]; then
+      for flag in run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests; do
+        if [[ "${FLAG_VALUES[$flag]:-}" == "true" ]]; then
+          needs_heavy_tests=true
+        fi
+      done
+    fi
+    if [[ "$run_heavy_tests" == "false" && "$needs_heavy_tests" == "true" ]]; then
+      heavy_tests_gated=true
+    else
+      message=""
+    fi
+  fi
+  # All Required Tests Passed fails on missing or invalid outputs, so always write all three.
+  local outputs=(
+    "run_heavy_tests=${run_heavy_tests}"
+    "heavy_tests_gated=${heavy_tests_gated}"
+    "heavy_tests_gate_message=${message}"
+  )
+  printf '%s\n' "${outputs[@]}"
+  if [[ -n "$GITHUB_OUTPUT" ]]; then
+    printf '%s\n' "${outputs[@]}" >> "$GITHUB_OUTPUT"
+  fi
+}
+
+# Every successful run ends here, so the gate outputs come last. If the script fails earlier, they
+# stay missing and All Required Tests Passed fails, instead of the heavy suites running ungated.
+finish() {
+  gate_heavy_tests
+  exit 0
+}
+
 EVENT_NAME="${EVENT_NAME:-${GITHUB_EVENT_NAME:-pull_request}}"
 BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 # Set to "true" to bypass the per-file rules and run everything, e.g. when a PR
@@ -93,33 +171,16 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS:-false}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS,,}"
 
-# Set to "true" to bypass the per-file rules and disable all tests and notebooks,
-# e.g. when a PR carries the `skip-ci-tests` label.
-SKIP_CI_TESTS="${SKIP_CI_TESTS:-false}"
-# Lowercased so that values such as "True" from manual runs are also honored.
-SKIP_CI_TESTS="${SKIP_CI_TESTS,,}"
-
-if [[ "$FORCE_ALL_TESTS" == "true" && "$SKIP_CI_TESTS" == "true" ]]; then
-  echo "ERROR: Both FORCE_ALL_TESTS and SKIP_CI_TESTS are set to true, which is contradictory." >&2
-  exit 1
-fi
-
 if [[ "$FORCE_ALL_TESTS" == "true" ]]; then
   echo "FORCE_ALL_TESTS is set, running all tests and notebooks"
   set_test_flags "true" "true"
-  exit 0
-fi
-
-if [[ "$SKIP_CI_TESTS" == "true" ]]; then
-  echo "SKIP_CI_TESTS is set, disabling all tests and notebooks"
-  set_test_flags "false" "false"
-  exit 0
+  finish
 fi
 
 if [ "$EVENT_NAME" != "pull_request" ]; then
   echo "Not a pull request (event: $EVENT_NAME), running all tests and notebooks"
   set_test_flags "true" "true"
-  exit 0
+  finish
 fi
 
 # GitHub's "List pull requests files" REST endpoint returns at most this many files.
@@ -212,7 +273,7 @@ echo "$CHANGED_FILES"
 if [ -z "$CHANGED_FILES" ]; then
   echo "No files detected or diff failed. Running core test suites (excluding notebooks) as a fail-safe."
   set_test_flags "true" "false"
-  exit 0
+  finish
 fi
 
 # Disable all tests by default
@@ -331,3 +392,5 @@ if [ ${#FINAL_UNMATCHED_FILES[@]} -gt 0 ]; then
   echo "Enabling all test suites except notebook tests as a fallback."
   enable_flags run_tests run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests
 fi
+
+finish
