@@ -1016,6 +1016,15 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Ragged buffer factor. If < 0, ragged buffer is worst case size.",
   )
+  moe_exclude_padding_from_routing: bool = Field(
+      False,
+      description=(
+          "Train only. Exclude padding tokens (decoder_segment_ids == 0) from MoE routing: they"
+          " contribute no assignments to group_sizes or the ragged dispatch (no buffer slots, no expert"
+          " compute), any replayed routed_experts for them are ignored, and their MoE block output is"
+          " zero (the residual passes through). Non-pad tokens' routing and outputs are unchanged."
+      ),
+  )
   retry_when_tokens_dropped: bool = Field(
       False,
       description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
