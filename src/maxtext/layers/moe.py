@@ -1274,6 +1274,7 @@ class RoutedMoE(nnx.Module):
                 sorted_selected_experts,
                 group_size,
                 self.num_experts_per_tok,
+                interpret=self._pallas_interpret(),
             )
         if sorted_inputs is None:
           sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
@@ -1383,6 +1384,7 @@ class RoutedMoE(nnx.Module):
             sorted_selected_experts,
             jnp.reshape(weights, (-1, self.num_experts_per_tok)),
             group_sizes,
+            interpret=self._pallas_interpret(),
         )
     else:
       unsort_intermediate = _sort_activations(
@@ -1411,8 +1413,12 @@ class RoutedMoE(nnx.Module):
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
 
+  def _pallas_interpret(self) -> bool:
+    """Returns True when the target device platform is not TPU (enabling Mosaic interpret mode)."""
+    return self.mesh.devices.flat[0].platform != "tpu"
+
   def _use_fused_combine(self, intermediate, weights, group_sizes) -> bool:
-    """True iff `moe_combine_kernel="tc"` is configured and the fused combine is valid here.
+    """Returns True iff `moe_combine_kernel="tc"` is configured and the fused combine is valid here.
 
     Valid only for the plain local sort: every token*top_k row is present in
     `intermediate` in stable expert-sorted order and `group_sizes` sums to the
@@ -1429,7 +1435,7 @@ class RoutedMoE(nnx.Module):
     return intermediate.shape[0] == math.prod(weights.shape) and group_sizes.ndim == 1
 
   def _use_fused_permute(self, is_qarray: bool) -> bool:
-    """True iff `moe_permute_kernel="tc"` is configured and the fused permute is valid here.
+    """Returns True iff `moe_permute_kernel="tc"` is configured and the fused permute is valid here.
 
     Valid only for the plain local sort of unquantized activations (no expert
     parallelism, no ring-of-experts).
