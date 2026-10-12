@@ -18,7 +18,7 @@
 # different environments (stable, nightly) and use cases (pre-training, post-training).
 # IMPORTANT: This script must be executed from the root directory of the MaxText repository.
 
-# For instructions on building the MaxText Docker image, please refer to the https://maxtext.readthedocs.io/en/latest/build_maxtext.html.
+# For instructions on building the MaxText Docker image, please refer to https://maxtext.readthedocs.io/page/tutorials/build_maxtext.html.
 
 PACKAGE_DIR="${PACKAGE_DIR:-src}"
 echo "PACKAGE_DIR: $PACKAGE_DIR"
@@ -90,7 +90,7 @@ run_docker_build() {
 # Function to build image for GPUs
 build_gpu_image() {
   if [[ ${MODE} == "pinned" ]]; then
-    local base_image=ghcr.io/nvidia/jax:base-2024-12-04
+    local base_image=ubuntu:24.04
     docker_build_args+=("BASEIMAGE=${base_image}")
   fi
 

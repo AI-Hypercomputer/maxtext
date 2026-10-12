@@ -34,6 +34,7 @@ Architecture Overview:
 """
 
 import inspect
+import itertools
 import logging
 import shlex
 from typing import Sequence, Callable, Any
@@ -276,7 +277,15 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
   # Inherits _shard_optimizer from PeftTrainer.
 
-  def _train_step(self, model, optimizer, inputs, grad_accumulator=None, **kwargs):  # pyrefly: ignore[bad-override]
+  def _train_step(
+      self,
+      model,
+      optimizer,
+      grad_accumulator,
+      inputs,
+      is_update_step=True,
+      **kwargs,
+  ):  # pyrefly: ignore[bad-override]
     """Overrides the main JIT block to natively handle ModelBundle module.
 
     Uses jax.value_and_grad with explicit split/merge to avoid nesting
@@ -442,12 +451,12 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
 
     for name, value in aux.items():
       if name not in self._buffered_train_metrics.additional_metrics:
-        self._buffered_train_metrics.additional_metrics[name] = (  # pyrefly: ignore[unsupported-operation]
+        self._buffered_train_metrics.additional_metrics[name] = (
             [],
             distillation_utils.weighted_mean,
-        )  # pyrefly: ignore[unsupported-operation]
+        )
 
-      self._buffered_train_metrics.additional_metrics[name][0].append(value)  # pyrefly: ignore[bad-argument-type]
+      self._buffered_train_metrics.additional_metrics[name][0].append(value)
 
     # Compact per-step summary: only the metrics that change run-to-run, and
     # only those that are nonzero (so MoE / feature-distill terms hide when off).
@@ -639,6 +648,7 @@ def build_training_components(
         skip_first_n_steps=student_config.skip_first_n_steps_for_profiler,
         profiler_steps=student_config.profiler_steps,
         set_profile_options=False,
+        enable_continuous_profiling=student_config.enable_continuous_profiling,
     )
 
   metrics_logging_options = metrics_logger.MetricsLoggerOptions(
@@ -788,7 +798,13 @@ def train_distill(
     trainer = trainer.with_gen_model_input_fn(custom_gen_model_input_fn)
 
     # 7. Create Iterator Wrappers (Use Utils)
-    train_iter = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
+    train_iter: Any = distillation_utils.MaxTextToTunixIterator(raw_train_iter)
+    if isinstance(student_config.steps, int) and isinstance(trainer._train_steps, int):  # pylint: disable=protected-access
+      grad_accum = (
+          student_config.gradient_accumulation_steps if isinstance(student_config.gradient_accumulation_steps, int) else 1
+      )
+      remaining_microsteps = max(0, (student_config.steps - trainer._train_steps) * grad_accum)  # pylint: disable=protected-access
+      train_iter = itertools.islice(train_iter, remaining_microsteps)
 
     eval_iter = None
     if raw_eval_iter is not None:
@@ -900,7 +916,8 @@ def main(argv: Sequence[str]) -> None:
 
   # 3. Initialize TEACHER Config
   # We isolate the Teacher from Student CLI arguments (like pruning params).
-  teacher_overrides = global_config.teacher_overrides
+  teacher_overrides = dict(global_config.teacher_overrides or {})
+  teacher_overrides.setdefault("distill_beta", global_config.distill_beta)
 
   # Ensure load_parameters_path is set in overrides
   if not is_offline and not teacher_overrides.get("load_parameters_path"):

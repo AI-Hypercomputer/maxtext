@@ -1021,7 +1021,7 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
 
   def _make_mock_config(self):
     cfg = MagicMock()
-    cfg.retry_when_tokens_dropped = False
+    cfg.moe_dropless_fallback = None
     return cfg
 
   def test_returns_five_tuple(self):
@@ -1053,14 +1053,14 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
     )
     self.assertEqual(donate_argnums, 0)
 
-  def test_donate_argnums_is_empty_with_retry_when_tokens_dropped(self):
+  def test_donate_argnums_is_zero_with_step_dropless_fallback(self):
     step = self._make_mock_step()
     cfg = self._make_mock_config()
-    cfg.retry_when_tokens_dropped = True
+    cfg.moe_dropless_fallback = "step"
     _, _, _, _, donate_argnums = maxtext_utils.get_functional_train_with_signature(
         step, "data_sharding", "state_shardings", "model", cfg
     )
-    self.assertEqual(donate_argnums, ())
+    self.assertEqual(donate_argnums, 0)
 
   def test_functional_train_is_partial(self):
     """functional_train should partially apply model and config."""
@@ -1380,11 +1380,19 @@ class TestGetDenseMoeLayers(unittest.TestCase):
     self.assertEqual(dense, 0)
     self.assertEqual(moe, 8)
 
-  def test_qwen3_5_block(self):
+  def test_qwen3_5_moe_block(self):
     cfg = self._make_cfg(DecoderBlockType.QWEN3_5, num_decoder_layers=8)
+    cfg.num_experts = 256
     dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
     self.assertEqual(dense, 0)
     self.assertEqual(moe, 8)
+
+  def test_qwen3_5_dense_block(self):
+    cfg = self._make_cfg(DecoderBlockType.QWEN3_5, num_decoder_layers=8)
+    cfg.num_experts = 1
+    dense, moe = maxtext_utils.get_dense_moe_layers(cfg)
+    self.assertEqual(dense, 8)
+    self.assertEqual(moe, 0)
 
   def test_unsupported_block_raises(self):
     cfg = self._make_cfg(DecoderBlockType.DEFAULT)

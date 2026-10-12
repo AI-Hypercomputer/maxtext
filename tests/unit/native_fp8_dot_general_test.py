@@ -32,8 +32,11 @@ import ml_dtypes
 import numpy as np
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from qwix._src.core import dot_general as qwix_dg
 
+from maxtext.layers import linears
+from maxtext.layers import moe
 from maxtext.layers import quantizations
 
 
@@ -124,9 +127,7 @@ class NativeFp8DotGeneralTest(unittest.TestCase):
 
   def test_dense_general_native_fp8_preserves_out_sharding_and_precision(self):
     """Tests that DenseGeneral under ShardMode.EXPLICIT threads out_sharding and matmul_precision."""
-    from flax import nnx  # pylint: disable=import-outside-toplevel
     from maxtext.configs.types import ShardMode  # pylint: disable=import-outside-toplevel
-    from maxtext.layers import linears  # pylint: disable=import-outside-toplevel
     from jax.sharding import NamedSharding, Mesh, PartitionSpec as P  # pylint: disable=import-outside-toplevel
 
     w_np, s_np = _load_real("attn_w", "attn_s")
@@ -429,7 +430,6 @@ class DenseGeneralNativeFp8Test(unittest.TestCase):
 
   def _make_layer(self, w_np, s_np, quant, rngs):
     """Creates DenseGeneral test layer."""
-    from maxtext.layers import linears  # pylint: disable=import-outside-toplevel
 
     out_dim, in_dim = w_np.shape
     layer = linears.DenseGeneral(
@@ -448,7 +448,6 @@ class DenseGeneralNativeFp8Test(unittest.TestCase):
 
   def _run_family(self, key_w, key_s, seed=0):
     """Runs parity test comparing native FP8 against dequantize baseline."""
-    from flax import nnx  # pylint: disable=import-outside-toplevel
 
     w_np, s_np = _load_real(key_w, key_s)  # (out, in), (out_blocks, in_blocks)
     in_dim = w_np.shape[1]
@@ -482,7 +481,6 @@ class DenseGeneralNativeFp8Test(unittest.TestCase):
 class DequantizeWeightPerChannelTest(unittest.TestCase):
 
   def test_square_matrix_per_channel_scaling(self):
-    from maxtext.layers import linears  # pylint: disable=import-outside-toplevel
 
     w = jnp.ones((4, 4), dtype=jnp.float8_e4m3fn)
     scale_1d = jnp.array([1.0, 2.0, 3.0, 4.0], dtype=jnp.float32)
@@ -491,7 +489,6 @@ class DequantizeWeightPerChannelTest(unittest.TestCase):
       np.testing.assert_allclose(np.asarray(dequant[row]), [1.0, 2.0, 3.0, 4.0])
 
   def test_moe_per_expert_leading_dimension_scaling(self):
-    from maxtext.layers import linears  # pylint: disable=import-outside-toplevel
 
     w = jnp.ones((2, 4, 4), dtype=jnp.float8_e4m3fn)
     scale_exp = jnp.array([2.0, 5.0], dtype=jnp.float32)
@@ -543,6 +540,146 @@ class MoENativeFp8PerChannelTest(unittest.TestCase):
 
     relerr = float(jnp.max(jnp.abs(out_native - out_baseline)) / (jnp.max(jnp.abs(out_baseline)) + 1e-12))
     self.assertLess(relerr, 1e-4, f"MoE GMM v2 native vs dequant baseline relerr={relerr:.3e}")
+
+
+class NativeFp8StaticActScaleTest(unittest.TestCase):
+  """Validates act_calibration_method="fixed,..." (static per-tensor activation scale)."""
+
+  _STATIC = "fixed,-224,224"
+
+  def _per_tensor_operands(self, batch=8, seed=0, act_std=0.5):
+    w_np, s_np = _load_real("attn_w", "attn_s")
+    w_pt, w_scale, tensor_scale = _requantize_per_tensor(w_np, s_np)
+    in_dim = w_np.shape[1]
+    rng = np.random.default_rng(seed)
+    act = (rng.normal(size=(batch, in_dim)).astype(np.float32) * act_std).astype(ml_dtypes.bfloat16)
+    return jnp.asarray(act), jnp.asarray(w_pt), jnp.asarray(w_scale), tensor_scale, in_dim
+
+  def _native(self, act, w, s, in_dim, calib):
+    return quantizations.native_fp8_dot_general(
+        act, w, s, in_dim, (1,), (1,), compute_dtype=jnp.float32, act_calibration_method=calib
+    )
+
+  def test_static_scale_matches_reference(self):
+    act, w, s, tensor_scale, in_dim = self._per_tensor_operands()
+    out = np.asarray(self._native(act, w, s, in_dim, self._STATIC))
+    act_q = (np.asarray(act, np.float32) / 0.5).astype(ml_dtypes.float8_e4m3fn).astype(np.float32) * 0.5
+    ref = act_q @ (np.asarray(w).astype(np.float32) * tensor_scale).T
+    relerr = float(np.max(np.abs(out - ref)) / (np.max(np.abs(ref)) + 1e-12))
+    self.assertLess(relerr, 1e-2, f"static-scale native vs reference relerr={relerr:.3e}")
+
+  def test_static_scale_clips_to_fixed_range(self):
+    act, w, s, _, in_dim = self._per_tensor_operands()
+    act_big = act.at[0, :4].set(1000.0)
+    out_big = self._native(act_big, w, s, in_dim, self._STATIC)
+    out_clipped = self._native(jnp.clip(act_big, -224.0, 224.0), w, s, in_dim, self._STATIC)
+    np.testing.assert_array_equal(np.asarray(out_big), np.asarray(out_clipped))
+
+  def test_static_scale_has_no_activation_reduction(self):
+    act, w, s, _, in_dim = self._per_tensor_operands()
+    jaxpr_absmax = str(jax.make_jaxpr(lambda x: self._native(x, w, s, in_dim, "absmax"))(act))
+    jaxpr_static = str(jax.make_jaxpr(lambda x: self._native(x, w, s, in_dim, self._STATIC))(act))
+    self.assertIn("reduce_max", jaxpr_absmax)
+    self.assertNotIn("reduce_max", jaxpr_static)
+
+  def test_static_scale_with_block_wise_weights(self):
+    w_np, s_np = _load_real("attn_w", "attn_s")
+    in_dim = w_np.shape[1]
+    block = in_dim // s_np.shape[1]
+    rng = np.random.default_rng(0)
+    act = jnp.asarray((rng.normal(size=(4, in_dim)).astype(np.float32) * 0.5).astype(ml_dtypes.bfloat16))
+    out = np.asarray(
+        quantizations.native_fp8_dot_general(
+            act,
+            jnp.asarray(w_np),
+            jnp.asarray(s_np),
+            block,
+            (1,),
+            (1,),
+            compute_dtype=jnp.float32,
+            act_calibration_method=self._STATIC,
+        )
+    )
+    act_q = (np.asarray(act, np.float32) / 0.5).astype(ml_dtypes.float8_e4m3fn).astype(np.float32) * 0.5
+    ref = act_q @ _independent_block_dequant(w_np, s_np).T
+    relerr = float(np.max(np.abs(out - ref)) / (np.max(np.abs(ref)) + 1e-12))
+    self.assertLess(relerr, 1e-2, f"static-scale block-wise native vs reference relerr={relerr:.3e}")
+
+  def test_dense_general_threads_act_calibration_method(self):
+    w_np, s_np = _load_real("attn_w", "attn_s")
+    out_dim, in_dim = w_np.shape
+    x = jnp.zeros((4, in_dim), dtype=jnp.bfloat16)
+    jaxprs = {}
+    for calib in ("absmax", self._STATIC):
+      layer = linears.DenseGeneral(
+          in_features_shape=in_dim,
+          out_features_shape=out_dim,
+          weight_dtype=jnp.float8_e4m3fn,
+          dtype=jnp.bfloat16,
+          block_size=in_dim // s_np.shape[1],
+          kernel_axes=("embed", "mlp"),
+          quant=quantizations.ServeFp8WeightQuantization(act_calibration_method=calib),
+          rngs=nnx.Rngs(0),
+      )
+      layer.kernel[...] = jnp.asarray(w_np.T)
+      layer.kernel_scale[...] = jnp.asarray(s_np.T)
+      jaxprs[calib] = str(jax.make_jaxpr(layer)(x))
+    self.assertIn("reduce_max", jaxprs["absmax"])
+    self.assertNotIn("reduce_max", jaxprs[self._STATIC])
+
+
+class ServeFp8ActCalibrationModesTest(unittest.TestCase):
+  """The two serve_fp8_weight activation modes and how they reach the fused MoE kernel."""
+
+  @staticmethod
+  @jax.jit
+  def _fused_moe_with_lhs_scales(hidden_states, w1_lhs_scale=None, w2_lhs_scale=None):
+    """Stands in for tpu-inference's jitted fused_moe_func after the lhs-scale change."""
+    del w1_lhs_scale, w2_lhs_scale
+    return hidden_states
+
+  @staticmethod
+  @jax.jit
+  def _fused_moe_without_lhs_scales(hidden_states):
+    """Stands in for a tpu-inference fused_moe_func without lhs-scale support."""
+    return hidden_states
+
+  def test_dynamic_mode_has_no_static_scale(self):
+    quant = quantizations.ServeFp8WeightQuantization()
+    self.assertEqual(quant.act_calibration_method, "absmax")
+    self.assertIsNone(quant.static_act_scale())
+
+  def test_static_mode_scale(self):
+    for calib in ("fixed,-224,224", "fixed,224"):
+      scale = quantizations.ServeFp8WeightQuantization(act_calibration_method=calib).static_act_scale()
+      self.assertEqual(scale.shape, (1, 1))
+      self.assertEqual(scale.dtype, jnp.float32)
+      np.testing.assert_array_equal(np.asarray(scale), [[0.5]])  # 224 / 448
+
+  def test_asymmetric_fixed_range_is_rejected_at_construction(self):
+    with self.assertRaises(ValueError):
+      quantizations.ServeFp8WeightQuantization(act_calibration_method="fixed,-100,224")
+
+  def test_fused_moe_kwargs_are_empty_in_dynamic_mode(self):
+    for quant in (None, quantizations.ServeFp8WeightQuantization()):
+      self.assertEqual(moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_with_lhs_scales), {})
+    # Dynamic mode never needs the new tpu-inference arguments.
+    self.assertEqual(
+        moe.fused_moe_lhs_scale_kwargs(quantizations.ServeFp8WeightQuantization(), self._fused_moe_without_lhs_scales),
+        {},
+    )
+
+  def test_fused_moe_kwargs_in_static_mode(self):
+    quant = quantizations.ServeFp8WeightQuantization(act_calibration_method="fixed,-224,224")
+    kwargs = moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_with_lhs_scales)
+    self.assertEqual(set(kwargs), {"w1_lhs_scale", "w2_lhs_scale"})
+    for scale in kwargs.values():
+      np.testing.assert_array_equal(np.asarray(scale), [[0.5]])
+
+  def test_static_mode_with_old_tpu_inference_fails_loudly(self):
+    quant = quantizations.ServeFp8WeightQuantization(act_calibration_method="fixed,-224,224")
+    with self.assertRaisesRegex(ValueError, "w1_lhs_scale"):
+      moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_without_lhs_scales)
 
 
 if __name__ == "__main__":

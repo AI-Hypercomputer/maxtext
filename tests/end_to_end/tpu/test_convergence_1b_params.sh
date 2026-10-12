@@ -7,7 +7,7 @@ echo "Running test_convergence_1b_params.sh"
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
 # DATASET_PATH (Required, unless dataset_path is already set in base.yml)
-# RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
+# RUN_NAME (Required, unless run_name is already set in base.yml or the JOBSET_NAME environment variable is set)
 # LOSS_THRESHOLD (Optional, default is 100.0 )
 #
 # Example to invoke this script:

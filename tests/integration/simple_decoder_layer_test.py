@@ -20,7 +20,7 @@ import pytest
 
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.trainers.pre_train.train import main as train_main
-from tests.utils.test_helpers import get_test_config_path
+from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path
 
 pytestmark = pytest.mark.integration_test
 
@@ -33,7 +33,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
         [
             None,
             get_test_config_path(),
-            "base_output_directory=gs://runner-maxtext-logs",
+            f"base_output_directory={get_test_base_output_directory()}",
             "run_name=runner_simple_decoder_layer_test",
             "dataset_type=synthetic",
             "decoder_block=simple",
@@ -50,7 +50,7 @@ class SimpleDecoderLayerTest(unittest.TestCase):
         [
             None,
             get_test_config_path(),
-            "base_output_directory=gs://runner-maxtext-logs",
+            f"base_output_directory={get_test_base_output_directory()}",
             "run_name=runner_simple_decoder_layer_test",
             "dataset_type=synthetic",
             "decoder_block=simple_mlp",

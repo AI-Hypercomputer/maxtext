@@ -72,7 +72,7 @@ ______________________________________________________________________
 ## 2. Prerequisites
 
 1. **MaxText Environment**: Follow the [installation guide](../install_maxtext.md) to set up your environment (`maxtext[tpu]` or `maxtext[cuda12]`).
-2. **Compute Resources**: A Google Kubernetes Engine (GKE) cluster with TPU slices managed via [XPK](https://github.com/AI-Hypercomputer/xpk).
+2. **Compute Resources**: A Google Kubernetes Engine (GKE) cluster with TPU slices, and the `gcluster` CLI from [Cluster Toolkit](https://github.com/GoogleCloudPlatform/cluster-toolkit). See [Running MaxText via Cluster Toolkit](../run_maxtext/run_maxtext_via_cluster_toolkit.md) for installation and cluster setup.
 3. **Storage**: A Google Cloud Storage (GCS) bucket for logging and Orbax checkpoints (`gs://<GCS_BUCKET>`).
 
 ______________________________________________________________________
@@ -117,13 +117,13 @@ ______________________________________________________________________
 In this recipe, we train **Qwen3-8B** with Streaming DiLoCo across **2 TPU v5p-128 slices** with $H=P=37$ (synchronizing 1 fragment every step) via the SPMD runner script:
 
 ```bash
-CLUSTER="mlperf-v5p" \
-ZONE="europe-west4-b" \
-PROJECT="cloud-tpu-multipod-dev" \
+CLUSTER="your-cluster-name" \
+LOCATION="your-cluster-location" \
+PROJECT="your-project-id" \
 DEVICE_TYPE="v5p-128" \
 NUM_SLICES="2" \
 RUNNAME="stream-dlco-8b-01" \
-XPK_WORKLOAD="stream-dlco-01" \
+WORKLOAD_NAME="stream-dlco-01" \
 BASE_OUTPUT_DIRECTORY="gs://your-bucket/maxtext-logs" \
 DATASET_PATH="gs://your-bucket/maxtext-datasets" \
 MODEL_NAME="qwen3-8b" \
@@ -138,7 +138,7 @@ DILOCO_OUTER_MOMENTUM="0.9" \
 bash src/maxtext/trainers/diloco/scripts/run_spmd_streaming_diloco.sh
 ```
 
-The script builds a Docker image from your local working tree, pushes it, and submits the workload via XPK. It passes `dcn_diloco_parallelism=${NUM_SLICES}`, uses the Grain/TFRecord C4 pipeline, and pins the Qwen3 tokenizer. Add `RESERVATION="<your-reservation>"` if your cluster requires one.
+The script builds a Docker image from your local working tree, pushes it, and submits the workload with `gcluster job submit`. It passes `dcn_diloco_parallelism=${NUM_SLICES}`, uses the Grain/TFRecord C4 pipeline, and pins the Qwen3 tokenizer. `LOCATION` is the cluster's location as shown by `gcloud container clusters list` (the region for regional clusters, the zone for zonal ones), and `WORKLOAD_NAME` (default: `RUNNAME`) must be at most 28 characters. There is no per-workload reservation setting: TPU reservations are configured on the cluster's node pools when the cluster is created.
 
 ```{admonition} The script's defaults are not this tutorial's recommendations
 ---
@@ -163,11 +163,11 @@ ______________________________________________________________________
 For large Mixture-of-Experts (MoE) architectures, this recipe demonstrates Streaming DiLoCo pre-training with the **OLMo Grain** data pipeline across 2x `v5p-128` TPU slices:
 
 ```bash
-XPK_CLUSTER="mlperf-v5p" \
-XPK_ZONE="europe-west4-b" \
-XPK_PROJECT="cloud-tpu-multipod-dev" \
-XPK_DEVICE_TYPE="v5p-128" \
-XPK_NUM_SLICES="2" \
+CLUSTER="your-cluster-name" \
+LOCATION="your-cluster-location" \
+PROJECT="your-project-id" \
+DEVICE_TYPE="v5p-128" \
+NUM_SLICES="2" \
 RUN_NAME="qw3-olmo-dlco-01" \
 WORKLOAD_NAME="qw3-olmo-01" \
 BASE_OUTPUT_DIRECTORY="gs://your-bucket/maxtext-logs" \
@@ -182,8 +182,8 @@ bash src/maxtext/trainers/diloco/scripts/run_olmo_qwen3_30b_streaming_diloco.sh
 ```
 
 - **49 Fragments**: 48 MoE transformer decoder layers + 1 embedding/head fragment ($H=49, P=49$).
-- **Grain Pipeline**: `dataset_type=olmo_grain`, reading a pre-built index (`OLMO_INDEX_PATH`, default `/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json`). The script mounts `OLMO_GCS_BASE` with gcsfuse at `OLMO_LOCAL_MOUNT` and remaps dataset paths from GCS to the local mount.
-- **Derived batch and schedule**: `PER_DEVICE_BATCH_SIZE` defaults to `TARGET_GLOBAL_BATCH / (devices_per_slice * XPK_NUM_SLICES)`, and `STEPS` defaults to a full pass over `TOTAL_INSTANCES`. Override any of these explicitly for shorter runs.
+- **Grain Pipeline**: `dataset_type=olmo_grain`, reading a pre-built index (`OLMO_INDEX_PATH`, default `/tmp/olmo-data/olmo/indices/olmo_index_seq8192.json`). The script mounts `OLMO_GCS_BASE` at `OLMO_LOCAL_MOUNT` through the GKE gcsfuse CSI driver (`gcluster job submit --mount`, which requires the GcsFuseCsiDriver add-on on the cluster) and remaps dataset paths from GCS to the local mount.
+- **Derived batch and schedule**: `PER_DEVICE_BATCH_SIZE` defaults to `TARGET_GLOBAL_BATCH / (devices_per_slice * NUM_SLICES)`, and `STEPS` defaults to a full pass over `TOTAL_INSTANCES`. Override any of these explicitly for shorter runs.
 
 ```{admonition} Same outer-LR caveat applies
 ---
@@ -202,13 +202,13 @@ To resume an interrupted DiLoCo pre-training run, submit the workload with the s
 
 ```bash
 RUNNAME="stream-dlco-8b-01" \
-XPK_WORKLOAD="dlco-resm-01" \
+WORKLOAD_NAME="dlco-resm-01" \
 BASE_OUTPUT_DIRECTORY="gs://your-bucket/maxtext-logs" \
 STEPS="2000" \
 bash src/maxtext/trainers/diloco/scripts/run_spmd_streaming_diloco.sh
 ```
 
-Use a *new* `XPK_WORKLOAD` (workload names must be unique) but the *same* `RUNNAME` and `BASE_OUTPUT_DIRECTORY`, since the checkpoint directory is derived from those. MaxText detects the existing Orbax checkpoint, recognizes it as a multi-replica DiLoCo checkpoint, and restores the per-replica inner optimizer moments together with the outer Nesterov momentum trace.
+Use a *new* `WORKLOAD_NAME` (workload names must be unique and at most 28 characters) but the *same* `RUNNAME` and `BASE_OUTPUT_DIRECTORY`, since the checkpoint directory is derived from those. MaxText detects the existing Orbax checkpoint, recognizes it as a multi-replica DiLoCo checkpoint, and restores the per-replica inner optimizer moments together with the outer Nesterov momentum trace.
 
 ### Bootstrapping from Single-Slice Weights
 

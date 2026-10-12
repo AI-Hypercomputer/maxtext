@@ -27,7 +27,7 @@ When enabled:
 - Production / serving entrypoints (`decode.py`, `maxengine_server.py`, `maxengine_config.py`, tokenizer access in `maxengine.py`) **fail fast with a clear RuntimeError** when decoupled. This prevents accidentally running partial serving logic locally when decoupled mode is ON.
 - Import-time safety is preserved by lightweight stubs returned from `decouple.py` (so modules import cleanly); only active use of missing functionality raises.
 - Conditionally replaces dataset paths in certain tests to point at minimal local datasets.
-- Uses a local base output directory (users can override with `LOCAL_BASE_OUTPUT`).
+- Uses a local base output directory, `maxtext_local_output/gcloud_decoupled_test_logs` (users can override with `LOCAL_BASE_OUTPUT`). Tests that use `get_test_base_output_directory()` write to a per-process subdirectory of it, so parallel workers do not collide.
 - Many tests use the helper `get_test_config_path()` from `tests/utils/test_helpers.py`. In decoupled mode, this helper selects `src/maxtext/configs/decoupled_base_test.yml` instead of `src/maxtext/configs/base.yml`.
 
 Minimal datasets included (checked into the repo):
@@ -47,7 +47,8 @@ pytest -k train_gpu_smoke_test -q
 Optional environment variables:
 
 - `LOCAL_GCLOUD_PROJECT` - placeholder project string (default: `local-maxtext-project`).
-- `LOCAL_BASE_OUTPUT` - override default local output directory used in tests.
+- `LOCAL_BASE_OUTPUT` - override the default local output root used in tests. Each test process still writes to its own subdirectory of it.
+- `MAXTEXT_TEST_OUTPUT_ID` - name of that per-process subdirectory, for processes that must share one (e.g. a multi-host test job). Must be a single path component; under pytest-xdist the worker id is appended.
 
 ## Installing a decoupled environment
 

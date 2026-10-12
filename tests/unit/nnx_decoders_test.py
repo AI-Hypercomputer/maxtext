@@ -57,7 +57,7 @@ from maxtext.layers.normalizations import RMSNorm
 from maxtext.models import gemma4, gemma4_small, qwen3, qwen3_5
 from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
-from maxtext.utils import maxtext_utils, maxtext_utils_nnx
+from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 
 # ---------------------------------------------------------------------------
@@ -1794,6 +1794,33 @@ class Qwen3_5ScannableBlockKVCacheTest(unittest.TestCase):
         kv_caches,
         [f"updated_kv_{i % self.CYCLE}_b{i // self.CYCLE}" for i in range(num_layers)],
     )
+
+
+class ScannedCycleLayerCountTest(unittest.TestCase):
+  """A scanned decoder with a repeating layer cycle needs a whole number of cycles."""
+
+  def _build(self, num_layers):
+    cfg = _make_config(
+        model_name="olmo3-7b-pt",
+        scan_layers=True,
+        base_num_decoder_layers=num_layers,
+        head_dim=64,
+        vocab_size=256,
+    )
+    mesh = maxtext_utils.get_mesh_from_config(cfg)
+    return model_creation_utils.create_nnx_abstract_model(cfg, mesh)
+
+  def test_partial_cycle_is_rejected(self):
+    # olmo3 repeats a 4-layer cycle; 6 layers used to build 4 and drop the rest.
+    with self.assertRaisesRegex(ValueError, "must be a multiple of inhomogeneous_layer_cycle_interval"):
+      self._build(6)
+
+  def test_fewer_layers_than_one_cycle_is_rejected(self):
+    with self.assertRaisesRegex(ValueError, "must be a multiple of inhomogeneous_layer_cycle_interval"):
+      self._build(2)
+
+  def test_whole_cycles_build(self):
+    self._build(8)
 
 
 if __name__ == "__main__":

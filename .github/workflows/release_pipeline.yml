@@ -250,9 +250,12 @@ jobs:
       needs.wait_for_tests_verification.result == 'success'
     permissions:
       id-token: write
+      attestations: write
       contents: read
     uses: ./.github/workflows/pypi_release.yml
     with:
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
       run_id: ${{ github.run_id }}
       publish: true
+    secrets:
+      READTHEDOCS_TOKEN: ${{ secrets.READTHEDOCS_TOKEN }}

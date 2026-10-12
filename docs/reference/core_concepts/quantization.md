@@ -81,6 +81,8 @@ The primary flags to control quantization are:
 
   - `logits_proj_quant_calibration_method` (default: `""`): Calibration method for the logits projection. If empty (default), inherits `weight_quantization_calibration_method` and `act_quantization_calibration_method`. Set to e.g. `'absmax'` to force absmax calibration.
 
+  - `logits_proj_bwd_quant_calibration_method` (default: `""`): Backward (gradient) calibration method for the logits projection, applied to both the activation-gradient and weight-gradient arms. If empty (default), inherits `bwd_quantization_calibration_method` and `drhs_grad_quantization_calibration_method`. Set to e.g. `'absmax'` to force absmax calibration.
+
   - Enabling this together with `logits_dot_in_fp32=True` is rejected at config init, because the fp32 cast on the logits operands would be undone by requantization at the projection matmul.
 
   - MTP has no output head of its own — it reuses the shared `logits_dense` via `apply_output_head`. This flag therefore also quantizes the MTP logits projection, independently of `quantize_mtp`.

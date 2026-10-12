@@ -44,9 +44,13 @@ def loader_exception_guard(config):
   except Exception as e:  # pylint: disable=broad-except
     elastic_utils.maybe_bubble_elastic_exception(config, e)
     if isinstance(e, StopIteration):
-      raise exceptions.StopTraining(f"You may have run out of training data. Received {type(e)}" f" exception: ({e})")
+      raise exceptions.StopTraining(
+          f"You may have run out of training data. Received {type(e)}" f" exception: ({e})"
+      ) from e
     else:
-      raise exceptions.StopTraining(f"`next(self.data_iterator)` failed with {type(e)} exception: ({e}).")
+      raise exceptions.StopTraining(
+          f"`next(self.data_iterator)` failed with {type(e)} exception: ({e}).",
+      ) from e
 
 
 class DataLoader:
