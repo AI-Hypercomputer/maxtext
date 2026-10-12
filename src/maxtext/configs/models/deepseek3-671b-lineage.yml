@@ -133,6 +133,7 @@ logical_axis_rules: [
   ['exp', ['x', 'y']],
   ['expert_only', ['x', 'y']],
   ['embed_moe', ['core', 'z']],
+  ['embed_router', ['core', 'z']],
   ['activation_batch', ['dcn', 'x', 'y', 'z']],
   ['activation_batch_attn', ['x', 'y', 'z']],
   ['activation_batch_moe', ['x', 'y']],

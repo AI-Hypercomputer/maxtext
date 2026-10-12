@@ -30,18 +30,18 @@ from flax import nnx
 from flax import traverse_util
 import jax
 import jax.numpy as jnp
-from maxtext.experimental.lineage import dsv3_config
-from maxtext.experimental.lineage import dsv3_loss
-from maxtext.experimental.lineage import dsv3_sharding
-from maxtext.experimental.lineage import quantization
 from maxtext.utils import max_logging
 import numpy as np
 
+# The Lineage modules are imported inside the use_lineage=True entry points so
+# that importing this module (done unconditionally by the MaxText trainer) does
+# not load the Lineage library and its kernel/JAX-version dependencies.
 if TYPE_CHECKING:
+  from maxtext.experimental.lineage import dsv3_config
   from maxtext.experimental.lineage import dsv3_model
+  from maxtext.experimental.lineage import quantization
 
 _RAGGED_BUFFER_FACTOR = 1.2  # Cross-layer ragged activation bank safety factor.
-_DCN_AXIS = dsv3_sharding.DCN_AXIS
 
 # `nnx.State` keys of `LineageTransformer`.
 PARAMS_KEY = "params"
@@ -86,11 +86,18 @@ def build_axis_mapping(
     cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh | None = None
 ) -> Mapping[str, str | tuple[str, ...]]:
   """Builds axis mapping from Lineage logical axes to MaxText physical mesh axes."""
-  has_dcn = (_DCN_AXIS in mesh.axis_names) if mesh is not None else (_DCN_AXIS in (getattr(cfg, "mesh_axes", ()) or ()))
+  from maxtext.experimental.lineage import dsv3_sharding  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+  dcn_axis = dsv3_sharding.DCN_AXIS
+  has_dcn = (dcn_axis in mesh.axis_names) if mesh is not None else (dcn_axis in (getattr(cfg, "mesh_axes", ()) or ()))
   return dsv3_sharding.build_axis_mapping(dict(cfg.logical_axis_rules), has_dcn=has_dcn)
 
 
-create_physical_device_mesh = dsv3_sharding.create_physical_device_mesh
+def create_physical_device_mesh(ici_parallelism: Sequence[int], devices: Sequence[Any]) -> np.ndarray:
+  """See `dsv3_sharding.create_physical_device_mesh`."""
+  from maxtext.experimental.lineage import dsv3_sharding  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+  return dsv3_sharding.create_physical_device_mesh(ici_parallelism, devices)
 
 
 def create_device_mesh(
@@ -100,6 +107,8 @@ def create_device_mesh(
     allow_split_physical_axes: bool | None = None,
 ) -> np.ndarray:
   """Maps logical mesh axis i one-to-one onto physical axis i, with mesh_utils fallback."""
+  from maxtext.experimental.lineage import dsv3_sharding  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
   return dsv3_sharding.create_device_mesh(
       ici_parallelism,
       devices,
@@ -118,6 +127,8 @@ def get_capacity_factor(cfg: Any) -> float:
 
 def get_quant_config(cfg: Any) -> quantization.QuantConfig | None:
   """Returns the Lineage `QuantConfig` selected by `cfg.lineage_quantization`."""
+  from maxtext.experimental.lineage import dsv3_config  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
   if cfg.lineage_quantization not in dsv3_config.QUANT_CONFIGS:
     raise ValueError(
         "lineage_quantization must be one of"
@@ -252,6 +263,9 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
   Returns:
     The validated config.
   """
+  from maxtext.experimental.lineage import dsv3_config  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from maxtext.experimental.lineage import dsv3_sharding  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
   num_decoder_layers = int(cfg.num_decoder_layers)
   num_dense_layers = int(cfg.first_num_dense_layers)
   router_dtype = _router_dtype(cfg)
@@ -293,7 +307,8 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       head_dot_in_fp32=bool(getattr(cfg, "logits_dot_in_fp32", False)),
       cast_logits_to_fp32=bool(getattr(cfg, "cast_logits_to_fp32", True)),
   )
-  axis_mapping = dsv3_sharding.build_axis_mapping(dict(cfg.logical_axis_rules), has_dcn=_DCN_AXIS in mesh.axis_names)
+  has_dcn = dsv3_sharding.DCN_AXIS in mesh.axis_names
+  axis_mapping = dsv3_sharding.build_axis_mapping(dict(cfg.logical_axis_rules), has_dcn=has_dcn)
   sharding = dsv3_sharding.sharding_config(
       mesh,
       axis_mapping,
@@ -550,6 +565,7 @@ def loss_and_aux(
     `mtp_loss`, `batch_stats`, `has_moe_overflow`, plus `diag_bias_values` /
     `diag_bias_updates` for `log_step_diagnostics`.
   """
+  from maxtext.experimental.lineage import dsv3_loss  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   from maxtext.experimental.lineage import dsv3_model  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   cfg = model.lineage_config()
