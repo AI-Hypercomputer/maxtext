@@ -96,6 +96,13 @@ warmup_programs_in_init: true
 # Stream-chunked c4_mlperf train rows are a single segment of all 1s, so
 # lineage_adapter.loss_and_aux drops the no-op Splash segment mask in training.
 use_stream_chunking: true
+# Keep first-use work out of the first eval:
+# - warm_eval_input_reshard_before_run_start compiles the eval batch's reshard
+#   program on an all-zero batch before run_start. Reads no eval data.
+# - eval_cache_prefill_in_background reads the eval set once on a background
+#   thread right after run_start, so the first eval reads it from memory.
+warm_eval_input_reshard_before_run_start: true
+eval_cache_prefill_in_background: true
 # Runtime XLA flags (keep on a single double-quoted line):
 # - --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=128MiB, which lets XLA
 #   merge each layer's 12-13 per-tensor DCN gradient all-reduces (0.5-28 MiB
