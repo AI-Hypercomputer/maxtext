@@ -81,17 +81,32 @@ jobs:
     environment: release
     if: needs.build_maxtext_package.result == 'success' && inputs.publish
     permissions:
-      id-token: write # required for PyPI Trusted Publishing (OIDC)
+      id-token: write # required for PyPI Trusted Publishing (OIDC) & Sigstore attestations
+      attestations: write
       contents: read
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: maxtext-wheel
           path: dist/
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel-sbom
+          path: sbom/
+      - name: Generate signed SLSA build provenance attestation for wheel
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: 'dist/*.whl'
+      - name: Generate signed SPDX SBOM attestation for wheel
+        uses: actions/attest-sbom@115c3be05ff3974bcbd596578934b3f9ce39bf68 # v2.2.0
+        with:
+          subject-path: 'dist/*.whl'
+          sbom-path: 'sbom/maxtext-wheel.spdx.json'
       - name: Publish MaxText wheel to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
         with:
           packages-dir: dist/
+          attestations: true
 
   get_latest_maxtext_pypi_version:
     name: Get latest MaxText PyPI version
