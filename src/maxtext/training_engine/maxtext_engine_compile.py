@@ -129,6 +129,7 @@ STATE_NOT_PASSED = {
     "update": (),
     maxtext_engine.DROPLESS_FWD_BWD: (_OPTIMIZER_KEY,),
     maxtext_engine.FIRST_PHASE_FWD_BWD: (_OPTIMIZER_KEY,),
+    maxtext_engine.FINAL_DROPLESS_FWD_BWD: (_OPTIMIZER_KEY,),
 }
 
 # The running gradient sum is not train state, but it stays allocated from an update's first
@@ -137,7 +138,12 @@ STATE_NOT_PASSED = {
 # outputs. Charged whether or not a run accumulates: the caller picks the number of micro-batches
 # per update at run time.
 ACCUMULATOR = "gradient accumulator"
-ACCUMULATOR_NOT_PASSED = ("fwd_bwd", maxtext_engine.DROPLESS_FWD_BWD, maxtext_engine.FIRST_PHASE_FWD_BWD)
+ACCUMULATOR_NOT_PASSED = (
+    "fwd_bwd",
+    maxtext_engine.DROPLESS_FWD_BWD,
+    maxtext_engine.FIRST_PHASE_FWD_BWD,
+    maxtext_engine.FINAL_DROPLESS_FWD_BWD,
+)
 
 
 @dataclasses.dataclass(frozen=True)

@@ -514,7 +514,12 @@ class MemoryReportTest(absltest.TestCase):
     self.assertEqual(
         sorted(maxtext_engine_compile.STATE_NOT_PASSED),
         sorted(
-            (*maxtext_engine_compile.KERNEL_NAMES, maxtext_engine.DROPLESS_FWD_BWD, maxtext_engine.FIRST_PHASE_FWD_BWD)
+            (
+                *maxtext_engine_compile.KERNEL_NAMES,
+                maxtext_engine.DROPLESS_FWD_BWD,
+                maxtext_engine.FIRST_PHASE_FWD_BWD,
+                maxtext_engine.FINAL_DROPLESS_FWD_BWD,
+            )
         ),
     )
 
