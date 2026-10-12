@@ -1582,12 +1582,10 @@ class GdnBwdPallasTest(absltest.TestCase):
     orig_kernel = bwd_api.pallas_gdn_bwd_kernel
 
     def wrapped_kernel(*args, **kwargs):
-      recorded_calls.append(
-          (
-              kwargs.get("d_recurrent_state") is not None,
-              bool(kwargs.get("return_dh0", False)),
-          )
-      )
+      recorded_calls.append((
+          kwargs.get("d_recurrent_state") is not None,
+          bool(kwargs.get("return_dh0", False)),
+      ))
       return orig_kernel(*args, **kwargs)
 
     with mock.patch.object(bwd_api, "pallas_gdn_bwd_kernel", side_effect=wrapped_kernel):
@@ -2782,6 +2780,375 @@ class GdnBwdPallasTest(absltest.TestCase):
     f32_dots = dot_generals(jnp.float32)
     self.assertLen(f32_dots, 17)
     self.assertEqual({e.params["precision"] for e in f32_dots}, {highest})
+
+  def test_chunk_size_128_fwd_bwd_and_remat_policies(self):
+    """Verifies chunk_size=128 forward + backward across bf16/fp32, packing, initial states, and remat."""
+    is_tpu = jax.default_backend() == "tpu"
+    chunk_size = 128
+    dims = _packing_dims()
+    batch_size, seq_len = (2 if is_tpu else 1), 2 * chunk_size
+    key = jax.random.PRNGKey(2026)
+    qkv, b, a, cw, cb, al, dt, up = _packing_inputs(key, batch_size, seq_len, dims)
+    cs, rs = _packing_states(jax.random.PRNGKey(2027), batch_size, dims)
+    seg = jnp.zeros((batch_size, seq_len), dtype=jnp.int32)
+    # Row 0: doc 1 across chunk boundary, doc 2 with trailing 0-pad
+    seg = seg.at[0, : chunk_size + 20].set(1)
+    seg = seg.at[0, chunk_size + 20 : 2 * chunk_size - 12].set(2)
+    if batch_size > 1:
+      # Row 1: leading 0-pad, doc 1, doc 2
+      seg = seg.at[1, 8 : chunk_size - 8].set(1)
+      seg = seg.at[1, chunk_size - 8 :].set(2)
+
+    def ref_loss(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_):
+      o, (ncs, nrs) = _call_pure_jax(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, seg, dims, chunk_size)
+      loss = jnp.sum(o * up) + 0.1 * jnp.sum(ncs) + 0.2 * jnp.sum(nrs)
+      return loss, (o, ncs, nrs)
+
+    ref_vg = jax.value_and_grad(ref_loss, argnums=tuple(range(9)), has_aux=True)
+    if is_tpu:
+      ref_vg = jax.jit(ref_vg)
+    (_, ref_aux), ref_grads = ref_vg(qkv, b, a, cw, cb, al, dt, cs, rs)
+
+    cp_state_policy = jax.checkpoint_policies.save_only_these_names("gdn_cp_state")
+    cases = (
+        [
+            (act_dtype, tol, policy)
+            for act_dtype, tol in ((jnp.float32, 1.5e-2), (jnp.bfloat16, 4e-2))
+            for policy in (None, jax.checkpoint_policies.nothing_saveable, cp_state_policy)
+        ]
+        if is_tpu
+        else [
+            (jnp.float32, 2e-3, None),
+            (jnp.bfloat16, 4e-2, cp_state_policy),
+        ]
+    )
+
+    for act_dtype, tol, policy in cases:
+      qkv_d = qkv.astype(act_dtype)
+      b_d = b.astype(act_dtype)
+      a_d = a.astype(act_dtype)
+      cw_d = cw.astype(act_dtype)
+      cb_d = cb.astype(act_dtype)
+      up_d = up.astype(act_dtype)
+
+      def kern_step(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, _act_dtype=act_dtype):
+        return gdn_bwd_pallas.gdn_decoupled_conv1d(
+            qkv_,
+            b_,
+            a_,
+            cw_,
+            cb_,
+            al_,
+            dt_,
+            cs_,
+            rs_,
+            dims["num_k_heads"],
+            dims["num_v_heads"],
+            dims["head_k_dim"],
+            dims["head_v_dim"],
+            dims["conv_kernel_size"],
+            chunk_size,
+            True,
+            _act_dtype,
+            None,
+            seg,
+        )
+
+      step_fn = jax.checkpoint(kern_step, policy=policy) if policy is not None else kern_step
+
+      def kern_loss(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, _step=step_fn, _up_d=up_d):
+        o, (ncs, nrs) = _step(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_)
+        loss = (
+            jnp.sum(o.astype(jnp.float32) * _up_d.astype(jnp.float32))
+            + 0.1 * jnp.sum(ncs.astype(jnp.float32))
+            + 0.2 * jnp.sum(nrs)
+        )
+        return loss, (o, ncs, nrs)
+
+      kern_vg = jax.value_and_grad(kern_loss, argnums=tuple(range(9)), has_aux=True)
+      if is_tpu:
+        kern_vg = jax.jit(kern_vg)
+      (_, got_aux), got_grads = kern_vg(qkv_d, b_d, a_d, cw_d, cb_d, al, dt, cs, rs)
+      for name, got, exp in zip(("out", "next_conv_state", "next_recurrent_state"), got_aux, ref_aux):
+        np.testing.assert_allclose(
+            np.asarray(got, dtype=np.float32),
+            np.asarray(exp, dtype=np.float32),
+            rtol=tol,
+            atol=tol,
+            err_msg=f"chunk_size={chunk_size} dtype={act_dtype} policy={policy}: {name}",
+        )
+      for name, got, exp in zip(_GRAD_NAMES + ("d_conv_state", "d_recurrent_state"), got_grads, ref_grads):
+        np.testing.assert_allclose(
+            np.asarray(got, dtype=np.float32),
+            np.asarray(exp, dtype=np.float32),
+            rtol=tol,
+            atol=tol,
+            err_msg=f"chunk_size={chunk_size} dtype={act_dtype} policy={policy}: {name}",
+        )
+
+  def test_chunk_size_128_head_group_size_64_v_heads(self):
+    """Verifies chunk_size=128 with num_k_heads=16, num_v_heads=64 for both bf16 and fp32 activations + packing."""
+    if jax.default_backend() != "tpu":
+      self.skipTest("TPU-specific VMEM head_group_size test at chunk_size=128")
+    from maxtext.kernels.gdn import compute_gdn as local_compute_gdn  # pylint: disable=import-outside-toplevel
+
+    self.assertIsNone(local_compute_gdn.default_head_group_size(64, 16, 64))
+    self.assertEqual(local_compute_gdn.default_head_group_size(128, 16, 64), 8)
+    self.assertEqual(local_compute_gdn.default_head_group_size(128, 16, 64, jnp.bfloat16), 8)
+    self.assertEqual(local_compute_gdn.default_head_group_size(128, 16, 64, jnp.float32), 2)
+    self.assertIsNone(local_compute_gdn.default_head_group_size(128, 8, 32, jnp.bfloat16))
+
+    chunk_size = 128
+    dims = {"num_k_heads": 16, "num_v_heads": 64, "head_k_dim": 128, "head_v_dim": 128, "conv_kernel_size": 4}
+    batch_size, seq_len = 1, 256
+    key = jax.random.PRNGKey(3030)
+    qkv, b, a, cw, cb, al, dt, up = _packing_inputs(key, batch_size, seq_len, dims)
+    cs, rs = _packing_states(jax.random.PRNGKey(3031), batch_size, dims)
+    seg = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    seg = seg.at[0, :8].set(0)
+    seg = seg.at[0, chunk_size + 20 : 2 * chunk_size - 6].set(2)
+    seg = seg.at[0, 2 * chunk_size - 6 :].set(0)
+
+    def ref_loss(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_):
+      o, (ncs, nrs) = _call_pure_jax(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, seg, dims, chunk_size)
+      loss = jnp.sum(o * up) + 0.1 * jnp.sum(ncs) + 0.2 * jnp.sum(nrs)
+      return loss, (o, ncs, nrs)
+
+    (_, ref_aux), ref_grads = jax.jit(jax.value_and_grad(ref_loss, argnums=tuple(range(9)), has_aux=True))(
+        qkv, b, a, cw, cb, al, dt, cs, rs
+    )
+
+    for act_dtype, tol in ((jnp.bfloat16, 4e-2), (jnp.float32, 2e-2)):
+      qkv_d, b_d, a_d, cw_d, cb_d, up_d = (x.astype(act_dtype) for x in (qkv, b, a, cw, cb, up))
+
+      def kern_loss(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, _act_dtype=act_dtype, _up_d=up_d):
+        o, (ncs, nrs) = gdn_bwd_pallas.gdn_decoupled_conv1d(
+            qkv_,
+            b_,
+            a_,
+            cw_,
+            cb_,
+            al_,
+            dt_,
+            cs_,
+            rs_,
+            dims["num_k_heads"],
+            dims["num_v_heads"],
+            dims["head_k_dim"],
+            dims["head_v_dim"],
+            dims["conv_kernel_size"],
+            chunk_size,
+            True,
+            _act_dtype,
+            None,
+            seg,
+        )
+        loss = (
+            jnp.sum(o.astype(jnp.float32) * _up_d.astype(jnp.float32))
+            + 0.1 * jnp.sum(ncs.astype(jnp.float32))
+            + 0.2 * jnp.sum(nrs)
+        )
+        return loss, (o, ncs, nrs)
+
+      (_, got_aux), got_grads = jax.jit(jax.value_and_grad(kern_loss, argnums=tuple(range(9)), has_aux=True))(
+          qkv_d, b_d, a_d, cw_d, cb_d, al, dt, cs, rs
+      )
+      for name, got, exp in zip(("out", "next_conv_state", "next_recurrent_state"), got_aux, ref_aux):
+        np.testing.assert_allclose(
+            np.asarray(got, dtype=np.float32),
+            np.asarray(exp, dtype=np.float32),
+            rtol=tol,
+            atol=tol,
+            err_msg=f"64 V heads chunk_size=128 dtype={act_dtype}: {name}",
+        )
+      for name, got, exp in zip(_GRAD_NAMES + ("d_conv_state", "d_recurrent_state"), got_grads, ref_grads):
+        np.testing.assert_allclose(
+            np.asarray(got, dtype=np.float32),
+            np.asarray(exp, dtype=np.float32),
+            rtol=tol,
+            atol=tol,
+            err_msg=f"64 V heads chunk_size=128 dtype={act_dtype}: {name}",
+        )
+
+  def test_chunk_size_128_head_cp_packed_with_initial_states(self):
+    """Verifies head-sharded CP (gdn_cp_mode='head') at chunk_size=128 with packed segment_ids and initial states."""
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Requires at least 2 devices for head-CP")
+    is_tpu = jax.default_backend() == "tpu"
+    chunk_size = 128
+    dims = _packing_dims()
+    cp_size = 2
+    local_dims = {
+        **dims,
+        "num_k_heads": dims["num_k_heads"] // cp_size,
+        "num_v_heads": dims["num_v_heads"] // cp_size,
+    }
+    batch_size, seq_len = (2 if is_tpu else 1), 2 * chunk_size
+    key = jax.random.PRNGKey(5050)
+    qkv, b, a, cw, cb, al, dt, up = _packing_inputs(key, batch_size, seq_len, dims)
+    cs, rs = _packing_states(jax.random.PRNGKey(5051), batch_size, dims)
+    seg = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    seg = seg.at[0, :10].set(0)
+    seg = seg.at[0, chunk_size + 14 : 2 * chunk_size - 6].set(2)
+    seg = seg.at[0, 2 * chunk_size - 6 :].set(0)
+    if batch_size > 1:
+      seg = seg.at[1, :chunk_size].set(0)
+      seg = seg.at[1, chunk_size + 8 :].set(2)
+
+    q_size = dims["num_k_heads"] * dims["head_k_dim"]
+    k_size = dims["num_k_heads"] * dims["head_k_dim"]
+    v_size = dims["num_v_heads"] * dims["head_v_dim"]
+
+    def split_qkv_heads(x, axis):
+      q, k, v = jnp.split(x, [q_size, q_size + k_size], axis=axis)
+      q_s = q.reshape(*q.shape[:axis], cp_size, q_size // cp_size, *q.shape[axis + 1 :])
+      k_s = k.reshape(*k.shape[:axis], cp_size, k_size // cp_size, *k.shape[axis + 1 :])
+      v_s = v.reshape(*v.shape[:axis], cp_size, v_size // cp_size, *v.shape[axis + 1 :])
+      return jnp.concatenate([q_s, k_s, v_s], axis=axis + 1)
+
+    def merge_qkv_heads(x, axis):
+      lq = q_size // cp_size
+      lk = k_size // cp_size
+      q_s, k_s, v_s = jnp.split(x, [lq, lq + lk], axis=axis + 1)
+      q = q_s.reshape(*q_s.shape[:axis], q_size, *q_s.shape[axis + 2 :])
+      k = k_s.reshape(*k_s.shape[:axis], k_size, *k_s.shape[axis + 2 :])
+      v = v_s.reshape(*v_s.shape[:axis], v_size, *v_s.shape[axis + 2 :])
+      return jnp.concatenate([q, k, v], axis=axis)
+
+    mesh = jax.sharding.Mesh(np.array(devices[:cp_size]), ("context",))
+    ps_h2 = jax.sharding.PartitionSpec(None, None, "context", None)
+    ps_cw = jax.sharding.PartitionSpec(None, None, "context", None)
+    ps_h0 = jax.sharding.PartitionSpec("context", None)
+    ps_h0_1d = jax.sharding.PartitionSpec("context", None)
+    ps_rs = jax.sharding.PartitionSpec(None, "context", None, None)
+    ps_rep = jax.sharding.PartitionSpec()
+
+    def loss_single(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_):
+      o, (ncs, nrs) = _call_pure_jax(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, seg, dims, chunk_size)
+      return jnp.sum(o * up) + 0.13 * jnp.sum(ncs) + 0.19 * jnp.sum(nrs), (o, ncs, nrs)
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(ps_h2, ps_h2, ps_h2, ps_cw, ps_h0, ps_h0_1d, ps_h0_1d, ps_h2, ps_rs, ps_rep),
+        out_specs=(ps_h2, ps_h2, ps_rs),
+        check_vma=False,
+    )
+    def run_head_cp(qkv_h, b_h, a_h, cw_h, cb_h, al_h, dt_h, cs_h, rs_h, seg_rep):
+      o_h, (ncs_h, nrs_h) = _call_kernel_api(
+          qkv_h.squeeze(2),
+          b_h.squeeze(2),
+          a_h.squeeze(2),
+          cw_h.squeeze(2),
+          cb_h.squeeze(0),
+          al_h.squeeze(0),
+          dt_h.squeeze(0),
+          cs_h.squeeze(2),
+          rs_h,
+          seg_rep,
+          local_dims,
+          chunk_size,
+          None,
+      )
+      return jnp.expand_dims(o_h, 2), jnp.expand_dims(ncs_h, 2), nrs_h
+
+    def loss_head_cp(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_):
+      nv_local = local_dims["num_v_heads"]
+      o_h, ncs_h, nrs = run_head_cp(
+          split_qkv_heads(qkv_, 2),
+          b_.reshape(batch_size, seq_len, cp_size, nv_local),
+          a_.reshape(batch_size, seq_len, cp_size, nv_local),
+          split_qkv_heads(cw_, 2),
+          split_qkv_heads(cb_, 0),
+          al_.reshape(cp_size, nv_local),
+          dt_.reshape(cp_size, nv_local),
+          split_qkv_heads(cs_, 2),
+          rs_,
+          seg,
+      )
+      o = o_h.reshape(batch_size, seq_len, dims["num_v_heads"], dims["head_v_dim"])
+      ncs = merge_qkv_heads(ncs_h, 2)
+      return jnp.sum(o * up) + 0.13 * jnp.sum(ncs) + 0.19 * jnp.sum(nrs), (o, ncs, nrs)
+
+    args = (qkv, b, a, cw, cb, al, dt, cs, rs)
+    vg_s = jax.value_and_grad(loss_single, argnums=tuple(range(9)), has_aux=True)
+    vg_h = jax.value_and_grad(loss_head_cp, argnums=tuple(range(9)), has_aux=True)
+    if is_tpu:
+      vg_s = jax.jit(vg_s)
+      vg_h = jax.jit(vg_h)
+    (_, aux_s), grads_s = vg_s(*args)
+    (_, aux_h), grads_h = vg_h(*args)
+    tol = 2e-2 if is_tpu else 2e-3
+    for name, got, exp in zip(("out", "next_conv_state", "next_recurrent_state"), aux_h, aux_s):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=tol, atol=tol, err_msg=f"head-CP c=128: {name}")
+    for name, got, exp in zip(_GRAD_NAMES + ("d_conv_state", "d_recurrent_state"), grads_h, grads_s):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=tol, atol=tol, err_msg=f"head-CP c=128: {name}")
+
+  def test_chunk_size_128_seq_cp_packed_with_initial_states(self):
+    """Verifies seq-CP (cp_axis_name='context') at chunk_size=128 with on-the-fly t_inv recomputation."""
+    devices = jax.devices()
+    if len(devices) < 2:
+      self.skipTest("Requires at least 2 devices for seq-CP")
+    is_tpu = jax.default_backend() == "tpu"
+    chunk_size = 128
+    dims = _packing_dims()
+    batch_size, seq_len = (2 if is_tpu else 1), 4 * chunk_size  # 2 chunks per rank across 2 CP ranks
+    key = jax.random.PRNGKey(4040)
+    qkv, b, a, cw, cb, al, dt, up = _packing_inputs(key, batch_size, seq_len, dims)
+    cs, rs = _packing_states(jax.random.PRNGKey(4041), batch_size, dims)
+    seg = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    seg = seg.at[0, :12].set(0)
+    seg = seg.at[0, chunk_size + 16 : 3 * chunk_size - 8].set(2)
+    seg = seg.at[0, 3 * chunk_size - 8 :].set(0)
+    if batch_size > 1:
+      seg = seg.at[1, : 2 * chunk_size].set(0)
+      seg = seg.at[1, 2 * chunk_size + 10 :].set(2)
+
+    mesh = jax.sharding.Mesh(np.array(devices[:2]), ("context",))
+    ps_seq = jax.sharding.PartitionSpec(None, "context", None)
+    ps_seg = jax.sharding.PartitionSpec(None, "context")
+    ps_rep = jax.sharding.PartitionSpec()
+    ps_up = jax.sharding.PartitionSpec(None, "context", None, None)
+
+    def loss_single(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_):
+      o, (ncs, nrs) = _call_pure_jax(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, seg, dims, chunk_size)
+      return jnp.sum(o * up) + 0.13 * jnp.sum(ncs) + 0.19 * jnp.sum(nrs), (o, ncs, nrs)
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(ps_seq, ps_seq, ps_seq, ps_rep, ps_rep, ps_rep, ps_rep, ps_rep, ps_rep, ps_seg, ps_up),
+        out_specs=(ps_up, ps_rep, ps_rep),
+        check_vma=False,
+    )
+    def run_cp(qkv_s, b_s, a_s, cw_, cb_, al_, dt_, cs_, rs_, seg_s, up_s):
+      del up_s
+      o, (ncs, nrs) = _call_kernel_api(qkv_s, b_s, a_s, cw_, cb_, al_, dt_, cs_, rs_, seg_s, dims, chunk_size, "context")
+      return o, ncs, nrs
+
+    # Also exercise custom remat saving only gdn_cp_state on TPU to verify chunk_states != None and t_inv_fwd == None.
+    run_cp_fn = (
+        jax.checkpoint(run_cp, policy=jax.checkpoint_policies.save_only_these_names("gdn_cp_state")) if is_tpu else run_cp
+    )
+
+    def loss_cp(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_):
+      o, ncs, nrs = run_cp_fn(qkv_, b_, a_, cw_, cb_, al_, dt_, cs_, rs_, seg, up)
+      return jnp.sum(o * up) + 0.13 * jnp.sum(ncs) + 0.19 * jnp.sum(nrs), (o, ncs, nrs)
+
+    args = (qkv, b, a, cw, cb, al, dt, cs, rs)
+    vg_s = jax.value_and_grad(loss_single, argnums=tuple(range(9)), has_aux=True)
+    vg_c = jax.value_and_grad(loss_cp, argnums=tuple(range(9)), has_aux=True)
+    if is_tpu:
+      vg_s = jax.jit(vg_s)
+      vg_c = jax.jit(vg_c)
+    (_, aux_s), grads_s = vg_s(*args)
+    (_, aux_c), grads_c = vg_c(*args)
+    tol = 2e-2 if is_tpu else 2e-3
+    for name, got, exp in zip(("out", "next_conv_state", "next_recurrent_state"), aux_c, aux_s):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=tol, atol=tol, err_msg=f"CP c=128: {name}")
+    for name, got, exp in zip(_GRAD_NAMES + ("d_conv_state", "d_recurrent_state"), grads_c, grads_s):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=tol, atol=tol, err_msg=f"CP c=128: {name}")
 
 
 def _find_eqns(jaxpr, primitive_name):
