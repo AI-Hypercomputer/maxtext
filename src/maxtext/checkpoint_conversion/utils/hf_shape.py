@@ -1053,6 +1053,38 @@ def LLAMA31_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def OLMO3_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns Hugging Face OLMo3 parameter shapes, including flattened QK norms."""
+  hidden_size = config["hidden_size"]
+  head_dim = config.get("head_dim") or hidden_size // config["num_attention_heads"]
+  query_size = config["num_attention_heads"] * head_dim
+  kv_size = config["num_key_value_heads"] * head_dim
+  mapping = {
+      "model.embed_tokens.weight": [config["vocab_size"], hidden_size],
+      "model.norm.weight": [hidden_size],
+      "lm_head.weight": [config["vocab_size"], hidden_size],
+  }
+  for layer_idx in range(config["num_hidden_layers"]):
+    prefix = f"model.layers.{layer_idx}"
+    mapping.update(
+        {
+            f"{prefix}.self_attn.q_proj.weight": [query_size, hidden_size],
+            f"{prefix}.self_attn.k_proj.weight": [kv_size, hidden_size],
+            f"{prefix}.self_attn.v_proj.weight": [kv_size, hidden_size],
+            f"{prefix}.self_attn.o_proj.weight": [hidden_size, query_size],
+            # OLMo3 normalizes projected Q/K before splitting the head dimension.
+            f"{prefix}.self_attn.q_norm.weight": [query_size],
+            f"{prefix}.self_attn.k_norm.weight": [kv_size],
+            f"{prefix}.mlp.gate_proj.weight": [config["intermediate_size"], hidden_size],
+            f"{prefix}.mlp.up_proj.weight": [config["intermediate_size"], hidden_size],
+            f"{prefix}.mlp.down_proj.weight": [hidden_size, config["intermediate_size"]],
+            f"{prefix}.post_attention_layernorm.weight": [hidden_size],
+            f"{prefix}.post_feedforward_layernorm.weight": [hidden_size],
+        }
+    )
+  return mapping
+
+
 def MIXTRAL_HF_WEIGHTS_TO_SHAPE(config):
   """
   Returns a mapping of Hugging Face parameter names to their tensor shapes.
@@ -1357,6 +1389,9 @@ HF_SHAPE = {
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
+    "olmo3-7b": OLMO3_HF_WEIGHTS_TO_SHAPE,
+    "olmo3-7b-pt": OLMO3_HF_WEIGHTS_TO_SHAPE,
+    "olmo3-32b": OLMO3_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-9b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
