@@ -3850,7 +3850,7 @@ class MaxTextConfig(
       raise ValueError(f"first_phase_ragged_buffer_factor must be >= 0 (got {self.first_phase_ragged_buffer_factor}).")
     if self.retry_dropless_first_steps > 0 and not self.retry_when_tokens_dropped:
       raise ValueError("retry_dropless_first_steps > 0 requires retry_when_tokens_dropped=True.")
-    if self.first_phase_ragged_buffer_factor > 0 and self.retry_dropless_first_steps <= 0:
+    if self.first_phase_ragged_buffer_factor > 0 and self.retry_dropless_first_steps == 0:
       raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_dropless_first_steps > 0.")
 
     if self.retry_when_tokens_dropped:

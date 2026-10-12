@@ -3158,10 +3158,10 @@ class RoutedMoE(nnx.Module):
           return carry, (out_c, lb_c, bu_c, jnp.asarray(ov_c, dtype=jnp.bool_))
 
         xs = tuple(split(a) for a in (x, logits, pre_bias_logits, sharded_input_ids, forced_routed_experts))
-        _, (outs, lb, bu, ov) = jax.lax.scan(body, None, xs)
+        _, (outs, lb, bias_upd, ov) = jax.lax.scan(body, None, xs)
         output = jnp.moveaxis(outs, 0, 1).reshape(outs.shape[1], seq_len, *outs.shape[3:])
         lb_loss = None if lb is None else jnp.mean(lb, axis=0)
-        bias_updates = None if bu is None else jnp.mean(bu, axis=0)
+        bias_updates = None if bias_upd is None else jnp.mean(bias_upd, axis=0)
         return output, lb_loss, bias_updates, jnp.any(ov)
 
       def _route_and_compute(force_dropless):
