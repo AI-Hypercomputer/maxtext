@@ -85,6 +85,7 @@ KERNEL_NAMES = ("fwd_bwd", "accumulate", "update")
 # through: the same kernel on the dropless graphdef (see `fwd_bwd`). Not one of `KERNEL_NAMES`: no update runs it
 # unless a buffer overflows, so it is added only when the replay is on.
 DROPLESS_FWD_BWD = "fwd_bwd_dropless"
+FIRST_PHASE_FWD_BWD = "fwd_bwd_first_phase"
 
 _PURE_STATE_FALLBACK_WARNING = (
     "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
@@ -688,6 +689,13 @@ def apply_dropless_overrides(config: pyconfig.HyperParameters, root: Any) -> Non
       module.remat_policy_override = "full"
 
 
+def apply_first_phase_overrides(config: pyconfig.HyperParameters, root: Any) -> None:
+  """Edits `root` in place so RoutedMoE uses `first_phase_ragged_buffer_factor`."""
+  for _, module in nnx.iter_graph(root):
+    if isinstance(module, moe.RoutedMoE):
+      module.ragged_buffer_factor_override = float(config.first_phase_ragged_buffer_factor)
+
+
 @dataclasses.dataclass(frozen=True)
 class _PendingOverflowCheck:
   """A micro-batch `fwd_bwd` accumulated before its MoE overflow flag reached the host.
@@ -850,6 +858,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # rebuilt when the model is re-split into a different one.
     self._dropless_source_graphdef: Any = None
     self._compiled_fwd_bwd_dropless: Any = None
+    self._first_phase_graphdef: Any = None
+    self._first_phase_source_graphdef: Any = None
+    self._compiled_fwd_bwd_first_phase: Any = None
+    self._start_step: int | None = None
     # The compiled path compiles `fwd_bwd_dropless` on a background thread from the first micro-batch, and joins it
     # before the first rerun or the update, whichever comes first.
     self._dropless_compile: concurrent.futures.Future | None = None
@@ -1529,6 +1541,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._dropless_source_graphdef = graphdef
     return self._dropless_graphdef
 
+  def _first_phase_graphdef_for(self, graphdef: Any, params_pure: Any, rest_pure: Any) -> Any:
+    """`graphdef` with `apply_first_phase_overrides` applied, edited on a copy of the model.
+
+    Cached until the model is re-split into a different graphdef.
+    """
+    if self._first_phase_graphdef is None or self._first_phase_source_graphdef != graphdef:
+      mdl = nnx.merge(graphdef, params_pure, rest_pure, copy=True)
+      apply_first_phase_overrides(self._config, mdl)
+      self._first_phase_graphdef, _, _ = nnx.split(mdl, nnx.Param, ...)
+      self._first_phase_source_graphdef = graphdef
+    return self._first_phase_graphdef
+
+  def _in_first_phase(self) -> bool:
+    """Returns True if the current train step is within the initial first-phase window."""
+    if self._config.retry_dropless_first_steps <= 0:
+      return False
+    if self._start_step is None or self.train_step < self._start_step:
+      self._start_step = self.train_step
+    return (self.train_step - self._start_step) < self._config.retry_dropless_first_steps
+
   @staticmethod
   def _accumulate_kernel(acc_grads, acc_denom, grads, denominator):
     """Adds one micro-batch's gradients and loss denominator to the running sums.
@@ -1997,6 +2029,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           in_shardings=fwd_bwd_in_shardings,
           out_shardings=fwd_bwd_out_shardings,
       )
+    self._compiled_fwd_bwd_first_phase = None
+    if self._dropless_replay and self._config.first_phase_ragged_buffer_factor > 0:
+      first_phase_graphdef = self._first_phase_graphdef_for(self._model_graphdef, params_pure, rest_pure)
+
+      def fwd_bwd_first_phase(params, rest, dynamic):
+        batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
+        return self._fwd_bwd_kernel(params, rest, batch, graphdef=first_phase_graphdef)
+
+      self._compiled_fwd_bwd_first_phase = jax.jit(
+          fwd_bwd_first_phase,
+          in_shardings=fwd_bwd_in_shardings,
+          out_shardings=fwd_bwd_out_shardings,
+      )
     self._compiled_accumulate = jax.jit(
         accumulate,
         in_shardings=accumulate_in_shardings,
@@ -2026,6 +2071,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     }
     if self._compiled_fwd_bwd_dropless is not None:
       self._jitted_kernels[DROPLESS_FWD_BWD] = self._compiled_fwd_bwd_dropless
+    if self._compiled_fwd_bwd_first_phase is not None:
+      self._jitted_kernels[FIRST_PHASE_FWD_BWD] = self._compiled_fwd_bwd_first_phase
     self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
     self._compiled = True
 
@@ -2092,6 +2139,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_update = compiled["update"]
     if DROPLESS_FWD_BWD in compiled:
       self._compiled_fwd_bwd_dropless = compiled[DROPLESS_FWD_BWD]
+    if FIRST_PHASE_FWD_BWD in compiled:
+      self._compiled_fwd_bwd_first_phase = compiled[FIRST_PHASE_FWD_BWD]
     self._compile_eval(dummy_data, compiler_options)
 
   def compile_kernels(
@@ -2198,6 +2247,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       }
       if DROPLESS_FWD_BWD in self._jitted_kernels:
         lowered[DROPLESS_FWD_BWD] = self._jitted_kernels[DROPLESS_FWD_BWD].lower(params_aval, rest_aval, batch_aval)
+      if FIRST_PHASE_FWD_BWD in self._jitted_kernels:
+        lowered[FIRST_PHASE_FWD_BWD] = self._jitted_kernels[FIRST_PHASE_FWD_BWD].lower(
+            params_aval, rest_aval, batch_aval
+        )
       return lowered
 
   def _start_running_sum(self, grads: Any) -> Any:
@@ -2257,10 +2310,33 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # After any recompile, not before: reading first would hand the new kernel a pure
     # state split against the old graph.
     params, rest = self._read_model_pure(model)
-    if self._dropless_replay and not self._compile_requested:
-      dropless_kernel = functools.partial(
-          self._fwd_bwd_kernel, graphdef=self._dropless_graphdef_for(self._model_graphdef, params, rest)
-      )
+    if self._dropless_replay:
+      if not self._compile_requested:
+        dropless_kernel = functools.partial(
+            self._fwd_bwd_kernel, graphdef=self._dropless_graphdef_for(self._model_graphdef, params, rest)
+        )
+      if self._in_first_phase():
+        if self._config.first_phase_ragged_buffer_factor <= 0.0:
+          if self._compile_requested:
+            if not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled):
+              self._join_dropless_compile()
+            if not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled):
+              avals = jax.tree.map(_to_aval, (params, rest, inputs))
+              options = self._xla_options(None)
+              with self._sharding_ctx():
+                self._compiled_fwd_bwd_dropless = self._compiled_fwd_bwd_dropless.lower(*avals).compile(
+                    compiler_options=options
+                )
+            fwd_bwd_kernel = self._compiled_fwd_bwd_dropless
+          else:
+            fwd_bwd_kernel = dropless_kernel
+        else:
+          if self._compile_requested:
+            fwd_bwd_kernel = self._compiled_fwd_bwd_first_phase
+          else:
+            fwd_bwd_kernel = functools.partial(
+                self._fwd_bwd_kernel, graphdef=self._first_phase_graphdef_for(self._model_graphdef, params, rest)
+            )
     with self._sharding_ctx():
       outputs = fwd_bwd_kernel(params, rest, inputs)
       if (
@@ -2900,6 +2976,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     else:
       self.train_step = restored_step
       self._resumed_mid_step = False
+    self._start_step = self.train_step
 
     # Restore intra-step state if it exists. Gated on the count because for a complete step
     # `restored_checkpoint_state.accumulated_grads` is just the value this engine passed in

@@ -39,7 +39,7 @@ import pytest
 pytestmark = [pytest.mark.post_training]
 
 
-def _cfg():
+def _cfg(**kwargs):
   return pyconfig.initialize(
       [sys.argv[0], get_test_config_path(), "attention=dot_product"],
       enable_checkpointing=False,
@@ -66,6 +66,7 @@ def _cfg():
       num_decoder_layers=1,
       scan_layers=False,
       run_name="dropless_replay_engine_test",
+      **kwargs,
   )
 
 
@@ -93,11 +94,11 @@ class DroplessReplayEngineTest(unittest.TestCase):
     os.environ["NEW_MODEL_DESIGN"] = "1"
     os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
-  def _engine(self, overflow_on_normal_path, flag="sown", has_aux=True):
+  def _engine(self, overflow_on_normal_path, flag="sown", has_aux=True, **config_overrides):
     """`flag` is where the loss leaves the overflow flag: sown on the model, in its aux as MaxText's loss does, or
     nowhere, as a loss that runs the forward on a split/merged copy of the model (Tunix's GRPO loss) does.
     `overflow_on_normal_path="marked"` overflows only the micro-batches built with `_payload(_MARKED)`."""
-    cfg = _cfg()
+    cfg = _cfg(**config_overrides)
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     real_model = models.Transformer(config=cfg, mesh=mesh, quant=None, model_mode="train", rngs=nnx.Rngs(0))
     with mock.patch.object(maxtext_engine.model_creation_utils, "from_pretrained", return_value=real_model):
@@ -108,6 +109,7 @@ class DroplessReplayEngineTest(unittest.TestCase):
 
     def loss_fn(model, **batch):
       dropless = all(m.force_dropless for m in _moes(model))
+      first_phase = any(getattr(m, "ragged_buffer_factor_override", None) is not None for m in _moes(model))
       loss, aux = base_loss(nnx.merge(*nnx.split(model)) if flag == "none" else model, **batch)
       # MaxText's loss returns a constant False flag here (retry_when_tokens_dropped is off in the config).
       aux = {k: v for k, v in aux.items() if k != "has_moe_overflow"}
@@ -120,9 +122,11 @@ class DroplessReplayEngineTest(unittest.TestCase):
         _moes(model)[0].sow(nnx.Intermediate, "moe_has_overflow", overflow)
       elif flag == "aux":
         aux["has_moe_overflow"] = overflow
-      # Tells the two kernels' gradients apart: the dropless one's loss is doubled.
+      # Tells the kernels' gradients apart: dropless is doubled, first_phase is 1.5x.
       if dropless:
         aux["xent_sum"] = aux["xent_sum"] * 2.0
+      elif first_phase:
+        aux["xent_sum"] = aux["xent_sum"] * 1.5
       return loss, aux
 
     engine.with_gen_model_input_fn(maxtext_engine.router_replay_gen_model_input_fn)
@@ -221,6 +225,70 @@ class DroplessReplayEngineTest(unittest.TestCase):
       self.assertTrue(moe.force_dropless and moe.dropless_scan_chunks)
     # The live model is untouched.
     self.assertFalse(any(m.force_dropless for m in _moes(engine.model)))
+
+  def test_retry_dropless_first_steps_runs_directly_dropless_and_transitions_to_normal(self):
+    engine = self._engine(overflow_on_normal_path=True, retry_dropless_first_steps=1)
+    # Step 0 is within retry_dropless_first_steps: runs directly dropless (no normal attempt, 0 replays).
+    engine.fwd_bwd(_payload())
+    engine._resolve_overflow_check()  # pylint: disable=protected-access
+    loss_0 = float(engine._cached_losses[-1].compute())  # pylint: disable=protected-access
+    self.assertEqual(engine._dropless_replays, 0)  # pylint: disable=protected-access
+    engine.update()
+    self.assertEqual(engine.train_step, 1)
+
+    # Step 1 is outside first steps: normal attempt runs, overflows, and replays dropless.
+    engine.fwd_bwd(_payload())
+    engine._resolve_overflow_check()  # pylint: disable=protected-access
+    loss_1 = float(engine._cached_losses[-1].compute())  # pylint: disable=protected-access
+    self.assertEqual(engine._dropless_replays, 1)  # pylint: disable=protected-access
+    self.assertAlmostEqual(loss_0, loss_1, places=3)
+
+  def test_first_phase_ragged_buffer_factor_attempts_first_phase(self):
+    # Without overflow, first-phase step keeps first-phase output (1.5x in loss_fn).
+    engine = self._engine(
+        overflow_on_normal_path=False,
+        override_logical_axis_rules=True,
+        retry_dropless_first_steps=1,
+        ragged_buffer_factor=1.0,
+        first_phase_ragged_buffer_factor=2.0,
+    )
+    engine.fwd_bwd(_payload())
+    engine._resolve_overflow_check()  # pylint: disable=protected-access
+    loss_clean = float(engine._cached_losses[-1].compute())  # pylint: disable=protected-access
+    self.assertEqual(engine._dropless_replays, 0)  # pylint: disable=protected-access
+
+    # With overflow, first-phase step replays dropless (2.0x in loss_fn).
+    engine_overflow = self._engine(
+        overflow_on_normal_path=True,
+        override_logical_axis_rules=True,
+        retry_dropless_first_steps=1,
+        ragged_buffer_factor=1.0,
+        first_phase_ragged_buffer_factor=2.0,
+    )
+    engine_overflow.fwd_bwd(_payload())
+    engine_overflow._resolve_overflow_check()  # pylint: disable=protected-access
+    loss_overflow = float(engine_overflow._cached_losses[-1].compute())  # pylint: disable=protected-access
+    self.assertEqual(engine_overflow._dropless_replays, 1)  # pylint: disable=protected-access
+    self.assertAlmostEqual(loss_overflow / loss_clean, 2.0 / 1.5, places=3)
+
+  def test_compile_kernels_adds_first_phase_when_factor_set(self):
+    engine = self._engine(
+        overflow_on_normal_path=False,
+        override_logical_axis_rules=True,
+        retry_dropless_first_steps=1,
+        ragged_buffer_factor=1.0,
+        first_phase_ragged_buffer_factor=2.0,
+    )
+    compiled = engine.compile_kernels(_payload())
+    self.assertEqual(
+        set(compiled),
+        {*maxtext_engine.KERNEL_NAMES, maxtext_engine.DROPLESS_FWD_BWD, maxtext_engine.FIRST_PHASE_FWD_BWD},
+    )
+    graph = nnx.merge(engine._first_phase_graphdef, *nnx.split(engine.model, nnx.Param, ...)[1:])  # pylint: disable=protected-access
+    for moe in _moes(graph):
+      self.assertEqual(moe.get_ragged_buffer_factor(), 2.0)
+    # The live model is untouched.
+    self.assertFalse(any(hasattr(m, "ragged_buffer_factor_override") for m in _moes(engine.model)))
 
 
 if __name__ == "__main__":
