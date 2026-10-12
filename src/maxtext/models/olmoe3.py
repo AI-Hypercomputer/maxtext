@@ -541,9 +541,12 @@ def _invert_unit_lower_fwd(m):
     n2 = inv.shape[-3] // 2
     inv = inv.reshape(*lead, n2, 2, size, size)
     a_inv, d_inv = inv[..., 0, :, :], inv[..., 1, :, :]
-    # The lower-left block of the 2*size block that starts at row 2*k*size.
-    lower = m.reshape(*lead, n2, 2 * size, c)
-    lower = jnp.stack([lower[..., i, size:, 2 * i * size : (2 * i + 1) * size] for i in range(n2)], axis=-3).astype(f32)
+    # The lower-left block of the 2*size block that starts at row 2*k*size, indexed on m directly. Slicing a
+    # [.., n2, 2*size, c] reshape of m instead miscompiles on TPU v4: for k >= 1 the column offset is dropped and the
+    # block comes from columns 0..size (rel. error 0.7 in the off-diagonal blocks, ~5e-3 in the inverse, +0.005 CE).
+    lower = jnp.stack(
+        [m[..., 2 * i * size + size : 2 * (i + 1) * size, 2 * i * size : (2 * i + 1) * size] for i in range(n2)], axis=-3
+    ).astype(f32)
     off = -mm(mm(d_inv, lower), a_inv)
     zeros = jnp.zeros_like(off)
     top = jnp.concatenate([a_inv, zeros], axis=-1)
