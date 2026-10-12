@@ -22,7 +22,7 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ## Unreleased
 
-**Last Updated**: 56d4bb517
+**Last Updated**: 10073768f
 
 <!-- Add new unreleased changes below this line -->
 
@@ -30,32 +30,65 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ##### Models
 
-- **Flax NNX Migration**: Converted FP8 ops (`Fp8DirectDotGeneralOp`, `NANOOFp8DotGeneralOp`, `Fp8Einsum`, `QwixDotGeneral`, `QwixEinsum`) and HuggingFace checkpoint parameter conversion (`to_maxtext.py`) to native Flax NNX modules, and deleted legacy `ToLinen` layer wrappers and factories.
+- **DeepSeek-V3 Lineage Architecture**: Added Lineage DeepSeek-V3 modules under `maxtext/experimental/lineage` with the exported `deepseek3-671b-lineage` configuration and `embed_router` rule. Lineage is a very efficient implementation of DeepSeek-V3 targeting `pdb=1` using a batch split strategy where the EP comms are fully overlapped (overlapped with splash). Also imported Lineage modules lazily in `lineage_adapter` when `use_lineage=False`, added optional model hooks for alternative DeepSeek-V3 implementations, and added `lineage_expert_permutation` for per-step expert load balancing in the Lineage MoE path.
+- **DeepSeek-V4 Multi-Token Prediction**: Added Multi-Token Prediction (MTP) support for DeepSeek-V4 decoder layers along with HuggingFace parameter mapping and shape alignment utilities.
+- **WeaverOmni Architecture**: Added the full 36-layer `WeaverOmniTransformer` backbone architecture and tests, supporting the `weaver` and `weaver-mini-diffuser` model configurations.
+- **Qwen3.5-9B Model Support**: Added base model onboarding for Qwen3.5-9B, including model configurations, HuggingFace checkpoint conversion, decode workflows, and logit verification.
+- **Flax NNX Migration**: Ported the remaining Linen sharding helpers into native MaxText implementations (`sharding.logical_to_spec` and `sharding.with_logical_constraint`), replacing Flax Linen dependencies across KV cache, attention ops, and decoder architectures. Additionally, converted FP8 ops (`Fp8DirectDotGeneralOp`, `NANOOFp8DotGeneralOp`, `Fp8Einsum`, `QwixDotGeneral`, `QwixEinsum`) and HuggingFace checkpoint parameter conversion (`to_maxtext.py`) to native Flax NNX modules, and deleted legacy `ToLinen` layer wrappers and factories.
 
 ##### Pre-Training
 
-- **YaRN RoPE Optimizations**: Added `rope_direct_position_freqs` to compute YaRN RoPE angles directly from position frequencies in 4D float32 without lookup tables, and added `rope_dot_pairwise` using a 4D block-skew contraction matrix to preserve rank-4 activations during pairwise rotation and eliminate layout copy overhead.
+- **JAX Flash & Splash Attention**: Added the JAX Flash and Splash Attention backward pass supporting Multi-Head Attention (MHA), Grouped-Query Attention (GQA), and Multi-Query Attention (MQA) with block sparsity, causal masking, soft capping, and packed-sequence segment IDs, and exposed `sa_qk_diag_skip`, `sa_sv_diag_skip`, and `sa_qk_diag_grid` configuration flags in Tokamax Splash Attention.
+- **YaRN RoPE Optimizations**: Applied YaRN RoPE rescaling to DeepSeek-V4 compressed attention (CSA/HCA) layers matching the HuggingFace configuration. Also added `rope_direct_position_freqs` to compute YaRN RoPE angles directly from position frequencies in 4D float32 without lookup tables, and added `rope_dot_pairwise` using a 4D block-skew contraction matrix to preserve rank-4 activations during pairwise rotation and eliminate layout copy overhead.
+- **DiLoCo Distributed Training**: Added `split_mesh_along_axis` and `remove_mesh_axis_from_rules` to derive per-replica views by splitting meshes along the `diloco` axis and stripping the axis from logical rules, and introduced `diloco_bucketize_non_scanned` to optionally bucketize non-scanned parameter matrices across layer fragments along their longest unsharded axis to balance data transfer.
+
+##### Post-Training
+
+- **Block-Diffusion Fine-Tuning**: Extended the block-diffusion objective to Continued Fine-Tuning (CFT) and completion-only Supervised Fine-Tuning (SFT), integrating with Tunix diffusion training and corrupting only configured supervision scopes while preventing future-prompt leakage.
+- **Continuous Profiling**: Added the `enable_continuous_profiling` configuration flag across profilers and post-training pipelines (SFT, DPO, RL, and Distillation) to capture profiles for long-running workloads.
+
+##### Multimodal
+
+- **Qwen3-VL Integration**: Added M3-style `qwen3-vl-2b` modeling implementation and layer correctness comparison tests.
+- **Wan 2.1 Video Diffusion Scaffolding**: Added M3 architecture skeleton and module stubs for diffusion models and Wan 2.1 text-to-video (`wan2.1-t2v-14b`), including Diffusers schedulers and pipeline utilities.
 
 ##### Performance
 
+- **TensorCore MoE Ragged Sort & Backward Quantization**: Enhanced TensorCore ragged sort with `[start, start+cap)` windowed routing, uint32 packed sorting, and `unique_indices` weight gathering, and fused MoE combine backward quantization prior to TC unsort-gather while skipping 3D DLHS zero-initialization.
+- **Quantization & Qwix Optimizations**: Disabled Qwix weight-gradient matmul tiling by default via `qwix_tile_weight_grad_matmuls`, supported `use_sliced_mla_proj` with Qwix interception quantization by preserving dot-general interception across sliced projection kernels, and added a configuration flag to keep backward passes in BF16 for Q projections during quantized training.
+- **Pre-Training Initialization Warmup**: Added `warmup_programs_in_init` to execute precompiled train and eval programs on synthetic batches during setup to warm JIT dispatch caches before timed execution, with options to skip dropless training warmup, and added `log_step_diagnostics` for step-level timing breakdown.
 - **TensorCore Ragged Sort & 3D Layout Pipeline for Ring-of-Experts MoE**: Added a TensorCore ragged sort implementation for Ring-of-Experts MoE, applied MoE routing weights to activations alongside the ragged sort, maintained the sorted MoE token buffer in 3D layout through GMM v2 kernels, and enabled token all-gather and combine in the TensorCore kernels' native 3D layout.
 - **In-Place MoE Gradient Accumulation**: Added `moe_accumulate_wi_dlhs` to accumulate `wi_0` and `wi_1` backward DLHS gradients in-place via `gmm_v2` `partial_sum` with fused DLHS scale, and introduced `moe_accumulate_chunk_wgrad` to accumulate weight gradients across token chunks in-place via `tgmm_v2` `partial_sum`.
 - **GMM v2 Native Transpose RHS**: Added native `transpose_rhs` support to Tokamax GMM v2 block specs and tiled matmuls to consume expert weights in their existing layout and eliminate RHS layout copies.
 - **FP8 Quantization**: Added `logits_proj_bwd_quant_calibration_method` allowing custom backward quantization calibration overrides for logits projections ([quantization](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/quantization.html)), and added the `lineage_quantization` (`none` or `fp8_full`) option to support quantization for Lineage DeepSeek-V3 routed experts.
 - **MLPerf DeepSeek-V3 Optimization**: Added the `fsdp-as-dp-for-attn-rf` custom mesh and sharding rule to shard MoE router weights on FSDP and overlap gradient communication with GMM backward execution ([custom mesh and rule](https://maxtext.readthedocs.io/en/latest/guides/optimization/custom_mesh_and_rule.html)), and added `warm_eval_input_reshard_before_run_start` and `eval_cache_prefill_in_background` flags to overlap eval input caching with initial training steps.
 
+##### Checkpointing / Goodput
+
+- **Goodput Monitoring & Logging**: Integrated the Orbax v1 logger into Goodput monitoring, and added sliding window tracking for goodput metrics to accurately evaluate sustained throughput and performance trends over time.
+- **Pathways Checkpointing**: Added opt-in colocated-Python checkpoint reads for Pathways single-controller runs across all parameter restoration paths (including metadata read) and introduced the `train_lib_tpu` build target.
+- **Elastic Training**: Unified all elastic training modes to use `elastic_retry` as the single entry point.
+
 ##### Usability
 
+- **Decision Models & Scoring Harness**: Added `vllm_score` for JEV-style decision-making LLMs, enabling next-token probability distribution extraction, candidate continuation scoring, and batch evaluation ([tutorials](https://maxtext.readthedocs.io/en/latest/tutorials.html), [decision models](https://maxtext.readthedocs.io/en/latest/tutorials/decision_models.html), [inference](https://maxtext.readthedocs.io/en/latest/tutorials/inference.html)).
+- **Configuration Support**: Updated `pyconfig` to accept configuration files with `.yaml` extensions alongside `.yml`.
+- **Documentation & Guides**: Updated ReadTheDocs links across documentation and tutorial notebooks to point to default versioned builds via redirects.
 - **Dependencies & Compatibility**: Updated pre-training dependency requirements to require `flax>=0.12.10` to ensure compatibility with JAX 0.11.2 ([update dependencies](https://maxtext.readthedocs.io/en/latest/development/update_dependencies.html)).
 
 #### Bug Fixes
 
+- Fixed loss calculation zeroing the language model loss when indexer loss is disabled or unscaled (`indexer_loss_scaling_factor == 0`).
+- Fixed DeepSeek-V4 logit checker forward pass execution under mesh JIT, token space decode assertion, and Linen side collection restoration (`Tid2EidVar`).
+- Fixed post-training hooks swallowing non-`StopIteration` data loading exceptions, ensuring unexpected loader errors surface immediately ([#5523](https://github.com/AI-Hypercomputer/maxtext/issues/5523)).
+- Fixed scanned decoders with inhomogeneous layer cycles silently dropping remainder layers or crashing when `num_decoder_layers` is not an exact multiple of `inhomogeneous_layer_cycle_interval`, raising an explicit `ValueError`.
 - Fixed `gmm_v2` partial K tail handling when `tile_k` does not divide `size_k` by masking stale VMEM in the LHS operand, preventing NaN/Inf poisoning of the accumulator and block absmax quantization.
 - Fixed MLPerf parallelism, precision, and config filename MLLog disclosure logging for Lineage DeepSeek-V3 runs.
 - Fixed SFT evaluation invoking the loss function with `is_train=True`, ensuring dropout, MTP loss, and sparsity `batch_stats` updates are disabled during eval.
 
 #### Deprecations
 
+- Removed experimental Lineage hooks from decoder, MTP, and MoE layers, and removed the `lineage_integration` configuration flag.
 - Deprecated calling `from_config()` without explicit `rngs` and deprecated `models.transformer_as_linen` in favor of native Flax NNX module initialization.
 
 ## Releases
