@@ -12,8 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This workflow automatically adds a "pull ready" label to a PR
-# when it has received at least 2 approving reviews and all checks have passed.
+# This workflow acts on a PR with at least 2 approving reviews and a single commit:
+# - It removes the `skip-ci-tests` label (add_skip_ci_tests_label.yml adds it to new PRs, except the ones
+#   Copybara exports) when the label skipped heavy tests that the PR needs and every other check passed.
+#   It uses the GitHub App token, because a label removed with GITHUB_TOKEN would not start the full CI run.
+# - It adds the "pull ready" label when all checks have passed.
 # It runs on pull request review events, workflow run completion events for the "MaxText Package Tests" workflow,
 # and can also be triggered manually via workflow dispatch.
 
@@ -37,6 +40,7 @@ jobs:
 
     steps:
       - name: Add Pull Request Label
+        id: decide
         uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         with:
           script: |
@@ -44,12 +48,31 @@ jobs:
             if (context.payload.pull_request !== undefined) {
               pull_number = context.payload.pull_request.number
             } else if (context.payload.workflow_run !== undefined) {
-              if (context.payload.workflow_run.pull_requests.length === 0) {
-                core.setFailed("This workflow is NOT running within a PR's context")
-                return
+              const run = context.payload.workflow_run
+              if (run.pull_requests.length === 0) {
+                // The list is empty for PRs from forks. Best effort: use the only open PR whose head is
+                // this run's commit on the fork's branch.
+                const fork = run.head_repository
+                if (run.event === 'pull_request' && fork && fork.full_name !== run.repository?.full_name) {
+                  const { data: pulls } = await github.rest.pulls.list({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    state: 'open',
+                    head: `${fork.owner.login}:${run.head_branch}`,
+                    per_page: 100,
+                  })
+                  const matches = pulls.filter(pr => pr.head.sha === run.head_sha && pr.head.repo?.full_name === fork.full_name)
+                  if (matches.length === 1) pull_number = matches[0].number
+                }
+                if (pull_number === -1) {
+                  core.setFailed("This workflow is NOT running within a PR's context")
+                  return
+                }
+                core.info(`PR #${pull_number} from the fork ${fork.full_name} has this run's commit`)
+              } else {
+                console.log(run.pull_requests)
+                pull_number = run.pull_requests[0].number
               }
-              console.log(context.payload.workflow_run.pull_requests)
-              pull_number = context.payload.workflow_run.pull_requests[0].number
             } else {
               core.setFailed("This workflow is running within an invalid context")
               return
@@ -60,6 +83,11 @@ jobs:
                 repository(owner: $owner, name: $repo) {
                   pullRequest(number: $pull_number) {
                     reviewDecision # Fetches the overall review status
+                    isDraft
+                    isCrossRepository
+                    labels(first: 100) {
+                      nodes { name }
+                    }
                     reviews(last: 100) {
                       nodes {
                         state
@@ -103,25 +131,145 @@ jobs:
 
             const last_commit_sha = commits.data.slice(-1)[0].sha
 
-            const { data: checkRuns } = await github.rest.checks.listForRef({
+            // Read every check run on the commit: one full CI run alone creates about 65 and each review
+            // adds more, while a single unpaginated call returns only the newest 30.
+            const checkRuns = await github.paginate(github.rest.checks.listForRef, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               ref: last_commit_sha,
+              per_page: 100,
             });
 
-            if (checkRuns.check_runs.length === 0) {
+            if (checkRuns.length === 0) {
               core.info("Not adding pull ready because no check runs are associated with the last commit: " + last_commit_sha)
               return
             }
 
-            for (const checkRun of checkRuns.check_runs) {
-              // Ignore the current running workflow and test duration tracking
-              if (checkRun.name.endsWith(context.job) || checkRun.name.includes('Track Test Duration')) continue
-
-              if (checkRun.status !== 'completed' || !['success', 'skipped'].includes(checkRun.conclusion)) {
-                core.info(`Waiting for check: ${checkRun.name} (Status: ${checkRun.status}, Conclusion: ${checkRun.conclusion})`);
-                return; // Exit without failing
+            // PROBLEM: If a PR has the `skip-ci-tests` label and needs the heavy tests, the "All Required Tests
+            // Passed" check (and "All Notebooks Passed" if notebooks changed) intentionally fails. If the label is
+            // later removed, a new CI run passes, but GitHub's API still returns the old failures for this commit.
+            // The same happens with the "cancelled" checks of a run that a newer run replaced.
+            //
+            // SOLUTION: We ignore the checks of older "MaxText Package Tests" runs IF a newer run has succeeded.
+            // To ensure the newer run actually ran the tests (and wasn't just skipped by an
+            // unrelated label event), we verify that its "Code Quality Check" status is 'success'.
+            // Until such a run exists, we wait. For other workflows, only the newest check with each name counts.
+            //
+            // These check names must match the job names in ci_pipeline.yml and code_quality.yml.
+            const ATP_CHECK = 'All Required Tests Passed'
+            const ANALYZE_CHECK = 'Analyze Code Changes for Test Orchestration'
+            const CODE_QUALITY_CHECK = 'Code Quality Check / Pre-commit Linters'
+            const NOTEBOOKS_CHECK = 'All Notebooks Passed'
+            // The title of the annotation that All Required Tests Passed writes when the heavy-test gate skipped
+            // suites that the PR needs (ci_pipeline.yml); keep them in sync.
+            const HEAVY_TESTS_SKIPPED = 'Heavy tests skipped'
+            const suiteOf = (run) => run.check_suite?.id
+            const suitesWith = (predicate) => new Set(checkRuns.filter(predicate).map(suiteOf).filter(id => id !== undefined))
+            const passed = (run) => run.status === 'completed' && ['success', 'skipped'].includes(run.conclusion)
+            const newestOf = (runs) => runs.reduce((newest, run) => (newest === undefined || run.id > newest.id ? run : newest), undefined)
+            // Every "MaxText Package Tests" run has both of these checks.
+            const pipelineSuites = suitesWith(run => run.name === ANALYZE_CHECK || run.name === ATP_CHECK)
+            const newestIdByName = new Map()
+            for (const run of checkRuns) {
+              if (suiteOf(run) !== undefined && !pipelineSuites.has(suiteOf(run))) {
+                newestIdByName.set(run.name, Math.max(run.id, newestIdByName.get(run.name) ?? 0))
               }
+            }
+            // `reference` is a check of the pipeline run that replaces the older runs.
+            const isReplaced = (run, reference) => {
+              if (suiteOf(run) === undefined) return false
+              if (pipelineSuites.has(suiteOf(run))) return suiteOf(run) !== suiteOf(reference) && run.id < reference.id
+              return run.id < newestIdByName.get(run.name)
+            }
+            // Returns the first check that has not passed, is not an expected failure and was not replaced.
+            // Check names come from the PR's workflows, so they are logged as JSON: a name with a newline
+            // could otherwise inject workflow commands such as ::set-output.
+            const firstBlockingCheck = (reference, isExpectedFailure) => {
+              for (const checkRun of checkRuns) {
+                // Ignore the current running workflow and test duration tracking
+                if (checkRun.name.endsWith(context.job) || checkRun.name.includes('Track Test Duration')) continue
+                if (passed(checkRun) || isExpectedFailure(checkRun)) continue
+                if (isReplaced(checkRun, reference)) {
+                  core.info(`Ignoring check replaced by a newer run: ${JSON.stringify(checkRun.name)} (id ${checkRun.id}, ${checkRun.conclusion ?? checkRun.status})`)
+                  continue
+                }
+                return checkRun
+              }
+              return undefined
+            }
+
+            // Phase 1: remove `skip-ci-tests` when it skipped heavy tests that the PR needs and every other check
+            // passed. The next steps remove it with the GitHub App token, which starts the full CI run; "pull ready"
+            // is added when that run passes.
+            const SKIP_CI_TESTS_LABEL = 'skip-ci-tests'
+            if (pullRequest.labels.nodes.some(label => label.name === SKIP_CI_TESTS_LABEL)) {
+              if (pullRequest.isDraft) {
+                core.info(`Keeping "${SKIP_CI_TESTS_LABEL}" because the PR is a draft`)
+                return
+              }
+              // The newest full run (runs for unrelated labels skip Code Quality) must be finished.
+              const newestCodeQuality = newestOf(checkRuns.filter(run => run.name === CODE_QUALITY_CHECK))
+              const fullRunChecks = suiteOf(newestCodeQuality ?? {}) === undefined ? [] :
+                checkRuns.filter(run => suiteOf(run) === suiteOf(newestCodeQuality))
+              const fullRunAtp = newestOf(fullRunChecks.filter(run => run.name === ATP_CHECK))
+              if (fullRunAtp === undefined || fullRunChecks.some(run => run.status !== 'completed')) {
+                core.info(`Waiting for a finished full CI run before deciding on "${SKIP_CI_TESTS_LABEL}"`)
+                return
+              }
+              // That run's All Required Tests Passed fails with the "Heavy tests skipped" annotation when the label
+              // skipped heavy tests that the PR needs (or when the gate gave no decision; removing the label then just
+              // runs the full CI). Its annotations are read only when it failed.
+              let skippedHeavyTests = false
+              if (fullRunAtp.conclusion === 'failure') {
+                const annotations = await github.paginate(github.rest.checks.listAnnotations, {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  check_run_id: fullRunAtp.id,
+                  per_page: 100,
+                })
+                skippedHeavyTests = annotations.some(annotation => annotation.title === HEAVY_TESTS_SKIPPED)
+              }
+              if (skippedHeavyTests) {
+                // Runs for unrelated labels repeat the gated result, so these checks may fail in any run of the
+                // pipeline. Every other check must pass, except coverage: each test job uploads coverage, so a
+                // gated run reports CPU-only coverage. Phase 2 checks it again after the full run.
+                const gatedChecks = [ATP_CHECK, NOTEBOOKS_CHECK]
+                const isCoverage = (run) => run.app?.slug === 'codecov' || run.name.startsWith('codecov/')
+                const blocker = firstBlockingCheck(fullRunAtp, (run) => isCoverage(run) || (pipelineSuites.has(suiteOf(run)) &&
+                  gatedChecks.includes(run.name) && run.status === 'completed' && run.conclusion === 'failure'))
+                if (blocker !== undefined) {
+                  core.info(`Keeping "${SKIP_CI_TESTS_LABEL}" until this check passes: ${JSON.stringify(blocker.name)} (Status: ${blocker.status}, Conclusion: ${blocker.conclusion})`)
+                  return
+                }
+                core.info(`Removing "${SKIP_CI_TESTS_LABEL}" to run the heavy tests`)
+                core.setOutput('remove_skip_ci_tests', 'true')
+                core.setOutput('pull_number', pull_number)
+                return
+              }
+              core.info(`Keeping "${SKIP_CI_TESTS_LABEL}": "${ATP_CHECK}" of the newest full CI run is ${fullRunAtp.conclusion} without a "${HEAVY_TESTS_SKIPPED}" annotation`)
+            }
+
+            // Phase 2: add "pull ready". As before, never to a PR from a fork: a maintainer adds it.
+            if (pullRequest.isCrossRepository) {
+              core.info(`Not adding "pull ready" to PR #${pull_number}: the bot doesn't add it to PRs from forks, so a maintainer does`)
+              return
+            }
+            const fullRunSuites = suitesWith(run =>
+              run.name === CODE_QUALITY_CHECK && run.status === 'completed' && run.conclusion === 'success')
+            const superseding = checkRuns
+              .filter(run => run.name === ATP_CHECK && run.status === 'completed' && run.conclusion === 'success' &&
+                fullRunSuites.has(suiteOf(run)))
+              .reduce((newest, run) => (newest === undefined || run.id > newest.id ? run : newest), undefined)
+            if (superseding === undefined) {
+              core.info(`Waiting for a passing "${ATP_CHECK}" check from a run that ran the full pipeline`)
+              return
+            }
+            core.info(`Newest passing full-pipeline "${ATP_CHECK}" id: ${superseding.id}`)
+
+            const waitingFor = firstBlockingCheck(superseding, () => false)
+            if (waitingFor !== undefined) {
+              core.info(`Waiting for check: ${JSON.stringify(waitingFor.name)} (Status: ${waitingFor.status}, Conclusion: ${waitingFor.conclusion})`);
+              return; // Exit without failing
             }
 
             console.log("Adding pull ready label because the PR is approved AND all the check runs have passed")
@@ -131,3 +279,46 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
             })
+
+      - name: Mint App token
+        id: app_token
+        # Only when the label must go. Reviews of fork PRs get no secrets, so a failed mint is tolerated
+        # only there (the next step then prints a warning). Anywhere else, e.g. with a broken App key, it
+        # fails the job.
+        if: steps.decide.outputs.remove_skip_ci_tests == 'true' && vars.APP_ID != ''
+        continue-on-error: ${{ github.event_name != 'workflow_run' && github.event.pull_request.head.repo.full_name != github.repository }}
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Remove skip-ci-tests (starts the full CI)
+        if: steps.decide.outputs.remove_skip_ci_tests == 'true'
+        env:
+          # Never GITHUB_TOKEN: a label removed with it would not start the CI run.
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
+          MINT_OUTCOME: ${{ steps.app_token.outcome }}
+          PR_NUMBER: ${{ steps.decide.outputs.pull_number }}
+        run: |
+          if [[ ! "${PR_NUMBER}" =~ ^[0-9]+$ ]]; then
+            echo "::error::The decide step gave no valid PR number."
+            exit 1
+          fi
+          if [[ -z "${GH_TOKEN}" ]]; then
+            if [[ "${MINT_OUTCOME}" == "failure" ]]; then
+              echo "::warning::The 'Mint App token' step failed (expected on reviews of fork PRs, which get no secrets), so the 'skip-ci-tests' label stays on PR #${PR_NUMBER}. A maintainer can remove it to run all tests."
+            else
+              echo "::notice::No GitHub App is configured (vars.APP_ID), so the 'skip-ci-tests' label stays on PR #${PR_NUMBER}. A maintainer can remove it to run all tests."
+            fi
+            exit 0
+          fi
+          if output=$(gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/skip-ci-tests" --silent 2>&1); then
+            echo "Removed the 'skip-ci-tests' label from PR #${PR_NUMBER}; the full CI run starts now."
+          elif [[ "${output}" == *"(HTTP 404)"* ]]; then
+            echo "The 'skip-ci-tests' label is already gone from PR #${PR_NUMBER}."
+          else
+            echo "::error::Could not remove the 'skip-ci-tests' label: ${output}"
+            exit 1
+          fi
