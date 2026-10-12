@@ -100,13 +100,14 @@ warmup_programs_in_init: true
 #   (multi-slice only).
 # - --xla_tpu_dvfs_p_state=7, which sets the TPU's DVFS P-state to 7 (the
 #   default, -1, sets none).
-# - --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false and
+# - --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false,
+#   --xla_tpu_enable_async_ragged_all_to_all=true, and
 #   --xla_tpu_force_async_all_to_all=true, which keep the expert-shuffle ragged
 #   all-to-all async on the TensorCore instead of queueing it behind the FSDP
 #   all-gathers on SparseCore.
 # Never add --xla_tpu_aggressive_opt_barrier_removal; it strips the optimization
 # barriers Lineage's backward pass depends on.
-compile_xla_flags: "--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_offloading_copy_to_sparsecore=false --xla_tpu_enable_sparse_core_collective_offload_dense_all_to_all=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=500000 --xla_all_gather_latency_bound_threshold_in_bytes=1000000 --xla_tpu_pipeline_memory_host_transfers=false --xla_tpu_enable_data_parallel_all_reduce_opt=false --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=134217728 --xla_tpu_dvfs_p_state=7 --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false --xla_tpu_force_async_all_to_all=true"
+compile_xla_flags: "--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_offloading_copy_to_sparsecore=false --xla_tpu_enable_sparse_core_collective_offload_dense_all_to_all=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=500000 --xla_all_gather_latency_bound_threshold_in_bytes=1000000 --xla_tpu_pipeline_memory_host_transfers=false --xla_tpu_enable_data_parallel_all_reduce_opt=false --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=134217728 --xla_tpu_dvfs_p_state=7 --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false --xla_tpu_enable_async_ragged_all_to_all=true --xla_tpu_force_async_all_to_all=true"
 shard_mode: "explicit"
 sharding_tolerance: 1.0
 remove_size_one_mesh_axis_from_type: false
