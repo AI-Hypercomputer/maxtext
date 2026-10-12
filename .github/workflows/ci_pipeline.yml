@@ -285,6 +285,27 @@ jobs:
       is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
+  # Tests that need the optional TensorFlow / JetStream deps. The flavors above run TF-free and skip
+  # them, so these flavors install them (WITH_TF) and fail on any skip caused by them being missing.
+  # TODO(b/561896829): GPU coverage for these tests still only comes from the scheduled GPU image pipeline.
+  tf-jetstream-tests:
+    name: TF/JetStream Tests
+    needs: [gate_test_run, analyze_code_changes]
+    if: |
+      always() &&
+      needs.gate_test_run.result == 'success' &&
+      needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
+    uses: ./.github/workflows/run_tests_coordinator.yml
+    strategy:
+      fail-fast: false
+      matrix:
+        flavor: [cpu-tf-jetstream, tpu-tf-jetstream]
+    with:
+      flavor: ${{ matrix.flavor }}
+      base_image: maxtext-unit-test-tpu:py312-bookworm
+      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
+
   maxtext_tpu_pathways_unit_tests:
     name: TPU Pathways Unit Tests
     needs: [gate_test_run, analyze_code_changes]
@@ -337,7 +358,7 @@ jobs:
 
   all_tests_passed:
     name: All Required Tests Passed
-    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, tf-jetstream-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -355,6 +376,7 @@ jobs:
           echo "GPU Tests (Matrix) result: ${NEEDS_GPU_TESTS_RESULT}"
           echo "CPU Pretrain Tests result: ${NEEDS_CPU_PRETRAIN_TESTS_RESULT}"
           echo "CPU Posttrain Tests result: ${NEEDS_CPU_POSTTRAIN_TESTS_RESULT}"
+          echo "TF/JetStream Tests result: ${NEEDS_TF_JETSTREAM_TESTS_RESULT}"
           echo "Pathways Unit result: ${NEEDS_MAXTEXT_TPU_PATHWAYS_UNIT_TESTS_RESULT}"
           echo "Pathways Integration result: ${NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT}"
 
@@ -372,6 +394,7 @@ jobs:
           NEEDS_GATE_TEST_RUN_RESULT: ${{ needs.gate_test_run.result }}
           NEEDS_CPU_PRETRAIN_TESTS_RESULT: ${{ needs.cpu-pretrain-tests.result }}
           NEEDS_CPU_POSTTRAIN_TESTS_RESULT: ${{ needs.cpu-posttrain-tests.result }}
+          NEEDS_TF_JETSTREAM_TESTS_RESULT: ${{ needs.tf-jetstream-tests.result }}
           NEEDS_TPU_PRETRAIN_TESTS_RESULT: ${{ needs.tpu-pretrain-tests.result }}
           NEEDS_TPU_POSTTRAIN_TESTS_RESULT: ${{ needs.tpu-posttrain-tests.result }}
           NEEDS_TPU7X_TESTS_RESULT: ${{ needs.tpu7x-tests.result }}
@@ -411,7 +434,7 @@ jobs:
 
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
-    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, tf-jetstream-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -429,7 +452,7 @@ jobs:
 
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
-    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
+    needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, tf-jetstream-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
     if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:

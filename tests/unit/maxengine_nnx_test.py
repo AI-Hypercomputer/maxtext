@@ -26,6 +26,8 @@ pytest.importorskip("jetstream", reason="jetstream not installed")
 from maxtext.inference.maxengine import maxengine
 from tests.utils.test_helpers import get_test_config_path
 
+pytestmark = [pytest.mark.requires_tf_jetstream]
+
 
 class SetEngineVarsNNXTest(unittest.TestCase):
   """set_engine_vars_from_base_engine must work on the NNX path."""

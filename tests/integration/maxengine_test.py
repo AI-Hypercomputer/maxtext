@@ -34,7 +34,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 
-pytestmark = [pytest.mark.external_serving]
+pytestmark = [pytest.mark.external_serving, pytest.mark.requires_tf_jetstream]
 
 
 @pytest.mark.integration_test

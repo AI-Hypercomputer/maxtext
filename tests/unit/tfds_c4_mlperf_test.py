@@ -46,6 +46,8 @@ from maxtext.input_pipeline.tfds_data_processing_c4_mlperf import (
     reduce_concat_tokens,
 )
 
+pytestmark = [pytest.mark.requires_tf_jetstream]
+
 
 class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
 
