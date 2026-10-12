@@ -93,6 +93,9 @@ enable_single_replica_ckpt_restoring: false
 # Run each precompiled train and eval program once on a synthetic batch during
 # initialization (the train state is unchanged). Reads no training data.
 warmup_programs_in_init: true
+# Stream-chunked c4_mlperf train rows are a single segment of all 1s, so
+# lineage_adapter.loss_and_aux drops the no-op Splash segment mask in training.
+use_stream_chunking: true
 # Runtime XLA flags (keep on a single double-quoted line):
 # - --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=128MiB, which lets XLA
 #   merge each layer's 12-13 per-tensor DCN gradient all-reduces (0.5-28 MiB

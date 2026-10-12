@@ -157,6 +157,16 @@ def _router_bias_dtype(cfg: Any) -> jax.typing.DTypeLike | None:
   return _router_dtype(cfg) or getattr(cfg, "dtype", None)
 
 
+def _stream_chunked_train_data(cfg: Any) -> bool:
+  """Whether `cfg` trains on stream-chunked `c4_mlperf` (one segment of 1s per row)."""
+  if getattr(cfg, "dataset_type", None) != "c4_mlperf":
+    return False
+  use_stream_chunking = getattr(cfg, "use_stream_chunking", None)
+  if use_stream_chunking is None:
+    use_stream_chunking = not getattr(cfg, "tokenize_train_data", True)
+  return bool(use_stream_chunking)
+
+
 def _mesh_scope(mesh: jax.sharding.Mesh):
   """Activates `mesh`'s abstract mesh for Lineage's explicit-sharding ops.
 
@@ -569,11 +579,14 @@ def loss_and_aux(
   from maxtext.experimental.lineage import dsv3_model  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   cfg = model.lineage_config()
+  # Stream-chunked MLPerf training rows (`format_continuous_stream_fn`) are one
+  # segment of all 1s, so the segment mask is a no-op: dropping it is exact.
+  drop_segment_ids = is_train and _stream_chunked_train_data(config)
   batch = dsv3_model.DSv3Batch(
       inputs=data["inputs"],
       targets=data["targets"],
       positions=data["inputs_position"],
-      segment_ids=data["inputs_segmentation"],
+      segment_ids=None if drop_segment_ids else data["inputs_segmentation"],
       target_mask=data["targets_segmentation"],
   )
   with _mesh_scope(model.mesh):
