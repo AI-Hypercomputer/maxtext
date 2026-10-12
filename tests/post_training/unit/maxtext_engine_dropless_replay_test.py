@@ -98,7 +98,15 @@ class DroplessReplayEngineTest(unittest.TestCase):
     """`flag` is where the loss leaves the overflow flag: sown on the model, in its aux as MaxText's loss does, or
     nowhere, as a loss that runs the forward on a split/merged copy of the model (Tunix's GRPO loss) does.
     `overflow_on_normal_path="marked"` overflows only the micro-batches built with `_payload(_MARKED)`."""
+    # The first-phase flags need retry_when_tokens_dropped=True, which the config cannot validate on CPU (see below):
+    # set them after validation.
+    first_phase = {
+        k: config_overrides.pop(k)
+        for k in ("retry_dropless_first_steps", "first_phase_ragged_buffer_factor")
+        if k in config_overrides
+    }
     cfg = _cfg(**config_overrides)
+    cfg.get_keys().update(first_phase)
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     real_model = models.Transformer(config=cfg, mesh=mesh, quant=None, model_mode="train", rngs=nnx.Rngs(0))
     with mock.patch.object(maxtext_engine.model_creation_utils, "from_pretrained", return_value=real_model):
@@ -233,6 +241,11 @@ class DroplessReplayEngineTest(unittest.TestCase):
     engine._resolve_overflow_check()  # pylint: disable=protected-access
     loss_0 = float(engine._cached_losses[-1].compute())  # pylint: disable=protected-access
     self.assertEqual(engine._dropless_replays, 0)  # pylint: disable=protected-access
+    # The normal kernel, not called during the first phase, compiles in the background meanwhile.
+    self.assertTrue(
+        engine._fwd_bwd_compile is not None  # pylint: disable=protected-access
+        or isinstance(engine._compiled_fwd_bwd, jax.stages.Compiled)  # pylint: disable=protected-access
+    )
     engine.update()
     self.assertEqual(engine.train_step, 1)
 
@@ -241,12 +254,14 @@ class DroplessReplayEngineTest(unittest.TestCase):
     engine._resolve_overflow_check()  # pylint: disable=protected-access
     loss_1 = float(engine._cached_losses[-1].compute())  # pylint: disable=protected-access
     self.assertEqual(engine._dropless_replays, 1)  # pylint: disable=protected-access
+    self.assertIsInstance(engine._compiled_fwd_bwd, jax.stages.Compiled)  # pylint: disable=protected-access
     self.assertAlmostEqual(loss_0, loss_1, places=3)
 
   def test_first_phase_ragged_buffer_factor_attempts_first_phase(self):
     # Without overflow, first-phase step keeps first-phase output (1.5x in loss_fn).
     engine = self._engine(
         overflow_on_normal_path=False,
+        # Skips the "EP rank 1 requires ragged_buffer_factor=-1.0" check, which the CPU mesh would trip.
         override_logical_axis_rules=True,
         retry_dropless_first_steps=1,
         ragged_buffer_factor=1.0,
@@ -260,6 +275,7 @@ class DroplessReplayEngineTest(unittest.TestCase):
     # With overflow, first-phase step replays dropless (2.0x in loss_fn).
     engine_overflow = self._engine(
         overflow_on_normal_path=True,
+        # Skips the "EP rank 1 requires ragged_buffer_factor=-1.0" check, which the CPU mesh would trip.
         override_logical_axis_rules=True,
         retry_dropless_first_steps=1,
         ragged_buffer_factor=1.0,
@@ -274,6 +290,7 @@ class DroplessReplayEngineTest(unittest.TestCase):
   def test_compile_kernels_adds_first_phase_when_factor_set(self):
     engine = self._engine(
         overflow_on_normal_path=False,
+        # Skips the "EP rank 1 requires ragged_buffer_factor=-1.0" check, which the CPU mesh would trip.
         override_logical_axis_rules=True,
         retry_dropless_first_steps=1,
         ragged_buffer_factor=1.0,

@@ -1031,7 +1031,8 @@ class MoEGeneral(BaseModel):
       0,
       description=(
           "With retry_when_tokens_dropped=True, run the first N steps after the loop's start step directly "
-          "with the dropless program (skipping the normal attempt) or with first_phase_ragged_buffer_factor. 0 = off."
+          "with the dropless program (skipping the normal attempt) or with first_phase_ragged_buffer_factor. 0 = off. "
+          "Training engine only (pre_train/train.py ignores it)."
       ),
   )
   first_phase_ragged_buffer_factor: float = Field(
@@ -1039,7 +1040,8 @@ class MoEGeneral(BaseModel):
       description=(
           "With retry_dropless_first_steps=N > 0, run the first N steps with a first-phase program whose "
           "RoutedMoE modules use this ragged buffer factor (instead of the dropless program directly); a first-phase "
-          "step that still drops tokens is replayed with the dropless program. Must be >= ragged_buffer_factor. 0 = off."
+          "step that still drops tokens is replayed with the dropless program. Must be >= ragged_buffer_factor. 0 = off. "
+          "Training engine only (pre_train/train.py ignores it)."
       ),
   )
   num_moe_token_chunks: PositiveInt = Field(
@@ -3845,9 +3847,9 @@ class MaxTextConfig(
     if self.retry_dropless_first_steps < 0:
       raise ValueError(f"retry_dropless_first_steps must be >= 0 (got {self.retry_dropless_first_steps}).")
     if self.first_phase_ragged_buffer_factor < 0:
-      raise ValueError(
-          f"first_phase_ragged_buffer_factor must be >= 0 (got {self.first_phase_ragged_buffer_factor})."
-      )
+      raise ValueError(f"first_phase_ragged_buffer_factor must be >= 0 (got {self.first_phase_ragged_buffer_factor}).")
+    if self.retry_dropless_first_steps > 0 and not self.retry_when_tokens_dropped:
+      raise ValueError("retry_dropless_first_steps > 0 requires retry_when_tokens_dropped=True.")
     if self.first_phase_ragged_buffer_factor > 0 and self.retry_dropless_first_steps <= 0:
       raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_dropless_first_steps > 0.")
 

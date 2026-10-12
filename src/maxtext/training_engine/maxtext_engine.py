@@ -862,10 +862,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._first_phase_source_graphdef: Any = None
     self._compiled_fwd_bwd_first_phase: Any = None
     self._start_step: int | None = None
+    # Whether the last `fwd_bwd` ran in the first phase, so its start and end are logged once each.
+    self._first_phase_active = False
     # The compiled path compiles `fwd_bwd_dropless` on a background thread from the first micro-batch, and joins it
     # before the first rerun or the update, whichever comes first.
     self._dropless_compile: concurrent.futures.Future | None = None
-    self._dropless_compile_executor: concurrent.futures.ThreadPoolExecutor | None = None
+    # During the first phase the normal `fwd_bwd` is not called, so it compiles on the same thread and is joined at
+    # the first step after the phase, rather than compiled in the middle of the run at that step.
+    self._fwd_bwd_compile: concurrent.futures.Future | None = None
+    self._compile_executor: concurrent.futures.ThreadPoolExecutor | None = None
     self._dropless_replays = 0
     # The last micro-batch, whose overflow flag is read after the next one is dispatched (or in `update`).
     self._pending_overflow_check: _PendingOverflowCheck | None = None
@@ -2015,7 +2020,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # The dropless replay's `fwd_bwd`: same signature, shardings and outputs, on the dropless graphdef.
     self._compiled_fwd_bwd_dropless = None
     # A compile still pending or running belongs to the kernel being replaced.
-    self._discard_dropless_compile()
+    self._discard_background_compiles()
     if self._dropless_replay:
       # Bound here: the kernel may be traced later, on the background compile thread.
       dropless_graphdef = self._dropless_graphdef_for(self._model_graphdef, params_pure, rest_pure)
@@ -2248,9 +2253,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if DROPLESS_FWD_BWD in self._jitted_kernels:
         lowered[DROPLESS_FWD_BWD] = self._jitted_kernels[DROPLESS_FWD_BWD].lower(params_aval, rest_aval, batch_aval)
       if FIRST_PHASE_FWD_BWD in self._jitted_kernels:
-        lowered[FIRST_PHASE_FWD_BWD] = self._jitted_kernels[FIRST_PHASE_FWD_BWD].lower(
-            params_aval, rest_aval, batch_aval
-        )
+        lowered[FIRST_PHASE_FWD_BWD] = self._jitted_kernels[FIRST_PHASE_FWD_BWD].lower(params_aval, rest_aval, batch_aval)
       return lowered
 
   def _start_running_sum(self, grads: Any) -> Any:
@@ -2310,12 +2313,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # After any recompile, not before: reading first would hand the new kernel a pure
     # state split against the old graph.
     params, rest = self._read_model_pure(model)
+    in_first_phase = False
     if self._dropless_replay:
       if not self._compile_requested:
         dropless_kernel = functools.partial(
             self._fwd_bwd_kernel, graphdef=self._dropless_graphdef_for(self._model_graphdef, params, rest)
         )
-      if self._in_first_phase():
+      in_first_phase = self._in_first_phase()
+      if in_first_phase != self._first_phase_active:
+        self._first_phase_active = in_first_phase
+        if not in_first_phase:
+          kernel_name = "normal"
+        elif self._config.first_phase_ragged_buffer_factor <= 0.0:
+          kernel_name = "dropless"
+        else:
+          kernel_name = "first-phase"
+        logging.info(
+            "Train step %d %s the first phase (retry_dropless_first_steps=%d): fwd_bwd runs the %s kernel.",
+            self.train_step,
+            "starts" if in_first_phase else "ends",
+            self._config.retry_dropless_first_steps,
+            kernel_name,
+        )
+      if in_first_phase:
         if self._config.first_phase_ragged_buffer_factor <= 0.0:
           if self._compile_requested:
             if not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled):
@@ -2337,6 +2357,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             fwd_bwd_kernel = functools.partial(
                 self._fwd_bwd_kernel, graphdef=self._first_phase_graphdef_for(self._model_graphdef, params, rest)
             )
+      elif self._fwd_bwd_compile is not None:
+        future, self._fwd_bwd_compile = self._fwd_bwd_compile, None
+        self._compiled_fwd_bwd = fwd_bwd_kernel = future.result()
     with self._sharding_ctx():
       outputs = fwd_bwd_kernel(params, rest, inputs)
       if (
@@ -2347,7 +2370,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       ):
         # On a background thread while the device runs this `fwd_bwd`, rather than at the first overflow in the
         # middle of a step or ahead of the first `fwd_bwd` on the startup path.
-        self._start_dropless_compile(self._compiled_fwd_bwd_dropless, params, rest, inputs)
+        self._dropless_compile = self._start_background_compile(self._compiled_fwd_bwd_dropless, params, rest, inputs)
+      if (
+          in_first_phase
+          and self._compile_requested
+          and self._fwd_bwd_compile is None
+          and not isinstance(self._compiled_fwd_bwd, jax.stages.Compiled)
+      ):
+        self._fwd_bwd_compile = self._start_background_compile(self._compiled_fwd_bwd, params, rest, inputs)
       loss, aux, new_rest, grads, denominator = outputs[:5]
       if self._accumulated_grads is None:
         acc_grads, acc_denom = self._start_running_sum(grads), denominator
@@ -2402,8 +2432,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     self._cached_losses.append(loss)
 
-  def _start_dropless_compile(self, jitted: Any, params: Any, rest: Any, inputs: Any) -> None:
-    """Lowers and compiles `fwd_bwd_dropless` for this batch on a background thread."""
+  def _start_background_compile(self, jitted: Any, params: Any, rest: Any, inputs: Any) -> concurrent.futures.Future:
+    """Lowers and compiles a `fwd_bwd` kernel for this batch on a background thread; returns its future."""
     avals = jax.tree.map(_to_aval, (params, rest, inputs))
     options = self._xla_options(None)
 
@@ -2413,25 +2443,27 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       with self._sharding_ctx():
         return jitted.lower(*avals).compile(compiler_options=options)
 
-    if self._dropless_compile_executor is None:
-      self._dropless_compile_executor = concurrent.futures.ThreadPoolExecutor(
-          max_workers=1, thread_name_prefix="dropless-compile"
-      )
-    self._dropless_compile = self._dropless_compile_executor.submit(compile_kernel)
+    if self._compile_executor is None:
+      self._compile_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="fwd-bwd-compile")
+    return self._compile_executor.submit(compile_kernel)
 
-  def _discard_dropless_compile(self) -> None:
-    """Drops a background compile of a kernel being replaced, so the next compile does not queue behind it."""
-    future, self._dropless_compile = self._dropless_compile, None
-    if future is None or future.cancel():
-      return
-    # Already running, and a thread cannot be stopped: its result is discarded, its error only logged, and the next
-    # compile gets a fresh thread rather than waiting for this one.
-    future.add_done_callback(
-        lambda f: f.exception() and logging.warning("Discarded fwd_bwd_dropless compile failed: %s", f.exception())
-    )
-    if not future.done():
-      self._dropless_compile_executor.shutdown(wait=False)
-      self._dropless_compile_executor = None
+  def _discard_background_compiles(self) -> None:
+    """Drops background compiles of kernels being replaced, so the next compile does not queue behind them."""
+    futures = (self._dropless_compile, self._fwd_bwd_compile)
+    self._dropless_compile = self._fwd_bwd_compile = None
+    running = False
+    for future in futures:
+      if future is None or future.cancel():
+        continue
+      # Already running, and a thread cannot be stopped: its result is discarded, its error only logged, and the
+      # next compile gets a fresh thread rather than waiting for this one.
+      future.add_done_callback(
+          lambda f: f.exception() and logging.warning("Discarded fwd_bwd compile failed: %s", f.exception())
+      )
+      running = running or not future.done()
+    if running:
+      self._compile_executor.shutdown(wait=False)
+      self._compile_executor = None
 
   def _join_dropless_compile(self) -> Any:
     """Waits for the background compile, installs `fwd_bwd_dropless` and returns it; re-raises a compile error."""
@@ -3361,10 +3393,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self.save_checkpoint(metadata=None, force=True)
       self._checkpoint_manager.close()
 
-    if self._dropless_compile_executor is not None:
+    if self._compile_executor is not None:
       # Cancels a compile not yet started; one already running cannot be stopped, and interpreter exit joins it.
-      self._dropless_compile_executor.shutdown(wait=False, cancel_futures=True)
-      self._dropless_compile_executor = None
+      self._compile_executor.shutdown(wait=False, cancel_futures=True)
+      self._compile_executor = None
 
     # Write the metrics and cleanup metrics logger resources
     self._throttler.cleanup()

@@ -513,7 +513,9 @@ class MemoryReportTest(absltest.TestCase):
     """A kernel added to the engine must be classified here, or the report refuses to run."""
     self.assertEqual(
         sorted(maxtext_engine_compile.STATE_NOT_PASSED),
-        sorted((*maxtext_engine_compile.KERNEL_NAMES, maxtext_engine.DROPLESS_FWD_BWD)),
+        sorted(
+            (*maxtext_engine_compile.KERNEL_NAMES, maxtext_engine.DROPLESS_FWD_BWD, maxtext_engine.FIRST_PHASE_FWD_BWD)
+        ),
     )
 
 

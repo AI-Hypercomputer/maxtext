@@ -84,9 +84,7 @@ def main():
   forced = jnp.broadcast_to(jnp.arange(top_k, dtype=jnp.int32), (x.shape[0], x.shape[1], top_k))
 
   ref, _ = _run(cfg_ref, mesh, params, x, forced)
-  cfg = layer_setup._cfg(  # pylint: disable=protected-access
-      True, retry_num_moe_token_chunks=8
-  )
+  cfg = layer_setup._cfg(True, retry_num_moe_token_chunks=8)  # pylint: disable=protected-access
   capped, capped_overflow = _run(cfg, mesh, params, x, forced)
   replay, replay_overflow = _run(cfg, mesh, params, x, forced, dropless_replay=True)
 
