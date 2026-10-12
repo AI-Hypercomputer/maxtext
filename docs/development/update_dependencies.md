@@ -68,6 +68,14 @@ if you want to build `seed-env` from source.
 
 Update the desired dependencies in `src/dependencies/requirements/base_requirements/requirements.txt` or the hardware-specific pre-training files (`src/dependencies/requirements/base_requirements/tpu-requirements.txt`, `src/dependencies/requirements/base_requirements/cuda12-requirements.txt`) or the post-training files (`src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt`).
 
+Put a version floor that only the pre-training environments can satisfy in the
+hardware-specific pre-training files, not in `requirements.txt`. The
+post-training requirements include `requirements.txt` and are resolved against
+their own JAX seed before the post-training overrides apply, so a floor that
+needs a newer JAX than that seed makes the post-training regeneration fail. For
+example, `flax>=0.12.10` needs `jax>=0.11.1`, but the post-training seed pins
+`jaxlib==0.11.0`.
+
 ## Step 2: Find the JAX build commit hash
 
 The dependency generation process is pinned to a specific nightly build of JAX. You need to find the commit hash for the desired JAX build from [JAX `build/` folder](https://github.com/jax-ml/jax/commits/main/build) and copy its full commit hash.

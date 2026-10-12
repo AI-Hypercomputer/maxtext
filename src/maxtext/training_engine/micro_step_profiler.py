@@ -69,6 +69,10 @@ class MicroStepProfiler:
           "TPU advanced profiling enabled: %s",
           self.profiling_options.advanced_configuration,
       )
+    if config.enable_continuous_profiling:
+      advanced = dict(getattr(self.profiling_options, "advanced_configuration", None) or {})
+      advanced["enable_continuous_profiling"] = True
+      self.profiling_options.advanced_configuration = advanced
     self.profile_active: bool = False
     # profiler_period is the distance between successive profiling window,
     # profiler_steps=3, profiler_period=4 gives [1,3], [5,7], [9,11].

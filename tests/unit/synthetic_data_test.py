@@ -15,6 +15,7 @@
 """Tests for synthetic data sharding."""
 
 import sys
+import types
 from absl.testing import absltest
 from absl.testing import parameterized
 import jax
@@ -22,6 +23,7 @@ from jax.sharding import Mesh
 from jax.experimental import mesh_utils
 
 from maxtext.configs import pyconfig
+from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
 from maxtext.input_pipeline.synthetic_data_processing import SyntheticDataIterator
 from maxtext.utils import sharding as maxtext_sharding
 from tests.utils.test_helpers import get_test_config_path
@@ -73,6 +75,25 @@ class SyntheticDataShardingTest(parameterized.TestCase):
     # Expected sharding: mapping of logical axes to physical mesh
     expected_sharding = maxtext_sharding.get_input_data_sharding(config, mesh)
     self.assertEqual(inputs.sharding, expected_sharding)
+
+
+class PlaceHolderDataIteratorTest(absltest.TestCase):
+  """Tests for the placeholder iterator used by the non loading hosts."""
+
+  def _config(self):
+    return types.SimpleNamespace(
+        global_batch_size_to_load=16,
+        global_batch_size_to_load_eval=8,
+        max_target_length=4,
+    )
+
+  def test_eval_placeholder_uses_eval_batch_size(self):
+    data = next(PlaceHolderDataIterator.get_place_holder_synthetic_data(self._config(), is_training=False))
+    self.assertEqual(data["inputs"].shape, (8 // jax.process_count(), 4))
+
+  def test_train_placeholder_uses_train_batch_size(self):
+    data = next(PlaceHolderDataIterator.get_place_holder_synthetic_data(self._config()))
+    self.assertEqual(data["inputs"].shape, (16 // jax.process_count(), 4))
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Mesh sharding, batch dimension reshaping, and metric extraction utilities for SPMD DiLoCo."""
+"""Mesh sharding, batch dimension reshaping, and metric extraction utilities for DiLoCo."""
 
 from collections.abc import Sequence
 
@@ -20,6 +20,7 @@ import drjax
 import jax
 import jax.numpy as jnp
 from jaxtyping import PyTree
+import numpy as np
 
 
 def add_diloco_to_sharding(pytree: PyTree) -> PyTree:
@@ -103,3 +104,43 @@ def extract_per_island_metrics(metrics: PyTree, num_diloco_replicas: int) -> PyT
       loss_i = drjax.reduce_sum(metrics["scalar"]["learning/loss"] * mask_i)
       default_metrics["scalar"][f"learning/loss_island_{i}"] = loss_i
   return default_metrics
+
+
+def split_mesh_along_axis(mesh: jax.sharding.Mesh, axis_name: str = "diloco") -> list[jax.sharding.Mesh]:
+  """Splits `mesh` into one submesh per index of `axis_name`, each without that axis.
+
+  Submesh `i` holds the devices at position `i` along `axis_name`, with the remaining axes (and their axis types) in
+  their original order, so any PartitionSpec that does not mention `axis_name` is valid on every submesh.
+  """
+  if axis_name not in mesh.axis_names:
+    raise ValueError(f"Axis {axis_name!r} not found in mesh axis names {mesh.axis_names}.")
+  axis_index = mesh.axis_names.index(axis_name)
+  keep = [i for i in range(len(mesh.axis_names)) if i != axis_index]
+  axis_names = tuple(mesh.axis_names[i] for i in keep)
+  axis_types = tuple(mesh.axis_types[i] for i in keep)
+  return [
+      jax.sharding.Mesh(np.take(mesh.devices, i, axis=axis_index), axis_names, axis_types=axis_types)
+      for i in range(mesh.shape[axis_name])
+  ]
+
+
+def remove_mesh_axis_from_rules(
+    logical_axis_rules: Sequence[tuple[str, str | Sequence[str] | None]], axis_name: str = "diloco"
+) -> list[tuple[str, str | tuple[str, ...] | None]]:
+  """Drops `axis_name` from the physical axes of every logical axis rule.
+
+  Rules that map only to `axis_name` are removed, so the logical axis falls through to the next matching rule, which
+  is what a mesh built by `split_mesh_along_axis` needs.
+  """
+  new_rules = []
+  for logical_axis, physical_axes in logical_axis_rules:
+    if isinstance(physical_axes, str):
+      if physical_axes == axis_name:
+        continue
+    elif physical_axes is not None:
+      stripped = tuple(ax for ax in physical_axes if ax != axis_name)
+      if physical_axes and not stripped:
+        continue
+      physical_axes = stripped
+    new_rules.append((logical_axis, physical_axes))
+  return new_rules

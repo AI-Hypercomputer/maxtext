@@ -12,18 +12,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for MLPerf DS v3 continuous stream chunking in tfds_data_processing_c4_mlperf."""
+"""Unit tests for tfds_data_processing_c4_mlperf: MLPerf DS v3 continuous stream chunking and eval batch decimation."""
 
+import os
+import tempfile
+import threading
+import time
 import types
 import unittest
+from unittest import mock
+import jax
+from jax.sharding import Mesh
 import numpy as np
 import pytest
 
+# A handful of devices is needed to exercise the local row to device mapping.
+os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
+
 tf = pytest.importorskip("tensorflow")
 tfds = pytest.importorskip("tensorflow_datasets")
+from tensorflow_datasets.core import reader as tfds_reader  # pylint: disable=wrong-import-position
 
+from maxtext.input_pipeline import tfds_data_processing_c4_mlperf as c4_mlperf
 from maxtext.input_pipeline.tfds_data_processing_c4_mlperf import (
+    _files_hold_one_example_each,
     _pad_to_batch_size,
+    _place_real_rows_in_local_batch,
     chunk_token_stream,
     format_continuous_stream_fn,
     format_fn,
@@ -388,6 +402,271 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
     b0 = batches[0]
     # Under sequence packing, trailing padding has segment ID 0
     self.assertIn(0, b0["inputs_segmentation"][0])
+
+
+def _make_eval_dataset(num_examples: int, seq_len: int) -> "tf.data.Dataset":
+  """Builds a formatted eval dataset with `num_examples` real examples."""
+
+  def gen():
+    for i in range(num_examples):
+      value = tf.fill([seq_len], tf.constant(i + 1, dtype=tf.int32))
+      yield {
+          "inputs": value,
+          "targets": value,
+          "inputs_position": tf.range(seq_len, dtype=tf.int32),
+          "targets_position": tf.range(seq_len, dtype=tf.int32),
+          "inputs_segmentation": tf.ones([seq_len], dtype=tf.int32),
+          "targets_segmentation": tf.ones([seq_len], dtype=tf.int32),
+      }
+
+  signature = {
+      key: tf.TensorSpec(shape=[seq_len], dtype=tf.int32)
+      for key in (
+          "inputs",
+          "targets",
+          "inputs_position",
+          "targets_position",
+          "inputs_segmentation",
+          "targets_segmentation",
+      )
+  }
+  return tf.data.Dataset.from_generator(gen, output_signature=signature)
+
+
+_NUM_HOSTS = 128
+_NUM_FILES = 2048
+_SEQ_LEN = 8
+_LOCAL_ROWS = 8
+_TOKENS_PER_EXAMPLE = _LOCAL_ROWS * _SEQ_LEN
+_TRAIN_STEP_S = 0.5
+
+
+def _example_tokens(key):
+  return (2 + 1000 * key + np.arange(_TOKENS_PER_EXAMPLE)).astype(np.int32)
+
+
+_EVAL_DATASET = "one_example_per_file_eval"
+
+
+def _write_one_example_per_file_eval(data_dir):
+  """Writes an eval split laid out like the MLPerf c4/en:3.0.9 one: one pre-tokenized example per tfrecord file.
+
+  The files and metadata are written directly (no generation step), so `tfds.builder` reads
+  them back as a read-only dataset, as it does for the MLPerf data.
+  """
+  features = tfds.features.FeaturesDict({"ids": tfds.features.Tensor(shape=(_TOKENS_PER_EXAMPLE,), dtype=np.int32)})
+  version_dir = os.path.join(data_dir, _EVAL_DATASET, "1.0.0")
+  os.makedirs(version_dir)
+  for key in range(_NUM_FILES):
+    path = os.path.join(version_dir, f"{_EVAL_DATASET}-validation.tfrecord-{key:05d}-of-{_NUM_FILES:05d}")
+    with tf.io.TFRecordWriter(path) as writer:
+      writer.write(features.serialize_example({"ids": _example_tokens(key)}))
+  tfds.folder_dataset.write_metadata(data_dir=version_dir, features=features, check_data=False)
+
+
+class _FileReadCounter:
+  """Records the tfrecord files the tfds reader pulls examples from (one example per file)."""
+
+  def __init__(self):
+    self.files = []
+    self._lock = threading.Lock()
+    self._orig = tfds_reader._get_dataset_from_filename  # pylint: disable=protected-access
+
+  def _record(self, filename):
+    with self._lock:
+      self.files.append(filename.numpy().decode())
+    return np.int64(0)
+
+  def dataset_from_filename(self, instruction, *args, **kwargs):
+    ds = self._orig(instruction, *args, **kwargs)
+
+    def _tag(example):
+      done = tf.py_function(self._record, [instruction.filename], tf.int64)
+      with tf.control_dependencies([done]):
+        return tf.identity(example)
+
+    return ds.map(_tag)
+
+
+class EvalReadsOwnFilesOnceTest(unittest.TestCase):
+  """Host i of 128 reads only its own eval file, once, and gets the same eval batch as before.
+
+  Before the change, the eval shard was taken after reading (host i reads files 0..i to find
+  its first example) and the cache never completed (the loop reads one batch out of a longer
+  shard), so every eval read the files again.
+  """
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls._tmp = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+    cls.data_dir = cls._tmp.name
+    _write_one_example_per_file_eval(cls.data_dir)
+    cls.name = _EVAL_DATASET
+    builder = tfds.builder(cls.name, data_dir=cls.data_dir)
+    instructions = builder.info.splits["validation"].file_instructions
+    cls.files = [os.path.basename(f.filename) for f in instructions]
+    assert len(cls.files) == _NUM_FILES and all(f.take == 1 for f in instructions)
+    # Read order of the whole split: host i's single example sits in file i.
+    cls.examples = [x["ids"] for x in tfds.as_numpy(builder.as_dataset(split="validation", shuffle_files=False))]
+
+  @classmethod
+  def tearDownClass(cls):
+    cls._tmp.cleanup()
+    super().tearDownClass()
+
+  def _build(self, host, shard_in_read):
+    ds = c4_mlperf.get_dataset(
+        self.name, "validation", host, _NUM_HOSTS, data_dir=self.data_dir, shard_in_read=shard_in_read
+    )
+    ds = c4_mlperf.rekey(ds, {"inputs": None, "targets": "ids"})
+    return preprocess_eval_dataset(
+        ds,
+        types.SimpleNamespace(pad_id=0, eos_id=1),
+        eval_global_batch_size_to_load=_NUM_HOSTS * _LOCAL_ROWS,
+        max_target_length=_SEQ_LEN,
+        num_examples=_LOCAL_ROWS,
+        real_data_rows=list(range(_LOCAL_ROWS)),
+        num_batches=1,
+        dataloading_host_count=_NUM_HOSTS,
+    )
+
+  def _evals(self, host, shard_in_read, num_evals=3):
+    """Runs `num_evals` evals the way train.py does.
+
+    Returns the eval batches, the files read in each eval, and whether the last eval's
+    iterator ended after its num_batches (= 1) batches.
+    """
+    counter = _FileReadCounter()
+    with (
+        mock.patch.object(tfds_reader, "_get_dataset_from_filename", counter.dataset_from_filename),
+        mock.patch.object(c4_mlperf.jax, "process_count", return_value=_NUM_HOSTS),
+    ):
+      ds = self._build(host, shard_in_read)
+      batches, reads = [], []
+      for _ in range(num_evals):
+        start = len(counter.files)
+        it = ds.as_numpy_iterator()  # the eval iterator reset before each eval
+        # The eval loop stops after num_batches (= 1) batches without draining the iterator.
+        batches.append(next(it))
+        # The train step before the next eval. The prefetch completes the truncated cache in the
+        # background meanwhile; before the change the cache was discarded at the next reset.
+        time.sleep(_TRAIN_STEP_S)
+        reads.append(counter.files[start:])
+      # Whether one eval is exactly num_batches batches long.
+      ended = next(it, None) is None
+    return batches, reads, ended
+
+  def test_files_hold_one_example_each(self):
+    self.assertTrue(_files_hold_one_example_each(self.name, "validation", self.data_dir, _NUM_HOSTS))
+    # More loading hosts than files: some hosts would get no file, keep sharding after reading.
+    self.assertFalse(_files_hold_one_example_each(self.name, "validation", self.data_dir, 2 * _NUM_FILES))
+
+  def test_same_batch_own_files_and_no_reread(self):
+    for host in (0, 5, 64, 127):
+      with self.subTest(host=host):
+        before, before_reads, _ = self._evals(host, shard_in_read=False, num_evals=1)
+        after, after_reads, after_ended = self._evals(host, shard_in_read=True)
+        # Byte-identical eval batch, on every eval.
+        for batch in after:
+          self.assertEqual(sorted(batch), sorted(before[0]))
+          for key in before[0]:
+            np.testing.assert_array_equal(batch[key], before[0][key])
+        np.testing.assert_array_equal(after[0]["inputs"], self.examples[host].reshape(_LOCAL_ROWS, _SEQ_LEN))
+        # Before: host i reads at least files 0..i. After: only its own files, and only once.
+        self.assertTrue(set(self.files[: host + 1]) <= set(before_reads[0]))
+        own = set(self.files[host::_NUM_HOSTS])
+        self.assertIn(self.files[host], after_reads[0])
+        self.assertTrue(set(after_reads[0]) <= own, after_reads[0])
+        self.assertEqual(after_reads[1:], [[], []])
+        self.assertTrue(after_ended)
+
+
+class PadToBatchSizeTest(unittest.TestCase):
+  """Tests for deriving the batch count without a cross-host allgather."""
+
+  def test_skips_allgather_when_only_a_subset_of_processes_loads(self):
+    ds = _make_eval_dataset(2, seq_len=4)
+    with mock.patch.object(c4_mlperf.jax, "process_count", return_value=8):
+      with mock.patch.object(c4_mlperf.multihost_utils, "process_allgather") as allgather:
+        padded = list(_pad_to_batch_size(ds, batch_size=4, num_examples=2, dataloading_host_count=2).as_numpy_iterator())
+    allgather.assert_not_called()
+    self.assertEqual(len(padded), 4)
+    self.assertTrue((padded[2]["targets_segmentation"] == 0).all())
+    self.assertTrue((padded[3]["targets_segmentation"] == 0).all())
+
+  def test_explicit_num_batches_skips_allgather(self):
+    ds = _make_eval_dataset(2, seq_len=4)
+    with mock.patch.object(c4_mlperf.multihost_utils, "process_allgather") as allgather:
+      padded = list(_pad_to_batch_size(ds, batch_size=2, num_examples=2, num_batches=3).as_numpy_iterator())
+    allgather.assert_not_called()
+    self.assertEqual(len(padded), 6)
+
+
+class PlaceRealRowsTest(unittest.TestCase):
+  """Tests for scattering real examples onto the rows that are evaluated."""
+
+  def test_scatters_full_batch(self):
+    seq_len = 3
+    batch = {
+        "inputs": tf.constant([[1, 1, 1], [2, 2, 2]], dtype=tf.int32),
+        "targets_segmentation": tf.ones([2, seq_len], dtype=tf.int32),
+    }
+    out = _place_real_rows_in_local_batch(batch, local_batch_size=4, real_data_rows=[0, 2])
+    inputs = out["inputs"].numpy()
+    segmentation = out["targets_segmentation"].numpy()
+    self.assertEqual(inputs.shape, (4, seq_len))
+    np.testing.assert_array_equal(inputs[0], [1, 1, 1])
+    np.testing.assert_array_equal(inputs[2], [2, 2, 2])
+    # The rows that are decimated away hold dummy data with zero loss weight.
+    np.testing.assert_array_equal(inputs[1], [0, 0, 0])
+    np.testing.assert_array_equal(inputs[3], [0, 0, 0])
+    self.assertEqual(segmentation[0].sum(), seq_len)
+    self.assertEqual(segmentation[1].sum(), 0)
+    self.assertEqual(segmentation[2].sum(), seq_len)
+    self.assertEqual(segmentation[3].sum(), 0)
+
+  def test_scatters_short_final_batch(self):
+    batch = {"inputs": tf.constant([[7, 7, 7]], dtype=tf.int32)}
+    out = _place_real_rows_in_local_batch(batch, local_batch_size=4, real_data_rows=[1, 3])
+    inputs = out["inputs"].numpy()
+    self.assertEqual(inputs.shape, (4, 3))
+    np.testing.assert_array_equal(inputs[1], [7, 7, 7])
+    self.assertEqual(inputs.sum(), 21)
+
+
+class LocalRowsLoadingRealDataTest(unittest.TestCase):
+  """Tests for the local row to device mapping helper."""
+
+  def setUp(self):
+    super().setUp()
+    devices = jax.devices()
+    if len(devices) < 8:
+      self.skipTest(f"Test needs 8 devices, got {len(devices)}")
+    self.devices = devices[:8]
+    self.mesh = Mesh(np.array(self.devices).reshape(4, 2), ("fsdp", "expert"))
+
+  def test_all_rows_when_nothing_is_decimated(self):
+    rows = c4_mlperf.get_local_rows_loading_real_data([["fsdp", "expert"]], 8, 8, 128, self.mesh)
+    self.assertEqual(rows, list(range(8)))
+
+  def test_only_rows_on_evaluated_devices(self):
+    # Simulate a host that owns every other device of the mesh, like a host whose
+    # devices span two mesh rows.
+    local_devices = [self.devices[i] for i in (0, 2, 4, 6)]
+    with mock.patch.object(type(self.mesh), "local_devices", property(lambda _: local_devices)):
+      with mock.patch.object(c4_mlperf.jax, "process_count", return_value=2):
+        rows = c4_mlperf.get_local_rows_loading_real_data([["fsdp", "expert"]], 8, 4, 128, self.mesh)
+    # Global rows 0 and 2 (local positions 0 and 1) are below the cutoff of 4.
+    self.assertEqual(rows, [0, 1])
+
+  def test_multiple_rows_per_device(self):
+    local_devices = [self.devices[i] for i in (0, 2, 4, 6)]
+    with mock.patch.object(type(self.mesh), "local_devices", property(lambda _: local_devices)):
+      with mock.patch.object(c4_mlperf.jax, "process_count", return_value=2):
+        rows = c4_mlperf.get_local_rows_loading_real_data([["fsdp", "expert"]], 16, 8, 128, self.mesh)
+    # Each device holds 2 rows; local positions 0 and 1 are below the cutoff.
+    self.assertEqual(rows, [0, 1, 2, 3])
 
 
 if __name__ == "__main__":

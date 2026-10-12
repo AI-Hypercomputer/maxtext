@@ -14,6 +14,7 @@
 """multi_token_prediction_test"""
 
 import unittest
+from unittest import mock
 import functools
 from types import SimpleNamespace
 from absl import logging as absl_logging
@@ -22,16 +23,19 @@ from absl import logging as absl_logging
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 from jax.sharding import Mesh
 from flax import nnx
 
 from maxtext.configs import pyconfig
 from maxtext.layers import multi_token_prediction  # The class under test
 from maxtext.layers import embeddings
+from maxtext.layers import mhc
 from maxtext.layers import quantizations
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.common.common_types import Config
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
+from maxtext.models import models
 from maxtext.trainers.pre_train import train as pre_train
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -147,16 +151,30 @@ class _MockDecoderForMTP:
     self.config = config
     self.model_mode = MODEL_MODE_TRAIN
     self.last_normalize_y = None
+    self.last_reduce_mhc = None
+    self.last_hidden_state_ndim = None
 
   def _apply_embedding(self, _shared_embedding, input_ids, _position_ids, _deterministic, model_mode):
     """Returns a zero tensor with the correct embedding shape."""
     batch_size, seq_len = input_ids.shape
     return jnp.zeros((batch_size, seq_len, self.config.base_emb_dim), dtype=self.config.dtype)
 
-  def apply_output_head(self, _shared_embedding, hidden_state, _deterministic, model_mode, normalize_y=True):
+  def apply_output_head(
+      self, _shared_embedding, hidden_state, _deterministic, model_mode, normalize_y=True, reduce_mhc=True
+  ):
     """Returns a zero tensor with the correct logit shape."""
     self.last_normalize_y = normalize_y
-    batch_size, seq_len, _ = hidden_state.shape
+    self.last_reduce_mhc = reduce_mhc
+    self.last_hidden_state_ndim = hidden_state.ndim
+    if not reduce_mhc:
+      # The real NNXDecoder.apply_output_head only collapses mHC streams when
+      # reduce_mhc=True, so a 4D state arriving here would silently produce 4D logits
+      # and break the loss. Callers that pass reduce_mhc=False must collapse first.
+      assert hidden_state.ndim == 3, (
+          "MTP must collapse mHC streams before calling the output head with "
+          f"reduce_mhc=False; got a {hidden_state.ndim}D state {hidden_state.shape}"
+      )
+    batch_size, seq_len = hidden_state.shape[:2]
     return jnp.zeros((batch_size, seq_len, self.config.vocab_size), dtype=self.config.dtype)
 
 
@@ -1096,6 +1114,180 @@ class CrossEntropyWithIntegerLabelsTest(unittest.TestCase):
 
     np.testing.assert_allclose(actual_loss, expected_loss, rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(actual_grad, expected_grad, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.tpu_only
+class MTPReuseInputEmbeddingTest(unittest.TestCase):
+  """mtp_reuse_input_embedding on the full Transformer.
+
+  Loss and every gradient are bitwise identical to the flag-off run, except the embedding table gradient, whose
+  terms are now summed before the lookup's transpose.
+  """
+
+  def _run(self, **flags):
+    """Returns (loss, mtp_loss, flat grads, #embedding lookups)."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="mtp_reuse_input_embedding_test",
+        skip_jax_distributed_system=True,
+        mtp_num_layers=1,
+        attention="dot_product",
+        enable_dropout=False,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        base_num_decoder_layers=2,
+        max_target_length=16,
+        per_device_batch_size=1,
+        vocab_size=64,
+        # float32 activations: with bfloat16, XLA's excess-precision fusion choices differ between the two graphs.
+        dtype="float32",
+        **flags,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = models.Transformer(cfg, mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=0))
+    batch, seq = jax.device_count(), cfg.max_target_length
+    k1, k2 = jax.random.split(jax.random.PRNGKey(7))
+    # Token 0 in the inputs too, so a rolled-in id 0 is not the only use of row 0.
+    inputs = jax.random.randint(k1, (batch, seq), 0, cfg.vocab_size)
+    segments = jnp.ones((batch, seq), dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32), (batch, seq))
+    data = {
+        "inputs": inputs,
+        "inputs_position": positions,
+        "inputs_segmentation": segments,
+        "targets": jax.random.randint(k2, (batch, seq), 0, cfg.vocab_size),
+        "targets_segmentation": segments,
+    }
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    def loss(p):
+      loss_value, aux = pre_train.loss_fn(nnx.merge(graphdef, p, rest), cfg, data, None, None, is_train=True)
+      return loss_value, aux["mtp_loss"]
+
+    embed_calls = 0
+    real_embed = embeddings.Embed.__call__
+
+    def count_embed(*args, **kwargs):
+      nonlocal embed_calls
+      embed_calls += 1
+      return real_embed(*args, **kwargs)
+
+    with mock.patch.object(embeddings.Embed, "__call__", count_embed):
+      (loss_value, mtp_loss), grads = jax.value_and_grad(loss, has_aux=True)(params)
+    self.assertGreater(float(mtp_loss), 0.0)
+    flat = {jax.tree_util.keystr(k): np.asarray(v) for k, v in jax.tree_util.tree_leaves_with_path(grads)}
+    return np.asarray(loss_value), np.asarray(mtp_loss), flat, embed_calls
+
+  def _check(self):
+    """Compares flag on vs off: loss and every gradient but the embedding table's must be bitwise equal.
+
+    Returns the number of embedding lookups (off, on).
+    """
+    ref_loss, ref_mtp, ref_grads, ref_embeds = self._run()
+    loss, mtp, grads, embeds = self._run(mtp_reuse_input_embedding=True)
+    np.testing.assert_array_equal(loss, ref_loss)
+    np.testing.assert_array_equal(mtp, ref_mtp)
+    self.assertEqual(grads.keys(), ref_grads.keys())
+    matched = 0
+    for name, ref in ref_grads.items():
+      if "token_embedder" in name:
+        matched += 1
+        np.testing.assert_allclose(grads[name], ref, rtol=1e-4, atol=1e-7, err_msg=name)
+      else:
+        np.testing.assert_array_equal(grads[name], ref, err_msg=name)
+    self.assertEqual(matched, 1)
+    return ref_embeds, embeds
+
+  def test_reuse_input_embedding(self):
+    self.assertEqual(self._check(), (2, 1))
+
+
+class DeepSeekV4MTPForwardTest(unittest.TestCase):
+  """Tests the DeepSeek-V4 mHC Multi-Token Prediction (MTP) forward pass."""
+
+  def setUp(self):
+    super().setUp()
+    self.cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        model_name="deepseek4-tiny",
+        run_name="deepseek4_mtp_forward_test",
+        skip_jax_distributed_system=True,
+        override_model_config=True,
+        attention="dot_product",
+        mtp_num_layers=1,
+        mtp_eval_target_module=1,
+        per_device_batch_size=1,
+        max_target_length=8,
+        vocab_size=128,
+    )
+    self.mesh = Mesh(maxtext_utils.create_device_mesh(self.cfg), self.cfg.mesh_axes)
+    self.rng = jax.random.PRNGKey(42)
+    self.rngs = nnx.Rngs(params=self.rng, dropout=self.rng)
+    self.test_model = MTPBlockTestModel(
+        config=self.cfg,
+        mesh=self.mesh,
+        rngs=self.rngs,
+    )
+
+  def test_deepseek_v4_mtp_forward_with_4d_mhc_state(self):
+    """Verifies that 4D mHC hidden state collapses to 3D and MTP produces finite losses."""
+    batch_size = int(self.cfg.per_device_batch_size)
+    seq_len = self.cfg.max_target_length
+    mhc_expansion_rate = self.cfg.mhc_expansion_rate
+    embed_dim = self.cfg.base_emb_dim
+
+    # Verify that the MTP layer instantiated the real DeepSeek-V4 mHC components
+    mtp_layer = self.test_model.mtp_block.mtp_layer_1
+    self.assertTrue(mtp_layer.is_mhc)
+    self.assertIsInstance(mtp_layer.hc_head, mhc.DeepSeek4HyperHead)
+
+    # Genuinely 4D main_hidden_state [batch, seq, mhc_expansion_rate, emb]
+    key_h, key_in, key_tgt = jax.random.split(self.rng, 3)
+    main_hidden_state = jax.random.normal(
+        key_h,
+        (batch_size, seq_len, mhc_expansion_rate, embed_dim),
+        dtype=self.cfg.dtype,
+    )
+    self.assertEqual(main_hidden_state.ndim, 4)
+
+    input_ids = jax.random.randint(key_in, (batch_size, seq_len), 0, self.cfg.vocab_size)
+    target_ids = jax.random.randint(key_tgt, (batch_size, seq_len), 0, self.cfg.vocab_size)
+    target_mask = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    position_ids = jnp.arange(seq_len, dtype=jnp.int32).reshape(1, -1).repeat(batch_size, axis=0)
+    decoder_segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+
+    self.test_model(
+        main_hidden_state,
+        input_ids,
+        target_ids,
+        target_mask,
+        position_ids=position_ids,
+        decoder_segment_ids=decoder_segment_ids,
+        model_mode=MODEL_MODE_TRAIN,
+        deterministic=True,
+    )
+
+    # 1. Assert sown loss / intermediates are finite (no NaN, no Inf)
+    model_state = nnx.state(self.test_model)
+    self.assertTrue(hasattr(model_state.mtp_block, "losses"))
+    losses = model_state.mtp_block.losses[...]
+    self.assertTrue(jnp.isfinite(losses).all(), f"MTP losses contain non-finite values: {losses}")
+    self.assertTrue(hasattr(model_state.mtp_block, "weights"))
+    weights = model_state.mtp_block.weights[...]
+    self.assertTrue(jnp.isfinite(weights).all(), f"MTP weights contain non-finite values: {weights}")
+    self.assertTrue(hasattr(model_state.mtp_block, "mtp_preds"))
+    preds = model_state.mtp_block.mtp_preds[...]
+    self.assertTrue(jnp.isfinite(preds).all(), f"MTP preds contain non-finite values: {preds}")
+
+    # 2. Assert output head arguments
+    self.assertIs(self.test_model.decoder.last_normalize_y, False)
+    self.assertIs(self.test_model.decoder.last_reduce_mhc, False)
+
+    # 3. Assert the state handed to the output head was already collapsed to 3D
+    self.assertEqual(self.test_model.decoder.last_hidden_state_ndim, 3)
 
 
 if __name__ == "__main__":

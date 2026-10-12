@@ -162,7 +162,7 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
         self.eval_metadata["eval_step_count"] != 0
     ), "BaseTrainingHooks.on_eval_step_start() must be called before BaseTrainingHooks.on_eval_step_end()"
 
-    avg_loss = eval_loss / self.eval_metadata["eval_step_count"]
+    avg_loss = eval_loss if self.eval_loss_is_preaveraged() else eval_loss / self.eval_metadata["eval_step_count"]
     metrics = {
         "scalar": {
             "eval/total_loss": eval_loss,
@@ -195,6 +195,10 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
     if avg_loss <= self.config.target_eval_loss:
       raise exceptions.StopTraining(f"Target loss {self.config.target_eval_loss=} is achieved.")
 
+  def eval_loss_is_preaveraged(self) -> bool:
+    """Whether Tunix supplies a cross-batch weighted mean to the eval hook."""
+    return False
+
   @abc.abstractmethod
   def get_total_weights(self, batch) -> jax.Array:
     """Calculate the number of non-padded tokens in the batch."""
@@ -215,9 +219,12 @@ class BaseDataHooks(DataHooks):
     """Loads the next batch of data for training."""
     try:
       self.train_batch = self.train_data_loader.load_next_batch()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      max_logging.log(f"Exception in load_next_train_batch: {str(e)}")
-      self.train_batch = None
+    except exceptions.StopTraining as e:
+      if isinstance(e.__cause__ or e.__context__, StopIteration):
+        max_logging.log(f"Training data exhausted: {str(e)}")
+        self.train_batch = None
+      else:
+        raise
     return self.train_batch
 
   @override
@@ -232,7 +239,7 @@ class BaseDataHooks(DataHooks):
         self.eval_batch = None
       else:
         self.eval_batch = next(self.eval_data_iterator)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      max_logging.log(f"Exception in load_next_eval_batch: {str(e)}")
+    except StopIteration as e:
+      max_logging.log(f"Evaluation data exhausted: {str(e)}")
       self.eval_batch = None
     return self.eval_batch
