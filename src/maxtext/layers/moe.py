@@ -933,6 +933,16 @@ class RoutedMoE(nnx.Module):
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
 
+    # tp-as-ep: the tensor axis acts as additional expert parallelism inside the routed MoE.
+    self._tp_as_ep = self.config.custom_mesh_and_rule == ctypes.CustomRule.TP_AS_EP
+    if self._tp_as_ep:
+      num_moe_shards = self.mesh.shape.get("expert", 1) * self.mesh.shape.get("tensor", 1)
+      if self.config.num_experts % num_moe_shards != 0:
+        raise ValueError(
+            f"custom_mesh_and_rule=tp-as-ep needs num_experts ({self.config.num_experts}) divisible by "
+            f"expert*tensor parallelism ({num_moe_shards})."
+        )
+
     if self.config.shard_exp_on_fsdp:
       # special sharding for dsv3
       self.wi_kernel_axes = ("embed_moe", None, "mlp_moe")
@@ -964,6 +974,9 @@ class RoutedMoE(nnx.Module):
     elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
       # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
+    elif self._tp_as_ep:
+      # when custom mesh and rule is tp-as-ep, tensor axis is same with expert in MoE component.
+      self._expert_parallelism_name = ("expert", "tensor")
     else:
       self._expert_parallelism_name = "expert"
 
@@ -1259,6 +1272,9 @@ class RoutedMoE(nnx.Module):
     return self.mesh.shape.get(self._expert_parallelism_name, 1)
 
   def get_tensor_parallelism_size(self):
+    if self._tp_as_ep:
+      # The tensor axis is consumed by expert parallelism, so routed experts are not tensor-sharded.
+      return 1
     if isinstance(self._tensor_parallelism_name, tuple):
       size = 1
       for axis in self._tensor_parallelism_name:
@@ -2507,21 +2523,23 @@ class RoutedMoE(nnx.Module):
       else:
         batch_logical_axis = "decode_batch_moe"
 
-      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      # Routed-MoE boundary names mirror activation_norm_length / activation_embed by default; a custom
+      # rule (e.g. tp-as-ep) can override them to change the token layout at the MoE boundary only.
+      input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
       w0_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       w1_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_mlp"))
       wo_bias_pspec = self._logical_to_mesh_axes(("exp", "activation_embed"))
 
-      gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+      gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
       # NOTE: deepseek2 has a different pattern
       if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
-        pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
+        pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
         pre_bias_logits_pspec = None
 
       if has_input_ids:
-        decoder_tokens_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length"))
+        decoder_tokens_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed"))
       else:
         decoder_tokens_pspec = None
 
@@ -2600,8 +2618,8 @@ class RoutedMoE(nnx.Module):
     output_pspec = self._logical_to_mesh_axes(
         (
             batch_logical_axis,
-            "activation_norm_length",
-            "activation_embed",
+            "activation_norm_length_routed",
+            "activation_embed_routed",
         )
     )
     input_partition_pspec = maybe_replicate_incompatible_batch(input_partition_pspec, inputs)
@@ -3836,10 +3854,10 @@ class RoutedMoE(nnx.Module):
       w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", None))
 
-    input_logical_axes = (batch_logical_axis, "activation_norm_length", None)
-    gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
+    input_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
+    gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
     pre_bias_logits_logical_axes = (
-        (batch_logical_axis, "activation_norm_length", None)
+        (batch_logical_axis, "activation_norm_length_routed", None)
         if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2"))
         else None
     )

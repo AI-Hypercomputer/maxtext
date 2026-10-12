@@ -769,6 +769,14 @@ assert train._TF_AVAILABLE is False
     # CP still inferred from activation_length
     self.assertEqual(infer_cp_axes(cp_as_ep_rules), ("context",))
 
+  def test_tp_as_ep_infer_axes(self):
+    """tp-as-ep: exp -> ['expert', 'tensor'], so ici_tensor_parallelism contributes to EP rank."""
+    tp_as_ep_rules = [
+        ["exp", ["expert", "tensor"]],
+        ["activation_length", ["context"]],
+    ]
+    self.assertEqual(infer_ep_axes(tp_as_ep_rules), ("expert", "tensor"))
+
   def test_ep_as_cp_infer_axes(self):
     """ep-as-cp: activation_length -> ['expert'], exp -> 'expert'. Expert axis serves both CP and EP."""
     ep_as_cp_rules = [
