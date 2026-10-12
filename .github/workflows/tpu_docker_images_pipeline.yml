@@ -141,6 +141,7 @@ jobs:
   run_ci_tests:
     name: Run ${{ matrix.name }} CI Tests
     needs: build_and_push_docker_images
+    if: ${{ !cancelled() && needs.build_and_push_docker_images.result == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -162,7 +163,10 @@ jobs:
   run_e2e_tests:
     name: Run E2E tests
     needs: build_and_push_docker_images
-    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.e2e_test_scope != 'none')
+    if: >-
+      ${{ !cancelled() &&
+      needs.build_and_push_docker_images.result == 'success' &&
+      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.e2e_test_scope != 'none')) }}
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
       mode: stable
