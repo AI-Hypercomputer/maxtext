@@ -97,7 +97,7 @@ _COMPRESSED_DQ_REDUCTION_STEPS = 3
 
 
 class _SplashBlocks(NamedTuple):
-  """Splash attention block sizes and Q/K/V layouts for one forward/backward configuration."""
+  """Splash attention block sizes and Q/K/V layouts for one pass."""
 
   block_q: int
   block_kv: int
@@ -123,15 +123,52 @@ def _resolve_attention_type(config: Config, attention_type: AttentionType | str 
 
 
 def resolve_context_parallel_strategy(config: Config, attention_type: AttentionType) -> str:
-  """Returns the context-parallel strategy for a layer of `attention_type`.
+  """Returns the effective context-parallel strategy for a layer.
 
-  `local_context_parallel_strategy`, when set, overrides `context_parallel_strategy`
-  for LOCAL_SLIDING layers only (e.g. halo KV exchange for sliding-window layers while
-  global layers keep using ring/ulysses).
+  `LOCAL_SLIDING` layers use `config.local_context_parallel_strategy` when it is
+  non-empty, and otherwise fall back to `config.context_parallel_strategy`. All
+  other attention types always use `config.context_parallel_strategy`.
+
+  Args:
+    config: Model configuration containing context-parallel strategy settings.
+    attention_type: The layer's attention type.
+
+  Returns:
+    Lowercase context-parallel strategy name (e.g., `"halo"`, `"ring"`).
   """
   if attention_type == AttentionType.LOCAL_SLIDING and config.local_context_parallel_strategy:
-    return config.local_context_parallel_strategy
-  return config.context_parallel_strategy
+    return config.local_context_parallel_strategy.lower()
+  return config.context_parallel_strategy.lower()
+
+
+def _halo_tails(k: Array, v: Array, seg: Array, halo: int) -> tuple[Array, Array, Array]:
+  """Slices the trailing `halo` KV tokens and segment IDs from a sequence chunk."""
+  return k[:, :, -halo:, :], v[:, :, -halo:, :], seg[:, -halo:]
+
+
+def _recv_halo(
+    k: Array,
+    v: Array,
+    seg: Array,
+    *,
+    halo: int,
+    context_axis: str,
+    perm: list[tuple[int, int]],
+    is_edge_rank: Array,
+    edge: tuple[Array, Array, Array] | None = None,
+) -> tuple[Array, Array, Array]:
+  """Receives the trailing `halo` KV tokens from the neighbour selected by `perm`.
+
+  On `is_edge_rank`, the neighbour does not precede this chunk in the global
+  sequence, so `edge` is used instead; `None` means nothing precedes it and
+  masks the halo out with segment ID `-2`.
+  """
+  k_halo, v_halo, seg_halo = (
+      jax.lax.ppermute(x, axis_name=context_axis, perm=perm) for x in _halo_tails(k, v, seg, halo)
+  )
+  if edge is None:
+    edge = (jnp.zeros_like(k_halo), jnp.zeros_like(v_halo), jnp.full_like(seg_halo, -2))
+  return tuple(jnp.where(is_edge_rank, e, h) for e, h in zip(edge, (k_halo, v_halo, seg_halo), strict=True))
 
 
 def validate_compute_axis_order(s: AxisIdxes) -> None:
@@ -737,12 +774,6 @@ class AttentionOp(nnx.Module):
     # Only the cudnn_flash_te bridge draws from these, and only with attention dropout
     # on; holding them otherwise leaves dead RNG state in the model.
     self.rngs = rngs if dropout_rate > 0.0 else None
-    self.context_parallel_strategy = resolve_context_parallel_strategy(self.config, self.attention_type)
-    if self.context_parallel_strategy == "halo" and self.attention_type != AttentionType.LOCAL_SLIDING:
-      raise ValueError(
-          "Halo context parallelism (local_context_parallel_strategy='halo') is only supported for "
-          "AttentionType.LOCAL_SLIDING."
-      )
     if self.attention_kernel == "flash" and self.context_parallel_strategy == "ring":
       target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
       if target_hardware == "tpu":
@@ -961,6 +992,10 @@ class AttentionOp(nnx.Module):
   def _logical_to_mesh_axes(self, logical_name):
     logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
+
+  @property
+  def context_parallel_strategy(self) -> str:
+    return resolve_context_parallel_strategy(self.config, self.attention_type)
 
   def _context_parallel_size(self) -> int:
     """Number of ways the query sequence is actually sharded, per the active rules.
@@ -1621,6 +1656,8 @@ class AttentionOp(nnx.Module):
       use_ragged_attention: bool = False,
   ) -> None:
     """Validates runtime constraints for the halo sliding-window CP path."""
+    if self.attention_type != AttentionType.LOCAL_SLIDING:
+      raise ValueError("Halo context parallelism is only supported for AttentionType.LOCAL_SLIDING.")
     if not self.config.use_tokamax_splash:
       raise ValueError("Halo context parallelism requires use_tokamax_splash=True.")
     if self.sliding_window_size is None or self.sliding_window_size <= 0:
@@ -1637,7 +1674,7 @@ class AttentionOp(nnx.Module):
       raise ValueError("Halo context parallelism does not support bidirectional masks.")
 
   def _splash_blocks(self) -> _SplashBlocks:
-    """Returns the Splash block sizes/layouts; eval reuses its forward blocks for the backward pass."""
+    """Returns the forward and backward Splash block sizes and layouts."""
     if max_utils.is_eval(self.config):
       return _SplashBlocks(
           block_q=self.eval_block_q,
@@ -1666,8 +1703,14 @@ class AttentionOp(nnx.Module):
         v_layout=self.v_layout,
     )
 
-  def _create_sa_config(self, blocks: _SplashBlocks, q_len: int, kv_len: int, attn_logits_soft_cap: float | None):
-    """Builds the Splash kernel config, clamping `blocks` to the per-kernel-call Q/KV lengths."""
+  def _create_sa_config(
+      self,
+      blocks: _SplashBlocks,
+      q_len: int,
+      kv_len: int,
+      attn_logits_soft_cap: float | None,
+  ) -> tokamax_splash_kernel.SplashConfig | splash_attention_kernel.BlockSizes:
+    """Builds the Splash kernel config, clamped to `q_len` and `kv_len`."""
     config = self.config
     if config.use_tokamax_splash:
       return tokamax_splash_kernel.SplashConfig(
@@ -2028,7 +2071,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Array | None = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
-  ) -> tuple[Array, Array]:
+  ) -> tuple[Array, Array | None]:
     """TPU Flash Attention."""
 
     use_tokamax_ring = self.context_parallel_strategy == "ring"
@@ -2725,15 +2768,40 @@ class AttentionOp(nnx.Module):
       use_ragged_attention: bool = False,
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Array | None = None,
-  ) -> tuple[Array, Array]:
-    """TPU Flash Attention with halo KV exchange for LOCAL_SLIDING context parallelism.
+  ) -> tuple[Array, Array | None]:
+    """Runs TPU Flash Attention with halo KV exchange for sliding-window CP.
 
-    Every context-parallel rank keeps its own sequence shard of Q/K/V. A sliding window
-    of `sliding_window_size` can only see that many tokens before the shard boundary, so
-    instead of all-gathering K/V each rank receives just the trailing `halo` KV tokens of
-    the preceding chunk via `ppermute` and runs the Tokamax Splash kernel on
-    `[halo | local chunk]`. With load-balanced CP each rank owns two chunks and the same
-    exchange happens per chunk.
+    Every context-parallel rank keeps its own sequence shard of Q/K/V. A
+    sliding window of `sliding_window_size` can only see that many tokens
+    before the shard boundary, so instead of all-gathering K/V each rank
+    receives just the trailing `halo` KV tokens of the preceding chunk via
+    `ppermute` and runs the Tokamax Splash kernel on `[halo | local chunk]`.
+    With load-balanced CP each rank owns two chunks and the same exchange
+    happens per chunk.
+
+    Args:
+      query: Query tensor of shape `(batch, q_len, num_heads, head_dim)`.
+      key: Key tensor of shape `(batch, kv_len, num_kv_heads, head_dim)`.
+      value: Value tensor of shape `(batch, kv_len, num_kv_heads, head_dim)`.
+      decoder_segment_ids: Optional query segment IDs of shape `(batch, q_len)`.
+      attn_logits_soft_cap: Optional soft cap for attention logits.
+      sinks: Optional attention sink logits of shape `(num_heads,)`.
+      indexer_mask: Unsupported on the halo CP path; must be `None`.
+      model_mode: Execution mode; only `MODEL_MODE_TRAIN` is supported.
+      previous_chunk: Unsupported on the halo CP path; must be `None`.
+      bidirectional_mask: Unsupported on the halo CP path; must be `None`.
+      use_ragged_attention: Unsupported on the halo CP path; must be `False`.
+      record_max_logits: Whether to return per-head maximum attention logits.
+      decoder_segment_ids_kv: Optional KV segment IDs of shape `(batch, kv_len)`.
+
+    Returns:
+      A tuple `(output, max_logits)` where `output` has shape
+      `(batch, q_len, num_heads, head_dim)` and `max_logits` is the per-head
+      maximum logits tensor when `record_max_logits=True`, or `None` otherwise.
+
+    Raises:
+      ValueError: If runtime configuration or input sequence shapes violate
+        halo context parallelism constraints.
     """
     self._validate_tpu_halo_runtime(
         model_mode=model_mode,
@@ -2743,7 +2811,7 @@ class AttentionOp(nnx.Module):
         use_ragged_attention=use_ragged_attention,
     )
     cp_size = self._context_parallel_size()
-    load_balanced = cp_size > 1 and self._load_balanced_context_parallel()
+    load_balanced = self._load_balanced_context_parallel()
     chunks_per_rank = 2 if load_balanced else 1
     context_axis = self.config.context_sharding
 
@@ -2765,7 +2833,7 @@ class AttentionOp(nnx.Module):
     blocks = self._splash_blocks()
     chunk_q_len = seq_len // total_chunks
     kv_block_align = math.lcm(min(blocks.block_kv, chunk_q_len), min(blocks.block_kv_dkv, chunk_q_len))
-    halo = -(-self.sliding_window_size // kv_block_align) * kv_block_align
+    halo = ((self.sliding_window_size + kv_block_align - 1) // kv_block_align) * kv_block_align
     if chunk_q_len < halo or chunk_q_len % kv_block_align != 0:
       raise ValueError(
           f"Halo context parallelism requires per-chunk sequence length {chunk_q_len} to be a multiple of "
@@ -2790,9 +2858,9 @@ class AttentionOp(nnx.Module):
       q_seq = np.arange(local_q_len, dtype=np.int32)
       q_seq[chunk_q_len:] += halo
       causal_mask.q_sequence = q_seq
-      local_mask.q_sequence = q_seq.copy()
+      local_mask.q_sequence = q_seq
 
-    @partial(jax.jit, static_argnames=["single_head_mask"])
+    @functools.partial(jax.jit, static_argnames=["single_head_mask"])
     def wrap_splash_kernel(single_head_mask):
       return tokamax_splash_kernel.make_splash_mha(mask=single_head_mask, config=sa_config, q_seq_shards=1)
 
@@ -2825,20 +2893,6 @@ class AttentionOp(nnx.Module):
     perm_fwd = [(i, (i + 1) % cp_size) for i in range(cp_size)]
     perm_bwd = [(i, (i - 1) % cp_size) for i in range(cp_size)]
 
-    def tails(k, v, seg):
-      return k[:, :, -halo:, :], v[:, :, -halo:, :], seg[:, -halo:]
-
-    def recv_halo(k, v, seg, perm, is_edge_rank, edge=None):
-      """Receives the trailing `halo` KV tokens of the neighbouring chunk selected by `perm`.
-
-      On `is_edge_rank` the neighbour does not precede this chunk in the global sequence,
-      so `edge` is used instead; `None` means "nothing precedes it" and masks the halo out.
-      """
-      k_halo, v_halo, seg_halo = (jax.lax.ppermute(x, axis_name=context_axis, perm=perm) for x in tails(k, v, seg))
-      if edge is None:
-        edge = (jnp.zeros_like(k_halo), jnp.zeros_like(v_halo), jnp.full_like(seg_halo, -2))
-      return tuple(jnp.where(is_edge_rank, e, h) for e, h in zip(edge, (k_halo, v_halo, seg_halo)))
-
     @functools.partial(
         jax.shard_map,
         mesh=self.mesh,
@@ -2869,13 +2923,26 @@ class AttentionOp(nnx.Module):
         k0, k1 = jnp.split(key, 2, axis=2)
         v0, v1 = jnp.split(value, 2, axis=2)
         seg0, seg1 = jnp.split(seg_kv, 2, axis=1)
-        k0_halo, v0_halo, seg0_halo = recv_halo(k0, v0, seg0, perm_fwd, rank == 0)
-        k1_halo, v1_halo, seg1_halo = recv_halo(k1, v1, seg1, perm_bwd, rank == cp_size - 1, edge=tails(k0, v0, seg0))
+        k0_halo, v0_halo, seg0_halo = _recv_halo(
+            k0, v0, seg0, halo=halo, context_axis=context_axis, perm=perm_fwd, is_edge_rank=rank == 0
+        )
+        k1_halo, v1_halo, seg1_halo = _recv_halo(
+            k1,
+            v1,
+            seg1,
+            halo=halo,
+            context_axis=context_axis,
+            perm=perm_bwd,
+            is_edge_rank=rank == cp_size - 1,
+            edge=_halo_tails(k0, v0, seg0, halo),
+        )
         key = jnp.concatenate([k0_halo, k0, k1_halo, k1], axis=2)
         value = jnp.concatenate([v0_halo, v0, v1_halo, v1], axis=2)
         seg_kv = jnp.concatenate([seg0_halo, seg0, seg1_halo, seg1], axis=1)
       else:
-        k_halo, v_halo, seg_halo = recv_halo(key, value, seg_kv, perm_fwd, rank == 0)
+        k_halo, v_halo, seg_halo = _recv_halo(
+            key, value, seg_kv, halo=halo, context_axis=context_axis, perm=perm_fwd, is_edge_rank=rank == 0
+        )
         key = jnp.concatenate([k_halo, key], axis=2)
         value = jnp.concatenate([v_halo, value], axis=2)
         seg_kv = jnp.concatenate([seg_halo, seg_kv], axis=1)
@@ -2883,14 +2950,16 @@ class AttentionOp(nnx.Module):
       segment_ids = tokamax_splash_kernel.SegmentIds(seg_q, seg_kv)
       if record_max_logits:
 
-        def kernel_fn(q, k, v, d, s):
-          out, stats = splash_kernel(q, k, v, d, sinks=s, save_residuals=True)
+        def kernel_with_stats(q, k, v, seg_ids, sink_logits):
+          out, stats = splash_kernel(q, k, v, seg_ids, sinks=sink_logits, save_residuals=True)
           return out, stats["max_logits"]
 
-        return jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(query, key, value, segment_ids, sinks)
-      out = jax.vmap(lambda q, k, v, d, s: splash_kernel(q, k, v, d, sinks=s), in_axes=(0, 0, 0, 0, None))(
-          query, key, value, segment_ids, sinks
-      )
+        return jax.vmap(kernel_with_stats, in_axes=(0, 0, 0, 0, None))(query, key, value, segment_ids, sinks)
+
+      def kernel_fn(q, k, v, seg_ids, sink_logits):
+        return splash_kernel(q, k, v, seg_ids, sinks=sink_logits)
+
+      out = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(query, key, value, segment_ids, sinks)
       return out, None
 
     x, max_logits = wrap_halo_flash_attention(

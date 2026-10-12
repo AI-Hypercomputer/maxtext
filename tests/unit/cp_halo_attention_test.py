@@ -11,484 +11,760 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Unit tests for per-layer CP strategy and halo sliding-window CP attention."""
+"""Tests for per-layer CP strategy resolution and halo sliding-window CP."""
 
 from __future__ import annotations
 
-import dataclasses
-import functools
-import os
+import sys
 import types
+from typing import Any
 from unittest import mock
 
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=8")
+from absl.testing import absltest
+from absl.testing import parameterized
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
+import jax
+import jax.numpy as jnp
+from jax.sharding import Mesh
+from jax.sharding import NamedSharding
+import numpy as np
+import pydantic
+import pytest
 
-from absl.testing import absltest  # pylint: disable=g-import-not-at-top
-from absl.testing import parameterized  # pylint: disable=g-import-not-at-top
-from flax import linen as nn  # pylint: disable=g-import-not-at-top
-from flax import nnx  # pylint: disable=g-import-not-at-top
-import jax  # pylint: disable=g-import-not-at-top
-import jax.numpy as jnp  # pylint: disable=g-import-not-at-top
-from jax.sharding import Mesh  # pylint: disable=g-import-not-at-top
-from jax.sharding import NamedSharding  # pylint: disable=g-import-not-at-top
-from jax.sharding import PartitionSpec as P  # pylint: disable=g-import-not-at-top
-from maxtext.common.common_types import AttentionType  # pylint: disable=g-import-not-at-top
-from maxtext.common.common_types import MODEL_MODE_TRAIN  # pylint: disable=g-import-not-at-top
-from maxtext.configs import pyconfig  # pylint: disable=g-import-not-at-top
-try:
-  import tokamax._src.ops.experimental.tpu.splash_attention.splash_attention_kernel  # pylint: disable=g-import-not-at-top,unused-import
-except ModuleNotFoundError:
-  import sys  # pylint: disable=g-import-not-at-top
-  from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as _tk_kernel  # pylint: disable=g-import-not-at-top
-  from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as _tk_mask  # pylint: disable=g-import-not-at-top
-  for _mod_name in (
-      "tokamax._src",
-      "tokamax._src.ops",
-      "tokamax._src.ops.attention",
-      "tokamax._src.ops.attention.base",
-      "tokamax._src.ops.attention.pallas_triton",
-      "tokamax._src.ops.experimental",
-      "tokamax._src.ops.experimental.tpu",
-      "tokamax._src.ops.experimental.tpu.splash_attention",
-  ):
-    sys.modules.setdefault(_mod_name, types.ModuleType(_mod_name))
-  sys.modules["tokamax._src.ops.experimental.tpu.splash_attention.splash_attention_kernel"] = _tk_kernel
-  sys.modules["tokamax._src.ops.experimental.tpu.splash_attention.splash_attention_mask"] = _tk_mask
-from maxtext.layers import attention_op as attention_op_lib  # pylint: disable=g-import-not-at-top
-from maxtext.utils import max_utils  # pylint: disable=g-import-not-at-top
-import numpy as np  # pylint: disable=g-import-not-at-top
+from maxtext.common import common_types
+from maxtext.common import gcloud_stub
+from maxtext.configs import pyconfig
+from maxtext.layers import attention_op
+from maxtext.layers import attentions
+from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
+from tests.utils import attention_test_util
+from tests.utils import hlo_test_utils
+from tests.utils import test_helpers
+
+_HALO_CP_TEST_CASES = (
+    {
+        "testcase_name": "cp2_no_load_balance",
+        "ici_context_parallelism": 2,
+        "context_parallel_load_balance": False,
+        "packing": False,
+    },
+    {
+        "testcase_name": "cp2_load_balance",
+        "ici_context_parallelism": 2,
+        "context_parallel_load_balance": True,
+        "packing": False,
+    },
+    {
+        "testcase_name": "cp2_packed",
+        "ici_context_parallelism": 2,
+        "context_parallel_load_balance": False,
+        "packing": True,
+    },
+    {
+        "testcase_name": "cp2_packed_load_balance",
+        "ici_context_parallelism": 2,
+        "context_parallel_load_balance": True,
+        "packing": True,
+    },
+    {
+        "testcase_name": "cp4_no_load_balance",
+        "ici_context_parallelism": 4,
+        "context_parallel_load_balance": False,
+        "packing": False,
+    },
+    {
+        "testcase_name": "cp4_load_balance",
+        "ici_context_parallelism": 4,
+        "context_parallel_load_balance": True,
+        "packing": False,
+    },
+    {
+        "testcase_name": "cp4_packed",
+        "ici_context_parallelism": 4,
+        "context_parallel_load_balance": False,
+        "packing": True,
+    },
+    {
+        "testcase_name": "cp4_packed_load_balance",
+        "ici_context_parallelism": 4,
+        "context_parallel_load_balance": True,
+        "packing": True,
+    },
+)
 
 
-def _count_primitives(jaxpr, primitive_name):
+def _count_primitives(jaxpr: Any, primitive_name: str, name_param: str | None = None) -> int:
   """Counts primitive occurrences in a jaxpr, recursing into sub-jaxprs."""
   count = 0
   for eqn in jaxpr.eqns:
-    if eqn.primitive.name == primitive_name:
+    if eqn.primitive.name == primitive_name and (name_param is None or name_param in str(eqn.params.get("name", ""))):
       count += 1
     for value in eqn.params.values():
       values = value if isinstance(value, (list, tuple)) else (value,)
       for entry in values:
         entry = getattr(entry, "jaxpr", entry)
         if hasattr(entry, "eqns"):
-          count += _count_primitives(entry, primitive_name)
+          count += _count_primitives(entry, primitive_name, name_param)
   return count
 
 
-def _dense_sliding_window_reference(q, k, v, seg_ids, window_size):
-  """Dense FP32 causal sliding-window attention reference.
+class CpHaloConfigAndValidationTest(parameterized.TestCase):
+  """Config, strategy resolution, and runtime validation tests for halo CP."""
 
-  Args:
-    q: [B, S, H_q, D]
-    k: [B, S, H_kv, D]
-    v: [B, S, H_kv, D]
-    seg_ids: [B, S] or None
-    window_size: int sliding window size W (attends to [i - (W - 1), i])
-  """
-  q_f32 = q.astype(jnp.float32)
-  k_f32 = k.astype(jnp.float32)
-  v_f32 = v.astype(jnp.float32)
-  b, s, h_q, d = q_f32.shape
-  h_kv = k_f32.shape[2]
-  if h_q != h_kv:
-    repeats = h_q // h_kv
-    k_f32 = jnp.repeat(k_f32, repeats, axis=2)
-    v_f32 = jnp.repeat(v_f32, repeats, axis=2)
-  logits = jnp.einsum("bshd,bthd->bhst", q_f32, k_f32)
-  idx = jnp.arange(s)
-  causal = idx[:, None] >= idx[None, :]
-  local = (idx[:, None] - idx[None, :]) < window_size
-  valid = causal & local
-  valid = valid[None, None, :, :]
-  if seg_ids is not None:
-    same_seg = seg_ids[:, :, None] == seg_ids[:, None, :]
-    valid = valid & same_seg[:, None, :, :]
-  logits = jnp.where(valid, logits, -1e30)
-  weights = jax.nn.softmax(logits, axis=-1)
-  weights = jnp.where(valid, weights, 0.0)
-  out = jnp.einsum("bhst,bthd->bshd", weights, v_f32)
-  return out.reshape(b, s, h_q, d)
+  def test_resolve_context_parallel_strategy_overrides_only_local_sliding(self):
+    config = types.SimpleNamespace(
+        context_parallel_strategy="Ring",
+        local_context_parallel_strategy="Halo",
+    )
+    self.assertEqual(
+        attention_op.resolve_context_parallel_strategy(config, common_types.AttentionType.LOCAL_SLIDING),
+        "halo",
+    )
+    self.assertEqual(
+        attention_op.resolve_context_parallel_strategy(config, common_types.AttentionType.GLOBAL),
+        "ring",
+    )
 
+    fallback_config = types.SimpleNamespace(
+        context_parallel_strategy="ring",
+        local_context_parallel_strategy="",
+    )
+    self.assertEqual(
+        attention_op.resolve_context_parallel_strategy(fallback_config, common_types.AttentionType.LOCAL_SLIDING),
+        "ring",
+    )
 
-def _make_attention_op_config(
-    *,
-    cp_strategy: str = "all_gather",
-    local_cp_strategy: str = "halo",
-    load_balance: bool = True,
-    block_size: int = 128,
-):
-  """Creates a lightweight config namespace for AttentionOp testing."""
-  return types.SimpleNamespace(
-      context_parallel_strategy=cp_strategy,
-      local_context_parallel_strategy=local_cp_strategy,
-      context_parallel_load_balance=load_balance,
-      context_sharding="context",
-      ulysses_context_sharding="context_usp_ulysses",
-      use_tokamax_splash=True,
-      use_jax_splash=False,
-      sa_block_q=block_size,
-      sa_block_kv=block_size,
-      sa_block_kv_compute=block_size,
-      eval_sa_block_q=block_size,
-      eval_sa_block_kv=block_size,
-      eval_sa_block_kv_compute=block_size,
-      sa_block_q_dkv=block_size,
-      sa_block_kv_dkv=block_size,
-      sa_block_kv_dkv_compute=block_size,
-      sa_block_q_dq=block_size,
-      sa_block_kv_dq=block_size,
-      sa_use_fused_bwd_kernel=True,
-      sa_q_layout="HEAD_DIM_MINOR",
-      sa_k_layout="HEAD_DIM_MINOR",
-      sa_v_layout="HEAD_DIM_MINOR",
-      eval_sa_q_layout="HEAD_DIM_MINOR",
-      eval_sa_k_layout="HEAD_DIM_MINOR",
-      eval_sa_v_layout="HEAD_DIM_MINOR",
-      use_splash_scheduler=False,
-      sa_fuse_reciprocal=True,
-      sa_use_base2_exp=True,
-      local_sa_block_q=block_size,
-      local_sa_block_kv=block_size,
-      local_sa_block_kv_compute=block_size,
-      eval_local_sa_block_q=block_size,
-      eval_local_sa_block_kv=block_size,
-      eval_local_sa_block_kv_compute=block_size,
-      local_sa_block_q_dkv=block_size,
-      local_sa_block_kv_dkv=block_size,
-      local_sa_block_kv_dkv_compute=block_size,
-      local_sa_block_q_dq=block_size,
-      local_sa_block_kv_dq=block_size,
-      local_sa_use_fused_bwd_kernel=True,
-      local_sa_q_layout="HEAD_DIM_MINOR",
-      local_sa_k_layout="HEAD_DIM_MINOR",
-      local_sa_v_layout="HEAD_DIM_MINOR",
-      eval_local_sa_q_layout="HEAD_DIM_MINOR",
-      eval_local_sa_k_layout="HEAD_DIM_MINOR",
-      eval_local_sa_v_layout="HEAD_DIM_MINOR",
-      local_use_splash_scheduler=False,
-      local_sa_fuse_reciprocal=True,
-      local_sa_use_base2_exp=True,
-      use_max_logit_estimate=-1,
-      cost_estimate_flops_fwd=-1,
-      cost_estimate_flops_bwd=-1,
-      dq_reduction_steps=0,
-      enable_dropout=False,
-      head_dim=64,
-      shard_mode="explicit",
-      debug_sharding=False,
-      logical_axis_rules=[
-          ("activation_batch_attn", ("data", "fsdp")),
-          ("activation_heads", ("tensor",)),
-          ("activation_kv_heads", ("tensor",)),
-          ("activation_q_length", ("context",)),
-          ("activation_kv_length", ()),
-          ("activation_kv", ()),
-      ],
-      is_eval=False,
-      run_as_eval=False,
-      float32_qk_product=True,
-      float32_logits=True,
-  )
+  def test_pyconfig_accepts_local_context_parallel_strategy_halo(self):
+    argv = [
+        "",
+        test_helpers.get_test_config_path(),
+        "run_name=test_cp_halo",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "local_context_parallel_strategy=Halo",
+        "sliding_window_size=128",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [mock.MagicMock(slice_index=0) for _ in range(8)]
+    with mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.context_parallel_strategy, "ring")
+    self.assertEqual(config.local_context_parallel_strategy, "halo")
+
+  def test_pyconfig_accepts_ulysses_global_with_halo_local_mqa(self):
+    argv = [
+        "",
+        test_helpers.get_test_config_path(),
+        "run_name=test_ulysses_halo",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ulysses",
+        "local_context_parallel_strategy=halo",
+        "context_parallel_load_balance=False",
+        "sliding_window_size=128",
+        "base_num_query_heads=8",
+        "base_num_kv_heads=1",
+        "global_num_kv_heads=4",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=False",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [mock.MagicMock(slice_index=0) for _ in range(8)]
+    with mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.context_parallel_strategy, "ulysses")
+    self.assertEqual(config.local_context_parallel_strategy, "halo")
+
+  def test_pyconfig_rejects_invalid_local_context_parallel_configs(self):
+    base_args = [
+        "",
+        test_helpers.get_test_config_path(),
+        "run_name=test_cp_halo_invalid",
+        "attention=flash",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ring",
+        "local_context_parallel_strategy=halo",
+        "sliding_window_size=128",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "dataset_type=synthetic",
+        "skip_jax_distributed_system=True",
+    ]
+    cases = [
+        (
+            ["local_context_parallel_strategy=invalid"],
+            ["local_context_parallel_strategy=halo"],
+            "local_context_parallel_strategy",
+        ),
+        (
+            ["sliding_window_size=0"],
+            ["sliding_window_size=128"],
+            "sliding_window_size > 0",
+        ),
+        (
+            ["use_tokamax_splash=False", "context_parallel_strategy=all_gather"],
+            ["use_tokamax_splash=True", "context_parallel_strategy=ring"],
+            "use_tokamax_splash=True",
+        ),
+        (
+            [
+                "context_parallel_strategy=ulysses",
+                "context_parallel_load_balance=False",
+                "packing=False",
+                "base_num_kv_heads=1",
+                "global_num_kv_heads=1",
+            ],
+            ["context_parallel_strategy=ring"],
+            "MQA",
+        ),
+    ]
+    mock_devices = [mock.MagicMock(slice_index=0) for _ in range(8)]
+    for bad_args, args_to_remove, expected_regex in cases:
+      with self.subTest(bad_args=bad_args):
+        argv = [arg for arg in base_args if arg not in args_to_remove]
+        argv.extend(bad_args)
+        with mock.patch("jax.devices", return_value=mock_devices):
+          with self.assertRaisesRegex((ValueError, pydantic.ValidationError), expected_regex):
+            pyconfig.initialize(argv)
+
+  def test_kv_head_sharding_skips_ulysses_context_axis_for_local_halo_layer(self):
+    cfg = pyconfig.initialize(
+        [sys.argv[0], test_helpers.get_test_config_path()],
+        per_device_batch_size=1.0,
+        run_name="test_kv_sharding",
+        enable_checkpointing=False,
+        max_target_length=128,
+        sliding_window_size=128,
+    )
+    inputs_shape = (1, cfg.max_target_length, 16)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    local_attention = attentions.Attention(
+        config=cfg,
+        num_query_heads=4,
+        num_kv_heads=2,
+        head_dim=cfg.head_dim,
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        inputs_q_shape=inputs_shape,
+        inputs_kv_shape=inputs_shape,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        dtype=cfg.dtype,
+        dropout_rate=cfg.dropout_rate,
+        attention_type=common_types.AttentionType.LOCAL_SLIDING,
+        sliding_window_size=128,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+    global_attention = attentions.Attention(
+        config=cfg,
+        num_query_heads=4,
+        num_kv_heads=2,
+        head_dim=cfg.head_dim,
+        max_target_length=cfg.max_target_length,
+        max_prefill_predict_length=cfg.max_prefill_predict_length,
+        inputs_q_shape=inputs_shape,
+        inputs_kv_shape=inputs_shape,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        dtype=cfg.dtype,
+        dropout_rate=cfg.dropout_rate,
+        attention_type=common_types.AttentionType.GLOBAL,
+        model_mode=common_types.MODEL_MODE_PREFILL,
+        rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+    )
+    local_attention.mesh = types.SimpleNamespace(shape={"context": 4})
+    global_attention.mesh = types.SimpleNamespace(shape={"context": 4})
+    with mock.patch.dict(
+        cfg.get_keys(),
+        {
+            "context_parallel_strategy": "ulysses",
+            "local_context_parallel_strategy": "halo",
+        },
+    ):
+      local_attention.init_kv_w(inputs_kv_shape=inputs_shape)
+      with self.assertRaisesRegex(ValueError, r"num_kv_heads \(2\).*must be divisible by 4"):
+        global_attention.init_kv_w(inputs_kv_shape=inputs_shape)
+
+  def test_tpu_halo_flash_attention_rejects_unsupported_runtime_features(self):
+    cfg = pyconfig.initialize(
+        [sys.argv[0], test_helpers.get_test_config_path()],
+        per_device_batch_size=1.0,
+        run_name="test_halo_runtime",
+        enable_checkpointing=False,
+        max_target_length=512,
+        sliding_window_size=128,
+        use_tokamax_splash=True,
+        local_context_parallel_strategy="halo",
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    op = attention_op.AttentionOp(
+        config=cfg,
+        mesh=mesh,
+        attention_kernel="flash",
+        max_target_length=512,
+        num_query_heads=4,
+        num_kv_heads=2,
+        attention_type=common_types.AttentionType.LOCAL_SLIDING,
+        sliding_window_size=128,
+    )
+    self.assertEqual(op.context_parallel_strategy, "halo")
+    q = jnp.zeros((1, 512, 4, cfg.head_dim), dtype=jnp.bfloat16)
+    k = jnp.zeros((1, 512, 2, cfg.head_dim), dtype=jnp.bfloat16)
+
+    with self.assertRaisesRegex(ValueError, "train mode"):
+      op.tpu_halo_flash_attention(q, k, k, None, model_mode=common_types.MODEL_MODE_PREFILL)
+    with self.assertRaisesRegex(ValueError, "ragged attention"):
+      op.tpu_halo_flash_attention(
+          q,
+          k,
+          k,
+          None,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          use_ragged_attention=True,
+      )
+    with self.assertRaisesRegex(ValueError, "chunked prefill"):
+      op.tpu_halo_flash_attention(
+          q,
+          k,
+          k,
+          None,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          previous_chunk=object(),
+      )
+    with self.assertRaisesRegex(ValueError, "indexer"):
+      op.tpu_halo_flash_attention(
+          q,
+          k,
+          k,
+          None,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          indexer_mask=object(),
+      )
+    with self.assertRaisesRegex(ValueError, "bidirectional"):
+      op.tpu_halo_flash_attention(
+          q,
+          k,
+          k,
+          None,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+          bidirectional_mask=object(),
+      )
+
+    zero_window_op = attention_op.AttentionOp(
+        config=cfg,
+        mesh=mesh,
+        attention_kernel="flash",
+        max_target_length=512,
+        num_query_heads=4,
+        num_kv_heads=2,
+        attention_type=common_types.AttentionType.LOCAL_SLIDING,
+        sliding_window_size=0,
+    )
+    with self.assertRaisesRegex(ValueError, "sliding_window_size > 0"):
+      zero_window_op.tpu_halo_flash_attention(q, k, k, None, model_mode=common_types.MODEL_MODE_TRAIN)
+
+    global_op = attention_op.AttentionOp(
+        config=cfg,
+        mesh=mesh,
+        attention_kernel="flash",
+        max_target_length=512,
+        num_query_heads=4,
+        num_kv_heads=2,
+        attention_type=common_types.AttentionType.GLOBAL,
+    )
+    with self.assertRaisesRegex(ValueError, "only supported for AttentionType.LOCAL_SLIDING"):
+      global_op.tpu_halo_flash_attention(q, k, k, None, model_mode=common_types.MODEL_MODE_TRAIN)
 
 
 class CpHaloAttentionTest(parameterized.TestCase):
+  """End-to-end TPU flash attention tests for halo sliding-window CP."""
+
+  config_arguments = {
+      "per_device_batch_size": 1.0,
+      "run_name": "test_cp_halo",
+      "enable_checkpointing": False,
+      "max_target_length": 1024,
+      "sliding_window_size": 128,
+      "sa_block_q": 128,
+      "sa_block_kv": 128,
+      "sa_block_kv_compute": 128,
+      "sa_block_q_dkv": 128,
+      "sa_block_kv_dkv": 128,
+      "sa_block_kv_dkv_compute": 128,
+      "sa_block_q_dq": 128,
+      "sa_block_kv_dq": 128,
+      "local_sa_block_q": 128,
+      "local_sa_block_kv": 128,
+      "local_sa_block_kv_compute": 128,
+      "local_sa_block_q_dkv": 128,
+      "local_sa_block_kv_dkv": 128,
+      "local_sa_block_kv_dkv_compute": 128,
+      "local_sa_block_q_dq": 128,
+      "local_sa_block_kv_dq": 128,
+  }
 
   def setUp(self):
     super().setUp()
-    if len(jax.devices()) < 8:
-      self.skipTest(f"Requires 8 CPU devices, found {len(jax.devices())}")
-    if jax.default_backend() == "cpu":
-      orig_make_splash_mha = attention_op_lib.tokamax_splash_kernel.make_splash_mha
+    if not gcloud_stub.is_decoupled():
+      jax.config.update("jax_remove_size_one_mesh_axis_from_type", True)
+    self.cfg = pyconfig.initialize(
+        [sys.argv[0], test_helpers.get_test_config_path()],
+        **self.config_arguments,
+    )
+    self.rng = jax.random.PRNGKey(0)
+    self.nnx_rng = nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42))
+    devices_array = maxtext_utils.create_device_mesh(self.cfg)
+    self.mesh = Mesh(devices_array, self.cfg.mesh_axes)
+    self.global_batch_size = self.cfg.global_batch_size_to_train_on
+    self.max_target_length = self.cfg.max_target_length
+    self.embed_dim = self.cfg.base_emb_dim
 
-      def _make_splash_mha_cpu(*args, **kwargs):
-        if "config" in kwargs and kwargs["config"] is not None:
-          kwargs["config"] = dataclasses.replace(kwargs["config"], interpret=True)
-        return orig_make_splash_mha(*args, **kwargs)
+  def get_data(self, dtype):
+    """Generates random input activations, segment IDs, and positions."""
+    lnx = jax.random.normal(
+        self.rng,
+        shape=(self.global_batch_size, self.max_target_length, self.embed_dim),
+        dtype=dtype,
+    )
+    decoder_segment_ids = jax.random.randint(self.rng, (self.global_batch_size, self.max_target_length), 0, 4)
+    decoder_positions = jax.random.randint(
+        self.rng,
+        (self.global_batch_size, self.max_target_length),
+        0,
+        self.max_target_length,
+    )
+    return lnx, decoder_segment_ids, decoder_positions
 
-      self.enterContext(
-          mock.patch.object(
-              attention_op_lib.tokamax_splash_kernel,
-              "make_splash_mha",
-              side_effect=_make_splash_mha_cpu,
-          )
+  def get_packed_data(self, dtype):
+    """Generates packed sequence inputs with contiguous segment IDs."""
+    lnx, _, _ = self.get_data(dtype)
+    segment_lengths = (160, 480, 224, 160)
+    segment_ids = jnp.concatenate(
+        [jnp.full((length,), segment, dtype=jnp.int32) for segment, length in enumerate(segment_lengths, start=1)]
+    )
+    positions = jnp.concatenate([jnp.arange(length, dtype=jnp.int32) for length in segment_lengths])
+    decoder_segment_ids = jnp.broadcast_to(segment_ids, (self.global_batch_size, self.max_target_length))
+    decoder_positions = jnp.broadcast_to(positions, (self.global_batch_size, self.max_target_length))
+    return lnx, decoder_segment_ids, decoder_positions
+
+  def _halo_test_config(
+      self,
+      ici_context_parallelism,
+      *,
+      context_parallel_load_balance=False,
+      packing=False,
+  ):
+    return pyconfig.initialize(
+        [sys.argv[0], test_helpers.get_test_config_path()],
+        **self.config_arguments,
+        attention="flash",
+        context_parallel_strategy="ring",
+        local_context_parallel_strategy="halo",
+        context_parallel_load_balance=context_parallel_load_balance,
+        ici_context_parallelism=ici_context_parallelism,
+        use_tokamax_splash=True,
+        use_jax_splash=False,
+        packing=packing,
+        dtype="float32",
+    )
+
+  def _halo_test_modules(self, cfg_cp, mesh_cp, lnx):
+    """Builds the dot-product reference and halo flash attention modules."""
+    attention_generic = attentions.Attention(
+        config=self.cfg,
+        num_query_heads=cfg_cp.num_query_heads,
+        num_kv_heads=cfg_cp.num_kv_heads,
+        head_dim=cfg_cp.head_dim,
+        max_target_length=cfg_cp.max_target_length,
+        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+        inputs_q_shape=lnx.shape,
+        inputs_kv_shape=lnx.shape,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        dtype=cfg_cp.dtype,
+        dropout_rate=cfg_cp.dropout_rate,
+        attention_type=common_types.AttentionType.LOCAL_SLIDING,
+        sliding_window_size=cfg_cp.sliding_window_size,
+        rngs=self.nnx_rng,
+    )
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      attention_flash_cp = attentions.Attention(
+          config=cfg_cp,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=mesh_cp,
+          attention_kernel="flash",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          attention_type=common_types.AttentionType.LOCAL_SLIDING,
+          sliding_window_size=cfg_cp.sliding_window_size,
+          model_mode=common_types.MODEL_MODE_PREFILL,
+          rngs=self.nnx_rng,
+      )
+    return attention_generic, attention_flash_cp
+
+  @parameterized.named_parameters(*_HALO_CP_TEST_CASES)
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_halo_context_parallel(
+      self,
+      ici_context_parallelism,
+      context_parallel_load_balance,
+      packing,
+  ):
+    """Tests forward parity between dot_product and flash attention + halo CP."""
+    cfg_cp = self._halo_test_config(
+        ici_context_parallelism,
+        context_parallel_load_balance=context_parallel_load_balance,
+        packing=packing,
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    if packing:
+      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    else:
+      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_generic, attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
+    generic_output, _ = attention_generic(
+        lnx,
+        lnx,
+        decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
+        deterministic=True,
+        model_mode=common_types.MODEL_MODE_TRAIN,
+    )
+    nnx.update(attention_flash_cp, nnx.state(attention_generic))
+
+    flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
+        cfg_cp,
+        mesh_cp,
+        attention_flash_cp,
+        lnx,
+        decoder_segment_ids,
+        decoder_positions,
+    )
+
+    generic_output = jax.device_get(generic_output)
+    flash_cp_output = jax.device_get(flash_cp_output)
+
+    np.testing.assert_allclose(
+        generic_output,
+        flash_cp_output,
+        rtol=1e-02,
+        atol=1e-02,
+        equal_nan=False,
+        err_msg=(
+            "Logits from generic dot product and flash attention + halo context"
+            " parallelism are not close."
+            f" ici_context_parallelism={ici_context_parallelism},"
+            f" context_parallel_load_balance={context_parallel_load_balance},"
+            f" packing={packing}."
+        ),
+    )
+
+  @parameterized.named_parameters(*_HALO_CP_TEST_CASES)
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_halo_context_parallel_grad(
+      self,
+      ici_context_parallelism,
+      context_parallel_load_balance,
+      packing,
+  ):
+    """Tests input-gradient parity between dot_product and flash halo CP."""
+    cfg_cp = self._halo_test_config(
+        ici_context_parallelism,
+        context_parallel_load_balance=context_parallel_load_balance,
+        packing=packing,
+    )
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    if packing:
+      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    else:
+      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+    attention_generic, attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_flash_cp, nnx.state(attention_generic))
+
+    def generic_loss(inputs):
+      output, _ = attention_generic(
+          inputs,
+          inputs,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    def halo_loss(inputs):
+      if context_parallel_load_balance:
+        context_parallel_size = cfg_cp.ici_context_parallelism
+        inputs = max_utils.reorder_sequence(inputs, cp_size=context_parallel_size)
+        halo_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
+        halo_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+      else:
+        halo_segment_ids = decoder_segment_ids
+        halo_positions = decoder_positions
+      output, _ = attention_flash_cp(
+          inputs,
+          inputs,
+          decoder_segment_ids=halo_segment_ids,
+          inputs_positions=halo_positions,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+      )
+      return jnp.mean(output.astype(jnp.float32) ** 2)
+
+    generic_grad = jax.grad(generic_loss)(lnx)
+    with (
+        jax.set_mesh(mesh_cp),
+        nn_partitioning.axis_rules(cfg_cp.logical_axis_rules),
+    ):
+      halo_grad = jax.grad(halo_loss)(lnx)
+    generic_grad = jax.device_get(generic_grad)
+    halo_grad = jax.device_get(halo_grad)
+
+    np.testing.assert_allclose(
+        generic_grad,
+        halo_grad,
+        rtol=1e-02,
+        atol=1e-07,
+        equal_nan=False,
+        err_msg=(
+            "Input gradients from generic dot product and flash attention +"
+            " halo context parallelism are not close."
+            f" ici_context_parallelism={ici_context_parallelism},"
+            f" context_parallel_load_balance={context_parallel_load_balance},"
+            f" packing={packing}."
+        ),
+    )
+
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_halo_hlo_uses_permute_without_sequence_all_gather(
+      self,
+  ):
+    """Checks halo CP HLO uses collective-permute and no sequence all-gather."""
+    cfg_cp = self._halo_test_config(4, context_parallel_load_balance=True, packing=True)
+    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
+    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+    _, attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
+
+    def attention_forward(x, pos, seg):
+      output, _ = attention_flash_cp(
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=common_types.MODEL_MODE_TRAIN,
+      )
+      return output
+
+    def attention_loss(x, pos, seg):
+      return jnp.sum(attention_forward(x, pos, seg).astype(jnp.float32))
+
+    hlo_texts = []
+    for lowered_fn in (attention_forward, jax.grad(attention_loss)):
+      with (
+          jax.set_mesh(mesh_cp),
+          nn_partitioning.axis_rules(cfg_cp.logical_axis_rules),
+      ):
+        input_sharding = NamedSharding(
+            mesh_cp,
+            nn_partitioning.logical_to_mesh_axes(
+                ("activation_batch", "activation_length", "activation_embed"),
+                nn_partitioning.get_axis_rules(),
+            ),
+        )
+        metadata_sharding = NamedSharding(
+            mesh_cp,
+            nn_partitioning.logical_to_mesh_axes((None, "activation_length"), nn_partitioning.get_axis_rules()),
+        )
+        lowered = jax.jit(lowered_fn).lower(
+            jax.device_put(lnx, input_sharding),
+            jax.device_put(decoder_positions, metadata_sharding),
+            jax.device_put(decoder_segment_ids, metadata_sharding),
+        )
+        hlo_texts.append(lowered.compile().as_text())
+
+    sequence_lengths = (cfg_cp.max_target_length,)
+    for hlo_text in hlo_texts:
+      self.assertGreater(
+          len(hlo_test_utils.collective_lines(hlo_text, "collective-permute")),
+          0,
+      )
+      self.assertLen(
+          hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, sequence_lengths),
+          0,
+      )
+      self.assertLen(
+          hlo_test_utils.attention_sequence_all_gather_lines(hlo_text, sequence_lengths, dtypes=("s32",)),
+          0,
       )
 
-  def _make_mesh(self, cp_size: int) -> Mesh:
-    fsdp_size = 8 // cp_size
-    devices = np.asarray(jax.devices()[:8]).reshape(1, fsdp_size, cp_size, 1)
-    return Mesh(devices, ("data", "fsdp", "context", "tensor"))
-
-  def test_per_layer_cp_strategy_resolution(self):
-    mesh = self._make_mesh(cp_size=2)
-    cfg = _make_attention_op_config(
-        cp_strategy="ring",
-        local_cp_strategy="halo",
-        load_balance=True,
-    )
-    local_op = attention_op_lib.AttentionOp(
-        config=cfg,
-        mesh=mesh,
-        attention_kernel="flash",
-        max_target_length=1024,
-        num_query_heads=4,
-        num_kv_heads=2,
-        float32_qk_product=True,
-        max_prefill_predict_length=512,
-        float32_logits=True,
-        attention_type=AttentionType.LOCAL_SLIDING,
-        sliding_window_size=128,
-        rngs=nnx.Rngs(0),
-    )
-    self.assertEqual(local_op.context_parallel_strategy, "halo")
-
-    cfg_ag = _make_attention_op_config(
-        cp_strategy="ring",
-        local_cp_strategy="all_gather",
-        load_balance=True,
-    )
-    local_ag_op = attention_op_lib.AttentionOp(
-        config=cfg_ag,
-        mesh=mesh,
-        attention_kernel="flash",
-        max_target_length=1024,
-        num_query_heads=4,
-        num_kv_heads=2,
-        float32_qk_product=True,
-        max_prefill_predict_length=512,
-        float32_logits=True,
-        attention_type=AttentionType.LOCAL_SLIDING,
-        sliding_window_size=128,
-        rngs=nnx.Rngs(0),
-    )
-    self.assertEqual(local_ag_op.context_parallel_strategy, "all_gather")
-
-    with self.assertRaisesRegex(ValueError, "only supported for AttentionType.LOCAL_SLIDING"):
-      attention_op_lib.AttentionOp(
-          config=_make_attention_op_config(cp_strategy="halo"),
-          mesh=mesh,
+  def test_residual_checkpoint_name_enables_context_remat_policy(self):
+    """Named halo Splash residuals let save-context remat skip fwd recompute."""
+    if len(jax.devices()) < 2:
+      self.skipTest("Requires at least 2 devices for a halo context mesh.")
+    cfg_cp = self._halo_test_config(2, context_parallel_load_balance=True)
+    mesh_cp = Mesh(maxtext_utils.create_device_mesh(cfg_cp), cfg_cp.mesh_axes)
+    batch_size = cfg_cp.global_batch_size_to_train_on
+    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
+      op = attention_op.AttentionOp(
+          config=cfg_cp,
+          mesh=mesh_cp,
           attention_kernel="flash",
-          max_target_length=1024,
+          max_target_length=cfg_cp.max_target_length,
           num_query_heads=4,
           num_kv_heads=2,
-          float32_qk_product=True,
-          max_prefill_predict_length=512,
-          float32_logits=True,
-          attention_type=AttentionType.GLOBAL,
-          rngs=nnx.Rngs(0),
+          attention_type=common_types.AttentionType.LOCAL_SLIDING,
+          sliding_window_size=cfg_cp.sliding_window_size,
+      )
+      query = jnp.zeros(
+          (batch_size, cfg_cp.max_target_length, 4, cfg_cp.head_dim),
+          jnp.bfloat16,
+      )
+      key = jnp.zeros(
+          (batch_size, cfg_cp.max_target_length, 2, cfg_cp.head_dim),
+          jnp.bfloat16,
       )
 
-  @parameterized.named_parameters(
-      dict(testcase_name="cp2_lb_false_unpacked", cp_size=2, load_balance=False, packed=False),
-      dict(testcase_name="cp2_lb_false_packed", cp_size=2, load_balance=False, packed=True),
-      dict(testcase_name="cp2_lb_true_unpacked", cp_size=2, load_balance=True, packed=False),
-      dict(testcase_name="cp2_lb_true_packed", cp_size=2, load_balance=True, packed=True),
-      dict(testcase_name="cp4_lb_false_unpacked", cp_size=4, load_balance=False, packed=False),
-      dict(testcase_name="cp4_lb_false_packed", cp_size=4, load_balance=False, packed=True),
-      dict(testcase_name="cp4_lb_true_unpacked", cp_size=4, load_balance=True, packed=False),
-      dict(testcase_name="cp4_lb_true_packed", cp_size=4, load_balance=True, packed=True),
-  )
-  def test_halo_attention_forward_and_grad_parity(self, cp_size: int, load_balance: bool, packed: bool):
-    mesh = self._make_mesh(cp_size=cp_size)
-    b = 4
-    s = 1024
-    h_q = 4
-    h_kv = 2
-    d = 64
-    w = 128
-    block_size = 128
+      def grad_jaxpr(policy):
+        remat = jax.checkpoint(
+            lambda q, k, v: op.tpu_flash_attention(q, k, v, None, model_mode=common_types.MODEL_MODE_TRAIN)[0]
+            .astype(jnp.float32)
+            .sum(),
+            policy=policy,
+        )
+        return jax.make_jaxpr(jax.grad(remat))(query, key, key).jaxpr
 
-    cfg = _make_attention_op_config(
-        cp_strategy="ring",
-        local_cp_strategy="halo",
-        load_balance=load_balance,
-        block_size=block_size,
+      saved = grad_jaxpr(jax.checkpoint_policies.save_only_these_names("context"))
+      recomputed = grad_jaxpr(jax.checkpoint_policies.nothing_saveable)
+
+    self.assertEqual(_count_primitives(saved, "name", "context"), 2)
+    self.assertLess(
+        _count_primitives(saved, "name", "context"),
+        _count_primitives(recomputed, "name", "context"),
     )
-    op = attention_op_lib.AttentionOp(
-        config=cfg,
-        mesh=mesh,
-        attention_kernel="flash",
-        max_target_length=s,
-        num_query_heads=h_q,
-        num_kv_heads=h_kv,
-        float32_qk_product=True,
-        max_prefill_predict_length=s,
-        float32_logits=True,
-        attention_type=AttentionType.LOCAL_SLIDING,
-        sliding_window_size=w,
-        rngs=nnx.Rngs(0),
-    )
-
-    key_rng = jax.random.PRNGKey(42 + cp_size * 10 + int(load_balance) * 2 + int(packed))
-    kq, kk, kv, kdo = jax.random.split(key_rng, 4)
-    q_contig = jax.random.normal(kq, (b, s, h_q, d), dtype=jnp.float32) * 0.2
-    k_contig = jax.random.normal(kk, (b, s, h_kv, d), dtype=jnp.float32) * 0.2
-    v_contig = jax.random.normal(kv, (b, s, h_kv, d), dtype=jnp.float32) * 0.2
-    do_contig = jax.random.normal(kdo, (b, s, h_q, d), dtype=jnp.float32) * 0.2
-
-    if packed:
-      pos = jnp.arange(s)[None, :]
-      seg_contig = jnp.where(pos < 300, 1, jnp.where(pos < 700, 2, 3))
-      seg_contig = jnp.broadcast_to(seg_contig, (b, s)).astype(jnp.int32)
-    else:
-      seg_contig = None
-
-    def ref_loss(q_, k_, v_):
-      out_ = _dense_sliding_window_reference(q_, k_, v_, seg_contig, w)
-      return jnp.sum(out_ * do_contig), out_
-
-    (_, out_ref), (dq_ref, dk_ref, dv_ref) = jax.value_and_grad(
-        ref_loss, argnums=(0, 1, 2), has_aux=True
-    )(q_contig, k_contig, v_contig)
-
-    if load_balance:
-      q_in = max_utils.reorder_sequence(q_contig, cp_size=cp_size, seq_dim=1, to_contiguous=False)
-      k_in = max_utils.reorder_sequence(k_contig, cp_size=cp_size, seq_dim=1, to_contiguous=False)
-      v_in = max_utils.reorder_sequence(v_contig, cp_size=cp_size, seq_dim=1, to_contiguous=False)
-      do_in = max_utils.reorder_sequence(do_contig, cp_size=cp_size, seq_dim=1, to_contiguous=False)
-      seg_in = (
-          max_utils.reorder_sequence(seg_contig, cp_size=cp_size, seq_dim=1, to_contiguous=False)
-          if seg_contig is not None
-          else None
-      )
-    else:
-      q_in, k_in, v_in, do_in, seg_in = q_contig, k_contig, v_contig, do_contig, seg_contig
-
-    qkv_sharding = NamedSharding(mesh, P("fsdp", "context", None, None))
-    seg_sharding = NamedSharding(mesh, P("fsdp", "context"))
-    q_in = jax.device_put(q_in, qkv_sharding)
-    k_in = jax.device_put(k_in, qkv_sharding)
-    v_in = jax.device_put(v_in, qkv_sharding)
-    do_in = jax.device_put(do_in, qkv_sharding)
-    if seg_in is not None:
-      seg_in = jax.device_put(seg_in, seg_sharding)
-
-    def halo_loss(q_, k_, v_):
-      out_, _ = op.tpu_flash_attention(
-          q_,
-          k_,
-          v_,
-          seg_in,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.sum(out_.astype(jnp.float32) * do_in.astype(jnp.float32)), out_
-
-    with nn.logical_axis_rules(cfg.logical_axis_rules):
-      (_, out_halo), (dq_halo, dk_halo, dv_halo) = jax.jit(
-          jax.value_and_grad(halo_loss, argnums=(0, 1, 2), has_aux=True)
-      )(q_in, k_in, v_in)
-
-    if load_balance:
-      out_halo = max_utils.reorder_sequence(out_halo, cp_size=cp_size, seq_dim=1, to_contiguous=True)
-      dq_halo = max_utils.reorder_sequence(dq_halo, cp_size=cp_size, seq_dim=1, to_contiguous=True)
-      dk_halo = max_utils.reorder_sequence(dk_halo, cp_size=cp_size, seq_dim=1, to_contiguous=True)
-      dv_halo = max_utils.reorder_sequence(dv_halo, cp_size=cp_size, seq_dim=1, to_contiguous=True)
-
-    np.testing.assert_allclose(np.asarray(out_halo), np.asarray(out_ref), rtol=2e-3, atol=2e-3)
-    np.testing.assert_allclose(np.asarray(dq_halo), np.asarray(dq_ref), rtol=2e-3, atol=2e-3)
-    np.testing.assert_allclose(np.asarray(dk_halo), np.asarray(dk_ref), rtol=2e-3, atol=2e-3)
-    np.testing.assert_allclose(np.asarray(dv_halo), np.asarray(dv_ref), rtol=2e-3, atol=2e-3)
-
-  def test_halo_uses_ppermute_and_no_all_gather(self):
-    mesh = self._make_mesh(cp_size=4)
-    b, s, h_q, h_kv, d, w = 4, 1024, 4, 2, 64, 128
-    cfg = _make_attention_op_config(
-        cp_strategy="ring",
-        local_cp_strategy="halo",
-        load_balance=True,
-        block_size=128,
-    )
-    with nn.logical_axis_rules(cfg.logical_axis_rules):
-      op = attention_op_lib.AttentionOp(
-          config=cfg,
-          mesh=mesh,
-          attention_kernel="flash",
-          max_target_length=s,
-          num_query_heads=h_q,
-          num_kv_heads=h_kv,
-          float32_qk_product=True,
-          max_prefill_predict_length=s,
-          float32_logits=True,
-          attention_type=AttentionType.LOCAL_SLIDING,
-          sliding_window_size=w,
-          rngs=nnx.Rngs(0),
-      )
-      q = jnp.zeros((b, s, h_q, d), dtype=jnp.bfloat16)
-      k = jnp.zeros((b, s, h_kv, d), dtype=jnp.bfloat16)
-      v = jnp.zeros((b, s, h_kv, d), dtype=jnp.bfloat16)
-      seg = jnp.ones((b, s), dtype=jnp.int32)
-
-      jaxpr = jax.make_jaxpr(
-          lambda q_, k_, v_, s_: op.tpu_flash_attention(q_, k_, v_, s_, model_mode=MODEL_MODE_TRAIN)[0]
-      )(q, k, v, seg).jaxpr
-
-    self.assertEqual(_count_primitives(jaxpr, "all_gather"), 0)
-    self.assertGreaterEqual(_count_primitives(jaxpr, "ppermute"), 2)
-
-  def test_halo_with_context_checkpoint_policy(self):
-    mesh = self._make_mesh(cp_size=2)
-    b, s, h_q, h_kv, d, w = 4, 1024, 4, 2, 64, 128
-    cfg = _make_attention_op_config(
-        cp_strategy="ring",
-        local_cp_strategy="halo",
-        load_balance=True,
-        block_size=128,
-    )
-    with nn.logical_axis_rules(cfg.logical_axis_rules):
-      op = attention_op_lib.AttentionOp(
-          config=cfg,
-          mesh=mesh,
-          attention_kernel="flash",
-          max_target_length=s,
-          num_query_heads=h_q,
-          num_kv_heads=h_kv,
-          float32_qk_product=True,
-          max_prefill_predict_length=s,
-          float32_logits=True,
-          attention_type=AttentionType.LOCAL_SLIDING,
-          sliding_window_size=w,
-          rngs=nnx.Rngs(0),
-      )
-      qkv_sharding = NamedSharding(mesh, P("fsdp", "context", None, None))
-      q = jax.device_put(jnp.ones((b, s, h_q, d), dtype=jnp.float32) * 0.1, qkv_sharding)
-      k = jax.device_put(jnp.ones((b, s, h_kv, d), dtype=jnp.float32) * 0.1, qkv_sharding)
-      v = jax.device_put(jnp.ones((b, s, h_kv, d), dtype=jnp.float32) * 0.1, qkv_sharding)
-
-      @functools.partial(
-          jax.checkpoint,
-          policy=jax.checkpoint_policies.save_only_these_names("context"),
-      )
-      def step_fn(q_, k_, v_):
-        out_, _ = op.tpu_flash_attention(q_, k_, v_, None, model_mode=MODEL_MODE_TRAIN)
-        return jnp.sum(out_)
-
-      dq, dk, dv = jax.jit(jax.grad(step_fn, argnums=(0, 1, 2)))(q, k, v)
-      self.assertEqual(dq.shape, q.shape)
-      self.assertEqual(dk.shape, k.shape)
-      self.assertEqual(dv.shape, v.shape)
-
-  def test_pyconfig_validates_local_context_parallel_strategy(self):
-    base_yml = os.path.join(
-        os.path.dirname(__file__), "..", "..", "src", "maxtext", "configs", "base.yml"
-    )
-    config = pyconfig.initialize(
-        [
-            "train.py",
-            base_yml,
-            "run_name=test_cp_halo",
-            "compile_topology=v6e-8",
-            "compile_topology_num_slices=1",
-            "ici_fsdp_parallelism=2",
-            "ici_context_parallelism=4",
-            "attention=flash",
-            "use_tokamax_splash=True",
-            "context_parallel_strategy=ring",
-            "local_context_parallel_strategy=halo",
-            "sliding_window_size=1024",
-            "max_target_length=8192",
-            "per_device_batch_size=1",
-        ]
-    )
-    self.assertEqual(config.context_parallel_strategy, "ring")
-    self.assertEqual(config.local_context_parallel_strategy, "halo")
 
 
 if __name__ == "__main__":

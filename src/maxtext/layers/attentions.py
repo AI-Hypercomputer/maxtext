@@ -52,7 +52,11 @@ from maxtext.common.common_types import (
     AttentionType,
 )
 from maxtext.layers import nnx_wrappers
-from maxtext.layers.attention_op import AttentionOp, _resolve_attention_type, resolve_context_parallel_strategy
+from maxtext.layers.attention_op import (
+    AttentionOp,
+    _resolve_attention_type,
+    resolve_context_parallel_strategy,
+)
 from maxtext.layers.embeddings import (
     LLaMARotaryEmbedding,
     LlamaVisionRotaryEmbedding,
