@@ -833,6 +833,53 @@ class LifecycleTest(absltest.TestCase):
 
     _assert_close(self, resumed, _run(_ZERO1).params, "the resumed run diverged from the uninterrupted one")
 
+  def test_a_restored_accumulator_lands_on_the_parameters_it_was_summed_for(self):
+    """A restored accumulator lands on its own parameters even when it comes back in plain dicts.
+
+    Restoring maps the accumulator onto the compiled layout by position, and plain dicts and the
+    model's own state type both flatten in key order, so each gradient has to land on the parameter
+    it was summed for. That matters on this model, whose two decoder layers have parameters of
+    identical shapes: a misplaced gradient would still fit. As above, the proof is that finishing
+    the step from the restored state lands on exactly the weights of the uninterrupted `_ZERO1` run.
+    """
+    output_dir = self.enterContext(tempfile.TemporaryDirectory())  # pylint: disable=consider-using-with
+    cfg, mesh = _rig(
+        shard_optimizer_over_data=True,
+        enable_checkpointing=True,
+        base_output_directory=output_dir,
+        async_checkpointing=False,
+        checkpoint_period=1,
+    )
+    with jax.set_mesh(mesh):
+      engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+      engine.compile(_batch(cfg, 0))
+      for micro in range(3):
+        engine.fwd_bwd(_batch(cfg, micro))
+      engine.update()
+      engine.fwd_bwd(_batch(cfg, 3))
+      engine.fwd_bwd(_batch(cfg, 4))
+      engine.save_checkpoint(metadata=None, force=True)
+      checkpoint_manager = engine._checkpoint_manager  # pylint: disable=protected-access
+      checkpoint_manager.wait_until_finished()
+
+      orbax_manager = checkpoint_manager._checkpoint_manager  # pylint: disable=protected-access
+      real_restore = orbax_manager.restore
+
+      def restore_as_plain_dicts(*args, **kwargs):
+        restored = dict(real_restore(*args, **kwargs).items())
+        restored["accumulated_grads"] = nnx.to_pure_dict(restored["accumulated_grads"])
+        return restored
+
+      with mock.patch.object(orbax_manager, "restore", side_effect=restore_as_plain_dicts) as restore:
+        engine.restore_checkpoint()
+      restore.assert_called_once()
+
+      engine.fwd_bwd(_batch(cfg, 5))
+      engine.update()
+      resumed = _params(engine)
+
+    _assert_close(self, resumed, _run(_ZERO1).params, "the resumed run diverged from the uninterrupted one")
+
   def test_a_recompile_leaves_a_live_accumulator_and_the_sharded_moments_alone(self):
     """A second batch shape re-enters `_compile_for_batch`, mid-step.
 

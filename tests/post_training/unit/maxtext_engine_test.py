@@ -16,6 +16,7 @@
 # pylint: disable=protected-access
 
 import dataclasses
+import threading
 import types
 from typing import Any
 from unittest import mock
@@ -60,6 +61,14 @@ class DummyStatefulNNXModel(nnx.Module):
   def __init__(self):
     self.weights = nnx.Param(jnp.array([1.0, 2.0]))
     self.calls = nnx.BatchStat(jnp.array(0.0))
+
+
+class DummyTwoParamNNXModel(nnx.Module):
+  """Two parameters of the same shape, so a gradient put on the wrong one still fits."""
+
+  def __init__(self):
+    self.first = nnx.Param(jnp.array([1.0, 2.0]))
+    self.second = nnx.Param(jnp.array([3.0, 4.0]))
 
 
 @struct.dataclass(frozen=True, kw_only=True)
@@ -142,6 +151,30 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     saved_metadata = mock.MagicMock()
     saved_metadata.custom_metadata = {"micro_step_count": micro_step_count}
     mock_orbax_mgr.metadata.return_value = saved_metadata
+
+  def _mock_save_in_flight(self, mock_orbax_mgr, saved_metadata):
+    """Makes the mocked Orbax manager's latest step an async save that is still being written.
+
+    Orbax counts the step as saved from the moment its save starts, but cannot read the step's
+    metadata until the save finishes.
+
+    Args:
+      mock_orbax_mgr: The mocked Orbax manager.
+      saved_metadata: What `metadata()` returns once the save has finished.
+    """
+    in_flight = True
+
+    def metadata(step):
+      if in_flight:
+        raise FileNotFoundError(f"Directory does not exist: {step}")
+      return saved_metadata
+
+    def wait_until_finished():
+      nonlocal in_flight
+      in_flight = False
+
+    mock_orbax_mgr.metadata.side_effect = metadata
+    mock_orbax_mgr.wait_until_finished.side_effect = wait_until_finished
 
   def test_raises_type_error_for_non_pyconfig(self):
     invalid_config = abstract_engine.TrainingConfig()
@@ -274,9 +307,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
             "optimizer_state": mock_handler.return_value,
             "accumulated_metrics": mock_handler.return_value,
             "accumulated_grads": mock_handler.return_value,
+            "accumulated_denominator": mock_handler.return_value,
         },
     )
-    self.assertEqual(mock_handler.call_count, 4)
+    self.assertEqual(mock_handler.call_count, 5)
     mock_handler.assert_has_calls(
         [
             mock.call(
@@ -285,7 +319,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
                 save_device_host_concurrent_gb=mock_config.checkpoint_storage_device_host_concurrent_gb,
             )
         ]
-        * 4,
+        * 5,
     )
 
   @mock.patch("orbax.checkpoint.PyTreeCheckpointHandler")
@@ -299,7 +333,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     )
 
     _ = maxtext_engine.MaxTextTrainingEngine(mock_config)
-    self.assertEqual(mock_handler.call_count, 4)
+    self.assertEqual(mock_handler.call_count, 5)
     mock_handler.assert_has_calls(
         [
             mock.call(
@@ -308,7 +342,7 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
                 save_device_host_concurrent_gb=16,
             )
         ]
-        * 4,
+        * 5,
     )
 
   @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
@@ -317,7 +351,9 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=import-outside-toplevel
     from maxtext.training_engine import checkpointing as checkpointing_module  # pylint: disable=import-outside-toplevel
 
-    checkpointing_module._PATHWAYS_PERSISTENCE_REGISTERED = False
+    # Registration is process-wide, and later intra-step saves read it to choose how to copy their
+    # state, so it is undone when this test ends.
+    self.enter_context(mock.patch.object(checkpointing_module, "_PATHWAYS_PERSISTENCE_REGISTERED", False))
     checkpointing_module._maybe_register_pathways_persistence()
 
     mock_register_type_handlers.assert_called_once()
@@ -462,34 +498,425 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_orbax_mgr.save.assert_not_called()
     mock_orbax_mgr.delete.assert_not_called()
 
-  def test_update_supersedes_intra_step_checkpoint_it_resumed_from(self):
+  def test_step_boundary_save_supersedes_an_intra_step_save_still_in_flight(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=10)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.custom_metadata = {"micro_step_count": 2}
+    self._mock_save_in_flight(mock_orbax_mgr, saved_metadata)
+
+    # Step 10 has run to completion while its intra-step checkpoint is still being written.
+    t.train_step = 10
+    t._micro_step_count = 0
+
+    t.save_checkpoint(metadata=None)
+
+    mock_orbax_mgr.delete.assert_called_once_with(10)
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    self.assertEqual(call_kwargs["step"], 10)
+    self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 0)
+
+  def test_intra_step_save_ignores_save_interval_and_a_declined_one_skips_gradient_reduction(self):
+    # A real Orbax manager rather than a mock, so its own save-interval policy decides.
+    t = maxtext_engine.MaxTextTrainingEngine(
+        self.setup_config(enable_checkpointing=True, checkpoint_period=2, gradient_accumulation_steps=4)
+    )
+    orbax_mgr = t._checkpoint_manager._checkpoint_manager
+    self.assertIsInstance(orbax_mgr, ocp.CheckpointManager)
+    t.train_step = 2
+    t.save_checkpoint(metadata=None)
+    t._checkpoint_manager.wait_until_finished()
+    self.assertEqual(orbax_mgr.latest_step(), 2)
+
+    t._micro_step_count = 2
+    t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+    t._accumulated_denominator = jnp.float32(2.0)
+    with (
+        mock.patch.object(t, "_reduced_accumulated_grads", wraps=t._reduced_accumulated_grads) as reduce_grads,
+        mock.patch.object(orbax_mgr, "save", wraps=orbax_mgr.save) as orbax_save,
+    ):
+      # Step 3 is not a multiple of the period, which paces step-boundary saves only.
+      t.save_checkpoint(metadata=None)
+      reduce_grads.assert_called_once()
+      orbax_save.assert_called_once()
+
+      # No progress since that save: declined before the gradients are reduced again.
+      t.save_checkpoint(metadata=None)
+      reduce_grads.assert_called_once()
+      orbax_save.assert_called_once()
+    t._checkpoint_manager.wait_until_finished()
+    self.assertEqual(orbax_mgr.latest_step(), 3)
+    self.assertEqual(t._checkpoint_manager.get_saved_micro_step_count(3), 2)
+
+    # A step-boundary save still follows the period: step 5 is not due.
+    t.train_step = 5
+    t._micro_step_count = 0
+    t.save_checkpoint(metadata=None)
+    t._checkpoint_manager.wait_until_finished()
+    self.assertEqual(orbax_mgr.latest_step(), 3)
+
+  def test_failed_background_save_is_forgotten_without_dropping_a_newer_one(self):
+    t = maxtext_engine.MaxTextTrainingEngine(
+        self.setup_config(enable_checkpointing=True, async_checkpointing=True, gradient_accumulation_steps=4)
+    )
+    cm = t._checkpoint_manager
+    orbax_mgr = cm._checkpoint_manager
+    self.assertIsInstance(orbax_mgr, ocp.CheckpointManager)
+    t.train_step = 9
+    t._micro_step_count = 1
+    t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+    t._accumulated_denominator = jnp.float32(2.0)
+
+    # Declined by Orbax on the background thread: step 10 must not be reported as saved.
+    with mock.patch.object(orbax_mgr, "save", return_value=False) as orbax_save:
+      t.save_checkpoint(metadata=None)
+      cm.wait_for_inflight_save_staging()
+    orbax_save.assert_called_once()
+    self.assertNotIn(10, cm._saved_step_micro_counts)
+    self.assertIsNone(cm.get_latest_step())
+
+    # Fails after a newer save at the same step has recorded itself: that record must survive.
+    def save_superseded_meanwhile(**kwargs):
+      cm._saved_step_micro_counts[kwargs["step"]] = 3
+      raise RuntimeError("storage unavailable")
+
+    with mock.patch.object(orbax_mgr, "save", side_effect=save_superseded_meanwhile):
+      t.save_checkpoint(metadata=None)
+      with self.assertRaisesRegex(RuntimeError, "storage unavailable"):
+        cm.wait_for_inflight_save_staging()
+    self.assertEqual(cm._saved_step_micro_counts[10], 3)
+
+  def test_superseding_a_declined_background_save_does_not_raise(self):
+    t = maxtext_engine.MaxTextTrainingEngine(
+        self.setup_config(enable_checkpointing=True, async_checkpointing=True, gradient_accumulation_steps=4)
+    )
+    cm = t._checkpoint_manager
+    orbax_mgr = cm._checkpoint_manager
+    self.assertIsInstance(orbax_mgr, ocp.CheckpointManager)
+    t.train_step = 9
+    t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+    t._accumulated_denominator = jnp.float32(2.0)
+
+    # Orbax declines the save at micro 1 on the background thread, but only once the save at
+    # micro 2 has decided to replace it: step 10 is recorded by then, yet never reaches disk.
+    release = threading.Event()
+
+    def declined_save(**kwargs):
+      del kwargs
+      release.wait(timeout=60)
+      return False
+
+    drain = cm.wait_until_finished
+
+    def release_then_drain():
+      release.set()
+      drain()
+
+    with (
+        mock.patch.object(orbax_mgr, "save", side_effect=declined_save) as orbax_save,
+        mock.patch.object(cm, "wait_until_finished", side_effect=release_then_drain),
+    ):
+      t._micro_step_count = 1
+      t.save_checkpoint(metadata=None)
+      t._micro_step_count = 2
+      t.save_checkpoint(metadata=None)
+      # Drain while `save` is still patched: the save at micro 2 runs on the background thread.
+      cm.wait_until_finished()
+    self.assertEqual(orbax_save.call_count, 2)
+    self.assertIsNone(cm.get_latest_step())
+
+  def test_update_waits_for_a_background_save_to_stage_before_donating_the_state(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True, async_checkpointing=True))
     t.with_loss_fn(
         lambda *args, **kwargs: (
             abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
             {},
         )
     )
-    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=5)
-    self._mock_saved_micro_step_count(mock_orbax_mgr, 2)
-
-    # State as `restore_checkpoint` leaves it after loading an intra-step checkpoint at 5.
-    t.train_step = 4
-    t._resumed_mid_step = True
-
     payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
     t.compile(payload)
     t.fwd_bwd(payload)
+    cm = t._checkpoint_manager
+    orbax_mgr = cm._checkpoint_manager
+    self.assertIsInstance(orbax_mgr, ocp.CheckpointManager)
+
+    # The intra-step save stays in Orbax's `save()`, which reads the parameters and optimizer
+    # state the update kernel donates, until `update()` waits for it.
+    waited_on = threading.Event()
+    real_save, real_wait, real_update = orbax_mgr.save, cm.wait_for_inflight_save_staging, t._compiled_update
+    unfinished_at_update = []
+
+    def save_once_waited_on(**kwargs):
+      waited_on.wait(timeout=60)
+      return real_save(**kwargs)
+
+    def wait_for_staging():
+      waited_on.set()
+      real_wait()
+
+    def update_kernel(*args):
+      unfinished_at_update.extend(f for f in cm._pending_async_futures if not f.done())
+      waited_on.set()  # Lets the save finish even when `update()` did not wait for it.
+      return real_update(*args)
+
+    with (
+        mock.patch.object(orbax_mgr, "save", side_effect=save_once_waited_on),
+        mock.patch.object(cm, "wait_for_inflight_save_staging", side_effect=wait_for_staging),
+        mock.patch.object(t, "_compiled_update", side_effect=update_kernel),
+    ):
+      t.save_checkpoint(metadata=None)
+      self.assertEqual(t.update(), 1)
+      cm.wait_until_finished()
+    self.assertEmpty(unfinished_at_update)
+    self.assertEqual(cm.get_saved_micro_step_count(1), 1)
+
+  def test_background_intra_step_save_writes_the_accumulators_as_they_were_when_saved(self):
+    # Each engine gets its own model, as each run would.
+    mesh = self.mock_from_pretrained.return_value[1]
+    self.mock_from_pretrained.side_effect = lambda *_args, **_kwargs: (DummyNNXModel(), mesh)
+    config = self.setup_config(enable_checkpointing=True, async_checkpointing=True)
+    payload = DummyPayload()
+
+    def new_engine():
+      engine = maxtext_engine.MaxTextTrainingEngine(config)
+      engine.with_loss_fn(self._weighted_loss_fn)
+      engine.compile(payload)
+      return engine
+
+    writer = new_engine()
+    cm = writer._checkpoint_manager
+    orbax_mgr = cm._checkpoint_manager
+    self.assertIsInstance(orbax_mgr, ocp.CheckpointManager)
+    for _ in range(2):
+      writer.fwd_bwd(payload)
+
+    # The save stays in Orbax's `save()` until the next micro-batch has been dispatched, which
+    # donates both accumulators to the kernel that adds into them.
+    next_micro_batch_dispatched = threading.Event()
+    real_save = orbax_mgr.save
+
+    def save_after_the_next_micro_batch(**kwargs):
+      next_micro_batch_dispatched.wait(timeout=60)
+      return real_save(**kwargs)
+
+    with mock.patch.object(orbax_mgr, "save", side_effect=save_after_the_next_micro_batch):
+      writer.save_checkpoint(metadata=None)
+      writer.fwd_bwd(payload)
+      next_micro_batch_dispatched.set()
+      cm.wait_until_finished()
+    # Each micro-batch adds [8.0, 8.0] to the gradients and 4.0 to the denominator.
+    np.testing.assert_allclose(writer._accumulated_grads["weights"], [24.0, 24.0])
+    self.assertAlmostEqual(float(writer._accumulated_denominator), 12.0)
+    cm.close()
+
+    # The checkpoint holds the two micro-batches folded in when it was taken, not the third.
+    t = new_engine()
+    t.restore_checkpoint()
+    self.assertEqual(t.train_step, 0)
+    self.assertEqual(t._micro_step_count, 2)
+    np.testing.assert_allclose(t._accumulated_grads["weights"], [16.0, 16.0])
+    self.assertAlmostEqual(float(t._accumulated_denominator), 8.0)
+
+  def test_superseding_removes_files_left_behind_by_orbax_delete(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    cm = t._checkpoint_manager
+    orbax_mgr = cm._checkpoint_manager
+    self.assertIsInstance(orbax_mgr, ocp.CheckpointManager)
+    t.train_step = 5
+    t.save_checkpoint(metadata=None)
+    step_dir = orbax_mgr.directory / "5"
+    self.assertTrue(step_dir.exists())
+
+    # On GCS, Orbax's step delete can return having removed only the directory's placeholder
+    # object, and deleting the files can then raise NOT_FOUND for one already removed.
+    rmtree = type(step_dir).rmtree
+
+    def rmtree_then_not_found(path, *args, **kwargs):
+      rmtree(path, *args, **kwargs)
+      raise FileNotFoundError(f"NOT_FOUND: {path}")
+
+    with (
+        mock.patch.object(orbax_mgr, "delete") as orbax_delete,
+        mock.patch.object(type(step_dir), "rmtree", autospec=True, side_effect=rmtree_then_not_found) as step_rmtree,
+    ):
+      cm._delete_saved_step(5)
+    orbax_delete.assert_called_once_with(5)
+    step_rmtree.assert_called_once()
+    self.assertFalse(step_dir.exists())
+
+  def test_orchestrator_save_supersedes_intra_step_checkpoint_it_resumed_from(self):
+    # Each engine gets its own model, as each run would.
+    mesh = self.mock_from_pretrained.return_value[1]
+    self.mock_from_pretrained.side_effect = lambda *_args, **_kwargs: (DummyNNXModel(), mesh)
+    config = self.setup_config(enable_checkpointing=True)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+
+    def new_engine():
+      engine = maxtext_engine.MaxTextTrainingEngine(config)
+      engine.with_loss_fn(self._weighted_loss_fn)
+      engine.compile(payload)
+      return engine
+
+    # A run checkpoints step 5 two micro-batches in, and stops there.
+    writer = new_engine()
+    writer.train_step = 4
+    for _ in range(2):
+      writer.fwd_bwd(payload)
+    writer.save_checkpoint(metadata={"cursor": 42})
+    writer._checkpoint_manager.close()
+
+    # The next run resumes from it and completes step 5. The engine writes only the checkpoints
+    # the orchestrator asks for.
+    t = new_engine()
+    cm = t._checkpoint_manager
+    self.assertEqual(t.restore_checkpoint(), {"cursor": 42})
+    t.fwd_bwd(payload)
     self.assertEqual(t.update(), 5)
+    self.assertEqual(cm.get_saved_micro_step_count(5), 2)
 
-    # The completed step must land on disk now, not a checkpoint period later.
-    mock_orbax_mgr.delete.assert_called_once_with(5)
-    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
-    self.assertEqual(call_kwargs["step"], 5)
-    self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 0)
-    self.assertFalse(t._resumed_mid_step)
+    # The orchestrator's save of the completed step replaces the partial one, and stores the
+    # metadata exactly as given.
+    t.save_checkpoint(metadata={"cursor": 43})
+    self.assertEqual(cm._checkpoint_manager.all_steps(), [5])
+    self.assertEqual(cm.get_saved_micro_step_count(5), 0)
+    cm.close()
+    self.assertEqual(new_engine().restore_checkpoint(), {"cursor": 43})
 
-  def test_update_does_not_checkpoint_when_not_resumed_mid_step(self):
+  def test_save_behind_the_latest_checkpoint_is_declined_even_when_forced(self):
+    # Orbax refuses a step that already exists and takes the step saved last as the latest, and
+    # forced and intra-step saves skip its own check against the latest step.
+    for async_checkpointing in (False, True):
+      for steps_on_disk in ([1, 2, 3], [1, 3]):
+        with self.subTest(async_checkpointing=async_checkpointing, steps_on_disk=steps_on_disk):
+          config = self.setup_config(enable_checkpointing=True, async_checkpointing=async_checkpointing)
+          writer = maxtext_engine.MaxTextTrainingEngine(config)
+          for step in steps_on_disk:
+            writer.train_step = step
+            writer.save_checkpoint(metadata=None)
+          writer._checkpoint_manager.close()
+
+          # A new run rolled back to step 1, with a later checkpoint already on disk.
+          t = maxtext_engine.MaxTextTrainingEngine(config)
+          cm = t._checkpoint_manager
+          orbax_mgr = cm._checkpoint_manager
+          t.restore_checkpoint(step=1)
+          t._micro_step_count = 2
+          t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+          t._accumulated_denominator = jnp.float32(2.0)
+          with mock.patch.object(orbax_mgr, "save", wraps=orbax_mgr.save) as orbax_save:
+            t.save_checkpoint(metadata=None)  # Intra-step, at step 2.
+            t.train_step = 2
+            t._micro_step_count = 0
+            t.save_checkpoint(metadata=None, force=True)  # As `close` saves the final step.
+            cm.wait_until_finished()
+          orbax_save.assert_not_called()
+          self.assertEqual(orbax_mgr.all_steps(), steps_on_disk)
+          self.assertEqual(cm.get_latest_step(), 3)
+
+          # Saving resumes once the run is past the latest checkpoint.
+          t.train_step = 3
+          t._micro_step_count = 2
+          t.save_checkpoint(metadata=None)
+          cm.wait_until_finished()
+          self.assertEqual(orbax_mgr.all_steps(), steps_on_disk + [4])
+
+  def test_checkpoint_manager_declines_a_save_behind_the_latest_before_copying_anything(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=5)
+    checkpoint_state = maxtext_engine.checkpointing.CheckpointState(
+        model=t.model,
+        accumulated_grads={"params": {"w": jnp.array([0.5, 0.5])}},
+        accumulated_denominator=jnp.float32(2.0),
+        micro_step_count=2,
+    )
+    real_isolate = maxtext_engine.checkpointing._isolate_for_async_save
+
+    with mock.patch.object(maxtext_engine.checkpointing, "_isolate_for_async_save", wraps=real_isolate) as isolate:
+      saved = t._checkpoint_manager.save_checkpoint(step=3, checkpoint_state=checkpoint_state, force=True)
+
+    self.assertFalse(saved)
+    isolate.assert_not_called()
+    mock_orbax_mgr.save.assert_not_called()
+
+  def test_checkpoint_manager_without_a_directory_declines_every_save(self):
+    cm = maxtext_engine.checkpointing.CheckpointManager(checkpoint_dir="", config=self.mock_config)
+
+    self.assertFalse(cm.should_save_checkpoint(step=1, micro_step_count=1))
+    self.assertFalse(cm.should_save_checkpoint(step=1, micro_step_count=0, force=True))
+
+  def test_partial_checkpoint_behind_the_latest_is_not_superseded(self):
+    # Each engine gets its own model, as each run would.
+    mesh = self.mock_from_pretrained.return_value[1]
+    self.mock_from_pretrained.side_effect = lambda *_args, **_kwargs: (DummyNNXModel(), mesh)
+    config = self.setup_config(enable_checkpointing=True)
+    writer = maxtext_engine.MaxTextTrainingEngine(config)
+    # A partial checkpoint at step 2, then a complete one at step 3: no save when step 2 completed.
+    writer.train_step = 1
+    writer._micro_step_count = 1
+    writer._accumulated_grads = jax.tree.map(jnp.ones_like, nnx.state(writer.model, nnx.Param))
+    writer._accumulated_denominator = jnp.float32(2.0)
+    writer.save_checkpoint(metadata=None)
+    writer.train_step = 3
+    writer._micro_step_count = 0
+    writer.save_checkpoint(metadata=None)
+    writer._checkpoint_manager.close()
+
+    # A new run rolled back to the partial checkpoint, and completes step 2.
+    t = maxtext_engine.MaxTextTrainingEngine(config)
+    t.with_loss_fn(self._weighted_loss_fn)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t.compile(payload)
+    cm = t._checkpoint_manager
+    t.restore_checkpoint(step=2)
+    self.assertEqual(t._micro_step_count, 1)
+    t.fwd_bwd(payload)
+    self.assertEqual(t.update(), 2)
+    t.save_checkpoint(metadata=None)
+    # Replacing it would write step 2 after step 3, which Orbax would then report as the latest.
+    self.assertEqual(cm._checkpoint_manager.all_steps(), [2, 3])
+    self.assertEqual(cm.get_latest_step(), 3)
+    self.assertEqual(cm.get_saved_micro_step_count(2), 1)
+
+    # The run carries on from there: step 3 is already saved complete, step 4 is new.
+    for step in (3, 4):
+      t.train_step = step
+      t.save_checkpoint(metadata=None)
+    self.assertEqual(cm._checkpoint_manager.all_steps(), [2, 3, 4])
+
+  def test_run_rolled_back_behind_the_latest_checkpoint_trains_through_it(self):
+    # Each engine gets its own model, as each run would.
+    mesh = self.mock_from_pretrained.return_value[1]
+    self.mock_from_pretrained.side_effect = lambda *_args, **_kwargs: (DummyNNXModel(), mesh)
+    config = self.setup_config(enable_checkpointing=True, async_checkpointing=True)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+
+    def new_engine():
+      engine = maxtext_engine.MaxTextTrainingEngine(config)
+      engine.with_loss_fn(self._weighted_loss_fn)
+      engine.compile(payload)
+      return engine
+
+    writer = new_engine()
+    for _ in range(3):
+      writer.fwd_bwd(payload)
+      writer.update()
+      writer.save_checkpoint(metadata=None)
+    writer._checkpoint_manager.close()
+
+    # Intra-step saves go through the background thread, whose errors `update` would raise.
+    t = new_engine()
+    t.restore_checkpoint(step=1)
+    for step in (2, 3, 4):
+      t.fwd_bwd(payload)
+      t.save_checkpoint(metadata=None)
+      self.assertEqual(t.update(), step)
+      t.save_checkpoint(metadata=None)
+    t._checkpoint_manager.wait_until_finished()
+    # Steps 2 and 3 keep the first run's checkpoints; step 4 replaced its partial with the complete one.
+    self.assertEqual(t._checkpoint_manager._checkpoint_manager.all_steps(), [1, 2, 3, 4])
+    self.assertEqual(t._checkpoint_manager.get_saved_micro_step_count(4), 0)
+
+  def test_update_does_not_checkpoint(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
     t.with_loss_fn(
         lambda *args, **kwargs: (
@@ -522,6 +949,97 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_orbax_mgr.save.assert_called_once()
     self.assertTrue(t._throttler._inflight_queue.empty())
 
+  def test_intra_step_save_checkpoint_does_not_drain_inflight_throttler_or_block_until_ready(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=10)
+    mock_logger = mock.MagicMock()
+    t._throttler._metrics_logger = mock_logger
+
+    # Stash a completed step's metrics buffer and add an inflight fwd_bwd computation.
+    stashed_metrics = abstract_engine.MetricsBuffer(id=9, mode="train")
+    t._throttler._pending_metrics = stashed_metrics
+    dummy_computation = jnp.array(1.0)
+    t._throttler._inflight_queue.put(([dummy_computation], None))
+
+    live_grad = jnp.array([0.5, 0.5])
+    live_denom = jnp.float32(4.0)
+    t.train_step = 10
+    t._micro_step_count = 2
+    t._accumulated_grads = {"params": {"w": live_grad}}
+    t._accumulated_denominator = live_denom
+
+    with mock.patch.object(maxtext_engine.checkpointing.jax, "block_until_ready") as mock_bur:
+      t.save_checkpoint(metadata={"step": 11})
+      mock_bur.assert_not_called()
+
+    # Inflight fwd_bwd queue must NOT be drained (zero-stall), while stashed metrics ARE flushed.
+    self.assertEqual(t._throttler._inflight_queue.qsize(), 1)
+    mock_logger.write_metrics.assert_called_once_with(stashed_metrics)
+    mock_orbax_mgr.save.assert_called_once()
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    self.assertNotIn("accumulated_denominator", call_kwargs["custom_metadata"])
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    saved_grad = args_dict["accumulated_grads"].item["params"]["w"]
+    saved_denom = args_dict["accumulated_denominator"].item["value"]
+    # Saved gradient and denominator buffers are isolated (non-aliasing copies) to survive donate_argnums=(3, 4) reuse.
+    self.assertIsNot(saved_grad, live_grad)
+    self.assertIsNot(saved_denom, live_denom)
+    np.testing.assert_allclose(np.asarray(saved_grad), np.asarray(live_grad))
+    np.testing.assert_allclose(np.asarray(saved_denom), np.asarray(live_denom))
+
+  def test_intra_step_save_stages_the_accumulators_in_pinned_host_memory_only_when_it_can(self):
+    # Staged in pinned host memory by default. A copy on device instead when that would exceed the
+    # host staging budget, or when Pathways persistence is registered: it saves straight from device memory.
+    for case, persistence_registered, over_budget, pinned in (
+        ("default", False, False, True),
+        ("over_the_host_staging_budget", False, True, False),
+        ("pathways_persistence", True, False, False),
+    ):
+      with (
+          self.subTest(case),
+          mock.patch.object(maxtext_engine.checkpointing, "_PATHWAYS_PERSISTENCE_REGISTERED", persistence_registered),
+      ):
+        t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+        mock_orbax_mgr = self._mock_orbax_manager(t)
+        if over_budget:
+          # Smaller than the 12 bytes the two accumulators below take.
+          t._checkpoint_manager._max_pinned_host_bytes = 1
+        live_grad = jnp.array([0.5, 0.5])
+        live_denom = jnp.float32(4.0)
+        t.train_step = 10
+        t._micro_step_count = 2
+        t._accumulated_grads = {"params": {"w": live_grad}}
+        t._accumulated_denominator = live_denom
+
+        t.save_checkpoint(metadata=None)
+
+        saved_items = mock_orbax_mgr.save.call_args.kwargs["args"]
+        saved_grad = saved_items["accumulated_grads"].item["params"]["w"]
+        saved_denom = saved_items["accumulated_denominator"].item["value"]
+        for saved, live in ((saved_grad, live_grad), (saved_denom, live_denom)):
+          self.assertIsNot(saved, live)
+          self.assertEqual(saved.sharding.memory_kind, "pinned_host" if pinned else live.sharding.memory_kind)
+          np.testing.assert_array_equal(saved, live)
+
+  def test_pinned_host_staging_needs_a_device_with_pinned_host_memory(self):
+    has_pinned_host_memory = maxtext_engine.checkpointing._has_pinned_host_memory
+    on_device = jax.sharding.SingleDeviceSharding(jax.devices()[0])
+    # A sharding on a platform whose devices have no pinned host memory.
+    device_memory_only = types.SimpleNamespace(
+        memory_kind="device",
+        addressable_devices=[types.SimpleNamespace(addressable_memories=lambda: [types.SimpleNamespace(kind="device")])],
+    )
+
+    self.assertTrue(has_pinned_host_memory(on_device))
+    self.assertFalse(has_pinned_host_memory(on_device.with_memory_kind("pinned_host")))
+    self.assertFalse(has_pinned_host_memory(device_memory_only))
+    self.assertFalse(has_pinned_host_memory(None))
+
   def test_save_checkpoint_called_after_fwd_bwd_before_update(self):
     mock_config = self.setup_config(enable_checkpointing=True)
     t = maxtext_engine.MaxTextTrainingEngine(mock_config)
@@ -539,8 +1057,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_orbax_mgr.save.assert_called_once()
     call_kwargs = mock_orbax_mgr.save.call_args.kwargs
     self.assertEqual(call_kwargs["custom_metadata"]["micro_step_count"], 1)
-    # The gradients are saved unreduced, so their divisor has to ride along with them.
-    self.assertEqual(call_kwargs["custom_metadata"]["accumulated_denominator"], 6.0)
+    # Divisor is saved as a CheckpointState item rather than in custom_metadata.
+    self.assertNotIn("accumulated_denominator", call_kwargs["custom_metadata"])
     self.assertEqual(call_kwargs["custom_metadata"]["additional_metadata"], dummy_metadata)
     args_dict = (
         dict(call_kwargs["args"].items())
@@ -550,6 +1068,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertIn("model_params", args_dict)
     self.assertNotIn("accumulated_metrics", args_dict)
     self.assertIn("accumulated_grads", args_dict)
+    self.assertIn("accumulated_denominator", args_dict)
+    np.testing.assert_allclose(np.asarray(args_dict["accumulated_denominator"].item["value"]), 6.0)
 
   def test_close_writes_final_checkpoint(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
@@ -625,7 +1145,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     mock_metadata.custom_metadata = {"micro_step_count": 2, "additional_metadata": dummy_metadata}
     mock_orbax_mgr.metadata.return_value = mock_metadata
 
-    metrics_buf = abstract_engine.MetricsBuffer(id=5, mode="train")
+    # `fwd_bwd` records under `train_step` (4), one behind the step the checkpoint is saved under (5).
+    metrics_buf = abstract_engine.MetricsBuffer(id=4, mode="train")
     # `weighted_metrics` is a plain dict; pylint cannot resolve that through
     # flax.struct.dataclass and wrongly reports it as unsubscriptable.
     # pylint: disable-next=unsupported-assignment-operation
@@ -646,14 +1167,324 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t._checkpoint_manager._checkpoint_manager = mock_orbax_mgr
 
     _ = t.restore_checkpoint(step=5)
+    self.assertEqual(t.train_step, 4)
     self.assertEqual(t._micro_step_count, 2)
-    # Flags the partial checkpoint at step 5 for replacement once that step completes.
-    self.assertTrue(t._resumed_mid_step)
     self.assertEqual(t._accumulated_grads, dummy_grads)
     self.assertEqual(len(t._cached_losses), 2)
     self.assertTrue(isinstance(t._cached_losses[0], abstract_engine.WeightedMetric))
     self.assertAlmostEqual(float(t._cached_losses[0].unreduced_sum), 4.0)
     self.assertAlmostEqual(float(t._cached_losses[1].unreduced_sum), 6.0)
+    # The checkpoint carries no denominator, so it comes from the restored losses.
+    self.assertAlmostEqual(float(t._accumulated_denominator), 4.0)
+
+  def test_restore_checkpoint_waits_for_a_save_still_in_flight(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=10)
+    saved_metadata = mock.MagicMock()
+    saved_metadata.item_metadata = {"model_params": {}}
+    saved_metadata.custom_metadata = {"micro_step_count": 0, "additional_metadata": {"cursor": 42}}
+    self._mock_save_in_flight(mock_orbax_mgr, saved_metadata)
+    mock_orbax_mgr.restore.return_value = {"model_params": nnx.state(DummyNNXModel())}
+
+    self.assertEqual(t.restore_checkpoint(), {"cursor": 42})
+    self.assertEqual(t.train_step, 10)
+
+  def test_save_checkpoint_saves_bool_metrics_as_float32(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    t.record_metrics("has_moe_overflow", jnp.bool_(True))
+
+    t.save_checkpoint(metadata=None)
+
+    call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    args_dict = (
+        dict(call_kwargs["args"].items())
+        if hasattr(call_kwargs["args"], "items") and callable(call_kwargs["args"].items)
+        else call_kwargs["args"].__dict__
+    )
+    # Pathways persistence can save a `bool` array but not restore it.
+    saved = args_dict["accumulated_metrics"].item[-1].scalar_metrics["has_moe_overflow"]
+    self.assertEqual(saved.dtype, jnp.float32)
+    np.testing.assert_array_equal(saved, [1.0])
+    # The recorder keeps what was recorded.
+    recorded = t._metrics_recorder.get_metrics_history(clear_cache=False)[-1].scalar_metrics["has_moe_overflow"]
+    self.assertEqual(recorded.dtype, jnp.bool_)
+
+  def test_restore_intra_step_checkpoint_constructs_array_restore_args_for_metrics_metadata(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=5)
+
+    array_meta = ocp.metadata.value.ArrayMetadata(
+        name="loss", directory=None, shape=(2,), sharding=None, dtype=jnp.dtype("float32")
+    )
+    scalar_meta = ocp.metadata.value.ScalarMetadata(name="id", directory=None, dtype=jnp.dtype("int64"))
+    string_meta = ocp.metadata.value.StringMetadata(name="mode", directory=None)
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {
+        "model_params": {},
+        "optimizer_state": {},
+        "accumulated_metrics": [{"id": scalar_meta, "mode": string_meta, "loss": array_meta}],
+        "accumulated_grads": {},
+        "accumulated_denominator": {"value": array_meta},
+    }
+    mock_metadata.custom_metadata = {"micro_step_count": 1}
+    mock_orbax_mgr.metadata.return_value = mock_metadata
+
+    dummy_model = DummyNNXModel()
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+        "accumulated_metrics": [],
+        "accumulated_grads": nnx.state(dummy_model, nnx.Param),
+        "accumulated_denominator": {"value": jnp.float32(4.0)},
+    }
+
+    t.restore_checkpoint(step=5)
+    restore_composite = mock_orbax_mgr.restore.call_args.kwargs["args"]
+    composite_items = (
+        dict(restore_composite.items())
+        if hasattr(restore_composite, "items") and callable(restore_composite.items)
+        else restore_composite.__dict__
+    )
+    denom_restore = composite_items["accumulated_denominator"]
+    self.assertIsInstance(denom_restore.restore_args, dict)
+    self.assertIn("value", denom_restore.restore_args)
+    self.assertIsInstance(denom_restore.restore_args["value"], ocp.ArrayRestoreArgs)
+    self.assertEqual(
+        denom_restore.restore_args["value"].sharding,
+        jax.sharding.NamedSharding(t._mesh, jax.sharding.PartitionSpec()),
+    )
+    np.testing.assert_allclose(np.asarray(t._accumulated_denominator), 4.0)
+    # Pathways persistence cannot restore an array without a sharding, and the metrics history has
+    # no restore target to take one from.
+    restored_arg_tree = composite_items["accumulated_metrics"].restore_args[0]
+    self.assertIsInstance(restored_arg_tree["loss"], ocp.ArrayRestoreArgs)
+    self.assertEqual(
+        restored_arg_tree["loss"].sharding,
+        jax.sharding.NamedSharding(t._mesh, jax.sharding.PartitionSpec()),
+    )
+    self.assertEqual(restored_arg_tree["loss"].global_shape, (2,))
+    self.assertEqual(restored_arg_tree["loss"].dtype, jnp.dtype("float32"))
+    self.assertIsInstance(restored_arg_tree["id"], ocp.RestoreArgs)
+    self.assertNotIsInstance(restored_arg_tree["id"], ocp.ArrayRestoreArgs)
+    self.assertEqual(restored_arg_tree["id"].restore_type, int)
+    self.assertIsInstance(restored_arg_tree["mode"], ocp.RestoreArgs)
+    self.assertNotIsInstance(restored_arg_tree["mode"], ocp.ArrayRestoreArgs)
+    self.assertEqual(restored_arg_tree["mode"].restore_type, str)
+
+  def test_restore_checkpoint_refreshes_pure_state_and_clears_stale_accumulators(self):
+    mock_config = self.setup_config(enable_checkpointing=True, gradient_accumulation_steps=2)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=3)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t.compile(payload)
+    t.fwd_bwd(payload)
+    self.assertIsNotNone(t._accumulated_grads)
+    self.assertIsNotNone(t._accumulated_denominator)
+    self.assertNotEmpty(t._cached_losses)
+
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}}
+    mock_metadata.custom_metadata = {"micro_step_count": 0}
+    mock_orbax_mgr.metadata.return_value = mock_metadata
+    restored_model = DummyNNXModel()
+    restored_model.weights.value = jnp.array([9.0, 10.0])
+    dummy_opt = nnx.Optimizer(restored_model, optax.sgd(0.01), wrt=nnx.Param)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(restored_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+    }
+
+    t.restore_checkpoint(step=3)
+    self.assertIsNotNone(t._params_pure)
+    self.assertIsNotNone(t._state_pure)
+    np.testing.assert_allclose(np.asarray(t._params_pure["weights"].value), [9.0, 10.0])
+    self.assertIsNone(t._accumulated_grads)
+    self.assertIsNone(t._accumulated_denominator)
+    self.assertEmpty(t._cached_losses)
+
+    # Partial checkpoints also replace cached losses and fall back to custom_metadata when
+    # accumulated_denominator is not stored as an array item.
+    t.fwd_bwd(payload)
+    self.assertNotEmpty(t._cached_losses)
+    mock_metadata.item_metadata = {"model_params": {}, "optimizer_state": {}, "accumulated_grads": {}}
+    mock_metadata.custom_metadata = {"micro_step_count": 1, "accumulated_denominator": 3.0}
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(restored_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+        "accumulated_metrics": [abstract_engine.MetricsBuffer(id=0, mode="train")],
+        "accumulated_grads": nnx.state(restored_model, nnx.Param),
+    }
+    t.restore_checkpoint(step=3)
+    self.assertEqual(t._micro_step_count, 1)
+    self.assertEmpty(t._cached_losses)
+    self.assertAlmostEqual(float(t._accumulated_denominator), 3.0)
+
+  def test_restore_intra_step_checkpoint_replicates_the_denominator_and_resumes_the_step(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=5)
+
+    orch_metadata = {"cursor": 42}
+    mock_metadata = mock.MagicMock()
+    mock_metadata.item_metadata = {
+        "model_params": {},
+        "optimizer_state": {},
+        "accumulated_metrics": {},
+        "accumulated_grads": {},
+        "accumulated_denominator": {},
+    }
+    mock_metadata.custom_metadata = {"micro_step_count": 2, "additional_metadata": orch_metadata}
+    mock_orbax_mgr.metadata.return_value = mock_metadata
+
+    # In real fwd_bwd() runs before update(), MetricsRecorder buffers under `id = train_step` (4),
+    # while save_checkpoint writes to `step = train_step + 1` (5).
+    metrics_buf = abstract_engine.MetricsBuffer(id=4, mode="train")
+    # pylint: disable-next=unsupported-assignment-operation
+    metrics_buf.weighted_metrics["loss"] = abstract_engine.WeightedMetric(
+        unreduced_sum=jnp.array([4.0, 6.0]),
+        denominator=jnp.array([2.0, 2.0]),
+    )
+    dummy_model = DummyNNXModel()
+    dummy_grads = nnx.state(DummyNNXModel(), nnx.Param)
+    dummy_opt = nnx.Optimizer(dummy_model, optax.sgd(0.01), wrt=nnx.Param)
+    mock_orbax_mgr.restore.return_value = {
+        "model_params": nnx.state(dummy_model),
+        "optimizer_state": nnx.state(dummy_opt, nnx.optimizer.OptState),
+        "accumulated_metrics": [metrics_buf],
+        "accumulated_grads": dummy_grads,
+        "accumulated_denominator": {"value": jnp.float32(4.0)},
+    }
+
+    restored_meta = t.restore_checkpoint(step=5)
+    self.assertEqual(restored_meta, orch_metadata)
+    self.assertEqual(t.train_step, 4)
+    self.assertLen(t._cached_losses, 2)
+    self.assertEqual(
+        t._accumulated_denominator.sharding,
+        jax.sharding.NamedSharding(t._mesh, jax.sharding.PartitionSpec()),
+    )
+    self.assertAlmostEqual(float(t._accumulated_denominator), 4.0)
+
+    # The resumed step runs to completion on the restored accumulators. Finishing it writes no
+    # checkpoint by itself: superseding the partial one is the orchestrator's save to make.
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t.compile(payload)
+    t.fwd_bwd(payload)
+    self.assertEqual(t.update(), 5)
+    mock_orbax_mgr.save.assert_not_called()
+
+  def test_compile_keeps_each_accumulated_gradient_on_its_own_parameter(self):
+    mesh = self.mock_from_pretrained.return_value[1]
+    self.mock_from_pretrained.return_value = (DummyTwoParamNNXModel(), mesh)
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    # Each micro-batch adds [8.0, 8.0] to the gradient of `first`, [2.0, 2.0] to that of `second`,
+    # and 4.0 to the denominator.
+    t.with_loss_fn(
+        lambda model, *_args, **_kwargs: abstract_engine.WeightedMetric(
+            unreduced_sum=8.0 * jnp.sum(model.first[...]) + 2.0 * jnp.sum(model.second[...]),
+            denominator=jnp.array(4.0),
+        )
+    )
+    # One micro-batch's worth, in plain dicts rather than the model's state type: compile maps it
+    # onto the parameters' layout by position.
+    t._accumulated_grads = {"first": jnp.array([8.0, 8.0]), "second": jnp.array([2.0, 2.0])}
+    t._accumulated_denominator = jnp.float32(4.0)
+    t._micro_step_count = 1
+    payload = DummyPayload()
+
+    t.compile(payload)
+    t.fwd_bwd(payload)
+
+    np.testing.assert_allclose(t._accumulated_grads["first"], [16.0, 16.0])
+    np.testing.assert_allclose(t._accumulated_grads["second"], [4.0, 4.0])
+    self.assertAlmostEqual(float(t._accumulated_denominator), 8.0)
+
+  def test_placing_a_leaf_already_on_its_target_makes_no_copy(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    leaf = jax.device_put(jnp.array([1.0, 2.0]), jax.sharding.NamedSharding(t._mesh, jax.sharding.PartitionSpec()))
+
+    self.assertIs(t._place_leaf(leaf, leaf.sharding), leaf)
+
+  def test_intra_step_save_supersedes_inflight_async_step_and_snapshots_metrics(self):
+    mock_config = self.setup_config(enable_checkpointing=True)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=None)
+    # Simulate an in-flight async save where `<step>.orbax-checkpoint-tmp` is not yet finalized on disk.
+    mock_orbax_mgr.metadata.side_effect = FileNotFoundError("temp dir still in flight")
+
+    t.train_step = 10
+    t._micro_step_count = 1
+    t._accumulated_grads = {"params": {"w": jnp.array([0.5, 0.5])}}
+    t._accumulated_denominator = jnp.float32(2.0)
+    t.record_metrics(
+        "loss",
+        abstract_engine.WeightedMetric(unreduced_sum=jnp.array(1.0), denominator=jnp.array(2.0)),
+    )
+
+    t.save_checkpoint(metadata={"cursor": 1})
+    mock_orbax_mgr.save.assert_called_once()
+    first_call_kwargs = mock_orbax_mgr.save.call_args.kwargs
+    first_args_dict = (
+        dict(first_call_kwargs["args"].items())
+        if hasattr(first_call_kwargs["args"], "items") and callable(first_call_kwargs["args"].items)
+        else first_call_kwargs["args"].__dict__
+    )
+    saved_metrics_snapshot = first_args_dict["accumulated_metrics"].item
+
+    # Mutate metrics on the next micro-step; the saved snapshot must remain untouched.
+    t.record_metrics(
+        "loss",
+        abstract_engine.WeightedMetric(unreduced_sum=jnp.array(3.0), denominator=jnp.array(2.0)),
+    )
+    self.assertEqual(saved_metrics_snapshot[-1].weighted_metrics["loss"].unreduced_sum.shape, (1,))
+
+    # A second intra-step save at the same step (step=11, micro_step_count=2) must supersede the first
+    # via in-memory `_saved_step_micro_counts` even though `metadata(11)` raises FileNotFoundError.
+    t._micro_step_count = 2
+    t.save_checkpoint(metadata={"cursor": 2})
+    mock_orbax_mgr.delete.assert_called_once_with(11)
+    self.assertEqual(mock_orbax_mgr.save.call_count, 2)
+    self.assertEqual(mock_orbax_mgr.save.call_args.kwargs["custom_metadata"]["micro_step_count"], 2)
+
+  def test_intra_step_save_is_not_capped_by_gradient_accumulation_steps(self):
+    # The orchestrator packs micro-batches itself, so how many make up a step need not match
+    # `gradient_accumulation_steps`, nor stay the same from one step to the next.
+    mock_config = self.setup_config(enable_checkpointing=True, gradient_accumulation_steps=2)
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    t.with_loss_fn(
+        lambda *args, **kwargs: (
+            abstract_engine.WeightedMetric(unreduced_sum=jnp.array(0.5), denominator=jnp.array(1.0)),
+            {},
+        )
+    )
+    mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=None)
+    payload = DummyPayload(token_ids=jnp.ones((2, 2)), token_mask=jnp.ones((2, 2)))
+    t.compile(payload)
+
+    for _ in range(3):
+      t.fwd_bwd(payload)
+    t.save_checkpoint(metadata={"cursor": 3})
+    self.assertEqual(mock_orbax_mgr.save.call_count, 1)
+    self.assertEqual(mock_orbax_mgr.save.call_args.kwargs["custom_metadata"]["micro_step_count"], 3)
+
+    # Completing the step writes no checkpoint the orchestrator did not ask for.
+    self.assertEqual(t.update(), 1)
+    self.assertEqual(mock_orbax_mgr.save.call_count, 1)
 
   def test_record_and_get_metrics(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
