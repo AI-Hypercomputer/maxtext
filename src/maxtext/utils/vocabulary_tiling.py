@@ -117,6 +117,11 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   )
 
   def _reshape(inputs, out_shape, out_sharding):
+    reshape_out_sharding = out_sharding if config.shard_mode == ShardMode.EXPLICIT else None
+    inputs = jax.lax.reshape(inputs, out_shape, out_sharding=reshape_out_sharding)
+    return _maybe_shard_with_name(inputs, out_sharding)
+
+  def _tile_reshape(inputs, out_shape, out_sharding):
     # When seq_len is divisible by num_vocab_tiling, tile (and untile in bwd)
     # along the unsharded seq_len axis (axis 1) instead of flattening
     # (batch, seq_len) directly. Direct flattening splits the FSDP-sharded
@@ -128,9 +133,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
           0,
           1,
       )
-    reshape_out_sharding = out_sharding if config.shard_mode == ShardMode.EXPLICIT else None
-    inputs = jax.lax.reshape(inputs, out_shape, out_sharding=reshape_out_sharding)
-    return _maybe_shard_with_name(inputs, out_sharding)
+    return _reshape(inputs, out_shape, out_sharding)
 
   hidden_states = _maybe_shard_with_name(hidden_states, hidden_spec)
   labels = _maybe_shard_with_name(labels, label_spec)
@@ -176,11 +179,11 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
     if config.vocab_tiling_ag_once:
       chunk_head_params = _maybe_shard_with_name(chunk_head_params, head_physical_spec)
 
-    reshaped_hidden_states = _reshape(
+    reshaped_hidden_states = _tile_reshape(
         hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
     )
-    reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
-    reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    reshaped_labels = _tile_reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    reshaped_segmentation = _tile_reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
 
     def _fwd_scan_body(accumulators, chunk_data):
       loss_accumulator, z_loss_accumulator = accumulators
@@ -269,7 +272,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
     grad_head = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_head)
     grad_reshaped_hidden_states *= loss_cotangent
     grad_head = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), chunk_head_params, grad_head)
-    grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
+    grad_reshaped_hidden_states = _tile_reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
 
     # Return explicit zeros for other_params and rest, not None. With None, JAX builds
     # the zero cotangents with the wrong layer-axis order for scanned params, and the
