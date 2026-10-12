@@ -186,20 +186,17 @@ def load_adapter(config, base_abstract_state_params, adapter_config_path, adapte
   return lora_params, lora_config
 
 
-def setup_initial_lora_state(model, data_iterator, tx, config, rng, mesh, checkpoint_manager, lora_adapter_path):
+def setup_initial_lora_state(data_iterator, tx, config, mesh, checkpoint_manager, lora_adapter_path):
   """Initialize the LoRA train state and optionally restore it from a checkpoint.
 
-  On the NNX path, `model` is unused; the abstract state is built from
-  `model_creation_utils.create_nnx_abstract_model` and `lora_state.params`
-  follows the NNX shape. On the Linen path the existing `{"params": ...}`
-  tree shape is preserved.
+  The abstract state is built from
+  `model_creation_utils.create_nnx_abstract_model`, so `lora_state.params`
+  follows the NNX shape.
 
   Args:
-    model: Linen `nn.Module` used on the Linen path; ignored on NNX.
     data_iterator: Data iterator passed through to `load_state_if_possible`.
     tx: Optax gradient transformation for the optimizer.
     config: Top-level MaxText config.
-    rng: PRNG key used for the Linen init.
     mesh: JAX device mesh.
     checkpoint_manager: Orbax `CheckpointManager` for the adapter.
     lora_adapter_path: Path to the adapter directory containing

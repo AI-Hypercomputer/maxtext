@@ -76,6 +76,7 @@ jobs:
     uses: ./.github/workflows/run_tests_coordinator.yml
     with:
       flavor: ${{ matrix.flavor }}
+      repository_name: ${{ inputs.repository_name }}
       base_image: ${{ inputs.image_name }}:${{ inputs.image_tag }}
       is_scheduled_run: true
       maxtext_installed: true

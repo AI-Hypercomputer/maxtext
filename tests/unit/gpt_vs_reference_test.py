@@ -42,6 +42,7 @@ from maxtext.layers import attentions, moe, embeddings
 from maxtext.layers.initializers import nd_dense_init
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
+from tests.utils import linen_wrappers
 
 
 # Reference implementation
@@ -323,7 +324,8 @@ class GptOssMLPTest(unittest.TestCase):
     jax_hidden_states = to_jax(hidden_states)
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
-    jax_model = moe.get_routed_moe(
+    jax_model = linen_wrappers.to_linen(
+        moe.RoutedMoE,
         name="MoeBlock",
         config=cfg,
         num_experts=cfg.num_experts,

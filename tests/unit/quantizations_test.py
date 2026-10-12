@@ -656,10 +656,10 @@ class MoEQuantizedEinsumTest(unittest.TestCase):
   def test_create_fp8_einsum(self):
     for quant_str in ("fp8", "nanoo_fp8"):
       quant = _configure_quantization(quant_str=quant_str)
-      wrapper = quantizations.create_fp8_einsum(quant, jnp.float32, nnx.Rngs(0))
+      einsum = quantizations.create_fp8_einsum(quant, jnp.float32, nnx.Rngs(0))
       lhs = jnp.ones((4, 8))
       rhs = jnp.ones((8, 16))
-      result = wrapper("ab,bc->ac", lhs, rhs, mutable=["_overwrite_with_gradient"])
+      result = einsum("ab,bc->ac", lhs, rhs)
       self.assertEqual(result.shape, (4, 16))
 
   def test_apply_einsum_in_nnx_plain_callable(self):
@@ -675,7 +675,8 @@ class MoEQuantizedEinsumTest(unittest.TestCase):
     parent = EinsumParent(nnx.Rngs(0))
     lhs = jnp.ones((2, 2))
     rhs = jnp.ones((2, 2))
-    einsum = quant.einsum(mesh_axes=())
+    aqt_quant: quantizations.AqtQuantization = quant
+    einsum = aqt_quant.einsum(mesh_axes=())
     result1 = quantizations.apply_einsum_in_nnx(parent, "aqt_test", einsum, ["aqt"], "bc,ab->ac", lhs, rhs)
     wrapper = getattr(parent, "quant_einsum_aqt_test")
     result2 = quantizations.apply_einsum_in_nnx(parent, "aqt_test", einsum, ["aqt"], "bc,ab->ac", lhs, rhs)
@@ -737,6 +738,29 @@ class LhsScaleTest(unittest.TestCase):
     )
     scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
     self.assertIsNone(scale)
+
+
+class QwixWeightGradTilingTest(unittest.TestCase):
+  """Weight-gradient tiling in the Qwix quantization rule."""
+
+  def _qwix_fp8_rule(self, *extra):
+    cfg = pyconfig.initialize(
+        ["", get_test_config_path(), "quantization=fp8", "use_qwix_quantization=true", *extra],
+        run_name="qwix_weight_grad_tiling_test",
+        skip_jax_distributed_system=True,
+    )
+    return quantizations.get_quantization_rule(cfg)[-1]
+
+  def test_qwix_weight_grad_is_not_tiled_by_default(self):
+    # Tiling the weight-gradient contraction makes XLA all-reduce the full gradient under FSDP.
+    self.assertIsNone(self._qwix_fp8_rule().bwd_weight_grad_tile_size)
+
+  def test_qwix_weight_grad_tile_count_sets_tile_size(self):
+    self.assertEqual(self._qwix_fp8_rule("qwix_bwd_weight_grad_tile_count=4").bwd_weight_grad_tile_size, 0.25)
+
+  def test_qwix_weight_grad_tile_count_must_be_positive(self):
+    with self.assertRaises(ValueError):
+      self._qwix_fp8_rule("qwix_bwd_weight_grad_tile_count=0")
 
 
 class RouterProjQwixInterceptionTest(unittest.TestCase):
@@ -850,6 +874,34 @@ class LogitsProjQwixTest(unittest.TestCase):
           r for r in quantizations.get_fp8_full_qwix_rule_w_sparsity(cfg) if r.module_path == "decoder/logits_dense.*"
       ][0]
       self.assertEqual((rule.weight_calibration_method, rule.act_calibration_method), (expected, expected))
+
+  def test_logits_proj_bwd_calibration_methods(self):
+    """Verifies logits_dense QtRule bwd calibration inheritance and override of both gradient arms."""
+    for override, expected_dlhs, expected_drhs in [
+        ("", "absmax", "fixed,0.01"),
+        ("absmax,1.5", "absmax,1.5", "absmax,1.5"),
+    ]:
+      extra = [f"logits_proj_bwd_quant_calibration_method={override}"] if override else []
+      cfg = pyconfig.initialize(
+          [
+              "",
+              get_test_config_path(),
+              "model_name=deepseek3-671b",
+              "quantization=fp8_full",
+              "use_qwix_quantization=true",
+              "bwd_quantization_calibration_method=absmax",
+              "drhs_grad_quantization_calibration_method=fixed,0.01",
+              "quantize_logits_proj=true",
+              *extra,
+          ],
+          run_name="logits_proj_bwd_calib_test",
+          skip_jax_distributed_system=True,
+      )
+      rule = [
+          r for r in quantizations.get_fp8_full_qwix_rule_w_sparsity(cfg) if r.module_path == "decoder/logits_dense.*"
+      ][0]
+      self.assertEqual(rule.bwd_calibration_method, expected_dlhs)
+      self.assertEqual(rule.additional_qt_config["drhs_grad_calibration_method"], expected_drhs)
 
 
 if __name__ == "__main__":

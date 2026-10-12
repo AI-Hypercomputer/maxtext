@@ -76,6 +76,32 @@ class PyconfigTest(unittest.TestCase):
           moe_use_direct_token_gather=False,
       )
 
+  def test_step_dropless_fallback_rejects_unreplayable_combinations(self):
+    def initialize(**kwargs):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          model_name="mixtral-8x7b",
+          megablox=True,
+          sparse_matmul=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=True,
+          ici_expert_parallelism=2,
+          ragged_buffer_factor=1.0,
+          moe_dropless_fallback="step",
+          **kwargs,
+      )
+
+    self.assertEqual(initialize().moe_dropless_fallback, "step")
+    for overrides, message in (
+        ({"enable_diloco": True, "dcn_diloco_parallelism": 2}, "not supported with enable_diloco"),
+        ({"compiled_trainstep_file": "/tmp/train_step.pickle"}, "not supported with compiled_trainstep_file"),
+        ({"optimizer_memory_host_offload": True}, "not supported with optimizer_memory_host_offload"),
+        ({"parameter_memory_host_offload": True}, "or parameter_memory_host_offload"),
+    ):
+      with self.subTest(**overrides), self.assertRaisesRegex(ValueError, message):
+        initialize(**overrides)
+
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
 
@@ -209,6 +235,20 @@ class PyconfigTest(unittest.TestCase):
     )
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
+
+  def test_rope_direct_position_freqs_requires_positions_in_table(self):
+    def make_config(max_target_length):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          rope_direct_position_freqs=True,
+          max_position_embeddings=4096,
+          max_target_length=max_target_length,
+      )
+
+    self.assertTrue(make_config(4096).rope_direct_position_freqs)
+    with self.assertRaises(ValueError):
+      make_config(4097)
 
   def _zero1_config(self, **kwargs):
     return pyconfig.initialize(
@@ -345,7 +385,10 @@ class PyconfigTest(unittest.TestCase):
 
       with self.subTest(decoder_block=decoder_block):
         with self.assertRaisesRegex(Exception, "requires `sparse_matmul=True`"):
-          initialize(sparse_matmul=False, megablox=False)
+          initialize(num_experts=2, base_mlp_dim=128, base_moe_mlp_dim=128, sparse_matmul=False, megablox=False)
+
+        config = initialize(num_experts=1, sparse_matmul=False, megablox=False)
+        self.assertEqual(config.num_experts, 1)
 
         with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_parallelism=2)
@@ -401,6 +444,19 @@ class PyconfigTest(unittest.TestCase):
         self.assertEqual(result, os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml"))
       finally:
         os.chdir(orig)
+
+  def test_resolve_or_infer_config_accepts_yaml_suffix(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      for suffix in (".yml", ".yaml", ".YAML"):
+        with self.subTest(suffix=suffix):
+          config_path = os.path.join(tmpdir, f"model{suffix}")
+          with open(config_path, "w", encoding="utf-8") as f:
+            f.write("steps: 1\n")
+          resolved, remaining = pyconfig._resolve_or_infer_config(  # pylint: disable=protected-access
+              ["train.py", config_path, "steps=2"]
+          )
+          self.assertEqual(resolved, config_path)
+          self.assertEqual(remaining, ["steps=2"])
 
   def test_config_file_mapping(self):
     for module, relative_path in _CONFIG_FILE_MAPPING.items():
@@ -717,6 +773,7 @@ assert train._TF_AVAILABLE is False
         "use_random_routing": (False, True),
         "use_ragged_sort": (False, True),
         "ragged_buffer_factor": (-1.0, 2.0),
+        "eval_ragged_buffer_factor": (-1.0, 2.0),
         "use_ring_of_experts": (False, True),
         "num_moe_emb_chunks": (0, 2),
     }

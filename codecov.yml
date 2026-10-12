@@ -37,6 +37,7 @@ ignore:
   - "src/maxtext/examples"
   - "src/maxtext/experimental"
   - "src/maxtext/inference"
+  - "src/maxtext/integration/vllm"
   - "src/maxtext/scratch_code"
 
 flags:

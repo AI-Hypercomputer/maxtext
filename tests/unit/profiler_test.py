@@ -55,6 +55,7 @@ class ProfilerTest(unittest.TestCase):
         xprof_e2e_enable_fw_throttle_event=True,
         xprof_e2e_enable_fw_power_level_event=True,
         xprof_e2e_enable_fw_thermal_event=True,
+        enable_continuous_profiling=True,
     )
 
     with patch("jax.profiler.ProfileOptions") as mock_options_cls:
@@ -73,6 +74,7 @@ class ProfilerTest(unittest.TestCase):
           "e2e_enable_fw_throttle_event": True,
           "e2e_enable_fw_power_level_event": True,
           "e2e_enable_fw_thermal_event": True,
+          "enable_continuous_profiling": True,
       }
       self.assertEqual(prof.profiling_options.advanced_configuration, expected_advanced_config)
 

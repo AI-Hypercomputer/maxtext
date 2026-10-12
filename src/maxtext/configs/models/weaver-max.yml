@@ -1,4 +1,4 @@
-# Model config for NVIDIA Cosmos3-Super Reasoner
+# Model config for Weaver Max
 
 # Core Architectural Parameters
 decoder_block: "qwen3"

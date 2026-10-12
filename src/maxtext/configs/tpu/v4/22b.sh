@@ -18,7 +18,7 @@ echo "Running 22b.sh"
 #
 # Command Flags:
 # OUTPUT_PATH (Required, unless base_output_directory is already set in base.yml)
-# RUN_NAME (Required, unless run_name is already set in base.yml or running with XPK/GKE)
+# RUN_NAME (Required, unless run_name is already set in base.yml or the JOBSET_NAME environment variable is set)
 #
 # Example to invoke this script for training:
 # bash src/maxtext/configs/tpu/v4/22b.sh RUN_NAME="<your_run_name>" OUTPUT_PATH="gs://<your_output_path>"

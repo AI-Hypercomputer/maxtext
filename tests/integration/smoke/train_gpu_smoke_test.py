@@ -18,7 +18,6 @@ import unittest
 
 from absl.testing import absltest
 
-from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_dataset_path, get_test_base_output_directory, get_test_config_path
@@ -29,14 +28,9 @@ class Train(unittest.TestCase):
 
   def setUp(self):
     """Set up test fixtures before each test method."""
-    decoupled = is_decoupled()
     # Use local minimal dataset if decoupled, otherwise default gs:// path.
     self.dataset_path = get_test_dataset_path()
-    self.base_output_directory = (
-        os.environ.get("LOCAL_BASE_OUTPUT", get_test_base_output_directory())
-        if decoupled
-        else get_test_base_output_directory()
-    )
+    self.base_output_directory = get_test_base_output_directory()
 
   def test_tiny_config(self):
     test_tmpdir = os.environ.get("TEST_TMPDIR")  # pylint: disable=unused-variable

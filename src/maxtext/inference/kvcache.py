@@ -19,7 +19,6 @@ from typing import Any, Optional, Callable
 import jax
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 
 from aqt.jax.v2 import config as aqt_config
@@ -29,6 +28,7 @@ from aqt.jax.v2.flax import aqt_flax
 
 from maxtext.common.common_types import Array, AxisNames, AxisIdxes, Config, CACHE_BATCH_PREFILL, DType, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, CACHE_HEADS_NONE, DECODING_ACTIVE_SEQUENCE_INDICATOR
 from maxtext.common.common_types import CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV, CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV
+from maxtext.utils.sharding import with_logical_constraint
 
 
 MAX_INT8 = 127.5
@@ -433,7 +433,7 @@ class KVCache(BaseCache):
         jnp.zeros(cache_shape_key, dtype=dtype),
         out_sharding=cache_axis_names,
     )
-    self.cached_ar_key[...] = nn.with_logical_constraint(
+    self.cached_ar_key[...] = with_logical_constraint(
         self.cached_ar_key[...],
         cache_axis_names,
     )
@@ -442,7 +442,7 @@ class KVCache(BaseCache):
         jnp.zeros(cache_shape_value, dtype=dtype),
         out_sharding=cache_axis_names,
     )
-    self.cached_ar_value[...] = nn.with_logical_constraint(
+    self.cached_ar_value[...] = with_logical_constraint(
         self.cached_ar_value[...],
         cache_axis_names,
     )
@@ -503,9 +503,9 @@ class KVCache(BaseCache):
     # not just during MODEL_MODE_PREFILL. This ensures AR updates persist.
     if getattr(self, "cached_prefill_key", None) is not None:
       self.cached_prefill_key.set_value(
-          nn.with_logical_constraint(new_recurrent_state, (cache_batch_axis_name, CACHE_HEADS, None, None))
+          with_logical_constraint(new_recurrent_state, (cache_batch_axis_name, CACHE_HEADS, None, None))
       )
-      self.cached_prefill_value.set_value(nn.with_logical_constraint(new_conv_state, (cache_batch_axis_name, None, None)))
+      self.cached_prefill_value.set_value(with_logical_constraint(new_conv_state, (cache_batch_axis_name, None, None)))
 
   def _get_ar_cache_vars(self):
     return self.ar_key_vars, self.ar_value_vars, self.cache_ar_segment_id, self.cache_ar_index, self.cached_ar_lengths
@@ -747,8 +747,8 @@ class KVCache(BaseCache):
               cached_value.get_value(), one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis
           )
       )
-    cached_key.set_value(nn.with_logical_constraint(cached_key.get_value(), ar_cache_axis_names))
-    cached_value.set_value(nn.with_logical_constraint(cached_value.get_value(), ar_cache_axis_names))
+    cached_key.set_value(with_logical_constraint(cached_key.get_value(), ar_cache_axis_names))
+    cached_value.set_value(with_logical_constraint(cached_value.get_value(), ar_cache_axis_names))
 
     if self.kv_quant:
       ar_cache_scale_axis_names = transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)

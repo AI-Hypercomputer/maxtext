@@ -210,8 +210,13 @@ def build_streaming_diloco_train_step(
     config: pyconfig.HyperParameters,
     train_step: Callable[[Any, Batch, PRNGKey], tuple[Any, Metrics]],
     mesh: jax.sharding.Mesh | None = None,
+    outer_params_shardings: PyTree | None = None,
 ) -> Callable[[DiLoCoTrainState, Batch, PRNGKey], tuple[DiLoCoTrainState, Metrics]]:
   """Convert a local state and train step into streaming DiLoCo train step."""
+  if getattr(config, "diloco_bucketize_non_scanned", False) and outer_params_shardings is None:
+    # The manipulator is built from tracers, which carry no sharding; without explicit shardings the fragmenter
+    # could split a sharded axis and make XLA gather whole leaves at every sync.
+    raise ValueError("diloco_bucketize_non_scanned requires outer_params_shardings for SPMD streaming DiLoCo.")
   outer_optimizer = optax.sgd(
       config.diloco_outer_lr,
       momentum=config.diloco_outer_momentum,
@@ -233,7 +238,8 @@ def build_streaming_diloco_train_step(
         step=new_step,
     )
 
-    manipulator = diloco_utils.FragmentedTreeManipulator.create(state.params, config)
+    # state.params are tracers here, so the fragmenter gets their shardings explicitly.
+    manipulator = diloco_utils.FragmentedTreeManipulator.create(state.params, config, shardings=outer_params_shardings)
 
     # Step 1: Run the synchronization logic if we hit a sync step
     is_sync_step = (new_step > 0) & (new_step % steps_between_syncs == 0)
@@ -280,6 +286,7 @@ def build_diloco_train_step(
     config: pyconfig.HyperParameters,
     train_step: Callable[[Any, Batch, PRNGKey], tuple[Any, Metrics]],
     mesh: jax.sharding.Mesh | None = None,
+    outer_params_shardings: PyTree | None = None,
 ) -> Callable[[DiLoCoTrainState, Batch, PRNGKey], tuple[DiLoCoTrainState, Metrics]]:
   """Convert a local state and train step into DiLoCo-compatible versions.
 
@@ -288,9 +295,11 @@ def build_diloco_train_step(
     train_step: A local train step. This will be executed independently within
       each replica.
     mesh: The mesh for sharding.
+    outer_params_shardings: Shardings of the outer parameters (`DiLoCoTrainState.params`). Streaming DiLoCo uses
+      them to split bucketized leaves only along unsharded axes; required when `diloco_bucketize_non_scanned` is set.
   """
   if config.enable_streaming_diloco:
-    return build_streaming_diloco_train_step(config, train_step, mesh=mesh)
+    return build_streaming_diloco_train_step(config, train_step, mesh=mesh, outer_params_shardings=outer_params_shardings)
   return build_vanilla_diloco_train_step(config, train_step, mesh=mesh)
 
 
