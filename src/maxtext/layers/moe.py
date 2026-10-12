@@ -28,7 +28,12 @@ from flax import nnx
 from flax import struct
 import jax
 from jax import ad_checkpoint as adc
-from jax.experimental.compute_on import compute_on
+try:
+  # jax 0.11.0 (the RL trainer image) has the keyword form (compute_type, out_memory_spaces, compiler_options) only as
+  # compute_on2; newer jax renamed it compute_on. The SparseCore pins below use the keyword form.
+  from jax.experimental.compute_on import compute_on2 as compute_on
+except ImportError:
+  from jax.experimental.compute_on import compute_on
 from jax.experimental import xla_metadata
 from jax.experimental.layout import Layout, with_layout_constraint
 import jax.numpy as jnp
