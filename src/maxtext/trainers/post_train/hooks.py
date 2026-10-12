@@ -38,14 +38,54 @@ from maxtext.utils import max_utils
 from maxtext.utils import sharding
 
 
-class BaseTrainingHooks(TrainingHooks, abc.ABC):
+class GoodputTrainingHooks(TrainingHooks):
+  """Lightweight training hooks for recording Goodput step start times."""
+
+  def __init__(self, config, goodput_recorder):
+    self.config = config
+    self.goodput_recorder = goodput_recorder
+
+  @override
+  def on_train_start(self, train_ctx: peft_trainer.PeftTrainer):
+    """Called at the beginning of training."""
+    del train_ctx
+
+  @override
+  def on_train_end(self, train_ctx: peft_trainer.PeftTrainer):
+    """Called at the end of training."""
+    del train_ctx
+
+  @override
+  def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
+    """Called at the beginning of a training step."""
+    if self.config.enable_goodput_recording:
+      record_goodput(self.goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
+
+  @override
+  def on_train_step_end(
+      self, train_ctx: peft_trainer.PeftTrainer, train_step: int, train_loss: float, step_time: float = 0.0
+  ):
+    """Called at the end of a training step."""
+    del train_ctx, train_step, train_loss, step_time
+
+  @override
+  def on_eval_step_start(self, train_ctx: peft_trainer.PeftTrainer):
+    """Called at the beginning of an evaluation step."""
+    del train_ctx
+
+  @override
+  def on_eval_step_end(self, train_ctx: peft_trainer.PeftTrainer, eval_loss: float):
+    """Called at the end of an evaluation step."""
+    del train_ctx, eval_loss
+
+
+class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
   """Shared training hooks for post-training."""
 
   def __init__(self, config, mesh, learning_rate_schedule, goodput_recorder):
-    self.config = config
+    super().__init__(config, goodput_recorder)
     self.mesh = mesh
     self.metric_logger = MetricLogger(self.config, learning_rate_schedule)
-    self.goodput_recorder = goodput_recorder
     self.metadata = {}
     self.train_metadata = defaultdict(float)
     self.eval_metadata = defaultdict(float)
@@ -90,8 +130,7 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
   @override
   def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
     """Called at the beginning of a training step."""
-    if self.config.enable_goodput_recording:
-      record_goodput(self.goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
+    super().on_train_step_start(train_ctx)
 
     # Calculate the number of non-padded tokens in the batch
     self.train_metadata[train_ctx.train_steps] = {

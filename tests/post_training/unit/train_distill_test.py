@@ -1139,6 +1139,8 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.per_device_batch_size = 1
     mock_student_cfg.max_target_length = 16
     mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.enable_goodput_recording = False
+    mock_student_cfg.monitor_goodput = False
 
     mock_teacher_cfg = mock.Mock()
     mock_teacher_cfg.vocab_size = 32000
@@ -1249,6 +1251,8 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.per_device_batch_size = 1
     mock_student_cfg.max_target_length = 16
     mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.enable_goodput_recording = False
+    mock_student_cfg.monitor_goodput = False
 
     mock_teacher_cfg = mock.Mock()
     mock_teacher_cfg.vocab_size = 32000
@@ -1403,6 +1407,106 @@ class TrainDistillTest(unittest.TestCase):
       argv = ["train_distill.py", "/does/not/exist.yml"]
       # Must not raise — failures here should not kill training.
       train_distill._save_run_manifest(argv, config)  # pylint: disable=protected-access
+
+  def _run_train_distill_with_goodput(self, enable_goodput_recording: bool):
+    """Helper to run train_distill with mocked components and goodput_recorder."""
+    devices = jax.devices()[:1]
+    mock_recorder = mock.MagicMock()
+
+    mock_student_cfg = mock.Mock()
+    mock_student_cfg.vocab_size = 32000
+    mock_student_cfg.mesh_axes = ("data",)
+    mock_student_cfg.dataset_type = "grain"
+    mock_student_cfg.data_sharding = ("fsdp",)
+    mock_student_cfg.learning_rate = 1e-4
+    mock_student_cfg.warmup_steps_fraction = 0.1
+    mock_student_cfg.learning_rate_final_fraction = 0.1
+    mock_student_cfg.steps = 10
+    mock_student_cfg.checkpoint_period = 5
+    mock_student_cfg.gradient_clipping_threshold = 0.0
+    mock_student_cfg.eval_interval = -1
+    mock_student_cfg.gradient_accumulation_steps = 1
+    mock_student_cfg.global_batch_size = 8
+    mock_student_cfg.distill_temperature = 1.0
+    mock_student_cfg.distill_alpha = 0.5
+    mock_student_cfg.distill_beta = 0.0
+    mock_student_cfg.distill_layer_indices = None
+    mock_student_cfg.distill_feature_loss_type = "cosine"
+    mock_student_cfg.use_sft = False
+    mock_student_cfg.enable_dropout = False
+    mock_student_cfg.learn_to_init_mode = False
+    mock_student_cfg.distill_weights_copy_map = {}
+    mock_student_cfg.distill_student_weights_share_map = {}
+    mock_student_cfg.get_keys.return_value = {}
+    mock_student_cfg.student_params_to_update = []
+    mock_student_cfg.distill_alpha_end = None
+    mock_student_cfg.distill_alpha_schedule = "constant"
+    mock_student_cfg.distill_temperature_end = None
+    mock_student_cfg.distill_temperature_schedule = "constant"
+    mock_student_cfg.distill_beta_end = None
+    mock_student_cfg.distill_beta_schedule = "constant"
+    mock_student_cfg.max_num_checkpoints_to_keep = 1
+    mock_student_cfg.async_checkpointing = False
+    mock_student_cfg.profiler = "none"
+    mock_student_cfg.tensorboard_dir = ""
+    mock_student_cfg.checkpoint_dir = ""
+    mock_student_cfg.log_period = 10
+    mock_student_cfg.save_checkpoint_on_completion = False
+    mock_student_cfg.logical_axis_rules = []
+    mock_student_cfg.enable_goodput_recording = enable_goodput_recording
+    mock_student_cfg.monitor_goodput = False
+    mock_student_cfg.goodput_job_name = "test-distill-job"
+    mock_student_cfg.run_name = "test-distill-run"
+
+    mock_teacher_cfg = mock.Mock()
+    mock_teacher_cfg.vocab_size = 32000
+
+    def fake_create_recorder(cfg):
+      return mock_recorder if cfg.enable_goodput_recording else None
+
+    with (
+        mock.patch.object(train_distill, "create_goodput_recorder", side_effect=fake_create_recorder),
+        mock.patch.object(train_distill.maxtext_utils, "create_device_mesh", return_value=np.array(devices)),
+        mock.patch.object(train_distill.tokenizer, "build_tokenizer", return_value=mock.Mock(pad_id=0)),
+        mock.patch.object(train_distill, "get_maxtext_model", return_value=mock.Mock()),
+        mock.patch.object(train_distill.input_pipeline_interface, "create_data_iterator", return_value=(None, None)),
+        mock.patch.object(train_distill, "MaxTextDistillationTrainer") as mock_trainer_cls,
+    ):
+      mock_trainer_instance = mock_trainer_cls.return_value
+      mock_trainer_instance._train_steps = 0
+      mock_trainer_instance.with_gen_model_input_fn.return_value = mock_trainer_instance
+
+      def fake_train(train_iter, eval_iter):  # pylint: disable=unused-argument
+        hooks_arg = mock_trainer_instance.with_training_hooks.call_args[0][0]
+        self.assertIsInstance(hooks_arg, train_distill.GoodputTrainingHooks)
+        hooks_arg.on_train_start(mock.Mock(train_steps=0))
+        hooks_arg.on_train_step_start(mock.Mock(train_steps=0))
+        hooks_arg.on_train_step_end(mock.Mock(train_steps=1), train_step=1, train_loss=1.0)
+        hooks_arg.on_train_step_start(mock.Mock(train_steps=1))
+        hooks_arg.on_train_step_end(mock.Mock(train_steps=2), train_step=2, train_loss=0.8)
+        hooks_arg.on_train_end(mock.Mock(train_steps=2))
+
+      mock_trainer_instance.train.side_effect = fake_train
+
+      train_distill.train_distill(mock_student_cfg, mock_teacher_cfg, is_offline=True, offline_data_dir="gs://dummy")
+
+    return mock_recorder
+
+  def test_train_distill_goodput_enabled(self):
+    """Verifies train_distill with enable_goodput_recording=True records lifecycle and step events."""
+    mock_recorder = self._run_train_distill_with_goodput(enable_goodput_recording=True)
+    mock_recorder.record_job_start_time.assert_called_once()
+    mock_recorder.record_tpu_init_start_time.assert_called_once()
+    mock_recorder.record_tpu_init_end_time.assert_called_once()
+    mock_recorder.record_training_preparation_start_time.assert_called_once()
+    mock_recorder.record_training_preparation_end_time.assert_called_once()
+    self.assertEqual(mock_recorder.record_step_start_time.call_args_list, [mock.call(0), mock.call(1)])
+    mock_recorder.record_job_end_time.assert_called_once()
+
+  def test_train_distill_goodput_disabled(self):
+    """Verifies train_distill with enable_goodput_recording=False performs zero recorder calls."""
+    mock_recorder = self._run_train_distill_with_goodput(enable_goodput_recording=False)
+    self.assertEqual(len(mock_recorder.method_calls), 0)
 
 
 if __name__ == "__main__":

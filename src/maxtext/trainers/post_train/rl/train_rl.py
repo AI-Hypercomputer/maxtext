@@ -77,6 +77,15 @@ os.environ["TOKENIZERS_PARALLELISM"] = "0"
 
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig, types
+from maxtext.common.goodput import (
+    GoodputEvent,
+    RECORD_JOB_END_TIME,
+    RECORD_JOB_START_TIME,
+    create_goodput_recorder,
+    maybe_monitor_goodput,
+    maybe_record_goodput,
+    record_goodput,
+)
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
@@ -648,17 +657,27 @@ def rl_train(argv: Sequence[str], kwargs: dict):
     trainer_devices: JAX devices for the trainer.
     sampler_devices: JAX devices for the sampler.
   """
-  _rl_train_impl(argv, kwargs)
-
-
-def _rl_train_impl(argv: Sequence[str], kwargs: dict):
-  """rl_train execution body."""
   trainer_config, sampler_config, trainer_devices, sampler_devices = model_creation_utils.setup_configs_and_devices(
       argv,
       kwargs,
       config_class=types.RLConfig,
   )
+  goodput_recorder = create_goodput_recorder(trainer_config)
+  record_goodput(goodput_recorder, RECORD_JOB_START_TIME)
+  _job_completed_gracefully = False
+  try:
+    with maybe_monitor_goodput(trainer_config):
+      _rl_train_impl(trainer_config, sampler_config, trainer_devices, sampler_devices, goodput_recorder)
+      _job_completed_gracefully = True
+  finally:
+    if _job_completed_gracefully:
+      record_goodput(goodput_recorder, RECORD_JOB_END_TIME)
 
+
+def _rl_train_impl(
+    trainer_config: Any, sampler_config: Any, trainer_devices: Any, sampler_devices: Any, goodput_recorder: Any = None
+):
+  """rl_train execution body."""
   # Create model tokenizer first so we can plumb its pad_id into the model
   # adapter (used to synthesize segment_ids that mask pad positions from
   # attention — without this the trainer attends to pad tokens and produces
@@ -669,13 +688,16 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
   )
   configure_tokenizer_chat_template(model_tokenizer, trainer_config)
 
-  reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = model_creation_utils.create_models_and_meshes(
-      trainer_config,
-      sampler_config,
-      trainer_devices,
-      sampler_devices,
-      tokenizer_pad_id=model_tokenizer.pad_token_id,
-  )
+  with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
+    reference_model, reference_mesh, actor_model, actor_mesh, rollout_mesh = (
+        model_creation_utils.create_models_and_meshes(
+            trainer_config,
+            sampler_config,
+            trainer_devices,
+            sampler_devices,
+            tokenizer_pad_id=model_tokenizer.pad_token_id,
+        )
+    )
 
   if not trainer_config.debug:
     # Apply filter to suppress noisy logs
@@ -714,17 +736,18 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
     max_logging.log(f"Policy mesh shape: {actor_mesh.shape}")
     max_logging.log(f"Rollout_mesh shape: {rollout_mesh.shape}")
 
-  rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
-      trainer_config,
-      sampler_config,
-      sampler_devices,
-      actor_model,
-      actor_mesh,
-      reference_model,
-      reference_mesh,
-      rollout_mesh,
-      model_tokenizer,
-  )
+  with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
+    rl_cluster, rl_trainer, _, reward_fns = create_rl_components(
+        trainer_config,
+        sampler_config,
+        sampler_devices,
+        actor_model,
+        actor_mesh,
+        reference_model,
+        reference_mesh,
+        rollout_mesh,
+        model_tokenizer,
+    )
 
   # Run evaluation before training
   if trainer_config.num_test_batches > 0:
@@ -757,7 +780,7 @@ def _rl_train_impl(argv: Sequence[str], kwargs: dict):
 
   # Wire intermediate eval: fire greedy `evaluate(...)` every `eval_interval`
   # outer steps. No-op when eval_interval <= 0 or num_test_batches <= 0.
-  utils_rl.install_training_hooks(rl_cluster, trainer_config, test_dataset, reward_fns)
+  utils_rl.install_training_hooks(rl_cluster, trainer_config, test_dataset, reward_fns, goodput_recorder=goodput_recorder)
 
   max_logging.warning("Starting RL training...")
   rl_trainer.train(train_dataset)
