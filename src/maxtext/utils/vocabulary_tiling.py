@@ -117,6 +117,17 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   )
 
   def _reshape(inputs, out_shape, out_sharding):
+    # When seq_len is divisible by num_vocab_tiling, tile (and untile in bwd)
+    # along the unsharded seq_len axis (axis 1) instead of flattening
+    # (batch, seq_len) directly. Direct flattening splits the FSDP-sharded
+    # batch axis (axis 0) across vocabulary tiles, forcing a cross-chip
+    # all-to-all + collective-permute in both forward and backward.
+    if hidden_states.shape[1] % config.num_vocab_tiling == 0:
+      inputs = jnp.swapaxes(
+          inputs.reshape(inputs.shape[0], out_shape[0], -1, *inputs.shape[2:]),
+          0,
+          1,
+      )
     reshape_out_sharding = out_sharding if config.shard_mode == ShardMode.EXPLICIT else None
     inputs = jax.lax.reshape(inputs, out_shape, out_sharding=reshape_out_sharding)
     return _maybe_shard_with_name(inputs, out_sharding)
@@ -161,32 +172,15 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       chunk_head_params, chunk_other_params, chunk_rest, hidden_states, labels, segmentation
   ):
     batch_size, seq_len, emb_dim = hidden_states.shape
-    num_tiles = config.num_vocab_tiling
-    vocab_tile_size = (batch_size * seq_len) // num_tiles
+    vocab_tile_size = (batch_size * seq_len) // config.num_vocab_tiling
     if config.vocab_tiling_ag_once:
       chunk_head_params = _maybe_shard_with_name(chunk_head_params, head_physical_spec)
 
-    if seq_len % num_tiles == 0:
-      seq_per_tile = seq_len // num_tiles
-      reshaped_hidden_states = _reshape(
-          jnp.swapaxes(hidden_states.reshape(batch_size, num_tiles, seq_per_tile, emb_dim), 0, 1),
-          (num_tiles, vocab_tile_size, emb_dim),
-          reshaped_hidden_spec,
-      )
-      reshaped_labels = _reshape(
-          jnp.swapaxes(labels.reshape(batch_size, num_tiles, seq_per_tile), 0, 1),
-          (num_tiles, vocab_tile_size),
-          reshaped_data_spec,
-      )
-      reshaped_segmentation = _reshape(
-          jnp.swapaxes(segmentation.reshape(batch_size, num_tiles, seq_per_tile), 0, 1),
-          (num_tiles, vocab_tile_size),
-          reshaped_data_spec,
-      )
-    else:
-      reshaped_hidden_states = _reshape(hidden_states, (num_tiles, vocab_tile_size, emb_dim), reshaped_hidden_spec)
-      reshaped_labels = _reshape(labels, (num_tiles, vocab_tile_size), reshaped_data_spec)
-      reshaped_segmentation = _reshape(segmentation, (num_tiles, vocab_tile_size), reshaped_data_spec)
+    reshaped_hidden_states = _reshape(
+        hidden_states, (config.num_vocab_tiling, vocab_tile_size, emb_dim), reshaped_hidden_spec
+    )
+    reshaped_labels = _reshape(labels, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
+    reshaped_segmentation = _reshape(segmentation, (config.num_vocab_tiling, vocab_tile_size), reshaped_data_spec)
 
     def _fwd_scan_body(accumulators, chunk_data):
       loss_accumulator, z_loss_accumulator = accumulators
@@ -275,20 +269,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
     grad_head = jax.tree_util.tree_map(lambda g: g * loss_cotangent, grad_head)
     grad_reshaped_hidden_states *= loss_cotangent
     grad_head = jax.tree_util.tree_map(lambda x, y: y.astype(x.dtype), chunk_head_params, grad_head)
-    num_tiles = config.num_vocab_tiling
-    if seq_len % num_tiles == 0:
-      seq_per_tile = seq_len // num_tiles
-      grad_reshaped_hidden_states = _reshape(
-          jnp.swapaxes(
-              grad_reshaped_hidden_states.reshape(num_tiles, batch_size, seq_per_tile, emb_dim),
-              0,
-              1,
-          ),
-          (batch_size, seq_len, emb_dim),
-          hidden_spec,
-      )
-    else:
-      grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
+    grad_reshaped_hidden_states = _reshape(grad_reshaped_hidden_states, (batch_size, seq_len, emb_dim), hidden_spec)
 
     # Return explicit zeros for other_params and rest, not None. With None, JAX builds
     # the zero cotangents with the wrong layer-axis order for scanned params, and the
