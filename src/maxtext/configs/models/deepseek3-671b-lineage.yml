@@ -122,30 +122,34 @@ override_logical_axis_rules: true
 # slices. The DCN gradient all-reduce is issued by Lineage's weight collection
 # (collect_along_axis over "dcn").
 mesh_axes: ['dcn', 'x', 'y', 'z', 'core']
-ici_parallelism: [1, 4, 4, 16, 2]
+ici_parallelism: [1, 8, 8, 8, 2]
 dcn_parallelism: [-1, 1, 1, 1, 1]
 data_sharding: [['dcn', 'x', 'y', 'z'], ['core']]
+# Layout of one 8x8x8 slice (512 chips, 1024 devices): attention heads and the
+# sequence over core, expert parallelism over (x, core) and FSDP of the MoE and
+# MLA weights over (y, z). q_lora and kv_lora skip core, since 1024 ways do not
+# divide the LoRA ranks (1536 and 512).
 logical_axis_rules: [
   ['embed', ['x', 'y', 'z', 'core']],
   ['embed_vocab', ['x', 'y', 'z', 'core']],
   ['embed_attn', ['x', 'y', 'z', 'core']],
-  ['q_lora', ['x', 'y', 'z', 'core']],
-  ['kv_lora', ['x', 'y', 'z', 'core']],
-  ['exp', ['x', 'y']],
-  ['expert_only', ['x', 'y']],
-  ['embed_moe', ['core', 'z']],
-  ['embed_router', ['core', 'z']],
+  ['q_lora', ['x', 'y', 'z']],
+  ['kv_lora', ['x', 'y', 'z']],
+  ['exp', ['x', 'core']],
+  ['expert_only', ['x', 'core']],
+  ['embed_moe', ['y', 'z']],
+  ['embed_router', ['y', 'z']],
   ['activation_batch', ['dcn', 'x', 'y', 'z']],
   ['activation_batch_attn', ['x', 'y', 'z']],
   ['activation_batch_moe', ['x', 'y']],
   ['activation_length', ['core']],
   ['activation_norm_length', ['core']],
-  ['activation_exp', ['x', 'y']],
+  ['activation_exp', ['x', 'core']],
   ['activation_embed_and_logits_batch', ['dcn', 'x', 'y', 'z']],
   # Flattened (batch * sequence) axis used by vocabulary_tiling.py. It must cover
   # every axis that shards batch ('dcn','x','y','z') and sequence ('core'); Flax
   # silently resolves unmatched logical names to None, which would replicate the
-  # per-chunk logits on all 512 devices instead of sharding them.
+  # per-chunk logits on all 1024 devices instead of sharding them.
   ['activation_embed_and_logits_batch_sequence', ['dcn', 'x', 'y', 'z', 'core']],
   ['activation_kv_batch', ['dcn', 'x', 'y', 'z']],
 ]
