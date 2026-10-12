@@ -1020,6 +1020,30 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
   )
+  retry_num_moe_token_chunks: PositiveInt = Field(
+      2,
+      description=(
+          "Token chunks of the retry_when_tokens_dropped dropless replay program, run as a lax.scan in the training"
+          " engine, each rematerialized, so its backward holds one chunk's worst-case buffers at a time."
+      ),
+  )
+  retry_dropless_first_steps: int = Field(
+      0,
+      description=(
+          "With retry_when_tokens_dropped=True, run the first N steps after the loop's start step directly "
+          "with the dropless program (skipping the normal attempt) or with first_phase_ragged_buffer_factor. 0 = off. "
+          "Training engine only (pre_train/train.py ignores it)."
+      ),
+  )
+  first_phase_ragged_buffer_factor: float = Field(
+      0.0,
+      description=(
+          "With retry_dropless_first_steps=N > 0, run the first N steps with a first-phase program whose "
+          "RoutedMoE modules use this ragged buffer factor (instead of the dropless program directly); a first-phase "
+          "step that still drops tokens is replayed with the dropless program. Must be >= ragged_buffer_factor. 0 = off. "
+          "Training engine only (pre_train/train.py ignores it)."
+      ),
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -3820,6 +3844,15 @@ class MaxTextConfig(
 
   def validate_retry_when_tokens_dropped(self):
     """Validates prerequisites for the step-level dropless fallback retry."""
+    if self.retry_dropless_first_steps < 0:
+      raise ValueError(f"retry_dropless_first_steps must be >= 0 (got {self.retry_dropless_first_steps}).")
+    if self.first_phase_ragged_buffer_factor < 0:
+      raise ValueError(f"first_phase_ragged_buffer_factor must be >= 0 (got {self.first_phase_ragged_buffer_factor}).")
+    if self.retry_dropless_first_steps > 0 and not self.retry_when_tokens_dropped:
+      raise ValueError("retry_dropless_first_steps > 0 requires retry_when_tokens_dropped=True.")
+    if self.first_phase_ragged_buffer_factor > 0 and self.retry_dropless_first_steps == 0:
+      raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_dropless_first_steps > 0.")
+
     if self.retry_when_tokens_dropped:
       if self.num_experts <= 1:
         raise ValueError("retry_when_tokens_dropped=True requires num_experts > 1.")
@@ -3833,6 +3866,14 @@ class MaxTextConfig(
         raise ValueError("retry_when_tokens_dropped=True requires use_ragged_sort=True.")
       if self.num_moe_emb_chunks > 0:
         raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
+      if self.first_phase_ragged_buffer_factor > 0:
+        if self.first_phase_ragged_buffer_factor < self.ragged_buffer_factor:
+          raise ValueError(
+              f"first_phase_ragged_buffer_factor ({self.first_phase_ragged_buffer_factor}) must be >= "
+              f"ragged_buffer_factor ({self.ragged_buffer_factor})."
+          )
+        if self.te_moe_block:
+          raise ValueError("first_phase_ragged_buffer_factor > 0 is not supported with te_moe_block=True.")
 
   def validate_ragged_buffer_factor(self):
     """Validates that ragged_buffer_factor is used with supported settings."""
@@ -5572,6 +5613,11 @@ class MaxTextConfig(
             f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
             f"max_target_length={self.max_target_length}."
         )
+    if self.retry_when_tokens_dropped and self.max_target_length % self.retry_num_moe_token_chunks != 0:
+      raise ValueError(
+          f"retry_num_moe_token_chunks={self.retry_num_moe_token_chunks} must evenly divide "
+          f"max_target_length={self.max_target_length}."
+      )
 
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
