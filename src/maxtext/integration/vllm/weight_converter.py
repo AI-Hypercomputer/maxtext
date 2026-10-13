@@ -259,8 +259,8 @@ class WeightConverter:
       self,
       rules: Optional[List[Rule]] = None,
       tp: int = 1,
-      kv_tp_size: int = 1,
-      moe_mlp_tp_size: int = 1,
+      kv_tp_size: Optional[int] = None,
+      moe_mlp_tp_size: Optional[int] = None,
       num_kv_heads: Optional[int] = None,
       head_dim: Optional[int] = None,
       config: Any = None,
@@ -284,8 +284,10 @@ class WeightConverter:
       )
     self.rules = rules
     self.tp = resolve_rollout_tp(config, tp)
-    self.kv_tp_size = kv_tp_size or getattr(config, "kv_tp_size", 1) or self.tp
-    self.moe_mlp_tp_size = moe_mlp_tp_size or getattr(config, "moe_mlp_tp_size", 1) or self.tp
+    self.kv_tp_size = kv_tp_size if kv_tp_size is not None else (getattr(config, "kv_tp_size", None) or self.tp)
+    self.moe_mlp_tp_size = (
+        moe_mlp_tp_size if moe_mlp_tp_size is not None else (getattr(config, "moe_mlp_tp_size", None) or self.tp)
+    )
     self.fp8_moe = fp8_moe if fp8_moe is not None else getattr(config, "fp8_moe", False)
 
     # Read by the rollout engine to decide whether to trace the reshard
@@ -714,14 +716,16 @@ class MaxTextToMaxTextConverter:
       debug: bool = False,
       prefuse_moe_weights: Optional[bool] = None,
       target_dtype: Optional[Any] = None,
-      kv_tp_size: int = 1,
-      moe_mlp_tp_size: int = 1,
+      kv_tp_size: Optional[int] = None,
+      moe_mlp_tp_size: Optional[int] = None,
       fp8_moe: Optional[bool] = None,
   ):
     self.config = config
     self.tp = resolve_rollout_tp(config, tp)
-    self.kv_tp_size = kv_tp_size or getattr(config, "kv_tp_size", 1) or self.tp
-    self.moe_mlp_tp_size = moe_mlp_tp_size or getattr(config, "moe_mlp_tp_size", 1) or self.tp
+    self.kv_tp_size = kv_tp_size if kv_tp_size is not None else (getattr(config, "kv_tp_size", None) or self.tp)
+    self.moe_mlp_tp_size = (
+        moe_mlp_tp_size if moe_mlp_tp_size is not None else (getattr(config, "moe_mlp_tp_size", None) or self.tp)
+    )
     self.fp8_moe = fp8_moe if fp8_moe is not None else getattr(config, "fp8_moe", False)
     self.moe_fused_layout = moe_fused_layout
     self.allow_unused_source_keys = allow_unused_source_keys
@@ -973,11 +977,14 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = (
-          self.moe_mlp_tp_size
-          if self.moe_mlp_tp_size > 1
-          else (self.tp if self.tp > 1 else _get_n_shards(tgt_val, tgt_fused_axis))
-      )
+      if isinstance(getattr(tgt_val, "sharding", None), jax.sharding.NamedSharding):
+        n_shards = _get_n_shards(tgt_val, tgt_fused_axis)
+      elif self.moe_mlp_tp_size > 1:
+        n_shards = self.moe_mlp_tp_size
+      elif self.kv_tp_size > 1 and self.moe_mlp_tp_size == 1:
+        n_shards = 1
+      else:
+        n_shards = self.tp if self.tp > 1 else _get_n_shards(tgt_val, tgt_fused_axis)
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
@@ -1058,7 +1065,12 @@ class MaxTextToMaxTextConverter:
     scan_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
 
     if self.moe_fused_layout == MoEFusedLayout.PER_SHARD_INTERLEAVE:
-      n_shards = int(self.moe_mlp_tp_size if self.moe_mlp_tp_size >= 1 else (self.tp if self.tp >= 1 else 1))
+      if self.moe_mlp_tp_size > 1:
+        n_shards = self.moe_mlp_tp_size
+      elif self.kv_tp_size > 1 and self.moe_mlp_tp_size == 1:
+        n_shards = 1
+      else:
+        n_shards = self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis)
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,

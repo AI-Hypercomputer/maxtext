@@ -21,7 +21,9 @@ import numpy as np
 import pytest
 
 from maxtext.integration.vllm.maxtext_vllm_rollout import (
+    _create_model_converter,
     MaxTextVllmRollout,
+    MaxTextVllmSampler,
     prepare_direct_sync_additional_config,
     requires_maxtext_scanned_weight_unroll,
     unroll_gemma_scanned_weights,
@@ -29,6 +31,7 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import (
     uses_maxtext_vllm_adapter,
     validate_direct_sync_layer_coverage,
 )
+from maxtext.integration.vllm.weight_converter import WeightConverter
 
 pytestmark = pytest.mark.post_training
 
@@ -494,3 +497,55 @@ class MaxTextAdapterSelectionTest(unittest.TestCase):
 
     self.assertFalse(requires_maxtext_scanned_weight_unroll(native_config))
     self.assertFalse(requires_maxtext_scanned_weight_unroll(unscanned_config))
+
+  @pytest.mark.cpu_only
+  def test_qwen35_direct_weight_converter_selection(self):
+    cfg = SimpleNamespace(
+        model_name="qwen3.5-35b-a3b",
+        rollout_tensor_parallelism=8,
+        num_decoder_layers=8,
+        inhomogeneous_layer_cycle_interval=4,
+        param_scan_axis=1,
+    )
+    conv = _create_model_converter(
+        "qwen3.5-35b-a3b",
+        config=cfg,
+        mesh=None,
+        use_hf_mapping=False,
+        use_weight_converter=True,
+    )
+    self.assertIsInstance(conv, WeightConverter)
+    self.assertIsNone(conv.rules)
+
+  @pytest.mark.cpu_only
+  def test_sampler_preserves_user_sharding_strategy(self):
+    sampler = object.__new__(MaxTextVllmSampler)
+    mesh = SimpleNamespace(
+        shape={"data": 1, "model": 8},
+        device_ids=np.arange(8).reshape(1, 8),
+    )
+    config = VllmConfig(
+        init_with_random_weights=True,
+        hbm_utilization=0.35,
+        lora_config=None,
+        mesh=mesh,
+        tensor_parallel_size=8,
+        data_parallel_size=1,
+        expert_parallel_size=1,
+        enable_dp_attention=False,
+        additional_config={
+            "sharding": {
+                "sharding_strategy": {
+                    "enable_dp_attention": False,
+                    "tensor_parallelism": 4,
+                    "expert_parallelism": 2,
+                }
+            }
+        },
+    )
+    args = sampler._vllm_config(config)  # pylint: disable=protected-access
+    strategy = args["additional_config"]["sharding"]["sharding_strategy"]
+    self.assertEqual(strategy["tensor_parallelism"], 4)
+    self.assertEqual(strategy["expert_parallelism"], 2)
+    self.assertFalse(strategy["enable_dp_attention"])
+    self.assertEqual(strategy["device_indexes"], list(range(8)))

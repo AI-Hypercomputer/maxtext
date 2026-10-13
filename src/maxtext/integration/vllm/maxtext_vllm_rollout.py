@@ -518,6 +518,20 @@ class MaxTextVllmSampler(VllmSampler):
     engine_kwargs = getattr(config, "engine_kwargs", {}) or {}
     self._model_name = model_name or getattr(config, "model", "") or engine_kwargs.get("model", "") or ""
     self._is_gemma = "gemma" in str(self._model_name).lower()
+    self._is_qwen = "qwen" in str(self._model_name).lower()
+
+  def _vllm_config(self, config: VllmConfig):
+    """Builds vLLM engine arguments while preserving user-specified sharding_strategy."""
+    user_sharding_strategy = copy.deepcopy(
+        ((config.additional_config or {}).get("sharding") or {}).get("sharding_strategy") or {}
+    )
+    args = super()._vllm_config(config)
+    if user_sharding_strategy:
+      additional_config = args.setdefault("additional_config", {})
+      sharding = additional_config.setdefault("sharding", {})
+      sharding_strategy = sharding.setdefault("sharding_strategy", {})
+      sharding_strategy.update(user_sharding_strategy)
+    return args
 
   def update_params(
       self,
@@ -525,8 +539,17 @@ class MaxTextVllmSampler(VllmSampler):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
-    if self._direct_maxtext_sync and self._is_gemma:
-      updated_weights = unroll_gemma_scanned_weights(updated_weights)
+    converter = getattr(self, "converter", getattr(self, "_converter", None))
+    if self._direct_maxtext_sync:
+      if converter is not None:
+        updated_weights = converter.convert(updated_weights, target_state=self.transformer_state)
+        while isinstance(updated_weights, dict) and "model" in updated_weights:
+          updated_weights = updated_weights["model"]
+      elif self._is_gemma:
+        updated_weights = unroll_gemma_scanned_weights(updated_weights)
+      elif self._is_qwen:
+        updated_weights = unroll_qwen_scanned_weights(updated_weights)
+      validate_direct_sync_layer_coverage(updated_weights, self.transformer_state)
     try:
       return super().update_params(updated_weights, filter_types)
     except BaseException:
