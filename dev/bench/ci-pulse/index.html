@@ -200,6 +200,18 @@ main{max-width:1200px;margin:0 auto;padding:16px 20px 60px}
 <div class="overlay" id="overlay" onclick="if(event.target===this)closeModal()"><div class="modal" id="modal"></div></div>
 
 <script>
+// ============ ESCAPING ============
+// Text from views/*.json is data, never HTML. Escape it before it goes into
+// innerHTML, so it always shows as plain text.
+function esc(v){
+  return String(v??'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]);
+}
+// A value passed into an inline handler, like onclick="f(...)": quote it for
+// JavaScript first, then escape it for the HTML attribute.
+function jsArg(v){return esc(JSON.stringify(v??null))}
+// Links from data must point at GitHub. Anything else becomes a dead link.
+function safeUrl(u){return /^https:\/\/github\.com\//.test(String(u??''))?String(u):'#'}
+
 // ============ JOB DEFINITIONS (baseline times in minutes) ============
 let JOBS=[
 {id:'analyze',name:'Analyze Code Changes for Test Orchestration',cat:'infra',lane:'Hosted',b:{q:0,s:0.3,r:0.2}},
@@ -487,7 +499,7 @@ function jtRender(s){
   return out+(s.tail||'');
 }
 function jtTh(id,key,label,style,title){
-  return`<th data-jt="${id}" data-jtkey="${key}" style="${style}"><span class="jth" onclick="jtSort('${id}','${key}')" title="${title}">${label}<span class="jtarr"></span></span></th>`;
+  return`<th data-jt="${esc(id)}" data-jtkey="${key}" style="${style}"><span class="jth" onclick="jtSort(${jsArg(String(id))},'${key}')" title="${title}">${label}<span class="jtarr"></span></span></th>`;
 }
 function jtSort(id,key){
   const s=JT[id];if(!s)return;
@@ -798,7 +810,7 @@ function renderTimeline(){
         badge.addEventListener('mousemove',ev=>{
           tip.innerHTML=`<div style="font-weight:700;font-size:14px;color:${f.col};margin-bottom:2px">${f.main}</div>
 <div style="font-size:13px;color:var(--ink2)">${f.sub}</div>
-<div style="font-size:12px;color:var(--muted);margin-top:4px">#${c.hash} — zoom in and this mark expands into its full label.</div>`;
+<div style="font-size:12px;color:var(--muted);margin-top:4px">#${esc(c.hash)} — zoom in and this mark expands into its full label.</div>`;
           tip.style.display='block';
           const lx=ev.clientX+14+280>window.innerWidth?ev.clientX-294:ev.clientX+14;
           tip.style.left=lx+'px';tip.style.top=Math.max(8,ev.clientY-16)+'px';
@@ -884,7 +896,7 @@ function renderTimeline(){
   if(zb){
     const btn='font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:4px 12px;border-radius:6px;cursor:pointer';
     zb.innerHTML=TL_ZOOM
-      ?`<span style="color:var(--accent);font-weight:600">Zoomed in: ${VIEW.length} of ${LIST.length} merged pull requests (#${VIEW[VIEW.length-1].hash} to #${VIEW[0].hash})</span>
+      ?`<span style="color:var(--accent);font-weight:600">Zoomed in: ${VIEW.length} of ${LIST.length} merged pull requests (#${esc(VIEW[VIEW.length-1].hash)} to #${esc(VIEW[0].hash)})</span>
 <button style="${btn}" onclick="tlZoomOut()">− Zoom out</button>
 <button style="${btn}" onclick="tlZoomReset()">Show all merged pull requests</button>`
       :`<span style="color:var(--muted)">${rangeCovers(win,LIST)}. Every bar is one merged pull request, oldest on the left and newest on the right. Drag across the chart to zoom into a range; double-click the chart to reset. The ▲ ✕ ↻ marks expand into full labels when you zoom in.</span>`;
@@ -913,8 +925,8 @@ function showTip(c,ci,wcs,med,e){
   // Jobs per category
   const tpuCount=tpuJobs.length,gpuCount=gpuJobs.length,cpuCount=cpuJobs.length;
 
-  tip.innerHTML=`<div class="th">${c.pr} ${c.title}</div>
-<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.attempts>1?c.attempts+' attempts · ':''}${c.concurrent} pipeline runs overlapped it</div>
+  tip.innerHTML=`<div class="th">${esc(c.pr)} ${esc(c.title)}</div>
+<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.attempts>1?esc(c.attempts)+' attempts · ':''}${esc(c.concurrent)} pipeline runs overlapped it</div>
 <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
 <span style="font-size:13px;color:var(--ink2)">Wall-clock time</span>
 <span class="tv" style="font-size:16px;font-weight:700">${Math.round(wc.total)}m</span>
@@ -928,9 +940,9 @@ function showTip(c,ci,wcs,med,e){
 <div class="trow"><span style="color:var(--q)">■ Queue wait</span><span class="tv">${wc.queue}m</span></div>
 <div style="border-top:1px solid var(--grid);margin:4px 0;padding-top:4px"></div>
 <div style="font-size:12px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Test execution (parallel)</div>
-<div class="trow"><span style="color:var(--tpu)">■ TPU <span style="color:var(--muted)">(${tpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('tpu')}</span></span><span class="tv">${Math.round(wc.catMax.tpu)}m</span></div>
-<div class="trow"><span style="color:var(--gpu)">■ GPU <span style="color:var(--muted)">(${gpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('gpu')}</span></span><span class="tv">${Math.round(wc.catMax.gpu)}m</span></div>
-<div class="trow"><span style="color:var(--cpu)">■ CPU <span style="color:var(--muted)">(${cpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${machineOfCat('cpu')}</span></span><span class="tv">${Math.round(wc.catMax.cpu)}m</span></div>
+<div class="trow"><span style="color:var(--tpu)">■ TPU <span style="color:var(--muted)">(${tpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfCat('tpu'))}</span></span><span class="tv">${Math.round(wc.catMax.tpu)}m</span></div>
+<div class="trow"><span style="color:var(--gpu)">■ GPU <span style="color:var(--muted)">(${gpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfCat('gpu'))}</span></span><span class="tv">${Math.round(wc.catMax.gpu)}m</span></div>
+<div class="trow"><span style="color:var(--cpu)">■ CPU <span style="color:var(--muted)">(${cpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfCat('cpu'))}</span></span><span class="tv">${Math.round(wc.catMax.cpu)}m</span></div>
 <div style="font-size:12px;color:var(--muted);margin-top:4px">Bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span> — sets the run time</div>
 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid var(--grid)">
 <div style="display:flex;gap:8px">
@@ -999,7 +1011,7 @@ function openModal(c,ci,wcs,med){
       const tc=TEST_COUNTS[j.id];
 
       // Step breakdown HTML
-      let stepHtml='<div id="'+rid+'" style="display:none;padding:8px 0 8px 24px;background:rgba(0,0,0,0.2);border-bottom:1px solid var(--grid)">';
+      let stepHtml='<div id="'+esc(rid)+'" style="display:none;padding:8px 0 8px 24px;background:rgba(0,0,0,0.2);border-bottom:1px solid var(--grid)">';
       if(steps){
         // Every width comes from the duration printed beside it. The two used to be computed
         // separately - the bar from the template share, the number from the job's own minutes -
@@ -1013,9 +1025,9 @@ function openModal(c,ci,wcs,med){
           +`</div>`;
         stepHtml+=`<table style="width:100%;font-size:13px;border-collapse:collapse">`
           +steps.map((st,si)=>`<tr>
-<td style="padding:3px 8px;border-bottom:1px solid var(--grid);color:var(--ink2)">${st.name}${st.img?'<br><span class="mono" style="font-size:11px;color:var(--muted)">'+st.img+'</span>':''}</td>
+<td style="padding:3px 8px;border-bottom:1px solid var(--grid);color:var(--ink2)">${esc(st.name)}${st.img?'<br><span class="mono" style="font-size:11px;color:var(--muted)">'+esc(st.img)+'</span>':''}</td>
 <td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);width:60px;text-align:right">${durs[si]>0?durs[si].toFixed(1)+'m':'—'}</td>
-<td style="padding:3px 8px;border-bottom:1px solid var(--grid);width:30px"><a href="${jUrl}#step:${si+1}:1" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none">log↗</a></td>
+<td style="padding:3px 8px;border-bottom:1px solid var(--grid);width:30px"><a href="${esc(safeUrl(jUrl))}#step:${si+1}:1" target="_blank" rel="noopener" style="color:var(--accent);font-size:12px;text-decoration:none">log↗</a></td>
 </tr>`).join('')+`</table>`;
       }else{
         // No step template: show the three times the collector actually records, and say so.
@@ -1031,7 +1043,7 @@ function openModal(c,ci,wcs,med){
 <td style="padding:3px 8px;border-bottom:1px solid var(--grid);color:var(--ink2)">${ph.name}</td>
 <td class="mono" style="padding:3px 8px;border-bottom:1px solid var(--grid);width:60px;text-align:right">${ph.dur>0?ph.dur+'m':'—'}</td>
 </tr>`).join('')+`</table>`;
-        stepHtml+=`<div style="font-size:12px;color:var(--muted);margin-top:6px">These are the three times recorded for a job. The per-step timings GitHub shows in its own log are not published in the data this page reads, so the steps inside setup and inside the test run cannot be listed here. <a href="${runUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">Open the run on GitHub ↗</a></div>`;
+        stepHtml+=`<div style="font-size:12px;color:var(--muted);margin-top:6px">These are the three times recorded for a job. The per-step timings GitHub shows in its own log are not published in the data this page reads, so the steps inside setup and inside the test run cannot be listed here. <a href="${esc(safeUrl(runUrl))}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">Open the run on GitHub ↗</a></div>`;
       }
       // Test summary (if test job)
       if(!tc&&j.r>0&&/Pathways/.test(j.name)){stepHtml+=`<div style="font-size:12px;color:var(--muted);margin-top:6px">No test-result file: the Pathways jobs run pytest without JUnit output, so no test counts exist for them.</div>`;}
@@ -1045,7 +1057,7 @@ function openModal(c,ci,wcs,med){
       // Test-level detail from JUnit data
       const testData=TESTS[c.hash]&&TESTS[c.hash][j.id];
       if(testData&&testData.note){
-        stepHtml+=`<div style="margin-top:6px;padding:6px 8px;background:var(--tint-crit);border-radius:6px;font-size:13px;color:var(--crit)">${testData.note}</div>`;
+        stepHtml+=`<div style="margin-top:6px;padding:6px 8px;background:var(--tint-crit);border-radius:6px;font-size:13px;color:var(--crit)">${esc(testData.note)}</div>`;
       }else if(testData&&testData.tests&&testData.tests.length){
         const sorted=[...testData.tests].sort((a,b)=>{
           if(a.st==='fail'&&b.st!=='fail')return -1;if(b.st==='fail'&&a.st!=='fail')return 1;
@@ -1058,21 +1070,21 @@ function openModal(c,ci,wcs,med){
           const deltaStr=delta!==null?(delta>0?'+'+delta+'s':delta+'s'):'';
           const deltaCol=t.st==='fail'?'var(--crit)':delta>2?'var(--crit)':delta>0?'var(--warn)':'var(--good)';
           const rowBg=t.st==='fail'?'background:var(--tint-crit)':t.isNew?'background:rgba(6,182,212,0.05)':'';
-          const stLabel=t.st==='fail'?`<span class="chip fail">✕ ${t.error||'FAIL'}</span>`:t.isNew?'<span class="chip new">★ NEW</span>':'<span style="color:var(--good)">✓</span>';
-          return`<tr style="${rowBg}"><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);font-size:12px">${t.name}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right">${t.dur!==null?t.dur+'s':'—'}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;color:var(--muted)">${t.base!==null?t.base+'s':'—'}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;color:${deltaCol};font-weight:600">${deltaStr}</td><td style="padding:4px 8px;border-bottom:1px solid var(--grid)">${stLabel}</td></tr>`;
+          const stLabel=t.st==='fail'?`<span class="chip fail">✕ ${esc(t.error||'FAIL')}</span>`:t.isNew?'<span class="chip new">★ NEW</span>':'<span style="color:var(--good)">✓</span>';
+          return`<tr style="${rowBg}"><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);font-size:12px">${esc(t.name)}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right">${t.dur!==null?t.dur+'s':'—'}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;color:var(--muted)">${t.base!==null?t.base+'s':'—'}</td><td class="mono" style="padding:4px 8px;border-bottom:1px solid var(--grid);text-align:right;color:${deltaCol};font-weight:600">${deltaStr}</td><td style="padding:4px 8px;border-bottom:1px solid var(--grid)">${stLabel}</td></tr>`;
         };
         JT[tid]={rows:sorted,pick:t=>t,row:jtRow,key:null,dir:'desc'};
         stepHtml+=`<div style="margin-top:8px;font-size:12px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)">Test results (JUnit)</div>`;
         stepHtml+=`<div style="font-size:12px;color:var(--muted);margin-top:2px">Failed tests come first. Then come the tests that added the most time: a test with a baseline is ranked by its Δ, and a new test, which has no baseline yet, is ranked by its full duration. Click Duration, Baseline, or Δ to sort by that column; click again to flip the order. Rows with a blank cell in the sorted column drop to the bottom: failed tests have no duration, and new tests have no baseline yet. Click the Test header to restore the default order.</div>`;
         stepHtml+=`<table style="width:100%;font-size:13px;border-collapse:collapse;margin-top:4px">
-<thead><tr>${jtTh(tid,'','Test',thS0+';text-align:left','Restore the default order')}${jtTh(tid,'dur','Duration',thS0+';text-align:right','Sort by duration')}${jtTh(tid,'base','Baseline',thS0+';text-align:right','Sort by baseline duration')}${jtTh(tid,'delta','Δ',thS0+';text-align:right','Sort by change against the baseline')}<th style="${thS0}">Status</th></tr></thead><tbody id="${tid}-body">${sorted.map(jtRow).join('')}</tbody></table>`;
+<thead><tr>${jtTh(tid,'','Test',thS0+';text-align:left','Restore the default order')}${jtTh(tid,'dur','Duration',thS0+';text-align:right','Sort by duration')}${jtTh(tid,'base','Baseline',thS0+';text-align:right','Sort by baseline duration')}${jtTh(tid,'delta','Δ',thS0+';text-align:right','Sort by change against the baseline')}<th style="${thS0}">Status</th></tr></thead><tbody id="${esc(tid)}-body">${sorted.map(jtRow).join('')}</tbody></table>`;
       }
       stepHtml+=`</div>`;
 
-      const jobHtml=`<tr style="opacity:${dim?0.25:1};cursor:pointer" onclick="const x=document.getElementById('${rid}');x.style.display=x.style.display==='none'?'block':'none';this.querySelector('.xarr').textContent=x.style.display==='none'?'▸':'▾'">
-<td style="font-size:13px;max-width:300px;min-width:220px;white-space:normal;line-height:1.25;padding-right:6px" title="${j.name}"><span class="xarr" style="color:var(--muted);margin-right:4px">▸</span><strong>${j.name}</strong></td>
-<td><span style="color:${lc};font-weight:600;font-size:13px">${j.lane}</span></td>
-<td class="mono" style="font-size:12px;color:var(--ink2);white-space:nowrap">${RUNNER_LABELS[j.id]||'&mdash;'}</td>
+      const jobHtml=`<tr style="opacity:${dim?0.25:1};cursor:pointer" onclick="const x=document.getElementById(${jsArg(String(rid))});x.style.display=x.style.display==='none'?'block':'none';this.querySelector('.xarr').textContent=x.style.display==='none'?'▸':'▾'">
+<td style="font-size:13px;max-width:300px;min-width:220px;white-space:normal;line-height:1.25;padding-right:6px" title="${esc(j.name)}"><span class="xarr" style="color:var(--muted);margin-right:4px">▸</span><strong>${esc(j.name)}</strong></td>
+<td><span style="color:${lc};font-weight:600;font-size:13px">${esc(j.lane)}</span></td>
+<td class="mono" style="font-size:12px;color:var(--ink2);white-space:nowrap">${esc(RUNNER_LABELS[j.id])||'&mdash;'}</td>
 <td class="mono" style="font-size:13px">${j.q}m</td>
 ${split?`<td class="mono" style="font-size:13px">${sImg}m</td><td class="mono" style="font-size:13px">${sEnv}m</td>`:`<td class="mono" style="font-size:13px">${j.s}m</td>`}
 <td class="mono" style="font-size:13px">${j.r}m</td>
@@ -1093,15 +1105,15 @@ ${split?`<td class="mono" style="font-size:13px">${sImg}m</td><td class="mono" s
     group:u=>u.cat,groupOrder:catOrder,groupHead:jobHeads};
   const jobBody=jtRender(JT[jid]);
   $('#modal').innerHTML=`<div class="modal-head"><div>
-<h2>${c.pr} ${c.title}</h2>
+<h2>${esc(c.pr)} ${esc(c.title)}</h2>
 <div class="sub">
-${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta>0?'+':''}${delta}m vs median · ${c.concurrent} pipeline runs overlapped it · bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span>
-<br><span style="color:var(--muted)">${trigger==='pull_request'?'Run of a merged pull request':'Scheduled run'} · ${time} (${ago}) · run #${runId}</span>
+${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta>0?'+':''}${delta}m vs median · ${esc(c.concurrent)} pipeline runs overlapped it · bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span>
+<br><span style="color:var(--muted)">${trigger==='pull_request'?'Run of a merged pull request':'Scheduled run'} · ${time} (${ago}) · run #${esc(runId)}</span>
 </div>
 <div style="display:flex;gap:8px;margin-top:6px">
-<a href="${runUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">View run ↗</a>
-<a href="${prUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">PR ${c.pr} ↗</a>
-<a href="${commitUrl}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">Commit ↗</a>
+<a href="${esc(safeUrl(runUrl))}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">View run ↗</a>
+<a href="${esc(safeUrl(prUrl))}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">PR ${esc(c.pr)} ↗</a>
+<a href="${esc(safeUrl(commitUrl))}" target="_blank" rel="noopener" style="font-size:13px;color:var(--accent);text-decoration:none;border:1px solid rgba(6,182,212,0.3);padding:3px 8px;border-radius:5px">Commit ↗</a>
 
 </div>
 </div><button class="modal-close" onclick="closeModal()">✕</button></div>
@@ -1118,7 +1130,7 @@ ${split?`<span style="display:flex;align-items:center;gap:5px;font-size:13px"><s
 </div>
 <table>
 <thead><tr>${jtTh(jid,'','Job','','Restore the original job order')}<th>Lane</th><th>Machine</th>${jtTh(jid,'q','Queue','','Sort by queue wait')}${split?jtTh(jid,'img','Image','','Sort by image pull time')+jtTh(jid,'env','Env','','Sort by environment setup time'):jtTh(jid,'setup','Setup','','Sort by setup time')}${jtTh(jid,'r','Run','','Sort by run time')}${jtTh(jid,'total','Total','','Sort by total time')}<th>Waterfall</th><th>Status</th></tr></thead>
-<tbody id="${jid}-body">${jobBody}</tbody></table></div>`;
+<tbody id="${esc(jid)}-body">${jobBody}</tbody></table></div>`;
 
   // Mark the column the table opened on, the same arrow a click would leave.
   const jArr=$('#modal').querySelector(`[data-jt="${jid}"][data-jtkey="total"] .jtarr`);
@@ -1243,8 +1255,8 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
       const score=(fo.length?1000:0)+(worst?(worst.flag?100:0)+Math.max(0,worst.dlt):0);
       const tone=fo.length?'crit':worst&&worst.flag?'warn':'none';
       const bits=[];
-      if(fo.length)bits.push(`<span style="color:var(--crit)">${fo.map(i=>'#'+wCommits[i].hash).join(', ')}: no tests ran &mdash; every ${d.label} test job failed before its tests started</span>`);
-      if(worst&&worst.dlt>0)bits.push(`${worst.flag?'<span style="color:var(--warn);font-weight:600">flagged:</span> ':''}biggest rise +${fmt(worst.dlt)}m at #${wCommits[worst.i].hash} (${m(worst.v)} against a usual ${m(worst.med)})${worst.flag?'':', inside the usual range'}`);
+      if(fo.length)bits.push(`<span style="color:var(--crit)">${fo.map(i=>'#'+esc(wCommits[i].hash)).join(', ')}: no tests ran &mdash; every ${d.label} test job failed before its tests started</span>`);
+      if(worst&&worst.dlt>0)bits.push(`${worst.flag?'<span style="color:var(--warn);font-weight:600">flagged:</span> ':''}biggest rise +${fmt(worst.dlt)}m at #${esc(wCommits[worst.i].hash)} (${m(worst.v)} against a usual ${m(worst.med)})${worst.flag?'':', inside the usual range'}`);
       else if(!fo.length)bits.push('no run rose above its usual level');
       if(!latest.failedOut)bits.push(`latest run ${m(latest.v)}`+(worst&&worst.flag?(lm!==null&&latest.v>lm*1.15&&latest.v-lm>2?', still above usual':', back to usual'):''));
       const target=fo.length?wCommits[fo[0]].hash:worst&&worst.dlt>0?wCommits[worst.i].hash:wCommits[0].hash;
@@ -1253,8 +1265,8 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
     sumHost.innerHTML=sumBlock({key:'dev',guide:'dev-sum',guideKind:'table',title:'Largest changes by device',
       lead:`One row per device: TPU, GPU and CPU. Each row names the merged pull request where that device's ${phase.chip.toLowerCase()} time went furthest above its usual level, and says whether the latest run is back at that level. A run where no tests ran at all is listed first. "Usual" is the typical ${phase.chip.toLowerCase()} time of the merged pull requests before each one, whether or not they fall inside this range. A rise is flagged when it is both over 15% and more than 2 minutes above usual. Click a row to open that run.`,
       cols:'56px 1fr 72px',
-      rows:rows.map(r=>({tone:r.tone,dim:HW!=='all'&&HW!==r.d.key,attrs:`data-devsum="${r.d.key}"`,onclick:`goToCommit('${r.target}')`,
-        cells:[`<span style="color:${r.d.color};font-weight:700">${r.d.label}</span>`,`<span style="color:var(--ink2)">${r.txt}</span>`,`<span class="mono" style="color:var(--accent)">#${r.target}</span>`]}))});
+      rows:rows.map(r=>({tone:r.tone,dim:HW!=='all'&&HW!==r.d.key,attrs:`data-devsum="${r.d.key}"`,onclick:`goToCommit(${jsArg(String(r.target))})`,
+        cells:[`<span style="color:${r.d.color};font-weight:700">${r.d.label}</span>`,`<span style="color:var(--ink2)">${r.txt}</span>`,`<span class="mono" style="color:var(--accent)">#${esc(r.target)}</span>`]}))});
   }
 
   const off=DEV_ZOOM?DEV_ZOOM.a:0;
@@ -1265,7 +1277,7 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
   zb.style.cssText='display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:6px;min-height:20px';
   const zbtn='font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:4px 12px;border-radius:6px;cursor:pointer';
   zb.innerHTML=DEV_ZOOM
-    ?`<span style="color:var(--accent);font-weight:600">Zoomed in: ${VIEW.length} of ${wCommits.length} merged pull requests (#${VIEW[VIEW.length-1].hash} to #${VIEW[0].hash})</span>
+    ?`<span style="color:var(--accent);font-weight:600">Zoomed in: ${VIEW.length} of ${wCommits.length} merged pull requests (#${esc(VIEW[VIEW.length-1].hash)} to #${esc(VIEW[0].hash)})</span>
 <button style="${zbtn}" onclick="devZoomOut()">− Zoom out</button>
 <button style="${zbtn}" onclick="devZoomReset()">Show all merged pull requests</button>`
     :`<span style="color:var(--muted)">Every point is one merged pull request. Drag across the chart to zoom into a range; double-click the chart to reset.</span>`;
@@ -1350,15 +1362,15 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
       crossV.setAttribute('x1',x);crossV.setAttribute('x2',x);crossV.setAttribute('opacity',1);
       const rows=DEVS.map(d=>({...d,...series[d.key][ai],anom:anomFlags[d.key][ai]})).sort((a,b)=>b.v-a.v);
       const tipEl=$('#tip');
-      tipEl.innerHTML=`<div style="font-weight:700;font-size:15px;margin-bottom:2px">#${c.hash} ${c.title}</div>
-<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${c.pr} · ${phase.chip} minutes per device, every test job listed</div>
+      tipEl.innerHTML=`<div style="font-weight:700;font-size:15px;margin-bottom:2px">#${esc(c.hash)} ${esc(c.title)}</div>
+<div style="font-size:13px;color:var(--muted);margin-bottom:8px">${esc(c.pr)} · ${phase.chip} minutes per device, every test job listed</div>
 ${rows.map((r,ri)=>{
   const expand=HW==='all'||HW===r.key;
   return `<div style="display:flex;justify-content:space-between;gap:14px;padding:3px 0;border-top:1px solid var(--grid)">
-<span style="font-size:13px"><span style="color:${r.color};font-weight:700">${r.label}</span> <span style="font-size:12px;color:var(--muted)" class="mono">${machineOfCat(r.key)}</span> <span style="font-size:11px;color:var(--muted)">${r.parts.length} jobs</span>${ri===0&&r.v>0?' <span style="font-size:11px;color:var(--warn)">sets the pace</span>':''}${r.failedOut?' <span style="font-size:11px;color:var(--crit)">no tests ran</span>':''}${r.anom?' <span style="font-size:11px;color:var(--warn)">above recent level</span>':''}</span>
+<span style="font-size:13px"><span style="color:${r.color};font-weight:700">${r.label}</span> <span style="font-size:12px;color:var(--muted)" class="mono">${esc(machineOfCat(r.key))}</span> <span style="font-size:11px;color:var(--muted)">${r.parts.length} jobs</span>${ri===0&&r.v>0?' <span style="font-size:11px;color:var(--warn)">sets the pace</span>':''}${r.failedOut?' <span style="font-size:11px;color:var(--crit)">no tests ran</span>':''}${r.anom?' <span style="font-size:11px;color:var(--warn)">above recent level</span>':''}</span>
 <span class="mono" style="font-weight:700;font-size:14px;color:${r.failedOut?'var(--crit)':'var(--ink)'}">${fmt(r.v)}m</span></div>`
     +(expand?r.parts.map(p=>`<div style="display:flex;justify-content:space-between;gap:14px;padding:1px 0 1px 12px">
-<span style="font-size:12px;color:${p.status==='fail'?'var(--crit)':'var(--muted)'}">${p.name}${p.status==='fail'?' — failed':''}</span>
+<span style="font-size:12px;color:${p.status==='fail'?'var(--crit)':'var(--muted)'}">${esc(p.name)}${p.status==='fail'?' — failed':''}</span>
 <span class="mono" style="font-size:12px;color:${p.status==='fail'?'var(--crit)':'var(--ink2)'}">${fmt(p.v)}m</span></div>`).join(''):'');
 }).join('')}
 <div style="font-size:12px;color:var(--accent);text-align:center;margin-top:6px">click the point to see full commit details →</div>`;
@@ -1440,7 +1452,7 @@ function prTime(h){
 const MONTH_NUM={Jan:'01',Feb:'02',Mar:'03',Apr:'04',May:'05',Jun:'06',Jul:'07',Aug:'08',Sep:'09',Oct:'10',Nov:'11',Dec:'12'};
 function dayNum(s){const p=String(s||'').split(' ');const m=MONTH_NUM[p[0]];return m?m+'/'+String(p[1]||'').padStart(2,'0'):String(s||'')}
 function prDay(h){return dayNum((TIMES[h]||'').split(' ').slice(0,2).join(' '))}  // '08/17'
-function rangeCovers(w,list){return list.length?`${w.label} covers ${list.length} merged pull request${list.length===1?'':'s'}, #${list[list.length-1].hash} (${prDay(list[list.length-1].hash)}) to #${list[0].hash} (${prDay(list[0].hash)})`:`${w.label} holds no merged pull requests`}
+function rangeCovers(w,list){return list.length?`${w.label} covers ${list.length} merged pull request${list.length===1?'':'s'}, #${esc(list[list.length-1].hash)} (${prDay(list[list.length-1].hash)}) to #${esc(list[0].hash)} (${prDay(list[0].hash)})`:`${w.label} holds no merged pull requests`}
 
 
 // ============ PAGE SWITCH ============
@@ -1591,7 +1603,7 @@ let TH_CATEGORIES=[
           sev: 'crit', rowClass: 'crit',
           badge: 'TESTS DISAPPEARED', badgeClass: 'badge-crit',
           name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
-          desc: `<strong>${Math.round(earlyCount).toLocaleString()} tests dropped to ${Math.round(recentCount).toLocaleString()}</strong> (${Math.round(earlyCount - recentCount).toLocaleString()} fewer)${crashCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + crashCommit.hash.slice(0,7) + '</span> (<span class="mono" style="color:var(--ink)">' + crashCommit.pr + '</span>)' : ''}. Total duration went from ${Math.round(earlyDur/60)}m to ${Math.round(recentDur/60)}m. Each remaining test takes <strong>${recentPT.toFixed(1)} seconds</strong> — they used to take ${earlyPT.toFixed(1)} seconds.`,
+          desc: `<strong>${Math.round(earlyCount).toLocaleString()} tests dropped to ${Math.round(recentCount).toLocaleString()}</strong> (${Math.round(earlyCount - recentCount).toLocaleString()} fewer)${crashCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + esc(crashCommit.hash.slice(0,7)) + '</span> (<span class="mono" style="color:var(--ink)">' + esc(crashCommit.pr) + '</span>)' : ''}. Total duration went from ${Math.round(earlyDur/60)}m to ${Math.round(recentDur/60)}m. Each remaining test takes <strong>${recentPT.toFixed(1)} seconds</strong> — they used to take ${earlyPT.toFixed(1)} seconds.`,
           metric: `${ptMultiplier}× SLOWER`,
           metricColor: '#FCA5A5',
           order: 0
@@ -1603,7 +1615,7 @@ let TH_CATEGORIES=[
           sev: 'crit', rowClass: 'crit',
           badge: 'TESTS DROPPED', badgeClass: 'badge-crit',
           name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
-          desc: `Test count dropped from <strong>${Math.round(earlyCount).toLocaleString()} to ${Math.round(recentCount).toLocaleString()}</strong> (${Math.round(earlyCount - recentCount).toLocaleString()} fewer)${crashCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + crashCommit.hash.slice(0,7) + '</span> (<span class="mono" style="color:var(--ink)">' + crashCommit.pr + '</span>)' : ''}. Duration dropped proportionally — remaining tests run at normal speed.`,
+          desc: `Test count dropped from <strong>${Math.round(earlyCount).toLocaleString()} to ${Math.round(recentCount).toLocaleString()}</strong> (${Math.round(earlyCount - recentCount).toLocaleString()} fewer)${crashCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + esc(crashCommit.hash.slice(0,7)) + '</span> (<span class="mono" style="color:var(--ink)">' + esc(crashCommit.pr) + '</span>)' : ''}. Duration dropped proportionally — remaining tests run at normal speed.`,
           metric: `${Math.round(countChange * 100)}%`,
           metricColor: '#FCA5A5',
           order: 1
@@ -1655,7 +1667,7 @@ let TH_CATEGORIES=[
           sev: 'info', rowClass: 'info',
           badge: 'NEW SUITE', badgeClass: 'badge-accent',
           name: cat.name + (cat.tag ? ' (' + cat.tag + ')' : ''), color: cat.color,
-          desc: `New test suite added${firstCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + firstCommit.hash.slice(0,7) + '</span> (<span class="mono" style="color:var(--ink)">' + firstCommit.pr + '</span>) on ' + firstCommit.date : ''} with <strong>${Math.round(recentCount)} tests</strong> running in about ${Math.round(recentDur/60)} minutes. Running normally so far.`,
+          desc: `New test suite added${firstCommit ? ' at commit <span class="mono" style="color:var(--ink)">' + esc(firstCommit.hash.slice(0,7)) + '</span> (<span class="mono" style="color:var(--ink)">' + esc(firstCommit.pr) + '</span>) on ' + esc(firstCommit.date) : ''} with <strong>${Math.round(recentCount)} tests</strong> running in about ${Math.round(recentDur/60)} minutes. Running normally so far.`,
           metric: `${Math.round(recentCount)} TESTS`,
           metricColor: 'var(--accent)',
           order: 5
@@ -1688,7 +1700,7 @@ let TH_CATEGORIES=[
     list.innerHTML = issues.map(iss => `
       <div class="issue-row ${iss.rowClass}">
         <span class="badge-pill ${iss.badgeClass}">${iss.badge}</span>
-        <strong style="color:${iss.color}; font-family:var(--mono);">${iss.name}</strong>
+        <strong style="color:${iss.color}; font-family:var(--mono);">${esc(iss.name)}</strong>
         <div class="issue-desc">${iss.desc}</div>
         <span class="mono" style="font-size:14px; color:${iss.metricColor}; font-weight:600;">${iss.metric}</span>
       </div>
@@ -1789,7 +1801,7 @@ function openWkPop(hash){
   const stChip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
   $('#wkpop-body').innerHTML=`
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
-<div style="font-weight:700;font-size:15px">#${c.hash} ${c.title}</div>${stChip}
+<div style="font-weight:700;font-size:15px">#${esc(c.hash)} ${esc(c.title)}</div>${stChip}
 <button onclick="closeWkPop()" style="margin-left:auto;font:600 15px var(--font);background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
 </div>
 <div style="font-size:13px;color:var(--ink2);margin-bottom:10px">Every worker suite in this run, longest first. The time is the suite's machine minutes: runner wait, plus setup, plus test run, added up over all of its workers. That is the whole run whatever the chart's two switches are set to, so it can be larger than the bar you clicked. A suite with several parallel workers lists each worker's test minutes. Total: <span class="mono" style="font-weight:700;color:var(--ink)">${Math.round(tot)}m</span>.</div>
@@ -1800,13 +1812,13 @@ ${rows.map(r=>{
   const wsLine=r.workers.length>1?`<br><span style="font-size:12px;color:var(--muted)">${r.workers.length} workers · tests ${r.workers.map(x=>x.r+'m').join(' · ')}</span>`:`<br><span style="font-size:12px;color:var(--muted)">${r.q}m wait · ${r.s}m setup · ${r.r}m tests</span>`;
   return`<div style="display:grid;grid-template-columns:16px 1fr 170px 52px 46px;gap:10px;align-items:center;padding:4px 0;border-bottom:1px solid var(--grid);opacity:${dim?0.3:1}">
 <span style="width:12px;height:12px;border-radius:3px;background:${colorOf[r.gid]};display:inline-block"></span>
-<span style="font-size:14px;${r.status==='fail'?'color:var(--crit)':''}">${r.name}${r.status==='fail'?' — failed':r.status==='flaky'?' — passed on retry':''}${wsLine}</span>
+<span style="font-size:14px;${r.status==='fail'?'color:var(--crit)':''}">${esc(r.name)}${r.status==='fail'?' — failed':r.status==='flaky'?' — passed on retry':''}${wsLine}</span>
 <span style="height:8px;background:var(--elevated);border-radius:4px;overflow:hidden"><span style="display:block;height:100%;width:${w}%;background:${colorOf[r.gid]}"></span></span>
 <span class="mono" style="font-size:14px;font-weight:700;text-align:right">${r.v.toFixed(1)}m</span>
 <span class="mono" style="font-size:12px;color:var(--muted);text-align:right">${share}%</span>
 </div>`}).join('')}
 <div style="display:flex;gap:10px;margin-top:12px">
-<button onclick="closeWkPop();goToCommit('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open full commit details</button>
+<button onclick="closeWkPop();goToCommit(${jsArg(String(c.hash))})" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open full commit details</button>
 
 </div>`;
   $('#wkpop').style.display='flex';
@@ -1827,10 +1839,10 @@ function openWkSuitePop(hash,gid){
   const stChip=st==='fail'?'<span class="chip fail">FAILED</span>':st==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
   $('#wkpop-body').innerHTML=`
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
-<div style="font-weight:700;font-size:15px">#${c.hash} ${c.title}</div>${stChip}
+<div style="font-weight:700;font-size:15px">#${esc(c.hash)} ${esc(c.title)}</div>${stChip}
 <button onclick="closeWkPop()" style="margin-left:auto;font:600 15px var(--font);background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
 </div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${ent.name} on this run — one row per worker, with its runner wait, setup, and test minutes.${ent.split?' The worker split is estimated from the suite total.':''} Together the ${n>1?n+' workers':'worker'} used <span class="mono" style="font-weight:700;color:var(--ink)">${suiteTot.toFixed(1)}m</span> of machine time${n>1?`, and because they run at the same time the suite added <span class="mono" style="font-weight:700;color:var(--ink)">${suiteWall.toFixed(1)}m</span> to the run`:''}.</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${esc(ent.name)} on this run — one row per worker, with its runner wait, setup, and test minutes.${ent.split?' The worker split is estimated from the suite total.':''} Together the ${n>1?n+' workers':'worker'} used <span class="mono" style="font-weight:700;color:var(--ink)">${suiteTot.toFixed(1)}m</span> of machine time${n>1?`, and because they run at the same time the suite added <span class="mono" style="font-weight:700;color:var(--ink)">${suiteWall.toFixed(1)}m</span> to the run`:''}.</div>
 ${rows.map((r,k)=>`<div style="display:grid;grid-template-columns:16px 1fr 190px 56px;gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid var(--grid)">
 <span style="width:12px;height:12px;border-radius:3px;background:${wkShade(col,k,n)};display:inline-block"></span>
 <span style="font-size:14px;${r.status==='fail'?'color:var(--crit)':''}">${r.name}${r.status==='fail'?' — failed':r.status==='flaky'?' — passed on retry':''}<br><span style="font-size:12px;color:var(--muted)">${r.q.toFixed(1)}m wait · ${r.s.toFixed(1)}m setup · ${r.r.toFixed(1)}m tests</span></span>
@@ -1838,8 +1850,8 @@ ${rows.map((r,k)=>`<div style="display:grid;grid-template-columns:16px 1fr 190px
 <span class="mono" style="font-size:14px;font-weight:700;text-align:right">${r.tot.toFixed(1)}m</span>
 </div>`).join('')}
 <div style="display:flex;gap:10px;margin-top:12px">
-<button onclick="openWkPop('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Every suite in this run</button>
-<button onclick="closeWkPop();goToCommit('${c.hash}')" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open full commit details</button>
+<button onclick="openWkPop(${jsArg(String(c.hash))})" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Every suite in this run</button>
+<button onclick="closeWkPop();goToCommit(${jsArg(String(c.hash))})" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:6px 14px;border-radius:6px;cursor:pointer">Open full commit details</button>
 
 </div>`;
   $('#wkpop').style.display='flex';
@@ -1910,7 +1922,7 @@ function renderWorker(){
     const byCat={};ents.forEach(e=>{(byCat[e.cat]=byCat[e.cat]||[]).push(e)});
     const sel=`<select onchange="setWKSel(this.value)" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:5px 8px;border-radius:6px;max-width:300px;cursor:pointer">
 <option value="all" ${WK_SEL==='all'?'selected':''}>All worker suites</option>
-${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]}">${(byCat[cat]||[]).map(e=>`<option value="${e.gid}" ${WK_SEL===e.gid?'selected':''}>${e.name}${e.jobs.length>1||e.split?' — '+(e.split?e.split.length:e.jobs.length)+' workers':''}</option>`).join('')}</optgroup>`).join('')}
+${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]}">${(byCat[cat]||[]).map(e=>`<option value="${esc(e.gid)}" ${WK_SEL===e.gid?'selected':''}>${esc(e.name)}${e.jobs.length>1||e.split?' — '+(e.split?e.split.length:e.jobs.length)+' workers':''}</option>`).join('')}</optgroup>`).join('')}
 </select>`;
     const row=(label,items,cur,fn)=>`<span style="font-size:13px;color:var(--muted)">${label}</span>`
       +items.map(i=>`<button class="fchip ${i.key===cur?'on':''}" style="border-radius:8px" title="${i.note}" onclick="${fn}('${i.key}')">${i.chip}</button>`).join('');
@@ -1980,9 +1992,9 @@ ${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]
           r.setAttribute('data-wk',k);
           r.addEventListener('mousemove',ev=>{
             if(n>1)svg.querySelectorAll('[data-wk]').forEach(nd=>nd.setAttribute('opacity',+nd.getAttribute('data-wk')===k?'1':'0.3'));
-            tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">#${c.hash} ${c.title}</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:2px">${ent.name}${n>1?' · '+wk.name:''}</div>
-${wk&&wk.machine?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${wk.machine}</div>`:'<div style="margin-bottom:6px"></div>'}
+            tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">#${esc(c.hash)} ${esc(c.title)}</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:2px">${esc(ent.name)}${n>1?' · '+wk.name:''}</div>
+${wk&&wk.machine?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${esc(wk.machine)}</div>`:'<div style="margin-bottom:6px"></div>'}
 ${breakdown(wk,sl.label)}
 <div style="display:flex;justify-content:space-between;gap:14px;font-size:14px;font-weight:700;border-top:1px solid var(--grid);margin-top:4px;padding-top:4px"><span>This worker</span><span class="mono" style="color:${wk.status==='fail'?'var(--crit)':'var(--ink)'}">${wk.tot.toFixed(1)}m</span></div>
 ${n>1?`<div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--ink2)"><span>${WK_MEASURE==='wall'?'Slowest of the '+n+' workers':'All '+n+' workers added up'}</span><span class="mono">${dpt.v.toFixed(1)}m</span></div>`:''}
@@ -2051,8 +2063,8 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
         r.addEventListener('mousemove',ev=>{
           svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-gid')===L.key?nd.getAttribute('data-op'):'0.22'));
           tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">${L.label} lane</div>
-<div style="font-size:13px;color:var(--ink2)">#${c.hash} · ${p.n} job${p.n===1?'':'s'} · ${WK_MEASURE==='wall'?'the slowest one is drawn':'all of them added up'}</div>
-${WK_MEASURE==='wall'&&p.lead?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${(JOBS.find(j=>j.id===p.lead)||{}).name||p.lead}${RUNNER_LABELS[p.lead]?' · '+RUNNER_LABELS[p.lead]:''}</div>`:'<div style="margin-bottom:6px"></div>'}
+<div style="font-size:13px;color:var(--ink2)">#${esc(c.hash)} · ${p.n} job${p.n===1?'':'s'} · ${WK_MEASURE==='wall'?'the slowest one is drawn':'all of them added up'}</div>
+${WK_MEASURE==='wall'&&p.lead?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${esc((JOBS.find(j=>j.id===p.lead)||{}).name||p.lead)}${RUNNER_LABELS[p.lead]?' · '+esc(RUNNER_LABELS[p.lead]):''}</div>`:'<div style="margin-bottom:6px"></div>'}
 ${breakdown(p,sl.label)}
 <div style="display:flex;justify-content:space-between;gap:14px;font-size:14px;font-weight:700;border-top:1px solid var(--grid);margin-top:4px;padding-top:4px"><span>This lane</span><span class="mono">${p.tot.toFixed(1)}m</span></div>
 <div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--ink2)"><span>${WK_MEASURE==='wall'?'Slowest lane in this run':'Every lane added up'}</span><span class="mono">${groupVal[i].toFixed(1)}m</span></div>
@@ -2122,11 +2134,11 @@ function flakyCellTip(evt,id,idx){
   const fObj=(j.fails||[]).find(p=>thIdxOf(p.pr)===idx);
   const f=!!fObj;
   const tEl=$('#tip');
-  const head=`<div style="font-weight:700;font-size:13px;margin-bottom:2px">${c.pr} &middot; ${dayNum(c.date)}</div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">${j.name}</div>`
-    +(RUNNER_LABELS[j.id]?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:4px">${RUNNER_LABELS[j.id]}</div>`:'');
+  const head=`<div style="font-weight:700;font-size:13px;margin-bottom:2px">${esc(c.pr)} &middot; ${dayNum(c.date)}</div><div style="font-size:12px;color:var(--muted);margin-bottom:4px">${esc(j.name)}</div>`
+    +(RUNNER_LABELS[j.id]?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:4px">${esc(RUNNER_LABELS[j.id])}</div>`:'');
   // Only this run of this job: which tests failed on the first attempt (from the JUnit report of attempt 1).
   const CAP=6;
-  const testLine=(name,cause)=>`<div style="font-size:12px;padding:1px 0;line-height:1.45"><span class="mono" style="color:var(--ink)">${name}</span> <span style="color:var(--muted)">&mdash; ${cause}</span></div>`;
+  const testLine=(name,cause)=>`<div style="font-size:12px;padding:1px 0;line-height:1.45"><span class="mono" style="color:var(--ink)">${esc(name)}</span> <span style="color:var(--muted)">&mdash; ${esc(cause)}</span></div>`;
   const listOf=(tests)=>{
     const shown=tests.slice(0,CAP),more=tests.length-shown.length;
     return shown.map(x=>testLine(x.name,x.cause)).join('')+(more>0?`<div style="font-size:12px;color:var(--muted);margin-top:2px">and ${more} more failed in the same run.</div>`:'');
@@ -2231,21 +2243,21 @@ function renderFlaky(){
       const rate=cal.n?r.inPrs.length/cal.n:0,col=flakyColor(rate);
       const hlIdx=r.inPrs.map(p=>thIdxOf(p)).filter(x=>x>=0).join(',');
       return{tone:rate>=0.2?'crit':rate>=0.1?'warn':'none',dim:HW!=='all'&&r.j.lane.toLowerCase()!==HW,
-        attrs:`data-ftlane="${r.j.lane}" onmouseenter="flakyTestHl('${r.j.id}','${hlIdx}',true)" onmouseleave="flakyTestHl('${r.j.id}','${hlIdx}',false)"`,
-        onclick:`openFlakyTestPop('${r.ft.test.replace(/'/g,"\\'")}','${r.j.id}')`,cells:[
-        `<div class="mono" style="font-weight:600;color:var(--ink);overflow-wrap:anywhere">${r.ft.test}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${r.ft.cause} &middot; last in ${r.inPrs[r.inPrs.length-1]}</div>`,
-        `<span style="color:var(--ink2)"><span style="color:${LANE_COLORS[r.j.lane]}">&#9679;</span> ${r.j.name}</span>`,
+        attrs:`data-ftlane="${esc(r.j.lane)}" onmouseenter="flakyTestHl(${jsArg(String(r.j.id))},'${hlIdx}',true)" onmouseleave="flakyTestHl(${jsArg(String(r.j.id))},'${hlIdx}',false)"`,
+        onclick:`openFlakyTestPop(${jsArg(String(r.ft.test))},${jsArg(String(r.j.id))})`,cells:[
+        `<div class="mono" style="font-weight:600;color:var(--ink);overflow-wrap:anywhere">${esc(r.ft.test)}</div><div style="font-size:12px;color:var(--muted);margin-top:2px">${esc(r.ft.cause)} &middot; last in ${esc(r.inPrs[r.inPrs.length-1])}</div>`,
+        `<span style="color:var(--ink2)"><span style="color:${LANE_COLORS[r.j.lane]}">&#9679;</span> ${esc(r.j.name)}</span>`,
         `<span class="mono" style="display:block;text-align:right;font-weight:700;color:${col==='#64748B'?'var(--ink)':col}">${r.inPrs.length} of ${cal.n} runs</span>`]};
     })});
   let legendH=`<div style="display:flex;flex-wrap:wrap;gap:6px 16px;align-items:center;font-size:12px;color:var(--muted);margin-bottom:8px">
-    <span>Each cell is one merged pull request, oldest on the left &mdash; ${first.pr} (${dayNum(first.date)}) &rarr; ${last.pr} (${dayNum(last.date)}).</span>
+    <span>Each cell is one merged pull request, oldest on the left &mdash; ${esc(first.pr)} (${dayNum(first.date)}) &rarr; ${esc(last.pr)} (${dayNum(last.date)}).</span>
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:var(--warn);display:inline-block"></span>failed first, passed on re-run</span>
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;border:2px solid var(--crit);display:inline-block"></span>failed, never re-run</span>
     <span style="display:inline-flex;align-items:center;gap:5px"><span style="width:11px;height:11px;border-radius:3px;background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER};display:inline-block"></span>passed first try</span>
   </div>`;
   const failsInRange=[...new Set(RESCUES.flatMap(r=>(r.fails||[]).filter(p=>cal.iset.has(thIdxOf(p.pr))).map(p=>p.pr)))];
   h+=`<div class="gtitle" style="font-size:14px;font-weight:700;color:var(--ink);margin:4px 0 6px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">Re-runs per job</div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="flaky">This chart shows which jobs failed: amber cells passed on re-run, outlined cells were never re-run. <span class="g-more">Each row is one job. Each cell is one merged pull request. Hover a cell to see which tests failed. Click a row for the full list of failed tests. <b>What the rate is:</b> the share of merged pull requests where this job failed on its first attempt and passed on a re-run. An amber rate means at least 1 in 10; red means at least 1 in 5. <b>Why a rate is sometimes hidden:</b> below 10 runs a single failure swings the percentage too far to be meaningful.</span></div>`+(listed.length?legendH:`<div style="font-size:14px;color:var(--ink2);padding:10px 4px">No job needed a re-run to pass ${cal.inRange}.${failsInRange.length?` ${failsInRange.join(', ')} failed and was never re-run — a failure, not a rescue, so it has no row.`:''}</div>`);
+<div style="font-size:13px;color:var(--ink2);margin-bottom:8px" data-guide="flaky">This chart shows which jobs failed: amber cells passed on re-run, outlined cells were never re-run. <span class="g-more">Each row is one job. Each cell is one merged pull request. Hover a cell to see which tests failed. Click a row for the full list of failed tests. <b>What the rate is:</b> the share of merged pull requests where this job failed on its first attempt and passed on a re-run. An amber rate means at least 1 in 10; red means at least 1 in 5. <b>Why a rate is sometimes hidden:</b> below 10 runs a single failure swings the percentage too far to be meaningful.</span></div>`+(listed.length?legendH:`<div style="font-size:14px;color:var(--ink2);padding:10px 4px">No job needed a re-run to pass ${cal.inRange}.${failsInRange.length?` ${esc(failsInRange.join(', '))} failed and was never re-run — a failure, not a rescue, so it has no row.`:''}</div>`);
   // The job rows and the axis under them scroll as one block, so a cell always
   // stays above its own date. The card itself is overflow:hidden.
   h+='<div data-flscroll="1" style="overflow-x:auto">';
@@ -2257,14 +2269,14 @@ function renderFlaky(){
     const failIdx={};failIn.forEach(p=>{failIdx[thIdxOf(p.pr)]=p});
     const cells=cal.idxs.map(i=>{
       const st=resIdx[i]?'background:var(--warn)':failIdx[i]?'background:transparent;border:2px solid var(--crit)':`background:${FL_PASS_BG};border:1px solid ${FL_PASS_BORDER}`;
-      return `<div data-cell="1" data-fljob="${j.id}" data-flidx="${i}" style="flex:1;height:16px;border-radius:3px;min-width:${CELL_MIN}px;transition:opacity .1s;${st}" onmousemove="flakyCellTip(event,'${j.id}',${i})" onmouseleave="flakyTipHide()" onclick="event.stopPropagation();openFlakyPop('${j.id}','${TH_COMMITS[i].pr}')"></div>`;
+      return `<div data-cell="1" data-fljob="${esc(j.id)}" data-flidx="${i}" style="flex:1;height:16px;border-radius:3px;min-width:${CELL_MIN}px;transition:opacity .1s;${st}" onmousemove="flakyCellTip(event,${jsArg(String(j.id))},${i})" onmouseleave="flakyTipHide()" onclick="event.stopPropagation();openFlakyPop(${jsArg(String(j.id))},${jsArg(String(TH_COMMITS[i].pr))})"></div>`;
     }).join('');
     const rateTxt=gated
       ?`${prIn.length} of ${n} runs &middot; <span style="color:var(--muted)">too few to rate (needs 10)</span>`
       :`<span style="color:${col==='#64748B'?'var(--ink)':col};font-weight:700">${Math.round(rate*100)}%</span> &middot; ${prIn.length} of ${n} runs`;
-    return `<div class="issue-row" data-flane="${j.lane}" onclick="openFlakyPop('${j.id}')" style="grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;cursor:pointer;opacity:${dim?0.28:1}">
-      <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${j.name}</div>
-      <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${RUNNER_LABELS[j.id]}</span>`:''}</div></div>
+    return `<div class="issue-row" data-flane="${esc(j.lane)}" onclick="openFlakyPop(${jsArg(String(j.id))})" style="grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;cursor:pointer;opacity:${dim?0.28:1}">
+      <div><div style="font-size:14px;font-weight:600;color:var(--ink)">${esc(j.name)}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:2px"><span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${esc(j.lane)} lane${RUNNER_LABELS[j.id]?` &middot; <span class="mono" style="font-size:12px">${esc(RUNNER_LABELS[j.id])}</span>`:''}</div></div>
       <div style="display:flex;gap:2px;min-width:220px;align-items:center">${cells}</div>
       <div class="mono" style="font-size:13px;text-align:right;white-space:nowrap;color:var(--ink)">${rateTxt}</div>
     </div>`;
@@ -2272,7 +2284,7 @@ function renderFlaky(){
   if(listed.length){
     h+=`<div data-flaxis="1" style="display:grid;grid-template-columns:290px 1fr 340px;min-width:${rowMin}px;gap:16px;align-items:start;padding:0 17px">
       <div style="font-size:12px;color:var(--muted);text-align:right;padding-top:2px">merged pull request &rarr;</div>
-      <div style="display:flex;gap:2px">${(()=>{const n=cal.idxs.length,step=n<=10?1:n<=20?2:n<=40?4:5;return cal.idxs.map((ci,vi)=>{const show=vi%step===0||vi===n-1;return`<div style="flex:1;min-width:${CELL_MIN}px;position:relative;height:${show?38:8}px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div>${show?`<div style="position:absolute;top:7px;left:50%;transform:translateX(-50%);text-align:center;font-size:10px;font-family:var(--mono);line-height:1.3;white-space:nowrap"><div style="font-weight:700;color:var(--ink)">${TH_COMMITS[ci].pr}</div><div style="color:var(--muted)">${dayNum(TH_COMMITS[ci].date)}</div></div>`:''}</div>`}).join('')})()}</div>
+      <div style="display:flex;gap:2px">${(()=>{const n=cal.idxs.length,step=n<=10?1:n<=20?2:n<=40?4:5;return cal.idxs.map((ci,vi)=>{const show=vi%step===0||vi===n-1;return`<div style="flex:1;min-width:${CELL_MIN}px;position:relative;height:${show?38:8}px"><div style="position:absolute;top:0;left:50%;width:1px;height:5px;background:var(--muted);opacity:0.55"></div>${show?`<div style="position:absolute;top:7px;left:50%;transform:translateX(-50%);text-align:center;font-size:10px;font-family:var(--mono);line-height:1.3;white-space:nowrap"><div style="font-weight:700;color:var(--ink)">${esc(TH_COMMITS[ci].pr)}</div><div style="color:var(--muted)">${dayNum(TH_COMMITS[ci].date)}</div></div>`:''}</div>`}).join('')})()}</div>
       <div style="font-size:12px;color:var(--muted);padding-top:2px">oldest &rarr; newest</div>
     </div>`;
   }
@@ -2313,25 +2325,25 @@ function openFlakyTestPop(testName,jobId){
     const e=j.events.find(x=>x.pr===p)||{};
     const fl=(j.fails||[]).find(x=>x.pr===p);
     const rid=e.runId||(fl&&fl.runId);
-    const chip=`<span class="mono" style="font-size:13px;color:var(--ink2)">${p}</span>`;
-    const runLink=rid?`<a href="https://github.com/${REPO}/actions/runs/${rid}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-size:12px" title="View CI run">run &rarr;</a>`:'';
+    const chip=`<span class="mono" style="font-size:13px;color:var(--ink2)">${esc(p)}</span>`;
+    const runLink=rid?`<a href="https://github.com/${REPO}/actions/runs/${esc(rid)}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;font-size:12px" title="View CI run">run &rarr;</a>`:'';
     return `<div style="display:grid;grid-template-columns:80px 64px 1fr auto;gap:12px;align-items:center;padding:8px 4px;border-top:1px solid var(--grid)">
       <span>${chip}</span><span style="font-size:13px;color:var(--muted)">${e.date||''}</span>
-      <span class="mono" style="font-size:13px;color:var(--ink2)">${ft.cause}</span>
+      <span class="mono" style="font-size:13px;color:var(--ink2)">${esc(ft.cause)}</span>
       <span>${runLink}</span></div>`;
   }).join('');
   $('#wkpop-body').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
-      <div class="mono" style="font-size:16px;font-weight:700;color:var(--ink);overflow-wrap:anywhere">${ft.test}</div>
+      <div class="mono" style="font-size:16px;font-weight:700;color:var(--ink);overflow-wrap:anywhere">${esc(ft.test)}</div>
       <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
     <div style="font-size:13px;color:var(--ink2);margin-bottom:12px;line-height:1.5">
       It failed on the first attempt and passed on a re-run in ${inPrs.length} of the ${cal.n} merged pull requests ${cal.inRange}.
-      It runs in <span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.name}.
-      Every failure so far reported the same line: <span class="mono" style="color:var(--ink)">${ft.cause}</span>.</div>
+      It runs in <span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${esc(j.name)}.
+      Every failure so far reported the same line: <span class="mono" style="color:var(--ink)">${esc(ft.cause)}</span>.</div>
     ${inPrs.length?rowsH:'<div style="font-size:13px;color:var(--muted)">This test needed no re-run inside this date range.</div>'}
-    ${share.length?`<div style="font-size:13px;color:var(--ink2);margin-top:10px;line-height:1.5">${share.length===1?'One other test':share.length+' other tests'} also failed in the same runs: ${share.map(x=>`<span class="mono">${x.test}</span>`).join(', ')}.</div>`:''}
+    ${share.length?`<div style="font-size:13px;color:var(--ink2);margin-top:10px;line-height:1.5">${share.length===1?'One other test':share.length+' other tests'} also failed in the same runs: ${share.map(x=>`<span class="mono">${esc(x.test)}</span>`).join(', ')}.</div>`:''}
     <div style="margin-top:14px;padding-top:10px;border-top:1px solid var(--grid)">
-      <button onclick="openFlakyPop('${jobId}')" style="font:600 13px var(--font);background:var(--elevated);border:1px solid var(--border);border-radius:8px;padding:6px 12px;color:var(--accent);cursor:pointer">Every re-run of ${j.name} &rarr;</button></div>
+      <button onclick="openFlakyPop(${jsArg(String(jobId))})" style="font:600 13px var(--font);background:var(--elevated);border:1px solid var(--border);border-radius:8px;padding:6px 12px;color:var(--accent);cursor:pointer">Every re-run of ${esc(j.name)} &rarr;</button></div>
 `;
   $('#wkpop').style.display='flex';
 }
@@ -2367,18 +2379,18 @@ function openFlakyPop(id,pr){
   const prLabel=pr?TH_COMMITS.find(c=>c.pr===pr):null;
   const testListH=testList.length
     ? testList.map(t=>`<div style="display:flex;align-items:baseline;gap:8px;padding:6px 4px;border-top:1px solid var(--grid)">
-        <span class="mono" style="font-size:13px;font-weight:600;color:var(--ink);flex:1;overflow-wrap:anywhere">${t.name}</span>
+        <span class="mono" style="font-size:13px;font-weight:600;color:var(--ink);flex:1;overflow-wrap:anywhere">${esc(t.name)}</span>
         ${pr?'':`<span style="font-size:12px;color:var(--muted);white-space:nowrap">${t.count} time${t.count===1?'':'s'}</span>`}
-      </div>${t.cause?`<div style="font-size:12px;color:var(--muted);padding:0 4px 4px;margin-top:-2px">${t.cause}</div>`:''}`).join('')
+      </div>${t.cause?`<div style="font-size:12px;color:var(--muted);padding:0 4px 4px;margin-top:-2px">${esc(t.cause)}</div>`:''}`).join('')
     : isGatePop
       ? `<div style="font-size:13px;color:var(--muted);padding:8px 0">Gate job — no individual test results.</div>`
       : `<div style="font-size:13px;color:var(--muted);padding:8px 0">Job failed due to setup or infrastructure issue, or test details were not collected.</div>`;
   const subtitle=pr
-    ?`<span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane &middot; ${pr}${prLabel?' &middot; '+dayNum(prLabel.date):''}`
-    :`<span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${j.lane} lane${evIn.length?` &middot; ${evIn.length} re-run${evIn.length===1?'':'s'}`:''}${failIn.length?` &middot; ${failIn.length} failure${failIn.length===1?'':'s'}`:''}`;
+    ?`<span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${esc(j.lane)} lane &middot; ${esc(pr)}${prLabel?' &middot; '+dayNum(prLabel.date):''}`
+    :`<span style="color:${LANE_COLORS[j.lane]}">&#9679;</span> ${esc(j.lane)} lane${evIn.length?` &middot; ${evIn.length} re-run${evIn.length===1?'':'s'}`:''}${failIn.length?` &middot; ${failIn.length} failure${failIn.length===1?'':'s'}`:''}`;
   $('#wkpop-body').innerHTML=`
     <div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;margin-bottom:4px">
-      <div style="font-size:17px;font-weight:700;color:var(--ink)">${j.name}</div>
+      <div style="font-size:17px;font-weight:700;color:var(--ink)">${esc(j.name)}</div>
       <button onclick="closeWkPop()" style="background:none;border:none;color:var(--muted);font-size:17px;cursor:pointer">&#10005;</button></div>
     <div style="font-size:13px;color:var(--muted);margin-bottom:6px">${subtitle}</div>
     <div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${testList.length?(pr?'Failed tests in this run:':'Failed tests in this job:'):''}</div>
@@ -2393,8 +2405,8 @@ function openFlakyPop(id,pr){
       const runUrl=rid?'https://github.com/'+REPO+'/actions/runs/'+rid:null;
       const prUrl='https://github.com/'+REPO+'/pull/'+prNum;
       return`<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--grid)">`
-        +(runUrl?`<a href="${runUrl}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;font-size:13px;cursor:pointer">View CI run on GitHub &rarr;</a> &nbsp; `:'')
-        +`<a href="${prUrl}" target="_blank" rel="noopener" style="color:var(--muted);text-decoration:underline;font-size:12px;cursor:pointer">PR #${prNum}</a></div>`;
+        +(runUrl?`<a href="${esc(safeUrl(runUrl))}" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;font-size:13px;cursor:pointer">View CI run on GitHub &rarr;</a> &nbsp; `:'')
+        +`<a href="${esc(safeUrl(prUrl))}" target="_blank" rel="noopener" style="color:var(--muted);text-decoration:underline;font-size:12px;cursor:pointer">PR #${esc(prNum)}</a></div>`;
     })()}
 `;
   $('#wkpop').style.display='flex';

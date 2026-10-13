@@ -17,7 +17,8 @@ setTimeout(()=>{
   const cells=[...d.querySelectorAll('#flaky [data-cell]')];
   ok(cells.length>0&&cells.every(x=>x.hasAttribute('data-fljob')&&x.hasAttribute('data-flidx')),'every strip cell carries job + index');
   // hover highlights only that test's PRs
-  const m=(testRow.getAttribute('onmouseenter')||'').match(/flakyTestHl\('([^']*)','([^']*)'/);
+  // The page now passes the job id as a JSON string ("..."), so accept either quote.
+  const m=(testRow.getAttribute('onmouseenter')||'').match(/flakyTestHl\(["']([^"']*)["'],'([^']*)'/);
   ok(!!m,'hover handler parses'); 
   w.flakyTestHl(m[1],m[2],true);
   const want=new Set(m[2].split(',').filter(Boolean));
