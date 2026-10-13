@@ -4801,9 +4801,7 @@ class RoutedMoE(nnx.Module):
       if self._expert_parallelism_name != "expert":
         raise ValueError("TE expert FSDP sharding currently requires the standard expert mesh axis.")
       if self.num_experts % (ep_size * fsdp_size) != 0:
-        raise ValueError(
-            f"num_experts={self.num_experts} must be divisible by EP x FSDP={ep_size * fsdp_size}."
-        )
+        raise ValueError(f"num_experts={self.num_experts} must be divisible by EP x FSDP={ep_size * fsdp_size}.")
     if self.num_experts % ep_size != 0:
       raise ValueError(f"num_experts={self.num_experts} must be divisible by EP size={ep_size}.")
 
