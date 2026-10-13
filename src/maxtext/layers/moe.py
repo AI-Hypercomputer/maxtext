@@ -2093,6 +2093,8 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+    if w1_kernel is None:  # fused prefused wi travels as w0_kernel
+      w1_pspec = None
     output_pspec = self._logical_to_mesh_axes(
         (
             batch_logical_axis,
@@ -2459,8 +2461,8 @@ class RoutedMoE(nnx.Module):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        # w1 is None when the fused (G, K, 2N) wi was passed through as one operand.
+        w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
         layer_w0, layer_w1 = _split_gate_up(out)
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
@@ -4010,9 +4012,21 @@ class RoutedMoE(nnx.Module):
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if (
+          cfg.moe_unsliced_prefused_wi
+          and cfg.sparse_matmul
+          and cfg.num_moe_emb_chunks == 0
+          and not quantizations.in_serve_mode(self.quant)
+          and self.wi_0_sparsity_module is None
+      ):
+        # Keep the fused [E, emb, 2N] wi as a single operand: slicing it into w0 / w1
+        # here and re-concatenating inside gmm_up (and the mirror in backward) costs
+        # full-weight copies; gmm_up consumes the fused weight directly (w1 is None).
+        w0_kernel = wi
+      else:
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None

@@ -276,6 +276,7 @@ use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the Mo
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
+moe_unsliced_prefused_wi: false # when true (with prefuse_moe_weights=true and sparse_matmul=true), pass the fused wi [E, emb, 2*mlp] across shard_map as a single operand (w1_kernel=None) instead of slicing into w0/w1 and re-concatenating inside gmm_up.
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
