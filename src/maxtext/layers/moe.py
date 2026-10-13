@@ -213,7 +213,7 @@ _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_
 
 
 def take_along_last_axis_dense(x: jax.Array, indices: jax.Array) -> jax.Array:
-  """`jnp.take_along_axis(x, indices, axis=-1)` as a fused compare-select-reduce (forward and backward)."""
+  """`jnp.take_along_axis(x, indices, axis=-1)` as a fused compare-select-reduce, avoiding 1-lane HLO gather/scatter."""
   iota = jax.lax.broadcasted_iota(indices.dtype, (1,) * indices.ndim + (x.shape[-1],), indices.ndim)
   hit = indices[..., None] == iota  # [..., k, num_classes]
   return jnp.sum(jnp.where(hit, x[..., None, :], jnp.zeros((), x.dtype)), axis=-1)
@@ -221,7 +221,7 @@ def take_along_last_axis_dense(x: jax.Array, indices: jax.Array) -> jax.Array:
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
 def top_k_dense_vjp(x: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
-  """`jax.lax.top_k(x, k)` whose backward is a fused compare-select-reduce rather than a scatter."""
+  """`jax.lax.top_k(x, k)` with a dense compare-select-reduce backward instead of JAX's default 1-lane scatter-add."""
   vals, indices = jax.lax.top_k(x, k)
   return vals, indices
 
@@ -1047,8 +1047,7 @@ class RoutedMoE(nnx.Module):
       elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
-        # softmax is monotonic, so top-k of the probabilities selects the same experts as top-k of the
-        # logits and yields their probabilities directly (no gather of [tokens, k] into [tokens, E]).
+        # Softmax is monotonic, so top_k on probabilities selects the same experts as logits without a second gather.
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         top_k_weights, top_k_indices = top_k_dense_vjp(router_probs, self.num_experts_per_tok)
         top_k_weights = top_k_weights.astype(self.dtype)
