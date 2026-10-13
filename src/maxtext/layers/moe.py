@@ -4014,11 +4014,17 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       native_w1_scale=None,
       native_w2_scale=None,
+      partial_output_to_add=None,
   ) -> tuple[jax.Array, None, None]:
     """Fused MoE via tpu_inference fused_moe_func (vllm_rpa path only).
 
     fused_moe_func handles routing, GMM, and weighted combination internally.
     It does not compute lb_loss or bias_updates (inference-only).
+
+    `partial_output_to_add` is an optional `[B, S, D]` per-device partial sum
+    (e.g. a TP-sharded shared expert) that fused_moe_func adds to the local
+    routed-expert partial before its all-reduce, so both are reduced by one
+    collective. See `fused_moe_partial_output_supported`.
     """
     if forced_routed_experts is not None:
       raise NotImplementedError("Forced routing via forced_routed_experts is not supported with" " fused_moe_matmul.")
@@ -4076,6 +4082,24 @@ class RoutedMoE(nnx.Module):
       quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
     fused_moe = quantizations.without_qwix_interception(fused_moe_func)
 
+    scatter_results = (
+        getattr(self, "mesh", None) is not None
+        and (
+            self.mesh.shape.get("data", 1)
+            * self.mesh.shape.get("attn_dp", 1)
+            * self.mesh.shape.get("attn_dp_expert", 1)
+        )
+        > 1
+    )
+
+    extra_kwargs = {}
+    if partial_output_to_add is not None:
+      if not self.fused_moe_partial_output_supported():
+        raise ValueError("partial_output_to_add is not supported by the installed tpu_inference / this mesh.")
+      extra_kwargs["partial_output_to_add"] = jnp.reshape(
+          partial_output_to_add, (batch_size * seq_len, emb_dim)
+      ).astype(hidden_states.dtype)
+
     output_2d = fused_moe(
         hidden_states=hidden_states,
         w1=quantized_w1,
@@ -4103,20 +4127,72 @@ class RoutedMoE(nnx.Module):
         use_gmm_fused_rs_kernel=tpu_inference_envs.USE_GMM_FUSED_RS_KERNEL,
         onehot_moe_permute_threshold=tpu_inference_envs.ONEHOT_MOE_PERMUTE_THRESHOLD,
         moe_chunk_size=tpu_inference_envs.VLLM_MOE_CHUNK_SIZE,
-        scatter_results=(
-            getattr(self, "mesh", None) is not None
-            and (
-                self.mesh.shape.get("data", 1)
-                * self.mesh.shape.get("attn_dp", 1)
-                * self.mesh.shape.get("attn_dp_expert", 1)
-            )
-            > 1
-        ),
+        scatter_results=scatter_results,
+        **extra_kwargs,
     )
 
     # Reshape output 2D [T, D] -> 3D [B, S, D]
     output = jnp.reshape(output_2d, (batch_size, seq_len, emb_dim))
     return output, None, None
+
+  # ---------------------------------------------------------------------------
+  # Helpers for fusing an external partial sum into the fused-MoE all-reduce.
+  # ---------------------------------------------------------------------------
+  def uses_fused_moe_path(self) -> bool:
+    """True when `__call__` dispatches to tpu_inference's fused_moe_func."""
+    cfg = self.config
+    return (
+        cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx")
+        and not self.is_hash_routing
+        and not getattr(cfg, "te_moe_block", False)
+    )
+
+  def fused_moe_reduction_axes(self) -> tuple[str, ...] | None:
+    """Mesh axes (size > 1) the fused MoE output is all-reduced over, or None if unknown.
+
+    Mirrors the reduction axis tpu_inference uses: `ShardingAxisName.EXPERT`
+    under expert parallelism and `ShardingAxisName.MLP_TENSOR` otherwise.
+    """
+    if getattr(self, "mesh", None) is None:
+      return None
+    try:
+      # pylint: disable=import-outside-toplevel
+      # pytype: disable=import-error
+      from tpu_inference.layers.common.sharding import ShardingAxisName
+    except ImportError:
+      return None
+    use_ep = self.get_expert_parallelism_size() > 1
+    axes = ShardingAxisName.EXPERT if use_ep else ShardingAxisName.MLP_TENSOR
+    if isinstance(axes, str):
+      axes = (axes,)
+    return tuple(ax for ax in axes if self.mesh.shape.get(ax, 1) > 1)
+
+  def fused_moe_partial_output_supported(self) -> bool:
+    """Whether `partial_output_to_add` can be forwarded to fused_moe_func.
+
+    Requires the fused path, a tpu_inference that accepts the argument, and the
+    plain all-reduce MoE path (no reduce-scatter of results across data/attn-dp
+    replicas and no fused reduce-scatter kernels).
+    """
+    if not self.uses_fused_moe_path() or getattr(self, "mesh", None) is None:
+      return False
+    try:
+      # pylint: disable=import-outside-toplevel
+      # pytype: disable=import-error
+      import inspect
+
+      from tpu_inference.layers.common.fused_moe_gmm import fused_moe_func
+      from tpu_inference import envs as tpu_inference_envs
+    except ImportError:
+      return False
+    if "partial_output_to_add" not in inspect.signature(fused_moe_func).parameters:
+      return False
+    if tpu_inference_envs.ENABLE_RS_KERNEL or tpu_inference_envs.USE_GMM_FUSED_RS_KERNEL:
+      return False
+    scatter_results = (
+        self.mesh.shape.get("data", 1) * self.mesh.shape.get("attn_dp", 1) * self.mesh.shape.get("attn_dp_expert", 1)
+    ) > 1
+    return not scatter_results
 
   def retrieve_quantized_weight(
       self,
@@ -4240,6 +4316,7 @@ class RoutedMoE(nnx.Module):
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
       forced_routed_experts: jax.Array | None = None,
+      partial_output_to_add: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
 
@@ -4249,12 +4326,19 @@ class RoutedMoE(nnx.Module):
         in DeepSeek V4's early MoE layers. If None, routing relies purely on `gate_inputs` or `inputs`.
       gate_inputs: Optional alternate inputs to feed into the routing gate.
       out_sharding: Optional sharding specification for the output.
+      partial_output_to_add: Optional `[B, S, D]` per-device partial sum that is
+        added to the routed-expert partial *before* the MoE all-reduce (fused
+        tpu_inference path only; see `fused_moe_partial_output_supported`). The
+        returned output then equals `routed + allreduce(partial)` at the cost of
+        a single collective.
 
     Returns:
       A tuple containing the MoE output, the load balance loss (if applicable),
       and any routed bias updates.
     """
     cfg = self.config
+    if partial_output_to_add is not None and not self.uses_fused_moe_path():
+      raise ValueError("partial_output_to_add is only supported on the fused (vllm_rpa) MoE path.")
     gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
     routing_inputs = inputs.astype(gate_dtype) if gate_inputs is None else gate_inputs.astype(gate_dtype)
     inputs = inputs.astype(cfg.dtype)
@@ -4401,6 +4485,7 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           native_w1_scale=wi_native_scale,
           native_w2_scale=wo_native_scale,
+          partial_output_to_add=partial_output_to_add,
       )
     elif cfg.sparse_matmul:
       if quantizations.in_serve_mode(self.quant):

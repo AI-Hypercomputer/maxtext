@@ -293,6 +293,9 @@ fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference
 fp8_moe_fake_quant: false
 # Trainer side: the rollout serves fp8_moe experts, so weight sync quantizes them (and emits their scales).
 rollout_fp8_moe: false
+# Fused vLLM MoE path only: reduce the shared expert together with the routed experts (one all-reduce
+# instead of two). Numerically `routed + sigmoid(gate) * shared` either way.
+fuse_shared_expert_all_reduce: true
 load_balance_loss_weight: 0.0 # weight for the load balance loss
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul
