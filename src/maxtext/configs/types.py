@@ -1362,6 +1362,13 @@ class MoEGeneral(BaseModel):
           " use_ragged_sort=False; falls back to 'xla' at runtime when the kernel preconditions do not hold."
       ),
   )
+  moe_combine_block_tokens: int = Field(
+      256,
+      description=(
+          "Tokens per grid step for moe_combine_kernel='tc' (power of two >= 128). Automatically stepped down by"
+          " powers of two (>= 128) to divide the token count and fit within moe_tc_vmem_limit_mib."
+      ),
+  )
   moe_permute_kernel: Literal["xla", "tc"] = Field(
       "xla",
       description=(
@@ -1370,6 +1377,20 @@ class MoEGeneral(BaseModel):
           " (kernels/moe_combine_tc.py `permute`, forward and backward). Requires moe_use_direct_token_gather=True"
           " and use_ring_of_experts=False; falls back to 'xla' at runtime when the kernel preconditions do not"
           " hold."
+      ),
+  )
+  moe_permute_block_tokens: int = Field(
+      512,
+      description=(
+          "Tokens per grid step for moe_permute_kernel='tc' (power of two >= 128). Automatically stepped down by"
+          " powers of two (>= 128) to divide the token count and fit within moe_tc_vmem_limit_mib."
+      ),
+  )
+  moe_tc_vmem_limit_mib: int = Field(
+      120,
+      description=(
+          "Maximum per-kernel VMEM footprint in MiB for moe_combine_kernel='tc' and moe_permute_kernel='tc'"
+          " (>= 16). Block size is stepped down to fit this budget; shapes that still exceed it fall back to 'xla'."
       ),
   )
   use_gather_mosaic_kernel: bool = Field(
@@ -5878,6 +5899,17 @@ class MaxTextConfig(
 
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
+
+    if self.moe_combine_block_tokens < 128 or (self.moe_combine_block_tokens & (self.moe_combine_block_tokens - 1)) != 0:
+      raise ValueError(
+          f"`moe_combine_block_tokens` must be a power of two >= 128, got {self.moe_combine_block_tokens}."
+      )
+    if self.moe_permute_block_tokens < 128 or (self.moe_permute_block_tokens & (self.moe_permute_block_tokens - 1)) != 0:
+      raise ValueError(
+          f"`moe_permute_block_tokens` must be a power of two >= 128, got {self.moe_permute_block_tokens}."
+      )
+    if self.moe_tc_vmem_limit_mib < 16:
+      raise ValueError(f"`moe_tc_vmem_limit_mib` must be >= 16, got {self.moe_tc_vmem_limit_mib}.")
 
     if self.moe_combine_kernel == "tc":
       if not self.sparse_matmul:

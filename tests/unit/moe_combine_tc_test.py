@@ -235,6 +235,9 @@ class MoeCombineTest(parameterized.TestCase):
     x, sort_idx, weights, group_sizes, _ = _problem(3, 100, 8, 16, 128)
     y = moe_combine_tc.combine(x, sort_idx, weights, group_sizes, block_tokens=128, interpret=True)
     np.testing.assert_array_equal(np.asarray(y), np.asarray(moe_combine_tc.combine_reference(x, sort_idx, weights)))
+    self.assertIsNone(
+        moe_combine_tc.combine(x, sort_idx, weights, group_sizes, block_tokens=128, interpret=True, fallback=False)
+    )
 
   @parameterized.named_parameters(
       ("uniform", 0.0),
@@ -259,6 +262,195 @@ class MoeCombineTest(parameterized.TestCase):
     sort_idx = jnp.argsort(jnp.zeros((800,), jnp.int32))
     group_sizes = jnp.array([800] + [0] * 15, jnp.int32)
     self.assertIsNone(moe_combine_tc.permute(x, sort_idx, group_sizes, 8, block_tokens=128, interpret=True))
+
+  @parameterized.named_parameters(
+      ("align8_384tok_k2_g16", 384, 2, 16, 128, 128, 8),
+      ("align16_512tok_k1_g180", 512, 1, 180, 128, 128, 16),
+  )
+  def test_three_or_more_experts_sharing_single_granule(
+      self, num_tokens, k, num_groups, hidden_dim, block_tokens, align
+  ):
+    """When >= 3 experts in the same token block start inside one 8/16-row granule, that granule is staged at most once."""
+    x, sort_idx, weights, group_sizes, dy = _problem(42, num_tokens, k, num_groups, hidden_dim, skew=0.0)
+    # pylint: disable=protected-access
+    dma_table = moe_combine_tc._build_dma_table(sort_idx, group_sizes, num_tokens, k, block_tokens, align=align)
+    num_fields = moe_combine_tc._NUM_DMA_TABLE_FIELDS
+    num_blocks = num_tokens // block_tokens
+    table = (
+        np.asarray(dma_table)
+        .reshape(num_blocks, -1)[:, : num_fields * num_groups]
+        .reshape(num_blocks, num_fields, num_groups)
+    )
+    head_hbm = table[:, moe_combine_tc._HEAD_STAGE_HBM]
+    tail_hbm = table[:, moe_combine_tc._TAIL_STAGE_HBM]
+    # pylint: enable=protected-access
+    for block_idx in range(num_blocks):
+      staged = [v for v in np.concatenate([head_hbm[block_idx], tail_hbm[block_idx]]) if v >= 0]
+      self.assertEqual(len(staged), len(set(staged)))
+    combine_fn = functools.partial(moe_combine_tc.combine, block_tokens=block_tokens, interpret=_interpret(), align=align)
+    self._check_combine(combine_fn, x, sort_idx, weights, group_sizes, dy)
+    permute_fn = functools.partial(
+        moe_combine_tc.permute, num_experts_per_tok=k, block_tokens=block_tokens, interpret=_interpret(), align=align
+    )
+    y_perm, vjp_perm = jax.vjp(lambda a: permute_fn(a, sort_idx, group_sizes), dy)
+    (dx_perm,) = vjp_perm(x)
+    np.testing.assert_array_equal(_f32(y_perm), _f32(dy[sort_idx // k]))
+    unsorted_x = x.astype(jnp.float32)[jnp.argsort(sort_idx)]
+    dx_perm_ref = jnp.sum(unsorted_x.reshape(num_tokens, k, hidden_dim), axis=1).astype(jnp.bfloat16)
+    np.testing.assert_allclose(_f32(dx_perm), _f32(dx_perm_ref), rtol=1e-2, atol=1e-2)
+
+  def test_max_token_65535_row_info_roundtrip(self):
+    """Token 65535 (`num_tokens=65536`) has `token_lo=255, token_hi=255` and must not collide with `_INFO_FILL`."""
+    k = 8
+    block_tokens = 256
+    block_start_token = 65536 - block_tokens  # 65280
+    # Build sort_idx entries for the last token block (tokens 65280..65535), including token 65535 slots 0..7.
+    tokens = np.arange(block_start_token, 65536, dtype=np.int32)
+    sort_idx = jnp.asarray(tokens * k + (tokens % k), dtype=jnp.int32)
+    # pylint: disable=protected-access
+    row_info = moe_combine_tc._build_row_info(sort_idx, k)
+    filler = jnp.full((block_tokens, moe_combine_tc._LANES), moe_combine_tc._INFO_FILL, dtype=jnp.bfloat16)
+    window_info = jnp.concatenate([row_info, filler], axis=0)[None, :, :]  # [1, 512, 128]
+    tok_in_block, topk_slot = moe_combine_tc._decode_row_info(
+        window_info,
+        0,
+        0,
+        2 * block_tokens,
+        block_tokens,
+        block_start_token,
+        block_tokens,
+        transpose=False,
+    )
+    tok_in_block_t, topk_slot_t = moe_combine_tc._decode_row_info(
+        window_info,
+        0,
+        0,
+        2 * block_tokens,
+        block_tokens,
+        block_start_token,
+        block_tokens,
+        transpose=True,
+    )
+    # pylint: enable=protected-access
+    np.testing.assert_array_equal(np.asarray(tok_in_block[:block_tokens, 0]), np.arange(block_tokens, dtype=np.int32))
+    np.testing.assert_array_equal(np.asarray(tok_in_block[block_tokens:, 0]), np.full(block_tokens, -1, dtype=np.int32))
+    np.testing.assert_array_equal(np.asarray(topk_slot[:block_tokens, 0]), tokens % k)
+    np.testing.assert_array_equal(np.asarray(tok_in_block_t[0]), np.asarray(tok_in_block[:, 0]))
+    np.testing.assert_array_equal(np.asarray(topk_slot_t[0]), np.asarray(topk_slot[:, 0]))
+
+  @parameterized.named_parameters(
+      ("k1_top1", 256, 1, 8, 128, 128, "random"),
+      ("single_expert_total", 256, 4, 1, 128, 128, "random"),
+      ("all_tokens_one_expert", 256, 4, 16, 128, 128, "single_active"),
+      ("trailing_empty_experts", 256, 4, 16, 128, 128, "first_half_only"),
+      ("single_block_combine_256", 256, 4, 16, 128, 256, "random"),
+      ("single_block_permute_512", 512, 4, 16, 128, None, "random"),
+      ("many_experts_256_stride_gt_1024", 256, 4, 256, 128, 128, "random"),
+      ("negative_and_zero_weights", 256, 4, 16, 128, 128, "neg_zero_weights"),
+  )
+  def test_routing_and_shape_corner_cases(self, num_tokens, k, num_groups, hidden_dim, block_tokens, mode):
+    rng = np.random.default_rng(99)
+    if mode == "single_active":
+      experts = np.broadcast_to(np.arange(k, dtype=np.int32), (num_tokens, k)).copy()
+      if k == 1:
+        experts[:] = 5
+      else:
+        experts[:, 0] = 5
+    elif mode == "first_half_only":
+      experts = np.stack([rng.choice(num_groups // 2, size=k, replace=False) for _ in range(num_tokens)])
+    elif num_groups == 1:
+      experts = np.zeros((num_tokens, k), dtype=np.int32)
+    else:
+      experts = np.stack([rng.choice(num_groups, size=k, replace=False) for _ in range(num_tokens)])
+    x, sort_idx, weights, group_sizes, dy = _sorted_problem(rng, experts, num_tokens, k, num_groups, hidden_dim)
+    if mode == "neg_zero_weights":
+      raw_w = rng.standard_normal((num_tokens, k)).astype(np.float32)
+      raw_w[::3, 0] = 0.0
+      weights = jnp.asarray(raw_w, dtype=jnp.bfloat16)
+
+    combine_fn = functools.partial(moe_combine_tc.combine, block_tokens=block_tokens, interpret=_interpret())
+    self._check_combine(combine_fn, x, sort_idx, weights, group_sizes, dy)
+
+    permute_fn = functools.partial(
+        moe_combine_tc.permute, num_experts_per_tok=k, block_tokens=block_tokens, interpret=_interpret()
+    )
+    y_perm, vjp_perm = jax.vjp(lambda a: permute_fn(a, sort_idx, group_sizes), dy)
+    (dx_perm,) = vjp_perm(x)
+    np.testing.assert_array_equal(_f32(y_perm), _f32(dy[sort_idx // k]))
+    unsorted_x = x.astype(jnp.float32)[jnp.argsort(sort_idx)]
+    dx_perm_ref = jnp.sum(unsorted_x.reshape(num_tokens, k, hidden_dim), axis=1).astype(jnp.bfloat16)
+    np.testing.assert_allclose(_f32(dx_perm), _f32(dx_perm_ref), rtol=1e-2, atol=1e-2)
+
+  def test_vmem_limit_step_down_and_fallback(self):
+    """When `block_tokens` exceeds `vmem_limit_bytes`, `_resolve_config` steps down to 256/128 or returns None."""
+    num_tokens, k, num_groups, hidden_dim = 512, 8, 64, 512
+    # pylint: disable=protected-access
+    vmem_128 = moe_combine_tc._required_vmem_bytes(128, k, num_groups, hidden_dim, 2, is_combine=True)
+    vmem_256 = moe_combine_tc._required_vmem_bytes(256, k, num_groups, hidden_dim, 2, is_combine=True)
+    vmem_512 = moe_combine_tc._required_vmem_bytes(512, k, num_groups, hidden_dim, 2, is_combine=True)
+    self.assertLess(vmem_128, vmem_256)
+    self.assertLess(vmem_256, vmem_512)
+
+    group_sizes = jnp.full((num_groups,), (num_tokens * k) // num_groups, dtype=jnp.int32)
+    cfg_step_to_256 = moe_combine_tc._resolve_config(
+        (num_tokens * k, hidden_dim),
+        jnp.bfloat16,
+        num_tokens,
+        k,
+        group_sizes,
+        block_tokens=512,
+        interpret=False,
+        align=8,
+        split_weights=False,
+        default_block_tokens=512,
+        is_combine=True,
+        vmem_limit_bytes=vmem_256,
+    )
+    self.assertIsNotNone(cfg_step_to_256)
+    self.assertEqual(cfg_step_to_256.block_tokens, 256)
+
+    cfg_step_to_128 = moe_combine_tc._resolve_config(
+        (num_tokens * k, hidden_dim),
+        jnp.bfloat16,
+        num_tokens,
+        k,
+        group_sizes,
+        block_tokens=512,
+        interpret=False,
+        align=8,
+        split_weights=False,
+        default_block_tokens=512,
+        is_combine=True,
+        vmem_limit_bytes=vmem_128,
+    )
+    self.assertIsNotNone(cfg_step_to_128)
+    self.assertEqual(cfg_step_to_128.block_tokens, 128)
+
+    cfg_too_small = moe_combine_tc._resolve_config(
+        (num_tokens * k, hidden_dim),
+        jnp.bfloat16,
+        num_tokens,
+        k,
+        group_sizes,
+        block_tokens=512,
+        interpret=False,
+        align=8,
+        split_weights=False,
+        default_block_tokens=512,
+        is_combine=True,
+        vmem_limit_bytes=vmem_128 - 1,
+    )
+    self.assertIsNone(cfg_too_small)
+    # pylint: enable=protected-access
+
+    # Verify kernel_supported bounds:
+    self.assertFalse(moe_combine_tc.kernel_supported((2048, 0), jnp.bfloat16, 256, 8, 256))
+    self.assertFalse(moe_combine_tc.kernel_supported((0, 128), jnp.bfloat16, 256, 0, 256))
+    self.assertFalse(moe_combine_tc.kernel_supported((256 * 129, 128), jnp.bfloat16, 256, 129, 256))
+    self.assertFalse(moe_combine_tc.kernel_supported((512, 128), jnp.bfloat16, 64, 8, 64))
+    self.assertFalse(moe_combine_tc.kernel_supported((2048, 128), jnp.bfloat16, 256, 8, 256, num_groups=0))
+    self.assertTrue(moe_combine_tc.kernel_supported((65536 * 8, 128), jnp.bfloat16, 65536, 8, 256, num_groups=16))
+    self.assertFalse(moe_combine_tc.kernel_supported(((65536 + 256) * 8, 128), jnp.bfloat16, 65536 + 256, 8, 256))
 
 
 if __name__ == "__main__":

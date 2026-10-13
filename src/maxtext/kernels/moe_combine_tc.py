@@ -122,16 +122,24 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-__all__ = ["combine", "combine_reference", "kernel_supported", "permute"]
+__all__ = [
+    "DEFAULT_COMBINE_BLOCK_TOKENS",
+    "DEFAULT_PERMUTE_BLOCK_TOKENS",
+    "DEFAULT_VMEM_LIMIT_BYTES",
+    "combine",
+    "combine_reference",
+    "kernel_supported",
+    "permute",
+]
 
 _LANES = 128
-_COMBINE_BLOCK_TOKENS = 256  # combine: tokens per grid step
-_PERMUTE_BLOCK_TOKENS = 512  # permute: no x window in VMEM, so larger blocks fit
+DEFAULT_COMBINE_BLOCK_TOKENS = 256  # combine: default tokens per grid step
+DEFAULT_PERMUTE_BLOCK_TOKENS = 512  # permute: default tokens per grid step
+DEFAULT_VMEM_LIMIT_BYTES = 120 * 1024 * 1024  # default per-kernel VMEM budget (120 MiB)
 _ROW_CHUNK = 256  # buffer rows processed per routing-matrix chunk
 _COL_CHUNK = 256  # hidden-dimension columns processed per MXU matmul chunk
 _FWD_BUCKET_ROWS = 512  # forward MXU contraction-size bucket in buffer rows
 _SCATTER_ROWS_PER_CHUNK = 1024  # scatter direction: buffer rows per compute chunk
-_VMEM_LIMIT = 120 * 1024 * 1024
 
 # Fields of the per-block SMEM DMA schedule table (`num_groups` entries per field, one per expert):
 _WIN_HBM_START = 0  # HBM start row of this expert's (coalesced) DMA window
@@ -162,6 +170,7 @@ class _Config(NamedTuple):
   split_weights: bool  # True when routing weights are f32 (split into bf16 hi + lo parts)
   interpret: Any  # False or pltpu.InterpretParams
   align: int  # DMA / VMEM row alignment A
+  vmem_limit_bytes: int  # max per-kernel VMEM budget in bytes
 
 
 # ---------------------------------------------------------------------------
@@ -169,11 +178,11 @@ class _Config(NamedTuple):
 # ---------------------------------------------------------------------------
 
 
-def _round_up(x, multiple):
+def _round_up(x: int, multiple: int) -> int:
   return (x + multiple - 1) // multiple * multiple
 
 
-def _dma_table_stride(num_groups):
+def _dma_table_stride(num_groups: int) -> int:
   """Per-block SMEM table length: a valid rank-1 Pallas TPU block size >= _NUM_DMA_TABLE_FIELDS * num_groups."""
   min_len = _NUM_DMA_TABLE_FIELDS * num_groups
   if min_len > 1024:
@@ -184,7 +193,7 @@ def _dma_table_stride(num_groups):
   return stride
 
 
-def _buffer_rows(block_tokens, k, num_groups, align=8):
+def _buffer_rows(block_tokens: int, k: int, num_groups: int, align: int = 8) -> int:
   """Static upper bound on VMEM window-buffer rows per token block.
 
   A token block owns `block_tokens * k` rows across at most `num_groups`
@@ -195,6 +204,71 @@ def _buffer_rows(block_tokens, k, num_groups, align=8):
   return _round_up(block_rows + (2 * align - 2) * min(num_groups, block_rows), _ROW_CHUNK)
 
 
+def _gather_vmem_bytes(
+    buf_rows: int,
+    block_tokens: int,
+    hidden_dim: int,
+    itemsize: int,
+    *,
+    weighted: bool,
+    split_weights: bool,
+) -> int:
+  """Estimated VMEM footprint in bytes for `_gather_call`."""
+  num_parts = 2 if (weighted and split_weights) else 1
+  return (
+      2 * buf_rows * (hidden_dim + _LANES) * itemsize  # window_x_vmem + window_info_vmem
+      + 2 * block_tokens * hidden_dim * itemsize  # out_ref double-buffered blocks
+      + num_parts * block_tokens * buf_rows * itemsize  # routing_matrix_vmem
+      + (2 * block_tokens * _LANES * 4 if weighted else 0)  # weights_ref blocks
+      + 16 * 1024 * 1024  # dot operands / temporaries, compiler scratch
+  )
+
+
+def _combine_bwd_vmem_bytes(buf_rows: int, block_tokens: int, hidden_dim: int, itemsize: int) -> int:
+  """Estimated VMEM footprint in bytes for `_bwd_call`."""
+  return (
+      4 * buf_rows * hidden_dim * itemsize  # window_x_vmem + window_grad_x_vmem
+      + 2 * buf_rows * _LANES * itemsize  # window_info_vmem
+      + 2 * block_tokens * hidden_dim * itemsize  # grad_out_ref blocks
+      + 4 * block_tokens * _LANES * 4  # weights_ref / grad_weights_ref blocks
+      + 24 * 1024 * 1024  # chunk temporaries, compiler scratch
+  )
+
+
+def _permute_fwd_vmem_bytes(buf_rows: int, block_tokens: int, hidden_dim: int, itemsize: int) -> int:
+  """Estimated VMEM footprint in bytes for `_permute_fwd_call`."""
+  return (
+      2 * buf_rows * hidden_dim * itemsize  # window_out_vmem
+      + 2 * buf_rows * _LANES * itemsize  # window_info_vmem
+      + 2 * block_tokens * hidden_dim * itemsize  # tokens_x_ref blocks
+      + 20 * 1024 * 1024  # chunk temporaries, compiler scratch
+  )
+
+
+def _required_vmem_bytes(
+    block_tokens: int,
+    k: int,
+    num_groups: int,
+    hidden_dim: int,
+    itemsize: int,
+    *,
+    split_weights: bool = False,
+    align: int = 8,
+    is_combine: bool = True,
+) -> int:
+  """Returns the peak VMEM bytes required across forward and backward passes."""
+  buf_rows = _buffer_rows(block_tokens, k, num_groups, align)
+  if is_combine:
+    fwd_bytes = _gather_vmem_bytes(
+        buf_rows, block_tokens, hidden_dim, itemsize, weighted=True, split_weights=split_weights
+    )
+    bwd_bytes = _combine_bwd_vmem_bytes(buf_rows, block_tokens, hidden_dim, itemsize)
+    return max(fwd_bytes, bwd_bytes)
+  fwd_bytes = _permute_fwd_vmem_bytes(buf_rows, block_tokens, hidden_dim, itemsize)
+  bwd_bytes = _gather_vmem_bytes(buf_rows, block_tokens, hidden_dim, itemsize, weighted=False, split_weights=False)
+  return max(fwd_bytes, bwd_bytes)
+
+
 def kernel_supported(
     x_shape: tuple[int, ...],
     x_dtype: jax.typing.DTypeLike,
@@ -202,29 +276,89 @@ def kernel_supported(
     k: int,
     block_tokens: int,
     align: int = 8,
+    *,
+    num_groups: int | None = None,
+    split_weights: bool = False,
+    is_combine: bool = True,
+    vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
 ) -> bool:
-  """Returns whether the Pallas kernels support this problem shape and dtype."""
+  """Returns whether the Pallas kernels support this problem shape, dtype, and VMEM budget."""
   if len(x_shape) != 2:
     return False
   num_rows, hidden_dim = x_shape
-  return (
-      jnp.dtype(x_dtype) == jnp.bfloat16
+  dtype = jnp.dtype(x_dtype)
+  shape_ok = (
+      dtype == jnp.bfloat16
+      and hidden_dim > 0
       and hidden_dim % _LANES == 0
-      and k <= _LANES
+      and 0 < k <= _LANES
       and align >= 8
       and (align & (align - 1)) == 0
-      and num_rows == num_tokens * k
-      and num_rows % align == 0
-      and block_tokens % _LANES == 0
+      and block_tokens >= _LANES
+      and (block_tokens & (block_tokens - 1)) == 0
+      and num_tokens >= block_tokens
       and num_tokens % block_tokens == 0
       and num_tokens <= _MAX_TOKENS
+      and num_rows == num_tokens * k
+      and num_rows % align == 0
   )
+  if not shape_ok:
+    return False
+  if num_groups is not None:
+    if num_groups <= 0:
+      return False
+    vmem_bytes = _required_vmem_bytes(
+        block_tokens,
+        k,
+        num_groups,
+        hidden_dim,
+        dtype.itemsize,
+        split_weights=split_weights,
+        align=align,
+        is_combine=is_combine,
+    )
+    if vmem_bytes > vmem_limit_bytes:
+      return False
+  return True
 
 
-def _block_tokens(num_tokens, default):
-  """Largest power-of-two divisor of num_tokens that is <= the tuned default (>= 128)."""
-  block_tokens = default
-  while block_tokens > _LANES and num_tokens % block_tokens != 0:
+def _select_block_tokens(
+    num_tokens: int,
+    max_block_tokens: int,
+    *,
+    k: int,
+    num_groups: int,
+    hidden_dim: int,
+    itemsize: int,
+    split_weights: bool,
+    align: int,
+    is_combine: bool,
+    vmem_limit_bytes: int,
+) -> int:
+  """Largest power-of-two `block_tokens` (`_LANES <= block_tokens <= max_block_tokens`) dividing `num_tokens` within `vmem_limit_bytes`."""
+  if max_block_tokens < _LANES or (max_block_tokens & (max_block_tokens - 1)) != 0:
+    return max_block_tokens
+  block_tokens = max_block_tokens
+  while block_tokens > _LANES:
+    if (
+        num_tokens >= block_tokens
+        and num_tokens % block_tokens == 0
+        and (
+            num_groups <= 0
+            or _required_vmem_bytes(
+                block_tokens,
+                k,
+                num_groups,
+                hidden_dim,
+                itemsize,
+                split_weights=split_weights,
+                align=align,
+                is_combine=is_combine,
+            )
+            <= vmem_limit_bytes
+        )
+    ):
+      break
     block_tokens //= 2
   return block_tokens
 
@@ -299,10 +433,15 @@ def _build_dma_table(sort_idx, group_sizes, num_tokens, k, block_tokens, align=8
     return (granule_hbm_start >= 0) & jnp.any(overlap, axis=2)
 
   # A tail granule that is also the head granule of a later expert in this block
-  # is already staged by that head -- never preload the same granule twice.
+  # is already staged by that head, and multiple small experts starting in the
+  # same head granule only stage it once -- never preload the same granule twice.
   valid_heads = jnp.where(nonempty, head_partial_granule_hbm, -2)
+  same_head_as_earlier = jnp.any(
+      jnp.tril(valid_heads[:, :, None] == valid_heads[:, None, :], k=-1),
+      axis=2,
+  )
   shared_with_head = jnp.any(tail_partial_granule_hbm[:, :, None] == valid_heads[:, None, :], axis=2)
-  need_head = has_earlier_block_rows(head_partial_granule_hbm)
+  need_head = has_earlier_block_rows(head_partial_granule_hbm) & ~same_head_as_earlier
   need_tail = has_earlier_block_rows(tail_partial_granule_hbm) & ~shared_with_head
 
   # If a needed granule lies in a window written by the previous block, copy
@@ -639,12 +778,13 @@ def _gather_call(sorted_x, padded_weights, dma_table, row_info, *, num_tokens, c
     in_specs = table_and_hbm_specs
 
   itemsize = jnp.dtype(sorted_x.dtype).itemsize
-  vmem_bytes = (
-      2 * buf_rows * (hidden_dim + _LANES) * itemsize  # window_x_vmem + window_info_vmem
-      + 2 * block_tokens * hidden_dim * itemsize  # out_ref double-buffered blocks
-      + num_parts * block_tokens * buf_rows * itemsize  # routing_matrix_vmem
-      + (2 * block_tokens * _LANES * 4 if padded_weights is not None else 0)  # weights_ref blocks
-      + 16 * 1024 * 1024  # dot operands / temporaries, compiler scratch
+  vmem_bytes = _gather_vmem_bytes(
+      buf_rows,
+      block_tokens,
+      hidden_dim,
+      itemsize,
+      weighted=padded_weights is not None,
+      split_weights=cfg.split_weights,
   )
   return pl.pallas_call(
       kernel,
@@ -665,7 +805,7 @@ def _gather_call(sorted_x, padded_weights, dma_table, row_info, *, num_tokens, c
           ],
       ),
       compiler_params=pltpu.CompilerParams(
-          dimension_semantics=("arbitrary",), vmem_limit_bytes=min(vmem_bytes, _VMEM_LIMIT)
+          dimension_semantics=("arbitrary",), vmem_limit_bytes=min(vmem_bytes, cfg.vmem_limit_bytes)
       ),
       interpret=cfg.interpret,
       name=name,
@@ -735,17 +875,19 @@ def _copy_shared_granule_from_prev_slot(
     ]
 
 
-def _prepare_scatter_output_slot(scatter: _ScatterWindowState, cur_dma_table_ref, slot):
+def _prepare_scatter_output_slot(scatter: _ScatterWindowState, cur_dma_table_ref, slot, buf_rows):
   """Ensures `window_out_vmem[slot]` holds all preloaded partial granules before compute starts.
 
-  Block 0 preloads its own partial granules from HBM. Every block waits for the
-  HBM preloads into `slot` (started one step ahead) to finish, then vector-copies
-  any boundary granules shared with the immediately preceding block (`1 - slot`).
+  Block 0 zeroes both output slots and preloads its own partial granules from HBM.
+  Every block waits for the HBM preloads into `slot` (started one step ahead) to
+  finish, then vector-copies any boundary granules shared with the immediately
+  preceding block (`1 - slot`).
   """
   block_idx = pl.program_id(0)
 
   @pl.when(block_idx == 0)
   def _():
+    _fill_both_slots(scatter.window_out_vmem, buf_rows, 0)
     scatter.preloaded_rows_smem[0] = lax.fori_loop(
         0,
         scatter.num_groups,
@@ -973,7 +1115,7 @@ def _bwd_kernel(
       num_groups,
       align,
   )
-  _prepare_scatter_output_slot(scatter, cur_dma_table_ref, slot)
+  _prepare_scatter_output_slot(scatter, cur_dma_table_ref, slot, buf_rows)
   packed_rows = _num_packed_rows(cur_dma_table_ref, num_groups)
   block_start_token = pl.program_id(0) * block_tokens
   _bwd_compute(
@@ -1008,13 +1150,7 @@ def _bwd_call(sorted_x, padded_weights, dma_table, row_info, grad_out, cfg: _Con
       pl.BlockSpec(memory_space=pl.ANY),
   ]
   itemsize = jnp.dtype(sorted_x.dtype).itemsize
-  vmem_bytes = (
-      4 * buf_rows * hidden_dim * itemsize  # window_x_vmem + window_grad_x_vmem
-      + 2 * buf_rows * _LANES * itemsize  # window_info_vmem
-      + 2 * block_tokens * hidden_dim * itemsize  # grad_out_ref blocks
-      + 4 * block_tokens * _LANES * 4  # weights_ref / grad_weights_ref blocks
-      + 24 * 1024 * 1024  # chunk temporaries, compiler scratch
-  )
+  vmem_bytes = _combine_bwd_vmem_bytes(buf_rows, block_tokens, hidden_dim, itemsize)
   axis_type = jax.typeof(sorted_x).manual_axis_type
   return pl.pallas_call(
       functools.partial(
@@ -1047,7 +1183,7 @@ def _bwd_call(sorted_x, padded_weights, dma_table, row_info, grad_out, cfg: _Con
           ],
       ),
       compiler_params=pltpu.CompilerParams(
-          dimension_semantics=("arbitrary",), vmem_limit_bytes=min(vmem_bytes, _VMEM_LIMIT)
+          dimension_semantics=("arbitrary",), vmem_limit_bytes=min(vmem_bytes, cfg.vmem_limit_bytes)
       ),
       interpret=cfg.interpret,
       name="moe_combine_bwd",
@@ -1092,7 +1228,7 @@ def _permute_fwd_kernel(
       num_groups,
       align,
   )
-  _prepare_scatter_output_slot(scatter, cur_dma_table_ref, slot)
+  _prepare_scatter_output_slot(scatter, cur_dma_table_ref, slot, buf_rows)
 
   packed_rows = _num_packed_rows(cur_dma_table_ref, num_groups)
   col_chunk = _COL_CHUNK if hidden_dim % _COL_CHUNK == 0 else _LANES
@@ -1140,12 +1276,7 @@ def _permute_fwd_call(x, dma_table, row_info, cfg: _Config):
       pl.BlockSpec(memory_space=pl.ANY),
   ]
   itemsize = jnp.dtype(x.dtype).itemsize
-  vmem_bytes = (
-      2 * buf_rows * hidden_dim * itemsize  # window_out_vmem
-      + 2 * buf_rows * _LANES * itemsize  # window_info_vmem
-      + 2 * block_tokens * hidden_dim * itemsize  # tokens_x_ref blocks
-      + 20 * 1024 * 1024  # chunk temporaries, compiler scratch
-  )
+  vmem_bytes = _permute_fwd_vmem_bytes(buf_rows, block_tokens, hidden_dim, itemsize)
   return pl.pallas_call(
       functools.partial(
           _permute_fwd_kernel, num_groups=num_groups, buf_rows=buf_rows, hidden_dim=hidden_dim, align=align
@@ -1167,7 +1298,7 @@ def _permute_fwd_call(x, dma_table, row_info, cfg: _Config):
           ],
       ),
       compiler_params=pltpu.CompilerParams(
-          dimension_semantics=("arbitrary",), vmem_limit_bytes=min(vmem_bytes, _VMEM_LIMIT)
+          dimension_semantics=("arbitrary",), vmem_limit_bytes=min(vmem_bytes, cfg.vmem_limit_bytes)
       ),
       interpret=cfg.interpret,
       name="moe_permute_fwd",
@@ -1180,16 +1311,56 @@ def _permute_fwd_call(x, dma_table, row_info, cfg: _Config):
 
 
 def _resolve_config(
-    rows_shape, dtype, num_tokens, k, group_sizes, *, block_tokens, interpret, align, split_weights, default_block_tokens
-):
+    rows_shape: tuple[int, ...],
+    dtype: jax.typing.DTypeLike,
+    num_tokens: int,
+    k: int,
+    group_sizes: jax.Array | None,
+    *,
+    sort_idx_shape: tuple[int, ...] | None = None,
+    block_tokens: int | None,
+    interpret: bool | pltpu.InterpretParams,
+    align: int,
+    split_weights: bool,
+    default_block_tokens: int,
+    is_combine: bool = True,
+    vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
+) -> _Config | None:
   """Returns `_Config`, or None if the kernel preconditions do not hold (`rows_shape`: the [T*K, D] array)."""
-  if block_tokens is None:
-    block_tokens = _block_tokens(num_tokens, default_block_tokens)
+  if len(rows_shape) != 2 or group_sizes is None or group_sizes.ndim != 1 or group_sizes.shape[0] <= 0:
+    return None
+  if sort_idx_shape is not None and sort_idx_shape != (rows_shape[0],):
+    return None
+  num_groups = int(group_sizes.shape[0])
+  max_block_tokens = default_block_tokens if (block_tokens is None or block_tokens <= 0) else block_tokens
+  block_tokens = _select_block_tokens(
+      num_tokens,
+      max_block_tokens,
+      k=k,
+      num_groups=num_groups,
+      hidden_dim=rows_shape[1],
+      itemsize=jnp.dtype(dtype).itemsize,
+      split_weights=split_weights,
+      align=align,
+      is_combine=is_combine,
+      vmem_limit_bytes=vmem_limit_bytes,
+  )
   if interpret is True:  # dynamic-size DMAs require the Mosaic TPU interpreter
     interpret = pltpu.InterpretParams()
-  if group_sizes is None or not kernel_supported(rows_shape, dtype, num_tokens, k, block_tokens, align):
+  if not kernel_supported(
+      rows_shape,
+      dtype,
+      num_tokens,
+      k,
+      block_tokens,
+      align,
+      num_groups=num_groups,
+      split_weights=split_weights,
+      is_combine=is_combine,
+      vmem_limit_bytes=vmem_limit_bytes,
+  ):
     return None
-  return _Config(k, block_tokens, int(group_sizes.shape[0]), split_weights, interpret, align)
+  return _Config(k, block_tokens, num_groups, split_weights, interpret, align, vmem_limit_bytes)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(4,))
@@ -1238,7 +1409,9 @@ def combine(
     block_tokens: int | None = None,
     interpret: bool | pltpu.InterpretParams = False,
     align: int = 8,
-) -> jax.Array:
+    vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
+    fallback: bool = True,
+) -> jax.Array | None:
   """Combines expert-sorted rows `x` into token outputs `y[t] = sum_k weights[t, k] * x[argsort(sort_idx)[t*K + k]]`.
 
   Args:
@@ -1246,14 +1419,20 @@ def combine(
     sort_idx: `[T*K]` int, stable argsort of the flat (token-major) expert ids.
     weights: `[T, K]` routing weights (any float dtype; non-bf16 weights use an exact hi + lo split).
     group_sizes: `[G]` int, rows per expert group of `x` (must sum to `T*K`), or None to fall back.
-    block_tokens: tokens per grid step (default: 256 or the largest power-of-two divisor of `T >= 128`).
+    block_tokens: tokens per grid step (default: 256, stepped down by powers of two >= 128 to divide `T`
+      and fit `vmem_limit_bytes`).
     interpret: run under the Mosaic TPU interpreter (off-TPU testing); True means `pltpu.InterpretParams()`.
     align: DMA / VMEM row alignment, a power of two >= 8.
+    vmem_limit_bytes: maximum per-kernel VMEM footprint in bytes (default: 120 MiB).
+    fallback: when True (default), falls back to `combine_reference` if the kernel preconditions do not hold;
+      when False, returns None so the caller can run its own fallback.
 
   Returns:
-    `[T, D]` array in `x.dtype` (f32 accumulation). Differentiable w.r.t. `x` and `weights`.
-    Falls back to `combine_reference` when the kernel preconditions (see `kernel_supported`) do not hold.
+    `[T, D]` array in `x.dtype` (f32 accumulation), differentiable w.r.t. `x` and `weights`, or None if
+    `fallback=False` and the kernel preconditions (see `kernel_supported`) do not hold.
   """
+  if weights.ndim != 2:
+    return combine_reference(x, sort_idx, weights) if fallback else None
   num_tokens, k = weights.shape
   cfg = _resolve_config(
       x.shape,
@@ -1261,14 +1440,17 @@ def combine(
       num_tokens,
       k,
       group_sizes,
+      sort_idx_shape=sort_idx.shape,
       block_tokens=block_tokens,
       interpret=interpret,
       align=align,
       split_weights=jnp.dtype(weights.dtype) != jnp.bfloat16,
-      default_block_tokens=_COMBINE_BLOCK_TOKENS,
+      default_block_tokens=DEFAULT_COMBINE_BLOCK_TOKENS,
+      is_combine=True,
+      vmem_limit_bytes=vmem_limit_bytes,
   )
   if cfg is None:
-    return combine_reference(x, sort_idx, weights)
+    return combine_reference(x, sort_idx, weights) if fallback else None
   dma_table = _build_dma_table(sort_idx, group_sizes, num_tokens, k, cfg.block_tokens, align)
   return _combine_vjp(x, weights, sort_idx, dma_table, cfg)
 
@@ -1311,6 +1493,7 @@ def permute(
     block_tokens: int | None = None,
     interpret: bool | pltpu.InterpretParams = False,
     align: int = 8,
+    vmem_limit_bytes: int = DEFAULT_VMEM_LIMIT_BYTES,
 ) -> jax.Array | None:
   """Permutes token activations `x` `[T, D]` into expert-sorted order `[T*K, D]` on the TensorCore.
 
@@ -1319,25 +1502,23 @@ def permute(
   Backward: `dx[t] = sum` over the `K` rows of `t` in `dy`, i.e. the combine forward
   with unit weights.
 
-  Intended configuration: `moe_permute_kernel="tc"` together with the XLA flags
-  `--xla_tpu_offload_gather_to_sparsecore=false`
-  `--xla_tpu_offload_all_supported_gathers_to_sparsecore=false`, so that neither
-  the permute nor the remaining small gathers are serialized on SparseCore
-  behind the expert-weight all-gathers.
-
   Args:
     x: `[T, D]` bf16 token activations.
     sort_idx: `[T*K]` int, stable argsort of the flat (token-major) expert ids.
     group_sizes: `[G]` int, rows per expert group (must sum to `T*K`), or None to return None.
     num_experts_per_tok: `K`.
-    block_tokens: tokens per grid step (default: 512 or the largest power-of-two divisor of `T >= 128`).
+    block_tokens: tokens per grid step (default: 512, stepped down by powers of two >= 128 to divide `T`
+      and fit `vmem_limit_bytes`).
     interpret: run under the Mosaic TPU interpreter (off-TPU testing); True means `pltpu.InterpretParams()`.
     align: DMA / VMEM row alignment, a power of two >= 8.
+    vmem_limit_bytes: maximum per-kernel VMEM footprint in bytes (default: 120 MiB).
 
   Returns:
     `[T*K, D]` array in `x.dtype`, differentiable w.r.t. `x`; or None when the kernel
     preconditions (see `kernel_supported`) do not hold so the caller can fall back.
   """
+  if x.ndim != 2:
+    return None
   num_tokens, hidden_dim = x.shape
   k = int(num_experts_per_tok)
   cfg = _resolve_config(
@@ -1346,11 +1527,14 @@ def permute(
       num_tokens,
       k,
       group_sizes,
+      sort_idx_shape=sort_idx.shape,
       block_tokens=block_tokens,
       interpret=interpret,
       align=align,
       split_weights=False,
-      default_block_tokens=_PERMUTE_BLOCK_TOKENS,
+      default_block_tokens=DEFAULT_PERMUTE_BLOCK_TOKENS,
+      is_combine=False,
+      vmem_limit_bytes=vmem_limit_bytes,
   )
   if cfg is None:
     return None

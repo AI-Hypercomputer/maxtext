@@ -76,6 +76,23 @@ class PyconfigTest(unittest.TestCase):
           moe_use_direct_token_gather=False,
       )
 
+  def test_moe_tc_block_tokens_and_vmem_limit_validation(self):
+    with self.assertRaisesRegex(ValueError, "`moe_combine_block_tokens` must be a power of two >= 128"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_combine_block_tokens=64,
+      )
+    with self.assertRaisesRegex(ValueError, "`moe_permute_block_tokens` must be a power of two >= 128"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_permute_block_tokens=192,
+      )
+    with self.assertRaisesRegex(ValueError, "`moe_tc_vmem_limit_mib` must be >= 16"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_vmem_limit_mib=8,
+      )
+
   def test_step_dropless_fallback_rejects_unreplayable_combinations(self):
     def initialize(**kwargs):
       return pyconfig.initialize(

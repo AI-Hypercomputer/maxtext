@@ -1680,6 +1680,8 @@ class RoutedMoE(nnx.Module):
                 sorted_selected_experts,
                 group_size,
                 self.num_experts_per_tok,
+                block_tokens=self.config.moe_permute_block_tokens,
+                vmem_limit_bytes=self.config.moe_tc_vmem_limit_mib * 1024 * 1024,
                 interpret=self._pallas_interpret(),
             )
         if sorted_inputs is None:
@@ -1774,6 +1776,7 @@ class RoutedMoE(nnx.Module):
     the result is (batch, seq, emb // 128, 128).
     """
 
+    output = None
     if tc_routing is not None:
       output = ring_ragged_unsort_tc(
           intermediate,
@@ -1816,16 +1819,20 @@ class RoutedMoE(nnx.Module):
       # moe_combine_kernel="tc": fused unpermute + top-k weighted sum (f32
       # accumulation, same arithmetic as float32_weight_sum=True). Never
       # materializes the [tokens*top_k, emb] unsorted copy; see
-      # kernels/moe_combine_tc.py.
+      # kernels/moe_combine_tc.py. Returns None when the kernel preconditions
+      # do not hold so we fall through to the XLA path below.
       with jax.named_scope("moe_combine"):
         output = moe_combine_tc.combine(
             intermediate,
             sorted_selected_experts,
             jnp.reshape(weights, (-1, self.num_experts_per_tok)),
             group_sizes,
+            block_tokens=self.config.moe_combine_block_tokens,
+            vmem_limit_bytes=self.config.moe_tc_vmem_limit_mib * 1024 * 1024,
             interpret=self._pallas_interpret(),
+            fallback=False,
         )
-    else:
+    if output is None:
       unsort_intermediate = _sort_activations(
           intermediate,
           jnp.argsort(sorted_selected_experts),
