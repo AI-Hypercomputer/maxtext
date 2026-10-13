@@ -35,6 +35,7 @@ import jax.numpy as jnp
 import pytest
 
 from maxtext.configs import pyconfig
+from maxtext.training_engine import maxtext_engine
 from maxtext.training_engine.maxtext_engine import MaxTextTrainingEngine
 from tests.utils.test_helpers import get_test_config_path
 
@@ -168,6 +169,40 @@ class PrepareWeightSyncTest(unittest.TestCase):
     self.assertIsNone(self.engine._raiden_sync)
     self.assertIsNone(self.engine._last_staged_step)
     self.assertIsNone(self.engine._staged_metadata)
+
+  def test_rollout_weight_dtype_config_reaches_weight_converter(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="test_rollout_weight_dtype",
+        scan_layers=True,
+        num_decoder_layers=2,
+        param_scan_axis=1,
+        inhomogeneous_layer_cycle_interval=1,
+        weight_dtype="float32",
+        rollout_weight_dtype="bfloat16",
+        enable_checkpointing=False,
+    )
+    self.assertEqual(cfg.weight_dtype, jnp.float32)
+    self.assertEqual(cfg.rollout_weight_dtype, jnp.bfloat16)
+
+    with (
+        mock.patch.object(MaxTextTrainingEngine, "_build_model", return_value=mock.MagicMock()),
+        mock.patch.object(MaxTextTrainingEngine, "_build_optimizer", return_value=mock.MagicMock()),
+        mock.patch.object(
+            maxtext_engine.train_utils,
+            "create_training_optimizer",
+            return_value=(mock.MagicMock(), mock.MagicMock()),
+        ),
+        mock.patch.object(maxtext_engine.checkpointing, "CheckpointManager"),
+        mock.patch.object(maxtext_engine.metrics_module, "MetricsLogger"),
+    ):
+      engine = MaxTextTrainingEngine(
+          training_config=cfg,
+          mesh=mock.MagicMock(),
+          wrap_with_tunix_adapter=False,
+      )
+    self.assertIsNotNone(engine._weight_converter)
+    self.assertEqual(engine._weight_converter._direct._resolve_target_dtype(), jnp.bfloat16)
 
 
 if __name__ == "__main__":
