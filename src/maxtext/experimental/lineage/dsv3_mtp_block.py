@@ -181,7 +181,9 @@ def dsv3_mtp_block(
   """Runs the MTP depths, as MaxText's `MultiTokenPredictionBlock.__call__`.
 
   Args:
-    main_hidden_state: Pre-final-norm hidden state of the main decoder.
+    main_hidden_state: Final-norm output of the main decoder (the same
+      normalized hidden state that feeds the main LM head), as in the
+      Megatron-LM reference where `final_layernorm` precedes MTP's `hnorm`.
     input_ids: Main decoder input tokens.
     target_ids: Main decoder target tokens.
     target_mask: Main decoder target mask or packed target segmentation; any

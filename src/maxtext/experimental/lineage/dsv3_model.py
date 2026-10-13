@@ -717,7 +717,9 @@ def dsv3_loss_and_aux(
             ),
         ),
     )
-  logits = dsv3_logits(params, fwd.hidden, cfg, mesh=mesh)
+  assert params.head.final_norm_scale is not None
+  normed_hidden = dsv3_embed.final_norm(fwd.hidden, params.head.final_norm_scale, epsilon=m.norm_epsilon)
+  logits = dsv3_lm_head(params, normed_hidden, cfg, mesh=mesh)
   with jax.named_scope("main_loss"):
     sums = dsv3_loss.masked_token_loss(
         logits,
@@ -793,7 +795,7 @@ def dsv3_loss_and_aux(
       token_zero_embedding = dsv3_embed.embed_single_token(params.embed.table, 0, dtype=m.dtype, iota_embed=m.iota_embed)
     with jax.named_scope("mtp"):
       mtp_outputs = dsv3_mtp_block.dsv3_mtp_block(
-          fwd.hidden,
+          normed_hidden,
           inputs,
           targets,
           target_mask,
