@@ -647,8 +647,8 @@ class TargetFreeConversionTest(unittest.TestCase):
     conv_flat = traverse_util.flatten_dict(converter_out)
 
     self.assertEqual(set(base_flat.keys()), set(conv_flat.keys()))
-    for k in base_flat:
-      v_base = getattr(base_flat[k], "value", base_flat[k])
+    for k, base_val in base_flat.items():
+      v_base = getattr(base_val, "value", base_val)
       v_conv = getattr(conv_flat[k], "value", conv_flat[k])
       self.assertEqual(v_base.shape, v_conv.shape, f"Shape mismatch at {k}")
       self.assertEqual(v_base.dtype, v_conv.dtype, f"Dtype mismatch at {k}")
@@ -678,8 +678,8 @@ class TargetFreeConversionTest(unittest.TestCase):
 
     expected_flat = traverse_util.flatten_dict(expected_out)
     self.assertEqual(set(merged_flat.keys()), set(expected_flat.keys()))
-    for k in expected_flat:
-      v_exp = getattr(expected_flat[k], "value", expected_flat[k])
+    for k, exp_val in expected_flat.items():
+      v_exp = getattr(exp_val, "value", exp_val)
       v_got = getattr(merged_flat[k], "value", merged_flat[k])
       self.assertEqual(v_exp.shape, v_got.shape, f"Shape mismatch at {k}")
       self.assertEqual(v_exp.dtype, v_got.dtype, f"Dtype mismatch at {k}")
@@ -710,8 +710,8 @@ class TargetFreeConversionTest(unittest.TestCase):
         merged_flat[k] = v
 
     self.assertEqual(set(merged_flat.keys()), set(expected_flat.keys()))
-    for k in expected_flat:
-      v_exp = getattr(expected_flat[k], "value", expected_flat[k])
+    for k, exp_val in expected_flat.items():
+      v_exp = getattr(exp_val, "value", exp_val)
       v_got = getattr(merged_flat[k], "value", merged_flat[k])
       np.testing.assert_array_equal(np.asarray(v_exp), np.asarray(v_got))
 
@@ -783,6 +783,51 @@ class TargetFreeConversionTest(unittest.TestCase):
           rollout_backend="maxtext",
       )
     self.assertIn("must be divisible by base_num_kv_heads", str(ctx.exception))
+
+  def test_case_10_dcp_moe_fusion_uses_single_shard(self):
+    """Under DCP (tp=4, kv_tp_size=4, moe_mlp_tp_size=1), MoE wi must fuse with n_shards=1."""
+    cfg = _config(prefuse_moe_weights=True)
+    source = _source_tree(True)
+    src_moe = source["base"]["decoder"]["layers"]["layer_0"]["moe_block"]
+    expected_wi_0 = np.asarray(jnp.take(src_moe["wi_0"], 0, axis=SCAN_AXIS))
+    expected_wi_1 = np.asarray(jnp.take(src_moe["wi_1"], 0, axis=SCAN_AXIS))
+    expected_concat = np.concatenate([expected_wi_0, expected_wi_1], axis=-1)
+
+    # 1. Target-free DCP conversion (kv_tp_size=4, moe_mlp_tp_size=1 resolved from config when omitted)
+    converter = WeightConverter(
+        config=_config(prefuse_moe_weights=True, kv_tp_size=4, moe_mlp_tp_size=1),
+        tp=4,
+        prefuse_moe_weights=True,
+        rollout_backend="maxtext",
+    )
+    self.assertEqual(converter.kv_tp_size, 4)
+    self.assertEqual(converter.moe_mlp_tp_size, 1)
+    out = converter.convert(source, target_state=None)
+    out_root = out["base"] if "base" in out else out
+    wi_tf = getattr(
+        out_root["decoder"]["layers_0"]["moe_block"]["wi"],
+        "value",
+        out_root["decoder"]["layers_0"]["moe_block"]["wi"],
+    )
+    np.testing.assert_array_equal(np.asarray(wi_tf), expected_concat)
+
+    # 2. Target-guided DCP conversion where target wi is expert-sharded over dcp on axis 0
+    if jax.device_count() >= 4:
+      dcp_mesh = jax.sharding.Mesh(
+          np.asarray(jax.devices()[:4]).reshape(1, 2, 2),
+          ("attn_dp", "model", "dcp"),
+      )
+      target = _place(
+          _target_tree(),
+          dcp_mesh,
+          lambda key, val: (
+              jax.sharding.PartitionSpec("dcp", None, None) if key[-1] == "wi" else jax.sharding.PartitionSpec()
+          ),
+      )
+      guided_converter = WeightConverter(rules=None, config=cfg, tp=4)
+      guided_out = guided_converter.convert(source, target_state=target)
+      wi_guided = guided_out["decoder"]["layers_0"]["moe_block"]["wi"]
+      np.testing.assert_array_equal(np.asarray(wi_guided), expected_concat)
 
 
 if __name__ == "__main__":
