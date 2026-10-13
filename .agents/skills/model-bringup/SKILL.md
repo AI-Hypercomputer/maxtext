@@ -1,12 +1,12 @@
 ---
 name: model-bringup
 description: >-
-  Performs new LLM/VLM model bring-up in MaxText on TPU VMs. Use when onboarding a new HuggingFace model (e.g., Qwen, Llama, Gemma variants) to MaxText. This includes analyzing the HuggingFace source code, implementing decoder layers in JAX/Flax, writing layer-wise unit tests with weight-copy/allclose checks, writing checkpoint conversion utilities for safetensors-to-orbax, and running the end-to-end forward pass logits checker. Don't use for general MaxText training execution, standard inference, or debugging unrelated TPU compilation issues.
+  Performs new LLM/VLM model bring-up in MaxText on TPU VMs. Use when onboarding a new HuggingFace model (e.g., Qwen, Llama, Gemma variants) to MaxText. This includes analyzing the HuggingFace source code, implementing decoder layers in JAX/Flax, writing layer-wise unit tests with weight-copy/allclose checks, writing checkpoint conversion utilities for safetensors-to-orbax, and verifying a mini model end to end (forward, backward, optimizer steps, logits, and decode). Don't use for general MaxText training execution, standard inference, or debugging unrelated TPU compilation issues.
 ---
 
 # MaxText New Model Bring-up Workflow
 
-New model bring-up in MaxText is a structured 4-phase workflow designed to systematically port a PyTorch/HuggingFace model, implement it in JAX, and mathematically verify correctness using exact weight copies, logits validation, and autoregressive decoding.
+New model bring-up in MaxText is a structured 4-phase workflow designed to systematically port a PyTorch/HuggingFace model, implement it in JAX, and verify correctness on a trimmed mini model (exact weight copies, forward/backward/optimizer parity, logits, and autoregressive decoding).
 
 Before beginning, review [docs/guides/model_bringup.md](../../../docs/guides/model_bringup.md) for the project's standard bring-up guide and [docs/reference/models/supported_models_and_architectures.md](../../../docs/reference/models/supported_models_and_architectures.md) to inspect existing supported architectures.
 
@@ -23,7 +23,7 @@ Update this document at each phase of the bring-up:
 2. **Phase Status Tracking**: Mark each phase as `NOT STARTED`, `IN PROGRESS`, `BLOCKED`, or `DONE`.
 3. **Bugs & Resolutions**: Log all bugs encountered during each phase and the exact fixes applied.
 4. **Session Wrap-up & Pitfalls**: Summarize all model-specific pitfalls, gotchas, and caveats upon completion.
-5. **Full Reproduction Commands**: Document exact CLI commands for mini safetensors slicing, checkpoint conversion, decode, and forward pass logits checking.
+5. **Full Reproduction Commands**: Document exact commands for building the mini model, checkpoint conversion, mini verification, decode, and forward pass logits checking.
 
 ---
 
@@ -34,15 +34,15 @@ Update this document at each phase of the bring-up:
 - Identify the HuggingFace Model ID.
 - **IMPORTANT**: Set `export HF_HOME=/dev/shm/$USER` before loading or downloading models to avoid filling up the TPU VM root disk.
 - **Decoder Pattern Inspection**: Determine if layers are homogeneous (identical repeated blocks) or inhomogeneous (e.g., layers 0–2 dense followed by MoE, or alternating local/global sliding window attention).
-- **Identify Smallest Subset**: Determine the minimal representative layer count (e.g. 1 layer for homogeneous, 4 layers for a 4-layer cycle).
-- **Create Mini Safetensors Subset**: Download/slice a mini safetensors directory in `/dev/shm/hf_mini/{model_name}_xlayers` containing only config, tokenizer, embeddings, output head, and the smallest layer subset weights.
+- **Identify Smallest Subset**: Determine the minimal representative layer count (e.g. 1 layer for homogeneous, 4 layers for a 4-layer cycle) plus any multimodal vision encoders or auxiliary heads (e.g. Multi-Token Prediction).
+- **Plan the Mini Model**: Decide which layers, experts, encoders, and heads a representative mini model must keep, and how to build it (e.g. slice real HF weights into `/dev/shm/hf_mini/{model_name}_mini`, or random-init a reduced config). The approach is the agent's choice; see Phase 4 Gate 0.
 - Initialize `{model_name}_handover.md` in the MaxText root directory with HF findings and set Phase 1 status to `DONE`.
 - For details, see [hf_analysis.md](references/hf_analysis.md).
 
 ### [Phase 2: JAX Layer Implementation & Verification](references/jax_layers.md)
 
 - **Maximize Reuse**: Check what layers already exist in MaxText that can be configured/reused (e.g., in `src/maxtext/layers/attentions.py`).
-- Implement new layers in JAX under `src/maxtext/layers/`.
+- Implement new layers in JAX under `src/maxtext/layers/` or `src/maxtext/models/`.
 - **Autoregressive Generation Support**: Ensure custom decoder layers properly support autoregressive decode (KV caching, causal mask updates during decode steps).
 - Write layer-wise correctness unit tests under `tests/unit/{model_name}_layers_test.py` using **mini-layer sizes** (e.g. batch=2, seq=4, hidden=128) and assert output matches PyTorch via `assert_allclose`.
 - **Reference**: Refer to existing layer tests such as `tests/unit/gemma3_layers_test.py` or `tests/unit/gemma4_layers_test.py` as implementation references.
@@ -53,22 +53,27 @@ Update this document at each phase of the bring-up:
 
 ### [Phase 3: Checkpoint Conversion Development](references/checkpoint_conversion.md)
 
-- Turn layer weight-mapping rules from unit tests into central mappings in `src/maxtext/checkpoint_conversion/utils/param_mapping.py` (`PARAM_MAPPING` and `HOOK_FNS`).
+- Turn layer weight-mapping rules from unit tests into central mappings in `src/maxtext/checkpoint_conversion/utils/param_mapping.py` (`PARAM_MAPPING` and `HOOK_FNS`) and `src/maxtext/checkpoint_conversion/utils/hf_shape.py` (`HF_SHAPE`).
 - **Always use central frameworks**: Extend `to_maxtext.py` and `to_huggingface.py`.
-- **Fast Iteration on Mini Subset**: Run conversion first on the mini safetensors subset in `/dev/shm/hf_mini/{model_name}_xlayers` using real weights to save time and memory.
+- **Fast Iteration on the Mini Model**: Run conversion first on the mini HF model in `/dev/shm/hf_mini/{model_name}_mini` to save time and memory.
 - Map and transform weights: load safetensors on CPU, **transpose** linear weights, reshape projections, and handle stack cycle indexing for scanned layers.
 - Update `{model_name}_handover.md` with Phase 3 status and full conversion commands.
 - For details, see [checkpoint_conversion.md](references/checkpoint_conversion.md).
 
-### [Phase 4: E2E Logits Validation & Autoregressive Decode Check](references/logits_checker.md)
+### [Phase 4: Mini-Model Verification, E2E Logits & Decode Check](references/verification.md)
 
-- **Logits Verification**: Run `forward_pass_logit_checker.py` using the mini-subset Orbax checkpoint against golden HF `.jsonl` logits (KL Divergence $\\le 10^{-3}$).
-- **Autoregressive Decode Verification**: Run full autoregressive decode to generate ~16 tokens on both HF PyTorch and MaxText using real weights from the mini subset.
-  - **Success Criteria**: Because weights are from a truncated model subset, output text will be gibberish, but **MaxText and HF must generate the exact same token IDs and gibberish text**.
-- **Deep Profiling via Activations Mapping**: If outputs diverge, run HF and MaxText step-by-step with `layers=1` and compare intermediate layer activations.
-- **Full Model Run**: Once mini subset passes, run full checkpoint conversion and full logits verification.
-- **Wrap Up Handover**: Finalize `{model_name}_handover.md` with all pitfalls found and full reproduction commands.
-- For details, see [logits_checker.md](references/logits_checker.md).
+- **Gate 0 (mini model, identical weights)**: Choose how to build a representative mini model (e.g. slice real HF weights, random-init a reduced config, or slice an existing MaxText checkpoint), convert it, and confirm `max_abs_diff == 0.0` for every tensor across HF and MaxText.
+- **6 core dimensions** (cover what the architecture has; mark the rest `N/A`):
+  1. **Challenging inputs**: chunk/window boundaries, padded and packed batches, special tokens, multimodal positions.
+  2. **Forward boundaries**: per-sub-layer outputs and full mini-model logits.
+  3. **MoE / dense coverage**: deliberate or forced routing plus `moe_lb_loss` (MoE), or MLP sub-activations (dense).
+  4. **Every head & objective**: pre-aggregation `aux` loss components and an objective ablation.
+  5. **Backward**: per-parameter-group gradients plus isolated block-level VJP probes.
+  6. **Multi-step updates**: 3 AdamW steps on changing batches (weights and moments) and frozen-parameter invariance.
+- **Supplemental checks**: `scan_layers` parity and `bfloat16` sanity (always); asymmetric position grid (multi-axis positions only); 2D sharding (≥ 4 chips only).
+- **CLI checks**: `forward_pass_logit_checker` (avg KL $\le 10^{-3}$) and a 16-token greedy decode whose token IDs exactly match HF.
+- **Wrap up**: Once the mini subset passes, run full conversion and verification, and fill in the Phase 4 checklist in `{model_name}_handover.md`.
+- For commands, thresholds, debugging, and the checklist template, see [verification.md](references/verification.md).
 
 ---
 
@@ -77,7 +82,7 @@ Update this document at each phase of the bring-up:
 > [!IMPORTANT]
 > **Gotcha 1: TPU VM local storage space limits & Mini-Subset Speedup**.
 > HuggingFace caching quickly fills VM disk. Always set `export HF_HOME=/dev/shm/$USER` and dump checkpoints to shared memory (e.g. `/dev/shm/$USER`).
-> Create a mini safetensors subset in `/dev/shm/hf_mini/{model_name}_xlayers` to iterate rapidly without loading massive full-model weights.
+> Build a mini model in `/dev/shm/hf_mini/{model_name}_mini` to iterate rapidly without loading massive full-model weights.
 > If verification fails, delete intermediate checkpoints immediately using `rm -rf`.
 
 > [!IMPORTANT]
@@ -102,7 +107,7 @@ Update this document at each phase of the bring-up:
 
 > [!IMPORTANT]
 > **Gotcha 7: TPU VM execution & command formatting**.
-> Always execute debugging, decoding, checkpoint conversion, and logits checking python commands directly from the MaxText root directory on your TPU VM. Run commands using standard python module flags (e.g., `python3 -m maxtext.inference.decode`).
+> Always execute debugging, decoding, checkpoint conversion, and verification python commands directly from the MaxText root directory on your TPU VM. Run commands using standard python module flags (e.g., `python3 -m maxtext.inference.decode`).
 
 ---
 

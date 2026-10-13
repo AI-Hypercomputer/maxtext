@@ -27,7 +27,7 @@ Examine the model's PyTorch class (typically subclassing `nn.Module`) and identi
 1. **Decoder Layer Pattern (Homogeneous vs Inhomogeneous)**:
    - **Homogeneous**: All decoder layers are identical and repeated (e.g., standard LLaMA/Gemma). Smallest test subset: **1 layer** ($N=1$).
    - **Dense-to-MoE Transition**: Early layers are dense (e.g., layers 0, 1, 2) and subsequent layers are MoE. Smallest test subset: **First $M$ dense layers + 1 MoE layer** (e.g., 3 + 1 = 4 layers).
-   - **Cyclic Attention Patterns**: Alternating attention mechanisms (e.g., local sliding window $\\to$ local $\\to$ global attention; or linear attention with periodic full softmax attention). Smallest test subset: **1 full cycle** (e.g., 4 layers).
+   - **Cyclic Attention Patterns**: Alternating attention mechanisms (e.g., local sliding window $\to$ local $\to$ global attention; or linear attention with periodic full softmax attention). Smallest test subset: **1 full cycle** (e.g., 4 layers).
 
 2. **Layer Normalization style**: RMSNorm vs LayerNorm, custom scaling, epsilon values.
 3. **Attention Block style**:
@@ -38,24 +38,31 @@ Examine the model's PyTorch class (typically subclassing `nn.Module`) and identi
 4. **MLP Block style**:
    - Gated MLPs (SwiGLU, GeGLU) vs standard MLP.
    - Mixture of Experts (MoE) parameters: Routing gate, number of experts, active experts per token, shared vs routed experts.
+5. **Multimodal Encoders & Auxiliary Heads** *(if applicable)*:
+   - Vision/audio encoder architecture, patch merger/projector, placeholder token IDs, and any multi-axis positional embeddings (e.g., 3D M-RoPE).
+   - Auxiliary training heads and objectives (e.g., Multi-Token Prediction / MTP layers and projections).
 
 ---
 
-## 4. Prepare Mini HF Safetensors Subset in `/dev/shm/hf_mini`
+## 4. Prepare a Mini HF Model in `/dev/shm/hf_mini`
 
-To drastically speed up iteration, save memory, and eliminate large checkpoint download/conversion bottlenecks, create a minimal safetensors model containing only the smallest layer subset ($N$ layers):
+> [!NOTE]
+> Slicing real weights (below) is the usual default, but how to build the mini model is the agent's choice; see [verification.md §1.1](verification.md) for alternatives (e.g. random-init a reduced config when weights are gated or too large) and the requirements every approach must meet.
 
-1. Target Directory: `/dev/shm/hf_mini/{model_name}_{N}layers`
+To drastically speed up iteration, save memory, and eliminate large checkpoint download/conversion bottlenecks, create a minimal safetensors model containing only the smallest representative subset ($N$ decoder layers):
+
+1. Target Directory: `/dev/shm/hf_mini/{model_name}_mini`
 2. Extract and save:
-   - `config.json` with `num_hidden_layers` (or `num_layers`) set to $N$.
-   - Tokenizer files (`tokenizer.json`, `tokenizer_config.json`, etc.).
+   - `config.json` with `num_hidden_layers` (or `num_layers`) set to $N$, and any per-layer config lists (e.g. `layer_types`) truncated to length $N$.
+   - Tokenizer (and processor, if multimodal) files (`tokenizer.json`, `tokenizer_config.json`, `preprocessor_config.json`, etc.).
    - Model weights containing ONLY:
      - Token embeddings (`embed_tokens.weight`)
      - Layers $0$ through $N-1$ (`layers.0.*` through `layers.{N-1}.*`)
      - Final normalization (`norm.weight` / `model.norm.weight`)
      - Output language model head (`lm_head.weight` if untied)
-3. Use real pretrained weights for this mini subset.
-4. This mini HF model will be used in Phase 3 for fast `to_maxtext` conversion and in Phase 4 for both `forward_pass_logit_checker` and 16-token autoregressive decoding comparison.
+     - *(if applicable)* Multimodal encoder/projector weights and auxiliary/MTP head weights
+3. Use real pretrained weights for this mini subset (or non-degenerate random weights if following Approach B in [verification.md §1.1](verification.md)).
+4. This mini HF model will be used in Phase 3 for fast `to_maxtext` conversion and in Phase 4 for the 6-dimension mini-model verification, `forward_pass_logit_checker`, and 16-token autoregressive decoding comparison.
 
 ```python
 # Quick snippet to slice HF model to mini safetensors subset
@@ -66,7 +73,7 @@ from transformers import AutoConfig, AutoTokenizer
 model_id = "{hf_model_id}"
 model_name = model_id.rsplit("/", 1)[-1]
 N = 1  # Adjust to the minimal representative layer subset identified above.
-out_dir = f"/dev/shm/hf_mini/{model_name}_{N}layers"
+out_dir = f"/dev/shm/hf_mini/{model_name}_mini"
 os.makedirs(out_dir, exist_ok=True)
 
 # 1. Save modified config
@@ -88,5 +95,5 @@ tokenizer.save_pretrained(out_dir)
 
 At the end of Phase 1, create and populate `{model_name}_handover.md` in the MaxText root directory:
 - Document all HF architectural parameters, epsilon, theta, dimensions, and decoder pattern.
-- Note the chosen minimal layer count ($N$) and mini safetensors directory path.
+- Note the planned mini-model sizes, construction approach, and mini HF model path.
 - Mark Phase 1 as `DONE` and Phase 2 as `IN PROGRESS`.
