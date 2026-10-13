@@ -25,6 +25,10 @@ axes:
 * `expert`: expert parallelism of the routed experts.
 * `fsdp_moe`: FSDP axes of the MoE weights.
 
+`sharding_config` derives a sixth logical name, `fsdp_mla` (`WEIGHT_FSDP_AXIS`),
+from them: the FSDP axes of the 2-D MLA projections and the MTP `eh_proj`, i.e.
+the `fsdp_moe` axes that do not also shard the heads (`attention`).
+
 An `axis_mapping` translates these names to physical mesh axes
 (`ops.physical_pspec`). Physical names (`"z"`, `"dcn"`) may also appear in a
 spec directly; `ops.physical_pspec` passes unknown names through.
@@ -48,13 +52,15 @@ AxisMapping = Mapping[str, str | tuple[str, ...]]
 DCN_AXIS = "dcn"
 # Logical axis names consumed by the Lineage layers.
 LOGICAL_AXES = ("dcn", "attention", "fsdp_attention", "expert", "fsdp_moe")
-# Physical FSDP axis of the 2-D attention/dense weights (`dsv3_perf_test`).
-WEIGHT_FSDP_AXIS = "z"
+# Logical FSDP axis of the 2-D attention/dense weights (`dsv3_perf_test`). Not
+# in `LOGICAL_AXES`: `sharding_config` derives it from the axis mapping
+# (`weight_fsdp_axes`).
+WEIGHT_FSDP_AXIS = "fsdp_mla"
 
 MLA_WEIGHT_SHARDINGS = dsv3_types.DSv3MLAWeightsPytree(
     q_down=P(None, WEIGHT_FSDP_AXIS, None),
-    # As in dsv3_perf_test; `fit_mla_up_shardings` moves the FSDP axis of the
-    # up-projections to their LoRA dim when z does not divide the head dim.
+    # As in dsv3_perf_test; `fit_mla_up_shardings` moves the FSDP axes of the
+    # up-projections to their LoRA dim when they do not divide the head dim.
     q_up=P(None, None, "attention", WEIGHT_FSDP_AXIS),
     q_norm_scale=P(None, None),
     kv_down=P(None, WEIGHT_FSDP_AXIS, None),
@@ -154,7 +160,8 @@ class DSv3ShardingConfig:
   """Axis mapping plus the logical specs of all weights and activations.
 
   Attributes:
-    axis_mapping: Lineage logical-to-physical axis mapping.
+    axis_mapping: Lineage logical-to-physical axis mapping, including the
+      derived `WEIGHT_FSDP_AXIS` (see `weight_fsdp_axes`).
     weights: Logical specs of every parameter group.
     activation: Spec of `[batch, seq, emb]` activations (embeddings, hidden
       states, logits).
@@ -171,8 +178,33 @@ class DSv3ShardingConfig:
   yarn_freqs: P
 
 
-def _move_up_fsdp_to_lora(node: Any, fields: Sequence[str], fsdp_axis: str) -> Any:
-  """Puts the FSDP axis of `fields` on their LoRA dim in an MLA spec pytree."""
+def _axis_names(v: str | Sequence[str]) -> tuple[str, ...]:
+  return (v,) if isinstance(v, str) else tuple(v)
+
+
+def weight_fsdp_axes(axis_mapping: AxisMapping) -> tuple[str, ...]:
+  """Physical FSDP axes of the 2-D MLA weights and the MTP `eh_proj`.
+
+  These are the `fsdp_moe` axes that do not also shard the heads (`attention`):
+  a PartitionSpec cannot use a mesh axis twice, and the MLA up-projections and
+  `out` carry the head dim next to their FSDP dim. E.g. with
+  `attention="core"`:
+
+  * `fsdp_moe=("core", "z")` gives `("z",)`;
+  * `fsdp_moe=("y", "z")` gives `("y", "z")`.
+
+  Args:
+    axis_mapping: Lineage logical-to-physical axis mapping.
+
+  Returns:
+    The physical axes `WEIGHT_FSDP_AXIS` resolves to, possibly empty.
+  """
+  attention_axes = _axis_names(axis_mapping["attention"])
+  return tuple(axis for axis in _axis_names(axis_mapping["fsdp_moe"]) if axis not in attention_axes)
+
+
+def _move_up_fsdp_to_lora(node: Any, fields: Sequence[str]) -> Any:
+  """Puts the FSDP axes of `fields` on their LoRA dim in an MLA spec pytree."""
   if not isinstance(node, dsv3_types.DSv3MLAWeightsPytree):
     return node
   updates = {}
@@ -181,7 +213,7 @@ def _move_up_fsdp_to_lora(node: Any, fields: Sequence[str], fsdp_axis: str) -> A
     if spec is None:
       continue
     layer_axes = (None,) * (len(spec) - 3)  # Empty for an MTP layer.
-    updates[field] = P(*layer_axes, fsdp_axis, "attention", None)
+    updates[field] = P(*layer_axes, WEIGHT_FSDP_AXIS, "attention", None)
   return dataclasses.replace(node, **updates)
 
 
@@ -192,15 +224,19 @@ def fit_mla_up_shardings(
     qk_head_dim: int,
     rope_head_dim: int,
     v_head_dim: int,
-    fsdp_axis: str = WEIGHT_FSDP_AXIS,
+    fsdp_axes: Sequence[str],
 ) -> Any:
-  """Moves an up-projection's FSDP axis to its LoRA dim if it does not divide.
+  """Moves an up-projection's FSDP axes to its LoRA dim if they do not divide.
 
   `q_up` (`[layer, q_lora, head, qk_head_dim + rope_head_dim]`), `k_up`
   (`[layer, kv_lora, head, qk_head_dim]`) and `v_up` (`[layer, kv_lora, head,
   v_head_dim]`) shard their trailing head dim over FSDP, as in dsv3_perf_test.
-  When the FSDP axis does not divide that dim (e.g. z = 128 for q_up's 192, z =
-  256 for k_up's 128), it moves to the LoRA dim instead.
+  When the FSDP axes do not divide that dim (e.g. 256-way FSDP for k_up's 128),
+  they move to the LoRA dim instead. For q_up the FSDP axes must divide every
+  slice that `init_dsv3_mla_weights` takes of the head dim, down to the
+  `rope_head_dim // 2` wide even/odd rope halves, because JAX cannot slice a
+  sharded dim into pieces its mesh axes do not divide: 64-way FSDP divides
+  q_up's 192 but not its 32-wide rope halves.
 
   Args:
     specs: Weight PartitionSpecs (`DECODER_WEIGHT_SHARDINGS`,
@@ -209,17 +245,19 @@ def fit_mla_up_shardings(
     qk_head_dim: Non-positional q/k head dim.
     rope_head_dim: RoPE head dim.
     v_head_dim: Value head dim.
-    fsdp_axis: Physical FSDP axis of the up-projections.
+    fsdp_axes: Physical FSDP axes of the up-projections, i.e. what
+      `WEIGHT_FSDP_AXIS` resolves to (see `weight_fsdp_axes`).
 
   Returns:
     `specs`, with the FSDP axes moved to the LoRA dims where needed.
   """
   head_dims = {
-      "q_up": qk_head_dim + rope_head_dim,
+      "q_up": math.gcd(qk_head_dim, rope_head_dim // 2),
       "k_up": qk_head_dim,
       "v_up": v_head_dim,
   }
-  fields = tuple(field for field, dim in head_dims.items() if dim % mesh_shape[fsdp_axis] != 0)
+  fsdp_size = math.prod(mesh_shape[axis] for axis in fsdp_axes)
+  fields = tuple(field for field, dim in head_dims.items() if dim % fsdp_size != 0)
   if not fields:
     return specs
   if isinstance(specs, DSv3WeightShardings):
@@ -231,7 +269,7 @@ def fit_mla_up_shardings(
             qk_head_dim=qk_head_dim,
             rope_head_dim=rope_head_dim,
             v_head_dim=v_head_dim,
-            fsdp_axis=fsdp_axis,
+            fsdp_axes=fsdp_axes,
         ),
         mtp=fit_mla_up_shardings(
             specs.mtp,
@@ -239,11 +277,76 @@ def fit_mla_up_shardings(
             qk_head_dim=qk_head_dim,
             rope_head_dim=rope_head_dim,
             v_head_dim=v_head_dim,
-            fsdp_axis=fsdp_axis,
+            fsdp_axes=fsdp_axes,
         ),
     )
   return jax.tree.map(
-      lambda node: _move_up_fsdp_to_lora(node, fields, fsdp_axis),
+      lambda node: _move_up_fsdp_to_lora(node, fields),
+      specs,
+      is_leaf=lambda x: isinstance(x, (dsv3_types.DSv3MLAWeightsPytree, P)),
+  )
+
+
+# Rows of a TPU tile along the second-minor dim. An all-gather along that dim
+# whose shards are not whole tiles is lowered as a gather of stacked shards
+# followed by a reshape, which XLA cannot lower on SparseCore.
+_TILE_ROWS = 8
+
+
+def fit_mla_down_shardings(
+    specs: Any,
+    mesh_shape: Mapping[str, int],
+    axis_mapping: AxisMapping,
+    *,
+    emb_dim: int,
+) -> Any:
+  """Fits the FSDP sharding of the MLA down-projections to whole TPU tiles.
+
+  `q_down` (`[layer, emb, q_lora]`) and `kv_down` (`[layer, emb, kv_lora +
+  rope_head_dim]`) shard their embedding dim over `WEIGHT_FSDP_AXIS` and are
+  all-gathered along it on SparseCore. When a shard is not a whole number of
+  `_TILE_ROWS`-row tiles (256-way FSDP over (y, z) leaves 7168 / 256 = 28 rows
+  on 8x16x16), leading FSDP axes are dropped until it is, keeping at least one;
+  the weights are replicated over the dropped axes.
+
+  Args:
+    specs: Weight PartitionSpecs (`DECODER_WEIGHT_SHARDINGS`,
+      `MTP_WEIGHT_SHARDINGS` or a `DSv3WeightShardings`).
+    mesh_shape: Mesh axis sizes, `mesh.shape`.
+    axis_mapping: Lineage logical-to-physical axis mapping, including
+      `WEIGHT_FSDP_AXIS`.
+    emb_dim: The embedding dim.
+
+  Returns:
+    `specs`, with `q_down` and `kv_down` fitted.
+  """
+  tiles = emb_dim // _TILE_ROWS
+
+  def fit_spec(spec: P) -> P:
+    physical = ops.physical_pspec(spec, axis_mapping)
+    dim_index = len(physical) - 2
+    axes = _axis_names(physical[dim_index] or ())
+    kept = axes
+    while len(kept) > 1 and tiles % math.prod(mesh_shape[a] for a in kept):
+      kept = kept[1:]
+    if kept == axes:
+      return spec
+    entries = list(physical)
+    entries[dim_index] = _to_axis_tuple(kept)
+    return P(*entries)
+
+  def fit(node: Any) -> Any:
+    if not isinstance(node, dsv3_types.DSv3MLAWeightsPytree):
+      return node
+    updates = {}
+    for field in ("q_down", "kv_down"):
+      spec = getattr(node, field)
+      if spec is not None:
+        updates[field] = fit_spec(spec)
+    return dataclasses.replace(node, **updates)
+
+  return jax.tree.map(
+      fit,
       specs,
       is_leaf=lambda x: isinstance(x, (dsv3_types.DSv3MLAWeightsPytree, P)),
   )
@@ -410,14 +513,16 @@ def sharding_config(
     mesh: The device mesh.
     axis_mapping: Lineage logical-to-physical axis mapping (see
       `build_axis_mapping`).
-    emb_dim: Embedding dim (for `fit_embed_shardings`).
+    emb_dim: Embedding dim (for `fit_embed_shardings` and
+      `fit_mla_down_shardings`).
     qk_head_dim: Non-positional q/k head dim (for `fit_mla_up_shardings`).
     rope_head_dim: RoPE head dim (for `fit_mla_up_shardings`).
     v_head_dim: Value head dim (for `fit_mla_up_shardings`).
     weights: Weight specs to start from; defaults to the dsv3_perf_test specs.
 
   Returns:
-    The sharding config.
+    The sharding config. Its `axis_mapping` is `axis_mapping` plus
+    `WEIGHT_FSDP_AXIS`, resolved by `weight_fsdp_axes`.
 
   Raises:
     ValueError: If `axis_mapping` lacks a logical axis.
@@ -425,16 +530,23 @@ def sharding_config(
   missing = [axis for axis in LOGICAL_AXES if axis not in axis_mapping]
   if missing:
     raise ValueError(f"axis_mapping lacks logical axes {missing}.")
+  fsdp_axes = weight_fsdp_axes(axis_mapping)
   fitted_weights = fit_mla_up_shardings(
       weights if weights is not None else DSv3WeightShardings(),
       mesh.shape,
       qk_head_dim=qk_head_dim,
       rope_head_dim=rope_head_dim,
       v_head_dim=v_head_dim,
+      fsdp_axes=fsdp_axes,
   )
   fitted_weights = fit_embed_shardings(fitted_weights, mesh.shape, axis_mapping, emb_dim=emb_dim)
+  full_axis_mapping = {
+      **axis_mapping,
+      WEIGHT_FSDP_AXIS: _to_axis_tuple(fsdp_axes),
+  }
+  fitted_weights = fit_mla_down_shardings(fitted_weights, mesh.shape, full_axis_mapping, emb_dim=emb_dim)
   return DSv3ShardingConfig(
-      axis_mapping=dict(axis_mapping),
+      axis_mapping=full_axis_mapping,
       weights=fitted_weights,
       activation=activation_sharding(mesh),
       segment_ids=segment_ids_sharding(mesh),

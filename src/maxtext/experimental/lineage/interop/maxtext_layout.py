@@ -446,7 +446,8 @@ def _move_mla_trailing_sharding_to_lora(a: Any) -> Any:
   """Moves any trailing-axis sharding of an MLA up-projection to its LoRA axis.
 
   In Lineage layout, `q_up`, `k_up` and `v_up` shard their trailing head-dim
-  axis over `WEIGHT_FSDP_AXIS` (`"z"`). In MaxText layout, `_interleave_rope`
+  axis over `WEIGHT_FSDP_AXIS` (e.g. `"z"` or `("y", "z")`; see
+  `dsv3_sharding.weight_fsdp_axes`). In MaxText layout, `_interleave_rope`
   and the `k_up`/`v_up` concatenation into `wkv_b` act on that trailing axis, so
   the restore target instead shards the LoRA axis (`axis -3`, which becomes
   `dim 0` after moving `param_scan_axis`).

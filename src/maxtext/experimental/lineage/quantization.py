@@ -87,6 +87,28 @@ class GmmQuantRule:
 
 
 @dataclasses.dataclass(frozen=True)
+class MlaQuantRule(GmmQuantRule):
+  """`GmmQuantRule` of the MLA projections, plus splash attention options.
+
+  Attributes:
+    splash_qk_qtype: If set, q and k are saturated to this dtype's finite range
+      and cast to it (unscaled) right before the splash attention kernel, in
+      both the forward and the (rematerialized) backward pass. v, the attention
+      output and all gradients stay in bf16.
+    q_proj_bwd_quantized: Whether the backward pass of the q down and q up
+      projections runs in fp8 like `_qdot_bwd`. If False, their dgrad and wgrad
+      dots run in bf16 on the dequantized weights while the forward pass stays
+      quantized.
+    q_prescaled_log2e: Whether q arrives already multiplied by LOG2E (folds
+      LOG2E into the softmax scale before casting to FP8).
+  """
+
+  splash_qk_qtype: Any | None = None
+  q_proj_bwd_quantized: bool = True
+  q_prescaled_log2e: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
 class QuantConfig:
   """Model-wide quantization config. `None` fields stay unquantized.
 
@@ -102,6 +124,17 @@ class QuantConfig:
 
 
 FP8_FULL = QuantConfig(routed_experts=GmmQuantRule(), mla=GmmQuantRule())
+FP8_FULL_SPLASH_QK = QuantConfig(
+    routed_experts=GmmQuantRule(),
+    mla=MlaQuantRule(splash_qk_qtype=jnp.float8_e4m3fn),
+)
+FP8_FULL_SPLASH_QK_E3 = QuantConfig(
+    routed_experts=GmmQuantRule(),
+    mla=MlaQuantRule(
+        splash_qk_qtype=jnp.float8_e4m3fn,
+        q_prescaled_log2e=True,
+    ),
+)
 
 
 def static_quantize(x: jax.Array, qtype: Any, scale: float) -> jax.Array:

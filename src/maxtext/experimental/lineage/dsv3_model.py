@@ -253,6 +253,9 @@ def init_kernels(
       qk_diag_skip=k.qk_diag_skip,
       qk_diag_grid=k.qk_diag_grid,
       sv_diag_skip=k.sv_diag_skip,
+      diag_band_skip=k.diag_band_skip,
+      dq_reduction_steps=k.dq_reduction_steps,
+      q_prescaled_log2e=(bool(getattr(getattr(k.quant, "mla", None), "q_prescaled_log2e", False)) or k.q_prescaled_log2e),
   )
   return yarn_freqs, splash_kernel
 
@@ -701,6 +704,19 @@ def dsv3_loss_and_aux(
 
   kernels = init_kernels(batch.positions, cfg, mesh)
   fwd = dsv3_forward(params, state, batch, cfg, mesh=mesh, kernels=kernels)
+  if params.head.kernel is not None:
+    # One all-gather shared by the main and MTP heads, and one reduce-scatter
+    # of their summed kernel cotangent.
+    params = dataclasses.replace(
+        params,
+        head=dataclasses.replace(
+            params.head,
+            kernel=dsv3_embed.collect_head_kernel(
+                params.head.kernel,
+                dtype=jnp.float32 if m.head_dot_in_fp32 else m.dtype,
+            ),
+        ),
+    )
   logits = dsv3_logits(params, fwd.hidden, cfg, mesh=mesh)
   with jax.named_scope("main_loss"):
     sums = dsv3_loss.masked_token_loss(

@@ -34,6 +34,8 @@ from maxtext.experimental.lineage import quantization
 QUANT_CONFIGS: dict[str, quantization.QuantConfig | None] = {
     "none": None,
     "fp8_full": quantization.FP8_FULL,
+    "fp8_full_splash_qk": quantization.FP8_FULL_SPLASH_QK,
+    "fp8_full_splash_qk_e3": quantization.FP8_FULL_SPLASH_QK_E3,
 }
 
 
@@ -166,6 +168,10 @@ class DSv3KernelConfig:
     qk_diag_skip: Skip masked QK diagonal blocks in Splash attention.
     qk_diag_grid: Diagonal grid of the QK diagonal skip.
     sv_diag_skip: Skip masked SV diagonal blocks in Splash attention.
+    diag_band_skip: Skip above-diagonal tiles within causal diagonal bands.
+    dq_reduction_steps: Number of steps for dkv dq reduction (1 for VMEM
+      reduction, 3, or None).
+    q_prescaled_log2e: Whether q is prescaled by log2(e) before casting to FP8.
     capacity_factor: MoE chunk capacity relative to the balanced load.
     ragged_buffer_factor: Cross-layer ragged activation bank safety factor.
     quant: Quantization of the routed experts and MLA, or None for bf16.
@@ -188,6 +194,9 @@ class DSv3KernelConfig:
   qk_diag_skip: bool = True
   qk_diag_grid: int = 8
   sv_diag_skip: bool = True
+  diag_band_skip: bool = True
+  dq_reduction_steps: int | None = 1
+  q_prescaled_log2e: bool = False
   capacity_factor: float = 2.0
   ragged_buffer_factor: float = 1.2
   quant: quantization.QuantConfig | None = None
@@ -259,6 +268,8 @@ class DSv3Config:
       )
     if m.num_kv_heads != m.num_query_heads:
       raise ValueError(f"num_kv_heads ({m.num_kv_heads}) must equal num_query_heads" f" ({m.num_query_heads}).")
+    if k.dq_reduction_steps not in (None, 1, 3):
+      raise ValueError("dq_reduction_steps must be one of (None, 1, 3), got" f" {k.dq_reduction_steps}.")
     if k.capacity_factor <= 0:
       raise ValueError(f"capacity_factor must be > 0, got {k.capacity_factor}.")
     if k.ragged_buffer_factor < 1.0:

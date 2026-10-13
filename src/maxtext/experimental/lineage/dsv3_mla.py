@@ -105,6 +105,39 @@ def _quantize_act(x: jax.Array, quant_rule: quantization.GmmQuantRule) -> jax.Ar
   return quantization.static_quantize(x, quant_rule.act_qtype, quant_rule.act_scale)
 
 
+def _dequantize_weight(w: jax.Array, quant_rule: quantization.GmmQuantRule) -> jax.Array:
+  """Returns the bf16 value of w if it is quantized with the rule's scale."""
+  if w.dtype != quant_rule.weight_qtype:
+    return w
+  return (w.astype(jnp.float32) * quant_rule.weight_scale).astype(jnp.bfloat16)
+
+
+def _quantize_splash_qk(x: jax.Array, quant_rule: quantization.GmmQuantRule | None) -> jax.Array:
+  """Casts splash attention q / k to the rule's `splash_qk_qtype`, if any.
+
+  Unscaled: x is only saturated to the dtype's finite range (+-448 for e4m3fn)
+  before the cast; see `quantization.MlaQuantRule`.
+
+  Args:
+    x: q or k, head-dim-minor and already scaled by the softmax scale.
+    quant_rule: Quantization rule of the MLA.
+
+  Returns:
+    x cast to the splash q / k dtype, or x itself if the rule has none.
+  """
+  qtype = getattr(quant_rule, "splash_qk_qtype", None)
+  if qtype is None or x.dtype == qtype:
+    return x
+  return quantization.static_quantize(x, qtype, 1.0)
+
+
+def _q_proj_bwd_quantized(
+    quant_rule: quantization.GmmQuantRule | None,
+) -> bool:
+  """Whether the q projections' backward pass runs in fp8 under `quant_rule`."""
+  return quant_rule is not None and getattr(quant_rule, "q_proj_bwd_quantized", True)
+
+
 def _fp8_dot(
     x: jax.Array,
     y: jax.Array,
@@ -419,6 +452,8 @@ def q_up_from_q_down(
       rope_factor=rope_factor,
       mscale=mscale,
   )
+  if getattr(quant_rule, "q_prescaled_log2e", False):
+    softmax_scale = softmax_scale * math.log2(math.e)
   cq = norm_fn(q_down, wq_norm_scale)
   dequant_scale = 1.0
   with jax.named_scope("q_up_projection"):
@@ -519,6 +554,8 @@ def q_up_from_q_down_bwd(
       rope_factor=rope_factor,
       mscale=mscale,
   )
+  if getattr(quant_rule, "q_prescaled_log2e", False):
+    softmax_scale = softmax_scale * math.log2(math.e)
   grad_q_nope, grad_q_roped = jnp.split(grad_q * softmax_scale, [qk_head_dim], axis=-1)
   _, rope_vjp = jax.vjp(rope_fn, q_pe, yarn_freqs)
   grad_q_pe, grad_yarn_freqs = rope_vjp(grad_q_roped)
@@ -529,7 +566,9 @@ def q_up_from_q_down_bwd(
     grad_q_up = jnp.concatenate([grad_q_nope, grad_q_pe], axis=-1)
 
   unreduced_cq_sharding = _cotangent_sharding(cq, unreduced=_mesh_axis_names(head_axis))
-  if quant_rule is None:
+  if not _q_proj_bwd_quantized(quant_rule):
+    if quant_rule is not None:
+      wq_up = _dequantize_weight(wq_up, quant_rule)
     with jax.named_scope("q_up_projection_wgrad"):
       grad_wq_up = dot(
           cq,
@@ -545,6 +584,7 @@ def q_up_from_q_down_bwd(
           out_sharding=unreduced_cq_sharding,
       )
   else:
+    assert quant_rule is not None
     with jax.named_scope("q_up_projection_bwd"):
       grad_cq, grad_wq_up = _qdot_bwd(
           grad_q_up,
@@ -1119,6 +1159,9 @@ def init_splash_kernel(
     qk_diag_skip: bool = True,
     qk_diag_grid: int = 8,
     sv_diag_skip: bool = True,
+    diag_band_skip: bool = True,
+    dq_reduction_steps: int | None = 1,
+    q_prescaled_log2e: bool = False,
 ) -> Any:
   """Initializes the Splash kernel with the given block sizes."""
   del num_query_heads
@@ -1144,15 +1187,30 @@ def init_splash_kernel(
   block_q = min(sa_block_q, q_seq_len_per_shard)
   block_kv = min(sa_block_kv, q_seq_len_per_shard)
   block_kv_compute = min(sa_block_kv_compute, q_seq_len_per_shard)
-  effective_qk_diag_skip = qk_diag_skip and (block_q == block_kv == block_kv_compute)
+  block_q_dkv = min(sa_block_q_dkv, q_seq_len_per_shard)
+  block_kv_dkv = min(sa_block_kv_dkv, q_seq_len_per_shard)
+  block_kv_dkv_compute = min(sa_block_kv_dkv_compute, q_seq_len_per_shard)
+  # The forward skip needs aligned diagonal blocks (block_q == block_kv); the
+  # compute tile may be smaller. The dkv skip needs square tiles.
+  effective_qk_diag_skip = (
+      qk_diag_skip
+      and block_q == block_kv
+      and block_kv % block_kv_compute == 0
+      and block_q_dkv == block_kv_dkv == block_kv_dkv_compute
+  )
+
   effective_sv_diag_skip = sv_diag_skip and (block_q == block_kv == block_kv_compute)
+  effective_dq_reduction_steps = (
+      None if dq_reduction_steps == 1 and q_seq_len_per_shard > 2 * block_q_dkv else dq_reduction_steps
+  )
+  effective_diag_band_skip = diag_band_skip and effective_qk_diag_skip and effective_dq_reduction_steps == 1
   sa_config = tokamax_splash_attention_kernel.SplashConfig(
       block_q=block_q,
       block_kv=block_kv,
       block_kv_compute=block_kv_compute,
-      block_q_dkv=min(sa_block_q_dkv, q_seq_len_per_shard),
-      block_kv_dkv=min(sa_block_kv_dkv, q_seq_len_per_shard),
-      block_kv_dkv_compute=min(sa_block_kv_dkv_compute, q_seq_len_per_shard),
+      block_q_dkv=block_q_dkv,
+      block_kv_dkv=block_kv_dkv,
+      block_kv_dkv_compute=block_kv_dkv_compute,
       block_q_dq=None,
       block_kv_dq=None,
       use_fused_bwd_kernel=True,
@@ -1162,6 +1220,9 @@ def init_splash_kernel(
       qk_diag_skip=effective_qk_diag_skip,
       qk_diag_grid=qk_diag_grid,
       sv_diag_skip=effective_sv_diag_skip,
+      diag_band_skip=effective_diag_band_skip,
+      dq_reduction_steps=effective_dq_reduction_steps,
+      q_prescaled_log2e=q_prescaled_log2e,
   )
   mask = tokamax_splash_mask.CausalMask(shape=(max_target_length, max_target_length))
   splash_kernel = tokamax_splash_attention_kernel.make_splash_mha(
@@ -1441,8 +1502,8 @@ def dsv3_mla_fwd(
       quant_rule=quant_rule,
   )
   splash_out, context = splash_attention(
-      q,
-      k,
+      _quantize_splash_qk(q, quant_rule),
+      _quantize_splash_qk(k, quant_rule),
       v,
       splash_kernel,
       segment_ids=segment_ids,
@@ -1562,8 +1623,8 @@ def dsv3_mla_bwd(
       grad_splash_out,
       splash_out,
       context,
-      q,
-      k,
+      _quantize_splash_qk(q, quant_rule),
+      _quantize_splash_qk(k, quant_rule),
       v,
       splash_kernel,
       segment_ids=segment_ids,
@@ -1588,7 +1649,7 @@ def dsv3_mla_bwd(
       quant_rule=quant_rule,
   )
 
-  if quant_rule is None:
+  if not _q_proj_bwd_quantized(quant_rule):
 
     def _q_down_fwd(norm_x, wq_down):
       return q_down_projection(
@@ -1598,9 +1659,13 @@ def dsv3_mla_bwd(
           axis_mapping=axis_mapping,
       )
 
-    _, vjp_q_down = jax.vjp(_q_down_fwd, norm_x, w.q_down)
+    wq_down = w.q_down
+    if quant_rule is not None:
+      wq_down = _dequantize_weight(wq_down, quant_rule)
+    _, vjp_q_down = jax.vjp(_q_down_fwd, norm_x, wq_down)
     grad_norm_x_q, grad_w_q_down = vjp_q_down(grad_q_down)
   else:
+    assert quant_rule is not None
     grad_norm_x_q, grad_w_q_down = down_projection_bwd(grad_q_down, x_q, w.q_down, quant_rule=quant_rule)
 
   # 6. Backprop through KV projection
