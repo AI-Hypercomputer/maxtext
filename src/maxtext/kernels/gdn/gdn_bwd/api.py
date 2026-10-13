@@ -41,9 +41,11 @@ class GDNKernelOptions:
 
   Passed to `gdn_decoupled_conv1d` as a non-differentiable argument (it must be
   hashable), so it is part of the jit/custom_vjp static signature. The defaults
-  are the recommended behavior; the fields exist so tests can turn the
-  sequence-CP work reductions off and compare against the original XLA path.
-  All of them only change the Pallas TPU kernel path under sequence-sharded CP.
+  are the recommended behavior; the fields exist so tests can turn the layout
+  fixes and the sequence-CP work reductions off and compare against the
+  original path. They only change the Pallas TPU kernel path (the `cp_*` ones
+  only under sequence-sharded CP), and shapes a variant does not support fall
+  back to the original path automatically.
 
   Attributes:
     bf16_qkv_input: Feed the forward kernel the bf16 (post-projection) qkv
@@ -51,14 +53,17 @@ class GDNKernelOptions:
       copy in HBM. Besides halving the qkv read, this keeps qkv in its natural
       `{2,1,0}` layout; the f32 `astype + reshape(N, 1, dim)` otherwise forces a
       `{2,0,1}` tiled layout that XLA propagates into every consumer of qkv in
-      the backward program (notably the pure-JAX conv1d backward).
+      the backward program (notably the pure-JAX conv1d backward). Bit-exact.
+      Default on; used only for bf16 qkv with chunk_size % 16 == 0 and
+      dim % 128 == 0 (bf16 tiling), otherwise the f32 copy is kept.
     cp_pass1_states_only: In sequence-sharded CP, pass 1 only needs the per-chunk
       recurrent states to compose the global prefix; skip computing / writing
       `out` and `chunk_states` in that pass. Bit-exact. Default on.
     bwd_natural_layout: The backward kernel reads `chunk_states` / `t_inv` /
       `do` and writes dq/dk/dv through BlockSpecs on their natural layouts
       instead of requiring the XLA glue to transpose/concat to and from the
-      kernel's compact layout.
+      kernel's compact layout. Bit-exact. Default on; shapes whose head-group
+      channel offsets are not block-aligned keep the relayout path.
     cp_m_local_in_kernel: In sequence-sharded CP, pass 1 also produces the local
       state transition `M_local` (the [d_k, d_k] map from the incoming state to
       the outgoing one) by carrying an identity block next to the recurrent
@@ -72,9 +77,9 @@ class GDNKernelOptions:
       difference is at the kernel's own rounding level). Default on.
   """
 
-  bf16_qkv_input: bool = False
+  bf16_qkv_input: bool = True
   cp_pass1_states_only: bool = True
-  bwd_natural_layout: bool = False
+  bwd_natural_layout: bool = True
   cp_m_local_in_kernel: bool = True
 
   def __post_init__(self):
@@ -215,7 +220,8 @@ def _run_local_gdn_decoupled_fwd(
   """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU.
 
   Pass options (Pallas path only; the pure-JAX CPU path ignores them and returns everything):
-    bf16_qkv_input: F4, feed bf16 qkv to the kernel (cast in VMEM).
+    bf16_qkv_input: F4, feed bf16 qkv to the kernel (cast in VMEM). Ignored unless qkv is bf16,
+      chunk_size % 16 == 0 and dim % 128 == 0 (bf16 tiling); the f32 copy is used then.
     states_only: F2, skip `out` and `chunk_states` (both returned as None).
     transition_in_state: F5, `recurrent_state` is [batch, num_v_heads, head_k_dim,
       head_v_dim + head_k_dim] whose extra block (identity on input) is carried
@@ -346,7 +352,7 @@ def _run_local_gdn_decoupled_fwd(
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
-      bf16_qkv_input=bf16_qkv_input and qkv.dtype == jnp.bfloat16,
+      bf16_qkv_input=(bf16_qkv_input and qkv.dtype == jnp.bfloat16 and chunk_size % 16 == 0 and dim_size % 128 == 0),
       states_only=states_only,
       transition_in_state=transition_in_state,
   )
@@ -854,7 +860,12 @@ def _gdn_decoupled_conv1d_bwd(
   # Support positional calls that omit trailing nondiff arguments (cp_axis_name,
   # cp_matmul_precision, options): the residuals are the first >= 10-tuple among the trailing slots.
   trailing = [cp_axis_name, cp_matmul_precision, options, residuals, cotangents]
-  res_idx = next(i for i, v in enumerate(trailing) if isinstance(v, tuple) and len(v) >= 10)
+  res_idx = next((i for i, v in enumerate(trailing) if isinstance(v, tuple) and len(v) >= 10), None)
+  if res_idx is None:
+    raise ValueError(
+        "_gdn_decoupled_conv1d_bwd: no residuals tuple (a tuple of >= 10 entries from _gdn_decoupled_conv1d_fwd)"
+        " among the trailing arguments (cp_axis_name, cp_matmul_precision, options, residuals, cotangents)."
+    )
   if res_idx < 3:
     residuals = trailing[res_idx]
     cotangents = trailing[res_idx + 1]

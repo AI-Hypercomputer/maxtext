@@ -672,13 +672,31 @@ def pallas_gdn_bwd_kernel(
   # whole number of q / k / v blocks (Blocked index maps), and lane-aligned
   # channel blocks. Otherwise keep the legacy relayout path.
   if natural_layout:
+    if (
+        (q_size + k_size) % tile_v_size != 0
+        and head_tile is None
+        and tile_v_heads % 2 == 0
+        and (tile_v_heads // 2) % repeats == 0
+    ):
+      # E.g. head-sharded cp=2 on Qwen3-Next / Qwen3.5 (8 k heads, 32 v heads, dim 128 per chip): the v slice
+      # starts at q_size + k_size = 2048, not a multiple of the 32-head v block (4096). Half-size groups align.
+      tile_v_heads //= 2
+      num_groups = num_v_heads // tile_v_heads
+      tile_kq_heads = tile_v_heads // repeats
+      tile_q_size = tile_kq_heads * kq_head_dim
+      tile_k_size = tile_kq_heads * kq_head_dim
+      tile_v_size = tile_v_heads * v_head_dim
+      group_dim_size = tile_q_size + tile_k_size + tile_v_size
     natural_layout = (
         q_size % tile_k_size == 0
         and (q_size + k_size) % tile_v_size == 0
         and tile_q_size % 128 == 0
+        and tile_k_size % 128 == 0
         and tile_v_size % 128 == 0
         and do.shape == (batch_size, seq_len, num_v_heads, v_head_dim)
     )
+    if natural_layout and name == "gdn_bwd_kernel":
+      name = f"{name}_nat"
 
   has_seg_ids = segment_ids is not None
   cfg = GDNBackwardConfig(

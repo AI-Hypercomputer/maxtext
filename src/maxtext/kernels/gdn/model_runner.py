@@ -69,10 +69,15 @@ _GDN_SAVED_NAMES = frozenset(
 
 
 def gdn_kernel_options_from_config(cfg: Any) -> GDNKernelOptions:
-  """Builds the static GDN kernel options from the MaxText config."""
+  """Builds the static GDN kernel options from the MaxText config.
+
+  `gdn_kernel_natural_layout` (default on) is the kill switch for both layout fixes (`bf16_qkv_input`,
+  `bwd_natural_layout`); the sequence-CP pass-1 options keep their `GDNKernelOptions` defaults.
+  """
+  natural_layout = bool(getattr(cfg, "gdn_kernel_natural_layout", True))
   return GDNKernelOptions(
-      bf16_qkv_input=bool(getattr(cfg, "gdn_kernel_bf16_qkv_input", False)),
-      bwd_natural_layout=bool(getattr(cfg, "gdn_kernel_bwd_natural_layout", False)),
+      bf16_qkv_input=natural_layout,
+      bwd_natural_layout=natural_layout,
   )
 
 
