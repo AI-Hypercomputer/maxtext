@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU-only tests of e2e_driver.py's payload builder and metric helpers (numpy only; no Tunix, no JAX).
+"""CPU-only tests of bench_driver.py's payload builder and metric helpers (numpy only; no Tunix, no JAX).
 
 The payload is a small stand-in for Tunix's packed RLTrainerPayload with the fields `realistic_payload` reads; it
 checks the same invariants as check_payload_routing.py does at the production shapes with Tunix's own builder.
@@ -29,7 +29,7 @@ import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
-import e2e_driver as d  # pylint: disable=g-import-not-at-top,wrong-import-position
+import bench_driver as d  # pylint: disable=g-import-not-at-top,wrong-import-position
 
 pytestmark = pytest.mark.cpu_only
 

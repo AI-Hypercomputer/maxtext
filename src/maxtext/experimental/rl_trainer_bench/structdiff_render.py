@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Structured diff of two render_e2e.py JobSets: every YAML leaf except the client command, plus the client command
+"""Structured diff of two render_bench.py JobSets: every YAML leaf except the client command, plus the client command
 split into the env prefix (MAXTEXT_EXTRA_FLAGS tokens, LIBTPU_INIT_ARGS tokens, other env), the trainer argv
-(E2E_TRAINER_ARGV), the orchestrator argv (E2E_ORCH_ARGV) and the driver env. Prints only differences.
+(TRAINER_ARGV), the orchestrator argv (ORCH_ARGV) and the driver env. Prints only differences.
 
   python3 structdiff_render.py a.yaml b.yaml
 """
@@ -25,7 +25,7 @@ import sys
 import yaml
 
 sys.path.insert(0, __import__("os").path.dirname(__import__("os").path.abspath(__file__)))
-from render_e2e import _proc_main  # pylint: disable=g-import-not-at-top
+from render_bench import _proc_main  # pylint: disable=g-import-not-at-top
 
 
 def leaves(x, path=""):
@@ -54,11 +54,11 @@ def parse(path):
   _, main_c = _proc_main(js)
   script = main_c["command"][-1]
   main_c["command"] = ["<client script>"]
-  line = next(l for l in script.splitlines() if "exec python /tmp/e2e_driver.py" in l)
+  line = next(l for l in script.splitlines() if "exec python /tmp/bench_driver.py" in l)
   toks = shlex.split(line)
   env = {}
   for t in toks:
-    if t in ("exec", "python", "/tmp/e2e_driver.py"):
+    if t in ("exec", "python", "/tmp/bench_driver.py"):
       continue
     k, _, v = t.partition("=")
     env[k] = v
@@ -66,8 +66,8 @@ def parse(path):
       "leaf": dict(leaves(js)),
       "MAXTEXT_EXTRA_FLAGS": flagmap(env.pop("MAXTEXT_EXTRA_FLAGS", "").split()),
       "LIBTPU_INIT_ARGS": flagmap(env.pop("LIBTPU_INIT_ARGS", "").split()),
-      "trainer_argv": flagmap(shlex.split(env.pop("E2E_TRAINER_ARGV", ""))),
-      "orch_argv": flagmap(shlex.split(env.pop("E2E_ORCH_ARGV", ""))),
+      "trainer_argv": flagmap(shlex.split(env.pop("TRAINER_ARGV", ""))),
+      "orch_argv": flagmap(shlex.split(env.pop("ORCH_ARGV", ""))),
       "env": env,
   }
   return sec

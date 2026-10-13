@@ -16,7 +16,7 @@
 """Renders the RL trainer benchmark JobSet from a DRY_RUN render of a Tunix GRPO e2e run.
 
 Input: the output of the e2e launcher with DRY_RUN=true (e.g. `DRY_RUN=true mlperf_gbs1024_submission.sh start`),
-saved to a file (`--e2e-render`). That output is a stream of YAML documents (one JobSet per orchestrator, trainer
+saved to a file (`--launch-render`). That output is a stream of YAML documents (one JobSet per orchestrator, trainer
 and rollout engine) that may be interleaved with launcher log lines; the trainer JobSet and the orchestrator JobSet
 are picked from it by the `--process_main=` of their `main` container. Alternatively pass the two JobSets as
 separate files (`--train-yaml`, `--orch-yaml`).
@@ -27,8 +27,8 @@ images, node selectors, tolerations, reservations, Kueue labels and annotations)
   * names: JobSet name, namespace, gang-id label; failurePolicy.maxRestarts=0 (a failed bench should not rerun
     the compile);
   * the client command: the same inline env prefix (MAXTEXT_EXTRA_FLAGS, LIBTPU_INIT_ARGS, ...) in front of
-    e2e_driver.py instead of the Tunix runtime main, with the e2e trainer's flags (E2E_TRAINER_ARGV) and the e2e
-    orchestrator's flags (E2E_ORCH_ARGV); the Tunix fail-fast wrapper and the gRPC port are dropped;
+    bench_driver.py instead of the Tunix runtime main, with the e2e trainer's flags (TRAINER_ARGV) and the e2e
+    orchestrator's flags (ORCH_ARGV); the Tunix fail-fast wrapper and the gRPC port are dropped;
   * trainer flags: --maxtext_ckpt_path is cleared (random init, the one intended difference),
     --maxtext_output_directory points at `--output-prefix/<name>` and --worker_id is the bench name;
   * optional knobs for A/B variants: --libtpu-extra / --libtpu-drop (written to every place the e2e render carries
@@ -42,7 +42,7 @@ images, node selectors, tolerations, reservations, Kueue labels and annotations)
     the orchestrator's --trainer_fsdp (which sets the assembler's pack size, fsdp x expert rows).
 
 Writes a file and nothing else; it never talks to a cluster. With --print-aot-env it prints shell exports of the
-trainer's MaxText and XLA flags and mesh for aot_e2e.sh instead of rendering.
+trainer's MaxText and XLA flags and mesh for aot_bench.sh instead of rendering.
 """
 
 from __future__ import annotations
@@ -302,24 +302,24 @@ def client_script(
 ) -> str:
   """The client container's bash script: writes the driver to /tmp and runs it under the e2e env prefix."""
   bench_env = (
-      f"E2E_TRAINER_ARGV={shlex.quote(shlex.join(trainer_argv))} "
-      f"E2E_ORCH_ARGV={shlex.quote(shlex.join(orch_argv))} STEPS={steps} MICRO_STEPS={micro_steps}"
+      f"TRAINER_ARGV={shlex.quote(shlex.join(trainer_argv))} "
+      f"ORCH_ARGV={shlex.quote(shlex.join(orch_argv))} STEPS={steps} MICRO_STEPS={micro_steps}"
   )
   for kv in shlex.split(driver_env):
     k, _, v = kv.partition("=")
     if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", k):
       raise ValueError(f"bad --driver-env entry {kv!r}")
     bench_env += f" {k}={shlex.quote(v)}"
-  if "E2E_DRIVER_EOF" in driver_src:
+  if "BENCH_DRIVER_EOF" in driver_src:
     raise ValueError("driver source contains the heredoc terminator")
   return f"""# PID 1 wrapper: forwards SIGTERM to the benchmark so the grace period shuts it down cleanly.
 echo "Program Start: $(date)"
-cat > /tmp/e2e_driver.py <<'E2E_DRIVER_EOF'
-{driver_src}E2E_DRIVER_EOF
+cat > /tmp/bench_driver.py <<'BENCH_DRIVER_EOF'
+{driver_src}BENCH_DRIVER_EOF
 _sigterm() {{ kill -SIGTERM "$!" 2>/dev/null; }}
 trap _sigterm SIGTERM
 (
-{env_prefix} {bench_env} exec python /tmp/e2e_driver.py
+{env_prefix} {bench_env} exec python /tmp/bench_driver.py
 ) & PID=$!
 while kill -0 $PID 2>/dev/null; do
   sleep 5
@@ -333,7 +333,7 @@ exit $EXIT_CODE
 
 
 def aot_env(env_prefix: str, libtpu: list[str], trainer_flags: list[str]) -> str:
-  """Shell exports for aot_e2e.sh: the trainer's MaxText flags, its --xla_* libtpu flags and its mesh."""
+  """Shell exports for aot_bench.sh: the trainer's MaxText flags, its --xla_* libtpu flags and its mesh."""
   lines = [
       f"export MAXTEXT_EXTRA_FLAGS={shlex.quote(maxtext_extra_flags(env_prefix))}",
       f"export LIBTPU_INIT_ARGS={shlex.quote(' '.join(f for f in libtpu if f.startswith('--xla_')))}",
@@ -348,12 +348,12 @@ def aot_env(env_prefix: str, libtpu: list[str], trainer_flags: list[str]) -> str
 
 def build_parser() -> argparse.ArgumentParser:
   p = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
-  p.add_argument("--e2e-render", default="", help="DRY_RUN output of the e2e launcher (multi-document YAML)")
-  p.add_argument("--train-yaml", default="", help="the e2e trainer JobSet alone (instead of --e2e-render)")
-  p.add_argument("--orch-yaml", default="", help="the e2e orchestrator JobSet alone (instead of --e2e-render)")
+  p.add_argument("--launch-render", default="", help="DRY_RUN output of the e2e launcher (multi-document YAML)")
+  p.add_argument("--train-yaml", default="", help="the e2e trainer JobSet alone (instead of --launch-render)")
+  p.add_argument("--orch-yaml", default="", help="the e2e orchestrator JobSet alone (instead of --launch-render)")
   p.add_argument("--trainer-main", default=TRAINER_MAIN, help="--process_main of the trainer JobSet")
   p.add_argument("--orch-main", default=ORCH_MAIN, help="--process_main of the orchestrator JobSet")
-  p.add_argument("--driver", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "e2e_driver.py"))
+  p.add_argument("--driver", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "bench_driver.py"))
   p.add_argument("--out", default="")
   p.add_argument("--name", default="")
   p.add_argument("--namespace", default="")
@@ -367,7 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--set-trainer-flags", default="", help='"k=v ...": replace existing trainer flags in place')
   p.add_argument("--set-orch-flags", default="", help='"k=v ...": replace existing orchestrator flags in place')
   p.add_argument("--image", default="", help="client (main container) image; empty keeps the e2e render's")
-  # Driver knobs (e2e_driver.py), as "K=V K=V": PAYLOAD ROUTING ROUTING_SCALE ROUTING_TARGETS PAD_FRACTION
+  # Driver knobs (bench_driver.py), as "K=V K=V": PAYLOAD ROUTING ROUTING_SCALE ROUTING_TARGETS PAD_FRACTION
   # FINAL_PAD_FRACTION PAYLOAD_SEED EP_SIZE ADVANTAGES LOGP_GATES.
   p.add_argument("--driver-env", default="")
   p.add_argument("--trainer-slice", default="", help="e.g. 4x8x8: FSDP fills it, expert/context/tp kept")
@@ -375,23 +375,23 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--compute-logps-chunk-size", default="", help="trainer --compute_logps_chunk_size; empty keeps")
   p.add_argument("--profiler-skip", default="", help="trainer --skip_first_n_profiler_steps (counts fwd_bwd calls)")
   p.add_argument("--profiler-steps", default="", help="trainer --profiler_steps (fwd_bwd calls in the window)")
-  p.add_argument("--print-aot-env", action="store_true", help="print exports for aot_e2e.sh instead of rendering")
+  p.add_argument("--print-aot-env", action="store_true", help="print exports for aot_bench.sh instead of rendering")
   return p
 
 
 def main(argv=None):
   a = build_parser().parse_args(argv)
-  if a.e2e_render:
+  if a.launch_render:
     if a.train_yaml or a.orch_yaml:
-      sys.exit("pass either --e2e-render or --train-yaml/--orch-yaml")
-    train, orch = select_jobsets(load_documents(a.e2e_render), a.trainer_main, a.orch_main)
+      sys.exit("pass either --launch-render or --train-yaml/--orch-yaml")
+    train, orch = select_jobsets(load_documents(a.launch_render), a.trainer_main, a.orch_main)
   elif a.train_yaml and a.orch_yaml:
     with open(a.train_yaml) as f:
       train = yaml.safe_load(f)
     with open(a.orch_yaml) as f:
       orch = yaml.safe_load(f)
   else:
-    sys.exit("pass --e2e-render, or both --train-yaml and --orch-yaml")
+    sys.exit("pass --launch-render, or both --train-yaml and --orch-yaml")
   if not a.print_aot_env:
     missing = [k for k in ("out", "name", "namespace", "output_prefix") if not getattr(a, k)]
     if missing:

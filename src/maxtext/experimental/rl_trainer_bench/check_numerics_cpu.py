@@ -13,10 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU check of the numerics knobs of e2e_driver.py (no TPU, no cluster): why gradient_norm was 0, and the fix.
+"""CPU check of the numerics knobs of bench_driver.py (no TPU, no cluster): why gradient_norm was 0, and the fix.
 
 Builds the TRAINER_WARMUP_COMPILE payload with Tunix's own builder from the e2e orchestrator argv of a DRY_RUN
-render (--e2e-render; exactly as the driver does: `run_deepswe_dist._parse_args`, `_build_algo`,
+render (--launch-render; exactly as the driver does: `run_deepswe_dist._parse_args`, `_build_algo`,
 `BatchConfig`, routed_experts left out to keep it light), then the realistic payload, then runs Tunix's GRPO
 loss (`algo.loss_fn()`, the function `configure_worker` hands the trainer) on it with a one-parameter stand-in for
 the model: `compute_per_token_logps` is replaced by `theta + base_logp` per token, so everything after the forward
@@ -34,7 +34,7 @@ With --fsdp 64 it also reports the packed rows per micro-batch of the 256-chip v
 
 Run with a Tunix and MaxText that match the e2e run, e.g. inside the trainer image:
   docker run --rm --entrypoint python -v $PWD:/tb:ro -v <dir of render>:/r:ro -e JAX_PLATFORMS=cpu <image> \
-    /tb/check_numerics_cpu.py --e2e-render /r/<e2e-dryrun>.yaml
+    /tb/check_numerics_cpu.py --launch-render /r/<launch-dryrun>.yaml
 """
 
 import argparse
@@ -48,11 +48,11 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-import e2e_driver as d  # pylint: disable=g-import-not-at-top
+import bench_driver as d  # pylint: disable=g-import-not-at-top
 
 
 def orch_argv_from_render(path, fsdp=None):
-  from render_e2e import _proc_main, load_documents, select_jobsets, split_command  # pylint: disable=g-import-not-at-top
+  from render_bench import _proc_main, load_documents, select_jobsets, split_command  # pylint: disable=g-import-not-at-top
   _, orch = select_jobsets(load_documents(path))
   _, flags = split_command(_proc_main(orch)[1]["command"][-1])
   if fsdp is not None:
@@ -141,14 +141,14 @@ def check_summary():
 
 def main():
   ap = argparse.ArgumentParser()
-  ap.add_argument("--e2e-render", required=True, help="DRY_RUN output of the e2e launcher (see README)")
+  ap.add_argument("--launch-render", required=True, help="DRY_RUN output of the e2e launcher (see README)")
   ap.add_argument("--fsdp", type=int, default=None, help="override --trainer_fsdp (64 for the 256-chip variant)")
   ap.add_argument("--rows", type=int, default=4, help="rows of the micro-batch fed to the loss (CPU time)")
   ap.add_argument("--far-logp", type=float, default=-12.0,
                   help="stand-in trainer logp per token; ~ -ln(vocab) for a near-uniform random-init model")
   a = ap.parse_args()
 
-  argv = orch_argv_from_render(a.e2e_render, a.fsdp)
+  argv = orch_argv_from_render(a.launch_render, a.fsdp)
   gates = [t for t in argv if t.split("=", 1)[0] in d.LOGP_GATE_FLAGS]
   print("orch gate flags:", gates)
   o, algo_on, warm = build(argv)

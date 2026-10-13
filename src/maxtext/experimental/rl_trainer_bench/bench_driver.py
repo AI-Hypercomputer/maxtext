@@ -57,7 +57,7 @@ import shlex
 import sys
 import time
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - [E2EBench] %(message)s", force=True)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - [TrainerBench] %(message)s", force=True)
 
 import dataclasses
 
@@ -323,8 +323,8 @@ def metric_log_lines(step, summary):
 
 
 def main() -> int:
-  trainer_argv = shlex.split(os.environ["E2E_TRAINER_ARGV"])
-  orch_argv = shlex.split(os.environ["E2E_ORCH_ARGV"])
+  trainer_argv = shlex.split(os.environ["TRAINER_ARGV"])
+  orch_argv = shlex.split(os.environ["ORCH_ARGV"])
   # LOGP_GATES=off (numerics A/B): the payload's rollout log-probs are synthetic (-0.7 per completion token), so
   # against a random-init trainer the seq_logprob_error_threshold and seq-mask-tis gates drop every sequence, the
   # loss mask is empty and the gradient is exactly 0. Stripping the gate flags keeps every sequence in the loss.

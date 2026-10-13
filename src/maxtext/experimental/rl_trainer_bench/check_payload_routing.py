@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU check of e2e_driver.realistic_payload at the 397B production shapes (no TPU, no cluster; needs Tunix).
+"""CPU check of bench_driver.realistic_payload at the 397B production shapes (no TPU, no cluster; needs Tunix).
 
 Builds the TRAINER_WARMUP_COMPILE payload with Tunix's own builder at the 397B e2e run's BatchConfig (64 rows x 65,536
 tokens, 16 segments per row at most, trainer_fsdp=32, trainer_expert=2, routed_experts [60 layers, top-10]), then
@@ -42,7 +42,7 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import e2e_driver as d  # pylint: disable=g-import-not-at-top
+import bench_driver as d  # pylint: disable=g-import-not-at-top
 
 from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
 from tunix.experimental.examples.deepswe_dist import trainer_warmup  # pylint: disable=g-import-not-at-top

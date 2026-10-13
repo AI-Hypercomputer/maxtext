@@ -22,8 +22,8 @@ sequence-packed RLTrainerPayload with router replay, and reports each kernel's m
 
 The recipe constants below are those of the Qwen3.5-397B-A17B GRPO recipe the bench was built for (prompt and
 response lengths, optimizer, GRPO config). The mesh, the logps chunk and the topology come from the environment
-(`render_e2e.py --print-aot-env` derives the first two from an e2e DRY_RUN render); edit the rest for another
-recipe so that the compile matches your trainer. Run with `aot_e2e.sh`, inside an image whose MaxText and Tunix
+(`render_bench.py --print-aot-env` derives the first two from an e2e DRY_RUN render); edit the rest for another
+recipe so that the compile matches your trainer. Run with `aot_bench.sh`, inside an image whose MaxText and Tunix
 match the e2e run.
 
 Environment: MAXTEXT_EXTRA_FLAGS (required), LIBTPU_INIT_ARGS (--xla_* flags), AOT_MESH_FSDP (32), AOT_MESH_TP (1),

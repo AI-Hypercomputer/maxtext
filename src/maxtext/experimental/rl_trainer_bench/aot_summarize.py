@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Summarizes aot_e2e.sh logs: per kernel (fwd_bwd, accumulate, update) the CompiledMemoryStats and cost analysis,
+"""Summarizes aot_bench.sh logs: per kernel (fwd_bwd, accumulate, update) the CompiledMemoryStats and cost analysis,
 and the tool's TRAIN-KERNEL DEVICE PEAK against an HBM cap.
 
   python3 aot_summarize.py <log> [<log> ...] [--cap-mib 84992]

@@ -21,7 +21,9 @@ program the e2e run compiles (the same MaxText flags, libtpu flags, mesh, GRPO l
 the same compile key) on one trainer slice, under the same Pathways setup, with a synthetic micro-batch whose MoE
 routing load is calibrated to a production run. There is no orchestrator, no rollout engines and no weight sync. A
 variant (a MaxText flag, a libtpu flag, a slice size) can therefore be A/B tested in one short job on one slice, and
-its profile read, without the rest of the RL system.
+its profile read, without the rest of the RL system. The bench is standalone and launches no e2e job: its input,
+`LAUNCH_RENDER`, is the DRY_RUN output of the full launcher, from which the renderer takes only the trainer JobSet and
+the trainer and orchestrator argv.
 
 ## Why a separate harness
 
@@ -31,7 +33,7 @@ loss and its vocabulary-chunked `compute_per_token_logps` pass are missing, the 
 optimizer step is driven by MaxText rather than by Tunix's `TrainerWorker`. Timings from it do not transfer to the RL
 step, and a variant that compiles there may not compile in the RL program (or the other way round).
 
-The bench therefore drives the trainer through Tunix's own code paths. `e2e_driver.py` builds the trainer worker with
+The bench therefore drives the trainer through Tunix's own code paths. `bench_driver.py` builds the trainer worker with
 `run_trainer_node._parse_args` and `_create_maxtext_trainer_factory` from the e2e trainer's argv, builds the
 `GRPOAdapter`, `BatchConfig` and batch assembler with `run_deepswe_dist._parse_args` and `_build_algo` from the e2e
 orchestrator's argv, applies `configure_worker`'s loss and model-input functions, compiles against Tunix's
@@ -51,11 +53,11 @@ to the team.
 
 | file | what it does |
 |---|---|
-| `e2e_driver.py` | the bench itself; runs as the Pathways client of the trainer slice |
-| `render_e2e.py`, `render_e2e.sh` | turn an e2e DRY_RUN render into the bench JobSet, with variant knobs |
+| `bench_driver.py` | the bench itself; runs as the Pathways client of the trainer slice |
+| `render_bench.py`, `render_bench.sh` | turn an e2e DRY_RUN render into the bench JobSet, with variant knobs |
 | `structdiff_render.py` | structured diff of two bench renders (YAML leaves, MaxText flags, libtpu flags, argv) |
 | `diff_config.py` | diff of the resolved MaxText `Config param` lines of two logs (e2e trainer vs bench) |
-| `aot_trainer.py`, `aot_e2e.sh`, `aot_summarize.py` | ahead-of-time compile and memory report on a CPU host |
+| `aot_trainer.py`, `aot_bench.sh`, `aot_summarize.py` | ahead-of-time compile and memory report on a CPU host |
 | `check_payload_routing.py` | CPU check of the realistic payload at the 397B production shapes (needs Tunix) |
 | `check_numerics_cpu.py` | CPU check of the numerics knobs with Tunix's GRPO loss (needs Tunix and MaxText) |
 | `hlo_collective_schedule.py` | static overlap summary of the collectives in a scheduled HLO dump |
@@ -69,7 +71,7 @@ Start from the launch you want to reproduce, with the environment you would laun
 for a dry run. For the MLPerf recipe in Tunix this is
 
 ```bash
-DRY_RUN=true bash tunix/experimental/examples/recipes/mlperf_gbs1024_submission.sh start > e2e-dryrun.yaml
+DRY_RUN=true bash tunix/experimental/examples/recipes/mlperf_gbs1024_submission.sh start > launch-dryrun.yaml
 ```
 
 The output is a stream of JobSets (orchestrator, trainer, one per rollout engine), possibly interleaved with
@@ -82,21 +84,21 @@ executing) the delete commands of a stop, so check your context afterwards.
 ### 2. Render the bench JobSet
 
 ```bash
-E2E_RENDER=e2e-dryrun.yaml NAME=tb-base K8S_NAMESPACE=<namespace> OUTPUT_PREFIX=<output-prefix> \
-  bash render_e2e.sh                     # writes rendered/tb-base.yaml and nothing else
+LAUNCH_RENDER=launch-dryrun.yaml NAME=tb-base K8S_NAMESPACE=<namespace> OUTPUT_PREFIX=<output-prefix> \
+  bash render_bench.sh                   # writes rendered/tb-base.yaml and nothing else
 ```
 
 The render keeps every scheduling field of the e2e trainer JobSet (Kueue labels and annotations, node selectors,
 tolerations, reservations, priority class, service account, the Pathways resource manager, proxy, worker and sidecar
 containers with their images, args and env). It changes the names, sets `failurePolicy.maxRestarts` to 0 (so a
 failure does not rerun the compile), and replaces the client command: the same inline env prefix as the e2e trainer
-(MAXTEXT_EXTRA_FLAGS, LIBTPU_INIT_ARGS and the rest) runs `e2e_driver.py`, written into the pod by the command itself,
-with the e2e trainer argv and orchestrator argv as `E2E_TRAINER_ARGV` and `E2E_ORCH_ARGV`. In the trainer argv,
+(MAXTEXT_EXTRA_FLAGS, LIBTPU_INIT_ARGS and the rest) runs `bench_driver.py`, written into the pod by the command itself,
+with the e2e trainer argv and orchestrator argv as `TRAINER_ARGV` and `ORCH_ARGV`. In the trainer argv,
 `--maxtext_ckpt_path` is cleared (random initialization is the one intended difference), `--maxtext_output_directory`
 becomes `<output-prefix>/<NAME>`, `--worker_id` becomes `NAME`, and the gRPC and discovery flags are dropped. The
 Tunix fail-fast wrapper is dropped as well, since it rewrites a clean exit into a restart.
 
-The knobs, all environment variables of `render_e2e.sh` (the Python script takes the same as flags):
+The knobs, all environment variables of `render_bench.sh` (the Python script takes the same as flags):
 
 `IMAGE` replaces the client image; the Pathways containers keep the e2e render's. `STEPS` (default 3) is the number of
 optimizer steps and `MICRO_STEPS` the `fwd_bwd` calls per step. Set `MICRO_STEPS` to what your e2e run does per
@@ -187,7 +189,7 @@ routing). Real tokens get replayed top-k routing with distinct experts, so MaxTe
 them. With `ROUTING=probe` (the default) each layer draws from a pool whose max expert-shard load ratio (under the
 EP=8 cp-as-ep layout) is calibrated by bisection to a per-layer target, with a seeded hot shard per layer.
 
-The default targets, `PROBE_REGULAR_MEAN_RATIO` in `e2e_driver.py`, were calibrated from a Qwen3.5-397B-A17B GRPO
+The default targets, `PROBE_REGULAR_MEAN_RATIO` in `bench_driver.py`, were calibrated from a Qwen3.5-397B-A17B GRPO
 production run (the per-layer mean over its 65 regular micro-batches). For another model or another phase of
 training, pass your own table with `ROUTING_TARGETS="r0,r1,..."` (one ratio per MoE layer, in the same probe order),
 or stretch the default with `ROUTING_SCALE` (targets become `1 + scale * (target - 1)`). `ROUTING=uniform` draws
@@ -212,19 +214,19 @@ the loss, and `ADVANTAGES=random` gives each segment a seeded N(0, 1) advantage 
 and routing byte-identical. With these two, the gradient norm of two variants (e.g. a MoE padding flag on and off) is
 a meaningful comparison; the loss value itself is a function of the payload alone when the ratio is 1.
 
-`check_numerics_cpu.py --e2e-render e2e-dryrun.yaml` reproduces this on CPU with Tunix's GRPO loss and a
+`check_numerics_cpu.py --launch-render launch-dryrun.yaml` reproduces this on CPU with Tunix's GRPO loss and a
 one-parameter stand-in for the model. The stand-in replaces `compute_per_token_logps`, so it is tied to that
 function's signature in the Tunix version it runs against.
 
 ## Ahead-of-time memory check
 
 ```bash
-E2E_RENDER=e2e-dryrun.yaml AOT_IMAGE=<image> [TRAINER_SLICE=4x8x8] bash aot_e2e.sh
-python3 aot_summarize.py logs/aot-e2e-<time>.log
+LAUNCH_RENDER=launch-dryrun.yaml AOT_IMAGE=<image> [TRAINER_SLICE=4x8x8] bash aot_bench.sh
+python3 aot_summarize.py logs/aot-bench-<time>.log
 ```
 
-`aot_e2e.sh` takes the trainer's MaxText flags, `--xla_*` libtpu flags and mesh from the e2e render
-(`render_e2e.py --print-aot-env`, with the same variant knobs as `render_e2e.sh`) and runs `aot_trainer.py` in the
+`aot_bench.sh` takes the trainer's MaxText flags, `--xla_*` libtpu flags and mesh from the e2e render
+(`render_bench.py --print-aot-env`, with the same variant knobs as `render_bench.sh`) and runs `aot_trainer.py` in the
 image on a CPU host against a virtual topology. `aot_trainer.py` builds the MaxText argv as the Tunix trainer node does
 and calls `training_engine/maxtext_engine_compile.py` with the GRPO loss, packed micro-batches and router replay; its
 recipe constants (sequence lengths, optimizer, GRPO config) are the 397B recipe's and need editing for another
@@ -239,7 +241,7 @@ python3 -m pytest src/maxtext/experimental/rl_trainer_bench/tests
 ```
 
 The tests run on CPU with PyYAML and NumPy only: the renderer on a hand-written DRY_RUN fixture
-(`tests/testdata/e2e_dryrun_fixture.yaml`), and the payload builder and metric helpers on a small stand-in payload.
+(`tests/testdata/launch_dryrun_fixture.yaml`), and the payload builder and metric helpers on a small stand-in payload.
 They live next to the code, so the repository's default `testpaths = tests` does not collect them; run them by path.
 `check_payload_routing.py` and `check_numerics_cpu.py` are the heavier checks at the production shapes and need a
 matching Tunix.
