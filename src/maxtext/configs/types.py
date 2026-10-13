@@ -1168,6 +1168,45 @@ class MoEGeneral(BaseModel):
           "dropless program's first load and execution cost into the first dropless replay, if any."
       ),
   )
+  moe_exclude_padding_from_routing: bool = Field(
+      False,
+      description=(
+          "Train only. Exclude padding tokens (decoder_segment_ids == 0) from MoE routing: they"
+          " contribute no assignments to group_sizes or the ragged dispatch (no buffer slots, no expert"
+          " compute), any replayed routed_experts for them are ignored, and their MoE block output is"
+          " zero (the residual passes through). Non-pad tokens' routing and outputs are unchanged."
+      ),
+  )
+  retry_when_tokens_dropped: bool = Field(
+      False,
+      description="Whether to discard candidate state and replay the step with a dropless buffer if tokens are dropped.",
+  )
+  retry_num_moe_token_chunks: PositiveInt = Field(
+      2,
+      description=(
+          "Token chunks of the retry_when_tokens_dropped dropless replay program, run as a lax.scan in the training"
+          " engine, each rematerialized, so its backward holds one chunk's worst-case buffers at a time."
+      ),
+  )
+  retry_dropless_final_micro_batch: bool = Field(
+      False,
+      description=(
+          "With retry_when_tokens_dropped=True, run the final micro-batch of every optimizer step (the training "
+          "engine's fwd_bwd called with apply_optimizer=True) directly with a dropless program: the regular "
+          "program's graph with every RoutedMoE force_dropless (same token chunks and remat), i.e. the "
+          "ragged_buffer_factor=-1 program. Every other micro-batch runs the ragged_buffer_factor program, and an "
+          "overflowing one is still replayed dropless."
+      ),
+  )
+  log_moe_drops: bool = Field(
+      False,
+      description=(
+          "Drop audit. On the ring-of-experts ragged path every RoutedMoE call sows `moe_dropped_assignments` "
+          "(sum over EP shards and the mesh of max(0, shard load - ragged buffer size), 0 when dropless) and "
+          "`moe_max_load_ratio`; the training engine logs a MOE_DROP_AUDIT line per micro-batch and records "
+          "moe_dropped_assignments per step. Adds a scalar psum and pmax per MoE layer call."
+      ),
+  )
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
@@ -4352,6 +4391,45 @@ class MaxTextConfig(
           f"Found other ICI axes enabled: {active}."
       )
 
+  def validate_retry_when_tokens_dropped(self):
+    """Validates prerequisites for the step-level dropless fallback retry."""
+    if self.log_moe_drops and self.moe_log_max_load_ratio:
+      raise ValueError("log_moe_drops and moe_log_max_load_ratio both sow moe_max_load_ratio; enable only one.")
+    if self.first_phase_ragged_buffer_factor < 0:
+      raise ValueError(f"first_phase_ragged_buffer_factor must be >= 0 (got {self.first_phase_ragged_buffer_factor}).")
+
+    if self.retry_dropless_final_micro_batch and not self.retry_when_tokens_dropped:
+      raise ValueError("retry_dropless_final_micro_batch=True requires retry_when_tokens_dropped=True.")
+
+    if self.retry_when_tokens_dropped:
+      if self.moe_dropless_fallback is not None:
+        raise ValueError("retry_when_tokens_dropped=True cannot be combined with moe_dropless_fallback (both handle drops).")
+      if self.num_experts <= 1:
+        raise ValueError("retry_when_tokens_dropped=True requires num_experts > 1.")
+      if self.ragged_buffer_factor == -1:
+        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0 (got default -1.0).")
+      if self.ragged_buffer_factor <= 0:
+        raise ValueError("retry_when_tokens_dropped=True requires ragged_buffer_factor > 0.0.")
+      if not self.use_ring_of_experts:
+        raise ValueError("retry_when_tokens_dropped=True is currently only supported with use_ring_of_experts=True.")
+      if not self.use_ragged_sort:
+        raise ValueError("retry_when_tokens_dropped=True requires use_ragged_sort=True.")
+      if self.num_moe_emb_chunks > 0:
+        raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
+      if self.retry_dropless_final_micro_batch and self.ragged_buffer_factor <= 0:
+        raise ValueError(
+            "retry_dropless_final_micro_batch=True needs ragged_buffer_factor > 0 (with rbf <= 0 every "
+            "micro-batch already runs dropless)."
+        )
+      if self.first_phase_ragged_buffer_factor > 0:
+        if self.first_phase_ragged_buffer_factor < self.ragged_buffer_factor:
+          raise ValueError(
+              f"first_phase_ragged_buffer_factor ({self.first_phase_ragged_buffer_factor}) must be >= "
+              f"ragged_buffer_factor ({self.ragged_buffer_factor})."
+          )
+        if self.te_moe_block:
+          raise ValueError("first_phase_ragged_buffer_factor > 0 is not supported with te_moe_block=True.")
+
   def validate_moe_dropless_fallback(self):
     """Validates prerequisites for the step-level ('step') and in-layer ('layer') dropless fallback."""
     mode = self.moe_dropless_fallback
@@ -4385,8 +4463,10 @@ class MaxTextConfig(
     """Validates retry_dropless_first_steps, first_phase_ragged_buffer_factor and the REQUIRED_RBF probe."""
     if self.retry_dropless_first_steps < 0:
       raise ValueError(f"retry_dropless_first_steps must be >= 0 (got {self.retry_dropless_first_steps}).")
-    if self.retry_dropless_first_steps > 0 and self.moe_dropless_fallback != "step":
-      raise ValueError("retry_dropless_first_steps > 0 requires moe_dropless_fallback='step'.")
+    if self.retry_dropless_first_steps > 0 and self.moe_dropless_fallback != "step" and not self.retry_when_tokens_dropped:
+      raise ValueError(
+          "retry_dropless_first_steps > 0 requires moe_dropless_fallback='step' or retry_when_tokens_dropped=True."
+      )
     if self.first_phase_ragged_buffer_factor < 0:
       raise ValueError(
           f"first_phase_ragged_buffer_factor must be 0 (off) or > 0 (got {self.first_phase_ragged_buffer_factor})."
@@ -4394,8 +4474,10 @@ class MaxTextConfig(
     if self.first_phase_ragged_buffer_factor > 0:
       if self.retry_dropless_first_steps <= 0:
         raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_dropless_first_steps > 0.")
-      if self.moe_dropless_fallback != "step":
-        raise ValueError("first_phase_ragged_buffer_factor > 0 requires moe_dropless_fallback='step'.")
+      if self.moe_dropless_fallback != "step" and not self.retry_when_tokens_dropped:
+        raise ValueError(
+            "first_phase_ragged_buffer_factor > 0 requires moe_dropless_fallback='step' or retry_when_tokens_dropped=True."
+        )
       if self.ragged_buffer_factor <= 0:
         raise ValueError("first_phase_ragged_buffer_factor > 0 requires ragged_buffer_factor > 0.")
       if self.first_phase_ragged_buffer_factor < self.ragged_buffer_factor:
@@ -5815,6 +5897,7 @@ class MaxTextConfig(
         raise ValueError("DeepSeek V4 hash routing is currently not supported with ring of experts.")
       self.validate_ragged_buffer_factor()
       self.validate_moe_dropless_fallback()
+      self.validate_retry_when_tokens_dropped()
       self.validate_moe_log_max_load_ratio()
       self.validate_moe_tc_ragged_sort()
     self.validate_num_moe_emb_chunks()
@@ -6338,6 +6421,11 @@ class MaxTextConfig(
             f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide "
             f"max_target_length={self.max_target_length}."
         )
+    if self.retry_when_tokens_dropped and self.max_target_length % self.retry_num_moe_token_chunks != 0:
+      raise ValueError(
+          f"retry_num_moe_token_chunks={self.retry_num_moe_token_chunks} must evenly divide "
+          f"max_target_length={self.max_target_length}."
+      )
 
     if self.moe_accumulate_chunk_wgrad and not (
         self.use_tokamax_gmm and self.use_gmm_v2 and self.num_moe_emb_chunks == 0 and not self.prefuse_moe_weights

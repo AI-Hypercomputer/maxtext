@@ -23,7 +23,7 @@ from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, Config, ShardMode, get_weight_dtype
+from maxtext.common.common_types import MODEL_MODE_TRAIN, Array, Config, ShardMode, get_weight_dtype
 from maxtext.layers.linears import MlpBlock
 from maxtext.layers.normalizations import Qwen3NextRMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -297,12 +297,21 @@ class Qwen3_5DecoderLayer(nnx.Module):
 
     # Instantiate and call our `Qwen3_5SparseMoEBlock` or `MlpBlock`.
     if getattr(self.config, "num_experts", 1) > 1:
+      # Padding tokens (segment id 0) are excluded from MoE routing when moe_exclude_padding_from_routing.
+      token_mask = None
+      if (
+          self.config.moe_exclude_padding_from_routing
+          and decoder_segment_ids is not None
+          and model_mode == MODEL_MODE_TRAIN
+      ):
+        token_mask = decoder_segment_ids != 0
       mlp_output, load_balance_loss = self.mlp(
           hidden_states,
           deterministic=deterministic,
           forced_routed_experts=forced_routed_experts,
           intermediate_sharding=self.mlp_intermediate_sharding,
           out_sharding=self.out_sharding,
+          token_mask=token_mask,
       )
 
       # We sow the load balancing loss so it can be collected and added to the total loss

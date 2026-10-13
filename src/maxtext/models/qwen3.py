@@ -38,6 +38,7 @@ from maxtext.common.common_types import (
     DType,
     EMBED,
     KV_BATCH,
+    HEAD,
     KV_HEAD,
     LENGTH,
     MODEL_MODE_AUTOREGRESSIVE,
@@ -789,10 +790,13 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       )
       return jax.sharding.NamedSharding(self.mesh, pspec)
 
+    gdn_head_axis = (
+        HEAD if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") else KV_HEAD
+    )
     return (
-        _sharding((KV_BATCH, cp_len, KV_HEAD)),
-        _sharding((KV_BATCH, cp_len, KV_HEAD, None)),
-        _sharding((KV_BATCH, KV_HEAD, None, None)),
+        _sharding((KV_BATCH, cp_len, gdn_head_axis)),
+        _sharding((KV_BATCH, cp_len, gdn_head_axis, None)),
+        _sharding((KV_BATCH, gdn_head_axis, None, None)),
     )
 
   @staticmethod
@@ -865,6 +869,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     batch, seq_len, _ = hidden_states.shape
     use_gdn_kernel = getattr(cfg, "use_gdn_kernel", False)
     flat_sharding, head_sharding, state_sharding = self._explicit_activation_shardings(batch)
+    gdn_head_axis = HEAD if cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") else KV_HEAD
 
     active_cache = kv_cache if kv_cache is not None else self.cache
 
@@ -926,7 +931,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         # and the reason the first version of this patch cut GDN memory but still
         # lost overall.
         cp_len = LENGTH if gdn_context_axes(cfg) else None
-      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
+      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
       if cp_axes_active and qkvz_pspec[1] is None:
         qkvz_pspec = jax.sharding.PartitionSpec(qkvz_pspec[0], cp_axis_for_pspec, *qkvz_pspec[2:])
       # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
@@ -1320,9 +1325,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         # logical rules, so this is correct whichever one is configured.
         cp_axes = gdn_context_axes(cfg)
         cp_len = LENGTH if cp_axes else None
-        qkv_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
-        g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD), mesh=self.mesh, rules=logical_rules)
-        state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=self.mesh, rules=logical_rules)
+        qkv_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
+        g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis), mesh=self.mesh, rules=logical_rules)
+        state_pspec = logical_to_mesh_axes((KV_BATCH, gdn_head_axis, None, None), mesh=self.mesh, rules=logical_rules)
         # Keep every shard_map input/output batch spec consistent when replication is required.
         qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
             qkv_pspec,
@@ -1643,6 +1648,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       forced_routed_experts: jnp.ndarray | None = None,
       intermediate_sharding: jax.sharding.NamedSharding | None = None,
       out_sharding: jax.sharding.NamedSharding | None = None,
+      token_mask: jnp.ndarray | None = None,
   ) -> tuple[Array, Array | None]:
     """Applies the sparse MoE block to the input hidden states.
 
@@ -1650,6 +1656,9 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       hidden_states: The input array from the previous layer. Shape: (batch,
         seq, embed_dim)
       deterministic: If True, disables dropout.
+      token_mask: Optional `(batch, seq)`, nonzero for real tokens. With
+        moe_exclude_padding_from_routing, masked-out tokens take no routed-expert
+        slots and the block's output for them is zero.
       intermediate_sharding: Optional layout for the shared expert's
         intermediate activation, honoured only under `ShardMode.EXPLICIT`.
       out_sharding: Optional layout for the block output, honoured only under
@@ -1662,12 +1671,18 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         training.
     """
     # 1. Apply the routed experts block.
+    exclude_padding = token_mask is not None and self.config.moe_exclude_padding_from_routing
     routed_output, load_balance_loss, _ = self.routed_experts(
         hidden_states,
         out_sharding=out_sharding,
         forced_routed_experts=forced_routed_experts,
+        token_mask=token_mask if exclude_padding else None,
     )
 
+    # Padding tokens get a zero MoE output, so the residual stream passes through unchanged. The routed output
+    # is already zero there (no expert slots, zero weights); the shared expert's term is zeroed through its
+    # [batch, seq, 1] gate. A `where` on the full [batch, seq, embed] output instead measurably raised the
+    # dropless (ragged_buffer_factor=-1) fwd_bwd HBM peak past the cap in the CPU AOT.
     if not self.use_shared_expert:
       return routed_output, load_balance_loss
 
@@ -1686,12 +1701,17 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
 
     # 4. Combine the outputs in fp32 then cast back to block dtype.
     if self.config.float32_weight_sum:
+      shared_gate = jax.nn.sigmoid(shared_gate_output.astype(jnp.float32))
+      if exclude_padding:
+        shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
       final_output = (
-          routed_output.astype(jnp.float32)
-          + jax.nn.sigmoid(shared_gate_output.astype(jnp.float32)) * shared_expert_output.astype(jnp.float32)
+          routed_output.astype(jnp.float32) + shared_gate * shared_expert_output.astype(jnp.float32)
       ).astype(self.config.dtype)
     else:
-      final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
+      shared_gate = jax.nn.sigmoid(shared_gate_output)
+      if exclude_padding:
+        shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
+      final_output = routed_output + shared_gate * shared_expert_output
 
     return final_output, load_balance_loss
 
