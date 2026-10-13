@@ -1649,6 +1649,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       forced_routed_experts: jnp.ndarray | None = None,
       intermediate_sharding: jax.sharding.NamedSharding | None = None,
       out_sharding: jax.sharding.NamedSharding | None = None,
+      token_mask: jnp.ndarray | None = None,
   ) -> tuple[Array, Array | None]:
     """Applies the sparse MoE block to the input hidden states.
 
@@ -1656,6 +1657,9 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       hidden_states: The input array from the previous layer. Shape: (batch,
         seq, embed_dim)
       deterministic: If True, disables dropout.
+      token_mask: Optional `(batch, seq)`, nonzero for real tokens. With
+        moe_exclude_padding_from_routing, masked-out tokens take no routed-expert
+        slots and the block's output for them is zero.
       intermediate_sharding: Optional layout for the shared expert's
         intermediate activation, honoured only under `ShardMode.EXPLICIT`.
       out_sharding: Optional layout for the block output, honoured only under
@@ -1668,12 +1672,18 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         training.
     """
     # 1. Apply the routed experts block.
+    exclude_padding = token_mask is not None and self.config.moe_exclude_padding_from_routing
     routed_output, load_balance_loss, _ = self.routed_experts(
         hidden_states,
         out_sharding=out_sharding,
         forced_routed_experts=forced_routed_experts,
+        token_mask=token_mask if exclude_padding else None,
     )
 
+    # Padding tokens get a zero MoE output, so the residual stream passes through unchanged. The routed output
+    # is already zero there (no expert slots, zero weights); the shared expert's term is zeroed through its
+    # [batch, seq, 1] gate. A `where` on the full [batch, seq, embed] output instead measurably raised the
+    # dropless (ragged_buffer_factor=-1) fwd_bwd HBM peak past the cap in the CPU AOT.
     if not self.use_shared_expert:
       return routed_output, load_balance_loss
 
@@ -1692,12 +1702,17 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
 
     # 4. Combine the outputs in fp32 then cast back to block dtype.
     if self.config.float32_weight_sum:
+      shared_gate = jax.nn.sigmoid(shared_gate_output.astype(jnp.float32))
+      if exclude_padding:
+        shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
       final_output = (
-          routed_output.astype(jnp.float32)
-          + jax.nn.sigmoid(shared_gate_output.astype(jnp.float32)) * shared_expert_output.astype(jnp.float32)
+          routed_output.astype(jnp.float32) + shared_gate * shared_expert_output.astype(jnp.float32)
       ).astype(self.config.dtype)
     else:
-      final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
+      shared_gate = jax.nn.sigmoid(shared_gate_output)
+      if exclude_padding:
+        shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
+      final_output = routed_output + shared_gate * shared_expert_output
 
     return final_output, load_balance_loss
 

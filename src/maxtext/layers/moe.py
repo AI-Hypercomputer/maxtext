@@ -323,6 +323,33 @@ def valid_expert_mask(indices, num_experts):
   return (indices >= 0) & (indices < num_experts)
 
 
+# Router-replay sentinel for a padding token (decoder_segment_ids == 0) under
+# moe_exclude_padding_from_routing. Distinct from UNSET (-1, "use the model's own router"): a token
+# whose slots are all PAD_TOKEN_ROUTED_EXPERT is routed nowhere (no expert slots, zero weights).
+PAD_TOKEN_ROUTED_EXPERT = -2
+
+
+def fold_padding_into_forced_routing(forced_routed_experts, token_mask, num_experts_per_tok):
+  """Marks every top-k slot of a padding token with PAD_TOKEN_ROUTED_EXPERT.
+
+  The pad mask then travels with `forced_routed_experts` through every routed-MoE path (shard_map
+  in_specs, the EP all-gather of the non-local routing path, the token-chunk slicing), so no new
+  operand is threaded through them. Replayed ids at pad positions are overwritten; without replay
+  the non-pad slots are UNSET (-1), i.e. the model's own router, exactly as with no replay.
+
+  Args:
+    forced_routed_experts: `[batch, seq, top_k]` replayed expert ids, or None.
+    token_mask: `[batch, seq]`, nonzero/True for real tokens.
+    num_experts_per_tok: top_k.
+  """
+  is_pad = jnp.logical_not(token_mask.astype(jnp.bool_))[..., None]
+  if forced_routed_experts is None:
+    base = jnp.full(token_mask.shape + (num_experts_per_tok,), -1, dtype=jnp.int32)
+  else:
+    base = forced_routed_experts
+  return jnp.where(is_pad, jnp.asarray(PAD_TOKEN_ROUTED_EXPERT, base.dtype), base)
+
+
 def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
   """Sums the two largest scores along the last axis, accumulating in float32.
 
@@ -1084,7 +1111,13 @@ class RoutedMoE(nnx.Module):
       has_duplicate = jnp.any(sorted_experts[..., 1:] == sorted_experts[..., :-1], axis=-1, keepdims=True)
       token_is_forced = jnp.logical_and(jnp.all(slot_valid, axis=-1, keepdims=True), jnp.logical_not(has_duplicate))
       top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
-      valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.ones_like(slot_valid, dtype=jnp.bool_))
+      if self.config.moe_exclude_padding_from_routing:
+        # A padding token (every slot PAD_TOKEN_ROUTED_EXPERT) is never forced (its slots are not
+        # valid ids) and gets no valid slot, so its weights are zeroed below and its ids become -1.
+        pad_token = jnp.all(forced_routed_experts == PAD_TOKEN_ROUTED_EXPERT, axis=-1, keepdims=True)
+        valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.logical_not(pad_token))
+      else:
+        valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.ones_like(slot_valid, dtype=jnp.bool_))
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
@@ -1155,6 +1188,12 @@ class RoutedMoE(nnx.Module):
       ):
         per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
+
+    if forced_routed_experts is not None and self.config.moe_exclude_padding_from_routing:
+      # Padding slots -> -1 (invalid). permute() maps invalid ids to a virtual expert past the last
+      # real one, which the ragged sort counts as nothing: no group_sizes entry, no buffer slot.
+      top_k_indices = jnp.where(valid_token_mask, top_k_indices, -1)
+      top_k_weights = jnp.where(valid_token_mask, top_k_weights, jnp.zeros_like(top_k_weights))
 
     return top_k_weights, top_k_indices
 
@@ -4240,6 +4279,7 @@ class RoutedMoE(nnx.Module):
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
       forced_routed_experts: jax.Array | None = None,
+      token_mask: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
 
@@ -4249,12 +4289,18 @@ class RoutedMoE(nnx.Module):
         in DeepSeek V4's early MoE layers. If None, routing relies purely on `gate_inputs` or `inputs`.
       gate_inputs: Optional alternate inputs to feed into the routing gate.
       out_sharding: Optional sharding specification for the output.
+      token_mask: Optional `[batch, seq]`, nonzero for real tokens. Used only with
+        moe_exclude_padding_from_routing: masked-out tokens take no expert slots and get a zero output.
 
     Returns:
       A tuple containing the MoE output, the load balance loss (if applicable),
       and any routed bias updates.
     """
     cfg = self.config
+    if token_mask is not None and cfg.moe_exclude_padding_from_routing:
+      forced_routed_experts = fold_padding_into_forced_routing(
+          forced_routed_experts, token_mask, self.num_experts_per_tok
+      )
     gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
     routing_inputs = inputs.astype(gate_dtype) if gate_inputs is None else gate_inputs.astype(gate_dtype)
     inputs = inputs.astype(cfg.dtype)
