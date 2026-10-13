@@ -26,9 +26,10 @@ from maxtext.layers import mhc
 from maxtext.layers import moe
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.nnx_decoders import NNXDecoderLayer
-from maxtext.layers.normalizations import RMSNorm
+from maxtext.layers.normalizations import Qwen3NextRMSNorm, RMSNorm
 from maxtext.models import deepseek4
 from maxtext.models import deepseek_batchsplit
+from maxtext.models import qwen3_5
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
@@ -42,6 +43,11 @@ def _is_deepseek4(config: Config) -> bool:
   depending on how the config was constructed, so both are accepted.
   """
   return config.decoder_block in (DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK4.value)
+
+
+def _is_qwen3_5(config: Config) -> bool:
+  """Returns True when the model uses the Qwen3.5 decoder block."""
+  return config.decoder_block in (DecoderBlockType.QWEN3_5, DecoderBlockType.QWEN3_5.value)
 
 
 # Custom Variable types for MTP intermediate outputs
@@ -191,27 +197,46 @@ class MultiTokenPredictionLayer(nnx.Module):
     self.rngs = rngs
     cfg = self.config
 
-    self.embedding_norm = RMSNorm(
-        num_features=cfg.emb_dim,
-        epsilon=cfg.normalization_layer_epsilon,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        kernel_axes=("norm",),
-        rngs=rngs,
-    )
-    self.hidden_state_norm = RMSNorm(
-        num_features=cfg.emb_dim,
-        epsilon=cfg.normalization_layer_epsilon,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        kernel_axes=("norm",),
-        rngs=rngs,
-    )
+    if _is_qwen3_5(cfg):
+      self.embedding_norm = Qwen3NextRMSNorm(
+          num_features=cfg.emb_dim,
+          epsilon=cfg.normalization_layer_epsilon,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          shard_mode=cfg.shard_mode,
+          rngs=rngs,
+      )
+      self.hidden_state_norm = Qwen3NextRMSNorm(
+          num_features=cfg.emb_dim,
+          epsilon=cfg.normalization_layer_epsilon,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          shard_mode=cfg.shard_mode,
+          rngs=rngs,
+      )
+    else:
+      self.embedding_norm = RMSNorm(
+          num_features=cfg.emb_dim,
+          epsilon=cfg.normalization_layer_epsilon,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          kernel_axes=("norm",),
+          rngs=rngs,
+      )
+      self.hidden_state_norm = RMSNorm(
+          num_features=cfg.emb_dim,
+          epsilon=cfg.normalization_layer_epsilon,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          kernel_axes=("norm",),
+          rngs=rngs,
+      )
     self.projection_layer = DenseGeneral(
         in_features_shape=2 * cfg.emb_dim,
         out_features_shape=cfg.emb_dim,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        matmul_precision=cfg.matmul_precision,
         use_bias=False,
         kernel_axes=("embed", None),
         rngs=rngs,
@@ -235,6 +260,16 @@ class MultiTokenPredictionLayer(nnx.Module):
           compress_ratio=0,
           is_hash_routing=False,
       )
+    elif _is_qwen3_5(cfg):
+      # Qwen3.5 MTP uses a single full-attention Qwen3_5DecoderLayer (where
+      # (layer_idx + 1) % inhomogeneous_layer_cycle_interval == 0).
+      self.transformer_layer = qwen3_5.Qwen3_5DecoderLayer(
+          config=cfg,
+          mesh=mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          layer_idx=cfg.inhomogeneous_layer_cycle_interval - 1,
+          rngs=rngs,
+      )
     else:
       self.transformer_layer = transformer_layer_module(
           config=cfg,
@@ -254,14 +289,24 @@ class MultiTokenPredictionLayer(nnx.Module):
           rngs=rngs,
       )
 
-    self.final_norm = RMSNorm(
-        num_features=cfg.emb_dim,
-        epsilon=cfg.normalization_layer_epsilon,
-        dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
-        kernel_axes=("norm",),
-        rngs=rngs,
-    )
+    if _is_qwen3_5(cfg):
+      self.final_norm = Qwen3NextRMSNorm(
+          num_features=cfg.emb_dim,
+          epsilon=cfg.normalization_layer_epsilon,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          shard_mode=cfg.shard_mode,
+          rngs=rngs,
+      )
+    else:
+      self.final_norm = RMSNorm(
+          num_features=cfg.emb_dim,
+          epsilon=cfg.normalization_layer_epsilon,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          kernel_axes=("norm",),
+          rngs=rngs,
+      )
 
   @property
   def embedding_norm(self):

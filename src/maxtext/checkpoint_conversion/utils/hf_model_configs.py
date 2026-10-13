@@ -1691,6 +1691,7 @@ except AttributeError:
 
 qwen3_8_27b_dict = {
     "architectures": ["Qwen3_5ForConditionalGeneration"],
+    "image_token_id": 248056,
     "model_type": "qwen3_5",
     "text_config": {
         "attention_bias": False,
@@ -1738,6 +1739,26 @@ qwen3_8_27b_dict = {
         "use_cache": True,
         "vocab_size": 248320,
     },
+    "tie_word_embeddings": False,
+    "video_token_id": 248057,
+    "vision_config": {
+        "deepstack_visual_indexes": [],
+        "depth": 27,
+        "hidden_act": "gelu_pytorch_tanh",
+        "hidden_size": 1152,
+        "in_channels": 3,
+        "initializer_range": 0.02,
+        "intermediate_size": 4304,
+        "model_type": "qwen3_5_vision",
+        "num_heads": 16,
+        "num_position_embeddings": 2304,
+        "out_hidden_size": 5120,
+        "patch_size": 16,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    },
+    "vision_end_token_id": 248054,
+    "vision_start_token_id": 248053,
 }
 
 try:

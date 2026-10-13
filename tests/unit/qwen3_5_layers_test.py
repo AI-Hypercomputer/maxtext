@@ -184,6 +184,7 @@ class TestQwen3_8_27BDecoderLayers(unittest.TestCase):
         base_num_query_heads=6,
         base_num_kv_heads=2,
         head_dim=32,
+        mrope_section=[2, 1, 1],
         gdn_num_key_heads=4,
         gdn_num_value_heads=12,
         gdn_key_head_dim=16,

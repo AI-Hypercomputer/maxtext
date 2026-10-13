@@ -40,6 +40,7 @@ _MODEL_TO_BLOCKS = {
     "qwen3.5-35b-fp8": ("qwen3_5", "qwen3_5"),
     "qwen3.5-397b-a17b": ("qwen3_5", "qwen3_5"),
     "qwen3.5-397b-a17b-fp8": ("qwen3_5", "qwen3_5"),
+    "qwen3.8-27b": ("qwen3_5", "qwen3_5"),
     # Stitched model
     "maxtext-omni-gemma3-qwen3": ("gemma3", "qwen3"),
     # Weaver

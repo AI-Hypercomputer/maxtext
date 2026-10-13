@@ -695,6 +695,8 @@ def QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE(config):
 def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
   """Returns mapping between HuggingFace Qwen3.5 weights path and their shape."""
 
+  vision_config = config.get("vision_config")
+  top_mtp_num_layers = config.get("mtp_num_hidden_layers", 0)
   if "text_config" in config:
     config = config["text_config"]
 
@@ -807,6 +809,89 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
               f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
           }
       )
+
+  # Vision shapes (if vision_config is present)
+  if vision_config:
+    v_depth = vision_config["depth"]
+    v_hidden_size = vision_config["hidden_size"]
+    v_intermediate_size = vision_config["intermediate_size"]
+    v_out_hidden_size = vision_config["out_hidden_size"]
+    v_spatial_merge = vision_config.get("spatial_merge_size", 2)
+    v_merger_hidden_size = v_hidden_size * (v_spatial_merge**2)
+
+    mapping["model.visual.patch_embed.proj.weight"] = [
+        v_hidden_size,
+        vision_config.get("in_channels", 3),
+        vision_config.get("temporal_patch_size", 2),
+        vision_config.get("patch_size", 16),
+        vision_config.get("patch_size", 16),
+    ]
+    mapping["model.visual.patch_embed.proj.bias"] = [v_hidden_size]
+    mapping["model.visual.pos_embed.weight"] = [vision_config["num_position_embeddings"], v_hidden_size]
+
+    for i in range(v_depth):
+      v_prefix = f"model.visual.blocks.{i}"
+      mapping[f"{v_prefix}.norm1.weight"] = [v_hidden_size]
+      mapping[f"{v_prefix}.norm1.bias"] = [v_hidden_size]
+      mapping[f"{v_prefix}.norm2.weight"] = [v_hidden_size]
+      mapping[f"{v_prefix}.norm2.bias"] = [v_hidden_size]
+      mapping[f"{v_prefix}.attn.qkv.weight"] = [3 * v_hidden_size, v_hidden_size]
+      mapping[f"{v_prefix}.attn.qkv.bias"] = [3 * v_hidden_size]
+      mapping[f"{v_prefix}.attn.proj.weight"] = [v_hidden_size, v_hidden_size]
+      mapping[f"{v_prefix}.attn.proj.bias"] = [v_hidden_size]
+      mapping[f"{v_prefix}.mlp.linear_fc1.weight"] = [v_intermediate_size, v_hidden_size]
+      mapping[f"{v_prefix}.mlp.linear_fc1.bias"] = [v_intermediate_size]
+      mapping[f"{v_prefix}.mlp.linear_fc2.weight"] = [v_hidden_size, v_intermediate_size]
+      mapping[f"{v_prefix}.mlp.linear_fc2.bias"] = [v_hidden_size]
+
+    mapping["model.visual.merger.norm.weight"] = [v_hidden_size]
+    mapping["model.visual.merger.norm.bias"] = [v_hidden_size]
+    mapping["model.visual.merger.linear_fc1.weight"] = [v_merger_hidden_size, v_merger_hidden_size]
+    mapping["model.visual.merger.linear_fc1.bias"] = [v_merger_hidden_size]
+    mapping["model.visual.merger.linear_fc2.weight"] = [v_out_hidden_size, v_merger_hidden_size]
+    mapping["model.visual.merger.linear_fc2.bias"] = [v_out_hidden_size]
+
+  # Multi-Token Prediction (MTP) shapes
+  mtp_num_layers = config.get("mtp_num_hidden_layers", top_mtp_num_layers)
+  if mtp_num_layers > 0:
+    mapping["mtp.pre_fc_norm_embedding.weight"] = [hidden_size]
+    mapping["mtp.pre_fc_norm_hidden.weight"] = [hidden_size]
+    mapping["mtp.fc.weight"] = [hidden_size, 2 * hidden_size]
+    mapping["mtp.norm.weight"] = [hidden_size]
+    for j in range(mtp_num_layers):
+      mtp_layer_prefix = f"mtp.layers.{j}"
+      mapping.update(
+          {
+              f"{mtp_layer_prefix}.input_layernorm.weight": [hidden_size],
+              f"{mtp_layer_prefix}.post_attention_layernorm.weight": [hidden_size],
+              f"{mtp_layer_prefix}.self_attn.q_proj.weight": [2 * q_dim, hidden_size],
+              f"{mtp_layer_prefix}.self_attn.k_proj.weight": [kv_dim, hidden_size],
+              f"{mtp_layer_prefix}.self_attn.v_proj.weight": [kv_dim, hidden_size],
+              f"{mtp_layer_prefix}.self_attn.o_proj.weight": [hidden_size, q_dim],
+              f"{mtp_layer_prefix}.self_attn.q_norm.weight": [head_dim],
+              f"{mtp_layer_prefix}.self_attn.k_norm.weight": [head_dim],
+          }
+      )
+      if num_experts > 1:
+        mapping.update(
+            {
+                f"{mtp_layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
+                f"{mtp_layer_prefix}.mlp.shared_expert.gate_proj.weight": [shared_expert_intermediate_size, hidden_size],
+                f"{mtp_layer_prefix}.mlp.shared_expert.up_proj.weight": [shared_expert_intermediate_size, hidden_size],
+                f"{mtp_layer_prefix}.mlp.shared_expert.down_proj.weight": [hidden_size, shared_expert_intermediate_size],
+                f"{mtp_layer_prefix}.mlp.shared_expert_gate.weight": [1, hidden_size],
+                f"{mtp_layer_prefix}.mlp.experts.gate_up_proj": [num_experts, 2 * moe_intermediate_size, hidden_size],
+                f"{mtp_layer_prefix}.mlp.experts.down_proj": [num_experts, hidden_size, moe_intermediate_size],
+            }
+        )
+      else:
+        mapping.update(
+            {
+                f"{mtp_layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+                f"{mtp_layer_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+                f"{mtp_layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+            }
+        )
 
   return mapping
 

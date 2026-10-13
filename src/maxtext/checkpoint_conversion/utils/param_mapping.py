@@ -1280,6 +1280,56 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
     )
     mapping["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-bias"] = "model.visual.merger.linear_fc2.bias"
 
+  # Multi-Token Prediction (MTP) mapping for Qwen3.5
+  _mtp = getattr(maxtext_config, "mtp_num_layers", 0)
+  mtp_num_layers = _mtp if isinstance(_mtp, int) else 0
+  for j in range(mtp_num_layers):
+    k = j + 1
+    mtp_prefix = f"params-mtp_block-mtp_layer_{k}"
+    t_prefix = f"{mtp_prefix}-mtp_{k}_transformer_layer"
+    hf_mtp_layer = f"mtp.layers.{j}"
+
+    mapping[f"{mtp_prefix}-mtp_{k}_embedding_norm-scale"] = "mtp.pre_fc_norm_embedding.weight"
+    mapping[f"{mtp_prefix}-mtp_{k}_hidden_state_norm-scale"] = "mtp.pre_fc_norm_hidden.weight"
+    mapping[f"{mtp_prefix}-mtp_{k}_projection-kernel"] = "mtp.fc.weight"
+    mapping[f"{mtp_prefix}-mtp_{k}_final_norm-scale"] = "mtp.norm.weight"
+
+    mapping[f"{t_prefix}-input_layernorm-scale"] = f"{hf_mtp_layer}.input_layernorm.weight"
+    mapping[f"{t_prefix}-post_attention_layernorm-scale"] = f"{hf_mtp_layer}.post_attention_layernorm.weight"
+    mapping.update(
+        {
+            f"{t_prefix}-attention-attention-query-kernel": f"{hf_mtp_layer}.self_attn.q_proj.weight",
+            f"{t_prefix}-attention-attention-key-kernel": f"{hf_mtp_layer}.self_attn.k_proj.weight",
+            f"{t_prefix}-attention-attention-value-kernel": f"{hf_mtp_layer}.self_attn.v_proj.weight",
+            f"{t_prefix}-attention-attention-out-kernel": f"{hf_mtp_layer}.self_attn.o_proj.weight",
+            f"{t_prefix}-attention-attention-query_norm-scale": f"{hf_mtp_layer}.self_attn.q_norm.weight",
+            f"{t_prefix}-attention-attention-key_norm-scale": f"{hf_mtp_layer}.self_attn.k_norm.weight",
+        }
+    )
+    if num_experts > 1:
+      mapping.update(
+          {
+              f"{t_prefix}-mlp-routed_experts-gate-kernel": f"{hf_mtp_layer}.mlp.gate.weight",
+              f"{t_prefix}-mlp-shared_expert-wi_0-kernel": f"{hf_mtp_layer}.mlp.shared_expert.gate_proj.weight",
+              f"{t_prefix}-mlp-shared_expert-wi_1-kernel": f"{hf_mtp_layer}.mlp.shared_expert.up_proj.weight",
+              f"{t_prefix}-mlp-shared_expert-wo-kernel": f"{hf_mtp_layer}.mlp.shared_expert.down_proj.weight",
+              f"{t_prefix}-mlp-shared_expert_gate-kernel": f"{hf_mtp_layer}.mlp.shared_expert_gate.weight",
+              f"{t_prefix}-mlp-routed_experts-wo": f"{hf_mtp_layer}.mlp.experts.down_proj",
+              (
+                  f"{t_prefix}-mlp-routed_experts-wi_0",
+                  f"{t_prefix}-mlp-routed_experts-wi_1",
+              ): f"{hf_mtp_layer}.mlp.experts.gate_up_proj",
+          }
+      )
+    else:
+      mapping.update(
+          {
+              f"{t_prefix}-mlp-wi_0-kernel": f"{hf_mtp_layer}.mlp.gate_proj.weight",
+              f"{t_prefix}-mlp-wi_1-kernel": f"{hf_mtp_layer}.mlp.up_proj.weight",
+              f"{t_prefix}-mlp-wo-kernel": f"{hf_mtp_layer}.mlp.down_proj.weight",
+          }
+      )
+
   return mapping
 
 
@@ -1588,14 +1638,41 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         reshape_conv3d_patch_embed  # pyrefly: ignore[bad-assignment]
     )
 
+    def fuse_qkv_vision(input_tensor, target_shape=None):
+      q, k, v = input_tensor
+      q_hf = q.reshape(hidden_size, hidden_size).T
+      k_hf = k.reshape(hidden_size, hidden_size).T
+      v_hf = v.reshape(hidden_size, hidden_size).T
+      return np.concatenate([q_hf, k_hf, v_hf], axis=0)
+
+    def fuse_qkv_bias_vision(input_tensor, target_shape=None):
+      qb, kb, vb = input_tensor
+      return np.concatenate([qb.reshape(hidden_size), kb.reshape(hidden_size), vb.reshape(hidden_size)], axis=0)
+
     for i in range(n_vision_layers):
       prefix = f"params-vision_encoder-Qwen3_5MoeVisionEncoder_0-blocks_{i}"
-      hooks[f"{prefix}-attn-attn-query-kernel"] = split_qkv_query  # pyrefly: ignore[bad-assignment]
-      hooks[f"{prefix}-attn-attn-query-bias"] = split_qkv_bias_query  # pyrefly: ignore[bad-assignment]
-      hooks[f"{prefix}-attn-attn-key-kernel"] = split_qkv_key  # pyrefly: ignore[bad-assignment]
-      hooks[f"{prefix}-attn-attn-key-bias"] = split_qkv_bias_key  # pyrefly: ignore[bad-assignment]
-      hooks[f"{prefix}-attn-attn-value-kernel"] = split_qkv_value  # pyrefly: ignore[bad-assignment]
-      hooks[f"{prefix}-attn-attn-value-bias"] = split_qkv_bias_value  # pyrefly: ignore[bad-assignment]
+      if saving_to_hf:
+        hooks[
+            (
+                f"{prefix}-attn-attn-query-kernel",
+                f"{prefix}-attn-attn-key-kernel",
+                f"{prefix}-attn-attn-value-kernel",
+            )
+        ] = fuse_qkv_vision  # pyrefly: ignore[unsupported-operation]
+        hooks[
+            (
+                f"{prefix}-attn-attn-query-bias",
+                f"{prefix}-attn-attn-key-bias",
+                f"{prefix}-attn-attn-value-bias",
+            )
+        ] = fuse_qkv_bias_vision  # pyrefly: ignore[unsupported-operation]
+      else:
+        hooks[f"{prefix}-attn-attn-query-kernel"] = split_qkv_query  # pyrefly: ignore[bad-assignment]
+        hooks[f"{prefix}-attn-attn-query-bias"] = split_qkv_bias_query  # pyrefly: ignore[bad-assignment]
+        hooks[f"{prefix}-attn-attn-key-kernel"] = split_qkv_key  # pyrefly: ignore[bad-assignment]
+        hooks[f"{prefix}-attn-attn-key-bias"] = split_qkv_bias_key  # pyrefly: ignore[bad-assignment]
+        hooks[f"{prefix}-attn-attn-value-kernel"] = split_qkv_value  # pyrefly: ignore[bad-assignment]
+        hooks[f"{prefix}-attn-attn-value-bias"] = split_qkv_bias_value  # pyrefly: ignore[bad-assignment]
       hooks[f"{prefix}-attn-attn-out-kernel"] = reshape_vision_attn_out  # pyrefly: ignore[bad-assignment]
       hooks[f"{prefix}-mlp-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
       hooks[f"{prefix}-mlp_out-kernel"] = reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
@@ -1607,6 +1684,31 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
     hooks["params-vision_encoder-Qwen3_5MoeVisionProjector_0-merger-mlp_2-kernel"] = (
         reshape_kernel_vision  # pyrefly: ignore[bad-assignment]
     )
+
+  # MTP hooks for Qwen3.5
+  _mtp = getattr(maxtext_config, "mtp_num_layers", 0)
+  mtp_num_layers = _mtp if isinstance(_mtp, int) else 0
+  for j in range(mtp_num_layers):
+    k = j + 1
+    mtp_prefix = f"params-mtp_block-mtp_layer_{k}"
+    t_prefix = f"{mtp_prefix}-mtp_{k}_transformer_layer"
+    hooks[f"{mtp_prefix}-mtp_{k}_projection-kernel"] = transpose
+    for key in ["query", "key", "value", "out"]:
+      hooks[f"{t_prefix}-attention-attention-{key}-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]
+    if num_experts > 1:
+      hooks[f"{t_prefix}-mlp-routed_experts-gate-kernel"] = transpose
+      hooks[f"{t_prefix}-mlp-shared_expert-wi_0-kernel"] = transpose
+      hooks[f"{t_prefix}-mlp-shared_expert-wi_1-kernel"] = transpose
+      hooks[f"{t_prefix}-mlp-shared_expert-wo-kernel"] = transpose
+      hooks[f"{t_prefix}-mlp-shared_expert_gate-kernel"] = transpose
+      hooks[(f"{t_prefix}-mlp-routed_experts-wi_0", f"{t_prefix}-mlp-routed_experts-wi_1")] = (
+          process_wi_0_wi_1  # pyrefly: ignore[unsupported-operation]
+      )
+      hooks[f"{t_prefix}-mlp-routed_experts-wo"] = transpose_expert
+    else:
+      hooks[f"{t_prefix}-mlp-wi_0-kernel"] = reshape_kernel
+      hooks[f"{t_prefix}-mlp-wi_1-kernel"] = reshape_kernel
+      hooks[f"{t_prefix}-mlp-wo-kernel"] = reshape_kernel
 
   return hooks
 

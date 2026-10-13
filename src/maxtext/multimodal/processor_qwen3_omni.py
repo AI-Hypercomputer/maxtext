@@ -83,6 +83,15 @@ QWEN_SPECIAL_TOKEN_CONFIGS = {
         "audio_end": 248071,  # <|audio_end|>
         "audio_pad": 248076,  # <|audio_pad|>
     },
+    "qwen3.8": {
+        "vision_start": 248053,  # <|vision_start|>
+        "vision_end": 248054,  # <|vision_end|>
+        "image_pad": 248056,  # <|image_pad|>
+        "video_pad": 248057,  # <|video_pad|>
+        "audio_start": 248070,  # <|audio_start|>
+        "audio_end": 248071,  # <|audio_end|>
+        "audio_pad": 248076,  # <|audio_pad|>
+    },
 }
 
 

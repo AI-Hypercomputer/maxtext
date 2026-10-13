@@ -5406,6 +5406,7 @@ class MaxTextConfig(
           "qwen3-vl-30b-a3b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
+          "qwen3.8-27b",
           "maxtext-omni-gemma3-qwen3",
           "weaver-mini",
           "weaver-max",

@@ -308,6 +308,8 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
       if override:
         max_logging.log(f"⚠️ Overwriting HF Config '{hf_attr}': {hf_value} -> {mt_value} (from MaxText '{mt_attr}')")
         setattr(target_cfg, hf_attr, mt_value)
+        if hf_attr == "num_hidden_layers" and isinstance(getattr(target_cfg, "layer_types", None), list):
+          target_cfg.layer_types = target_cfg.layer_types[:mt_value]
       else:
         mismatches.append(f"{hf_attr} (HF={hf_value} vs MaxText={mt_value})")
 
@@ -523,7 +525,12 @@ def main(argv: Sequence[str]) -> None:
   tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
 
   # For multi-modal case:
-  processor = AutoProcessor.from_pretrained(hf_tokenizer_id, token=hf_token) if config.use_multimodal else None
+  processor = None
+  if config.use_multimodal:
+    try:
+      processor = AutoProcessor.from_pretrained(hf_tokenizer_id, token=hf_token)
+    except ImportError as e:
+      max_logging.log(f"Warning: Could not load AutoProcessor ({e}); saving without processor.")
 
   # 3. Get parameter mappings
   mappings = _get_model_mappings(model_key, config.scan_layers, hf_config_obj.to_dict(), config)

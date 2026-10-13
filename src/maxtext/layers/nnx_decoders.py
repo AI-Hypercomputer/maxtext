@@ -1487,6 +1487,7 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-35b-fp8",
             "qwen3.5-397b-a17b",
             "qwen3.5-397b-a17b-fp8",
+            "qwen3.8-27b",
             "maxtext-omni-gemma3-qwen3",
             "weaver-mini",
             "weaver-max",
@@ -1511,6 +1512,7 @@ class NNXDecoder(nnx.Module):
             "qwen3.5-35b-fp8",
             "qwen3.5-397b-a17b",
             "qwen3.5-397b-a17b-fp8",
+            "qwen3.8-27b",
             "weaver-mini",
             "weaver-max",
         }:
