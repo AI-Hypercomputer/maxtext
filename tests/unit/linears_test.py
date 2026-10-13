@@ -604,6 +604,83 @@ class MlpBlockTest(unittest.TestCase):
     self.assertEqual(outputs.shape, (batch_size, seq_len, in_features))
     self.assertEqual(layer.wi.kernel[...].shape, (in_features, 1, intermediate_dim))
 
+  def test_unreduced_output_matches_reduced_output(self):
+    """`unreduced_output=True` returns per-device partials whose psum is the regular output.
+
+    Runs on any multi-device backend (CPU with `--xla_force_host_platform_device_count=N` works):
+    the `mlp` logical axis is put on tensor parallelism so `wo` contracts over a sharded dimension.
+    """
+    num_devices = jax.device_count()
+    if num_devices < 2:
+      self.skipTest("needs >= 2 devices for a sharded `wo` contraction")
+
+    in_features = 64
+    intermediate_dim = 32 * num_devices
+    batch_size, seq_len = 2, 4
+
+    config_arguments = {
+        "per_device_batch_size": 1.0,
+        "run_name": "test",
+        "enable_checkpointing": False,
+        "max_target_length": seq_len,
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "matmul_precision": "highest",
+        "fused_mlp": False,
+        "ici_tensor_parallelism": num_devices,
+    }
+    argv = [sys.argv[0], get_test_config_path()]
+    cfg = pyconfig.initialize(argv, **config_arguments)
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = jax.sharding.Mesh(devices_array, cfg.mesh_axes)
+
+    with mesh, nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      layer = linears.MlpBlock(
+          config=cfg,
+          mesh=mesh,
+          in_features=in_features,
+          intermediate_dim=intermediate_dim,
+          rngs=nnx.Rngs(params=0, dropout=1),
+      )
+      self.assertTrue(layer.can_return_unreduced_output())
+      axes = layer.unreduced_output_axes()
+      self.assertEqual(set(axes), {"tensor"})
+
+      inputs = jax.random.normal(jax.random.PRNGKey(1), (batch_size, seq_len, in_features), dtype=cfg.dtype)
+
+      def run(m, x):
+        reference = m(x, deterministic=True)
+        partial = m(x, deterministic=True, unreduced_output=True)
+        reduced = jax.shard_map(
+            lambda p: jax.lax.psum(p, axes),
+            mesh=mesh,
+            in_specs=jax.sharding.PartitionSpec(),
+            out_specs=jax.sharding.PartitionSpec(),
+            check_vma=False,
+        )(partial)
+        return reference, partial, reduced
+
+      reference, partial, reduced = nnx.jit(run)(layer, inputs)
+
+    self.assertEqual(partial.shape, reference.shape)
+    np.testing.assert_allclose(np.asarray(reduced), np.asarray(reference), rtol=1e-5, atol=1e-5)
+    # Sanity: the per-device partial is genuinely partial (not already reduced).
+    self.assertFalse(np.allclose(np.asarray(partial), np.asarray(reference), rtol=1e-3, atol=1e-3))
+
+  def test_unreduced_output_requires_plain_kernel(self):
+    """The local `wo` path is only offered for an unquantized, bias-free block on a mesh."""
+    layer = linears.MlpBlock(
+        config=self.cfg,
+        mesh=self.mesh,
+        in_features=4,
+        intermediate_dim=8,
+        use_bias=True,
+        rngs=self.rngs,
+    )
+    self.assertFalse(layer.can_return_unreduced_output())
+    with self.assertRaises(ValueError):
+      layer(jnp.ones((2, 3, 4)), unreduced_output=True)
+
   @pytest.mark.tpu_only
   def test_dense_fsdp_two_stage_all_gather_tpu_only(self):
     """`dense_fsdp_use_two_stage_all_gather` is a pure resharding and must not change MLP numerics.

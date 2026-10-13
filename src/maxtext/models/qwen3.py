@@ -62,6 +62,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated, RMSNorm, l2norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
@@ -1667,6 +1668,15 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         - The load balancing loss from the routed experts, if applicable during
         training.
     """
+    if self._fuse_shared_expert_all_reduce():
+      return self._call_fused_shared_expert_all_reduce(
+          hidden_states,
+          deterministic=deterministic,
+          forced_routed_experts=forced_routed_experts,
+          intermediate_sharding=intermediate_sharding,
+          out_sharding=out_sharding,
+      )
+
     # 1. Apply the routed experts block.
     routed_output, load_balance_loss, _ = self.routed_experts(
         hidden_states,
@@ -1686,9 +1696,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     )
 
     # 3. Apply the gate for the shared expert in fp32.
-    shared_gate_output = self.shared_expert_gate(
-        hidden_states.astype(jnp.float32) if self.config.float32_gate_logits else hidden_states
-    )
+    shared_gate_output = self._shared_expert_gate_logits(hidden_states)
 
     # 4. Combine the outputs in fp32 then cast back to block dtype.
     if self.config.float32_weight_sum:
@@ -1700,6 +1708,86 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       final_output = routed_output + jax.nn.sigmoid(shared_gate_output) * shared_expert_output
 
     return final_output, load_balance_loss
+
+  def _shared_expert_gate_logits(self, hidden_states: Array) -> Array:
+    """Shared-expert gate logits, `(B, S, 1)`, in fp32 when `float32_gate_logits`."""
+    return self.shared_expert_gate(
+        hidden_states.astype(jnp.float32) if self.config.float32_gate_logits else hidden_states
+    )
+
+  def _fuse_shared_expert_all_reduce(self) -> bool:
+    """Whether the shared expert can ride the routed experts' all-reduce.
+
+    On the fused vLLM MoE path the routed output is produced by tpu_inference's
+    `fused_moe_func`, whose expert-parallel partials are summed with one
+    all-reduce over `ShardingAxisName.EXPERT`. The shared expert is a TP MLP whose
+    `wo` contraction is sharded over the same device group (logical `mlp` axis),
+    so its output would otherwise be reduced by a *second* all-reduce of the same
+    size right before the two are added. Since `sigmoid(gate)` is a per-token
+    scalar replicated on every device, `routed + g * shared` is linear in both
+    partials and the two reductions can be merged:
+
+        allreduce(routed_partial) + g * allreduce(shared_partial)
+          == allreduce(routed_partial + g * shared_partial)
+
+    This halves the bytes of the post-MoE collective (the single largest item of
+    a prefill step on Qwen3.5-397B pure-TP/EP: 2 x bf16[T, D] -> 1 x). It is only
+    valid when both partial sums live on exactly the same device group and the
+    MoE path does a plain all-reduce (no reduce-scatter across data replicas).
+    """
+    cfg = self.config
+    if not getattr(cfg, "fuse_shared_expert_all_reduce", True):
+      return False
+    if not self.use_shared_expert or self.mesh is None:
+      return False
+    if not self.routed_experts.fused_moe_partial_output_supported():
+      return False
+    if not self.shared_expert.can_return_unreduced_output():
+      return False
+    moe_axes = self.routed_experts.fused_moe_reduction_axes()
+    shared_axes = self.shared_expert.unreduced_output_axes()
+    if moe_axes is None or not moe_axes:
+      return False
+    if set(moe_axes) != set(shared_axes):
+      max_logging.log(
+          "fuse_shared_expert_all_reduce disabled: MoE reduction axes "
+          f"{moe_axes} differ from shared-expert TP axes {shared_axes}."
+      )
+      return False
+    return True
+
+  def _call_fused_shared_expert_all_reduce(
+      self,
+      hidden_states: Array,
+      *,
+      deterministic: bool,
+      forced_routed_experts: jnp.ndarray | None,
+      intermediate_sharding: jax.sharding.NamedSharding | None,
+      out_sharding: jax.sharding.NamedSharding | None,
+  ) -> tuple[Array, Array | None]:
+    """`routed + sigmoid(gate) * shared` with a single all-reduce (see `_fuse_shared_expert_all_reduce`)."""
+    # Un-reduced (per-device partial) shared-expert output projection.
+    shared_partial = self.shared_expert(
+        hidden_states,
+        deterministic=deterministic,
+        intermediate_sharding=intermediate_sharding,
+        out_sharding=out_sharding,
+        unreduced_output=True,
+    )
+    gate = jax.nn.sigmoid(self._shared_expert_gate_logits(hidden_states).astype(jnp.float32))
+    # Scale the partial before the reduction. The gate is replicated across the
+    # reduction group, so scaling each partial equals scaling the reduced sum.
+    # Applying the gate in fp32 and reducing in the block dtype mirrors the
+    # separate-reduction path, whose shared-expert all-reduce also runs in dtype.
+    gated_partial = (gate * shared_partial.astype(jnp.float32)).astype(self.config.dtype)
+
+    routed_plus_shared, load_balance_loss, _ = self.routed_experts(
+        hidden_states,
+        out_sharding=out_sharding,
+        forced_routed_experts=forced_routed_experts,
+        partial_output_to_add=gated_partial,
+    )
+    return routed_plus_shared, load_balance_loss
 
 
 class Qwen3NextScannableBlock(nnx.Module):

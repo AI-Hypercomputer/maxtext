@@ -24,6 +24,7 @@ import jax.numpy as jnp
 
 from jax import lax
 from jax.sharding import NamedSharding, Mesh, PartitionSpec
+from jax.sharding import PartitionSpec as P
 from jax.ad_checkpoint import checkpoint_name
 
 from flax import nnx
@@ -41,6 +42,7 @@ from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
+from maxtext.utils.sharding import adjust_pspec_for_indivisible_shapes, logical_to_mesh_axes, mesh_axes_for_dim
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
@@ -783,8 +785,25 @@ class MlpBlock(nnx.Module):
       deterministic: bool = False,
       intermediate_sharding: NamedSharding | None = None,
       out_sharding: NamedSharding | None = None,
+      *,
+      unreduced_output: bool = False,
   ):
-    """Applies Transformer MlpBlock module."""
+    """Applies Transformer MlpBlock module.
+
+    Args:
+      inputs: The input activations.
+      decode: Unused; kept for API compatibility.
+      deterministic: If True, disables dropout.
+      intermediate_sharding: Optional sharding for the intermediate activation.
+      out_sharding: Optional sharding for the output.
+      unreduced_output: If True, return the *per-device partial sum* of the
+        output projection instead of the reduced output. The `wo` contraction
+        runs locally under `jax.shard_map`, so the all-reduce the SPMD
+        partitioner would otherwise insert is skipped. The caller must reduce
+        the result over `self.unreduced_output_axes()` itself, typically by
+        folding it into another reduction (e.g. the routed-expert all-reduce of
+        a MoE block). Requires `self.can_return_unreduced_output()`.
+    """
     cfg = self.config
 
     if self.mlp_layer_norm is not None:
@@ -820,10 +839,98 @@ class MlpBlock(nnx.Module):
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     x = self._maybe_shard_with_logical(x, self.intermediate_logical)
-    output = self.wo(x, out_sharding=out_sharding)
+    if unreduced_output:
+      output = self._wo_unreduced(x)
+    else:
+      output = self.wo(x, out_sharding=out_sharding)
 
     output = checkpoint_name(output, "mlpwo")
     return output
+
+  # ---------------------------------------------------------------------------
+  # Un-reduced output projection (partial sums kept on each device).
+  # ---------------------------------------------------------------------------
+  def _wo_kernel_mesh_spec(self):
+    """Mesh PartitionSpec of the `wo` kernel ("mlp", "embed") under the current rules."""
+    return logical_to_mesh_axes(("mlp", "embed"), self.mesh)
+
+  def unreduced_output_axes(self) -> tuple[str, ...]:
+    """Mesh axes (size > 1) the un-reduced output is a partial sum over.
+
+    These are the mesh axes the `mlp` (contraction) dimension of `wo` is sharded
+    over. Summing the un-reduced output across exactly this device group yields
+    the regular output.
+    """
+    if self.mesh is None:
+      return ()
+    spec = self._wo_kernel_mesh_spec()
+    if spec is None or not spec:
+      return ()
+    return tuple(ax for ax in mesh_axes_for_dim(spec[0]) if self.mesh.shape.get(ax, 1) > 1)
+
+  def can_return_unreduced_output(self) -> bool:
+    """Whether `unreduced_output=True` is supported for this block.
+
+    The local `wo` path bypasses DenseGeneral's quantized / fp8 / two-stage
+    all-gather machinery, so it is only offered for a plain (unquantized,
+    bias-free) kernel on a mesh.
+    """
+    if self.mesh is None or self.quant is not None or self.use_bias:
+      return False
+    if quantizations.in_serve_mode(self.quant):
+      return False
+    if getattr(self.wo, "kernel_scale", None) is not None:
+      return False
+    kernel = getattr(self.wo, "kernel", None)
+    if hasattr(kernel, "get_value"):
+      kernel_value = kernel.get_value()
+    else:
+      kernel_value = getattr(kernel, "value", kernel)
+    if is_fp8_dtype(getattr(kernel_value, "dtype", None)):
+      return False
+    if self.mesh.shape.get("fsdp", 1) > 1 or self.mesh.shape.get("fsdp_transpose", 1) > 1:
+      # The kernel would need the (two-stage) all-gather DenseGeneral performs.
+      return False
+    return True
+
+  def _wo_unreduced(self, x):
+    """Local `wo` contraction: returns per-device partial sums, no all-reduce."""
+    if not self.can_return_unreduced_output():
+      raise ValueError("MlpBlock.unreduced_output is not supported for this configuration.")
+    kernel = self.wo.kernel
+    if hasattr(kernel, "get_value"):
+      kernel = kernel.get_value()
+    kernel = getattr(kernel, "value", kernel)
+    kernel = jnp.asarray(kernel, self.dtype)
+    x = jnp.asarray(x, self.dtype)
+
+    kernel_spec = self._wo_kernel_mesh_spec()
+    x_spec = logical_to_mesh_axes(self.intermediate_logical, self.mesh)
+    if kernel_spec is None:
+      kernel_spec = P(None, None)
+    if x_spec is None:
+      x_spec = P(*([None] * x.ndim))
+    kernel_spec = adjust_pspec_for_indivisible_shapes(kernel_spec, kernel.shape, self.mesh)
+    x_spec = adjust_pspec_for_indivisible_shapes(x_spec, x.shape, self.mesh)
+    embed_axes = kernel_spec[1] if len(kernel_spec) > 1 else None
+    out_spec = P(*x_spec[: x.ndim - 1], embed_axes)
+    precision = lax.Precision(self.matmul_precision_for_wo())
+
+    def _local_wo(x_local, w_local):
+      return lax.dot_general(x_local, w_local, (((x_local.ndim - 1,), (0,)), ((), ())), precision=precision)
+
+    # check_vma=False: the output is deliberately *not* invariant across the
+    # contraction axes; it is a partial sum the caller reduces.
+    return jax.shard_map(
+        _local_wo,
+        mesh=self.mesh,
+        in_specs=(x_spec, kernel_spec),
+        out_specs=out_spec,
+        check_vma=False,
+    )(x, kernel)
+
+  def matmul_precision_for_wo(self) -> str:
+    return self.wo.matmul_precision
 
 
 def mlp_block(

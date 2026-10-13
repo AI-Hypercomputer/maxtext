@@ -1316,6 +1316,17 @@ class MoEGeneral(BaseModel):
       description="Whether to fuse the expert scaling factors into the expert weights. "
       "This can improve inference performance.",
   )
+  fuse_shared_expert_all_reduce: bool = Field(
+      True,
+      description=(
+          "On the fused vLLM MoE path (attention=vllm_rpa*), fold the shared expert's un-reduced output"
+          " projection into the routed experts' all-reduce instead of reducing the two separately."
+          " The result is `routed + sigmoid(gate) * shared` either way; this only halves the bytes the"
+          " post-MoE all-reduce moves. Automatically disabled when the shared expert's TP group differs"
+          " from the MoE reduction group, when results are reduce-scattered across data replicas, or"
+          " when the installed tpu_inference does not support it."
+      ),
+  )
 
   @model_validator(mode="after")
   def validate_moe_chunks(self) -> "MoEGeneral":
