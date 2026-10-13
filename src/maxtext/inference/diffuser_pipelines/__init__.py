@@ -13,3 +13,6 @@
 # limitations under the License.
 
 """Diffusion inference pipelines package."""
+
+from .pipeline_utils import FlaxDiffusionPipeline
+from .wan_pipeline import WanPipeline, WanPipeline2_1
