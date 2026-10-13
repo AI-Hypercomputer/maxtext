@@ -68,12 +68,44 @@ _GDN_SAVED_NAMES = frozenset(
 )
 
 
+def _cp_pass2_split_residuals(cfg: Any) -> bool:
+  """Whether a t_inv-reusing sequence-CP pass 2 should be split into an output and a residual pass.
+
+  Decided statically from the remat config (outputs are identical either way, only the number of
+  forward-kernel calls differs). It only matters when pass 2 reuses the pass-1 t_inv:
+
+  | backward replays the fwd kernel | `gdn_cp_state` | pass 2                  | kernels per layer |
+  |---------------------------------|----------------|-------------------------|-------------------|
+  | no (no remat, or gdn residuals  | any            | coupled (t_inv reused)  | 2 (fwd)           |
+  | saved: `gdn`/`gdn_states` set)  |                |                         |                   |
+  | yes                             | remat          | coupled                 | 2 fwd + 2 bwd     |
+  | yes                             | device/offload | split: 2a fwd, 2b bwd   | 2 fwd + 1 bwd     |
+
+  The backward replays the forward kernel when its residuals (`t_inv`, `chunk_states`) are not
+  saved: any remat policy other than 'none', unless `gdn` or `gdn_states` is 'device'/'offload'
+  (both need `remat_policy='custom'`; `gdn='device'` also wraps preset policies to save them). With
+  `gdn_cp_state='remat'` the replay re-runs pass 1 anyway (pass 2 needs its incoming state), so the
+  coupled pass 2 is already optimal there.
+  """
+  replays_fwd_kernel = (
+      getattr(cfg, "remat_policy", "full") != "none"
+      and getattr(cfg, "gdn", "remat") == "remat"
+      and getattr(cfg, "gdn_states", "remat") == "remat"
+  )
+  cp_carries_saved = getattr(cfg, "gdn_cp_state", "remat") != "remat"
+  return replays_fwd_kernel and cp_carries_saved
+
+
 def gdn_kernel_options_from_config(cfg: Any) -> GDNKernelOptions:
-  """Builds the static GDN kernel options from the MaxText config (all default off)."""
+  """Builds the static GDN kernel options from the MaxText config.
+
+  `cp_pass1_states_only` and `cp_m_local_in_kernel` keep their `GDNKernelOptions` defaults (on);
+  `gdn_kernel_cp_pass2_reuse_t_inv` is opt-in, and the pass-2 split it uses is derived from the remat
+  config (see `_cp_pass2_split_residuals`).
+  """
   return GDNKernelOptions(
-      cp_pass1_states_only=bool(getattr(cfg, "gdn_kernel_cp_pass1_states_only", False)),
       cp_pass2_reuse_t_inv=bool(getattr(cfg, "gdn_kernel_cp_pass2_reuse_t_inv", False)),
-      cp_m_local_in_kernel=bool(getattr(cfg, "gdn_kernel_cp_m_local_in_kernel", False)),
+      cp_pass2_split_residuals=_cp_pass2_split_residuals(cfg),
   )
 
 

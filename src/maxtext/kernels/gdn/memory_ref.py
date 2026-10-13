@@ -375,7 +375,7 @@ class TInvInBufferedRef(BaseBufferedRef):
 
     for idx in range(self.cfg.seq_tile_size):
       pltpu.make_async_copy(
-          src_ref.at[p_id + idx],
+          src_ref.at[p_id * self.cfg.seq_tile_size + idx],
           vmem_ref.at[idx],
           sem,
       ).start()
@@ -543,7 +543,8 @@ def create_allocs(
 
   Returns (allocs, names). Inputs come first (qkv, b, a, conv, recurrent, and
   t_inv_in when `cfg.t_inv_input`), followed by outputs (out unless
-  `cfg.states_only`, t_inv, chunk_states).
+  `cfg.states_only`, t_inv unless `cfg.t_inv_input`, chunk_states when
+  `cfg.has_chunk_states_output`).
   """
   qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.dim_size)
   ba_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.aligned_num_v_heads)

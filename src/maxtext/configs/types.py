@@ -1471,27 +1471,19 @@ class Qwen3Next(BaseModel):
           " HIGHEST) or with head-sharded context parallelism."
       ),
   )
-  gdn_kernel_cp_pass1_states_only: bool = Field(
-      False,
-      description=(
-          "GDN Pallas kernel, sequence-sharded CP only: pass 1 computes only the per-chunk recurrent states "
-          "(skips out / chunk_states). Bit-exact with the default."
-      ),
-  )
   gdn_kernel_cp_pass2_reuse_t_inv: bool = Field(
       False,
       description=(
-          "GDN Pallas kernel, sequence-sharded CP only: pass 2 reuses the block-triangular inverse t_inv from "
-          "pass 1 instead of recomputing the Gram matrix and the serial inverse. Bit-exact with the default."
-      ),
-  )
-  gdn_kernel_cp_m_local_in_kernel: bool = Field(
-      False,
-      description=(
-          "GDN Pallas kernel, sequence-sharded CP only: pass 1 also returns the local state transition M_local by "
-          "carrying an identity block next to the recurrent state, replacing the XLA per-chunk transition tree "
-          "(compose_local_from_t_inv) and its K-slice conv1d. Requires gdn_kernel_cp_pass1_states_only=True. "
-          "M_local is computed with the kernel's bf16-operand arithmetic (not bit-exact with the default)."
+          "GDN Pallas kernel, sequence-sharded CP only (no effect otherwise): pass 2 reuses the block-triangular "
+          "inverse t_inv from pass 1 instead of recomputing the Gram matrix and the serial inverse. Bit-exact. "
+          "Meant for gdn='remat' with gdn_cp_state='device' (or 'offload'): pass 2 is then split into a t_inv-reusing "
+          "pass for the forward output and a default pass whose outputs are the backward residuals, so the forward "
+          "runs pass 1 + pass 2a and the backward replays only pass 2b (3 forward-kernel calls per layer instead of "
+          "4). Without remat (or with gdn/gdn_states saved) pass 2 is not split and only the forward work drops; with "
+          "remat and gdn_cp_state='remat' the backward replays pass 1 anyway and pass 2 is not split either "
+          "(decision table: model_runner._cp_pass2_split_residuals). "
+          "Sequence-sharded CP always runs pass 1 states-only with the local state transition M_local computed in "
+          "the kernel (bf16-operand MXU arithmetic, not bit-exact with the former f32 XLA transition tree)."
       ),
   )
 
@@ -4201,8 +4193,19 @@ class MaxTextConfig(
       if cfg.context_parallel_load_balance:
         raise ValueError("GatedDeltaNet context parallelism requires context_parallel_load_balance=False.")
 
+    reuse_t_inv = getattr(cfg, "gdn_kernel_cp_pass2_reuse_t_inv", False)
     if not cfg.use_gdn_kernel:
+      if reuse_t_inv:
+        raise ValueError("gdn_kernel_cp_pass2_reuse_t_inv=True requires use_gdn_kernel=True.")
       return
+    gdn_cp_mode = getattr(cfg, "gdn_cp_mode", "auto")
+    if reuse_t_inv and (cp_size == 1 or gdn_cp_mode == "head"):
+      logger.warning(
+          "gdn_kernel_cp_pass2_reuse_t_inv=True has no effect without sequence-sharded GDN context parallelism "
+          "(context parallelism %d, gdn_cp_mode=%r).",
+          cp_size,
+          gdn_cp_mode,
+      )
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(
           "use_gdn_kernel=True does not support tensor parallelism: the kernel's shard_map does not shard over "

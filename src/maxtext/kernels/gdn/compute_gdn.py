@@ -105,7 +105,7 @@ def fused_transpose_broadcast(x: jax.Array, src_dim: int, dst_dim: int) -> jax.A
 
 
 def chunked_gdn_per_seq(
-    q_large: jax.Array,  # [num_kq_heads, chunk, kq_head_dim]
+    q_large: jax.Array | None,  # [num_kq_heads, chunk, kq_head_dim]; None when cfg.states_only
     k_large: jax.Array,  # [num_kq_heads, chunk, kq_head_dim]
     v_large: jax.Array,  # [num_v_heads, chunk, v_head_dim]
     gating_log: jax.Array,  # [1, chunk, aligned_num_v_heads]
@@ -132,14 +132,16 @@ def chunked_gdn_per_seq(
     valid_c = seg_c_col > 0.5
     active_c = jnp.abs(seg_c_col)
     seg_prev = jnp.abs(seg_aux_col[:, cfg.prev_kernel_size : cfg.prev_kernel_size + 1, :])
-    q_large = jnp.where(valid_c, q_large, 0.0)
+    if not cfg.states_only:
+      q_large = jnp.where(valid_c, q_large, 0.0)
     k_large = jnp.where(valid_c, k_large, 0.0)
     v_large = jnp.where(valid_c, v_large, 0.0)
     gating_log = jnp.where(valid_c, gating_log, 0.0)
     beta = jnp.where(valid_c, beta, 0.0)
 
   # NOTE: Repeat along non lane/sublane dim is free.
-  q_repeat = jnp.repeat(q_large, cfg.v_per_kq_head, axis=0)
+  # A states-only pass (F2) never reads q.
+  q_repeat = None if cfg.states_only else jnp.repeat(q_large, cfg.v_per_kq_head, axis=0)
   k_repeat = jnp.repeat(k_large, cfg.v_per_kq_head, axis=0)
 
   # Compute cumulative sum of decay in float32 to prevent bf16 cumsum drift.
@@ -334,7 +336,7 @@ def chunked_gdn_per_seq(
 
 def chunked_gdn(
     real_sizes: jax.Array,
-    q_large: jax.Array,
+    q_large: jax.Array | None,
     k_large: jax.Array,
     v_large: jax.Array,
     b_large: jax.Array,
@@ -345,7 +347,11 @@ def chunked_gdn(
     cfg: config.GDNConfig,
     t_inv_in: jax.Array | None = None,  # [seq, num_v_heads, chunk, chunk]
 ) -> tuple[jax.Array | None, jax.Array, jax.Array]:
-  """Perform chunked GDN over input [seq, num_heads, chunk, head_dim]."""
+  """Perform chunked GDN over input [seq, num_heads, chunk, head_dim].
+
+  With `cfg.states_only` (F2) `q_large` is not used (it may be None) and all
+  q-side work (masking, norm, scaling, head repeat) is skipped.
+  """
 
   mask_dtype = get_mask_dtype(cfg.dtypes.compute)
   iota = jax.lax.broadcasted_iota(mask_dtype, (cfg.seq_tile_size, 1, cfg.chunk_size, 1), 2)
@@ -361,7 +367,8 @@ def chunked_gdn(
       seg_aux_per_seq.append(b_trans[cfg.num_v_heads + 1 : cfg.num_v_heads + 2])
 
   # [seqs, num_kq_heads, chunk, kq_head_dim]
-  q_large = jnp.where(mask, q_large.astype(cfg.dtypes.compute), 0)
+  if not cfg.states_only:
+    q_large = jnp.where(mask, q_large.astype(cfg.dtypes.compute), 0)
   k_large = jnp.where(mask, k_large.astype(cfg.dtypes.compute), 0)
   # [seqs, num_v_heads, chunk, v_head_dim]
   v_large = jnp.where(mask, v_large.astype(cfg.dtypes.compute), 0)
@@ -373,10 +380,12 @@ def chunked_gdn(
 
   # NOTE: Any element-wise computations should occur before repeat.
   if cfg.use_qk_norm_in_gdn:
-    q_large = l2_norm(q_large)
+    if not cfg.states_only:
+      q_large = l2_norm(q_large)
     k_large = l2_norm(k_large)
-  q_scale = cfg.kq_head_dim**-0.5
-  q_large *= q_scale
+  if not cfg.states_only:
+    q_scale = cfg.kq_head_dim**-0.5
+    q_large *= q_scale
 
   # [seqs, 1, chunk, num_v_heads]
   beta = jax.nn.sigmoid(b_large)
@@ -393,7 +402,7 @@ def chunked_gdn(
   t_inv_list = []
   for idx in range(cfg.seq_tile_size):
     out, state, t_inv = chunked_gdn_per_seq(
-        q_large[idx],
+        None if cfg.states_only else q_large[idx],
         k_large[idx],
         v_large[idx],
         gating_log[idx],

@@ -127,7 +127,7 @@ def inner_kernel(
   recurrent_slot_ref = slots["recurrent"]  # [seq, num_v_heads, kq_head, v_head]
   t_inv_in_slot_ref = slots.get("t_inv_in")  # [seq, num_v_heads, chunk, chunk]
   out_slot_ref = slots.get("out")  # [seq * chunk, num_v_heads, v_head]
-  t_inv_slot_ref = slots["t_inv"]  # [seq, num_v_heads, chunk, chunk]
+  t_inv_slot_ref = slots.get("t_inv")  # [seq, num_v_heads, chunk, chunk]
   chunk_states_slot_ref = slots.get("chunk_states")
 
   p_id = pl.program_id(0)
@@ -225,7 +225,8 @@ def inner_kernel(
     assert out is not None
     out_slot_ref[...] = out.astype(out_slot_ref.dtype)
   recurrent_slot_ref[...] = new_recurrent_state.astype(recurrent_slot_ref.dtype)
-  t_inv_slot_ref[...] = t_inv.astype(t_inv_slot_ref.dtype)
+  if t_inv_slot_ref is not None:
+    t_inv_slot_ref[...] = t_inv.astype(t_inv_slot_ref.dtype)
   if chunk_states_slot_ref is not None:
     chunk_states_slot_ref[...] = prev_recurrent.astype(chunk_states_slot_ref.dtype)
 
@@ -238,15 +239,15 @@ def outer_kernel(
     carry_conv_scratch_ref: jax.Array | None = None,
     carry_recurrent_scratch_ref: jax.Array | None = None,
     cfg: config.GDNConfig,
-    has_in_act: bool = True,
     **kwargs,
 ) -> None:
   """Setup memory allocations and emit pipeline for running inner_kernel.
 
   Positional refs: metadata_ref, qkv_ref, b_ref, a_ref, conv_state_ref,
-  recurrent_state_ref, [in_act], [t_inv_in_ref], weights_ref, then outputs
-  [out_ref], conv_state_out_ref, recurrent_state_out_ref, t_inv_ref,
-  [chunk_states_ref]. Bracketed refs are present depending on `cfg` flags.
+  recurrent_state_ref, in_act (None when there is no `out`), [t_inv_in_ref],
+  weights_ref, then outputs [out_ref], conv_state_out_ref,
+  recurrent_state_out_ref, [t_inv_ref], [chunk_states_ref]. Bracketed refs are
+  present depending on `cfg` flags.
   """
   del kwargs
   args = list(args)
@@ -256,17 +257,15 @@ def outer_kernel(
   a_ref = args.pop(0)
   conv_state_ref = args.pop(0)
   recurrent_state_ref = args.pop(0)
-  del has_in_act  # A None operand still occupies a positional slot.
-  args.pop(0)  # in_act (aliased to out) or None.
+  args.pop(0)  # in_act (aliased to out) or None: a None operand still occupies a positional slot.
   t_inv_in_ref = args.pop(0) if cfg.t_inv_input else None
   weights_ref: memory_ref.WeightRefs = args.pop(0)
   # Outputs.
   out_ref = None if cfg.states_only else args.pop(0)
   args.pop(0)  # conv_state_out_ref (aliased).
   args.pop(0)  # recurrent_state_out_ref (aliased).
-  t_inv_ref = args.pop(0)
-  has_chunk_states = cfg.mode == config.GDNMode.PER_SEQ and not cfg.states_only
-  chunk_states_ref = args.pop(0) if has_chunk_states else None
+  t_inv_ref = args.pop(0) if cfg.has_t_inv_output else None
+  chunk_states_ref = args.pop(0) if cfg.has_chunk_states_output else None
   assert not args, len(args)
 
   allocs, alloc_names = memory_ref.create_allocs(
@@ -293,7 +292,8 @@ def outer_kernel(
       "t_inv": t_inv_ref,
       "chunk_states": chunk_states_ref,
   }
-  num_inputs = alloc_names.index("out") if "out" in alloc_names else alloc_names.index("t_inv")
+  # create_allocs orders the inputs (including the aliased conv / recurrent states) before the outputs.
+  num_inputs = sum(name in ("qkv", "b", "a", "conv", "recurrent", "t_inv_in") for name in alloc_names)
   in_specs = tuple(alloc.spec for alloc in allocs[:num_inputs])
   out_specs = tuple(alloc.spec for alloc in allocs[num_inputs:])
 
@@ -343,6 +343,7 @@ def outer_kernel(
         "use_qk_norm_in_gdn",
         "states_only",
         "transition_in_state",
+        "skip_chunk_states",
     ),
 )
 def fused_conv1d_gdn(
@@ -377,6 +378,7 @@ def fused_conv1d_gdn(
     states_only: bool = False,
     t_inv_in: jax.Array | None = None,  # [num_chunks, n_v, chunk, chunk]
     transition_in_state: bool = False,
+    skip_chunk_states: bool = False,
 ) -> tuple[jax.Array | None, tuple[jax.Array, jax.Array], jax.Array, jax.Array | None]:
   """Perform conv1d and gdn in a single fused kernel, returning (out, states, t_inv, chunk_states).
 
@@ -384,11 +386,14 @@ def fused_conv1d_gdn(
     states_only: (F2) skip `out` / `chunk_states` (returned as None) and the
       q-dependent compute; only conv/recurrent states and t_inv are produced.
     t_inv_in: (F3) reuse a previously computed `t_inv` (same layout as the
-      returned one) instead of recomputing the Gram matrix and its inverse.
+      returned one) instead of recomputing the Gram matrix and its inverse. The
+      kernel then has no t_inv output; `t_inv_in` itself is returned as t_inv.
     transition_in_state: (F5) `recurrent_state` is [num_states, n_v, d_k, d_v + d_k];
       the extra [d_k, d_k] block is carried through the same per-chunk update as
       the state, so (starting from the identity) it returns the local state
       transition M_local. Requires `states_only`.
+    skip_chunk_states: do not produce `chunk_states` (returned as None), e.g.
+      for a pass whose only consumer is `out`.
   """
   act_in_dtype = qkv.dtype
   act_out_dtype = qkv.dtype
@@ -539,6 +544,7 @@ def fused_conv1d_gdn(
         states_only=is_per_seq and states_only,
         t_inv_input=use_t_inv_in,
         transition_in_state=is_per_seq and transition_in_state,
+        skip_chunk_states=is_per_seq and skip_chunk_states,
     )
 
     if mode == config.GDNMode.BATCHED:
@@ -584,11 +590,13 @@ def fused_conv1d_gdn(
     )
 
     out_shape_list = [] if cfg.states_only else [out_shape]
-    out_shape_list += [in_conv_state, in_recurrent_state, t_inv_shape]
+    out_shape_list += [in_conv_state, in_recurrent_state]
+    if cfg.has_t_inv_output:
+      out_shape_list.append(t_inv_shape)
     if cfg.states_only:
       # Aliased outputs moved up by one (no `out`).
       input_output_aliases = {len(metadata_obj) + 3: 0, len(metadata_obj) + 4: 1}
-    if is_per_seq and not cfg.states_only:
+    if cfg.has_chunk_states_output:
       chunk_states_shape = jax.ShapeDtypeStruct(
           (num_chunks, cfg.num_v_heads, cfg.kq_head_dim, cfg.v_head_dim),
           cfg.dtypes.compute,
@@ -608,7 +616,7 @@ def fused_conv1d_gdn(
     operands.append(weights)
 
     results = pl.pallas_call(
-        functools.partial(outer_kernel, cfg=cfg, has_in_act=in_act is not None),
+        functools.partial(outer_kernel, cfg=cfg),
         out_shape=out_shape_tuple,
         in_specs=tuple(in_specs),
         out_specs=out_specs_tuple,
@@ -626,13 +634,17 @@ def fused_conv1d_gdn(
     r_out = None if cfg.states_only else results.pop(0)
     r_conv = results.pop(0)
     r_rec = results.pop(0)
-    r_t_inv = results.pop(0)
-    r_chunk_states = results.pop(0) if results else None
+    # With t_inv_in the kernel does not write t_inv: hand back the input instead.
+    r_t_inv = results.pop(0) if cfg.has_t_inv_output else t_inv_in
+    r_chunk_states = results.pop(0) if cfg.has_chunk_states_output else None
+    assert not results, len(results)
     return r_out, r_conv, r_rec, r_t_inv, r_chunk_states
 
   if not is_prefill_only:
-    if states_only or t_inv_in is not None or transition_in_state:
-      raise ValueError("states_only / t_inv_in / transition_in_state are only supported for prefill-only calls.")
+    if states_only or t_inv_in is not None or transition_in_state or skip_chunk_states:
+      raise ValueError(
+          "states_only / t_inv_in / transition_in_state / skip_chunk_states are only supported for prefill-only calls."
+      )
     out_act, out_conv_state, out_recurrent_state, _, _ = call_kernel(
         conv_state, recurrent_state, None, config.GDNMode.BATCHED
     )
