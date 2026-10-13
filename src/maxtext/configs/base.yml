@@ -330,8 +330,7 @@ moe_combine_kernel: "xla"
 # MoE token permute (gather into expert-sorted order) implementation when moe_use_direct_token_gather=true:
 #   "xla": XLA gather (default).
 #   "tc":  fused TensorCore Pallas kernel (kernels/moe_combine_tc.py `permute`). Requires use_ring_of_experts=false;
-#          falls back to "xla" for quantized activations or unsupported shapes. Pair with
-#          --xla_tpu_offload_gather_to_sparsecore=false --xla_tpu_offload_all_supported_gathers_to_sparsecore=false.
+#          falls back to "xla" for quantized activations or unsupported shapes.
 moe_permute_kernel: "xla"
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
