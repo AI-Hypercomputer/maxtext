@@ -71,7 +71,6 @@ rope_interleave: true
 rope_truncate: true
 rope_attention_scaling: false
 use_lineage: true
-lineage_expert_permutation: "lpt"
 # fp8 routed-expert GMMs, mirroring MaxText's qwix fp8_full ("none" for bf16).
 lineage_quantization: "fp8_full"
 allow_split_physical_axes: true
