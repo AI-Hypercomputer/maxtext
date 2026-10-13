@@ -13,3 +13,6 @@
 # limitations under the License.
 
 """Wan 2.1 model family package."""
+
+from .autoencoder_kl_wan import AutoencoderKLWan, AutoencoderKLWanCache
+from .transformer_wan import WanModel
