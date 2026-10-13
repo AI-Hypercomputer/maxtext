@@ -77,6 +77,30 @@ WI_1 = "wi_1"
 WO = "wo"
 
 
+@jax.custom_vjp
+def _split_gate_up(out: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Split the fused [rows, 2N] gmm output into (gate, up) halves.
+
+  Plain slicing makes XLA assemble the cotangent with two dynamic-update-slices
+  (pad + add) in backward; the custom VJP concatenates the two half-gradients
+  once, which fuses into the following tgmm/gmm input.
+  """
+  n = out.shape[-1] // 2
+  return out[:, :n], out[:, n:]
+
+
+def _split_gate_up_fwd(out: jax.Array) -> tuple[tuple[jax.Array, jax.Array], None]:
+  return _split_gate_up(out), None
+
+
+def _split_gate_up_bwd(_residuals: None, grads: tuple[jax.Array, jax.Array]) -> tuple[jax.Array]:
+  grad_gate, grad_up = grads
+  return (jnp.concatenate([grad_gate, grad_up], axis=-1),)
+
+
+_split_gate_up.defvjp(_split_gate_up_fwd, _split_gate_up_bwd)
+
+
 @struct.dataclass
 class RouteMetadata:
   """EP communication state needed to undo the forward all-to-all after expert computation."""
@@ -2611,6 +2635,8 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+    if w1_kernel is None:  # fused prefused wi travels as w0_kernel
+      w1_pspec = None
     output_pspec = self._logical_to_mesh_axes(
         (
             batch_logical_axis,
@@ -3105,11 +3131,10 @@ class RoutedMoE(nnx.Module):
       if not gather_weights:
         wi_gather_axes = []
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        # w1 is None when the fused (G, K, 2N) wi was passed through as one operand.
+        w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        n = out.shape[-1] // 2
-        layer_w0, layer_w1 = out[:, :n], out[:, n:]
+        layer_w0, layer_w1 = _split_gate_up(out)
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
           layer_w0 = layer_w0 + w0_bias
           layer_w1 = layer_w1 + w1_bias
@@ -4957,9 +4982,21 @@ class RoutedMoE(nnx.Module):
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if (
+          cfg.moe_unsliced_prefused_wi
+          and cfg.sparse_matmul
+          and cfg.num_moe_emb_chunks == 0
+          and not quantizations.in_serve_mode(self.quant)
+          and self.wi_0_sparsity_module is None
+      ):
+        # Keep the fused [E, emb, 2N] wi as a single operand: slicing it into w0 / w1
+        # here and re-concatenating inside gmm_up (and the mirror in backward) costs
+        # full-weight copies; gmm_up consumes the fused weight directly (w1 is None).
+        w0_kernel = wi
+      else:
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None

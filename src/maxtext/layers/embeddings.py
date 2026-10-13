@@ -296,10 +296,12 @@ class RotaryEmbedding(nnx.Module):
     sin_half = jnp.sin(sinusoid_inp).astype(inputs.dtype)
     cos_half = jnp.cos(sinusoid_inp).astype(inputs.dtype)
 
-    sin = jnp.concatenate([sin_half, sin_half], axis=-1)
-    cos = jnp.concatenate([cos_half, cos_half], axis=-1)
-
-    x_out = self.apply_rotary(inputs, cos, sin)
+    # Split-half RoPE on the half-width sin/cos (same math as x*cos + rotate_half(x)*sin);
+    # lets XLA fuse q/k norm + RoPE into one kernel instead of three.
+    x1, x2 = jnp.split(inputs, 2, axis=-1)
+    out1 = x1 * cos_half - x2 * sin_half
+    out2 = x2 * cos_half + x1 * sin_half
+    x_out = jnp.concatenate([out1, out2], axis=-1)
 
     if self.cast_as_fprop_dtype:
       x_out = x_out.astype(self.fprop_dtype)

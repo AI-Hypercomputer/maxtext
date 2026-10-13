@@ -94,7 +94,7 @@ class RMSNorm(nnx.Module):
     """Applies layer normalization on the input."""
     x = jnp.asarray(x, jnp.float32)
     mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
-    y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
+    y = x * lax.rsqrt(mean2 + self.epsilon)
 
     # out_sharding must be None in auto shard mode
     if self.shard_mode != ShardMode.EXPLICIT:
@@ -104,6 +104,7 @@ class RMSNorm(nnx.Module):
       out_sharding = truncate_out_sharding(out_sharding, y.ndim)
 
     if not self.with_scale:
+      y = jnp.asarray(y, self.dtype)
       if out_sharding is not None:
         y = jax.lax.with_sharding_constraint(y, out_sharding)
       return y
@@ -119,13 +120,8 @@ class RMSNorm(nnx.Module):
     if self.shard_mode == ShardMode.EXPLICIT:
       effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
 
-    if self.scale_offset != 0.0:
-      normed_fp32 = x * lax.rsqrt(mean2 + self.epsilon)
-      y = jnp.einsum("...k,k->...k", normed_fp32, effective_scale, out_sharding=out_sharding)
-      return jnp.asarray(y, self.dtype)
-
-    effective_scale = jnp.asarray(effective_scale, self.dtype)
-    return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
+    y = jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
+    return jnp.asarray(y, self.dtype)
 
 
 class GlobalRMSNorm(RMSNorm):

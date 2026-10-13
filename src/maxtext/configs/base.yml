@@ -322,6 +322,7 @@ moe_tc_ragged_3d_gmm: false # moe_tc_ragged_sort with tokamax gmm_v2: keep the s
 moe_tc_ragged_3d_dispatch: false # moe_tc_ragged_sort + moe_tc_ragged_3d_gmm: keep tokens in the (batch, seq, emb // 128, 128) layout through the EP all-gather and combine.
 moe_tc_window_routing: false # moe_tc_ragged_sort: keep only the shard's [start, start + cap) routing window, packed uint32 sorts.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
+moe_unsliced_prefused_wi: false # when true (with prefuse_moe_weights=true and sparse_matmul=true), pass the fused wi [E, emb, 2*mlp] across shard_map as a single operand (w1_kernel=None) instead of slicing into w0/w1 and re-concatenating inside gmm_up.
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
