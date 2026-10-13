@@ -2897,8 +2897,17 @@ class ManifoldConstrainedHyperConnections(BaseModel):
       ),
   )
 
+  mhc_split_axis_contraction: bool = Field(
+      False,
+      description=(
+          "Whether to contract the mHC rate and embed axes separately instead of flattening them, "
+          "so the activation's TP-sharded embed dim is never all-gathered."
+      ),
+  )
+
   @model_validator(mode="after")
   def validate_mhc_kernel(self) -> "ManifoldConstrainedHyperConnections":
+    """Rejects incompatible combinations of mHC kernel and layout options."""
     if self.use_mhc_pallas_kernel and not self.enable_mhc_lite:
       raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
     if self.te_mhc:
@@ -2906,6 +2915,10 @@ class ManifoldConstrainedHyperConnections(BaseModel):
         raise ValueError(f"`te_mhc=True` requires `mhc_expansion_rate=4`, got {self.mhc_expansion_rate}.")
       if self.enable_mhc_lite or self.use_mhc_pallas_kernel:
         raise ValueError("`te_mhc=True` requires `enable_mhc_lite=False` and `use_mhc_pallas_kernel=False`.")
+    if self.use_mhc_pallas_kernel and self.mhc_split_axis_contraction:
+      raise ValueError("use_mhc_pallas_kernel=True is not supported with mhc_split_axis_contraction=True.")
+    if self.te_mhc and self.mhc_split_axis_contraction:
+      raise ValueError("te_mhc=True is not supported with mhc_split_axis_contraction=True.")
     return self
 
 
