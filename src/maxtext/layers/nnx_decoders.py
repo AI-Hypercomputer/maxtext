@@ -49,6 +49,7 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
     deepseek4,
+    glm5_next,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
     envy,
@@ -492,6 +493,7 @@ class NNXDecoder(nnx.Module):
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
     self.is_qwen3_next = self.config.decoder_block == DecoderBlockType.QWEN3_NEXT
     self.is_qwen3_5 = self.config.decoder_block == DecoderBlockType.QWEN3_5
+    self.is_glm5_next = self.config.decoder_block == DecoderBlockType.GLM5_NEXT
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -598,6 +600,8 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_deepseek(decoder_block_classes, rngs)
     elif self.is_deepseek4:
       self._init_scanned_deepseek4(rngs)
+    elif self.is_glm5_next:
+      self._init_scanned_glm5_next(rngs)
     elif self.is_gemma3:
       self._init_scanned_gemma3(decoder_block_classes, rngs, mesh)
     elif self.is_gemma4:
@@ -629,6 +633,22 @@ class NNXDecoder(nnx.Module):
           metadata_axis_name="scanned_blocks",
           rngs=rngs,
       )
+
+  def _init_scanned_glm5_next(self, rngs):
+    """GLM-5.3: unscanned prefix (dense layers up to a period boundary), scanned periods, unscanned remainder."""
+    num_prefix, num_blocks, num_remainder = glm5_next.scan_layout(self.config)
+    for layer_idx in range(num_prefix):
+      self._create_and_register_layer(glm5_next.Glm5NextDecoderLayer, rngs, "layers", layer_idx, layer_idx=layer_idx)
+    if num_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          glm5_next.Glm5NextScannableBlock,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+      )
+    first_remainder = num_prefix + num_blocks * self.config.inhomogeneous_layer_cycle_interval
+    for layer_idx in range(first_remainder, first_remainder + num_remainder):
+      self._create_and_register_layer(glm5_next.Glm5NextDecoderLayer, rngs, "layers", layer_idx, layer_idx=layer_idx)
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -897,6 +917,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.GLM5_NEXT,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1252,6 +1273,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
+        DecoderBlockType.GLM5_NEXT: get_scannable(glm5_next.Glm5NextDecoderLayer, glm5_next.Glm5NextScannableBlock),
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1414,6 +1436,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
+        DecoderBlockType.GLM5_NEXT,
     }:
       return functools.partial(
           RMSNorm,
@@ -2065,6 +2088,8 @@ class NNXDecoder(nnx.Module):
               previous_chunk,
               decoder_input_tokens,
           )
+        elif self.is_glm5_next:
+          y = self._apply_glm5_next_scanned_blocks(y, layer_args, layer_kwargs)
         elif self.is_gemma3:
           y = self._apply_gemma3_scanned_blocks(
               y,
@@ -2295,6 +2320,9 @@ class NNXDecoder(nnx.Module):
     if getattr(cfg, "mhc_expansion_rate", 1) > 1:
       if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
         hidden_state = self.hc_head(y)
+      elif cfg.mhc_final_reduce == "mean":
+        # GLM-5.3: unweighted mean over the streams.
+        hidden_state = jnp.mean(y, axis=2).astype(y.dtype)
       else:
         # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
         hidden_state = mhc_reduce(y)
@@ -2402,6 +2430,27 @@ class NNXDecoder(nnx.Module):
           **layer_call_kwargs,
       )
 
+    return y
+
+  def _apply_glm5_next_scanned_blocks(self, y, layer_args, layer_kwargs):
+    """Applies GLM-5.3 layers: unscanned prefix, scanned periods, unscanned remainder."""
+    cfg = self.config
+    num_prefix, num_blocks, num_remainder = glm5_next.scan_layout(cfg)
+    first_remainder = num_prefix + num_blocks * cfg.inhomogeneous_layer_cycle_interval
+    call_kwargs = {k: v for k, v in layer_kwargs.items() if k in ("slot", "previous_chunk")}
+    for layer_idx in range(num_prefix):
+      y, _ = getattr(self, f"layers_{layer_idx}")(y, *layer_args, **call_kwargs)
+    if num_blocks > 0:
+      y, self.scanned_blocks, _ = self._apply_layers_sequentially(
+          self.scanned_blocks,
+          y,
+          *layer_args,
+          length=num_blocks,
+          metadata_axis_name="scanned_blocks",
+          **call_kwargs,
+      )
+    for layer_idx in range(first_remainder, first_remainder + num_remainder):
+      y, _ = getattr(self, f"layers_{layer_idx}")(y, *layer_args, **call_kwargs)
     return y
 
   def _apply_gemma3_scanned_blocks(
