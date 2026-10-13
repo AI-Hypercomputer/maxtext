@@ -864,6 +864,89 @@ class MonthWindowTest(OfflineTestCase):
     self.assertEqual(views.months_in_window(date(2026, 9, 15)), ["2026-06", "2026-07", "2026-08", "2026-09"])
 
 
+class PruneViewsTest(OfflineTestCase):
+  """Deleting the view files the dashboard can no longer show.
+
+  Pinned to 2026-09-15. Its 90-day window starts on 2026-06-18 and touches June to September.
+  """
+
+  TODAY = date(2026, 9, 15)
+
+  def make_views(self) -> Path:
+    """Writes two May files, one June file, three pull request files and meta.json.
+
+    Returns:
+      The output directory, the one `--out` names.
+    """
+    out = self.temp_dir()
+    views_dir = out / "views"
+    (views_dir / "pr").mkdir(parents=True)
+    for name in ("runs-2026-05.json", "flaky-2026-05.json", "runs-2026-06.json"):
+      (views_dir / name).write_text("{}", encoding="utf-8")
+    for number in (1, 2, 3):
+      (views_dir / "pr" / f"{number}.json").write_text("{}", encoding="utf-8")
+    meta = {
+        "pull_requests": {
+            "1": {"file": "pr/1.json", "updated_at": "2026-06-17T23:59:59Z"},
+            "2": {"file": "pr/2.json", "updated_at": "2026-06-18T00:00:00Z"},
+            "3": {"file": "pr/3.json", "updated_at": None},
+        }
+    }
+    (views_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    return out
+
+  def remaining(self, out: Path) -> list[str]:
+    """Returns every JSON file left under `views/`, relative to it.
+
+    Args:
+      out: The output directory.
+
+    Returns:
+      The relative paths, sorted.
+    """
+    return sorted(path.relative_to(out / "views").as_posix() for path in (out / "views").rglob("*.json"))
+
+  def test_old_months_and_old_pull_requests_go(self) -> None:
+    """May goes and June stays; a pull request last built the day before the window goes."""
+    out = self.make_views()
+
+    deleted = views.prune_views(out, self.TODAY)
+
+    self.assertEqual(
+        sorted(path.relative_to(out / "views").as_posix() for path in deleted),
+        ["flaky-2026-05.json", "pr/1.json", "runs-2026-05.json"],
+    )
+    self.assertEqual(self.remaining(out), ["meta.json", "pr/2.json", "pr/3.json", "runs-2026-06.json"])
+
+  def test_a_dry_run_deletes_nothing(self) -> None:
+    """A dry run names the same three files and leaves all seven in place."""
+    out = self.make_views()
+
+    would_delete = views.prune_views(out, self.TODAY, dry_run=True)
+
+    self.assertEqual(len(would_delete), 3)
+    self.assertEqual(len(self.remaining(out)), 7)
+
+  def test_the_file_field_is_never_used_as_a_path(self) -> None:
+    """meta.json names a file for each pull request, but only pr/<number>.json is ever deleted."""
+    out = self.make_views()
+    outside = out / "keep.json"
+    outside.write_text("{}", encoding="utf-8")
+    meta_path = out / "views" / "meta.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["pull_requests"]["1"]["file"] = "../keep.json"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+    views.prune_views(out, self.TODAY)
+
+    self.assertTrue(outside.exists())
+    self.assertFalse((out / "views" / "pr" / "1.json").exists())
+
+  def test_no_views_yet_is_not_an_error(self) -> None:
+    """The very first tick has no views folder at all."""
+    self.assertEqual(views.prune_views(self.temp_dir(), self.TODAY), [])
+
+
 class ViewsTestCase(OfflineTestCase):
   """Base for the tests that build the fixture store's views into a temporary directory."""
 

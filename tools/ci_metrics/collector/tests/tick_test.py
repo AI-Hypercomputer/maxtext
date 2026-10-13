@@ -1155,6 +1155,52 @@ class DryRunTest(TickTestCase):
     self.assertEqual(len(self.stored_rows(rows.KIND_TEST, SCHEDULED_MONTH)), EXPECTED_TEST_ROWS[SCHEDULED_MONTH])
 
 
+class PruneTest(TickTestCase):
+  """A tick deletes what has left the dashboard's 90-day window, before it rebuilds the views.
+
+  The first tick runs on 2026-09-01 and writes August and September. The second runs on
+  2026-12-15, whose window starts on 2026-09-17: September stays, August has to go.
+  """
+
+  LATER = datetime(2026, 12, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+  def august_files(self) -> list[str]:
+    """Returns every file in the store whose name holds August, relative to the store."""
+    return sorted(path.relative_to(self.out).as_posix() for path in self.out.rglob(f"*{RERUN_MONTH}*"))
+
+  def pr_file(self) -> Path:
+    """Returns the view file of the August run's merged pull request."""
+    return self.out / "views" / "pr" / f"{RERUN_PULL_NUMBER}.json"
+
+  def test_a_later_tick_deletes_what_the_window_has_left(self) -> None:
+    """August's rows, August's views and the August pull request go; September stays."""
+    code, printed, _ = self.run_tick(self.full_client())
+    self.assertEqual(code, tick.EXIT_OK, printed)
+    self.assertTrue(self.august_files(), "the first tick has to write August files for this test to mean anything")
+    self.assertTrue(self.pr_file().exists(), "the first tick has to write the pull request file")
+
+    code, printed, _ = self.run_tick(self.full_client(), now=self.LATER)
+
+    self.assert_no_problems(printed)
+    self.assertEqual(code, tick.EXIT_OK, printed)
+    self.assertEqual(self.august_files(), [])
+    self.assertTrue(self.data_path(rows.KIND_RUN, SCHEDULED_MONTH).exists())
+    self.assertFalse(self.pr_file().exists())
+    self.assertNotIn(str(RERUN_PULL_NUMBER), self.meta()["pull_requests"])
+    self.assertIn("Pruned", printed)
+
+  def test_a_dry_run_tick_deletes_nothing(self) -> None:
+    """A dry run on the later date names what would go and leaves every file in place."""
+    self.run_tick(self.full_client())
+    before = snapshot(self.out)
+
+    code, printed, _ = self.run_tick(self.full_client(), ["--dry-run"], now=self.LATER)
+
+    self.assertEqual(code, tick.EXIT_OK, printed)
+    self.assertEqual(snapshot(self.out), before)
+    self.assertIn("Pruned", printed)
+
+
 class UsageTest(TickTestCase):
   """A command line that could never work is refused, and nothing is written."""
 

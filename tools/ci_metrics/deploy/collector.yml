@@ -16,6 +16,12 @@
 # TEMPLATE - THIS FILE DOES NOT RUN FROM HERE.
 # =============================================================================
 #
+# OUTDATED. The workflow that really runs is .github/workflows/ci_metrics_collector.yml
+# on main (PR #5599). This copy is older and some of its comments are wrong: the real
+# workflow also publishes the views to gh-pages, and the store branch is not squashed
+# yearly - the workflow starts its history over once a month instead. Do not copy from
+# this file. Sync it with the real workflow, or delete it, once that PR is merged.
+#
 # This is the workflow that would run the CI metrics collector on a schedule. It lives in
 # tools/ci_metrics/deploy/ as a template and is deliberately NOT in .github/workflows/: that
 # directory belongs to the pipeline this project measures, and nothing here may add a job to
@@ -134,9 +140,8 @@ jobs:
         with:
           ref: ${{ env.STORE_BRANCH }}
           path: store
-          # The whole history: a tick appends to it and pushes, so a shallow clone cannot
-          # rebase onto a tip it does not have. The store branch is squashed yearly, which is
-          # what keeps this affordable.
+          # Full history, so the push retry below can rebase. (Outdated note: see the banner
+          # at the top. Nothing squashes this branch yearly.)
           fetch-depth: 0
 
       - name: Set up Python

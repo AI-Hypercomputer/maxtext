@@ -20,12 +20,17 @@ back. It touches no network and computes no metric.
 
 The store lives under one directory, given to `Store` and never defaulted:
 
-    <out>/data/<kind>-YYYY-MM.ndjson   one JSON object a line, appended, never edited
-    <out>/data/state.json              which attempts are stored, which are in flight
-    <out>/views/<name>-YYYY-MM.json    what the browser loads, rebuilt each tick
-    <out>/views/pr/<n>.json            one merged pull request in full
+    <out>/data/<kind>-YYYY-MM.ndjson         one JSON object a line, appended, never edited
+    <out>/data/<kind>-YYYY-MM-partN.ndjson   the same month, continued once a part is full
+    <out>/data/state.json                    which attempts are stored, which are in flight
+    <out>/views/<name>-YYYY-MM.json          what the browser loads, rebuilt each tick
+    <out>/views/pr/<n>.json                  one merged pull request in full
 
-Five rules hold the whole design up.
+No data file grows past `MAX_PART_BYTES` (40 MB), because GitHub refuses a push with any file
+over 100 MB. A month's rows go into part 1 until it is full, then into part 2, and so on.
+Readers see the parts of a month as one file, in part order.
+
+Six rules hold the whole design up.
 
 1. **Append-only, with corrections.** A line is never edited and never deleted in place. When
    a number turns out to be wrong - an artifact that was unreadable at 04:00 and readable at
@@ -40,8 +45,8 @@ Five rules hold the whole design up.
    process killed mid-tick - the Actions job cancelled, the runner pulled - leaves either the
    old file or the new one, never a half-written line and never a truncated `state.json`. It
    can leave the temporary file itself behind, which `Store.sweep_temp` clears on a later run.
-   An append copies the file it is extending, so it costs one pass over that month's file:
-   pass a tick's rows in as few `append` calls as you can rather than one call per run.
+   An append copies the file it is extending, so it costs one pass over that month's last
+   part: pass a tick's rows in as few `append` calls as you can rather than one call per run.
 
 3. **`state.json` is an index, not the truth.** It records run attempts, never individual
    rows: indexing every test row would reach a hundred megabytes and be rewritten six times a
@@ -56,10 +61,15 @@ Five rules hold the whole design up.
    built them. It never fills a gap, never coerces a None to 0, and never drops a null field.
 
 5. **A month closes once.** A tick appends only to the month of the run it is reading, so a
-   past month stops changing. `compact_month` is then run once against the closed month: it
-   keeps the last row per key, and for test rows it drops the detail of runs whose pull
+   past month stops changing. `compact_month` can then be run once against the closed month:
+   it keeps the last row per key, and for test rows it drops the detail of runs whose pull
    request never merged, whose per-flavor totals survive in the suite rows. Running it a
-   second time changes nothing and rewrites nothing.
+   second time changes nothing and rewrites nothing. Nothing calls it yet: it needs a correct
+   keep list (see its docstring), and on real data it saves only about 17%.
+
+6. **Old months are deleted.** The dashboard shows the last 90 days, which touch four months
+   at most. Each tick calls `prune_months` with the first month the dashboard can still show,
+   so every older month's files go and the store stops growing.
 
 The store never imports `github.py`, `runs.py` or `junit.py`, so it can be exercised with no
 network module present and no `requests` installed. Nothing here calls an AI service: a row
@@ -148,6 +158,11 @@ MONTH_FIELD: dict[str, str] = {
 MONTH_FORMAT = "%Y-%m"
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
+# What follows "<kind>-" in a data file name. A month's first part keeps the plain name,
+# `job-2026-09.ndjson`, so a store written before parts existed reads as it is. Later parts
+# add a number: `job-2026-09-part2.ndjson`, `-part3`, and so on.
+PART_NAME_PATTERN = re.compile(r"^(?P<month>\d{4}-(0[1-9]|1[0-2]))(-part(?P<part>[2-9]|[1-9]\d+))?$")
+
 # A run attempt reports this status once GitHub is finished with it. Anything else means the
 # attempt was still moving when it was written.
 COMPLETED_STATUS = "completed"
@@ -173,6 +188,11 @@ TEMP_MAX_AGE_HOURS = 6
 # has passed it. Dropping an id is safe rather than lossy: `append` then falls back to the
 # month file's own keys, which is the exact answer.
 MAX_INDEXED_RUNS = 20000
+
+# The biggest a data file may grow. GitHub rejects a push that holds any file over 100 MB and
+# warns at 50 MB, and one busy month of job rows is about 180 MB. So a month's rows are split
+# into parts: when the current part is full, the next rows go into a new part file.
+MAX_PART_BYTES = 40 * 1024 * 1024
 
 # Read sizes. The copy chunk bounds an append's memory; the tail window is how far back the
 # last newline of a file is looked for.
@@ -1180,8 +1200,9 @@ class Store:
     for kind in ROW_KINDS:
       if kind not in wanted:
         continue
-      for _, payload in _iter_payloads(self.path_for(kind, month)):
-        yield rows.from_json(payload)
+      for path in self._parts(kind, month):
+        for _, payload in _iter_payloads(path):
+          yield rows.from_json(payload)
 
   def pending_run_ids(self) -> list[int]:
     """Returns the runs seen but not yet stored, from the index.
@@ -1207,14 +1228,61 @@ class Store:
     """
     if not self.data_dir.is_dir():
       return []
-    found: list[str] = []
+    found: set[str] = set()
     for path in self.data_dir.glob(f"{kind}-*{NDJSON_SUFFIX}"):
-      month = path.name[len(kind) + 1 : -len(NDJSON_SUFFIX)]
-      if MONTH_PATTERN.match(month):
-        found.append(month)
+      match = PART_NAME_PATTERN.match(path.name[len(kind) + 1 : -len(NDJSON_SUFFIX)])
+      if match:
+        found.add(match.group("month"))
       else:
-        _warn(f"{path.name} is not named <kind>-YYYY-MM{NDJSON_SUFFIX} and was ignored.")
+        _warn(f"{path.name} is not named <kind>-YYYY-MM[-partN]{NDJSON_SUFFIX} and was ignored.")
     return sorted(found)
+
+  def _numbered_parts(self, kind: str, month: str) -> list[tuple[int, Path]]:
+    """Lists the files one month of one kind is stored in, with their part numbers.
+
+    Args:
+      kind: One of the `rows.KIND_*` constants, already checked.
+      month: "YYYY-MM", already checked.
+
+    Returns:
+      (part number, path) pairs, part 1 first. Sorted by number, not by name: as text,
+      "part10" would come before "part2", and the plain first part would come last.
+    """
+    if not self.data_dir.is_dir():
+      return []
+    numbered: list[tuple[int, Path]] = []
+    for path in self.data_dir.glob(f"{kind}-{month}*{NDJSON_SUFFIX}"):
+      match = PART_NAME_PATTERN.match(path.name[len(kind) + 1 : -len(NDJSON_SUFFIX)])
+      if match and match.group("month") == month:
+        numbered.append((int(match.group("part") or 1), path))
+    return sorted(numbered)
+
+  def _parts(self, kind: str, month: str) -> list[Path]:
+    """Lists the files one month of one kind is stored in, part 1 first.
+
+    Args:
+      kind: One of the `rows.KIND_*` constants, already checked.
+      month: "YYYY-MM", already checked.
+
+    Returns:
+      The paths. Empty when the month has no rows of this kind.
+    """
+    return [path for _, path in self._numbered_parts(kind, month)]
+
+  def _part_path(self, kind: str, month: str, number: int) -> Path:
+    """Returns the path of one part of a month, whether or not it exists yet.
+
+    Args:
+      kind: One of the `rows.KIND_*` constants.
+      month: "YYYY-MM".
+      number: The part number, from 1.
+
+    Returns:
+      The plain `path_for` name for part 1, `<kind>-YYYY-MM-partN.ndjson` after that.
+    """
+    if number == 1:
+      return self.path_for(kind, month)
+    return self.data_dir / f"{check_kind(kind)}-{check_month(month)}-part{number}{NDJSON_SUFFIX}"
 
   def refresh(self) -> None:
     """Drops the cached state and the cached per-file key sets.
@@ -1350,11 +1418,12 @@ class Store:
     """
     found: set[tuple[int, int]] = set()
     for month in self._months_of(rows.KIND_JOB):
-      for _, payload in _iter_payloads(self.path_for(rows.KIND_JOB, month)):
-        run_id = _as_int(payload.get("run_id"))
-        attempt = _as_int(payload.get("attempt"))
-        if run_id is not None and attempt is not None:
-          found.add((run_id, attempt))
+      for path in self._parts(rows.KIND_JOB, month):
+        for _, payload in _iter_payloads(path):
+          run_id = _as_int(payload.get("run_id"))
+          attempt = _as_int(payload.get("attempt"))
+          if run_id is not None and attempt is not None:
+            found.add((run_id, attempt))
     return found
 
   def has_attempt(self, run_id: int, attempt: int) -> bool:
@@ -1444,7 +1513,7 @@ class Store:
     """
     check_kind(kind)
     wanted = self.months(kind) if months is None else sorted(check_month(item) for item in months)
-    payloads, _ = self._winners(kind, [self.path_for(kind, item) for item in wanted])
+    payloads, _ = self._winners(kind, [path for item in wanted for path in self._parts(kind, item)])
     return payloads
 
   def read_rows(self, kind: str, months: Sequence[str] | None = None) -> list[Any]:
@@ -1467,6 +1536,39 @@ class Store:
     """
     return [rows.from_json(payload) for payload in self.read(kind, months)]
 
+  def prune_months(self, before: str, dry_run: bool = False) -> list[Path]:
+    """Deletes every data file of the months before `before`: every kind, every part.
+
+    This is what stops the store from growing forever. The tick passes the first month the
+    dashboard can still show, so nothing on screen loses its rows. `state.json` stays: it lists
+    run ids, not months, and an id whose rows are gone does no harm (see `State.prune`).
+
+    Args:
+      before: The first month to keep, "YYYY-MM". It is checked, because as text "2026-9"
+        sorts after "2026-10" and would delete the wrong months.
+      dry_run: Only list the files. Delete nothing.
+
+    Returns:
+      The files deleted - or, on a dry run, the files that would be - sorted by path.
+
+    Raises:
+      StoreError: `before` is not a month, or a file could not be deleted.
+    """
+    check_month(before)
+    old_months = {(kind, month) for kind in ROW_KINDS for month in self._months_of(kind) if month < before}
+    doomed = sorted(path for kind, month in old_months for path in self._parts(kind, month))
+    if dry_run:
+      return doomed
+    for path in doomed:
+      try:
+        path.unlink()
+      except OSError as error:
+        raise StoreError(f"{path} could not be deleted: {error}") from error
+    for key in old_months:
+      self._keys.pop(key, None)
+      self._bodies.pop(key, None)
+    return doomed
+
   def compact_month(
       self,
       kind: str,
@@ -1482,7 +1584,8 @@ class Store:
       * superseded lines - of the rows sharing a key, only the last one survives;
       * for test rows, every row of a run that is not in `merged_run_ids`. Their per-flavor
         totals are not lost: those live in the suite rows, which compaction never touches.
-        This is the rule that keeps the store inside its size budget.
+        On real data this saves about 17%. What keeps the store's size bounded is
+        `prune_months`, not this.
 
     **`merged_run_ids` is the keep list, and it is wider than its name.** It has to hold the
     merged pull request runs AND the scheduled main runs that were kept at full resolution -
@@ -1520,24 +1623,31 @@ class Store:
           f"{month} has not closed yet, so compacting it could race a tick that is appending to it. "
           "Pass allow_open_month=True only when nothing is writing."
       )
-    path = self.path_for(kind, month)
-    if not path.exists():
+    numbered = self._numbered_parts(kind, month)
+    if not numbered:
       return 0
-    survivors, total = self._winners(kind, [path])
+    paths = [path for _, path in numbered]
+    survivors, total = self._winners(kind, paths)
     if kind == rows.KIND_TEST:
       keep = {value for value in (_as_int(item) for item in merged_run_ids) if value is not None}
       if not keep and survivors and not allow_dropping_all:
         raise StoreError(
-            f"compacting {path.name} with an empty keep list would delete all {len(survivors)} test rows, and their "
+            f"compacting {kind}-{month} with an empty keep list would delete all {len(survivors)} test rows, and their "
             "artifacts are long gone. Pass the merged pull request runs and the daily scheduled main runs, or "
             "allow_dropping_all=True if the month really holds nothing worth keeping."
         )
       survivors = [payload for payload in survivors if _as_int(payload.get("run_id")) in keep]
     removed = total - len(survivors)
-    if removed == 0 and _complete_length(path) == path.stat().st_size:
+    if removed == 0 and all(_complete_length(path) == path.stat().st_size for path in paths):
       return 0
-    body = "".join(f"{_encode(payload)}\n" for payload in survivors)
-    write_text_atomic(path, body)
+    # Write the new parts first and delete the leftovers last. A crash in between then leaves
+    # rows twice, which `read` already handles, and never loses one.
+    groups = _split_into_parts([f"{_encode(payload)}\n" for payload in survivors], MAX_PART_BYTES)
+    for number, group in enumerate(groups, start=1):
+      write_text_atomic(self._part_path(kind, month, number), "".join(group))
+    for number, path in numbered:
+      if number > len(groups):
+        path.unlink()
     self._keys.pop((kind, month), None)
     self._bodies.pop((kind, month), None)
     return removed
@@ -1649,7 +1759,6 @@ class Store:
     Raises:
       StoreError: The file could not be read or written.
     """
-    path = self.path_for(kind, month)
     mutable = kind in MUTABLE_KINDS
     fresh: list[tuple[str, dict[str, Any]]] = []
     batch: dict[str, str] = {}
@@ -1669,7 +1778,7 @@ class Store:
       fresh.append((key, payload))
     if not fresh:
       return 0
-    self._append_text(path, "".join(f"{_encode(payload)}\n" for _, payload in fresh))
+    self._append_lines(kind, month, [f"{_encode(payload)}\n" for _, payload in fresh])
     known = self._keys.get((kind, month))
     if known is not None:
       known.update(key for key, _ in fresh)
@@ -1715,8 +1824,7 @@ class Store:
     cached = self._keys.get((kind, month))
     if cached is not None:
       return cached
-    path = self.path_for(kind, month)
-    keys = {row_key(payload) for _, payload in _iter_payloads(path)}
+    keys = {row_key(payload) for path in self._parts(kind, month) for _, payload in _iter_payloads(path)}
     self._keys[(kind, month)] = keys
     return keys
 
@@ -1741,10 +1849,10 @@ class Store:
     cached = self._bodies.get((kind, month))
     if cached is not None:
       return cached
-    path = self.path_for(kind, month)
     bodies: dict[str, str] = {}
-    for _, payload in _iter_payloads(path):
-      bodies[row_key(payload)] = _body(payload)
+    for path in self._parts(kind, month):
+      for _, payload in _iter_payloads(path):
+        bodies[row_key(payload)] = _body(payload)
     self._bodies[(kind, month)] = bodies
     return bodies
 
@@ -1757,6 +1865,33 @@ class Store:
       How many files were removed.
     """
     return _sweep_temp(self.data_dir)
+
+  def _append_lines(self, kind: str, month: str, lines: Sequence[str]) -> None:
+    """Adds lines to the end of a month, starting a new part whenever the current one is full.
+
+    Lines go on the month's last part until the next line would push it past
+    `MAX_PART_BYTES`; from there they go into a new part. A line is never split, so a line
+    that is bigger than the limit on its own gets a part to itself.
+
+    Each part is written atomically, but a batch that spills into a new part is two writes. A
+    process killed between them loses the second write only, and nothing is lost for good:
+    `state.json` is saved at the end of a tick, so the next tick reads that attempt again,
+    and `append` skips the rows that did land.
+
+    Args:
+      kind: The kind.
+      month: The month.
+      lines: The lines to add, each already ending in a newline.
+
+    Raises:
+      StoreError: A file could not be read or written.
+    """
+    numbered = self._numbered_parts(kind, month)
+    number, path = numbered[-1] if numbered else (1, self.path_for(kind, month))
+    used = _complete_length(path) if path.exists() else 0
+    for offset, group in enumerate(_split_into_parts(lines, MAX_PART_BYTES, used)):
+      if group:
+        self._append_text(self._part_path(kind, month, number + offset), "".join(group))
 
   def _append_text(self, path: Path, block: str) -> None:
     """Adds a block of complete lines to a file, atomically.
@@ -1834,6 +1969,30 @@ class Store:
           best[key] = (order, payload)
     ranked = sorted(best.values(), key=lambda item: (item[0][1], item[0][2]))
     return [payload for _, payload in ranked], total
+
+
+def _split_into_parts(lines: Sequence[str], limit: int, used: int = 0) -> list[list[str]]:
+  """Groups lines into parts of at most `limit` bytes, never splitting a line.
+
+  Args:
+    lines: The lines, each ending in a newline.
+    limit: The most bytes a part may hold.
+    used: How many bytes the first part already holds. The first group goes on the end of
+      that part, and is empty when the very first line would not fit.
+
+  Returns:
+    The groups, in order. There is always at least one, even for no lines. A line bigger than
+    the limit on its own gets a group of its own.
+  """
+  groups: list[list[str]] = [[]]
+  for line in lines:
+    size = len(line.encode("utf-8"))
+    if used and used + size > limit:
+      groups.append([])
+      used = 0
+    groups[-1].append(line)
+    used += size
+  return groups
 
 
 def _body(payload: Mapping[str, Any]) -> str:

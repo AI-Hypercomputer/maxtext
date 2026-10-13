@@ -236,33 +236,47 @@ python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "${STORE}/views/meta.
   || die 'views/meta.json is not valid JSON. Refusing to publish a broken index.'
 
 # The views are a rendering of the store, not a second copy of the history, so
-# they are replaced whole rather than merged. That is safe as long as the store
-# is the same one as last time: the store appends, so each rebuild covers
-# everything the last one did and more.
+# they are replaced whole rather than merged. Months older than the dashboard's
+# 90-day window drop out on purpose: the dashboard no longer shows them and the
+# collector deletes their rows. Every month still inside the window should be
+# covered by the rebuild at least as fully as before.
 #
-# It stops being safe when the store is a different or emptier one - a fresh
+# That stops being true when the store is a different or emptier one - a fresh
 # clone, a wiped directory, a shorter --since. Then the rebuild is SMALLER than
-# what is already published, and replacing it whole would delete history that
-# exists nowhere else. So compare the two indexes first and refuse to shrink.
+# what is already published, and replacing it whole would delete data that
+# exists nowhere else. So compare the months still inside the window first and
+# refuse to shrink them.
 if [ -f "${TARGET}/meta.json" ]; then
   set +e
   python3 - "${TARGET}/meta.json" "${STORE}/views/meta.json" <<'PY'
 import json, sys
+from datetime import datetime, timedelta
 
 def read(path):
     with open(path) as fh:
         return json.load(fh)
 
 old, new = read(sys.argv[1]), read(sys.argv[2])
+
+# The first month the new rebuild's window still shows. Older months have aged
+# out and are allowed to disappear. Without a readable stamp, compare everything.
+try:
+    stamp = datetime.strptime(new["generated_at"], "%Y-%m-%dT%H:%M:%SZ").date()
+    first_day = stamp - timedelta(days=max(int(new.get("window_days", 90)), 1) - 1)
+    first_month = first_day.strftime("%Y-%m")
+except (KeyError, TypeError, ValueError):
+    first_month = ""
+
 problems = []
 for group, body in old.get("groups", {}).items():
-    had = set(body.get("months", ()))
-    now = set(new.get("groups", {}).get(group, {}).get("months", ()))
+    new_body = new.get("groups", {}).get(group, {})
+    had = {month for month in body.get("months", ()) if month >= first_month}
+    now = set(new_body.get("months", ()))
     gone = sorted(had - now)
     if gone:
         problems.append(f"{group}: would lose month(s) {', '.join(gone)}")
-    was = sum(sum(t.values()) for t in body.get("rows", {}).values())
-    is_ = sum(sum(t.values()) for t in new.get("groups", {}).get(group, {}).get("rows", {}).values())
+    was = sum(sum(t.values()) for month, t in body.get("rows", {}).items() if month >= first_month)
+    is_ = sum(sum(t.values()) for month, t in new_body.get("rows", {}).items() if month >= first_month)
     if is_ < was:
         problems.append(f"{group}: {was:,} row(s) published, {is_:,} in the rebuild")
 

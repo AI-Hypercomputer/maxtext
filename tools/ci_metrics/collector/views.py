@@ -577,13 +577,87 @@ def months_in_window(today: date, window_days: int = VIEW_WINDOW_DAYS) -> list[s
     Every "YYYY-MM" between the first day of the window and today, inclusive. A 90-day window
     touches four months at most.
   """
-  first = today - timedelta(days=max(window_days, 1) - 1)
+  first = window_first_day(today, window_days)
   months = []
   cursor = date(first.year, first.month, 1)
   while cursor <= today:
     months.append(cursor.strftime("%Y-%m"))
     cursor = date(cursor.year + (cursor.month // 12), cursor.month % 12 + 1, 1)
   return months
+
+
+def window_first_day(today: date, window_days: int = VIEW_WINDOW_DAYS) -> date:
+  """Returns the first day the dashboard's window still shows.
+
+  Args:
+    today: The day the tick is running.
+    window_days: How far back the dashboard can look.
+
+  Returns:
+    The day `window_days - 1` days before today, so the window holds `window_days` days.
+  """
+  return today - timedelta(days=max(window_days, 1) - 1)
+
+
+def prune_views(out_dir: Path | str, today: date, dry_run: bool = False) -> list[Path]:
+  """Deletes the view files the dashboard can no longer show.
+
+  Two kinds of file go:
+
+    * a month file, `<group>-YYYY-MM.json`, whose month is older than the window's first month;
+    * a pull request file whose `updated_at` in meta.json is before the window's first day.
+      A pull request file is rewritten while the month of its newest run is open, so
+      `updated_at` is never older than that run - an old `updated_at` means the whole pull
+      request has left the window.
+
+  A pull request with no `updated_at` is kept, because nothing says how old it is. The path
+  is always built from the number, never from meta.json's `file` field. meta.json itself is
+  not edited: the next build drops the entries whose files are gone.
+
+  Args:
+    out_dir: The output directory, the one `--out` names.
+    today: The day the tick is running.
+    dry_run: Only list the files. Delete nothing.
+
+  Returns:
+    The files deleted - or, on a dry run, the files that would be - sorted by path.
+
+  Raises:
+    OSError: A file could not be deleted.
+  """
+  views_root = Path(out_dir) / VIEWS_DIRNAME
+  if not views_root.is_dir():
+    return []
+  keep_from = months_in_window(today)[0]
+  first_day = window_first_day(today)
+  doomed: list[Path] = []
+  for group in VIEW_GROUPS:
+    for path in views_root.glob(f"{group}-*.json"):
+      month = path.stem[len(group) + 1 :]
+      try:
+        _month_start(month)
+      except ViewError:
+        continue
+      if month < keep_from:
+        doomed.append(path)
+  meta = read_view(views_root / META_FILENAME)
+  entries = meta.get("pull_requests") if isinstance(meta, Mapping) else None
+  for key, entry in (entries or {}).items():
+    try:
+      number = int(key)
+    except (TypeError, ValueError):
+      continue
+    updated = parse_timestamp(entry.get("updated_at")) if isinstance(entry, Mapping) else None
+    if updated is None or updated.astimezone(timezone.utc).date() >= first_day:
+      continue
+    path = views_root / PR_DIRNAME / f"{number}.json"
+    if path.exists():
+      doomed.append(path)
+  doomed.sort()
+  if not dry_run:
+    for path in doomed:
+      path.unlink()
+  return doomed
 
 
 def months_to_rebuild(available: Iterable[str], today: date) -> list[str]:
@@ -1927,9 +2001,10 @@ def build_views(
   still reach meta.json, taken from the finished file on disk, which costs one small read
   instead of a month of rows.
 
-  Nothing is deleted here. Pruning a month that has fallen out of the window, and pruning the
-  pull request files with it, belongs to the store's compaction step; a file that has already
-  gone simply stops being advertised in meta.json.
+  Nothing is deleted here. Deleting a month that has fallen out of the window, and the old
+  pull request files with it, is done by `prune_views` and `Store.prune_months`, which the
+  tick runs before this. A file that has already gone simply stops being advertised in
+  meta.json.
 
   A pull request file is written by the month that holds its newest run. A month rebuilt on
   its own leaves a newer month's file alone rather than replacing it with an abandoned push.

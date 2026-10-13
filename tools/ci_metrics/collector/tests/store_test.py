@@ -40,8 +40,8 @@ Six promises are checked head on, because the whole collector rests on them.
   3. **`state.json` is an index of attempts, nothing finer.** No test row, no job id and no
      test name ever appears in it, and deleting it costs nothing that cannot be rebuilt by
      scanning the rows.
-  4. **A month is a file.** Two runs created in two months land in two files, so a closed
-     month stops changing.
+  4. **A month has its own files.** Two runs created in two months land in different files, so
+     a closed month stops changing. A big month is split into parts and still reads as one.
   5. **Compaction is idempotent and never touches what it is not aimed at.** It drops
      superseded lines and the per-test detail of runs that did not merge; the second run
      removes nothing and does not even rewrite the file.
@@ -1690,6 +1690,190 @@ class HalfWrittenAttemptTest(StoreTestCase):
 
     self.assertFalse(state.is_incomplete(RUN_ID, 1))
     self.assertEqual(state.attempt_count, 1)
+
+
+class PartFileTest(StoreTestCase):
+  """A month that grows past the part size goes on in a new file, and still reads as one month.
+
+  GitHub refuses a push with any file over 100 MB, and one busy month of job rows is about
+  180 MB. These tests shrink the part size so the scheduled run's 54 job rows (the biggest is
+  about 3 KB) fill around fifteen parts.
+  """
+
+  PART_BYTES = 8000
+
+  def setUp(self) -> None:
+    """Shrinks the part size and builds the scheduled run's 54 job rows."""
+    super().setUp()
+    patch = mock.patch.object(store, "MAX_PART_BYTES", self.PART_BYTES)
+    patch.start()
+    self.addCleanup(patch.stop)
+    self.run_payload = load_json("run.json")
+    self.jobs = [rows.job_row(self.run_payload, job, collected_at=FIRST_TICK) for job in load_jobs("jobs.json")]
+
+  def job_files(self) -> list[Path]:
+    """Returns every job file in the store, sorted by name."""
+    return sorted(self.store.data_dir.glob(f"{rows.KIND_JOB}-*{store.NDJSON_SUFFIX}"))
+
+  def test_no_file_grows_past_the_part_size(self) -> None:
+    """Every part stays under the limit, and reading gives back all 54 rows in the order written."""
+    written = self.store.append(rows.KIND_JOB, self.jobs, month=RUN_MONTH)
+
+    self.assertEqual(written, 54)
+    files = self.job_files()
+    self.assertGreaterEqual(len(files), 10, "ten or more parts are needed to catch part10 sorting before part2")
+    for path in files:
+      self.assertLessEqual(path.stat().st_size, self.PART_BYTES, path.name)
+    stored = self.reopen().read(rows.KIND_JOB, [RUN_MONTH])
+    self.assertEqual([payload["job_id"] for payload in stored], [row.job_id for row in self.jobs])
+
+  def test_a_row_bigger_than_the_part_size_gets_a_file_of_its_own(self) -> None:
+    """A row is never cut in half and never dropped, even when it alone is over the limit."""
+    with mock.patch.object(store, "MAX_PART_BYTES", 1000):
+      self.store.append(rows.KIND_JOB, self.jobs, month=RUN_MONTH)
+
+    for path in self.job_files():
+      if path.stat().st_size > 1000:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1, f"{path.name} is over the limit and holds more than one row")
+    self.assertEqual(len(self.reopen().read(rows.KIND_JOB, [RUN_MONTH])), 54)
+
+  def test_a_repeated_append_finds_the_rows_in_every_part(self) -> None:
+    """The next tick writes nothing, because the keys of every part are checked, not just part 1."""
+    self.store.append(rows.KIND_JOB, self.jobs, month=RUN_MONTH)
+    self.assertGreater(len(self.job_files()), 1, "the month has to be split for this test to mean anything")
+    before = self.ndjson_snapshot()
+
+    again = self.reopen().append(rows.KIND_JOB, self.jobs, month=RUN_MONTH)
+
+    self.assertEqual(again, 0)
+    self.assertEqual(self.ndjson_snapshot(), before)
+
+  def test_a_month_in_several_parts_is_listed_once_and_quietly(self) -> None:
+    """A part file belongs to its month: it is listed once and never warned about as a strange name."""
+    with captured_stderr() as errors:
+      self.store.append(rows.KIND_JOB, self.jobs, month=RUN_MONTH)
+      months = self.reopen().months(rows.KIND_JOB)
+
+    self.assertGreater(len(self.job_files()), 1, "the month has to be split for this test to mean anything")
+    self.assertEqual(months, [RUN_MONTH])
+    self.assertEqual(errors.getvalue(), "")
+
+  def test_read_month_yields_the_rows_of_every_part(self) -> None:
+    """The view builder reads months through `read_month`, so it has to see every part too."""
+    self.store.append(rows.KIND_JOB, self.jobs, month=RUN_MONTH)
+
+    yielded = list(self.reopen().read_month(RUN_MONTH, [rows.KIND_JOB]))
+
+    self.assertEqual([row.job_id for row in yielded], [row.job_id for row in self.jobs])
+
+  def test_a_lost_index_still_finds_jobs_that_live_in_a_later_part(self) -> None:
+    """Rebuilding state.json reads every part, so a run whose jobs are all past part 1 counts as stored."""
+    second_id = RUN_ID + 1
+    second_run = dict(self.run_payload, id=second_id)
+    second_job = dict(load_jobs("jobs.json")[0], run_id=second_id, id=1)
+    self.store.append(
+        rows.KIND_RUN,
+        [rows.run_row(self.run_payload, collected_at=FIRST_TICK), rows.run_row(second_run, collected_at=FIRST_TICK)],
+    )
+    self.store.append(rows.KIND_JOB, self.jobs, month=RUN_MONTH)
+    self.store.append(rows.KIND_JOB, [rows.job_row(second_run, second_job, collected_at=FIRST_TICK)], month=RUN_MONTH)
+    first_part = self.lines_of(rows.KIND_JOB, RUN_MONTH)
+    self.assertNotIn(second_id, [line["run_id"] for line in first_part], "the second run's job must not be in part 1")
+
+    state = self.reopen().load_state()
+
+    self.assertTrue(state.rebuilt)
+    self.assertTrue(state.is_collected(second_id, 1))
+
+  def test_compaction_leaves_one_line_per_key_across_all_parts(self) -> None:
+    """Compacting a split month drops the old copies from every part, and every part stays small."""
+    rerun = load_json(f"rerun-{UNMERGED_RUN_ID}-run.json")
+    jobs = attempts_of(UNMERGED_RUN_ID, "rerun", UNMERGED_ATTEMPT)[UNMERGED_ATTEMPT]
+    self.store.append(rows.KIND_JOB, [rows.job_row(rerun, job, collected_at=FIRST_TICK) for job in jobs], month=CLOSED_MONTH)
+    self.store.append(
+        rows.KIND_JOB,
+        [rows.job_row(rerun, job, collected_at=SECOND_TICK) for job in jobs],
+        month=CLOSED_MONTH,
+        correction=True,
+    )
+
+    removed = self.store.compact_month(rows.KIND_JOB, CLOSED_MONTH, merged_run_ids=[])
+
+    self.assertEqual(removed, 42)
+    files = self.job_files()
+    lines = [json.loads(line) for path in files for line in path.read_text(encoding="utf-8").splitlines()]
+    self.assertEqual(len(lines), 42)
+    self.assertEqual({line["collected_at"] for line in lines}, {SECOND_TICK})
+    for path in files:
+      self.assertLessEqual(path.stat().st_size, self.PART_BYTES, path.name)
+    before = self.ndjson_snapshot()
+    self.assertEqual(self.store.compact_month(rows.KIND_JOB, CLOSED_MONTH, merged_run_ids=[]), 0)
+    self.assertEqual(self.ndjson_snapshot(), before)
+
+
+class PruneMonthsTest(StoreTestCase):
+  """Deleting the months the dashboard can no longer show, so the store stops growing."""
+
+  def test_months_before_the_cutoff_go_and_the_rest_stay(self) -> None:
+    """August goes; September and state.json stay; the deleted files are named back."""
+    self.write_a_tick(self.store, FIRST_TICK)
+
+    deleted = self.store.prune_months(RUN_MONTH)
+
+    self.assertEqual(
+        sorted(path.name for path in deleted),
+        ["job-2026-08.ndjson", "rescue-2026-08.ndjson", "run-2026-08.ndjson"],
+    )
+    self.assertEqual(
+        sorted(path.name for path in self.store.data_dir.iterdir()),
+        ["job-2026-09.ndjson", "run-2026-09.ndjson", "state.json", "suite-2026-09.ndjson", "test-2026-09.ndjson"],
+    )
+    self.assertEqual(self.reopen().months(), [RUN_MONTH])
+
+  def test_every_part_of_an_old_month_goes(self) -> None:
+    """A split month is deleted whole, not just its first file."""
+    with mock.patch.object(store, "MAX_PART_BYTES", 8000):
+      self.write_a_tick(self.store, FIRST_TICK)
+    august_jobs = list(self.store.data_dir.glob(f"{rows.KIND_JOB}-{CLOSED_MONTH}*"))
+    self.assertGreater(len(august_jobs), 1, "August's jobs have to be split for this test to mean anything")
+
+    self.store.prune_months(RUN_MONTH)
+
+    self.assertEqual(list(self.store.data_dir.glob(f"*{CLOSED_MONTH}*")), [])
+
+  def test_the_same_store_forgets_the_keys_of_a_deleted_month(self) -> None:
+    """After a prune, rows of that month are new again, not skipped as already stored."""
+    self.write_a_tick(self.store, FIRST_TICK)
+    # Forget the attempt in the index, so the file's keys are what decide "already stored".
+    self.store.load_state().forget_attempt(UNMERGED_RUN_ID, UNMERGED_ATTEMPT)
+    rerun = load_json(f"rerun-{UNMERGED_RUN_ID}-run.json")
+    attempt_jobs = attempts_of(UNMERGED_RUN_ID, "rerun", UNMERGED_ATTEMPT)[UNMERGED_ATTEMPT]
+    jobs = [rows.job_row(rerun, job, collected_at=SECOND_TICK) for job in attempt_jobs]
+    self.assertEqual(self.store.append(rows.KIND_JOB, jobs, month=CLOSED_MONTH), 0, "the keys are cached and present")
+
+    self.store.prune_months(RUN_MONTH)
+
+    self.assertEqual(self.store.append(rows.KIND_JOB, jobs, month=CLOSED_MONTH), 42)
+
+  def test_a_dry_run_names_the_files_and_deletes_nothing(self) -> None:
+    """A dry run shows what would go without touching the store."""
+    self.write_a_tick(self.store, FIRST_TICK)
+    before = self.ndjson_snapshot()
+
+    would_delete = self.store.prune_months(RUN_MONTH, dry_run=True)
+
+    self.assertEqual(len(would_delete), 3)
+    self.assertEqual(self.ndjson_snapshot(), before)
+
+  def test_a_malformed_cutoff_deletes_nothing(self) -> None:
+    """As text, "2026-9" sorts after "2026-10" and would delete October, so it is refused."""
+    self.write_a_tick(self.store, FIRST_TICK)
+    before = self.ndjson_snapshot()
+
+    with self.assertRaises(store.StoreError):
+      self.store.prune_months("2026-9")
+    self.assertEqual(self.ndjson_snapshot(), before)
 
 
 if __name__ == "__main__":

@@ -336,10 +336,16 @@ Where a row lives, whether it is there already, and how a reader gets the curren
 back. No network, no metric.
 
 ```
-<out>/data/<kind>-YYYY-MM.ndjson   one JSON object a line, appended, never edited
-<out>/data/state.json              which attempts are stored, which are in flight
-<out>/views/...                    what the browser loads
+<out>/data/<kind>-YYYY-MM.ndjson         one JSON object a line, appended, never edited
+<out>/data/<kind>-YYYY-MM-partN.ndjson   the same month, continued once a part is full
+<out>/data/state.json                    which attempts are stored, which are in flight
+<out>/views/...                          what the browser loads
 ```
+
+No data file grows past 40 MB (`store.MAX_PART_BYTES`), because GitHub blocks any file over
+100 MB and a busy month of job rows is about 180 MB. Each tick also deletes every month the
+dashboard can no longer show (older than its 90-day window), so the store holds four months
+at most.
 
 Five rules hold it up, and the module docstring states them in full:
 
@@ -356,7 +362,10 @@ Five rules hold it up, and the module docstring states them in full:
    own only proves a tick started that attempt, not that it finished it.
 4. **Missing is None, never zero.** Rows pass through exactly as `rows.py` built them.
 5. **A month closes once.** A tick appends only to the month of the run it is reading.
-   `compact_month` is run once against a closed month, and running it twice changes nothing.
+   `compact_month` can be run once against a closed month, and running it twice changes
+   nothing. Nothing calls it yet; on real data it saves only about 17%.
+6. **Old months are deleted.** Each tick deletes the rows and views of months older than the
+   dashboard's 90-day window (`Store.prune_months`, `views.prune_views`).
 
 The month is the RUN's month, not the row's. Run and rescue rows can name it themselves;
 job, suite and test rows take `month=store.month_for_run(run)` from the caller, so a re-run
@@ -453,7 +462,7 @@ python3 tools/ci_metrics/collector/tests/store_test.py
 python3 tools/ci_metrics/collector/tests/views_test.py
 python3 tools/ci_metrics/collector/tests/tick_test.py
 
-# Or all of them at once - 544 tests, about five seconds:
+# Or all of them at once - 565 tests, about five seconds:
 python3 -m unittest discover -s tools/ci_metrics/collector/tests \
         -p '*_test.py' -t tools/ci_metrics/collector/tests
 

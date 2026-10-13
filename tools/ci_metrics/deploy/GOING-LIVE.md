@@ -160,7 +160,7 @@ is the wire between them, plus three decisions only a person can make.
 `python -m collector.tick --out DIR --repo AI-Hypercomputer/maxtext` writes:
 
 ```
-DIR/data/*.ndjson              append-only raw rows, one file per month
+DIR/data/*.ndjson              append-only raw rows, one or more 40 MB parts per month
 DIR/data/state.json            which run+attempt is already stored
 DIR/views/meta.json            index: which files exist, when they were built
 DIR/views/runs-YYYY-MM.json        tables: runs, jobs
@@ -630,8 +630,9 @@ Three useful things to read out of that:
   views/workflows-2026-08.json
 ```
 
-For that 3-run sample, `data/` came to 268 KB and `views/` to 24 KB. Only
-`views/` is published. `data/` never goes on the website - it is what the views
+For that 3-run sample, `data/` came to 268 KB and `views/` to 24 KB. Real volume
+is far bigger: the store for Sep 1-14, 2026 held 157 MB of rows (85 MB of them
+job rows), so a full month is about 330 MB. Only `views/` is published. `data/` never goes on the website - it is what the views
 are rebuilt from, and it belongs on its own branch.
 
 **Step 3 - copy only the views into the branch.**
@@ -680,13 +681,14 @@ Both, at different layers, and the difference is worth being clear about.
 **The store appends.** `data/*.ndjson` is append-only by design: a tick adds
 lines and never edits one, and a correction is written as a new line rather than
 a change to an old one. `state.json` records which run and attempt is already
-there, so re-reading a window costs nothing. Keep pointing `--store` at the same
-directory and the history grows without limit.
+there, so re-reading a window costs nothing. The one thing a tick deletes is
+whole months older than the dashboard's 90-day window, so the store holds four
+months at most instead of growing forever.
 
 **The published views are rebuilt, not appended.** `views/*.json` is a rendering
 of the store, so the script replaces the whole folder each time. That is not
-data loss, because the store it was rendered from still holds everything - the
-rebuild always covers what the last one did **and more**.
+data loss: every month still inside the 90-day window is covered by the rebuild
+at least as fully as before. Months older than the window drop out on purpose.
 
 It stops being true in exactly one case: when the store is a different or
 emptier one than last time. A fresh clone, a wiped directory, a shorter
@@ -747,7 +749,7 @@ them all in one is what makes this confusing.
 | the dashboard page, served as `dev/bench/ci-pulse/index.html` | **this branch** (gh-pages) | it is the page the tab opens; it has to be here to be reachable, and next to its data so relative paths work (section 3) |
 | `tools/ci_metrics/site/index.html` (the source) | **`main`** | it is edited and reviewed there; the copy under `dev/bench/ci-pulse/` is the build output |
 | `tools/ci_metrics/collector/` (9 modules) | **`main`** | GitHub only runs scheduled workflows from the default branch, and the workflow checks the collector out by ref |
-| `tools/ci_metrics/collector/tests/` (49 files, 544 tests) | **`main`**, with the collector | they are the collector's regression net and must run in the collector's pull requests |
+| `tools/ci_metrics/collector/tests/` (49 files, 565 tests) | **`main`**, with the collector | they are the collector's regression net and must run in the collector's pull requests |
 | `tools/ci_metrics/site/tests/` (14 files, 247 assertions) | **`main`**, with a copy of the page | they are jsdom checks; they need node, not a web host |
 | `tools/ci_metrics/deploy/collector.yml` | copied to **`main`** as `.github/workflows/ci_metrics_collector.yml` | see above |
 | the view JSON files the collector writes | **wherever the page is served from** | the page reads them with a relative path |
@@ -764,7 +766,7 @@ Concretely:
 
 - **`main` gets a pull request** adding `tools/ci_metrics/` (collector, site
   source, both test suites) and `.github/workflows/ci_metrics_collector.yml`.
-  This is where review happens and where CI can run the 544 Python tests and 247
+  This is where review happens and where CI can run the 565 Python tests and 247
   dashboard assertions.
 - **This branch gets only what is served**: `dev/bench/ci-pulse/index.html` and
   `dev/bench/ci-pulse/views/*.json`. No Python, no test fixtures, no

@@ -48,9 +48,12 @@ What a tick does:
      after it starts, so its pull request has no merge time yet, and nothing would ever bring
      that run back - its id and creation time never change, so the watermark passes it for
      good.
-  6. Rebuilds the views with `views.build_views`, for the months this tick touched plus any
+  6. Deletes what the dashboard can no longer show: rows of months older than the 90-day
+     window, view files of those months, and pull request files older than the window. This
+     is what keeps the store from growing forever.
+  7. Rebuilds the views with `views.build_views`, for the months this tick touched plus any
      month whose view files have gone missing.
-  7. Prints a report a person can read and, as its last line, one line a log can grep.
+  8. Prints a report a person can read and, as its last line, one line a log can grep.
 
 Exit codes, which a scheduler is expected to tell apart:
 
@@ -288,6 +291,8 @@ class TickReport:
   views_written: int = 0
   views_unchanged: int = 0
   pr_files_written: int = 0
+  data_files_pruned: int = 0
+  view_files_pruned: int = 0
   months_touched: set[str] = field(default_factory=set)
   months_rebuilt: list[str] = field(default_factory=list)
   suite_reasons: dict[str, int] = field(default_factory=dict)
@@ -1043,8 +1048,8 @@ def months_missing_views(row_store: store_module.Store, today: date) -> set[str]
   """Finds the months whose view files have gone, so the next tick writes them back.
 
   Views are disposable: delete them all and this is what puts them back. Only months still
-  inside the view window are considered - an older month keeps its rows and loses its views on
-  purpose.
+  inside the view window are considered - an older month is deleted, rows and views both, by
+  `prune_old_files`.
 
   Args:
     row_store: The store to look in.
@@ -1063,6 +1068,34 @@ def months_missing_views(row_store: store_module.Store, today: date) -> set[str]
         missing.add(month)
         break
   return missing
+
+
+def prune_old_files(options: Options, row_store: store_module.Store, report: TickReport, now: datetime) -> None:
+  """Deletes the rows and views the dashboard can no longer show, so the store stops growing.
+
+  The dashboard looks back `views.VIEW_WINDOW_DAYS` days, which touches four months at most.
+  Rows of older months go, and so do view files older than the window. This runs before the
+  views are rebuilt, so the new meta.json never lists a file that was just deleted.
+
+  On a dry run nothing is deleted; the report only counts what would go.
+
+  Args:
+    options: The tick's settings.
+    row_store: The store to prune.
+    report: The report to count into.
+    now: The current moment.
+
+  Raises:
+    TickError: A file could not be deleted.
+  """
+  today = now.date()
+  try:
+    data_files = row_store.prune_months(views.months_in_window(today)[0], dry_run=options.dry_run)
+    view_files = views.prune_views(options.out, today, dry_run=options.dry_run)
+  except (store_module.StoreError, OSError) as error:
+    raise TickError(f"old files could not be deleted: {error}") from error
+  report.data_files_pruned = len(data_files)
+  report.view_files_pruned = len(view_files)
 
 
 def rebuild_views(
@@ -1184,6 +1217,11 @@ def print_report(report: TickReport, options: Options) -> None:
       f"{format_count(report.views_unchanged)} unchanged, "
       f"{format_count(report.pr_files_written)} pull request file(s)",
   )
+  line(
+      "Pruned",
+      f"{format_count(report.data_files_pruned)} data file(s), {format_count(report.view_files_pruned)} view file(s) "
+      f"older than the {views.VIEW_WINDOW_DAYS}-day window" + (" [dry run: would delete]" if options.dry_run else ""),
+  )
   line("API requests spent", f"{format_count(report.api_requests)} (+{format_count(report.download_requests)} downloads)")
   if report.stopped_because:
     line("Stopped early", report.stopped_because)
@@ -1217,6 +1255,9 @@ def summary_line(report: TickReport, options: Options) -> str:
       f"{report.views_written + report.pr_files_written} view file(s)",
       f"{report.api_requests} API request(s)",
   ]
+  pruned = report.data_files_pruned + report.view_files_pruned
+  if pruned:
+    parts.append(f"{pruned} old file(s) pruned")
   if report.stopped_because:
     parts.append("stopped early")
   if options.dry_run:
@@ -1324,6 +1365,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       _warn("WARNING: state.json was missing or unreadable; the index was rebuilt from the stored rows.")
     tick = Tick(options, client, row_store, state, report)
     tick.collect()
+    prune_old_files(options, row_store, report, tick.now)
     rebuild_views(options, row_store, state, report, tick.now)
     if not options.dry_run:
       row_store.save_state(state)
