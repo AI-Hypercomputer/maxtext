@@ -212,6 +212,11 @@ function jsArg(v){return esc(JSON.stringify(v??null))}
 // Links from data must point at GitHub. Anything else becomes a dead link.
 function safeUrl(u){return /^https:\/\/github\.com\//.test(String(u??''))?String(u):'#'}
 
+// ============ MAPS KEYED BY NAMES ============
+// A job, flavor or test name can be any text, even "constructor" or "__proto__". A map keyed by
+// names from the data starts with no prototype, so every name is just a name.
+function dict(entries){return Object.assign(Object.create(null),entries)}
+
 // ============ JOB DEFINITIONS (baseline times in minutes) ============
 let JOBS=[
 {id:'analyze',name:'Analyze Code Changes for Test Orchestration',cat:'infra',lane:'Hosted',b:{q:0,s:0.3,r:0.2}},
@@ -234,7 +239,7 @@ let JOBS=[
 {id:'cpu-post-i',name:'CPU Posttrain Tests (cpu-post-training-integration)',cat:'cpu',lane:'CPU',b:{q:0,s:2,r:4}},
 ];
 const CAT_COLORS={build:'var(--bld)',tpu:'var(--tpu)',gpu:'var(--gpu)',cpu:'var(--cpu)',infra:'var(--bld)'};
-const LANE_COLORS={TPU:'var(--tpu)',GPU:'var(--gpu)',CPU:'var(--cpu)',Hosted:'var(--muted)',Build:'var(--bld)'};
+const LANE_COLORS=dict({TPU:'var(--tpu)',GPU:'var(--gpu)',CPU:'var(--cpu)',Hosted:'var(--muted)',Build:'var(--bld)'});
 
 // ============ COMMITS (overrides from baseline) ============
 let COMMITS=[
@@ -1728,7 +1733,7 @@ let WK_GROUPS={
   'cpu-post-u':{name:'CPU Posttrain Tests (cpu-post-training-unit, 4 workers)',cat:'cpu',lane:'CPU',jobs:['cpu-post-u'],split:[0.29,0.26,0.24,0.21]},
 };
 function wkEntities(){
-  const memberOf={};Object.entries(WK_GROUPS).forEach(([gid,g])=>g.jobs.forEach(j=>{memberOf[j]=gid}));
+  const memberOf=dict();Object.entries(WK_GROUPS).forEach(([gid,g])=>g.jobs.forEach(j=>{memberOf[j]=gid}));
   const ents=[];
   ['tpu','gpu','cpu','build','infra'].forEach(cat=>{
     JOBS.filter(j=>j.cat===cat).forEach(j=>{
@@ -1781,7 +1786,7 @@ function wkShade(hex,i,n){
 // the drill-down that still lists suite by suite - is the only place that needs the ramp.
 function wkColors(ents){
   const byCat={};ents.forEach(e=>{(byCat[e.cat]=byCat[e.cat]||[]).push(e.gid)});
-  const map={};Object.entries(byCat).forEach(([cat,ids])=>ids.forEach((id,i)=>{map[id]=wkShade(WK_LANE_HEX[cat]||'#64748B',i,ids.length)}));
+  const map=dict();Object.entries(byCat).forEach(([cat,ids])=>ids.forEach((id,i)=>{map[id]=wkShade(WK_LANE_HEX[cat]||'#64748B',i,ids.length)}));
   return map;
 }
 function closeWkPop(){$('#wkpop').style.display='none'}
@@ -2357,7 +2362,7 @@ function openFlakyPop(id,pr){
   const isGatePop=j.lane==='Hosted'||j.lane==='Build';
   // When a specific PR is given (cell click), show tests for that PR only.
   // When no PR (row click), show all tests for the job.
-  const testMap={};
+  const testMap=dict();
   FLAKY_TESTS.filter(x=>x.job===id).forEach(x=>{
     if(pr){
       // PR-specific: only tests that failed in this PR (or fallback to all for this job)
@@ -2493,7 +2498,7 @@ async function loadViews(base){
   await Promise.all(VIEW_GROUPS.map(async group=>{
     const months=(meta.groups&&meta.groups[group]&&meta.groups[group].months)||[];
     const files=await Promise.all(months.map(m=>getJSON(`${base}${group}-${m}.json`)));
-    const tables={};
+    const tables=dict();
     files.forEach(file=>{
       Object.entries((file&&file.tables)||{}).forEach(([name,table])=>{
         (tables[name]=tables[name]||[]).push(...rowsOf(table));
@@ -2514,7 +2519,7 @@ async function getJSON(url){
 // Turning view rows into the page's model
 // --------------------------------------------------------------------------
 
-const LANE_CAT={TPU:'tpu',GPU:'gpu',CPU:'cpu',Build:'build',Hosted:'infra'};
+const LANE_CAT=dict({TPU:'tpu',GPU:'gpu',CPU:'cpu',Build:'build',Hosted:'infra'});
 const MONTHS=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 function mins(seconds){return seconds==null?0:Math.round((seconds/60)*100)/100}
@@ -2567,7 +2572,7 @@ function adaptViews(v){
   });
   const jobs=[...seen.values()].map(j=>({id:j.id,name:j.name,cat:j.cat,lane:j.lane,
     b:{q:median(j.q),s:median(j.s),r:median(j.r)}}));
-  const labels={};seen.forEach((j,id)=>{if(j.label)labels[id]=j.label});
+  const labels=dict();seen.forEach((j,id)=>{if(j.label)labels[id]=j.label});
 
   // ---- one entry per merged pull request, oldest first ----
   const byRun=new Map();
@@ -2597,10 +2602,10 @@ function adaptViews(v){
   const ordered=[...newestPerPr.values()].sort((a,b)=>
     new Date(b.created_at||b.merged_at)-new Date(a.created_at||a.merged_at));
 
-  const commits=[],times={},timeIso={},runIds={},triggers={},probeQ={};
+  const commits=[],times=dict(),timeIso=dict(),runIds=dict(),triggers=dict(),probeQ=dict();
   ordered.forEach(run=>{
     const hash=String(run.pr);
-    const o={};
+    const o=dict();
     (byRun.get(run.run_id)||[]).forEach(r=>{
       o[jobSlug(r)]={q:mins(r.queued_seconds),s:mins(r.setup_seconds),r:mins(r.run_seconds),
                      st:r.conclusion==='success'?'pass':'fail'};
@@ -2613,7 +2618,7 @@ function adaptViews(v){
     times[hash]=stamp(when);timeIso[hash]=when;
     runIds[hash]=run.run_id;triggers[hash]=run.event||'';
     // The queue view reports one wait per device lane per run.
-    const q={tpu:0,gpu:0,cpu:0};
+    const q=dict({tpu:0,gpu:0,cpu:0});
     queue.filter(x=>x.run_id===run.run_id).forEach(x=>{
       const k=String(x.lane||'').toLowerCase();
       if(k in q)q[k]=Math.round(mins(x.median_wait_seconds));
@@ -2622,7 +2627,7 @@ function adaptViews(v){
   });
 
   // ---- test counts per job, from the suites view ----
-  const counts={};
+  const counts=dict();
   suites.forEach(s=>{
     if(!s.flavor)return;
     const workers=Math.max(1,s.workers_ran||s.workers_named||1);
@@ -2643,12 +2648,12 @@ function adaptViews(v){
   });
 
   // ---- worker groups: any flavor that ran on more than one worker ----
-  const perFlavor={};
+  const perFlavor=dict();
   jobs.forEach(j=>{
     const flavor=j.id.split('#')[0];
     (perFlavor[flavor]=perFlavor[flavor]||[]).push(j);
   });
-  const wkGroups={};
+  const wkGroups=dict();
   Object.entries(perFlavor).forEach(([flavor,list])=>{
     if(list.length<2)return;
     wkGroups[flavor]={name:`${list[0].name.replace(/ \(worker \d+\)$/,'')} (${list.length} workers)`,
@@ -2666,8 +2671,8 @@ function adaptViews(v){
   // because the bar charts reverse it themselves; the flaky strip and the suite-health series
   // index into TH_COMMITS directly, so their order has to be the drawing order.
   const thOrder=[...commits].reverse();
-  const prIndex={};thOrder.forEach((c,i)=>{prIndex[c.hash]=i});
-  const byFlavor={};
+  const prIndex=dict();thOrder.forEach((c,i)=>{prIndex[c.hash]=i});
+  const byFlavor=dict();
   suites.forEach(s=>{
     if(!s.flavor||!(String(s.pr) in prIndex))return;
     (byFlavor[s.flavor]=byFlavor[s.flavor]||[]).push(s);
@@ -2694,7 +2699,7 @@ function adaptViews(v){
   // a job that failed and passed on a re-run, false is one that failed and was never re-run. The
   // second is a failure, not a rescue, and belongs in `fails`, which the strip already draws as
   // an outlined cell. Pushing both into `events` counted every failure as a re-run.
-  const rescueByJob={};
+  const rescueByJob=dict();
   rescues.forEach(r=>{
     const id=r.flavor?(r.worker==null?r.flavor:`${r.flavor}#${r.worker}`):jobSlug(r);
     const g=rescueByJob[id]=rescueByJob[id]||{id,name:r.job_name||id,lane:r.lane||'',events:[],fails:[]};
@@ -2720,7 +2725,7 @@ function adaptViews(v){
   // tooltip can show which tests failed regardless of whether the job was re-run.
   const failedKeys=new Set(rescues
     .map(r=>`${r.run_id}|${r.job_name}|${r.failed_attempt}`));
-  const flakyByTest={};
+  const flakyByTest=dict();
   rescueTests.forEach(x=>{
     if(!failedKeys.has(`${x.run_id}|${x.job_name}|${x.failed_attempt}`))return;
     const key=x.classname?`${x.classname}.${x.name}`:x.name;
@@ -2745,8 +2750,8 @@ function applyModel(m,generatedAt){
   TEST_COUNTS=m.counts;WK_GROUPS=m.wkGroups;
   TH_CATEGORIES=m.thCategories;TH_COMMITS=m.thCommits;
   RESCUES=m.rescues;FLAKY_TESTS=m.flaky.length?m.flaky:FLAKY_TESTS;
-  TESTS={};                                   // per-test detail is not in the month views
-  STEPS={};                                   // nor are per-step names and timings
+  TESTS=dict();                               // per-test detail is not in the month views
+  STEPS=dict();                               // nor are per-step names and timings
   if(generatedAt){const d=new Date(generatedAt);if(!isNaN(d))TODAY=d}
 }
 
