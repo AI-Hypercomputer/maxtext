@@ -5422,6 +5422,7 @@ class MaxTextConfig(
           "qwen3-vl-2b",
           "qwen3-vl-4b",
           "qwen3-vl-30b-a3b",
+          "qwen3.5-9b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
           "maxtext-omni-gemma3-qwen3",
