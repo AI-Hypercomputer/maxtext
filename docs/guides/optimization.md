@@ -49,6 +49,13 @@ Optimize with Pallas kernels for fine-grained control.
 
 Guide to setting up benchmarks, performing performance tuning, and analyzing metrics.
 ```
+
+```{grid-item-card} 🔁 FSDP Weight Prefetching
+:link: optimization/fsdp_prefetch
+:link-type: doc
+
+Overlap the FSDP all-gather of the next layer's weights with the current layer's compute.
+```
 ````
 
 ```{toctree}
@@ -58,6 +65,7 @@ maxdepth: 1
 ---
 optimization/custom_model.md
 optimization/sharding.md
+optimization/fsdp_prefetch.md
 optimization/custom_mesh_and_rule.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md

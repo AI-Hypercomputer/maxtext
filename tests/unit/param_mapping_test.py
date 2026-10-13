@@ -22,7 +22,10 @@ import pytest
 pytestmark = [pytest.mark.decoupled_target]
 
 
-from maxtext.checkpoint_conversion.to_maxtext import _build_multi_axis_stacked_tensor
+from maxtext.checkpoint_conversion.to_maxtext import (
+    _build_multi_axis_stacked_tensor,
+    _build_single_axis_stacked_tensor,
+)
 from maxtext.checkpoint_conversion.utils import hf_shape
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import utils
@@ -300,6 +303,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
     self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("MoEBiasVar-decoder-moe_layers_0-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias", mapping)
 
   def test_deepseek_mapping_scanned(self):
     config = {
@@ -310,6 +314,107 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config = mock.Mock()
     mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
     self.assertIn("params-decoder-dense_layers-self_attention-query-kernel", mapping)
+    self.assertIn("MoEBiasVar-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias", mapping)
+
+  def test_deepseek_mtp_mapping(self):
+    config = {
+        "num_hidden_layers": 61,
+        "first_k_dense_replace": 3,
+        "n_routed_experts": 2,
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_decoder_layers = 4
+    maxtext_config.first_num_dense_layers = 3
+    maxtext_config.num_experts = 2
+    maxtext_config.mtp_num_layers = 1
+    mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    self.assertEqual(
+        mapping["params-mtp_block-mtp_layer_1-mtp_1_embedding_norm-scale"],
+        "model.layers.61.enorm.weight",
+    )
+    self.assertEqual(
+        mapping["params-mtp_block-mtp_layer_1-mtp_1_projection-kernel"],
+        "model.layers.61.eh_proj.weight",
+    )
+    self.assertEqual(
+        mapping["params-mtp_block-mtp_layer_1-mtp_1_final_norm-scale"],
+        "model.layers.61.shared_head.norm.weight",
+    )
+    self.assertEqual(
+        mapping["MoEBiasVar-mtp_block-mtp_layer_1-mtp_1_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias"],
+        "model.layers.61.mlp.gate.e_score_correction_bias",
+    )
+    self.assertEqual(
+        mapping["params-mtp_block-mtp_layer_1-mtp_1_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-wi_0"],
+        [
+            "model.layers.61.mlp.experts.0.gate_proj.weight",
+            "model.layers.61.mlp.experts.1.gate_proj.weight",
+        ],
+    )
+    hooks = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=True)
+    self.assertIn("params-mtp_block-mtp_layer_1-mtp_1_projection-kernel", hooks)
+    self.assertIn(
+        "params-mtp_block-mtp_layer_1-mtp_1_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-wi_0",
+        hooks,
+    )
+
+  def test_single_axis_stack_axis_selection(self):
+    """Single-axis stacking (to_maxtext) and slicing (to_huggingface) must pick the same, correct axis.
+
+    Scanned layer weights stack on `param_scan_axis`; unscanned MoE experts (e.g. MTP, DeepSeek V4
+    prefix layers) and non-Param variable collections (`MoEBiasVar`) stack on axis 0.
+    """
+    cfg = mock.Mock()
+    cfg.scan_layers = True
+    cfg.param_scan_axis = 1
+    cfg.weight_dtype = "float32"
+
+    # num_stacked differs from every slice dim, so a wrong axis changes the stacked shape.
+    num_stacked = 5
+    cases = [
+        # (mt_key, slice_shape, expected_axis)
+        # Scanned DeepSeek MoE router gate: the bug fixed in this PR (was misclassified as unscanned MoE).
+        ("params-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel", (4, 3), 1),
+        # Scanned Mixtral router gate.
+        ("params-decoder-layers-MoeBlock_0-gate-kernel", (4, 3), 1),
+        # Scanned non-MoE weight (control).
+        ("params-decoder-dense_layers-self_attention-out-kernel", (4, 3), 1),
+        # Non-Param variable collection: stacked on axis 0 even though the stacked tensor is 2D.
+        ("MoEBiasVar-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias", (3,), 0),
+        # Unscanned MTP experts (stacked on expert axis) while scan_layers=True.
+        ("params-mtp_block-mtp_layer_1-mtp_1_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-wi_0", (4, 3), 0),
+        # DeepSeek V4 unrolled prefix layer experts: must not be caught by the "decoder-layers-" exclusion.
+        ("params-decoder-layers_0-mlp-MoeBlock_0-wi_0", (4, 3), 0),
+    ]
+
+    for mt_key, slice_shape, expected_axis in cases:
+      with self.subTest(mt_key=mt_key):
+        hf_names = [f"hf_{i}" for i in range(num_stacked)]
+        base = np.arange(np.prod(slice_shape), dtype=np.float32).reshape(slice_shape)
+
+        def value_of(i, base=base):
+          return base + 100 * i
+
+        def getter(name, value_of=value_of):
+          return value_of(int(name.split("_")[1]))
+
+        target_shape = list(slice_shape)
+        target_shape.insert(expected_axis, num_stacked)
+        target_shape = tuple(target_shape)
+
+        # Forward (to_maxtext): stacked along expected_axis, each slice in its own position.
+        stacked = _build_single_axis_stacked_tensor(hf_names, getter, None, target_shape, cfg, mt_key)
+        self.assertEqual(stacked.shape, target_shape)
+        for i in range(num_stacked):
+          np.testing.assert_array_equal(np.take(stacked, i, axis=expected_axis), value_of(i))
+
+        # Backward (to_huggingface): slicing along the same axis recovers the originals.
+        param_map = {mt_key: hf_names}
+        hf_shape_map = {name: slice_shape for name in hf_names}
+        out = dict(process_maxtext_param(mt_key, stacked, param_map, {}, hf_shape_map, cfg))
+        self.assertEqual(sorted(out), sorted(hf_names))
+        for i, name in enumerate(hf_names):
+          np.testing.assert_array_equal(out[name], value_of(i))
 
   def test_gpt_oss_mapping(self):
     config = {

@@ -499,8 +499,11 @@ def _build_single_axis_stacked_tensor(
 
   axis_to_stack = 0
   if config.scan_layers:
-    is_var_collection = "MoEBiasVar" in mt_key or "Tid2EidVar" in mt_key
-    is_unscanned_moe = "MoeBlock" in mt_key and "scanned_blocks" not in mt_key
+    key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
+    is_var_collection = "MoEBiasVar" in key_str or "Tid2EidVar" in key_str
+    is_unscanned_moe = "MoeBlock" in key_str and not any(
+        s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
+    )
     if not (is_var_collection or is_unscanned_moe):
       # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
       # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar

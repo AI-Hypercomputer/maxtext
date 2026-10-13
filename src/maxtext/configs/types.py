@@ -1938,6 +1938,15 @@ class LayoutAndSharding(BaseModel):
   )
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
   compile_xla_flags: str = Field("", description="Compiler options for compilation only.")
+  prefetch_fsdp_weights: bool = Field(
+      False,
+      description=(
+          "Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in"
+          " both the forward and backward pass. Requires scan_layers=True; the backward always rematerializes"
+          " each layer in full (remat_policy is ignored). Has no effect when no FSDP mesh axis spans more"
+          " than one device. See docs/guides/optimization/fsdp_prefetch.md."
+      ),
+  )
 
 
 class DcnParallelism(BaseModel):
@@ -5413,6 +5422,7 @@ class MaxTextConfig(
           "qwen3-vl-2b",
           "qwen3-vl-4b",
           "qwen3-vl-30b-a3b",
+          "qwen3.5-9b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
           "maxtext-omni-gemma3-qwen3",
@@ -5444,6 +5454,7 @@ class MaxTextConfig(
           "simple",
           "simple_mlp",
           "llama2",
+          "llama4",
           "deepseek",
           "mistral",
           "mixtral",

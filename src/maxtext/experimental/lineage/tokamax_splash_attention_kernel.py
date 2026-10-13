@@ -20,11 +20,13 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from tokamax._src.ops.experimental.tpu.splash_attention import base
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as mask_lib
 from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info as mask_info_lib
 
-# Re-export core types and constants from Tokamax.
+from maxtext.experimental.lineage import splash_attention_kernel as tokamax_splash
+
+# Re-export core types and constants. The kernel is the lineage branch of the
+# Tokamax splash kernel (splash_attention_kernel.py in this directory).
 SplashConfig = tokamax_splash.SplashConfig
 QKVLayout = tokamax_splash.QKVLayout
 SegmentIds = base.SegmentIds
@@ -33,6 +35,7 @@ SplashCustomReturnType = base.SplashCustomReturnType
 SplashResidualsType = base.SplashResidualsType
 MaskFunctionType = tokamax_splash.MaskFunctionType
 LOG2E = tokamax_splash.LOG2E
+dkv_q_blocks_are_contiguous = tokamax_splash.dkv_q_blocks_are_contiguous
 
 # Backwards compatibility alias for BlockSizes
 BlockSizes = SplashConfig
@@ -253,9 +256,11 @@ def _make_splash_attention(
   if config is None:
     config = SplashConfig.get_default()
 
-  if (config.qk_diag_skip or config.sv_diag_skip) and not isinstance(mask, mask_lib.CausalMask):
+  # The skip assumes kv > q is always masked and kv <= q never is, which only
+  # holds for a pure CausalMask with offset 0.
+  if (config.qk_diag_skip or config.sv_diag_skip) and not (isinstance(mask, mask_lib.CausalMask) and mask.offset == 0):
     param_name = "sv_diag_skip" if config.sv_diag_skip else "qk_diag_skip"
-    raise ValueError(f"{param_name}=True requires a pure CausalMask; got " f"{type(mask).__name__}.")
+    raise ValueError(f"{param_name}=True requires a pure CausalMask with offset 0; got " f"{mask!r}.")
 
   process_fn = functools.partial(
       mask_info_lib.process_mask,
@@ -278,8 +283,16 @@ def _make_splash_attention(
         mask,
         (bq_dkv, bkv_dkv),
         is_dkv=True,
-        return_dynamic_grid=config.dq_reduction_steps == 3,
+        return_dynamic_grid=config.dq_reduction_steps in (1, 3),
     )
+    assert bq_dkv is not None
+    q_blocks_per_shard = mask.shape[0] // q_seq_shards // bq_dkv
+    if config.dq_reduction_steps == 1 and not (dkv_q_blocks_are_contiguous(dkv_mask_info, q_blocks_per_shard)):
+      raise ValueError(
+          "dq_reduction_steps=1 requires the dkv grid to visit every q block in"
+          " one run of consecutive steps, which this mask and block sizes do"
+          " not. Use dq_reduction_steps=3 or None."
+      )
     assert (mask_function_fwd is None) == (mask_function_dkv is None)
     dkv_mask_sparsity = float(np.mean(dkv_mask_info.block_mask != 0))
     dkv_mask_info = jax.tree.map(jnp.array, dkv_mask_info)

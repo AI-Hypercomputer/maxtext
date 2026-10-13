@@ -357,6 +357,10 @@ class GmmConfigs:
   has_glu_coeffs: bool = False
   glu_out_dtype: jnp.dtype | None = None
   has_glu_out_scale: bool = False
+  # The 3D lhs rows are gathered from HBM inside the kernel (one DMA per row)
+  # instead of being read from a pre-permuted lhs (see `gmm_v2`'s
+  # `lhs_gather_indices`).
+  lhs_gather: bool = False
 
   @property
   def num_quant_blocks_per_tile_k(self) -> int:
@@ -510,7 +514,10 @@ def generate_block_specs(
   index_map = IndexMaps(metadata_ref, cfgs, out_offset_ref)
   bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane)
 
-  if cfgs.lhs_is_3d:
+  if cfgs.lhs_gather:
+    # The kernel gathers the lhs rows itself (see `GatherRefs`).
+    lhs_value_spec = None
+  elif cfgs.lhs_is_3d:
     lhs_value_spec = pl.BlockSpec(
         (
             bounded_slice_gm,
@@ -596,6 +603,135 @@ def generate_block_specs(
   return (lhs_block_spec, rhs_block_spec), OutRef(out=out_block_spec, act=act_block_spec)
 
 
+# In-kernel lhs row gather (see `gmm_v2`'s `lhs_gather_indices`).
+
+# A gm tile's window of gather indices starts at an offset aligned to the HBM
+# tile of the int32 indices (128) so its DMA needs no retiling.
+_GATHER_IDX_ALIGN = 128
+# Row DMAs issued per loop iteration; their source rows are read first.
+_GATHER_ISSUE_UNROLL = 16
+
+
+def gather_idx_window(tile_m: int) -> int:
+  """Number of gather indices staged in SMEM per gm tile."""
+  # A tile's rows start anywhere in an aligned block, hence the extra block.
+  return align_to(tile_m, _GATHER_IDX_ALIGN) + _GATHER_IDX_ALIGN
+
+
+@dataclasses.dataclass(frozen=True)
+class GatherRefs:
+  """Refs of the in-kernel lhs row gather.
+
+  Lhs row m is row `indices[start + m]` of the gather source x. The rows of gm
+  tile i are DMAed from HBM, one DMA per row, into VMEM slot i % 2 while tile
+  i - 1 computes. A slot is k-major, `[num_k, tile_m, tile_d0, 128]`, so the
+  block of k step k is a contiguous `[tile_m, tile_d0, 128]` view laid out like
+  the pipelined lhs block, with tile row 0 at lhs row m_offset (see
+  `inner_kernel`). The rows of a slot outside the tile's [m_start, m_end) are
+  stale and masked out like the rows of other groups in a pipelined block.
+
+  The indices of tile i are staged in SMEM window i % 2; the window of tile i +
+  1 is fetched while tile i - 1 computes.
+  """
+
+  start_ref: jax.Array  # int32[1] SMEM: `start`.
+  idx_hbm_ref: jax.Array  # int32[num_indices] HBM, padded (see `gmm_v2`).
+  # x as [x_rows * num_k, 1, tile_d0, 128] HBM: k block j of x row r is entry
+  # r * num_k + j.
+  x_hbm_ref: jax.Array
+  buf_ref: jax.Array  # [2 * num_k, tile_m, tile_d0, 128] VMEM.
+  row_sems: jax.Array  # DMA semaphores [2], one per slot.
+  idx_smem_ref: jax.Array  # int32[2 * idx_window] SMEM.
+  idx_sems: jax.Array  # DMA semaphores [2], one per index window.
+  num_k: int
+  idx_window: int
+  max_win_start: int
+
+  def lhs_block(self, slot: jax.Array, k_id: jax.Array) -> Any:
+    """Returns the `[tile_m, tile_d0, 128]` lhs block of k step k_id."""
+    return self.buf_ref.at[slot * self.num_k + k_id]
+
+  def _window(self, metadata_ref: MetadataRef, gm_id: jax.Array | int) -> tuple[jax.Array, jax.Array]:
+    """Returns the window start of tile gm_id and its m_start's offset in it."""
+    row = self.start_ref[0] + metadata_ref.gm_id_to_m_offset[gm_id]
+    win_start = jnp.minimum(row // _GATHER_IDX_ALIGN * _GATHER_IDX_ALIGN, self.max_win_start)
+    return win_start, row - win_start
+
+  def idx_copy(
+      self,
+      metadata_ref: MetadataRef,
+      gm_id: jax.Array | int,
+      slot: jax.Array | int,
+  ):
+    """Returns the DMA of the gather indices of tile gm_id into window slot."""
+    win_start, _ = self._window(metadata_ref, gm_id)
+    return pltpu.make_async_copy(
+        self.idx_hbm_ref.at[pl.ds(pl.multiple_of(win_start, _GATHER_IDX_ALIGN), self.idx_window)],
+        self.idx_smem_ref.at[pl.ds(slot * self.idx_window, self.idx_window)],
+        self.idx_sems.at[slot],
+    )
+
+  def start_rows(
+      self,
+      metadata_ref: MetadataRef,
+      gm_id: jax.Array | int,
+      slot: jax.Array | int,
+      size_lhs_sublane: int,
+  ):
+    """Starts the row DMAs of tile gm_id into slot.
+
+    Requires the gather indices of the tile in SMEM window `slot`.
+
+    Args:
+      metadata_ref: Tile metadata.
+      gm_id: Tile to gather.
+      slot: Row slot and index window of the tile.
+      size_lhs_sublane: Sublane block size of the lhs rows.
+    """
+    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+    num_rows = metadata_ref.gm_id_to_m_offset[gm_id + 1] - m_start
+    _, win_off = self._window(metadata_ref, gm_id)
+    idx_base = slot * self.idx_window + win_off
+    # Lhs row m_start is tile row m_start - m_offset.
+    dst_base = m_start % size_lhs_sublane
+    sem = self.row_sems.at[slot]
+
+    def _copy(src_row, dst_row):
+      pltpu.make_async_copy(
+          self.x_hbm_ref.at[pl.ds(src_row * self.num_k, self.num_k)],
+          self.buf_ref.at[pl.ds(slot * self.num_k, self.num_k), pl.ds(dst_row, 1)],
+          sem,
+      ).start()
+
+    unroll = _GATHER_ISSUE_UNROLL
+    num_full = num_rows // unroll
+
+    @pl.loop(0, num_full)
+    def _(i):
+      base = i * unroll
+      src_rows = [self.idx_smem_ref[idx_base + base + u] for u in range(unroll)]
+      for u in range(unroll):
+        _copy(src_rows[u], dst_base + base + u)
+
+    @pl.loop(num_full * unroll, num_rows)
+    def _(i):
+      _copy(self.idx_smem_ref[idx_base + i], dst_base + i)
+
+  def wait_rows(self, num_rows: jax.Array, slot: jax.Array | int):
+    """Waits for the num_rows row DMAs into slot."""
+    sem = self.row_sems.at[slot]
+    tile_m = self.buf_ref.shape[1]
+    # A wait only needs the byte count; split the dynamic row count into
+    # static power-of-two waits, one per set bit.
+    for b in reversed(range(tile_m.bit_length())):
+      size = 1 << b
+
+      @pl.when((num_rows & size) != 0)
+      def _(size=size):
+        rows = self.buf_ref.at[pl.ds(slot * self.num_k, self.num_k), pl.ds(0, size)]
+        pltpu.make_async_copy(rows, rows, sem).wait()
+
+
 # Define kernels.
 
 
@@ -610,6 +746,7 @@ def inner_kernel(
     partial_out_ref: jax.Array,  # [size_lhs_sublane, tile_n]
     acc_ref: jax.Array,  # [tile_m, tile_n]
     metadata_ref: MetadataRef,
+    gather_refs: GatherRefs | None = None,
     *,
     cfgs: GmmConfigs,
     out_scale_ref: jax.Array | None = None,  # f32[1] in SMEM
@@ -633,6 +770,8 @@ def inner_kernel(
       Will be initialized to zero if this is first tile for grid[n_id, :, :].
     acc_ref: Reference to the accumulator.
     metadata_ref: Reference to the metadata.
+    gather_refs: With `cfgs.lhs_gather`, the in-kernel lhs row gather, which
+      replaces `tiled_lhs_ref.value`.
     cfgs: GmmConfigs.
     out_scale_ref: Optional per-tensor scale the accumulator is multiplied by on
       the last k step.
@@ -650,6 +789,32 @@ def inner_kernel(
   m_start_local = m_start - m_offset
   m_end_local = m_end - m_offset
 
+  gathered_lhs_ref = None
+  if gather_refs is not None:
+    # The prologue in `kernel_main` started the rows of tile 0 and the indices
+    # of tile 1. num_n == 1, so the gm tiles run in order.
+    k_id = pl.program_id(2)
+    slot = gm_id % 2
+
+    @pl.when(k_id == 0)
+    @jax.named_scope("lhs_gather")
+    def _gather():
+      gather_refs.wait_rows(m_end - m_start, slot)
+      num_gm = pl.num_programs(1)
+      next_slot = 1 - slot
+
+      @pl.when(gm_id + 1 < num_gm)
+      def _():
+        gather_refs.idx_copy(metadata_ref, gm_id + 1, next_slot).wait()
+        gather_refs.start_rows(metadata_ref, gm_id + 1, next_slot, cfgs.dims.size_lhs_sublane)
+
+      @pl.when(gm_id + 2 < num_gm)
+      def _():
+        # Window `slot` is free: tile gm_id's rows were started from it.
+        gather_refs.idx_copy(metadata_ref, gm_id + 2, slot).start()
+
+    gathered_lhs_ref = gather_refs.lhs_block(slot, k_id)
+
   def _matmul(is_first_k_step: bool, is_last_k_step: bool, bucket_m: int):
     tpu_info = pltpu.get_tpu_info()
     mxu_size = tpu_info.mxu_column_size
@@ -658,7 +823,11 @@ def inner_kernel(
     if cfgs.lhs_is_3d:
       # Block is [tile_m // sublane, sublane, tile_d0, 128]; relayout the first
       # bucket_m rows into [bucket_m, tile_k] with tokens on sublanes.
-      tiled_lhs = relayout.load_3d_as_2d(tiled_lhs_ref.value, bucket_m, cfgs.lhs_tile_d0)
+      tiled_lhs = relayout.load_3d_as_2d(
+          tiled_lhs_ref.value if gathered_lhs_ref is None else gathered_lhs_ref,
+          bucket_m,
+          cfgs.lhs_tile_d0,
+      )
     else:
       tiled_lhs = tiled_lhs_ref.get_value().reshape(-1, cfgs.tiles.tile_k)[:bucket_m]
     tiled_rhs = tiled_rhs_ref.get_weight()
@@ -1165,6 +1334,7 @@ def kernel_main(
     *,
     cfgs: GmmConfigs,
     out_offset_ref: jax.Array | None = None,  # int32[1]
+    gather_refs: GatherRefs | None = None,
 ):
   """Entry point for GMM kernel.
 
@@ -1196,6 +1366,8 @@ def kernel_main(
     cfgs: GmmConfigs.
     out_offset_ref: Optional sublane-aligned row of `out_ref` that lhs row 0 is
       written to.
+    gather_refs: With `cfgs.lhs_gather`, the in-kernel lhs row gather; then
+      `lhs_ref.value` is None.
   """
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.out_size_n, cfgs.tiles.tile_n)
@@ -1211,6 +1383,20 @@ def kernel_main(
       metadata_ref,
       cfgs=cfgs,
   )
+
+  if gather_refs is not None:
+
+    @pl.when(num_gm > 0)
+    @jax.named_scope("lhs_gather_prologue")
+    def _():
+      idx_copy = gather_refs.idx_copy(metadata_ref, 0, 0)
+      idx_copy.start()
+      idx_copy.wait()
+      gather_refs.start_rows(metadata_ref, 0, 0, cfgs.dims.size_lhs_sublane)
+
+      @pl.when(num_gm > 1)
+      def _():
+        gather_refs.idx_copy(metadata_ref, 1, 1).start()
 
   if cfgs.zero_init:
     zero_size = zero_out_start(
@@ -1258,7 +1444,10 @@ def kernel_main(
   # Bounded slice requires second last dim to be aligned to the sublane size.
   # rhs_ref uses static tiling thus reshape is not needed. The lhs quant scale
   # (when present) is small and statically tiled, so it is passed through as-is.
-  if cfgs.lhs_is_3d:
+  if lhs_ref.value is None:
+    # Gathered in-kernel (see `GatherRefs`).
+    lhs_value_in = None
+  elif cfgs.lhs_is_3d:
     # [size_m, D0, 128] -> [size_m // sublane, sublane, D0, 128].
     lhs_value_in = lhs_ref.value.reshape(-1, cfgs.dims.size_lhs_sublane, *lhs_ref.value.shape[-2:])
   else:
@@ -1273,7 +1462,9 @@ def kernel_main(
   if out_ref.act is not None:
     act_val_in = out_ref.act.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.act.shape[-1])
   out_in = OutRef(out=out_val_in, act=act_val_in)
-  scratches = [partial_out_ref, acc_ref, metadata_ref]
+  scratches: list[Any] = [partial_out_ref, acc_ref, metadata_ref]
+  if gather_refs is not None:
+    scratches.append(gather_refs)
   pipeline_fn(lhs_in, rhs_ref, out_in, scratches=scratches)
 
   if cfgs.zero_init:
@@ -1308,6 +1499,53 @@ def _kernel_main_into_out(
       *scratch_refs,
       cfgs=cfgs,
       out_offset_ref=out_offset_ref,
+  )
+
+
+def _kernel_main_gather_into_out(
+    lhs_group_sizes_ref: jax.Array,
+    group_offset_ref: jax.Array,
+    out_offset_ref: jax.Array,
+    gather_start_ref: jax.Array,  # int32[1]
+    lhs_ref: LhsRef,  # value: gather source [rows * num_k, 1, tile_d0, 128]
+    rhs_ref: WeightsRef,
+    out_scale_ref: jax.Array | None,
+    glu_out_scale_ref: jax.Array | None,
+    gather_indices_ref: jax.Array,  # int32[num_indices]
+    aliased_out_ref: jax.Array,
+    out_ref: OutRef,
+    *scratch_refs,
+    cfgs: GmmConfigs,
+    idx_window: int,
+    max_win_start: int,
+):
+  """`_kernel_main_into_out` gathering the lhs rows in-kernel."""
+  del aliased_out_ref  # Same buffer as `out_ref.out`.
+  *scratch_refs, buf_ref, row_sems, idx_smem_ref, idx_sems = scratch_refs
+  gather_refs = GatherRefs(
+      start_ref=gather_start_ref,
+      idx_hbm_ref=gather_indices_ref,
+      x_hbm_ref=lhs_ref.value,
+      buf_ref=buf_ref,
+      row_sems=row_sems,
+      idx_smem_ref=idx_smem_ref,
+      idx_sems=idx_sems,
+      num_k=cfgs.dims.size_k // cfgs.tiles.tile_k,
+      idx_window=idx_window,
+      max_win_start=max_win_start,
+  )
+  kernel_main(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      dataclasses.replace(lhs_ref, value=None),
+      rhs_ref,
+      out_scale_ref,
+      glu_out_scale_ref,
+      out_ref,
+      *scratch_refs,
+      cfgs=cfgs,
+      out_offset_ref=out_offset_ref,
+      gather_refs=gather_refs,
   )
 
 
@@ -1662,6 +1900,8 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
   )
   if cfgs.has_glu_coeffs:
     name += "-glu"
+  if cfgs.lhs_gather:
+    name += "-gather"
   return name
 
 
@@ -1902,6 +2142,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "out_is_3d",
         "flat_rhs",
         "glu_out_dtype",
+        "lhs_gather_size_m",
     ],
     donate_argnames=["out"],
 )
@@ -1934,6 +2175,9 @@ def gmm_v2(
     glu_coeffs: jax.Array | None = None,  # [size_m, 1]
     glu_out_dtype: jnp.dtype | None = None,
     glu_out_scale: jax.Array | None = None,  # [1, 1]
+    lhs_gather_indices: jax.Array | None = None,  # int32[num_indices]
+    lhs_gather_start: jax.Array | int = 0,  # int32 scalar
+    lhs_gather_size_m: int | None = None,
 ) -> jax.Array | tuple[jax.Array, jax.Array]:
   """GMM kernel implemented with emit_pipeline.
 
@@ -2003,6 +2247,18 @@ def gmm_v2(
       (e.g. `jnp.float8_e4m3fn`). Defaults to `out`'s dtype.
     glu_out_scale: Optional `[1, 1]` f32 static quantization scale for `act`
       when `glu_out_dtype` is fp8.
+    lhs_gather_indices: Optional int32 `[num_indices]` row indices into `lhs`.
+      When given, `lhs` is the gather source x `[x_rows, size_k // 128, 128]`
+      and the kernel multiplies the gathered rows `x[lhs_gather_indices[
+      lhs_gather_start + m]]`, `m < lhs_gather_size_m`, DMAing them straight
+      from HBM (one DMA per row, double-buffered per m tile) instead of reading
+      a pre-gathered lhs. Only the rows of the groups are gathered, so the
+      indices past `lhs_gather_start + sum(group_sizes)` are never read and need
+      not be valid. Requires `out`, an unscaled (bf16 / fp8) 3D x consumed as
+      is, tile_k dividing size_k and a single n tile (tile_n >= the output
+      width, as `glu_coeffs` requires anyway).
+    lhs_gather_start: Offset into `lhs_gather_indices` of gathered row 0.
+    lhs_gather_size_m: Number of gathered rows (the logical size_m).
 
   Returns:
     Output of shape [size_m, size_n], or [size_m, size_n // 128, 128] if
@@ -2020,15 +2276,38 @@ def gmm_v2(
     # Zero-filling rows outside the computed range would wipe `out`.
     zero_initialize = False
 
+  gather_src = None
+  size_m = lhs.shape[0]
+  if lhs_gather_indices is not None:
+    if out is None or lhs.ndim != 3 or lhs_scale is not None:
+      raise ValueError(
+          "`lhs_gather_indices` requires `out` and a 3D lhs without"
+          f" `lhs_scale`; got {lhs.shape=}, {out is None=},"
+          f" {lhs_scale is None=}."
+      )
+    if lhs_gather_indices.ndim != 1:
+      raise ValueError(f"`lhs_gather_indices` must be 1D; got {lhs_gather_indices.shape=}.")
+    if lhs_gather_size_m is None or lhs_gather_size_m <= 0:
+      raise ValueError("`lhs_gather_indices` requires a positive `lhs_gather_size_m`; got" f" {lhs_gather_size_m}.")
+    gather_src = lhs
+    size_m = lhs_gather_size_m
+
   # The kernel reshapes lhs by its sublane block, so pad the rows up to it.
   # The extra rows sit past every group, so they add no work, and they are
   # sliced back off the output below.
-  size_m = lhs.shape[0]
   if glu_coeffs is not None and glu_coeffs.shape != (size_m, 1):
     raise ValueError(f"glu_coeffs must have shape ({size_m}, 1); got {glu_coeffs.shape}.")
   size_lhs_sublane = _get_lhs_sublane_size(lhs.dtype, size_m)
   padded_size_m = align_to(size_m, size_lhs_sublane)
-  if padded_size_m != size_m:
+  if gather_src is not None:
+    # Shape-only stand-in for the gathered [padded_size_m, D0, 128] lhs, for
+    # the configs; its padding rows are never gathered.
+    lhs = jax.ShapeDtypeStruct(  # pyrefly: ignore[bad-assignment]
+        (padded_size_m, *gather_src.shape[1:]), gather_src.dtype
+    )
+    if glu_coeffs is not None and padded_size_m != size_m:
+      glu_coeffs = jnp.pad(glu_coeffs, ((0, padded_size_m - size_m), (0, 0)))
+  elif padded_size_m != size_m:
     lhs = jnp.pad(lhs, ((0, padded_size_m - size_m),) + ((0, 0),) * (lhs.ndim - 1))
     if glu_coeffs is not None:
       glu_coeffs = jnp.pad(glu_coeffs, ((0, padded_size_m - size_m), (0, 0)))
@@ -2070,6 +2349,17 @@ def gmm_v2(
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
+  if gather_src is not None:
+    # The gather fills whole k-major slots per m tile and reuses them across
+    # the k steps, so n tiles (which revisit every m tile) are not supported.
+    if dims.size_k % tiles.tile_k != 0 or cfgs.lhs_cfgs.quant_dtype is not None or tiles.tile_n < cfgs.out_size_n:
+      raise ValueError(
+          "`lhs_gather_indices` requires tile_k to divide size_k, an lhs"
+          " consumed as is and a single n tile; got"
+          f" {tiles=}, {dims.size_k=}, {cfgs.out_size_n=},"
+          f" {cfgs.lhs_cfgs.quant_dtype=}."
+      )
+    cfgs = dataclasses.replace(cfgs, lhs_gather=True)
   if cfgs.lhs_cfgs.should_use_external_scale and not cfgs.rhs_cfgs.has_scale:
     assert lhs_scale is not None
     out_scale = lhs_scale if out_scale is None else lhs_scale * out_scale
@@ -2173,17 +2463,18 @@ def gmm_v2(
     out_slice = (slice(None, size_m), slice(None, cfgs.out_size_n))
   # Propagate the manual-axis type so the kernel works under
   # shard_map(check_vma=True) (the output inherits the lhs' manual axes).
+  lhs_manual_axis_type = jax.typeof(lhs if gather_src is None else gather_src).manual_axis_type
   out_init = jax.ShapeDtypeStruct(
       out_shape,
       cfgs.out_dtype,
-      manual_axis_type=jax.typeof(lhs).manual_axis_type,
+      manual_axis_type=lhs_manual_axis_type,
   )
   act_init = None
   if cfgs.has_glu_coeffs:
     act_init = jax.ShapeDtypeStruct(
         (dims.size_m, dims.size_n // 2),
         act_dtype,
-        manual_axis_type=jax.typeof(lhs).manual_axis_type,
+        manual_axis_type=lhs_manual_axis_type,
     )
   lhs_in = LhsRef(value=lhs, scale=lhs_scale, glu_coeffs=glu_coeffs)
   if cfgs.flat_rhs:
@@ -2202,9 +2493,64 @@ def gmm_v2(
     hbm = pl.BlockSpec(memory_space=pltpu.HBM)
     out_offset = jnp.asarray(out_offset, jnp.int32)[None]
     scalars = (group_sizes, group_offset, out_offset)
-    inputs = (lhs_in, rhs_weights, out_scale, glu_out_scale, out)
+    inputs = [lhs_in, rhs_weights, out_scale, glu_out_scale]
+    in_specs = [
+        LhsRef(
+            value=hbm,
+            scale=hbm if cfgs.lhs_cfgs.has_scale else None,
+            glu_coeffs=hbm if cfgs.has_glu_coeffs else None,
+        ),
+        WeightsRef(
+            weight=hbm,
+            scale=hbm if rhs_scale is not None else None,
+            bias=hbm if rhs_bias is not None else None,
+        ),
+        out_scale_spec,
+        glu_out_scale_spec,
+    ]
+    kernel = functools.partial(_kernel_main_into_out, cfgs=cfgs)
+    if gather_src is not None:
+      assert lhs_gather_indices is not None
+      num_k = dims.size_k // tiles.tile_k
+      idx_window = gather_idx_window(tiles.tile_m)
+      indices = lhs_gather_indices.astype(jnp.int32)
+      # Pad so every index window is in bounds and starts HBM-tile aligned.
+      num_indices = indices.shape[0]
+      indices = jnp.pad(
+          indices,
+          (0, max(-num_indices % _GATHER_IDX_ALIGN, idx_window - num_indices)),
+      )
+      scalars += (jnp.asarray(lhs_gather_start, jnp.int32).reshape(1),)
+      # [x_rows, D0, 128] -> [x_rows * num_k, 1, tile_d0, 128], so a row's k
+      # blocks are one DMA. tile_d0 is a multiple of the HBM sublane tiling, so
+      # this is a bitcast; keep it the last op on x before the kernel call.
+      x_view = gather_src.reshape(-1, 1, cfgs.lhs_tile_d0, num_lanes)
+      inputs[0] = dataclasses.replace(lhs_in, value=x_view)
+      inputs.append(indices)
+      in_specs.append(hbm)
+      kernel = functools.partial(
+          _kernel_main_gather_into_out,
+          cfgs=cfgs,
+          idx_window=idx_window,
+          max_win_start=indices.shape[0] - idx_window,
+      )
+      scratch_shapes = scratch_shapes + [
+          # buf_ref: two k-major slots of gathered rows.
+          pltpu.VMEM(
+              (2 * num_k, tiles.tile_m, cfgs.lhs_tile_d0, num_lanes),
+              gather_src.dtype,
+          ),
+          # row_sems
+          pltpu.SemaphoreType.DMA((2,)),
+          # idx_smem_ref
+          pltpu.SMEM((2 * idx_window,), jnp.int32),
+          # idx_sems
+          pltpu.SemaphoreType.DMA((2,)),
+      ]
+    inputs.append(out)
+    in_specs.append(hbm)
     res = pl.pallas_call(
-        functools.partial(_kernel_main_into_out, cfgs=cfgs),
+        kernel,
         out_shape=OutRef(
             out=jax.ShapeDtypeStruct(
                 out.shape,
@@ -2215,21 +2561,7 @@ def gmm_v2(
         ),
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=len(scalars),
-            in_specs=[
-                LhsRef(
-                    value=hbm,
-                    scale=hbm if cfgs.lhs_cfgs.has_scale else None,
-                    glu_coeffs=hbm if cfgs.has_glu_coeffs else None,
-                ),
-                WeightsRef(
-                    weight=hbm,
-                    scale=hbm if rhs_scale is not None else None,
-                    bias=hbm if rhs_bias is not None else None,
-                ),
-                out_scale_spec,
-                glu_out_scale_spec,
-                hbm,
-            ],
+            in_specs=in_specs,
             out_specs=OutRef(out=hbm, act=hbm if cfgs.has_glu_coeffs else None),
             # pyrefly: ignore[bad-argument-type]
             scratch_shapes=scratch_shapes,

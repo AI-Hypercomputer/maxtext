@@ -82,17 +82,6 @@ class LineageExpertPermutationVar(nnx.BatchStat):
 ExpertPermutationVar = LineageExpertPermutationVar
 
 
-def build_axis_mapping(
-    cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh | None = None
-) -> Mapping[str, str | tuple[str, ...]]:
-  """Builds axis mapping from Lineage logical axes to MaxText physical mesh axes."""
-  from maxtext.experimental.lineage import dsv3_sharding  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-
-  dcn_axis = dsv3_sharding.DCN_AXIS
-  has_dcn = (dcn_axis in mesh.axis_names) if mesh is not None else (dcn_axis in (getattr(cfg, "mesh_axes", ()) or ()))
-  return dsv3_sharding.build_axis_mapping(dict(cfg.logical_axis_rules), has_dcn=has_dcn)
-
-
 def create_physical_device_mesh(ici_parallelism: Sequence[int], devices: Sequence[Any]) -> np.ndarray:
   """See `dsv3_sharding.create_physical_device_mesh`."""
   from maxtext.experimental.lineage import dsv3_sharding  # pylint: disable=g-import-not-at-top,import-outside-toplevel
@@ -317,16 +306,7 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       head_dot_in_fp32=bool(getattr(cfg, "logits_dot_in_fp32", False)),
       cast_logits_to_fp32=bool(getattr(cfg, "cast_logits_to_fp32", True)),
   )
-  has_dcn = dsv3_sharding.DCN_AXIS in mesh.axis_names
-  axis_mapping = dsv3_sharding.build_axis_mapping(dict(cfg.logical_axis_rules), has_dcn=has_dcn)
-  sharding = dsv3_sharding.sharding_config(
-      mesh,
-      axis_mapping,
-      emb_dim=model.emb_dim,
-      qk_head_dim=model.qk_head_dim,
-      rope_head_dim=model.rope_head_dim,
-      v_head_dim=model.v_head_dim,
-  )
+  sharding = dsv3_sharding.sharding_config(mesh)
   expert_permutation = getattr(cfg, "lineage_expert_permutation", None)
   kernels = dsv3_config.DSv3KernelConfig(
       max_target_length=int(cfg.max_target_length),

@@ -253,6 +253,94 @@ def dsv3_routed_experts_impl(
 
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
+def dsv3_routed_experts_gather_impl(
+    x_ag: jt.Num[jax.Array, "NBT D0 D1"],
+    token_indices: jt.Int[jax.Array, "num_indices"],
+    start: jt.Int[jax.Array, ""] | int,
+    w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    group_sizes: jt.Num[jax.Array, "E"],
+    sorted_coeffs: jt.Num[jax.Array, "BT 1"] | jt.Num[jax.Array, "BT"],
+    bank: jt.Num[jax.Array, "bank_rows D_gate"],
+    bank_offset: jt.Int[jax.Array, ""],
+    reduce_metadata: ops.RaggedGatherReduceMetadata,
+    y_ag_acc: jt.Num[jax.Array, "NBT D0 D1"] | None = None,
+    *,
+    gmm_fn: GmmFn,
+    quant_rule: quantization.GmmQuantRule,
+) -> tuple[
+    jt.Num[jax.Array, "NBT D0 D1"],
+    jt.Num[jax.Array, "bank_rows D_gate"],
+]:
+  """fp8 routed experts of one chunk that gather and combine their tokens.
+
+  Same result as `dsv3_routed_experts_impl(x, ...)` with `x[m] =
+  x_ag[token_indices[start + m]]` and a `gmm_fn` with `supports_fused_glu`,
+  followed by `dsv3_router.unpermute_chunk(..., out=y_ag_acc)`, but
+  `gmm_fn.gather_gate` DMAs the tokens straight from x_ag and
+  `gmm_fn.linear_combine` scatters the linear GMM's rows straight into the
+  combined tokens, so neither x nor the expert outputs are written to HBM.
+
+  Args:
+    x_ag: Tokens to gather from, quantized with the act scale of quant_rule.
+    token_indices: Row of x_ag of each sorted slot.
+    start: Sorted slot of token 0 (the chunk start).
+    w: Routed expert weights, quantized with the weight scale of quant_rule.
+    group_sizes: Number of tokens assigned to each expert on the local device.
+      Requires start + sum(group_sizes) <= num_indices.
+    sorted_coeffs: Routing coefficients of the tokens; BT is the token capacity.
+    bank: Cross-layer gating activation bank on this device.
+    bank_offset: Bank offset at which gate_out is pushed.
+    reduce_metadata: Ragged gather reduce routing of the chunk (see
+      `dsv3_router.chunk_reduce_metadata`).
+    y_ag_acc: Optional combined tokens of earlier chunks to accumulate into,
+      donated. If None, the result starts at zero.
+    gmm_fn: Function to perform Grouped Matrix Multiplication; must implement
+      `gather_gate` and `linear_combine` (e.g. `expert_mlp.ExpertGmm3d`).
+    quant_rule: fp8 quantization (see `dsv3_routed_experts_impl`).
+
+  Returns:
+    Tuple of (top-k reduced expert outputs, updated bank).
+  """
+  assert w.gate is not None
+  assert w.linear is not None
+  if sorted_coeffs.ndim == 1:
+    sorted_coeffs = sorted_coeffs[:, None]
+  sa, sw = quant_rule.act_scale, quant_rule.weight_scale
+  capacity = sorted_coeffs.shape[0]
+  num_tokens = jnp.sum(group_sizes, dtype=jnp.int32)
+  row, _ = bank_chunk_row(bank, capacity, bank_offset, num_tokens)
+  with jax.named_scope("gate"):
+    bank, act = getattr(gmm_fn, "gather_gate")(
+        x_ag,
+        token_indices,
+        start,
+        w.gate,
+        group_sizes,
+        bank,
+        row,
+        out_scale=_scale(sa * sw),
+        size_m=capacity,
+        glu_coeffs=sorted_coeffs,
+        glu_out_dtype=quant_rule.act_qtype,
+        glu_out_scale=_scale(sa),
+    )
+  with jax.named_scope("linear_combine"):
+    y_ag = getattr(gmm_fn, "linear_combine")(
+        act,
+        w.linear,
+        group_sizes,
+        token_indices,
+        start,
+        reduce_metadata.tokens,
+        out_scale=_scale(sa * sw),
+        num_out_tokens=x_ag.shape[0],
+        out=y_ag_acc,
+    )
+  return y_ag, bank
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
 def dsv3_routed_experts(
     x: jt.Num[jax.Array, "BT D0 D1"],
     w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
@@ -282,6 +370,97 @@ def dsv3_routed_experts(
       mesh=mesh,
       out_specs=(jax.typeof(x).sharding.spec, bank_pspec, offset_pspec),
   )(x, w, group_sizes, sorted_coeffs, bank, bank_offset)
+
+
+def _retrieve_or_remat_gate_out(
+    routed: jt.Num[jax.Array, "BT D0 D1"],
+    w_gate: jt.Num[jax.Array, "E D F"],
+    group_sizes: jt.Num[jax.Array, "E"],
+    bank: jt.Num[jax.Array, "bank_rows D_gate"],
+    row: jt.Int[jax.Array, ""],
+    is_overflow: jt.Bool[jax.Array, ""],
+    *,
+    gmm_fn: GmmFn,
+    out_scale: jt.Float[jax.Array, "1 1"] | None,
+) -> jt.Num[jax.Array, "bank_rows D_gate"]:
+  """Rematerializes a chunk's gate_out at bank `row` if it overflowed."""
+
+  @jax.named_call
+  def _remat_gate_out(bank):
+    with jax.named_scope("gate"):
+      return gmm_fn.gate(routed, w_gate, group_sizes, bank, row, out_scale=out_scale)
+
+  with jax.named_scope("retrieve_or_remat_gate_out"):
+    return jax.lax.cond(is_overflow, _remat_gate_out, lambda b: b, bank)
+
+
+def _gate_bwd(
+    routed: jt.Num[jax.Array, "BT D0 D1"],
+    w_gate: jt.Num[jax.Array, "E D F"],
+    group_sizes: jt.Num[jax.Array, "E"],
+    grad_gate_out: jt.Num[jax.Array, "BT F"],
+    grad_gate_amax: jt.Float[jax.Array, "1 1"] | None,
+    grad_w_acc: jt.Num[jax.Array, "E D F"] | None,
+    *,
+    gmm_fn: GmmFn,
+    quant_rule: quantization.GmmQuantRule | None,
+    w_gate_q: jt.Num[jax.Array, "E D F"] | None,
+    num_tokens: jt.Int[jax.Array, ""],
+    dgate_tile_exps: jt.Int[jax.Array, "max_gd"] | None = None,
+) -> tuple[jt.Num[jax.Array, "BT D0 D1"], jt.Num[jax.Array, "E D F"]]:
+  """Gating GMM backward; with quant_rule, grad_gate_out is quantized first.
+
+  The quantization uses per-tile power-of-two scales (`2^dgate_tile_exps[gm]`)
+  if `dgate_tile_exps` is given, else one absmax scale for the chunk: from
+  `grad_gate_amax` if given, else computed over its first `num_tokens` rows.
+
+  Args:
+    routed: Input tokens, sorted by expert.
+    w_gate: Gate weights, giving the type of the weight gradient.
+    group_sizes: Number of tokens assigned to each local expert.
+    grad_gate_out: Cotangent of the gating GMM output (already quantized to
+      `quant_rule.bwd_qtype` when `dgate_tile_exps` is given).
+    grad_gate_amax: Optional `[1, 1]` f32 absmax of grad_gate_out's valid rows.
+    grad_w_acc: Optional gate weight gradient to accumulate into, in place.
+    gmm_fn: Function to perform Grouped Matrix Multiplication.
+    quant_rule: Optional fp8 quantization (see `dsv3_routed_experts_bwd_impl`).
+    w_gate_q: fp8 gate weights, required with quant_rule.
+    num_tokens: Number of valid rows.
+    dgate_tile_exps: Optional per-dgrad-tile power-of-two exponent `exp_i` of
+      already-quantized `grad_gate_out` (`scale_i = 2^exp_i`).
+
+  Returns:
+    Tuple of (grad_routed_in, grad_w_gate including grad_w_acc).
+  """
+  with jax.named_scope("gate"):
+    dx_scale = dw_scale = dw_dtype = None
+    extra_kwargs = {}
+    if quant_rule is not None:
+      if dgate_tile_exps is not None:
+        dx_scale = _scale(quant_rule.weight_scale)
+        dw_scale = _scale(quant_rule.act_scale)
+        extra_kwargs["dgate_tile_exps"] = dgate_tile_exps
+      else:
+        if grad_gate_amax is not None:
+          s_dg = quantization.absmax_to_scale(grad_gate_amax, quant_rule.bwd_qtype)
+          grad_gate_out = quantization.quantize_with_scale(grad_gate_out, s_dg, quant_rule.bwd_qtype, num_tokens)
+        else:
+          grad_gate_out, s_dg = quantization.absmax_quantize(grad_gate_out, quant_rule.bwd_qtype, num_tokens)
+        dx_scale = s_dg * quant_rule.weight_scale
+        dw_scale = s_dg * quant_rule.act_scale
+      dw_dtype = quant_rule.grad_dtype
+    return gmm_fn.gate_bwd(
+        routed,
+        w_gate,
+        group_sizes,
+        grad_gate_out,
+        grad_w_acc,
+        w_q=w_gate_q,
+        dx_scale=dx_scale,
+        dw_scale=dw_scale,
+        dw_dtype=dw_dtype,
+        **extra_kwargs,
+    )
 
 
 @jax.named_call
@@ -357,20 +536,16 @@ def dsv3_routed_experts_bwd_impl(
     act_qtype = quant_rule.act_qtype
     dw_dtype = quant_rule.grad_dtype
 
-  @jax.named_call
-  def _remat_gate_out(bank):
-    with jax.named_scope("gate"):
-      return gmm_fn.gate(
-          routed,
-          w_routed.gate if w_gate_q is None else w_gate_q,
-          group_sizes,
-          bank,
-          row,
-          out_scale=gate_scale,
-      )
-
-  with jax.named_scope("retrieve_or_remat_gate_out"):
-    bank = jax.lax.cond(is_overflow, _remat_gate_out, lambda b: b, bank)
+  bank = _retrieve_or_remat_gate_out(
+      routed,
+      w_routed.gate if w_gate_q is None else w_gate_q,
+      group_sizes,
+      bank,
+      row,
+      is_overflow,
+      gmm_fn=gmm_fn,
+      out_scale=gate_scale,
+  )
 
   fuse_glu = quant_rule is not None and getattr(gmm_fn, "supports_fused_glu", False)
   dyn_grad_scale = getattr(gmm_fn, "supports_dynamic_grad_scale", False)
@@ -455,29 +630,143 @@ def dsv3_routed_experts_bwd_impl(
           block_size_hidden=1024,
           g_mask_max=act_max if fuse_glu else None,
       )
-  with jax.named_scope("gate"):
-    dx_scale = dw_gate_scale = None
-    if quant_rule is not None:
-      if grad_gate_amax is not None:
-        s_dg = quantization.absmax_to_scale(grad_gate_amax, quant_rule.bwd_qtype)
-        grad_gate_out = quantization.quantize_with_scale(grad_gate_out, s_dg, quant_rule.bwd_qtype, num_tokens)
-      else:
-        grad_gate_out, s_dg = quantization.absmax_quantize(grad_gate_out, quant_rule.bwd_qtype, num_tokens)
-      dx_scale = s_dg * quant_rule.weight_scale
-      dw_gate_scale = s_dg * quant_rule.act_scale
-    grad_routed_in, grad_w_gate = gmm_fn.gate_bwd(
-        routed,
-        w_routed.gate,
-        group_sizes,
-        grad_gate_out,
-        grad_w_acc.gate,
-        w_q=w_gate_q,
-        dx_scale=dx_scale,
-        dw_scale=dw_gate_scale,
-        dw_dtype=dw_dtype,
-    )
+  grad_routed_in, grad_w_gate = _gate_bwd(
+      routed,
+      w_routed.gate,
+      group_sizes,
+      grad_gate_out,
+      grad_gate_amax,
+      grad_w_acc.gate,
+      gmm_fn=gmm_fn,
+      quant_rule=quant_rule,
+      w_gate_q=w_gate_q,
+      num_tokens=num_tokens,
+  )
   grad_w_routed = dsv3_types.DSv3MoERoutedExpertWeightsPytree(gate=grad_w_gate, linear=grad_w_linear)
   grad_sorted_coeffs = jnp.reshape(grad_sorted_coeffs, orig_coeffs_shape)
+  return grad_routed_in, grad_w_routed, grad_sorted_coeffs, bank
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def dsv3_routed_experts_gather_bwd_impl(
+    grad_y_ag: jt.Num[jax.Array, "NBT D0 D1"],
+    token_indices: jt.Int[jax.Array, "num_indices"],
+    start: jt.Int[jax.Array, ""] | int,
+    routed: jt.Num[jax.Array, "BT D0 D1"],
+    w_routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    group_sizes: jt.Num[jax.Array, "E"],
+    sorted_coeffs: jt.Num[jax.Array, "BT 1"] | jt.Num[jax.Array, "BT"],
+    bank: jt.Num[jax.Array, "bank_rows D_gate"],
+    bank_offset: jt.Int[jax.Array, ""],
+    grad_w_acc: dsv3_types.DSv3MoERoutedExpertWeightsPytree | None = None,
+    *,
+    gmm_fn: GmmFn,
+    quant_rule: quantization.GmmQuantRule,
+    w_routed_q: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    grad_y_scale: jt.Float[jax.Array, "1 1"] | None = None,
+) -> tuple[
+    jt.Num[jax.Array, "BT D0 D1"],
+    dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    jt.Num[jax.Array, "BT 1"] | jt.Num[jax.Array, "BT"],
+    jt.Num[jax.Array, "bank_rows D_gate"],
+]:
+  """fp8 `dsv3_routed_experts_bwd_impl` gathering grad_routed in-kernel.
+
+  Same contract as `dsv3_routed_experts_bwd_impl(grad_routed, routed, ...)`
+  with `grad_routed[m] = grad_y_ag[token_indices[start + m]]`, but
+  `gmm_fn.linear_bwd_gather` DMAs these rows straight from grad_y_ag and fuses
+  the SiLU (with its activation rematerialization from the bank) into the
+  linear backward, so neither grad_routed, the activations nor their gradient
+  are written to HBM in bf16. When `grad_y_scale` is given, `grad_y_ag` is
+  already quantized to `quant_rule.bwd_qtype` upstream of the chunk loop; else
+  the output gradient rows are quantized to `quant_rule.bwd_qtype` with one
+  power-of-two absmax scale per kernel row tile (see `linear_bwd_split`).
+
+  Args:
+    grad_y_ag: Cotangent of the top-k reduced expert outputs (bf16, or
+      `quant_rule.bwd_qtype` when `grad_y_scale` is given).
+    token_indices: Row of grad_y_ag of each sorted slot.
+    start: Sorted slot of token 0 (the chunk start). Requires start +
+      sum(group_sizes) <= num_indices.
+    routed: Input tokens, sorted by expert, quantized with the act scale.
+    w_routed: Routed expert weights, giving the types of the gradients.
+    group_sizes: Number of tokens assigned to each expert on the local device.
+    sorted_coeffs: Routing coefficients sorted like routed.
+    bank: Cross-layer gating activation bank on this device.
+    bank_offset: Bank offset at which gate_out was pushed.
+    grad_w_acc: Optional routed expert weight gradients to accumulate into, in
+      place.
+    gmm_fn: Function to perform Grouped Matrix Multiplication; must implement
+      `linear_bwd_gather` (e.g. `expert_mlp.ExpertGmm3d`).
+    quant_rule: fp8 quantization (see `dsv3_routed_experts_bwd_impl`).
+    w_routed_q: fp8 routed expert weights.
+    grad_y_scale: Optional `[1, 1]` f32 scale of pre-quantized `grad_y_ag`.
+
+  Returns:
+    Tuple of (grad_routed_in, grad_w_routed, grad_sorted_coeffs, bank), with
+    grad_w_routed including grad_w_acc.
+  """
+  assert w_routed.gate is not None and w_routed.linear is not None
+  assert w_routed_q.gate is not None and w_routed_q.linear is not None
+  orig_coeffs_shape = sorted_coeffs.shape
+  if sorted_coeffs.ndim == 1:
+    sorted_coeffs = sorted_coeffs[:, None]
+  if grad_w_acc is None:
+    grad_w_acc = dsv3_types.DSv3MoERoutedExpertWeightsPytree()
+  sa, sw = quant_rule.act_scale, quant_rule.weight_scale
+  num_tokens = jnp.sum(group_sizes, dtype=jnp.int32)
+  row, is_overflow = bank_chunk_row(bank, routed.shape[0], bank_offset, num_tokens)
+  bank = _retrieve_or_remat_gate_out(
+      routed,
+      w_routed_q.gate,
+      group_sizes,
+      bank,
+      row,
+      is_overflow,
+      gmm_fn=gmm_fn,
+      out_scale=_scale(sa * sw),
+  )
+  with jax.named_scope("linear_silu"):
+    (
+        grad_gate_out,
+        grad_gate_amax,
+        grad_gate_tile_exps,
+        grad_sorted_coeffs,
+        grad_w_linear,
+    ) = getattr(gmm_fn, "linear_bwd_gather")(
+        grad_y_ag,
+        token_indices,
+        start,
+        w_routed.linear,
+        group_sizes,
+        bank,
+        row,
+        sorted_coeffs,
+        grad_w_acc.linear,
+        w_q=w_routed_q.linear,
+        x_scale=sa,
+        x_qtype=quant_rule.act_qtype,
+        dout_qtype=quant_rule.bwd_qtype,
+        dout_scale=grad_y_scale,
+        w_scale=sw,
+        dw_dtype=quant_rule.grad_dtype,
+    )
+  grad_routed_in, grad_w_gate = _gate_bwd(
+      routed,
+      w_routed.gate,
+      group_sizes,
+      grad_gate_out,
+      grad_gate_amax,
+      grad_w_acc.gate,
+      gmm_fn=gmm_fn,
+      quant_rule=quant_rule,
+      w_gate_q=w_routed_q.gate,
+      num_tokens=num_tokens,
+      dgate_tile_exps=grad_gate_tile_exps,
+  )
+  grad_w_routed = dsv3_types.DSv3MoERoutedExpertWeightsPytree(gate=grad_w_gate, linear=grad_w_linear)
+  grad_sorted_coeffs = jnp.reshape(grad_sorted_coeffs.astype(sorted_coeffs.dtype), orig_coeffs_shape)
   return grad_routed_in, grad_w_routed, grad_sorted_coeffs, bank
 
 
