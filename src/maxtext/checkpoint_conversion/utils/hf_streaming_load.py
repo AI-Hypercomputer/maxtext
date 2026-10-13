@@ -172,7 +172,7 @@ def resolve_target_name(mt_key: str, flat_target: dict) -> str | None:
   return None
 
 
-def _stacked_axes(mt_key: str, shape: tuple, depth: int, config, name: str | None = None) -> tuple[int, ...]:
+def _stacked_axes(mt_key: str, shape: tuple, depth: int, config) -> tuple[int, ...]:
   """Where each nesting level of the HF key list lands in the MaxText weight.
 
   Matches `tensor_handling`: a flat list stacks along `param_scan_axis` for
@@ -181,17 +181,15 @@ def _stacked_axes(mt_key: str, shape: tuple, depth: int, config, name: str | Non
 
   Two flat-list cases stack along axis 0 even with scanned layers, as in
   `to_maxtext`: weights outside the `params` collection (`MoEBiasVar`,
-  `Tid2EidVar`) in a Linen tree, which put the layer axis first, and the expert
-  list of a single unscanned layer (`...-layers_<i>-...-MoeBlock...`, e.g.
-  DeepSeek-V4's first layers), which has no layer axis at all. An NNX tree (whose
-  `name` drops the collection prefix) scans those collections like any other
-  weight, along `param_scan_axis`.
+  `Tid2EidVar`), which put the layer axis first, and the expert list of a single
+  unscanned layer (`...-layers_<i>-...-MoeBlock...`, e.g. DeepSeek-V4's first
+  layers), which has no layer axis at all.
   """
   if depth == 0:
     return ()
   if depth == 1:
     scan_axis = config.param_scan_axis
-    if not config.scan_layers or len(shape) <= scan_axis or _stacks_on_axis_0(mt_key, name):
+    if not config.scan_layers or len(shape) <= scan_axis or _stacks_on_axis_0(mt_key):
       return (0,)
     return (scan_axis,)
   return tuple(tensor_handling.stacked_axes(mt_key, config, depth))
@@ -203,12 +201,10 @@ _UNSCANNED_LAYER_KEY = re.compile(r"-layers_\d+-")
 _LAYER_FIRST_COLLECTIONS = ("MoEBiasVar-", "Tid2EidVar-")
 
 
-def _stacks_on_axis_0(mt_key: str, name: str | None = None) -> bool:
+def _stacks_on_axis_0(mt_key: str) -> bool:
   """Whether a flat HF key list for `mt_key` stacks along axis 0 with scanned layers (see `_stacked_axes`)."""
   if mt_key.startswith(_LAYER_FIRST_COLLECTIONS):
-    # Linen keeps the collection name (layer axis first); NNX drops it (layer axis at param_scan_axis).
-    collection = mt_key.split("-", 1)[0]
-    return name is None or name.startswith(f"{collection}.")
+    return True
   return "MoeBlock" in mt_key and "scanned_blocks" not in mt_key and bool(_UNSCANNED_LAYER_KEY.search(mt_key))
 
 
@@ -341,7 +337,7 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
     for key, name in zip(mt_keys, names):
       leaf = flat_target[name]
       shape = tuple(leaf.shape)
-      axes = _stacked_axes(key, shape, depth, config, name)
+      axes = _stacked_axes(key, shape, depth, config)
       parts.append(
           _Target(
               name=name,

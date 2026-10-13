@@ -428,18 +428,6 @@ class DeepSeekV4LayoutTest(parameterized.TestCase):
     self.assertEqual(hf_streaming_load._stacked_axes(mt_key, shape, 1, config), (axis,))  # pylint: disable=protected-access
 
   @parameterized.named_parameters(
-      ("linen_layers_first", "MoEBiasVar.decoder.scanned_blocks.layers_0.mlp.MoeBlock_0.gate.bias", (2, 16), 0),
-      ("nnx_param_scan_axis", "decoder.scanned_blocks.layers_0.mlp.MoeBlock_0.gate.bias", (16, 2), 1),
-  )
-  def test_other_collection_axis_follows_tree_layout(self, name, shape, axis):
-    """Linen puts a scanned `MoEBiasVar` layer axis first; NNX (no collection prefix) uses `param_scan_axis`."""
-    config = _config(scan_layers=True)
-    mt_key = "MoEBiasVar-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-gate-bias"
-    self.assertEqual(
-        hf_streaming_load._stacked_axes(mt_key, shape, 1, config, name), (axis,)  # pylint: disable=protected-access
-    )
-
-  @parameterized.named_parameters(
       ("linen_collection", "MoEBiasVar.decoder.layers_3.mlp.MoeBlock_0.gate.bias"),
       ("nnx_without_collection", "decoder.layers_3.mlp.MoeBlock_0.gate.bias"),
   )
