@@ -72,6 +72,7 @@ from maxtext.common.goodput import (
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
+from maxtext.experimental.lineage import lineage_adapter
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -151,6 +152,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   else:
     for k, v in data.items():
       data[k] = v[: config.micro_batch_size_to_eval_on, :]
+  if lineage_adapter.is_native(config):
+    return lineage_adapter.loss_and_aux(model, config, data, is_train=is_train)
   # Only forward the kwarg when router replay is actually in use, so models
   # and adapters whose __call__ predates the feature keep working.
   forced_routing_kwargs = (
@@ -219,9 +222,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if indexer_losses_state is not None:
     intermediate_outputs["indexer_losses"] = indexer_losses_state.to_pure_dict()
 
-  if (config.use_indexer and not config.indexer_sparse_training) and is_train:
+  is_dense_warmup = config.use_indexer and config.indexer_loss_scaling_factor > 0.0 and not config.indexer_sparse_training
+  if is_dense_warmup and is_train:
     # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
     # The main model parameters are frozen and only the indexer is trained via KL divergence.
+    # Gated on indexer_loss_scaling_factor > 0 like the logits skip in nnx_decoders.py; otherwise
+    # there is no indexer loss either and the total objective would be zero.
     xent_sum = 0.0
     total_z_loss = 0.0
   elif config.num_vocab_tiling > 1:
@@ -618,7 +624,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
   # pylint: disable=too-many-nested-blocks
-  if config.routed_bias and config.routed_bias_update_rate > 0.0:
+  if lineage_adapter.is_native(config):
+    diag_bias_values = list(aux.get("diag_bias_values", ()))
+    diag_bias_updates = list(aux.get("diag_bias_updates", ()))
+  elif config.routed_bias and config.routed_bias_update_rate > 0.0:
     if getattr(config, "model_name", "").startswith("deepseek4"):
       max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
       flat_intermediates = traverse_util.flatten_dict(aux.get("intermediate_outputs", {}))
@@ -729,12 +738,12 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "scalars": {},
   }
   if config.moe_dropless_fallback == "step":
-    metrics["has_moe_overflow"] = (  # pyrefly: ignore[bad-assignment]
+    metrics["has_moe_overflow"] = (
         has_moe_overflow if has_moe_overflow is not None else jnp.bool_(False)  # pyrefly: ignore[bad-assignment]
     )
   if getattr(config, "log_required_ragged_buffer_factor", False) and "moe_required_rbf" in aux:
     # Top-level (not "scalar"): a per-layer vector, read by training_loop_iteration for the REQUIRED_RBF line.
-    metrics["moe_required_rbf"] = aux["moe_required_rbf"]  # pyrefly: ignore[bad-assignment]
+    metrics["moe_required_rbf"] = aux["moe_required_rbf"]
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -909,6 +918,13 @@ def training_loop_iteration(
   )
   if ran_eval:
     assert eval_data_iterator
+    prefill_thread = python_vars.get("eval_prefill_thread")
+    if prefill_thread is not None and prefill_thread.is_alive():
+      # Let the background cache pass commit before building the eval iterator (never a race in practice:
+      # the first eval is tens of steps after run_start).
+      wait_t = time.perf_counter()
+      prefill_thread.join(timeout=600)
+      max_logging.log(f"eval cache prefill: waited {time.perf_counter() - wait_t:.3f} s before eval")
     # Explicitly reset the eval iterator and counters before starting the eval loop
     if hasattr(eval_data_iterator, "reset"):
       eval_data_iterator.reset()
@@ -1136,8 +1152,19 @@ def start_run_clock(config, start_step, warmup_fn=None, barrier_fn=None, python_
   mllog_utils.block_start(config, start_step)
 
 
-def train_loop(config, recorder, state=None):
-  """Main Training loop."""
+def train_loop(config, recorder, state=None, elastic_retry_cache=None):
+  """Main Training loop.
+
+  Args:
+    config: Config object.
+    recorder: Goodput recorder.
+    state: Optional initial train state.
+    elastic_retry_cache: Optional `elastic_utils.RetryCache`. An elastic retry on the same slices reuses the setup and the
+      compiled steps cached in it instead of building them again.
+
+  Returns:
+    The final train state.
+  """
   (
       init_rng,
       checkpoint_manager,
@@ -1150,7 +1177,7 @@ def train_loop(config, recorder, state=None):
       rampup_manager,
       eval_data_iterator,
       state,
-  ) = train_utils.setup_train_loop(config, recorder)
+  ) = train_utils.setup_train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
   # Throttling is applied only if configured (dcn_bandwidth_limit is set).
   # The default flag value is empty, meaning no throttling is applied by default.
@@ -1180,16 +1207,24 @@ def train_loop(config, recorder, state=None):
   else:
     params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
-  p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
-      config,
-      jit_model,
-      mesh,
-      state,
-      state_mesh_shardings,
-      train_step,
-      eval_step,
-      eval_data_iterator,
-      params_shardings,
+  # Jit the train and eval steps, or reuse the ones compiled by the previous elastic attempt. A pause/resume retry
+  # comes back on the same slices, so the compiled programs still fit and the retrace, lowering and compile are
+  # skipped. After a replica resize the cache has been emptied, so the steps are compiled again for the new mesh.
+  p_train_step, p_eval_step = elastic_utils.get_or_build(
+      elastic_retry_cache,
+      "train_and_eval_step",
+      functools.partial(
+          train_utils.jit_train_and_eval_step,
+          config,
+          jit_model,
+          mesh,
+          state,
+          state_mesh_shardings,
+          train_step,
+          eval_step,
+          eval_data_iterator,
+          params_shardings,
+      ),
   )
 
   if jit_model_eval is not None and p_eval_step is not None:
@@ -1264,14 +1299,17 @@ def train_loop(config, recorder, state=None):
       if p_train_step_first_phase is not None:
         aot_compile_step(p_train_step_first_phase, lower_args, compiler_options, prefix="train_first_phase")
 
+  if p_eval_step is not None:
+    # Also used by warm_eval_input_reshard_before_run_start, which applies with a pre-compiled train step too.
+    with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules_for_eval):
+      data_sharding_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+      shaped_eval_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding_eval, is_eval=True)
   # Ahead-of-time compile the evaluation step alongside the training step to
   # warm up the XLA executable cache and avoid JIT compilation pause on the
   # first eval step.
   if p_eval_step is not None and config.compiled_trainstep_file == "" and not jax.config.jax_enable_pgle:
     with jax.set_mesh(mesh), logical_axis_rules(config.logical_axis_rules_for_eval):
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
-      data_sharding_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
-      shaped_eval_batch = maxtext_utils.get_shaped_batch(config, batch_sharding=data_sharding_eval, is_eval=True)
       if config.enable_diloco:
         eval_lower_args = (state, shaped_eval_batch, init_rng)
       else:
@@ -1354,8 +1392,12 @@ def train_loop(config, recorder, state=None):
         warmup_list += [
             ("train", "train", p_train_step),
             ("train_first_phase", "train", p_train_step_first_phase),
-            ("train_dropless", "train", p_train_step_dropless),
         ]
+        if config.warmup_skip_train_dropless:
+          if p_train_step_dropless is not None:
+            max_logging.log("warmup_programs_in_init: skipping train_dropless (warmup_skip_train_dropless=True)")
+        else:
+          warmup_list.append(("train_dropless", "train", p_train_step_dropless))
       if precompiled_eval:
         warmup_list += [("eval", "eval", p_eval_step), ("eval_dropless", "eval", p_eval_step_dropless)]
       # Same shardings as the loop's batches: the loader's device_put sharding for train, the eval rules for eval.
@@ -1390,11 +1432,23 @@ def train_loop(config, recorder, state=None):
   te_moe_overflow_window = []
   try:
     train_utils.prepare_before_run_start(
-        config, state, learning_rate_schedule, start_step, mesh, data_loader, shaped_batch
+        config,
+        state,
+        learning_rate_schedule,
+        start_step,
+        mesh,
+        data_loader,
+        shaped_batch,
+        shaped_eval_batch=shaped_eval_batch,
     )
     python_vars["last_step_completion"] = datetime.datetime.now()
 
     start_run_clock(config, start_step, warmup_fn=warmup_fn, python_vars=python_vars)
+
+    # Inside the timed region: overlap the eval pipeline's file reads with the first training steps.
+    python_vars["eval_prefill_thread"] = None
+    if config.eval_cache_prefill_in_background and eval_data_iterator is not None:
+      python_vars["eval_prefill_thread"] = train_utils.start_eval_cache_prefill(eval_data_iterator)
 
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
@@ -1502,10 +1556,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   return config, recorder
 
 
-def run(config, recorder):
+def run(config, recorder, elastic_retry_cache=None):
   """Run the job given hyperparameters and utilities."""
   with (max_utils.maybe_get_transformer_engine_context(config),):
-    train_loop(config, recorder)
+    train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
 
 def get_train_func(config, recorder, argv):
@@ -1513,24 +1567,38 @@ def get_train_func(config, recorder, argv):
   if config.elastic_enabled:
     max_logging.log("Elastic utils: Elastic training enabled.")
 
-    def on_elastic_event():
-      elastic_utils.record_elastic_event_start(recorder, config)
+    # Setup that an elastic retry on the same slices can reuse: the `initialize` result, the mesh, the abstract
+    # model and the jitted steps. `elastic_retry` turns it on for the run and empties it when the slices change,
+    # so a pause/resume retry reuses everything and a replica resize rebuilds everything. It is shared by
+    # `elastic_retry` and the attempts it runs, and is passed down to `train_loop` and `setup_train_loop`. It
+    # can't live in the config: the config built for an attempt is itself one of the cached objects.
+    elastic_retry_cache = elastic_utils.RetryCache()
+
+    def on_elastic_event(scale_up):
+      elastic_utils.record_elastic_event_start(recorder, scale_up=scale_up)
 
     def on_slices_ready():
       elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)
 
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
-      elastic_config, elastic_recorder = initialize(argv)
+      # Reuse the config and goodput recorder from the previous attempt if it ran on the same slices. After a
+      # replica resize `initialize` runs again so the config picks up the new slice count.
+      elastic_config, elastic_recorder = elastic_utils.get_or_build(
+          elastic_retry_cache, "initialize", functools.partial(initialize, argv)
+      )
       run(
           elastic_config,
           elastic_recorder,
+          elastic_retry_cache=elastic_retry_cache,
       )
 
+    # Every attempt goes through `elastic_train_wrapper`; the cache decides how much of it is skipped.
     train_func = elastic_utils.elastic_retry(
         config,
         callback_fn=on_elastic_event,
         pre_callback_fn=on_slices_ready,
+        retry_cache=elastic_retry_cache,
     )(functools.partial(elastic_train_wrapper, argv=argv))
   else:
     # Use the already initialized variables

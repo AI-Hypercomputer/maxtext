@@ -38,14 +38,54 @@ from maxtext.utils import max_utils
 from maxtext.utils import sharding
 
 
-class BaseTrainingHooks(TrainingHooks, abc.ABC):
+class GoodputTrainingHooks(TrainingHooks):
+  """Lightweight training hooks for recording Goodput step start times."""
+
+  def __init__(self, config, goodput_recorder):
+    self.config = config
+    self.goodput_recorder = goodput_recorder
+
+  @override
+  def on_train_start(self, train_ctx: peft_trainer.PeftTrainer):
+    """Called at the beginning of training."""
+    del train_ctx
+
+  @override
+  def on_train_end(self, train_ctx: peft_trainer.PeftTrainer):
+    """Called at the end of training."""
+    del train_ctx
+
+  @override
+  def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
+    """Called at the beginning of a training step."""
+    if self.config.enable_goodput_recording:
+      record_goodput(self.goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
+
+  @override
+  def on_train_step_end(
+      self, train_ctx: peft_trainer.PeftTrainer, train_step: int, train_loss: float, step_time: float = 0.0
+  ):
+    """Called at the end of a training step."""
+    del train_ctx, train_step, train_loss, step_time
+
+  @override
+  def on_eval_step_start(self, train_ctx: peft_trainer.PeftTrainer):
+    """Called at the beginning of an evaluation step."""
+    del train_ctx
+
+  @override
+  def on_eval_step_end(self, train_ctx: peft_trainer.PeftTrainer, eval_loss: float):
+    """Called at the end of an evaluation step."""
+    del train_ctx, eval_loss
+
+
+class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
   """Shared training hooks for post-training."""
 
   def __init__(self, config, mesh, learning_rate_schedule, goodput_recorder):
-    self.config = config
+    super().__init__(config, goodput_recorder)
     self.mesh = mesh
     self.metric_logger = MetricLogger(self.config, learning_rate_schedule)
-    self.goodput_recorder = goodput_recorder
     self.metadata = {}
     self.train_metadata = defaultdict(float)
     self.eval_metadata = defaultdict(float)
@@ -90,8 +130,7 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
   @override
   def on_train_step_start(self, train_ctx: peft_trainer.PeftTrainer):
     """Called at the beginning of a training step."""
-    if self.config.enable_goodput_recording:
-      record_goodput(self.goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
+    super().on_train_step_start(train_ctx)
 
     # Calculate the number of non-padded tokens in the batch
     self.train_metadata[train_ctx.train_steps] = {
@@ -162,7 +201,7 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
         self.eval_metadata["eval_step_count"] != 0
     ), "BaseTrainingHooks.on_eval_step_start() must be called before BaseTrainingHooks.on_eval_step_end()"
 
-    avg_loss = eval_loss / self.eval_metadata["eval_step_count"]
+    avg_loss = eval_loss if self.eval_loss_is_preaveraged() else eval_loss / self.eval_metadata["eval_step_count"]
     metrics = {
         "scalar": {
             "eval/total_loss": eval_loss,
@@ -195,6 +234,10 @@ class BaseTrainingHooks(TrainingHooks, abc.ABC):
     if avg_loss <= self.config.target_eval_loss:
       raise exceptions.StopTraining(f"Target loss {self.config.target_eval_loss=} is achieved.")
 
+  def eval_loss_is_preaveraged(self) -> bool:
+    """Whether Tunix supplies a cross-batch weighted mean to the eval hook."""
+    return False
+
   @abc.abstractmethod
   def get_total_weights(self, batch) -> jax.Array:
     """Calculate the number of non-padded tokens in the batch."""
@@ -215,9 +258,12 @@ class BaseDataHooks(DataHooks):
     """Loads the next batch of data for training."""
     try:
       self.train_batch = self.train_data_loader.load_next_batch()
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      max_logging.log(f"Exception in load_next_train_batch: {str(e)}")
-      self.train_batch = None
+    except exceptions.StopTraining as e:
+      if isinstance(e.__cause__ or e.__context__, StopIteration):
+        max_logging.log(f"Training data exhausted: {str(e)}")
+        self.train_batch = None
+      else:
+        raise
     return self.train_batch
 
   @override
@@ -232,7 +278,7 @@ class BaseDataHooks(DataHooks):
         self.eval_batch = None
       else:
         self.eval_batch = next(self.eval_data_iterator)
-    except Exception as e:  # pylint: disable=broad-exception-caught
-      max_logging.log(f"Exception in load_next_eval_batch: {str(e)}")
+    except StopIteration as e:
+      max_logging.log(f"Evaluation data exhausted: {str(e)}")
       self.eval_batch = None
     return self.eval_batch

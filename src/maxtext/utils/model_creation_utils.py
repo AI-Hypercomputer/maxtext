@@ -41,7 +41,6 @@ from etils import epath
 from flax import nnx
 from flax.core.meta import Partitioned
 from flax.core.spmd import logical_axis_rules
-import flax.linen as nn
 from huggingface_hub import get_token
 import jax
 import jax.numpy as jnp
@@ -49,8 +48,10 @@ from jax.sharding import Mesh
 from maxtext.common import checkpointing
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
+from maxtext.experimental.lineage import lineage_adapter
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.integration.vllm.convert_utils import _partition_size
+from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.models import models
 from maxtext.utils import max_logging
@@ -217,6 +218,19 @@ def _align_checkpoint_to_model_shapes(ckpt_arr, model_arr, logical_axes=None):
         )
       result = jnp.repeat(result, model_dim // ckpt_dim, axis=axis)
   return jax.device_put(result, model_arr.sharding)
+
+
+def _intersect_with_metadata(target, meta_tree):
+  """Returns the sub-tree of `target` whose paths exist in checkpoint `meta_tree`."""
+  if not hasattr(target, "items"):
+    return target
+  out = {}
+  for k, v in target.items():
+    if hasattr(meta_tree, "items") and k in meta_tree:
+      sub_tree = _intersect_with_metadata(v, meta_tree[k])
+      if not hasattr(sub_tree, "items") or sub_tree:
+        out[k] = sub_tree
+  return out
 
 
 def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
@@ -478,7 +492,7 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: None = None,
     quant_mode_str: str = "train",
-) -> nn.Module:
+) -> nnx_wrappers.ToLinen:
   ...
 
 
@@ -503,7 +517,7 @@ def from_config(
     model_mode: str = MODEL_MODE_TRAIN,
     rngs: nnx.Rngs | None = None,
     quant_mode_str: str = "train",
-) -> nn.Module | models.Transformer:
+) -> nnx_wrappers.ToLinen | models.Transformer:
   """Load a pretrained MaxText model from checkpoint.
 
   With `rngs` this returns the NNX `Transformer`. Without it, it returns the
@@ -524,6 +538,8 @@ def from_config(
 
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""
+  if rngs is not None and lineage_adapter.is_native(config):
+    return lineage_adapter.LineageTransformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   if rngs is not None:
     return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   else:
@@ -1030,15 +1046,23 @@ def from_pretrained(
             target_for_restore, metadata.item_metadata.tree["params"]["params"], False
         )
 
+        # Linen checkpoints keep non-trainable variables (e.g. `Tid2EidVar`) in
+        # collections beside "params"; restore the model leaves they hold too.
+        ckpt_collections = metadata.item_metadata.tree["params"]
         item_to_restore = {"params": {"params": target_for_restore}}
-        base_restore_args = ocp.checkpoint_utils.construct_restore_args(target_for_restore)
+        for col, col_meta in ckpt_collections.items():
+          if col != "params":
+            col_target = _intersect_with_metadata(target_for_restore, col_meta)
+            if col_target:
+              item_to_restore["params"][col] = col_target
         restore_args = {
             "params": {
-                "params": _fix_restore_args_for_shape_mismatch(
-                    base_restore_args,
-                    metadata.item_metadata.tree["params"]["params"],
+                col: _fix_restore_args_for_shape_mismatch(
+                    ocp.checkpoint_utils.construct_restore_args(col_target),
+                    ckpt_collections[col],
                     mesh,
                 )
+                for col, col_target in item_to_restore["params"].items()
             }
         }
       else:
@@ -1136,6 +1160,9 @@ def from_pretrained(
         )
       else:
         checkpoint = restored["params"]["params"]
+        for col, col_tree in restored["params"].items():
+          if col != "params":
+            checkpoint = checkpointing._deep_merge_dicts(checkpoint, col_tree)  # pylint: disable=protected-access
 
       if checkpoint:
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
@@ -1151,7 +1178,7 @@ def from_pretrained(
         )
         # ``specs`` (nnx.get_partition_spec(abstract_state) at the top of from_pretrained)
         # is the source of truth for logical axis names — it's the input to
-        # nn.logical_to_mesh_sharding.  Each leaf is a PartitionSpec whose entries are
+        # the logical-to-mesh sharding conversion.  Each leaf is a PartitionSpec whose entries are
         # logical axis names (or None / nested tuples).  Reuse it for repeat/zero-pad
         # dispatch in _align_checkpoint_to_model_shapes.
         # nnx.get_partition_spec returns Variables wrapping PartitionSpecs at the leaves;
@@ -1204,6 +1231,16 @@ def from_pretrained(
 
         checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
         nnx.update(model, checkpoint)
+        unrestored = [
+            jax.tree_util.keystr(path)
+            for path, leaf in jax.tree_util.tree_flatten_with_path(nnx.state(model))[0]
+            if isinstance(leaf, jax.Array) and leaf.is_deleted()
+        ]
+        if unrestored:
+          raise ValueError(
+              f"Checkpoint '{config.load_parameters_path}' has no value for {len(unrestored)} model "
+              f"variables: {unrestored[:5]}"
+          )
       else:
         raise ValueError(
             f"Checkpoint restore from '{config.load_parameters_path}' yielded no parameters. "

@@ -24,7 +24,6 @@ import jax.numpy as jnp
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh, NamedSharding
 
-from flax import linen as nn
 from flax import nnx
 
 from maxtext.common.common_types import Config, DType, AxisNames, BATCH, LENGTH, EMBED, HEAD, D_KV, Array, MODEL_MODE_TRAIN
@@ -38,6 +37,7 @@ from maxtext.layers.initializers import Initializer, NdInitializer, nd_dense_ini
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import with_logical_constraint
 
 # -----------------------------------------
 # The Normalization Layer specific for GPT3
@@ -310,7 +310,7 @@ class Gpt3MultiHeadAttention(nnx.Module):
       kv_cache: Array | None = None,
       attention_metadata: dict[str, Any] | None = None,
   ):
-    inputs_q = nn.with_logical_constraint(inputs_q, self.input_axis_names)
+    inputs_q = with_logical_constraint(inputs_q, self.input_axis_names)
     if self.fused_qkv:
       query, key, value = self.qkv_projection(self.qkv_proj, inputs_q)
     else:
@@ -322,11 +322,11 @@ class Gpt3MultiHeadAttention(nnx.Module):
     query /= depth_scaling
 
     # annotate with sharding constraint.
-    query = nn.with_logical_constraint(query, self.query_axis_names)
+    query = with_logical_constraint(query, self.query_axis_names)
     query = checkpoint_name(query, "query_proj")
-    key = nn.with_logical_constraint(key, self.key_axis_names)
+    key = with_logical_constraint(key, self.key_axis_names)
     key = checkpoint_name(key, "key_proj")
-    value = nn.with_logical_constraint(value, self.value_axis_names)
+    value = with_logical_constraint(value, self.value_axis_names)
     value = checkpoint_name(value, "value_proj")
 
     cached_values = [None, None]
@@ -335,7 +335,7 @@ class Gpt3MultiHeadAttention(nnx.Module):
 
     out = self.attention_op(query, key, value, decoder_segment_ids, None, model_mode, cached_values)
 
-    out = nn.with_logical_constraint(out, self.out_axis_names)
+    out = with_logical_constraint(out, self.out_axis_names)
 
     # apply output projection,  output dim is set to the input dim.
     out = self.projection(self.out, out)
@@ -437,11 +437,11 @@ class Gpt3DecoderLayer(nnx.Module):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
 
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     lnx = self.pre_self_attention_norm(inputs)
 
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = with_logical_constraint(lnx, self.activation_axis_names)
 
     # Self-attention block
     assert (
@@ -458,15 +458,15 @@ class Gpt3DecoderLayer(nnx.Module):
         attention_metadata=attention_metadata,
     )
 
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = with_logical_constraint(attention_lnx, self.activation_axis_names)
     attention_lnx += inputs
     # MLP block.
     mlp_lnx = self.mlp(attention_lnx, deterministic=deterministic)
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     layer_output = attention_lnx + mlp_lnx
     layer_output = self.dropout(layer_output, deterministic=deterministic)
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = with_logical_constraint(layer_output, self.activation_axis_names)
 
     if getattr(self.config, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))

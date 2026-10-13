@@ -141,6 +141,7 @@ class DecoderBlockType(enum.Enum):
   OLMO3 = "olmo3"
   DEEPSEEK4 = "deepseek4"
   ENVY = "envy"
+  WEAVER = "weaver"
 
 
 class VisionEncoderBlockType(enum.Enum):
@@ -197,4 +198,6 @@ class CustomRule(enum.Enum):
   FSDP_2D = "2d-fsdp"
   EP_AS_DP = "ep-as-dp"
   SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
+  EXPERT_ON_FSDP_EP = "expert-on-fsdp-ep"
   FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
+  FSDP_AS_DP_FOR_ATTN_RF = "fsdp-as-dp-for-attn-rf"  # fsdp-as-dp-for-attn with the router weight sharded on fsdp

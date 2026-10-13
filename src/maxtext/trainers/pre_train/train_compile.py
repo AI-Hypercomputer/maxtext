@@ -170,7 +170,7 @@ def get_shaped_inputs(topology_mesh, config):
   # Collect NNX activation shardings via an abstract forward pass (must run
   # after get_abstract_state, which only traces __init__).
   if config.debug_sharding:
-    _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)  # pyrefly: ignore[unbound-name]
+    _collect_nnx_activation_shardings(_create_model_partial, config, topology_mesh)
 
   return (
       shaped_train_args,
@@ -341,7 +341,9 @@ def main(argv: Sequence[str]) -> None:
 
     # Wrap train_step with diloco
     train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, params_shardings)
-    train_step_fn = diloco.build_diloco_train_step(config, train_step_partial)
+    train_step_fn = diloco.build_diloco_train_step(
+        config, train_step_partial, outer_params_shardings=state_mesh_shardings.params
+    )
 
     # For DiLoCo, the train_step_fn is already fully wrapped and takes (state, batch, prng)
     func_to_compile = train_step_fn

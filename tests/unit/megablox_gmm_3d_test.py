@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""TPU tests: 3D-layout gmm_v2 / tgmm_v2 match the 2D kernels (bf16 and fp8)."""
+"""TPU tests: 3D-layout gmm_v2 / tgmm_v2 match the 2D kernels (bf16 and fp8); gmm_v2 is exact on a partial last K tile."""
 
 import functools
 
@@ -20,6 +20,7 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
+from jax.experimental.pallas import tpu as pltpu
 import numpy as np
 import qwix
 import qwix.pallas as qpl
@@ -324,6 +325,105 @@ class Gmm3dTest(parameterized.TestCase):
     # [cap, 7168] (in moe the weights multiply the 2D (cap, mlp) activation, so this is test-only).
     np.testing.assert_allclose(np.asarray(dw3), np.asarray(dw2), rtol=1e-5, atol=1e-6)
     self.assertGreater(float(jnp.max(jnp.abs(out2.astype(jnp.float32)))), 0.0)
+
+  @parameterized.parameters(True, False)
+  def test_shared_fixed_scale_bwd_is_bit_exact(self, use_gmm_v2):
+    """Flag 1 (shared lhs/rhs fixed scale + shared quantized grad) is bit-identical to the unshared bwd.
+
+    "fixed,-224,224" and "fixed,-224.0,224.0" give the same qwix scale, but _lhs_rhs_share_fixed_scale compares
+    the strings, so the second spelling turns the shortcut (and share_quantized_grad) off without mocking.
+    """
+    if use_gmm_v2 and pltpu.get_tpu_info().fp8_ops_per_second == 0:
+      self.skipTest("A fixed act scale in gmm_v2 needs fp8 matmul hardware.")
+    k0, k1 = jax.random.split(jax.random.key(11))
+    lhs = _rand(k0, (M, D), jnp.bfloat16)
+    rhs = _rand(k1, (E, D, F), jnp.bfloat16, 0.05)
+    tiling = (512, 7168, 512, 512, 512, 1024, 512, 1024, 512)
+
+    def rule(act_cal):
+      return qwix.QtRule(
+          weight_qtype=FP8,
+          act_qtype=FP8,
+          bwd_qtype=jnp.float8_e5m2,
+          weight_calibration_method="fixed,-224,224",
+          act_calibration_method=act_cal,  # same scale, different string
+          bwd_calibration_method="fixed,-64,64",
+      )
+
+    def loss(lhs, rhs, r):
+      out = ops.gmm(
+          lhs,
+          rhs,
+          self.gs,
+          tiling=tiling,
+          preferred_element_type=jnp.bfloat16,
+          use_qwix_quantization=True,
+          qwix_rule=r,
+          use_tokamax_backend=True,
+          use_gmm_v2=use_gmm_v2,
+      )
+      return jnp.sum(out.astype(jnp.float32) ** 2)
+
+    grad_fn = jax.jit(jax.grad(loss, argnums=(0, 1)), static_argnums=2)
+    dlhs_on, drhs_on = grad_fn(lhs, rhs, rule("fixed,-224,224"))
+    dlhs_off, drhs_off = grad_fn(lhs, rhs, rule("fixed,-224.0,224.0"))
+    # Rows past sum(group_sizes) are padding the gmm backward may leave unwritten (garbage), so compare valid rows.
+    valid = int(GROUP_SIZES.sum())
+    for on, off in ((dlhs_on[:valid], dlhs_off[:valid]), (drhs_on, drhs_off)):
+      self.assertTrue(bool(jnp.any(on != 0)))
+      np.testing.assert_array_equal(_f32(on), _f32(off))
+
+
+K_TAIL_G, K_TAIL_M, K_TAIL_N = 8, 512, 256
+# sum 211 < K_TAIL_M: padding rows, one empty group.
+K_TAIL_GROUP_SIZES = np.array([26, 31, 0, 30, 29, 28, 32, 35], np.int32)
+
+
+def _poison_hbm():
+  """Fills and frees ~2 GiB of HBM with NaN, so stale memory the kernel reads past an operand's end is NaN."""
+  xs = [jnp.full((64, 1024, 1024), jnp.nan, jnp.float32) for _ in range(8)]
+  jax.block_until_ready(xs)
+  del xs
+
+
+def _k_tail_reference(lhs, rhs, transpose_rhs):
+  lhs, rhs = np.asarray(lhs, np.float32), np.asarray(rhs, np.float32)
+  if transpose_rhs:
+    rhs = rhs.swapaxes(1, 2)
+  out = np.zeros((K_TAIL_M, K_TAIL_N), np.float32)
+  start = 0
+  for g, size in enumerate(K_TAIL_GROUP_SIZES):
+    out[start : start + size] = lhs[start : start + size] @ rhs[g]
+    start += size
+  return out
+
+
+class GmmV2KTailTest(parameterized.TestCase):
+  """tile_k does not divide size_k: the partial last K tile must mask lhs as well as rhs (stale VMEM is not zero)."""
+
+  @parameterized.product(
+      size_k_tile_k=((256, 384), (384, 256), (640, 512)),
+      transpose_rhs=(False, True),
+  )
+  def test_partial_k_tile_matches_reference(self, size_k_tile_k, transpose_rhs):
+    size_k, tile_k = size_k_tile_k
+    lhs = jax.random.normal(jax.random.PRNGKey(0), (K_TAIL_M, size_k), jnp.float32).astype(jnp.bfloat16)
+    rhs_shape = (K_TAIL_G, K_TAIL_N, size_k) if transpose_rhs else (K_TAIL_G, size_k, K_TAIL_N)
+    rhs = (jax.random.normal(jax.random.PRNGKey(1), rhs_shape, jnp.float32) * 0.05).astype(jnp.bfloat16)
+    group_sizes = jnp.asarray(K_TAIL_GROUP_SIZES)
+    tiles = gmm_v2.TileSizes(tile_m=128, tile_k=tile_k, tile_n=K_TAIL_N)
+
+    _poison_hbm()
+    out = jax.jit(
+        lambda lhs, rhs: gmm_v2.gmm_v2(
+            lhs, rhs, group_sizes, tile_info=tiles, preferred_element_type=jnp.float32, transpose_rhs=transpose_rhs
+        )
+    )(lhs, rhs)
+
+    num_valid = int(K_TAIL_GROUP_SIZES.sum())
+    np.testing.assert_allclose(
+        np.asarray(out)[:num_valid], _k_tail_reference(lhs, rhs, transpose_rhs)[:num_valid], rtol=1e-5, atol=1e-5
+    )
 
 
 if __name__ == "__main__":

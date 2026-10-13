@@ -221,6 +221,64 @@ class TfdsC4MlperfStreamChunkingTest(unittest.TestCase):
     self.assertTrue((b0["targets_segmentation"] == 1).all())
     np.testing.assert_array_equal(b0["inputs_position"][0], np.arange(seq_len))
 
+  def test_eval_rows_uniform(self):
+    """Every eval row has a single segment id (all 1s, or all 0s for dummy rows), over the whole epoch.
+
+    This is the precondition for `sa_ignore_segment_ids`: splash's segment mask is an identity when
+    `inputs_segmentation` is uniform within each row. Covers real chunks, pad rows
+    (`_pad_to_batch_size`: copies of a real row with `targets_segmentation` zeroed) and dummy rows
+    (`_place_real_rows_in_local_batch` decimation: all zeros).
+    """
+    seq_len = 8
+    local_batch_size = 8
+    rng = np.random.default_rng(0)
+    docs = [list(rng.integers(2, 1000, size=n)) for n in rng.integers(1, 3 * seq_len, size=24)]
+    n_tokens = sum(len(d) for d in docs)
+    # chunk_token_stream appends one eod per document and drops the remainder.
+    n_chunks = (n_tokens + len(docs)) // seq_len
+    mock_tokenizer = types.SimpleNamespace(pad_id=0, eos_id=1)
+
+    layouts = [
+        # (name, real_data_rows, extra_batches, dataloading_host_count)
+        ("no_decimation_pad", None, 1, 0),
+        ("decimated", [0, 2, 4, 6], 1, 0),
+        ("multihost_extra_pad", [0, 1, 4, 5], 3, 4),
+    ]
+    for name, real_rows, extra_batches, hosts in layouts:
+      with self.subTest(layout=name):
+        real_batch_size = len(real_rows) if real_rows is not None else local_batch_size
+        # Explicit num_batches with slack (as on multi-host), so the last batches hold pad rows.
+        num_batches = -(-n_chunks // real_batch_size) + extra_batches
+        eval_ds = preprocess_eval_dataset(
+            eval_ds=self._make_dataset_from_docs(docs),
+            sp_tokenizer=mock_tokenizer,
+            eval_global_batch_size_to_load=local_batch_size * jax.process_count(),
+            max_target_length=seq_len,
+            is_tokenized_dataset=True,
+            real_data_rows=real_rows,
+            num_batches=num_batches,
+            dataloading_host_count=hosts,
+        )
+        rows = mixed = all1 = all0 = pad = dummy = 0
+        for b in eval_ds.as_numpy_iterator():
+          seg, tgt_seg = b["inputs_segmentation"], b["targets_segmentation"]
+          row_all1 = np.all(seg == 1, axis=1)
+          row_all0 = np.all(seg == 0, axis=1)
+          no_loss = np.all(tgt_seg == 0, axis=1)
+          rows += seg.shape[0]
+          mixed += int(np.any(seg != seg[:, :1], axis=1).sum())
+          all1 += int(row_all1.sum())
+          all0 += int(row_all0.sum())
+          pad += int((row_all1 & no_loss).sum())
+          dummy += int((row_all0 & no_loss).sum())
+        self.assertEqual(rows, num_batches * local_batch_size)
+        self.assertEqual(mixed, 0, "a row has more than one segment id")
+        self.assertEqual(all1 + all0, rows, "unexpected segment id value")
+        self.assertEqual(all0, dummy, "all-0 rows must be loss-free dummy rows")
+        self.assertGreater(pad, 0, "layout should include pad rows")
+        if real_rows is not None:
+          self.assertGreater(dummy, 0, "layout should include dummy rows")
+
   def test_chunk_token_stream_handles_empty_documents_gracefully(self):
     """Verifies that empty documents (length 0) in the dataset stream are handled without error."""
     docs = [

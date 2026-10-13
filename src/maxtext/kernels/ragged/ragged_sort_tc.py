@@ -61,6 +61,9 @@ class TcRouting:
   start: jax.Array
   count: jax.Array
   reduce_meta: tc.RaggedGatherReduceMetadata
+  num_out_tokens: int = jax.tree.static()
+  # slot_order / token_ids_sorted hold only this shard's [cap] window (start == 0), see `window_routing`.
+  windowed: bool = jax.tree.static()
 
 
 def _to3d(x):
@@ -282,12 +285,18 @@ def ring_ragged_sort_tc(
     flatten_block_size=0,
     tag_routing_fn=None,
     keep_3d=False,
+    window_routing=False,
 ):
   """TC version of `ring_ragged_sort` for the truncated-buffer case.
 
   `tag_routing_fn` (as in `ring_ragged_sort`, e.g. a checkpoint_name tagger for moe_routing_maps) is applied to
   each integer routing array (the TcRouting leaves, group sizes and the inverse permutation), so they can be
   saved across the remat boundary instead of recomputed in the backward pass.
+
+  With `window_routing` (moe_tc_window_routing), the expert sort is a packed uint32 sort, the routing keeps only
+  this shard's [start, start + cap) window of the sorted slots (so the reduce metadata sorts cap instead of
+  N * topk slots), and the inverse permutation is not computed: the third output is then the forward
+  permutation, which TC callers only use for its shape.
 
   Returns:
     (sorted buffer [buffer_size, hidden], group_sizes [num_experts],
@@ -296,10 +305,11 @@ def ring_ragged_sort_tc(
   num_tokens_local = hidden_states_local.shape[0]
   topk_indices_flat = topk_indices_local.flatten().astype(jnp.int32)
   n = topk_indices_flat.shape[0]
-  topk_argsort_indices = jnp.argsort(topk_indices_flat, stable=True).astype(jnp.int32)
-  token_ids_sorted = topk_argsort_indices // topk
+  if window_routing:
+    _, topk_argsort_indices = tc.packed_stable_sort(topk_indices_flat, num_experts - 1)
+  else:
+    topk_argsort_indices = jnp.argsort(topk_indices_flat, stable=True).astype(jnp.int32)
   group_sizes_local = jax.nn.one_hot(topk_indices_flat, num_experts, dtype=jnp.int32).sum(axis=0)
-  topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices).astype(jnp.int32)
 
   shard_idx = jax.lax.axis_index(ep_name) if ep_size > 1 else 0
   local_num_experts = num_experts // ep_size
@@ -309,22 +319,40 @@ def ring_ragged_sort_tc(
   cap = n if buffer_size is None else min(buffer_size, n)
   count = jnp.minimum(end - start, cap).astype(jnp.int32)
 
-  token_ids_sorted = jax.lax.stop_gradient(token_ids_sorted)
-  reduce_meta = tc.ragged_gather_reduce_tc_metadata(
-      token_ids_sorted, start, count, top_k=topk, block_size=reduce_block_size
-  )
+  if window_routing:
+    topk_argsort_revert_indices = topk_argsort_indices
+    slot_order = jax.lax.dynamic_slice_in_dim(jnp.pad(topk_argsort_indices, (0, cap)), start, cap, axis=0)
+    token_ids_sorted = jax.lax.stop_gradient(slot_order // topk)
+    reduce_meta = tc.ragged_gather_reduce_tc_metadata(
+        token_ids_sorted,
+        0,
+        count,
+        top_k=topk,
+        block_size=reduce_block_size,
+        num_out_tokens=num_tokens_local,
+        packed_sort=True,
+    )
+    start = jnp.int32(0)
+  else:
+    topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices).astype(jnp.int32)
+    slot_order = topk_argsort_indices
+    token_ids_sorted = jax.lax.stop_gradient(topk_argsort_indices // topk)
+    reduce_meta = tc.ragged_gather_reduce_tc_metadata(
+        token_ids_sorted, start, count, top_k=topk, block_size=reduce_block_size
+    )
   routing = TcRouting(
       token_ids_sorted=token_ids_sorted,
-      slot_order=topk_argsort_indices,
+      slot_order=slot_order,
       start=start,
       count=count,
       reduce_meta=reduce_meta,
+      num_out_tokens=num_tokens_local,
+      windowed=window_routing,
   )
   if tag_routing_fn is not None:
     routing = jax.tree.map(tag_routing_fn, routing)
     group_sizes_local = tag_routing_fn(group_sizes_local)
     topk_argsort_revert_indices = tag_routing_fn(topk_argsort_revert_indices)
-  del num_tokens_local
   # A 3D (N, D // 128, 128) input (moe_tc_ragged_3d_dispatch) is gathered without a relayout, and its
   # cotangent is produced in the same layout.
   tokens_3d = hidden_states_local.ndim == 3
@@ -351,9 +379,15 @@ def tc_buffer_row_weights(routing, topk_weights, cap):
     [cap] float32 weights.
   """
   w_flat = topk_weights.astype(jnp.float32)
+  iota = jnp.arange(cap, dtype=jnp.int32)
+  valid = iota < routing.count
+  if routing.windowed:
+    # Valid rows are distinct slots and padding rows get distinct out-of-range indices (filled with 0), so the
+    # gather is unique_indices and its transpose needs no scatter-sort.
+    rows = jnp.where(valid, routing.slot_order, w_flat.shape[0] + iota)
+    return w_flat.at[rows].get(mode="fill", fill_value=0.0, unique_indices=True)
   padded_order = jnp.pad(routing.slot_order, (0, cap))
   rows = jax.lax.dynamic_slice_in_dim(padded_order, routing.start, cap, axis=0)
-  valid = jnp.arange(cap, dtype=jnp.int32) < routing.count
   return jnp.where(valid, jnp.take(w_flat, jnp.where(valid, rows, 0), axis=0), 0.0)
 
 
@@ -385,8 +419,7 @@ def ring_ragged_unsort_tc(
     [N, hidden] (or [N, hidden // 128, 128] if out_3d) partial combine for this shard's experts.
   """
   cap = sorted_tokens_local.shape[0]
-  n = routing.slot_order.shape[0]
-  num_out_tokens = n // topk
+  num_out_tokens = routing.num_out_tokens
   if prescaled:
     scaled = sorted_tokens_local
   else:

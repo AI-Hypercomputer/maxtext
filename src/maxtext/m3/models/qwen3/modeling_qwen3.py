@@ -323,6 +323,7 @@ class Qwen3Decoder(nnx.Module):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      layer_cls: type[nnx.Module] = Qwen3DecoderLayer,
   ):
     """Initializes the Qwen3 decoder stack of N layers and final layer normalization.
 
@@ -330,13 +331,14 @@ class Qwen3Decoder(nnx.Module):
       config: Model configuration specifying layer count, dimensions, and dtypes.
       mesh: Device mesh used for parallel execution.
       rngs: NNX random number generators.
+      layer_cls: Decoder layer constructor for model-family subclasses.
     """
     self.config = config
     self.num_layers = config.num_decoder_layers
 
     # Flat attribute names: layers_0, layers_1, ...
     for lyr in range(self.num_layers):
-      layer = Qwen3DecoderLayer(
+      layer = layer_cls(
           config=config,
           rngs=rngs,
       )

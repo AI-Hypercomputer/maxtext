@@ -22,8 +22,8 @@ import re
 from typing import Any
 import warnings
 
-from flax import linen as nn
 from flax import nnx
+from flax.core.spmd import logical_axis_rules
 import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
@@ -69,13 +69,9 @@ from maxtext.models import (
     qwen3_5,
     qwen3_custom,
     simple_layer,
+    weaver,
 )
 
-try:
-  # lineage_adapter is Google-internal and excluded from the open-source export.
-  from maxtext.experimental.lineage import lineage_adapter
-except ImportError:
-  lineage_adapter = None
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, sharding
 from maxtext.utils.sharding import create_sharding
@@ -820,7 +816,14 @@ class NNXDecoder(nnx.Module):
     """Initializes scanned generic decoder layers."""
     config = self.config
     layer_cls = decoder_block_classes[0]
-    num_layers = int(config.num_decoder_layers / config.inhomogeneous_layer_cycle_interval)
+    cycle_interval = config.inhomogeneous_layer_cycle_interval
+    if config.num_decoder_layers % cycle_interval:
+      raise ValueError(
+          f"num_decoder_layers ({config.num_decoder_layers}) must be a multiple of"
+          f" inhomogeneous_layer_cycle_interval ({cycle_interval}) to scan {config.decoder_block.value} layers:"
+          " each scan step builds one whole cycle, so the remaining layers would be dropped."
+      )
+    num_layers = config.num_decoder_layers // cycle_interval
     layer_kwargs = {}
     if config.decoder_block == DecoderBlockType.LLAMA4:
       layer_kwargs = {
@@ -1238,6 +1241,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
+        DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1545,7 +1549,30 @@ class NNXDecoder(nnx.Module):
     """Looks up the token embeddings, before dropout and positional embeddings."""
     return shared_embedding(decoder_input_tokens.astype("int32"), model_mode=model_mode)
 
-  def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True):
+  def _reduce_mhc_streams(self, y):
+    """Collapses a 4D mHC hidden state down to 3D.
+
+    `[batch, length, mhc_expansion_rate, emb_dim]` --> `[batch, length, emb_dim]`.
+
+    This is a no-op for non-mHC models and for states that are already collapsed, so it
+    is safe to call on any path that requires a 3D state.
+
+    Args:
+      y: Hidden state tensor, either already 3D or an expanded 4D mHC state.
+
+    Returns:
+      The hidden state with the parallel-stream axis removed.
+    """
+    cfg = self.config
+    if cfg.mhc_expansion_rate <= 1 or y.ndim < 4:
+      return y
+    if self.is_deepseek4:
+      return self.hc_head(y)
+    # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+    _, mhc_reduce_fn = mhc.get_functions(cfg.mhc_expansion_rate)
+    return mhc_reduce_fn(y)
+
+  def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True, reduce_mhc=True):
     """Applies final normalization and projects hidden states to logits.
 
     Args:
@@ -1557,9 +1584,16 @@ class NNXDecoder(nnx.Module):
         (decoder_norm) before projecting to logits. Set to False when called from
         Multi-Token Prediction (MTP), which applies its own dedicated final norm
         (mtp_k_final_norm) to avoid double normalization.
+      reduce_mhc: If True (default), collapses the parallel hyper-connection (mHC)
+        streams of a 4D `[batch, seq, mhc_expansion_rate, emb]` hidden state down to
+        3D before normalizing. Set to False when the caller has already reduced the
+        state itself (MTP applies its own per-depth `hc_head`).
     """
 
     cfg = self.config
+    if reduce_mhc:
+      y = self._reduce_mhc_streams(y)
+
     if normalize_y:
       if cfg.shard_mode == ShardMode.EXPLICIT:
         norm_out_sharding = create_sharding(
@@ -1608,7 +1642,7 @@ class NNXDecoder(nnx.Module):
   def _build_linen_params(self, moe_stack: nnx.Module) -> dict:
     """
     Bridges NNX to Linen by creating a dictionary that mimics the exact variable
-    structure expected by `deepseek_batchsplit.fetch_weights` and `lineage_adapter`.
+    structure expected by `deepseek_batchsplit.fetch_weights`.
     """
     state_dict = nnx.state(moe_stack, (nnx.Param, moe.MoEBiasVar))
     moe_block = state_dict.get("moe_block", state_dict.get("DeepSeekMoeBlock_0"))
@@ -1788,9 +1822,8 @@ class NNXDecoder(nnx.Module):
         decoder_input_embeddings=decoder_input_embeddings,
     )
 
-    mhc_reduce = None
     if hasattr(cfg, "mhc_expansion_rate"):
-      mhc_expand, mhc_reduce = mhc.get_functions(cfg.mhc_expansion_rate)
+      mhc_expand, _ = mhc.get_functions(cfg.mhc_expansion_rate)
       if cfg.mhc_expansion_rate > 1:
         # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
         y = mhc_expand(y)
@@ -1832,7 +1865,7 @@ class NNXDecoder(nnx.Module):
       if self.is_deepseek:
         # Pre-pipeline: dense layers + outside-pipeline MoE layers under PP-as-DP axis rules.
         logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
-        with self.mesh, nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp):
+        with self.mesh, logical_axis_rules(logical_axis_rules_pp_as_dp):
           if cfg.scan_layers:
             if getattr(self, "dense_layers", None) is not None and cfg.first_num_dense_layers > 0:
               y, self.dense_layers, _ = self._apply_layers_sequentially(
@@ -1907,7 +1940,7 @@ class NNXDecoder(nnx.Module):
           logical_axis_rules_pp_as_dp = sharding.logical_axis_rules_pp_act_as_dp(cfg.logical_axis_rules)
           with (
               self.mesh,
-              nn.partitioning.axis_rules(logical_axis_rules_pp_as_dp),
+              logical_axis_rules(logical_axis_rules_pp_as_dp),
           ):
             if cfg.scan_layers and hasattr(self, "layers_outside_pipeline"):
               remaining = cfg.num_decoder_layers - cfg.pipeline_parallel_layers
@@ -1972,22 +2005,6 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 **common_kwargs,
             )
-          elif cfg.use_lineage:
-            if lineage_adapter is None:
-              raise ImportError("use_lineage=True requires the Google-internal lineage_adapter.")
-            y, lineage_lb_loss, lineage_bias_updates = lineage_adapter.run_lineage_dsv3(
-                inputs=y,
-                dense_params=self._build_linen_params(self.dense_layers),
-                sparse_params=self._build_linen_params(self.moe_layers),
-                decoder_positions=decoder_positions,
-                mesh=self.mesh,
-                cfg=cfg,
-                decoder_segment_ids=decoder_segment_ids,
-            )
-            if lineage_lb_loss is not None:
-              self.sow(nnx.Intermediate, "moe_lb_loss", lineage_lb_loss)
-            if lineage_bias_updates is not None:
-              self.sow(nnx.Intermediate, "moe_bias_updates", lineage_bias_updates)
           else:
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,
@@ -2272,17 +2289,21 @@ class NNXDecoder(nnx.Module):
     assert isinstance(y, jax.Array)
 
     # After the final transformer layer, `y` holds the raw, un-normalized hidden state.
-    if getattr(cfg, "mhc_expansion_rate", 1) > 1:
-      if cfg.decoder_block == DecoderBlockType.DEEPSEEK4:
-        hidden_state = self.hc_head(y)
-      else:
-        # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
-        hidden_state = mhc_reduce(y)
-    else:
-      hidden_state = y
+    # For DeepSeek-V4 it is deliberately left in its expanded 4D
+    # `[batch, length, mhc_expansion_rate, emb_dim]` form: the DeepSeek-V4 MTP block consumes this
+    # return value directly and needs the full parallel-stream state to stay faithful to the
+    # reference architecture. Every consumer that instead requires a collapsed 3D state reduces it
+    # explicitly: `apply_output_head` does so for the logit paths, and the two branches below
+    # do so for the consumers that bypass `apply_output_head`. Other mHC models have a generic MTP
+    # block that expects a 3D state, so their streams are collapsed here (a no-op for non-mHC models).
+    hidden_state = y if self.is_deepseek4 else self._reduce_mhc_streams(y)
 
     # When invoking from vLLM with RPA attention, logit computation is deferred to a later stage.
     if cfg.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      # The vLLM adapter immediately flattens this to `[tokens, emb]` and only later feeds it
+      # back through `apply_output_head`, by which point the stream axis is indistinguishable
+      # from the token axis. So the collapse has to happen here, before we hand the state out.
+      hidden_state = self._reduce_mhc_streams(hidden_state)
       logits = None
 
     # When in the Indexer Dense Warm-up stage, skip the expensive output head projection
@@ -2298,7 +2319,11 @@ class NNXDecoder(nnx.Module):
     # Instead, we keep track on the hidden states, which has smaller size compared to full logits
     elif cfg.num_vocab_tiling > 1 and model_mode == MODEL_MODE_TRAIN:
       logits = None
-      self.sow(nnx.Intermediate, "hidden_states", hidden_state)
+      # The tiled loss reshapes on exactly three axes and differentiates only the output-head
+      # params, so the collapse belongs out here rather than inside the tiled region. Note we
+      # sow a collapsed copy and leave `hidden_state` itself 4D, so MTP still receives the
+      # full stream state when both features are enabled.
+      self.sow(nnx.Intermediate, "hidden_states", self._reduce_mhc_streams(hidden_state))
 
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)

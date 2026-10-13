@@ -18,6 +18,7 @@ from typing import Any, Callable, Optional
 
 from tunix.sft import hooks as _tunix_hooks
 
+from maxtext.common.goodput import GoodputEvent, record_goodput
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.utils import max_logging
 
@@ -46,12 +47,14 @@ class RLTrainingHooks(_tunix_hooks.TrainingHooks):
       test_dataset: Any,
       eval_interval: int,
       reward_fns: Optional[list[Callable[..., Any]]] = None,
+      goodput_recorder: Any = None,
   ):
     self._rl_cluster = rl_cluster
     self._trainer_config = trainer_config
     self._test_dataset = test_dataset
     self._eval_interval = eval_interval
     self._reward_fns = reward_fns
+    self._goodput_recorder = goodput_recorder
     self._last_step_evaluated = -1
 
   # The five lifecycle methods below are abstract in `tunix.sft.hooks.TrainingHooks`,
@@ -64,7 +67,9 @@ class RLTrainingHooks(_tunix_hooks.TrainingHooks):
     del train_ctx
 
   def on_train_step_start(self, train_ctx):  # noqa: ARG002
-    del train_ctx
+    if getattr(self._trainer_config, "enable_goodput_recording", False):
+      # Ensure step is monotonically increasing across RL iterations (0, 1, 2, ...)
+      record_goodput(self._goodput_recorder, f"record_{GoodputEvent.STEP.value}_start_time", train_ctx.train_steps)
 
   def on_eval_step_start(self, train_ctx):  # noqa: ARG002
     del train_ctx
@@ -75,6 +80,8 @@ class RLTrainingHooks(_tunix_hooks.TrainingHooks):
   def on_train_step_end(self, trainer, step, loss):  # noqa: ARG002
     """Fire `evaluate(...)` once per `eval_interval` outer steps."""
     del trainer, loss
+    if self._eval_interval <= 0 or getattr(self._trainer_config, "num_test_batches", 0) <= 0:
+      return
     try:
       outer_step = int(self._rl_cluster.global_steps)
     except Exception:  # pylint: disable=broad-exception-caught

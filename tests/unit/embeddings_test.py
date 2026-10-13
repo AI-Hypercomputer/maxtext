@@ -243,6 +243,85 @@ class YarnRotaryEmbeddingTest(unittest.TestCase):
           rngs=self.rngs,
       )
 
+  def test_dot_pairwise_requires_pairwise(self):
+    with self.assertRaises(ValueError):
+      embeddings.YarnRotaryEmbedding(
+          embedding_dims=4,
+          mesh=self.mesh,
+          max_position_embeddings=16384,
+          original_max_position_embeddings=4096,
+          interleave=True,
+          pairwise=False,
+          dot_pairwise=True,
+          rngs=self.rngs,
+      )
+
+  def test_direct_position_freqs_and_dot_pairwise_parity(self):
+    rng = jax.random.PRNGKey(42)
+    inputs = jax.random.normal(rng, (2, 8, 4, 64), dtype=jnp.bfloat16)
+    position = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32)[None, :], (2, 8))
+    cotangent = jax.random.normal(jax.random.PRNGKey(7), inputs.shape, dtype=jnp.bfloat16)
+
+    ref_layer = embeddings.YarnRotaryEmbedding(
+        embedding_dims=64,
+        mesh=self.mesh,
+        max_position_embeddings=16384,
+        original_max_position_embeddings=4096,
+        interleave=True,
+        pairwise=True,
+        fprop_dtype=jnp.bfloat16,
+        rngs=self.rngs,
+    )
+    ref_out, ref_vjp = jax.vjp(lambda x: ref_layer(x, position=position), inputs)
+    (ref_grad,) = ref_vjp(cotangent)
+
+    for direct_freqs, dot_pw in ((True, False), (False, True), (True, True)):
+      layer = embeddings.YarnRotaryEmbedding(
+          embedding_dims=64,
+          mesh=self.mesh,
+          max_position_embeddings=16384,
+          original_max_position_embeddings=4096,
+          interleave=True,
+          pairwise=True,
+          direct_position_freqs=direct_freqs,
+          dot_pairwise=dot_pw,
+          fprop_dtype=jnp.bfloat16,
+          rngs=self.rngs,
+      )
+      out, vjp_fn = jax.vjp(lambda x, l=layer: l(x, position=position), inputs)
+      (grad,) = vjp_fn(cotangent)
+      np.testing.assert_allclose(
+          np.asarray(out, dtype=np.float32),
+          np.asarray(ref_out, dtype=np.float32),
+          rtol=1e-2,
+          atol=1e-2,
+      )
+      np.testing.assert_allclose(
+          np.asarray(grad, dtype=np.float32),
+          np.asarray(ref_grad, dtype=np.float32),
+          rtol=1e-2,
+          atol=1e-2,
+      )
+
+  def test_direct_position_freqs_non_pairwise_parity(self):
+    inputs = jax.random.normal(jax.random.PRNGKey(42), (2, 8, 4, 64), dtype=jnp.float32)
+    position = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32)[None, :], (2, 8))
+    for interleave in (True, False):
+      outs = []
+      for direct_freqs in (False, True):
+        layer = embeddings.YarnRotaryEmbedding(
+            embedding_dims=64,
+            mesh=self.mesh,
+            max_position_embeddings=16384,
+            original_max_position_embeddings=4096,
+            interleave=interleave,
+            direct_position_freqs=direct_freqs,
+            fprop_dtype=jnp.float32,
+            rngs=self.rngs,
+        )
+        outs.append(layer(inputs, position=position))
+      np.testing.assert_allclose(outs[1], outs[0], rtol=1e-5, atol=1e-5)
+
   def test_non_interleaved_call(self):
     layer = embeddings.YarnRotaryEmbedding(
         embedding_dims=4,

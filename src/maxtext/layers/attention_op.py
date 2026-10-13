@@ -22,7 +22,6 @@ from typing import Any, Callable, Optional, Tuple
 
 from flax import linen as nn
 from flax import nnx
-from flax.linen import partitioning
 import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
@@ -73,7 +72,7 @@ from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, maybe_shard_with_pspec
+from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, logical_to_spec, maybe_shard_with_pspec, with_logical_constraint
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
 from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
@@ -680,6 +679,9 @@ class AttentionOp(nnx.Module):
         self.use_splash_scheduler = self.config.local_use_splash_scheduler
         self.fuse_reciprocal = self.config.local_sa_fuse_reciprocal
         self.use_base2_exp = self.config.local_sa_use_base2_exp
+        # Diagonal sub-tile skipping requires a pure causal mask.
+        self.qk_diag_skip = False
+        self.sv_diag_skip = False
       else:
         self.block_q = self.config.sa_block_q
         self.block_kv = self.config.sa_block_kv
@@ -702,6 +704,8 @@ class AttentionOp(nnx.Module):
         self.use_splash_scheduler = self.config.use_splash_scheduler
         self.fuse_reciprocal = self.config.sa_fuse_reciprocal
         self.use_base2_exp = self.config.sa_use_base2_exp
+        self.qk_diag_skip = self.config.sa_qk_diag_skip
+        self.sv_diag_skip = self.config.sa_sv_diag_skip
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.chunk_attn_window_size = chunk_attn_window_size
@@ -1932,6 +1936,10 @@ class AttentionOp(nnx.Module):
     pad_q = 0
     pad_kv = 0
     decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+    if getattr(self.config, "sa_ignore_segment_ids", False):
+      # Every row is one segment (stream chunking), so the segment mask is a no-op; causal masking still applies.
+      decoder_segment_ids = None
+      decoder_segment_ids_kv_in = None
 
     if max_utils.is_eval(self.config):
       block_q = self.eval_block_q
@@ -2038,6 +2046,21 @@ class AttentionOp(nnx.Module):
     # create_splash_attention config
     def create_sa_config(config, query, key, attn_logits_soft_cap):
       if config.use_tokamax_splash:
+        # Tokamax only allows diagonal sub-tile skipping with a pure `CausalMask`, which
+        # GLOBAL/MLA get unless load-balanced context parallelism permutes the sequence.
+        use_diag_skip = (
+            self.attention_type in (AttentionType.GLOBAL, AttentionType.MLA)
+            and query.shape[2] == key.shape[2]
+            and not (cp_size > 1 and load_balanced_context_parallel)
+        )
+        diag_skip_kwargs = {}
+        if use_diag_skip and (self.qk_diag_skip or self.sv_diag_skip):
+          # Only passed when enabled so older Tokamax releases (< 0.0.15) keep working by default.
+          diag_skip_kwargs = {
+              "qk_diag_skip": self.qk_diag_skip,
+              "sv_diag_skip": self.sv_diag_skip,
+              "qk_diag_grid": config.sa_qk_diag_grid,
+          }
         sa_config = tokamax_splash_kernel.SplashConfig(
             block_q=min(block_q, query.shape[2]),
             block_kv=min(block_kv, key.shape[2]),
@@ -2076,6 +2099,7 @@ class AttentionOp(nnx.Module):
                 else (_COMPRESSED_DQ_REDUCTION_STEPS if self.attention_type == AttentionType.COMPRESSED else None)
             ),
             use_experimental_scheduler=self.use_splash_scheduler,
+            **diag_skip_kwargs,
         )
       else:
         sa_config = splash_attention_kernel.BlockSizes(
@@ -2259,7 +2283,7 @@ class AttentionOp(nnx.Module):
     elif not use_tokamax_ring and not use_ulysses and not use_usp and self.config.use_jax_splash:
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
-      segment_axis_names_splash_kernel = nn.logical_to_mesh_axes((Q_LENGTH,))
+      segment_axis_names_splash_kernel = logical_to_spec((Q_LENGTH,))
     elif not use_tokamax_ring and not use_ulysses and not use_usp:
       # Create multi-head mask
       multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) * query.shape[1])
@@ -2926,9 +2950,9 @@ class AttentionOp(nnx.Module):
 
     local_out = self.wv_product(local_exps, value, model_mode, wv_product_einsum)
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
-      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      local_out = with_logical_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
     elif model_mode == MODEL_MODE_PREFILL:
-      local_out = partitioning.with_sharding_constraint(local_out, (BATCH_ATTN, KV_LENGTH, HEAD, D_KV))
+      local_out = with_logical_constraint(local_out, (BATCH_ATTN, KV_LENGTH, HEAD, D_KV))
 
     if self.reshape_q and q_seq_len == 1:
       local_max = local_max[:, 0:1, :, :]
@@ -2936,9 +2960,9 @@ class AttentionOp(nnx.Module):
       local_out = local_out[:, 0:1, :, :]
 
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
-      local_max = partitioning.with_sharding_constraint(local_max, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      local_sum = partitioning.with_sharding_constraint(local_sum, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      local_out = partitioning.with_sharding_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      local_max = with_logical_constraint(local_max, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      local_sum = with_logical_constraint(local_sum, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+      local_out = with_logical_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
 
     return local_out, local_max, local_sum
 
@@ -2991,29 +3015,29 @@ class AttentionOp(nnx.Module):
       weights_prefill_shd = (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH)
 
     if self.is_partition_in_decode(q_seq_len):
-      query = partitioning.with_sharding_constraint(query, decode_q_sharding)
+      query = with_logical_constraint(query, decode_q_sharding)
       # avoid sharding scale tensor when using kv cache quantization
       if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, decode_kv_sharding)
-        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, decode_kv_sharding)
+        key.qvalue = with_logical_constraint(key.qvalue, decode_kv_sharding)
+        value.qvalue = with_logical_constraint(value.qvalue, decode_kv_sharding)
       else:
-        key = partitioning.with_sharding_constraint(key, decode_kv_sharding)
-        value = partitioning.with_sharding_constraint(value, decode_kv_sharding)
+        key = with_logical_constraint(key, decode_kv_sharding)
+        value = with_logical_constraint(value, decode_kv_sharding)
     elif model_mode == MODEL_MODE_PREFILL:
-      query = partitioning.with_sharding_constraint(query, prefill_q_sharding)
+      query = with_logical_constraint(query, prefill_q_sharding)
       # avoid sharding scale tensor when using kv cache quantization
       if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = partitioning.with_sharding_constraint(key.qvalue, prefill_kv_sharding)
-        value.qvalue = partitioning.with_sharding_constraint(value.qvalue, prefill_kv_sharding)
+        key.qvalue = with_logical_constraint(key.qvalue, prefill_kv_sharding)
+        value.qvalue = with_logical_constraint(value.qvalue, prefill_kv_sharding)
       else:
-        key = partitioning.with_sharding_constraint(key, prefill_kv_sharding)
-        value = partitioning.with_sharding_constraint(value, prefill_kv_sharding)
+        key = with_logical_constraint(key, prefill_kv_sharding)
+        value = with_logical_constraint(value, prefill_kv_sharding)
 
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode, qk_product_einsum)
     if self.is_partition_in_decode(q_seq_len):
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, weights_decode_shd)
+      attn_weights = with_logical_constraint(attn_weights, weights_decode_shd)
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_weights = partitioning.with_sharding_constraint(attn_weights, weights_prefill_shd)
+      attn_weights = with_logical_constraint(attn_weights, weights_prefill_shd)
 
     if self.attn_logits_soft_cap:
       attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
@@ -3061,9 +3085,9 @@ class AttentionOp(nnx.Module):
       attn_weights = apply_mask_to_logits(attn_weights, indexer_mask)
 
     if self.is_partition_in_decode(q_seq_len):
-      attn_mask = partitioning.with_sharding_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
+      attn_mask = with_logical_constraint(attn_mask, (KV_LENGTH, HEAD, None, None, None))
     elif model_mode == MODEL_MODE_PREFILL:
-      attn_mask = partitioning.with_sharding_constraint(attn_mask, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
+      attn_mask = with_logical_constraint(attn_mask, (BATCH_ATTN, HEAD, None, PREFILL_LENGTH, KV_LENGTH))
     if attn_mask is not None:
       attn_weights = apply_mask_to_logits(attn_weights, attn_mask)
 

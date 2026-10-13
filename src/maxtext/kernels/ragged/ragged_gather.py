@@ -445,7 +445,7 @@ def ragged_gather(
       core_axis_name="core",
       subcore_axis_name="subcore",
   )
-  return pl.kernel(  # pytype: disable=wrong-keyword-args
+  return pl.kernel(
       functools.partial(
           main_kernel,
           core_axis_name=vector_mesh.core_axis_name,

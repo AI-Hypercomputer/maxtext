@@ -20,6 +20,8 @@ ragged_gather_reduce_tc and its metadata). Tokens are laid out as
 """
 
 import dataclasses
+import functools
+import logging
 import math
 
 import jax
@@ -323,15 +325,23 @@ class RaggedGatherReduceMetadata:
       token and token count of each block.
     block_size: Maximum VMEM rows per block (valid input rows plus output
       tokens), which also bounds the row DMAs in flight per block.
+    num_indices: Length of the `indices` the metadata was derived from
+      (`num_out_tokens * top_k`, or the buffer cap for windowed indices).
   """
 
   src_rows: jax.Array
   tokens: jax.Array
   blocks: jax.Array
   block_size: int = jax.tree.static()
+  num_indices: int = jax.tree.static()
 
 
-def _ragged_gather_reduce_tc_layout(num_indices: int, top_k: int, block_size: int) -> tuple[int, int, int]:
+def _ragged_gather_reduce_tc_layout(
+    num_indices: int,
+    top_k: int,
+    block_size: int,
+    num_out_tokens: int | None = None,
+) -> tuple[int, int, int]:
   """Returns (max_blocks, window, slots_len) of the metadata layout.
 
   A token costs its valid rows plus its output row. Block `b` takes the tokens
@@ -344,9 +354,12 @@ def _ragged_gather_reduce_tc_layout(num_indices: int, top_k: int, block_size: in
     num_indices: Length of the forward gather's indices.
     top_k: Number of occurrences of each token id in the indices.
     block_size: Maximum VMEM rows per block.
+    num_out_tokens: Number of output tokens; defaults to `num_indices // top_k`.
   """
+  if num_out_tokens is None:
+    num_out_tokens = num_indices // top_k
   align = _RAGGED_GATHER_REDUCE_TC_ALIGN
-  max_blocks = pl.cdiv(num_indices + num_indices // top_k, block_size - top_k)
+  max_blocks = pl.cdiv(num_indices + num_out_tokens, block_size - top_k)
   window = pl.cdiv(block_size, align) * align + align
   slots_len = pl.cdiv(max(num_indices, window), align) * align
   return max_blocks, window, slots_len
@@ -361,6 +374,41 @@ def _check_ragged_gather_reduce_tc_args(top_k: int, block_size: int):
     )
 
 
+@functools.cache
+def _warn_packed_sort_fallback(n: int, max_key: int, pos_bits: int, key_bits: int) -> None:
+  """Logs, once per shape at trace time, that packed_stable_sort took the slower tuple sort."""
+  logging.warning(
+      "packed_stable_sort: %d position bits (n=%d) + %d key bits (max_key=%d) > 32; "
+      "falling back to the (key, position) tuple sort.",
+      pos_bits,
+      n,
+      key_bits,
+      max_key,
+  )
+
+
+def packed_stable_sort(key: jax.Array, max_key: int) -> tuple[jax.Array, jax.Array]:
+  """Stable sort of `arange(len(key))` by non-negative int `key` <= max_key; returns (sorted_key, positions).
+
+  Sorts the single uint32 array `key << pos_bits | position` when it fits in 32 bits (else the (key, position)
+  tuple sort). The positions are distinct, so every packed value is unique and the unstable single-array sort
+  gives the stable order.
+  """
+  n = key.shape[0]
+  positions = jnp.arange(n, dtype=jnp.int32)
+  pos_bits = max(1, (n - 1).bit_length())
+  key_bits = max(1, int(max_key).bit_length())
+  if pos_bits + key_bits > 32:
+    _warn_packed_sort_fallback(n, int(max_key), pos_bits, key_bits)
+    sorted_key, sorted_positions = jax.lax.sort((key.astype(jnp.int32), positions), num_keys=1, is_stable=True)
+    return sorted_key, sorted_positions
+  shift = jnp.uint32(pos_bits)
+  packed_key = (key.astype(jnp.uint32) << shift) | positions.astype(jnp.uint32)
+  sorted_packed = jax.lax.sort(packed_key, is_stable=False)
+  sorted_positions = (sorted_packed & jnp.uint32((1 << pos_bits) - 1)).astype(jnp.int32)
+  return (sorted_packed >> shift).astype(jnp.int32), sorted_positions
+
+
 def ragged_gather_reduce_tc_metadata(
     indices: jax.Array,
     start: jax.Array | int,
@@ -368,6 +416,8 @@ def ragged_gather_reduce_tc_metadata(
     *,
     top_k: int,
     block_size: int = 896,
+    num_out_tokens: int | None = None,
+    packed_sort: bool = False,
 ) -> RaggedGatherReduceMetadata:
   """Derives the routing consumed by `ragged_gather_reduce_tc`.
 
@@ -397,22 +447,30 @@ def ragged_gather_reduce_tc_metadata(
     block_size: Maximum VMEM rows (valid input rows plus output tokens) per
       block of the kernel. Must exceed `top_k`, and `ragged_gather_reduce_tc`
       requires its block buffers to fit in VMEM for the token shape.
+    num_out_tokens: Number of output tokens. Defaults to `num_indices // top_k`;
+      set it when `indices` is already the `[start, start + cap)` window of the
+      full indices (then pass `start=0`).
+    packed_sort: Compact the slots with `packed_stable_sort` (same result, a
+      single-array sort) instead of the (key, position) tuple sort.
 
   Returns:
     The compacted slots and block table.
   """
   _check_ragged_gather_reduce_tc_args(top_k, block_size)
   num_indices = indices.shape[0]
-  if num_indices % top_k:
-    raise ValueError(f"indices length ({num_indices}) must be divisible by top_k ({top_k}).")
+  if num_out_tokens is None:
+    if num_indices % top_k:
+      raise ValueError(f"indices length ({num_indices}) must be divisible by top_k ({top_k}).")
+    num_out_tokens = num_indices // top_k
   if isinstance(num_tokens, int) and num_tokens < 0:
     raise ValueError(f"num_tokens must be non-negative, got {num_tokens}.")
   if isinstance(start, int) and start < 0:
     raise ValueError(f"start must be non-negative, got {start}.")
   if isinstance(start, int) and isinstance(num_tokens, int) and start + num_tokens > num_indices:
     raise ValueError(f"start + num_tokens ({start + num_tokens}) must not exceed indices" f" length ({num_indices}).")
-  num_out_tokens = num_indices // top_k
-  max_blocks, _, slots_len = _ragged_gather_reduce_tc_layout(num_indices, top_k, block_size)
+  max_blocks, _, slots_len = _ragged_gather_reduce_tc_layout(
+      num_indices, top_k, block_size, num_out_tokens=num_out_tokens
+  )
   if num_out_tokens == 0:
     empty_slots = jnp.zeros((slots_len,), jnp.int32)
     return RaggedGatherReduceMetadata(
@@ -420,6 +478,7 @@ def ragged_gather_reduce_tc_metadata(
         tokens=empty_slots,
         blocks=jnp.zeros((1,), jnp.int32),
         block_size=block_size,
+        num_indices=num_indices,
     )
 
   start = jnp.asarray(start, dtype=jnp.int32)
@@ -429,7 +488,10 @@ def ragged_gather_reduce_tc_metadata(
   valid = (rel >= 0) & (rel < num_tokens)
   # Valid slots first, by token and then buffer order; invalid slots last.
   key = jnp.where(valid, indices, num_out_tokens).astype(jnp.int32)
-  sorted_key, sorted_positions = jax.lax.sort((key, positions), num_keys=1, is_stable=True)
+  if packed_sort:
+    sorted_key, sorted_positions = packed_stable_sort(key, num_out_tokens)
+  else:
+    sorted_key, sorted_positions = jax.lax.sort((key, positions), num_keys=1, is_stable=True)
   pad = slots_len - num_indices
   src_rows = jnp.pad(sorted_positions - start, (0, pad))
   tokens = jnp.pad(sorted_key, (0, pad))
@@ -482,6 +544,7 @@ def ragged_gather_reduce_tc_metadata(
       tokens=tokens,
       blocks=blocks.astype(jnp.int32),
       block_size=block_size,
+      num_indices=num_indices,
   )
 
 
@@ -510,7 +573,7 @@ def ragged_gather_reduce_tc(
   Args:
     x: Ragged token buffer of shape (max_input_tokens, d0, d1).
     metadata: Routing from `ragged_gather_reduce_tc_metadata`.
-    num_out_tokens: Number of output tokens, `len(indices) // top_k`.
+    num_out_tokens: Number of output tokens the metadata was derived for.
     top_k: Number of occurrences of each token id in `indices`.
 
   Returns:
@@ -528,7 +591,9 @@ def ragged_gather_reduce_tc(
   num_buffers = _RAGGED_GATHER_REDUCE_TC_NUM_BUFFERS
   align = _RAGGED_GATHER_REDUCE_TC_ALIGN
   fields = _RAGGED_GATHER_REDUCE_TC_BLOCK_FIELDS
-  max_blocks, window, slots_len = _ragged_gather_reduce_tc_layout(num_out_tokens * top_k, top_k, block_size)
+  max_blocks, window, slots_len = _ragged_gather_reduce_tc_layout(
+      metadata.num_indices, top_k, block_size, num_out_tokens=num_out_tokens
+  )
   expected_shapes = ((slots_len,), (slots_len,), (1 + fields * max_blocks,))
   shapes = (
       metadata.src_rows.shape,
@@ -538,8 +603,8 @@ def ragged_gather_reduce_tc(
   if shapes != expected_shapes:
     raise ValueError(
         "metadata (src_rows, tokens, blocks) must have shapes"
-        f" {expected_shapes}, got {shapes}; was it derived from"
-        f" {num_out_tokens * top_k} indices with top_k={top_k}?"
+        f" {expected_shapes}, got {shapes}; was it derived for"
+        f" num_out_tokens={num_out_tokens} with top_k={top_k}?"
     )
   # A (d0, d1) token is padded to whole (sublanes, 128) tiles in VMEM.
   itemsize = jnp.dtype(x.dtype).itemsize

@@ -135,8 +135,8 @@ jobs:
           # Edit docs/release_notes.md on this branch directly to correct any wording or categorization before merging.
           BRANCH_NAME="chore/changelog-update-${DATE_STR}-${GITHUB_RUN_NUMBER}"
 
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "maxtext-bot"
+          git config --global user.email "maxtext-github-bot@google.com"
 
           git checkout -b "${BRANCH_NAME}"
           git add docs/release_notes.md

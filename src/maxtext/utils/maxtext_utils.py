@@ -36,12 +36,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.configs import types
-
-try:
-  # lineage_adapter is Google-internal and excluded from the open-source export.
-  from maxtext.experimental.lineage import lineage_adapter
-except ImportError:
-  lineage_adapter = None
+from maxtext.experimental.lineage import lineage_adapter
 from maxtext.multimodal import processor as mm_processor
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.diloco import utils as diloco_utils
@@ -761,7 +756,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5, DecoderBlockType.DEEPSEEK4):
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.DEEPSEEK4):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -1328,6 +1323,7 @@ def calculate_tflops_training_per_device(config, log=True):
       gate_flops = 2 * config.per_device_batch_size * config.max_target_length * config.emb_dim * config.num_experts
       if config.decoder_block in (
           DecoderBlockType.DEEPSEEK,
+          DecoderBlockType.DEEPSEEK4,
           DecoderBlockType.LLAMA4,
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.GEMMA4,
@@ -1709,10 +1705,11 @@ def setup_initial_state(
 
   # Initialization
   with axis_rules(config.logical_axis_rules):
+    native = lineage_adapter.is_native(config)
     restored, raw_params = checkpointing.load_state_if_possible(
         checkpoint_manager,
         data_iterator,
-        config.load_parameters_path,
+        "" if native else config.load_parameters_path,
         config.load_full_state_path,
         config.checkpoint_storage_concurrent_gb,
         unboxed_abstract_state,
@@ -1726,6 +1723,17 @@ def setup_initial_state(
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
     )
+    if native and restored is None and raw_params is None and config.load_parameters_path:
+      # The Lineage-native model restores MaxText-layout params against its own abstract target.
+      raw_params = checkpointing.load_params_from_path(
+          config.load_parameters_path,
+          lineage_adapter.maxtext_restore_target(config, mesh),
+          config.checkpoint_storage_concurrent_gb,
+          use_ocdbt=config.checkpoint_storage_use_ocdbt,
+          use_zarr3=config.checkpoint_storage_use_zarr3,
+          enable_single_replica_ckpt_restoring=bool(config.enable_single_replica_ckpt_restoring),
+          colocated_python_checkpointing=bool(config.enable_single_controller and config.colocated_python_checkpointing),
+      )
     # Partial or fully restored
     was_restored = bool(restored is not None or raw_params is not None)
 
@@ -1740,7 +1748,10 @@ def setup_initial_state(
         in_shardings=None,
         out_shardings=state_mesh_shardings,
     )()
-    if raw_params:
+    if raw_params and native:
+      # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
+      lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
+    elif raw_params:
       # Params-only load (base model weights): overlay restored weights, keep init for everything else.
       target_model = (
           state["model"]
@@ -2046,7 +2057,7 @@ def create_device_mesh(config, devices=None):
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 
-  if getattr(config, "use_lineage", False) and lineage_adapter is not None:
+  if getattr(config, "use_lineage", False):
     dcn_parallelism = (
         max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
     )

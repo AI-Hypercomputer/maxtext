@@ -24,6 +24,7 @@ import jax
 import pytest
 import yaml
 
+from flax.core.spmd import logical_axis_rules
 from jax.sharding import PartitionSpec
 from jax.sharding import Mesh
 from jax.experimental import mesh_utils
@@ -325,3 +326,56 @@ def test_split_axis_rule_accompanies_parent_rule(split_axis, parent_axis):
       missing.append(str(path))
 
   assert not missing, f"logical_axis_rules define '{parent_axis}' but not '{split_axis}' in: {missing}"
+
+
+def test_logical_to_spec_follows_rule_priority():
+  rules = (("batch", "X"), ("features", "X"), ("heads", "Y"), ("batch", "Z"))
+  spec = sharding.logical_to_spec(("batch", "length", "heads", "features"), rules=rules)
+  assert spec == PartitionSpec("X", None, "Y", None)
+
+
+def test_logical_to_spec_skips_mesh_axes_already_used():
+  rules = (("a", ("data", "fsdp")), ("b", "fsdp"), ("b", "tensor"))
+  assert sharding.logical_to_spec(("a", "b"), rules=rules) == PartitionSpec(("data", "fsdp"), "tensor")
+
+
+def test_logical_to_spec_keeps_none_and_unconstrained():
+  spec = sharding.logical_to_spec((None, "a", PartitionSpec.UNCONSTRAINED), rules=(("a", "data"),))
+  assert spec == PartitionSpec(None, "data", PartitionSpec.UNCONSTRAINED)
+
+
+def test_logical_to_spec_uses_the_rules_in_context():
+  with logical_axis_rules((("a", "data"),)):
+    assert sharding.logical_to_spec(("a", "b")) == PartitionSpec("data", None)
+
+
+def test_logical_to_spec_rejects_repeated_names():
+  with pytest.raises(ValueError, match="more than once"):
+    sharding.logical_to_spec(("a", "a"), rules=())
+
+
+def test_logical_to_spec_of_none_is_none():
+  assert sharding.logical_to_spec(None, rules=()) is None
+
+
+def _lower_logical_constraint(mesh_context, mesh):
+  rules = (("b", "data"), ("h", "tensor"))
+  f = jax.jit(lambda a: sharding.with_logical_constraint(a, ("b", "h")))
+  with mesh_context(mesh), logical_axis_rules(rules):
+    return f.lower(jax.numpy.ones((2, 2))).as_text()
+
+
+def test_with_logical_constraint_applies_under_a_global_mesh():
+  mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("data", "tensor"))
+  assert "sharding_constraint" in _lower_logical_constraint(jax.set_mesh, mesh)
+
+
+def test_with_logical_constraint_is_skipped_under_a_plain_mesh_context():
+  # MaxEngine enters its mesh this way; the Flax call it replaces did nothing there either.
+  mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("data", "tensor"))
+  assert "sharding_constraint" not in _lower_logical_constraint(lambda m: m, mesh)
+
+
+def test_with_logical_constraint_without_rules_returns_the_input():
+  x = jax.numpy.ones((2, 2))
+  assert sharding.with_logical_constraint(x, ("b", "h")) is x

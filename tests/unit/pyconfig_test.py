@@ -209,6 +209,20 @@ class PyconfigTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       config_inference.ici_fsdp_parallelism = 4
 
+  def test_rope_direct_position_freqs_requires_positions_in_table(self):
+    def make_config(max_target_length):
+      return pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          rope_direct_position_freqs=True,
+          max_position_embeddings=4096,
+          max_target_length=max_target_length,
+      )
+
+    self.assertTrue(make_config(4096).rope_direct_position_freqs)
+    with self.assertRaises(ValueError):
+      make_config(4097)
+
   def _zero1_config(self, **kwargs):
     return pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
@@ -344,7 +358,10 @@ class PyconfigTest(unittest.TestCase):
 
       with self.subTest(decoder_block=decoder_block):
         with self.assertRaisesRegex(Exception, "requires `sparse_matmul=True`"):
-          initialize(sparse_matmul=False, megablox=False)
+          initialize(num_experts=2, base_mlp_dim=128, base_moe_mlp_dim=128, sparse_matmul=False, megablox=False)
+
+        config = initialize(num_experts=1, sparse_matmul=False, megablox=False)
+        self.assertEqual(config.num_experts, 1)
 
         with self.assertRaisesRegex(Exception, "does not support context parallelism"):
           initialize(ici_context_parallelism=2)
@@ -400,6 +417,19 @@ class PyconfigTest(unittest.TestCase):
         self.assertEqual(result, os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml"))
       finally:
         os.chdir(orig)
+
+  def test_resolve_or_infer_config_accepts_yaml_suffix(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      for suffix in (".yml", ".yaml", ".YAML"):
+        with self.subTest(suffix=suffix):
+          config_path = os.path.join(tmpdir, f"model{suffix}")
+          with open(config_path, "w", encoding="utf-8") as f:
+            f.write("steps: 1\n")
+          resolved, remaining = pyconfig._resolve_or_infer_config(  # pylint: disable=protected-access
+              ["train.py", config_path, "steps=2"]
+          )
+          self.assertEqual(resolved, config_path)
+          self.assertEqual(remaining, ["steps=2"])
 
   def test_config_file_mapping(self):
     for module, relative_path in _CONFIG_FILE_MAPPING.items():

@@ -316,7 +316,7 @@ The schedule values above are a strong default for same-size pruning recovery. S
 
 #### Multi-host on GKE via Cluster Toolkit
 
-A reference launcher is provided at [`src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh). It handles image preparation (`prep_image` layers Tunix on top of the MaxText base image), runner image upload (`upload_runner`), workload submission (`submit`), log streaming (`monitor`), workload cancellation (`cleanup`), and an auto-resume loop (`resume_until_done`) for long-running jobs.
+A reference launcher is provided at [`src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh`](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh). It handles image preparation (`prep_image` builds the [TPU post-training Docker image](../build_maxtext.md#tpu-post-training-docker-image)), runner image upload (`upload_runner`), workload submission (`submit`), log streaming (`monitor`), workload cancellation (`cleanup`), and an auto-resume loop (`resume_until_done`) for long-running jobs.
 
 Minimum environment variables:
 
@@ -343,7 +343,7 @@ export DISTILL_LAYER_INDICES=[3,7,11,15,19,23,27,31]   # no spaces inside bracke
 Then:
 
 ```bash
-# (Optional) One-time: layer a custom Tunix pin on top of the MaxText base image
+# One-time: build the TPU post-training Docker image (run from an activated MaxText venv)
 bash src/maxtext/trainers/post_train/distillation/scripts/run_distill_ctk.sh prep_image
 
 # Bake ./src into a runner image and push to gcr.io/$PROJECT_ID/...:${USER}-distill

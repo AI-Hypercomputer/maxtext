@@ -740,6 +740,29 @@ class LhsScaleTest(unittest.TestCase):
     self.assertIsNone(scale)
 
 
+class QwixWeightGradTilingTest(unittest.TestCase):
+  """Weight-gradient tiling in the Qwix quantization rule."""
+
+  def _qwix_fp8_rule(self, *extra):
+    cfg = pyconfig.initialize(
+        ["", get_test_config_path(), "quantization=fp8", "use_qwix_quantization=true", *extra],
+        run_name="qwix_weight_grad_tiling_test",
+        skip_jax_distributed_system=True,
+    )
+    return quantizations.get_quantization_rule(cfg)[-1]
+
+  def test_qwix_weight_grad_is_not_tiled_by_default(self):
+    # Tiling the weight-gradient contraction makes XLA all-reduce the full gradient under FSDP.
+    self.assertIsNone(self._qwix_fp8_rule().bwd_weight_grad_tile_size)
+
+  def test_qwix_weight_grad_tile_count_sets_tile_size(self):
+    self.assertEqual(self._qwix_fp8_rule("qwix_bwd_weight_grad_tile_count=4").bwd_weight_grad_tile_size, 0.25)
+
+  def test_qwix_weight_grad_tile_count_must_be_positive(self):
+    with self.assertRaises(ValueError):
+      self._qwix_fp8_rule("qwix_bwd_weight_grad_tile_count=0")
+
+
 class RouterProjQwixInterceptionTest(unittest.TestCase):
   """Verifies Qwix interception behavior for the MoE router projection."""
 
