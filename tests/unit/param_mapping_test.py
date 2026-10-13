@@ -32,9 +32,18 @@ from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.checkpoint_conversion.utils import utils
 from maxtext.checkpoint_conversion.utils.utils import process_maxtext_param
+from maxtext.utils import globals as maxtext_globals
 
 
 class ParamMappingTest(unittest.TestCase):
+
+  def test_every_hf_model_config_has_mapping_and_hooks(self):
+    # to_maxtext and safetensors_dynamic look up these tables with the same model_name, and to_maxtext rejects a
+    # model that has no HF_IDS entry.
+    configs = set(hf_model_configs.HF_MODEL_CONFIGS)
+    self.assertEqual(configs - set(param_mapping.PARAM_MAPPING), set())
+    self.assertEqual(configs - set(param_mapping.HOOK_FNS), set())
+    self.assertEqual(configs - set(maxtext_globals.HF_IDS), set())
 
   def test_gemma3_mapping_unscanned(self):
     config = {
