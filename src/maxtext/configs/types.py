@@ -1369,8 +1369,7 @@ class MoEGeneral(BaseModel):
           " moe_use_direct_token_gather=True. 'xla': XLA gather (default). 'tc': fused TensorCore Pallas kernel"
           " (kernels/moe_combine_tc.py `permute`, forward and backward). Requires moe_use_direct_token_gather=True"
           " and use_ring_of_experts=False; falls back to 'xla' at runtime when the kernel preconditions do not"
-          " hold. Intended for use with --xla_tpu_offload_gather_to_sparsecore=false"
-          " --xla_tpu_offload_all_supported_gathers_to_sparsecore=false."
+          " hold."
       ),
   )
   use_gather_mosaic_kernel: bool = Field(
