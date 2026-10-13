@@ -212,13 +212,6 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
-def take_along_last_axis_dense(x: jax.Array, indices: jax.Array) -> jax.Array:
-  """`jnp.take_along_axis(x, indices, axis=-1)` as a fused compare-select-reduce, avoiding 1-lane HLO gather/scatter."""
-  iota = jax.lax.broadcasted_iota(indices.dtype, (1,) * indices.ndim + (x.shape[-1],), indices.ndim)
-  hit = indices[..., None] == iota  # [..., k, num_classes]
-  return jnp.sum(jnp.where(hit, x[..., None, :], jnp.zeros((), x.dtype)), axis=-1)
-
-
 @functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
 def top_k_dense_vjp(x: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
   """`jax.lax.top_k(x, k)` with a dense compare-select-reduce backward instead of JAX's default 1-lane scatter-add."""
@@ -1021,7 +1014,7 @@ class RoutedMoE(nnx.Module):
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-        top_k_weights = take_along_last_axis_dense(router_probs, gather_indices).astype(self.dtype)
+        top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
       else:
         top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
     else:
@@ -1080,7 +1073,7 @@ class RoutedMoE(nnx.Module):
       if self.per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
       ):
-        per_expert_scale_topk = take_along_last_axis_dense(self.per_expert_scale.value.astype(jnp.float32), top_k_indices)
+        per_expert_scale_topk = jnp.take_along_axis(self.per_expert_scale.value[None, None, :], top_k_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return top_k_weights, top_k_indices
