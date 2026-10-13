@@ -27,10 +27,11 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${E2E_RENDER:?set E2E_RENDER to the DRY_RUN output of your e2e launch}"
 : "${AOT_IMAGE:?set AOT_IMAGE to an image with the MaxText and Tunix of the e2e run}"
-eval "$(python3 "$HERE/render_e2e.py" --print-aot-env --e2e-render "$E2E_RENDER" \
+_aot_env=$(python3 "$HERE/render_e2e.py" --print-aot-env --e2e-render "$E2E_RENDER" \
   --extra-maxtext-flags "${EXTRA_MAXTEXT_FLAGS:-}" --replace-maxtext-flags "${REPLACE_MAXTEXT_FLAGS:-}" \
   --libtpu-extra="${LIBTPU_EXTRA:-}" --libtpu-drop="${LIBTPU_DROP:-}" --trainer-slice "${TRAINER_SLICE:-}" \
-  --compute-logps-chunk-size "${COMPUTE_LOGPS_CHUNK_SIZE:-}")"
+  --compute-logps-chunk-size "${COMPUTE_LOGPS_CHUNK_SIZE:-}")
+eval "$_aot_env"
 case "${TRAINER_SLICE:-}" in 4x8x8) _topo=tpu7x-512 ;; *) _topo=tpu7x-256 ;; esac
 TOPO=${AOT_COMPILE_TOPOLOGY:-$_topo}
 LOG=${LOG:-logs/aot-e2e-$(date -u +%Y%m%dT%H%M%SZ).log}

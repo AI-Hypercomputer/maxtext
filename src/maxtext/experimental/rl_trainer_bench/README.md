@@ -76,7 +76,8 @@ The output is a stream of JobSets (orchestrator, trainer, one per rollout engine
 launcher log lines. The renderer picks the trainer and the orchestrator JobSet by the `--process_main=` of their
 `main` container and ignores everything else. If you already have the two JobSets as separate files, pass them with
 `--train-yaml` and `--orch-yaml` instead. The DRY_RUN output describes your environment (namespace, images,
-buckets), so keep it local.
+buckets), so keep it local. In our runs the dry run still switched the current kubectl context and printed (without
+executing) the delete commands of a stop, so check your context afterwards.
 
 ### 2. Render the bench JobSet
 
@@ -100,7 +101,7 @@ The knobs, all environment variables of `render_e2e.sh` (the Python script takes
 `IMAGE` replaces the client image; the Pathways containers keep the e2e render's. `STEPS` (default 3) is the number of
 optimizer steps and `MICRO_STEPS` the `fwd_bwd` calls per step. Set `MICRO_STEPS` to what your e2e run does per
 optimizer step (the orchestrator logs one train call per micro-batch); the default of 9 (5 with
-`TRAINER_SLICE=4x8x8`) is an example calibration from the 397B recipe, where about 1,152 trajectories per step packed
+`TRAINER_SLICE=4x8x8`) is an example calibration from our 397B runs, where about 1,152 trajectories per step packed
 into 9 micro-batches of 64 rows on a 4x4x8 trainer.
 
 `EXTRA_MAXTEXT_FLAGS="k=v ..."` appends MaxText flags (MaxText keys are last-wins), and
@@ -176,7 +177,7 @@ The profile goes under `<output-prefix>/<NAME>/tensorboard/` in the usual `plugi
 
 Tunix's TRAINER_WARMUP_COMPILE payload fixes the shapes, dtypes, fields and per-row segment count of the packed
 micro-batch, which is what the compile needs. As a timing payload it is degenerate for a MoE model: at the 397B shapes
-it is about 97% padding, every token carries the same id and every routed expert is UNSET, so with router replay every
+it was about 97% padding in our runs (measured with `check_payload_routing.py`), every token carries the same id and every routed expert is UNSET, so with router replay every
 token falls back to the router with identical inputs and lands on the same experts.
 
 `PAYLOAD=realistic` (the default) keeps the warm-up payload's structure and rebuilds its contents with
@@ -198,7 +199,7 @@ padded, since the e2e run's last micro-batch of a step is a partially filled tai
 the final one. Before the steps the driver logs one `PAYLOAD_ROUTING` line per payload with the offline per-layer
 ratio of the replayed tokens; the runtime ratio, which includes the padding's router-chosen experts, is in the
 engine's `MOE_DROP_AUDIT` lines with the MaxText flag `log_moe_drops=true`. Building the two payloads at the 397B
-shapes takes a couple of minutes of host time before the first step. `PAYLOAD=warmup` restores the warm-up payload.
+shapes took about two minutes each of host time in our runs, before the first step. `PAYLOAD=warmup` restores the warm-up payload.
 
 ## Numerics mode
 

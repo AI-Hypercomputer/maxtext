@@ -45,6 +45,8 @@ Writes a file and nothing else; it never talks to a cluster. With --print-aot-en
 trainer's MaxText and XLA flags and mesh for aot_e2e.sh instead of rendering.
 """
 
+from __future__ import annotations
+
 import argparse
 import copy
 import os
