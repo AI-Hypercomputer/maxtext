@@ -86,6 +86,15 @@ KERNEL_NAMES = ("fwd_bwd", "accumulate", "update")
 # unless a buffer overflows, so it is added only when the replay is on.
 DROPLESS_FWD_BWD = "fwd_bwd_dropless"
 FIRST_PHASE_FWD_BWD = "fwd_bwd_first_phase"
+# Under `retry_dropless_final_micro_batch`, the `fwd_bwd` the final micro-batch of each step (`fwd_bwd(...,
+# apply_optimizer=True)`) runs: the regular graph with every RoutedMoE `force_dropless` (see
+# `apply_final_dropless_overrides`).
+FINAL_DROPLESS_FWD_BWD = "fwd_bwd_final_dropless"
+# log_moe_drops: the loss aux key carrying the per-layer drop audit, `{"dropped": int32[L], "max_ratio": f32[L]}`.
+# Tunix's GRPO/PPO losses set it (their forward runs on a merged copy of the model, so the sows never reach
+# the engine); for a loss that leaves the sows on the model the engine collects them itself. Popped from the
+# aux before metrics are recorded: the per-micro-batch MOE_DROP_AUDIT line reports it instead.
+MOE_AUDIT_AUX_KEY = "_moe_audit"
 
 _PURE_STATE_FALLBACK_WARNING = (
     "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
@@ -696,6 +705,71 @@ def apply_first_phase_overrides(config: pyconfig.HyperParameters, root: Any) -> 
       module.ragged_buffer_factor_override = float(config.first_phase_ragged_buffer_factor)
 
 
+def apply_final_dropless_overrides(root: Any) -> None:
+  """Turns `root` into the final micro-batch's dropless program, in place.
+
+  Every RoutedMoE drops no token (`force_dropless`: the ragged buffer is sized for the worst case, as at
+  ragged_buffer_factor=-1); token chunks, chunk pipelining and the remat policy stay as configured, so this is
+  the regular program at ragged_buffer_factor=-1 rather than the replay program of `apply_dropless_overrides`.
+  """
+  for _, module in nnx.iter_graph(root):
+    if isinstance(module, moe.RoutedMoE):
+      module.force_dropless = True
+
+
+def _natural_key(path_str: str) -> list[Any]:
+  """Sort key that orders `layers_10` after `layers_2`."""
+  import re  # pylint: disable=import-outside-toplevel
+
+  return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", path_str)]
+
+
+def collect_moe_audit(model: Any) -> dict[str, jax.Array] | None:
+  """The drop audit RoutedMoE sowed on `model` (log_moe_drops): per-layer vectors, natural path order.
+
+  A scanned stack contributes its stacked values in order. Of a sow tuple, the last entry is this forward's.
+  Returns None when nothing was sown.
+  """
+  found: dict[str, list[tuple[str, jax.Array]]] = {"moe_dropped_assignments": [], "moe_max_load_ratio": []}
+  for path, var in nnx.state(model, nnx.Intermediate).flat_state():
+    name = str(path[-1]) if path else ""
+    if name in found:
+      sown = var.get_value() if hasattr(var, "get_value") else var
+      latest = jnp.asarray(sown[-1] if isinstance(sown, tuple) else sown)
+      found[name].append(("/".join(str(p) for p in path), latest))
+  if not found["moe_dropped_assignments"]:
+    return None
+  out = {}
+  for name, key, dtype in (
+      ("moe_dropped_assignments", "dropped", jnp.int32),
+      ("moe_max_load_ratio", "max_ratio", jnp.float32),
+  ):
+    entries = sorted(found[name], key=lambda e: _natural_key(e[0]))
+    out[key] = jnp.concatenate([jnp.ravel(v).astype(dtype) for _, v in entries])
+  return out
+
+
+def _split_moe_audit(aux: Any) -> tuple[Any, Any]:
+  """`(aux without the drop audit, the audit or None)`."""
+  if isinstance(aux, dict) and MOE_AUDIT_AUX_KEY in aux:
+    aux = dict(aux)
+    return aux, aux.pop(MOE_AUDIT_AUX_KEY)
+  return aux, None
+
+
+@dataclasses.dataclass
+class _MoeAuditEntry:
+  """One micro-batch's drop audit (log_moe_drops), logged once its values are on the host."""
+
+  step: int
+  micro: int
+  program: str
+  # The audit of the program whose gradients were accumulated, and, if it was replayed, the discarded attempt's.
+  used: Any
+  replayed: bool = False
+  discarded: Any = None
+
+
 @dataclasses.dataclass(frozen=True)
 class _PendingOverflowCheck:
   """A micro-batch `fwd_bwd` accumulated before its MoE overflow flag reached the host.
@@ -713,6 +787,10 @@ class _PendingOverflowCheck:
   dropless_kernel: Callable[..., Any] | None
   accumulate_kernel: Callable[..., Any]
   micro_step: int
+  # log_moe_drops: this attempt's drop audit, its program label and train step (None/"" otherwise).
+  audit: Any = None
+  program: str = ""
+  train_step: int = 0
 
 
 class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
@@ -872,6 +950,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._fwd_bwd_compile: concurrent.futures.Future | None = None
     self._compile_executor: concurrent.futures.ThreadPoolExecutor | None = None
     self._dropless_replays = 0
+    # retry_dropless_final_micro_batch: the final micro-batch of a step runs `_compiled_fwd_bwd_final` (on
+    # `_final_graphdef`), compiled with the other kernels, or on the background thread ahead of the replay kernel.
+    self._final_dropless = bool(getattr(training_config, "retry_dropless_final_micro_batch", False))
+    self._final_graphdef: Any = None
+    self._final_source_graphdef: Any = None
+    self._compiled_fwd_bwd_final: Any = None
+    self._final_compile: concurrent.futures.Future | None = None
+    self._warned_no_apply_optimizer = False
+    # log_moe_drops: per-micro-batch audits waiting for the host, and this step's totals.
+    self._log_moe_drops = bool(getattr(training_config, "log_moe_drops", False))
+    self._moe_audit_queue: list[_MoeAuditEntry] = []
+    self._moe_dropped_used_step = 0
+    self._moe_dropped_discarded_step = 0
+    self._moe_audit_missing_step = False
     # The last micro-batch, whose overflow flag is read after the next one is dispatched (or in `update`).
     self._pending_overflow_check: _PendingOverflowCheck | None = None
     # Set when this run resumed from an intra-step checkpoint, cleared once the step it
@@ -1464,6 +1556,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         # No adapter set: the loss is a MaxText one, called MaxText's way.
         out = loss_callable(mdl, self._config, b, None, None, is_train=True)
       loss_out = _normalize_loss_output(out, self._has_aux)
+      if self._log_moe_drops:
+        # The audit from the loss's aux (Tunix's GRPO/PPO losses), else from the sows left on the model.
+        raw_aux = _normalize_loss_output(out, has_aux=True).aux_metrics
+        audit = raw_aux.get(MOE_AUDIT_AUX_KEY) if isinstance(raw_aux, dict) else None
+        if audit is None:
+          audit = collect_moe_audit(mdl)
+        aux_metrics = {k: v for k, v in (loss_out.aux_metrics or {}).items() if k != MOE_AUDIT_AUX_KEY}
+        if audit is not None:
+          aux_metrics[MOE_AUDIT_AUX_KEY] = audit
+        loss_out = loss_out.replace(aux_metrics=aux_metrics)
       has_overflow = None
       if self._dropless_replay:
         # RoutedMoE sows its overflow flag. MaxText's loss pops it into its aux as `has_moe_overflow`, and so do
@@ -1557,6 +1659,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._first_phase_graphdef, _, _ = nnx.split(mdl, nnx.Param, ...)
       self._first_phase_source_graphdef = graphdef
     return self._first_phase_graphdef
+
+  def _final_graphdef_for(self, graphdef: Any, params_pure: Any, rest_pure: Any) -> Any:
+    """`graphdef` with `apply_final_dropless_overrides` applied, edited on a copy of the model.
+
+    Cached until the model is re-split into a different graphdef.
+    """
+    if self._final_graphdef is None or self._final_source_graphdef != graphdef:
+      mdl = nnx.merge(graphdef, params_pure, rest_pure, copy=True)
+      apply_final_dropless_overrides(mdl)
+      self._final_graphdef, _, _ = nnx.split(mdl, nnx.Param, ...)
+      self._final_source_graphdef = graphdef
+    return self._final_graphdef
 
   def _in_first_phase(self) -> bool:
     """Returns True if the current train step is within the initial first-phase window."""
@@ -2034,6 +2148,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           in_shardings=fwd_bwd_in_shardings,
           out_shardings=fwd_bwd_out_shardings,
       )
+    self._compiled_fwd_bwd_final = None
+    if self._dropless_replay and self._final_dropless:
+      final_graphdef = self._final_graphdef_for(self._model_graphdef, params_pure, rest_pure)
+
+      def fwd_bwd_final_dropless(params, rest, dynamic):
+        batch = {**dynamic, **static_batch} if isinstance(dynamic, dict) else dynamic
+        return self._fwd_bwd_kernel(params, rest, batch, graphdef=final_graphdef)
+
+      self._compiled_fwd_bwd_final = jax.jit(
+          fwd_bwd_final_dropless,
+          in_shardings=fwd_bwd_in_shardings,
+          out_shardings=fwd_bwd_out_shardings,
+      )
     self._compiled_fwd_bwd_first_phase = None
     if self._dropless_replay and self._config.first_phase_ragged_buffer_factor > 0:
       first_phase_graphdef = self._first_phase_graphdef_for(self._model_graphdef, params_pure, rest_pure)
@@ -2078,6 +2205,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._jitted_kernels[DROPLESS_FWD_BWD] = self._compiled_fwd_bwd_dropless
     if self._compiled_fwd_bwd_first_phase is not None:
       self._jitted_kernels[FIRST_PHASE_FWD_BWD] = self._compiled_fwd_bwd_first_phase
+    if self._compiled_fwd_bwd_final is not None:
+      self._jitted_kernels[FINAL_DROPLESS_FWD_BWD] = self._compiled_fwd_bwd_final
     self._compiled_signature = _batch_signature(dynamic_batch, static_batch)
     self._compiled = True
 
@@ -2146,6 +2275,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._compiled_fwd_bwd_dropless = compiled[DROPLESS_FWD_BWD]
     if FIRST_PHASE_FWD_BWD in compiled:
       self._compiled_fwd_bwd_first_phase = compiled[FIRST_PHASE_FWD_BWD]
+    if FINAL_DROPLESS_FWD_BWD in compiled:
+      self._compiled_fwd_bwd_final = compiled[FINAL_DROPLESS_FWD_BWD]
     self._compile_eval(dummy_data, compiler_options)
 
   def compile_kernels(
@@ -2254,6 +2385,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         lowered[DROPLESS_FWD_BWD] = self._jitted_kernels[DROPLESS_FWD_BWD].lower(params_aval, rest_aval, batch_aval)
       if FIRST_PHASE_FWD_BWD in self._jitted_kernels:
         lowered[FIRST_PHASE_FWD_BWD] = self._jitted_kernels[FIRST_PHASE_FWD_BWD].lower(params_aval, rest_aval, batch_aval)
+      if FINAL_DROPLESS_FWD_BWD in self._jitted_kernels:
+        lowered[FINAL_DROPLESS_FWD_BWD] = self._jitted_kernels[FINAL_DROPLESS_FWD_BWD].lower(
+            params_aval, rest_aval, batch_aval
+        )
       return lowered
 
   def _start_running_sum(self, grads: Any) -> Any:
@@ -2275,10 +2410,25 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     Args:
       payload: Packed micro-batch training input.
-      **kwargs: Implementation-specific options, accepted for interface compatibility
-        and ignored by this engine.
+      **kwargs: Implementation-specific options. `apply_optimizer` (bool), which Tunix passes as the
+        orchestrator's flag for the step's final micro-batch, selects the final micro-batch's dropless program
+        under `retry_dropless_final_micro_batch`; everything else is ignored.
     """
     batch = self._prepare_batch(payload)
+    apply_optimizer = kwargs.get("apply_optimizer")
+    final = False
+    if self._dropless_replay and self._final_dropless:
+      if apply_optimizer is None:
+        if not self._warned_no_apply_optimizer:
+          # An older caller: every micro-batch then runs the ragged_buffer_factor program and an overflowing
+          # one is replayed dropless, so no token is dropped, but the final micro-batch is not dropless upfront.
+          logging.warning(
+              "retry_dropless_final_micro_batch=True, but fwd_bwd was called without apply_optimizer; the final "
+              "micro-batch runs the ragged_buffer_factor program (replayed dropless on overflow)."
+          )
+          self._warned_no_apply_optimizer = True
+      else:
+        final = bool(apply_optimizer) and not self._in_first_phase()
 
     model = getattr(self._state, "model", None) if self._state is not None else self._model
     if not isinstance(model, nnx.Module):
@@ -2360,8 +2510,37 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       elif self._fwd_bwd_compile is not None:
         future, self._fwd_bwd_compile = self._fwd_bwd_compile, None
         self._compiled_fwd_bwd = fwd_bwd_kernel = future.result()
+      if final:
+        # The step's final micro-batch: directly dropless, never replayed (it cannot overflow).
+        if self._compile_requested:
+          if not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled):
+            self._join_final_compile()
+          if not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled):
+            # Neither warmed up by compile(dummy_data) nor compiled in the background: only when the very first
+            # micro-batch of the run is also its step's last.
+            logging.warning("Compiling fwd_bwd_final_dropless on the critical path (first micro-batch is final).")
+            avals = jax.tree.map(_to_aval, (params, rest, inputs))
+            with self._sharding_ctx():
+              self._compiled_fwd_bwd_final = self._compiled_fwd_bwd_final.lower(*avals).compile(
+                  compiler_options=self._xla_options(None)
+              )
+          fwd_bwd_kernel = self._compiled_fwd_bwd_final
+        else:
+          fwd_bwd_kernel = functools.partial(
+              self._fwd_bwd_kernel, graphdef=self._final_graphdef_for(self._model_graphdef, params, rest)
+          )
     with self._sharding_ctx():
       outputs = fwd_bwd_kernel(params, rest, inputs)
+      if (
+          self._dropless_replay
+          and self._final_dropless
+          and self._compile_requested
+          and self._final_compile is None
+          and self._compiled_fwd_bwd_final is not None
+          and not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled)
+      ):
+        # Ahead of the replay kernel's, on the same thread: the first step's last micro-batch needs it for certain.
+        self._start_final_compile(self._compiled_fwd_bwd_final, params, rest, inputs)
       if (
           self._dropless_replay
           and self._compile_requested
@@ -2379,6 +2558,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       ):
         self._fwd_bwd_compile = self._start_background_compile(self._compiled_fwd_bwd, params, rest, inputs)
       loss, aux, new_rest, grads, denominator = outputs[:5]
+      aux, audit = _split_moe_audit(aux)
       if self._accumulated_grads is None:
         acc_grads, acc_denom = self._start_running_sum(grads), denominator
       else:
@@ -2409,12 +2589,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           dropless_kernel=dropless_kernel,
           accumulate_kernel=accumulate_kernel,
           micro_step=self._micro_step_count,
+          audit=audit,
+          program=self._program_label(final) if self._log_moe_drops else "",
+          train_step=self.train_step,
       )
       # Dropped before the previous micro-batch's rerun, so this one's gradients are not live beside it.
       del outputs, grads, acc_grads
       self._resolve_overflow_check()
       self._pending_overflow_check = check
     else:
+      if self._log_moe_drops:
+        # Read in `update`, so the host does not wait on this micro-batch here.
+        self._moe_audit_queue.append(
+            _MoeAuditEntry(
+                step=self.train_step, micro=self._micro_step_count, program=self._program_label(final), used=audit
+            )
+        )
       self._record_micro_batch(loss, aux)
     self._micro_step_count += 1
     self._total_micro_steps += 1
@@ -2447,10 +2637,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._compile_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="fwd-bwd-compile")
     return self._compile_executor.submit(compile_kernel)
 
+  def _start_final_compile(self, jitted: Any, params: Any, rest: Any, inputs: Any) -> None:
+    """Lowers and compiles `fwd_bwd_final_dropless` for this batch on the background thread.
+
+    Submitted ahead of the replay kernel on the same single-worker thread: the final micro-batch of the first step
+    needs it for certain, the replay kernel only on an overflow.
+    """
+    self._final_compile = self._start_background_compile(jitted, params, rest, inputs)
+
   def _discard_background_compiles(self) -> None:
     """Drops background compiles of kernels being replaced, so the next compile does not queue behind them."""
-    futures = (self._dropless_compile, self._fwd_bwd_compile)
-    self._dropless_compile = self._fwd_bwd_compile = None
+    futures = (self._dropless_compile, self._fwd_bwd_compile, getattr(self, "_final_compile", None))
+    self._dropless_compile = self._fwd_bwd_compile = self._final_compile = None
     running = False
     for future in futures:
       if future is None or future.cancel():
@@ -2464,6 +2662,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if running:
       self._compile_executor.shutdown(wait=False)
       self._compile_executor = None
+
+  def _join_final_compile(self) -> Any:
+    """Waits for the background compile, installs `fwd_bwd_final_dropless` and returns it; re-raises an error."""
+    if self._final_compile is not None:
+      future, self._final_compile = self._final_compile, None
+      self._compiled_fwd_bwd_final = future.result()
+    return self._compiled_fwd_bwd_final
 
   def _join_dropless_compile(self) -> Any:
     """Waits for the background compile, installs `fwd_bwd_dropless` and returns it; re-raises a compile error."""
@@ -2484,6 +2689,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if check is None:
       return
     loss, aux = check.loss, check.aux
+    replayed = False
+    rerun_audit = None
     if bool(check.has_overflow):
       logging.info(
           "MoE ragged buffer overflow in micro step %d of train step %d; rerunning it with the dropless kernel.",
@@ -2495,6 +2702,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       with self._sharding_ctx():
         dropless_kernel = check.dropless_kernel or self._join_dropless_compile()
         loss, aux, _, grads, denominator, rerun_overflow = dropless_kernel(check.params, check.rest, check.inputs)
+        aux, rerun_audit = _split_moe_audit(aux)
         self._accumulated_grads, self._accumulated_denominator = check.accumulate_kernel(
             self._accumulated_grads, self._accumulated_denominator, grads, denominator
         )
@@ -2504,7 +2712,90 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             f"The dropless rerun of micro step {check.micro_step} still overflowed; check apply_dropless_overrides."
         )
       self._dropless_replays += 1
+      replayed = True
+    if self._log_moe_drops:
+      self._moe_audit_queue.append(
+          _MoeAuditEntry(
+              step=check.train_step,
+              micro=check.micro_step,
+              program=check.program,
+              used=rerun_audit if replayed else check.audit,
+              replayed=replayed,
+              discarded=check.audit if replayed else None,
+          )
+      )
+      # The flag above was read on the host, so this attempt's audit (same computation) is ready too.
+      self._flush_moe_audit()
     self._record_micro_batch(loss, aux)
+
+  def _program_label(self, final: bool) -> str:
+    """The MOE_DROP_AUDIT label of the program a micro-batch's first attempt ran."""
+    rbf = float(self._config.ragged_buffer_factor)
+    if final or rbf <= 0 or (self._in_first_phase() and self._config.first_phase_ragged_buffer_factor <= 0):
+      return "dropless"
+    if self._in_first_phase():
+      return f"rbf{float(self._config.first_phase_ragged_buffer_factor):g}"
+    return f"rbf{rbf:g}"
+
+  def _flush_moe_audit(self) -> None:
+    """Logs every queued micro-batch drop audit as a MOE_DROP_AUDIT line and adds it to the step totals.
+
+    Blocks on the queued values; they are scalars per layer and their micro-batches have been dispatched.
+    `dropped_assignments_used` is the count of the program whose gradients were accumulated, so it is the
+    replay's after a replay. -1 means a layer did not compute the audit (off the ring-of-experts ragged path),
+    which is never counted as zero.
+    """
+    while self._moe_audit_queue:
+      entry = self._moe_audit_queue.pop(0)
+      used = None if entry.used is None else jax.device_get(entry.used)
+      if used is None:
+        self._moe_audit_missing_step = True
+        if jax.process_index() == 0:
+          logging.warning(
+              "MOE_DROP_AUDIT step=%d micro=%d program=%s replayed=%s dropped_assignments_used=-1 (no audit was "
+              "sown: log_moe_drops needs the ring-of-experts ragged path, and a Tunix loss that returns it)",
+              entry.step, entry.micro, entry.program, entry.replayed,
+          )
+        continue
+      dropped = np.asarray(used["dropped"]).astype(np.int64).ravel()
+      ratios = np.asarray(used["max_ratio"], dtype=np.float32).ravel()
+      if (dropped < 0).any():
+        self._moe_audit_missing_step = True
+        used_total = -1
+      else:
+        used_total = int(dropped.sum())
+        self._moe_dropped_used_step += used_total
+      discarded_total = None
+      if entry.discarded is not None:
+        disc = np.asarray(jax.device_get(entry.discarded)["dropped"]).astype(np.int64).ravel()
+        discarded_total = int(disc.sum()) if not (disc < 0).any() else -1
+        if discarded_total > 0:
+          self._moe_dropped_discarded_step += discarded_total
+      if jax.process_index() != 0:
+        continue
+      logging.info(
+          "MOE_DROP_AUDIT step=%d micro=%d program=%s replayed=%s dropped_assignments_used=%d max_ratio=%.4f "
+          "per_layer_dropped=[%s]",
+          entry.step,
+          entry.micro,
+          entry.program,
+          entry.replayed,
+          used_total,
+          float(ratios.max()) if ratios.size else float("nan"),
+          ",".join(str(int(v)) for v in dropped),
+      )
+      if entry.discarded is not None:
+        disc_audit = jax.device_get(entry.discarded)
+        logging.info(
+            "MOE_DROP_AUDIT_DISCARDED step=%d micro=%d program=%s dropped_assignments_discarded=%d max_ratio=%.4f "
+            "per_layer_dropped=[%s]",
+            entry.step,
+            entry.micro,
+            entry.program,
+            discarded_total,
+            float(np.max(disc_audit["max_ratio"])),
+            ",".join(str(int(v)) for v in np.asarray(disc_audit["dropped"]).ravel()),
+        )
 
   @_profiled_step("update")
   def update(self, **kwargs: Any) -> int:
@@ -2523,6 +2814,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._resolve_overflow_check()
     # A compile error surfaces at the first update, not at the first overflow, which may be much later.
     self._join_dropless_compile()
+    self._join_final_compile()
     if self._accumulated_grads is None:
       return self.train_step
 
@@ -2574,6 +2866,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
+    if self._log_moe_drops:
+      self._flush_moe_audit()
+      step_used = -1 if self._moe_audit_missing_step else self._moe_dropped_used_step
+      if jax.process_index() == 0:
+        logging.info(
+            "MOE_DROP_AUDIT_STEP step=%d dropped_assignments_used=%d dropless_replays=%d "
+            "dropped_assignments_discarded=%d",
+            self.train_step,
+            step_used,
+            self._dropless_replays,
+            self._moe_dropped_discarded_step,
+        )
+      # A step sum, recorded once per update: `moe_dropped_assignments` must be 0 in a compliant run.
+      self.record_metrics("moe_dropped_assignments", step_used)
+      self.record_metrics("moe_dropped_assignments_discarded", self._moe_dropped_discarded_step)
+      self._moe_dropped_used_step = 0
+      self._moe_dropped_discarded_step = 0
+      self._moe_audit_missing_step = False
     if self._dropless_replay:
       self.record_metrics("moe_dropless_replays", self._dropless_replays)
       self._dropless_replays = 0
@@ -3076,6 +3386,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # (e.g., `(total_loss, aux)`). Skip these so `buffer_metrics` only receives scalar
     # metrics, arrays, or nested metric dicts.
     if metric is None or name == "intermediate_outputs" or isinstance(metric, (tuple, list)):
+      return
+    if name == MOE_AUDIT_AUX_KEY:
+      # The per-layer drop audit (log_moe_drops) is logged as MOE_DROP_AUDIT lines, never buffered as a metric.
       return
     if isinstance(metric, dict):
       for sub_k, sub_v in metric.items():

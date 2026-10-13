@@ -1044,6 +1044,25 @@ class MoEGeneral(BaseModel):
           "Training engine only (pre_train/train.py ignores it)."
       ),
   )
+  retry_dropless_final_micro_batch: bool = Field(
+      False,
+      description=(
+          "With retry_when_tokens_dropped=True, run the final micro-batch of every optimizer step (the training "
+          "engine's fwd_bwd called with apply_optimizer=True) directly with a dropless program: the regular "
+          "program's graph with every RoutedMoE force_dropless (same token chunks and remat), i.e. the "
+          "ragged_buffer_factor=-1 program. Every other micro-batch runs the ragged_buffer_factor program, and an "
+          "overflowing one is still replayed dropless."
+      ),
+  )
+  log_moe_drops: bool = Field(
+      False,
+      description=(
+          "Drop audit. On the ring-of-experts ragged path every RoutedMoE call sows `moe_dropped_assignments` "
+          "(sum over EP shards and the mesh of max(0, shard load - ragged buffer size), 0 when dropless) and "
+          "`moe_max_load_ratio`; the training engine logs a MOE_DROP_AUDIT line per micro-batch and records "
+          "moe_dropped_assignments per step. Adds a scalar psum and pmax per MoE layer call."
+      ),
+  )
   first_phase_ragged_buffer_factor: float = Field(
       0.0,
       description=(
@@ -3862,6 +3881,9 @@ class MaxTextConfig(
     if self.first_phase_ragged_buffer_factor > 0 and self.retry_dropless_first_steps == 0:
       raise ValueError("first_phase_ragged_buffer_factor > 0 requires retry_dropless_first_steps > 0.")
 
+    if self.retry_dropless_final_micro_batch and not self.retry_when_tokens_dropped:
+      raise ValueError("retry_dropless_final_micro_batch=True requires retry_when_tokens_dropped=True.")
+
     if self.retry_when_tokens_dropped:
       if self.num_experts <= 1:
         raise ValueError("retry_when_tokens_dropped=True requires num_experts > 1.")
@@ -3875,6 +3897,11 @@ class MaxTextConfig(
         raise ValueError("retry_when_tokens_dropped=True requires use_ragged_sort=True.")
       if self.num_moe_emb_chunks > 0:
         raise ValueError("retry_when_tokens_dropped=True does not support num_moe_emb_chunks > 0.")
+      if self.retry_dropless_final_micro_batch and self.ragged_buffer_factor <= 0:
+        raise ValueError(
+            "retry_dropless_final_micro_batch=True needs ragged_buffer_factor > 0 (with rbf <= 0 every "
+            "micro-batch already runs dropless)."
+        )
       if self.first_phase_ragged_buffer_factor > 0:
         if self.first_phase_ragged_buffer_factor < self.ragged_buffer_factor:
           raise ValueError(
