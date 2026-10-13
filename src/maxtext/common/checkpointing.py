@@ -36,6 +36,7 @@ import jax.numpy as jnp
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.common import checkpoint_context
 from maxtext.common import emergency_checkpointing
+from maxtext.common.goodput import get_goodput_job_name
 from maxtext.common import grain_utility
 from maxtext.common import train_state_nnx
 from maxtext.input_pipeline import multihost_dataloading
@@ -885,7 +886,8 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
     config: MaxText config.
 
   Returns:
-    An Orbax `CloudLogger` writing to the `goodput_<run_name>` log if
+    An Orbax `CloudLogger` writing to the `goodput_<job_name>` log (where
+    `job_name` is resolved via `get_goodput_job_name(config)`) if
     `enable_checkpoint_cloud_logger` is set, otherwise None.
   """
   if not config.enable_checkpoint_cloud_logger:
@@ -899,11 +901,10 @@ def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-
         " (is google-cloud-logging installed?). Checkpoint logs are disabled."
     )
     return None
-  logger_name = f"goodput_{config.run_name}"
+  job_name = get_goodput_job_name(config)
+  logger_name = f"goodput_{job_name}"
   try:
-    orbax_cloud_logger = cloud_logger_cls(
-        options=cloud_logger_options_cls(job_name=config.run_name, logger_name=logger_name)
-    )
+    orbax_cloud_logger = cloud_logger_cls(options=cloud_logger_options_cls(job_name=job_name, logger_name=logger_name))
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.warning(f"Failed to initialize Orbax CloudLogger: {e}. Checkpoint logs are disabled.")
     return None
