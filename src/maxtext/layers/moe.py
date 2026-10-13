@@ -933,6 +933,20 @@ class RoutedMoE(nnx.Module):
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
 
+    if self.config.custom_mesh_and_rule == ctypes.CustomRule.EXPERT_ON_FSDP_EP:
+      if any(
+          (
+              self.config.shard_exp_on_fsdp,
+              self.config.use_2d_fsdp_sharding,
+              self.config.use_batch_split_schedule,
+              self.config.moe_flat_fsdp_weights,
+          )
+      ):
+        raise ValueError(
+            "expert-on-fsdp-ep requires the standard unflattened expert weight axes; "
+            "disable shard_exp_on_fsdp, use_2d_fsdp_sharding, use_batch_split_schedule, and moe_flat_fsdp_weights."
+        )
+
     if self.config.shard_exp_on_fsdp:
       # special sharding for dsv3
       self.wi_kernel_axes = ("embed_moe", None, "mlp_moe")
@@ -4783,6 +4797,13 @@ class RoutedMoE(nnx.Module):
 
     fsdp_size = self.mesh.shape.get("fsdp", 1)
     ep_size = self.mesh.shape.get(self._expert_parallelism_name, 1)
+    if self.config.custom_mesh_and_rule == ctypes.CustomRule.EXPERT_ON_FSDP_EP:
+      if self._expert_parallelism_name != "expert":
+        raise ValueError("TE expert FSDP sharding currently requires the standard expert mesh axis.")
+      if self.num_experts % (ep_size * fsdp_size) != 0:
+        raise ValueError(
+            f"num_experts={self.num_experts} must be divisible by EP x FSDP={ep_size * fsdp_size}."
+        )
     if self.num_experts % ep_size != 0:
       raise ValueError(f"num_experts={self.num_experts} must be divisible by EP size={ep_size}.")
 
