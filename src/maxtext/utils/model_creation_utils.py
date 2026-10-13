@@ -857,6 +857,32 @@ def verify_and_sync_scan_layers(config):
 
 
 # pylint: disable=too-many-positional-arguments
+def _load_safetensors_dynamic(model, sharded_state, config):
+  """Loads HF safetensors into `model` with the on-the-fly converter (`source_checkpoint_layout=safetensors_dynamic`).
+
+  Uses the same loader as training (`checkpointing.load_state_if_possible`). The model's initial weights are
+  freed first, as the Orbax path does, so only the loaded copy is held on device.
+  """
+  param_state = sharded_state.filter(
+      lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+  )
+  abstract_state = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), param_state)
+  for leaf in jax.tree.leaves(param_state):
+    if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+      leaf.delete()
+  _, restored_state = checkpointing.load_state_if_possible(
+      None,
+      None,
+      config.load_parameters_path,
+      "",
+      config.checkpoint_storage_concurrent_gb,
+      abstract_state,
+      source_checkpoint_layout="safetensors_dynamic",
+      maxtext_config=config,
+  )
+  nnx.update(model, restored_state)
+
+
 def from_pretrained(
     config,
     mesh=None,
@@ -875,7 +901,8 @@ def from_pretrained(
   scale factors instead of full-precision kernels.
   """
   original_mesh = mesh
-  if config.convert_checkpoint_if_possible and not config.load_parameters_path:
+  loads_safetensors_dynamic = config.source_checkpoint_layout == "safetensors_dynamic"
+  if config.convert_checkpoint_if_possible and not config.load_parameters_path and not loads_safetensors_dynamic:
     if not (epath.Path(config.base_output_directory) / "0" / "items").exists():
       # Try to convert checkpoint on the fly
       hf_access_token = config.hf_access_token or get_token()
@@ -957,7 +984,9 @@ def from_pretrained(
     mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
-    if config.load_parameters_path:
+    if loads_safetensors_dynamic:
+      _load_safetensors_dynamic(model, sharded_state, config)
+    elif config.load_parameters_path:
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
