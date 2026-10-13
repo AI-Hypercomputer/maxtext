@@ -38,16 +38,28 @@ Maintain `{model_name}_handover.md` under the MaxText repository root throughout
 - **Minimal Subset Layer Count ($N$)**: e.g., 1 layer, 4 layers
 - **Key Parameters**: `vocab_size`, `hidden_size`, `num_attention_heads`, `num_key_value_heads`, `head_dim`, `intermediate_size`, `rms_norm_eps`, `rope_theta`, etc.
 
-## 2. Phase-by-Phase Status
+## 2. Phase-by-Phase Status & Phase 4 Verification Checklist
 - [x] Phase 1: HF Discovery & Mini Safetensors Creation (DONE)
 - [x] Phase 2: JAX Layer Implementation & Layer Tests (DONE)
 - [x] Phase 3: Checkpoint Mapping & Mini-Checkpoint Conversion (DONE)
-- [x] Phase 4: E2E Logits & 16-Token Autoregressive Decode Verification (DONE)
+- [x] Phase 4: Comprehensive Mini-Model Verification, E2E Logits & 16-Token Decode (DONE)
+  - [x] **Gate 0 (Slicing & Conversion Parity)**: `slice_model.py` + `to_huggingface.py` round-trip (`max_abs_diff == 0.0`)
+  - [x] **Dimension 1 (Challenging Inputs)**: Sequence/chunk boundaries, padded batches (+ attribution probes), packed documents (`segment_ids`), special/boundary tokens, and multimodal/3D MRoPE grids
+  - [x] **Dimension 2 (Forward Boundaries)**: Component outputs (ViT, merger, post-scatter embeddings, linear/full attention sub-stages, MLP/MoE, MTP sub-stages) & complete mini-model logits
+  - [x] **Dimension 3 (MoE / Dense Coverage)**: Deliberate/forced routing & load-balancing loss (MoE) or SwiGLU sub-activations & zero routing overhead (Dense)
+  - [x] **Dimension 4 (Enabled Heads & Objectives)**: Pre-aggregation loss components exposed; 4-way ablation (`Config_A` Main CE, `Config_B` +Z-loss, `Config_C` MTP only, `Config_D` Combined)
+  - [x] **Dimension 5 (Backward Sensitivity & Independence)**: Per-parameter-group E2E gradients + isolated block-level upstream VJP probes (`dX`, `dW`)
+  - [x] **Dimension 6 (Multi-Step Stateful Updates & Freezing)**: 3-step stateful AdamW with changing batches (weights $W^{(3)}$ + moments $m^{(3)}, v^{(3)}$) & frozen parameter invariance
+  - [x] **Supplemental Check S.1 (`scan_layers=True` Parity)**: Scanned `param_mapping`, forward logits, loss, and backward gradients vs. `scan_layers=False`
+  - [x] **Supplemental Check S.2 (Asymmetric 3D MRoPE & Negative Control)**: Non-square `[T, H, W]` grid + axis-swap negative control
+  - [x] **Supplemental Check S.3 (Multi-Chip 2D Sharding)**: Physical `PartitionSpec`s + `fsdp=2, tensor=2` forward/backward parity vs. unsharded
+  - [x] **Supplemental Check S.4 (`bfloat16` Mixed Precision)**: Zero `NaN`/`Inf`, `100%` top-1 logit agreement, and `cosine_sim > 0.998` across all gradient groups
+  - [x] **CLI E2E Logits & 16-Token Autoregressive Decode**: `forward_pass_logit_checker` (KL Div $\le 10^{-3}$) & exact 16-token greedy decode match
 
 ## 3. Bugs Encountered & Solutions
 - **Phase 2 (JAX Layers)**: [Description of bug, root cause, and how it was fixed]
 - **Phase 3 (Checkpoint Conversion)**: [Transposition mismatch, key naming issue, etc.]
-- **Phase 4 (Logits & Decode)**: [RoPE frequency mismatch, KV cache indexing, etc.]
+- **Phase 4 (Mini Verification, Logits & Decode)**: [Multimodal scatter token ID, MTP projection matmul_precision, reverse QKV fusion hooks, RoPE frequency mismatch, KV cache indexing, etc.]
 
 ## 4. Pitfalls & Model-Specific Gotchas (Session Wrap-up)
 - Summary of unexpected model behaviors, unusual head projections, bias handling, tied embeddings, etc.
@@ -57,6 +69,9 @@ Maintain `{model_name}_handover.md` under the MaxText repository root throughout
   `python3 slice_hf_model.py ...`
 - **Mini Checkpoint Conversion**:
   `python3 -m maxtext.checkpoint_conversion.to_maxtext ...`
+- **6-Dimension Mini-Model Verification & 4 Supplemental Checks**:
+  `python3 -u tests/integration/{model_name}_mini_verification_test.py`
+  `python3 -u tests/integration/{model_name}_mini_supplemental_test.py`
 - **Forward Pass Logits Check**:
   `python3 -m tests.utils.forward_pass_logit_checker ...`
 - **Autoregressive Decode Check**:
