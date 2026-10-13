@@ -17,7 +17,17 @@
 from functools import partial
 from typing import Any, Callable, List
 import jax
+from jax.experimental import multihost_utils
 import jax.numpy as np
+import numpy
+
+# An all-gather puts a copy of the whole array on every device, so larger arrays are gathered in slices of at most
+# this many bytes along the leading axis.
+_MAX_GATHER_BYTES = 1 << 30
+
+# Variable collections besides `params` that param mappings name as a key prefix (DeepSeek MoE gate bias and
+# hash-routing table).
+VARIABLE_COLLECTIONS = ("MoEBiasVar", "Tid2EidVar")
 
 
 def apply_hook_fns(weight, target_shape, hook_fns):
@@ -31,6 +41,76 @@ def apply_hook_fns(weight, target_shape, hook_fns):
   for hook_fn in hook_fns:
     weight = hook_fn(weight, target_shape)
   return weight
+
+
+def _spans_other_hosts(weight) -> bool:
+  """Returns True if `weight`, or any tensor in a tuple of them, has shards on other hosts."""
+  weights = weight if isinstance(weight, tuple) else (weight,)
+  return any(isinstance(w, jax.Array) and not w.is_fully_addressable for w in weights)
+
+
+def _gather_in_slices(weight, gather_fn, max_bytes=_MAX_GATHER_BYTES):
+  """Gathers `weight` with `gather_fn`, in slices along the leading axis if it is larger than `max_bytes`.
+
+  Each slice is gathered to every host and copied to host memory before the next one, so the copy on every
+  device stays at most `max_bytes` (e.g. 8.6 GB qwen3.5-397b expert weights do not fit in one TPU's HBM).
+  """
+  if weight.ndim == 0 or weight.shape[0] < 2 or weight.nbytes <= max_bytes:
+    return gather_fn(weight)
+  rows = max(1, weight.shape[0] * max_bytes // weight.nbytes)
+  return numpy.concatenate(
+      [numpy.asarray(gather_fn(weight[i : i + rows])) for i in range(0, weight.shape[0], rows)], axis=0
+  )
+
+
+def _gather_to_host(weight):
+  """Gathers `weight`, or each tensor in a tuple of them, into a full NumPy array on every host."""
+  if isinstance(weight, tuple):
+    return tuple(_gather_to_host(w) for w in weight)
+  if isinstance(weight, jax.Array) and not weight.is_fully_addressable:
+    return _gather_in_slices(weight, partial(multihost_utils.process_allgather, tiled=True))
+  return weight
+
+
+def _apply_hook_fns_any_host(weight, target_shape, hook_fns):
+  """Applies hook functions to a weight that may be sharded across hosts.
+
+  Many hooks use NumPy, which cannot read a `jax.Array` with shards on other hosts. If a hook fails on
+  such a weight, the weight is gathered to every host and the hooks are applied again. Every host loads
+  the same tensors in the same order, so all hosts take the fallback together, as the gather requires.
+  """
+  try:
+    return apply_hook_fns(weight, target_shape, hook_fns)
+  except RuntimeError:
+    if not _spans_other_hosts(weight):
+      raise
+    return apply_hook_fns(_gather_to_host(weight), target_shape, hook_fns)
+
+
+def _device_put(array, sharding):
+  """Places `array` with `sharding`.
+
+  A host array, such as a NumPy hook result after the gather fallback, is placed shard by shard with
+  `jax.make_array_from_callback`, since every host holds all of it. `jax.device_put` would first all-gather it
+  across hosts on device to check that all hosts hold the same value, which needs the array's size times the
+  number of hosts in HBM.
+  """
+  if not isinstance(array, jax.Array) and not getattr(sharding, "is_fully_addressable", True):
+    return jax.make_array_from_callback(array.shape, sharding, lambda index: array[index])
+  return jax.device_put(array, sharding)
+
+
+def _get_hf_tensor(tensor_getter_fn: Callable[[str], np.ndarray], hf_key: Any):
+  """Returns the HF tensor for `hf_key`, or a tuple of tensors for a tuple of keys.
+
+  A `None` key marks a leaf with no HF tensor (e.g. DeepSeek-V4 mHC norm scales): it returns `None`, and the
+  hook builds the value, as in to_maxtext.
+  """
+  if hf_key is None:
+    return None
+  if isinstance(hf_key, tuple):
+    return tuple(tensor_getter_fn(k) for k in hf_key)
+  return tensor_getter_fn(hf_key)
 
 
 def nesting_depth(hf_source_keys: Any) -> int:
@@ -88,6 +168,43 @@ def slice_shape(target_shape: tuple, axes: tuple) -> tuple:
   return tuple(dim for i, dim in enumerate(target_shape) if i not in set(axes))
 
 
+def _full_spec(sharding, ndim: int) -> list:
+  """Returns the partition spec of `sharding` with one entry per axis of an `ndim`-rank array.
+
+  A `PartitionSpec` may be shorter than the array rank; the missing trailing axes are replicated.
+  """
+  spec = list(sharding.spec)
+  return spec + [None] * (ndim - len(spec))
+
+
+def composite_target_leaf(leaves: List[Any]) -> Any:
+  """Returns the target for a composite MaxText key: its leaves stacked along a new last axis.
+
+  The hook for a composite MaxText key returns the leaves stacked along the last axis, so the stacked
+  tensor is loaded as one target and then split. The new axis is replicated.
+  """
+  leaf = leaves[0]
+  if not hasattr(leaf, "sharding"):
+    return tuple(leaf) + (len(leaves),)
+  sharding = leaf.sharding
+  if hasattr(sharding, "spec"):
+    spec = jax.sharding.PartitionSpec(*_full_spec(sharding, len(leaf.shape)), None)
+    sharding = jax.sharding.NamedSharding(sharding.mesh, spec)
+  return jax.ShapeDtypeStruct(shape=tuple(leaf.shape) + (len(leaves),), dtype=leaf.dtype, sharding=sharding)
+
+
+def composite_hook_fn(hook_fns: Any, num_leaves: int) -> Callable:
+  """Wraps the hook of a composite MaxText key to take the stacked shape from `composite_target_leaf`.
+
+  Composite hooks expect one target shape per leaf, as `to_maxtext` passes them.
+  """
+
+  def hook(weight, target_shape):
+    return apply_hook_fns(weight, [tuple(target_shape[:-1])] * num_leaves, hook_fns)
+
+  return hook
+
+
 def _binary_chunked_stack(tensors: List[np.ndarray], axis: int) -> np.ndarray:
   """Stacks JAX arrays along axis by binary division to limit memory usage from JAX compiler."""
   if not tensors:
@@ -135,7 +252,11 @@ def _build_multi_axis_stacked_tensor(
   # is assembled with its stacked axes leading and only moved into place at the
   # end, so level ``l`` carries the specs of the axes not yet stacked, followed by
   # the specs of the slice itself.
-  target_spec = list(target_sharding.spec) if target_sharding is not None and hasattr(target_sharding, "spec") else None
+  target_spec = (
+      _full_spec(target_sharding, len(target_shape))
+      if target_sharding is not None and hasattr(target_sharding, "spec")
+      else None
+  )
 
   def sharding_at(level):
     if target_spec is None:
@@ -147,12 +268,11 @@ def _build_multi_axis_stacked_tensor(
   def gather(keys, level):
     if level == depth:
       # A tuple of keys is a composite HF source that the hook fuses into one leaf.
-      raw = tuple(tensor_getter_fn(k) for k in keys) if isinstance(keys, tuple) else tensor_getter_fn(keys)
-      tensor = apply_hook_fns(raw, mt_slice_shape, hook_fns)
+      tensor = _apply_hook_fns_any_host(_get_hf_tensor(tensor_getter_fn, keys), mt_slice_shape, hook_fns)
     else:
       tensor = _binary_chunked_stack([gather(sub, level + 1) for sub in keys], axis=0)
     if target_sharding is not None and level > 0:
-      tensor = jax.device_put(tensor, sharding_at(level))
+      tensor = _device_put(tensor, sharding_at(level))
     return tensor
 
   stacked_array = gather(hf_source_keys, 0).astype(target_dtype)
@@ -169,6 +289,7 @@ def _build_single_axis_stacked_tensor(
     hook_fns: Any,
     target_leaf: Any,
     config,
+    mt_key: Any = "",
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along a single axis directly in place on device."""
   if hasattr(target_leaf, "sharding"):
@@ -180,7 +301,14 @@ def _build_single_axis_stacked_tensor(
     target_sharding = None
     target_dtype = target_leaf.dtype if hasattr(target_leaf, "dtype") else np.float32
 
-  if config.scan_layers:
+  # Same rule as to_maxtext: with scan_layers, an MoE layer outside the scanned stack (e.g. the DeepSeek-V4
+  # prefix layers `layers_0`..) and the MoE bias and tid2eid collections still stack experts along axis 0.
+  key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
+  is_var_collection = any(collection in key_str for collection in VARIABLE_COLLECTIONS)
+  is_unscanned_moe = "MoeBlock" in key_str and not any(
+      s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
+  )
+  if config.scan_layers and not (is_var_collection or is_unscanned_moe):
     # If the target tensor rank exceeds param_scan_axis (e.g., multidimensional weights or 2D block scales),
     # stack along param_scan_axis (typically axis 1 in scanned layers). For 1D tensors (e.g., per-layer scalar
     # quantization scales like Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)), stack along axis 0
@@ -197,7 +325,7 @@ def _build_single_axis_stacked_tensor(
   mt_slice_shape = tuple(mt_slice_shape_list)
 
   if target_sharding is not None and hasattr(target_sharding, "spec"):
-    spec_list = list(target_sharding.spec)
+    spec_list = _full_spec(target_sharding, len(target_shape))
     del spec_list[axis_to_stack]
     slice_sharding = jax.sharding.NamedSharding(target_sharding.mesh, jax.sharding.PartitionSpec(*spec_list))
   else:
@@ -205,11 +333,11 @@ def _build_single_axis_stacked_tensor(
 
   tensors_to_stack = []
   for hf_key_single in hf_source_keys:
-    hf_tensor_numpy = tensor_getter_fn(hf_key_single)
-    processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
+    hf_tensor = _get_hf_tensor(tensor_getter_fn, hf_key_single)
+    processed_hf_tensor = _apply_hook_fns_any_host(hf_tensor, mt_slice_shape, hook_fns)
 
     if target_sharding is not None:
-      processed_hf_tensor = jax.device_put(processed_hf_tensor, slice_sharding)
+      processed_hf_tensor = _device_put(processed_hf_tensor, slice_sharding)
     tensors_to_stack.append(processed_hf_tensor)
 
   stacked_array = _binary_chunked_stack(tensors_to_stack, axis=axis_to_stack).astype(target_dtype)
@@ -234,15 +362,15 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
     mt_key: The MaxText parameter key, used to place the axes of nested block scans.
   """
   if not isinstance(hf_source_keys_or_key, list):
-    # Case 1: Single hf key (str)
+    # Case 1: Single hf key (str), or a tuple of keys that the hook fuses into one leaf
     def _loader(getter, key, leaf, hook):
       if hasattr(leaf, "sharding"):
-        array = apply_hook_fns(getter(key), leaf.shape, hook)
+        array = _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf.shape, hook)
         # Cast to the target dtype, as the stacked cases do. Otherwise a bf16 checkpoint stays bf16
         # even when weight_dtype is float32.
-        return jax.device_put(array.astype(leaf.dtype), device=leaf.sharding)
+        return _device_put(array.astype(leaf.dtype), leaf.sharding)
       else:
-        return apply_hook_fns(getter(key), leaf, hook)
+        return _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf, hook)
 
     return partial(
         _loader,
@@ -261,6 +389,7 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
         hook_fn,
         mt_target_leaf,
         config,
+        mt_key,
     )
   else:
     # isinstance(hf_source_keys_or_key[0], list)
