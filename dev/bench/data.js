@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791903930354,
+  "lastUpdate": 1791910750906,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -49485,6 +49485,128 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 480,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Daniel Mandragona",
+            "username": "dandragona",
+            "email": "dandragona@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "f0b2abe3f6f3736c5579673f42b5cbc17b327fd3",
+          "message": "Sync Lineage DeepSeek-V3 modules into experimental/lineage, including the branched splash attention kernel and 1D expert-parallel sharding.\n\nResults:\n- All unit, integration, and platform tests pass (GitHub Actions run 38328666655 green; TAP presubmit clean).\n\nImportant technical details:\n- Adds a py_library for splash_attention_kernel.py and routes tokamax_splash_attention_kernel to it.\n- Excludes the internal Pathways XM launcher from the synced module set and disallows @jaxtyped above jit.\n\nPiperOrigin-RevId: 998330480",
+          "timestamp": "2026-10-13T03:31:45Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/f0b2abe3f6f3736c5579673f42b5cbc17b327fd3"
+        },
+        "date": 1791910750194,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 23.510000000000034,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 101,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 282.729,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 106.36100000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1459.7270000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 97,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 101.581,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 156.863,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 8008.713,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 480,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1121.431,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 97,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 199.68599999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 2154.8630000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 160,
             "unit": "count"
           }
         ]
