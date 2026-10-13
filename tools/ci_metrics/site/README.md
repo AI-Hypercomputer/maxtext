@@ -40,10 +40,14 @@ npm install        # jsdom only
 npm test
 ```
 
-Each check prints one line per assertion and a `N passed, M failed` summary. The
-checks are the regression net for the mock: every visible number that was reviewed
-(date-range windows, suite names, worker counts, flaky rates, sort orders, guide
-panels) has an assertion.
+Each check prints one line per assertion and a `N passed, M failed` summary. Most
+checks run the page on the sample data that is built into it. Three of them
+(`check_realdata.js`, `check_escape.js` and `check_names.js`) run it on the real view
+files in `views/` next to the page, and skip themselves if that folder is missing.
+The checks are a regression net, not a full proof: they cover the date range, the
+charts, sort orders, worker counts and the guide buttons. Some parts have no check at
+the moment: the flaky card's totals, most of the numbers and wording in its tooltips
+and pop-ups, and most of the wording of its guide.
 
 ## Facts the mock encodes about the real pipeline
 

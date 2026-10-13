@@ -1,6 +1,7 @@
-// The machine each job asks for, shown on all four charts. Chart 1 and 3 name the machine
-// type per device; chart 2 names the pool on the runner-wait slice; chart 4 names the type on
-// the job row and the type plus pool in the cell tooltip; the commit modal has a full column.
+// The machine each job asks for (its runs-on label), shown on all four charts. Chart 1 and 3
+// name the machine type per device; chart 2 puts it on every worker row and in its hover
+// cards; chart 4 names it on the job row and in the cell tooltip; the commit modal has a
+// full column. Runner pools are not shown anywhere.
 const fs=require('fs');const {JSDOM}=require('jsdom');
 const dom=new JSDOM(require('./loadpage.js')(),{runScripts:'dangerously',pretendToBeVisual:true});
 const w=dom.window,d=w.document;
@@ -27,7 +28,7 @@ setTimeout(()=>{
   ok('chart 1 hover names the TPU machine',tip1.includes(TPU));
   ok('chart 1 hover names the GPU and CPU machines',tip1.includes(GPU)&&tip1.includes(CPU));
 
-  // chart 2: worker rows carry machine + pool, and the wait slice names the pool
+  // chart 2: worker rows carry the machine, and the hover cards name it
   const ent=w.wkEntities(c0).find(e=>e.jobs&&e.jobs.length);
   const rows=w.wkWorkerRows(c0,ent);
   ok('chart 2 worker rows carry a machine',rows.every(r=>r.machine&&r.machine.length>4));
@@ -54,7 +55,11 @@ setTimeout(()=>{
   const tip3=T(d.getElementById('tip'));
   ok('chart 3 hover names a machine type',tip3.includes(TPU)||tip3.includes(CPU)||tip3.includes(GPU));
 
-  // chart 4: job row + cell tooltip
+  // chart 4: job row + cell tooltip. The flaky card calls its jobs gpu-integration, tpu-unit and
+  // tpu-pathways-integration, and the mock only labels the ids of JOBS. In the real data the two
+  // are the same ids, so give the card's ids a label and draw it again.
+  Object.assign(labels,{'gpu-integration':GPU,'tpu-unit':TPU,'tpu-pathways-integration':TPU});
+  w.renderFlaky();
   const flaky=T(d.getElementById('flaky'));
   ok('chart 4 job rows name the machine',flaky.includes(GPU)||flaky.includes(TPU));
   const cell=d.querySelector('#flaky [data-cell][data-fljob]');

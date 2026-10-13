@@ -3,7 +3,8 @@
 // The published view is empty today - the failed attempts' JUnit files had already expired - so
 // nothing else on the page exercises this path. These checks feed adaptViews a hand-built view so
 // the two ways it can silently drop a row stay caught: a test whose job id does not match the
-// rescue group it belongs to, and a test taken from an attempt that was never re-run at all.
+// rescue group it belongs to, and a test taken from an attempt that was never re-run at all. The
+// page keeps that second kind on purpose, so the tooltip can name every test that failed.
 const {JSDOM}=require('jsdom');
 const dom=new JSDOM(require('./loadpage.js')(),{runScripts:'dangerously',pretendToBeVisual:true});
 const w=dom.window;
@@ -19,7 +20,7 @@ setTimeout(()=>{
     {run_id:2,pr:9002,job_name:'TPU Pathways Unit Tests (1) / tpu-pathways-unit',
      lane:'TPU',flavor:null,worker:null,rescued:true,failed_attempt:1,
      final_conclusion:'success',failed_conclusion:'failure',wasted_seconds:60},
-    // failed and never re-run: its tests are not flaky, they just failed
+    // failed and never re-run: its test is kept, but the job is a failure, not a rescue
     {run_id:3,pr:9003,job_name:'CPU Pretrain Tests (cpu-unit) / Execute Tests (2) / cpu-unit',
      lane:'CPU',flavor:'cpu-unit',worker:2,rescued:false,failed_attempt:1,
      final_conclusion:'failure',failed_conclusion:'failure',wasted_seconds:300},
@@ -35,8 +36,10 @@ setTimeout(()=>{
   const m=w.adaptViews({runs:{runs:[],jobs:[]},suites:{suites:[]},queue:{queue:[]},
                         flaky:{rescues,rescue_tests}});
   const names=m.flaky.map(f=>f.test).sort();
-  ok('a test from an attempt that was never re-run is left out',!names.includes('test_never_rerun'));
-  ok('both rescued tests are kept',names.join()==='test_rescued_noflavor,test_rescued_worker');
+  ok('a test from an attempt that was never re-run is kept, so the tooltip can name it',
+     m.flaky.some(f=>f.test==='test_never_rerun'&&f.job==='cpu-unit#2'));
+  ok('all three tests are kept: both rescued ones and the never-re-run one',
+     names.join()==='test_never_rerun,test_rescued_noflavor,test_rescued_worker');
 
   const ids=new Set(m.rescues.map(r=>r.id));
   ok('every test names a job the card can find',m.flaky.every(f=>ids.has(f.job)));
@@ -50,7 +53,7 @@ setTimeout(()=>{
   // and the split the rescues themselves get, on the same input
   const cpu2=m.rescues.find(r=>r.id==='cpu-unit#2');
   ok('the never-re-run row lands in fails, not events',
-     !!cpu2&&cpu2.events.length===0&&cpu2.fails.join()==='#9003');
+     !!cpu2&&cpu2.events.length===0&&cpu2.fails.length===1&&cpu2.fails[0].pr==='#9003'&&cpu2.fails[0].runId===3);
   ok('the rescued rows land in events',
      m.rescues.find(r=>r.id==='cpu-unit#1').events.length===1);
 

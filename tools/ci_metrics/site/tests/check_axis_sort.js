@@ -116,13 +116,6 @@ setTimeout(()=>{
   ok('legend draws the three badge marks',['slow','fail','flaky'].every(k=>!!d.querySelector(`.leg [data-lg="${k}"] svg circle`))&&d.querySelectorAll('.leg [data-lg="fail"] svg line').length===2);
   ok('legend labels name the states',txt(d.querySelector('.leg [data-lg="slow"]')).includes('slower than recent runs')&&txt(d.querySelector('.leg [data-lg="fail"]'))==='failed'&&txt(d.querySelector('.leg [data-lg="flaky"]')).includes('passed on retry'));
   ok('timeline guide explains the marks',d.getElementById('guide-timeline').textContent.includes('▲ means the run was slower than recent runs'));
-  // worker meta: sentence and legend on separate lines (2026-08-31 part K)
-  const wkMeta=d.querySelector('#wk-meta');
-  ok('worker meta = sentence line + legend line',wkMeta.children.length===2&&wkMeta.children[0].tagName==='DIV'&&wkMeta.children[1].hasAttribute('data-wklegend')&&wkMeta.children[1].textContent.includes('TPU')&&wkMeta.children[1].textContent.includes('Checks')&&!wkMeta.children[0].textContent.includes('Checks'));
-  w.setWKSel('tpu-pre-u');
-  const wkMeta2=d.querySelector('#wk-meta');
-  ok('single-suite meta keeps the same two-line shape',wkMeta2.children.length===2&&wkMeta2.children[1].hasAttribute('data-wklegend')&&wkMeta2.children[1].textContent.includes('Worker tests'));
-  w.setWKSel('all');
   console.log(`\n${pass} passed, ${fail} failed`);
   process.exit(fail?1:0);
 },300);

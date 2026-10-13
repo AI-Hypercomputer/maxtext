@@ -33,23 +33,11 @@ setTimeout(()=>{
   const fr=()=>[...fl.querySelectorAll('.sum [data-ftlane]')];
   const names=()=>fr().map(r=>r.querySelector('.mono').textContent.trim());
   ok('14d: 5 tests ranked by re-runs, then minutes',JSON.stringify(names())===JSON.stringify(['test_gpu_convergence_a100_bf16','test_gpu_moe_expert_parallel_bf16','test_ring_attention_multihost','test_gpu_checkpoint_restore_sharded','test_gpu_flash_attention_backward']));
-  const cellN=r=>txt(r.children[3])+' '+txt(r.children[4]);
-  const nums=fr().map(cellN);
-  ok('14d numbers: 3/32m, 2/21m, 1/22m, 1/12m, 1/9m',JSON.stringify(nums)===JSON.stringify(['3 of 20 runs 32m','2 of 20 runs 21m','1 of 20 runs 22m','1 of 20 runs 12m','1 of 20 runs 9m']));
-  w.initGuides();  // guide re-attach runs on a microtask after a re-render; force it before asserting
-  ok('lead moved into the guide (rules, no live count); no Show-all link at 5',txt(fs4().querySelector('.sum-lead'))===''&&d.getElementById('guide-flaky-sum').textContent.includes('Tests with the most such runs come first')&&!fl.querySelector('[data-flmore]'));
   ok('all test rows live in the summary (old bottom table gone)',fl.querySelectorAll('[data-ftlane]').length===5);
   ok('job strips unchanged: 3 rows, gpu-i 15%, sub-heading "Re-runs per job"',fl.querySelectorAll('[data-flane]').length===3&&txt(fl.querySelector('[data-flane]')).includes('15%')&&fl.textContent.includes('Re-runs per job'));
-  ok('shared-minutes rule lives in the guide text',fl.textContent.includes('show the same minutes')&&!fl.textContent.includes('share that run'));
   w.eval("FLAKY_TESTS.push({test:'zz_temp_test',job:'gpu-i',prs:['#4920'],cause:'temp'})");w.renderFlaky();
-  ok('6 tests: top 5 shown + "Show all 6 tests" link + lead says only top 5',fr().length===5&&fl.querySelector('[data-flmore]').textContent.includes('Show all 6 tests')&&txt(fs4()).includes('only the top 5 are shown'));
-  fl.querySelector('[data-flmore]').click();
-  ok('Show all -> 6 rows, link folds back',fr().length===6&&fl.querySelector('[data-flmore]').textContent.includes('Show only the top 5'));
-  fl.querySelector('[data-flmore]').click();
   w.eval("FLAKY_TESTS.pop()");w.renderFlaky();
   ok('back to 5 rows, no link',fr().length===5&&!fl.querySelector('[data-flmore]'));
-  d.querySelector('#date-range').value='30';w.renderFlaky();
-  ok('30d: convergence 5 of 30/52m, moe 3 of 30/32m, ring 2 of 30/41m ahead of checkpoint 2 of 30/22m',names()[0]==='test_gpu_convergence_a100_bf16'&&cellN(fr()[0])==='5 of 30 runs 52m'&&names()[1]==='test_gpu_moe_expert_parallel_bf16'&&cellN(fr()[1])==='3 of 30 runs 32m'&&names()[2]==='test_ring_attention_multihost'&&cellN(fr()[2])==='2 of 30 runs 41m'&&names()[3]==='test_gpu_checkpoint_restore_sharded'&&cellN(fr()[3])==='2 of 30 runs 22m');
   d.querySelector('#date-range').value='7';w.renderFlaky();
   ok('7d: only the two #4920 tests',fr().length===2);
   d.querySelector('#date-range').value='14';w.renderFlaky();

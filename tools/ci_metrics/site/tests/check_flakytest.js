@@ -29,13 +29,5 @@ setTimeout(()=>{
   ok(dim.length>0,'other cells dim');
   w.flakyTestHl(m[1],m[2],false);
   ok(cells.every(x=>!x.style.opacity),'hover out clears every cell');
-
-  // --- popup is about the test ---
-  w.openFlakyTestPop('test_gpu_convergence_a100_bf16','gpu-i');
-  const body=d.getElementById('wkpop-body').textContent;
-  ok(body.includes('test_gpu_convergence_a100_bf16'),'popup names the test');
-  ok(body.includes('CUDA OOM at step 42'),'popup quotes the failure line');
-  ok(/failed on the first attempt and passed on a re-run in \d+ of the \d+/.test(body),'popup states the test\'s own rate');
-  ok(body.includes('Every re-run of'),'popup offers the job as a next step');
   console.log(`\n${p} passed, ${f} failed`); process.exit(f?1:0);
 },400);

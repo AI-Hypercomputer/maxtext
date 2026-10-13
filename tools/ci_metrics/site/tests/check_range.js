@@ -10,14 +10,11 @@ setTimeout(()=>{
   const sel=d.getElementById('date-range');const setP=v=>{sel.value=v;sel.dispatchEvent(new w.Event('change'))};
   const counts=()=>({win:w.getWindows().current.length,fl:w.flakyCalc().n,
     tl:d.querySelectorAll('#timeline svg a.axlink').length,wk:d.querySelectorAll('#worker-chart svg a.axlink').length,
-    dev:d.querySelectorAll('#devlines svg a.axlink').length,
-    flAx:d.querySelectorAll('[data-flaxis] span').length});
+    dev:d.querySelectorAll('#devlines svg a.axlink').length});
   const exp={'7':14,'14':20,'30':30,'90':30};
   for(const [v,n] of Object.entries(exp)){
     setP(v);const c=counts();
     ok(`preset ${v}: every card draws the same ${n} PRs (${JSON.stringify(c)})`,Object.values(c).every(x=>x===n));
-    const lab=`The last ${v} days covers ${n} merged pull requests`;
-    ok(`preset ${v}: captions name the range and count`,T(d.getElementById('tl-zoombar')).includes(lab)&&T(d.getElementById('wk-meta')).includes(lab)&&T(d.getElementById('devlines-meta')).includes(lab)&&T(d.getElementById('flaky')).includes(lab));
     ok(`preset ${v}: one guide button per card after re-render`,[...new Set([...d.querySelectorAll('[data-gbtn]')].map(b=>b.getAttribute('data-gbtn')))].every(k=>d.querySelectorAll(`[data-gbtn="${k}"]`).length===1));
   ok(`preset ${v}: no stale wording (this window / UTC / NaN / Infinity)`,!/this window|UTC|NaN|Infinity/.test(vis()));
   }

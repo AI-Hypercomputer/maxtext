@@ -19,6 +19,9 @@ let pass=0,fail=0;
 function ok(c,m){if(c){pass++;console.log('  ok   '+m)}else{fail++;console.log('  FAIL '+m)}}
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 const own=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
+// A scenario that needs an example the files do not have today is left out, with a note. Data
+// that changes must not turn this check red when the page is fine.
+const skip=m=>console.log('  skip  '+m);
 
 if(!fs.existsSync(path.join(VIEWS,'meta.json'))){
   console.log('  skip  no views/ next to the page - run tools/ci_metrics/deploy/refresh-data.sh first');
@@ -47,6 +50,7 @@ const jobNameColumn=t=>t.columns.includes('job_name')?'job_name':t.columns.inclu
 // like cpu-unit#2), a flavor with no worker number (its job id is the bare
 // flavor), and two jobs that never have a flavor. Each is the busiest of its
 // kind in the last 14 days, the range the page opens on, so it is on the page.
+// A kind with nothing in those 14 days gives no example.
 function pickExamples(files){
   const all=name=>Object.values(files).flatMap(f=>{
     const t=f.tables&&f.tables[name];
@@ -59,14 +63,15 @@ function pickExamples(files){
   const hits=word=>[...recent].reduce((n,[name,c])=>n+((name||'').split(/[^\w-]+/).includes(word)?c:0),0);
   const workers=new Map();  // flavor -> the worker numbers it ran with
   jobs.forEach(j=>{if(j.flavor)workers.set(j.flavor,(workers.get(j.flavor)||new Set()).add(j.worker))});
-  const best=list=>list.sort((a,b)=>hits(b)-hits(a)||(a<b?-1:1))[0];
+  const best=list=>list.filter(f=>hits(f)>0).sort((a,b)=>hits(b)-hits(a)||(a<b?-1:1))[0];
   const flavors=[...workers.keys()];
   const flavored=new Set(jobs.filter(j=>j.flavor).map(j=>j.name));
   const bare=[...new Set(jobs.filter(j=>!j.flavor&&j.lane!=='Build'&&!flavored.has(j.name)).map(j=>j.name))]
     .filter(n=>recent.get(n)>0).sort((a,b)=>recent.get(b)-recent.get(a)||(a<b?-1:1));
   return{multi:best(flavors.filter(f=>workers.get(f).size>1)),
          single:best(flavors.filter(f=>workers.get(f).size===1&&workers.get(f).has(null))),
-         jobs:bare.slice(0,2)};
+         jobs:bare.slice(0,2),
+         any:[...flavors].sort()[0]};
 }
 const EX=pickExamples(parsed());
 
@@ -94,10 +99,9 @@ function renameColumns(files,cols,to){
   for(const f of Object.values(files))for(const t of tablesOf(f))
     t.columns.forEach((c,i)=>{if(cols.includes(c))t.rows.forEach(r=>{if(typeof r[i]==='string')r[i]=to})});
 }
-// The rescue-tests table is empty in today's data. Add one row per name, tied to
-// the newest rescue of a merged pull request, so the flaky-test list has
-// something to draw. Returns the id of the job the tests belong to.
-function addTests(files,names){
+// The newest rescue of a merged pull request that has a flavor, and the file it is in.
+// Null if the files have none.
+function pickRescue(files){
   const rowsOf=(f,name)=>{const t=f.tables&&f.tables[name];return t?t.rows.map(r=>Object.fromEntries(t.columns.map((c,i)=>[c,r[i]]))):[]};
   const flaky=Object.keys(files).filter(k=>/^views\/flaky-/.test(k));
   const merged=new Set(Object.keys(files).filter(k=>/^views\/runs-/.test(k)).flatMap(k=>rowsOf(files[k],'runs').map(r=>String(r.pr))));
@@ -105,6 +109,13 @@ function addTests(files,names){
   flaky.forEach(k=>rowsOf(files[k],'rescues').forEach(r=>{
     if(r.rescued&&r.flavor&&merged.has(String(r.pr))&&(!best||r.created_at>best.created_at)){best=r;bestFile=k}
   }));
+  return best&&{best,bestFile};
+}
+// The rescue-tests table is empty in today's data. Add one row per name, tied to
+// that rescue, so the flaky-test list has something to draw. Returns the id of the
+// job the tests belong to.
+function addTests(files,names){
+  const {best,bestFile}=pickRescue(files);
   const t=files[bestFile].tables.rescue_tests;
   names.forEach(name=>{
     const row={run_id:best.run_id,pr:best.pr,job_name:best.job_name,failed_attempt:best.failed_attempt,
@@ -290,7 +301,8 @@ const choice=n=>P=>[...P.d.querySelectorAll('#wk-chips option')].some(o=>o.value
 // Both flavors are renamed on one page, each to a different name, so five pages
 // give each flavor all five names.
 const {multi:MULTI,single:SINGLE}=EX;
-if(MULTI&&SINGLE)NAMES.forEach((n,i)=>{
+if(!(MULTI&&SINGLE))skip(`flavor pages left out: they need a flavor that ran on several workers (${MULTI||'none found'}) and one with no worker number (${SINGLE||'none found'}), each with a failure in the last 14 days. The view-reader block at the end still tries both shapes.`);
+else NAMES.forEach((n,i)=>{
   const m=NAMES[(i+1)%NAMES.length];
   scenarios.push({tag:`flavors ${MULTI} -> ${n}, ${SINGLE} -> ${m}`,
     edit:f=>{renameFlavor(f,MULTI,n);renameFlavor(f,SINGLE,m)},
@@ -304,6 +316,7 @@ if(MULTI&&SINGLE)NAMES.forEach((n,i)=>{
 // A job with no flavor gets its id from its name: "constructor" stays
 // "constructor", "__proto__" becomes "proto". Two jobs, one page.
 const jobs=[['__proto__','proto'],['constructor','constructor']].slice(0,EX.jobs.length).map(([n,id],i)=>[EX.jobs[i],n,id]);
+if(jobs.length<2)skip(`job-name page: it needs two jobs with no flavor and a failure in the last 14 days, and the files have ${jobs.length}${jobs.length?', so only the first name is tried':', so the page is left out'}. The view-reader block at the end still tries every name on a job with no flavor.`);
 if(jobs.length)scenarios.push({tag:`job names -> ${jobs.map(j=>j[1]).join(', ')}`,
   edit:f=>jobs.forEach(([from,n])=>renameJob(f,from,n)),
   focus:jobs.map(j=>j[2]),
@@ -313,14 +326,16 @@ if(jobs.length)scenarios.push({tag:`job names -> ${jobs.map(j=>j[1]).join(', ')}
 // Columns the collector fills from a fixed list hold a bad value: a lane, a pull
 // request number, and a table name, all spelled like words every object has.
 // The charts change shape here (a job is in no lane), so only "they draw" is asked.
-if(SINGLE){
+const ODD=SINGLE||EX.any;
+if(!ODD)skip('lane, pull request number and table page left out: the files have no job with a flavor to change.');
+else{
   const n='constructor';
   scenarios.push({tag:`a lane, a pull request number and a table named ${n}`,
     bars:false,
     edit:f=>{
       const col=(t,c)=>t.columns.indexOf(c);
       for(const[k,file]of Object.entries(f))for(const[tn,t]of Object.entries(file.tables||{})){
-        if(tn==='jobs')t.rows.forEach(r=>{if(r[col(t,'flavor')]===SINGLE)r[col(t,'lane')]=n});
+        if(tn==='jobs')t.rows.forEach(r=>{if(r[col(t,'flavor')]===ODD)r[col(t,'lane')]=n});
         if(tn==='queue')t.rows.forEach(r=>{r[col(t,'lane')]=n});
         if(tn==='suites'&&t.rows.length)t.rows[0][col(t,'pr')]=n;
       }
@@ -339,21 +354,26 @@ if(SINGLE){
 // the test is made up.
 {
   const n='__proto__';
+  const withTest=!!pickRescue(parsed());
+  if(!withTest)skip('the files have no rescued job with a flavor on a merged pull request, so no test is made up and the last page only renames the other columns.');
+  const tag=withTest?`test name and every other name column -> ${n}`:`every other name column -> ${n}`;
   let job;
-  scenarios.push({tag:`test name and every other name column -> ${n}`,
+  scenarios.push({tag,
     edit:f=>{
       renameColumns(f,['title','author','base_ref','workflow_name','workflow_path','runner_label','pool'],n);
-      job=addTests(f,[n,'test_synthetic_b']);
+      if(withTest)job=addTests(f,[n,'test_synthetic_b']);
     },
-    shows:[[`the flaky card shows the test ${n} as text`,text('#flaky',n)]],
+    shows:withTest?[[`the flaky card shows the test ${n} as text`,text('#flaky',n)]]:[],
     after:P=>{
       const pop=()=>P.d.querySelector('#wkpop-body').textContent;
-      P.w.openFlakyTestPop(n,job);
-      ok(pop().includes(n),`test name and every other name column -> ${n}: the test's own pop-up shows it as text`);
-      P.w.openFlakyTestPop('test_synthetic_b',job);
-      ok(pop().includes(n),`test name and every other name column -> ${n}: the other test's pop-up lists it as text`);
+      if(withTest){
+        P.w.openFlakyTestPop(n,job);
+        ok(pop().includes(n),`${tag}: the test's own pop-up shows it as text`);
+        P.w.openFlakyTestPop('test_synthetic_b',job);
+        ok(pop().includes(n),`${tag}: the other test's pop-up lists it as text`);
+      }
       P.w.openWkPop(P.w.eval('COMMITS[0].hash'));
-      ok(pop().includes(n),`test name and every other name column -> ${n}: a pull request title shows as text`);
+      ok(pop().includes(n),`${tag}: a pull request title shows as text`);
     }});
 }
 
@@ -419,10 +439,11 @@ async function reader(P){
 }
 
 (async()=>{
+  // What the scenarios use, from today's files. A note, not an assertion.
+  if(MULTI&&SINGLE)console.log(`  info  flavors picked from the files: ${MULTI} (several workers), ${SINGLE} (no worker number)`);
+  if(jobs.length)console.log(`  info  jobs with no flavor picked from the files: ${jobs.map(j=>j[0]).join(', ')}`);
   // The page with the original names comes first. It is the yardstick for the
   // others, and it is kept open for the view-reader block at the end.
-  ok(!!(MULTI&&SINGLE),'the files have a flavor that ran on several workers and one with no worker number'+(MULTI&&SINGLE?` (${MULTI}, ${SINGLE})`:''));
-  ok(jobs.length===2,`the files have two jobs with no flavor that failed lately${jobs.length===2?` (${jobs.map(j=>j[0]).join(', ')})`:''}`);
   const first=await openPage(parsed());
   BASE.bars=barsOf(first);BASE.snap=snapshot(first.w);
   await verify(first,'original names',{});

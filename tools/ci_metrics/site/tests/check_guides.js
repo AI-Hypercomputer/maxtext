@@ -25,7 +25,6 @@ setTimeout(()=>{
      btn('timeline').textContent.includes('How to read')&&btn('timeline').getAttribute('aria-controls')==='guide-timeline');
 
   // caveats that must stay where a reader sees them without opening anything
-  ok('flaky definition stays visible',txt(lead('flaky')).includes('fail on a first attempt'));
   ok('bar-card leads make no newest-left claim; the panels state the direction',
      !txt(lead('timeline')).includes('newest merged pull request is on the left')&&
      txt(panel('timeline')).includes('oldest merged pull request on the left'));

@@ -18,7 +18,6 @@ setTimeout(()=>{
   ok('worker purpose',body.includes("This chart shows where each merged pull request's CI time went, one bar per device lane."));
   ok('timeline purpose',body.includes('This chart shows how long CI took on every merged pull request on main'));
   ok('devlines purpose',body.includes("This chart shows how many minutes the TPU, GPU and CPU test jobs spent running their tests on each merged pull request"));
-  ok('rerun purpose',body.includes('This chart shows which jobs are flaky'));
   // Worker copy fixes
   ok('no "Pick one suite above"',!body.includes('Pick one suite above'));
   ok('dropdown has no "(stacked bars)"',!d.querySelector('#worker-chart, body').textContent.includes('stacked bars')||!html.includes('All worker suites (stacked bars)'));

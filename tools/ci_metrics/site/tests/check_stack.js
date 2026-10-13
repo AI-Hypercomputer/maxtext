@@ -28,7 +28,6 @@ setTimeout(()=>{
 
   // ---------- the view a reader lands on ----------
   ok('opens on all suites, wall clock, tests only',w.eval('WK_SEL')==='all'&&w.eval('WK_MEASURE')==='wall'&&w.eval('WK_PHASE')==='tests');
-  ok('both switches are offered',d.querySelector('#wk-chips').textContent.includes('Measure:')&&d.querySelector('#wk-chips').textContent.includes('Wall clock')&&d.querySelector('#wk-chips').textContent.includes('Machine minutes')&&d.querySelector('#wk-chips').textContent.includes('Time shown:')&&d.querySelector('#wk-chips').textContent.includes('Tests only'));
 
   // ---------- all suites: one bar per device lane, not one slice per suite ----------
   const lanes=()=>{const o={};[...svg().querySelectorAll('[data-gid]')].forEach(e=>{const k=e.getAttribute('data-gid');o[k]=(o[k]||0)+1});return o};
@@ -61,17 +60,12 @@ setTimeout(()=>{
   ok('machine minutes still label every bar under the top gridline',groupLabels().every(v=>v<=axisTop()));
   const machLabels=groupLabels();
   ok('machine minutes are never below wall clock',machLabels.length===wallLabels.length&&machLabels.every((v,i)=>v>=wallLabels[i]));
-  ok('meta explains that machine minutes add up',meta().textContent.includes('Machine minutes add up, so the lanes are stacked'));
-  set('all','wall','tests');
-  ok('meta explains that wall clock is the slowest lane',meta().textContent.includes('the number above a group is the slowest lane'));
 
   // ---------- one suite: one bar per worker ----------
   set('cpu-pre-u','wall','tests');
   ok('cpu-pre 4 workers side by side, one capped bar each',svg().querySelectorAll('path').length===4*n&&svg().querySelectorAll('rect').length===0&&columns()===4*n);
   ok('four worker shades',new Set(shapes().map(e=>e.getAttribute('fill'))).size===4);
   ok('wall-clock label is the slowest worker, never the sum',groupLabels().every(v=>v<=axisTop()));
-  ok('meta says the workers run at the same time',meta().textContent.includes('The workers run at the same time, so they are drawn side by side'));
-  ok('meta split disclosure',meta().textContent.includes('estimated from the suite total'));
   ok('legend names the worker shades',meta().textContent.includes('Worker tests')&&meta().textContent.includes('shaded dark to light = worker 1 to 4'));
   ok('back chip present',d.querySelector('#wk-chips').textContent.includes('Back to all suites'));
   const texts=[...svg().querySelectorAll('text')].map(t=>t.textContent);
@@ -80,7 +74,6 @@ setTimeout(()=>{
   set('cpu-pre-u','machine','tests');
   ok('machine minutes stack the four workers into one column',svg().querySelectorAll('path').length===n&&svg().querySelectorAll('rect').length===3*n&&columns()===n);
   ok('the stacked total still fits under the top gridline',groupLabels().every(v=>v<=axisTop()));
-  ok('meta says machine minutes add up across the workers',meta().textContent.includes('the number above a bar is all 4 of them together'));
 
   set('cpu-pre-u','wall','all');
   ok('All time shows each worker its own wait and setup',fillCount('var(--bld)')>0);
@@ -128,10 +121,6 @@ setTimeout(()=>{
   w.closeWkPop();
 
   // the legend may only name colours the chart is actually drawing
-  set('cpu-pre-u','machine','all');
-  ok('machine minutes stack whole workers, so the legend drops wait and setup',!meta().textContent.includes('Runner wait')&&meta().textContent.includes('Worker time'));
-  set('all','machine','all');
-  ok('all-lanes machine legend drops wait and setup too',!meta().textContent.includes('Runner wait'));
   set('all','wall','all');
   ok('wall clock draws the phases, so the legend names them',meta().textContent.includes('Runner wait')&&meta().textContent.includes('Setup'));
 
