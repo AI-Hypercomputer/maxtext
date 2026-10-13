@@ -182,3 +182,37 @@ def store_2d_as_3d(ref, x2d: jax.Array, tm: int, tile_d0: int) -> None:
     words = [pltpu.bitcast(x2d[:, (c + q) * LANES : (c + q + 1) * LANES], jnp.uint32) for q in range(pack)]
     for r, out in enumerate(_transpose_words(words)):
       o2d[pl.ds(r * rows_per_tok + c // pack, tm // pack, stride=stride), :] = out
+
+
+def store_2d_into_3d(ref, x2d: jax.Array, tm: int, row_start: int) -> None:
+  """Stores ``x2d`` ``[tm, n * 128]`` into rows ``[row_start, row_start + n)``.
+
+  Like :func:`store_2d_as_3d`, but writes only ``n`` of the ``d0`` rows of
+  each token of ``ref`` (``[..., d0, 128]``), so a kernel can relayout its
+  output one column chunk at a time.
+
+  Args:
+    ref: Destination VMEM ref with trailing dimensions ``(d0, 128)``.
+    x2d: 2D tile ``[tm, n * 128]`` of ``ref.dtype`` to store.
+    tm: Number of tokens in ``x2d`` (a multiple of the packing).
+    row_start: First of the ``n`` rows written, a multiple of the packing.
+  """
+  assert x2d.dtype == ref.dtype, (x2d.dtype, ref.dtype)
+  assert x2d.shape[0] == tm and x2d.shape[1] % LANES == 0, (x2d.shape, tm)
+  o2d, rows_per_tok, pack = _flat_u32_view(ref, ref.shape[-2])
+  assert tm % pack == 0, (tm, pack)
+  num_rows = x2d.shape[1] // LANES
+  assert num_rows % pack == 0, (num_rows, pack)
+  stride = pack * rows_per_tok
+  word_start = row_start // pack
+  for c in range(0, num_rows, pack):
+    words = [pltpu.bitcast(x2d[:, (c + q) * LANES : (c + q + 1) * LANES], jnp.uint32) for q in range(pack)]
+    for r, out in enumerate(_transpose_words(words)):
+      o2d[
+          pl.ds(
+              r * rows_per_tok + word_start + c // pack,
+              tm // pack,
+              stride=stride,
+          ),
+          :,
+      ] = out

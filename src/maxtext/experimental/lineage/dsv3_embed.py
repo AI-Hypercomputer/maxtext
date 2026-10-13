@@ -264,7 +264,7 @@ def collect_head_kernel(
   Returns:
     The kernel in `dtype`, replicated (`reduced`) over every mesh axis: the
     ones it was sharded on and the ones it was already replicated over (`dcn`,
-    and any ICI axes `fit_embed_shardings` dropped).
+    and any ICI axes its spec leaves out, e.g. `x` on 8x16x16).
   """
   spec = jax.typeof(kernel).sharding.spec
   if len(spec) > 1 and spec[1] is not None:

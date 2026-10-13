@@ -287,6 +287,7 @@ def reduce_along_axis(
     like: jt.Shaped[jax.Array, "..."] | jt.PyTree[jt.Shaped[jax.Array, "..."]],
     *,
     axes: Collection[str] | None = None,
+    split_scatters: bool | jt.PyTree[bool] = False,
     defer: bool = False,
     compute_type: str | None = None,
     compiler_options: dict[str, Any] | None = None,
@@ -317,6 +318,11 @@ def reduce_along_axis(
       all the collected axes. The collected axes sharding a dimension of `like`
       together must be all in or all out of `axes`, since reduce-scattering
       along only some of them would scramble the shards.
+    split_scatters: Whether to issue each reduce-scatter along several axes as
+      one reduce-scatter per axis, major axis first, instead of one along all of
+      them; a bool or a pytree prefix of `xs`. A one-axis reduce-scatter uses
+      the links of only its axis, but for small, latency-bound arrays several of
+      them can finish sooner than one multi-axis reduce-scatter.
     defer: Whether to return the reduction as a `DeferredReduce` to run inside
       the caller's `shard_map`, instead of issuing it. Requires no
       `compute_type`.
@@ -382,6 +388,11 @@ def reduce_along_axis(
     return _nothing_to_reduce()
 
   mesh = jax.typeof(leaves[0]).sharding.mesh
+  split_tree = jax.tree.map(
+      lambda split, sub_xs: jax.tree.map(lambda _: split, sub_xs),
+      split_scatters,
+      xs,
+  )
   in_specs = jax.tree.map(lambda arr: jax.typeof(arr).sharding.spec, xs)
   like_specs = jax.tree.map(lambda arr: jax.typeof(arr).sharding.spec, like)
 
@@ -462,12 +473,17 @@ def reduce_along_axis(
       in_spec: jax.sharding.PartitionSpec,
       like_spec: jax.sharding.PartitionSpec,
       physical_axes: tuple[tuple[str, ...], frozenset[str]],
+      split: bool,
   ):
     scatters, psums, _ = _leaf_collectives(in_spec, like_spec, physical_axes)
     # The reduce-scatters first: they shrink the all-reduces, which commute
     # with them as they are along other axes.
     for dim_idx, scatter_axes in scatters:
-      arr = jax.lax.psum_scatter(arr, scatter_axes, scatter_dimension=dim_idx, tiled=True)
+      # When split, the major axis goes first, so that each device ends up
+      # with the shard that one multi-axis reduce-scatter would give it.
+      groups = [(ax,) for ax in scatter_axes] if split else [scatter_axes]
+      for group in groups:
+        arr = jax.lax.psum_scatter(arr, group, scatter_dimension=dim_idx, tiled=True)
     for ax in psums:
       arr = jax.lax.psum(arr, ax)
     return arr
@@ -481,6 +497,7 @@ def reduce_along_axis(
             xs_treedef.flatten_up_to(physical_axes_tree),
         )
     )
+    leaf_splits = xs_treedef.flatten_up_to(split_tree)
     leaf_out_specs = xs_treedef.flatten_up_to(out_specs)
     # The arrays this call reduces along no axis need no collective.
     reduced_idxs = []
@@ -490,7 +507,7 @@ def reduce_along_axis(
         reduced_idxs.append(i)
 
     def _local_fn(operand):
-      return [_reduce_leaf(arr, *leaf_specs[i]) for arr, i in zip(operand, reduced_idxs)]
+      return [_reduce_leaf(arr, *leaf_specs[i], split=leaf_splits[i]) for arr, i in zip(operand, reduced_idxs)]
 
     def _finish(reduced):
       merged = list(xs_leaves)
@@ -506,7 +523,14 @@ def reduce_along_axis(
     )
 
   def _reduce_pytree(xs_local):
-    return jax.tree.map(_reduce_leaf, xs_local, in_specs, like_specs, physical_axes_tree)
+    return jax.tree.map(
+        _reduce_leaf,
+        xs_local,
+        in_specs,
+        like_specs,
+        physical_axes_tree,
+        split_tree,
+    )
 
   if compute_type is not None:
     _reduce_pytree = jax.experimental.compute_on.compute_on(

@@ -126,10 +126,10 @@ override_logical_axis_rules: true
 # has size num_slices (1 for a single slice; it is kept in the type because
 # remove_size_one_mesh_axis_from_type is false) and carries pure data
 # parallelism: MaxText-side activations split their batch over it, while
-# Lineage's logical axes below (activation_batch_attn -> fsdp_attention,
-# exp -> expert, embed_moe -> fsdp_moe) deliberately exclude it so that FSDP
-# and expert parallelism stay inside a slice and weights are replicated across
-# slices. The DCN gradient all-reduce is issued by Lineage's weight collection
+# Lineage's shardings (dsv3_sharding.TOPOLOGY_SHARDINGS, looked up by the
+# per-slice (x, y, z) shape) deliberately exclude it so that FSDP and expert
+# parallelism stay inside a slice and weights are replicated across slices.
+# The DCN gradient all-reduce is issued by Lineage's weight collection
 # (collect_along_axis over "dcn").
 mesh_axes: ['dcn', 'x', 'y', 'z', 'core']
 ici_parallelism: [1, 8, 8, 8, 2]
