@@ -608,6 +608,19 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
     mock_init.assert_not_called()
 
+  def test_tpu_checkpoint_load_without_checkpointing_calls_jax_init(self):
+    # Loading a checkpoint on multi-host needs the distributed system even when saving is off.
+    for load_keys in (
+        {"load_parameters_path": "gs://bucket/ckpt/0/items"},
+        {"load_full_state_path": "gs://bucket/ckpt/0/items"},
+        {"source_checkpoint_layout": "safetensors_dynamic"},
+    ):
+      with self.subTest(**load_keys), mock.patch("jax.distributed.initialize") as mock_init:
+        max_utils.maybe_initialize_jax_distributed_system(self._base_keys(enable_checkpointing=False, **load_keys))
+        mock_init.assert_called_once_with(
+            initialization_timeout=self._base_keys()["jax_distributed_initialization_timeout"]
+        )
+
 
 class TestReorderSequence(unittest.TestCase):
   """Tests for reorder_sequence optimization in max_utils.py"""
