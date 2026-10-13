@@ -188,9 +188,17 @@ _SPARSE_8X16X16 = dsv3_types.DSv3SparseLayerWeightsPytree(
     moe=dsv3_types.DSv3MoEWeightsPytree(
         router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
         routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
-            gate=P(None, ("x", "core"), ("y", "z"), None),
-            # On its hidden dim, as on 8x8x8.
-            linear=P(None, ("x", "core"), ("y", "z"), None),
+            # 256-way FSDP over (y, z) would leave 7168 / 256 = 28-row gate
+            # shards, not whole 8-row TPU tiles: the SparseCore all-gather
+            # lands them with the embedding dim outermost, and XLA relayouts
+            # every gathered gate and gate gradient. y shards the expert dim
+            # instead, after the expert axes, splitting the 16 local experts
+            # into one per device, and z leaves 448-row gate shards.
+            # `ops.collect_along_axis` gathers both dims with one all-gather.
+            gate=P(None, ("x", "core", "y"), "z", None),
+            # On its hidden dim, as on 8x8x8, with gate's expert axes so both
+            # routed weights share one expert layout.
+            linear=P(None, ("x", "core", "y"), "z", None),
         ),
         shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
             gate_0=P(None, None, ("y", "z")),

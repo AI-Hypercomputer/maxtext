@@ -110,6 +110,42 @@ def physical_pspec(
   return jax.sharding.PartitionSpec(*physical_partitions, reduced=reduced, unreduced=unreduced)
 
 
+def _merged_gather_dims(
+    local_shape: Sequence[int],
+    lead: tuple[int, tuple[str, ...], tuple[str, ...]],
+    trail: tuple[int, tuple[str, ...], tuple[str, ...]],
+) -> bool:
+  """Whether two collected dims can share one all-gather of their merged view.
+
+  `lead` and `trail` are `(dim, partition axes, collected axes)` of two
+  dimensions. Collecting `lead` along axes `a` and `trail` along axes `b` is
+  one tiled all-gather along `a + b` of the view merging the two dimensions
+  when they are adjacent, `lead`'s shard is a single index (so the shards of
+  the merged view are contiguous runs of `trail`), `a` are the minor axes
+  sharding `lead`, and `b` all the axes sharding `trail`. E.g. routed expert
+  weights `[expert, rows, cols]` sharded `P(("x", "y"), "z", None)` and
+  collected along `("y", "z")` gather `[rows / |z|, cols]` blocks into
+  `[|y| * rows, cols]`: the shards stay whole tiles where gathering `rows`
+  along `("y", "z")` alone would split them.
+
+  Args:
+    local_shape: Shape of the local shard.
+    lead: The first dimension.
+    trail: The second dimension.
+
+  Returns:
+    Whether the merged all-gather applies.
+  """
+  lead_dim, lead_part, lead_axes = lead
+  trail_dim, trail_part, trail_axes = trail
+  return (
+      trail_dim == lead_dim + 1
+      and local_shape[lead_dim] == 1
+      and tuple(lead_part[len(lead_part) - len(lead_axes) :]) == lead_axes
+      and tuple(trail_part) == trail_axes
+  )
+
+
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def collect_along_axis(
     xs: jt.Num[jax.Array, "*input_dims"] | jt.PyTree[jt.Num[jax.Array, "..."]],
@@ -222,16 +258,43 @@ def collect_along_axis(
   ):
     physical_axis_names, physical_axis_set = physical_axes
     sharded_axes = set()
+    gathers = []
     for dim_idx, part in enumerate(in_spec.partitions):
       if part is None:
         continue
       part_axes = (part,) if isinstance(part, str) else part
       sharded_axes.update(part_axes)
-      # One all-gather along all the axes sharding the dimension, rather than
-      # one per axis, which would each use the links of only its axis.
       gather_axes = tuple(ax for ax in part_axes if ax in physical_axis_set)
       if gather_axes:
-        arr = jax.lax.all_gather(arr, gather_axes, axis=dim_idx, tiled=True, to="reduced")
+        gathers.append((dim_idx, part_axes, gather_axes))
+    # One all-gather along all the axes sharding the dimension, rather than
+    # one per axis, which would each use the links of only its axis. Two
+    # adjacent dimensions are gathered with a single all-gather of their
+    # merged view (see `_merged_gather_dims`).
+    i = 0
+    while i < len(gathers):
+      dim_idx, _, gather_axes = gathers[i]
+      if i + 1 < len(gathers) and _merged_gather_dims(arr.shape, gathers[i], gathers[i + 1]):
+        next_dim, _, next_axes = gathers[i + 1]
+        shape = arr.shape
+        merged = arr.reshape(
+            *shape[:dim_idx],
+            shape[dim_idx] * shape[next_dim],
+            *shape[next_dim + 1 :],
+        )
+        merged = jax.lax.all_gather(
+            merged,
+            gather_axes + next_axes,
+            axis=dim_idx,
+            tiled=True,
+            to="reduced",
+        )
+        gathered_lead = math.prod(jax.lax.axis_size(a) for a in gather_axes)
+        arr = merged.reshape(*shape[:dim_idx], gathered_lead, -1, *shape[next_dim + 1 :])
+        i += 2
+        continue
+      arr = jax.lax.all_gather(arr, gather_axes, axis=dim_idx, tiled=True, to="reduced")
+      i += 1
     for ax in physical_axis_names:
       if ax not in sharded_axes and ax not in in_spec.reduced and ax not in in_spec.unreduced:
         arr = jax.lax.pcast(arr, ax, to="reduced")
@@ -476,14 +539,48 @@ def reduce_along_axis(
       split: bool,
   ):
     scatters, psums, _ = _leaf_collectives(in_spec, like_spec, physical_axes)
-    # The reduce-scatters first: they shrink the all-reduces, which commute
-    # with them as they are along other axes.
-    for dim_idx, scatter_axes in scatters:
+
+    def _part_axes(dim_idx):
+      part = like_spec.partitions[dim_idx]
+      return (part,) if isinstance(part, str) else tuple(part or ())
+
+    def _psum_scatter(arr, dim_idx, scatter_axes):
       # When split, the major axis goes first, so that each device ends up
       # with the shard that one multi-axis reduce-scatter would give it.
       groups = [(ax,) for ax in scatter_axes] if split else [scatter_axes]
       for group in groups:
         arr = jax.lax.psum_scatter(arr, group, scatter_dimension=dim_idx, tiled=True)
+      return arr
+
+    # The reduce-scatters first: they shrink the all-reduces, which commute
+    # with them as they are along other axes. `scatters` is in reverse
+    # dimension order; the dual of a merged all-gather in `collect_along_axis`
+    # is one reduce-scatter of the merged view.
+    i = 0
+    while i < len(scatters):
+      dim_idx, scatter_axes = scatters[i]
+      if i + 1 < len(scatters):
+        lead_dim, lead_axes = scatters[i + 1]
+        lead_size = math.prod(jax.lax.axis_size(a) for a in lead_axes)
+        local_shape = list(arr.shape)
+        local_shape[lead_dim] //= lead_size
+        if _merged_gather_dims(
+            local_shape,
+            (lead_dim, _part_axes(lead_dim), lead_axes),
+            (dim_idx, _part_axes(dim_idx), scatter_axes),
+        ):
+          shape = arr.shape
+          merged = arr.reshape(
+              *shape[:lead_dim],
+              shape[lead_dim] * shape[dim_idx],
+              *shape[dim_idx + 1 :],
+          )
+          merged = _psum_scatter(merged, lead_dim, lead_axes + scatter_axes)
+          arr = merged.reshape(*shape[:lead_dim], 1, -1, *shape[dim_idx + 1 :])
+          i += 2
+          continue
+      arr = _psum_scatter(arr, dim_idx, scatter_axes)
+      i += 1
     for ax in psums:
       arr = jax.lax.psum(arr, ax)
     return arr

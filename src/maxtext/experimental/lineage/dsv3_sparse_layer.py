@@ -612,6 +612,36 @@ def _bank_from_carry(
   return constrain_activation_bank(bank.reshape(-1, bank.shape[-1]))
 
 
+def routed_w_to_tiles(
+    w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
+  """Views collected routed expert weights as `[expert, rows / 8, 8, cols]`.
+
+  The SparseCore all-gather produces fp8 routed weights in T(8, 128) tiling,
+  but XLA ignores layout constraints on the layer-scan and chunk-loop carries
+  and gives `[expert, rows, cols]` fp8 weights the default T(32, 128) tiling, so
+  every layer copies each gathered weight between them (as with the bank, see
+  `_bank_to_carry`). A second-minor dimension of 8 gets T(8, 128) tiling, so in
+  this view the weights keep the all-gather's tiling everywhere and every
+  reshape between the views is a bitcast. The routed experts read the weights
+  through `routed_w_from_tiles`, in either tiling.
+
+  Args:
+    w: Collected `[expert, rows, cols]` routed expert weights.
+
+  Returns:
+    The weights viewed as `[expert, rows / 8, 8, cols]`.
+  """
+  return jax.tree.map(lambda a: a.reshape(*a.shape[:-2], a.shape[-2] // 8, 8, a.shape[-1]), w)
+
+
+def routed_w_from_tiles(
+    w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
+  """Inverse of `routed_w_to_tiles`."""
+  return jax.tree.map(lambda a: a.reshape(*a.shape[:-3], a.shape[-3] * 8, a.shape[-1]), w)
+
+
 def _routed_experts_chunked_impl(
     x_ag: jt.Num[jax.Array, "NBT D0 D1"],
     metadata: dsv3_router.RouterMetadata[jax.Array],
@@ -636,7 +666,8 @@ def _routed_experts_chunked_impl(
   Args:
     x_ag: All-gathered tokens on this device.
     metadata: Router metadata on this device.
-    w_routed: Routed expert weights on this device.
+    w_routed: Routed expert weights on this device, in the `routed_w_to_tiles`
+      view.
     bank: Cross-layer gating activation bank on this device.
     bank_offset: Write offset into `bank`.
     num_experts_per_tok: Number of experts selected per token.
@@ -672,7 +703,7 @@ def _routed_experts_chunked_impl(
           x_ag,
           token_indices,
           start,
-          w_routed,
+          routed_w_from_tiles(w_routed),
           group_sizes,
           sorted_coeffs,
           bank,
@@ -693,7 +724,7 @@ def _routed_experts_chunked_impl(
       )
       routed_out, bank = dsv3_experts.dsv3_routed_experts_impl(
           routed,
-          w_routed,
+          routed_w_from_tiles(w_routed),
           group_sizes,
           sorted_coeffs,
           bank,
@@ -988,6 +1019,8 @@ def _routed_experts_chunked_bwd_impl(
   num_slots = metadata.sort_indices.shape[0]
   num_local_tokens = jnp.sum(metadata.group_sizes, dtype=jnp.int32)
   bank_offset = bank_offset - dsv3_experts.bank_aligned(num_local_tokens)
+  if grad_w_acc is not None:
+    grad_w_acc = routed_w_from_tiles(grad_w_acc)
   # With fp8 and a gmm_fn that can gather, the linear backward reads each
   # chunk's output gradient rows straight from grad_y_ag instead of a
   # permute_chunk copy.
@@ -1019,7 +1052,7 @@ def _routed_experts_chunked_bwd_impl(
           token_indices,
           start,
           permute(x_ag),
-          w_routed,
+          routed_w_from_tiles(w_routed),
           group_sizes,
           sorted_coeffs,
           bank,
@@ -1027,14 +1060,14 @@ def _routed_experts_chunked_bwd_impl(
           grad_w_acc,
           gmm_fn=gmm_fn,
           quant_rule=quant_rule,
-          w_routed_q=w_routed_q,
+          w_routed_q=routed_w_from_tiles(w_routed_q),
           grad_y_scale=grad_y_scale,
       )
     else:
       grad_x_sorted, grad_w_routed, grad_coeffs, bank = dsv3_experts.dsv3_routed_experts_bwd_impl(
           permute(grad_y_ag),
           permute(x_ag),
-          w_routed,
+          routed_w_from_tiles(w_routed),
           group_sizes,
           sorted_coeffs,
           bank,
@@ -1042,7 +1075,7 @@ def _routed_experts_chunked_bwd_impl(
           grad_w_acc,
           gmm_fn=gmm_fn,
           quant_rule=quant_rule,
-          w_routed_q=w_routed_q,
+          w_routed_q=(None if w_routed_q is None else routed_w_from_tiles(w_routed_q)),
       )
     grad_x_ag = dsv3_router.unpermute_chunk(
         grad_x_sorted,
@@ -1111,7 +1144,7 @@ def _routed_experts_chunked_bwd_impl(
   return (
       grad_x_ag,
       grad_sorted_coeffs[:num_slots],
-      grad_w_routed,
+      routed_w_to_tiles(grad_w_routed),
       bank,
       bank_offset,
   )
@@ -4098,7 +4131,8 @@ def collect_w_ici(
       is performed.
 
   Returns:
-    The collected (and, if requested, shuffled) weights.
+    The collected (and, if requested, shuffled) weights, with `moe.routed` in
+    the `routed_w_to_tiles` view.
   """
   w_axes = _w_ici_axes()
 
@@ -4123,18 +4157,22 @@ def collect_w_ici(
         axis_mapping,
         **_SC1_KWARGS,
     )
-    return dsv3_types.DSv3SparseLayerWeightsPytree(
+    collected = dsv3_types.DSv3SparseLayerWeightsPytree(
         pre_attn_norm_scale=pre_attn_norm_scale,
         mla=mla,
         post_attn_norm_scale=post_attn_norm_scale,
         moe=moe,
     )
-
-  return ops.collect_along_axis(
-      w,
-      w_axes,
-      axis_mapping,
-      **_SC1_KWARGS,
+  else:
+    collected = ops.collect_along_axis(
+        w,
+        w_axes,
+        axis_mapping,
+        **_SC1_KWARGS,
+    )
+  return dataclasses.replace(
+      collected,
+      moe=dataclasses.replace(collected.moe, routed=routed_w_to_tiles(collected.moe.routed)),
   )
 
 
@@ -4223,6 +4261,10 @@ def reduce_w_ici_sc1(
     The partially reduced gradients, sharded like `like` along the
     `_sc1_reduce_axes`.
   """
+  grad_w = dataclasses.replace(
+      grad_w,
+      moe=dataclasses.replace(grad_w.moe, routed=routed_w_from_tiles(grad_w.moe.routed)),
+  )
   return ops.reduce_along_axis(
       grad_w,
       _w_ici_axes(),

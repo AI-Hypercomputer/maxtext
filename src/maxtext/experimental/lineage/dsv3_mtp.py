@@ -165,9 +165,9 @@ def dsv3_mtp_layer(
       routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
       axis_mapping: Mapping[str, str | tuple[str, ...]],
   ) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
-    """Collects routed expert weights, shuffling experts before the FSDP AG."""
+    """Collects routed expert weights in the `routed_w_to_tiles` view."""
     if expert_permutations is None:
-      return ops.collect_along_axis(routed, ("dcn", "fsdp_moe"), axis_mapping)
+      return dsv3_sparse_layer.routed_w_to_tiles(ops.collect_along_axis(routed, ("dcn", "fsdp_moe"), axis_mapping))
     routed = ops.collect_along_axis(routed, ("dcn",), axis_mapping)
     with jax.named_scope("shuffle_experts"):
       routed = dsv3_expert_shuffle.shuffle_experts(
@@ -176,7 +176,7 @@ def dsv3_mtp_layer(
           expert_axis_name=expert_axis_name,
           axis_mapping=axis_mapping,
       )
-    return ops.collect_along_axis(routed, ("fsdp_moe",), axis_mapping)
+    return dsv3_sparse_layer.routed_w_to_tiles(ops.collect_along_axis(routed, ("fsdp_moe",), axis_mapping))
 
   def _collect_w(
       w: dsv3_types.DSv3MTPWeightsPytree,

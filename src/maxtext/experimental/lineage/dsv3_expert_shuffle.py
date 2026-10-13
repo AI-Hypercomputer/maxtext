@@ -256,18 +256,33 @@ def _ragged_permute(
     *,
     axis_name: tuple[str, ...],
 ) -> jax.Array:
-  """Permutes the expert-sharded dim 0 of `x` across the expert axis."""
+  """Permutes the expert-sharded dim 0 of `x` across the expert axis.
+
+  Dim 0 may also be sharded along minor axes after the expert axes (e.g. an
+  FSDP axis, as in the 8x16x16 routed expert layout of
+  `dsv3_sharding.TOPOLOGY_SHARDINGS`). Physical position `p` is then index `p`
+  of dim 0 over all of them, so the permutation runs over all of them, with
+  `num_experts // num_shards` slots per shard.
+
+  Args:
+    x: Expert-sharded array, experts on dim 0.
+    perm: Expert permutation.
+    axis_name: Physical expert axis names, a prefix of dim 0's axes.
+
+  Returns:
+    `x` with its experts permuted, sharded like `x`.
+  """
   x_spec = jax.typeof(x).sharding.spec
   mesh = jax.typeof(x).sharding.mesh
   partitions = x_spec.partitions
   dim0 = partitions[0] if partitions else None
   dim0 = (dim0,) if isinstance(dim0, str) else tuple(dim0 or ())
-  assert dim0 == axis_name, (
+  assert dim0[: len(axis_name)] == axis_name, (
       "routed expert weights must be sharded along the expert axis" f" {axis_name} on dim 0, got spec {x_spec}"
   )
   perm = jax.reshard(perm, jax.sharding.NamedSharding(mesh, P()))
   return jax.shard_map(
-      functools.partial(_ragged_permute_shard, axis_name=axis_name),
+      functools.partial(_ragged_permute_shard, axis_name=dim0),
       mesh=mesh,
       in_specs=(x_spec, P()),
       out_specs=x_spec,
