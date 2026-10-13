@@ -280,8 +280,13 @@ def create(output_dir: str, seed: int) -> None:
   print(f"Wrote {len(out)} tensors ({total / 1e9:.2f} GB) in {len(shards)} shards to {output_dir}")
 
 
-def golden(checkpoint_dir: str, output_path: str, prompt: str) -> None:
-  """Loads the mini checkpoint through the HF reference and saves float32 golden logits."""
+def golden(checkpoint_dir: str, output_path: str, prompt: str, index_topks=None) -> None:
+  """Loads a GLM-5.3 checkpoint through the HF reference and saves float32 golden logits.
+
+  Works for both the mini and the full checkpoint. With `index_topks`, the model is loaded once and one golden
+  file is written per value (`<output_path stem>_topk<k>.jsonl`), overriding each DSA indexer's `index_topk`
+  attribute (the HF code is unchanged); without it, the checkpoint config's value is used.
+  """
   from transformers import AutoTokenizer, FineGrainedFP8Config, Glm5NextForConditionalGeneration  # pylint: disable=import-outside-toplevel
 
   tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
@@ -296,12 +301,26 @@ def golden(checkpoint_dir: str, output_path: str, prompt: str) -> None:
   model = model.float()
   model.eval()
   input_ids = tokenizer.encode(prompt, return_tensors="pt")
-  with torch.no_grad():
-    logits = model(input_ids=input_ids).logits[0].float().numpy()
-  print(f"tokens={input_ids.shape[1]} logits={logits.shape} finite={np.isfinite(logits).all()}")
-  with open(output_path, "w", encoding="utf-8") as f:
-    f.write(json.dumps({"prompt": prompt, "tokens": input_ids[0].tolist(), "logits": logits.tolist()}) + "\n")
-  print(f"Wrote golden logits to {output_path}")
+  indexers = [
+      layer.self_attn.indexer
+      for layer in model.model.language_model.layers
+      if getattr(layer.self_attn, "indexer", None) is not None
+  ]
+  runs = [(None, output_path)]
+  if index_topks:
+    stem = output_path[: -len(".jsonl")] if output_path.endswith(".jsonl") else output_path
+    runs = [(k, f"{stem}_topk{k}.jsonl") for k in index_topks]
+  for topk, path in runs:
+    if topk is not None:
+      for indexer in indexers:
+        assert topk % indexer.index_kpool == 0, (topk, indexer.index_kpool)
+        indexer.index_topk = topk
+    with torch.no_grad():
+      logits = model(input_ids=input_ids).logits[0].float().numpy()
+    print(f"index_topk={topk} tokens={input_ids.shape[1]} logits={logits.shape} finite={np.isfinite(logits).all()}")
+    with open(path, "w", encoding="utf-8") as f:
+      f.write(json.dumps({"prompt": prompt, "tokens": input_ids[0].tolist(), "logits": logits.tolist()}) + "\n")
+    print(f"Wrote golden logits to {path}")
 
 
 def main():
@@ -314,11 +333,14 @@ def main():
   p_golden.add_argument("--checkpoint-dir", required=True)
   p_golden.add_argument("--output-path", required=True)
   p_golden.add_argument("--prompt", default=DEFAULT_PROMPT)
+  p_golden.add_argument(
+      "--index-topk", type=int, nargs="*", default=None, help="Write one golden file per DSA index_topk value."
+  )
   args = parser.parse_args()
   if args.cmd == "create":
     create(args.output_dir, args.seed)
   else:
-    golden(args.checkpoint_dir, args.output_path, args.prompt)
+    golden(args.checkpoint_dir, args.output_path, args.prompt, args.index_topk)
 
 
 if __name__ == "__main__":
