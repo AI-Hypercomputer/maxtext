@@ -212,6 +212,31 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def top_k_dense_vjp(x: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
+  """`jax.lax.top_k(x, k)` with a dense compare-select-reduce backward instead of JAX's default 1-lane scatter-add."""
+  vals, indices = jax.lax.top_k(x, k)
+  return vals, indices
+
+
+def _top_k_dense_vjp_fwd(x: jax.Array, k: int):
+  vals, indices = jax.lax.top_k(x, k)
+  return (vals, indices), (indices, x.shape[-1])
+
+
+def _top_k_dense_vjp_bwd(k: int, residuals, grads):
+  del k
+  indices, num_classes = residuals
+  g_vals, _ = grads
+  iota = jax.lax.broadcasted_iota(indices.dtype, (1,) * indices.ndim + (num_classes,), indices.ndim)
+  hit = indices[..., None] == iota  # [..., k, num_classes]
+  dx = jnp.sum(jnp.where(hit, g_vals[..., None], jnp.zeros((), g_vals.dtype)), axis=-2)
+  return (dx,)
+
+
+top_k_dense_vjp.defvjp(_top_k_dense_vjp_fwd, _top_k_dense_vjp_bwd)
+
+
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
@@ -1015,9 +1040,13 @@ class RoutedMoE(nnx.Module):
       elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
+        # Softmax is monotonic, so top_k on router_probs selects the same experts as
+        # gate_logits without a separate take_along_axis gather. Since Gemma 4 has 128
+        # experts (matching the 128-lane TPU VPU width), top_k_dense_vjp replaces the
+        # default 1-lane backward scatter-add with a fused 128-lane compare-select-reduce.
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-        _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
-        top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+        top_k_weights, top_k_indices = top_k_dense_vjp(router_probs, self.num_experts_per_tok)
+        top_k_weights = top_k_weights.astype(self.dtype)
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
