@@ -28,7 +28,7 @@ import functools
 import gc
 import os
 import time
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 from absl import logging
 from flax import nnx
@@ -694,6 +694,15 @@ def apply_first_phase_overrides(config: pyconfig.HyperParameters, root: Any) -> 
   for _, module in nnx.iter_graph(root):
     if isinstance(module, moe.RoutedMoE):
       module.ragged_buffer_factor_override = float(config.first_phase_ragged_buffer_factor)
+
+
+class _OverflowCheckTiming(NamedTuple):
+  """What `_resolve_overflow_check` spent, for `TRAINER_UPDATE_TIMING`."""
+
+  # Reading the overflow flag, which waits for the micro-batch that produced it.
+  flag_wait_s: float
+  # The dropless rerun, through reading its own flag; 0 when the micro-batch did not overflow.
+  rerun_s: float
 
 
 @dataclasses.dataclass(frozen=True)
@@ -2472,19 +2481,27 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._compiled_fwd_bwd_dropless = future.result()
     return self._compiled_fwd_bwd_dropless
 
-  def _resolve_overflow_check(self) -> None:
+  def _resolve_overflow_check(self) -> _OverflowCheckTiming:
     """Reads the pending micro-batch's overflow flag, reruns it dropless if it is set, and records it.
 
     `fwd_bwd` accumulated it as zero gradients and denominator, so the rerun's are added in their
     place. The rerun starts from the parameters, state and batch it ran from: parameters change only
     in `update`, and `fwd_bwd` donates nothing. The state the rerun returns is dropped, since the
     micro-batches after it already ran from the capped run's, which differs at most in RNG counts.
+
+    Returns:
+      How long reading the flag (which waits for the micro-batch to finish) and the rerun took.
     """
     check, self._pending_overflow_check = self._pending_overflow_check, None
     if check is None:
-      return
+      return _OverflowCheckTiming(flag_wait_s=0.0, rerun_s=0.0)
     loss, aux = check.loss, check.aux
-    if bool(check.has_overflow):
+    t_flag = time.monotonic()
+    overflowed = bool(check.has_overflow)
+    flag_wait_s = time.monotonic() - t_flag
+    rerun_s = 0.0
+    if overflowed:
+      t_rerun = time.monotonic()
       logging.info(
           "MoE ragged buffer overflow in micro step %d of train step %d; rerunning it with the dropless kernel.",
           check.micro_step,
@@ -2503,8 +2520,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         raise RuntimeError(
             f"The dropless rerun of micro step {check.micro_step} still overflowed; check apply_dropless_overrides."
         )
+      # Reading `rerun_overflow` waited for the rerun to finish.
+      rerun_s = time.monotonic() - t_rerun
       self._dropless_replays += 1
     self._record_micro_batch(loss, aux)
+    return _OverflowCheckTiming(flag_wait_s=flag_wait_s, rerun_s=rerun_s)
 
   @_profiled_step("update")
   def update(self, **kwargs: Any) -> int:
@@ -2519,19 +2539,31 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       The train step count after this update. Unchanged when there is nothing to apply.
     """
+    t_start = time.monotonic()
     # The last micro-batch's rerun, if it overflowed, belongs to the sums applied below.
-    self._resolve_overflow_check()
+    overflow_timing = self._resolve_overflow_check()
     # A compile error surfaces at the first update, not at the first overflow, which may be much later.
+    t_join = time.monotonic()
     self._join_dropless_compile()
+    join_compile_s = time.monotonic() - t_join
     if self._accumulated_grads is None:
       return self.train_step
+    micro_steps = self._micro_step_count
 
     if self._learning_rate_schedule is not None:
       lr = self._learning_rate_schedule(self.train_step)
       self.record_metrics("learning_rate", lr)
 
     # Wait for previous computations to finish before dispatching the update step to TPU.
+    t_throttle = time.monotonic()
     self._throttler.wait_for_next()
+    throttler_wait_s = time.monotonic() - t_throttle
+    # TRAINER_UPDATE_TIMING: wait for every queued micro-batch, so `update_compute_s` below is the
+    # update alone. Without the replay nothing above waits for the last micro-batch.
+    t_drain = time.monotonic()
+    jax.block_until_ready((self._accumulated_grads, self._accumulated_denominator))
+    drain_s = time.monotonic() - t_drain
+    t_dispatch = time.monotonic()
 
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
@@ -2571,6 +2603,29 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if not compiled:
       # Back to pinned host memory, where the compiled update's `out_shardings` would put it.
       self._offload_optimizer_state()
+    dispatch_s = time.monotonic() - t_dispatch
+    # Waits for the whole new state, the optimizer state written back to host memory under offload
+    # included. The caller reads this update's metrics next, which waits for it anyway.
+    t_compute = time.monotonic()
+    jax.block_until_ready(new_state_pure)
+    update_compute_s = time.monotonic() - t_compute
+    logging.info(
+        "TRAINER_UPDATE_TIMING train_step=%d micro_steps=%d compiled=%s optimizer_memory_host_offload=%s "
+        "overflow_flag_wait_s=%.3f dropless_rerun_s=%.3f join_compile_s=%.3f throttler_wait_s=%.3f "
+        "drain_s=%.3f dispatch_s=%.3f update_compute_s=%.3f total_s=%.3f",
+        self.train_step,
+        micro_steps,
+        compiled,
+        self._config.optimizer_memory_host_offload,
+        overflow_timing.flag_wait_s,
+        overflow_timing.rerun_s,
+        join_compile_s,
+        throttler_wait_s,
+        drain_s,
+        dispatch_s,
+        update_compute_s,
+        time.monotonic() - t_start,
+    )
 
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)

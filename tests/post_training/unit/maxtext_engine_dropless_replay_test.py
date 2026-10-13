@@ -212,6 +212,32 @@ class DroplessReplayEngineTest(unittest.TestCase):
     self.assertEqual(after_each, [0, 0, 0])
     self.assertEqual(replays, 1)
 
+  def _update_timing(self, first_tokens):
+    """Runs one step over micro-batches starting with `first_tokens`; returns the update's TRAINER_UPDATE_TIMING
+    fields."""
+    engine = self._engine(overflow_on_normal_path="marked")
+    for first_token in first_tokens:
+      engine.fwd_bwd(_payload(first_token))
+    with self.assertLogs("absl", level="INFO") as logs:
+      engine.update()
+    (line,) = [r.getMessage() for r in logs.records if r.getMessage().startswith("TRAINER_UPDATE_TIMING ")]
+    return dict(field.split("=", 1) for field in line.split()[1:])
+
+  def test_update_timing_reports_the_last_micro_batch_rerun(self):
+    fields = self._update_timing([10, _MARKED])
+    self.assertEqual(fields["train_step"], "0")
+    self.assertEqual(fields["micro_steps"], "2")
+    self.assertGreater(float(fields["dropless_rerun_s"]), 0.0)
+    parts = ("overflow_flag_wait_s", "dropless_rerun_s", "join_compile_s", "throttler_wait_s", "drain_s",
+             "dispatch_s", "update_compute_s")
+    self.assertTrue(all(float(fields[k]) >= 0.0 for k in parts))
+    self.assertGreaterEqual(float(fields["total_s"]) + 1e-3, sum(float(fields[k]) for k in parts))
+
+  def test_update_timing_without_an_overflow_has_no_rerun(self):
+    fields = self._update_timing([10, 10])
+    self.assertEqual(float(fields["dropless_rerun_s"]), 0.0)
+    self.assertGreater(float(fields["update_compute_s"]), 0.0)
+
   def test_scoring_and_eval_run_the_dropless_graph(self):
     engine = self._engine(overflow_on_normal_path=False)
     with engine.model_scope() as (model, _, _):
