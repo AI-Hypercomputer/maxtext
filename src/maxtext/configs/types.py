@@ -1017,6 +1017,16 @@ class SplashAttention(BaseModel):
           " quantized to jnp.float8_e4m3fn, without scaling factors."
       ),
   )
+  sa_ignore_segment_ids: bool = Field(
+      False,
+      description=(
+          "Do not pass decoder segment ids to splash attention, which skips the"
+          " per-block segment mask. Only valid when every row is a single"
+          " segment: dataset_type='c4_mlperf' with stream chunking for both"
+          " train and eval. Requires attention='flash' and attention_type in"
+          " ('global', 'mla', 'local_sliding', 'chunk')."
+      ),
+  )
   use_max_logit_estimate: int = Field(
       -1,
       description="-1 means no estimate, any > 0 value will be used as max logit estimate",
@@ -5823,6 +5833,34 @@ class MaxTextConfig(
           "K quantization is currently only supported with"
           f" attention_type='mla'. Found attention_type='{self.attention_type}'"
       )
+    if self.sa_ignore_segment_ids:
+      # Mirrors the use_stream_chunking=None resolution in tfds_data_processing_c4_mlperf.py: stream
+      # chunking (uniform segment ids per row) is the default for pre-tokenized data.
+      def _stream_chunked(tokenize_data: bool) -> bool:
+        return self.use_stream_chunking is True or (self.use_stream_chunking is None and not tokenize_data)
+
+      if not (
+          self.dataset_type == DatasetType.C4MLPERF
+          and _stream_chunked(self.tokenize_train_data)
+          and (self.eval_interval <= 0 or _stream_chunked(self.tokenize_eval_data))
+      ):
+        raise ValueError(
+            "sa_ignore_segment_ids requires dataset_type='c4_mlperf' with"
+            " stream chunking for train and eval (use_stream_chunking=True, or"
+            " None with pre-tokenized data); packed sequences need the segment"
+            " mask."
+        )
+      if self.attention != "flash":
+        raise ValueError("sa_ignore_segment_ids only applies to attention='flash'; got" f" attention='{self.attention}'.")
+      # Types whose masks come from positions only. COMPRESSED also uses segment ids (-1) to mask block padding.
+      if self.attention_type not in ("global", "mla", "local_sliding", "chunk"):
+        raise ValueError(
+            "sa_ignore_segment_ids supports attention_type in ('global',"
+            " 'mla', 'local_sliding', 'chunk'); got"
+            f" attention_type='{self.attention_type}'."
+        )
+      if self.use_lineage:
+        raise ValueError("sa_ignore_segment_ids is not supported with use_lineage=True.")
     if self.share_kv_projections and self.fused_qkv:
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":

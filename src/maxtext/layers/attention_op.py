@@ -1936,6 +1936,10 @@ class AttentionOp(nnx.Module):
     pad_q = 0
     pad_kv = 0
     decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+    if getattr(self.config, "sa_ignore_segment_ids", False):
+      # Every row is one segment (stream chunking), so the segment mask is a no-op; causal masking still applies.
+      decoder_segment_ids = None
+      decoder_segment_ids_kv_in = None
 
     if max_utils.is_eval(self.config):
       block_q = self.eval_block_q
