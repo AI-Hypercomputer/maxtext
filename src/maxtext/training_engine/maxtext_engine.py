@@ -3277,7 +3277,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             worker_index=jax.process_index(),
             staging_dir=default_staging_dir,
             auto_h2d=False,
-            parallelism=4,
         )
         self._last_staged_transport = effective_transport
 
