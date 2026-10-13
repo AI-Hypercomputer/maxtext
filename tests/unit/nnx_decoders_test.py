@@ -46,6 +46,7 @@ from maxtext.common.common_types import (
     AttentionType,
     DecoderBlockType,
     MultimodalInput,
+    ShardMode,
 )
 from maxtext.configs import pyconfig
 from maxtext.layers import linears
@@ -887,12 +888,15 @@ class TestGemma4ScannableBlock(unittest.TestCase):
         param_scan_axis=1,
         remat_policy="none",
         scan_layers=True,
+        shard_mode=ShardMode.AUTO,
+        debug_sharding=False,
     )
 
   def _make_block(self):
     return gemma4.Gemma4ScannableBlock(
         config=self.config,
-        mesh=None,
+        # The block pins its input with maybe_shard_with_logical, which needs a real mesh.
+        mesh=Mesh(np.array(jax.devices()[:1]), ("data",)),
         model_mode=MODEL_MODE_AUTOREGRESSIVE,
         rngs=nnx.Rngs(0),
     )

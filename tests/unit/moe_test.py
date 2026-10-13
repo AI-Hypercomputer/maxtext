@@ -630,6 +630,7 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
       rngs=object(),
       get_expert_parallelism_size=lambda: expert_parallelism,
       _expert_parallelism_name="expert",
+      per_expert_scale=None,
   )
   original_batch_partition = "fsdp" if expert_parallelism == 1 else ("fsdp", "expert")
   fake_moe._logical_to_mesh_axes = lambda logical_axes: P(  # pylint: disable=protected-access
