@@ -654,7 +654,7 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5")):
         # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
         self.bias = MoEBiasVar(
             default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
@@ -2536,7 +2536,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5")):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -3862,7 +3862,7 @@ class RoutedMoE(nnx.Module):
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     pre_bias_logits_logical_axes = (
         (batch_logical_axis, "activation_norm_length", None)
-        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2"))
+        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5"))
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
@@ -4297,7 +4297,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "glm5")):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
