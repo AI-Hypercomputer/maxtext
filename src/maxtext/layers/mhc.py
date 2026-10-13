@@ -23,7 +23,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, Config
+from maxtext.common.common_types import Array, Config, is_fp8_dtype
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.kernels.mhc import api as mhc_kernel
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
@@ -102,7 +102,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.rngs = rngs
     self.mesh = mesh
     self.dtype = self.config.dtype
-    self.weight_dtype = self.config.weight_dtype
+    # mHC parameters are never FP8-quantized (they map to unquantized HF tensors).
+    self.weight_dtype = self.config.dtype if is_fp8_dtype(self.config.weight_dtype) else self.config.weight_dtype
     self.matmul_precision = jax.lax.Precision(self.config.matmul_precision)
 
     if getattr(self.config, "use_mhc_pallas_kernel", False) and not self.config.enable_mhc_lite:

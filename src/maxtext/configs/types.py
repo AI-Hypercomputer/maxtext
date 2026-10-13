@@ -254,6 +254,8 @@ ModelName = Literal[
     "deepseek3.2-671b",
     "deepseek4-tiny",
     "deepseek4-284b",
+    "glm5.3-flash",
+    "glm5.3-flash-mini",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -875,6 +877,16 @@ class AttentionIndexer(BaseModel):
   indexer_head_dim: NonNegativeInt = Field(128, description="Head dim for indexer query and key.")
   indexer_n_heads: NonNegativeInt = Field(64, description="Number of query heads in indexer.")
   indexer_topk: NonNegativeInt = Field(2048, description="Number of tokens selected by the query token in indexer.")
+  indexer_kpool: PositiveInt = Field(
+      1,
+      description=(
+          "GLM-5.3 k-pool size: the indexer scores pools of this many consecutive tokens (a learned softmax-weighted"
+          " average of their keys) and selects indexer_topk // indexer_kpool pools. 1 disables pooling."
+      ),
+  )
+  indexer_kpool_always_select_tail: bool = Field(
+      True, description="GLM-5.3: always attend to the incomplete trailing k-pool of each query."
+  )
   indexer_sparse_training: bool = Field(
       False,
       description="Determines the training strategy for the indexer: Dense Warm-up or Sparse Training stage.",
@@ -1655,6 +1667,18 @@ class Qwen3Next(BaseModel):
       ),
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+
+
+class KimiDeltaAttentionConfig(BaseModel):
+  """Configuration for Kimi Delta Attention (KDA) linear-attention layers (GLM-5.3-Flash)."""
+
+  kda_num_heads: int = Field(64, description="Number of KDA heads.")
+  kda_head_dim: int = Field(128, description="KDA head dimension (shared by q/k/v).")
+  kda_conv_kernel_dim: int = Field(4, description="Short causal depthwise conv width applied to q/k/v.")
+  kda_gate_lower_bound: None | float = Field(
+      -5.0, description="Safe-gate lower bound for the per-channel log decay; None uses -exp(A_log)*softplus."
+  )
+  kda_chunk_size: int = Field(64, description="Chunk size for the chunked KDA recurrence.")
 
 
 # ----------------------------------------------------------------------------
@@ -2546,6 +2570,10 @@ class ManifoldConstrainedHyperConnections(BaseModel):
   """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
   mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
+  mhc_final_reduce: Literal["sum", "mean"] = Field(
+      "sum",
+      description="How non-DeepSeek-V4 models collapse the mHC streams before the final norm (GLM-5.3 uses mean).",
+  )
   sinkhorn_iterations: PositiveInt = Field(20, description="The number of iterations for the Sinkhorn-Knopp algorithm.")
   enable_mhc_lite: bool = Field(
       False,
@@ -3902,6 +3930,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    KimiDeltaAttentionConfig,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -6066,6 +6095,7 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
+    KimiDeltaAttentionConfig,
     MultimodalGeneral,
     Muon,
     FineTuning,
