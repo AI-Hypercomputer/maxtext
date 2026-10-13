@@ -87,6 +87,27 @@ KERNEL_NAMES = ("fwd_bwd", "accumulate", "update")
 DROPLESS_FWD_BWD = "fwd_bwd_dropless"
 FIRST_PHASE_FWD_BWD = "fwd_bwd_first_phase"
 
+# Transfer streams for the trainer-side weight synchronizer. Under Pathways the value reaches the native
+# transport as an FFI attribute, so it has to be set here rather than in the worker env. The rollout side
+# (tpu_inference RaidenWorkerSync) already reads the same env name.
+RAIDEN_PARALLELISM_ENV = "RAIDEN_PARALLELISM"
+DEFAULT_RAIDEN_PARALLELISM = 4
+
+
+def _raiden_parallelism() -> tuple[int, str]:
+  """Returns (parallelism, source): RAIDEN_PARALLELISM when set and non-empty, else the default 4."""
+  raw = os.environ.get(RAIDEN_PARALLELISM_ENV, "").strip()
+  if not raw:
+    return DEFAULT_RAIDEN_PARALLELISM, "default"
+  try:
+    value = int(raw)
+  except ValueError as e:
+    raise ValueError(f"{RAIDEN_PARALLELISM_ENV}={raw!r} is not an integer") from e
+  if value <= 0:
+    raise ValueError(f"{RAIDEN_PARALLELISM_ENV}={raw!r} must be positive")
+  return value, "env " + RAIDEN_PARALLELISM_ENV
+
+
 _PURE_STATE_FALLBACK_WARNING = (
     "Cannot keep the train state as a pure pytree across steps (%s), so every fwd_bwd and "
     "update will re-walk the NNX module graph. That is correct but slow -- the two "
@@ -3271,13 +3292,20 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
               "GCS weight synchronization requires a staging directory. Please set the "
               "WEIGHT_SYNC_GCS_DIR environment variable or configure base_output_directory."
           )
+        parallelism, parallelism_source = _raiden_parallelism()
+        logging.info(
+            "Trainer weight synchronizer (%s): parallelism=%d (%s)",
+            effective_transport,
+            parallelism,
+            parallelism_source,
+        )
         self._weight_sync = tunix_weight_sync.create_weight_synchronizer(
             mode=effective_transport,
             job_name="trainer",
             worker_index=jax.process_index(),
             staging_dir=default_staging_dir,
             auto_h2d=False,
-            parallelism=4,
+            parallelism=parallelism,
         )
         self._last_staged_transport = effective_transport
 
