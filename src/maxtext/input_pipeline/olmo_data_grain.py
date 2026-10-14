@@ -494,7 +494,19 @@ class ShiftToInputsTargets(grain.transforms.Map):
   The OLMo dataset has no document boundaries inside an instance — sequences
   span doc boundaries with no special masking — so ``segmentation`` and
   ``position`` are trivially uniform within an instance.
+
+  With ``segment_ids_from_eos`` set, ``inputs_segmentation`` instead numbers the
+  documents inside the instance as OLMo-core's ``segment_ids_from_eos`` does
+  (an EOS token ends its own document), plus one, since MaxText reserves 0 for
+  padding. OLMo-core's EMO router builds its per-document expert pools from
+  those ids; pair this with ``olmoe3_mixers_ignore_segment_ids`` so attention
+  and KDA still see one segment per row. ``targets_segmentation`` (the loss
+  mask) is unchanged.
   """
+
+  def __init__(self, segment_ids_from_eos: Optional[int] = None):
+    super().__init__()
+    self.segment_ids_from_eos = segment_ids_from_eos
 
   def map(self, element: Dict[str, Any]) -> Dict[str, Any]:
     """Convert ``tokens`` into ``inputs`` / ``targets`` / segmentation tensors."""
@@ -522,11 +534,17 @@ class ShiftToInputsTargets(grain.transforms.Map):
     targets_seg = np.full(L, seg_value, dtype=np.int32)
     targets_seg[-1] = 0  # never compute loss on the boundary position
 
+    if self.segment_ids_from_eos is None:
+      inputs_seg = np.ones(L, dtype=np.int32)
+    else:
+      eos = (tokens == self.segment_ids_from_eos).astype(np.int32)
+      inputs_seg = (np.cumsum(eos) - eos + 1).astype(np.int32)
+
     return {
         "inputs": inputs,
         "targets": targets,
         "inputs_position": np.arange(L, dtype=np.int32),
-        "inputs_segmentation": np.ones(L, dtype=np.int32),
+        "inputs_segmentation": inputs_seg,
         "targets_segmentation": targets_seg,
     }
 
@@ -545,6 +563,7 @@ def make_olmo_grain_data_loader(
     grain_worker_buffer_size: int = 1,
     initial_step: int = 0,
     global_indices_path: str = "",
+    segment_ids_from_eos: Optional[int] = None,
 ):
   """Build a Grain ``DataLoader`` for OLMo-style fixed-seq-length training.
 
@@ -569,6 +588,9 @@ def make_olmo_grain_data_loader(
     global_indices_path: If set, take the order from this OLMo-core global
       indices file with :class:`OlmoCoreOrderSampler` instead of shuffling
       with ``seed``.
+    segment_ids_from_eos: If set, ``inputs_segmentation`` numbers the documents
+      inside each instance by this EOS token id (see
+      :class:`ShiftToInputsTargets`).
 
   Returns:
     A ``grain.DataLoader``.
@@ -602,7 +624,7 @@ def make_olmo_grain_data_loader(
   if apply_ngram_filter:
     ops.append(NgramFilterTransform())
   if shift_to_inputs_targets:
-    ops.append(ShiftToInputsTargets())
+    ops.append(ShiftToInputsTargets(segment_ids_from_eos))
   ops.append(grain.transforms.Batch(batch_size=batch_size, drop_remainder=True))
 
   # Grain expects ``shard_options`` on the DataLoader (sharding used to live

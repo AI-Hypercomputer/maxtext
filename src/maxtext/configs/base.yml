@@ -267,6 +267,7 @@ log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
+moe_global_load_balancing: false # OLMo-core global_load_balancing: LB counts averaged over the whole batch, not per device
 moe_aux_loss_reduction: mean # 'mean' (MaxText: weight x average over MoE layers) or 'sum' (OLMo-core: weight x every layer)
 # EMo document-pool routing (OLMoE3): restrict each document's top-k to a per-document
 # expert pool (size sampled from [min, max] in training, fixed at eval). arxiv 2605.06663
@@ -956,6 +957,7 @@ olmo_path_remap_from: '' # rewrite index paths starting with this prefix...
 olmo_path_remap_to: ''   # ...to this one (e.g. gs://bucket/ -> /mnt/.../ for gcsfuse).
 olmo_apply_ngram_filter: true # mask instances with repetitive n-grams (OLMo-core filter)
 olmo_global_indices_path: '' # OLMo-core global indices (uint32) to train in its batch order instead of data_shuffle_seed
+olmo_segment_ids_from_eos: -1 # >= 0: inputs_segmentation numbers each instance's documents by this EOS id (OLMoE3 EMO pools); -1: one segment
 
 # Training loop
 steps: 150_001 # If set to -1 then will inherit value from learning_rate_schedule_steps
@@ -1501,6 +1503,8 @@ moe_a2a_token_chunks: 1
 kda_conv_in_compute_dtype: false
 # Rematerialize each OLMoE3 layer on its own instead of per mixer cycle.
 olmoe3_per_layer_remat: false
+# Attention and KDA see one segment per row; segment ids then only define the EMO document pools.
+olmoe3_mixers_ignore_segment_ids: false
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on

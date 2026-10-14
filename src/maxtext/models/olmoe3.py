@@ -927,19 +927,35 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     return above | (at & (jnp.cumsum(at, axis=-1) <= slots))
 
   def load_balance_loss(self, top_k_indices, logits) -> jax.Array:
-    """OLMo-core's batch-level load-balancing loss (``global_load_balancing``).
+    """OLMo-core's batch-level load-balancing loss.
 
     ``lb = (E / K) * sum_e mean_{b,s}(probs_e) * counts_e / (B * S)``, scaled by
-    ``load_balance_loss_weight``. Counts are summed over the whole batch rather
-    than per sequence; under jit the batch axis here is the global batch, so
-    the reduction spans all data-parallel replicas, which is exactly the
-    reference's all-reduced global balancing.
+    ``load_balance_loss_weight``, with counts summed over the batch rather than
+    per sequence.
+
+    On the dense path the arrays here span the global batch. On the sparse path
+    this runs inside the routed MoE's ``shard_map``, where they are one device's
+    tokens, so without ``moe_global_load_balancing`` each device balances its
+    own tokens and the value returned through ``out_specs=P()`` is device 0's.
+    With it, the counts are averaged over every mesh axis first (OLMo-core's
+    ``global_load_balancing``: all-reduced counts, local probabilities, no
+    gradient through the counts), and the loss is then averaged too, so every
+    device holds the global-batch value. The loss is linear in the
+    probabilities, so the mean of the per-device terms is exactly the
+    global-batch loss; the gradient through ``P()`` is already the mean of the
+    per-device gradients, and the final ``pmean`` leaves it unchanged.
+    Averaging over an axis that replicates the batch is harmless: the copies agree.
     """
     expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.float32)
     counts = expert_mask.sum(axis=(0, 1, 2))
     tokens = top_k_indices.shape[0] * top_k_indices.shape[1]
     mean_probs = logits.astype(jnp.float32).mean(axis=(0, 1))
+    in_shard_map = self.config.moe_global_load_balancing and self.config.sparse_matmul
+    if in_shard_map:
+      counts = jax.lax.pmean(jax.lax.stop_gradient(counts), tuple(self.mesh.axis_names))
     lb = (mean_probs * counts).sum() * self.num_experts / (self.num_experts_per_tok * tokens)
+    if in_shard_map:
+      lb = jax.lax.pmean(lb, tuple(self.mesh.axis_names))
     return lb * self.config.load_balance_loss_weight
 
   def __init__(self, *args, gate_in_features: int, **kwargs):
@@ -1074,10 +1090,15 @@ class OLMoE3DecoderLayer(nnx.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     normed = self.attn_in_norm(inputs)
+    # With olmoe3_mixers_ignore_segment_ids the segment ids number EMO documents only: attention and KDA see one
+    # segment per row, as OLMo-core trains without document masking, and padding (0) stays masked.
+    mixer_segment_ids = decoder_segment_ids
+    if self.config.olmoe3_mixers_ignore_segment_ids and decoder_segment_ids is not None:
+      mixer_segment_ids = (decoder_segment_ids != 0).astype(decoder_segment_ids.dtype)
     if self.is_full_attention_layer:
       mixer_out, kv_cache = self.mixer(
           normed,
-          decoder_segment_ids,
+          mixer_segment_ids,
           decoder_positions,
           deterministic,
           model_mode,
@@ -1085,7 +1106,7 @@ class OLMoE3DecoderLayer(nnx.Module):
           attention_metadata=attention_metadata,
       )
     else:
-      mixer_out = self.mixer(normed, decoder_segment_ids)
+      mixer_out = self.mixer(normed, mixer_segment_ids)
 
     hidden = inputs + self.attn_out_norm(mixer_out)
     hidden = nn.with_logical_constraint(hidden, self.activation_axis_names)

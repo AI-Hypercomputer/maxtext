@@ -295,6 +295,21 @@ class TransformsTest(unittest.TestCase):
     np.testing.assert_array_equal(out["inputs_segmentation"], np.ones(8, dtype=np.int32))
     np.testing.assert_array_equal(out["targets_segmentation"], np.zeros(8, dtype=np.int32))
 
+  def test_shift_to_inputs_targets_segment_ids_from_eos(self):
+    """Documents numbered as OLMo-core's segment_ids_from_eos (EOS ends its own document), plus one."""
+    eos = 100257
+    arr = np.array([eos, 5, 6, eos, 7, eos, eos, 8, 9], dtype=np.uint32)
+    out = ShiftToInputsTargets(segment_ids_from_eos=eos).map(
+        {"tokens": arr, "instance_id": 0, "file_id": 0, "instance_mask": True}
+    )
+    # OLMo-core: eos.cumsum() - eos = [0, 1, 1, 1, 2, 2, 3, 4, 4]; MaxText reserves 0 for padding.
+    np.testing.assert_array_equal(out["inputs_segmentation"], np.array([1, 2, 2, 2, 3, 3, 4, 5, 5], dtype=np.int32))
+    # The loss mask is the default one.
+    np.testing.assert_array_equal(out["targets_segmentation"], np.array([1] * 8 + [0], dtype=np.int32))
+    default = ShiftToInputsTargets().map({"tokens": arr, "instance_id": 0, "file_id": 0, "instance_mask": True})
+    for key in ("inputs", "targets", "inputs_position", "targets_segmentation"):
+      np.testing.assert_array_equal(out[key], default[key])
+
 
 class FactoryTest(unittest.TestCase):
 

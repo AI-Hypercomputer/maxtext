@@ -187,6 +187,42 @@ class OLMoE3PackingTest(unittest.TestCase):
         "first document's logits changed when a second document was packed after it",
     )
 
+  def test_mixers_ignore_segment_ids(self):
+    """With ``olmoe3_mixers_ignore_segment_ids`` the segment ids reach only the EMO router.
+
+    The pools here hold every expert, so documents don't change the routing: the logits with three documents
+    must equal those with one segment per row, as OLMo-core trains (no document masking, EMO pools per EOS
+    document). Without the flag, attention and KDA reset at the boundaries and the logits differ.
+    """
+    seq_len = 32
+    tokens = (jnp.arange(seq_len, dtype=jnp.int32)[None, :] * 7) % 101 + 1
+    positions = jnp.arange(seq_len, dtype=jnp.int32)[None, :]
+    one_segment = jnp.ones((1, seq_len), jnp.int32)
+    documents = jnp.concatenate(
+        [jnp.full((1, 10), 1, jnp.int32), jnp.full((1, 9), 2, jnp.int32), jnp.full((1, 13), 3, jnp.int32)], axis=1
+    )
+    logits = {}
+    for ignore in (False, True):
+      cfg = _config(
+          "olmoe3-30m",
+          max_target_length=seq_len,
+          extra=(
+              "override_model_config=True",
+              "emo_min_document_expert_pool=32",
+              "emo_max_document_expert_pool=32",
+              "emo_eval_document_expert_pool=32",
+              f"olmoe3_mixers_ignore_segment_ids={ignore}",
+          ),
+      )
+      mesh, model = _build(cfg)
+      with mesh:
+        params = model.init({"params": jax.random.PRNGKey(0)}, tokens, positions, one_segment)
+        for name, segments in (("one", one_segment), ("docs", documents)):
+          out = model.apply(params, tokens, positions, segments, enable_dropout=False)
+          logits[(ignore, name)] = out[0] if isinstance(out, tuple) else out
+    np.testing.assert_allclose(np.asarray(logits[(True, "docs")]), np.asarray(logits[(True, "one")]), atol=1e-5)
+    self.assertGreater(float(jnp.max(jnp.abs(logits[(False, "docs")] - logits[(False, "one")]))), 1e-3)
+
 
 if __name__ == "__main__":
   unittest.main()

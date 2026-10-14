@@ -145,6 +145,7 @@ def _make_loader_for_host(
       grain_worker_buffer_size=worker_buffer,
       initial_step=initial_step,
       global_indices_path=global_indices_path,
+      segment_ids_from_eos=None if config.olmo_segment_ids_from_eos < 0 else config.olmo_segment_ids_from_eos,
   )
 
 

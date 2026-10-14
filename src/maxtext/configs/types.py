@@ -1588,6 +1588,24 @@ class Qwen3Next(BaseModel):
           " unrolled first cycle is not rematerialized at all and the scanned cycles remat as a block."
       ),
   )
+  olmoe3_mixers_ignore_segment_ids: bool = Field(
+      False,
+      description=(
+          "Attention and KDA see one segment per row (only padding, segment 0, stays masked), and the segment ids"
+          " define only the EMO document pools. OLMo-core's hero trains without document masking"
+          " (generate_doc_lengths=False) while its EMO router splits pools at EOS; use with"
+          " olmo_segment_ids_from_eos."
+      ),
+  )
+  moe_global_load_balancing: bool = Field(
+      False,
+      description=(
+          "OLMo-core's global_load_balancing: the load-balancing loss multiplies each device's mean router"
+          " probabilities by expert counts averaged over the whole batch (all-reduced across the batch-sharding"
+          " mesh axes) instead of the device's own counts. The counts carry no gradient. The loss value is then"
+          " the global-batch one on every device."
+      ),
+  )
   moe_lean_routing: bool = Field(
       False,
       description=(
@@ -2299,6 +2317,15 @@ class OlmoGrainDataset(BaseModel):
       description=(
           "If set, train in OLMo-core's batch order: a headerless uint32 permutation of the index's instances, as"
           " written by OLMo-core's NumpyFSLDataLoader. Replaces the data_shuffle_seed shuffle for training."
+      ),
+  )
+  olmo_segment_ids_from_eos: int = Field(
+      -1,
+      description=(
+          "If >= 0, inputs_segmentation numbers the documents inside each instance by this EOS token id, as"
+          " OLMo-core's segment_ids_from_eos (plus one; 0 is padding), for the OLMoE3 EMO document pools. Pair"
+          " with olmoe3_mixers_ignore_segment_ids to keep one attention/KDA segment per row. -1: one segment per"
+          " instance."
       ),
   )
 
