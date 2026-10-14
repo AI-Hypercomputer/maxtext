@@ -272,8 +272,8 @@ class DSv3Config:
       raise ValueError("dq_reduction_steps must be one of (None, 1, 3), got" f" {k.dq_reduction_steps}.")
     if k.capacity_factor <= 0:
       raise ValueError(f"capacity_factor must be > 0, got {k.capacity_factor}.")
-    if k.ragged_buffer_factor < 1.0:
-      raise ValueError(f"ragged_buffer_factor must be >= 1, got {k.ragged_buffer_factor}.")
+    if k.ragged_buffer_factor <= 0.0:
+      raise ValueError(f"ragged_buffer_factor must be > 0, got {k.ragged_buffer_factor}.")
     if k.expert_permutation not in (dsv3_expert_shuffle.EXPERT_PERMUTATION_ALGORITHMS):
       raise ValueError(
           "expert_permutation must be one of"

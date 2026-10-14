@@ -655,6 +655,73 @@ def dsv3_logits(
   return dsv3_lm_head(params, normed, cfg, mesh=mesh)
 
 
+def next_dsv3_state(
+    state: DSv3MutableState,
+    *,
+    bias_updates: jax.Array | None,
+    mtp_bias_updates: Sequence[jax.Array],
+    router_aux: dsv3_types.DSv3RouterAux[Any] | None,
+    mtp_router_aux: Sequence[dsv3_types.DSv3RouterAux[Any]] | None,
+    cfg: dsv3_config.DSv3Config,
+    mesh: jax.sharding.Mesh,
+) -> DSv3MutableState:
+  """The mutable state of the next training step.
+
+  Adds the loss-free load balancing updates to the routed gate biases and, if
+  expert shuffling is enabled, computes the next expert permutations from the
+  router aux (only `group_sizes` is read). `dsv3_loss_and_aux` calls this with
+  one batch's outputs; under gradient accumulation the caller passes updates
+  and group sizes of the whole (accumulated) batch instead.
+
+  Args:
+    state: The state of the current step.
+    bias_updates: Updates `[num_sparse_layers, num_experts]` of the decoder
+      router biases, or None to keep them.
+    mtp_bias_updates: Updates `[num_experts]` of every MTP depth; empty to keep
+      the MTP biases.
+    router_aux: Decoder router aux (for the next expert permutations); only
+      read when expert shuffling is enabled.
+    mtp_router_aux: Router aux of every MTP depth, or None without MTP; only
+      read when expert shuffling is enabled.
+    cfg: Model config.
+    mesh: The device mesh.
+
+  Returns:
+    The next state.
+  """
+  k, s = cfg.kernels, cfg.sharding
+  replicated = jax.sharding.NamedSharding(mesh, P())
+  assert state.router_bias is not None
+  # The layers read the biases and permutations replicated.
+  router_bias = state.router_bias
+  if bias_updates is not None:
+    router_bias = jax.reshard((router_bias + bias_updates).astype(router_bias.dtype), replicated)
+  mtp_router_bias = state.mtp_router_bias
+  if mtp_bias_updates:
+    mtp_router_bias = tuple(
+        jax.reshard((b + u).astype(b.dtype), replicated) for b, u in zip(state.mtp_router_bias, mtp_bias_updates)
+    )
+  expert_permutations = state.expert_permutations
+  mtp_expert_permutations = state.mtp_expert_permutations
+  if k.expert_permutation != "none":
+    assert router_aux is not None
+    num_shards = dsv3_expert_shuffle.num_expert_shards(mesh, "expert", s.axis_mapping)
+    next_permutation = functools.partial(
+        dsv3_expert_shuffle.next_expert_permutation,
+        k.expert_permutation,
+        num_shards=num_shards,
+    )
+    expert_permutations = jax.reshard(next_permutation(router_aux), replicated)
+    if mtp_router_aux is not None:
+      mtp_expert_permutations = tuple(jax.reshard(next_permutation(aux), replicated) for aux in mtp_router_aux)
+  return DSv3MutableState[dsv3_types.ArrayType](
+      router_bias=router_bias,
+      mtp_router_bias=mtp_router_bias,
+      expert_permutations=expert_permutations,
+      mtp_expert_permutations=mtp_expert_permutations,
+  )
+
+
 def _moe_lb_loss(parts: Sequence[jax.Array], *, megatron: bool) -> jax.Array:
   """Combines per-module load balance losses as MaxText's `train.loss_fn`."""
   lb_losses = jnp.concatenate([jnp.ravel(p) for p in parts])
@@ -671,6 +738,7 @@ def dsv3_loss_and_aux(
     *,
     mesh: jax.sharding.Mesh,
     train: bool,
+    update_state: bool = True,
 ) -> tuple[jax.Array, DSv3LossAux]:
   """Computes the training objective of MaxText's DeepSeek-V3 recipe.
 
@@ -685,15 +753,16 @@ def dsv3_loss_and_aux(
     batch: The batch.
     cfg: Model config.
     mesh: The device mesh.
-    train: Training step (adds the MTP loss; computes the routed-bias updates
-      and the next expert permutations into `aux.new_state`).
+    train: Training step (adds the MTP loss).
+    update_state: When `train` is True, compute the per-batch routed-bias
+      updates and next expert permutations into `aux.new_state` (False under
+      gradient accumulation, where `next_dsv3_state` runs once after the scan).
 
   Returns:
     The scalar loss and the auxiliary outputs.
   """
-  m, k, t, s = cfg.model, cfg.kernels, cfg.training, cfg.sharding
+  m, t, s = cfg.model, cfg.training, cfg.sharding
   token_sharding = _named_sharding(s.token, cfg, mesh)
-  replicated = jax.sharding.NamedSharding(mesh, P())
   # Per-token arrays share the logits' batch / sequence layout.
   inputs = jax.reshard(batch.inputs, token_sharding)
   targets = jax.reshard(batch.targets, token_sharding)
@@ -738,7 +807,7 @@ def dsv3_loss_and_aux(
       num_experts_per_tok=m.num_experts_per_tok,
       load_balance_loss_weight=t.load_balance_loss_weight,
       megatron_seq_aux_loss=t.megatron_seq_aux_loss,
-      routed_bias_update_rate=t.routed_bias_update_rate if train else 0.0,
+      routed_bias_update_rate=t.routed_bias_update_rate if (train and update_state) else 0.0,
   )
   lb_loss, bias_updates = dsv3_loss.moe_router_aux_outputs(fwd.router_aux, **router_aux_kwargs)
   lb_parts = [] if lb_loss is None else [lb_loss]
@@ -828,34 +897,15 @@ def dsv3_loss_and_aux(
     loss = loss + moe_lb_loss
 
   new_state = state
-  if train:
-    assert state.router_bias is not None
-    # The layers read the biases and permutations replicated.
-    router_bias = state.router_bias
-    if bias_updates is not None:
-      router_bias = jax.reshard((router_bias + bias_updates).astype(router_bias.dtype), replicated)
-    mtp_router_bias = state.mtp_router_bias
-    if mtp_bias_updates:
-      mtp_router_bias = tuple(
-          jax.reshard((b + u).astype(b.dtype), replicated) for b, u in zip(state.mtp_router_bias, mtp_bias_updates)
-      )
-    expert_permutations = state.expert_permutations
-    mtp_expert_permutations = state.mtp_expert_permutations
-    if k.expert_permutation != "none":
-      num_shards = dsv3_expert_shuffle.num_expert_shards(mesh, "expert", s.axis_mapping)
-      next_permutation = functools.partial(
-          dsv3_expert_shuffle.next_expert_permutation,
-          k.expert_permutation,
-          num_shards=num_shards,
-      )
-      expert_permutations = jax.reshard(next_permutation(fwd.router_aux), replicated)
-      if mtp_outputs is not None:
-        mtp_expert_permutations = tuple(jax.reshard(next_permutation(aux), replicated) for aux in mtp_outputs.aux)
-    new_state = DSv3MutableState[dsv3_types.ArrayType](
-        router_bias=router_bias,
-        mtp_router_bias=mtp_router_bias,
-        expert_permutations=expert_permutations,
-        mtp_expert_permutations=mtp_expert_permutations,
+  if train and update_state:
+    new_state = next_dsv3_state(
+        state,
+        bias_updates=bias_updates,
+        mtp_bias_updates=tuple(mtp_bias_updates),
+        router_aux=fwd.router_aux,
+        mtp_router_aux=None if mtp_outputs is None else tuple(mtp_outputs.aux),
+        cfg=cfg,
+        mesh=mesh,
     )
 
   aux = DSv3LossAux(
