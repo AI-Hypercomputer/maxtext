@@ -53,6 +53,7 @@ parameter from the source checkpoint and build the target checkpoint.
 
 import warnings
 import numpy as np
+from maxtext.models.qwen38 import hc_shapes, layer_shapes
 
 import jax
 import jax.numpy as jnp
@@ -4553,11 +4554,37 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
   return mapping
 
 
+def QWEN38_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Preserve independent PLE table shards and native HF-oriented weights."""
+  if scan_layers:
+    raise NotImplementedError("Qwen3.8 bringup requires scan_layers=false")
+  mapping = {
+      "params-token_embedder-embedding": "model.language_model.embed_tokens.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+  for name in hc_shapes(maxtext_config.emb_dim, maxtext_config.qwen38_hc_count, maxtext_config.qwen38_hc_lowrank, False):
+    mapping[f"params-decoder-decoder_norm-w-{name}"] = f"model.language_model.hyper_connection_mixer.{name}"
+  for i in range(maxtext_config.num_decoder_layers):
+    for name in layer_shapes(maxtext_config, i):
+      mapping[f"params-decoder-layers_{i}-w-{name}"] = f"model.language_model.layers.{i}.{name}"
+  return mapping
+
+
+def QWEN38_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Only the shared MaxText LM output projection changes orientation."""
+
+  def output_projection(value, target_shape):
+    return value.T
+
+  return {"params-decoder-logits_dense-kernel": output_projection}
+
+
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN
 
 
 PARAM_MAPPING = {
+    "qwen3.8-flash-next": QWEN38_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4618,6 +4645,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "qwen3.8-flash-next": QWEN38_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,

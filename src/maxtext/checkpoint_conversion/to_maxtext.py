@@ -50,6 +50,7 @@ Example Usage:
 """
 
 import argparse
+import dataclasses
 from functools import partial
 import json
 import os
@@ -67,6 +68,7 @@ from maxtext.configs import pyconfig
 from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
+from maxtext.checkpoint_conversion.utils.safetensors_range import RemoteSafetensors
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
@@ -109,6 +111,8 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
   """
   if torch is not None and isinstance(tensor, torch.Tensor):
     tensor = tensor.detach().cpu()
+    if not tensor.is_floating_point() and not tensor.is_complex():
+      return tensor.numpy()
     # If target is float32, convert all tensors to float32
     if save_dtype in ("float32", DType.FLOAT32):
       return tensor.to(torch.float32).numpy()
@@ -140,6 +144,8 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
     return tensor.numpy()
 
   if isinstance(tensor, np.ndarray):
+    if np.issubdtype(tensor.dtype, np.integer) or tensor.dtype == np.bool_:
+      return tensor
     if save_dtype in ("float32", DType.FLOAT32) and tensor.dtype != np.float32:
       return tensor.astype(np.float32)
     return tensor
@@ -167,11 +173,13 @@ class LazyHFLoader:
   can still occur in parallel.
   """
 
-  def __init__(self, model_id, token, revision=None, save_dtype: str = "bfloat16"):
+  def __init__(self, model_id, token, revision=None, save_dtype: str = "bfloat16", stream_remote_tensors=False):
     self.model_id = model_id
     self.token = token
     self.revision = revision
     self.save_dtype = save_dtype
+    self.stream_remote_tensors = stream_remote_tensors
+    self._remote_readers = {}
     # Whether loads from local directory
     self.is_local = os.path.isdir(self.model_id)
     self.shard_map = {}
@@ -247,6 +255,14 @@ class LazyHFLoader:
       # Fallback: sometimes keys in index don't perfectly match requested keys if there are prefix mismatches.
       # You might need advanced fuzzy matching here if you encounter errors.
       raise ValueError(f"Key {key} not found in HF checkpoint index.")
+
+    if self.stream_remote_tensors and not self.is_local:
+      with self._ram_lock:
+        if shard_name not in self._remote_readers:
+          url = f'https://huggingface.co/{self.model_id}/resolve/{self.revision or "main"}/{shard_name}'
+          self._remote_readers[shard_name] = RemoteSafetensors(url)
+        tensor = self._remote_readers[shard_name].read_tensor_numpy(resolved_key)
+        return _convert_tensor_to_numpy(tensor, self.save_dtype)
 
     if shard_name in self._local_shard_paths:
       local_path = self._local_shard_paths[shard_name]
@@ -368,6 +384,60 @@ class LazyTensorHandler(type_handlers.NumpyHandler):
 # Register LazyTensor with the custom handler.
 # It's safe to register this globally even if eager loading is used.
 type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
+
+
+# Orbax v1 uses its own leaf registry rather than the v0 type-handler registry.
+# Keep custom serialization local to trees containing LazyTensor; standard
+# arrays and restores continue to use Orbax's normal PyTree handler.
+from orbax.checkpoint import v1 as ocp_v1
+from orbax.checkpoint.experimental.v1._src.serialization.numpy_leaf_handler import NumpyLeafHandler
+from orbax.checkpoint.experimental.v1._src.serialization.registry import StandardLeafHandlerRegistry
+
+
+class LazyTensorV1LeafHandler(NumpyLeafHandler):
+  """Serialize lazy leaves sequentially to bound conversion memory."""
+
+  async def serialize(self, params, serialization_context):
+    """Defer materialization until Orbax has prepared the output paths."""
+    serialize_numpy = super().serialize
+
+    # Await each leaf's write before materializing the next. This bounds
+    # conversion memory to the largest source leaf plus its transformed copy.
+    async def write_sequentially():
+      for param in params:
+        materialized = dataclasses.replace(param, value=np.asarray(param.value))
+        committed = await serialize_numpy([materialized], serialization_context)
+        await committed
+        del materialized
+
+    # Return before waiting for writes: Orbax signals path creation only after
+    # all leaf serializers have returned their background tasks.
+    return write_sequentially()
+
+
+class LazyTensorV1PyTreeHandler(ocp_v1.handlers.PyTreeHandler):
+  """Use lazy serialization only for trees containing LazyTensor leaves."""
+
+  def __init__(self, **kwargs):
+    registry = StandardLeafHandlerRegistry()
+    registry.add(
+        leaf_type=LazyTensor,
+        abstract_type=LazyTensor,
+        handler_type=LazyTensorV1LeafHandler,
+        secondary_typestrs=["np.ndarray"],
+    )
+    super().__init__(leaf_handler_registry=registry, **kwargs)
+
+  def is_handleable(self, checkpointable):
+    return any(isinstance(x, LazyTensor) for x in jax.tree.leaves(checkpointable)) and super().is_handleable(
+        checkpointable
+    )
+
+  def is_abstract_handleable(self, abstract_checkpointable):
+    return False
+
+
+ocp_v1.handlers.register_handler(LazyTensorV1PyTreeHandler)
 
 
 def get_maxtext_model_info(config):
@@ -632,6 +702,15 @@ def _get_maxtext_weight(
   processes MaxText keys, which can be `atomic_mt_key` or `composite_mt_key`.
   """
   is_composite_mt_key = isinstance(mt_param_key_or_keys, tuple)
+  if isinstance(mt_param_key_or_keys, str) and mt_param_key_or_keys.endswith(
+      (
+          "ple.ple_embedding.layer_multipliers",
+          "ple.ple_embedding.ngram_heads_vocab_sizes",
+          "ple.ple_embedding.ngram_heads_offsets",
+          "ple.ple_embedding.row_ids",
+      )
+  ):
+    save_dtype = "int64"
   if not use_lazy_load:
     # Case 1: Eager mode
     # In eager mode, we execute the function immediately to get the
@@ -945,6 +1024,7 @@ def _extract_conversion_args(args: Sequence[str]) -> tuple[dict[str, Any], list[
       "eager_load_method",
       "revision",
       "simulated_cpu_devices_count",
+      "stream_remote_tensors",
   }
   extracted = {}
   cleaned_args = []
@@ -954,7 +1034,7 @@ def _extract_conversion_args(args: Sequence[str]) -> tuple[dict[str, Any], list[
       key_prefix = f"{name}="
       if arg_item.startswith(key_prefix) or arg_item.startswith(f"--{key_prefix}"):
         val = arg_item.split("=", 1)[1]
-        if name == "lazy_load_tensors":
+        if name in ("lazy_load_tensors", "stream_remote_tensors"):
           extracted[name] = str2bool(val)
         elif name == "simulated_cpu_devices_count":
           extracted[name] = int(val)
@@ -975,6 +1055,7 @@ def main(
     revision: str | None = None,
     save_dtype: str = "bfloat16",
     simulated_cpu_devices_count: int = 16,
+    stream_remote_tensors: bool = False,
 ) -> None:
   overall_start = time.time()
   extracted, cleaned_args = _extract_conversion_args(args)
@@ -984,6 +1065,9 @@ def main(
   eager_load_method = extracted.get("eager_load_method", eager_load_method)
   revision = extracted.get("revision", revision)
   simulated_cpu_devices_count = extracted.get("simulated_cpu_devices_count", simulated_cpu_devices_count)
+  stream_remote_tensors = extracted.get("stream_remote_tensors", stream_remote_tensors)
+  if stream_remote_tensors and not lazy_load_tensors:
+    raise ValueError("stream_remote_tensors requires lazy_load_tensors=true")
   args = cleaned_args
   # Check if the user is using an Instruct version. If so, use the base model architecture
   for i, raw_param in enumerate(args):
@@ -1042,7 +1126,9 @@ def main(
     # Define the appropriate tensor getter based on mode
     if lazy_load_tensors:
       max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
-      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, save_dtype=save_dtype)
+      hf_loader = LazyHFLoader(
+          model_id, hf_token, revision=revision, save_dtype=save_dtype, stream_remote_tensors=stream_remote_tensors
+      )
 
       print_ram_usage("After LazyLoader init")
       tensor_getter = hf_loader.get_tensor
@@ -1298,6 +1384,12 @@ if __name__ == "__main__":
   parser.add_argument(
       "--simulated_cpu_devices_count", type=int, required=False, default=16, help="Sharding of checkpoint"
   )
+  parser.add_argument(
+      "--stream_remote_tensors",
+      type=str2bool,
+      default=False,
+      help="Read remote safetensors leaves with bounded HTTP ranges without caching full source shards",
+  )
   # Normalize key=value CLI arguments for local_args if passed without leading dashes
   normalized_argv = [sys.argv[0]]
   for raw_cli_arg in sys.argv[1:]:
@@ -1308,6 +1400,7 @@ if __name__ == "__main__":
         "eager_load_method=",
         "revision=",
         "simulated_cpu_devices_count=",
+        "stream_remote_tensors=",
     ):
       if raw_cli_arg.startswith(cli_prefix):
         raw_cli_arg = "--" + raw_cli_arg
@@ -1333,4 +1426,5 @@ if __name__ == "__main__":
       revision=local_args.revision,
       save_dtype=local_args.save_dtype,
       simulated_cpu_devices_count=local_args.simulated_cpu_devices_count,
+      stream_remote_tensors=local_args.stream_remote_tensors,
   )
