@@ -667,6 +667,110 @@ class GateLogit(nnx.Module):
     return output, pre_bias_logits
 
 
+# Per-layer size up to which a scanned kernel is gathered once per stack rather than in every layer.
+_GATHER_ONCE_MAX_LAYER_BYTES = 16 * 1024 * 1024
+
+
+def _is_small_scanned_kernel(module) -> bool:
+  kernel = getattr(module, "kernel", None)
+  if not isinstance(kernel, nnx.Param) or not hasattr(module, "kernel_axes") or kernel.value.ndim < 3:
+    return False
+  layers = kernel.value.shape[kernel.get_metadata().get("param_scan_axis", 0)]
+  return kernel.value.size // layers * kernel.value.dtype.itemsize <= _GATHER_ONCE_MAX_LAYER_BYTES
+
+
+def _param_path(path) -> tuple:
+  """A params pytree path as the module path keys `nnx.iter_modules` yields, plus the param name.
+
+  Drops the trailing `GetAttrKey("value")` of each Variable leaf.
+  """
+  keys = []
+  for k in path:
+    if isinstance(k, jax.tree_util.DictKey):
+      keys.append(k.key)
+    elif isinstance(k, jax.tree_util.SequenceKey):
+      keys.append(k.idx)
+  return tuple(keys)
+
+
+def _gathered_kernels(layers: nnx.Module) -> dict:
+  """{kernel path within a scanned layer stack: its module}, for the kernels gathered once per stack."""
+  kernels = {}
+  for path, module in nnx.iter_modules(layers):
+    if isinstance(module, GateLogit):
+      kernels[path + ("kernel",)] = module
+    elif _is_small_scanned_kernel(module):
+      kernels[path + ("kernel",)] = module
+    if isinstance(module, attentions.Attention) and hasattr(module, "query"):
+      # The backward pass otherwise gathers the query kernel twice per layer: for the rematerialized
+      # projection and for the input gradient. Under fused_qkv there is no `query` (it is `qkv_proj`).
+      kernels[path + ("query", "kernel")] = module.query
+  return kernels
+
+
+def gather_scanned_kernels_once(layers: nnx.Module, params, mesh: Mesh, shard_mode):
+  """Gathers small FSDP-sharded kernels of a scanned layer stack once, before the scan, not in every layer.
+
+  The MoE router kernel (embed x num_experts, f32 under float32_gate_logits) is small but FSDP-sharded,
+  so every layer all-gathers it on the critical path, synchronously on TPUs that run all-gathers on the
+  TensorCore, and the backward pass gathers it again. Replicating the stacked kernels up front is one
+  all-gather for all layers. `params` is the stack's Param state with the scan axis leading; pair with
+  `reduce_scatter_gathered_grads` inside the scan so each layer's gradient still lands sharded.
+  """
+  gathered = _gathered_kernels(layers)
+  replicated = NamedSharding(mesh, P())
+
+  def replicate(path, x):
+    if _param_path(path) not in gathered:
+      return x
+    if shard_mode == ShardMode.EXPLICIT:
+      return jax.sharding.reshard(x, replicated)
+    return jax.lax.with_sharding_constraint(x, replicated)
+
+  return jax.tree_util.tree_map_with_path(replicate, params)
+
+
+def gathered_kernel_grad_shardings(layers: nnx.Module, mesh: Mesh, rules) -> dict:
+  """{kernel path within one layer: the kernel's own sharding} for the kernels `gather_scanned_kernels_once` gathers."""
+  return {
+      path: NamedSharding(mesh, logical_to_mesh_axes(tuple(module.kernel_axes), mesh, rules))
+      for path, module in _gathered_kernels(layers).items()
+  }
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _identity_with_grad_sharding(x, sharding):
+  """The identity on `x`; its cotangent is constrained to `sharding`."""
+  return x
+
+
+def _identity_with_grad_sharding_fwd(x, sharding):
+  del sharding
+  return x, None
+
+
+def _identity_with_grad_sharding_bwd(sharding, _, cotangent):
+  return (jax.lax.with_sharding_constraint(cotangent, sharding),)
+
+
+_identity_with_grad_sharding.defvjp(_identity_with_grad_sharding_fwd, _identity_with_grad_sharding_bwd)
+
+
+def reduce_scatter_gathered_grads(params, shardings: dict):
+  """Identity on one layer's params whose backward puts the gathered kernels' gradients back on their sharding.
+
+  A layer handed a slice of a replicated kernel otherwise gets a replicated gradient: an all-reduce per
+  layer, stacked at full size across the scan. Constraining it to the kernel's own sharding makes it a
+  reduce-scatter into a stacked shard, as when the layer gathered the kernel itself.
+  """
+
+  def apply(path, x):
+    keys = _param_path(path)
+    return _identity_with_grad_sharding(x, shardings[keys]) if keys in shardings else x
+
+  return jax.tree_util.tree_map_with_path(apply, params)
+
+
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
 
