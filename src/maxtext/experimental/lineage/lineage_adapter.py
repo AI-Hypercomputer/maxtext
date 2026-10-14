@@ -194,8 +194,7 @@ def _unsupported_native_options(cfg: Any) -> list[str]:
   # `finalize_accumulated_step`); Tunix's optax.MultiSteps accumulation would
   # run whole train steps per microbatch and advance the router state each.
   require(
-      get("gradient_accumulation_steps", 1) == 1
-      or not get("use_tunix_gradient_accumulation", False),
+      get("gradient_accumulation_steps", 1) == 1 or not get("use_tunix_gradient_accumulation", False),
       "use_tunix_gradient_accumulation is unsupported",
   )
   require(get("num_vocab_tiling", 1) <= 1, "num_vocab_tiling must be 1")
@@ -557,9 +556,7 @@ def _ga_stats(aux: dsv3_model.DSv3LossAux, cfg: dsv3_config.DSv3Config) -> dict[
   stats: dict[str, Any] = {"z_loss_sum": aux.z_loss_sum}
   if cfg.training.routed_bias_update_rate > 0.0:
     stats["expert_counts"] = dsv3_loss.expert_counts(aux.router_aux, num_experts=num_experts)
-    stats["mtp_expert_counts"] = tuple(
-        dsv3_loss.expert_counts(a, num_experts=num_experts) for a in aux.mtp_router_aux
-    )
+    stats["mtp_expert_counts"] = tuple(dsv3_loss.expert_counts(a, num_experts=num_experts) for a in aux.mtp_router_aux)
   if cfg.kernels.expert_permutation != "none":
     stats["group_sizes"] = aux.router_aux.group_sizes
     stats["mtp_group_sizes"] = tuple(a.group_sizes for a in aux.mtp_router_aux)
