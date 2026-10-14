@@ -4453,6 +4453,268 @@ DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN
 
 
+# ----------------------------------------------------------------------------------------------
+# GLM-5.3-Flash (glm5_next)
+# ----------------------------------------------------------------------------------------------
+
+# HF modules stored as FP8 (e4m3, 128x128 blocks, float32 `weight_scale_inv`) in the upstream checkpoint,
+# keyed by (MaxText module path suffix, HF module path suffix).
+_GLM5_DSA_FP8 = (
+    ("self_attention-wq_a", "self_attn.q_a_proj"),
+    ("self_attention-wq_b", "self_attn.q_b_proj"),
+    ("self_attention-wkv_a", "self_attn.kv_a_proj_with_mqa"),
+    ("self_attention-out", "self_attn.o_proj"),
+)
+_GLM5_DSA_BF16 = (
+    ("self_attention-wkv_b-kernel", "self_attn.kv_b_proj.weight"),
+    ("self_attention-q_norm-scale", "self_attn.q_a_layernorm.weight"),
+    ("self_attention-kv_norm-scale", "self_attn.kv_a_layernorm.weight"),
+    ("self_attention-indexer-wq_b-kernel", "self_attn.indexer.wq_b.weight"),
+    ("self_attention-indexer-wk-kernel", "self_attn.indexer.wk.weight"),
+    ("self_attention-indexer-k_norm-scale", "self_attn.indexer.k_norm.weight"),
+    ("self_attention-indexer-k_norm-bias", "self_attn.indexer.k_norm.bias"),
+    ("self_attention-indexer-weights_proj-kernel", "self_attn.indexer.weights_proj.weight"),
+    ("self_attention-indexer-compress_gate-kernel", "self_attn.indexer.index_kpool_compress_gate"),
+    ("self_attention-indexer-compress_ape", "self_attn.indexer.index_kpool_compress_ape"),
+)
+_GLM5_KDA_BF16 = (
+    ("self_attention-q_proj-kernel", "self_attn.q_proj.weight"),
+    ("self_attention-k_proj-kernel", "self_attn.k_proj.weight"),
+    ("self_attention-v_proj-kernel", "self_attn.v_proj.weight"),
+    ("self_attention-q_conv1d", "self_attn.q_conv1d.weight"),
+    ("self_attention-k_conv1d", "self_attn.k_conv1d.weight"),
+    ("self_attention-v_conv1d", "self_attn.v_conv1d.weight"),
+    ("self_attention-f_a_proj-kernel", "self_attn.f_a_proj.weight"),
+    ("self_attention-f_b_proj-kernel", "self_attn.f_b_proj.weight"),
+    ("self_attention-dt_bias", "self_attn.dt_bias"),
+    ("self_attention-A_log", "self_attn.A_log"),
+    ("self_attention-b_proj-kernel", "self_attn.b_proj.weight"),
+    ("self_attention-g_a_proj-kernel", "self_attn.g_a_proj.weight"),
+    ("self_attention-g_b_proj-kernel", "self_attn.g_b_proj.weight"),
+    ("self_attention-o_norm", "self_attn.o_norm.weight"),
+    ("self_attention-o_proj-kernel", "self_attn.o_proj.weight"),
+)
+_GLM5_DENSE_MLP_FP8 = (
+    ("mlp-wi_0", "mlp.gate_proj"),
+    ("mlp-wi_1", "mlp.up_proj"),
+    ("mlp-wo", "mlp.down_proj"),
+)
+_GLM5_SHARED_EXPERT_FP8 = (
+    ("mlp-shared_experts-wi_0", "mlp.shared_experts.gate_proj"),
+    ("mlp-shared_experts-wi_1", "mlp.shared_experts.up_proj"),
+    ("mlp-shared_experts-wo", "mlp.shared_experts.down_proj"),
+)
+_GLM5_ROUTED_EXPERT_FP8 = (
+    ("mlp-MoeBlock_0-wi_0", "gate_proj"),
+    ("mlp-MoeBlock_0-wi_1", "up_proj"),
+    ("mlp-MoeBlock_0-wo", "down_proj"),
+)
+
+
+def _glm5_layout(config, maxtext_config):
+  """(text_config dict, num_layers, num_experts, cycle, num_prefix, num_blocks, num_remainder)."""
+  text_config = config.get("text_config", config) if isinstance(config, dict) else config
+  n_layers = text_config.get("num_hidden_layers") if isinstance(text_config, dict) else text_config.num_hidden_layers
+  n_experts = text_config.get("n_routed_experts") if isinstance(text_config, dict) else text_config.n_routed_experts
+  cycle = maxtext_config.inhomogeneous_layer_cycle_interval
+  num_dense = maxtext_config.first_num_dense_layers
+  num_prefix = min(-(-num_dense // cycle) * cycle, n_layers)
+  num_blocks, num_remainder = divmod(n_layers - num_prefix, cycle)
+  return text_config, n_layers, n_experts, cycle, num_prefix, num_blocks, num_remainder
+
+
+def _glm5_is_fp8(maxtext_config) -> bool:
+  from maxtext.common.common_types import is_fp8_dtype  # pylint: disable=import-outside-toplevel
+
+  return is_fp8_dtype(getattr(maxtext_config, "weight_dtype", None))
+
+
+def _glm5_layer_slots(maxtext_config, num_prefix, num_blocks, num_remainder, cycle, scan_layers, n_layers):
+  """Yields (maxtext layer prefix, [hf layer indices] or int, is_dsa, is_dense)."""
+  if not scan_layers:
+    for i in range(n_layers):
+      yield f"params-decoder-layers_{i}", i, i % cycle == cycle - 1, i < maxtext_config.first_num_dense_layers
+    return
+  for i in range(num_prefix):
+    yield f"params-decoder-layers_{i}", i, i % cycle == cycle - 1, i < maxtext_config.first_num_dense_layers
+  for j in range(cycle):
+    if num_blocks:
+      yield (
+          f"params-decoder-scanned_blocks-layers_{j}",
+          [num_prefix + b * cycle + j for b in range(num_blocks)],
+          j == cycle - 1,
+          False,
+      )
+  first_remainder = num_prefix + num_blocks * cycle
+  for i in range(first_remainder, first_remainder + num_remainder):
+    yield f"params-decoder-layers_{i}", i, i % cycle == cycle - 1, i < maxtext_config.first_num_dense_layers
+
+
+def GLM5_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """MaxText -> HF tensor names for GLM-5.3-Flash (text-only; MTP layers are not mapped).
+
+  With an FP8 MaxText config (`weight_dtype: float8_e4m3fn`), FP8 HF weights map 1:1 to FP8 kernels and
+  their `weight_scale_inv` to `kernel_scale` / `wi_*_scale`; otherwise each FP8 weight is mapped together
+  with its scale as a tuple and dequantized on load by the hook.
+  """
+  _, n_layers, n_experts, cycle, num_prefix, num_blocks, num_remainder = _glm5_layout(config, maxtext_config)
+  fp8 = _glm5_is_fp8(maxtext_config)
+  hf = "model.language_model"
+
+  mapping = {
+      "params-token_embedder-embedding": f"{hf}.embed_tokens.weight",
+      "params-decoder-decoder_norm-scale": f"{hf}.norm.weight",
+      "params-decoder-logits_dense-kernel": "lm_head.weight",
+  }
+
+  for prefix, layers, is_dsa, is_dense in _glm5_layer_slots(
+      maxtext_config, num_prefix, num_blocks, num_remainder, cycle, scan_layers, n_layers
+  ):
+
+    def key(name, layers=layers):
+      if isinstance(layers, list):
+        return [f"{hf}.layers.{i}.{name}" for i in layers]
+      return f"{hf}.layers.{layers}.{name}"
+
+    def expert_key(name, layers=layers):
+      if isinstance(layers, list):
+        return [[f"{hf}.layers.{i}.mlp.experts.{e}.{name}" for i in layers] for e in range(n_experts)]
+      return [f"{hf}.layers.{layers}.mlp.experts.{e}.{name}" for e in range(n_experts)]
+
+    def add_fp8(mt_name, hf_module, scale_suffix, expert=False):
+      get = expert_key if expert else key
+      weight, scale = get(f"{hf_module}.weight"), get(f"{hf_module}.weight_scale_inv")
+      if fp8:
+        mapping[f"{prefix}-{mt_name}{'' if expert else '-kernel'}"] = weight
+        mapping[f"{prefix}-{mt_name}{scale_suffix}"] = scale
+      else:
+        # Pair every weight with its scale (same nesting) for dequantize-on-load.
+        def pair(w, s):
+          return [pair(a, b) for a, b in zip(w, s)] if isinstance(w, list) else (w, s)
+
+        mapping[f"{prefix}-{mt_name}{'' if expert else '-kernel'}"] = pair(weight, scale)
+
+    mapping[f"{prefix}-pre_self_attention_layer_norm-scale"] = key("input_layernorm.weight")
+    mapping[f"{prefix}-post_self_attention_layer_norm-scale"] = key("post_attention_layernorm.weight")
+    for mod, hf_attr in (("mhc_attention", "hc_attn"), ("mhc_mlp", "hc_ffn")):
+      mapping[f"{prefix}-{mod}-mhc_norm-scale"] = None
+      for part in ("pre", "post", "res"):
+        mapping[f"{prefix}-{mod}-{part}_alpha"] = key(f"{hf_attr}_fn")
+        mapping[f"{prefix}-{mod}-{part}_beta"] = key(f"{hf_attr}_base")
+        mapping[f"{prefix}-{mod}-{part}_alpha_scale"] = key(f"{hf_attr}_scale")
+
+    if is_dsa:
+      for mt_name, hf_module in _GLM5_DSA_FP8:
+        add_fp8(mt_name, hf_module, "-kernel_scale")
+      for mt_name, hf_name in _GLM5_DSA_BF16:
+        mapping[f"{prefix}-{mt_name}"] = key(hf_name)
+    else:
+      for mt_name, hf_name in _GLM5_KDA_BF16:
+        mapping[f"{prefix}-{mt_name}"] = key(hf_name)
+
+    if is_dense:
+      for mt_name, hf_module in _GLM5_DENSE_MLP_FP8:
+        add_fp8(mt_name, hf_module, "-kernel_scale")
+    else:
+      mapping[f"{prefix}-mlp-MoeBlock_0-gate-kernel"] = key("mlp.gate.weight")
+      mapping[f"{prefix.replace('params-', 'MoEBiasVar-')}-mlp-MoeBlock_0-gate-bias"] = key(
+          "mlp.gate.e_score_correction_bias"
+      )
+      for mt_name, hf_module in _GLM5_SHARED_EXPERT_FP8:
+        add_fp8(mt_name, hf_module, "-kernel_scale")
+      for mt_name, hf_proj in _GLM5_ROUTED_EXPERT_FP8:
+        add_fp8(mt_name, hf_proj, "_scale", expert=True)
+
+  return mapping
+
+
+def GLM5_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """HF -> MaxText tensor transforms for GLM-5.3-Flash (see `GLM5_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING`)."""
+  if saving_to_hf:
+    raise NotImplementedError("MaxText -> HF export is not implemented for GLM-5.3-Flash yet.")
+  _, n_layers, _, cycle, num_prefix, num_blocks, num_remainder = _glm5_layout(config, maxtext_config)
+  fp8 = _glm5_is_fp8(maxtext_config)
+
+  def transpose_reshape(x, target_shape):
+    """HF Linear weight [out, in] (or its [out_blocks, in_blocks] scale) -> MaxText kernel [in, *out]."""
+    return x.T.reshape(target_shape)
+
+  def dequant_transpose_reshape(x, target_shape):
+    """(FP8 weight [out, in], float32 scale_inv [out/128, in/128]) -> dequantized MaxText kernel."""
+    w, s = x
+    xp = _array_module(w)
+    out_dim, in_dim = w.shape
+    so, si = s.shape
+    w = w.astype(xp.float32).reshape(so, out_dim // so, si, in_dim // si) * s.astype(xp.float32)[:, None, :, None]
+    return w.reshape(out_dim, in_dim).T.reshape(target_shape)
+
+  def conv_kernel(x, target_shape):
+    """HF depthwise conv weight [C, 1, W] -> MaxText [W, C]."""
+    return x.reshape(x.shape[0], x.shape[-1]).T.reshape(target_shape)
+
+  def reshape(x, target_shape):
+    return x.reshape(target_shape)
+
+  def ones(x, target_shape):
+    dtype = x.dtype if x is not None else np.float32
+    return np.ones(target_shape, dtype=dtype)
+
+  def mhc_slice(mode, part_idx):
+    def hook(t, target_shape):
+      if mode == "scale":
+        return t[part_idx : part_idx + 1].reshape(target_shape)
+      t = t.T if mode == "alpha" else t
+      k = int(np.sqrt(1 + t.shape[-1]) - 1)
+      out = t[..., part_idx * k : (part_idx + 1) * k] if part_idx < 2 else t[..., 2 * k :]
+      return out.reshape(target_shape)
+
+    return hook
+
+  kernel_hook = transpose_reshape if fp8 else dequant_transpose_reshape
+  hooks = {
+      "params-decoder-logits_dense-kernel": transpose_reshape,
+  }
+
+  for prefix, _, is_dsa, is_dense in _glm5_layer_slots(
+      maxtext_config, num_prefix, num_blocks, num_remainder, cycle, scan_layers, n_layers
+  ):
+    for mod in ("mhc_attention", "mhc_mlp"):
+      hooks[f"{prefix}-{mod}-mhc_norm-scale"] = ones
+      for idx, part in enumerate(("pre", "post", "res")):
+        hooks[f"{prefix}-{mod}-{part}_alpha"] = mhc_slice("alpha", idx)
+        hooks[f"{prefix}-{mod}-{part}_beta"] = mhc_slice("beta", idx)
+        hooks[f"{prefix}-{mod}-{part}_alpha_scale"] = mhc_slice("scale", idx)
+
+    fp8_modules = []
+    if is_dsa:
+      fp8_modules += [m for m, _ in _GLM5_DSA_FP8]
+      for name in ("wkv_b-kernel", "indexer-wq_b-kernel", "indexer-wk-kernel", "indexer-weights_proj-kernel",
+                   "indexer-compress_gate-kernel"):
+        hooks[f"{prefix}-self_attention-{name}"] = transpose_reshape
+    else:
+      for name in ("q_proj", "k_proj", "v_proj", "f_a_proj", "f_b_proj", "b_proj", "g_a_proj", "g_b_proj", "o_proj"):
+        hooks[f"{prefix}-self_attention-{name}-kernel"] = transpose_reshape
+      for name in ("q_conv1d", "k_conv1d", "v_conv1d"):
+        hooks[f"{prefix}-self_attention-{name}"] = conv_kernel
+      hooks[f"{prefix}-self_attention-dt_bias"] = reshape
+
+    if is_dense:
+      fp8_modules += [m for m, _ in _GLM5_DENSE_MLP_FP8]
+    else:
+      fp8_modules += [m for m, _ in _GLM5_SHARED_EXPERT_FP8]
+      hooks[f"{prefix}-mlp-MoeBlock_0-gate-kernel"] = transpose_reshape
+      for mt_name, _ in _GLM5_ROUTED_EXPERT_FP8:
+        hooks[f"{prefix}-{mt_name}"] = kernel_hook
+        if fp8:
+          hooks[f"{prefix}-{mt_name}_scale"] = transpose_reshape
+    for mt_name in fp8_modules:
+      hooks[f"{prefix}-{mt_name}-kernel"] = kernel_hook
+      if fp8:
+        hooks[f"{prefix}-{mt_name}-kernel_scale"] = transpose_reshape
+
+  return hooks
+
+
 PARAM_MAPPING = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4495,6 +4757,8 @@ PARAM_MAPPING = {
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.3-flash": GLM5_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.3-flash-mini": GLM5_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4556,6 +4820,8 @@ HOOK_FNS = {
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-tiny": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.3-flash": GLM5_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.3-flash-mini": GLM5_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,

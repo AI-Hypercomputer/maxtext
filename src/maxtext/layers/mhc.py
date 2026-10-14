@@ -23,7 +23,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-from maxtext.common.common_types import Array, Config
+from maxtext.common.common_types import Array, Config, is_fp8_dtype
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.kernels.mhc import api as mhc_kernel
 from maxtext.layers.initializers import default_bias_init, default_scalar_init, nd_dense_init
@@ -102,8 +102,12 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     self.rngs = rngs
     self.mesh = mesh
     self.dtype = self.config.dtype
-    self.weight_dtype = self.config.weight_dtype
+    # mHC parameters are never FP8-quantized (they map to unquantized HF tensors).
+    self.weight_dtype = self.config.dtype if is_fp8_dtype(self.config.weight_dtype) else self.config.weight_dtype
     self.matmul_precision = jax.lax.Precision(self.config.matmul_precision)
+    # dtype of the mixing-weight computation (norm, projection, sigmoid/Sinkhorn). GLM-5.3's reference computes
+    # these in float32 even for bf16 models and casts the weights back before combining the streams.
+    self.mix_dtype = jnp.float32 if getattr(self.config, "mhc_float32_mixing", False) else self.dtype
 
     if getattr(self.config, "use_mhc_pallas_kernel", False) and not self.config.enable_mhc_lite:
       raise ValueError("use_mhc_pallas_kernel=True requires enable_mhc_lite=True.")
@@ -111,7 +115,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     # Norm layer
     self.mhc_norm = RMSNorm(
         num_features=self.k * self.dim,
-        dtype=self.config.dtype,
+        dtype=self.mix_dtype,
         weight_dtype=self.weight_dtype,
         kernel_axes=("norm",),
         epsilon=self.config.normalization_layer_epsilon,
@@ -210,8 +214,8 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
   def res_mapping(self, h_res: Array):
     """Helper function for residual mapping after matmul."""
     # In MaxText, we match weight precision to activations before Matmul
-    res_beta = jnp.asarray(self.res_beta[...], self.dtype)
-    res_alpha_scale = jnp.asarray(self.res_alpha_scale[...], self.dtype)
+    res_beta = jnp.asarray(self.res_beta[...], self.mix_dtype)
+    res_alpha_scale = jnp.asarray(self.res_alpha_scale[...], self.mix_dtype)
 
     if self.config.enable_mhc_lite:
       intermediate = res_alpha_scale * h_res + res_beta[None, None, :]
@@ -231,13 +235,13 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       h_res = jnp.reshape(h_res, (b, s, self.k, self.k))
       intermediate = res_alpha_scale * h_res + res_beta[None, None, :, :]
       output = sinkhorn(intermediate, self.sinkhorn_iterations)
-      return output
+      return output.astype(self.dtype)
 
   def mapping(self, h: Array, alpha_scale: Array, beta: Array, scale: float, eps: float = 0.0):
     """Helper function for both pre and post mappings after matmul."""
     # In MaxText, we match weight precision to activations before Matmul
-    beta = jnp.asarray(beta, self.dtype)
-    alpha_scale = jnp.asarray(alpha_scale, self.dtype)
+    beta = jnp.asarray(beta, self.mix_dtype)
+    alpha_scale = jnp.asarray(alpha_scale, self.mix_dtype)
     intermediate = alpha_scale * h + beta[None, None, :]
     output = scale * jax.nn.sigmoid(intermediate) + eps
     return output
@@ -292,9 +296,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
         norm_x = self.mhc_norm(jnp.reshape(x, (b, s, k * d)))
 
       # Fused Projections
-      pre_alpha = jnp.asarray(self.pre_alpha[...], self.dtype)
-      post_alpha = jnp.asarray(self.post_alpha[...], self.dtype)
-      res_alpha = jnp.asarray(self.res_alpha[...], self.dtype)
+      pre_alpha = jnp.asarray(self.pre_alpha[...], self.mix_dtype)
+      post_alpha = jnp.asarray(self.post_alpha[...], self.mix_dtype)
+      res_alpha = jnp.asarray(self.res_alpha[...], self.mix_dtype)
 
       alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
 
@@ -316,9 +320,9 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
       layer_input = jnp.einsum(
           "bsk,bskd->bsd",
           pre_mapping,
-          x,
+          x.astype(self.mix_dtype),
           precision=self.matmul_precision,
-      )
+      ).astype(self.dtype)
 
     # 3. Pre-norm
     layer_input = norm_fn(layer_input)
@@ -361,7 +365,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     )
     # Moving away from einsum seems to allow XLA to perform better fusions
     # bsd,bsk -> bskd
-    post_out = jnp.expand_dims(layer_out, axis=2) * jnp.expand_dims(post_mapping, axis=3)
+    post_out = jnp.expand_dims(layer_out, axis=2) * jnp.expand_dims(post_mapping.astype(self.dtype), axis=3)
 
     # 6. Residual mapping, res_out shape as [batch, seq, expansion_rate, emb]
     res_mapping = self.res_mapping(h_res)

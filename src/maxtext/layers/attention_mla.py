@@ -61,8 +61,11 @@ from maxtext.common.common_types import (
     PREFILL_LENGTH,
     AttentionType,
     DEFAULT_MASK_VALUE,
+    get_weight_dtype,
+    is_fp8_dtype,
 )
 
+from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral
@@ -75,6 +78,35 @@ from maxtext.utils.globals import EPS
 
 
 PLACEHOLDER_SEQ_LEN = 1
+
+
+def _proj_quant_kwargs(config: Any, name: str, fallback_weight_dtype: DType) -> dict:
+  """Per-projection weight dtype / FP8 weight-only quantization kwargs for DenseGeneral.
+
+  With an FP8 `weight_dtype`, `unquantized_modules` decides per projection (e.g. GLM-5.3 keeps `wkv_b`
+  and the indexer in bf16) and quantized kernels get block scales. FP8 block scales are tiny and their
+  block dims (e.g. kv_lora/128) need not divide large meshes, so they are replicated. Without FP8 this
+  returns the module's usual weight dtype and nothing else, leaving existing models unchanged.
+  """
+  if not is_fp8_dtype(getattr(config, "weight_dtype", None)):
+    return {"weight_dtype": fallback_weight_dtype}
+  weight_quant = quantizations.get_weight_quant_config(config, name)
+  kwargs = {"weight_dtype": get_weight_dtype(config, name), "weight_quant": weight_quant}
+  if weight_quant is not None:
+    kwargs["replicate_scale"] = True
+  return kwargs
+
+
+def _dense(replicate_scale: bool = False, **kwargs) -> DenseGeneral:
+  """DenseGeneral with an optional fully replicated `kernel_scale`."""
+  if replicate_scale:
+    in_shape = kwargs["in_features_shape"]
+    out_shape = kwargs["out_features_shape"]
+    rank = (len(in_shape) if isinstance(in_shape, tuple) else 1) + (
+        len(out_shape) if isinstance(out_shape, tuple) else 1
+    )
+    kwargs["scale_axes"] = (None,) * rank
+  return DenseGeneral(**kwargs)
 
 
 class indexer_losses(nnx.Variable):  # pylint: disable=invalid-name,abstract-method
@@ -126,14 +158,14 @@ class Indexer(nnx.Module):
     self.softmax_scale = self.head_dim**-0.5
 
     # Query Projection: Latent Query -> Indexer Query
-    self.wq_b = DenseGeneral(
+    self.wq_b = _dense(
         in_features_shape=self.q_lora_rank,
         out_features_shape=(self.n_heads, self.head_dim),
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("q_lora", "q_heads", "kv"),
         dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
+        **_proj_quant_kwargs(config, "indexer_wq_b", self.weight_dtype),
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
@@ -141,14 +173,14 @@ class Indexer(nnx.Module):
     )
 
     # Key Projection: Input -> Shared Indexer Key
-    self.wk = DenseGeneral(
+    self.wk = _dense(
         in_features_shape=self.emb_dim,
         out_features_shape=self.head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed_attn", "kv"),
         dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
+        **_proj_quant_kwargs(config, "indexer_wk", self.weight_dtype),
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
@@ -156,7 +188,8 @@ class Indexer(nnx.Module):
     )
 
     # Key Normalization with Bias
-    self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=self.weight_dtype, rngs=rngs)
+    k_norm_dtype = _proj_quant_kwargs(config, "indexer_k_norm", self.weight_dtype)["weight_dtype"]
+    self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=k_norm_dtype, rngs=rngs)
 
     # Projection: Input -> Importance Weights for Heads
     # deepseek3.2 enforces FP32 and does not quantize, for precision and stability.
@@ -173,6 +206,27 @@ class Indexer(nnx.Module):
         shard_mode=self.config.shard_mode,
         rngs=self.rngs,
     )
+
+    # GLM-5.3 k-pool selection: score pools of `kpool` consecutive tokens instead of single tokens. Each pool key
+    # is a softmax-weighted average of its token keys (gate = x @ compress_gate + compress_ape per slot).
+    self.kpool = getattr(config, "indexer_kpool", 1)
+    self.kpool_always_select_tail = getattr(config, "indexer_kpool_always_select_tail", True)
+    if self.kpool > 1:
+      self.compress_gate = _dense(
+          in_features_shape=self.emb_dim,
+          out_features_shape=self.head_dim,
+          axis=-1,
+          kernel_init=self.kernel_init,
+          kernel_axes=("embed_attn", "kv"),
+          dtype=self.dtype,
+          **_proj_quant_kwargs(config, "indexer_compress_gate", self.weight_dtype),
+          quant=self.quant,
+          matmul_precision=self.config.matmul_precision,
+          shard_mode=self.config.shard_mode,
+          rngs=self.rngs,
+      )
+      ape_dtype = _proj_quant_kwargs(config, "indexer_compress_ape", self.weight_dtype)["weight_dtype"]
+      self.compress_ape = nnx.Param(jnp.zeros((self.kpool, self.head_dim), ape_dtype), sharding=(None, None))
 
   def update_indexer_cache(self, kv_cache, k, decoder_segment_ids, model_mode, previous_chunk):
     """Updates Indexer buffers by processing KV cache results."""
@@ -218,11 +272,77 @@ class Indexer(nnx.Module):
       Array with partial RoPE applied, with shape [batch, seqlen, indexer_n_heads, indexer_head_dim]
     """
     # indexer_head_dim -> [rope_head_dim, indexer_head_dim - rope_head_dim]
+    if self.rope_head_dim == 0 or self.rotary_embedding is None:  # NoPE (e.g. GLM-5.3)
+      return inputs
     x_pe, x_nope = jnp.split(inputs, [self.rope_head_dim], axis=-1)
     # x_pe [B, S, H, rope_head_dim], positions [B, S]
     x_pe = self.rotary_embedding(x_pe, position=inputs_positions)
     x = jnp.concatenate([x_pe, x_nope], axis=-1)
     return x
+
+  def kpool_mask(
+      self, inputs_kv: Array, q: Array, k: Array, weights: Array, decoder_segment_ids: Optional[Array]
+  ) -> Array:
+    """GLM-5.3 k-pool token selection as an additive mask [b, t, s] (0 = attend, DEFAULT_MASK_VALUE = masked).
+
+    Pools of `kpool` consecutive tokens (starting at token 0; MaxText pads on the right) get one key each:
+    softmax over the pool of (inputs_kv @ compress_gate + compress_ape), applied per channel to the token keys.
+    Each query picks the top `indexer_topk // kpool` visible complete pools by
+    sum_h weights_h * relu(q_h . pool_key), expanded back to their tokens, plus the incomplete tail pool.
+
+    Reference: `Glm5NextTextIndexer` in transformers/models/glm5_next/modeling_glm5_next.py.
+    """
+    b, s, _ = inputs_kv.shape
+    t = q.shape[1]
+    p_size = self.kpool
+    n_pools = -(-s // p_size)
+    pad = n_pools * p_size - s
+    q = q.astype(jnp.float32)
+    k = k.astype(jnp.float32)
+    gate = self.compress_gate(inputs_kv).astype(jnp.float32)  # [b, s, d]
+    valid = jnp.ones((b, s), dtype=bool) if decoder_segment_ids is None else decoder_segment_ids != 0
+
+    def pad_fn(x, value=0):
+      return jnp.pad(x, ((0, 0), (0, pad)) + ((0, 0),) * (x.ndim - 2), constant_values=value)
+
+    k_p = pad_fn(k).reshape(b, n_pools, p_size, -1)
+    gate_p = pad_fn(gate).reshape(b, n_pools, p_size, -1)
+    valid_padded = pad_fn(valid, False)
+    valid_p = valid_padded.reshape(b, n_pools, p_size)
+    pool_valid = valid_p.all(-1)  # [b, P]
+
+    logits = gate_p + self.compress_ape[...].astype(jnp.float32)[None, None]
+    logits = jnp.where(valid_p[..., None], logits, -jnp.inf)
+    probs = jnp.nan_to_num(jax.nn.softmax(logits, axis=2))
+    pool_keys = jnp.sum(probs * k_p, axis=2)  # [b, P, d]
+
+    scores = jax.nn.relu(jnp.einsum("bthd,bpd->bthp", q, pool_keys, precision=self.config.matmul_precision))
+    index_scores = jnp.einsum(
+        "bth,bthp->btp", weights.astype(jnp.float32), scores, precision=self.config.matmul_precision
+    )
+
+    q_pos = jnp.arange(t)
+    pool_end = jnp.arange(n_pools) * p_size + p_size - 1
+    end_valid = valid_padded[:, pool_end]  # [b, P]
+    # A pool is selectable only if it is complete, valid, and its last token is causally visible.
+    candidates = (pool_end[None, :] <= q_pos[:, None])[None] & (pool_valid & end_valid)[:, None, :]  # [b, t, P]
+    index_scores = jnp.where(candidates, index_scores, jnp.finfo(jnp.float32).min)
+
+    select_k = min(self.indexer_topk // p_size, n_pools)
+    _, selected = jax.lax.top_k(index_scores, select_k)  # [b, t, K]
+    selected_valid = jnp.take_along_axis(candidates, selected, axis=-1)
+    pool_mask = jnp.any((jax.nn.one_hot(selected, n_pools, dtype=jnp.int32) * selected_valid[..., None]) > 0, axis=-2)
+    token_mask = pool_mask[:, :, jnp.arange(s) // p_size]  # [b, t, s]
+
+    if self.kpool_always_select_tail:
+      kv_idx = jnp.arange(s)
+      visible = (kv_idx[None, :] <= q_pos[:, None])[None] & valid[:, None, :]  # [b, t, s]
+      visible_count = visible.sum(-1)
+      tail_start = visible_count - visible_count % p_size
+      token_mask = token_mask | ((kv_idx[None, None, :] >= tail_start[..., None]) & visible)
+
+    token_mask = token_mask & valid[:, :, None]
+    return jnp.where(token_mask, jnp.array(0.0, self.dtype), jnp.array(DEFAULT_MASK_VALUE, self.dtype))
 
   def generate_mask(self, indexer_score: Array, topk_values: Array) -> Array:
     """Creates a mask for top-k indices
@@ -345,6 +465,9 @@ class Indexer(nnx.Module):
     inputs_kv = jax.lax.stop_gradient(inputs_kv)
 
     # Query Processing: Project from Latent low_rank_q
+    if self.kpool > 1 and model_mode != MODEL_MODE_TRAIN:
+      # TODO(glm5.3): cache per-token gate scores with the indexer keys so pools can be rebuilt during decode.
+      raise NotImplementedError("The k-pool indexer currently supports only full-sequence (train) mode.")
     q = self.wq_b(low_rank_q)  # [b, t, q_lora_rank] -> [b, t, h * d]
     q = q.reshape(bsz, seqlen, self.n_heads, self.head_dim)  # [b, t, h, d]
     q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
@@ -372,6 +495,12 @@ class Indexer(nnx.Module):
     # https://github.com/deepseek-ai/DeepSeek-V3.2-Exp/blob/87e509a2e5a100d221c97df52c6e8be7835f0057/inference/model.py#L478-L480
     weights = weights * (self.n_heads**-0.5) * self.softmax_scale
 
+    if self.kpool > 1:
+      # GLM-5.3 k-pool selection (scores pools, expands them to tokens, always keeps the incomplete tail pool).
+      indexer_mask = self.kpool_mask(inputs_kv, q, k, weights, decoder_segment_ids)
+      if attention_mask is not None:
+        indexer_mask += attention_mask
+      return indexer_mask, None, None
     # Compute Index Scores
     # When qk_head_chunk_size > 0, compute Index Scores by chunking the 'heads' dimension to reduce memory
     # The naive evaluation materializes [b, t, s, h].
@@ -603,7 +732,8 @@ class MLA(Attention):
       # MLA applies yarn with interleave layout.
       # Indexer applies yarn with concatenate layout.
       indexer_rope = copy.copy(self.rotary_embedding)
-      indexer_rope.interleave = False
+      if indexer_rope is not None:
+        indexer_rope.interleave = False
       self.indexer = Indexer(
           config,
           rngs=rngs,
@@ -655,7 +785,7 @@ class MLA(Attention):
     ), f"MLA requires MLA attention type {AttentionType.MLA.value}"
     assert self.kv_lora_rank > 0, "KV LoRA rank must be > 0"
     assert self.qk_nope_head_dim > 0, "QK NoPe head dim must be > 0"
-    assert self.qk_rope_head_dim > 0, "QK RoPE head dim must be > 0"
+    assert self.qk_rope_head_dim >= 0, "QK RoPE head dim must be >= 0 (0 = NoPE, e.g. GLM-5.3)"
     assert self.v_head_dim > 0, "V head dim must be > 0"
     assert self.num_query_heads == self.num_kv_heads, "MLA requires equal number of query and kv heads"
     assert not self.config.fused_qkv, "Fused QKV is not supported for MLA"
@@ -677,14 +807,14 @@ class MLA(Attention):
       )
     else:
       # LoRA path for Q.
-      self.wq_a = DenseGeneral(
+      self.wq_a = _dense(
           in_features_shape=self.config.emb_dim,
           out_features_shape=self.q_lora_rank,
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("embed_attn", "q_lora_up_proj"),
           dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
+          **_proj_quant_kwargs(self.config, "wq_a", self.weight_dtype),
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
@@ -698,14 +828,14 @@ class MLA(Attention):
           kernel_axes=("norm",),
           rngs=self.rngs,
       )
-      self.wq_b = DenseGeneral(
+      self.wq_b = _dense(
           in_features_shape=self.q_lora_rank,
           out_features_shape=(self.num_query_heads, self.qk_head_dim),
           axis=-1,
           kernel_init=self.kernel_init,
           kernel_axes=("q_lora", "q_heads", "kv"),
           dtype=self.dtype,
-          weight_dtype=self.weight_dtype,
+          **_proj_quant_kwargs(self.config, "wq_b", self.weight_dtype),
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
@@ -713,14 +843,14 @@ class MLA(Attention):
       )
 
     # KV LoRA path.
-    self.wkv_a = DenseGeneral(
+    self.wkv_a = _dense(
         in_features_shape=self.config.emb_dim,
         out_features_shape=self.kv_lora_rank + self.qk_rope_head_dim,
         axis=-1,
         kernel_init=self.kernel_init,
         kernel_axes=("embed_attn", "kv_lora_up_proj"),
         dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
+        **_proj_quant_kwargs(self.config, "wkv_a", self.weight_dtype),
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
@@ -734,7 +864,7 @@ class MLA(Attention):
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
-    self.wkv_b = DenseGeneral(
+    self.wkv_b = _dense(
         in_features_shape=self.kv_lora_rank,
         out_features_shape=(
             self.num_query_heads,
@@ -744,7 +874,7 @@ class MLA(Attention):
         kernel_init=self.kernel_init,
         kernel_axes=("kv_lora", "kv_heads", "kv_head_dim"),
         dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
+        **_proj_quant_kwargs(self.config, "wkv_b", self.weight_dtype),
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
@@ -753,11 +883,42 @@ class MLA(Attention):
 
     # Set softmax scaling.
     self.softmax_scale = self.qk_head_dim**-0.5
-    if self.max_position_embeddings > self.original_max_position_embeddings:
+    if self.qk_rope_head_dim > 0 and self.max_position_embeddings > self.original_max_position_embeddings:
       mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 
     self.out = self.init_out_w(output_dim=inputs_q_shape[-1])
+
+  def init_rotary_embedding(self):
+    """No rotary embedding for NoPE MLA (qk_rope_head_dim == 0, e.g. GLM-5.3)."""
+    if self.qk_rope_head_dim == 0:
+      return None
+    return super().init_rotary_embedding()
+
+  def apply_rotary_embedding(self, inputs: Array, inputs_positions: Optional[Array | None] = None, rope_kwargs=None):
+    if self.rotary_embedding is None:
+      return inputs
+    return super().apply_rotary_embedding(inputs, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
+
+  def init_out_w(self, output_dim: int) -> nnx.Module:
+    """Output projection; per-projection FP8 settings when `weight_dtype` is FP8 (otherwise the base layer)."""
+    if not is_fp8_dtype(getattr(self.config, "weight_dtype", None)):
+      return super().init_out_w(output_dim)
+    return _dense(
+        in_features_shape=(self.num_query_heads, self.out_head_dim),
+        out_features_shape=output_dim,
+        axis=(-2, -1),
+        kernel_init=self.kernel_init,
+        kernel_axes=(None, None, None)
+        if self.config.ici_context_autoregressive_parallelism > 1
+        else ("heads", "kv", "embed_attn"),
+        dtype=self.dtype,
+        **_proj_quant_kwargs(self.config, "out", self.weight_dtype),
+        quant=self.quant,
+        shard_mode=self.config.shard_mode,
+        matmul_precision=self.config.matmul_precision,
+        rngs=self.rngs,
+    )
 
   def _attention_op_num_kv_heads(self) -> int:
     if self.use_absorbed_mqa:
@@ -824,7 +985,7 @@ class MLA(Attention):
     # Set softmax scaling.
     self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
     self.softmax_scale = self.qk_head_dim**-0.5
-    if self.max_position_embeddings > self.original_max_position_embeddings:
+    if self.qk_rope_head_dim > 0 and self.max_position_embeddings > self.original_max_position_embeddings:
       mscale = 0.1 * self.mscale * math.log(self.rope_factor) + 1.0
       self.softmax_scale = self.softmax_scale * mscale * mscale
 

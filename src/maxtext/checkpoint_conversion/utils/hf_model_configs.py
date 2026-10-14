@@ -1142,6 +1142,44 @@ class DeepseekV4Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
 deepseek4_284b_config = DeepseekV4Config(**deepseek4_284b_dict)
 
 
+# GLM-5.3-Flash (https://huggingface.co/zai-org/GLM-5.3-Flash/blob/main/config.json), text config only.
+# transformers' Glm5NextConfig differs across versions, so a plain PretrainedConfig carries the fields the
+# HF<->MaxText mapping needs (layer/expert counts; the layer schedule comes from the MaxText config).
+_glm5_3_flash_text_dict = {
+    "model_type": "glm5_next_text",
+    "hidden_size": 4096,
+    "intermediate_size": 12288,
+    "moe_intermediate_size": 2048,
+    "num_hidden_layers": 45,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 64,
+    "n_routed_experts": 288,
+    "n_shared_experts": 1,
+    "num_experts_per_tok": 8,
+    "first_k_dense_replace": 3,
+    "q_lora_rank": 1536,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 256,
+    "qk_rope_head_dim": 0,
+    "v_head_dim": 256,
+    "index_n_heads": 32,
+    "index_head_dim": 128,
+    "index_topk": 2048,
+    "index_kpool": 4,
+    "hc_mult": 4,
+    "vocab_size": 154880,
+    "tie_word_embeddings": False,
+}
+glm5_3_flash_config = transformers.PretrainedConfig(
+    architectures=["Glm5NextForConditionalGeneration"], text_config=dict(_glm5_3_flash_text_dict)
+)
+# Mini bring-up checkpoint (gs://snehalv-data/glm-5.3-flash/hf/mini): 13 layers, 16 experts, index_topk=8.
+glm5_3_flash_mini_config = transformers.PretrainedConfig(
+    architectures=["Glm5NextForConditionalGeneration"],
+    text_config={**_glm5_3_flash_text_dict, "num_hidden_layers": 13, "n_routed_experts": 16, "index_topk": 8},
+)
+
+
 # from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
 gpt_oss_20b_dict = {
@@ -2107,6 +2145,8 @@ HF_MODEL_CONFIGS = {
     "deepseek3-671b": deepseek3_671b_config,
     "deepseek3.2-671b": deepseek32_671b_config,
     "deepseek4-284b": deepseek4_284b_config,
+    "glm5.3-flash": glm5_3_flash_config,
+    "glm5.3-flash-mini": glm5_3_flash_mini_config,
     "gpt-oss-20b": gpt_oss_20b_config,
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,

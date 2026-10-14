@@ -705,6 +705,10 @@ class MlpBlock(nnx.Module):
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
+        if cfg.decoder_block == DecoderBlockType.GLM5_NEXT and cfg.mlp_activations_limit > 0.0:
+          # GLM-5.3 clamps the SwiGLU gate (upper bound only) and up (both bounds) projections.
+          limit = cfg.mlp_activations_limit
+          x = jnp.clip(x, max=limit) if idx == 0 else jnp.clip(x, min=-limit, max=limit)
         x = _convert_to_activation_function(act_fn)(x)
         activations.append(x)
 

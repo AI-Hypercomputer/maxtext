@@ -1,0 +1,99 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# GLM-5.3-Flash (zai-org/GLM-5.3-Flash), text-only, FP8 weight-only storage with dynamic dequantization.
+# Hybrid: 3 KDA + 1 DSA (NoPE MLA + k-pool indexer) per period, mHC residuals, sigmoid noaux_tc MoE.
+
+base_config: "base.yml"
+decoder_block: "glm5_next"
+
+# Core architecture
+base_emb_dim: 4096
+base_num_decoder_layers: 45
+base_num_query_heads: 64
+base_num_kv_heads: 64
+head_dim: 256
+vocab_size: 154880
+normalization_layer_epsilon: 1.0e-5
+enable_dropout: false
+logits_via_embedding: false
+
+# Layer schedule: layer i is DSA iff i % 4 == 3; layers [0, 3) are dense.
+inhomogeneous_layer_cycle_interval: 4
+first_num_dense_layers: 3
+
+# Dense MLP / MoE
+base_mlp_dim: 12288
+base_moe_mlp_dim: 2048
+mlp_activations: ["silu", "linear"]
+mlp_activations_limit: 10.0
+num_experts: 288
+num_experts_per_tok: 8
+shared_experts: 1
+routed_score_func: "sigmoid"
+routed_bias: true
+routed_bias_update_rate: 0.0
+routed_scaling_factor: 2.5
+norm_topk_prob: true
+float32_gate_logits: true
+
+# DSA layers: NoPE MLA + k-pool indexer
+attention_type: "mla"
+use_indexer: true
+# The released indexer is already trained: train in the DSA "sparse training" stage (LM loss on, sparse mask),
+# not the dense warm-up stage (which skips the LM loss and only trains the indexer).
+indexer_sparse_training: true
+# DSA runs on MLA + the indexer mask through AttentionOp: Tokamax dynamic-mask splash by default (or dot_product).
+attention: "flash"
+use_tokamax_splash: true
+q_lora_rank: 1536
+kv_lora_rank: 512
+qk_nope_head_dim: 256
+qk_rope_head_dim: 0
+v_head_dim: 256
+indexer_n_heads: 32
+indexer_head_dim: 128
+indexer_topk: 2048
+indexer_kpool: 4
+indexer_kpool_always_select_tail: true
+
+# KDA (Kimi Delta Attention) layers
+kda_num_heads: 64
+kda_head_dim: 128
+kda_conv_kernel_dim: 4
+kda_gate_lower_bound: -5.0
+kda_chunk_size: 16  # with the -5 safe gate, 16 keeps the factorized intra-chunk decay within fp32 range
+
+# Manifold-constrained hyper-connections
+mhc_expansion_rate: 4
+mhc_final_reduce: "mean"
+mhc_float32_mixing: true  # the reference computes mHC weights in fp32
+sinkhorn_iterations: 20
+
+# FP8 weight-only quantization (matches the upstream checkpoint's quantized/unquantized split)
+weight_dtype: "float8_e4m3fn"
+weight_block_size: 128
+dtype: "bfloat16"
+unquantized_modules:
+  - "token_embedder"
+  - "logits_dense"
+  - "norm"
+  - "gate"
+  - "mhc"
+  - "kda_*"
+  - "indexer_*"
+  - "wkv_b"
+
+tokenizer_type: "huggingface"
+tokenizer_path: "zai-org/GLM-5.3-Flash"
