@@ -2419,12 +2419,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """Maps a micro-batch to loss inputs and places them on the mesh, ahead of its `fwd_bwd`.
 
     For a caller that receives the micro-batch early (Tunix's `TrainerWorker.stage_fwd_bwd`,
-    while the device still computes the previous step's last micro-batch and update): the
-    input mapping and the host-to-device copy run here, and `fwd_bwd(prepared)` later
-    dispatches without moving data. The traced inputs go to exactly the shardings `fwd_bwd`
-    compiles them onto (`_batch_data_shardings`), with the closed-over half untouched, so the
-    kernel, its inputs and the result are those of `fwd_bwd(payload)`. Holds one micro-batch
-    of inputs in device memory until that `fwd_bwd`.
+    while the device still computes the previous step's last micro-batch, and its update unless
+    the caller deferred it): the input mapping and the host-to-device copy run here, and
+    `fwd_bwd(prepared)` later dispatches without moving data. The traced inputs go to exactly
+    the shardings `fwd_bwd` compiles them onto (`_batch_data_shardings`), with the closed-over
+    half untouched, so the kernel, its inputs and the result are those of `fwd_bwd(payload)`.
+    Holds one micro-batch of inputs in device memory until that `fwd_bwd`.
+
+    Safe between a step's last `fwd_bwd` and its `update()`, the order Tunix uses to stage
+    before a deferred update. Under `retry_when_tokens_dropped` the last micro-batch's
+    overflow flag is still pending there: this neither reads nor resolves it, and the dropless
+    rerun `update()` may then run reads the inputs that micro-batch's pending check kept, never
+    the prepared ones. The mapping reads only the payload (no parameter, gradient or optimizer
+    state), so the prepared input is the same whether the update runs before or after it.
 
     Args:
       payload: Packed micro-batch training input.
@@ -2449,7 +2456,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     waited on when it left the queue. A blocking wait, not an `is_ready()` poll: under Pathways
     a readiness check is an RPC to the proxy, so a poll can read "not ready" for work that has
     finished. Changes no state: the in-flight queue and its pending metrics are left as they
-    were (see `InflightThrottler.block_until_ready`).
+    were (see `InflightThrottler.block_until_ready`), and so is a pending overflow check: under
+    `retry_when_tokens_dropped` the last micro-batch's flag, and its dropless rerun if it
+    overflowed, are still left to the next `fwd_bwd` or `update()`.
     """
     start = time.monotonic()
     self._throttler.block_until_ready()

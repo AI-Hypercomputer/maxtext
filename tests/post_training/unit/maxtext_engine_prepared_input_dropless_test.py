@@ -13,11 +13,11 @@
 # limitations under the License.
 """prepare_fwd_bwd_input under the dropless replay and the final micro-batch's dropless program.
 
-The MLPerf recipes train with `retry_when_tokens_dropped` (a micro-batch whose MoE ragged buffer overflowed is
-accumulated as zero and rerun dropless, from the inputs it ran on) and `retry_dropless_final_micro_batch` (a step's
-last micro-batch runs the dropless program directly). A micro-batch prepared ahead must take both paths exactly like
-the payload it came from: the overflowing micro-batch is replayed from its prepared inputs, the final one runs the
-final program, and the weights, losses and replay counts are bit-identical.
+The team's MLPerf trainer configuration trains with `retry_when_tokens_dropped` (a micro-batch whose MoE ragged buffer
+overflowed is accumulated as zero and rerun dropless, from the inputs it ran on); `retry_dropless_final_micro_batch` (a
+step's last micro-batch runs the dropless program directly) is an option on top of it. A micro-batch prepared ahead must
+take both paths exactly like the payload it came from: the overflowing micro-batch is replayed from its prepared inputs,
+the final one runs the final program, and the weights, losses and replay counts are bit-identical.
 
 The rig is `maxtext_engine_final_dropless_test.py`'s: a one-layer Qwen3.5 MoE on CPU whose loss reports the overflow
 flag RoutedMoE would, from which program its graph is, and scales the loss per program so the kernels can be told

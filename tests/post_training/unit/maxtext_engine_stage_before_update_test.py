@@ -15,11 +15,11 @@
 
 Tunix's staged step boundary (`stage_before_update`) calls, at a staged boundary: `fwd_bwd(last, apply_optimizer=True)`,
 then `prepare_fwd_bwd_input(next step's first micro-batch)`, then `wait_for_device()`, then `update()`, and later
-`fwd_bwd(prepared)`. Under `retry_when_tokens_dropped` without `retry_dropless_final_micro_batch` (the MLPerf recipes
-set the first and not the second), the step's last micro-batch can overflow: its flag is still pending when the next
-micro-batch is prepared, and its dropless rerun runs inside `update()`, after the prepare. The prepared micro-batch must
-come out of that untouched, and the whole run must train bit-identically to the base order, `fwd_bwd(last,
-apply_optimizer=True)`, `update()`, `fwd_bwd(next payload)`.
+`fwd_bwd(prepared)`. Under `retry_when_tokens_dropped` without `retry_dropless_final_micro_batch` (the team's MLPerf
+trainer configuration sets the first; the second is opt-in), the step's last micro-batch can overflow: its flag is still
+pending when the next micro-batch is prepared, and its dropless rerun runs inside `update()`, after the prepare. The
+prepared micro-batch must come out of that untouched, and the whole run must train bit-identically to the base order,
+`fwd_bwd(last, apply_optimizer=True)`, `update()`, `fwd_bwd(next payload)`.
 
 The rig is `maxtext_engine_prepared_input_dropless_test.py`'s (a one-layer Qwen3.5 MoE on CPU whose loss reports the
 overflow flag RoutedMoE would), with the final micro-batch's dropless program off.
