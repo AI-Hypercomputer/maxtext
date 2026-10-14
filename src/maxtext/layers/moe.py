@@ -687,9 +687,9 @@ def _gathered_kernels(layers: nnx.Module) -> dict:
   for path, module in nnx.iter_modules(layers):
     if isinstance(module, GateLogit):
       kernels[path + ("kernel",)] = module
-    elif isinstance(module, attentions.Attention):
+    elif isinstance(module, attentions.Attention) and hasattr(module, "query"):
       # The backward pass otherwise gathers the query kernel twice per layer: for the rematerialized
-      # projection and for the input gradient.
+      # projection and for the input gradient. Under fused_qkv there is no `query` (it is `qkv_proj`).
       kernels[path + ("query", "kernel")] = module.query
   return kernels
 
