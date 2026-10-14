@@ -534,14 +534,19 @@ def export_for_inference(export_dir: str, model, transformer_config: dict, sourc
     return
   src_step = _latest_step(_component_manager(source_checkpoint_dir, names), source_checkpoint_dir)
   src, dst = epath.Path(source_checkpoint_dir) / str(src_step), epath.Path(export_dir) / "0"
+
+  def copy_tree(src_dir: epath.Path, dst_dir: epath.Path) -> None:
+    # Explicit walk: `rglob("**")` is rejected on GCS paths.
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    for entry in src_dir.iterdir():
+      if entry.is_dir():
+        copy_tree(entry, dst_dir / entry.name)
+      else:
+        entry.copy(dst_dir / entry.name, overwrite=True)
+
   for item in src.iterdir():
-    if item.name in names or not item.is_dir():
-      continue
-    for f in item.rglob("*"):
-      if f.is_file():
-        target = dst / item.name / f.relative_to(item)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        f.copy(target)
+    if item.name not in names and item.is_dir():
+      copy_tree(item, dst / item.name)
 
 
 # ==============================================================================
