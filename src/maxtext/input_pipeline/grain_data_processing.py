@@ -178,14 +178,17 @@ def get_datasets(
     grain_index_storage_option=None,
 ):
   """Load a Grain dataset for the selected ``grain_file_type``."""
-  if data_file_type == "arrayrecord":
+  if data_file_type in ("arrayrecord", "bagz"):
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
       files = find_data_files(pattern, hf_access_token=hf_access_token)
-      reader_options = (
-          {"index_storage_option": grain_index_storage_option} if grain_index_storage_option is not None else None
-      )
-      source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
+      if data_file_type == "bagz":
+        source = input_pipeline_utils.make_bagz_data_source(files, index_storage_option=grain_index_storage_option)
+      else:
+        reader_options = (
+            {"index_storage_option": grain_index_storage_option} if grain_index_storage_option is not None else None
+        )
+        source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
       return grain.MapDataset.source(source)
 
     # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
@@ -342,7 +345,7 @@ def get_datasets(
     )
   else:
     raise ValueError(
-        f"grain pipeline supports (arrayrecord, tfrecord, parquet, mmap, mmap_npy) as grain_file_type, "
+        f"grain pipeline supports (arrayrecord, bagz, tfrecord, parquet, mmap, mmap_npy) as grain_file_type, "
         f"but got {data_file_type}"
     )
 
