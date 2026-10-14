@@ -51,6 +51,7 @@ except (ImportError, ModuleNotFoundError):
 from maxtext.common import common_types
 from maxtext.layers import quantizations
 from maxtext.utils import max_logging
+from . import wan_flash_attention
 from .utils_wan import (
     BlockSizes,
     CONTEXT,
@@ -896,13 +897,15 @@ def _ulysses_attention(
     use_fixed_m: bool = False,
     ulysses_attention_chunks: int = 1,
     preserve_asymmetric_block_sizes: bool = False,
+    use_wan_flash: bool = False,
 ) -> jax.Array:
   """Ulysses sequence-parallel attention.
 
   Tensors arrive sequence-sharded on the context axis.  Inside a shard_map the
   all-to-all collectives trade sequence shards for head shards, run local
   splash attention on the full sequence with a subset of heads, then
-  all-to-all back.
+  all-to-all back. With `use_wan_flash` the local kernel is `wan_flash_attention`
+  (fixed-row-max Pallas kernel with a fused backward) instead of splash.
   """
   axis_name = CONTEXT
   num_shards = mesh.shape[axis_name]
@@ -911,10 +914,10 @@ def _ulysses_attention(
   key, _ = _reshape_data_for_flash(key, heads, num_shards)
   value, _ = _reshape_data_for_flash(value, heads, num_shards)
   attention_mask = _prepare_attention_mask_for_shard_map(attention_mask, query.shape[0], key.shape[2])
-  if attention_mask is not None and use_custom_kernel:
+  if attention_mask is not None and (use_custom_kernel or use_wan_flash):
     raise NotImplementedError(
-        "The custom dense splash kernel (use_custom_kernel) does not support"
-        " attention_mask (it only handles padding via orig_seq_len); got a"
+        "The custom dense splash kernel (use_custom_kernel) and wan_flash_attention do not support"
+        " attention_mask (they only handle padding via the original sequence length); got a"
         " non-None attention_mask."
     )
   num_heads = query.shape[1]
@@ -927,7 +930,7 @@ def _ulysses_attention(
         f" context_shards={num_shards}."
     )
 
-  if not use_custom_kernel:
+  if not use_custom_kernel and not use_wan_flash:
     block_sizes = _select_flash_block_sizes(
         query,
         key,
@@ -951,7 +954,18 @@ def _ulysses_attention(
     if attention_mask is not None and mask_needs_ulysses_gather:
       attention_mask = jax.lax.all_gather(attention_mask, axis_name=axis_name, axis=1, tiled=True)
 
-    if use_custom_kernel:
+    if use_wan_flash:
+      # Tokens >= the real length are padding (added by WanModel or by _reshape_data_for_flash); the kernel masks
+      # them like splash's padding segment ids, and pads internally only if the length is not block-friendly.
+      seq_real = wan_flash_attention.current_seq_real() or orig_q_seq_len
+      attention_output = wan_flash_attention.wan_flash_attention(
+          query,
+          key,
+          value,
+          seq_real=seq_real if mask_padding_tokens else query.shape[2],
+          residual_checkpoint_name=residual_checkpoint_name,
+      ).astype(query.dtype)
+    elif use_custom_kernel:
       if attention_mask is not None:
         raise NotImplementedError(
             "The custom dense splash kernel (use_custom_kernel) does not"
@@ -1851,6 +1865,26 @@ def ulysses_kernel(q, k, v, context):
   )
 
 
+@register_kernel("ulysses_wan_flash")
+def ulysses_wan_flash_kernel(q, k, v, context):
+  return _ulysses_attention(
+      q,
+      k * context["scale"],
+      v,
+      context["heads"],
+      context["mesh"],
+      context["axis_names_q"],
+      context["axis_names_kv"],
+      context["flash_block_sizes"],
+      context["dtype"],
+      mask_padding_tokens=context["mask_padding_tokens"],
+      residual_checkpoint_name=context["residual_checkpoint_name"],
+      attention_mask=context["attention_mask"],
+      ulysses_attention_chunks=context["ulysses_attention_chunks"],
+      use_wan_flash=True,
+  )
+
+
 @register_kernel("ulysses_ring")
 def ulysses_ring_kernel(q, k, v, context):
   return _ulysses_ring_attention(
@@ -2516,6 +2550,8 @@ class FlaxWanAttention(nnx.Module):
         and not is_self_attention
     ):
       attention_kernel = "ulysses_custom"  # plain ulysses (no ring) for cross attention
+    elif attention_kernel == "ulysses_wan_flash" and not is_self_attention:
+      attention_kernel = "ulysses"  # wan_flash_attention needs q / kv of equal length: splash for cross attention
     self.added_kv_proj_dim = added_kv_proj_dim  # New for I2V
     self.image_seq_len = image_seq_len  # New for I2V
     tpu_type = get_tpu_type()
@@ -4074,6 +4110,9 @@ class WanModel(nnx.Module):
     self.gradient_checkpoint = GradientCheckpointType.from_str(remat_policy)
     self.names_which_can_be_offloaded = names_which_can_be_offloaded
     self.names_which_can_be_saved = names_which_can_be_saved
+    # wan_flash_attention needs a 128-multiple sequence with a good block divisor: pad the video tokens once here
+    # (masked as padding inside the kernel, sliced off before the head) instead of per attention call.
+    self.pad_tokens_for_wan_flash = attention == "ulysses_wan_flash"
     if scan_layers:
       self.blocks = init_block(rngs)
     else:
@@ -4212,6 +4251,13 @@ class WanModel(nnx.Module):
     with self.conditional_named_scope("patch_embedding"):
       hidden_states = self.patch_embedding(hidden_states)
       hidden_states = jax.lax.collapse(hidden_states, 1, -1)
+    num_video_tokens = hidden_states.shape[1]
+    token_pad = 0
+    if self.pad_tokens_for_wan_flash and kv_cache is None:
+      token_pad = wan_flash_attention.padded_len(num_video_tokens) - num_video_tokens
+    if token_pad:
+      hidden_states = jnp.pad(hidden_states, ((0, 0), (0, token_pad), (0, 0)))
+      rotary_emb = jnp.pad(rotary_emb, ((0, 0), (0, 0), (0, token_pad), (0, 0)))
     per_token_t = timestep.ndim == 2  # [B, seq_len] for TI2V
     with self.conditional_named_scope("condition_embedder"):
       if per_token_t:
@@ -4348,9 +4394,13 @@ class WanModel(nnx.Module):
         raise ValueError("cached_residual must be provided when skip_blocks is True")
       hidden_states = hidden_states + cached_residual
     else:
-      hidden_states = _run_all_blocks(hidden_states)
+      with wan_flash_attention.seq_real_scope(num_video_tokens if token_pad else None):
+        hidden_states = _run_all_blocks(hidden_states)
 
     residual_x = hidden_states - hidden_states_before_blocks
+    if token_pad:
+      hidden_states = hidden_states[:, :num_video_tokens]
+      residual_x = residual_x[:, :num_video_tokens]
 
     if per_token_t:
       # temb: [B, seq_len, dim] — per-token modulation for final head
