@@ -790,6 +790,10 @@ def _gathered_kernels(layers: nnx.Module) -> dict:
   for path, module in nnx.iter_modules(layers):
     if isinstance(module, GateLogit):
       kernels[path + ("kernel",)] = module
+    elif isinstance(module, attentions.Attention):
+      # The backward pass otherwise gathers the query kernel twice per layer: for the rematerialized
+      # projection and for the input gradient.
+      kernels[path + ("query", "kernel")] = module.query
   return kernels
 
 
