@@ -1173,6 +1173,22 @@ class MoEGeneral(BaseModel):
           " layout on load; full-state resumes must come from a flat checkpoint."
       ),
   )
+  moe_cache_argsort: bool = Field(
+      False,
+      description="Pass precomputed inverse permutation into MoE sort/combine to avoid backward argsort.",
+  )
+  moe_pallas_row_gather: bool = Field(
+      False,
+      description="Use the Pallas DMA row gather for MoE token sort/route gathers (needs use_custom_sort_vjp).",
+  )
+  moe_pallas_row_gather_sites: str = Field(
+      "route,unsort",
+      description="Comma-separated MoE gather sites for moe_pallas_row_gather: 'route' and/or 'unsort'.",
+  )
+  moe_pallas_combine: bool = Field(
+      False,
+      description="Fuse the MoE unsort gather and top-k weighted sum into one Pallas kernel.",
+  )
   moe_gmm_v2_dlhs_transpose_rhs: bool = Field(
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",

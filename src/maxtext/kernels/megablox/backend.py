@@ -254,6 +254,7 @@ def _get_store_mask(
     group_metadata: GroupMetadata,
     tm: int,
     tn: int,
+    out_3d: bool = False,
 ) -> jnp.ndarray:
   """Mask for rows that belong to the current group in the current tile."""
   group_offsets, group_ids, m_tile_ids = group_metadata[:3]
@@ -261,7 +262,8 @@ def _get_store_mask(
   group_start = group_offsets[group_id]
   group_end = group_offsets[group_id + 1]
   m_id = m_tile_ids[grid_id] * tm
-  iota = jax.lax.broadcasted_iota(jnp.int32, (tm, tn), 0) + m_id
+  mask_shape = (tm, tn // 128, 128) if out_3d else (tm, tn)
+  iota = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 0) + m_id
   return jnp.logical_and(iota >= group_start, iota < group_end)
 
 
@@ -278,7 +280,8 @@ def _zero_uninitialized_memory(
   group_end = group_offsets[start_group + num_nonzero_groups]
   valid_mask = jax.lax.broadcasted_iota(jnp.int32, (out.shape[0],), 0)
   valid_mask = (valid_mask >= group_start) & (valid_mask < group_end)
-  return jnp.where(valid_mask[:, None], out, 0)
+  mask_bcast = valid_mask.reshape((-1,) + (1,) * (out.ndim - 1))
+  return jnp.where(mask_bcast, out, 0)
 
 
 def _calculate_bytes(x: jax.Array | qpl.QArray) -> int:
@@ -299,6 +302,9 @@ LutFn = Callable[[int, int, int], Optional[tuple[int, int, int]]]
         "transpose_rhs",
         "interpret",
         "varying_axes",
+        "accumulate_out",
+        "out_3d",
+        "fast_store",
     ],
 )
 def gmm(
@@ -312,6 +318,9 @@ def gmm(
     transpose_rhs: bool = False,
     interpret: bool = False,
     varying_axes: tuple[str, ...] = (),
+    accumulate_out: bool = False,
+    out_3d: bool = False,
+    fast_store: bool = False,
 ) -> jnp.ndarray:
   """Compute lhs[sizes[i-1]:sizes[i], :] @ rhs for each group 'i'.
 
@@ -365,6 +374,14 @@ def gmm(
   tiles_n, n_rem = _calculate_irregular_num_tiles(n, tn)
   del n_rem
 
+  use_3d_out = bool(out_3d and (n % 128 == 0) and (tn % 128 == 0) and ((tn // 128) % 8 == 0))
+  use_fast_store = bool(accumulate_out or use_3d_out or fast_store)
+  single_k_tile_direct = bool(tiles_k == 1 and use_fast_store)
+  if use_3d_out and existing_out is not None and existing_out.ndim == 2:
+    existing_out = existing_out.reshape(m, n // 128, 128)
+  elif not use_3d_out and existing_out is not None and existing_out.ndim == 3:
+    existing_out = existing_out.reshape(m, n)
+
   # Create the metadata we need for computation.
   group_metadata, num_active_tiles = make_group_metadata(  # pylint: disable=unbalanced-tuple-unpacking
       group_sizes=group_sizes,
@@ -382,7 +399,7 @@ def gmm(
       rhs: jax.Array | qpl.QArray,
       existing_out,
       out,
-      acc_scratch,
+      *scratch_args,
   ):
     group_offsets, group_ids, m_tile_ids = group_metadata
     del group_offsets, group_ids, group_offset
@@ -390,10 +407,7 @@ def gmm(
     grid_id = pl.program_id(1)
     k_i = pl.program_id(2)
 
-    @pl.when(k_i == 0)
-    def _zero_acc():
-      acc_scratch[...] = jnp.zeros_like(acc_scratch)
-
+    def _maybe_init_existing_out():
       if existing_out is not None:
         prev_grid_id = jnp.where(grid_id > 0, grid_id - 1, 0)
         is_first_processed_group = grid_id == 0
@@ -411,17 +425,25 @@ def gmm(
       iota = lax.broadcasted_iota(jnp.int32, x.shape, dim)
       return jnp.where(iota < k_rem, x, 0).astype(x.dtype)
 
-    def _store_accum():
+    def _store_accum(to_store):
       mask = _get_store_mask(
           grid_id=grid_id,
           group_metadata=group_metadata,
           tm=tm,
           tn=tn,
+          out_3d=use_3d_out,
       )
-      to_store = acc_scratch[...]
-      out[...] = jax.lax.select(mask[...], to_store, out[...].astype(jnp.float32)).astype(preferred_element_type)
+      if use_3d_out:
+        to_store = to_store.reshape(tm, tn // 128, 128)
+      if accumulate_out and existing_out is not None:
+        summed = (out[...].astype(jnp.float32) + to_store).astype(preferred_element_type)
+        out[...] = jax.lax.select(mask[...], summed, out[...])
+      elif use_fast_store:
+        out[...] = jax.lax.select(mask[...], to_store.astype(preferred_element_type), out[...])
+      else:
+        out[...] = jax.lax.select(mask[...], to_store, out[...].astype(jnp.float32)).astype(preferred_element_type)
 
-    def _accum(is_last_k_tile):
+    def _compute_tile_dot(is_last_k_tile):
       if is_last_k_tile:
         mask_k_rem_lhs = functools.partial(mask_k_rem, dim=1)
         mask_k_rem_rhs = functools.partial(mask_k_rem, dim=int(transpose_rhs))
@@ -446,20 +468,34 @@ def gmm(
       else:
         dot_general_dims = (((1,), (0,)), ((), ()))
 
-      acc_scratch[...] += qpl.dot_general(
+      return qpl.dot_general(
           loaded_lhs,
           loaded_rhs,
           preferred_element_type=jnp.float32,
           dimension_numbers=dot_general_dims,
       )
-      if is_last_k_tile:
-        _store_accum()
 
-    lax.cond(
-        k_i == tiles_k - 1,
-        functools.partial(_accum, True),
-        functools.partial(_accum, False),
-    )
+    if single_k_tile_direct:
+      _maybe_init_existing_out()
+      _store_accum(_compute_tile_dot(True))
+    else:
+      acc_scratch = scratch_args[0]
+
+      @pl.when(k_i == 0)
+      def _zero_acc():
+        acc_scratch[...] = jnp.zeros_like(acc_scratch)
+        _maybe_init_existing_out()
+
+      def _accum(is_last_k_tile):
+        acc_scratch[...] += _compute_tile_dot(is_last_k_tile)
+        if is_last_k_tile:
+          _store_accum(acc_scratch[...])
+
+      lax.cond(
+          k_i == tiles_k - 1,
+          functools.partial(_accum, True),
+          functools.partial(_accum, False),
+      )
 
   def lhs_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
     # lhs is (m, k). Load the [tm, tk] matrix for this m-tile.
@@ -481,12 +517,15 @@ def gmm(
     return group_ids[grid_id] - group_offset[0], k_i, n_i
 
   def out_transform_indices(n_i, grid_id, k_i, group_metadata, group_offset):
-    # out is (m, n). Load the [tm, tn] matrix for this m-tile.
+    # out is (m, n) or (m, n // 128, 128). Load the [tm, tn] matrix for this m-tile.
     group_offsets, group_ids, m_tile_ids = group_metadata
     del k_i, group_offsets, group_ids, group_offset
+    if use_3d_out:
+      return m_tile_ids[grid_id], n_i, 0
     return m_tile_ids[grid_id], n_i
 
-  out_block_spec = pl.BlockSpec((tm, tn), out_transform_indices)
+  out_block_shape = (tm, tn // 128, 128) if use_3d_out else (tm, tn)
+  out_block_spec = pl.BlockSpec(out_block_shape, out_transform_indices)
   if existing_out is None:
     in_out_block_spec: Any = None
     input_output_aliases = {}
@@ -522,10 +561,14 @@ def gmm(
       "tiling": {"tile_m": tm, "tile_k": tk, "tile_n": tn},
       "transpose_rhs": transpose_rhs,
   }
+  out_full_shape = (m, n // 128, 128) if use_3d_out else (m, n)
+  scratch_shapes = [] if single_k_tile_direct else [pltpu.VMEM((tm, tn), jnp.float32)]
   call_gmm = qpl.pallas_call(
       kernel,
       out_shape=jax.ShapeDtypeStruct(
-          (m, n), preferred_element_type, manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes))
+          out_full_shape,
+          preferred_element_type,
+          manual_axis_type=jax.sharding.ManualAxisType(varying=frozenset(varying_axes)),
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
@@ -536,7 +579,7 @@ def gmm(
           ],
           out_specs=out_block_spec,
           grid=(tiles_n, num_active_tiles, tiles_k),
-          scratch_shapes=[pltpu.VMEM((tm, tn), jnp.float32)],
+          scratch_shapes=scratch_shapes,
       ),
       input_output_aliases=input_output_aliases,
       compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel", "arbitrary", "arbitrary")),
@@ -559,6 +602,8 @@ def gmm(
         num_nonzero_groups=rhs.shape[0],
         group_metadata=group_metadata,
     )
+  if out_3d and not use_3d_out:
+    out = out.reshape(m, n // 128, 128)
   return out
 
 
@@ -570,6 +615,7 @@ def gmm(
         "num_actual_groups",
         "interpret",
         "varying_axes",
+        "single_operand_mask",
     ],
 )
 def tgmm(
@@ -583,6 +629,7 @@ def tgmm(
     existing_out: jnp.ndarray | None = None,
     interpret: bool = False,
     varying_axes: tuple[str, ...] = (),
+    single_operand_mask: bool = False,
 ) -> jnp.ndarray:
   """Compute lhs[:, sizes[i-1]:sizes[i]] @ rhs[sizes[i-1]:sizes[i], :].
 
@@ -668,52 +715,76 @@ def tgmm(
 
     @pl.when(dont_skip)
     def _do():
-      rhs_mask = _get_store_mask(
-          grid_id=grid_id,
-          group_metadata=group_metadata,
-          tm=tm,
-          tn=tn,
-      )
-      lhs_mask = _get_store_mask(
-          grid_id=grid_id,
-          group_metadata=group_metadata,
-          tm=tm,
-          tn=tk,
-      )
       loaded_lhs = lhs[...]
-      if isinstance(loaded_lhs, qpl.QArray):
-        loaded_lhs = dataclasses.replace(
-            loaded_lhs,
-            qvalue=lax.select(
-                lhs_mask[...],
-                loaded_lhs.qvalue,
-                jnp.zeros_like(loaded_lhs.qvalue),
-            ),
+      loaded_rhs = rhs[...]
+      if not single_operand_mask or isinstance(loaded_lhs, qpl.QArray) or isinstance(rhs, qpl.QArray):
+        rhs_mask = _get_store_mask(
+            grid_id=grid_id,
+            group_metadata=group_metadata,
+            tm=tm,
+            tn=tn,
         )
-      else:
+        lhs_mask = _get_store_mask(
+            grid_id=grid_id,
+            group_metadata=group_metadata,
+            tm=tm,
+            tn=tk,
+        )
+        if isinstance(loaded_lhs, qpl.QArray):
+          loaded_lhs = dataclasses.replace(
+              loaded_lhs,
+              qvalue=lax.select(
+                  lhs_mask[...],
+                  loaded_lhs.qvalue,
+                  jnp.zeros_like(loaded_lhs.qvalue),
+              ),
+          )
+        else:
+          loaded_lhs = lax.select(
+              lhs_mask[...],
+              loaded_lhs,
+              jnp.zeros_like(lhs),
+          )
+        if isinstance(rhs, qpl.QArray):
+          loaded_rhs = dataclasses.replace(
+              loaded_rhs,
+              qvalue=lax.select(
+                  rhs_mask[...],
+                  loaded_rhs.qvalue,
+                  jnp.zeros_like(loaded_rhs.qvalue),
+              ),
+          )
+        else:
+          loaded_rhs = lax.select(
+              rhs_mask[...],
+              loaded_rhs,
+              jnp.zeros_like(rhs),
+          )
+      elif tk <= tn:
+        lhs_mask = _get_store_mask(
+            grid_id=grid_id,
+            group_metadata=group_metadata,
+            tm=tm,
+            tn=tk,
+        )
         loaded_lhs = lax.select(
             lhs_mask[...],
             loaded_lhs,
             jnp.zeros_like(lhs),
         )
-      loaded_lhs = loaded_lhs.swapaxes(0, 1)
-
-      loaded_rhs = rhs[...]
-      if isinstance(rhs, qpl.QArray):
-        loaded_rhs = dataclasses.replace(
-            loaded_rhs,
-            qvalue=lax.select(
-                rhs_mask[...],
-                loaded_rhs.qvalue,
-                jnp.zeros_like(loaded_rhs.qvalue),
-            ),
-        )
       else:
+        rhs_mask = _get_store_mask(
+            grid_id=grid_id,
+            group_metadata=group_metadata,
+            tm=tm,
+            tn=tn,
+        )
         loaded_rhs = lax.select(
             rhs_mask[...],
             loaded_rhs,
             jnp.zeros_like(rhs),
         )
+      loaded_lhs = loaded_lhs.swapaxes(0, 1)
 
       acc_scratch[...] += qpl.dot(
           loaded_lhs,
