@@ -296,6 +296,14 @@ and does not use the engine.
 | `model_scope(*inputs)` | none; the caller jits | inputs | yields the model and the placed inputs under the sharding rules |
 | `fwd_only(fn, *inputs)` | none; `fn` jits | inputs | `fn(model, ...)` |
 | `eval_step(batch)` | eval | params, rest, batch | loss, aux |
+| `prepare_fwd_bwd_input(micro_batch)` | none; `device_put` | micro-batch | a `PreparedFwdBwdInput`: the micro-batch mapped to loss inputs and placed on `fwd_bwd`'s input shardings, which `fwd_bwd` takes in its place |
+| `wait_for_device()` | none | | the seconds it blocked until the in-flight `fwd_bwd`s and `update` finished; dequeues nothing and writes no metrics |
+
+A caller may prepare the next step's first micro-batch between a step's last `fwd_bwd` and its
+`update()`, as Tunix does when it stages before a deferred update. Under `retry_when_tokens_dropped`
+the last micro-batch's overflow flag is then still pending: neither `prepare_fwd_bwd_input` nor
+`wait_for_device` resolves it, `update()` does, and a dropless rerun reads that micro-batch's own kept
+inputs, so the prepared micro-batch is unaffected (`maxtext_engine_stage_before_update_test.py`).
 
 Every micro-batch runs the same `fwd_bwd` program. The first micro-batch's gradients start the
 accumulator, and `accumulate` adds each later one's to it in place. The accumulator is not passed to
@@ -383,6 +391,8 @@ The engine's tests are in `tests/post_training/unit/` and run on CPU; they requi
 | `maxtext_engine_model_build_test.py` | model construction with and without a mesh set by the caller |
 | `maxtext_engine_checkpoint_test.py` | resuming from a mid-step checkpoint through Orbax reproduces the uninterrupted step |
 | `maxtext_engine_grad_cast_test.py` | `cast_grads_after_all_reduce`: which gradients leave `fwd_bwd` uncast, and that moving their cast changes no number on CPU |
+| `maxtext_engine_prepared_input{,_dropless,_sharded}_test.py` | `prepare_fwd_bwd_input` and `wait_for_device`: a prepared micro-batch trains bit-identically on one device, through Tunix's `TrainerWorker` staging, under the dropless replay and final dropless programs, and on a four-device mesh with Tunix's payload; the wait leaves the in-flight queue and the metrics writes as they were |
+| `maxtext_engine_stage_before_update_test.py` | the order Tunix uses to stage before a deferred update (`fwd_bwd(last)`, `prepare_fwd_bwd_input(next)`, `wait_for_device()`, `update()`) under the dropless replay and final dropless programs, directly and through Tunix's `TrainerWorker`: bit-identical to the base order, including a rerun of the last micro-batch inside `update()` |
 | `maxtext_engine_{constructor,data_parallel,xaot,packing,profiling}_test.py`, `router_replay_engine_test.py` | construction, data parallelism, ahead-of-time compilation, sequence packing, profiling, router replay |
 
 ## Differences from pre_train/train.py
