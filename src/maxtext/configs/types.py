@@ -2570,6 +2570,10 @@ class ManifoldConstrainedHyperConnections(BaseModel):
   """Configuration for DeepSeek Manifold-Constrained Hyper Connections (mHC)."""
 
   mhc_expansion_rate: PositiveInt = Field(1, description="The number of parallel streams in Hyper Connection.")
+  mhc_float32_mixing: bool = Field(
+      False,
+      description="Compute mHC mixing weights (norm, projection, sigmoid/Sinkhorn) in float32 regardless of dtype.",
+  )
   mhc_final_reduce: Literal["sum", "mean"] = Field(
       "sum",
       description="How non-DeepSeek-V4 models collapse the mHC streams before the final norm (GLM-5.3 uses mean).",

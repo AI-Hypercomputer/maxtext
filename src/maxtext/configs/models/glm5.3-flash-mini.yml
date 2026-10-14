@@ -72,6 +72,7 @@ kda_chunk_size: 16  # with the -5 safe gate, 16 keeps the factorized intra-chunk
 # Manifold-constrained hyper-connections
 mhc_expansion_rate: 4
 mhc_final_reduce: "mean"
+mhc_float32_mixing: true  # the reference computes mHC weights in fp32
 sinkhorn_iterations: 20
 
 # FP8 weight-only quantization (matches the upstream checkpoint's quantized/unquantized split)
