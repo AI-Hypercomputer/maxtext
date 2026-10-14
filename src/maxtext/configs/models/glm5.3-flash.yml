@@ -66,7 +66,7 @@ kda_num_heads: 64
 kda_head_dim: 128
 kda_conv_kernel_dim: 4
 kda_gate_lower_bound: -5.0
-kda_chunk_size: 64
+kda_chunk_size: 16  # with the -5 safe gate, 16 keeps the factorized intra-chunk decay within fp32 range
 
 # Manifold-constrained hyper-connections
 mhc_expansion_rate: 4

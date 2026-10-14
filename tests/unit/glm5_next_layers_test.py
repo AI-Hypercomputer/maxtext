@@ -281,6 +281,20 @@ class KDAKernelTest(Glm5NextTestBase):
       self.assert_close(mt_o, hf_o, atol=2e-4)
       self.assert_close(mt_state, hf_state, atol=2e-4)
 
+  def test_factorized_chunk_matches_hf_chunk(self):
+    """Factorized intra-chunk decay (bounded gate, chunk <= 16) vs the HF chunked reference."""
+    for chunk in (8, 16):
+      q, k, v, g, beta = self._inputs(s=53)
+      g = -5.0 * torch.ones_like(g) * torch.rand_like(g)  # includes steps near the -5 bound
+      hf_o, hf_state = glm5.chunk_kimi_delta_attention(
+          q, k, v, g, beta, chunk_size=chunk, output_final_state=True, use_qk_l2norm_in_kernel=True
+      )
+      mt_o, mt_state = kda.chunk_kda(
+          t2j(q), t2j(k), t2j(v), t2j(g), t2j(beta), chunk_size=chunk, max_neg_log_decay=5.0
+      )
+      self.assert_close(mt_o, hf_o, atol=2e-4)
+      self.assert_close(mt_state, hf_state, atol=2e-4)
+
   def test_chunk_matches_hf_recurrent(self):
     q, k, v, g, beta = self._inputs()
     hf_o, _ = glm5.recurrent_kimi_delta_attention(

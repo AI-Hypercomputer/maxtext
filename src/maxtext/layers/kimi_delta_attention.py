@@ -42,6 +42,8 @@ from maxtext.layers.initializers import nd_dense_init
 from maxtext.layers.linears import DenseGeneral
 
 _HIGHEST = jax.lax.Precision.HIGHEST
+# Largest |exponent| used by the factorized intra-chunk decay (exp(40) ~ 2e17 is far from fp32 overflow).
+_MAX_FACTORIZED_EXPONENT = 40.0
 
 
 def l2norm(x: Array, axis: int = -1, eps: float = 1e-6) -> Array:
@@ -58,6 +60,7 @@ def chunk_kda(
     chunk_size: int = 64,
     initial_state: Optional[Array] = None,
     use_qk_l2norm: bool = True,
+    max_neg_log_decay: Optional[float] = None,
 ) -> tuple[Array, Array]:
   """Chunked Kimi Delta Attention.
 
@@ -70,6 +73,9 @@ def chunk_kda(
     chunk_size: chunk length C.
     initial_state: optional [B, H, K, V] recurrent state.
     use_qk_l2norm: L2-normalize q and k (in float32) before the recurrence.
+    max_neg_log_decay: optional bound on -g per step (e.g. 5 for GLM-5.3's safe gate). When
+      `max_neg_log_decay * chunk_size / 2` is small enough, the intra-chunk decay is factorized into
+      matmuls instead of materializing the [B, H, N, C, C, K] pairwise-decay tensor.
 
   Returns:
     (output [B, S, H, V] in query.dtype, final state [B, H, K, V] in float32).
@@ -99,14 +105,25 @@ def chunk_kda(
   k_beta = k * beta[..., None]
   v_beta = v * beta[..., None]
 
-  # Pairwise per-channel decay exp(g_i - g_j) for j <= i; masked *before* exp to avoid overflow.
   causal = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool))
   strict = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
-  g_diff = g[..., :, None, :] - g[..., None, :, :]  # [B, H, N, C, C, K]
-  decay = jnp.exp(jnp.where(causal[..., None], g_diff, -jnp.inf))
+  # Per-step |log-decay| bound times the half-chunk span bounds |g - g_mid|; exp of that must stay finite in fp32.
+  factorize = max_neg_log_decay is not None and max_neg_log_decay * chunk_size / 2 <= _MAX_FACTORIZED_EXPONENT
+  if factorize:
+    # exp(g_i - g_j) = exp(g_i - g_mid) * exp(g_mid - g_j): the intra-chunk decayed products become plain
+    # matmuls, with O(C*K) instead of O(C*C*K) memory per chunk.
+    g_centered = g - g[..., chunk_size // 2 : chunk_size // 2 + 1, :]
+    k_in = k * jnp.exp(-g_centered)
+    a = jnp.matmul(k_beta * jnp.exp(g_centered), k_in.swapaxes(-1, -2), precision=_HIGHEST)
+    qk = jnp.matmul(q * jnp.exp(g_centered), k_in.swapaxes(-1, -2), precision=_HIGHEST)
+  else:
+    # Pairwise per-channel decay exp(g_i - g_j) for j <= i; masked *before* exp to avoid overflow.
+    g_diff = g[..., :, None, :] - g[..., None, :, :]  # [B, H, N, C, C, K]
+    decay = jnp.exp(jnp.where(causal[..., None], g_diff, -jnp.inf))
+    a = jnp.einsum("bhnik,bhnjk,bhnijk->bhnij", k_beta, k, decay, precision=_HIGHEST)
+    qk = jnp.einsum("bhnik,bhnjk,bhnijk->bhnij", q, k, decay, precision=_HIGHEST)
 
   # WY representation: T = (I + StrictLower(k_beta_i . k_j * decay_ij))^-1.
-  a = jnp.einsum("bhnik,bhnjk,bhnijk->bhnij", k_beta, k, decay, precision=_HIGHEST)
   a = jnp.where(strict, a, 0.0)
   eye = jnp.eye(chunk_size, dtype=jnp.float32)
   t = jax.scipy.linalg.solve_triangular(eye + a, jnp.broadcast_to(eye, a.shape), lower=True, unit_diagonal=True)
@@ -114,7 +131,6 @@ def chunk_kda(
   w = jnp.matmul(t, k_beta * jnp.exp(g), precision=_HIGHEST)  # [B, H, N, C, K]
 
   # Intra-chunk q.k scores with decay (diagonal included).
-  qk = jnp.einsum("bhnik,bhnjk,bhnijk->bhnij", q, k, decay, precision=_HIGHEST)
   qk = jnp.where(causal, qk, 0.0)
 
   state0 = jnp.zeros((b, h, dk, dv), jnp.float32) if initial_state is None else initial_state.astype(jnp.float32)
@@ -291,7 +307,16 @@ class KimiDeltaAttention(nnx.Module):
     g = self.forget_gate(x)
     beta = jax.nn.sigmoid(self.b_proj(x).astype(jnp.float32))
 
-    o, _ = chunk_kda(q, k, v, g, beta, chunk_size=self.chunk_size, use_qk_l2norm=True)
+    o, _ = chunk_kda(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        chunk_size=self.chunk_size,
+        use_qk_l2norm=True,
+        max_neg_log_decay=None if self.lower_bound is None else abs(self.lower_bound),
+    )
     gate = self.g_b_proj(self.g_a_proj(x))
     o = self.gated_norm(o.astype(self.dtype), gate)
     return self.o_proj(o), None
