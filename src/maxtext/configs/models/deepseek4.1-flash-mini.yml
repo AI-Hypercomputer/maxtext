@@ -31,8 +31,6 @@ qk_rope_head_dim: 64
 enable_dropout: false
 logits_via_embedding: false
 normalization_layer_epsilon: 1.0e-20
-tokenizer_type: "huggingface"
-tokenizer_path: "deepseek-ai/DeepSeek-V4.1-Flash"
 
 decoder_block: "deepseek41"
 

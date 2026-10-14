@@ -237,7 +237,9 @@ def write_checkpoint(specs, output_dir: str, seed: int):
 
 def main():
   parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-  parser.add_argument("--upstream_dir", required=True, help="dir with upstream config.json, inference/config.json, tokenizer")
+  parser.add_argument(
+      "--upstream_dir", required=True, help="dir with upstream config.json, inference/config.json, tokenizer"
+  )
   parser.add_argument("--output_dir", required=True)
   parser.add_argument("--gcs_output", default="", help="optional gs:// destination to copy the checkpoint to")
   parser.add_argument("--seed", type=int, default=0)
