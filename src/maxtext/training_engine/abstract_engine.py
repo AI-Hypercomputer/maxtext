@@ -164,7 +164,7 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def compile(self, dummy_data: TrainerPayload) -> None:
+  def compile(self, dummy_data: TrainerPayload | None = None) -> None:
     """Triggers JAX compilation. `with_loss_fn` must be called first.
 
     Args:

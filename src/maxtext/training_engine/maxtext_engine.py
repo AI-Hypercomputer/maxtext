@@ -1581,7 +1581,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def compile(
       self,
-      dummy_data: abstract_engine.TrainerPayload,
+      dummy_data: abstract_engine.TrainerPayload | None = None,
       compiler_options: dict[str, Any] | None = None,
   ) -> None:
     """Triggers SPMD compilation of the fwd_bwd, update and eval steps.
@@ -1593,6 +1593,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         compiles lazily on the first `fwd_bwd` instead.
       compiler_options: Optional dictionary of compilation options passed to XLA compiler.
     """
+
+    def _resolve_dummy_routed_experts(data: Any) -> Any:
+      if not isinstance(data, abstract_engine.RLTrainerPayload):
+        return data
+      routed_experts = data.routed_experts
+      if routed_experts is None or routed_experts.size != 0:
+        return data
+      num_layers = self._config.num_decoder_layers
+      top_k = self._config.num_experts_per_tok
+      batch_size, seq_len = routed_experts.shape[:2]
+      expanded = np.zeros(
+          (batch_size, seq_len, num_layers, top_k),
+          dtype=routed_experts.dtype,
+      )
+      return dataclasses.replace(data, routed_experts=expanded)
+
     # Recorded even when compilation is deferred: it is what tells `fwd_bwd` the caller
     # wants the compiled path at all. Engines that never call `compile` stay eager.
     self._compile_requested = True
@@ -1609,6 +1625,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
       return
 
+    dummy_data = _resolve_dummy_routed_experts(dummy_data)
     compiled = self.compile_kernels(dummy_data, compiler_options)
     self._compiled_fwd_bwd = compiled["fwd_bwd"]
     self._compiled_fwd_bwd_accum = compiled["fwd_bwd_accum"]
