@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,28 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""prepare_fwd_bwd_input with Tunix's real model input, on a sharded mesh.
+"""prepare_fwd_bwd_input with Tunix's real model input, on a four-device mesh.
 
-`maxtext_engine_prepared_input_test` uses a one-device mesh and a flat toy
-input. Production feeds Tunix's `_algo_model_input`: {"train_example":
-RLTrainerPayload (a flax.struct pytree with static `metadata`), "algo_config":
-a closed-over object, "pad_id", "eos_id"}, on a mesh whose batch axis shards.
-Here the batch is split over 4 host devices, and a prepared micro-batch, with
-`wait_for_device` after it as Tunix's `TrainerWorker.stage_fwd_bwd` does, must
-train bit-identically to the payload it came from.
+`maxtext_engine_prepared_input_test` uses a one-device mesh and a flat toy input. Production feeds Tunix's
+`_algo_model_input`: {"train_example": RLTrainerPayload (a flax.struct pytree with static `metadata`),
+"algo_config": a closed-over object, "pad_id", "eos_id"}, on a mesh whose batch axis shards. Here the batch is split
+over four host devices, and a prepared micro-batch, with `wait_for_device` after it as Tunix's
+`TrainerWorker.stage_fwd_bwd` does, must train bit-identically to the payload it came from.
+
+Everything runs in a subprocess, for the reason `maxtext_engine_data_parallel_test.py` gives: the CPU backend reads
+`--xla_force_host_platform_device_count` only when it initializes, which has already happened by the time pytest
+imports this file, so setting the flag here would leave one device and skip the tests green.
+`test_prepared_input_on_a_four_device_cpu_mesh` re-execs the module with the flag appended and refuses to pass unless
+the child reports tests actually run.
 """
+# pylint: disable=protected-access
 
 import dataclasses
 import functools
 import os
+import re
+import subprocess
+import sys
 import types
+import unittest
 from unittest import mock
 
-# A single device shards nothing, so ask XLA for four host devices before JAX
-# initializes its backend.
-os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
-
-# pylint: disable=wrong-import-position
+from absl import flags
 from absl.testing import absltest
 from flax import nnx
 import jax
@@ -42,15 +47,42 @@ from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import maxtext_utils
-from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 import pytest
 
+from tests.utils.test_helpers import get_test_config_path
+
 # training_engine imports tunix, so these tests need the post-training dependency bundle.
-pytestmark = [pytest.mark.post_training]
+pytestmark = [pytest.mark.post_training, pytest.mark.cpu_only]
+
+_REQUIRED_DEVICES = 4
+_SENTINEL = "MAXTEXT_ENGINE_PREPARED_INPUT_SHARDED_TESTS_PASSED"
+_RAN = re.compile(rf"{_SENTINEL} ran=(\d+)")
 
 B, P, C, L, K = 4, 8, 16, 2, 3
+
+
+@pytest.mark.post_training
+@pytest.mark.cpu_only
+def test_prepared_input_on_a_four_device_cpu_mesh():
+  """The only test pytest collects here; the class below runs inside the child process."""
+  env = os.environ.copy()
+  env["XLA_FLAGS"] = f"{env.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}".strip()
+  env["JAX_PLATFORMS"] = "cpu"
+  # The child imports `tests.utils.test_helpers`, which pytest puts on the path for us and a bare interpreter does
+  # not.
+  repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+  env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
+
+  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
+
+  report = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+  assert result.returncode == 0, report
+  ran = _RAN.search(result.stdout)
+  # An exit status of 0 is also what a run that skipped everything produces.
+  assert ran, f"the child did not report a completed run\n{report}"
+  assert int(ran.group(1)) > 0, f"every test in the child skipped\n{report}"
 
 
 class _Model(nnx.Module):
@@ -60,7 +92,7 @@ class _Model(nnx.Module):
 
 
 def _payload(seed: int):
-  from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
+  from tunix.experimental.common import datatypes  # pylint: disable=import-outside-toplevel
 
   rng = np.random.default_rng(seed)
   return datatypes.RLTrainerPayload(
@@ -77,16 +109,11 @@ def _payload(seed: int):
 
 def _loss_fn(model, train_example, algo_config, pad_id, eos_id):
   del eos_id
-  w = model.weights.value
+  w = model.weights[...]
   x = train_example.completion_ids.astype(jnp.float32) / 50.0
   m = train_example.completion_mask * (train_example.completion_ids != pad_id)
   routed = jnp.mean(train_example.routed_experts.astype(jnp.float32), (2, 3))
-  pred = (
-      w[0] * x
-      + w[1] * x**2 * algo_config.scale
-      + w[2] * routed[:, P:] / 8.0
-      + train_example.old_per_token_logps
-  )
+  pred = w[0] * x + w[1] * x**2 * algo_config.scale + w[2] * routed[:, P:] / 8.0 + train_example.old_per_token_logps
   per_tok = pred * train_example.advantages[:, None] * m
   return (
       abstract_engine.WeightedMetric(unreduced_sum=jnp.sum(per_tok), denominator=jnp.sum(m)),
@@ -96,10 +123,13 @@ def _loss_fn(model, train_example, algo_config, pad_id, eos_id):
 
 class NestedPayloadPreparedInputTest(absltest.TestCase):
 
+  __test__ = False  # collected only via the subprocess entry point at the top of this file.
+
   def setUp(self):
+    """A four-device mesh and a toy three-weight model, built without a checkpoint."""
     super().setUp()
-    if jax.device_count() < 4:
-      self.skipTest("needs 4 devices; set XLA_FLAGS=--xla_force_host_platform_device_count=4")
+    if jax.device_count() < _REQUIRED_DEVICES:
+      self.skipTest(f"needs {_REQUIRED_DEVICES} devices; run through pytest, which re-execs with them")
     self.config = pyconfig.initialize(
         [None, get_test_config_path()],
         model_name="llama3.1-8b",
@@ -134,13 +164,14 @@ class NestedPayloadPreparedInputTest(absltest.TestCase):
     self.algo_config = types.SimpleNamespace(scale=0.75)
 
   def _engine(self):
-    from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=g-import-not-at-top
+    """An engine fed through Tunix's `_algo_model_input`, compiled on the first payload."""
+    from tunix.experimental.orchestrator import algorithm_adapter  # pylint: disable=import-outside-toplevel
 
     engine = maxtext_engine.MaxTextTrainingEngine(self.config)
     engine.with_loss_fn(_loss_fn, has_aux=True)
     engine.with_gen_model_input_fn(
         functools.partial(
-            algorithm_adapter._algo_model_input,  # pylint: disable=protected-access
+            algorithm_adapter._algo_model_input,
             algo_config=self.algo_config,
             pad_id=0,
             eos_id=1,
@@ -150,7 +181,7 @@ class NestedPayloadPreparedInputTest(absltest.TestCase):
     return engine
 
   def _train(self, engine, payloads, prepare_at):
-    """Two steps of two micro-batches; those in `prepare_at` prepared ahead."""
+    """Two steps of two micro-batches; those in `prepare_at` prepared ahead, after the previous update."""
     prepared = {}
     if 0 in prepare_at:
       prepared[0] = engine.prepare_fwd_bwd_input(payloads[0])
@@ -160,15 +191,15 @@ class NestedPayloadPreparedInputTest(absltest.TestCase):
       for j in range(2):
         i = 2 * step + j
         engine.fwd_bwd(prepared.pop(i) if i in prepared else payloads[i])
-        if j == 1 and i + 1 in prepare_at:
-          # Prepared before the update is applied, as stage_fwd_bwd does, which
-          # then waits for the device to report whether that hid.
-          prepared[i + 1] = engine.prepare_fwd_bwd_input(payloads[i + 1])
-          engine.wait_for_device()
       engine.update()
+      if 2 * step + 2 in prepare_at:
+        # Prepared while the update is still on the device, as stage_fwd_bwd does, which then waits for the device
+        # to report whether that hid.
+        prepared[2 * step + 2] = engine.prepare_fwd_bwd_input(payloads[2 * step + 2])
+        engine.wait_for_device()
       buf = engine.get_metrics(clear_cache=True)
       metrics.append(np.asarray(buf.weighted_metrics["loss"].compute()).tolist())
-    return np.asarray(engine.model.weights.value), metrics
+    return np.asarray(engine.model.weights[...]), metrics
 
   def test_bit_identical_on_a_sharded_mesh(self):
     payloads = [_payload(s) for s in (1, 2, 3, 4)]
@@ -186,10 +217,10 @@ class NestedPayloadPreparedInputTest(absltest.TestCase):
   def test_prepared_leaves_are_sharded_like_the_compile(self):
     engine = self._engine()
     prepared = engine.prepare_fwd_bwd_input(_payload(2))
-    dynamic, static = maxtext_engine._split_static_and_dynamic(prepared.batch)  # pylint: disable=protected-access
+    dynamic, static = maxtext_engine._split_static_and_dynamic(prepared.batch)
     self.assertEqual(set(dynamic), {"train_example"})
     self.assertEqual(set(static), {"algo_config", "pad_id", "eos_id"})
-    shardings = engine._batch_data_shardings(dynamic)  # pylint: disable=protected-access
+    shardings = engine._batch_data_shardings(dynamic)
     example, sharding = dynamic["train_example"], shardings["train_example"]
     self.assertEqual(example.metadata, {})  # stripped by _prepare_batch
     split_2d = 0
@@ -205,7 +236,7 @@ class NestedPayloadPreparedInputTest(absltest.TestCase):
       self.assertIsInstance(leaf, jax.Array, field)
       self.assertEqual(leaf.sharding, want, field)
       rows = {s.index[0] for s in leaf.addressable_shards}
-      if leaf.ndim >= 2 and len(rows) == 4:
+      if leaf.ndim >= 2 and len(rows) == _REQUIRED_DEVICES:
         split_2d += 1
     # Not vacuous: the 2-D leaves really are split four ways.
     self.assertGreaterEqual(split_2d, 3)
@@ -221,5 +252,20 @@ class NestedPayloadPreparedInputTest(absltest.TestCase):
     self.assertFalse(np.array_equal(ref_w, new_w))
 
 
+_SUITE = (NestedPayloadPreparedInputTest,)
+
+
 if __name__ == "__main__":
-  absltest.main()
+  if jax.device_count() < _REQUIRED_DEVICES:
+    raise SystemExit(
+        f"needs {_REQUIRED_DEVICES} devices, got {jax.device_count()}; run this through pytest, which sets "
+        f"XLA_FLAGS=--xla_force_host_platform_device_count={_REQUIRED_DEVICES}"
+    )
+  flags.FLAGS(sys.argv[:1])  # absltest's create_tempdir reads --test_tmpdir; a bare unittest run parses no flags.
+  _loader = unittest.defaultTestLoader
+  _result = unittest.TextTestRunner(verbosity=2).run(
+      unittest.TestSuite(_loader.loadTestsFromTestCase(cls) for cls in _SUITE)
+  )
+  if not _result.wasSuccessful():
+    sys.exit(1)
+  print(f"{_SENTINEL} ran={_result.testsRun - len(_result.skipped)}")

@@ -2440,14 +2440,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return PreparedFwdBwdInput(batch=batch)
 
   def wait_for_device(self) -> float:
-    """Blocks until the computations dispatched so far have finished; returns the seconds waited.
+    """Blocks until the computations this engine holds in flight have finished; returns the seconds waited.
 
     For a caller that did work after dispatching and wants to know whether it hid behind the
     device (Tunix's `TrainerWorker.stage_fwd_bwd` reports it): ~0 means the device was already
-    idle. A blocking wait, not an `is_ready()` poll: under Pathways a readiness check is an RPC
-    to the proxy, so a poll can read "not ready" for work that has finished. Changes no state:
-    the in-flight queue and its pending metrics are left as they were (see
-    `InflightThrottler.block_until_ready`).
+    idle. It waits on what the in-flight throttler holds: each queued `fwd_bwd`'s loss and the
+    last `update`'s gradient norm, so the update counts. Anything dispatched before those was
+    waited on when it left the queue. A blocking wait, not an `is_ready()` poll: under Pathways
+    a readiness check is an RPC to the proxy, so a poll can read "not ready" for work that has
+    finished. Changes no state: the in-flight queue and its pending metrics are left as they
+    were (see `InflightThrottler.block_until_ready`).
     """
     start = time.monotonic()
     self._throttler.block_until_ready()

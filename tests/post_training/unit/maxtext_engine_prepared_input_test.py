@@ -1,4 +1,4 @@
-# Copyright 2023–2026 Google LLC
+# Copyright 2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,13 @@ still runs) must train exactly like the payload it came from: same compiled
 kernel, same inputs, bit-identical weights and metrics. Waiting for the device
 afterwards (what Tunix's `TrainerWorker.stage_fwd_bwd` does, to report whether
 the transfer hid behind the device) must change nothing either.
+
+`maxtext_engine_prepared_input_dropless_test.py` covers the dropless replay and
+the final micro-batch's dropless program, and
+`maxtext_engine_prepared_input_sharded_test.py` a four-device mesh with Tunix's
+real model input.
 """
+# pylint: disable=protected-access
 
 import dataclasses
 import types
@@ -69,7 +75,7 @@ def _payload(seed: int) -> _Payload:
 
 def _loss_fn(model, tokens, mask, scale):
   # Depends on the data and on both weights, so any change to either shows.
-  pred = model.weights.value[0] * tokens + model.weights.value[1] * tokens**2
+  pred = model.weights[...][0] * tokens + model.weights[...][1] * tokens**2
   return (
       abstract_engine.WeightedMetric(
           unreduced_sum=jnp.sum(pred * mask) * scale,
@@ -84,9 +90,15 @@ def _model_input(payload: _Payload) -> dict[str, Any]:
   return {"tokens": payload.token_ids, "mask": payload.token_mask, "scale": 2.0}
 
 
+# Where a step's next first micro-batch is prepared, relative to the step's update.
+_BEFORE_UPDATE = "before_update"  # a separate update call follows the last fwd_bwd
+_AFTER_UPDATE = "after_update"  # the update runs inside the last fwd_bwd call (google/tunix#2719)
+
+
 class PrepareFwdBwdInputTest(absltest.TestCase):
 
   def setUp(self):
+    """A one-device mesh and a toy two-weight model, built without a checkpoint."""
     super().setUp()
     self.config = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -128,92 +140,116 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
       engine.compile(_payload(0))
     return engine
 
-  def _train(self, engine, payloads, prepare_at: set[int], wait: bool = False):
+  def _train(self, engine, payloads, prepare_at: set[int], wait: bool = False, order: str = _BEFORE_UPDATE):
     """Two steps of two micro-batches; micro-batches in `prepare_at` go in prepared.
 
-    A prepared micro-batch is prepared before the previous update is applied, as
-    `TrainerWorker.stage_fwd_bwd` does while that update is still on the device.
-    With `wait`, `wait_for_device` follows each prepare, as it does there too.
+    A step's next first micro-batch is prepared right after the step's last `fwd_bwd`, while that micro-batch
+    and the update are still on the device: before the update with `order=_BEFORE_UPDATE`, after it with
+    `_AFTER_UPDATE` (where Tunix's `TrainerWorker.stage_fwd_bwd` lands once the update runs inside the last
+    train call). With `wait`, `wait_for_device` follows each prepare, as it does there too.
     """
-    prepared = {i: None for i in prepare_at}
-    if 0 in prepared:
-      prepared[0] = engine.prepare_fwd_bwd_input(payloads[0])
+    prepared = {}
+
+    def prepare(i):
+      if i not in prepare_at or i >= len(payloads):
+        return
+      prepared[i] = engine.prepare_fwd_bwd_input(payloads[i])
       if wait:
-        engine.wait_for_device()
+        queued = engine._throttler._inflight_queue.qsize()
+        self.assertGreaterEqual(engine.wait_for_device(), 0.0)
+        # The in-flight queue is left for the next dispatch, or a drain, to empty as before.
+        self.assertEqual(engine._throttler._inflight_queue.qsize(), queued)
+
+    prepare(0)
     metrics = []
     for step in range(2):
       for j in range(2):
         i = 2 * step + j
-        engine.fwd_bwd(prepared[i] if i in prepared else payloads[i])
-        if j == 1 and i + 1 in prepared:
-          prepared[i + 1] = engine.prepare_fwd_bwd_input(payloads[i + 1])
-          if wait:
-            queued = engine._throttler._inflight_queue.qsize()
-            self.assertGreaterEqual(engine.wait_for_device(), 0.0)
-            # The in-flight queue is left for the update to drain as before.
-            self.assertEqual(engine._throttler._inflight_queue.qsize(), queued)
+        engine.fwd_bwd(prepared.pop(i) if i in prepared else payloads[i])
+      if order == _BEFORE_UPDATE:
+        prepare(2 * step + 2)
       engine.update()
+      if order == _AFTER_UPDATE:
+        prepare(2 * step + 2)
       buffer = engine.get_metrics(clear_cache=True)
       metrics.append({k: np.asarray(v).tolist() for k, v in sorted(buffer.scalar_metrics.items())})
       metrics[-1]["loss"] = np.asarray(buffer.weighted_metrics["loss"].compute()).tolist()
-    return np.asarray(engine.model.weights.value), metrics
+    self.assertEqual(prepared, {})
+    return np.asarray(engine.model.weights[...]), metrics
 
   def test_prepared_micro_batches_train_bit_identically(self):
     payloads = [_payload(s) for s in (1, 2, 3, 4)]
     for compiled in (True, False):
-      ref = self._engine(compiled)
-      new = self._engine(compiled)
-      with (
-          mock.patch.object(new, "_compile_for_batch", wraps=new._compile_for_batch) as new_compiles,
-          mock.patch.object(ref, "_compile_for_batch", wraps=ref._compile_for_batch) as ref_compiles,
-      ):
-        ref_w, ref_m = self._train(ref, payloads, prepare_at=set())
-        new_w, new_m = self._train(new, payloads, prepare_at={0, 2})
-      np.testing.assert_array_equal(ref_w, new_w)
-      self.assertEqual(ref_m, new_m)
-      # No kernel was rebuilt for a prepared input.
-      self.assertEqual(ref_compiles.call_count, new_compiles.call_count)
-      self.assertEqual(new.train_step, 2)
+      for order in (_BEFORE_UPDATE, _AFTER_UPDATE):
+        with self.subTest(compiled=compiled, order=order):
+          ref = self._engine(compiled)
+          new = self._engine(compiled)
+          with (
+              mock.patch.object(new, "_compile_for_batch", wraps=new._compile_for_batch) as new_compiles,
+              mock.patch.object(ref, "_compile_for_batch", wraps=ref._compile_for_batch) as ref_compiles,
+          ):
+            ref_w, ref_m = self._train(ref, payloads, prepare_at=set())
+            new_w, new_m = self._train(new, payloads, prepare_at={0, 2}, order=order)
+          np.testing.assert_array_equal(ref_w, new_w)
+          self.assertEqual(ref_m, new_m)
+          # No kernel was rebuilt for a prepared input.
+          self.assertEqual(ref_compiles.call_count, new_compiles.call_count)
+          self.assertEqual(new.train_step, 2)
 
   def test_waiting_for_the_device_changes_nothing(self):
     payloads = [_payload(s) for s in (1, 2, 3, 4)]
     for compiled in (True, False):
-      ref = self._engine(compiled)
-      new = self._engine(compiled)
-      with (
-          mock.patch.object(new, "_compile_for_batch", wraps=new._compile_for_batch) as new_compiles,
-          mock.patch.object(ref, "_compile_for_batch", wraps=ref._compile_for_batch) as ref_compiles,
-          mock.patch.object(new._metrics_logger, "write_metrics", wraps=new._metrics_logger.write_metrics) as new_w,
-          mock.patch.object(ref._metrics_logger, "write_metrics", wraps=ref._metrics_logger.write_metrics) as ref_w,
-      ):
-        ref_weights, ref_m = self._train(ref, payloads, prepare_at=set())
-        new_weights, new_m = self._train(new, payloads, prepare_at={0, 2}, wait=True)
-      np.testing.assert_array_equal(ref_weights, new_weights)
-      self.assertEqual(ref_m, new_m)
-      self.assertEqual(ref_compiles.call_count, new_compiles.call_count)
-      # The same metrics writes, in the same order (the wait writes none).
-      self.assertEqual(
-          [c.args[0].id for c in ref_w.call_args_list],
-          [c.args[0].id for c in new_w.call_args_list],
-      )
+      for order in (_BEFORE_UPDATE, _AFTER_UPDATE):
+        with self.subTest(compiled=compiled, order=order):
+          ref = self._engine(compiled)
+          new = self._engine(compiled)
+          with (
+              mock.patch.object(new, "_compile_for_batch", wraps=new._compile_for_batch) as new_compiles,
+              mock.patch.object(ref, "_compile_for_batch", wraps=ref._compile_for_batch) as ref_compiles,
+              mock.patch.object(new._metrics_logger, "write_metrics", wraps=new._metrics_logger.write_metrics) as new_w,
+              mock.patch.object(ref._metrics_logger, "write_metrics", wraps=ref._metrics_logger.write_metrics) as ref_w,
+          ):
+            ref_weights, ref_m = self._train(ref, payloads, prepare_at=set())
+            new_weights, new_m = self._train(new, payloads, prepare_at={0, 2}, wait=True, order=order)
+          np.testing.assert_array_equal(ref_weights, new_weights)
+          self.assertEqual(ref_m, new_m)
+          self.assertEqual(ref_compiles.call_count, new_compiles.call_count)
+          # The same metrics writes, in the same order (the wait writes none).
+          self.assertEqual(
+              [c.args[0].id for c in ref_w.call_args_list],
+              [c.args[0].id for c in new_w.call_args_list],
+          )
 
-  def test_wait_for_device_waits_for_the_update_and_keeps_the_queue(self):
+  def test_wait_for_device_waits_on_every_queued_computation_and_keeps_the_queue(self):
     engine = self._engine(True)
     engine.fwd_bwd(_payload(1))
     engine.fwd_bwd(_payload(2))
     engine.update()
     queue = engine._throttler._inflight_queue
     queued = list(queue.queue)
-    self.assertNotEmpty(queued)
-    waited = engine.wait_for_device()
+    # The update queues its gradient norm with the step's metrics, after the micro-batches' losses.
+    self.assertIsNotNone(queued[-1][1])
+    waited_on = []
+    block = jax.block_until_ready
+
+    def spy(x):
+      waited_on.append(x)
+      return block(x)
+
+    with mock.patch.object(inflight_throttler.jax, "block_until_ready", side_effect=spy):
+      waited = engine.wait_for_device()
     self.assertIsInstance(waited, float)
     self.assertGreaterEqual(waited, 0.0)
+    # Nothing dequeued: the next dispatch or drain finds the same queue.
     self.assertEqual(list(queue.queue), queued)
-    # Everything dispatched before the wait, the update included, is done.
-    for leaves, _ in queued:
-      for leaf in leaves:
-        if isinstance(leaf, jax.Array):
-          self.assertTrue(leaf.is_ready())
+    # Every queued computation was waited on, in order: each micro-batch's loss and the update's gradient norm,
+    # so a caller's wait covers the update.
+    self.assertEqual([id(x) for x in waited_on], [id(leaves) for leaves, _ in queued])
+    token = getattr(engine, "last_update_token", None)
+    if token is not None:
+      # With the readiness tokens of AI-Hypercomputer/maxtext#5571 the update's token is that same norm, so a
+      # caller that waits on it after `wait_for_device` (Tunix's `TrainerWorker.stage_fwd_bwd`) does not wait again.
+      self.assertIs(queued[-1][0][0], token)
 
   def test_the_comparison_sees_a_one_token_difference(self):
     payloads = [_payload(s) for s in (1, 2, 3, 4)]
@@ -226,36 +262,53 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
     self.assertFalse(np.array_equal(ref_w, new_w))
 
   def test_staged_through_tunix_trainer_worker_trains_bit_identically(self):
-    # The path Tunix's pipelined step boundary takes: TrainerWorker.stage_fwd_bwd
-    # calls prepare_fwd_bwd_input, fwd_bwd_staged trains what it returned.
-    from tunix.experimental.common import datatypes  # pylint: disable=g-import-not-at-top
-    from tunix.experimental.worker import trainer_worker  # pylint: disable=g-import-not-at-top
+    """The path Tunix's pipelined step boundary takes, through a real `TrainerWorker`.
 
-    payloads = [_payload(s) for s in (1, 2, 3, 4)]
+    Each step's last micro-batch runs the update in the same call (`fwd_bwd(apply_optimizer=True)`,
+    google/tunix#2719). With staging, that call returns at the update's dispatch (`wait_for_update=False`) and the
+    next step's first micro-batch is staged right after it: `stage_fwd_bwd` calls `prepare_fwd_bwd_input` and
+    `wait_for_device`, and `fwd_bwd_staged` trains what it returned.
+    """
+    from tunix.experimental.common import datatypes  # pylint: disable=import-outside-toplevel
+    from tunix.experimental.worker import trainer_worker  # pylint: disable=import-outside-toplevel
+
+    if not hasattr(trainer_worker.TrainerWorker, "stage_fwd_bwd"):
+      self.skipTest("this Tunix has no TrainerWorker.stage_fwd_bwd (its pipelined step boundary)")
+
+    payloads = [_payload(s) for s in (1, 2, 3, 4, 5, 6)]
 
     def run(stage: bool):
       engine = self._engine(True)
       worker = trainer_worker.TrainerWorker(trainer_factory=lambda: engine)
       worker.initialize()
-      prepare = mock.patch.object(engine, "prepare_fwd_bwd_input", wraps=engine.prepare_fwd_bwd_input)
-      with prepare as spy:
-        for i, payload in enumerate(payloads):
-          request = datatypes.TrainRequest(request_id=f"r{i}", payload=payload)
-          if stage and i % 2 == 0:
-            resp = worker.stage_fwd_bwd(request)
-            # The engine's wait_for_device answered how long the device ran on.
-            self.assertGreaterEqual(resp.metadata["device_wait_s"], 0.0)
-            worker.fwd_bwd_staged(f"r{i}")
-          else:
-            worker.fwd_bwd(request)
-          if i % 2 == 1:
-            worker.update()
-      return np.asarray(engine.model.weights.value), spy.call_count
+      with (
+          mock.patch.object(engine, "prepare_fwd_bwd_input", wraps=engine.prepare_fwd_bwd_input) as prepare,
+          mock.patch.object(engine, "wait_for_device", wraps=engine.wait_for_device) as wait,
+      ):
+        staged_id = None
+        for step in range(3):
+          for j in range(2):
+            i = 2 * step + j
+            kwargs = {"apply_optimizer": True, "wait_for_update": not stage} if j == 1 else {}
+            if staged_id is not None:
+              resp = worker.fwd_bwd_staged(staged_id, **kwargs)
+              staged_id = None
+            else:
+              resp = worker.fwd_bwd(datatypes.TrainRequest(request_id=f"r{i}", payload=payloads[i]), **kwargs)
+            if j == 1:
+              self.assertEqual(resp.metadata["train_step"], step + 1)
+              if stage and i + 1 < len(payloads):
+                staged = worker.stage_fwd_bwd(datatypes.TrainRequest(request_id=f"r{i + 1}", payload=payloads[i + 1]))
+                # The engine's wait_for_device answered how long the device still ran.
+                self.assertGreaterEqual(staged.metadata["device_wait_s"], 0.0)
+                staged_id = f"r{i + 1}"
+      return np.asarray(engine.model.weights[...]), prepare.call_count, wait.call_count
 
-    ref_w, ref_prepared = run(stage=False)
-    new_w, new_prepared = run(stage=True)
+    ref_w, ref_prepared, ref_waits = run(stage=False)
+    new_w, new_prepared, new_waits = run(stage=True)
     np.testing.assert_array_equal(ref_w, new_w)
     self.assertEqual((ref_prepared, new_prepared), (0, 2))
+    self.assertEqual((ref_waits, new_waits), (0, 2))
 
   def test_preparing_places_the_traced_inputs_and_leaves_state_alone(self):
     engine = self._engine(True)
@@ -263,7 +316,7 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
     before = (
         engine.micro_step_count,
         engine.train_step,
-        np.asarray(engine.model.weights.value),
+        np.asarray(engine.model.weights[...]),
     )
     prepared = engine.prepare_fwd_bwd_input(_payload(2))
     self.assertIsInstance(prepared, maxtext_engine.PreparedFwdBwdInput)
@@ -277,7 +330,7 @@ class PrepareFwdBwdInputTest(absltest.TestCase):
     after = (
         engine.micro_step_count,
         engine.train_step,
-        np.asarray(engine.model.weights.value),
+        np.asarray(engine.model.weights[...]),
     )
     self.assertEqual(before[:2], after[:2])
     np.testing.assert_array_equal(before[2], after[2])
