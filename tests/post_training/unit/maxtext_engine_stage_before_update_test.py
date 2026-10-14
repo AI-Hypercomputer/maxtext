@@ -65,6 +65,7 @@ class StageBeforeUpdateOrderTest(unittest.TestCase):
     os.environ["SKIP_JAX_PRECOMPILE"] = "1"
 
   def _engine(self, final_dropless: bool = False):
+    """The one-layer MoE engine with the dropless replay on; its loss raises the overflow flag on marked batches."""
     cfg = _cfg(override_logical_axis_rules=True, ragged_buffer_factor=2.5)
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     real_model = models.Transformer(config=cfg, mesh=mesh, quant=None, model_mode="train", rngs=nnx.Rngs(0))
@@ -157,6 +158,70 @@ class StageBeforeUpdateOrderTest(unittest.TestCase):
     staged = self._train(self._engine(final_dropless=True), staged=True)
     self._assert_same_training(reference, staged)
     self.assertEqual(staged[2], [True, True])
+
+  def test_through_tunix_trainer_worker_the_deferred_update_trains_bit_identically(self):
+    """The same order, driven by a real Tunix `TrainerWorker`: `fwd_bwd(last, apply_optimizer=True,
+    defer_update=True)` runs the last micro-batch and holds the update, `stage_fwd_bwd` prepares the next step's first
+    micro-batch without waiting, `apply_deferred_update` waits for the device and runs the update (and with it the
+    last micro-batch's rerun), and `fwd_bwd_staged` trains the prepared micro-batch. Against the fused calls
+    `fwd_bwd(last, apply_optimizer=True)` and `fwd_bwd(next payload)`."""
+    from tunix.experimental.common import datatypes  # pylint: disable=import-outside-toplevel
+    from tunix.experimental.worker import trainer_worker  # pylint: disable=import-outside-toplevel
+
+    if not hasattr(trainer_worker.TrainerWorker, "apply_deferred_update"):
+      self.skipTest("this Tunix has no TrainerWorker.apply_deferred_update (staging before the update)")
+
+    def run(staged: bool):
+      engine = self._engine()
+      worker = trainer_worker.TrainerWorker(trainer_factory=lambda: engine)
+      worker.initialize()
+      metrics, device_waits = [], []
+      staged_id = None
+      with mock.patch.object(engine, "fwd_bwd", wraps=engine.fwd_bwd) as fwd_bwd:
+        for step, tokens in enumerate(_STEPS):
+          for j, first_token in enumerate(tokens):
+            final = j == len(tokens) - 1
+            kwargs = {"apply_optimizer": True} if final else {}
+            if final and staged and step + 1 < len(_STEPS):
+              kwargs["defer_update"] = True
+            if j == 0 and staged_id is not None:
+              resp = worker.fwd_bwd_staged(staged_id, **kwargs)
+              staged_id = None
+            else:
+              request = datatypes.TrainRequest(request_id=f"s{step}m{j}", payload=_payload(first_token))
+              resp = worker.fwd_bwd(request, **kwargs)
+          if resp.metadata.get("update_deferred"):
+            nxt = datatypes.TrainRequest(request_id=f"s{step + 1}m0", payload=_payload(_STEPS[step + 1][0]))
+            stage = worker.stage_fwd_bwd(nxt)
+            self.assertTrue(stage.metadata["before_update"])
+            self.assertIsNone(stage.metadata["device_wait_s"])
+            update = worker.apply_deferred_update()
+            device_waits.append(update.metadata["device_wait_s"])
+            self.assertEqual(update.metadata["train_step"], step + 1)
+            staged_id = nxt.request_id
+          else:
+            self.assertEqual(resp.metadata["train_step"], step + 1)
+          buffer = engine.get_metrics(clear_cache=True)
+          metrics.append(
+              {
+                  "loss": np.asarray(buffer.weighted_metrics["loss"].compute()).tolist(),
+                  "gradient_norm": np.asarray(buffer.scalar_metrics["gradient_norm"]).tolist(),
+              }
+          )
+        # `defer_update` is the worker's, never the engine's.
+        self.assertTrue(all("defer_update" not in c.kwargs for c in fwd_bwd.call_args_list))
+      self.assertIsNone(staged_id)
+      self.assertIsNone(worker._deferred_update)
+      params = [np.asarray(leaf) for leaf in jax.tree.leaves(nnx.state(engine.model, nnx.Param))]
+      return params, metrics, device_waits
+
+    reference = run(staged=False)
+    staged = run(staged=True)
+    self.assertEqual(reference[1], staged[1])
+    for r, n in zip(reference[0], staged[0]):
+      np.testing.assert_array_equal(r, n)
+    self.assertEqual(len(staged[2]), len(_STEPS) - 1)
+    self.assertTrue(all(w >= 0.0 for w in staged[2]))
 
   def test_the_comparison_sees_a_rerun_of_the_wrong_micro_batch(self):
     # Control: a rerun inside update() that ran on the prepared micro-batch instead of its own is caught.
