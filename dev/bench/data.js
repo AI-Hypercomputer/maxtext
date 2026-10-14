@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791968240622,
+  "lastUpdate": 1791982607810,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -50095,6 +50095,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 480,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "133ba46a9011463ae0161eb284e0672b24ad2728",
+          "message": "MaxText: add `mtp_norm_main_hidden_state` to feed the final-norm output into MTP.\n\nThe Megatron-LM DeepSeek-V3 reference applies the decoder's final norm\nonce and feeds that normalized hidden state to both the LM head and the\nMTP block (`hnorm`). MaxText's decoder normalizes only inside\n`apply_output_head` and hands the raw pre-norm `hidden_state` to\n`MultiTokenPredictionBlock`.\n\nAdd the config flag `mtp_norm_main_hidden_state` (default false, so\nexisting runs are unchanged). When set, the decoder applies\n`decoder_norm` before the output head (`normalize_y=False`) and returns\nthe normalized state, so MTP receives the same tensor as the LM head. No\nparameters or compute are added. Because MTP's `hnorm` re-normalizes its\ninput, only the elementwise `decoder_norm.scale` weighting changes; a\n256-chip A/B at GBS 512 (xid/297385920 on vs xid/297386341 off) showed a\nmean eval-loss delta of +0.008 and convergence at step 75 vs 74.\n\nPiperOrigin-RevId: 999222165",
+          "timestamp": "2026-10-14T09:17:31Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/133ba46a9011463ae0161eb284e0672b24ad2728"
+        },
+        "date": 1791982607153,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total DECOUPLED Tests Duration",
+            "value": 20.508000000000038,
+            "unit": "sec"
+          },
+          {
+            "name": "Total DECOUPLED Tests Count",
+            "value": 103,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 288.396,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 102.97,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2024.0259999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 104.56400000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 156.38799999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7625.527000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 480,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1394.411,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.732,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
             "unit": "count"
           }
         ]
