@@ -335,6 +335,48 @@ class DeepSeek41EngramHashTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+class DeepSeek41DequantTest(unittest.TestCase):
+  """The MaxText loader hook and the reference loader dequantize the released FP8 / FP4 formats identically."""
+
+  def _check(self, weight, scale, expected):
+    from maxtext.checkpoint_conversion.utils import param_mapping  # pylint: disable=import-outside-toplevel
+
+    out = torch.empty(expected.shape, dtype=torch.bfloat16)
+    ref_runner.dequantize_into(out, weight, scale, rows_per_chunk=64)
+    np.testing.assert_array_equal(out.float().numpy(), expected.numpy())
+    w_j = jnp.asarray(weight.view(torch.int8).numpy()) if weight.dtype == torch.int8 else None
+    if w_j is None:
+      w_j = jnp.asarray(weight.float().numpy()).astype(jnp.float8_e4m3fn)
+    s_j = jnp.asarray(scale.float().numpy()).astype(jnp.float8_e8m0fnu)
+    got = param_mapping.dequantize_block_scaled((w_j, s_j))
+    self.assertEqual(got.dtype, jnp.bfloat16)
+    np.testing.assert_array_equal(_j2np(got), expected.numpy())
+
+  def test_fp8_block_32x32(self):
+    torch.manual_seed(0)
+    weight = (torch.randn(96, 160) * 4).to(torch.float8_e4m3fn)
+    scale = torch.exp2(torch.randint(-8, 4, (3, 5)).float()).to(torch.float8_e8m0fnu)
+    expected = weight.float() * scale.float().repeat_interleave(32, 0).repeat_interleave(32, 1)
+    self._check(weight, scale, expected)
+
+  def test_fp8_rows_1x32(self):
+    torch.manual_seed(1)
+    weight = torch.randn(200, 64).to(torch.float8_e4m3fn)
+    scale = torch.exp2(torch.randint(-8, 4, (200, 2)).float()).to(torch.float8_e8m0fnu)
+    expected = weight.float() * scale.float().repeat_interleave(32, 1)
+    self._check(weight, scale, expected)
+
+  def test_fp4_packed(self):
+    torch.manual_seed(2)
+    codes = torch.randint(0, 16, (64, 128))
+    table = ref_runner._FP4_E2M1_VALUES  # pylint: disable=protected-access
+    packed = (codes[:, 0::2] | (codes[:, 1::2] << 4)).to(torch.uint8).view(torch.int8)
+    scale = torch.exp2(torch.randint(-8, 4, (64, 4)).float()).to(torch.float8_e8m0fnu)
+    expected = table[codes] * scale.float().repeat_interleave(32, 1)
+    self._check(packed, scale, expected)
+
+
+@pytest.mark.cpu_only
 class DeepSeek41LayersTest(unittest.TestCase):
   """Runs every layer type of a tiny model, layer by layer, against the reference blocks."""
 

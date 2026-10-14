@@ -201,7 +201,7 @@ class DeepSeek41Engram(nnx.Module):
     self.eps = config.normalization_layer_epsilon
     self.embed = nnx.Param(
         jax.nn.initializers.normal(stddev=0.02)(rngs.params(), (num_embeddings, self.head_dim), config.weight_dtype),
-        out_sharding=("vocab", None),
+        out_sharding=("vocab", "embed"),
     )
     self.wkv = DenseGeneral(
         in_features_shape=self.n_hash_cols * self.head_dim,

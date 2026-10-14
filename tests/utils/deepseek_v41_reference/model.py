@@ -13,6 +13,8 @@
 #   * The engram hash table is a plain (unquantized) embedding instead of FP8 rows plus scales.
 #   * The vision tower / aligner (and image merging) are removed: this reference is text only.
 #   * `Transformer.forward` can return the logits of every position (`full_logits=True`).
+#   * `ModelArgs.fp32_compute`: keep the (bf16) weights but run every matmul in float32, for a more precise
+#     reference when the model is too large to hold in float32.
 #   * Relative imports, so the directory works as a Python package.
 import math
 from contextlib import contextmanager
@@ -37,6 +39,7 @@ from .kernel import (
 world_size = 1
 rank = 0
 default_dtype = torch.bfloat16  # storage dtype for Linear weights, from ModelArgs.dtype
+compute_fp32 = False  # from ModelArgs.fp32_compute
 fp8_block_size = 32  # one fp8 scale per 32x32 weight block / 32 activations
 fp4_block_size = 32  # one fp4 scale per 32 elements along K
 scale_fmt = "ue8m0"
@@ -65,6 +68,7 @@ class ModelArgs:
     max_seq_len: int = 4096
     temperature: float = 1
     dtype: Literal["bf16", "fp32"] = "bf16"
+    fp32_compute: bool = False
     expert_dtype: None = None
     vocab_size: int = 129280
     dim: int = 1024
@@ -196,6 +200,8 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = No
     reference only ever holds floating-point weights)."""
     assert bias is None
     assert weight.dtype in (torch.float32, torch.bfloat16, torch.float16), weight.dtype
+    if compute_fp32:
+        return F.linear(x.float(), weight.float())
     return F.linear(x.to(weight.dtype), weight)
 
 
@@ -764,7 +770,7 @@ class Attention(nn.Module):
         o = o.view(bsz, seqlen, self.n_local_groups, -1)
         act_quant(o, fp8_block_size, scale_fmt, scale_dtype, True)
         wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        o = torch.einsum("bsgd,grd->bsgr", o, wo_a.to(o.dtype))
         x = self.wo_b(o.flatten(2))
         return x
 
@@ -1050,7 +1056,7 @@ class DSparkAttention(Attention):
         o = o.view(bsz, block_size, self.n_local_groups, -1)
         act_quant(o, fp8_block_size, scale_fmt, scale_dtype, True)
         wo_a = self.wo_a.weight.view(self.n_local_groups, self.o_lora_rank, -1)
-        o = torch.einsum("bsgd,grd->bsgr", o, wo_a)
+        o = torch.einsum("bsgd,grd->bsgr", o, wo_a.to(o.dtype))
         x = self.wo_b(o.flatten(2))
         return x
 
@@ -1166,10 +1172,11 @@ class Transformer(nn.Module):
     this sets the globals at the top of the file. The tokenizer only feeds the engram token map."""
 
     def __init__(self, args: ModelArgs, tokenizer=None):
-        global world_size, rank, default_dtype
+        global world_size, rank, default_dtype, compute_fp32
         world_size = dist.get_world_size() if dist.is_initialized() else 1
         rank = dist.get_rank() if dist.is_initialized() else 0
         default_dtype = torch.float32 if args.dtype == "fp32" else torch.bfloat16
+        compute_fp32 = args.fp32_compute
         assert not args.vision_enabled, "the plain-PyTorch reference is text only"
         super().__init__()
         self.max_seq_len = args.max_seq_len
