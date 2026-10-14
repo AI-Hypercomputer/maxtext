@@ -1077,7 +1077,10 @@ class TrainTests(unittest.TestCase):
     }
     # gpt3's bias reshard reassociates the bias-gradient reductions (~5e-5 by step 2 on
     # v5p); gpt-oss drifts a few ULPs through the grouped matmul under expert parallelism.
-    rtol = {"gpt3_fused_qkv": 1e-4, "gpt3": 1e-4, "gpt_oss": 1e-5, "gpt_oss_tensor": 1e-6}
+    # Under tensor parallelism gpt-oss is bit-for-bit on a four-way axis, but once the
+    # axis fully shards the eight heads (tpu7x-8) the backward reductions reassociate and
+    # it drifts ~5e-6 by step 2.
+    rtol = {"gpt3_fused_qkv": 1e-4, "gpt3": 1e-4, "gpt_oss": 1e-5, "gpt_oss_tensor": 1e-4}
     for case, model_args in _GPT_MODELS.items():
       with self.subTest(case=case):
         args = model_args + parallelism[case]
@@ -1477,7 +1480,15 @@ class TrainTests(unittest.TestCase):
         # parallelism to gemma4_small, which builds its stack without the scan.
         "gemma4": ["ici_fsdp_parallelism=-1"],
         "gemma4_moe": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
-        "gemma4_small": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+        "gemma4_small": [
+            "ici_fsdp_parallelism=1",
+            # `global_num_kv_heads=4` caps how far the global layers' KV heads can shard, so
+            # pin the degree rather than take the device count: `-1` resolves to 8 on tpu7x-8,
+            # which four heads do not divide. Whatever is left over goes to data parallelism,
+            # which both shard modes see alike.
+            "ici_tensor_parallelism=4",
+            "ici_data_parallelism=-1",
+        ],
     }
     for decoder_block, model_args in _GEMMA4_MODELS.items():
       with self.subTest(decoder_block=decoder_block):
@@ -1495,9 +1506,11 @@ class TrainTests(unittest.TestCase):
         # 1.0), so a reassociated sum shows up sooner than it does for the other families.
         # The same drift appears under pure data parallelism, where every reshard explicit
         # sharding inserts is a no-op -- float noise, not the two runs disagreeing about
-        # the math. A genuinely wrong sharding does not land here: it either fails the
-        # shape check outright or moves the loss by percent.
-        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-3, atol=0.0)
+        # the math. How far it gets by the third step depends on the platform: all three
+        # blocks reach about 7e-4 on v4-8, and gemma4_moe reaches 1.1e-3 under Pathways on
+        # v6e-4. A genuinely wrong sharding does not land here: it either fails the shape
+        # check outright or moves the loss by percent.
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=2e-3, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
