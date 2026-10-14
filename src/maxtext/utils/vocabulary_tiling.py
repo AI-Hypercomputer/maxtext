@@ -54,6 +54,21 @@ def _is_output_head_param_path(path, _value):
   return any(k in keys for k in _OUTPUT_HEAD_PATH_KEYS)
 
 
+def _gather_output_head(model, head_params, config):
+  """All-gathers the output head over the embed-sharding axes.
+
+  Done before a `custom_vjp`, it lets the backward reuse the gathered table instead of re-gathering it for every
+  chunk.
+  """
+  head_physical_spec = get_physical_spec_without_axes(
+      nnx.get_partition_spec(head_params),
+      model.mesh,
+      FSDP_MESH_AXES + ("context", "context_usp_ulysses", "expert"),
+      get_logical_axis_rules(),
+  )
+  return maybe_shard_with_name(head_params, head_physical_spec, shard_mode=config.shard_mode)
+
+
 def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   """Computes cross-entropy loss with vocab tiling for NNX models.
 
@@ -131,16 +146,7 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
   graphdef, head_params, other_params, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
 
   if config.vocab_tiling_ag_once:
-    # all gather the output head over the embed-sharding axes; doing it before
-    # the custom_vjp lets the backward reuse the gathered table instead of
-    # re-gathering it for every chunk
-    head_physical_spec = get_physical_spec_without_axes(
-        nnx.get_partition_spec(head_params),
-        model.mesh,
-        FSDP_MESH_AXES + ("context", "context_usp_ulysses", "expert"),
-        get_logical_axis_rules(),
-    )
-    head_params = maybe_shard_with_name(head_params, head_physical_spec, shard_mode=config.shard_mode)
+    head_params = _gather_output_head(model, head_params, config)
 
   def _logits_for_chunk(chunk_head_params, chunk_other_params, chunk_rest, hidden_chunk):
     local_model = nnx.merge(graphdef, chunk_head_params, chunk_other_params, chunk_rest, copy=True)
@@ -271,3 +277,87 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       head_params, other_params, rest, hidden_states, labels, segmentation
   )
   return total_loss, total_z_loss
+
+
+def vocab_tiling_nnx_chunked_apply(model, hidden_states, chunk_inputs, chunk_fn, chunk_size, config, model_mode="train"):
+  """Applies `chunk_fn` to sequence chunks of the output-head logits, one chunk's logits live at a time.
+
+  For callers that chunk the logits along the sequence themselves, such as Tunix's per-token log-probs. A plain
+  `lax.scan` over `logits_from_hidden_states_for_vocab_tiling` keeps the output head inside the loop, so XLA
+  gathers it and reduces its gradient once per chunk. Here a `custom_vjp` takes the head out of the loop: with
+  `vocab_tiling_ag_once` it is gathered once, and the backward accumulates its gradient in the scan carry.
+
+  Args:
+    model: NNX model exposing `logits_from_hidden_states_for_vocab_tiling`.
+    hidden_states: `[batch, seq, emb]` pre-norm hidden states, `seq` a multiple of `chunk_size`.
+    chunk_inputs: Pytree of `[batch, seq, ...]` arrays sliced alongside the hidden states; not differentiated.
+    chunk_fn: `(logits [batch, chunk, vocab] float32, chunk of chunk_inputs) -> pytree of [batch, chunk, ...]`
+      float arrays.
+    chunk_size: Tokens per chunk along `seq`.
+    config: Model config.
+    model_mode: Passed to `logits_from_hidden_states_for_vocab_tiling`.
+
+  Returns:
+    `chunk_fn`'s outputs over the whole sequence, `[batch, seq, ...]`.
+  """
+  batch_size, seq_len, _ = hidden_states.shape
+  num_chunks = seq_len // chunk_size
+
+  def _to_chunks(x):  # [batch, seq, ...] -> [num_chunks, batch, chunk, ...]
+    return jnp.swapaxes(x.reshape(batch_size, num_chunks, chunk_size, *x.shape[2:]), 0, 1)
+
+  def _from_chunks(x):  # [num_chunks, batch, chunk, ...] -> [batch, seq, ...]
+    return jnp.swapaxes(x, 0, 1).reshape(batch_size, seq_len, *x.shape[3:])
+
+  # As in vocab_tiling_nnx_loss: only the head is differentiated, the rest goes through as primals.
+  graphdef, head_params, other_params, rest = nnx.split(model, _is_output_head_param_path, nnx.Param, ...)
+  if not jax.tree_util.tree_leaves(head_params):
+    # Every other param is passed through undifferentiated, so this would silently zero the head gradient.
+    raise ValueError(f"No output-head params (paths containing one of {_OUTPUT_HEAD_PATH_KEYS}) in the model.")
+  if config.vocab_tiling_ag_once:
+    head_params = _gather_output_head(model, head_params, config)
+
+  def _chunk_outputs(chunk_head_params, chunk_other_params, chunk_rest, hidden_chunk, inputs_chunk):
+    local_model = nnx.merge(graphdef, chunk_head_params, chunk_other_params, chunk_rest, copy=True)
+    logits = local_model.logits_from_hidden_states_for_vocab_tiling(hidden_chunk, True, model_mode)
+    return chunk_fn(logits.astype(jnp.float32), inputs_chunk)
+
+  @jax.custom_vjp
+  def chunked_apply(chunk_head_params, chunk_other_params, chunk_rest, chunked_hidden, chunked_inputs):
+    return _chunked_apply_fwd(chunk_head_params, chunk_other_params, chunk_rest, chunked_hidden, chunked_inputs)[0]
+
+  def _chunked_apply_fwd(chunk_head_params, chunk_other_params, chunk_rest, chunked_hidden, chunked_inputs):
+    def _body(carry, xs):
+      return carry, _chunk_outputs(chunk_head_params, chunk_other_params, chunk_rest, *xs)
+
+    _, outputs = jax.lax.scan(_body, None, (chunked_hidden, chunked_inputs))
+    return outputs, (chunk_head_params, chunk_other_params, chunk_rest, chunked_hidden, chunked_inputs)
+
+  def _chunked_apply_bwd(residuals, cotangents):
+    chunk_head_params, chunk_other_params, chunk_rest, chunked_hidden, chunked_inputs = residuals
+
+    def _body(grad_head_acc, xs):
+      hidden_chunk, inputs_chunk, cotangent_chunk = xs
+      _, vjp_fn = jax.vjp(
+          lambda p, h: _chunk_outputs(p, chunk_other_params, chunk_rest, h, inputs_chunk),
+          chunk_head_params,
+          hidden_chunk,
+      )
+      grad_head_update, grad_hidden_chunk = vjp_fn(cotangent_chunk)
+      grad_head_acc = jax.tree_util.tree_map(lambda acc, g: acc + g.astype(acc.dtype), grad_head_acc, grad_head_update)
+      return grad_head_acc, grad_hidden_chunk
+
+    # f32 accumulator: the head gradient sums num_chunks partial products.
+    initial_grad_head = jax.tree_util.tree_map(lambda p: jnp.zeros(p.shape, jnp.float32), chunk_head_params)
+    grad_head, grad_hidden = jax.lax.scan(_body, initial_grad_head, (chunked_hidden, chunked_inputs, cotangents))
+    grad_head = jax.tree_util.tree_map(lambda p, g: g.astype(p.dtype), chunk_head_params, grad_head)
+    # Explicit zeros, not None, as in vocab_tiling_nnx_loss (scanned params' cotangent layout).
+    grad_other = jax.tree_util.tree_map(jnp.zeros_like, chunk_other_params)
+    grad_rest = jax.tree_util.tree_map(jnp.zeros_like, chunk_rest)
+    return grad_head, grad_other, grad_rest, grad_hidden.astype(chunked_hidden.dtype), None
+
+  chunked_apply.defvjp(_chunked_apply_fwd, _chunked_apply_bwd)
+  outputs = chunked_apply(
+      head_params, other_params, rest, _to_chunks(hidden_states), jax.tree_util.tree_map(_to_chunks, chunk_inputs)
+  )
+  return jax.tree_util.tree_map(_from_chunks, outputs)

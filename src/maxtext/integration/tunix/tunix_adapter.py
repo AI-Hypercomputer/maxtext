@@ -28,6 +28,7 @@ from flax import nnx
 from jax import Array
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS  # pylint: disable=ungrouped-imports
 from maxtext.integration.tunix.utils import VllmWeightMapping
+from maxtext.utils import vocabulary_tiling
 from maxtext.models.models import Transformer
 
 
@@ -172,6 +173,21 @@ class TunixMaxTextAdapter(nnx.Module):
     return self.base.logits_from_hidden_states_for_vocab_tiling(
         hidden_states,
         deterministic=True,
+        model_mode=getattr(self.base, "model_mode", "train"),
+    )
+
+  def apply_chunked_logits(self, hidden_states: Array, chunk_inputs: Any, chunk_fn: Any, chunk_size: int) -> Any:
+    """`chunk_fn(logits, inputs)` over sequence chunks of the logits, the output head kept out of the chunk loop.
+
+    See `vocabulary_tiling.vocab_tiling_nnx_chunked_apply`; with `vocab_tiling_ag_once` the head is gathered once.
+    """
+    return vocabulary_tiling.vocab_tiling_nnx_chunked_apply(
+        self.base,
+        hidden_states,
+        chunk_inputs,
+        chunk_fn,
+        chunk_size,
+        self.base.config,
         model_mode=getattr(self.base, "model_mode", "train"),
     )
 

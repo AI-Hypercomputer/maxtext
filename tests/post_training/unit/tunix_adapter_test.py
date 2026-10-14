@@ -372,7 +372,7 @@ class _NNXLinearBase(tunix_adapter_module.nnx.Module):
 
   def __init__(self, vocab_size: int = 8, emb_dim: int = 4):
     super().__init__()
-    self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME)
+    self.config = SimpleNamespace(model_name=_STUB_MODEL_NAME, vocab_tiling_ag_once=False)
     self.model_mode = "train"
     self.embed = tunix_adapter_module.nnx.Param(
         jnp.arange(vocab_size * emb_dim, dtype=jnp.float32).reshape(
@@ -380,7 +380,8 @@ class _NNXLinearBase(tunix_adapter_module.nnx.Module):
         )
         * 0.1
     )
-    self.head = tunix_adapter_module.nnx.Param(
+    # Named like MaxText's LM head: the chunked-logits path differentiates only output-head params.
+    self.logits_dense = tunix_adapter_module.nnx.Param(
         jnp.arange(emb_dim * vocab_size, dtype=jnp.float32).reshape(
             emb_dim, vocab_size
         )
@@ -410,7 +411,7 @@ class _NNXLinearBase(tunix_adapter_module.nnx.Module):
       self, hidden_states, deterministic, model_mode
   ):
     del deterministic, model_mode
-    return jnp.einsum("bse,ev->bsv", hidden_states, self.head[...])
+    return jnp.einsum("bse,ev->bsv", hidden_states, self.logits_dense[...])
 
 
 class TunixAdapterChunkedLogpsTest(unittest.TestCase):
