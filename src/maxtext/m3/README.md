@@ -48,7 +48,8 @@ There is no `layers/` directory: NNX *is* the layer library.
    Some duplication across model files is cheaper than a 60-parameter shared layer.
 3. **Sharding is an annotation.** Models receive a `Sharding` instance at construction and refer to
    logical axis names only (`"embed"`, `"heads"`, `"mlp"`). Model code never names physical mesh
-   axes or devices.
+   axes or devices. Models are constructed inside `jax.sharding.set_mesh(mesh)`, on one device as
+   on many: Flax places parameters from their metadata at construction and raises without a mesh.
 4. **Infrastructure stays out of model code.** No `maybe_remat`, no `dot_general` injection, no
    `model_mode` conditionals. Only zero-cost annotations belong in `__call__`: sharding specs and
    `checkpoint_name` tags.
@@ -70,6 +71,7 @@ bearing for that second driver — breaking them tends to fail silently:
 | Remat and scan wrappers must be path-transparent | Parameter paths feed checkpointing, HF mappings, weight sync, optimizer masks and unscan; an extra path segment breaks them, in several cases without an error |
 | Auxiliary losses fold into the primary loss | Only the primary loss is differentiated; a router loss reported alongside it contributes no gradient |
 | One `Mesh` object shared with the driver | Sharding whose mesh differs from the engine's is silently replaced by full replication |
+| Mesh axes keep legacy's names (`data`, `fsdp`, `tensor`, `expert`) | The engine reads the data axis by name: on a mesh with no axis called `data` it declines Zero-1 (one warning) and deferred gradient all-reduce (silently) |
 | No parameter sharding constraints after init | Parameters are sharded once by the initializer; re-asserting collides with the engine's deferred all-reduce and Zero-1 resharding |
 
 ## Tests
