@@ -660,7 +660,9 @@ class Quantization(BaseModel):
       ),
   )
   kv_quant_axis: KvQuantAxis = Field(KvQuantAxis.HEADS_AND_DKV, description="Axes to quantize over for the KV cache.")
-  kv_quant_dtype: Literal["int8", "int4"] = Field("int8", description="Data type for KV cache quantization.")
+  kv_quant_dtype: Literal["int8", "int4", "fp8"] = Field(
+      "int8", description="Data type for KV cache quantization. 'fp8' stores the cache as float8_e4m3fn."
+  )
   quantization_local_shard_count: int = Field(
       -1,
       description="AQT int8 only: number of local shards along the contraction axis of weight-gradient matmuls, each"
@@ -5887,6 +5889,32 @@ class MaxTextConfig(
           "do not pass several devices to a single process."
       )
 
+  def _validate_kvcache_quantization(self):
+    """Validates that quantize_kvcache is not combined with unsupported attention or cache settings."""
+    if not self.kv_quant_axis:
+      raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    unsupported = []
+    if self.use_chunked_prefill:
+      unsupported.append("use_chunked_prefill=True")
+    if self.use_ragged_attention:
+      unsupported.append("use_ragged_attention=True")
+    if self.attention_type == "mla" and not self.mla_naive_kvcache:
+      unsupported.append("attention_type='mla' with mla_naive_kvcache=False (latent KV cache)")
+    if self.moba:
+      unsupported.append("moba=True")
+    if self.attention_type == "compressed":
+      unsupported.append("attention_type='compressed'")
+    if self.dtype == DType.FLOAT16:
+      # Qwix computes K/V scales and QK^T in the activation dtype; in float16, small scales clamp to 1 and QK^T overflows.
+      unsupported.append("dtype='float16'")
+    if unsupported:
+      raise ValueError(f"quantize_kvcache=True does not support: {', '.join(unsupported)}.")
+    if self.attention in ("vllm_rpa", "vllm_batched_rpa"):
+      logger.warning(
+          "quantize_kvcache=True has no effect with attention=%s, which manages its own KV cache.",
+          self.attention,
+      )
+
   def _validate_te_comm_gemm_overlap(self):
     """Validates that te_comm_gemm_overlap is used with supported settings to enable TE Collective GEMM ops."""
     te_has_distributed_env = jax.local_device_count() == 1 and jax.distributed.is_initialized()
@@ -7804,8 +7832,8 @@ class MaxTextConfig(
         )
       if self.block_diffusion_canvas_policy == "seed_and_mask" and self.causal_block_size < 2:
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
-    if self.quantize_kvcache and not self.kv_quant_axis:
-      raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
+    if self.quantize_kvcache:
+      self._validate_kvcache_quantization()
     if self.mtp_reuse_input_embedding and self.use_multimodal:
       raise ValueError("`mtp_reuse_input_embedding` does not support multimodal inputs.")
     if self.mtp_norm_main_hidden_state:

@@ -444,8 +444,6 @@ class GptOssAttentionTest(unittest.TestCase):
           decoder_segment_ids=jnp.ones((self.batch_size, self.seq_len)),
           model_mode="train",
           sinks=self.jax_sinks,
-          qk_product_einsum=jnp.einsum,
-          wv_product_einsum=jnp.einsum,
       )
       return unnormalized_output / sum_val
 

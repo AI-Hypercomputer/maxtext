@@ -1791,7 +1791,11 @@ class Attention(nnx.Module):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    assert not self.config.quantize_kvcache or self.kv_quant
+    if self.config.quantize_kvcache and self.kv_quant is None:
+      raise ValueError(
+          "quantize_kvcache=True requires the Attention layer to be constructed with"
+          " kv_quant=quantizations.configure_kv_quant(config)."
+      )
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and model_mode != MODEL_MODE_TRAIN:
       batch, seq_len, num_heads, head_dim = query.shape
