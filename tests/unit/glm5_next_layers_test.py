@@ -31,7 +31,8 @@ import torch
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.layers import kimi_delta_attention as kda
-from maxtext.layers.attention_glm5 import Glm5SparseMLA, KPoolIndexer
+from maxtext.common.common_types import AttentionType, DEFAULT_MASK_VALUE
+from maxtext.layers import attention_mla
 from maxtext.models.glm5_next import Glm5NextDecoderLayer
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 
@@ -141,6 +142,39 @@ def mt_config(**overrides):
   )
   kwargs.update(overrides)
   return pyconfig.initialize([None, os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")], **kwargs)
+
+
+def build_mla(cfg, mesh):
+  """GLM-5.3 DSA attention: MaxText MLA with NoPE and the k-pool indexer (as in models/glm5_next.py)."""
+  shape = (cfg.global_batch_size_to_train_on, cfg.max_target_length, cfg.emb_dim)
+  return attention_mla.MLA(
+      config=cfg,
+      num_query_heads=cfg.num_query_heads,
+      num_kv_heads=cfg.num_kv_heads,
+      head_dim=cfg.head_dim,
+      max_target_length=cfg.max_target_length,
+      max_prefill_predict_length=cfg.max_prefill_predict_length,
+      attention_kernel=cfg.attention,
+      attention_type=AttentionType(cfg.attention_type),
+      inputs_q_shape=shape,
+      inputs_kv_shape=shape,
+      mesh=mesh,
+      dtype=cfg.dtype,
+      weight_dtype=cfg.weight_dtype,
+      dropout_rate=0.0,
+      name="self_attention",
+      q_lora_rank=cfg.q_lora_rank,
+      kv_lora_rank=cfg.kv_lora_rank,
+      qk_nope_head_dim=cfg.qk_nope_head_dim,
+      qk_rope_head_dim=cfg.qk_rope_head_dim,
+      v_head_dim=cfg.v_head_dim,
+      max_position_embeddings=cfg.max_position_embeddings,
+      original_max_position_embeddings=cfg.original_max_position_embeddings,
+      mscale=cfg.mscale,
+      rope_factor=cfg.rope_factor,
+      model_mode=MODEL_MODE_TRAIN,
+      rngs=nnx.Rngs(0),
+  )
 
 
 def t2j(t: torch.Tensor):
@@ -321,12 +355,14 @@ class KDABlockTest(Glm5NextTestBase):
 
 
 class SparseMLATest(Glm5NextTestBase):
+  """GLM-5.3 DSA layers run on MaxText's MLA (NoPE) with the k-pool indexer."""
 
-  def _build(self, seq):
+  def _build(self, seq, **cfg_overrides):
     cfg = hf_config()
     hf_attn = glm5.Glm5NextTextAttention(cfg, layer_idx=3).eval()
     randomize(hf_attn, seed=1)
-    mt_attn = Glm5SparseMLA(mt_config(), self.mesh, jnp.float32, rngs=nnx.Rngs(0))
+    mt_cfg = mt_config(**cfg_overrides)
+    mt_attn = build_mla(mt_cfg, self.mesh)
     copy_mla(hf_attn, mt_attn)
     x = torch.randn(2, seq, EMB)
     return hf_attn, mt_attn, x
@@ -338,30 +374,35 @@ class SparseMLATest(Glm5NextTestBase):
       topk = hf_attn.indexer(x, q_resid, torch.ones(2, seq, dtype=torch.bool), None)
       hf_mask = hf_attn.build_attention_mask_from_topk(topk, torch.zeros(1), seq)[:, 0]
       hf_mask = hf_mask == 0 if hf_mask.dtype != torch.bool else hf_mask
-      mt_mask = mt_attn.indexer(t2j(x), t2j(q_resid))
-      np.testing.assert_array_equal(np.asarray(mt_mask), hf_mask.numpy(), err_msg=f"seq={seq}")
+      causal = jnp.where(jnp.tril(jnp.ones((seq, seq), bool)), 0.0, DEFAULT_MASK_VALUE)[None].repeat(2, 0)
+      mt_mask, _, _ = mt_attn.indexer(
+          inputs_q=t2j(x),
+          low_rank_q=t2j(q_resid),
+          inputs_kv=t2j(x),
+          inputs_positions=jnp.arange(seq)[None].repeat(2, 0),
+          attention_mask=causal,
+          decoder_segment_ids=jnp.ones((2, seq), jnp.int32),
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      mt_mask = np.asarray(mt_mask) == 0.0
+      np.testing.assert_array_equal(mt_mask, hf_mask.numpy(), err_msg=f"seq={seq}")
       if seq > TOPK + KPOOL:
         # Sparse selection must actually drop tokens for long sequences.
-        self.assertLess(int(np.asarray(mt_mask)[:, -1].sum(-1).max()), seq)
+        self.assertLess(int(mt_mask[:, -1].sum(-1).max()), seq)
 
   def test_sparse_mla_matches_hf(self):
     for seq in (8, 37):
       hf_attn, mt_attn, x = self._build(seq)
       hf_out, _, _ = hf_attn(x, attention_mask=torch.ones(2, seq, dtype=torch.bool))
-      mt_out, _ = mt_attn(t2j(x), model_mode=MODEL_MODE_TRAIN)
+      mt_out, _ = mt_attn(
+          t2j(x),
+          t2j(x),
+          inputs_positions=jnp.arange(seq)[None].repeat(2, 0),
+          decoder_segment_ids=jnp.ones((2, seq), jnp.int32),
+          model_mode=MODEL_MODE_TRAIN,
+          deterministic=True,
+      )
       self.assert_close(mt_out, hf_out, atol=2e-4)
-
-
-class KPoolIndexerTest(Glm5NextTestBase):
-
-  def test_kpool1_is_plain_topk(self):
-    """With kpool=1 the indexer reduces to per-token causal top-k."""
-    idx = KPoolIndexer(mt_config(indexer_kpool=1, indexer_topk=4), jnp.float32, rngs=nnx.Rngs(0))
-    x = jax.random.normal(jax.random.key(0), (1, 12, EMB))
-    q = jax.random.normal(jax.random.key(1), (1, 12, Q_LORA))
-    mask = np.asarray(idx(x, q))
-    self.assertTrue((mask.sum(-1) == np.minimum(np.arange(12) + 1, 4)).all())
-    self.assertFalse(np.triu(mask[0], k=1).any())
 
 
 class DecoderLayerTest(Glm5NextTestBase):

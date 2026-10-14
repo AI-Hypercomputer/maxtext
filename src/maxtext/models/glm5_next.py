@@ -33,13 +33,13 @@ from flax import nnx
 from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 
-from maxtext.common.common_types import Config, HyperConnectionType, MODEL_MODE_PREFILL, get_weight_dtype
+from maxtext.common.common_types import AttentionType, Config, HyperConnectionType, MODEL_MODE_PREFILL, get_weight_dtype
+from maxtext.layers import attention_mla
 from maxtext.layers import initializers
 from maxtext.layers import linears
 from maxtext.layers import mhc
 from maxtext.layers import moe
 from maxtext.layers import quantizations
-from maxtext.layers.attention_glm5 import Glm5SparseMLA
 from maxtext.layers.kimi_delta_attention import KimiDeltaAttention
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.utils import max_utils
@@ -88,8 +88,8 @@ class Glm5NextDecoderLayer(nnx.Module):
     assert config.mhc_expansion_rate > 1, "GLM-5.3-Flash requires mHC (mhc_expansion_rate > 1)."
 
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
-    del batch_size, seq_len
     emb = config.emb_dim
+    dummy_inputs_shape = (batch_size, seq_len, emb)
 
     def norm():
       return RMSNorm(
@@ -105,7 +105,38 @@ class Glm5NextDecoderLayer(nnx.Module):
     self.post_self_attention_layer_norm = norm()
 
     if self.is_dsa:
-      self.self_attention = Glm5SparseMLA(config, mesh, config.dtype, quant, rngs=rngs)
+      # DeepSeek Sparse Attention: MaxText's MLA (NoPE, qk_rope_head_dim=0) with the k-pool DSA indexer; the
+      # indexer mask goes through AttentionOp, so dot_product and flash (dynamic-mask splash) both work.
+      self.self_attention = attention_mla.MLA(
+          config=config,
+          num_query_heads=config.num_query_heads,
+          num_kv_heads=config.num_kv_heads,
+          head_dim=config.head_dim,
+          max_target_length=config.max_target_length,
+          max_prefill_predict_length=config.max_prefill_predict_length,
+          attention_kernel=config.attention,
+          attention_type=AttentionType(config.attention_type),
+          inputs_q_shape=dummy_inputs_shape,
+          inputs_kv_shape=dummy_inputs_shape,
+          mesh=mesh,
+          dtype=config.dtype,
+          weight_dtype=config.weight_dtype,
+          dropout_rate=config.dropout_rate,
+          name="self_attention",
+          quant=quant,
+          kv_quant=quantizations.configure_kv_quant(config),
+          q_lora_rank=config.q_lora_rank,
+          kv_lora_rank=config.kv_lora_rank,
+          qk_nope_head_dim=config.qk_nope_head_dim,
+          qk_rope_head_dim=config.qk_rope_head_dim,
+          v_head_dim=config.v_head_dim,
+          max_position_embeddings=config.max_position_embeddings,
+          original_max_position_embeddings=config.original_max_position_embeddings,
+          mscale=config.mscale,
+          rope_factor=config.rope_factor,
+          model_mode=model_mode,
+          rngs=rngs,
+      )
     else:
       self.self_attention = KimiDeltaAttention(config, mesh, config.dtype, quant, rngs=rngs)
 
@@ -181,7 +212,7 @@ class Glm5NextDecoderLayer(nnx.Module):
       decoder_input_tokens=None,
       **kwargs,
   ):
-    del decoder_positions, previous_chunk, slot, attention_metadata, decoder_input_tokens, kwargs
+    del previous_chunk, slot, attention_metadata, decoder_input_tokens, kwargs
     if isinstance(inputs, tuple):
       inputs = inputs[0]
     x = checkpoint_name(inputs, "decoder_layer_input")  # [B, S, hc_mult, E]
@@ -192,7 +223,9 @@ class Glm5NextDecoderLayer(nnx.Module):
         x=x,
         mhc_type=HyperConnectionType.ATTENTION,
         decoder_segment_ids=decoder_segment_ids,
+        inputs_positions=decoder_positions,
         model_mode=model_mode,
+        deterministic=deterministic,
     )
 
     if self.is_dense:
