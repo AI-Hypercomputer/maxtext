@@ -24,7 +24,6 @@ from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
 from flax import nnx
-from flax.linen import partitioning as nn_partitioning
 from flax import struct
 import jax
 from jax import ad_checkpoint as adc
@@ -680,6 +679,20 @@ def _is_small_scanned_kernel(module) -> bool:
   return kernel.value.size // layers * kernel.value.dtype.itemsize <= _GATHER_ONCE_MAX_LAYER_BYTES
 
 
+def _param_path(path) -> tuple:
+  """A params pytree path as the module path keys `nnx.iter_modules` yields, plus the param name.
+
+  Drops the trailing `GetAttrKey("value")` of each Variable leaf.
+  """
+  keys = []
+  for k in path:
+    if isinstance(k, jax.tree_util.DictKey):
+      keys.append(k.key)
+    elif isinstance(k, jax.tree_util.SequenceKey):
+      keys.append(k.idx)
+  return tuple(keys)
+
+
 def _gathered_kernels(layers: nnx.Module) -> dict:
   """{kernel path within a scanned layer stack: its module}, for the kernels gathered once per stack."""
   kernels = {}
@@ -708,7 +721,7 @@ def gather_scanned_kernels_once(layers: nnx.Module, params, mesh: Mesh, shard_mo
   replicated = NamedSharding(mesh, P())
 
   def replicate(path, x):
-    if tuple(k.key for k in path if isinstance(k, jax.tree_util.DictKey)) not in gathered:
+    if _param_path(path) not in gathered:
       return x
     if shard_mode == ShardMode.EXPLICIT:
       return jax.sharding.reshard(x, replicated)
@@ -720,24 +733,27 @@ def gather_scanned_kernels_once(layers: nnx.Module, params, mesh: Mesh, shard_mo
 def gathered_kernel_grad_shardings(layers: nnx.Module, mesh: Mesh, rules) -> dict:
   """{kernel path within one layer: the kernel's own sharding} for the kernels `gather_scanned_kernels_once` gathers."""
   return {
-      path: NamedSharding(mesh, nn_partitioning.logical_to_mesh_axes(tuple(module.kernel_axes), rules))
+      path: NamedSharding(mesh, logical_to_mesh_axes(tuple(module.kernel_axes), mesh, rules))
       for path, module in _gathered_kernels(layers).items()
   }
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
 def _identity_with_grad_sharding(x, sharding):
-  @jax.custom_vjp
-  def ident(y):
-    return y
+  """The identity on `x`; its cotangent is constrained to `sharding`."""
+  return x
 
-  def ident_fwd(y):
-    return y, None
 
-  def ident_bwd(_, ct):
-    return (jax.lax.with_sharding_constraint(ct, sharding),)
+def _identity_with_grad_sharding_fwd(x, sharding):
+  del sharding
+  return x, None
 
-  ident.defvjp(ident_fwd, ident_bwd)
-  return ident(x)
+
+def _identity_with_grad_sharding_bwd(sharding, _, cotangent):
+  return (jax.lax.with_sharding_constraint(cotangent, sharding),)
+
+
+_identity_with_grad_sharding.defvjp(_identity_with_grad_sharding_fwd, _identity_with_grad_sharding_bwd)
 
 
 def reduce_scatter_gathered_grads(params, shardings: dict):
@@ -749,7 +765,7 @@ def reduce_scatter_gathered_grads(params, shardings: dict):
   """
 
   def apply(path, x):
-    keys = tuple(k.key for k in path if isinstance(k, jax.tree_util.DictKey))
+    keys = _param_path(path)
     return _identity_with_grad_sharding(x, shardings[keys]) if keys in shardings else x
 
   return jax.tree_util.tree_map_with_path(apply, params)
