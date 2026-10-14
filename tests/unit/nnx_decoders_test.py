@@ -49,7 +49,9 @@ from maxtext.common.common_types import (
     ShardMode,
 )
 from maxtext.configs import pyconfig
+from maxtext.layers import fsdp_prefetch
 from maxtext.layers import linears
+from maxtext.layers import nnx_decoders
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed
@@ -1834,7 +1836,7 @@ class TestNNXDecoderPrefetching(unittest.TestCase):
     super().setUp()
     # The CPU test mesh has a single device, so no FSDP axis spans more than one device. Force the
     # prefetch path so that these tests exercise it.
-    patcher = mock.patch("maxtext.layers.fsdp_prefetch.mesh_uses_fsdp", return_value=True)
+    patcher = mock.patch.object(fsdp_prefetch, "mesh_uses_fsdp", return_value=True)
     patcher.start()
     self.addCleanup(patcher.stop)
     self.cfg = _make_config(scan_layers=True, prefetch_fsdp_weights=True, num_decoder_layers=3)
@@ -1988,8 +1990,9 @@ class TestNNXDecoderPrefetching(unittest.TestCase):
     ids, segment_ids, positions = self._make_token_inputs()
     graphdef, params, state = self._get_sharded_params_and_state(decoder, with_fsdp=False)
 
-    with unittest.mock.patch(
-        "maxtext.layers.nnx_decoders.NNXDecoderLayer.__call__",
+    with unittest.mock.patch.object(
+        NNXDecoderLayer,
+        "__call__",
         return_value=jnp.zeros(
             (
                 self.cfg.global_batch_size_to_train_on,
@@ -2074,7 +2077,7 @@ class TestNNXDecoderPrefetching(unittest.TestCase):
       )
       return jnp.sum(out_logits)
 
-    with unittest.mock.patch("maxtext.layers.fsdp_prefetch.getattr", side_effect=_mock_getattr):
+    with unittest.mock.patch.object(fsdp_prefetch, "getattr", side_effect=_mock_getattr, create=True):
       loss_val, grad_params = jax.value_and_grad(loss_fn)(params, state)
     self.assertTrue(jnp.isfinite(loss_val))
     self.assertIsNotNone(grad_params)
@@ -2178,9 +2181,9 @@ class TestNNXDecoderPrefetching(unittest.TestCase):
     decoder = NNXDecoder(config=self.cfg, mesh=self.mesh, model_mode=MODEL_MODE_TRAIN, rngs=self.rngs)
     hidden = jnp.zeros((self.cfg.global_batch_size_to_train_on, self.cfg.max_target_length, self.cfg.emb_dim))
     with (
-        mock.patch("maxtext.layers.fsdp_prefetch.mesh_uses_fsdp", return_value=False),
+        mock.patch.object(fsdp_prefetch, "mesh_uses_fsdp", return_value=False),
         mock.patch.object(NNXDecoder, "_apply_layers_sequentially_prefetch") as prefetch,
-        mock.patch("maxtext.layers.nnx_decoders.max_logging.info") as log_info,
+        mock.patch.object(nnx_decoders.max_logging, "info") as log_info,
     ):
       # pylint: disable=protected-access
       out, _, kv = decoder._apply_layers_sequentially(decoder.layers, hidden, length=0, kv_caches_stacked=None)
@@ -2256,7 +2259,7 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
   def setUp(self):
     super().setUp()
     # Force the prefetch path on the single-device CPU test mesh (see TestNNXDecoderPrefetching).
-    patcher = mock.patch("maxtext.layers.fsdp_prefetch.mesh_uses_fsdp", return_value=True)
+    patcher = mock.patch.object(fsdp_prefetch, "mesh_uses_fsdp", return_value=True)
     patcher.start()
     self.addCleanup(patcher.stop)
 
@@ -2342,7 +2345,7 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
 
   def test_grad_parity_ignores_remat_policy(self):
     # The prefetch path always rematerializes each layer in full; other policies are logged and ignored.
-    with unittest.mock.patch("maxtext.layers.fsdp_prefetch.max_logging.info") as log_info:
+    with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
       self._assert_parity(num_layers=3, remat_policy="minimal")
     self.assertTrue(any("remat_policy=minimal is ignored" in str(c) for c in log_info.call_args_list))
 

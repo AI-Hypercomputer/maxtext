@@ -36,30 +36,14 @@ def _abstract_mesh(shape, names):
 
 
 class FsdpPrefetchHelpersTest(unittest.TestCase):
-  """Tests for the static loop-split, ordering, and stacking helpers."""
+  """Tests for the layer-slicing, stacking, and sharding helpers."""
 
-  def test_fwd_split_covers_all_layers(self):
-    for length in range(1, 10):
-      s, num_pairs = fsdp_prefetch._prefetch_fwd_split(length)  # pylint: disable=protected-access
-      self.assertIn(s, (0, 1))
-      # Head layers + loop layers + the last layer (run after the loop) = all layers.
-      self.assertEqual(s + 2 * num_pairs + 1, length)
-
-  def test_can_order_requires_multi_trip_loop(self):
-    self.assertFalse(fsdp_prefetch._prefetch_can_order(0))  # pylint: disable=protected-access
-    self.assertFalse(fsdp_prefetch._prefetch_can_order(1))  # pylint: disable=protected-access
-    self.assertTrue(fsdp_prefetch._prefetch_can_order(2))  # pylint: disable=protected-access
-
-  def test_interleave_restores_layer_order(self):
-    even = {"w": jnp.array([[0.0], [2.0], [4.0]])}
-    odd = {"w": jnp.array([[1.0], [3.0], [5.0]])}
-    out = fsdp_prefetch._interleave(even, odd)  # pylint: disable=protected-access
-    np.testing.assert_array_equal(out["w"][:, 0], np.arange(6.0))
-
-  def test_take_and_expand0(self):
+  def test_slice_and_expand0(self):
     tree = {"w": jnp.arange(12.0).reshape(3, 4)}
-    layer = fsdp_prefetch._take(tree, 1)  # pylint: disable=protected-access
+    layer = fsdp_prefetch._slice_at(tree, 1)  # pylint: disable=protected-access
     np.testing.assert_array_equal(layer["w"], np.arange(4.0, 8.0))
+    sub = fsdp_prefetch._slice_range(tree, 1, 3)  # pylint: disable=protected-access
+    np.testing.assert_array_equal(sub["w"], np.arange(4.0, 12.0).reshape(2, 4))
     self.assertEqual(fsdp_prefetch._expand0(layer)["w"].shape, (1, 4))  # pylint: disable=protected-access
 
   def test_explicit_all_gather_without_fsdp_sharding_returns_none(self):
