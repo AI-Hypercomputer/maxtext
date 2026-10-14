@@ -17,9 +17,7 @@
 # pylint: disable=protected-access
 
 import functools
-import re
 import sys
-import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -882,10 +880,10 @@ class GdnBwdPallasTest(absltest.TestCase):
           transition_in_state=True,
       )
 
-  def test_cp_pass_states_only_and_t_inv_reuse_are_bitwise(self):
-    """F2/F3: a states-only pass and a t_inv-reusing pass reproduce the default pass bit for bit."""
+  def test_cp_pass_states_only_is_bitwise(self):
+    """F2: a states-only pass reproduces the default pass's states and t_inv bit for bit."""
     if jax.default_backend() != "tpu":
-      self.skipTest("states_only / t_inv_in are Pallas TPU kernel options")
+      self.skipTest("states_only is a Pallas TPU kernel option")
     batch_size = 2
     chunk_size = 64
     num_chunks = 3
@@ -901,7 +899,7 @@ class GdnBwdPallasTest(absltest.TestCase):
         jax.random.PRNGKey(606), batch_size, seq_len, dim_size, num_v_heads, conv_kernel_size
     )
     conv_halo = jnp.zeros((batch_size, conv_kernel_size - 1, dim_size), dtype=qkv.dtype)
-    # A non-zero incoming state, as pass 2 of seq-CP sees it.
+    # A non-zero incoming state, so the states-only pass exercises the full state update.
     h0 = 0.1 * jax.random.normal(jax.random.PRNGKey(7), (batch_size, num_v_heads, head_k_dim, head_v_dim), jnp.float32)
 
     for compute_dtype, act_dtype in ((jnp.float32, jnp.float32), (jnp.bfloat16, jnp.bfloat16)):
@@ -928,45 +926,22 @@ class GdnBwdPallasTest(absltest.TestCase):
         self.assertIsNotNone(out_ref)
         self.assertIsNotNone(chunk_states_ref)
 
-        # F2: states-only pass -> no out / chunk_states, identical states and t_inv. As seq-CP pass 1
-        # does, keep t_inv in the kernel's compute dtype (no f32 round trip before pass 2 reads it).
+        # F2: states-only pass -> no out / chunk_states, identical states and t_inv.
         (out_so, (cs_so, rs_so)), t_inv_so, chunk_states_so = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
-            qkv_c, b_c, a_c, recurrent_state=h0, states_only=True, t_inv_dtype=None, **common
+            qkv_c, b_c, a_c, recurrent_state=h0, states_only=True, **common
         )
         self.assertIsNone(out_so)
         self.assertIsNone(chunk_states_so)
-        self.assertEqual(t_inv_so.dtype, jnp.dtype(compute_dtype))
         np.testing.assert_array_equal(cs_so, cs_ref)
         np.testing.assert_array_equal(rs_so, rs_ref)
-        np.testing.assert_array_equal(t_inv_so.astype(jnp.float32), t_inv_ref)
+        np.testing.assert_array_equal(t_inv_so, t_inv_ref)
 
-        # F3: feeding the compute-dtype pass-1 t_inv back in reproduces every output bit for bit. The
-        # kernel does not write t_inv again; the returned one is the input.
-        (out_ti, (cs_ti, rs_ti)), t_inv_ti, chunk_states_ti = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
-            qkv_c, b_c, a_c, recurrent_state=h0, t_inv_in=t_inv_so, **common
-        )
-        np.testing.assert_array_equal(out_ti, out_ref)
-        np.testing.assert_array_equal(cs_ti, cs_ref)
-        np.testing.assert_array_equal(rs_ti, rs_ref)
-        np.testing.assert_array_equal(t_inv_ti, t_inv_ref)
-        np.testing.assert_array_equal(chunk_states_ti, chunk_states_ref)
-
-        # Seq-CP pass 2a (t_inv reused, no chunk_states): same output and states.
-        (out_2a, (cs_2a, rs_2a)), _, chunk_states_2a = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(
-            qkv_c, b_c, a_c, recurrent_state=h0, t_inv_in=t_inv_so, skip_chunk_states=True, **common
-        )
-        self.assertIsNone(chunk_states_2a)
-        np.testing.assert_array_equal(out_2a, out_ref)
-        np.testing.assert_array_equal(cs_2a, cs_ref)
-        np.testing.assert_array_equal(rs_2a, rs_ref)
-
-  def test_gdn_kernel_options_defaults_and_config_derivation(self):
-    """Seq-CP pass-1 reductions are on by default; the pass-2 split is derived from the remat config."""
+  def test_gdn_kernel_options_defaults(self):
+    """The seq-CP pass-1 reductions are on by default; turning both off is the XLA path."""
     opts = gdn_bwd_pallas.GDNKernelOptions()
     self.assertTrue(opts.cp_pass1_states_only)
     self.assertTrue(opts.cp_m_local_in_kernel)
-    self.assertFalse(opts.cp_pass2_reuse_t_inv)
-    self.assertFalse(opts.cp_pass2_split_residuals)
+    self.assertEqual(gdn_bwd_pallas.DEFAULT_GDN_KERNEL_OPTIONS, opts)
     # In-kernel M_local needs a states-only pass 1, so it turns it on; both off is the legacy XLA path.
     self.assertTrue(gdn_bwd_pallas.GDNKernelOptions(cp_pass1_states_only=False).cp_pass1_states_only)
     legacy = gdn_bwd_pallas.GDNKernelOptions(cp_pass1_states_only=False, cp_m_local_in_kernel=False)
@@ -975,167 +950,6 @@ class GdnBwdPallasTest(absltest.TestCase):
     same = gdn_bwd_pallas.GDNKernelOptions(cp_m_local_in_kernel=False, cp_pass1_states_only=False)
     self.assertEqual(legacy, same)
     self.assertEqual(hash(legacy), hash(same))
-
-    from maxtext.kernels.gdn import model_runner  # pylint: disable=import-outside-toplevel
-
-    def options(**kwargs):
-      cfg = {"remat_policy": "custom", "gdn": "remat", "gdn_states": "remat", "gdn_cp_state": "device"}
-      cfg.update(kwargs)
-      return model_runner.gdn_kernel_options_from_config(types.SimpleNamespace(**cfg))
-
-    self.assertEqual(options(), gdn_bwd_pallas.GDNKernelOptions(cp_pass2_split_residuals=True))
-    self.assertTrue(options(gdn_kernel_cp_pass2_reuse_t_inv=True).cp_pass2_reuse_t_inv)
-    # (remat config) -> whether a t_inv-reusing pass 2 is split into an output pass and a residual pass.
-    cases = (
-        ({}, True),  # gdn=remat, carries saved: the bwd replays pass 2 only.
-        ({"gdn_cp_state": "offload"}, True),
-        ({"remat_policy": "full", "gdn_cp_state": "remat"}, False),  # the bwd replays pass 1 anyway.
-        ({"gdn_cp_state": "remat"}, False),
-        ({"remat_policy": "none"}, False),  # no replay at all.
-        ({"gdn": "device"}, False),  # kernel residuals saved: no replay.
-        ({"gdn": "offload"}, False),
-        ({"gdn_states": "device"}, False),
-    )
-    for overrides, split in cases:
-      with self.subTest(**overrides):
-        self.assertEqual(options(gdn_kernel_cp_pass2_reuse_t_inv=True, **overrides).cp_pass2_split_residuals, split)
-        # The split is derived independently of where t_inv reuse comes from.
-        self.assertEqual(options(**overrides).cp_pass2_split_residuals, split)
-
-  def test_cp_pass2_reuse_t_inv_split_kernel_calls_under_remat(self):
-    """Under remat with the seq-CP carries saved, the split pass 2 keeps pass 1 out of the backward replay.
-
-    Counts the fused forward-kernel custom calls in the compiled fwd+bwd program of a sequence-sharded call:
-    split (pass 1 + pass 2a in the forward, pass 2b replayed in the backward) = 3, the coupled pass 2 under
-    the same policy = 4 (its residuals depend on pass 1, so the replay re-runs pass 1), and the coupled
-    pass 2 without remat = 2. Values and gradients do not depend on the variant.
-    """
-    devices = jax.devices()
-    if jax.default_backend() != "tpu" or len(devices) < 2:
-      self.skipTest(f"Needs >= 2 TPU devices for a sequence-sharded call, got {len(devices)} {jax.default_backend()}")
-    cp_size = 2
-    batch_size = 1
-    chunk_size = 64
-    seq_len = cp_size * 2 * chunk_size
-    num_k_heads = 2
-    num_v_heads = 4
-    head_k_dim = 128
-    head_v_dim = 128
-    conv_kernel_size = 4
-    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
-    args = _init_bwd_inputs(
-        jax.random.PRNGKey(2040), batch_size, seq_len, dim_size, num_v_heads, head_v_dim, conv_kernel_size
-    )
-    # The model's bf16 activations (bf16 compute, t_inv handed between passes in bf16), f32 weights.
-    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = args
-    inputs = (qkv.astype(jnp.bfloat16), b.astype(jnp.bfloat16), a.astype(jnp.bfloat16))
-    inputs += (conv_weight, conv_bias, a_log, dt_bias)
-    do = do.astype(jnp.bfloat16)
-    mesh = jax.sharding.Mesh(np.array(devices[:cp_size]), ("context",))
-    P = jax.sharding.PartitionSpec
-    seq_spec = P(None, "context", None)
-
-    class CpStateDeviceConfig:  # gdn=remat (bwd replays the fwd kernel), gdn_cp_state=device.
-      use_gdn_kernel = True
-      remat_policy = "custom"
-      tensors_on_device = ["gdn_cp_state"]
-      tensors_to_offload = []
-
-    save_names, offload_names = maxtext_utils.get_save_and_offload_names(CpStateDeviceConfig())
-    self.assertIn("gdn_cp_s_in", save_names)
-    policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-        names_which_can_be_saved=save_names,
-        names_which_can_be_offloaded=offload_names,
-        offload_src="device",
-        offload_dst="pinned_host",
-    )
-
-    def compile_variant(options, remat):
-      def loss(qkv, b, a, cw, cb, al, dt, do_):
-        @functools.partial(
-            jax.shard_map,
-            mesh=mesh,
-            in_specs=(seq_spec, seq_spec, seq_spec, P(), P(), P(), P()),
-            out_specs=P(None, "context", None, None),
-            check_vma=False,
-        )
-        def _mapped(qkv_l, b_l, a_l, cw_l, cb_l, al_l, dt_l):
-          out, _ = gdn_bwd_pallas.gdn_decoupled_conv1d(
-              qkv_l,
-              b_l,
-              a_l,
-              cw_l,
-              cb_l,
-              al_l,
-              dt_l,
-              None,
-              None,
-              num_k_heads,
-              num_v_heads,
-              head_k_dim,
-              head_v_dim,
-              conv_kernel_size,
-              chunk_size,
-              True,
-              jnp.bfloat16,
-              "context",
-              options=options,
-          )
-          return out
-
-        out = _mapped(qkv, b, a, cw, cb, al, dt)
-        return jnp.sum(out.astype(jnp.float32) * do_.astype(jnp.float32))
-
-      fn = jax.checkpoint(loss, policy=policy) if remat else loss
-      return jax.jit(jax.value_and_grad(fn, argnums=tuple(range(7)))).lower(*inputs, do).compile()
-
-    def kernel_calls(compiled):
-      counts = {}
-      for line in compiled.as_text().splitlines():
-        # XLA names each Pallas custom-call instruction after its kernel
-        # (fused_conv1d_gdn_<mode>_b<n>_c<n>[_variant][.k]); other instructions (e.g. gather index custom-calls)
-        # only carry the kernel name in their op_name metadata.
-        match = re.match(r"\s*(?:ROOT )?%(fused_conv1d_gdn_[a-z]\w*?)(?:\.\d+)? = .*\bcustom-call\(", line)
-        if match:
-          name = match.group(1)
-          if "_states_only" in name:
-            kind = "pass1"
-          elif "_tinv_in" in name:
-            kind = "pass2a" if "_no_cs" in name else "pass2_reuse"
-          else:
-            kind = "pass2"
-          counts[kind] = counts.get(kind, 0) + 1
-      return counts
-
-    reuse = gdn_bwd_pallas.GDNKernelOptions(cp_pass2_reuse_t_inv=True)
-    split = gdn_bwd_pallas.GDNKernelOptions(cp_pass2_reuse_t_inv=True, cp_pass2_split_residuals=True)
-    variants = {
-        "split_remat": (split, True, {"pass1": 1, "pass2a": 1, "pass2": 1}),
-        "coupled_remat": (reuse, True, {"pass1": 2, "pass2_reuse": 2}),
-        "coupled_no_remat": (reuse, False, {"pass1": 1, "pass2_reuse": 1}),
-        "default_remat": (gdn_bwd_pallas.DEFAULT_GDN_KERNEL_OPTIONS, True, {"pass1": 1, "pass2": 2}),
-    }
-    results = {}
-    for name, (options, remat, expected) in variants.items():
-      with self.subTest(variant=name):
-        compiled = compile_variant(options, remat)
-        self.assertEqual(
-            kernel_calls(compiled),
-            expected,
-            "\n".join(
-                line[:400]
-                for line in compiled.as_text().splitlines()
-                if "fused_conv1d_gdn_" in line and "custom-call(" in line
-            ),
-        )
-        results[name] = compiled(*inputs, do)
-    ref_value, ref_grads = results["default_remat"]
-    for name, (value, grads) in results.items():
-      np.testing.assert_allclose(value, ref_value, rtol=1e-6, err_msg=name)
-      for idx, (g, g_ref) in enumerate(zip(grads, ref_grads)):
-        np.testing.assert_allclose(
-            np.asarray(g, np.float32), np.asarray(g_ref, np.float32), rtol=1e-5, atol=1e-6, err_msg=f"{name} grad {idx}"
-        )
 
   def test_decoupled_conv1d_gdn_kernel_gradient_with_initial_states(self):
     """Verifies custom VJP gradients when initial conv_state and recurrent_state are provided."""

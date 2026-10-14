@@ -114,7 +114,6 @@ def chunked_gdn_per_seq(
     cfg: config.GDNConfig,
     seg_c_col: jax.Array | None = None,  # [1, chunk, 1]
     seg_aux_col: jax.Array | None = None,  # [1, chunk, 1]
-    t_inv_in: jax.Array | None = None,  # [num_v_heads, chunk, chunk]
 ) -> tuple[jax.Array | None, jax.Array, jax.Array]:
   """Perform chunked GDN over input [num_heads, chunk, head_dim]."""
   # bf16 activations keep single-pass MXU matmuls even with an f32 compute dtype
@@ -205,25 +204,19 @@ def chunked_gdn_per_seq(
   # [num_v_heads, chunk, kq_head_dim]
   k_beta_repeat = k_repeat * beta_large
 
-  if t_inv_in is not None:
-    # F3: precomputed triangular inverse (identical to what this pass would
-    # compute: it depends only on k, beta, gating, which do not depend on the
-    # incoming state).
-    t_inv = t_inv_in.astype(cfg.dtypes.compute)
-  else:
-    # [num_v_heads, chunk, chunk]
-    beta_k_k_t = jax.lax.dot(
-        k_beta_repeat,
-        k_repeat,
-        dimension_numbers=(((2,), (2,)), ((0,), (0,))),
-        precision=dot_prec,
-        preferred_element_type=jnp.float32,
-    ).astype(cfg.dtypes.compute)
-    gating_beta_k_k_t = gating_map_masked * beta_k_k_t
-    t = jnp.where(identity_mask, 1, gating_beta_k_k_t)
+  # [num_v_heads, chunk, chunk]
+  beta_k_k_t = jax.lax.dot(
+      k_beta_repeat,
+      k_repeat,
+      dimension_numbers=(((2,), (2,)), ((0,), (0,))),
+      precision=dot_prec,
+      preferred_element_type=jnp.float32,
+  ).astype(cfg.dtypes.compute)
+  gating_beta_k_k_t = gating_map_masked * beta_k_k_t
+  t = jnp.where(identity_mask, 1, gating_beta_k_k_t)
 
-    # [num_v_heads, chunk, chunk]
-    t_inv = invert_triangular_matrix(t, precision=dot_prec)
+  # [num_v_heads, chunk, chunk]
+  t_inv = invert_triangular_matrix(t, precision=dot_prec)
 
   # [num_v_heads, chunk, v_head_dim]
   v_beta_large = v_large * beta_large
@@ -345,7 +338,6 @@ def chunked_gdn(
     a_log: jax.Array,
     dt_bias: jax.Array,
     cfg: config.GDNConfig,
-    t_inv_in: jax.Array | None = None,  # [seq, num_v_heads, chunk, chunk]
 ) -> tuple[jax.Array | None, jax.Array, jax.Array]:
   """Perform chunked GDN over input [seq, num_heads, chunk, head_dim].
 
@@ -411,7 +403,6 @@ def chunked_gdn(
         cfg,
         seg_c_col=seg_c_per_seq[idx] if cfg.has_seg_ids else None,
         seg_aux_col=seg_aux_per_seq[idx] if cfg.has_seg_ids else None,
-        t_inv_in=t_inv_in[idx] if t_inv_in is not None else None,
     )
     if out is not None:
       out_list.append(out.swapaxes(0, 1))

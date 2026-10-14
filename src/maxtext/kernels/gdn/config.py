@@ -86,10 +86,6 @@ class GDNConfig:
   # F2: states-only pass (seq-CP pass 1): skips `out` / `chunk_states`
   # (no HBM buffers, no writes) and all q-dependent compute.
   states_only: bool = False
-  # F3: t_inv is provided as an input (seq-CP pass 2); skips the Gram matrix
-  # and the block-triangular inverse, and the kernel has no t_inv output (the
-  # caller already holds it).
-  t_inv_input: bool = False
   # F5: the recurrent state carries the local state transition (seq-CP pass 1).
   # The state's last dim is v_head_dim + kq_head_dim: the extra
   # [kq_head_dim, kq_head_dim] block starts as the identity (set by the caller)
@@ -97,10 +93,6 @@ class GDNConfig:
   # exactly like S itself (S_new = M_c S + U_c), so the kernel returns
   # M_local = M_{N-1} ... M_0 next to S_ext. Requires `states_only`.
   transition_in_state: bool = False
-  # No `chunk_states` output (no HBM buffer, no writes): seq-CP pass 2a, whose
-  # only consumer is the forward output, while a separate pass 2b produces the
-  # backward residuals.
-  skip_chunk_states: bool = False
 
   @property
   def chunk_size(self) -> int:
@@ -132,16 +124,6 @@ class GDNConfig:
     return self.v_head_dim + (self.kq_head_dim if self.transition_in_state else 0)
 
   @property
-  def has_t_inv_output(self) -> bool:
-    """Whether the kernel writes t_inv (not when it reads a precomputed one)."""
-    return not self.t_inv_input
-
-  @property
-  def has_chunk_states_output(self) -> bool:
-    """Whether the kernel writes the per-chunk incoming states (chunked mode only)."""
-    return self.mode == GDNMode.PER_SEQ and not self.states_only and not self.skip_chunk_states
-
-  @property
   def aligned_num_v_heads(self) -> int:
     tpu_info = pltpu.get_tpu_info()
     num_lanes = tpu_info.num_lanes
@@ -153,12 +135,8 @@ class GDNConfig:
     name = f"fused_conv1d_gdn_{self.mode.value}_b{self.seq_tile_size}" f"_c{self.chunk_size}"
     if self.states_only:
       name += "_states_only"
-    if self.t_inv_input:
-      name += "_tinv_in"
     if self.transition_in_state:
       name += "_mloc"
-    if self.skip_chunk_states:
-      name += "_no_cs"
     return name
 
   def get_metadata(self) -> dict[str, str | int | float]:

@@ -339,20 +339,6 @@ class PyconfigTest(unittest.TestCase):
       self._init_qwen3_next_packing(packing=False, gdn_cp_mode="invalid_mode")
     self.assertEqual(self._init_qwen3_next_packing(packing=False, gdn_cp_mode="head").gdn_cp_mode, "head")
 
-    # The seq-CP t_inv reuse knob is a kernel option: it needs use_gdn_kernel=True.
-    with self.assertRaisesRegex(ValueError, "gdn_kernel_cp_pass2_reuse_t_inv=True requires use_gdn_kernel=True"):
-      self._init_qwen3_next_packing(packing=False, use_gdn_kernel=False, gdn_kernel_cp_pass2_reuse_t_inv=True)
-    cfg_reuse = self._init_qwen3_next_packing(
-        packing=False,
-        use_gdn_kernel=True,
-        gdn_kernel_cp_pass2_reuse_t_inv=True,
-        max_target_length=256,
-        ici_context_parallelism=4,
-        context_parallel_load_balance=False,
-        gdn_cp_mode="seq",
-    )
-    self.assertTrue(cfg_reuse.gdn_kernel_cp_pass2_reuse_t_inv)
-
   def test_rl_config_gdn_granular_remat_requires_gdn_kernel(self):
     """RLConfig does not inherit MaxTextConfig's validators, so it carries its own GDN remat guard."""
     for key in ("gdn", "gdn_cp_state"):

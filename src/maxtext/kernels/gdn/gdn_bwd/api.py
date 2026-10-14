@@ -49,12 +49,6 @@ class GDNKernelOptions:
     cp_pass1_states_only: In sequence-sharded CP, pass 1 only needs the per-chunk
       recurrent states to compose the global prefix; skip computing / writing
       `out` and `chunk_states` in that pass. Bit-exact. Default on.
-    cp_pass2_reuse_t_inv: In sequence-sharded CP, pass 2 reuses the block
-      triangular inverse `t_inv` produced by pass 1 (it is identical: it only
-      depends on k/b/a within a chunk) instead of recomputing the Gram matrix
-      and the serial 16-block inverse. Bit-exact. Default off: it saves pass-2
-      work in the forward, but makes pass 2 depend on pass 1; see
-      `cp_pass2_split_residuals` for how that interacts with rematerialization.
     cp_m_local_in_kernel: In sequence-sharded CP, pass 1 also produces the local
       state transition `M_local` (the [d_k, d_k] map from the incoming state to
       the outgoing one) by carrying an identity block next to the recurrent
@@ -66,23 +60,10 @@ class GDNKernelOptions:
       `M_local` is computed with the kernel's bf16-operand / f32-accumulate
       arithmetic, so results are not bit-exact with the XLA tree (the
       difference is at the kernel's own rounding level). Default on.
-    cp_pass2_split_residuals: Only used with `cp_pass2_reuse_t_inv`. Splits
-      pass 2 into pass 2a (reuses pass-1 `t_inv`, produces only `out` and the
-      final states) and pass 2b (the default pass 2, whose `t_inv` and
-      `chunk_states` are the backward residuals). Under rematerialization
-      with the sequence-CP carries saved (`gdn_cp_state` device/offload), the
-      forward then runs pass 1 + pass 2a and the backward replays only pass 2b
-      (3 forward-kernel calls per layer). Without the split, the residuals
-      depend on pass 1, so the backward replays pass 1 too (4 calls). Without
-      rematerialization the split adds a kernel call, so it is off by default
-      and `model_runner.gdn_kernel_options_from_config` derives it from the
-      remat config. Outputs are identical either way.
   """
 
   cp_pass1_states_only: bool = True
-  cp_pass2_reuse_t_inv: bool = False
   cp_m_local_in_kernel: bool = True
-  cp_pass2_split_residuals: bool = False
 
   def __post_init__(self):
     if self.cp_m_local_in_kernel and not self.cp_pass1_states_only:
@@ -212,10 +193,7 @@ def _run_local_gdn_decoupled_fwd(
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
     states_only: bool = False,
-    t_inv_in: Optional[jax.Array] = None,
     transition_in_state: bool = False,
-    skip_chunk_states: bool = False,
-    t_inv_dtype: Optional[jnp.dtype] = jnp.float32,
 ) -> Tuple[
     Tuple[Optional[jax.Array], Tuple[jax.Array, jax.Array]],
     Optional[jax.Array],
@@ -225,16 +203,10 @@ def _run_local_gdn_decoupled_fwd(
 
   Pass options (Pallas path only; the pure-JAX CPU path ignores them and returns everything):
     states_only: F2, skip `out` and `chunk_states` (both returned as None).
-    t_inv_in: F3, [batch, num_chunks, num_v_heads, chunk, chunk] t_inv from a
-      previous pass; skips the Gram matrix + triangular inverse. The returned
-      t_inv is then `t_inv_in` itself (the kernel does not write it again).
     transition_in_state: F5, `recurrent_state` is [batch, num_v_heads, head_k_dim,
       head_v_dim + head_k_dim] whose extra block (identity on input) is carried
       through the chunk recurrence and comes back as the local transition
       M_local. Requires `states_only` and an explicit `recurrent_state`; TPU only.
-    skip_chunk_states: do not produce `chunk_states` (returned as None).
-    t_inv_dtype: dtype of the returned t_inv; None keeps the kernel's compute
-      dtype (e.g. to feed it back as `t_inv_in` without a round trip through f32).
   """
   if transition_in_state and not states_only:
     raise ValueError("transition_in_state requires states_only.")
@@ -329,10 +301,6 @@ def _run_local_gdn_decoupled_fwd(
   else:
     tokamax_recurrent_state = recurrent_state.astype(jnp.float32)
 
-  t_inv_in_flat = None
-  if t_inv_in is not None:
-    t_inv_in_flat = t_inv_in.reshape(batch_size * num_chunks, num_v_heads, chunk_size, chunk_size)
-
   (
       core_attn_out_flat,
       (new_conv_state, new_recurrent_state),
@@ -365,17 +333,13 @@ def _run_local_gdn_decoupled_fwd(
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
       states_only=states_only,
-      t_inv_in=t_inv_in_flat,
       transition_in_state=transition_in_state,
-      skip_chunk_states=skip_chunk_states,
   )
 
   core_attn_out = None
   if core_attn_out_flat is not None:
     core_attn_out = core_attn_out_flat.reshape(batch_size, seq_len, num_v_heads, head_v_dim).astype(qkv.dtype)
-  if t_inv_dtype is not None:
-    t_inv_raw = t_inv_raw.astype(t_inv_dtype)
-  t_inv = t_inv_raw.reshape(batch_size, num_chunks, num_v_heads, chunk_size, chunk_size)
+  t_inv = t_inv_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, chunk_size, chunk_size)
   chunk_states = None
   if chunk_states_raw is not None:
     chunk_states = chunk_states_raw.astype(jnp.float32).reshape(
@@ -449,23 +413,16 @@ def _run_cp_gdn_decoupled_fwd_impl(
     seg_metadata: Optional[Tuple[Optional[jax.Array], Optional[jax.Array], Optional[jax.Array]]] = None,
     cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
     pass1_states_only: bool = False,
-    pass2_reuse_t_inv: bool = False,
     m_local_in_kernel: bool = False,
-    pass2_split_residuals: bool = False,
 ):
   """Runs 2-pass sequence-sharded CP forward for GDN.
 
-  Returns ((out, states), t_inv, chunk_states, conv_halo, s_in_r, m_local), where t_inv and
-  chunk_states are the backward residuals. Pass options (see `GDNKernelOptions`; all of them only
-  change the Pallas TPU kernel path, the pure-JAX CPU path always uses the XLA composition):
+  Pass-1 options (see `GDNKernelOptions`; they only change the Pallas TPU kernel path, the
+  pure-JAX CPU path always uses the XLA composition):
     pass1_states_only: F2, pass 1 only produces states + t_inv.
-    pass2_reuse_t_inv: F3, pass 2 reuses pass 1's t_inv.
     m_local_in_kernel: F5, pass 1 also returns the local transition M_local
       (identity block carried next to the state), replacing the K-slice conv1d
       and the XLA `compose_local_from_t_inv` tree. Requires pass1_states_only.
-    pass2_split_residuals: with pass2_reuse_t_inv, pass 2a (t_inv reused) produces only the
-      output and pass 2b (the default pass 2) the residuals, so that the residuals do not
-      depend on pass 1.
   """
   if m_local_in_kernel and not pass1_states_only:
     raise ValueError("m_local_in_kernel requires pass1_states_only.")
@@ -509,9 +466,8 @@ def _run_cp_gdn_decoupled_fwd_impl(
   else:
     pass1_rs = zero_rs
 
-  # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv and S_ext_local. t_inv stays
-  # in the kernel's compute dtype so pass 2 can read it back without an f32 round trip.
-  (_, states_pass1), t_inv_1, _ = _run_local_gdn_decoupled_fwd(
+  # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv and S_ext_local
+  (_, states_pass1), t_inv, _ = _run_local_gdn_decoupled_fwd(
       qkv,
       b,
       a,
@@ -534,7 +490,6 @@ def _run_cp_gdn_decoupled_fwd_impl(
       init_seg=init_seg,
       states_only=pass1_states_only,
       transition_in_state=m_local_in_kernel,
-      t_inv_dtype=None,
   )
 
   if m_local_in_kernel:
@@ -561,7 +516,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
         a=a,
         a_log=a_log,
         dt_bias=dt_bias,
-        t_inv=t_inv_1.astype(jnp.float32),
+        t_inv=t_inv,
         num_k_heads=num_k_heads,
         num_v_heads=num_v_heads,
         head_k_dim=head_k_dim,
@@ -579,9 +534,8 @@ def _run_cp_gdn_decoupled_fwd_impl(
   s_in_r, final_rs = cp_gdn.incoming_state(m_local, s_ext_local, h_init, cp_axis_name, precision=cp_matmul_precision)
   s_in_r = checkpoint_name(s_in_r, "gdn_cp_s_in")
 
-  # Pass 2: Local GDN with true incoming state s_in_r.
-  run_pass2 = functools.partial(
-      _run_local_gdn_decoupled_fwd,
+  # Pass 2: Local GDN with true incoming state s_in_r
+  (out, (next_cs_local, _)), t_inv_2, chunk_states = _run_local_gdn_decoupled_fwd(
       qkv,
       b,
       a,
@@ -603,19 +557,6 @@ def _run_cp_gdn_decoupled_fwd_impl(
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
   )
-  if not pass2_reuse_t_inv:
-    (out, (next_cs_local, _)), t_inv_2, chunk_states = run_pass2()
-  elif not pass2_split_residuals:
-    # One pass 2 reusing the pass-1 t_inv (it is also the returned residual). Best without remat, or
-    # when the backward replays pass 1 anyway (sequence-CP carries not saved).
-    (out, (next_cs_local, _)), t_inv_2, chunk_states = run_pass2(t_inv_in=t_inv_1)
-  else:
-    # Pass 2a reuses the pass-1 t_inv and only feeds the output (and the final conv state); pass 2b
-    # is the default pass 2 and produces the backward residuals (bit-identical t_inv, chunk_states).
-    # Under remat with the sequence-CP carries saved, the forward drops pass 2b (its outputs are only
-    # residuals) and the backward replay needs only pass 2b, not pass 1 or pass 2a.
-    (out, (next_cs_local, _)), _, _ = run_pass2(t_inv_in=t_inv_1, skip_chunk_states=True)
-    _, t_inv_2, chunk_states = run_pass2()
   if s_enc_local is not None:
     # Owner = last rank with a valid local token (rank 0 if none). A rank whose
     # tokens are all padding must not own the state even though its halo is
@@ -682,9 +623,7 @@ def gdn_decoupled_conv1d(
         segment_ids=segment_ids,
         cp_matmul_precision=cp_matmul_precision,
         pass1_states_only=options.cp_pass1_states_only,
-        pass2_reuse_t_inv=options.cp_pass2_reuse_t_inv,
         m_local_in_kernel=options.cp_m_local_in_kernel,
-        pass2_split_residuals=options.cp_pass2_split_residuals,
     )
     return out, states
 
@@ -809,9 +748,7 @@ def _gdn_decoupled_conv1d_fwd(
         seg_metadata=seg_metadata,
         cp_matmul_precision=cp_matmul_precision,
         pass1_states_only=options.cp_pass1_states_only,
-        pass2_reuse_t_inv=options.cp_pass2_reuse_t_inv,
         m_local_in_kernel=options.cp_m_local_in_kernel,
-        pass2_split_residuals=options.cp_pass2_split_residuals,
     )
     out = checkpoint_name(out, "gdn_core_attn_out")
     residuals = (
