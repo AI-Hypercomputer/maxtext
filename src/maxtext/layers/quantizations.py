@@ -162,6 +162,45 @@ class Quantization:
     """Placeholder for einsum implementation in subclasses."""
 
 
+class JaxBlockScaledDotGeneral(nnx.Module):
+  """Stateless OCP MX dot_general: `jax.nn.scaled_dot_general` with one config for both operands and the gradient."""
+
+  def __init__(self, mode: str):
+    self.mode = mode
+
+  def __call__(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+  ) -> jax.Array:
+    # jax.nn.scaled_dot_general takes no precision argument.
+    del precision
+    output_dtype = jnp.result_type(lhs, rhs) if preferred_element_type is None else preferred_element_type
+    config = jax.nn.get_scaled_dot_general_config(self.mode)
+    return jax.nn.scaled_dot_general(
+        lhs, rhs, dimension_numbers, preferred_element_type=output_dtype, configs=[config, config, config]
+    )
+
+
+@dataclass
+class JaxBlockScaledQuantization(Quantization):
+  """Configures OCP MX quantization through `jax.nn.scaled_dot_general`."""
+
+  quant_mode = "train"
+  mode: str
+
+  def dot_general_cls(self, mesh_axes: Tuple[str, ...] = ()):
+    del mesh_axes
+    return functools.partial(JaxBlockScaledDotGeneral, mode=self.mode)
+
+  def einsum(self, *args, **kwargs):
+    del args, kwargs
+    raise ValueError(f"quantization='jax_{self.mode}' does not support einsum.")
+
+
 def infer_scale_granularity(scale_shape: Tuple[int, ...]) -> Tuple[str, int | None]:
   """Infers quantization scheme ('per_tensor', 'per_channel', or 'block_wise') from scale shape."""
   nontrivial_axes = [i for i, s in enumerate(scale_shape) if s > 1]
@@ -899,6 +938,8 @@ def _get_quant_config(config):
   """Set quantization params based on user configuration."""
   if not config.quantization or config.quantization == "":
     return None
+  if config.quantization in ("jax_mxfp8", "jax_mxfp4"):
+    return config.quantization
   if config.quantization == "int8":
     return _get_int8_quant_config(config)
   if config.quantization == "intmp":
@@ -959,7 +1000,9 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
-    if quant_cfg == "fp8":
+    if quant_cfg in ("jax_mxfp8", "jax_mxfp4"):
+      return JaxBlockScaledQuantization(mode=quant_cfg.removeprefix("jax_"))
+    elif quant_cfg == "fp8":
       return Fp8Quantization()
     elif quant_cfg == "nanoo_fp8":
       return NANOOFp8Quantization()
