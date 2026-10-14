@@ -38,7 +38,7 @@ from maxtext.layers.normalizations import RMSNorm, align_scale_with_normalized_a
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
+from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, with_logical_constraint
 
 
 GEMMA4_ATTENTION_PATTERN = (
@@ -203,15 +203,23 @@ class Gemma4DecoderLayer(nnx.Module):
     self.mlp_activation_axis_names = self.activation_axis_names[:-1] + ("activation_mlp",)
 
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
-    # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
-    self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
-    self.mlp_intermediate_sharding = create_sharding(mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules())
-    self._maybe_shard_with_logical = functools.partial(
-        maybe_shard_with_logical,
-        mesh=mesh,
-        shard_mode=config.shard_mode,
-        debug_sharding=config.debug_sharding,
-    )
+    # ShardMode.AUTO these are set to None so callees do not pin physical out_sharding
+    # and GSPMD infers the layout via logical axis constraints.
+    if config.shard_mode == ShardMode.EXPLICIT:
+      self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+      self.mlp_intermediate_sharding = create_sharding(
+          mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules()
+      )
+      self._maybe_shard_with_logical = functools.partial(
+          maybe_shard_with_logical,
+          mesh=mesh,
+          shard_mode=config.shard_mode,
+          debug_sharding=config.debug_sharding,
+      )
+    else:
+      self.out_sharding = None
+      self.mlp_intermediate_sharding = None
+      self._maybe_shard_with_logical = with_logical_constraint
 
     self.pre_self_attention_norm = RMSNorm(
         num_features=config.emb_dim,
@@ -487,12 +495,15 @@ class Gemma4ScannableBlock(nnx.Module):
     self.num_of_layers = num_of_layers
     self.remat_policy_fn = remat_policy_fn
     self.apply_internal_remat = apply_internal_remat
-    self._maybe_shard_with_logical = functools.partial(
-        maybe_shard_with_logical,
-        mesh=mesh,
-        shard_mode=config.shard_mode,
-        debug_sharding=config.debug_sharding,
-    )
+    if config.shard_mode == ShardMode.EXPLICIT:
+      self._maybe_shard_with_logical = functools.partial(
+          maybe_shard_with_logical,
+          mesh=mesh,
+          shard_mode=config.shard_mode,
+          debug_sharding=config.debug_sharding,
+      )
+    else:
+      self._maybe_shard_with_logical = with_logical_constraint
 
     pattern_length = len(GEMMA4_ATTENTION_PATTERN)
     if not 0 <= num_of_layers <= pattern_length:

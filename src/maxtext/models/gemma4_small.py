@@ -30,7 +30,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical
+from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, with_logical_constraint
 
 
 # E2B repeats 4 sliding + 1 global (period 5); E4B repeats 5 sliding + 1 global
@@ -281,19 +281,28 @@ class Gemma4SmallDecoderLayer(nnx.Module):
     self.mlp_activation_axis_names = self.activation_axis_names[:-1] + ("activation_mlp",)
 
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
-    # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
-    self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
-    self.mlp_intermediate_sharding = create_sharding(mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules())
-    # The per-layer-input feature axis is left replicated: the gate is multiplied against a
-    # slice of the PLE tensor, whose feature axis falls out of a reshape and so carries no
-    # layout of its own. Pinning the gate here keeps the two operands in agreement.
-    self.ple_sharding = create_sharding(mesh, self.activation_axis_names[:-1] + (None,), rules=get_logical_axis_rules())
-    self._maybe_shard_with_logical = functools.partial(
-        maybe_shard_with_logical,
-        mesh=mesh,
-        shard_mode=config.shard_mode,
-        debug_sharding=config.debug_sharding,
-    )
+    # ShardMode.AUTO these are set to None so callees do not pin physical out_sharding
+    # and GSPMD infers the layout via logical axis constraints.
+    if config.shard_mode == ShardMode.EXPLICIT:
+      self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+      self.mlp_intermediate_sharding = create_sharding(
+          mesh, self.mlp_activation_axis_names, rules=get_logical_axis_rules()
+      )
+      # The per-layer-input feature axis is left replicated: the gate is multiplied against a
+      # slice of the PLE tensor, whose feature axis falls out of a reshape and so carries no
+      # layout of its own. Pinning the gate here keeps the two operands in agreement.
+      self.ple_sharding = create_sharding(mesh, self.activation_axis_names[:-1] + (None,), rules=get_logical_axis_rules())
+      self._maybe_shard_with_logical = functools.partial(
+          maybe_shard_with_logical,
+          mesh=mesh,
+          shard_mode=config.shard_mode,
+          debug_sharding=config.debug_sharding,
+      )
+    else:
+      self.out_sharding = None
+      self.mlp_intermediate_sharding = None
+      self.ple_sharding = None
+      self._maybe_shard_with_logical = with_logical_constraint
 
     self.pre_self_attention_norm = RMSNorm(
         num_features=config.emb_dim,
