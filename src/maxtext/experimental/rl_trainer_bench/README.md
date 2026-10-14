@@ -61,7 +61,7 @@ to the team.
 | `check_payload_routing.py` | CPU check of the realistic payload at the 397B production shapes (needs Tunix) |
 | `check_numerics_cpu.py` | CPU check of the numerics knobs with Tunix's GRPO loss (needs Tunix and MaxText) |
 | `hlo_collective_schedule.py` | static overlap summary of the collectives in a scheduled HLO dump |
-| `tests/` | CPU unit tests of the renderer and the payload builder |
+| `tests/` | CPU unit tests of the renderer, the payload builder and the driver's step loop |
 
 ## How to use it
 
@@ -218,6 +218,35 @@ a meaningful comparison; the loss value itself is a function of the payload alon
 one-parameter stand-in for the model. The stand-in replaces `compute_per_token_logps`, so it is tied to that
 function's signature in the Tunix version it runs against.
 
+## Step boundary: STAGE_BEFORE_UPDATE
+
+`DRIVER_ENV="STAGE_BEFORE_UPDATE=on"` (default `off`; any other value raises) times the step boundary of a trainer that
+stages the next step's first micro-batch before the previous step's update, as Tunix's `TrainerWorker.stage_fwd_bwd`
+does before `apply_deferred_update` (google/tunix#2877). After step k's last `fwd_bwd` and before its `update`, the
+driver hands step k+1's first micro-batch to the engine's `prepare_fwd_bwd_input`, which maps it to loss inputs and
+places it on `fwd_bwd`'s input shardings while the device still computes step k's last micro-batch. The driver then
+calls `wait_for_device` (it returns how long that micro-batch still ran) and runs the update, the drain and the
+metrics read as with the switch off; step k+1's first `fwd_bwd` takes the prepared input. The trainer sees the same
+micro-batches, in the same order, with the same `apply_optimizer` flags and one `update` per step. Each staged
+boundary logs, after step k's `completed step` line:
+
+```
+STAGE_BEFORE_UPDATE step=<k> staged=bench_<k+1>_0 stage_s=<host seconds> device_wait_s=<seconds>
+```
+
+A `device_wait_s` well above `stage_s` means the copy was issued while the device was still busy.
+`prepare_fwd_bwd_input` and `wait_for_device` come with AI-Hypercomputer/maxtext#5718. With an engine that lacks them
+the driver raises a `RuntimeError` naming them right after the trainer worker initializes, before the compile; the
+switch off needs nothing new. A trainer worker that runs the update inside the step's last `fwd_bwd` (Tunix's fused
+update, google/tunix#2719) leaves no update to stage before, so with it the driver raises at the first boundary.
+
+Why it shows on this bench: with replayed routing a micro-batch's input is several GB (`routed_experts` is
+`[rows, seq, layers, top_k]`), and with the switch off step k+1's first micro-batch is copied to the device after the
+drain, while the device is idle. In one same-pod A/B on the 397B recipe (128 TPU v7x chips, `MICRO_STEPS=9`, steps
+1-4), the step's second `fwd_bwd` call took 7.5-7.8 s longer than a regular one with the switch off and about the same
+as a regular one with it on, and the step went from 107.7 s to 100.0 s; the regular micro-batches and the step's tail
+(last micro-batch, update and drain) did not change.
+
 ## Ahead-of-time memory check
 
 ```bash
@@ -242,6 +271,9 @@ python3 -m pytest src/maxtext/experimental/rl_trainer_bench/tests
 
 The tests run on CPU with PyYAML and NumPy only: the renderer on a hand-written DRY_RUN fixture
 (`tests/testdata/launch_dryrun_fixture.yaml`), and the payload builder and metric helpers on a small stand-in payload.
+`tests/stage_before_update_test.py` runs the driver's `main()` against stand-ins for Pathways, JAX, Tunix and the
+training engine: with `STAGE_BEFORE_UPDATE` off the engine sees the original loop's calls, with it on the same
+micro-batches in the same order with one update per step, and an engine without the two methods is refused.
 They live next to the code, so the repository's default `testpaths = tests` does not collect them; run them by path.
 `check_payload_routing.py` and `check_numerics_cpu.py` are the heavier checks at the production shapes and need a
 matching Tunix.

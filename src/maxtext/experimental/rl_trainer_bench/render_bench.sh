@@ -37,6 +37,7 @@
 #   PROFILER_SKIP=<n> PROFILER_STEPS=<m>  trace fwd_bwd calls n .. n+m-1 of the run (see README)
 #   DRIVER_ENV="K=V ..."               bench_driver.py knobs: PAYLOAD ROUTING ROUTING_SCALE ROUTING_TARGETS
 #                                      PAD_FRACTION FINAL_PAD_FRACTION PAYLOAD_SEED EP_SIZE ADVANTAGES LOGP_GATES
+#                                      STAGE_BEFORE_UPDATE
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${LAUNCH_RENDER:?set LAUNCH_RENDER to the DRY_RUN output of your e2e launch}"

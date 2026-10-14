@@ -368,7 +368,7 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--set-orch-flags", default="", help='"k=v ...": replace existing orchestrator flags in place')
   p.add_argument("--image", default="", help="client (main container) image; empty keeps the e2e render's")
   # Driver knobs (bench_driver.py), as "K=V K=V": PAYLOAD ROUTING ROUTING_SCALE ROUTING_TARGETS PAD_FRACTION
-  # FINAL_PAD_FRACTION PAYLOAD_SEED EP_SIZE ADVANTAGES LOGP_GATES.
+  # FINAL_PAD_FRACTION PAYLOAD_SEED EP_SIZE ADVANTAGES LOGP_GATES STAGE_BEFORE_UPDATE.
   p.add_argument("--driver-env", default="")
   p.add_argument("--trainer-slice", default="", help="e.g. 4x8x8: FSDP fills it, expert/context/tp kept")
   p.add_argument("--devices-per-chip", type=int, default=2, help="JAX devices per chip (tpu7x: 2)")

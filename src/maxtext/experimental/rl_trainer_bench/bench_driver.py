@@ -49,6 +49,20 @@ After each step the driver logs `STEP_LOSS step=N loss= grad_norm= micro_loss=[.
 
 The intended difference from e2e: no checkpoint is loaded (random init; the trainer argv's --maxtext_ckpt_path is
 cleared by the launcher), so weights and routing values differ while shapes, shardings and the program match.
+
+STAGE_BEFORE_UPDATE=on (default off; anything else raises): the step boundary of a trainer that stages the next step's
+first micro-batch before the previous step's update (Tunix's `TrainerWorker.stage_fwd_bwd` before
+`apply_deferred_update`, google/tunix#2877). After step k's last `fwd_bwd`, and before its `update`, step k+1's first
+micro-batch is mapped to loss inputs and placed on the mesh (`prepare_fwd_bwd_input`, i.e. its host-to-device copy runs
+while the device still computes step k's last micro-batch), the driver waits for that micro-batch (`wait_for_device`,
+which reports how long it still ran), then runs the update, the drain and the metrics read exactly as with the switch
+off, and step k+1's first `fwd_bwd` takes the prepared input. The trainer sees the same micro-batches, in the same
+order, with the same `apply_optimizer` flags and one `update` per step. It needs a training engine with
+`prepare_fwd_bwd_input` and `wait_for_device` (AI-Hypercomputer/maxtext#5718); without them the driver raises right
+after the trainer worker initializes, before the compile. A trainer worker that runs the update inside the step's last
+`fwd_bwd` (Tunix's fused update, google/tunix#2719) leaves no update to stage before, and the driver raises at the
+first boundary. Off, the loop runs as before: the added lines are behind the switch or leave `staged` None. Each
+staged boundary logs `STAGE_BEFORE_UPDATE step=k ...` after the step's `completed step` line.
 """
 
 import logging
@@ -335,6 +349,10 @@ def main() -> int:
     raise ValueError(f"LOGP_GATES must be on or off, got {logp_gates!r}")
   steps = int(os.environ.get("STEPS", "3"))
   micro_steps = int(os.environ.get("MICRO_STEPS", "4"))
+  stage_before_update = os.environ.get("STAGE_BEFORE_UPDATE", "off")
+  if stage_before_update not in ("on", "off"):
+    raise ValueError(f"STAGE_BEFORE_UPDATE must be on or off, got {stage_before_update!r}")
+  stage_before_update = stage_before_update == "on"
 
   # Same JAX init as K8sJaxContext.initialize() under JAX_PLATFORMS=proxy.
   import pathwaysutils  # pylint: disable=g-import-not-at-top
@@ -366,6 +384,20 @@ def main() -> int:
   t0 = time.monotonic()
   worker.initialize()
   logging.info("Trainer worker initialized in %.1fs on %d devices.", time.monotonic() - t0, jax.device_count())
+  if stage_before_update:
+    engine = worker._trainer  # pylint: disable=protected-access
+    missing = [n for n in ("prepare_fwd_bwd_input", "wait_for_device") if not callable(getattr(engine, n, None))]
+    if missing:
+      raise RuntimeError(
+          f"STAGE_BEFORE_UPDATE=on needs the training engine's prepare_fwd_bwd_input and "
+          f"wait_for_device (AI-Hypercomputer/maxtext#5718); {type(engine).__name__} lacks {missing}. "
+          "Use a MaxText that has them, or STAGE_BEFORE_UPDATE=off."
+      )
+    logging.info(
+        "STAGE_BEFORE_UPDATE on: step k+1's first micro-batch is prepared on the mesh before step k's update "
+        "(%s.prepare_fwd_bwd_input, then wait_for_device).",
+        type(engine).__name__,
+    )
 
   # Tokenizer ids, as run_deepswe_dist.main derives them.
   tokenizer_path = o_args.tokenizer_path or os.getenv("MODEL_DIR") or o_args.model_id
@@ -465,17 +497,37 @@ def main() -> int:
   elif mode != "warmup":
     raise ValueError(f"PAYLOAD must be realistic or warmup, got {mode!r}")
 
+  staged = None  # STAGE_BEFORE_UPDATE: step k+1's first micro-batch as prepare_fwd_bwd_input returned it
   for step in range(steps):
     t0 = time.monotonic()
     times = []
+    if stage_before_update:
+      train_step_at_start = engine.train_step  # Moves only in update(): see the check before the stage below.
     for m in range(micro_steps):
       tm = time.monotonic()
       last = m == micro_steps - 1
       req = datatypes.TrainRequest(request_id=f"bench_{step}_{m}", payload=final if last else regular, metadata={})
+      if m == 0 and staged is not None:
+        # The same micro-batch (step k+1's first, `regular`, or `final` when MICRO_STEPS is 1), already prepared.
+        req = datatypes.TrainRequest(request_id=req.request_id, payload=staged, metadata={})
+        staged = None
       # As DistributedRLEngine.train_step: the step's last micro-batch is the one with apply_optimizer=True.
       # Per-micro-step runtime load ratios: MOE_DROP_AUDIT lines with the MaxText flag log_moe_drops=true.
       worker.fwd_bwd(request=req, apply_optimizer=last)
       times.append(time.monotonic() - tm)
+    if stage_before_update and step + 1 < steps:
+      if engine.train_step != train_step_at_start:  # pylint: disable=possibly-used-before-assignment
+        raise RuntimeError(
+            "STAGE_BEFORE_UPDATE=on, but the trainer worker already ran this step's update inside its last fwd_bwd "
+            "(Tunix's fused update, google/tunix#2719), so nothing can be staged before it. Use "
+            "STAGE_BEFORE_UPDATE=off with this Tunix."
+        )
+      # Step k+1's first micro-batch (`regular`, or `final` when MICRO_STEPS is 1), mapped and placed on the mesh
+      # while the device still computes this step's last micro-batch; then how long that micro-batch still ran.
+      ts = time.monotonic()
+      staged = engine.prepare_fwd_bwd_input(final if micro_steps == 1 else regular)
+      stage_s = time.monotonic() - ts
+      device_wait_s = engine.wait_for_device()
     worker.update()
     # Drain the step's device work before reading the clock, as maxtext_engine/train.py does.
     throttler = getattr(worker._trainer, "_throttler", None)  # pylint: disable=protected-access
@@ -488,6 +540,14 @@ def main() -> int:
         "completed step: %d, seconds: %.3f, micro_steps: %d, seconds/micro_step: %.3f, fwd_bwd dispatch s: %s",
         step, dt, micro_steps, dt / micro_steps, [round(x, 3) for x in times],
     )
+    if stage_before_update and step + 1 < steps:
+      logging.info(
+          "STAGE_BEFORE_UPDATE step=%d staged=bench_%d_0 stage_s=%.3f device_wait_s=%.3f",
+          step,
+          step + 1,
+          stage_s,
+          device_wait_s,
+      )
     # Numerics comparison (e.g. moe_exclude_padding_from_routing on vs off): the step's loss (per micro-batch and
     # pooled), gradient norm and every other trainer metric, read after the step's timing so they do not affect it.
     try:
