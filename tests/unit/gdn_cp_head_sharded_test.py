@@ -871,7 +871,11 @@ class GdnCpHeadShardedTest(absltest.TestCase):
 
       if cp_size == 2:
         self.assertGreater(speedup_head, 1.5)
-        self.assertGreater(speedup_seq, 1.5)
+        # Sequence-sharded CP runs two kernel passes plus a cross-rank state composition, so its speedup
+        # over CP=1 is lower than head sharding's. The layout fixes (gdn_kernel_natural_layout) speed up
+        # CP=1 more than seq-CP (about -36% vs -9% on v7x), which lowers this ratio although every latency
+        # drops; hence the lower bound.
+        self.assertGreater(speedup_seq, 1.2)
 
       results_table.append(
           {

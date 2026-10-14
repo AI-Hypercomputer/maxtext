@@ -18,6 +18,7 @@
 
 import functools
 import sys
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -655,6 +656,158 @@ class GdnBwdPallasTest(absltest.TestCase):
       if g_none is not None and g_cached_all is not None:
         np.testing.assert_allclose(g_none, g_cached_all, rtol=1e-5, atol=1e-5)
 
+  def test_layout_options_match_default_bitwise(self):
+    """The default bf16_qkv_input / bwd_natural_layout reproduce the original kernels' outputs and gradients bit for bit."""
+    if jax.default_backend() != "tpu":
+      self.skipTest("bf16_qkv_input / bwd_natural_layout are Pallas TPU kernel options")
+    batch_size = 2
+    chunk_size = 64
+    num_chunks = 3
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(909), batch_size, seq_len, dim_size, num_v_heads, head_v_dim, conv_kernel_size
+    )
+    k_cs, k_rs, k_dcs, k_drs = jax.random.split(jax.random.PRNGKey(910), 4)
+    # Incoming conv halo and recurrent state, and cotangents on the outgoing ones, as a seq-CP shard sees them.
+    conv_state = 0.1 * jax.random.normal(k_cs, (batch_size, conv_kernel_size - 1, dim_size), jnp.float32)
+    recurrent_state = 0.1 * jax.random.normal(k_rs, (batch_size, num_v_heads, head_k_dim, head_v_dim), jnp.float32)
+    d_next_cs = jax.random.normal(k_dcs, conv_state.shape, jnp.float32)
+    d_next_rs = jax.random.normal(k_drs, recurrent_state.shape, jnp.float32)
+    layout_options = gdn_bwd_pallas.GDNKernelOptions()
+    self.assertTrue(layout_options.bf16_qkv_input and layout_options.bwd_natural_layout)
+    legacy_options = gdn_bwd_pallas.GDNKernelOptions(bf16_qkv_input=False, bwd_natural_layout=False)
+
+    for compute_dtype in (jnp.float32, jnp.bfloat16):
+      with self.subTest(compute_dtype=jnp.dtype(compute_dtype).name):
+        # The model feeds the kernel its bf16 projection output; bf16_qkv_input only engages on bf16 qkv.
+        qkv_c, b_c, a_c, cs_c = (x.astype(jnp.bfloat16) for x in (qkv, b, a, conv_state))
+
+        def run(options, qkv_c=qkv_c, b_c=b_c, a_c=a_c, cs_c=cs_c, compute_dtype=compute_dtype):
+          def f(qkv_in, b_in, a_in, cw_in, cb_in, al_in, dt_in, cs_in, rs_in):
+            out, (next_cs, next_rs) = gdn_bwd_pallas.gdn_decoupled_conv1d(
+                qkv_in,
+                b_in,
+                a_in,
+                cw_in,
+                cb_in,
+                al_in,
+                dt_in,
+                cs_in,
+                rs_in,
+                num_k_heads=num_k_heads,
+                num_v_heads=num_v_heads,
+                head_k_dim=head_k_dim,
+                head_v_dim=head_v_dim,
+                conv_kernel_size=conv_kernel_size,
+                chunk_size=chunk_size,
+                use_qk_norm_in_gdn=True,
+                compute_dtype=compute_dtype,
+                options=options,
+            )
+            return out, next_cs, next_rs
+
+          primals = (qkv_c, b_c, a_c, conv_weight, conv_bias, a_log, dt_bias, cs_c, recurrent_state)
+          outs, vjp_fn = jax.vjp(f, *primals)
+          cotangents = (do.astype(outs[0].dtype), d_next_cs.astype(outs[1].dtype), d_next_rs.astype(outs[2].dtype))
+          return jax.block_until_ready((outs, vjp_fn(cotangents)))
+
+        outs_ref, grads_ref = run(legacy_options)
+        outs_opt, grads_opt = run(layout_options)
+        for name, x_ref, x_opt in zip(("out", "next_conv_state", "next_recurrent_state"), outs_ref, outs_opt):
+          with self.subTest(output=name):
+            self.assertEqual(x_opt.dtype, x_ref.dtype)
+            np.testing.assert_array_equal(np.asarray(x_opt), np.asarray(x_ref))
+        grad_names = (
+            "d_qkv",
+            "d_b",
+            "d_a",
+            "d_conv_weight",
+            "d_conv_bias",
+            "d_a_log",
+            "d_dt_bias",
+            "d_conv_state",
+            "d_h0",
+        )
+        for name, g_ref, g_opt in zip(grad_names, grads_ref, grads_opt):
+          with self.subTest(gradient=name):
+            self.assertEqual(g_opt.dtype, g_ref.dtype)
+            np.testing.assert_array_equal(np.asarray(g_opt), np.asarray(g_ref))
+
+  def test_bwd_natural_layout_head_sharded_cp2_shape(self):
+    """Head-sharded cp=2 (8 k / 32 v heads per chip) keeps the natural layout by halving the head group.
+
+    With the default 32-head bf16 group the v slice offset (q_size + k_size = 2048) is not a whole number of
+    v blocks (4096); the kernel halves the group instead of silently falling back to the relayout path.
+    """
+    if jax.default_backend() != "tpu":
+      self.skipTest("bwd_natural_layout is a Pallas TPU kernel option")
+    batch_size = 1
+    chunk_size = 64
+    seq_len = 2 * chunk_size
+    num_k_heads = 8
+    num_v_heads = 32
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, do = _init_bwd_inputs(
+        jax.random.PRNGKey(4242), batch_size, seq_len, dim_size, num_v_heads, head_v_dim, conv_kernel_size
+    )
+    qkv_conv, chunk_states, t_inv = gdn_bwd_pallas._compute_forward_conv_and_states(
+        qkv=qkv,
+        b=b,
+        a=a,
+        conv_weight=conv_weight,
+        conv_bias=conv_bias,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        recurrent_state=None,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=True,
+    )
+    # bf16 activations select the 32-head group (the f32 group is 16 heads and already aligned).
+    qkv_conv, b_bf16, a_bf16, do = (x.astype(jnp.bfloat16) for x in (qkv_conv, b, a, do))
+
+    def bwd(natural_layout, head_tile=None):
+      return jax.jit(
+          functools.partial(
+              gdn_bwd_pallas.pallas_gdn_bwd_kernel,
+              num_v_heads=num_v_heads,
+              kq_head_dim=head_k_dim,
+              v_head_dim=head_v_dim,
+              chunk_size=chunk_size,
+              use_qk_norm_in_gdn=True,
+              head_tile=head_tile,
+              natural_layout=natural_layout,
+          )
+      )
+
+    args = (qkv_conv, b_bf16, a_bf16, a_log, dt_bias, do, chunk_states, t_inv)
+    self.assertIn("gdn_bwd_kernel_nat", bwd(True).lower(*args).as_text())
+    self.assertNotIn("gdn_bwd_kernel_nat", bwd(False).lower(*args).as_text())
+    natural = jax.block_until_ready(bwd(True)(*args))
+    # Same 16-head groups through the relayout path: bit for bit.
+    legacy_16 = jax.block_until_ready(bwd(False, head_tile=16)(*args))
+    # Default 32-head groups through the relayout path: per-head math is the same.
+    legacy_32 = jax.block_until_ready(bwd(False)(*args))
+    for idx, (x_nat, x_16, x_32) in enumerate(zip(natural, legacy_16, legacy_32)):
+      with self.subTest(output=idx):
+        self.assertEqual(x_nat.dtype, x_16.dtype)
+        np.testing.assert_array_equal(np.asarray(x_nat), np.asarray(x_16))
+        np.testing.assert_allclose(np.asarray(x_nat, np.float32), np.asarray(x_32, np.float32), rtol=1e-6, atol=1e-6)
+
   def test_run_local_gdn_decoupled_fwd_returns_cached_chunk_states(self):
     """Verifies _run_local_gdn_decoupled_fwd returns properly shaped chunk_states."""
     is_tpu = jax.default_backend() == "tpu"
@@ -950,6 +1103,16 @@ class GdnBwdPallasTest(absltest.TestCase):
     same = gdn_bwd_pallas.GDNKernelOptions(cp_m_local_in_kernel=False, cp_pass1_states_only=False)
     self.assertEqual(legacy, same)
     self.assertEqual(hash(legacy), hash(same))
+
+  def test_gdn_kernel_natural_layout_switch(self):
+    """One config kill switch (default on) drives both layout fixes."""
+    from maxtext.kernels.gdn import model_runner  # pylint: disable=import-outside-toplevel
+
+    opts = model_runner.gdn_kernel_options_from_config(types.SimpleNamespace())
+    self.assertEqual(opts, gdn_bwd_pallas.GDNKernelOptions())
+    self.assertTrue(opts.bf16_qkv_input and opts.bwd_natural_layout)
+    legacy_layout = model_runner.gdn_kernel_options_from_config(types.SimpleNamespace(gdn_kernel_natural_layout=False))
+    self.assertFalse(legacy_layout.bf16_qkv_input or legacy_layout.bwd_natural_layout)
 
   def test_decoupled_conv1d_gdn_kernel_gradient_with_initial_states(self):
     """Verifies custom VJP gradients when initial conv_state and recurrent_state are provided."""

@@ -339,6 +339,13 @@ class PyconfigTest(unittest.TestCase):
       self._init_qwen3_next_packing(packing=False, gdn_cp_mode="invalid_mode")
     self.assertEqual(self._init_qwen3_next_packing(packing=False, gdn_cp_mode="head").gdn_cp_mode, "head")
 
+    # The natural-layout kill switch defaults on; turning it off is a kernel setting too.
+    self.assertTrue(self._init_qwen3_next_packing(packing=False, use_gdn_kernel=True).gdn_kernel_natural_layout)
+    with self.assertRaisesRegex(ValueError, "gdn_kernel_natural_layout=False .* requires use_gdn_kernel=True"):
+      self._init_qwen3_next_packing(packing=False, use_gdn_kernel=False, gdn_kernel_natural_layout=False)
+    cfg_legacy = self._init_qwen3_next_packing(packing=False, use_gdn_kernel=True, gdn_kernel_natural_layout=False)
+    self.assertFalse(cfg_legacy.gdn_kernel_natural_layout)
+
   def test_rl_config_gdn_granular_remat_requires_gdn_kernel(self):
     """RLConfig does not inherit MaxTextConfig's validators, so it carries its own GDN remat guard."""
     for key in ("gdn", "gdn_cp_state"):

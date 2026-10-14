@@ -434,8 +434,24 @@ def compose_bwd_local_from_t_inv(
     segment_ids: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
     precision: jax.lax.Precision = DEFAULT_PRECISION,
+    head_major_glue: bool = False,
 ) -> Tuple[jax.Array, jax.Array]:
-  """Computes backward rank transition (dM_local, dS_ext_local) using pre-batched GEMMs."""
+  """Computes backward rank transition (dM_local, dS_ext_local) using pre-batched GEMMs.
+
+  `head_major_glue` keeps the math bit-identical but changes *where* XLA may
+  place the token-major -> head-major relayout of q/k/do. With the natural
+  (token-major) backward kernel layout, XLA's layout assignment propagates the
+  kernel's token-major layout forward through `astype(f32)` and the GQA
+  `jnp.repeat` broadcast, then pays for the relayout on the 4x-repeated f32
+  tensors inside the gating/select fusions (which also stops them from fusing
+  into the dot prologues). With `head_major_glue=True` the relayout is done once
+  per tensor, in bf16, on the un-repeated [N_c, B, H_k, C, d] view and pinned
+  with `lax.optimization_barrier` so the algebraic simplifier cannot fold the
+  reshapes away and move the broadcast back in front of it. The barrier only has
+  to survive until layout assignment: the final HLO is identical with
+  `--xla_tpu_aggressive_opt_barrier_removal` true or false (no opt-barrier is
+  left in either case).
+  """
   batch, seq_len, _ = qkv_conv.shape
   num_chunks = seq_len // chunk_size
   repeats = num_v_heads // num_k_heads
@@ -443,26 +459,50 @@ def compose_bwd_local_from_t_inv(
   k_size = num_k_heads * head_k_dim
   scale = 1.0 / jnp.sqrt(head_k_dim)
 
-  q_orig = qkv_conv[:, :, :q_size].reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim).astype(jnp.float32)
-  k_orig = (
-      qkv_conv[:, :, q_size : q_size + k_size]
-      .reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim)
-      .astype(jnp.float32)
-  )
-  if use_qk_norm_in_gdn:
-    q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
-    k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
-  else:
-    q_orig = q_orig * scale
+  if head_major_glue:
 
-  q_rep = jnp.repeat(q_orig, repeats, axis=3)
-  k_rep = jnp.repeat(k_orig, repeats, axis=3)
-  q_h = jnp.transpose(q_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
-  k_h = jnp.transpose(k_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
-  do_h = jnp.transpose(
-      do.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads, head_v_dim),
-      (1, 0, 3, 2, 4),
-  )
+    def _head_major(x: jax.Array, heads: int, dim: int) -> jax.Array:
+      """[B, S, heads*dim] -> [N_c, B, heads, C, dim], relayout pinned on this (bf16, un-repeated) tensor."""
+      x = x.reshape(batch, num_chunks, chunk_size, heads, dim)
+      x = jnp.transpose(x, (1, 0, 3, 2, 4))  # [N_c, B, heads, C, dim]
+      # Merging the three major dims leaves XLA no bitcast-compatible token-major layout for this
+      # value, and the barrier keeps the simplifier from cancelling the reshape pair / sinking the
+      # GQA broadcast through it.
+      x = x.reshape(num_chunks * batch * heads, chunk_size, dim)
+      x = lax.optimization_barrier(x)
+      return x.reshape(num_chunks, batch, heads, chunk_size, dim)
+
+    q_orig = _head_major(qkv_conv[:, :, :q_size], num_k_heads, head_k_dim).astype(jnp.float32)
+    k_orig = _head_major(qkv_conv[:, :, q_size : q_size + k_size], num_k_heads, head_k_dim).astype(jnp.float32)
+    if use_qk_norm_in_gdn:
+      q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
+      k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
+    else:
+      q_orig = q_orig * scale
+    q_h = jnp.repeat(q_orig, repeats, axis=2)  # [N_c, B, H_v, C, d_k]
+    k_h = jnp.repeat(k_orig, repeats, axis=2)  # [N_c, B, H_v, C, d_k]
+    do_h = _head_major(do.reshape(batch, seq_len, num_v_heads * head_v_dim), num_v_heads, head_v_dim).astype(jnp.float32)
+  else:
+    q_orig = qkv_conv[:, :, :q_size].reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim).astype(jnp.float32)
+    k_orig = (
+        qkv_conv[:, :, q_size : q_size + k_size]
+        .reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim)
+        .astype(jnp.float32)
+    )
+    if use_qk_norm_in_gdn:
+      q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
+      k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
+    else:
+      q_orig = q_orig * scale
+
+    q_rep = jnp.repeat(q_orig, repeats, axis=3)
+    k_rep = jnp.repeat(k_orig, repeats, axis=3)
+    q_h = jnp.transpose(q_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
+    k_h = jnp.transpose(k_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
+    do_h = jnp.transpose(
+        do.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads, head_v_dim),
+        (1, 0, 3, 2, 4),
+    )
 
   b_h = jnp.transpose(
       b.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads),

@@ -1471,6 +1471,16 @@ class Qwen3Next(BaseModel):
           " HIGHEST) or with head-sharded context parallelism."
       ),
   )
+  gdn_kernel_natural_layout: bool = Field(
+      True,
+      description=(
+          "GDN Pallas kernel layout fixes (bit-exact): the forward kernel reads the bf16 qkv and up-casts it in VMEM "
+          "instead of an f32 HBM copy, and the backward kernel reads / writes its operands in their natural "
+          "[B, S, C] layouts instead of relayout copies (including head-major sequence-CP backward glue). Shapes "
+          "either does not support fall back automatically. Set to false to restore the original f32 qkv input "
+          "and relayout backward path (kill switch). Only used with use_gdn_kernel=True."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -4179,6 +4189,10 @@ class MaxTextConfig(
         raise ValueError("GatedDeltaNet context parallelism requires context_parallel_load_balance=False.")
 
     if not cfg.use_gdn_kernel:
+      if not getattr(cfg, "gdn_kernel_natural_layout", True):
+        raise ValueError(
+            "gdn_kernel_natural_layout=False is a GDN Pallas kernel switch and requires use_gdn_kernel=True."
+        )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(

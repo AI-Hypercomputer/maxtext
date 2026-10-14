@@ -39,6 +39,7 @@ from maxtext.utils.sharding import (
 )
 from . import compute_conv1d as gdn_compute_conv1d
 from .gdn_bwd_pallas import gdn_decoupled_conv1d
+from .gdn_bwd_pallas import GDNKernelOptions
 
 try:
   from jax.extend.core.primitives import name_p
@@ -65,6 +66,19 @@ _GDN_SAVED_NAMES = frozenset(
         "gdn_conv_out",
     }
 )
+
+
+def gdn_kernel_options_from_config(cfg: Any) -> GDNKernelOptions:
+  """Builds the static GDN kernel options from the MaxText config.
+
+  `gdn_kernel_natural_layout` (default on) is the kill switch for both layout fixes (`bf16_qkv_input`,
+  `bwd_natural_layout`); the sequence-CP pass-1 options keep their `GDNKernelOptions` defaults.
+  """
+  natural_layout = bool(getattr(cfg, "gdn_kernel_natural_layout", True))
+  return GDNKernelOptions(
+      bf16_qkv_input=natural_layout,
+      bwd_natural_layout=natural_layout,
+  )
 
 
 def _default_gdn_context_axes(cfg: Any) -> tuple[str, ...]:
@@ -606,6 +620,7 @@ def run_gdn_kernel_layer(
 ) -> tuple[Array, Array | None, Array | None]:
   """Executes the fused/decoupled Pallas GDN conv1d + delta-rule kernel with CP support."""
   cfg = layer.config
+  kernel_options = gdn_kernel_options_from_config(cfg)
   batch, seq_len = query.shape[:2]
 
   cp_axes = tuple(
@@ -887,6 +902,7 @@ def run_gdn_kernel_layer(
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=state_dtype,
             segment_ids=seg_val,
+            options=kernel_options,
         )
 
         if next_cs is not None:
@@ -926,6 +942,7 @@ def run_gdn_kernel_layer(
           cp_axis_name=cp_axis_name if use_seq_sharded_cp else None,
           segment_ids=seg_val,
           cp_matmul_precision=cp_matmul_precision,
+          options=kernel_options,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -968,6 +985,7 @@ def run_gdn_kernel_layer(
         use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
         compute_dtype=state_dtype,
         segment_ids=decoder_segment_ids,
+        options=kernel_options,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")

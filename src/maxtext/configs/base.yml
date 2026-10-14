@@ -1490,6 +1490,8 @@ gdn_cp_mode: "auto"
 # ('highest' = 6 bf16 passes on TPU, 'high' = 3 passes). Only used with use_gdn_kernel: true and
 # sequence-sharded GDN CP (gdn_cp_mode 'seq', or 'auto' when it does not pick head sharding); a no-op otherwise.
 gdn_cp_matmul_precision: "highest"
+# GDN Pallas kernel layout switch (needs use_gdn_kernel; bit-exact).
+gdn_kernel_natural_layout: true # bf16 qkv fwd input + natural-layout bwd I/O; false restores the f32 input / relayout path
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
