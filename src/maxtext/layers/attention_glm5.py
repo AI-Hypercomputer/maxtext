@@ -44,6 +44,8 @@ _HIGHEST = jax.lax.Precision.HIGHEST
 
 
 def _dense(config, name, in_shape, out_shape, axes, dtype, quant, rngs, in_axis=-1, weight_dtype=None):
+  in_rank = len(in_shape) if isinstance(in_shape, tuple) else 1
+  out_rank = len(out_shape) if isinstance(out_shape, tuple) else 1
   return DenseGeneral(
       in_features_shape=in_shape,
       out_features_shape=out_shape,
@@ -53,6 +55,9 @@ def _dense(config, name, in_shape, out_shape, axes, dtype, quant, rngs, in_axis=
       dtype=dtype,
       weight_dtype=weight_dtype if weight_dtype is not None else get_weight_dtype(config, name),
       weight_quant=None if weight_dtype is not None else quantizations.get_weight_quant_config(config, name),
+      # FP8 block scales are tiny (e.g. (32, 4) for wkv_a) and their block dims (kv_lora/128, q_lora/128)
+      # do not divide large fsdp meshes, so keep them replicated.
+      scale_axes=(None,) * (in_rank + out_rank),
       quant=quant,
       matmul_precision=config.matmul_precision,
       shard_mode=config.shard_mode,
