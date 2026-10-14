@@ -300,9 +300,7 @@ class DeepSeek41CandidateBlocksTest(unittest.TestCase):
     lens = (torch.arange(1, s + 1)).unsqueeze(-1)
     logits = logits.masked_fill(torch.arange(c) >= lens, float("-inf"))
     ref = ref_model.select_candidate_blocks(logits, lens, 3, 4)
-    out = attention_deepseek41.select_candidate_blocks(
-        _t2j(logits), jnp.broadcast_to(jnp.arange(1, s + 1), (2, s)), 3, 4
-    )
+    out = attention_deepseek41.select_candidate_blocks(_t2j(logits), jnp.broadcast_to(jnp.arange(1, s + 1), (2, s)), 3, 4)
     np.testing.assert_array_equal(np.asarray(out), ref.numpy())
 
 
@@ -323,8 +321,14 @@ class DeepSeek41EngramHashTest(unittest.TestCase):
     self.assertEqual(vocab, args.engram_compressed_vocab_size)
     for li, layer_id in enumerate(args.engram_layer_ids):
       hasher = engram_deepseek41.DeepSeek41NgramHasher(
-          token_map, vocab, args.engram_pad_id, args.engram_layer_ids, layer_id,
-          args.engram_max_ngram_size, args.engram_n_heads, args.engram_vocab_size,
+          token_map,
+          vocab,
+          args.engram_pad_id,
+          args.engram_layer_ids,
+          layer_id,
+          args.engram_max_ngram_size,
+          args.engram_n_heads,
+          args.engram_vocab_size,
       )
       out = hasher(jnp.asarray(ids.numpy()))
       np.testing.assert_array_equal(np.asarray(out), ref[:, :, li].numpy())
@@ -375,6 +379,83 @@ class DeepSeek41LayersTest(unittest.TestCase):
         np.testing.assert_allclose(
             _j2np(carry["pre_mix"]), ref_pre.numpy(), rtol=2e-3, atol=2e-3, err_msg=f"pre_mix mismatch at layer {i}"
         )
+
+
+# The mini layout (14 layers, each repeating group twice) at tiny widths, so scanned stacks really stack.
+MINI_COMPRESS_RATIOS = [0, 0, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1]
+MINI_LAYOUT = dict(
+    n_layers=len(MINI_COMPRESS_RATIOS),
+    compress_ratios=tuple(MINI_COMPRESS_RATIOS),
+    kv_source_layers=(2, 4, 6, 8),
+    index_source_layers=(2, 4, 6, 8, 10, 12),
+    candidate_source_layer=8,
+    engram_layer_ids=(1, 6),
+)
+
+
+@pytest.mark.cpu_only
+class DeepSeek41CheckpointTest(unittest.TestCase):
+  """Saves a tiny random checkpoint in the upstream layout, streams it into MaxText through the param mapping
+  (`safetensors_dynamic`), and compares the logits with the reference for scanned and unscanned layers."""
+
+  @classmethod
+  def setUpClass(cls):
+    import tempfile  # pylint: disable=import-outside-toplevel
+    from safetensors.torch import save_file  # pylint: disable=import-outside-toplevel
+    from transformers import AutoTokenizer  # pylint: disable=import-outside-toplevel
+
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    args = {**REF_ARGS, **MINI_LAYOUT}
+    args["engram_num_embeddings"] = tuple(
+        sum(sum(per_ngram) for per_ngram in layer)
+        for layer in engram_deepseek41.engram_primes(
+            args["engram_layer_ids"], args["engram_max_ngram_size"], args["engram_n_heads"], args["engram_vocab_size"]
+        )
+    )
+    cls.ref = ref_runner.build_model(ref_model.ModelArgs(**args), tokenizer)
+    _init_reference(cls.ref, seed=1)
+    cls.ckpt_dir = tempfile.mkdtemp(prefix="dsv41_tiny_")
+    state = {k: v.contiguous() for k, v in cls.ref.state_dict().items()}
+    save_file(state, os.path.join(cls.ckpt_dir, "model-00001-of-00001.safetensors"), metadata={"format": "pt"})
+
+  def _maxtext_logits(self, ids, scan_layers):
+    from maxtext.common.common_types import MODEL_MODE_TRAIN  # pylint: disable=import-outside-toplevel
+    from maxtext.utils import maxtext_utils, model_creation_utils  # pylint: disable=import-outside-toplevel
+
+    config = _maxtext_config(
+        base_num_decoder_layers=MINI_LAYOUT["n_layers"],
+        compress_ratios=MINI_COMPRESS_RATIOS,
+        kv_source_layers=list(MINI_LAYOUT["kv_source_layers"]),
+        index_source_layers=list(MINI_LAYOUT["index_source_layers"]),
+        candidate_source_layer=MINI_LAYOUT["candidate_source_layer"],
+        ds41_engram_layers=list(MINI_LAYOUT["engram_layer_ids"]),
+        scan_layers=scan_layers,
+        load_parameters_path=self.ckpt_dir,
+        source_checkpoint_layout="safetensors_dynamic",
+    )
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+    model = model_creation_utils.from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
+    tokens = jnp.asarray(ids.numpy(), jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(SEQ), tokens.shape)
+    logits = model(
+        decoder_input_tokens=tokens,
+        decoder_positions=positions,
+        decoder_segment_ids=jnp.ones_like(tokens),
+        enable_dropout=False,
+    )
+    return _j2np(logits)
+
+  def _check(self, scan_layers):
+    ids = torch.randint(0, REF_ARGS["vocab_size"], (1, SEQ))
+    ref_logits = self.ref(ids, full_logits=True).numpy()
+    logits = self._maxtext_logits(ids, scan_layers)[:1]
+    np.testing.assert_allclose(logits, ref_logits, rtol=2e-3, atol=2e-3)
+
+  def test_unscanned(self):
+    self._check(scan_layers=False)
+
+  def test_scanned(self):
+    self._check(scan_layers=True)
 
 
 if __name__ == "__main__":

@@ -216,7 +216,9 @@ class DeepSeek41DecoderLayer(nnx.Module):
     hc_dim = self.hc_mult * config.emb_dim
     init = jax.nn.initializers.normal(stddev=0.02)
     for name in ("hc_attn", "hc_ffn"):
-      setattr(self, f"{name}_fn", nnx.Param(init(rngs.params(), (hc_dim, mix_hc), jnp.float32), out_sharding=("embed", None)))
+      setattr(
+          self, f"{name}_fn", nnx.Param(init(rngs.params(), (hc_dim, mix_hc), jnp.float32), out_sharding=("embed", None))
+      )
       setattr(self, f"{name}_base", nnx.Param(jnp.zeros((mix_hc,), jnp.float32), out_sharding=(None,)))
       setattr(self, f"{name}_scale", nnx.Param(jnp.ones((3,), jnp.float32), out_sharding=(None,)))
 
@@ -378,6 +380,8 @@ def build_segment_carry_plans(config: Config, segments: list[Segment]) -> list[S
 
 def add_placeholders(carry: dict, keys: tuple[str, ...], compress_ratio: int, config: Config) -> dict:
   """Adds zero-valued shared-state entries (with the shapes / dtypes the attention layers produce)."""
+  if not keys:
+    return carry
   b, s = carry["h"].shape[:2]
   c = s // compress_ratio
   shapes = {
