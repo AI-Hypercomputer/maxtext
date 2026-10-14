@@ -701,9 +701,9 @@ def _gathered_kernels(layers: nnx.Module) -> dict:
       kernels[path + ("kernel",)] = module
     elif _is_small_scanned_kernel(module):
       kernels[path + ("kernel",)] = module
-    if isinstance(module, attentions.Attention):
+    if isinstance(module, attentions.Attention) and hasattr(module, "query"):
       # The backward pass otherwise gathers the query kernel twice per layer: for the rematerialized
-      # projection and for the input gradient.
+      # projection and for the input gradient. Under fused_qkv there is no `query` (it is `qkv_proj`).
       kernels[path + ("query", "kernel")] = module.query
   return kernels
 
