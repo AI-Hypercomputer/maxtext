@@ -1503,6 +1503,14 @@ class Qwen3Next(BaseModel):
       ),
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+  gdn_pin_in_proj_output_layout: bool = Field(
+      True,
+      description=(
+          "vLLM serving only: constrain the GatedDeltaNet in_proj_qkvz output to its row-major XLA layout."
+          " Without it XLA satisfies the per-head split downstream by emitting the projection against a"
+          " transposed weight, materialized as a full copy of the [embed, 2K+2V] kernel on every step."
+      ),
+  )
   use_gdn_kernel: bool = Field(
       False,
       description="Whether to use GDN Pallas kernel.",
