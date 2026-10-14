@@ -1203,6 +1203,13 @@ deepseek41_flash_dict = {
     "engram_pad_token_id": 2,
     "engram_compressed_vocab_size": 99092,
     "torch_dtype": "bfloat16",
+    "quantization_config": {
+        "quant_method": "fp8",
+        "activation_scheme": "dynamic",
+        "weight_block_size": [32, 32],
+        "scale_fmt": "ue8m0",
+        "expert_dtype": "fp4",
+    },
 }
 
 # The mini checkpoint written by tests/utils/deepseek_v41_reference/create_mini_checkpoint.py.
@@ -1219,6 +1226,7 @@ deepseek41_flash_mini_dict = {
     "engram_layer_ids": [1, 6],
     "engram_num_embeddings": [242682, 247712],
     "engram_vocab_size": 10000,
+    "quantization_config": None,  # the mini checkpoint is unquantized
 }
 
 

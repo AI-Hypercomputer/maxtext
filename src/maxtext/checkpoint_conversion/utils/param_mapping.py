@@ -4449,6 +4449,56 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
   return mapping
 
 
+# FP4 E2M1 code -> value (sign bit is the high bit of each nibble).
+_FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+
+
+def dequantize_block_scaled(pair, target_shape=None):
+  """(weight, scale) -> bf16 weight, for block-scaled FP8 / packed FP4 checkpoints (DeepSeek-V4.1 format).
+
+  `weight` is FP8 E4M3 [out, in], or int8 [out, in / 2] holding two FP4 E2M1 codes per byte (low nibble first).
+  `scale` holds one power-of-two (E8M0) scale per block; the block size follows from the two shapes, e.g.
+  32 x 32 blocks for FP8 linears and 1 x 32 for FP4 experts and the FP8 engram table rows. Both element formats
+  times a power of two are exact in bf16.
+  """
+  del target_shape
+  weight, scale = pair
+  xp = _array_module(weight)
+  if weight.dtype == np.int8:
+    packed = jax.lax.bitcast_convert_type(weight, jnp.uint8) if xp is jnp else weight.view(np.uint8)
+    table = xp.asarray(_FP4_E2M1_VALUES, dtype=jnp.bfloat16)
+    codes = xp.stack([packed & 0xF, packed >> 4], axis=-1).reshape(weight.shape[0], -1)
+    w = xp.take(table, codes.astype(xp.int32))
+  else:
+    w = weight.astype(jnp.bfloat16)
+  s = scale.astype(jnp.float32).astype(jnp.bfloat16)
+  rows, cols = w.shape
+  s = xp.repeat(s, -(-rows // s.shape[0]), axis=0)[:rows]
+  s = xp.repeat(s, -(-cols // s.shape[1]), axis=1)[:, :cols]
+  return w * s
+
+
+# DeepSeek-V4.1 tensors stored block-quantized (with a sibling `.scale`) in the released checkpoint.
+_DEEPSEEK_V41_QUANTIZED = (
+    "attn.wq_a.weight",
+    "attn.wq_b.weight",
+    "attn.wkv.weight",
+    "attn.wo_a.weight",
+    "attn.wo_b.weight",
+    "attn.indexer.wq_b.weight",
+    "w1.weight",
+    "w2.weight",
+    "w3.weight",
+    "engram.wkv.weight",
+    "engram.embed.weight",
+)
+
+
+def _deepseek41_is_quantized(config) -> bool:
+  quant = config.get("quantization_config") if isinstance(config, dict) else getattr(config, "quantization_config", None)
+  return bool(quant)
+
+
 def _deepseek41_layer_prefixes(maxtext_config, scan_layers):
   """(MaxText key prefix, HF layer ids, layer spec) for every DeepSeek-V4.1 layer slot.
 
@@ -4473,8 +4523,17 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers
   The layer structure (compressor / indexer / engram placement, number of experts) comes from `maxtext_config`.
   Scanned stacks map to a list of HF keys (one per stacked layer); routed experts to a list per expert.
   """
-  del config
+  quantized = _deepseek41_is_quantized(config)
   num_experts = maxtext_config.num_experts
+
+  def with_scales(source):
+    """In a quantized checkpoint, a quantized weight is read together with its scale."""
+    if isinstance(source, list):
+      return [with_scales(x) for x in source]
+    if quantized and source.endswith(_DEEPSEEK_V41_QUANTIZED):
+      return (source, source[: -len("weight")] + "scale")
+    return source
+
   mapping = {
       "params-token_embedder-embedding": "embed.weight",
       "params-decoder-decoder_norm-scale": "norm.weight",
@@ -4539,7 +4598,7 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers
       mapping[f"{prefix}-engram-wkv-kernel"] = hf("engram.wkv.weight")
       mapping[f"{prefix}-engram-q_weight"] = hf("engram.q_weight")
       mapping[f"{prefix}-engram-k_weight"] = hf("engram.k_weight")
-  return mapping
+  return {key: with_scales(source) for key, source in mapping.items()}
 
 
 def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
@@ -4548,7 +4607,7 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers
   torch Linear weights [out, in] become kernels [in, *out]; `wo_a` [groups * o_lora_rank, d] becomes the grouped
   kernel [groups, d, o_lora_rank]; the hyper-connection projections [mix, hc * dim] become [hc * dim, mix].
   """
-  del config
+  quantized = _deepseek41_is_quantized(config)
 
   def to_mt_kernel(x, target_shape):
     """torch [out, in] -> MaxText [in, *out]; saving: MaxText [in, *out] -> torch [out, in] (target_shape)."""
@@ -4604,7 +4663,20 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers
     for key in kernels:
       mapping[key] = to_mt_kernel
     mapping[f"{attn}-o_a_proj-kernel"] = o_a_proj
-  return mapping
+    if spec.has_engram:
+      mapping[f"{prefix}-engram-embed"] = None
+
+  if quantized and not saving_to_hf:
+    # Dequantize first; the sources of these weights are (weight, scale) pairs (see the param mapping).
+    param_map = DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING({"quantization_config": True}, maxtext_config, scan_layers)
+    for key, source in param_map.items():
+      leaf = source
+      while isinstance(leaf, list):
+        leaf = leaf[0]
+      if isinstance(leaf, tuple):
+        hook = mapping.get(key)
+        mapping[key] = [dequantize_block_scaled] + ([hook] if hook is not None else [])
+  return {k: v for k, v in mapping.items() if v is not None}
 
 
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING
