@@ -76,6 +76,13 @@ WI_0 = "wi_0"
 WI_1 = "wi_1"
 WO = "wo"
 
+# Decoder blocks using DeepSeek routing-weight scaling and the SwiGLU clamp.
+_DEEPSEEK_ROUTING_BLOCKS = (
+    ctypes.DecoderBlockType.DEEPSEEK,
+    ctypes.DecoderBlockType.DEEPSEEK4,
+    ctypes.DecoderBlockType.DEEPSEEK41,
+)
+
 
 @struct.dataclass
 class RouteMetadata:
@@ -1347,7 +1354,7 @@ class RoutedMoE(nnx.Module):
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
+    if self.config.decoder_block in _DEEPSEEK_ROUTING_BLOCKS:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1472,7 +1479,7 @@ class RoutedMoE(nnx.Module):
         glu = jnp.multiply(layer_w0, layer_act)
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
       elif (
-          self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4)
+          self.config.decoder_block in _DEEPSEEK_ROUTING_BLOCKS
           and self.config.mlp_activations_limit > 0.0
       ):
         # DeepSeek V4 uses bounds to clip the SwiGLU activations
@@ -5125,6 +5132,12 @@ class RoutedAndSharedMoE(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         config=self.config,
         quant=self.quant,
+        # DeepSeek-V4.1 clamps the shared expert's SwiGLU like the routed experts'.
+        activations_limit=(
+            self.config.mlp_activations_limit
+            if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK41
+            else 0.0
+        ),
         rngs=self.rngs,
     )
 

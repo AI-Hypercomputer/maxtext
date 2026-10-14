@@ -520,6 +520,7 @@ class MlpBlock(nnx.Module):
       use_pre_norm: bool = False,
       quant: None | Quant = None,
       model_mode: None | str = None,
+      activations_limit: float = 0.0,
       *,
       rngs: nnx.Rngs,
   ) -> None:
@@ -541,8 +542,11 @@ class MlpBlock(nnx.Module):
       use_pre_norm: whether to add pre layer norm in mlp layers.
       quant: Optional quantization config, no quantization if None.
       out_sharding: Named sharding of outputs
+      activations_limit: If > 0, clamps a gated (two-activation) MLP's pre-activations SwiGLU-style: the
+        gate branch from above at `activations_limit`, the up branch to [-activations_limit, activations_limit].
     """
     self.config = config
+    self.activations_limit = activations_limit
     self.mesh = mesh
     self.in_features = in_features
     self.intermediate_dim = intermediate_dim
@@ -669,6 +673,14 @@ class MlpBlock(nnx.Module):
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block.value=}")
 
+  def _clamp(self, x, idx: int):
+    """SwiGLU clamp (see `activations_limit`); a no-op unless enabled for a gated MLP."""
+    if self.activations_limit <= 0.0 or len(self.activations) != 2:
+      return x
+    if idx == 0:
+      return jnp.clip(x, max=self.activations_limit)
+    return jnp.clip(x, min=-self.activations_limit, max=self.activations_limit)
+
   def __call__(
       self,
       inputs,
@@ -695,7 +707,7 @@ class MlpBlock(nnx.Module):
 
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
-        y = _convert_to_activation_function(act_fn)(x[:, :, idx, ...])
+        y = _convert_to_activation_function(act_fn)(self._clamp(x[:, :, idx, ...], idx))
         activations.append(y)
     else:
       for idx, act_fn in enumerate(self.activations):
@@ -705,7 +717,7 @@ class MlpBlock(nnx.Module):
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
-        x = _convert_to_activation_function(act_fn)(x)
+        x = _convert_to_activation_function(act_fn)(self._clamp(x, idx))
         activations.append(x)
 
     # Take elementwise product of above intermediate activations.

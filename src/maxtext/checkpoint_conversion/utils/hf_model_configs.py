@@ -1142,6 +1142,99 @@ class DeepseekV4Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
 deepseek4_284b_config = DeepseekV4Config(**deepseek4_284b_dict)
 
 
+# Text model settings of https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/config.json (`text_config`).
+deepseek41_flash_dict = {
+    "architectures": ["DeepseekV41ForCausalLM"],
+    "model_type": "deepseek_v41_text",
+    "bos_token_id": 0,
+    "eos_token_id": 1,
+    "pad_token_id": 2,
+    "vocab_size": 129280,
+    "hidden_size": 5120,
+    "moe_intermediate_size": 2304,
+    "num_hidden_layers": 40,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 1,
+    "head_dim": 512,
+    "qk_rope_head_dim": 64,
+    "q_lora_rank": 1280,
+    "o_lora_rank": 1024,
+    "o_groups": 8,
+    "hidden_act": "silu",
+    "swiglu_limit": 10.0,
+    "rms_norm_eps": 1e-20,
+    "tie_word_embeddings": False,
+    "max_position_embeddings": 1048576,
+    "rope_theta": 10000,
+    "rope_scaling": {
+        "rope_type": "yarn",
+        "factor": 16,
+        "beta_fast": 32,
+        "beta_slow": 1,
+        "original_max_position_embeddings": 65536,
+    },
+    "n_routed_experts": 384,
+    "n_shared_experts": 1,
+    "num_experts_per_tok": 6,
+    "scoring_func": "sqrtsoftplus",
+    "topk_method": "noaux_tc",
+    "norm_topk_prob": True,
+    "routed_scaling_factor": 1.5,
+    "sliding_window": 128,
+    "compress_ratios": [0, 0] + [2] * 18 + [1] * 20,
+    "compress_rope_theta": 160000,
+    "kv_source_layer_ids": [2, 8, 14, 20],
+    "index_source_layer_ids": [2, 8, 14, 20, 24, 28, 32, 36],
+    "index_n_heads": 32,
+    "index_head_dim": 128,
+    "index_topk": 512,
+    "candidate_source_layer_id": 20,
+    "candidate_topk_blocks": 2048,
+    "candidate_block_size": 8,
+    "hc_mult": 4,
+    "hc_sinkhorn_iters": 20,
+    "hc_eps": 1e-06,
+    "engram_layer_ids": [1, 14],
+    "engram_num_embeddings": [384006168, 384016682],
+    "engram_max_ngram_size": 4,
+    "engram_vocab_size": 16000000,
+    "engram_n_heads": 8,
+    "engram_head_dim": 256,
+    "engram_pad_token_id": 2,
+    "engram_compressed_vocab_size": 99092,
+    "torch_dtype": "bfloat16",
+}
+
+# The mini checkpoint written by tests/utils/deepseek_v41_reference/create_mini_checkpoint.py.
+deepseek41_flash_mini_dict = {
+    **deepseek41_flash_dict,
+    "num_hidden_layers": 14,
+    "n_routed_experts": 8,
+    "compress_ratios": [0, 0, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1],
+    "kv_source_layer_ids": [2, 4, 6, 8],
+    "index_source_layer_ids": [2, 4, 6, 8, 10, 12],
+    "index_topk": 4,
+    "candidate_source_layer_id": 8,
+    "candidate_topk_blocks": 8,
+    "engram_layer_ids": [1, 6],
+    "engram_num_embeddings": [242682, 247712],
+    "engram_vocab_size": 10000,
+}
+
+
+# TODO: replace with the transformers config class once DeepSeek-V4.1 is available in transformers.
+class DeepseekV41Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
+  model_type = "deepseek_v41_text"
+
+  def __init__(self, **kwargs):
+    self.max_position_embeddings = kwargs.get("max_position_embeddings", 1048576)
+    super().__init__(**kwargs)
+
+
+deepseek41_flash_config = DeepseekV41Config(**deepseek41_flash_dict)
+deepseek41_flash_mini_config = DeepseekV41Config(**deepseek41_flash_mini_dict)
+
+
 # from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
 gpt_oss_20b_dict = {
@@ -2107,6 +2200,8 @@ HF_MODEL_CONFIGS = {
     "deepseek3-671b": deepseek3_671b_config,
     "deepseek3.2-671b": deepseek32_671b_config,
     "deepseek4-284b": deepseek4_284b_config,
+    "deepseek4.1-flash": deepseek41_flash_config,
+    "deepseek4.1-flash-mini": deepseek41_flash_mini_config,
     "gpt-oss-20b": gpt_oss_20b_config,
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,

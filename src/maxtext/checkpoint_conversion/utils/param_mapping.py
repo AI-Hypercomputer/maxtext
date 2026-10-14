@@ -4449,6 +4449,164 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
   return mapping
 
 
+def _deepseek41_layer_prefixes(maxtext_config, scan_layers):
+  """(MaxText key prefix, HF layer ids, layer spec) for every DeepSeek-V4.1 layer slot.
+
+  Unscanned: one `layers_{i}` per layer. Scanned: one stack `segments_{k}` per segment of structurally identical
+  layer groups; block layer `j` of segment `k` stacks the j-th layer of each of the segment's groups.
+  """
+  from maxtext.models import deepseek41  # pylint: disable=import-outside-toplevel
+
+  specs = deepseek41.build_layer_specs(maxtext_config)
+  if not scan_layers:
+    return [(f"params-decoder-layers_{i}", i, specs[i]) for i in range(len(specs))]
+  out = []
+  for k, segment in enumerate(deepseek41.build_segments(maxtext_config)):
+    for j, layer_id in enumerate(segment.groups[0]):
+      out.append((f"params-decoder-segments_{k}-layers_{j}", [g[j] for g in segment.groups], specs[layer_id]))
+  return out
+
+
+def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText parameter keys to DeepSeek-V4.1 checkpoint keys (upstream `inference/` names, text model).
+
+  The layer structure (compressor / indexer / engram placement, number of experts) comes from `maxtext_config`.
+  Scanned stacks map to a list of HF keys (one per stacked layer); routed experts to a list per expert.
+  """
+  del config
+  num_experts = maxtext_config.num_experts
+  mapping = {
+      "params-token_embedder-embedding": "embed.weight",
+      "params-decoder-decoder_norm-scale": "norm.weight",
+      "params-decoder-logits_dense-kernel": "head.weight",
+  }
+
+  for prefix, layer_ids, spec in _deepseek41_layer_prefixes(maxtext_config, scan_layers):
+    if isinstance(layer_ids, list):
+
+      def hf(target, layer_ids=layer_ids):
+        return [f"layers.{i}.{target}" for i in layer_ids]
+
+      def hf_experts(target, layer_ids=layer_ids):
+        return [[f"layers.{i}.{target.format(e=e)}" for i in layer_ids] for e in range(num_experts)]
+
+    else:
+
+      def hf(target, layer_ids=layer_ids):
+        return f"layers.{layer_ids}.{target}"
+
+      def hf_experts(target, layer_ids=layer_ids):
+        return [f"layers.{layer_ids}.{target.format(e=e)}" for e in range(num_experts)]
+
+    mapping[f"{prefix}-pre_self_attention_layer_norm-scale"] = hf("attn_norm.weight")
+    mapping[f"{prefix}-post_self_attention_layer_norm-scale"] = hf("ffn_norm.weight")
+    for name in ("hc_attn", "hc_ffn"):
+      for part in ("fn", "base", "scale"):
+        mapping[f"{prefix}-{name}_{part}"] = hf(f"{name}_{part}")
+
+    attn = f"{prefix}-self_attention"
+    mapping[f"{attn}-wq_a-kernel"] = hf("attn.wq_a.weight")
+    mapping[f"{attn}-q_norm-scale"] = hf("attn.q_norm.weight")
+    mapping[f"{attn}-wq_b-kernel"] = hf("attn.wq_b.weight")
+    mapping[f"{attn}-wkv-kernel"] = hf("attn.wkv.weight")
+    mapping[f"{attn}-kv_norm-scale"] = hf("attn.kv_norm.weight")
+    mapping[f"{attn}-o_a_proj-kernel"] = hf("attn.wo_a.weight")
+    mapping[f"{attn}-o_b_proj-kernel"] = hf("attn.wo_b.weight")
+    mapping[f"{attn}-sinks"] = hf("attn.attn_sink")
+    if spec.is_kv_source:
+      mapping[f"{attn}-compressor-wkv-kernel"] = hf("attn.compressor.wkv.weight")
+      if spec.compress_ratio > 1:
+        mapping[f"{attn}-compressor-wgate-kernel"] = hf("attn.compressor.wgate.weight")
+      mapping[f"{attn}-compressor-norm-scale"] = hf("attn.compressor.norm.weight")
+    if spec.is_index_source:
+      mapping[f"{attn}-indexer-wq_b-kernel"] = hf("attn.indexer.wq_b.weight")
+      mapping[f"{attn}-indexer-weights_proj-kernel"] = hf("attn.indexer.weights_proj.weight")
+      if spec.is_kv_source:
+        mapping[f"{attn}-indexer-wk-kernel"] = hf("attn.indexer.wk.weight")
+        mapping[f"{attn}-indexer-k_norm-scale"] = hf("attn.indexer.k_norm.weight")
+
+    mapping[f"{prefix}-mlp-MoeBlock_0-gate-kernel"] = hf("ffn.gate.weight")
+    mapping[f"{prefix.replace('params-', 'MoEBiasVar-')}-mlp-MoeBlock_0-gate-bias"] = hf("ffn.gate.bias")
+    mapping[f"{prefix}-mlp-MoeBlock_0-wi_0"] = hf_experts("ffn.experts.{e}.w1.weight")
+    mapping[f"{prefix}-mlp-MoeBlock_0-wi_1"] = hf_experts("ffn.experts.{e}.w3.weight")
+    mapping[f"{prefix}-mlp-MoeBlock_0-wo"] = hf_experts("ffn.experts.{e}.w2.weight")
+    mapping[f"{prefix}-mlp-shared_experts-wi_0-kernel"] = hf("ffn.shared_experts.w1.weight")
+    mapping[f"{prefix}-mlp-shared_experts-wi_1-kernel"] = hf("ffn.shared_experts.w3.weight")
+    mapping[f"{prefix}-mlp-shared_experts-wo-kernel"] = hf("ffn.shared_experts.w2.weight")
+
+    if spec.has_engram:
+      mapping[f"{prefix}-engram-embed"] = hf("engram.embed.weight")
+      mapping[f"{prefix}-engram-wkv-kernel"] = hf("engram.wkv.weight")
+      mapping[f"{prefix}-engram-q_weight"] = hf("engram.q_weight")
+      mapping[f"{prefix}-engram-k_weight"] = hf("engram.k_weight")
+  return mapping
+
+
+def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Hooks converting single (per layer / per expert) tensors between DeepSeek-V4.1 and MaxText layouts.
+
+  torch Linear weights [out, in] become kernels [in, *out]; `wo_a` [groups * o_lora_rank, d] becomes the grouped
+  kernel [groups, d, o_lora_rank]; the hyper-connection projections [mix, hc * dim] become [hc * dim, mix].
+  """
+  del config
+
+  def to_mt_kernel(x, target_shape):
+    """torch [out, in] -> MaxText [in, *out]; saving: MaxText [in, *out] -> torch [out, in] (target_shape)."""
+    if saving_to_hf:
+      return x.reshape(x.shape[0], -1).T.reshape(target_shape)
+    return x.T.reshape(target_shape)
+
+  def o_a_proj(x, target_shape):
+    if saving_to_hf:  # [g, d, r] -> [g * r, d]
+      return x.transpose(0, 2, 1).reshape(target_shape)
+    groups, _, rank = target_shape
+    return x.reshape(groups, rank, -1).transpose(0, 2, 1)
+
+  def embedding(x, target_shape):
+    return x[: target_shape[0]]
+
+  def logits(x, target_shape):
+    if saving_to_hf:  # [d, vocab] -> [vocab, d]
+      return x.T[: target_shape[0]]
+    return x[: target_shape[1]].T
+
+  mapping = {
+      "params-token_embedder-embedding": embedding,
+      "params-decoder-logits_dense-kernel": logits,
+  }
+  for prefix, _, spec in _deepseek41_layer_prefixes(maxtext_config, scan_layers):
+    attn = f"{prefix}-self_attention"
+    kernels = [
+        f"{prefix}-hc_attn_fn",
+        f"{prefix}-hc_ffn_fn",
+        f"{attn}-wq_a-kernel",
+        f"{attn}-wq_b-kernel",
+        f"{attn}-wkv-kernel",
+        f"{attn}-o_b_proj-kernel",
+        f"{prefix}-mlp-MoeBlock_0-gate-kernel",
+        f"{prefix}-mlp-MoeBlock_0-wi_0",
+        f"{prefix}-mlp-MoeBlock_0-wi_1",
+        f"{prefix}-mlp-MoeBlock_0-wo",
+        f"{prefix}-mlp-shared_experts-wi_0-kernel",
+        f"{prefix}-mlp-shared_experts-wi_1-kernel",
+        f"{prefix}-mlp-shared_experts-wo-kernel",
+    ]
+    if spec.is_kv_source:
+      kernels += [f"{attn}-compressor-wkv-kernel"]
+      if spec.compress_ratio > 1:
+        kernels += [f"{attn}-compressor-wgate-kernel"]
+    if spec.is_index_source:
+      kernels += [f"{attn}-indexer-wq_b-kernel", f"{attn}-indexer-weights_proj-kernel"]
+      if spec.is_kv_source:
+        kernels += [f"{attn}-indexer-wk-kernel"]
+    if spec.has_engram:
+      kernels += [f"{prefix}-engram-wkv-kernel"]
+    for key in kernels:
+      mapping[key] = to_mt_kernel
+    mapping[f"{attn}-o_a_proj-kernel"] = o_a_proj
+  return mapping
+
+
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN
 
@@ -4495,6 +4653,8 @@ PARAM_MAPPING = {
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek4.1-flash": DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek4.1-flash-mini": DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4556,6 +4716,8 @@ HOOK_FNS = {
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-tiny": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek4.1-flash": DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek4.1-flash-mini": DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
