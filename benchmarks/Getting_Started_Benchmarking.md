@@ -3,7 +3,7 @@
 Two approaches are here:
 
 1. Run a model recipe with a single CLI command. Great to replicate performance results previously measured. See https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/trillium for examples.
-2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with Cluster Toolkit workloads. Legacy XPK examples are retained below for older automation.
+2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with Cluster Toolkit workloads.
 
 For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticate
 to the cluster and configure `gcluster` before submitting:
@@ -47,31 +47,28 @@ gcluster job submit \
   --topology=${TOPOLOGY?} \
   --num-slices=1 \
   --pathways-gcs-location=${BASE_OUTPUT_DIRECTORY?} \
-  --command="python3 -m benchmarks.benchmark_runner --use_pathways=true on-device --base_output_directory=${BASE_OUTPUT_DIRECTORY?} --run_name=${RUN_NAME?} --num_steps=5"
+  --command="python3 -m benchmarks.benchmark_runner on-device --use_pathways=true --base_output_directory=${BASE_OUTPUT_DIRECTORY?} --run_name=${RUN_NAME?} --num_steps=5"
 ```
-
-The existing Python XPK runner below remains available for older benchmark
-automation, but it is not a Cluster Toolkit submission path.
 
 - **xla_flags_library.py**: A grouping of xla flags organized by purpose with details on how they can be applied to a model.
 - **maxtext_trillium_model_configs.py**: A list of model definitions for Trillium. See optimized models here and how they apply xla flags. This config provides a pythonic way to run MaxText models.
-- **benchmark_runner.py**: A cli interface to running a specific model recipe, on pathways or mcjax directly or with orchestration like xpk with one command.
+- **benchmark_runner.py**: A cli interface to running a specific model recipe, on pathways or mcjax directly or with orchestration like Cluster Toolkit (`ctk`) with one command.
 
 ```shell
-# Legacy: McJax with XPK
+# McJax with Cluster Toolkit (ctk)
 CLUSTER=my-cluster
-ZONE=my-zone
+LOCATION=my-location
 PROJECT=my-project
-python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
+python3 -m benchmarks.benchmark_runner ctk --project ${PROJECT?} --location ${LOCATION?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
 ```
 
 ```shell
-# Legacy: Pathways with XPK
+# Pathways with Cluster Toolkit (ctk)
 export RUNNER=us-docker.pkg.dev/path/to/maxtext_runner
 export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server
 export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server
 
-python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5 --pathways_server_image="${SERVER_IMAGE?}" --pathways_proxy_server_image="${PROXY_IMAGE?}" --pathways_runner_image="${RUNNER?}"
+python3 -m benchmarks.benchmark_runner ctk --use_pathways=true --pathways_server_image="${SERVER_IMAGE?}" --pathways_proxy_server_image="${PROXY_IMAGE?}" --pathways_runner_image="${RUNNER?}" --project ${PROJECT?} --location ${LOCATION?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
 ```
 
 ```shell
@@ -80,7 +77,7 @@ python3 -m benchmarks.benchmark_runner xpk --project ${PROJECT?} --zone ${ZONE?}
 python3 -m benchmarks.benchmark_runner on-device --base_output_directory gs://maxtext-experiments-tpem/ --run_name="test-run" --num_steps=5
 ```
 
-- **maxtext_xpk_runner.py**: Legacy Python orchestration for XPK workloads. New benchmark submissions should use `gcluster job submit`; this runner still requires a separate implementation before it can submit Cluster Toolkit jobs directly.
+- **maxtext_ctk_runner.py** (and backward-compatible alias **maxtext_xpk_runner.py**): Python orchestration for Cluster Toolkit (`gcluster`) workloads.
 
 ```shell
 # Loop possibilities:
@@ -119,20 +116,20 @@ for model in list_of_models:
             base_docker_image=base_docker_image,
             pathways_config=None
           )
-          command, name = generate_xpk_workload_cmd(
+          command, name = generate_workload_cmd(
             cluster_config=cluster_config,
             wl_config=wl_config
           )
 
           print(f"Name of the workload is: {name} \n")
-          xpk_workload_names.append(name)
+          workload_names.append(name)
 
-          print(f"XPK command to be used is: {command} \n")
-          xpk_workload_cmds.append(command)
+          print(f"gcluster command to be used is: {command} \n")
+          workload_cmds.append(command)
 
-  for xpk_workload_name, xpk_workload_cmd in zip(xpk_workload_names, xpk_workload_cmds):
-    return_code = run_command_with_updates(xpk_workload_cmd, xpk_workload_name)
+  for workload_name, workload_cmd in zip(workload_names, workload_cmds):
+    return_code = run_command_with_updates(workload_cmd, workload_name)
     if return_code != 0:
-      print(f'Unable to run xpk workload: {xpk_workload_name}')
+      print(f'Unable to run gcluster workload: {workload_name}')
 
 ```

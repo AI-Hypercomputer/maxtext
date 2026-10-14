@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,55 +17,78 @@ This module provides helper functions for parsing command-line arguments
 in benchmark recipes.
 
 It primarily offers a standardized way to handle a `--delete` flag, which can
-be used to clean up existing XPK workloads before starting a new run.
+be used to clean up existing Cluster Toolkit (gcluster) workloads before
+starting a new run.
 """
 
 import os
+import subprocess
 
-from benchmarks.xpk_configs import XpkClusterConfig
+from benchmarks.ctk_configs import ClusterConfig
 
 # Constants for defining supported actions
 DELETE = "delete"
 
 
-def _handle_delete(cluster_config: XpkClusterConfig, user: str, **kwargs) -> int:
-  """Handles the deletion of workloads.
+def _handle_delete(cluster_config: ClusterConfig, user: str, **kwargs) -> int:
+  """Handles the deletion of workloads starting with the user's prefix.
 
   Args:
-      cluster_config: XpkClusterConfig object
+      cluster_config: ClusterConfig object
       user: User string
-      **kwargs: Optional keyword arguments, such as xpk_path
+      **kwargs: Optional keyword arguments (retained for backward compatibility)
   """
-  xpk_path = kwargs.get("xpk_path", "xpk")  # Default to "xpk" if not provided
+  del kwargs
   first_three_chars = user[:3]
-  delete_command = (
-      f"python3 {xpk_path}/xpk.py workload delete "
-      f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
-      f" --filter-by-job={first_three_chars} --zone={cluster_config.zone}"
+  location = getattr(cluster_config, "location", None) or cluster_config.zone
+  get_jobs_cmd = (
+      f"gcloud container clusters get-credentials {cluster_config.cluster_name} "
+      f"--location={location} --project={cluster_config.project} && "
+      "kubectl get jobset -o custom-columns=NAME:.metadata.name --no-headers"
   )
-  print(f"Deleting workloads starting with: {first_three_chars} using command:" f" {delete_command}")
-  os.system(delete_command)
+  try:
+    output = subprocess.check_output(get_jobs_cmd, shell=True, text=True)
+  except subprocess.CalledProcessError as e:
+    print(f"Failed to fetch jobs from cluster {cluster_config.cluster_name}: {e}")
+    return 1
+
+  jobs_to_cancel = [job.strip() for job in output.splitlines() if job.strip().startswith(first_three_chars)]
+
+  final_return_code = 0
+  for job in jobs_to_cancel:
+    cancel_cmd = (
+        f"gcluster job cancel {job} "
+        f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
+        f" --location={location}"
+    )
+    print(f"Deleting workload: {job} using command: {cancel_cmd}")
+    ret_code = os.system(cancel_cmd)
+    if ret_code != 0:
+      final_return_code = ret_code
+
+  return final_return_code
 
 
-def handle_delete_specific_workload(cluster_config: XpkClusterConfig, workload_name: str, **kwargs) -> int:
+def handle_delete_specific_workload(cluster_config: ClusterConfig, workload_name: str, **kwargs) -> int:
   """Handles the deletion of workloads with a specific name.
 
   Args:
-      cluster_config: XpkClusterConfig object
+      cluster_config: ClusterConfig object
       workload_name: workload name
-      **kwargs: Optional keyword arguments, such as xpk_path
+      **kwargs: Optional keyword arguments (retained for backward compatibility)
   """
-  xpk_path = kwargs.get("xpk_path", "xpk")  # Default to "xpk" if not provided
+  del kwargs
+  location = getattr(cluster_config, "location", None) or cluster_config.zone
   delete_command = (
-      f"python3 {xpk_path}/xpk.py workload delete "
+      f"gcluster job cancel {workload_name} "
       f"--project={cluster_config.project} --cluster={cluster_config.cluster_name}"
-      f" --filter-by-job={workload_name} --zone={cluster_config.zone}"
+      f" --location={location}"
   )
   print(f"Deleting workload: {workload_name} using command:" f" {delete_command}")
-  os.system(f"yes | {delete_command}")
+  return os.system(delete_command)
 
 
-def handle_cmd_args(cluster_config: XpkClusterConfig, is_delete: bool, user: str, **kwargs) -> bool:
+def handle_cmd_args(cluster_config: ClusterConfig, is_delete: bool, user: str, **kwargs) -> bool:
   """Parses command-line arguments and executes the specified actions.
 
   Args:
