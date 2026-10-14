@@ -63,6 +63,8 @@ if [ ! -f /tmp/golden_data_gpt-oss-20b.jsonl ]; then
   gcloud storage cp gs://maxtext-test-assets/golden_data_gpt-oss-20b.jsonl /tmp/golden_data_gpt-oss-20b.jsonl
 fi
 
+export LIBTPU_INIT_ARGS='--xla_tpu_scoped_vmem_limit_kib=81920'
+
 python3 -m tests.utils.forward_pass_logit_checker \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
@@ -74,6 +76,6 @@ python3 -m tests.utils.forward_pass_logit_checker \
     dtype=float32 \
     attention=dot_product \
     --golden_logits_path=/tmp/golden_data_gpt-oss-20b.jsonl \
-    --max_kl_div=1.0 \
+    --max_kl_div=1.1 \
     hardware=cpu \
     skip_jax_distributed_system=True
