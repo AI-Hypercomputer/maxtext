@@ -196,12 +196,15 @@ def cache_values(tree):
 
 
 def update_cache(tree, values):
-  """Update fixed-shape per-array caches after a model step."""
+  """Update caches while preserving their declared storage dtypes."""
   for key, value in values.items():
     if isinstance(value, dict):
       update_cache(tree[key], value)
     else:
-      tree[key].set_value(value)
+      # Prefill math may promote BF16 values, but insertion and subsequent
+      # generation require the same dtypes as the initialized decode state.
+      # Recurrent GDN state remains FP32 because its storage is declared FP32.
+      tree[key].set_value(value.astype(tree[key].get_value().dtype))
 
 
 def weight_axes(name, shape):
@@ -217,7 +220,8 @@ def weight_axes(name, shape):
   if name == "mlp.experts.down_proj":
     return ("exp", "embed_moe", "mlp_moe")
   if len(shape) == 2:
-    return ("mlp", "embed")
+    # Scalar-output gates have shape (1, hidden); replicate their output axis.
+    return tuple(None if size == 1 else axis for size, axis in zip(shape, ("mlp", "embed")))
   return (None,) * len(shape)
 
 

@@ -21,6 +21,7 @@ from orbax.checkpoint import v1 as ocp
 
 torch = pytest.importorskip("torch")
 from maxtext.checkpoint_conversion.to_maxtext import _convert_tensor_to_numpy, _get_maxtext_weight, LazyTensor
+from maxtext.models.qwen38 import weight_axes
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.hf_shape import QWEN38_HF_WEIGHTS_TO_SHAPE
 from maxtext.checkpoint_conversion.utils.param_mapping import QWEN38_MAXTEXT_TO_HF_PARAM_HOOK_FN
@@ -82,3 +83,25 @@ def test_inverse_mapping_retains_independent_ple_shards_and_projection_orientati
   hook = QWEN38_MAXTEXT_TO_HF_PARAM_HOOK_FN({}, None, saving_to_hf=True)["params-decoder-logits_dense-kernel"]
   weight = np.arange(12).reshape(3, 4)
   np.testing.assert_array_equal(hook(weight, (4, 3)), weight.T)
+
+
+@pytest.mark.parametrize("tensor,expert", [(1, 1), (2, 1), (2, 2), (2, 4), (2, 8)])
+def test_full_weight_shapes_divide_cluster_mesh(tensor, expert):
+  """Validate all full-size decoder weights without allocating their data."""
+  shapes = QWEN38_HF_WEIGHTS_TO_SHAPE(HF_MODEL_CONFIGS["qwen3.8-flash-next"].to_dict())
+  factors = {
+      None: 1,
+      "exp": expert,
+      "mlp_moe": tensor,
+      "embed_moe": 4,
+      "mlp": tensor,
+      "embed": 4 * expert,
+      "embed_vocab": 4 * expert,
+  }
+  for key, shape in shapes.items():
+    if not key.startswith("model.layers."):
+      continue
+    name = key.split(".", 3)[3]
+    axes = weight_axes(name, shape)
+    for size, axis in zip(shape, axes):
+      assert size % factors[axis] == 0, (key, shape, axes, tensor, expert)

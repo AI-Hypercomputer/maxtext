@@ -178,3 +178,19 @@ MoE gathers per token to bound temporary memory. Both prioritize correctness ove
 peak throughput. Conversion streaming improves onboarding memory and I/O; it
 does not itself speed steady-state decoding. PLE decode looks up 16 rows per token,
 so full-table device residency and communication are the next performance concerns.
+
+## BF16 decode cache fix
+
+Prefill cache writes now preserve each initialized leaf dtype before MaxEngine
+slot insertion and subsequent generation. BF16 storage stays BF16; GDN recurrent
+state remains FP32. A regression reproduces promoted prefill values and checks
+JIT slot insertion. TPU launch environments must include `JAX_PLATFORMS=tpu,cpu`
+for the host validation callbacks. Full TPU decode must still be rerun to verify
+the complete runtime path.
+
+## Cluster singleton gate sharding fix
+
+The shared-expert gate `(1,2560)` now replicates its singleton output axis
+instead of assigning it to tensor parallelism. Shape-only regressions check
+all decoder weight dimensions against each script-supported mesh (4–64 devices).
+Rebuild the runner image before resubmitting; checkpoint reconversion is not needed.

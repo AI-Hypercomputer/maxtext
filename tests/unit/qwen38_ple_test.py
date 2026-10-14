@@ -347,3 +347,27 @@ def test_greedy_sampler_keeps_engine_token_dtype_with_x64(algorithm):
   assert 0 <= result.item() < 3
   if algorithm == "greedy":
     np.testing.assert_array_equal(result, [1])
+
+
+def test_cache_update_preserves_bf16_storage_and_fp32_recurrence():
+  initial = {
+      "attention": {
+          "conv": jnp.zeros((1, 3, 8), jnp.bfloat16),
+          "recurrent": jnp.zeros((1, 2, 8, 8), jnp.float32),
+      },
+      "ple_conv": jnp.zeros((1, 9, 16), jnp.bfloat16),
+      "tokens": jnp.zeros((1, 2), jnp.int32),
+  }
+  cache = nnx.Dict(
+      attention=nnx.Dict({k: nnx.Cache(v) for k, v in initial["attention"].items()}),
+      ple_conv=nnx.Cache(initial["ple_conv"]),
+      tokens=nnx.Cache(initial["tokens"]),
+  )
+  # Prefill math can promote a storage leaf to float32.
+  promoted = jax.tree.map(lambda x: jnp.ones(x.shape, jnp.float32), initial)
+  update_cache(cache, promoted)
+  actual = cache_values(cache)
+  for destination, source in zip(jax.tree.leaves(initial), jax.tree.leaves(actual)):
+    assert source.dtype == destination.dtype
+    inserted = jax.jit(lambda x, y: jax.lax.dynamic_update_index_in_dim(x, y, 0, 0))(destination, source)
+    np.testing.assert_array_equal(np.asarray(inserted), np.ones(destination.shape))
