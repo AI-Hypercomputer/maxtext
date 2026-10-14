@@ -668,13 +668,27 @@ class GateLogit(nnx.Module):
     return output, pre_bias_logits
 
 
+# Per-layer size up to which a scanned kernel is gathered once per stack rather than in every layer.
+_GATHER_ONCE_MAX_LAYER_BYTES = 16 * 1024 * 1024
+
+
+def _is_small_scanned_kernel(module) -> bool:
+  kernel = getattr(module, "kernel", None)
+  if not isinstance(kernel, nnx.Param) or not hasattr(module, "kernel_axes") or kernel.value.ndim < 3:
+    return False
+  layers = kernel.value.shape[kernel.get_metadata().get("param_scan_axis", 0)]
+  return kernel.value.size // layers * kernel.value.dtype.itemsize <= _GATHER_ONCE_MAX_LAYER_BYTES
+
+
 def _gathered_kernels(layers: nnx.Module) -> dict:
   """{kernel path within a scanned layer stack: its module}, for the kernels gathered once per stack."""
   kernels = {}
   for path, module in nnx.iter_modules(layers):
     if isinstance(module, GateLogit):
       kernels[path + ("kernel",)] = module
-    elif isinstance(module, attentions.Attention):
+    elif _is_small_scanned_kernel(module):
+      kernels[path + ("kernel",)] = module
+    if isinstance(module, attentions.Attention):
       # The backward pass otherwise gathers the query kernel twice per layer: for the rematerialized
       # projection and for the input gradient.
       kernels[path + ("query", "kernel")] = module.query
