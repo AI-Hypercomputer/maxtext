@@ -16,15 +16,16 @@
 
 # Promotes a Docker image version from a staging Artifact Registry repository
 # to a production Artifact Registry repository via the :promoteArtifact API
-# (Exit Gate) and waits for the long-running operation to complete.
+# (Exit Gate), waits for the long-running operation to complete, and attaches
+# the SPDX SBOM reference if an SBOM bucket is provided.
 #
 # Usage:
-#   .github/scripts/promote_artifacts.sh <project_name> <staging_repo> <prod_repo> <image_name> <image_digest> [location]
+#   .github/scripts/promote_artifacts.sh <project_name> <staging_repo> <prod_repo> <image_name> <image_digest> [sbom_bucket] [location]
 
 set -euo pipefail
 
 if [[ $# -lt 5 ]]; then
-  echo "Usage: $0 <project_name> <staging_repo> <prod_repo> <image_name> <image_digest> [location]" >&2
+  echo "Usage: $0 <project_name> <staging_repo> <prod_repo> <image_name> <image_digest> [sbom_bucket] [location]" >&2
   exit 1
 fi
 
@@ -33,7 +34,8 @@ STAGING_REPO="$2"
 PROD_REPO="$3"
 IMAGE_NAME="$4"
 IMAGE_DIGEST="$5"
-LOCATION="${6:-us}"
+SBOM_BUCKET="${6:-${SBOM_BUCKET:-}}"
+LOCATION="${7:-us}"
 
 echo "Promoting ${IMAGE_NAME}@${IMAGE_DIGEST} from ${STAGING_REPO} to ${PROD_REPO} in project ${PROJECT_NAME}..."
 
@@ -63,41 +65,54 @@ echo "Promote API response (HTTP ${HTTP_STATUS}): ${BODY}"
 if [[ "${HTTP_STATUS}" -lt 200 || "${HTTP_STATUS}" -ge 300 ]]; then
   if echo "${BODY}" | grep -qi "already exists"; then
     echo "Artifact version already exists in ${PROD_REPO}; skipping promotion."
-    exit 0
-  fi
-  echo "Error: promoteArtifact API failed with HTTP ${HTTP_STATUS}" >&2
-  exit 1
-fi
-
-OP_NAME=$(echo "${BODY}" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("name", ""))')
-if [[ -z "${OP_NAME}" ]]; then
-  echo "No operation name returned; promotion completed synchronously."
-  exit 0
-fi
-
-echo "Waiting for promotion operation ${OP_NAME} to complete..."
-for attempt in {1..60}; do
-  OP_STATUS=$(curl -s \
-    -H "Authorization: Bearer ${ACCESS_TOKEN}" \
-    -H "Content-Type: application/json" \
-    "https://artifactregistry.googleapis.com/v1/${OP_NAME}")
-  read -r DONE HAS_ERR < <(python3 -c 'import json, sys; d = json.load(sys.stdin); print(str(d.get("done", False)).lower(), str("error" in d).lower())' <<< "${OP_STATUS}")
-  if [[ "${DONE}" == "true" ]]; then
-    echo "Final operation status: ${OP_STATUS}"
-    if [[ "${HAS_ERR}" == "true" ]]; then
-      if echo "${OP_STATUS}" | grep -qi "already exists"; then
-        echo "Artifact version already exists in ${PROD_REPO}; skipping promotion."
-        exit 0
-      fi
-      echo "Error: Promotion operation failed." >&2
-      exit 1
-    fi
-    exit 0
-  fi
-  if [[ "${attempt}" -eq 60 ]]; then
-    echo "Error: Timed out waiting for promotion operation ${OP_NAME} to complete." >&2
+  else
+    echo "Error: promoteArtifact API failed with HTTP ${HTTP_STATUS}" >&2
     exit 1
   fi
-  echo "Promotion still in progress, retrying in 5 seconds..."
-  sleep 5
-done
+else
+  OP_NAME=$(echo "${BODY}" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("name", ""))')
+  if [[ -z "${OP_NAME}" ]]; then
+    echo "No operation name returned; promotion completed synchronously."
+  else
+    echo "Waiting for promotion operation ${OP_NAME} to complete..."
+    for attempt in {1..60}; do
+      OP_STATUS=$(curl -s \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+        -H "Content-Type: application/json" \
+        "https://artifactregistry.googleapis.com/v1/${OP_NAME}")
+      read -r DONE HAS_ERR < <(python3 -c 'import json, sys; d = json.load(sys.stdin); print(str(d.get("done", False)).lower(), str("error" in d).lower())' <<< "${OP_STATUS}")
+      if [[ "${DONE}" == "true" ]]; then
+        echo "Final operation status: ${OP_STATUS}"
+        if [[ "${HAS_ERR}" == "true" ]]; then
+          if echo "${OP_STATUS}" | grep -qi "already exists"; then
+            echo "Artifact version already exists in ${PROD_REPO}; skipping promotion."
+            break
+          fi
+          echo "Error: Promotion operation failed." >&2
+          exit 1
+        fi
+        break
+      fi
+      if [[ "${attempt}" -eq 60 ]]; then
+        echo "Error: Timed out waiting for promotion operation ${OP_NAME} to complete." >&2
+        exit 1
+      fi
+      echo "Promotion still in progress, retrying in 5 seconds..."
+      sleep 5
+    done
+  fi
+fi
+
+if [[ -n "${SBOM_BUCKET}" ]]; then
+  STAGING_SBOM_GCS="${SBOM_BUCKET}/${LOCATION}-docker.pkg.dev%2F${PROJECT_NAME}%2F${STAGING_REPO}%2F${IMAGE_NAME}%40${IMAGE_DIGEST/:/%3A}/sbom/user-2-3.spdx.json"
+  if gcloud storage cp "${STAGING_SBOM_GCS}" /tmp/sbom.spdx.json 2>/dev/null; then
+    PROD_IMAGE_URI="${LOCATION}-docker.pkg.dev/${PROJECT_NAME}/${PROD_REPO}/${IMAGE_NAME}@${IMAGE_DIGEST}"
+    echo "Attaching SPDX SBOM reference to promoted image ${PROD_IMAGE_URI}..."
+    gcloud artifacts sbom load \
+      --project="${PROJECT_NAME}" \
+      --source=/tmp/sbom.spdx.json \
+      --uri="${PROD_IMAGE_URI}" \
+      --destination="${SBOM_BUCKET}" \
+      --quiet || echo "Warning: gcloud artifacts sbom load on promoted image returned non-zero."
+  fi
+fi
