@@ -751,7 +751,9 @@ def ragged_gather_reduce(
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
-          needs_layout_passes=False,
+          # jax 0.11.1 (libtpu 0.0.46) can't run the SparseCore layout passes
+          # on this kernel.
+          needs_layout_passes=jax.__version_info__ >= (0, 11, 2),
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,
