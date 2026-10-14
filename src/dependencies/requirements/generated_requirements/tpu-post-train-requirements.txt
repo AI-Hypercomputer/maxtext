@@ -328,7 +328,7 @@ tensorflow-metadata>=1.21.0
 tensorstore>=0.1.84
 termcolor>=3.3.0
 tiktoken>=0.14.0
-tokamax>=0.0.14
+tokamax>=0.0.14,!=0.1.0
 tokenizers>=0.22.2
 toml>=0.10.2
 tomlkit>=0.15.1
