@@ -1013,9 +1013,12 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
   def test_compile_expands_routed_experts_placeholder_from_config(self):
     """`compile()` expands a `(B, S, 0, 0)` `routed_experts` placeholder using config."""
-    self.mock_config.num_decoder_layers = 3
-    self.mock_config.num_experts_per_tok = 4
-    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    mock_config = self.setup_config(
+        override_model_config=True,
+        base_num_decoder_layers=3,
+        num_experts_per_tok=4,
+    )
+    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
     seen_shapes = []
 
     def _loss_fn(model, routed_experts):
@@ -1790,7 +1793,7 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
           completion_mask=np.zeros((2, 3), dtype=np.int32),
           advantages=np.zeros((2,), dtype=np.float32),
           old_per_token_logps=np.zeros((2, 3), dtype=np.float32),
-          routed_experts=np.empty((2, 4, 0, 0), dtype=np.int16),
+          routed_experts=np.empty((2, 5, 0, 0), dtype=np.int16),
       )
       real_payload = datatypes.RLTrainerPayload(
           prompt_ids=np.array([[10, 11], [12, 0]], dtype=np.int32),
@@ -1799,7 +1802,7 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
           completion_mask=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
           advantages=np.array([1.0, -1.0], dtype=np.float32),
           old_per_token_logps=np.full((2, 3), -0.5, dtype=np.float32),
-          routed_experts=np.zeros((2, 4, num_layers, top_k), dtype=np.int16),
+          routed_experts=np.zeros((2, 5, num_layers, top_k), dtype=np.int16),
       )
     else:
       dummy_payload = datatypes.RLTrainerPayload(
@@ -1809,7 +1812,7 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
           completion_mask=np.zeros((2, 8), dtype=np.int32),
           advantages=np.zeros((2, 8), dtype=np.float32),
           old_per_token_logps=np.zeros((2, 8), dtype=np.float32),
-          routed_experts=np.empty((2, 7, 0, 0), dtype=np.int16),
+          routed_experts=np.empty((2, 8, 0, 0), dtype=np.int16),
           segment_ids=np.zeros((2, 8), dtype=np.int32),
           segment_positions=np.zeros((2, 8), dtype=np.int32),
           num_segments=9,
@@ -1830,7 +1833,7 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
               dtype=np.float32,
           ),
           old_per_token_logps=np.full((2, 8), -0.5, dtype=np.float32),
-          routed_experts=np.zeros((2, 7, num_layers, top_k), dtype=np.int16),
+          routed_experts=np.zeros((2, 8, num_layers, top_k), dtype=np.int16),
           segment_ids=np.array(
               [[1, 1, 1, 1, 1, 0, 0, 0], [1, 1, 1, 0, 0, 0, 0, 0]],
               dtype=np.int32,
