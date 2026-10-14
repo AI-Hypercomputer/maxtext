@@ -300,6 +300,7 @@ ModelName = Literal[
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-9b",
+    "qwen3.5-27b",
     "qwen3.5-35b-a3b",
     "qwen3.5-35b-a3b-fp8",
     "qwen3.5-35b-fp8",
@@ -1786,6 +1787,40 @@ class Qwen3Next(BaseModel):
       64,
       description="Chunk size for the parallel scan algorithm in the Gated Delta Net.",
   )
+  qwen3_5_sublayer_remat: bool = Field(
+      False,
+      description="Whether to rematerialize sublayers individually in Qwen 3.5 DecoderLayer.",
+  )
+  gdn_chunk_impl: Literal["default", "fast"] = Field(
+      default="default",
+      description=(
+          "The implementation variant for the Gated DeltaNet chunked rule. "
+          "'fast' replaces solve_triangular with a matmul-only inverse to optimize TPU performance."
+      ),
+  )
+  gdn_inverse_block_size: int = Field(
+      16, description="Base block size of the recursive unit-lower-triangular inverse used by gdn_chunk_impl='fast'."
+  )
+  gdn_recurrence_impl: Literal["jax", "pallas", "fused"] = Field(
+      "jax",
+      description=(
+          "Inter-chunk recurrence for gdn_chunk_impl='fast': "
+          "'jax' (lax.scan), 'pallas' (TPU kernel) or 'fused' (fused stage-2 + recurrence forward kernel)."
+      ),
+  )
+  gdn_pallas_heads_per_block: int = Field(
+      2,
+      description="Number of GDN value heads computed per Pallas grid block across the recurrence scan.",
+  )
+  gdn_pallas_batch_map: bool = Field(
+      False,
+      description="With gdn_recurrence_impl='pallas', keep the per-sequence jax.lax.map to bound HBM.",
+  )
+  gdn_inverse_precision: Literal["default", "high", "highest"] = Field(
+      "highest",
+      description="Precision for matmul operations in invert_unit_lower_triangular.",
+  )
+
   use_qk_norm_in_gdn: bool = Field(
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
