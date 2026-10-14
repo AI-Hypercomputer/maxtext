@@ -1592,6 +1592,28 @@ class NNXDecoder(nnx.Module):
     _, mhc_reduce_fn = mhc.get_functions(cfg.mhc_expansion_rate)
     return mhc_reduce_fn(y)
 
+  def apply_decoder_norm(self, y, reduce_mhc=True):
+    """Applies the decoder's final normalization (`decoder_norm`) to a hidden state.
+
+    Args:
+      y: Hidden state tensor, either 3D or an expanded 4D mHC state.
+      reduce_mhc: If True (default), collapses the parallel hyper-connection streams to 3D
+        before normalizing.
+
+    Returns:
+      The normalized hidden state.
+    """
+    if reduce_mhc:
+      y = self._reduce_mhc_streams(y)
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      norm_out_sharding = create_sharding(
+          self.mesh,
+          ("activation_batch", "activation_length", "activation_embed"),
+      )
+    else:
+      norm_out_sharding = None
+    return self.decoder_norm(y, out_sharding=norm_out_sharding)
+
   def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True, reduce_mhc=True):
     """Applies final normalization and projects hidden states to logits.
 
@@ -1601,9 +1623,10 @@ class NNXDecoder(nnx.Module):
       deterministic: Whether dropout is disabled.
       model_mode: Operational mode (e.g. MODEL_MODE_TRAIN, MODEL_MODE_PREFILL).
       normalize_y: If True (default), applies the main decoder final normalization
-        (decoder_norm) before projecting to logits. Set to False when called from
-        Multi-Token Prediction (MTP), which applies its own dedicated final norm
-        (mtp_k_final_norm) to avoid double normalization.
+        (decoder_norm) before projecting to logits. Set to False when `y` is already
+        normalized: when called from Multi-Token Prediction (MTP), which applies its
+        own dedicated final norm (mtp_k_final_norm), or when the decoder has already
+        applied `decoder_norm` because `mtp_norm_main_hidden_state` is enabled.
       reduce_mhc: If True (default), collapses the parallel hyper-connection (mHC)
         streams of a 4D `[batch, seq, mhc_expansion_rate, emb]` hidden state down to
         3D before normalizing. Set to False when the caller has already reduced the
@@ -1615,15 +1638,7 @@ class NNXDecoder(nnx.Module):
       y = self._reduce_mhc_streams(y)
 
     if normalize_y:
-      if cfg.shard_mode == ShardMode.EXPLICIT:
-        norm_out_sharding = create_sharding(
-            self.mesh,
-            ("activation_batch", "activation_length", "activation_embed"),
-        )
-      else:
-        norm_out_sharding = None
-
-      y = self.decoder_norm(y, out_sharding=norm_out_sharding)
+      y = self.apply_decoder_norm(y, reduce_mhc=False)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:
@@ -2344,6 +2359,15 @@ class NNXDecoder(nnx.Module):
       # sow a collapsed copy and leave `hidden_state` itself 4D, so MTP still receives the
       # full stream state when both features are enabled.
       self.sow(nnx.Intermediate, "hidden_states", self._reduce_mhc_streams(hidden_state))
+
+    elif cfg.mtp_norm_main_hidden_state:
+      # Megatron-LM applies the decoder's final norm once and feeds that tensor to both the LM
+      # head and the MTP block, so normalize here and hand the normalized state out to MTP.
+      # (`num_vocab_tiling > 1` and `mhc_expansion_rate > 1` are rejected by the config validator.)
+      hidden_state = self.apply_decoder_norm(hidden_state)
+      logits = self.apply_output_head(
+          shared_embedding, hidden_state, deterministic, model_mode, normalize_y=False, reduce_mhc=False
+      )
 
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)

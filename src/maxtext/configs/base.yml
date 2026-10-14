@@ -259,6 +259,9 @@ mtp_loss_scaling_factor: 0.1
 mtp_eval_target_module: 0
 # reuse the main decoder's token embeddings instead of a second lookup
 mtp_reuse_input_embedding: false
+# apply the decoder's final norm to the main hidden state before passing it to
+# MTP, as in Megatron-LM where final_layernorm precedes the MTP hnorm
+mtp_norm_main_hidden_state: false
 
 # mixture of experts (moe)
 num_experts: 1

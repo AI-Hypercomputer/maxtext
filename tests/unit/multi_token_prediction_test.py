@@ -730,6 +730,94 @@ class MaybeQuantizeModelMTPTest(unittest.TestCase):
     self.assertIsNotNone(quantized)
 
 
+class MTPNormMainHiddenStateTest(unittest.TestCase):
+  """`mtp_norm_main_hidden_state` feeds the `decoder_norm` output to MTP without changing the logits."""
+
+  def setUp(self):
+    super().setUp()
+    self.batch_size, self.seq_len = jax.device_count(), 8
+    key = jax.random.PRNGKey(7)
+    self.data = {
+        "inputs": jax.random.randint(key, (self.batch_size, self.seq_len), 0, 128),
+        "inputs_position": jnp.arange(self.seq_len, dtype=jnp.int32).reshape(1, -1).repeat(self.batch_size, axis=0),
+        "inputs_segmentation": jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32),
+        "targets": jax.random.randint(jax.random.PRNGKey(8), (self.batch_size, self.seq_len), 0, 128),
+        "targets_segmentation": jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32),
+    }
+
+  def _build(self, mtp_norm_main_hidden_state):
+    """A tiny real `models.Transformer` with one MTP layer and a non-trivial `decoder_norm.scale`."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="mtp_norm_main_hidden_state_test",
+        skip_jax_distributed_system=True,
+        mtp_num_layers=1,
+        mtp_norm_main_hidden_state=mtp_norm_main_hidden_state,
+        attention="dot_product",
+        enable_dropout=False,
+        base_num_decoder_layers=1,
+        base_emb_dim=16,
+        base_mlp_dim=32,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        head_dim=8,
+        max_target_length=8,
+        per_device_batch_size=1,
+        vocab_size=128,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = models.Transformer(cfg, mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=0))
+    # RMSNorm initializes `scale` to ones, which `hnorm` would make invisible; use a
+    # per-channel scale so the normalized and un-normalized MTP inputs actually differ.
+    model.decoder.decoder_norm.scale[...] = jnp.linspace(0.5, 1.5, cfg.emb_dim, dtype=jnp.float32)
+    return cfg, mesh, model
+
+  def _logits_and_mtp_loss(self, cfg, mesh, model):
+    """Runs the forward pass and `pre_train.loss_fn`, returning `(logits, mtp_loss)`."""
+    with jax.set_mesh(mesh):
+      logits = model(
+          decoder_input_tokens=self.data["inputs"],
+          decoder_positions=self.data["inputs_position"],
+          decoder_segment_ids=self.data["inputs_segmentation"],
+          enable_dropout=False,
+          decoder_target_tokens=self.data["targets"],
+          decoder_target_mask=self.data["targets_segmentation"],
+      )
+      _, aux = pre_train.loss_fn(model, cfg, self.data, None, None, is_train=True)
+    return logits, float(aux["mtp_loss"])
+
+  def _decoder_norm_scale_grad_of_mtp_loss(self, cfg, mesh, model):
+    """Returns `d(mtp_loss) / d(decoder.decoder_norm.scale)` as a NumPy array."""
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    def mtp_loss(p):
+      _, aux = pre_train.loss_fn(nnx.merge(graphdef, p, rest), cfg, self.data, None, None, is_train=True)
+      return aux["mtp_loss"]
+
+    with jax.set_mesh(mesh):
+      grads = jax.grad(mtp_loss)(params)
+    return np.asarray(grads["decoder"]["decoder_norm"]["scale"][...])
+
+  def test_logits_unchanged_and_mtp_sees_normalized_state(self):
+    cfg_off, mesh_off, model_off = self._build(mtp_norm_main_hidden_state=False)
+    cfg_on, mesh_on, model_on = self._build(mtp_norm_main_hidden_state=True)
+    logits_off, mtp_loss_off = self._logits_and_mtp_loss(cfg_off, mesh_off, model_off)
+    logits_on, mtp_loss_on = self._logits_and_mtp_loss(cfg_on, mesh_on, model_on)
+
+    # `decoder_norm` is applied exactly once on the LM-head path either way.
+    np.testing.assert_allclose(np.asarray(logits_on), np.asarray(logits_off), rtol=1e-5, atol=1e-5)
+    # The MTP block received a different (normalized, per-channel scaled) hidden state.
+    self.assertNotAlmostEqual(mtp_loss_on, mtp_loss_off, places=5)
+
+  def test_decoder_norm_scale_gets_mtp_gradient_only_when_enabled(self):
+    cfg_off, mesh_off, model_off = self._build(mtp_norm_main_hidden_state=False)
+    cfg_on, mesh_on, model_on = self._build(mtp_norm_main_hidden_state=True)
+    grad_off = self._decoder_norm_scale_grad_of_mtp_loss(cfg_off, mesh_off, model_off)
+    grad_on = self._decoder_norm_scale_grad_of_mtp_loss(cfg_on, mesh_on, model_on)
+    np.testing.assert_array_equal(grad_off, np.zeros_like(grad_off))
+    self.assertGreater(np.abs(grad_on).max(), 0.0)
+
+
 class MTPQwixInterceptionTest(unittest.TestCase):
 
   def _assert_mtp_interception(self, quantize_mtp: bool, expected_rule: str):

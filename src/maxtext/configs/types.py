@@ -719,6 +719,13 @@ class MTP(BaseModel):
       False,
       description="Reuse the main decoder's token embeddings instead of a second lookup.",
   )
+  mtp_norm_main_hidden_state: bool = Field(
+      False,
+      description=(
+          "Apply the decoder's final norm to the main hidden state before passing it to MTP, as in"
+          " Megatron-LM where `final_layernorm` precedes the MTP `hnorm`."
+      ),
+  )
 
 
 class LogitsAndLoss(BaseModel):
@@ -5329,6 +5336,18 @@ class MaxTextConfig(
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if self.mtp_reuse_input_embedding and self.use_multimodal:
       raise ValueError("`mtp_reuse_input_embedding` does not support multimodal inputs.")
+    if self.mtp_norm_main_hidden_state:
+      if self.num_vocab_tiling > 1:
+        raise ValueError(
+            "`mtp_norm_main_hidden_state` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
+            " decoder skips `apply_output_head` in train mode and `decoder_norm` runs later inside"
+            " `vocab_tiling_nnx_loss`, so the MTP block would still receive the un-normalized hidden state."
+        )
+      if self.mhc_expansion_rate > 1:
+        raise ValueError(
+            "`mtp_norm_main_hidden_state` is not supported with `mhc_expansion_rate > 1`: the MTP layers expect"
+            " the expanded 4D hyper-connection state, which the decoder's final norm collapses to 3D."
+        )
     if self.quantize_mtp:
       if self.mtp_num_layers <= 0:
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
