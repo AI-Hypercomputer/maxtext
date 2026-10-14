@@ -24,6 +24,7 @@ from typing import Iterable, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 from flax import struct
 import jax
 from jax import ad_checkpoint as adc
@@ -732,6 +733,75 @@ class GateLogit(nnx.Module):
       bias = jnp.asarray(self.bias[...], self.dtype)
       output += bias
     return output, pre_bias_logits
+
+
+def _gathered_kernels(layers: nnx.Module) -> dict:
+  """{kernel path within a scanned layer stack: its module}, for the kernels gathered once per stack."""
+  kernels = {}
+  for path, module in nnx.iter_modules(layers):
+    if isinstance(module, GateLogit):
+      kernels[path + ("kernel",)] = module
+  return kernels
+
+
+def gather_scanned_kernels_once(layers: nnx.Module, params, mesh: Mesh, shard_mode):
+  """Gathers small FSDP-sharded kernels of a scanned layer stack once, before the scan, not in every layer.
+
+  The MoE router kernel (embed x num_experts, f32 under float32_gate_logits) is small but FSDP-sharded,
+  so every layer all-gathers it on the critical path, synchronously on TPUs that run all-gathers on the
+  TensorCore, and the backward pass gathers it again. Replicating the stacked kernels up front is one
+  all-gather for all layers. `params` is the stack's Param state with the scan axis leading; pair with
+  `reduce_scatter_gathered_grads` inside the scan so each layer's gradient still lands sharded.
+  """
+  gathered = _gathered_kernels(layers)
+  replicated = NamedSharding(mesh, P())
+
+  def replicate(path, x):
+    if tuple(k.key for k in path if isinstance(k, jax.tree_util.DictKey)) not in gathered:
+      return x
+    if shard_mode == ShardMode.EXPLICIT:
+      return jax.sharding.reshard(x, replicated)
+    return jax.lax.with_sharding_constraint(x, replicated)
+
+  return jax.tree_util.tree_map_with_path(replicate, params)
+
+
+def gathered_kernel_grad_shardings(layers: nnx.Module, mesh: Mesh, rules) -> dict:
+  """{kernel path within one layer: the kernel's own sharding} for the kernels `gather_scanned_kernels_once` gathers."""
+  return {
+      path: NamedSharding(mesh, nn_partitioning.logical_to_mesh_axes(tuple(module.kernel_axes), rules))
+      for path, module in _gathered_kernels(layers).items()
+  }
+
+
+def _identity_with_grad_sharding(x, sharding):
+  @jax.custom_vjp
+  def ident(y):
+    return y
+
+  def ident_fwd(y):
+    return y, None
+
+  def ident_bwd(_, ct):
+    return (jax.lax.with_sharding_constraint(ct, sharding),)
+
+  ident.defvjp(ident_fwd, ident_bwd)
+  return ident(x)
+
+
+def reduce_scatter_gathered_grads(params, shardings: dict):
+  """Identity on one layer's params whose backward puts the gathered kernels' gradients back on their sharding.
+
+  A layer handed a slice of a replicated kernel otherwise gets a replicated gradient: an all-reduce per
+  layer, stacked at full size across the scan. Constraining it to the kernel's own sharding makes it a
+  reduce-scatter into a stacked shard, as when the layer gathered the kernel itself.
+  """
+
+  def apply(path, x):
+    keys = tuple(k.key for k in path if isinstance(k, jax.tree_util.DictKey))
+    return _identity_with_grad_sharding(x, shardings[keys]) if keys in shardings else x
+
+  return jax.tree_util.tree_map_with_path(apply, params)
 
 
 class RoutedMoE(nnx.Module):
