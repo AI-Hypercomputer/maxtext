@@ -52,6 +52,9 @@ float32_gate_logits: true
 # DSA layers: NoPE MLA + k-pool indexer
 attention_type: "mla"
 use_indexer: true
+# The released indexer is already trained: train in the DSA "sparse training" stage (LM loss on, sparse mask),
+# not the dense warm-up stage (which skips the LM loss and only trains the indexer).
+indexer_sparse_training: true
 # DSA runs on MLA + the indexer mask through AttentionOp: Tokamax dynamic-mask splash by default (or dot_product).
 attention: "flash"
 use_tokamax_splash: true
