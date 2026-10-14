@@ -387,8 +387,13 @@ def _kernel_l2norm(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
   return (x_f * jax.lax.rsqrt(jnp.sum(x_f * x_f, axis=-1, keepdims=True) + eps)).astype(x.dtype)
 
 
-def _l2_normalize(x: jnp.ndarray, eps: float = 1e-12) -> jnp.ndarray:
-  return x * jax.lax.rsqrt(jnp.maximum(jnp.sum(x * x, axis=-1, keepdims=True), eps))
+def _l2_normalize(x: jnp.ndarray, eps: float = 1e-6) -> jnp.ndarray:
+  """The q/k L2-norm of the unfused path: FLA's ``l2norm`` (rsqrt(sum + 1e-6)), like the fused kernel's.
+
+  It used to be rsqrt(max(sum, 1e-12)), the standalone reference's form. On real OLMo-core weights that
+  epsilon alone put the KDA layers 8e-4 off the PyTorch/FLA model's logits; with FLA's it is 7e-5.
+  """
+  return _kernel_l2norm(x, eps)
 
 
 def _delta_rule_chunked(q, k, v, log_decay, beta, resets, chunk_size: int, state_dtype: str = "float32") -> jnp.ndarray:
@@ -429,7 +434,6 @@ def _delta_rule_chunked(q, k, v, log_decay, beta, resets, chunk_size: int, state
   beta_c = beta.reshape(batch, num_chunks, c, heads).transpose(1, 0, 3, 2)
   reset_c = resets.reshape(batch, num_chunks, c).transpose(1, 0, 2)
 
-  eye = jnp.eye(c, dtype=q.dtype)
   causal = jnp.tril(jnp.ones((c, c), dtype=bool))
   strict = jnp.tril(jnp.ones((c, c), dtype=bool), k=-1)
   positions = jnp.arange(c)
@@ -468,13 +472,10 @@ def _delta_rule_chunked(q, k, v, log_decay, beta, resets, chunk_size: int, state
     # (I + diag(beta) M) delta = diag(beta) (v - carried prediction)
     m = jnp.einsum("bhid,bhjd,bhijd->bhij", k_i, k_i, pair_decay)
     m = jnp.where(strict & same_doc, m, 0.0) * beta_i[..., None]
-    # (I + M)^-1 via Newton (X <- X(2I - AX)); M nilpotent so it converges in
-    # log2(C) steps. Batched matmuls stay on the MXU; solve_triangular's TPU
-    # lowering forced a ~2.4s/step relayout at the 3p5b shape (profiled).
-    a_mat = eye + m
-    m_inv = eye - m
-    for _ in range(max(0, (c - 1).bit_length() - 1)):
-      m_inv = m_inv @ (2.0 * eye - a_mat @ m_inv)
+    # (I + M)^-1 by blocked forward substitution in fp32 (_invert_unit_lower). Not Newton (X <- X(2I - AX)),
+    # whose iterates are the Neumann partial sums of -M and overflow on trained keys (see _invert_unit_lower),
+    # and not solve_triangular, whose TPU lowering forced a ~2.4s/step relayout at the 3p5b shape (profiled).
+    m_inv = _invert_unit_lower(m.astype(jnp.float32))
     carried = jnp.einsum("bhid,bhdv->bhiv", k_i * cum.astype(compute_dtype), state) * from_prev
     delta = jnp.einsum(
         "bhij,bhjv->bhiv", m_inv.astype(compute_dtype), (v_i - carried) * beta_i[..., None].astype(compute_dtype)
@@ -509,10 +510,19 @@ def _delta_rule_chunked(q, k, v, log_decay, beta, resets, chunk_size: int, state
 def _invert_unit_lower(m: jnp.ndarray) -> jnp.ndarray:
   """(I + M)^-1 for strictly lower triangular M over the last two axes.
 
-  Block doubling from 16 x 16: each diagonal block's inverse is a power series
-  that ends because M is nilpotent, then [[A, 0], [C, D]]^-1 = [[A^-1, 0],
-  [-D^-1 C A^-1, D^-1]] doubles the block size. All batched matmuls; the
-  analytic VJP below replaces differentiating through the iterations.
+  Forward substitution inside 16 x 16 diagonal blocks, then block doubling,
+  [[A, 0], [C, D]]^-1 = [[A^-1, 0], [-D^-1 C A^-1, D^-1]], up to the chunk, as
+  FLA's solve_tril does. Every intermediate is a block of the answer, so nothing
+  grows past it. The analytic VJP below replaces differentiating through the
+  iterations.
+
+  The diagonal blocks used to be a power series, (I - N)(I + N^2)(I + N^4)...,
+  like the Newton iteration (X <- X(2I - AX)) the chunked path used before. Both
+  build the Neumann partial sums of -N, which for the delta rule's
+  M = beta_i k_i . k_j on keys as alike as a trained model's, with beta up to 2,
+  reach 1e8..1e20 in fp32 before cancelling: an inverse wrong by orders of
+  magnitude while still finite, or inf once a product overflows (the NaN loss at
+  steps 210-220 of the OLMo 3.5 hero replay).
   """
   return _invert_unit_lower_fwd(m)[0]
 
@@ -528,14 +538,12 @@ def _invert_unit_lower_fwd(m):
   blocks = m.reshape(*lead, nb, base, nb, base)
   diag = jnp.einsum("...rirj->...rij", blocks).astype(f32)
   eye = jnp.eye(base, dtype=f32)
-  # (I + N)^-1 = (I - N)(I + N^2)(I + N^4)... until N^base = 0.
-  p = -diag
-  inv = eye + p
-  power = 1
-  while 2 * power < base:
-    p = mm(p, p)
-    inv = mm(inv, eye + p)
-    power *= 2
+  # Row i of (I + N)^-1 is e_i - sum_{j < i} N[i, j] row_j.
+  rows = [jnp.broadcast_to(eye[0], diag.shape[:-2] + (base,))]
+  for i in range(1, base):
+    prev = jnp.stack(rows, axis=-2)
+    rows.append(eye[i] - jnp.einsum("...j,...jk->...k", diag[..., i, :i], prev, precision=jax.lax.Precision.HIGHEST))
+  inv = jnp.stack(rows, axis=-2)
   size = base
   while size < c:
     n2 = inv.shape[-3] // 2
