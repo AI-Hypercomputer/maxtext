@@ -1461,6 +1461,7 @@ class RoutedMoE(nnx.Module):
     if self.config.decoder_block in (
         ctypes.DecoderBlockType.DEEPSEEK,
         ctypes.DecoderBlockType.DEEPSEEK4,
+        ctypes.DecoderBlockType.DEEPSEEK41,
         ctypes.DecoderBlockType.MING,
         ctypes.DecoderBlockType.HY4,
     ):
@@ -1589,7 +1590,8 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
       elif (
           self.config.decoder_block
-          in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.HY4)
+          in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.DEEPSEEK41,
+              ctypes.DecoderBlockType.HY4)
           and self.config.mlp_activations_limit > 0.0
       ):
         # DeepSeek V4 uses bounds to clip the SwiGLU activations
@@ -5555,7 +5557,8 @@ class RoutedAndSharedMoE(nnx.Module):
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
     # DeepSeek-V4 clamps the shared expert's SwiGLU like the routed experts (apply_ffn_activation).
     clamp_shared = (
-        self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK4 and self.config.mlp_activations_limit > 0.0
+        self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.DEEPSEEK41)
+        and self.config.mlp_activations_limit > 0.0
     )
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,
