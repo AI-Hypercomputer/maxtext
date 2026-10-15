@@ -290,6 +290,7 @@ log_moe_drops: false # drop audit: sow moe_dropped_assignments / moe_max_load_ra
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 prefuse_moe_weights: false # whether to pre-fuse MoE weights (wi_0 and wi_1 into wi) during initialization
+prepare_moe_weights_once_per_step: false # hoist MoE weight preparation (pre-fused wi pass-through without split/re-concat and pre-scan FP8 fake-quantization) once per step instead of repeating per layer/pass.
 fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference/rollout
 # Keep routed-expert weights in weight_dtype but round them in the forward pass to the per-channel FP8 grid
 # fp8_moe stores them on, with straight-through gradients: the trainer computes with the rollout's weights.

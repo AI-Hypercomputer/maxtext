@@ -2442,6 +2442,8 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+    if w1_kernel is None:
+      w1_pspec = None
     output_pspec = self._logical_to_mesh_axes(
         (
             batch_logical_axis,
@@ -2842,8 +2844,8 @@ class RoutedMoE(nnx.Module):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        # When prepare_moe_weights_once_per_step=True, w0 is already the fused (G, K, 2N) kernel and w1 is None.
+        w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
         if not self.config.mlp_bias:
           # Returned whole, as (out, None): `_down_projection` splits it in `fused_glu`, whose backward concatenates
@@ -3027,14 +3029,15 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
-      partial_sum0 = jnp.zeros((cur_x_chunk.shape[0], w0.shape[-1]), dtype=cur_x_chunk.dtype)
-      partial_sum1 = jnp.zeros((cur_x_chunk.shape[0], w1.shape[-1]), dtype=cur_x_chunk.dtype)
+      mlp_dim = w0.shape[-1] // 2 if w1 is None else w0.shape[-1]
+      partial_sum0 = jnp.zeros((cur_x_chunk.shape[0], mlp_dim), dtype=cur_x_chunk.dtype)
+      partial_sum1 = jnp.zeros((cur_x_chunk.shape[0], mlp_dim if w1 is None else w1.shape[-1]), dtype=cur_x_chunk.dtype)
 
       def scan_fn(carry, _):
         cur_x, ps0, ps1, chunk_idx = carry
 
         cur_w0 = jax.lax.dynamic_slice_in_dim(w0, chunk_idx * chunk_dim, chunk_dim, axis=1)
-        cur_w1 = jax.lax.dynamic_slice_in_dim(w1, chunk_idx * chunk_dim, chunk_dim, axis=1)
+        cur_w1 = None if w1 is None else jax.lax.dynamic_slice_in_dim(w1, chunk_idx * chunk_dim, chunk_dim, axis=1)
         gmm_fn = get_gmm_for_local_experts(cur_x, routing, route_metadata)
         next_ps0, next_ps1 = gmm_up(
             cur_x,
@@ -3068,7 +3071,11 @@ class RoutedMoE(nnx.Module):
       )
       # gmm the last chunk
       last_w0 = jax.lax.dynamic_slice_in_dim(w0, (self.config.num_moe_emb_chunks - 1) * chunk_dim, chunk_dim, axis=1)
-      last_w1 = jax.lax.dynamic_slice_in_dim(w1, (self.config.num_moe_emb_chunks - 1) * chunk_dim, chunk_dim, axis=1)
+      last_w1 = (
+          None
+          if w1 is None
+          else jax.lax.dynamic_slice_in_dim(w1, (self.config.num_moe_emb_chunks - 1) * chunk_dim, chunk_dim, axis=1)
+      )
       gmm_fn = get_gmm_for_local_experts(last_x_chunk, routing, route_metadata)
       mask = (
           jnp.arange(last_x_chunk.shape[0]) < valid_token_count(last_x_chunk, routing, route_metadata)
@@ -3534,7 +3541,8 @@ class RoutedMoE(nnx.Module):
     if self.config.moe_fsdp_use_two_stage_all_gather:
       # Unshard on fsdp axis
       w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp"))
+      if w1_kernel is not None:
+        w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp"))
 
       # Unshard on fsdp_transpose axis
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp", None))
@@ -3542,12 +3550,14 @@ class RoutedMoE(nnx.Module):
       # Make sure XLA does not optimize by combining above All-Gather to unshard
       # on FSDP axis and the subsequent unshard on fsdp_transpose axis
       w0_kernel = jax.lax.optimization_barrier(w0_kernel)
-      w1_kernel = jax.lax.optimization_barrier(w1_kernel)
+      if w1_kernel is not None:
+        w1_kernel = jax.lax.optimization_barrier(w1_kernel)
       wo_kernel = jax.lax.optimization_barrier(wo_kernel)
 
       # Unshard on both fsdp and fsdp_transpose transpose
       w0_kernel = self._maybe_shard_with_logical(w0_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
-      w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
+      if w1_kernel is not None:
+        w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", None))
 
     input_logical_axes = (batch_logical_axis, "activation_norm_length", None)
@@ -4641,9 +4651,20 @@ class RoutedMoE(nnx.Module):
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if (
+          getattr(cfg, "prepare_moe_weights_once_per_step", False)
+          and cfg.sparse_matmul
+          and self.wi_0_sparsity_module is None
+          and self.wi_1_sparsity_module is None
+          and not quantizations.in_serve_mode(self.quant)
+          and (self.quant is None or isinstance(self.quant, quantizations.ServeFp8WeightQuantization))
+      ):
+        w0_kernel = wi
+        w1_kernel = None
+      else:
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
@@ -4656,11 +4677,12 @@ class RoutedMoE(nnx.Module):
         w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
         w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
 
-    if cfg.fp8_moe_fake_quant and not is_fused_moe_path:
+    if cfg.fp8_moe_fake_quant and not is_fused_moe_path and not getattr(self, "_weights_preprepared_for_step", False):
       # Axis 2 is the output dim of wi_0/wi_1 (mlp) and wo (embed). An fp8_moe rollout quantizes the
       # fused wi = [wi_0 | wi_1] per output channel, so rounding the halves separately is identical.
       w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel)
-      w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
+      if w1_kernel is not None:
+        w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
       wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel)
 
     # For fused MoE path (inference only), if we have not fused expert
@@ -4968,3 +4990,51 @@ def get_routed_and_shared_moe(
       abstract_init=False,
   )
   return module
+
+
+def _fake_quantize_moe_weight_stack(w: jax.Array) -> jax.Array:
+  """Per-output-channel FP8 fake-quantization across unscanned `(E, K, M)` or scanned `(E, ..., K, M)` weights."""
+  in_dim_axis = w.ndim - 2
+  fp8_max = 448.0
+  max_val = jnp.max(jnp.abs(w), axis=(in_dim_axis,), keepdims=True)
+  scale = jnp.maximum(max_val / fp8_max, 1e-12).astype(jnp.float32)
+  q = jnp.clip(w / scale, -fp8_max, fp8_max).astype(jnp.float8_e4m3fn)
+  q = jax.lax.optimization_barrier(q)
+  w_q = jax.lax.stop_gradient((q.astype(jnp.float32) * scale).astype(w.dtype))
+  return w_q + (w - jax.lax.stop_gradient(w))
+
+
+def prepare_moe_weights_for_step(root_module: nnx.Module, config: ctypes.Config) -> None:
+  """Hoists MoE weight casting and per-channel FP8 fake-quantization once per step before layer scan."""
+  if not getattr(config, "prepare_moe_weights_once_per_step", False):
+    return
+  if not getattr(config, "fp8_moe_fake_quant", False):
+    return
+  for _, module in nnx.iter_graph(root_module):
+    if not isinstance(module, RoutedMoE):
+      continue
+    if getattr(module, "_weights_preprepared_for_step", False):
+      continue
+    if quantizations.in_serve_mode(module.quant) or not (
+        module.quant is None or isinstance(module.quant, quantizations.ServeFp8WeightQuantization)
+    ):
+      continue
+    if module.wi_0_sparsity_module is not None or module.wi_1_sparsity_module is not None:
+      continue
+    if getattr(module, "wo_scale", None) is not None:
+      continue
+    if config.prefuse_moe_weights:
+      if getattr(module, "wi_scale", None) is not None:
+        continue
+      wi_val = jnp.asarray(module.wi.get_value(), dtype=module.dtype)
+      module.wi.set_value(_fake_quantize_moe_weight_stack(wi_val))
+    else:
+      if getattr(module, "wi_0_scale", None) is not None or getattr(module, "wi_1_scale", None) is not None:
+        continue
+      wi_0_val = jnp.asarray(module.wi_0.get_value(), dtype=module.dtype)
+      wi_1_val = jnp.asarray(module.wi_1.get_value(), dtype=module.dtype)
+      module.wi_0.set_value(_fake_quantize_moe_weight_stack(wi_0_val))
+      module.wi_1.set_value(_fake_quantize_moe_weight_stack(wi_1_val))
+    wo_val = jnp.asarray(module.wo.get_value(), dtype=module.dtype)
+    module.wo.set_value(_fake_quantize_moe_weight_stack(wo_val))
+    module._weights_preprepared_for_step = True  # pylint: disable=protected-access

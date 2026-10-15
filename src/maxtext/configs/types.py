@@ -1063,6 +1063,17 @@ class MoEGeneral(BaseModel):
           "moe_dropped_assignments per step. Adds a scalar psum and pmax per MoE layer call."
       ),
   )
+  prepare_moe_weights_once_per_step: bool = Field(
+      False,
+      description=(
+          "Prepare MoE expert weights once per step (W3a): (1) when `prefuse_moe_weights=True` and "
+          "`sparse_matmul=True`, pass the pre-fused `wi` `(E, K, 2*N)` tensor directly through FSDP all-gather, "
+          "`moe_expert_weight_prefetch` (`barrier_tie`), and `shard_map` into `gmm_up` without splitting into "
+          "`(w0, w1)` and re-concatenating `[w0, w1]` inside `gmm_up`; and (2) when `fp8_moe_fake_quant=True`, "
+          "hoist weight dtype casting and per-channel FP8 fake-quantization before the decoder layer scan so "
+          "they run once on the FSDP-sharded weights instead of repeating in forward and backward remat."
+      ),
+  )
   first_phase_ragged_buffer_factor: float = Field(
       0.0,
       description=(

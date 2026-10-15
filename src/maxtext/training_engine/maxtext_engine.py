@@ -1557,6 +1557,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         # gradients or reduce-scatters them (the MoE router gate's, every layer, every micro-batch).
         p = jax.tree.map(lambda x, frozen: jax.lax.stop_gradient(x) if frozen else x, p, self._freeze_mask_fn(p))
       mdl = nnx.merge(graphdef if graphdef is not None else self._model_graphdef, p, r, copy=True)
+      if getattr(self._config, "prepare_moe_weights_once_per_step", False) and not getattr(
+          self._config, "parameter_memory_host_offload", False
+      ):
+        moe.prepare_moe_weights_for_step(mdl, self._config)
       if self._gen_model_input_fn is not None:
         # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
         # `with_gen_model_input_fn` -- so its output is unpacked rather than passed as the
