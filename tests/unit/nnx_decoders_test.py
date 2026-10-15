@@ -1397,6 +1397,48 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
     self.assertEqual(len(updated_kvs), num_layers)
     np.testing.assert_allclose(y_external, y_scanned, rtol=1e-5, atol=1e-5)
 
+  def test_gemma4_decoder_layer_sharding_by_shard_mode(self):
+    """Under ShardMode.AUTO, Gemma4 decoder layers must leave out_sharding as None."""
+    # pylint: disable=protected-access
+    for shard_mode, expect_none in ((ShardMode.AUTO, True), (ShardMode.EXPLICIT, False)):
+      cfg_gemma4 = _make_config(
+          decoder_block="gemma4",
+          shard_mode=shard_mode.value,
+      )
+      layer = gemma4.Gemma4DecoderLayer(
+          config=cfg_gemma4,
+          mesh=self.mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=nnx.Rngs(params=0),
+      )
+      cfg_small = _make_config(
+          decoder_block="gemma4_small",
+          model_name="gemma4-e2b",
+          hidden_size_per_layer_input=64,
+          vocab_size_per_layer_input=256,
+          shard_mode=shard_mode.value,
+      )
+      small_layer = gemma4_small.Gemma4SmallDecoderLayer(
+          config=cfg_small,
+          mesh=self.mesh,
+          model_mode=MODEL_MODE_TRAIN,
+          rngs=nnx.Rngs(params=0),
+      )
+      if expect_none:
+        self.assertIsNone(layer.out_sharding)
+        self.assertIsNone(layer.mlp_intermediate_sharding)
+        self.assertIs(layer._maybe_shard_with_logical, gemma4.with_logical_constraint)
+        self.assertIsNone(small_layer.out_sharding)
+        self.assertIsNone(small_layer.mlp_intermediate_sharding)
+        self.assertIsNone(small_layer.ple_sharding)
+        self.assertIs(small_layer._maybe_shard_with_logical, gemma4_small.with_logical_constraint)
+      else:
+        self.assertIsNotNone(layer.out_sharding)
+        self.assertIsNotNone(layer.mlp_intermediate_sharding)
+        self.assertIsNotNone(small_layer.out_sharding)
+        self.assertIsNotNone(small_layer.mlp_intermediate_sharding)
+        self.assertIsNotNone(small_layer.ple_sharding)
+
 
 @pytest.mark.tpu_only
 class TestGemma4SmallNNXDecoder(unittest.TestCase):
