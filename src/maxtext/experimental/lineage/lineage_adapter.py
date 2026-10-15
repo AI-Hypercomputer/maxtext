@@ -319,6 +319,7 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
   if 0 < eval_pdb < 1:
     eval_sharding = dsv3_sharding.expert_axes_as_cp_config(sharding)
   expert_permutation = getattr(cfg, "lineage_expert_permutation", None)
+  dq_reduction_steps = int(getattr(cfg, "lineage_dq_reduction_steps", 1))
   kernels = dsv3_config.DSv3KernelConfig(
       max_target_length=int(cfg.max_target_length),
       sa_block_q=int(cfg.sa_block_q),
@@ -330,6 +331,8 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       sa_q_layout=cfg.sa_q_layout,
       sa_k_layout=cfg.sa_k_layout,
       sa_v_layout=cfg.sa_v_layout,
+      diag_band_skip=bool(getattr(cfg, "lineage_diag_band_skip", True)),
+      dq_reduction_steps=None if dq_reduction_steps == 0 else dq_reduction_steps,
       capacity_factor=get_capacity_factor(cfg),
       ragged_buffer_factor=(
           float(cfg.ragged_buffer_factor)

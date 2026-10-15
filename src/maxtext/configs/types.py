@@ -1660,9 +1660,11 @@ class DeepSeekMoE(BaseModel):
       False,
       description="Whether to use Lineage DeepSeek-V3 execution.",
   )
-  lineage_quantization: Literal["none", "fp8_full"] = Field(
+  lineage_quantization: Literal["none", "fp8_full", "fp8_full_splash_qk", "fp8_full_splash_qk_e3"] = Field(
       "none",
-      description=("Quantization of the Lineage sparse-layer routed experts. Only used" " if use_lineage is True."),
+      description=(
+          "Quantization of the Lineage sparse-layer routed experts and MLA." " Only used if use_lineage is True."
+      ),
   )
 
   @classmethod
@@ -1680,6 +1682,14 @@ class DeepSeekMoE(BaseModel):
           " from the previous step's per-expert token counts with `dsv3_expert_shuffle.lpt_expert_permutation`; the"
           " first step uses the identity."
       ),
+  )
+  lineage_diag_band_skip: bool = Field(
+      True,
+      description="Enable row-band diagonal skip in Lineage Splash attention.",
+  )
+  lineage_dq_reduction_steps: int = Field(
+      1,
+      description=("Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None."),
   )
 
 
