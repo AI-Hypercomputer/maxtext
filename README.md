@@ -48,6 +48,7 @@ See our guide on running MaxText in decoupled mode, without any GCP dependencies
 
 ## 🔥 Latest news 🔥
 
+- [October 15, 2026] Qwen3.8 2.4T is now [supported](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md).
 - [October 8, 2026] MaxText now supports JEV-style decision scoring on TPU via vLLM; see the [Decision Models tutorial](https://maxtext.readthedocs.io/en/latest/tutorials/decision_models.html) for a Qwen3.5-9B example with Bespoke-Nimble LoRA weights.
 - [August 19, 2026] Distributed low-communication training with **Streaming DiLoCo** is now supported in MaxText! Scale LLMs and MoEs across multi-slice TPU clusters and low-bandwidth DCN/WAN networks. See the [DiLoCo training tutorial](https://maxtext.readthedocs.io/en/maxtext-v0.2.5/tutorials/diloco_pretraining.html) and [DiLoCo theory reference](https://maxtext.readthedocs.io/en/maxtext-v0.2.5/reference/core_concepts/diloco.html) for details.
 - [August 5, 2026] DeepSeek V4 Flash (284B) is now supported. See the [user guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/deepseek/Run_DeepSeek.md) for checkpoint conversion and evaluation details.
@@ -135,6 +136,7 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
   - Gemma 2 (2B, 9B, 27B)
   - Gemma 1 (2B, 7B)
 - Alibaba
+  - Qwen 3.8 MoE (2.4T)
   - Qwen 3.5 MoE (35B, 397B)
   - Qwen 3 Next (80B)
   - Qwen 3 MoE (30B, 235B), Qwen 3 MoE 2507 (235B, 480B)

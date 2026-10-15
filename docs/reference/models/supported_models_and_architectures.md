@@ -56,6 +56,11 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Variants** MoE with Hybrid Attention (35B-A3B, 397B-A17B)
 - **Notes**: GatedDeltaNet, GQA, Multimodal, MoE.
 
+### Qwen3.8
+
+- **Variants**: MoE with Hybrid Attention (2.4T-A95B)
+- **Notes**: GatedDeltaNet, GQA, MoE.
+
 ### GPT-OSS
 
 - **Variants**: 20B, 120B
@@ -101,7 +106,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
   - **Qwen**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/moe/run_qwen_moe.md) |
     [Qwen3-Next Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen/next/run_qwen3_next.md) |
     [Qwen3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3.py) | [Qwen3-Next Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3.py) |
-    [Qwen3.5 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3_5.py)
+    [Qwen3.5 & Qwen3.8 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3_5.py)
   - **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gpt_oss.py)
   - **Kimi**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md) | [K2 reuses DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
 
