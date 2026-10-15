@@ -54,11 +54,18 @@ def main():
   parser.add_argument("--index_topk", type=int, default=None)
   parser.add_argument("--candidate_topk_blocks", type=int, default=None)
   parser.add_argument("--threads", type=int, default=0)
+  parser.add_argument(
+      "--extra_topk_output",
+      default="",
+      help="Also write goldens with index_topk=4 / candidate_topk_blocks=8 here, reusing the loaded model.",
+  )
   args = parser.parse_args()
 
   if args.threads:
     torch.set_num_threads(args.threads)
-  overrides = {k: v for k, v in (("index_topk", args.index_topk), ("candidate_topk_blocks", args.candidate_topk_blocks)) if v}
+  overrides = {
+      k: v for k, v in (("index_topk", args.index_topk), ("candidate_topk_blocks", args.candidate_topk_blocks)) if v
+  }
   from transformers import AutoTokenizer  # pylint: disable=import-outside-toplevel
 
   tokenizer = AutoTokenizer.from_pretrained(args.ckpt_dir)
@@ -71,21 +78,38 @@ def main():
       fp32_compute=args.fp32_compute,
       **overrides,
   )
-  print(f"loaded reference in {time.time() - t0:.0f}s: index_topk={margs.index_topk} "
-        f"candidate_topk_blocks={margs.candidate_topk_blocks}", flush=True)
+  print(
+      f"loaded reference in {time.time() - t0:.0f}s: index_topk={margs.index_topk} "
+      f"candidate_topk_blocks={margs.candidate_topk_blocks}",
+      flush=True,
+  )
 
+  run_prompts(model, tokenizer, args.output)
+  if args.extra_topk_output:
+    for layer in model.layers:
+      if layer.attn.indexer is not None:
+        layer.attn.indexer.index_topk = 4
+        layer.attn.indexer.candidate_topk_blocks = 8
+    print("index_topk=4 candidate_topk_blocks=8", flush=True)
+    run_prompts(model, tokenizer, args.extra_topk_output)
+
+
+def run_prompts(model, tokenizer, output):
   out = []
   for prompt in PROMPTS:
     ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
     t0 = time.time()
     logits = model(ids, full_logits=True)[0].float()
     top = logits[-1].topk(5)
-    print(f"{ids.shape[1]} tokens in {time.time() - t0:.0f}s; last-token top-5 {tokenizer.convert_ids_to_tokens(top.indices)}",
-          flush=True)
+    print(
+        f"{ids.shape[1]} tokens in {time.time() - t0:.0f}s; last-token top-5 "
+        f"{tokenizer.convert_ids_to_tokens(top.indices)}",
+        flush=True,
+    )
     out.append({"prompt": prompt, "tokens": ids[0].numpy(), "logits": logits.numpy()})
-  with open(args.output, "wb") as f:
+  with open(output, "wb") as f:
     pickle.dump(out, f)
-  print(f"wrote {args.output}", flush=True)
+  print(f"wrote {output}", flush=True)
 
 
 if __name__ == "__main__":

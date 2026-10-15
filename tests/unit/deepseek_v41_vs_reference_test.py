@@ -32,6 +32,7 @@ import pytest
 import torch
 from flax import nnx
 
+from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.configs import pyconfig
 from maxtext.layers import attention_deepseek41
 from maxtext.layers import engram_deepseek41
@@ -230,7 +231,9 @@ def copy_layer(mt: deepseek41.DeepSeek41DecoderLayer, ref: ref_model.Block):
   _copy_linear(mt.mlp.shared_experts.wo, rf.shared_experts.w2)
 
   if ref.engram is not None:
-    _set(mt.engram.embed, _t2j(ref.engram.embed.weight))
+    table = _t2j(ref.engram.embed.weight)
+    rows = mt.engram.embed[...].shape[0]
+    _set(mt.engram.embed, jnp.pad(table, ((0, rows - table.shape[0]), (0, 0))))
     _copy_linear(mt.engram.wkv, ref.engram.wkv)
     _set(mt.engram.q_weight, _t2j(ref.engram.q_weight))
     _set(mt.engram.k_weight, _t2j(ref.engram.k_weight))
@@ -351,11 +354,34 @@ class DeepSeek41DequantTest(unittest.TestCase):
     got = param_mapping.dequantize_block_scaled((w_j, s_j))
     self.assertEqual(got.dtype, jnp.bfloat16)
     np.testing.assert_array_equal(_j2np(got), expected.numpy())
+    # As the streaming loader hands them over: the weight split by rows over the chips (including splits whose
+    # pieces line up with the scale blocks), the scales either a full copy or split the same way.
+    devices = jax.devices()
+    for n in sorted({d for d in (2, len(devices) // 2, len(devices)) if d > 1 and w_j.shape[0] % d == 0}):
+      w_s = jax.device_put(w_j, hf_streaming_load.choose_load_sharding(w_j.shape, w_j.dtype, devices[:n], 0))
+      for split_scale in (False, True):
+        if split_scale and s_j.shape[0] != w_j.shape[0]:
+          continue
+        s_s = jax.device_put(
+            s_j,
+            hf_streaming_load.choose_load_sharding(s_j.shape, s_j.dtype, devices[:n], 0 if split_scale else 1 << 62),
+        )
+        got = param_mapping.dequantize_block_scaled((w_s, s_s))
+        self.assertEqual(got.sharding, w_s.sharding)
+        np.testing.assert_array_equal(_j2np(got), expected.numpy(), err_msg=f"{n} chips, split scales {split_scale}")
 
   def test_fp8_block_32x32(self):
     torch.manual_seed(0)
     weight = (torch.randn(96, 160) * 4).to(torch.float8_e4m3fn)
     scale = torch.exp2(torch.randint(-8, 4, (3, 5)).float()).to(torch.float8_e8m0fnu)
+    expected = weight.float() * scale.float().repeat_interleave(32, 0).repeat_interleave(32, 1)
+    self._check(weight, scale, expected)
+
+  def test_fp8_block_32x32_shards_aligned_to_blocks(self):
+    # 256 rows over 2 / 4 / 8 chips: 128 / 64 / 32 rows each, whole scale blocks (the 64-chip v5p `wq_b` case).
+    torch.manual_seed(3)
+    weight = (torch.randn(256, 96) * 4).to(torch.float8_e4m3fn)
+    scale = torch.exp2(torch.randint(-8, 4, (8, 3)).float()).to(torch.float8_e8m0fnu)
     expected = weight.float() * scale.float().repeat_interleave(32, 0).repeat_interleave(32, 1)
     self._check(weight, scale, expected)
 
