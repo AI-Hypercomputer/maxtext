@@ -109,7 +109,7 @@ def gradient_accumulation_loss_and_grad(
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
-    if config.ga_params_loop_barrier:
+    if getattr(config, "ga_params_loop_barrier", False):
       # ga_params passes through the carry unchanged, so XLA may treat work on it (FSDP all-gathers, casts) as
       # loop-invariant and hoist it out of the loop, keeping its results live across micro-batches. Tying the
       # params to this micro-batch's data makes them loop-variant. On olmo35-tiny at v4-2048, GA=2, this cut the

@@ -39,6 +39,7 @@ class _Cfg:
   debug_sharding: bool = False
   training_objective: str = "causal_lm"
   use_tunix_gradient_accumulation: bool = False
+  ga_params_loop_barrier: bool = False
 
 
 class _TinyNNX(nnx.Module):
@@ -175,6 +176,26 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     np.testing.assert_allclose(loss, expected_loss, rtol=1e-6)
     np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
     np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
+  def test_params_loop_barrier_leaves_loss_and_grads_unchanged(self):
+    """The barrier only changes what XLA may hoist out of the scan, not the result."""
+    results = []
+    for barrier in (False, True):
+      results.append(
+          gradient_accumulation.gradient_accumulation_loss_and_grad(
+              _fake_loss_fn,
+              _Cfg(gradient_accumulation_steps=2, ga_params_loop_barrier=barrier),
+              self.model,
+              params=None,
+              params_shardings=self._params_shardings(),
+              data=self.data,
+              dropout_rng=None,
+          )
+      )
+    (loss, _, grads), (barrier_loss, _, barrier_grads) = results
+    np.testing.assert_allclose(barrier_loss, loss, rtol=1e-6)
+    for g, bg in zip(jax.tree.leaves(grads), jax.tree.leaves(barrier_grads)):
+      np.testing.assert_allclose(bg, g, rtol=1e-6)
 
   def test_per_microbatch_metrics_are_reported_for_the_whole_batch(self):
     """Metrics loss_fn gives as micro-batch means come out as batch means, not sums over micro-batches.
