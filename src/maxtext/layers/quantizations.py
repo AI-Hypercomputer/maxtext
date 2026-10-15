@@ -30,6 +30,7 @@ from aqt.jax.v2 import calibration
 
 import qwix
 from qwix._src.core import numerics
+from qwix._src.core import qarray
 from qwix._src.core import dot_general_qt
 from qwix._src.core import sparsity
 from qwix._src import interception as qwix_interception
@@ -70,6 +71,7 @@ from maxtext.configs.types import TeCommGemmOverlapPolicy
 from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils import max_logging
+from maxtext.utils import sparsity_utils
 
 # Params used to define mixed precision quantization configs
 DEFAULT = "__default__"  # default config
@@ -1152,6 +1154,99 @@ def _drhs_grad_calibration_override(config: Config) -> dict:
   return {"drhs_grad_calibration_method": m} if m else {}
 
 
+def _decoder_layers_module_path(config: Config) -> str:
+  """Returns the Qwix module path regex for the decoder layers selected by `sparse_layers`."""
+  sparse_indices = sparsity_utils.get_sparse_layer_indices(config)
+  if sparse_indices is None:
+    return "decoder/.*layers.*"
+  return f"decoder/layers_({'|'.join(str(i) for i in sparse_indices)})/.*"
+
+
+def _get_weight_only_sparsity_rules(config: Config) -> list[qwix.QtRule]:
+  """Returns Qwix rules for weight-only N:M sparsity without quantization.
+
+  Weights of the selected decoder layers are masked along their contracting
+  axis on every forward pass (see `qwix.QtRule.rhs_sparsity_rule`); the step
+  schedule fields (`weight_sparsity_start_step` and
+  `weight_sparsity_update_step`) only apply to the fp8_full SparsityModule path.
+  MoE expert kernels ("gmm") are masked in `moe.py`. The router is never
+  sparsified.
+  """
+  sparsity_rule = sparsity.SparsityRule(
+      weight_sparsity_n=config.weight_sparsity_n,
+      weight_sparsity_m=config.weight_sparsity_m,
+  )
+  op_names = ("gmm",) if config.sparse_experts_only else ("dot_general", "gmm")
+  return [
+      _get_router_proj_unquantized_rule(),
+      qwix.QtRule(
+          module_path=_decoder_layers_module_path(config),
+          weight_qtype=None,
+          act_qtype=None,
+          bwd_qtype=None,
+          rhs_sparsity_rule=sparsity_rule,
+          op_names=op_names,
+      ),
+  ]
+
+
+def apply_initial_weight_sparsity(model: nnx.Module, config: Config) -> int:
+  """Zeroes pruned weights of an unscanned model in place with N:M sparsity.
+
+  Applies the same masks as weight-only sparsity training
+  (`_get_weight_only_sparsity_rules`): dense kernels of the selected decoder
+  layers are masked along their innermost contracting axis, MoE expert kernels
+  ([E, in, out]) along axis 1, and the router is skipped. Starting from pruned
+  weights keeps the masks stable early in training. Only call this for the
+  model being trained (e.g. the distillation student), never for a frozen
+  teacher.
+
+  Args:
+    model: The model whose weights are sparsified in place.
+    config: The model's config.
+
+  Returns:
+    The number of sparsified kernels.
+  """
+  if config.quantization or not (config.weight_sparsity_n and config.weight_sparsity_m):
+    return 0
+  if config.scan_layers:
+    max_logging.log(
+        "Skipping initial weight sparsification for scanned layers; weights are still masked in every forward pass."
+    )
+    return 0
+  sparse_indices = sparsity_utils.get_sparse_layer_indices(config)
+  rule = sparsity.SparsityRule(weight_sparsity_n=config.weight_sparsity_n, weight_sparsity_m=config.weight_sparsity_m)
+  sparsify = jax.jit(functools.partial(qarray.sparsify, how=rule), static_argnames="axis")
+
+  def _sparsify_param(param: nnx.Param, axis: int) -> None:
+    param.set_value(sparsify(param.get_value(), axis=axis))
+
+  count = 0
+  for path, module in nnx.iter_graph(model):
+    match = re.search(r"(^|/)decoder/layers_(\d+)(/|$)", "/".join(str(p) for p in path))
+    if not match or (sparse_indices is not None and int(match.group(2)) not in sparse_indices):
+      continue
+    if path and path[-1] == "gate":  # MoE router.
+      continue
+    expert_params = [getattr(module, name, None) for name in ("wi_0", "wi_1", "wo")]
+    if all(isinstance(p, nnx.Param) for p in expert_params):
+      for param in expert_params:
+        _sparsify_param(param, axis=1)
+        count += 1
+    elif not config.sparse_experts_only and isinstance(getattr(module, "kernel", None), nnx.Param):
+      contracting_axes = getattr(module, "axis", None)
+      if contracting_axes is None:
+        continue
+      num_contracting = len(contracting_axes) if isinstance(contracting_axes, (tuple, list)) else 1
+      _sparsify_param(module.kernel, axis=num_contracting - 1)
+      count += 1
+  max_logging.log(
+      f"Applied initial {config.weight_sparsity_n}:{config.weight_sparsity_m} weight sparsity to {count} kernels."
+  )
+  return count
+
+
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
@@ -1270,6 +1365,8 @@ def get_quantization_rule(config: Config):
     case "fp8_gpu":
       return make_qt_rule(jnp.float8_e4m3fn)
     case "":
+      if config.weight_sparsity_n and config.weight_sparsity_m:
+        return _get_weight_only_sparsity_rules(config)
       return None
 
 
@@ -1282,13 +1379,17 @@ def get_qt_provider(config):
       return NvidaFp8Provider(get_quantization_rule(config))
     case "fp8_nanoo":
       return NANOOFp8Provider(get_quantization_rule(config))
+    case "":
+      if config.weight_sparsity_n and config.weight_sparsity_m:
+        return qwix.QtProvider(get_quantization_rule(config))
   return None
 
 
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
-  if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
+  has_sparsity = bool(config.weight_sparsity_n and config.weight_sparsity_m)
+  if (config.quantization or has_sparsity) and config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
