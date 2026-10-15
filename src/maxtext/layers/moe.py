@@ -125,7 +125,7 @@ class RouteOutput:
   # moe_log_max_load_ratio=True on the ring-of-experts ragged path.
   max_load_ratio: Optional[jax.Array] = None
   # Inverse of sorted_selected_experts on the ring-of-experts ragged path, so the unsort backward does not re-sort to
-  # get it. Only set when moe_routing_maps is not "remat".
+  # get it. Set when moe_routing_maps is not "remat", and always with moe_routing_index_math="count".
   topk_argsort_indices: Optional[jax.Array] = None
   # moe_tc_ragged_sort: TcRouting shared by the TensorCore ragged sort and unsort of this chunk.
   tc_routing: Optional[Any] = None
@@ -462,6 +462,25 @@ def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
 
   # 3. Cast both values to float32 before summation.
   return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
+
+
+def topk_indices_by_argmax(scores: jax.Array, k: int) -> jax.Array:
+  """`jax.lax.top_k(scores, k)[1]` without a sort (moe_routing_index_math="count").
+
+  k passes of argmax over the last axis, each masking its winner to -inf. argmax returns the first maximal index,
+  so ties go to the lower index, in the order top_k returns them. With k small against the expert count (10 of 512
+  for Qwen3.5-397B) the k reductions are expected to cost less than the sort top_k lowers to; this was timed only as
+  part of moe_routing_index_math="count", not on its own. Needs at least k entries above -inf per row, true of the
+  router probabilities it is used on.
+  """
+  lane = jax.lax.broadcasted_iota(jnp.int32, scores.shape, scores.ndim - 1)
+  masked = scores
+  picks = []
+  for _ in range(k):
+    pick = jnp.argmax(masked, axis=-1).astype(jnp.int32)
+    picks.append(pick)
+    masked = jnp.where(lane == pick[..., None], jnp.array(-jnp.inf, scores.dtype), masked)
+  return jnp.stack(picks, axis=-1)
 
 
 def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None):
@@ -1455,7 +1474,12 @@ class RoutedMoE(nnx.Module):
     valid_token_mask = None
     if forced_routed_experts is not None:
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-      _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
+      if self.config.moe_routing_index_math == "count":
+        # The router's own choice for tokens without (valid) forced ids: the same indices as top_k, from k argmax
+        # passes instead of a sort. Under moe_exclude_padding_from_routing every token takes this branch.
+        auto_indices = topk_indices_by_argmax(router_probs, self.num_experts_per_tok)
+      else:
+        _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
       # A token has real forced routing only if its slots are within [0, num_experts).
       # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
@@ -1834,9 +1858,12 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           tag_routing_fn=tag_routing_fn,
+          index_math=self.config.moe_routing_index_math,
       )
-      if tag_routing_fn is None:
+      if tag_routing_fn is None and self.config.moe_routing_index_math == "sort":
         # moe_routing_maps=remat: unpermute re-derives the permutation in its backward (existing behavior).
+        # moe_routing_index_math="count" always passes it: its inverse covers only this shard's slots, so it
+        # cannot be argsorted back, and under remat the replay recomputes it anyway (no memory is saved).
         topk_argsort_indices = None
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -2014,6 +2041,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
+          index_math=self.config.moe_routing_index_math,
       )
     else:
       unsort_intermediate = _sort_activations(

@@ -18,6 +18,70 @@ import jax
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
 from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
+from maxtext.kernels.ragged.ragged_gather_tc import packed_stable_sort
+
+_INDEX_MATH_MODES = ("sort", "count")
+
+
+def _check_index_math(index_math):
+  if index_math not in _INDEX_MATH_MODES:
+    raise ValueError(f"index_math must be one of {_INDEX_MATH_MODES}, got {index_math!r}")
+
+
+def _local_slot_positions(topk_indices_local, num_experts, shard_idx, ep_size, block=128):
+  """Position of every flat (token, k) slot routed to this shard, inside this shard's window of the sorted slots.
+
+  Equals ``argsort(argsort(flat_ids)) - shard_output_start`` on the slots of this shard's experts (``argsort``
+  stable, by expert id) and is -1 on every other slot. It needs no sort and no scatter: in the stable order by
+  expert id, slot (t, k) with local expert e comes after
+    - every slot of a lower local expert (an exclusive prefix sum of the local expert counts),
+    - every slot of expert e in an earlier token (an exclusive prefix count over tokens), and
+    - every earlier slot of token t that also picked e (0 unless a token repeats an expert).
+  The prefix count over tokens runs per block of ``block`` tokens as a strictly-lower-triangular matmul (its
+  inputs are counts <= topk, exact in bfloat16, and it accumulates in float32, exact below 2**24), plus an int32
+  prefix sum over the block totals.
+
+  Args:
+    topk_indices_local: ``[num_tokens, topk]`` expert ids. Ids outside this shard's experts (including the
+      ``num_experts`` padding id) are never local.
+    num_experts: total number of experts.
+    shard_idx: this shard's index on the expert-parallel axis (a traced scalar is fine).
+    ep_size: number of expert shards.
+    block: tokens per block of the prefix count.
+
+  Returns:
+    ``[num_tokens * topk]`` int32 positions in ``[0, local slots)``, or -1.
+  """
+  num_tokens, topk = topk_indices_local.shape
+  local_num_experts = num_experts // ep_size
+  pad = (-num_tokens) % block
+  ids = topk_indices_local.astype(jnp.int32)
+  if pad:
+    ids = jnp.pad(ids, ((0, pad), (0, 0)), constant_values=num_experts)  # the padding id: never local
+  t = ids.shape[0]
+  le = ids - shard_idx * local_num_experts  # local expert id, in [0, local_num_experts) iff the slot is local
+  is_local = (le >= 0) & (le < local_num_experts)
+  hit = le[:, :, None] == jnp.arange(local_num_experts, dtype=jnp.int32)[None, None, :]  # [t, topk, E_local]
+  counts_per_token = jnp.sum(hit, axis=1, dtype=jnp.int32)  # [t, E_local]
+  kk = jnp.arange(topk, dtype=jnp.int32)
+  dup_before = jnp.sum(
+      (le[:, :, None] == le[:, None, :]) & (kk[None, None, :] < kk[None, :, None]), axis=-1, dtype=jnp.int32
+  )  # [t, topk]: earlier slots of the same token with the same expert
+  blocks = counts_per_token.reshape(t // block, block, local_num_experts)
+  strict_lower = jnp.tril(jnp.ones((block, block), jnp.bfloat16), k=-1)
+  # Slots of each local expert in the earlier tokens of the same block.
+  within = jnp.einsum(
+      "ij,bjk->bik", strict_lower, blocks.astype(jnp.bfloat16), preferred_element_type=jnp.float32
+  ).astype(jnp.int32)
+  block_totals = jnp.sum(blocks, axis=1, dtype=jnp.int32)  # [t // block, E_local]
+  before_block = jnp.cumsum(block_totals, axis=0) - block_totals
+  earlier = (within + before_block[:, None, :]).reshape(t, local_num_experts)  # [t, E_local]
+  local_counts = jnp.sum(block_totals, axis=0)
+  local_offsets = jnp.cumsum(local_counts) - local_counts
+  # One select-reduce over the local experts picks each slot's own expert's terms (no gather).
+  pos = jnp.sum(jnp.where(hit, earlier[:, None, :] + local_offsets[None, None, :], 0), axis=-1) + dup_before
+  pos = jnp.where(is_local, pos, -1)[:num_tokens]
+  return pos.reshape(-1)
 
 
 def ring_ragged_sort(
@@ -36,6 +100,7 @@ def ring_ragged_sort(
     gather_reduce_bytes_accessed_override=-1,
     use_single_sparsecore=False,
     tag_routing_fn=None,
+    index_math="sort",
 ):
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
@@ -66,6 +131,13 @@ def ring_ragged_sort(
     buffer_size: optional scalar ``int`` representing the size of the local buffer.
     tag_routing_fn: optional function applied to each integer routing array (the sort permutation, its inverse,
       the sorted token indices and the group sizes).
+    index_math: how the routing index maps are computed (``moe_routing_index_math``).
+      "sort" (default): the permutation and its inverse by two stable argsorts.
+      "count": the permutation by one single-operand packed uint32 sort, the sorted token indices by division,
+      and the inverse permutation by counting, on this shard's slots only (-1 on every other slot); the
+      gather-reduce of the backward packs its validity sort too. Every reader of the inverse masks it to this
+      shard's window, so the forward output and the gradients are the same. The unsort of these rows must then
+      get ``topk_argsort_indices`` and ``index_math="count"`` (a partial inverse cannot be argsorted back).
 
   Returns:
     A tuple containing:
@@ -76,19 +148,37 @@ def ring_ragged_sort(
       - 1D tensor ``topk_argsort_revert_indices`` for inverse routing.
       - 1D tensor ``topk_argsort_indices``, the inverse of ``topk_argsort_revert_indices``.
   """
+  _check_index_math(index_math)
   # The routing index maps depend only on the (integer) expert ids, so they are computed outside the custom_vjp.
   # Only the gather below is differentiated.
   num_tokens_local = hidden_states_local.shape[0]
 
   topk_indices_flat = topk_indices_local.flatten()  # num_tokens_local x topk
-  topk_argsort_indices = jnp.argsort(topk_indices_flat)  # num_tokens_local x topk
+  if index_math == "count":
+    # The stable order by expert id as ONE single-operand sort of (expert << pos_bits | slot): the packed values
+    # are distinct, so the unstable sort has one result, the stable argsort's permutation. jnp.argsort sorts the
+    # (expert, iota) pair stably, which XLA lowers in the forward pass with a duplicated iota operand.
+    _, topk_argsort_indices = packed_stable_sort(topk_indices_flat.astype(jnp.int32), num_experts)
+    # Flat slot j belongs to token j // topk, so the sorted token indices need no gather of a repeated iota.
+    token_indices_sorted = (topk_argsort_indices // topk).astype(jnp.int32)  # num_tokens_local x topk
+  else:
+    topk_argsort_indices = jnp.argsort(topk_indices_flat)  # num_tokens_local x topk
 
-  token_indices = jnp.arange(num_tokens_local, dtype=jnp.int32).repeat(topk)  # num_tokens_local x topk
-  token_indices_sorted = token_indices[topk_argsort_indices]  # num_tokens_local x topk
+    token_indices = jnp.arange(num_tokens_local, dtype=jnp.int32).repeat(topk)  # num_tokens_local x topk
+    token_indices_sorted = token_indices[topk_argsort_indices]  # num_tokens_local x topk
 
   group_sizes_local = jax.nn.one_hot(topk_indices_flat, num_experts, dtype=jnp.int32).sum(axis=0)  # GLOBAL_NUM_EXPERTS
 
-  topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)  # num_tokens_local x topk
+  if index_math == "count":
+    # Every reader of the inverse permutation masks it to [shard_output_start, shard_output_end), so it is
+    # computed on this shard's slots only, by counting instead of a second argsort, and is -1 elsewhere.
+    shard_idx = jax.lax.axis_index(ep_name)
+    local_pos = _local_slot_positions(topk_indices_local, num_experts, shard_idx, ep_size)
+    shard_start = jnp.sum(jnp.where(jnp.arange(num_experts) < shard_idx * (num_experts // ep_size), group_sizes_local, 0))
+    topk_argsort_revert_indices = jnp.where(local_pos >= 0, shard_start + local_pos, -1).astype(jnp.int32)
+  else:
+    topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)  # num_tokens_local x topk
+  packed_preprocess = index_math == "count"
 
   if tag_routing_fn is not None:
     topk_argsort_indices, token_indices_sorted, group_sizes_local, topk_argsort_revert_indices = (
@@ -205,6 +295,7 @@ def ring_ragged_sort(
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
+          packed_preprocess=packed_preprocess,
       )
     else:
       # Buffering: g_x has size `local_buffer_size` (packed).
@@ -231,6 +322,7 @@ def ring_ragged_sort(
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
+          packed_preprocess=packed_preprocess,
       )
     return grad_hidden_states, None, None, None
 
@@ -256,6 +348,7 @@ def ring_ragged_unsort(
     gather_reduce_bytes_accessed_override=-1,
     use_single_sparsecore=False,
     topk_argsort_indices=None,
+    index_math="sort",
 ):
   """Dual of :func:`ring_ragged_sort`.
 
@@ -285,11 +378,18 @@ def ring_ragged_unsort(
     topk_argsort_indices: optional inverse of ``topk_argsort_revert_indices`` (as returned by
       :func:`ring_ragged_sort`). The backward needs this permutation; when it is
       None, the backward re-derives it with an argsort. Both give the same permutation.
+      Required with ``index_math="count"``, whose inverse covers only this shard's slots.
+    index_math: must match the :func:`ring_ragged_sort` call that produced the routing. With "count" the
+      gather-reduce packs its validity sort, and in the backward the routing-weight gradient goes back to slot
+      order by a masked gather through the inverse permutation instead of a scatter (each valid slot reads its
+      own row; other shards' and dropped slots read 0). Same values either way.
 
   Returns:
     A 2D ``[num_tokens_local, hidden]`` tensor with expert outputs scattered back
     to their original global sequence locations, with unpopulated positions zeroed out.
   """
+  _check_index_math(index_math)
+  packed_preprocess = index_math == "count"
 
   @jax.custom_vjp
   def _ring_ragged_unsort(
@@ -352,6 +452,7 @@ def ring_ragged_unsort(
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
+          packed_preprocess=packed_preprocess,
       )
     else:
       # Shift indices so they map to the packed local buffer [0, local_num_tokens).
@@ -371,6 +472,7 @@ def ring_ragged_unsort(
           flops_override=gather_reduce_flops_override,
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
+          packed_preprocess=packed_preprocess,
       )
 
     res = (
@@ -418,6 +520,9 @@ def ring_ragged_unsort(
     # topk_argsort_indices; reuse it when the caller has it rather than sorting again.
     if topk_argsort_indices is not None:
       idx_inv = topk_argsort_indices
+    elif index_math == "count":
+      # The "count" inverse holds only this shard's slots (-1 elsewhere), so it cannot be argsorted back.
+      raise ValueError("index_math='count' needs topk_argsort_indices (the forward permutation of ring_ragged_sort).")
     else:
       idx_inv = jnp.argsort(topk_argsort_revert_indices)
 
@@ -444,7 +549,14 @@ def ring_ragged_unsort(
       grad_sorted_tokens = (gathered * weight_for_sorted[:, None]).astype(gathered.dtype)
       # Row-wise dot in sorted order, then permuted back to flat slot order.
       dot_sorted = jnp.sum(gathered.astype(jnp.float32) * sorted_tokens_local[:n].astype(jnp.float32), axis=-1)
-      grad_topk_weights = dot_sorted[topk_argsort_revert_indices]
+      if index_math == "count":
+        # Other shards' slots hold -1, not a row outside the window, so mask them instead of reading row -1.
+        slot_valid = (topk_argsort_revert_indices >= shard_output_start) & (
+            topk_argsort_revert_indices < shard_output_end
+        )
+        grad_topk_weights = jnp.where(slot_valid, dot_sorted[jnp.where(slot_valid, topk_argsort_revert_indices, 0)], 0.0)
+      else:
+        grad_topk_weights = dot_sorted[topk_argsort_revert_indices]
     else:
       # Slice the inverse permutation to match the packed local buffer.
       padded_idx_inv = jnp.pad(idx_inv, (0, buffer_size))
@@ -468,10 +580,21 @@ def ring_ragged_unsort(
       mask = jnp.arange(buffer_size) < limit
       gathered = jnp.where(mask[:, None], gathered, 0.0)
       grad_sorted_tokens = (gathered * sliced_weights[:, None]).astype(gathered.dtype)
-      # Scatter the per-slot dot back to flat slot order; dropped slots stay zero.
       dot_local = jnp.sum(gathered.astype(jnp.float32) * sorted_tokens_local.astype(jnp.float32), axis=-1)
-      slots = jnp.where(mask, sliced_idx_inv, n)
-      grad_topk_weights = jnp.zeros((n,), jnp.float32).at[slots].set(dot_local, mode="drop")
+      if index_math == "count":
+        # Route the per-row dot back to flat slot order with a gather through the inverse permutation instead
+        # of a TensorCore scatter: each valid slot reads its own buffer row; other shards' slots (-1) and
+        # dropped slots read 0, as the scatter leaves them. The table is padded to n entries because XLA only
+        # offloads a 1-D gather to the SparseCore for a large table (v7x AOT: 225,280 entries -> TensorCore
+        # gather at ~7 ns/element; 655,360 -> SparseCore).
+        shifted = topk_argsort_revert_indices - shard_output_start
+        slot_valid = (shifted >= 0) & (shifted < limit)
+        dot_table = jnp.pad(dot_local, (0, max(0, n - buffer_size)))
+        grad_topk_weights = jnp.where(slot_valid, dot_table[jnp.where(slot_valid, shifted, 0)], 0.0)
+      else:
+        # Scatter the per-slot dot back to flat slot order; dropped slots stay zero.
+        slots = jnp.where(mask, sliced_idx_inv, n)
+        grad_topk_weights = jnp.zeros((n,), jnp.float32).at[slots].set(dot_local, mode="drop")
     return grad_sorted_tokens, None, None, grad_topk_weights, None
 
   _ring_ragged_unsort.defvjp(_ring_ragged_unsort_fwd, _ring_ragged_unsort_bwd)

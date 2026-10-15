@@ -355,6 +355,11 @@ moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
+# Ring-of-experts ragged sort routing index maps: 'sort' = two stable argsorts (default); 'count' = one packed
+# single-operand sort plus counting for the inverse (and argmax passes for the top-k of non-forced tokens under
+# router replay / padding exclusion). Same permutation, same values.
+# Needs sparse_matmul, use_ring_of_experts and use_ragged_sort (and te_moe_block=False).
+moe_routing_index_math: 'sort'
 moe_tc_ragged_sort: false # ring-of-experts ragged sort/unsort on TensorCore (Pallas DMA kernels) instead of the SparseCore
                           # kernels; requires use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0.
 moe_tc_ragged_gather_block_size: 1024 # moe_tc_ragged_sort: rows per grid step of the TC ragged gather.
