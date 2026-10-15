@@ -1638,6 +1638,11 @@ gdn_cp_mode: "auto"
 # ('highest' = 6 bf16 passes on TPU, 'high' = 3 passes). Only used with use_gdn_kernel: true and
 # sequence-sharded GDN CP (gdn_cp_mode 'seq', or 'auto' when it does not pick head sharding); a no-op otherwise.
 gdn_cp_matmul_precision: "highest"
+# GDN kernel path: build the Conv1D + SiLU halo-extended input [conv_state | qkv] in qkv's dtype and cast each tap
+# to float32 where it is read, instead of materializing a float32 copy (805.5 MB per GDN layer in the backward of
+# the Qwen3.5-397B RL trainer). Same values: outputs and the qkv gradient bit-identical, the conv weight gradient up to
+# float32 summation order. Requires use_gdn_kernel: true.
+gdn_conv1d_input_in_qkv_dtype: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
