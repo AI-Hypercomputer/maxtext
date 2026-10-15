@@ -18,6 +18,7 @@ import dataclasses
 from typing import Optional, override
 
 import jax
+from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 from tokamax._src.ops.causal_conv1d_gated_delta_rule import base
@@ -26,6 +27,7 @@ from . import config
 from . import wrapper
 
 GDNConfig = config.GDNConfig
+get_cost_estimate = wrapper.get_cost_estimate
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -60,6 +62,7 @@ class PallasMosaicTpuCausalConv1dGatedDeltaRule(base.CausalConv1dGatedDeltaRule[
       mixed_tile_size: int = 64,
       config: GDNConfig | None = None,
       return_residuals: bool = False,
+      cost_estimate: Optional[pl.CostEstimate] = None,
   ) -> tuple[tuple[tuple[jax.Array, jax.Array], jax.Array], None]:
     """Forward execution rule for Causal Conv1D Gated Delta Rule."""
     del return_residuals
@@ -87,6 +90,7 @@ class PallasMosaicTpuCausalConv1dGatedDeltaRule(base.CausalConv1dGatedDeltaRule[
         compute_precision=compute_precision,
         decode_tile_size=decode_tile_size,
         mixed_tile_size=mixed_tile_size,
+        cost_estimate=cost_estimate,
     )
     return (states, out_act), None
 
