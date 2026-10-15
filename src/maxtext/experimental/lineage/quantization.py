@@ -45,7 +45,10 @@ def get_static_scale(calibration_method: str, qtype: Any) -> float:
   """Returns the scale of a `fixed,<min>,<max>` calibration for `qtype`."""
   name, *bounds = calibration_method.split(",")
   if name != "fixed" or len(bounds) != 2:
-    raise ValueError("Expected a 'fixed,<min>,<max>' calibration method, got" f" {calibration_method!r}.")
+    raise ValueError(
+        "Expected a 'fixed,<min>,<max>' calibration method, got"
+        f" {calibration_method!r}."
+    )
   return max(abs(float(b)) for b in bounds) / _finfo_max(qtype)
 
 
@@ -73,7 +76,10 @@ class GmmQuantRule:
 
   def __post_init__(self):
     if self.bwd_calibration_method != "absmax":
-      raise ValueError("Only 'absmax' gradient calibration is supported, got" f" {self.bwd_calibration_method!r}.")
+      raise ValueError(
+          "Only 'absmax' gradient calibration is supported, got"
+          f" {self.bwd_calibration_method!r}."
+      )
     # Fail at construction on malformed static calibrations.
     _ = self.weight_scale, self.act_scale
 
@@ -117,10 +123,34 @@ class QuantConfig:
       including the token all-gather that feeds them.
     mla: Quantization of the MLA projections (q down, kv down, q up, v up and
       out; k up stays unquantized) in all layers.
+    combine_qtype: If set, the forward-pass combine token reduce-scatter of the
+      sparse layers runs on SparseCore 0 (`ops.reduce_scatter_sc0`) with its ICI
+      ring sends quantized to this dtype (only `jnp.float8_e4m3fn` is supported)
+      using one dynamic absmax scale per token shared by all expert devices; the
+      local, die-to-die and output tokens stay bf16. The backward pass stays in
+      bf16.
+    combine_per_hop_scaling: With `combine_qtype`, scale each ring hop of the
+      combine reduce-scatter with its own per-token bound (local + die-to-die
+      absmax plus the bound received with the running sum) instead of one
+      all-device scale per token, which removes the cross-device absmax gather.
   """
 
   routed_experts: GmmQuantRule | None = None
   mla: GmmQuantRule | None = None
+  combine_qtype: Any | None = None
+  combine_per_hop_scaling: bool = False
+
+  def __post_init__(self):
+    if (
+        self.combine_qtype is not None
+        and self.combine_qtype != jnp.float8_e4m3fn
+    ):
+      raise ValueError(
+          "combine_qtype must be None or jnp.float8_e4m3fn, got"
+          f" {self.combine_qtype!r}."
+      )
+    if self.combine_per_hop_scaling and self.combine_qtype is None:
+      raise ValueError("combine_per_hop_scaling requires combine_qtype.")
 
 
 FP8_FULL = QuantConfig(routed_experts=GmmQuantRule(), mla=GmmQuantRule())
@@ -134,6 +164,12 @@ FP8_FULL_SPLASH_QK_E3 = QuantConfig(
         splash_qk_qtype=jnp.float8_e4m3fn,
         q_prescaled_log2e=True,
     ),
+)
+FP8_FULL_COMBINE = dataclasses.replace(
+    FP8_FULL, combine_qtype=jnp.float8_e4m3fn
+)
+FP8_FULL_COMBINE_PER_HOP = dataclasses.replace(
+    FP8_FULL_COMBINE, combine_per_hop_scaling=True
 )
 
 
@@ -151,7 +187,9 @@ def absmax_to_scale(amax: jax.Array, qtype: Any) -> jax.Array:
   return scale.reshape(1, 1)
 
 
-def _xla_quantize_with_scale(x: jax.Array, scale: jax.Array, qtype: Any) -> jax.Array:
+def _xla_quantize_with_scale(
+    x: jax.Array, scale: jax.Array, qtype: Any
+) -> jax.Array:
   fmax = _finfo_max(qtype)
   inv_scale = 1.0 / scale.astype(jnp.float32)
   return jnp.clip(x.astype(jnp.float32) * inv_scale, -fmax, fmax).astype(qtype)
@@ -162,7 +200,10 @@ def _can_use_ragged_pallas(x: jax.Array) -> bool:
       x.ndim in (2, 3)
       and x.shape[0] >= 64
       and x.shape[0] % 64 == 0
-      and ((x.ndim == 2 and x.shape[1] % 128 == 0) or (x.ndim == 3 and x.shape[1] % 8 == 0 and x.shape[2] == 128))
+      and (
+          (x.ndim == 2 and x.shape[1] % 128 == 0)
+          or (x.ndim == 3 and x.shape[1] % 8 == 0 and x.shape[2] == 128)
+      )
   )
 
 
@@ -195,7 +236,9 @@ def quantize_with_scale(
   return _xla_quantize_with_scale(x, scale, qtype)
 
 
-def ragged_absmax(x: jax.Array, num_valid_rows: jax.Array | int | None = None) -> jax.Array:
+def ragged_absmax(
+    x: jax.Array, num_valid_rows: jax.Array | int | None = None
+) -> jax.Array:
   """Returns the `[1, 1]` f32 absmax of the first `num_valid_rows` of `x`."""
   abs_x = jnp.abs(x.astype(jnp.float32))
   if num_valid_rows is not None:

@@ -78,10 +78,16 @@ class DSv3Params(Generic[T]):
     head: Final norm scale and LM head kernel (None when `tied_head`).
   """
 
-  embed: dsv3_embed.DSv3EmbedWeightsPytree[T] = dataclasses.field(default_factory=dsv3_embed.DSv3EmbedWeightsPytree[T])
-  decoder: dsv3_types.DSv3WeightsPytree[T] = dataclasses.field(default_factory=dsv3_types.DSv3WeightsPytree[T])
+  embed: dsv3_embed.DSv3EmbedWeightsPytree[T] = dataclasses.field(
+      default_factory=dsv3_embed.DSv3EmbedWeightsPytree[T]
+  )
+  decoder: dsv3_types.DSv3WeightsPytree[T] = dataclasses.field(
+      default_factory=dsv3_types.DSv3WeightsPytree[T]
+  )
   mtp: tuple[dsv3_mtp_block.DSv3MTPDepthWeightsPytree[T], ...] = ()
-  head: dsv3_embed.DSv3HeadWeightsPytree[T] = dataclasses.field(default_factory=dsv3_embed.DSv3HeadWeightsPytree[T])
+  head: dsv3_embed.DSv3HeadWeightsPytree[T] = dataclasses.field(
+      default_factory=dsv3_embed.DSv3HeadWeightsPytree[T]
+  )
 
 
 @jax.tree_util.register_dataclass
@@ -185,8 +191,12 @@ class DSv3LossAux:
   mtp_mask: jax.Array | None
 
 
-def _named_sharding(spec: P, cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh) -> jax.sharding.NamedSharding:
-  return jax.sharding.NamedSharding(mesh, ops.physical_pspec(spec, cfg.sharding.axis_mapping))
+def _named_sharding(
+    spec: P, cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh
+) -> jax.sharding.NamedSharding:
+  return jax.sharding.NamedSharding(
+      mesh, ops.physical_pspec(spec, cfg.sharding.axis_mapping)
+  )
 
 
 def _cast(tree: Any, dtype: jax.typing.DTypeLike) -> Any:
@@ -201,7 +211,9 @@ def with_router_bias(
   """Returns `w` with `moe.router.bias` set to `bias`."""
   return dataclasses.replace(
       w,
-      moe=dataclasses.replace(w.moe, router=dataclasses.replace(w.moe.router, bias=bias)),
+      moe=dataclasses.replace(
+          w.moe, router=dataclasses.replace(w.moe.router, bias=bias)
+      ),
   )
 
 
@@ -255,12 +267,19 @@ def init_kernels(
       sv_diag_skip=k.sv_diag_skip,
       diag_band_skip=k.diag_band_skip,
       dq_reduction_steps=k.dq_reduction_steps,
-      q_prescaled_log2e=(bool(getattr(getattr(k.quant, "mla", None), "q_prescaled_log2e", False)) or k.q_prescaled_log2e),
+      q_prescaled_log2e=(
+          bool(
+              getattr(getattr(k.quant, "mla", None), "q_prescaled_log2e", False)
+          )
+          or k.q_prescaled_log2e
+      ),
   )
   return yarn_freqs, splash_kernel
 
 
-def dsv3_layer_kwargs(cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh) -> dict[str, Any]:
+def dsv3_layer_kwargs(
+    cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh
+) -> dict[str, Any]:
   """Keyword arguments shared by `dsv3.dsv3` and `dsv3_mtp.dsv3_mtp_layer`.
 
   Args:
@@ -335,7 +354,9 @@ def init_expert_permutations(
   Returns:
     `(expert_permutations, mtp_expert_permutations)` of `DSv3MutableState`.
   """
-  expert_permutations, mtp_expert_permutations = identity_expert_permutations(cfg)
+  expert_permutations, mtp_expert_permutations = identity_expert_permutations(
+      cfg
+  )
   if expert_permutations is None:
     return None, ()
   replicated = jax.sharding.NamedSharding(mesh, P())
@@ -345,7 +366,9 @@ def init_expert_permutations(
   )
 
 
-def dsv3_param_shardings(cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh) -> tuple[
+def dsv3_param_shardings(
+    cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh
+) -> tuple[
     DSv3Params[dsv3_types.ShardingType],
     DSv3MutableState[dsv3_types.ShardingType],
 ]:
@@ -372,10 +395,14 @@ def dsv3_param_shardings(cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh) -
   mtp_layer = named_tree(specs.mtp)
   params = DSv3Params[dsv3_types.ShardingType](
       embed=dsv3_embed.DSv3EmbedWeightsPytree(table=named(specs.embed_table)),
-      decoder=dataclasses.replace(decoder, sparse=with_router_bias(decoder.sparse, None)),
+      decoder=dataclasses.replace(
+          decoder, sparse=with_router_bias(decoder.sparse, None)
+      ),
       mtp=tuple(
           dsv3_mtp_block.DSv3MTPDepthWeightsPytree(
-              layer=dataclasses.replace(mtp_layer, sparse=with_router_bias(mtp_layer.sparse, None)),
+              layer=dataclasses.replace(
+                  mtp_layer, sparse=with_router_bias(mtp_layer.sparse, None)
+              ),
               final_norm_scale=named(specs.final_norm_scale),
           )
           for _ in range(m.num_mtp_layers)
@@ -391,7 +418,9 @@ def dsv3_param_shardings(cfg: dsv3_config.DSv3Config, mesh: jax.sharding.Mesh) -
       router_bias=replicated,
       mtp_router_bias=(replicated,) * m.num_mtp_layers,
       expert_permutations=replicated if shuffling else None,
-      mtp_expert_permutations=((replicated,) * m.num_mtp_layers if shuffling else ()),
+      mtp_expert_permutations=(
+          (replicated,) * m.num_mtp_layers if shuffling else ()
+      ),
   )
   return params, state
 
@@ -400,7 +429,9 @@ def init_dsv3_params(
     rng: jax.Array,
     cfg: dsv3_config.DSv3Config,
     mesh: jax.sharding.Mesh,
-) -> tuple[DSv3Params[dsv3_types.ArrayType], DSv3MutableState[dsv3_types.ArrayType]]:
+) -> tuple[
+    DSv3Params[dsv3_types.ArrayType], DSv3MutableState[dsv3_types.ArrayType]
+]:
   """Initializes random parameters and the initial state.
 
   Weights are drawn with the Lineage default initializers (the embedding table
@@ -457,7 +488,9 @@ def init_dsv3_params(
       s.axis_mapping,
       weight_dtype=m.weight_dtype,
       tied_head=m.tied_head,
-      out_shardings=dsv3_embed.DSv3HeadWeightsPytree(final_norm_scale=specs.final_norm_scale, kernel=specs.head_kernel),
+      out_shardings=dsv3_embed.DSv3HeadWeightsPytree(
+          final_norm_scale=specs.final_norm_scale, kernel=specs.head_kernel
+      ),
   )
 
   replicated = jax.sharding.NamedSharding(mesh, P())
@@ -492,7 +525,9 @@ def init_dsv3_params(
     )
     mtp.append(
         dsv3_mtp_block.DSv3MTPDepthWeightsPytree(
-            layer=dataclasses.replace(layer, sparse=with_router_bias(layer.sparse, None)),
+            layer=dataclasses.replace(
+                layer, sparse=with_router_bias(layer.sparse, None)
+            ),
             final_norm_scale=dsv3_types.default_scale_init(
                 scale_key,
                 (m.emb_dim,),
@@ -503,15 +538,21 @@ def init_dsv3_params(
     )
 
   assert decoder.sparse.moe.router.bias is not None
-  router_bias = jax.reshard(decoder.sparse.moe.router.bias.astype(m.router_bias_dtype), replicated)
+  router_bias = jax.reshard(
+      decoder.sparse.moe.router.bias.astype(m.router_bias_dtype), replicated
+  )
   params = DSv3Params[dsv3_types.ArrayType](
       embed=embed,
-      decoder=dataclasses.replace(decoder, sparse=with_router_bias(decoder.sparse, None)),
+      decoder=dataclasses.replace(
+          decoder, sparse=with_router_bias(decoder.sparse, None)
+      ),
       mtp=tuple(mtp),
       head=head,
   )
 
-  expert_permutations, mtp_expert_permutations = init_expert_permutations(cfg, mesh)
+  expert_permutations, mtp_expert_permutations = init_expert_permutations(
+      cfg, mesh
+  )
   state = DSv3MutableState[dsv3_types.ArrayType](
       router_bias=router_bias,
       mtp_router_bias=tuple(mtp_router_bias),
@@ -550,7 +591,8 @@ def dsv3_forward(
   shuffling = k.expert_permutation != "none"
   if shuffling != (state.expert_permutations is not None):
     raise ValueError(
-        f"expert_permutation={k.expert_permutation!r} but" f" state.expert_permutations is {state.expert_permutations}."
+        f"expert_permutation={k.expert_permutation!r} but"
+        f" state.expert_permutations is {state.expert_permutations}."
     )
   assert params.embed.table is not None
   with jax.named_scope("embed"):
@@ -565,14 +607,18 @@ def dsv3_forward(
     )
   segment_ids = None
   if batch.segment_ids is not None:
-    segment_ids = jax.reshard(batch.segment_ids, _named_sharding(s.segment_ids, cfg, mesh))
+    segment_ids = jax.reshard(
+        batch.segment_ids, _named_sharding(s.segment_ids, cfg, mesh)
+    )
   if kernels is None:
     kernels = init_kernels(batch.positions, cfg, mesh)
   yarn_freqs, splash_kernel = kernels
 
   assert state.router_bias is not None
   decoder = _cast(params.decoder, m.dtype)
-  decoder = dataclasses.replace(decoder, sparse=with_router_bias(decoder.sparse, state.router_bias))
+  decoder = dataclasses.replace(
+      decoder, sparse=with_router_bias(decoder.sparse, state.router_bias)
+  )
   with jax.named_scope("decoder"):
     hidden, router_aux = dsv3.dsv3(
         token_embeddings,
@@ -584,7 +630,9 @@ def dsv3_forward(
         expert_permutations=state.expert_permutations,
         **dsv3_layer_kwargs(cfg, mesh),
     )
-  return DSv3ForwardOutputs(hidden=hidden, token_embeddings=token_embeddings, router_aux=router_aux)
+  return DSv3ForwardOutputs(
+      hidden=hidden, token_embeddings=token_embeddings, router_aux=router_aux
+  )
 
 
 @jax.named_call
@@ -651,7 +699,9 @@ def dsv3_logits(
     The logits `[batch, seq, vocab]`.
   """
   assert params.head.final_norm_scale is not None
-  normed = dsv3_embed.final_norm(hidden, params.head.final_norm_scale, epsilon=cfg.model.norm_epsilon)
+  normed = dsv3_embed.final_norm(
+      hidden, params.head.final_norm_scale, epsilon=cfg.model.norm_epsilon
+  )
   return dsv3_lm_head(params, normed, cfg, mesh=mesh)
 
 
@@ -695,17 +745,22 @@ def next_dsv3_state(
   # The layers read the biases and permutations replicated.
   router_bias = state.router_bias
   if bias_updates is not None:
-    router_bias = jax.reshard((router_bias + bias_updates).astype(router_bias.dtype), replicated)
+    router_bias = jax.reshard(
+        (router_bias + bias_updates).astype(router_bias.dtype), replicated
+    )
   mtp_router_bias = state.mtp_router_bias
   if mtp_bias_updates:
     mtp_router_bias = tuple(
-        jax.reshard((b + u).astype(b.dtype), replicated) for b, u in zip(state.mtp_router_bias, mtp_bias_updates)
+        jax.reshard((b + u).astype(b.dtype), replicated)
+        for b, u in zip(state.mtp_router_bias, mtp_bias_updates)
     )
   expert_permutations = state.expert_permutations
   mtp_expert_permutations = state.mtp_expert_permutations
   if k.expert_permutation != "none":
     assert router_aux is not None
-    num_shards = dsv3_expert_shuffle.num_expert_shards(mesh, "expert", s.axis_mapping)
+    num_shards = dsv3_expert_shuffle.num_expert_shards(
+        mesh, "expert", s.axis_mapping
+    )
     next_permutation = functools.partial(
         dsv3_expert_shuffle.next_expert_permutation,
         k.expert_permutation,
@@ -713,7 +768,10 @@ def next_dsv3_state(
     )
     expert_permutations = jax.reshard(next_permutation(router_aux), replicated)
     if mtp_router_aux is not None:
-      mtp_expert_permutations = tuple(jax.reshard(next_permutation(aux), replicated) for aux in mtp_router_aux)
+      mtp_expert_permutations = tuple(
+          jax.reshard(next_permutation(aux), replicated)
+          for aux in mtp_router_aux
+      )
   return DSv3MutableState[dsv3_types.ArrayType](
       router_bias=router_bias,
       mtp_router_bias=mtp_router_bias,
@@ -735,9 +793,13 @@ def eval_config_and_params(
 ) -> tuple[dsv3_config.DSv3Config, DSv3Params]:
   """The config and parameters of the eval step.
 
-  Without `cfg.eval_sharding` both are returned unchanged. With it, the config
-  uses `eval_sharding` and the parameters are resharded to its weight specs,
-  which `eval_sharding` keeps equal to the training layout up to a local
+  The eval step drops the combine quantization (`quant.combine_qtype`), so its
+  combine token reduce-scatter stays bf16: the FP8 `ops.reduce_scatter_sc0`
+  kernel does not support the small per-device batch sizes of eval.
+
+  Without `cfg.eval_sharding` the parameters are returned unchanged. With it,
+  the config uses `eval_sharding` and the parameters are resharded to its weight
+  specs, which `eval_sharding` keeps equal to the training layout up to a local
   reslice (e.g. the MLA head dim of `dsv3_sharding.expert_axes_as_cp_config`),
   so the reshard moves no data across devices.
 
@@ -749,9 +811,19 @@ def eval_config_and_params(
   Returns:
     `(eval_cfg, eval_params)`.
   """
+  quant = cfg.kernels.quant
+  if quant is not None and quant.combine_qtype is not None:
+    quant = dataclasses.replace(
+        quant, combine_qtype=None, combine_per_hop_scaling=False
+    )
+    cfg = dataclasses.replace(
+        cfg, kernels=dataclasses.replace(cfg.kernels, quant=quant)
+    )
   if cfg.eval_sharding is None:
     return cfg, params
-  eval_cfg = dataclasses.replace(cfg, sharding=cfg.eval_sharding, eval_sharding=None)
+  eval_cfg = dataclasses.replace(
+      cfg, sharding=cfg.eval_sharding, eval_sharding=None
+  )
   param_shardings, _ = dsv3_param_shardings(eval_cfg, mesh)
   return eval_cfg, jax.tree.map(jax.reshard, params, param_shardings)
 
@@ -780,7 +852,7 @@ def dsv3_loss_and_aux(
     state: Mutable state (router biases, expert permutations).
     batch: The batch.
     cfg: Model config. In eval, its `eval_sharding` (if set) replaces `sharding`
-      (see `eval_config_and_params`).
+      and the combine quantization is dropped (see `eval_config_and_params`).
     mesh: The device mesh.
     train: Training step (adds the MTP loss).
     update_state: When `train` is True, compute the per-batch routed-bias
@@ -818,7 +890,9 @@ def dsv3_loss_and_aux(
         ),
     )
   assert params.head.final_norm_scale is not None
-  normed_hidden = dsv3_embed.final_norm(fwd.hidden, params.head.final_norm_scale, epsilon=m.norm_epsilon)
+  normed_hidden = dsv3_embed.final_norm(
+      fwd.hidden, params.head.final_norm_scale, epsilon=m.norm_epsilon
+  )
   logits = dsv3_lm_head(params, normed_hidden, cfg, mesh=mesh)
   with jax.named_scope("main_loss"):
     sums = dsv3_loss.masked_token_loss(
@@ -838,9 +912,13 @@ def dsv3_loss_and_aux(
       num_experts_per_tok=m.num_experts_per_tok,
       load_balance_loss_weight=t.load_balance_loss_weight,
       megatron_seq_aux_loss=t.megatron_seq_aux_loss,
-      routed_bias_update_rate=(t.routed_bias_update_rate if (train and update_state) else 0.0),
+      routed_bias_update_rate=(
+          t.routed_bias_update_rate if (train and update_state) else 0.0
+      ),
   )
-  lb_loss, bias_updates = dsv3_loss.moe_router_aux_outputs(fwd.router_aux, **router_aux_kwargs)
+  lb_loss, bias_updates = dsv3_loss.moe_router_aux_outputs(
+      fwd.router_aux, **router_aux_kwargs
+  )
   lb_parts = [] if lb_loss is None else [lb_loss]
 
   mtp_loss: jax.Array | float = 0.0
@@ -848,10 +926,15 @@ def dsv3_loss_and_aux(
   mtp_bias_updates = []
   if params.mtp:
     if len(state.mtp_router_bias) != len(params.mtp):
-      raise ValueError(f"Got {len(state.mtp_router_bias)} MTP router biases for" f" {len(params.mtp)} MTP depths.")
+      raise ValueError(
+          f"Got {len(state.mtp_router_bias)} MTP router biases for"
+          f" {len(params.mtp)} MTP depths."
+      )
     segment_ids = None
     if batch.segment_ids is not None:
-      segment_ids = jax.reshard(batch.segment_ids, _named_sharding(s.segment_ids, cfg, mesh))
+      segment_ids = jax.reshard(
+          batch.segment_ids, _named_sharding(s.segment_ids, cfg, mesh)
+      )
     yarn_freqs, splash_kernel = kernels
     layer_kwargs = dsv3_layer_kwargs(cfg, mesh)
     depth_weights = []
@@ -859,7 +942,9 @@ def dsv3_loss_and_aux(
       layer = _cast(w.layer, m.dtype)
       depth_weights.append(
           dsv3_mtp_block.DSv3MTPDepthWeightsPytree(
-              layer=dataclasses.replace(layer, sparse=with_router_bias(layer.sparse, bias)),
+              layer=dataclasses.replace(
+                  layer, sparse=with_router_bias(layer.sparse, bias)
+              ),
               final_norm_scale=w.final_norm_scale,
           )
       )
@@ -892,7 +977,9 @@ def dsv3_loss_and_aux(
     if t.mtp_reuse_input_embedding:
       assert params.embed.table is not None
       main_token_embeddings = fwd.token_embeddings
-      token_zero_embedding = dsv3_embed.embed_single_token(params.embed.table, 0, dtype=m.dtype, iota_embed=m.iota_embed)
+      token_zero_embedding = dsv3_embed.embed_single_token(
+          params.embed.table, 0, dtype=m.dtype, iota_embed=m.iota_embed
+      )
     with jax.named_scope("mtp"):
       mtp_outputs = dsv3_mtp_block.dsv3_mtp_block(
           normed_hidden,
@@ -913,10 +1000,14 @@ def dsv3_loss_and_aux(
           token_zero_embedding=token_zero_embedding,
       )
     if train:
-      mtp_loss = dsv3_mtp_block.mtp_loss(mtp_outputs, scaling_factor=t.mtp_loss_scaling_factor)
+      mtp_loss = dsv3_mtp_block.mtp_loss(
+          mtp_outputs, scaling_factor=t.mtp_loss_scaling_factor
+      )
       loss = loss + mtp_loss
     for aux in mtp_outputs.aux:
-      depth_lb_loss, depth_bias_updates = dsv3_loss.moe_router_aux_outputs(aux, **router_aux_kwargs)
+      depth_lb_loss, depth_bias_updates = dsv3_loss.moe_router_aux_outputs(
+          aux, **router_aux_kwargs
+      )
       if depth_lb_loss is not None:
         lb_parts.append(depth_lb_loss)
       if depth_bias_updates is not None:

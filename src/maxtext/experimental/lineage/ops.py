@@ -17,6 +17,7 @@
 from collections.abc import Callable, Collection, Mapping
 import dataclasses
 import functools
+import inspect
 import math
 import string
 from typing import Any, NamedTuple, Sequence, Union
@@ -24,6 +25,7 @@ import jax
 import jax.experimental.compute_on
 import jax.experimental.pallas as pl
 from jax.experimental.pallas import tpu as pltpu
+from jax.experimental.pallas import tpu_sc as plsc
 import jax.numpy as jnp
 import jaxtyping as jt
 import typeguard
@@ -57,7 +59,8 @@ def rms_norm(
     The normalized array.
   """
   assert scale is None or scale.shape == x.shape[-scale.ndim :], (
-      f"scale.shape must be a suffix of x.shape, but got {scale.shape} and" f" {x.shape}"
+      f"scale.shape must be a suffix of x.shape, but got {scale.shape} and"
+      f" {x.shape}"
   )
 
   x_dtype = x.dtype
@@ -107,7 +110,9 @@ def physical_pspec(
   physical_partitions = tuple(_map_axis(p) for p in logical_pspec.partitions)
   reduced = _map_set(logical_pspec.reduced)
   unreduced = _map_set(logical_pspec.unreduced)
-  return jax.sharding.PartitionSpec(*physical_partitions, reduced=reduced, unreduced=unreduced)
+  return jax.sharding.PartitionSpec(
+      *physical_partitions, reduced=reduced, unreduced=unreduced
+  )
 
 
 def _merged_gather_dims(
@@ -186,7 +191,9 @@ def collect_along_axis(
 
   def _is_axis_spec(x: Any) -> bool:
     return isinstance(x, str) or (
-        isinstance(x, (tuple, list)) and not hasattr(x, "_fields") and all(isinstance(e, str) for e in x)
+        isinstance(x, (tuple, list))
+        and not hasattr(x, "_fields")
+        and all(isinstance(e, str) for e in x)
     )
 
   def _get_physical_axes(
@@ -204,14 +211,18 @@ def collect_along_axis(
     return xs
 
   physical_axes_tree = jax.tree.map(
-      lambda spec, sub_xs: jax.tree.map(lambda _: _get_physical_axes(spec), sub_xs),
+      lambda spec, sub_xs: jax.tree.map(
+          lambda _: _get_physical_axes(spec), sub_xs
+      ),
       axis_name,
       xs,
       is_leaf=_is_axis_spec,
   )
   flat_physical_axes = jax.tree.leaves(
       physical_axes_tree,
-      is_leaf=lambda x: (isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], frozenset)),
+      is_leaf=lambda x: (
+          isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], frozenset)
+      ),
   )
   if not any(names for names, _ in flat_physical_axes):
     return xs
@@ -274,7 +285,9 @@ def collect_along_axis(
     i = 0
     while i < len(gathers):
       dim_idx, _, gather_axes = gathers[i]
-      if i + 1 < len(gathers) and _merged_gather_dims(arr.shape, gathers[i], gathers[i + 1]):
+      if i + 1 < len(gathers) and _merged_gather_dims(
+          arr.shape, gathers[i], gathers[i + 1]
+      ):
         next_dim, _, next_axes = gathers[i + 1]
         shape = arr.shape
         merged = arr.reshape(
@@ -290,13 +303,21 @@ def collect_along_axis(
             to="reduced",
         )
         gathered_lead = math.prod(jax.lax.axis_size(a) for a in gather_axes)
-        arr = merged.reshape(*shape[:dim_idx], gathered_lead, -1, *shape[next_dim + 1 :])
+        arr = merged.reshape(
+            *shape[:dim_idx], gathered_lead, -1, *shape[next_dim + 1 :]
+        )
         i += 2
         continue
-      arr = jax.lax.all_gather(arr, gather_axes, axis=dim_idx, tiled=True, to="reduced")
+      arr = jax.lax.all_gather(
+          arr, gather_axes, axis=dim_idx, tiled=True, to="reduced"
+      )
       i += 1
     for ax in physical_axis_names:
-      if ax not in sharded_axes and ax not in in_spec.reduced and ax not in in_spec.unreduced:
+      if (
+          ax not in sharded_axes
+          and ax not in in_spec.reduced
+          and ax not in in_spec.unreduced
+      ):
         arr = jax.lax.pcast(arr, ax, to="reduced")
     return arr
 
@@ -354,7 +375,11 @@ def reduce_along_axis(
     defer: bool = False,
     compute_type: str | None = None,
     compiler_options: dict[str, Any] | None = None,
-) -> jt.Num[jax.Array, "*input_dims"] | jt.PyTree[jt.Num[jax.Array, "..."]] | DeferredReduce:
+) -> (
+    jt.Num[jax.Array, "*input_dims"]
+    | jt.PyTree[jt.Num[jax.Array, "..."]]
+    | DeferredReduce
+):
   """Reduces cotangents of `collect_along_axis` back to its input shardings.
 
   `reduce_along_axis(ct, axis_name, axis_mapping, like=w)` is the VJP of
@@ -399,7 +424,10 @@ def reduce_along_axis(
     of them if `defer`.
   """
   if defer and compute_type is not None:
-    raise ValueError("defer runs the reduction in the caller's shard_map, which rules out" " compute_type.")
+    raise ValueError(
+        "defer runs the reduction in the caller's shard_map, which rules out"
+        " compute_type."
+    )
   if axes is not None:
     axes = frozenset(axes)
 
@@ -410,7 +438,9 @@ def reduce_along_axis(
 
   def _is_axis_spec(x: Any) -> bool:
     return isinstance(x, str) or (
-        isinstance(x, (tuple, list)) and not hasattr(x, "_fields") and all(isinstance(e, str) for e in x)
+        isinstance(x, (tuple, list))
+        and not hasattr(x, "_fields")
+        and all(isinstance(e, str) for e in x)
     )
 
   def _get_physical_axes(
@@ -438,14 +468,18 @@ def reduce_along_axis(
     return _nothing_to_reduce()
 
   physical_axes_tree = jax.tree.map(
-      lambda spec, sub_xs: jax.tree.map(lambda _: _get_physical_axes(spec), sub_xs),
+      lambda spec, sub_xs: jax.tree.map(
+          lambda _: _get_physical_axes(spec), sub_xs
+      ),
       axis_name,
       xs,
       is_leaf=_is_axis_spec,
   )
   flat_physical_axes = jax.tree.leaves(
       physical_axes_tree,
-      is_leaf=lambda x: (isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], frozenset)),
+      is_leaf=lambda x: (
+          isinstance(x, tuple) and len(x) == 2 and isinstance(x[1], frozenset)
+      ),
   )
   if not any(names for names, _ in flat_physical_axes):
     return _nothing_to_reduce()
@@ -502,7 +536,10 @@ def reduce_along_axis(
     psums = [
         ax
         for ax in reversed(physical_axis_names)
-        if ax in selected and ax not in sharded_axes and ax not in like_spec.reduced and ax not in like_spec.unreduced
+        if ax in selected
+        and ax not in sharded_axes
+        and ax not in like_spec.reduced
+        and ax not in like_spec.unreduced
     ]
     return scatters, psums, pending - selected
 
@@ -549,7 +586,9 @@ def reduce_along_axis(
       # with the shard that one multi-axis reduce-scatter would give it.
       groups = [(ax,) for ax in scatter_axes] if split else [scatter_axes]
       for group in groups:
-        arr = jax.lax.psum_scatter(arr, group, scatter_dimension=dim_idx, tiled=True)
+        arr = jax.lax.psum_scatter(
+            arr, group, scatter_dimension=dim_idx, tiled=True
+        )
       return arr
 
     # The reduce-scatters first: they shrink the all-reduces, which commute
@@ -604,7 +643,10 @@ def reduce_along_axis(
         reduced_idxs.append(i)
 
     def _local_fn(operand):
-      return [_reduce_leaf(arr, *leaf_specs[i], split=leaf_splits[i]) for arr, i in zip(operand, reduced_idxs)]
+      return [
+          _reduce_leaf(arr, *leaf_specs[i], split=leaf_splits[i])
+          for arr, i in zip(operand, reduced_idxs)
+      ]
 
     def _finish(reduced):
       merged = list(xs_leaves)
@@ -654,7 +696,12 @@ def w_collect_pipelined_scan(
     w: AnyJaxArrayOrPyTree,
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
-    reduce_fn_ici: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None = None,
+    reduce_fn_ici: (
+        Callable[
+            [AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree
+        ]
+        | None
+    ) = None,
 ) -> tuple[AnyJaxArray, AnyJaxArrayOrPyTree]:
   """Pipelines weight collection for scanning over scan_fn.
 
@@ -688,7 +735,9 @@ def w_collect_pipelined_scan(
     x, aux_step = scan_fn(x, w)
     return (x, w_n), aux_step
 
-  (x, w_last), aux_scanned = jax.lax.scan(body, carry, jax.tree.map(lambda _w: _w[1:], w))
+  (x, w_last), aux_scanned = jax.lax.scan(
+      body, carry, jax.tree.map(lambda _w: _w[1:], w)
+  )
   x, aux_last = scan_fn(x, w_last)
   aux = jax.tree.map(
       lambda s, l: jnp.concatenate([s, l[jnp.newaxis]], axis=0),
@@ -708,14 +757,22 @@ def w_collect_pipelined_scan_fwd(
     w: AnyJaxArrayOrPyTree,
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
-    reduce_fn_ici: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None,
+    reduce_fn_ici: (
+        Callable[
+            [AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree
+        ]
+        | None
+    ),
 ) -> tuple[tuple[AnyJaxArray, AnyJaxArrayOrPyTree], Any]:
   """Forward pass of w_collect_pipelined_scan which does not save collected weights."""
   assert jax.tree.leaves(w)[0].shape[0] >= 2, (
-      "there must be at least two scan iterations to perform a pipelined scan" " and its transpose"
+      "there must be at least two scan iterations to perform a pipelined scan"
+      " and its transpose"
   )
   # Derive the reduce functions (the duals of the collect functions)
-  w_first_dcn, reduce_fn_dcn = jax.vjp(collect_fn_dcn, jax.tree.map(lambda _w: _w[0], w))
+  w_first_dcn, reduce_fn_dcn = jax.vjp(
+      collect_fn_dcn, jax.tree.map(lambda _w: _w[0], w)
+  )
   getattr(reduce_fn_dcn, "args_res")[0] = None
   if reduce_fn_ici is None:
     w_first, reduce_fn_ici_vjp = jax.vjp(collect_fn_ici, w_first_dcn)
@@ -737,11 +794,15 @@ def w_collect_pipelined_scan_fwd(
     getattr(scan_fn_vjp, "args_res")[1] = None
     return (x, w_n), (scan_fn_vjp, aux_step)
 
-  (x, w_last), (scan_fn_vjps, aux_scanned) = jax.lax.scan(body_fwd, carry, jax.tree.map(lambda _w: _w[2:], w))
+  (x, w_last), (scan_fn_vjps, aux_scanned) = jax.lax.scan(
+      body_fwd, carry, jax.tree.map(lambda _w: _w[2:], w)
+  )
   (x, aux_last), scan_fn_vjp_last = jax.vjp(scan_fn, x, w_last)
   getattr(scan_fn_vjp_last, "args_res")[1] = None
   aux = jax.tree.map(
-      lambda first, scanned, last: jnp.concatenate([first[jnp.newaxis], scanned, last[jnp.newaxis]], axis=0),
+      lambda first, scanned, last: jnp.concatenate(
+          [first[jnp.newaxis], scanned, last[jnp.newaxis]], axis=0
+      ),
       aux_first,
       aux_scanned,
       aux_last,
@@ -761,7 +822,12 @@ def w_collect_pipelined_scan_bwd(
     _,
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
-    reduce_fn_ici: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None,
+    reduce_fn_ici: (
+        Callable[
+            [AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree
+        ]
+        | None
+    ),
     res: Any,
     grad_outputs: tuple[AnyJaxArray, Any],
 ) -> tuple[AnyJaxArray, AnyJaxArrayOrPyTree]:
@@ -791,7 +857,9 @@ def w_collect_pipelined_scan_bwd(
   getattr(scan_fn_vjp_last, "args_res")[1] = w_last
   x_grad, w_last_grad_unreduced = scan_fn_vjp_last(step_grad_last)
 
-  w_second_last = collect_fn_ici(collect_fn_dcn(jax.tree.map(lambda _w: _w[-2], w)))
+  w_second_last = collect_fn_ici(
+      collect_fn_dcn(jax.tree.map(lambda _w: _w[-2], w))
+  )
   carry = (x_grad, w_second_last, w_last_grad_unreduced)
 
   aux_scanned_grad = jax.tree.map(lambda g: g[1:-1], aux_grad)
@@ -828,7 +896,9 @@ def w_collect_pipelined_scan_bwd(
   # Likely better to initialize w_grad as a tree of zeros and insert into it
   # rather than concatenating at the end.
   w_grad = jax.tree.map(
-      lambda x, y, z: jnp.concatenate([x[jnp.newaxis], y[jnp.newaxis], z], axis=0),
+      lambda x, y, z: jnp.concatenate(
+          [x[jnp.newaxis], y[jnp.newaxis], z], axis=0
+      ),
       w_first_grad_reduced,
       w_second_grad_reduced,
       w_grads_reduced,
@@ -836,7 +906,9 @@ def w_collect_pipelined_scan_bwd(
   return x_grad, w_grad
 
 
-w_collect_pipelined_scan.defvjp(w_collect_pipelined_scan_fwd, w_collect_pipelined_scan_bwd)
+w_collect_pipelined_scan.defvjp(
+    w_collect_pipelined_scan_fwd, w_collect_pipelined_scan_bwd
+)
 
 
 class PipelinedScanLayer(NamedTuple):
@@ -844,7 +916,9 @@ class PipelinedScanLayer(NamedTuple):
   bwd: Callable[..., Any]
 
 
-def combine_w_grads(w_mla: AnyJaxArrayOrPyTree, w_expert: AnyJaxArrayOrPyTree) -> AnyJaxArrayOrPyTree:
+def combine_w_grads(
+    w_mla: AnyJaxArrayOrPyTree, w_expert: AnyJaxArrayOrPyTree
+) -> AnyJaxArrayOrPyTree:
   """Combines MLA/norm/router gradients and expert gradients for a layer."""
 
   def _add(a, b):
@@ -880,7 +954,9 @@ def _layer_at(tree: Any, idx: int | jax.Array | None) -> Any:
     return None
   if isinstance(idx, int):
     return _layer_slice(tree, idx)
-  return jax.tree.map(lambda t: jax.lax.dynamic_index_in_dim(t, idx, keepdims=False), tree)
+  return jax.tree.map(
+      lambda t: jax.lax.dynamic_index_in_dim(t, idx, keepdims=False), tree
+  )
 
 
 def _w_aux_kwargs(w_aux_layer: Any) -> dict[str, Any]:
@@ -938,7 +1014,9 @@ def _layer_collect(
     w_aux_layer = _layer_at(w_aux, idx)
     return pre(collect_fn_dcn(_layer_at(w, idx)), w_aux_layer), w_aux_layer
 
-  return _LayerCollect(collect=collect, pre=pre, collect_ici=collect_ici, pre_carry=pre_carry)
+  return _LayerCollect(
+      collect=collect, pre=pre, collect_ici=collect_ici, pre_carry=pre_carry
+  )
 
 
 def _shifted_indices(layers: slice | int, shift: int, num_layers: int) -> Any:
@@ -963,7 +1041,9 @@ def _shifted_indices(layers: slice | int, shift: int, num_layers: int) -> Any:
   return idx if 0 <= idx < num_layers else None
 
 
-def _fwd_step_xs(w: Any, w_aux: Any, layers: slice | int, shifted: bool) -> tuple[Any, Any, Any]:
+def _fwd_step_xs(
+    w: Any, w_aux: Any, layers: slice | int, shifted: bool
+) -> tuple[Any, Any, Any]:
   """Inputs `(w_layer, w_aux_layer, pre_idx)` of forward steps for `layers`.
 
   Without `collect_fn_pre` (`shifted=False`) a step collects the layer it is
@@ -997,11 +1077,15 @@ def w_collect_pipelined_scan_prologue_epilogue(
     w: AnyJaxArrayOrPyTree,
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici_fwd: Callable[..., AnyJaxArrayOrPyTree],
-    reduce_fn_dcn: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
+    reduce_fn_dcn: Callable[
+        [AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree
+    ],
     reduce_fn_ici_first: Callable[..., AnyJaxArrayOrPyTree],
     reduce_fn_ici_second: Callable[..., AnyJaxArrayOrPyTree],
     collect_fn_ici_bwd: Callable[..., AnyJaxArrayOrPyTree] | None = None,
-    quantize_fn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None = None,
+    quantize_fn: (
+        Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None
+    ) = None,
     offload_fn: Callable[[Any], Any] = lambda res: res,
     load_fn: Callable[[Any], Any] = lambda res: res,
     w_aux: Any = None,
@@ -1098,12 +1182,15 @@ def w_collect_pipelined_scan_prologue_epilogue(
   del reduce_fn_ici_first, reduce_fn_ici_second, reduce_fn_pre
   num_layers = jax.tree.leaves(w)[0].shape[0]
   assert num_layers >= 3, (
-      "there must be at least three layers to perform a pipelined scan with a" " peeled prologue and epilogue"
+      "there must be at least three layers to perform a pipelined scan with a"
+      " peeled prologue and epilogue"
   )
   if quantize_fn is not None:
     w = quantize_fn(w)
   shifted = collect_fn_pre is not None
-  fns = _layer_collect(collect_fn_dcn, collect_fn_ici_fwd, collect_fn_pre, w, w_aux)
+  fns = _layer_collect(
+      collect_fn_dcn, collect_fn_ici_fwd, collect_fn_pre, w, w_aux
+  )
   step_xs = functools.partial(_fwd_step_xs, w, w_aux, shifted=shifted)
 
   w_aux_0 = _layer_slice(w_aux, 0)
@@ -1113,7 +1200,9 @@ def w_collect_pipelined_scan_prologue_epilogue(
   w_aux_1 = _layer_slice(w_aux, 1)
   w_second = fns.collect(_layer_slice(w, 1), w_aux_1)
   pre_carry = fns.pre_carry(2 if shifted else None)
-  carry, aux_first = scan_body_fn.fwd(carry, w_first, w_second, **_w_aux_kwargs(w_aux_0))[0]
+  carry, aux_first = scan_body_fn.fwd(
+      carry, w_first, w_second, **_w_aux_kwargs(w_aux_0)
+  )[0]
 
   def _scan_step(carry_tuple, xs):
     w_n_sharded, w_aux_n, pre_idx = xs
@@ -1124,13 +1213,17 @@ def w_collect_pipelined_scan_prologue_epilogue(
     else:
       w_next = fns.collect(w_n_sharded, w_aux_n)
     pre_carry = fns.pre_carry(pre_idx)
-    activations, aux_step = scan_body_fn.fwd(activations, w_curr, w_next, **_w_aux_kwargs(w_aux_curr))[0]
+    activations, aux_step = scan_body_fn.fwd(
+        activations, w_curr, w_next, **_w_aux_kwargs(w_aux_curr)
+    )[0]
     return (activations, w_next, w_aux_n, pre_carry), aux_step
 
   def body(carry_tuple, xs_pair):
     xs_0, xs_1 = xs_pair
     carry_tuple, aux_0 = _scan_step(carry_tuple, xs_0)
-    (carry_tuple, aux_0), xs_1 = jax.lax.optimization_barrier(((carry_tuple, aux_0), xs_1))
+    (carry_tuple, aux_0), xs_1 = jax.lax.optimization_barrier(
+        ((carry_tuple, aux_0), xs_1)
+    )
     carry_tuple, aux_1 = _scan_step(carry_tuple, xs_1)
     return carry_tuple, (aux_0, aux_1)
 
@@ -1150,7 +1243,9 @@ def w_collect_pipelined_scan_prologue_epilogue(
     aux_parts.append(aux_scanned)
   if num_scanned % 2 == 1:
     rem = 2 + 2 * num_pairs
-    (carry, w_curr, w_aux_curr, pre_carry), aux_rem = _scan_step((carry, w_curr, w_aux_curr, pre_carry), step_xs(rem))
+    (carry, w_curr, w_aux_curr, pre_carry), aux_rem = _scan_step(
+        (carry, w_curr, w_aux_curr, pre_carry), step_xs(rem)
+    )
     aux_parts.append(jax.tree.map(lambda x: x[jnp.newaxis], aux_rem))
 
   # Peeled final scan body step, whose backward pass primes the pipelined DCN
@@ -1184,11 +1279,15 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
     w: AnyJaxArrayOrPyTree,
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici_fwd: Callable[..., AnyJaxArrayOrPyTree],
-    reduce_fn_dcn: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
+    reduce_fn_dcn: Callable[
+        [AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree
+    ],
     reduce_fn_ici_first: Callable[..., AnyJaxArrayOrPyTree],
     reduce_fn_ici_second: Callable[..., AnyJaxArrayOrPyTree],
     collect_fn_ici_bwd: Callable[..., AnyJaxArrayOrPyTree] | None = None,
-    quantize_fn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None = None,
+    quantize_fn: (
+        Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree] | None
+    ) = None,
     offload_fn: Callable[[Any], Any] = lambda res: res,
     load_fn: Callable[[Any], Any] = lambda res: res,
     w_aux: Any = None,
@@ -1203,12 +1302,16 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
       "there must be at least three layers to perform a pipelined scan and its"
       " transpose, which peel a scan body step at each end of the scan"
   )
-  assert (collect_fn_pre is None) == (reduce_fn_pre is None), "collect_fn_pre and reduce_fn_pre must be given together"
+  assert (collect_fn_pre is None) == (
+      reduce_fn_pre is None
+  ), "collect_fn_pre and reduce_fn_pre must be given together"
   # Only the quantized weights are collected, here and in the backward pass.
   if quantize_fn is not None:
     w = quantize_fn(w)
   shifted = collect_fn_pre is not None
-  fns = _layer_collect(collect_fn_dcn, collect_fn_ici_fwd, collect_fn_pre, w, w_aux)
+  fns = _layer_collect(
+      collect_fn_dcn, collect_fn_ici_fwd, collect_fn_pre, w, w_aux
+  )
   step_xs = functools.partial(_fwd_step_xs, w, w_aux, shifted=shifted)
 
   w_aux_0 = _layer_slice(w_aux, 0)
@@ -1221,10 +1324,14 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
     w_second = fns.collect(_layer_slice(w, 1), w_aux_1)
     pre_carry = fns.pre_carry(2 if shifted else None)
     res_prologue_host = offload_fn(res_prologue)
-    (carry, aux_first), res_sb_0 = scan_body_fn.fwd(carry, w_first, w_second, **_w_aux_kwargs(w_aux_0))
+    (carry, aux_first), res_sb_0 = scan_body_fn.fwd(
+        carry, w_first, w_second, **_w_aux_kwargs(w_aux_0)
+    )
 
   res_sb_0_shaped = jax.eval_shape(offload_fn, res_sb_0)
-  has_host_offload = any(_is_pinned_host(s) for s in jax.tree.leaves(res_sb_0_shaped))
+  has_host_offload = any(
+      _is_pinned_host(s) for s in jax.tree.leaves(res_sb_0_shaped)
+  )
 
   def _split_for_offload(res):
     if not has_host_offload:
@@ -1258,7 +1365,9 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
     else:
       w_next = fns.collect(w_n_sharded, w_aux_n)
     pre_carry = fns.pre_carry(pre_idx)
-    (activations, aux_step), res_curr = scan_body_fn.fwd(activations, w_curr, w_next, **_w_aux_kwargs(w_aux_curr))
+    (activations, aux_step), res_curr = scan_body_fn.fwd(
+        activations, w_curr, w_next, **_w_aux_kwargs(w_aux_curr)
+    )
     res_curr_offload, res_curr_device = _split_for_offload(res_curr)
     return (activations, w_next, w_aux_n, pre_carry, res_curr_offload), (
         res_prev_host,
@@ -1269,13 +1378,15 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
   @jax.named_call
   def body_fwd(carry_tuple, xs_pair):
     xs_0, xs_1 = xs_pair
-    carry_tuple, (res_prev_0_host, res_curr_0_device, aux_0) = jax.named_call(_scan_step_fwd, name="unrolled_0")(
-        carry_tuple, xs_0
+    carry_tuple, (res_prev_0_host, res_curr_0_device, aux_0) = jax.named_call(
+        _scan_step_fwd, name="unrolled_0"
+    )(carry_tuple, xs_0)
+    (carry_tuple, aux_0), xs_1 = jax.lax.optimization_barrier(
+        ((carry_tuple, aux_0), xs_1)
     )
-    (carry_tuple, aux_0), xs_1 = jax.lax.optimization_barrier(((carry_tuple, aux_0), xs_1))
-    carry_tuple, (res_prev_1_host, res_curr_1_device, aux_1) = jax.named_call(_scan_step_fwd, name="unrolled_1")(
-        carry_tuple, xs_1
-    )
+    carry_tuple, (res_prev_1_host, res_curr_1_device, aux_1) = jax.named_call(
+        _scan_step_fwd, name="unrolled_1"
+    )(carry_tuple, xs_1)
     return carry_tuple, (
         (res_prev_0_host, res_prev_1_host),
         (res_curr_0_device, res_curr_1_device),
@@ -1331,7 +1442,9 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
 
   with jax.named_scope("epilogue_fwd"):
     res_last_sb_host = _offload(res_last_sb_offload)
-    (out, aux_last), res_epilogue = epilogue_fn.fwd(carry, w_last, **_w_aux_kwargs(w_aux_last))
+    (out, aux_last), res_epilogue = epilogue_fn.fwd(
+        carry, w_last, **_w_aux_kwargs(w_aux_last)
+    )
   res_epilogue_host = offload_fn(res_epilogue)
   aux_parts.append(jax.tree.map(lambda x: x[jnp.newaxis], aux_last))
 
@@ -1365,7 +1478,9 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
     epilogue_fn: PipelinedScanLayer,
     collect_fn_dcn: Callable[[AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
     collect_fn_ici_fwd: Callable[..., AnyJaxArrayOrPyTree],
-    reduce_fn_dcn: Callable[[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree],
+    reduce_fn_dcn: Callable[
+        [AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], AnyJaxArrayOrPyTree
+    ],
     reduce_fn_ici_first: Callable[..., AnyJaxArrayOrPyTree],
     reduce_fn_ici_second: Callable[..., AnyJaxArrayOrPyTree],
     collect_fn_ici_bwd: Callable[..., AnyJaxArrayOrPyTree] | None,
@@ -1402,7 +1517,9 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
   ) = res
   num_layers = jax.tree.leaves(w)[0].shape[0]
   shifted = collect_fn_pre is not None
-  fns = _layer_collect(collect_fn_dcn, collect_fn_ici_bwd, collect_fn_pre, w, w_aux)
+  fns = _layer_collect(
+      collect_fn_dcn, collect_fn_ici_bwd, collect_fn_pre, w, w_aux
+  )
 
   def _load(res_host):
     return None if res_host is None else load_fn(res_host)
@@ -1434,11 +1551,15 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
   # reductions read from them (`collect_fn_pre` preserves shardings).
   def _reduce_ici_first(w_unreduced, w_aux_layer):
     """First stage of reducing a layer's gradient over the ICI axes."""
-    return reduce_fn_ici_first(w_unreduced, w_last_dcn, **_w_aux_kwargs(w_aux_layer))
+    return reduce_fn_ici_first(
+        w_unreduced, w_last_dcn, **_w_aux_kwargs(w_aux_layer)
+    )
 
   def _reduce_ici_second(w_partial, w_aux_layer, **kwargs):
     """Second stage of reducing a layer's gradient over the ICI axes."""
-    return reduce_fn_ici_second(w_partial, w_last_dcn, **_w_aux_kwargs(w_aux_layer), **kwargs)
+    return reduce_fn_ici_second(
+        w_partial, w_last_dcn, **_w_aux_kwargs(w_aux_layer), **kwargs
+    )
 
   def _reduce_pre(w_partial, w_aux_layer):
     """Applies `reduce_fn_pre` (if any) to a partially reduced gradient."""
@@ -1499,9 +1620,13 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         pre_idx,
     ) = xs
 
-    w_partial_pending_grad, w_aux_partial_pending = (None, None) if w_partial_pending is None else w_partial_pending
+    w_partial_pending_grad, w_aux_partial_pending = (
+        (None, None) if w_partial_pending is None else w_partial_pending
+    )
     if w_partial_pending is not None:
-      w_partial_pending_grad = _reduce_pre(w_partial_pending_grad, w_aux_partial_pending)
+      w_partial_pending_grad = _reduce_pre(
+          w_partial_pending_grad, w_aux_partial_pending
+      )
 
     # Load previous iteration's offloaded residuals to device
     res_prev_loaded = _load(res_prev_host)
@@ -1539,10 +1664,16 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         w_prev_expert_grad_unreduced,
         _reduce_ici_first_with_collect,
         w_partial_pending_grad,
-        functools.partial(_reduce_ici_second, w_aux_layer=w_aux_partial_pending),
+        functools.partial(
+            _reduce_ici_second, w_aux_layer=w_aux_partial_pending
+        ),
         **_w_aux_kwargs(w_aux_curr),
     )
-    w_pending_reduced = None if w_partial_pending is None else _reduce_dcn(w_partial_pending_grad_ici)
+    w_pending_reduced = (
+        None
+        if w_partial_pending is None
+        else _reduce_dcn(w_partial_pending_grad_ici)
+    )
 
     return (
         carry_grad,
@@ -1581,7 +1712,9 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
   def body_bwd(carry, xs_pair):
     xs_0, xs_1 = xs_pair
     carry_in = carry
-    carry, w_1_reduced = jax.named_call(_scan_step_bwd, name="unrolled_1")(carry, xs_1)
+    carry, w_1_reduced = jax.named_call(_scan_step_bwd, name="unrolled_1")(
+        carry, xs_1
+    )
     carry_for_barrier = jax.tree.map(
         lambda x_in, x_out: None if x_out is x_in else x_out,
         carry_in,
@@ -1598,7 +1731,9 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         carry_for_barrier,
         is_leaf=lambda x: x is None,
     )
-    carry, w_0_reduced = jax.named_call(_scan_step_bwd, name="unrolled_0")(carry, xs_0)
+    carry, w_0_reduced = jax.named_call(_scan_step_bwd, name="unrolled_0")(
+        carry, xs_0
+    )
     return carry, (w_0_reduced, w_1_reduced)
 
   num_scanned = num_layers - 3
@@ -1645,11 +1780,19 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
   if num_pairs > 0:
     even = slice(0, 2 * num_pairs, 2)
     odd = slice(1, 1 + 2 * num_pairs, 2)
-    aux_even_grad = jax.tree.map(lambda g: g[0 : 2 * num_pairs : 2], aux_scanned_grad)
-    aux_odd_grad = jax.tree.map(lambda g: g[1 : 2 * num_pairs : 2], aux_scanned_grad)
+    aux_even_grad = jax.tree.map(
+        lambda g: g[0 : 2 * num_pairs : 2], aux_scanned_grad
+    )
+    aux_odd_grad = jax.tree.map(
+        lambda g: g[1 : 2 * num_pairs : 2], aux_scanned_grad
+    )
 
-    xs_0 = _step_xs(res_curr_0_scanned_device, res_prev_0_scanned_host, even, aux_even_grad)
-    xs_1 = _step_xs(res_curr_1_scanned_device, res_prev_1_scanned_host, odd, aux_odd_grad)
+    xs_0 = _step_xs(
+        res_curr_0_scanned_device, res_prev_0_scanned_host, even, aux_even_grad
+    )
+    xs_1 = _step_xs(
+        res_curr_1_scanned_device, res_prev_1_scanned_host, odd, aux_odd_grad
+    )
 
     carry_bwd, (w_0_reduced_scanned, w_1_reduced_scanned) = jax.lax.scan(
         body_bwd,
@@ -1707,11 +1850,17 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
   # compute, which leaves only the first layer's reduction to drain the
   # pipeline.
   with jax.named_scope("prologue_bwd"):
-    w_second_grad_reduced = _reduce_dcn(_reduce_ici_second(_reduce_pre(w_second_grad_partial, w_aux_1), w_aux_1))
+    w_second_grad_reduced = _reduce_dcn(
+        _reduce_ici_second(_reduce_pre(w_second_grad_partial, w_aux_1), w_aux_1)
+    )
 
-    x_grad, w_0_mla_grad_unreduced = prologue_fn.bwd(res_prologue_device, carry_grad, w_0, **_w_aux_kwargs(w_aux_0))
+    x_grad, w_0_mla_grad_unreduced = prologue_fn.bwd(
+        res_prologue_device, carry_grad, w_0, **_w_aux_kwargs(w_aux_0)
+    )
 
-    w_0_unreduced = combine_w_grads(w_0_mla_grad_unreduced, w_0_expert_grad_unreduced)
+    w_0_unreduced = combine_w_grads(
+        w_0_mla_grad_unreduced, w_0_expert_grad_unreduced
+    )
     w_first_grad_reduced = _reduce_dcn(
         _reduce_ici_second(
             _reduce_pre(_reduce_ici_first(w_0_unreduced, w_aux_0), w_aux_0),
@@ -1731,7 +1880,9 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
     w_grad_parts.append(w_grads_reduced)
   if w_rem_reduced is not None:
     w_grad_parts.append(jax.tree.map(lambda x: x[jnp.newaxis], w_rem_reduced))
-  w_grad = jax.tree.map(lambda *parts: jnp.concatenate(parts, axis=0), *w_grad_parts)
+  w_grad = jax.tree.map(
+      lambda *parts: jnp.concatenate(parts, axis=0), *w_grad_parts
+  )
   return x_grad, w_grad, None
 
 
@@ -1741,15 +1892,21 @@ w_collect_pipelined_scan_prologue_epilogue.defvjp(
 )
 
 
-def silu_mul_tile(x: jax.Array, y: jax.Array, c: jax.Array, out_dtype: jt.DTypeLike) -> jax.Array:
+def silu_mul_tile(
+    x: jax.Array, y: jax.Array, c: jax.Array, out_dtype: jt.DTypeLike
+) -> jax.Array:
   """Computes `(silu(x) * y * c).astype(out_dtype)` in-register."""
   return (jax.nn.silu(x) * y * c).astype(out_dtype)
 
 
-def quantize_tile(x: jax.Array, inv_scale: jax.Array, qtype: jt.DTypeLike) -> jax.Array:
+def quantize_tile(
+    x: jax.Array, inv_scale: jax.Array, qtype: jt.DTypeLike
+) -> jax.Array:
   """Quantizes tile `x` to `qtype` given `inv_scale = 1.0 / scale`."""
   q_max = float(jnp.finfo(qtype).max)
-  return jnp.clip(x.astype(jnp.float32) * inv_scale, -q_max, q_max).astype(qtype)
+  return jnp.clip(x.astype(jnp.float32) * inv_scale, -q_max, q_max).astype(
+      qtype
+  )
 
 
 def _ragged_silu_mul_kernel(
@@ -1833,7 +1990,9 @@ def _ragged_silu_mul_fwd_pipeline(
             g1_spec,
             pl.BlockSpec((block_size_tokens, 1), lambda i, j: (i, 0)),
         ],
-        out_specs=pl.BlockSpec((block_size_tokens, block_size_hidden), lambda i, j: (i, j)),
+        out_specs=pl.BlockSpec(
+            (block_size_tokens, block_size_hidden), lambda i, j: (i, j)
+        ),
     )(x_ref, x_ref, c_ref, out_ref)
 
 
@@ -1855,7 +2014,11 @@ def _pallas_ragged_silu_mul(
   hbm = pl.BlockSpec(memory_space=pltpu.HBM)
   smem = pl.BlockSpec(memory_space=pltpu.SMEM)
   target_dtype = jnp.dtype(out_dtype) if out_dtype is not None else x.dtype
-  out_scale_smem = out_scale.astype(jnp.float32).reshape(1) if out_scale is not None else None
+  out_scale_smem = (
+      out_scale.astype(jnp.float32).reshape(1)
+      if out_scale is not None
+      else None
+  )
   out_scale_spec = smem if out_scale_smem is not None else None
   manual_axis_type = getattr(jax.typeof(x), "manual_axis_type", None)
   call_kwargs = {}
@@ -1912,9 +2075,15 @@ def _ragged_silu_mul_bwd_kernel(
   dsilu_x = sig_x * (1.0 + x_val * (1.0 - sig_x))
 
   if g_mask_max is not None:
-    mask_bound = g_mask_max[0] if hasattr(g_mask_max, "ndim") and g_mask_max.ndim > 0 else g_mask_max
+    mask_bound = (
+        g_mask_max[0]
+        if hasattr(g_mask_max, "ndim") and g_mask_max.ndim > 0
+        else g_mask_max
+    )
     act_bf16 = (silu_x * y_val * c_val).astype(x_val.dtype)
-    g_val = jnp.where(jnp.abs(act_bf16) <= mask_bound, g_val, 0).astype(g_val.dtype)
+    g_val = jnp.where(jnp.abs(act_bf16) <= mask_bound, g_val, 0).astype(
+        g_val.dtype
+    )
 
   gc_val = g_val * c_val
   dx = (gc_val * y_val * dsilu_x).astype(dx_ref.dtype)
@@ -1923,7 +2092,9 @@ def _ragged_silu_mul_bwd_kernel(
   dy_ref[...] = dy
 
   if amax_vmem_ref is not None and num_tokens_ref is not None:
-    row_idx = pl.program_id(0) * dx.shape[0] + jax.lax.broadcasted_iota(jnp.int32, (dx.shape[0], 1), 0)
+    row_idx = pl.program_id(0) * dx.shape[0] + jax.lax.broadcasted_iota(
+        jnp.int32, (dx.shape[0], 1), 0
+    )
     valid = row_idx < num_tokens_ref[0]
     tile_abs = jnp.where(valid, jnp.maximum(jnp.abs(dx), jnp.abs(dy)), 0)
     tile_max = jnp.max(tile_abs, axis=0).astype(jnp.float32)
@@ -1977,7 +2148,9 @@ def _ragged_silu_mul_bwd_pipeline(
     )
     hidden_shape = (block_size_tokens, block_size_hidden)
     hidden_spec = pl.BlockSpec(hidden_shape, lambda i, j: (i, j))
-    dy_spec = pl.BlockSpec(hidden_shape, lambda i, j: (i, j + num_hidden_blocks))
+    dy_spec = pl.BlockSpec(
+        hidden_shape, lambda i, j: (i, j + num_hidden_blocks)
+    )
     coeffs_spec = pl.BlockSpec((block_size_tokens, 1), lambda i, j: (i, 0))
     # dx and dy are written directly into the two halves of dxy_ref.
     pltpu.emit_pipeline(
@@ -2009,7 +2182,9 @@ def _pallas_ragged_silu_mul_bwd(
 ) -> Any:
   """Computes backward pass gradients w.r.t. x and coeffs using Pallas."""
   max_num_tokens, hidden_dim = g.shape
-  if (g_mask_max is not None or with_absmax) and block_size_tokens * block_size_hidden > 512 * 1024:
+  if (
+      g_mask_max is not None or with_absmax
+  ) and block_size_tokens * block_size_hidden > 512 * 1024:
     block_size_tokens = min(block_size_tokens, 512)
   block_size_hidden = min(block_size_hidden, hidden_dim)
   num_hidden_blocks = (hidden_dim + block_size_hidden - 1) // block_size_hidden
@@ -2186,7 +2361,8 @@ def _ragged_absmax_kernel(
   block_tokens = x_val.shape[0]
   rem = num_tokens_ref[0] - pl.program_id(0) * block_tokens
   abs_x = jnp.where(
-      (rem >= block_tokens) | (jax.lax.broadcasted_iota(jnp.int32, x_val.shape, 0) < rem),
+      (rem >= block_tokens)
+      | (jax.lax.broadcasted_iota(jnp.int32, x_val.shape, 0) < rem),
       abs_x,
       0.0,
   )
@@ -2210,11 +2386,14 @@ def _ragged_quantize_kernel(
   inv_scale = 1.0 / scale_ref[...].astype(jnp.float32)
   if x_val.ndim == 3:
     inv_scale = inv_scale[None]
-  q = jnp.clip(x_val.astype(jnp.float32) * inv_scale, -fmax, fmax).astype(out_ref.dtype)
+  q = jnp.clip(x_val.astype(jnp.float32) * inv_scale, -fmax, fmax).astype(
+      out_ref.dtype
+  )
   block_tokens = x_val.shape[0]
   rem = num_tokens_ref[0] - pl.program_id(0) * block_tokens
   q = jnp.where(
-      (rem >= block_tokens) | (jax.lax.broadcasted_iota(jnp.int32, x_val.shape, 0) < rem),
+      (rem >= block_tokens)
+      | (jax.lax.broadcasted_iota(jnp.int32, x_val.shape, 0) < rem),
       q,
       0,
   )
@@ -2320,7 +2499,9 @@ def ragged_quantize(
           block_size_tokens=block_size_tokens,
           fmax=fmax,
       ),
-      out_shape=jax.ShapeDtypeStruct(x.shape, qtype, manual_axis_type=manual_axis_type),
+      out_shape=jax.ShapeDtypeStruct(
+          x.shape, qtype, manual_axis_type=manual_axis_type
+      ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=1,
           in_specs=[hbm, pl.BlockSpec((1, 1), lambda *_: (0, 0))],
@@ -2360,8 +2541,12 @@ def ragged_absmax_quantize(
           fmax=fmax,
       ),
       out_shape=(
-          jax.ShapeDtypeStruct(x.shape, qtype, manual_axis_type=manual_axis_type),
-          jax.ShapeDtypeStruct((1, 1), jnp.float32, manual_axis_type=manual_axis_type),
+          jax.ShapeDtypeStruct(
+              x.shape, qtype, manual_axis_type=manual_axis_type
+          ),
+          jax.ShapeDtypeStruct(
+              (1, 1), jnp.float32, manual_axis_type=manual_axis_type
+          ),
       ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=1,
@@ -2597,7 +2782,9 @@ def _ragged_write_kernel(
 
   first_valid_dst_row = jnp.maximum(dst_block_start, d_off)
   first_needed_src_row = s_off + first_valid_dst_row - d_off
-  src_block_0 = jnp.clip(first_needed_src_row // b_size, zero, max_src_idx).astype(jnp.int32)
+  src_block_0 = jnp.clip(
+      first_needed_src_row // b_size, zero, max_src_idx
+  ).astype(jnp.int32)
   src_block_0_start = src_block_0 * b_size
 
   src_concat = jnp.concatenate([src0_ref[...], src1_ref[...]], axis=0)
@@ -2605,7 +2792,9 @@ def _ragged_write_kernel(
   roll_shift = ((two_b_size - shift) % two_b_size).astype(jnp.int32)
   rolled_src = pltpu.roll(src_concat, roll_shift, axis=0)[:block_size, :]
 
-  global_dst_rows = dst_block_start + jax.lax.broadcasted_iota(jnp.int32, dst_in_ref.shape, dimension=0)
+  global_dst_rows = dst_block_start + jax.lax.broadcasted_iota(
+      jnp.int32, dst_in_ref.shape, dimension=0
+  )
   write_mask = (global_dst_rows >= d_off) & (global_dst_rows < d_off + s_size)
   dst_out_ref[...] = jnp.where(write_mask, rolled_src, dst_in_ref[...])
 
@@ -2629,7 +2818,9 @@ def _pallas_ragged_write(
   d_off_i32 = jnp.int32(dst_offset)
   s_size_i32 = jnp.int32(slice_size)
   first_dst_block = d_off_i32 // jnp.int32(block_size)
-  last_dst_block = (d_off_i32 + s_size_i32 - jnp.int32(1)) // jnp.int32(block_size)
+  last_dst_block = (d_off_i32 + s_size_i32 - jnp.int32(1)) // jnp.int32(
+      block_size
+  )
   num_dst_blocks = jnp.where(
       s_size_i32 > jnp.int32(0),
       last_dst_block - first_dst_block + jnp.int32(1),
@@ -2662,7 +2853,9 @@ def _pallas_ragged_write(
     return (src_block_0, jnp.int32(0))
 
   def src1_index_map(block_idx, dst_off_ref, src_off_ref, slice_size_ref):
-    src_block_0, _ = src0_index_map(block_idx, dst_off_ref, src_off_ref, slice_size_ref)
+    src_block_0, _ = src0_index_map(
+        block_idx, dst_off_ref, src_off_ref, slice_size_ref
+    )
     src_block_1 = jnp.clip(
         src_block_0 + jnp.int32(1),
         jnp.int32(0),
@@ -2746,13 +2939,22 @@ def ragged_write(
       write update.
   """
   if dst.ndim != 2 or src.ndim != 2:
-    raise ValueError(f"dst and src must be 2D arrays, got ranks {dst.ndim} and {src.ndim}")
+    raise ValueError(
+        f"dst and src must be 2D arrays, got ranks {dst.ndim} and {src.ndim}"
+    )
   if dst.dtype != src.dtype:
-    raise ValueError(f"dst and src must have the same dtype, got {dst.dtype} and {src.dtype}")
+    raise ValueError(
+        f"dst and src must have the same dtype, got {dst.dtype} and {src.dtype}"
+    )
   if dst.shape[1] != src.shape[1]:
-    raise ValueError(f"dst and src embedding dimensions must match, got {dst.shape[1]} and" f" {src.shape[1]}")
+    raise ValueError(
+        f"dst and src embedding dimensions must match, got {dst.shape[1]} and"
+        f" {src.shape[1]}"
+    )
   if block_size_tokens <= 0:
-    raise ValueError(f"block_size_tokens must be positive, got {block_size_tokens}")
+    raise ValueError(
+        f"block_size_tokens must be positive, got {block_size_tokens}"
+    )
   if dst.shape[0] == 0 or src.shape[0] == 0 or dst.shape[1] == 0:
     return dst
   dst_limit = dst.shape[0]
@@ -2774,9 +2976,15 @@ def ragged_write(
   )
 
   zero = jnp.int32(0)
-  safe_slice_size = jnp.where(is_oob, zero, jnp.asarray(slice_size, dtype=jnp.int32))
-  safe_dst_offset = jnp.where(is_oob, zero, jnp.asarray(dst_offset, dtype=jnp.int32))
-  safe_src_offset = jnp.where(is_oob, zero, jnp.asarray(src_offset, dtype=jnp.int32))
+  safe_slice_size = jnp.where(
+      is_oob, zero, jnp.asarray(slice_size, dtype=jnp.int32)
+  )
+  safe_dst_offset = jnp.where(
+      is_oob, zero, jnp.asarray(dst_offset, dtype=jnp.int32)
+  )
+  safe_src_offset = jnp.where(
+      is_oob, zero, jnp.asarray(src_offset, dtype=jnp.int32)
+  )
 
   return _pallas_ragged_write(
       dst,
@@ -2909,7 +3117,9 @@ def ragged_gather_tc(
   if max_out_tokens <= 0:
     raise ValueError(f"max_out_tokens must be positive, got {max_out_tokens}.")
   if isinstance(num_tokens, int) and not 0 <= num_tokens <= max_out_tokens:
-    raise ValueError(f"num_tokens must be in [0, {max_out_tokens}], got {num_tokens}.")
+    raise ValueError(
+        f"num_tokens must be in [0, {max_out_tokens}], got {num_tokens}."
+    )
   if block_size <= 0:
     raise ValueError(f"block_size must be positive, got {block_size}.")
   num_indices = indices.shape[0]
@@ -2990,7 +3200,9 @@ def ragged_gather_tc(
         # Synchronous; the row gathers read the indices as scalars when issued,
         # so a single SMEM buffer suffices.
         copy = pltpu.make_async_copy(
-            idx_hbm_ref.at[pl.ds(pl.multiple_of(win_start, idx_align), idx_window)],
+            idx_hbm_ref.at[
+                pl.ds(pl.multiple_of(win_start, idx_align), idx_window)
+            ],
             idx_smem_ref,
             idx_sem,
         )
@@ -3005,7 +3217,9 @@ def ragged_gather_tc(
           @pl.loop(0, size // step_unroll)
           def _(chunk_i):
             base_i = off + chunk_i * step_unroll
-            src_indices = [idx_smem_ref[idx_off + base_i + u] for u in range(step_unroll)]
+            src_indices = [
+                idx_smem_ref[idx_off + base_i + u] for u in range(step_unroll)
+            ]
             for u in range(step_unroll):
               pltpu.make_async_copy(
                   x_hbm_ref.at[pl.ds(src_indices[u], 1), :, :],
@@ -3133,15 +3347,15 @@ def ragged_gather_tc(
       x.dtype,
       manual_axis_type=manual_axis_type,
   )
-  scalars = jnp.stack(
-      [
-          jnp.asarray(start, dtype=jnp.int32),
-          jnp.asarray(num_tokens, dtype=jnp.int32),
-      ]
-  )
+  scalars = jnp.stack([
+      jnp.asarray(start, dtype=jnp.int32),
+      jnp.asarray(num_tokens, dtype=jnp.int32),
+  ])
   # Only launch grid steps for blocks overlapping `[0, num_tokens)`. When
   # `num_tokens` is traced, this is a dynamic grid size.
-  num_steps = pl.cdiv(num_tokens if isinstance(num_tokens, int) else scalars[1], block_size)
+  num_steps = pl.cdiv(
+      num_tokens if isinstance(num_tokens, int) else scalars[1], block_size
+  )
   scratch_shapes = [
       pltpu.VMEM((num_buffers, block_size, dim0, dim1), x.dtype),
       pltpu.SMEM((idx_window,), indices.dtype),
@@ -3234,7 +3448,9 @@ class RaggedGatherReduceMetadata:
   block_size: int = jax.tree.static()
 
 
-def _ragged_gather_reduce_tc_layout(num_indices: int, top_k: int, block_size: int) -> tuple[int, int, int]:
+def _ragged_gather_reduce_tc_layout(
+    num_indices: int, top_k: int, block_size: int
+) -> tuple[int, int, int]:
   """Returns (max_blocks, window, slots_len) of the metadata layout.
 
   A token costs its valid rows plus its output row. Block `b` takes the tokens
@@ -3260,7 +3476,8 @@ def _check_ragged_gather_reduce_tc_args(top_k: int, block_size: int):
     raise ValueError(f"top_k must be positive, got {top_k}.")
   if block_size <= top_k:
     raise ValueError(
-        f"block_size must exceed top_k ({top_k}) so that a block fits a token" f" and its rows, got {block_size}."
+        f"block_size must exceed top_k ({top_k}) so that a block fits a token"
+        f" and its rows, got {block_size}."
     )
 
 
@@ -3313,15 +3530,26 @@ def ragged_gather_reduce_tc_metadata(
   _check_ragged_gather_reduce_tc_args(top_k, block_size)
   num_indices = indices.shape[0]
   if num_indices % top_k:
-    raise ValueError(f"indices length ({num_indices}) must be divisible by top_k ({top_k}).")
+    raise ValueError(
+        f"indices length ({num_indices}) must be divisible by top_k ({top_k})."
+    )
   if isinstance(num_tokens, int) and num_tokens < 0:
     raise ValueError(f"num_tokens must be non-negative, got {num_tokens}.")
   if isinstance(start, int) and start < 0:
     raise ValueError(f"start must be non-negative, got {start}.")
-  if isinstance(start, int) and isinstance(num_tokens, int) and start + num_tokens > num_indices:
-    raise ValueError(f"start + num_tokens ({start + num_tokens}) must not exceed indices" f" length ({num_indices}).")
+  if (
+      isinstance(start, int)
+      and isinstance(num_tokens, int)
+      and start + num_tokens > num_indices
+  ):
+    raise ValueError(
+        f"start + num_tokens ({start + num_tokens}) must not exceed indices"
+        f" length ({num_indices})."
+    )
   num_out_tokens = num_indices // top_k
-  max_blocks, _, slots_len = _ragged_gather_reduce_tc_layout(num_indices, top_k, block_size)
+  max_blocks, _, slots_len = _ragged_gather_reduce_tc_layout(
+      num_indices, top_k, block_size
+  )
   if num_out_tokens == 0:
     empty_slots = jnp.zeros((slots_len,), jnp.int32)
     return RaggedGatherReduceMetadata(
@@ -3346,17 +3574,23 @@ def ragged_gather_reduce_tc_metadata(
   window_indices = jax.lax.dynamic_slice_in_dim(indices, window_start, window)
   # Valid slots first, by token and then buffer order; invalid slots last.
   key = jnp.where(valid, window_indices, num_out_tokens).astype(jnp.int32)
-  sorted_key, sorted_positions = jax.lax.sort((key, window_positions), num_keys=1, is_stable=True)
+  sorted_key, sorted_positions = jax.lax.sort(
+      (key, window_positions), num_keys=1, is_stable=True
+  )
   if window < num_indices:
     # The invalid slots follow the valid ones in buffer order: those before
     # `start`, then those after the valid slots.
-    invalid_positions = jnp.where(positions < start + num_tokens, positions - num_tokens, positions)
+    invalid_positions = jnp.where(
+        positions < start + num_tokens, positions - num_tokens, positions
+    )
     sorted_positions = jnp.where(
         positions < num_tokens,
         jnp.pad(sorted_positions, (0, num_indices - window)),
         invalid_positions,
     )
-    sorted_key = jnp.pad(sorted_key, (0, num_indices - window), constant_values=num_out_tokens)
+    sorted_key = jnp.pad(
+        sorted_key, (0, num_indices - window), constant_values=num_out_tokens
+    )
   pad = slots_len - num_indices
   src_rows = jnp.pad(sorted_positions - start, (0, pad))
   tokens = jnp.pad(sorted_key, (0, pad))
@@ -3372,7 +3606,9 @@ def ragged_gather_reduce_tc_metadata(
   padded_key = jnp.pad(sorted_key, (top_k - 1, 0), constant_values=-1)
   run_offset = jnp.zeros_like(sorted_key)
   for k in range(1, top_k):
-    run_offset = run_offset + (padded_key[top_k - 1 - k : top_k - 1 - k + num_indices] == sorted_key).astype(jnp.int32)
+    run_offset = run_offset + (
+        padded_key[top_k - 1 - k : top_k - 1 - k + num_indices] == sorted_key
+    ).astype(jnp.int32)
   offset_bits = (top_k - 1).bit_length()
   offset_mask = (1 << offset_bits) - 1
   int_max = jnp.iinfo(jnp.int32).max
@@ -3387,9 +3623,9 @@ def ragged_gather_reduce_tc_metadata(
   # budget: count full chunks first, then scan the single straddling chunk.
   chunk = _RAGGED_GATHER_REDUCE_TC_SEARCH_CHUNK
   num_chunks = pl.cdiv(num_indices, chunk)
-  packed_chunks = jnp.pad(packed, (0, num_chunks * chunk - num_indices), constant_values=int_max).reshape(
-      num_chunks, chunk
-  )
+  packed_chunks = jnp.pad(
+      packed, (0, num_chunks * chunk - num_indices), constant_values=int_max
+  ).reshape(num_chunks, chunk)
   end_packed = packed_chunks[:, -1]
   threshold = jnp.arange(max_blocks + 1, dtype=jnp.int32) * (block_size - top_k)
   thr_packed = threshold[:, None] << offset_bits
@@ -3410,7 +3646,9 @@ def ragged_gather_reduce_tc_metadata(
   )
   prev_key = jnp.where(
       slot_start > 0,
-      (prev_packed >> offset_bits) + (prev_packed & offset_mask) - (slot_start - 1),
+      (prev_packed >> offset_bits)
+      + (prev_packed & offset_mask)
+      - (slot_start - 1),
       -1,
   )
   next_packed = jnp.min(jnp.where(sel_below, int_max, sel_packed), axis=1)
@@ -3421,15 +3659,13 @@ def ragged_gather_reduce_tc_metadata(
   )
   token_start = jnp.clip(threshold - slot_start, prev_key + 1, next_key)
   num_blocks = jnp.sum(token_start[:-1] < num_out_tokens, dtype=jnp.int32)
-  blocks = jnp.concatenate(
-      [
-          num_blocks[None],
-          slot_start[:-1],
-          jnp.diff(slot_start),
-          token_start[:-1],
-          jnp.diff(token_start),
-      ]
-  )
+  blocks = jnp.concatenate([
+      num_blocks[None],
+      slot_start[:-1],
+      jnp.diff(slot_start),
+      token_start[:-1],
+      jnp.diff(token_start),
+  ])
   return RaggedGatherReduceMetadata(
       src_rows=src_rows,
       tokens=tokens,
@@ -3492,10 +3728,15 @@ def ragged_gather_reduce_tc(
   block_size = metadata.block_size
   _check_ragged_gather_reduce_tc_args(top_k, block_size)
   if num_out_tokens < 0:
-    raise ValueError(f"num_out_tokens must be non-negative, got {num_out_tokens}.")
+    raise ValueError(
+        f"num_out_tokens must be non-negative, got {num_out_tokens}."
+    )
   if out is not None:
     if out.shape != (num_out_tokens, dim0, dim1):
-      raise ValueError(f"out must have shape {(num_out_tokens, dim0, dim1)}, got" f" {out.shape}.")
+      raise ValueError(
+          f"out must have shape {(num_out_tokens, dim0, dim1)}, got"
+          f" {out.shape}."
+      )
     if out.dtype != x.dtype:
       raise ValueError(f"out must have dtype {x.dtype}, got {out.dtype}.")
   if zero_initialized is None:
@@ -3504,7 +3745,9 @@ def ragged_gather_reduce_tc(
   num_buffers = _RAGGED_GATHER_REDUCE_TC_NUM_BUFFERS
   align = _RAGGED_GATHER_REDUCE_TC_ALIGN
   fields = _RAGGED_GATHER_REDUCE_TC_BLOCK_FIELDS
-  max_blocks, window, slots_len = _ragged_gather_reduce_tc_layout(num_out_tokens * top_k, top_k, block_size)
+  max_blocks, window, slots_len = _ragged_gather_reduce_tc_layout(
+      num_out_tokens * top_k, top_k, block_size
+  )
   expected_shapes = ((slots_len,), (slots_len,), (1 + fields * max_blocks,))
   shapes = (
       metadata.src_rows.shape,
@@ -3520,7 +3763,9 @@ def ragged_gather_reduce_tc(
   # A (d0, d1) token is padded to whole (sublanes, 128) tiles in VMEM.
   itemsize = jnp.dtype(x.dtype).itemsize
   sublanes = 8 * max(1, 4 // itemsize)
-  token_vmem_bytes = pl.cdiv(dim0, sublanes) * sublanes * pl.cdiv(dim1, 128) * 128 * itemsize
+  token_vmem_bytes = (
+      pl.cdiv(dim0, sublanes) * sublanes * pl.cdiv(dim1, 128) * 128 * itemsize
+  )
   vmem_budget = _RAGGED_GATHER_REDUCE_TC_VMEM_BUDGET
   if num_buffers * block_size * token_vmem_bytes > vmem_budget:
     raise ValueError(
@@ -3660,7 +3905,9 @@ def ragged_gather_reduce_tc(
       if zero_initialized:
 
         def _zero_out(off, size):
-          vmem_ref[b, pl.ds(out_base + off, size), :, :] = jnp.zeros((size, dim0, dim1), x.dtype)
+          vmem_ref[b, pl.ds(out_base + off, size), :, :] = jnp.zeros(
+              (size, dim0, dim1), x.dtype
+          )
 
         _unrolled_chunks(num_tokens, 256, _zero_out)
       else:
@@ -3789,7 +4036,9 @@ def ragged_gather_reduce_tc(
         issue_idx = issue_base + base_j
         reduce_idx = reduce_base + base_j
         srcs = [src_smem_ref[issue_idx + u] for u in range(unroll)]
-        toks = [tok_smem_ref[reduce_idx + u] - token_bias_i for u in range(unroll)]
+        toks = [
+            tok_smem_ref[reduce_idx + u] - token_bias_i for u in range(unroll)
+        ]
         rows = vmem_ref[b_i, pl.ds(base_j, unroll), :, :].astype(jnp.float32)
         for u in range(unroll):
           pltpu.make_async_copy(
@@ -3804,7 +4053,9 @@ def ragged_gather_reduce_tc(
         prev_t, total = carry
         base_j = c * unroll
         reduce_idx = reduce_base + base_j
-        toks = [tok_smem_ref[reduce_idx + u] - token_bias_i for u in range(unroll)]
+        toks = [
+            tok_smem_ref[reduce_idx + u] - token_bias_i for u in range(unroll)
+        ]
         rows = vmem_ref[b_i, pl.ds(base_j, unroll), :, :].astype(jnp.float32)
         for u in range(unroll):
           prev_t, total = _reduce_step(toks[u], rows[u], prev_t, total)
@@ -3817,13 +4068,19 @@ def ragged_gather_reduce_tc(
         return _reduce_step(t, row, prev_t, total)
 
       carry = (jnp.int32(-1), jnp.zeros((dim0, dim1), jnp.float32))
-      carry = jax.lax.fori_loop(0, num_both_chunks, _issue_and_reduce_chunk, carry)
+      carry = jax.lax.fori_loop(
+          0, num_both_chunks, _issue_and_reduce_chunk, carry
+      )
       _unrolled_chunks(
           num_issue - base_issue_rem,
           _RAGGED_GATHER_REDUCE_TC_ISSUE_UNROLL,
-          lambda off, u: _issue_in_chunk(b_nxt, issue_base, base_issue_rem + off, u),
+          lambda off, u: _issue_in_chunk(
+              b_nxt, issue_base, base_issue_rem + off, u
+          ),
       )
-      carry = jax.lax.fori_loop(num_both_chunks, num_reduce_chunks, _reduce_chunk, carry)
+      carry = jax.lax.fori_loop(
+          num_both_chunks, num_reduce_chunks, _reduce_chunk, carry
+      )
       jax.lax.fori_loop(base_reduce_rem, num_reduce, _reduce_one, carry)
       _out_start(i)
 
@@ -3841,7 +4098,9 @@ def ragged_gather_reduce_tc(
         _out_wait(num_blocks - 1 - k)
 
   manual_axis_type = getattr(jax.typeof(x), "manual_axis_type", None)
-  out_shape = jax.ShapeDtypeStruct((num_out_tokens, dim0, dim1), x.dtype, manual_axis_type=manual_axis_type)
+  out_shape = jax.ShapeDtypeStruct(
+      (num_out_tokens, dim0, dim1), x.dtype, manual_axis_type=manual_axis_type
+  )
   hbm_spec = pl.BlockSpec(memory_space=pltpu.HBM)
   dma_sems = pltpu.SemaphoreType.DMA((num_buffers,))
   in_specs = [
@@ -3877,3 +4136,1323 @@ def ragged_gather_reduce_tc(
       ),
       name="ragged_gather_reduce_tc",
   )(*inputs)
+
+
+# Double-buffered (1024, 56, 128) bf16 input tiles plus bf16/f32 temporaries.
+_TOKEN_ABSMAX_VMEM_LIMIT = 48 * 1024 * 1024
+
+
+def _token_absmax_kernel(x_ref, out_ref):
+  m_bf16 = jnp.max(jnp.abs(x_ref[...]), axis=1)
+  absmax = jnp.max(m_bf16.astype(jnp.float32), axis=1)
+  out_ref[...] = absmax[:, None]
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def token_absmax(
+    x: jt.Num[jax.Array, "num_tokens d0 d1"],
+    *,
+    max_token_block: int = 1024,
+) -> jt.Float[jax.Array, "num_tokens"]:
+  """Per-token `max(|x|)` over the trailing `(d0, d1)` dims as a TC kernel.
+
+  Equivalent to `jnp.max(jnp.abs(x.astype(jnp.float32)), axis=(1, 2))`, which
+  XLA emits as a lane-reduction-per-token loop fusion running ~10x below HBM
+  roofline for `(num_tokens, 56, 128)` bf16 inputs (~1.5 ms vs ~0.2 ms for 470
+  MB on TPU v7x). When `num_tokens % 128 == 0 and d1 == 128`, outputs a 2D
+  `(num_tokens // 128, 128)` array (zero lane padding, zero post-kernel reduce)
+  and reduces `d0` in bf16 before transposing into lanes via XLU.
+
+  Args:
+    x: Tokens of shape `(num_tokens, d0, d1)` with `num_tokens` divisible by 8.
+    max_token_block: Upper bound on tokens per grid step.
+
+  Returns:
+    `float32` per-token absolute maxima of shape `(num_tokens,)`.
+
+  Raises:
+    ValueError: If `num_tokens` is not divisible by 8.
+  """
+  num_tokens, dim0, dim1 = x.shape
+  if num_tokens % 8 != 0:
+    raise ValueError(f"num_tokens ({num_tokens}) must be divisible by 8.")
+  manual_axis_type = getattr(jax.typeof(x), "manual_axis_type", None)
+  if num_tokens % 128 == 0 and dim1 == 128:
+    out_rows = num_tokens // 128
+    max_rb = max(1, max_token_block // 128)
+    row_block = max(
+        rb
+        for rb in range(1, min(max_rb, out_rows) + 1)
+        if out_rows % rb == 0 and (rb % 8 == 0 or rb == out_rows)
+    )
+    token_block = row_block * 128
+
+    def _token_absmax_2d_kernel(x_ref, out_ref):
+      m_bf16 = jnp.max(jnp.abs(x_ref[...]), axis=1)
+      m_3d = m_bf16.reshape(row_block, 128, 128)
+      out_ref[...] = jnp.max(jnp.swapaxes(m_3d, 1, 2), axis=1).astype(
+          jnp.float32
+      )
+
+    out = pl.pallas_call(
+        _token_absmax_2d_kernel,
+        out_shape=jax.ShapeDtypeStruct(
+            (out_rows, 128), jnp.float32, manual_axis_type=manual_axis_type
+        ),
+        grid=(out_rows // row_block,),
+        in_specs=[pl.BlockSpec((token_block, dim0, dim1), lambda i: (i, 0, 0))],
+        out_specs=pl.BlockSpec((row_block, 128), lambda i: (i, 0)),
+        compiler_params=pltpu.CompilerParams(
+            dimension_semantics=("parallel",),
+            vmem_limit_bytes=_TOKEN_ABSMAX_VMEM_LIMIT,
+        ),
+        name="token_absmax",
+    )(x)
+    return out.reshape(num_tokens)
+
+  token_block = max(
+      tb
+      for tb in range(8, min(max_token_block, num_tokens) + 1, 8)
+      if num_tokens % tb == 0
+  )
+  out = pl.pallas_call(
+      _token_absmax_kernel,
+      out_shape=jax.ShapeDtypeStruct(
+          (num_tokens, 1), jnp.float32, manual_axis_type=manual_axis_type
+      ),
+      grid=(num_tokens // token_block,),
+      in_specs=[pl.BlockSpec((token_block, dim0, dim1), lambda i: (i, 0, 0))],
+      out_specs=pl.BlockSpec((token_block, 1), lambda i: (i, 0)),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel",),
+          vmem_limit_bytes=_TOKEN_ABSMAX_VMEM_LIMIT,
+      ),
+      name="token_absmax",
+  )(x)
+  return out.reshape(num_tokens)
+
+
+# Released JAX (e.g. 0.11.x in the Cloud TPU MaxText images) and its libtpu
+# predate `pltpu.bitcast(..., dim=)` and `pltpu.make_async_copy(..., src_sem=)`:
+# its Mosaic SparseCore compiler cannot lower minormost-dimension bitcasts
+# (`vector.bitcast`) and tracks local VMEM -> HBM copies (push streams) with the
+# copy's `sem` rather than a source semaphore. Checked once at import.
+_BITCAST_HAS_DIM = "dim" in inspect.signature(pltpu.bitcast).parameters
+_ASYNC_COPY_HAS_SRC_SEM = (
+    "src_sem" in inspect.signature(pltpu.make_async_copy).parameters
+)
+
+
+def _sc_push_copy(src_ref, dst_ref, sem):
+  """Local VMEM -> HBM copy (a push stream) on SparseCore, tracked by `sem`."""
+  if _ASYNC_COPY_HAS_SRC_SEM:
+    return pltpu.make_async_copy(src_ref, dst_ref, sem=None, src_sem=sem)
+  return pltpu.make_async_copy(src_ref, dst_ref, sem)
+
+
+def _sc_fence_readback(hbm_slice, vmem_slice, sem):
+  """Minimal read-back on `sem` to drain prior VMEM -> HBM pushes."""
+  if not _ASYNC_COPY_HAS_SRC_SEM:
+    rb = pltpu.make_async_copy(hbm_slice, vmem_slice, sem)
+    rb.start()
+    rb.wait()
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def reduce_scatter_sc0(
+    x: jt.Num[jax.Array, "num_tokens d0 d1"],
+    *,
+    token_amax: jt.Float[jax.Array, "num_tokens"] | None = None,
+    per_hop_scaling: bool = False,
+    ring_axis: str = "z",
+    core_axis: str = "core",
+    num_microbatches: int = 2,
+    vmem_tile_rows: int | None = None,
+    collective_id: int = 0,
+) -> jt.Num[jax.Array, "out_tokens d0 d1"]:
+  """1D hierarchical FP8-ring token reduce-scatter on SparseCore 0.
+
+  Performs a forward-pass combine token reduce-scatter over a 1D ring of chips
+  (`ring_axis`) and the die-to-die axis (`core_axis`), pinned exclusively to
+  SparseCore 0 (`num_cores=1`). The ring (ICI C2C) sends are always quantized to
+  `jnp.float8_e4m3fn`; `x.dtype` selects what else is:
+
+  * `jnp.float8_e4m3fn`: the input, D2D partner tokens and the output are FP8
+    too, halving the HBM and D2D traffic.
+  * `jnp.bfloat16`: the input, D2D partner tokens and the output stay bf16, so
+    only the running sums travelling along the ring are quantized.
+
+  Each step sums local tokens, partner-core D2D tokens, and (after the first
+  hop) incoming ring C2C tokens in `jnp.bfloat16` on the 16 vector subcores of
+  SparseCore 0 and quantizes the result to `jnp.float8_e4m3fn` for the next hop
+  (saturating at +-448 instead of overflowing to NaN), while the scalar subcore
+  pipelines bidirectional ring C2C and D2D remote DMAs.
+
+  With `token_amax` (bf16 input only) the kernel also applies per-token
+  scaling so the FP8 ring never saturates and keeps its relative precision
+  regardless of the token magnitude: the scalar subcore all-gathers the local
+  per-token absmax of every device, the vector subcores sum them (in device
+  order) into a bound on every partial sum and turn it into a power-of-two
+  scale `2^ceil(log2(sum / 448))` (`1` for all-zero tokens). The local + D2D
+  sum of each hop is multiplied by the inverse scale in f32 before it is
+  quantized and added to the incoming running sum, and the final hop multiplies
+  the incoming running sum back by the scale, so the output is in the input
+  units. Power-of-two scales make every (de)quantization multiply exact.
+
+  With `per_hop_scaling` there is no all-device amax gather: each hop bounds
+  only its own partial sum by the local + D2D partner absmax of the hop plus
+  the bound received with the incoming running sum (per-token f32 metadata that
+  travels along the ring next to the FP8 data), scales its local + D2D sum with
+  the matching power-of-two inverse scale and rescales the incoming running sum
+  by the (power-of-two) ratio of the two bounds. The final hop rescales the
+  incoming running sum into the input units. When `token_amax` is omitted with
+  `per_hop_scaling=True`, the kernel fuses the per-token absmax reduction of
+  `local + D2D` directly into the SparseCore 0 vector subcores, eliminating both
+  the standalone TensorCore `token_absmax` pass and the D2D partner amax copy.
+
+  Device `(z, c)` receives the reduced slice `x[(2 * z + c) * out_tokens :
+  (2 * z + c + 1) * out_tokens]`, matching `jax.lax.psum_scatter(x,
+  axis_name=(ring_axis, core_axis), scatter_dimension=0, tiled=True)`.
+
+  Args:
+    x: Local input token buffer of shape `(num_tokens, d0, 128)` and dtype
+      `jnp.float8_e4m3fn` or `jnp.bfloat16`, with `d0` divisible by 8.
+    token_amax: Optional `float32` local per-token `max(|x|)` of shape
+      `(num_tokens,)` (see `token_absmax`) enabling in-kernel per-token scaling.
+      Requires a `jnp.bfloat16` `x`, `num_tokens` divisible by 256 and
+      `vmem_tile_rows` divisible by `d0`. Optional when `per_hop_scaling=True`.
+    per_hop_scaling: Scale per ring hop instead of with one all-device scale per
+      token. When `token_amax` is `None`, fuses the per-token absmax of `local +
+      D2D` into the SparseCore 0 vector subcores. Requires a `jnp.bfloat16` `x`
+      and the tokens per vector subcore and microbatch block (`num_tokens //
+      (ring_size * 2 * 2 * num_microbatches * 16)`) to be divisible by 8.
+    ring_axis: Name of the 1D ring axis across chips (size >= 2).
+    core_axis: Name of the die-to-die axis within a chip (size 2).
+    num_microbatches: Number of pipelined microbatches per half-chunk.
+    vmem_tile_rows: Number of 2D rows `(d0-folded)` per VMEM tile per vector
+      subcore (must be divisible by 8). Defaults to the largest multiple of 8
+      (and of `d0` with per-token scaling) that divides the rows per subcore and
+      microbatch, at most 448 for FP8 inputs and 224 for bf16 inputs.
+    collective_id: Barrier semaphore collective ID for neighbor synchronization.
+
+  Returns:
+    Reduced tokens of shape `(num_tokens // (ring_size * 2), d0, 128)` and
+    dtype `x.dtype`.
+
+  Raises:
+    ValueError: If `x` dtype, shape, or mesh axes violate kernel constraints.
+  """
+  if x.dtype not in (jnp.float8_e4m3fn, jnp.bfloat16):
+    raise ValueError(
+        f"x must have dtype float8_e4m3fn or bfloat16, got {x.dtype}."
+    )
+  quantized_input = x.dtype == jnp.float8_e4m3fn
+  has_amax_input = token_amax is not None
+  scaled = has_amax_input or per_hop_scaling
+  if scaled and quantized_input:
+    raise ValueError(
+        "token_amax or per_hop_scaling scaling requires a bfloat16 x."
+    )
+  global_scaling = has_amax_input and not per_hop_scaling
+  fused_per_hop = per_hop_scaling and not has_amax_input
+  unfused_per_hop = per_hop_scaling and has_amax_input
+  num_tokens, dim0, dim1 = x.shape
+  if dim1 != 128:
+    raise ValueError(f"x trailing dimension must be 128, got {dim1}.")
+  if dim0 % 8 != 0:
+    raise ValueError(f"x second dimension must be divisible by 8, got {dim0}.")
+  ring_size = jax.lax.axis_size(ring_axis)
+  core_size = jax.lax.axis_size(core_axis)
+  if ring_size < 2:
+    raise ValueError(
+        f"ring_axis '{ring_axis}' must have size >= 2, got {ring_size}."
+    )
+  if core_size != 2:
+    raise ValueError(
+        f"core_axis '{core_axis}' must have size 2, got {core_size}."
+    )
+  num_devices = ring_size * core_size
+  if num_tokens % num_devices != 0:
+    raise ValueError(
+        f"num_tokens ({num_tokens}) must be divisible by ring_size * core_size"
+        f" ({num_devices})."
+    )
+  out_tokens = num_tokens // num_devices
+  chunk_rows = out_tokens * dim0
+  if chunk_rows % 2 != 0:
+    raise ValueError(f"chunk_rows ({chunk_rows}) must be divisible by 2.")
+  half_chunk_rows = chunk_rows // 2
+  if num_microbatches < 1 or half_chunk_rows % num_microbatches != 0:
+    raise ValueError(
+        f"half_chunk_rows ({half_chunk_rows}) must be divisible by"
+        f" num_microbatches ({num_microbatches})."
+    )
+  mb_rows = half_chunk_rows // num_microbatches
+  num_subcores = 16
+  if mb_rows % num_subcores != 0:
+    raise ValueError(
+        f"mb_rows ({mb_rows}) must be divisible by {num_subcores} subcores."
+    )
+  subcore_rows = mb_rows // num_subcores
+  # Per-token scales are DMA'd per tile, so tiles must hold whole tokens.
+  tile_rows_unit = math.lcm(8, dim0) if scaled else 8
+  if vmem_tile_rows is None:
+    # Keeps the six double-buffered tiles within the per-subcore VMEM.
+    max_tile_rows = 448 if quantized_input else 224
+    vmem_tile_rows = max(
+        (
+            r
+            for r in range(tile_rows_unit, max_tile_rows + 1, tile_rows_unit)
+            if subcore_rows % r == 0
+        ),
+        default=tile_rows_unit,
+    )
+  if vmem_tile_rows <= 0 or vmem_tile_rows % 8 != 0:
+    raise ValueError(
+        f"vmem_tile_rows ({vmem_tile_rows}) must be a positive multiple of 8."
+    )
+  if subcore_rows % vmem_tile_rows != 0:
+    raise ValueError(
+        f"subcore_rows ({subcore_rows}) must be divisible by vmem_tile_rows"
+        f" ({vmem_tile_rows})."
+    )
+  tiles_per_dir = subcore_rows // vmem_tile_rows
+  num_tiles = 2 * tiles_per_dir
+  fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
+  # Per-token scaling (`token_amax`) constants.
+  amax_chunk = 16  # Tokens per lane-broadcast row chunk (one SC vreg).
+  if scaled:
+    if num_tokens % (num_subcores * amax_chunk) != 0:
+      raise ValueError(
+          f"num_tokens ({num_tokens}) must be divisible by"
+          f" {num_subcores * amax_chunk} with token_amax."
+      )
+    if vmem_tile_rows % dim0 != 0:
+      raise ValueError(
+          f"vmem_tile_rows ({vmem_tile_rows}) must be divisible by d0 ({dim0})"
+          " with token_amax."
+      )
+  tokens_per_subcore = num_tokens // num_subcores
+  tokens_per_tile = vmem_tile_rows // dim0 if scaled else 0
+  # Tokens per vector subcore in one (step, microbatch, direction) block; the
+  # per-hop amax windows are 1D f32 HBM DMAs, which need 32-byte alignment.
+  block_tokens = subcore_rows // dim0 if scaled else 0
+  mb_tokens = mb_rows // dim0 if scaled else 0
+  if per_hop_scaling and block_tokens % 8 != 0:
+    raise ValueError(
+        f"The tokens per subcore and microbatch block ({block_tokens}) must be"
+        " divisible by 8 with per_hop_scaling."
+    )
+
+  scs_mesh = plsc.ScalarSubcoreMesh(axis_name="sc_core", num_cores=1)
+  tec_mesh = plsc.VectorSubcoreMesh(
+      core_axis_name="sc_core",
+      subcore_axis_name="subcore",
+      num_cores=1,
+      num_subcores=num_subcores,
+  )
+  # Extra per-token scaling HBM buffers (kernel outputs) per mode.
+  if global_scaling:
+    extra_names = ("amax_gather", "inv_rows")
+  elif unfused_per_hop:
+    extra_names = ("amax_partner", "amax_send", "amax_recv")
+  elif fused_per_hop:
+    extra_names = ("amax_send", "amax_recv")
+  else:
+    extra_names = ()
+
+  def _unpack_refs(refs):
+    """Splits `(*inputs, *outputs)` into the common refs and an extras dict."""
+    x_ref, *refs = refs
+    amax_ref = refs.pop(0) if has_amax_input else None
+    out_ref, running_sum_ref, d2d_recv_ref, c2c_recv_ref, *extra = refs
+    return (
+        x_ref,
+        amax_ref,
+        out_ref,
+        running_sum_ref,
+        d2d_recv_ref,
+        c2c_recv_ref,
+        dict(zip(extra_names, extra, strict=True)),
+    )
+
+  def _pow2_exponent(a):
+    """Biased exponent `e` of the power-of-two scale `2^(e - 127) >= a / 448`.
+
+    `e = 127` (scale 1) for `a == 0` (or denormal `a / 448`). Computed exactly
+    with integer ops on the f32 bit pattern.
+
+    Args:
+      a: Non-negative f32 per-token amax bounds.
+
+    Returns:
+      The int32 biased exponents, in [1, 253].
+    """
+    bits = jax.lax.bitcast_convert_type(a * (1.0 / fp8_max), jnp.int32)
+    exp_biased = jnp.right_shift(bits, 23) & 0xFF
+    mant = bits & 0x7FFFFF
+    kb = jnp.clip(jnp.where(mant != 0, exp_biased + 1, exp_biased), 1, 253)
+    return jnp.where(exp_biased > 0, kb, 127)
+
+  def _pow2_from_exponent(e):
+    """`2^(e - 127)` as f32 (`0.0` for `e == 0`)."""
+    return jax.lax.bitcast_convert_type(jnp.left_shift(e, 23), jnp.float32)
+
+  def _scs_kernel(
+      *refs,
+      scs_to_tec,
+      tec_to_scs,
+      d2d_send_sem,
+      d2d_recv_sem,
+      c2c_send_sem,
+      c2c_recv_sem,
+      a_vmem,
+      b_vmem,
+      c_vmem,
+      tec_in_sem,
+      tec_out_sem,
+      **amax_scratch,
+  ):
+    del a_vmem, b_vmem, c_vmem, tec_in_sem, tec_out_sem
+    x_ref, amax_ref, _, running_sum_ref, d2d_recv_ref, c2c_recv_ref, extra = (
+        _unpack_refs(refs)
+    )
+    z = jax.lax.axis_index(ring_axis)
+    c = jax.lax.axis_index(core_axis)
+    right_z = jax.lax.rem(z + 1, ring_size)
+    left_z = jax.lax.rem(z + ring_size - 1, ring_size)
+    partner_c = 1 - c
+    my_slot = z * 2 + c
+
+    barrier_sem = pltpu.get_barrier_semaphore()
+    if global_scaling:
+      # The amax all-gather writes into every device: handshake with all.
+      for k in range(1, num_devices):
+        slot = jax.lax.rem(my_slot + k, num_devices)
+        pl.semaphore_signal(
+            barrier_sem,
+            1,
+            device_id={
+                ring_axis: jax.lax.div(slot, 2),
+                core_axis: jax.lax.rem(slot, 2),
+            },
+        )
+      pl.semaphore_wait(barrier_sem, num_devices - 1)
+    else:
+      pl.semaphore_signal(barrier_sem, 1, device_id={core_axis: partner_c})
+      pl.semaphore_signal(barrier_sem, 1, device_id={ring_axis: right_z})
+      if ring_size > 2:
+        pl.semaphore_signal(barrier_sem, 1, device_id={ring_axis: left_z})
+        pl.semaphore_wait(barrier_sem, 3)
+      else:
+        pl.semaphore_wait(barrier_sem, 2)
+
+    def _amax_copy(k):
+      """Sends the local amax into slot `my_slot` of device `my_slot + k`."""
+      slot = jax.lax.rem(my_slot + k, num_devices)
+      return pltpu.make_async_remote_copy(
+          amax_ref,
+          extra["amax_gather"].at[pl.ds(my_slot * num_tokens, num_tokens)],
+          amax_scratch["amax_send_sem"],
+          amax_scratch["amax_recv_sem"],
+          device_id={
+              ring_axis: jax.lax.div(slot, 2),
+              core_axis: jax.lax.rem(slot, 2),
+          },
+      )
+
+    def _d2d_copies(s, m):
+      cw_z_dst = jax.lax.rem(z + ring_size - 1 - s, ring_size)
+      ccw_z_dst = jax.lax.rem(z + 1 + s, ring_size)
+      src_cw = pl.multiple_of(
+          (((cw_z_dst * 2 + partner_c) * 2 + 0) * num_microbatches + m)
+          * mb_rows,
+          8,
+      )
+      src_ccw = pl.multiple_of(
+          (((ccw_z_dst * 2 + partner_c) * 2 + 1) * num_microbatches + m)
+          * mb_rows,
+          8,
+      )
+      dst_cw = pl.multiple_of(((s * num_microbatches + m) * 2 + 0) * mb_rows, 8)
+      dst_ccw = pl.multiple_of(
+          ((s * num_microbatches + m) * 2 + 1) * mb_rows, 8
+      )
+      d2d_cw = pltpu.make_async_remote_copy(
+          x_ref.at[pl.ds(src_cw, mb_rows), :],
+          d2d_recv_ref.at[pl.ds(dst_cw, mb_rows), :],
+          d2d_send_sem.at[s, m, 0],
+          d2d_recv_sem.at[s, m, 0],
+          device_id={core_axis: partner_c},
+      )
+      d2d_ccw = pltpu.make_async_remote_copy(
+          x_ref.at[pl.ds(src_ccw, mb_rows), :],
+          d2d_recv_ref.at[pl.ds(dst_ccw, mb_rows), :],
+          d2d_send_sem.at[s, m, 1],
+          d2d_recv_sem.at[s, m, 1],
+          device_id={core_axis: partner_c},
+      )
+      return d2d_cw, d2d_ccw
+
+    def _c2c_copies(h, m):
+      """Ring copies of hop `h`: cw to `right_z`, ccw to `left_z`."""
+      copies = []
+      for d, dst_z in ((0, right_z), (1, left_z)):
+        row = pl.multiple_of(((h * num_microbatches + m) * 2 + d) * mb_rows, 8)
+        copies.append(
+            pltpu.make_async_remote_copy(
+                running_sum_ref.at[pl.ds(row, mb_rows), :],
+                c2c_recv_ref.at[pl.ds(row, mb_rows), :],
+                c2c_send_sem.at[h, m, d],
+                c2c_recv_sem.at[h, m, d],
+                device_id={ring_axis: dst_z},
+            )
+        )
+        if per_hop_scaling:
+          # The per-token bounds of the running sums travel alongside.
+          tok = pl.multiple_of(
+              ((h * num_microbatches + m) * 2 + d) * mb_tokens, 8
+          )
+          copies.append(
+              pltpu.make_async_remote_copy(
+                  extra["amax_send"].at[pl.ds(tok, mb_tokens)],
+                  extra["amax_recv"].at[pl.ds(tok, mb_tokens)],
+                  amax_scratch["c2c_amax_send_sem"].at[h, m, d],
+                  amax_scratch["c2c_amax_recv_sem"].at[h, m, d],
+                  device_id={ring_axis: dst_z},
+              )
+          )
+      return copies
+
+    def _amax_partner_copy():
+      """Sends the local amax to the D2D partner's `amax_partner`."""
+      return pltpu.make_async_remote_copy(
+          amax_ref,
+          extra["amax_partner"],
+          amax_scratch["amax_d2d_send_sem"],
+          amax_scratch["amax_d2d_recv_sem"],
+          device_id={core_axis: partner_c},
+      )
+
+    def _signal_and_wait_tec(slot):
+      for subcore in range(num_subcores):
+        pl.semaphore_signal(
+            scs_to_tec.at[slot], 1, device_id={"subcore": subcore}
+        )
+      pl.semaphore_wait(tec_to_scs.at[slot], num_subcores)
+
+    # Step 0 (prologue): local + D2D -> running_sum_ref[0], then start C2C[0].
+    d2d0_cw, d2d0_ccw = _d2d_copies(0, 0)
+    d2d0_cw.start()
+    d2d0_ccw.start()
+
+    if global_scaling:
+      # All-gather the per-token amax of every device (slot k = 2 * z + c),
+      # then release the vector subcores to compute the scales.
+      for k in range(num_devices):
+        _amax_copy(k).start()
+      for k in range(num_devices):
+        _amax_copy(k).wait_recv()
+      for subcore in range(num_subcores):
+        pl.semaphore_signal(
+            amax_scratch["amax_ready"], 1, device_id={"subcore": subcore}
+        )
+    elif unfused_per_hop:
+      # The vector subcores read `amax_partner` only after the first
+      # `scs_to_tec` signal below.
+      _amax_partner_copy().start()
+      _amax_partner_copy().wait_recv()
+
+    @pl.loop(0, num_microbatches)
+    def _step0_mb(m):
+      slot = jax.lax.rem(m, 2)
+
+      @pl.when(m + 1 < num_microbatches)
+      def _prefetch_step0_d2d():
+        nxt_cw, nxt_ccw = _d2d_copies(0, m + 1)
+        nxt_cw.start()
+        nxt_ccw.start()
+
+      cur_cw, cur_ccw = _d2d_copies(0, m)
+      cur_cw.wait_recv()
+      cur_ccw.wait_recv()
+
+      nxt_hop_cw, nxt_hop_ccw = _d2d_copies(1, m)
+      nxt_hop_cw.start()
+      nxt_hop_ccw.start()
+
+      _signal_and_wait_tec(slot)
+
+      for cp in _c2c_copies(0, m):
+        cp.start()
+
+    # Intermediate ring steps s = 1 .. ring_size - 2.
+    if ring_size > 2:
+
+      @pl.loop(0, ring_size - 2)
+      def _mid_steps(h):
+        s = h + 1
+
+        @pl.loop(0, num_microbatches)
+        def _mid_mb(m):
+          slot = jax.lax.rem(s * num_microbatches + m, 2)
+          for cp in _c2c_copies(h, m):
+            cp.wait_recv()
+
+          cur_d2d_cw, cur_d2d_ccw = _d2d_copies(s, m)
+          cur_d2d_cw.wait_recv()
+          cur_d2d_ccw.wait_recv()
+
+          nxt_d2d_cw, nxt_d2d_ccw = _d2d_copies(s + 1, m)
+          nxt_d2d_cw.start()
+          nxt_d2d_ccw.start()
+
+          _signal_and_wait_tec(slot)
+
+          for cp in _c2c_copies(s, m):
+            cp.start()
+
+    # Final ring step s = ring_size - 1: 3-way sum directly into out_ref.
+    last_h = ring_size - 2
+    last_s = ring_size - 1
+
+    @pl.loop(0, num_microbatches)
+    def _final_mb(m):
+      slot = jax.lax.rem(last_s * num_microbatches + m, 2)
+      for cp in _c2c_copies(last_h, m):
+        cp.wait_recv()
+
+      cur_d2d_cw, cur_d2d_ccw = _d2d_copies(last_s, m)
+      cur_d2d_cw.wait_recv()
+      cur_d2d_ccw.wait_recv()
+
+      _signal_and_wait_tec(slot)
+
+    # Drain all remote send semaphores before exiting the kernel.
+    if global_scaling:
+      for k in range(num_devices):
+        _amax_copy(k).wait_send()
+    elif unfused_per_hop:
+      _amax_partner_copy().wait_send()
+
+    @pl.loop(0, ring_size)
+    def _wait_d2d_sends(s):
+      @pl.loop(0, num_microbatches)
+      def _wait_d2d_mb(m):
+        d2d_cw, d2d_ccw = _d2d_copies(s, m)
+        d2d_cw.wait_send()
+        d2d_ccw.wait_send()
+
+    @pl.loop(0, ring_size - 1)
+    def _wait_c2c_sends(h):
+      @pl.loop(0, num_microbatches)
+      def _wait_c2c_mb(m):
+        for cp in _c2c_copies(h, m):
+          cp.wait_send()
+
+  def _tec_kernel(
+      *refs,
+      scs_to_tec,
+      tec_to_scs,
+      d2d_send_sem,
+      d2d_recv_sem,
+      c2c_send_sem,
+      c2c_recv_sem,
+      a_vmem,
+      b_vmem,
+      c_vmem,
+      tec_in_sem,
+      tec_out_sem,
+      **amax_scratch,
+  ):
+    del d2d_send_sem, d2d_recv_sem, c2c_send_sem, c2c_recv_sem
+    (
+        x_ref,
+        amax_ref,
+        out_ref,
+        running_sum_ref,
+        d2d_recv_ref,
+        c2c_recv_ref,
+        (extra),
+    ) = _unpack_refs(refs)
+    z = jax.lax.axis_index(ring_axis)
+    c = jax.lax.axis_index(core_axis)
+    subcore = jax.lax.axis_index("subcore")
+
+    if global_scaling:
+      _tec_token_scales(
+          subcore,
+          extra["amax_gather"],
+          extra["inv_rows"],
+          tec_in_sem,
+          tec_out_sem,
+          **amax_scratch,
+      )
+
+    def _tile_offsets(s, m, tile_idx):
+      d = jax.lax.div(tile_idx, tiles_per_dir)
+      t = jax.lax.rem(tile_idx, tiles_per_dir)
+      cw_z_dst = jax.lax.rem(z + ring_size - 1 - s, ring_size)
+      ccw_z_dst = jax.lax.rem(z + 1 + s, ring_size)
+      z_dst = jnp.where(d == 0, cw_z_dst, ccw_z_dst)
+      sc_off = subcore * subcore_rows + t * vmem_tile_rows
+      x_row = pl.multiple_of(
+          (((z_dst * 2 + c) * 2 + d) * num_microbatches + m) * mb_rows + sc_off,
+          8,
+      )
+      buf_row = pl.multiple_of(
+          ((s * num_microbatches + m) * 2 + d) * mb_rows + sc_off, 8
+      )
+      prev_c2c_row = pl.multiple_of(
+          (((s - 1) * num_microbatches + m) * 2 + d) * mb_rows + sc_off, 8
+      )
+      out_row = pl.multiple_of((d * num_microbatches + m) * mb_rows + sc_off, 8)
+      return x_row, buf_row, prev_c2c_row, out_row
+
+    def _run_microbatch(s, m, *, three_way: bool, to_final_out: bool):
+      sync_slot = jax.lax.rem(s * num_microbatches + m, 2)
+      pl.semaphore_wait(scs_to_tec.at[sync_slot], 1)
+
+      def _hop_token_scales():
+        """Per-hop scales of this subcore's tokens in the two blocks of (s, m).
+
+        Sums the local, D2D partner and (after the first hop) received per-token
+        amax bounds into the bound of the outgoing running sum, derives the
+        power-of-two inverse scale for it and the scale ratio for the incoming
+        running sum, and ships the new bound to `amax_send` for the ring copy.
+
+        Returns:
+          The started `amax_send` copies to wait for before signalling the SCS.
+        """
+        local_vmem = amax_scratch["hop_local_vmem"]
+        partner_vmem = amax_scratch["hop_partner_vmem"]
+        recv_vmem = amax_scratch["hop_recv_vmem"]
+        bound_vmem = amax_scratch["hop_bound_vmem"]
+        inv_vmem = amax_scratch["hop_inv_vmem"]
+        prev_scale_vmem = amax_scratch["hop_prev_scale_vmem"]
+        in_sem = amax_scratch["hop_in_sem"]
+        block_offsets = [
+            _tile_offsets(s, m, d * tiles_per_dir) for d in range(2)
+        ]
+        in_copies = []
+        for d, (x_row, _, prev_c2c_row, _) in enumerate(block_offsets):
+          dst = pl.ds(d * block_tokens, block_tokens)
+          if not to_final_out:
+            tok0 = pl.multiple_of(jax.lax.div(x_row, dim0), 8)
+            in_copies.append(
+                pltpu.make_async_copy(
+                    amax_ref.at[pl.ds(tok0, block_tokens)],
+                    local_vmem.at[dst],
+                    in_sem,
+                )
+            )
+            in_copies.append(
+                pltpu.make_async_copy(
+                    extra["amax_partner"].at[pl.ds(tok0, block_tokens)],
+                    partner_vmem.at[dst],
+                    in_sem,
+                )
+            )
+          if three_way:
+            prev_tok0 = pl.multiple_of(jax.lax.div(prev_c2c_row, dim0), 8)
+            in_copies.append(
+                pltpu.make_async_copy(
+                    extra["amax_recv"].at[pl.ds(prev_tok0, block_tokens)],
+                    recv_vmem.at[dst],
+                    in_sem,
+                )
+            )
+        for cp in in_copies:
+          cp.start()
+        for cp in in_copies:
+          cp.wait()
+
+        out_copies = []
+        for d, (_, buf_row, _, _) in enumerate(block_offsets):
+          sl = pl.ds(d * block_tokens, block_tokens)
+          if to_final_out:
+            # Rescale the incoming running sum into the input units.
+            prev_scale_vmem[sl] = _pow2_from_exponent(
+                _pow2_exponent(recv_vmem[sl])
+            )
+            continue
+          bound = local_vmem[sl] + partner_vmem[sl]
+          if three_way:
+            recv_bound = recv_vmem[sl]
+            bound = bound + recv_bound
+            e_new = _pow2_exponent(bound)
+            # Rescale the incoming running sum from its scale to the new one
+            # (a power of two <= 1, exact; 0 if it underflows f32).
+            prev_scale_vmem[sl] = _pow2_from_exponent(
+                jnp.clip(127 + _pow2_exponent(recv_bound) - e_new, 0, 254)
+            )
+          else:
+            e_new = _pow2_exponent(bound)
+          inv_vmem[sl] = _pow2_from_exponent(254 - e_new)
+          bound_vmem[sl] = bound
+          send_tok0 = pl.multiple_of(jax.lax.div(buf_row, dim0), 8)
+          out_copies.append(
+              _sc_push_copy(
+                  bound_vmem.at[sl],
+                  extra["amax_send"].at[pl.ds(send_tok0, block_tokens)],
+                  amax_scratch["hop_out_sem"],
+              )
+          )
+        for cp in out_copies:
+          cp.start()
+        return out_copies
+
+      def _fused_hop_prologue():
+        """Loads `amax_recv` for fused `per_hop_scaling` (and final rescale)."""
+        recv_vmem = amax_scratch["hop_recv_vmem"]
+        prev_scale_vmem = amax_scratch["hop_prev_scale_vmem"]
+        in_sem = amax_scratch["hop_in_sem"]
+        block_offsets = [
+            _tile_offsets(s, m, d * tiles_per_dir) for d in range(2)
+        ]
+        if three_way:
+          in_copies = []
+          for d, (_, _, prev_c2c_row, _) in enumerate(block_offsets):
+            dst = pl.ds(d * block_tokens, block_tokens)
+            prev_tok0 = pl.multiple_of(jax.lax.div(prev_c2c_row, dim0), 8)
+            in_copies.append(
+                pltpu.make_async_copy(
+                    extra["amax_recv"].at[pl.ds(prev_tok0, block_tokens)],
+                    recv_vmem.at[dst],
+                    in_sem,
+                )
+            )
+          for cp in in_copies:
+            cp.start()
+          for cp in in_copies:
+            cp.wait()
+        if to_final_out:
+          for d in range(2):
+            sl = pl.ds(d * block_tokens, block_tokens)
+            prev_scale_vmem[sl] = _pow2_from_exponent(
+                _pow2_exponent(recv_vmem[sl])
+            )
+
+      def _fused_hop_epilogue():
+        """Pushes `hop_bound_vmem` to `amax_send` after all tiles complete."""
+        bound_vmem = amax_scratch["hop_bound_vmem"]
+        out_copies = []
+        for d in range(2):
+          _, buf_row, _, _ = _tile_offsets(s, m, d * tiles_per_dir)
+          sl = pl.ds(d * block_tokens, block_tokens)
+          send_tok0 = pl.multiple_of(jax.lax.div(buf_row, dim0), 8)
+          out_copies.append(
+              _sc_push_copy(
+                  bound_vmem.at[sl],
+                  extra["amax_send"].at[pl.ds(send_tok0, block_tokens)],
+                  amax_scratch["hop_out_sem"],
+              )
+          )
+        for cp in out_copies:
+          cp.start()
+        for cp in out_copies:
+          cp.wait()
+
+      if unfused_per_hop:
+        bound_copies = _hop_token_scales()
+      else:
+        bound_copies = []
+        if fused_per_hop:
+          _fused_hop_prologue()
+
+      def _load_copies(tile_idx, slot):
+        x_row, buf_row, prev_c2c_row, _ = _tile_offsets(s, m, tile_idx)
+        in_sem = tec_in_sem.at[slot]
+        copies = [
+            pltpu.make_async_copy(
+                x_ref.at[pl.ds(x_row, vmem_tile_rows), :],
+                a_vmem.at[slot],
+                sem=in_sem,
+            ),
+            pltpu.make_async_copy(
+                d2d_recv_ref.at[pl.ds(buf_row, vmem_tile_rows), :],
+                b_vmem.at[slot],
+                sem=in_sem,
+            ),
+        ]
+        if three_way:
+          copies.append(
+              pltpu.make_async_copy(
+                  c2c_recv_ref.at[pl.ds(prev_c2c_row, vmem_tile_rows), :],
+                  c_vmem.at[slot],
+                  sem=in_sem,
+              )
+          )
+        if global_scaling:
+          # The inverse scales of the whole tokens held by this tile.
+          tile_tok0 = pl.multiple_of(jax.lax.div(x_row, dim0), tokens_per_tile)
+          copies.append(
+              pltpu.make_async_copy(
+                  extra["inv_rows"].at[pl.ds(tile_tok0, tokens_per_tile), :],
+                  amax_scratch["inv_vmem"].at[slot],
+                  sem=in_sem,
+              )
+          )
+        return copies
+
+      def _store_copy(tile_idx, slot):
+        _, buf_row, _, out_row = _tile_offsets(s, m, tile_idx)
+        dst_ref = out_ref if to_final_out else running_sum_ref
+        dst_row = out_row if to_final_out else buf_row
+        # In bf16 mode the FP8 ring sends are staged in `c_vmem`.
+        src_vmem = a_vmem if quantized_input or to_final_out else c_vmem
+        return _sc_push_copy(
+            src_vmem.at[slot],
+            dst_ref.at[pl.ds(dst_row, vmem_tile_rows), :],
+            tec_out_sem.at[slot],
+        )
+
+      def _to_compressed_bf16(v):
+        if not _BITCAST_HAS_DIM:
+          # Same elementwise result, without the relayout-free reinterpretation.
+          return v.astype(jnp.bfloat16)
+        u32 = pltpu.bitcast(v, jnp.uint32, dim=-2)
+        return pltpu.bitcast(u32, jnp.float8_e4m3fn, dim=-1).astype(
+            jnp.bfloat16
+        )
+
+      def _from_compressed_bf16(acc):
+        # Saturate: on TPU `astype(float8_e4m3fn)` maps |acc| > 448 to NaN.
+        acc = jnp.clip(acc, -fp8_max, fp8_max)
+        if not _BITCAST_HAS_DIM:
+          return acc.astype(jnp.float8_e4m3fn)
+        u32 = pltpu.bitcast(acc.astype(jnp.float8_e4m3fn), jnp.uint32, dim=-1)
+        return pltpu.bitcast(u32, jnp.float8_e4m3fn, dim=-2)
+
+      def _compute_rows(slot, r_slice):
+        if quantized_input:
+          acc = _to_compressed_bf16(
+              a_vmem[slot, r_slice, :]
+          ) + _to_compressed_bf16(b_vmem[slot, r_slice, :])
+          if three_way:
+            acc = acc + _to_compressed_bf16(c_vmem[slot, r_slice, :])
+          a_vmem[slot, r_slice, :] = _from_compressed_bf16(acc)
+        else:
+          acc = a_vmem[slot, r_slice, :] + b_vmem[slot, r_slice, :]
+          if three_way:
+            acc = acc + c_vmem[slot, r_slice, :].astype(jnp.bfloat16)
+          if to_final_out:
+            a_vmem[slot, r_slice, :] = acc
+          else:
+            # Saturate: see `_from_compressed_bf16`.
+            c_vmem[slot, r_slice, :] = jnp.clip(acc, -fp8_max, fp8_max).astype(
+                jnp.float8_e4m3fn
+            )
+
+      def _compute_scaled_rows(slot, r_slice, inv_scale, prev_scale):
+        """f32 math; the power-of-two scale multiplies are exact.
+
+        Args:
+          slot: VMEM tile slot.
+          r_slice: Rows of the tile to compute.
+          inv_scale: Inverse scale of the outgoing running sum (non-final hops).
+          prev_scale: Scale applied to the incoming running sum, or `None` to
+            add it as is.
+        """
+        acc = a_vmem[slot, r_slice, :].astype(jnp.float32) + b_vmem[
+            slot, r_slice, :
+        ].astype(jnp.float32)
+        if not to_final_out:
+          acc = acc * inv_scale
+        if three_way:
+          prev = (
+              c_vmem[slot, r_slice, :].astype(jnp.bfloat16).astype(jnp.float32)
+          )
+          acc = acc + prev if prev_scale is None else acc + prev * prev_scale
+        if to_final_out:
+          a_vmem[slot, r_slice, :] = acc.astype(jnp.bfloat16)
+        else:
+          # Saturate (only reachable with an understated amax); Mosaic-SC only
+          # packs f32 -> fp8 via bf16.
+          c_vmem[slot, r_slice, :] = (
+              jnp.clip(acc, -fp8_max, fp8_max)
+              .astype(jnp.bfloat16)
+              .astype(jnp.float8_e4m3fn)
+          )
+
+      def _compute(slot, tile_idx):
+        if not scaled:
+
+          @plsc.parallel_loop(0, vmem_tile_rows, step=4)
+          def _row_loop(r):
+            _compute_rows(slot, pl.ds(r, 4))
+
+          return
+
+        if global_scaling:
+          inv_vmem = amax_scratch["inv_vmem"]
+
+          @plsc.parallel_loop(0, tokens_per_tile * dim0, step=4)
+          def _token_row_loop_global(r):
+            j = jax.lax.div(r, dim0)
+            inv_scale = jnp.broadcast_to(
+                inv_vmem[slot, pl.ds(j, 1), :], (4, 128)
+            )
+            prev_scale = None
+            if to_final_out:
+              prev_scale = jax.lax.bitcast_convert_type(
+                  (254 << 23)
+                  - jax.lax.bitcast_convert_type(inv_scale, jnp.int32),
+                  jnp.float32,
+              )
+            _compute_scaled_rows(slot, pl.ds(r, 4), inv_scale, prev_scale)
+
+          return
+
+        d = jax.lax.div(tile_idx, tiles_per_dir)
+        t = jax.lax.rem(tile_idx, tiles_per_dir)
+        tok_base = d * block_tokens + t * tokens_per_tile
+        hop_prev_scale_vmem = amax_scratch["hop_prev_scale_vmem"]
+
+        if fused_per_hop and not to_final_out:
+          sum_vmem = amax_scratch["sum_vmem"]
+          hop_recv_vmem = amax_scratch["hop_recv_vmem"]
+          hop_bound_vmem = amax_scratch["hop_bound_vmem"]
+
+          @pl.loop(0, tokens_per_tile)
+          def _tok_loop(j):
+            r_tok = pl.multiple_of(j * dim0, 8)
+            idx = tok_base + j
+            row_max_init = jnp.zeros((4, dim1), dtype=jnp.float32)
+
+            @plsc.parallel_loop(0, dim0, step=4, carry=row_max_init)
+            def _pass1(dr, cur_max):
+              r = pl.multiple_of(r_tok + dr, 4)
+              acc = (
+                  a_vmem[slot, pl.ds(r, 4), :].astype(jnp.float32)
+                  + b_vmem[slot, pl.ds(r, 4), :].astype(jnp.float32)
+              )
+              sum_vmem[pl.ds(dr, 4), :] = acc
+              return jnp.maximum(cur_max, jnp.abs(acc))
+
+            m4 = _pass1
+            m2 = jnp.maximum(m4[:2, :], m4[2:, :])
+            m1 = jnp.maximum(m2[:1, :], m2[1:, :])
+            v64 = jnp.maximum(m1[:, :64], m1[:, 64:])
+            v32 = jnp.maximum(v64[:, :32], v64[:, 32:])
+            v16 = jnp.maximum(v32[:, :16], v32[:, 16:])
+            vals = [v16[0, k] for k in range(16)]
+            while len(vals) > 1:
+              vals = [
+                  jnp.maximum(vals[2 * k], vals[2 * k + 1])
+                  for k in range(len(vals) // 2)
+              ]
+            pair_amax_1 = jnp.broadcast_to(vals[0], (1,))
+            if three_way:
+              recv_bound_1 = hop_recv_vmem[pl.ds(idx, 1)]
+              bound_1 = pair_amax_1 + recv_bound_1
+              e_new_1 = _pow2_exponent(bound_1)
+              prev_scale = jnp.broadcast_to(
+                  _pow2_from_exponent(
+                      jnp.clip(
+                          127 + _pow2_exponent(recv_bound_1) - e_new_1, 0, 254
+                      )
+                  ),
+                  (4, dim1),
+              )
+            else:
+              bound_1 = pair_amax_1
+              e_new_1 = _pow2_exponent(bound_1)
+              prev_scale = None
+            hop_bound_vmem[pl.ds(idx, 1)] = bound_1
+            inv_scale = jnp.broadcast_to(
+                _pow2_from_exponent(254 - e_new_1), (4, dim1)
+            )
+
+            @plsc.parallel_loop(0, dim0, step=4)
+            def _pass2(dr):
+              r = pl.multiple_of(r_tok + dr, 4)
+              acc = sum_vmem[pl.ds(dr, 4), :] * inv_scale
+              if three_way:
+                prev = (
+                    c_vmem[slot, pl.ds(r, 4), :]
+                    .astype(jnp.bfloat16)
+                    .astype(jnp.float32)
+                )
+                acc = acc + prev * prev_scale
+              c_vmem[slot, pl.ds(r, 4), :] = (
+                  jnp.clip(acc, -fp8_max, fp8_max)
+                  .astype(jnp.bfloat16)
+                  .astype(jnp.float8_e4m3fn)
+              )
+
+          return
+
+        @plsc.parallel_loop(0, tokens_per_tile * dim0, step=4)
+        def _token_row_loop_hop(r):
+          j = jax.lax.div(r, dim0)
+          idx = tok_base + j
+          if to_final_out:
+            inv_scale = None
+          else:
+            inv_scale = jnp.broadcast_to(
+                amax_scratch["hop_inv_vmem"][pl.ds(idx, 1)], (4, 128)
+            )
+          if not three_way:
+            prev_scale = None
+          else:
+            prev_scale = jnp.broadcast_to(
+                hop_prev_scale_vmem[pl.ds(idx, 1)], (4, 128)
+            )
+          _compute_scaled_rows(slot, pl.ds(r, 4), inv_scale, prev_scale)
+
+      for cp in _load_copies(0, 0):
+        cp.start()
+
+      @pl.loop(0, num_tiles)
+      def _tile_loop(tile_idx):
+        slot = jax.lax.rem(tile_idx, 2)
+        nxt_slot = 1 - slot
+        for cp in _load_copies(tile_idx, slot):
+          cp.wait()
+
+        @pl.when(tile_idx >= 1)
+        def _wait_prev_store():
+          _store_copy(tile_idx - 1, nxt_slot).wait()
+
+        @pl.when(tile_idx + 1 < num_tiles)
+        def _start_next_loads():
+          for cp in _load_copies(tile_idx + 1, nxt_slot):
+            cp.start()
+
+        _compute(slot, tile_idx)
+        _store_copy(tile_idx, slot).start()
+
+      _store_copy(num_tiles - 1, (num_tiles - 1) % 2).wait()
+      if fused_per_hop and not to_final_out:
+        _fused_hop_epilogue()
+      for cp in bound_copies:
+        cp.wait()
+      if not to_final_out:
+        src_v = a_vmem if quantized_input else c_vmem
+        for k in range(min(2, num_tiles)):
+          t_idx = num_tiles - 1 - k
+          t_slot = t_idx % 2
+          _, t_buf_row, _, _ = _tile_offsets(s, m, t_idx)
+          tail_row = pl.multiple_of(t_buf_row + vmem_tile_rows - 8, 8)
+          _sc_fence_readback(
+              running_sum_ref.at[pl.ds(tail_row, 8), :],
+              src_v.at[t_slot, pl.ds(vmem_tile_rows - 8, 8), :],
+              tec_out_sem.at[t_slot],
+          )
+        if per_hop_scaling:
+          _, d1_buf_row, _, _ = _tile_offsets(s, m, tiles_per_dir)
+          d1_send_tok = pl.multiple_of(
+              jax.lax.div(d1_buf_row, dim0) + block_tokens - 8, 8
+          )
+          _sc_fence_readback(
+              extra["amax_send"].at[pl.ds(d1_send_tok, 8)],
+              amax_scratch["hop_bound_vmem"].at[pl.ds(2 * block_tokens - 8, 8)],
+              amax_scratch["hop_out_sem"],
+          )
+      pl.semaphore_signal(tec_to_scs.at[sync_slot], 1)
+
+    @pl.loop(0, num_microbatches)
+    def _tec_step0(m):
+      _run_microbatch(0, m, three_way=False, to_final_out=False)
+
+    if ring_size > 2:
+
+      @pl.loop(0, ring_size - 2)
+      def _tec_mid_steps(h):
+        @pl.loop(0, num_microbatches)
+        def _tec_mid_mb(m):
+          _run_microbatch(h + 1, m, three_way=True, to_final_out=False)
+
+    @pl.loop(0, num_microbatches)
+    def _tec_final_step(m):
+      _run_microbatch(ring_size - 1, m, three_way=True, to_final_out=True)
+
+  def _tec_token_scales(
+      subcore,
+      amax_gather_ref,
+      inv_rows_ref,
+      tec_in_sem,
+      tec_out_sem,
+      *,
+      amax_ready,
+      amax_vmem,
+      acc_vmem,
+      rows_vmem,
+      inv_vmem,
+      **unused_scs_scratch,
+  ):
+    """Sums the gathered amax slots of this subcore's tokens into inv rows."""
+    del inv_vmem, unused_scs_scratch
+    pl.semaphore_wait(amax_ready, 1)
+    tok_base = pl.multiple_of(subcore * tokens_per_subcore, tokens_per_subcore)
+
+    def _slot_copy(k, buf):
+      return pltpu.make_async_copy(
+          amax_gather_ref.at[
+              pl.ds(k * num_tokens + tok_base, tokens_per_subcore)
+          ],
+          amax_vmem.at[buf],
+          tec_in_sem.at[buf],
+      )
+
+    _slot_copy(0, 0).start()
+    for k in range(num_devices):
+      _slot_copy(k, k % 2).wait()
+      if k + 1 < num_devices:
+        _slot_copy(k + 1, (k + 1) % 2).start()
+      if k == 0:
+        acc_vmem[...] = amax_vmem[0]
+      else:
+        acc_vmem[...] += amax_vmem[k % 2]
+
+    # inv = 2^-ceil(log2(amax / fp8_max)) (1 for all-zero tokens).
+    acc_vmem[...] = _pow2_from_exponent(254 - _pow2_exponent(acc_vmem[...]))
+
+    # Lane-broadcast the inverse scales into (token, 128) rows so the compute
+    # loop can DMA the rows of each tile.
+    def _row_copy(ci, buf):
+      return _sc_push_copy(
+          rows_vmem.at[buf],
+          inv_rows_ref.at[pl.ds(tok_base + ci * amax_chunk, amax_chunk), :],
+          tec_out_sem.at[buf],
+      )
+
+    num_chunks = tokens_per_subcore // amax_chunk
+
+    @pl.loop(0, num_chunks)
+    def _chunk(ci):
+      buf = jax.lax.rem(ci, 2)
+
+      @pl.when(ci >= 2)
+      def _wait_prev():
+        _row_copy(ci - 2, buf).wait()
+
+      v = acc_vmem[
+          pl.ds(pl.multiple_of(ci * amax_chunk, amax_chunk), amax_chunk)
+      ]
+      for j in range(amax_chunk):
+        rows_vmem[buf, pl.ds(j, 1), :] = jnp.broadcast_to(v[j], (1, dim1))
+      _row_copy(ci, buf).start()
+
+    for ci in range(max(num_chunks - 2, 0), num_chunks):
+      _row_copy(ci, ci % 2).wait()
+    for ci in range(max(num_chunks - 2, 0), num_chunks):
+      _sc_fence_readback(
+          inv_rows_ref.at[pl.ds(tok_base + ci * amax_chunk, amax_chunk), :],
+          rows_vmem.at[ci % 2],
+          tec_out_sem.at[ci % 2],
+      )
+    plsc.subcore_barrier()
+
+  x_2d = x.reshape(num_tokens * dim0, dim1)
+  manual_axis_type = getattr(jax.typeof(x), "manual_axis_type", None)
+  out_struct = jax.ShapeDtypeStruct(
+      (chunk_rows, dim1), x.dtype, manual_axis_type=manual_axis_type
+  )
+  c2c_buf_rows = (ring_size - 1) * num_microbatches * 2 * mb_rows
+  running_sum_struct = jax.ShapeDtypeStruct(
+      (c2c_buf_rows, dim1),
+      jnp.float8_e4m3fn,
+      manual_axis_type=manual_axis_type,
+  )
+  d2d_recv_struct = jax.ShapeDtypeStruct(
+      (ring_size * num_microbatches * 2 * mb_rows, dim1),
+      x.dtype,
+      manual_axis_type=manual_axis_type,
+  )
+  c2c_recv_struct = jax.ShapeDtypeStruct(
+      (c2c_buf_rows, dim1),
+      jnp.float8_e4m3fn,
+      manual_axis_type=manual_axis_type,
+  )
+  vmem_shape = (2, vmem_tile_rows, dim1)
+  scratch_types = dict(
+      scs_to_tec=pltpu.SemaphoreType.REGULAR((2,)) @ tec_mesh,
+      tec_to_scs=pltpu.SemaphoreType.REGULAR((2,)) @ scs_mesh,
+      d2d_send_sem=pltpu.SemaphoreType.DMA((ring_size, num_microbatches, 2))
+      @ scs_mesh,
+      d2d_recv_sem=pltpu.SemaphoreType.DMA((ring_size, num_microbatches, 2))
+      @ scs_mesh,
+      c2c_send_sem=pltpu.SemaphoreType.DMA((ring_size - 1, num_microbatches, 2))
+      @ scs_mesh,
+      c2c_recv_sem=pltpu.SemaphoreType.DMA((ring_size - 1, num_microbatches, 2))
+      @ scs_mesh,
+      a_vmem=pltpu.VMEM(vmem_shape, x.dtype) @ tec_mesh,
+      b_vmem=pltpu.VMEM(vmem_shape, x.dtype) @ tec_mesh,
+      c_vmem=pltpu.VMEM(vmem_shape, jnp.float8_e4m3fn) @ tec_mesh,
+      tec_in_sem=pltpu.SemaphoreType.DMA((2,)) @ tec_mesh,
+      tec_out_sem=pltpu.SemaphoreType.DMA((2,)) @ tec_mesh,
+  )
+  inputs = (x_2d,)
+  out_type = (out_struct, running_sum_struct, d2d_recv_struct, c2c_recv_struct)
+  if has_amax_input:
+    inputs += (token_amax,)
+
+  def _f32_struct(shape):
+    return jax.ShapeDtypeStruct(
+        shape, jnp.float32, manual_axis_type=manual_axis_type
+    )
+
+  if global_scaling:
+    out_type += (
+        _f32_struct((num_devices * num_tokens,)),  # amax_gather
+        _f32_struct((num_tokens, dim1)),  # inv_rows
+    )
+    scratch_types.update(
+        amax_send_sem=pltpu.SemaphoreType.DMA(()) @ scs_mesh,
+        amax_recv_sem=pltpu.SemaphoreType.DMA(()) @ scs_mesh,
+        amax_ready=pltpu.SemaphoreType.REGULAR(()) @ tec_mesh,
+        amax_vmem=pltpu.VMEM((2, tokens_per_subcore), jnp.float32) @ tec_mesh,
+        acc_vmem=pltpu.VMEM((tokens_per_subcore,), jnp.float32) @ tec_mesh,
+        rows_vmem=pltpu.VMEM((2, amax_chunk, dim1), jnp.float32) @ tec_mesh,
+        inv_vmem=pltpu.VMEM((2, tokens_per_tile, dim1), jnp.float32) @ tec_mesh,
+    )
+  elif per_hop_scaling:
+    c2c_buf_tokens = c2c_buf_rows // dim0
+    if unfused_per_hop:
+      out_type += (_f32_struct((num_tokens,)),)  # amax_partner
+    out_type += (
+        _f32_struct((c2c_buf_tokens,)),  # amax_send
+        _f32_struct((c2c_buf_tokens,)),  # amax_recv
+    )
+    c2c_sem_shape = (ring_size - 1, num_microbatches, 2)
+
+    def _hop_vmem():
+      return pltpu.VMEM((2 * block_tokens,), jnp.float32) @ tec_mesh
+
+    scratch_types.update(
+        c2c_amax_send_sem=pltpu.SemaphoreType.DMA(c2c_sem_shape) @ scs_mesh,
+        c2c_amax_recv_sem=pltpu.SemaphoreType.DMA(c2c_sem_shape) @ scs_mesh,
+        hop_in_sem=pltpu.SemaphoreType.DMA(()) @ tec_mesh,
+        hop_out_sem=pltpu.SemaphoreType.DMA(()) @ tec_mesh,
+        hop_recv_vmem=_hop_vmem(),
+        hop_bound_vmem=_hop_vmem(),
+        hop_prev_scale_vmem=_hop_vmem(),
+    )
+    if unfused_per_hop:
+      scratch_types.update(
+          amax_d2d_send_sem=pltpu.SemaphoreType.DMA(()) @ scs_mesh,
+          amax_d2d_recv_sem=pltpu.SemaphoreType.DMA(()) @ scs_mesh,
+          hop_local_vmem=_hop_vmem(),
+          hop_partner_vmem=_hop_vmem(),
+          hop_inv_vmem=_hop_vmem(),
+      )
+    else:
+      scratch_types.update(
+          sum_vmem=pltpu.VMEM((dim0, dim1), jnp.float32) @ tec_mesh,
+      )
+  out_2d, *_ = pl.kernel(
+      body=[_scs_kernel, _tec_kernel],
+      mesh=[scs_mesh, tec_mesh],
+      out_type=out_type,
+      scratch_types=scratch_types,
+      compiler_params=pltpu.CompilerParams(
+          collective_id=collective_id,
+          use_tc_tiling_on_sc=True,
+      ),
+      name="reduce_scatter_sc0",
+  )(*inputs)
+  return out_2d.reshape(out_tokens, dim0, dim1)

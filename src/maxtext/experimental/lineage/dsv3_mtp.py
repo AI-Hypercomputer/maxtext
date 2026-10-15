@@ -36,9 +36,15 @@ def collect_ehproj_weights(
 ) -> dsv3_types.DSv3EHProjWeightsPytree:
   """Collects EHProj weights along mesh axes."""
   return dsv3_types.DSv3EHProjWeightsPytree(
-      enorm_scale=ops.collect_along_axis(w.enorm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping),
-      hnorm_scale=ops.collect_along_axis(w.hnorm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping),
-      eh_proj=ops.collect_along_axis(w.eh_proj, ("dcn", "fsdp_attention", "attention"), axis_mapping),
+      enorm_scale=ops.collect_along_axis(
+          w.enorm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping
+      ),
+      hnorm_scale=ops.collect_along_axis(
+          w.hnorm_scale, ("dcn", "fsdp_attention", "attention"), axis_mapping
+      ),
+      eh_proj=ops.collect_along_axis(
+          w.eh_proj, ("dcn", "fsdp_attention", "attention"), axis_mapping
+      ),
   )
 
 
@@ -159,7 +165,9 @@ def dsv3_mtp_layer(
     A tuple of (output_tokens, aux).
   """
   if expert_permutations is not None:
-    dsv3_expert_shuffle.validate_expert_permutations(expert_permutations, num_experts=num_experts)
+    dsv3_expert_shuffle.validate_expert_permutations(
+        expert_permutations, num_experts=num_experts
+    )
 
   def _collect_routed(
       routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
@@ -167,10 +175,14 @@ def dsv3_mtp_layer(
   ) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
     """Collects routed expert weights in the `routed_w_to_tiles` view."""
     if expert_permutations is None:
-      collected = ops.collect_along_axis(routed, ("dcn", "fsdp_moe"), axis_mapping)
+      collected = ops.collect_along_axis(
+          routed, ("dcn", "fsdp_moe"), axis_mapping
+      )
       return dsv3_sparse_layer.routed_w_to_tiles(
           jax.tree.map(
-              lambda a: a.reshape(num_experts, -1, a.shape[-1]) if a.ndim == 2 else a,
+              lambda a: a.reshape(num_experts, -1, a.shape[-1])
+              if a.ndim == 2
+              else a,
               collected,
           )
       )
@@ -182,7 +194,9 @@ def dsv3_mtp_layer(
           expert_axis_name=expert_axis_name,
           axis_mapping=axis_mapping,
       )
-    return dsv3_sparse_layer.routed_w_to_tiles(ops.collect_along_axis(routed, ("fsdp_moe",), axis_mapping))
+    return dsv3_sparse_layer.routed_w_to_tiles(
+        ops.collect_along_axis(routed, ("fsdp_moe",), axis_mapping)
+    )
 
   def _collect_w(
       w: dsv3_types.DSv3MTPWeightsPytree,
@@ -203,7 +217,9 @@ def dsv3_mtp_layer(
                     ("dcn", "fsdp_attention", "attention"),
                     axis_mapping,
                 ),
-                q_up=ops.collect_along_axis(w.sparse.mla.q_up, ("dcn", "fsdp_attention"), axis_mapping),
+                q_up=ops.collect_along_axis(
+                    w.sparse.mla.q_up, ("dcn", "fsdp_attention"), axis_mapping
+                ),
                 q_norm_scale=ops.collect_along_axis(
                     w.sparse.mla.q_norm_scale,
                     ("dcn", "fsdp_attention"),
@@ -214,14 +230,20 @@ def dsv3_mtp_layer(
                     ("dcn", "fsdp_attention", "attention"),
                     axis_mapping,
                 ),
-                k_up=ops.collect_along_axis(w.sparse.mla.k_up, ("dcn", "fsdp_attention"), axis_mapping),
-                v_up=ops.collect_along_axis(w.sparse.mla.v_up, ("dcn", "fsdp_attention"), axis_mapping),
+                k_up=ops.collect_along_axis(
+                    w.sparse.mla.k_up, ("dcn", "fsdp_attention"), axis_mapping
+                ),
+                v_up=ops.collect_along_axis(
+                    w.sparse.mla.v_up, ("dcn", "fsdp_attention"), axis_mapping
+                ),
                 kv_norm_scale=ops.collect_along_axis(
                     w.sparse.mla.kv_norm_scale,
                     ("dcn", "fsdp_attention"),
                     axis_mapping,
                 ),
-                out=ops.collect_along_axis(w.sparse.mla.out, ("dcn", "fsdp_attention"), axis_mapping),
+                out=ops.collect_along_axis(
+                    w.sparse.mla.out, ("dcn", "fsdp_attention"), axis_mapping
+                ),
             ),
             post_attn_norm_scale=ops.collect_along_axis(
                 w.sparse.post_attn_norm_scale,

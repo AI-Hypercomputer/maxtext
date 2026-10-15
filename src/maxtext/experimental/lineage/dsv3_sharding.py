@@ -124,7 +124,9 @@ def drop_layer_axis(specs: Any) -> Any:
   Returns:
     `specs`, with the leading entry of every PartitionSpec dropped.
   """
-  return jax.tree.map(lambda spec: P(*spec[1:]), specs, is_leaf=lambda x: isinstance(x, P))
+  return jax.tree.map(
+      lambda spec: P(*spec[1:]), specs, is_leaf=lambda x: isinstance(x, P)
+  )
 
 
 # 8x8x8: MLA heads on core, EP over (x, core), FSDP over (y, z).
@@ -297,9 +299,54 @@ _SPARSE_4X8X8 = dsv3_types.DSv3SparseLayerWeightsPytree(
     ),
 )
 
+# 4x4x8: the 4x8x8 layout, except q_up carries its 16-way FSDP over (x, y) on
+# its 192-wide head dim (as k_up and v_up do): 16 ways divide the 32-wide
+# even/odd rope halves in `init_dsv3_mla_weights`, whereas sharding q_lora
+# (1536 / 16 = 96) pads the 128-wide minor TPU tile dim by 33%.
+_MLA_4X4X8 = dataclasses.replace(
+    _MLA_4X8X8, q_up=P(None, None, "core", ("x", "y"))
+)
+_SPARSE_4X4X8 = dataclasses.replace(_SPARSE_4X8X8, mla=_MLA_4X4X8)
+
 # Per-slice `(x, y, z)` topology -> shardings. A multi-slice mesh uses the entry
 # of its slices; `sharding_config` adds data parallelism over `dcn`.
 TOPOLOGY_SHARDINGS: dict[tuple[int, int, int], TopologySharding] = {
+    (4, 4, 8): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("z", "core"),
+            "fsdp_moe": ("x", "y"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_4X4X8,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, None, ("x", "y")),
+                        gate_1=P(None, None, ("x", "y")),
+                        linear=P(None, ("x", "y"), None),
+                    ),
+                ),
+                sparse=_SPARSE_4X4X8,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P(("x", "y"), None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_4X4X8),
+            ),
+            # Over every ICI axis, as on 8x8x8: 256 ways divide the 7168-wide
+            # embedding dim.
+            embed_table=P(None, ("x", "y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("x", "y", "z", "core"), None),
+        ),
+    ),
     (4, 8, 8): TopologySharding(
         axis_mapping={
             "attention": "core",
@@ -560,7 +607,10 @@ def sharding_config(
   topology = (mesh.shape["x"], mesh.shape["y"], mesh.shape["z"])
   entry = TOPOLOGY_SHARDINGS.get(topology)
   if entry is None:
-    raise ValueError(f"No DSv3 shardings for per-slice topology {topology}; supported:" f" {sorted(TOPOLOGY_SHARDINGS)}.")
+    raise ValueError(
+        f"No DSv3 shardings for per-slice topology {topology}; supported:"
+        f" {sorted(TOPOLOGY_SHARDINGS)}."
+    )
   return DSv3ShardingConfig(
       axis_mapping={
           "dcn": DCN_AXIS if DCN_AXIS in mesh.axis_names else (),
@@ -652,7 +702,9 @@ def activation_resharded_config(
       `dcn`, `expert` or `fsdp_moe`, does not shard `attention` over `base`'s
       `attention` axes as a prefix, or overlaps with the MLA FSDP axes.
   """
-  missing = [axis for axis in LOGICAL_AXES if axis not in activation_axis_mapping]
+  missing = [
+      axis for axis in LOGICAL_AXES if axis not in activation_axis_mapping
+  ]
   if missing:
     raise ValueError(f"activation_axis_mapping lacks logical axes {missing}.")
   for axis in ("dcn", "expert", "fsdp_moe"):
@@ -660,7 +712,8 @@ def activation_resharded_config(
         _to_axis_tuple(_axis_names(base.axis_mapping[axis]))
     ):
       raise ValueError(
-          f"The activation layout must keep `{axis}`:" f" {activation_axis_mapping[axis]} != {base.axis_mapping[axis]}."
+          f"The activation layout must keep `{axis}`:"
+          f" {activation_axis_mapping[axis]} != {base.axis_mapping[axis]}."
       )
   base_attention = _axis_names(base.axis_mapping["attention"])
   new_attention = _axis_names(activation_axis_mapping["attention"])
@@ -688,7 +741,10 @@ def activation_resharded_config(
   )
   return dataclasses.replace(
       base,
-      axis_mapping={axis: _to_axis_tuple(_axis_names(activation_axis_mapping[axis])) for axis in LOGICAL_AXES},
+      axis_mapping={
+          axis: _to_axis_tuple(_axis_names(activation_axis_mapping[axis]))
+          for axis in LOGICAL_AXES
+      },
       weights=weights,
   )
 
@@ -720,7 +776,9 @@ def expert_axes_as_cp_axis_mapping(axis_mapping: AxisMapping) -> AxisMapping:
   """
   attention = _axis_names(axis_mapping["attention"])
   fsdp_attention = _axis_names(axis_mapping["fsdp_attention"])
-  moved = tuple(ax for ax in _axis_names(axis_mapping["expert"]) if ax not in attention)
+  moved = tuple(
+      ax for ax in _axis_names(axis_mapping["expert"]) if ax not in attention
+  )
   missing = [ax for ax in moved if ax not in fsdp_attention]
   if missing:
     raise ValueError(
@@ -731,7 +789,9 @@ def expert_axes_as_cp_axis_mapping(axis_mapping: AxisMapping) -> AxisMapping:
   return {
       **axis_mapping,
       "attention": _to_axis_tuple(attention + moved),
-      "fsdp_attention": _to_axis_tuple(tuple(ax for ax in fsdp_attention if ax not in moved)),
+      "fsdp_attention": _to_axis_tuple(
+          tuple(ax for ax in fsdp_attention if ax not in moved)
+      ),
   }
 
 
@@ -753,7 +813,9 @@ def expert_axes_as_cp_config(base: DSv3ShardingConfig) -> DSv3ShardingConfig:
   Returns:
     The eval sharding config.
   """
-  return activation_resharded_config(base, expert_axes_as_cp_axis_mapping(base.axis_mapping))
+  return activation_resharded_config(
+      base, expert_axes_as_cp_axis_mapping(base.axis_mapping)
+  )
 
 
 def named_shardings(
@@ -763,7 +825,9 @@ def named_shardings(
 ) -> Any:
   """Resolves a pytree of logical PartitionSpecs to physical NamedShardings."""
   return jax.tree.map(
-      lambda spec: jax.sharding.NamedSharding(mesh, ops.physical_pspec(spec, axis_mapping)),
+      lambda spec: jax.sharding.NamedSharding(
+          mesh, ops.physical_pspec(spec, axis_mapping)
+      ),
       specs,
       is_leaf=lambda x: isinstance(x, P),
   )
@@ -776,7 +840,9 @@ def reshard(
     axis_mapping: AxisMapping,
 ) -> Any:
   """Reshards `tree` to the physical layout of the Lineage logical `specs`."""
-  return jax.tree.map(jax.reshard, tree, named_shardings(specs, mesh, axis_mapping))
+  return jax.tree.map(
+      jax.reshard, tree, named_shardings(specs, mesh, axis_mapping)
+  )
 
 
 def _physical_coords(device: Any) -> tuple[int, ...]:
@@ -795,14 +861,25 @@ def _physical_slice_grid(slice_devices: Sequence[Any]) -> np.ndarray:
   """Sorts one slice's devices into an (x, y, z, core) grid."""
   coords_list = [_physical_coords(device) for device in slice_devices]
   if not coords_list or any(len(coords) != 4 for coords in coords_list):
-    raise ValueError("Devices do not expose 3D TPU physical coordinates (x, y, z, core).")
-  physical_shape = tuple(max(coords[axis] for coords in coords_list) + 1 for axis in range(4))
+    raise ValueError(
+        "Devices do not expose 3D TPU physical coordinates (x, y, z, core)."
+    )
+  physical_shape = tuple(
+      max(coords[axis] for coords in coords_list) + 1 for axis in range(4)
+  )
   if math.prod(physical_shape) != len(slice_devices):
-    raise ValueError(f"Device count {len(slice_devices)} does not fill physical shape" f" {list(physical_shape)}.")
-  return np.array(sorted(slice_devices, key=_physical_coords), dtype=object).reshape(physical_shape)
+    raise ValueError(
+        f"Device count {len(slice_devices)} does not fill physical shape"
+        f" {list(physical_shape)}."
+    )
+  return np.array(
+      sorted(slice_devices, key=_physical_coords), dtype=object
+  ).reshape(physical_shape)
 
 
-def create_physical_device_mesh(ici_parallelism: Sequence[int], devices: Sequence[Any]) -> np.ndarray:
+def create_physical_device_mesh(
+    ici_parallelism: Sequence[int], devices: Sequence[Any]
+) -> np.ndarray:
   """Maps the logical mesh one-to-one onto the physical TPU torus.
 
   Supports both 4-entry `(x, y, z, core)` single-slice meshes and 5-entry
@@ -882,7 +959,9 @@ def create_device_mesh(
     ValueError: If a multi-slice request does not use the `dcn`-leading mesh.
   """
   if dcn_parallelism is not None:
-    expected = [len(devices_by_slice(devices))] + [1] * (len(dcn_parallelism) - 1)
+    expected = [len(devices_by_slice(devices))] + [1] * (
+        len(dcn_parallelism) - 1
+    )
     if len(ici_parallelism) != 5 or list(dcn_parallelism) != expected:
       raise ValueError(
           "Lineage across several slices requires mesh_axes"
