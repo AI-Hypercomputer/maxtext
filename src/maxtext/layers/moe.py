@@ -662,9 +662,11 @@ class GateLogit(nnx.Module):
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates. Kept in float32 whatever the
+        # weight dtype (as upstream): the trained biases are large and close together (e.g. DeepSeek-V4.1-Flash
+        # layer 39 spans 57.17..57.65), so bf16 would collapse them to a handful of values and change the top-k.
         self.bias = MoEBiasVar(
-            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            default_bias_init(rngs.params(), bias_shape, jnp.float32),
             out_sharding=bias_axes,
         )
       else:
@@ -731,8 +733,12 @@ class GateLogit(nnx.Module):
       pre_bias_logits = output
 
     if self.use_bias:
-      bias = jnp.asarray(self.bias[...], self.dtype)
-      output += bias
+      if isinstance(self.bias, MoEBiasVar):
+        # Selection-only bias: add in float32 so bf16 compute does not round it away (see __init__).
+        output = output.astype(jnp.float32) + jnp.asarray(self.bias[...], jnp.float32)
+      else:
+        bias = jnp.asarray(self.bias[...], self.dtype)
+        output += bias
     return output, pre_bias_logits
 
 
