@@ -1066,6 +1066,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # resumed into completes and its finished state has been checkpointed.
     self._resumed_mid_step = False
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
+    # Readiness tokens for Tunix's TrainerWorker step timer (TRAINER_STEP_TIMING): arrays that
+    # become ready when the last microbatch's / optimizer step's device work has finished.
+    self.last_fwd_bwd_token: jax.Array | None = None
+    self.last_update_token: jax.Array | None = None
     # `create_training_optimizer` returns a raw optax GradientTransformation. `TrainStateNNX.apply_gradients`
     # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
     # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. `wrt=nnx.Param`
@@ -2912,6 +2916,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # the update step.
     self._throttler.add_computation(computation=loss, metrics=None)
 
+    # Readiness token for Tunix's step timer (TRAINER_STEP_TIMING): the loss rather than the running sums, which the
+    # next micro-batch's accumulate donates. A dropless rerun dispatched later replaces it (`_resolve_overflow_check`).
+    self.last_fwd_bwd_token = loss.unreduced_sum if isinstance(loss, abstract_engine.WeightedMetric) else loss
     self._accumulated_grads = acc_grads
     self._accumulated_denominator = acc_denom
     if self._dropless_replay:
@@ -3048,6 +3055,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             self._accumulated_grads, self._accumulated_denominator, grads, denominator
         )
       self._throttler.add_computation(computation=loss, metrics=None)
+      # The rerun is the last device work dispatched so far, so it carries the readiness token from here on.
+      self.last_fwd_bwd_token = loss.unreduced_sum if isinstance(loss, abstract_engine.WeightedMetric) else loss
       if bool(rerun_overflow):
         raise RuntimeError(
             f"The dropless rerun of micro step {check.micro_step} still overflowed; check apply_dropless_overrides."
@@ -3213,6 +3222,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # Back to pinned host memory, where the compiled update's `out_shardings` would put it.
       self._offload_optimizer_state()
 
+    # Same readiness signal the throttler uses below: the norm comes out of the update executable.
+    self.last_update_token = grad_norm
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
     if self._log_moe_drops:
