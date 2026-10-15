@@ -24,7 +24,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-DEFAULT_VMEM_LIMIT_FACTOR: float = 0.90
+# The 64-v-head prefill kernel needs about 58 MiB of the 64 MiB VMEM on TPU7x.
+DEFAULT_VMEM_LIMIT_FACTOR: float = 0.95
 
 
 class GDNMode(enum.StrEnum):
