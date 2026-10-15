@@ -1161,7 +1161,7 @@ class MoEGeneral(BaseModel):
           " offload per layer instead of 2 x num_moe_token_chunks, and one weight-gradient reduce-scatter instead of"
           " one per chunk. Same routing; bit-identical with float32 routing weights (float32_weight_sum=True), while"
           " bfloat16 weights get their cotangent reduce-scattered in float32. The per-chunk load-balance loss is"
-          " computed as without it. Tagged moe_routing_maps. Requires sparse_matmul=True, te_moe_block=False,"
+          " computed as without it. Tagged moe_route. Requires sparse_matmul=True, te_moe_block=False,"
           " ring_of_experts_local_routing=True, moe_chunk_pipeline=True and use_random_routing=False (random routing"
           " draws per call, so one draw for the layer differs from one per chunk)."
       ),
@@ -1387,6 +1387,18 @@ class MoEGeneral(BaseModel):
       # num_moe_emb_chunks is a MoEKernels field; this validator runs on the combined config.
       if getattr(self, "num_moe_emb_chunks", 0) > 0:
         raise ValueError("moe_chunk_pipeline=True does not support num_moe_emb_chunks > 0.")
+    return self
+
+  @model_validator(mode="after")
+  def validate_prepare_moe_weights_once_per_step(self) -> "MoEGeneral":
+    """Without either of the two things it prepares, the key would silently do nothing."""
+    if self.prepare_moe_weights_once_per_step and not (
+        (self.prefuse_moe_weights and self.sparse_matmul) or self.fp8_moe_fake_quant
+    ):
+      raise ValueError(
+          "prepare_moe_weights_once_per_step=True requires prefuse_moe_weights=True with sparse_matmul=True, or"
+          " fp8_moe_fake_quant=True."
+      )
     return self
 
   @model_validator(mode="after")
