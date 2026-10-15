@@ -33,6 +33,12 @@ _TRI_INV_FIELD_DEFAULTS = {
     "emit_t_inv": True,
 }
 
+# GDNConfig fields that change how the kernel lays out a value it computes either way, not what it computes or
+# returns. They are left out of the kernel name and metadata, so the lowered program outside the kernel body is the
+# same with and without them, and a profile shows the same kernel name for both variants (the run's config tells
+# them apart).
+_LAYOUT_ONLY_FIELDS = ("conv_dense_token_stack",)
+
 
 class GDNMode(enum.StrEnum):
   """Execution mode for GDN kernel."""
@@ -92,6 +98,9 @@ class GDNConfig:
   tri_inv_algo: str = "xor_dnc"
   head_group_size: int | None = None
   emit_t_inv: bool = True
+  # Build the Conv1D output from dense per-token views (compute_conv1d.stack_conv1d_tokens; config
+  # gdn_conv1d_dense_token_stack). GDNMode.PER_SEQ only.
+  conv_dense_token_stack: bool = False
 
   @property
   def chunk_size(self) -> int:
@@ -136,11 +145,13 @@ class GDNConfig:
     return name
 
   def get_metadata(self) -> dict[str, str | int | float]:
-    """Flattened config fields for the kernel's metadata (knobs at their defaults are left out)."""
+    """Flattened config fields for the kernel's metadata (knobs at their defaults and layout-only fields are left out)."""
     cfgs_dict = dataclasses.asdict(self)
     for field_name, default in _TRI_INV_FIELD_DEFAULTS.items():
       if cfgs_dict.get(field_name) == default:
         cfgs_dict.pop(field_name)
+    for field_name in _LAYOUT_ONLY_FIELDS:
+      cfgs_dict.pop(field_name)
     ret = {}
     for path, val in jax.tree_util.tree_leaves_with_path(cfgs_dict):
       key = jax.tree_util.keystr(path, simple=True, separator=".")

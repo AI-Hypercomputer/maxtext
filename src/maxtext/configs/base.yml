@@ -1643,6 +1643,12 @@ gdn_cp_matmul_precision: "highest"
 # and the qkv, conv-state and bias gradients are bit-identical on CPU, the conv weight gradient matches up to float32
 # summation order. Requires use_gdn_kernel: true.
 gdn_conv1d_input_in_qkv_dtype: false
+# GDN kernel path: build the Pallas GDN forward kernel's Conv1D output from dense per-token [conv_dim / 1024, 8, 128]
+# views instead of jnp.stack (kernels/gdn/compute_conv1d.py). Same values; the October 2026 TPU compiler lays the
+# stacked value out with 7 of 8 sublanes as padding, so the SiLU after it runs on 8x the vector registers. Requires
+# use_gdn_kernel: true and a GDN Conv1D width (2 * key heads * key head dim + value heads * value head dim) that is
+# a multiple of 1024.
+gdn_conv1d_dense_token_stack: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

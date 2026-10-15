@@ -619,6 +619,8 @@ def run_gdn_kernel_layer(
   cp_matmul_precision = jax.lax.Precision[getattr(cfg, "gdn_cp_matmul_precision", "highest").upper()]
   # Conv1D halo input in qkv's dtype instead of a float32 copy (compute_conv1d_bwd.py). Same values.
   conv_input_in_qkv_dtype = cfg.gdn_conv1d_input_in_qkv_dtype
+  # Forward kernel's Conv1D output built from dense per-token views (compute_conv1d.py). Same values.
+  conv_dense_token_stack = bool(getattr(cfg, "gdn_conv1d_dense_token_stack", False))
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
@@ -890,6 +892,7 @@ def run_gdn_kernel_layer(
             compute_dtype=state_dtype,
             segment_ids=seg_val,
             conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+            conv_dense_token_stack=conv_dense_token_stack,
         )
 
         if next_cs is not None:
@@ -930,6 +933,7 @@ def run_gdn_kernel_layer(
           segment_ids=seg_val,
           cp_matmul_precision=cp_matmul_precision,
           conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+          conv_dense_token_stack=conv_dense_token_stack,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -973,6 +977,7 @@ def run_gdn_kernel_layer(
         compute_dtype=state_dtype,
         segment_ids=decoder_segment_ids,
         conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+        conv_dense_token_stack=conv_dense_token_stack,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")

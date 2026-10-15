@@ -20,6 +20,38 @@ import jax.numpy as jnp
 
 from . import config
 
+# One float32 vector register is 8 sublanes x 128 lanes. gdn_conv1d_dense_token_stack regroups causal_conv1d's
+# per-token rows in units of one register (see stack_conv1d_tokens), so it needs rows of a multiple of this size.
+_F32_VREG_SUBLANES = 8
+_VREG_LANES = 128
+DENSE_TOKEN_STACK_ALIGNMENT = _F32_VREG_SUBLANES * _VREG_LANES
+
+
+def stack_conv1d_tokens(out_list: list[jax.Array], dense: bool) -> jax.Array:
+  """Stacks causal_conv1d's per-token rows, each [seq, 1, dim], into its [seq, chunk, 1, dim] output.
+
+  dense=False is jnp.stack(out_list, axis=1). The stacked value's second-minor dimension is 1, and the TPU compiler
+  of the October 2026 Pathways build (and of the libtpu 0.0.51 nightlies) lays it out in (8, 128) tiles padded from
+  1 to 8 sublanes. The SiLU that wrapper.inner_kernel applies next inherits that layout, so its exp and reciprocal
+  run on 8x as many vector registers as the data fills. Older compilers keep the value in dense (1, 128) tiles.
+
+  dense=True (config gdn_conv1d_dense_token_stack) views each [1, 1, dim] float32 row as [dim / 1024, 8, 128], which
+  is free because the row already fills dim / 1024 registers, concatenates the views along the leading axis and
+  reshapes the result to [1, chunk, 1, dim]. The values and their order are the same; only the layout the compiler
+  chooses changes, and it stays dense on old and new compilers alike. Requires seq == 1 (GDNMode.PER_SEQ), float32
+  rows and dim a multiple of DENSE_TOKEN_STACK_ALIGNMENT.
+  """
+  if not dense:
+    return jnp.stack(out_list, axis=1)
+  row = out_list[0]
+  if row.shape[0] != 1 or row.size % DENSE_TOKEN_STACK_ALIGNMENT or jnp.dtype(row.dtype).itemsize != 4:
+    raise ValueError(
+        "gdn_conv1d_dense_token_stack needs one sequence per tile and float32 rows whose size is a multiple of"
+        f" {DENSE_TOKEN_STACK_ALIGNMENT}, got a {jnp.dtype(row.dtype)} row of shape {row.shape}."
+    )
+  dense_rows = jnp.concatenate([o.reshape(-1, _F32_VREG_SUBLANES, _VREG_LANES) for o in out_list], axis=0)
+  return dense_rows.reshape(row.shape[0], len(out_list), *row.shape[1:])
+
 
 def encode_segment_ids(
     segment_ids: jax.Array,
@@ -296,4 +328,4 @@ def causal_conv1d(
         new_conv_state,
     )
 
-  return jnp.stack(out_list, axis=1), new_conv_state
+  return stack_conv1d_tokens(out_list, cfg.conv_dense_token_stack), new_conv_state
