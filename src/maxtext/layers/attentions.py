@@ -75,6 +75,40 @@ from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, lo
 # pytype: disable=attribute-error
 
 
+def _row_major(x):
+  try:
+    from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
+  except ImportError:  # older JAX
+    return x
+  if not isinstance(x, jax.core.Tracer):
+    return x
+  return with_layout_constraint(x, Layout(major_to_minor=tuple(range(x.ndim))))
+
+
+@jax.custom_vjp
+def _pin_row_major_with_cotangent(x):
+  """Identity that constrains `x` and its cotangent to the default (row-major) XLA layout.
+
+  Under Ulysses the attention backward wants the hidden-state gradient tokens-minor, for the
+  [B, S, H, D] -> [B, H, S, D] transpose ahead of the inverse all-to-all. Without a pin XLA carries that
+  layout out through the residual add into the neighbouring MoE layers, where it transposes the
+  expert-parallel-gathered token buffer (8x the local tokens) in front of the token reduce-scatter. Pinning
+  the attention block's input and output keeps the relayout on the attention-local tensors.
+  """
+  return _row_major(x)
+
+
+def _pin_row_major_fwd(x):
+  return _row_major(x), None
+
+
+def _pin_row_major_bwd(_, g):
+  return (_row_major(g),)
+
+
+_pin_row_major_with_cotangent.defvjp(_pin_row_major_fwd, _pin_row_major_bwd)
+
+
 @dataclasses.dataclass(repr=False)
 class L2Norm(nnx.Module):
   """
@@ -1161,6 +1195,13 @@ class Attention(nnx.Module):
           inputs_q, inputs_kv, inputs_positions, decoder_segment_ids, use_shared_kv=use_shared_kv
       )
 
+    pin_layout = (
+        model_mode == MODEL_MODE_TRAIN and self.config.context_parallel_strategy.lower() == "ulysses" and not use_shared_kv
+    )
+    if pin_layout:
+      same_kv = inputs_kv is inputs_q
+      inputs_q = _pin_row_major_with_cotangent(inputs_q)
+      inputs_kv = inputs_q if same_kv else _pin_row_major_with_cotangent(inputs_kv)
     inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
     inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
     qkv_sharding = create_sharding(self.mesh, input_axis_names)
@@ -1284,6 +1325,8 @@ class Attention(nnx.Module):
       out = self.attention_op.reorder_for_attention_load_balance(out, to_natural=True)
     if getattr(self.config, "distill_beta", 0.0) > 0.0:
       self.sow(nnx.Intermediate, "out_projection_activations", out)
+    if pin_layout:
+      out = _pin_row_major_with_cotangent(out)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
 
