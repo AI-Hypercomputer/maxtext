@@ -334,7 +334,8 @@ Three decisions worth knowing:
 ### `store.py` - the append-only store on disk
 
 Where a row lives, whether it is there already, and how a reader gets the current version
-back. No network, no metric.
+back. No network, no metric: it never imports `github.py`, `runs.py` or `junit.py`, so it
+runs with no network module and no `requests` installed.
 
 ```
 <out>/data/<kind>-YYYY-MM.ndjson         one JSON object a line, appended, never edited
@@ -348,19 +349,23 @@ No data file grows past 40 MB (`store.MAX_PART_BYTES`), because GitHub blocks an
 dashboard can no longer show (older than its 90-day window), so the store holds four months
 at most.
 
-Five rules hold it up, and the module docstring states them in full:
+Six rules hold it up:
 
 1. **Append-only, with corrections.** A wrong number is fixed by a second line with the same
-   key and a later `collected_at`; `read` returns the last row per key. One kind corrects
-   itself without being asked - a rescue is keyed by the failure, not the outcome, so the
-   tick that later sees the re-run rewrites it (`MUTABLE_KINDS`).
+   key and a later `collected_at`; `read` returns the last row per key, and a tie goes to
+   the later file, then the later line. One kind corrects itself without being asked - a
+   rescue is keyed by the failure, not the outcome, so the tick that later sees the re-run
+   rewrites it (`MUTABLE_KINDS`).
 2. **Writes are atomic per file.** Everything lands in a temporary file and is renamed into
    place, so a killed tick leaves either the old file or the new one. `Store.sweep_temp`
-   clears the temporary file a killed tick left behind.
+   clears the temporary file a killed tick left behind. An append copies the file it
+   extends, so pass a tick's rows in as few `append` calls as you can.
 3. **`state.json` is an index, not the truth.** It records run attempts, never rows, keeps
    the newest `MAX_INDEXED_RUNS` run ids, and can be deleted: `load_state` rebuilds it by
    scanning the stored rows. The rebuild reads the job files too, because a run row on its
-   own only proves a tick started that attempt, not that it finished it.
+   own only proves a tick started that attempt, not that it finished it. It cannot rebuild
+   the in-flight list, so the tick after a rebuild re-asks the last day
+   (`REBUILD_REWIND_HOURS`); that is cheap, because `append` skips rows it already has.
 4. **Missing is None, never zero.** Rows pass through exactly as `rows.py` built them.
 5. **A month closes once.** A tick appends only to the month of the run it is reading.
    `compact_month` can be run once against a closed month, and running it twice changes

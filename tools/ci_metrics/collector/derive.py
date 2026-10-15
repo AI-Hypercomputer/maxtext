@@ -273,7 +273,7 @@ def parse_execute_tests_name(name: Any) -> tuple[str, int] | None:
 
 
 def flavor_of(job: Job) -> str | None:
-  """Returns the test flavor a job belongs to, from the last segment of its name."""
+  """Returns the last segment of a job's name: a test flavor, or a name like "Build Wheel" for jobs that run no tests."""
   name = job.get("name")
   if not isinstance(name, str) or " / " not in name:
     return None
@@ -284,7 +284,7 @@ def flavor_of(job: Job) -> str | None:
 
 
 def jobs_for_flavor(jobs: Iterable[Job], flavor: str) -> list[Job]:
-  """Picks out the jobs that ran one flavor's tests."""
+  """Picks out the jobs named for one flavor, including never-started and carried-over ones."""
   return [job for job in jobs if flavor_of(job) == flavor]
 
 

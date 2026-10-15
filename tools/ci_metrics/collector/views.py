@@ -740,6 +740,8 @@ def _claim_pull_request(data: MonthData, run: rows.RunRow) -> None:
 
 def _job_flavor(job: Mapping[str, Any], flavors: set[str]) -> tuple[str | None, int | None]:
   """Returns the test flavor and worker number a job ran, or (None, None)."""
+  # `derive.flavor_of` also answers "Build Wheel" and "Pre-commit Linters". A name counts as a flavor only if it
+  # is in `flavors`, the allowlist from `derive.test_flavors`.
   parsed = derive.parse_execute_tests_name(job.get("name"))
   if parsed is not None and parsed[0] in flavors:
     return parsed[0], parsed[1]
