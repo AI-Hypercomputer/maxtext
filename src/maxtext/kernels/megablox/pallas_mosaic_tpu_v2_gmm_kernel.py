@@ -254,6 +254,10 @@ class GmmConfigs:
   # Output is stored as [size_m, out_size_n // 128, 128] (one contiguous slab
   # per row); tiles are relayouted from [tile_m, tile_n] inside VMEM.
   out_is_3d: bool = False
+  # With fuse_act: also write the two halves of the accumulator before the
+  # activation (gate and up), each [size_m, out_size_n] in out_dtype, next to
+  # the activation output. The backward of the activation needs them.
+  return_pre_act: bool = False
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -538,7 +542,16 @@ def inner_kernel(
     acc_ref: Reference to the accumulator.
     metadata_ref: Reference to the metadata.
     cfgs: GmmConfigs.
+
+  With cfgs.return_pre_act, tiled_out_ref and partial_out_ref are (act, gate,
+  up) triples. The activation takes the regular store path; gate and up are
+  stored from the same accumulator before the activation is applied.
   """
+
+  pre_act_refs = ()
+  if cfgs.return_pre_act:
+    (tiled_out_ref, *tiled_pre_act_refs), (partial_out_ref, *partial_pre_act_refs) = tiled_out_ref, partial_out_ref
+    pre_act_refs = tuple(zip(tiled_pre_act_refs, partial_pre_act_refs))
 
   def _matmul(is_first_k_step: bool, is_last_k_step: bool):
     tpu_info = pltpu.get_tpu_info()
@@ -773,6 +786,12 @@ def inner_kernel(
           ps_tile = tiled_ps_ref[...].reshape(acc.shape)  # pyrefly: ignore[unsupported-operation]
         acc += ps_tile.astype(acc.dtype)
 
+      if pre_act_refs:
+        # acc is [tile_m, 2 * tile_n] = gate | up. Store both halves before the activation, rounded to the
+        # output dtype exactly as the unfused kernel rounds its output; the activation below stays in f32.
+        for (tiled_pre_ref, partial_pre_ref), acc_half in zip(pre_act_refs, jnp.split(acc, 2, -1)):
+          _store_group_rows(tiled_pre_ref, partial_pre_ref, acc_half, metadata_ref, cfgs)
+
       acc = apply_act_fn(acc, cfgs.fuse_act)
 
       gm_id = pl.program_id(cfgs.gm_axis)
@@ -878,6 +897,42 @@ def inner_kernel(
           matmul_last,
           matmul,
       ),
+  )
+
+
+def _store_group_rows(
+    tiled_ref: jax.Array,  # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
+    partial_ref: jax.Array,  # [size_lhs_sublane, tile_n]
+    acc: jax.Array,  # [tile_m, tile_n]
+    metadata_ref: MetadataRef,
+    cfgs: GmmConfigs,
+):
+  """Stores the current group's rows of `acc` into a 2D output tile, with the partial-row carry.
+
+  The same steps as the 2D store at the end of inner_kernel's last k step: zero
+  the rows of other groups, round to the output dtype, add the sublane rows the
+  previous gm tile left in `partial_ref`, and leave this tile's unfinished last
+  sublane rows there for the next one. Used for the extra (return_pre_act)
+  outputs written from the same accumulator.
+  """
+  gm_id = pl.program_id(cfgs.gm_axis)
+  m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+  m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+  m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
+  m_start_local = m_start - m_offset
+  m_end_local = m_end - m_offset
+
+  iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0)
+  mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
+  tiled_ref[...] = jnp.where(mask, acc, 0).reshape(tiled_ref.shape).astype(tiled_ref.dtype)
+
+  partial_zeros = jnp.zeros_like(partial_ref)
+  tiled_ref[0] += jnp.where(gm_id == 0, partial_zeros, partial_ref[...])
+  last_row = m_end_local // cfgs.dims.size_lhs_sublane
+  partial_ref[...] = jnp.where(
+      m_end_local % cfgs.dims.size_lhs_sublane == 0,
+      partial_zeros,
+      tiled_ref[last_row],
   )
 
 
@@ -1077,6 +1132,8 @@ def kernel_main(
     semaphore_ref: jax.Array | None,  # [1]
     *,
     cfgs: GmmConfigs,
+    pre_act_out_refs: tuple[jax.Array, ...] = (),  # return_pre_act: (gate, up) outputs, each shaped like out_ref
+    pre_act_partial_refs: tuple[jax.Array, ...] = (),  # return_pre_act: their partial-row scratch
 ):
   """Entry point for GMM kernel.
 
@@ -1132,8 +1189,22 @@ def kernel_main(
         num_gm,
         dims=cfgs.dims,
     )
+    # The pre-activation outputs have the act output's shape, so they zero the same rows with DMAs of the
+    # same size on the same semaphore; zero_out_end below waits for them one output at a time.
+    for pre_act_out_ref in pre_act_out_refs:
+      zero_out_start(
+          pre_act_out_ref,
+          zero_ref,  # pyrefly: ignore[bad-argument-type]
+          semaphore_ref,  # pyrefly: ignore[bad-argument-type]
+          metadata_ref,
+          num_gm,
+          dims=cfgs.dims,
+      )
 
   (lhs_spec, rhs_spec, ps_spec), out_spec = generate_block_specs(metadata_ref, cfgs)
+  if pre_act_out_refs:
+    # (act, gate, up) tiles share one index map; inner_kernel receives them as one tuple.
+    out_spec = ((out_spec,) * (1 + len(pre_act_out_refs)),)
 
   if cfgs.fuse_act is not None:
     if cfgs.transpose_rhs:
@@ -1174,10 +1245,54 @@ def kernel_main(
   # Works for both [size_m, size_n] and the 3D [size_m, D0, 128] output.
   out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, *out_ref.shape[1:])
   scratches = [partial_out_ref, acc_ref, metadata_ref]
+  if pre_act_out_refs:
+    out_in = (out_in, *(r.reshape(-1, cfgs.dims.size_lhs_sublane, *r.shape[1:]) for r in pre_act_out_refs))
+    scratches[0] = (partial_out_ref, *pre_act_partial_refs)
   pipeline_fn(lhs_in, rhs_ref, ps_in, out_in, scratches=scratches)
 
   if cfgs.zero_init:
     zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)  # pyrefly: ignore[bad-argument-type, unbound-name]
+    for pre_act_out_ref in pre_act_out_refs:
+      # pyrefly: ignore[bad-argument-type, unbound-name]
+      zero_out_end(pre_act_out_ref, semaphore_ref, zero_size, dims=cfgs.dims)
+
+
+def kernel_main_pre_act(
+    lhs_group_sizes_ref: jax.Array,
+    group_offset_ref: jax.Array,
+    lhs_ref: LhsRef,
+    rhs_ref: WeightsRef,
+    partial_sum_ref: jax.Array,
+    out_ref: jax.Array,  # act: [size_m, size_n // 2]
+    gate_out_ref: jax.Array,  # gate before the activation: [size_m, size_n // 2]
+    up_out_ref: jax.Array,  # up before the activation: [size_m, size_n // 2]
+    partial_out_ref: jax.Array,
+    acc_ref: jax.Array,
+    metadata_ref: MetadataRef,
+    zero_ref: jax.Array | None,
+    semaphore_ref: jax.Array | None,
+    partial_gate_ref: jax.Array,  # [size_lhs_sublane, tile_n]
+    partial_up_ref: jax.Array,  # [size_lhs_sublane, tile_n]
+    *,
+    cfgs: GmmConfigs,
+):
+  """kernel_main for return_pre_act: pallas_call passes the gate and up outputs right after act."""
+  kernel_main(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      lhs_ref,
+      rhs_ref,
+      partial_sum_ref,
+      out_ref,
+      partial_out_ref,
+      acc_ref,
+      metadata_ref,
+      zero_ref,
+      semaphore_ref,
+      cfgs=cfgs,
+      pre_act_out_refs=(gate_out_ref, up_out_ref),
+      pre_act_partial_refs=(partial_gate_ref, partial_up_ref),
+  )
 
 
 def calculate_tiling(
@@ -1395,6 +1510,8 @@ def get_cost_estimate(cfgs: GmmConfigs):
     rhs_bytes += dims.size_group * dims.size_n * fp32_bytes
 
   out_bytes = dims.size_m * cfgs.out_size_n * cfgs.out_dtype.itemsize
+  if cfgs.return_pre_act:
+    out_bytes *= 3  # act, gate and up
 
   total_bytes = lhs_bytes + rhs_bytes + out_bytes
 
@@ -1406,6 +1523,7 @@ def get_cost_estimate(cfgs: GmmConfigs):
 
 
 def get_scope_name(cfgs: GmmConfigs) -> str:
+  """The kernel's named scope: its dims, tiles and the flags that change the kernel."""
   dims = cfgs.dims
   tiles = cfgs.tiles
   scope_name = (
@@ -1414,6 +1532,8 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
   )
   if cfgs.transpose_rhs:
     scope_name += "-transpose_rhs"
+  if cfgs.return_pre_act:
+    scope_name += "-pre_act"
   return scope_name
 
 
@@ -1436,6 +1556,7 @@ def make_gmm_configs(
     lhs_scale: jax.Array | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    return_pre_act: bool = False,
 ):
   """Fills the GMM config for the GMM kernel."""
 
@@ -1562,6 +1683,8 @@ def make_gmm_configs(
       raise ValueError(f"3D out requires an even tile_m; got {tiles=}.")
   elif partial_sum is not None and partial_sum.ndim == 3:
     raise ValueError("A 3D partial_sum requires out_is_3d=True.")
+  if return_pre_act and (fuse_act is None or out_is_3d or partial_sum is not None):
+    raise NotImplementedError("return_pre_act needs fuse_act and a 2D output, and no partial_sum.")
 
   return GmmConfigs(
       dims=dims,
@@ -1575,11 +1698,15 @@ def make_gmm_configs(
       fuse_act=fuse_act,
       transpose_rhs=transpose_rhs,
       out_is_3d=out_is_3d,
+      return_pre_act=return_pre_act,
   )
 
 
 def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
+  """The kernel config flattened to the pallas_call metadata dict."""
   cfgs_dict = dataclasses.asdict(cfgs)
+  if not cfgs.return_pre_act:
+    del cfgs_dict["return_pre_act"]  # keeps the metadata of every other gmm_v2 call unchanged
   ret = {}
   for path, val in jax.tree_util.tree_leaves_with_path(cfgs_dict):
     key = jax.tree_util.keystr(path, simple=True, separator=".")
@@ -1601,6 +1728,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "fuse_act",
         "transpose_rhs",
         "out_is_3d",
+        "return_pre_act",
     ]
 )
 def gmm_v2(
@@ -1623,7 +1751,8 @@ def gmm_v2(
     fuse_act: str | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
-) -> jax.Array:
+    return_pre_act: bool = False,
+) -> jax.Array | tuple[jax.Array, jax.Array, jax.Array]:
   """GMM kernel implemented with emit_pipeline.
 
   Dynamically calculate offset lhs/out tiles to reduce redundant computations.
@@ -1661,9 +1790,16 @@ def gmm_v2(
       Both require tile_k / tile_n to be a multiple of 128 that divides the
       dim. Tiles whose D0 (tile // 128) is not a multiple of 8 use full-D0
       blocks and relayout the tile window in VMEM.
+    return_pre_act: With fuse_act, also return the gate and up halves of the
+      matmul before the activation (what the activation's backward needs), each
+      rounded to the output dtype as the unfused kernel rounds them. The
+      activation itself is computed from the f32 accumulator. 2D output only,
+      no partial_sum.
 
   Returns:
-    Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]).
+    Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]); with
+    fuse_act the output width is size_n // 2. With return_pre_act, the tuple
+    (act, gate, up), each of shape [size_m, size_n // 2].
   """
 
   del precision
@@ -1695,6 +1831,7 @@ def gmm_v2(
       lhs_scale=lhs_scale,
       transpose_rhs=transpose_rhs,
       out_is_3d=out_is_3d,
+      return_pre_act=return_pre_act,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
@@ -1775,6 +1912,9 @@ def gmm_v2(
     ]
   else:
     scratch_shapes += [None, None]
+  if cfgs.return_pre_act:
+    # Partial-row carries of the gate and up outputs (kernel_main_pre_act takes them last).
+    scratch_shapes += [pltpu.VMEM(partial_out_shape, cfgs.out_dtype) for _ in range(2)]
 
   aligned_n = align_to(cfgs.out_size_n, num_lanes)
   if cfgs.out_is_3d:
@@ -1794,9 +1934,11 @@ def gmm_v2(
     partial_sum_idx = sum(1 for x in leaves if x is not None)
     input_output_aliases = {partial_sum_idx: 0}
 
+  out_spec = pl.BlockSpec(memory_space=pltpu.HBM)
   out = pl.pallas_call(
-      functools.partial(kernel_main, cfgs=cfgs),
-      out_shape=out_init,
+      functools.partial(kernel_main_pre_act if cfgs.return_pre_act else kernel_main, cfgs=cfgs),
+      # return_pre_act: (act, gate, up), all of act's shape.
+      out_shape=(out_init,) * 3 if cfgs.return_pre_act else out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
           in_specs=[
@@ -1811,7 +1953,7 @@ def gmm_v2(
               ),
               partial_sum_spec,
           ],
-          out_specs=pl.BlockSpec(memory_space=pltpu.HBM),
+          out_specs=(out_spec,) * 3 if cfgs.return_pre_act else out_spec,
           scratch_shapes=scratch_shapes,  # pyrefly: ignore[bad-argument-type]
       ),
       compiler_params=pltpu.CompilerParams(
@@ -1823,6 +1965,8 @@ def gmm_v2(
       metadata=get_metadata(cfgs),  # pyrefly: ignore[bad-argument-type]
       input_output_aliases=input_output_aliases,
   )(group_sizes, group_offset, lhs_in, rhs_weights, partial_sum)
+  if cfgs.return_pre_act:
+    return tuple(o[:, : cfgs.out_size_n] for o in out)
   if cfgs.out_is_3d:
     return out
   return out[:, : cfgs.out_size_n]

@@ -327,6 +327,11 @@ moe_unsplit_prefused_wi: false
 # With prefuse_moe_weights on the sparse-matmul path: the activation on the whole [gate | up] up-projection output as
 # one custom-VJP op whose backward writes d[gate | up] in one pass. Same values.
 moe_prefused_swiglu_vjp: false
+# The MoE SwiGLU in the wi GMM epilogue (megablox gmm_silu, tokamax gmm_v2): the forward kernel writes the
+# [buffer, mlp] activation instead of the [buffer, 2 * mlp] GMM output (differentiated: act, gate and up, i.e.
+# [buffer, 3 * mlp]). Numerics change: silu reads the float32 accumulator.
+# Needs prefuse_moe_weights, use_tokamax_gmm and use_gmm_v2, silu+linear without clipping, no bias or quantization.
+moe_wi_gmm_fused_swiglu: false
 fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference/rollout
 # Keep routed-expert weights in weight_dtype but round them in the forward pass to the per-channel FP8 grid
 # fp8_moe stores them on, with straight-through gradients: the trainer computes with the rollout's weights.
