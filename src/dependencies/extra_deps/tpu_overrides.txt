@@ -3,4 +3,4 @@ fsspec==2026.2.0
 gcsfs==2026.2.0
 orbax-checkpoint>=0.12.4
 markdown>=3.10.2
-xprof<=2.23.0
+xprof>=2.23.1

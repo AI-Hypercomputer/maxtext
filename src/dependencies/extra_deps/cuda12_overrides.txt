@@ -3,4 +3,23 @@ fsspec==2026.2.0
 gcsfs==2026.2.0
 orbax-checkpoint>=0.12.1
 markdown>=3.10.2
-xprof<=2.23.0
+xprof>=2.23.1
+# transformer-engine-jax ships only as an sdist and is compiled at install time.
+# 2.20.x reworked its CUDA/NCCL/XLA build discovery and fails to install on the
+# MaxText GPU CI image; hold the Transformer Engine stack at the last version
+# that builds there until it can be upgraded separately. Note that
+# generate_requirements.sh rewrites == into >= floors in
+# generated_requirements/cuda12-requirements.txt, so this pin relies on
+# `uv pip install --resolution=lowest` (used by setup.sh and GPU CI).
+transformer-engine==2.19.0
+transformer-engine-cu12==2.19.0
+transformer-engine-jax==2.19.0
+# tokamax>=0.0.15 imports `cutlass` (via its CuTeDSL gated linear unit) whenever
+# nvidia-cudnn-frontend/nvidia-cutlass-dsl are installed, and importing cutlass
+# inserts cutlass/base_dsl into sys.path. transformers then resolves
+# `import torch` to cutlass/base_dsl/torch.py in torch-less GPU installs, so
+# every MaxText module that imports transformers fails to import. Hold the GPU
+# environment at 0.0.14 until tokamax stops leaking that sys.path entry.
+# Like the Transformer Engine pin, this relies on --resolution=lowest (see
+# docs/install_maxtext.md).
+tokamax==0.0.14
