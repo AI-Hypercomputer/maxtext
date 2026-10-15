@@ -14,7 +14,11 @@
 
 """Utilities for Learn-to-Init phase of the distillation"""
 
+from typing import Callable
+
 from flax import nnx
+import jax
+import jax.numpy as jnp
 from maxtext.utils import max_logging
 import re
 
@@ -47,6 +51,66 @@ def _nav_to_attr(root, parts):
         f"nnx.graph.iter_graph output for this model."
     )
   return obj
+
+
+def _set_child(parent, name: str, value) -> None:
+  if hasattr(parent, name):
+    setattr(parent, name, value)
+  else:
+    parent[name] = value
+
+
+def share_frozen_params(
+    student_model: nnx.Module,
+    teacher_model: nnx.Module,
+    is_frozen: Callable[[tuple], bool],
+) -> int:
+  """Makes frozen student params reference the identical teacher params, so they are stored once.
+
+  A student `nnx.Param` is replaced by the teacher's `nnx.Param` Variable at the
+  same graph path only if `is_frozen(path)` is True and both arrays have the same
+  shape, dtype, sharding and values. Afterwards both models hold the same
+  Variable, so the array is stored once in device memory. Trainable params
+  (`is_frozen(path)` False) are never shared, and params that differ from the
+  teacher's (e.g. pruned or sparsified) keep their own value.
+
+  Args:
+    student_model: The student model, modified in place.
+    teacher_model: The teacher model whose params are reused.
+    is_frozen: Returns True for student param paths (tuples of path components)
+      that are not trained.
+
+  Returns:
+    The number of shared params.
+  """
+  teacher_params = {path: node for path, node in nnx.graph.iter_graph(teacher_model) if isinstance(node, nnx.Param)}
+  candidates = [
+      (path, node)
+      for path, node in nnx.graph.iter_graph(student_model)
+      if isinstance(node, nnx.Param) and is_frozen(path) and path in teacher_params
+  ]
+  num_shared = 0
+  num_skipped = 0
+  for path, student_node in candidates:
+    teacher_node = teacher_params[path]
+    if student_node is teacher_node:
+      continue
+    s_val, t_val = student_node.get_value(), teacher_node.get_value()
+    same_layout = (
+        s_val.shape == t_val.shape
+        and s_val.dtype == t_val.dtype
+        and getattr(s_val, "sharding", None) == getattr(t_val, "sharding", None)
+    )
+    if not same_layout or not bool(jax.jit(jnp.array_equal)(s_val, t_val)):
+      num_skipped += 1
+      continue
+    _set_child(_nav_to_attr(student_model, [str(p) for p in path[:-1]]), str(path[-1]), teacher_node)
+    num_shared += 1
+  max_logging.log(
+      f"share_frozen_params: shared {num_shared} frozen student params with the teacher; {num_skipped} candidates "
+      "kept their own copy because shape, dtype, sharding or values differ."
+  )
+  return num_shared
 
 
 def prepare_student_weights(

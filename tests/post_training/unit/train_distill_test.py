@@ -37,9 +37,9 @@ from absl.testing import absltest
 # Import the module under test
 from maxtext.trainers.post_train.distillation import train_distill
 from maxtext.trainers.post_train.distillation import distillation_utils
+from maxtext.trainers.post_train.distillation import lti_utils
 from maxtext.configs import pyconfig
 from tests.utils.test_helpers import get_test_config_path
-
 
 DEFAULT_DATA_SHARDING = [
     "data",
@@ -192,11 +192,11 @@ class TrainDistillTest(unittest.TestCase):
     optimizer, inputs = mock.Mock(), mock.Mock()
 
     # 4. Configure nnx.split/merge/update mocks
-    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
-    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+    mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest)
 
     # 5. Configure mocked jax.value_and_grad
-    # _train_step uses: (loss, (aux, new_rest)), grads = grad_fn(diff_params, rest)
+    # _train_step uses: (loss, (aux, new_rest)), grads = grad_fn(diff_params, frozen_params, rest)
     mock_loss, mock_aux, mock_grads = mock.Mock(), {}, mock.Mock()
     mock_grad_fn = mock.Mock(return_value=((mock_loss, (mock_aux, mock.Mock())), mock_grads))
     mock_value_and_grad.return_value = mock_grad_fn
@@ -206,8 +206,8 @@ class TrainDistillTest(unittest.TestCase):
     # 6. Execute outer function & trigger inner loss_wrapper_pure
     trainer._train_step(model_bundle, optimizer, None, inputs)
     loss_wrapper = mock_value_and_grad.call_args[0][0]
-    # loss_wrapper_pure signature is (diff_params, rest), not (student, teacher, batch)
-    loss_wrapper(mock_diff_params, mock_rest)
+    # loss_wrapper_pure signature is (diff_params, frozen_params, rest), not (student, teacher, batch)
+    loss_wrapper(mock_diff_params, mock_frozen_params, mock_rest)
 
     # 7. Assertions
     trainer.strategy.teacher_forward_fn.assert_not_called()
@@ -255,11 +255,11 @@ class TrainDistillTest(unittest.TestCase):
     optimizer, inputs = mock.Mock(), mock.Mock()
 
     # 4. Configure nnx.split/merge/update mocks
-    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
-    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+    mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest)
 
     # 5. Configure mocked jax.value_and_grad
-    # _train_step uses: (loss, (aux, new_rest)), grads = grad_fn(diff_params, rest)
+    # _train_step uses: (loss, (aux, new_rest)), grads = grad_fn(diff_params, frozen_params, rest)
     mock_loss, mock_aux, mock_grads = mock.Mock(), {}, mock.Mock()
     mock_grad_fn = mock.Mock(return_value=((mock_loss, (mock_aux, mock.Mock())), mock_grads))
     mock_value_and_grad.return_value = mock_grad_fn
@@ -270,8 +270,8 @@ class TrainDistillTest(unittest.TestCase):
     # 6. Execute outer function & trigger inner loss_wrapper_pure
     train_step_out = trainer._train_step(model_bundle, optimizer, None, inputs)
     loss_wrapper = mock_value_and_grad.call_args[0][0]
-    # loss_wrapper_pure signature is (diff_params, rest), not (student, teacher, batch)
-    loss_wrapper(mock_diff_params, mock_rest)
+    # loss_wrapper_pure signature is (diff_params, frozen_params, rest), not (student, teacher, batch)
+    loss_wrapper(mock_diff_params, mock_frozen_params, mock_rest)
 
     # 7. Assertions
     # Teacher forward is called OUTSIDE value_and_grad in _train_step
@@ -344,11 +344,11 @@ class TrainDistillTest(unittest.TestCase):
     optimizer, inputs = mock.Mock(), mock.Mock()
 
     # 4. Configure nnx.split/merge/update mocks
-    mock_graphdef, mock_diff_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock()
-    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_rest)
+    mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest = mock.Mock(), mock.Mock(), mock.Mock(), mock.Mock()
+    mock_split.return_value = (mock_graphdef, mock_diff_params, mock_frozen_params, mock_rest)
 
     # 5. Configure mocked jax.value_and_grad
-    # _train_step uses: (loss, (aux, new_rest)), grads = grad_fn(diff_params, rest)
+    # _train_step uses: (loss, (aux, new_rest)), grads = grad_fn(diff_params, frozen_params, rest)
     mock_grad_fn = mock.Mock(return_value=((mock.Mock(), ({}, mock.Mock())), mock.Mock()))
     mock_value_and_grad.return_value = mock_grad_fn
     mock_global_norm.return_value = mock.Mock()
@@ -357,8 +357,8 @@ class TrainDistillTest(unittest.TestCase):
     # 6. Execute outer function & trigger inner loss_wrapper_pure
     trainer._train_step(model_bundle, optimizer, None, inputs)
     loss_wrapper = mock_value_and_grad.call_args[0][0]
-    # loss_wrapper_pure signature is (diff_params, rest), not (student, teacher, batch)
-    loss_wrapper(mock_diff_params, mock_rest)
+    # loss_wrapper_pure signature is (diff_params, frozen_params, rest), not (student, teacher, batch)
+    loss_wrapper(mock_diff_params, mock_frozen_params, mock_rest)
 
     # 7. Assertions
     trainer.strategy.create_labels.assert_called_once_with(
@@ -455,9 +455,8 @@ class TrainDistillTest(unittest.TestCase):
         out_projection_activations=jnp.ones((32, 1, 1, 8)),
     )
 
-    # Labels must be One-Hot Encoded to match logits shape (1, 2, 4)
-    labels_indices = jnp.array([[0, 1]])
-    labels = jax.nn.one_hot(labels_indices, 4)
+    # Integer labels (batch=1, seq=2) with every position valid.
+    labels = distillation_utils.Labels(targets=jnp.array([[0, 1]], dtype=jnp.int32), mask=jnp.ones((1, 2)))
 
     # Run calculation
     _, metrics = strategy.compute_loss(student_output, teacher_output, labels)
@@ -507,7 +506,7 @@ class TrainDistillTest(unittest.TestCase):
     logits = distillation_utils.DistillationForwardOutput(
         logits=jnp.array([[[10.0, 0.0]]]), out_projection_activations=np.ones((32, 1, 1, 8))
     )
-    labels = jnp.array([[[1.0, 0.0]]])
+    labels = distillation_utils.Labels(targets=jnp.array([[0]], dtype=jnp.int32), mask=jnp.ones((1, 1)))
 
     loss, aux = strategy.compute_eval_loss(logits, labels)
     self.assertTrue(isinstance(loss, jax.Array))
@@ -517,7 +516,7 @@ class TrainDistillTest(unittest.TestCase):
     logits = distillation_utils.DistillationForwardOutput(
         logits=jnp.array([[[10.0, 0.0]]]), out_projection_activations=None
     )
-    labels = jnp.array([[[1.0, 0.0]]])
+    labels = distillation_utils.Labels(targets=jnp.array([[0]], dtype=jnp.int32), mask=jnp.ones((1, 1)))
 
     loss, aux = strategy.compute_eval_loss(logits, labels)
     self.assertTrue(isinstance(loss, jax.Array))
@@ -718,11 +717,12 @@ class TrainDistillTest(unittest.TestCase):
     mock_trainer.optimizer = mock.Mock()
     mock_trainer._lora_enabled = False
 
-    mock_iter = object()  # No save method
+    mock_iter = iter(range(20))  # No save method
 
     config = mock.Mock()
     config.dataset_type = "synthetic"  # Not grain
     config.checkpoint_dir = self.test_dir
+    config.distill_save_trainable_params_only = False
 
     # Use real options
     train_config = mock.Mock()
@@ -731,9 +731,12 @@ class TrainDistillTest(unittest.TestCase):
     train_config.checkpointing_options = ocp.CheckpointManagerOptions(max_to_keep=1, create=True)
     mock_trainer.config = train_config
 
-    with mock.patch(
-        "maxtext.trainers.post_train.distillation.distillation_utils.MaxTextCheckpointManager.maybe_restore"
-    ) as mock_restore:
+    with (
+        mock.patch(
+            "maxtext.trainers.post_train.distillation.distillation_utils.MaxTextCheckpointManager.maybe_restore"
+        ) as mock_restore,
+        mock.patch.object(train_distill, "_set_optimizer_step_counters") as mock_set_counters,
+    ):
       mock_restore.return_value = (10, {})
 
       result = train_distill.MaxTextDistillationTrainer.setup_checkpoint_manager_and_restore(
@@ -742,8 +745,61 @@ class TrainDistillTest(unittest.TestCase):
 
     # Should still swap manager (to MaxTextCheckpointManager) but with None iterator
     self.assertIsInstance(mock_trainer.checkpoint_manager, distillation_utils.MaxTextCheckpointManager)
-    # Result should be original iterator
-    self.assertEqual(result, mock_iter)
+    # Result should be original iterator, advanced past the 10 batches consumed before the checkpoint.
+    self.assertIs(result, mock_iter)
+    self.assertEqual(next(result), 10)
+    # The (mocked) restore did not restore an optimizer state, so the step counters are set.
+    mock_set_counters.assert_called_once_with(mock_trainer.optimizer, 10)
+
+  def test_resume_with_restored_optimizer_keeps_counters(self):
+    """When the optimizer state is restored, its step counters are left untouched."""
+    mock_trainer = mock.Mock()
+    mock_manager = mock.Mock()
+    mock_manager.maybe_restore.return_value = (3, {})
+    mock_manager.restored_optimizer_state = True
+    train_config = mock.Mock()
+    train_config.get_with_default.return_value = 2
+    mock_trainer.config = train_config
+    config = mock.Mock()
+    config.dataset_type = "synthetic"
+    raw_iter = iter(range(10))
+    with (
+        mock.patch(
+            "maxtext.trainers.post_train.distillation.distillation_utils.MaxTextCheckpointManager",
+            return_value=mock_manager,
+        ),
+        mock.patch.object(train_distill, "_set_optimizer_step_counters") as mock_set_counters,
+    ):
+      result = train_distill.MaxTextDistillationTrainer.setup_checkpoint_manager_and_restore(
+          mock_trainer, raw_iter, config
+      )
+    mock_set_counters.assert_not_called()
+    # 3 steps x 2 gradient accumulation micro-batches were skipped.
+    self.assertEqual(next(result), 6)
+
+  @staticmethod
+  def _counters(optimizer):
+    counters = {}
+    for path, value in jax.tree_util.tree_leaves_with_path(nnx.state(optimizer, nnx.optimizer.OptState)):
+      name = train_distill._state_field_name(path)
+      if name in ("count", "gradient_step", "mini_step"):
+        counters.setdefault(name, []).append(int(value))
+    return counters
+
+  def test_set_optimizer_step_counters(self):
+    """Update counters are set to the train step and MultiSteps starts a new accumulation window."""
+    model = nnx.Linear(2, 2, rngs=nnx.Rngs(0))
+    inner = optax.inject_hyperparams(optax.adam)(learning_rate=1e-3)
+    for tx, expected in [
+        (inner, {"count": [7, 7]}),
+        (optax.MultiSteps(inner, every_k_schedule=4), {"count": [7, 7], "gradient_step": [7], "mini_step": [0]}),
+    ]:
+      optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+      if isinstance(tx, optax.MultiSteps):
+        # Put MultiSteps in the middle of an accumulation window.
+        optimizer.update(model, jax.tree.map(jnp.ones_like, nnx.state(model, nnx.Param)))
+      train_distill._set_optimizer_step_counters(optimizer, 7)
+      self.assertEqual(self._counters(optimizer), expected)
 
   def test_post_process_train_step(self):
     """Verifies metrics are moved from aux dict to the trainer buffer."""
@@ -960,6 +1016,8 @@ class TrainDistillTest(unittest.TestCase):
     config.checkpoint_dir = self.test_dir
     config.dataset_type = "synthetic"
     config.lora_enabled = False
+    config.distill_save_trainable_params_only = False
+    config.distill_skip_optimizer_checkpoint = False
 
     # pylint: disable=import-outside-toplevel
     from tunix.sft import peft_trainer
@@ -1106,6 +1164,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.distill_beta = 0.0
     mock_student_cfg.distill_layer_indices = None
     mock_student_cfg.distill_feature_loss_type = "cosine"
+    mock_student_cfg.distill_fused_lm_head = False
     mock_student_cfg.use_sft = False
     mock_student_cfg.enable_dropout = False
 
@@ -1218,6 +1277,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.distill_beta = 0.0
     mock_student_cfg.distill_layer_indices = None
     mock_student_cfg.distill_feature_loss_type = "cosine"
+    mock_student_cfg.distill_fused_lm_head = False
     mock_student_cfg.use_sft = False
     mock_student_cfg.enable_dropout = False
 
@@ -1281,6 +1341,103 @@ class TrainDistillTest(unittest.TestCase):
     # check that both student and teacher models are set since online mode should load both
     self.assertIs(model_bundle.student_model, mock_student_model)
     self.assertIs(model_bundle.teacher_model, mock_teacher_model)
+
+  def test_teacher_argv_forwards_only_batch_shape_flags(self):
+    """Student-only CLI flags must not reach the teacher config; batch-shape flags must."""
+    argv = [
+        "train_distill.py",
+        "config.yml",
+        "per_device_batch_size=2",
+        "max_target_length=64",
+        "max_prefill_predict_length=32",
+        "gradient_accumulation_steps=4",
+        "weight_sparsity_n=2",
+        "weight_sparsity_m=4",
+        "student_params_to_update=[decoder/layers_0/]",
+        "num_query_heads=16",
+        "load_parameters_path=gs://student",
+    ]
+    self.assertEqual(
+        train_distill._teacher_argv(argv),
+        [
+            "train_distill.py",
+            "config.yml",
+            "per_device_batch_size=2",
+            "max_target_length=64",
+            "max_prefill_predict_length=32",
+            "gradient_accumulation_steps=4",
+        ],
+    )
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.train_distill")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.pathwaysutils.initialize")
+  @mock.patch("maxtext.configs.pyconfig.initialize")
+  def test_main_isolates_teacher_from_student_cli_flags(self, mock_pyconfig_init, _mock_pathways, mock_train):
+    """main() builds the teacher config without student-only CLI flags."""
+    mock_global = mock.Mock()
+    mock_global.student_overrides = {"weight_sparsity_n": 2}
+    mock_global.teacher_overrides = {"load_parameters_path": "gs://teacher"}
+    mock_global.offline_data_dir = None
+    mock_global.base_output_directory = ""
+    mock_global.run_name = ""
+    mock_global.distill_beta = 0.0
+    batch_cfg = {"per_device_batch_size": 2, "max_target_length": 64, "gradient_accumulation_steps": 1}
+    mock_student_cfg = mock.Mock(distill_beta=0.0, **batch_cfg)
+    mock_teacher_cfg = mock.Mock(**batch_cfg)
+    mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
+
+    argv = [
+        "train_distill.py",
+        "config.yml",
+        "per_device_batch_size=2",
+        "max_target_length=64",
+        "weight_sparsity_n=2",
+        "student_params_to_update=[decoder/layers_0/]",
+        "load_parameters_path=gs://student",
+    ]
+    train_distill.main(argv)
+
+    student_call, teacher_call = mock_pyconfig_init.call_args_list[1:]
+    self.assertEqual(student_call.args[0], argv)
+    self.assertEqual(student_call.kwargs, {"weight_sparsity_n": 2})
+    self.assertEqual(
+        teacher_call.args[0], ["train_distill.py", "config.yml", "per_device_batch_size=2", "max_target_length=64"]
+    )
+    self.assertEqual(teacher_call.kwargs, {"load_parameters_path": "gs://teacher", "distill_beta": 0.0})
+    mock_train.assert_called_once_with(mock_student_cfg, mock_teacher_cfg, False, None)
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.train_distill")
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.pathwaysutils.initialize")
+  @mock.patch("maxtext.configs.pyconfig.initialize")
+  def test_main_rejects_feature_distillation_with_mixed_scan_layers(self, mock_pyconfig_init, _mock_pathways, mock_train):
+    """Scanned and unscanned models produce different feature kinds, so mixing them is rejected."""
+    mock_global = mock.Mock()
+    mock_global.student_overrides = {}
+    mock_global.teacher_overrides = {"load_parameters_path": "gs://teacher"}
+    mock_global.offline_data_dir = None
+    mock_global.base_output_directory = ""
+    mock_global.run_name = ""
+    batch_cfg = {"per_device_batch_size": 1, "max_target_length": 16, "gradient_accumulation_steps": 1}
+    mock_student_cfg = mock.Mock(distill_beta=0.1, scan_layers=False, **batch_cfg)
+    mock_teacher_cfg = mock.Mock(scan_layers=True, **batch_cfg)
+    mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
+    with self.assertRaisesRegex(ValueError, "same scan_layers"):
+      train_distill.main(["train_distill.py", "config.yml"])
+    mock_train.assert_not_called()
+
+  @mock.patch("maxtext.trainers.post_train.distillation.train_distill.pathwaysutils.initialize")
+  @mock.patch("maxtext.configs.pyconfig.initialize")
+  def test_main_requires_teacher_checkpoint_path_online(self, mock_pyconfig_init, _mock_pathways):
+    """A CLI load_parameters_path (the student's) does not satisfy the teacher checkpoint requirement."""
+    mock_global = mock.Mock()
+    mock_global.student_overrides = {}
+    mock_global.teacher_overrides = {}
+    mock_global.offline_data_dir = None
+    mock_global.base_output_directory = ""
+    mock_global.run_name = ""
+    mock_pyconfig_init.side_effect = [mock_global, mock.Mock()]
+    with self.assertRaisesRegex(ValueError, "Teacher model path is missing"):
+      train_distill.main(["train_distill.py", "config.yml", "load_parameters_path=gs://student"])
 
   @mock.patch.object(distillation_utils, "calculate_distillation_tflops_per_device", return_value=(0.0, 0.0, 0.0))
   def test_student_freeze_param_filter(self, _mock_tflops):
@@ -1432,6 +1589,7 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.distill_beta = 0.0
     mock_student_cfg.distill_layer_indices = None
     mock_student_cfg.distill_feature_loss_type = "cosine"
+    mock_student_cfg.distill_fused_lm_head = False
     mock_student_cfg.use_sft = False
     mock_student_cfg.enable_dropout = False
     mock_student_cfg.learn_to_init_mode = False
@@ -1507,6 +1665,81 @@ class TrainDistillTest(unittest.TestCase):
     """Verifies train_distill with enable_goodput_recording=False performs zero recorder calls."""
     mock_recorder = self._run_train_distill_with_goodput(enable_goodput_recording=False)
     self.assertEqual(len(mock_recorder.method_calls), 0)
+
+
+class ShareFrozenParamsTest(unittest.TestCase):
+  """Tests for lti_utils.share_frozen_params."""
+
+  class _Model(nnx.Module):
+
+    def __init__(self, seed):
+      self.frozen_a = nnx.Linear(2, 2, rngs=nnx.Rngs(seed))
+      self.frozen_b = nnx.Linear(2, 2, rngs=nnx.Rngs(seed + 1))
+      self.trainable = nnx.Linear(2, 2, rngs=nnx.Rngs(seed + 2))
+
+  @staticmethod
+  def _is_frozen(path):
+    return path[0] != "trainable"
+
+  def test_shares_identical_frozen_params_only(self):
+    teacher = self._Model(0)
+    student = self._Model(0)  # Same seeds -> identical values.
+    num_shared = lti_utils.share_frozen_params(student, teacher, self._is_frozen)
+    # frozen_a/{kernel,bias} and frozen_b/{kernel,bias}; trainable params are never shared.
+    self.assertEqual(num_shared, 4)
+    self.assertIs(student.frozen_a.kernel, teacher.frozen_a.kernel)
+    self.assertIs(student.frozen_b.bias, teacher.frozen_b.bias)
+    self.assertIsNot(student.trainable.kernel, teacher.trainable.kernel)
+    # Updating the teacher's shared Variable is visible from the student.
+    teacher.frozen_a.kernel.set_value(jnp.ones((2, 2)))
+    np.testing.assert_array_equal(student.frozen_a.kernel.get_value(), np.ones((2, 2)))
+
+  def test_skips_mismatched_dtype_shape_and_values(self):
+    teacher = self._Model(0)
+    student = self._Model(0)
+    student.frozen_a.kernel.set_value(student.frozen_a.kernel.get_value().astype(jnp.bfloat16))  # dtype differs
+    student.frozen_b.kernel.set_value(jnp.zeros((2, 3)))  # shape differs
+    student.frozen_b.bias.set_value(student.frozen_b.bias.get_value() + 1.0)  # values differ
+    self.assertEqual(lti_utils.share_frozen_params(student, teacher, self._is_frozen), 1)  # frozen_a/bias only.
+    self.assertIs(student.frozen_a.bias, teacher.frozen_a.bias)
+    self.assertIsNot(student.frozen_a.kernel, teacher.frozen_a.kernel)
+    self.assertIsNot(student.frozen_b.kernel, teacher.frozen_b.kernel)
+
+    different = self._Model(10)  # Different kernels; the zero-initialized biases are still identical.
+    self.assertEqual(lti_utils.share_frozen_params(different, teacher, self._is_frozen), 2)
+    self.assertIsNot(different.frozen_a.kernel, teacher.frozen_a.kernel)
+    self.assertIsNot(different.frozen_b.kernel, teacher.frozen_b.kernel)
+
+  def test_sharing_requires_trainable_subset_config(self):
+    with self.assertRaisesRegex(ValueError, "student_params_to_update"):
+      pyconfig.initialize(["", get_test_config_path(), "distill_share_frozen_teacher_weights=True"])
+
+
+class DistillationConfigValidationTest(unittest.TestCase):
+  """Validators for the distillation memory/efficiency config fields."""
+
+  def _init(self, *overrides):
+    return pyconfig.initialize(["", get_test_config_path(), "skip_jax_distributed_system=True", *overrides])
+
+  def test_fused_lm_head_requires_tied_embedding(self):
+    with self.assertRaisesRegex(ValueError, "logits_via_embedding"):
+      self._init("distill_fused_lm_head=True", "logits_via_embedding=False")
+
+  def test_fused_lm_head_requires_divisible_chunks(self):
+    with self.assertRaisesRegex(ValueError, "distill_lm_head_chunks"):
+      self._init(
+          "distill_fused_lm_head=True", "logits_via_embedding=True", "max_target_length=60", "distill_lm_head_chunks=8"
+      )
+
+  def test_fused_lm_head_rejects_parameter_host_offload(self):
+    with self.assertRaisesRegex(ValueError, "parameter_memory_host_offload"):
+      self._init("distill_fused_lm_head=True", "logits_via_embedding=True", "parameter_memory_host_offload=True")
+
+  def test_fused_lm_head_valid_config(self):
+    config = self._init(
+        "distill_fused_lm_head=True", "logits_via_embedding=True", "max_target_length=64", "distill_lm_head_chunks=8"
+    )
+    self.assertTrue(config.distill_fused_lm_head)
 
 
 if __name__ == "__main__":
