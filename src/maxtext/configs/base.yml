@@ -182,6 +182,9 @@ quantize_kvcache: false # set to true to quantize kv cache values, defaults to f
 #   - "dkv" is expected with better accuracy but degraded computation
 kv_quant_axis: "heads_and_dkv"
 kv_quant_dtype: "int8"
+# Keep attention K/V in dtype but round them in the training forward pass to the float8_e4m3fn grid
+# a vLLM fp8 KV cache stores them on, with straight-through gradients.
+fp8_kv_fake_quant: false
 quantize_mtp: false # set to true to quantize mtp layers when quantization is enabled. requires mtp_num_layers > 0 and quantization=fp8_full.
 quantize_router_proj: true # set to false to exclude the moe router (gate) projection matmul from quantization when quantization is enabled. default is true for backward compatibility. applicable when use_qwix_quantization=true and quantization is set; ignored otherwise.
 checkpoint_is_quantized: false # set to true if reading from a saved aqt quantized checkpoint

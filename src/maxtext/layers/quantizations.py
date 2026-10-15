@@ -187,6 +187,16 @@ def fake_quantize_weight_per_channel(w: Array, channel_axis: int = 2) -> Array:
   return w_q + (w - jax.lax.stop_gradient(w))
 
 
+def fake_quantize_kv_fp8(x: Array) -> Array:
+  """Rounds `x` to the unscaled float8_e4m3fn grid, with a straight-through gradient."""
+  finfo = jnp.finfo(jnp.float8_e4m3fn)
+  q = jnp.clip(x, float(finfo.min), float(finfo.max)).astype(jnp.float8_e4m3fn)
+  # Under jit, XLA folds the bf16 -> fp8 -> bf16 convert pair into a no-op, dropping the rounding.
+  q = jax.lax.optimization_barrier(q)
+  x_q = jax.lax.stop_gradient(q.astype(x.dtype))
+  return x_q + (x - jax.lax.stop_gradient(x))
+
+
 @dataclass
 class Quantization:
   """Base class for quantization configurations"""
