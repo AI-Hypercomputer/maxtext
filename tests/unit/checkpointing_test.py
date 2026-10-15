@@ -43,6 +43,10 @@ ocp_v0 = ocp
 pytestmark = [pytest.mark.decoupled_target]
 
 
+class _StopBeforeDownload(Exception):
+  """Raised by a mocked `HfFileSystem.glob` to stop a load before it downloads anything."""
+
+
 class BinaryChunkedStackTest(parameterized.TestCase):
   """Tests for the `_binary_chunked_stack` function."""
 
@@ -149,6 +153,35 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[1, 0], tensors["expert_1.layer_0.weight"])
     np.testing.assert_allclose(result[1, 1], tensors["expert_1.layer_1.weight"])
 
+  @parameterized.named_parameters(
+      ("single_key", "w0", (4, 4)),
+      ("single_axis_stack", ["w0", "w1"], (2, 4, 4)),
+      ("multi_axis_stack", [["w0", "w1"], ["w2", "w3"]], (2, 2, 4, 4)),
+  )
+  def test_get_hf_loading_function_returns_target_dtype(self, hf_keys, target_shape):
+    # HF checkpoints are usually bf16; every case must return the target dtype (float32 here).
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 0
+
+    tensors = {f"w{i}": np.full((4, 4), i + 0.5, dtype=jnp.bfloat16) for i in range(4)}
+    # The stacked cases index the spec by axis, so give it one entry per axis, as MaxText does.
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=target_shape,
+        dtype=np.float32,
+        sharding=NamedSharding(self.mesh, PartitionSpec(*([None] * len(target_shape)))),
+    )
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, None, target_leaf, MockConfig())()
+
+    self.assertEqual(result.shape, target_shape)
+    self.assertEqual(result.dtype, np.float32)
+    self.assertEqual(result.sharding, target_leaf.sharding)
+    first_slice = result[(0,) * (len(target_shape) - 2)]
+    np.testing.assert_array_equal(first_slice, tensors["w0"].astype(np.float32))
+
 
 class LoadDynamicTest(parameterized.TestCase):
   """Tests for cache downloads and dynamic loading of safetensors."""
@@ -240,6 +273,32 @@ class LoadDynamicTest(parameterized.TestCase):
     self.assertEqual(loaded_vars, {"params": {}})
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
+
+  @parameterized.named_parameters(
+      ("base", "llama3.1-8b"),
+      ("instruct_8b", "llama3.1-8b-Instruct"),
+      ("instruct_70b", "llama3.1-70b-Instruct"),
+  )
+  @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
+  def test_empty_path_resolves_repo_of_exact_model_name(self, model_name, mock_hf_fs):
+    # -Instruct variants have their own HF_IDS entries; using the base name would load the base
+    # model's weights.
+    mock_hf_fs.return_value.glob.side_effect = _StopBeforeDownload
+    config = mock.Mock(model_name=model_name, hf_access_token=None, base_output_directory="gs://dummy-bucket")
+
+    with self.assertRaises(_StopBeforeDownload):
+      load_dynamic.load_safetensors_dynamic_state("", {}, config)
+
+    expected_repo = load_dynamic.maxtext_globals.HF_IDS[model_name]
+    mock_hf_fs.return_value.glob.assert_called_once_with(f"{expected_repo}/*.safetensors")
+
+  def test_empty_path_without_hf_ids_entry_raises(self):
+    # HF_IDS has llama3.1-405b but no -Instruct entry for it, so this must raise instead of using the
+    # base repo.
+    config = mock.Mock(model_name="llama3.1-405b-Instruct", hf_access_token=None, base_output_directory="gs://b")
+
+    with self.assertRaisesRegex(ValueError, "No HF repo for model_name=llama3.1-405b-Instruct"):
+      load_dynamic.load_safetensors_dynamic_state("", {}, config)
 
 
 class SourceCheckpointLoadingTest(parameterized.TestCase):
