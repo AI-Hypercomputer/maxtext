@@ -335,7 +335,8 @@ moe_wi_gmm_fused_swiglu: false
 # The MoE SwiGLU backward in the epilogue of the wo (down projection) DLHS GMM (megablox gmm_dswiglu, tokamax gmm_v2):
 # the kernel writes d[gate | up] from its float32 accumulator instead of d act in bf16. Numerics change: the derivative
 # reads the float32 accumulator. Same requirements as moe_wi_gmm_fused_swiglu, plus no TC ragged sort, and one n tile:
-# wo_tile_dlhs_mlp_dim = the per-shard MoE MLP dim (with moe_wi_gmm_fused_swiglu, wi_tile_fwd_mlp_dim >= 2x that dim).
+# wo_tile_dlhs_mlp_dim = the per-shard MoE MLP dim (with moe_wi_gmm_fused_swiglu, explicit tiles and a
+# wi_tile_fwd_mlp_dim whose half is that dim or a multiple of 128 dividing it).
 moe_wo_gmm_fused_dswiglu: false
 fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference/rollout
 # Keep routed-expert weights in weight_dtype but round them in the forward pass to the per-channel FP8 grid

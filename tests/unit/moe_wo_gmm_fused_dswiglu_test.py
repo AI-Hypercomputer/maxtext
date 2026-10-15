@@ -45,9 +45,15 @@ DLHS must be traced exactly once per chunk with the key and never without it; th
 with the key (its gradient is stopped, gate_up carries it) and must be with the unfused reference; and stand-in
 epilogues that swap the gate and up halves, or that drop the row scale (the routing weight), must FAIL.
 
-The validator cases also cover the kernels' one-n-tile rules, which it checks at config time when no mesh axis shards
-the MoE MLP dim: wo_tile_dlhs_mlp_dim must be that dim, and with moe_wi_gmm_fused_swiglu wi_tile_fwd_mlp_dim at least
-twice it (stack 9's 1024 against Qwen3.5-397B's 1024 is the rejected case).
+The gmm_v2 stand-in writes the fused wi GMM's [gate | up] (return_pre_act="concat") as the kernel does, one
+[gate_j | up_j] block per forward n tile, and its fused DLHS reads it with the kernel module's own reader
+(split_dact_gate_up) at the dact_pre_act_tile_n the layer passes. With wi_tile_fwd_mlp_dim = the MLP dim (two forward
+n tiles per half, as at the 397B bench cell 1024 / 1024) the layer must pass the forward's tile_n and stay bit-identical
+to the unfused layer; a reader that ignores the layout (the measured build) must FAIL there.
+
+The validator cases also cover the kernels' tile rules, which it checks at config time when no mesh axis shards the
+MoE MLP dim: wo_tile_dlhs_mlp_dim must be that dim, and with moe_wi_gmm_fused_swiglu wi_tile_fwd_mlp_dim must halve to
+that dim or to a multiple of 128 dividing it (stack 9's 1024 against Qwen3.5-397B's 1024 is accepted).
 """
 
 import functools
@@ -147,10 +153,22 @@ class FusedDswigluConfigTest(parameterized.TestCase):
       # The kernels' one-n-tile rules, at config time (the MoE MLP dim is not sharded here, so it is _MLP per shard).
       ("dlhs_two_tiles", {"wo_tile_dlhs_mlp_dim": _MLP // 2}, f"wo_tile_dlhs_mlp_dim={_MLP}, the MoE MLP dim"),
       ("dlhs_tile_wider_than_mlp", {"wo_tile_dlhs_mlp_dim": 2 * _MLP}, f"wo_tile_dlhs_mlp_dim={_MLP}, the MoE MLP dim"),
+      # With moe_wi_gmm_fused_swiglu the fused DLHS reads [gate | up] in pieces of gmm_silu's tile_n per half
+      # (wi_tile_fwd_mlp_dim // 2): the MLP dim, or whole lane tiles of 128 that divide it.
       (
-          "fused_wi_two_tiles_per_half",  # stack 9: wi_tile_fwd_mlp_dim = the MLP dim
-          {"moe_wi_gmm_fused_swiglu": True, "wi_tile_fwd_mlp_dim": _MLP},
-          f"wi_tile_fwd_mlp_dim >= {2 * _MLP} with moe_wi_gmm_fused_swiglu",
+          "fused_wi_half_tile_off_the_lane_grid",  # 128 // 2 = 64 divides the MLP dim, but is not a lane tile
+          {"moe_wi_gmm_fused_swiglu": True, "wi_tile_fwd_mlp_dim": 128},
+          f"a wi_tile_fwd_mlp_dim that halves to {_MLP} or to a multiple of 128 dividing it",
+      ),
+      (
+          "fused_wi_half_tile_not_dividing",  # 384 // 2 = 192
+          {"moe_wi_gmm_fused_swiglu": True, "wi_tile_fwd_mlp_dim": 384},
+          f"a wi_tile_fwd_mlp_dim that halves to {_MLP} or to a multiple of 128 dividing it",
+      ),
+      (
+          "fused_wi_tile_odd",  # clipped to the MLP dim per half, but gmm_silu halves the tile itself
+          {"moe_wi_gmm_fused_swiglu": True, "wi_tile_fwd_mlp_dim": 2 * _MLP + 1},
+          f"a wi_tile_fwd_mlp_dim that halves to {_MLP} or to a multiple of 128 dividing it",
       ),
   )
   def test_rejected(self, overrides, requirement):
@@ -165,6 +183,8 @@ class FusedDswigluConfigTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("alone", {}),
       ("with_fused_wi_swiglu", {"moe_wi_gmm_fused_swiglu": True}),
+      # Stack 9: wi_tile_fwd_mlp_dim = the MLP dim, two forward n tiles per half, read in the per-tile layout.
+      ("fused_wi_two_tiles_per_half", {"moe_wi_gmm_fused_swiglu": True, "wi_tile_fwd_mlp_dim": _MLP}),
       (
           "measured_stack",
           {
@@ -254,6 +274,22 @@ def _row_scale_dropped_epilogue(acc, gate, up, row_scale, return_dot):
   return _unfused_rounding_epilogue(acc, gate, up, None, return_dot)
 
 
+def _concat_store(gate, up, tile_n):
+  """The fused wi kernel's return_pre_act="concat" output: n tile j's accumulator [gate_j | up_j] is block j."""
+  n = gate.shape[-1]
+  blocks = [
+      jnp.concatenate([gate[:, j * tile_n : (j + 1) * tile_n], up[:, j * tile_n : (j + 1) * tile_n]], -1)
+      for j in range(n // tile_n)
+  ]
+  return jnp.concatenate(blocks, axis=-1)
+
+
+def _legacy_reader(gate_up, pre_act_tile_n):
+  """Deliberately wrong (the measured build): reads gate_up as the contiguous [gate | up] whatever its layout."""
+  del pre_act_tile_n
+  return gmm_v2.split_dact_gate_up(gate_up, None)
+
+
 def _gmm_v2_stand_in(
     lhs,
     rhs,
@@ -272,7 +308,9 @@ def _gmm_v2_stand_in(
     dact_gate_up=None,
     dact_row_scale=None,
     return_dact_dot=False,
+    dact_pre_act_tile_n=None,
     epilogue=_unfused_rounding_epilogue,
+    reader=None,
     **unused,
 ):
   """gmm_v2 for the calls the layer makes: rows outside the local groups are zero, as with zero_initialize."""
@@ -287,8 +325,11 @@ def _gmm_v2_stand_in(
     n = acc.shape[-1]
     assert fuse_dact == "swiglu" and dact_gate_up.shape == (lhs.shape[0], 2 * n), (fuse_dact, dact_gate_up.shape)
     assert tile_info.tile_n == n, tile_info  # The kernel's single n tile.
+    _TRACED.setdefault("pre_act_tile_n", set()).add(dact_pre_act_tile_n)
     scale = None if dact_row_scale is None else dact_row_scale.astype(jnp.float32).reshape(acc.shape[0], -1)[:, :1]
-    d_gate_up, dot = epilogue(acc, dact_gate_up[:, :n], dact_gate_up[:, n:], scale, return_dact_dot)
+    # The kernel's reader of the layout (or a deliberately wrong one).
+    gate, up = (reader or gmm_v2.split_dact_gate_up)(dact_gate_up, dact_pre_act_tile_n)
+    d_gate_up, dot = epilogue(acc, gate, up, scale, return_dact_dot)
     d_gate_up = jnp.where(rows, d_gate_up, 0.0).astype(out_dtype)
     return (d_gate_up, jnp.where(rows[:, 0], dot[:, 0], 0.0)) if return_dact_dot else d_gate_up
   if fuse_act is not None:
@@ -297,8 +338,9 @@ def _gmm_v2_stand_in(
     gate_up = jnp.where(rows, acc, 0.0).astype(out_dtype)
     if return_pre_act == "concat":
       _TRACED["fused_wi_concat"] = _TRACED.get("fused_wi_concat", 0) + 1
-      assert tile_info.tile_n == n, tile_info  # [gate | up] is written per n tile: one tile per half.
-      return act, gate_up
+      _TRACED.setdefault("fwd_tile_n", set()).add(tile_info.tile_n)
+      # [gate | up] is written one [gate_j | up_j] block per n tile, as the kernel writes it.
+      return act, _concat_store(gate_up[:, :n], gate_up[:, n:], tile_info.tile_n)
     if return_pre_act:
       return act, gate_up[:, :n], gate_up[:, n:]
     return act
@@ -383,11 +425,11 @@ def _inputs(cfg, mode):
   return x, token_mask
 
 
-def _run(cfg, mesh, params, x, token_mask, epilogue):
+def _run(cfg, mesh, params, x, token_mask, epilogue, reader=None):
   """Loss, output and gradients with the stand-ins, and the fused kernel calls traced in the backward pass."""
   _TRACED.clear()
   with (
-      mock.patch.object(gmm_v2, "gmm_v2", functools.partial(_gmm_v2_stand_in, epilogue=epilogue)),
+      mock.patch.object(gmm_v2, "gmm_v2", functools.partial(_gmm_v2_stand_in, epilogue=epilogue, reader=reader)),
       mock.patch.object(tgmm_v2, "tgmm_v2", _tgmm_v2_stand_in),
       mock.patch.object(
           moe.RoutedMoE, "apply_ffn_activation", _activation_vjp_tripwire(moe.RoutedMoE.apply_ffn_activation)
@@ -434,7 +476,7 @@ def _compare(label, old, new, exact, loose=()):
   return passed
 
 
-def _case(label, overrides, mode="real", epilogue=_unfused_rounding_epilogue, exact=True):
+def _case(label, overrides, mode="real", epilogue=_unfused_rounding_epilogue, exact=True, reader=None):
   """The layer with the key against the layer without it (which runs the activation's VJP in one pass).
 
   With moe_router_grad_from_wo_input AND moe_wi_gmm_fused_swiglu, the unfused routing-weight gradient <u, h> reads
@@ -451,9 +493,12 @@ def _case(label, overrides, mode="real", epilogue=_unfused_rounding_epilogue, ex
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_old.logical_axis_rules):
     _, params, _ = nnx.split(_build(cfg_old, mesh), nnx.Param, ...)
   old, traced_old = _run(cfg_old, mesh, params, x, token_mask, epilogue)
-  new, traced_new = _run(cfg_new, mesh, params, x, token_mask, epilogue)
+  new, traced_new = _run(cfg_new, mesh, params, x, token_mask, epilogue, reader)
   chunks = cfg_new.num_moe_token_chunks
   want_concat = chunks if overrides.get("moe_wi_gmm_fused_swiglu") else 0
+  # The layout the layer must hand the fused DLHS: the fused wi GMM's tile_n per half, or None for a GMM output.
+  fwd_tile_n = min(cfg_new.wi_tile_fwd_mlp_dim, 2 * _MLP) // 2
+  want_layout = {fwd_tile_n} if want_concat else {None}
   structure = (
       traced_old.get("fused_dlhs", 0) == 0
       and traced_new.get("fused_dlhs", 0) == chunks
@@ -463,6 +508,8 @@ def _case(label, overrides, mode="real", epilogue=_unfused_rounding_epilogue, ex
       # (the reference with moe_wi_gmm_fused_swiglu has the activation inside the fused wi GMM, not here).
       and traced_new.get("activation_vjp", 0) == 0
       and (want_concat > 0 or traced_old.get("activation_vjp", 0) > 0)
+      and traced_new.get("pre_act_tile_n") == want_layout
+      and traced_new.get("fwd_tile_n", {fwd_tile_n}) == {fwd_tile_n}
   )
   print(f"{label}: [{'ok' if structure else 'FAIL'}] traced plain={traced_old} fused={traced_new}", flush=True)
   loose = ("['gate']", "[1]") if overrides.get("moe_router_grad_from_wo_input") and want_concat else ()
@@ -474,6 +521,7 @@ def main():
   pipelined = {"moe_chunk_pipeline": True}
   a14 = {"moe_router_grad_from_wo_input": True}
   silu = {"moe_wi_gmm_fused_swiglu": True}
+  two_tiles = {"wi_tile_fwd_mlp_dim": _MLP}  # two forward n tiles per half, as at the 397B cell (1024 vs 1024)
   measured = {
       **pipelined,
       **a14,
@@ -501,6 +549,14 @@ def main():
       "kernel_epilogue_fused_wi": _case(
           "kernel_epilogue_fused_wi", {**pipelined, **silu}, epilogue=_kernel_epilogue, exact=False
       ),
+      # Two forward n tiles per half: the fused DLHS reads the [gate_j | up_j] layout.
+      "a14_measured_stack_fused_wi_2tiles": _case(
+          "a14_measured_stack_fused_wi_2tiles", {**measured, **silu, **two_tiles}, "padmask"
+      ),
+      "pipelined_fused_wi_2tiles": _case("pipelined_fused_wi_2tiles", {**pipelined, **silu, **two_tiles}),
+      "kernel_epilogue_fused_wi_2tiles": _case(
+          "kernel_epilogue_fused_wi_2tiles", {**pipelined, **silu, **two_tiles}, epilogue=_kernel_epilogue, exact=False
+      ),
   }
   controls = {
       "control_halves_swapped": _case("control_halves_swapped", pipelined, epilogue=_halves_swapped_epilogue),
@@ -509,6 +565,20 @@ def main():
       ),
       "control_row_scale_dropped": _case(
           "control_row_scale_dropped", measured, "padmask", _row_scale_dropped_epilogue, exact=False
+      ),
+      # The measured build's reader at two forward tiles per half: gate = [gate_0 | up_0].
+      "control_legacy_reader_fused_wi_2tiles": _case(
+          "control_legacy_reader_fused_wi_2tiles",
+          {**pipelined, **silu, **two_tiles},
+          exact=False,
+          reader=_legacy_reader,
+      ),
+      "control_legacy_reader_a14_fused_wi_2tiles": _case(
+          "control_legacy_reader_a14_fused_wi_2tiles",
+          {**measured, **silu, **two_tiles},
+          "padmask",
+          exact=False,
+          reader=_legacy_reader,
       ),
   }
   print("SUMMARY", {**results, **controls}, flush=True)

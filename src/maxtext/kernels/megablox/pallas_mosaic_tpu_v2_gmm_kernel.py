@@ -136,6 +136,37 @@ def apply_dact_fn(
       raise NotImplementedError(f"Unsupported backward activation function: {fuse_dact}")
 
 
+def split_dact_gate_up(gate_up_tile: jax.Array, pre_act_tile_n: int | None) -> tuple[jax.Array, jax.Array]:
+  """The gate and up halves of a [tile_m, 2 * tile_n] block of a fuse_dact epilogue's gate_up input.
+
+  return_pre_act="concat" stores each forward n tile's accumulator [gate_j | up_j] as one block, so a
+  row of the fused forward's [gate | up] output is laid out [gate_0 | up_0 | gate_1 | up_1 | ...], with
+  pre_act_tile_n (the forward's tile_n, per half) columns per piece. The fuse_dact epilogue spans the whole
+  row (one n tile), so its block is that row: the gate is the concatenation of the even pieces and up of the
+  odd ones. Static, lane-aligned slices (pre_act_tile_n is a multiple of 128): a selection of whole vregs in
+  VMEM, no extra HBM traffic. With None (or one piece per half: the [gate | up] of an unfused GMM output, or
+  of a forward with one n tile per half) this is the plain split in two.
+
+  Args:
+    gate_up_tile: The block, [tile_m, 2 * tile_n].
+    pre_act_tile_n: The width of the forward's pieces, or None for the contiguous [gate | up] layout.
+
+  Returns:
+    (gate, up), each [tile_m, tile_n].
+  """
+  tile_n = gate_up_tile.shape[-1] // 2
+  if pre_act_tile_n is None or pre_act_tile_n == tile_n:
+    gate, up = jnp.split(gate_up_tile, 2, axis=-1)
+    return gate, up
+  if pre_act_tile_n <= 0 or tile_n % pre_act_tile_n:
+    raise ValueError(f"pre_act_tile_n {pre_act_tile_n} must divide the block's half width {tile_n}.")
+  p = pre_act_tile_n
+  pieces = range(tile_n // p)
+  gate = jnp.concatenate([gate_up_tile[:, 2 * j * p : (2 * j + 1) * p] for j in pieces], axis=-1)
+  up = jnp.concatenate([gate_up_tile[:, (2 * j + 1) * p : (2 * j + 2) * p] for j in pieces], axis=-1)
+  return gate, up
+
+
 def align_to(x, a):
   return pl.cdiv(x, a) * a
 
@@ -331,8 +362,10 @@ class GmmConfigs:
   # With fuse_act: also write the two halves of the accumulator before the
   # activation (gate and up), each [size_m, out_size_n] in out_dtype, next to
   # the activation output. The backward of the activation needs them.
-  # "concat": write them as one [size_m, 2 * out_size_n] output [gate | up]
-  # (the input of a fuse_dact epilogue); needs a single n tile.
+  # "concat": write them as one [size_m, 2 * out_size_n] output (the input of a
+  # fuse_dact epilogue): each n tile's [gate_j | up_j] is one block, so the
+  # layout is [gate_0 | up_0 | gate_1 | up_1 | ...] with tile_n columns per
+  # piece, i.e. [gate | up] with one n tile per half.
   return_pre_act: bool | str = False
   # The backward of a gated activation (apply_dact_fn) in the epilogue: the
   # accumulator is the activation output's cotangent, dact_gate_up
@@ -344,6 +377,10 @@ class GmmConfigs:
   fuse_dact: str | None = None
   has_dact_row_scale: bool = False
   return_dact_dot: bool = False
+  # With fuse_dact: dact_gate_up is a fused forward's return_pre_act="concat"
+  # output with this many columns per [gate_j | up_j] piece (that forward's
+  # tile_n), read with split_dact_gate_up. None: the contiguous [gate | up].
+  dact_pre_act_tile_n: int | None = None
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -899,7 +936,8 @@ def inner_kernel(
         # acc is [tile_m, 2 * tile_n] = gate | up. Store before the activation, rounded to the
         # output dtype exactly as the unfused kernel rounds its output; the activation below stays in f32.
         if cfgs.return_pre_act == "concat":
-          # One [gate | up] block; with the single n tile make_gmm_configs requires, the whole row.
+          # One [gate_j | up_j] block per n tile (the whole row [gate | up] with one n tile per half); a
+          # fuse_dact reader de-interleaves it with split_dact_gate_up(..., tile_n).
           tiled_pre_ref, partial_pre_ref = pre_act_refs[0]
           _store_group_rows(tiled_pre_ref, partial_pre_ref, acc, metadata_ref, cfgs)
         else:
@@ -910,11 +948,12 @@ def inner_kernel(
 
       if cfgs.fuse_dact is not None:
         # acc is the activation output's cotangent u for this tile's rows; the gate | up block covers the
-        # whole row (make_gmm_configs requires a single n tile). The [d_gate | d_up] it becomes takes the
-        # regular store path below (masking, rounding to out_dtype, partial-row carry).
+        # whole row (make_gmm_configs requires a single n tile), in the layout the fused forward wrote it
+        # (split_dact_gate_up). The [d_gate | d_up] it becomes takes the regular store path below (masking,
+        # rounding to out_dtype, partial-row carry), contiguous whatever that layout.
         tile_m, tile_n = cfgs.tiles.tile_m, cfgs.tiles.tile_n
         gate_up_tile = tiled_ps_ref.gate_up[...].reshape(tile_m, 2 * tile_n)  # pyrefly: ignore[missing-attribute]
-        gate_tile, up_tile = jnp.split(gate_up_tile, 2, axis=-1)
+        gate_tile, up_tile = split_dact_gate_up(gate_up_tile, cfgs.dact_pre_act_tile_n)
         row_scale_tile = None
         if cfgs.has_dact_row_scale:
           row_scale_tile = tiled_ps_ref.row_scale[...].reshape(tile_m, -1)[:, :1]  # pyrefly: ignore[missing-attribute]
@@ -1745,6 +1784,8 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
     scope_name += "-pre_act"
   if cfgs.fuse_dact is not None:
     scope_name += f"-dact_{cfgs.fuse_dact}"
+    if cfgs.dact_pre_act_tile_n is not None:
+      scope_name += f"-preact_tn_{cfgs.dact_pre_act_tile_n}"
   return scope_name
 
 
@@ -1772,6 +1813,7 @@ def make_gmm_configs(
     dact_gate_up: jax.Array | None = None,
     dact_row_scale: jax.Array | None = None,
     return_dact_dot: bool = False,
+    dact_pre_act_tile_n: int | None = None,
 ):
   """Fills the GMM config for the GMM kernel."""
 
@@ -1902,11 +1944,11 @@ def make_gmm_configs(
     raise ValueError(f'return_pre_act must be False, True or "concat"; got {return_pre_act!r}.')
   if return_pre_act and (fuse_act is None or out_is_3d or partial_sum is not None or fuse_dact is not None):
     raise NotImplementedError("return_pre_act needs fuse_act and a 2D output, and no partial_sum.")
-  if return_pre_act == "concat" and tiles.tile_n != dims.size_n // 2:
-    # Each n tile's accumulator is [gate tile | up tile]; stored as one block per n tile it is laid out
-    # [gate_0 | up_0 | gate_1 | up_1 | ...], which is [gate | up] only when one tile spans each half.
+  if return_pre_act == "concat" and (dims.size_n // 2) % tiles.tile_n:
+    # Each n tile's accumulator is [gate tile | up tile], stored as one block per n tile: the layout is
+    # [gate_0 | up_0 | gate_1 | up_1 | ...] (split_dact_gate_up reads it back), which needs whole tiles.
     raise NotImplementedError(
-        f'return_pre_act="concat" requires a single n tile (tile_n == size_n // 2 == {dims.size_n // 2}); got {tiles=}.'
+        f'return_pre_act="concat" requires tile_n to divide size_n // 2 = {dims.size_n // 2}; got {tiles=}.'
     )
   if fuse_dact is not None:
     if fuse_dact != "swiglu":
@@ -1922,17 +1964,29 @@ def make_gmm_configs(
           f"got {None if dact_gate_up is None else dact_gate_up.shape}."
       )
     if tiles.tile_n != dims.size_n:
-      # The [d_gate | d_up] tile of an n tile is stored as one block, as with return_pre_act="concat", and
-      # the gate | up block it reads is split in two halves: both are the [gate | up] layout only with one tile.
+      # The [d_gate | d_up] tile of an n tile is stored as one block, as with return_pre_act="concat": it is
+      # the contiguous [d_gate | d_up] the next GMM's backward reads only with one tile. (The gate | up block
+      # it reads is then the whole row, in whatever layout dact_pre_act_tile_n describes.)
       raise NotImplementedError(f"fuse_dact requires a single n-tile (tile_n == size_n); got {tiles=}, {dims=}.")
+    if dact_pre_act_tile_n == dims.size_n:
+      dact_pre_act_tile_n = None  # one piece per half: the contiguous [gate | up], the same kernel
+    if dact_pre_act_tile_n is not None and (
+        dact_pre_act_tile_n <= 0 or dims.size_n % dact_pre_act_tile_n or dact_pre_act_tile_n % num_lanes
+    ):
+      # The single n tile spans size_n, so a forward tile wider than size_n cannot exist; one that does not
+      # divide it would leave a partial piece, and one off the lane grid could not be selected in whole vregs.
+      raise NotImplementedError(
+          f"dact_pre_act_tile_n (the fused forward's tile_n per half) must be a multiple of {num_lanes} that"
+          f" divides size_n = {dims.size_n}; got {dact_pre_act_tile_n}."
+      )
     if dact_row_scale is not None and dact_row_scale.shape not in (
         (dims.size_m,),
         (dims.size_m, 1),
         (dims.size_m, num_lanes),
     ):
       raise ValueError(f"dact_row_scale must have shape ({dims.size_m}, ...); got {dact_row_scale.shape}.")
-  elif dact_gate_up is not None or dact_row_scale is not None or return_dact_dot:
-    raise ValueError("dact_gate_up, dact_row_scale, and return_dact_dot require fuse_dact to be set.")
+  elif dact_gate_up is not None or dact_row_scale is not None or return_dact_dot or dact_pre_act_tile_n is not None:
+    raise ValueError("dact_gate_up, dact_row_scale, return_dact_dot and dact_pre_act_tile_n require fuse_dact to be set.")
 
   return GmmConfigs(
       dims=dims,
@@ -1950,6 +2004,7 @@ def make_gmm_configs(
       fuse_dact=fuse_dact,
       has_dact_row_scale=dact_row_scale is not None,
       return_dact_dot=return_dact_dot,
+      dact_pre_act_tile_n=dact_pre_act_tile_n,
   )
 
 
@@ -1962,6 +2017,8 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
     del cfgs_dict["fuse_dact"]
     del cfgs_dict["has_dact_row_scale"]
     del cfgs_dict["return_dact_dot"]
+  if cfgs.dact_pre_act_tile_n is None:
+    del cfgs_dict["dact_pre_act_tile_n"]  # the contiguous [gate | up] reader keeps its metadata too
   ret = {}
   for path, val in jax.tree_util.tree_leaves_with_path(cfgs_dict):
     key = jax.tree_util.keystr(path, simple=True, separator=".")
@@ -1986,6 +2043,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "return_pre_act",
         "fuse_dact",
         "return_dact_dot",
+        "dact_pre_act_tile_n",
     ]
 )
 def gmm_v2(
@@ -2013,6 +2071,7 @@ def gmm_v2(
     dact_gate_up: jax.Array | None = None,
     dact_row_scale: jax.Array | None = None,
     return_dact_dot: bool = False,
+    dact_pre_act_tile_n: int | None = None,
 ) -> jax.Array | tuple[jax.Array, ...]:
   """GMM kernel implemented with emit_pipeline.
 
@@ -2056,8 +2115,10 @@ def gmm_v2(
       rounded to the output dtype as the unfused kernel rounds them. The
       activation itself is computed from the f32 accumulator. 2D output only,
       no partial_sum. "concat" returns them as one [size_m, size_n] array
-      [gate | up] instead (the input of a fuse_dact epilogue); it needs a
-      single n tile (tile_n == size_n // 2).
+      instead (the input of a fuse_dact epilogue), one [gate_j | up_j] block
+      per n tile: [gate | up] with one tile per half (tile_n == size_n // 2),
+      else interleaved by tile (a fuse_dact reader passes this tile_n as its
+      dact_pre_act_tile_n). tile_n must divide size_n // 2.
     fuse_dact: The backward of a gated activation in the epilogue ("swiglu",
       see apply_dact_fn): the matmul computes the activation output's cotangent
       u = lhs @ rhs^T, and the kernel writes [d_gate | d_up] of shape
@@ -2070,6 +2131,10 @@ def gmm_v2(
       [size_m, 1]) that multiplies u before the derivative.
     return_dact_dot: With fuse_dact, also return <u, silu(gate) * up> per row in
       f32, shape [size_m].
+    dact_pre_act_tile_n: With fuse_dact, the layout of dact_gate_up when it is a
+      fused forward's return_pre_act="concat" output: that forward's tile_n (per
+      half), i.e. the width of its [gate_j | up_j] pieces. None (or size_n):
+      the contiguous [gate | up]. The output is [d_gate | d_up] either way.
 
   Returns:
     Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]); with
@@ -2115,6 +2180,7 @@ def gmm_v2(
       dact_gate_up=dact_gate_up,
       dact_row_scale=dact_row_scale,
       return_dact_dot=return_dact_dot,
+      dact_pre_act_tile_n=dact_pre_act_tile_n,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles

@@ -3800,6 +3800,17 @@ class RoutedMoE(nnx.Module):
       intermediate = jax.lax.stop_gradient(self.apply_ffn_activation(gate_up[:, :n], gate_up[:, n:]))
       return intermediate, gate_up
 
+    def _dswiglu_pre_act_tile_n(gate_up):
+      """moe_wo_gmm_fused_dswiglu: the layout of the [gate | up] the fused DLHS epilogue reads (dact_pre_act_tile_n).
+
+      None for the up projection's GMM output, the contiguous [gate | up]. With moe_wi_gmm_fused_swiglu the fused wi
+      GMM writes it one [gate_j | up_j] block per forward n tile: the width of those pieces, its tile_n per half.
+      """
+      if not fuse_silu_in_wi_gmm:
+        return None
+      _, wi_tile_size = get_wi_gmm_params()
+      return mblx.gmm_silu_pre_act_tile_n(wi_tile_size, gate_up.shape[-1], self.config.use_gmm_v2_heuristic_tiling)
+
     def _run_wo_gmm_dswiglu(
         intermediate_layer, gate_up, wo, gmm_fn, wo_tile_size, *, tc_prescaled=False, x_is_3d=False, return_weights=False
     ):
@@ -3833,6 +3844,7 @@ class RoutedMoE(nnx.Module):
           group_offset=gmm_fn.keywords["group_offset"],
           use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
           use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+          dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(gate_up),
       )
       return out[: intermediate_layer.shape[0]] if padding_amount > 0 else out
 
@@ -4217,6 +4229,7 @@ class RoutedMoE(nnx.Module):
             return_dact_dot=True,
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+            dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(dact_gate_up),
         )
         if padding_amount > 0:
           # dot is an array here (return_dact_dot=True).

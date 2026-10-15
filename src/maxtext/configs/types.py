@@ -1780,15 +1780,12 @@ class MoEGeneral(BaseModel):
           " wo^T of each row into d[gate | up] and writes that [buffer, 2 * mlp] array, instead of writing u in bfloat16"
           " for separate elementwise passes to read back (the SwiGLU VJP; with moe_router_grad_from_wo_input also the"
           " routing weight's product and gradient, which then come from the same epilogue). Works with and without"
-          " moe_router_grad_from_wo_input. Accepted with moe_wi_gmm_fused_swiglu, but no accepted configuration of that"
-          " pair has run on TPU: the one-tile fused wi forward it needs ran out of VMEM in an AOT compile at"
-          " Qwen3.5-397B's MoE dims (wi_tile_fwd_mlp_dim=2048), and the stack-9 runs used two tiles per half, which"
-          " wrote the wrong layout and is rejected. NUMERICS CHANGE: the SwiGLU derivative reads the float32 accumulator"
-          " instead of its bfloat16 rounding and runs in float32 to one rounding of d[gate | up]; with"
-          " moe_router_grad_from_wo_input the routing weight multiplies u in float32 (not its bfloat16 product), and the"
-          " routing-weight gradient is <u, silu(gate) * up> in float32, not <bf16(u), the bfloat16 activation>. Measured"
-          " on the Qwen3.5-397B RL trainer bench, 128 TPU v7x, with moe_router_grad_from_wo_input: 87.061 -> 86.528 s"
-          " per step (mean of steps 1-4, arms o275x-s6n3c-l3 vs o275x-s6n3-l3, same pod). Requires"
+          " moe_router_grad_from_wo_input and moe_wi_gmm_fused_swiglu. NUMERICS CHANGE: the SwiGLU derivative reads the"
+          " float32 accumulator instead of its bfloat16 rounding and runs in float32 to one rounding of d[gate | up];"
+          " with moe_router_grad_from_wo_input the routing weight multiplies u in float32 (not its bfloat16 product),"
+          " and the routing-weight gradient is <u, silu(gate) * up> in float32, not <bf16(u), the bfloat16 activation>."
+          " Measured on the Qwen3.5-397B RL trainer bench, 128 TPU v7x, with moe_router_grad_from_wo_input: 87.061 ->"
+          " 86.528 s per step (mean of steps 1-4, arms o275x-s6n3c-l3 vs o275x-s6n3-l3, same pod). Requires"
           " prefuse_moe_weights=True, sparse_matmul=True, te_moe_block=False, use_tokamax_gmm=True, use_gmm_v2=True, no"
           " weight quantization, mlp_activations=['silu', 'linear'] without clipping, mlp_bias=False,"
           " num_moe_emb_chunks=0, moe_flat_fsdp_weights, moe_tc_ragged_sort, moe_tc_ragged_3d_gmm,"
@@ -1796,10 +1793,11 @@ class MoEGeneral(BaseModel):
           " routed experts' gate or up half (mlpwi_0, moe_mlpwi_0, moe_mlpwi_1; the minimal* policies save mlpwi_0: the"
           " up projection hands on its whole [gate | up] output, so those names are never formed), and not"
           " moe_prefused_swiglu_vjp (no separate activation backward is left for it to fuse). The fused DLHS needs one n"
-          " tile spanning the MLP dim (wo_tile_dlhs_mlp_dim = the per-shard MoE MLP dim), and with"
-          " moe_wi_gmm_fused_swiglu the forward GMM one n tile per half (wi_tile_fwd_mlp_dim >= 2 x that dim). The"
-          " validator checks both when no mesh axis shards the MoE MLP dim and use_gmm_v2_heuristic_tiling is off;"
-          " otherwise the kernel raises when traced."
+          " tile spanning the MLP dim (wo_tile_dlhs_mlp_dim = the per-shard MoE MLP dim). With moe_wi_gmm_fused_swiglu"
+          " it reads the fused wi GMM's [gate | up] in that kernel's per-tile layout (any wi_tile_fwd_mlp_dim whose half"
+          " is that dim or a multiple of 128 dividing it), and needs explicit tiles (use_gmm_v2_heuristic_tiling=False)."
+          " The validator checks the tiles when no mesh axis shards the MoE MLP dim and use_gmm_v2_heuristic_tiling is"
+          " off; otherwise the kernels raise when traced."
       ),
   )
   fp8_moe: bool = Field(
@@ -1928,14 +1926,16 @@ class MoEGeneral(BaseModel):
     ]
 
   def _moe_wo_gmm_fused_dswiglu_tile_requirements(self) -> list[tuple[bool, str]]:
-    """The fused kernels' one-n-tile rules for moe_wo_gmm_fused_dswiglu, checked here where the config decides them.
+    """The fused kernels' tile rules for moe_wo_gmm_fused_dswiglu, checked here where the config decides them.
 
-    Each n tile's accumulator is stored as one block, so [gate | up] and [d gate | d up] keep their layout only with
-    one n tile: the fused DLHS needs wo_tile_dlhs_mlp_dim = the MoE MLP dim n, and with moe_wi_gmm_fused_swiglu the
-    fused wi forward needs wi_tile_fwd_mlp_dim >= 2n (gmm_silu halves it and clips it to 2n), else it writes
-    [gate_0 | up_0 | gate_1 | up_1 | ...]. make_gmm_configs raises on both when the layer is traced; this fails at
-    config time instead. None with use_gmm_v2_heuristic_tiling (calculate_tiling picks the tiles when traced) or
-    where the config alone does not fix the per-shard n (_moe_mlp_dim_if_unsharded): the kernel still checks those.
+    Each n tile's accumulator is stored as one block. The fused DLHS writes [d gate | d up], which the wi GMM's
+    backward reads contiguous, so it needs one n tile: wo_tile_dlhs_mlp_dim = the MoE MLP dim n. With
+    moe_wi_gmm_fused_swiglu the fused wi forward writes [gate | up] one [gate_j | up_j] block per forward n tile
+    (gmm_silu halves wi_tile_fwd_mlp_dim and clips it to n), and the fused DLHS reads it back in pieces of that width:
+    n itself, or whole lane tiles (a multiple of 128) that divide n. gmm_silu and make_gmm_configs raise on these when
+    the layer is traced; this fails at config time instead. None with use_gmm_v2_heuristic_tiling (calculate_tiling
+    picks the tiles when traced, and the fused pair raises there) or where the config alone does not fix the per-shard
+    n (_moe_mlp_dim_if_unsharded): the kernels still check those.
     """
     if self.use_gmm_v2_heuristic_tiling:
       return []
@@ -1943,12 +1943,14 @@ class MoEGeneral(BaseModel):
     if n is None:
       return []
     wo_tile, wi_tile = self.wo_tile_dlhs_mlp_dim, self.wi_tile_fwd_mlp_dim
+    wi_half_tile = min(wi_tile, 2 * n) // 2  # megablox ops.gmm_silu_pre_act_tile_n
+    wi_half_tile_ok = wi_tile % 2 == 0 and (wi_half_tile == n or (wi_half_tile % 128 == 0 and n % wi_half_tile == 0))
     return [
         (wo_tile == n, f"wo_tile_dlhs_mlp_dim={n}, the MoE MLP dim (one n tile in the fused DLHS; got {wo_tile})"),
         (
-            not self.moe_wi_gmm_fused_swiglu or wi_tile >= 2 * n,
-            f"wi_tile_fwd_mlp_dim >= {2 * n} with moe_wi_gmm_fused_swiglu (one forward n tile per half of [gate | up];"
-            f" got {wi_tile})",
+            not self.moe_wi_gmm_fused_swiglu or wi_half_tile_ok,
+            f"with moe_wi_gmm_fused_swiglu, a wi_tile_fwd_mlp_dim that halves to {n} or to a multiple of 128 dividing"
+            f" it (the fused DLHS reads [gate | up] in pieces of the fused wi GMM's n tile; got {wi_tile})",
         ),
     ]
 

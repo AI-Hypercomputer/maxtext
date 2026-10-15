@@ -1436,7 +1436,8 @@ def gmm_silu(
   epilogue reads; written by the same kernel when differentiated), rounded as the unfused GMM rounds its output.
   The backward takes gate_up's cotangent, which is already d[gate | up], straight to gmm's DLHS / TGMM; act's
   cotangent is NOT used, so the caller must stop act's gradient and route it through gate_up. The kernel writes
-  [gate | up] per n tile, so this needs a single forward n tile: tiling[2] >= 2n (gmm_v2 raises otherwise).
+  gate_up one [gate_j | up_j] block per forward n tile: with more than one tile per half it is interleaved by
+  tile, and its reader must pass gmm_silu_pre_act_tile_n(tiling, 2n) as gmm_dswiglu's dact_pre_act_tile_n.
   """
   if isinstance(lhs, qpl.QArray) or isinstance(rhs, qpl.QArray) or lhs.ndim != 2 or rhs.ndim != 3:
     raise NotImplementedError("gmm_silu: plain 2D lhs and [g, k, 2n] rhs only.")
@@ -1455,15 +1456,30 @@ def gmm_silu(
   )
 
 
+def gmm_silu_pre_act_tile_n(tiling: tuple[int, ...], size_n: int, heuristic: bool = False) -> int:
+  """The fused forward's tile_n per half for gmm's 9-tuple `tiling` and a [g, k, size_n] prefused rhs.
+
+  That is the width of the [gate_j | up_j] pieces of gmm_silu(fuse_bwd_dswiglu=True)'s gate_up: the
+  dact_pre_act_tile_n its reader (gmm_dswiglu, gmm_dswiglu_bwd) must pass. gmm_silu itself tiles with it.
+  """
+  if heuristic:
+    # gmm_v2.calculate_tiling picks the forward's tile inside the kernel from shapes this caller does not have.
+    raise NotImplementedError(
+        "gmm_silu's [gate | up] layout is not known statically with use_gmm_v2_heuristic_tiling: use explicit tiles."
+    )
+  half_n = size_n // 2
+  tile_n = min(tiling[2], size_n) // 2
+  if tiling[2] % 2 or (tile_n % 128 and tile_n != half_n):
+    raise ValueError(f"gmm_silu: fwd tile_n {tiling[2]} must halve to a multiple of 128 (or to n={half_n}).")
+  return tile_n
+
+
 def _gmm_silu_kernel(lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, return_pre_act):
   """The fused forward: act, or (act, gate, up) with return_pre_act, or (act, [gate | up]) with "concat"."""
   if heuristic:
     tile_info = gmm_v2.calculate_tiling
   else:
-    half_n = rhs.shape[-1] // 2
-    tile_n = min(tiling[2], rhs.shape[-1]) // 2
-    if tiling[2] % 2 or (tile_n % 128 and tile_n != half_n):
-      raise ValueError(f"gmm_silu: fwd tile_n {tiling[2]} must halve to a multiple of 128 (or to n={half_n}).")
+    tile_n = gmm_silu_pre_act_tile_n(tiling, rhs.shape[-1])
     tile_info = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tile_n)
   return gmm_v2.gmm_v2(
       lhs=lhs,
@@ -1629,6 +1645,7 @@ def gmm_dswiglu_bwd(
     return_dact_dot: bool = False,
     use_gmm_v2_heuristic_tiling: bool = False,
     use_dlhs_transpose_rhs: bool = False,
+    dact_pre_act_tile_n: int | None = None,
 ):
   """The backward of `lhs_act @ rhs` (per group), lhs_act = silu(gate) * up, with the SwiGLU backward fused.
 
@@ -1637,6 +1654,9 @@ def gmm_dswiglu_bwd(
   dact_gate_up = [gate | up] (the [m, 2n] input of the activation), so u and d act are never written. The DRHS is
   gmm's TGMM, lhs_act^T @ dout. dact_row_scale (optional, [m]) multiplies u per row before the derivative;
   return_dact_dot also returns <u, act> per row in float32. Needs tiling[5] (the DLHS tile_n) == n.
+  dact_pre_act_tile_n: None when dact_gate_up is the contiguous [gate | up] (an unfused GMM output); for the
+  gate_up of gmm_silu(fuse_bwd_dswiglu=True), gmm_silu_pre_act_tile_n(its tiling, 2n): the epilogue then reads
+  it in that kernel's per-tile [gate_j | up_j] layout. d[gate | up] is contiguous either way.
 
   Only the bf16 tokamax gmm_v2 path, as gmm_silu: no quantization, partial sums or explicit weight gathers.
 
@@ -1672,6 +1692,7 @@ def gmm_dswiglu_bwd(
       dact_gate_up=dact_gate_up,
       dact_row_scale=dact_row_scale,
       return_dact_dot=return_dact_dot,
+      dact_pre_act_tile_n=dact_pre_act_tile_n,
   )
   drhs = _drhs_run_tokamax_v2(
       dout,
@@ -1698,12 +1719,15 @@ def gmm_dswiglu(
     group_offset: jnp.ndarray | int | None = None,
     use_gmm_v2_heuristic_tiling: bool = False,
     use_dlhs_transpose_rhs: bool = False,
+    dact_pre_act_tile_n: int | None = None,
 ) -> jnp.ndarray:
   """`lhs_act @ rhs` per group (gmm's tokamax gmm_v2 forward) whose backward returns d gate_up, not d lhs_act.
 
-  lhs_act must be silu(gate) * up of gate_up = [gate | up] ([m, 2n]). The backward (gmm_dswiglu_bwd) fuses the
-  SwiGLU backward into the DLHS epilogue: it returns gate_up's cotangent d[gate | up] and a ZERO cotangent for
-  lhs_act, so the caller must stop lhs_act's gradient (its gradient goes through gate_up). The forward is gmm's.
+  lhs_act must be silu(gate) * up of gate_up ([m, 2n]). The backward (gmm_dswiglu_bwd) fuses the SwiGLU backward
+  into the DLHS epilogue: it returns gate_up's cotangent d[gate | up] and a ZERO cotangent for lhs_act, so the
+  caller must stop lhs_act's gradient (its gradient goes through gate_up). The forward is gmm's. gate_up is the
+  contiguous [gate | up] (dact_pre_act_tile_n None), or gmm_silu(fuse_bwd_dswiglu=True)'s, read in its per-tile
+  layout with dact_pre_act_tile_n = gmm_silu_pre_act_tile_n (see gmm_dswiglu_bwd); its cotangent is contiguous.
   """
   return _gmm_dswiglu(
       lhs_act,
@@ -1715,31 +1739,51 @@ def gmm_dswiglu(
       tuple(tiling),
       use_gmm_v2_heuristic_tiling,
       use_dlhs_transpose_rhs,
+      dact_pre_act_tile_n,
   )
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(5, 6, 7, 8, 9))
 def _gmm_dswiglu(
-    lhs_act, gate_up, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, dlhs_transpose
+    lhs_act,
+    gate_up,
+    rhs,
+    group_sizes,
+    group_offset,
+    preferred_element_type,
+    tiling,
+    heuristic,
+    dlhs_transpose,
+    pre_act_tile_n,
 ):
   """gmm_dswiglu when not differentiated: gmm's forward (gate_up is only read by the backward)."""
-  del gate_up, dlhs_transpose
+  del gate_up, dlhs_transpose, pre_act_tile_n
   return _fwd_run_tokamax_v2(
       lhs_act, rhs, group_sizes, preferred_element_type, tiling, heuristic, group_offset, None, False
   )
 
 
 def _gmm_dswiglu_fwd(
-    lhs_act, gate_up, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, dlhs_transpose
+    lhs_act,
+    gate_up,
+    rhs,
+    group_sizes,
+    group_offset,
+    preferred_element_type,
+    tiling,
+    heuristic,
+    dlhs_transpose,
+    pre_act_tile_n,
 ):
-  del dlhs_transpose
+  """Forward rule of _gmm_dswiglu: gmm's forward, keeping the inputs (not the output) for the backward."""
+  del dlhs_transpose, pre_act_tile_n
   out = _fwd_run_tokamax_v2(
       lhs_act, rhs, group_sizes, preferred_element_type, tiling, heuristic, group_offset, None, False
   )
   return out, (lhs_act, gate_up, rhs, group_sizes, group_offset)
 
 
-def _gmm_dswiglu_bwd(preferred_element_type, tiling, heuristic, dlhs_transpose, residual, grad):
+def _gmm_dswiglu_bwd(preferred_element_type, tiling, heuristic, dlhs_transpose, pre_act_tile_n, residual, grad):
   """gmm_dswiglu_bwd at the saved activation and [gate | up]: (0 for lhs_act, d[gate | up], d rhs)."""
   lhs_act, gate_up, rhs, group_sizes, group_offset = residual
   d_gate_up, _, drhs = gmm_dswiglu_bwd(
@@ -1753,6 +1797,7 @@ def _gmm_dswiglu_bwd(preferred_element_type, tiling, heuristic, dlhs_transpose, 
       gate_up,
       use_gmm_v2_heuristic_tiling=heuristic,
       use_dlhs_transpose_rhs=dlhs_transpose,
+      dact_pre_act_tile_n=pre_act_tile_n,
   )
   # lhs_act's gradient is carried by gate_up (see gmm_dswiglu).
   return jnp.zeros_like(lhs_act), d_gate_up, drhs, None, None
