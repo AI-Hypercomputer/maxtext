@@ -36,6 +36,8 @@ from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bi
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import get_logical_axis_rules
+from maxtext.utils.sharding import logical_to_mesh_axes
 from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import get_physical_spec_without_axes
@@ -160,6 +162,67 @@ def _compute_dot_general_nnx(
   return dot_general(
       inputs, kernel, ((axis, contract_ind), ((), ())), precision=matmul_precision, out_sharding=out_sharding
   )
+
+
+# Logical axis a custom rule set maps to every mesh axis the tokens are sharded over when it keeps the dense weights
+# off some of them (cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp); see `route_dense_weight_grad`.
+DENSE_GRAD_AXIS = "embed_grad"
+_DENSE_EMBED_AXES = ("embed", "embed_attn")
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _reshard_cotangent(x, via, to):
+  """Identity whose cotangent is constrained to the PartitionSpec `via` and then to `to`."""
+  del via, to
+  return x
+
+
+def _reshard_cotangent_fwd(x, via, to):
+  del via, to
+  return x, None
+
+
+def _reshard_cotangent_bwd(via, to, _, cotangent):
+  # Without the barrier, XLA:TPU folds the reduce-scatter into `via` and the all-gather into `to` back into one
+  # full-size all-reduce.
+  cotangent = jax.lax.optimization_barrier(jax.lax.with_sharding_constraint(cotangent, via))
+  return (jax.lax.with_sharding_constraint(cotangent, to),)
+
+
+_reshard_cotangent.defvjp(_reshard_cotangent_fwd, _reshard_cotangent_bwd)
+
+
+def route_dense_weight_grad(kernel: Array, kernel_axes: tuple[None | str, ...]) -> Array:
+  """Reduce-scatters a dense weight's gradient over every token axis before resharding it to the weight's sharding.
+
+  A weight's gradient is a partial sum over every mesh axis the tokens are sharded on. When the weight is sharded
+  over only some of them (cp-as-ep-dense-no-cp and cp-as-ep-dense-fsdp replicate the dense weights over context),
+  GSPMD reduces that partial sum with a full-size all-reduce over every device and keeps a slice of it. Under a rule
+  set that maps `embed_grad` to the token axes, the backward of every kernel with an `embed` or `embed_attn`
+  dimension instead constrains the gradient to the kernel's axes with that dimension on `embed_grad` (one
+  reduce-scatter over all of the token axes' devices, as under cp-as-ep), and then, across an optimization barrier,
+  to the kernel's own sharding (an all-gather of that shard over the axes the weight is replicated on). The forward
+  is unchanged, and under every rule set that does not map `embed_grad` the kernel is returned as is.
+
+  Args:
+    kernel: The kernel, as the dot product consumes it.
+    kernel_axes: Its logical axes.
+
+  Returns:
+    The kernel.
+  """
+  rules = get_logical_axis_rules()
+  if not rules or not any(rule[0] == DENSE_GRAD_AXIS for rule in rules):
+    return kernel
+  if not any(isinstance(axis, str) and axis in _DENSE_EMBED_AXES for axis in kernel_axes):
+    return kernel
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty:
+    raise ValueError(f"The logical axis rules map {DENSE_GRAD_AXIS!r}, which needs a mesh set with jax.set_mesh.")
+  via_axes = tuple(DENSE_GRAD_AXIS if isinstance(a, str) and a in _DENSE_EMBED_AXES else a for a in kernel_axes)
+  via = logical_to_mesh_axes(via_axes, mesh, rules=rules)
+  to = logical_to_mesh_axes(tuple(kernel_axes), mesh, rules=rules)
+  return _reshard_cotangent(kernel, via, to)
 
 
 class DenseGeneral(nnx.Module):
@@ -464,6 +527,7 @@ class DenseGeneral(nnx.Module):
       kernel = kernel[..., begin:end]
 
     kernel = self._maybe_two_stage_all_gather(kernel)
+    kernel = route_dense_weight_grad(kernel, self.kernel_axes)
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:

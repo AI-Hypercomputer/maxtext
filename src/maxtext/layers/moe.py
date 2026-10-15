@@ -888,6 +888,7 @@ class GateLogit(nnx.Module):
     else:
       kernel = self.kernel[...]
     kernel = jnp.asarray(kernel, self.dtype)
+    kernel = linears.route_dense_weight_grad(kernel, self.kernel_axes)
 
     contract_ind = tuple(range(0, len(norm_axis)))
     output_sharding = (
@@ -1265,8 +1266,12 @@ class RoutedMoE(nnx.Module):
       if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
         expert_axes.append("dcp")
       self._expert_parallelism_name = tuple(expert_axes)
-    elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
-      # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
+    elif self.config.custom_mesh_and_rule in (
+        ctypes.CustomRule.CP_AS_EP,
+        ctypes.CustomRule.CP_AS_EP_DENSE_NO_CP,
+        ctypes.CustomRule.CP_AS_EP_DENSE_FSDP,
+    ):
+      # when custom mesh and rule is cp-as-ep (or a variant of it), context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
     else:
       self._expert_parallelism_name = "expert"
