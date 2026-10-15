@@ -301,6 +301,39 @@ def forward_row_major(x: jax.Array) -> jax.Array:
   return _forward_layout_constraint(x, tuple(range(x.ndim)))
 
 
+def _split_gate_up(fused):
+  """The gate and up halves of the prefused gate/up GEMM output, with the remat names of `gmm_up`."""
+  n = fused.shape[-1] // 2
+  gate = adc.checkpoint_name(adc.checkpoint_name(fused[..., :n], "mlpwi_0"), "moe_mlpwi_0")
+  up = adc.checkpoint_name(fused[..., n:], "moe_mlpwi_1")
+  return gate, up
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def fused_glu(fused, glu):
+  """`glu(gate, up)` of the two halves of `fused`, the [..., 2 * mlp] output of the prefused gate/up GEMM.
+
+  Autodiff transposes each half's slice into a zero-padded [..., 2 * mlp] gradient and adds the two, one more
+  full pass over the gradient. This backward computes the same two half gradients, with `jax.vjp` of `glu`, and
+  concatenates them, which XLA writes straight from the activation's backward fusion.
+  """
+  return glu(*_split_gate_up(fused))
+
+
+def _fused_glu_fwd(fused, glu):
+  gate, up = _split_gate_up(fused)
+  return glu(gate, up), (gate, up)
+
+
+def _fused_glu_bwd(glu, residuals, cotangent):
+  _, glu_vjp = jax.vjp(glu, *residuals)
+  # The zero-padded add turns -0 into +0; so does this, so the gradient is bit-identical to autodiff's.
+  return (jnp.concatenate([jnp.where(d == 0, 0, d) for d in glu_vjp(cotangent)], axis=-1),)
+
+
+fused_glu.defvjp(_fused_glu_fwd, _fused_glu_bwd)
+
+
 def get_batchsplit_init_kernel_axes():
   return (
       ("expert_only", "embed_moe", None),
@@ -2678,6 +2711,10 @@ class RoutedMoE(nnx.Module):
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        if not self.config.mlp_bias:
+          # Returned whole, as (out, None): `_down_projection` splits it in `fused_glu`, whose backward concatenates
+          # the halves' gradients, and the chunk pipeline's tie 4 holds the GEMM output, not a copy of its first half.
+          return out, None
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
@@ -2931,7 +2968,10 @@ class RoutedMoE(nnx.Module):
 
     def _down_projection(output0, output1, gmm_fn, wo, wo_bias, routing, route_metadata):
       """The activation and the down projection, per routed token."""
-      intermediate_layer = self.apply_ffn_activation(output0, output1)
+      if output1 is None:  # output0 is the prefused gate/up GEMM output (see `gmm_up`)
+        intermediate_layer = fused_glu(output0, self.apply_ffn_activation)
+      else:
+        intermediate_layer = self.apply_ffn_activation(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       intermediate_output = gmm_fn(
           intermediate_layer,
