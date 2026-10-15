@@ -1034,6 +1034,28 @@ class SplashAttention(BaseModel):
           " quantized to jnp.float8_e4m3fn, without scaling factors."
       ),
   )
+  sa_dkv_reuse_scaled_q: bool = Field(
+      False,
+      description=(
+          "Experimental flag (maps to SplashConfig.dkv_reuse_scaled_q). With sa_use_base2_exp=True, the"
+          " fused dkv backward kernel normally keeps two copies of q live (LOG2E-scaled q for logits and"
+          " unscaled q for dK). When True, dkv reuses the LOG2E-scaled q for the dK matmul and divides dK"
+          " by LOG2E, keeping only one live q copy. Works with bf16 or fp8 q across all attention types."
+          " Subsumed by sa_q_prescaled_log2e; prefer sa_dkv_reuse_scaled_q when q is bf16 or on paths where"
+          " sa_q_prescaled_log2e is not supported (non-MLA or use_mla_absorbed_mqa=True)."
+      ),
+  )
+  sa_q_prescaled_log2e: bool = Field(
+      False,
+      description=(
+          "Experimental flag (maps to SplashConfig.q_prescaled_log2e). With sa_use_base2_exp=True and"
+          " experimental_sa_quant_q_fp8=True, in-kernel LOG2E scaling rounds q to fp8 a second time after"
+          " MaxText's softmax_scale cast. When True, attention_mla.py folds LOG2E into the f32"
+          " softmax_scale multiply before the fp8 cast (single fp8 rounding), and the kernel skips internal"
+          " q scaling in fwd/dq/dkv and divides dq and dk by LOG2E. Strictly subsumes sa_dkv_reuse_scaled_q"
+          " (sa_q_prescaled_log2e > sa_dkv_reuse_scaled_q > both False for non-absorbed MLA with fp8 q)."
+      ),
+  )
   sa_ignore_segment_ids: bool = Field(
       False,
       description=(
@@ -5960,6 +5982,49 @@ class MaxTextConfig(
           "K quantization is currently only supported with"
           f" attention_type='mla'. Found attention_type='{self.attention_type}'"
       )
+    if self.sa_qproj_bwd_bf16 and not (
+        self.quantization == "fp8_full" and self.use_qwix_quantization and not self.use_batch_split_schedule
+    ):
+      raise ValueError(
+          "sa_qproj_bwd_bf16=True only takes effect with quantization='fp8_full', use_qwix_quantization=True and"
+          " use_batch_split_schedule=False."
+      )
+    if self.sa_q_prescaled_log2e:
+      if not (
+          self.experimental_sa_quant_q_fp8
+          and self.sa_use_base2_exp
+          and self.use_tokamax_splash
+          and self.attention == "flash"
+      ):
+        raise ValueError(
+            "sa_q_prescaled_log2e requires experimental_sa_quant_q_fp8=True, sa_use_base2_exp=True,"
+            " use_tokamax_splash=True and attention='flash'."
+        )
+      # The LOG2E fold is only in the MLA query path (attention_mla.py).
+      if self.attention_type != "mla":
+        raise ValueError(f"sa_q_prescaled_log2e only supports attention_type='mla'; got '{self.attention_type}'.")
+      if self.use_mla_absorbed_mqa:
+        raise ValueError("sa_q_prescaled_log2e is not supported with use_mla_absorbed_mqa=True.")
+      # Ring and USP context parallelism use MaxText's vendored splash kernel (natural exp, no
+      # q_prescaled_log2e), which would apply the LOG2E-scaled q as natural-exp logits.
+      if self.context_parallel_strategy.lower() in ("ring", "usp"):
+        raise ValueError(
+            "sa_q_prescaled_log2e is not supported with context_parallel_strategy"
+            f" '{self.context_parallel_strategy}'; use 'all_gather' or 'ulysses'."
+        )
+      if self.sa_dkv_reuse_scaled_q:
+        raise ValueError("sa_q_prescaled_log2e subsumes sa_dkv_reuse_scaled_q; set only one of them.")
+    if self.sa_dkv_reuse_scaled_q:
+      if not (self.sa_use_base2_exp and self.use_tokamax_splash and self.attention == "flash"):
+        raise ValueError(
+            "sa_dkv_reuse_scaled_q only takes effect with sa_use_base2_exp=True, use_tokamax_splash=True and"
+            " attention='flash'."
+        )
+      if self.context_parallel_strategy.lower() in ("ring", "usp"):
+        raise ValueError(
+            "sa_dkv_reuse_scaled_q is not supported with context_parallel_strategy"
+            f" '{self.context_parallel_strategy}'; use 'all_gather' or 'ulysses'."
+        )
     if self.sa_ignore_segment_ids:
       # Mirrors the use_stream_chunking=None resolution in tfds_data_processing_c4_mlperf.py: stream
       # chunking (uniform segment ids per row) is the default for pre-tokenized data.

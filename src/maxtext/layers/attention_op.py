@@ -2075,6 +2075,8 @@ class AttentionOp(nnx.Module):
             attn_logits_soft_cap=attn_logits_soft_cap,
             fuse_reciprocal=self.fuse_reciprocal,
             use_base2_exp=self.use_base2_exp,
+            dkv_reuse_scaled_q=getattr(config, "sa_dkv_reuse_scaled_q", False),
+            q_prescaled_log2e=getattr(config, "sa_q_prescaled_log2e", False),
             residual_checkpoint_name="context",
             fwd_cost_estimate=pl.CostEstimate(
                 flops=config.cost_estimate_flops_fwd,
