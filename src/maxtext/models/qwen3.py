@@ -1473,6 +1473,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
     gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
+    if model_mode == MODEL_MODE_TRAIN:
+      # Token-minor, as the backward's recomputed projection reads it: left to itself, layout assignment gives
+      # the forward's operand the norm's head-tiled layout and out_proj re-tiles it on every MXU fetch.
+      gated_output = moe._forward_layout_constraint(gated_output, (0, 2, 1))
 
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output, out_sharding=out_sharding)

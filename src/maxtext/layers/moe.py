@@ -250,6 +250,23 @@ def _forward_optimization_barrier_bwd(_, cotangents):
 _forward_optimization_barrier.defvjp(_forward_optimization_barrier_fwd, _forward_optimization_barrier_bwd)
 
 
+@jax.custom_vjp
+def _backward_optimization_barrier(operands):
+  """The identity on the forward values and `jax.lax.optimization_barrier` on their cotangents."""
+  return operands
+
+
+def _backward_optimization_barrier_fwd(operands):
+  return operands, None
+
+
+def _backward_optimization_barrier_bwd(_, cotangents):
+  return (jax.lax.optimization_barrier(cotangents),)
+
+
+_backward_optimization_barrier.defvjp(_backward_optimization_barrier_fwd, _backward_optimization_barrier_bwd)
+
+
 def barrier_tie(x, dep, backward: bool = False):
   """Returns `(x, dep)` unchanged, tied together by `jax.lax.optimization_barrier`.
 
@@ -3303,6 +3320,11 @@ class RoutedMoE(nnx.Module):
         reads those barrier outputs, and XLA removes the reduce-scatter and its
         gather-reduce. The compiled backward has the collectives of the plain chunk loop.
         """
+        nonlocal x, w0, w1, wo
+        # The backward hands the layer-input gradient on only once the expert-weight gradients exist, so each
+        # layer's tgmm runs under its own token reduce-scatters instead of at the end of the backward iteration,
+        # where every deferred layer's sorted-token buffers would still be live.
+        x, (w0, w1, wo) = _backward_optimization_barrier((x, (w0, w1, wo)))
         seq_len = x.shape[1]
         chunk = seq_len // n_chunks
 
