@@ -1127,6 +1127,8 @@ _REMAT_PRESET_MLP_NAMES = {
 # The checkpoint names of the routed experts' up-projection output in the sparse-matmul path: the gate half carries
 # mlpwi_0 and moe_mlpwi_0, the up half moe_mlpwi_1 (moe.py gmm_up).
 _MOE_UP_PROJECTION_NAMES = ("mlpwi_0", "moe_mlpwi_0", "moe_mlpwi_1")
+# ... and of its down-projection output: mlpwo and moe_mlpwo.
+_MOE_DOWN_PROJECTION_NAMES = ("mlpwo", "moe_mlpwo")
 
 
 class MoEGeneral(BaseModel):
@@ -1412,6 +1414,24 @@ class MoEGeneral(BaseModel):
           " computed as without it. Tagged moe_routing_maps. Requires sparse_matmul=True, te_moe_block=False,"
           " ring_of_experts_local_routing=True, moe_chunk_pipeline=True and use_random_routing=False (random routing"
           " draws per call, so one draw for the layer differs from one per chunk)."
+      ),
+  )
+  moe_router_grad_from_wo_input: bool = Field(
+      False,
+      description=(
+          "Ring of Experts with the ragged sort: run the activation, the down projection (wo GEMM) and the unsort"
+          " as one op whose backward does not read the down projection's output. The routing-weight gradient"
+          " <g, h wo> is computed as <g wo^T, h> from the down projection's input and the routing weight is applied"
+          " on the [rows, mlp] side, so a rematerialized layer no longer recomputes the down-projection GEMM in the"
+          " backward, and the combine backward's pass over [rows, hidden] tensors moves to [rows, mlp] ones. The"
+          " forward is bit-identical. NUMERICS CHANGE: each gradient keeps one rounding to the activation dtype, at"
+          " a different point, so the gradients agree with the unfused ops to bf16 rounding, not bit for bit."
+          " Requires sparse_matmul=True, te_moe_block=False, use_ring_of_experts=True and use_ragged_sort=True, and"
+          " the down projection to be the bare GEMM of the sorted rows: no tensor parallelism, mlp_bias=False, no"
+          " weight quantization, moe_tc_ragged_sort, moe_accumulate_chunk_wgrad, moe_bwd_prequant_before_unsort and"
+          " moe_quantize_token_all_gather off, num_moe_emb_chunks=0; and a remat policy that does not save the routed"
+          " experts' down-projection output (mlpwo, moe_mlpwo; the minimal* and save_dot_except_mlpwi policies save"
+          " mlpwo): the fused op never forms it, so the policy would silently stop saving the MoE tensor."
       ),
   )
   ring_of_experts_row_major_reduce_scatter: bool = Field(
@@ -1835,6 +1855,30 @@ class MoEGeneral(BaseModel):
               (self.moe_chunk_pipeline, "moe_chunk_pipeline=True (only the pipelined chunk loop gathers per chunk)"),
               # Random routing draws per get_topk call: one draw for the layer is not one per chunk.
               (not self.use_random_routing, "use_random_routing=False"),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_router_grad_from_wo_input(self) -> "MoEGeneral":
+    """The fused op needs the ring-of-experts ragged sort and a down projection that is the bare GEMM of its rows."""
+    if self.moe_router_grad_from_wo_input:
+      _reject_unless(
+          "moe_router_grad_from_wo_input=True",
+          self._ring_of_experts_ragged_sort_requirements()
+          + [
+              (
+                  self.ici_tensor_parallelism * self.dcn_tensor_parallelism == 1,
+                  "no tensor parallelism (the layer checks the mesh again when it is traced)",
+              ),
+              (not self.mlp_bias, "mlp_bias=False"),
+              self._no_weight_quantization_requirement(),
+              (not self.moe_tc_ragged_sort, "moe_tc_ragged_sort=False"),
+              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
+              (not self.moe_bwd_prequant_before_unsort, "moe_bwd_prequant_before_unsort=False"),
+              (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              self._remat_keeps_moe_tensor_requirement("down-projection output", _MOE_DOWN_PROJECTION_NAMES),
           ],
       )
     return self
