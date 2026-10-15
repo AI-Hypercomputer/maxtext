@@ -496,14 +496,14 @@ def create_allocs(
     qkv_ref: jax.Array,
     b_ref: jax.Array,
     a_ref: jax.Array,
-    out_ref: jax.Array,
+    out_ref: jax.Array | None,
     conv_state_ref: jax.Array,
     recurrent_state_ref: jax.Array,
     cfg: config.GDNConfig,
     t_inv_ref: jax.Array | None = None,
     chunk_states_ref: jax.Array | None = None,
 ) -> tuple[Any, ...]:
-  """Creates all Pallas double-buffered allocations for GDN kernel."""
+  """Creates all Pallas double-buffered allocations for GDN kernel (no output buffers without out_ref)."""
   qkv_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.dim_size)
   ba_shape = (cfg.seq_tile_size, cfg.chunk_size, 1, cfg.aligned_num_v_heads)
 
@@ -543,15 +543,6 @@ def create_allocs(
   b_alloc = in_buffered_partial(spec=ba_spec, dtype_or_type=b_ref)
   a_alloc = in_buffered_partial(spec=ba_spec, dtype_or_type=a_ref)
 
-  out_alloc = OutBufferedRef.output(
-      spec=block_spec_partial(block_shape=out_shape),
-      dtype_or_type=out_ref,
-      buffer_count=pipeline_mode.buffer_count,
-      use_lookahead=pipeline_mode.use_lookahead,
-      cfg=cfg,
-      metadata_ref=metadata_ref,
-  )
-
   conv_spec = block_spec_partial(block_shape=conv_shape)
   recurrent_spec = block_spec_partial(block_shape=recurrent_shape)
   state_buffered_partial = functools.partial(
@@ -570,8 +561,18 @@ def create_allocs(
       a_alloc,
       conv_alloc,
       recurrent_alloc,
-      out_alloc,
   ]
+
+  if out_ref is not None:
+    out_alloc = OutBufferedRef.output(
+        spec=block_spec_partial(block_shape=out_shape),
+        dtype_or_type=out_ref,
+        buffer_count=pipeline_mode.buffer_count,
+        use_lookahead=pipeline_mode.use_lookahead,
+        cfg=cfg,
+        metadata_ref=metadata_ref,
+    )
+    allocs.append(out_alloc)
 
   if t_inv_ref is not None:
     t_inv_shape = (

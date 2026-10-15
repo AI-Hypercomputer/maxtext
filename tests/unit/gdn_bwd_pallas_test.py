@@ -27,6 +27,7 @@ import numpy as np
 
 from maxtext.configs import types as config_types
 from maxtext.kernels.gdn import gdn_bwd_pallas
+from maxtext.kernels.gdn.gdn_bwd import api as gdn_api
 from maxtext.models import qwen3
 from maxtext.utils import maxtext_utils
 
@@ -725,6 +726,56 @@ class GdnBwdPallasTest(absltest.TestCase):
     tol = 5e-3 if is_tpu else 1e-5
     np.testing.assert_allclose(chunk_states, exp_chunk_states, rtol=tol, atol=tol)
     np.testing.assert_allclose(t_inv, exp_t_inv, rtol=tol, atol=tol)
+
+  def test_run_local_gdn_states_fwd_matches_full_forward(self):
+    """The states-only forward (CP pass 1) returns the full forward's states and t_inv bit for bit.
+
+    On TPU this compares the PER_SEQ_STATES kernel, which skips the output, with the PER_SEQ kernel.
+    """
+    is_tpu = jax.default_backend() == "tpu"
+    batch_size = 2
+    chunk_size = 64 if is_tpu else 32
+    seq_len = 4 * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias = _init_fwd_inputs(
+        jax.random.PRNGKey(7), batch_size, seq_len, dim_size, num_v_heads, conv_kernel_size
+    )
+    qkv, b, a = (x.astype(jnp.bfloat16) for x in (qkv, b, a))
+    # Pass-1 inputs: the conv halo, a zero recurrent state, and packed rows with trailing padding.
+    conv_state = jax.random.normal(jax.random.PRNGKey(8), (batch_size, conv_kernel_size - 1, dim_size), jnp.bfloat16)
+    recurrent_state = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), jnp.float32)
+    seg = np.zeros((batch_size, seq_len), np.int32)
+    seg[0, : seq_len // 3] = 1
+    seg[0, seq_len // 3 : seq_len - 10] = 2
+    seg[1, : seq_len - 40] = 1
+    segment_ids, conv_halo_seg, init_seg = gdn_api._local_segment_metadata(jnp.asarray(seg), True, conv_kernel_size)
+    args = (qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state)
+    kwargs = {
+        "num_k_heads": num_k_heads,
+        "num_v_heads": num_v_heads,
+        "head_k_dim": head_k_dim,
+        "head_v_dim": head_v_dim,
+        "conv_kernel_size": conv_kernel_size,
+        "chunk_size": chunk_size,
+        "use_qk_norm_in_gdn": True,
+        "compute_dtype": jnp.float32,
+        "segment_ids": segment_ids,
+        "conv_halo_seg": conv_halo_seg,
+        "init_seg": init_seg,
+    }
+
+    (_, exp_states), exp_t_inv, _ = gdn_api._run_local_gdn_decoupled_fwd(*args, **kwargs)
+    states, t_inv = gdn_api._run_local_gdn_states_fwd(*args, **kwargs)
+
+    for got, exp in zip((*states, t_inv), (*exp_states, exp_t_inv)):
+      self.assertEqual(got.dtype, exp.dtype)
+      np.testing.assert_array_equal(np.asarray(got, np.float32), np.asarray(exp, np.float32))
 
   def test_decoupled_conv1d_gdn_kernel_gradient_with_initial_states(self):
     """Verifies custom VJP gradients when initial conv_state and recurrent_state are provided."""

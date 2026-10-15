@@ -114,8 +114,8 @@ def chunked_gdn_per_seq(
     cfg: config.GDNConfig,
     seg_c_col: jax.Array | None = None,  # [1, chunk, 1]
     seg_aux_col: jax.Array | None = None,  # [1, chunk, 1]
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-  """Perform chunked GDN over input [num_heads, chunk, head_dim]."""
+) -> tuple[jax.Array | None, jax.Array, jax.Array]:
+  """Perform chunked GDN over input [num_heads, chunk, head_dim]; out is None in PER_SEQ_STATES mode."""
   # bf16 activations keep single-pass MXU matmuls even with an f32 compute dtype
   # (HIGHEST would triple the forward MXU cost); HIGHEST needs f32 activations and compute.
   dot_prec = (
@@ -236,23 +236,36 @@ def chunked_gdn_per_seq(
   # [num_v_heads, chunk, v_head_dim]
   u, w = jnp.split(merged_uw, [cfg.v_head_dim], axis=-1)
 
-  # [num_v_heads, chunk, kq_head_dim]
-  q_large_gating = q_repeat * gating_forward
-  # NOTE: Concatenate lhs with same rhs to leverage weight
-  # stationary architecture.
-  # [num_v_heads, 2 * chunk, kq_head_dim]
-  merged_w_q = jnp.concat([w, q_large_gating], axis=1)
-  # [num_v_heads, 2 * chunk, v_head_dim]
-  merged_ws_out_updated = jax.lax.dot(
-      merged_w_q,
-      state_prev,
-      dimension_numbers=(((2,), (1,)), ((0,), (0,))),
-      precision=dot_prec,
-      preferred_element_type=jnp.float32,
-  )
+  states_only = cfg.mode == config.GDNMode.PER_SEQ_STATES
+  if states_only:
+    # No output: only the w rows of the merged matmul below. Each row's dot product is the same,
+    # so ws is bit-identical.
+    # [num_v_heads, chunk, v_head_dim]
+    ws = jax.lax.dot(
+        w,
+        state_prev,
+        dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+        precision=dot_prec,
+        preferred_element_type=jnp.float32,
+    )
+  else:
+    # [num_v_heads, chunk, kq_head_dim]
+    q_large_gating = q_repeat * gating_forward
+    # NOTE: Concatenate lhs with same rhs to leverage weight
+    # stationary architecture.
+    # [num_v_heads, 2 * chunk, kq_head_dim]
+    merged_w_q = jnp.concat([w, q_large_gating], axis=1)
+    # [num_v_heads, 2 * chunk, v_head_dim]
+    merged_ws_out_updated = jax.lax.dot(
+        merged_w_q,
+        state_prev,
+        dimension_numbers=(((2,), (1,)), ((0,), (0,))),
+        precision=dot_prec,
+        preferred_element_type=jnp.float32,
+    )
 
-  # NOTE: Splitting along non sublane/lane dim is free.
-  ws, out_updated = jnp.split(merged_ws_out_updated, 2, axis=1)
+    # NOTE: Splitting along non sublane/lane dim is free.
+    ws, out_updated = jnp.split(merged_ws_out_updated, 2, axis=1)
   ws = ws.astype(cfg.dtypes.compute)
 
   # [num_v_heads, chunk, v_head_dim]
@@ -273,6 +286,8 @@ def chunked_gdn_per_seq(
   # [num_v_heads, kq_head_dim, v_head_dim]
   state_updated = state_prev * gating_last
   state = state_updated + state_new
+  if states_only:
+    return None, state, t_inv
 
   # [num_kq_heads, chunk, chunk]
   out_qk = jax.lax.dot(
@@ -314,8 +329,8 @@ def chunked_gdn(
     a_log: jax.Array,
     dt_bias: jax.Array,
     cfg: config.GDNConfig,
-) -> tuple[jax.Array, jax.Array, jax.Array]:
-  """Perform chunked GDN over input [seq, num_heads, chunk, head_dim]."""
+) -> tuple[jax.Array | None, jax.Array, jax.Array]:
+  """Perform chunked GDN over input [seq, num_heads, chunk, head_dim]; out is None in PER_SEQ_STATES mode."""
 
   mask_dtype = get_mask_dtype(cfg.dtypes.compute)
   iota = jax.lax.broadcasted_iota(mask_dtype, (cfg.seq_tile_size, 1, cfg.chunk_size, 1), 2)
@@ -373,10 +388,11 @@ def chunked_gdn(
         seg_c_col=seg_c_per_seq[idx] if cfg.has_seg_ids else None,
         seg_aux_col=seg_aux_per_seq[idx] if cfg.has_seg_ids else None,
     )
-    out_list.append(out.swapaxes(0, 1))
+    if out is not None:
+      out_list.append(out.swapaxes(0, 1))
     state_list.append(state)
     t_inv_list.append(t_inv)
-  out = jnp.stack(out_list, axis=0)
+  out = jnp.stack(out_list, axis=0) if out_list else None
   state = jnp.stack(state_list, axis=0)
   t_inv = jnp.stack(t_inv_list, axis=0)
   return out, state, t_inv
