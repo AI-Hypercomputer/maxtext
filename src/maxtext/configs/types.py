@@ -1113,6 +1113,22 @@ def _reject_unless(setting: str, requirements: list[tuple[bool, str]]) -> None:
     raise ValueError(f"{setting} requires: {'; '.join(unmet)}.")
 
 
+# The MLP checkpoint names that the remat_policy presets save or offload (Decoder.get_remat_policy, nnx_decoders.py).
+# remat_policy=custom names them per tensor instead (mlpwi_0, mlpwo, moe_mlpwi_0, ... = device / offload).
+_REMAT_PRESET_MLP_NAMES = {
+    "minimal": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_with_context": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_flash": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_with_quantization": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_with_context_and_quantization": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_offloaded": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "save_dot_except_mlpwi": ("mlpwo",),
+}
+# The checkpoint names of the routed experts' up-projection output in the sparse-matmul path: the gate half carries
+# mlpwi_0 and moe_mlpwi_0, the up half moe_mlpwi_1 (moe.py gmm_up).
+_MOE_UP_PROJECTION_NAMES = ("mlpwi_0", "moe_mlpwi_0", "moe_mlpwi_1")
+
+
 class MoEGeneral(BaseModel):
   """General configuration for Mixture of Experts (MoE) layers."""
 
@@ -1449,6 +1465,18 @@ class MoEGeneral(BaseModel):
           " use_ring_of_experts=True and use_ragged_sort=True."
       ),
   )
+  moe_ragged_sort_unique_pair_argsort: bool = Field(
+      False,
+      description=(
+          "With moe_routing_index_math='sort': run the ring-of-experts ragged sort's argsorts (the expert"
+          " permutation, its inverse, and the SparseCore gather-reduce's validity sort) as unstable sorts of the"
+          " unique (key, index) pairs instead of stable argsorts. XLA lowers a stable jnp.argsort in the forward"
+          " pass with a third, duplicated iota operand; the pair sort has two operands and exactly one result, the"
+          " same permutation. Exact (same values). An alternative to moe_routing_index_math='count', which removes"
+          " these sorts instead. Requires sparse_matmul=True, te_moe_block=False, use_ring_of_experts=True,"
+          " use_ragged_sort=True and moe_routing_index_math='sort'."
+      ),
+  )
   moe_quantize_combine_bwd_method: str | None = Field(
       "",
       description=(
@@ -1655,6 +1683,35 @@ class MoEGeneral(BaseModel):
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
       "This enables a single FFN1 grouped GEMM in sparse MoE paths and passes fused weights directly in vllm_rpa mode.",
   )
+  moe_unsplit_prefused_wi: bool = Field(
+      False,
+      description=(
+          "With prefuse_moe_weights on the sparse-matmul training path: keep the prefused wi = [w0 | w1] one tensor"
+          " from the parameter to the up-projection GEMM, instead of slicing it into w0 and w1 at the layer entry and"
+          " concatenating the gathered halves back before the GEMM. One fp8 fake-quant (per output channel, so the"
+          " same values as rounding the halves), one FSDP all-gather, one operand through the expert-weight"
+          " prefetch barrier, and no post-gather concatenate. Exact (same values). Requires sparse_matmul=True,"
+          " te_moe_block=False, no weight quantization, an unsharded expert MLP dimension (tensor, tensor_sequence"
+          " and autoregressive parallelism 1), the default expert-weight sharding (not shard_exp_on_fsdp,"
+          " use_2d_fsdp_sharding, shard_embed_moe_on_fsdp, moe_flat_fsdp_weights or"
+          " moe_fsdp_use_two_stage_all_gather), num_moe_emb_chunks=0 and moe_accumulate_chunk_wgrad=False."
+      ),
+  )
+  moe_prefused_swiglu_vjp: bool = Field(
+      False,
+      description=(
+          "With prefuse_moe_weights on the sparse-matmul path: apply the MoE's gated activation (SwiGLU, or any"
+          " other mlp_activations pair, e.g. GPT-OSS's clipped form) to the whole [gate | up] up-projection output as"
+          " one custom-VJP op whose backward returns d[gate | up] as one array, computed by the same ops autodiff"
+          " emits. Split, the two [rows, mlp] cotangents leave their fusion separately and XLA concatenates them in"
+          " an extra full pass over the expert buffer. Exact (same values; the gradient bits can differ only in the"
+          " sign of an exact zero). An alternative to moe_wi_gmm_fused_swiglu for configurations that one does not"
+          " support (other GMM backends, other activations). Requires sparse_matmul=True, te_moe_block=False,"
+          " mlp_bias=False, num_moe_emb_chunks=0, and a remat policy that does not save the routed experts' gate or"
+          " up half (mlpwi_0, moe_mlpwi_0, moe_mlpwi_1; the minimal* policies save mlpwi_0): the fused activation"
+          " never forms them, so the policy would silently stop saving the MoE tensor."
+      ),
+  )
   fp8_moe: bool = Field(
       False,
       description="Whether MoE weights are quantized to float8_e4m3fn in inference/rollout.",
@@ -1739,6 +1796,109 @@ class MoEGeneral(BaseModel):
     if self.moe_routing_index_math != "sort":
       _reject_unless(
           f"moe_routing_index_math={self.moe_routing_index_math!r}", self._ring_of_experts_ragged_sort_requirements()
+      )
+    return self
+
+  def _prefused_sparse_matmul_requirements(self) -> list[tuple[bool, str]]:
+    """What the MoE layer needs to run the prefused [w0 | w1] sparse-matmul up projection in training."""
+    return [
+        (self.prefuse_moe_weights, "prefuse_moe_weights=True"),
+        (self.sparse_matmul, "sparse_matmul=True"),
+        (not self.te_moe_block, "te_moe_block=False"),
+        (
+            self.attention not in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"),
+            "an attention other than vllm_rpa* (the fused-MoE inference path)",
+        ),
+    ]
+
+  def _no_weight_quantization_requirement(self) -> tuple[bool, str]:
+    return (not self.quantization and not self.use_qwix_quantization, "no weight quantization")
+
+  def _remat_keeps_moe_tensor_requirement(self, tensor: str, names: tuple[str, ...]) -> tuple[bool, str]:
+    """Requirement: the remat policy saves none of `names`, the checkpoint names of the routed experts' `tensor`.
+
+    The keys that ask for this never form that tensor (it is fused into the op that reads it), so a policy that
+    saves or offloads it would silently stop saving the MoE tensor; the shared expert's dense MLP, which carries the
+    generic names (mlpwi_0, mlpwo) too, would still be saved.
+    """
+    if self.remat_policy == "custom":
+      saved = [name for name in names if getattr(self, name) != RematLocation.REMAT]
+    else:
+      saved = [name for name in names if name in _REMAT_PRESET_MLP_NAMES.get(self.remat_policy, ())]
+    return (
+        not saved,
+        f"a remat policy that does not save the routed experts' {tensor}, which this key never forms"
+        f" (remat_policy={self.remat_policy} saves it as {', '.join(saved)})",
+    )
+
+  def _expert_mlp_dim_shards(self) -> int:
+    """Devices that split the expert weights' MLP dimension inside the expert shard_map, by the default logical axis
+    rules ('mlp_no_fsdp' -> tensor, tensor_sequence, autoregressive)."""
+    degrees = (
+        self.ici_tensor_parallelism,
+        self.dcn_tensor_parallelism,
+        self.ici_tensor_sequence_parallelism,
+        self.dcn_tensor_sequence_parallelism,
+        self.ici_autoregressive_parallelism,
+        self.dcn_autoregressive_parallelism,
+    )
+    return math.prod(degrees)
+
+  @model_validator(mode="after")
+  def validate_moe_ragged_sort_unique_pair_argsort(self) -> "MoEGeneral":
+    """The pair argsort rewrites the ring-of-experts ragged sort's argsorts, which "count" removes."""
+    if self.moe_ragged_sort_unique_pair_argsort:
+      _reject_unless(
+          "moe_ragged_sort_unique_pair_argsort=True",
+          self._ring_of_experts_ragged_sort_requirements()
+          + [
+              (
+                  self.moe_routing_index_math == "sort",
+                  "moe_routing_index_math='sort' (with 'count' there are no argsorts left to rewrite; set one of them)",
+              )
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_unsplit_prefused_wi(self) -> "MoEGeneral":
+    """The whole wi needs the prefused sparse-matmul path and readers of w0/w1 that all take the [w0 | w1] layout."""
+    if self.moe_unsplit_prefused_wi:
+      _reject_unless(
+          "moe_unsplit_prefused_wi=True",
+          self._prefused_sparse_matmul_requirements()
+          + [
+              self._no_weight_quantization_requirement(),
+              # The default expert-weight sharding: these split w0 and w1 differently from the whole [w0 | w1].
+              (not self.moe_fsdp_use_two_stage_all_gather, "moe_fsdp_use_two_stage_all_gather=False"),
+              (not self.moe_flat_fsdp_weights, "moe_flat_fsdp_weights=False"),
+              (not self.shard_exp_on_fsdp, "shard_exp_on_fsdp=False"),
+              (not self.use_2d_fsdp_sharding, "use_2d_fsdp_sharding=False"),
+              (not self.shard_embed_moe_on_fsdp, "shard_embed_moe_on_fsdp=False"),
+              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              # Sharded, a device would hold a slice of [w0 | w1] instead of matching slices of w0 and w1. The layer
+              # checks the actual partition spec again when it is traced (custom logical axis rules).
+              (
+                  self._expert_mlp_dim_shards() == 1,
+                  "an unsharded expert MLP dimension (tensor, tensor_sequence and autoregressive parallelism 1)",
+              ),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_prefused_swiglu_vjp(self) -> "MoEGeneral":
+    """The fused activation needs the whole prefused [gate | up] output, unbiased and unchunked, never saved per half."""
+    if self.moe_prefused_swiglu_vjp:
+      _reject_unless(
+          "moe_prefused_swiglu_vjp=True",
+          self._prefused_sparse_matmul_requirements()
+          + [
+              (not self.mlp_bias, "mlp_bias=False (biases are added per half)"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0 (partial sums per half)"),
+              self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
+          ],
       )
     return self
 
