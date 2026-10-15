@@ -139,8 +139,16 @@ def conv1d_silu_bwd(
   """
   if _resolve_conv_input_in_qkv_dtype(conv_input_in_qkv_dtype):
     return _conv1d_silu_bwd_narrow_input(
-        qkv, conv_weight, conv_bias, dy, kernel_size, conv_out, conv_state, return_d_conv_state, segment_ids,
-        conv_halo_seg
+        qkv,
+        conv_weight,
+        conv_bias,
+        dy,
+        kernel_size,
+        conv_out,
+        conv_state,
+        return_d_conv_state,
+        segment_ids,
+        conv_halo_seg,
     )
   _, seq_len, _ = qkv.shape
   if conv_weight.ndim == 3:
@@ -233,18 +241,19 @@ def conv1d_silu_bwd(
 # gdn_conv1d_input_in_qkv_dtype: the halo-extended conv input in qkv's dtype.
 #
 # The default path above builds conv_input = [conv_state | qkv] (or qkv left-padded by kernel_size - 1 zeros) in
-# float32 and slices the kernel_size taps out of it. That materializes a float32 copy of the whole input: on the
-# Qwen3.5-397B RL trainer (bf16 qkv, sequence-sharded context parallelism) one f32[1, 16387, 12288] = 805.5 MB buffer
-# per GDN layer in the backward pass, written once and read kernel_size times.
+# float32 and slices the kernel_size taps out of it. That materializes a float32 copy of the whole input, one buffer
+# of batch x (sequence + kernel_size - 1) x channels per GDN layer in the backward pass, written once and read
+# kernel_size times.
 #
 # The functions below build conv_input in qkv's dtype (bf16 for bf16 qkv and conv_state; the promoted dtype if they
 # differ) and cast each tap slice to float32 where it is read, so XLA fuses the cast into the consumer and the
 # float32 copy is never written. Every product and sum is formed in the same order, on the same float32 values, as in
 # the default path (bf16 -> float32 is exact), so op by op every output is bit-identical; only which tensors are
-# materialized in HBM changes. Compiled, the forward outputs and dx / d_conv_state / db stay bit-identical, while the
-# weight gradient dw, a float32 reduction over batch x sequence, can come out in a different summation order when XLA
-# fuses the tap's cast into the reduction (CPU: a few ulp, only when the pre-activation is recomputed without packing
-# or a conv state). No jax.lax.optimization_barrier is used: the narrow buffer alone is what removes the copy.
+# materialized in HBM changes. Compiled (measured on CPU), the forward outputs and dx / d_conv_state / db stay
+# bit-identical, while the weight gradient dw, a float32 reduction over batch x sequence, can come out in a different
+# summation order when XLA fuses the tap's cast into the reduction (CPU: a few ulp, only when the pre-activation is
+# recomputed without packing or a conv state). No jax.lax.optimization_barrier is used: the narrow buffer alone is
+# what removes the copy.
 # Tests: tests/unit/gdn_conv1d_input_in_qkv_dtype_test.py.
 
 

@@ -794,21 +794,11 @@ def inner_kernel(
 
       acc = apply_act_fn(acc, cfgs.fuse_act)
 
-      gm_id = pl.program_id(cfgs.gm_axis)
-
-      # Mask out rows that does not belong to the current group.
-      m_start = metadata_ref.gm_id_to_m_offset[gm_id]
-      m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
-      m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
-
-      m_start_local = m_start - m_offset
-      m_end_local = m_end - m_offset
-
-      iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0)
-      mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
-      acc_masked = jnp.where(mask, acc, 0)
-
       # Write the final output to the output ref.
+      if not cfgs.out_is_3d:
+        _store_group_rows(tiled_out_ref, partial_out_ref, acc, metadata_ref, cfgs)
+        return
+      acc_masked, gm_id, m_end_local = _mask_group_rows(acc, metadata_ref, cfgs)
       if cfgs.out_window:
         # Full-D0 out slab resident across the N tiles of this gm tile. The
         # cross-gm partial-row carry is kept per N tile, in the 2D domain.
@@ -825,39 +815,12 @@ def inner_kernel(
         partial_out_ref[n_id] = jnp.where(m_end_local % sub == 0, jnp.zeros_like(last), last)
         relayout.store_2d_as_3d_window(tiled_out_ref, out2d, out2d.shape[0], cfgs.out_tile_d0, n_id)
         return
-      if cfgs.out_is_3d:
-        # Block is [tile_m // sublane, sublane, tile_d0, 128]; scatter the
-        # [tile_m, tile_n] rows back into per-token [tile_d0, 128] slabs.
-        relayout.store_2d_as_3d(
-            tiled_out_ref, acc_masked.astype(tiled_out_ref.dtype), acc_masked.shape[0], cfgs.out_tile_d0
-        )
-      else:
-        tiled_out_ref[...] = acc_masked.reshape(tiled_out_ref.shape).astype(tiled_out_ref.dtype)
-
-      # If this is the first tile for grid[n_id, :, :], we initialize the
-      # partial out to zeros. Otherwise, partial out from last tile of
-      # grid[n_id-1, :, :] can be used and cause numeric issues.
-      partial_out_zeros = jnp.zeros_like(partial_out_ref)
-
-      # Accumulate the partial output from the previous step.
-      tiled_out_ref[0] += jnp.where(gm_id == 0, partial_out_zeros, partial_out_ref[...])
-
-      # Consider following case where size_lhs_sublane = 4, number denotes group
-      # id and | denotes boundaries between sublanes:
-      # | 0 0 1 2 | 2 2 2 2 | 3 3 4 4 |
-      #
-      # Assuming group id of current step is 1, current step will not completely
-      # fill size_lhs_sublane rows and will be revisited at the next step. By
-      # storing the partial rows into the partial_out_ref, the next step can
-      # read them and accumulate to them.  Additionally, for group id of 2,
-      # since it completely fills the size_lhs_sublane rows, we need to zero out
-      # partial_out_ref to avoid numeric error for group 3.
-      last_row = m_end_local // cfgs.dims.size_lhs_sublane
-      partial_out_ref[...] = jnp.where(
-          m_end_local % cfgs.dims.size_lhs_sublane == 0,
-          partial_out_zeros,
-          tiled_out_ref[last_row],
+      # Block is [tile_m // sublane, sublane, tile_d0, 128]; scatter the
+      # [tile_m, tile_n] rows back into per-token [tile_d0, 128] slabs.
+      relayout.store_2d_as_3d(
+          tiled_out_ref, acc_masked.astype(tiled_out_ref.dtype), acc_masked.shape[0], cfgs.out_tile_d0
       )
+      _carry_partial_rows(tiled_out_ref, partial_out_ref, gm_id, m_end_local, cfgs)
     else:
       acc_ref[...] = acc
 
@@ -900,6 +863,61 @@ def inner_kernel(
   )
 
 
+def _mask_group_rows(acc: jax.Array, metadata_ref: MetadataRef, cfgs: GmmConfigs):
+  """Zeroes the rows of `acc` that do not belong to the current gm tile's group.
+
+  Returns the masked `acc`, the gm tile id and the group's end row relative to
+  the tile's first sublane row (what _carry_partial_rows needs).
+  """
+  gm_id = pl.program_id(cfgs.gm_axis)
+
+  # Mask out rows that does not belong to the current group.
+  m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+  m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+  m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
+
+  m_start_local = m_start - m_offset
+  m_end_local = m_end - m_offset
+
+  iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0)
+  mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
+  return jnp.where(mask, acc, 0), gm_id, m_end_local
+
+
+def _carry_partial_rows(
+    tiled_out_ref: jax.Array,
+    partial_out_ref: jax.Array,
+    gm_id: jax.Array,
+    m_end_local: jax.Array,
+    cfgs: GmmConfigs,
+):
+  """Adds the sublane rows the previous gm tile left in `partial_out_ref`; leaves this tile's unfinished ones there."""
+  # If this is the first tile for grid[n_id, :, :], we initialize the
+  # partial out to zeros. Otherwise, partial out from last tile of
+  # grid[n_id-1, :, :] can be used and cause numeric issues.
+  partial_out_zeros = jnp.zeros_like(partial_out_ref)
+
+  # Accumulate the partial output from the previous step.
+  tiled_out_ref[0] += jnp.where(gm_id == 0, partial_out_zeros, partial_out_ref[...])
+
+  # Consider following case where size_lhs_sublane = 4, number denotes group
+  # id and | denotes boundaries between sublanes:
+  # | 0 0 1 2 | 2 2 2 2 | 3 3 4 4 |
+  #
+  # Assuming group id of current step is 1, current step will not completely
+  # fill size_lhs_sublane rows and will be revisited at the next step. By
+  # storing the partial rows into the partial_out_ref, the next step can
+  # read them and accumulate to them.  Additionally, for group id of 2,
+  # since it completely fills the size_lhs_sublane rows, we need to zero out
+  # partial_out_ref to avoid numeric error for group 3.
+  last_row = m_end_local // cfgs.dims.size_lhs_sublane
+  partial_out_ref[...] = jnp.where(
+      m_end_local % cfgs.dims.size_lhs_sublane == 0,
+      partial_out_zeros,
+      tiled_out_ref[last_row],
+  )
+
+
 def _store_group_rows(
     tiled_ref: jax.Array,  # [tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
     partial_ref: jax.Array,  # [size_lhs_sublane, tile_n]
@@ -907,33 +925,16 @@ def _store_group_rows(
     metadata_ref: MetadataRef,
     cfgs: GmmConfigs,
 ):
-  """Stores the current group's rows of `acc` into a 2D output tile, with the partial-row carry.
+  """The 2D store of inner_kernel's last k step: the current group's rows of `acc`, with the partial-row carry.
 
-  The same steps as the 2D store at the end of inner_kernel's last k step: zero
-  the rows of other groups, round to the output dtype, add the sublane rows the
-  previous gm tile left in `partial_ref`, and leave this tile's unfinished last
-  sublane rows there for the next one. Used for the extra (return_pre_act)
-  outputs written from the same accumulator.
+  Zeroes the rows of other groups, rounds to the output dtype, stores the tile
+  and carries its unfinished last sublane rows to the next gm tile. Used for the
+  plain 2D output and for the extra (return_pre_act) outputs written from the
+  same accumulator.
   """
-  gm_id = pl.program_id(cfgs.gm_axis)
-  m_start = metadata_ref.gm_id_to_m_offset[gm_id]
-  m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
-  m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
-  m_start_local = m_start - m_offset
-  m_end_local = m_end - m_offset
-
-  iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0)
-  mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
-  tiled_ref[...] = jnp.where(mask, acc, 0).reshape(tiled_ref.shape).astype(tiled_ref.dtype)
-
-  partial_zeros = jnp.zeros_like(partial_ref)
-  tiled_ref[0] += jnp.where(gm_id == 0, partial_zeros, partial_ref[...])
-  last_row = m_end_local // cfgs.dims.size_lhs_sublane
-  partial_ref[...] = jnp.where(
-      m_end_local % cfgs.dims.size_lhs_sublane == 0,
-      partial_zeros,
-      tiled_ref[last_row],
-  )
+  acc_masked, gm_id, m_end_local = _mask_group_rows(acc, metadata_ref, cfgs)
+  tiled_ref[...] = acc_masked.reshape(tiled_ref.shape).astype(tiled_ref.dtype)
+  _carry_partial_rows(tiled_ref, partial_ref, gm_id, m_end_local, cfgs)
 
 
 def fill_metadata(

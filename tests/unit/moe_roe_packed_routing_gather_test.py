@@ -46,8 +46,7 @@ Two-sided:
     but exactly one [..., 2 * top_k] float32 array; under moe_routing_maps=device that array is tagged
     moe_routing_maps, under remat it is untagged, and nothing is ever tagged moe_route.
   - Deliberately wrong versions must FAIL: a packed gather whose result is shifted along the sequence (each chunk
-    gets another chunk's routing), and the packed path with its load-balance loss dropped (what an earlier version
-    of this change did).
+    gets another chunk's routing), and the packed path with its load-balance loss dropped.
 """
 
 import contextlib
@@ -325,7 +324,8 @@ def _dropped_load_balance_loss():
   return mock.patch.object(jax.lax, "pmean", lambda x, axis_name, **kwargs: jnp.zeros_like(x))
 
 
-# The MoE settings of the Qwen3.5-397B RL trainer benchmark that the cases above do not all set.
+# The subset of the Qwen3.5-397B RL trainer benchmark's MoE settings that this file needs (the cases above do not
+# all set them).
 _BENCH_FLAGS = {
     "moe_expert_weight_prefetch": "forward",
     "ring_of_experts_row_major_reduce_scatter": True,
