@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792035572766,
+  "lastUpdate": 1792046382855,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -50563,6 +50563,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 480,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Daniel Mandragona",
+            "username": "dandragona",
+            "email": "dandragona@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "bcc425e663a09dc113fbc7521e01a310e7a196a6",
+          "message": "Sync Lineage DeepSeek-V3 modules into experimental/lineage.\n\nChanged files:\n  src/maxtext/experimental/lineage/BUILD\n  src/maxtext/experimental/lineage/dsv3_dense_layer.py\n  src/maxtext/experimental/lineage/dsv3_dense_layers.py\n  src/maxtext/experimental/lineage/dsv3_loss.py\n  src/maxtext/experimental/lineage/dsv3_mla.py\n  src/maxtext/experimental/lineage/dsv3_model.py\n  src/maxtext/experimental/lineage/dsv3_mtp.py\n  src/maxtext/experimental/lineage/dsv3_router.py\n  src/maxtext/experimental/lineage/dsv3_sharding.py\n  src/maxtext/experimental/lineage/dsv3_sparse_layer.py\n  src/maxtext/experimental/lineage/dsv3_types.py\n  src/maxtext/experimental/lineage/interop/maxtext_layout.py\n  src/maxtext/experimental/lineage/mla_l4_megakernel_bwd_fused.py (deleted)\n  src/maxtext/experimental/lineage/mla_qkv_up_bwd_kernels.py\n  src/maxtext/experimental/lineage/mla_qkv_up_kernel.py\n  src/maxtext/experimental/lineage/ops.py\n\nPiperOrigin-RevId: 999835634",
+          "timestamp": "2026-10-15T04:21:23Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/bcc425e663a09dc113fbc7521e01a310e7a196a6"
+        },
+        "date": 1792046382024,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 287.387,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 105.95400000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2037.386,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 101.07300000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 156.416,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7884.795999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 478,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1442.857,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 198.62499999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 6797.214000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 478,
             "unit": "count"
           }
         ]
