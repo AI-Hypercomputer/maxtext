@@ -47,6 +47,7 @@ from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
+from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort_down_projection
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
@@ -2576,6 +2577,14 @@ class RoutedMoE(nnx.Module):
     # log_moe_drops only: the shard_map gets a 5th (moe_audit) output only when requested, so the
     # compiled program is unchanged with the flag off.
     log_moe_drops = getattr(self.config, "log_moe_drops", False)
+    # moe_router_grad_from_wo_input: the ring-of-experts down projection and unsort run as one op
+    # (_ring_down_project_and_unpermute). The config validator checks the rest; the mesh decides this.
+    router_grad_from_wo_input = self.config.moe_router_grad_from_wo_input
+    if router_grad_from_wo_input and self.get_tensor_parallelism_size() > 1:
+      raise ValueError(
+          "moe_router_grad_from_wo_input=True does not support tensor parallelism in the MoE layer: the down"
+          " projection must be the bare GEMM of the sorted rows, without its reduce-scatter."
+      )
 
     def fwd_tile(name):
       """Reads a forward GMM tile size, preferring `eval_*` under eval axis rules."""
@@ -3972,6 +3981,64 @@ class RoutedMoE(nnx.Module):
           ),
       )
 
+    def _ring_down_project_and_unpermute(
+        output0, output1, wo, routing, route_metadata, batch_size, sequence_length, forward_tie=None
+    ):
+      """moe_router_grad_from_wo_input: `_ring_unpermute(_down_projection(...))` as one op.
+
+      The fused op's backward does not read the down projection's output: the routing-weight gradient
+      <g, h wo> is computed as <g wo^T, h> from the down projection's input, and the routing weight is applied
+      on the [rows, mlp] side, so a rematerialized layer no longer recomputes the down-projection GEMM in the
+      backward (ring_ragged_unsort_down_projection). The config validator admits the key only where the down
+      projection is the bare GEMM of the sorted rows (no bias, TC sort, tensor parallelism or quantization).
+      `forward_tie` is the pipelined loop's tie 2, applied inside the op to the down-projection output.
+      Returns the output as [expert shards x batch, seq, embed], as `_ring_unpermute`, and the tie's output.
+      """
+      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
+      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+      wo_gather_axes, wo_tile_size = get_wo_gmm_params()
+
+      def down_projection(h, kernel, group_sizes, expert_assignments, group_offset):
+        return gmm(
+            h,
+            kernel,
+            tiling=wo_tile_size,
+            group_sizes=group_sizes,
+            expert_assignments=expert_assignments,
+            weight_gather_axes=wo_gather_axes,
+            group_offset=group_offset,
+        )
+
+      operands = get_gmm_operands_for_local_experts(intermediate_layer, routing, route_metadata)
+      output = ring_ragged_unsort_down_projection(
+          intermediate_layer,
+          wo,
+          down_projection,
+          (operands["group_sizes"], operands["expert_assignments"], operands["group_offset"]),
+          routing.group_sizes,
+          routing.sorted_selected_experts,
+          self.num_experts_per_tok,
+          self.config.num_experts // self.get_expert_parallelism_size(),
+          self._expert_parallelism_name,
+          topk_weights=jnp.ravel(routing.weights).astype(jnp.float32),
+          topk_argsort_indices=routing.topk_argsort_indices,
+          forward_tie=forward_tie,
+          enforce_gather_fallback=self.config.ragged_gather_fallback,
+          enforce_gather_reduce_fallback=self.config.ragged_gather_reduce_fallback,
+          gather_flops_override=self.config.ragged_gather_cost_estimate_flops,
+          gather_reduce_flops_override=self.config.ragged_gather_reduce_cost_estimate_flops,
+          gather_bytes_accessed_override=self.config.ragged_gather_cost_estimate_bytes_accessed,
+          gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
+          use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
+          index_math=self.config.moe_routing_index_math,
+          unique_pair_argsort=self.config.moe_ragged_sort_unique_pair_argsort,
+      )
+      if forward_tie is not None:
+        output, forward_tie = output
+      # The reshapes of unpermute and _ring_unpermute (the embed dim is whole: no tensor parallelism here).
+      output = output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
+      return jnp.reshape(output, (-1, sequence_length, self.moe_expert_input_dim)), forward_tie
+
     def _ring_reduce_scatter(output):
       """Ring of experts: sum the partial outputs across the expert shards."""
       if self.config.ring_of_experts_row_major_reduce_scatter:
@@ -3999,6 +4066,20 @@ class RoutedMoE(nnx.Module):
       if output.ndim == 4:
         output = jnp.reshape(output, (*output.shape[:2], -1))
       return output
+
+    def _moe_body_outputs(output, routing, weights):
+      """What _moe_body returns: the layer output, the routing's side outputs, and the weights `(w0, w1, wo)`
+      (as returned by the GMMs under moe_accumulate_chunk_wgrad)."""
+      return (
+          output,
+          routing.lb_loss,
+          routing.bias_updates,
+          routing.has_overflow,
+          routing.required_rbf,
+          routing.max_load_ratio,
+          routing.moe_audit,
+          weights,
+      )
 
     def _moe_body(
         x,
@@ -4082,6 +4163,17 @@ class RoutedMoE(nnx.Module):
           output0, output1, w0, w1 = up_res  # pylint: disable=unbalanced-tuple-unpacking
         else:
           output0, output1 = up_res  # pylint: disable=unbalanced-tuple-unpacking
+
+      if router_grad_from_wo_input:
+        # moe_router_grad_from_wo_input: the activation, the down projection and the unsort as one op whose
+        # backward does not read the down projection's output; then the same reduce-scatter as below. The op does
+        # not return the weights, so it cannot serve moe_accumulate_chunk_wgrad (the config validator rejects it).
+        if return_weights or not gather_weights:
+          raise NotImplementedError("moe_router_grad_from_wo_input does not support moe_accumulate_chunk_wgrad.")
+        output, _ = _ring_down_project_and_unpermute(
+            output0, output1, wo, routing, route_metadata, batch_size, sequence_length
+        )
+        return _moe_body_outputs(_ring_reduce_scatter(output), routing, (w0, w1, wo))
 
       tc_prescaled = (
           self.config.use_ring_of_experts
@@ -4196,16 +4288,7 @@ class RoutedMoE(nnx.Module):
             )
           # Same reduce-scatter as the pipelined chunk loop (adds ring_of_experts_row_major_reduce_scatter).
           output = _ring_reduce_scatter(output)
-        return (
-            output,
-            routing.lb_loss,
-            routing.bias_updates,
-            routing.has_overflow,
-            routing.required_rbf,
-            routing.max_load_ratio,
-            routing.moe_audit,
-            (w0, w1, wo),
-        )
+        return _moe_body_outputs(output, routing, (w0, w1, wo))
 
       if self.get_expert_parallelism_size() > 1:
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
@@ -4237,16 +4320,7 @@ class RoutedMoE(nnx.Module):
           group_sizes=routing.group_sizes,
       )
 
-      return (
-          output,
-          routing.lb_loss,
-          routing.bias_updates,
-          routing.has_overflow,
-          routing.required_rbf,
-          routing.max_load_ratio,
-          routing.moe_audit,
-          (w0, w1, wo),
-      )
+      return _moe_body_outputs(output, routing, (w0, w1, wo))
 
     in_specs = (
         input_partition_pspec,
@@ -4439,24 +4513,28 @@ class RoutedMoE(nnx.Module):
             #    so the TensorCore runs that GEMM while the gather-reduce is on the SparseCore.
             unpermuted, output0 = barrier_tie(unpermuted, output0)
             outs.append(_ring_reduce_scatter(unpermuted))
-          intermediate_output, wo_c, tc_prescaled, x_is_3d = _down_projection(
-              x_c,
-              output0,
-              output1,
-              gmm_fn,
-              cur_wo,
-              wo_bias_c,
-              routing,
-              route_metadata,
-              gather_weights=gather_c,
-              return_weights=return_c,
-          )
-          if return_c:
-            cur_w0, cur_w1, cur_wo = w0_c, w1_c, wo_c
-          if c + 1 < n_chunks:
-            # 2. This chunk's gather-reduce waits for the next chunk's routed tokens.
-            intermediate_output, routed = barrier_tie(intermediate_output, dispatched[c + 1][0])
-            dispatched[c + 1] = _with_routed(dispatched[c + 1], routed)
+          if router_grad_from_wo_input:
+            # moe_router_grad_from_wo_input: the fused op below runs the down projection, after tie 3.
+            intermediate_output, tc_prescaled, x_is_3d = None, False, False
+          else:
+            intermediate_output, wo_c, tc_prescaled, x_is_3d = _down_projection(
+                x_c,
+                output0,
+                output1,
+                gmm_fn,
+                cur_wo,
+                wo_bias_c,
+                routing,
+                route_metadata,
+                gather_weights=gather_c,
+                return_weights=return_c,
+            )
+            if return_c:
+              cur_w0, cur_w1, cur_wo = w0_c, w1_c, wo_c
+            if c + 1 < n_chunks:
+              # 2. This chunk's gather-reduce waits for the next chunk's routed tokens.
+              intermediate_output, routed = barrier_tie(intermediate_output, dispatched[c + 1][0])
+              dispatched[c + 1] = _with_routed(dispatched[c + 1], routed)
           if outs:
             # 3. This chunk's gather-reduce waits for the previous chunk's reduce-scatter. The tie holds the
             #    gather-reduce's routing weights, a small input: holding the down-projection output instead
@@ -4467,9 +4545,26 @@ class RoutedMoE(nnx.Module):
             #    run before the previous chunk's reduce-scatter.
             weights, outs[-1] = barrier_tie(routing.weights, outs[-1])
             routing = routing.replace(weights=weights)
-          unpermuted = _ring_unpermute(
-              intermediate_output, routing, x.shape[0], chunk, tc_prescaled=tc_prescaled, x_is_3d=x_is_3d
-          )
+          if router_grad_from_wo_input:
+            # moe_router_grad_from_wo_input: the down projection and the unsort as one op. Tie 2 moves inside it
+            # (forward only, as barrier_tie's backward=False): this chunk's down-projection output and the next
+            # chunk's routed tokens. Tie 3 above already holds the routing weights the op's gather-reduce reads.
+            unpermuted, routed = _ring_down_project_and_unpermute(
+                output0,
+                output1,
+                cur_wo,
+                routing,
+                route_metadata,
+                x.shape[0],
+                chunk,
+                forward_tie=dispatched[c + 1][0] if c + 1 < n_chunks else None,
+            )
+            if c + 1 < n_chunks:
+              dispatched[c + 1] = _with_routed(dispatched[c + 1], routed)
+          else:
+            unpermuted = _ring_unpermute(
+                intermediate_output, routing, x.shape[0], chunk, tc_prescaled=tc_prescaled, x_is_3d=x_is_3d
+            )
           lb_losses.append(routing.lb_loss)
           bias_updates_list.append(routing.bias_updates)
           has_overflows.append(routing.has_overflow)
