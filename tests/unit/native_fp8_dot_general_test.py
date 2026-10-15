@@ -38,6 +38,7 @@ from qwix._src.core import dot_general as qwix_dg
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import quantizations
+from maxtext.layers.initializers import nd_dense_init
 
 
 def _load_real(key_w, key_s):
@@ -309,6 +310,8 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
         shard_mode=ShardMode.AUTO,
         matmul_precision="default",
         dense_fsdp_use_two_stage_all_gather=False,
+        dense_weight_grad_in_kernel_order=False,
+        moe_flat_fsdp_weights=False,
         debug_sharding=False,
         weight_block_size=128,
         emb_dim=16,
@@ -366,7 +369,7 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
         num_experts=4,
         num_experts_per_tok=2,
         mesh=None,
-        kernel_init=nnx.initializers.lecun_normal(),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", None),
         intermediate_dim=32,
         weight_dtype=cfg.weight_dtype,
