@@ -1,8 +1,13 @@
-datasets>=4.8.5
-fsspec==2026.2.0
-gcsfs==2026.2.0
+datasets>=5.0.1
+fsspec==2026.6.0
+gcsfs==2026.6.0
 orbax-checkpoint>=0.12.1
 markdown>=3.10.2
+oauthlib>=4.0.0
+setuptools>=84.0.0
+urllib3>=2.8.0
+werkzeug>=3.1.9
+wheel>=0.48.0
 xprof>=2.23.1
 # transformer-engine-jax ships only as an sdist and is compiled at install time.
 # 2.20.x reworked its CUDA/NCCL/XLA build discovery and fails to install on the

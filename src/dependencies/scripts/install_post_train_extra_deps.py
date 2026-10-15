@@ -79,6 +79,7 @@ def main():
   """
   os.environ["VLLM_TARGET_DEVICE"] = "tpu"
   os.environ["UV_TORCH_BACKEND"] = "cpu"
+  os.environ.setdefault("VLLM_VERSION_OVERRIDE", "0.30.0+tpu")
   ensure_cpp20_compiler()
 
   current_dir = os.path.dirname(os.path.abspath(__file__))

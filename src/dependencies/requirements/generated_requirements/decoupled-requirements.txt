@@ -58,7 +58,7 @@ flatbuffers>=25.12.19
 flax>=0.12.10
 fonttools>=4.63.0
 frozenlist>=1.8.0
-fsspec>=2026.2.0
+fsspec>=2026.6.0
 gast>=0.7.0
 google-pasta>=0.2.0
 googleapis-common-protos>=1.75.5
@@ -211,7 +211,7 @@ typing-extensions>=4.16.0
 typing-inspection>=0.4.4
 tzdata>=2026.5 ; sys_platform == 'emscripten' or sys_platform == 'win32'
 uritemplate>=4.2.0
-urllib3>=2.7.0
+urllib3>=2.8.0
 uvicorn>=0.54.0
 uvloop>=0.23.0
 virtualenv>=21.14.7
