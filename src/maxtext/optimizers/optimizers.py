@@ -192,6 +192,17 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
         weight_decay=config.adam_weight_decay,
         mask=get_adamw_mask(config),
     )
+  elif config.opt_type == "adam_pax_low_memory":
+    base_opt = adam_pax_low_memory(
+        learning_rate_schedule,
+        beta1=config.adam_b1,
+        epsilon=config.adam_eps,
+        epsilon_root=config.adam_eps_root,
+        weight_decay=config.adam_weight_decay,
+        mask=get_adamw_mask(config),
+        update_rounding=config.bf16_update_rounding,
+        stochastic_rounding_seed=config.stochastic_rounding_seed,
+    )
   elif config.opt_type == "sgd":
     base_opt = optax.sgd(learning_rate_schedule)
   elif config.opt_type == "muon":
@@ -272,6 +283,24 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
     )
 
   return base_opt
+
+
+def _stochastic_round_update(u, p, step_size, key):
+  """Returns a bf16 update d such that p + d == SR_bf16(p + step_size * u) exactly.
+
+  Stochastic rounding keeps tiny updates (|lr * u| < half a bf16 ulp) from being
+  silently rounded away; E[p_new] equals the exact fp32 result. Zero weights
+  with a zero update (2:4-masked entries) stay exactly zero.
+  """
+  if p.dtype != jnp.bfloat16:
+    return (step_size * u).astype(u.dtype)
+  p32 = p.astype(jnp.float32)
+  new32 = p32 + step_size * u.astype(jnp.float32)
+  bits = jax.lax.bitcast_convert_type(new32, jnp.uint32)
+  noise = jax.random.bits(key, new32.shape, jnp.uint32) & jnp.uint32(0xFFFF)
+  bits = (bits + noise) & jnp.uint32(0xFFFF0000)
+  new_bf16 = jax.lax.bitcast_convert_type(bits, jnp.float32).astype(jnp.bfloat16)
+  return (new_bf16.astype(jnp.float32) - p32).astype(p.dtype)
 
 
 def adam_pax(
@@ -374,6 +403,133 @@ def adam_pax(
     step_size = -1.0 * (learning_rate_fn(count) if callable(learning_rate_fn) else learning_rate_fn)
     # Finally, fold in step size.
     updates = jax.tree_util.tree_map(lambda x: step_size * x, updates)
+
+    updated_states = optax.ScaleByAdamState(count=count + 1, mu=mu, nu=nu)
+    return updates, updated_states
+
+  return optax.GradientTransformation(init_fn, update_fn)
+
+
+def adam_pax_low_memory(
+    learning_rate_fn: optax.Schedule,
+    beta1: float,
+    epsilon: float,
+    epsilon_root: float,
+    weight_decay: float,
+    mask=None,
+    update_rounding: str = "nearest",
+    stochastic_rounding_seed: int = 0,
+) -> optax.GradientTransformation:
+  """Low-memory single-moment variant of `adam_pax` for bf16 parameters.
+
+  Instead of a per-parameter second moment, each gradient is normalized on the
+  fly by its RMS over the last axis (for MaxText `[in, out]` kernels this is the
+  output dimension, i.e. one scale per input row; 1-D params use one scale for
+  the whole tensor and scalars their magnitude). Only the first moment of the
+  normalized gradient is kept. Optimizer state is the first moment plus, for
+  `update_rounding="kahan"`, a compensation residual with the params' shape.
+
+  The state is an `optax.ScaleByAdamState` so it checkpoints like `adam_pax`;
+  `nu` holds the Kahan residual (or a 0-d placeholder when unused) rather than a
+  second moment.
+
+  Args:
+    learning_rate_fn: a callable that given the current training step, returns
+      the learning rate to apply.
+    beta1: decay rate to track the first moment.
+    epsilon: Small constant added to the RMS denominator (outside the sqrt).
+    epsilon_root: Small constant added inside the square root of the RMS.
+    weight_decay: If > 0, weight decay to apply.
+    mask: Optional weight decay mask (tree or callable).
+    update_rounding: How bf16 parameter updates are rounded: "nearest" (default
+      round-to-nearest), "kahan" (deterministic Kahan-compensated summation that
+      carries the sub-ULP residual in optimizer state), or "stochastic"
+      (unbiased stochastic rounding).
+    stochastic_rounding_seed: PRNG seed for `update_rounding="stochastic"`.
+
+  Returns:
+    A `optax.GradientTransformation`.
+  """
+  if update_rounding not in ("nearest", "kahan", "stochastic"):
+    raise ValueError(f"Unsupported update_rounding: {update_rounding!r}")
+  use_kahan = update_rounding == "kahan"
+
+  def init_fn(params):
+    mu = jax.tree_util.tree_map(jnp.zeros_like, params)
+    if use_kahan:
+      # `nu` holds the Kahan compensation residual (same shape/dtype as params,
+      # so it is sharded like the params).
+      nu = jax.tree_util.tree_map(jnp.zeros_like, params)
+    else:
+      nu = jnp.zeros([], jnp.float32)  # 0-d placeholder; no per-param state.
+    return optax.ScaleByAdamState(count=jnp.zeros([], jnp.int32), mu=mu, nu=nu)
+
+  def bias_corrected_decay(step: jnp.int32, decay: float):
+    t = step.astype(jnp.float32) + 1.0
+    return decay * (1.0 - jnp.power(decay, t - 1.0)) / (1.0 - jnp.power(decay, t))
+
+  def update_fn(updates, state, params=None):
+    if weight_decay > 0 or update_rounding != "nearest":
+      assert params is not None
+    count = state.count
+
+    def _update_mu_rms(update, mu):
+      u_f32 = update.astype(jnp.float32)
+      axis = -1 if u_f32.ndim >= 1 else None  # Scalars are normalized by their magnitude.
+      rms = jnp.sqrt(jnp.mean(jnp.square(u_f32), axis=axis, keepdims=True) + epsilon_root) + epsilon
+      u_norm = (u_f32 / rms).astype(mu.dtype)
+      beta1_decay = bias_corrected_decay(count, beta1).astype(mu.dtype)
+      return ((1.0 - beta1_decay) * u_norm + beta1_decay * mu).astype(mu.dtype)
+
+    mu = jax.tree_util.tree_map(_update_mu_rms, updates, state.mu)
+    nu = state.nu
+    updates = mu
+
+    if weight_decay > 0:
+      if mask is not None:
+        mask_tree = mask(params) if callable(mask) else mask
+        updates = jax.tree_util.tree_map(
+            lambda x, v, m: x + weight_decay * v.astype(x.dtype) if m else x, updates, params, mask_tree
+        )
+      else:
+        updates = jax.tree_util.tree_map(lambda x, v: x + weight_decay * v.astype(x.dtype), updates, params)
+
+    step_size = -1.0 * (learning_rate_fn(count) if callable(learning_rate_fn) else learning_rate_fn)
+
+    if update_rounding == "stochastic":
+      base_key = jax.random.fold_in(jax.random.PRNGKey(stochastic_rounding_seed), count)
+      u_leaves, treedef = jax.tree_util.tree_flatten(updates)
+      p_leaves = treedef.flatten_up_to(params)
+      updates = jax.tree_util.tree_unflatten(
+          treedef,
+          [
+              _stochastic_round_update(u, p, step_size, jax.random.fold_in(base_key, i))
+              for i, (u, p) in enumerate(zip(u_leaves, p_leaves))
+          ],
+      )
+    elif use_kahan:
+      u_leaves, treedef = jax.tree_util.tree_flatten(updates)
+      r_leaves = treedef.flatten_up_to(state.nu)
+      p_leaves = treedef.flatten_up_to(params)
+      new_u_leaves = []
+      new_r_leaves = []
+      for u, r, p in zip(u_leaves, r_leaves, p_leaves):
+        if p.dtype != jnp.bfloat16:
+          new_u_leaves.append((step_size * u).astype(u.dtype))
+          new_r_leaves.append(r)
+        else:
+          tot_f32 = r.astype(jnp.float32) + step_size * u.astype(jnp.float32)
+          p_f32 = p.astype(jnp.float32)
+          new_p_bf16 = (p_f32 + tot_f32).astype(jnp.bfloat16)
+          applied_f32 = new_p_bf16.astype(jnp.float32) - p_f32
+          # Zero updates (e.g. N:M-masked weights) keep a zero residual.
+          new_r_bf16 = jnp.where(u == 0, jnp.zeros_like(r), (tot_f32 - applied_f32).astype(jnp.bfloat16))
+          new_u_leaves.append(applied_f32.astype(p.dtype))
+          new_r_leaves.append(new_r_bf16)
+      updates = jax.tree_util.tree_unflatten(treedef, new_u_leaves)
+      nu = jax.tree_util.tree_unflatten(treedef, new_r_leaves)
+    else:
+      updates = jax.tree_util.tree_map(lambda x: (step_size * x).astype(x.dtype), updates)
 
     updated_states = optax.ScaleByAdamState(count=count + 1, mu=mu, nu=nu)
     return updates, updated_states
