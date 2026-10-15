@@ -281,6 +281,39 @@ def barrier_tie(x, dep, backward: bool = False):
   return barrier((x, dep))
 
 
+def _prefused_ffn_activation(act_fn, h01):
+  """`act_fn(h01[..., :n], h01[..., n:])` on the prefused up-projection output `h01 = [gate | up]`.
+
+  moe_prefused_swiglu_vjp. The forward is exactly the slice + `act_fn` the split path runs. The backward calls
+  `jax.vjp` of the same `act_fn` at the same primal point, so d(gate) and d(up) come from the ops autodiff emits for
+  it, and returns them as ONE `[rows, 2n]` array, so the concatenate fuses into the elementwise backward. Split, the
+  two `[rows, n]` cotangents leave the SwiGLU-backward fusion separately and XLA joins them in an extra pass over
+  the whole expert buffer (the transpose of the two slices, `add_any(pad, pad)`). The values are the same; the bits
+  can differ only in the sign of an exact zero, since the add of zero pads gives -0.0 + 0.0 = +0.0 where the
+  concatenate keeps -0.0 (measured on XLA:CPU). The residual is `h01` itself, from which the backward recomputes the
+  slices, so no separate gate slice is kept for the backward.
+  """
+  n = h01.shape[-1] // 2
+
+  def split(h):
+    return h[..., :n], h[..., n:]
+
+  @jax.custom_vjp
+  def fused_act(h):
+    return act_fn(*split(h))
+
+  def fused_act_fwd(h):
+    return act_fn(*split(h)), h
+
+  def fused_act_bwd(h, cotangent):
+    _, act_vjp = jax.vjp(act_fn, *split(h))
+    d_gate, d_up = act_vjp(cotangent)
+    return (jnp.concatenate([d_gate, d_up], axis=-1),)
+
+  fused_act.defvjp(fused_act_fwd, fused_act_bwd)
+  return fused_act(h01)
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
 def _forward_layout_constraint(x, major_to_minor):
   """`with_layout_constraint` on the forward value and the identity on its cotangent."""
@@ -1685,6 +1718,52 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
       return intermediate_layer.astype(self.dtype)
 
+  def apply_ffn_activation_maybe_fused(self, layer_w0, layer_w1):
+    """`apply_ffn_activation`; `layer_w1=None` means `layer_w0` is the whole [gate | up] up-projection output.
+
+    gmm_up returns that layout under moe_prefused_swiglu_vjp, and the activation then runs as one custom-VJP op
+    (`_prefused_ffn_activation`) whose backward writes d[gate | up] in one pass.
+    """
+    if layer_w1 is None:
+      return _prefused_ffn_activation(self.apply_ffn_activation, layer_w0)
+    return self.apply_ffn_activation(layer_w0, layer_w1)
+
+  def _keep_prefused_wi_whole(self):
+    """moe_unsplit_prefused_wi: whether the prefused `wi = [w0 | w1]` stays one tensor up to the up-projection GEMM.
+
+    Then `wi` is fake-quantized, FSDP-all-gathered and carried through the expert-weight prefetch barrier as one
+    tensor, and the GEMM reads it directly (`w1_kernel=None` marks the layout), instead of being sliced into w0/w1
+    here and concatenated back after the gather. The config validator admits the key only where every reader of
+    w0/w1 handles that layout, including an expert MLP dimension that the default logical axis rules leave
+    unsharded; this checks what only the built layer knows (quantization objects, sparsity, the partition spec under
+    the actual axis rules), and raises rather than fall back.
+    """
+    if not self.config.moe_unsplit_prefused_wi:
+      return False
+    blockers = []
+    if self.quant is not None:
+      blockers.append("weight quantization")
+    if self.wi_0_sparsity_module is not None:
+      blockers.append("weight sparsity")
+    # The whole [w0 | w1] last dim must be on every device of the expert shard_map: sharded, a device would hold a
+    # slice of [w0 | w1] instead of matching slices of w0 and w1. Same pspec as sparse_matmul's default branch.
+    wi_pspec = remove_mesh_axes_from_partition_spec(self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp")), ("fsdp",))
+    f_shards = math.prod(self.mesh.shape[a] for a in mesh_axes_for_dim(wi_pspec[2]) if a in self.mesh.shape)
+    if f_shards != 1:
+      blockers.append(f"the MLP dimension sharded {f_shards}-way in the expert shard_map")
+    if blockers:
+      raise ValueError(f"moe_unsplit_prefused_wi=True cannot apply: {', '.join(blockers)}.")
+    return True
+
+  def _use_prefused_swiglu_vjp(self):
+    """moe_prefused_swiglu_vjp: whether gmm_up hands [gate | up] to the activation as one array.
+
+    The per-half outputs are never formed (the fused activation keeps [gate | up] as its residual), so the config
+    validator admits the key only where no remat policy saves them (mlpwi_0 / moe_mlpwi_0 / moe_mlpwi_1), without
+    MLP biases (added per half) and without embedding chunks (partial sums per half).
+    """
+    return self.config.moe_prefused_swiglu_vjp
+
   def permute(
       self,
       inputs,
@@ -1859,6 +1938,7 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           tag_routing_fn=tag_routing_fn,
           index_math=self.config.moe_routing_index_math,
+          unique_pair_argsort=self.config.moe_ragged_sort_unique_pair_argsort,
       )
       if tag_routing_fn is None and self.config.moe_routing_index_math == "sort":
         # moe_routing_maps=remat: unpermute re-derives the permutation in its backward (existing behavior).
@@ -2042,6 +2122,7 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
           index_math=self.config.moe_routing_index_math,
+          unique_pair_argsort=self.config.moe_ragged_sort_unique_pair_argsort,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -2471,7 +2552,12 @@ class RoutedMoE(nnx.Module):
       input_ids=None,
       forced_routed_experts=None,
   ):
-    """Perform sparse matrix multiplication of inputs and Experts."""
+    """Perform sparse matrix multiplication of inputs and Experts.
+
+    `w1_kernel=None` (moe_unsplit_prefused_wi) means `w0_kernel` is the whole prefused [w0 | w1] weight.
+    """
+    if w1_kernel is None and not self.config.prefuse_moe_weights:
+      raise ValueError("sparse_matmul got w1_kernel=None (the whole [w0 | w1] layout), which needs prefuse_moe_weights.")
     # log_moe_drops only: the shard_map gets a 5th (moe_audit) output only when requested, so the
     # compiled program is unchanged with the flag off.
     log_moe_drops = getattr(self.config, "log_moe_drops", False)
@@ -3375,9 +3461,19 @@ class RoutedMoE(nnx.Module):
       if not gather_weights:
         wi_gather_axes = []
       if self.config.prefuse_moe_weights:
-        # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        if w1 is None:
+          # moe_unsplit_prefused_wi: w0 is already the gathered (and fake-quantized) whole [w0 | w1] weight.
+          w_fused = w0
+        else:
+          # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
+          w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        if partial_accum0 is None and partial_accum1 is None and self._use_prefused_swiglu_vjp():
+          # moe_prefused_swiglu_vjp: the whole [gate | up] output goes to the activation as one array
+          # (apply_ffn_activation_maybe_fused, which layer_w1=None selects), whose backward then writes d[gate | up]
+          # in one pass. There are no per-half outputs to tag; the config validator rejects a remat policy that
+          # would save them, since it would silently stop saving the MoE tensor.
+          return out, None
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
@@ -3691,7 +3787,7 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
-      intermediate_layer = self.apply_ffn_activation(output0, output1)
+      intermediate_layer = self.apply_ffn_activation_maybe_fused(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -3875,7 +3971,7 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
-      intermediate_layer = self.apply_ffn_activation(output0, output1)
+      intermediate_layer = self.apply_ffn_activation_maybe_fused(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -5640,9 +5736,15 @@ class RoutedMoE(nnx.Module):
     elif cfg.prefuse_moe_weights:
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
-      n = wi.shape[-1] // 2
-      w0_kernel = wi[..., :n]
-      w1_kernel = wi[..., n:]
+      if self._keep_prefused_wi_whole():
+        # moe_unsplit_prefused_wi: w0_kernel carries the whole [w0 | w1] and w1_kernel=None marks the layout, so
+        # the fake-quant, the FSDP all-gather and the prefetch barrier see one tensor and the up-projection reads it
+        # without the concatenate that would otherwise put the gathered halves back together.
+        w0_kernel, w1_kernel = wi, None
+      else:
+        n = wi.shape[-1] // 2
+        w0_kernel = wi[..., :n]
+        w1_kernel = wi[..., n:]
     else:
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
@@ -5659,7 +5761,8 @@ class RoutedMoE(nnx.Module):
       # Axis 2 is the output dim of wi_0/wi_1 (mlp) and wo (embed). An fp8_moe rollout quantizes the
       # fused wi = [wi_0 | wi_1] per output channel, so rounding the halves separately is identical.
       w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel)
-      w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
+      if w1_kernel is not None:  # None: moe_unsplit_prefused_wi, and the line above rounded both halves at once
+        w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
       wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel)
 
     # For fused MoE path (inference only), if we have not fused expert

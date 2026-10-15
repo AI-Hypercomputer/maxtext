@@ -263,6 +263,25 @@ def _calculate_col_chunk_size(col_size: int, num_simd_lanes: int) -> int:
   return 128
 
 
+def argsort_unique_pairs(keys: jax.Array, axis: int = -1) -> jax.Array:
+  """``jnp.argsort(keys, axis=axis, stable=True)``, computed as an unstable sort of the pairs ``(key, index)``.
+
+  The pairs ``(keys[i], i)`` along ``axis`` are all distinct, so sorting them lexicographically has exactly one
+  result, the stable argsort's permutation: equal keys come out in increasing index order. Marked unstable, the
+  sort keeps two operands (keys, indices) and a two-key comparator. ``jnp.argsort`` emits a stable
+  ``sort_key_val(keys, iota)``, which XLA lowers in the forward pass with a THIRD operand (a second copy of the iota
+  as the tie-breaker). Measured on TPU v7x for an s32[655360] argsort: 0.61-0.63 ms for the three-operand sort,
+  0.42 ms for the two-operand one (moe_ragged_sort_unique_pair_argsort). The index dtype and sharding are the ones
+  ``jnp.argsort`` uses.
+  """
+  dim = axis % keys.ndim
+  # jnp.argsort's index dtype: the default integer type (int32 unless x64 is enabled).
+  idx_dtype = jax.dtypes.canonicalize_dtype(jnp.int64)
+  iota = jax.lax.broadcasted_iota(idx_dtype, keys.shape, dim, out_sharding=jax.typeof(keys).sharding)
+  _, indices = jax.lax.sort((keys, iota), dimension=dim, is_stable=False, num_keys=2)
+  return indices
+
+
 def _preprocess(
     valid_rows_mask: jax.Array,
     reduce_group_size: int,
@@ -270,11 +289,14 @@ def _preprocess(
     num_simd_lanes: int,
     row_chunk_size: int,
     packed: bool = False,
+    unique_pair_argsort: bool = False,
 ) -> tuple[jax.Array, jax.Array, jax.Array]:
   """Sorts valid source rows to the front of each row partition.
 
   With ``packed`` (``moe_routing_index_math="count"``) the stable partition is one single-operand sort of
-  packed uint32 keys instead of a stable argsort; the permutation is the same.
+  packed uint32 keys instead of a stable argsort; the permutation is the same. With ``unique_pair_argsort``
+  (``moe_ragged_sort_unique_pair_argsort``) it is ``argsort_unique_pairs``, the same permutation again.
+  ``packed`` takes precedence.
 
   Returns:
     sorted_by_validity: original row index of each slot after the stable
@@ -296,6 +318,8 @@ def _preprocess(
     key = key | jnp.arange(row_partition_size, dtype=jnp.uint32)[None, :]
     key = jax.lax.sort(key, dimension=1, is_stable=False)
     sorted_by_validity = (key & jnp.uint32((1 << idx_bits) - 1)).astype(jnp.int32)
+  elif unique_pair_argsort:
+    sorted_by_validity = argsort_unique_pairs(~valid_rows_mask_2d, axis=-1)
   else:
     # Stable sort of a boolean key is a stable partition: valid rows keep their
     # relative order and move ahead of the invalid ones.
@@ -652,6 +676,7 @@ def main_kernel(
         "bytes_accessed_override",
         "use_single_sparsecore",
         "packed_preprocess",
+        "unique_pair_argsort",
     ),
 )
 def ragged_gather_reduce(
@@ -665,6 +690,7 @@ def ragged_gather_reduce(
     bytes_accessed_override: int = -1,
     use_single_sparsecore: bool = False,
     packed_preprocess: bool = False,
+    unique_pair_argsort: bool = False,
 ) -> jax.Array:
   """Gathers ``x`` by ``indices``, weights and masks, then reduces by group.
 
@@ -677,6 +703,8 @@ def ragged_gather_reduce(
     packed_preprocess: sort the valid rows to the front with one packed uint32 sort (``_preprocess(packed=True)``,
       ``moe_routing_index_math="count"``). Same permutation, so the same output. Only the SparseCore path sorts;
       the reference fallback (any non-TPU target) ignores it.
+    unique_pair_argsort: the same validity sort as a two-operand sort of unique (key, index) pairs
+      (``argsort_unique_pairs``, ``moe_ragged_sort_unique_pair_argsort``). Same permutation; SparseCore path only.
 
   Returns:
     Reduced output, ``(input_size // reduce_group_size, hidden_size)``.
@@ -741,6 +769,7 @@ def ragged_gather_reduce(
       num_simd_lanes,
       row_chunk_size,
       packed=packed_preprocess,
+      unique_pair_argsort=unique_pair_argsort,
   )
 
   # Step 4: Launch the SparseCore kernel.

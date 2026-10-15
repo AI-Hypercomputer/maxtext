@@ -17,6 +17,7 @@
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
+from maxtext.kernels.ragged.ragged_gather_reduce_v2 import argsort_unique_pairs
 from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
 from maxtext.kernels.ragged.ragged_gather_tc import packed_stable_sort
 
@@ -101,6 +102,7 @@ def ring_ragged_sort(
     use_single_sparsecore=False,
     tag_routing_fn=None,
     index_math="sort",
+    unique_pair_argsort=False,
 ):
   """Ragged-gather variant for AG-RS Expert Parallelism token routing.
 
@@ -138,6 +140,10 @@ def ring_ragged_sort(
       gather-reduce of the backward packs its validity sort too. Every reader of the inverse masks it to this
       shard's window, so the forward output and the gradients are the same. The unsort of these rows must then
       get ``topk_argsort_indices`` and ``index_math="count"`` (a partial inverse cannot be argsorted back).
+    unique_pair_argsort: with ``index_math="sort"``, run both argsorts, and the validity sort of the backward's
+      gather-reduce, as unstable two-operand sorts of the unique (key, index) pairs (``argsort_unique_pairs``,
+      ``moe_ragged_sort_unique_pair_argsort``) instead of stable argsorts, which XLA lowers with a duplicated iota
+      operand. Same permutations, same values.
 
   Returns:
     A tuple containing:
@@ -154,6 +160,7 @@ def ring_ragged_sort(
   num_tokens_local = hidden_states_local.shape[0]
 
   topk_indices_flat = topk_indices_local.flatten()  # num_tokens_local x topk
+  argsort = argsort_unique_pairs if unique_pair_argsort else jnp.argsort  # the "sort" maps' argsort
   if index_math == "count":
     # The stable order by expert id as ONE single-operand sort of (expert << pos_bits | slot): the packed values
     # are distinct, so the unstable sort has one result, the stable argsort's permutation. jnp.argsort sorts the
@@ -162,7 +169,7 @@ def ring_ragged_sort(
     # Flat slot j belongs to token j // topk, so the sorted token indices need no gather of a repeated iota.
     token_indices_sorted = (topk_argsort_indices // topk).astype(jnp.int32)  # num_tokens_local x topk
   else:
-    topk_argsort_indices = jnp.argsort(topk_indices_flat)  # num_tokens_local x topk
+    topk_argsort_indices = argsort(topk_indices_flat)  # num_tokens_local x topk
 
     token_indices = jnp.arange(num_tokens_local, dtype=jnp.int32).repeat(topk)  # num_tokens_local x topk
     token_indices_sorted = token_indices[topk_argsort_indices]  # num_tokens_local x topk
@@ -177,8 +184,9 @@ def ring_ragged_sort(
     shard_start = jnp.sum(jnp.where(jnp.arange(num_experts) < shard_idx * (num_experts // ep_size), group_sizes_local, 0))
     topk_argsort_revert_indices = jnp.where(local_pos >= 0, shard_start + local_pos, -1).astype(jnp.int32)
   else:
-    topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices)  # num_tokens_local x topk
+    topk_argsort_revert_indices = argsort(topk_argsort_indices)  # num_tokens_local x topk
   packed_preprocess = index_math == "count"
+  unique_pair_preprocess = unique_pair_argsort and not packed_preprocess
 
   if tag_routing_fn is not None:
     topk_argsort_indices, token_indices_sorted, group_sizes_local, topk_argsort_revert_indices = (
@@ -296,6 +304,7 @@ def ring_ragged_sort(
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
           packed_preprocess=packed_preprocess,
+          unique_pair_argsort=unique_pair_preprocess,
       )
     else:
       # Buffering: g_x has size `local_buffer_size` (packed).
@@ -323,6 +332,7 @@ def ring_ragged_sort(
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
           packed_preprocess=packed_preprocess,
+          unique_pair_argsort=unique_pair_preprocess,
       )
     return grad_hidden_states, None, None, None
 
@@ -349,6 +359,7 @@ def ring_ragged_unsort(
     use_single_sparsecore=False,
     topk_argsort_indices=None,
     index_math="sort",
+    unique_pair_argsort=False,
 ):
   """Dual of :func:`ring_ragged_sort`.
 
@@ -383,6 +394,8 @@ def ring_ragged_unsort(
       gather-reduce packs its validity sort, and in the backward the routing-weight gradient goes back to slot
       order by a masked gather through the inverse permutation instead of a scatter (each valid slot reads its
       own row; other shards' and dropped slots read 0). Same values either way.
+    unique_pair_argsort: with ``index_math="sort"``, the forward gather-reduce's validity sort as a two-operand
+      sort of unique pairs (as in :func:`ring_ragged_sort`). Same values.
 
   Returns:
     A 2D ``[num_tokens_local, hidden]`` tensor with expert outputs scattered back
@@ -390,6 +403,7 @@ def ring_ragged_unsort(
   """
   _check_index_math(index_math)
   packed_preprocess = index_math == "count"
+  unique_pair_preprocess = unique_pair_argsort and not packed_preprocess
 
   @jax.custom_vjp
   def _ring_ragged_unsort(
@@ -453,6 +467,7 @@ def ring_ragged_unsort(
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
           packed_preprocess=packed_preprocess,
+          unique_pair_argsort=unique_pair_preprocess,
       )
     else:
       # Shift indices so they map to the packed local buffer [0, local_num_tokens).
@@ -473,6 +488,7 @@ def ring_ragged_unsort(
           bytes_accessed_override=gather_reduce_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
           packed_preprocess=packed_preprocess,
+          unique_pair_argsort=unique_pair_preprocess,
       )
 
     res = (
