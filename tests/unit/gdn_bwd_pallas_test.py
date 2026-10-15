@@ -24,9 +24,12 @@ from absl.testing import absltest
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from maxtext.configs import types as config_types
+from maxtext.kernels.gdn import compute_gdn
 from maxtext.kernels.gdn import gdn_bwd_pallas
+from maxtext.kernels.gdn.gdn_bwd import api as gdn_api
 from maxtext.models import qwen3
 from maxtext.utils import maxtext_utils
 
@@ -137,6 +140,28 @@ class GdnBwdPallasTest(absltest.TestCase):
 
     np.testing.assert_allclose(out_emit, expected_out[0], rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(state_emit, expected_state[0], rtol=5e-3, atol=5e-3)
+
+  def test_invert_triangular_matrix_matches_float64_inverse(self):
+    """The forward kernels' blocked inverse of T = I + strictly-lower(decay * beta k k^T) is exact to f32 rounding.
+
+    Chunks of 16 and less are one substitution block; 32 and 64 also substitute into rows that the
+    inter-block matmul has already updated.
+    """
+    rng = np.random.default_rng(0)
+    num_heads, head_dim = 4, 128
+    for chunk_size in (8, 16, 32, 64):
+      k = rng.standard_normal((num_heads, chunk_size, head_dim))
+      k /= np.linalg.norm(k, axis=-1, keepdims=True)
+      beta = 1 / (1 + np.exp(-rng.standard_normal((num_heads, chunk_size, 1))))
+      log_g = np.cumsum(-0.05 * np.abs(rng.standard_normal((num_heads, chunk_size))), axis=1)
+      decay = np.exp(log_g[:, :, None] - log_g[:, None, :]) * np.tril(np.ones((chunk_size, chunk_size)), -1)
+      t = (np.eye(chunk_size) + decay * np.einsum("hik,hjk->hij", k * beta, k)).astype(np.float32)
+
+      t_inv = compute_gdn.invert_triangular_matrix(jnp.asarray(t), precision=jax.lax.Precision.HIGHEST)
+
+      np.testing.assert_allclose(
+          np.asarray(t_inv, np.float64), np.linalg.inv(t.astype(np.float64)), rtol=0, atol=1e-6, err_msg=f"{chunk_size=}"
+      )
 
   def test_compute_forward_conv_and_states(self):
     batch_size = 1
@@ -726,6 +751,107 @@ class GdnBwdPallasTest(absltest.TestCase):
     np.testing.assert_allclose(chunk_states, exp_chunk_states, rtol=tol, atol=tol)
     np.testing.assert_allclose(t_inv, exp_t_inv, rtol=tol, atol=tol)
 
+  def test_run_local_gdn_states_fwd_matches_full_forward(self):
+    """The states-only forward (CP pass 1) returns the full forward's states and t_inv bit for bit.
+
+    On TPU this compares the PER_SEQ_STATES kernel, which skips the output, with the PER_SEQ kernel.
+    """
+    is_tpu = jax.default_backend() == "tpu"
+    batch_size = 2
+    chunk_size = 64 if is_tpu else 32
+    seq_len = 4 * chunk_size
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128 if is_tpu else 64
+    head_v_dim = 128 if is_tpu else 64
+    conv_kernel_size = 4
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias = _init_fwd_inputs(
+        jax.random.PRNGKey(7), batch_size, seq_len, dim_size, num_v_heads, conv_kernel_size
+    )
+    qkv, b, a = (x.astype(jnp.bfloat16) for x in (qkv, b, a))
+    # Pass-1 inputs: the conv halo, a zero recurrent state, and packed rows with trailing padding.
+    conv_state = jax.random.normal(jax.random.PRNGKey(8), (batch_size, conv_kernel_size - 1, dim_size), jnp.bfloat16)
+    recurrent_state = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), jnp.float32)
+    seg = np.zeros((batch_size, seq_len), np.int32)
+    seg[0, : seq_len // 3] = 1
+    seg[0, seq_len // 3 : seq_len - 10] = 2
+    seg[1, : seq_len - 40] = 1
+    segment_ids, conv_halo_seg, init_seg = gdn_api._local_segment_metadata(jnp.asarray(seg), True, conv_kernel_size)
+    args = (qkv, b, a, conv_weight, conv_bias, a_log, dt_bias, conv_state, recurrent_state)
+    kwargs = {
+        "num_k_heads": num_k_heads,
+        "num_v_heads": num_v_heads,
+        "head_k_dim": head_k_dim,
+        "head_v_dim": head_v_dim,
+        "conv_kernel_size": conv_kernel_size,
+        "chunk_size": chunk_size,
+        "use_qk_norm_in_gdn": True,
+        "compute_dtype": jnp.float32,
+        "segment_ids": segment_ids,
+        "conv_halo_seg": conv_halo_seg,
+        "init_seg": init_seg,
+    }
+
+    (_, exp_states), exp_t_inv, _ = gdn_api._run_local_gdn_decoupled_fwd(*args, **kwargs)
+    states, t_inv = gdn_api._run_local_gdn_states_fwd(*args, **kwargs)
+
+    for got, exp in zip((*states, t_inv), (*exp_states, exp_t_inv)):
+      self.assertEqual(got.dtype, exp.dtype)
+      np.testing.assert_array_equal(np.asarray(got, np.float32), np.asarray(exp, np.float32))
+
+  @pytest.mark.tpu_only
+  def test_prefill_bf16_qkv_matches_fp32_qkv_path(self):
+    """Prefill-only kernels upcast bf16 qkv chunks in VMEM; the general path upcasts in HBM. Same bits.
+
+    Covers the full prefill kernel (PER_SEQ) and the states-only kernel (PER_SEQ_STATES).
+    """
+    from maxtext.kernels.gdn import wrapper  # pylint: disable=import-outside-toplevel
+
+    batch_size, chunk_size, num_k_heads, num_v_heads, head_dim, conv_kernel_size = 2, 64, 2, 8, 128, 4
+    seq_len = 4 * chunk_size
+    dim_size = num_k_heads * head_dim * 2 + num_v_heads * head_dim
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias = _init_fwd_inputs(
+        jax.random.PRNGKey(5), batch_size, seq_len, dim_size, num_v_heads, conv_kernel_size
+    )
+
+    def run(fn, **kwargs):
+      # Fresh states for every call: the wrapper donates them.
+      k1, k2 = jax.random.split(jax.random.PRNGKey(6))
+      conv_state = jax.random.normal(k1, (batch_size + 1, conv_kernel_size - 1, dim_size), jnp.bfloat16)
+      recurrent_state = 0.1 * jax.random.normal(k2, (batch_size + 1, num_v_heads, head_dim, head_dim), jnp.float32)
+      return fn(
+          qkv=qkv.astype(jnp.bfloat16).reshape(-1, dim_size),
+          b=b.astype(jnp.bfloat16).reshape(-1, num_v_heads),
+          a=a.astype(jnp.bfloat16).reshape(-1, num_v_heads),
+          conv_state=conv_state,
+          recurrent_state=recurrent_state,
+          conv_weight=jnp.swapaxes(conv_weight, 0, 2),
+          conv_bias=conv_bias,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          query_start_loc=jnp.arange(0, (batch_size + 1) * seq_len, seq_len, dtype=jnp.int32),
+          state_indices=jnp.arange(1, batch_size + 1, dtype=jnp.int32),
+          distribution=jnp.array([0, 0, batch_size], dtype=jnp.int32),
+          seq_lens=jnp.full((batch_size,), seq_len + 1, dtype=jnp.int32),
+          n_kq=num_k_heads,
+          n_v=num_v_heads,
+          d_k=head_dim,
+          d_v=head_dim,
+          kernel_size=conv_kernel_size,
+          mixed_tile_size=chunk_size,
+          **kwargs,
+      )
+
+    out, (conv_out, rec_out), t_inv, chunk_states = run(wrapper.fused_conv1d_gdn, is_prefill_only=True)
+    (states_conv, states_rec), states_t_inv = run(wrapper.fused_conv1d_gdn_states)
+    ref_out, (ref_conv, ref_rec), ref_t_inv, ref_chunk_states = run(wrapper.fused_conv1d_gdn, is_prefill_only=False)
+    got = (out, conv_out, rec_out, t_inv, chunk_states, states_conv, states_rec, states_t_inv)
+    exp = (ref_out, ref_conv, ref_rec, ref_t_inv, ref_chunk_states, ref_conv, ref_rec, ref_t_inv)
+    for g, e in zip(got, exp):
+      np.testing.assert_array_equal(np.asarray(g), np.asarray(e))
+
   def test_decoupled_conv1d_gdn_kernel_gradient_with_initial_states(self):
     """Verifies custom VJP gradients when initial conv_state and recurrent_state are provided."""
     is_tpu = jax.default_backend() == "tpu"
@@ -878,6 +1004,101 @@ class GdnBwdPallasTest(absltest.TestCase):
     np.testing.assert_allclose(da1, da2, rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(dal1, dal2, rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(ddt1, ddt2, rtol=1e-3, atol=1e-3)
+
+  @pytest.mark.tpu_only
+  def test_gdn_kernel_bwd_group_blocks_match_per_group_calls(self):
+    """Verifies the in-place group reads (q/k/v column blocks, do, chunk_states, t_inv) and dq/dk/dv writes.
+
+    Every head group runs the same kernel body as a single-group call on that group's heads, so the 2-group call at
+    the Qwen3.5-397B per-device layer geometry (64 v / 16 kq heads, bf16) must match per-group calls bit for bit.
+    """
+    batch_size = 1
+    chunk_size = 64
+    num_chunks = 8
+    seq_len = num_chunks * chunk_size
+    num_k_heads = 16
+    num_v_heads = 64
+    head_tile = 32
+    head_dim = 128
+    q_size = num_k_heads * head_dim
+    dim_size = 2 * q_size + num_v_heads * head_dim
+    tile_q = q_size * head_tile // num_v_heads
+    tile_v = head_tile * head_dim
+
+    k1, k2, k3, k4, k5, k6, k7, k8, k9 = jax.random.split(jax.random.PRNGKey(2468), 9)
+    qkv = jax.random.normal(k1, (batch_size, seq_len, dim_size), dtype=jnp.float32).astype(jnp.bfloat16)
+    b = jax.random.normal(k2, (batch_size, seq_len, num_v_heads), dtype=jnp.float32).astype(jnp.bfloat16)
+    a = jax.random.normal(k3, (batch_size, seq_len, num_v_heads), dtype=jnp.float32).astype(jnp.bfloat16)
+    a_log = jax.random.normal(k4, (num_v_heads,), dtype=jnp.float32)
+    dt_bias = jax.random.normal(k5, (num_v_heads,), dtype=jnp.float32)
+    do = jax.random.normal(k6, (batch_size, seq_len, num_v_heads, head_dim), dtype=jnp.float32).astype(jnp.bfloat16)
+    chunk_states = 0.1 * jax.random.normal(k7, (batch_size, num_chunks, num_v_heads, head_dim, head_dim))
+    t_inv = 0.1 * jax.random.normal(k8, (batch_size, num_chunks, num_v_heads, chunk_size, chunk_size))
+    dht = 0.1 * jax.random.normal(k9, (batch_size, num_v_heads, head_dim, head_dim))
+    # Two packed documents, the second starting mid-chunk, then padding.
+    segment_ids = jnp.zeros((batch_size, seq_len), jnp.int32)
+    segment_ids = segment_ids.at[:, : seq_len // 2 + 5].set(1).at[:, seq_len // 2 + 5 : seq_len - 16].set(2)
+
+    run = functools.partial(
+        gdn_bwd_pallas.pallas_gdn_bwd_kernel,
+        kq_head_dim=head_dim,
+        v_head_dim=head_dim,
+        chunk_size=chunk_size,
+        head_tile=head_tile,
+        segment_ids=segment_ids,
+        return_dh0=True,
+    )
+    full = run(
+        qkv_conv=qkv,
+        b=b,
+        a=a,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        do=do,
+        chunk_states=chunk_states,
+        t_inv=t_inv,
+        num_v_heads=num_v_heads,
+        d_recurrent_state=dht,
+    )
+
+    per_group = []
+    for g in range(num_v_heads // head_tile):
+      heads = slice(g * head_tile, (g + 1) * head_tile)
+      qkv_g = jnp.concatenate(
+          [
+              qkv[..., g * tile_q : (g + 1) * tile_q],
+              qkv[..., q_size + g * tile_q : q_size + (g + 1) * tile_q],
+              qkv[..., 2 * q_size + g * tile_v : 2 * q_size + (g + 1) * tile_v],
+          ],
+          axis=-1,
+      )
+      per_group.append(
+          run(
+              qkv_conv=qkv_g,
+              b=b[..., heads],
+              a=a[..., heads],
+              a_log=a_log[heads],
+              dt_bias=dt_bias[heads],
+              do=do[:, :, heads],
+              chunk_states=chunk_states[:, :, heads],
+              t_inv=t_inv[:, :, heads],
+              num_v_heads=head_tile,
+              d_recurrent_state=dht[:, heads],
+          )
+      )
+
+    dy = [out[0] for out in per_group]
+    ref_dy = jnp.concatenate(
+        [d[..., :tile_q] for d in dy] + [d[..., tile_q : 2 * tile_q] for d in dy] + [d[..., 2 * tile_q :] for d in dy],
+        axis=-1,
+    )
+    np.testing.assert_array_equal(full[0], ref_dy)
+    np.testing.assert_array_equal(full[1], jnp.concatenate([out[1] for out in per_group], axis=-1))
+    np.testing.assert_array_equal(full[2], jnp.concatenate([out[2] for out in per_group], axis=-1))
+    np.testing.assert_array_equal(full[5], jnp.concatenate([out[5] for out in per_group], axis=1))
+    # d_a_log / d_dt_bias also sum per-chunk partials in XLA, whose order may depend on the number of groups.
+    np.testing.assert_allclose(full[3], jnp.concatenate([out[3] for out in per_group]), rtol=1e-6, atol=0)
+    np.testing.assert_allclose(full[4], jnp.concatenate([out[4] for out in per_group]), rtol=1e-6, atol=0)
 
   def test_gdn_kernel_bwd_variable_length_segment_ids_reset(self):
     """Verifies segment_ids document boundaries reset carried state gradient to prevent leakage."""
@@ -1511,53 +1732,65 @@ class GdnBwdPallasTest(absltest.TestCase):
     in_00, out_00, n_in_00, n_out_00 = gdn_bwd_pallas.make_bwd_block_specs(
         num_chunks=2,
         chunk_size=16,
-        dim_size=128,
+        qk_tile_size=32,
+        v_tile_size=64,
         num_v_heads=4,
         kq_head_dim=16,
         v_head_dim=16,
+        k_block_offset=1,
+        v_block_offset=1,
         has_dht=False,
         has_dh0=False,
     )
-    self.assertEqual(n_in_00, 9)
-    self.assertEqual(n_out_00, 5)
-    self.assertLen(in_00, 9)
-    self.assertLen(out_00, 5)
+    self.assertEqual(n_in_00, 11)
+    self.assertEqual(n_out_00, 7)
+    self.assertLen(in_00, 11)
+    self.assertLen(out_00, 7)
 
     _, _, n_in_10, n_out_10 = gdn_bwd_pallas.make_bwd_block_specs(
         num_chunks=2,
         chunk_size=16,
-        dim_size=128,
+        qk_tile_size=32,
+        v_tile_size=64,
         num_v_heads=4,
         kq_head_dim=16,
         v_head_dim=16,
+        k_block_offset=1,
+        v_block_offset=1,
         has_dht=True,
         has_dh0=False,
     )
-    self.assertEqual((n_in_10, n_out_10), (10, 5))
+    self.assertEqual((n_in_10, n_out_10), (12, 7))
 
     _, _, n_in_01, n_out_01 = gdn_bwd_pallas.make_bwd_block_specs(
         num_chunks=2,
         chunk_size=16,
-        dim_size=128,
+        qk_tile_size=32,
+        v_tile_size=64,
         num_v_heads=4,
         kq_head_dim=16,
         v_head_dim=16,
+        k_block_offset=1,
+        v_block_offset=1,
         has_dht=False,
         has_dh0=True,
     )
-    self.assertEqual((n_in_01, n_out_01), (9, 6))
+    self.assertEqual((n_in_01, n_out_01), (11, 8))
 
     _, _, n_in_11, n_out_11 = gdn_bwd_pallas.make_bwd_block_specs(
         num_chunks=2,
         chunk_size=16,
-        dim_size=128,
+        qk_tile_size=32,
+        v_tile_size=64,
         num_v_heads=4,
         kq_head_dim=16,
         v_head_dim=16,
+        k_block_offset=1,
+        v_block_offset=1,
         has_dht=True,
         has_dh0=True,
     )
-    self.assertEqual((n_in_11, n_out_11), (10, 6))
+    self.assertEqual((n_in_11, n_out_11), (12, 8))
 
     is_tpu = jax.default_backend() == "tpu"
     batch_size = 1

@@ -24,7 +24,8 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-DEFAULT_VMEM_LIMIT_FACTOR: float = 0.90
+# The 64-v-head prefill kernel needs about 58 MiB of the 64 MiB VMEM on TPU7x.
+DEFAULT_VMEM_LIMIT_FACTOR: float = 0.95
 
 
 class GDNMode(enum.StrEnum):
@@ -32,6 +33,8 @@ class GDNMode(enum.StrEnum):
 
   BATCHED = enum.auto()
   PER_SEQ = enum.auto()
+  # PER_SEQ that only carries the conv/recurrent states and t_inv: no output, no chunk states.
+  PER_SEQ_STATES = enum.auto()
 
   def get_seq_tile_size(self, tile_size: int) -> int:
     if self == GDNMode.BATCHED:
@@ -82,6 +85,8 @@ class GDNConfig:
   num_buffers: int = 2
   has_seg_ids: bool = False
   use_qk_norm_in_gdn: bool = True
+  # Prefill-only tiles are whole chunks: qkv is DMA'd in act_in dtype and upcast in VMEM.
+  is_prefill_only: bool = False
 
   @property
   def chunk_size(self) -> int:
@@ -150,7 +155,13 @@ class GDNConfig:
       carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
       carry_recurrent_scratch = pltpu.VMEM(recurrent_shape, jnp.float32)
 
+    # Compact fp32 copy of a prefill qkv chunk, read by Conv1D and the q/k/v loads.
+    qkv_scratch = None
+    if self.is_prefill_only:
+      qkv_scratch = pltpu.VMEM((self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32)
+
     return {
         "carry_conv_scratch_ref": carry_conv_scratch,
         "carry_recurrent_scratch_ref": carry_recurrent_scratch,
+        "qkv_scratch_ref": qkv_scratch,
     }
