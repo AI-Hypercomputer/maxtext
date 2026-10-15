@@ -268,6 +268,9 @@ def _run_local_gdn_decoupled_fwd(
       d_k=head_k_dim,
       d_v=head_v_dim,
       kernel_size=conv_kernel_size,
+      # seq_len is a multiple of chunk_size (checked above), so the prefill kernel writes every
+      # output row and the output buffer needs no zero fill.
+      zero_initialize_out=False,
       compute_precision=jnp.dtype(compute_dtype),
       mixed_tile_size=chunk_size,
       is_prefill_only=True,
