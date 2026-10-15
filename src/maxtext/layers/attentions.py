@@ -16,6 +16,7 @@
 
 import dataclasses
 import functools
+import math
 import os
 from typing import Any, Iterable, Optional, Tuple, Union, cast
 
@@ -458,10 +459,14 @@ class Attention(nnx.Module):
 
     Ulysses context parallelism shards the KV heads a second time, over the
     context axis, using a runtime all-to-all rather than the weight's logical
-    axes, so that axis is folded in explicitly.  `types.py` separately requires
-    `num_kv_heads` to be divisible by the context-parallel size on its own;
-    checking the product here is what catches a head count that clears each
-    factor individually but not both together.
+    axes, so that axis is folded in explicitly.  `types.py` separately checks
+    `num_kv_heads` against the context-parallel size on its own; checking the
+    product here is what catches a head count that clears each factor
+    individually but not both together.  The one exception is a context axis
+    that is a multiple of the KV heads left on each device by the other axes:
+    Ulysses then repeats each KV head across the context ranks whose query heads
+    use it (`ulysses_attention.repeat_kv_heads_for_ulysses`) instead of splitting
+    the KV heads, so the context axis places no constraint on them.
 
     Without this check an over-sharded mesh fails much later, either with an
     opaque XLA divisibility error or by silently leaving the projection
@@ -489,17 +494,22 @@ class Attention(nnx.Module):
       kv_head_axes = (kv_head_axes,)
     kv_head_axes = list(kv_head_axes)
 
+    def shards(axes):
+      return math.prod(self.mesh.shape.get(axis, 1) for axis in axes)
+
     # Ulysses exchanges sequence ownership for head ownership through an
     # all-to-all, so the context axis shards KV heads too even though no
-    # logical rule says so.
+    # logical rule says so -- unless it is a multiple of the KV heads left per
+    # device, in which case those heads are repeated rather than split.
     if self.config.context_parallel_strategy.lower() == "ulysses":
       ulysses_axis = self.config.context_sharding
       if ulysses_axis not in kv_head_axes:
-        kv_head_axes.append(ulysses_axis)
+        local_kv_heads, remainder = divmod(self.num_kv_heads, shards(kv_head_axes))
+        replicated = remainder == 0 and self.mesh.shape.get(ulysses_axis, 1) % local_kv_heads == 0
+        if not replicated:
+          kv_head_axes.append(ulysses_axis)
 
-    kv_parallelism = 1
-    for axis in kv_head_axes:
-      kv_parallelism *= self.mesh.shape.get(axis, 1)
+    kv_parallelism = shards(kv_head_axes)
 
     if self.num_kv_heads % kv_parallelism != 0:
       raise ValueError(

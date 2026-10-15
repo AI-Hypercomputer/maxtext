@@ -21,6 +21,7 @@ from unittest import mock
 from absl.testing import absltest
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.common.common_types import MODEL_MODE_TRAIN
@@ -250,6 +251,72 @@ class UlyssesAttentionTest(absltest.TestCase):
           ulysses_size=4,
           attention_label="TPU Ulysses attention",
       )
+
+  def test_validate_head_sharding_accepts_kv_head_replication_only_when_allowed(self):
+    """Two KV heads at Ulysses size 4 need replication, which only the Ulysses path (not USP) performs."""
+    mesh = types.SimpleNamespace(shape={"context": 4})
+    kwargs = {
+        "axis_names_q": (None, None, "context", None),
+        "axis_names_kv": (None, None, "context", None),
+        "mesh": mesh,
+        "num_query_heads": 32,
+        "num_kv_heads": 2,
+        "head_dim_q": 1,
+        "head_dim_kv": 1,
+        "ulysses_size": 4,
+        "attention_label": "TPU Ulysses attention",
+    }
+    with self.assertRaisesRegex(
+        ValueError, r"local KV heads \(2\) to be divisible by the Ulysses exchange size \(4\)\.$"
+    ):
+      ulysses_attention.validate_head_sharding(**kwargs)
+    ulysses_attention.validate_head_sharding(**kwargs, allow_kv_head_replication=True)
+    # One local KV head left by tensor sharding is repeated to every rank too.
+    tensor_sharded = (None, "tensor", "context", None)
+    ulysses_attention.validate_head_sharding(
+        **{
+            **kwargs,
+            "axis_names_q": tensor_sharded,
+            "axis_names_kv": tensor_sharded,
+            "mesh": types.SimpleNamespace(shape={"context": 4, "tensor": 2}),
+        },
+        allow_kv_head_replication=True,
+    )
+    with self.assertRaisesRegex(ValueError, "or to divide it"):
+      ulysses_attention.validate_head_sharding(
+          **{**kwargs, "num_query_heads": 36, "num_kv_heads": 6}, allow_kv_head_replication=True
+      )
+
+  def test_kv_head_replication(self):
+    cases = {(2, 4): 2, (2, 8): 4, (1, 4): 4, (4, 4): 1, (8, 4): 1, (16, 2): 1}
+    for (local_kv_heads, ulysses_size), expected in cases.items():
+      with self.subTest(local_kv_heads=local_kv_heads, ulysses_size=ulysses_size):
+        self.assertEqual(ulysses_attention.kv_head_replication(local_kv_heads, ulysses_size), expected)
+    for local_kv_heads, ulysses_size in ((3, 4), (6, 4), (4, 6)):
+      with self.subTest(local_kv_heads=local_kv_heads, ulysses_size=ulysses_size):
+        with self.assertRaisesRegex(ValueError, "divide one another"):
+          ulysses_attention.kv_head_replication(local_kv_heads, ulysses_size)
+
+  def test_repeat_kv_heads_pairs_every_query_head_with_its_kv_head(self):
+    """After the exchange, every rank's query heads find their own KV head (32 query / 2 KV heads, Ulysses 4 and 8).
+
+    Splash pairs local query head i with local KV head i // (local query heads / local KV heads). The exchange
+    hands rank r the r-th contiguous block of heads, simulated here by splitting the head dimension.
+    """
+    num_query_heads, num_kv_heads = 32, 2
+    key = jnp.arange(num_kv_heads, dtype=jnp.int32).reshape(1, num_kv_heads, 1, 1)
+    for ulysses_size in (4, 8):
+      with self.subTest(ulysses_size=ulysses_size):
+        replication = ulysses_attention.kv_head_replication(num_kv_heads, ulysses_size)
+        repeated = ulysses_attention.repeat_kv_heads_for_ulysses(key, replication)
+        np.testing.assert_array_equal(repeated[0, :, 0, 0], np.repeat(np.arange(num_kv_heads), replication))
+        query_heads = np.arange(num_query_heads)
+        for rank, kv_block in enumerate(np.split(np.asarray(repeated[0, :, 0, 0]), ulysses_size)):
+          rank_query_heads = np.split(query_heads, ulysses_size)[rank]
+          local_group = len(rank_query_heads) // len(kv_block)
+          paired = kv_block[np.arange(len(rank_query_heads)) // local_group]
+          np.testing.assert_array_equal(paired, rank_query_heads // (num_query_heads // num_kv_heads))
+    self.assertIs(ulysses_attention.repeat_kv_heads_for_ulysses(key, 1), key)
 
   def test_ulysses_all_to_all_moves_heads_to_sequence(self):
     tensor = jnp.ones((1, 16, 8, 2))

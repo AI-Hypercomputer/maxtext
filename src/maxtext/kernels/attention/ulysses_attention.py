@@ -18,6 +18,7 @@ from __future__ import annotations
 from typing import Any
 
 import jax
+import jax.numpy as jnp
 
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.utils import sharding
@@ -158,8 +159,13 @@ def validate_head_sharding(
     head_dim_kv: int,
     ulysses_size: int,
     attention_label: str,
+    allow_kv_head_replication: bool = False,
 ) -> None:
-  """Validates local head counts before the Ulysses head/sequence exchange."""
+  """Validates local head counts before the Ulysses head/sequence exchange.
+
+  With `allow_kv_head_replication`, fewer local KV heads than Ulysses ranks are accepted when the ranks are a
+  multiple of them: the caller then repeats each KV head with `repeat_kv_heads_for_ulysses` before the exchange.
+  """
   q_head_axes = sharding.mesh_axes_for_dim(axis_names_q[head_dim_q])
   kv_head_axes = sharding.mesh_axes_for_dim(axis_names_kv[head_dim_kv])
   q_head_shards = sharding.mesh_axes_size(mesh, q_head_axes, label=attention_label)
@@ -195,11 +201,45 @@ def validate_head_sharding(
         f"{attention_label} requires local query heads "
         f"({local_query_heads}) to be divisible by the Ulysses exchange size ({ulysses_size})."
     )
-  if local_kv_heads % ulysses_size != 0:
+  if local_kv_heads % ulysses_size != 0 and not (allow_kv_head_replication and ulysses_size % local_kv_heads == 0):
     raise ValueError(
         f"{attention_label} requires local KV heads "
-        f"({local_kv_heads}) to be divisible by the Ulysses exchange size ({ulysses_size})."
+        f"({local_kv_heads}) to be divisible by the Ulysses exchange size ({ulysses_size})"
+        + (" or to divide it." if allow_kv_head_replication else ".")
     )
+
+
+def kv_head_replication(local_kv_heads: int, ulysses_size: int) -> int:
+  """How many copies of each local KV head the Ulysses exchange needs.
+
+  The all-to-all hands rank r the r-th contiguous block of heads. When the local KV heads are a multiple of the
+  ranks, every rank already receives whole KV heads (1). When the ranks are a multiple of the KV heads, each KV
+  head is repeated `ulysses_size // local_kv_heads` times so that every rank receives one.
+  """
+  if local_kv_heads % ulysses_size == 0:
+    return 1
+  if ulysses_size % local_kv_heads == 0:
+    return ulysses_size // local_kv_heads
+  raise ValueError(
+      f"TPU Ulysses attention requires local KV heads ({local_kv_heads}) and the Ulysses exchange size "
+      f"({ulysses_size}) to divide one another."
+  )
+
+
+def repeat_kv_heads_for_ulysses(tensor: Any, replication: int):
+  """Repeats each KV head of `[B, H_kv, S/U, D]` in place, `[kv0, kv0, kv1, kv1]` for 2 heads and 2 copies.
+
+  The copies of a head must be adjacent. Splash pairs query head h with KV head h // (H_q / H_kv), so a query
+  head's KV head is the one at the same relative position in the head dimension. The all-to-all keeps that
+  position: rank r receives query heads [r * H_q / U, (r + 1) * H_q / U) and KV head r of the repeated tensor,
+  which is a copy of KV head r // replication, the one those query heads use. Tiling the heads instead
+  (`[kv0, kv1, kv0, kv1]`) would give rank 1 the second KV head for query heads of the first group.
+
+  `jnp.repeat` is linear, so its transpose sums the gradients of the copies back onto each KV head.
+  """
+  if replication == 1:
+    return tensor
+  return jnp.repeat(tensor, replication, axis=1)
 
 
 def ulysses_all_to_all(tensor: Any, ulysses_axis: str):

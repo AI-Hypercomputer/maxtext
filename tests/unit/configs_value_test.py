@@ -578,6 +578,32 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.ici_context_parallelism, 4)
     self.assertFalse(config.context_parallel_load_balance)
 
+  def test_tpu_ulysses_config_validation_accepts_fewer_kv_heads_than_context_ranks(self):
+    """2 KV heads at context 4 or 8 (Qwen3.5) are repeated across the context ranks."""
+    for ici_context_parallelism in (4, 8):
+      with self.subTest(ici_context_parallelism=ici_context_parallelism):
+        argv = [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "use_jax_splash=False",
+            "context_parallel_strategy=ulysses",
+            "context_parallel_load_balance=False",
+            f"ici_context_parallelism={ici_context_parallelism}",
+            "base_num_query_heads=32",
+            "base_num_kv_heads=2",
+            "hardware=tpu",
+            "packing=True",
+            "skip_jax_distributed_system=True",
+        ]
+        mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          config = pyconfig.initialize(argv)
+        self.assertEqual(config.num_kv_heads, 2)
+        self.assertEqual(config.context_parallel_strategy, "ulysses")
+
   def test_tpu_ulysses_config_validation_accepts_packing(self):
     argv = [
         "",
@@ -642,6 +668,7 @@ class ConfigTest(absltest.TestCase):
         (["base_num_kv_heads=1"], [], "MQA"),
         (["base_num_query_heads=18"], [], "requires num_query_heads"),
         (["base_num_kv_heads=10"], [], "requires num_kv_heads"),
+        (["base_num_query_heads=24", "base_num_kv_heads=6"], [], r"requires num_kv_heads \(6\).*or to divide it"),
         (["attention_type=mla"], [], "global causal attention"),
         (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal attention"),
         (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal attention"),
