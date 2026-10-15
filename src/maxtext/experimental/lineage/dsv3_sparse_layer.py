@@ -615,22 +615,33 @@ def _bank_from_carry(
 def routed_w_to_tiles(
     w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
 ) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
-  """Views collected routed expert weights as `[expert, rows / 8, 8, cols]`.
+  """Views routed expert weights as `[expert, rows / 8, 8, cols]`.
 
-  The SparseCore all-gather produces fp8 routed weights in T(8, 128) tiling,
-  but XLA ignores layout constraints on the layer-scan and chunk-loop carries
-  and gives `[expert, rows, cols]` fp8 weights the default T(32, 128) tiling, so
-  every layer copies each gathered weight between them (as with the bank, see
-  `_bank_to_carry`). A second-minor dimension of 8 gets T(8, 128) tiling, so in
-  this view the weights keep the all-gather's tiling everywhere and every
-  reshape between the views is a bitcast. The routed experts read the weights
-  through `routed_w_from_tiles`, in either tiling.
+  The routed experts' kernels read fp8 weights in T(8, 128) tiling, but XLA
+  ignores layout constraints on the layer-scan and chunk-loop carries and gives
+  `[expert, rows, cols]` fp8 weights the default T(32, 128) tiling, so every
+  layer would copy each gathered weight between them (as with the bank, see
+  `_bank_to_carry`). The SparseCore all-gather keeps its operand's tiling, so
+  it must also get its shards in T(8, 128): when their rows are a multiple of
+  32 (e.g. 448 on 8x16x16), default-tiled shards gather into T(32, 128) in
+  SparseCore private HBM, followed by a SparseCore relayout copy of the whole
+  gathered weight. A second-minor dimension of 8 gets T(8, 128) tiling without
+  a layout constraint, so `collect_w_ici` gathers the shards in this view and
+  the weights keep it everywhere: every reshape between the views is a
+  bitcast. The routed experts read the weights through `routed_w_from_tiles`,
+  in either tiling.
+
+  Flat `[expert * rows, cols]` weights (e.g. the 8x32x32 sharding) are viewed
+  as `[expert * rows / 8, 8, cols]`, whose shards are whole tiles even when
+  they split an expert's rows.
 
   Args:
-    w: Collected `[expert, rows, cols]` routed expert weights.
+    w: `[expert, rows, cols]` or flat `[expert * rows, cols]` routed expert
+      weights or shards.
 
   Returns:
-    The weights viewed as `[expert, rows / 8, 8, cols]`.
+    The weights viewed as `[expert, rows / 8, 8, cols]` (or `[expert * rows /
+    8, 8, cols]`).
   """
   return jax.tree.map(lambda a: a.reshape(*a.shape[:-2], a.shape[-2] // 8, 8, a.shape[-1]), w)
 
@@ -4144,6 +4155,12 @@ def collect_w_ici(
         expert_axis_name=expert_axis_name,
     )
 
+  # Gather the routed expert weights in the `routed_w_to_tiles` view so the
+  # SparseCore all-gather produces T(8, 128) weights (see its docstring).
+  assert w.moe.routed.gate is not None
+  flat_routed = w.moe.routed.gate.ndim == 2
+  w = dataclasses.replace(w, moe=dataclasses.replace(w.moe, routed=routed_w_to_tiles(w.moe.routed)))
+
   if split:
     pre_attn_norm_scale, mla = ops.collect_along_axis(
         (w.pre_attn_norm_scale, w.mla),
@@ -4170,10 +4187,17 @@ def collect_w_ici(
         axis_mapping,
         **_SC1_KWARGS,
     )
-  return dataclasses.replace(
-      collected,
-      moe=dataclasses.replace(collected.moe, routed=routed_w_to_tiles(collected.moe.routed)),
+  if not flat_routed:
+    return collected
+  # Unmerge the gathered `[expert * rows / 8, 8, cols]` tiles into experts, a
+  # bitcast.
+  assert w.moe.router.kernel is not None
+  num_experts = w.moe.router.kernel.shape[-1]
+  routed = jax.tree.map(
+      lambda a: a.reshape(num_experts, -1, *a.shape[-2:]),
+      collected.moe.routed,
   )
+  return dataclasses.replace(collected, moe=dataclasses.replace(collected.moe, routed=routed))
 
 
 def _split_w_attention_moe(
@@ -4261,9 +4285,15 @@ def reduce_w_ici_sc1(
     The partially reduced gradients, sharded like `like` along the
     `_sc1_reduce_axes`.
   """
+  flat_routed = like.moe.routed.gate is not None and like.moe.routed.gate.ndim == 2
+  routed = (
+      jax.tree.map(lambda a: a.reshape(-1, a.shape[-1]), grad_w.moe.routed)
+      if flat_routed
+      else routed_w_from_tiles(grad_w.moe.routed)
+  )
   grad_w = dataclasses.replace(
       grad_w,
-      moe=dataclasses.replace(grad_w.moe, routed=routed_w_from_tiles(grad_w.moe.routed)),
+      moe=dataclasses.replace(grad_w.moe, routed=routed),
   )
   return ops.reduce_along_axis(
       grad_w,

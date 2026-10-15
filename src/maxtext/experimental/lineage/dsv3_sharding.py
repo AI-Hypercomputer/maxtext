@@ -208,6 +208,62 @@ _SPARSE_8X16X16 = dsv3_types.DSv3SparseLayerWeightsPytree(
     ),
 )
 
+# 8x16x32: the 8x16x16 layout, except where 512-way FSDP over (y, z) does not
+# fit whole 8-row TPU tiles.
+_SPARSE_8X16X32 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_8X16X16,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("x", "core", "y"), "z", None),
+            linear=P(None, ("x", "core", "y"), "z", None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            # 512-way FSDP over (y, z) would leave 2048 / 512 = 4-row shards
+            # (0.5 tiles), not whole 8-row TPU tiles. Shard over z only
+            # (64-row shards, 8 tiles).
+            gate_0=P(None, None, "z"),
+            gate_1=P(None, None, "z"),
+            linear=P(None, "z", None),
+        ),
+    ),
+)
+
+# 8x32x32: 16384-way ICI with EP over (x, core) and 1024-way FSDP over (y, z).
+# Routed expert weights merge `(expert, rows) -> expert * rows` (`[L, E*rows,
+# cols]`) and shard all four `(x, core, y, z)` axes on that single row axis so
+# every shard is an exact T(8, 128) tile (`[112, 4096]` gate, `[32, 7168]`
+# linear) and SparseCore issues one unified 2D `(y, z)` collective.
+_MLA_8X32X32 = dsv3_types.DSv3MLAWeightsPytree(
+    q_down=P(None, "z", None),
+    q_up=P(None, "z", "core", None),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, "z", None),
+    k_up=P(None, "z", "core", None),
+    v_up=P(None, "z", "core", None),
+    kv_norm_scale=P(None, None),
+    out=P(None, "core", None, "z"),
+)
+_SPARSE_8X32X32 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_8X32X32,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("x", "core", "y", "z"), None),
+            linear=P(None, ("x", "core", "y", "z"), None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, "z", None),
+            gate_1=P(None, "z", None),
+            linear=P(None, "z", None),
+        ),
+    ),
+)
+
 # 4x8x8: the 8x8x8 layout with EP over (z, core) and FSDP over (x, y), so each
 # device keeps 16 experts and the collectives match 8x8x8's. The slice must be
 # a plain (untwisted) torus, which the launchers request explicitly.
@@ -352,6 +408,80 @@ TOPOLOGY_SHARDINGS: dict[tuple[int, int, int], TopologySharding] = {
             embed_table=P(None, ("y", "z", "core")),
             final_norm_scale=P(None),
             head_kernel=P(("y", "z", "core"), None),
+        ),
+    ),
+    (8, 16, 32): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("x", "core"),
+            "fsdp_moe": ("y", "z"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_8X16X16,
+                    post_attn_norm_scale=P(None, None),
+                    # 512-way FSDP over (y, z) would leave 18432 / 512 = 36-row
+                    # shards (4.5 tiles), not whole 8-row TPU tiles. Shard over
+                    # z only (576-row shards, 72 tiles).
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, None, "z"),
+                        gate_1=P(None, None, "z"),
+                        linear=P(None, "z", None),
+                    ),
+                ),
+                sparse=_SPARSE_8X16X32,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P(("y", "z"), None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_8X16X32),
+            ),
+            # Over every ICI axis but x: 8192 ways do not divide the 7168-wide
+            # embedding dim. 1024 ways over (y, z, core) divide it (7 rows).
+            embed_table=P(None, ("y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("y", "z", "core"), None),
+        ),
+    ),
+    (8, 32, 32): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("x", "core"),
+            "fsdp_moe": ("y", "z"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_8X32X32,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, "z", None),
+                        gate_1=P(None, "z", None),
+                        linear=P(None, "z", None),
+                    ),
+                ),
+                sparse=_SPARSE_8X32X32,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P("z", None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_8X32X32),
+            ),
+            # 64 ways over (z, core) leave 7168 / 64 = 112 = 14 * 8-row tiles.
+            embed_table=P(None, ("z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("z", "core"), None),
         ),
     ),
 }

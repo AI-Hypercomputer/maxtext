@@ -18,7 +18,8 @@ One `pallas_call` computes, per device, the full query, key and value of MLA
 from the compressed query `q_down` and compressed key/value `kv_down`:
 
   q = yarn_tail(fp8_dot(quant(rms_norm(q_down)), wq_up)) * scale
-  k = concat([rms_norm(ckv) @ wk_up, broadcast(yarn(k_pe))])
+  k = concat([fp8_dot(quant(rms_norm(ckv)), wk_up) * dequant_scale,
+              broadcast(yarn(k_pe))])
   v = fp8_dot(quant(rms_norm(ckv)), wv_up) * dequant_scale
 
 with `ckv, k_pe = split(kv_down)`. The norms, static fp8 quantization, YaRN and
@@ -97,7 +98,6 @@ def _qkv_up_kernel(
     k_ref,
     v_ref,
     cq_q_scratch,
-    ckv_scratch,
     ckv_q_scratch,
     cos_scratch,
     sin_scratch,
@@ -131,13 +131,12 @@ def _qkv_up_kernel(
     cos_ref: `[1, block_t, R]` YaRN cos tile.
     sin_ref: `[1, block_t, R]` YaRN sin tile.
     wq_ref: `[block_n * (QK + R), Cq]` fp8 q up weight tile.
-    wk_ref: `[block_n * QK, Ckv]` bf16 k up weight tile.
+    wk_ref: `[block_n * QK, Ckv]` fp8 k up weight tile.
     wv_ref: `[Ckv, block_n * V]` fp8 v up weight tile.
     q_ref: `[1, block_n, QK + R, block_t]` output q tile.
     k_ref: `[1, block_n, QK + R, block_t]` output k tile.
     v_ref: `[1, block_n, block_t, V]` output v tile.
     cq_q_scratch: `[T, Cq]` VMEM scratch for quantized cq.
-    ckv_scratch: `[T, Ckv]` VMEM scratch for normalized bf16 ckv.
     ckv_q_scratch: `[T, Ckv]` VMEM scratch for quantized ckv.
     cos_scratch: `[R, T]` VMEM scratch for scaled seq-minor cos.
     sin_scratch: `[R, T]` VMEM scratch for scaled seq-minor sin.
@@ -167,7 +166,6 @@ def _qkv_up_kernel(
     kv_down = kv_down_ref[0]
     ckv = _rms_norm(kv_down[:, :kv_lora_rank], kv_norm_scale_ref[...], eps)
     ckv_q_scratch[rows, :] = _static_quantize(ckv, act_qtype, act_scale)
-    ckv_scratch[rows, :] = ckv.astype(jnp.bfloat16)
     # Seq-minor [R, block_t] frequencies and k_pe.
     cos = _transpose(cos_ref[0])
     sin = _transpose(sin_ref[0])
@@ -179,7 +177,6 @@ def _qkv_up_kernel(
     sin_scratch[:, rows] = sin * q_scale
 
   cq_q = cq_q_scratch[rows, :]
-  ckv = ckv_scratch[rows, :]
   ckv_q = ckv_q_scratch[rows, :]
   cos = cos_scratch[:, rows]
   sin = sin_scratch[:, rows]
@@ -192,7 +189,7 @@ def _qkv_up_kernel(
     q = _nt_dot(wq_ref[h0 * qk_rope_dim : (h0 + head_group) * qk_rope_dim, :], cq_q)
     q = q.astype(jnp.bfloat16).astype(jnp.float32)
     # [head_group * QK, block_t].
-    k = _nt_dot(wk_ref[h0 * qk_head_dim : (h0 + head_group) * qk_head_dim, :], ckv)
+    k = _nt_dot(wk_ref[h0 * qk_head_dim : (h0 + head_group) * qk_head_dim, :], ckv_q)
     # [block_t, head_group * V].
     v = jax.lax.dot_general(
         ckv_q,
@@ -208,7 +205,7 @@ def _qkv_up_kernel(
       q_ref[0, h, :qk_head_dim, :] = (qh[:qk_head_dim] * q_scale).astype(q_ref.dtype)
       q_ref[0, h, qk_head_dim : qk_head_dim + half, :] = (x1 * cos[:half] - x2 * sin[:half]).astype(q_ref.dtype)
       q_ref[0, h, qk_head_dim + half :, :] = (x2 * cos[half:] + x1 * sin[half:]).astype(q_ref.dtype)
-      k_ref[0, h, :qk_head_dim, :] = k[j * qk_head_dim : (j + 1) * qk_head_dim].astype(k_ref.dtype)
+      k_ref[0, h, :qk_head_dim, :] = (k[j * qk_head_dim : (j + 1) * qk_head_dim] * dequant_scale).astype(k_ref.dtype)
       k_ref[0, h, qk_head_dim:, :] = k_pe
       v_ref[0, h] = (v[:, j * v_head_dim : (j + 1) * v_head_dim] * dequant_scale).astype(v_ref.dtype)
 
@@ -255,7 +252,7 @@ def qkv_up_fwd(
     q_down: `[B, T, Cq]` bf16 compressed query.
     kv_down: `[B, T, Ckv + R]` bf16 compressed key/value and RoPE key.
     wq_up: `[Cq, N, QK + R]` fp8 q up weights, quantized with weight_scale.
-    wk_up: `[Ckv, N, QK]` unquantized bf16 k up weights.
+    wk_up: `[Ckv, N, QK]` fp8 k up weights, quantized with weight_scale.
     wv_up: `[Ckv, N, V]` fp8 v up weights, quantized with weight_scale.
     wq_norm_scale: `[Cq]` query RMSNorm scale.
     wkv_norm_scale: `[Ckv]` key/value RMSNorm scale.
@@ -347,7 +344,6 @@ def qkv_up_fwd(
       out_shape=out_shape,
       scratch_shapes=[
           pltpu.VMEM((seq_len, q_lora_rank), act_qtype),
-          pltpu.VMEM((seq_len, kv_lora_rank), jnp.bfloat16),
           pltpu.VMEM((seq_len, kv_lora_rank), act_qtype),
           pltpu.VMEM((rope_head_dim, seq_len), jnp.float32),
           pltpu.VMEM((rope_head_dim, seq_len), jnp.float32),

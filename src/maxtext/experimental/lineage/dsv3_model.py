@@ -679,8 +679,8 @@ def next_dsv3_state(
       router biases, or None to keep them.
     mtp_bias_updates: Updates `[num_experts]` of every MTP depth; empty to keep
       the MTP biases.
-    router_aux: Decoder router aux (for the next expert permutations); only
-      read when expert shuffling is enabled.
+    router_aux: Decoder router aux (for the next expert permutations); only read
+      when expert shuffling is enabled.
     mtp_router_aux: Router aux of every MTP depth, or None without MTP; only
       read when expert shuffling is enabled.
     cfg: Model config.
@@ -838,7 +838,7 @@ def dsv3_loss_and_aux(
       num_experts_per_tok=m.num_experts_per_tok,
       load_balance_loss_weight=t.load_balance_loss_weight,
       megatron_seq_aux_loss=t.megatron_seq_aux_loss,
-      routed_bias_update_rate=t.routed_bias_update_rate if (train and update_state) else 0.0,
+      routed_bias_update_rate=(t.routed_bias_update_rate if (train and update_state) else 0.0),
   )
   lb_loss, bias_updates = dsv3_loss.moe_router_aux_outputs(fwd.router_aux, **router_aux_kwargs)
   lb_parts = [] if lb_loss is None else [lb_loss]

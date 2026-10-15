@@ -28,7 +28,6 @@ from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_
 import typeguard
 
 from maxtext.experimental.lineage import dsv3_types
-from maxtext.experimental.lineage import mla_l4_megakernel_bwd_fused
 from maxtext.experimental.lineage import mla_qkv_up_bwd_kernels
 from maxtext.experimental.lineage import mla_qkv_up_kernel
 from maxtext.experimental.lineage import ops
@@ -82,10 +81,8 @@ def quantize_mla_weights(
     quant_rule: Quantization rule of the MLA projections.
 
   Returns:
-    w with the q down, q up, kv down, v up and out projection weights
-    quantized with the rule's static weight scale. k up stays unquantized: an
-    fp8 k up dot outputs k head-dim-minor, which splash's SEQ_MINOR k layout
-    would have to transpose.
+    w with the q down, q up, kv down, k up, v up and out projection weights
+    quantized with the rule's static weight scale.
   """
 
   def q(w: jax.Array | None) -> jax.Array | None:
@@ -96,6 +93,7 @@ def quantize_mla_weights(
       q_down=q(w.q_down),
       q_up=q(w.q_up),
       kv_down=q(w.kv_down),
+      k_up=q(w.k_up),
       v_up=q(w.v_up),
       out=q(w.out),
   )
@@ -751,7 +749,7 @@ def kv_up_from_kv_down(
     return dot(ckv, w) if quant_rule is None else _qdot(ckv_q, w, quant_rule)
 
   with jax.named_scope("k_up_projection"):
-    k_nope = dot(ckv, wk_up)  # Unquantized; see `quantize_mla_weights`.
+    k_nope = _up(wk_up)
   with jax.named_scope("v_up_projection"):
     v = _up(wv_up)
 
@@ -816,7 +814,7 @@ def kv_up_from_kv_down_bwd(
     kv_lora_rank: Compressed key/value dimension.
     norm_fn: Normalization function.
     rope_fn: RoPE function.
-    quant_rule: Optional fp8 quantization of the v up projection; see
+    quant_rule: Optional fp8 quantization of the k up and v up projections; see
       `_qdot_bwd`.
 
   Returns:
@@ -830,44 +828,34 @@ def kv_up_from_kv_down_bwd(
 
   grad_k_nope, grad_k_pe = jnp.split(grad_k, [wk_up.shape[-1]], axis=-1)
 
-  # k up is unquantized; see `quantize_mla_weights`.
-  with jax.named_scope("k_up_projection_wgrad"):
-    grad_wk_up = dot(
-        ckv,
-        grad_k_nope,
-        axes=((0, 1), (0, 1)),
-        out_sharding=_cotangent_sharding(wk_up),
-    )
-  with jax.named_scope("k_up_projection_dgrad"):
-    grad_ckv_k = dot(
-        grad_k_nope,
-        wk_up,
-        axes=((2, 3), (1, 2)),
-        out_sharding=unreduced_sharding,
-    )
-  if quant_rule is None:
-    with jax.named_scope("v_up_projection_wgrad"):
-      grad_wv_up = dot(
+  def _up_bwd(grad: jax.Array, w: jax.Array, name: str):
+    """Returns the (head-unreduced) grad_ckv and grad_w of `_up(w)`."""
+    if quant_rule is None:
+      with jax.named_scope(f"{name}_wgrad"):
+        grad_w = dot(
+            ckv,
+            grad,
+            axes=((0, 1), (0, 1)),
+            out_sharding=_cotangent_sharding(w),
+        )
+      with jax.named_scope(f"{name}_dgrad"):
+        grad_ckv = dot(grad, w, axes=((2, 3), (1, 2)), out_sharding=unreduced_sharding)
+      return grad_ckv, grad_w
+    with jax.named_scope(f"{name}_bwd"):
+      return _qdot_bwd(
+          grad,
           ckv,
-          grad_v,
-          axes=((0, 1), (0, 1)),
-          out_sharding=_cotangent_sharding(wv_up),
-      )
-    with jax.named_scope("v_up_projection_dgrad"):
-      grad_ckv_v = dot(grad_v, wv_up, axes=((2, 3), (1, 2)), out_sharding=unreduced_sharding)
-  else:
-    with jax.named_scope("v_up_projection_bwd"):
-      grad_ckv_v, grad_wv_up = _qdot_bwd(
-          grad_v,
-          ckv,
-          wv_up,
+          w,
           quant_rule=quant_rule,
           dgrad_axes=((2, 3), (1, 2)),
           wgrad_axes=((0, 1), (0, 1)),
           dx_spec=unreduced_sharding.spec,
-          dw_spec=_cotangent_sharding(wv_up).spec,
+          dw_spec=_cotangent_sharding(w).spec,
           ste_x=ckv,
       )
+
+  grad_ckv_k, grad_wk_up = _up_bwd(grad_k_nope, wk_up, "k_up_projection")
+  grad_ckv_v, grad_wv_up = _up_bwd(grad_v, wv_up, "v_up_projection")
 
   @compute_on(
       compute_type="device",
@@ -965,7 +953,7 @@ def qkv_up_from_down_fused(
     q_down: Compressed query, sharded along the batch only.
     kv_down: Compressed key/value and RoPE key, sharded like q_down.
     wq_up: Query up projection weights, sharded along the heads only.
-    wk_up: Key up projection weights (unquantized), sharded like wq_up.
+    wk_up: Key up projection weights, sharded like wq_up.
     wv_up: Value up projection weights, sharded like wq_up.
     wq_norm_scale: Query normalization scale.
     wkv_norm_scale: Key/value normalization scale.
@@ -977,7 +965,7 @@ def qkv_up_from_down_fused(
     rope_factor: RoPE factor, used for scaling.
     mscale: YaRN magnitude scale.
     norm_epsilon: Epsilon of the RMS normalizations.
-    quant_rule: Quantization rule of the q and v up projections.
+    quant_rule: Quantization rule of the q, k and v up projections.
     block_t: Token tile of the kernel.
     block_n: Head tile of the kernel.
     head_group: Heads per dot of the kernel.
@@ -1040,7 +1028,7 @@ def qkv_up_from_down_fused(
       q_down,
       kv_down,
       _quantize_weight(wq_up, quant_rule),
-      wk_up,
+      _quantize_weight(wk_up, quant_rule),
       _quantize_weight(wv_up, quant_rule),
       wq_norm_scale,
       wkv_norm_scale,
@@ -1102,7 +1090,7 @@ def qkv_up_from_qkv_down_bwd(
   """fp8 backward pass of `q_up_from_q_down` and `kv_up_from_kv_down`.
 
   Same as `q_up_from_q_down_bwd` and `kv_up_from_kv_down_bwd` with
-  `rope_fn=yarn` and an `ops.rms_norm` norm_fn, except that the q and v
+  `rope_fn=yarn` and an `ops.rms_norm` norm_fn, except that the q, k and v
   cotangents are quantized to e5m2 with one absmax scale per (token, head)
   tile instead of one per device. On each device, the activation gradients
   (`mla_qkv_up_bwd_kernels.qkv_up_dgrad`) and the weight gradients
@@ -1119,7 +1107,7 @@ def qkv_up_from_qkv_down_bwd(
     q_pe: Pre-RoPE query residual of `q_up_from_q_down`, only used for the
       gradient of `yarn_freqs`.
     wq_up: Query up projection weights.
-    wk_up: Key up projection weights (unquantized).
+    wk_up: Key up projection weights.
     wv_up: Value up projection weights.
     wq_norm_scale: Query normalization scale.
     wkv_norm_scale: Key/value normalization scale.
@@ -1132,7 +1120,7 @@ def qkv_up_from_qkv_down_bwd(
     rope_factor: RoPE factor, used for scaling.
     mscale: YaRN magnitude scale.
     norm_fn: `functools.partial(ops.rms_norm, epsilon=...)`.
-    quant_rule: fp8 quantization of the q up and v up projections.
+    quant_rule: fp8 quantization of the q up, k up and v up projections.
     blocks: (token, head) tile size of the kernels and of the e5m2 absmax
       scales.
 
@@ -1154,6 +1142,7 @@ def qkv_up_from_qkv_down_bwd(
   if getattr(quant_rule, "q_prescaled_log2e", False):
     softmax_scale = softmax_scale * math.log2(math.e)
   wq_up = _quantize_weight(wq_up, quant_rule)
+  wk_up = _quantize_weight(wk_up, quant_rule)
   wv_up = _quantize_weight(wv_up, quant_rule)
   grad_q_sharding = jax.typeof(grad_q).sharding
   assert isinstance(grad_q_sharding, jax.sharding.NamedSharding)
@@ -1204,7 +1193,7 @@ def qkv_up_from_qkv_down_bwd(
     def heads_major(g, w):  # Inverse of heads_minor.
       return jnp.transpose(g.reshape(*w.shape[1:], w.shape[0]), (2, 0, 1))
 
-    grad_cq, grad_kv, gq, dv_q, scales = mla_qkv_up_bwd_kernels.qkv_up_dgrad(
+    grad_cq, grad_kv, gq, dk_q, dv_q, scales = mla_qkv_up_bwd_kernels.qkv_up_dgrad(
         grad_q,
         grad_k,
         grad_v,
@@ -1221,7 +1210,7 @@ def qkv_up_from_qkv_down_bwd(
         norm_fn(kv_down[..., :kv_lora_rank], wkv_norm_scale),
         wq_norm_scale.reshape(1, -1),
         gq,
-        grad_k,
+        dk_q,
         dv_q,
         scales,
         grad_dtype=quant_rule.grad_dtype,
@@ -1845,9 +1834,8 @@ def dsv3_mla_fwd(
 ]:
   """Forward pass for MLA returning output activations and residuals.
 
-  With `quant_rule`, all projections but k up run in fp8 (see
-  `quantize_mla_weights`); weights not already quantized (e.g. before
-  collection) are quantized here.
+  With `quant_rule`, all projections run in fp8 (see `quantize_mla_weights`);
+  weights not already quantized (e.g. before collection) are quantized here.
   """
   if quant_rule is not None:
     w = quantize_mla_weights(w, quant_rule)
@@ -1978,108 +1966,9 @@ def dsv3_mla_bwd(
 ]:
   """Backward pass for MLA using saved residuals and rematerialization.
 
-  With `quant_rule`, all projections but k up are backpropagated through like
-  the fp8 routed expert GMMs; see `_qdot_bwd`. Supported fp8 configurations
-  run the whole backward in one fused 2-TensorCore Pallas kernel; see
-  `mla_l4_megakernel_bwd_fused`.
+  With `quant_rule`, all projections are backpropagated through like the fp8
+  routed expert GMMs; see `_qdot_bwd`.
   """
-  if quant_rule is not None and rope_fn is yarn:
-    head_axes = mla_l4_megakernel_bwd_fused.attention_axes(splash_out)
-    num_cores = (
-        mesh.shape[head_axes[0]] if len(head_axes) == 1 else 0
-    )  # The kernel needs exactly one attention axis of size 2.
-    if num_cores == 2 and mla_l4_megakernel_bwd_fused.is_supported(
-        norm_fn=norm_fn,
-        qk_head_dim=qk_head_dim,
-        rope_head_dim=rope_head_dim,
-        kv_lora_rank=kv_lora_rank,
-        v_head_dim=splash_out.shape[-1],
-        quant_rule=quant_rule,
-        q_lora_rank=q_down.shape[-1],
-        seq_len=norm_x.shape[1],
-        emb_dim=norm_x.shape[2],
-        num_local_heads=splash_out.shape[2] // num_cores,
-        num_cores=num_cores,
-    ):
-      return mla_l4_megakernel_bwd_fused.fused_mla_bwd(
-          grad_out,
-          norm_x,
-          q_down,
-          kv_down,
-          context,
-          splash_out,
-          w,
-          yarn_freqs,
-          splash_kernel,
-          kv_lora_rank=kv_lora_rank,
-          qk_head_dim=qk_head_dim,
-          rope_head_dim=rope_head_dim,
-          num_query_heads=num_query_heads,
-          max_position_embeddings=max_position_embeddings,
-          original_max_position_embeddings=original_max_position_embeddings,
-          rope_factor=rope_factor,
-          mscale=mscale,
-          norm_fn=norm_fn,
-          rope_fn=rope_fn,
-          mesh=mesh,
-          axis_mapping=axis_mapping,
-          segment_ids=segment_ids,
-          quant_rule=quant_rule,
-      )
-  return _dsv3_mla_bwd_xla(
-      grad_out,
-      norm_x,
-      q_down,
-      kv_down,
-      context,
-      splash_out,
-      w,
-      yarn_freqs,
-      splash_kernel,
-      kv_lora_rank=kv_lora_rank,
-      qk_head_dim=qk_head_dim,
-      rope_head_dim=rope_head_dim,
-      num_query_heads=num_query_heads,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      rope_factor=rope_factor,
-      mscale=mscale,
-      norm_fn=norm_fn,
-      rope_fn=rope_fn,
-      mesh=mesh,
-      axis_mapping=axis_mapping,
-      segment_ids=segment_ids,
-      quant_rule=quant_rule,
-  )
-
-
-def _dsv3_mla_bwd_xla(
-    grad_out: jax.Array,
-    norm_x: jax.Array,
-    q_down: jax.Array,
-    kv_down: jax.Array,
-    context: jax.Array,
-    splash_out: jax.Array,
-    w: dsv3_types.DSv3MLAWeightsPytree,
-    yarn_freqs: tuple[jax.Array, jax.Array],
-    splash_kernel: Any,
-    *,
-    kv_lora_rank: int,
-    qk_head_dim: int,
-    rope_head_dim: int,
-    num_query_heads: int,
-    max_position_embeddings: int,
-    original_max_position_embeddings: int,
-    rope_factor: int,
-    mscale: float,
-    norm_fn: NormFn,
-    rope_fn: RopeFn,
-    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
-    axis_mapping: Mapping[str, str | tuple[str, ...]],
-    segment_ids: jax.Array | None = None,
-    quant_rule: quantization.GmmQuantRule | None = None,
-):
-  """Unfused XLA backward pass for MLA (bf16 and fp8 fallback)."""
   x_q = norm_x
   if quant_rule is not None:
     w = quantize_mla_weights(w, quant_rule)

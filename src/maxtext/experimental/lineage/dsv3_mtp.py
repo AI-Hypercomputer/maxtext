@@ -167,7 +167,13 @@ def dsv3_mtp_layer(
   ) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
     """Collects routed expert weights in the `routed_w_to_tiles` view."""
     if expert_permutations is None:
-      return dsv3_sparse_layer.routed_w_to_tiles(ops.collect_along_axis(routed, ("dcn", "fsdp_moe"), axis_mapping))
+      collected = ops.collect_along_axis(routed, ("dcn", "fsdp_moe"), axis_mapping)
+      return dsv3_sparse_layer.routed_w_to_tiles(
+          jax.tree.map(
+              lambda a: a.reshape(num_experts, -1, a.shape[-1]) if a.ndim == 2 else a,
+              collected,
+          )
+      )
     routed = ops.collect_along_axis(routed, ("dcn",), axis_mapping)
     with jax.named_scope("shuffle_experts"):
       routed = dsv3_expert_shuffle.shuffle_experts(

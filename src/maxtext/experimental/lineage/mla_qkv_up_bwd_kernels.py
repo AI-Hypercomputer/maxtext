@@ -15,21 +15,20 @@
 """Split (dgrad + wgrad) Pallas kernels for the fp8 MLA QKV-up backward.
 
 Per device (one TensorCore), for the head shard of N heads, the kernels compute
-the backward pass of the fp8 q up, bf16 k up and fp8 v up projections of
-`dsv3_mla`:
+the backward pass of the fp8 q up, k up and v up projections of `dsv3_mla`:
 
-* `qkv_up_dgrad` applies the transposed YaRN RoPE to dq, quantizes the q and v
-  cotangents to e5m2 per (token block, head block) tile with a dynamic absmax
-  scale computed in VMEM, and returns the head-unreduced `grad_cq` [B, T, Cq]
-  and `grad_kv` = [grad_ckv, sum over heads of dk_pe] [B, T, Ckv + R]. It also
-  returns the e5m2 q and v cotangents and their tile scales, so that the wgrad
-  kernel reads them instead of redoing the RoPE and quantization of the bf16
-  cotangents (and reads 2-2.7x fewer bytes).
+* `qkv_up_dgrad` applies the transposed YaRN RoPE to dq, quantizes the q, k
+  (non-RoPE dims) and v cotangents to e5m2 per (token block, head block) tile
+  with a dynamic absmax scale computed in VMEM, and returns the head-unreduced
+  `grad_cq` [B, T, Cq] and `grad_kv` = [grad_ckv, sum over heads of dk_pe]
+  [B, T, Ckv + R]. It also returns the e5m2 q, k and v cotangents and their
+  tile scales, so that the wgrad kernel reads them instead of redoing the RoPE
+  and quantization of the bf16 cotangents (and reads 2-2.7x fewer bytes).
 * `qkv_up_wgrad` recomputes the normalized and statically quantized cq from
   q_down in VMEM (once per token block) and returns `grad_wq_up`, `grad_wk_up`
   and `grad_wv_up`, accumulated in f32 over the tokens. The normalized ckv is
-  taken as an input: caching it in VMEM too does not fit at the production
-  per-device batch of 2.
+  taken as an input (and quantized in VMEM): caching it in VMEM too does not
+  fit at the production per-device batch of 2.
 
 The bf16 cotangents are taken head-major, [B, N, T, D], the layout splash
 attention produces them in. The weights and weight gradients are taken
@@ -67,7 +66,7 @@ class QkvUpBwdDims:
     eps: RMSNorm epsilon of the q and kv norms.
     act_scale: Static fp8 scale of cq and ckv.
     act_qtype: fp8 dtype of cq and ckv.
-    weight_scale: Static fp8 scale of wq_up and wv_up.
+    weight_scale: Static fp8 scale of wq_up, wk_up and wv_up.
   """
 
   qk_head_dim: int
@@ -143,6 +142,7 @@ def _dgrad_kernel(
     grad_cq_ref,
     grad_kv_ref,
     gq_ref,
+    dk_q_ref,
     dv_q_ref,
     scales_ref,
     rope_ref,
@@ -179,14 +179,17 @@ def _dgrad_kernel(
     amax_q = jnp.maximum(amax_q, _abs_max(rope))
     ropes.append(rope)
   rope_ref[...] = jnp.concatenate(ropes, axis=1)
+  amax_k = jnp.zeros((), jnp.float32)
   amax_v = jnp.zeros((), jnp.float32)
   for i in range(num_heads):
+    amax_k = jnp.maximum(amax_k, _abs_max(dk_ref[i, :, :qk]))
     amax_v = jnp.maximum(amax_v, _abs_max(dv_ref[i]))
-  s_q, s_v = _e5m2_scale(amax_q), _e5m2_scale(amax_v)
-  inv_q, inv_v = 1.0 / s_q, 1.0 / s_v
+  s_q, s_k, s_v = map(_e5m2_scale, (amax_q, amax_k, amax_v))
+  inv_q, inv_k, inv_v = 1.0 / s_q, 1.0 / s_k, 1.0 / s_v
   row = jax.lax.broadcasted_iota(jnp.int32, scales_ref.shape, 0)
-  scales_ref[...] = jnp.where(row == 0, s_q, s_v)
+  scales_ref[...] = jnp.where(row == 0, s_q, jnp.where(row == 1, s_v, s_k))
   q_dequant = s_q * (dims.softmax_scale * dims.weight_scale)
+  k_dequant = s_k * dims.weight_scale
   v_dequant = s_v * dims.weight_scale
 
   def accumulate(acc_ref, rows, x, cols=slice(None)):
@@ -204,15 +207,14 @@ def _dgrad_kernel(
         rows,
         jax.lax.dot_general(gq_ref[rows], wq_ref[...], _NN, preferred_element_type=jnp.float32) * q_dequant,
     )
+    dk_q_ref[rows] = _to_e5m2(
+        jnp.concatenate([dk_ref[i, rows, :qk] for i in range(num_heads)], axis=1),
+        inv_k,
+    )
     accumulate(
         acc_k_ref,
         rows,
-        jax.lax.dot_general(
-            jnp.concatenate([dk_ref[i, rows, :qk] for i in range(num_heads)], axis=1),
-            wk_ref[...],
-            _NN,
-            preferred_element_type=jnp.float32,
-        ),
+        jax.lax.dot_general(dk_q_ref[rows], wk_ref[...], _NN, preferred_element_type=jnp.float32) * k_dequant,
     )
     dk_pe = dk_ref[0, rows, qk:].astype(jnp.float32)
     for i in range(1, num_heads):
@@ -237,10 +239,10 @@ def _dgrad_kernel(
     def write_body(rows):
       ckv = _rms_norm(kv_down_ref[rows, :ckv_dim], kv_norm_scale_ref[...], dims.eps)
       # Straight-through estimator of ckv's static act quantization, which
-      # only the fp8 v up projection applies (like `_qdot_bwd(...,
+      # the fp8 k up and v up projections apply (like `_qdot_bwd(...,
       # ste_x=ckv)`).
       keep = jnp.abs(ckv.astype(jnp.float32)) <= dims.act_max
-      grad_ckv = acc_k_ref[rows] + jnp.where(keep, acc_v_ref[rows], 0.0)
+      grad_ckv = jnp.where(keep, acc_k_ref[rows] + acc_v_ref[rows], 0.0)
       # The outputs are token-minor, like their consumers want them.
       grad_cq_ref[:, rows] = acc_q_ref[rows].T.astype(grad_cq_ref.dtype)
       grad_kv_ref[:ckv_dim, rows] = grad_ckv.T.astype(grad_kv_ref.dtype)
@@ -254,7 +256,7 @@ def _wgrad_kernel(
     ckv_ref,
     q_norm_scale_ref,
     gq_ref,
-    dk_ref,
+    dk_q_ref,
     dv_q_ref,
     scales_ref,
     grad_wq_ref,
@@ -267,25 +269,37 @@ def _wgrad_kernel(
     *,
     dims: QkvUpBwdDims,
     chunk: int,
+    cache_cq: bool = True,
 ):
   """One (head block, batch, token block) step of `qkv_up_wgrad`."""
   n, b, t = pl.program_id(0), pl.program_id(1), pl.program_id(2)
-  num_heads, block_t = dk_ref.shape[:2]
-  qk = dims.qk_head_dim
+  block_t = dk_q_ref.shape[0]
   t_rows = pl.ds(pl.multiple_of(t * block_t, block_t), block_t)
   first = (b == 0) & (t == 0)
   last = (b == pl.num_programs(1) - 1) & (t == pl.num_programs(2) - 1)
 
-  @pl.when(n == 0)
-  def stage_cq():
-    # cq does not depend on the head block, so it is normalized and quantized
-    # for the first head block and kept in VMEM.
+  if cache_cq:
+
+    @pl.when(n == 0)
+    def stage_cq():
+      # cq does not depend on the head block, so it is normalized and quantized
+      # for the first head block and kept in VMEM.
+      def stage_body(rows):
+        cache_rows = pl.ds(pl.multiple_of(t * block_t + rows.start, chunk), chunk)
+        cq = _rms_norm(q_down_ref[rows], q_norm_scale_ref[...], dims.eps)
+        cq_q_ref[b, cache_rows] = _static_quantize(cq, dims)
+
+      _row_chunks(block_t, chunk, stage_body)
+
+    cq_q = cq_q_ref[b, t_rows]
+  else:
+
     def stage_body(rows):
-      cache_rows = pl.ds(pl.multiple_of(t * block_t + rows.start, chunk), chunk)
       cq = _rms_norm(q_down_ref[rows], q_norm_scale_ref[...], dims.eps)
-      cq_q_ref[b, cache_rows] = _static_quantize(cq, dims)
+      cq_q_ref[rows] = _static_quantize(cq, dims)
 
     _row_chunks(block_t, chunk, stage_body)
+    cq_q = cq_q_ref[...]
 
   def tn(x, y):
     return jax.lax.dot_general(x, y, _TN, preferred_element_type=jnp.float32)
@@ -295,22 +309,14 @@ def _wgrad_kernel(
     acc_ref[...] = jnp.where(first, 0.0, acc_ref[...]) + x
 
   s_q, s_v = scales_ref[0:1, 0:1], scales_ref[1:2, 0:1]
+  s_k = scales_ref[2:3, 0:1]
   accumulate(
       acc_wq_ref,
-      tn(gq_ref[...], cq_q_ref[b, t_rows]) * (s_q * (dims.softmax_scale * dims.act_scale)),
+      tn(gq_ref[...], cq_q) * (s_q * (dims.softmax_scale * dims.act_scale)),
   )
-  ckv = ckv_ref[...]
-  accumulate(
-      acc_wk_ref,
-      tn(
-          jnp.concatenate([dk_ref[i, :, :qk] for i in range(num_heads)], axis=1),
-          ckv,
-      ),
-  )
-  accumulate(
-      acc_wv_ref,
-      tn(dv_q_ref[...], _static_quantize(ckv, dims)) * (s_v * dims.act_scale),
-  )
+  ckv_q = _static_quantize(ckv_ref[...], dims)
+  accumulate(acc_wk_ref, tn(dk_q_ref[...], ckv_q) * (s_k * dims.act_scale))
+  accumulate(acc_wv_ref, tn(dv_q_ref[...], ckv_q) * (s_v * dims.act_scale))
 
   @pl.when(last)
   def write_grads():
@@ -353,7 +359,7 @@ def qkv_up_dgrad(
     kv_norm_scale: kv norm scale, [1, Ckv].
     cos_sin: Concatenated YaRN cos and sin frequencies, [B, T, 2 * R].
     wq_up: fp8 q up weights, [N * (QK + R), Cq].
-    wk_up: bf16 k up weights, [N * QK, Ckv].
+    wk_up: fp8 k up weights, [N * QK, Ckv].
     wv_up: fp8 v up weights, [N * V, Ckv].
     dims: Static dims and constants.
     block_t: Token block size.
@@ -363,13 +369,16 @@ def qkv_up_dgrad(
   Returns:
     Tuple of
     * grad_cq: [B, Cq, T] bf16, pending the head sum and the q norm backward.
-    * grad_kv: [B, Ckv + R, T] bf16, grad_ckv (with the v STE applied) and the
-      head sum of dk_pe, pending the head sum and the kv norm / RoPE backward.
+    * grad_kv: [B, Ckv + R, T] bf16, grad_ckv (with the ckv STE applied) and
+      the head sum of dk_pe, pending the head sum and the kv norm / RoPE
+      backward.
     * gq: [B, T, N * (QK + R)] e5m2 q cotangent / softmax_scale (with the
       transposed RoPE applied), divided by its tile scale.
+    * dk_q: [B, T, N * QK] e5m2 cotangent of the non-RoPE k dims, divided by
+      its tile scale.
     * dv_q: [B, T, N * V] e5m2 v cotangent, divided by its tile scale.
     * scales: [B, T / block_t, N / block_n, 8, 128] f32 tile scales, of gq in
-      row 0 and of dv_q in row 1.
+      row 0, of dv_q in row 1 and of dk_q in row 2.
   """
   batch, num_heads, num_tokens, d = dq.shape
   if num_tokens % block_t or num_heads % block_n or block_n % 2:
@@ -397,7 +406,7 @@ def qkv_up_dgrad(
   bytes_accessed = (
       _nbytes(dq, dk, dv, kv_down, cos_sin)
       + batch * grid[1] * _nbytes(wq_up, wk_up, wv_up)
-      + batch * num_tokens * (num_heads * (d + v) + 2 * (cq_dim + kv_width))
+      + batch * num_tokens * (num_heads * (d + qk + v) + 2 * (cq_dim + kv_width))
   )
   return pl.pallas_call(
       functools.partial(_dgrad_kernel, dims=dims, chunk=chunk),
@@ -405,6 +414,7 @@ def qkv_up_dgrad(
           _out_struct((batch, cq_dim, num_tokens), jnp.bfloat16, dq),
           _out_struct((batch, kv_width, num_tokens), jnp.bfloat16, dq),
           _out_struct((batch, num_tokens, num_heads * d), _E5M2, dq),
+          _out_struct((batch, num_tokens, num_heads * qk), _E5M2, dq),
           _out_struct((batch, num_tokens, num_heads * v), _E5M2, dq),
           _out_struct((*grid, 8, 128), jnp.float32, dq),
       ),
@@ -424,6 +434,7 @@ def qkv_up_dgrad(
           tokens_t_spec(cq_dim),
           tokens_t_spec(kv_width),
           tile_spec(d),
+          tile_spec(qk),
           tile_spec(v),
           pl.BlockSpec((None, None, None, 8, 128), lambda b, t, n: (b, t, n, 0, 0)),
       ),
@@ -453,7 +464,7 @@ def qkv_up_wgrad(
     ckv: jax.Array,
     q_norm_scale: jax.Array,
     gq: jax.Array,
-    dk: jax.Array,
+    dk_q: jax.Array,
     dv_q: jax.Array,
     scales: jax.Array,
     *,
@@ -470,7 +481,7 @@ def qkv_up_wgrad(
     ckv: Normalized compressed kv, [B, T, Ckv] bf16.
     q_norm_scale: q norm scale, [1, Cq].
     gq: `qkv_up_dgrad`'s e5m2 q cotangent.
-    dk: k cotangent, [B, N, T, QK + R] bf16.
+    dk_q: `qkv_up_dgrad`'s e5m2 k cotangent.
     dv_q: `qkv_up_dgrad`'s e5m2 v cotangent.
     scales: `qkv_up_dgrad`'s tile scales.
     dims: Static dims and constants.
@@ -483,8 +494,9 @@ def qkv_up_wgrad(
     Tuple of grad_wq_up [N * (QK + R), Cq], grad_wk_up [N * QK, Ckv] and
     grad_wv_up [N * V, Ckv].
   """
-  batch, num_heads, num_tokens, d = dk.shape
-  qk, v = dims.qk_head_dim, dims.v_head_dim
+  qk, v, d = dims.qk_head_dim, dims.v_head_dim, dims.q_head_dim
+  batch, num_tokens = dk_q.shape[:2]
+  num_heads = dk_q.shape[2] // qk
   cq_dim, ckv_dim = q_down.shape[2], ckv.shape[2]
   grid = (num_heads // block_n, batch, num_tokens // block_t)
   assert scales.shape[:3] == (batch, grid[2], grid[0]), scales.shape
@@ -495,28 +507,37 @@ def qkv_up_wgrad(
   def grad_spec(cols, head_dim):
     return pl.BlockSpec((block_n * head_dim, cols), lambda n, b, t: (n, 0))
 
-  # Only the first head block reads q_down; the later ones keep the last block
-  # index, so that its block is not fetched again.
-  q_down_spec = pl.BlockSpec(
-      (None, block_t, cq_dim),
-      lambda n, b, t: (
-          jnp.where(n == 0, b, batch - 1),
-          jnp.where(n == 0, t, grid[2] - 1),
-          0,
-      ),
-      pipeline_mode=pl.Buffered(1),
-  )
+  cache_cq = batch * num_tokens * cq_dim <= 2 * 4096 * 1536
+  if cache_cq:
+    # Only the first head block reads q_down; the later ones keep the last block
+    # index, so that its block is not fetched again.
+    q_down_spec = pl.BlockSpec(
+        (None, block_t, cq_dim),
+        lambda n, b, t: (
+            jnp.where(n == 0, b, batch - 1),
+            jnp.where(n == 0, t, grid[2] - 1),
+            0,
+        ),
+        pipeline_mode=pl.Buffered(1),
+    )
+    cq_scratch = pltpu.VMEM((batch, num_tokens, cq_dim), dims.act_qtype)
+  else:
+    q_down_spec = pl.BlockSpec((None, block_t, cq_dim), lambda n, b, t: (b, t, 0))
+    cq_scratch = pltpu.VMEM((block_t, cq_dim), dims.act_qtype)
   flops = 2 * batch * num_tokens * num_heads * (d * cq_dim + qk * ckv_dim + v * ckv_dim)
   bytes_accessed = (
-      _nbytes(q_down, gq, dk, dv_q) + grid[0] * _nbytes(ckv) + num_heads * (d * cq_dim + (qk + v) * ckv_dim) * 2
+      _nbytes(q_down, gq, dk_q, dv_q)
+      + grid[0] * _nbytes(ckv)
+      + (0 if cache_cq else (grid[0] - 1) * _nbytes(q_down))
+      + num_heads * (d * cq_dim + (qk + v) * ckv_dim) * 2
   )
   chunk = min(chunk, block_t)
   return pl.pallas_call(
-      functools.partial(_wgrad_kernel, dims=dims, chunk=chunk),
+      functools.partial(_wgrad_kernel, dims=dims, chunk=chunk, cache_cq=cache_cq),
       out_shape=(
-          _out_struct((num_heads * d, cq_dim), grad_dtype, dk),
-          _out_struct((num_heads * qk, ckv_dim), grad_dtype, dk),
-          _out_struct((num_heads * v, ckv_dim), grad_dtype, dk),
+          _out_struct((num_heads * d, cq_dim), grad_dtype, dk_q),
+          _out_struct((num_heads * qk, ckv_dim), grad_dtype, dk_q),
+          _out_struct((num_heads * v, ckv_dim), grad_dtype, dk_q),
       ),
       grid=grid,
       in_specs=[
@@ -524,7 +545,7 @@ def qkv_up_wgrad(
           pl.BlockSpec((None, block_t, ckv_dim), lambda n, b, t: (b, t, 0)),
           pl.BlockSpec((1, cq_dim), lambda n, b, t: (0, 0)),
           tile_spec(d),
-          pl.BlockSpec((None, block_n, block_t, d), lambda n, b, t: (b, n, t, 0)),
+          tile_spec(qk),
           tile_spec(v),
           pl.BlockSpec((None, None, None, 8, 128), lambda n, b, t: (b, t, n, 0, 0)),
       ],
@@ -534,7 +555,7 @@ def qkv_up_wgrad(
           grad_spec(ckv_dim, v),
       ),
       scratch_shapes=[
-          pltpu.VMEM((batch, num_tokens, cq_dim), dims.act_qtype),
+          cq_scratch,
           pltpu.VMEM((block_n * d, cq_dim), jnp.float32),
           pltpu.VMEM((block_n * qk, ckv_dim), jnp.float32),
           pltpu.VMEM((block_n * v, ckv_dim), jnp.float32),
@@ -550,4 +571,4 @@ def qkv_up_wgrad(
       ),
       cost_estimate=pl.CostEstimate(flops=flops, transcendentals=0, bytes_accessed=bytes_accessed),
       name="qkv_up_wgrad",
-  )(q_down, ckv, q_norm_scale, gq, dk, dv_q, scales)
+  )(q_down, ckv, q_norm_scale, gq, dk_q, dv_q, scales)
