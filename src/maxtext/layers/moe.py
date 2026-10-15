@@ -2666,6 +2666,9 @@ class RoutedMoE(nnx.Module):
     # moe_router_grad_from_wo_input: the ring-of-experts down projection and unsort run as one op
     # (_ring_down_project_and_unpermute). The config validator checks the rest; the mesh decides this.
     router_grad_from_wo_input = self.config.moe_router_grad_from_wo_input
+    # moe_wo_gmm_fused_dswiglu: the SwiGLU backward runs in the epilogue of the down projection's (wo) DLHS GMM
+    # (_prepare_wo_inputs, _run_wo_gmm_dswiglu and the fused op of _ring_down_project_and_unpermute).
+    fuse_dswiglu_in_wo_gmm = getattr(self.config, "moe_wo_gmm_fused_dswiglu", False)
     if router_grad_from_wo_input and self.get_tensor_parallelism_size() > 1:
       raise ValueError(
           "moe_router_grad_from_wo_input=True does not support tensor parallelism in the MoE layer: the down"
@@ -3604,11 +3607,16 @@ class RoutedMoE(nnx.Module):
           # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
           w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        if partial_accum0 is None and partial_accum1 is None and self.config.moe_prefused_swiglu_vjp:
+        if (
+            partial_accum0 is None
+            and partial_accum1 is None
+            and (fuse_dswiglu_in_wo_gmm or self.config.moe_prefused_swiglu_vjp)
+        ):
           # moe_prefused_swiglu_vjp: the whole [gate | up] output goes to the activation as one array
           # (apply_ffn_activation_maybe_fused, which layer_w1=None selects), whose backward then writes d[gate | up]
-          # in one pass. There are no per-half outputs to tag; the config validator rejects a remat policy that
-          # would save them, since it would silently stop saving the MoE tensor.
+          # in one pass. moe_wo_gmm_fused_dswiglu: it is the input of the SwiGLU backward fused into the down
+          # projection's DLHS (_prepare_wo_inputs). There are no per-half outputs to tag; the config validators
+          # reject a remat policy that would save them, since it would silently stop saving the MoE tensor.
           return out, None
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
@@ -3696,6 +3704,18 @@ class RoutedMoE(nnx.Module):
       ]
       if unmet:
         raise ValueError(f"moe_wi_gmm_fused_swiglu=True does not support {' or '.join(unmet)}.")
+    if fuse_dswiglu_in_wo_gmm:
+      # As for moe_wi_gmm_fused_swiglu: the fused DLHS is the plain bf16 gmm_v2 of the local expert weights.
+      unmet = [
+          name
+          for name, hit in (
+              ("weight quantization", self.quant is not None),
+              ("an explicit expert-weight all-gather", weight_gather),
+          )
+          if hit
+      ]
+      if unmet:
+        raise ValueError(f"moe_wo_gmm_fused_dswiglu=True does not support {' or '.join(unmet)}.")
 
     def gmm_up_or_silu(
         x,
@@ -3713,9 +3733,10 @@ class RoutedMoE(nnx.Module):
       """gmm_up; with moe_wi_gmm_fused_swiglu, (silu(x @ w0) * (x @ w1), None) from one fused GMM.
 
       `gmm_operands` are the routing operands that `gmm_fn` is bound to (get_gmm_operands_for_local_experts); the
-      fused GMM takes them explicitly. An output1 of None tells the caller the activation is already applied.
-      Biases, the mask and gather_weights only matter in configurations the key does not support (mlp_bias, an
-      explicit weight all-gather).
+      fused GMM takes them explicitly. An output1 of None tells the caller the activation is already applied. With
+      moe_wo_gmm_fused_dswiglu too, output1 is the GMM's [gate | up] (see _prepare_wo_inputs). Biases, the mask and
+      gather_weights only matter in configurations the key does not support (mlp_bias, an explicit weight
+      all-gather).
       """
       if not fuse_silu_in_wi_gmm:
         return gmm_up(
@@ -3739,7 +3760,7 @@ class RoutedMoE(nnx.Module):
       # Weights are stored as (G,K,2N): w0/w1 are adjacent slices (the same concatenate as gmm_up), or w0 is already
       # the whole [w0 | w1] (moe_unsplit_prefused_wi).
       w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
-      act = mblx.gmm_silu(
+      out = mblx.gmm_silu(
           inputs.astype(self.dtype),
           w_fused.astype(self.dtype),
           gmm_operands["group_sizes"],
@@ -3750,8 +3771,70 @@ class RoutedMoE(nnx.Module):
           use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
           fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
           fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
+          fuse_bwd_dswiglu=fuse_dswiglu_in_wo_gmm,
       )
-      return (act[: x.shape[0]] if padding_amount else act), None
+      if fuse_dswiglu_in_wo_gmm:
+        # moe_wo_gmm_fused_dswiglu: (act, [gate | up]); the backward runs through [gate | up] (_prepare_wo_inputs).
+        act, gate_up = out
+        return (act[: x.shape[0]], gate_up[: x.shape[0]]) if padding_amount else (act, gate_up)
+      return (out[: x.shape[0]] if padding_amount else out), None
+
+    def _prepare_wo_inputs(output0, output1):
+      """The down projection's input from gmm_up_or_silu's outputs: (activation, None or [gate | up]).
+
+      Without moe_wo_gmm_fused_dswiglu: (the activation, None). With it, the SwiGLU backward runs in the down
+      projection's DLHS epilogue, so its input [gate | up] comes along as the second output and carries the
+      gradient, and the activation is passed with its gradient stopped (its cotangent is the DLHS output, which the
+      epilogue consumes). The activation comes from the fused wi GMM (moe_wi_gmm_fused_swiglu: output0 = act,
+      output1 = [gate | up]) or from the same apply_ffn_activation the unfused path runs on the whole [gate | up]
+      (output0 = [gate | up], output1 = None), so the forward is unchanged.
+      """
+      if not fuse_dswiglu_in_wo_gmm:
+        # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
+        intermediate = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+        return intermediate, None
+      if fuse_silu_in_wi_gmm:
+        return jax.lax.stop_gradient(output0), output1
+      gate_up = output0
+      n = gate_up.shape[-1] // 2
+      intermediate = jax.lax.stop_gradient(self.apply_ffn_activation(gate_up[:, :n], gate_up[:, n:]))
+      return intermediate, gate_up
+
+    def _run_wo_gmm_dswiglu(
+        intermediate_layer, gate_up, wo, gmm_fn, wo_tile_size, *, tc_prescaled=False, x_is_3d=False, return_weights=False
+    ):
+      """moe_wo_gmm_fused_dswiglu: the down projection gmm_fn would run, as megablox gmm_dswiglu.
+
+      The same tokamax gmm_v2 forward; its backward returns the SwiGLU input's gradient d[gate | up] from the DLHS
+      epilogue (gmm_dswiglu_bwd) instead of the activation's. Rows are padded to the forward tile, as gmm() pads.
+      The flags are what the caller's gmm_fn call would also handle; the config validator excludes them.
+      """
+      unsupported = [
+          name
+          for name, hit in (
+              # The epilogue would differentiate silu(gate) * up, not the routing-weighted activation.
+              ("routing weights on the activation (moe_tc_ragged_weights_on_activation)", tc_prescaled),
+              ("a 3D token buffer (moe_tc_ragged_3d_gmm)", x_is_3d),
+              ("moe_accumulate_chunk_wgrad", return_weights),
+          )
+          if hit
+      ]
+      if unsupported:
+        raise NotImplementedError(f"moe_wo_gmm_fused_dswiglu does not support {', '.join(unsupported)}.")
+      padded_h, padding_amount = max_utils.maybe_pad(intermediate_layer, fwd_tile("wo_tile_fwd_batch_seq"))
+      padded_gate_up = jnp.pad(gate_up, ((0, padding_amount), (0, 0))) if padding_amount > 0 else gate_up
+      out = mblx.gmm_dswiglu(
+          padded_h.astype(self.dtype),
+          padded_gate_up.astype(self.dtype),
+          wo.astype(self.dtype),
+          gmm_fn.keywords["group_sizes"],  # the routing get_gmm_for_local_experts bound for this buffer
+          preferred_element_type=self.dtype,
+          tiling=wo_tile_size,
+          group_offset=gmm_fn.keywords["group_offset"],
+          use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+          use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+      )
+      return out[: intermediate_layer.shape[0]] if padding_amount > 0 else out
 
     def get_gmm_operands_for_local_experts(x, routing, route_metadata):
       """The routing operands of the local experts' GMMs: group sizes, expert assignments, group offset."""
@@ -4002,8 +4085,8 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
-      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
-      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+      # moe_wi_gmm_fused_swiglu / moe_wo_gmm_fused_dswiglu: see _prepare_wo_inputs.
+      intermediate_layer, dswiglu_gate_up = _prepare_wo_inputs(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -4014,14 +4097,26 @@ class RoutedMoE(nnx.Module):
         raise NotImplementedError("moe_tc_ragged_3d_gmm does not support tensor parallelism or mlp_bias.")
       if self.config.moe_bwd_prequant_before_unsort:
         raise NotImplementedError("moe_chunk_pipeline does not support moe_bwd_prequant_before_unsort.")
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-          return_rhs=return_weights,
-          **({"out_is_3d": True} if x_is_3d else {}),
-      )
+      if dswiglu_gate_up is not None:
+        intermediate_output = _run_wo_gmm_dswiglu(
+            intermediate_layer,
+            dswiglu_gate_up,
+            wo,
+            gmm_fn,
+            wo_tile_size,
+            tc_prescaled=tc_prescaled,
+            x_is_3d=x_is_3d,
+            return_weights=return_weights,
+        )
+      else:
+        intermediate_output = gmm_fn(
+            intermediate_layer,
+            wo,
+            tiling=wo_tile_size,
+            weight_gather_axes=wo_gather_axes,
+            return_rhs=return_weights,
+            **({"out_is_3d": True} if x_is_3d else {}),
+        )
       if return_weights:
         intermediate_output, wo = intermediate_output
       if self.get_tensor_parallelism_size() > 1:
@@ -4080,8 +4175,8 @@ class RoutedMoE(nnx.Module):
       `forward_tie` is the pipelined loop's tie 2, applied inside the op to the down-projection output.
       Returns the output as [expert shards x batch, seq, embed], as `_ring_unpermute`, and the tie's output.
       """
-      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
-      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+      # moe_wi_gmm_fused_swiglu / moe_wo_gmm_fused_dswiglu: see _prepare_wo_inputs.
+      intermediate_layer, dswiglu_gate_up = _prepare_wo_inputs(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
 
       def down_projection(h, kernel, group_sizes, expert_assignments, group_offset):
@@ -4094,6 +4189,39 @@ class RoutedMoE(nnx.Module):
             weight_gather_axes=wo_gather_axes,
             group_offset=group_offset,
         )
+
+      def down_projection_bwd_dswiglu(
+          gathered, weighted_h, kernel, group_sizes, expert_assignments, group_offset, *, dact_gate_up, dact_row_scale
+      ):
+        """moe_wo_gmm_fused_dswiglu: down_projection's backward at the input weighted_h and cotangent gathered,
+        with the SwiGLU backward in the DLHS epilogue (megablox gmm_dswiglu_bwd): (d[gate | up], <u, h>, dwo).
+        """
+        del expert_assignments
+        num_rows = gathered.shape[0]
+        # Rows padded to the forward tile, as gmm() pads them; the padding is in no group.
+        gathered, padding_amount = max_utils.maybe_pad(gathered, fwd_tile("wo_tile_fwd_batch_seq"))
+        if padding_amount > 0:
+          weighted_h = jnp.pad(weighted_h, ((0, padding_amount), (0, 0)))
+          dact_gate_up = jnp.pad(dact_gate_up, ((0, padding_amount), (0, 0)))
+          dact_row_scale = jnp.pad(dact_row_scale, (0, padding_amount))
+        d_gate_up, dot, grad_wo = mblx.gmm_dswiglu_bwd(
+            gathered.astype(self.dtype),
+            weighted_h.astype(self.dtype),
+            kernel.astype(self.dtype),
+            group_sizes,
+            group_offset,
+            self.dtype,
+            wo_tile_size,
+            dact_gate_up.astype(self.dtype),
+            dact_row_scale=dact_row_scale,
+            return_dact_dot=True,
+            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+            use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+        )
+        if padding_amount > 0:
+          # dot is an array here (return_dact_dot=True).
+          d_gate_up, dot = d_gate_up[:num_rows], dot[:num_rows]  # pylint: disable=unsubscriptable-object
+        return d_gate_up, dot, grad_wo
 
       operands = get_gmm_operands_for_local_experts(intermediate_layer, routing, route_metadata)
       output = ring_ragged_unsort_down_projection(
@@ -4118,6 +4246,8 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           index_math=self.config.moe_routing_index_math,
           unique_pair_argsort=self.config.moe_ragged_sort_unique_pair_argsort,
+          dswiglu_gate_up=dswiglu_gate_up,
+          down_projection_bwd_dswiglu=None if dswiglu_gate_up is None else down_projection_bwd_dswiglu,
       )
       if forward_tie is not None:
         output, forward_tie = output
@@ -4274,8 +4404,8 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
-      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
-      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+      # moe_wi_gmm_fused_swiglu / moe_wo_gmm_fused_dswiglu: see _prepare_wo_inputs.
+      intermediate_layer, dswiglu_gate_up = _prepare_wo_inputs(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -4311,15 +4441,27 @@ class RoutedMoE(nnx.Module):
                 ),
             ),
         }
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-          return_rhs=return_weights,
-          **({"out_is_3d": True} if x_is_3d else {}),
-          **tc_unsort_kwargs,
-      )
+      if dswiglu_gate_up is not None:
+        intermediate_output = _run_wo_gmm_dswiglu(
+            intermediate_layer,
+            dswiglu_gate_up,
+            wo,
+            gmm_fn,
+            wo_tile_size,
+            tc_prescaled=tc_prescaled,
+            x_is_3d=x_is_3d,
+            return_weights=return_weights,
+        )
+      else:
+        intermediate_output = gmm_fn(
+            intermediate_layer,
+            wo,
+            tiling=wo_tile_size,
+            weight_gather_axes=wo_gather_axes,
+            return_rhs=return_weights,
+            **({"out_is_3d": True} if x_is_3d else {}),
+            **tc_unsort_kwargs,
+        )
       if return_weights:
         intermediate_output, wo = intermediate_output
       if self.get_tensor_parallelism_size() > 1:
