@@ -829,7 +829,14 @@ class RoutedMoE(nnx.Module):
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
-      self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
+      # wo is [experts, mlp, embed]. Mesh rules that define `mlp_moe_out`/`embed_moe_out` (cp-as-ep) shard its mlp
+      # dim over FSDP instead of its embed dim, so its gradient reduce-scatter scatters a middle dimension, like wi's,
+      # instead of being transposed to [embed, experts * mlp] and scattered on its major dimension (about 3x slower
+      # on the SparseCore for the same bytes).
+      if {"mlp_moe_out", "embed_moe_out"} <= {rule[0] for rule in self.config.logical_axis_rules}:
+        self.wo_kernel_axes = ("exp", "mlp_moe_out", "embed_moe_out")
+      else:
+        self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
       # vLLM uses 'model' as the tensor parallelism axis name

@@ -63,6 +63,9 @@ logical_axis_rules: [
                       # MoE Weights
                       ['exp', ['context', 'expert']],
                       ['embed_moe', ['fsdp']],
+                      # wo's dims: FSDP on its mlp dim (see RoutedMoE.wo_kernel_axes)
+                      ['mlp_moe_out', ['fsdp']],
+                      ['embed_moe_out', []],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
