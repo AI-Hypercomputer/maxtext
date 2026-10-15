@@ -612,6 +612,21 @@ def finalize_deferred_intermediates(intermediate_outputs, config):
   return jax.tree_util.tree_map_with_path(_fix, intermediate_outputs)
 
 
+def pack_routing_for_all_gather(weights: jax.Array, ids: jax.Array) -> jax.Array:
+  """`[..., k]` routing weights and expert ids as ONE float32 `[..., 2k]` array (moe_roe_packed_routing_gather).
+
+  Exact: expert ids are integers in [-1, num_experts), and float32 holds every integer up to 2**24; float32 weights
+  are kept as they are and narrower ones convert exactly. `unpack_routing` inverts it.
+  """
+  return jnp.concatenate([weights.astype(jnp.float32), ids.astype(jnp.float32)], axis=-1)
+
+
+def unpack_routing(packed: jax.Array, weights_dtype, ids_dtype) -> tuple[jax.Array, jax.Array]:
+  """The routing weights and expert ids of a `pack_routing_for_all_gather` array, in their own dtypes."""
+  k = packed.shape[-1] // 2
+  return packed[..., :k].astype(weights_dtype), packed[..., k:].astype(ids_dtype)
+
+
 def routing_tag_fn(config):
   """Returns the checkpoint_name tagger for the routing arrays, or None under moe_routing_maps=remat.
 
@@ -3038,6 +3053,25 @@ class RoutedMoE(nnx.Module):
       x_gathered_qval = all_gather_fn(x_input.qvalue)
       return dataclasses.replace(x_input, qvalue=x_gathered_qval)
 
+    # The ring of experts' all-gather over the expert-parallel axis (tokens and routing), on a SparseCore with
+    # moe_pin_sparse_core_all_gathers / moe_pin_sparse_core_ep_all_gathers. roe_ag_and_route and the packed routing
+    # gather of the pipelined chunk loop (moe_roe_packed_routing_gather) both use it.
+    if self.config.moe_pin_sparse_core_all_gathers or getattr(self.config, "moe_pin_sparse_core_ep_all_gathers", False):
+
+      @functools.partial(
+          compute_on,
+          compute_type="tpu_sparsecore",
+          out_memory_spaces=jax.memory.Space.Device,
+          compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
+      )
+      def _ep_all_gather(z):
+        return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+
+    else:
+
+      def _ep_all_gather(z):
+        return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+
     def roe_ag_and_route(
         x,
         logits,
@@ -3048,23 +3082,14 @@ class RoutedMoE(nnx.Module):
         input_ids=None,
         forced_routed_experts=None,
         force_dropless=False,
+        gathered_topk=None,
     ):
-      if self.config.moe_pin_sparse_core_all_gathers or getattr(self.config, "moe_pin_sparse_core_ep_all_gathers", False):
+      """Ring of experts: all-gathers this chunk's tokens over the expert-parallel axis and routes them.
 
-        @functools.partial(
-            compute_on,
-            compute_type="tpu_sparsecore",
-            out_memory_spaces=jax.memory.Space.Device,
-            compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
-        )
-        def _ep_all_gather(z):
-          return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
-
-      else:
-
-        def _ep_all_gather(z):
-          return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
-
+      `gathered_topk` (moe_roe_packed_routing_gather): `(weights, expert ids)` of these tokens, already routed and
+      all-gathered over the expert-parallel axis, plus this shard's own (local, not gathered) expert ids for the
+      load-balance loss. The local top-k and the two routing all-gathers of this chunk are then skipped.
+      """
       if use_tc_3d_dispatch():
         # moe_tc_ragged_3d_dispatch: all-gather the tokens in the TC kernels' (emb // 128, 128) layout; the
         # reshape is on the local tokens, so the gathered tensor needs no relayout before the TC sort.
@@ -3097,7 +3122,21 @@ class RoutedMoE(nnx.Module):
           and not self.is_hash_routing
           and not self.config.use_random_routing
       )
-      if self.config.ring_of_experts_local_routing:
+      if gathered_topk is not None:
+        # moe_roe_packed_routing_gather: the chunk pipeline routed this shard's tokens of every chunk at once and
+        # all-gathered weights and ids as one packed array; this chunk's slice arrives here. Same values as the
+        # local-routing branch below (routing is per token), including its per-chunk load-balance loss, which is
+        # computed from this shard's own ids of these tokens exactly as there.
+        weights, selected_experts, local_selected_experts = gathered_topk
+        lb_loss = None
+        if self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing and not use_megatron_seq_aux_loss:
+          lb_loss = jax.lax.pmean(
+              self.router_load_balance_loss(local_selected_experts, logits, pre_bias_logits),
+              self._expert_parallelism_name,
+          )
+        topk = (weights, selected_experts, lb_loss)
+        logits, pre_bias_logits = None, None
+      elif self.config.ring_of_experts_local_routing:
         # (68792f5 pin) Routing is per token, so each shard routes only its own tokens and all-gathers the top-k
         # ids and weights the way the tokens were gathered. The [tokens, num_experts] logits never
         # cross shards, so neither does their gradient, and the gradient of the top-k gather is a
@@ -3334,6 +3373,7 @@ class RoutedMoE(nnx.Module):
         input_ids=None,
         forced_routed_experts=None,
         force_dropless=False,
+        gathered_topk=None,
     ):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -3350,6 +3390,7 @@ class RoutedMoE(nnx.Module):
             input_ids=input_ids,
             forced_routed_experts=forced_routed_experts,
             force_dropless=force_dropless,
+            gathered_topk=gathered_topk,
         )
       else:
         return ra2a_and_route(
@@ -4198,6 +4239,10 @@ class RoutedMoE(nnx.Module):
             "moe_chunk_pipeline=True is skipped: --xla_tpu_aggressive_opt_barrier_removal=true (or ENABLED)"
             " removes optimization barriers before scheduling. Set it to false to use the pipeline."
         )
+        if self.config.moe_roe_packed_routing_gather:
+          max_logging.warning(
+              "moe_roe_packed_routing_gather=True is skipped too: it only runs in the pipelined chunk loop."
+          )
         pipeline_enabled = False
 
       def _pipelined_route_and_compute(force_dropless):
@@ -4235,6 +4280,33 @@ class RoutedMoE(nnx.Module):
         seq_len = x.shape[1]
         chunk = seq_len // n_chunks
 
+        packed_topk = None
+        if self.config.moe_roe_packed_routing_gather:
+          # moe_roe_packed_routing_gather: route ALL of this shard's tokens once (every chunk) and all-gather the
+          # top-k weights and expert ids as ONE float32 [batch, seq, 2k] array: one all-gather (one SparseCore
+          # offload) per layer instead of two per chunk, and in the backward one reduce-scatter of the weight
+          # cotangent instead of one per chunk. Routing is per token, so each chunk's slice holds the values the
+          # per-chunk local routing would compute (pack_routing_for_all_gather: exact).
+          num_expert_shards = self.get_expert_parallelism_size()
+          expert_shard = jax.lax.axis_index(self._expert_parallelism_name) if num_expert_shards > 1 else 0
+          local_weights, local_ids = self.get_topk(
+              logits,
+              pre_bias_logits,
+              rngs,
+              sharded_input_ids,
+              forced_routed_experts,
+              num_token_shards=num_expert_shards,
+              token_shard_index=expert_shard,
+          )
+          packed = _ep_all_gather(pack_routing_for_all_gather(local_weights, local_ids))
+          # A routing map: with moe_routing_maps=device (or offload) the backward reuses the gathered array and the
+          # rematerialized forward skips the gather. Untagged under moe_routing_maps=remat.
+          tag_fn = routing_tag_fn(self.config)
+          if tag_fn is not None:
+            packed = tag_fn(packed)
+          gathered_weights, gathered_ids = unpack_routing(packed, local_weights.dtype, local_ids.dtype)
+          packed_topk = (gathered_weights, gathered_ids, local_ids)
+
         def _dispatch(c, x_c):
           sl = slice(c * chunk, (c + 1) * chunk)
           return route(
@@ -4245,6 +4317,7 @@ class RoutedMoE(nnx.Module):
               input_ids=None if sharded_input_ids is None else sharded_input_ids[:, sl],
               forced_routed_experts=None if forced_routed_experts is None else forced_routed_experts[:, sl, :],
               force_dropless=force_dropless,
+              gathered_topk=None if packed_topk is None else tuple(t[:, sl, :] for t in packed_topk),
           )
 
         def _with_routed(dispatched_c, routed):
