@@ -160,6 +160,7 @@ class OptimizerType(str, Enum):
 
   ADAMW = "adamw"
   ADAM_PAX = "adam_pax"
+  ADAM_PAX_LOW_MEMORY = "adam_pax_low_memory"
   SGD = "sgd"
   MUON = "muon"
 
@@ -3039,6 +3040,16 @@ class AdamW(BaseModel):
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",
   )
+  bf16_update_rounding: Literal["nearest", "kahan", "stochastic"] = Field(
+      "nearest",
+      description=(
+          "Rounding of bf16 parameter updates for opt_type='adam_pax_low_memory': 'nearest' (round to nearest), "
+          "'kahan' (deterministic Kahan-compensated summation; keeps a param-sized bf16 residual in optimizer "
+          "state), or 'stochastic' (unbiased stochastic rounding). Non-default values require "
+          "opt_type='adam_pax_low_memory'."
+      ),
+  )
+  stochastic_rounding_seed: int = Field(0, description="PRNG seed for bf16_update_rounding='stochastic'.")
 
 
 class Muon(BaseModel):
@@ -5083,6 +5094,12 @@ class MaxTextConfig(
     if self.distill_beta > 0.0:
       if not self.scan_layers:
         raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
+
+    if self.bf16_update_rounding != "nearest" and self.opt_type != OptimizerType.ADAM_PAX_LOW_MEMORY:
+      raise ValueError(
+          f"bf16_update_rounding={self.bf16_update_rounding!r} requires opt_type='adam_pax_low_memory', "
+          f"got opt_type={self.opt_type!r}."
+      )
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
