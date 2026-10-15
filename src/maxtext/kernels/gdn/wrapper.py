@@ -371,6 +371,7 @@ def outer_kernel(
         "tri_inv_algo",
         "head_group_size",
         "emit_t_inv",
+        "conv_dense_token_stack",
     ),
 )
 def fused_conv1d_gdn(
@@ -405,12 +406,20 @@ def fused_conv1d_gdn(
     tri_inv_algo: str = compute_gdn.DEFAULT_TRI_INV_ALGO,
     head_group_size: int | None = None,
     emit_t_inv: bool = True,
+    conv_dense_token_stack: bool = False,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array], jax.Array | None, jax.Array]:
   """Perform conv1d and gdn in a single fused kernel, returning (out, states, t_inv, chunk_states).
 
   When `head_group_size` is None, `compute_gdn.default_head_group_size` selects an
   appropriate KQ-head group size for `chunk_size > 64`. With `emit_t_inv=False`,
   the returned `t_inv` is None.
+
+  `conv_dense_token_stack` (config gdn_conv1d_dense_token_stack) makes the per-sequence kernel build its Conv1D
+  output from dense per-token views instead of jnp.stack (compute_conv1d.stack_conv1d_tokens): the same values, in
+  a layout the TPU compiler keeps dense. It requires `dim` to be a multiple of
+  compute_conv1d.DENSE_TOKEN_STACK_ALIGNMENT. The batched (decode) kernel, which convolves one token per sequence,
+  does not take the option and keeps jnp.stack for its one-token rows; MaxText's GDN layer never runs that kernel,
+  since gdn_bwd/api.py calls this function prefill-only.
   """
   act_in_dtype = qkv.dtype
   act_out_dtype = qkv.dtype
@@ -435,6 +444,12 @@ def fused_conv1d_gdn(
   assert query_start_loc.shape == (num_seqs + 1,)
   assert state_indices.shape == (num_seqs,)
   assert distribution.shape == (3,)
+  if conv_dense_token_stack and dim % compute_conv1d.DENSE_TOKEN_STACK_ALIGNMENT:
+    raise ValueError(
+        f"conv_dense_token_stack (gdn_conv1d_dense_token_stack) requires the Conv1D width ({dim}) to be a multiple of"
+        f" {compute_conv1d.DENSE_TOKEN_STACK_ALIGNMENT}; with head-sharded GDN context parallelism this is the width"
+        " of one rank's heads."
+    )
 
   num_lanes = pltpu.get_tpu_info().num_lanes
   packing = 4 // act_in_dtype.itemsize
@@ -530,7 +545,7 @@ def fused_conv1d_gdn(
   ) -> tuple[jax.Array, ...]:
     if mode == config.GDNMode.BATCHED:
       tile_size = decode_tile_size
-      tri_inv_kwargs = {}
+      per_seq_kwargs = {}
     else:
       tile_size = mixed_tile_size
       resolved_head_group_size = (
@@ -538,10 +553,11 @@ def fused_conv1d_gdn(
           if head_group_size is None
           else head_group_size
       )
-      tri_inv_kwargs = {
+      per_seq_kwargs = {
           "tri_inv_algo": compute_gdn.validate_tri_inv_algo(tri_inv_algo),
           "head_group_size": resolved_head_group_size,
           "emit_t_inv": emit_t_inv,
+          "conv_dense_token_stack": conv_dense_token_stack,
       }
 
     cfg = config.GDNConfig(
@@ -563,7 +579,7 @@ def fused_conv1d_gdn(
             recurrent_state=in_recurrent_state.dtype,
             conv_state=in_conv_state.dtype,
         ),
-        **tri_inv_kwargs,
+        **per_seq_kwargs,
     )
 
     if mode == config.GDNMode.BATCHED:

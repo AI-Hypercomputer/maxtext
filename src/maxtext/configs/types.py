@@ -2253,6 +2253,24 @@ class Qwen3Next(BaseModel):
           " runs that Conv1D)."
       ),
   )
+  gdn_conv1d_dense_token_stack: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: in the Pallas GDN forward kernel, build each chunk's Conv1D output from per-token"
+          " [conv_dim / 1024, 8, 128] float32 views concatenated along the leading axis, instead of jnp.stack(axis=1)"
+          " of the per-token [1, 1, conv_dim] rows (kernels/gdn/compute_conv1d.py stack_conv1d_tokens). The value is"
+          " the same, element for element; only the layout the TPU compiler gives it changes. The stacked value's"
+          " second-minor dimension is 1, and the compiler of the October 2026 Pathways build lays it out in (8, 128)"
+          " tiles padded from 1 to 8 sublanes, so the SiLU that follows runs its exp and reciprocal on 8x as many"
+          " vector registers as the data fills; the dense views keep the value in dense tiles, as older compilers"
+          " already do for the stack. Applies to every forward kernel call of gdn_decoupled_conv1d and its forward"
+          " rule (both sequence-sharded context-parallel passes, and the forward rule's replay under remat); the"
+          " backward kernel is unchanged. Requires use_gdn_kernel=True (the only path that runs that kernel) and a"
+          " Conv1D width, 2 * gdn_num_key_heads * gdn_key_head_dim + gdn_num_value_heads * gdn_value_head_dim (one"
+          " rank's heads under head-sharded GDN context parallelism), that is a multiple of 1024: one float32 vector"
+          " register of 8 x 128."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -5294,7 +5312,13 @@ class MaxTextConfig(
     """
     if is_rl_config:
       MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
+    dense_token_stack = getattr(cfg, "gdn_conv1d_dense_token_stack", False)
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+      if dense_token_stack:
+        raise ValueError(
+            "gdn_conv1d_dense_token_stack=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
       return
     cp_size = math.prod(
         max(1, getattr(cfg, f"{mesh}_{axis}_parallelism"))
@@ -5314,6 +5338,11 @@ class MaxTextConfig(
         raise ValueError(
             "gdn_conv1d_input_in_qkv_dtype=True requires use_gdn_kernel=True: only the GDN kernel path runs the"
             " Conv1D + SiLU (kernels/gdn/gdn_bwd/compute_conv1d_bwd.py) whose input it keeps in qkv's dtype."
+        )
+      if dense_token_stack:
+        raise ValueError(
+            "gdn_conv1d_dense_token_stack=True requires use_gdn_kernel=True: only the Pallas GDN forward kernel"
+            " runs the in-VMEM Conv1D (kernels/gdn/compute_conv1d.py) whose output it assembles."
         )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
@@ -5341,6 +5370,40 @@ class MaxTextConfig(
             f"degree ({cp_size}) times gdn_chunk_size ({cfg.gdn_chunk_size}), so that every per-rank sequence "
             "is a whole number of kernel chunks."
         )
+    if dense_token_stack:
+      MaxTextConfig.validate_gdn_dense_token_stack_width(cfg, cp_size)
+
+  @staticmethod
+  def validate_gdn_dense_token_stack_width(cfg: Any, cp_size: int) -> None:
+    """Fails if gdn_conv1d_dense_token_stack cannot regroup the Conv1D rows the GDN forward kernel convolves.
+
+    The option regroups each token's float32 Conv1D row in whole vector registers of 8 x 128
+    (kernels/gdn/compute_conv1d.py DENSE_TOKEN_STACK_ALIGNMENT), so the width each forward-kernel call convolves must
+    be a multiple of 1024: the whole Conv1D, or one rank's heads under head-sharded GDN context parallelism.
+
+    `cp_size` counts a context parallelism left at -1 (filled in when the mesh is built) as 1, as validate_gdn_config's
+    sequence-length check does. If the filled-in degree head-shards the heads to a width that is not a multiple of
+    1024, wrapper.fused_conv1d_gdn's own width check raises when the layer is traced.
+    """
+    num_k_heads, num_v_heads = cfg.gdn_num_key_heads, cfg.gdn_num_value_heads
+    # Head-sharded as model_runner._resolve_gdn_cp_mode decides it for training: gdn_cp_mode 'head', or 'auto' at a
+    # degree of 2 that divides the key heads. (Head counts the degree does not divide fail there on their own.)
+    cp_mode = getattr(cfg, "gdn_cp_mode", "auto")
+    head_sharded = cp_size > 1 and (
+        cp_mode == "head" or (cp_mode == "auto" and cp_size <= min(2, num_k_heads) and num_k_heads % cp_size == 0)
+    )
+    ranks = cp_size if head_sharded and num_k_heads % cp_size == 0 and num_v_heads % cp_size == 0 else 1
+    width = 2 * (num_k_heads // ranks) * cfg.gdn_key_head_dim + (num_v_heads // ranks) * cfg.gdn_value_head_dim
+    if width % 1024:
+      if ranks > 1:
+        where = f"one rank's heads under head-sharded GDN context parallelism of degree {cp_size}"
+      else:
+        where = "the whole Conv1D"
+      raise ValueError(
+          f"gdn_conv1d_dense_token_stack=True requires the width each GDN forward kernel convolves ({where}: 2 * key"
+          f" heads * gdn_key_head_dim + value heads * gdn_value_head_dim = {width}) to be a multiple of 1024: it"
+          " regroups each token's float32 row in whole vector registers of 8 x 128."
+      )
 
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
