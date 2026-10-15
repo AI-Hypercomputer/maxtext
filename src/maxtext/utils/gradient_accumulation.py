@@ -133,7 +133,11 @@ def gradient_accumulation_loss_and_grad(
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
+    # Pin the micro-batch gradient and the running sum to the parameter shardings inside the scan, so XLA can't
+    # pick an unsharded layout for them before the add; the post-scan constraint below comes too late to steer it.
+    cur_batch_gradient = jax.tree.map(_maybe_shard_with_name, cur_batch_gradient, grad_shardings)
     acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
+    acc_grad_and_loss["grad"] = jax.tree.map(_maybe_shard_with_name, acc_grad_and_loss["grad"], grad_shardings)
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
     return acc_grad_and_loss, aux
 
