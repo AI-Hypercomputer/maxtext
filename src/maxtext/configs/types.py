@@ -749,6 +749,19 @@ class LogitsAndLoss(BaseModel):
           "shard_mode=auto. None means on for an untied model under shard_mode=explicit and off everywhere else."
       ),
   )
+  lm_head_fsdp_as_vocab_tp: bool = Field(
+      False,
+      description=(
+          "Shard the untied LM head on its vocab dimension using the FSDP axes (vocab TP over FSDP) instead of "
+          "sharding its embed dimension on FSDP, so that the per-step FSDP all-gather of the head kernel and the "
+          "reduce-scatter of its gradient move onto the hidden state -- reducing collective traffic when "
+          "fsdp*per_device_batch*length < vocab_size (small-batch regimes) -- and the weight gradient needs no "
+          "collective at all. The logits come out sharded on vocab across FSDP, so the loss builds its one-hot "
+          "targets against a vocab-sharded iota rather than gathering them. Requires an untied head without MTP, "
+          "vocab tiling, fp8 head weights, or training_objective=block_diffusion, and a vocab size divisible by "
+          "the combined tensor and FSDP axes. Defaults to False (opt-in)."
+      ),
+  )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
@@ -1796,6 +1809,13 @@ DEFAULT_LOGICAL_AXIS_RULES: list[list] = [
     # Vocab Weights
     ["vocab", ["tensor", "tensor_sequence", "autoregressive"]],
     ["embed_vocab", ["fsdp", "fsdp_transpose", "context", "context_usp_ulysses", "expert"]],
+    # The four rules below are only used when lm_head_fsdp_as_vocab_tp is on; they rotate the
+    # untied LM head off its embed dimension and onto its vocab dimension, so the FSDP axes
+    # gather the hidden state (batch x length x embed) instead of the kernel (embed x vocab).
+    ["activation_embed_and_logits_batch_no_fsdp", ["data", "stage", "expert"]],
+    ["activation_vocab_fsdp", ["tensor", "tensor_sequence", "fsdp", "fsdp_transpose"]],
+    ["vocab_fsdp", ["tensor", "tensor_sequence", "autoregressive", "fsdp", "fsdp_transpose"]],
+    ["embed_vocab_replicated", []],
     # ==========================================
     # Attention
     # ==========================================
