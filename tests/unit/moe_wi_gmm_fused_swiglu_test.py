@@ -14,8 +14,8 @@
 """moe_wi_gmm_fused_swiglu on CPU: megablox ops.gmm_silu's own code, its wiring in the MoE layer, and the validator.
 
 With the key, the up projection calls megablox `gmm_silu` (the tokamax gmm_v2 kernel with the SwiGLU in its epilogue)
-instead of `gmm` followed by the activation. The kernels are Pallas TPU kernels and do not run on CPU; their numerics
-are tested on TPU in megablox_gmm_silu_test.py. Two CPU checks cover everything around them:
+instead of `gmm` followed by the activation. The kernels are Pallas TPU kernels and do not run on CPU; their own test,
+megablox_gmm_silu_test.py, is TPU-only (not yet run on TPU). Two CPU checks cover everything around them:
 
 ops.gmm_silu (in-process, `GmmSiluVjpTest`). Only the Pallas entry `gmm_v2.gmm_v2` and gmm's TPU backward
 `ops._gmm_bwd` are replaced: the first by a jnp grouped matmul that honours fuse_act and return_pre_act and records the
@@ -34,7 +34,8 @@ changes in moe.py (the rows and the routing operands handed to the fused GMM, th
 removal, the whole [w0 | w1] weight, and the skipped activation), not the kernel. The fused kernel's real numerics
 differ by rounding (silu reads the f32 accumulator). Cases: the plain and the pipelined chunk loop, a dropless buffer
 (where each shard's group offset is not 0), padding excluded from routing, the whole prefused wi
-(moe_unsplit_prefused_wi), with the other MoE keys of this series, and with those and the benchmark's MoE settings
+(moe_unsplit_prefused_wi), with it and the other MoE keys (moe_routing_index_math="count",
+moe_roe_packed_routing_gather), and with those and the benchmark's MoE settings
 (expert-weight prefetch, row-major reduce-scatter, routing maps on device, ragged_buffer_factor 2.75, fp8 fake-quant,
 moe_gmm_v2_dlhs_transpose_rhs). Two-sided: the fused path must trace exactly one gmm_silu call per chunk and the plain
 one none; gmm_silu must get the routing operands, the wi tiling the plain path gives gmm, and the DLHS options of the
@@ -186,8 +187,9 @@ class GmmSiluVjpTest(parameterized.TestCase):
       group_offset=(0, 1),
       # (use_dlhs_transpose_rhs, fuse_dlhs_scale, fuse_3d_dlhs_ps): each alone, so a swapped binding shows.
       dlhs_options=((False, False, False), (True, False, False), (False, True, False), (False, False, True)),
+      heuristic=(False, True),
   )
-  def test_custom_vjp(self, group_offset, dlhs_options):
+  def test_custom_vjp(self, group_offset, dlhs_options, heuristic):
     dlhs_transpose, fuse_scale, fuse_3d = dlhs_options
     seen = {"tile_n": [], "return_pre_act": [], "bwd": []}
 
@@ -204,7 +206,7 @@ class GmmSiluVjpTest(parameterized.TestCase):
     ):
       del kwargs
       self.assertEqual(fuse_act, "silu")
-      seen["tile_n"].append(tile_info.tile_n)
+      seen["tile_n"].append(tile_info if callable(tile_info) else tile_info.tile_n)
       seen["return_pre_act"].append(return_pre_act)
       acc = _grouped_f32(lhs, rhs, group_sizes, 0 if group_offset is None else group_offset)
       n = acc.shape[-1] // 2
@@ -232,6 +234,7 @@ class GmmSiluVjpTest(parameterized.TestCase):
           preferred_element_type=jnp.bfloat16,
           tiling=_OP_TILING,
           group_offset=offset,
+          use_gmm_v2_heuristic_tiling=heuristic,
           use_dlhs_transpose_rhs=dlhs_transpose,
           fuse_dlhs_scale=fuse_scale,
           fuse_3d_dlhs_ps=fuse_3d,
@@ -245,8 +248,9 @@ class GmmSiluVjpTest(parameterized.TestCase):
       _, vjp = jax.vjp(gmm_silu, lhs, rhs)
       dlhs, _ = vjp(cotangent)
 
-    # The forward tile: tiling[2] halved, every call; act alone undifferentiated, act + gate + up differentiated.
-    self.assertEqual(seen["tile_n"], [_OP_TILING[2] // 2] * 2)
+    # The forward tile: tiling[2] halved (or gmm_v2's heuristic), every call; act alone undifferentiated, act + gate +
+    # up differentiated.
+    self.assertEqual(seen["tile_n"], [gmm_v2.calculate_tiling if heuristic else _OP_TILING[2] // 2] * 2)
     self.assertEqual(seen["return_pre_act"], [False, True])
     # The backward: gmm's backward gets [d gate | d up] of silu(gate) * up on the bf16 halves, bit for bit.
     acc = _grouped_f32(lhs, rhs, group_sizes, offset)
@@ -272,7 +276,7 @@ class GmmSiluVjpTest(parameterized.TestCase):
         "quantization_rule": None,
         "use_tokamax_backend": True,
         "use_gmm_v2": True,
-        "use_gmm_v2_heuristic_tiling": False,
+        "use_gmm_v2_heuristic_tiling": heuristic,
         "return_rhs": False,
         "return_lhs": False,
         "fuse_dlhs_scale": fuse_scale,
@@ -494,7 +498,8 @@ def _ragged_dropless_matches_unsorted(label, ragged_gmm=None):
   return passed
 
 
-# The MoE settings of the Qwen3.5-397B RL trainer benchmark that the cases above do not all set.
+# The subset of the Qwen3.5-397B RL trainer benchmark's MoE settings that this file needs (the cases above do not
+# all set them).
 _BENCH_FLAGS = {
     "moe_chunk_pipeline": True,
     "moe_expert_weight_prefetch": "forward",

@@ -1113,7 +1113,8 @@ def _reject_unless(setting: str, requirements: list[tuple[bool, str]]) -> None:
     raise ValueError(f"{setting} requires: {'; '.join(unmet)}.")
 
 
-# The MLP checkpoint names that the remat_policy presets save or offload (Decoder.get_remat_policy, nnx_decoders.py).
+# The MLP checkpoint names that the remat_policy presets save or offload (Decoder.minimal_policy and get_remat_policy
+# in nnx_decoders.py, which point back here: keep the two in sync).
 # remat_policy=custom names them per tensor instead (mlpwi_0, mlpwo, moe_mlpwi_0, ... = device / offload).
 _REMAT_PRESET_MLP_NAMES = {
     "minimal": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
@@ -1833,6 +1834,53 @@ class MoEGeneral(BaseModel):
   # mlp_bias, remat_policy, the parallelism degrees, ...) directly: they run on the combined configs (MaxTextConfig
   # and RLConfig), which have all of them, so a renamed field fails loudly instead of passing the check.
 
+  def _prefused_sparse_matmul_requirements(self) -> list[tuple[bool, str]]:
+    """What the MoE layer needs to run the prefused [w0 | w1] sparse-matmul up projection in training."""
+    return [
+        (self.prefuse_moe_weights, "prefuse_moe_weights=True"),
+        (self.sparse_matmul, "sparse_matmul=True"),
+        (not self.te_moe_block, "te_moe_block=False"),
+        (
+            self.attention not in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"),
+            "an attention other than vllm_rpa* (the fused-MoE inference path)",
+        ),
+    ]
+
+  def _no_weight_quantization_requirement(self) -> tuple[bool, str]:
+    return (not self.quantization and not self.use_qwix_quantization, "no weight quantization")
+
+  def _remat_keeps_moe_tensor_requirement(self, tensor: str, names: tuple[str, ...]) -> tuple[bool, str]:
+    """Requirement: the remat policy saves none of `names`, the checkpoint names of the routed experts' `tensor`.
+
+    The keys that ask for this never form that tensor (it is fused into the op that reads it), so a policy that
+    saves or offloads it would silently stop saving the MoE tensor; the shared expert's dense MLP, which carries the
+    generic names (mlpwi_0, mlpwo) too, would still be saved.
+    """
+    if self.remat_policy == "custom":
+      saved = [name for name in names if getattr(self, name) != RematLocation.REMAT]
+    else:
+      saved = [name for name in names if name in _REMAT_PRESET_MLP_NAMES.get(self.remat_policy, ())]
+    return (
+        not saved,
+        f"a remat policy that does not save the routed experts' {tensor}, which this key never forms"
+        f" (remat_policy={self.remat_policy} saves it as {', '.join(saved)})",
+    )
+
+  def _expert_mlp_dim_shards(self) -> int:
+    """Devices that split the expert weights' MLP dimension inside the expert shard_map.
+
+    By the default logical axis rules: 'mlp_no_fsdp' -> tensor, tensor_sequence, autoregressive.
+    """
+    degrees = (
+        self.ici_tensor_parallelism,
+        self.dcn_tensor_parallelism,
+        self.ici_tensor_sequence_parallelism,
+        self.dcn_tensor_sequence_parallelism,
+        self.ici_autoregressive_parallelism,
+        self.dcn_autoregressive_parallelism,
+    )
+    return math.prod(degrees)
+
   def _ring_of_experts_ragged_sort_requirements(self) -> list[tuple[bool, str]]:
     """What the MoE layer needs to run the ring-of-experts ragged sort."""
     return [
@@ -1891,51 +1939,6 @@ class MoEGeneral(BaseModel):
           f"moe_routing_index_math={self.moe_routing_index_math!r}", self._ring_of_experts_ragged_sort_requirements()
       )
     return self
-
-  def _prefused_sparse_matmul_requirements(self) -> list[tuple[bool, str]]:
-    """What the MoE layer needs to run the prefused [w0 | w1] sparse-matmul up projection in training."""
-    return [
-        (self.prefuse_moe_weights, "prefuse_moe_weights=True"),
-        (self.sparse_matmul, "sparse_matmul=True"),
-        (not self.te_moe_block, "te_moe_block=False"),
-        (
-            self.attention not in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"),
-            "an attention other than vllm_rpa* (the fused-MoE inference path)",
-        ),
-    ]
-
-  def _no_weight_quantization_requirement(self) -> tuple[bool, str]:
-    return (not self.quantization and not self.use_qwix_quantization, "no weight quantization")
-
-  def _remat_keeps_moe_tensor_requirement(self, tensor: str, names: tuple[str, ...]) -> tuple[bool, str]:
-    """Requirement: the remat policy saves none of `names`, the checkpoint names of the routed experts' `tensor`.
-
-    The keys that ask for this never form that tensor (it is fused into the op that reads it), so a policy that
-    saves or offloads it would silently stop saving the MoE tensor; the shared expert's dense MLP, which carries the
-    generic names (mlpwi_0, mlpwo) too, would still be saved.
-    """
-    if self.remat_policy == "custom":
-      saved = [name for name in names if getattr(self, name) != RematLocation.REMAT]
-    else:
-      saved = [name for name in names if name in _REMAT_PRESET_MLP_NAMES.get(self.remat_policy, ())]
-    return (
-        not saved,
-        f"a remat policy that does not save the routed experts' {tensor}, which this key never forms"
-        f" (remat_policy={self.remat_policy} saves it as {', '.join(saved)})",
-    )
-
-  def _expert_mlp_dim_shards(self) -> int:
-    """Devices that split the expert weights' MLP dimension inside the expert shard_map, by the default logical axis
-    rules ('mlp_no_fsdp' -> tensor, tensor_sequence, autoregressive)."""
-    degrees = (
-        self.ici_tensor_parallelism,
-        self.dcn_tensor_parallelism,
-        self.ici_tensor_sequence_parallelism,
-        self.dcn_tensor_sequence_parallelism,
-        self.ici_autoregressive_parallelism,
-        self.dcn_autoregressive_parallelism,
-    )
-    return math.prod(degrees)
 
   @model_validator(mode="after")
   def validate_moe_ragged_sort_unique_pair_argsort(self) -> "MoEGeneral":
@@ -2241,14 +2244,13 @@ class Qwen3Next(BaseModel):
           "GDN kernel path: build the Conv1D + SiLU input, the halo-extended [conv_state | qkv] (or qkv left-padded"
           " by gdn_conv_kernel_dim - 1 zeros), in qkv's dtype and cast each of the gdn_conv_kernel_dim taps to"
           " float32 where it is read, instead of materializing a float32 copy of the whole input that every tap"
-          " then slices (kernels/gdn/gdn_bwd/compute_conv1d_bwd.py). The copy is f32[1, 16387, 12288] = 805.5 MB"
-          " per GDN layer in the backward pass of the Qwen3.5-397B RL trainer (bf16 activations, sequence-sharded"
-          " context parallelism). bfloat16 -> float32 is lossless and every product and sum is formed in the same"
-          " order, so the forward outputs and the qkv / conv-state / bias gradients are bit-identical; the conv weight"
-          " gradient, a float32 reduction over batch x sequence, may be summed in a different order once XLA fuses"
-          " the cast into it (CPU: a few ulp). Only which tensors live in HBM changes; no optimization barrier is"
-          " involved. Applies to the Conv1D forward and backward that gdn_decoupled_conv1d and its custom-VJP rules"
-          " trace. Requires use_gdn_kernel=True (the only path that runs that Conv1D)."
+          " then slices (kernels/gdn/gdn_bwd/compute_conv1d_bwd.py). bfloat16 -> float32 is lossless and every"
+          " product and sum is formed in the same order, so the forward outputs and the qkv / conv-state / bias"
+          " gradients are bit-identical on CPU; the conv weight gradient, a float32 reduction over batch x sequence,"
+          " may be summed in a different order once XLA fuses the cast into it (CPU: a few ulp). Only which tensors"
+          " live in HBM changes; no optimization barrier is involved. Applies to the Conv1D forward and backward that"
+          " gdn_decoupled_conv1d and its custom-VJP rules trace. Requires use_gdn_kernel=True (the only path that"
+          " runs that Conv1D)."
       ),
   )
 
@@ -5308,7 +5310,7 @@ class MaxTextConfig(
         raise ValueError("GatedDeltaNet context parallelism requires context_parallel_load_balance=False.")
 
     if not cfg.use_gdn_kernel:
-      if getattr(cfg, "gdn_conv1d_input_in_qkv_dtype", False):
+      if cfg.gdn_conv1d_input_in_qkv_dtype:
         raise ValueError(
             "gdn_conv1d_input_in_qkv_dtype=True requires use_gdn_kernel=True: only the GDN kernel path runs the"
             " Conv1D + SiLU (kernels/gdn/gdn_bwd/compute_conv1d_bwd.py) whose input it keeps in qkv's dtype."

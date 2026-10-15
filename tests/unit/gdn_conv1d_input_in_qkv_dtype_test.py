@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#     http://www.apache.org/licenses/LICENSE-2.0
+#       https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -47,6 +47,7 @@ def _bits(x):
 
 
 def _conv_inputs(seed, *, batch=2, seq_len=24, dim=16, with_state, with_bias, with_segments, dtype=jnp.bfloat16):
+  """Seeded Conv1D + SiLU inputs: (qkv, conv_weight, conv_bias, conv_state, dy, segment_ids, conv_halo_seg)."""
   keys = jax.random.split(jax.random.PRNGKey(seed), 6)
   qkv = jax.random.normal(keys[0], (batch, seq_len, dim), jnp.float32).astype(dtype)
   conv_weight = jax.random.normal(keys[1], (_KERNEL_SIZE, 1, dim), jnp.float32)
@@ -83,7 +84,7 @@ def _pad_or_concat_out_dtypes(jaxpr, shape):
 
 
 _CASES = [
-    dict(testcase_name=f"state{s}_bias{b}_seg{g}", with_state=s, with_bias=b, with_segments=g)
+    {"testcase_name": f"state{s}_bias{b}_seg{g}", "with_state": s, "with_bias": b, "with_segments": g}
     for s in (False, True)
     for b in (False, True)
     for g in (False, True)
@@ -100,7 +101,13 @@ class GdnConv1dInputInQkvDtypeTest(parameterized.TestCase):
 
     def fwd(narrow):
       return compute_conv1d_bwd.conv1d_silu_fwd(
-          qkv, w, bias, _KERNEL_SIZE, conv_state=state, segment_ids=seg, conv_halo_seg=halo,
+          qkv,
+          w,
+          bias,
+          _KERNEL_SIZE,
+          conv_state=state,
+          segment_ids=seg,
+          conv_halo_seg=halo,
           conv_input_in_qkv_dtype=narrow,
       )
 
@@ -124,8 +131,16 @@ class GdnConv1dInputInQkvDtypeTest(parameterized.TestCase):
 
         def bwd(narrow, cached_conv_out=cached_conv_out, return_d_conv_state=return_d_conv_state):
           return compute_conv1d_bwd.conv1d_silu_bwd(
-              qkv, w, bias, dy, _KERNEL_SIZE, conv_out=cached_conv_out, conv_state=state,
-              return_d_conv_state=return_d_conv_state, segment_ids=seg, conv_halo_seg=halo,
+              qkv,
+              w,
+              bias,
+              dy,
+              _KERNEL_SIZE,
+              conv_out=cached_conv_out,
+              conv_state=state,
+              return_d_conv_state=return_d_conv_state,
+              segment_ids=seg,
+              conv_halo_seg=halo,
               conv_input_in_qkv_dtype=narrow,
           )
 
@@ -153,8 +168,8 @@ class GdnConv1dInputInQkvDtypeTest(parameterized.TestCase):
             self.assertEqual(_bits(r), _bits(g))
 
   @parameterized.named_parameters(
-      dict(testcase_name="no_state", with_state=False),
-      dict(testcase_name="state", with_state=True),
+      {"testcase_name": "no_state", "with_state": False},
+      {"testcase_name": "state", "with_state": True},
   )
   def test_conv_input_is_narrow_only_when_enabled(self, with_state):
     """Positive control: the default path builds the [B, S + K - 1, D] input in float32, the option in bf16."""
@@ -265,15 +280,15 @@ class GdnConv1dInputInQkvDtypeTest(parameterized.TestCase):
 
   def test_requires_gdn_kernel(self):
     def cfg(**overrides):
-      fields = dict(
-          decoder_block=config_types.DecoderBlockType.QWEN3_5,
-          ici_context_parallelism=1,
-          dcn_context_parallelism=1,
-          ici_context_usp_ulysses_parallelism=1,
-          dcn_context_usp_ulysses_parallelism=1,
-          use_gdn_kernel=False,
-          gdn_conv1d_input_in_qkv_dtype=False,
-      )
+      fields = {
+          "decoder_block": config_types.DecoderBlockType.QWEN3_5,
+          "ici_context_parallelism": 1,
+          "dcn_context_parallelism": 1,
+          "ici_context_usp_ulysses_parallelism": 1,
+          "dcn_context_usp_ulysses_parallelism": 1,
+          "use_gdn_kernel": False,
+          "gdn_conv1d_input_in_qkv_dtype": False,
+      }
       fields.update(overrides)
       return types.SimpleNamespace(**fields)
 

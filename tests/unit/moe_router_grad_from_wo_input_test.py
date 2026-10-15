@@ -40,11 +40,14 @@ Pre-registered, all in a subprocess with 8 CPU devices:
     runs: dh 0.996-1.005, dwo 0.992-1.003, dw 0.941-1.065 (dw, one value per slot, is the noisiest), so 1.10 sits
     above the spread. A backward that rounds the routing weight to bf16 measures 1.31-1.34 on dh and dwo on every
     seed, and one that shrinks the routing-weight gradient by 0.5% measures 3.0-3.3 on dw; both must fail.
+    Both paths share the unsort helpers, so a defect there moves both errors together and leaves the ratio at 1;
+    each path's error, and the forward output's, must therefore also stay within _PRECISION_MAX_ERR = 1e-2 of the
+    float32 reference (measured at most 2.4e-3).
   - The shrunk Qwen3.5 routed MoE of moe_roe_local_routing_test.py (16 experts, top 4, cp-as-ep, ragged sort, local
     routing, two token chunks): output and loss bit-identical to the key off, every gradient within relative L2 1e-2
     (measured <= 4.2e-3): plain and pipelined chunk loop, dropless, padding excluded with "count", saved routing
-    maps, the prefused-weight keys, and the benchmark's MoE settings with every compatible key of this series on
-    against all off (moe_routing_index_math="count", moe_unsplit_prefused_wi, moe_prefused_swiglu_vjp,
+    maps, the prefused-weight keys, and the benchmark's MoE settings with every compatible MoE key on against all
+    off (moe_routing_index_math="count", moe_unsplit_prefused_wi, moe_prefused_swiglu_vjp,
     moe_roe_packed_routing_gather; expert-weight prefetch, row-major reduce-scatter, routing maps on device,
     ragged_buffer_factor 2.75, fp8 fake-quant, padding excluded). A 0.5% error in the routing-weight gradient sits
     inside the layer's 1e-2 tolerance; the precision check above is what catches it. Structure: the compiled
@@ -52,7 +55,8 @@ Pre-registered, all in a subprocess with 8 CPU devices:
     longer recomputed in the backward), the pipelined forward keeps the same number of optimization barriers (tie 2
     moves into the op), and every chunk but the last reads the next chunk's routed tokens from the op's tie output.
   - On an expert 4 x tensor 2 mesh the layer runs without the key and raises at trace time when the key reaches it
-    past the validator.
+    past the validator. With moe_accumulate_chunk_wgrad past the validator, the plain and the pipelined chunk loop
+    both raise (the fused op does not return the weights).
   - Deliberately wrong versions must FAIL: the fused backward with the routing weight dropped from the input and
     weight gradients (at the op and in the layer).
   - The validator rejects the key for each requirement it does not meet, naming it.
@@ -92,6 +96,8 @@ _XLA_FLAGS = f"--xla_force_host_platform_device_count={_NUM_DEVICES} --xla_allow
 _GRAD_REL_L2 = 1e-2
 # The fused backward's error against a float32 run, over the two-ops backward's error (see the module docstring).
 _PRECISION_RATIO = 1.10
+# The largest relative L2 error either path's output or gradients may have against the float32 run.
+_PRECISION_MAX_ERR = 1e-2
 _PRECISION_SEEDS = range(6)
 
 
@@ -371,7 +377,8 @@ def _op_backward_run(seed, buffer_size, index_math, path):
   """The op (path "fused"), the two ops apart ("two_ops", both bf16) or the dense float32 function ("reference"),
   differentiated at (h, w, wo) with the cotangent g on a 4-device EP mesh. h is an input, so the only roundings are
   the backward's own (and, in the two-ops path, the forward GEMM output's). Returns (dh, dw, dwo), summed or gathered
-  over the shards. The routing weights are in [0.25, 0.3), the bottom of a binade, where bf16 rounds them worst."""
+  over the shards, after each shard's forward output. The routing weights are in [0.25, 0.3), the bottom of a binade,
+  where bf16 rounds them worst."""
   x, ids, _, _, wo, cot, h = _op_inputs(seed, _PRECISION_TOKENS)
   w = jax.random.uniform(jax.random.PRNGKey(1000 + seed), (_PRECISION_TOKENS * _OP_TOPK,), jnp.float32, 0.25, 0.3)
   ep, local = _OP_EP, _OP_EXPERTS // _OP_EP
@@ -416,11 +423,11 @@ def _op_backward_run(seed, buffer_size, index_math, path):
 
     out, vjp = jax.vjp(f, h[:rows], w, wo)
     dh, dw, dwo = vjp(cot.astype(out.dtype))
-    return dh[None], dw[None], dwo[None]
+    return out[None], dh[None], dw[None], dwo[None]
 
-  sm = jax.shard_map(body, mesh=mesh, in_specs=(P("ep"), P(), P("ep"), P()), out_specs=(P("ep"),) * 3, check_vma=False)
-  dh, dw, dwo = [np.asarray(jnp.asarray(a).astype(jnp.float32)) for a in jax.jit(sm)(h_s, w, wo_s, cot)]
-  return dh, dw.sum(0), dwo.reshape(_OP_EXPERTS, _OP_F, _OP_D)
+  sm = jax.shard_map(body, mesh=mesh, in_specs=(P("ep"), P(), P("ep"), P()), out_specs=(P("ep"),) * 4, check_vma=False)
+  out, dh, dw, dwo = [np.asarray(jnp.asarray(a).astype(jnp.float32)) for a in jax.jit(sm)(h_s, w, wo_s, cot)]
+  return out, dh, dw.sum(0), dwo.reshape(_OP_EXPERTS, _OP_F, _OP_D)
 
 
 def _op_precision_case(label, buffer_size, index_math, control=None):
@@ -432,17 +439,18 @@ def _op_precision_case(label, buffer_size, index_math, control=None):
     with control if control is not None else contextlib.nullcontext():
       fused = _op_backward_run(seed, buffer_size, index_math, "fused")
     parts = []
-    for name, r, a, b in zip(("dh", "dw", "dwo"), reference, two_ops, fused):
+    for name, r, a, b in zip(("out", "dh", "dw", "dwo"), reference, two_ops, fused):
       err_two_ops, err_fused = _rel(a, r), _rel(b, r)
       ratio = err_fused / err_two_ops
       ok = ratio <= _PRECISION_RATIO and bool(np.isfinite(b).all()) and err_two_ops > 0
+      ok &= max(err_two_ops, err_fused) <= _PRECISION_MAX_ERR
       passed &= ok
       ratios.append(ratio)
       parts.append(f"{name} {err_two_ops:.2e}/{err_fused:.2e}={ratio:.3f}{'' if ok else ' FAIL'}")
     lines.append(f"  seed {seed}: error vs float32, two ops / fused = ratio: {'; '.join(parts)}")
   print(
-      f"{label}: {'PASS' if passed else 'FAIL'} (ratio <= {_PRECISION_RATIO}; over the seeds min"
-      f" {min(ratios):.3f} max {max(ratios):.3f})",
+      f"{label}: {'PASS' if passed else 'FAIL'} (ratio <= {_PRECISION_RATIO}, errors <= {_PRECISION_MAX_ERR};"
+      f" over the seeds min {min(ratios):.3f} max {max(ratios):.3f})",
       flush=True,
   )
   print("\n".join(lines), flush=True)
@@ -721,7 +729,8 @@ def _tensor_parallel_guard():
   return ok
 
 
-# The MoE settings of the Qwen3.5-397B RL trainer benchmark that the cases above do not all set.
+# The subset of the Qwen3.5-397B RL trainer benchmark's MoE settings that this file needs (the cases above do not
+# all set them).
 _BENCH_FLAGS = {
     "moe_chunk_pipeline": True,
     "moe_expert_weight_prefetch": "forward",
@@ -732,7 +741,7 @@ _BENCH_FLAGS = {
     "fp8_moe_fake_quant": True,
     "moe_exclude_padding_from_routing": True,
 }
-# Every key of this series that composes with the others on the megablox path the CPU runs (the fused SiLU GMM is
+# Every MoE performance key that composes with the others on the megablox path the CPU runs (the fused SiLU GMM is
 # tokamax-gmm_v2-only; moe_wi_gmm_fused_swiglu_test.py stacks it with the others using kernel stand-ins).
 _ALL_KEYS = {
     "moe_routing_index_math": "count",
@@ -741,6 +750,27 @@ _ALL_KEYS = {
     "moe_roe_packed_routing_gather": True,
     "moe_router_grad_from_wo_input": True,
 }
+
+
+def _chunk_wgrad_guard():
+  """With moe_accumulate_chunk_wgrad past the validator, both chunk loops refuse the key at trace time."""
+  results = []
+  for loop, overrides in (("plain", {}), ("pipelined", {"moe_chunk_pipeline": True})):
+    cfg = _cfg(**overrides)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    x, forced, token_mask = _inputs(cfg, "real")
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      _, params, _ = nnx.split(_build(cfg, mesh), nnx.Param, ...)
+    override = _ConfigOverride(cfg, moe_router_grad_from_wo_input=True, moe_accumulate_chunk_wgrad=True)
+    try:
+      _run(override, mesh, params, x, forced, token_mask)
+    except NotImplementedError as e:
+      raised = "does not support moe_accumulate_chunk_wgrad" in str(e)
+    else:
+      raised = False
+    results.append(raised)
+    print(f"chunk_wgrad_guard: [{'ok' if raised else 'FAIL'}] {loop} loop raises at trace time: {raised}", flush=True)
+  return all(results)
 
 
 def main():
@@ -775,6 +805,7 @@ def main():
           "layer_bench_flags_all_keys", _BENCH_FLAGS, mode="padmask", keys=_ALL_KEYS, same_barriers=False
       ),
       "tensor_parallel_guard": _tensor_parallel_guard(),
+      "chunk_wgrad_guard": _chunk_wgrad_guard(),
   }
   controls = {
       "control_op_weight_dropped": _op_case(

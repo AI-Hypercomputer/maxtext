@@ -233,6 +233,16 @@ _REJECTED = (
             ("chunk_wgrad", {"moe_accumulate_chunk_wgrad": True}, "moe_accumulate_chunk_wgrad=False"),
             ("emb_chunks", {"num_moe_emb_chunks": 2}, "num_moe_emb_chunks=0"),
             ("tensor_parallel", _TP_MESH, "an unsharded expert MLP dimension"),
+            (
+                "tensor_sequence_parallel",
+                {**_TP_MESH, "ici_tensor_parallelism": 1, "ici_tensor_sequence_parallelism": 2},
+                "an unsharded expert MLP dimension",
+            ),
+            (
+                "autoregressive_parallel",
+                {**_TP_MESH, "ici_tensor_parallelism": 1, "ici_autoregressive_parallelism": 2},
+                "an unsharded expert MLP dimension",
+            ),
         )
     ]
     + [(f"swiglu_vjp_{name}", "moe_prefused_swiglu_vjp", o, m) for name, o, m in _OFF_PREFUSED_PATH]
@@ -243,6 +253,18 @@ _REJECTED = (
             ("emb_chunks", {"num_moe_emb_chunks": 2}, "num_moe_emb_chunks=0"),
             ("minimal_remat", {"remat_policy": "minimal"}, "remat_policy=minimal saves it as mlpwi_0"),
             ("offloaded_remat", {"remat_policy": "minimal_offloaded"}, "remat_policy=minimal_offloaded saves it as"),
+            ("context_remat", {"remat_policy": "minimal_with_context"}, "remat_policy=minimal_with_context saves it as"),
+            ("flash_remat", {"remat_policy": "minimal_flash"}, "remat_policy=minimal_flash saves it as"),
+            (
+                "quantization_remat",
+                {"remat_policy": "minimal_with_quantization"},
+                "remat_policy=minimal_with_quantization saves it as",
+            ),
+            (
+                "context_quantization_remat",
+                {"remat_policy": "minimal_with_context_and_quantization"},
+                "remat_policy=minimal_with_context_and_quantization saves it as",
+            ),
             ("saved_gate", {"remat_policy": "custom", "mlpwi_0": "device"}, "remat_policy=custom saves it as mlpwi_0"),
             ("saved_moe_gate", {"remat_policy": "custom", "moe_mlpwi_0": "device"}, "saves it as moe_mlpwi_0"),
             ("offloaded_moe_up", {"remat_policy": "custom", "moe_mlpwi_1": "offload"}, "saves it as moe_mlpwi_1"),
@@ -520,7 +542,8 @@ def _unsplit_wi_tensor_parallel_guard():
   return ok
 
 
-# The MoE settings of the Qwen3.5-397B RL trainer benchmark that the cases above do not all set.
+# The subset of the Qwen3.5-397B RL trainer benchmark's MoE settings that this file needs (the cases above do not
+# all set them).
 _BENCH_FLAGS = {
     "moe_chunk_pipeline": True,
     "moe_expert_weight_prefetch": "forward",

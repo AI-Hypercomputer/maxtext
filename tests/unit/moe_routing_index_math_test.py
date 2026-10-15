@@ -201,6 +201,13 @@ class RoutingIndexMathConfigTest(parameterized.TestCase):
   def test_accepted_on_the_ring_ragged_sort(self):
     self.assertEqual(_cfg(moe_routing_index_math="count").moe_routing_index_math, "count")
 
+  def test_names_every_unmet_requirement(self):
+    """The error names all unmet requirements, not only the first."""
+    with self.assertRaises(ValueError) as raised:
+      _cfg(moe_routing_index_math="count", te_moe_block=True, use_ragged_sort=False)
+    self.assertIn("te_moe_block=False", str(raised.exception))
+    self.assertIn("use_ragged_sort=True", str(raised.exception))
+
 
 def _cfg(**overrides):
   """The shrunk Qwen3.5 routed-MoE config on the cp-as-ep mesh (moe_roe_local_routing_test.py's, local routing)."""
@@ -324,8 +331,11 @@ def _count_argsorts(jaxpr):
 
 
 def _run(cfg, mesh, params, x, forced, token_mask):
-  """Loss, output, gradients, the overflow flag, the sort / top_k equation counts of the gradient, and the
-  packed_preprocess flag of every ragged_gather_reduce call traced."""
+  """Runs the layer's value_and_grad; returns (loss, output, gradients), the overflow flag and the counts.
+
+  The counts are the gradient's sort / top_k equations and the packed_preprocess flag of every
+  ragged_gather_reduce call traced.
+  """
   preprocess_flags = []
   real_gather_reduce = ragged_sort.ragged_gather_reduce
 
@@ -454,7 +464,8 @@ def _count_needs_forward_permutation():
   return raised
 
 
-# The MoE settings of the Qwen3.5-397B RL trainer benchmark that the cases above do not all set.
+# The subset of the Qwen3.5-397B RL trainer benchmark's MoE settings that this file needs (the cases above do not
+# all set them).
 _BENCH_FLAGS = {
     "moe_chunk_pipeline": True,
     "moe_expert_weight_prefetch": "forward",

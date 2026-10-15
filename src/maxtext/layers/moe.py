@@ -1771,15 +1771,6 @@ class RoutedMoE(nnx.Module):
       raise ValueError(f"moe_unsplit_prefused_wi=True cannot apply: {', '.join(blockers)}.")
     return True
 
-  def _use_prefused_swiglu_vjp(self):
-    """moe_prefused_swiglu_vjp: whether gmm_up hands [gate | up] to the activation as one array.
-
-    The per-half outputs are never formed (the fused activation keeps [gate | up] as its residual), so the config
-    validator admits the key only where no remat policy saves them (mlpwi_0 / moe_mlpwi_0 / moe_mlpwi_1), without
-    MLP biases (added per half) and without embedding chunks (partial sums per half).
-    """
-    return self.config.moe_prefused_swiglu_vjp
-
   def permute(
       self,
       inputs,
@@ -3518,7 +3509,7 @@ class RoutedMoE(nnx.Module):
           # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
           w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        if partial_accum0 is None and partial_accum1 is None and self._use_prefused_swiglu_vjp():
+        if partial_accum0 is None and partial_accum1 is None and self.config.moe_prefused_swiglu_vjp:
           # moe_prefused_swiglu_vjp: the whole [gate | up] output goes to the activation as one array
           # (apply_ffn_activation_maybe_fused, which layer_w1=None selects), whose backward then writes d[gate | up]
           # in one pass. There are no per-half outputs to tag; the config validator rejects a remat policy that
@@ -3880,7 +3871,7 @@ class RoutedMoE(nnx.Module):
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
       gmm_operands = get_gmm_operands_for_local_experts(x, routing, route_metadata)
-      gmm_fn = functools.partial(gmm, **gmm_operands)  # get_gmm_for_local_experts
+      gmm_fn = functools.partial(gmm, **gmm_operands)
       up_res = gmm_up_or_silu(
           x,
           w0,
@@ -4068,8 +4059,10 @@ class RoutedMoE(nnx.Module):
       return output
 
     def _moe_body_outputs(output, routing, weights):
-      """What _moe_body returns: the layer output, the routing's side outputs, and the weights `(w0, w1, wo)`
-      (as returned by the GMMs under moe_accumulate_chunk_wgrad)."""
+      """What _moe_body returns: the layer output, the routing's side outputs and the weights `(w0, w1, wo)`.
+
+      The weights are as the GMMs return them under moe_accumulate_chunk_wgrad.
+      """
       return (
           output,
           routing.lb_loss,
@@ -4098,6 +4091,9 @@ class RoutedMoE(nnx.Module):
         gather_weights=True,
         return_weights=False,
     ):
+      if router_grad_from_wo_input and (return_weights or not gather_weights):
+        # The fused op does not return the weights (the config validator rejects the two keys together).
+        raise NotImplementedError("moe_router_grad_from_wo_input does not support moe_accumulate_chunk_wgrad.")
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
@@ -4145,7 +4141,7 @@ class RoutedMoE(nnx.Module):
           w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
         gmm_operands = get_gmm_operands_for_local_experts(x, routing, route_metadata)
-        gmm_fn = functools.partial(gmm, **gmm_operands)  # get_gmm_for_local_experts
+        gmm_fn = functools.partial(gmm, **gmm_operands)
         up_res = gmm_up_or_silu(
             x,
             w0,
@@ -4166,10 +4162,7 @@ class RoutedMoE(nnx.Module):
 
       if router_grad_from_wo_input:
         # moe_router_grad_from_wo_input: the activation, the down projection and the unsort as one op whose
-        # backward does not read the down projection's output; then the same reduce-scatter as below. The op does
-        # not return the weights, so it cannot serve moe_accumulate_chunk_wgrad (the config validator rejects it).
-        if return_weights or not gather_weights:
-          raise NotImplementedError("moe_router_grad_from_wo_input does not support moe_accumulate_chunk_wgrad.")
+        # backward does not read the down projection's output; then the same reduce-scatter as below.
         output, _ = _ring_down_project_and_unpermute(
             output0, output1, wo, routing, route_metadata, batch_size, sequence_length
         )
@@ -4490,6 +4483,9 @@ class RoutedMoE(nnx.Module):
         for c in range(n_chunks):
           gather_c = not accum_chunk_wgrad or c == 0
           return_c = accum_chunk_wgrad and c < n_chunks - 1
+          if router_grad_from_wo_input and (return_c or not gather_c):
+            # The fused op does not return the weights (the config validator rejects the two keys together).
+            raise NotImplementedError("moe_router_grad_from_wo_input does not support moe_accumulate_chunk_wgrad.")
           if c + 1 < n_chunks:
             # 1. The next chunk's token all-gather waits for this chunk's routed tokens.
             x_next, routed = barrier_tie(x[:, (c + 1) * chunk : (c + 2) * chunk, :], dispatched[c][0])

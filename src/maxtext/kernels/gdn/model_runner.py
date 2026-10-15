@@ -618,7 +618,7 @@ def run_gdn_kernel_layer(
   )
   cp_matmul_precision = jax.lax.Precision[getattr(cfg, "gdn_cp_matmul_precision", "highest").upper()]
   # Conv1D halo input in qkv's dtype instead of a float32 copy (compute_conv1d_bwd.py). Same values.
-  conv_input_in_qkv_dtype = bool(getattr(cfg, "gdn_conv1d_input_in_qkv_dtype", False))
+  conv_input_in_qkv_dtype = cfg.gdn_conv1d_input_in_qkv_dtype
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)

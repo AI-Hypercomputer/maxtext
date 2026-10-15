@@ -1249,6 +1249,8 @@ class NNXDecoder(nnx.Module):
 
     return layer_map[cfg.decoder_block]
 
+  # configs/types.py _REMAT_PRESET_MLP_NAMES lists the MLP checkpoint names that minimal_policy and the presets of
+  # get_remat_policy save (the MoE key validators read it): keep the two in sync.
   def minimal_policy(self, with_context=False, with_quantization=False):
     """Helper for creating minimal checkpoint policies."""
     names = [
