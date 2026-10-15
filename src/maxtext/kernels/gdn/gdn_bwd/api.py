@@ -1033,25 +1033,47 @@ def _gdn_decoupled_conv1d_bwd_impl(
         if d_conv_state is not None
         else None
     )
-    dm_local, ds_ext_local = cp_gdn.compose_bwd_local_from_t_inv(
-        qkv_conv=qkv_conv,
-        b=b,
-        a=a,
-        a_log=a_log,
-        dt_bias=dt_bias,
-        do=d_out,
-        t_inv=t_inv,
-        num_k_heads=num_k_heads,
-        num_v_heads=num_v_heads,
-        head_k_dim=head_k_dim,
-        head_v_dim=head_v_dim,
-        chunk_size=chunk_size,
-        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-        m_local_cached=m_local_fwd,
-        segment_ids=segment_ids,
-        init_seg=init_seg,
-        precision=cp_matmul_precision,
-    )
+    if target_platform(qkv_conv) == "tpu" and m_local_fwd is not None and cp_matmul_precision == jax.lax.Precision.HIGH:
+      # ds_ext_local of compose_bwd_local_from_t_inv at the same 3-pass precision, as a reverse Pallas scan
+      # (Horner order) instead of XLA's HBM-bound tree. dm_local is the transposed forward transition, which
+      # compose_bwd_local_from_t_inv also returns when given m_local_cached.
+      ds_ext_local = dh_scan.gdn_cp_dh_scan(
+          qkv_conv,
+          b,
+          a,
+          a_log,
+          dt_bias,
+          d_out,
+          t_inv,
+          num_v_heads=num_v_heads,
+          kq_head_dim=head_k_dim,
+          v_head_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+          segment_ids=segment_ids,
+          init_seg=init_seg,
+      )
+      dm_local = jnp.swapaxes(m_local_fwd.astype(jnp.float32), -1, -2)
+    else:
+      dm_local, ds_ext_local = cp_gdn.compose_bwd_local_from_t_inv(
+          qkv_conv=qkv_conv,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          do=d_out,
+          t_inv=t_inv,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+          m_local_cached=m_local_fwd,
+          segment_ids=segment_ids,
+          init_seg=init_seg,
+          precision=cp_matmul_precision,
+      )
     dht_local, _ = cp_gdn.incoming_grad_state(
         dm_local, ds_ext_local, dht_final, cp_axis_name, precision=cp_matmul_precision
     )
