@@ -33,7 +33,7 @@ benchmark does not pin (it measured +0.363 s per micro-batch slower with the pin
 Pre-registered comparisons, per case:
   - Bit-identical output, loss and every gradient with float32 routing weights (float32_weight_sum, the default) and
     no load-balance loss: real routing, padding excluded from routing, forced ids with a buffer that drops tokens,
-    saved routing maps, with moe_routing_index_math="count", and with the benchmark's MoE settings (expert-weight
+    saved routing maps, and with the benchmark's MoE settings (expert-weight
     prefetch, row-major reduce-scatter, routing maps on device, ragged_buffer_factor 2.75, prefused weights with
     fp8 fake-quant, padding excluded).
   - With the load-balance loss on, the loss and the output stay bit-identical (the per-chunk loss is computed from
@@ -43,8 +43,8 @@ Pre-registered comparisons, per case:
     reduce-scattered in float32 instead of bfloat16, so the gradients agree to relative L2 < 1e-2.
 Two-sided:
   - Structure: the plain loop must all-gather two [..., top_k] arrays per chunk and the packed one none of those
-    but exactly one [..., 2 * top_k] float32 array; under moe_routing_maps=device that array is tagged
-    moe_routing_maps, under remat it is untagged, and nothing is ever tagged moe_route.
+    but exactly one [..., 2 * top_k] float32 array; under moe_route=device that array is tagged moe_route, under
+    remat it is untagged.
   - Deliberately wrong versions must FAIL: a packed gather whose result is shifted along the sequence (each chunk
     gets another chunk's routing), and the packed path with its load-balance loss dropped (what an earlier version
     of this change did).

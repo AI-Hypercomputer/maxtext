@@ -512,8 +512,8 @@ def unpack_routing(packed: jax.Array, weights_dtype, ids_dtype) -> tuple[jax.Arr
 
 
 def routing_tag_fn(config):
-  """Returns the checkpoint_name tagger for the routing arrays, or None under moe_routing_maps=remat."""
-  if getattr(config, "moe_route", "remat") == "remat":
+  """Returns the checkpoint_name tagger for the routing arrays, or None under moe_route=remat."""
+  if config.moe_route == "remat":
     return None
   return lambda t: adc.checkpoint_name(t, "moe_route")
 
@@ -4713,7 +4713,7 @@ class RoutedMoE(nnx.Module):
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
       if (
-          getattr(cfg, "prepare_moe_weights_once_per_step", False)
+          cfg.prepare_moe_weights_once_per_step
           and cfg.sparse_matmul
           and self.wi_0_sparsity_module is None
           and self.wi_1_sparsity_module is None
@@ -5067,9 +5067,7 @@ def _fake_quantize_moe_weight_stack(w: jax.Array) -> jax.Array:
 
 def prepare_moe_weights_for_step(root_module: nnx.Module, config: ctypes.Config) -> None:
   """Hoists MoE weight casting and per-channel FP8 fake-quantization once per step before layer scan."""
-  if not getattr(config, "prepare_moe_weights_once_per_step", False):
-    return
-  if not getattr(config, "fp8_moe_fake_quant", False):
+  if not config.prepare_moe_weights_once_per_step or not config.fp8_moe_fake_quant:
     return
   for _, module in nnx.iter_graph(root_module):
     if not isinstance(module, RoutedMoE):
