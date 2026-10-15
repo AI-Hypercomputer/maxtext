@@ -203,6 +203,8 @@ class CustomRule(enum.Enum):
   DEFAULT = ""
   PURE_FSDP = "pure-fsdp"
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
+  CP_AS_EP_DENSE_NO_CP = "cp-as-ep-dense-no-cp"  # cp-as-ep with the dense weights on fsdp x expert, not context
+  CP_AS_EP_DENSE_FSDP = "cp-as-ep-dense-fsdp"  # cp-as-ep with the dense weights on fsdp only
   EP_AS_CP = "ep-as-cp"  # Support EP only
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
   FSDP_2D = "2d-fsdp"

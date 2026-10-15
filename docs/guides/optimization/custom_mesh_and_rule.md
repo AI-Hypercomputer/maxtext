@@ -51,6 +51,12 @@ This rule utilizes the `data`, `stage`, `fsdp`, and `expert` axes. Its defining 
 
 Similar in philosophy to `ep-as-cp.yml`, this configuration explicitly includes the `context` axis in the mesh layout alongside `data`, `stage`, `fsdp`, and `expert`. While context sharding is mapped to the `context` axis globally, within MoE components, this `context` axis dynamically shifts to perform expert parallelism instead of FSDP. This custom rule supports using CP and EP together.
 
+### `cp-as-ep-dense-no-cp.yml` and `cp-as-ep-dense-fsdp.yml`
+
+Variants of `cp-as-ep.yml` that take the dense weights (`embed`, `embed_attn`, `q_lora`, `kv_lora`: attention and shared-expert projections, the MoE router and the shared-expert gate) off the `context` axis. Under `cp-as-ep` they are sharded over `fsdp` x `context` x `expert`, so every all-gather of them spans all devices and also synchronizes the context ranks, which do unequal attention work under causal context parallelism. `cp-as-ep-dense-no-cp.yml` shards them over `fsdp` x `expert` and `cp-as-ep-dense-fsdp.yml` over `fsdp` only, so those all-gathers run in independent groups of `fsdp` x `expert` (or `fsdp`) devices, at the cost of replicating the weights and their gradients `context`-way (`context` x `expert`-way).
+
+Both rules also map `embed_grad` to the token axes. Left to GSPMD, the gradient of a weight replicated over `context` (a partial sum over every token axis) is all-reduced at full size over all devices and then sliced. With `embed_grad` mapped, `linears.route_dense_weight_grad` reduce-scatters it over all devices instead, as under `cp-as-ep`, and then all-gathers the shard over the replicated axes. The GatedDeltaNet projections (`embed_gdn`), activations, the vocabulary weights and the routed experts are sharded exactly as in `cp-as-ep.yml`, and `RoutedMoE` keeps `("context", "expert")` as its expert-parallel axes.
+
 ### `ep-as-dp.yml`
 
 Different with the rule in `base.yml`, this rule configures expert physical axis to function as data parallelism rather than FSDP. This removes the constraint where FSDPxEP is limited by specific model dimensions, particularly for small tensors such as attention projections. Ultimately, this change benefits large-scale training.
