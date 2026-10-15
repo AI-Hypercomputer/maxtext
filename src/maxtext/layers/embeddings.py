@@ -288,6 +288,15 @@ class RotaryEmbedding(nnx.Module):
     """Applies the rotary transformation logic."""
     return (inputs * cos) + (self._rotate_half(inputs) * sin)
 
+  def sin_cos_tables(self, position: jax.Array, dtype: DType) -> tuple[jax.Array, jax.Array]:
+    """Half-width RoPE tables `sin_half, cos_half: [B, S, embedding_dims / 2]` in `dtype`.
+
+    These are exactly the tables `__call__` multiplies the inputs with (before they are tiled to
+    the full width for the rotate-half form); exposed so fused kernels can consume them directly.
+    """
+    sinusoid_inp = position[:, :, jnp.newaxis] / self.timescale
+    return jnp.sin(sinusoid_inp).astype(dtype), jnp.cos(sinusoid_inp).astype(dtype)
+
   def __call__(
       self,  # pytype: disable=signature-mismatch  # overriding-parameter-count-checks
       inputs: jax.Array,
@@ -315,15 +324,16 @@ class RotaryEmbedding(nnx.Module):
           "The embedding dims of the rotary position embedding" "must match the hidden dimension of the inputs."
       )
 
-    position = position[:, :, jnp.newaxis, jnp.newaxis]
-    sinusoid_inp = position / self.timescale
-    sin_half = jnp.sin(sinusoid_inp).astype(inputs.dtype)
-    cos_half = jnp.cos(sinusoid_inp).astype(inputs.dtype)
+    sin_half, cos_half = self.sin_cos_tables(position, inputs.dtype)
+    sin_half = sin_half[:, :, jnp.newaxis, :]
+    cos_half = cos_half[:, :, jnp.newaxis, :]
 
-    sin = jnp.concatenate([sin_half, sin_half], axis=-1)
-    cos = jnp.concatenate([cos_half, cos_half], axis=-1)
-
-    x_out = self.apply_rotary(inputs, cos, sin)
+    # Split-half RoPE on the half-width sin/cos (same math as x*cos + rotate_half(x)*sin);
+    # lets XLA fuse q/k norm + RoPE into one kernel instead of three.
+    x1, x2 = jnp.split(inputs, 2, axis=-1)
+    out1 = x1 * cos_half - x2 * sin_half
+    out2 = x2 * cos_half + x1 * sin_half
+    x_out = jnp.concatenate([out1, out2], axis=-1)
 
     if self.cast_as_fprop_dtype:
       x_out = x_out.astype(self.fprop_dtype)
