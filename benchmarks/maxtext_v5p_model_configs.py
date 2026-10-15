@@ -157,12 +157,13 @@ llama4_maverick_dropless_v5p_256 = _add_to_model_dictionary(
             "per_device_batch_size": 4,
             "max_target_length": 8192,
             "ici_fsdp_parallelism": 32,
-            "ici_tensor_parallelism": 4,
+            "ici_expert_parallelism": 4,
             "enable_checkpointing": False,
             "dtype": "bfloat16",
             "weight_dtype": "float32",
             "megablox": True,
             "sparse_matmul": True,
+            "use_ragged_sort": True,
             "dataset_type": "synthetic",
             "opt_type": "adamw",
             "skip_first_n_steps_for_profiler": 5,
@@ -187,7 +188,8 @@ llama4_maverick_dropless_v5p_256 = _add_to_model_dictionary(
         },
         xla_flags=(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.ASYNC_ALL_GATHER_OVERLAP
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
             + xla_flags_library.DATA_PARALLEL_OVERLAP
             + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
             + xla_flags_library.HOST_OFFLOAD_FLAGS
