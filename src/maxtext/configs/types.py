@@ -1726,6 +1726,24 @@ class MoEGeneral(BaseModel):
           " never forms them, so the policy would silently stop saving the MoE tensor."
       ),
   )
+  moe_wi_gmm_fused_swiglu: bool = Field(
+      False,
+      description=(
+          "Apply the MoE SwiGLU in the epilogue of the wi (up-projection) GMM (megablox ops.gmm_silu, the tokamax"
+          " gmm_v2 kernel with fuse_act): the forward kernel writes the [buffer, mlp] activation of the rows it"
+          " computes instead of the [buffer, 2 * mlp] GMM output that a separate elementwise pass reads back over every"
+          " buffer row, padding included. When differentiated it writes the activation and the gate and up halves"
+          " ([buffer, 3 * mlp] in all, gate and up rounded as the unfused GMM rounds its output), and the backward is"
+          " the unfused one. NUMERICS CHANGE: silu reads the float32 accumulator instead of its bfloat16 rounding (the"
+          " more precise value), so the activation differs by rounding. Requires prefuse_moe_weights=True,"
+          " sparse_matmul=True, te_moe_block=False, use_tokamax_gmm=True, use_gmm_v2=True, no weight quantization,"
+          " mlp_activations=['silu', 'linear'] without clipping, mlp_bias=False, num_moe_emb_chunks=0,"
+          " moe_flat_fsdp_weights, moe_tc_ragged_3d_gmm, moe_quantize_token_all_gather and moe_accumulate_chunk_wgrad"
+          " off, and a remat policy that does not save the routed experts' gate or up half (mlpwi_0, moe_mlpwi_0,"
+          " moe_mlpwi_1; the minimal* policies save mlpwi_0): the fused GMM never forms them, so the policy would"
+          " silently stop saving the MoE tensor."
+      ),
+  )
   fp8_moe: bool = Field(
       False,
       description="Whether MoE weights are quantized to float8_e4m3fn in inference/rollout.",
@@ -1928,6 +1946,37 @@ class MoEGeneral(BaseModel):
           + [
               (not self.mlp_bias, "mlp_bias=False (biases are added per half)"),
               (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0 (partial sums per half)"),
+              self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
+              (
+                  not self.moe_wi_gmm_fused_swiglu,
+                  "moe_wi_gmm_fused_swiglu=False (the wi GMM already applies the activation)",
+              ),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_wi_gmm_fused_swiglu(self) -> "MoEGeneral":
+    """The fused gmm_v2 SwiGLU epilogue replaces the up projection only on the plain bf16 prefused gmm_v2 path."""
+    if self.moe_wi_gmm_fused_swiglu:
+      _reject_unless(
+          "moe_wi_gmm_fused_swiglu=True",
+          self._prefused_sparse_matmul_requirements()
+          + [
+              # gmm_silu is the bf16 tokamax gmm_v2 kernel only.
+              (self.use_tokamax_gmm and self.use_gmm_v2, "use_tokamax_gmm=True and use_gmm_v2=True"),
+              self._no_weight_quantization_requirement(),
+              # The epilogue computes silu(gate) * up; GPT-OSS and clipped activations differ.
+              (list(self.mlp_activations) == ["silu", "linear"], "mlp_activations=['silu', 'linear']"),
+              (self.decoder_block != DecoderBlockType.GPT_OSS, "a decoder_block other than gpt_oss"),
+              (self.mlp_activations_limit <= 0.0, "mlp_activations_limit <= 0 (no clipping)"),
+              (not self.mlp_bias, "mlp_bias=False"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              (not self.moe_flat_fsdp_weights, "moe_flat_fsdp_weights=False"),
+              # A 2D bf16 token buffer.
+              (not self.moe_tc_ragged_3d_gmm, "moe_tc_ragged_3d_gmm=False"),
+              (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
+              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
               self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
           ],
       )

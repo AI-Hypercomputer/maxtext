@@ -3583,28 +3583,105 @@ class RoutedMoE(nnx.Module):
         return jnp.sum(jax.lax.dynamic_slice_in_dim(routing.group_sizes, experts_start, num_experts_per_shard))
       return jnp.sum(routing.group_sizes)
 
-    def get_gmm_for_local_experts(x, routing, route_metadata):
-      """Return a partial GMM function with preconfigured routing params."""
+    # moe_wi_gmm_fused_swiglu: apply the SwiGLU in the wi GMM's epilogue (megablox ops.gmm_silu). The unfused path
+    # writes the [buffer, 2 * mlp] GMM output and reads it back in an elementwise pass over every buffer row, padding
+    # included; the fused GMM writes the [buffer, mlp] activation of the rows it computes. When differentiated it also
+    # writes gate and up, and the backward is the unfused one. Works with split (w0, w1) and with the whole prefused
+    # wi of moe_unsplit_prefused_wi (w0 = [w0 | w1], w1 = None). Off, gmm_up_or_silu is gmm_up and nothing below runs.
+    fuse_silu_in_wi_gmm = self.config.moe_wi_gmm_fused_swiglu
+    if fuse_silu_in_wi_gmm:
+      # The config validator checks the config-level requirements; these two only the built layer knows.
+      unmet = [
+          name
+          for name, hit in (
+              ("weight quantization", self.quant is not None),
+              ("an explicit expert-weight all-gather", weight_gather),
+          )
+          if hit
+      ]
+      if unmet:
+        raise ValueError(f"moe_wi_gmm_fused_swiglu=True does not support {' or '.join(unmet)}.")
+
+    def gmm_up_or_silu(
+        x,
+        w0,
+        w1,
+        w0_bias,
+        w1_bias,
+        gmm_fn,
+        gmm_operands,
+        _weight_gather,
+        mask=None,
+        gather_weights=True,
+        return_weights=False,
+    ):
+      """gmm_up; with moe_wi_gmm_fused_swiglu, (silu(x @ w0) * (x @ w1), None) from one fused GMM.
+
+      `gmm_operands` are the routing operands that `gmm_fn` is bound to (get_gmm_operands_for_local_experts); the
+      fused GMM takes them explicitly. An output1 of None tells the caller the activation is already applied.
+      Biases, the mask and gather_weights only matter in configurations the key does not support (mlp_bias, an
+      explicit weight all-gather).
+      """
+      if not fuse_silu_in_wi_gmm:
+        return gmm_up(
+            x,
+            w0,
+            w1,
+            w0_bias,
+            w1_bias,
+            gmm_fn,
+            _weight_gather,
+            mask=mask,
+            gather_weights=gather_weights,
+            return_weights=return_weights,
+        )
+      if return_weights:
+        raise NotImplementedError("moe_wi_gmm_fused_swiglu does not support moe_accumulate_chunk_wgrad.")
+      del w0_bias, w1_bias, mask, gather_weights
+      _, wi_tile_size = get_wi_gmm_params()
+      # As gmm(): pad the rows to the forward tile and cast to the compute dtype.
+      inputs, padding_amount = max_utils.maybe_pad(x, fwd_tile("wi_tile_fwd_batch_seq"))
+      # Weights are stored as (G,K,2N): w0/w1 are adjacent slices (the same concatenate as gmm_up), or w0 is already
+      # the whole [w0 | w1] (moe_unsplit_prefused_wi).
+      w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
+      act = mblx.gmm_silu(
+          inputs.astype(self.dtype),
+          w_fused.astype(self.dtype),
+          gmm_operands["group_sizes"],
+          preferred_element_type=self.dtype,
+          tiling=wi_tile_size,
+          group_offset=gmm_operands["group_offset"],
+          use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+          use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+          fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
+          fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
+      )
+      return (act[: x.shape[0]] if padding_amount else act), None
+
+    def get_gmm_operands_for_local_experts(x, routing, route_metadata):
+      """The routing operands of the local experts' GMMs: group sizes, expert assignments, group offset."""
       num_ep = self.get_expert_parallelism_size()
       num_experts_per_shard = self.config.num_experts // num_ep
       if self.config.use_ring_of_experts and x.shape[0] < routing.sorted_selected_experts.shape[0]:
         local_group_sizes = routing.local_group_sizes
-        return functools.partial(
-            gmm,
-            group_sizes=local_group_sizes,
-            expert_assignments=routing.selected_experts,
-            group_offset=0,
-        )
+        return {
+            "group_sizes": local_group_sizes,
+            "expert_assignments": routing.selected_experts,
+            "group_offset": 0,
+        }
       if self.config.use_ragged_sort and self.config.use_ring_of_experts:
         experts_start = route_metadata.expert_shard_id * num_experts_per_shard
       else:
         experts_start = 0
-      return functools.partial(
-          gmm,
-          group_sizes=routing.group_sizes,
-          expert_assignments=routing.selected_experts,
-          group_offset=experts_start,
-      )
+      return {
+          "group_sizes": routing.group_sizes,
+          "expert_assignments": routing.selected_experts,
+          "group_offset": experts_start,
+      }
+
+    def get_gmm_for_local_experts(x, routing, route_metadata):
+      """Return a partial GMM function with preconfigured routing params."""
+      return functools.partial(gmm, **get_gmm_operands_for_local_experts(x, routing, route_metadata))
 
     def unsort_output_and_ra2a(
         intermediate_output,
@@ -3793,14 +3870,16 @@ class RoutedMoE(nnx.Module):
       if self.config.mlp_bias:
         w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
-      gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
-      up_res = gmm_up(
+      gmm_operands = get_gmm_operands_for_local_experts(x, routing, route_metadata)
+      gmm_fn = functools.partial(gmm, **gmm_operands)  # get_gmm_for_local_experts
+      up_res = gmm_up_or_silu(
           x,
           w0,
           w1,
           w0_bias,
           w1_bias,
           gmm_fn,
+          gmm_operands,
           weight_gather,
           mask=mask,
           gather_weights=gather_weights,
@@ -3828,7 +3907,8 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
-      intermediate_layer = self.apply_ffn_activation_maybe_fused(output0, output1)
+      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
+      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -3983,14 +4063,16 @@ class RoutedMoE(nnx.Module):
         if self.config.mlp_bias:
           w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
 
-        gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
-        up_res = gmm_up(
+        gmm_operands = get_gmm_operands_for_local_experts(x, routing, route_metadata)
+        gmm_fn = functools.partial(gmm, **gmm_operands)  # get_gmm_for_local_experts
+        up_res = gmm_up_or_silu(
             x,
             w0,
             w1,
             w0_bias,
             w1_bias,
             gmm_fn,
+            gmm_operands,
             weight_gather,
             mask=mask,
             gather_weights=gather_weights,
@@ -4012,7 +4094,8 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
-      intermediate_layer = self.apply_ffn_activation_maybe_fused(output0, output1)
+      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
+      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
