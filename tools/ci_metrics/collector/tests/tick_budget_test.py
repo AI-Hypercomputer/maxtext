@@ -17,8 +17,9 @@
 GITHUB_TOKEN's 1,000 requests an hour are shared by every workflow in the repository, and one
 tick of 40 runs spends about 500. So the tick checks the budget before each run it reads,
 before each in-flight re-read and before the merge checks, and stops cleanly when fewer than
-`RATE_LIMIT_FLOOR` requests are left. A fake client answers the budget question and fails the
-test on anything else, so nothing here reaches GitHub.
+`RATE_LIMIT_FLOOR` requests are left. It reads the budget two ways, from `/rate_limit` and from
+the `X-RateLimit-Remaining` header of the latest answer, and trusts the lower one. A fake client
+answers both readings and fails the test on anything else, so nothing here reaches GitHub.
 """
 
 from __future__ import annotations
@@ -56,8 +57,9 @@ WAITING_PULL_REQUESTS = 60
 class FakeClient:
   """Answers the budget question. Anything else would be a real request, so it fails the test."""
 
-  def __init__(self, remaining: int | Exception) -> None:
+  def __init__(self, remaining: int | Exception, hint: int | None = None) -> None:
     self.remaining = remaining
+    self.remaining_hint = hint
     self.budget_reads = 0
 
   def rate_limit(self) -> dict[str, int]:
@@ -65,6 +67,8 @@ class FakeClient:
     self.budget_reads += 1
     if isinstance(self.remaining, Exception):
       raise self.remaining
+    # The real client overwrites its header count with this reading, so the guard has to read the hint first.
+    self.remaining_hint = self.remaining
     return {"limit": 1000, "remaining": self.remaining, "reset": 0}
 
   def __getattr__(self, name: str) -> Any:
@@ -81,13 +85,15 @@ class TickBudgetTest(unittest.TestCase):
     self.collect_run = patch.start()
     self.addCleanup(patch.stop)
 
-  def make_tick(self, remaining: int | Exception, pending: tuple[int, ...] = ()) -> tuple[tick.Tick, FakeClient]:
+  def make_tick(
+      self, remaining: int | Exception, pending: tuple[int, ...] = (), hint: int | None = None
+  ) -> tuple[tick.Tick, FakeClient]:
     """Returns a tick over an empty store and a one-day window, and its fake client."""
     row_store = store.Store(self.tmp_dir)
     state = row_store.load_state()
     for run_id in pending:
       state.mark_pending(run_id, 1, created_at="2026-10-15T00:00:00Z")
-    client = FakeClient(remaining)
+    client = FakeClient(remaining, hint=hint)
     options = tick.Options(out=Path(self.tmp_dir), backfill_days=1)
     return tick.Tick(options, client, row_store, state, tick.TickReport()), client
 
@@ -115,6 +121,25 @@ class TickBudgetTest(unittest.TestCase):
       self.assertTrue(subject._collect_one(dict(RUNNING)))
     self.collect_run.assert_called_once()
     self.assertIn("could not be read", printed.getvalue())
+
+  def test_lower_header_count_stops(self):
+    subject, _ = self.make_tick(remaining=1000, hint=tick.RATE_LIMIT_FLOOR - 1)
+    self.assertFalse(subject._collect_one(dict(RUNNING)))
+    self.collect_run.assert_not_called()
+    self.assertIn(f"{tick.RATE_LIMIT_FLOOR - 1} of", subject.report.stopped_because)
+
+  def test_higher_header_count_does_not_hide_a_low_budget(self):
+    subject, _ = self.make_tick(remaining=tick.RATE_LIMIT_FLOOR - 1, hint=1000)
+    self.assertFalse(subject._collect_one(dict(RUNNING)))
+    self.collect_run.assert_not_called()
+
+  def test_header_count_decides_when_the_endpoint_is_down(self):
+    subject, _ = self.make_tick(
+        remaining=github.GitHubError("the rate-limit endpoint is down", status=503), hint=tick.RATE_LIMIT_FLOOR - 1
+    )
+    self.assertFalse(subject._collect_one(dict(RUNNING)))
+    self.collect_run.assert_not_called()
+    self.assertEqual(subject.report.problems, [])
 
   def test_already_stored_run_reads_no_budget(self):
     subject, client = self.make_tick(remaining=0)

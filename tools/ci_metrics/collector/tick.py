@@ -286,15 +286,24 @@ class Tick:
 
   def _budget_allows(self) -> bool:
     """Checks the API budget before more requests are spent; False means stop cleanly."""
+    # The headers of the latest answer can show fewer requests left than /rate_limit does (a
+    # real run saw 267 used against 223), so the lower reading decides. Read the header count
+    # first: rate_limit() overwrites it.
+    seen = self.client.remaining_hint
     try:
       status = self.client.rate_limit()
     except github.GitHubError as error:
-      _warn(f"WARNING: the rate-limit endpoint could not be read ({error}); carrying on.")
-      return True
-    if status["remaining"] >= RATE_LIMIT_FLOOR:
+      if seen is None:
+        _warn(f"WARNING: the rate-limit endpoint could not be read ({error}); carrying on.")
+        return True
+      remaining, limit = seen, "?"
+    else:
+      remaining = status["remaining"] if seen is None else min(seen, status["remaining"])
+      limit = status["limit"]
+    if remaining >= RATE_LIMIT_FLOOR:
       return True
     self.report.stopped_because = (
-        f"the API budget ran low: {status['remaining']} of {status['limit']} requests left, "
+        f"the API budget ran low: {remaining} of {limit} requests left, "
         f"floor is {RATE_LIMIT_FLOOR}. The next tick resumes from the watermark."
     )
     return False

@@ -74,6 +74,8 @@ class GitHubClient:
                                              # max_items stops after the page that reaches it
   def get_bytes(url, *, max_bytes=None) -> bytes  # absolute URL, follows redirects, no token off-host
   def rate_limit() -> dict                   # {"limit", "remaining", "reset"}
+  def remaining_hint() -> int | None         # property: X-RateLimit-Remaining of the latest answer,
+                                             # overwritten by rate_limit()
   def wait_for_rate_limit(need=50) -> None   # free when the budget is clearly sufficient
   def close() -> None                        # closes only a session it created itself
 ```
@@ -430,8 +432,9 @@ What it decides:
   So does a low API budget. The tick checks the budget between backfill weeks, before each
   run it reads, before each in-flight run it re-reads, and before the merge checks, and then
   again every 25 pull requests while it asks them. It stops when fewer than 300 requests
-  (`RATE_LIMIT_FLOOR`) are left this hour. GITHUB_TOKEN's 1,000 requests an hour are shared by
-  every workflow in the repository.
+  (`RATE_LIMIT_FLOOR`) are left this hour. It reads the budget two ways, from /rate_limit and
+  from the latest answer's own X-RateLimit-Remaining header, and trusts the lower one.
+  GITHUB_TOKEN's 1,000 requests an hour are shared by every workflow in the repository.
   `--dry-run` fetches and builds everything into a temporary directory and writes nothing
   to `--out`.
 

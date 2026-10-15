@@ -32,6 +32,9 @@ reaches N items, so a run with thousands of artifacts is not listed to the end; 
 paging works as it always did. And the text of a connection error, which can quote the whole
 request path with its signed query, loses the query before it goes into a message.
 
+One more check: `remaining_hint` holds the `X-RateLimit-Remaining` of the latest API answer, which
+the tick's budget guard reads next to the `/rate_limit` endpoint.
+
 Needs `requests`, like the client itself. Run from the repository root, either way:
 
   python3 tools/ci_metrics/collector/tests/github_download_test.py
@@ -572,6 +575,20 @@ class SignedUrlTest(ClientTestCase):
       client.get_bytes(ARTIFACT_URL, max_bytes=LIMIT)
 
     self.assert_clean(caught.exception, ARTIFACT_URL)
+
+
+class RemainingHintTest(ClientTestCase):
+  """`remaining_hint` is the X-RateLimit-Remaining of the latest API answer, and None before any answer."""
+
+  def test_a_new_client_has_none_and_an_answer_with_the_header_sets_it(self) -> None:
+    answer = JsonPage([])
+    answer.headers["X-RateLimit-Remaining"] = "123"
+    client, _ = self.make_client([answer])
+    self.assertIsNone(client.remaining_hint, "no answer has arrived yet")
+
+    client.get_json("actions/runs/1/artifacts")
+
+    self.assertEqual(client.remaining_hint, 123)
 
 
 if __name__ == "__main__":

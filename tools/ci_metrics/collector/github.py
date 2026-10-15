@@ -363,6 +363,11 @@ class GitHubClient:
     self._reset_hint = status["reset"]
     return status
 
+  @property
+  def remaining_hint(self) -> int | None:
+    """X-RateLimit-Remaining from the latest API answer, or None before the first one."""
+    return self._remaining_hint
+
   def wait_for_rate_limit(self, need: int = 50) -> None:
     """Waits until at least `need` requests are left in the current rate-limit window."""
     if self._remaining_hint is not None and self._remaining_hint >= need:
