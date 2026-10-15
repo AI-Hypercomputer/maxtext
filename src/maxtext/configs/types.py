@@ -1400,6 +1400,20 @@ class MoEGeneral(BaseModel):
           " Requires use_ring_of_experts=True."
       ),
   )
+  moe_roe_packed_routing_gather: bool = Field(
+      False,
+      description=(
+          "With ring_of_experts_local_routing and moe_chunk_pipeline: route the layer's local tokens once (every"
+          " token chunk) and all-gather the top-k weights and expert ids as ONE float32 [batch, seq, 2*top_k] array"
+          " (ids are exact in float32), instead of two all-gathers (ids, weights) per token chunk: one SparseCore"
+          " offload per layer instead of 2 x num_moe_token_chunks, and one weight-gradient reduce-scatter instead of"
+          " one per chunk. Same routing; bit-identical with float32 routing weights (float32_weight_sum=True), while"
+          " bfloat16 weights get their cotangent reduce-scattered in float32. The per-chunk load-balance loss is"
+          " computed as without it. Tagged moe_routing_maps. Requires sparse_matmul=True, te_moe_block=False,"
+          " ring_of_experts_local_routing=True, moe_chunk_pipeline=True and use_random_routing=False (random routing"
+          " draws per call, so one draw for the layer differs from one per chunk)."
+      ),
+  )
   ring_of_experts_row_major_reduce_scatter: bool = Field(
       False,
       description=(
@@ -1789,6 +1803,23 @@ class MoEGeneral(BaseModel):
         (self.use_ring_of_experts, "use_ring_of_experts=True"),
         (self.use_ragged_sort, "use_ragged_sort=True"),
     ]
+
+  @model_validator(mode="after")
+  def validate_moe_roe_packed_routing_gather(self) -> "MoEGeneral":
+    """The packed gather replaces the per-chunk routing gathers of the pipelined local-routing chunk loop."""
+    if self.moe_roe_packed_routing_gather:
+      _reject_unless(
+          "moe_roe_packed_routing_gather=True",
+          [
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (not self.te_moe_block, "te_moe_block=False"),
+              (self.ring_of_experts_local_routing, "ring_of_experts_local_routing=True"),
+              (self.moe_chunk_pipeline, "moe_chunk_pipeline=True (only the pipelined chunk loop gathers per chunk)"),
+              # Random routing draws per get_topk call: one draw for the layer is not one per chunk.
+              (not self.use_random_routing, "use_random_routing=False"),
+          ],
+      )
+    return self
 
   @model_validator(mode="after")
   def validate_moe_routing_index_math(self) -> "MoEGeneral":

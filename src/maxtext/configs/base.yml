@@ -340,6 +340,9 @@ use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backw
 router_topk_matmul_vjp: false # deepseek routing: dense one-hot VJP for the top-k weight gather (no scatter-add in the backward)
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
 ring_of_experts_local_routing: false # ring of experts: route each shard's own tokens, then all-gather only the top-k expert ids and weights (not the router logits)
+# With ring_of_experts_local_routing + moe_chunk_pipeline: route every token chunk once and all-gather ids + weights as
+# ONE float32 array per layer (tagged moe_routing_maps) instead of two gathers per chunk. Same routing.
+moe_roe_packed_routing_gather: false
 ring_of_experts_row_major_reduce_scatter: false # ring of experts: lay out the expert-parallel reduce-scatter input row-major in the forward pass, so XLA does not copy the combine output into another layout and the result back
 moe_topk_before_ep_all_gather: false # ring of experts: run top-k on local tokens and all-gather top-k weights/ids instead of router logits
 te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
