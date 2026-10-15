@@ -12,65 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""One collector tick: read what is new, store its rows, rebuild the views.
-
-This is the program a schedule calls, and the only module that decides what to ask GitHub
-for. It owns no file format and no arithmetic: `github` fetches, `junit` parses, `runs`
-finds, `derive` computes, `rows` shapes, `store` writes and `views` renders. What is left -
-and it is the whole of this module - is the decisions: which window to ask for, which run to
-read, which test rows are worth keeping, and when to stop.
-
-    python -m collector.tick --out DIR [--since YYYY-MM-DD] [--until YYYY-MM-DD]
-                             [--backfill-days 30] [--dry-run] [--max-runs N]
-                             [--repo owner/name]
-
-`--out` is required and has no default, because a store is a thing a person chooses, never a
-thing a program picks for them.
-
-What a tick does:
-
-  1. Opens the store and loads `data/state.json`. If that file is gone the store rebuilds the
-     index by scanning the run rows, so losing it costs a slow tick and nothing else.
-  2. Asks the API only for runs created at or after the stored watermark, minus a short
-     re-check window so a run that gained an attempt is seen again. With no watermark it is a
-     backfill instead: `--backfill-days` back, walked one week at a time, oldest first, with
-     the rate budget checked between weeks. A week at a time is not a nicety - GitHub serves
-     at most 1000 runs per listing and this pipeline makes about 650 a week, so a wider
-     listing would drop the oldest runs without saying so.
-  3. Per run: reads its attempts and each attempt's jobs, links its pull request, and for a
-     recent, non-superseded ci_pipeline run downloads the JUnit artifacts. Artifacts live
-     about a day, so a backfilled run has none - that is counted and reported, never passed
-     off as a suite that published no tests.
-  4. Appends the rows through `store.Store`, which files them by the run's month, skips what
-     is already there, and treats a correction as a new line rather than an edit.
-  5. Asks the pull requests that were still open when their run was collected whether they
-     have merged. Without that step the runs view would stay empty: a run is read minutes
-     after it starts, so its pull request has no merge time yet, and nothing would ever bring
-     that run back - its id and creation time never change, so the watermark passes it for
-     good.
-  6. Deletes what the dashboard can no longer show: rows of months older than the 90-day
-     window, view files of those months, and pull request files older than the window. This
-     is what keeps the store from growing forever.
-  7. Rebuilds the views with `views.build_views`, for the months this tick touched plus any
-     month whose view files have gone missing.
-  8. Prints a report a person can read and, as its last line, one line a log can grep.
-
-Exit codes, which a scheduler is expected to tell apart:
-
-  0  The tick finished. It may have written rows or found nothing new; both are success, and
-     the workflow's commit step is what decides whether there is anything to push.
-  1  Data was lost or put at risk: a fetch failed after its retries, a run could not be
-     collected, or the store could not be written. Repeating a tick is always safe, so the
-     usual answer is to run it again.
-  2  The tick was asked for something impossible: a bad argument, an `--out` that is not a
-     usable store, or a window that ends before it starts. Repeating it would fail the same
-     way, so this is a command line to fix rather than a tick to run again.
-
-`--dry-run` fetches everything and computes everything, and writes nothing into the store:
-the rows are built and counted but not appended, the index is not saved, and the views are
-rendered into a throwaway directory that is deleted on the way out. It is the way to check
-the collector against the real API without touching a store.
-"""
+"""One collector tick: read what is new, store its rows, rebuild the views."""
 
 from __future__ import annotations
 
@@ -132,12 +74,7 @@ class TickError(RuntimeError):
 
 
 class UsageError(TickError):
-  """The tick was asked for something impossible, so repeating it would fail the same way.
-
-  Kept apart from `TickError` because the two mean different things to a scheduler: a usage
-  error is a command line to fix (exit 2), a `TickError` is a tick to run again once the
-  cause is gone (exit 1).
-  """
+  """The tick was asked for something impossible, so repeating it would fail the same way."""
 
 
 def _warn(message: str) -> None:
@@ -151,31 +88,12 @@ def utc_now() -> datetime:
 
 
 def iso_utc(moment: datetime) -> str:
-  """Formats a moment the way every stored timestamp is written.
-
-  Args:
-    moment: The moment. A naive value is read as UTC.
-
-  Returns:
-    "2026-09-01T15:04:05Z", seconds resolution, matching `rows.utc_now_iso`.
-  """
+  """Formats a moment the way every stored timestamp is written."""
   return runs.as_utc(moment).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def parse_day(value: str, end_of_day: bool = False) -> datetime:
-  """Turns a YYYY-MM-DD argument into a UTC moment.
-
-  Args:
-    value: The day, as typed on the command line.
-    end_of_day: True to return the last second of the day instead of the first, which is what
-      an inclusive `--until` means to a person.
-
-  Returns:
-    The moment, in UTC.
-
-  Raises:
-    UsageError: The value is not a YYYY-MM-DD date.
-  """
+  """Turns a YYYY-MM-DD argument into a UTC moment."""
   try:
     day = datetime.strptime(value.strip(), "%Y-%m-%d")
   except ValueError as error:
@@ -186,17 +104,7 @@ def parse_day(value: str, end_of_day: bool = False) -> datetime:
 
 
 def split_repo(value: str) -> tuple[str, str]:
-  """Splits an "owner/name" argument.
-
-  Args:
-    value: The repository, for example "AI-Hypercomputer/maxtext".
-
-  Returns:
-    (owner, name).
-
-  Raises:
-    UsageError: The value is not two non-empty parts around one "/".
-  """
+  """Splits an "owner/name" argument."""
   owner, _, name = value.partition("/")
   if not owner or not name or "/" in name:
     raise UsageError(f"--repo must be owner/name, got {value!r}")
@@ -204,11 +112,7 @@ def split_repo(value: str) -> tuple[str, str]:
 
 
 class CountingSession(requests.Session):
-  """A requests session that counts what a tick spent, split by host.
-
-  Only api.github.com requests come out of the repository's hourly budget; an artifact
-  download is a redirect to a storage host and is free, so the two are counted apart.
-  """
+  """A requests session that counts what a tick spent, split by host."""
 
   def __init__(self) -> None:
     """Builds an empty session with both counters at zero."""
@@ -217,17 +121,7 @@ class CountingSession(requests.Session):
     self.download_requests = 0
 
   def request(self, method: str | bytes, url: str | bytes, *args: Any, **kwargs: Any) -> requests.Response:
-    """Counts one request and sends it.
-
-    Args:
-      method: HTTP method.
-      url: Absolute URL.
-      *args: Passed straight through to `requests.Session.request`.
-      **kwargs: Passed straight through to `requests.Session.request`.
-
-    Returns:
-      The response.
-    """
+    """Counts one request and sends it."""
     if urlsplit(str(url)).netloc == github.API_HOST:
       self.api_requests += 1
     else:
@@ -237,17 +131,7 @@ class CountingSession(requests.Session):
 
 @dataclass(frozen=True)
 class Options:
-  """One tick's settings, all of them from the command line.
-
-  Attributes:
-    out: The store directory. Required, never defaulted.
-    repo: The repository to read, as "owner/name".
-    since: Start of the window, or None to use the watermark.
-    until: End of the window, or None for "up to now".
-    backfill_days: How far back the first tick of an empty store reaches.
-    dry_run: True to fetch and compute everything and write nothing.
-    max_runs: Stop after this many runs, or None for no cap.
-  """
+  """One tick's settings, all of them from the command line."""
 
   out: Path
   repo: str = DEFAULT_REPO
@@ -260,11 +144,7 @@ class Options:
 
 @dataclass
 class TickReport:
-  """Everything the tick has to be able to say about itself when it is done.
-
-  Counters are facts, not judgements: a suite with no test file is a normal state, and the
-  report says which suites and why rather than deciding whether that is bad.
-  """
+  """Everything the tick has to be able to say about itself when it is done."""
 
   mode: str = "tick"
   window_since: str | None = None
@@ -304,14 +184,7 @@ class TickReport:
   problems: list[str] = field(default_factory=list)
 
   def note_suite(self, run_id: int, suite_id: str, reason: str | None, is_partial: bool) -> None:
-    """Records why a suite has no numbers, or that it only has some of them.
-
-    Args:
-      run_id: The run the suite belongs to.
-      suite_id: The suite, e.g. "tpu-pathways-unit".
-      reason: The reason code from `junit`, or None when the suite published a result.
-      is_partial: True when some of the suite's workers published nothing.
-    """
+    """Records why a suite has no numbers, or that it only has some of them."""
     if reason:
       self.suite_reasons[reason] = self.suite_reasons.get(reason, 0) + 1
       examples = self.suite_reason_examples.setdefault(reason, [])
@@ -332,23 +205,12 @@ class TickReport:
 
   @property
   def changed(self) -> bool:
-    """True when the tick learned something, rather than only restamping meta.json.
-
-    meta.json is rewritten on every tick so the page can tell how fresh it is, so "a file
-    changed" is not the question. Rows, rebuilt months and pull request files are.
-    """
+    """True when the tick learned something, rather than only restamping meta.json."""
     return bool(self.rows_written or self.pr_files_written or self.months_rebuilt)
 
 
 class Tick:
-  """Collects one window of runs into the store.
-
-  The object holds what every step needs - the client, the store, the index, the report - so
-  each method can stay short and say one thing. Rows are appended as soon as a run has been
-  read whole, and the index is saved last, so a tick that dies half way leaves a store that
-  is merely behind: `Store.append` skips what it already holds, and the next tick redoes the
-  run without duplicating a single line.
-  """
+  """Collects one window of runs into the store."""
 
   def __init__(
       self,
@@ -358,15 +220,7 @@ class Tick:
       state: store_module.State,
       report: TickReport,
   ) -> None:
-    """Builds a tick.
-
-    Args:
-      options: The command-line settings.
-      client: The GitHub client to read through.
-      row_store: The store to append to.
-      state: The index the store loaded.
-      report: The report to fill in.
-    """
+    """Builds a tick."""
     self.options = options
     self.client = client
     self.store = row_store
@@ -390,12 +244,7 @@ class Tick:
   # ---------------------------------------------------------------- the window
 
   def window(self) -> tuple[datetime, datetime | None, bool]:
-    """Decides which window to ask the API for.
-
-    Returns:
-      (since, until, backfill). `backfill` is True when the store has no watermark, which is
-      the only thing that makes a tick walk a month instead of the last few hours.
-    """
+    """Decides which window to ask the API for."""
     until = self.options.until
     if self.options.since is not None:
       return self.options.since, until, self.state.watermark_created_at is None
@@ -409,11 +258,7 @@ class Tick:
     return min(watermark, self.now - timedelta(days=RECHECK_DAYS)), until, False
 
   def collect(self) -> None:
-    """Walks the window, oldest week first, collects every run in it, then chases merges.
-
-    Raises:
-      UsageError: The window ends before it starts.
-    """
+    """Walks the window, oldest week first, collects every run in it, then chases merges."""
     since, until, backfill = self.window()
     self.report.mode = "backfill" if backfill else "tick"
     self.report.window_since = iso_utc(since)
@@ -436,13 +281,7 @@ class Tick:
     self._refresh_merges()
 
   def _budget_allows(self) -> bool:
-    """Checks the API budget before starting another week of backfill.
-
-    Returns:
-      True to carry on. False when the budget is low, in which case the tick stops cleanly:
-      everything collected so far is kept, the watermark reflects it, and the next tick
-      resumes from there.
-    """
+    """Checks the API budget before starting another week of backfill."""
     try:
       status = self.client.rate_limit()
     except github.GitHubError as error:
@@ -457,16 +296,7 @@ class Tick:
     return False
 
   def _list_slice(self, since: datetime, until: datetime) -> list[dict[str, Any]]:
-    """Lists one week of runs, oldest first, with the superseded ones marked.
-
-    Args:
-      since: Start of the slice.
-      until: End of the slice.
-
-    Returns:
-      The run payloads, oldest first. Oldest first matters: the watermark then only ever
-      moves forward over runs that were really read, so stopping half way is safe.
-    """
+    """Lists one week of runs, oldest first, with the superseded ones marked."""
     try:
       listed = runs.list_runs(self.client, since, until)
     except (github.GitHubError, runs.RunsError) as error:
@@ -477,15 +307,7 @@ class Tick:
   # ------------------------------------------------------------------ one run
 
   def _collect_one(self, listed: dict[str, Any]) -> bool:
-    """Collects one run.
-
-    Args:
-      listed: The run payload from the listing, already carrying its superseded flag.
-
-    Returns:
-      True to carry on with the next run, False when the tick has hit `--max-runs` and should
-      stop cleanly.
-    """
+    """Collects one run."""
     if self.options.max_runs is not None and self._runs_processed >= self.options.max_runs:
       self.report.stopped_because = f"--max-runs {self.options.max_runs} reached; the next tick continues."
       return False
@@ -512,16 +334,7 @@ class Tick:
     return True
 
   def _failed(self, run_id: int, listed: dict[str, Any], error: Exception) -> None:
-    """Records a run that could not be collected, and arranges for it to be tried again.
-
-    The run goes on the in-flight list, which is read by run id rather than by window, so the
-    next tick retries it even though the watermark has moved past it.
-
-    Args:
-      run_id: The run that failed.
-      listed: Its run payload.
-      error: What went wrong.
-    """
+    """Records a run that could not be collected, and arranges for it to be tried again."""
     self.report.runs_failed += 1
     self.state.mark_pending(
         run_id,
@@ -532,34 +345,14 @@ class Tick:
     self.report.note_problem(f"run {run_id} could not be collected ({error}); it will be tried again next tick.")
 
   def _already_stored(self, listed: dict[str, Any], run_id: int) -> bool:
-    """True when every attempt of a finished run is already in the store.
-
-    Args:
-      listed: The run payload from the listing.
-      run_id: The run id.
-
-    Returns:
-      True when there is nothing to fetch. A run still going is never "already stored", and
-      neither is one whose attempt count has grown since it was collected.
-    """
+    """True when every attempt of a finished run is already in the store."""
     if listed.get("status") != store_module.COMPLETED_STATUS:
       return False
     attempts = int(listed.get("run_attempt") or 1)
     return all(self.state.is_collected(run_id, number) for number in range(1, attempts + 1))
 
   def _attempt_payloads(self, listed: dict[str, Any]) -> list[dict[str, Any]]:
-    """Returns one run payload per attempt, oldest attempt first.
-
-    A finished run on its first attempt needs no extra request: the listing payload already
-    describes the only attempt there is. Anything else goes through `runs.list_attempts`,
-    which re-reads the run because `run_attempt` moves while a collector works.
-
-    Args:
-      listed: The run payload from the listing.
-
-    Returns:
-      The attempt payloads, each carrying the listing's superseded flag so the row keeps it.
-    """
+    """Returns one run payload per attempt, oldest attempt first."""
     if listed.get("status") == store_module.COMPLETED_STATUS and int(listed.get("run_attempt") or 1) == 1:
       payloads = [listed]
     else:
@@ -574,19 +367,7 @@ class Tick:
     return marked
 
   def _collect_run(self, listed: dict[str, Any], run_id: int) -> None:
-    """Reads one run whole - attempts, jobs, pull request, tests - and stores its rows.
-
-    Args:
-      listed: The run payload from the listing.
-      run_id: The run id.
-
-    Raises:
-      github.GitHubError: A request failed after the client's own retries.
-      runs.RunsError: A payload was not the shape the API documents.
-      rows.RowError: A payload was missing a field a row needs.
-      store_module.StoreError: A row could not be written.
-      junit.JUnitError: An artifact could not be downloaded or parsed.
-    """
+    """Reads one run whole - attempts, jobs, pull request, tests - and stores its rows."""
     month = store_module.month_for_run(listed)
     attempts = self._attempt_payloads(listed)
     pull = runs.resolve_pull_request(self.client, listed)
@@ -661,22 +442,7 @@ class Tick:
       month: str,
       pull: dict[str, Any] | None,
   ) -> None:
-    """Remembers an attempt that has not finished, or gives up on one that never will.
-
-    An attempt is written when its status is `completed`. One still going is put on the
-    in-flight list and looked at again next tick. One that has been in flight for more than a
-    day is written once with the status it has - `in_progress`, `queued`, whatever the API
-    says - and marked incomplete, so a stuck run cannot block the store forever. That status
-    IS the incomplete marker on the row: adding an `incomplete` field to `RunRow` would break
-    `rows.from_json` for every row already stored, which reads the field set exactly.
-
-    Args:
-      payload: The attempt's run payload.
-      run_id: The run id.
-      number: The attempt number.
-      month: The month file the run belongs to.
-      pull: The pull request the run belongs to, or None.
-    """
+    """Remembers an attempt that has not finished, or gives up on one that never will."""
     if (run_id, number) not in self._expired:
       if self.state.mark_pending(run_id, number, created_at=payload.get("created_at"), status=payload.get("status")):
         self.report.attempts_pending += 1
@@ -696,16 +462,7 @@ class Tick:
     )
 
   def _collect_pending(self) -> None:
-    """Looks again at the attempts that were still running when a PAST tick saw them.
-
-    They are fetched by run id, not by listing, because a run that started before the
-    watermark would never come back in a window query.
-
-    The list is the one taken when the tick opened, and a run this tick has already read is
-    skipped. A run that has just been put on the in-flight list - it is still going, or it
-    failed a moment ago - is left for the next tick: re-reading it here would spend the same
-    requests twice and report the same run as two.
-    """
+    """Looks again at the attempts that were still running when a PAST tick saw them."""
     for run_id in self._pending_at_start:
       if self.options.max_runs is not None and self._runs_processed >= self.options.max_runs:
         return
@@ -731,17 +488,7 @@ class Tick:
   # -------------------------------------------------------------- merge chasing
 
   def _refresh_merges(self) -> None:
-    """Asks the pull requests that were open when their run was read whether they merged.
-
-    The list is derived from the store, not remembered in the index: a stored run row whose
-    event is `pull_request`, whose pull request number is known and whose `pr_merged_at` is
-    still null is a run waiting to find out. That keeps the index to what the storage rules
-    say it holds, and it survives an index rebuild for free.
-
-    One request per waiting pull request, and a second only for the few that merged since the
-    last tick. The merge is stored as an appended correction, exactly like any other: the
-    original row stays where it is.
-    """
+    """Asks the pull requests that were open when their run was read whether they merged."""
     waiting = self._open_pull_requests()
     self.report.prs_watched = len(waiting)
     for number in sorted(waiting):
@@ -758,12 +505,7 @@ class Tick:
         self.report.merges_learned += 1
 
   def _open_pull_requests(self) -> dict[int, int]:
-    """Finds the stored runs whose pull request had not merged when they were read.
-
-    Returns:
-      Pull request number -> the newest stored run id for it. Bounded by `MERGE_WATCH_DAYS`,
-      so a pull request nobody ever merges stops being asked about.
-    """
+    """Finds the stored runs whose pull request had not merged when they were read."""
     cutoff = iso_utc(self.now - timedelta(days=MERGE_WATCH_DAYS))
     months = sorted({store_module.month_key(cutoff), store_module.month_key(self.collected_at)})
     waiting: dict[int, int] = {}
@@ -785,15 +527,7 @@ class Tick:
     return waiting
 
   def _store_merge(self, run_id: int, pull: dict[str, Any]) -> bool:
-    """Appends a corrected run row for a run whose pull request has now merged.
-
-    Args:
-      run_id: The run to correct.
-      pull: The merged pull request.
-
-    Returns:
-      True when a correction was written.
-    """
+    """Appends a corrected run row for a run whose pull request has now merged."""
     if not run_id:
       return False
     try:
@@ -827,21 +561,7 @@ class Tick:
   # ------------------------------------------------------------------- tests
 
   def _harvest_tests(self, listed: dict[str, Any], run_id: int, jobs: Sequence[dict[str, Any]]) -> junit.RunTests | None:
-    """Downloads and parses the run's JUnit artifacts, or says why it did not.
-
-    Artifacts are fetched early and eagerly - before anyone knows whether the pull request
-    will merge - because GitHub deletes them after about a day while runs and jobs stay
-    readable for ninety. A run older than that is not asked about its artifacts at all: the
-    answer is already known, and the gap is counted so the report can state it.
-
-    Args:
-      listed: The run payload from the listing, carrying the superseded flag.
-      run_id: The run id.
-      jobs: The newest completed attempt's jobs, used to ask about the flavors that really ran.
-
-    Returns:
-      The parsed results, or None when there are none to read.
-    """
+    """Downloads and parses the run's JUnit artifacts, or says why it did not."""
     if listed.get("path") != runs.CI_PIPELINE_PATH:
       return None
     if listed.get(runs.SUPERSEDED_FIELD):
@@ -867,16 +587,7 @@ class Tick:
     return found
 
   def _suite_rows(self, run_payload: dict[str, Any], run_tests: junit.RunTests) -> list[rows.SuiteRow]:
-    """Builds the per-flavor totals row for every suite of one attempt.
-
-    Args:
-      run_payload: The attempt's run payload, which is where the attempt number comes from.
-      run_tests: The run's parsed results.
-
-    Returns:
-      One row per suite, including the suites that published nothing: their counts are None
-      and they carry a reason, because a suite with no file is not a suite with no tests.
-    """
+    """Builds the per-flavor totals row for every suite of one attempt."""
     built: list[rows.SuiteRow] = []
     for suite_id, entry in sorted(run_tests.suites.items()):
       row = rows.suite_row(run_payload, entry, collected_at=self.collected_at)
@@ -886,21 +597,7 @@ class Tick:
     return built
 
   def _is_full_snapshot(self, run_payload: dict[str, Any]) -> bool:
-    """True when this run is the day's full per-test snapshot.
-
-    Once a day the first scheduled run on main keeps every test row, which is what gives the
-    per-test history a daily resolution without storing several thousand rows six times an
-    hour. Every other run keeps the two-tier selection instead.
-
-    Which day is already taken is read from the store rather than remembered in the index: a
-    scheduled main run of a day the store already has one for is not the first.
-
-    Args:
-      run_payload: The attempt's run payload.
-
-    Returns:
-      True when this run should keep every test row.
-    """
+    """True when this run is the day's full per-test snapshot."""
     if run_payload.get("event") != runs.EVENT_SCHEDULE or run_payload.get("head_branch") != "main":
       return False
     day = str(run_payload.get("created_at") or "")[:10]
@@ -914,15 +611,7 @@ class Tick:
     return True
 
   def _snapshot_days(self) -> dict[str, int]:
-    """Returns which day already has a full snapshot, and the run that gave it.
-
-    Read from the store once per tick rather than remembered in the index. A run that finds
-    its own id against its day is still the snapshot: re-collecting a run must keep the same
-    rows, not decide it has been beaten by itself.
-
-    Returns:
-      "YYYY-MM-DD" -> the run id of that day's scheduled main run.
-    """
+    """Returns which day already has a full snapshot, and the run that gave it."""
     if self._snapshot_days_cache is None:
       claimed: dict[str, int] = {}
       month = store_module.month_key(self.collected_at)
@@ -945,13 +634,7 @@ class Tick:
     return self._snapshot_days_cache
 
   def _known_names(self) -> set[tuple[str, str, str]]:
-    """Returns the test names the store already holds, so a new test can be recognised.
-
-    Streamed rather than loaded: only the three name fields are kept, so the memory cost is a
-    few thousand tuples whatever the files hold. Empty on the first tick of a new store, which
-    is correct rather than convenient - every test really is new to it, and the first harvest
-    keeps them all.
-    """
+    """Returns the test names the store already holds, so a new test can be recognised."""
     if self._known_names_cache is None:
       found: set[tuple[str, str, str]] = set()
       months = sorted(
@@ -969,21 +652,7 @@ class Tick:
     return self._known_names_cache
 
   def _kept_test_rows(self, run_payload: dict[str, Any], run_tests: junit.RunTests) -> list[rows.TestRow]:
-    """Builds this run's test rows and keeps the two tiers the store is allowed to hold.
-
-    Storing every test of every run would be about 3,700 rows a run, six times an hour. So a
-    normal run keeps only what a chart or a triage reads back: every failure, every test the
-    store has never seen before, and the slowest 25 of each suite. The day's scheduled main
-    run keeps everything, so the full list still exists at daily resolution.
-
-    Args:
-      run_payload: The attempt's run payload.
-      run_tests: The run's parsed results.
-
-    Returns:
-      The rows to store, in suite then worker order. Anything not kept is gone when the
-      artifact expires; that is a deliberate trade, written down in the data catalog.
-    """
+    """Builds this run's test rows and keeps the two tiers the store is allowed to hold."""
     built: list[rows.TestRow] = []
     for suite_id, entry in sorted(run_tests.suites.items()):
       for worker, result in sorted(entry.per_worker.items()):
@@ -1028,36 +697,14 @@ class Tick:
   # ------------------------------------------------------------------ writing
 
   def _append(self, month: str, kind: str, records: Sequence[Any], correction: bool = False) -> None:
-    """Appends one kind of row to its month's file, unless this is a dry run.
-
-    Args:
-      month: The "YYYY-MM" of the run's creation, which is what decides the file.
-      kind: One of the `rows.KIND_*` constants.
-      records: The rows to append.
-      correction: True to write rows whose keys are already stored.
-
-    Raises:
-      store_module.StoreError: The file could not be written.
-    """
+    """Appends one kind of row to its month's file, unless this is a dry run."""
     if not records or self.options.dry_run:
       return
     self.store.append(kind, list(records), month=month, correction=correction)
 
 
 def months_missing_views(row_store: store_module.Store, today: date) -> set[str]:
-  """Finds the months whose view files have gone, so the next tick writes them back.
-
-  Views are disposable: delete them all and this is what puts them back. Only months still
-  inside the view window are considered - an older month is deleted, rows and views both, by
-  `prune_old_files`.
-
-  Args:
-    row_store: The store to look in.
-    today: The day the tick is running, as a `date`.
-
-  Returns:
-    The month keys that are missing at least one view file.
-  """
+  """Finds the months whose view files have gone, so the next tick writes them back."""
   window = set(views.months_in_window(today))
   missing: set[str] = set()
   for month in row_store.months():
@@ -1071,23 +718,7 @@ def months_missing_views(row_store: store_module.Store, today: date) -> set[str]
 
 
 def prune_old_files(options: Options, row_store: store_module.Store, report: TickReport, now: datetime) -> None:
-  """Deletes the rows and views the dashboard can no longer show, so the store stops growing.
-
-  The dashboard looks back `views.VIEW_WINDOW_DAYS` days, which touches four months at most.
-  Rows of older months go, and so do view files older than the window. This runs before the
-  views are rebuilt, so the new meta.json never lists a file that was just deleted.
-
-  On a dry run nothing is deleted; the report only counts what would go.
-
-  Args:
-    options: The tick's settings.
-    row_store: The store to prune.
-    report: The report to count into.
-    now: The current moment.
-
-  Raises:
-    TickError: A file could not be deleted.
-  """
+  """Deletes the rows and views the dashboard can no longer show, so the store stops growing."""
   today = now.date()
   try:
     data_files = row_store.prune_months(views.months_in_window(today)[0], dry_run=options.dry_run)
@@ -1101,21 +732,7 @@ def prune_old_files(options: Options, row_store: store_module.Store, report: Tic
 def rebuild_views(
     options: Options, row_store: store_module.Store, state: store_module.State, report: TickReport, now: datetime
 ) -> None:
-  """Rewrites the view files for every month that needs them, then meta.json.
-
-  On a dry run the same work happens into a throwaway directory, so the rendering is really
-  exercised and nothing under `--out` is touched.
-
-  Args:
-    options: The tick's settings.
-    row_store: The store to read rows from.
-    state: The index, whose in-flight count meta.json publishes.
-    report: The report to count into.
-    now: The current moment.
-
-  Raises:
-    TickError: A view file could not be written.
-  """
+  """Rewrites the view files for every month that needs them, then meta.json."""
   today = now.date()
   wanted = sorted(report.months_touched | months_missing_views(row_store, today))
   try:
@@ -1154,12 +771,7 @@ def format_count(value: int) -> str:
 
 
 def print_report(report: TickReport, options: Options) -> None:
-  """Prints the tick's report: what it saw, what it wrote, and what it could not read.
-
-  Args:
-    report: The finished report.
-    options: The tick's settings, for the paths and the dry-run note.
-  """
+  """Prints the tick's report: what it saw, what it wrote, and what it could not read."""
   width = 26
   print()
   print(f"CI metrics tick - {options.repo}")
@@ -1231,15 +843,7 @@ def print_report(report: TickReport, options: Options) -> None:
 
 
 def summary_line(report: TickReport, options: Options) -> str:
-  """Builds the one line a log can grep, which is always the last thing printed.
-
-  Args:
-    report: The finished report.
-    options: The tick's settings.
-
-  Returns:
-    A single line naming the outcome, what changed and what it cost.
-  """
+  """Builds the one line a log can grep, which is always the last thing printed."""
   if report.problems:
     outcome = "lost data"
   elif not report.changed:
@@ -1266,14 +870,7 @@ def summary_line(report: TickReport, options: Options) -> str:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-  """Parses the command line.
-
-  Args:
-    argv: Arguments to parse, or None to read sys.argv.
-
-  Returns:
-    The parsed arguments.
-  """
+  """Parses the command line."""
   parser = argparse.ArgumentParser(
       prog="python -m collector.tick",
       description="Collect one window of pipeline runs into a store and rebuild its views.",
@@ -1299,18 +896,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 def build_options(args: argparse.Namespace) -> Options:
-  """Turns the parsed arguments into the tick's settings.
-
-  Args:
-    args: The parsed command line.
-
-  Returns:
-    The settings.
-
-  Raises:
-    UsageError: An argument is impossible - a bad date, a window that ends before it starts,
-      or a count below one.
-  """
+  """Turns the parsed arguments into the tick's settings."""
   # `Path("")` is `PosixPath(".")`, so an empty --out would reach the store as the working
   # directory and only be caught when that directory happens to hold a `.git`. The store's own
   # guard cannot see it, because by then the empty string has already become a path.
@@ -1336,15 +922,7 @@ def build_options(args: argparse.Namespace) -> Options:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-  """Runs one tick.
-
-  Args:
-    argv: Command-line arguments, or None to read sys.argv.
-
-  Returns:
-    0 when the tick finished, whether or not it found anything new; 1 when data was lost or
-    put at risk, which is always safe to retry; 2 when the command line was wrong.
-  """
+  """Runs one tick."""
   args = parse_args(argv)
   try:
     owner, name = split_repo(args.repo)

@@ -12,69 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Builds the JSON files the dashboard loads, out of the rows the store already holds.
-
-This is layer 3. Layer 1 reads GitHub, layer 2 turns what it read into numbers and row
-shapes, and this module turns stored rows into the six view groups plus one file per merged
-pull request. It is the only module that writes anything, and it never fetches: everything
-it needs is already on disk.
-
-What it writes, all under `<out>/views/`:
-
-  meta.json               what exists, when it was generated, and which pull request files
-                          changed. The browser reads this first and nothing else is fetched
-                          until it has.
-  <group>-YYYY-MM.json    one file per view group per month: runs, suites, flaky, queue,
-                          workflows.
-  pr/<n>.json             one merged pull request in full - every attempt, job, step, suite
-                          and test row the store holds for it.
-
-Four rules shape the format.
-
-  * **Columnar.** A table is `{"columns": [...], "rows": [[...], ...]}`, not a list of
-    objects, because repeating twenty field names on eight thousand rows costs about three
-    times the bytes. `to_columnar` and `from_columnar` are exact inverses, including None,
-    and the browser rehydrates with the same two lines.
-  * **Split by month, rebuilt by month.** A tick rewrites the open months only. A closed
-    month's file is byte-identical from one tick to the next, so git sees no change and the
-    browser's cache keeps working. `build_views` reports what it wrote, what it left alone
-    because the bytes were already right, and what it skipped without reading.
-  * **No timestamp inside a view file.** `generated_at` lives in meta.json alone. If a view
-    carried its own build time, every file would change on every tick and the store would
-    grow by a full copy six times a day.
-  * **Missing is null.** A suite that published no test file reaches the view as null counts
-    with its reason code, never as zero, and a suite where only some workers reported
-    carries `is_partial` so it cannot be drawn as a drop. This module never fills a gap with
-    a number.
-  * **One row per pull request, in the runs view only.** A pull request can have more than
-    one completed run - an earlier push that finished before the next push arrived is kept,
-    not superseded - so the suites and queue tables can carry two rows with the same `pr`.
-    The runs view and `pr/<n>.json` describe exactly one of them, and every other table
-    marks it with `is_representative`. Join on `run_id`, or filter on that flag; joining on
-    `pr` alone draws the abandoned push as a second point at the same place on the axis.
-
-Where the numbers come from
----------------------------
-Every duration in every view is `derive.py`'s answer, not a second implementation. The one
-thing this module computes itself is arithmetic `derive.py` does not claim: the median of a
-list (`statistics.median`), the count of overlapping run windows, and which scheduled probe
-run sits nearest a merged pull request's run. Per-step seconds are NOT computed here at all -
-steps travel as their two timestamps, because `derive.py` has no public "seconds of a named
-step" and this module will not grow one.
-
-It imports `derive` and `rows` and nothing else from the package: like `junit.py`, it stays
-importable with no network module - and therefore no `requests` - present.
-
-On the length of the builders
------------------------------
-`build_pr_view`, `build_views`, `build_runs_view` and `build_flaky_view` are longer than
-anything in the modules they sit on. That is deliberate and it is measured: their branch and
-statement counts are small - `build_pr_view` is seven branches - and the lines are the column
-dictionaries themselves, one field per line because the formatter spreads them. Splitting a
-literal into a helper per table would move the same text and cost the reader one hop per
-table to see which field a column carries. If a future change adds control flow rather than
-fields, split it then.
-"""
+"""Builds the JSON files the dashboard loads, out of the rows the store already holds."""
 
 from __future__ import annotations
 
@@ -398,11 +336,7 @@ PR_ERRORS_COLUMNS = (
 
 
 class ViewError(ValueError):
-  """Raised when a view cannot be built or a view file cannot be read back.
-
-  The message always names the table and the field at fault, so a tick that dies on one odd
-  record says which one it was.
-  """
+  """Raised when a view cannot be built or a view file cannot be read back."""
 
 
 class StateLike(Protocol):
@@ -414,15 +348,7 @@ class StateLike(Protocol):
 
 
 class RowStore(Protocol):
-  """The part of the store this module reads, satisfied by `store.Store`.
-
-  Declared structurally, the way `junit.py` declares its client, so `views.py` does not import
-  the writer and a test can hand it a list-backed stub.
-
-  `read_rows` is expected to have applied the correction rule already - of the lines sharing a
-  key, the one with the greatest `collected_at` wins. `store.Store.read` does. `latest_rows`
-  is applied again here anyway, because it is idempotent and a stub is not obliged to.
-  """
+  """The part of the store this module reads, satisfied by `store.Store`."""
 
   def months(self, kind: str) -> Sequence[str]:
     """Returns the months one row kind has a file for, as "YYYY-MM", ascending."""
@@ -440,24 +366,7 @@ class RowStore(Protocol):
 
 
 def to_columnar(records: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> dict[str, Any]:
-  """Turns a list of records into one columnar table.
-
-  The names are written once, in the `columns` list, and each record becomes a plain array in
-  that order. Nothing is coerced: a None stays a JSON null, a float stays a float, and a list
-  field stays a list.
-
-  Args:
-    records: The records, each a mapping whose keys are exactly `columns`.
-    columns: The column names, in the order they should be written.
-
-  Returns:
-    `{"columns": [...], "rows": [[...], ...]}`.
-
-  Raises:
-    ViewError: `columns` repeats a name, or a record's keys are not exactly `columns`. Both
-      are refused rather than patched, because a silently dropped field would reach the
-      dashboard as a missing number and be drawn as a gap.
-  """
+  """Turns a list of records into one columnar table."""
   names = list(columns)
   if len(set(names)) != len(names):
     raise ViewError(f"columnar table has a repeated column: {sorted({n for n in names if names.count(n) > 1})}")
@@ -474,20 +383,7 @@ def to_columnar(records: Sequence[Mapping[str, Any]], columns: Sequence[str]) ->
 
 
 def from_columnar(obj: Mapping[str, Any]) -> list[dict[str, Any]]:
-  """Turns a columnar table back into a list of records. The exact inverse of `to_columnar`.
-
-  The browser does the same two lines. Keeping it this simple is the point: there is no type
-  coercion and no ordering trick to reproduce in JavaScript.
-
-  Args:
-    obj: A table as `to_columnar` writes it.
-
-  Returns:
-    One dict per row, keys in column order.
-
-  Raises:
-    ViewError: The object is not a table, or a row is not as long as the column list.
-  """
+  """Turns a columnar table back into a list of records. The exact inverse of `to_columnar`."""
   if not isinstance(obj, Mapping) or "columns" not in obj or "rows" not in obj:
     raise ViewError("not a columnar table: expected an object with 'columns' and 'rows'")
   names = obj["columns"]
@@ -521,14 +417,7 @@ def parse_timestamp(value: Any) -> datetime | None:
 
 
 def month_key(moment: Any) -> str | None:
-  """Returns the "YYYY-MM" a moment belongs to, in UTC.
-
-  Args:
-    moment: A date, a datetime, or an ISO-8601 timestamp string.
-
-  Returns:
-    The month key, or None when the value cannot be read as a moment.
-  """
+  """Returns the "YYYY-MM" a moment belongs to, in UTC."""
   if isinstance(moment, datetime):
     aware = moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
     return aware.astimezone(timezone.utc).strftime("%Y-%m")
@@ -546,11 +435,7 @@ def month_of_run(run: rows.RunRow) -> str | None:
 
 
 def _month_start(month: str) -> date:
-  """Returns the first day of a "YYYY-MM" month.
-
-  Raises:
-    ViewError: The string is not a month key.
-  """
+  """Returns the first day of a "YYYY-MM" month."""
   try:
     return datetime.strptime(month, "%Y-%m").date()
   except (TypeError, ValueError) as error:
@@ -567,16 +452,7 @@ def _shift_month(month: str, back: int) -> str:
 
 
 def months_in_window(today: date, window_days: int = VIEW_WINDOW_DAYS) -> list[str]:
-  """Lists the months the dashboard's window touches, oldest first.
-
-  Args:
-    today: The day the tick is running.
-    window_days: How far back the dashboard can look.
-
-  Returns:
-    Every "YYYY-MM" between the first day of the window and today, inclusive. A 90-day window
-    touches four months at most.
-  """
+  """Lists the months the dashboard's window touches, oldest first."""
   first = window_first_day(today, window_days)
   months = []
   cursor = date(first.year, first.month, 1)
@@ -587,44 +463,12 @@ def months_in_window(today: date, window_days: int = VIEW_WINDOW_DAYS) -> list[s
 
 
 def window_first_day(today: date, window_days: int = VIEW_WINDOW_DAYS) -> date:
-  """Returns the first day the dashboard's window still shows.
-
-  Args:
-    today: The day the tick is running.
-    window_days: How far back the dashboard can look.
-
-  Returns:
-    The day `window_days - 1` days before today, so the window holds `window_days` days.
-  """
+  """Returns the first day the dashboard's window still shows."""
   return today - timedelta(days=max(window_days, 1) - 1)
 
 
 def prune_views(out_dir: Path | str, today: date, dry_run: bool = False) -> list[Path]:
-  """Deletes the view files the dashboard can no longer show.
-
-  Two kinds of file go:
-
-    * a month file, `<group>-YYYY-MM.json`, whose month is older than the window's first month;
-    * a pull request file whose `updated_at` in meta.json is before the window's first day.
-      A pull request file is rewritten while the month of its newest run is open, so
-      `updated_at` is never older than that run - an old `updated_at` means the whole pull
-      request has left the window.
-
-  A pull request with no `updated_at` is kept, because nothing says how old it is. The path
-  is always built from the number, never from meta.json's `file` field. meta.json itself is
-  not edited: the next build drops the entries whose files are gone.
-
-  Args:
-    out_dir: The output directory, the one `--out` names.
-    today: The day the tick is running.
-    dry_run: Only list the files. Delete nothing.
-
-  Returns:
-    The files deleted - or, on a dry run, the files that would be - sorted by path.
-
-  Raises:
-    OSError: A file could not be deleted.
-  """
+  """Deletes the view files the dashboard can no longer show."""
   views_root = Path(out_dir) / VIEWS_DIRNAME
   if not views_root.is_dir():
     return []
@@ -661,24 +505,7 @@ def prune_views(out_dir: Path | str, today: date, dry_run: bool = False) -> list
 
 
 def months_to_rebuild(available: Iterable[str], today: date) -> list[str]:
-  """Picks the months whose view files this tick should rewrite.
-
-  A month is open while it is still gaining rows. That is today's month, always; the month
-  before it for the first `MONTH_OVERLAP_DAYS` days, because a tick just after midnight on
-  the 1st collects runs created in the month that has just ended and those rows are filed
-  under it; and any month later than today's, which can only mean the store ran under a clock
-  ahead of this one and its rows would otherwise never be published.
-
-  Every other month is closed. Its file is left exactly as it is - not read, not rewritten -
-  which is what keeps a tick's commit small and a closed month's URL cacheable forever.
-
-  Args:
-    available: The months the store holds.
-    today: The day the tick is running.
-
-  Returns:
-    The months to rebuild, oldest first, restricted to months the store actually has.
-  """
+  """Picks the months whose view files this tick should rewrite."""
   current = today.strftime("%Y-%m")
   open_months = {current}
   if today.day <= MONTH_OVERLAP_DAYS:
@@ -694,17 +521,7 @@ def months_to_rebuild(available: Iterable[str], today: date) -> list[str]:
 
 
 def store_months(store: RowStore) -> list[str]:
-  """Returns every month the store holds a file for, in any kind, oldest first.
-
-  A store keeps one file per kind per month, so a month with runs but no test rows still
-  counts. The union is what the view builder walks.
-
-  Args:
-    store: The row store.
-
-  Returns:
-    The month keys, ascending.
-  """
+  """Returns every month the store holds a file for, in any kind, oldest first."""
   found: set[str] = set()
   for kind in (rows.KIND_RUN, rows.KIND_JOB, rows.KIND_SUITE, rows.KIND_TEST, rows.KIND_RESCUE):
     found.update(store.months(kind))
@@ -712,18 +529,7 @@ def store_months(store: RowStore) -> list[str]:
 
 
 def latest_rows(records: Iterable[rows.Row]) -> list[rows.Row]:
-  """Applies the reader rule: the last row per key wins.
-
-  The store is append-only, so a correction is a second row carrying the same key and a later
-  `collected_at`. Ties - two rows written inside the same second - are broken by position, so
-  the later line in the later file wins, exactly as the browser's loader does it.
-
-  Args:
-    records: Stored rows, in the order they were written.
-
-  Returns:
-    One row per key, in the order each key was first seen.
-  """
+  """Applies the reader rule: the last row per key wins."""
   best: dict[str, tuple[str, int, rows.Row]] = {}
   for position, record in enumerate(records):
     key = record.key()
@@ -735,19 +541,7 @@ def latest_rows(records: Iterable[rows.Row]) -> list[rows.Row]:
 
 
 def job_payload(job: rows.JobRow) -> dict[str, Any]:
-  """Turns a stored job row back into the shape `derive.py` reads.
-
-  A `JobRow` carries every field the jobs endpoint returned, under the same names, with two
-  exceptions: the job's id is stored as `job_id` and its attempt as `attempt`. This puts the
-  API's own names back so the row can be handed straight to `derive.queue_seconds`,
-  `derive.phase_split` and the rest without any of them learning about stored rows.
-
-  Args:
-    job: The stored job row.
-
-  Returns:
-    A plain dict, safe to mutate, holding both spellings.
-  """
+  """Turns a stored job row back into the shape `derive.py` reads."""
   payload = dataclasses.asdict(job)
   payload["id"] = job.job_id
   payload["run_attempt"] = job.attempt
@@ -755,19 +549,7 @@ def job_payload(job: rows.JobRow) -> dict[str, Any]:
 
 
 def pool_label(job: Mapping[str, Any]) -> str | None:
-  """Returns the runs-on label that names a job's runner pool.
-
-  The label a job asked for is the pool it queued in: `linux-x86-ct6e-180-4tpu`,
-  `linux-x86-n2-32`, and so on. A known label wins over an unknown one, so the pool and the
-  lane always agree with `derive.device_lane`.
-
-  Args:
-    job: The job payload.
-
-  Returns:
-    The label in lower case, or None when the job asked for no runner at all - a skipped job
-    has an empty labels list and never queued anywhere.
-  """
+  """Returns the runs-on label that names a job's runner pool."""
   labels = job.get("labels")
   if not isinstance(labels, (list, tuple)):
     return None
@@ -783,11 +565,7 @@ def pool_label(job: Mapping[str, Any]) -> str | None:
 
 
 def _median(values: Sequence[float]) -> float | None:
-  """Returns the median of the values, or None for an empty list.
-
-  A median is statistics, not job arithmetic, so it comes from the standard library rather
-  than from `derive.py`.
-  """
+  """Returns the median of the values, or None for an empty list."""
   return statistics.median(values) if values else None
 
 
@@ -798,11 +576,7 @@ def _median(values: Sequence[float]) -> float | None:
 
 @dataclass
 class RunAttempt:
-  """One attempt of one run, with its jobs, its suites and the numbers `derive.py` gives.
-
-  Built once per attempt and handed to every builder, so `phase_split` runs once even though
-  four views quote it.
-  """
+  """One attempt of one run, with its jobs, its suites and the numbers `derive.py` gives."""
 
   run: rows.RunRow
   jobs: list[dict[str, Any]] = field(default_factory=list)
@@ -832,12 +606,7 @@ class RunAttempt:
 
 @dataclass
 class MonthData:
-  """Every row of one month, deduplicated, indexed by run and attempt.
-
-  `runs` holds one entry per (run id, attempt). `merged_pr_runs` maps a merged pull request
-  number to the one run that represents it. `kept_run_ids` is the set of runs the views draw:
-  everything else stays in the store but is not published.
-  """
+  """Every row of one month, deduplicated, indexed by run and attempt."""
 
   month: str
   attempts: dict[tuple[int, int], RunAttempt] = field(default_factory=dict)
@@ -869,19 +638,7 @@ class MonthData:
     return last.run.pr_number
 
   def is_representative(self, run_id: int) -> bool:
-    """True when this run is the one its pull request is drawn from.
-
-    A pull request that pushed twice can leave two completed runs behind. Only one of them
-    reaches the runs view and `pr/<n>.json`; the others are published in the per-run tables
-    but must not be drawn as a second point for the same pull request.
-
-    Args:
-      run_id: The run.
-
-    Returns:
-      True for a scheduled run, which represents itself, and for the one run chosen for its
-      pull request.
-    """
+    """True when this run is the one its pull request is drawn from."""
     number = self.pr_of(run_id)
     if number is None:
       return True
@@ -889,20 +646,7 @@ class MonthData:
 
 
 def _is_kept(run: rows.RunRow) -> bool:
-  """True when a run belongs in the published views.
-
-  Two kinds are published: the run of a merged pull request, which is what every chart on the
-  Main page is made of, and a scheduled run, which is the probe series and the daily
-  full-history snapshot. A superseded run is never published - it was cancelled by a newer
-  push and its numbers describe work that was abandoned - and neither is a pull request that
-  did not merge. Their rows stay in the store; compaction trims them when the month closes.
-
-  Args:
-    run: The stored run row.
-
-  Returns:
-    True when the run should reach a view file.
-  """
+  """True when a run belongs in the published views."""
   if run.superseded:
     return False
   if run.is_merged_pr:
@@ -911,21 +655,7 @@ def _is_kept(run: rows.RunRow) -> bool:
 
 
 def load_month(store: RowStore, month: str) -> MonthData:
-  """Reads one month out of the store and indexes it.
-
-  Two passes. The first reads runs, jobs, suites and rescues, which is everything needed to
-  decide which runs are published and which pull requests merged. The second reads test rows,
-  and keeps only the ones belonging to a merged pull request's run: a scheduled run's daily
-  snapshot is every test in the repository and none of it is ever drawn, so carrying it into
-  a view would cost megabytes for nothing.
-
-  Args:
-    store: The row store.
-    month: "YYYY-MM".
-
-  Returns:
-    The month's rows, deduplicated by key and indexed by run and attempt.
-  """
+  """Reads one month out of the store and indexes it."""
   data = MonthData(month=month)
   for kind in (rows.KIND_RUN, rows.KIND_JOB, rows.KIND_SUITE, rows.KIND_RESCUE):
     for record in latest_rows(store.read_rows(kind, [month])):
@@ -956,16 +686,7 @@ def load_month(store: RowStore, month: str) -> MonthData:
 
 
 def _place_row(data: MonthData, record: rows.Row) -> None:
-  """Files one deduplicated row under its run and attempt.
-
-  A job, suite or test row whose run has no run row is dropped: the store writes a run row
-  first, so a row with no run is a half-written tick, and publishing it would draw a run with
-  no identity.
-
-  Args:
-    data: The month being loaded.
-    record: The row.
-  """
+  """Files one deduplicated row under its run and attempt."""
   kind = rows.row_kind(record)
   stamp = getattr(record, "collected_at", "") or ""
   run_id = record.run_id
@@ -989,16 +710,7 @@ def _place_row(data: MonthData, record: rows.Row) -> None:
 
 
 def _claim_pull_request(data: MonthData, run: rows.RunRow) -> None:
-  """Records the one run that represents a merged pull request.
-
-  A pull request can have several runs, one per push. The dashboard traces the final commit
-  only, so the run whose head sha is the pull request's head sha wins; failing that, the
-  newest run by creation time wins, which is the same run in every case measured.
-
-  Args:
-    data: The month being loaded.
-    run: A run row of a merged pull request.
-  """
+  """Records the one run that represents a merged pull request."""
   number = run.pr_number
   if number is None:
     return
@@ -1027,21 +739,7 @@ def _claim_pull_request(data: MonthData, run: rows.RunRow) -> None:
 
 
 def _job_flavor(job: Mapping[str, Any], flavors: set[str]) -> tuple[str | None, int | None]:
-  """Returns the test flavor and worker number a job ran, or (None, None).
-
-  `derive.flavor_of` reads the last segment of any job name, so on a real run it also answers
-  "Build Wheel" and "Pre-commit Linters". `flavors` is the allowlist from
-  `derive.test_flavors`, which keeps only the names backed by a job that ran tests, and this
-  checks against it before believing either reading.
-
-  Args:
-    job: The job payload.
-    flavors: The flavors that really ran in this attempt.
-
-  Returns:
-    (flavor, worker). The worker is None for a flavor whose jobs are not named
-    "Execute Tests (N)" - the Pathways flavors use a different name shape.
-  """
+  """Returns the test flavor and worker number a job ran, or (None, None)."""
   parsed = derive.parse_execute_tests_name(job.get("name"))
   if parsed is not None and parsed[0] in flavors:
     return parsed[0], parsed[1]
@@ -1052,16 +750,7 @@ def _job_flavor(job: Mapping[str, Any], flavors: set[str]) -> tuple[str | None, 
 
 
 def _job_record(job: Mapping[str, Any], flavors: set[str]) -> dict[str, Any]:
-  """Builds the per-job fields every view spells the same way.
-
-  Args:
-    job: The job payload.
-    flavors: The attempt's test flavors, for `_job_flavor`.
-
-  Returns:
-    A dict of the shared fields. Every duration comes from `derive.py` and is None when that
-    job cannot answer - a carried-over job, or one that never held a runner.
-  """
+  """Builds the per-job fields every view spells the same way."""
   flavor, worker = _job_flavor(job, flavors)
   return {
       "job_id": job.get("id"),
@@ -1082,27 +771,7 @@ def _job_record(job: Mapping[str, Any], flavors: set[str]) -> dict[str, Any]:
 
 
 def _suite_record(entry: RunAttempt, suite: rows.SuiteRow, flavors: set[str]) -> dict[str, Any]:
-  """Builds the per-suite fields shared by the suites view and a pull request view.
-
-  A nested suite - the decoupled pass, which runs inside cpu-unit worker 1 - gets null for
-  duration, machine time and workers. Its `flavor` is cpu-unit, so measuring it against
-  cpu-unit's jobs would report cpu-unit's half hour as the nested pass's twenty seconds. Its
-  JUnit seconds are real and are carried; its wall clock is simply not measurable, and a null
-  says so.
-
-  A suite whose flavor has no stored jobs in this attempt gets the same treatment. There is
-  nothing to measure it against, and `derive.machine_seconds([])` answers 0.0 - a real answer
-  to a different question. Publishing that would draw a suite as having used no machine at
-  all, so the four measured fields are null instead.
-
-  Args:
-    entry: The attempt the suite ran in.
-    suite: The stored suite row.
-    flavors: The attempt's test flavors.
-
-  Returns:
-    A dict of the shared fields.
-  """
+  """Builds the per-suite fields shared by the suites view and a pull request view."""
   nested = suite.nested_in is not None
   measurable = not nested and suite.flavor in flavors
   flavor_jobs = derive.jobs_for_flavor(entry.jobs, suite.flavor) if measurable else []
@@ -1128,31 +797,7 @@ def _suite_record(entry: RunAttempt, suite: rows.SuiteRow, flavors: set[str]) ->
 
 
 def _overlap_counts(data: MonthData) -> dict[int, int]:
-  """Counts, for every published run, how many other runs were in flight at the same time.
-
-  A run's window is its own `created_at` - the moment GitHub accepted it - to the finish of
-  its last job, which is `derive.phase_split(...).last_completed_at` of its highest stored
-  attempt and falls back to the run's `updated_at` when no job row was stored. Two runs
-  overlap when their windows intersect, whatever workflow, trigger or branch they belong to.
-  That is the definition the dashboard prints as "N pipeline runs overlapped it"; it never
-  says "concurrent". A re-run stretches the window, because the run really was open that
-  whole time.
-
-  The windows are closed at both ends, so two runs a second apart count as overlapping and a
-  run whose window is a single instant - created and finished inside the same second, or
-  stored with no jobs at all - still counts the runs it sat inside. Timestamps here have
-  one-second resolution, so treating the boundary as open would report zero for a run that
-  demonstrably shared the machines.
-
-  Runs whose window falls outside this month are not counted, so a run in the first hour of a
-  month undercounts. The alternative is reading a closed month on every tick.
-
-  Args:
-    data: The month's rows.
-
-  Returns:
-    run id -> how many other runs overlapped it. A run with no readable window is absent.
-  """
+  """Counts, for every published run, how many other runs were in flight at the same time."""
   windows: dict[int, tuple[datetime, datetime]] = {}
   for run_id in sorted(data.kept_run_ids | {key[0] for key in data.attempts}):
     last = data.last_attempt(run_id)
@@ -1181,24 +826,7 @@ def _overlap_counts(data: MonthData) -> dict[int, int]:
 
 
 def build_runs_view(data: MonthData) -> dict[str, Any]:
-  """Builds the runs view: one row per merged pull request, plus its jobs.
-
-  This is what the Main page is drawn from. It replaces the mock's COMMITS, TIMES, RUN_IDS,
-  TRIGGERS, JOBS and MACHINES in one file.
-
-  The run row's phase minutes come from the FIRST stored attempt, because every trend chart
-  compares like with like and a re-run only re-executes the jobs that failed. What the
-  re-runs cost is not hidden: `rerun_machine_seconds` carries the runner time every later
-  attempt spent. The job table is the first attempt too, and holds only jobs that asked for a
-  real runner; the ten "Setup Parameters" jobs and the gates are seconds long on shared
-  machines and are kept in the pull request view instead.
-
-  Args:
-    data: The month's rows.
-
-  Returns:
-    The view object, with a "runs" table and a "jobs" table.
-  """
+  """Builds the runs view: one row per merged pull request, plus its jobs."""
   overlaps = _overlap_counts(data)
   run_records: list[dict[str, Any]] = []
   job_records: list[dict[str, Any]] = []
@@ -1279,32 +907,7 @@ def build_runs_view(data: MonthData) -> dict[str, Any]:
 
 
 def build_suites_view(data: MonthData) -> dict[str, Any]:
-  """Builds the suites view: one row per suite per attempt of every published run.
-
-  This is the test-suite health chart's history - the executed count T, the wall-clock
-  duration D and the worker count W the dashboard reads together. It replaces the mock's
-  TH_CATEGORIES.data, TH_COMMITS and THI_WORKERS.
-
-  Scheduled runs are included and carry `event`, because the daily scheduled run is the only
-  place a full test list is kept and the browser draws it as its own series, never mixed with
-  pull request runs.
-
-  Two numbers are deliberately separate. `workers_named` is how many "Execute Tests (N)" jobs
-  the flavor was configured with, which is zero for the Pathways flavors because their jobs
-  are named differently; `workers_ran` is how many of that flavor's jobs held a machine. A
-  zero in the first with a two in the second is a naming fact, not a disappearance.
-
-  A pull request that pushed twice can have two completed runs in the month. Both are
-  published - the first push's suites really did run - so `is_representative` says which run
-  is the one the runs view and `pr/<n>.json` describe. Drawing one point per pull request
-  means filtering on it; drawing every run means ignoring it.
-
-  Args:
-    data: The month's rows.
-
-  Returns:
-    The view object, with a "suites" table.
-  """
+  """Builds the suites view: one row per suite per attempt of every published run."""
   records: list[dict[str, Any]] = []
   for run_id in sorted(data.kept_run_ids):
     last = data.last_attempt(run_id)
@@ -1330,24 +933,7 @@ def build_suites_view(data: MonthData) -> dict[str, Any]:
 
 
 def build_flaky_view(data: MonthData) -> dict[str, Any]:
-  """Builds the flaky view: every rescue event, and the tests that failed in each.
-
-  A rescue is a job that failed on one attempt and passed on a later one. A job that failed
-  and was never re-run is stored under the same shape with `rescued` false, and is carried
-  here too, because the dashboard has to be able to say "#4940 failed and was never re-run -
-  a failure, not a rescue" instead of quietly leaving it out of both counts.
-
-  `wasted_seconds` is the failed job's own run time, read by `derive.run_seconds` from the
-  stored job row of the attempt that failed. A rescue row does not carry the job's steps, so
-  when that job row is missing the answer is null rather than a subtraction of two timestamps
-  that would ignore a cancelled job's overrunning steps.
-
-  Args:
-    data: The month's rows.
-
-  Returns:
-    The view object, with a "rescues" table and a "rescue_tests" table.
-  """
+  """Builds the flaky view: every rescue event, and the tests that failed in each."""
   rescue_records: list[dict[str, Any]] = []
   test_records: list[dict[str, Any]] = []
 
@@ -1442,18 +1028,7 @@ def _find_job(entry: RunAttempt | None, job_id: int | None) -> dict[str, Any] | 
 
 
 def _failed_tests(entry: RunAttempt | None, flavor: str | None, worker: int | None) -> list[rows.TestRow]:
-  """Returns the tests that failed in one job of one attempt.
-
-  Args:
-    entry: The attempt whose test rows to search, or None when it was not stored.
-    flavor: The flavor the job ran. None means the job cannot be tied to a suite - a Pathways
-      job publishes no test file at all - and the answer is an empty list, never a guess.
-    worker: The worker number, when the job has one. A flavor's rows are split per worker, so
-      naming the worker keeps a four-worker suite's other three out of this job's list.
-
-  Returns:
-    The failed and errored test rows, in stored order.
-  """
+  """Returns the tests that failed in one job of one attempt."""
   if entry is None or flavor is None:
     return []
   found = []
@@ -1468,28 +1043,7 @@ def _failed_tests(entry: RunAttempt | None, flavor: str | None, worker: int | No
 
 
 def build_queue_view(data: MonthData) -> dict[str, Any]:
-  """Builds the queue view: how long each runner pool made each run wait.
-
-  One row per pool per published run, from the first stored attempt. The pool is the runs-on
-  label the jobs asked for - `linux-x86-ct6e-180-4tpu`, `linux-x86-n2-32` - because that is
-  what a job queues against. Jobs that asked for no runner at all are not in any pool and are
-  left out.
-
-  A pull request with two completed runs in the month has a row for each; `is_representative`
-  marks the one the runs view describes, exactly as it does in the suites view.
-
-  Every pull request row also carries the nearest scheduled run's wait for the same pool.
-  That is the probe: the same pipeline on a timer, so when a merge looks slow and the probe
-  next to it was slow too, the queue was the infrastructure and not the change. "Nearest" is
-  the smallest gap in creation time within `PROBE_MAX_GAP_SECONDS`; beyond that the two ran
-  under different conditions and the probe columns are null.
-
-  Args:
-    data: The month's rows.
-
-  Returns:
-    The view object, with a "queue" table.
-  """
+  """Builds the queue view: how long each runner pool made each run wait."""
   measured: dict[int, dict[str, dict[str, Any]]] = {}
   for run_id in sorted(data.kept_run_ids):
     first = data.first_attempt(run_id)
@@ -1549,15 +1103,7 @@ def build_queue_view(data: MonthData) -> dict[str, Any]:
 def _probe_index(
     data: MonthData, measured: Mapping[int, Mapping[str, Mapping[str, Any]]]
 ) -> dict[str, list[tuple[datetime, int, str, float]]]:
-  """Indexes the scheduled runs' longest wait per pool, sorted by time.
-
-  Args:
-    data: The month's rows.
-    measured: Per run, per pool, the numbers `build_queue_view` already worked out.
-
-  Returns:
-    pool label -> [(created, run id, created_at string, longest wait)], oldest first.
-  """
+  """Indexes the scheduled runs' longest wait per pool, sorted by time."""
   index: dict[str, list[tuple[datetime, int, str, float]]] = {}
   for run_id, pools in measured.items():
     last = data.last_attempt(run_id)
@@ -1579,16 +1125,7 @@ def _probe_index(
 def _nearest_probe(
     probes: Sequence[tuple[datetime, int, str, float]], created: datetime | None
 ) -> tuple[datetime, int, str, float] | None:
-  """Finds the scheduled run closest in time to a merged pull request's run.
-
-  Args:
-    probes: One pool's scheduled runs, oldest first.
-    created: When the pull request's run was created.
-
-  Returns:
-    The nearest probe, or None when there is none inside `PROBE_MAX_GAP_SECONDS`. A run in the
-    first hours of a month can find no probe, because only this month is read.
-  """
+  """Finds the scheduled run closest in time to a merged pull request's run."""
   if not probes or created is None:
     return None
   moments = [probe[0] for probe in probes]
@@ -1603,23 +1140,7 @@ def _nearest_probe(
 
 
 def build_workflows_view(data: MonthData) -> dict[str, Any]:
-  """Builds the workflows view: one row per workflow per day.
-
-  The clock time is the median of that day's runs, measured by `derive.run_wall_seconds` over
-  each run's first stored attempt, so a re-run does not make a workflow look slower than it
-  was. The machine minutes are the opposite question and are summed over every stored attempt,
-  because a re-run really did hold runners. Superseded runs are in neither: they were
-  cancelled by a newer push and their numbers describe abandoned work.
-
-  Every workflow the collector stores appears here, not only the pipeline: the nightly image
-  builds are on the same card.
-
-  Args:
-    data: The month's rows.
-
-  Returns:
-    The view object, with a "workflows" table.
-  """
+  """Builds the workflows view: one row per workflow per day."""
   days: dict[tuple[str, str], dict[str, Any]] = {}
   for run_id in sorted({key[0] for key in data.attempts}):
     first = data.first_attempt(run_id)
@@ -1676,30 +1197,7 @@ def build_workflows_view(data: MonthData) -> dict[str, Any]:
 
 
 def build_pr_view(pr_number: int, data: MonthData) -> dict[str, Any]:
-  """Builds one merged pull request's file: every attempt, job, step, suite and test stored.
-
-  This is the file a click fetches. It replaces the mock's ATTEMPT_INFO, TESTS, TEST_COUNTS,
-  STEPS and error rows, and it is shared by the commit modal and the Single PR page, so a
-  click on the same pull request from either place costs one request.
-
-  Steps travel as their two timestamps rather than as a duration. `derive.py` has no public
-  "seconds of a named step" and this module will not write a second one; subtracting two
-  ISO-8601 strings is one line in the browser.
-
-  `updated_at` is the newest `collected_at` of the rows behind the file, not the moment it was
-  built, so a tick that re-derives an unchanged pull request writes the same bytes and the
-  browser's cached copy stays valid.
-
-  Args:
-    pr_number: The merged pull request.
-    data: The month's rows.
-
-  Returns:
-    The view object.
-
-  Raises:
-    ViewError: The month holds no run for that pull request.
-  """
+  """Builds one merged pull request's file: every attempt, job, step, suite and test stored."""
   run_id = data.merged_pr_runs.get(pr_number)
   if run_id is None:
     raise ViewError(f"no stored run for merged pull request #{pr_number} in {data.month}")
@@ -1815,20 +1313,7 @@ def build_pr_view(pr_number: int, data: MonthData) -> dict[str, Any]:
 
 
 def _error_record(attempt: int, job: Mapping[str, Any], shared: Mapping[str, Any]) -> dict[str, Any]:
-  """Builds one error row: the first step of a failed job that failed.
-
-  Nothing is summarised. The step's own name is quoted, and the failing tests of the same job
-  are in the tests table with their JUnit messages verbatim.
-
-  Args:
-    attempt: The attempt the job failed in.
-    job: The job payload.
-    shared: The job's shared fields, already built by `_job_record`.
-
-  Returns:
-    The error record. Every step field is None for a job that failed with no steps at all -
-    a job cancelled while queued has an empty steps list, and that is the whole story.
-  """
+  """Builds one error row: the first step of a failed job that failed."""
   failed_step = None
   for step in job.get("steps") or []:
     if step.get("conclusion") == CONCLUSION_FAILURE:
@@ -1862,25 +1347,7 @@ def build_meta(
     uncollected: int,
     window_days: int = VIEW_WINDOW_DAYS,
 ) -> dict[str, Any]:
-  """Builds meta.json, the first file the browser reads and the only one with a build time.
-
-  It answers four questions before anything else is fetched: how old is this data, which
-  month files exist for each group, how many rows each holds, and which pull request files
-  have changed since the browser last looked.
-
-  Args:
-    generated_at: When this tick ran, ISO-8601 UTC.
-    months: group -> the month keys that have a file, ascending.
-    counts: group -> month -> table -> row count.
-    pull_requests: pull request number -> the newest `collected_at` behind its file.
-    uncollected: How many runs the store has seen but not collected - attempts still running,
-      and attempts it could not read. A number here is normal; a number that keeps growing is
-      not, and the dashboard shows it rather than quietly drawing a shorter history.
-    window_days: How far back the views reach.
-
-  Returns:
-    The meta object.
-  """
+  """Builds meta.json, the first file the browser reads and the only one with a build time."""
   groups: dict[str, Any] = {}
   totals: dict[str, int] = {}
   for group in VIEW_GROUPS:
@@ -1908,38 +1375,17 @@ def build_meta(
 
 
 def _view_file(group: str, month: str, tables: Mapping[str, Any]) -> dict[str, Any]:
-  """Wraps a group's tables in the envelope every month file shares.
-
-  There is deliberately no timestamp in here. A month file whose rows have not changed
-  serialises to the same bytes on every tick, so git records nothing and the browser's cached
-  copy stays valid. The build time lives in meta.json alone.
-  """
+  """Wraps a group's tables in the envelope every month file shares."""
   return {"schema": SCHEMA_VERSION, "group": group, "month": month, "tables": dict(tables)}
 
 
 def _dumps(obj: Any) -> str:
-  """Serialises a view the one way this module ever serialises anything.
-
-  Compact separators, no ASCII escaping, key order as written, one trailing newline. Two ticks
-  that build the same view produce the same bytes.
-  """
+  """Serialises a view the one way this module ever serialises anything."""
   return json.dumps(obj, separators=(",", ":"), ensure_ascii=False) + "\n"
 
 
 def write_view_file(path: Path, obj: Any) -> str:
-  """Writes one view file, and says whether it actually changed.
-
-  The file is written to a temporary name in the same directory and moved into place, so a
-  reader never sees half a file and a tick that dies leaves the previous version intact.
-
-  Args:
-    path: Where the file goes.
-    obj: The view object.
-
-  Returns:
-    "written" when the bytes on disk changed, "unchanged" when they did not. An unchanged file
-    is not rewritten at all: its modification time stays put and git sees nothing to commit.
-  """
+  """Writes one view file, and says whether it actually changed."""
   payload = _dumps(obj)
   try:
     if path.read_text(encoding="utf-8") == payload:
@@ -1954,11 +1400,7 @@ def write_view_file(path: Path, obj: Any) -> str:
 
 
 def read_view(path: Path) -> dict[str, Any] | None:
-  """Reads a view file back, or returns None when it is missing or unreadable.
-
-  Used for the months this tick did not rebuild: their row counts still have to reach
-  meta.json, and reading a finished view file is much cheaper than re-reading their rows.
-  """
+  """Reads a view file back, or returns None when it is missing or unreadable."""
   try:
     return json.loads(path.read_text(encoding="utf-8"))
   except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -1994,41 +1436,7 @@ def build_views(
     uncollected: int | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
-  """Builds every file the browser reads, and reports exactly what it touched.
-
-  Only the open months are rebuilt - today's, and the one before it for the first couple of
-  days of a month. A closed month's file is never read and never rewritten. Its row counts
-  still reach meta.json, taken from the finished file on disk, which costs one small read
-  instead of a month of rows.
-
-  Nothing is deleted here. Deleting a month that has fallen out of the window, and the old
-  pull request files with it, is done by `prune_views` and `Store.prune_months`, which the
-  tick runs before this. A file that has already gone simply stops being advertised in
-  meta.json.
-
-  A pull request file is written by the month that holds its newest run. A month rebuilt on
-  its own leaves a newer month's file alone rather than replacing it with an abandoned push.
-
-  Args:
-    store: The row store.
-    out_dir: The output directory, the one `--out` names. Files go under `<out_dir>/views/`.
-    today: The day this tick is running, used to pick the open months and the window.
-    months: Rebuild exactly these months instead of the default. A tick that knows which
-      months it appended to should pass them; anything not in the store is ignored.
-    uncollected: How many run attempts have been seen but not collected. Read from
-      `store.load_state().pending_count` when not given.
-    generated_at: The build time for meta.json. Defaults to now, in the same format the rows
-      use.
-
-  Returns:
-    A summary:
-      generated_at, out_dir, window_days
-      months_rebuilt / months_skipped - what was read and what was left alone
-      written / unchanged - view files whose bytes changed, and whose did not
-      pr_written / pr_unchanged - the same, for pull request files
-      counts - group -> month -> table -> rows
-      uncollected_runs, meta - the state meta.json was given
-  """
+  """Builds every file the browser reads, and reports exactly what it touched."""
   out = Path(out_dir)
   views_root = out / VIEWS_DIRNAME
   views_root.mkdir(parents=True, exist_ok=True)
@@ -2125,20 +1533,7 @@ def build_views(
 
 
 def _kept_pr_file(path: Path, candidate: Mapping[str, Any]) -> str | None:
-  """Says whether the pull request file already on disk describes a newer run than this one.
-
-  A pull request can have completed runs in two months - a push late on the 31st, another on
-  the 1st. Each month claims the pull request for the only run it can see, so a tick that
-  rebuilds the older month alone would otherwise overwrite `pr/<n>.json` with the abandoned
-  push, and once the newer month has closed nothing would ever repair it.
-
-  Args:
-    path: The pull request file.
-    candidate: The view this build produced for it.
-
-  Returns:
-    The stored file's `updated_at` when it must be kept, or None when it should be written.
-  """
+  """Says whether the pull request file already on disk describes a newer run than this one."""
   stored = read_view(path)
   if not isinstance(stored, Mapping):
     return None
@@ -2153,19 +1548,7 @@ def _kept_pr_file(path: Path, candidate: Mapping[str, Any]) -> str | None:
 
 
 def _carried_pull_requests(views_root: Path) -> dict[int, str | None]:
-  """Carries meta.json's pull request list forward across a tick.
-
-  A pull request whose month is closed keeps its file and its `updated_at` from the last time
-  it was built. Re-reading six hundred files every tick to recover a timestamp that cannot
-  have changed would cost more than the whole rest of the build. An entry whose file has gone
-  is dropped, so a prune heals itself on the next tick.
-
-  Args:
-    views_root: The `views/` directory.
-
-  Returns:
-    pull request number -> its stored `updated_at`.
-  """
+  """Carries meta.json's pull request list forward across a tick."""
   meta = read_view(views_root / META_FILENAME)
   if not isinstance(meta, Mapping):
     return {}

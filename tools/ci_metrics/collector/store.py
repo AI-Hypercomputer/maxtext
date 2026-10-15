@@ -12,69 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The append-only store: the collector's own copy of everything it has already read.
-
-This is layer 3's foundation. `rows.py` says what a record looks like; this module decides
-where it lives, whether it is already there, and how a reader gets the current version of it
-back. It touches no network and computes no metric.
-
-The store lives under one directory, given to `Store` and never defaulted:
-
-    <out>/data/<kind>-YYYY-MM.ndjson         one JSON object a line, appended, never edited
-    <out>/data/<kind>-YYYY-MM-partN.ndjson   the same month, continued once a part is full
-    <out>/data/state.json                    which attempts are stored, which are in flight
-    <out>/views/<name>-YYYY-MM.json          what the browser loads, rebuilt each tick
-    <out>/views/pr/<n>.json                  one merged pull request in full
-
-No data file grows past `MAX_PART_BYTES` (40 MB), because GitHub refuses a push with any file
-over 100 MB. A month's rows go into part 1 until it is full, then into part 2, and so on.
-Readers see the parts of a month as one file, in part order.
-
-Six rules hold the whole design up.
-
-1. **Append-only, with corrections.** A line is never edited and never deleted in place. When
-   a number turns out to be wrong - an artifact that was unreadable at 04:00 and readable at
-   08:00, a run that gained an attempt - the fix is a second line with the same key and a
-   later `collected_at`. Readers take the last row per key, ties broken by file order and
-   then line order. That is what `read` does, so nothing downstream has to remember the rule.
-   One kind corrects itself: a rescue is keyed by the failure and not by the outcome, so a
-   row whose answer has changed is written without the caller asking (see `MUTABLE_KINDS`).
-
-2. **Writes are atomic per file.** Every write goes to a temporary file in the same
-   directory, is flushed and fsynced, and is then moved into place with `os.replace`. A
-   process killed mid-tick - the Actions job cancelled, the runner pulled - leaves either the
-   old file or the new one, never a half-written line and never a truncated `state.json`. It
-   can leave the temporary file itself behind, which `Store.sweep_temp` clears on a later run.
-   An append copies the file it is extending, so it costs one pass over that month's last
-   part: pass a tick's rows in as few `append` calls as you can rather than one call per run.
-
-3. **`state.json` is an index, not the truth.** It records run attempts, never individual
-   rows: indexing every test row would reach a hundred megabytes and be rewritten six times a
-   day. It keeps the newest `MAX_INDEXED_RUNS` run ids and drops the rest on save, so the
-   file the collector commits stops growing. If it is lost or corrupt, `load_state` rebuilds
-   it by scanning the NDJSON, and says so with `State.rebuilt`. The rebuild cannot recover the in-flight list, because an
-   attempt that was still running was never written - so a rebuilt state rewinds its
-   watermark by `REBUILD_REWIND_HOURS` and the next tick re-asks that window. Re-asking is
-   cheap: `append` skips what is already stored.
-
-4. **Missing is None, never zero.** The store passes values through exactly as `rows.py`
-   built them. It never fills a gap, never coerces a None to 0, and never drops a null field.
-
-5. **A month closes once.** A tick appends only to the month of the run it is reading, so a
-   past month stops changing. `compact_month` can then be run once against the closed month:
-   it keeps the last row per key, and for test rows it drops the detail of runs whose pull
-   request never merged, whose per-flavor totals survive in the suite rows. Running it a
-   second time changes nothing and rewrites nothing. Nothing calls it yet: it needs a correct
-   keep list (see its docstring), and on real data it saves only about 17%.
-
-6. **Old months are deleted.** The dashboard shows the last 90 days, which touch four months
-   at most. Each tick calls `prune_months` with the first month the dashboard can still show,
-   so every older month's files go and the store stops growing.
-
-The store never imports `github.py`, `runs.py` or `junit.py`, so it can be exercised with no
-network module present and no `requests` installed. Nothing here calls an AI service: a row
-goes in the way `rows.py` built it and comes back out the same.
-"""
+"""The append-only store: the collector's own copy of everything it has already read."""
 
 from __future__ import annotations
 
@@ -201,36 +139,16 @@ TAIL_WINDOW_BYTES = 1 << 16
 
 
 class StoreError(RuntimeError):
-  """Raised when the store cannot be read, written or addressed.
-
-  The message always names the file, the key or the month at fault, so a collector tick that
-  dies says which part of the store broke it. A row that cannot be shaped stays
-  `rows.RowError`; a request that failed stays `github.GitHubError`.
-  """
+  """Raised when the store cannot be read, written or addressed."""
 
 
 def _warn(message: str) -> None:
-  """Prints a warning to stderr so it never lands in piped collector output.
-
-  Args:
-    message: The line to print.
-  """
+  """Prints a warning to stderr so it never lands in piped collector output."""
   print(message, file=sys.stderr, flush=True)
 
 
 def parse_timestamp(value: Any) -> datetime | None:
-  """Reads one of GitHub's ISO-8601 timestamps.
-
-  A third copy of this parser, next to the ones in `runs.py` and `derive.py`. It is repeated
-  rather than imported so that the store depends on `rows.py` alone and stays importable with
-  no network module and no `requests` installed.
-
-  Args:
-    value: An ISO-8601 string, a datetime, or anything else.
-
-  Returns:
-    A timezone-aware UTC datetime, or None when the value is not a timestamp.
-  """
+  """Reads one of GitHub's ISO-8601 timestamps."""
   if isinstance(value, datetime):
     return as_utc(value)
   if not isinstance(value, str) or not value.strip():
@@ -245,43 +163,19 @@ def parse_timestamp(value: Any) -> datetime | None:
 
 
 def as_utc(moment: datetime) -> datetime:
-  """Puts a datetime in UTC, treating a naive one as UTC already.
-
-  Args:
-    moment: Any datetime.
-
-  Returns:
-    The same instant, timezone-aware, in UTC.
-  """
+  """Puts a datetime in UTC, treating a naive one as UTC already."""
   if moment.tzinfo is None:
     return moment.replace(tzinfo=timezone.utc)
   return moment.astimezone(timezone.utc)
 
 
 def utc_now() -> datetime:
-  """Returns the current instant in UTC.
-
-  Returns:
-    A timezone-aware UTC datetime.
-  """
+  """Returns the current instant in UTC."""
   return datetime.now(timezone.utc)
 
 
 def month_key(value: Any) -> str:
-  """Turns a timestamp into the month string its rows are filed under.
-
-  The month is always taken in UTC, so a run created at 01:00 on the first of the month in a
-  +03:00 zone still files under the previous month, which is when GitHub says it happened.
-
-  Args:
-    value: An ISO-8601 timestamp or a datetime.
-
-  Returns:
-    The month, e.g. "2026-09".
-
-  Raises:
-    StoreError: The value is not a timestamp.
-  """
+  """Turns a timestamp into the month string its rows are filed under."""
   moment = parse_timestamp(value)
   if moment is None:
     raise StoreError(f"{value!r} is not a timestamp, so it names no month.")
@@ -289,21 +183,7 @@ def month_key(value: Any) -> str:
 
 
 def month_for_run(run: Mapping[str, Any]) -> str:
-  """Returns the month every row of a run belongs in.
-
-  A run's rows are filed together under the run's own `created_at`, not under each row's
-  timestamp: a re-run started three days later must not scatter one run across two files, or
-  a closed month would keep changing.
-
-  Args:
-    run: A run payload from the API, or a stored run row as JSON.
-
-  Returns:
-    The month, e.g. "2026-09".
-
-  Raises:
-    StoreError: The payload carries no readable `created_at`.
-  """
+  """Returns the month every row of a run belongs in."""
   created = run.get("created_at")
   if created is None:
     raise StoreError(f"run {run.get('id', run.get('run_id'))!r} has no 'created_at', so it names no month.")
@@ -311,35 +191,14 @@ def month_for_run(run: Mapping[str, Any]) -> str:
 
 
 def _key_part(value: object) -> str:
-  """Encodes one part of a key, exactly as `rows.py` does.
-
-  Args:
-    value: The part. None becomes an empty part, which is what an unknown worker number is.
-
-  Returns:
-    The value percent-encoded, leaving only unreserved ASCII characters as they were.
-  """
+  """Encodes one part of a key, exactly as `rows.py` does."""
   if value is None:
     return ""
   return quote(str(value), safe="")
 
 
 def row_key(payload: Mapping[str, Any]) -> str:
-  """Builds the store key of a stored JSON row.
-
-  Read straight off the payload's fields rather than by rebuilding the row, so that a line
-  written before a field was added is still addressable. The result is identical to the row
-  object's own `key()`.
-
-  Args:
-    payload: A row as `rows.to_json` wrote it, carrying "kind".
-
-  Returns:
-    The key, e.g. "job|33468578834|1|99733460534".
-
-  Raises:
-    StoreError: The payload has no known "kind", or no value in its leading key field.
-  """
+  """Builds the store key of a stored JSON row."""
   kind = str(payload.get("kind", ""))
   fields = KEY_FIELDS.get(kind)
   if fields is None:
@@ -350,53 +209,21 @@ def row_key(payload: Mapping[str, Any]) -> str:
 
 
 def check_kind(kind: str) -> str:
-  """Checks that a kind is one this store files.
-
-  Args:
-    kind: One of the `rows.KIND_*` constants.
-
-  Returns:
-    The kind, unchanged.
-
-  Raises:
-    StoreError: The kind is not stored.
-  """
+  """Checks that a kind is one this store files."""
   if kind not in KEY_FIELDS:
     raise StoreError(f"{kind!r} is not a stored row kind; it is one of {list(ROW_KINDS)}.")
   return kind
 
 
 def check_month(month: str) -> str:
-  """Checks that a month string is a real "YYYY-MM".
-
-  Args:
-    month: The month to check.
-
-  Returns:
-    The month, unchanged.
-
-  Raises:
-    StoreError: The string is not a month.
-  """
+  """Checks that a month string is a real "YYYY-MM"."""
   if not isinstance(month, str) or not MONTH_PATTERN.match(month):
     raise StoreError(f"{month!r} is not a month in the form YYYY-MM.")
   return month
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:
-  """Writes a file so that a killed process cannot leave it half written.
-
-  The bytes land in a temporary file beside the target, are flushed and fsynced, and are then
-  moved onto the target with `os.replace`, which is atomic within one filesystem. A reader
-  therefore sees either the whole previous file or the whole new one.
-
-  Args:
-    path: The file to write.
-    data: Its entire new contents.
-
-  Raises:
-    StoreError: The directory could not be created or the file could not be written.
-  """
+  """Writes a file so that a killed process cannot leave it half written."""
   _ensure_dir(path.parent)
   handle, temp_name = tempfile.mkstemp(dir=str(path.parent), prefix=TEMP_PREFIX, suffix=path.suffix)
   temp_path = Path(temp_name)
@@ -416,28 +243,12 @@ def write_bytes_atomic(path: Path, data: bytes) -> None:
 
 
 def write_text_atomic(path: Path, text: str) -> None:
-  """Writes text atomically, UTF-8 encoded.
-
-  Args:
-    path: The file to write.
-    text: Its entire new contents.
-
-  Raises:
-    StoreError: The file could not be written.
-  """
+  """Writes text atomically, UTF-8 encoded."""
   write_bytes_atomic(path, text.encode("utf-8"))
 
 
 def write_json_atomic(path: Path, payload: Any) -> None:
-  """Writes one JSON document atomically.
-
-  Args:
-    path: The file to write.
-    payload: Anything `json.dumps` accepts.
-
-  Raises:
-    StoreError: The payload does not serialise, or the file could not be written.
-  """
+  """Writes one JSON document atomically."""
   try:
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
   except (TypeError, ValueError) as error:
@@ -446,14 +257,7 @@ def write_json_atomic(path: Path, payload: Any) -> None:
 
 
 def _ensure_dir(path: Path) -> None:
-  """Creates a directory and its parents if they are not there yet.
-
-  Args:
-    path: The directory.
-
-  Raises:
-    StoreError: The directory could not be created.
-  """
+  """Creates a directory and its parents if they are not there yet."""
   try:
     path.mkdir(parents=True, exist_ok=True)
   except OSError as error:
@@ -461,14 +265,7 @@ def _ensure_dir(path: Path) -> None:
 
 
 def _fsync_dir(path: Path) -> None:
-  """Flushes a directory entry so a rename survives a power cut.
-
-  Best effort. Platforms that will not open a directory - Windows - are left alone, because
-  the rename itself is already atomic there.
-
-  Args:
-    path: The directory to flush.
-  """
+  """Flushes a directory entry so a rename survives a power cut."""
   try:
     handle = os.open(str(path), os.O_RDONLY)
   except OSError:
@@ -485,23 +282,7 @@ def _fsync_dir(path: Path) -> None:
 
 
 def _sweep_temp(directory: Path, now: float | None = None) -> int:
-  """Deletes temporary files an earlier process left behind when it was killed.
-
-  An atomic write lands in `<dir>/.tmp-*` and is then renamed. A process killed between the
-  two leaves the temporary file in place: harmless to read - `months` and `read` only look at
-  the real suffixes - but it is a full copy of that month's rows, in the directory the
-  collector commits, and nothing else ever removes it.
-
-  Only files older than `TEMP_MAX_AGE_HOURS` are touched, so a write that is happening right
-  now in another process is never pulled out from under it.
-
-  Args:
-    directory: The directory to sweep. Missing is not an error.
-    now: The current time as a POSIX timestamp, for tests.
-
-  Returns:
-    How many files were deleted.
-  """
+  """Deletes temporary files an earlier process left behind when it was killed."""
   if not directory.is_dir():
     return 0
   moment = now if now is not None else datetime.now(tz=timezone.utc).timestamp()
@@ -527,18 +308,7 @@ def _sweep_temp(directory: Path, now: float | None = None) -> int:
 
 
 def _complete_length(path: Path) -> int:
-  """Returns how many bytes of a file end in a complete line.
-
-  Every write here is atomic, so a torn last line should be impossible. It is measured
-  anyway, because a file truncated by something outside the collector - a full disk, a killed
-  copy - must not be able to glue its broken tail onto the next row.
-
-  Args:
-    path: The file to measure.
-
-  Returns:
-    The offset just past the last newline, or 0 when the file holds no newline at all.
-  """
+  """Returns how many bytes of a file end in a complete line."""
   size = path.stat().st_size
   if size == 0:
     return 0
@@ -556,20 +326,7 @@ def _complete_length(path: Path) -> int:
 
 
 def _iter_payloads(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
-  """Reads one NDJSON file, line by line.
-
-  Args:
-    path: The file. A file that does not exist yields nothing, because a month with no rows
-      and a month that was never written are the same fact.
-
-  Yields:
-    (line index counted from 0, the decoded object).
-
-  Raises:
-    StoreError: A line in the middle of the file is not a JSON object. A broken last line
-      that has no newline after it is a torn write: it is reported and skipped, because the
-      rest of the file is still good.
-  """
+  """Reads one NDJSON file, line by line."""
   if not path.exists():
     return
   try:
@@ -594,18 +351,7 @@ def _iter_payloads(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
 
 @dataclass
 class PendingAttempt:
-  """A run attempt the collector has seen but cannot store yet, because it is still running.
-
-  Attributes:
-    run_id: The run.
-    attempt: The attempt number, from the payload's `run_attempt`.
-    first_seen_at: When the collector first put it on this list, ISO-8601 UTC. The 24-hour
-      rule is measured from here, not from the run's own start, so a run discovered late is
-      still given a full day.
-    created_at: The run's `created_at`, kept so a tick can file it in the right month without
-      re-reading the run.
-    status: The status GitHub last reported, e.g. "in_progress" or "queued".
-  """
+  """A run attempt the collector has seen but cannot store yet, because it is still running."""
 
   run_id: int
   attempt: int
@@ -630,17 +376,7 @@ class PendingAttempt:
 
   @classmethod
   def from_json(cls, payload: Mapping[str, Any]) -> PendingAttempt:
-    """Rebuilds an entry from `state.json`.
-
-    Args:
-      payload: One element of the file's "pending" list.
-
-    Returns:
-      The entry.
-
-    Raises:
-      StoreError: The entry carries no usable run id or attempt number.
-    """
+    """Rebuilds an entry from `state.json`."""
     run_id = _as_int(payload.get("run_id"))
     attempt = _as_int(payload.get("attempt"))
     if run_id is None or attempt is None:
@@ -656,14 +392,7 @@ class PendingAttempt:
 
 
 def _as_int(value: Any) -> int | None:
-  """Reads a value as an int, or None when it is not one.
-
-  Args:
-    value: Anything.
-
-  Returns:
-    The int, or None. A bool is not an int here: True is not run 1.
-  """
+  """Reads a value as an int, or None when it is not one."""
   if isinstance(value, bool) or value is None:
     return None
   if isinstance(value, int):
@@ -675,42 +404,13 @@ def _as_int(value: Any) -> int | None:
 
 
 def _as_str(value: Any) -> str | None:
-  """Reads a value as a string, keeping None as None.
-
-  Args:
-    value: Anything.
-
-  Returns:
-    The string, or None.
-  """
+  """Reads a value as a string, keeping None as None."""
   return None if value is None else str(value)
 
 
 @dataclass
 class State:
-  """The index of what the store already holds, and what it is still waiting for.
-
-  It records run attempts and nothing finer. A collected attempt implies its jobs, suites and
-  tests: indexing every test row would reach a hundred megabytes and be rewritten six times a
-  day for no benefit, since rows of one attempt are always written together.
-
-  Attributes:
-    collected: run id -> the attempts stored in full, from a run GitHub had finished.
-    incomplete: run id -> the attempts written while they were still running, because they sat
-      in `pending` longer than a day. They are stored, so they are never fetched again by
-      accident, but they are not final.
-    pending: (run id, attempt) -> the attempt, still in flight, nothing written for it yet.
-    watermark_run_id: The highest run id seen. The tick's "everything after this" mark.
-    watermark_created_at: That run's `created_at`. The runs endpoint filters by creation time,
-      not by id, so this is the value a tick actually queries with.
-    rebuilt: True when this state was reconstructed by scanning the NDJSON because
-      `state.json` was missing or unreadable, and the scan found rows. The in-flight list
-      cannot be reconstructed, so a caller seeing this should widen its window instead of
-      trusting the watermark exactly. A brand new store is not flagged: it has nothing to
-      recover and no watermark at all.
-    updated_at: When the state was last saved, ISO-8601 UTC.
-    v: Schema version of the state file.
-  """
+  """The index of what the store already holds, and what it is still waiting for."""
 
   collected: dict[int, set[int]] = field(default_factory=dict)
   incomplete: dict[int, set[int]] = field(default_factory=dict)
@@ -722,52 +422,19 @@ class State:
   v: int = STATE_VERSION
 
   def has_attempt(self, run_id: int, attempt: int) -> bool:
-    """Says whether an attempt's rows are in the store already, final or not.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-
-    Returns:
-      True when the attempt was written, whether completed or written incomplete.
-    """
+    """Says whether an attempt's rows are in the store already, final or not."""
     return self.is_collected(run_id, attempt) or self.is_incomplete(run_id, attempt)
 
   def is_collected(self, run_id: int, attempt: int) -> bool:
-    """Says whether an attempt was stored from a run GitHub had finished.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-
-    Returns:
-      True when the attempt is in `collected`.
-    """
+    """Says whether an attempt was stored from a run GitHub had finished."""
     return attempt in self.collected.get(run_id, ())
 
   def is_incomplete(self, run_id: int, attempt: int) -> bool:
-    """Says whether an attempt was stored while it was still running.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-
-    Returns:
-      True when the attempt is in `incomplete`.
-    """
+    """Says whether an attempt was stored while it was still running."""
     return attempt in self.incomplete.get(run_id, ())
 
   def mark_collected(self, run_id: int, attempt: int, created_at: str | None = None) -> None:
-    """Records an attempt as stored in full.
-
-    Call this after every row of the attempt has been appended, never before: an attempt
-    marked collected is skipped by `Store.append`, so marking it early loses rows.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-      created_at: The run's `created_at`, which also moves the watermark.
-    """
+    """Records an attempt as stored in full."""
     self.collected.setdefault(run_id, set()).add(attempt)
     self.incomplete.get(run_id, set()).discard(attempt)
     self._drop_empty(run_id)
@@ -775,17 +442,7 @@ class State:
     self.note_run(run_id, created_at)
 
   def mark_incomplete(self, run_id: int, attempt: int, created_at: str | None = None) -> None:
-    """Records an attempt as written while it was still running.
-
-    The two indexes are exclusive, so this clears the attempt from `collected` exactly as
-    `mark_collected` clears it from `incomplete`. An attempt in both would be counted twice
-    by `attempt_count` and would contradict itself in `state.json`.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-      created_at: The run's `created_at`, which also moves the watermark.
-    """
+    """Records an attempt as written while it was still running."""
     self.incomplete.setdefault(run_id, set()).add(attempt)
     self.collected.get(run_id, set()).discard(attempt)
     self._drop_empty(run_id)
@@ -800,22 +457,7 @@ class State:
       status: str | None = None,
       first_seen_at: str | None = None,
   ) -> bool:
-    """Puts an attempt on the in-flight list, or leaves it there.
-
-    An attempt already in the store is not added: it has an answer, so it is not waiting for
-    one. An attempt already pending keeps its original `first_seen_at`, so the 24-hour clock
-    is not reset by every tick that sees it again.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-      created_at: The run's `created_at`.
-      status: The status GitHub last reported.
-      first_seen_at: When it was first seen; defaults to now.
-
-    Returns:
-      True when the entry is on the list after this call.
-    """
+    """Puts an attempt on the in-flight list, or leaves it there."""
     if self.has_attempt(run_id, attempt):
       return False
     identity = (run_id, attempt)
@@ -835,31 +477,11 @@ class State:
     return True
 
   def drop_pending(self, run_id: int, attempt: int) -> bool:
-    """Takes an attempt off the in-flight list.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-
-    Returns:
-      True when something was removed.
-    """
+    """Takes an attempt off the in-flight list."""
     return self.pending.pop((run_id, attempt), None) is not None
 
   def forget_attempt(self, run_id: int, attempt: int) -> bool:
-    """Un-records an attempt so its rows can be harvested again.
-
-    The rows already in the store stay there; this only clears the index entry that would
-    make `Store.append` skip them. Use it to re-read an attempt whose rows were wrong. To add
-    a corrected version alongside the old one instead, append with `correction=True`.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-
-    Returns:
-      True when the attempt had been recorded.
-    """
+    """Un-records an attempt so its rows can be harvested again."""
     was_known = self.has_attempt(run_id, attempt)
     self.collected.get(run_id, set()).discard(attempt)
     self.incomplete.get(run_id, set()).discard(attempt)
@@ -867,12 +489,7 @@ class State:
     return was_known
 
   def note_run(self, run_id: int, created_at: str | None = None) -> None:
-    """Moves the watermark forward if this run is newer than everything seen so far.
-
-    Args:
-      run_id: The run.
-      created_at: That run's `created_at`, if it is known.
-    """
+    """Moves the watermark forward if this run is newer than everything seen so far."""
     if self.watermark_run_id is None or run_id > self.watermark_run_id:
       self.watermark_run_id = run_id
       if created_at:
@@ -884,19 +501,7 @@ class State:
   def expired_pending(
       self, now: datetime | None = None, max_age_hours: int = PENDING_MAX_AGE_HOURS
   ) -> list[PendingAttempt]:
-    """Returns the in-flight attempts that have waited too long.
-
-    A tick writes what it knows for each of these once, marks it incomplete and stops waiting,
-    so one stuck run cannot block the store forever.
-
-    Args:
-      now: The moment to measure from; defaults to the current time.
-      max_age_hours: How long an attempt may stay in flight.
-
-    Returns:
-      The expired entries, oldest first. An entry whose `first_seen_at` cannot be read counts
-      as expired, because a timestamp nobody can compare would keep it on the list for ever.
-    """
+    """Returns the in-flight attempts that have waited too long."""
     moment = as_utc(now) if now is not None else utc_now()
     cutoff = moment - timedelta(hours=max_age_hours)
     expired: list[tuple[str, PendingAttempt]] = []
@@ -925,22 +530,7 @@ class State:
     return len(self.pending)
 
   def prune(self, keep: int = MAX_INDEXED_RUNS) -> int:
-    """Drops the oldest run ids from the index so `state.json` cannot grow forever.
-
-    The file is rewritten and committed on every tick, six times a day, so an index that only
-    ever grows adds to the committed history for the life of the project. Run ids rise with
-    time, so keeping the highest `keep` of them keeps everything recent. Dropping an id costs
-    nothing: the watermark means it is never listed again, and if it ever is, `append` falls
-    back to the month file's own keys, which is the exact answer rather than a cached one.
-
-    In-flight attempts are never pruned - they are the one thing a scan cannot rebuild.
-
-    Args:
-      keep: How many run ids to keep.
-
-    Returns:
-      How many run ids were dropped.
-    """
+    """Drops the oldest run ids from the index so `state.json` cannot grow forever."""
     known = set(self.collected) | set(self.incomplete)
     if len(known) <= keep:
       return 0
@@ -957,24 +547,13 @@ class State:
     return dropped
 
   def _drop_empty(self, run_id: int) -> None:
-    """Removes a run id whose attempt set has emptied, so the file does not grow husks.
-
-    Args:
-      run_id: The run to check.
-    """
+    """Removes a run id whose attempt set has emptied, so the file does not grow husks."""
     for index in (self.collected, self.incomplete):
       if run_id in index and not index[run_id]:
         del index[run_id]
 
   def to_json(self) -> dict[str, Any]:
-    """Returns the state as it is stored.
-
-    Attempt sets become sorted lists under string run ids, because JSON has neither sets nor
-    integer keys, and sorting keeps the committed file's diff small.
-
-    Returns:
-      A JSON-safe dict.
-    """
+    """Returns the state as it is stored."""
     return {
         "v": self.v,
         "updated_at": self.updated_at,
@@ -988,18 +567,7 @@ class State:
 
   @classmethod
   def from_json(cls, payload: Mapping[str, Any]) -> State:
-    """Rebuilds the state from `state.json`.
-
-    Args:
-      payload: The parsed file.
-
-    Returns:
-      The state.
-
-    Raises:
-      StoreError: The file was written by a newer collector, or its shape is not readable. A
-        newer version is refused rather than read wrong, the same rule `rows.from_json` uses.
-    """
+    """Rebuilds the state from `state.json`."""
     version = _as_int(payload.get("v"))
     if version is None:
       raise StoreError(f"state has a non-integer v={payload.get('v')!r}.")
@@ -1018,18 +586,7 @@ class State:
 
 
 def _attempt_index(payload: Any, what: str) -> dict[int, set[int]]:
-  """Reads one of the state file's run id -> attempts maps.
-
-  Args:
-    payload: The stored map.
-    what: Which map it is, for the error message.
-
-  Returns:
-    run id -> the set of attempt numbers.
-
-  Raises:
-    StoreError: The map is not a map, or holds something that is not a run id and attempts.
-  """
+  """Reads one of the state file's run id -> attempts maps."""
   if payload is None:
     return {}
   if not isinstance(payload, dict):
@@ -1048,17 +605,7 @@ def _attempt_index(payload: Any, what: str) -> dict[int, set[int]]:
 
 
 def _pending_list(payload: Any) -> list[PendingAttempt]:
-  """Reads the state file's in-flight list.
-
-  Args:
-    payload: The stored list.
-
-  Returns:
-    The entries.
-
-  Raises:
-    StoreError: The list is not a list, or an entry cannot be read.
-  """
+  """Reads the state file's in-flight list."""
   if payload is None:
     return []
   if not isinstance(payload, (list, tuple)):
@@ -1072,30 +619,10 @@ def _pending_list(payload: Any) -> list[PendingAttempt]:
 
 
 class Store:
-  """The append-only row store under one output directory.
-
-  One instance per output directory per process. It caches the state and, per file it has had
-  to read, the set of keys that file already holds, so a tick parses each month's file at most
-  once. `refresh` drops both caches.
-
-  Nothing is written until something is appended: constructing a Store for reading creates no
-  directories.
-  """
+  """The append-only row store under one output directory."""
 
   def __init__(self, out_dir: Path | str) -> None:
-    """Opens the store at a directory.
-
-    There is no default and no fallback to the working directory. A path is refused outright
-    when it is empty, when it is the filesystem root or the user's home directory, or when it
-    holds a `.git` directory and is not already a store - writing a data store into somebody's
-    checkout by accident has to be impossible, and those are the three ways it happens.
-
-    Args:
-      out_dir: The output directory. It does not have to exist yet.
-
-    Raises:
-      StoreError: The path is missing, empty or one of the refused places.
-    """
+    """Opens the store at a directory."""
     if out_dir is None or (isinstance(out_dir, str) and not out_dir.strip()):
       raise StoreError("the store needs an output directory; there is no default.")
     resolved = Path(out_dir).expanduser().resolve()
@@ -1139,34 +666,11 @@ class Store:
     return self.data_dir / STATE_FILENAME
 
   def path_for(self, kind: str, month: str) -> Path:
-    """Returns the file one kind's rows for one month are stored in.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants.
-      month: "YYYY-MM".
-
-    Returns:
-      The path, e.g. `<out>/data/test-2026-09.ndjson`.
-
-    Raises:
-      StoreError: The kind is not stored, or the month is not a month.
-    """
+    """Returns the file one kind's rows for one month are stored in."""
     return self.data_dir / f"{check_kind(kind)}-{check_month(month)}{NDJSON_SUFFIX}"
 
   def months(self, kind: str | None = None) -> list[str]:
-    """Lists the months the store has files for.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants, or None for every month any kind has a file
-        for. `months()` with no argument is what a view builder wants: it asks which months
-        exist at all.
-
-    Returns:
-      The months, oldest first. Empty when nothing has been written.
-
-    Raises:
-      StoreError: The kind is not stored.
-    """
+    """Lists the months the store has files for."""
     if kind is not None:
       return self._months_of(check_kind(kind))
     found: set[str] = set()
@@ -1175,26 +679,7 @@ class Store:
     return sorted(found)
 
   def read_month(self, month: str, kinds: Sequence[str] | None = None) -> Iterator[rows.Row]:
-    """Yields one month's rows as row objects, in the order the lines were written.
-
-    Nothing is deduplicated here: every line comes out, corrections included, so a caller that
-    wants to apply the correction rule itself can. `read` is the deduplicated view of the same
-    data. Calling this twice for one month is fine - each call opens the files again, which is
-    what a two-pass view builder needs.
-
-    Args:
-      month: "YYYY-MM".
-      kinds: The kinds to yield, from `rows.KIND_*`. None yields every kind. Whatever order
-        they are given in, the kinds come out in `ROW_KINDS` order, and each kind's rows come
-        out in line order.
-
-    Yields:
-      The stored rows.
-
-    Raises:
-      StoreError: The month or a kind is malformed, or a file could not be read.
-      rows.RowError: A stored line does not match the current row schema.
-    """
+    """Yields one month's rows as row objects, in the order the lines were written."""
     check_month(month)
     wanted = set(ROW_KINDS) if kinds is None else {check_kind(item) for item in kinds}
     for kind in ROW_KINDS:
@@ -1205,27 +690,11 @@ class Store:
           yield rows.from_json(payload)
 
   def pending_run_ids(self) -> list[int]:
-    """Returns the runs seen but not yet stored, from the index.
-
-    This is meta.json's uncollected count, as run ids rather than a number.
-
-    Returns:
-      The run ids, ascending, each once however many attempts of it are in flight.
-
-    Raises:
-      StoreError: The index could not be loaded.
-    """
+    """Returns the runs seen but not yet stored, from the index."""
     return sorted({entry.run_id for entry in self.load_state().pending.values()})
 
   def _months_of(self, kind: str) -> list[str]:
-    """Lists the months one kind has a file for.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants, already checked.
-
-    Returns:
-      The months, oldest first.
-    """
+    """Lists the months one kind has a file for."""
     if not self.data_dir.is_dir():
       return []
     found: set[str] = set()
@@ -1238,16 +707,7 @@ class Store:
     return sorted(found)
 
   def _numbered_parts(self, kind: str, month: str) -> list[tuple[int, Path]]:
-    """Lists the files one month of one kind is stored in, with their part numbers.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants, already checked.
-      month: "YYYY-MM", already checked.
-
-    Returns:
-      (part number, path) pairs, part 1 first. Sorted by number, not by name: as text,
-      "part10" would come before "part2", and the plain first part would come last.
-    """
+    """Lists the files one month of one kind is stored in, with their part numbers."""
     if not self.data_dir.is_dir():
       return []
     numbered: list[tuple[int, Path]] = []
@@ -1258,56 +718,23 @@ class Store:
     return sorted(numbered)
 
   def _parts(self, kind: str, month: str) -> list[Path]:
-    """Lists the files one month of one kind is stored in, part 1 first.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants, already checked.
-      month: "YYYY-MM", already checked.
-
-    Returns:
-      The paths. Empty when the month has no rows of this kind.
-    """
+    """Lists the files one month of one kind is stored in, part 1 first."""
     return [path for _, path in self._numbered_parts(kind, month)]
 
   def _part_path(self, kind: str, month: str, number: int) -> Path:
-    """Returns the path of one part of a month, whether or not it exists yet.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants.
-      month: "YYYY-MM".
-      number: The part number, from 1.
-
-    Returns:
-      The plain `path_for` name for part 1, `<kind>-YYYY-MM-partN.ndjson` after that.
-    """
+    """Returns the path of one part of a month, whether or not it exists yet."""
     if number == 1:
       return self.path_for(kind, month)
     return self.data_dir / f"{check_kind(kind)}-{check_month(month)}-part{number}{NDJSON_SUFFIX}"
 
   def refresh(self) -> None:
-    """Drops the cached state and the cached per-file key sets.
-
-    Call it when something outside this process has written to the store, and in tests
-    between cases that share a directory.
-    """
+    """Drops the cached state and the cached per-file key sets."""
     self._state = None
     self._keys.clear()
     self._bodies.clear()
 
   def load_state(self) -> State:
-    """Returns the store's index, rebuilding it from the NDJSON when the file is gone.
-
-    The state is cached: the same object comes back on every call, so a caller can mark
-    attempts on it and save once at the end of a tick. A `state.json` written by a newer
-    collector is an error; a missing or unreadable one is not, because it is an index and the
-    NDJSON is the truth.
-
-    Returns:
-      The state. `State.rebuilt` is True when it came from a scan rather than from the file.
-
-    Raises:
-      StoreError: `state.json` was written by a newer schema version.
-    """
+    """Returns the store's index, rebuilding it from the NDJSON when the file is gone."""
     if self._state is not None:
       return self._state
     path = self.state_path
@@ -1328,20 +755,7 @@ class Store:
     return self._state
 
   def save_state(self, state: State) -> None:
-    """Writes the index, atomically, and keeps it as this store's cached state.
-
-    Two things happen on the way out. The oldest run ids beyond `MAX_INDEXED_RUNS` are
-    dropped, so the committed file stops growing once the project is a year old. And
-    `rebuilt` is cleared: the flag says "this index came from a scan, so widen your window",
-    and once the scan's result has been written back, the file is the index again and the
-    next tick has nothing to distrust.
-
-    Args:
-      state: The state to write. Its `updated_at` is stamped here.
-
-    Raises:
-      StoreError: The file could not be written.
-    """
+    """Writes the index, atomically, and keeps it as this store's cached state."""
     state.prune()
     state.rebuilt = False
     state.updated_at = rows.utc_now_iso()
@@ -1349,34 +763,7 @@ class Store:
     self._state = state
 
   def rebuild_state(self) -> State:
-    """Rebuilds the index by scanning the stored rows.
-
-    Every stored attempt has a run row, so the run files say which attempts exist. They do
-    not say whether the attempt was finished: a tick writes its run row first, so a tick that
-    died straight afterwards leaves a run row with no jobs behind it. Marking that attempt
-    "collected" would make the next tick skip it, and its jobs, suites and tests would never
-    be stored - the rows would be lost with nothing said. So the job files are scanned too,
-    and an attempt is only collected when its jobs are there as well. An attempt that really
-    held no job is re-read once and then settles; re-reading costs requests, not rows.
-
-    An attempt whose run row reports a status other than "completed" was written while it was
-    still running and comes back as incomplete, whether or not it has jobs.
-
-    Two things a scan cannot recover, both of them stated in the result rather than guessed:
-    the in-flight list, because nothing was ever written for those attempts, and an exact
-    watermark, because a run that was in flight can have an id below the newest stored one. So
-    the rebuilt watermark timestamp is rewound by `REBUILD_REWIND_HOURS` and `rebuilt` is set,
-    and the next tick re-asks that window. Re-asking costs API calls and nothing else: `append`
-    skips every row it already has.
-
-    Returns:
-      The reconstructed state. `rebuilt` is set when the scan actually found rows; a store
-      with nothing in it comes back empty and unflagged, because a first tick has nothing to
-      recover and no watermark to distrust.
-
-    Raises:
-      StoreError: A run file could not be read.
-    """
+    """Rebuilds the index by scanning the stored rows."""
     state = State()
     scanned = 0
     newest_created: str | None = None
@@ -1405,17 +792,7 @@ class Store:
     return state
 
   def _attempts_with_jobs(self) -> set[tuple[int, int]]:
-    """Returns every (run id, attempt) that has at least one stored job row.
-
-    Read line by line rather than through `read`, because a rebuild happens over the whole
-    store and the job files are the biggest thing in it after the tests.
-
-    Returns:
-      The attempts whose jobs are on disk.
-
-    Raises:
-      StoreError: A job file could not be read.
-    """
+    """Returns every (run id, attempt) that has at least one stored job row."""
     found: set[tuple[int, int]] = set()
     for month in self._months_of(rows.KIND_JOB):
       for path in self._parts(rows.KIND_JOB, month):
@@ -1427,18 +804,7 @@ class Store:
     return found
 
   def has_attempt(self, run_id: int, attempt: int) -> bool:
-    """Says whether an attempt's rows are already stored.
-
-    Args:
-      run_id: The run.
-      attempt: The attempt number.
-
-    Returns:
-      True when the index has it, whether it was completed or written incomplete.
-
-    Raises:
-      StoreError: The index could not be loaded.
-    """
+    """Says whether an attempt's rows are already stored."""
     return self.load_state().has_attempt(run_id, attempt)
 
   def append(
@@ -1448,37 +814,7 @@ class Store:
       month: str | None = None,
       correction: bool = False,
   ) -> int:
-    """Appends rows to their month's file, skipping the ones already stored.
-
-    A row is skipped when the index says its attempt is stored, or when its key is already in
-    the target file. Neither check applies with `correction=True`, which is how a fixed row is
-    added: it is appended with its own later `collected_at`, the old line stays where it is,
-    and `read` returns the new one.
-
-    A rescue row is the one exception to the key rule, because its key names the failure and
-    not the outcome. It is compared on its content instead: an identical row is skipped, and
-    one whose answer has changed - "never re-run" becoming "rescued" - is written without the
-    caller having to ask for a correction.
-
-    An append copies the file it extends, so pass a batch: one call per kind per tick costs one
-    pass over that month's file, one call per run costs one pass per run.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants. Every record must be of this kind.
-      records: Row objects from `rows.py`, or the JSON dicts `rows.to_json` produces.
-      month: The month to file them under, "YYYY-MM". Leave it out only for run and rescue
-        rows, which carry a timestamp that is inside their run's own month. Job, suite and
-        test rows need it passed: `store.month_for_run(run)`. Passing it explicitly is what
-        keeps a run's rows in one file when a re-run lands in the next month.
-      correction: Write every row even if its key is stored already.
-
-    Returns:
-      How many rows were actually written.
-
-    Raises:
-      StoreError: The kind is unknown, a record is of another kind, a record cannot be keyed,
-        a month cannot be worked out, or the file could not be written.
-    """
+    """Appends rows to their month's file, skipping the ones already stored."""
     check_kind(kind)
     if not records:
       return 0
@@ -1493,67 +829,18 @@ class Store:
     return written
 
   def read(self, kind: str, months: Sequence[str] | None = None) -> list[dict[str, Any]]:
-    """Reads one kind back, with corrections applied.
-
-    The correction rule lives here so nothing downstream has to remember it: of the lines
-    sharing a key, the one with the greatest `collected_at` wins, and when those tie the later
-    line in the later file wins.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants.
-      months: The months to read, or None for every month in the store. A month with no file
-        contributes nothing rather than failing.
-
-    Returns:
-      The winning row of each key, as the JSON dicts they were stored as, in the order the
-      winning lines appear in the store. Nothing is coerced: a null field stays null.
-
-    Raises:
-      StoreError: The kind is unknown, a month is malformed, or a file is unreadable.
-    """
+    """Reads one kind back, with corrections applied."""
     check_kind(kind)
     wanted = self.months(kind) if months is None else sorted(check_month(item) for item in months)
     payloads, _ = self._winners(kind, [path for item in wanted for path in self._parts(kind, item)])
     return payloads
 
   def read_rows(self, kind: str, months: Sequence[str] | None = None) -> list[Any]:
-    """Reads one kind back as row objects.
-
-    The typed view of `read`. It goes through `rows.from_json`, which insists a stored line
-    carries exactly the fields its dataclass declares, so this raises where `read` would hand
-    back a row written under a different field set.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants.
-      months: The months to read, or None for every month.
-
-    Returns:
-      The winning rows, in the same order as `read`.
-
-    Raises:
-      StoreError: The kind is unknown or a file is unreadable.
-      rows.RowError: A stored line does not match the current row schema.
-    """
+    """Reads one kind back as row objects."""
     return [rows.from_json(payload) for payload in self.read(kind, months)]
 
   def prune_months(self, before: str, dry_run: bool = False) -> list[Path]:
-    """Deletes every data file of the months before `before`: every kind, every part.
-
-    This is what stops the store from growing forever. The tick passes the first month the
-    dashboard can still show, so nothing on screen loses its rows. `state.json` stays: it lists
-    run ids, not months, and an id whose rows are gone does no harm (see `State.prune`).
-
-    Args:
-      before: The first month to keep, "YYYY-MM". It is checked, because as text "2026-9"
-        sorts after "2026-10" and would delete the wrong months.
-      dry_run: Only list the files. Delete nothing.
-
-    Returns:
-      The files deleted - or, on a dry run, the files that would be - sorted by path.
-
-    Raises:
-      StoreError: `before` is not a month, or a file could not be deleted.
-    """
+    """Deletes every data file of the months before `before`: every kind, every part."""
     check_month(before)
     old_months = {(kind, month) for kind in ROW_KINDS for month in self._months_of(kind) if month < before}
     doomed = sorted(path for kind, month in old_months for path in self._parts(kind, month))
@@ -1577,45 +864,7 @@ class Store:
       allow_open_month: bool = False,
       allow_dropping_all: bool = False,
   ) -> int:
-    """Rewrites one closed month's file down to what has to be kept.
-
-    Two things are dropped, and nothing else:
-
-      * superseded lines - of the rows sharing a key, only the last one survives;
-      * for test rows, every row of a run that is not in `merged_run_ids`. Their per-flavor
-        totals are not lost: those live in the suite rows, which compaction never touches.
-        On real data this saves about 17%. What keeps the store's size bounded is
-        `prune_months`, not this.
-
-    **`merged_run_ids` is the keep list, and it is wider than its name.** It has to hold the
-    merged pull request runs AND the scheduled main runs that were kept at full resolution -
-    one a day, the daily history the dashboard's long-range charts are drawn from. A
-    scheduled run has no pull request at all, so leaving those ids out quietly deletes a
-    month of daily history that cannot be fetched again: the JUnit artifacts expired the day
-    after the run.
-
-    It is idempotent by construction. A second run finds no duplicate keys and no droppable
-    test rows, removes nothing, and leaves the file untouched - it does not even rewrite it,
-    so the month's file stops changing in the committed history.
-
-    Args:
-      kind: One of the `rows.KIND_*` constants.
-      month: The month to compact, "YYYY-MM".
-      merged_run_ids: The runs whose per-test detail is kept. Only consulted for test rows;
-        for every other kind this call only drops superseded lines.
-      allow_open_month: Compact a month that has not closed yet. Off by default, because a
-        tick may be appending to the current month while this runs.
-      allow_dropping_all: Let an empty keep list wipe a month of test rows. Off by default,
-        because an empty set is almost always a caller that failed to load its merged runs,
-        and the rows it deletes cannot be fetched again.
-
-    Returns:
-      How many lines were removed. Zero means there was nothing to do.
-
-    Raises:
-      StoreError: The kind or month is malformed, the month is still open, the keep list is
-        empty for a month that holds test rows, or the file could not be read or written.
-    """
+    """Rewrites one closed month's file down to what has to be kept."""
     check_kind(kind)
     check_month(month)
     if not allow_open_month and month >= month_key(utc_now()):
@@ -1653,22 +902,7 @@ class Store:
     return removed
 
   def write_view(self, name: str, payload: Any) -> Path:
-    """Writes one view file under `views/`, atomically.
-
-    The browser fetches these, so a half-written one would break the dashboard rather than the
-    collector. The name may carry the `pr/` sub-directory and nothing else: no absolute path,
-    no walking upwards.
-
-    Args:
-      name: The file name relative to `views/`, e.g. "runs-2026-09.json" or "pr/5070.json".
-      payload: Anything `json.dumps` accepts.
-
-    Returns:
-      The path written.
-
-    Raises:
-      StoreError: The name escapes `views/`, does not end in ".json", or the write failed.
-    """
+    """Writes one view file under `views/`, atomically."""
     relative = Path(name)
     if relative.is_absolute() or ".." in relative.parts:
       raise StoreError(f"view name {name!r} has to stay inside {VIEWS_DIRNAME}/.")
@@ -1679,26 +913,11 @@ class Store:
     return path
 
   def _looks_like_store(self) -> bool:
-    """Says whether this directory already holds a store, so the checkout guard can stand down.
-
-    Returns:
-      True when `data/` or `data/state.json` is already there.
-    """
+    """Says whether this directory already holds a store, so the checkout guard can stand down."""
     return self.data_dir.is_dir() or self.state_path.is_file()
 
   def _as_payload(self, record: Any, kind: str) -> dict[str, Any]:
-    """Turns one appended record into the JSON object that gets written.
-
-    Args:
-      record: A row object from `rows.py`, or a JSON dict it produced.
-      kind: The kind the caller said it is appending.
-
-    Returns:
-      The payload, carrying "kind".
-
-    Raises:
-      StoreError: The record is of another kind, or is not a row at all.
-    """
+    """Turns one appended record into the JSON object that gets written."""
     if isinstance(record, dict):
       given = record.get("kind")
       if given is None:
@@ -1715,18 +934,7 @@ class Store:
     return rows.to_json(record)
 
   def _month_of(self, payload: Mapping[str, Any], kind: str) -> str:
-    """Works out which month a row belongs to when the caller passed none.
-
-    Args:
-      payload: The row.
-      kind: Its kind.
-
-    Returns:
-      The month, "YYYY-MM".
-
-    Raises:
-      StoreError: The kind carries no timestamp of its own, or its timestamp is missing.
-    """
+    """Works out which month a row belongs to when the caller passed none."""
     field_name = MONTH_FIELD.get(kind)
     if field_name is None:
       raise StoreError(
@@ -1745,20 +953,7 @@ class Store:
       items: Sequence[tuple[str, dict[str, Any]]],
       correction: bool,
   ) -> int:
-    """Appends one kind's rows to one month's file.
-
-    Args:
-      kind: The kind.
-      month: The month.
-      items: (key, payload) pairs, in the order they should be written.
-      correction: Write every row even if its key is stored already.
-
-    Returns:
-      How many rows were written.
-
-    Raises:
-      StoreError: The file could not be read or written.
-    """
+    """Appends one kind's rows to one month's file."""
     mutable = kind in MUTABLE_KINDS
     fresh: list[tuple[str, dict[str, Any]]] = []
     batch: dict[str, str] = {}
@@ -1788,18 +983,7 @@ class Store:
     return len(fresh)
 
   def _state_has_row(self, kind: str, payload: Mapping[str, Any]) -> bool:
-    """Says whether the index already accounts for this row, without reading any file.
-
-    The cheap half of the dedup. It answers only for the kinds that belong to one attempt: a
-    rescue spans attempts, so it always falls through to the file's keys.
-
-    Args:
-      kind: The row's kind.
-      payload: The row.
-
-    Returns:
-      True when the row's attempt is recorded as stored.
-    """
+    """Says whether the index already accounts for this row, without reading any file."""
     if kind not in ATTEMPT_KINDS:
       return False
     run_id = _as_int(payload.get("run_id"))
@@ -1809,18 +993,7 @@ class Store:
     return self.load_state().has_attempt(run_id, attempt)
 
   def _known_keys(self, kind: str, month: str) -> set[str]:
-    """Returns every key already in one month's file, reading it at most once per process.
-
-    Args:
-      kind: The kind.
-      month: The month.
-
-    Returns:
-      The keys. Empty when the file does not exist.
-
-    Raises:
-      StoreError: The file could not be read.
-    """
+    """Returns every key already in one month's file, reading it at most once per process."""
     cached = self._keys.get((kind, month))
     if cached is not None:
       return cached
@@ -1829,23 +1002,7 @@ class Store:
     return keys
 
   def _known_bodies(self, kind: str, month: str) -> dict[str, str]:
-    """Returns the current content of every key in a mutable kind's month file.
-
-    Only the kinds in `MUTABLE_KINDS` need this. The value is the row with its `collected_at`
-    left out, so two writes of an unchanged rescue compare equal while a rescue that has
-    since been re-run does not. Later lines win, which is the same correction rule `read`
-    applies.
-
-    Args:
-      kind: The kind.
-      month: The month.
-
-    Returns:
-      key -> that key's latest stored content. Empty when the file does not exist.
-
-    Raises:
-      StoreError: The file could not be read.
-    """
+    """Returns the current content of every key in a mutable kind's month file."""
     cached = self._bodies.get((kind, month))
     if cached is not None:
       return cached
@@ -1857,35 +1014,11 @@ class Store:
     return bodies
 
   def sweep_temp(self) -> int:
-    """Removes temporary files a killed process left in the data directory.
-
-    Called once when a tick opens the store. See `_sweep_temp` for why the age guard is there.
-
-    Returns:
-      How many files were removed.
-    """
+    """Removes temporary files a killed process left in the data directory."""
     return _sweep_temp(self.data_dir)
 
   def _append_lines(self, kind: str, month: str, lines: Sequence[str]) -> None:
-    """Adds lines to the end of a month, starting a new part whenever the current one is full.
-
-    Lines go on the month's last part until the next line would push it past
-    `MAX_PART_BYTES`; from there they go into a new part. A line is never split, so a line
-    that is bigger than the limit on its own gets a part to itself.
-
-    Each part is written atomically, but a batch that spills into a new part is two writes. A
-    process killed between them loses the second write only, and nothing is lost for good:
-    `state.json` is saved at the end of a tick, so the next tick reads that attempt again,
-    and `append` skips the rows that did land.
-
-    Args:
-      kind: The kind.
-      month: The month.
-      lines: The lines to add, each already ending in a newline.
-
-    Raises:
-      StoreError: A file could not be read or written.
-    """
+    """Adds lines to the end of a month, starting a new part whenever the current one is full."""
     numbered = self._numbered_parts(kind, month)
     number, path = numbered[-1] if numbered else (1, self.path_for(kind, month))
     used = _complete_length(path) if path.exists() else 0
@@ -1894,21 +1027,7 @@ class Store:
         self._append_text(self._part_path(kind, month, number + offset), "".join(group))
 
   def _append_text(self, path: Path, block: str) -> None:
-    """Adds a block of complete lines to a file, atomically.
-
-    The existing bytes are copied into a temporary file, the block goes on the end, and the
-    temporary file replaces the target. A killed process therefore leaves the file exactly as
-    it was. If the existing file ends in a torn line - which this writer cannot produce, but
-    a full disk or an outside truncation can - that line is dropped and reported rather than
-    having the new rows glued onto it.
-
-    Args:
-      path: The NDJSON file.
-      block: The lines to add, each already ending in a newline.
-
-    Raises:
-      StoreError: The file could not be read or written.
-    """
+    """Adds a block of complete lines to a file, atomically."""
     _ensure_dir(path.parent)
     carry_over = 0
     if path.exists():
@@ -1942,19 +1061,7 @@ class Store:
     _fsync_dir(path.parent)
 
   def _winners(self, kind: str, paths: Sequence[Path]) -> tuple[list[dict[str, Any]], int]:
-    """Applies the correction rule across a set of files.
-
-    Args:
-      kind: The kind being read, for the error messages.
-      paths: The files, in the order they should be ranked - oldest month first.
-
-    Returns:
-      (the winning payloads, in the order their winning lines appear; how many lines were read
-      in total, which is what compaction subtracts from).
-
-    Raises:
-      StoreError: A file could not be read, or a line could not be keyed.
-    """
+    """Applies the correction rule across a set of files."""
     best: dict[str, tuple[tuple[str, int, int], dict[str, Any]]] = {}
     total = 0
     for file_index, path in enumerate(paths):
@@ -1972,18 +1079,7 @@ class Store:
 
 
 def _split_into_parts(lines: Sequence[str], limit: int, used: int = 0) -> list[list[str]]:
-  """Groups lines into parts of at most `limit` bytes, never splitting a line.
-
-  Args:
-    lines: The lines, each ending in a newline.
-    limit: The most bytes a part may hold.
-    used: How many bytes the first part already holds. The first group goes on the end of
-      that part, and is empty when the very first line would not fit.
-
-  Returns:
-    The groups, in order. There is always at least one, even for no lines. A line bigger than
-    the limit on its own gets a group of its own.
-  """
+  """Groups lines into parts of at most `limit` bytes, never splitting a line."""
   groups: list[list[str]] = [[]]
   for line in lines:
     size = len(line.encode("utf-8"))
@@ -1996,18 +1092,7 @@ def _split_into_parts(lines: Sequence[str], limit: int, used: int = 0) -> list[l
 
 
 def _body(payload: Mapping[str, Any]) -> str:
-  """Returns a row's content without the stamp that changes on every tick.
-
-  Two ticks that re-derive the same unchanged rescue produce rows that differ only in
-  `collected_at`. Comparing on this instead of on the whole payload is what lets the store
-  skip the repeat while still writing the row whose answer has changed.
-
-  Args:
-    payload: The row.
-
-  Returns:
-    A canonical string of every field except `collected_at`.
-  """
+  """Returns a row's content without the stamp that changes on every tick."""
   return json.dumps(
       {name: value for name, value in payload.items() if name != STAMP_FIELD},
       sort_keys=True,
@@ -2017,21 +1102,7 @@ def _body(payload: Mapping[str, Any]) -> str:
 
 
 def _encode(payload: Mapping[str, Any]) -> str:
-  """Turns one row into the line that is written.
-
-  Field order is left exactly as the caller built it - `rows.to_json` emits "kind" first and
-  then the dataclass's own order - so the committed file diffs line by line instead of
-  reshuffling on every write.
-
-  Args:
-    payload: The row.
-
-  Returns:
-    One line of JSON, with no trailing newline.
-
-  Raises:
-    StoreError: The row does not serialise.
-  """
+  """Turns one row into the line that is written."""
   try:
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
   except (TypeError, ValueError) as error:

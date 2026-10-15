@@ -12,30 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Read-only GitHub REST API client for the CI metrics collector.
-
-Every value the dashboard shows comes from the GitHub API, JUnit XML and arithmetic, so
-this module is the only place that talks to the network. It wraps `requests` with the
-three things the collector needs and nothing else:
-
-  * authentication from the GITHUB_TOKEN environment variable,
-  * pagination that stops correctly on a short page, an empty page or a missing next link,
-  * retries with exponential backoff on server errors and rate-limit rejections.
-
-All requests are GET. The client never writes to GitHub and never touches the gh-pages
-branch.
-
-The Authorization header is attached by host, not by call site: every request whose host is
-not api.github.com is sent with no credential at all, whatever URL the caller passed. That
-covers the artifact download, which GitHub answers with a redirect to a signed storage URL;
-that hop is followed by hand so requests cannot re-apply a .netrc credential for the new
-host either. See `GitHubClient.get_bytes` and `GitHubClient._request`.
-
-An artifact is a zip that anyone who can open a pull request can make, so a download can be
-capped: `get_bytes(url, max_bytes=N)` streams the body and counts the bytes that really
-arrive, and stops as soon as there are more than N, whatever the artifact listing or the
-Content-Length header says.
-"""
+"""Read-only GitHub REST API client for the CI metrics collector."""
 
 from __future__ import annotations
 
@@ -85,143 +62,59 @@ _TOKEN_WARNING_EMITTED = False
 
 
 class GitHubError(RuntimeError):
-  """Raised when a GitHub request cannot be completed or its answer cannot be used.
-
-  Attributes:
-    status: HTTP status code of the failing response, or None for transport failures.
-    url: URL that was being requested, when it is known.
-  """
+  """Raised when a GitHub request cannot be completed or its answer cannot be used."""
 
   def __init__(self, message: str, status: int | None = None, url: str | None = None) -> None:
-    """Builds the error.
-
-    Args:
-      message: Human-readable description of what failed.
-      status: HTTP status code of the failing response, if there was one.
-      url: URL that was being requested, if it is known.
-    """
+    """Builds the error."""
     super().__init__(message)
     self.status = status
     self.url = url
 
 
 def _sleep(seconds: float) -> None:
-  """Sleeps for the given number of seconds (a seam tests can patch out).
-
-  Args:
-    seconds: How long to sleep. Values at or below zero return immediately.
-  """
+  """Sleeps for the given number of seconds (a seam tests can patch out)."""
   if seconds > 0:
     time.sleep(seconds)
 
 
 def _warn(message: str) -> None:
-  """Prints a warning to stderr so it never lands in piped collector output.
-
-  Args:
-    message: The line to print.
-  """
+  """Prints a warning to stderr so it never lands in piped collector output."""
   print(message, file=sys.stderr, flush=True)
 
 
 def _no_auth(request: Any) -> Any:
-  """Auth callable that adds nothing, used to stop requests from applying .netrc credentials.
-
-  `requests.Session.prepare_request` looks up .netrc whenever the request carries no auth
-  and `trust_env` is on. Passing a truthy callable suppresses that lookup without adding a
-  credential of our own.
-
-  Args:
-    request: The prepared request, returned unchanged.
-
-  Returns:
-    The same request object.
-  """
+  """Auth callable that adds nothing, used to stop requests from applying .netrc credentials."""
   return request
 
 
 def _is_api_url(url: str) -> bool:
-  """Returns True when a URL points at api.github.com, the only host that may see the token.
-
-  Args:
-    url: Absolute URL to check.
-
-  Returns:
-    True when the host is exactly api.github.com.
-  """
+  """Returns True when a URL points at api.github.com, the only host that may see the token."""
   return urlsplit(url).netloc.lower() == API_HOST
 
 
 def _safe_url(url: str) -> str:
-  """Returns a URL without its query string, for messages that may be logged.
-
-  Artifact downloads redirect to a storage URL whose query carries a signed access token.
-  Printing it would leak a credential into collector logs, so the query is cut off.
-
-  Args:
-    url: The URL to quote.
-
-  Returns:
-    The URL up to the first "?".
-  """
+  """Returns a URL without its query string, for messages that may be logged."""
   return url.split("?", 1)[0]
 
 
 def _without_queries(text: str) -> str:
-  """Cuts the query string off every URL or path inside a piece of text.
-
-  The text of a connection error from urllib3 quotes the whole request path, for example "Max
-  retries exceeded with url: /container/blob?sig=...". On the storage host that query is the
-  download signature, so it must not reach a message that may be logged. Every "?" and what
-  follows it, up to the next whitespace, is cut. A quote or bracket inside the query cannot stop
-  the cut and leave the signature behind; the price is that a closing quote or bracket that
-  touches the URL goes with it.
-
-  Args:
-    text: The text of an error.
-
-  Returns:
-    The same text with the queries cut out.
-  """
+  """Cuts the query string off every URL or path inside a piece of text."""
   return re.sub(r"\?\S*", "", text)
 
 
 def _backoff_seconds(attempt: int) -> float:
-  """Returns the exponential backoff delay for a failed attempt.
-
-  Args:
-    attempt: 1-based attempt number that just failed.
-
-  Returns:
-    Seconds to wait before the next attempt, capped at MAX_BACKOFF_SLEEP_SECONDS.
-  """
+  """Returns the exponential backoff delay for a failed attempt."""
   return min(BACKOFF_BASE_SECONDS * (2 ** (attempt - 1)), MAX_BACKOFF_SLEEP_SECONDS)
 
 
 def _seconds_until(reset_epoch: int) -> float:
-  """Returns how long to wait for a rate-limit window to reset.
-
-  Args:
-    reset_epoch: Unix timestamp the limit resets at, as GitHub reports it.
-
-  Returns:
-    Seconds to wait, never negative and never more than MAX_RATE_LIMIT_SLEEP_SECONDS. A
-    small buffer is added because the client and GitHub clocks are not the same clock.
-  """
+  """Returns how long to wait for a rate-limit window to reset."""
   remaining = reset_epoch - time.time() + RATE_LIMIT_BUFFER_SECONDS
   return min(max(remaining, 0.0), MAX_RATE_LIMIT_SLEEP_SECONDS)
 
 
 def _header_int(response: requests.Response, name: str) -> int | None:
-  """Reads one response header as an integer.
-
-  Args:
-    response: Response to read the header from.
-    name: Header name, matched case-insensitively.
-
-  Returns:
-    The integer value, or None when the header is absent or not a number.
-  """
+  """Reads one response header as an integer."""
   raw = response.headers.get(name)
   if raw is None:
     return None
@@ -232,15 +125,7 @@ def _header_int(response: requests.Response, name: str) -> int | None:
 
 
 def _body_excerpt(response: requests.Response, limit: int = 200) -> str:
-  """Returns a short, single-line excerpt of a response body for error messages.
-
-  Args:
-    response: Response whose body should be quoted.
-    limit: Maximum number of characters to keep.
-
-  Returns:
-    The trimmed body text, or an empty string when the body cannot be read.
-  """
+  """Returns a short, single-line excerpt of a response body for error messages."""
   try:
     text = " ".join(response.text.split())
   except (UnicodeDecodeError, ValueError):
@@ -251,24 +136,7 @@ def _body_excerpt(response: requests.Response, limit: int = 200) -> str:
 
 
 def _read_limited(response: requests.Response, max_bytes: int | None) -> bytes:
-  """Reads a streamed body, counting the bytes that really arrive.
-
-  Neither the artifact listing nor the Content-Length header is trusted: the listing can be
-  wrong, and a server can leave the header out or write a wrong one. So the body is read in
-  pieces, and reading stops as soon as there are more than `max_bytes`. A Content-Length that
-  already says the body is too big is refused before anything is read.
-
-  Args:
-    response: The final response, requested with `stream=True`.
-    max_bytes: The most bytes to accept, or None for no limit.
-
-  Returns:
-    The whole body.
-
-  Raises:
-    GitHubError: The body is longer than `max_bytes`, or says it will be. The message quotes
-      the URL without its query, like every other message of this client.
-  """
+  """Reads a streamed body, counting the bytes that really arrive."""
   safe = _safe_url(response.url)
   if max_bytes is not None:
     announced = _header_int(response, "Content-Length")
@@ -293,11 +161,7 @@ def _read_limited(response: requests.Response, max_bytes: int | None) -> bytes:
 
 
 class GitHubClient:
-  """Read-only client for one repository's GitHub REST API.
-
-  The client keeps a `requests.Session` so connections are reused, remembers the newest
-  rate-limit headers it saw, and turns every unrecoverable failure into a GitHubError.
-  """
+  """Read-only client for one repository's GitHub REST API."""
 
   def __init__(
       self,
@@ -306,16 +170,7 @@ class GitHubClient:
       token: str | None = None,
       session: requests.Session | None = None,
   ) -> None:
-    """Builds a client for `owner/repo`.
-
-    Args:
-      owner: Repository owner, for example "AI-Hypercomputer".
-      repo: Repository name, for example "maxtext".
-      token: GitHub token. Falls back to the GITHUB_TOKEN environment variable. Without a
-        token the API allows only 60 requests per hour, so a warning is printed once.
-      session: Session to send requests through. A new one is created when omitted; pass
-        your own to share connections or to stub the network in tests.
-    """
+    """Builds a client for `owner/repo`."""
     global _TOKEN_WARNING_EMITTED
 
     self.owner = owner
@@ -349,20 +204,7 @@ class GitHubClient:
       self.session.close()
 
   def get_json(self, path: str, **params: Any) -> dict[str, Any]:
-    """Fetches one JSON object from a repository-relative API path.
-
-    Args:
-      path: Path under /repos/{owner}/{repo}, for example "actions/runs/33468578834". An
-        absolute https URL is also accepted and used as given.
-      **params: Query-string parameters.
-
-    Returns:
-      The decoded JSON object.
-
-    Raises:
-      GitHubError: On a failed request, a body that is not JSON, or a body that is a JSON
-        array rather than an object (use `paginate` for list endpoints).
-    """
+    """Fetches one JSON object from a repository-relative API path."""
     response = self._request("GET", self._url(path), params=params or None)
     payload = self._decode_json(response)
     if not isinstance(payload, dict):
@@ -375,30 +217,7 @@ class GitHubClient:
     return payload
 
   def paginate(self, path: str, key: str, *, max_items: int | None = None, **params: Any) -> list[Any]:
-    """Fetches every page of a list endpoint and returns the items flattened.
-
-    Paging follows the Link header when GitHub sends one. Without it, paging stops on a
-    short page (fewer than per_page items) or on an empty page, whichever comes first.
-
-    Args:
-      path: Path under /repos/{owner}/{repo}, for example "actions/runs/1/artifacts".
-      key: Field of the response object holding the list, for example "jobs", "artifacts"
-        or "workflow_runs". Ignored when the endpoint answers with a bare JSON array.
-      max_items: Stop paging after the page that makes the list this long, so a list that is far
-        too long is not read to the end. Whole pages are kept, so the list can be a little
-        longer than this, and it is cut short when the endpoint had more: the caller must not
-        take it for everything. None (the default) reads every page, as it always did. It is
-        not sent to GitHub.
-      **params: Query-string parameters. `per_page` defaults to 100.
-
-    Returns:
-      Every item from every page, in the order GitHub returned them, or the pages up to the
-      one that reached `max_items`.
-
-    Raises:
-      GitHubError: On a failed request, a body that is not JSON, a body that has no `key`
-        field, or a page count beyond MAX_PAGES (a paging loop that never ends).
-    """
+    """Fetches every page of a list endpoint and returns the items flattened."""
     query: dict[str, Any] | None = dict(params)
     query.setdefault("per_page", PER_PAGE)
     per_page = int(query["per_page"])
@@ -454,34 +273,7 @@ class GitHubClient:
     raise GitHubError(f"Stopped paging {self._url(path)} after {MAX_PAGES} pages; the next links loop.")
 
   def get_bytes(self, url: str, *, max_bytes: int | None = None) -> bytes:
-    """Downloads an absolute URL and returns its bytes, following GitHub's redirect.
-
-    Artifact downloads answer 302 with a Location on a storage host. That hop is followed
-    by hand, with the Authorization header removed and .netrc lookups suppressed, so the
-    token never leaves api.github.com. Letting requests follow the redirect would strip the
-    header too, but it would also re-apply any .netrc credentials for the new host.
-
-    Every response is streamed and closed again, so the body of a redirect is never read and
-    the final body is read a piece at a time. With `max_bytes` set, the bytes that really
-    arrive are counted and reading stops as soon as there are more than that, whatever the
-    Content-Length header says. A body that breaks off half way is downloaded again, up to
-    MAX_ATTEMPTS times; the requests themselves are retried as before.
-
-    Storage URLs carry a signed access token in their query string, so every message this
-    method raises quotes the URL without its query.
-
-    Args:
-      url: Absolute http(s) URL, for example an artifact's archive_download_url.
-      max_bytes: The most bytes to accept, or None (the default) for no limit.
-
-    Returns:
-      The response body as bytes (for artifacts, the zip file).
-
-    Raises:
-      GitHubError: On a non-absolute URL, a failed request, a redirect without a Location,
-        more than MAX_REDIRECTS hops, a final status that is not 200, a body that breaks off
-        on every attempt, or a body longer than `max_bytes`.
-    """
+    """Downloads an absolute URL and returns its bytes, following GitHub's redirect."""
     if not url.lower().startswith(("http://", "https://")):
       raise GitHubError(f"get_bytes needs an absolute http(s) URL, got {url!r}.", url=url)
     safe = _safe_url(url)
@@ -509,20 +301,7 @@ class GitHubClient:
     raise GitHubError(f"GET {safe} failed after {MAX_ATTEMPTS} attempts.", url=safe)
 
   def _download_once(self, url: str, safe: str, max_bytes: int | None) -> bytes:
-    """Follows the redirects of one download by hand, then reads the final body.
-
-    Args:
-      url: Absolute http(s) URL.
-      safe: The same URL without its query, for messages.
-      max_bytes: The most bytes to accept, or None for no limit.
-
-    Returns:
-      The body of the final 200 response.
-
-    Raises:
-      GitHubError: See `get_bytes`.
-      requests.RequestException: The body broke off while it was being read.
-    """
+    """Follows the redirects of one download by hand, then reads the final body."""
     response = self._request("GET", url, allow_redirects=False, timeout=DOWNLOAD_TIMEOUT_SECONDS, stream=True)
     try:
       hops = 0
@@ -559,14 +338,7 @@ class GitHubClient:
       response.close()
 
   def rate_limit(self) -> dict[str, int]:
-    """Reads the core rate-limit budget. This endpoint does not spend budget itself.
-
-    Returns:
-      A dict with "limit", "remaining" and "reset" (reset is a Unix timestamp).
-
-    Raises:
-      GitHubError: On a failed request or an answer without the expected fields.
-    """
+    """Reads the core rate-limit budget. This endpoint does not spend budget itself."""
     response = self._request("GET", f"{API_ROOT}/rate_limit")
     payload = self._decode_json(response)
     if not isinstance(payload, dict):
@@ -592,17 +364,7 @@ class GitHubClient:
     return status
 
   def wait_for_rate_limit(self, need: int = 50) -> None:
-    """Waits until at least `need` requests are left in the current rate-limit window.
-
-    Safe to call before every batch: when the newest rate-limit headers already show enough
-    budget the call costs nothing, and when the budget is short it sleeps at most one hour.
-
-    Args:
-      need: How many requests the next batch is expected to spend.
-
-    Raises:
-      GitHubError: When the rate-limit endpoint cannot be read.
-    """
+    """Waits until at least `need` requests are left in the current rate-limit window."""
     if self._remaining_hint is not None and self._remaining_hint >= need:
       return
 
@@ -620,14 +382,7 @@ class GitHubClient:
     self._remaining_hint = None
 
   def _url(self, path: str) -> str:
-    """Turns a repository-relative path into an absolute API URL.
-
-    Args:
-      path: Repository-relative path, or an absolute http(s) URL which is returned as is.
-
-    Returns:
-      The absolute URL to request.
-    """
+    """Turns a repository-relative path into an absolute API URL."""
     if path.lower().startswith(("http://", "https://")):
       return path
     return f"{API_ROOT}/repos/{self.owner}/{self.repo}/{path.lstrip('/')}"
@@ -642,30 +397,7 @@ class GitHubClient:
       send_auth: bool | None = None,
       stream: bool = False,
   ) -> requests.Response:
-    """Sends one request, retrying transport errors, 5xx and rate-limit rejections.
-
-    Args:
-      method: HTTP method, always "GET" in this collector.
-      url: Absolute URL to request.
-      params: Query-string parameters, or None.
-      allow_redirects: Whether requests may follow redirects itself. `get_bytes` sets this
-        to False so it can drop the token before the next hop.
-      timeout: (connect, read) timeout in seconds.
-      send_auth: Whether to attach the token. None decides by host, which is the safe
-        default: only api.github.com is authenticated. False forces the header off and also
-        suppresses .netrc lookups, so no credential of any kind reaches the host.
-      stream: Whether to leave the body unread, so the caller can read it in pieces. The
-        caller must close a streamed response. The option is passed to the session only when
-        it is True, so every other request is sent exactly as it always was.
-
-    Returns:
-      The response, whose status is below 400.
-
-    Raises:
-      GitHubError: When the request still fails after MAX_ATTEMPTS, when its retries would
-        sleep longer than MAX_TOTAL_RETRY_SLEEP_SECONDS, or when it fails with a status that
-        retrying cannot fix (404, 401, a plain 403).
-    """
+    """Sends one request, retrying transport errors, 5xx and rate-limit rejections."""
     if send_auth is None:
       send_auth = _is_api_url(url)
     safe = _safe_url(url)
@@ -726,33 +458,14 @@ class GitHubClient:
 
   @staticmethod
   def _affordable_delay(wanted: float, already_slept: float) -> float | None:
-    """Trims a retry delay to what is left of this request's sleeping budget.
-
-    Args:
-      wanted: The delay the retry rule asks for, in seconds.
-      already_slept: How long this request has slept across earlier attempts.
-
-    Returns:
-      The delay to use, or None when the budget is spent and the caller should give up
-      instead of waiting.
-    """
+    """Trims a retry delay to what is left of this request's sleeping budget."""
     left = MAX_TOTAL_RETRY_SLEEP_SECONDS - already_slept
     if left <= 0:
       return None
     return min(wanted, left)
 
   def _retry_delay(self, response: requests.Response, attempt: int) -> float | None:
-    """Decides whether a failed response is worth retrying, and how long to wait first.
-
-    Args:
-      response: The failing response.
-      attempt: 1-based attempt number that just failed.
-
-    Returns:
-      Seconds to wait before retrying, or None when retrying cannot help. 404 is never
-      retried; 5xx always is; 403 only when it carries a rate-limit signal, because a plain
-      403 means the token lacks permission and will keep meaning that.
-    """
+    """Decides whether a failed response is worth retrying, and how long to wait first."""
     status = response.status_code
     if status == 404:
       return None
@@ -777,11 +490,7 @@ class GitHubClient:
     return None
 
   def _note_rate_headers(self, response: requests.Response) -> None:
-    """Remembers the rate-limit headers of a response so wait_for_rate_limit can skip a call.
-
-    Args:
-      response: Any response from api.github.com. Responses without the headers are ignored.
-    """
+    """Remembers the rate-limit headers of a response so wait_for_rate_limit can skip a call."""
     remaining = _header_int(response, "X-RateLimit-Remaining")
     if remaining is not None:
       self._remaining_hint = remaining
@@ -790,17 +499,7 @@ class GitHubClient:
       self._reset_hint = reset
 
   def _decode_json(self, response: requests.Response) -> Any:
-    """Decodes a response body as JSON.
-
-    Args:
-      response: Response to decode.
-
-    Returns:
-      The decoded object, list or scalar.
-
-    Raises:
-      GitHubError: When the body is not valid JSON.
-    """
+    """Decodes a response body as JSON."""
     try:
       return response.json()
     except ValueError as error:
