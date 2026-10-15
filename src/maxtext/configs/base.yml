@@ -1511,6 +1511,11 @@ context_parallel_load_balance: true
 # GatedDeltaNet, whose recurrence needs natural order) and the input pipeline keep natural order. Only causal
 # (global) attention layers are balanced. Requires context_parallel_load_balance: false and use_multimodal: false.
 context_parallel_attention_load_balance: false
+# Under context_parallel_attention_load_balance, save each attention layer's reordered positions and segment ids
+# for the backward. They depend only on the batch, so jax.lax.scan keeps one saved copy outside the layer loop, and
+# the remat replay of the attention layers reads it instead of reordering them again. Same values. Requires
+# context_parallel_attention_load_balance: true, remat_policy: custom and scan_layers: true.
+context_parallel_attention_load_balance_hoist_ids: false
 context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 

@@ -2574,6 +2574,20 @@ class HardwareAndMesh(BaseModel):
           "use_multimodal=False."
       ),
   )
+  context_parallel_attention_load_balance_hoist_ids: bool = Field(
+      False,
+      description=(
+          "Under context_parallel_attention_load_balance, name each attention layer's DUAL_CHUNK_SWAP-ordered"
+          " positions and segment ids (Attention._to_load_balanced_order) so that remat_policy=custom saves them"
+          " (maxtext_utils.get_save_and_offload_names). They depend only on the batch, so the saved value is a loop"
+          " invariant of the layer scan, which jax.lax.scan hoists out of the loop: the forward computes it once,"
+          " and the remat replay of the attention layers reads that copy instead of reordering the positions and"
+          " segment ids again (two collective-permutes per array, then a per-rank select between the received"
+          " halves and their concatenation). The reordered values are the same, so outputs and gradients do not"
+          " change. Requires context_parallel_attention_load_balance=True with an even context parallelism of at"
+          " least 2, remat_policy='custom' and scan_layers=True."
+      ),
+  )
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
@@ -2598,6 +2612,33 @@ class HardwareAndMesh(BaseModel):
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
   )
+
+  @model_validator(mode="after")
+  def validate_context_parallel_attention_load_balance_hoist_ids(self) -> "HardwareAndMesh":
+    """The ids are reordered only on the attention load-balance path, and only a scanned custom remat hoists them."""
+    if self.context_parallel_attention_load_balance_hoist_ids:
+      # context_sharding, the parallelism degrees and remat_policy live in other sections; this validator runs on
+      # the combined config. The degree is the one AttentionOp.attention_load_balance_context_size balances over.
+      context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
+          self, f"dcn_{self.context_sharding}_parallelism", 1
+      )
+      _reject_unless(
+          "context_parallel_attention_load_balance_hoist_ids=True",
+          [
+              (
+                  self.context_parallel_attention_load_balance,
+                  "context_parallel_attention_load_balance=True (the only path that reorders them)",
+              ),
+              (
+                  context_parallel_size >= 2 and context_parallel_size % 2 == 0,
+                  f"an even context parallelism of at least 2 (got {context_parallel_size}; attention keeps natural"
+                  " order otherwise)",
+              ),
+              (self.remat_policy == "custom", "remat_policy='custom' (the only policy whose save list takes the name)"),
+              (self.scan_layers, "scan_layers=True (the hoist out of the layer loop is jax.lax.scan's)"),
+          ],
+      )
+    return self
 
 
 class LayoutAndSharding(BaseModel):
