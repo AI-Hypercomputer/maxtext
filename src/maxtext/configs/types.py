@@ -1621,6 +1621,13 @@ class MoEGeneral(BaseModel):
       False,
       description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
   )
+  gather_scanned_kernels_once: bool = Field(
+      False,
+      description=(
+          "Gather small FSDP-sharded MoE router and attention query kernels once before the scanned layer stack"
+          " instead of inside every scanned layer."
+      ),
+  )
   moe_pin_sparse_core_ep_all_gathers: bool = Field(
       False,
       description="Pin only the ring-of-experts EP all-gathers (dispatch tokens and routing inputs) to a SparseCore"
