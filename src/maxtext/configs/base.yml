@@ -679,6 +679,14 @@ qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
 # Combine matmuls for QKV and MLP
 fused_qkv: false
 fused_mlp: false
+# Training: gather the attention query projection kernel (with Qwen3-Next / Qwen3.5's output gate) once per attention
+# layer in the backward pass instead of twice. The kernel is sharded on its embed dimension, so the partitioner
+# all-gathers it for the remat replay of q = x @ wq and again for the input gradient dx = dq @ wq^T. With this on, the
+# replay's gathered kernel feeds the input gradient (it stays live in between); the kernel gradient is unchanged and
+# the results are the same bits. Requires an unquantized, unfused (fused_qkv: false) query projection whose kernel is
+# sharded on its embed dimension and replicated on the others (no tensor parallelism), auto shard mode, and
+# remat_policy full, save_out_proj, or custom with query_proj: 'remat'.
+query_proj_kernel_gather_once: false
 
 record_internal_nn_metrics: 0
 
