@@ -112,8 +112,15 @@ class SyntheticDataIterator:
     return self
 
   def __next__(self):
+    # self.data never changes, so every step's batch is the same array. Reusing the first one skips the
+    # per-step reshard (about 30 ms on a v4-128 at seq 4096), which a real loader's prefetch would hide.
+    if self.config.synthetic_data_reuse_batch and getattr(self, "_batch", None) is not None:
+      return self._batch
     with self.mesh:
-      return self.data_generator(self.config, self.data)  # pylint: disable=not-callable
+      batch = self.data_generator(self.config, self.data)  # pylint: disable=not-callable
+    if self.config.synthetic_data_reuse_batch:
+      self._batch = batch
+    return batch
 
   @staticmethod
   def raw_generate_synthetic_data(config: pyconfig.HyperParameters, data):

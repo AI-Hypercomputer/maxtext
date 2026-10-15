@@ -20,6 +20,7 @@ from flax import nnx
 
 import jax
 import jax.numpy as jnp
+from maxtext.kernels import fused_ce
 from maxtext.utils.sharding import (
     maybe_shard_with_name,
     create_sharding,
@@ -270,3 +271,77 @@ def vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train):
       head_params, other_params, rest, hidden_states, labels, segmentation
   )
   return total_loss, total_z_loss
+
+
+def _fused_ce_config_from(config) -> fused_ce.FusedCEConfig:
+  vmem = config.fused_lm_head_ce_vmem_limit_mib
+  return fused_ce.FusedCEConfig(
+      block_t_fwd=config.fused_lm_head_ce_block_t,
+      block_v_fwd=config.fused_lm_head_ce_block_v,
+      block_t_dx=config.fused_lm_head_ce_block_t_dx,
+      block_v_dx=config.fused_lm_head_ce_block_v_dx,
+      block_t_dw=config.fused_lm_head_ce_block_t_dw,
+      block_v_dw=config.fused_lm_head_ce_block_v_dw,
+      bwd_fused=config.fused_lm_head_ce_bwd_fused,
+      block_t_bwd=config.fused_lm_head_ce_block_t_bwd,
+      block_v_bwd=config.fused_lm_head_ce_block_v_bwd,
+      compute_dtype=jnp.dtype(config.dtype).name,
+      vmem_limit_bytes=vmem * 1024 * 1024 if vmem > 0 else None,
+      # Mosaic kernels only compile for TPU; elsewhere (CPU tests) run in interpret mode.
+      interpret=jax.devices()[0].platform != "tpu",
+  )
+
+
+def fused_lm_head_ce_nnx_loss(model, hidden_states, data, config, is_train):
+  """Cross-entropy loss via the fused LM-head + CE Pallas kernel (`fused_lm_head_ce=True`).
+
+  Applies the decoder's final norm (and dropout) in XLA, then runs the untied LM-head
+  matmul + log-sum-exp + target logit (+ z-loss) tile by tile in VMEM under shard_map
+  over the token-batch axes; the head kernel is all-gathered once inside the
+  shard_map (its gradient is reduce-scattered back). Semantics match the
+  `num_vocab_tiling` path: `max_utils.cross_entropy_with_logits` masked by
+  `targets_segmentation != 0`, except that logits stay in f32 instead of being
+  rounded to bf16 by the LM-head dot.
+
+  Args:
+    model: NNX Transformer whose decoder has `decoder_norm` and `logits_dense`.
+    hidden_states: `[B, S, D]` final (pre-norm) decoder hidden states.
+    data: Dict with ``targets`` and ``targets_segmentation``.
+    config: Model and training config.
+    is_train: Whether the model is in training mode.
+
+  Returns:
+    A tuple ``(total_loss, total_z_loss)`` of token sums (not normalized).
+  """
+  if config.logits_via_embedding:
+    raise ValueError("fused_lm_head_ce requires an untied LM head (logits_via_embedding=False).")
+  if config.final_logits_soft_cap:
+    raise ValueError("fused_lm_head_ce does not support final_logits_soft_cap.")
+  if config.logits_dot_in_fp32 or config.quantize_logits_proj:
+    raise ValueError("fused_lm_head_ce requires a bf16 LM-head dot (logits_dot_in_fp32/quantize_logits_proj off).")
+
+  decoder = model.decoder
+  mesh = model.mesh
+  deterministic = not config.enable_dropout if is_train else True
+  y = decoder.decoder_norm(hidden_states)
+  y = decoder.dropout(y, deterministic=deterministic)
+  y = y.astype(config.dtype)
+  kernel = decoder.logits_dense.kernel[...]
+
+  token_spec = create_sharding(mesh, ("activation_embed_and_logits_batch", "activation_length")).spec
+  w_spec = create_sharding(mesh, ("embed_vocab", "vocab")).spec
+  labels = data["targets"]
+  weights = (data["targets_segmentation"] != 0).astype(jnp.float32)
+
+  loss, z_loss = fused_ce.sharded_fused_linear_cross_entropy(
+      y,
+      kernel,
+      labels,
+      weights,
+      mesh=mesh,
+      token_spec=token_spec,
+      w_spec=w_spec,
+      z_loss=config.z_loss_multiplier,
+      cfg=_fused_ce_config_from(config),
+  )
+  return jnp.sum(loss), jnp.sum(z_loss)

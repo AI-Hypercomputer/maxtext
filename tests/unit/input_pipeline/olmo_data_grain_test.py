@@ -39,6 +39,7 @@ import numpy as np
 from maxtext.input_pipeline.olmo_data import build_index, OlmoNpyIndex
 from maxtext.input_pipeline.olmo_data_grain import (
     NgramFilterTransform,
+    OlmoCoreOrderSampler,
     OlmoIndexSampler,
     OlmoNpyDataSource,
     ShiftToInputsTargets,
@@ -295,6 +296,56 @@ class TransformsTest(unittest.TestCase):
     np.testing.assert_array_equal(out["inputs_segmentation"], np.ones(8, dtype=np.int32))
     np.testing.assert_array_equal(out["targets_segmentation"], np.zeros(8, dtype=np.int32))
 
+  def test_shift_to_inputs_targets_eos_segmentation(self):
+    # EOS at position 0 does not start a new segment; EOS at positions 3 and 5 do.
+    arr = np.array([99, 10, 11, 99, 12, 99, 13, 14], dtype=np.uint32)
+    out = ShiftToInputsTargets(segment_eos_token_id=99).map(
+        {"tokens": arr, "instance_id": 0, "file_id": 0, "instance_mask": True}
+    )
+    expected_seg = np.array([1, 1, 1, 2, 2, 3, 3, 3], dtype=np.int32)
+    expected_tgt_seg = np.array([1, 1, 1, 2, 2, 3, 3, 0], dtype=np.int32)
+    np.testing.assert_array_equal(out["inputs_segmentation"], expected_seg)
+    np.testing.assert_array_equal(out["targets_segmentation"], expected_tgt_seg)
+
+
+class OlmoCoreOrderSamplerTest(unittest.TestCase):
+
+  def test_olmo_core_order_matches_across_worker_counts(self):
+    with tempfile.TemporaryDirectory() as d:
+      idx, _ = _build_synthetic_index(d, sizes=(128,), sequence_length=4)
+      # 32 instances total; write a deterministic permutation as uint32.
+      perm = np.random.default_rng(123).permutation(idx.total_instances).astype(np.uint32)
+      perm_path = _write_raw_uint32(d, "global_indices.npy", perm)
+
+      sampler = OlmoCoreOrderSampler(
+          global_indices_path=perm_path,
+          total_instances=idx.total_instances,
+          batch_size=4,
+          shard_index=0,
+          shard_count=1,
+      )
+      self.assertEqual(sampler.num_global_batches, 8)
+
+      batches_by_workers = {}
+      for workers in (0, 1, 2):
+        loader = make_olmo_grain_data_loader(
+            idx,
+            seed=0,
+            batch_size=4,
+            shard_index=0,
+            shard_count=1,
+            apply_ngram_filter=False,
+            shift_to_inputs_targets=False,
+            grain_worker_count=workers,
+            global_indices_path=perm_path,
+        )
+        batches_by_workers[workers] = [b["instance_id"].tolist() for b in loader]
+
+      expected_batches = [perm[k * 4 : (k + 1) * 4].tolist() for k in range(8)]
+      self.assertEqual(batches_by_workers[0], expected_batches)
+      self.assertEqual(batches_by_workers[1], expected_batches)
+      self.assertEqual(batches_by_workers[2], expected_batches)
+
 
 class FactoryTest(unittest.TestCase):
 
@@ -350,4 +401,11 @@ class FactoryTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  try:
+    from grain._src.core import multiprocessing as grain_mp  # pylint: disable=g-import-not-at-top
+  except ImportError:
+    grain_mp = None
+  if grain_mp is not None and hasattr(grain_mp, "handle_test_main"):
+    grain_mp.handle_test_main(unittest.main)
+  else:
+    unittest.main()
