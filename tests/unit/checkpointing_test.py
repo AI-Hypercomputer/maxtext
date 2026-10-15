@@ -198,16 +198,14 @@ class LoadDynamicTest(parameterized.TestCase):
 
   @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
-  @mock.patch.object(load_dynamic, "load_sharded_hf_state")
-  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state")
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming")
   @mock.patch("jax.process_index", return_value=0)
   @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
   def test_load_safetensors_dynamic_from_hf_hub(
       self,
       mock_sync,
       mock_process_index,
-      mock_transform,
-      mock_load_sharded,
+      mock_load_streaming,
       mock_storage_client,
       mock_hf_fs,
   ):
@@ -219,8 +217,7 @@ class LoadDynamicTest(parameterized.TestCase):
     mock_blob.name = "hf_cache/repo_meta-llama/model.safetensors"
     mock_client_instance.list_blobs.return_value = [mock_blob]
 
-    mock_load_sharded.return_value = {}
-    mock_transform.return_value = {"params": {}}
+    mock_load_streaming.return_value = {"params": {}}
 
     class MockConfig:
 
@@ -240,6 +237,8 @@ class LoadDynamicTest(parameterized.TestCase):
     self.assertEqual(loaded_vars, {"params": {}})
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
+    # The weights are streamed from the GCS cache, not from the Hub.
+    self.assertEqual(mock_load_streaming.call_args.args[0], "gs://dummy-bucket/hf_cache/repo_meta-llama")
 
 
 class SourceCheckpointLoadingTest(parameterized.TestCase):
