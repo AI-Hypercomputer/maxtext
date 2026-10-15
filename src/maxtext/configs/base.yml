@@ -1437,6 +1437,8 @@ local_sa_fuse_reciprocal: None  # inherits from sa_fuse_reciprocal if None
 local_sa_use_base2_exp: None  # inherits from sa_use_base2_exp if None
 experimental_sa_quant_q_fp8: False # Experimental flag: If enabled, the Q tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
 experimental_sa_quant_k_fp8: False # Experimental flag: If enabled, the K tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
+sa_dkv_reuse_scaled_q: False # Experimental (SplashConfig.dkv_reuse_scaled_q): fused dkv kernel reuses LOG2E-scaled q for dK (1 live q copy instead of 2). Works with bf16 or fp8 q; subsumed by sa_q_prescaled_log2e.
+sa_q_prescaled_log2e: False # Experimental (SplashConfig.q_prescaled_log2e): folds LOG2E into f32 q softmax_scale before fp8 cast (1 fp8 rounding instead of 2) and skips in-kernel q scaling. Preferred over sa_dkv_reuse_scaled_q for MLA with fp8 q.
 sa_ignore_segment_ids: False # Do not pass segment ids to splash attention, for both train and eval. Splash then runs its non-segmented kernels, which skip the per-block segment-id compare and mask (VPU work on every block, not only diagonal ones); causal masking still applies. Only valid for c4_mlperf with stream chunking, where every row is one segment.
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
