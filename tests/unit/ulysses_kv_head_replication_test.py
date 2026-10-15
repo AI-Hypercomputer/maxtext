@@ -314,8 +314,9 @@ def _run_attention_op_checks():
 
   with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
     hlo = jax.jit(flash("ulysses")).lower(*args).compile().as_text()
-  # q, k, v in and the output back; no K/V all-gather (the one all-gather is the int32 segment IDs).
-  assert hlo.count(" all-to-all(") == 4, hlo.count(" all-to-all(")
+  # q, k, v in as one packed exchange and the output back; no K/V all-gather (the one all-gather is the int32
+  # segment IDs).
+  assert hlo.count(" all-to-all(") == 2, hlo.count(" all-to-all(")
   assert hlo.count(" all-gather(") + hlo.count(" all-gather-start(") == 1
 
 

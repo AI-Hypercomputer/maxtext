@@ -247,6 +247,34 @@ def ulysses_all_to_all(tensor: Any, ulysses_axis: str):
   return jax.lax.all_to_all(tensor, ulysses_axis, split_axis=1, concat_axis=2, tiled=True)
 
 
+def ulysses_all_to_all_qkv(query: Any, key: Any, value: Any, ulysses_axis: str, ulysses_size: int):
+  """`ulysses_all_to_all` of Q, K and V as one collective.
+
+  XLA does not combine the three exchanges, and the K/V ones are small enough to be mostly latency. Rank r's block
+  of each tensor's head axis is laid out next to the others ([its H_q/U query heads, its H_kv/U key heads, its
+  H_kv/U value heads]), so one tiled all-to-all over the concatenated head axis hands every rank the same heads as
+  three separate exchanges, and the backward is one all-to-all as well. Falls back to three exchanges when the
+  tensors cannot be concatenated (different batch, sequence, head dim or dtype).
+  """
+  b, hq, s, d = query.shape
+  hk = key.shape[1]
+  if key.shape != value.shape or (key.shape[0], key.shape[2], key.shape[3]) != (b, s, d) or not (
+      query.dtype == key.dtype == value.dtype and hq % ulysses_size == 0 and hk % ulysses_size == 0
+  ):
+    return tuple(ulysses_all_to_all(x, ulysses_axis) for x in (query, key, value))
+  nq, nk = hq // ulysses_size, hk // ulysses_size
+  packed = jnp.concatenate(
+      [
+          query.reshape(b, ulysses_size, nq, s, d),
+          key.reshape(b, ulysses_size, nk, s, d),
+          value.reshape(b, ulysses_size, nk, s, d),
+      ],
+      axis=2,
+  ).reshape(b, ulysses_size * (nq + 2 * nk), s, d)
+  packed = ulysses_all_to_all(packed, ulysses_axis)
+  return packed[:, :nq], packed[:, nq : nq + nk], packed[:, nq + nk :]
+
+
 def inverse_ulysses_all_to_all(tensor: Any, ulysses_axis: str):
   """Moves `[B, H/U, S, D]` back to `[B, H, S/U, D]`."""
   return jax.lax.all_to_all(tensor, ulysses_axis, split_axis=2, concat_axis=1, tiled=True)
