@@ -813,6 +813,9 @@ num_vocab_tiling: 1
 # reuses it instead of re-gathering per chunk. Faster when steps are short enough to expose
 # the gathers; holds the gathered head in memory for the backward.
 vocab_tiling_ag_once: false
+# If set to true then cut the vocab tiles along the sequence instead of the flattened batch, so each device keeps
+# its own tokens; the batch-major cut reshards the hidden states through a full all-gather at small per-device batches.
+vocab_tiling_seq_major: false
 
 # Tokenizer
 vocab_size: 32_000 # powers of 2 for sharding
@@ -1094,6 +1097,7 @@ gradient_clipping_threshold: 1.0
 # Instead of updating the weights every step, you may effectively use a larger
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
+ga_params_loop_barrier: false # stop XLA hoisting loop-invariant work on the params (all-gathers, casts) out of the GA loop
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
 
