@@ -2614,6 +2614,14 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
   )
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
+  ulysses_qkv: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for Q/K/V after the Ulysses all-to-all (context_parallel_strategy='ulysses'). Saving them"
+          " (device or offload) keeps the backward from replaying the all-to-all; costs the exchanged Q/K/V per"
+          " attention layer."
+      ),
+  )
   gdn: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for GatedDeltaNet (GDN) recurrence kernel and residuals (remat, device, offload).",
@@ -5807,6 +5815,7 @@ class MaxTextConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "ulysses_qkv",
           "gdn",
           "gdn_conv",
           "gdn_states",
@@ -7376,6 +7385,7 @@ class RLConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "ulysses_qkv",
           "gdn",
           "gdn_conv",
           "gdn_states",
