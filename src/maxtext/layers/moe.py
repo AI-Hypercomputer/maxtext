@@ -30,6 +30,7 @@ from jax import ad_checkpoint as adc
 from jax.experimental.compute_on import compute_on
 from jax.experimental import xla_metadata
 from jax.experimental.layout import Layout, with_layout_constraint
+from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -37,6 +38,7 @@ from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.kernels import sort_activations
+from maxtext.kernels.ragged import glu_rows
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -312,14 +314,25 @@ def _split_gate_up(fused):
   return gate, up
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
-def fused_glu(fused, glu):
+def fused_glu(fused, glu, limit=None):
   """`glu(gate, up)` of the two halves of `fused`, the [..., 2 * mlp] output of the prefused gate/up GEMM.
 
   Autodiff transposes each half's slice into a zero-padded [..., 2 * mlp] gradient and adds the two, one more
   full pass over the gradient. This backward computes the same two half gradients, with `jax.vjp` of `glu`, and
   concatenates them, which XLA writes straight from the activation's backward fusion.
+
+  `limit`, if given, says that only rows [0, limit) of the [rows, 2 * mlp] expert buffer `fused` hold tokens and
+  that `glu` is the bf16 SiLU GLU. On a TPU, Pallas kernels then compute the activation and its gradient on those
+  rows only, bit-identical to the XLA fusions, and write the gradient's two halves at once; the rows past the
+  1024-row block of row limit - 1 are left unwritten in both results.
   """
+  if limit is not None and pltpu.is_tpu_device() and glu_rows.kernel_supported(fused):
+    return _silu_glu_rows(fused, limit)
+  return _fused_glu(fused, glu)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _fused_glu(fused, glu):
   return glu(*_split_gate_up(fused))
 
 
@@ -334,7 +347,26 @@ def _fused_glu_bwd(glu, residuals, cotangent):
   return (jnp.concatenate([jnp.where(d == 0, 0, d) for d in glu_vjp(cotangent)], axis=-1),)
 
 
-fused_glu.defvjp(_fused_glu_fwd, _fused_glu_bwd)
+_fused_glu.defvjp(_fused_glu_fwd, _fused_glu_bwd)
+
+
+@jax.custom_vjp
+def _silu_glu_rows(fused, limit):
+  return glu_rows.glu_fwd_rows(fused, limit)
+
+
+def _silu_glu_rows_fwd(fused, limit):
+  # The kernels read both halves in place, so the residual is the whole buffer, under the names of both halves.
+  fused = adc.checkpoint_name(adc.checkpoint_name(adc.checkpoint_name(fused, "mlpwi_0"), "moe_mlpwi_0"), "moe_mlpwi_1")
+  return glu_rows.glu_fwd_rows(fused, limit), (fused, limit)
+
+
+def _silu_glu_rows_bwd(residuals, cotangent):
+  fused, limit = residuals
+  return glu_rows.glu_bwd_rows(fused, cotangent, limit), None
+
+
+_silu_glu_rows.defvjp(_silu_glu_rows_fwd, _silu_glu_rows_bwd)
 
 
 def get_batchsplit_init_kernel_axes():
@@ -3020,7 +3052,20 @@ class RoutedMoE(nnx.Module):
     def _down_projection(output0, output1, gmm_fn, wo, wo_bias, routing, route_metadata):
       """The activation and the down projection, per routed token."""
       if output1 is None:  # output0 is the prefused gate/up GEMM output (see `gmm_up`)
-        intermediate_layer = fused_glu(output0, self.apply_ffn_activation)
+        # The ring's packed buffer holds its tokens in rows [0, valid_token_count); the SiLU GLU kernels skip the
+        # rest. apply_ffn_activation is the plain SiLU GLU unless the decoder block clips its inputs.
+        silu_glu = (
+            self.config.mlp_activations[0] == "silu"
+            and self.dtype == jnp.bfloat16
+            and self.config.decoder_block != ctypes.DecoderBlockType.GPT_OSS
+            and not (
+                self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4)
+                and self.config.mlp_activations_limit > 0.0
+            )
+        )
+        packed = self.config.use_ring_of_experts and output0.shape[0] < routing.sorted_selected_experts.shape[0]
+        limit = valid_token_count(output0, routing, route_metadata) if silu_glu and packed else None
+        intermediate_layer = fused_glu(output0, self.apply_ffn_activation, limit)
       else:
         intermediate_layer = self.apply_ffn_activation(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
