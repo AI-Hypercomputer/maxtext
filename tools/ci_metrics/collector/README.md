@@ -427,8 +427,9 @@ What it decides:
   newly-seen test and the slowest 25 per suite. The day's first scheduled main run keeps
   every test row.
 - **When to stop.** `--max-runs` stops it cleanly and says so; the next tick continues.
-  So does a low API budget: before each run it reads, before it re-reads in-flight runs and
-  before it asks pull requests about merges, it stops when fewer than 300 requests
+  So does a low API budget. The tick checks the budget between backfill weeks, before each
+  run it reads, before each in-flight run it re-reads, and before the merge checks, and then
+  again every 25 pull requests while it asks them. It stops when fewer than 300 requests
   (`RATE_LIMIT_FLOOR`) are left this hour. GITHUB_TOKEN's 1,000 requests an hour are shared by
   every workflow in the repository.
   `--dry-run` fetches and builds everything into a temporary directory and writes nothing

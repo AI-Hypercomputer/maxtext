@@ -62,6 +62,9 @@ MERGE_WATCH_DAYS = 14
 # 1000 an hour per repository, shared by every workflow in it, so the others keep some.
 RATE_LIMIT_FLOOR = 300
 
+# The merge checks cost a request per waiting pull request, so they re-check the budget this often.
+MERGE_BUDGET_CHECK_EVERY = 25
+
 DEFAULT_BACKFILL_DAYS = 30
 
 EXIT_OK = 0
@@ -303,6 +306,8 @@ class Tick:
     except (github.GitHubError, runs.RunsError) as error:
       self.report.note_problem(f"runs created {iso_utc(since)}..{iso_utc(until)} could not be listed: {error}")
       return []
+    # Oldest first: the watermark moves only past runs this tick has handled, so a stop part-way
+    # (--max-runs, a low budget) never skips one.
     return list(reversed(runs.mark_superseded(listed)))
 
   # ------------------------------------------------------------------ one run
@@ -498,7 +503,9 @@ class Tick:
     """Asks the pull requests that were open when their run was read whether they merged."""
     waiting = self._open_pull_requests()
     self.report.prs_watched = len(waiting)
-    for number in sorted(waiting):
+    for index, number in enumerate(sorted(waiting)):
+      if index and index % MERGE_BUDGET_CHECK_EVERY == 0 and not self._budget_allows():
+        return
       try:
         pull = runs.get_pull_request(self.client, number)
       except github.GitHubError as error:

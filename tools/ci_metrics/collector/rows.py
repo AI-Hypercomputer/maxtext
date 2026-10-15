@@ -22,8 +22,9 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 from urllib.parse import quote
 
-# Row schema version. Bump it when a field changes meaning, not when one is added with a
-# default: `from_json` reads any row whose version is at or below this one.
+# Row schema version. `from_json` refuses a row with a newer version, or without exactly the
+# fields of its type. So adding or removing a field makes the rows already stored unreadable:
+# that change needs a migration of the store, not only a bump of this number.
 ROW_VERSION = 1
 
 # Row kinds. The kind travels inside the JSON so `from_json` knows what to rebuild, and the

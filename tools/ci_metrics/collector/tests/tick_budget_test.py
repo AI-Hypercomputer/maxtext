@@ -23,6 +23,8 @@ test on anything else, so nothing here reaches GitHub.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import shutil
 import sys
 import tempfile
@@ -46,6 +48,9 @@ from collector import tick
 
 # A run that is still going is never "already stored", so the tick would read it.
 RUNNING = {"id": 101, "status": "in_progress", "run_attempt": 1, "created_at": "2026-10-15T00:00:00Z"}
+
+# Pull requests waiting for the merge checks: enough for the budget to be checked twice inside the loop.
+WAITING_PULL_REQUESTS = 60
 
 
 class FakeClient:
@@ -105,8 +110,11 @@ class TickBudgetTest(unittest.TestCase):
 
   def test_unreadable_budget_carries_on(self):
     subject, _ = self.make_tick(remaining=github.GitHubError("the rate-limit endpoint is down", status=503))
-    self.assertTrue(subject._collect_one(dict(RUNNING)))
+    printed = io.StringIO()
+    with contextlib.redirect_stderr(printed):
+      self.assertTrue(subject._collect_one(dict(RUNNING)))
     self.collect_run.assert_called_once()
+    self.assertIn("could not be read", printed.getvalue())
 
   def test_already_stored_run_reads_no_budget(self):
     subject, client = self.make_tick(remaining=0)
@@ -135,6 +143,29 @@ class TickBudgetTest(unittest.TestCase):
       with mock.patch.object(tick.Tick, "_refresh_merges") as merges:
         subject.collect()
     merges.assert_called_once()
+
+  def run_merge_checks(self, remaining: int) -> tuple[tick.Tick, FakeClient, mock.Mock]:
+    """Runs the merge checks over waiting pull requests that are all still open; returns the pull request reads."""
+    subject, client = self.make_tick(remaining=remaining)
+    waiting = {number: 1000 + number for number in range(1, WAITING_PULL_REQUESTS + 1)}
+    with mock.patch.object(tick.Tick, "_open_pull_requests", return_value=waiting):
+      with mock.patch.object(tick.runs, "get_pull_request", return_value={"state": "open"}) as get_pull_request:
+        subject._refresh_merges()
+    return subject, client, get_pull_request
+
+  def test_low_budget_stops_merge_checks_part_way(self):
+    subject, _, get_pull_request = self.run_merge_checks(remaining=tick.RATE_LIMIT_FLOOR - 1)
+    self.assertEqual(get_pull_request.call_count, tick.MERGE_BUDGET_CHECK_EVERY)
+    self.assertIn("API budget ran low", subject.report.stopped_because)
+    # A budget stop is not lost data: the tick still exits 0 and the workflow still saves.
+    self.assertEqual(subject.report.problems, [])
+
+  def test_enough_budget_finishes_merge_checks(self):
+    subject, client, get_pull_request = self.run_merge_checks(remaining=tick.RATE_LIMIT_FLOOR)
+    self.assertEqual(get_pull_request.call_count, WAITING_PULL_REQUESTS)
+    self.assertIsNone(subject.report.stopped_because)
+    # The budget is read after every 25th pull request (here twice), not before each one.
+    self.assertEqual(client.budget_reads, 2)
 
 
 if __name__ == "__main__":
