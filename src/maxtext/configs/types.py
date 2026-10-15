@@ -6609,10 +6609,13 @@ class MaxTextConfig(
         )
       if self.num_kv_heads == 1:
         raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
-      if self.num_kv_heads % context_parallel_size != 0:
+      # Fewer KV heads than context ranks is fine when the ranks are a multiple of them: each KV head is then
+      # repeated across the ranks whose query heads use it (ulysses_attention.repeat_kv_heads_for_ulysses).
+      if self.num_kv_heads % context_parallel_size != 0 and context_parallel_size % self.num_kv_heads != 0:
         raise ValueError(
             "TPU Ulysses attention requires num_kv_heads "
-            f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+            f"({self.num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size}) or to "
+            "divide it."
         )
     self._validate_usp_context_parallelism()
     self._validate_context_parallel_attention_load_balance(context_parallel_size)

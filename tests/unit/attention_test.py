@@ -3050,7 +3050,7 @@ class AttentionTest(parameterized.TestCase):
         f"dq_reduction_steps={dq_reduction_steps}, ring_scan_unroll={ring_scan_unroll}, packing={packing}.",
     )
 
-  def _ulysses_test_config(self, ici_context_parallelism, packing=False):
+  def _ulysses_test_config(self, ici_context_parallelism, packing=False, **heads):
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
@@ -3062,6 +3062,7 @@ class AttentionTest(parameterized.TestCase):
         use_jax_splash=False,
         packing=packing,
         dtype="float32",
+        **heads,
     )
 
   def _ulysses_test_modules(self, cfg_cp, mesh_cp, lnx):
@@ -3104,12 +3105,20 @@ class AttentionTest(parameterized.TestCase):
       {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2, "packing": False},
       {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4, "packing": False},
       {"testcase_name": "ulysses_size_4_packed", "ici_context_parallelism": 4, "packing": True},
+      # 2 KV heads at Ulysses size 4: each KV head is repeated to two context ranks.
+      {
+          "testcase_name": "ulysses_size_4_packed_kv_repeated",
+          "ici_context_parallelism": 4,
+          "packing": True,
+          "kv_heads": 2,
+      },
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ulysses_context_parallel(self, ici_context_parallelism, packing):
+  def test_tpu_flash_attention_ulysses_context_parallel(self, ici_context_parallelism, packing, kv_heads=None):
     """Test equivalence between dot_product and flash attention + Ulysses context parallelism"""
 
-    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
+    heads = {} if kv_heads is None else {"base_num_query_heads": 8, "base_num_kv_heads": kv_heads}
+    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing, **heads)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     if packing:
@@ -3149,12 +3158,14 @@ class AttentionTest(parameterized.TestCase):
       {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2, "packing": False},
       {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4, "packing": False},
       {"testcase_name": "ulysses_size_4_packed", "ici_context_parallelism": 4, "packing": True},
+      {"testcase_name": "ulysses_size_4_packed_kv_repeated", "ici_context_parallelism": 4, "packing": True, "kv_heads": 2},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ulysses_context_parallel_grad(self, ici_context_parallelism, packing):
+  def test_tpu_flash_attention_ulysses_context_parallel_grad(self, ici_context_parallelism, packing, kv_heads=None):
     """Test input-gradient equivalence between dot_product and flash attention + Ulysses context parallelism"""
 
-    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
+    heads = {} if kv_heads is None else {"base_num_query_heads": 8, "base_num_kv_heads": kv_heads}
+    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing, **heads)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     if packing:
@@ -6930,7 +6941,6 @@ class KVHeadShardingTest(parameterized.TestCase):
   _NUM_KV_HEADS = 2
   _EMBED_DIM = 16
   _INDIVISIBLE = r"num_kv_heads \(2\).*must be divisible"
-  _INDIVISIBLE_BY_4 = r"num_kv_heads \(2\).*must be divisible by 4"
 
   def setUp(self):
     """Builds an attention layer with two KV heads on a single-device mesh."""
@@ -7022,29 +7032,48 @@ class KVHeadShardingTest(parameterized.TestCase):
     self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
 
   def test_ulysses_context_axis_rejected(self):
-    """Ulysses shards KV heads over context via all-to-all, not a logical rule."""
-    self._set_mesh_shape(context=4)
+    """Ulysses shards KV heads over context via all-to-all, not a logical rule.
+
+    Two KV heads and a context axis of 3 neither split evenly nor repeat
+    evenly, so the context axis counts against the KV heads.
+    """
+    self._set_mesh_shape(context=3)
     with (
         self._use_ulysses(),
-        self.assertRaisesRegex(ValueError, self._INDIVISIBLE_BY_4),
+        self.assertRaisesRegex(ValueError, r"num_kv_heads \(2\).*must be divisible by 3"),
     ):
       self.attention.init_kv_w(inputs_kv_shape=self.inputs_kv_shape)
 
   def test_ulysses_multiplies_with_tensor_parallelism(self):
     """The binding constraint is the product of the context and tensor axes.
 
-    Two KV heads clear `context`=2 and `tensor`=1 individually, and `types.py`
+    Six KV heads clear `context`=2 and `tensor`=2 individually, and `types.py`
     only checks the context factor, so the combined degree of 4 is caught here.
+    The 3 KV heads left per device by `tensor` cannot be repeated evenly over
+    `context` either.
     """
     self._set_mesh_shape(context=2, tensor=2)
+    self.attention.num_kv_heads = 6
     with (
         self._use_ulysses(),
-        self.assertRaisesRegex(ValueError, self._INDIVISIBLE_BY_4),
+        self.assertRaisesRegex(ValueError, r"num_kv_heads \(6\).*must be divisible by 4"),
     ):
-      self.attention.init_kv_w(inputs_kv_shape=self.inputs_kv_shape)
+      self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
 
   def test_ulysses_divisible_accepted(self):
     self._set_mesh_shape(context=2)
+    with self._use_ulysses():
+      self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
+
+  @parameterized.named_parameters(
+      ("two_heads_context_4", {"context": 4}),
+      ("two_heads_context_8", {"context": 8}),
+      # `tensor` leaves one KV head per device, which Ulysses repeats to both context ranks.
+      ("one_local_head_context_2", {"context": 2, "tensor": 2}),
+  )
+  def test_ulysses_repeated_kv_heads_accepted(self, mesh_shape):
+    """A context axis that is a multiple of the local KV heads repeats them instead of splitting them."""
+    self._set_mesh_shape(**mesh_shape)
     with self._use_ulysses():
       self.attention._validate_kv_head_sharding(self._KV_KERNEL_AXES)  # pylint: disable=protected-access
 
