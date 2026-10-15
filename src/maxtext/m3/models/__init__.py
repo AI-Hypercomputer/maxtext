@@ -30,7 +30,18 @@ from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model
 
 
+def create_glm5_3_flash_model(config, mesh=None, *, rngs, **kwargs):
+  """Lazy factory for GLM-5.3-Flash to avoid eager tokamax import on CI."""
+  # pylint: disable=import-outside-toplevel
+  if rngs is None:
+    raise ValueError("rngs must be provided as a non-None nnx.Rngs instance.")
+  from maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash  # pylint: disable=g-import-not-at-top
+
+  return modeling_glm5_3_flash.Glm5Model.from_maxtext_config(config, mesh=mesh, rngs=rngs, **kwargs)
+
+
 MODEL_REGISTRY: dict[str, Callable] = {
+    "glm5.3-flash": create_glm5_3_flash_model,
     "qwen3-0.6b": create_qwen3_model,
     "qwen3-vl-2b": create_qwen3_vl_model,
 }
