@@ -51,6 +51,7 @@ The main conversion script uses these mappings to systematically transform each
 parameter from the source checkpoint and build the target checkpoint.
 """
 
+import functools
 import warnings
 import numpy as np
 
@@ -4453,17 +4454,8 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
 _FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 
 
-def dequantize_block_scaled(pair, target_shape=None):
-  """(weight, scale) -> bf16 weight, for block-scaled FP8 / packed FP4 checkpoints (DeepSeek-V4.1 format).
-
-  `weight` is FP8 E4M3 [out, in], or int8 [out, in / 2] holding two FP4 E2M1 codes per byte (low nibble first).
-  `scale` holds one power-of-two (E8M0) scale per block; the block size follows from the two shapes, e.g.
-  32 x 32 blocks for FP8 linears and 1 x 32 for FP4 experts and the FP8 engram table rows. Both element formats
-  times a power of two are exact in bf16.
-  """
-  del target_shape
-  weight, scale = pair
-  xp = _array_module(weight)
+def _dequantize_block_scaled(xp, weight, scale, broadcast_scales=True):
+  """See `dequantize_block_scaled`; `xp` is `np` or `jnp`."""
   if weight.dtype == np.int8:
     packed = jax.lax.bitcast_convert_type(weight, jnp.uint8) if xp is jnp else weight.view(np.uint8)
     table = xp.asarray(_FP4_E2M1_VALUES, dtype=jnp.bfloat16)
@@ -4473,9 +4465,128 @@ def dequantize_block_scaled(pair, target_shape=None):
     w = weight.astype(jnp.bfloat16)
   s = scale.astype(jnp.float32).astype(jnp.bfloat16)
   rows, cols = w.shape
-  s = xp.repeat(s, -(-rows // s.shape[0]), axis=0)[:rows]
-  s = xp.repeat(s, -(-cols // s.shape[1]), axis=1)[:, :cols]
+  block_rows, block_cols = -(-rows // s.shape[0]), -(-cols // s.shape[1])
+  if broadcast_scales and rows == block_rows * s.shape[0] and cols == block_cols * s.shape[1]:
+    # Broadcast the scales instead of materializing them at full size (the engram tables are ~100 GB).
+    blocks = w.reshape(s.shape[0], block_rows, s.shape[1], block_cols)
+    return (blocks * s[:, None, :, None]).reshape(rows, cols)
+  s = xp.repeat(s, block_rows, axis=0)[:rows]
+  s = xp.repeat(s, block_cols, axis=1)[:, :cols]
   return w * s
+
+
+# On device the dequantization runs per shard (`shard_map`): each chip expands the scales for its own rows of the
+# (row-split) weight, so XLA never partitions the block arithmetic. Letting XLA partition a jitted version silently
+# zeroed 3/4 of some tensors on a 64-chip v5p slice (DeepSeek-V4.1-Flash `wq_b` / `wo_a`, whose 512 / 128 rows per
+# chip line up with the 32-row scale blocks), and moving E8M0 scales between chips has produced NaNs. Every element
+# format times a power of two is exact in bf16, so the result is bit-identical to the numpy path.
+
+
+def _local_dequantize(weight, scale, rows, row_offset):
+  """Dequantizes local rows [row_offset, row_offset + weight.shape[0]) of a weight with `rows` rows in total.
+
+  `scale` is the full (replicated) scale tensor, or exactly these rows' scales when it has one row per weight row.
+  """
+  if weight.dtype == np.int8:
+    packed = jax.lax.bitcast_convert_type(weight, jnp.uint8)
+    codes = jnp.stack([packed & 0xF, packed >> 4], axis=-1).reshape(weight.shape[0], -1)
+    w = jnp.take(jnp.asarray(_FP4_E2M1_VALUES, dtype=jnp.bfloat16), codes.astype(jnp.int32))
+  else:
+    w = weight.astype(jnp.bfloat16)
+  s = scale.astype(jnp.float32).astype(jnp.bfloat16)
+  local_rows, cols = w.shape
+  if s.shape[0] != local_rows:  # Full scale tensor: pick each local row's block.
+    block_rows = -(-rows // s.shape[0])
+    s = jnp.take(s, (row_offset + jnp.arange(local_rows)) // block_rows, axis=0)
+  block_cols = -(-cols // s.shape[1])
+  s = jnp.repeat(s, block_cols, axis=1)[:, :cols]
+  return w * s
+
+
+def _row_axis(sharding):
+  """The mesh axis a load sharding splits dim 0 over, or None (see `hf_streaming_load.choose_load_sharding`)."""
+  spec = sharding.spec if isinstance(sharding, jax.sharding.NamedSharding) else ()
+  return spec[0] if len(spec) and spec[0] is not None else None
+
+
+@functools.lru_cache(maxsize=None)
+def _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, rows, scale_rows):
+  row_axis = weight_spec[0] if len(weight_spec) else None
+  scale_split = len(scale_spec) > 0 and scale_spec[0] is not None
+
+  def local(weight, scale):
+    offset = jax.lax.axis_index(row_axis) * weight.shape[0] if row_axis is not None else 0
+    if not scale_split and scale_rows == rows:
+      # One scale row per weight row, held in full: slice out this shard's rows.
+      scale = jax.lax.dynamic_slice_in_dim(scale, offset, weight.shape[0], axis=0)
+    return _local_dequantize(weight, scale, rows, offset)
+
+  return jax.jit(
+      jax.shard_map(local, mesh=mesh, in_specs=(weight_spec, scale_spec), out_specs=weight_spec, check_vma=False)
+  )
+
+
+def _dequantize_on_device(weight, scale):
+  mesh = weight.sharding.mesh
+  weight_spec = jax.sharding.PartitionSpec(_row_axis(weight.sharding))
+  scale_spec = jax.sharding.PartitionSpec()
+  if (
+      isinstance(scale.sharding, jax.sharding.NamedSharding)
+      and scale.sharding.mesh == mesh
+      and _row_axis(scale.sharding) is not None
+  ):
+    if scale.shape[0] != weight.shape[0]:
+      raise ValueError(
+          f"Row-split scales {scale.shape} must have one row per weight row {weight.shape} to dequantize per shard."
+      )
+    scale_spec = jax.sharding.PartitionSpec(_row_axis(scale.sharding))
+  elif scale.sharding != jax.sharding.NamedSharding(mesh, scale_spec):
+    if not scale.is_fully_replicated:
+      raise ValueError(f"Scales with sharding {scale.sharding} cannot be dequantized per shard of {weight.sharding}.")
+    # A full copy on every chip already: rebuild it on the weight's mesh from the local copies (no communication).
+    scale = jax.make_array_from_single_device_arrays(
+        scale.shape,
+        jax.sharding.NamedSharding(mesh, scale_spec),
+        [jax.device_put(scale.addressable_shards[0].data, d) for d in mesh.local_devices],
+    )
+  fn = _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, weight.shape[0], scale.shape[0])
+  return fn(weight, scale)
+
+
+def pad_rows_to_target(x, target_shape):
+  """Pads dim 0 with zeros up to `target_shape[0]` (e.g. the row-padded DeepSeek-V4.1 engram tables)."""
+  if target_shape is None or x.shape[0] == target_shape[0]:
+    return x
+  xp = _array_module(x)
+  return xp.pad(x, ((0, target_shape[0] - x.shape[0]),) + ((0, 0),) * (x.ndim - 1))
+
+
+# The streaming loader may then read the HF tensor(s) already zero-padded to the target's rows (see
+# `hf_streaming_load._load_request`), which this and the dequantize hook pass through unchanged.
+pad_rows_to_target.pads_rows_to_target = True
+
+
+def dequantize_block_scaled(pair, target_shape=None):
+  """(weight, scale) -> bf16 weight, for block-scaled FP8 / packed FP4 checkpoints (DeepSeek-V4.1 format).
+
+  `weight` is FP8 E4M3 [out, in], or int8 [out, in / 2] holding two FP4 E2M1 codes per byte (low nibble first).
+  `scale` holds one power-of-two (E8M0) scale per block; the block size follows from the two shapes, e.g.
+  32 x 32 blocks for FP8 linears and 1 x 32 for FP4 experts and the FP8 engram table rows. Both element formats
+  times a power of two are exact in bf16.
+  """
+  weight, scale = pair
+  del target_shape  # Row padding, if any, is done by the reader or a later hook.
+  if isinstance(weight, jax.Array):
+    if not isinstance(weight.sharding, jax.sharding.NamedSharding):
+      weight = jax.device_put(
+          weight,
+          jax.sharding.NamedSharding(
+              jax.sharding.Mesh(np.array(sorted(weight.sharding.device_set, key=lambda d: d.id)), ("copies",)),
+              jax.sharding.PartitionSpec(),
+          ),
+      )
+    return _dequantize_on_device(weight, scale)
+  return _dequantize_block_scaled(np, weight, scale)
 
 
 # DeepSeek-V4.1 tensors stored block-quantized (with a sibling `.scale`) in the released checkpoint.
@@ -4664,7 +4775,7 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers
       mapping[key] = to_mt_kernel
     mapping[f"{attn}-o_a_proj-kernel"] = o_a_proj
     if spec.has_engram:
-      mapping[f"{prefix}-engram-embed"] = None
+      mapping[f"{prefix}-engram-embed"] = pad_rows_to_target
 
   if quantized and not saving_to_hf:
     # Dequantize first; the sources of these weights are (weight, scale) pairs (see the param mapping).

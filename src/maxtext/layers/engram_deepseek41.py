@@ -182,6 +182,15 @@ class DeepSeek41NgramHasher:
     return jnp.concatenate(hashes, axis=-1).astype(jnp.int32) + jnp.asarray(self.offsets)
 
 
+# The engram tables are sharded by rows over every chip; their (prime-sum) row counts are padded to a multiple of
+# this so any power-of-two chip count up to it divides them. Hash ids never reach the padding rows.
+ENGRAM_ROW_PADDING = 1024
+
+
+def padded_engram_rows(num_embeddings: int) -> int:
+  return -(-num_embeddings // ENGRAM_ROW_PADDING) * ENGRAM_ROW_PADDING
+
+
 class DeepSeek41Engram(nnx.Module):
   """Engram layer: gated n-gram memory added into each hyper-connection copy."""
 
@@ -199,9 +208,14 @@ class DeepSeek41Engram(nnx.Module):
     self.head_dim = config.ds41_engram_head_dim
     self.n_hash_cols = (config.ds41_engram_max_ngram_size - 1) * config.ds41_engram_n_heads
     self.eps = config.normalization_layer_epsilon
+    # Zero-initialized: the full model's tables have ~384M rows, and generating random values for them is not
+    # partitionable with every PRNG implementation (e.g. `unsafe_rbg`), which would materialize a whole table on
+    # each chip. Zero rows just make the engram contribute nothing until trained / loaded.
     self.embed = nnx.Param(
-        jax.nn.initializers.normal(stddev=0.02)(rngs.params(), (num_embeddings, self.head_dim), config.weight_dtype),
-        out_sharding=("vocab", "embed"),
+        jnp.zeros((padded_engram_rows(num_embeddings), self.head_dim), dtype=config.weight_dtype),
+        # Rows over every chip (as upstream's ParallelEngramEmbedding): the lookup is a masked local gather plus a
+        # reduction, and loading never moves the ~100 GB tables across chips.
+        out_sharding=("embed", None),
     )
     self.wkv = DenseGeneral(
         in_features_shape=self.n_hash_cols * self.head_dim,
