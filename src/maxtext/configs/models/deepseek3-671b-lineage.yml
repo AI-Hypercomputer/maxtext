@@ -71,7 +71,6 @@ rope_interleave: true
 rope_truncate: true
 rope_attention_scaling: false
 use_lineage: true
-lineage_expert_permutation: "lpt"
 # fp8 routed-expert GMMs, mirroring MaxText's qwix fp8_full ("none" for bf16).
 lineage_quantization: "fp8_full"
 allow_split_physical_axes: true
@@ -93,6 +92,16 @@ enable_single_replica_ckpt_restoring: false
 # Run each precompiled train and eval program once on a synthetic batch during
 # initialization (the train state is unchanged). Reads no training data.
 warmup_programs_in_init: true
+# Stream-chunked c4_mlperf train rows are a single segment of all 1s, so
+# lineage_adapter.loss_and_aux drops the no-op Splash segment mask in training.
+use_stream_chunking: true
+# Keep first-use work out of the first eval:
+# - warm_eval_input_reshard_before_run_start compiles the eval batch's reshard
+#   program on an all-zero batch before run_start. Reads no eval data.
+# - eval_cache_prefill_in_background reads the eval set once on a background
+#   thread right after run_start, so the first eval reads it from memory.
+warm_eval_input_reshard_before_run_start: true
+eval_cache_prefill_in_background: true
 # Runtime XLA flags (keep on a single double-quoted line):
 # - --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=128MiB, which lets XLA
 #   merge each layer's 12-13 per-tensor DCN gradient all-reduces (0.5-28 MiB
@@ -100,13 +109,14 @@ warmup_programs_in_init: true
 #   (multi-slice only).
 # - --xla_tpu_dvfs_p_state=7, which sets the TPU's DVFS P-state to 7 (the
 #   default, -1, sets none).
-# - --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false and
+# - --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false,
+#   --xla_tpu_enable_async_ragged_all_to_all=true, and
 #   --xla_tpu_force_async_all_to_all=true, which keep the expert-shuffle ragged
 #   all-to-all async on the TensorCore instead of queueing it behind the FSDP
 #   all-gathers on SparseCore.
 # Never add --xla_tpu_aggressive_opt_barrier_removal; it strips the optimization
 # barriers Lineage's backward pass depends on.
-compile_xla_flags: "--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_offloading_copy_to_sparsecore=false --xla_tpu_enable_sparse_core_collective_offload_dense_all_to_all=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=500000 --xla_all_gather_latency_bound_threshold_in_bytes=1000000 --xla_tpu_pipeline_memory_host_transfers=false --xla_tpu_enable_data_parallel_all_reduce_opt=false --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=134217728 --xla_tpu_dvfs_p_state=7 --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false --xla_tpu_force_async_all_to_all=true"
+compile_xla_flags: "--xla_tpu_scoped_vmem_limit_kib=65536 --xla_tpu_enable_offloading_copy_to_sparsecore=false --xla_tpu_enable_sparse_core_collective_offload_dense_all_to_all=false --xla_tpu_check_legacy_constraints_in_reduce_scatter_legalizer=false --xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=500000 --xla_all_gather_latency_bound_threshold_in_bytes=1000000 --xla_tpu_pipeline_memory_host_transfers=false --xla_tpu_enable_data_parallel_all_reduce_opt=false --xla_tpu_dcn_all_reduce_combiner_threshold_bytes=134217728 --xla_tpu_dvfs_p_state=7 --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false --xla_tpu_enable_async_ragged_all_to_all=true --xla_tpu_force_async_all_to_all=true"
 shard_mode: "explicit"
 sharding_tolerance: 1.0
 remove_size_one_mesh_axis_from_type: false
@@ -115,36 +125,40 @@ override_logical_axis_rules: true
 # has size num_slices (1 for a single slice; it is kept in the type because
 # remove_size_one_mesh_axis_from_type is false) and carries pure data
 # parallelism: MaxText-side activations split their batch over it, while
-# Lineage's logical axes below (activation_batch_attn -> fsdp_attention,
-# exp -> expert, embed_moe -> fsdp_moe) deliberately exclude it so that FSDP
-# and expert parallelism stay inside a slice and weights are replicated across
-# slices. The DCN gradient all-reduce is issued by Lineage's weight collection
+# Lineage's shardings (dsv3_sharding.TOPOLOGY_SHARDINGS, looked up by the
+# per-slice (x, y, z) shape) deliberately exclude it so that FSDP and expert
+# parallelism stay inside a slice and weights are replicated across slices.
+# The DCN gradient all-reduce is issued by Lineage's weight collection
 # (collect_along_axis over "dcn").
 mesh_axes: ['dcn', 'x', 'y', 'z', 'core']
-ici_parallelism: [1, 4, 4, 16, 2]
+ici_parallelism: [1, 8, 8, 8, 2]
 dcn_parallelism: [-1, 1, 1, 1, 1]
 data_sharding: [['dcn', 'x', 'y', 'z'], ['core']]
+# Layout of one 8x8x8 slice (512 chips, 1024 devices): attention heads and the
+# sequence over core, expert parallelism over (x, core) and FSDP of the MoE and
+# MLA weights over (y, z). q_lora and kv_lora skip core, since 1024 ways do not
+# divide the LoRA ranks (1536 and 512).
 logical_axis_rules: [
   ['embed', ['x', 'y', 'z', 'core']],
   ['embed_vocab', ['x', 'y', 'z', 'core']],
   ['embed_attn', ['x', 'y', 'z', 'core']],
-  ['q_lora', ['x', 'y', 'z', 'core']],
-  ['kv_lora', ['x', 'y', 'z', 'core']],
-  ['exp', ['x', 'y']],
-  ['expert_only', ['x', 'y']],
-  ['embed_moe', ['core', 'z']],
-  ['embed_router', ['core', 'z']],
+  ['q_lora', ['x', 'y', 'z']],
+  ['kv_lora', ['x', 'y', 'z']],
+  ['exp', ['x', 'core']],
+  ['expert_only', ['x', 'core']],
+  ['embed_moe', ['y', 'z']],
+  ['embed_router', ['y', 'z']],
   ['activation_batch', ['dcn', 'x', 'y', 'z']],
   ['activation_batch_attn', ['x', 'y', 'z']],
   ['activation_batch_moe', ['x', 'y']],
   ['activation_length', ['core']],
   ['activation_norm_length', ['core']],
-  ['activation_exp', ['x', 'y']],
+  ['activation_exp', ['x', 'core']],
   ['activation_embed_and_logits_batch', ['dcn', 'x', 'y', 'z']],
   # Flattened (batch * sequence) axis used by vocabulary_tiling.py. It must cover
   # every axis that shards batch ('dcn','x','y','z') and sequence ('core'); Flax
   # silently resolves unmatched logical names to None, which would replicate the
-  # per-chunk logits on all 512 devices instead of sharding them.
+  # per-chunk logits on all 1024 devices instead of sharding them.
   ['activation_embed_and_logits_batch_sequence', ['dcn', 'x', 'y', 'z', 'core']],
   ['activation_kv_batch', ['dcn', 'x', 'y', 'z']],
 ]

@@ -137,6 +137,7 @@ class Indexer(nnx.Module):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -152,6 +153,7 @@ class Indexer(nnx.Module):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -171,6 +173,7 @@ class Indexer(nnx.Module):
         quant=None,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -673,6 +676,7 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
+          weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
           rngs=self.rngs,
       )
     else:
@@ -688,6 +692,7 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
+          weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
           rngs=self.rngs,
       )
       self.q_norm = RMSNorm(
@@ -709,6 +714,7 @@ class MLA(Attention):
           quant=self.quant,
           matmul_precision=self.config.matmul_precision,
           shard_mode=self.config.shard_mode,
+          weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
           rngs=self.rngs,
       )
 
@@ -724,6 +730,7 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
     self.kv_norm = RMSNorm(
@@ -748,6 +755,7 @@ class MLA(Attention):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -865,6 +873,10 @@ class MLA(Attention):
     if self.use_absorbed_mqa:
       query = self.absorb_query(q_nope, q_pe) * self.softmax_scale
       query_logical_name = query_logical_name[:-1] + (None,)
+    elif getattr(self.config, "sa_q_prescaled_log2e", False):
+      # Fold LOG2E (for the splash kernel's base-2 softmax) into the softmax scale,
+      # multiplied in f32, so q is rounded to fp8 once.
+      query = jnp.concatenate([q_nope, q_pe], axis=-1).astype(jnp.float32) * (self.softmax_scale * math.log2(math.e))
     else:
       query = jnp.concatenate([q_nope, q_pe], axis=-1) * self.softmax_scale
 

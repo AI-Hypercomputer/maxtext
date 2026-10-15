@@ -866,20 +866,22 @@ def install_training_hooks(
     trainer_config: Any,
     test_dataset: Any,
     reward_fns: Optional[list[Callable[..., Any]]] = None,
+    goodput_recorder: Any = None,
 ) -> None:
-  """Install maxtext's `RLTrainingHooks` on the actor trainer.
+  """Attach `RLTrainingHooks` to `rl_cluster.actor_trainer` if enabled.
 
   When `reward_fns` is provided, intermediate eval logs the per-example
   `mean_reward` alongside the correctness metrics, mirroring the training-time
   reward stack.
 
-  No-op if `eval_interval <= 0` or `num_test_batches <= 0` or tunix's hooks
-  module is unavailable.
+  No-op if both intermediate eval (`eval_interval > 0` and `num_test_batches > 0`)
+  and `enable_goodput_recording` are disabled, or if tunix's hooks module is unavailable.
   """
-  if trainer_config.num_test_batches <= 0:
-    return
   eval_interval = int(getattr(trainer_config, "eval_interval", 0))
-  if eval_interval <= 0:
+  num_test_batches = int(getattr(trainer_config, "num_test_batches", 0))
+  eval_enabled = num_test_batches > 0 and eval_interval > 0
+  goodput_enabled = bool(getattr(trainer_config, "enable_goodput_recording", False))
+  if not eval_enabled and not goodput_enabled:
     return
   try:
     # `hooks` hard-imports `tunix.sft.hooks`. If that's missing (stock-only
@@ -894,7 +896,9 @@ def install_training_hooks(
   try:
     actor = rl_cluster.actor_trainer
     if getattr(actor, "training_hooks", None) is None:
-      actor.training_hooks = RLTrainingHooks(rl_cluster, trainer_config, test_dataset, eval_interval, reward_fns)
+      actor.training_hooks = RLTrainingHooks(
+          rl_cluster, trainer_config, test_dataset, eval_interval, reward_fns, goodput_recorder=goodput_recorder
+      )
       max_logging.warning(
           f"[intermediate-eval] hook installed: evaluate(...) will fire every {eval_interval} outer steps."
       )

@@ -64,12 +64,29 @@ jobs:
           echo "maxtext_sha=${MAXTEXT_SHA}" >> "$GITHUB_OUTPUT"
       - name: Install build tools
         run: |
+          apt-get update -y && apt-get install -y --no-install-recommends curl ca-certificates
           python -m pip install --upgrade pip build uv
+      - name: Set up Syft
+        id: download_syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
       - name: Build maxtext wheel
         run: |
           uv build --wheel
+      - name: Generate SPDX SBOM for MaxText wheel
+        shell: bash
+        env:
+          SYFT_CMD: ${{ steps.download_syft.outputs.cmd }}
+        run: |
+          mkdir -p sbom
+          WHEEL_FILE=$(ls dist/maxtext-*.whl)
+          "${SYFT_CMD}" "${WHEEL_FILE}" -o spdx-json=sbom/maxtext-wheel.spdx.json
       - name: Upload the built maxtext wheel
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: maxtext-wheel
           path: dist/*
+      - name: Upload the maxtext wheel SPDX SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: maxtext-wheel-sbom
+          path: sbom/maxtext-wheel.spdx.json

@@ -187,6 +187,7 @@ def _sparse_layer_from_maxtext(
     *,
     qk_head_dim: int,
     rope_head_dim: int,
+    flat_routed: bool = False,
 ) -> tuple[dsv3_types.DSv3SparseLayerWeightsPytree, jax.Array]:
   """Returns the layer weights (router bias None) and the router bias."""
   ds_moe = layer["DeepSeekMoeBlock_0"]
@@ -196,6 +197,10 @@ def _sparse_layer_from_maxtext(
     gate = leaf(moe_block["wi"])
   else:
     gate = jnp.concatenate([leaf(moe_block["wi_0"]), leaf(moe_block["wi_1"])], axis=-1)
+  wo = leaf(moe_block["wo"])
+  if flat_routed:
+    gate = gate.reshape(*gate.shape[:-3], -1, gate.shape[-1])
+    wo = wo.reshape(*wo.shape[:-3], -1, wo.shape[-1])
   weights = dsv3_types.DSv3SparseLayerWeightsPytree(
       pre_attn_norm_scale=leaf(layer["pre_self_attention_layer_norm"]["scale"]),
       mla=_mla_from_maxtext(
@@ -207,7 +212,7 @@ def _sparse_layer_from_maxtext(
       post_attn_norm_scale=leaf(layer["post_self_attention_layer_norm"]["scale"]),
       moe=dsv3_types.DSv3MoEWeightsPytree(
           router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=leaf(moe_block["gate"]["kernel"]), bias=None),
-          routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(gate=gate, linear=leaf(moe_block["wo"])),
+          routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(gate=gate, linear=wo),
           shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
               gate_0=leaf(shared["wi_0"]["kernel"]),
               gate_1=leaf(shared["wi_1"]["kernel"]),
@@ -227,6 +232,15 @@ def _sparse_layer_to_maxtext(
 ) -> Tree:
   """Inverse of `_sparse_layer_from_maxtext`: one sparse stack in MaxText names."""
   gate = _arr(w.moe.routed.gate)
+  wo = _arr(w.moe.routed.linear)
+  router_kernel = _arr(w.moe.router.kernel)
+  num_experts = router_kernel.shape[-1]
+  if gate.ndim == 2:
+    gate = gate.reshape(num_experts, -1, gate.shape[-1])
+    wo = wo.reshape(num_experts, -1, wo.shape[-1])
+  elif gate.ndim == 3 and router_kernel.ndim == 3:
+    gate = gate.reshape(gate.shape[0], num_experts, -1, gate.shape[-1])
+    wo = wo.reshape(wo.shape[0], num_experts, -1, wo.shape[-1])
   hidden = gate.shape[-1] // 2
   # In MaxText NNX (`nnx_scan.create_scanned_layers`) and on-disk Orbax
   # checkpoints, `gate.bias` (`MoEBiasVar`, non-`Param`) is stacked at axis 0
@@ -240,7 +254,7 @@ def _sparse_layer_to_maxtext(
               "gate": {"kernel": leaf(w.moe.router.kernel), "bias": _arr(bias)},
               "wi_0": leaf(gate[..., :hidden]),
               "wi_1": leaf(gate[..., hidden:]),
-              "wo": leaf(w.moe.routed.linear),
+              "wo": leaf(wo),
           },
           "shared_experts": {
               "wi_0": {"kernel": leaf(w.moe.shared.gate_0)},
@@ -256,6 +270,7 @@ def maxtext_to_lineage_params(
     cfg: dsv3_config.DSv3Config,
     *,
     param_scan_axis: int = PARAM_SCAN_AXIS,
+    flat_routed: bool = False,
 ) -> tuple[
     dsv3_model.DSv3Params[dsv3_types.ArrayType],
     dsv3_model.DSv3MutableState[dsv3_types.ArrayType],
@@ -273,6 +288,7 @@ def maxtext_to_lineage_params(
       router biases to `cfg.model.router_bias_dtype`.
     param_scan_axis: MaxText's `param_scan_axis`: the layer axis of the leaves
       of the scanned decoder stacks.
+    flat_routed: Whether routed expert weights merge `(expert, rows)`.
 
   Returns:
     The parameters and the state (router biases from the tree; identity expert
@@ -285,13 +301,25 @@ def maxtext_to_lineage_params(
   dims = dict(qk_head_dim=m.qk_head_dim, rope_head_dim=m.rope_head_dim)
 
   decoder = tree["decoder"]
-  sparse, router_bias = _sparse_layer_from_maxtext(decoder["moe_layers"], scanned, unscanned_bias, **dims)
+  sparse, router_bias = _sparse_layer_from_maxtext(
+      decoder["moe_layers"],
+      scanned,
+      unscanned_bias,
+      flat_routed=flat_routed,
+      **dims,
+  )
   mtp = []
   mtp_router_bias = []
   for k in range(1, m.num_mtp_layers + 1):
     layer = tree["mtp_block"][f"mtp_layer_{k}"]
     prefix = f"mtp_{k}"
-    mtp_sparse, bias = _sparse_layer_from_maxtext(layer[f"{prefix}_transformer_layer"], unscanned, unscanned_bias, **dims)
+    mtp_sparse, bias = _sparse_layer_from_maxtext(
+        layer[f"{prefix}_transformer_layer"],
+        unscanned,
+        unscanned_bias,
+        flat_routed=flat_routed,
+        **dims,
+    )
     mtp.append(
         dsv3_mtp_block.DSv3MTPDepthWeightsPytree(
             layer=dsv3_types.DSv3MTPWeightsPytree(
@@ -445,8 +473,9 @@ def _rebind_mesh(tree: Any, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh)
 def _move_mla_trailing_sharding_to_lora(a: Any) -> Any:
   """Moves any trailing-axis sharding of an MLA up-projection to its LoRA axis.
 
-  In Lineage layout, `q_up`, `k_up` and `v_up` shard their trailing head-dim
-  axis over `WEIGHT_FSDP_AXIS` (`"z"`). In MaxText layout, `_interleave_rope`
+  In Lineage layout, `q_up`, `k_up` and `v_up` may shard their trailing
+  head-dim axis over FSDP mesh axes (e.g. `"z"` or `("y", "z")`; see
+  `dsv3_sharding.TOPOLOGY_SHARDINGS`). In MaxText layout, `_interleave_rope`
   and the `k_up`/`v_up` concatenation into `wkv_b` act on that trailing axis, so
   the restore target instead shards the LoRA axis (`axis -3`, which becomes
   `dim 0` after moving `param_scan_axis`).
@@ -501,6 +530,52 @@ def lineage_abstract_params(
   )
 
 
+def _unmerge_routed_abstract_leaf(a: Any, num_experts: int) -> Any:
+  """Unmerges `[..., E * rows, cols]` abstract routed weights for Orbax restore."""
+  if a is None:
+    return None
+  sharding = a.sharding
+  prefix_shape = a.shape[:-2]
+  rows = a.shape[-2] // num_experts
+  cols = a.shape[-1]
+  unmerged_shape = (*prefix_shape, num_experts, rows, cols)
+  if not isinstance(sharding, jax.sharding.NamedSharding):
+    return jax.ShapeDtypeStruct(unmerged_shape, a.dtype)
+  mesh = sharding.mesh
+  spec = list(sharding.spec) + [None] * (a.ndim - len(sharding.spec))
+  merged = spec[-2]
+  axes = (merged,) if isinstance(merged, str) else tuple(merged or ())
+  ep_axes = axes[:-2] or None
+  row_ax = axes[-2] if len(axes) >= 2 else None
+  col_ax = axes[-1] if len(axes) >= 1 else None
+  unmerged_spec = (*spec[:-2], ep_axes, row_ax, col_ax)
+  return jax.ShapeDtypeStruct(
+      unmerged_shape,
+      a.dtype,
+      sharding=jax.sharding.NamedSharding(mesh, P(*unmerged_spec)),
+  )
+
+
+def _prepare_sparse_for_maxtext_restore(node: Any) -> Any:
+  """Prepares an abstract sparse layer node for MaxText Orbax restore."""
+  if not isinstance(node, dsv3_types.DSv3SparseLayerWeightsPytree):
+    return node
+  mla = _prepare_mla_for_maxtext_restore(node.mla)
+  gate = node.moe.routed.gate
+  router_k = node.moe.router.kernel
+  if gate is None or router_k is None:
+    return dataclasses.replace(node, mla=mla)
+  is_flat = gate.ndim == 2 or (gate.ndim == 3 and router_k.ndim == 3)
+  if not is_flat:
+    return dataclasses.replace(node, mla=mla)
+  num_experts = router_k.shape[-1]
+  routed = dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+      gate=_unmerge_routed_abstract_leaf(gate, num_experts),
+      linear=_unmerge_routed_abstract_leaf(node.moe.routed.linear, num_experts),
+  )
+  return dataclasses.replace(node, mla=mla, moe=dataclasses.replace(node.moe, routed=routed))
+
+
 def maxtext_abstract_param_tree(
     cfg: dsv3_config.DSv3Config,
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
@@ -530,6 +605,11 @@ def maxtext_abstract_param_tree(
       _prepare_mla_for_maxtext_restore,
       params,
       is_leaf=lambda x: isinstance(x, dsv3_types.DSv3MLAWeightsPytree),
+  )
+  params = jax.tree.map(
+      _prepare_sparse_for_maxtext_restore,
+      params,
+      is_leaf=lambda x: isinstance(x, dsv3_types.DSv3SparseLayerWeightsPytree),
   )
   with _mesh_context(mesh):
     tree = jax.eval_shape(
@@ -568,8 +648,16 @@ def convert_maxtext_params(
     The parameters and the state, sharded as `dsv3_param_shardings(cfg, mesh)`.
   """
   out_shardings = dsv3_model.dsv3_param_shardings(cfg, mesh)
+  gate_sharding = out_shardings[0].decoder.sparse.moe.routed.gate
+  gate_spec = gate_sharding.spec if isinstance(gate_sharding, jax.sharding.NamedSharding) else gate_sharding
+  flat_routed = gate_spec is not None and len(gate_spec) == 3
   convert = jax.sharding.auto_axes(
-      functools.partial(maxtext_to_lineage_params, cfg=cfg, param_scan_axis=param_scan_axis),
+      functools.partial(
+          maxtext_to_lineage_params,
+          cfg=cfg,
+          param_scan_axis=param_scan_axis,
+          flat_routed=flat_routed,
+      ),
       out_sharding=out_shardings,
   )
   with jax.set_mesh(mesh):

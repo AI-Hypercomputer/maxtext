@@ -495,7 +495,9 @@ class MultiTokenPredictionBlock(nnx.Module):
 
     Args:
       shared_embedding: Shared token embedding, used for the MTP input embeddings and the output head.
-      main_hidden_state: Final (pre-norm) hidden state of the main decoder.
+      main_hidden_state: Final hidden state of the main decoder: pre-norm by default, or the
+        `decoder_norm` output when `mtp_norm_main_hidden_state` is enabled (as in Megatron-LM,
+        where `final_layernorm` precedes the MTP `hnorm`).
       input_ids: Main decoder input tokens.
       target_ids: Main decoder target tokens.
       target_mask: Main decoder target mask or packed segment ids.

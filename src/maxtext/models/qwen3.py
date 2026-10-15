@@ -36,12 +36,14 @@ from maxtext.common.common_types import (
     Config,
     DType,
     EMBED,
+    HEAD,
     KV_BATCH,
     KV_HEAD,
     LENGTH,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_TRAIN,
     ShardMode,
+    get_quant,
     get_weight_dtype,
 )
 from maxtext.inference import kvcache
@@ -560,12 +562,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         in_features_shape=in_features,
         out_features_shape=(self.key_dim * 2 + self.value_dim * 2),
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "in_proj_qkvz"),
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
-        quant=self.quant,
+        quant=get_quant(cfg, "in_proj_qkvz", self.quant),
         rngs=rngs,
     )
     self.in_proj_ba = DenseGeneral(
@@ -576,7 +578,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         kernel_axes=("embed_attn", "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
-        quant=self.quant,
+        quant=get_quant(cfg, "in_proj_ba", self.quant),
         rngs=rngs,
     )
 
@@ -621,12 +623,12 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         in_features_shape=self.value_dim,
         out_features_shape=(in_features,),
         dtype=cfg.dtype,
-        weight_dtype=cfg.weight_dtype,
+        weight_dtype=get_weight_dtype(cfg, "out_proj"),
         kernel_axes=("gdn_head", "embed_attn"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
-        quant=self.quant,
+        quant=get_quant(cfg, "out_proj", self.quant),
         rngs=rngs,
     )
 
@@ -661,10 +663,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       )
       return jax.sharding.NamedSharding(self.mesh, pspec)
 
+    gdn_head_axis = HEAD if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else KV_HEAD
     return (
-        _sharding((KV_BATCH, cp_len, KV_HEAD)),
-        _sharding((KV_BATCH, cp_len, KV_HEAD, None)),
-        _sharding((KV_BATCH, KV_HEAD, None, None)),
+        _sharding((KV_BATCH, cp_len, gdn_head_axis)),
+        _sharding((KV_BATCH, cp_len, gdn_head_axis, None)),
+        _sharding((KV_BATCH, gdn_head_axis, None, None)),
     )
 
   @staticmethod
@@ -736,6 +739,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     cfg = self.config
     batch, seq_len, _ = hidden_states.shape
     flat_sharding, head_sharding, state_sharding = self._explicit_activation_shardings(batch)
+    gdn_head_axis = HEAD if cfg.attention in ("vllm_rpa", "vllm_batched_rpa") else KV_HEAD
 
     active_cache = kv_cache if kv_cache is not None else self.cache
 
@@ -788,7 +792,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # and the reason the first version of this patch cut GDN memory but still
       # lost overall.
       cp_len = LENGTH if gdn_context_axes(cfg) else None
-      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
+      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
       # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
       qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
           qkvz_pspec,
@@ -1060,7 +1064,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     if cfg.shard_mode == ShardMode.EXPLICIT:
       # Both are stored replicated but broadcast against (B, S, H_v) activations whose
       # head axis is sharded, and explicit sharding requires broadcast operands to
-      # agree -- the same fix `_align_scale_with_normalized_axis` applies to the norm
+      # agree -- the same fix `align_scale_with_normalized_axis` applies to the norm
       # scales.
       head_spec = jax.sharding.PartitionSpec(jax.typeof(a).sharding.spec[-1])
       A_log = jax.sharding.reshard(A_log, head_spec)
@@ -1115,9 +1119,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       # logical rules, so this is correct whichever one is configured.
       cp_axes = gdn_context_axes(cfg)
       cp_len = LENGTH if cp_axes else None
-      qkv_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD, None), mesh=self.mesh, rules=logical_rules)
-      g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, KV_HEAD), mesh=self.mesh, rules=logical_rules)
-      state_pspec = logical_to_mesh_axes((KV_BATCH, KV_HEAD, None, None), mesh=self.mesh, rules=logical_rules)
+      qkv_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
+      g_beta_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis), mesh=self.mesh, rules=logical_rules)
+      state_pspec = logical_to_mesh_axes((KV_BATCH, gdn_head_axis, None, None), mesh=self.mesh, rules=logical_rules)
       # Keep every shard_map input/output batch spec consistent when replication is required.
       qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
           qkv_pspec,
@@ -1413,6 +1417,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           use_bias=False,  # Qwen3-Next shared_expert_gate does not have a bias
           dtype=cfg.dtype,
           weight_dtype=get_weight_dtype(cfg, "shared_expert_gate"),
+          quant=get_quant(cfg, "shared_expert_gate", self.quant),
           kernel_init=max_initializers.nd_dense_init(cfg.dense_init_scale, "fan_in", "truncated_normal"),
           kernel_axes=("embed", None),
           matmul_precision=cfg.matmul_precision,

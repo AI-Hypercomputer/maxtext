@@ -181,7 +181,9 @@ def dsv3_mtp_block(
   """Runs the MTP depths, as MaxText's `MultiTokenPredictionBlock.__call__`.
 
   Args:
-    main_hidden_state: Pre-final-norm hidden state of the main decoder.
+    main_hidden_state: Final-norm output of the main decoder (the same
+      normalized hidden state that feeds the main LM head), as in the
+      Megatron-LM reference where `final_layernorm` precedes MTP's `hnorm`.
     input_ids: Main decoder input tokens.
     target_ids: Main decoder target tokens.
     target_mask: Main decoder target mask or packed target segmentation; any
@@ -231,7 +233,9 @@ def dsv3_mtp_block(
   aux_per_depth = []
 
   rolled_token_embeddings = main_token_embeddings
-  not_filled = jnp.ones(input_ids.shape, dtype=jnp.int32)
+  # Sharded like the ids: a replicated mask would be gathered across the token
+  # axes to match them below.
+  not_filled = jnp.ones_like(input_ids, dtype=jnp.int32)
   if token_zero_embedding is not None:
     # The row keeps the table's embedding-dim sharding; broadcasting it against
     # the token-sharded fill mask below must not combine the two.

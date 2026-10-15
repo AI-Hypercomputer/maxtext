@@ -28,6 +28,8 @@ from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_
 import typeguard
 
 from maxtext.experimental.lineage import dsv3_types
+from maxtext.experimental.lineage import mla_qkv_up_bwd_kernels
+from maxtext.experimental.lineage import mla_qkv_up_kernel
 from maxtext.experimental.lineage import ops
 from maxtext.experimental.lineage import quantization
 from maxtext.experimental.lineage import tokamax_splash_attention_kernel
@@ -79,10 +81,8 @@ def quantize_mla_weights(
     quant_rule: Quantization rule of the MLA projections.
 
   Returns:
-    w with the q down, q up, kv down, v up and out projection weights
-    quantized with the rule's static weight scale. k up stays unquantized: an
-    fp8 k up dot outputs k head-dim-minor, which splash's SEQ_MINOR k layout
-    would have to transpose.
+    w with the q down, q up, kv down, k up, v up and out projection weights
+    quantized with the rule's static weight scale.
   """
 
   def q(w: jax.Array | None) -> jax.Array | None:
@@ -93,6 +93,7 @@ def quantize_mla_weights(
       q_down=q(w.q_down),
       q_up=q(w.q_up),
       kv_down=q(w.kv_down),
+      k_up=q(w.k_up),
       v_up=q(w.v_up),
       out=q(w.out),
   )
@@ -103,6 +104,39 @@ def _quantize_act(x: jax.Array, quant_rule: quantization.GmmQuantRule) -> jax.Ar
   if x.dtype == quant_rule.act_qtype:
     return x
   return quantization.static_quantize(x, quant_rule.act_qtype, quant_rule.act_scale)
+
+
+def _dequantize_weight(w: jax.Array, quant_rule: quantization.GmmQuantRule) -> jax.Array:
+  """Returns the bf16 value of w if it is quantized with the rule's scale."""
+  if w.dtype != quant_rule.weight_qtype:
+    return w
+  return (w.astype(jnp.float32) * quant_rule.weight_scale).astype(jnp.bfloat16)
+
+
+def _quantize_splash_qk(x: jax.Array, quant_rule: quantization.GmmQuantRule | None) -> jax.Array:
+  """Casts splash attention q / k to the rule's `splash_qk_qtype`, if any.
+
+  Unscaled: x is only saturated to the dtype's finite range (+-448 for e4m3fn)
+  before the cast; see `quantization.MlaQuantRule`.
+
+  Args:
+    x: q or k, head-dim-minor and already scaled by the softmax scale.
+    quant_rule: Quantization rule of the MLA.
+
+  Returns:
+    x cast to the splash q / k dtype, or x itself if the rule has none.
+  """
+  qtype = getattr(quant_rule, "splash_qk_qtype", None)
+  if qtype is None or x.dtype == qtype:
+    return x
+  return quantization.static_quantize(x, qtype, 1.0)
+
+
+def _q_proj_bwd_quantized(
+    quant_rule: quantization.GmmQuantRule | None,
+) -> bool:
+  """Whether the q projections' backward pass runs in fp8 under `quant_rule`."""
+  return quant_rule is not None and getattr(quant_rule, "q_proj_bwd_quantized", True)
 
 
 def _fp8_dot(
@@ -419,6 +453,8 @@ def q_up_from_q_down(
       rope_factor=rope_factor,
       mscale=mscale,
   )
+  if getattr(quant_rule, "q_prescaled_log2e", False):
+    softmax_scale = softmax_scale * math.log2(math.e)
   cq = norm_fn(q_down, wq_norm_scale)
   dequant_scale = 1.0
   with jax.named_scope("q_up_projection"):
@@ -519,6 +555,8 @@ def q_up_from_q_down_bwd(
       rope_factor=rope_factor,
       mscale=mscale,
   )
+  if getattr(quant_rule, "q_prescaled_log2e", False):
+    softmax_scale = softmax_scale * math.log2(math.e)
   grad_q_nope, grad_q_roped = jnp.split(grad_q * softmax_scale, [qk_head_dim], axis=-1)
   _, rope_vjp = jax.vjp(rope_fn, q_pe, yarn_freqs)
   grad_q_pe, grad_yarn_freqs = rope_vjp(grad_q_roped)
@@ -529,7 +567,9 @@ def q_up_from_q_down_bwd(
     grad_q_up = jnp.concatenate([grad_q_nope, grad_q_pe], axis=-1)
 
   unreduced_cq_sharding = _cotangent_sharding(cq, unreduced=_mesh_axis_names(head_axis))
-  if quant_rule is None:
+  if not _q_proj_bwd_quantized(quant_rule):
+    if quant_rule is not None:
+      wq_up = _dequantize_weight(wq_up, quant_rule)
     with jax.named_scope("q_up_projection_wgrad"):
       grad_wq_up = dot(
           cq,
@@ -545,6 +585,7 @@ def q_up_from_q_down_bwd(
           out_sharding=unreduced_cq_sharding,
       )
   else:
+    assert quant_rule is not None
     with jax.named_scope("q_up_projection_bwd"):
       grad_cq, grad_wq_up = _qdot_bwd(
           grad_q_up,
@@ -708,7 +749,7 @@ def kv_up_from_kv_down(
     return dot(ckv, w) if quant_rule is None else _qdot(ckv_q, w, quant_rule)
 
   with jax.named_scope("k_up_projection"):
-    k_nope = dot(ckv, wk_up)  # Unquantized; see `quantize_mla_weights`.
+    k_nope = _up(wk_up)
   with jax.named_scope("v_up_projection"):
     v = _up(wv_up)
 
@@ -773,7 +814,7 @@ def kv_up_from_kv_down_bwd(
     kv_lora_rank: Compressed key/value dimension.
     norm_fn: Normalization function.
     rope_fn: RoPE function.
-    quant_rule: Optional fp8 quantization of the v up projection; see
+    quant_rule: Optional fp8 quantization of the k up and v up projections; see
       `_qdot_bwd`.
 
   Returns:
@@ -787,44 +828,34 @@ def kv_up_from_kv_down_bwd(
 
   grad_k_nope, grad_k_pe = jnp.split(grad_k, [wk_up.shape[-1]], axis=-1)
 
-  # k up is unquantized; see `quantize_mla_weights`.
-  with jax.named_scope("k_up_projection_wgrad"):
-    grad_wk_up = dot(
-        ckv,
-        grad_k_nope,
-        axes=((0, 1), (0, 1)),
-        out_sharding=_cotangent_sharding(wk_up),
-    )
-  with jax.named_scope("k_up_projection_dgrad"):
-    grad_ckv_k = dot(
-        grad_k_nope,
-        wk_up,
-        axes=((2, 3), (1, 2)),
-        out_sharding=unreduced_sharding,
-    )
-  if quant_rule is None:
-    with jax.named_scope("v_up_projection_wgrad"):
-      grad_wv_up = dot(
+  def _up_bwd(grad: jax.Array, w: jax.Array, name: str):
+    """Returns the (head-unreduced) grad_ckv and grad_w of `_up(w)`."""
+    if quant_rule is None:
+      with jax.named_scope(f"{name}_wgrad"):
+        grad_w = dot(
+            ckv,
+            grad,
+            axes=((0, 1), (0, 1)),
+            out_sharding=_cotangent_sharding(w),
+        )
+      with jax.named_scope(f"{name}_dgrad"):
+        grad_ckv = dot(grad, w, axes=((2, 3), (1, 2)), out_sharding=unreduced_sharding)
+      return grad_ckv, grad_w
+    with jax.named_scope(f"{name}_bwd"):
+      return _qdot_bwd(
+          grad,
           ckv,
-          grad_v,
-          axes=((0, 1), (0, 1)),
-          out_sharding=_cotangent_sharding(wv_up),
-      )
-    with jax.named_scope("v_up_projection_dgrad"):
-      grad_ckv_v = dot(grad_v, wv_up, axes=((2, 3), (1, 2)), out_sharding=unreduced_sharding)
-  else:
-    with jax.named_scope("v_up_projection_bwd"):
-      grad_ckv_v, grad_wv_up = _qdot_bwd(
-          grad_v,
-          ckv,
-          wv_up,
+          w,
           quant_rule=quant_rule,
           dgrad_axes=((2, 3), (1, 2)),
           wgrad_axes=((0, 1), (0, 1)),
           dx_spec=unreduced_sharding.spec,
-          dw_spec=_cotangent_sharding(wv_up).spec,
+          dw_spec=_cotangent_sharding(w).spec,
           ste_x=ckv,
       )
+
+  grad_ckv_k, grad_wk_up = _up_bwd(grad_k_nope, wk_up, "k_up_projection")
+  grad_ckv_v, grad_wv_up = _up_bwd(grad_v, wv_up, "v_up_projection")
 
   @compute_on(
       compute_type="device",
@@ -864,6 +895,404 @@ def kv_up_from_kv_down_bwd(
       grad_wv_up,
       grad_wkv_norm_scale,
       grad_yarn_freqs,
+  )
+
+
+def _rms_norm_epsilon(norm_fn: NormFn) -> float | None:
+  """Returns the epsilon of `partial(ops.rms_norm, epsilon=...)`, else None."""
+  if (
+      isinstance(norm_fn, functools.partial)
+      and norm_fn.func is ops.rms_norm
+      and not norm_fn.args
+      and set(norm_fn.keywords) == {"epsilon"}
+  ):
+    return float(norm_fn.keywords["epsilon"])
+  return None
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def qkv_up_from_down_fused(
+    q_down: jt.Num[jax.Array, "B T Cq"],
+    kv_down: jt.Num[jax.Array, "B T Ckv_plus_R"],
+    wq_up: jt.Num[jax.Array, "Cq N QK_plus_R"],
+    wk_up: jt.Num[jax.Array, "Ckv N QK"],
+    wv_up: jt.Num[jax.Array, "Ckv N V"],
+    wq_norm_scale: jt.Num[jax.Array, "Cq"],
+    wkv_norm_scale: jt.Num[jax.Array, "Ckv"],
+    yarn_freqs: tuple[
+        jt.Num[jax.Array, "B T 1 R"],
+        jt.Num[jax.Array, "B T 1 R"],
+    ],
+    *,
+    qk_head_dim: int,
+    rope_head_dim: int,
+    max_position_embeddings: int,
+    original_max_position_embeddings: int,
+    rope_factor: int,
+    mscale: float,
+    norm_epsilon: float,
+    quant_rule: quantization.GmmQuantRule,
+    block_t: int = 1024,
+    block_n: int = 8,
+    head_group: int = 4,
+) -> tuple[
+    jt.Num[jax.Array, "B T N QK_plus_R"],
+    jt.Num[jax.Array, "B T N QK_plus_R"],
+    jt.Num[jax.Array, "B T N V"],
+]:
+  """fp8 `q_up_from_q_down` and `kv_up_from_kv_down` in one Pallas kernel.
+
+  Same q, k and v as the two fp8 projections with `norm_fn=partial(
+  ops.rms_norm, epsilon=norm_epsilon)` and `rope_fn=yarn`, up to rounding, but
+  without their residuals. Each device computes its heads with
+  `mla_qkv_up_kernel.qkv_up_fwd`, which writes q and k seq-minor and v
+  head-dim-minor, the splash attention layouts.
+
+  Args:
+    q_down: Compressed query, sharded along the batch only.
+    kv_down: Compressed key/value and RoPE key, sharded like q_down.
+    wq_up: Query up projection weights, sharded along the heads only.
+    wk_up: Key up projection weights, sharded like wq_up.
+    wv_up: Value up projection weights, sharded like wq_up.
+    wq_norm_scale: Query normalization scale.
+    wkv_norm_scale: Key/value normalization scale.
+    yarn_freqs: YaRN cos and sin frequencies.
+    qk_head_dim: Non-RoPE query/key head dimension.
+    rope_head_dim: RoPE head dimension.
+    max_position_embeddings: The maximum position indices in the input.
+    original_max_position_embeddings: Original maximum position embeddings.
+    rope_factor: RoPE factor, used for scaling.
+    mscale: YaRN magnitude scale.
+    norm_epsilon: Epsilon of the RMS normalizations.
+    quant_rule: Quantization rule of the q, k and v up projections.
+    block_t: Token tile of the kernel.
+    block_n: Head tile of the kernel.
+    head_group: Heads per dot of the kernel.
+
+  Returns:
+    The query, key and value.
+  """
+  softmax_scale = _softmax_scale(
+      qk_head_dim=qk_head_dim,
+      rope_head_dim=rope_head_dim,
+      max_position_embeddings=max_position_embeddings,
+      original_max_position_embeddings=original_max_position_embeddings,
+      rope_factor=rope_factor,
+      mscale=mscale,
+  )
+  if getattr(quant_rule, "q_prescaled_log2e", False):
+    softmax_scale = softmax_scale * math.log2(math.e)
+  mesh = jax.typeof(q_down).sharding.mesh
+  P = jax.sharding.PartitionSpec  # pylint: disable=invalid-name
+
+  def partitions(x: jax.Array) -> tuple[Any, ...]:
+    sharding = jax.typeof(x).sharding
+    assert isinstance(sharding, jax.sharding.NamedSharding)
+    parts = tuple(sharding.spec.partitions)
+    return parts + (None,) * (x.ndim - len(parts))
+
+  # Each device computes all its heads for full sequences of its batch shard.
+  batch_axis, head_axis = partitions(q_down)[0], partitions(wq_up)[1]
+  for x, expected in (
+      (q_down, (batch_axis, None, None)),
+      (kv_down, (batch_axis, None, None)),
+      (wq_up, (None, head_axis, None)),
+      (wk_up, (None, head_axis, None)),
+      (wv_up, (None, head_axis, None)),
+      (wq_norm_scale, (None,)),
+      (wkv_norm_scale, (None,)),
+      *((f, (batch_axis, None, None, None)) for f in yarn_freqs),
+  ):
+    assert partitions(x) == expected, (partitions(x), expected)
+  local_fn = functools.partial(
+      mla_qkv_up_kernel.qkv_up_fwd,
+      qk_head_dim=qk_head_dim,
+      kv_lora_rank=wk_up.shape[0],
+      softmax_scale=softmax_scale,
+      norm_epsilon=norm_epsilon,
+      act_qtype=quant_rule.act_qtype,
+      act_scale=quant_rule.act_scale,
+      weight_scale=quant_rule.weight_scale,
+      block_t=block_t,
+      block_n=block_n,
+      head_group=head_group,
+  )
+  out_spec = P(batch_axis, head_axis, None, None)
+  q, k, v = jax.shard_map(
+      local_fn,
+      mesh=mesh,
+      out_specs=(out_spec, out_spec, out_spec),
+      check_vma=False,
+  )(
+      q_down,
+      kv_down,
+      _quantize_weight(wq_up, quant_rule),
+      _quantize_weight(wk_up, quant_rule),
+      _quantize_weight(wv_up, quant_rule),
+      wq_norm_scale,
+      wkv_norm_scale,
+      yarn_freqs,
+  )
+  # [B, N, D, T] / [B, N, T, V] -> [B, T, N, D]; XLA folds these into the
+  # transposes to the splash attention layouts.
+  return (
+      jnp.transpose(q, (0, 3, 1, 2)),
+      jnp.transpose(k, (0, 3, 1, 2)),
+      jnp.transpose(v, (0, 2, 1, 3)),
+  )
+
+
+def _use_qkv_up_bwd_kernels(
+    quant_rule: quantization.GmmQuantRule | None,
+    norm_fn: NormFn,
+    rope_fn: RopeFn,
+) -> bool:
+  """Whether `qkv_up_from_qkv_down_bwd` supports the given configuration."""
+  return quant_rule is not None and rope_fn is yarn and _rms_norm_epsilon(norm_fn) is not None
+
+
+# (token, head) tile size of the QKV-up backward kernels, which is also the
+# tile of the e5m2 cotangents' absmax scales; see mla_l1_qkv_up_bwd_split_test.
+_QKV_UP_BWD_BLOCKS = (512, 8)
+
+
+@jax.named_call
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def qkv_up_from_qkv_down_bwd(
+    grad_q: jt.Num[jax.Array, "B T N QK_plus_R"],
+    grad_k: jt.Num[jax.Array, "B T N QK_plus_R"],
+    grad_v: jt.Num[jax.Array, "B T N V"],
+    q_down: jt.Num[jax.Array, "B T Cq"],
+    kv_down: jt.Num[jax.Array, "B T Ckv_plus_R"],
+    q_pe: jt.Num[jax.Array, "B T N R"],
+    wq_up: jt.Num[jax.Array, "Cq N QK_plus_R"],
+    wk_up: jt.Num[jax.Array, "Ckv N QK"],
+    wv_up: jt.Num[jax.Array, "Ckv N V"],
+    wq_norm_scale: jt.Num[jax.Array, "Cq"],
+    wkv_norm_scale: jt.Num[jax.Array, "Ckv"],
+    yarn_freqs: tuple[
+        jt.Num[jax.Array, "B T 1 R"],
+        jt.Num[jax.Array, "B T 1 R"],
+    ],
+    *,
+    kv_lora_rank: int,
+    qk_head_dim: int,
+    rope_head_dim: int,
+    max_position_embeddings: int,
+    original_max_position_embeddings: int,
+    rope_factor: int,
+    mscale: float,
+    norm_fn: NormFn,
+    quant_rule: quantization.GmmQuantRule,
+    blocks: tuple[int, int] = _QKV_UP_BWD_BLOCKS,
+) -> tuple[Any, ...]:
+  """fp8 backward pass of `q_up_from_q_down` and `kv_up_from_kv_down`.
+
+  Same as `q_up_from_q_down_bwd` and `kv_up_from_kv_down_bwd` with
+  `rope_fn=yarn` and an `ops.rms_norm` norm_fn, except that the q, k and v
+  cotangents are quantized to e5m2 with one absmax scale per (token, head)
+  tile instead of one per device. On each device, the activation gradients
+  (`mla_qkv_up_bwd_kernels.qkv_up_dgrad`) and the weight gradients
+  (`mla_qkv_up_bwd_kernels.qkv_up_wgrad`) are each computed by one Pallas
+  kernel. The head all-reduces of grad_cq and grad_kv, the q STE and the norm
+  and RoPE pullbacks are unchanged.
+
+  Args:
+    grad_q: Cotangent of the full query.
+    grad_k: Cotangent of the key.
+    grad_v: Cotangent of the value.
+    q_down: Compressed query.
+    kv_down: Compressed key/value.
+    q_pe: Pre-RoPE query residual of `q_up_from_q_down`, only used for the
+      gradient of `yarn_freqs`.
+    wq_up: Query up projection weights.
+    wk_up: Key up projection weights.
+    wv_up: Value up projection weights.
+    wq_norm_scale: Query normalization scale.
+    wkv_norm_scale: Key/value normalization scale.
+    yarn_freqs: YaRN cos and sin frequencies.
+    kv_lora_rank: Compressed key/value dimension.
+    qk_head_dim: Non-RoPE query/key head dimension.
+    rope_head_dim: RoPE head dimension.
+    max_position_embeddings: The maximum position indices in the input.
+    original_max_position_embeddings: Original maximum position embeddings.
+    rope_factor: RoPE factor, used for scaling.
+    mscale: YaRN magnitude scale.
+    norm_fn: `functools.partial(ops.rms_norm, epsilon=...)`.
+    quant_rule: fp8 quantization of the q up, k up and v up projections.
+    blocks: (token, head) tile size of the kernels and of the e5m2 absmax
+      scales.
+
+  Returns:
+    The gradients with respect to `q_down`, `kv_down`, `wq_up`, `wk_up`,
+    `wv_up`, `wq_norm_scale` and `wkv_norm_scale`, and the q and kv parts of
+    the gradient with respect to `yarn_freqs`.
+  """
+  eps = _rms_norm_epsilon(norm_fn)
+  assert eps is not None, norm_fn
+  softmax_scale = _softmax_scale(
+      qk_head_dim=qk_head_dim,
+      rope_head_dim=rope_head_dim,
+      max_position_embeddings=max_position_embeddings,
+      original_max_position_embeddings=original_max_position_embeddings,
+      rope_factor=rope_factor,
+      mscale=mscale,
+  )
+  if getattr(quant_rule, "q_prescaled_log2e", False):
+    softmax_scale = softmax_scale * math.log2(math.e)
+  wq_up = _quantize_weight(wq_up, quant_rule)
+  wk_up = _quantize_weight(wk_up, quant_rule)
+  wv_up = _quantize_weight(wv_up, quant_rule)
+  grad_q_sharding = jax.typeof(grad_q).sharding
+  assert isinstance(grad_q_sharding, jax.sharding.NamedSharding)
+  head_axis = grad_q_sharding.spec[2]
+  head_axes = _mesh_axis_names(head_axis)
+  dims = mla_qkv_up_bwd_kernels.QkvUpBwdDims(
+      qk_head_dim=qk_head_dim,
+      rope_head_dim=rope_head_dim,
+      v_head_dim=wv_up.shape[-1],
+      softmax_scale=softmax_scale,
+      eps=eps,
+      act_scale=quant_rule.act_scale,
+      act_qtype=quant_rule.act_qtype,
+      weight_scale=quant_rule.weight_scale,
+  )
+  out_specs = (
+      _cotangent_sharding(q_down, unreduced=head_axes).spec,
+      _cotangent_sharding(kv_down, unreduced=head_axes).spec,
+      _cotangent_sharding(wq_up).spec,
+      _cotangent_sharding(wk_up).spec,
+      _cotangent_sharding(wv_up).spec,
+  )
+
+  def _local_bwd(
+      grad_q,
+      grad_k,
+      grad_v,
+      q_down,
+      kv_down,
+      wq_up,
+      wk_up,
+      wv_up,
+      wq_norm_scale,
+      wkv_norm_scale,
+      cos,
+      sin,
+  ):  # pyformat: disable
+    # The kernels take the cotangents head-major, like splash attention
+    # outputs them, so these transposes cancel with splash's.
+    grad_q, grad_k, grad_v = (jnp.transpose(x, (0, 2, 1, 3)) for x in (grad_q, grad_k, grad_v))
+    t, n = grad_q.shape[2], grad_q.shape[1]
+    cos_sin = jnp.concatenate([cos, sin], axis=-1).reshape(cos.shape[0], t, -1)
+    kw = dict(dims=dims, block_t=min(blocks[0], t), block_n=min(blocks[1], n))
+
+    def heads_minor(w):  # [C, N, D] -> [N * D, C], a bitcast for C-minor w.
+      return jnp.transpose(w, (1, 2, 0)).reshape(-1, w.shape[0])
+
+    def heads_major(g, w):  # Inverse of heads_minor.
+      return jnp.transpose(g.reshape(*w.shape[1:], w.shape[0]), (2, 0, 1))
+
+    grad_cq, grad_kv, gq, dk_q, dv_q, scales = mla_qkv_up_bwd_kernels.qkv_up_dgrad(
+        grad_q,
+        grad_k,
+        grad_v,
+        kv_down,
+        wkv_norm_scale.reshape(1, -1),
+        cos_sin,
+        heads_minor(wq_up),
+        heads_minor(wk_up),
+        heads_minor(wv_up),
+        **kw,
+    )
+    grad_wq_up, grad_wk_up, grad_wv_up = mla_qkv_up_bwd_kernels.qkv_up_wgrad(
+        q_down,
+        norm_fn(kv_down[..., :kv_lora_rank], wkv_norm_scale),
+        wq_norm_scale.reshape(1, -1),
+        gq,
+        dk_q,
+        dv_q,
+        scales,
+        grad_dtype=quant_rule.grad_dtype,
+        **kw,
+    )
+    outs = (
+        jnp.swapaxes(grad_cq, 1, 2),
+        jnp.swapaxes(grad_kv, 1, 2),
+        heads_major(grad_wq_up, wq_up),
+        heads_major(grad_wk_up, wk_up),
+        heads_major(grad_wv_up, wv_up),
+    )
+    return tuple(map(_match_spec, outs, out_specs))
+
+  grad_cq, grad_kv, grad_wq_up, grad_wk_up, grad_wv_up = jax.shard_map(
+      _local_bwd,
+      mesh=grad_q_sharding.mesh,
+      out_specs=out_specs,
+      check_vma=True,
+  )(
+      grad_q,
+      grad_k,
+      grad_v,
+      q_down,
+      kv_down,
+      wq_up,
+      wk_up,
+      wv_up,
+      wq_norm_scale,
+      wkv_norm_scale,
+      *yarn_freqs,
+  )
+
+  @compute_on(
+      compute_type="device",
+      out_memory_spaces=jax.memory.Space.Device,
+  )
+  def _head_all_reduce(x: jax.Array) -> jax.Array:
+    return jax.lax.psum(x, axis_name=head_axis)
+
+  grad_cq = jax.shard_map(
+      _head_all_reduce,
+      mesh=grad_q_sharding.mesh,
+      out_specs=_cotangent_sharding(q_down).spec,
+      check_vma=True,
+  )(grad_cq)
+  grad_ckv, grad_k_pe = jnp.split(
+      jax.shard_map(
+          _head_all_reduce,
+          mesh=grad_q_sharding.mesh,
+          out_specs=_cotangent_sharding(kv_down).spec,
+          check_vma=True,
+      )(grad_kv),
+      [kv_lora_rank],
+      axis=-1,
+  )
+
+  _, q_norm_vjp = jax.vjp(norm_fn, q_down, wq_norm_scale)
+  cq = norm_fn(q_down, wq_norm_scale)
+  grad_q_down, grad_wq_norm_scale = q_norm_vjp(_ste(grad_cq, cq, quant_rule))
+
+  _, kv_norm_vjp = jax.vjp(norm_fn, kv_down[..., :kv_lora_rank], wkv_norm_scale)
+  grad_ckv, grad_wkv_norm_scale = kv_norm_vjp(grad_ckv)
+  k_pe = jnp.expand_dims(kv_down[..., kv_lora_rank:], axis=2)
+  _, k_rope_vjp = jax.vjp(yarn, k_pe, yarn_freqs)
+  grad_k_pe, grad_yarn_freqs_kv = k_rope_vjp(jnp.expand_dims(grad_k_pe, axis=2))
+  grad_kv_down = jnp.concatenate([grad_ckv, jnp.squeeze(grad_k_pe, axis=2)], axis=-1)
+
+  # Dead code in training, where yarn_freqs is not differentiated.
+  grad_q_roped = jnp.split(grad_q * softmax_scale, [qk_head_dim], axis=-1)[1]
+  _, q_rope_vjp = jax.vjp(yarn, q_pe, yarn_freqs)
+  _, grad_yarn_freqs_q = q_rope_vjp(grad_q_roped)
+  return (
+      grad_q_down,
+      grad_kv_down,
+      grad_wq_up,
+      grad_wk_up,
+      grad_wv_up,
+      grad_wq_norm_scale,
+      grad_wkv_norm_scale,
+      grad_yarn_freqs_q,
+      grad_yarn_freqs_kv,
   )
 
 
@@ -1119,6 +1548,9 @@ def init_splash_kernel(
     qk_diag_skip: bool = True,
     qk_diag_grid: int = 8,
     sv_diag_skip: bool = True,
+    diag_band_skip: bool = True,
+    dq_reduction_steps: int | None = 1,
+    q_prescaled_log2e: bool = False,
 ) -> Any:
   """Initializes the Splash kernel with the given block sizes."""
   del num_query_heads
@@ -1144,15 +1576,30 @@ def init_splash_kernel(
   block_q = min(sa_block_q, q_seq_len_per_shard)
   block_kv = min(sa_block_kv, q_seq_len_per_shard)
   block_kv_compute = min(sa_block_kv_compute, q_seq_len_per_shard)
-  effective_qk_diag_skip = qk_diag_skip and (block_q == block_kv == block_kv_compute)
+  block_q_dkv = min(sa_block_q_dkv, q_seq_len_per_shard)
+  block_kv_dkv = min(sa_block_kv_dkv, q_seq_len_per_shard)
+  block_kv_dkv_compute = min(sa_block_kv_dkv_compute, q_seq_len_per_shard)
+  # The forward skip needs aligned diagonal blocks (block_q == block_kv); the
+  # compute tile may be smaller. The dkv skip needs square tiles.
+  effective_qk_diag_skip = (
+      qk_diag_skip
+      and block_q == block_kv
+      and block_kv % block_kv_compute == 0
+      and block_q_dkv == block_kv_dkv == block_kv_dkv_compute
+  )
+
   effective_sv_diag_skip = sv_diag_skip and (block_q == block_kv == block_kv_compute)
+  effective_dq_reduction_steps = (
+      None if dq_reduction_steps == 1 and q_seq_len_per_shard > 2 * block_q_dkv else dq_reduction_steps
+  )
+  effective_diag_band_skip = diag_band_skip and effective_qk_diag_skip and effective_dq_reduction_steps == 1
   sa_config = tokamax_splash_attention_kernel.SplashConfig(
       block_q=block_q,
       block_kv=block_kv,
       block_kv_compute=block_kv_compute,
-      block_q_dkv=min(sa_block_q_dkv, q_seq_len_per_shard),
-      block_kv_dkv=min(sa_block_kv_dkv, q_seq_len_per_shard),
-      block_kv_dkv_compute=min(sa_block_kv_dkv_compute, q_seq_len_per_shard),
+      block_q_dkv=block_q_dkv,
+      block_kv_dkv=block_kv_dkv,
+      block_kv_dkv_compute=block_kv_dkv_compute,
       block_q_dq=None,
       block_kv_dq=None,
       use_fused_bwd_kernel=True,
@@ -1162,6 +1609,9 @@ def init_splash_kernel(
       qk_diag_skip=effective_qk_diag_skip,
       qk_diag_grid=qk_diag_grid,
       sv_diag_skip=effective_sv_diag_skip,
+      diag_band_skip=effective_diag_band_skip,
+      dq_reduction_steps=effective_dq_reduction_steps,
+      q_prescaled_log2e=q_prescaled_log2e,
   )
   mask = tokamax_splash_mask.CausalMask(shape=(max_target_length, max_target_length))
   splash_kernel = tokamax_splash_attention_kernel.make_splash_mha(
@@ -1384,9 +1834,8 @@ def dsv3_mla_fwd(
 ]:
   """Forward pass for MLA returning output activations and residuals.
 
-  With `quant_rule`, all projections but k up run in fp8 (see
-  `quantize_mla_weights`); weights not already quantized (e.g. before
-  collection) are quantized here.
+  With `quant_rule`, all projections run in fp8 (see `quantize_mla_weights`);
+  weights not already quantized (e.g. before collection) are quantized here.
   """
   if quant_rule is not None:
     w = quantize_mla_weights(w, quant_rule)
@@ -1406,21 +1855,6 @@ def dsv3_mla_fwd(
       axis_mapping=axis_mapping,
       quant_rule=quant_rule,
   )
-  q, _ = q_up_from_q_down(
-      q_down,
-      w.q_up,
-      w.q_norm_scale,
-      yarn_freqs,
-      qk_head_dim=qk_head_dim,
-      rope_head_dim=rope_head_dim,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      rope_factor=rope_factor,
-      mscale=mscale,
-      norm_fn=norm_fn,
-      rope_fn=rope_fn,
-      quant_rule=quant_rule,
-  )
   kv_down = kv_down_projection(
       x,
       w.kv_down,
@@ -1428,21 +1862,57 @@ def dsv3_mla_fwd(
       axis_mapping=axis_mapping,
       quant_rule=quant_rule,
   )
-  (k, v), _ = kv_up_from_kv_down(
-      kv_down,
-      w.k_up,
-      w.v_up,
-      w.kv_norm_scale,
-      yarn_freqs,
-      kv_lora_rank=kv_lora_rank,
-      num_query_heads=num_query_heads,
-      norm_fn=norm_fn,
-      rope_fn=rope_fn,
-      quant_rule=quant_rule,
-  )
+  norm_epsilon = _rms_norm_epsilon(norm_fn)
+  if quant_rule is not None and rope_fn is yarn and norm_epsilon is not None:
+    q, k, v = qkv_up_from_down_fused(
+        q_down,
+        kv_down,
+        w.q_up,
+        w.k_up,
+        w.v_up,
+        w.q_norm_scale,
+        w.kv_norm_scale,
+        yarn_freqs,
+        qk_head_dim=qk_head_dim,
+        rope_head_dim=rope_head_dim,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        rope_factor=rope_factor,
+        mscale=mscale,
+        norm_epsilon=norm_epsilon,
+        quant_rule=quant_rule,
+    )
+  else:
+    q, _ = q_up_from_q_down(
+        q_down,
+        w.q_up,
+        w.q_norm_scale,
+        yarn_freqs,
+        qk_head_dim=qk_head_dim,
+        rope_head_dim=rope_head_dim,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        rope_factor=rope_factor,
+        mscale=mscale,
+        norm_fn=norm_fn,
+        rope_fn=rope_fn,
+        quant_rule=quant_rule,
+    )
+    (k, v), _ = kv_up_from_kv_down(
+        kv_down,
+        w.k_up,
+        w.v_up,
+        w.kv_norm_scale,
+        yarn_freqs,
+        kv_lora_rank=kv_lora_rank,
+        num_query_heads=num_query_heads,
+        norm_fn=norm_fn,
+        rope_fn=rope_fn,
+        quant_rule=quant_rule,
+    )
   splash_out, context = splash_attention(
-      q,
-      k,
+      _quantize_splash_qk(q, quant_rule),
+      _quantize_splash_qk(k, quant_rule),
       v,
       splash_kernel,
       segment_ids=segment_ids,
@@ -1496,8 +1966,8 @@ def dsv3_mla_bwd(
 ]:
   """Backward pass for MLA using saved residuals and rematerialization.
 
-  With `quant_rule`, all projections but k up are backpropagated through like
-  the fp8 routed expert GMMs; see `_qdot_bwd`.
+  With `quant_rule`, all projections are backpropagated through like the fp8
+  routed expert GMMs; see `_qdot_bwd`.
   """
   x_q = norm_x
   if quant_rule is not None:
@@ -1526,69 +1996,158 @@ def dsv3_mla_bwd(
   else:
     grad_splash_out, grad_w_out = out_projection_bwd(grad_out, splash_out, w.out, quant_rule=quant_rule)
 
-  # 2. Remat q from q_down
-  q, q_residuals = q_up_from_q_down(
-      q_down,
-      w.q_up,
-      w.q_norm_scale,
-      yarn_freqs,
-      qk_head_dim=qk_head_dim,
-      rope_head_dim=rope_head_dim,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      rope_factor=rope_factor,
-      mscale=mscale,
-      norm_fn=norm_fn,
-      rope_fn=rope_fn,
-      quant_rule=quant_rule,
-  )
+  norm_epsilon = _rms_norm_epsilon(norm_fn)
+  if quant_rule is not None and rope_fn is yarn and norm_epsilon is not None:
+    # 2-3. Remat q, k, v from q_down and kv_down in one kernel
+    q, k, v = qkv_up_from_down_fused(
+        q_down,
+        kv_down,
+        w.q_up,
+        w.k_up,
+        w.v_up,
+        w.q_norm_scale,
+        w.kv_norm_scale,
+        yarn_freqs,
+        qk_head_dim=qk_head_dim,
+        rope_head_dim=rope_head_dim,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        rope_factor=rope_factor,
+        mscale=mscale,
+        norm_epsilon=norm_epsilon,
+        quant_rule=quant_rule,
+    )
+    # The residuals of `q_up_from_q_down` and `kv_up_from_kv_down`, computed
+    # like they do. q_pe only feeds grad_yarn_freqs.
+    cq = norm_fn(q_down, w.q_norm_scale)
+    q_pe = _fp8_dot(
+        _quantize_act(cq, quant_rule),
+        _quantize_weight(w.q_up, quant_rule)[..., qk_head_dim:],
+        1,
+        jnp.bfloat16,
+    )
+    q_residuals = (cq, q_pe * (quant_rule.act_scale * quant_rule.weight_scale))
+    ckv = norm_fn(kv_down[..., :kv_lora_rank], w.kv_norm_scale)
+  else:
+    # 2. Remat q from q_down
+    q, q_residuals = q_up_from_q_down(
+        q_down,
+        w.q_up,
+        w.q_norm_scale,
+        yarn_freqs,
+        qk_head_dim=qk_head_dim,
+        rope_head_dim=rope_head_dim,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        rope_factor=rope_factor,
+        mscale=mscale,
+        norm_fn=norm_fn,
+        rope_fn=rope_fn,
+        quant_rule=quant_rule,
+    )
 
-  # 3. Remat k, v from kv_down
-  (k, v), ckv = kv_up_from_kv_down(
-      kv_down,
-      w.k_up,
-      w.v_up,
-      w.kv_norm_scale,
-      yarn_freqs,
-      kv_lora_rank=kv_lora_rank,
-      num_query_heads=num_query_heads,
-      norm_fn=norm_fn,
-      rope_fn=rope_fn,
-      quant_rule=quant_rule,
-  )
+    # 3. Remat k, v from kv_down
+    (k, v), ckv = kv_up_from_kv_down(
+        kv_down,
+        w.k_up,
+        w.v_up,
+        w.kv_norm_scale,
+        yarn_freqs,
+        kv_lora_rank=kv_lora_rank,
+        num_query_heads=num_query_heads,
+        norm_fn=norm_fn,
+        rope_fn=rope_fn,
+        quant_rule=quant_rule,
+    )
 
   # 4. Splash attention backward
   dq, dk, dv = splash_attention_bwd(
       grad_splash_out,
       splash_out,
       context,
-      q,
-      k,
+      _quantize_splash_qk(q, quant_rule),
+      _quantize_splash_qk(k, quant_rule),
       v,
       splash_kernel,
       segment_ids=segment_ids,
   )
 
-  # 5. Backprop through Q projection
-  grad_q_down, grad_w_q_up, grad_w_q_norm_scale, grad_yarn_freqs_q = q_up_from_q_down_bwd(
-      dq,
-      q_down,
-      q_residuals,
-      w.q_up,
-      w.q_norm_scale,
-      yarn_freqs,
-      qk_head_dim=qk_head_dim,
-      rope_head_dim=rope_head_dim,
-      max_position_embeddings=max_position_embeddings,
-      original_max_position_embeddings=original_max_position_embeddings,
-      rope_factor=rope_factor,
-      mscale=mscale,
-      norm_fn=norm_fn,
-      rope_fn=rope_fn,
-      quant_rule=quant_rule,
-  )
+  # 5. Backprop through the Q and KV up projections
+  if _use_qkv_up_bwd_kernels(quant_rule, norm_fn, rope_fn):
+    assert quant_rule is not None
+    (
+        grad_q_down,
+        grad_kv_down,
+        grad_w_q_up,
+        grad_w_k_up,
+        grad_w_v_up,
+        grad_w_q_norm_scale,
+        grad_w_kv_norm_scale,
+        grad_yarn_freqs_q,
+        grad_yarn_freqs_kv,
+    ) = qkv_up_from_qkv_down_bwd(
+        dq,
+        dk,
+        dv,
+        q_down,
+        kv_down,
+        q_residuals[1],
+        w.q_up,
+        w.k_up,
+        w.v_up,
+        w.q_norm_scale,
+        w.kv_norm_scale,
+        yarn_freqs,
+        kv_lora_rank=kv_lora_rank,
+        qk_head_dim=qk_head_dim,
+        rope_head_dim=rope_head_dim,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        rope_factor=rope_factor,
+        mscale=mscale,
+        norm_fn=norm_fn,
+        quant_rule=quant_rule,
+    )
+  else:
+    grad_q_down, grad_w_q_up, grad_w_q_norm_scale, grad_yarn_freqs_q = q_up_from_q_down_bwd(
+        dq,
+        q_down,
+        q_residuals,
+        w.q_up,
+        w.q_norm_scale,
+        yarn_freqs,
+        qk_head_dim=qk_head_dim,
+        rope_head_dim=rope_head_dim,
+        max_position_embeddings=max_position_embeddings,
+        original_max_position_embeddings=original_max_position_embeddings,
+        rope_factor=rope_factor,
+        mscale=mscale,
+        norm_fn=norm_fn,
+        rope_fn=rope_fn,
+        quant_rule=quant_rule,
+    )
+    (
+        grad_kv_down,
+        grad_w_k_up,
+        grad_w_v_up,
+        grad_w_kv_norm_scale,
+        grad_yarn_freqs_kv,
+    ) = kv_up_from_kv_down_bwd(
+        dk,
+        dv,
+        kv_down,
+        ckv,
+        w.k_up,
+        w.v_up,
+        w.kv_norm_scale,
+        yarn_freqs,
+        kv_lora_rank=kv_lora_rank,
+        norm_fn=norm_fn,
+        rope_fn=rope_fn,
+        quant_rule=quant_rule,
+    )
 
-  if quant_rule is None:
+  if not _q_proj_bwd_quantized(quant_rule):
 
     def _q_down_fwd(norm_x, wq_down):
       return q_down_projection(
@@ -1598,32 +2157,16 @@ def dsv3_mla_bwd(
           axis_mapping=axis_mapping,
       )
 
-    _, vjp_q_down = jax.vjp(_q_down_fwd, norm_x, w.q_down)
+    wq_down = w.q_down
+    if quant_rule is not None:
+      wq_down = _dequantize_weight(wq_down, quant_rule)
+    _, vjp_q_down = jax.vjp(_q_down_fwd, norm_x, wq_down)
     grad_norm_x_q, grad_w_q_down = vjp_q_down(grad_q_down)
   else:
+    assert quant_rule is not None
     grad_norm_x_q, grad_w_q_down = down_projection_bwd(grad_q_down, x_q, w.q_down, quant_rule=quant_rule)
 
   # 6. Backprop through KV projection
-  (
-      grad_kv_down,
-      grad_w_k_up,
-      grad_w_v_up,
-      grad_w_kv_norm_scale,
-      grad_yarn_freqs_kv,
-  ) = kv_up_from_kv_down_bwd(
-      dk,
-      dv,
-      kv_down,
-      ckv,
-      w.k_up,
-      w.v_up,
-      w.kv_norm_scale,
-      yarn_freqs,
-      kv_lora_rank=kv_lora_rank,
-      norm_fn=norm_fn,
-      rope_fn=rope_fn,
-      quant_rule=quant_rule,
-  )
 
   if quant_rule is None:
 

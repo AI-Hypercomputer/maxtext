@@ -49,6 +49,20 @@ Optimize with Pallas kernels for fine-grained control.
 
 Guide to setting up benchmarks, performing performance tuning, and analyzing metrics.
 ```
+
+```{grid-item-card} 🔁 FSDP Weight Prefetching
+:link: optimization/fsdp_prefetch
+:link-type: doc
+
+Overlap the FSDP all-gather of the next layer's weights with the current layer's compute.
+```
+
+```{grid-item-card} 🔀 Shard Mode: explicit vs auto
+:link: optimization/shard_mode_performance
+:link-type: doc
+
+Measured HLO and xprof comparison of `shard_mode: explicit` against `shard_mode: auto` on the onboarded models.
+```
 ````
 
 ```{toctree}
@@ -58,7 +72,9 @@ maxdepth: 1
 ---
 optimization/custom_model.md
 optimization/sharding.md
+optimization/fsdp_prefetch.md
 optimization/custom_mesh_and_rule.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md
+optimization/shard_mode_performance.md
 ```

@@ -8,4 +8,4 @@ setuptools>=84.0.0
 urllib3>=2.8.0
 werkzeug>=3.1.9
 wheel>=0.48.0
-xprof<=2.23.0
+xprof>=2.23.1

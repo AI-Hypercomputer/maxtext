@@ -305,7 +305,12 @@ def moe_megatron_seq_aux_loss(
     density_prob = jnp.mean(probs, axis=1)
     return jnp.mean(density * density_prob) * (num_experts**2) * weight
 
-  losses = jnp.stack([layer_loss(logits[i]) for i in range(logits.shape[0])])
+  # One batched top-k and reduction over the layer axis rather than a Python
+  # loop over layers, which issued a few hundred small ops (one top-k, one-hot
+  # and mean per layer) outside the layer scan. The one-hot stays fused into
+  # its reduction, so the `(layers, batch, seq, top_k, experts)` mask is never
+  # materialized.
+  losses = jax.vmap(layer_loss)(logits)
   return losses if scanned else losses[0]
 
 

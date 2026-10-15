@@ -15,7 +15,8 @@
 """Custom XLA post-scheduler transformation for DSv3.
 
 Maximizes async overlap by "bubbling" every async start as early as possible and
-every async done as late as possible within a computation's schedule.
+every async done as late as possible within a computation's schedule. The entry
+computation and every while body are rewritten.
 
 The module is split into two layers:
 
@@ -34,6 +35,9 @@ The algorithm, in order:
      op claimed by several async ops travels with every one of them.
   2. Probe each bundle against the *original* schedule to find the earliest slot
      a start bundle could occupy and the latest slot a done bundle could occupy.
+     A loop that issues async work of its own is a fence: no start is hoisted
+     above it and no done is sunk below it, so nothing is left in flight on a
+     queue the loop is about to use, and no buffer is held across the loop.
   3. Derive the final done order (farthest-from-the-end first) and the start
      bubbling order (which is the reverse of the final start order).
   4. Raise each start to its FIFO floor, so that starts sharing a hardware queue
@@ -50,7 +54,7 @@ The algorithm, in order:
      out of its legal reach.
 """
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 import dataclasses
 import json
 import re
@@ -58,6 +62,7 @@ from typing import Any
 
 from jax._src.lib import hlo as _hlo
 import jax.extend.xla as jex_xla
+
 from tensorflow.compiler.xla.service import hlo_pb2  # pylint: disable=g-direct-tensorflow-import
 
 _DEFAULT_TRANSFORM_NAME = "max_async_overlap_transform"
@@ -147,6 +152,8 @@ _BODY_RE = re.compile(r"\bbody=(%?[\w.\-]+)")
 _INSTRUCTION_NAME_RE = re.compile(r"%([\w.\-]+)")
 _ASYNC_THREAD_RE = re.compile(r'async_execution_thread="([^"]+)"')
 _CORE_IDS_RE = re.compile(r'"core_ids":\s*\[([^\]]*)\]')
+# The entry computation's header line in a printed module.
+_ENTRY_RE = re.compile(r"^ENTRY %([\w.\-]+)", re.MULTILINE)
 
 # Frontend attribute handler that marks a send/recv as megascale (DCN) traffic
 # rather than a transfer to the host. Megascale lowers a cross-slice collective
@@ -243,6 +250,7 @@ def make_schedule_graph(
     queues: Mapping[str, str] | None = None,
     glue: Mapping[str, str] | None = None,
     serialized_queues: Iterable[str] = (),
+    fences: Iterable[str] = (),
 ) -> ScheduleGraph:
   """Builds a `ScheduleGraph`, deriving users, control successors, and pins.
 
@@ -258,6 +266,10 @@ def make_schedule_graph(
     serialized_queues: Queues whose starts must stay behind every same-queue
       done that precedes them in `order`. Each such done becomes a control
       predecessor of the start, so every later step honors it for free.
+    fences: Instructions no async op may be moved across. The nearest fence
+      before an async start becomes its control predecessor, and an async done
+      becomes a control predecessor of the nearest fence after it. A pair that
+      already straddles a fence in `order` keeps straddling it.
 
   Returns:
     A fully populated `ScheduleGraph`.
@@ -275,23 +287,38 @@ def make_schedule_graph(
   control_preds = control_preds or {}
   queues = {k: v for k, v in (queues or {}).items() if k in present}
   serialized_queues = frozenset(serialized_queues)
+  fences = frozenset(fences)
   operand_map: dict[str, tuple[str, ...]] = {}
-  control_pred_map: dict[str, tuple[str, ...]] = {}
+  control_pred_lists: dict[str, list[str]] = {}
   user_lists: dict[str, list[str]] = {name: [] for name in order}
   control_succ_lists: dict[str, list[str]] = {name: [] for name in order}
 
   retired: dict[str, list[str]] = {}
+  fence: str | None = None
   for name in order:
     operand_map[name] = tuple(o for o in operands.get(name, ()) if o in present)
     preds = [p for p in control_preds.get(name, ()) if p in present]
     queue = queues.get(name)
     if queue is not None and queue in serialized_queues:
       preds += [d for d in retired.get(queue, ()) if d not in preds]
-    control_pred_map[name] = tuple(preds)
+    if opcodes.get(name) in _ASYNC_START_OPCODES and fence is not None:
+      if fence not in preds:
+        preds.append(fence)
+    control_pred_lists[name] = preds
+    if name in fences:
+      fence = name
     if opcodes.get(name) in _ASYNC_DONE_OPCODES and operand_map[name]:
       done_queue = queues.get(operand_map[name][0])
       if done_queue is not None and done_queue in serialized_queues:
         retired.setdefault(done_queue, []).append(name)
+  fence = None
+  for name in reversed(order):
+    if name in fences:
+      fence = name
+    elif fence is not None and opcodes.get(name) in _ASYNC_DONE_OPCODES:
+      if name not in control_pred_lists[fence]:
+        control_pred_lists[fence].append(name)
+  control_pred_map = {name: tuple(control_pred_lists[name]) for name in order}
   for name in order:
     for operand in operand_map[name]:
       user_lists[operand].append(name)
@@ -554,33 +581,44 @@ def prune_bundle_for_done(
     seed: str,
     bundle: frozenset[str],
     positions: Mapping[str, int],
+    max_slot: int | None = None,
 ) -> tuple[frozenset[str], Probe]:
   """Shrinks a done bundle until no member would have to move earlier.
 
-  Mirror image of `prune_bundle_for_start`.
+  Mirror image of `prune_bundle_for_start`. `max_slot` is the FIFO cap the
+  bundle will actually end at, which can undercut the dependency bound. It can
+  even undercut the seed itself, when a transfer issued after this one has
+  already been placed ahead of it; the seed then moves back alone, and its
+  consumers stay put, which keeps them behind it.
 
   Args:
     graph: The schedule graph.
     seed: The async done.
     bundle: Candidate bundle.
     positions: Current name -> index map.
+    max_slot: Upper bound on the slot the bundle will be moved to.
 
   Returns:
-    The pruned bundle and its probe.
+    The pruned bundle and its probe. The probe reports the dependency bound
+    only; the caller still applies `max_slot`.
 
   Raises:
-    ScheduleTransformError: If the seed itself would be dropped.
+    ScheduleTransformError: If the seed cannot move back to `max_slot`.
   """
   current = set(bundle)
   while True:
     probe = latest_slot(graph, frozenset(current), positions)
-    dropped = {m for m in current if positions[m] > probe.slot}
+    target = probe.slot if max_slot is None else min(probe.slot, max_slot)
+    dropped = {m for m in current if positions[m] > target}
     if not dropped:
       return frozenset(current), probe
     if seed in dropped:
-      raise ScheduleTransformError(
-          f"Async done {seed} at {positions[seed]} follows its own bundle" f" upper bound {probe.slot}."
-      )
+      alone = frozenset({seed})
+      if earliest_slot(graph, alone, positions).slot > target:
+        raise ScheduleTransformError(
+            f"Async done {seed} at {positions[seed]} cannot move back to its" f" queue cap {target}."
+        )
+      return alone, latest_slot(graph, alone, positions)
     current -= dropped
 
 
@@ -589,18 +627,13 @@ def prune_bundle_for_done(
 # ---------------------------------------------------------------------------
 
 
-def order_dones(
+def _cluster_start_slots(
     dones: Sequence[str],
-    done_probes: Mapping[str, Probe],
-    start_probes: Mapping[str, Probe],
+    start_slots: Mapping[str, int],
     start_of_done: Mapping[str, str],
-    total: int,
     glue: Mapping[str, str] | None = None,
-) -> list[str]:
-  """Orders async dones as they should appear in the final schedule.
-
-  Farthest from the end first; ties broken by the earliest position of the
-  corresponding start, then by name.
+) -> dict[str, int]:
+  """Returns the start slot each done is ranked by.
 
   A glued cluster is tied to the *latest* start in it, not to each done's own
   start. A DCN recv start depends on nothing and so probes to the very front,
@@ -611,14 +644,12 @@ def order_dones(
 
   Args:
     dones: Async done names.
-    done_probes: Probe results for the done bundles.
-    start_probes: Probe results for the start bundles.
+    start_slots: Start name -> its slot, probed or final.
     start_of_done: Done name -> its start name.
-    total: Number of instructions in the schedule.
     glue: Done name -> the done it must sit immediately before.
 
   Returns:
-    Done names in final schedule order.
+    Done name -> the start slot to rank it by; -1 for an unknown start.
   """
   followers: dict[str, list[str]] = {}
   for done in dones:
@@ -626,17 +657,88 @@ def order_dones(
     if anchor is not None:
       followers.setdefault(anchor, []).append(done)
 
-  def cluster_start_slot(done: str) -> int:
-    slots = [-1]
+  slots: dict[str, int] = {}
+  for done in dones:
+    candidates = [-1]
     for member in (done, *followers.get(done, ())):
       start = start_of_done.get(member)
-      if start in start_probes:
-        slots.append(start_probes[start].slot)
-    return max(slots)
+      if start in start_slots:
+        candidates.append(start_slots[start])
+    slots[done] = max(candidates)
+  return slots
+
+
+def order_completions(
+    dones: Sequence[str],
+    done_probes: Mapping[str, Probe],
+    start_slots: Mapping[str, int],
+    start_of_done: Mapping[str, str],
+    glue: Mapping[str, str] | None = None,
+) -> list[str]:
+  """Orders async dones as the queues should complete them.
+
+  A queue completes in issue order, so this is its issue order too:
+  `fifo_constrained_slots` holds every start back behind its predecessor here.
+  Ranking by deadline alone -- the done that can sink the least first -- would
+  issue a transfer that is ready early behind one that is ready late but due a
+  little sooner, and the issue delay costs more window than the earlier
+  completion saves. Ranking by the sum of the earliest start slot and the
+  latest done slot instead picks, for any two transfers sharing a queue, the
+  order that leaves them the larger total window: swapping two neighbours
+  changes the total by exactly the difference of their sums. Ties go to the
+  earlier deadline, then the earlier start, then the name.
+
+  Args:
+    dones: Async done names.
+    done_probes: Probe results for the done bundles.
+    start_slots: Start name -> its earliest slot.
+    start_of_done: Done name -> its start name.
+    glue: Done name -> the done it must sit immediately before; see
+      `_cluster_start_slots`.
+
+  Returns:
+    Done names in completion order.
+  """
+  ranked_starts = _cluster_start_slots(dones, start_slots, start_of_done, glue)
+
+  def key(done: str) -> tuple[int, int, int, str]:
+    done_slot = done_probes[done].slot
+    start_slot = ranked_starts[done]
+    return (start_slot + done_slot, done_slot, start_slot, done)
+
+  return sorted(dones, key=key)
+
+
+def order_dones(
+    dones: Sequence[str],
+    done_probes: Mapping[str, Probe],
+    start_slots: Mapping[str, int],
+    start_of_done: Mapping[str, str],
+    total: int,
+    glue: Mapping[str, str] | None = None,
+) -> list[str]:
+  """Orders async dones as they should appear in the final schedule.
+
+  Farthest from the end first; ties broken by the earliest position of the
+  corresponding start (of the whole cluster for glued dones, see
+  `_cluster_start_slots`), then by name.
+
+  Args:
+    dones: Async done names.
+    done_probes: Probe results for the done bundles.
+    start_slots: Start name -> its slot, probed or final.
+    start_of_done: Done name -> its start name.
+    total: Number of instructions in the schedule.
+    glue: Done name -> the done it must sit immediately before.
+
+  Returns:
+    Done names in final schedule order.
+  """
+  ranked_starts = _cluster_start_slots(dones, start_slots, start_of_done, glue)
 
   def key(done: str) -> tuple[int, int, str]:
     distance_from_end = total - 1 - done_probes[done].slot
-    return (-distance_from_end, cluster_start_slot(done), done)
+    return (-distance_from_end, ranked_starts[done], done)
 
   return sorted(dones, key=key)
 
@@ -649,10 +751,10 @@ def fifo_constrained_slots(
 ) -> dict[str, int]:
   """Raises start slots so each hardware queue issues in completion order.
 
-  An async queue is FIFO: whatever is issued first completes first. The done
-  order is fixed by how late each done can sink, so on a shared queue the issue
-  order is fully determined by it — a start whose done must complete later
-  cannot be issued before one whose done must complete sooner.
+  An async queue is FIFO: whatever is issued first completes first. The
+  completion order comes from `order_completions`, so on a shared queue the
+  issue order is fully determined by it — a start whose done must complete
+  later cannot be issued before one whose done must complete sooner.
 
   Where the raw probes disagree, the *start* yields. Delaying a start is always
   legal (a start may sit anywhere at or after its earliest slot), whereas a done
@@ -776,23 +878,25 @@ def apply_glue_order(names: Sequence[str], glue: Mapping[str, str]) -> list[str]
 
 
 def move_bundle_to_start_slot(order: Sequence[str], bundle: frozenset[str], slot: int) -> list[str]:
-  """Moves `bundle` so its first member sits at index `slot`.
+  """Moves `bundle` so it directly follows the instruction at index `slot - 1`.
 
-  Bundle members keep their relative order. Because every instruction before
-  `slot` is a non-member in a valid schedule, `slot` indexes the same position
-  before and after the members are lifted out.
+  Bundle members keep their relative order. A member may already sit before
+  `slot` -- a start being delayed to a FIFO floor does -- and is lifted out
+  like the rest, so the insertion index drops by the number of such members.
 
   Args:
     order: Current schedule.
     bundle: Instructions to move together.
-    slot: Target index of the first bundle member.
+    slot: The bundle lands directly behind the instruction currently at `slot -
+      1`, or at the front when `slot` is 0.
 
   Returns:
     The new schedule.
   """
   members = [name for name in order if name in bundle]
   rest = [name for name in order if name not in bundle]
-  return rest[:slot] + members + rest[slot:]
+  index = slot - sum(1 for name in order[:slot] if name in bundle)
+  return rest[:index] + members + rest[index:]
 
 
 def move_bundle_to_end_slot(order: Sequence[str], bundle: frozenset[str], slot: int) -> list[str]:
@@ -860,13 +964,21 @@ def bubble_starts_left(
   instead. If its dependencies will not reach that far the glue is dropped for
   that start and it bubbles normally, which is why `glue` is best-effort.
 
+  A floor is a slot in the original order. Hoisting never disturbs the prefix
+  ahead of a slot, but delaying a start to its floor pulls that start out of
+  the prefix, so a floor is re-read as the live position of the instruction
+  that originally sat just ahead of it. That keeps a start and the queue
+  predecessor it is waiting for, which is bubbled later, aiming at the same
+  gap, where the later bubble lands first.
+
   Args:
     graph: The schedule graph.
     order: Starting schedule.
     bubble_order: Starts to move, in order. Glued starts must come after their
       anchors, which `defer_glued` arranges.
     bundles: Start -> its (possibly overlapping) bundle.
-    floors: Start -> a lower bound on its slot, from the FIFO constraint.
+    floors: Start -> a lower bound on its slot in `graph.order`, from the FIFO
+      constraint.
 
   Returns:
     The rewritten schedule, and each start's actually-moved bundle.
@@ -877,7 +989,12 @@ def bubble_starts_left(
   for start in bubble_order:
     positions = {name: i for i, name in enumerate(current)}
     anchor = graph.glue.get(start)
-    floor = positions[anchor] if anchor is not None else floors.get(start, 0)
+    if anchor is not None:
+      floor = positions[anchor]
+    elif floors.get(start, 0) > 0:
+      floor = positions[graph.order[floors[start] - 1]] + 1
+    else:
+      floor = 0
     bundle, probe = prune_bundle_for_start(graph, start, bundles[start], positions, floor)
     if anchor is not None and probe.slot <= positions[anchor]:
       current = move_bundle_before(current, bundle, anchor)
@@ -902,9 +1019,18 @@ def bubble_dones_right(
   follower is pulled towards it rather than the other way around, which costs
   the follower some overlap but none of the anchor's.
 
+  A queue completes in issue order, so a done also stays in front of the done
+  of any transfer issued after it on the same queue. Dones come in ceiling
+  order, so by the time a done is placed, every later-issued done with a lower
+  ceiling is in place and caps it; the rest are bubbled afterwards and land
+  behind it by themselves. A capped done parks directly in front of the first
+  such done, even when that means moving back: the issue order can put a
+  transfer ahead of one it used to trail, and then its done, still sitting
+  where the input left it, is behind the other's ceiling.
+
   Args:
     graph: The schedule graph.
-    order: Starting schedule.
+    order: Starting schedule, with the starts in their final positions.
     bubble_order: Dones to move, in order. Glued dones must come after their
       anchors, which `defer_glued` arranges.
     bundles: Done -> its (possibly overlapping) bundle.
@@ -912,17 +1038,34 @@ def bubble_dones_right(
   Returns:
     The rewritten schedule, and each done's actually-moved bundle.
   """
+  issue = {name: i for i, name in enumerate(order)}
+  start_of = {done: graph.operands[done][0] for done in bubble_order}
   current = list(order)
   taken: dict[str, frozenset[str]] = {}
+  placed: list[str] = []
   for done in bubble_order:
     positions = {name: i for i, name in enumerate(current)}
-    bundle, probe = prune_bundle_for_done(graph, done, bundles[done], positions)
+    queue = graph.queues.get(start_of[done])
+    cappers = [
+        other
+        for other in placed
+        if queue is not None
+        and graph.queues.get(start_of[other]) == queue
+        and issue[start_of[other]] > issue[start_of[done]]
+    ]
+    capper = min(cappers, key=positions.__getitem__, default=None)
+    cap = None if capper is None else positions[capper] - 1
+    bundle, probe = prune_bundle_for_done(graph, done, bundles[done], positions, cap)
+    slot = probe.slot if cap is None else min(probe.slot, cap)
     anchor = graph.glue.get(done)
-    if anchor is not None and positions[anchor] - 1 <= probe.slot:
+    if anchor is not None and positions[anchor] - 1 <= slot:
       current = move_bundle_before(current, bundle, anchor)
+    elif capper is not None and slot < probe.slot:
+      current = move_bundle_before(current, bundle, capper)
     else:
-      current = move_bundle_to_end_slot(current, bundle, probe.slot)
+      current = move_bundle_to_end_slot(current, bundle, slot)
     taken[done] = bundle
+    placed.append(done)
   return current, taken
 
 
@@ -959,24 +1102,42 @@ def reschedule(graph: ScheduleGraph) -> RescheduleResult:
     done_bundles[done] = bundle
     done_probes[done] = probe
 
-  done_order = order_dones(
+  completion_order = order_completions(
       dones,
       done_probes,
-      start_probes,
+      {start: probe.slot for start, probe in start_probes.items()},
       start_of_done,
-      len(graph.order),
       graph.glue,
   )
-  # Gluing relocates the followers, so this -- not `done_order` -- is the
-  # completion order each queue will actually see.
-  final_done_order = apply_glue_order(done_order, graph.glue)
+  # Gluing relocates the followers, so this -- not `completion_order` -- is
+  # the completion order each queue will actually see.
+  final_done_order = apply_glue_order(completion_order, graph.glue)
   start_slots = fifo_constrained_slots(start_probes, final_done_order, start_of_done, graph.queues)
   start_bubble_order = defer_glued(
       order_starts(starts, start_slots, final_done_order, done_of_start),
       graph.glue,
   )
-  done_bubble_order = defer_glued(final_done_order, graph.glue)
   order, moved_starts = bubble_starts_left(graph, graph.order, start_bubble_order, start_bundles, start_slots)
+
+  # Hoisting moves a consumer that is itself an async start, so the dones are
+  # probed again against the hoisted order before they are ranked. They are
+  # bubbled in ceiling order, which is what the FIFO caps in
+  # `bubble_dones_right` rely on; ties go in issue order, which is how the
+  # queue completes them anyway.
+  positions = {name: i for i, name in enumerate(order)}
+  for done in dones:
+    bundle, probe = prune_bundle_for_done(graph, done, bundle_for_done(graph, done), positions)
+    done_bundles[done] = bundle
+    done_probes[done] = probe
+  done_order = order_dones(
+      dones,
+      done_probes,
+      {start: positions[start] for start in starts},
+      start_of_done,
+      len(graph.order),
+      graph.glue,
+  )
+  done_bubble_order = defer_glued(apply_glue_order(done_order, graph.glue), graph.glue)
   order, moved_dones = bubble_dones_right(graph, order, done_bubble_order, done_bundles)
 
   return RescheduleResult(
@@ -1332,8 +1493,22 @@ def _build_graph(
     sequence: Sequence["_hlo.HloInstruction"],
     computations_by_name: Mapping[str, "_hlo.HloComputation"],
     fusion_cache: dict[str, bool],
+    async_bodies: Collection[str] = (),
 ) -> ScheduleGraph:
-  """Builds a `ScheduleGraph` from a scheduled instruction sequence."""
+  """Builds a `ScheduleGraph` from a scheduled instruction sequence.
+
+  Args:
+    sequence: The computation's scheduled instructions.
+    computations_by_name: Every computation in the module, by name.
+    fusion_cache: Memo for `_fusion_is_data_formatting`, shared across calls.
+    async_bodies: While bodies that issue async work. A loop over one of them is
+      a fence: a transfer left in flight across it would sit ahead of every
+      transfer the loop issues on the same FIFO, and hold its buffer live for
+      the whole loop.
+
+  Returns:
+    The graph, with fences at the loops over `async_bodies`.
+  """
   order = [inst.name for inst in sequence]
   opcodes = {inst.name: inst.opcode.name for inst in sequence}
   operands = {inst.name: [o.name for o in inst.operands()] for inst in sequence}
@@ -1341,6 +1516,7 @@ def _build_graph(
   control_preds: dict[str, tuple[str, ...]] = {}
   data_formatting: list[str] = []
   queues: dict[str, str] = {}
+  fences: list[str] = []
   for inst in sequence:
     text = inst.to_string()
     control_preds[inst.name] = _parse_control_predecessors(text)
@@ -1355,6 +1531,8 @@ def _build_graph(
       queue = async_queue(opcode, text)
       if queue is not None:
         queues[inst.name] = queue
+    elif opcode == "kWhile" and _while_body_name(text) in async_bodies:
+      fences.append(inst.name)
 
   return make_schedule_graph(
       order=order,
@@ -1365,7 +1543,14 @@ def _build_graph(
       queues=queues,
       glue=megascale_glue(sequence),
       serialized_queues=_SERIALIZED_QUEUES,
+      fences=fences,
   )
+
+
+def _while_body_name(instruction_text: str) -> str | None:
+  """Returns the body computation a kWhile's `to_string()` names, if any."""
+  match = _BODY_RE.search(instruction_text)
+  return None if match is None else match.group(1).lstrip("%")
 
 
 def while_body_names(module: "_hlo.HloModule") -> set[str]:
@@ -1375,18 +1560,85 @@ def while_body_names(module: "_hlo.HloModule") -> set[str]:
     for inst in computation.instructions():
       if inst.opcode.name != "kWhile":
         continue
-      match = _BODY_RE.search(inst.to_string())
-      if match is not None:
-        names.add(match.group(1).lstrip("%"))
+      body = _while_body_name(inst.to_string())
+      if body is not None:
+        names.add(body)
   return names
+
+
+def async_issuing_body_names(module: "_hlo.HloModule") -> set[str]:
+  """Returns the while bodies that issue async work.
+
+  A body counts if it contains an async start itself or loops over a body that
+  does. The routed experts' chunk loops contain neither, so they are not in
+  the set and a transfer may still overlap them.
+
+  Args:
+    module: The module to inspect.
+
+  Returns:
+    Names of the qualifying while-body computations.
+  """
+  issues_directly: dict[str, bool] = {}
+  nested_bodies: dict[str, list[str]] = {}
+  for computation in module.make_nonfusion_computations():
+    issues_directly[computation.name] = False
+    nested_bodies[computation.name] = []
+    for inst in computation.instructions():
+      opcode = inst.opcode.name
+      if opcode in _ASYNC_START_OPCODES:
+        issues_directly[computation.name] = True
+      elif opcode == "kWhile":
+        body = _while_body_name(inst.to_string())
+        if body is not None:
+          nested_bodies[computation.name].append(body)
+
+  memo: dict[str, bool] = {}
+
+  def issues(name: str) -> bool:
+    if name not in memo:
+      memo[name] = False  # Guards against a cycle in malformed input.
+      memo[name] = issues_directly.get(name, False) or any(issues(nested) for nested in nested_bodies.get(name, ()))
+    return memo[name]
+
+  bodies = set().union(*nested_bodies.values())
+  return {body for body in bodies if issues(body)}
+
+
+def entry_computation_name(module: "_hlo.HloModule") -> str:
+  """Returns the name of the module's entry computation.
+
+  The bindings expose no accessor for it, so the module is printed in its
+  tersest form and the `ENTRY` marker read back.
+
+  Args:
+    module: The module to inspect.
+
+  Returns:
+    The entry computation's name.
+
+  Raises:
+    ScheduleTransformError: If the module prints no entry computation.
+  """
+  options = _hlo.HloPrintOptions()
+  options.print_backend_config = False
+  options.print_extra_attributes = False
+  options.print_metadata = False
+  options.print_operand_shape = False
+  options.print_program_shape = False
+  options.print_result_shape = False
+  match = _ENTRY_RE.search(module.to_string(options))
+  if match is None:
+    raise ScheduleTransformError(f"Module {module.name} has no entry.")
+  return match.group(1)
 
 
 def default_computation_filter(
     module: "_hlo.HloModule",
 ) -> Callable[["_hlo.HloComputation"], bool]:
-  """Returns a predicate selecting while-body computations."""
-  bodies = while_body_names(module)
-  return lambda computation: computation.name in bodies
+  """Returns a predicate selecting the entry and every while body."""
+  selected = while_body_names(module) | {entry_computation_name(module)}
+  return lambda computation: computation.name in selected
 
 
 def transform_module(
@@ -1398,7 +1650,7 @@ def transform_module(
   Args:
     module: The module to rewrite in place.
     computation_filter: Factory returning a predicate over computations.
-      Defaults to selecting while bodies.
+      Defaults to selecting the entry computation and every while body.
 
   Returns:
     One (computation name, graph, result) triple per rewritten computation.
@@ -1413,6 +1665,7 @@ def transform_module(
   filter_factory = computation_filter or default_computation_filter
   selects = filter_factory(module)
   computations_by_name = {c.name: c for c in module.computations()}
+  async_bodies = async_issuing_body_names(module)
   fusion_cache: dict[str, bool] = {}
   results: list[tuple[str, ScheduleGraph, RescheduleResult]] = []
 
@@ -1426,7 +1679,7 @@ def transform_module(
     if not sequence:
       continue
 
-    graph = _build_graph(sequence, computations_by_name, fusion_cache)
+    graph = _build_graph(sequence, computations_by_name, fusion_cache, async_bodies)
     result = reschedule(graph)
     validate_order(graph, result.order)
 
@@ -1524,8 +1777,8 @@ def max_async_overlap_transform(serialized_hlo: bytes) -> bytes:
   """XLA post-scheduler transformation pass.
 
   Bubbles async starts as early as possible and async dones as late as possible
-  in every while-body computation, to maximize overlap, then restamps send/recv
-  aggregation to match the new schedules.
+  in the entry computation and every while body, to maximize overlap, then
+  restamps send/recv aggregation to match the new schedules.
 
   Args:
     serialized_hlo: Serialized HloModuleProto bytes.
@@ -1585,7 +1838,7 @@ def debug_report(serialized_hlo: bytes, max_bundle_members: int = 6) -> str:
       )
 
     lines.append("")
-    lines.append("-- ASYNC DONES (final order)")
+    lines.append("-- ASYNC DONES (final order; probed in the hoisted order)")
     lines.append(f"{'#':<4}{'done':<40}{'orig':>7}{'probe':>7}{'final':>7}" f"  {'blocker':<34}bundle")
     for i, done in enumerate(result.done_bubble_order):
       probe = result.done_probes[done]
@@ -1605,7 +1858,18 @@ def register_transform(
     name: str = _DEFAULT_TRANSFORM_NAME,
     platforms: Sequence[str] | str | None = None,
 ) -> None:
-  """Registers the post-scheduler transformation with JAX/XLA."""
+  """Registers the post-scheduler transformation with JAX/XLA.
+
+  XLA appends every registration under `name` and runs each of them, and the
+  model is traced (and so registered) more than once per job, so any earlier
+  registration is replaced rather than stacked. The pass is not idempotent:
+  a second application reorders what the first one scheduled.
+
+  Args:
+    name: Registration name passed to XLA.
+    platforms: Target platform name(s), or None for all platforms.
+  """
+  unregister_transform(name=name, platforms=platforms)
   jex_xla.register_hlo_module_transformation(
       max_async_overlap_transform,
       name=name,

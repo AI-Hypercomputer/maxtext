@@ -34,6 +34,8 @@ from maxtext.experimental.lineage import quantization
 QUANT_CONFIGS: dict[str, quantization.QuantConfig | None] = {
     "none": None,
     "fp8_full": quantization.FP8_FULL,
+    "fp8_full_splash_qk": quantization.FP8_FULL_SPLASH_QK,
+    "fp8_full_splash_qk_e3": quantization.FP8_FULL_SPLASH_QK_E3,
 }
 
 
@@ -166,6 +168,10 @@ class DSv3KernelConfig:
     qk_diag_skip: Skip masked QK diagonal blocks in Splash attention.
     qk_diag_grid: Diagonal grid of the QK diagonal skip.
     sv_diag_skip: Skip masked SV diagonal blocks in Splash attention.
+    diag_band_skip: Skip above-diagonal tiles within causal diagonal bands.
+    dq_reduction_steps: Number of steps for dkv dq reduction (1 for VMEM
+      reduction, 3, or None).
+    q_prescaled_log2e: Whether q is prescaled by log2(e) before casting to FP8.
     capacity_factor: MoE chunk capacity relative to the balanced load.
     ragged_buffer_factor: Cross-layer ragged activation bank safety factor.
     quant: Quantization of the routed experts and MLA, or None for bf16.
@@ -188,6 +194,9 @@ class DSv3KernelConfig:
   qk_diag_skip: bool = True
   qk_diag_grid: int = 8
   sv_diag_skip: bool = True
+  diag_band_skip: bool = True
+  dq_reduction_steps: int | None = 1
+  q_prescaled_log2e: bool = False
   capacity_factor: float = 2.0
   ragged_buffer_factor: float = 1.2
   quant: quantization.QuantConfig | None = None
@@ -232,12 +241,17 @@ class DSv3Config:
     sharding: Axis mapping and weight/activation specs.
     kernels: Kernel and runtime knobs.
     training: Training objective knobs.
+    eval_sharding: Sharding of the eval step (`dsv3_model.dsv3_loss_and_aux`
+      with `train=False`), or None to evaluate with `sharding`. It must keep
+      `sharding`'s weight layout up to a local reslice (e.g.
+      `dsv3_sharding.expert_axes_as_cp_config`).
   """
 
   model: DSv3ModelConfig
   sharding: dsv3_sharding.DSv3ShardingConfig
   kernels: DSv3KernelConfig
   training: DSv3TrainingConfig = DSv3TrainingConfig()
+  eval_sharding: dsv3_sharding.DSv3ShardingConfig | None = None
 
   def validate(self) -> None:
     """Checks the constraints of the Lineage layers.
@@ -259,10 +273,12 @@ class DSv3Config:
       )
     if m.num_kv_heads != m.num_query_heads:
       raise ValueError(f"num_kv_heads ({m.num_kv_heads}) must equal num_query_heads" f" ({m.num_query_heads}).")
+    if k.dq_reduction_steps not in (None, 1, 3):
+      raise ValueError("dq_reduction_steps must be one of (None, 1, 3), got" f" {k.dq_reduction_steps}.")
     if k.capacity_factor <= 0:
       raise ValueError(f"capacity_factor must be > 0, got {k.capacity_factor}.")
-    if k.ragged_buffer_factor < 1.0:
-      raise ValueError(f"ragged_buffer_factor must be >= 1, got {k.ragged_buffer_factor}.")
+    if k.ragged_buffer_factor <= 0.0:
+      raise ValueError(f"ragged_buffer_factor must be > 0, got {k.ragged_buffer_factor}.")
     if k.expert_permutation not in (dsv3_expert_shuffle.EXPERT_PERMUTATION_ALGORITHMS):
       raise ValueError(
           "expert_permutation must be one of"
@@ -273,6 +289,12 @@ class DSv3Config:
       raise ValueError(
           f"mtp_eval_target_module ({t.mtp_eval_target_module}) must be in" f" [0, num_mtp_layers={m.num_mtp_layers}]."
       )
-    missing = [axis for axis in dsv3_sharding.LOGICAL_AXES if axis not in self.sharding.axis_mapping]
-    if missing:
-      raise ValueError(f"sharding.axis_mapping lacks logical axes {missing}.")
+    for name, sharding in (
+        ("sharding", self.sharding),
+        ("eval_sharding", self.eval_sharding),
+    ):
+      if sharding is None:
+        continue
+      missing = [axis for axis in dsv3_sharding.LOGICAL_AXES if axis not in sharding.axis_mapping]
+      if missing:
+        raise ValueError(f"{name}.axis_mapping lacks logical axes {missing}.")

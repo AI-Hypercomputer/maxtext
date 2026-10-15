@@ -105,6 +105,10 @@ debug: false
 # If true, Tunix-managed metrics measurement will be enabled. The metrics will be
 # uploaded to tensorboard.
 enable_tunix_perf_metrics: false
+enable_goodput_recording: false
+goodput_job_name: ""
+monitor_goodput: false
+enable_pathways_goodput: false
 
 # ====== Training ======
 batch_size: 1

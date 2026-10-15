@@ -28,6 +28,10 @@ axes:
 An `axis_mapping` translates these names to physical mesh axes
 (`ops.physical_pspec`). Physical names (`"z"`, `"dcn"`) may also appear in a
 spec directly; `ops.physical_pspec` passes unknown names through.
+
+`sharding_config` takes only the mesh: `TOPOLOGY_SHARDINGS` maps each per-slice
+`(x, y, z)` topology to its axis mapping and to the physical PartitionSpecs of
+every weight.
 """
 
 from collections.abc import Callable, Mapping, Sequence
@@ -48,90 +52,12 @@ AxisMapping = Mapping[str, str | tuple[str, ...]]
 DCN_AXIS = "dcn"
 # Logical axis names consumed by the Lineage layers.
 LOGICAL_AXES = ("dcn", "attention", "fsdp_attention", "expert", "fsdp_moe")
-# Physical FSDP axis of the 2-D attention/dense weights (`dsv3_perf_test`).
-WEIGHT_FSDP_AXIS = "z"
-
-MLA_WEIGHT_SHARDINGS = dsv3_types.DSv3MLAWeightsPytree(
-    q_down=P(None, WEIGHT_FSDP_AXIS, None),
-    # As in dsv3_perf_test; `fit_mla_up_shardings` moves the FSDP axis of the
-    # up-projections to their LoRA dim when z does not divide the head dim.
-    q_up=P(None, None, "attention", WEIGHT_FSDP_AXIS),
-    q_norm_scale=P(None, None),
-    kv_down=P(None, WEIGHT_FSDP_AXIS, None),
-    k_up=P(None, None, "attention", WEIGHT_FSDP_AXIS),
-    v_up=P(None, None, "attention", WEIGHT_FSDP_AXIS),
-    kv_norm_scale=P(None, None),
-    out=P(None, "attention", None, WEIGHT_FSDP_AXIS),
-)
-
-DECODER_WEIGHT_SHARDINGS = dsv3_types.DSv3WeightsPytree(
-    dense=dsv3_types.DSv3DenseLayerWeightsPytree(
-        pre_attn_norm_scale=P(None, None),
-        mla=MLA_WEIGHT_SHARDINGS,
-        post_attn_norm_scale=P(None, None),
-        mlp=dsv3_types.DSv3MLPWeightsPytree(
-            gate_0=P(None, None, "fsdp_moe"),
-            gate_1=P(None, None, "fsdp_moe"),
-            linear=P(None, "fsdp_moe", None),
-        ),
-    ),
-    sparse=dsv3_types.DSv3SparseLayerWeightsPytree(
-        pre_attn_norm_scale=P(None, None),
-        mla=MLA_WEIGHT_SHARDINGS,
-        post_attn_norm_scale=P(None, None),
-        moe=dsv3_types.DSv3MoEWeightsPytree(
-            router=dsv3_types.DSv3MoERouterWeightsPytree(
-                kernel=P(),
-                bias=P(),
-            ),
-            routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
-                gate=P(None, "expert", "fsdp_moe", None),
-                # The routed `linear` ([layer, expert, hidden, embed]) is
-                # sharded on its hidden dim, as in dsv3_perf_test. Sharding it
-                # on the embed dim instead makes the in-loop all-gather over
-                # `fsdp_moe` land in a transposed layout that costs a relayout
-                # copy at every use and before the backward reduce-scatter.
-                linear=P(None, "expert", "fsdp_moe", None),
-            ),
-            shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
-                gate_0=P(None, None, "fsdp_moe"),
-                gate_1=P(None, None, "fsdp_moe"),
-                linear=P(None, "fsdp_moe", None),
-            ),
-        ),
-    ),
-)
-
-# An MTP layer is one unscanned DeepSeek MoE layer behind the `eh_proj`
-# projection, so its sparse weights reuse the stack specs minus the layer axis.
-MTP_WEIGHT_SHARDINGS = dsv3_types.DSv3MTPWeightsPytree(
-    ehproj=dsv3_types.DSv3EHProjWeightsPytree(
-        enorm_scale=P(None),
-        hnorm_scale=P(None),
-        # [2 * emb, emb]. FSDP only, as in dsv3_perf_test: 14336 rows do not
-        # divide over a whole 4x4x128 slice (fsdp_attention x attention = 4096).
-        eh_proj=P(WEIGHT_FSDP_AXIS, None),
-    ),
-    sparse=jax.tree.map(
-        lambda spec: P(*spec[1:]),
-        DECODER_WEIGHT_SHARDINGS.sparse,
-        is_leaf=lambda x: isinstance(x, P),
-    ),
-)
-
-# Embedding table `[vocab, emb]`, final norm scale `[emb]` and LM head kernel
-# `[emb, vocab]`: sharded on the embedding dim over every ICI axis, matching
-# MaxText's `embed_vocab` logical axis for this recipe. `fit_embed_shardings`
-# drops leading axes on meshes too large for the embedding dim.
-EMBED_TABLE_SHARDING = P(None, ("fsdp_attention", "attention"))
-FINAL_NORM_SCALE_SHARDING = P(None)
-HEAD_KERNEL_SHARDING = P(("fsdp_attention", "attention"), None)
 
 
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass(frozen=True)
 class DSv3WeightShardings:
-  """Logical PartitionSpecs of every DSv3 parameter group.
+  """Physical PartitionSpecs of every DSv3 parameter group.
 
   Attributes:
     decoder: Specs of the scanned dense and sparse decoder stacks.
@@ -142,20 +68,20 @@ class DSv3WeightShardings:
     head_kernel: Spec of the LM head kernel `[emb, vocab]`.
   """
 
-  decoder: dsv3_types.DSv3WeightsPytree[Any] = dataclasses.field(default_factory=lambda: DECODER_WEIGHT_SHARDINGS)
-  mtp: dsv3_types.DSv3MTPWeightsPytree[Any] = dataclasses.field(default_factory=lambda: MTP_WEIGHT_SHARDINGS)
-  embed_table: P = EMBED_TABLE_SHARDING
-  final_norm_scale: P = FINAL_NORM_SCALE_SHARDING
-  head_kernel: P = HEAD_KERNEL_SHARDING
+  decoder: dsv3_types.DSv3WeightsPytree[Any]
+  mtp: dsv3_types.DSv3MTPWeightsPytree[Any]
+  embed_table: P
+  final_norm_scale: P
+  head_kernel: P
 
 
 @dataclasses.dataclass(frozen=True)
 class DSv3ShardingConfig:
-  """Axis mapping plus the logical specs of all weights and activations.
+  """Axis mapping plus the specs of all weights and activations.
 
   Attributes:
     axis_mapping: Lineage logical-to-physical axis mapping.
-    weights: Logical specs of every parameter group.
+    weights: Physical specs of every parameter group.
     activation: Spec of `[batch, seq, emb]` activations (embeddings, hidden
       states, logits).
     segment_ids: Spec of `[batch, seq]` segment ids entering the layers.
@@ -171,174 +97,394 @@ class DSv3ShardingConfig:
   yarn_freqs: P
 
 
-def _move_up_fsdp_to_lora(node: Any, fields: Sequence[str], fsdp_axis: str) -> Any:
-  """Puts the FSDP axis of `fields` on their LoRA dim in an MLA spec pytree."""
-  if not isinstance(node, dsv3_types.DSv3MLAWeightsPytree):
-    return node
-  updates = {}
-  for field in fields:
-    spec = getattr(node, field)
-    if spec is None:
-      continue
-    layer_axes = (None,) * (len(spec) - 3)  # Empty for an MTP layer.
-    updates[field] = P(*layer_axes, fsdp_axis, "attention", None)
-  return dataclasses.replace(node, **updates)
+@dataclasses.dataclass(frozen=True)
+class TopologySharding:
+  """Shardings of one per-slice topology, an entry of `TOPOLOGY_SHARDINGS`.
+
+  Attributes:
+    axis_mapping: Lineage logical-to-physical axis mapping of every logical axis
+      but `dcn`, which `sharding_config` adds.
+    weights: Physical specs of every parameter group.
+  """
+
+  axis_mapping: AxisMapping
+  weights: DSv3WeightShardings
 
 
-def fit_mla_up_shardings(
-    specs: Any,
-    mesh_shape: Mapping[str, int],
-    *,
-    qk_head_dim: int,
-    rope_head_dim: int,
-    v_head_dim: int,
-    fsdp_axis: str = WEIGHT_FSDP_AXIS,
-) -> Any:
-  """Moves an up-projection's FSDP axis to its LoRA dim if it does not divide.
+def drop_layer_axis(specs: Any) -> Any:
+  """Drops the leading (layer) entry of every PartitionSpec in `specs`.
 
-  `q_up` (`[layer, q_lora, head, qk_head_dim + rope_head_dim]`), `k_up`
-  (`[layer, kv_lora, head, qk_head_dim]`) and `v_up` (`[layer, kv_lora, head,
-  v_head_dim]`) shard their trailing head dim over FSDP, as in dsv3_perf_test.
-  When the FSDP axis does not divide that dim (e.g. z = 128 for q_up's 192, z =
-  256 for k_up's 128), it moves to the LoRA dim instead.
+  An MTP layer is one unscanned DeepSeek MoE layer behind the `eh_proj`
+  projection, so its sparse weights use the decoder's sparse specs minus the
+  layer axis.
 
   Args:
-    specs: Weight PartitionSpecs (`DECODER_WEIGHT_SHARDINGS`,
-      `MTP_WEIGHT_SHARDINGS` or a `DSv3WeightShardings`).
-    mesh_shape: Mesh axis sizes, `mesh.shape`.
-    qk_head_dim: Non-positional q/k head dim.
-    rope_head_dim: RoPE head dim.
-    v_head_dim: Value head dim.
-    fsdp_axis: Physical FSDP axis of the up-projections.
+    specs: A pytree of PartitionSpecs of scanned weights.
 
   Returns:
-    `specs`, with the FSDP axes moved to the LoRA dims where needed.
+    `specs`, with the leading entry of every PartitionSpec dropped.
   """
-  head_dims = {
-      "q_up": qk_head_dim + rope_head_dim,
-      "k_up": qk_head_dim,
-      "v_up": v_head_dim,
-  }
-  fields = tuple(field for field, dim in head_dims.items() if dim % mesh_shape[fsdp_axis] != 0)
-  if not fields:
-    return specs
-  if isinstance(specs, DSv3WeightShardings):
-    return dataclasses.replace(
-        specs,
-        decoder=fit_mla_up_shardings(
-            specs.decoder,
-            mesh_shape,
-            qk_head_dim=qk_head_dim,
-            rope_head_dim=rope_head_dim,
-            v_head_dim=v_head_dim,
-            fsdp_axis=fsdp_axis,
+  return jax.tree.map(lambda spec: P(*spec[1:]), specs, is_leaf=lambda x: isinstance(x, P))
+
+
+# 8x8x8: MLA heads on core, EP over (x, core), FSDP over (y, z).
+_MLA_8X8X8 = dsv3_types.DSv3MLAWeightsPytree(
+    q_down=P(None, ("y", "z"), None),
+    # q_up carries its FSDP axes on its q_lora dim: 64 ways divide its 192-wide
+    # head dim but not the 32-wide even/odd rope halves that
+    # `init_dsv3_mla_weights` slices out of it, and JAX cannot slice a sharded
+    # dim into pieces its mesh axes do not divide.
+    q_up=P(None, ("y", "z"), "core", None),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, ("y", "z"), None),
+    k_up=P(None, None, "core", ("y", "z")),
+    v_up=P(None, None, "core", ("y", "z")),
+    kv_norm_scale=P(None, None),
+    out=P(None, "core", None, ("y", "z")),
+)
+_SPARSE_8X8X8 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_8X8X8,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("x", "core"), ("y", "z"), None),
+            # The routed `linear` ([layer, expert, hidden, embed]) is sharded on
+            # its hidden dim, as in dsv3_perf_test. Sharding it on the embed dim
+            # instead makes the in-loop all-gather over `fsdp_moe` land in a
+            # transposed layout that costs a relayout copy at every use and
+            # before the backward reduce-scatter.
+            linear=P(None, ("x", "core"), ("y", "z"), None),
         ),
-        mtp=fit_mla_up_shardings(
-            specs.mtp,
-            mesh_shape,
-            qk_head_dim=qk_head_dim,
-            rope_head_dim=rope_head_dim,
-            v_head_dim=v_head_dim,
-            fsdp_axis=fsdp_axis,
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, None, ("y", "z")),
+            gate_1=P(None, None, ("y", "z")),
+            linear=P(None, ("y", "z"), None),
         ),
-    )
-  return jax.tree.map(
-      lambda node: _move_up_fsdp_to_lora(node, fields, fsdp_axis),
-      specs,
-      is_leaf=lambda x: isinstance(x, (dsv3_types.DSv3MLAWeightsPytree, P)),
-  )
+    ),
+)
 
+# 8x16x16: the 8x8x8 layout, except where 256-way FSDP over (y, z) does not fit.
+_MLA_8X16X16 = dsv3_types.DSv3MLAWeightsPytree(
+    # The down-projections are FSDP-sharded over z only: 256 ways would leave
+    # 7168 / 256 = 28-row shards of the embedding dim, not whole 8-row TPU
+    # tiles, and XLA cannot lower the SparseCore all-gather of such shards.
+    q_down=P(None, "z", None),
+    # The up-projections carry their FSDP axes on their LoRA dim: 256 ways
+    # divide none of their head dims.
+    q_up=P(None, ("y", "z"), "core", None),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, "z", None),
+    k_up=P(None, ("y", "z"), "core", None),
+    v_up=P(None, ("y", "z"), "core", None),
+    kv_norm_scale=P(None, None),
+    out=P(None, "core", None, ("y", "z")),
+)
+_SPARSE_8X16X16 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_8X16X16,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            # 256-way FSDP over (y, z) would leave 7168 / 256 = 28-row gate
+            # shards, not whole 8-row TPU tiles: the SparseCore all-gather
+            # lands them with the embedding dim outermost, and XLA relayouts
+            # every gathered gate and gate gradient. y shards the expert dim
+            # instead, after the expert axes, splitting the 16 local experts
+            # into one per device, and z leaves 448-row gate shards.
+            # `ops.collect_along_axis` gathers both dims with one all-gather.
+            gate=P(None, ("x", "core", "y"), "z", None),
+            # On its hidden dim, as on 8x8x8, with gate's expert axes so both
+            # routed weights share one expert layout.
+            linear=P(None, ("x", "core", "y"), "z", None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, None, ("y", "z")),
+            gate_1=P(None, None, ("y", "z")),
+            linear=P(None, ("y", "z"), None),
+        ),
+    ),
+)
 
-def _fit_spec_dim(
-    spec: P,
-    dim_index: int,
-    dim: int,
-    mesh_shape: Mapping[str, int],
-    axis_mapping: AxisMapping,
-) -> P:
-  """Drops leading mesh axes of one spec entry until they divide `dim`.
+# 8x16x32: the 8x16x16 layout, except where 512-way FSDP over (y, z) does not
+# fit whole 8-row TPU tiles.
+_SPARSE_8X16X32 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_8X16X16,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("x", "core", "y"), "z", None),
+            linear=P(None, ("x", "core", "y"), "z", None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            # 512-way FSDP over (y, z) would leave 2048 / 512 = 4-row shards
+            # (0.5 tiles), not whole 8-row TPU tiles. Shard over z only
+            # (64-row shards, 8 tiles).
+            gate_0=P(None, None, "z"),
+            gate_1=P(None, None, "z"),
+            linear=P(None, "z", None),
+        ),
+    ),
+)
 
-  Args:
-    spec: Logical PartitionSpec.
-    dim_index: Index of the entry to fit.
-    dim: Size of that array dimension.
-    mesh_shape: Mesh axis sizes, `mesh.shape`.
-    axis_mapping: Lineage logical-to-physical axis mapping.
+# 8x32x32: 16384-way ICI with EP over (x, core) and 1024-way FSDP over (y, z).
+# Routed expert weights merge `(expert, rows) -> expert * rows` (`[L, E*rows,
+# cols]`) and shard all four `(x, core, y, z)` axes on that single row axis so
+# every shard is an exact T(8, 128) tile (`[112, 4096]` gate, `[32, 7168]`
+# linear) and SparseCore issues one unified 2D `(y, z)` collective.
+_MLA_8X32X32 = dsv3_types.DSv3MLAWeightsPytree(
+    q_down=P(None, "z", None),
+    q_up=P(None, "z", "core", None),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, "z", None),
+    k_up=P(None, "z", "core", None),
+    v_up=P(None, "z", "core", None),
+    kv_norm_scale=P(None, None),
+    out=P(None, "core", None, "z"),
+)
+_SPARSE_8X32X32 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_8X32X32,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("x", "core", "y", "z"), None),
+            linear=P(None, ("x", "core", "y", "z"), None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, "z", None),
+            gate_1=P(None, "z", None),
+            linear=P(None, "z", None),
+        ),
+    ),
+)
 
-  Returns:
-    `spec` itself if its physical axes already divide `dim`; otherwise the
-    physical spec with the largest trailing run of those axes that divides it.
-  """
-  physical = ops.physical_pspec(spec, axis_mapping)
-  entry = physical[dim_index]
-  axes = (entry,) if isinstance(entry, str) else tuple(entry or ())
-  kept = axes
-  while dim % math.prod(mesh_shape[axis] for axis in kept) != 0:
-    kept = kept[1:]  # Terminates: the empty product is 1.
-  if kept == axes:
-    return spec
-  entries = list(physical)
-  entries[dim_index] = _to_axis_tuple(kept) if kept else None
-  return P(*entries)
+# 4x8x8: the 8x8x8 layout with EP over (z, core) and FSDP over (x, y), so each
+# device keeps 16 experts and the collectives match 8x8x8's. The slice must be
+# a plain (untwisted) torus, which the launchers request explicitly.
+_MLA_4X8X8 = dsv3_types.DSv3MLAWeightsPytree(
+    q_down=P(None, ("x", "y"), None),
+    # On its q_lora dim, as on 8x8x8.
+    q_up=P(None, ("x", "y"), "core", None),
+    q_norm_scale=P(None, None),
+    kv_down=P(None, ("x", "y"), None),
+    k_up=P(None, None, "core", ("x", "y")),
+    v_up=P(None, None, "core", ("x", "y")),
+    kv_norm_scale=P(None, None),
+    out=P(None, "core", None, ("x", "y")),
+)
+_SPARSE_4X8X8 = dsv3_types.DSv3SparseLayerWeightsPytree(
+    pre_attn_norm_scale=P(None, None),
+    mla=_MLA_4X8X8,
+    post_attn_norm_scale=P(None, None),
+    moe=dsv3_types.DSv3MoEWeightsPytree(
+        router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=P(), bias=P()),
+        routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+            gate=P(None, ("z", "core"), ("x", "y"), None),
+            # On its hidden dim, as on 8x8x8.
+            linear=P(None, ("z", "core"), ("x", "y"), None),
+        ),
+        shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+            gate_0=P(None, None, ("x", "y")),
+            gate_1=P(None, None, ("x", "y")),
+            linear=P(None, ("x", "y"), None),
+        ),
+    ),
+)
 
-
-def fit_embed_shardings(
-    specs: DSv3WeightShardings,
-    mesh_shape: Mapping[str, int],
-    axis_mapping: AxisMapping,
-    *,
-    emb_dim: int,
-) -> DSv3WeightShardings:
-  """Fits the embedding-dim sharding of the embedding table and LM head.
-
-  Both shard the embedding dim over every ICI axis, which does not divide it on
-  large meshes (7168 = 2^10 * 7 over more than 1024 devices). There, the
-  leading mesh axes are dropped until the rest divides `emb_dim`; the weights
-  are replicated over the dropped axes.
-
-  Args:
-    specs: Weight PartitionSpecs.
-    mesh_shape: Mesh axis sizes, `mesh.shape`.
-    axis_mapping: Lineage logical-to-physical axis mapping.
-    emb_dim: The embedding dim.
-
-  Returns:
-    `specs`, with `embed_table` and `head_kernel` fitted.
-  """
-  return dataclasses.replace(
-      specs,
-      embed_table=_fit_spec_dim(specs.embed_table, 1, emb_dim, mesh_shape, axis_mapping),
-      head_kernel=_fit_spec_dim(specs.head_kernel, 0, emb_dim, mesh_shape, axis_mapping),
-  )
-
-
-def _to_axis_tuple(v: str | Sequence[str]) -> str | tuple[str, ...]:
-  if isinstance(v, str):
-    return v
-  return v[0] if len(v) == 1 else tuple(v)
-
-
-def build_axis_mapping(rules: Mapping[str, str | Sequence[str]], *, has_dcn: bool) -> AxisMapping:
-  """Builds the Lineage logical-to-physical axis mapping from MaxText rules.
-
-  Args:
-    rules: MaxText logical axis rules (`dict(cfg.logical_axis_rules)`). Reads
-      `activation_length` (-> `attention`), `activation_batch_attn` (->
-      `fsdp_attention`), `exp` (-> `expert`) and `embed_moe` (-> `fsdp_moe`).
-    has_dcn: Whether the mesh carries a leading `dcn` axis. If so, the logical
-      `dcn` axis maps to it; otherwise it maps to the empty tuple, which
-      `ops.physical_pspec` / `ops.collect_along_axis` treat as a no-op.
-
-  Returns:
-    The axis mapping.
-  """
-  return {
-      "dcn": DCN_AXIS if has_dcn else (),
-      "attention": _to_axis_tuple(rules["activation_length"]),
-      "fsdp_attention": _to_axis_tuple(rules["activation_batch_attn"]),
-      "expert": _to_axis_tuple(rules["exp"]),
-      "fsdp_moe": _to_axis_tuple(rules["embed_moe"]),
-  }
+# Per-slice `(x, y, z)` topology -> shardings. A multi-slice mesh uses the entry
+# of its slices; `sharding_config` adds data parallelism over `dcn`.
+TOPOLOGY_SHARDINGS: dict[tuple[int, int, int], TopologySharding] = {
+    (4, 8, 8): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("z", "core"),
+            "fsdp_moe": ("x", "y"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_4X8X8,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, None, ("x", "y")),
+                        gate_1=P(None, None, ("x", "y")),
+                        linear=P(None, ("x", "y"), None),
+                    ),
+                ),
+                sparse=_SPARSE_4X8X8,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P(("x", "y"), None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_4X8X8),
+            ),
+            # Over every ICI axis, as on 8x8x8: 512 ways divide the 7168-wide
+            # embedding dim.
+            embed_table=P(None, ("x", "y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("x", "y", "z", "core"), None),
+        ),
+    ),
+    (8, 8, 8): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("x", "core"),
+            "fsdp_moe": ("y", "z"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_8X8X8,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, None, ("y", "z")),
+                        gate_1=P(None, None, ("y", "z")),
+                        linear=P(None, ("y", "z"), None),
+                    ),
+                ),
+                sparse=_SPARSE_8X8X8,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    # [2 * emb, emb]: FSDP only, as in dsv3_perf_test.
+                    eh_proj=P(("y", "z"), None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_8X8X8),
+            ),
+            # The embedding table `[vocab, emb]` and LM head kernel `[emb,
+            # vocab]` are sharded on the embedding dim over every ICI axis,
+            # matching MaxText's `embed_vocab` logical axis for this recipe.
+            embed_table=P(None, ("x", "y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("x", "y", "z", "core"), None),
+        ),
+    ),
+    (8, 16, 16): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("x", "core"),
+            "fsdp_moe": ("y", "z"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_8X16X16,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, None, ("y", "z")),
+                        gate_1=P(None, None, ("y", "z")),
+                        linear=P(None, ("y", "z"), None),
+                    ),
+                ),
+                sparse=_SPARSE_8X16X16,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P(("y", "z"), None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_8X16X16),
+            ),
+            # Over every ICI axis but x: 4096 ways do not divide the 7168-wide
+            # embedding dim.
+            embed_table=P(None, ("y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("y", "z", "core"), None),
+        ),
+    ),
+    (8, 16, 32): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("x", "core"),
+            "fsdp_moe": ("y", "z"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_8X16X16,
+                    post_attn_norm_scale=P(None, None),
+                    # 512-way FSDP over (y, z) would leave 18432 / 512 = 36-row
+                    # shards (4.5 tiles), not whole 8-row TPU tiles. Shard over
+                    # z only (576-row shards, 72 tiles).
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, None, "z"),
+                        gate_1=P(None, None, "z"),
+                        linear=P(None, "z", None),
+                    ),
+                ),
+                sparse=_SPARSE_8X16X32,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P(("y", "z"), None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_8X16X32),
+            ),
+            # Over every ICI axis but x: 8192 ways do not divide the 7168-wide
+            # embedding dim. 1024 ways over (y, z, core) divide it (7 rows).
+            embed_table=P(None, ("y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("y", "z", "core"), None),
+        ),
+    ),
+    (8, 32, 32): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("x", "core"),
+            "fsdp_moe": ("y", "z"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_8X32X32,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, "z", None),
+                        gate_1=P(None, "z", None),
+                        linear=P(None, "z", None),
+                    ),
+                ),
+                sparse=_SPARSE_8X32X32,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P("z", None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_8X32X32),
+            ),
+            # 64 ways over (z, core) leave 7168 / 64 = 112 = 14 * 8-row tiles.
+            embed_table=P(None, ("z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("z", "core"), None),
+        ),
+    ),
+}
 
 
 def dcn_batch_axis(
@@ -396,51 +542,218 @@ def yarn_freqs_sharding(
 
 def sharding_config(
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
-    axis_mapping: AxisMapping,
-    *,
-    emb_dim: int,
-    qk_head_dim: int,
-    rope_head_dim: int,
-    v_head_dim: int,
-    weights: DSv3WeightShardings | None = None,
 ) -> DSv3ShardingConfig:
-  """Assembles the `DSv3ShardingConfig` for `mesh`.
+  """Looks up the `DSv3ShardingConfig` of `mesh`'s per-slice topology.
 
   Args:
-    mesh: The device mesh.
-    axis_mapping: Lineage logical-to-physical axis mapping (see
-      `build_axis_mapping`).
-    emb_dim: Embedding dim (for `fit_embed_shardings`).
-    qk_head_dim: Non-positional q/k head dim (for `fit_mla_up_shardings`).
-    rope_head_dim: RoPE head dim (for `fit_mla_up_shardings`).
-    v_head_dim: Value head dim (for `fit_mla_up_shardings`).
-    weights: Weight specs to start from; defaults to the dsv3_perf_test specs.
+    mesh: The device mesh: `x`, `y`, `z` and `core` axes, plus a leading `dcn`
+      axis across slices if any.
 
   Returns:
-    The sharding config.
+    The sharding config of the `TOPOLOGY_SHARDINGS` entry for the mesh's
+    `(x, y, z)` shape. Its axis mapping maps `dcn` to the `dcn` mesh axis, or
+    to the empty tuple (a no-op) if the mesh has none.
 
   Raises:
-    ValueError: If `axis_mapping` lacks a logical axis.
+    ValueError: If `TOPOLOGY_SHARDINGS` has no entry for that shape.
   """
-  missing = [axis for axis in LOGICAL_AXES if axis not in axis_mapping]
-  if missing:
-    raise ValueError(f"axis_mapping lacks logical axes {missing}.")
-  fitted_weights = fit_mla_up_shardings(
-      weights if weights is not None else DSv3WeightShardings(),
-      mesh.shape,
-      qk_head_dim=qk_head_dim,
-      rope_head_dim=rope_head_dim,
-      v_head_dim=v_head_dim,
-  )
-  fitted_weights = fit_embed_shardings(fitted_weights, mesh.shape, axis_mapping, emb_dim=emb_dim)
+  topology = (mesh.shape["x"], mesh.shape["y"], mesh.shape["z"])
+  entry = TOPOLOGY_SHARDINGS.get(topology)
+  if entry is None:
+    raise ValueError(f"No DSv3 shardings for per-slice topology {topology}; supported:" f" {sorted(TOPOLOGY_SHARDINGS)}.")
   return DSv3ShardingConfig(
-      axis_mapping=dict(axis_mapping),
-      weights=fitted_weights,
+      axis_mapping={
+          "dcn": DCN_AXIS if DCN_AXIS in mesh.axis_names else (),
+          **entry.axis_mapping,
+      },
+      weights=entry.weights,
       activation=activation_sharding(mesh),
       segment_ids=segment_ids_sharding(mesh),
       token=token_sharding(mesh),
       yarn_freqs=yarn_freqs_sharding(mesh),
   )
+
+
+def _axis_names(v: str | Sequence[str]) -> tuple[str, ...]:
+  return (v,) if isinstance(v, str) else tuple(v)
+
+
+def _to_axis_tuple(v: str | Sequence[str]) -> str | tuple[str, ...]:
+  if isinstance(v, str):
+    return v
+  return v[0] if len(v) == 1 else tuple(v)
+
+
+# MLA weights whose head dim is sharded over `attention`, and its negative
+# dimension index (same in the scanned decoder stacks and in an unscanned MTP
+# layer).
+_MLA_HEAD_DIMS = (("q_up", -2), ("k_up", -2), ("v_up", -2), ("out", -3))
+
+
+def _is_mla_or_spec(x: Any) -> bool:
+  return isinstance(x, (dsv3_types.DSv3MLAWeightsPytree, P))
+
+
+def _reshard_mla_heads(node: Any, head_axis: str | tuple[str, ...]) -> Any:
+  """Replaces the head-dim entry of the head-sharded MLA specs with `head_axis`."""
+  if not isinstance(node, dsv3_types.DSv3MLAWeightsPytree):
+    return node
+  head_axes = _axis_names(head_axis)
+  updates = {}
+  for field, dim in _MLA_HEAD_DIMS:
+    spec = getattr(node, field)
+    if spec is None:
+      continue
+    entries = list(spec)
+    idx = len(entries) + dim
+    other_axes = set()
+    for i, entry in enumerate(entries):
+      if i != idx and entry is not None:
+        other_axes.update(_axis_names(entry))
+    overlap = [ax for ax in head_axes if ax in other_axes]
+    if overlap:
+      raise ValueError(
+          f"The activation layout's `attention` axes {head_axis} overlap with"
+          f" the MLA `{field}` FSDP axes {entries}: {overlap}."
+      )
+    entries[idx] = head_axis
+    updates[field] = P(*entries)
+  return dataclasses.replace(node, **updates)
+
+
+def activation_resharded_config(
+    base: DSv3ShardingConfig,
+    activation_axis_mapping: AxisMapping,
+) -> DSv3ShardingConfig:
+  """A sharding config with new activation axes and (almost) the same weights.
+
+  Used to evaluate with a different activation layout than training, e.g. a
+  fractional batch with the expert axes acting as context parallelism:
+  `attention` (the sequence axis outside attention and the MLA head axis inside
+  it) and `fsdp_attention` (the batch axis) change, while `expert` and
+  `fsdp_moe` must not.
+
+  Every weight keeps the physical layout of `base`, except the MLA projections
+  whose head dim follows `attention`. The new `attention` axes must start with
+  `base`'s (e.g. `core` -> `(core, x)`), so every device's heads are a subset of
+  its training heads and resharding the parameters of `base` to this config
+  only slices the head dim locally, without communication. In particular, the
+  embedding table and LM head keep `base`'s axis order.
+
+  Args:
+    base: The training sharding config.
+    activation_axis_mapping: Logical-to-physical axis mapping of the new layout.
+
+  Returns:
+    The sharding config of the new layout.
+
+  Raises:
+    ValueError: If `activation_axis_mapping` lacks a logical axis, changes
+      `dcn`, `expert` or `fsdp_moe`, does not shard `attention` over `base`'s
+      `attention` axes as a prefix, or overlaps with the MLA FSDP axes.
+  """
+  missing = [axis for axis in LOGICAL_AXES if axis not in activation_axis_mapping]
+  if missing:
+    raise ValueError(f"activation_axis_mapping lacks logical axes {missing}.")
+  for axis in ("dcn", "expert", "fsdp_moe"):
+    if _to_axis_tuple(_axis_names(activation_axis_mapping[axis])) != (
+        _to_axis_tuple(_axis_names(base.axis_mapping[axis]))
+    ):
+      raise ValueError(
+          f"The activation layout must keep `{axis}`:" f" {activation_axis_mapping[axis]} != {base.axis_mapping[axis]}."
+      )
+  base_attention = _axis_names(base.axis_mapping["attention"])
+  new_attention = _axis_names(activation_axis_mapping["attention"])
+  if new_attention[: len(base_attention)] != base_attention:
+    # Each device's heads must be a subset of its training heads, i.e. the
+    # training axes must be the major (leading) axes of the new head sharding.
+    raise ValueError(
+        "The activation layout must shard `attention` over the training axes"
+        f" {base.axis_mapping['attention']} as a prefix, got"
+        f" {activation_axis_mapping['attention']}."
+    )
+  head_axis = _to_axis_tuple(new_attention)
+  weights = dataclasses.replace(
+      base.weights,
+      decoder=jax.tree.map(
+          lambda node: _reshard_mla_heads(node, head_axis),
+          base.weights.decoder,
+          is_leaf=_is_mla_or_spec,
+      ),
+      mtp=jax.tree.map(
+          lambda node: _reshard_mla_heads(node, head_axis),
+          base.weights.mtp,
+          is_leaf=_is_mla_or_spec,
+      ),
+  )
+  return dataclasses.replace(
+      base,
+      axis_mapping={axis: _to_axis_tuple(_axis_names(activation_axis_mapping[axis])) for axis in LOGICAL_AXES},
+      weights=weights,
+  )
+
+
+def expert_axes_as_cp_axis_mapping(axis_mapping: AxisMapping) -> AxisMapping:
+  """The axis mapping that uses the expert axes as context parallelism.
+
+  For evaluating a fractional batch (fewer rows than batch shards): the expert
+  axes that do not already shard `attention` move from the batch
+  (`fsdp_attention`) to the sequence and MLA heads (`attention`), appended
+  after the training `attention` axes. Outside attention each device then holds
+  a shorter sequence slice of fewer rows; inside MLA the low-rank q/kv latents
+  are all-gathered along the longer `attention` group as in training, and each
+  device holds the full sequence for fewer heads. `expert` and `fsdp_moe` are
+  unchanged, so the MoE keeps its expert parallelism and FSDP.
+
+  E.g. the recipe layout `attention=core`, `fsdp_attention=(x, y, z)`,
+  `expert=(x, core)` becomes `attention=(core, x)`, `fsdp_attention=(y, z)`.
+
+  Args:
+    axis_mapping: The training axis mapping.
+
+  Returns:
+    The new axis mapping, for `activation_resharded_config`.
+
+  Raises:
+    ValueError: If an expert axis that does not shard `attention` does not shard
+      `fsdp_attention` either, i.e. moving it would not shorten the batch.
+  """
+  attention = _axis_names(axis_mapping["attention"])
+  fsdp_attention = _axis_names(axis_mapping["fsdp_attention"])
+  moved = tuple(ax for ax in _axis_names(axis_mapping["expert"]) if ax not in attention)
+  missing = [ax for ax in moved if ax not in fsdp_attention]
+  if missing:
+    raise ValueError(
+        f"Expert axes {missing} shard neither `attention` {attention} nor"
+        f" `fsdp_attention` {fsdp_attention}; they cannot become context"
+        " parallelism."
+    )
+  return {
+      **axis_mapping,
+      "attention": _to_axis_tuple(attention + moved),
+      "fsdp_attention": _to_axis_tuple(tuple(ax for ax in fsdp_attention if ax not in moved)),
+  }
+
+
+def expert_axes_as_cp_config(base: DSv3ShardingConfig) -> DSv3ShardingConfig:
+  """`base` with the expert axes as context parallelism for the activations.
+
+  The eval layout of a fractional eval batch: the activations follow
+  `expert_axes_as_cp_axis_mapping`, the weights keep `base`'s physical layout
+  (only the MLA head dim is sliced further, locally; see
+  `activation_resharded_config`).
+
+  Batch split needs an even local batch on every batch shard, so the eval batch
+  needs at least 2 rows per shard of the new `fsdp_attention` (and `dcn`) axes,
+  e.g. 2 * |y * z| rows on an [x, y, z, core] mesh with the recipe layout.
+
+  Args:
+    base: The training sharding config.
+
+  Returns:
+    The eval sharding config.
+  """
+  return activation_resharded_config(base, expert_axes_as_cp_axis_mapping(base.axis_mapping))
 
 
 def named_shardings(

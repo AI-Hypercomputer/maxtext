@@ -53,6 +53,10 @@ MTP_EXPERT_PERMUTATIONS_KEY = "mtp_expert_permutations"
 # Linen-style collection name used by MaxText checkpoints for routed gate biases.
 MOE_BIAS_COLLECTION = "MoEBiasVar"
 
+# `loss_and_aux` aux key of the per-micro-batch router statistics under
+# gradient accumulation (consumed by `finalize_accumulated_step`).
+GA_STATS_KEY = "lineage_ga_stats"
+
 
 def is_native(cfg: Any) -> bool:
   """Whether `cfg` runs the Lineage-native DeepSeek-V3 model (`use_lineage`)."""
@@ -80,17 +84,6 @@ class LineageExpertPermutationVar(nnx.BatchStat):
 
 
 ExpertPermutationVar = LineageExpertPermutationVar
-
-
-def build_axis_mapping(
-    cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh | None = None
-) -> Mapping[str, str | tuple[str, ...]]:
-  """Builds axis mapping from Lineage logical axes to MaxText physical mesh axes."""
-  from maxtext.experimental.lineage import dsv3_sharding  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-
-  dcn_axis = dsv3_sharding.DCN_AXIS
-  has_dcn = (dcn_axis in mesh.axis_names) if mesh is not None else (dcn_axis in (getattr(cfg, "mesh_axes", ()) or ()))
-  return dsv3_sharding.build_axis_mapping(dict(cfg.logical_axis_rules), has_dcn=has_dcn)
 
 
 def create_physical_device_mesh(ici_parallelism: Sequence[int], devices: Sequence[Any]) -> np.ndarray:
@@ -157,6 +150,16 @@ def _router_bias_dtype(cfg: Any) -> jax.typing.DTypeLike | None:
   return _router_dtype(cfg) or getattr(cfg, "dtype", None)
 
 
+def _stream_chunked_train_data(cfg: Any) -> bool:
+  """Whether `cfg` trains on stream-chunked `c4_mlperf` (one segment of 1s per row)."""
+  if getattr(cfg, "dataset_type", None) != "c4_mlperf":
+    return False
+  use_stream_chunking = getattr(cfg, "use_stream_chunking", None)
+  if use_stream_chunking is None:
+    use_stream_chunking = not getattr(cfg, "tokenize_train_data", True)
+  return bool(use_stream_chunking)
+
+
 def _mesh_scope(mesh: jax.sharding.Mesh):
   """Activates `mesh`'s abstract mesh for Lineage's explicit-sharding ops.
 
@@ -187,9 +190,12 @@ def _unsupported_native_options(cfg: Any) -> list[str]:
       not get("quantization", None),
       "quantization (AQT/Qwix) is unsupported; use lineage_quantization",
   )
+  # Manual gradient accumulation is supported (see `loss_and_aux` and
+  # `finalize_accumulated_step`); Tunix's optax.MultiSteps accumulation would
+  # run whole train steps per microbatch and advance the router state each.
   require(
-      get("gradient_accumulation_steps", 1) == 1,
-      "gradient_accumulation_steps must be 1",
+      get("gradient_accumulation_steps", 1) == 1 or not get("use_tunix_gradient_accumulation", False),
+      "use_tunix_gradient_accumulation is unsupported",
   )
   require(get("num_vocab_tiling", 1) <= 1, "num_vocab_tiling must be 1")
   require(
@@ -307,17 +313,13 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       head_dot_in_fp32=bool(getattr(cfg, "logits_dot_in_fp32", False)),
       cast_logits_to_fp32=bool(getattr(cfg, "cast_logits_to_fp32", True)),
   )
-  has_dcn = dsv3_sharding.DCN_AXIS in mesh.axis_names
-  axis_mapping = dsv3_sharding.build_axis_mapping(dict(cfg.logical_axis_rules), has_dcn=has_dcn)
-  sharding = dsv3_sharding.sharding_config(
-      mesh,
-      axis_mapping,
-      emb_dim=model.emb_dim,
-      qk_head_dim=model.qk_head_dim,
-      rope_head_dim=model.rope_head_dim,
-      v_head_dim=model.v_head_dim,
-  )
+  sharding = dsv3_sharding.sharding_config(mesh)
+  eval_sharding = None
+  eval_pdb = float(getattr(cfg, "eval_per_device_batch_size", 0) or 0)
+  if 0 < eval_pdb < 1:
+    eval_sharding = dsv3_sharding.expert_axes_as_cp_config(sharding)
   expert_permutation = getattr(cfg, "lineage_expert_permutation", None)
+  dq_reduction_steps = int(getattr(cfg, "lineage_dq_reduction_steps", 1))
   kernels = dsv3_config.DSv3KernelConfig(
       max_target_length=int(cfg.max_target_length),
       sa_block_q=int(cfg.sa_block_q),
@@ -329,8 +331,14 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       sa_q_layout=cfg.sa_q_layout,
       sa_k_layout=cfg.sa_k_layout,
       sa_v_layout=cfg.sa_v_layout,
+      diag_band_skip=bool(getattr(cfg, "lineage_diag_band_skip", True)),
+      dq_reduction_steps=None if dq_reduction_steps == 0 else dq_reduction_steps,
       capacity_factor=get_capacity_factor(cfg),
-      ragged_buffer_factor=_RAGGED_BUFFER_FACTOR,
+      ragged_buffer_factor=(
+          float(cfg.ragged_buffer_factor)
+          if float(getattr(cfg, "ragged_buffer_factor", -1.0)) > 0.0
+          else _RAGGED_BUFFER_FACTOR
+      ),
       quant=get_quant_config(cfg),
       max_async_overlap_transform=True,
       expert_permutation=("none" if expert_permutation is None else str(expert_permutation)),
@@ -345,7 +353,13 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       mtp_eval_target_module=int(getattr(cfg, "mtp_eval_target_module", 0)),
       mtp_reuse_input_embedding=bool(getattr(cfg, "mtp_reuse_input_embedding", False)),
   )
-  lineage_cfg = dsv3_config.DSv3Config(model=model, sharding=sharding, kernels=kernels, training=training)
+  lineage_cfg = dsv3_config.DSv3Config(
+      model=model,
+      sharding=sharding,
+      kernels=kernels,
+      training=training,
+      eval_sharding=eval_sharding,
+  )
   lineage_cfg.validate()
   return lineage_cfg
 
@@ -419,11 +433,34 @@ class LineageTransformer(nnx.Module):
       raise ValueError("use_lineage=True does not support MaxText quantization.")
     validate_supported(config)
     from maxtext.experimental.lineage import dsv3_model  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.experimental.lineage import ops  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
     cfg = dsv3_config_from_maxtext(config, mesh)
+    if cfg.eval_sharding is not None:
+      eval_sharding = cfg.eval_sharding
+      token_spec = ops.physical_pspec(
+          eval_sharding.token,
+          eval_sharding.axis_mapping,
+      )
+      override_keys = {
+          "activation_embed_and_logits_batch",
+          "activation_norm_length",
+      }
+      base_rules = list(getattr(config, "logical_axis_rules_for_eval", ()))
+      new_rules = tuple(
+          [
+              ("activation_embed_and_logits_batch", token_spec[0]),
+              ("activation_norm_length", token_spec[1]),
+          ]
+          + [r for r in base_rules if r[0] not in override_keys]
+      )
+      if hasattr(config, "get_keys"):
+        config.get_keys()["logical_axis_rules_for_eval"] = new_rules
+      else:
+        config.logical_axis_rules_for_eval = new_rules
     param_shardings, state_shardings = dsv3_model.dsv3_param_shardings(cfg, mesh)
     with _mesh_scope(mesh):
       params, state = dsv3_model.init_dsv3_params(rngs.params(), cfg, mesh)
@@ -538,6 +575,30 @@ class LineageTransformer(nnx.Module):
       return dsv3_model.dsv3_logits(self.lineage_params(), fwd.hidden, cfg, mesh=self.mesh)
 
 
+def accumulates_gradients(config: Any, is_train: bool = True) -> bool:
+  """Whether training steps of `config` run MaxText's manual GA scan."""
+  return (
+      is_train
+      and int(getattr(config, "gradient_accumulation_steps", 1)) > 1
+      and not getattr(config, "use_tunix_gradient_accumulation", False)
+  )
+
+
+def _ga_stats(aux: dsv3_model.DSv3LossAux, cfg: dsv3_config.DSv3Config) -> dict[str, Any]:
+  """Per-microbatch statistics summed by the GA scan for `finalize_accumulated_step`."""
+  from maxtext.experimental.lineage import dsv3_loss  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+  num_experts = cfg.model.num_experts
+  stats: dict[str, Any] = {"z_loss_sum": aux.z_loss_sum}
+  if cfg.training.routed_bias_update_rate > 0.0:
+    stats["expert_counts"] = dsv3_loss.expert_counts(aux.router_aux, num_experts=num_experts)
+    stats["mtp_expert_counts"] = tuple(dsv3_loss.expert_counts(a, num_experts=num_experts) for a in aux.mtp_router_aux)
+  if cfg.kernels.expert_permutation != "none":
+    stats["group_sizes"] = aux.router_aux.group_sizes
+    stats["mtp_group_sizes"] = tuple(a.group_sizes for a in aux.mtp_router_aux)
+  return stats
+
+
 def loss_and_aux(
     model: LineageTransformer,
     config: Any,
@@ -547,9 +608,15 @@ def loss_and_aux(
 ) -> tuple[jax.Array, dict[str, Any]]:
   """`train.loss_fn` of the Lineage model: the loss and MaxText's `aux` dict.
 
-  Runs `dsv3_model.dsv3_loss_and_aux` on the micro-batch and, in training
+  Runs `dsv3_model.dsv3_loss_and_aux` on the micro-batch and, in non-GA training
   steps, advances the routed gate biases and expert permutations in `model`
-  (they reach the train state through `train_step`'s non-parameter state).
+  (they reach the train state through `train_step`'s non-parameter state). Under
+  manual gradient accumulation (`accumulates_gradients(config, is_train)`), the
+  router state is left untouched per micro-batch, the returned `loss` is the
+  token-summed objective `xent_sum + (mtp_loss + moe_lb_loss) * total_weights`
+  expected by `gradient_accumulation_loss_and_grad`, and `aux[GA_STATS_KEY]`
+  carries the per-micro-batch router counts and `z_loss_sum` for
+  `finalize_accumulated_step`.
 
   Args:
     model: The model.
@@ -563,17 +630,22 @@ def loss_and_aux(
     `intermediate_outputs`, `xent_sum`, `z_loss`, `total_weights`,
     `moe_lb_loss`, `indexer_loss`, `moe_bias_updates`, `mtp_moe_bias_updates`,
     `mtp_loss`, `batch_stats`, `has_moe_overflow`, plus `diag_bias_values` /
-    `diag_bias_updates` for `log_step_diagnostics`.
+    `diag_bias_updates` for `log_step_diagnostics` and (under GA)
+    `lineage_ga_stats` for `finalize_accumulated_step`.
   """
   from maxtext.experimental.lineage import dsv3_loss  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   from maxtext.experimental.lineage import dsv3_model  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   cfg = model.lineage_config()
+  accumulate = accumulates_gradients(config, is_train)
+  # Stream-chunked MLPerf training rows (`format_continuous_stream_fn`) are one
+  # segment of all 1s, so the segment mask is a no-op: dropping it is exact.
+  drop_segment_ids = is_train and _stream_chunked_train_data(config)
   batch = dsv3_model.DSv3Batch(
       inputs=data["inputs"],
       targets=data["targets"],
       positions=data["inputs_position"],
-      segment_ids=data["inputs_segmentation"],
+      segment_ids=None if drop_segment_ids else data["inputs_segmentation"],
       target_mask=data["targets_segmentation"],
   )
   with _mesh_scope(model.mesh):
@@ -584,8 +656,9 @@ def loss_and_aux(
         cfg,
         mesh=model.mesh,
         train=is_train,
+        update_state=not accumulate,
     )
-  if is_train:
+  if is_train and not accumulate:
     model.set_lineage_state(aux.new_state)
 
   intermediate_outputs: dict[str, Any] = {}
@@ -598,11 +671,16 @@ def loss_and_aux(
   new_state = aux.new_state
   diag_bias_values = []
   diag_bias_updates = []
-  if is_train and aux.router_bias_updates is not None:
+  if is_train and not accumulate and aux.router_bias_updates is not None:
     diag_bias_values.append(new_state.router_bias)
     diag_bias_updates.append(aux.router_bias_updates)
     diag_bias_values.extend(new_state.mtp_router_bias)
     diag_bias_updates.extend(aux.mtp_router_bias_updates)
+  extra = {}
+  if accumulate:
+    weights = jnp.asarray(aux.total_weights, jnp.float32)
+    loss = aux.xent_sum + (aux.mtp_loss + aux.moe_lb_loss) * weights
+    extra[GA_STATS_KEY] = _ga_stats(aux, cfg)
   return loss, {
       "intermediate_outputs": intermediate_outputs,
       "xent_sum": aux.xent_sum,
@@ -617,7 +695,53 @@ def loss_and_aux(
       "has_moe_overflow": jnp.bool_(False),
       "diag_bias_values": diag_bias_values,
       "diag_bias_updates": diag_bias_updates,
+      **extra,
   }
+
+
+def finalize_accumulated_step(model: LineageTransformer, aux: dict[str, Any]) -> dict[str, Any]:
+  """Applies one full-batch router-bias / expert-permutation update after the GA scan."""
+  from maxtext.experimental.lineage import dsv3_loss  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from maxtext.experimental.lineage import dsv3_model  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  from maxtext.experimental.lineage import dsv3_types  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+  aux = dict(aux)
+  stats = aux.pop(GA_STATS_KEY)
+  cfg = model.lineage_config()
+  aux["z_loss"] = stats["z_loss_sum"] / (aux["total_weights"] + dsv3_loss.EPS)
+  aux["has_moe_overflow"] = jnp.bool_(False)
+  bias_updates = None
+  mtp_bias_updates = ()
+  if "expert_counts" in stats:
+    to_updates = functools.partial(
+        dsv3_loss.load_balance_updates_from_counts,
+        num_experts=cfg.model.num_experts,
+        rate=cfg.training.routed_bias_update_rate,
+    )
+    bias_updates = to_updates(stats["expert_counts"])
+    mtp_bias_updates = tuple(to_updates(c) for c in stats["mtp_expert_counts"])
+  router_aux = mtp_router_aux = None
+  if "group_sizes" in stats:
+    as_aux = lambda g: dsv3_types.DSv3RouterAux(  # pylint: disable=g-long-lambda
+        group_sizes=g, selected_experts=None, logits=None
+    )
+    router_aux = as_aux(stats["group_sizes"])
+    mtp_router_aux = tuple(as_aux(g) for g in stats["mtp_group_sizes"])
+  with _mesh_scope(model.mesh):
+    new_state = dsv3_model.next_dsv3_state(
+        model.lineage_state(),
+        bias_updates=bias_updates,
+        mtp_bias_updates=mtp_bias_updates,
+        router_aux=router_aux,
+        mtp_router_aux=mtp_router_aux,
+        cfg=cfg,
+        mesh=model.mesh,
+    )
+  model.set_lineage_state(new_state)
+  if bias_updates is not None:
+    aux["diag_bias_values"] = [new_state.router_bias, *new_state.mtp_router_bias]
+    aux["diag_bias_updates"] = [bias_updates, *mtp_bias_updates]
+  return aux
 
 
 def maxtext_abstract_param_tree(config: Any, mesh: jax.sharding.Mesh) -> dict[str, Any]:

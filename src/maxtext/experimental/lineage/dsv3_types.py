@@ -502,21 +502,31 @@ def init_dsv3_moe_routed_expert_weights(
     add_layer_dim = functools.partial(_add_layer_dim, num_layers=num_layers)
     subkeys = jax.random.split(rng, 3)
     k_init = functools.partial(kernel_init, dtype=weight_dtype)
+    expected_flat_rank = 3 if num_layers > 1 else 2
+    flat_routed = (
+        out_shardings.gate is not None
+        and hasattr(out_shardings.gate, "spec")
+        and len(out_shardings.gate.spec) == expected_flat_rank
+    )
+    gate_shape = (num_experts * emb_dim, expert_hidden_dim) if flat_routed else (num_experts, emb_dim, expert_hidden_dim)
+    linear_shape = (
+        (num_experts * expert_hidden_dim, emb_dim) if flat_routed else (num_experts, expert_hidden_dim, emb_dim)
+    )
     gate_0 = k_init(
         subkeys[0],
-        add_layer_dim((num_experts, emb_dim, expert_hidden_dim)),
+        add_layer_dim(gate_shape),
         out_sharding=out_shardings.gate,
     )
     gate_1 = k_init(
         subkeys[1],
-        add_layer_dim((num_experts, emb_dim, expert_hidden_dim)),
+        add_layer_dim(gate_shape),
         out_sharding=out_shardings.gate,
     )
     return DSv3MoERoutedExpertWeightsPytree[ArrayType](
         gate=jnp.concatenate([gate_0, gate_1], axis=-1),
         linear=k_init(
             subkeys[2],
-            add_layer_dim((num_experts, expert_hidden_dim, emb_dim)),
+            add_layer_dim(linear_shape),
             out_sharding=out_shardings.linear,
         ),
     )

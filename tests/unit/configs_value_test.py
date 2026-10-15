@@ -97,6 +97,15 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_mtp_norm_main_hidden_state_rejects_unsupported_combinations(self):
+    """`mtp_norm_main_hidden_state` is rejected with vocab tiling or expanded mHC streams."""
+    base = ["", _BASE_CONFIG_PATH, "run_name=test", "mtp_num_layers=1", "mtp_norm_main_hidden_state=True"]
+    pyconfig.initialize(base)
+    with self.assertRaisesRegex(ValueError, "num_vocab_tiling"):
+      pyconfig.initialize(base + ["num_vocab_tiling=2"])
+    with self.assertRaisesRegex(ValueError, "mhc_expansion_rate"):
+      pyconfig.initialize(base + ["mhc_expansion_rate=2"])
+
   def test_enable_mllog_without_eval_warns(self):
     """enable_mllog with eval_interval <= 0 is allowed (for measuring eval impact) and logs a warning."""
     argv = ["", _BASE_CONFIG_PATH, "run_name=test", "steps=1", "enable_mllog=true", "eval_interval=-1"]

@@ -1844,9 +1844,12 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       or scanned with expert stacking (nested list of strings).
   """
   # Extract hf configuration parameters, without mtp
-  num_main_layers = config["num_hidden_layers"]
-  first_num_dense_layers = config["first_k_dense_replace"]
-  num_experts = config.get("n_routed_experts", 0)
+  mt_num_layers = getattr(maxtext_config, "num_decoder_layers", None)
+  num_main_layers = mt_num_layers if isinstance(mt_num_layers, int) else config["num_hidden_layers"]
+  mt_first_dense = getattr(maxtext_config, "first_num_dense_layers", None)
+  first_num_dense_layers = mt_first_dense if isinstance(mt_first_dense, int) else config["first_k_dense_replace"]
+  mt_num_experts = getattr(maxtext_config, "num_experts", None)
+  num_experts = mt_num_experts if isinstance(mt_num_experts, int) else config.get("n_routed_experts", 0)
 
   # Mapping for non-layer-specific weights
   mapping = {
@@ -1908,6 +1911,11 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
       mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
           f"model.layers.{i}.{hf_key}" for i in range(first_num_dense_layers, num_main_layers)
       ]
+    mapping["MoEBiasVar-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias"] = (
+        [  # pyrefly: ignore[bad-assignment]
+            f"model.layers.{i}.mlp.gate.e_score_correction_bias" for i in range(first_num_dense_layers, num_main_layers)
+        ]
+    )
 
     for maxtext_key, hf_key in moe_expert_keys.items():
       mapping[f"params-decoder-moe_layers-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
@@ -1925,11 +1933,47 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
 
       for maxtext_key, hf_key in moe_layer_keys.items():
         mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = f"model.layers.{i}.{hf_key}"
+      mapping[f"MoEBiasVar-decoder-moe_layers_{moe_layer_idx}-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias"] = (
+          f"model.layers.{i}.mlp.gate.e_score_correction_bias"
+      )
 
       for maxtext_key, hf_key in moe_expert_keys.items():
         mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
             f"model.layers.{i}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
         ]
+
+  # MTP Layers
+  # Note: HF DeepSeek MTP layers also contain `model.layers.{hf_mtp_idx}.embed_tokens.weight` and
+  # `model.layers.{hf_mtp_idx}.shared_head.head.weight`, which duplicate `model.embed_tokens.weight`
+  # and `lm_head.weight`. MaxText shares the base model's token_embedder and logits_dense weights
+  # directly (matching `MTP_KEYS_TO_SKIP` in `convert_deepseek_family_ckpt.py`), so they are omitted
+  # here for `to_maxtext`. Exporting MTP checkpoints via `to_huggingface` would need to copy those
+  # two tensors from the base model.
+  mtp_num_layers = getattr(maxtext_config, "mtp_num_layers", 0)
+  if not isinstance(mtp_num_layers, int):
+    mtp_num_layers = 0
+  hf_mtp_start_layer = config["num_hidden_layers"]
+  for j in range(mtp_num_layers):
+    hf_mtp_idx = hf_mtp_start_layer + j
+    mtp_prefix = f"params-mtp_block-mtp_layer_{j + 1}"
+    mtp_layer_prefix = f"{mtp_prefix}-mtp_{j + 1}_transformer_layer"
+
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_embedding_norm-scale"] = f"model.layers.{hf_mtp_idx}.enorm.weight"
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_hidden_state_norm-scale"] = f"model.layers.{hf_mtp_idx}.hnorm.weight"
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_projection-kernel"] = f"model.layers.{hf_mtp_idx}.eh_proj.weight"
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_final_norm-scale"] = f"model.layers.{hf_mtp_idx}.shared_head.norm.weight"
+
+    for maxtext_key, hf_key in moe_layer_keys.items():
+      mapping[f"{mtp_layer_prefix}-{maxtext_key}"] = f"model.layers.{hf_mtp_idx}.{hf_key}"
+    mapping[
+        f"MoEBiasVar-mtp_block-mtp_layer_{j + 1}-mtp_{j + 1}_transformer_layer-DeepSeekMoeBlock_0-MoeBlock_0-gate-bias"
+    ] = f"model.layers.{hf_mtp_idx}.mlp.gate.e_score_correction_bias"
+
+    for maxtext_key, hf_key in moe_expert_keys.items():
+      mapping[f"{mtp_layer_prefix}-{maxtext_key}"] = [  # pyrefly: ignore[bad-assignment]
+          f"model.layers.{hf_mtp_idx}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
+      ]
+
   return mapping
 
 
@@ -1944,8 +1988,10 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     else:
       return input_tensor.T.reshape(target_shape)
 
-  num_main_layers = config["num_hidden_layers"]
-  first_num_dense_layers = config["first_k_dense_replace"]
+  mt_num_layers = getattr(maxtext_config, "num_decoder_layers", None)
+  num_main_layers = mt_num_layers if isinstance(mt_num_layers, int) else config["num_hidden_layers"]
+  mt_first_dense = getattr(maxtext_config, "first_num_dense_layers", None)
+  first_num_dense_layers = mt_first_dense if isinstance(mt_first_dense, int) else config["first_k_dense_replace"]
 
   mapping = {
       "params-decoder-logits_dense-kernel": reshape_kernel,
@@ -1997,6 +2043,15 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       moe_layer_idx = i - first_num_dense_layers
       for key in moe_need_reshape:
         mapping[f"params-decoder-moe_layers_{moe_layer_idx}-{key}"] = reshape_kernel
+
+  mtp_num_layers = getattr(maxtext_config, "mtp_num_layers", 0)
+  if not isinstance(mtp_num_layers, int):
+    mtp_num_layers = 0
+  for j in range(mtp_num_layers):
+    mtp_prefix = f"params-mtp_block-mtp_layer_{j + 1}"
+    mapping[f"{mtp_prefix}-mtp_{j + 1}_projection-kernel"] = reshape_kernel
+    for key in moe_need_reshape:
+      mapping[f"{mtp_prefix}-mtp_{j + 1}_transformer_layer-{key}"] = reshape_kernel
 
   return mapping
 

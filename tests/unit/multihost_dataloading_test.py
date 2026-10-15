@@ -383,6 +383,21 @@ class MultihostDataloadingTest(parameterized.TestCase):
       self.assertTrue(w.joined)
     self.assertTrue(it._parent._pool.terminated)
 
+    class MockGrainRootIterator:
+
+      def __init__(self):
+        self._parents = ()
+        self._workers = [MockWorker()]
+
+      @property
+      def _parent(self):
+        assert len(self._parents) == 1, self._parents
+        return self._parents[0]
+
+    grain_it = MockGrainRootIterator()
+    multihost_dataloading._terminate_iterator_workers(grain_it)
+    self.assertTrue(grain_it._workers[0].terminated)
+
 
 if __name__ == "__main__":
   absltest.main()

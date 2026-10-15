@@ -34,6 +34,21 @@ from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding, trunca
 _MAX_WAVELENGTH = 10_000
 
 
+def _cis(theta: Array) -> Array:
+  """`exp(1j * theta)` for real `theta`, written as `cos(theta) + 1j*sin(theta)`.
+
+  Bit-identical to `jnp.exp(1j * theta)` for every angle RoPE produces (the two
+  differ only in the sign of a zero imaginary part at `theta == -0.0`), but it
+  does not go through XLA's overflow-safe complex `exponential` expansion, which
+  evaluates `exp(real(1j*theta)) == exp(0)` over the whole tensor. Under
+  `shard_mode: explicit` it evaluates it *twice*: the `Sharding` custom-call on
+  the broadcast `1j` keeps the simplifier from commuting the constant to the
+  right, so the reassociation that lets CSE merge the two `exponential`s never
+  fires.
+  """
+  return jax.lax.complex(jnp.cos(theta), jnp.sin(theta))
+
+
 def _maybe_move_embedding_to_device(embedding_table: Array, config: Config) -> Array:
   """Moves embedding table to device if parameter offloading is enabled."""
   if config.parameter_memory_host_offload:
@@ -196,9 +211,18 @@ def attend_on_embedding(
   if out_sharding is not None:
     out_sharding = truncate_out_sharding(out_sharding, query.ndim)
   embedding_table = _maybe_move_embedding_to_device(embedding_table, config)
-  return jnp.dot(
+  # Contract over the table's feature axis instead of materializing `table.T`.
+  # Under `shard_mode: explicit` the transposed table is a distinct typed value,
+  # so XLA cannot fold it into the dot's dimension numbers: the (large) table
+  # shard is cast to bf16 once for the input lookup in `Embed.__call__` and a
+  # second time here, and the tied head's weight gradient comes out flipped.
+  # Expressing the transpose as dimension numbers keeps both consumers on one
+  # cast and leaves the gradient in the table's own axis order. Under `auto`
+  # this is a no-op -- XLA already folded the `.T` away.
+  return jnp.einsum(
+      "...e,ve->...v",
       query,
-      jnp.asarray(embedding_table, jnp.bfloat16).T,
+      jnp.asarray(embedding_table, jnp.bfloat16),
       preferred_element_type=attend_dtype,
       out_sharding=out_sharding,
   )
@@ -549,14 +573,22 @@ class LLaMARotaryEmbedding(RotaryEmbedding):
     # Shift the inputs left and right as per LLaMA's specific behavior
     inputs_shifted_left = jnp.concatenate([inputs[..., 1:], inputs[..., :1]], axis=-1)
     inputs_shifted_right = jnp.concatenate([inputs[..., -1:], inputs[..., :-1]], axis=-1)
-    inputs_shifted = jax.lax.select(
-        jnp.tile(
-            jnp.mod(jnp.arange(self.embedding_dims, dtype=jnp.int32), 2),
-            inputs.shape[:-1] + (1,),
-        ),
-        inputs_shifted_right,
-        inputs_shifted_left,
-    )
+    # `lax.select` requires the predicate to match the cases in shape and, under
+    # ShardMode.EXPLICIT, in sharding too. Tiling the 1-D mask to the full input shape yields a
+    # replicated [B, S, N, H] predicate, which is rejected once the inputs are sharded.
+    # Broadcasting the 1-D mask through `jnp.where` selects exactly the same elements -- verified
+    # bit-for-bit in both the forward pass and the gradient -- and carries no sharding of its own.
+    # It is used only under explicit sharding so that ShardMode.AUTO keeps the XLA fusion, and
+    # hence the exact floating-point rounding, it has today.
+    is_odd_dim = jnp.mod(jnp.arange(self.embedding_dims, dtype=jnp.int32), 2)
+    if self.shard_mode == ShardMode.EXPLICIT:
+      inputs_shifted = jnp.where(is_odd_dim.astype(bool), inputs_shifted_right, inputs_shifted_left)
+    else:
+      inputs_shifted = jax.lax.select(
+          jnp.tile(is_odd_dim, inputs.shape[:-1] + (1,)),
+          inputs_shifted_right,
+          inputs_shifted_left,
+      )
 
     # Determine positions if not provided
     if position is None:
@@ -675,8 +707,9 @@ class YarnRotaryEmbedding(nnx.Module):
     if self.dot_pairwise and not self.pairwise:
       raise ValueError("rope_dot_pairwise=True requires rope_pairwise=True.")
 
+    # freqs are [batch, length, half_dim]; the trailing head-dim slice is never sharded.
     self.freqs_sharding = (
-        create_sharding(mesh, ("activation_batch", "activation_length", "q_heads"))
+        create_sharding(mesh, ("activation_batch", "activation_length", None))
         if shard_mode == ShardMode.EXPLICIT
         else None
     )
@@ -706,16 +739,11 @@ class YarnRotaryEmbedding(nnx.Module):
 
   @property
   def freqs_cis(self):
-    """Frequencies for rotary embedding."""
-    freqs = self.inv_freqs
-
+    """Frequencies for every position, shape [max_position_embeddings, half_dim]."""
     # Precompute frequencies for all positions by taking the outer product.
     t = jnp.arange(self.max_position_embeddings, dtype=jnp.float32)  # shape [max_position_embeddings]
     # This gives a [max_position_embeddings, half_dim] tensor with rows as time steps.
-    freqs = jnp.outer(t, freqs)
-
-    # Compute the complex “cis” values: exp(i * theta).
-    return jnp.exp(1j * freqs)  # shape [max_position_embeddings, half_dim]
+    return _cis(jnp.outer(t, self.inv_freqs))
 
   @staticmethod
   def _find_correction_dim(num_rotations: float, dim: int, base: float, max_position_embeddings: int) -> float:
@@ -822,10 +850,6 @@ class YarnRotaryEmbedding(nnx.Module):
         half_dim = h // 2
         if self.dot_pairwise:
           cos, sin = self._cos_sin(position, repeat_interleave=True)  # shape: [B, S, 1, dim]
-          if self.shard_mode == ShardMode.EXPLICIT:
-            rotated_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
-            cos = jnp.broadcast_to(cos, inputs.shape, out_sharding=rotated_sharding)
-            sin = jnp.broadcast_to(sin, inputs.shape, out_sharding=rotated_sharding)
           # Swap-and-sign [x_0, x_1, ...] -> [-x_1, x_0, ...] as a matmul against the block-skew
           # matrix I_{half_dim} (x) [[0, 1], [-1, 0]], avoiding the rank-5 reshape relayout copies.
           p_swap = jnp.kron(jnp.eye(half_dim, dtype=inputs.dtype), jnp.asarray([[0, 1], [-1, 0]], dtype=inputs.dtype))
@@ -844,17 +868,13 @@ class YarnRotaryEmbedding(nnx.Module):
           cos, sin = self._cos_sin(position)  # shape: [B, S, 1, half_dim]
           cos = cos[..., jnp.newaxis]
           sin = sin[..., jnp.newaxis]
-          if self.shard_mode == ShardMode.EXPLICIT:
-            rotated_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", None, None, None))
-            cos = jnp.broadcast_to(cos, pairs.shape, out_sharding=rotated_sharding)
-            sin = jnp.broadcast_to(sin, pairs.shape, out_sharding=rotated_sharding)
           swapped = jnp.flip(pairs, axis=-1)
           sign = jnp.asarray([-1.0, 1.0], dtype=jnp.float32)
           rotated_pairs = pairs * cos + swapped * sin * sign
           output = rotated_pairs.reshape(b, s, n, h)
     else:
       if self.direct_position_freqs:
-        freqs = jnp.exp(1j * self._position_angles(position, self.inv_freqs))  # shape: [B, S, 1, half_dim]
+        freqs = _cis(self._position_angles(position, self.inv_freqs))  # shape: [B, S, 1, half_dim]
       else:
         freqs = self._gather_freqs_cis(position)  # shape: [B, S, 1, half_dim]
       if self.interleave:
@@ -871,12 +891,6 @@ class YarnRotaryEmbedding(nnx.Module):
 
       inputs_complex = first_half + 1j * second_half  # shape: [b, s, n, half_dim]
       # Apply the rotary transformation via complex multiplication.
-      rotated_sharding = (
-          create_sharding(self.mesh, ("activation_batch", "activation_length", None, None))
-          if self.shard_mode == ShardMode.EXPLICIT
-          else None
-      )
-      freqs = jnp.broadcast_to(freqs, inputs_complex.shape, out_sharding=rotated_sharding)
       rotated = jnp.multiply(inputs_complex, freqs)  # shape: [b, s, n, half_dim]
 
       # Convert the complex result back to a real tensor.

@@ -110,6 +110,10 @@ def dsv3_dense_layers(
       dsv3_dense_layer.collect_w_ici,
       axis_mapping=axis_mapping,
   )
+  _reduce_w_ici = functools.partial(
+      dsv3_dense_layer.reduce_w_ici,
+      axis_mapping=axis_mapping,
+  )
 
   _dsv3_dense_layer = functools.partial(
       dsv3_dense_layer.dsv3_dense_layer,
@@ -134,5 +138,5 @@ def dsv3_dense_layers(
   def _scan_fn(x, w):
     return _dsv3_dense_layer(x, w), ()
 
-  x, _ = ops.w_collect_pipelined_scan(_scan_fn, x, w, _collect_w_dcn, _collect_w_ici)
+  x, _ = ops.w_collect_pipelined_scan(_scan_fn, x, w, _collect_w_dcn, _collect_w_ici, _reduce_w_ici)
   return x

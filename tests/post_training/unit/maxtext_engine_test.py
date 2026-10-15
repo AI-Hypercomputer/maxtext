@@ -16,11 +16,13 @@
 # pylint: disable=protected-access
 
 import dataclasses
+import os
 import types
 from typing import Any
 from unittest import mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import nnx
 from flax import struct
 import jax
@@ -37,6 +39,7 @@ import orbax.checkpoint as ocp
 import pytest
 from tunix.experimental.common import datatypes
 from tunix.experimental.train import abstract_trainer
+from tunix.rl import algo_core
 from tunix.sft import utils as sft_utils
 
 # training_engine imports tunix, so these tests need the post-training dependency bundle.
@@ -1008,6 +1011,44 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     self.assertTrue(t._compiled)
     np.testing.assert_allclose(t._accumulated_grads["weights"], jnp.array([8.0, 8.0]), rtol=1e-5)
 
+  def test_compile_expands_routed_experts_placeholder_from_config(self):
+    """`compile()` expands a `(B, S, 0, 0)` `routed_experts` placeholder using config."""
+    # pyconfig objects are read-only, so build a config with the routing dims instead
+    # of mutating `self.mock_config`.
+    config = self.setup_config(override_model_config=True, base_num_decoder_layers=3, num_experts_per_tok=4)
+    t = maxtext_engine.MaxTextTrainingEngine(config)
+    seen_shapes = []
+
+    def _loss_fn(model, routed_experts):
+      seen_shapes.append(routed_experts.shape)
+      return abstract_engine.WeightedMetric(
+          unreduced_sum=jnp.sum(model.weights[...]) * 8.0 + jnp.sum(routed_experts) * 0.0,
+          denominator=jnp.array(4.0),
+      )
+
+    t.with_loss_fn(_loss_fn)
+    t.with_gen_model_input_fn(lambda payload: {"routed_experts": payload.routed_experts})
+
+    dummy_payload = datatypes.RLTrainerPayload(
+        prompt_ids=np.zeros((2, 3), dtype=np.int32),
+        prompt_mask=np.ones((2, 3), dtype=np.int32),
+        completion_ids=np.zeros((2, 5), dtype=np.int32),
+        completion_mask=np.ones((2, 5), dtype=np.int32),
+        advantages=np.zeros((2,), dtype=np.float32),
+        routed_experts=np.empty((2, 8, 0, 0), dtype=np.int16),
+    )
+    t.compile(dummy_payload)
+    self.assertTrue(t._compiled)
+    self.assertIn((2, 8, 3, 4), seen_shapes)
+
+    real_payload = dataclasses.replace(
+        dummy_payload,
+        routed_experts=np.zeros((2, 8, 3, 4), dtype=np.int16),
+    )
+    with mock.patch.object(t, "_compile_for_batch", wraps=t._compile_for_batch) as mock_compile:
+      t.fwd_bwd(real_payload)
+      mock_compile.assert_not_called()
+
   def test_compiled_kernel_is_rebuilt_when_a_static_loss_argument_changes(self):
     """A changed non-traced loss argument must reach the loss, not the stale closure.
 
@@ -1639,6 +1680,189 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       # when `fwd_only` queued its computation.
       write_metrics.assert_called_once()
       self.assertIsNone(t._throttler._pending_metrics)
+
+
+class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
+  """End-to-end MoE router-replay AOT precompilation tests for MaxTextTrainingEngine."""
+
+  def _build_moe_engine(self, num_layers: int = 1, top_k: int = 2):
+    """Builds a miniature MoE MaxTextTrainingEngine for precompilation testing."""
+    self.enterContext(mock.patch.dict(os.environ, {"NEW_MODEL_DESIGN": "1"}))
+    num_devices = jax.device_count()
+    data_parallelism = min(2, num_devices)
+    tensor_parallelism = num_devices // data_parallelism
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        model_name="qwen3.5-35b-a3b",
+        override_model_config=True,
+        base_num_decoder_layers=num_layers,
+        num_decoder_layers=num_layers,
+        num_experts=4,
+        num_experts_per_tok=top_k,
+        base_emb_dim=128,
+        base_num_query_heads=2,
+        base_num_kv_heads=2,
+        head_dim=128,
+        base_mlp_dim=128,
+        base_moe_mlp_dim=128,
+        vocab_size=256,
+        attention="dot_product",
+        use_mrope=False,
+        partial_rotary_factor=0.25,
+        scan_layers=False,
+        ici_data_parallelism=data_parallelism,
+        ici_fsdp_parallelism=1,
+        ici_tensor_parallelism=tensor_parallelism,
+        run_name="maxtext_moe_routed_experts_precompile_e2e_test",
+        base_output_directory=self.create_tempdir().full_path,
+        init_weights_seed=42,
+        micro_batch_size_to_train_on=2,
+        max_target_length=8,
+        gradient_accumulation_steps=1,
+        warmup_steps_fraction=0.0,
+        learning_rate=1e-2,
+        enable_dropout=False,
+        record_internal_nn_metrics=False,
+        enable_tensorboard=False,
+        tensorboard_dir=self.create_tempdir().full_path,
+        skip_jax_distributed_system=True,
+        enable_checkpointing=False,
+        profiler_steps=0,
+        use_weight_converter=False,
+        dtype="float32",
+        weight_dtype="float32",
+        grad_dtype="float32",
+    )
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    engine = maxtext_engine.MaxTextTrainingEngine(
+        cfg,
+        mesh=mesh,
+        wrap_with_tunix_adapter=True,
+        tokenizer_pad_id=0,
+    )
+    algo_config = types.SimpleNamespace(
+        beta=0.0,
+        epsilon=0.2,
+        epsilon_high=0.2,
+        loss_algo="grpo",
+        loss_agg_mode="token-mean",
+        temperature=1.0,
+        kl_loss_mode="low_var_kl",
+        kl_clamp_value=None,
+    )
+    engine.with_loss_fn(algo_core.grpo_loss_fn, has_aux=True)
+    engine.with_gen_model_input_fn(
+        lambda payload: {
+            "train_example": payload,
+            "algo_config": algo_config,
+            "pad_id": 0,
+            "eos_id": 2,
+        }
+    )
+    trace_counts = {"fwd_bwd": 0, "update": 0}
+    orig_fwd_bwd = engine._fwd_bwd_kernel
+    orig_update = engine._update_kernel
+
+    def traced_fwd_bwd(*args, **kwargs):
+      trace_counts["fwd_bwd"] += 1
+      return orig_fwd_bwd(*args, **kwargs)
+
+    def traced_update(*args, **kwargs):
+      trace_counts["update"] += 1
+      return orig_update(*args, **kwargs)
+
+    engine._fwd_bwd_kernel = traced_fwd_bwd
+    engine._update_kernel = traced_update
+    return engine, trace_counts
+
+  @parameterized.named_parameters(
+      ("padded_moe_routed_experts", "padded"),
+      ("packed_moe_routed_experts", "packed"),
+  )
+  def test_first_real_step_is_served_from_compiled_executables(self, layout: str):
+    num_layers, top_k = 1, 2
+    engine, trace_counts = self._build_moe_engine(num_layers=num_layers, top_k=top_k)
+
+    if layout == "padded":
+      dummy_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((2, 2), dtype=np.int32),
+          prompt_mask=np.zeros((2, 2), dtype=np.int32),
+          completion_ids=np.zeros((2, 3), dtype=np.int32),
+          completion_mask=np.zeros((2, 3), dtype=np.int32),
+          advantages=np.zeros((2,), dtype=np.float32),
+          old_per_token_logps=np.zeros((2, 3), dtype=np.float32),
+          routed_experts=np.empty((2, 5, 0, 0), dtype=np.int16),
+      )
+      real_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.array([[10, 11], [12, 0]], dtype=np.int32),
+          prompt_mask=np.array([[1, 1], [1, 0]], dtype=np.int32),
+          completion_ids=np.array([[20, 21, 2], [22, 2, 0]], dtype=np.int32),
+          completion_mask=np.array([[1, 1, 1], [1, 1, 0]], dtype=np.int32),
+          advantages=np.array([1.0, -1.0], dtype=np.float32),
+          old_per_token_logps=np.full((2, 3), -0.5, dtype=np.float32),
+          routed_experts=np.zeros((2, 5, num_layers, top_k), dtype=np.int16),
+      )
+    else:
+      dummy_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((2, 0), dtype=np.int32),
+          prompt_mask=np.zeros((2, 0), dtype=np.int32),
+          completion_ids=np.zeros((2, 8), dtype=np.int32),
+          completion_mask=np.zeros((2, 8), dtype=np.int32),
+          advantages=np.zeros((2, 8), dtype=np.float32),
+          old_per_token_logps=np.zeros((2, 8), dtype=np.float32),
+          routed_experts=np.empty((2, 8, 0, 0), dtype=np.int16),
+          segment_ids=np.zeros((2, 8), dtype=np.int32),
+          segment_positions=np.zeros((2, 8), dtype=np.int32),
+          num_segments=9,
+      )
+      real_payload = datatypes.RLTrainerPayload(
+          prompt_ids=np.zeros((2, 0), dtype=np.int32),
+          prompt_mask=np.zeros((2, 0), dtype=np.int32),
+          completion_ids=np.array(
+              [[10, 11, 20, 21, 2, 0, 0, 0], [12, 22, 2, 0, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          completion_mask=np.array(
+              [[0, 0, 1, 1, 1, 0, 0, 0], [0, 1, 1, 0, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          advantages=np.array(
+              [[0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0], [0.0, -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0]],
+              dtype=np.float32,
+          ),
+          old_per_token_logps=np.full((2, 8), -0.5, dtype=np.float32),
+          routed_experts=np.zeros((2, 8, num_layers, top_k), dtype=np.int16),
+          segment_ids=np.array(
+              [[1, 1, 1, 1, 1, 0, 0, 0], [1, 1, 1, 0, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          segment_positions=np.array(
+              [[0, 1, 2, 3, 4, 0, 0, 0], [0, 1, 2, 0, 0, 0, 0, 0]],
+              dtype=np.int32,
+          ),
+          num_segments=9,
+      )
+
+    engine.compile(dummy_payload)
+    self.assertTrue(engine._compiled)
+    self.assertEqual(trace_counts, {"fwd_bwd": 2, "update": 1})
+    traces_after_compile = dict(trace_counts)
+    params_before = jax.tree.map(np.asarray, nnx.state(engine.model, nnx.Param))
+
+    with mock.patch.object(engine, "_compile_for_batch", wraps=engine._compile_for_batch) as mock_compile:
+      engine.fwd_bwd(real_payload)
+      step = engine.update()
+      mock_compile.assert_not_called()
+
+    self.assertEqual(step, 1)
+    self.assertEqual(trace_counts, traces_after_compile)
+    params_after = nnx.state(engine.model, nnx.Param)
+    self.assertTrue(
+        any(
+            not np.allclose(a, b)
+            for a, b in zip(jax.tree.leaves(params_before), jax.tree.leaves(params_after), strict=True)
+        )
+    )
 
 
 if __name__ == "__main__":

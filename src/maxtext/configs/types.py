@@ -30,7 +30,7 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -719,6 +719,13 @@ class MTP(BaseModel):
       False,
       description="Reuse the main decoder's token embeddings instead of a second lookup.",
   )
+  mtp_norm_main_hidden_state: bool = Field(
+      False,
+      description=(
+          "Apply the decoder's final norm to the main hidden state before passing it to MTP, as in"
+          " Megatron-LM where `final_layernorm` precedes the MTP `hnorm`."
+      ),
+  )
 
 
 class LogitsAndLoss(BaseModel):
@@ -731,6 +738,16 @@ class LogitsAndLoss(BaseModel):
   )
   logits_dot_in_fp32: bool = Field(False, description="Use fp32 for the logits dot product for stability.")
   cast_logits_to_fp32: bool = Field(True, description="Whether to cast the final logits to fp32.")
+  lm_head_weight_grad_in_kernel_order: bool | None = Field(
+      None,
+      description=(
+          "Trace the untied LM head's dot inside a jax.sharding.auto_axes region so that XLA folds the "
+          "transpose back into the gradient dot and the weight gradient comes out in the kernel's stored "
+          "axis order. Recovers the weight-gradient reduce-scatter that shard_mode=explicit otherwise loses, "
+          "leaving the stored kernel, its initialization and the arithmetic untouched. No effect under "
+          "shard_mode=auto. None means on for an untied model under shard_mode=explicit and off everywhere else."
+      ),
+  )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
@@ -1015,6 +1032,38 @@ class SplashAttention(BaseModel):
       description=(
           "Experimental flag: If enabled, the K tensor in splash attention is"
           " quantized to jnp.float8_e4m3fn, without scaling factors."
+      ),
+  )
+  sa_dkv_reuse_scaled_q: bool = Field(
+      False,
+      description=(
+          "Experimental flag (maps to SplashConfig.dkv_reuse_scaled_q). With sa_use_base2_exp=True, the"
+          " fused dkv backward kernel normally keeps two copies of q live (LOG2E-scaled q for logits and"
+          " unscaled q for dK). When True, dkv reuses the LOG2E-scaled q for the dK matmul and divides dK"
+          " by LOG2E, keeping only one live q copy. Works with bf16 or fp8 q across all attention types."
+          " Subsumed by sa_q_prescaled_log2e; prefer sa_dkv_reuse_scaled_q when q is bf16 or on paths where"
+          " sa_q_prescaled_log2e is not supported (non-MLA or use_mla_absorbed_mqa=True)."
+      ),
+  )
+  sa_q_prescaled_log2e: bool = Field(
+      False,
+      description=(
+          "Experimental flag (maps to SplashConfig.q_prescaled_log2e). With sa_use_base2_exp=True and"
+          " experimental_sa_quant_q_fp8=True, in-kernel LOG2E scaling rounds q to fp8 a second time after"
+          " MaxText's softmax_scale cast. When True, attention_mla.py folds LOG2E into the f32"
+          " softmax_scale multiply before the fp8 cast (single fp8 rounding), and the kernel skips internal"
+          " q scaling in fwd/dq/dkv and divides dq and dk by LOG2E. Strictly subsumes sa_dkv_reuse_scaled_q"
+          " (sa_q_prescaled_log2e > sa_dkv_reuse_scaled_q > both False for non-absorbed MLA with fp8 q)."
+      ),
+  )
+  sa_ignore_segment_ids: bool = Field(
+      False,
+      description=(
+          "Do not pass decoder segment ids to splash attention, which skips the"
+          " per-block segment mask. Only valid when every row is a single"
+          " segment: dataset_type='c4_mlperf' with stream chunking for both"
+          " train and eval. Requires attention='flash' and attention_type in"
+          " ('global', 'mla', 'local_sliding', 'chunk')."
       ),
   )
   use_max_logit_estimate: int = Field(
@@ -1633,9 +1682,11 @@ class DeepSeekMoE(BaseModel):
       False,
       description="Whether to use Lineage DeepSeek-V3 execution.",
   )
-  lineage_quantization: Literal["none", "fp8_full"] = Field(
+  lineage_quantization: Literal["none", "fp8_full", "fp8_full_splash_qk", "fp8_full_splash_qk_e3"] = Field(
       "none",
-      description=("Quantization of the Lineage sparse-layer routed experts. Only used" " if use_lineage is True."),
+      description=(
+          "Quantization of the Lineage sparse-layer routed experts and MLA." " Only used if use_lineage is True."
+      ),
   )
 
   @classmethod
@@ -1653,6 +1704,14 @@ class DeepSeekMoE(BaseModel):
           " from the previous step's per-expert token counts with `dsv3_expert_shuffle.lpt_expert_permutation`; the"
           " first step uses the identity."
       ),
+  )
+  lineage_diag_band_skip: bool = Field(
+      True,
+      description="Enable row-band diagonal skip in Lineage Splash attention.",
+  )
+  lineage_dq_reduction_steps: int = Field(
+      1,
+      description=("Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None."),
   )
 
 
@@ -1922,12 +1981,52 @@ class LayoutAndSharding(BaseModel):
       False,
       description="Use two separate All-Gather calls for dense MLP weights sharded on both FSDP and FSDP-transpose.",
   )
+  dense_weight_grad_in_kernel_order: bool | None = Field(
+      None,
+      description=(
+          "Trace the per-layer attention and MLP projection dots inside a jax.sharding.auto_axes region so that "
+          "XLA folds the transpose back into the gradient dot and each weight gradient comes out in its kernel's "
+          "stored axis order. This is the in-loop counterpart of lm_head_weight_grad_in_kernel_order and, like it, "
+          "None means on wherever it can act: shard_mode=explicit, where the Sharding custom-call on every dot "
+          "output blocks that fold. Without it explicit is 0.33%-1.48% slower than auto at every measured layer "
+          "count that is not a multiple of 8; with it explicit lands within 0.2% of auto everywhere "
+          "(docs/guides/optimization/shard_mode_performance.md section 4.8). Stored kernels, their initialization "
+          "and the arithmetic are untouched, so gradients are bit-identical to the default rule. No effect under "
+          "shard_mode=auto, where XLA folds the transpose itself, or on quantized layers."
+      ),
+  )
+  save_fsdp_gathered_weights: bool = Field(
+      False,
+      description=(
+          "Gather each FSDP-sharded layer kernel once at the top of the scan body, in config.dtype, and keep the "
+          "gathered value as a remat residual so the backward pass reads it instead of re-gathering. Mode-neutral: "
+          "auto and explicit get the same answer to within half a point. Whether it is a win depends on how much of "
+          "the backward pass is FSDP all-gather rather than activation traffic, so it has a sign condition: measured "
+          "on v5p with the production SparseCore libtpu flags it is worth -3% to -8% at up to 2,048 tokens per "
+          "device-step (mixtral-8x7b -8.3%, llama2-7b -5.2%, qwen3-8b -4.7%, and -6.3% at base_emb_dim 4096), but it "
+          "costs +0.5% to +1.0% above ~4,096 tokens per device-step and regresses the gemma2/gemma3 family at any "
+          "size, whose 256K-vocab logits dominate the step. See "
+          "docs/guides/optimization/shard_mode_performance.md section 4.11 for the full table and the rule. Off by "
+          "default for that reason and because the residuals grow HLO temporaries by 25%-75% (deepseek2-16b runs "
+          "without it and OOMs with it); measure both step time and peak HBM before enabling. Numerics are "
+          "unchanged -- only kernels are touched, and every consumer already casts them to config.dtype."
+      ),
+  )
   internal_compile: bool = Field(
       False,
       description="Use internal_compile to bypass open-source topology mappings.",
   )
   internal_compile_num_devices: int = Field(-1, description="Number of devices when using internal_compile.")
   compile_xla_flags: str = Field("", description="Compiler options for compilation only.")
+  prefetch_fsdp_weights: bool = Field(
+      False,
+      description=(
+          "Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in"
+          " both the forward and backward pass. Requires scan_layers=True; the backward always rematerializes"
+          " each layer in full (remat_policy is ignored). Has no effect when no FSDP mesh axis spans more"
+          " than one device. See docs/guides/optimization/fsdp_prefetch.md."
+      ),
+  )
 
 
 class DcnParallelism(BaseModel):
@@ -4439,6 +4538,58 @@ class MaxTextConfig(
     return self
 
   @model_validator(mode="after")
+  def resolve_lm_head_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the tri-state flag, and reject it where it cannot be honored.
+
+    The transpose it removes only exists under explicit sharding, and on an untied
+    model removing it has been a win or a wash on every configuration measured
+    (docs/guides/optimization/shard_mode_performance.md section 5) -- on qwen3-8b it
+    is the difference between +3.25% and -0.41% against `auto`. So the default is
+    "on wherever it can do anything", and writing the flag out is only needed to
+    reproduce a measurement.
+    """
+    if self.lm_head_weight_grad_in_kernel_order is None:
+      self.lm_head_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT and not self.logits_via_embedding
+    elif self.lm_head_weight_grad_in_kernel_order and self.logits_via_embedding:
+      raise ValueError(
+          "lm_head_weight_grad_in_kernel_order only applies to the untied LM head, but logits_via_embedding is True."
+      )
+    return self
+
+  @model_validator(mode="after")
+  def resolve_dense_weight_grad_in_kernel_order(self) -> "MaxTextConfig":
+    """Resolve the in-loop counterpart of the LM-head flag.
+
+    Same barrier, same shape of fix, same default rule: on wherever it can act.
+    The two are independent and additive -- on llama2 at 18 layers, explicit
+    costs +1.098% against auto with neither flag, +0.621% with this one alone,
+    +0.429% with the LM-head flag alone and +0.005% with both
+    (docs/guides/optimization/shard_mode_performance.md section 4.8).
+    """
+    if self.dense_weight_grad_in_kernel_order is None:
+      self.dense_weight_grad_in_kernel_order = self.shard_mode == ShardMode.EXPLICIT
+    return self
+
+  @model_validator(mode="after")
+  def validate_save_fsdp_gathered_weights(self) -> "MaxTextConfig":
+    """Reject the three configurations the gathered-weight residual cannot serve."""
+    if self.save_fsdp_gathered_weights and self.quantization:
+      raise ValueError("save_fsdp_gathered_weights casts kernels to config.dtype, which is not valid when quantizing.")
+    if self.save_fsdp_gathered_weights and is_fp8_dtype(self.weight_dtype):
+      # Weight-only fp8 leaves `quantization` unset, so the check above misses it. The hoisted
+      # gather casts to config.dtype, which would upcast the kernel before the all-gather -- the
+      # opposite of what fp8 weights are for -- and separate it from its kernel_scale.
+      raise ValueError(
+          "save_fsdp_gathered_weights casts kernels to config.dtype, which discards the fp8 encoding "
+          f"of weight_dtype={self.weight_dtype}."
+      )
+    if self.save_fsdp_gathered_weights and self.parameter_memory_host_offload:
+      raise ValueError(
+          "save_fsdp_gathered_weights keeps gathered kernels in HBM, which defeats parameter_memory_host_offload."
+      )
+    return self
+
+  @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
     Computes all derived values and runs all cross-field validations after initial parsing.
@@ -5253,6 +5404,18 @@ class MaxTextConfig(
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if self.mtp_reuse_input_embedding and self.use_multimodal:
       raise ValueError("`mtp_reuse_input_embedding` does not support multimodal inputs.")
+    if self.mtp_norm_main_hidden_state:
+      if self.num_vocab_tiling > 1:
+        raise ValueError(
+            "`mtp_norm_main_hidden_state` is not supported with `num_vocab_tiling > 1`: under vocab tiling the"
+            " decoder skips `apply_output_head` in train mode and `decoder_norm` runs later inside"
+            " `vocab_tiling_nnx_loss`, so the MTP block would still receive the un-normalized hidden state."
+        )
+      if self.mhc_expansion_rate > 1:
+        raise ValueError(
+            "`mtp_norm_main_hidden_state` is not supported with `mhc_expansion_rate > 1`: the MTP layers expect"
+            " the expanded 4D hyper-connection state, which the decoder's final norm collapses to 3D."
+        )
     if self.quantize_mtp:
       if self.mtp_num_layers <= 0:
         raise ValueError("`quantize_mtp` can only be enabled when `mtp_num_layers > 0`.")
@@ -5403,6 +5566,7 @@ class MaxTextConfig(
           "qwen3-vl-2b",
           "qwen3-vl-4b",
           "qwen3-vl-30b-a3b",
+          "qwen3.5-9b",
           "qwen3.5-35b-a3b",
           "qwen3.5-397b-a17b",
           "maxtext-omni-gemma3-qwen3",
@@ -5434,7 +5598,10 @@ class MaxTextConfig(
           "simple",
           "simple_mlp",
           "llama2",
+          "llama4",
           "deepseek",
+          "gpt3",
+          "gpt_oss",
           "mistral",
           "mixtral",
           "qwen2",
@@ -5446,6 +5613,8 @@ class MaxTextConfig(
           "gemma",
           "gemma2",
           "gemma3",
+          "gemma4",
+          "gemma4_small",
       }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
@@ -5823,6 +5992,77 @@ class MaxTextConfig(
           "K quantization is currently only supported with"
           f" attention_type='mla'. Found attention_type='{self.attention_type}'"
       )
+    if self.sa_qproj_bwd_bf16 and not (
+        self.quantization == "fp8_full" and self.use_qwix_quantization and not self.use_batch_split_schedule
+    ):
+      raise ValueError(
+          "sa_qproj_bwd_bf16=True only takes effect with quantization='fp8_full', use_qwix_quantization=True and"
+          " use_batch_split_schedule=False."
+      )
+    if self.sa_q_prescaled_log2e:
+      if not (
+          self.experimental_sa_quant_q_fp8
+          and self.sa_use_base2_exp
+          and self.use_tokamax_splash
+          and self.attention == "flash"
+      ):
+        raise ValueError(
+            "sa_q_prescaled_log2e requires experimental_sa_quant_q_fp8=True, sa_use_base2_exp=True,"
+            " use_tokamax_splash=True and attention='flash'."
+        )
+      # The LOG2E fold is only in the MLA query path (attention_mla.py).
+      if self.attention_type != "mla":
+        raise ValueError(f"sa_q_prescaled_log2e only supports attention_type='mla'; got '{self.attention_type}'.")
+      if self.use_mla_absorbed_mqa:
+        raise ValueError("sa_q_prescaled_log2e is not supported with use_mla_absorbed_mqa=True.")
+      # Ring and USP context parallelism use MaxText's vendored splash kernel (natural exp, no
+      # q_prescaled_log2e), which would apply the LOG2E-scaled q as natural-exp logits.
+      if self.context_parallel_strategy.lower() in ("ring", "usp"):
+        raise ValueError(
+            "sa_q_prescaled_log2e is not supported with context_parallel_strategy"
+            f" '{self.context_parallel_strategy}'; use 'all_gather' or 'ulysses'."
+        )
+      if self.sa_dkv_reuse_scaled_q:
+        raise ValueError("sa_q_prescaled_log2e subsumes sa_dkv_reuse_scaled_q; set only one of them.")
+    if self.sa_dkv_reuse_scaled_q:
+      if not (self.sa_use_base2_exp and self.use_tokamax_splash and self.attention == "flash"):
+        raise ValueError(
+            "sa_dkv_reuse_scaled_q only takes effect with sa_use_base2_exp=True, use_tokamax_splash=True and"
+            " attention='flash'."
+        )
+      if self.context_parallel_strategy.lower() in ("ring", "usp"):
+        raise ValueError(
+            "sa_dkv_reuse_scaled_q is not supported with context_parallel_strategy"
+            f" '{self.context_parallel_strategy}'; use 'all_gather' or 'ulysses'."
+        )
+    if self.sa_ignore_segment_ids:
+      # Mirrors the use_stream_chunking=None resolution in tfds_data_processing_c4_mlperf.py: stream
+      # chunking (uniform segment ids per row) is the default for pre-tokenized data.
+      def _stream_chunked(tokenize_data: bool) -> bool:
+        return self.use_stream_chunking is True or (self.use_stream_chunking is None and not tokenize_data)
+
+      if not (
+          self.dataset_type == DatasetType.C4MLPERF
+          and _stream_chunked(self.tokenize_train_data)
+          and (self.eval_interval <= 0 or _stream_chunked(self.tokenize_eval_data))
+      ):
+        raise ValueError(
+            "sa_ignore_segment_ids requires dataset_type='c4_mlperf' with"
+            " stream chunking for train and eval (use_stream_chunking=True, or"
+            " None with pre-tokenized data); packed sequences need the segment"
+            " mask."
+        )
+      if self.attention != "flash":
+        raise ValueError("sa_ignore_segment_ids only applies to attention='flash'; got" f" attention='{self.attention}'.")
+      # Types whose masks come from positions only. COMPRESSED also uses segment ids (-1) to mask block padding.
+      if self.attention_type not in ("global", "mla", "local_sliding", "chunk"):
+        raise ValueError(
+            "sa_ignore_segment_ids supports attention_type in ('global',"
+            " 'mla', 'local_sliding', 'chunk'); got"
+            f" attention_type='{self.attention_type}'."
+        )
+      if self.use_lineage:
+        raise ValueError("sa_ignore_segment_ids is not supported with use_lineage=True.")
     if self.share_kv_projections and self.fused_qkv:
       raise ValueError("`share_kv_projections` is not compatible with `fused_qkv`.")
     if self.share_kv_projections and self.attention_type == "mla":

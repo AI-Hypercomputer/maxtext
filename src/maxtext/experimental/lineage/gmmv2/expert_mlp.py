@@ -41,7 +41,11 @@ Every forward and backward matmul is a single Pallas kernel that does the
                    [BT,56,128]
 
 ``gate_gmm`` is forward-only and writes into a caller buffer (the activation
-bank); ``gate_gmm_bwd`` is its backward pass. ``ExpertGmm3d`` implements the
+bank); ``gate_gmm_bwd`` is its backward pass. ``gather_gate_gmm`` is
+``gate_gmm`` of token rows it gathers in-kernel, fusing the routing permutation
+into the GMM. ``linear_gmm_bwd_gather`` is the FP8 backward of the linear GMM
+and the SiLU on output gradient rows it gathers in-kernel (see
+``linear_bwd_split``). ``ExpertGmm3d`` implements the
 ``GmmFn`` protocol (``.gate`` / ``.gate_bwd`` / ``.linear`` / ``.linear_bwd``)
 used by ``dsv3_experts.py``. The backward passes can accumulate the weight
 gradients into existing ones in place (``dw_acc``).
@@ -56,7 +60,10 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 
+from maxtext.experimental.lineage.gmmv2 import gate_bwd_fused
 from maxtext.experimental.lineage.gmmv2 import gmmv2_kernel
+from maxtext.experimental.lineage.gmmv2 import linear_bwd_split
+from maxtext.experimental.lineage.gmmv2 import linear_combine_fwd
 from maxtext.experimental.lineage.gmmv2 import tgmm_kernel
 
 TileSizes = gmmv2_kernel.TileSizes
@@ -91,6 +98,12 @@ class ExpertMlpConfig:
       ``T(8,128)`` in front of every GMM instead. Values and autodiff are
       unchanged. Requires the rhs row tile (``tile_k``, or ``tile_n`` for the
       transposed dx / dact GMMs) to divide the per-expert rows.
+    fuse_gate_bwd: fuse the FP8 gate backward `dx` GMM and `dW` TGMM into a
+      single Pallas kernel (`gate_bwd_fused`) when supported.
+    linear_bwd_dgrad: tiles of the gathered FP8 linear dgrad + SiLU backward
+      kernel of `linear_gmm_bwd_gather`.
+    linear_bwd_wgrad: tiles of the FP8 linear wgrad kernel of
+      `linear_gmm_bwd_gather`.
   """
 
   gate_fwd: TileSizes | None = None
@@ -102,6 +115,9 @@ class ExpertMlpConfig:
   disable_multi_core_mode: bool = False
   zero_initialize: bool = True
   flat_weights: bool = True
+  fuse_gate_bwd: bool = True
+  linear_bwd_dgrad: linear_bwd_split.DgradTiles = linear_bwd_split.DEFAULT_DGRAD_TILES
+  linear_bwd_wgrad: linear_bwd_split.WgradTiles = linear_bwd_split.DEFAULT_WGRAD_TILES
 
 
 def _check_3d(name: str, x: jax.Array) -> None:
@@ -241,6 +257,28 @@ def _tgmm_dw(
 # ----------------------------------------------------------------------------
 
 
+def _gate_fwd_kwargs(
+    out: jax.Array,
+    out_scale: jax.Array | None,
+    glu_coeffs: jax.Array | None,
+    glu_out_dtype: jnp.dtype | None,
+    glu_out_scale: jax.Array | None,
+) -> dict[str, Any]:
+  """Returns the fp8 / fused GLU `gmm_v2` arguments of the gate GMM."""
+  kwargs: dict[str, Any] = {}
+  if out_scale is not None:
+    kwargs.update(
+        out_scale=out_scale,
+        acc_dtype=jnp.float32,
+        preferred_element_type=out.dtype,
+    )
+  if glu_coeffs is not None:
+    kwargs["glu_coeffs"] = glu_coeffs
+    kwargs["glu_out_dtype"] = glu_out_dtype
+    kwargs["glu_out_scale"] = glu_out_scale
+  return kwargs
+
+
 def gate_gmm(
     cfg: ExpertMlpConfig,
     x3d: jax.Array,  # bf16 or fp8 [BT, D // 128, 128]
@@ -278,17 +316,6 @@ def gate_gmm(
     The updated `out`, or `(out, act)` when `glu_coeffs` is provided.
   """
   _check_3d("x3d", x3d)
-  kwargs: dict[str, Any] = {}
-  if out_scale is not None:
-    kwargs.update(
-        out_scale=out_scale,
-        acc_dtype=jnp.float32,
-        preferred_element_type=out.dtype,
-    )
-  if glu_coeffs is not None:
-    kwargs["glu_coeffs"] = glu_coeffs
-    kwargs["glu_out_dtype"] = glu_out_dtype
-    kwargs["glu_out_scale"] = glu_out_scale
   return _gmm(
       cfg,
       cfg.gate_fwd,
@@ -297,7 +324,66 @@ def gate_gmm(
       group_sizes,
       out=out,
       out_offset=out_offset,
-      **kwargs,
+      **_gate_fwd_kwargs(out, out_scale, glu_coeffs, glu_out_dtype, glu_out_scale),
+  )
+
+
+def gather_gate_gmm(
+    cfg: ExpertMlpConfig,
+    x3d: jax.Array,  # bf16 or fp8 [N, D // 128, 128]
+    indices: jax.Array,  # int32 [num_indices]
+    start: jax.Array | int,
+    w_gate: jax.Array,  # [E, D, F_gate]
+    group_sizes: jax.Array,  # int32 [E]
+    out: jax.Array,  # [R, F_gate]
+    out_offset: jax.Array | int,
+    out_scale: jax.Array | None = None,  # f32 [1, 1]
+    *,
+    size_m: int,
+    glu_coeffs: jax.Array | None = None,  # [size_m, 1]
+    glu_out_dtype: jnp.dtype | None = None,
+    glu_out_scale: jax.Array | None = None,  # f32 [1, 1]
+) -> Any:  # [R, F_gate] (and [size_m, F_gate // 2] when glu_coeffs is set)
+  """`gate_gmm` of the rows `x3d[indices[start + m]]`, m < size_m.
+
+  Same result as `gate_gmm(cfg, x3d[indices[start:start + size_m]], ...)`,
+  but the kernel DMAs the routed rows straight from `x3d` into VMEM, so the
+  gathered `[size_m, D // 128, 128]` tokens are never written to HBM. Only the
+  rows of the groups are gathered: requires start + sum(group_sizes) <=
+  num_indices; the indices past that are never read.
+
+  Args:
+    cfg: Kernel configuration. Requires `disable_multi_core_mode`.
+    x3d: Unpermuted tokens in the 3D layout.
+    indices: Row of x3d of each routed token.
+    start: Index into `indices` of routed token 0.
+    w_gate: Gate weights.
+    group_sizes: Routed tokens per local expert, in routed token order.
+    out: Buffer to write into, e.g. the activation bank. Donated.
+    out_offset: Row of `out` receiving routed token 0 (see `gate_gmm`).
+    out_scale: For fp8 x3d and w_gate, the product of their per-tensor scales.
+    size_m: Number of routed tokens (the `BT` of `gate_gmm`), static.
+    glu_coeffs: Optional per-routed-token coefficients `[size_m, 1]` (see
+      `gate_gmm`).
+    glu_out_dtype: Optional dtype for the fused GLU output `act`.
+    glu_out_scale: Optional `[1, 1]` f32 quantization scale for `act`.
+
+  Returns:
+    The updated `out`, or `(out, act)` when `glu_coeffs` is provided.
+  """
+  _check_3d("x3d", x3d)
+  return _gmm(
+      cfg,
+      cfg.gate_fwd,
+      x3d,
+      w_gate,
+      group_sizes,
+      out=out,
+      out_offset=out_offset,
+      lhs_gather_indices=indices,
+      lhs_gather_start=start,
+      lhs_gather_size_m=size_m,
+      **_gate_fwd_kwargs(out, out_scale, glu_coeffs, glu_out_dtype, glu_out_scale),
   )
 
 
@@ -312,6 +398,8 @@ def gate_gmm_bwd(
     w_q: jax.Array | None = None,  # fp8 [E, D, F_gate]
     dgate_scale: jax.Array | None = None,  # f32 [1, 1]
     dgate_qtype: jnp.dtype | None = None,
+    dgate_tile_exps: jax.Array | None = None,  # int32 [max_gd]
+    dgrad_tile_rows: int | None = None,
     dx_scale: jax.Array | None = None,  # f32 [1, 1]
     dw_scale: jax.Array | None = None,  # f32 [1, 1]
     dw_dtype: jnp.dtype | None = None,
@@ -333,10 +421,14 @@ def gate_gmm_bwd(
     w_q: Optional fp8 copy of w_gate; selects the fp8 path.
     dgate_scale: Optional per-tensor scale to quantize bf16 `dgate` in-kernel.
     dgate_qtype: Optional fp8 dtype to quantize `dgate` to in-kernel.
+    dgate_tile_exps: Optional per-tile power-of-two scale exponents of pre-
+      quantized `dgate` from `linear_bwd_dgrad`.
+    dgrad_tile_rows: Optional `tile_rows` of `linear_bwd_dgrad` when
+      `dgate_tile_exps` is provided.
     dx_scale: Product of the dgate and w_q scales (or w_q scale when
-      `dgate_scale` is given).
+      `dgate_scale` or `dgate_tile_exps` is given).
     dw_scale: Product of the x3d and dgate scales (or x3d scale when
-      `dgate_scale` is given).
+      `dgate_scale` or `dgate_tile_exps` is given).
     dw_dtype: Dtype of dw_gate. Defaults to w_gate's dtype.
 
   Returns:
@@ -348,6 +440,33 @@ def gate_gmm_bwd(
     dgate = dgate.astype(x3d.dtype)
     dx_kwargs, dw_kwargs = {}, {}
   else:
+    target_dw_dtype = w_gate.dtype if dw_dtype is None else dw_dtype
+    if (
+        dgate_scale is None
+        and cfg.disable_multi_core_mode
+        and cfg.fuse_gate_bwd
+        and dx_scale is not None
+        and dw_scale is not None
+        and gate_bwd_fused.is_supported(x3d, w_q, group_sizes, dgate, dw_dtype=target_dw_dtype)
+    ):
+      can_alias_acc = dw_acc is not None and not _psum_axes(x3d, w_gate)
+      dx3d, dw_gate = gate_bwd_fused.gate_bwd_fused(
+          x3d,
+          w_q,
+          group_sizes,
+          dgate,
+          dx_scale=dx_scale,
+          dw_scale=dw_scale,
+          dgate_tile_exps=dgate_tile_exps,
+          dgrad_tile_rows=(cfg.linear_bwd_dgrad.tile_rows if dgrad_tile_rows is None else dgrad_tile_rows),
+          dw_acc=dw_acc if can_alias_acc else None,
+          dw_dtype=target_dw_dtype,
+      )
+      if not can_alias_acc:
+        dw_gate = _match_vma(dw_gate, w_gate)
+        if dw_acc is not None:
+          dw_gate = dw_acc + dw_gate
+      return _match_vma(dx3d, x3d), dw_gate
     dx_kwargs = dict(
         out_scale=dx_scale,
         acc_dtype=jnp.float32,
@@ -583,6 +702,108 @@ def _linear_gmm_bwd(cfg, res, dout3d):
 linear_gmm.defvjp(_linear_gmm_fwd, _linear_gmm_bwd)
 
 
+def linear_gmm_bwd_gather(
+    cfg: ExpertMlpConfig,
+    dout_ag: jax.Array,  # bf16 or fp8 [N, D // 128, 128]
+    indices: jax.Array,  # int32 [num_indices]
+    start: jax.Array | int,
+    w_linear: jax.Array,  # [E, F, D]
+    w_q: jax.Array,  # fp8 [E, F, D]
+    group_sizes: jax.Array,  # int32 [E]
+    bank: jax.Array,  # bf16 [R, 2F]
+    bank_row: jax.Array | int,
+    coeffs: jax.Array,  # [M, 1]
+    dw_acc: jax.Array | None = None,  # [E, F, D]
+    *,
+    act_scale: float,
+    act_qtype: jnp.dtype,
+    dout_qtype: jnp.dtype,
+    dout_scale: jax.Array | None = None,
+    quantize_grad_gate: bool | None = None,
+    w_scale: float,
+    dw_dtype: jnp.dtype | None = None,
+) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array]:
+  """FP8 backward of SiLU + linear_gmm of the gathered rows of `dout_ag`.
+
+  Row m < sum(group_sizes) is the cotangent `dout_ag[indices[start + m]]` of
+  `linear_gmm_fp8(act)` with `act[m] = silu(g0) * g1 * coeffs[m]` of the gating
+  activations `[g0, g1] = bank[bank_row + m]` (see `linear_bwd_split`).
+
+  Args:
+    cfg: Kernel configuration.
+    dout_ag: Cotangent of the top-k reduced linear outputs, 3D layout (bf16, or
+      `dout_qtype` when `dout_scale` is given).
+    indices: Row of dout_ag of each sorted slot.
+    start: Sorted slot of row 0.
+    w_linear: Linear weights, giving the type of dw.
+    w_q: fp8 linear weights, quantized with `w_scale`.
+    group_sizes: Rows per local expert.
+    bank: Gating activations.
+    bank_row: Bank row of row 0, a multiple of 32.
+    coeffs: Routing coefficients `[M, 1]` of the rows.
+    dw_acc: Optional gradient of `w_linear` to accumulate into (see `_tgmm_dw`).
+    act_scale: Static scale of the fp8 activations.
+    act_qtype: fp8 dtype of the activations.
+    dout_qtype: fp8 dtype the cotangent rows are quantized to.
+    dout_scale: Optional `[1, 1]` f32 scale of pre-quantized `dout_ag`.
+    quantize_grad_gate: Whether `dgrad` emits `dgate` already quantized to
+      `dout_qtype` with per-tile power-of-two scale (`dgate_tile_exps`).
+      Defaults to `cfg.disable_multi_core_mode and cfg.fuse_gate_bwd`.
+    w_scale: Static scale of w_q.
+    dw_dtype: Dtype of dw. Defaults to w_linear's dtype.
+
+  Returns:
+    Tuple of (dgate `[M, 2F]` (`dout_qtype` if `quantize_grad_gate` else bf16),
+    its `[1, 1]` f32 absmax, optional `dgate_tile_exps` `[max_gd]` int32,
+    dcoeffs `[M, 1]` f32, dw_linear including dw_acc). Rows past
+    sum(group_sizes) are garbage.
+  """
+  dw_dtype = w_linear.dtype if dw_dtype is None else jnp.dtype(dw_dtype)
+  if quantize_grad_gate is None:
+    quantize_grad_gate = cfg.disable_multi_core_mode and cfg.fuse_gate_bwd
+  dgrad = linear_bwd_split.linear_bwd_dgrad(
+      dout_ag,
+      indices,
+      start,
+      w_q,
+      group_sizes,
+      bank,
+      bank_row,
+      coeffs,
+      act_scale=act_scale,
+      w_scale=w_scale,
+      act_qtype=act_qtype,
+      dy_qtype=dout_qtype,
+      dy_scale=dout_scale,
+      grad_gate_qtype=dout_qtype if quantize_grad_gate else None,
+      tiles=cfg.linear_bwd_dgrad,
+  )
+  can_alias_acc = dw_acc is not None and not _psum_axes(dgrad.act_q, w_linear)
+  dw = linear_bwd_split.linear_bwd_wgrad(
+      dgrad.act_q,
+      dgrad.dy_q,
+      dgrad.tile_exps,
+      group_sizes,
+      act_scale=act_scale,
+      dy_scale=dout_scale,
+      dgrad_tile_rows=cfg.linear_bwd_dgrad.tile_rows,
+      dw_acc=dw_acc if can_alias_acc else None,
+      dw_dtype=dw_dtype,
+      tiles=cfg.linear_bwd_wgrad,
+  )
+  if not can_alias_acc:
+    dw = _match_vma(dw, w_linear)
+    if dw_acc is not None:
+      dw = dw_acc + dw
+  return (
+      dgrad.grad_gate,
+      dgrad.grad_gate_amax,
+      dgrad.grad_gate_tile_exps,
+      dgrad.grad_coeffs,
+      dw,
+  )
+
+
 # ----------------------------------------------------------------------------
 # `gmm_fn` object for dsv3_experts.py.
 # ----------------------------------------------------------------------------
@@ -627,6 +848,39 @@ class ExpertGmm3d:
         glu_out_scale=glu_out_scale,
     )
 
+  def gather_gate(
+      self,
+      x: jax.Array,
+      indices: jax.Array,
+      start: jax.Array | int,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      out: jax.Array,
+      out_offset: jax.Array | int,
+      out_scale: jax.Array | None = None,
+      *,
+      size_m: int,
+      glu_coeffs: jax.Array | None = None,
+      glu_out_dtype: jnp.dtype | None = None,
+      glu_out_scale: jax.Array | None = None,
+  ) -> Any:
+    """`gate` of the rows `x[indices[start + m]]`, gathered in-kernel."""
+    return gather_gate_gmm(
+        self.cfg,
+        x,
+        indices,
+        start,
+        w,
+        group_sizes,
+        out,
+        out_offset,
+        out_scale=out_scale,
+        size_m=size_m,
+        glu_coeffs=glu_coeffs,
+        glu_out_dtype=glu_out_dtype,
+        glu_out_scale=glu_out_scale,
+    )
+
   def gate_bwd(
       self,
       x: jax.Array,
@@ -638,6 +892,8 @@ class ExpertGmm3d:
       w_q: jax.Array | None = None,
       dgate_scale: jax.Array | None = None,
       dgate_qtype: jnp.dtype | None = None,
+      dgate_tile_exps: jax.Array | None = None,
+      dgrad_tile_rows: int | None = None,
       dx_scale: jax.Array | None = None,
       dw_scale: jax.Array | None = None,
       dw_dtype: jnp.dtype | None = None,
@@ -652,6 +908,8 @@ class ExpertGmm3d:
         w_q=w_q,
         dgate_scale=dgate_scale,
         dgate_qtype=dgate_qtype,
+        dgate_tile_exps=dgate_tile_exps,
+        dgrad_tile_rows=(self.cfg.linear_bwd_dgrad.tile_rows if dgrad_tile_rows is None else dgrad_tile_rows),
         dx_scale=dx_scale,
         dw_scale=dw_scale,
         dw_dtype=dw_dtype,
@@ -688,6 +946,123 @@ class ExpertGmm3d:
         dout_qtype=dout_qtype,
         dact_scale=dx_scale,
         dw_scale=dw_scale,
+        dw_dtype=dw_dtype,
+    )
+
+  def linear_combine(
+      self,
+      x: jax.Array,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      token_indices: jax.Array,
+      start: jax.Array | int,
+      sorted_tokens: jax.Array,
+      *,
+      out_scale: jax.Array,
+      num_out_tokens: int,
+      out: jax.Array | None = None,
+  ) -> jax.Array:
+    """fp8 `linear` of x fused with the top-k combine of its rows.
+
+    Returns `out` (or zeros) plus, for each row m < sum(group_sizes) of x, the
+    linear GMM row m added to row `token_indices[start + m]` (see
+    `linear_combine_fwd.linear_combine_fwd`). Forward only.
+
+    Args:
+      x: fp8 activations `[BT, F]`.
+      w: fp8 linear weights `[E, F, D]`.
+      group_sizes: Rows of x of each expert.
+      token_indices: Output token of each sorted slot.
+      start: Sorted slot of row 0 of x.
+      sorted_tokens: The tokens of the rows in ascending order
+        (`ops.RaggedGatherReduceMetadata.tokens`); only read without `out`.
+      out_scale: Product of the per-tensor scales of x and w.
+      num_out_tokens: Number of output tokens.
+      out: Optional `[num_out_tokens, D // 128, 128]` bf16 tokens to accumulate
+        into, donated.
+
+    Returns:
+      The bf16 combined tokens `[num_out_tokens, D // 128, 128]`.
+    """
+    assert self.cfg.disable_multi_core_mode
+    return linear_combine_fwd.linear_combine_fwd(
+        x,
+        w,
+        group_sizes,
+        token_indices,
+        start,
+        None if out is not None else sorted_tokens,
+        out_scale=out_scale,
+        num_out_tokens=num_out_tokens,
+        out=out,
+    )
+
+  def linear_bwd_gather(
+      self,
+      dout_ag: jax.Array,
+      indices: jax.Array,
+      start: jax.Array | int,
+      w: jax.Array,
+      group_sizes: jax.Array,
+      bank: jax.Array,
+      bank_row: jax.Array | int,
+      coeffs: jax.Array,
+      dw_acc: jax.Array | None = None,
+      *,
+      w_q: jax.Array,
+      x_scale: float,
+      x_qtype: jnp.dtype,
+      dout_qtype: jnp.dtype,
+      dout_scale: jax.Array | None = None,
+      quantize_grad_gate: bool | None = None,
+      w_scale: float,
+      dw_dtype: jnp.dtype | None = None,
+  ) -> tuple[jax.Array, jax.Array, jax.Array | None, jax.Array, jax.Array]:
+    """FP8 SiLU + `linear` backward of gathered cotangent rows.
+
+    See `linear_gmm_bwd_gather`.
+
+    Args:
+      dout_ag: Cotangent of the top-k reduced linear outputs, 3D layout.
+      indices: Row of dout_ag of each sorted slot.
+      start: Sorted slot of row 0.
+      w: Linear weights, giving the type of dw.
+      group_sizes: Rows per local expert.
+      bank: Gating activations.
+      bank_row: Bank row of row 0.
+      coeffs: Routing coefficients `[M, 1]` of the rows.
+      dw_acc: Optional gradient of `w` to accumulate into, in place.
+      w_q: fp8 linear weights.
+      x_scale: Static scale of the fp8 activations.
+      x_qtype: fp8 dtype of the activations.
+      dout_qtype: fp8 dtype the cotangent rows are quantized to.
+      dout_scale: Optional `[1, 1]` f32 scale of pre-quantized `dout_ag`.
+      quantize_grad_gate: Whether `dgrad` emits `dgate` already quantized to
+        `dout_qtype` with per-tile power-of-two scale.
+      w_scale: Static scale of w_q.
+      dw_dtype: Dtype of dw.
+
+    Returns:
+      Tuple of (dgate, dgate absmax, optional dgate_tile_exps, dcoeffs, dw).
+    """
+    return linear_gmm_bwd_gather(
+        self.cfg,
+        dout_ag,
+        indices,
+        start,
+        w,
+        w_q,
+        group_sizes,
+        bank,
+        bank_row,
+        coeffs,
+        dw_acc,
+        act_scale=x_scale,
+        act_qtype=x_qtype,
+        dout_qtype=dout_qtype,
+        dout_scale=dout_scale,
+        quantize_grad_gate=quantize_grad_gate,
+        w_scale=w_scale,
         dw_dtype=dw_dtype,
     )
 

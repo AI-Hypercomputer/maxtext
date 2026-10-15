@@ -495,8 +495,13 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
       "lm_head.weight": [vocab_size, hidden_size],
   }
 
-  # --- Loop Over Layers ---
-  for layer_idx in range(num_hidden_layers):
+  mtp_num_layers = config.get(
+      "num_nextn_predict_layers",
+      config.get("num_mtp_layers", config.get("mtp_num_layers", 0)),
+  )
+
+  # --- Loop Over Layers (including MTP layers if present) ---
+  for layer_idx in range(num_hidden_layers + mtp_num_layers):
     layer_prefix = f"model.layers.{layer_idx}"
 
     # --- Attention weights ---
@@ -511,6 +516,16 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
         # output projection
         f"{layer_prefix}.self_attn.o_proj.weight": [hidden_size, o_proj_in_dim],
     }
+
+    if layer_idx >= num_hidden_layers:
+      layer_mapping.update(
+          {
+              f"{layer_prefix}.enorm.weight": [hidden_size],
+              f"{layer_prefix}.hnorm.weight": [hidden_size],
+              f"{layer_prefix}.eh_proj.weight": [hidden_size, 2 * hidden_size],
+              f"{layer_prefix}.shared_head.norm.weight": [hidden_size],
+          }
+      )
 
     # query projection
     if q_lora_rank is None:

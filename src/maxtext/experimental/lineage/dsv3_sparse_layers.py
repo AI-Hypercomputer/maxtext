@@ -368,15 +368,16 @@ def dsv3_sparse_layers(
           quant=quant,
       ),
   )
-  _reduce_w_ici = functools.partial(dsv3_sparse_layer.reduce_w_ici, axis_mapping=axis_mapping)
+  _reduce_w_ici_sc1 = functools.partial(dsv3_sparse_layer.reduce_w_ici_sc1, axis_mapping=axis_mapping)
+  _reduce_w_ici_sc0 = functools.partial(dsv3_sparse_layer.reduce_w_ici_sc0, axis_mapping=axis_mapping)
   collect_fn_pre = None
   reduce_fn_pre = None
   if expert_permutations is not None:
     # The pipelined scan slices the per-layer permutation alongside `w` and
     # hands it to the collect and layer functions as `w_aux`. The shuffle is a
     # TensorCore collective that the pipelined scan issues one step ahead of
-    # the ICI collect (and its transpose one step after the ICI reduction), so
-    # that neither waits on the other.
+    # the ICI collect (and its transpose one step after the first stage of the
+    # ICI reduction), so that neither waits on the other.
     collect_fn_pre = _with_expert_permutations(
         functools.partial(
             dsv3_sparse_layer.shuffle_w_routed,
@@ -393,7 +394,8 @@ def dsv3_sparse_layers(
     )
     _collect_w_ici_fwd = _with_expert_permutations(_collect_w_ici_fwd, accepts=False)
     _collect_w_ici_bwd = _with_expert_permutations(_collect_w_ici_bwd, accepts=False)
-    _reduce_w_ici = _with_expert_permutations(_reduce_w_ici, accepts=False)
+    _reduce_w_ici_sc1 = _with_expert_permutations(_reduce_w_ici_sc1, accepts=False)
+    _reduce_w_ici_sc0 = _with_expert_permutations(_reduce_w_ici_sc0, accepts=False)
     _prologue = ops.PipelinedScanLayer(
         fwd=_with_expert_permutations(_prologue.fwd, accepts=False),
         bwd=_with_expert_permutations(_prologue.bwd, accepts=False),
@@ -415,7 +417,8 @@ def dsv3_sparse_layers(
       _collect_w_dcn,
       _collect_w_ici_fwd,
       functools.partial(dsv3_sparse_layer.reduce_w_dcn, axis_mapping=axis_mapping),
-      _reduce_w_ici,
+      _reduce_w_ici_sc1,
+      _reduce_w_ici_sc0,
       _collect_w_ici_bwd,
       # Quantizes the routed expert and MLA weights of all layers once, so
       # that they are collected in fp8 in both passes.

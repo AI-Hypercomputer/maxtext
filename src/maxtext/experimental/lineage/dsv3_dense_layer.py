@@ -173,14 +173,9 @@ def collect_w_dcn(
   return ops.collect_along_axis(w, "dcn", axis_mapping)
 
 
-@jt.jaxtyped(typechecker=typeguard.typechecked)
-def collect_w_ici(
-    w: dsv3_types.DSv3DenseLayerWeightsPytree,
-    *,
-    axis_mapping: Mapping[str, str | tuple[str, ...]],
-) -> dsv3_types.DSv3DenseLayerWeightsPytree:
-  """Collects dense layer weights across ICI mesh axes."""
-  w_axes = dsv3_types.DSv3DenseLayerWeightsPytree(
+def _w_ici_axes() -> dsv3_types.DSv3DenseLayerWeightsPytree:
+  """Returns the ICI axes each dense layer weight is collected along."""
+  return dsv3_types.DSv3DenseLayerWeightsPytree(
       pre_attn_norm_scale=("fsdp_attention", "attention"),
       mla=dsv3_types.DSv3MLAWeightsPytree(
           q_down=("fsdp_attention", "attention"),
@@ -199,10 +194,53 @@ def collect_w_ici(
           linear=("fsdp_attention", "attention"),
       ),
   )
+
+
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def collect_w_ici(
+    w: dsv3_types.DSv3DenseLayerWeightsPytree,
+    *,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+) -> dsv3_types.DSv3DenseLayerWeightsPytree:
+  """Collects dense layer weights across ICI mesh axes (on SparseCore 1)."""
   return ops.collect_along_axis(
       w,
-      w_axes,
+      _w_ici_axes(),
       axis_mapping,
       compute_type="tpu_sparsecore",
       compiler_options={"sparse_core_config": {"core_ids": [1]}},
+  )
+
+
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def reduce_w_ici(
+    grad_w: dsv3_types.DSv3DenseLayerWeightsPytree,
+    like: dsv3_types.DSv3DenseLayerWeightsPytree,
+    *,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+) -> dsv3_types.DSv3DenseLayerWeightsPytree:
+  """Reduces dense layer weight gradients across ICI mesh axes.
+
+  The dual of `collect_w_ici`, run on SparseCore 0 rather than SparseCore 1:
+  the backward pass of the pipelined dense layer scan re-collects each layer's
+  weights on SparseCore 1 while reducing the previous layer's gradients, and
+  the embedding gradient's reduce-scatter also queues on SparseCore 1, so
+  issuing the reductions there serialized all of them after the last dense
+  layer's backward pass, leaving the TensorCore idle until they drained.
+
+  Args:
+    grad_w: Gradients of the `collect_w_ici` outputs.
+    like: Weights with the shardings of the `collect_w_ici` inputs.
+    axis_mapping: Mapping from logical to physical mesh axes.
+
+  Returns:
+    The reduced gradients, sharded like `like`.
+  """
+  return ops.reduce_along_axis(
+      grad_w,
+      _w_ici_axes(),
+      axis_mapping,
+      like,
+      compute_type="tpu_sparsecore",
+      compiler_options={"sparse_core_config": {"core_ids": [0]}},
   )

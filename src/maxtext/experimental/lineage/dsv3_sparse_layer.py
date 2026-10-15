@@ -14,7 +14,7 @@
 
 """Single DeepSeekV3 sparse layer."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 import dataclasses
 import functools
 import math
@@ -347,6 +347,59 @@ def _quantize_act(x: jax.Array, quant_rule: quantization.GmmQuantRule | None) ->
   return quantization.static_quantize(x, quant_rule.act_qtype, quant_rule.act_scale)
 
 
+def _dispatch_bwd(
+    moe_in: jt.Num[jax.Array, "B T D"],
+    grad_out: jt.Num[jax.Array, "B T D"],
+    *,
+    expert_axis_name: str,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+    mesh: jax.sharding.Mesh,
+    gmm_fn: GmmFn,
+    quant_rule: quantization.GmmQuantRule | None,
+) -> tuple[
+    jt.Num[jax.Array, "NBT D0 D1"],
+    jt.Num[jax.Array, "NBT D0 D1"],
+    jt.Num[jax.Array, "num_token_shards 1"] | None,
+]:
+  """Rematerializes dispatch of moe_in and transposes combine of grad_out."""
+  moe_in_q = _quantize_act(moe_in, quant_rule)
+  if quant_rule is None or not hasattr(gmm_fn, "linear_bwd_gather"):
+    x_ag, grad_y_ag = dsv3_router.dsv3_aggregated_dispatches(
+        moe_in_q,
+        grad_out,
+        expert_axis_name=expert_axis_name,
+        axis_mapping=axis_mapping,
+        mesh=mesh,
+    )
+    return x_ag, grad_y_ag, None
+
+  physical_expert_axis = axis_mapping.get(expert_axis_name, expert_axis_name)
+  token_axis = dsv3_router.dsv3_get_token_axis(
+      jax.typeof(moe_in_q).sharding.spec, num_model_dims=1
+  ) or dsv3_router.dsv3_get_token_axis(jax.typeof(grad_out).sharding.spec, num_model_dims=1)
+  token_spec_3d = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis, None, None), axis_mapping)
+  scale_spec = ops.physical_pspec(jax.sharding.PartitionSpec(token_axis, None), axis_mapping)
+
+  def _impl(m_in, g_out):
+    local_amax = quantization.ragged_absmax(g_out)
+    amax = jax.lax.pmax(local_amax, axis_name=physical_expert_axis)
+    scale = quantization.absmax_to_scale(amax, quant_rule.bwd_qtype)
+    g_out_q = quantization.quantize_with_scale(g_out, scale, quant_rule.bwd_qtype)
+    x_ag, grad_y_ag = dsv3_router.dsv3_aggregated_dispatches_impl(
+        m_in,
+        g_out_q,
+        expert_axis_name=expert_axis_name,
+        axis_mapping=axis_mapping,
+    )
+    return x_ag, grad_y_ag, scale
+
+  return jax.shard_map(
+      _impl,
+      mesh=mesh,
+      out_specs=(token_spec_3d, token_spec_3d, scale_spec),
+  )(moe_in_q, grad_out)
+
+
 def _quantize_routed_weights(
     w_routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
     quant_rule: quantization.GmmQuantRule,
@@ -559,6 +612,47 @@ def _bank_from_carry(
   return constrain_activation_bank(bank.reshape(-1, bank.shape[-1]))
 
 
+def routed_w_to_tiles(
+    w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
+  """Views routed expert weights as `[expert, rows / 8, 8, cols]`.
+
+  The routed experts' kernels read fp8 weights in T(8, 128) tiling, but XLA
+  ignores layout constraints on the layer-scan and chunk-loop carries and gives
+  `[expert, rows, cols]` fp8 weights the default T(32, 128) tiling, so every
+  layer would copy each gathered weight between them (as with the bank, see
+  `_bank_to_carry`). The SparseCore all-gather keeps its operand's tiling, so
+  it must also get its shards in T(8, 128): when their rows are a multiple of
+  32 (e.g. 448 on 8x16x16), default-tiled shards gather into T(32, 128) in
+  SparseCore private HBM, followed by a SparseCore relayout copy of the whole
+  gathered weight. A second-minor dimension of 8 gets T(8, 128) tiling without
+  a layout constraint, so `collect_w_ici` gathers the shards in this view and
+  the weights keep it everywhere: every reshape between the views is a
+  bitcast. The routed experts read the weights through `routed_w_from_tiles`,
+  in either tiling.
+
+  Flat `[expert * rows, cols]` weights (e.g. the 8x32x32 sharding) are viewed
+  as `[expert * rows / 8, 8, cols]`, whose shards are whole tiles even when
+  they split an expert's rows.
+
+  Args:
+    w: `[expert, rows, cols]` or flat `[expert * rows, cols]` routed expert
+      weights or shards.
+
+  Returns:
+    The weights viewed as `[expert, rows / 8, 8, cols]` (or `[expert * rows /
+    8, 8, cols]`).
+  """
+  return jax.tree.map(lambda a: a.reshape(*a.shape[:-2], a.shape[-2] // 8, 8, a.shape[-1]), w)
+
+
+def routed_w_from_tiles(
+    w: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+) -> dsv3_types.DSv3MoERoutedExpertWeightsPytree:
+  """Inverse of `routed_w_to_tiles`."""
+  return jax.tree.map(lambda a: a.reshape(*a.shape[:-3], a.shape[-3] * 8, a.shape[-1]), w)
+
+
 def _routed_experts_chunked_impl(
     x_ag: jt.Num[jax.Array, "NBT D0 D1"],
     metadata: dsv3_router.RouterMetadata[jax.Array],
@@ -583,7 +677,8 @@ def _routed_experts_chunked_impl(
   Args:
     x_ag: All-gathered tokens on this device.
     metadata: Router metadata on this device.
-    w_routed: Routed expert weights on this device.
+    w_routed: Routed expert weights on this device, in the `routed_w_to_tiles`
+      view.
     bank: Cross-layer gating activation bank on this device.
     bank_offset: Write offset into `bank`.
     num_experts_per_tok: Number of experts selected per token.
@@ -596,36 +691,67 @@ def _routed_experts_chunked_impl(
   """
   capacity = metadata.capacity
   num_local_tokens = jnp.sum(metadata.group_sizes, dtype=jnp.int32)
+  # With fp8 and a fused-GLU gate GMM that can gather, the gate GMM reads each
+  # chunk's tokens straight from x_ag instead of a permute_chunk copy, and the
+  # linear GMM adds its rows straight into y_ag instead of unpermute_chunk.
+  gather_in_gate = (
+      quant_rule is not None
+      and getattr(gmm_fn, "supports_fused_glu", False)
+      and hasattr(gmm_fn, "gather_gate")
+      and hasattr(gmm_fn, "linear_combine")
+  )
+  token_indices = None
+  if gather_in_gate:
+    token_indices = metadata.sort_indices // num_experts_per_tok
 
   def _chunk(start, reduce_metadata, bank, bank_offset, y_ag_acc=None):
     num_tokens = dsv3_router.chunk_num_tokens(num_local_tokens, start, capacity)
-    routed = dsv3_router.permute_chunk(
-        x_ag,
-        metadata.sort_indices,
-        start,
-        num_tokens,
-        capacity=capacity,
-        num_experts_per_tok=num_experts_per_tok,
-    )
-    routed_out, bank = dsv3_experts.dsv3_routed_experts_impl(
-        routed,
-        w_routed,
-        dsv3_router.chunk_group_sizes(metadata.group_sizes, start, num_tokens),
-        _chunk_rows(metadata.sorted_coeffs, start, capacity),
-        bank,
-        bank_offset[0],
-        gmm_fn=gmm_fn,
-        quant_rule=quant_rule,
-    )
+    group_sizes = dsv3_router.chunk_group_sizes(metadata.group_sizes, start, num_tokens)
+    sorted_coeffs = _chunk_rows(metadata.sorted_coeffs, start, capacity)
+    if gather_in_gate:
+      assert quant_rule is not None and token_indices is not None
+      y_ag, bank = dsv3_experts.dsv3_routed_experts_gather_impl(
+          x_ag,
+          token_indices,
+          start,
+          routed_w_from_tiles(w_routed),
+          group_sizes,
+          sorted_coeffs,
+          bank,
+          bank_offset[0],
+          reduce_metadata,
+          y_ag_acc,
+          gmm_fn=gmm_fn,
+          quant_rule=quant_rule,
+      )
+    else:
+      routed = dsv3_router.permute_chunk(
+          x_ag,
+          metadata.sort_indices,
+          start,
+          num_tokens,
+          capacity=capacity,
+          num_experts_per_tok=num_experts_per_tok,
+      )
+      routed_out, bank = dsv3_experts.dsv3_routed_experts_impl(
+          routed,
+          routed_w_from_tiles(w_routed),
+          group_sizes,
+          sorted_coeffs,
+          bank,
+          bank_offset[0],
+          gmm_fn=gmm_fn,
+          quant_rule=quant_rule,
+      )
+      y_ag = dsv3_router.unpermute_chunk(
+          routed_out,
+          reduce_metadata,
+          num_out_tokens=x_ag.shape[0],
+          num_experts_per_tok=num_experts_per_tok,
+          out=y_ag_acc,
+          zero_initialized=(y_ag_acc is None),
+      )
     bank = constrain_activation_bank(bank)
-    y_ag = dsv3_router.unpermute_chunk(
-        routed_out,
-        reduce_metadata,
-        num_out_tokens=x_ag.shape[0],
-        num_experts_per_tok=num_experts_per_tok,
-        out=y_ag_acc,
-        zero_initialized=(y_ag_acc is None),
-    )
     return y_ag, bank, bank_offset + dsv3_experts.bank_aligned(num_tokens)
 
   y_ag, bank, bank_offset = _chunk(0, metadata.reduce_metadata, _bank_from_carry(bank), bank_offset)
@@ -672,8 +798,8 @@ def ubatch_expert(
     mla_out: jt.Num[jax.Array, "B T D"],
     bank: jt.Num[jax.Array, "bank_tiles 8 gate_dim"],
     bank_offset: jt.Num[jax.Array, "num_token_shards"],
-    w_shared: dsv3_types.DSv3MoESharedExpertWeightsPytree,
     w_routed: dsv3_types.DSv3MoERoutedExpertWeightsPytree,
+    w_shared: dsv3_types.DSv3MoESharedExpertWeightsPytree | None = None,
     *,
     num_experts_per_tok: int = 8,
     gmm_fn: GmmFn,
@@ -693,13 +819,13 @@ def ubatch_expert(
     ],
     dsv3_router.RouterMetadata[jax.Array],
 ]:
-  """Routed and shared expert computation including expert-side permute and unpermute.
+  """Routed expert computation and optional shared expert computation.
 
   With `quant_rule`, x_ag and w_routed must already be quantized (see
-  `dsv3_experts.dsv3_routed_experts_impl`); the shared expert stays bf16.
+  `dsv3_experts.dsv3_routed_experts_impl`). When `w_shared` is omitted, `moe_in`
+  is forwarded so `ubatch_combine` can run `dsv3_shared_expert` in parallel with
+  the combine `reduce-scatter`.
   """
-  shared_x = dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
-
   x_ag_pspec = jax.typeof(x_ag).sharding.spec
   bank_pspec = jax.typeof(bank).sharding.spec
   offset_pspec = jax.typeof(bank_offset).sharding.spec
@@ -714,9 +840,10 @@ def ubatch_expert(
       out_specs=(x_ag_pspec, bank_pspec, offset_pspec),
   )(x_ag, router_metadata, w_routed, bank, bank_offset)
 
+  shared_or_moe_in = moe_in if w_shared is None else dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
   expert_out = (
       y_ag,
-      shared_x,
+      shared_or_moe_in,
       mla_out,
   )
   return (expert_out, (bank, bank_offset)), router_metadata
@@ -726,9 +853,10 @@ def ubatch_expert(
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def ubatch_combine(
     y_ag: jt.Num[jax.Array, "NBT D0 D1"],
-    shared_x: jt.Num[jax.Array, "B T D"],
+    shared_or_moe_in: jt.Num[jax.Array, "B T D"],
     mla_out: jt.Num[jax.Array, "B T D"],
     *,
+    w_shared: dsv3_types.DSv3MoESharedExpertWeightsPytree | None = None,
     local_seq_length: int,
     expert_axis_name: str,
     axis_mapping: Mapping[str, str | tuple[str, ...]],
@@ -742,7 +870,7 @@ def ubatch_combine(
     ],
     tuple[()],
 ]:
-  """Combines reduced routed expert outputs across devices via psum_scatter."""
+  """Combines reduced routed expert outputs and optionally runs shared expert."""
   combined_x = dsv3_router.dsv3_combine(
       y_ag,
       local_seq_length=local_seq_length,
@@ -751,6 +879,7 @@ def ubatch_combine(
       mesh=mesh,
       out_specs=out_specs,
   )
+  shared_x = shared_or_moe_in if w_shared is None else dsv3_experts.dsv3_shared_expert(shared_or_moe_in, w_shared)
   combine_out = (
       combined_x,
       shared_x,
@@ -791,6 +920,7 @@ def ubatch_expert_bwd(
     mesh: jax.sharding.Mesh,
     quant_rule: quantization.GmmQuantRule | None = None,
     w_routed_q: dsv3_types.DSv3MoERoutedExpertWeightsPytree | None = None,
+    grad_y_scale: jt.Num[jax.Array, "num_token_shards 1"] | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "NBT D0 D1"],
     jt.Num[jax.Array, "kNBT"],
@@ -835,6 +965,7 @@ def ubatch_expert_bwd(
       bank_offset,
       grad_w_acc,
       w_routed_q,
+      grad_y_scale,
   )
   return (
       grad_x_ag,
@@ -854,6 +985,7 @@ def _routed_experts_chunked_bwd_impl(
     bank_offset: jt.Num[jax.Array, "1"],
     grad_w_acc: dsv3_types.DSv3MoERoutedExpertWeightsPytree | None,
     w_routed_q: dsv3_types.DSv3MoERoutedExpertWeightsPytree | None = None,
+    grad_y_scale: jt.Num[jax.Array, "1 1"] | None = None,
     *,
     num_experts_per_tok: int,
     gmm_fn: GmmFn,
@@ -883,6 +1015,8 @@ def _routed_experts_chunked_bwd_impl(
     grad_w_acc: Optional routed expert weight gradients to accumulate every
       chunk's into, in place.
     w_routed_q: Quantized w_routed, required with `quant_rule`.
+    grad_y_scale: Optional per-microbatch f32 scale `[1, 1]` when `grad_y_ag` is
+      pre-quantized to FP8 (`e5m2`).
     num_experts_per_tok: Number of experts selected per token.
     gmm_fn: Function to perform Grouped Matrix Multiplication.
     quant_rule: Optional fp8 quantization; x_ag must then already be quantized
@@ -896,8 +1030,18 @@ def _routed_experts_chunked_bwd_impl(
   num_slots = metadata.sort_indices.shape[0]
   num_local_tokens = jnp.sum(metadata.group_sizes, dtype=jnp.int32)
   bank_offset = bank_offset - dsv3_experts.bank_aligned(num_local_tokens)
-
-  fuse_grad_amax = quant_rule is not None and getattr(gmm_fn, "supports_dynamic_grad_scale", False)
+  if grad_w_acc is not None:
+    grad_w_acc = routed_w_from_tiles(grad_w_acc)
+  # With fp8 and a gmm_fn that can gather, the linear backward reads each
+  # chunk's output gradient rows straight from grad_y_ag instead of a
+  # permute_chunk copy.
+  gather_in_linear_bwd = quant_rule is not None and hasattr(gmm_fn, "linear_bwd_gather")
+  token_indices = None
+  if gather_in_linear_bwd:
+    assert quant_rule is not None
+    token_indices = metadata.sort_indices // num_experts_per_tok
+    if grad_y_scale is None:
+      grad_y_ag, grad_y_scale = quantization.absmax_quantize(grad_y_ag, quant_rule.bwd_qtype)
 
   def _chunk(start, reduce_metadata, bank, grad_w_acc, grad_x_ag_acc=None):
     num_tokens = dsv3_router.chunk_num_tokens(num_local_tokens, start, capacity)
@@ -909,24 +1053,41 @@ def _routed_experts_chunked_bwd_impl(
         capacity=capacity,
         num_experts_per_tok=num_experts_per_tok,
     )
-    if fuse_grad_amax:
-      grad_routed, grad_routed_amax = permute(grad_y_ag, with_absmax=True)
+    group_sizes = dsv3_router.chunk_group_sizes(metadata.group_sizes, start, num_tokens)
+    sorted_coeffs = _chunk_rows(metadata.sorted_coeffs, start, capacity)
+    if gather_in_linear_bwd:
+      assert quant_rule is not None and token_indices is not None
+      assert w_routed_q is not None
+      grad_x_sorted, grad_w_routed, grad_coeffs, bank = dsv3_experts.dsv3_routed_experts_gather_bwd_impl(
+          grad_y_ag,
+          token_indices,
+          start,
+          permute(x_ag),
+          routed_w_from_tiles(w_routed),
+          group_sizes,
+          sorted_coeffs,
+          bank,
+          bank_offset[0] + start,
+          grad_w_acc,
+          gmm_fn=gmm_fn,
+          quant_rule=quant_rule,
+          w_routed_q=routed_w_from_tiles(w_routed_q),
+          grad_y_scale=grad_y_scale,
+      )
     else:
-      grad_routed, grad_routed_amax = permute(grad_y_ag), None
-    grad_x_sorted, grad_w_routed, grad_coeffs, bank = dsv3_experts.dsv3_routed_experts_bwd_impl(
-        grad_routed,
-        permute(x_ag),
-        w_routed,
-        dsv3_router.chunk_group_sizes(metadata.group_sizes, start, num_tokens),
-        _chunk_rows(metadata.sorted_coeffs, start, capacity),
-        bank,
-        bank_offset[0] + start,
-        grad_w_acc,
-        gmm_fn=gmm_fn,
-        quant_rule=quant_rule,
-        w_routed_q=w_routed_q,
-        grad_routed_amax=grad_routed_amax,
-    )
+      grad_x_sorted, grad_w_routed, grad_coeffs, bank = dsv3_experts.dsv3_routed_experts_bwd_impl(
+          permute(grad_y_ag),
+          permute(x_ag),
+          routed_w_from_tiles(w_routed),
+          group_sizes,
+          sorted_coeffs,
+          bank,
+          bank_offset[0] + start,
+          grad_w_acc,
+          gmm_fn=gmm_fn,
+          quant_rule=quant_rule,
+          w_routed_q=(None if w_routed_q is None else routed_w_from_tiles(w_routed_q)),
+      )
     grad_x_ag = dsv3_router.unpermute_chunk(
         grad_x_sorted,
         reduce_metadata,
@@ -994,7 +1155,7 @@ def _routed_experts_chunked_bwd_impl(
   return (
       grad_x_ag,
       grad_sorted_coeffs[:num_slots],
-      grad_w_routed,
+      routed_w_to_tiles(grad_w_routed),
       bank,
       bank_offset,
   )
@@ -1387,7 +1548,6 @@ def dsv3_sparse_layer_epilogue_fwd(
         *outputs_dispatch_curr_0,
         bank=bank_0,
         bank_offset=bank_offset_0,
-        w_shared=w.moe.shared,
         w_routed=w_routed,
         num_experts_per_tok=num_experts_per_tok,
         gmm_fn=gmm_fn,
@@ -1418,6 +1578,7 @@ def dsv3_sparse_layer_epilogue_fwd(
   ):
     outputs_combine_curr_0, _ = ubatch_combine(
         *outputs_expert_curr_0,
+        w_shared=w.moe.shared,
         local_seq_length=local_seq_length,
         expert_axis_name=expert_axis_name,
         axis_mapping=axis_mapping,
@@ -1428,7 +1589,6 @@ def dsv3_sparse_layer_epilogue_fwd(
         *outputs_dispatch_curr_1,
         bank=bank_1,
         bank_offset=bank_offset_1,
-        w_shared=w.moe.shared,
         w_routed=w_routed,
         num_experts_per_tok=num_experts_per_tok,
         gmm_fn=gmm_fn,
@@ -1456,6 +1616,7 @@ def dsv3_sparse_layer_epilogue_fwd(
     out_mb0_wait = ubatch_wait(out_mb0)
     outputs_combine_curr_1, _ = ubatch_combine(
         *outputs_expert_curr_1,
+        w_shared=w.moe.shared,
         local_seq_length=local_seq_length,
         expert_axis_name=expert_axis_name,
         axis_mapping=axis_mapping,
@@ -1677,12 +1838,14 @@ def dsv3_sparse_layer_epilogue_bwd(
     grad_shared_x_0 = grad_out_mb0_wait
     grad_mla_out_unpermute_0 = grad_out_mb0_wait
 
-    x_ag_1, grad_y_ag_1 = dsv3_router.dsv3_aggregated_dispatches(
-        _quantize_act(moe_in_curr_1, quant_rule),
+    x_ag_1, grad_y_ag_1, grad_y_scale_1 = _dispatch_bwd(
+        moe_in_curr_1,
         grad_out_mb1,
         expert_axis_name=expert_axis_name,
         axis_mapping=axis_mapping,
         mesh=mesh,
+        gmm_fn=gmm_fn,
+        quant_rule=quant_rule,
     )
     return (
         (
@@ -1690,7 +1853,7 @@ def dsv3_sparse_layer_epilogue_bwd(
             grad_shared_x_0,
             grad_mla_out_unpermute_0,
         ),
-        (x_ag_1, grad_y_ag_1),
+        (x_ag_1, grad_y_ag_1, grad_y_scale_1),
     ), ()
 
   @jax.named_call
@@ -1705,6 +1868,7 @@ def dsv3_sparse_layer_epilogue_bwd(
       grad_out_mb0,
       x_ag_1,
       grad_y_ag_1,
+      grad_y_scale_1,
       grad_shared_x_1,
       bank_1,
       bank_offset_1,
@@ -1712,12 +1876,14 @@ def dsv3_sparse_layer_epilogue_bwd(
     """Phase 4: mb0 dispatch remat & combine transpose; mb1 expert backward."""
     assert res.mb1 is not None
     assert res.mb1.moe is not None
-    x_ag_0, grad_y_ag_0 = dsv3_router.dsv3_aggregated_dispatches(
-        _quantize_act(moe_in_curr_0, quant_rule),
+    x_ag_0, grad_y_ag_0, grad_y_scale_0 = _dispatch_bwd(
+        moe_in_curr_0,
         grad_out_mb0,
         expert_axis_name=expert_axis_name,
         axis_mapping=axis_mapping,
         mesh=mesh,
+        gmm_fn=gmm_fn,
+        quant_rule=quant_rule,
     )
 
     def _shared_expert_fwd_1(moe_in, w_shared):
@@ -1744,9 +1910,10 @@ def dsv3_sparse_layer_epilogue_bwd(
         mesh=mesh,
         quant_rule=quant_rule,
         w_routed_q=w_routed_q,
+        grad_y_scale=grad_y_scale_1,
     )
     return (
-        (x_ag_0, grad_y_ag_0),
+        (x_ag_0, grad_y_ag_0, grad_y_scale_0),
         (
             grad_x_ag_1,
             grad_sorted_coeffs_1,
@@ -1762,7 +1929,7 @@ def dsv3_sparse_layer_epilogue_bwd(
   def phase5(
       x_ag_0,
       grad_y_ag_0,
-      grad_shared_x_0,
+      grad_y_scale_0,
       grad_x_ag_1,
       grad_sorted_coeffs_1,
       grad_w_routed_1,
@@ -1787,13 +1954,9 @@ def dsv3_sparse_layer_epilogue_bwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
     )
-    grad_coeffs_ag_1, x_ag_0, grad_y_ag_0 = jax.lax.optimization_barrier((grad_coeffs_ag_1, x_ag_0, grad_y_ag_0))
-
-    def _shared_expert_fwd_0(moe_in, w_shared):
-      return dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
-
-    _, vjp_shared_0 = jax.vjp(_shared_expert_fwd_0, moe_in_curr_0, w.moe.shared)
-    grad_moe_in_shared_0, grad_w_shared_0 = vjp_shared_0(grad_shared_x_0)
+    grad_coeffs_ag_1, x_ag_0, grad_y_ag_0, grad_y_scale_0 = jax.lax.optimization_barrier(
+        (grad_coeffs_ag_1, x_ag_0, grad_y_ag_0, grad_y_scale_0)
+    )
 
     (
         grad_x_ag_0,
@@ -1814,6 +1977,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         mesh=mesh,
         quant_rule=quant_rule,
         w_routed_q=w_routed_q,
+        grad_y_scale=grad_y_scale_0,
     )
 
     grad_moe_in_routed_1, grad_coeffs_1 = dsv3_router.dsv3_combine_with_coeff_grads(
@@ -1832,10 +1996,11 @@ def dsv3_sparse_layer_epilogue_bwd(
             grad_x_ag_0,
             grad_sorted_coeffs_0,
             grad_w_routed,
-            grad_moe_in_shared_0,
-            grad_w_shared_0,
         ),
-        (grad_moe_in_routed_1, grad_coeffs_1),
+        (
+            grad_moe_in_routed_1,
+            grad_coeffs_1,
+        ),
         (bank_0, bank_offset_0),
     ), ()
 
@@ -1844,12 +2009,13 @@ def dsv3_sparse_layer_epilogue_bwd(
   def phase6(
       grad_x_ag_0,
       grad_sorted_coeffs_0,
+      grad_shared_x_0,
       grad_moe_in_routed_1,
       grad_moe_in_shared_1,
       grad_coeffs_1,
       grad_aux_1,
   ):
-    """Phase 6: mb0 dispatch transpose; mb1 router & post_norm pullback."""
+    """Phase 6: mb0 dispatch transpose & shared expert backward; mb1 router & post_norm pullback."""
     assert res.mb0 is not None
     assert res.mb0.moe is not None
     grad_coeffs_ag_0 = dsv3_router.dsv3_unsort_coeff_grads(
@@ -1858,6 +2024,9 @@ def dsv3_sparse_layer_epilogue_bwd(
         expert_axis_name=expert_axis_name,
         axis_mapping=axis_mapping,
         mesh=mesh,
+    )
+    grad_coeffs_ag_0, grad_shared_x_0, grad_moe_in_shared_1 = jax.lax.optimization_barrier(
+        (grad_coeffs_ag_0, grad_shared_x_0, grad_moe_in_shared_1)
     )
     grad_moe_in_routed_0, grad_coeffs_0 = dsv3_router.dsv3_combine_with_coeff_grads(
         grad_x_ag_0,
@@ -1870,6 +2039,12 @@ def dsv3_sparse_layer_epilogue_bwd(
         mesh=mesh,
         out_specs=x_pspec,
     )
+
+    def _shared_expert_fwd_0(moe_in, w_shared):
+      return dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
+
+    _, vjp_shared_0 = jax.vjp(_shared_expert_fwd_0, moe_in_curr_0, w.moe.shared)
+    grad_moe_in_shared_0, grad_w_shared_0 = vjp_shared_0(grad_shared_x_0)
 
     grad_moe_in_expert_1 = grad_moe_in_routed_1 + grad_moe_in_shared_1
 
@@ -1895,7 +2070,12 @@ def dsv3_sparse_layer_epilogue_bwd(
     _, vjp_post_norm_1 = jax.vjp(_fwd_post_norm_1, mla_out_curr_1, w.post_attn_norm_scale)
     grad_mla_out_norm_1, grad_post_attn_norm_scale_1 = vjp_post_norm_1(grad_moe_in_total_1)
     return (
-        (grad_moe_in_routed_0, grad_coeffs_0),
+        (
+            grad_moe_in_routed_0,
+            grad_coeffs_0,
+            grad_moe_in_shared_0,
+            grad_w_shared_0,
+        ),
         (grad_mla_out_norm_1, grad_post_attn_norm_scale_1, grad_w_router_1),
     ), ()
 
@@ -2013,7 +2193,7 @@ def dsv3_sparse_layer_epilogue_bwd(
             grad_shared_x_0,
             grad_mla_out_unpermute_0,
         ),
-        (x_ag_1, grad_y_ag_1),
+        (x_ag_1, grad_y_ag_1, grad_y_scale_1),
     ), _ = phase2(grad_out_mb0_wait, grad_out_mb1_p1)
 
     (
@@ -2022,18 +2202,18 @@ def dsv3_sparse_layer_epilogue_bwd(
             grad_shared_x_0_wait,
             grad_mla_out_unpermute_0_wait,
         ),
-        (x_ag_1_wait, grad_y_ag_1_wait),
+        (x_ag_1_wait, grad_y_ag_1_wait, grad_y_scale_1_wait),
     ), _ = phase3(
         (
             grad_out_mb0_p2,
             grad_shared_x_0,
             grad_mla_out_unpermute_0,
         ),
-        (x_ag_1, grad_y_ag_1),
+        (x_ag_1, grad_y_ag_1, grad_y_scale_1),
     )
 
     (
-        (x_ag_0, grad_y_ag_0),
+        (x_ag_0, grad_y_ag_0, grad_y_scale_0),
         (
             grad_x_ag_1,
             grad_sorted_coeffs_1,
@@ -2046,6 +2226,7 @@ def dsv3_sparse_layer_epilogue_bwd(
         grad_out_mb0_wait3,
         x_ag_1_wait,
         grad_y_ag_1_wait,
+        grad_y_scale_1_wait,
         grad_shared_x_1,
         bank_1,
         bank_offset_1,
@@ -2056,15 +2237,16 @@ def dsv3_sparse_layer_epilogue_bwd(
             grad_x_ag_0,
             grad_sorted_coeffs_0,
             grad_w_routed,
-            grad_moe_in_shared_0,
-            grad_w_shared_0,
         ),
-        (grad_moe_in_routed_1, grad_coeffs_1),
+        (
+            grad_moe_in_routed_1,
+            grad_coeffs_1,
+        ),
         (bank_0, bank_offset_0),
     ), _ = phase5(
         x_ag_0,
         grad_y_ag_0,
-        grad_shared_x_0_wait,
+        grad_y_scale_0,
         grad_x_ag_1,
         grad_sorted_coeffs_1,
         grad_w_routed_1,
@@ -2073,11 +2255,17 @@ def dsv3_sparse_layer_epilogue_bwd(
     )
 
     (
-        (grad_moe_in_routed_0, grad_coeffs_0),
+        (
+            grad_moe_in_routed_0,
+            grad_coeffs_0,
+            grad_moe_in_shared_0,
+            grad_w_shared_0,
+        ),
         (grad_mla_out_norm_1, grad_post_attn_norm_scale_1, grad_w_router_1),
     ), _ = phase6(
         grad_x_ag_0,
         grad_sorted_coeffs_0,
+        grad_shared_x_0_wait,
         grad_moe_in_routed_1,
         grad_moe_in_shared_1,
         grad_coeffs_1,
@@ -2378,7 +2566,6 @@ def dsv3_sparse_layer_scan_body_fwd(
     """Phase 4: mb0 expert; mb1 dispatch."""
     (outputs_expert_curr_0, (bank_0, bank_offset_0)), res_expert_curr_0 = ubatch_expert(
         *outputs_dispatch_curr_0,
-        w_shared=w_curr.moe.shared,
         w_routed=w_routed,
         num_experts_per_tok=num_experts_per_tok,
         gmm_fn=gmm_fn,
@@ -2404,9 +2591,10 @@ def dsv3_sparse_layer_scan_body_fwd(
   @jax.named_call
   @program_order(enforce=False)
   def phase5(outputs_expert_curr_0, outputs_dispatch_curr_1, bank_1, bank_offset_1):
-    """Phase 5: mb0 combine; mb1 expert."""
+    """Phase 5: mb0 combine & shared expert; mb1 expert."""
     outputs_combine_curr_0, _ = ubatch_combine(
         *outputs_expert_curr_0,
+        w_shared=w_curr.moe.shared,
         local_seq_length=local_seq_length,
         expert_axis_name=expert_axis_name,
         axis_mapping=axis_mapping,
@@ -2585,6 +2773,13 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_outputs: Any,
     w_curr: dsv3_types.DSv3SparseLayerWeightsPytree,
     w_next: dsv3_types.DSv3SparseLayerWeightsPytree,
+    w_next_expert_grad_unreduced: dsv3_types.DSv3SparseLayerWeightsPytree,
+    reduce_ici_first_fn: Callable[
+        [dsv3_types.DSv3SparseLayerWeightsPytree],
+        dsv3_types.DSv3SparseLayerWeightsPytree,
+    ],
+    w_pending_grad_partial: dsv3_types.DSv3SparseLayerWeightsPytree | None,
+    reduce_ici_second_fn: Callable[..., tuple[ops.DeferredReduce, ops.DeferredReduce]],
     *,
     yarn_freqs: tuple[
         tuple[
@@ -2628,8 +2823,28 @@ def dsv3_sparse_layer_scan_body_bwd(
     Any,
     dsv3_types.DSv3SparseLayerWeightsPytree,
     dsv3_types.DSv3SparseLayerWeightsPytree,
+    dsv3_types.DSv3SparseLayerWeightsPytree | None,
 ]:
-  """Performs backward pass for DSv3 sparse layer scan body."""
+  """Performs backward pass for DSv3 sparse layer scan body.
+
+  Besides the layer's backward pass, it completes the gradient of `w_next`, the
+  next layer's weights: the mb0 MLA gradients computed in phase 2 are added to
+  `w_next_expert_grad_unreduced`, the rest of it, which is the second output of
+  the previous call. The completed gradient then goes through the first stage
+  of its ICI reduction, `reduce_ici_first_fn` (SparseCore 1), during phases 3
+  to 8, and the next call runs the second stage on it as its
+  `w_pending_grad_partial` with `reduce_ici_second_fn(..., defer=True)`
+  (SparseCore 0): the attention half in phase 5 and the MoE half in phase 7,
+  each in the same SparseCore block as the reduce-scatter of a microbatch's
+  token gradients, which it follows. Its input thus depends on none of that
+  call's compute.
+
+  Returns:
+    The gradient of the previous layer's outputs, the gradient of `w_curr`
+    without its mb0 MLA part (which the next call adds, see above), the
+    partially reduced gradient of `w_next`, and the ICI-reduced
+    `w_pending_grad_partial` (`None` if it is).
+  """
   quant_rule = quant.routed_experts if quant else None
   mla_rule = quant.mla if quant else None
   w_routed_q = None if quant_rule is None else _quantize_routed_weights(w_curr.moe.routed, quant_rule)
@@ -2691,7 +2906,11 @@ def dsv3_sparse_layer_scan_body_bwd(
 
   @jax.named_call
   @program_order(enforce=False)
-  def phase2(grad_outputs_mla_next_0_wait, grad_x_next_1):
+  def phase2(
+      grad_outputs_mla_next_0_wait,
+      grad_x_next_1,
+      w_next_expert_grad_unreduced,
+  ):
     """Phase 2: mb0 next layer mla backward; mb1 dispatch remat & combine transpose."""
     assert res.mb0.mla is not None
     grad_out_proj_out_next_0, grad_orig_x_next_0 = grad_outputs_mla_next_0_wait
@@ -2732,37 +2951,46 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_x_norm_next_0, grad_pre_attn_norm_scale_next_0 = vjp_pre_norm_next_0(grad_norm_x_next_0)
     grad_x_next_0 = grad_x_norm_next_0 + grad_orig_x_next_0
 
-    x_ag_1, grad_y_ag_1 = dsv3_router.dsv3_aggregated_dispatches(
-        _quantize_act(moe_in_curr_1, quant_rule),
+    # Completes the next layer's gradient, whose other contributions come from
+    # its own backward step.
+    w_next_grad_unreduced = ops.combine_w_grads(
+        dsv3_types.DSv3SparseLayerWeightsPytree(
+            pre_attn_norm_scale=grad_pre_attn_norm_scale_next_0,
+            mla=grad_w_mla_next_0,
+            post_attn_norm_scale=None,
+            moe=dsv3_types.DSv3MoEWeightsPytree(),
+        ),
+        w_next_expert_grad_unreduced,
+    )
+
+    x_ag_1, grad_y_ag_1, grad_y_scale_1 = _dispatch_bwd(
+        moe_in_curr_1,
         grad_x_next_1,
         expert_axis_name=expert_axis_name,
         axis_mapping=axis_mapping,
         mesh=mesh,
+        gmm_fn=gmm_fn,
+        quant_rule=quant_rule,
     )
     return (
-        (
-            grad_x_next_0,
-            grad_pre_attn_norm_scale_next_0,
-            grad_w_mla_next_0,
-            grad_yarn_freqs_next_0,
-        ),
-        (x_ag_1, grad_y_ag_1),
+        (grad_x_next_0, w_next_grad_unreduced, grad_yarn_freqs_next_0),
+        (x_ag_1, grad_y_ag_1, grad_y_scale_1),
     ), ()
 
   @jax.named_call
   @program_order(enforce=False)
-  def phase3(grad_x_next_0, x_ag_1, grad_y_ag_1):
+  def phase3(grad_x_next_0, x_ag_1, grad_y_ag_1, grad_y_scale_1):
     """Phase 3: mb0 residual pullback; mb1 wait."""
     grad_shared_x_0 = grad_x_next_0
     grad_mla_out_unpermute_0 = grad_x_next_0
-    x_ag_1_wait, grad_y_ag_1_wait = ubatch_wait((x_ag_1, grad_y_ag_1))
+    x_ag_1_wait, grad_y_ag_1_wait, grad_y_scale_1_wait = ubatch_wait((x_ag_1, grad_y_ag_1, grad_y_scale_1))
     return (
         (
             grad_x_next_0,
             grad_shared_x_0,
             grad_mla_out_unpermute_0,
         ),
-        (x_ag_1_wait, grad_y_ag_1_wait),
+        (x_ag_1_wait, grad_y_ag_1_wait, grad_y_scale_1_wait),
     ), ()
 
   @jax.named_call
@@ -2771,6 +2999,7 @@ def dsv3_sparse_layer_scan_body_bwd(
       grad_x_next_0,
       x_ag_1,
       grad_y_ag_1,
+      grad_y_scale_1,
       grad_shared_x_1,
       bank_1,
       bank_offset_1,
@@ -2778,12 +3007,14 @@ def dsv3_sparse_layer_scan_body_bwd(
     """Phase 4: mb0 dispatch remat & combine transpose; mb1 expert backward."""
     assert res.mb1 is not None
     assert res.mb1.moe is not None
-    x_ag_0, grad_y_ag_0 = dsv3_router.dsv3_aggregated_dispatches(
-        _quantize_act(moe_in_curr_0, quant_rule),
+    x_ag_0, grad_y_ag_0, grad_y_scale_0 = _dispatch_bwd(
+        moe_in_curr_0,
         grad_x_next_0,
         expert_axis_name=expert_axis_name,
         axis_mapping=axis_mapping,
         mesh=mesh,
+        gmm_fn=gmm_fn,
+        quant_rule=quant_rule,
     )
 
     def _shared_expert_fwd_1(moe_in, w_shared):
@@ -2810,9 +3041,10 @@ def dsv3_sparse_layer_scan_body_bwd(
         mesh=mesh,
         quant_rule=quant_rule,
         w_routed_q=w_routed_q,
+        grad_y_scale=grad_y_scale_1,
     )
     return (
-        (x_ag_0, grad_y_ag_0),
+        (x_ag_0, grad_y_ag_0, grad_y_scale_0),
         (
             grad_x_ag_1,
             grad_sorted_coeffs_1,
@@ -2828,14 +3060,16 @@ def dsv3_sparse_layer_scan_body_bwd(
   def phase5(
       x_ag_0,
       grad_y_ag_0,
+      grad_y_scale_0,
       grad_shared_x_0,
       grad_x_ag_1,
       grad_sorted_coeffs_1,
       grad_w_routed_1,
       bank_0,
       bank_offset_0,
+      w_pending_grad_partial,
   ):
-    """Phase 5: mb0 expert backward, accumulating onto mb1's routed weight gradients; mb1 dispatch transpose."""
+    """Phase 5: mb0 expert backward, accumulating onto mb1's routed weight gradients; mb1 dispatch transpose and attention weight reduction."""
     assert res.mb0.moe is not None
     assert res.mb1 is not None
     assert res.mb1.moe is not None
@@ -2853,7 +3087,21 @@ def dsv3_sparse_layer_scan_body_bwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
     )
-    grad_coeffs_ag_1, x_ag_0, grad_y_ag_0 = jax.lax.optimization_barrier((grad_coeffs_ag_1, x_ag_0, grad_y_ag_0))
+    (
+        grad_coeffs_ag_1,
+        x_ag_0,
+        grad_y_ag_0,
+        grad_y_scale_0,
+        grad_shared_x_0,
+    ) = jax.lax.optimization_barrier(
+        (
+            grad_coeffs_ag_1,
+            x_ag_0,
+            grad_y_ag_0,
+            grad_y_scale_0,
+            grad_shared_x_0,
+        )
+    )
 
     def _shared_expert_fwd_0(moe_in, w_shared):
       return dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
@@ -2880,12 +3128,20 @@ def dsv3_sparse_layer_scan_body_bwd(
         mesh=mesh,
         quant_rule=quant_rule,
         w_routed_q=w_routed_q,
+        grad_y_scale=grad_y_scale_0,
     )
 
-    grad_moe_in_routed_1, grad_coeffs_1 = dsv3_router.dsv3_combine_with_coeff_grads(
+    # Runs the second ICI reduction stage (SparseCore 0) of the attention half
+    # of the weight gradient the previous call partially reduced, in the same
+    # SparseCore block as mb1's token gradient reduce-scatter, right after it.
+    # It then overlaps with mb0's expert backward and mb1's router backward
+    # from as soon as the reduce-scatter is done, instead of having to wait for
+    # a later phase to issue it.
+    grad_moe_in_routed_1, grad_coeffs_1, w_pending_grad_attention = dsv3_router.dsv3_combine_with_coeff_grads_and_reduce(
         grad_x_ag_1,
         grad_coeffs_ag_1,
         res.mb1.moe.router_metadata,
+        None if w_pending_grad_partial is None else reduce_ici_second_fn(w_pending_grad_partial, defer=True)[0],
         local_seq_length=local_seq_length,
         num_experts_per_tok=num_experts_per_tok,
         expert_axis_name=expert_axis_name,
@@ -2903,6 +3159,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         ),
         (grad_moe_in_routed_1, grad_coeffs_1),
         (bank_0, bank_offset_0),
+        w_pending_grad_attention,
     ), ()
 
   @jax.named_call
@@ -2951,8 +3208,9 @@ def dsv3_sparse_layer_scan_body_bwd(
       grad_x_ag_0,
       grad_sorted_coeffs_0,
       grad_mla_out_total_1,
+      w_pending_grad_partial,
   ):
-    """Phase 7: mb0 dispatch transpose; mb1 pre_norm and MLA backward."""
+    """Phase 7: mb0 dispatch transpose and MoE weight reduction; mb1 pre_norm and MLA backward."""
     assert res.mb1 is not None
     assert res.mb1.mla is not None
     assert res.mb0 is not None
@@ -2964,10 +3222,17 @@ def dsv3_sparse_layer_scan_body_bwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
     )
-    grad_moe_in_routed_0, grad_coeffs_0 = dsv3_router.dsv3_combine_with_coeff_grads(
+    # Runs the second ICI reduction stage (SparseCore 0) of the MoE half of the
+    # weight gradient the previous call partially reduced, in the same
+    # SparseCore block as mb0's token gradient reduce-scatter, right after it.
+    # It then overlaps with mb1's MLA backward from as soon as the
+    # reduce-scatter is done, instead of having to wait for a later phase to
+    # issue it.
+    grad_moe_in_routed_0, grad_coeffs_0, w_pending_grad_moe = dsv3_router.dsv3_combine_with_coeff_grads_and_reduce(
         grad_x_ag_0,
         grad_coeffs_ag_0,
         res.mb0.moe.router_metadata,
+        None if w_pending_grad_partial is None else reduce_ici_second_fn(w_pending_grad_partial, defer=True)[1],
         local_seq_length=local_seq_length,
         num_experts_per_tok=num_experts_per_tok,
         expert_axis_name=expert_axis_name,
@@ -3016,6 +3281,7 @@ def dsv3_sparse_layer_scan_body_bwd(
     return (
         (grad_moe_in_routed_0, grad_coeffs_0),
         (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_yarn_freqs_1),
+        w_pending_grad_moe,
     ), ()
 
   @jax.named_call
@@ -3066,6 +3332,8 @@ def dsv3_sparse_layer_scan_body_bwd(
       bank_offset_0,
       bank_1,
       bank_offset_1,
+      w_next_expert_grad_unreduced,
+      w_pending_grad_partial,
   ):
     (
         (
@@ -3078,14 +3346,13 @@ def dsv3_sparse_layer_scan_body_bwd(
     ) = phase1(grad_outputs_mla_next_0, grad_x_next_1)
 
     (
-        (
-            grad_x_next_0,
-            grad_pre_attn_norm_scale_next_0,
-            grad_w_mla_next_0,
-            grad_yarn_freqs_next_0,
-        ),
-        (x_ag_1, grad_y_ag_1),
-    ), _ = phase2(grad_outputs_mla_next_0_wait, grad_x_next_1_p1)
+        (grad_x_next_0, w_next_grad_unreduced, _),
+        (x_ag_1, grad_y_ag_1, grad_y_scale_1),
+    ), _ = phase2(
+        grad_outputs_mla_next_0_wait,
+        grad_x_next_1_p1,
+        w_next_expert_grad_unreduced,
+    )
 
     (
         (
@@ -3093,11 +3360,11 @@ def dsv3_sparse_layer_scan_body_bwd(
             grad_shared_x_0,
             grad_mla_out_unpermute_0,
         ),
-        (x_ag_1_wait, grad_y_ag_1_wait),
-    ), _ = phase3(grad_x_next_0, x_ag_1, grad_y_ag_1)
+        (x_ag_1_wait, grad_y_ag_1_wait, grad_y_scale_1_wait),
+    ), _ = phase3(grad_x_next_0, x_ag_1, grad_y_ag_1, grad_y_scale_1)
 
     (
-        (x_ag_0, grad_y_ag_0),
+        (x_ag_0, grad_y_ag_0, grad_y_scale_0),
         (
             grad_x_ag_1,
             grad_sorted_coeffs_1,
@@ -3110,6 +3377,7 @@ def dsv3_sparse_layer_scan_body_bwd(
         grad_x_next_0_p3,
         x_ag_1_wait,
         grad_y_ag_1_wait,
+        grad_y_scale_1_wait,
         grad_shared_x_1,
         bank_1,
         bank_offset_1,
@@ -3125,15 +3393,18 @@ def dsv3_sparse_layer_scan_body_bwd(
         ),
         (grad_moe_in_routed_1, grad_coeffs_1),
         (bank_0, bank_offset_0),
+        w_pending_grad_attention,
     ), _ = phase5(
         x_ag_0,
         grad_y_ag_0,
+        grad_y_scale_0,
         grad_shared_x_0,
         grad_x_ag_1,
         grad_sorted_coeffs_1,
         grad_w_routed_1,
         bank_0,
         bank_offset_0,
+        w_pending_grad_partial,
     )
 
     (
@@ -3162,11 +3433,13 @@ def dsv3_sparse_layer_scan_body_bwd(
     grad_mla_out_total_1 = grad_mla_out_unpermute_1 + grad_mla_out_norm_1
     (
         (grad_moe_in_routed_0, grad_coeffs_0),
-        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, grad_yarn_freqs_1),
+        (grad_mb1, grad_pre_attn_norm_scale_1, grad_w_mla_1, _),
+        w_pending_grad_moe,
     ), _ = phase7(
         grad_x_ag_0_w,
         grad_sorted_coeffs_0_w,
         grad_mla_out_total_1,
+        w_pending_grad_partial,
     )
 
     (
@@ -3182,9 +3455,8 @@ def dsv3_sparse_layer_scan_body_bwd(
 
     grad_mla_out_total_0 = grad_mla_out_unpermute_0_w + grad_mla_out_norm_0
 
-    grad_yarn_freqs = (grad_yarn_freqs_next_0, grad_yarn_freqs_1)
-
     return (
+        w_next_grad_unreduced,
         grad_mla_out_total_0,
         grad_mb1_wait,
         bank_0,
@@ -3193,7 +3465,6 @@ def dsv3_sparse_layer_scan_body_bwd(
         bank_offset_1,
         grad_pre_attn_norm_scale_1,
         grad_w_mla_1,
-        grad_yarn_freqs,
         grad_post_attn_norm_scale_0,
         grad_post_attn_norm_scale_1,
         grad_w_router_0,
@@ -3201,11 +3472,12 @@ def dsv3_sparse_layer_scan_body_bwd(
         grad_w_routed,
         grad_w_shared_0,
         grad_w_shared_1,
-        grad_pre_attn_norm_scale_next_0,
-        grad_w_mla_next_0,
+        w_pending_grad_attention,
+        w_pending_grad_moe,
     )
 
   (
+      w_next_grad_unreduced,
       grad_mla_out_total_0,
       grad_mb1_wait,
       bank_0,
@@ -3214,7 +3486,6 @@ def dsv3_sparse_layer_scan_body_bwd(
       bank_offset_1,
       grad_pre_attn_norm_scale_1,
       grad_w_mla_1,
-      _,
       grad_post_attn_norm_scale_0,
       grad_post_attn_norm_scale_1,
       grad_w_router_0,
@@ -3222,8 +3493,8 @@ def dsv3_sparse_layer_scan_body_bwd(
       grad_w_routed,
       grad_w_shared_0,
       grad_w_shared_1,
-      grad_pre_attn_norm_scale_next_0,
-      grad_w_mla_next_0,
+      w_pending_grad_attention,
+      w_pending_grad_moe,
   ) = _scan_body_bwd(
       grad_outputs_mla_next_0,
       grad_x_next_1,
@@ -3231,6 +3502,19 @@ def dsv3_sparse_layer_scan_body_bwd(
       bank_offset_0,
       bank_1,
       bank_offset_1,
+      w_next_expert_grad_unreduced,
+      w_pending_grad_partial,
+  )
+
+  # Runs the first ICI reduction stage of the next layer's weight gradient
+  # outside of `_scan_body_bwd`, whose `program_order` chain would only start
+  # it once phase 8 is done. It only depends on phase 2, so it can run during
+  # phases 3 to 8. Only the next call runs the second stage, so nothing here
+  # waits on it.
+  w_next_grad_partial = reduce_ici_first_fn(w_next_grad_unreduced)
+
+  w_pending_grad = (
+      None if w_pending_grad_partial is None else ops.combine_w_grads(w_pending_grad_attention, w_pending_grad_moe)
   )
 
   grad_outputs_mla_curr = (
@@ -3253,14 +3537,12 @@ def dsv3_sparse_layer_scan_body_bwd(
       ),
   )
 
-  grad_w_next = dsv3_types.DSv3SparseLayerWeightsPytree(
-      pre_attn_norm_scale=grad_pre_attn_norm_scale_next_0,
-      mla=grad_w_mla_next_0,
-      post_attn_norm_scale=None,
-      moe=dsv3_types.DSv3MoEWeightsPytree(),
+  return (
+      grad_outputs_mla_curr,
+      grad_w_curr,
+      w_next_grad_partial,
+      w_pending_grad,
   )
-
-  return grad_outputs_mla_curr, grad_w_curr, grad_w_next
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=tuple(range(6, 30)))
@@ -3701,6 +3983,34 @@ _SC1_KWARGS = dict(
     compute_type="tpu_sparsecore",
     compiler_options={"sparse_core_config": {"core_ids": [1]}},
 )
+_SC0_KWARGS = dict(
+    compute_type="tpu_sparsecore",
+    compiler_options={"sparse_core_config": {"core_ids": [0]}},
+)
+
+
+def _sc1_reduce_axes(
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+) -> frozenset[str]:
+  """Returns the physical mesh axes of the first weight gradient ICI reduction.
+
+  The first stage (`reduce_w_ici_sc1`) reduces along the `fsdp_moe` axes, which
+  the weights are sharded along (e.g. `core` and `z`, or `y` and `z`), so it is
+  mostly reduce-scatters. The second stage (`reduce_w_ici_sc0`) reduces along
+  the other axes, which the weights are replicated along, so it is the
+  all-reduces, which the pipelined layer scan hides behind the next layer's
+  backward pass. Among the collected axes only `fsdp_moe` ones shard weight
+  dimensions, so the stages never split the axes sharding a dimension, which
+  `ops.reduce_along_axis` does not support.
+
+  Args:
+    axis_mapping: Mapping from logical to physical mesh axes.
+
+  Returns:
+    The physical axes of `fsdp_moe`.
+  """
+  fsdp_moe = axis_mapping["fsdp_moe"]
+  return frozenset((fsdp_moe,) if isinstance(fsdp_moe, str) else fsdp_moe)
 
 
 def _w_ici_axes() -> dsv3_types.DSv3SparseLayerWeightsPytree:
@@ -3832,7 +4142,8 @@ def collect_w_ici(
       is performed.
 
   Returns:
-    The collected (and, if requested, shuffled) weights.
+    The collected (and, if requested, shuffled) weights, with `moe.routed` in
+    the `routed_w_to_tiles` view.
   """
   w_axes = _w_ici_axes()
 
@@ -3843,6 +4154,12 @@ def collect_w_ici(
         axis_mapping=axis_mapping,
         expert_axis_name=expert_axis_name,
     )
+
+  # Gather the routed expert weights in the `routed_w_to_tiles` view so the
+  # SparseCore all-gather produces T(8, 128) weights (see its docstring).
+  assert w.moe.routed.gate is not None
+  flat_routed = w.moe.routed.gate.ndim == 2
+  w = dataclasses.replace(w, moe=dataclasses.replace(w.moe, routed=routed_w_to_tiles(w.moe.routed)))
 
   if split:
     pre_attn_norm_scale, mla = ops.collect_along_axis(
@@ -3857,31 +4174,107 @@ def collect_w_ici(
         axis_mapping,
         **_SC1_KWARGS,
     )
-    return dsv3_types.DSv3SparseLayerWeightsPytree(
+    collected = dsv3_types.DSv3SparseLayerWeightsPytree(
         pre_attn_norm_scale=pre_attn_norm_scale,
         mla=mla,
         post_attn_norm_scale=post_attn_norm_scale,
         moe=moe,
     )
+  else:
+    collected = ops.collect_along_axis(
+        w,
+        w_axes,
+        axis_mapping,
+        **_SC1_KWARGS,
+    )
+  if not flat_routed:
+    return collected
+  # Unmerge the gathered `[expert * rows / 8, 8, cols]` tiles into experts, a
+  # bitcast.
+  assert w.moe.router.kernel is not None
+  num_experts = w.moe.router.kernel.shape[-1]
+  routed = jax.tree.map(
+      lambda a: a.reshape(num_experts, -1, *a.shape[-2:]),
+      collected.moe.routed,
+  )
+  return dataclasses.replace(collected, moe=dataclasses.replace(collected.moe, routed=routed))
 
-  return ops.collect_along_axis(
-      w,
-      w_axes,
-      axis_mapping,
-      **_SC1_KWARGS,
+
+def _split_w_attention_moe(
+    w: dsv3_types.DSv3SparseLayerWeightsPytree,
+) -> tuple[
+    dsv3_types.DSv3SparseLayerWeightsPytree,
+    dsv3_types.DSv3SparseLayerWeightsPytree,
+]:
+  """Splits `w` into its attention and MoE halves, `None` elsewhere.
+
+  The halves mirror `collect_w_ici(split=True)` and merge back with
+  `ops.combine_w_grads`.
+
+  Args:
+    w: Sparse layer weights or weight gradients.
+
+  Returns:
+    The attention half (`pre_attn_norm_scale` and `mla`) and the MoE half
+    (`post_attn_norm_scale` and `moe`) of `w`.
+  """
+  masked = jax.tree.map(lambda _: None, w)
+  attention = dataclasses.replace(masked, pre_attn_norm_scale=w.pre_attn_norm_scale, mla=w.mla)
+  moe = dataclasses.replace(masked, post_attn_norm_scale=w.post_attn_norm_scale, moe=w.moe)
+  return attention, moe
+
+
+def _w_ici_split_scatters() -> dsv3_types.DSv3SparseLayerWeightsPytree:
+  """Returns whether to split each weight gradient's ICI reduce-scatter by axis.
+
+  With FSDP over two axes (e.g. `y` and `z`), the small, latency-bound
+  reduce-scatters of the MLA down-projections, `k_up`, `v_up` and the shared
+  experts are issued as one 1D reduce-scatter per axis (see
+  `ops.reduce_along_axis`), and the large, bandwidth-bound ones of `q_up`, `out`
+  and the routed experts as one 2D reduce-scatter, which uses the links of both
+  axes. The norm scales and router weights are only all-reduced.
+  """
+  return dsv3_types.DSv3SparseLayerWeightsPytree(
+      pre_attn_norm_scale=False,
+      mla=dsv3_types.DSv3MLAWeightsPytree(
+          q_down=True,
+          q_up=False,
+          q_norm_scale=False,
+          kv_down=True,
+          k_up=True,
+          v_up=True,
+          kv_norm_scale=False,
+          out=False,
+      ),
+      post_attn_norm_scale=False,
+      moe=dsv3_types.DSv3MoEWeightsPytree(
+          router=dsv3_types.DSv3MoERouterWeightsPytree(kernel=False, bias=False),
+          routed=dsv3_types.DSv3MoERoutedExpertWeightsPytree(
+              gate=False,
+              linear=False,
+          ),
+          shared=dsv3_types.DSv3MoESharedExpertWeightsPytree(
+              gate_0=True,
+              gate_1=True,
+              linear=True,
+          ),
+      ),
   )
 
 
 @jt.jaxtyped(typechecker=typeguard.typechecked)
-def reduce_w_ici(
+def reduce_w_ici_sc1(
     grad_w: dsv3_types.DSv3SparseLayerWeightsPytree,
     like: dsv3_types.DSv3SparseLayerWeightsPytree,
     *,
     axis_mapping: Mapping[str, str | tuple[str, ...]],
 ) -> dsv3_types.DSv3SparseLayerWeightsPytree:
-  """Reduces sparse layer weight gradients across ICI mesh axes.
+  """Reduces sparse layer weight gradients along the `_sc1_reduce_axes`.
 
-  The dual of `collect_w_ici(split=False)`.
+  The first stage of the dual of `collect_w_ici(split=False)`, on SparseCore 1.
+  The gradients stay unreduced along the other collected ICI axes until
+  `reduce_w_ici_sc0`. The `_w_ici_split_scatters` reduce-scatters are issued
+  one axis at a time.
 
   Args:
     grad_w: Gradients of the `collect_w_ici` outputs.
@@ -3889,6 +4282,68 @@ def reduce_w_ici(
     axis_mapping: Mapping from logical to physical mesh axes.
 
   Returns:
-    The reduced gradients, sharded like `like`.
+    The partially reduced gradients, sharded like `like` along the
+    `_sc1_reduce_axes`.
   """
-  return ops.reduce_along_axis(grad_w, _w_ici_axes(), axis_mapping, like, **_SC1_KWARGS)
+  flat_routed = like.moe.routed.gate is not None and like.moe.routed.gate.ndim == 2
+  routed = (
+      jax.tree.map(lambda a: a.reshape(-1, a.shape[-1]), grad_w.moe.routed)
+      if flat_routed
+      else routed_w_from_tiles(grad_w.moe.routed)
+  )
+  grad_w = dataclasses.replace(
+      grad_w,
+      moe=dataclasses.replace(grad_w.moe, routed=routed),
+  )
+  return ops.reduce_along_axis(
+      grad_w,
+      _w_ici_axes(),
+      axis_mapping,
+      like,
+      axes=_sc1_reduce_axes(axis_mapping),
+      split_scatters=_w_ici_split_scatters(),
+      **_SC1_KWARGS,
+  )
+
+
+@jt.jaxtyped(typechecker=typeguard.typechecked)
+def reduce_w_ici_sc0(
+    grad_w: dsv3_types.DSv3SparseLayerWeightsPytree,
+    like: dsv3_types.DSv3SparseLayerWeightsPytree,
+    *,
+    axis_mapping: Mapping[str, str | tuple[str, ...]],
+    defer: bool = False,
+) -> dsv3_types.DSv3SparseLayerWeightsPytree | tuple[ops.DeferredReduce, ops.DeferredReduce]:
+  """Reduces sparse layer weight gradients along the remaining ICI axes.
+
+  The second stage of the dual of `collect_w_ici(split=False)`, on SparseCore 0:
+  `reduce_w_ici_sc0(reduce_w_ici_sc1(grad_w, like), like)` is that dual.
+
+  Args:
+    grad_w: Outputs of `reduce_w_ici_sc1`.
+    like: Weights with the shardings of the `collect_w_ici` inputs.
+    axis_mapping: Mapping from logical to physical mesh axes.
+    defer: Whether to return the reduction as a pair of `ops.DeferredReduce`s,
+      of the attention and the MoE weights (see `_split_w_attention_moe`), for
+      the caller to run in SparseCore 0 blocks it already has (e.g. after
+      reduce-scatters), instead of in one of this function's.
+
+  Returns:
+    The reduced gradients, sharded like `like`. The pair of `ops.DeferredReduce`
+    of their halves if `defer`, whose outputs merge with `ops.combine_w_grads`.
+  """
+  mesh = jax.typeof(jax.tree.leaves(like)[0]).sharding.mesh
+  axes = frozenset(mesh.axis_names) - _sc1_reduce_axes(axis_mapping)
+  if not defer:
+    return ops.reduce_along_axis(grad_w, _w_ici_axes(), axis_mapping, like, axes=axes, **_SC0_KWARGS)
+  return tuple(
+      ops.reduce_along_axis(
+          grad_w_half,
+          _w_ici_axes(),
+          axis_mapping,
+          like_half,
+          axes=axes,
+          defer=True,
+      )
+      for grad_w_half, like_half in zip(_split_w_attention_moe(grad_w), _split_w_attention_moe(like))
+  )

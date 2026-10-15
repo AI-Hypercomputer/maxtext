@@ -85,10 +85,19 @@ def _terminate_iterator_workers(obj):
   if obj is None:
     return
   candidates = [obj]
-  if hasattr(obj, "_iterator"):
-    candidates.append(obj._iterator)
-  if hasattr(obj, "_parent"):
-    candidates.append(obj._parent)
+  for attr in ("_iterator", "_parent"):
+    try:
+      val = getattr(obj, attr, None)
+      if val is not None:
+        candidates.append(val)
+    except Exception:
+      pass
+  try:
+    parents = getattr(obj, "_parents", None)
+    if parents and isinstance(parents, (list, tuple)):
+      candidates.extend(p for p in parents if p is not None)
+  except Exception:
+    pass
   for c in candidates:
     workers = getattr(c, "_workers", None) or getattr(c, "workers", None)
     if workers and isinstance(workers, (list, tuple)):

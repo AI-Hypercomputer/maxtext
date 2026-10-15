@@ -1020,5 +1020,131 @@ class TokenizerChatTemplateTest(unittest.TestCase):
     self.assertEqual(rendered, "Hello!")
 
 
+class RLGoodputTest(unittest.TestCase):
+  """Unit tests for Goodput recording in RL training and hooks."""
+
+  def test_rl_training_hooks_goodput_with_eval_interval_zero(self):
+    """Verify RLTrainingHooks records step start time and does not raise ZeroDivisionError when eval_interval=0."""
+    from maxtext.trainers.post_train.rl import hooks as rl_hooks  # pylint: disable=import-outside-toplevel
+
+    mock_recorder = mock.MagicMock()
+    trainer_config = SimpleNamespace(
+        enable_goodput_recording=True,
+        eval_interval=0,
+        num_test_batches=0,
+        num_eval_passes=1,
+        eval_corr_lst=False,
+        eval_make_lst=False,
+    )
+    rl_cluster = SimpleNamespace(global_steps=0, actor_trainer=SimpleNamespace(training_hooks=None))
+
+    train_rl.utils_rl.install_training_hooks(
+        rl_cluster, trainer_config, test_dataset=None, goodput_recorder=mock_recorder
+    )
+    hook = rl_cluster.actor_trainer.training_hooks
+    self.assertIsInstance(hook, rl_hooks.RLTrainingHooks)
+
+    # Simulate step 0 and step 1 start/end
+    train_ctx = SimpleNamespace(train_steps=0)
+    hook.on_train_step_start(train_ctx)
+    hook.on_train_step_end(trainer=train_ctx, step=1, loss=0.5)  # Must not raise ZeroDivisionError
+
+    train_ctx.train_steps = 1
+    hook.on_train_step_start(train_ctx)
+    hook.on_train_step_end(trainer=train_ctx, step=2, loss=0.4)
+
+    self.assertEqual(mock_recorder.record_step_start_time.call_args_list, [mock.call(0), mock.call(1)])
+
+  def _run_rl_train_with_goodput(self, enable_goodput_recording: bool):
+    """Helper to run rl_train with mocked components and goodput_recorder."""
+    mock_recorder = mock.MagicMock()
+    trainer_config = SimpleNamespace(
+        enable_goodput_recording=enable_goodput_recording,
+        monitor_goodput=False,
+        goodput_job_name="test-rl-job",
+        run_name="test-rl-run",
+        debug=SimpleNamespace(rl=False),
+        load_parameters_path="gs://dummy/ckpt",
+        tokenizer_path="dummy_tokenizer",
+        hf_access_token=None,
+        checkpoint_dir="/tmp/rl_ckpt",
+        tensorboard_dir="/tmp/rl_tb",
+        profiler="",
+        steps=1,
+        batch_size=1,
+        num_batches=1,
+        num_test_batches=0,
+        eval_interval=0,
+        num_eval_passes=1,
+        eval_corr_lst=False,
+        eval_make_lst=False,
+        train_fraction=1.0,
+        load_checkpoint_only_once=False,
+        save_checkpoint_on_completion=False,
+        enable_single_controller=False,
+        reward_functions_path="",
+        reward_functions="",
+        rl=SimpleNamespace(use_agentic_rollout=False),
+    )
+    sampler_config = SimpleNamespace(debug=SimpleNamespace(rl=False))
+
+    def fake_create_recorder(cfg):
+      return mock_recorder if cfg.enable_goodput_recording else None
+
+    mock_rl_cluster = SimpleNamespace(
+        global_steps=0, actor_trainer=SimpleNamespace(training_hooks=None), close=mock.MagicMock()
+    )
+    mock_rl_trainer = mock.MagicMock()
+
+    def fake_train(dataset):  # pylint: disable=unused-argument
+      hook = mock_rl_cluster.actor_trainer.training_hooks
+      if hook is not None:
+        hook.on_train_step_start(SimpleNamespace(train_steps=0))
+        hook.on_train_step_end(trainer=None, step=1, loss=1.0)
+
+    mock_rl_trainer.train.side_effect = fake_train
+
+    with (
+        mock.patch.object(train_rl, "create_goodput_recorder", side_effect=fake_create_recorder),
+        mock.patch.object(
+            train_rl.model_creation_utils,
+            "setup_configs_and_devices",
+            return_value=(trainer_config, sampler_config, [mock.MagicMock()], [mock.MagicMock()]),
+        ),
+        mock.patch.object(
+            train_rl.model_creation_utils,
+            "create_models_and_meshes",
+            return_value=(mock.MagicMock(), mock.MagicMock(), mock.MagicMock(), mock.MagicMock(), mock.MagicMock()),
+        ),
+        mock.patch.object(train_rl.epath, "Path", return_value=mock.MagicMock()),
+        mock.patch.object(train_rl.AutoTokenizer, "from_pretrained", return_value=mock.MagicMock()),
+        mock.patch.object(train_rl, "configure_tokenizer_chat_template"),
+        mock.patch.object(train_rl, "prepare_datasets", return_value=(["batch"], [])),
+        mock.patch.object(
+            train_rl, "create_rl_components", return_value=(mock_rl_cluster, mock_rl_trainer, mock.MagicMock(), [])
+        ),
+        mock.patch.object(train_rl.jax, "effects_barrier"),
+    ):
+      train_rl.rl_train(["dummy"], {})
+
+    return mock_recorder
+
+  def test_rl_train_goodput_enabled_records_lifecycle_and_steps(self):
+    """Verify rl_train with enable_goodput_recording=True records all lifecycle and step events."""
+    mock_recorder = self._run_rl_train_with_goodput(enable_goodput_recording=True)
+    mock_recorder.record_job_start_time.assert_called_once()
+    mock_recorder.record_tpu_init_start_time.assert_called_once()
+    mock_recorder.record_tpu_init_end_time.assert_called_once()
+    mock_recorder.record_training_preparation_start_time.assert_called_once()
+    mock_recorder.record_training_preparation_end_time.assert_called_once()
+    mock_recorder.record_step_start_time.assert_called_once_with(0)
+    mock_recorder.record_job_end_time.assert_called_once()
+
+  def test_rl_train_goodput_disabled_performs_zero_recorder_calls(self):
+    """Verify rl_train with enable_goodput_recording=False performs zero recorder calls."""
+    mock_recorder = self._run_rl_train_with_goodput(enable_goodput_recording=False)
+    self.assertEqual(len(mock_recorder.method_calls), 0)
+
+
 if __name__ == "__main__":
   unittest.main()

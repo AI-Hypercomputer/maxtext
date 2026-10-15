@@ -40,7 +40,7 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
-from maxtext.layers import nnx_scan
+from maxtext.layers import fsdp_prefetch, nnx_scan
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
 from maxtext.layers.normalizations import RMSNorm
@@ -79,6 +79,96 @@ from maxtext.utils.sharding import create_sharding
 # ------------------------------------------------------------------------------
 # The network: Decoder Definitions
 # ------------------------------------------------------------------------------
+
+_FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
+_GATHERED_FSDP_WEIGHT = "gathered_fsdp_weight"
+
+
+def _drop_fsdp_mesh_axes(entry):
+  """Return one PartitionSpec entry with the FSDP mesh axes removed."""
+  if entry is None:
+    return None
+  if isinstance(entry, str):
+    return None if entry in _FSDP_MESH_AXES else entry
+  rest = tuple(a for a in entry if a not in _FSDP_MESH_AXES)
+  if not rest:
+    return None
+  return rest[0] if len(rest) == 1 else rest
+
+
+def save_gathered_fsdp_weights_policy(policy):
+  """Extend a remat policy so the hoisted FSDP weight gathers survive as residuals."""
+  keep = jax.checkpoint_policies.save_only_these_names(_GATHERED_FSDP_WEIGHT)
+  return keep if policy is None else jax.checkpoint_policies.save_from_both_policies(policy, keep)
+
+
+def hoist_fsdp_weight_gather(params, mesh, config):
+  """Gather each FSDP-sharded layer kernel once, in compute dtype, at the top of a scan body.
+
+  Left alone, the FSDP all-gather of a weight is emitted wherever the weight is first
+  read, which under remat means once in the forward pass and again in the recomputed
+  backward pass. Doing it explicitly here gives the gather a name, so the remat policy
+  can keep the gathered value as a residual and the backward pass reads it instead of
+  re-gathering. See `save_fsdp_gathered_weights` in base.yml.
+
+  Numerics are unchanged: the only arithmetic difference is that the cast to
+  `config.dtype` happens before the gather rather than inside the consuming dot, and
+  only kernels (rank >= 2 float arrays) are touched, never the rank-1 norm scales.
+  """
+  if not config.save_fsdp_gathered_weights:
+    return params
+
+  def gathered(value, spec):
+    """(pspec, cast value) for a kernel worth gathering here, or None to leave it be."""
+    new_spec = tuple(_drop_fsdp_mesh_axes(e) for e in spec)
+    if tuple(spec) == new_spec:
+      return None
+    if getattr(value, "ndim", 0) < 2 or not jnp.issubdtype(value.dtype, jnp.floating):
+      return None
+    # Every consumer casts its kernel to config.dtype before the dot, so doing it here
+    # instead is arithmetically identical -- but it halves both the bytes on the wire
+    # and the bytes the residual costs in HBM. That halving is what makes the residual
+    # pay for itself: kept at f32 it is a wash (see the guide, section 4.11).
+    return jax.sharding.PartitionSpec(*new_spec), jnp.asarray(value, config.dtype)
+
+  if config.shard_mode == ShardMode.EXPLICIT:
+
+    def hoist(x):
+      if not hasattr(x, "shape") or getattr(x, "ndim", 0) < 2:
+        return x
+      spec = getattr(jax.typeof(x).sharding, "spec", None)
+      if spec is None:
+        return x
+      out = gathered(x, tuple(spec))
+      if out is None:
+        return x
+      pspec, value = out
+      return checkpoint_name(jax.sharding.reshard(value, pspec), _GATHERED_FSDP_WEIGHT)
+
+    return jax.tree.map(hoist, params)
+
+  # Under shard_mode: auto jax.typeof(x).sharding.spec is all-None inside the traced
+  # body, so the logical axis names have to be read off the nnx.Variable metadata and
+  # lowered through the logical axis rules by hand.
+  rules = sharding.get_logical_axis_rules() or config.logical_axis_rules
+
+  def hoist_auto(x):
+    if not isinstance(x, nnx.Variable) or x.type.__name__ == "_overwrite_with_gradient":
+      return x
+    metadata = x.get_metadata()
+    # Same precedence `variable_to_logically_partitioned` uses, so both read the same names.
+    names = next((metadata[k] for k in ("out_sharding", "sharding_names", "sharding") if metadata.get(k)), None)
+    value = x.get_value()
+    if not names or not hasattr(value, "shape") or len(names) != getattr(value, "ndim", 0):
+      return x
+    out = gathered(value, tuple(sharding.logical_to_mesh_axes(tuple(names), mesh, rules=rules)))
+    if out is None:
+      return x
+    pspec, value = out
+    pinned = jax.lax.with_sharding_constraint(value, jax.sharding.NamedSharding(mesh, pspec))
+    return x.replace(checkpoint_name(pinned, _GATHERED_FSDP_WEIGHT))
+
+  return jax.tree.map(hoist_auto, params, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
 
 class NNXDecoderLayer(nnx.Module):
@@ -477,6 +567,7 @@ class NNXDecoder(nnx.Module):
           matmul_precision=self.config.matmul_precision,
           parameter_memory_host_offload=config.parameter_memory_host_offload,
           weight_quant=quantizations.get_weight_quant_config(config, "logits_dense"),
+          weight_grad_in_kernel_order=config.lm_head_weight_grad_in_kernel_order,
           rngs=rngs,
       )
 
@@ -1057,6 +1148,16 @@ class NNXDecoder(nnx.Module):
       (final_carry, updated_layers) when kv_caches_stacked is None.
       (final_carry, updated_layers, returned_kv_stacked) otherwise.
     """
+    if self.config.prefetch_fsdp_weights and not fsdp_prefetch.mesh_uses_fsdp(self.mesh):
+      max_logging.info("prefetch_fsdp_weights: no FSDP mesh axis spans more than one device; using the regular scan.")
+    elif (
+        self.config.prefetch_fsdp_weights
+        and kv_caches_stacked is None
+        and forced_routed_experts_scanned is None
+        and not self.config.parameter_memory_host_offload
+        and not getattr(self, "disable_quant_stats_update", False)
+    ):
+      return self._apply_layers_sequentially_prefetch(layers, x_in, *args, length=length, **kwargs)
     if length == 0:
       return (
           x_in,
@@ -1064,6 +1165,8 @@ class NNXDecoder(nnx.Module):
           kv_caches_stacked if kv_caches_stacked is not None else None,
       )
     policy = self.get_remat_policy()
+    if self.config.save_fsdp_gathered_weights:
+      policy = save_gathered_fsdp_weights_policy(policy)
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
     graphdef, params, state = nnx.split(layers, nnx.Param, ...)
 
@@ -1109,6 +1212,8 @@ class NNXDecoder(nnx.Module):
             lambda x: jax.device_put(x, max_utils.device_space()),
             current_params,
         )
+      else:
+        current_params = hoist_fsdp_weight_gather(current_params, self.mesh, self.config)
 
       layer = nnx.merge(graphdef, current_params, current_state)
 
@@ -1205,6 +1310,12 @@ class NNXDecoder(nnx.Module):
       out_layers = layers
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
+
+  def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
+    """Runs the scanned layer stack with FSDP weight prefetching (see `fsdp_prefetch`)."""
+    return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+        layers, x_in, *args, length=length, mesh=self.mesh, config=self.config, **kwargs
+    )
 
   def get_decoder_layers(self):
     """Retrieves decoder layer classes based on config using a dictionary lookup."""
@@ -1415,6 +1526,7 @@ class NNXDecoder(nnx.Module):
       return functools.partial(
           gpt3.Gpt3LayerNorm,
           num_features=num_features,
+          shard_mode=self.config.shard_mode,
           reductions_in_fp32=False,
           use_bias=True,
           rngs=rngs,
@@ -1482,6 +1594,7 @@ class NNXDecoder(nnx.Module):
             "qwen3-vl-2b",
             "qwen3-vl-4b",
             "qwen3-vl-30b-a3b",
+            "qwen3.5-9b",
             "qwen3.5-35b-a3b",
             "qwen3.5-35b-a3b-fp8",
             "qwen3.5-35b-fp8",
@@ -1506,6 +1619,7 @@ class NNXDecoder(nnx.Module):
             "qwen3-vl-2b",
             "qwen3-vl-4b",
             "qwen3-vl-30b-a3b",
+            "qwen3.5-9b",
             "qwen3.5-35b-a3b",
             "qwen3.5-35b-a3b-fp8",
             "qwen3.5-35b-fp8",
@@ -1572,6 +1686,28 @@ class NNXDecoder(nnx.Module):
     _, mhc_reduce_fn = mhc.get_functions(cfg.mhc_expansion_rate)
     return mhc_reduce_fn(y)
 
+  def apply_decoder_norm(self, y, reduce_mhc=True):
+    """Applies the decoder's final normalization (`decoder_norm`) to a hidden state.
+
+    Args:
+      y: Hidden state tensor, either 3D or an expanded 4D mHC state.
+      reduce_mhc: If True (default), collapses the parallel hyper-connection streams to 3D
+        before normalizing.
+
+    Returns:
+      The normalized hidden state.
+    """
+    if reduce_mhc:
+      y = self._reduce_mhc_streams(y)
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      norm_out_sharding = create_sharding(
+          self.mesh,
+          ("activation_batch", "activation_length", "activation_embed"),
+      )
+    else:
+      norm_out_sharding = None
+    return self.decoder_norm(y, out_sharding=norm_out_sharding)
+
   def apply_output_head(self, shared_embedding, y, deterministic, model_mode, normalize_y=True, reduce_mhc=True):
     """Applies final normalization and projects hidden states to logits.
 
@@ -1581,9 +1717,10 @@ class NNXDecoder(nnx.Module):
       deterministic: Whether dropout is disabled.
       model_mode: Operational mode (e.g. MODEL_MODE_TRAIN, MODEL_MODE_PREFILL).
       normalize_y: If True (default), applies the main decoder final normalization
-        (decoder_norm) before projecting to logits. Set to False when called from
-        Multi-Token Prediction (MTP), which applies its own dedicated final norm
-        (mtp_k_final_norm) to avoid double normalization.
+        (decoder_norm) before projecting to logits. Set to False when `y` is already
+        normalized: when called from Multi-Token Prediction (MTP), which applies its
+        own dedicated final norm (mtp_k_final_norm), or when the decoder has already
+        applied `decoder_norm` because `mtp_norm_main_hidden_state` is enabled.
       reduce_mhc: If True (default), collapses the parallel hyper-connection (mHC)
         streams of a 4D `[batch, seq, mhc_expansion_rate, emb]` hidden state down to
         3D before normalizing. Set to False when the caller has already reduced the
@@ -1595,15 +1732,7 @@ class NNXDecoder(nnx.Module):
       y = self._reduce_mhc_streams(y)
 
     if normalize_y:
-      if cfg.shard_mode == ShardMode.EXPLICIT:
-        norm_out_sharding = create_sharding(
-            self.mesh,
-            ("activation_batch", "activation_length", "activation_embed"),
-        )
-      else:
-        norm_out_sharding = None
-
-      y = self.decoder_norm(y, out_sharding=norm_out_sharding)
+      y = self.apply_decoder_norm(y, reduce_mhc=False)
     y = self.dropout(y, deterministic=deterministic)  # NNX call
 
     if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE}:
@@ -2324,6 +2453,15 @@ class NNXDecoder(nnx.Module):
       # sow a collapsed copy and leave `hidden_state` itself 4D, so MTP still receives the
       # full stream state when both features are enabled.
       self.sow(nnx.Intermediate, "hidden_states", self._reduce_mhc_streams(hidden_state))
+
+    elif cfg.mtp_norm_main_hidden_state:
+      # Megatron-LM applies the decoder's final norm once and feeds that tensor to both the LM
+      # head and the MTP block, so normalize here and hand the normalized state out to MTP.
+      # (`num_vocab_tiling > 1` and `mhc_expansion_rate > 1` are rejected by the config validator.)
+      hidden_state = self.apply_decoder_norm(hidden_state)
+      logits = self.apply_output_head(
+          shared_embedding, hidden_state, deterministic, model_mode, normalize_y=False, reduce_mhc=False
+      )
 
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)

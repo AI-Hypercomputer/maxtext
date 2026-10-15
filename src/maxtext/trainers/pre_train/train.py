@@ -513,6 +513,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         data,
         loss_rng,
     )
+    if lineage_adapter is not None and lineage_adapter.is_native(config):
+      # The Lineage model leaves its router state untouched per microbatch; apply
+      # one full-batch routed-bias / expert-permutation update for the step.
+      aux = lineage_adapter.finalize_accumulated_step(loss_model, aux)
   else:
     owg_type = variablelib.variable_type_from_name("_overwrite_with_gradient", allow_register=True)
     custom_param_filter = nnx.Any(owg_type)

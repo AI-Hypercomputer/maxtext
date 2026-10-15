@@ -54,6 +54,30 @@ _QWEN3_MODELS = {
     + _MOE_OVERRIDES,
 }
 
+# One tiny model per Gemma 4 decoder block that supports explicit sharding.
+_GEMMA4_MODELS = {
+    "gemma4": ["model_name=gemma4-31b"],
+    "gemma4_moe": [
+        "model_name=gemma4-26b",
+        # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet (a gap it
+        # shares with mixtral and qwen3_moe), so exercise the sparse_matmul path.
+        "sparse_matmul=True",
+        "megablox=True",
+        "shared_experts=1",
+    ]
+    + _MOE_OVERRIDES,
+    "gemma4_small": [
+        "model_name=gemma4-e2b",
+        # E2B/E4B build their stack in a Python loop rather than a scan.
+        "scan_layers=False",
+        # Per-layer embeddings and KV sharing are what this block adds over gemma4.
+        # Six layers under the E2B period of five leaves layer 5 sharing K/V with layer 3.
+        "hidden_size_per_layer_input=64",
+        "vocab_size_per_layer_input=2048",
+        "num_kv_shared_layers=1",
+    ],
+}
+
 # One tiny model per Mistral-family decoder block that supports explicit sharding.
 _MISTRAL_MODELS = {
     "mistral": ["model_name=mistral-7b"],
@@ -65,6 +89,21 @@ _MISTRAL_MODELS = {
         "megablox=True",
     ]
     + _MOE_OVERRIDES,
+}
+
+_GPT_OSS = [
+    "model_name=gpt-oss-20b",
+    # RoutedMoE.dense_matmul is not onboarded to explicit sharding yet.
+    "sparse_matmul=True",
+    "megablox=True",
+] + _MOE_OVERRIDES
+
+# One tiny model per GPT-family decoder block that supports explicit sharding.
+_GPT_MODELS = {
+    "gpt3_fused_qkv": ["model_name=gpt3-6b", "fused_qkv=True"],
+    "gpt3": ["model_name=gpt3-6b", "fused_qkv=False"],
+    "gpt_oss": _GPT_OSS,
+    "gpt_oss_tensor": _GPT_OSS,
 }
 
 
@@ -136,6 +175,19 @@ class TrainTests(unittest.TestCase):
       rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
   ]
 
+  _gpt_overrides = [
+      "override_model_config=True",
+      "base_num_decoder_layers=2",
+      "base_emb_dim=256",
+      "base_mlp_dim=512",
+      "base_num_query_heads=8",
+      "base_num_kv_heads=8",
+      "head_dim=128",
+      "vocab_size=2048",
+      "max_target_length=256",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+  ]
+
   _mistral_overrides = [
       "override_model_config=True",
       "base_num_decoder_layers=2",
@@ -147,6 +199,29 @@ class TrainTests(unittest.TestCase):
       "vocab_size=2048",
       "max_target_length=256",
       rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.mistral-v1')}",
+  ]
+
+  # Six layers is one whole period of the Gemma 4 sliding/global attention pattern, so both
+  # attention types run -- and for the scanned blocks it is one whole Gemma4ScannableBlock.
+  _gemma4_overrides = [
+      "override_model_config=True",
+      "base_num_decoder_layers=6",
+      "base_emb_dim=256",
+      "base_mlp_dim=512",
+      "base_num_query_heads=8",
+      "base_num_kv_heads=8",
+      "head_dim=128",
+      # Global layers carry their own head count and head dim; four kv heads keeps them
+      # divisible by a four-way tensor axis.
+      "global_num_kv_heads=4",
+      "global_head_dim=128",
+      "vocab_size=2048",
+      "max_target_length=256",
+      # The splash kernel cannot build a mask for a downscaled Gemma (its sliding window
+      # leaves empty blocks); dot product attention keeps the focus on sharding.
+      "attention=dot_product",
+      "tokenizer_type=sentencepiece",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer_gemma4.model')}",
   ]
 
   _qwen2_overrides = [
@@ -161,6 +236,31 @@ class TrainTests(unittest.TestCase):
       "vocab_size=2048",
       "max_target_length=256",
       # The Qwen2.5 model configs default to a HuggingFace tokenizer that is not
+      # vendored in the repo; use the checked-in tiktoken asset instead.
+      "tokenizer_type=tiktoken",
+      rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
+  ]
+
+  _llama4_overrides = [
+      "model_name=llama4-17b-16e",
+      "override_model_config=True",
+      # Four layers with a MoE step of 2 covers every Llama4 layer variant exactly once:
+      # chunked+dense, chunked+MoE, chunked+dense and global (NoPE) + MoE. The NoPE
+      # interval and the layer cycle interval are both 4 in the model config already.
+      "base_num_decoder_layers=4",
+      "interleave_moe_layer_step=2",
+      "base_emb_dim=256",
+      "base_mlp_dim=512",
+      "base_moe_mlp_dim=256",
+      "base_num_query_heads=8",
+      "base_num_kv_heads=8",
+      "num_experts=8",
+      "vocab_size=2048",
+      "max_target_length=256",
+      # Keep the chunked attention window under the sequence length so the chunk mask
+      # is actually exercised rather than degenerating into full attention.
+      "chunk_attn_window_size=128",
+      # The Llama4 model configs default to a HuggingFace tokenizer that is not
       # vendored in the repo; use the checked-in tiktoken asset instead.
       "tokenizer_type=tiktoken",
       rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
@@ -956,6 +1056,41 @@ class TrainTests(unittest.TestCase):
         # ZeRO-1 reassociates the gradient all-reduce, so allow a little float slack.
         np.testing.assert_allclose(sharded, baseline, rtol=1e-4, atol=0.0)
 
+  def _gpt_losses(self, run_name, extra_args):
+    """Trains a tiny gpt3/gpt-oss model for a few steps and returns its per-step losses."""
+    return self._losses(run_name, self._gpt_overrides, extra_args)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_gpt_explicit_sharding_matches_auto(self):
+    """Explicit sharding only changes how layouts are expressed, so the losses must not move.
+
+    Each case is paired with the parallelism that stresses it most: tensor parallelism
+    shards the attention heads and the dense MLP intermediate, and expert parallelism
+    shards the gpt-oss MoE dispatch.
+    """
+    parallelism = {
+        "gpt3_fused_qkv": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+        "gpt3": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+        "gpt_oss": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
+        "gpt_oss_tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+    }
+    # gpt3's bias reshard reassociates the bias-gradient reductions (~5e-5 by step 2 on
+    # v5p); gpt-oss drifts a few ULPs through the grouped matmul under expert parallelism.
+    # Under tensor parallelism gpt-oss is bit-for-bit on a four-way axis, but once the
+    # axis fully shards the eight heads (tpu7x-8) the backward reductions reassociate and
+    # it drifts ~5e-6 by step 2.
+    rtol = {"gpt3_fused_qkv": 1e-4, "gpt3": 1e-4, "gpt_oss": 1e-5, "gpt_oss_tensor": 1e-4}
+    for case, model_args in _GPT_MODELS.items():
+      with self.subTest(case=case):
+        args = model_args + parallelism[case]
+        auto_losses = self._gpt_losses(f"{case}_auto", args + ["shard_mode=auto"])
+        explicit_losses = self._gpt_losses(f"{case}_explicit", args + ["shard_mode=explicit"])
+        print(f"[{case}] auto losses: {auto_losses}", flush=True)
+        print(f"[{case}] explicit losses: {explicit_losses}", flush=True)
+        self.assertTrue(auto_losses, "auto run produced no metrics")
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=rtol[case], atol=0.0)
+
   def _mistral_losses(self, run_name, extra_args):
     """Trains a tiny Mistral/Mixtral model for a few steps and returns its per-step losses."""
     return self._losses(run_name, self._mistral_overrides, extra_args)
@@ -1061,6 +1196,35 @@ class TrainTests(unittest.TestCase):
     self.assertTrue(auto_losses, "auto run produced no metrics")
     # Expert parallelism does not reassociate any reduction, so the two runs are bit-for-bit.
     np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-6, atol=0.0)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_llama4_explicit_sharding_matches_auto(self):
+    """Explicit sharding only changes how layouts are expressed, so the losses must not move.
+
+    A Llama4 model interleaves dense and MoE layers, so it is run under both of the
+    parallelisms that stress them: tensor parallelism shards the dense MLP
+    intermediate, and expert parallelism shards the MoE dispatch.
+    """
+    parallelism = {
+        "tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
+        "expert": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
+    }
+    # Under tensor parallelism the two modes are bit-for-bit. Under expert parallelism
+    # pinning the activations reassociates the reductions inside the MoE block, so the
+    # loss drifts by a few ULPs by the third step. The drift is ~5e-7 at this size but
+    # grows with the expert dimensions, so leave the bound loose.
+    rtol = {"tensor": 1e-6, "expert": 1e-4}
+    for name, parallelism_args in parallelism.items():
+      with self.subTest(parallelism=name):
+        auto_losses = self._losses(f"llama4_{name}_auto", self._llama4_overrides, parallelism_args + ["shard_mode=auto"])
+        explicit_losses = self._losses(
+            f"llama4_{name}_explicit", self._llama4_overrides, parallelism_args + ["shard_mode=explicit"]
+        )
+        print(f"[llama4/{name}] auto losses: {auto_losses}", flush=True)
+        print(f"[llama4/{name}] explicit losses: {explicit_losses}", flush=True)
+        self.assertTrue(auto_losses, "auto run produced no metrics")
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=rtol[name], atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
@@ -1200,6 +1364,39 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.tpu_only
   # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
   @pytest.mark.skip_on_tpu7x
+  def test_tpu_llama4_zero1_gradient_accumulation(self):
+    """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
+
+    Under explicit sharding this routes the accumulated gradients through the
+    `reduced`/`unreduced` PartitionSpec labels applied in
+    `maxtext.utils.gradient_accumulation`, and casts the parameters to bf16 before the
+    accumulation scan so the all-gather happens once in low precision.
+    """
+    zero1_ga = [
+        "remat_policy=minimal",
+        "per_device_batch_size=2",
+        "ici_data_parallelism=-1",
+        "dcn_data_parallelism=1",
+        "ici_fsdp_parallelism=1",
+        "dcn_fsdp_parallelism=1",
+        "gradient_accumulation_steps=8",
+    ]
+    baseline = self._losses(
+        "llama4_ga", self._llama4_overrides, zero1_ga + ["shard_mode=auto", "shard_optimizer_over_data=False"]
+    )
+    sharded = self._losses(
+        "llama4_ga_zero1", self._llama4_overrides, zero1_ga + ["shard_mode=explicit", "shard_optimizer_over_data=True"]
+    )
+    print(f"[llama4] auto + GA losses: {baseline}", flush=True)
+    print(f"[llama4] explicit + ZeRO-1 + GA losses: {sharded}", flush=True)
+    self.assertTrue(baseline, "baseline run produced no metrics")
+    # ZeRO-1 reassociates the gradient all-reduce, so allow a little float slack.
+    np.testing.assert_allclose(sharded, baseline, rtol=1e-4, atol=0.0)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
   def test_tpu_gemma_zero1_gradient_accumulation_explicit(self):
     """Gemma under ZeRO-1 + gradient accumulation + explicit sharding.
 
@@ -1260,6 +1457,101 @@ class TrainTests(unittest.TestCase):
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', tokenizer)}",
         ] + extra_args
         train_main(gemma_zero1_ga)
+
+  def _gemma4_losses(self, run_name, extra_args):
+    """Trains a tiny Gemma 4 model for a few steps and returns its per-step losses."""
+    return self._losses(run_name, self._gemma4_overrides, extra_args)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_tpu_gemma4_explicit_sharding_matches_auto(self):
+    """Explicit sharding only changes how layouts are expressed, so the losses must not move.
+
+    Each decoder block is paired with the parallelism that stresses it most: tensor
+    parallelism shards the dense MLP intermediate and the attention heads the QK/V norms
+    sit next to, and expert parallelism shards the MoE dispatch.
+    """
+    parallelism = {
+        # The scanned gemma4 block should run under tensor parallelism too, but a four-way
+        # tensor axis makes the dot_product attention backward produce NaN gradients under
+        # explicit sharding. That is not new here -- gemma3-4b, which
+        # shares the scanned local/global block, reproduces it at the same sizes, and the
+        # splash kernel is unaffected -- so cover this block under FSDP and leave tensor
+        # parallelism to gemma4_small, which builds its stack without the scan.
+        "gemma4": ["ici_fsdp_parallelism=-1"],
+        "gemma4_moe": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
+        "gemma4_small": [
+            "ici_fsdp_parallelism=1",
+            # `global_num_kv_heads=4` caps how far the global layers' KV heads can shard, so
+            # pin the degree rather than take the device count: `-1` resolves to 8 on tpu7x-8,
+            # which four heads do not divide. Whatever is left over goes to data parallelism,
+            # which both shard modes see alike.
+            "ici_tensor_parallelism=4",
+            "ici_data_parallelism=-1",
+        ],
+    }
+    for decoder_block, model_args in _GEMMA4_MODELS.items():
+      with self.subTest(decoder_block=decoder_block):
+        args = model_args + parallelism[decoder_block]
+        auto_losses = self._gemma4_losses(f"{decoder_block}_auto", args + ["shard_mode=auto"])
+        explicit_losses = self._gemma4_losses(f"{decoder_block}_explicit", args + ["shard_mode=explicit"])
+        print(f"[{decoder_block}] auto losses: {auto_losses}", flush=True)
+        print(f"[{decoder_block}] explicit losses: {explicit_losses}", flush=True)
+        self.assertTrue(auto_losses, "auto run produced no metrics")
+        # Step 0 is bit-for-bit for all three blocks: the forward pass computes the same
+        # numbers, explicit sharding only says where they live. The trajectory then drifts
+        # by a few parts in ten thousand, because pinning a layout GSPMD would have chosen
+        # differently reassociates the reductions underneath it and Gemma 4 runs its
+        # residual stream in bf16 with unscaled attention logits (query_pre_attn_scalar is
+        # 1.0), so a reassociated sum shows up sooner than it does for the other families.
+        # The same drift appears under pure data parallelism, where every reshard explicit
+        # sharding inserts is a no-op -- float noise, not the two runs disagreeing about
+        # the math. How far it gets by the third step depends on the platform: all three
+        # blocks reach about 7e-4 on v4-8, and gemma4_moe reaches 1.1e-3 under Pathways on
+        # v6e-4. A genuinely wrong sharding does not land here: it either fails the shape
+        # check outright or moves the loss by percent.
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=2e-3, atol=0.0)
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
+  @pytest.mark.skip_on_tpu7x
+  def test_tpu_gemma4_zero1_gradient_accumulation(self):
+    """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
+
+    Under explicit sharding this routes the accumulated gradients through the
+    `reduced`/`unreduced` PartitionSpec labels applied in
+    `maxtext.utils.gradient_accumulation`, which the Gemma 4 layers have to keep intact
+    across the scan carry and, for the MoE block, across the router scale.
+    """
+    zero1_ga = [
+        "remat_policy=minimal",
+        "per_device_batch_size=2",
+        "ici_data_parallelism=-1",
+        "dcn_data_parallelism=1",
+        "ici_fsdp_parallelism=1",
+        "dcn_fsdp_parallelism=1",
+        "gradient_accumulation_steps=4",
+    ]
+    for decoder_block, model_args in _GEMMA4_MODELS.items():
+      with self.subTest(decoder_block=decoder_block):
+        args = model_args + zero1_ga
+        baseline = self._gemma4_losses(
+            f"{decoder_block}_ga",
+            args + ["shard_mode=auto", "shard_optimizer_over_data=False"],
+        )
+        sharded = self._gemma4_losses(
+            f"{decoder_block}_ga_zero1",
+            args + ["shard_mode=explicit", "shard_optimizer_over_data=True"],
+        )
+        print(f"[{decoder_block}] auto + GA losses: {baseline}", flush=True)
+        print(f"[{decoder_block}] explicit + ZeRO-1 + GA losses: {sharded}", flush=True)
+        self.assertTrue(baseline, "baseline run produced no metrics")
+        # Step 0 matches to the last bit or two; from there this compares two runs that
+        # differ in both shard mode and where the optimizer moments live, on top of the
+        # bf16 sensitivity described in the parity test above. gemma4_moe is the loosest
+        # at a few parts in a thousand by the third step.
+        np.testing.assert_allclose(sharded, baseline, rtol=5e-3, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
