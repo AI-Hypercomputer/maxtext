@@ -314,6 +314,10 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       cast_logits_to_fp32=bool(getattr(cfg, "cast_logits_to_fp32", True)),
   )
   sharding = dsv3_sharding.sharding_config(mesh)
+  eval_sharding = None
+  eval_pdb = float(getattr(cfg, "eval_per_device_batch_size", 0) or 0)
+  if 0 < eval_pdb < 1:
+    eval_sharding = dsv3_sharding.expert_axes_as_cp_config(sharding)
   expert_permutation = getattr(cfg, "lineage_expert_permutation", None)
   kernels = dsv3_config.DSv3KernelConfig(
       max_target_length=int(cfg.max_target_length),
@@ -346,7 +350,13 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       mtp_eval_target_module=int(getattr(cfg, "mtp_eval_target_module", 0)),
       mtp_reuse_input_embedding=bool(getattr(cfg, "mtp_reuse_input_embedding", False)),
   )
-  lineage_cfg = dsv3_config.DSv3Config(model=model, sharding=sharding, kernels=kernels, training=training)
+  lineage_cfg = dsv3_config.DSv3Config(
+      model=model,
+      sharding=sharding,
+      kernels=kernels,
+      training=training,
+      eval_sharding=eval_sharding,
+  )
   lineage_cfg.validate()
   return lineage_cfg
 
@@ -420,11 +430,34 @@ class LineageTransformer(nnx.Module):
       raise ValueError("use_lineage=True does not support MaxText quantization.")
     validate_supported(config)
     from maxtext.experimental.lineage import dsv3_model  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.experimental.lineage import ops  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
     cfg = dsv3_config_from_maxtext(config, mesh)
+    if cfg.eval_sharding is not None:
+      eval_sharding = cfg.eval_sharding
+      token_spec = ops.physical_pspec(
+          eval_sharding.token,
+          eval_sharding.axis_mapping,
+      )
+      override_keys = {
+          "activation_embed_and_logits_batch",
+          "activation_norm_length",
+      }
+      base_rules = list(getattr(config, "logical_axis_rules_for_eval", ()))
+      new_rules = tuple(
+          [
+              ("activation_embed_and_logits_batch", token_spec[0]),
+              ("activation_norm_length", token_spec[1]),
+          ]
+          + [r for r in base_rules if r[0] not in override_keys]
+      )
+      if hasattr(config, "get_keys"):
+        config.get_keys()["logical_axis_rules_for_eval"] = new_rules
+      else:
+        config.logical_axis_rules_for_eval = new_rules
     param_shardings, state_shardings = dsv3_model.dsv3_param_shardings(cfg, mesh)
     with _mesh_scope(mesh):
       params, state = dsv3_model.init_dsv3_params(rngs.params(), cfg, mesh)

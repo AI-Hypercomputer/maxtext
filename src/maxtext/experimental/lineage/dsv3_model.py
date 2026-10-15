@@ -728,6 +728,34 @@ def _moe_lb_loss(parts: Sequence[jax.Array], *, megatron: bool) -> jax.Array:
   return jnp.sum(lb_losses) if megatron else jnp.mean(lb_losses)
 
 
+def eval_config_and_params(
+    cfg: dsv3_config.DSv3Config,
+    params: DSv3Params,
+    mesh: jax.sharding.Mesh,
+) -> tuple[dsv3_config.DSv3Config, DSv3Params]:
+  """The config and parameters of the eval step.
+
+  Without `cfg.eval_sharding` both are returned unchanged. With it, the config
+  uses `eval_sharding` and the parameters are resharded to its weight specs,
+  which `eval_sharding` keeps equal to the training layout up to a local
+  reslice (e.g. the MLA head dim of `dsv3_sharding.expert_axes_as_cp_config`),
+  so the reshard moves no data across devices.
+
+  Args:
+    cfg: Model config.
+    params: Model parameters, in `cfg.sharding`'s layout.
+    mesh: The device mesh.
+
+  Returns:
+    `(eval_cfg, eval_params)`.
+  """
+  if cfg.eval_sharding is None:
+    return cfg, params
+  eval_cfg = dataclasses.replace(cfg, sharding=cfg.eval_sharding, eval_sharding=None)
+  param_shardings, _ = dsv3_param_shardings(eval_cfg, mesh)
+  return eval_cfg, jax.tree.map(jax.reshard, params, param_shardings)
+
+
 @jax.named_call
 @jt.jaxtyped(typechecker=typeguard.typechecked)
 def dsv3_loss_and_aux(
@@ -751,7 +779,8 @@ def dsv3_loss_and_aux(
     params: Model parameters.
     state: Mutable state (router biases, expert permutations).
     batch: The batch.
-    cfg: Model config.
+    cfg: Model config. In eval, its `eval_sharding` (if set) replaces `sharding`
+      (see `eval_config_and_params`).
     mesh: The device mesh.
     train: Training step (adds the MTP loss).
     update_state: When `train` is True, compute the per-batch routed-bias
@@ -761,6 +790,8 @@ def dsv3_loss_and_aux(
   Returns:
     The scalar loss and the auxiliary outputs.
   """
+  if not train:
+    cfg, params = eval_config_and_params(cfg, params, mesh)
   m, t, s = cfg.model, cfg.training, cfg.sharding
   token_sharding = _named_sharding(s.token, cfg, mesh)
   # Per-token arrays share the logits' batch / sequence layout.

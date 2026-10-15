@@ -37,6 +37,10 @@ T = TypeVar("T", ArrayType, ShardingType, Any)
 # MoE chunk capacities are rounded up to a multiple of this many slots, since
 # the chunked MoE path produces garbage for unaligned capacities.
 _CAPACITY_ALIGN = 256
+# Matches `--xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes`; XLA's
+# SparseCore collective offloader rejects `tpu_sparsecore`-annotated all-gathers
+# whose gathered output is smaller than this threshold.
+_SC_ALL_GATHER_MIN_BYTES = 500_000
 
 
 def _get_axis_size(axis_name: str | tuple[str, ...]) -> int:
@@ -84,7 +88,21 @@ def _all_gather_sc0(
     *operands: jax.Array,
     axis_name: str | tuple[str, ...],
 ) -> tuple[jax.Array, ...]:
-  """Executes all_gather on SparseCore 0."""
+  """Executes all_gather on SparseCore 0.
+
+  Falls back to TensorCore when any gathered output is below XLA's SparseCore
+  offload threshold (`_SC_ALL_GATHER_MIN_BYTES`), e.g. a fractional eval batch.
+
+  Args:
+    *operands: Arrays to all-gather along axis 0.
+    axis_name: Mesh axis or tuple of mesh axes along which to gather.
+
+  Returns:
+    A tuple of the gathered arrays.
+  """
+  axis_size = _get_axis_size(axis_name)
+  if any(x.size * x.dtype.itemsize * axis_size < _SC_ALL_GATHER_MIN_BYTES for x in operands):
+    return tuple(jax.lax.all_gather(x, axis_name=axis_name, axis=0, tiled=True) for x in operands)
 
   @compute_on(
       compute_type="tpu_sparsecore",

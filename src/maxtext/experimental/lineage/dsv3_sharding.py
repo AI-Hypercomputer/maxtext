@@ -444,6 +444,188 @@ def sharding_config(
   )
 
 
+def _axis_names(v: str | Sequence[str]) -> tuple[str, ...]:
+  return (v,) if isinstance(v, str) else tuple(v)
+
+
+def _to_axis_tuple(v: str | Sequence[str]) -> str | tuple[str, ...]:
+  if isinstance(v, str):
+    return v
+  return v[0] if len(v) == 1 else tuple(v)
+
+
+# MLA weights whose head dim is sharded over `attention`, and its negative
+# dimension index (same in the scanned decoder stacks and in an unscanned MTP
+# layer).
+_MLA_HEAD_DIMS = (("q_up", -2), ("k_up", -2), ("v_up", -2), ("out", -3))
+
+
+def _is_mla_or_spec(x: Any) -> bool:
+  return isinstance(x, (dsv3_types.DSv3MLAWeightsPytree, P))
+
+
+def _reshard_mla_heads(node: Any, head_axis: str | tuple[str, ...]) -> Any:
+  """Replaces the head-dim entry of the head-sharded MLA specs with `head_axis`."""
+  if not isinstance(node, dsv3_types.DSv3MLAWeightsPytree):
+    return node
+  head_axes = _axis_names(head_axis)
+  updates = {}
+  for field, dim in _MLA_HEAD_DIMS:
+    spec = getattr(node, field)
+    if spec is None:
+      continue
+    entries = list(spec)
+    idx = len(entries) + dim
+    other_axes = set()
+    for i, entry in enumerate(entries):
+      if i != idx and entry is not None:
+        other_axes.update(_axis_names(entry))
+    overlap = [ax for ax in head_axes if ax in other_axes]
+    if overlap:
+      raise ValueError(
+          f"The activation layout's `attention` axes {head_axis} overlap with"
+          f" the MLA `{field}` FSDP axes {entries}: {overlap}."
+      )
+    entries[idx] = head_axis
+    updates[field] = P(*entries)
+  return dataclasses.replace(node, **updates)
+
+
+def activation_resharded_config(
+    base: DSv3ShardingConfig,
+    activation_axis_mapping: AxisMapping,
+) -> DSv3ShardingConfig:
+  """A sharding config with new activation axes and (almost) the same weights.
+
+  Used to evaluate with a different activation layout than training, e.g. a
+  fractional batch with the expert axes acting as context parallelism:
+  `attention` (the sequence axis outside attention and the MLA head axis inside
+  it) and `fsdp_attention` (the batch axis) change, while `expert` and
+  `fsdp_moe` must not.
+
+  Every weight keeps the physical layout of `base`, except the MLA projections
+  whose head dim follows `attention`. The new `attention` axes must start with
+  `base`'s (e.g. `core` -> `(core, x)`), so every device's heads are a subset of
+  its training heads and resharding the parameters of `base` to this config
+  only slices the head dim locally, without communication. In particular, the
+  embedding table and LM head keep `base`'s axis order.
+
+  Args:
+    base: The training sharding config.
+    activation_axis_mapping: Logical-to-physical axis mapping of the new layout.
+
+  Returns:
+    The sharding config of the new layout.
+
+  Raises:
+    ValueError: If `activation_axis_mapping` lacks a logical axis, changes
+      `dcn`, `expert` or `fsdp_moe`, does not shard `attention` over `base`'s
+      `attention` axes as a prefix, or overlaps with the MLA FSDP axes.
+  """
+  missing = [axis for axis in LOGICAL_AXES if axis not in activation_axis_mapping]
+  if missing:
+    raise ValueError(f"activation_axis_mapping lacks logical axes {missing}.")
+  for axis in ("dcn", "expert", "fsdp_moe"):
+    if _to_axis_tuple(_axis_names(activation_axis_mapping[axis])) != (
+        _to_axis_tuple(_axis_names(base.axis_mapping[axis]))
+    ):
+      raise ValueError(
+          f"The activation layout must keep `{axis}`:" f" {activation_axis_mapping[axis]} != {base.axis_mapping[axis]}."
+      )
+  base_attention = _axis_names(base.axis_mapping["attention"])
+  new_attention = _axis_names(activation_axis_mapping["attention"])
+  if new_attention[: len(base_attention)] != base_attention:
+    # Each device's heads must be a subset of its training heads, i.e. the
+    # training axes must be the major (leading) axes of the new head sharding.
+    raise ValueError(
+        "The activation layout must shard `attention` over the training axes"
+        f" {base.axis_mapping['attention']} as a prefix, got"
+        f" {activation_axis_mapping['attention']}."
+    )
+  head_axis = _to_axis_tuple(new_attention)
+  weights = dataclasses.replace(
+      base.weights,
+      decoder=jax.tree.map(
+          lambda node: _reshard_mla_heads(node, head_axis),
+          base.weights.decoder,
+          is_leaf=_is_mla_or_spec,
+      ),
+      mtp=jax.tree.map(
+          lambda node: _reshard_mla_heads(node, head_axis),
+          base.weights.mtp,
+          is_leaf=_is_mla_or_spec,
+      ),
+  )
+  return dataclasses.replace(
+      base,
+      axis_mapping={axis: _to_axis_tuple(_axis_names(activation_axis_mapping[axis])) for axis in LOGICAL_AXES},
+      weights=weights,
+  )
+
+
+def expert_axes_as_cp_axis_mapping(axis_mapping: AxisMapping) -> AxisMapping:
+  """The axis mapping that uses the expert axes as context parallelism.
+
+  For evaluating a fractional batch (fewer rows than batch shards): the expert
+  axes that do not already shard `attention` move from the batch
+  (`fsdp_attention`) to the sequence and MLA heads (`attention`), appended
+  after the training `attention` axes. Outside attention each device then holds
+  a shorter sequence slice of fewer rows; inside MLA the low-rank q/kv latents
+  are all-gathered along the longer `attention` group as in training, and each
+  device holds the full sequence for fewer heads. `expert` and `fsdp_moe` are
+  unchanged, so the MoE keeps its expert parallelism and FSDP.
+
+  E.g. the recipe layout `attention=core`, `fsdp_attention=(x, y, z)`,
+  `expert=(x, core)` becomes `attention=(core, x)`, `fsdp_attention=(y, z)`.
+
+  Args:
+    axis_mapping: The training axis mapping.
+
+  Returns:
+    The new axis mapping, for `activation_resharded_config`.
+
+  Raises:
+    ValueError: If an expert axis that does not shard `attention` does not shard
+      `fsdp_attention` either, i.e. moving it would not shorten the batch.
+  """
+  attention = _axis_names(axis_mapping["attention"])
+  fsdp_attention = _axis_names(axis_mapping["fsdp_attention"])
+  moved = tuple(ax for ax in _axis_names(axis_mapping["expert"]) if ax not in attention)
+  missing = [ax for ax in moved if ax not in fsdp_attention]
+  if missing:
+    raise ValueError(
+        f"Expert axes {missing} shard neither `attention` {attention} nor"
+        f" `fsdp_attention` {fsdp_attention}; they cannot become context"
+        " parallelism."
+    )
+  return {
+      **axis_mapping,
+      "attention": _to_axis_tuple(attention + moved),
+      "fsdp_attention": _to_axis_tuple(tuple(ax for ax in fsdp_attention if ax not in moved)),
+  }
+
+
+def expert_axes_as_cp_config(base: DSv3ShardingConfig) -> DSv3ShardingConfig:
+  """`base` with the expert axes as context parallelism for the activations.
+
+  The eval layout of a fractional eval batch: the activations follow
+  `expert_axes_as_cp_axis_mapping`, the weights keep `base`'s physical layout
+  (only the MLA head dim is sliced further, locally; see
+  `activation_resharded_config`).
+
+  Batch split needs an even local batch on every batch shard, so the eval batch
+  needs at least 2 rows per shard of the new `fsdp_attention` (and `dcn`) axes,
+  e.g. 2 * |y * z| rows on an [x, y, z, core] mesh with the recipe layout.
+
+  Args:
+    base: The training sharding config.
+
+  Returns:
+    The eval sharding config.
+  """
+  return activation_resharded_config(base, expert_axes_as_cp_axis_mapping(base.axis_mapping))
+
+
 def named_shardings(
     specs: Any,
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,

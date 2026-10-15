@@ -241,12 +241,17 @@ class DSv3Config:
     sharding: Axis mapping and weight/activation specs.
     kernels: Kernel and runtime knobs.
     training: Training objective knobs.
+    eval_sharding: Sharding of the eval step (`dsv3_model.dsv3_loss_and_aux`
+      with `train=False`), or None to evaluate with `sharding`. It must keep
+      `sharding`'s weight layout up to a local reslice (e.g.
+      `dsv3_sharding.expert_axes_as_cp_config`).
   """
 
   model: DSv3ModelConfig
   sharding: dsv3_sharding.DSv3ShardingConfig
   kernels: DSv3KernelConfig
   training: DSv3TrainingConfig = DSv3TrainingConfig()
+  eval_sharding: dsv3_sharding.DSv3ShardingConfig | None = None
 
   def validate(self) -> None:
     """Checks the constraints of the Lineage layers.
@@ -284,6 +289,12 @@ class DSv3Config:
       raise ValueError(
           f"mtp_eval_target_module ({t.mtp_eval_target_module}) must be in" f" [0, num_mtp_layers={m.num_mtp_layers}]."
       )
-    missing = [axis for axis in dsv3_sharding.LOGICAL_AXES if axis not in self.sharding.axis_mapping]
-    if missing:
-      raise ValueError(f"sharding.axis_mapping lacks logical axes {missing}.")
+    for name, sharding in (
+        ("sharding", self.sharding),
+        ("eval_sharding", self.eval_sharding),
+    ):
+      if sharding is None:
+        continue
+      missing = [axis for axis in dsv3_sharding.LOGICAL_AXES if axis not in sharding.axis_mapping]
+      if missing:
+        raise ValueError(f"{name}.axis_mapping lacks logical axes {missing}.")
