@@ -166,43 +166,18 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   return params, state, gather_fn, layer_fn, rs_fn
 
 
-def _take(tree, idx):
-  """Layer `idx` (a Python int or a traced scalar) of a layer-stacked pytree."""
-  return jax.tree.map(lambda x: jax.lax.dynamic_index_in_dim(x, idx, 0, keepdims=False), tree)
+def _slice_at(tree, idx):
+  """Layer `idx` of a layer-stacked pytree."""
+  return jax.tree.map(lambda x: x[idx], tree)
+
+
+def _slice_range(tree, start, end):
+  """Layers `start .. end-1` of a layer-stacked pytree."""
+  return jax.tree.map(lambda x: x[start:end], tree)
 
 
 def _expand0(tree):
   return jax.tree.map(lambda x: jnp.expand_dims(x, 0), tree)
-
-
-def _after(deps, x):
-  """Returns `x`, ordered after `deps` have been computed (via an optimization barrier)."""
-  _, x = jax.lax.optimization_barrier((deps, x))
-  return x
-
-
-def _interleave(even, odd):
-  """[P, ...] stacks of layers 0, 2, .., 2P-2 and 1, 3, .., 2P-1 -> one [2P, ...] stack in layer order."""
-  return jax.tree.map(lambda e, o: jnp.stack([e, o], axis=1).reshape((2 * e.shape[0],) + e.shape[1:]), even, odd)
-
-
-def _prefetch_fwd_split(length):
-  """Returns (s, num_pairs): the forward runs layers 0 .. s-1 before its pair loop (s = 0 or 1), so
-  the loop covers an even number of layers s .. length-2 and the last layer runs after it."""
-  s = (length - 1) % 2
-  return s, (length - 1 - s) // 2
-
-
-def _prefetch_can_order(num_pairs):
-  """Whether a pair loop may order its second gather after the loop's first layer (see `_after`).
-
-  XLA's FSDP scheduler (for gathers tagged `xla_explicit_fsdp`) requires that no tagged gather
-  depends on another tagged gather's result within one computation; only while loops separate them.
-  Inside a loop body the dependency runs through the loop-carried weights, but XLA removes one-trip
-  loops (and unrolling would put two iterations in one body), so only multi-trip, non-unrolled loops
-  order.
-  """
-  return num_pairs >= 2
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0, 6, 7))
@@ -217,12 +192,10 @@ def _custom_vjp_prefetch_pipeline(
   Gathered weights are never saved between forward and backward. The backward always rematerializes
   each layer in full (the decoder remat policy does not apply to this path).
 
-  Both passes scan over pairs of layers and use two gathered-weight buffers in turn (ping-pong): the
-  buffer carried into an iteration is only refilled (by the prefetch two layers ahead) once the layer
-  reading it is done. With a single carried buffer, the prefetch of W(k+1) would overwrite the carry
-  slot while W(k) is still being read, and XLA would add a full-size copy of every gathered layer to
-  double-buffer it. So the forward holds at most two layers of gathered weights (current +
-  prefetched), and the backward at most three (W(k), W(k-1) and dW(k) until its reduce-scatter).
+  Both passes unroll their scan loop by 2 (`unroll=2`), so each unrolled while-loop body runs two
+  consecutive layers and alternates between two gathered-weight buffers. The forward holds at most
+  two layers of gathered weights (current + prefetched), and the backward at most three (W(k),
+  W(k-1) and dW(k) until its reduce-scatter).
   """
   out, _ = _custom_vjp_prefetch_pipeline_fwd(
       graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
@@ -233,138 +206,95 @@ def _custom_vjp_prefetch_pipeline(
 def _custom_vjp_prefetch_pipeline_fwd(
     graphdef, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctx
 ):
-  """Forward pass. Scan iteration j runs layers k = s+2j and k+1 (s = 1 if layer 0 runs before the loop).
-
-  W(k) arrives in the loop carry. AG(k+1) is issued at the start of the iteration (overlapping layer
-  k) into an iteration-local buffer, and AG(k+2) once layer k is done (overlapping layer k+1) into the
-  carry slot W(k) has just freed. The last layer runs after the loop on the carried weights.
-  """
+  """Forward pass: AG(k+1) is issued while layer k computes; the gathered weights ride in the carry."""
   params, state, gather_fn, layer_fn, _ = _prefetch_setup(
       graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx
   )
-  s, num_pairs = _prefetch_fwd_split(length)
-  y = x_in
-  w = gather_fn(_take(params, 0))
-  ys_head = []  # Inputs of the layers before the loop (residuals for the backward pass).
-  if s:
-    w_next = gather_fn(_take(params, 1))  # AG(1) || layer 0.
-    ys_head.append(y)
-    y = layer_fn(y, w, _take(state, 0))
-    w = w_next
-  ys_even = ys_odd = None  # Inputs of the loop's layers s, s+2, .. / s+1, s+3, ..
-  if num_pairs:
-    ordered = _prefetch_can_order(num_pairs)
+  w_0 = gather_fn(_slice_at(params, 0))
+  w_curr = gather_fn(_slice_at(params, 1)) if length > 1 else None  # AG(1) || fwd(0).
+  y = layer_fn(x_in, w_0, _slice_at(state, 0))
+  ys_mid = None  # Inputs of layers 1 .. length-2 (residuals for the backward pass).
+  if length > 2:
+    # Only order within the unrolled loop when the unroll=2 while-loop has >= 2 trips; XLA unrolls
+    # single-trip while-loops into the parent computation, where FSDP gathers must not depend on
+    # earlier FSDP gathers without a while-loop barrier in between.
+    ordered = (length - 2) // 2 >= 2
 
-    def body(carry, j):
-      y, w_a = carry
-      k = s + 2 * j
-      w_b = gather_fn(_take(params, k + 1))  # AG(k+1) || layer k.
-      y_a = y
-      y = layer_fn(y, w_a, _take(state, k))
-      # AG(k+2) waits for layer k's output, so for every read of W(k), and can reuse W(k)'s buffer.
-      p = _take(params, k + 2)
-      w_a = gather_fn(_after(y, p) if ordered else p)  # AG(k+2) || layer k+1.
-      y_b = y
-      y = layer_fn(y, w_b, _take(state, k + 1))
-      return (y, w_a), (y_a, y_b)
+    def body(carry, xs):
+      y_k, w_k = carry
+      state_k, params_next = xs
+      if ordered:
+        # In the 2nd unrolled step of each iteration, waits for the 1st step's layer_fn(y_k, w_k)
+        # so W(k) is dead before AG(k+2) starts and AG(k+2) can reuse W(k)'s buffer.
+        y_k, w_k, params_next = jax.lax.optimization_barrier((y_k, w_k, params_next))
+      w_next = gather_fn(params_next)  # AG(k+1) || layer k.
+      return (layer_fn(y_k, w_k, state_k), w_next), y_k
 
-    (y, w), (ys_even, ys_odd) = jax.lax.scan(body, (y, w), jnp.arange(num_pairs))
-  y_last = y
-  y = layer_fn(y, w, _take(state, length - 1))
-  residuals = (
-      (tuple(ys_head), ys_even, ys_odd, y_last),
-      params_leaves,
-      state_leaves,
-      diff_args_leaves,
-      diff_kwargs_leaves,
-  )
-  return (y, state), residuals
+    # Iterates k = 1 .. length-2; element j of xs has state[j+1] and params[j+2].
+    (y, w_curr), ys_mid = jax.lax.scan(
+        body,
+        (y, w_curr),
+        (_slice_range(state, 1, length - 1), _slice_range(params, 2, length)),
+        unroll=2,
+    )
+  y_last_in = y if length > 1 else x_in
+  final_y = layer_fn(y_last_in, w_curr, _slice_at(state, length - 1)) if length > 1 else y
+  residuals = (x_in, ys_mid, y_last_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves)
+  return (final_y, state), residuals
 
 
 def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
-  """Backward pass, mirroring the forward's ping-pong buffers.
-
-  Layer L-1 (and layer L-2 if needed to leave an even number of loop layers) runs before the loop.
-  Scan iteration j runs layers hi = 2j+2 and hi-1 (in that order): W(hi) arrives in the loop carry,
-  AG(hi-1) is issued at the start of the iteration (overlapping bwd(hi)), and AG(hi-2) once bwd(hi) is
-  done (overlapping bwd(hi-1)) into the carry slot W(hi) has just freed. Layer 0 runs after the loop
-  on the carried weights. Each layer's dW is reduce-scattered after its vjp.
-  """
-  (ys_head, ys_even, ys_odd, y_last), params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves = res
+  """Backward pass: AG(k-1) is issued while layer k is rematerialized and differentiated."""
+  x_in, ys_mid, y_last_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves = res
   g, _ = g_out  # Non-parameter layer state is not differentiated.
   params, state, gather_fn, layer_fn, rs_fn = _prefetch_setup(
       graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx
   )
-  s, _ = _prefetch_fwd_split(length)
+  # Tie `params` to `g` so XLA cannot CSE the backward all-gathers with peeled forward slices or
+  # hoist backward weight slices before the forward pass.
+  g, params = jax.lax.optimization_barrier((g, params))
 
-  def layer_input(k, odd=None):
-    """Saved input of layer k. For a traced k, `odd` says whether k-s is odd (static)."""
-    if isinstance(k, int):
-      if k == length - 1:
-        return y_last
-      if k < s:
-        return ys_head[k]
-      odd = (k - s) % 2 == 1
-    return _take(ys_odd if odd else ys_even, (k - s) // 2)
-
-  def layer_vjp(k, w, g_y, odd=None, y_in=None):
-    layer_state = _take(state, k)
-    y_in = layer_input(k, odd) if y_in is None else y_in
+  def layer_vjp(y_in, w, layer_state, g_y):
     _, vjp_fn = jax.vjp(lambda y_, w_: layer_fn(y_, w_, layer_state), y_in, w)
     return vjp_fn(g_y)  # (dy_in, dW gathered)
 
-  # The param slices depend only on the params, so XLA would issue the first backward gathers at the
-  # start of the step and keep those gathered layers alive through the whole forward pass. Tying the
-  # (sharded) params to the incoming cotangent delays the backward gathers until the backward starts.
-  g, params = jax.lax.optimization_barrier((g, params))
-
-  grads = {}  # Layer -> reduce-scattered dW, for the layers outside the loop.
   last = length - 1
-  w = gather_fn(_take(params, last))
-  w_next = gather_fn(_take(params, last - 1)) if length > 1 else None  # AG(L-2) || bwd(L-1).
-  g, dw = layer_vjp(last, w, g)
-  grads[last] = rs_fn(dw)
-  w = w_next
-  top = 0  # Highest loop layer (the loop runs layers top .. 1).
-  d_lo = d_hi = None  # Reduce-scattered dW of the loop's layers 1, 3, .. / 2, 4, .. (stacked by pair).
+  w_last = gather_fn(_slice_at(params, last))
+  w_prev = gather_fn(_slice_at(params, last - 1)) if length > 1 else None  # AG(L-2) || bwd(L-1).
+  g, dw = layer_vjp(y_last_in, w_last, _slice_at(state, last), g)
+  parts = [_expand0(rs_fn(dw))]
   if length > 1:
-    peel = (length - 2) % 2  # Layer L-2 runs before the loop, leaving an even number of loop layers.
-    if peel:
-      k = length - 2
-      w_next = gather_fn(_take(params, k - 1))  # AG(L-3) || bwd(L-2).
-      g, dw = layer_vjp(k, w, g)
-      grads[k] = rs_fn(dw)
-      w = w_next
-    top = length - 2 - peel
-    num_pairs = top // 2
-    if num_pairs:
-      ordered = _prefetch_can_order(num_pairs)
+    if length > 2:
+      ordered = (length - 2) // 2 >= 2
 
-      def body(carry, j):
-        g, w_a = carry
-        hi = 2 * j + 2
-        w_b = gather_fn(_take(params, hi - 1))  # AG(hi-1) || bwd(hi).
-        g, dw_a = layer_vjp(hi, w_a, g, odd=s == 1)
-        p, y_b = _take(params, hi - 2), layer_input(hi - 1, odd=s == 0)
+      def body(carry, xs):
+        g_k, w_k = carry
+        y_k, state_k, params_prev = xs
         if ordered:
-          # Layer hi-1 (including its recompute) and AG(hi-2) wait for all of bwd(hi), dW included.
-          # So W(hi) is dead when AG(hi-2) starts (it can reuse W(hi)'s buffer), and XLA does not
-          # interleave the two layers, which would keep both layers' full-size dW and activations live.
-          g, dw_a, y_b, p = jax.lax.optimization_barrier((g, dw_a, y_b, p))
-        w_a = gather_fn(p)  # AG(hi-2) || bwd(hi-1).
-        g, dw_b = layer_vjp(hi - 1, w_b, g, y_in=y_b)
-        return (g, w_a), (rs_fn(dw_b), rs_fn(dw_a))
+          # In the 2nd unrolled step of each iteration, waits for the 1st step's g_k and w_km1 so
+          # W(k) is dead before AG(k-2) starts and XLA does not interleave the two unrolled layers'
+          # recomputes and dW buffers.
+          g_k, w_k, y_k, params_prev = jax.lax.optimization_barrier((g_k, w_k, y_k, params_prev))
+        w_km1 = gather_fn(params_prev)  # AG(k-1) || bwd(k).
+        g_km1, dw_k = layer_vjp(y_k, w_k, state_k, g_k)
+        dw_k = rs_fn(dw_k)
+        if ordered:
+          g_km1, dw_k = jax.lax.optimization_barrier((g_km1, dw_k))
+        return (g_km1, w_km1), dw_k
 
-      # Iterates j = num_pairs-1 .. 0; outputs are stacked in j order.
-      (g, w), (d_lo, d_hi) = jax.lax.scan(body, (g, w), jnp.arange(num_pairs), reverse=True)
-    g, dw = layer_vjp(0, w, g)
-    grads[0] = rs_fn(dw)
+      # Iterates k = length-2 .. 1; element j of xs is layer k = j + 1, and outputs are stacked in j order.
+      (g, w_prev), d_mid = jax.lax.scan(
+          body,
+          (g, w_prev),
+          (ys_mid, _slice_range(state, 1, length - 1), _slice_range(params, 0, length - 2)),
+          reverse=True,
+          unroll=2,
+      )
+      parts.insert(0, d_mid)
+    g, dw0 = layer_vjp(x_in, w_prev, _slice_at(state, 0), g)
+    parts.insert(0, _expand0(rs_fn(dw0)))
 
-  # Per-layer grads stacked in layer order: [dW0, dW1 .. dW(top) (loop), dW(top+1) .. dW(L-1)].
-  parts = [_expand0(grads[0])]
-  if top:
-    parts.append(_interleave(d_lo, d_hi))
-  parts += [_expand0(grads[k]) for k in range(top + 1, length)]
+  # Per-layer grads stacked in layer order: [dW0, dW1 .. dW(L-2), dW(L-1)].
   d_params = parts[0] if len(parts) == 1 else jax.tree.map(lambda *xs: jnp.concatenate(xs, axis=0), *parts)
   params_bar_leaves = tuple(jax.tree_util.tree_leaves(d_params))
 
