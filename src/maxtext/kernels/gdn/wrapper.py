@@ -95,7 +95,7 @@ def _pack_fwd_segment_metadata(
 
 def inner_kernel(
     # Inputs.
-    qkv_slot_ref: jax.Ref,  # [seq, chunk, 1, dim_size]
+    qkv_slot_ref: jax.Ref,  # [seq, chunk, 1, dim_size] ([seq, chunk, dim_size] for prefill-only)
     b_slot_ref: jax.Ref,  # [seq, chunk, 1, num_v_heads]
     a_slot_ref: jax.Ref,  # [seq, chunk, 1, num_v_heads]
     conv_state_slot_ref: jax.Ref,  # [seq, prev_kernel_size, 1, dim_size]
@@ -126,8 +126,15 @@ def inner_kernel(
   weights_ref = args[1]
   carry_conv_scratch_ref = args[2] if len(args) > 2 else None
   carry_recurrent_scratch_ref = args[3] if len(args) > 3 else None
+  qkv_scratch_ref = args[4] if len(args) > 4 else None
 
   p_id = pl.program_id(0)
+
+  # Prefill-only qkv arrives in act_in dtype and large layout. Upcast it into the
+  # compact fp32 scratch, which then serves as the qkv slot below.
+  if qkv_scratch_ref is not None:
+    vmem_ldst.upcast_large_to_compact(qkv_slot_ref, qkv_scratch_ref)
+    qkv_slot_ref = qkv_scratch_ref
 
   # Prepare states.
   real_sizes, prev_conv, prev_recurrent = vmem_ldst.load_and_select_states(
@@ -242,6 +249,7 @@ def outer_kernel(
     *args,
     carry_conv_scratch_ref: jax.Array | None = None,
     carry_recurrent_scratch_ref: jax.Array | None = None,
+    qkv_scratch_ref: jax.Array | None = None,
     cfg: config.GDNConfig,
     **kwargs,
 ) -> None:
@@ -307,6 +315,7 @@ def outer_kernel(
             weights_ref,
             carry_conv_scratch_ref,
             carry_recurrent_scratch_ref,
+            qkv_scratch_ref,
         ),
         allocations=allocations,
     )
@@ -353,7 +362,6 @@ def _fused_conv1d_gdn(
   recurrent_out_dtype = recurrent_state.dtype
   assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
-  qkv = qkv.astype(jnp.float32)
   b = b.astype(jnp.float32)
   a = a.astype(jnp.float32)
   conv_state = conv_state.astype(jnp.float32)
@@ -421,7 +429,6 @@ def _fused_conv1d_gdn(
   batch_padding_size = padded_batch_size - batch_size
   aligned_num_v_heads = tiling.align_to(n_v + extra_lanes, num_lanes)
   num_v_padding_size = aligned_num_v_heads - n_v
-  qkv = jnp.pad(qkv, ((0, batch_padding_size), (0, 0)))
   b = jnp.pad(b, ((0, batch_padding_size), (0, num_v_padding_size)))
   a = jnp.pad(a, ((0, batch_padding_size), (0, num_v_padding_size)))
   if has_seg_ids:
@@ -436,7 +443,12 @@ def _fused_conv1d_gdn(
     b = b.at[:batch_size, n_v].set(s_enc_flat)
     b = b.at[:batch_size, n_v + 1].set(seg_aux_flat)
 
-  qkv = qkv.reshape(padded_batch_size, 1, -1)
+  if is_prefill_only:
+    # Whole chunks, DMA'd in act_in dtype and upcast to fp32 in VMEM by the kernel.
+    qkv = qkv.reshape(batch_size // mixed_tile_size, mixed_tile_size, dim)
+  else:
+    qkv = jnp.pad(qkv.astype(jnp.float32), ((0, batch_padding_size), (0, 0)))
+    qkv = qkv.reshape(padded_batch_size, 1, -1)
   b = b.reshape(padded_batch_size, 1, -1)
   a = a.reshape(padded_batch_size, 1, -1)
 
@@ -480,6 +492,7 @@ def _fused_conv1d_gdn(
         v_head_dim=d_v,
         has_seg_ids=has_seg_ids,
         use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        is_prefill_only=is_prefill_only,
         dtypes=config.Dtypes(
             act_in=act_in_dtype,
             act_out=act_out_dtype,

@@ -778,6 +778,57 @@ class GdnBwdPallasTest(absltest.TestCase):
       self.assertEqual(got.dtype, exp.dtype)
       np.testing.assert_array_equal(np.asarray(got, np.float32), np.asarray(exp, np.float32))
 
+  @pytest.mark.tpu_only
+  def test_prefill_bf16_qkv_matches_fp32_qkv_path(self):
+    """Prefill-only kernels upcast bf16 qkv chunks in VMEM; the general path upcasts in HBM. Same bits.
+
+    Covers the full prefill kernel (PER_SEQ) and the states-only kernel (PER_SEQ_STATES).
+    """
+    from maxtext.kernels.gdn import wrapper  # pylint: disable=import-outside-toplevel
+
+    batch_size, chunk_size, num_k_heads, num_v_heads, head_dim, conv_kernel_size = 2, 64, 2, 8, 128, 4
+    seq_len = 4 * chunk_size
+    dim_size = num_k_heads * head_dim * 2 + num_v_heads * head_dim
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias = _init_fwd_inputs(
+        jax.random.PRNGKey(5), batch_size, seq_len, dim_size, num_v_heads, conv_kernel_size
+    )
+
+    def run(fn, **kwargs):
+      # Fresh states for every call: the wrapper donates them.
+      k1, k2 = jax.random.split(jax.random.PRNGKey(6))
+      conv_state = jax.random.normal(k1, (batch_size + 1, conv_kernel_size - 1, dim_size), jnp.bfloat16)
+      recurrent_state = 0.1 * jax.random.normal(k2, (batch_size + 1, num_v_heads, head_dim, head_dim), jnp.float32)
+      return fn(
+          qkv=qkv.astype(jnp.bfloat16).reshape(-1, dim_size),
+          b=b.astype(jnp.bfloat16).reshape(-1, num_v_heads),
+          a=a.astype(jnp.bfloat16).reshape(-1, num_v_heads),
+          conv_state=conv_state,
+          recurrent_state=recurrent_state,
+          conv_weight=jnp.swapaxes(conv_weight, 0, 2),
+          conv_bias=conv_bias,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          query_start_loc=jnp.arange(0, (batch_size + 1) * seq_len, seq_len, dtype=jnp.int32),
+          state_indices=jnp.arange(1, batch_size + 1, dtype=jnp.int32),
+          distribution=jnp.array([0, 0, batch_size], dtype=jnp.int32),
+          seq_lens=jnp.full((batch_size,), seq_len + 1, dtype=jnp.int32),
+          n_kq=num_k_heads,
+          n_v=num_v_heads,
+          d_k=head_dim,
+          d_v=head_dim,
+          kernel_size=conv_kernel_size,
+          mixed_tile_size=chunk_size,
+          **kwargs,
+      )
+
+    out, (conv_out, rec_out), t_inv, chunk_states = run(wrapper.fused_conv1d_gdn, is_prefill_only=True)
+    (states_conv, states_rec), states_t_inv = run(wrapper.fused_conv1d_gdn_states)
+    ref_out, (ref_conv, ref_rec), ref_t_inv, ref_chunk_states = run(wrapper.fused_conv1d_gdn, is_prefill_only=False)
+    got = (out, conv_out, rec_out, t_inv, chunk_states, states_conv, states_rec, states_t_inv)
+    exp = (ref_out, ref_conv, ref_rec, ref_t_inv, ref_chunk_states, ref_conv, ref_rec, ref_t_inv)
+    for g, e in zip(got, exp):
+      np.testing.assert_array_equal(np.asarray(g), np.asarray(e))
+
   def test_decoupled_conv1d_gdn_kernel_gradient_with_initial_states(self):
     """Verifies custom VJP gradients when initial conv_state and recurrent_state are provided."""
     is_tpu = jax.default_backend() == "tpu"
