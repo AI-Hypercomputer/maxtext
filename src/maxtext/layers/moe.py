@@ -417,6 +417,37 @@ def fold_padding_into_forced_routing(forced_routed_experts, token_mask, num_expe
   return jnp.where(is_pad, jnp.asarray(PAD_TOKEN_ROUTED_EXPERT, base.dtype), base)
 
 
+def _top_k_indices_where_needed(probs, needed, k):
+  """`jax.lax.top_k(probs, k)[1]` on the tokens where `needed` is set; other tokens may get any ids.
+
+  Under router replay almost every token is forced or padding. When at most 256 tokens need the
+  router's own choice, top_k sorts only those rows (gathered, then scattered back) instead of every
+  row; otherwise it sorts every row. top_k is per row, so the needed rows are exact either way.
+
+  Args:
+    probs: `[..., num_experts]` router probabilities.
+    needed: `[..., 1]` True for tokens whose ids are read.
+    k: top_k.
+  """
+  max_rows = 256
+  flat = probs.reshape(-1, probs.shape[-1])
+  if flat.shape[0] <= max_rows:
+    return jax.lax.top_k(probs, k)[1]
+  needed = needed.reshape(-1)
+
+  def compact(flat, needed):
+    # Fill entries repeat row 0, which only writes row 0's own top_k to row 0.
+    rows = jnp.nonzero(needed, size=max_rows)[0]
+    return jnp.zeros((flat.shape[0], k), jnp.int32).at[rows].set(jax.lax.top_k(flat[rows], k)[1])
+
+  def full(flat, needed):
+    del needed
+    return jax.lax.top_k(flat, k)[1]
+
+  indices = jax.lax.cond(jnp.sum(needed) <= max_rows, compact, full, flat, needed)
+  return indices.reshape(probs.shape[:-1] + (k,))
+
+
 def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
   """Sums the two largest scores along the last axis, accumulating in float32.
 
@@ -1169,7 +1200,6 @@ class RoutedMoE(nnx.Module):
     valid_token_mask = None
     if forced_routed_experts is not None:
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-      _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
       # A token has real forced routing only if its slots are within [0, num_experts).
       # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
@@ -1177,7 +1207,6 @@ class RoutedMoE(nnx.Module):
       sorted_experts = jnp.sort(forced_routed_experts, axis=-1)
       has_duplicate = jnp.any(sorted_experts[..., 1:] == sorted_experts[..., :-1], axis=-1, keepdims=True)
       token_is_forced = jnp.logical_and(jnp.all(slot_valid, axis=-1, keepdims=True), jnp.logical_not(has_duplicate))
-      top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       if self.config.moe_exclude_padding_from_routing:
         # A padding token (every slot PAD_TOKEN_ROUTED_EXPERT) is never forced (its slots are not
         # valid ids) and gets no valid slot, so its weights are zeroed below and its ids become -1.
@@ -1185,6 +1214,11 @@ class RoutedMoE(nnx.Module):
         valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.logical_not(pad_token))
       else:
         valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.ones_like(slot_valid, dtype=jnp.bool_))
+      # Only tokens that are neither forced nor padding read auto_indices: every other id is replaced
+      # or masked below.
+      uses_auto = jnp.logical_and(jnp.logical_not(token_is_forced), jnp.any(valid_token_mask, axis=-1, keepdims=True))
+      auto_indices = _top_k_indices_where_needed(router_probs, uses_auto, self.num_experts_per_tok)
+      top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)

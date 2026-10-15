@@ -267,6 +267,28 @@ class MlpBlockTest(unittest.TestCase):
     self.model.init({"params": self.rng, "dropout": self.rng}, x)
 
 
+class TopKIndicesWhereNeededTest(unittest.TestCase):
+
+  def test_matches_top_k_on_needed_tokens(self):
+    """Both branches give jax.lax.top_k's ids on the needed tokens: 256 compact, 257 sorts every row."""
+    # Coarse logits make ties common; top_k breaks them by the lower index.
+    logits = jnp.round(jax.random.normal(jax.random.PRNGKey(0), (2, 512, 32)) * 4) / 4
+    probs = jax.nn.softmax(logits, axis=-1)
+    expected = np.asarray(jax.lax.top_k(probs, 4)[1])
+    top_k_where_needed = jax.jit(moe._top_k_indices_where_needed, static_argnums=2)  # pylint: disable=protected-access
+    order = jax.random.permutation(jax.random.PRNGKey(1), 2 * 512)
+    for num_needed in (256, 257):
+      needed = jnp.zeros(2 * 512, jnp.bool_).at[order[:num_needed]].set(True)
+      got = np.asarray(top_k_where_needed(probs, needed.reshape(2, 512, 1), 4)).reshape(-1, 4)
+      needed = np.asarray(needed)
+      np.testing.assert_array_equal(got[needed], expected.reshape(-1, 4)[needed])
+      if num_needed <= 256:
+        # The compact branch leaves the other tokens (but row 0) at 0.
+        np.testing.assert_array_equal(got[1:][~needed[1:]], 0)
+      else:
+        np.testing.assert_array_equal(got, expected.reshape(-1, 4))
+
+
 class DeepSeekRoutingTest(unittest.TestCase):
 
   def setUp(self):
