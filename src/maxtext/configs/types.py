@@ -753,6 +753,11 @@ class LogitsAndLoss(BaseModel):
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
   )
   z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
+  vocab_tiling_seq_major: bool = Field(
+      False,
+      description="With num_vocab_tiling > 1: cut the tiles along the sequence (each device keeps its own rows) instead"
+      " of along the flattened batch*sequence axis, which reshards the hidden states into the tiles.",
+  )
   num_vocab_tiling: int = Field(
       1,
       description="Enables memory-saving optimization by tiling cross-entropy loss computation. >1 to enable.",
