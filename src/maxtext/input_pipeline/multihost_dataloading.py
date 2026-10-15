@@ -324,7 +324,11 @@ class MultiHostDataLoadIterator:
         raise TimeoutError(f"Failed to load data after {MAX_DATA_LOAD_ATTEMPTS} retry attempts.")
 
       self.last_local_data = local_data
-    input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=self.global_mesh), local_data)
+    if jax.process_count() == 1:
+      sharding = NamedSharding(self.global_mesh, PartitionSpec(self.global_mesh.axis_names))
+      input_gdas = jax.device_put(local_data, sharding)
+    else:
+      input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=self.global_mesh), local_data)
 
     return input_gdas
 

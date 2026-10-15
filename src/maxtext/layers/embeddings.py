@@ -150,7 +150,6 @@ class Embed(nnx.Module):
       output = jnp.dot(one_hot, embedding, out_sharding=out_sharding)
     else:
       output = embedding.at[inputs].get(out_sharding=out_sharding)
-
     return output
 
   def embed_single_token(self, token_id: int) -> Array:
