@@ -154,12 +154,18 @@ class LoadPlan:
   targets: list[_Target]
   groups: list[list[_Write]]
   unmatched_mt_keys: list[str]  # Mapping entries with no weight in the target tree.
+  # Weights whose mapping has no HF tensor (HF key None): the hook makes the whole value
+  # from nothing (e.g. DeepSeek-V4's `mhc_norm` scales are all ones), as in `to_maxtext`.
+  generated: list[_Target] = dataclasses.field(default_factory=list)
 
 
 def resolve_target_name(mt_key: str, flat_target: dict) -> str | None:
   """Finds the key in the flattened target tree that a param-mapping key refers to."""
   mt_name = mt_key.replace("params-", "").replace("-", ".")
   candidates = [mt_name, f"params.{mt_name}", mt_key.replace("-", ".")]
+  # An NNX tree holds weights of other Flax collections (e.g. `Tid2EidVar`) beside the rest,
+  # without the collection name.
+  candidates += [mt_key[len(c) :].replace("-", ".") for c in _LAYER_FIRST_COLLECTIONS if mt_key.startswith(c)]
   for candidate in candidates:
     if candidate in flat_target:
       return candidate
@@ -172,15 +178,34 @@ def _stacked_axes(mt_key: str, shape: tuple, depth: int, config) -> tuple[int, .
   Matches `tensor_handling`: a flat list stacks along `param_scan_axis` for
   scanned layers (or axis 0 for rank-1 weights and unscanned MoE experts), and
   deeper nesting follows `tensor_handling.stacked_axes`.
+
+  Two flat-list cases stack along axis 0 even with scanned layers, as in
+  `to_maxtext`: weights outside the `params` collection (`MoEBiasVar`,
+  `Tid2EidVar`), which put the layer axis first, and the expert list of a single
+  unscanned layer (`...-layers_<i>-...-MoeBlock...`, e.g. DeepSeek-V4's first
+  layers), which has no layer axis at all.
   """
   if depth == 0:
     return ()
   if depth == 1:
     scan_axis = config.param_scan_axis
-    if not config.scan_layers or len(shape) <= scan_axis:
+    if not config.scan_layers or len(shape) <= scan_axis or _stacks_on_axis_0(mt_key):
       return (0,)
     return (scan_axis,)
   return tuple(tensor_handling.stacked_axes(mt_key, config, depth))
+
+
+# A single unscanned decoder layer, e.g. "params-decoder-layers_2-mlp-...".
+_UNSCANNED_LAYER_KEY = re.compile(r"-layers_\d+-")
+# Flax collections other than `params` whose stacked weights put the layer axis first.
+_LAYER_FIRST_COLLECTIONS = ("MoEBiasVar-", "Tid2EidVar-")
+
+
+def _stacks_on_axis_0(mt_key: str) -> bool:
+  """Whether a flat HF key list for `mt_key` stacks along axis 0 with scanned layers (see `_stacked_axes`)."""
+  if mt_key.startswith(_LAYER_FIRST_COLLECTIONS):
+    return True
+  return "MoeBlock" in mt_key and "scanned_blocks" not in mt_key and bool(_UNSCANNED_LAYER_KEY.search(mt_key))
 
 
 def _enumerate_sources(hf_source: Any, target: _Target) -> Iterator[tuple[tuple[int, ...], Any]]:
@@ -299,7 +324,7 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
     The load plan.
   """
   flat_target = flax.traverse_util.flatten_dict(target_tree, sep=".")
-  targets, writes, unmatched = [], [], []
+  targets, writes, unmatched, generated = [], [], [], []
   for mt_key, hf_source in param_map.items():
     # A tuple MaxText key: the hooks give all its weights at once, stacked on a new last axis.
     mt_keys = mt_key if isinstance(mt_key, tuple) else (mt_key,)
@@ -327,13 +352,20 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
       )
     if len({(p.shape, p.axes) for p in parts}) > 1:
       raise ValueError(f"The MaxText weights of {mt_key} differ in shape: {[p.shape for p in parts]}.")
+    if hf_source is None:
+      if len(parts) > 1 or parts[0].hooks is None:
+        raise ValueError(f"Param mapping gives no HF tensor for {mt_key}, so it needs exactly one weight and a hook.")
+      generated.append(parts[0])
+      continue
     targets.extend(parts)
     writes.extend(_Write(tuple(parts), index, source) for index, source in _enumerate_sources(hf_source, parts[0]))
 
   groups = collections.defaultdict(list)
   for write in writes:
     groups[_layer_group(write.hf_keys[0])].append(write)
-  return LoadPlan(targets=targets, groups=[groups[k] for k in sorted(groups)], unmatched_mt_keys=unmatched)
+  return LoadPlan(
+      targets=targets, groups=[groups[k] for k in sorted(groups)], unmatched_mt_keys=unmatched, generated=generated
+  )
 
 
 @functools.lru_cache(maxsize=None)
@@ -437,6 +469,16 @@ def _apply_write(write: _Write, hf_arrays: dict, results: dict):
       results[target.name] = _cast_fn(target.dtype, target.sharding)(part)
 
 
+def _generate(target: _Target) -> jax.Array:
+  """Makes a weight whose mapping has no HF tensor: the hook gets None and the full shape, as in `to_maxtext`."""
+  x = tensor_handling.apply_hook_fns(None, target.shape, target.hooks)
+  if tuple(x.shape) != target.shape:
+    raise ValueError(
+        f"Hooks for {target.mt_key} made shape {tuple(x.shape)} from no HF tensor, but {target.name} is {target.shape}."
+    )
+  return _cast_fn(target.dtype, target.sharding)(x)
+
+
 def _peak_hbm_gb() -> float | None:
   stats = jax.local_devices()[0].memory_stats()
   return stats["peak_bytes_in_use"] / 1e9 if stats and "peak_bytes_in_use" in stats else None
@@ -499,9 +541,12 @@ def load_hf_params_streaming(
     max_logging.log(
         f"Streaming {sum(len(g) for g in plan.groups)} HF sources into {len(plan.targets)} MaxText weights"
         f" in {len(calls)} read calls from {path}"
+        + (f"; {len(plan.generated)} more weights come from hooks alone" if plan.generated else "")
     )
 
     results = {t.name: _alloc_fn(t.shape, t.dtype, t.sharding)() for t in plan.targets if t.axes}
+    for target in plan.generated:
+      results[target.name] = _generate(target)
     total_bytes = 0
     # Only reads and their copies into HBM (`fetch`) run on the background thread. The
     # jitted rearranging (`unpack`) and writes stay on this thread in a fixed order, so
@@ -548,6 +593,6 @@ def load_hf_params_streaming(
   flat_restored = flax.traverse_util.flatten_dict(target_tree, sep=".")
   flat_restored.update(results)
   restored = flax.traverse_util.unflatten_dict(flat_restored, sep=".")
-  # A Linen tree carries the `params` collection, and maybe others beside it: return it as is.
-  # An NNX pure dict has bare weights: wrap them once.
+  # A Linen tree carries the `params` collection, and maybe others beside it (e.g. DeepSeek-V4's
+  # `MoEBiasVar` and `Tid2EidVar`): return it as is. An NNX pure dict has bare weights: wrap them once.
   return restored if "params" in restored else {"params": restored}
