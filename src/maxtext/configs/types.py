@@ -2425,8 +2425,10 @@ class Qwen3Next(BaseModel):
       "highest",
       description=(
           "Precision of the f32 matmuls that compose the GDN recurrent state across sequence-sharded context"
-          " parallelism (kernels/gdn/gdn_bwd/cp_gdn.py). On TPU 'highest' runs 6 bf16 passes and 'high' runs 3."
-          " Only the XLA composition math changes; the Pallas kernels keep their own precision. It applies only"
+          " parallelism (kernels/gdn/gdn_bwd/cp_gdn.py). On TPU 'highest' runs 6 bf16 passes and 'high' runs 3;"
+          " with 'high' the rank-local forward transition product runs as a Pallas scan (kernels/gdn/gdn_bwd/"
+          "dh_scan.py) at the same 3 passes. Only the composition math changes; the Pallas GDN kernels keep their"
+          " own precision. It applies only"
           " with use_gdn_kernel=True and sequence-sharded GDN context parallelism: gdn_cp_mode='seq', or 'auto',"
           " which shards the sequence unless the GDN context parallelism is 2 and divides the number of key"
           " heads. It has no effect with use_gdn_kernel=False (that path's context parallelism always uses"
