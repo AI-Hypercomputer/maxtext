@@ -30,6 +30,7 @@ from jax import ad_checkpoint as adc
 from jax.experimental.compute_on import compute_on
 from jax.experimental import xla_metadata
 from jax.experimental.layout import Layout, with_layout_constraint
+from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -37,6 +38,7 @@ from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
 from maxtext.kernels import sort_activations
+from maxtext.kernels.ragged import glu_rows
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort import ring_ragged_sort
@@ -109,6 +111,9 @@ class RouteOutput:
   # log_moe_drops=True on the ring-of-experts ragged path only (None otherwise): the drop audit
   # `(dropped_assignments, max_load_ratio)`, see `RoutedMoE.permute`. Logging only.
   moe_audit: Optional[tuple[jax.Array, jax.Array]] = None
+  # Ring-of-experts ragged path only (None otherwise): the sort permutation, the inverse of
+  # `sorted_selected_experts` there. The unsort backward reads it instead of argsorting that.
+  topk_argsort_indices: Optional[jax.Array] = None
 
 
 def combine_moe_audits(audits):
@@ -245,6 +250,23 @@ def _forward_optimization_barrier_bwd(_, cotangents):
 _forward_optimization_barrier.defvjp(_forward_optimization_barrier_fwd, _forward_optimization_barrier_bwd)
 
 
+@jax.custom_vjp
+def _backward_optimization_barrier(operands):
+  """The identity on the forward values and `jax.lax.optimization_barrier` on their cotangents."""
+  return operands
+
+
+def _backward_optimization_barrier_fwd(operands):
+  return operands, None
+
+
+def _backward_optimization_barrier_bwd(_, cotangents):
+  return (jax.lax.optimization_barrier(cotangents),)
+
+
+_backward_optimization_barrier.defvjp(_backward_optimization_barrier_fwd, _backward_optimization_barrier_bwd)
+
+
 def barrier_tie(x, dep, backward: bool = False):
   """Returns `(x, dep)` unchanged, tied together by `jax.lax.optimization_barrier`.
 
@@ -299,6 +321,69 @@ def forward_row_major(x: jax.Array) -> jax.Array:
   Only the forward value is constrained; the cotangent keeps whatever layout XLA picks.
   """
   return _forward_layout_constraint(x, tuple(range(x.ndim)))
+
+
+def _split_gate_up(fused):
+  """The gate and up halves of the prefused gate/up GEMM output, with the remat names of `gmm_up`."""
+  n = fused.shape[-1] // 2
+  gate = adc.checkpoint_name(adc.checkpoint_name(fused[..., :n], "mlpwi_0"), "moe_mlpwi_0")
+  up = adc.checkpoint_name(fused[..., n:], "moe_mlpwi_1")
+  return gate, up
+
+
+def fused_glu(fused, glu, limit=None):
+  """`glu(gate, up)` of the two halves of `fused`, the [..., 2 * mlp] output of the prefused gate/up GEMM.
+
+  Autodiff transposes each half's slice into a zero-padded [..., 2 * mlp] gradient and adds the two, one more
+  full pass over the gradient. This backward computes the same two half gradients, with `jax.vjp` of `glu`, and
+  concatenates them, which XLA writes straight from the activation's backward fusion.
+
+  `limit`, if given, says that only rows [0, limit) of the [rows, 2 * mlp] expert buffer `fused` hold tokens and
+  that `glu` is the bf16 SiLU GLU. On a TPU, Pallas kernels then compute the activation and its gradient on those
+  rows only, bit-identical to the XLA fusions, and write the gradient's two halves at once; the rows past the
+  1024-row block of row limit - 1 are left unwritten in both results.
+  """
+  if limit is not None and pltpu.is_tpu_device() and glu_rows.kernel_supported(fused):
+    return _silu_glu_rows(fused, limit)
+  return _fused_glu(fused, glu)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _fused_glu(fused, glu):
+  return glu(*_split_gate_up(fused))
+
+
+def _fused_glu_fwd(fused, glu):
+  gate, up = _split_gate_up(fused)
+  return glu(gate, up), (gate, up)
+
+
+def _fused_glu_bwd(glu, residuals, cotangent):
+  _, glu_vjp = jax.vjp(glu, *residuals)
+  # The zero-padded add turns -0 into +0; so does this, so the gradient is bit-identical to autodiff's.
+  return (jnp.concatenate([jnp.where(d == 0, 0, d) for d in glu_vjp(cotangent)], axis=-1),)
+
+
+_fused_glu.defvjp(_fused_glu_fwd, _fused_glu_bwd)
+
+
+@jax.custom_vjp
+def _silu_glu_rows(fused, limit):
+  return glu_rows.glu_fwd_rows(fused, limit)
+
+
+def _silu_glu_rows_fwd(fused, limit):
+  # The kernels read both halves in place, so the residual is the whole buffer, under the names of both halves.
+  fused = adc.checkpoint_name(adc.checkpoint_name(adc.checkpoint_name(fused, "mlpwi_0"), "moe_mlpwi_0"), "moe_mlpwi_1")
+  return glu_rows.glu_fwd_rows(fused, limit), (fused, limit)
+
+
+def _silu_glu_rows_bwd(residuals, cotangent):
+  fused, limit = residuals
+  return glu_rows.glu_bwd_rows(fused, cotangent, limit), None
+
+
+_silu_glu_rows.defvjp(_silu_glu_rows_fwd, _silu_glu_rows_bwd)
 
 
 def get_batchsplit_init_kernel_axes():
@@ -382,6 +467,37 @@ def fold_padding_into_forced_routing(forced_routed_experts, token_mask, num_expe
   else:
     base = forced_routed_experts
   return jnp.where(is_pad, jnp.asarray(PAD_TOKEN_ROUTED_EXPERT, base.dtype), base)
+
+
+def _top_k_indices_where_needed(probs, needed, k):
+  """`jax.lax.top_k(probs, k)[1]` on the tokens where `needed` is set; other tokens may get any ids.
+
+  Under router replay almost every token is forced or padding. When at most 256 tokens need the
+  router's own choice, top_k sorts only those rows (gathered, then scattered back) instead of every
+  row; otherwise it sorts every row. top_k is per row, so the needed rows are exact either way.
+
+  Args:
+    probs: `[..., num_experts]` router probabilities.
+    needed: `[..., 1]` True for tokens whose ids are read.
+    k: top_k.
+  """
+  max_rows = 256
+  flat = probs.reshape(-1, probs.shape[-1])
+  if flat.shape[0] <= max_rows:
+    return jax.lax.top_k(probs, k)[1]
+  needed = needed.reshape(-1)
+
+  def compact(flat, needed):
+    # Fill entries repeat row 0, which only writes row 0's own top_k to row 0.
+    rows = jnp.nonzero(needed, size=max_rows)[0]
+    return jnp.zeros((flat.shape[0], k), jnp.int32).at[rows].set(jax.lax.top_k(flat[rows], k)[1])
+
+  def full(flat, needed):
+    del needed
+    return jax.lax.top_k(flat, k)[1]
+
+  indices = jax.lax.cond(jnp.sum(needed) <= max_rows, compact, full, flat, needed)
+  return indices.reshape(probs.shape[:-1] + (k,))
 
 
 def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
@@ -667,6 +783,96 @@ class GateLogit(nnx.Module):
     return output, pre_bias_logits
 
 
+def _param_path(path) -> tuple:
+  """A params pytree path as the module path keys `nnx.iter_modules` yields, plus the param name.
+
+  Drops the trailing `GetAttrKey("value")` of each Variable leaf.
+  """
+  keys = []
+  for k in path:
+    if isinstance(k, jax.tree_util.DictKey):
+      keys.append(k.key)
+    elif isinstance(k, jax.tree_util.SequenceKey):
+      keys.append(k.idx)
+  return tuple(keys)
+
+
+def _gathered_kernels(layers: nnx.Module) -> dict:
+  """{kernel path within a scanned layer stack: its module}, for the kernels gathered once per stack."""
+  kernels = {}
+  for path, module in nnx.iter_modules(layers):
+    if isinstance(module, GateLogit):
+      kernels[path + ("kernel",)] = module
+    elif isinstance(module, attentions.Attention) and hasattr(module, "query"):
+      # The backward pass otherwise gathers the query kernel twice per layer: for the rematerialized
+      # projection and for the input gradient. Under fused_qkv there is no `query` (it is `qkv_proj`).
+      kernels[path + ("query", "kernel")] = module.query
+  return kernels
+
+
+def gather_scanned_kernels_once(layers: nnx.Module, params, mesh: Mesh, shard_mode):
+  """Gathers small FSDP-sharded kernels of a scanned layer stack once, before the scan, not in every layer.
+
+  The MoE router kernel (embed x num_experts, f32 under float32_gate_logits) is small but FSDP-sharded,
+  so every layer all-gathers it on the critical path, synchronously on TPUs that run all-gathers on the
+  TensorCore, and the backward pass gathers it again. Replicating the stacked kernels up front is one
+  all-gather for all layers. `params` is the stack's Param state with the scan axis leading; pair with
+  `reduce_scatter_gathered_grads` inside the scan so each layer's gradient still lands sharded.
+  """
+  gathered = _gathered_kernels(layers)
+  replicated = NamedSharding(mesh, P())
+
+  def replicate(path, x):
+    if _param_path(path) not in gathered:
+      return x
+    if shard_mode == ShardMode.EXPLICIT:
+      return jax.sharding.reshard(x, replicated)
+    return jax.lax.with_sharding_constraint(x, replicated)
+
+  return jax.tree_util.tree_map_with_path(replicate, params)
+
+
+def gathered_kernel_grad_shardings(layers: nnx.Module, mesh: Mesh, rules) -> dict:
+  """{kernel path within one layer: the kernel's own sharding} for the kernels `gather_scanned_kernels_once` gathers."""
+  return {
+      path: NamedSharding(mesh, logical_to_mesh_axes(tuple(module.kernel_axes), mesh, rules))
+      for path, module in _gathered_kernels(layers).items()
+  }
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _identity_with_grad_sharding(x, sharding):
+  """The identity on `x`; its cotangent is constrained to `sharding`."""
+  return x
+
+
+def _identity_with_grad_sharding_fwd(x, sharding):
+  del sharding
+  return x, None
+
+
+def _identity_with_grad_sharding_bwd(sharding, _, cotangent):
+  return (jax.lax.with_sharding_constraint(cotangent, sharding),)
+
+
+_identity_with_grad_sharding.defvjp(_identity_with_grad_sharding_fwd, _identity_with_grad_sharding_bwd)
+
+
+def reduce_scatter_gathered_grads(params, shardings: dict):
+  """Identity on one layer's params whose backward puts the gathered kernels' gradients back on their sharding.
+
+  A layer handed a slice of a replicated kernel otherwise gets a replicated gradient: an all-reduce per
+  layer, stacked at full size across the scan. Constraining it to the kernel's own sharding makes it a
+  reduce-scatter into a stacked shard, as when the layer gathered the kernel itself.
+  """
+
+  def apply(path, x):
+    keys = _param_path(path)
+    return _identity_with_grad_sharding(x, shardings[keys]) if keys in shardings else x
+
+  return jax.tree_util.tree_map_with_path(apply, params)
+
+
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
 
@@ -762,7 +968,14 @@ class RoutedMoE(nnx.Module):
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
-      self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
+      # wo is [experts, mlp, embed]. Mesh rules that define `mlp_moe_out`/`embed_moe_out` (cp-as-ep) shard its mlp
+      # dim over FSDP instead of its embed dim, so its gradient reduce-scatter scatters a middle dimension, like wi's,
+      # instead of being transposed to [embed, experts * mlp] and scattered on its major dimension (about 3x slower
+      # on the SparseCore for the same bytes).
+      if {"mlp_moe_out", "embed_moe_out"} <= {rule[0] for rule in self.config.logical_axis_rules}:
+        self.wo_kernel_axes = ("exp", "mlp_moe_out", "embed_moe_out")
+      else:
+        self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
       # vLLM uses 'model' as the tensor parallelism axis name
@@ -1136,7 +1349,6 @@ class RoutedMoE(nnx.Module):
     valid_token_mask = None
     if forced_routed_experts is not None:
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-      _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
       # A token has real forced routing only if its slots are within [0, num_experts).
       # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
@@ -1144,7 +1356,6 @@ class RoutedMoE(nnx.Module):
       sorted_experts = jnp.sort(forced_routed_experts, axis=-1)
       has_duplicate = jnp.any(sorted_experts[..., 1:] == sorted_experts[..., :-1], axis=-1, keepdims=True)
       token_is_forced = jnp.logical_and(jnp.all(slot_valid, axis=-1, keepdims=True), jnp.logical_not(has_duplicate))
-      top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       if self.config.moe_exclude_padding_from_routing:
         # A padding token (every slot PAD_TOKEN_ROUTED_EXPERT) is never forced (its slots are not
         # valid ids) and gets no valid slot, so its weights are zeroed below and its ids become -1.
@@ -1152,6 +1363,11 @@ class RoutedMoE(nnx.Module):
         valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.logical_not(pad_token))
       else:
         valid_token_mask = jnp.where(token_is_forced, slot_valid, jnp.ones_like(slot_valid, dtype=jnp.bool_))
+      # Only tokens that are neither forced nor padding read auto_indices: every other id is replaced
+      # or masked below.
+      uses_auto = jnp.logical_and(jnp.logical_not(token_is_forced), jnp.any(valid_token_mask, axis=-1, keepdims=True))
+      auto_indices = _top_k_indices_where_needed(router_probs, uses_auto, self.num_experts_per_tok)
+      top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
@@ -1420,7 +1636,7 @@ class RoutedMoE(nnx.Module):
       else:
         buffer_size = None
 
-      sorted_inputs, group_size, sorted_selected_experts = ring_ragged_sort(
+      sorted_inputs, group_size, sorted_selected_experts, topk_argsort_indices = ring_ragged_sort(
           inputs_2d,
           topk_indices_2d,
           self.config.num_experts,
@@ -1437,6 +1653,7 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
+      topk_argsort_indices = None
       flatten_selected_experts = jnp.ravel(selected_experts)
 
       # Must precede roll_to_expert_id: `(-1 - roll) % num_experts` wraps padding
@@ -1542,6 +1759,7 @@ class RoutedMoE(nnx.Module):
         local_group_size,
         has_overflow,
         moe_audit,
+        topk_argsort_indices,
     )
 
   def unpermute(
@@ -1553,6 +1771,7 @@ class RoutedMoE(nnx.Module):
       sequence_length,
       use_custom_sort_vjp=True,
       group_sizes=None,
+      topk_argsort_indices=None,
   ):
     """Unpermute tokens to original order and combine weights."""
 
@@ -1566,6 +1785,7 @@ class RoutedMoE(nnx.Module):
           intermediate,
           group_sizes,
           sorted_selected_experts,
+          topk_argsort_indices,
           self.num_experts_per_tok,
           local_num_experts,
           self._expert_parallelism_name,
@@ -2414,6 +2634,7 @@ class RoutedMoE(nnx.Module):
           local_group_sizes,
           has_overflow,
           moe_audit,
+          topk_argsort_indices,
       ) = self.permute(
           x,
           logits,
@@ -2439,6 +2660,7 @@ class RoutedMoE(nnx.Module):
               local_group_sizes=local_group_sizes,
               has_overflow=has_overflow,
               moe_audit=moe_audit,
+              topk_argsort_indices=topk_argsort_indices,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -2470,6 +2692,7 @@ class RoutedMoE(nnx.Module):
           lb_loss,
           bias_updates,
           local_group_sizes,
+          _,
           _,
           _,
       ) = self.permute(
@@ -2678,6 +2901,10 @@ class RoutedMoE(nnx.Module):
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
+        if not self.config.mlp_bias:
+          # Returned whole, as (out, None): `_down_projection` splits it in `fused_glu`, whose backward concatenates
+          # the halves' gradients, and the chunk pipeline's tie 4 holds the GEMM output, not a copy of its first half.
+          return out, None
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
         if self.config.mlp_bias and w0_bias is not None and w1_bias is not None:
@@ -2931,7 +3158,23 @@ class RoutedMoE(nnx.Module):
 
     def _down_projection(output0, output1, gmm_fn, wo, wo_bias, routing, route_metadata):
       """The activation and the down projection, per routed token."""
-      intermediate_layer = self.apply_ffn_activation(output0, output1)
+      if output1 is None:  # output0 is the prefused gate/up GEMM output (see `gmm_up`)
+        # The ring's packed buffer holds its tokens in rows [0, valid_token_count); the SiLU GLU kernels skip the
+        # rest. apply_ffn_activation is the plain SiLU GLU unless the decoder block clips its inputs.
+        silu_glu = (
+            self.config.mlp_activations[0] == "silu"
+            and self.dtype == jnp.bfloat16
+            and self.config.decoder_block != ctypes.DecoderBlockType.GPT_OSS
+            and not (
+                self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4)
+                and self.config.mlp_activations_limit > 0.0
+            )
+        )
+        packed = self.config.use_ring_of_experts and output0.shape[0] < routing.sorted_selected_experts.shape[0]
+        limit = valid_token_count(output0, routing, route_metadata) if silu_glu and packed else None
+        intermediate_layer = fused_glu(output0, self.apply_ffn_activation, limit)
+      else:
+        intermediate_layer = self.apply_ffn_activation(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
       intermediate_output = gmm_fn(
           intermediate_layer,
@@ -2963,6 +3206,7 @@ class RoutedMoE(nnx.Module):
           sequence_length=sequence_length,
           use_custom_sort_vjp=self.config.use_custom_sort_vjp,
           group_sizes=routing.group_sizes,
+          topk_argsort_indices=routing.topk_argsort_indices,
       )
       return jnp.reshape(
           output,
@@ -3166,6 +3410,11 @@ class RoutedMoE(nnx.Module):
         reads those barrier outputs, and XLA removes the reduce-scatter and its
         gather-reduce. The compiled backward has the collectives of the plain chunk loop.
         """
+        nonlocal x, w0, w1, wo
+        # The backward hands the layer-input gradient on only once the expert-weight gradients exist, so each
+        # layer's tgmm runs under its own token reduce-scatters instead of at the end of the backward iteration,
+        # where every deferred layer's sorted-token buffers would still be live.
+        x, (w0, w1, wo) = _backward_optimization_barrier((x, (w0, w1, wo)))
         seq_len = x.shape[1]
         chunk = seq_len // n_chunks
 

@@ -134,6 +134,28 @@ def load_compact_to_large(vmem_ref: jax.Ref) -> jax.Array:
   return jnp.concat(vreg_list, axis=-1).reshape(new_shape)
 
 
+def upcast_large_to_compact(large_ref: jax.Ref, compact_ref: jax.Ref) -> None:
+  """Upcast activations from large layout into a compact fp32 reference.
+
+  The inverse of load_as_qkv_large: one strided store per 128-lane column puts
+  each token's lanes into its own row of the compact reference.
+
+  Args:
+    large_ref: Activations in VMEM of shape [seq_tile_size, chunk_size,
+      dim_size].
+    compact_ref: fp32 reference in VMEM of shape [seq_tile_size, chunk_size, 1,
+      dim_size].
+  """
+
+  num_lanes = pltpu.get_tpu_info().num_lanes
+  lanes_per_col = compact_ref.shape[-1] // num_lanes
+  for idx in range(compact_ref.shape[0]):
+    compact_flat_ref = compact_ref.at[idx].reshape(-1, num_lanes)  # pyrefly: ignore[missing-attribute]
+    for lane in range(lanes_per_col):
+      col = large_ref[idx, :, lane * num_lanes : (lane + 1) * num_lanes]
+      compact_flat_ref[lane::lanes_per_col] = col.astype(compact_ref.dtype)
+
+
 def load_and_select_states(
     metadata_ref: memory_ref.MetadataRef,
     p_id: jax.Array,

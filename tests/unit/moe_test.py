@@ -14,6 +14,7 @@
 """Mixture of Experts (MoE) tests."""
 
 import functools
+import re
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -30,6 +31,7 @@ import qwix
 from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Config, DType
 from maxtext.configs import pyconfig
+from maxtext.kernels.ragged import ragged_sort
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
@@ -265,6 +267,28 @@ class MlpBlockTest(unittest.TestCase):
   def test_init(self):
     x = jnp.array([1.0, 2.0]).reshape((1, 1, 2))  # TODO(bug): need reshape due to error
     self.model.init({"params": self.rng, "dropout": self.rng}, x)
+
+
+class TopKIndicesWhereNeededTest(unittest.TestCase):
+
+  def test_matches_top_k_on_needed_tokens(self):
+    """Both branches give jax.lax.top_k's ids on the needed tokens: 256 compact, 257 sorts every row."""
+    # Coarse logits make ties common; top_k breaks them by the lower index.
+    logits = jnp.round(jax.random.normal(jax.random.PRNGKey(0), (2, 512, 32)) * 4) / 4
+    probs = jax.nn.softmax(logits, axis=-1)
+    expected = np.asarray(jax.lax.top_k(probs, 4)[1])
+    top_k_where_needed = jax.jit(moe._top_k_indices_where_needed, static_argnums=2)  # pylint: disable=protected-access
+    order = jax.random.permutation(jax.random.PRNGKey(1), 2 * 512)
+    for num_needed in (256, 257):
+      needed = jnp.zeros(2 * 512, jnp.bool_).at[order[:num_needed]].set(True)
+      got = np.asarray(top_k_where_needed(probs, needed.reshape(2, 512, 1), 4)).reshape(-1, 4)
+      needed = np.asarray(needed)
+      np.testing.assert_array_equal(got[needed], expected.reshape(-1, 4)[needed])
+      if num_needed <= 256:
+        # The compact branch leaves the other tokens (but row 0) at 0.
+        np.testing.assert_array_equal(got[1:][~needed[1:]], 0)
+      else:
+        np.testing.assert_array_equal(got, expected.reshape(-1, 4))
 
 
 class DeepSeekRoutingTest(unittest.TestCase):
@@ -3505,6 +3529,84 @@ class RoutedMoEFp8Test(unittest.TestCase):
     self.assertEqual(model.weight_quant.block_size, [64, 32])
     expected_wi_shape = (cfg.num_experts, 128 // 64, (cfg.base_moe_mlp_dim * 2) // 32)
     self.assertEqual(model.wi_scale.shape, expected_wi_shape)
+
+
+class FusedGluTest(unittest.TestCase):
+  """`fused_glu` matches autodiff of the split prefused gate/up output, bit for bit."""
+
+  def test_matches_autodiff_of_split_bitwise(self):
+    def glu(gate, up):
+      return (jax.nn.silu(gate) * up).astype(jnp.bfloat16)
+
+    def split_then_glu(fused):
+      n = fused.shape[-1] // 2
+      return glu(fused[:, :n], fused[:, n:])
+
+    k_fused, k_cotangent = jax.random.split(jax.random.key(0))
+    fused = (3 * jax.random.normal(k_fused, (256, 2 * 128))).astype(jnp.bfloat16)
+    # Zero cotangent rows give -0 half gradients, which autodiff's zero-padded add turns into +0.
+    cotangent = jax.random.normal(k_cotangent, (256, 128)).astype(jnp.bfloat16).at[64:128].set(0)
+    bits = lambda a: np.asarray(a).view(np.uint16)
+    for wrap in (lambda f: f, jax.checkpoint):
+      want, want_vjp = jax.vjp(jax.jit(wrap(split_then_glu)), fused)
+      got, got_vjp = jax.vjp(jax.jit(wrap(lambda f: moe.fused_glu(f, glu))), fused)
+      np.testing.assert_array_equal(bits(got), bits(want))
+      np.testing.assert_array_equal(bits(got_vjp(cotangent)[0]), bits(want_vjp(cotangent)[0]))
+
+
+class RingRaggedUnsortGradTest(parameterized.TestCase):
+  """ring_ragged_unsort's custom backward against autodiff of the same forward written with plain gathers."""
+
+  @parameterized.named_parameters(("unbuffered", None), ("buffered", 8))
+  def test_grad_matches_autodiff_without_argsort(self, buffer_size):
+    ep, num_tokens, hidden, topk, num_experts = 2, 8, 128, 2, 4
+    local_num_experts = num_experts // ep
+    rng = np.random.default_rng(0)
+    # Small integers keep every product and sum exact, so the comparison is bitwise.
+    hidden_states = jnp.asarray(rng.integers(-4, 5, (ep, num_tokens, hidden)), jnp.bfloat16)
+    experts = jnp.asarray(
+        [[rng.choice(num_experts, topk, replace=False) for _ in range(num_tokens)] for _ in range(ep)], jnp.int32
+    )
+    weights = jnp.asarray(rng.integers(1, 4, (ep, num_tokens * topk)), jnp.float32)
+    cotangent = jnp.asarray(rng.integers(-4, 5, (ep, num_tokens, hidden)), jnp.float32)
+    fallbacks = {"enforce_gather_fallback": True, "enforce_gather_reduce_fallback": True}
+
+    def sort(x, e):
+      return ragged_sort.ring_ragged_sort(x, e, num_experts, topk, "expert", ep, buffer_size=buffer_size, **fallbacks)
+
+    # Each vmap lane is one expert shard. buffer_size=8 is the balanced load: the shards receive 9 and 6 slots,
+    # so one drops a slot and the other leaves buffer rows unused.
+    tokens, group_sizes, revert, perm = jax.vmap(sort, axis_name="expert")(hidden_states, experts)
+
+    def unsort(tokens, weights, group_sizes, revert, perm):
+      return ragged_sort.ring_ragged_unsort(
+          tokens, group_sizes, revert, perm, topk, local_num_experts, "expert", weights, **fallbacks
+      )
+
+    def reference(tokens, weights, group_sizes, revert, perm):
+      del perm
+      offsets = jnp.cumulative_sum(group_sizes, include_initial=True)
+      shard = jax.lax.axis_index("expert")
+      start, end = offsets[shard * local_num_experts], offsets[(shard + 1) * local_num_experts]
+      if tokens.shape[0] < revert.shape[0]:  # packed buffer: this shard's rows start at 0
+        pos, valid = revert - start, (revert >= start) & (revert - start < jnp.minimum(end - start, tokens.shape[0]))
+      else:
+        pos, valid = revert, (revert >= start) & (revert < end)
+      rows = jnp.where(valid[:, None], tokens[jnp.where(valid, pos, 0)].astype(jnp.float32) * weights[:, None], 0.0)
+      return rows.reshape(num_tokens, topk, hidden).sum(axis=1)
+
+    def grads(fn):
+      def loss(tokens, weights):
+        out = jax.vmap(fn, axis_name="expert")(tokens, weights, group_sizes, revert, perm)
+        return jnp.sum(out.astype(jnp.float32) * cotangent)
+
+      return jax.grad(loss, argnums=(0, 1))
+
+    for actual, expected in zip(grads(unsort)(tokens, weights), grads(reference)(tokens, weights)):
+      np.testing.assert_array_equal(actual, expected)
+    # The backward reuses the sort's permutation instead of argsorting the revert indices.
+    jaxpr = str(jax.make_jaxpr(grads(unsort))(tokens, weights))
+    self.assertIsNone(re.search(r"\bsort\[", jaxpr), "the unsort backward argsorts")
 
 
 if __name__ == "__main__":

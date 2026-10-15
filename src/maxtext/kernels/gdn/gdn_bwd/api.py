@@ -25,6 +25,7 @@ import jax.numpy as jnp
 from .. import compute_conv1d as local_compute_conv1d
 from .. import wrapper as local_gdn_wrapper
 from . import cp_gdn
+from . import dh_scan
 from .compute_conv1d_bwd import conv1d_silu_bwd
 from .compute_conv1d_bwd import conv1d_silu_fwd
 from .jax_compute_gdn_states import _compute_forward_conv_and_states
@@ -130,6 +131,50 @@ def decoupled_conv1d_gdn_bwd_kernel(
   )
 
 
+def _fused_kernel_inputs(
+    qkv: jax.Array,
+    b: jax.Array,
+    a: jax.Array,
+    conv_weight: jax.Array,
+    conv_state: Optional[jax.Array],
+    recurrent_state: Optional[jax.Array],
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_kernel_size: int,
+) -> dict[str, jax.Array]:
+  """Lays out [batch, seq, ...] inputs for the fused Conv1D-GDN kernel: one equal-length prefill sequence per row."""
+  num_seqs, seq_len, dim_size = qkv.shape
+  has_init = (conv_state is not None) or (recurrent_state is not None)
+
+  if conv_state is None:
+    tokamax_conv_state = jnp.zeros((num_seqs + 1, conv_kernel_size - 1, dim_size), dtype=qkv.dtype)
+  elif conv_state.shape[0] == num_seqs:
+    tokamax_conv_state = jnp.pad(conv_state, ((1, 0), (0, 0), (0, 0)))
+  else:
+    tokamax_conv_state = conv_state
+
+  if recurrent_state is None:
+    tokamax_recurrent_state = jnp.zeros((num_seqs + 1, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
+  elif recurrent_state.shape[0] == num_seqs:
+    tokamax_recurrent_state = jnp.pad(recurrent_state.astype(jnp.float32), ((1, 0), (0, 0), (0, 0), (0, 0)))
+  else:
+    tokamax_recurrent_state = recurrent_state.astype(jnp.float32)
+
+  return {
+      "qkv": qkv.reshape(-1, dim_size),
+      "b": b.reshape(-1, b.shape[-1]),
+      "a": a.reshape(-1, a.shape[-1]),
+      "conv_state": tokamax_conv_state,
+      "recurrent_state": tokamax_recurrent_state,
+      "conv_weight": jnp.swapaxes(conv_weight, 0, 2),
+      "query_start_loc": jnp.arange(0, (num_seqs + 1) * seq_len, seq_len, dtype=jnp.int32),
+      "state_indices": jnp.arange(1, num_seqs + 1, dtype=jnp.int32),
+      "distribution": jnp.array([0, 0, num_seqs], dtype=jnp.int32),
+      "seq_lens": jnp.full((num_seqs,), seq_len + (1 if has_init else 0), dtype=jnp.int32),
+  }
+
+
 def _run_local_gdn_decoupled_fwd(
     qkv: jax.Array,
     b: jax.Array,
@@ -158,7 +203,7 @@ def _run_local_gdn_decoupled_fwd(
     Optional[jax.Array],
 ]:
   """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU."""
-  batch_size, seq_len, dim_size = qkv.shape
+  batch_size, seq_len, _ = qkv.shape
   if seq_len % chunk_size != 0:
     raise ValueError(
         f"GDN forward kernel requires the local sequence length ({seq_len}) to be a multiple of"
@@ -215,58 +260,27 @@ def _run_local_gdn_decoupled_fwd(
     )
     return (out, states), t_inv, chunk_states
 
-  num_seqs = batch_size
   num_chunks = seq_len // chunk_size
-
-  qkv_flat = qkv.reshape(-1, dim_size)
-  b_flat = b.reshape(-1, b.shape[-1])
-  a_flat = a.reshape(-1, a.shape[-1])
-  tokamax_conv_weight = jnp.swapaxes(conv_weight, 0, 2)
-
-  has_init = (conv_state is not None) or (recurrent_state is not None)
-  query_start_loc = jnp.arange(0, (num_seqs + 1) * seq_len, seq_len, dtype=jnp.int32)
-  state_indices = jnp.arange(1, num_seqs + 1, dtype=jnp.int32)
-  seq_lens = jnp.full((num_seqs,), seq_len + (1 if has_init else 0), dtype=jnp.int32)
-  distribution = jnp.array([0, 0, num_seqs], dtype=jnp.int32)
-
-  if conv_state is None:
-    tokamax_conv_state = jnp.zeros((num_seqs + 1, conv_kernel_size - 1, dim_size), dtype=qkv.dtype)
-  elif conv_state.shape[0] == num_seqs:
-    tokamax_conv_state = jnp.pad(conv_state, ((1, 0), (0, 0), (0, 0)))
-  else:
-    tokamax_conv_state = conv_state
-
-  if recurrent_state is None:
-    tokamax_recurrent_state = jnp.zeros((num_seqs + 1, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
-  elif recurrent_state.shape[0] == num_seqs:
-    tokamax_recurrent_state = jnp.pad(recurrent_state.astype(jnp.float32), ((1, 0), (0, 0), (0, 0), (0, 0)))
-  else:
-    tokamax_recurrent_state = recurrent_state.astype(jnp.float32)
-
   (
       core_attn_out_flat,
       (new_conv_state, new_recurrent_state),
       t_inv_raw,
       chunk_states_raw,
   ) = local_gdn_wrapper.fused_conv1d_gdn(
-      qkv=qkv_flat,
-      b=b_flat,
-      a=a_flat,
-      conv_state=tokamax_conv_state,
-      recurrent_state=tokamax_recurrent_state,
-      conv_weight=tokamax_conv_weight,
+      **_fused_kernel_inputs(
+          qkv, b, a, conv_weight, conv_state, recurrent_state, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size
+      ),
       conv_bias=conv_bias,
       a_log=a_log,
       dt_bias=dt_bias,
-      query_start_loc=query_start_loc,
-      state_indices=state_indices,
-      distribution=distribution,
-      seq_lens=seq_lens,
       n_kq=num_k_heads,
       n_v=num_v_heads,
       d_k=head_k_dim,
       d_v=head_v_dim,
       kernel_size=conv_kernel_size,
+      # seq_len is a multiple of chunk_size (checked above), so the prefill kernel writes every
+      # output row and the output buffer needs no zero fill.
+      zero_initialize_out=False,
       compute_precision=jnp.dtype(compute_dtype),
       mixed_tile_size=chunk_size,
       is_prefill_only=True,
@@ -290,6 +304,90 @@ def _run_local_gdn_decoupled_fwd(
       t_inv,
       chunk_states,
   )
+
+
+def _run_local_gdn_states_fwd(
+    qkv: jax.Array,
+    b: jax.Array,
+    a: jax.Array,
+    conv_weight: jax.Array,
+    conv_bias: Optional[jax.Array],
+    a_log: jax.Array,
+    dt_bias: jax.Array,
+    conv_state: Optional[jax.Array],
+    recurrent_state: Optional[jax.Array],
+    *,
+    num_k_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_kernel_size: int,
+    chunk_size: int,
+    use_qk_norm_in_gdn: bool,
+    compute_dtype: jnp.dtype,
+    segment_ids: Optional[jax.Array] = None,
+    conv_halo_seg: Optional[jax.Array] = None,
+    init_seg: Optional[jax.Array] = None,
+) -> Tuple[Tuple[jax.Array, jax.Array], jax.Array]:
+  """_run_local_gdn_decoupled_fwd for callers that need only (states, t_inv), bit-identical to it.
+
+  On TPU the kernel skips the output and the chunk states; on CPU XLA drops the unused pure-JAX outputs.
+  """
+  if target_platform(qkv) == "cpu":
+    (_, states), t_inv, _ = _run_local_gdn_decoupled_fwd(
+        qkv,
+        b,
+        a,
+        conv_weight,
+        conv_bias,
+        a_log,
+        dt_bias,
+        conv_state,
+        recurrent_state,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        compute_dtype=compute_dtype,
+        segment_ids=segment_ids,
+        conv_halo_seg=conv_halo_seg,
+        init_seg=init_seg,
+    )
+    return states, t_inv
+  batch_size, seq_len, _ = qkv.shape
+  if seq_len % chunk_size != 0:
+    raise ValueError(
+        f"GDN forward kernel requires the local sequence length ({seq_len}) to be a multiple of"
+        f" chunk_size ({chunk_size}); with sequence-sharded context parallelism this is seq_len / cp."
+    )
+  fallback_reason = pallas_unsupported_reason(head_k_dim=head_k_dim, head_v_dim=head_v_dim, chunk_size=chunk_size)
+  if fallback_reason is not None:
+    raise ValueError(f"GDN Pallas TPU forward kernel does not support {fallback_reason}.")
+
+  (new_conv_state, new_recurrent_state), t_inv_raw = local_gdn_wrapper.fused_conv1d_gdn_states(
+      **_fused_kernel_inputs(
+          qkv, b, a, conv_weight, conv_state, recurrent_state, num_v_heads, head_k_dim, head_v_dim, conv_kernel_size
+      ),
+      conv_bias=conv_bias,
+      a_log=a_log,
+      dt_bias=dt_bias,
+      n_kq=num_k_heads,
+      n_v=num_v_heads,
+      d_k=head_k_dim,
+      d_v=head_v_dim,
+      kernel_size=conv_kernel_size,
+      compute_precision=jnp.dtype(compute_dtype),
+      mixed_tile_size=chunk_size,
+      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+      segment_ids=segment_ids,
+      conv_halo_seg=conv_halo_seg,
+      init_seg=init_seg,
+  )
+  t_inv = t_inv_raw.astype(jnp.float32).reshape(batch_size, seq_len // chunk_size, num_v_heads, chunk_size, chunk_size)
+  return (new_conv_state[1:].astype(qkv.dtype), new_recurrent_state[1:].astype(jnp.float32)), t_inv
 
 
 def _is_cp_active(cp_axis_name: str | tuple[str, ...] | None) -> bool:
@@ -377,8 +475,9 @@ def _run_cp_gdn_decoupled_fwd_impl(
   conv_halo = checkpoint_name(conv_halo, "gdn_cp_conv_halo")
   zero_rs = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
 
-  # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv and S_ext_local
-  (_, states_pass1), t_inv, _ = _run_local_gdn_decoupled_fwd(
+  # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv and S_ext_local. Its output
+  # is not needed, so the kernel neither computes it nor writes it or the chunk states.
+  states_pass1, t_inv = _run_local_gdn_states_fwd(
       qkv,
       b,
       a,
@@ -414,24 +513,43 @@ def _run_cp_gdn_decoupled_fwd_impl(
       conv_halo_seg=conv_halo_seg,
       output_dtype=jnp.float32,
   )
-  m_local, s_ext_local = cp_gdn.compose_local_from_t_inv(
-      qkv_conv=k_conv,
-      b=b,
-      a=a,
-      a_log=a_log,
-      dt_bias=dt_bias,
-      t_inv=t_inv,
-      num_k_heads=num_k_heads,
-      num_v_heads=num_v_heads,
-      head_k_dim=head_k_dim,
-      head_v_dim=head_v_dim,
-      chunk_size=chunk_size,
-      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-      s_ext_pass1=states_pass1[1],
-      segment_ids=s_enc_local,
-      init_seg=init_seg,
-      precision=cp_matmul_precision,
-  )
+  if target_platform(qkv) == "tpu" and cp_matmul_precision == jax.lax.Precision.HIGH:
+    # The same chunk transitions as compose_local_from_t_inv at the same 3-pass precision, multiplied in
+    # sequence in a Pallas scan instead of XLA's HBM-bound tree of f32 [chunks, heads, d_k, d_k] products.
+    m_local = dh_scan.gdn_cp_m_scan(
+        k_conv,
+        b,
+        a,
+        a_log,
+        dt_bias,
+        t_inv,
+        num_v_heads=num_v_heads,
+        kq_head_dim=head_k_dim,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        segment_ids=s_enc_local,
+        init_seg=init_seg,
+    )
+    s_ext_local = states_pass1[1].astype(jnp.float32)
+  else:
+    m_local, s_ext_local = cp_gdn.compose_local_from_t_inv(
+        qkv_conv=k_conv,
+        b=b,
+        a=a,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        t_inv=t_inv,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        s_ext_pass1=states_pass1[1],
+        segment_ids=s_enc_local,
+        init_seg=init_seg,
+        precision=cp_matmul_precision,
+    )
   m_local = checkpoint_name(m_local, "gdn_cp_m_local")
 
   h_init = recurrent_state.astype(jnp.float32) if recurrent_state is not None else zero_rs
@@ -909,25 +1027,47 @@ def _gdn_decoupled_conv1d_bwd(
         if d_conv_state is not None
         else None
     )
-    dm_local, ds_ext_local = cp_gdn.compose_bwd_local_from_t_inv(
-        qkv_conv=qkv_conv,
-        b=b,
-        a=a,
-        a_log=a_log,
-        dt_bias=dt_bias,
-        do=d_out,
-        t_inv=t_inv,
-        num_k_heads=num_k_heads,
-        num_v_heads=num_v_heads,
-        head_k_dim=head_k_dim,
-        head_v_dim=head_v_dim,
-        chunk_size=chunk_size,
-        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-        m_local_cached=m_local_fwd,
-        segment_ids=segment_ids,
-        init_seg=init_seg,
-        precision=cp_matmul_precision,
-    )
+    if target_platform(qkv_conv) == "tpu" and m_local_fwd is not None and cp_matmul_precision == jax.lax.Precision.HIGH:
+      # ds_ext_local of compose_bwd_local_from_t_inv at the same 3-pass precision, as a reverse Pallas scan
+      # (Horner order) instead of XLA's HBM-bound tree. dm_local is the transposed forward transition, which
+      # compose_bwd_local_from_t_inv also returns when given m_local_cached.
+      ds_ext_local = dh_scan.gdn_cp_dh_scan(
+          qkv_conv,
+          b,
+          a,
+          a_log,
+          dt_bias,
+          d_out,
+          t_inv,
+          num_v_heads=num_v_heads,
+          kq_head_dim=head_k_dim,
+          v_head_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+          segment_ids=segment_ids,
+          init_seg=init_seg,
+      )
+      dm_local = jnp.swapaxes(m_local_fwd.astype(jnp.float32), -1, -2)
+    else:
+      dm_local, ds_ext_local = cp_gdn.compose_bwd_local_from_t_inv(
+          qkv_conv=qkv_conv,
+          b=b,
+          a=a,
+          a_log=a_log,
+          dt_bias=dt_bias,
+          do=d_out,
+          t_inv=t_inv,
+          num_k_heads=num_k_heads,
+          num_v_heads=num_v_heads,
+          head_k_dim=head_k_dim,
+          head_v_dim=head_v_dim,
+          chunk_size=chunk_size,
+          use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+          m_local_cached=m_local_fwd,
+          segment_ids=segment_ids,
+          init_seg=init_seg,
+          precision=cp_matmul_precision,
+      )
     dht_local, _ = cp_gdn.incoming_grad_state(
         dm_local, ds_ext_local, dht_final, cp_axis_name, precision=cp_matmul_precision
     )

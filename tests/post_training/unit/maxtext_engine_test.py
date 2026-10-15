@@ -336,6 +336,8 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
       payload = DummyPayload()
       t.compile(payload)
       t.fwd_bwd(payload)
+      # Not differentiated at all, rather than differentiated and zeroed in `update()`.
+      np.testing.assert_array_equal(np.asarray(t._accumulated_grads["router_gate"]), [0.0, 0.0])
       t.update()
 
       np.testing.assert_allclose(np.asarray(t.model.router_gate.get_value()), [10.0, 10.0])
