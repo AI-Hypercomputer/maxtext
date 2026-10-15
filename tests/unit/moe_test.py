@@ -14,6 +14,7 @@
 """Mixture of Experts (MoE) tests."""
 
 import functools
+import re
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -30,6 +31,7 @@ import qwix
 from jax.sharding import Mesh, PartitionSpec as P
 from maxtext.common.common_types import Config, DType
 from maxtext.configs import pyconfig
+from maxtext.kernels.ragged import ragged_sort
 from maxtext.layers import linears
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
@@ -3550,6 +3552,61 @@ class FusedGluTest(unittest.TestCase):
       got, got_vjp = jax.vjp(jax.jit(wrap(lambda f: moe.fused_glu(f, glu))), fused)
       np.testing.assert_array_equal(bits(got), bits(want))
       np.testing.assert_array_equal(bits(got_vjp(cotangent)[0]), bits(want_vjp(cotangent)[0]))
+
+
+class RingRaggedUnsortGradTest(parameterized.TestCase):
+  """ring_ragged_unsort's custom backward against autodiff of the same forward written with plain gathers."""
+
+  @parameterized.named_parameters(("unbuffered", None), ("buffered", 8))
+  def test_grad_matches_autodiff_without_argsort(self, buffer_size):
+    ep, num_tokens, hidden, topk, num_experts = 2, 8, 128, 2, 4
+    local_num_experts = num_experts // ep
+    rng = np.random.default_rng(0)
+    # Small integers keep every product and sum exact, so the comparison is bitwise.
+    hidden_states = jnp.asarray(rng.integers(-4, 5, (ep, num_tokens, hidden)), jnp.bfloat16)
+    experts = jnp.asarray(
+        [[rng.choice(num_experts, topk, replace=False) for _ in range(num_tokens)] for _ in range(ep)], jnp.int32
+    )
+    weights = jnp.asarray(rng.integers(1, 4, (ep, num_tokens * topk)), jnp.float32)
+    cotangent = jnp.asarray(rng.integers(-4, 5, (ep, num_tokens, hidden)), jnp.float32)
+    fallbacks = {"enforce_gather_fallback": True, "enforce_gather_reduce_fallback": True}
+
+    def sort(x, e):
+      return ragged_sort.ring_ragged_sort(x, e, num_experts, topk, "expert", ep, buffer_size=buffer_size, **fallbacks)
+
+    # Each vmap lane is one expert shard. buffer_size=8 is the balanced load: the shards receive 9 and 6 slots,
+    # so one drops a slot and the other leaves buffer rows unused.
+    tokens, group_sizes, revert, perm = jax.vmap(sort, axis_name="expert")(hidden_states, experts)
+
+    def unsort(tokens, weights, group_sizes, revert, perm):
+      return ragged_sort.ring_ragged_unsort(
+          tokens, group_sizes, revert, perm, topk, local_num_experts, "expert", weights, **fallbacks
+      )
+
+    def reference(tokens, weights, group_sizes, revert, perm):
+      del perm
+      offsets = jnp.cumulative_sum(group_sizes, include_initial=True)
+      shard = jax.lax.axis_index("expert")
+      start, end = offsets[shard * local_num_experts], offsets[(shard + 1) * local_num_experts]
+      if tokens.shape[0] < revert.shape[0]:  # packed buffer: this shard's rows start at 0
+        pos, valid = revert - start, (revert >= start) & (revert - start < jnp.minimum(end - start, tokens.shape[0]))
+      else:
+        pos, valid = revert, (revert >= start) & (revert < end)
+      rows = jnp.where(valid[:, None], tokens[jnp.where(valid, pos, 0)].astype(jnp.float32) * weights[:, None], 0.0)
+      return rows.reshape(num_tokens, topk, hidden).sum(axis=1)
+
+    def grads(fn):
+      def loss(tokens, weights):
+        out = jax.vmap(fn, axis_name="expert")(tokens, weights, group_sizes, revert, perm)
+        return jnp.sum(out.astype(jnp.float32) * cotangent)
+
+      return jax.grad(loss, argnums=(0, 1))
+
+    for actual, expected in zip(grads(unsort)(tokens, weights), grads(reference)(tokens, weights)):
+      np.testing.assert_array_equal(actual, expected)
+    # The backward reuses the sort's permutation instead of argsorting the revert indices.
+    jaxpr = str(jax.make_jaxpr(grads(unsort))(tokens, weights))
+    self.assertIsNone(re.search(r"\bsort\[", jaxpr), "the unsort backward argsorts")
 
 
 if __name__ == "__main__":

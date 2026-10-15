@@ -109,6 +109,9 @@ class RouteOutput:
   # log_moe_drops=True on the ring-of-experts ragged path only (None otherwise): the drop audit
   # `(dropped_assignments, max_load_ratio)`, see `RoutedMoE.permute`. Logging only.
   moe_audit: Optional[tuple[jax.Array, jax.Array]] = None
+  # Ring-of-experts ragged path only (None otherwise): the sort permutation, the inverse of
+  # `sorted_selected_experts` there. The unsort backward reads it instead of argsorting that.
+  topk_argsort_indices: Optional[jax.Array] = None
 
 
 def combine_moe_audits(audits):
@@ -1487,7 +1490,7 @@ class RoutedMoE(nnx.Module):
       else:
         buffer_size = None
 
-      sorted_inputs, group_size, sorted_selected_experts = ring_ragged_sort(
+      sorted_inputs, group_size, sorted_selected_experts, topk_argsort_indices = ring_ragged_sort(
           inputs_2d,
           topk_indices_2d,
           self.config.num_experts,
@@ -1504,6 +1507,7 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
       )
     else:
+      topk_argsort_indices = None
       flatten_selected_experts = jnp.ravel(selected_experts)
 
       # Must precede roll_to_expert_id: `(-1 - roll) % num_experts` wraps padding
@@ -1609,6 +1613,7 @@ class RoutedMoE(nnx.Module):
         local_group_size,
         has_overflow,
         moe_audit,
+        topk_argsort_indices,
     )
 
   def unpermute(
@@ -1620,6 +1625,7 @@ class RoutedMoE(nnx.Module):
       sequence_length,
       use_custom_sort_vjp=True,
       group_sizes=None,
+      topk_argsort_indices=None,
   ):
     """Unpermute tokens to original order and combine weights."""
 
@@ -1633,6 +1639,7 @@ class RoutedMoE(nnx.Module):
           intermediate,
           group_sizes,
           sorted_selected_experts,
+          topk_argsort_indices,
           self.num_experts_per_tok,
           local_num_experts,
           self._expert_parallelism_name,
@@ -2481,6 +2488,7 @@ class RoutedMoE(nnx.Module):
           local_group_sizes,
           has_overflow,
           moe_audit,
+          topk_argsort_indices,
       ) = self.permute(
           x,
           logits,
@@ -2506,6 +2514,7 @@ class RoutedMoE(nnx.Module):
               local_group_sizes=local_group_sizes,
               has_overflow=has_overflow,
               moe_audit=moe_audit,
+              topk_argsort_indices=topk_argsort_indices,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -2537,6 +2546,7 @@ class RoutedMoE(nnx.Module):
           lb_loss,
           bias_updates,
           local_group_sizes,
+          _,
           _,
           _,
       ) = self.permute(
@@ -3037,6 +3047,7 @@ class RoutedMoE(nnx.Module):
           sequence_length=sequence_length,
           use_custom_sort_vjp=self.config.use_custom_sort_vjp,
           group_sizes=routing.group_sizes,
+          topk_argsort_indices=routing.topk_argsort_indices,
       )
       return jnp.reshape(
           output,
