@@ -46,6 +46,31 @@ python -m tests.utils.forward_pass_logit_checker src/maxtext/configs/base.yml mo
 | unscanned | 6.1e-5 | 4.7e-2 / 8.3e-4 |
 | scanned | 5.3e-5 | 4.7e-2 / 7.8e-4 |
 
+## Full-scale check (released FP8/FP4 checkpoint)
+- Checkpoint: `gs://snehalv-data/deepseek-v4.1-flash/hf/full` (also `/dev/shm/dsv41_full` on the CPU VM). MaxText
+  dequantizes on the fly (`param_mapping.dequantize_block_scaled`, per shard via `shard_map`); the mapping follows the
+  checkpoint's own `config.json` `quantization_config`.
+- Goldens (reference, bf16 weights, fp32 compute, 4 prompts incl. a 462-token one), from the 3.8 TB CPU VM:
+  `python -m tests.utils.deepseek_v41_reference.generate_golden_logits --ckpt_dir /dev/shm/dsv41_full --output g.pkl
+  --fp32_compute [--index_topk 4 --candidate_topk_blocks 8]` ->
+  `gs://snehalv-data/deepseek-v4.1-flash/golden/golden_full{,_topk4}.pkl`.
+- MaxText on v5p-128 (XPK, 64 chips): `model_name=deepseek4.1-flash load_parameters_path=gs://.../hf/full
+  source_checkpoint_layout=safetensors_dynamic scan_layers=true max_target_length=512 per_device_batch_size=0.125
+  dtype=float32 weight_dtype=bfloat16 matmul_precision=highest ici_fsdp_parallelism=-1 ici_expert_parallelism=16
+  sparse_matmul=false capacity_factor=-1 --golden_logits_path=golden_full.pkl --max_kl_div=0.5`
+  (topk4 run adds `indexer_topk=4 candidate_topk_blocks=8 override_model_config=true`). Loads 501 GB in ~250 s.
+- Quantized mini for quick loader checks on v4: `tests/utils/deepseek_v41_reference/quantize_checkpoint.py`.
+
+| full checkpoint | "I love to" | "Today is a" | "What is the" | 462 tokens |
+|---|---|---|---|---|
+| upstream config (pass) | 0.112 | 0.131 | 0.021 | 0.092 |
+| index_topk=4, candidate_topk_blocks=8 | 0.112 | 0.131 | 0.021 | spikes (0.18, 0.63, inf @115); rest ~1e-3 |
+
+Full-scale-only bugs found (all in loading / dtype, not the model): XLA-partitioned dequant zeroed 3/4 of tensors whose
+per-chip rows line up with the 32-row scale blocks on 64 chips (now `shard_map`); bf16 MoE routing bias collapsed the
+trained biases (now fp32, also affects DeepSeek V3/V4 / Kimi-K2 `MoEBiasVar`); engram tables (384M rows) are read
+zero-padded and row-sharded over all chips.
+
 ## Known gaps / follow-ups
 - Forward / prefill only: no autoregressive decode caches (window ring, compressed KV, compressor state).
 - Attention is a dense jnp dot-product path (no flash/splash); fine for bring-up, not for long-context training.
