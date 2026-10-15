@@ -23,6 +23,7 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 from .. import compute_conv1d as local_compute_conv1d
+from .. import compute_gdn as local_compute_gdn
 from .. import wrapper as local_gdn_wrapper
 from . import cp_gdn
 from .compute_conv1d_bwd import conv1d_silu_bwd
@@ -61,15 +62,7 @@ def decoupled_conv1d_gdn_bwd_kernel(
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
     interpret: bool | pltpu.InterpretParams | None = None,
-) -> Tuple[
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    jax.Array,
-    Optional[jax.Array],
-    jax.Array,
-    jax.Array,
-]:
+) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, Optional[jax.Array], jax.Array, jax.Array,]:
   """Decoupled Conv1D + GDN backward combining Pallas GDN bwd and JAX Conv1D bwd."""
   del seq_lens, qkv
   if segment_ids is not None and conv_halo_seg is None and init_seg is None:
@@ -104,6 +97,7 @@ def decoupled_conv1d_gdn_bwd_kernel(
       segment_ids=segment_ids,
       init_seg=init_seg,
       interpret=interpret,
+      recompute_t_inv=t_inv is None,
   )
 
   d_pre_conv_qkv, d_conv_weight, d_conv_bias = conv1d_silu_bwd(
@@ -152,11 +146,7 @@ def _run_local_gdn_decoupled_fwd(
     segment_ids: Optional[jax.Array] = None,
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
-) -> Tuple[
-    Tuple[jax.Array, Tuple[jax.Array, jax.Array]],
-    Optional[jax.Array],
-    Optional[jax.Array],
-]:
+) -> Tuple[Tuple[jax.Array, Tuple[jax.Array, jax.Array]], Optional[jax.Array], Optional[jax.Array],]:
   """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU."""
   batch_size, seq_len, dim_size = qkv.shape
   if seq_len % chunk_size != 0:
@@ -168,6 +158,8 @@ def _run_local_gdn_decoupled_fwd(
   fallback_reason = pallas_unsupported_reason(head_k_dim=head_k_dim, head_v_dim=head_v_dim, chunk_size=chunk_size)
   if not on_cpu and fallback_reason is not None:
     raise ValueError(f"GDN Pallas TPU forward kernel does not support {fallback_reason}.")
+  emit_t_inv = chunk_size <= 64
+  head_group_size = local_compute_gdn.default_head_group_size(chunk_size, num_k_heads, num_v_heads, qkv.dtype)
   if on_cpu:
     out, states = pure_jax_decoupled_conv1d_gdn(
         qkv=qkv,
@@ -213,6 +205,8 @@ def _run_local_gdn_decoupled_fwd(
         conv_halo_seg=conv_halo_seg,
         init_seg=init_seg,
     )
+    if not emit_t_inv:
+      t_inv = None
     return (out, states), t_inv, chunk_states
 
   num_seqs = batch_size
@@ -274,10 +268,16 @@ def _run_local_gdn_decoupled_fwd(
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
+      tri_inv_algo=local_compute_gdn.DEFAULT_TRI_INV_ALGO,
+      head_group_size=head_group_size,
+      emit_t_inv=emit_t_inv,
   )
 
   core_attn_out = core_attn_out_flat.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
-  t_inv = t_inv_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, chunk_size, chunk_size)
+  if t_inv_raw is None:
+    t_inv = None
+  else:
+    t_inv = t_inv_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, chunk_size, chunk_size)
   chunk_states = chunk_states_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, head_k_dim, head_v_dim)
   return (
       (
@@ -377,7 +377,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
   conv_halo = checkpoint_name(conv_halo, "gdn_cp_conv_halo")
   zero_rs = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
 
-  # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv and S_ext_local
+  # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv (when chunk_size <= 64) and S_ext_local
   (_, states_pass1), t_inv, _ = _run_local_gdn_decoupled_fwd(
       qkv,
       b,
@@ -598,20 +598,18 @@ def _gdn_decoupled_conv1d_fwd(
       conv_state,
       recurrent_state,
       segment_ids,
-  ) = _unwrap_primal(
-      (
-          qkv,
-          b,
-          a,
-          conv_weight,
-          conv_bias,
-          a_log,
-          dt_bias,
-          conv_state,
-          recurrent_state,
-          segment_ids,
-      )
-  )
+  ) = _unwrap_primal((
+      qkv,
+      b,
+      a,
+      conv_weight,
+      conv_bias,
+      a_log,
+      dt_bias,
+      conv_state,
+      recurrent_state,
+      segment_ids,
+  ))
   qkv = checkpoint_name(qkv, "gdn_fwd_conv")
   qkv = checkpoint_name(qkv, "gdn_conv_out")
   has_initial_state = (conv_state is not None) or (recurrent_state is not None)
@@ -848,9 +846,12 @@ def _gdn_decoupled_conv1d_bwd(
         has_initial_state=bool(has_user_conv_state) or bool(has_user_recurrent_state),
     )
 
-  # Recompute forward chunk states and t_inv if not cached in residuals
+  # When chunk_states is cached in residuals and t_inv was omitted (chunk_size > 64),
+  # the Pallas backward kernel rebuilds T^-1 per chunk in VMEM using xor_dnc instead
+  # of reading it from HBM or recomputing it with XLA.
+  recompute_t_inv_in_kernel = chunk_states is not None and t_inv_fwd is None
   conv_out_cached = None
-  if chunk_states is None or t_inv_fwd is None:
+  if not recompute_t_inv_in_kernel and (chunk_states is None or t_inv_fwd is None):
     qkv_conv, chunk_states_recomputed, t_inv_recomputed = _compute_forward_conv_and_states(
         qkv=pre_conv_qkv,
         b=b,
@@ -949,6 +950,7 @@ def _gdn_decoupled_conv1d_bwd(
         init_seg=init_seg,
         d_recurrent_state=dht_local,
         return_dh0=need_dh0,
+        recompute_t_inv=recompute_t_inv_in_kernel,
     )
     if need_dh0:
       dy_conv, d_b, d_a, d_a_log, d_dt_bias, dh0_local = bwd_out
@@ -1034,6 +1036,7 @@ def _gdn_decoupled_conv1d_bwd(
       init_seg=init_seg,
       d_recurrent_state=d_recurrent_state,
       return_dh0=need_dh0,
+      recompute_t_inv=recompute_t_inv_in_kernel,
   )
   # pylint: disable=unbalanced-tuple-unpacking
   if need_dh0:

@@ -308,14 +308,25 @@ class PyconfigTest(unittest.TestCase):
     )
     self.assertEqual(cfg_cp4.max_target_length // cfg_cp4.ici_context_parallelism, cfg_cp4.gdn_chunk_size)
 
-    # gdn_chunk_size != 64 or head_dim % 128 != 0 raises ValueError when use_gdn_kernel=True.
-    with self.assertRaisesRegex(ValueError, "requires gdn_chunk_size=64"):
-      self._init_qwen3_next_packing(
-          packing=False,
-          use_gdn_kernel=True,
-          override_model_config=True,
-          gdn_chunk_size=32,
-      )
+    # gdn_chunk_size not in (64, 128) or head_dim % 128 != 0 raises ValueError when use_gdn_kernel=True.
+    for bad_chunk_size in (32, 256):
+      with self.assertRaisesRegex(ValueError, r"requires gdn_chunk_size in \(64, 128\)"):
+        self._init_qwen3_next_packing(
+            packing=False,
+            use_gdn_kernel=True,
+            override_model_config=True,
+            gdn_chunk_size=bad_chunk_size,
+        )
+    cfg_c128 = self._init_qwen3_next_packing(
+        packing=False,
+        use_gdn_kernel=True,
+        override_model_config=True,
+        gdn_chunk_size=128,
+        max_target_length=256,
+        ici_context_parallelism=2,
+        context_parallel_load_balance=False,
+    )
+    self.assertEqual(cfg_c128.gdn_chunk_size, 128)
     with self.assertRaisesRegex(ValueError, "multiples of 128"):
       self._init_qwen3_next_packing(
           packing=False,
