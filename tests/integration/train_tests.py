@@ -985,6 +985,42 @@ class TrainTests(unittest.TestCase):
       with open(metrics_file, "rt", encoding="utf8") as f:
         return [json.loads(line)["learning/loss"] for line in f if line.strip()]
 
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_mhc_matches_baseline(self):
+    """TE mHC kernels must train close to the MaxText mHC path.
+
+    The two are not bit-identical: TE runs Sinkhorn in the log domain without the
+    1e-6 epsilons MaxText adds after the softmax and each normalization, uses TF32
+    GEMMs unless matmul_precision is HIGHEST, and fuses ops into Triton kernels with
+    different accumulation order. Hence the loose tolerance.
+    """
+    pytest.importorskip("transformer_engine.jax.mhc")
+    mhc_model = [
+        "model_name=deepseek-custom",
+        "override_model_config=True",
+        "hardware=gpu",
+        "attention=dot_product",
+        "mhc_expansion_rate=4",
+        "engram_layers=[]",
+        "use_indexer=False",
+        "base_emb_dim=256",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=4",
+        "base_mlp_dim=512",
+        "base_moe_mlp_dim=128",
+        "base_num_decoder_layers=2",
+        "first_num_dense_layers=1",
+        "num_experts=4",
+        "vocab_size=1024",
+        "max_target_length=128",
+        "per_device_batch_size=1",
+    ]
+    baseline_losses = self._losses("mhc_baseline", mhc_model, ["te_mhc=False"])
+    te_losses = self._losses("mhc_te", mhc_model, ["te_mhc=True"])
+    self.assertEqual(len(te_losses), len(baseline_losses))
+    np.testing.assert_allclose(te_losses, baseline_losses, rtol=2e-2)
+
   def _qwen3_losses(self, run_name, extra_args):
     """Trains a tiny Qwen3 model for a few steps and returns its per-step losses."""
     return self._losses(run_name, self._qwen3_overrides, extra_args)
