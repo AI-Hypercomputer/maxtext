@@ -2235,6 +2235,22 @@ class Qwen3Next(BaseModel):
           " HIGHEST) or with head-sharded context parallelism."
       ),
   )
+  gdn_conv1d_input_in_qkv_dtype: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: build the Conv1D + SiLU input, the halo-extended [conv_state | qkv] (or qkv left-padded"
+          " by gdn_conv_kernel_dim - 1 zeros), in qkv's dtype and cast each of the gdn_conv_kernel_dim taps to"
+          " float32 where it is read, instead of materializing a float32 copy of the whole input that every tap"
+          " then slices (kernels/gdn/gdn_bwd/compute_conv1d_bwd.py). The copy is f32[1, 16387, 12288] = 805.5 MB"
+          " per GDN layer in the backward pass of the Qwen3.5-397B RL trainer (bf16 activations, sequence-sharded"
+          " context parallelism). bfloat16 -> float32 is lossless and every product and sum is formed in the same"
+          " order, so the forward outputs and the qkv / conv-state / bias gradients are bit-identical; the conv weight"
+          " gradient, a float32 reduction over batch x sequence, may be summed in a different order once XLA fuses"
+          " the cast into it (CPU: a few ulp). Only which tensors live in HBM changes; no optimization barrier is"
+          " involved. Applies to the Conv1D forward and backward that gdn_decoupled_conv1d and its custom-VJP rules"
+          " trace. Requires use_gdn_kernel=True (the only path that runs that Conv1D)."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -5292,6 +5308,11 @@ class MaxTextConfig(
         raise ValueError("GatedDeltaNet context parallelism requires context_parallel_load_balance=False.")
 
     if not cfg.use_gdn_kernel:
+      if getattr(cfg, "gdn_conv1d_input_in_qkv_dtype", False):
+        raise ValueError(
+            "gdn_conv1d_input_in_qkv_dtype=True requires use_gdn_kernel=True: only the GDN kernel path runs the"
+            " Conv1D + SiLU (kernels/gdn/gdn_bwd/compute_conv1d_bwd.py) whose input it keeps in qkv's dtype."
+        )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(
