@@ -454,9 +454,11 @@ def main_kernel(
 
       tw = topk_weights_refs[s][...]
       if cfg.topk_dtype == jnp.bfloat16:
-        tw_f32 = plsc.bitcast(jnp.bitwise_left_shift(tw, 16), jnp.float32)
+        tw_f32 = pltpu.bitcast(
+            jnp.bitwise_left_shift(tw, 16), jnp.float32, dim=-1
+        )
       else:
-        tw_f32 = plsc.bitcast(tw, jnp.float32)
+        tw_f32 = pltpu.bitcast(tw, jnp.float32, dim=-1)
       tw_f32_vmem_sc[sub] = tw_f32
 
     # For each sub-chunk, the destination of the row just before it -- the
@@ -557,9 +559,9 @@ def main_kernel(
             # into the float32 sign/exponent position and clear the rest.
             shift = jnp.where(jnp.bitwise_and(src_idx_slice[row_src], 1) == 0, 16, 0)
             shifted = jnp.bitwise_and(jnp.left_shift(val_u32, shift), jnp.uint32(0xFFFF0000))
-            data_f32 = plsc.bitcast(shifted, jnp.float32)
+            data_f32 = pltpu.bitcast(shifted, jnp.float32, dim=-1)
           else:
-            data_f32 = plsc.bitcast(val_u32, jnp.float32)
+            data_f32 = pltpu.bitcast(val_u32, jnp.float32, dim=-1)
           data_f32 *= tw_slice[row_src]
 
           # Reduction: accumulate while the destination group is unchanged,
