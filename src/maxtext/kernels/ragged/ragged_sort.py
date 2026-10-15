@@ -19,6 +19,7 @@ from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from maxtext.kernels.ragged.ragged_gather import ragged_gather
 from maxtext.kernels.ragged.ragged_gather_reduce_v2 import ragged_gather_reduce
+from maxtext.kernels.ragged.unsort_bwd_rows import unsort_bwd_rows
 
 
 def ring_ragged_sort(
@@ -451,13 +452,11 @@ def ring_ragged_unsort(
           bytes_accessed_override=gather_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
       )
-      # Mask out gradients for elements beyond the valid limit of the local buffer.
+      # Only rows [0, limit) of the local buffer hold tokens: weight their gradients and take their dots.
       limit = jnp.minimum(shard_output_end - shard_output_start, buffer_size)
-      mask = jnp.arange(buffer_size) < limit
-      gathered = jnp.where(mask[:, None], gathered, 0.0)
-      grad_sorted_tokens = (gathered * sliced_weights[:, None]).astype(gathered.dtype)
+      grad_sorted_tokens, dot_local = unsort_bwd_rows(gathered, sorted_tokens_local, sliced_weights, limit)
       # Scatter the per-slot dot back to flat slot order; dropped slots stay zero.
-      dot_local = jnp.sum(gathered.astype(jnp.float32) * sorted_tokens_local.astype(jnp.float32), axis=-1)
+      mask = jnp.arange(buffer_size) < limit
       slots = jnp.where(mask, sliced_idx_inv, n)
       grad_topk_weights = jnp.zeros((n,), jnp.float32).at[slots].set(dot_local, mode="drop")
     return grad_sorted_tokens, None, None, None, grad_topk_weights
