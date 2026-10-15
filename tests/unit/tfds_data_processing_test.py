@@ -32,6 +32,8 @@ from maxtext.input_pipeline import tfds_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
 from tests.utils.test_helpers import get_test_config_path, get_test_base_output_directory
 
+pytestmark = [pytest.mark.requires_tf_jetstream]
+
 
 class TfdsDataProcessingTest(unittest.TestCase):
 
