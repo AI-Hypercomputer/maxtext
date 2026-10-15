@@ -695,6 +695,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       self.cache = None  # No cache for train mode or when inputs_shape not provided
 
     block_size = getattr(cfg, "weight_block_size", None)
+    # A custom rule set can shard the GatedDeltaNet projections apart from the attention projections by mapping
+    # `embed_gdn`; otherwise their embed dimension follows `embed_attn`.
+    gdn_embed_axis = "embed_gdn" if any(rule[0] == "embed_gdn" for rule in cfg.logical_axis_rules) else "embed_attn"
 
     # Submodule instantiations
     self.in_proj_qkvz = DenseGeneral(
@@ -702,7 +705,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(self.key_dim * 2 + self.value_dim * 2),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        kernel_axes=("embed_attn", "gdn_head"),
+        kernel_axes=(gdn_embed_axis, "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
@@ -714,7 +717,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(self.num_v_heads * 2),
         dtype=cfg.dtype,
         weight_dtype=get_weight_dtype(cfg, "in_proj_ba"),
-        kernel_axes=("embed_attn", "gdn_head"),
+        kernel_axes=(gdn_embed_axis, "gdn_head"),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         quant=self.quant,
@@ -767,7 +770,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         out_features_shape=(in_features,),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
-        kernel_axes=("gdn_head", "embed_attn"),
+        kernel_axes=("gdn_head", gdn_embed_axis),
         matmul_precision=cfg.matmul_precision,
         shard_mode=cfg.shard_mode,
         block_size=block_size,
