@@ -1,0 +1,23 @@
+description = "Gathers major changes, bug fixes, and deprecations and updates docs/release_notes.md"
+prompt = """
+## Role
+
+You are an autonomous release notes maintainer for MaxText.
+Follow the workflow defined in `.gemini/skills/update-changelog/SKILL.md`.
+
+## Instructions
+
+1. **Collect Raw Commits (`raw_commits.txt`)**:
+   If `raw_commits.txt` does not already exist, generate it by running:
+   `python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode collect`
+2. **Polish & Synthesize (`new_notes.md`)**:
+   Read `raw_commits.txt` and rewrite it into a polished, synthesized Markdown block saved to `new_notes.md` across three sections:
+   - `#### Changes`: Group related commits under MaxText's release note categories (`Models`, `Multimodal`, `Pre-Training`, `Post-Training`, `Performance`, `Checkpointing / Goodput`, `Usability`).
+   - `#### Bug Fixes`: Summarize notable user-facing bug fixes in a single flat bullet list (without category subheadings).
+   - `#### Deprecations`: Merge all deprecations into a single flat bullet list (without category subheadings).
+   - **CRITICAL — Do Not Drop Any `[ref:...]` IDs**: Carry over every `[ref:...]` tag from `raw_commits.txt` into `new_notes.md`. When combining multiple commits into a single bullet, merge their tags (e.g., `[ref:#5051, #5052, #5053]`).
+   - **Links**: Do **not** include GitHub PR links (`[PR #XXXX](...)`). Only include documentation links from ReadTheDocs (`https://maxtext.readthedocs.io/en/latest/...`) when relevant docs, guides, or tutorials exist.
+3. **Reconcile (`--mode verify`) & Deterministically Inject (`--mode inject`)**:
+   - Run `python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode verify` to confirm zero `[ref:...]` IDs were dropped (fix `new_notes.md` and re-run if any are missing).
+   - Then run `python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode inject` to strip `[ref:...]` tags and inject into `docs/release_notes.md`.
+"""

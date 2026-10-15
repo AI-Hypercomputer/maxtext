@@ -20,7 +20,7 @@ import os
 import shutil
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -33,8 +33,9 @@ import numpy as np
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
-from maxtext.trainers.post_train.hooks import BaseTrainingHooks
+from maxtext.trainers.post_train.hooks import BaseDataHooks, BaseTrainingHooks
 from maxtext.common.metric_logger import MetricLogger
+from maxtext.utils import exceptions
 from maxtext.utils import maxtext_utils
 
 
@@ -43,6 +44,13 @@ class DummyTrainingHooks(BaseTrainingHooks):
 
   def get_total_weights(self, batch) -> jax.Array:
     return np.sum(batch["targets_segmentation"] != 0)
+
+
+class PreaveragedDummyTrainingHooks(DummyTrainingHooks):
+  """Models an objective that passes a weighted eval mean."""
+
+  def eval_loss_is_preaveraged(self) -> bool:
+    return True
 
 
 class BaseHooksTest(unittest.TestCase):
@@ -118,9 +126,73 @@ class BaseHooksTest(unittest.TestCase):
     self.assertAlmostEqual(metrics["eval/avg_perplexity"], np.exp(5.0), places=2)
     self.assertEqual(metrics["eval/total_weights"], jax.device_count() * self.config.max_target_length * total_eval_steps)
 
+  def test_preaveraged_eval_loss_is_not_divided_again(self):
+    training_hooks = PreaveragedDummyTrainingHooks(
+        self.config,
+        self.mesh,
+        self.learning_rate_schedule,
+        goodput_recorder=None,
+    )
+    training_hooks.metric_logger = MetricLogger(self.config, self.learning_rate_schedule)
+    training_hooks.metric_logger.metadata = defaultdict(float)
+    self.mock_train_ctx.data_hooks.eval_batch = self.expected_batch
+    self.mock_train_ctx.train_steps = 0
+    for _ in range(2):
+      training_hooks.on_eval_step_start(self.mock_train_ctx)
+
+    training_hooks.on_eval_step_end(self.mock_train_ctx, eval_loss=3.0)
+
+    metrics = self._read_logged_metrics(num_expected=1)[0]
+    self.assertAlmostEqual(metrics["eval/total_loss"], 3.0)
+    self.assertAlmostEqual(metrics["eval/avg_loss"], 3.0)
+    self.assertAlmostEqual(metrics["eval/avg_perplexity"], np.exp(3.0), places=2)
+
   def test_on_train_end_asserts_if_on_train_start_not_called(self):
     with self.assertRaises(AssertionError):
       self.training_hooks.on_train_end(self.mock_train_ctx)
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_load_next_train_batch_stop_iteration_returns_none(self, mock_create_data_iterator):
+    mock_train_iter = MagicMock()
+    mock_train_iter.__next__.side_effect = StopIteration()
+    mock_create_data_iterator.return_value = (mock_train_iter, None)
+
+    data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+    batch = data_hooks.load_next_train_batch(self.mock_train_ctx)
+    self.assertIsNone(batch)
+    self.assertIsNone(data_hooks.train_batch)
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_load_next_train_batch_propagates_unexpected_exception(self, mock_create_data_iterator):
+    mock_train_iter = MagicMock()
+    mock_train_iter.__next__.side_effect = IndexError("list index out of range")
+    mock_create_data_iterator.return_value = (mock_train_iter, None)
+
+    data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+    with self.assertRaises(exceptions.StopTraining) as cm:
+      data_hooks.load_next_train_batch(self.mock_train_ctx)
+    self.assertIsInstance(cm.exception.__cause__, IndexError)
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_load_next_eval_batch_stop_iteration_returns_none(self, mock_create_data_iterator):
+    mock_eval_iter = MagicMock()
+    mock_eval_iter.__next__.side_effect = StopIteration()
+    mock_create_data_iterator.return_value = (MagicMock(), mock_eval_iter)
+
+    data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+    batch = data_hooks.load_next_eval_batch(self.mock_train_ctx)
+    self.assertIsNone(batch)
+    self.assertIsNone(data_hooks.eval_batch)
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_load_next_eval_batch_propagates_unexpected_exception(self, mock_create_data_iterator):
+    mock_eval_iter = MagicMock()
+    mock_eval_iter.__next__.side_effect = RuntimeError("eval data stream failed")
+    mock_create_data_iterator.return_value = (MagicMock(), mock_eval_iter)
+
+    data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+    with self.assertRaises(RuntimeError):
+      data_hooks.load_next_eval_batch(self.mock_train_ctx)
 
 
 if __name__ == "__main__":

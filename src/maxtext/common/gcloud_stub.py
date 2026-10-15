@@ -314,6 +314,12 @@ def _goodput_stubs():
     def start_step_deviation_uploader(self):
       print("[DECOUPLED NO-OP] goodput step deviation uploader skipped.")
 
+    def start_rolling_window_goodput_uploader(self, *_a, **_k):
+      print("[DECOUPLED NO-OP] rolling window goodput uploader skipped.")
+
+    def stop_rolling_window_goodput_uploader(self, *_a, **_k):
+      print("[DECOUPLED NO-OP] rolling window goodput uploader stop skipped.")
+
   monitoring_ns = SimpleNamespace(GCPOptions=_StubMonitoringOptions, GoodputMonitor=_StubGoodputMonitor)
   goodput_ns = SimpleNamespace(GoodputRecorder=_StubGoodputRecorder)
   return goodput_ns, monitoring_ns, True

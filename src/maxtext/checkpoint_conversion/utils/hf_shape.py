@@ -704,15 +704,16 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
   vocab_size = config["vocab_size"]
   num_attention_heads = config["num_attention_heads"]
   num_key_value_heads = config["num_key_value_heads"]
-  num_experts = config["num_experts"]
+  num_experts = config.get("num_experts", 0) or 0
   head_dim = config["head_dim"]
   linear_conv_kernel_dim = config["linear_conv_kernel_dim"]
   linear_key_head_dim = config["linear_key_head_dim"]
   linear_value_head_dim = config["linear_value_head_dim"]
   linear_num_key_heads = config["linear_num_key_heads"]
   linear_num_value_heads = config["linear_num_value_heads"]
-  moe_intermediate_size = config["moe_intermediate_size"]
-  shared_expert_intermediate_size = config["shared_expert_intermediate_size"]
+  moe_intermediate_size = config.get("moe_intermediate_size", 0)
+  shared_expert_intermediate_size = config.get("shared_expert_intermediate_size", 0)
+  intermediate_size = config.get("intermediate_size", 0)
   cycle_interval = config["full_attention_interval"]
 
   # --- Calculated Values ---
@@ -776,27 +777,36 @@ def QWEN3_5_HF_WEIGHTS_TO_SHAPE(config):
           }
       )
 
-    # --- MLP Logic (MoE + Shared) ---
-    mapping.update(
-        {
-            # Router
-            f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
-            # Shared Experts (SwiGLU - Separate Weights)
-            f"{layer_prefix}.mlp.shared_expert.gate_proj.weight": [shared_expert_intermediate_size, hidden_size],
-            f"{layer_prefix}.mlp.shared_expert.up_proj.weight": [shared_expert_intermediate_size, hidden_size],
-            f"{layer_prefix}.mlp.shared_expert.down_proj.weight": [hidden_size, shared_expert_intermediate_size],
-            # Shared Expert Gate (learned scaling factor)
-            f"{layer_prefix}.mlp.shared_expert_gate.weight": [1, hidden_size],
-        }
-    )
+    if num_experts > 1:
+      # --- MLP Logic (MoE + Shared) ---
+      mapping.update(
+          {
+              # Router
+              f"{layer_prefix}.mlp.gate.weight": [num_experts, hidden_size],
+              # Shared Experts (SwiGLU - Separate Weights)
+              f"{layer_prefix}.mlp.shared_expert.gate_proj.weight": [shared_expert_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.shared_expert.up_proj.weight": [shared_expert_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.shared_expert.down_proj.weight": [hidden_size, shared_expert_intermediate_size],
+              # Shared Expert Gate (learned scaling factor)
+              f"{layer_prefix}.mlp.shared_expert_gate.weight": [1, hidden_size],
+          }
+      )
 
-    # --- Vectorized & Fused Routed Experts (No loop, no .weight suffix) ---
-    mapping.update(
-        {
-            f"{layer_prefix}.mlp.experts.gate_up_proj": [num_experts, 2 * moe_intermediate_size, hidden_size],
-            f"{layer_prefix}.mlp.experts.down_proj": [num_experts, hidden_size, moe_intermediate_size],
-        }
-    )
+      # --- Vectorized & Fused Routed Experts (No loop, no .weight suffix) ---
+      mapping.update(
+          {
+              f"{layer_prefix}.mlp.experts.gate_up_proj": [num_experts, 2 * moe_intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.experts.down_proj": [num_experts, hidden_size, moe_intermediate_size],
+          }
+      )
+    else:
+      mapping.update(
+          {
+              f"{layer_prefix}.mlp.gate_proj.weight": [intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.up_proj.weight": [intermediate_size, hidden_size],
+              f"{layer_prefix}.mlp.down_proj.weight": [hidden_size, intermediate_size],
+          }
+      )
 
   return mapping
 
@@ -1174,106 +1184,137 @@ def QWEN3_VL_HF_WEIGHTS_TO_SHAPE(config):
 
 
 def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
-  """Returns a dictionary mapping HuggingFace weight names to shapes for DeepSeek V4."""
+  """Returns the HuggingFace parameter shapes for DeepSeek V4."""
   hidden_size = config["hidden_size"]
   vocab_size = config["vocab_size"]
   num_hidden_layers = config["num_hidden_layers"]
   q_lora_rank = config.get("q_lora_rank", 1024)
-  kv_lora_rank = config.get("kv_lora_rank", 512)
-  # MaxText scales o_lora_rank by o_groups to get o_a_out_features (8192)
   o_lora_rank = config.get("o_lora_rank", 1024) * config.get("o_groups", 8)
   num_attention_heads = config["num_attention_heads"]
   head_dim = config["head_dim"]
-
   moe_intermediate_size = config["moe_intermediate_size"]
   n_routed_experts = config["n_routed_experts"]
-
-  # Dynamic hyperparameters replacing hardcoded literals:
-  hc_mult = config.get("hc_mult", 4)
-  hc_dim = (2 * hc_mult) + (hc_mult**2)  # 2(4) + 16 = 24
-  num_hash_layers = config.get("num_hash_layers", 3)  # 3
-  index_n_heads = config.get("index_n_heads", 64)  # 64
-  index_head_dim = config.get("index_head_dim", 128)  # 128
+  hc_mult = config.get("hc_mult", config.get("mhc_expansion_rate", 4))
+  hc_dim = (2 * hc_mult) + (hc_mult**2)
+  num_hash_layers = config.get("num_hash_layers", config.get("first_num_hash_layers", 3))
+  index_n_heads = config.get("index_n_heads", config.get("indexer_n_heads", 64))
+  index_head_dim = config.get("index_head_dim", config.get("indexer_head_dim", 128))
 
   mapping = {
-      "model.embed_tokens.weight": [vocab_size, hidden_size],
-      "model.norm.weight": [hidden_size],
+      "embed.weight": [vocab_size, hidden_size],
+      "norm.weight": [hidden_size],
       "head.weight": [vocab_size, hidden_size],
-      "model.hc_head.hc_fn": [hc_mult, hidden_size * hc_mult],
-      "model.hc_head.hc_base": [hc_mult],
-      "model.hc_head.hc_scale": [1],
+      "hc_head_fn": [hc_mult, hidden_size * hc_mult],
+      "hc_head_base": [hc_mult],
+      "hc_head_scale": [1],
   }
 
-  for layer_idx in range(num_hidden_layers):
-    layer_prefix = f"model.layers.{layer_idx}"
-    layer_mapping = {
-        f"{layer_prefix}.input_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.post_attention_layernorm.weight": [hidden_size],
-        f"{layer_prefix}.self_attn.q_a_proj.weight": [q_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.q_a_norm.weight": [q_lora_rank],
-        f"{layer_prefix}.self_attn.q_b_proj.weight": [num_attention_heads * head_dim, q_lora_rank],
-        f"{layer_prefix}.self_attn.kv_proj.weight": [kv_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.kv_norm.weight": [kv_lora_rank],
-        f"{layer_prefix}.self_attn.sinks": [num_attention_heads],
-        f"{layer_prefix}.self_attn.o_a_proj.weight": [o_lora_rank, hidden_size],
-        f"{layer_prefix}.self_attn.o_b_proj.weight": [hidden_size, o_lora_rank],
-        # MHC
-        f"{layer_prefix}.attn_hc.fn": [hc_dim, hidden_size * hc_mult],
-        f"{layer_prefix}.attn_hc.base": [hc_dim],
-        f"{layer_prefix}.attn_hc.scale": [num_hash_layers],
-        f"{layer_prefix}.ffn_hc.fn": [hc_dim, hidden_size * hc_mult],
-        f"{layer_prefix}.ffn_hc.base": [hc_dim],
-        f"{layer_prefix}.ffn_hc.scale": [num_hash_layers],
-        # MLP / MoE Block
-        f"{layer_prefix}.mlp.gate.weight": [n_routed_experts, hidden_size],
-        f"{layer_prefix}.mlp.gate.e_score_correction_bias": [n_routed_experts],
-        f"{layer_prefix}.mlp.shared_experts.gate_proj.weight": [moe_intermediate_size, hidden_size],
-        f"{layer_prefix}.mlp.shared_experts.up_proj.weight": [moe_intermediate_size, hidden_size],
-        f"{layer_prefix}.mlp.shared_experts.down_proj.weight": [hidden_size, moe_intermediate_size],
+  def _compressor_shapes(comp_prefix, comp_dim, norm_dim, r):
+    return {
+        f"{comp_prefix}.wgate.weight": [comp_dim, hidden_size],
+        f"{comp_prefix}.wkv.weight": [comp_dim, hidden_size],
+        f"{comp_prefix}.norm.weight": [norm_dim],
+        f"{comp_prefix}.ape": [r, comp_dim],
     }
 
-    # Experts
-    for e in range(n_routed_experts):
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w1.weight"] = [moe_intermediate_size, hidden_size]
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w3.weight"] = [moe_intermediate_size, hidden_size]
-      layer_mapping[f"{layer_prefix}.mlp.experts.{e}.w2.weight"] = [hidden_size, moe_intermediate_size]
+  def _layer_shapes(layer_prefix, is_hash, ratio):
+    """Returns the HF shapes for one DeepSeek-V4 transformer layer under `layer_prefix`.
 
-    # Compressors
-    if layer_idx >= 2:
-      c_type = "csa" if (layer_idx % 2 == 0) else "hca"
-      if c_type == "csa":
-        layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.kv_proj.weight": [1024, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.gate_proj.weight": [1024, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.position_bias": [4, 1024],
-                f"{layer_prefix}.self_attn.compressor.kv_norm.weight": [512],
-            }
-        )
-        layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.indexer.gate_proj.weight": [256, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.kv_proj.weight": [256, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.q_b_proj.weight": [
-                    index_n_heads * index_head_dim,
-                    q_lora_rank,
-                ],
-                f"{layer_prefix}.self_attn.compressor.indexer.scorer.weights_proj.weight": [index_n_heads, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.indexer.position_bias": [4, 256],
-                f"{layer_prefix}.self_attn.compressor.indexer.kv_norm.weight": [128],
-            }
-        )
-      else:  # hca
-        layer_mapping.update(
-            {
-                f"{layer_prefix}.self_attn.compressor.kv_proj.weight": [512, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.gate_proj.weight": [512, hidden_size],
-                f"{layer_prefix}.self_attn.compressor.position_bias": [128, 512],
-                f"{layer_prefix}.self_attn.compressor.kv_norm.weight": [512],
-            }
-        )
+    Args:
+      layer_prefix: HF key prefix, e.g. `layers.3` or `mtp.0`.
+      is_hash: Whether the layer uses hash routing (emits `tid2eid` instead of a gate bias).
+      ratio: Compression ratio; 0 means the layer has no compressor weights.
+    """
+    layer_mapping = {
+        f"{layer_prefix}.attn_norm.weight": [hidden_size],
+        f"{layer_prefix}.ffn_norm.weight": [hidden_size],
+        f"{layer_prefix}.attn.wq_a.weight": [q_lora_rank, hidden_size],
+        f"{layer_prefix}.attn.q_norm.weight": [q_lora_rank],
+        f"{layer_prefix}.attn.wq_b.weight": [num_attention_heads * head_dim, q_lora_rank],
+        f"{layer_prefix}.attn.wkv.weight": [
+            config.get("num_key_value_heads", 1) * config.get("head_dim", 64),
+            hidden_size,
+        ],
+        f"{layer_prefix}.attn.kv_norm.weight": [head_dim],
+        f"{layer_prefix}.attn.attn_sink": [num_attention_heads],
+        f"{layer_prefix}.attn.wo_a.weight": [
+            o_lora_rank,
+            (num_attention_heads * head_dim) // config.get("o_groups", 8),
+        ],
+        f"{layer_prefix}.attn.wo_b.weight": [hidden_size, o_lora_rank],
+        f"{layer_prefix}.hc_attn_fn": [hc_dim, hidden_size * hc_mult],
+        f"{layer_prefix}.hc_attn_base": [hc_dim],
+        f"{layer_prefix}.hc_attn_scale": [3],
+        f"{layer_prefix}.hc_ffn_fn": [hc_dim, hidden_size * hc_mult],
+        f"{layer_prefix}.hc_ffn_base": [hc_dim],
+        f"{layer_prefix}.hc_ffn_scale": [3],
+        f"{layer_prefix}.ffn.gate.weight": [n_routed_experts, hidden_size],
+        f"{layer_prefix}.ffn.gate.bias": [n_routed_experts],
+    }
+    if is_hash:
+      layer_mapping[f"{layer_prefix}.ffn.gate.tid2eid"] = [vocab_size, config.get("num_experts_per_tok", 2)]
 
-    mapping.update(layer_mapping)
+    if ratio > 0:
+      comp_dim = 2 * head_dim if ratio == 4 else head_dim
+      layer_mapping.update(_compressor_shapes(f"{layer_prefix}.attn.compressor", comp_dim, head_dim, ratio))
+      if ratio == 4:
+        layer_mapping.update(
+            _compressor_shapes(f"{layer_prefix}.attn.indexer.compressor", 2 * index_head_dim, index_head_dim, ratio)
+        )
+        layer_mapping[f"{layer_prefix}.attn.indexer.weights_proj.weight"] = [index_n_heads, hidden_size]
+        layer_mapping[f"{layer_prefix}.attn.indexer.wq_b.weight"] = [index_n_heads * index_head_dim, q_lora_rank]
+
+    for exp_idx in range(n_routed_experts):
+      layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w1.weight"] = [moe_intermediate_size, hidden_size]
+      layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w2.weight"] = [hidden_size, moe_intermediate_size]
+      layer_mapping[f"{layer_prefix}.ffn.experts.{exp_idx}.w3.weight"] = [moe_intermediate_size, hidden_size]
+
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w1.weight"] = [moe_intermediate_size, hidden_size]
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w3.weight"] = [moe_intermediate_size, hidden_size]
+    layer_mapping[f"{layer_prefix}.ffn.shared_experts.w2.weight"] = [hidden_size, moe_intermediate_size]
+
+    return layer_mapping
+
+  compress_ratios = config["compress_ratios"]
+  for layer_idx in range(num_hidden_layers):
+    mapping.update(
+        _layer_shapes(
+            f"layers.{layer_idx}",
+            is_hash=layer_idx < num_hash_layers,
+            ratio=compress_ratios[layer_idx],
+        )
+    )
+
+  # Multi-Token Prediction heads. Each MTP depth owns a full DeepSeek-V4 decoder layer,
+  # built as DeepSeek4DecoderLayer(compress_ratio=0, is_hash_routing=False), so it has
+  # neither compressor weights nor hash routing but does carry a MoE gate bias. On top of
+  # that it has its own norms, a fused input projection and a hyper-connection head.
+  mtp_num_layers = config.get(
+      "num_nextn_predict_layers",
+      config.get("num_mtp_layers", config.get("mtp_num_layers", 0)),
+  )
+  for mtp_idx in range(mtp_num_layers):
+    mtp_prefix = f"mtp.{mtp_idx}"
+    mapping.update(_layer_shapes(mtp_prefix, is_hash=False, ratio=0))
+    mapping.update(
+        {
+            f"{mtp_prefix}.enorm.weight": [hidden_size],
+            f"{mtp_prefix}.hnorm.weight": [hidden_size],
+            f"{mtp_prefix}.norm.weight": [hidden_size],
+            f"{mtp_prefix}.e_proj.weight": [hidden_size, hidden_size],
+            f"{mtp_prefix}.h_proj.weight": [hidden_size, hidden_size],
+            # MaxText fuses these two into a single [2 * emb, emb] kernel, so the export
+            # splits one MaxText param into two HF params via this composite key.
+            (f"{mtp_prefix}.e_proj.weight", f"{mtp_prefix}.h_proj.weight"): (
+                [hidden_size, hidden_size],
+                [hidden_size, hidden_size],
+            ),
+            f"{mtp_prefix}.hc_head_fn": [hc_mult, hidden_size * hc_mult],
+            f"{mtp_prefix}.hc_head_base": [hc_mult],
+            f"{mtp_prefix}.hc_head_scale": [1],
+        }
+    )
+
   return mapping
 
 
@@ -1316,6 +1357,7 @@ HF_SHAPE = {
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x22b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,
+    "qwen3.5-9b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-a3b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.5-35b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,

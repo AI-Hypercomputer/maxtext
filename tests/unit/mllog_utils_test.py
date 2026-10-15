@@ -118,6 +118,7 @@ def make_config(**overrides):
       "enable_mllog": True,
       "mllog_file": "",
       "run_name": "unit-test-run",
+      "model_name": "deepseek3-671b",
       "data_shuffle_seed": 1234,
       "steps": 12000,
       "global_batch_size_to_train_on": 16384,
@@ -296,7 +297,63 @@ class MllogUtilsTest(unittest.TestCase):
     self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM), "bfloat16")
     self.assertEqual(self.mllogger.value_of(_CONSTANTS.EXPERT_PARALLELISM), 8)
     self.assertEqual(self.mllogger.value_of(_CONSTANTS.MICRO_BATCH_SIZE), 2)
-    self.assertEqual(self.mllogger.value_of(_CONSTANTS.CONFIG_FILENAME), "config.yml")
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.CONFIG_FILENAME), "deepseek3-671b.yml")
+
+  def test_init_print_lineage(self):
+    """Lineage EP/TP come from its axis rules, fp8 from lineage_quantization."""
+    config = self.setup_local(
+        model_name="deepseek3-671b-lineage",
+        use_lineage=True,
+        quantization="",
+        lineage_quantization="fp8_full",
+        grad_dtype="bfloat16",
+        ici_expert_parallelism=1,
+        # The 8192-chip mesh of deepseek3-671b-lineage.yml + the launcher.
+        mesh_axes=["dcn", "x", "y", "z", "core"],
+        ici_parallelism=[1, 4, 4, 64, 2],
+        dcn_parallelism=[8, 1, 1, 1, 1],
+        logical_axis_rules=(
+            ("exp", ("x", "y", "core")),
+            ("activation_length", ("core",)),
+        ),
+    )
+    mllog_utils.init_print(config)
+
+    expected = {
+        _CONSTANTS.EXPERT_PARALLELISM: 32,
+        _CONSTANTS.TENSOR_PARALLELISM: 2,
+        _CONSTANTS.CONTEXT_PARALLELISM: 1,
+        _CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_LINEAR: "fp8",
+        _CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM: "fp8",
+        _CONSTANTS.CONFIG_FILENAME: "deepseek3-671b-lineage.yml",
+    }
+    for key, value in expected.items():
+      self.assertEqual(self.mllogger.value_of(key), value, key)
+
+  def test_init_print_comm_precision_includes_quantized_token_all_gather(self):
+    config = self.setup_local(moe_quantize_token_all_gather=True)
+    mllog_utils.init_print(config)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM), "fp8")
+
+    # Without EP > 1, the token all-gather does not run, so comm precision stays at grad/dtype precision.
+    self.mllogger.events.clear()
+    config_ep1 = make_config(
+        mllog_file=config.mllog_file,
+        moe_quantize_token_all_gather=True,
+        ici_expert_parallelism=1,
+    )
+    mllog_utils.init_print(config_ep1)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM), "bfloat16")
+
+    # With fp32 grad_dtype and unquantized token all-gather, comm precision is fp32.
+    self.mllogger.events.clear()
+    config_fp32 = make_config(
+        mllog_file=config.mllog_file,
+        moe_quantize_token_all_gather=False,
+        grad_dtype="float32",
+    )
+    mllog_utils.init_print(config_fp32)
+    self.assertEqual(self.mllogger.value_of(_CONSTANTS.LOWEST_NUMERICAL_PRECISION_IN_COMM), "fp32")
 
   def test_disabled_config_emits_nothing(self):
     config = make_config(enable_mllog=False)

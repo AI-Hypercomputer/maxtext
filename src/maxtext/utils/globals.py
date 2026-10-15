@@ -88,14 +88,15 @@ HF_IDS = {
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
     "qwen3.5-35b-a3b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",
     "qwen3.5-35b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",
+    "qwen3.5-9b": "Qwen/Qwen3.5-9B",
     "mixtral-8x7b": "mistralai/Mixtral-8x7B-Instruct-v0.1",
     "mistral-7b": "mistralai/Mistral-7B-v0.1",
     "mixtral-8x22b": "mistralai/Mixtral-8x22B-Instruct-v0.1",
     "olmo3-7b": "allenai/Olmo-3-7B-Instruct",
     "olmo3-7b-pt": "allenai/Olmo-3-1025-7B",
     "olmo3-32b": "allenai/Olmo-3-32B-Think",
-    "cosmos3-nano-reasoner": "nvidia/Cosmos3-Nano",
-    "cosmos3-super-reasoner": "nvidia/Cosmos3-Super",
+    "weaver-mini": "Qwen/Qwen3-VL-4B-Instruct",
+    "weaver-max": "Qwen/Qwen3-VL-8B-Instruct",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }

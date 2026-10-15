@@ -1,2 +1,3 @@
 -r requirements.txt
+flax>=0.12.10
 transformer-engine[jax]

@@ -13,4 +13,4 @@
 # limitations under the License.
 """Megablox kernel"""
 
-from maxtext.kernels.megablox.ops import gmm
+from maxtext.kernels.megablox.ops import TcUnsortCfg, gmm

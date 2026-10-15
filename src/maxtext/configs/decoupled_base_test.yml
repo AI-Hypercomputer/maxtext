@@ -4,6 +4,8 @@
 base_config: base.yml
 
 # Output goes to a local relative directory so tests do not require GCS.
+# Tests that call get_test_base_output_directory() write to a per-process
+# subdirectory of this root instead; only tests that rely on this default share it.
 base_output_directory: ./maxtext_local_output/gcloud_decoupled_test_logs
 run_name: test_decoupled
 
@@ -70,5 +72,3 @@ monitor_goodput: false
 goodput_upload_interval_seconds: 0
 enable_pathways_goodput: false
 enable_gcp_goodput_metrics: false
-
-tensorboard_dir: "./maxtext_local_output/gcloud_decoupled_test_logs/tensorboard"

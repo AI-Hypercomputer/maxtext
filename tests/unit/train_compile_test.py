@@ -428,6 +428,65 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_moe_x_sorted_device(self):
+    """moe_x_sorted=device under the custom remat policy on the ring-of-experts sparse_matmul path."""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_x_sorted_device.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-16",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-test",
+            "ici_expert_parallelism=4",
+            "sparse_matmul=True",
+            "megablox=True",
+            "per_device_batch_size=4",
+            "max_target_length=128",
+            "use_ring_of_experts=True",
+            "use_random_routing=True",
+            "attention=flash",
+            "dtype=bfloat16",
+            "remat_policy=custom",
+            "moe_x_sorted=device",
+        )
+    )
+
+  def test_moe_x_sorted_rejects_emb_chunking(self):
+    """moe_x_sorted != remat is rejected with num_moe_emb_chunks > 0, whose path does not tag the routed input."""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_x_sorted_emb_chunking.pickle")
+    with self.assertRaisesRegex(ValueError, "moe_x_sorted=device is not supported with num_moe_emb_chunks"):
+      train_compile_main(
+          (
+              "",
+              get_test_config_path(),
+              f"compiled_trainstep_file={compiled_trainstep_file}",
+              "compile_topology=v5p-8",
+              "use_iota_embed=true",
+              "compile_topology_num_slices=1",
+              "model_name=deepseek3-test",
+              "ici_expert_parallelism=4",
+              "sparse_matmul=True",
+              "megablox=False",
+              "use_tokamax_gmm=True",
+              "use_gmm_v2=True",
+              "num_moe_emb_chunks=7",
+              "use_ring_of_experts=True",
+              "per_device_batch_size=2",
+              "max_target_length=1024",
+              "attention=flash",
+              "dtype=bfloat16",
+              "weight_dtype=bfloat16",
+              "scan_layers=True",
+              "remat_policy=custom",
+              "moe_x_sorted=device",
+          )
+      )
+
   def test_moe_ragged_dot_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
