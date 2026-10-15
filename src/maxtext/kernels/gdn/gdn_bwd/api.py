@@ -25,6 +25,7 @@ import jax.numpy as jnp
 from .. import compute_conv1d as local_compute_conv1d
 from .. import wrapper as local_gdn_wrapper
 from . import cp_gdn
+from . import dh_scan
 from .compute_conv1d_bwd import conv1d_silu_bwd
 from .compute_conv1d_bwd import conv1d_silu_fwd
 from .jax_compute_gdn_states import _compute_forward_conv_and_states
@@ -509,24 +510,43 @@ def _run_cp_gdn_decoupled_fwd_impl(
       conv_halo_seg=conv_halo_seg,
       output_dtype=jnp.float32,
   )
-  m_local, s_ext_local = cp_gdn.compose_local_from_t_inv(
-      qkv_conv=k_conv,
-      b=b,
-      a=a,
-      a_log=a_log,
-      dt_bias=dt_bias,
-      t_inv=t_inv,
-      num_k_heads=num_k_heads,
-      num_v_heads=num_v_heads,
-      head_k_dim=head_k_dim,
-      head_v_dim=head_v_dim,
-      chunk_size=chunk_size,
-      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-      s_ext_pass1=states_pass1[1],
-      segment_ids=s_enc_local,
-      init_seg=init_seg,
-      precision=cp_matmul_precision,
-  )
+  if target_platform(qkv) == "tpu" and cp_matmul_precision == jax.lax.Precision.HIGH:
+    # The same chunk transitions as compose_local_from_t_inv at the same 3-pass precision, multiplied in
+    # sequence in a Pallas scan instead of XLA's HBM-bound tree of f32 [chunks, heads, d_k, d_k] products.
+    m_local = dh_scan.gdn_cp_m_scan(
+        k_conv,
+        b,
+        a,
+        a_log,
+        dt_bias,
+        t_inv,
+        num_v_heads=num_v_heads,
+        kq_head_dim=head_k_dim,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        segment_ids=s_enc_local,
+        init_seg=init_seg,
+    )
+    s_ext_local = states_pass1[1].astype(jnp.float32)
+  else:
+    m_local, s_ext_local = cp_gdn.compose_local_from_t_inv(
+        qkv_conv=k_conv,
+        b=b,
+        a=a,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        t_inv=t_inv,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        s_ext_pass1=states_pass1[1],
+        segment_ids=s_enc_local,
+        init_seg=init_seg,
+        precision=cp_matmul_precision,
+    )
   m_local = checkpoint_name(m_local, "gdn_cp_m_local")
 
   h_init = recurrent_state.astype(jnp.float32) if recurrent_state is not None else zero_rs
