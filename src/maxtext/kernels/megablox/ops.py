@@ -1395,3 +1395,140 @@ def _drhs_run_megablox(
       interpret=interpret,
       varying_axes=rhs_vma_axes,
   )
+
+
+# ==============================================================================
+# GMM + SwiGLU: the activation in the gmm_v2 epilogue
+# ==============================================================================
+
+
+def gmm_silu(
+    lhs: jnp.ndarray,
+    rhs: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    preferred_element_type: jnp.dtype,
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
+    group_offset: jnp.ndarray | int | None = None,
+    use_gmm_v2_heuristic_tiling: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
+    fuse_dlhs_scale: bool = False,
+    fuse_3d_dlhs_ps: bool = False,
+) -> jnp.ndarray:
+  """silu(lhs @ gate) * (lhs @ up) per group, with the activation in the gmm_v2 epilogue.
+
+  `rhs` is the prefused [g, k, 2n] weight, gate = rhs[..., :n] and up = rhs[..., n:]. The unfused path writes
+  the [m, 2n] GMM output and runs the activation over every row in a separate elementwise pass; here the kernel
+  applies it to the f32 accumulator of the rows it computes and writes [m, n].
+
+  Numerics: the activation reads the f32 accumulator instead of its bf16 rounding, so `act` differs from the
+  unfused value by rounding (it is the more precise of the two). The backward is the unfused one: it takes
+  gate and up rounded exactly as the unfused GMM rounds its output (the kernel writes them next to act when
+  differentiated), the SwiGLU VJP of `jax.nn.silu(gate) * up`, and the unchanged tokamax gmm_v2 DLHS / TGMM
+  DRHS of `gmm`.
+
+  Only the bf16 tokamax gmm_v2 path: no quantization, no partial_sum, no return_lhs / return_rhs, 2D lhs and
+  output, rhs not transposed. tiling is gmm's 9-tuple; the fused kernel's tile_n counts the columns of each
+  half, so tiling[2] is halved and every grid step does the unfused kernel's MXU work in the same VMEM.
+  """
+  if isinstance(lhs, qpl.QArray) or isinstance(rhs, qpl.QArray) or lhs.ndim != 2 or rhs.ndim != 3:
+    raise NotImplementedError("gmm_silu: plain 2D lhs and [g, k, 2n] rhs only.")
+  return _gmm_silu(
+      lhs,
+      rhs,
+      group_sizes,
+      group_offset,
+      preferred_element_type,
+      tuple(tiling),
+      use_gmm_v2_heuristic_tiling,
+      use_dlhs_transpose_rhs,
+      fuse_dlhs_scale,
+      fuse_3d_dlhs_ps,
+  )
+
+
+def _gmm_silu_kernel(lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, return_pre_act):
+  """The fused forward: act, or (act, gate, up) with return_pre_act."""
+  if heuristic:
+    tile_info = gmm_v2.calculate_tiling
+  else:
+    half_n = rhs.shape[-1] // 2
+    tile_n = min(tiling[2], rhs.shape[-1]) // 2
+    if tiling[2] % 2 or (tile_n % 128 and tile_n != half_n):
+      raise ValueError(f"gmm_silu: fwd tile_n {tiling[2]} must halve to a multiple of 128 (or to n={half_n}).")
+    tile_info = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tile_n)
+  return gmm_v2.gmm_v2(
+      lhs=lhs,
+      rhs=rhs,
+      group_sizes=group_sizes,
+      tile_info=tile_info,
+      preferred_element_type=preferred_element_type,
+      group_offset=group_offset,
+      fuse_act="silu",
+      return_pre_act=return_pre_act,
+  )
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(4, 5, 6, 7, 8, 9))
+def _gmm_silu(
+    lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d
+):
+  # Not differentiated: the activation alone, nothing else is written.
+  del dlhs_transpose, fuse_scale, fuse_3d
+  return _gmm_silu_kernel(lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, False)
+
+
+def _gmm_silu_fwd(
+    lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d
+):
+  """Differentiated: the kernel also writes gate and up, the residuals of the unfused backward."""
+  del dlhs_transpose, fuse_scale, fuse_3d
+  act, gate, up = _gmm_silu_kernel(lhs, rhs, group_sizes, group_offset, preferred_element_type, tiling, heuristic, True)
+  return act, (lhs, rhs, group_sizes, group_offset, gate, up)
+
+
+def _swiglu(gate, up):
+  """MaxText's MoE activation on the GMM output (`apply_ffn_activation`, mlp_activations silu + linear)."""
+  return (jax.nn.silu(gate) * up).astype(gate.dtype)
+
+
+def _gmm_silu_bwd(preferred_element_type, tiling, heuristic, dlhs_transpose, fuse_scale, fuse_3d, residual, dact):
+  """The unfused backward from the saved bf16 gate and up: the SwiGLU VJP, then gmm's DLHS / TGMM."""
+  lhs, rhs, group_sizes, group_offset, gate, up = residual
+  # The unfused backward: the SwiGLU VJP on the bf16 GMM output, then gmm's own backward on [d gate | d up].
+  _, swiglu_vjp = jax.vjp(_swiglu, gate, up)
+  dgate, dup = swiglu_vjp(dact.astype(gate.dtype))
+  grad = jnp.concatenate([dgate, dup], axis=-1)
+  # gmm's own backward, as gmm's custom VJP calls it for a plain bf16 tokamax gmm_v2 GMM (no quantization, no
+  # partial sum, no returned operands), with this op's DLHS options.
+  dlhs, drhs, *_ = _gmm_bwd(
+      lhs_dtype=lhs.dtype,
+      rhs_dtype=rhs.dtype,
+      preferred_element_type=preferred_element_type,
+      tiling=tiling,
+      transpose_rhs=False,
+      interpret=False,  # the megablox backend only
+      quantization_rule=None,
+      use_tokamax_backend=True,
+      weight_gather_axes=None,
+      use_manual_quantization=False,
+      lhs_vma_axes=(),
+      rhs_vma_axes=(),
+      use_gmm_v2=True,
+      use_gmm_v2_heuristic_tiling=heuristic,
+      return_rhs=False,
+      return_lhs=False,
+      fuse_dlhs_scale=fuse_scale,
+      use_dlhs_transpose_rhs=dlhs_transpose,
+      flat_fsdp_shard=None,
+      out_is_3d=False,
+      fuse_3d_dlhs_ps=fuse_3d,
+      tc_unsort_cfg=None,
+      # (lhs, rhs, group_sizes, group_offset, partial_sum_fwd, lhs_is_qarray, rhs_is_qarray, tc_routing)
+      residual=(lhs, rhs, group_sizes, group_offset, None, False, False, None),
+      # (d out, d returned lhs, d returned rhs)
+      grad=(grad, None, None),
+  )
+  return dlhs, drhs, None, None
+
+
+_gmm_silu.defvjp(_gmm_silu_fwd, _gmm_silu_bwd)

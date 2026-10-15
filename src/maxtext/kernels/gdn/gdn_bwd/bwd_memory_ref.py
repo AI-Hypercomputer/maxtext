@@ -29,8 +29,12 @@ def make_bwd_block_specs(
     padded_num_v_heads: int | None = None,
     has_dht: bool = False,
     has_dh0: bool = False,
+    has_t_inv: bool = True,
 ) -> Tuple[list[pl.BlockSpec], list[pl.BlockSpec], int, int]:
-  """Constructs reverse-scan Pallas emit_pipeline in_specs and out_specs for GDN backward."""
+  """Constructs reverse-scan Pallas emit_pipeline in_specs and out_specs for GDN backward.
+
+  With `has_t_inv=False` (t_inv recomputed in-kernel) the t_inv input spec is omitted.
+  """
   if padded_num_v_heads is None:
     padded_num_v_heads = ((num_v_heads + 127) // 128) * 128
 
@@ -63,11 +67,16 @@ def make_bwd_block_specs(
           (None, None, None, num_v_heads, kq_head_dim, v_head_dim),
           lambda b, g, c: (b, g, rc(c), 0, 0, 0),
       ),
-      # 5: t_inv [B, G, C, num_v_heads, chunk_size, chunk_size]
-      pl.BlockSpec(
-          (None, None, None, num_v_heads, chunk_size, chunk_size),
-          lambda b, g, c: (b, g, rc(c), 0, 0, 0),
-      ),
+  ]
+  if has_t_inv:
+    in_specs.append(
+        # 5: t_inv [B, G, C, num_v_heads, chunk_size, chunk_size]
+        pl.BlockSpec(
+            (None, None, None, num_v_heads, chunk_size, chunk_size),
+            lambda b, g, c: (b, g, rc(c), 0, 0, 0),
+        )
+    )
+  in_specs += [
       # 6: a_log [B, G, 1, padded_num_v_heads]
       pl.BlockSpec(
           (None, None, 1, padded_num_v_heads),

@@ -69,6 +69,7 @@ def create_gdn_config(
       use_gdn_kernel=True,
       enable_gdn_sequence_packing=enable_gdn_sequence_packing,
       gdn_cp_mode=gdn_cp_mode,
+      gdn_conv1d_input_in_qkv_dtype=False,
       load_balance_loss_weight=0.0,
       scan_layers=False,
       using_pipeline_parallelism=False,

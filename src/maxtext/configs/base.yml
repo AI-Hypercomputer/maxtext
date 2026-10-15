@@ -321,6 +321,17 @@ log_moe_drops: false # drop audit: sow moe_dropped_assignments / moe_max_load_ra
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 prefuse_moe_weights: false # whether to pre-fuse MoE weights (wi_0 and wi_1 into wi) during initialization
+# With prefuse_moe_weights on the sparse-matmul training path: keep wi = [w0 | w1] one tensor through the fp8
+# fake-quant, the FSDP all-gather and the prefetch barrier into the up-projection GEMM (no split + concatenate).
+moe_unsplit_prefused_wi: false
+# With prefuse_moe_weights on the sparse-matmul path: the activation on the whole [gate | up] up-projection output as
+# one custom-VJP op whose backward writes d[gate | up] in one pass. Same values.
+moe_prefused_swiglu_vjp: false
+# The MoE SwiGLU in the wi GMM epilogue (megablox gmm_silu, tokamax gmm_v2): the forward kernel writes the
+# [buffer, mlp] activation instead of the [buffer, 2 * mlp] GMM output (differentiated: act, gate and up, i.e.
+# [buffer, 3 * mlp]). Numerics change: silu reads the float32 accumulator.
+# Needs prefuse_moe_weights, use_tokamax_gmm and use_gmm_v2, silu+linear without clipping, no bias or quantization.
+moe_wi_gmm_fused_swiglu: false
 fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference/rollout
 # Keep routed-expert weights in weight_dtype but round them in the forward pass to the per-channel FP8 grid
 # fp8_moe stores them on, with straight-through gradients: the trainer computes with the rollout's weights.
@@ -334,6 +345,12 @@ use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backw
 router_topk_matmul_vjp: false # deepseek routing: dense one-hot VJP for the top-k weight gather (no scatter-add in the backward)
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
 ring_of_experts_local_routing: false # ring of experts: route each shard's own tokens, then all-gather only the top-k expert ids and weights (not the router logits)
+# With ring_of_experts_local_routing + moe_chunk_pipeline: route every token chunk once and all-gather ids + weights as
+# ONE float32 array per layer (tagged moe_routing_maps) instead of two gathers per chunk. Same routing.
+moe_roe_packed_routing_gather: false
+# Ring of experts with ragged sort: activation + down projection + unsort as one op whose backward reads the down
+# projection's input, not its output (no recomputed wo GEMM under remat). Numerics change: gradients to bf16 rounding.
+moe_router_grad_from_wo_input: false
 ring_of_experts_row_major_reduce_scatter: false # ring of experts: lay out the expert-parallel reduce-scatter input row-major in the forward pass, so XLA does not copy the combine output into another layout and the result back
 moe_topk_before_ep_all_gather: false # ring of experts: run top-k on local tokens and all-gather top-k weights/ids instead of router logits
 te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
@@ -355,6 +372,14 @@ moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
+# Ring-of-experts ragged sort routing index maps: 'sort' = two stable argsorts (default); 'count' = one packed
+# single-operand sort plus counting for the inverse (and argmax passes for the top-k of non-forced tokens under
+# router replay / padding exclusion). Same permutation, same values.
+# Needs sparse_matmul, use_ring_of_experts and use_ragged_sort (and te_moe_block=False).
+moe_routing_index_math: 'sort'
+# With moe_routing_index_math='sort': the ragged sort's argsorts (and the SparseCore gather-reduce validity sort) as
+# unstable two-operand sorts of unique (key, index) pairs instead of stable argsorts (three operands). Same values.
+moe_ragged_sort_unique_pair_argsort: false
 moe_tc_ragged_sort: false # ring-of-experts ragged sort/unsort on TensorCore (Pallas DMA kernels) instead of the SparseCore
                           # kernels; requires use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0.
 moe_tc_ragged_gather_block_size: 1024 # moe_tc_ragged_sort: rows per grid step of the TC ragged gather.
@@ -1613,6 +1638,17 @@ gdn_cp_mode: "auto"
 # ('highest' = 6 bf16 passes on TPU, 'high' = 3 passes). Only used with use_gdn_kernel: true and
 # sequence-sharded GDN CP (gdn_cp_mode 'seq', or 'auto' when it does not pick head sharding); a no-op otherwise.
 gdn_cp_matmul_precision: "highest"
+# GDN kernel path: build the Conv1D + SiLU halo-extended input [conv_state | qkv] in qkv's dtype and cast each tap
+# to float32 where it is read, instead of materializing a float32 copy of the whole input. Same values: the outputs
+# and the qkv, conv-state and bias gradients are bit-identical on CPU, the conv weight gradient matches up to float32
+# summation order. Requires use_gdn_kernel: true.
+gdn_conv1d_input_in_qkv_dtype: false
+# GDN kernel path: build the Pallas GDN forward kernel's Conv1D output from dense per-token [conv_dim / 1024, 8, 128]
+# views instead of jnp.stack (kernels/gdn/compute_conv1d.py). Same values; the October 2026 TPU compiler lays the
+# stacked value out with 7 of 8 sublanes as padding, so the SiLU after it runs on 8x the vector registers. Requires
+# use_gdn_kernel: true and a GDN Conv1D width (2 * key heads * key head dim + value heads * value head dim) that is
+# a multiple of 1024.
+gdn_conv1d_dense_token_stack: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

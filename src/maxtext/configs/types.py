@@ -1101,6 +1101,37 @@ class SplashAttention(BaseModel):
   )
 
 
+def _reject_unless(setting: str, requirements: list[tuple[bool, str]]) -> None:
+  """Raises a ValueError naming every requirement of `setting` that is not met.
+
+  Args:
+    setting: the setting being validated, as the user wrote it (e.g. "moe_unsplit_prefused_wi=True").
+    requirements: (met, requirement) pairs, `requirement` describing what `setting` needs.
+  """
+  unmet = [requirement for met, requirement in requirements if not met]
+  if unmet:
+    raise ValueError(f"{setting} requires: {'; '.join(unmet)}.")
+
+
+# The MLP checkpoint names that the remat_policy presets save or offload (Decoder.minimal_policy and get_remat_policy
+# in nnx_decoders.py, which point back here: keep the two in sync).
+# remat_policy=custom names them per tensor instead (mlpwi_0, mlpwo, moe_mlpwi_0, ... = device / offload).
+_REMAT_PRESET_MLP_NAMES = {
+    "minimal": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_with_context": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_flash": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_with_quantization": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_with_context_and_quantization": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "minimal_offloaded": ("mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo"),
+    "save_dot_except_mlpwi": ("mlpwo",),
+}
+# The checkpoint names of the routed experts' up-projection output in the sparse-matmul path: the gate half carries
+# mlpwi_0 and moe_mlpwi_0, the up half moe_mlpwi_1 (moe.py gmm_up).
+_MOE_UP_PROJECTION_NAMES = ("mlpwi_0", "moe_mlpwi_0", "moe_mlpwi_1")
+# ... and of its down-projection output: mlpwo and moe_mlpwo.
+_MOE_DOWN_PROJECTION_NAMES = ("mlpwo", "moe_mlpwo")
+
+
 class MoEGeneral(BaseModel):
   """General configuration for Mixture of Experts (MoE) layers."""
 
@@ -1372,6 +1403,38 @@ class MoEGeneral(BaseModel):
           " Requires use_ring_of_experts=True."
       ),
   )
+  moe_roe_packed_routing_gather: bool = Field(
+      False,
+      description=(
+          "With ring_of_experts_local_routing and moe_chunk_pipeline: route the layer's local tokens once (every"
+          " token chunk) and all-gather the top-k weights and expert ids as ONE float32 [batch, seq, 2*top_k] array"
+          " (ids are exact in float32), instead of two all-gathers (ids, weights) per token chunk: one SparseCore"
+          " offload per layer instead of 2 x num_moe_token_chunks, and one weight-gradient reduce-scatter instead of"
+          " one per chunk. Same routing; bit-identical with float32 routing weights (float32_weight_sum=True), while"
+          " bfloat16 weights get their cotangent reduce-scattered in float32. The per-chunk load-balance loss is"
+          " computed as without it. Tagged moe_routing_maps. Requires sparse_matmul=True, te_moe_block=False,"
+          " ring_of_experts_local_routing=True, moe_chunk_pipeline=True and use_random_routing=False (random routing"
+          " draws per call, so one draw for the layer differs from one per chunk)."
+      ),
+  )
+  moe_router_grad_from_wo_input: bool = Field(
+      False,
+      description=(
+          "Ring of Experts with the ragged sort: run the activation, the down projection (wo GEMM) and the unsort"
+          " as one op whose backward does not read the down projection's output. The routing-weight gradient"
+          " <g, h wo> is computed as <g wo^T, h> from the down projection's input and the routing weight is applied"
+          " on the [rows, mlp] side, so a rematerialized layer no longer recomputes the down-projection GEMM in the"
+          " backward, and the combine backward's pass over [rows, hidden] tensors moves to [rows, mlp] ones. The"
+          " forward is bit-identical. NUMERICS CHANGE: each gradient keeps one rounding to the activation dtype, at"
+          " a different point, so the gradients agree with the unfused ops to bf16 rounding, not bit for bit."
+          " Requires sparse_matmul=True, te_moe_block=False, use_ring_of_experts=True and use_ragged_sort=True, and"
+          " the down projection to be the bare GEMM of the sorted rows: no tensor parallelism, mlp_bias=False, no"
+          " weight quantization, moe_tc_ragged_sort, moe_accumulate_chunk_wgrad, moe_bwd_prequant_before_unsort and"
+          " moe_quantize_token_all_gather off, num_moe_emb_chunks=0; and a remat policy that does not save the routed"
+          " experts' down-projection output (mlpwo, moe_mlpwo; the minimal* and save_dot_except_mlpwi policies save"
+          " mlpwo): the fused op never forms it, so the policy would silently stop saving the MoE tensor."
+      ),
+  )
   ring_of_experts_row_major_reduce_scatter: bool = Field(
       False,
       description=(
@@ -1420,6 +1483,34 @@ class MoEGeneral(BaseModel):
   use_ragged_sort: bool = Field(
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
+  )
+  moe_routing_index_math: Literal["sort", "count"] = Field(
+      "sort",
+      description=(
+          "How the ring-of-experts ragged sort computes its routing index maps. 'sort' (default): the expert"
+          " permutation and its inverse by two stable argsorts. 'count': the permutation by one single-operand"
+          " packed uint32 sort (XLA lowers the stable argsort with an extra, duplicated iota operand); the sorted"
+          " token indices by division instead of a gather; the inverse permutation by counting, on this shard's"
+          " slots only, instead of a second argsort; the router-weight gradient back to slot order by a gather"
+          " instead of a scatter; the gather-reduce validity sort packed into one uint32 operand; and, for tokens"
+          " without forced ids under router replay or moe_exclude_padding_from_routing, the router's top-k indices"
+          " by k argmax passes instead of a sort. Exact: the same permutation, so the same outputs and gradients,"
+          " dropped tokens included. With moe_tc_ragged_sort, which replaces the ragged sort of the dropping program,"
+          " it applies to the dropless program's ragged sort only. Requires sparse_matmul=True, te_moe_block=False,"
+          " use_ring_of_experts=True and use_ragged_sort=True."
+      ),
+  )
+  moe_ragged_sort_unique_pair_argsort: bool = Field(
+      False,
+      description=(
+          "With moe_routing_index_math='sort': run the ring-of-experts ragged sort's argsorts (the expert"
+          " permutation, its inverse, and the SparseCore gather-reduce's validity sort) as unstable sorts of the"
+          " unique (key, index) pairs instead of stable argsorts. XLA lowers a stable jnp.argsort in the forward"
+          " pass with a third, duplicated iota operand; the pair sort has two operands and exactly one result, the"
+          " same permutation. Exact (same values). An alternative to moe_routing_index_math='count', which removes"
+          " these sorts instead. Requires sparse_matmul=True, te_moe_block=False, use_ring_of_experts=True,"
+          " use_ragged_sort=True and moe_routing_index_math='sort'."
+      ),
   )
   moe_quantize_combine_bwd_method: str | None = Field(
       "",
@@ -1627,6 +1718,53 @@ class MoEGeneral(BaseModel):
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
       "This enables a single FFN1 grouped GEMM in sparse MoE paths and passes fused weights directly in vllm_rpa mode.",
   )
+  moe_unsplit_prefused_wi: bool = Field(
+      False,
+      description=(
+          "With prefuse_moe_weights on the sparse-matmul training path: keep the prefused wi = [w0 | w1] one tensor"
+          " from the parameter to the up-projection GEMM, instead of slicing it into w0 and w1 at the layer entry and"
+          " concatenating the gathered halves back before the GEMM. One fp8 fake-quant (per output channel, so the"
+          " same values as rounding the halves), one FSDP all-gather, one operand through the expert-weight"
+          " prefetch barrier, and no post-gather concatenate. Exact (same values). Requires sparse_matmul=True,"
+          " te_moe_block=False, no weight quantization, an unsharded expert MLP dimension (tensor, tensor_sequence"
+          " and autoregressive parallelism 1), the default expert-weight sharding (not shard_exp_on_fsdp,"
+          " use_2d_fsdp_sharding, shard_embed_moe_on_fsdp, moe_flat_fsdp_weights or"
+          " moe_fsdp_use_two_stage_all_gather), num_moe_emb_chunks=0 and moe_accumulate_chunk_wgrad=False."
+      ),
+  )
+  moe_prefused_swiglu_vjp: bool = Field(
+      False,
+      description=(
+          "With prefuse_moe_weights on the sparse-matmul path: apply the MoE's gated activation (SwiGLU, or any"
+          " other mlp_activations pair, e.g. GPT-OSS's clipped form) to the whole [gate | up] up-projection output as"
+          " one custom-VJP op whose backward returns d[gate | up] as one array, computed by the same ops autodiff"
+          " emits. Split, the two [rows, mlp] cotangents leave their fusion separately and XLA concatenates them in"
+          " an extra full pass over the expert buffer. Exact (same values; the gradient bits can differ only in the"
+          " sign of an exact zero). An alternative to moe_wi_gmm_fused_swiglu for configurations that one does not"
+          " support (other GMM backends, other activations). Requires sparse_matmul=True, te_moe_block=False,"
+          " mlp_bias=False, num_moe_emb_chunks=0, and a remat policy that does not save the routed experts' gate or"
+          " up half (mlpwi_0, moe_mlpwi_0, moe_mlpwi_1; the minimal* policies save mlpwi_0): the fused activation"
+          " never forms them, so the policy would silently stop saving the MoE tensor."
+      ),
+  )
+  moe_wi_gmm_fused_swiglu: bool = Field(
+      False,
+      description=(
+          "Apply the MoE SwiGLU in the epilogue of the wi (up-projection) GMM (megablox ops.gmm_silu, the tokamax"
+          " gmm_v2 kernel with fuse_act): the forward kernel writes the [buffer, mlp] activation of the rows it"
+          " computes instead of the [buffer, 2 * mlp] GMM output that a separate elementwise pass reads back over every"
+          " buffer row, padding included. When differentiated it writes the activation and the gate and up halves"
+          " ([buffer, 3 * mlp] in all, gate and up rounded as the unfused GMM rounds its output), and the backward is"
+          " the unfused one. NUMERICS CHANGE: silu reads the float32 accumulator instead of its bfloat16 rounding (the"
+          " more precise value), so the activation differs by rounding. Requires prefuse_moe_weights=True,"
+          " sparse_matmul=True, te_moe_block=False, use_tokamax_gmm=True, use_gmm_v2=True, no weight quantization,"
+          " mlp_activations=['silu', 'linear'] without clipping, mlp_bias=False, num_moe_emb_chunks=0,"
+          " moe_flat_fsdp_weights, moe_tc_ragged_3d_gmm, moe_quantize_token_all_gather and moe_accumulate_chunk_wgrad"
+          " off, and a remat policy that does not save the routed experts' gate or up half (mlpwi_0, moe_mlpwi_0,"
+          " moe_mlpwi_1; the minimal* policies save mlpwi_0): the fused GMM never forms them, so the policy would"
+          " silently stop saving the MoE tensor."
+      ),
+  )
   fp8_moe: bool = Field(
       False,
       description="Whether MoE weights are quantized to float8_e4m3fn in inference/rollout.",
@@ -1688,6 +1826,206 @@ class MoEGeneral(BaseModel):
       raise ValueError(
           "Only one of shard_exp_on_fsdp, use_2d_fsdp_sharding, or "
           "shard_embed_moe_on_fsdp can be True at the same time."
+      )
+    return self
+
+  # The validators of the MoE performance keys below share one form: each lists (met, requirement) pairs and
+  # _reject_unless raises naming every unmet one. They read the fields of the other config mixins (sparse_matmul,
+  # mlp_bias, remat_policy, the parallelism degrees, ...) directly: they run on the combined configs (MaxTextConfig
+  # and RLConfig), which have all of them, so a renamed field fails loudly instead of passing the check.
+
+  def _prefused_sparse_matmul_requirements(self) -> list[tuple[bool, str]]:
+    """What the MoE layer needs to run the prefused [w0 | w1] sparse-matmul up projection in training."""
+    return [
+        (self.prefuse_moe_weights, "prefuse_moe_weights=True"),
+        (self.sparse_matmul, "sparse_matmul=True"),
+        (not self.te_moe_block, "te_moe_block=False"),
+        (
+            self.attention not in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"),
+            "an attention other than vllm_rpa* (the fused-MoE inference path)",
+        ),
+    ]
+
+  def _no_weight_quantization_requirement(self) -> tuple[bool, str]:
+    return (not self.quantization and not self.use_qwix_quantization, "no weight quantization")
+
+  def _remat_keeps_moe_tensor_requirement(self, tensor: str, names: tuple[str, ...]) -> tuple[bool, str]:
+    """Requirement: the remat policy saves none of `names`, the checkpoint names of the routed experts' `tensor`.
+
+    The keys that ask for this never form that tensor (it is fused into the op that reads it), so a policy that
+    saves or offloads it would silently stop saving the MoE tensor; the shared expert's dense MLP, which carries the
+    generic names (mlpwi_0, mlpwo) too, would still be saved.
+    """
+    if self.remat_policy == "custom":
+      saved = [name for name in names if getattr(self, name) != RematLocation.REMAT]
+    else:
+      saved = [name for name in names if name in _REMAT_PRESET_MLP_NAMES.get(self.remat_policy, ())]
+    return (
+        not saved,
+        f"a remat policy that does not save the routed experts' {tensor}, which this key never forms"
+        f" (remat_policy={self.remat_policy} saves it as {', '.join(saved)})",
+    )
+
+  def _expert_mlp_dim_shards(self) -> int:
+    """Devices that split the expert weights' MLP dimension inside the expert shard_map.
+
+    By the default logical axis rules: 'mlp_no_fsdp' -> tensor, tensor_sequence, autoregressive.
+    """
+    degrees = (
+        self.ici_tensor_parallelism,
+        self.dcn_tensor_parallelism,
+        self.ici_tensor_sequence_parallelism,
+        self.dcn_tensor_sequence_parallelism,
+        self.ici_autoregressive_parallelism,
+        self.dcn_autoregressive_parallelism,
+    )
+    return math.prod(degrees)
+
+  def _ring_of_experts_ragged_sort_requirements(self) -> list[tuple[bool, str]]:
+    """What the MoE layer needs to run the ring-of-experts ragged sort."""
+    return [
+        (self.sparse_matmul, "sparse_matmul=True"),
+        (not self.te_moe_block, "te_moe_block=False"),
+        (self.use_ring_of_experts, "use_ring_of_experts=True"),
+        (self.use_ragged_sort, "use_ragged_sort=True"),
+    ]
+
+  @model_validator(mode="after")
+  def validate_moe_roe_packed_routing_gather(self) -> "MoEGeneral":
+    """The packed gather replaces the per-chunk routing gathers of the pipelined local-routing chunk loop."""
+    if self.moe_roe_packed_routing_gather:
+      _reject_unless(
+          "moe_roe_packed_routing_gather=True",
+          [
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (not self.te_moe_block, "te_moe_block=False"),
+              (self.ring_of_experts_local_routing, "ring_of_experts_local_routing=True"),
+              (self.moe_chunk_pipeline, "moe_chunk_pipeline=True (only the pipelined chunk loop gathers per chunk)"),
+              # Random routing draws per get_topk call: one draw for the layer is not one per chunk.
+              (not self.use_random_routing, "use_random_routing=False"),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_router_grad_from_wo_input(self) -> "MoEGeneral":
+    """The fused op needs the ring-of-experts ragged sort and a down projection that is the bare GEMM of its rows."""
+    if self.moe_router_grad_from_wo_input:
+      _reject_unless(
+          "moe_router_grad_from_wo_input=True",
+          self._ring_of_experts_ragged_sort_requirements()
+          + [
+              (
+                  self.ici_tensor_parallelism * self.dcn_tensor_parallelism == 1,
+                  "no tensor parallelism (the layer checks the mesh again when it is traced)",
+              ),
+              (not self.mlp_bias, "mlp_bias=False"),
+              self._no_weight_quantization_requirement(),
+              (not self.moe_tc_ragged_sort, "moe_tc_ragged_sort=False"),
+              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
+              (not self.moe_bwd_prequant_before_unsort, "moe_bwd_prequant_before_unsort=False"),
+              (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              self._remat_keeps_moe_tensor_requirement("down-projection output", _MOE_DOWN_PROJECTION_NAMES),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_routing_index_math(self) -> "MoEGeneral":
+    """moe_routing_index_math='count' needs the ring-of-experts ragged sort, the only user of these index maps."""
+    if self.moe_routing_index_math != "sort":
+      _reject_unless(
+          f"moe_routing_index_math={self.moe_routing_index_math!r}", self._ring_of_experts_ragged_sort_requirements()
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_ragged_sort_unique_pair_argsort(self) -> "MoEGeneral":
+    """The pair argsort rewrites the ring-of-experts ragged sort's argsorts, which "count" removes."""
+    if self.moe_ragged_sort_unique_pair_argsort:
+      _reject_unless(
+          "moe_ragged_sort_unique_pair_argsort=True",
+          self._ring_of_experts_ragged_sort_requirements()
+          + [
+              (
+                  self.moe_routing_index_math == "sort",
+                  "moe_routing_index_math='sort' (with 'count' there are no argsorts left to rewrite; set one of them)",
+              )
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_unsplit_prefused_wi(self) -> "MoEGeneral":
+    """The whole wi needs the prefused sparse-matmul path and readers of w0/w1 that all take the [w0 | w1] layout."""
+    if self.moe_unsplit_prefused_wi:
+      _reject_unless(
+          "moe_unsplit_prefused_wi=True",
+          self._prefused_sparse_matmul_requirements()
+          + [
+              self._no_weight_quantization_requirement(),
+              # The default expert-weight sharding: these split w0 and w1 differently from the whole [w0 | w1].
+              (not self.moe_fsdp_use_two_stage_all_gather, "moe_fsdp_use_two_stage_all_gather=False"),
+              (not self.moe_flat_fsdp_weights, "moe_flat_fsdp_weights=False"),
+              (not self.shard_exp_on_fsdp, "shard_exp_on_fsdp=False"),
+              (not self.use_2d_fsdp_sharding, "use_2d_fsdp_sharding=False"),
+              (not self.shard_embed_moe_on_fsdp, "shard_embed_moe_on_fsdp=False"),
+              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              # Sharded, a device would hold a slice of [w0 | w1] instead of matching slices of w0 and w1. The layer
+              # checks the actual partition spec again when it is traced (custom logical axis rules).
+              (
+                  self._expert_mlp_dim_shards() == 1,
+                  "an unsharded expert MLP dimension (tensor, tensor_sequence and autoregressive parallelism 1)",
+              ),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_prefused_swiglu_vjp(self) -> "MoEGeneral":
+    """The fused activation needs the whole prefused [gate | up] output, unbiased and unchunked, never saved per half."""
+    if self.moe_prefused_swiglu_vjp:
+      _reject_unless(
+          "moe_prefused_swiglu_vjp=True",
+          self._prefused_sparse_matmul_requirements()
+          + [
+              (not self.mlp_bias, "mlp_bias=False (biases are added per half)"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0 (partial sums per half)"),
+              self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
+              (
+                  not self.moe_wi_gmm_fused_swiglu,
+                  "moe_wi_gmm_fused_swiglu=False (the wi GMM already applies the activation)",
+              ),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_wi_gmm_fused_swiglu(self) -> "MoEGeneral":
+    """The fused gmm_v2 SwiGLU epilogue replaces the up projection only on the plain bf16 prefused gmm_v2 path."""
+    if self.moe_wi_gmm_fused_swiglu:
+      _reject_unless(
+          "moe_wi_gmm_fused_swiglu=True",
+          self._prefused_sparse_matmul_requirements()
+          + [
+              # gmm_silu is the bf16 tokamax gmm_v2 kernel only.
+              (self.use_tokamax_gmm and self.use_gmm_v2, "use_tokamax_gmm=True and use_gmm_v2=True"),
+              self._no_weight_quantization_requirement(),
+              # The epilogue computes silu(gate) * up; GPT-OSS and clipped activations differ.
+              (list(self.mlp_activations) == ["silu", "linear"], "mlp_activations=['silu', 'linear']"),
+              (self.decoder_block != DecoderBlockType.GPT_OSS, "a decoder_block other than gpt_oss"),
+              (self.mlp_activations_limit <= 0.0, "mlp_activations_limit <= 0 (no clipping)"),
+              (not self.mlp_bias, "mlp_bias=False"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              (not self.moe_flat_fsdp_weights, "moe_flat_fsdp_weights=False"),
+              # A 2D bf16 token buffer.
+              (not self.moe_tc_ragged_3d_gmm, "moe_tc_ragged_3d_gmm=False"),
+              (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
+              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
+              self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
+          ],
       )
     return self
 
@@ -1898,6 +2236,39 @@ class Qwen3Next(BaseModel):
           " which shards the sequence unless the GDN context parallelism is 2 and divides the number of key"
           " heads. It has no effect with use_gdn_kernel=False (that path's context parallelism always uses"
           " HIGHEST) or with head-sharded context parallelism."
+      ),
+  )
+  gdn_conv1d_input_in_qkv_dtype: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: build the Conv1D + SiLU input, the halo-extended [conv_state | qkv] (or qkv left-padded"
+          " by gdn_conv_kernel_dim - 1 zeros), in qkv's dtype and cast each of the gdn_conv_kernel_dim taps to"
+          " float32 where it is read, instead of materializing a float32 copy of the whole input that every tap"
+          " then slices (kernels/gdn/gdn_bwd/compute_conv1d_bwd.py). bfloat16 -> float32 is lossless and every"
+          " product and sum is formed in the same order, so the forward outputs and the qkv / conv-state / bias"
+          " gradients are bit-identical on CPU; the conv weight gradient, a float32 reduction over batch x sequence,"
+          " may be summed in a different order once XLA fuses the cast into it (CPU: a few ulp). Only which tensors"
+          " live in HBM changes; no optimization barrier is involved. Applies to the Conv1D forward and backward that"
+          " gdn_decoupled_conv1d and its custom-VJP rules trace. Requires use_gdn_kernel=True (the only path that"
+          " runs that Conv1D)."
+      ),
+  )
+  gdn_conv1d_dense_token_stack: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: in the Pallas GDN forward kernel, build each chunk's Conv1D output from per-token"
+          " [conv_dim / 1024, 8, 128] float32 views concatenated along the leading axis, instead of jnp.stack(axis=1)"
+          " of the per-token [1, 1, conv_dim] rows (kernels/gdn/compute_conv1d.py stack_conv1d_tokens). The value is"
+          " the same, element for element; only the layout the TPU compiler gives it changes. The stacked value's"
+          " second-minor dimension is 1, and the compiler of the October 2026 Pathways build lays it out in (8, 128)"
+          " tiles padded from 1 to 8 sublanes, so the SiLU that follows runs its exp and reciprocal on 8x as many"
+          " vector registers as the data fills; the dense views keep the value in dense tiles, as older compilers"
+          " already do for the stack. Applies to every forward kernel call of gdn_decoupled_conv1d and its forward"
+          " rule (both sequence-sharded context-parallel passes, and the forward rule's replay under remat); the"
+          " backward kernel is unchanged. Requires use_gdn_kernel=True (the only path that runs that kernel) and a"
+          " Conv1D width, 2 * gdn_num_key_heads * gdn_key_head_dim + gdn_num_value_heads * gdn_value_head_dim (one"
+          " rank's heads under head-sharded GDN context parallelism), that is a multiple of 1024: one float32 vector"
+          " register of 8 x 128."
       ),
   )
 
@@ -4941,7 +5312,13 @@ class MaxTextConfig(
     """
     if is_rl_config:
       MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
+    dense_token_stack = getattr(cfg, "gdn_conv1d_dense_token_stack", False)
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+      if dense_token_stack:
+        raise ValueError(
+            "gdn_conv1d_dense_token_stack=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
       return
     cp_size = math.prod(
         max(1, getattr(cfg, f"{mesh}_{axis}_parallelism"))
@@ -4957,6 +5334,16 @@ class MaxTextConfig(
         raise ValueError("GatedDeltaNet context parallelism requires context_parallel_load_balance=False.")
 
     if not cfg.use_gdn_kernel:
+      if cfg.gdn_conv1d_input_in_qkv_dtype:
+        raise ValueError(
+            "gdn_conv1d_input_in_qkv_dtype=True requires use_gdn_kernel=True: only the GDN kernel path runs the"
+            " Conv1D + SiLU (kernels/gdn/gdn_bwd/compute_conv1d_bwd.py) whose input it keeps in qkv's dtype."
+        )
+      if dense_token_stack:
+        raise ValueError(
+            "gdn_conv1d_dense_token_stack=True requires use_gdn_kernel=True: only the Pallas GDN forward kernel"
+            " runs the in-VMEM Conv1D (kernels/gdn/compute_conv1d.py) whose output it assembles."
+        )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(
@@ -4964,8 +5351,8 @@ class MaxTextConfig(
           f"'tensor' (got ici_tensor_parallelism={cfg.ici_tensor_parallelism}, "
           f"dcn_tensor_parallelism={cfg.dcn_tensor_parallelism})."
       )
-    if cfg.gdn_chunk_size != 64:
-      raise ValueError(f"use_gdn_kernel=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}.")
+    if cfg.gdn_chunk_size not in (64, 128):
+      raise ValueError(f"use_gdn_kernel=True requires gdn_chunk_size in (64, 128), got {cfg.gdn_chunk_size}.")
     if cfg.gdn_key_head_dim % 128 or cfg.gdn_value_head_dim % 128:
       raise ValueError(
           "use_gdn_kernel=True requires gdn_key_head_dim and gdn_value_head_dim to be multiples of 128, "
@@ -4983,6 +5370,40 @@ class MaxTextConfig(
             f"degree ({cp_size}) times gdn_chunk_size ({cfg.gdn_chunk_size}), so that every per-rank sequence "
             "is a whole number of kernel chunks."
         )
+    if dense_token_stack:
+      MaxTextConfig.validate_gdn_dense_token_stack_width(cfg, cp_size)
+
+  @staticmethod
+  def validate_gdn_dense_token_stack_width(cfg: Any, cp_size: int) -> None:
+    """Fails if gdn_conv1d_dense_token_stack cannot regroup the Conv1D rows the GDN forward kernel convolves.
+
+    The option regroups each token's float32 Conv1D row in whole vector registers of 8 x 128
+    (kernels/gdn/compute_conv1d.py DENSE_TOKEN_STACK_ALIGNMENT), so the width each forward-kernel call convolves must
+    be a multiple of 1024: the whole Conv1D, or one rank's heads under head-sharded GDN context parallelism.
+
+    `cp_size` counts a context parallelism left at -1 (filled in when the mesh is built) as 1, as validate_gdn_config's
+    sequence-length check does. If the filled-in degree head-shards the heads to a width that is not a multiple of
+    1024, wrapper.fused_conv1d_gdn's own width check raises when the layer is traced.
+    """
+    num_k_heads, num_v_heads = cfg.gdn_num_key_heads, cfg.gdn_num_value_heads
+    # Head-sharded as model_runner._resolve_gdn_cp_mode decides it for training: gdn_cp_mode 'head', or 'auto' at a
+    # degree of 2 that divides the key heads. (Head counts the degree does not divide fail there on their own.)
+    cp_mode = getattr(cfg, "gdn_cp_mode", "auto")
+    head_sharded = cp_size > 1 and (
+        cp_mode == "head" or (cp_mode == "auto" and cp_size <= min(2, num_k_heads) and num_k_heads % cp_size == 0)
+    )
+    ranks = cp_size if head_sharded and num_k_heads % cp_size == 0 and num_v_heads % cp_size == 0 else 1
+    width = 2 * (num_k_heads // ranks) * cfg.gdn_key_head_dim + (num_v_heads // ranks) * cfg.gdn_value_head_dim
+    if width % 1024:
+      if ranks > 1:
+        where = f"one rank's heads under head-sharded GDN context parallelism of degree {cp_size}"
+      else:
+        where = "the whole Conv1D"
+      raise ValueError(
+          f"gdn_conv1d_dense_token_stack=True requires the width each GDN forward kernel convolves ({where}: 2 * key"
+          f" heads * gdn_key_head_dim + value heads * gdn_value_head_dim = {width}) to be a multiple of 1024: it"
+          " regroups each token's float32 row in whole vector registers of 8 x 128."
+      )
 
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":

@@ -24,6 +24,7 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 from .. import compute_conv1d as local_compute_conv1d
+from .. import compute_gdn as local_compute_gdn
 from .bwd_memory_ref import make_bwd_block_specs
 from .runtime_utils import ensure_cpu_interpret_registered
 from .runtime_utils import pallas_unsupported_reason
@@ -121,6 +122,10 @@ class GDNBackwardConfig:
   vmem_limit_mb: Optional[int] = None
   use_qk_norm_in_gdn: bool = False
   has_seg_ids: bool = False
+  # When True, t_inv is not an input: each chunk rebuilds T and inverts it in VMEM
+  # with `tri_inv_algo`.
+  recompute_t_inv: bool = False
+  tri_inv_algo: str = local_compute_gdn.DEFAULT_TRI_INV_ALGO
 
   @property
   def repeats(self) -> int:
@@ -139,23 +144,37 @@ def _bwd_gdn_pipeline_body(
     has_dh0: bool = False,
 ) -> None:
   """Inner kernel executed per (batch, group, chunk) by emit_pipeline with manual GDN backward."""
-  if len(refs) == 17:
+  if len(refs) == 17 and not cfg.recompute_t_inv:
     has_dht = True
     has_dh0 = True
   idx = 0
   # pylint: disable=unbalanced-tuple-unpacking
-  (
-      qkv_conv_ref,
-      b_ref,
-      a_ref,
-      do_ref,
-      chunk_states_ref,
-      t_inv_ref,
-      a_log_ref,
-      dt_bias_ref,
-      reset_ref,
-  ) = refs[idx : idx + 9]
-  idx += 9
+  if cfg.recompute_t_inv:
+    (
+        qkv_conv_ref,
+        b_ref,
+        a_ref,
+        do_ref,
+        chunk_states_ref,
+        a_log_ref,
+        dt_bias_ref,
+        reset_ref,
+    ) = refs[idx : idx + 8]
+    t_inv_ref = None
+    idx += 8
+  else:
+    (
+        qkv_conv_ref,
+        b_ref,
+        a_ref,
+        do_ref,
+        chunk_states_ref,
+        t_inv_ref,
+        a_log_ref,
+        dt_bias_ref,
+        reset_ref,
+    ) = refs[idx : idx + 9]
+    idx += 9
   if has_dht:
     dht_ref = refs[idx]
     idx += 1
@@ -214,7 +233,7 @@ def _bwd_gdn_pipeline_body(
   a_val = a_ref[...][:, :num_v_heads].astype(jnp.float32)
   do_val = do_ref[...].astype(jnp.float32)
   state_prev = chunk_states_ref[...].astype(jnp.float32)
-  t_inv_val = t_inv_ref[...].astype(jnp.float32)
+  t_inv_val = t_inv_ref[...].astype(jnp.float32) if t_inv_ref is not None else None
   a_log_val = a_log_ref[...][0, :num_v_heads].astype(jnp.float32)
   dt_bias_val = dt_bias_ref[...][0, :num_v_heads].astype(jnp.float32)
 
@@ -266,8 +285,10 @@ def _bwd_gdn_pipeline_body(
     q_scaled = jnp.where(valid_c[:, :, None], q_scaled, 0.0)
     k_scaled_val = jnp.where(valid_c[:, :, None], k_scaled_val, 0.0)
 
-  q_rep = jnp.repeat(q_scaled, repeats, axis=1)
-  k_rep = jnp.repeat(k_scaled_val, repeats, axis=1)
+  q_kq = jnp.transpose(q_scaled, (1, 0, 2))
+  k_kq = jnp.transpose(k_scaled_val, (1, 0, 2))
+  q_h = jnp.repeat(q_kq, repeats, axis=0)
+  k_h = jnp.repeat(k_kq, repeats, axis=0)
   beta = jax.nn.sigmoid(b_val)
 
   sp_input = a_val + dt_bias_val
@@ -281,19 +302,15 @@ def _bwd_gdn_pipeline_body(
 
   cumsum_log_g = jnp.dot(mask_cumsum, log_g, precision=jax.lax.Precision.HIGHEST)
 
-  q_h = jnp.transpose(q_rep, (1, 0, 2))
-  k_h = jnp.transpose(k_rep, (1, 0, 2))
   v_h = jnp.transpose(v, (1, 0, 2))
   beta_h = jnp.transpose(beta, (1, 0))
   cumsum_h = jnp.transpose(cumsum_log_g, (1, 0))
   do_h = jnp.transpose(do_val, (1, 0, 2))
 
   diff = cumsum_h[:, :, None] - cumsum_h[:, None, :]
-  safe_diff_strict = jnp.where(mask_strict[None, :, :] > 0.5, diff, -1e4)
-  g_mat_strict = jnp.exp(safe_diff_strict) * mask_strict[None, :, :]
-
   safe_diff_causal = jnp.where(mask_causal[None, :, :] > 0.5, diff, -1e4)
   g_mat_causal = jnp.exp(safe_diff_causal) * mask_causal[None, :, :]
+  g_mat_strict = g_mat_causal * mask_strict[None, :, :]
 
   gating_forward = jnp.exp(cumsum_h)[:, :, None]
   gating_last = jnp.exp(cumsum_h[:, -1])[:, None, None]
@@ -306,9 +323,21 @@ def _bwd_gdn_pipeline_body(
     gating_backward = jnp.exp(cumsum_h[:, -1:] - cumsum_h)[:, :, None]
 
   k_beta = k_h * beta_h[:, :, None]
-  k_h_T = jnp.swapaxes(k_h, -1, -2)
+  k_kq_T = jnp.swapaxes(k_kq, -1, -2)
 
-  A = t_inv_val
+  if cfg.recompute_t_inv:
+    # Rebuild T = I + strictly_lower(beta_i k_i.k_j exp(g_i - g_j)) and invert it here
+    # instead of reading the forward kernel's t_inv from HBM. Compute both q @ k^T and
+    # k @ k^T at num_kq_heads (4x fewer 3-pass bf16 matmuls) before repeating to num_v_heads.
+    kk_kq = _gdn_matmul(k_kq, k_kq_T, compute_dtype, precise=True)
+    t_lower = jnp.repeat(kk_kq, repeats, axis=0) * (beta_h[:, :, None] * g_mat_strict)
+    t_rows = jax.lax.broadcasted_iota(jnp.int32, t_lower.shape, 1)
+    t_cols = jax.lax.broadcasted_iota(jnp.int32, t_lower.shape, 2)
+    t_full = jnp.where(t_rows == t_cols, 1.0, t_lower)
+    inv_prec = jax.lax.Precision.HIGHEST if jnp.dtype(compute_dtype) == jnp.float32 else jax.lax.Precision.DEFAULT
+    A = local_compute_gdn.invert_triangular_matrix(t_full, precision=inv_prec, algo=cfg.tri_inv_algo).astype(jnp.float32)
+  else:
+    A = t_inv_val
 
   v_beta = v_h * beta_h[:, :, None]
   k_beta_g = k_beta * gating_forward
@@ -331,7 +360,8 @@ def _bwd_gdn_pipeline_body(
   )
 
   q_g = q_h * gating_forward
-  attn_unmasked = _gdn_matmul(q_h, k_h_T, compute_dtype, precise=True)
+  attn_kq = _gdn_matmul(q_kq, k_kq_T, compute_dtype, precise=True)
+  attn_unmasked = jnp.repeat(attn_kq, repeats, axis=0)
   attn = attn_unmasked * g_mat_causal
 
   k_scaled_bwd = k_h * gating_backward
@@ -484,7 +514,7 @@ def _pallas_gdn_bwd_kernel_single_group(
     dt_bias: jax.Array,
     do: jax.Array,
     chunk_states: jax.Array,
-    t_inv: jax.Array,
+    t_inv: Optional[jax.Array],
     *,
     cfg: GDNBackwardConfig,
     segment_ids: Optional[jax.Array] = None,
@@ -517,6 +547,8 @@ def _pallas_gdn_bwd_kernel_single_group(
       return_dh0=return_dh0,
       interpret=interpret,
       name=name,
+      recompute_t_inv=cfg.recompute_t_inv,
+      tri_inv_algo=cfg.tri_inv_algo,
   )
 
 
@@ -528,7 +560,7 @@ def pallas_gdn_bwd_kernel(
     dt_bias: jax.Array,
     do: jax.Array,
     chunk_states: jax.Array,
-    t_inv: jax.Array,
+    t_inv: Optional[jax.Array],
     *,
     num_v_heads: int,
     kq_head_dim: int,
@@ -543,12 +575,18 @@ def pallas_gdn_bwd_kernel(
     return_dh0: bool = False,
     interpret: bool | pltpu.InterpretParams | None = None,
     name: str = "gdn_bwd_kernel",
+    recompute_t_inv: bool = False,
+    tri_inv_algo: str = local_compute_gdn.DEFAULT_TRI_INV_ALGO,
 ):
   """Executes the Pallas reverse-chunk GDNv3 backward kernel using emit_pipeline.
 
   Dispatches a single kernel call with 3D grid=(batch_size, num_groups,
-  num_chunks).
+  num_chunks). With `recompute_t_inv=True`, `t_inv` is ignored (may be None) and
+  each chunk rebuilds T^-1 in VMEM with `tri_inv_algo`.
   """
+  if t_inv is None and not recompute_t_inv:
+    raise ValueError("pallas_gdn_bwd_kernel needs t_inv unless recompute_t_inv=True.")
+  local_compute_gdn.validate_tri_inv_algo(tri_inv_algo)
   if interpret is None:
     on_cpu = target_platform(qkv_conv) == "cpu"
     fallback_reason = pallas_unsupported_reason(head_k_dim=kq_head_dim, head_v_dim=v_head_dim, chunk_size=chunk_size)
@@ -579,10 +617,14 @@ def pallas_gdn_bwd_kernel(
       _, init_seg = local_compute_conv1d.initial_state_segment_metadata(segment_ids, 4)
   if head_tile is not None:
     target_tile = head_tile
-  elif jnp.dtype(qkv_conv.dtype) == jnp.float32:
-    target_tile = _F32_HEAD_TILE
   else:
-    target_tile = _BF16_HEAD_TILE
+    if jnp.dtype(qkv_conv.dtype) == jnp.float32:
+      target_tile = _F32_HEAD_TILE
+    else:
+      target_tile = _BF16_HEAD_TILE
+    if chunk_size > 64:
+      # ~10 [tile, C, C] f32 intermediates are live per step; keep them at the C=64 budget.
+      target_tile = max(1, target_tile * 64 // chunk_size)
 
   max_possible = min(num_v_heads, target_tile)
   tile_v_heads = None
@@ -615,6 +657,8 @@ def pallas_gdn_bwd_kernel(
       vmem_limit_mb=vmem_limit_mb,
       use_qk_norm_in_gdn=use_qk_norm_in_gdn,
       has_seg_ids=has_seg_ids,
+      recompute_t_inv=recompute_t_inv,
+      tri_inv_algo=tri_inv_algo,
   )
 
   padded_tile_v_heads = cfg.padded_num_v_heads
@@ -680,18 +724,20 @@ def pallas_gdn_bwd_kernel(
   ).swapaxes(1, 2)
 
   # 5. Prepare t_inv into (B, G, C, tile_v_heads, chunk_size, chunk_size)
-  t_inv_6d = (
-      t_inv.reshape(
-          batch_size,
-          num_chunks,
-          num_groups,
-          tile_v_heads,
-          chunk_size,
-          chunk_size,
-      )
-      .swapaxes(1, 2)
-      .astype(jnp.float32)
-  )
+  t_inv_6d = None
+  if not recompute_t_inv:
+    t_inv_6d = (
+        t_inv.reshape(
+            batch_size,
+            num_chunks,
+            num_groups,
+            tile_v_heads,
+            chunk_size,
+            chunk_size,
+        )
+        .swapaxes(1, 2)
+        .astype(jnp.float32)
+    )
 
   # 6. Prepare a_log and dt_bias into (B, G, 1, padded_tile_v_heads)
   a_log_2d = a_log.reshape(num_groups, tile_v_heads)
@@ -744,7 +790,10 @@ def pallas_gdn_bwd_kernel(
       a_5d,
       do_6d,
       chunk_states_6d,
-      t_inv_6d,
+  ]
+  if t_inv_6d is not None:
+    in_args.append(t_inv_6d)
+  in_args += [
       a_log_4d,
       dt_bias_4d,
       reset_hbm_5d,
@@ -774,7 +823,10 @@ def pallas_gdn_bwd_kernel(
       padded_num_v_heads=padded_tile_v_heads,
       has_dht=has_dht,
       has_dh0=has_dh0,
+      has_t_inv=not recompute_t_inv,
   )
+  if recompute_t_inv and name == "gdn_bwd_kernel":
+    name = f"gdn_bwd_kernel_recompute_{tri_inv_algo}"
 
   out_shapes_list = [
       jax.ShapeDtypeStruct(
