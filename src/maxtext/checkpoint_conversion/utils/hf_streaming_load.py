@@ -62,6 +62,7 @@ READ_BYTES_PER_HOST = 4 << 30
 
 READ_CHUNK_BYTES = safetensors_reader.READ_CHUNK_BYTES
 READ_THREADS = safetensors_reader.READ_THREADS
+MIN_PIECE_BYTES = safetensors_reader.MIN_PIECE_BYTES
 
 _LOAD_MESH_AXES = ("rows", "copies")
 # "model.layers.12.self_attn.q_proj.weight" -> ("model.", "12").
@@ -451,6 +452,7 @@ def load_hf_params_streaming(
     read_bytes_per_host: int | None = READ_BYTES_PER_HOST,
     read_chunk_bytes: int = READ_CHUNK_BYTES,
     read_threads: int = READ_THREADS,
+    min_piece_bytes: int = MIN_PIECE_BYTES,
     prefetch: bool = True,
 ) -> dict:
   """Loads an HF SafeTensors checkpoint into MaxText weights, a few decoder layers at a time.
@@ -467,6 +469,8 @@ def load_hf_params_streaming(
       Whole decoder layers are packed up to this; None reads the whole checkpoint in one call.
     read_chunk_bytes: Size of each ranged read sent to storage.
     read_threads: How many ranged reads each host keeps in flight.
+    min_piece_bytes: Groups of same-shape HF tensors whose per-chip pieces would be smaller
+      than this are read whole and rearranged on the TPU chips (see `safetensors_reader`).
     prefetch: Read the next call while the current one is converted. Faster, but holds
       up to two calls of HF tensors in HBM instead of one.
 
@@ -479,7 +483,9 @@ def load_hf_params_streaming(
   t_start = time.time()
   plan = build_plan(param_map, hook_map, target_tree, config)
   with (
-      safetensors_reader.SafetensorsReader(path, num_threads=read_threads, chunk_bytes=read_chunk_bytes) as reader,
+      safetensors_reader.SafetensorsReader(
+          path, num_threads=read_threads, chunk_bytes=read_chunk_bytes, min_piece_bytes=min_piece_bytes
+      ) as reader,
       concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="hf_prefetch") as prefetcher,
   ):
     hf_metadata = reader.metadata
@@ -498,17 +504,19 @@ def load_hf_params_streaming(
     results = {t.name: _alloc_fn(t.shape, t.dtype, t.sharding)() for t in plan.targets if t.axes}
     total_bytes = 0
     # Only reads and their copies into HBM (`fetch`) run on the background thread. The
-    # writes stay on this thread in a fixed order, so every host issues the same
-    # programs in the same order.
+    # jitted rearranging (`unpack`) and writes stay on this thread in a fixed order, so
+    # every host issues the same programs in the same order.
     future = prefetcher.submit(reader.fetch, requests[0]) if calls else None
     try:
       for call_index, call in enumerate(calls):
         t_wait = time.time()
-        hf_arrays = future.result()
+        fetched = future.result()
         t_read = time.time()
         has_next = call_index + 1 < len(calls)
         if prefetch and has_next:
           future = prefetcher.submit(reader.fetch, requests[call_index + 1])
+        hf_arrays = reader.unpack(fetched)
+        del fetched
         for write in call:
           _apply_write(write, hf_arrays, results)
         # Finish this call's writes before dropping its HF tensors, so at most one
