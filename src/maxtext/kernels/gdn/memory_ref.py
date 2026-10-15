@@ -586,12 +586,17 @@ def create_allocs(
   b_alloc = in_buffered_partial(spec=ba_spec, dtype_or_type=b_ref)
   a_alloc = in_buffered_partial(spec=ba_spec, dtype_or_type=a_ref)
 
-  conv_spec = block_spec_partial(block_shape=conv_shape)
-  recurrent_spec = block_spec_partial(block_shape=recurrent_shape)
+  # A prefill call with one sequence copies the states in only before its first tile and out only after
+  # its last, so no copy is in flight while a tile uses the slot: one buffer suffices and frees VMEM.
+  state_pipeline_mode = pipeline_mode
+  if cfg.is_prefill_only and metadata_ref.s_idx_has_initial_state.shape[0] == 1:
+    state_pipeline_mode = pl.Buffered(buffer_count=1, use_lookahead=False)
+  conv_spec = block_spec_partial(block_shape=conv_shape, pipeline_mode=state_pipeline_mode)
+  recurrent_spec = block_spec_partial(block_shape=recurrent_shape, pipeline_mode=state_pipeline_mode)
   state_buffered_partial = functools.partial(
       StateBufferedRef.input_output,
-      buffer_count=pipeline_mode.buffer_count,
-      use_lookahead=pipeline_mode.use_lookahead,
+      buffer_count=state_pipeline_mode.buffer_count,
+      use_lookahead=state_pipeline_mode.use_lookahead,
       cfg=cfg,
       metadata_ref=metadata_ref,
   )

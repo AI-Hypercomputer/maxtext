@@ -51,18 +51,24 @@ def invert_triangular_matrix(
   num_blocks = chunk // block_size
 
   def local_forward_sub(t_mat: jax.Array, b_mat: jax.Array) -> jax.Array:
-    x_list = []
-    for i in range(block_size):
-      b_i = b_mat[:, i, :]
-      if i == 0:
-        x_i = b_i
+    # Right-looking substitution: once row j is final, subtract t[i, j] * x_j from every later row i.
+    # The rows stay in place as two sublane-aligned halves, so no step re-stacks the solved rows or
+    # moves a row of t from lanes to sublanes. Each row subtracts the same products as a left-looking
+    # solve, one at a time in column order.
+    half = block_size // 2
+    x_lo, x_hi = b_mat[:, :half, :], b_mat[:, half:, :]
+    t_lo, t_hi = t_mat[:, :half, :], t_mat[:, half:, :]
+    rows_lo = jax.lax.broadcasted_iota(jnp.int32, (1, half, 1), 1)
+    rows_hi = jax.lax.broadcasted_iota(jnp.int32, (1, block_size - half, 1), 1)
+    for j in range(block_size - 1):
+      if j < half:
+        x_j = x_lo[:, j : j + 1, :]
+        x_lo = jnp.where(rows_lo > j, x_lo - t_lo[:, :, j : j + 1] * x_j, x_lo)
+        x_hi = x_hi - t_hi[:, :, j : j + 1] * x_j
       else:
-        stacked_x = jnp.stack(x_list, axis=1)
-        all_prev_t = t_mat[:, i, :i]
-        prev_sum = jnp.sum(all_prev_t[..., None] * stacked_x, axis=1)
-        x_i = b_i - prev_sum
-      x_list.append(x_i)
-    return jnp.stack(x_list, axis=1)
+        x_j = x_hi[:, j - half : j - half + 1, :]
+        x_hi = jnp.where(rows_hi > j - half, x_hi - t_hi[:, :, j : j + 1] * x_j, x_hi)
+    return jnp.concatenate([x_lo, x_hi], axis=1)
 
   x_blocks = []
   iota_r = jax.lax.broadcasted_iota(jnp.int32, t.shape, 1)

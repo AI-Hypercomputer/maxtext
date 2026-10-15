@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 
 from maxtext.configs import types as config_types
+from maxtext.kernels.gdn import compute_gdn
 from maxtext.kernels.gdn import gdn_bwd_pallas
 from maxtext.kernels.gdn.gdn_bwd import api as gdn_api
 from maxtext.models import qwen3
@@ -139,6 +140,28 @@ class GdnBwdPallasTest(absltest.TestCase):
 
     np.testing.assert_allclose(out_emit, expected_out[0], rtol=1e-3, atol=1e-3)
     np.testing.assert_allclose(state_emit, expected_state[0], rtol=5e-3, atol=5e-3)
+
+  def test_invert_triangular_matrix_matches_float64_inverse(self):
+    """The forward kernels' blocked inverse of T = I + strictly-lower(decay * beta k k^T) is exact to f32 rounding.
+
+    Chunks of 16 and less are one substitution block; 32 and 64 also substitute into rows that the
+    inter-block matmul has already updated.
+    """
+    rng = np.random.default_rng(0)
+    num_heads, head_dim = 4, 128
+    for chunk_size in (8, 16, 32, 64):
+      k = rng.standard_normal((num_heads, chunk_size, head_dim))
+      k /= np.linalg.norm(k, axis=-1, keepdims=True)
+      beta = 1 / (1 + np.exp(-rng.standard_normal((num_heads, chunk_size, 1))))
+      log_g = np.cumsum(-0.05 * np.abs(rng.standard_normal((num_heads, chunk_size))), axis=1)
+      decay = np.exp(log_g[:, :, None] - log_g[:, None, :]) * np.tril(np.ones((chunk_size, chunk_size)), -1)
+      t = (np.eye(chunk_size) + decay * np.einsum("hik,hjk->hij", k * beta, k)).astype(np.float32)
+
+      t_inv = compute_gdn.invert_triangular_matrix(jnp.asarray(t), precision=jax.lax.Precision.HIGHEST)
+
+      np.testing.assert_allclose(
+          np.asarray(t_inv, np.float64), np.linalg.inv(t.astype(np.float64)), rtol=0, atol=1e-6, err_msg=f"{chunk_size=}"
+      )
 
   def test_compute_forward_conv_and_states(self):
     batch_size = 1
