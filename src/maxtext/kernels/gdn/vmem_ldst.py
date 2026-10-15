@@ -23,7 +23,7 @@ from . import config
 from . import memory_ref
 
 
-def load_as_qkv_large(qkv_vmem_ref: jax.Ref, cfgs: config.GDNConfig) -> tuple[jax.Array, jax.Array, jax.Array]:
+def load_as_qkv_large(qkv_vmem_ref: jax.Ref, cfgs: config.GDNConfig) -> tuple[jax.Array | None, jax.Array, jax.Array]:
   """Split qkv and transpose by performing 1 load per chunk for large layout.
 
   Args:
@@ -33,7 +33,8 @@ def load_as_qkv_large(qkv_vmem_ref: jax.Ref, cfgs: config.GDNConfig) -> tuple[ja
     cfgs: GDN configuration object.
 
   Returns:
-    q, k: [seq_tile_size, num_kq_heads, chunk_size, kq_head_dim]
+    q, k: [seq_tile_size, num_kq_heads, chunk_size, kq_head_dim]; q is None
+      when `cfgs.states_only` (a states-only pass never reads q).
     v: [seq_tile_size, num_v_heads, chunk_size, v_head_dim]
   """
 
@@ -54,9 +55,11 @@ def load_as_qkv_large(qkv_vmem_ref: jax.Ref, cfgs: config.GDNConfig) -> tuple[ja
       q_lane = kq_head * kq_lanes_per_head + lane
       k_lane = k_offset + q_lane
 
-      q_head_list.append(qkv_slot_flat_ref[q_lane::lanes_per_col])
+      if not cfgs.states_only:
+        q_head_list.append(qkv_slot_flat_ref[q_lane::lanes_per_col])
       k_head_list.append(qkv_slot_flat_ref[k_lane::lanes_per_col])
-    q_large_list.append(jnp.concat(q_head_list, axis=-1))
+    if not cfgs.states_only:
+      q_large_list.append(jnp.concat(q_head_list, axis=-1))
     k_large_list.append(jnp.concat(k_head_list, axis=-1))
   v_offset = kq_lanes_per_head * cfgs.num_kq_heads * 2
   v_lanes_per_head = cfgs.v_head_dim // num_lanes
@@ -67,7 +70,7 @@ def load_as_qkv_large(qkv_vmem_ref: jax.Ref, cfgs: config.GDNConfig) -> tuple[ja
       v_head_list.append(qkv_slot_flat_ref[v_lane::lanes_per_col])
     v_large_list.append(jnp.concat(v_head_list, axis=-1))
 
-  q_large = jnp.stack(q_large_list, axis=0)
+  q_large = jnp.stack(q_large_list, axis=0) if q_large_list else None
   k_large = jnp.stack(k_large_list, axis=0)
   v_large = jnp.stack(v_large_list, axis=0)
 
@@ -230,8 +233,8 @@ def load_activation_as_large(
     b_vmem_ref: jax.Ref,
     a_vmem_ref: jax.Ref,
     cfgs: config.GDNConfig,
-) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, jax.Array]:
-  """Load activations from VMEM as a large layout."""
+) -> tuple[jax.Array | None, jax.Array, jax.Array, jax.Array, jax.Array]:
+  """Load activations from VMEM as a large layout (q is None when `cfgs.states_only`)."""
 
   qkv_vmem_ref[...] = qkv_vreg
 
@@ -240,11 +243,12 @@ def load_activation_as_large(
   v_large_list = []
   for idx in range(cfgs.seq_tile_size):
     q_large, k_large, v_large = load_as_qkv_large(qkv_vmem_ref.at[idx], cfgs)
-    q_large_list.append(q_large)
+    if q_large is not None:
+      q_large_list.append(q_large)
     k_large_list.append(k_large)
     v_large_list.append(v_large)
 
-  q_large = jnp.stack(q_large_list, axis=0)
+  q_large = jnp.stack(q_large_list, axis=0) if q_large_list else None
   k_large = jnp.stack(k_large_list, axis=0)
   v_large = jnp.stack(v_large_list, axis=0)
   b_large = load_compact_to_large(b_vmem_ref)
