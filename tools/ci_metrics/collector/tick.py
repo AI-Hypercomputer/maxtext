@@ -58,9 +58,9 @@ RECHECK_DAYS = 2
 # for this long, and then left alone.
 MERGE_WATCH_DAYS = 14
 
-# Backfill stops cleanly while this many requests are still left, so the tick that follows
-# has budget to work with. GITHUB_TOKEN inside Actions allows 1000 an hour per repository.
-RATE_LIMIT_FLOOR = 150
+# The tick stops cleanly while this many requests are still left. GITHUB_TOKEN inside Actions allows
+# 1000 an hour per repository, shared by every workflow in it, so the others keep some.
+RATE_LIMIT_FLOOR = 300
 
 DEFAULT_BACKFILL_DAYS = 30
 
@@ -278,10 +278,11 @@ class Tick:
         if not self._collect_one(run):
           return
     self._collect_pending()
-    self._refresh_merges()
+    if self._budget_allows():
+      self._refresh_merges()
 
   def _budget_allows(self) -> bool:
-    """Checks the API budget before starting another week of backfill."""
+    """Checks the API budget before more requests are spent; False means stop cleanly."""
     try:
       status = self.client.rate_limit()
     except github.GitHubError as error:
@@ -324,6 +325,10 @@ class Tick:
       self.state.note_run(run_id, listed.get("created_at"))
       self.report.runs_already_stored += 1
       return True
+
+    # A run already stored costs no request, so only a run that will be read checks the budget.
+    if not self._budget_allows():
+      return False
 
     self._runs_processed += 1
     self._read_this_tick.add(run_id)
@@ -468,6 +473,8 @@ class Tick:
         return
       if run_id in self._read_this_tick:
         continue
+      if not self._budget_allows():
+        return
       try:
         listed = runs.get_run(self.client, int(run_id))
       except github.GitHubError as error:

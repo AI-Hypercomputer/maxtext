@@ -422,12 +422,15 @@ What it decides:
 
 - **Which window.** Everything after the stored watermark, plus a re-listing of the last two
   days - a re-run keeps its run id and creation time, so a watermark alone would never see
-  it. With no watermark it backfills, a week at a time, checking the rate budget between
-  weeks and stopping cleanly when it runs low.
+  it. With no watermark it backfills, a week at a time.
 - **Which rows to keep.** Every run keeps per-flavor totals plus every failed, rescued and
   newly-seen test and the slowest 25 per suite. The day's first scheduled main run keeps
   every test row.
 - **When to stop.** `--max-runs` stops it cleanly and says so; the next tick continues.
+  So does a low API budget: before each run it reads, before it re-reads in-flight runs and
+  before it asks pull requests about merges, it stops when fewer than 300 requests
+  (`RATE_LIMIT_FLOOR`) are left this hour. GITHUB_TOKEN's 1,000 requests an hour are shared by
+  every workflow in the repository.
   `--dry-run` fetches and builds everything into a temporary directory and writes nothing
   to `--out`.
 
@@ -447,15 +450,19 @@ whose artifacts had already expired - "too old to have any" is never the same as
 workflows, not as a collection failure. `meta.json` always changes, because it carries
 `generated_at`; nothing else does unless its rows did.
 
-The workflow that runs this on a schedule is `.github/workflows/ci_metrics_collector.yml`.
+The workflow that runs this on a schedule is `.github/workflows/ci_metrics_collector.yml` on
+`main`. It does not run the newest commit of this branch: it runs the one commit named by
+`COLLECTOR_SHA` in that file, so new code here runs only after a PR to `main` changes that ID.
 
 ## Running the tests
 
 `store_test.py` checks the store. `junit_limits_test.py` checks that test-result zips and XML
 files which are too big or broken are refused with a `JUnitError`. `github_download_test.py`
-checks the capped download in `get_bytes`. The tests never touch the network. They need
-nothing beyond the Python standard library, except `github_download_test.py`, which needs
-`requests` like the client itself (the workflow installs it before the tests run).
+checks the capped download in `get_bytes`. `tick_budget_test.py` checks that a tick stops
+before it spends the last 300 requests of the hourly budget. The tests never touch the
+network. They need nothing beyond the Python standard library, except
+`github_download_test.py` and `tick_budget_test.py`, which need `requests` like the client
+itself (the workflow installs it before the tests run).
 
     # From the repository root, every test file:
     python3 -B -m unittest discover -s tools/ci_metrics/collector/tests -p '*_test.py' -t tools/ci_metrics/collector/tests
