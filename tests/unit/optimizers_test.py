@@ -668,6 +668,7 @@ class AdamWMaskTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("adamw", "adamw", optimizers.optax, "adamw"),
       ("adam_pax", "adam_pax", optimizers, "adam_pax"),
+      ("adam_pax_low_memory", "adam_pax_low_memory", optimizers, "adam_pax_low_memory"),
   )
   def test_optimizer_with_mask(self, opt_type, mock_target, mock_attr):
     """Test that optimizer receives the mask function from config and it works as expected"""
@@ -712,6 +713,7 @@ class AdamWMaskTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("adamw", "adamw", optimizers.optax, "adamw"),
       ("adam_pax", "adam_pax", optimizers, "adam_pax"),
+      ("adam_pax_low_memory", "adam_pax_low_memory", optimizers, "adam_pax_low_memory"),
   )
   def test_optimizer_without_mask(self, opt_type, mock_target, mock_attr):
     """Test that optimizer receives None for mask when config is empty"""
@@ -766,6 +768,359 @@ class AdamPaxScalarLearningRateTest(parameterized.TestCase):
     self.assertTrue(jnp.allclose(updates_c["w"], updates_s["w"], rtol=1e-6))
     # Sanity: with positive grads + negative step_size, updates should be negative.
     self.assertLess(float(updates_c["w"][0]), 0.0)
+
+
+class AdamPaxLowMemoryTest(parameterized.TestCase):
+  """Tests for opt_type='adam_pax_low_memory' and its bf16 update rounding modes."""
+
+  def _make_opt(self, update_rounding, lr=1e-3):
+    return optimizers.adam_pax_low_memory(
+        learning_rate_fn=lambda step: lr,
+        beta1=0.0,  # Use the RMS-normalized gradient directly.
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+        update_rounding=update_rounding,
+        stochastic_rounding_seed=0,
+    )
+
+  def _run(self, opt, params, grads, steps):
+    state = opt.init(params)
+    for _ in range(steps):
+      updates, state = opt.update(grads, state, params)
+      params = optax.apply_updates(params, updates)
+    return params, state
+
+  def test_state_size(self):
+    params = {"w": jnp.ones((4, 8), jnp.bfloat16)}
+    _, nearest_state = self._run(self._make_opt("nearest"), params, params, steps=1)
+    _, kahan_state = self._run(self._make_opt("kahan"), params, params, steps=1)
+    # No per-parameter second moment; Kahan keeps a residual of the params' shape.
+    self.assertEqual(nearest_state.nu.shape, ())
+    self.assertEqual(kahan_state.nu["w"].shape, (4, 8))
+    self.assertEqual(kahan_state.nu["w"].dtype, jnp.bfloat16)
+
+  def test_kahan_keeps_sub_ulp_updates(self):
+    # lr * normalized_grad (1e-3) is far below half a bf16 ulp at 1.0 (~3.9e-3),
+    # so round-to-nearest drops every update while Kahan accumulates them.
+    params = {"w": jnp.ones((2, 4), jnp.bfloat16)}
+    grads = {"w": -jnp.ones((2, 4), jnp.bfloat16)}
+    steps = 100
+    nearest, _ = self._run(self._make_opt("nearest"), params, grads, steps)
+    kahan, _ = self._run(self._make_opt("kahan"), params, grads, steps)
+
+    self.assertTrue(jnp.all(nearest["w"] == 1.0))
+    expected = 1.0 + steps * 1e-3
+    self.assertTrue(jnp.allclose(kahan["w"].astype(jnp.float32), expected, atol=8e-3))
+
+  def test_stochastic_rounding_is_unbiased(self):
+    params = {"w": jnp.ones((64, 64), jnp.bfloat16)}
+    grads = {"w": -jnp.ones((64, 64), jnp.bfloat16)}
+    steps = 20
+    sr, _ = self._run(self._make_opt("stochastic"), params, grads, steps)
+    mean = float(jnp.mean(sr["w"].astype(jnp.float32)))
+    self.assertAlmostEqual(mean, 1.0 + steps * 1e-3, delta=2e-3)
+
+  def test_zero_weights_with_zero_grads_stay_zero(self):
+    # N:M-masked entries (zero weight, zero gradient) must remain exactly zero.
+    params = {"w": jnp.array([[0.0, 1.0, 0.0, 1.0]], jnp.bfloat16)}
+    grads = {"w": jnp.array([[0.0, -1.0, 0.0, -1.0]], jnp.bfloat16)}
+    for rounding in ("nearest", "kahan", "stochastic"):
+      out, _ = self._run(self._make_opt(rounding), params, grads, steps=5)
+      self.assertEqual(float(out["w"][0, 0]), 0.0, rounding)
+      self.assertEqual(float(out["w"][0, 2]), 0.0, rounding)
+
+  def test_invalid_rounding_raises(self):
+    with self.assertRaises(ValueError):
+      self._make_opt("bogus")
+
+  @parameterized.parameters("nearest", "kahan", "stochastic")
+  def test_scalar_and_vector_params(self, rounding):
+    # 0-d and 1-d params (e.g. scalars, norm scales) must not crash the RMS normalization.
+    params = {"s": jnp.array(1.0, jnp.bfloat16), "v": jnp.ones((4,), jnp.bfloat16)}
+    grads = {"s": jnp.array(-0.5, jnp.bfloat16), "v": -jnp.ones((4,), jnp.bfloat16)}
+    out, _ = self._run(self._make_opt(rounding, lr=0.1), params, grads, steps=2)
+    self.assertEqual(out["s"].shape, ())
+    self.assertGreater(float(out["s"]), 1.0)
+    self.assertTrue(jnp.all(out["v"] > 1.0))
+
+  def test_kahan_residual_has_param_shape_and_dtype(self):
+    params = {"w": jnp.ones((4, 8), jnp.bfloat16), "b": jnp.ones((8,), jnp.float32)}
+    state = self._make_opt("kahan").init(params)
+    for name, p in params.items():
+      self.assertEqual(state.nu[name].shape, p.shape)
+      self.assertEqual(state.nu[name].dtype, p.dtype)
+
+  def test_rounding_requires_low_memory_opt_type(self):
+    argv = ["", get_test_config_path(), "run_name=test", "opt_type=adam_pax", "bf16_update_rounding=kahan"]
+    with self.assertRaisesRegex(ValueError, "requires opt_type='adam_pax_low_memory'"):
+      pyconfig.initialize(argv)
+
+  def test_invalid_rounding_rejected_by_config(self):
+    argv = ["", get_test_config_path(), "run_name=test", "opt_type=adam_pax_low_memory", "bf16_update_rounding=bogus"]
+    with self.assertRaises(Exception):
+      pyconfig.initialize(argv)
+
+  def test_get_optimizer(self):
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=adam_pax_low_memory",
+        "bf16_update_rounding=kahan",
+    ]
+    config = pyconfig.initialize(argv)
+    learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    with patch.object(optimizers, "adam_pax_low_memory") as mock_opt:
+      optimizers.get_optimizer(config, learning_rate_schedule)
+      mock_opt.assert_called_once()
+      _, kwargs = mock_opt.call_args
+      self.assertEqual(kwargs["update_rounding"], "kahan")
+
+    opt = optimizers.get_optimizer(config, learning_rate_schedule)
+    params = {"w": jnp.ones((2, 4), jnp.bfloat16)}
+    state = opt.init(params)
+    updates, new_state = opt.update(params, state, params)
+    self.assertEqual(updates["w"].shape, (2, 4))
+    self.assertEqual(int(new_state.count), 1)
+
+  @parameterized.parameters("nearest", "kahan", "stochastic")
+  def test_non_bf16_params_across_rounding_modes(self, rounding):
+    params = {
+        "w_bf16": jnp.ones((2, 4), jnp.bfloat16),
+        "w_f32": jnp.ones((4,), jnp.float32),
+    }
+    grads = {
+        "w_bf16": -jnp.ones((2, 4), jnp.bfloat16),
+        "w_f32": -jnp.ones((4,), jnp.float32),
+    }
+    out, state = self._run(self._make_opt(rounding, lr=0.1), params, grads, steps=2)
+    self.assertTrue(jnp.allclose(out["w_f32"], jnp.full((4,), 1.2, jnp.float32), atol=1e-5))
+    self.assertEqual(out["w_f32"].dtype, jnp.float32)
+    if rounding == "kahan":
+      self.assertTrue(jnp.all(state.nu["w_f32"] == 0.0))
+
+  def test_momentum_and_scalar_learning_rate(self):
+    lr_value = 0.1
+    params = {"w": jnp.array([[2.0, 2.0]], jnp.bfloat16)}
+    grads_step0 = {"w": jnp.array([[1.0, 1.0]], jnp.bfloat16)}
+    grads_step1 = {"w": jnp.array([[1.0, -1.0]], jnp.bfloat16)}
+
+    opt_callable = optimizers.adam_pax_low_memory(
+        learning_rate_fn=lambda step: lr_value,
+        beta1=0.9,
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+    )
+    opt_scalar = optimizers.adam_pax_low_memory(
+        learning_rate_fn=jnp.array(lr_value),
+        beta1=0.9,
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+    )
+    state_c = opt_callable.init(params)
+    state_s = opt_scalar.init(params)
+    for grads in (grads_step0, grads_step1):
+      updates_c, state_c = opt_callable.update(grads, state_c, params)
+      updates_s, state_s = opt_scalar.update(grads, state_s, params)
+      self.assertTrue(jnp.allclose(updates_c["w"], updates_s["w"], rtol=1e-6))
+      self.assertTrue(jnp.allclose(state_c.mu["w"], state_s.mu["w"], rtol=1e-6))
+    self.assertEqual(int(state_c.count), 2)
+    # On step 1, the second column gradient flipped sign, but positive momentum from step 0 keeps mu[0, 1] > -1.
+    self.assertGreater(float(state_c.mu["w"][0, 1]), -0.5)
+
+  def test_weight_decay_and_mask(self):
+    params = {
+        "w": jnp.full((2, 2), 2.0, jnp.float32),
+        "b": jnp.full((2,), 2.0, jnp.float32),
+    }
+    grads = {
+        "w": jnp.ones((2, 2), jnp.float32),
+        "b": jnp.ones((2,), jnp.float32),
+    }
+
+    def _step(weight_decay, mask=None):
+      opt = optimizers.adam_pax_low_memory(
+          learning_rate_fn=0.1,
+          beta1=0.0,
+          epsilon=1e-8,
+          epsilon_root=0.0,
+          weight_decay=weight_decay,
+          mask=mask,
+      )
+      state = opt.init(params)
+      updates, _ = opt.update(grads, state, params)
+      return updates
+
+    no_wd = _step(0.0)
+    full_wd = _step(0.5, mask=None)
+    callable_mask_wd = _step(0.5, mask=lambda p: {"w": True, "b": False})
+    tree_mask_wd = _step(0.5, mask={"w": True, "b": False})
+
+    # Weight decay adds -lr * wd * param = -0.1 * 0.5 * 2.0 = -0.1 to unmasked leaves.
+    self.assertTrue(jnp.allclose(full_wd["w"], no_wd["w"] - 0.1, atol=1e-5))
+    self.assertTrue(jnp.allclose(full_wd["b"], no_wd["b"] - 0.1, atol=1e-5))
+    self.assertTrue(jnp.allclose(callable_mask_wd["w"], full_wd["w"], atol=1e-5))
+    self.assertTrue(jnp.allclose(callable_mask_wd["b"], no_wd["b"], atol=1e-5))
+    self.assertTrue(jnp.allclose(tree_mask_wd["w"], callable_mask_wd["w"], atol=1e-5))
+    self.assertTrue(jnp.allclose(tree_mask_wd["b"], callable_mask_wd["b"], atol=1e-5))
+
+  def test_params_required_only_for_weight_decay_or_non_nearest_rounding(self):
+    params = {"w": jnp.ones((2,), jnp.bfloat16)}
+    opt_nearest = self._make_opt("nearest")
+    state = opt_nearest.init(params)
+    updates, _ = opt_nearest.update(params, state)
+    self.assertEqual(updates["w"].shape, (2,))
+
+    opt_kahan = self._make_opt("kahan")
+    with self.assertRaises(AssertionError):
+      opt_kahan.update(params, opt_kahan.init(params), params=None)
+
+    opt_stochastic = self._make_opt("stochastic")
+    with self.assertRaises(AssertionError):
+      opt_stochastic.update(params, opt_stochastic.init(params), params=None)
+
+    opt_wd = optimizers.adam_pax_low_memory(
+        learning_rate_fn=0.1,
+        beta1=0.0,
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.1,
+    )
+    with self.assertRaises(AssertionError):
+      opt_wd.update(params, opt_wd.init(params), params=None)
+
+  def test_stochastic_round_update_non_bf16_passthrough(self):
+    # pylint: disable=protected-access
+    # Covers optimizers._stochastic_round_update early return (line 296):
+    # When p.dtype != jnp.bfloat16, _stochastic_round_update bypasses the bf16
+    # bitcast/noise path and returns (step_size * u).astype(u.dtype) directly.
+    step_size = jnp.array(-0.05, dtype=jnp.float32)
+    for dtype in (jnp.float32, jnp.float16):
+      p = jnp.array([1.0, -2.5, 0.0, 4.25], dtype=dtype)
+      u = jnp.array([0.25, -0.5, 0.0, 1.5], dtype=dtype)
+      d_key0 = optimizers._stochastic_round_update(u, p, step_size, jax.random.PRNGKey(0))
+      d_key1 = optimizers._stochastic_round_update(u, p, step_size, jax.random.PRNGKey(99))
+      expected = (step_size * u).astype(dtype)
+      self.assertEqual(d_key0.dtype, dtype)
+      self.assertTrue(jnp.array_equal(d_key0, expected))
+      # Non-bf16 updates must be completely deterministic and independent of the PRNG key.
+      self.assertTrue(jnp.array_equal(d_key0, d_key1))
+
+  def test_stochastic_round_update_bf16_exact_identity_and_sub_ulp_brackets(self):
+    # pylint: disable=protected-access
+    # Covers optimizers._stochastic_round_update bf16 bit-manipulation body (lines 297-303):
+    # At p = 1.0 in bfloat16, 1 ULP is 2^-7 = 0.0078125. With step_size = -1.0 and
+    # u = -2^-8 = -0.00390625 (exactly +0.5 ULP update), the exact fp32 target
+    # new32 = 1.0 + 2^-8 sits halfway between adjacent bf16 values 1.0 and 1.0078125.
+    # Adding 16-bit uniform noise to the fp32 uint32 bits and masking with 0xFFFF0000
+    # rounds up to 1.0078125 (d = 2^-7) or down to 1.0 (d = 0.0) with probability 0.5.
+    ulp = 2.0**-7
+    p = jnp.ones((2048,), dtype=jnp.bfloat16)
+    u = jnp.full((2048,), -0.5 * ulp, dtype=jnp.bfloat16)
+    step_size = jnp.array(-1.0, dtype=jnp.float32)
+
+    d = optimizers._stochastic_round_update(u, p, step_size, jax.random.PRNGKey(42))
+    self.assertEqual(d.dtype, jnp.bfloat16)
+
+    # Every update d must land in {0.0, ulp} so that p + d is in {1.0, 1.0 + ulp}.
+    d_f32 = d.astype(jnp.float32)
+    self.assertTrue(jnp.all((d_f32 == 0.0) | (d_f32 == ulp)))
+    new_p_bf16 = p + d
+    self.assertTrue(jnp.array_equal(new_p_bf16.astype(jnp.float32), p.astype(jnp.float32) + d_f32))
+
+    # Both rounding brackets must be exercised with ~50% probability.
+    frac_rounded_up = float(jnp.mean((d_f32 == ulp).astype(jnp.float32)))
+    self.assertAlmostEqual(frac_rounded_up, 0.5, delta=0.05)
+
+    # Zero bf16 weights with zero updates (0x00000000 in fp32) stay identically zero
+    # after adding 16-bit noise (& 0xFFFF) and masking (& 0xFFFF0000).
+    p_zero = jnp.zeros((64,), dtype=jnp.bfloat16)
+    u_zero = jnp.zeros((64,), dtype=jnp.bfloat16)
+    d_zero = optimizers._stochastic_round_update(u_zero, p_zero, step_size, jax.random.PRNGKey(7))
+    self.assertTrue(jnp.all(d_zero == 0.0))
+
+  def test_stochastic_rounding_pytree_leaf_and_step_key_folding(self):
+    # Covers adam_pax_low_memory update_fn's update_rounding == 'stochastic' branch
+    # (lines 499-509): verifies that base_key folds in both step count and per-leaf
+    # enumeration index i across a multi-leaf PyTree with mixed bf16 and fp32 leaves.
+    params = {
+        "leaf_a": jnp.ones((128,), dtype=jnp.bfloat16),
+        "leaf_b": jnp.ones((128,), dtype=jnp.bfloat16),
+        "leaf_f32": jnp.ones((16,), dtype=jnp.float32),
+    }
+    # Identical gradients on leaf_a and leaf_b produce identical RMS-normalized mu,
+    # so any difference between their updates comes solely from fold_in(base_key, i).
+    grads = {
+        "leaf_a": -jnp.ones((128,), dtype=jnp.bfloat16),
+        "leaf_b": -jnp.ones((128,), dtype=jnp.bfloat16),
+        "leaf_f32": -jnp.ones((16,), dtype=jnp.float32),
+    }
+
+    opt_seed0 = optimizers.adam_pax_low_memory(
+        learning_rate_fn=1e-3,
+        beta1=0.0,
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+        update_rounding="stochastic",
+        stochastic_rounding_seed=0,
+    )
+    opt_seed0_dup = optimizers.adam_pax_low_memory(
+        learning_rate_fn=1e-3,
+        beta1=0.0,
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+        update_rounding="stochastic",
+        stochastic_rounding_seed=0,
+    )
+    opt_seed1 = optimizers.adam_pax_low_memory(
+        learning_rate_fn=1e-3,
+        beta1=0.0,
+        epsilon=1e-8,
+        epsilon_root=0.0,
+        weight_decay=0.0,
+        update_rounding="stochastic",
+        stochastic_rounding_seed=1,
+    )
+
+    state0 = opt_seed0.init(params)
+    updates_step1, state1 = opt_seed0.update(grads, state0, params)
+    updates_step2, _ = opt_seed0.update(grads, state1, params)
+
+    # 1. Distinct leaf indices (i=0 vs i=1) receive distinct folded keys on the same step.
+    self.assertFalse(jnp.array_equal(updates_step1["leaf_a"], updates_step1["leaf_b"]))
+    # 2. Distinct step counts (count=1 vs count=2) fold distinct base_keys for the same leaf.
+    self.assertFalse(jnp.array_equal(updates_step1["leaf_a"], updates_step2["leaf_a"]))
+    # 3. The float32 leaf in the same PyTree takes the non-bf16 passthrough branch on every step.
+    self.assertTrue(jnp.allclose(updates_step1["leaf_f32"], jnp.full((16,), 1e-3, dtype=jnp.float32), atol=1e-6))
+    self.assertTrue(jnp.array_equal(updates_step1["leaf_f32"], updates_step2["leaf_f32"]))
+
+    # 4. Same stochastic_rounding_seed reproduces identical PyTree updates; a different seed diverges.
+    updates_dup, _ = opt_seed0_dup.update(grads, opt_seed0_dup.init(params), params)
+    updates_seed1, _ = opt_seed1.update(grads, opt_seed1.init(params), params)
+    for k in params:
+      self.assertTrue(jnp.array_equal(updates_step1[k], updates_dup[k]))
+    self.assertFalse(jnp.array_equal(updates_step1["leaf_a"], updates_seed1["leaf_a"]))
+
+    # 5. End-to-end config wiring for bf16_update_rounding=stochastic via get_optimizer.
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test",
+        "opt_type=adam_pax_low_memory",
+        "bf16_update_rounding=stochastic",
+    ]
+    config = pyconfig.initialize(argv)
+    lr_schedule = maxtext_utils.create_learning_rate_schedule(config)
+    opt_from_config = optimizers.get_optimizer(config, lr_schedule)
+    cfg_state = opt_from_config.init(params)
+    cfg_updates, cfg_state = opt_from_config.update(grads, cfg_state, params)
+    self.assertEqual(cfg_updates["leaf_a"].dtype, jnp.bfloat16)
+    self.assertEqual(int(cfg_state.count), 1)
 
 
 class TrainableParametersMaskTest(parameterized.TestCase):
