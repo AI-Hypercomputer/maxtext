@@ -3507,5 +3507,28 @@ class RoutedMoEFp8Test(unittest.TestCase):
     self.assertEqual(model.wi_scale.shape, expected_wi_shape)
 
 
+class FusedGluTest(unittest.TestCase):
+  """`fused_glu` matches autodiff of the split prefused gate/up output, bit for bit."""
+
+  def test_matches_autodiff_of_split_bitwise(self):
+    def glu(gate, up):
+      return (jax.nn.silu(gate) * up).astype(jnp.bfloat16)
+
+    def split_then_glu(fused):
+      n = fused.shape[-1] // 2
+      return glu(fused[:, :n], fused[:, n:])
+
+    k_fused, k_cotangent = jax.random.split(jax.random.key(0))
+    fused = (3 * jax.random.normal(k_fused, (256, 2 * 128))).astype(jnp.bfloat16)
+    # Zero cotangent rows give -0 half gradients, which autodiff's zero-padded add turns into +0.
+    cotangent = jax.random.normal(k_cotangent, (256, 128)).astype(jnp.bfloat16).at[64:128].set(0)
+    bits = lambda a: np.asarray(a).view(np.uint16)
+    for wrap in (lambda f: f, jax.checkpoint):
+      want, want_vjp = jax.vjp(jax.jit(wrap(split_then_glu)), fused)
+      got, got_vjp = jax.vjp(jax.jit(wrap(lambda f: moe.fused_glu(f, glu))), fused)
+      np.testing.assert_array_equal(bits(got), bits(want))
+      np.testing.assert_array_equal(bits(got_vjp(cotangent)[0]), bits(want_vjp(cotangent)[0]))
+
+
 if __name__ == "__main__":
   absltest.main()
