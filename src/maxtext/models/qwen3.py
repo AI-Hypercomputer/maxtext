@@ -100,6 +100,31 @@ def gdn_context_axes(cfg) -> tuple[str, ...]:
   )
 
 
+def _pin_row_major_layout(x: Array) -> Array:
+  """Constrains `x` to its default (row-major) XLA layout.
+
+  Used on the GatedDeltaNet `in_proj_qkvz` output under vLLM serving. The
+  per-head split that follows the projection (reshape to `(B, S, H_k, 2*D_k +
+  2*D_v*V/K)`, then slicing q/k/v/z along the last axis) makes XLA's layout
+  assignment prefer a heads-major layout for the projection result, which it
+  then obtains by emitting the dot with a *transposed weight* operand. The
+  weight is an entry parameter whose layout is fixed, so XLA materializes that
+  transpose as a `copy` of the whole `[embed, 2*K+2*V]` kernel (21 MB per
+  layer on Qwen3.5-397B, 44 copies per decode step ~ 4% of the step; see the
+  `copy(bf16[2560,4096]{0,1})` ops in a decode profile). Pinning the dot
+  output to row-major keeps the weight in its stored layout and moves the
+  relayout onto the activation, which is `num_tokens x 2560` and negligible in
+  decode. `with_layout_constraint` is a no-op outside `jit`.
+  """
+  try:
+    from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
+  except ImportError:  # older JAX
+    return x
+  if not isinstance(x, jax.core.Tracer):
+    return x
+  return with_layout_constraint(x, Layout(major_to_minor=tuple(range(x.ndim))))
+
+
 def naive_jax_chunk_gated_delta_rule(
     query, key, value, g, beta, chunk_size=64, initial_state=None, use_qk_norm_in_gdn=False
 ):
@@ -898,6 +923,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
     qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
+    if use_paged_state and getattr(cfg, "gdn_pin_in_proj_output_layout", True):
+      qkvz = _pin_row_major_layout(qkvz)
     if use_gdn_kernel:
       qkvz = checkpoint_name(qkvz, "qkv_proj")
     # ba: (B, S, 2 * H_v)

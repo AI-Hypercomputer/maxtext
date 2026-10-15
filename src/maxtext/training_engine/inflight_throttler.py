@@ -65,6 +65,17 @@ class InflightThrottler:
         self._flush_pending_metrics()
         self._pending_metrics = metrics
 
+  def block_until_ready(self) -> None:
+    """Waits for every inflight computation to finish, leaving the queue as it is.
+
+    Unlike `wait_for_all`, nothing is dequeued and no metrics are written: the next
+    `wait_for_next` / `wait_for_all` sees the same queue and finds it already finished.
+    """
+    with self._inflight_queue.mutex:
+      inflight = list(self._inflight_queue.queue)
+    for computation, _ in inflight:
+      jax.block_until_ready(computation)
+
   def wait_for_all(self) -> None:
     """Wait for all inflight computations to finish and log their metrics."""
     while not self._inflight_queue.empty():

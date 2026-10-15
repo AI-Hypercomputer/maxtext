@@ -1602,6 +1602,9 @@ gdn_chunk_size: 64
 use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
+# vLLM serving only: pin the GDN in_proj_qkvz output to row-major so XLA does not re-layout the
+# projection weight on every step (see Qwen3NextGatedDeltaNet).
+gdn_pin_in_proj_output_layout: true
 # Whether to use GDN Pallas kernel
 use_gdn_kernel: false
 # GDN context parallelism mode ('auto', 'seq', or 'head')
