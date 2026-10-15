@@ -32,6 +32,8 @@ class GDNMode(enum.StrEnum):
 
   BATCHED = enum.auto()
   PER_SEQ = enum.auto()
+  # PER_SEQ that only carries the conv/recurrent states and t_inv: no output, no chunk states.
+  PER_SEQ_STATES = enum.auto()
 
   def get_seq_tile_size(self, tile_size: int) -> int:
     if self == GDNMode.BATCHED:
