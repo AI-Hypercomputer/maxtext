@@ -24,7 +24,7 @@ In this tutorial we use a single host TPU VM such as `v6e-8/v5p-8`. Let's get st
 
 ## Install dependencies
 
-For instructions on installing MaxText on your VM, please refer to the [official documentation](../../install_maxtext) and use the `maxtext[tpu]` installation path to include all necessary dependencies.
+For instructions on installing MaxText on your VM, please refer to the [official documentation](../../install_maxtext.md) and use the `maxtext[tpu]` installation path to include all necessary dependencies.
 
 ## Setup environment variables
 

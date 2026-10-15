@@ -156,7 +156,7 @@ python3 -m tests.utils.forward_pass_logit_checker \
     --golden_logits_path=${PWD}/golden_Qwen3_Next.jsonl
 ```
 
-To run MMLU benchmarks and validate the model's performance, follow the instructions provided [here](../../../benchmarks/api_server/README.md).
+To run MMLU benchmarks and validate the model's performance, follow the instructions provided [here](../../../../../benchmarks/api_server/README.md).
 
 ## Supported MoE Strategies
 
