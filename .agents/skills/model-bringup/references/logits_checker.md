@@ -111,6 +111,7 @@ If discrepancies persist:
    - MLP intermediate and output projections
    - Final norm and logits
 3. Compare intermediate tensors side-by-side to pinpoint the exact failing operation.
+4. For automated 1:1 HF-to-MaxText config auditing, layerwise `.npz` activation bisection, and isolated FP64 single-layer weight checks, use the [maxtext-logit-bisect](../../maxtext-logit-bisect/SKILL.md) skill.
 
 ---
 
