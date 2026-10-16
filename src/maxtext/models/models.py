@@ -33,6 +33,7 @@ from maxtext.layers.embeddings import Embed
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers import audio_decoders
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_logging
 
@@ -142,7 +143,21 @@ class Transformer(nnx.Module):
         VisionEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_multimodal", False) else None
     )
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_audio", False) else None
-    self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
+    self.decoder = NNXDecoder(
+        config=cfg,
+        mesh=mesh,
+        quant=self.quant,
+        model_mode=self.model_mode,
+        rngs=rngs,
+        feature_spec=audio_decoders.get_feature_spec(cfg),
+    )
+    # Attach output components at their original roots to preserve checkpoint paths.
+    audio_components = audio_decoders.create_audio_components(
+        cfg, mesh, self.quant, model_mode=self.model_mode, rngs=rngs
+    )
+    self.audio_component_names = tuple(audio_components)
+    for name, component in audio_components.items():
+      setattr(self, name, component)
 
     # If MTP is enabled via config, set up the MTP block.
     if getattr(self.config, "mtp_num_layers", 0) > 0:
