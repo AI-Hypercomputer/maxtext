@@ -369,6 +369,7 @@ def _validator_cfg(**overrides):
       "gdn_conv1d_input_in_qkv_dtype": False,
       "gdn_conv1d_dense_token_stack": False,
       "gdn_cp_mode": "auto",
+      "packing": True,
   }
   fields.update(overrides)
   return types.SimpleNamespace(**fields)
