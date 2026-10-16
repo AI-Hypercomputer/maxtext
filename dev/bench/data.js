@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792112523636,
+  "lastUpdate": 1792128814530,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -51108,6 +51108,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 6779.195999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 478,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Daniel Mandragona",
+            "username": "dandragona",
+            "email": "dandragona@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "60225f3f5971fe3319f0c6c00f54989df7f3eb6b",
+          "message": "Makes maxtext/experimental/lineage match the code that ran in the DeepSeek-V3 671B MLPerf Training v6.1 8k-chip result runs, which applied these edits so the Lineage stack runs on released jax 0.11.1 / libtpu 0.0.48.\n\nResults:\n- After this change, every module in the package matches the code that ran, at the AST level (docstrings ignored). The only differences left are import paths that Copybara rewrites on export, plus a few changes made after the runs.\n\nImportant technical details:\n- dsv3_sparse_layer.py: falls back from jax.experimental.overlap.program_order to jax._src.pjit.program_order, then to an identity decorator, when the import is unavailable.\n- dsv3_sparse_layer.py / dsv3_experts.py: drops the tiling= argument from the activation-bank Layout constraint (released libtpu cannot serialize result_tilings); the major_to_minor constraint is kept.\n- ops.py: removes the pltpu.annotate Mosaic memory-ref hints in ragged_gather_reduce (not in released JAX); the hints only steer codegen and annotate returns the same ref.\n\nPiperOrigin-RevId: 1000559356",
+          "timestamp": "2026-10-16T02:52:02Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/60225f3f5971fe3319f0c6c00f54989df7f3eb6b"
+        },
+        "date": 1792128813614,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 285.92,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 100.924,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2012.9680000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 96.349,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.23299999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7876.362000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 478,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1440.562,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.014,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 6806.334999999998,
             "unit": "sec"
           },
           {
