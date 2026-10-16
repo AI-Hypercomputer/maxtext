@@ -232,6 +232,16 @@ def add_text_to_summary_writer(key, value, summary_writer):
     summary_writer.add_text(key, value)
 
 
+def _uses_checkpoints(raw_keys):
+  """Returns True if the run saves or loads checkpoints, which needs the distributed system on multi-host."""
+  return bool(
+      raw_keys["enable_checkpointing"]
+      or raw_keys.get("load_parameters_path")
+      or raw_keys.get("load_full_state_path")
+      or raw_keys.get("source_checkpoint_layout") == "safetensors_dynamic"
+  )
+
+
 def maybe_initialize_jax_distributed_system(raw_keys):
   """The best recipe to initialize the Jax Distributed System has varied over time. We keep a layer of
   indirection in MaxText to avoid breaking the call sites unnecessarily.
@@ -307,7 +317,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
         num_slices=raw_keys["num_slices"],
     )
     max_logging.log("Jax distributed system initialized on TPUs for multi-tier checkpointing!")
-  elif raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1:
+  elif _uses_checkpoints(raw_keys) and raw_keys["compile_topology_num_slices"] == -1:
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
