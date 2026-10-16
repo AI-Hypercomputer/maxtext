@@ -2675,8 +2675,18 @@ def _patch_pgle_profiler() -> None:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+_registered = False
+
+
 def register() -> None:
-    """Register the collective-overlap POST_SCHEDULER pass and PGLE hook."""
+    """Register the collective-overlap POST_SCHEDULER pass and PGLE hook.
+
+    Idempotent: elastic retries re-run initialize(), and each extra registration
+    would queue another copy of the pass.
+    """
+    global _registered
+    if _registered:
+        return
     if os.environ.get("COLLECTIVE_OVERLAP_DISABLE", "1") == "1":
         _logger.info("collective_overlap_pass: disabled (set COLLECTIVE_OVERLAP_DISABLE=0 to enable)")
         return
@@ -2694,4 +2704,5 @@ def register() -> None:
         name="profile_guided_collective_overlap",
         stage=jex_xla.PipelineStage.POST_SCHEDULER,
     )
+    _registered = True
     _logger.info("collective_overlap_pass: registered POST_SCHEDULER pass 'profile_guided_collective_overlap'.")
