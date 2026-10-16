@@ -29,6 +29,7 @@ from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
 from maxtext.training_engine import abstract_engine
+from maxtext.training_engine import checkpointing
 from maxtext.training_engine import maxtext_engine
 from maxtext.training_engine import metrics as metrics_module
 from maxtext.utils import maxtext_utils
@@ -544,6 +545,21 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     t.save_checkpoint(metadata={"step": 10})
     mock_orbax_mgr.save.assert_not_called()
     mock_orbax_mgr.delete.assert_not_called()
+
+  def test_skip_checkpoint_save_if_in_progress_installs_the_skip_policy_only_when_set(self):
+    # The behavior itself is covered against real Orbax in
+    # tests/unit/training_engine_checkpoint_skip_in_progress_test.py; this checks the key reaches
+    # the wrapper through pyconfig and ends up as Orbax's save-decision policy.
+    t = maxtext_engine.MaxTextTrainingEngine(
+        self.setup_config(enable_checkpointing=True, skip_checkpoint_save_if_in_progress=True)
+    )
+    wrapper = t._checkpoint_manager
+    self.assertIsInstance(wrapper._skip_policy, checkpointing._SkipWhileSaveInProgressPolicy)
+    self.assertIs(wrapper._checkpoint_manager._save_decision_policy, wrapper._skip_policy)
+
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    self.assertFalse(t._config.skip_checkpoint_save_if_in_progress)
+    self.assertIsNone(t._checkpoint_manager._skip_policy)
 
   def test_save_checkpoint_overwrites_intra_step_checkpoint_at_same_step(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))

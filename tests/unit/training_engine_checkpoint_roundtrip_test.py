@@ -57,6 +57,7 @@ def _config():
       async_checkpointing=True,
       async_checkpointing_timeout_secs=1200,
       abandon_failed_checkpoint_saves=False,
+      skip_checkpoint_save_if_in_progress=False,
       checkpoint_storage_use_ocdbt=False,
       checkpoint_storage_use_zarr3=False,
       checkpoint_storage_device_host_concurrent_gb=None,

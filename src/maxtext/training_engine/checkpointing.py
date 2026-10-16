@@ -15,7 +15,7 @@
 """Checkpointing utilities for MaxText training engine."""
 
 import collections
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 import dataclasses
 import math
 import os
@@ -31,6 +31,7 @@ import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.training_engine import abstract_engine
 import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp_v1
 
 
 @dataclasses.dataclass
@@ -403,6 +404,64 @@ def _assert_uniform_device_set(tree: Any, *, item: str) -> None:
     )
 
 
+def _interval_save_decision_policy(save_interval_steps: int) -> ocp_v1.training.save_decision_policies.SaveDecisionPolicy:
+  """Orbax's default save-decision policy for `CheckpointManagerOptions(save_interval_steps=...)`, restated.
+
+  Passing `save_decision_policy` replaces that default outright, so its members are rebuilt here (see
+  Orbax's `_get_default_save_decision_policy`): every `save_interval_steps` steps, on a preemption
+  signal, and the first save of a run. `save_on_steps`, which this manager never sets, is left out.
+  """
+  policies = ocp_v1.training.save_decision_policies
+  return policies.AnySavePolicy(
+      [
+          policies.FixedIntervalPolicy(save_interval_steps),
+          policies.PreemptionCheckpointingPolicy(),
+          policies.InitialSavePolicy(),
+      ]
+  )
+
+
+class _SkipWhileSaveInProgressPolicy:
+  """Orbax save-decision policy: `inner`'s decision, except that a step is declined while a save is in progress.
+
+  "In progress" means the background half (storage writes and finalization) of the previous async
+  save has not ended; Orbax hands the flag to every policy as `context.is_saving_in_progress`. Orbax
+  tracks it per process, and in a multi-process job it flips under a barrier whose wall-clock order
+  differs from process to process, so a decision read from it could differ between processes and
+  leave the ones that went on to save waiting at Orbax's barriers for the ones that skipped. The
+  policy is therefore limited to single-process jobs (`CheckpointManager` enforces this); a
+  multi-process version would take the decision on the primary host and publish it through Orbax's
+  signaling client, as Orbax's own `ContinuousCheckpointingPolicy` does. A forced save never consults
+  a policy, so it still waits.
+  """
+
+  def __init__(self, inner: ocp_v1.training.save_decision_policies.SaveDecisionPolicy):
+    self._inner = inner
+    # The step the latest decision declined because a save was in progress; see `take_declined_step`.
+    self._declined_step: int | None = None
+
+  def should_save(
+      self,
+      step: Any,
+      previous_steps: Sequence[Any],
+      *,
+      context: ocp_v1.training.save_decision_policies.DecisionContext,
+  ) -> bool:
+    """`inner`'s decision for `step`, unless a save is in progress, which declines it and records the step."""
+    self._declined_step = None
+    if not self._inner.should_save(step, previous_steps=previous_steps, context=context):
+      return False
+    if context.is_saving_in_progress:
+      self._declined_step = step.step
+      return False
+    return True
+
+  def take_declined_step(self) -> int | None:
+    """Returns the step the latest decision declined because a save was in progress, or None; cleared once read."""
+    step, self._declined_step = self._declined_step, None
+    return step
+
+
 class CheckpointManager:
   """CheckpointManager wrapper for MaxText training engine."""
 
@@ -421,6 +480,10 @@ class CheckpointManager:
     # Whether a background save that fails is raised from the next checkpoint call (False, the
     # default) or logged and dropped (True). See `_drain_in_flight_save`.
     self._abandon_failed_saves = config.abandon_failed_checkpoint_saves
+    # Installed when `skip_checkpoint_save_if_in_progress` is set: Orbax's save-decision policy for
+    # `checkpoint_period` that also declines a step while the previous save is still being written,
+    # so the request is dropped instead of waiting. See `save_checkpoint`.
+    self._skip_policy: _SkipWhileSaveInProgressPolicy | None = None
     # The step of the save most recently handed to Orbax, so a failure that surfaces later can
     # be attributed to it.
     self._in_flight_step: int | None = None
@@ -450,10 +513,22 @@ class CheckpointManager:
             save_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
         )
 
+      if config.skip_checkpoint_save_if_in_progress:
+        if jax.process_count() > 1:
+          raise ValueError(
+              "skip_checkpoint_save_if_in_progress needs a single JAX process (e.g. Pathways); this job has "
+              f"{jax.process_count()}. Orbax tracks the in-progress flag per process, so the processes could "
+              "decide differently and the ones that went on to save would wait at Orbax's barriers for the "
+              "ones that skipped."
+          )
+        self._skip_policy = _SkipWhileSaveInProgressPolicy(_interval_save_decision_policy(config.checkpoint_period))
+
       self._checkpoint_manager = ocp.CheckpointManager(
           directory=checkpoint_dir,
           options=ocp.CheckpointManagerOptions(
               save_interval_steps=config.checkpoint_period,
+              # None keeps Orbax's default policy for `save_interval_steps`; the skip policy restates it.
+              save_decision_policy=self._skip_policy,
               max_to_keep=config.max_num_checkpoints_to_keep,
               enable_async_checkpointing=config.async_checkpointing,
               # Deadline for the background half of a save (storage writes and finalization).
@@ -669,7 +744,9 @@ class CheckpointManager:
       custom_metadata: Custom metadata to save with the checkpoint.
 
     Returns:
-      Whether the checkpoint was saved.
+      Whether the checkpoint was saved. False when checkpointing is disabled, when the interval policy
+      declines the step, when a checkpoint for it already exists, or when the previous save is still
+      being written and `skip_checkpoint_save_if_in_progress` is set.
     """
     if self._checkpoint_manager is None:
       logging.info("Checkpointing is disabled, skipping save.")
@@ -688,6 +765,21 @@ class CheckpointManager:
     # failed step from `get_latest_step()` before the check below.
     if kwargs.get("force") or self._checkpoint_manager.should_save(step):
       self._drain_in_flight_save(f"before saving step {step}")
+    elif self._skip_policy is not None and self._skip_policy.take_declined_step() == step:
+      # The policy declined this step because the previous save's background half (storage writes and
+      # finalization) is still running. Draining here would block training until it ends and only
+      # then write this step; with the option on, this request is dropped instead and the next one
+      # after it ends saves. Orbax clears the in-progress flag when that background half ends for any
+      # reason, failure included, so a failed save never hides behind this: the next request drains
+      # it and `abandon_failed_checkpoint_saves` decides whether it is raised or dropped.
+      logging.warning(
+          "Skipping the checkpoint save at step %d: the save at step %s is still being written and "
+          "skip_checkpoint_save_if_in_progress is set. Step %d will not be restorable.",
+          step,
+          self._in_flight_step,
+          step,
+      )
+      return False
 
     # A checkpoint already exists at this step. Skip, unless this one is more complete --
     # the case that matters is a step resumed from an intra-step checkpoint and then run to
