@@ -2114,6 +2114,50 @@ try:
 except AttributeError:
   qwen3_8_2_4t_a95b_config = PTConfig(**qwen3_8_2_4t_a95b_dict)  # pytype: disable=wrong-arg-types
 
+glm5_3_flash_dict = {
+    "architectures": ["Glm5NextForConditionalGeneration"],
+    "image_token_id": 154854,
+    "model_type": "glm5_next",
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 154826,
+        "dtype": "bfloat16",
+        "eos_token_id": [154827, 154828],
+        "first_k_dense_replace": 3,
+        "head_dim": 256,
+        "hidden_act": "silu",
+        "hidden_size": 4096,
+        "initializer_range": 0.02,
+        "intermediate_size": 12288,
+        "kda_config": {
+            "conv_kernel_size": 4,
+            "gate_lower_bound": -5.0,
+            "head_dim": 128,
+            "num_heads": 64,
+        },
+        "max_position_embeddings": 1048576,
+        "model_type": "glm5_next_text",
+        "moe_intermediate_size": 2048,
+        "n_routed_experts": 288,
+        "n_shared_experts": 1,
+        "norm_topk_prob": True,
+        "num_attention_heads": 64,
+        "num_experts_per_tok": 8,
+        "num_hidden_layers": 45,
+        "num_key_value_heads": 64,
+        "pad_token_id": 154820,
+        "rms_norm_eps": 1e-05,
+        "routed_scaling_factor": 2.5,
+        "swiglu_limit": 10.0,
+        "tie_word_embeddings": False,
+        "vocab_size": 154880,
+    },
+    "tie_word_embeddings": False,
+    "transformers_version": "5.16.1",
+}
+glm5_3_flash_config = PTConfig(**glm5_3_flash_dict)
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
@@ -2173,4 +2217,5 @@ HF_MODEL_CONFIGS = {
     "olmo3-7b": olmo3_7b_config,
     "olmo3-7b-pt": olmo3_7b_config,
     "olmo3-32b": olmo3_32b_config,
+    "glm5.3-flash": glm5_3_flash_config,
 }
