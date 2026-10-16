@@ -199,6 +199,34 @@ class ConfigTest(absltest.TestCase):
           types.MaxTextConfig(**{**common_config, **overrides})
         self.assertIn(expected_error, str(context.exception))
 
+  def test_te_moe_quantized_weight_gather_validation(self):
+    common = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_mxfp8",
+        "te_moe_quantize_before_fsdp_all_gather": True,
+        "override_logical_axis_rules": True,
+    }
+    self.assertTrue(types.MaxTextConfig(**common).te_moe_quantize_before_fsdp_all_gather)
+    self.assertFalse(
+        types.MaxTextConfig(
+            **{**common, "te_moe_quantize_before_fsdp_all_gather": False}
+        ).te_moe_quantize_before_fsdp_all_gather
+    )
+    for overrides in (
+        {"te_gmm_quantization": "te_no_quant"},
+        {"use_2d_fsdp_sharding": True},
+        {"te_moe_quantize_before_fsdp_all_gather": "invalid"},
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaises(pydantic.ValidationError):
+          types.MaxTextConfig(**{**common, **overrides})
+
   def test_te_moe_block_uses_ragged_buffer_factor_validation(self):
     common_config = {
         "run_name": "test",
@@ -1126,6 +1154,20 @@ class ConfigTest(absltest.TestCase):
     ]
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
+
+  def test_te_moe_dispatch_remat_location(self):
+    """Dispatch outputs participate in the custom remat policy."""
+    name = "te_moe_dispatch_remat_location"
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "remat_policy=custom"]
+    default_config = pyconfig.initialize(argv)
+    self.assertEqual(getattr(default_config, name), types.RematLocation.REMAT)
+    for location in ("remat", "device", "offload"):
+      with self.subTest(location=location):
+        config = pyconfig.initialize(argv + [f"{name}={location}"])
+        self.assertEqual(name in config.tensors_on_device, location == "device")
+        self.assertEqual(name in config.tensors_to_offload, location == "offload")
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv + [f"{name}=invalid"])
 
   def test_indexer_cutoff_threshold_remat_policy(self):
     """Tests custom remat policy and validation for indexer_cutoff_threshold."""

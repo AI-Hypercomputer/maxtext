@@ -76,6 +76,19 @@ WI_0 = "wi_0"
 WI_1 = "wi_1"
 WO = "wo"
 
+_TE_MOE_CHECKPOINT_NAMES = {
+    "wi_0_checkpoint_name": "moe_mlpwi_0",
+    "wi_1_checkpoint_name": "moe_mlpwi_1",
+    "wo_checkpoint_name": "moe_mlpwo",
+    "dispatch_checkpoint_name": "te_moe_dispatch_remat_location",
+}
+
+
+def _get_te_moe_checkpoint_kwargs(moe_fn) -> dict[str, str]:
+  """Return supported TE MoE output remat names."""
+  parameters = inspect.signature(moe_fn).parameters
+  return {name: label for name, label in _TE_MOE_CHECKPOINT_NAMES.items() if name in parameters}
+
 
 @struct.dataclass
 class RouteMetadata:
@@ -4848,6 +4861,7 @@ class RoutedMoE(nnx.Module):
     """Run TransformerEngine's fused EP MoEBlock using MaxText-owned params."""
     try:
       from transformer_engine.jax import moe as te_moe  # pylint: disable=import-outside-toplevel
+      from transformer_engine.jax.sharding import MeshResource  # pylint: disable=import-outside-toplevel
     except ImportError as exc:
       raise ImportError(
           "te_moe_block=True requires TransformerEngine JAX MoE support. "
@@ -4874,11 +4888,13 @@ class RoutedMoE(nnx.Module):
     fc1_quantizer_set, fc2_quantizer_set = self.quant.get_moe_block_quantizer_sets(
         self.config.te_gmm_quantization,
         # Dispatch buffers have one group per (fsdp, ep, local_expert),
-        # while model weights retain their global expert-group shape until
-        # TE's grouped-GEMM partitioning gathers the quantized FSDP shard.
-        n_token_groups=fsdp_size * self.num_experts,
+        # while model weights retain their global expert-group descriptor.
+        # TE owns either the BF16 gather or the opt-in quantized gather.
+        n_token_groups=self.mesh.shape.get("data", 1) * fsdp_size * self.num_experts,
         n_expert_groups=self.num_experts,
     )
+
+    checkpoint_kwargs = _get_te_moe_checkpoint_kwargs(te_moe.moe)
 
     output, lb_loss, total_recv_tokens = te_moe.moe(
         inputs,
@@ -4900,14 +4916,15 @@ class RoutedMoE(nnx.Module):
         aux_loss_coeff=self.config.load_balance_loss_weight,
         apply_topk_weights_early=True,
         quantizer_sets=(fc1_quantizer_set, fc2_quantizer_set),
-        ep_axis=self._expert_parallelism_name,
-        data_parallelism_axes=("fsdp",),
+        mesh_resource=MeshResource(dp_resource="data", fsdp_resource="fsdp", ep_resource=self._expert_parallelism_name),
         input_axes=("activation_batch", "activation_norm_length", None),
         gate_kernel_axes=self.kernel_axes,
         wi_kernel_axes=self.wi_kernel_axes,
         wo_kernel_axes=self.wo_kernel_axes,
         dtype=self.dtype,
         recv_capacity_per_rank=max_utils.get_te_moe_recv_capacity_per_rank(),
+        quant_before_fsdp_ag=self.config.te_moe_quantize_before_fsdp_all_gather,
+        **checkpoint_kwargs,
     )
     recv_capacity_per_rank = max_utils.get_te_moe_recv_capacity_per_rank()
     output = output.astype(self.dtype)
