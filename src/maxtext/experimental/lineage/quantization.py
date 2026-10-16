@@ -155,6 +155,11 @@ FP8_FULL_SPLASH_QK_E3 = QuantConfig(
 )
 FP8_FULL_COMBINE = dataclasses.replace(FP8_FULL, combine_qtype=jnp.float8_e4m3fn)
 FP8_FULL_COMBINE_PER_HOP = dataclasses.replace(FP8_FULL_COMBINE, combine_per_hop_scaling=True)
+FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP = dataclasses.replace(
+    FP8_FULL_SPLASH_QK_E3,
+    combine_qtype=jnp.float8_e4m3fn,
+    combine_per_hop_scaling=True,
+)
 
 
 def static_quantize(x: jax.Array, qtype: Any, scale: float) -> jax.Array:

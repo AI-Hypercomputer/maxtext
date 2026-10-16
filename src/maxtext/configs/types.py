@@ -1702,6 +1702,7 @@ class DeepSeekMoE(BaseModel):
       "fp8_full_splash_qk",
       "fp8_full_splash_qk_e3",
       "fp8_full_combine_per_hop",
+      "fp8_full_splash_qk_e3_combine_per_hop",
   ] = Field(
       "none",
       description=(

@@ -38,6 +38,7 @@ QUANT_CONFIGS: dict[str, quantization.QuantConfig | None] = {
     "fp8_full_splash_qk_e3": quantization.FP8_FULL_SPLASH_QK_E3,
     "fp8_full_combine": quantization.FP8_FULL_COMBINE,
     "fp8_full_combine_per_hop": quantization.FP8_FULL_COMBINE_PER_HOP,
+    "fp8_full_splash_qk_e3_combine_per_hop": (quantization.FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP),
 }
 
 

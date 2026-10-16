@@ -735,9 +735,13 @@ def eval_config_and_params(
 ) -> tuple[dsv3_config.DSv3Config, DSv3Params]:
   """The config and parameters of the eval step.
 
-  Without `cfg.eval_sharding` both are returned unchanged. With it, the config
-  uses `eval_sharding` and the parameters are resharded to its weight specs,
-  which `eval_sharding` keeps equal to the training layout up to a local
+  The eval step drops the combine quantization (`quant.combine_qtype`), so its
+  combine token reduce-scatter stays bf16: the FP8 `ops.reduce_scatter_sc0`
+  kernel does not support the small per-device batch sizes of eval.
+
+  Without `cfg.eval_sharding` the parameters are returned unchanged. With it,
+  the config uses `eval_sharding` and the parameters are resharded to its weight
+  specs, which `eval_sharding` keeps equal to the training layout up to a local
   reslice (e.g. the MLA head dim of `dsv3_sharding.expert_axes_as_cp_config`),
   so the reshard moves no data across devices.
 
@@ -749,6 +753,10 @@ def eval_config_and_params(
   Returns:
     `(eval_cfg, eval_params)`.
   """
+  quant = cfg.kernels.quant
+  if quant is not None and quant.combine_qtype is not None:
+    quant = dataclasses.replace(quant, combine_qtype=None, combine_per_hop_scaling=False)
+    cfg = dataclasses.replace(cfg, kernels=dataclasses.replace(cfg.kernels, quant=quant))
   if cfg.eval_sharding is None:
     return cfg, params
   eval_cfg = dataclasses.replace(cfg, sharding=cfg.eval_sharding, eval_sharding=None)
@@ -780,7 +788,7 @@ def dsv3_loss_and_aux(
     state: Mutable state (router biases, expert permutations).
     batch: The batch.
     cfg: Model config. In eval, its `eval_sharding` (if set) replaces `sharding`
-      (see `eval_config_and_params`).
+      and the combine quantization is dropped (see `eval_config_and_params`).
     mesh: The device mesh.
     train: Training step (adds the MTP loss).
     update_state: When `train` is True, compute the per-batch routed-bias

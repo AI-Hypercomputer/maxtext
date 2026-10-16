@@ -91,23 +91,29 @@ def _should_tc_fallback(
     axis_name: str | tuple[str, ...],
     num_tokens: int,
 ) -> bool:
-  """Whether multi-axis collectives should fall back to TensorCore.
+  """Whether a routing-metadata collective should skip the SparseCore 0 block.
+
+  Only the routing-metadata collectives (`_all_gather_routing_metadata` and
+  `_psum_scatter_routing_metadata`) consult this. Token dispatch and combine
+  always run as aggregated SparseCore 0 `compute_on` blocks: emitting them as
+  plain collectives splits them into separately scheduled SparseCore offloads
+  (cl/999064204 applied the fallback to them too; pdb=2 8x16x16 profiles showed
+  the dispatch all-gathers landing on SparseCore 0 un-aggregated).
 
   On small per-device token counts (< MULTI_AXIS_TC_FALLBACK_TOKEN_THRESHOLD,
-  e.g. pdb=1 with 2048 tokens/core), SparseCore 0 collectives overlap
+  e.g. pdb=1 with 2048 tokens/core), the SparseCore 0 block overlaps
   asynchronously with TensorCore compute without contention. At larger token
   counts (>= MULTI_AXIS_TC_FALLBACK_TOKEN_THRESHOLD, e.g. pdb >= 2 with 4096
-  tokens/core), SparseCore DMA scheduling causes severe ICI/TC
-  desynchronization, so falling back to TensorCore collectives is significantly
-  faster.
+  tokens/core) on multi-axis meshes, the metadata collectives are emitted as
+  plain `jax.lax` collectives for XLA to schedule instead.
 
   Args:
     axis_name: Mesh axis or tuple of mesh axes along which to communicate.
     num_tokens: Explicit per-shard token count.
 
   Returns:
-    True if the collective should execute on TensorCore, False if on SparseCore
-    0.
+    True if the collective should be emitted as a plain `jax.lax` collective,
+    False if it should run in a SparseCore 0 `compute_on` block.
   """
   if not (isinstance(axis_name, (tuple, list)) and len(axis_name) > 1):
     return False
@@ -117,26 +123,21 @@ def _should_tc_fallback(
 def _all_gather_sc0(
     *operands: jax.Array,
     axis_name: str | tuple[str, ...],
-    num_tokens: int,
 ) -> tuple[jax.Array, ...]:
   """Executes all_gather on SparseCore 0.
 
-  Falls back to TensorCore on multi-axis collectives with >= 4096 tokens (see
-  `_should_tc_fallback`) and when any gathered output is below XLA's SparseCore
+  Falls back to TensorCore when any gathered output is below XLA's SparseCore
   offload threshold (`_SC_ALL_GATHER_MIN_BYTES`), e.g. a fractional eval batch.
 
   Args:
     *operands: Arrays to all-gather along axis 0.
     axis_name: Mesh axis or tuple of mesh axes along which to gather.
-    num_tokens: Explicit per-shard token count.
 
   Returns:
     A tuple of the gathered arrays.
   """
   axis_size = _get_axis_size(axis_name)
-  if _should_tc_fallback(axis_name, num_tokens) or any(
-      x.size * x.dtype.itemsize * axis_size < _SC_ALL_GATHER_MIN_BYTES for x in operands
-  ):
+  if any(x.size * x.dtype.itemsize * axis_size < _SC_ALL_GATHER_MIN_BYTES for x in operands):
     return tuple(jax.lax.all_gather(x, axis_name=axis_name, axis=0, tiled=True) for x in operands)
 
   @compute_on(
@@ -153,11 +154,8 @@ def _all_gather_sc0(
 def _psum_scatter_sc0(
     *operands: jax.Array,
     axis_name: str | tuple[str, ...],
-    num_tokens: int,
 ) -> tuple[jax.Array, ...]:
-  """Executes psum_scatter on SparseCore 0, falling back to TC on multi-axis with >= 4096 tokens."""
-  if _should_tc_fallback(axis_name, num_tokens):
-    return tuple(jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=0, tiled=True) for x in operands)
+  """Executes psum_scatter on SparseCore 0."""
 
   @compute_on(
       compute_type="tpu_sparsecore",
@@ -228,13 +226,11 @@ def _psum_scatter_and_reduce_sc0(
     axis_name: str | tuple[str, ...],
     reduce_fn: Callable[[Any], Any],
     reduce_operand: Any,
-    num_tokens: int,
 ) -> tuple[tuple[jax.Array, ...], Any]:
   """Executes psum_scatter, then `reduce_fn(reduce_operand)`, on SparseCore 0.
 
   Both run in one SparseCore block, so `reduce_fn`'s collectives start as soon
-  as the psum_scatters are done. When `axis_name` spans multiple mesh axes with
-  >= 4096 tokens, executes on TensorCore instead.
+  as the psum_scatters are done.
 
   Args:
     *operands: Arrays to psum_scatter along dimension 0.
@@ -242,14 +238,10 @@ def _psum_scatter_and_reduce_sc0(
     reduce_fn: Function applied to `reduce_operand` after the psum_scatters,
       typically issuing further collectives.
     reduce_operand: Pytree passed to `reduce_fn`.
-    num_tokens: Explicit per-shard token count.
 
   Returns:
     A tuple of the scattered operands and `reduce_fn(reduce_operand)`.
   """
-  if _should_tc_fallback(axis_name, num_tokens):
-    scattered = tuple(jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=0, tiled=True) for x in operands)
-    return scattered, reduce_fn(reduce_operand)
 
   @compute_on(
       compute_type="tpu_sparsecore",
@@ -261,6 +253,56 @@ def _psum_scatter_and_reduce_sc0(
     return scattered, reduce_fn(reduce_operand)
 
   return _rs_then_reduce(operands, reduce_operand)
+
+
+def _all_gather_routing_metadata(
+    x: jax.Array,
+    *,
+    axis_name: str | tuple[str, ...],
+    num_tokens: int,
+) -> jax.Array:
+  """All-gathers routing metadata along axis 0.
+
+  Runs on SparseCore 0 unless `_should_tc_fallback` says to emit a plain
+  collective for XLA to schedule.
+
+  Args:
+    x: Array to all-gather along axis 0.
+    axis_name: Mesh axis or tuple of mesh axes along which to gather.
+    num_tokens: Per-shard token count, see `_should_tc_fallback`.
+
+  Returns:
+    The gathered array.
+  """
+  if _should_tc_fallback(axis_name, num_tokens):
+    return jax.lax.all_gather(x, axis_name=axis_name, axis=0, tiled=True)
+  (x_ag,) = _all_gather_sc0(x, axis_name=axis_name)
+  return x_ag
+
+
+def _psum_scatter_routing_metadata(
+    x: jax.Array,
+    *,
+    axis_name: str | tuple[str, ...],
+    num_tokens: int,
+) -> jax.Array:
+  """Reduce-scatters routing metadata along dimension 0.
+
+  Runs on SparseCore 0 unless `_should_tc_fallback` says to emit a plain
+  collective for XLA to schedule.
+
+  Args:
+    x: Array to psum_scatter along dimension 0.
+    axis_name: Mesh axis or tuple of mesh axes along which to scatter.
+    num_tokens: Per-shard token count, see `_should_tc_fallback`.
+
+  Returns:
+    The scattered array.
+  """
+  if _should_tc_fallback(axis_name, num_tokens):
+    return jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=0, tiled=True)
+  (x_rs,) = _psum_scatter_sc0(x, axis_name=axis_name)
+  return x_rs
 
 
 def _gather_sc0(
@@ -459,7 +501,7 @@ def _sort_coeffs_fwd(
     tuple[jt.Int[jax.Array, "kNBT"], jt.Int[jax.Array, "E_local"]],
 ]:
   del num_experts_per_tok
-  (coeffs_ag,) = _all_gather_sc0(coeffs, axis_name=axis_name, num_tokens=coeffs.shape[0])
+  coeffs_ag = _all_gather_routing_metadata(coeffs, axis_name=axis_name, num_tokens=coeffs.shape[0])
   sorted_coeffs = _gather_sc0(jnp.reshape(coeffs_ag, (-1, 1)), sort_indices)
   return sorted_coeffs, (sort_indices, group_sizes)
 
@@ -478,7 +520,7 @@ def _sort_coeffs_bwd(
   unsorted = _scatter_sc0(masked_grad, sort_indices)
   grad_coeffs_ag = jnp.reshape(unsorted, (-1, num_experts_per_tok))
   num_tokens = grad_coeffs_ag.shape[0] // _get_axis_size(axis_name)
-  (grad_coeffs,) = _psum_scatter_sc0(grad_coeffs_ag, axis_name=axis_name, num_tokens=num_tokens)
+  grad_coeffs = _psum_scatter_routing_metadata(grad_coeffs_ag, axis_name=axis_name, num_tokens=num_tokens)
   return grad_coeffs, None, None
 
 
@@ -604,7 +646,7 @@ def _routing_metadata_impl(
   device_index = _get_axis_index(physical_expert_axis_name)
 
   selected_experts_flat = jnp.ravel(physical_selected_experts)
-  (all_selected_experts,) = _all_gather_sc0(
+  all_selected_experts = _all_gather_routing_metadata(
       selected_experts_flat,
       axis_name=physical_expert_axis_name,
       num_tokens=physical_selected_experts.shape[0],
@@ -1057,13 +1099,7 @@ def _combine_with_coeff_grads_impl(
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"]]:
   """Per-shard body of `dsv3_combine_with_coeff_grads`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
-  num_tokens = grad_x_ag.shape[0] // _get_axis_size(physical_expert_axis_name)
-  grad_x_local, grad_coeffs_local = _psum_scatter_sc0(
-      grad_x_ag,
-      grad_coeffs_ag,
-      axis_name=physical_expert_axis_name,
-      num_tokens=num_tokens,
-  )
+  grad_x_local, grad_coeffs_local = _psum_scatter_sc0(grad_x_ag, grad_coeffs_ag, axis_name=physical_expert_axis_name)
   return _reshape_combined_grads(
       grad_x_local,
       grad_coeffs_local,
@@ -1138,14 +1174,12 @@ def _combine_with_coeff_grads_and_reduce_impl(
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"], list[jax.Array]]:
   """Per-shard body of `dsv3_combine_with_coeff_grads_and_reduce`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
-  num_tokens = grad_x_ag.shape[0] // _get_axis_size(physical_expert_axis_name)
   (grad_x_local, grad_coeffs_local), reduced = _psum_scatter_and_reduce_sc0(
       grad_x_ag,
       grad_coeffs_ag,
       axis_name=physical_expert_axis_name,
       reduce_fn=reduce_fn,
       reduce_operand=reduce_operand,
-      num_tokens=num_tokens,
   )
   grad_x, grad_coeffs = _reshape_combined_grads(
       grad_x_local,
@@ -1482,11 +1516,7 @@ def dsv3_dispatch_impl(
   """Dispatches local tokens via all-gather on SC0."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
   x_flat = jnp.reshape(x, (-1, x.shape[-1] // 128, 128))
-  (x_ag,) = _all_gather_sc0(
-      x_flat,
-      axis_name=physical_expert_axis_name,
-      num_tokens=x_flat.shape[0],
-  )
+  (x_ag,) = _all_gather_sc0(x_flat, axis_name=physical_expert_axis_name)
   return x_ag
 
 
@@ -1537,12 +1567,7 @@ def dsv3_aggregated_dispatches_impl(
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
   moe_in_flat = jnp.reshape(moe_in, (-1, moe_in.shape[-1] // 128, 128))
   grad_out_flat = jnp.reshape(grad_out, (-1, grad_out.shape[-1] // 128, 128))
-  x_ag, grad_y_ag = _all_gather_sc0(
-      moe_in_flat,
-      grad_out_flat,
-      axis_name=physical_expert_axis_name,
-      num_tokens=moe_in_flat.shape[0],
-  )
+  x_ag, grad_y_ag = _all_gather_sc0(moe_in_flat, grad_out_flat, axis_name=physical_expert_axis_name)
   return x_ag, grad_y_ag
 
 
@@ -1606,12 +1631,7 @@ def dsv3_combine_impl(
         per_hop_scaling=combine_per_hop_scaling,
     )
   else:
-    num_tokens = y_ag.shape[0] // _get_axis_size(physical_expert_axis_name)
-    (y_local,) = _psum_scatter_sc0(
-        y_ag,
-        axis_name=physical_expert_axis_name,
-        num_tokens=num_tokens,
-    )
+    (y_local,) = _psum_scatter_sc0(y_ag, axis_name=physical_expert_axis_name)
   return jnp.reshape(
       y_local,
       (-1, local_seq_length, y_local.shape[-2] * y_local.shape[-1]),
