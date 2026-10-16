@@ -1309,6 +1309,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
 
+      if self.config.decoder_block.value == "qwen3_8":
+        for slot in slots:
+          full_cache = jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
+        return full_cache
+
       if path_key in _DEEPSEEK_V4_CACHE_KEYS:
         # Copy these states by explicitly overwriting the target slots matching current request id
         for slot in slots:
@@ -1429,6 +1434,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
       if batch_idx < 0:
         raise ValueError(f"Batch index {batch_idx=} shouldn't be less than zero for {path_key}, got {annotations=}")
+
+      if self.config.decoder_block.value == "qwen3_8":
+        return jax.lax.dynamic_update_index_in_dim(full_cache, partial_cache, slot, batch_idx)
 
       if path_key in _DEEPSEEK_V4_CACHE_KEYS:
         # Copy these states by explicitly overwriting the target slot matching current request id

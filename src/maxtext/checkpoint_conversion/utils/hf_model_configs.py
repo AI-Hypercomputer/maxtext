@@ -2114,8 +2114,56 @@ try:
 except AttributeError:
   qwen3_8_2_4t_a95b_config = PTConfig(**qwen3_8_2_4t_a95b_dict)  # pytype: disable=wrong-arg-types
 
+class Qwen38CheckpointConfig(PTConfig):
+  """Text checkpoint metadata without an import-time experimental dependency."""
+
+  model_type = "qwen4_exp_text"
+
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
+    "qwen3.8-flash-next": Qwen38CheckpointConfig(
+        architectures=["Qwen4ExpForCausalLM"],
+        tie_word_embeddings=False,
+        dtype="bfloat16",
+        rms_norm_eps=1e-6,
+        max_position_embeddings=262144,
+        full_attention_interval=4,
+        output_gate_type="sigmoid",
+        linear_conv_kernel_dim=4,
+        indexer_n_heads=4,
+        indexer_kv_heads=1,
+        indexer_head_dim=128,
+        indexer_budget=2048,
+        indexer_compress_ratio=4,
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 10000000,
+            "partial_rotary_factor": 0.25,
+            "mrope_section": [11, 11, 10],
+            "mrope_interleaved": True,
+        },
+        hidden_size=2560,
+        num_hidden_layers=48,
+        num_attention_heads=24,
+        num_key_value_heads=2,
+        head_dim=256,
+        num_experts=512,
+        num_experts_per_tok=10,
+        moe_intermediate_size=640,
+        shared_expert_intermediate_size=640,
+        linear_num_key_heads=16,
+        linear_num_value_heads=48,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
+        hc_count=4,
+        hc_lowrank=320,
+        ple_layer_ids=[2],
+        ple_embed_dim=2560,
+        ngram_vocab_size_base=20000000,
+        vocab_size=248320,
+        eos_token_id=248044,
+    ),
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
     "gemma2-27b": gemma2_27b_config,

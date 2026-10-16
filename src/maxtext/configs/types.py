@@ -296,6 +296,7 @@ ModelName = Literal[
     "qwen3-next-80b-a3b",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
+    "qwen3.8-flash-next",
     "qwen3.5-9b",
     "qwen3.5-35b-a3b",
     "qwen3.5-35b-a3b-fp8",
@@ -1741,6 +1742,11 @@ class DeepSeekMoE(BaseModel):
 class Qwen3Next(BaseModel):
   """Configuration specific to Qwen3-Next models with Gated Delta Net."""
 
+  qwen38_hc_count: int = Field(4, description="Qwen3.8 gated residual stream count.")
+  qwen38_hc_lowrank: int = Field(320, description="Qwen3.8 gated residual bottleneck rank.")
+  qwen38_ple_compact_rows: int = Field(
+      0, ge=0, description="Test fixture PLE row count; 0 retains all 128 full table shards."
+  )
   gdn_conv_kernel_dim: int = Field(4, description="Kernel size for the 1D convolution in the Gated Delta Net.")
   gdn_key_head_dim: int = Field(128, description="Head dimension for the key/query in the Gated Delta Net.")
   gdn_value_head_dim: int = Field(128, description="Head dimension for the value in the Gated Delta Net.")
@@ -5671,6 +5677,7 @@ class MaxTextConfig(
       # Both hybrid decoders share the same GatedDeltaNet sublayers, so the same gaps.
       if self.decoder_block in (
           DecoderBlockType.QWEN3_5,
+          DecoderBlockType.QWEN3_8,
           DecoderBlockType.QWEN3_NEXT,
       ):
         decoder_name = self.decoder_block.value
@@ -5905,6 +5912,7 @@ class MaxTextConfig(
     if self.decoder_block in (
         DecoderBlockType.QWEN3_NEXT,
         DecoderBlockType.QWEN3_5,
+        DecoderBlockType.QWEN3_8,
     ):
       if int(self.gdn_num_value_heads) % int(self.gdn_num_key_heads) != 0:
         raise ValueError("gdn_num_value_heads must be divisible by gdn_num_key_heads")
