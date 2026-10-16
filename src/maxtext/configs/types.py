@@ -1568,7 +1568,10 @@ class MoEGeneral(BaseModel):
 class MoEKernels(BaseModel):
   """Configuration for MoE-specific kernels like Megablox."""
 
-  megablox: bool = Field(True, description="Whether to use Megablox kernels for MoE.")
+  megablox: bool = Field(
+      True,
+      description="Whether to use Megablox kernels for MoE. Automatically disabled when hardware='cpu'.",
+  )
   sparse_matmul: bool = Field(True, description="Whether to use sparse matmul kernels for MoE.")
   wi_tile_fwd_batch_seq: int = Field(
       512,
@@ -4900,6 +4903,10 @@ class MaxTextConfig(
         "compile_topology_num_slices": self.compile_topology_num_slices,
     }
     self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
+
+    # Megablox Pallas Mosaic kernels are TPU-specific; automatically fall back to jax.lax.ragged_dot on CPU.
+    if self.hardware == "cpu" and self.megablox:
+      self.megablox = False
 
     # Check for AQT deprecation warning
     if self.quantization and not self.use_qwix_quantization:

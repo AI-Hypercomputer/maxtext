@@ -2409,9 +2409,11 @@ class RoutedMoE(nnx.Module):
           and not self.config.quantization
           and not self.config.use_gmm_v2
           and not isinstance(inputs, qpl.QArray)
+          and self.config.hardware != "cpu"
       )
-      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
-      use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox
+      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox.
+      # On CPU (hardware="cpu"), bypass TPU Pallas custom-VJP kernels and fall back to jax.lax.ragged_dot.
+      use_custom_vjp_gmm = (self.config.use_tokamax_gmm or self.config.megablox) and self.config.hardware != "cpu"
 
       if is_tokamax_v1_unquantized:
         # tokamax v1 (unquantized)
