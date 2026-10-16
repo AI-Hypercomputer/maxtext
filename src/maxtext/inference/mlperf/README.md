@@ -59,7 +59,7 @@ mv 09292024_mixtral_15k_mintoken2_v1.pkl mixtral-processed-data.pkl
 ```
 
 ### Install Maxtext
-For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/en/latest/install_maxtext.html). Then, run the following commands to install the additional dependencies:
+For instructions on installing MaxText on your VM, please refer to the [official documentation](https://maxtext.readthedocs.io/page/install_maxtext.html). Then, run the following commands to install the additional dependencies:
 ```
 cd ~
 git clone https://github.com/AI-Hypercomputer/maxtext.git

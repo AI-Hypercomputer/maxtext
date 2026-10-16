@@ -1,9 +1,12 @@
 echo "Running 2vm.sh"
 
-# Example command to invoke this script via XPK
-# python3 xpk/xpk.py workload create --cluster ${CLUSTER_NAME} \
-# --workload ${WORKLOAD_NAME} --docker-image=gcr.io/supercomputer-testing/${LOCAL_IMAGE_NAME} \
-# --device-type ${DEVICE_TYPE} --num-slices 2 \
+# Example command to submit this script with Cluster Toolkit (gcluster). See
+# docs/run_maxtext/run_maxtext_via_cluster_toolkit.md to install gcluster and set the default
+# project, cluster, and location (`gcluster job config set ...`). COMPUTE_TYPE is the GPU
+# type, e.g. h100-80gb-8 (a3-highgpu-8g).
+# gcluster job submit --name=${WORKLOAD_NAME} \
+# --image=gcr.io/${PROJECT_ID}/${LOCAL_IMAGE_NAME} \
+# --compute-type=${COMPUTE_TYPE} --num-nodes=2 \
 # --command "bash src/maxtext/configs/gpu/a3/llama_2_7b/2vm.sh"
 
 # Stop execution if any command exits with error

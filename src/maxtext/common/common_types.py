@@ -151,6 +151,7 @@ class DecoderBlockType(enum.Enum):
   OLMO3 = "olmo3"
   DEEPSEEK4 = "deepseek4"
   ENVY = "envy"
+  WEAVER = "weaver"
 
 
 class VisionEncoderBlockType(enum.Enum):
@@ -202,9 +203,12 @@ class CustomRule(enum.Enum):
   DEFAULT = ""
   PURE_FSDP = "pure-fsdp"
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
+  CP_AS_EP_DENSE_NO_CP = "cp-as-ep-dense-no-cp"  # cp-as-ep with the dense weights on fsdp x expert, not context
+  CP_AS_EP_DENSE_FSDP = "cp-as-ep-dense-fsdp"  # cp-as-ep with the dense weights on fsdp only
   EP_AS_CP = "ep-as-cp"  # Support EP only
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
   FSDP_2D = "2d-fsdp"
   EP_AS_DP = "ep-as-dp"
   SHARD_EXP_ON_FSDP = "shard-exp-on-fsdp"
   FSDP_AS_DP_FOR_ATTN = "fsdp-as-dp-for-attn"
+  FSDP_AS_DP_FOR_ATTN_RF = "fsdp-as-dp-for-attn-rf"  # fsdp-as-dp-for-attn with the router weight sharded on fsdp

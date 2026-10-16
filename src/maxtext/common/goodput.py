@@ -20,12 +20,16 @@ to various logging platforms, including cloud logging and TensorBoard.
 """
 
 import contextlib
-import jax
 from enum import Enum
-from maxtext.utils import max_logging
+import jax
 from maxtext.common.gcloud_stub import goodput_modules
+from maxtext.utils import max_logging
 
 goodput, monitoring, _GOODPUT_STUB = goodput_modules()
+
+
+def get_goodput_job_name(config) -> str:
+  return config.goodput_job_name or config.run_name
 
 
 class GoodputEvent(Enum):
@@ -44,6 +48,7 @@ RECORD_JOB_END_TIME = f"record_{GoodputEvent.JOB.value}_end_time"
 
 def _construct_goodput_monitor(config, common_kwargs):
   """Constructs a GoodputMonitor, preferring the elastic-aware monitor when applicable."""
+  job_name = common_kwargs["job_name"]
   if config.elastic_enabled:
     try:
       from maxtext.utils import elastic_utils  # pylint: disable=import-outside-toplevel
@@ -52,13 +57,13 @@ def _construct_goodput_monitor(config, common_kwargs):
         from ml_goodput_measurement import monitoring_elastic  # pylint: disable=import-outside-toplevel
 
         monitor = monitoring_elastic.ElasticGoodputMonitor(include_slice_efficiency=True, **common_kwargs)
-        max_logging.log(f"Goodput: using ElasticGoodputMonitor for job: {config.run_name}")
+        max_logging.log(f"Goodput: using ElasticGoodputMonitor for job: {job_name}")
         return monitor
     except Exception as e:  # pylint: disable=broad-exception-caught
       max_logging.log(f"Goodput: could not create elastic goodput monitor, falling back to base monitor: {e}")
 
   monitor = monitoring.GoodputMonitor(pathway_enabled=config.enable_pathways_goodput, **common_kwargs)
-  max_logging.log(f"Goodput: using GoodputMonitor for job: {config.run_name}")
+  max_logging.log(f"Goodput: using GoodputMonitor for job: {job_name}")
   return monitor
 
 
@@ -87,9 +92,12 @@ def maybe_monitor_goodput(config):
         enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
     )
 
+    job_name = get_goodput_job_name(config)
+    logger_name = f"goodput_{job_name}"
+
     common_kwargs = {
-        "job_name": config.run_name,
-        "logger_name": f"goodput_{config.run_name}",
+        "job_name": job_name,
+        "logger_name": logger_name,
         "tensorboard_dir": config.tensorboard_dir,
         "upload_interval": config.goodput_upload_interval_seconds,
         "monitoring_enabled": True,
@@ -101,12 +109,42 @@ def maybe_monitor_goodput(config):
 
     goodput_monitor = _construct_goodput_monitor(config, common_kwargs)
     goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Goodput upload to Tensorboard & GCM in the background!")
-    yield
+    max_logging.log("Started Cumulative Goodput upload to Tensorboard & GCM in the background!")
+    with maybe_monitor_rolling_window_goodput(goodput_monitor, config):
+      yield
   finally:
     if goodput_monitor:
       goodput_monitor.stop_goodput_uploader()
-      max_logging.log("Flushed final metrics and safe exited from Goodput monitoring.")
+      max_logging.log("Flushed final metrics and safe exited from cumulative Goodput monitoring.")
+
+
+@contextlib.contextmanager
+def maybe_monitor_rolling_window_goodput(goodput_monitor, config):
+  """Monitor rolling window goodput if enabled on the lead host.
+
+  Failures to start or stop the rolling window uploader are logged and
+  swallowed so that monitoring degrades gracefully and never interrupts
+  training. Exceptions raised by the wrapped block are not caught here.
+  """
+  if _GOODPUT_STUB or not goodput_monitor or not config.enable_rolling_window_goodput:
+    yield
+    return
+  started = False
+  try:
+    goodput_monitor.start_rolling_window_goodput_uploader(config.rolling_windows_seconds)
+    started = True
+    max_logging.log("Started Rolling Window Goodput upload to Tensorboard & GCM in the background!")
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Goodput: failed to start rolling window goodput uploader, continuing without it: {e}")
+  try:
+    yield
+  finally:
+    if started:
+      try:
+        goodput_monitor.stop_rolling_window_goodput_uploader()
+        max_logging.log("Flushed final metrics and safe exited from rolling window Goodput monitoring.")
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        max_logging.log(f"Goodput: failed to stop rolling window goodput uploader cleanly: {e}")
 
 
 @contextlib.contextmanager
@@ -147,7 +185,8 @@ def create_goodput_recorder(config):
   if not config.enable_goodput_recording:
     return None
 
-  logger_name = f"goodput_{config.run_name}"
+  job_name = get_goodput_job_name(config)
+  logger_name = f"goodput_{job_name}"
 
   # Detect if we should use the elastic-aware recorder
   if config.elastic_enabled:
@@ -157,13 +196,13 @@ def create_goodput_recorder(config):
       if elastic_utils.should_use_elastic(config):
         from ml_goodput_measurement import goodput_elastic  # pylint: disable=import-outside-toplevel
 
-        recorder = goodput_elastic.ElasticGoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
+        recorder = goodput_elastic.ElasticGoodputRecorder(job_name, logger_name, jax.process_index() == 0)
         elastic_utils.record_slice_state(recorder)
-        max_logging.log(f"Goodput: created ElasticGoodputRecorder for job: {config.run_name}")
+        max_logging.log(f"Goodput: created ElasticGoodputRecorder for job: {job_name}")
         return recorder
     except Exception as e:  # pylint: disable=broad-exception-caught
       max_logging.log(f"Goodput: could not create elastic goodput recorder, falling back to base recorder: {e}")
 
-  recorder = goodput.GoodputRecorder(config.run_name, logger_name, jax.process_index() == 0)
-  max_logging.log(f"Goodput: created base GoodputRecorder for job: {config.run_name}")
+  recorder = goodput.GoodputRecorder(job_name, logger_name, jax.process_index() == 0)
+  max_logging.log(f"Goodput: created base GoodputRecorder for job: {job_name}")
   return recorder

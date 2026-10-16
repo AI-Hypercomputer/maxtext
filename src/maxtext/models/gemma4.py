@@ -20,17 +20,17 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.sharding import Mesh
 import jax.numpy as jnp
 
-from flax import linen as nn
 from flax import nnx
 from typing import Optional, Any
 
 from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL
 from maxtext.layers import initializers
 from maxtext.layers import moe
-from maxtext.layers import nnx_scan, nnx_wrappers
+from maxtext.layers import nnx_scan
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import MlpBlock
+from maxtext.utils.sharding import with_logical_constraint
 
 import jax.sharding
 from maxtext.layers.normalizations import RMSNorm
@@ -337,11 +337,11 @@ class Gemma4DecoderLayer(nnx.Module):
       is_scan_carry = True
     elif isinstance(inputs, tuple):
       inputs = inputs[0]
-    inputs = nn.with_logical_constraint(inputs, self.activation_axis_names)
+    inputs = with_logical_constraint(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     lnx = self.pre_self_attention_norm(inputs)
-    lnx = nn.with_logical_constraint(lnx, self.activation_axis_names)
+    lnx = with_logical_constraint(lnx, self.activation_axis_names)
 
     # Gemma4 only applies bidirectional attention in sliding (local) layers,
     # not in full (global) attention layers.
@@ -362,7 +362,7 @@ class Gemma4DecoderLayer(nnx.Module):
     )
     if cfg.use_post_attn_norm:
       attention_lnx = self.post_self_attention_norm(attention_lnx)
-    attention_lnx = nn.with_logical_constraint(attention_lnx, self.activation_axis_names)
+    attention_lnx = with_logical_constraint(attention_lnx, self.activation_axis_names)
 
     attention_lnx += inputs
     residual = attention_lnx
@@ -383,13 +383,13 @@ class Gemma4DecoderLayer(nnx.Module):
     if cfg.use_post_ffw_norm:
       mlp_lnx = self.post_ffw_norm(mlp_lnx)
 
-    mlp_lnx = nn.with_logical_constraint(mlp_lnx, self.activation_axis_names)
+    mlp_lnx = with_logical_constraint(mlp_lnx, self.activation_axis_names)
 
     next_layer_addition = mlp_lnx + residual
     layer_output = next_layer_addition
     layer_output = layer_output * jnp.asarray(self.layer_scalar.value, cfg.dtype)
 
-    layer_output = nn.with_logical_constraint(layer_output, self.activation_axis_names)
+    layer_output = with_logical_constraint(layer_output, self.activation_axis_names)
 
     if getattr(cfg, "record_internal_nn_metrics", False):
       self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
@@ -411,12 +411,6 @@ class Gemma4DecoderLayer(nnx.Module):
       return (layer_output, stacked_kv_cache, layer_idx + 1), None
     else:
       return layer_output, kv_cache
-
-
-Gemma4DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Gemma4DecoderLayer,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)
 
 
 class Gemma4ScannableBlock(nnx.Module):
@@ -667,7 +661,7 @@ class Gemma4ScannableBlock(nnx.Module):
       attention_metadata=None,
   ):
     cfg = self.config
-    inputs = nn.with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
+    inputs = with_logical_constraint(inputs, ("activation_batch", "activation_norm_length", "activation_embed"))
     inputs = checkpoint_name(inputs, "decoder_layer_input")
 
     # Arguments shared by every layer in the block. model_mode differentiates
@@ -699,9 +693,3 @@ class Gemma4ScannableBlock(nnx.Module):
     if cfg.scan_layers:
       return y, None
     return y
-
-
-Gemma4ScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Gemma4ScannableBlock,
-    base_metadata_fn=initializers.variable_to_logically_partitioned,
-)

@@ -15,7 +15,9 @@
 
 """Create an Orbax CheckpointManager with specified (Async or not) Checkpointer."""
 
+import collections
 import contextlib
+import dataclasses
 import importlib
 import os
 import time
@@ -23,6 +25,7 @@ from typing import Any
 
 from etils import epath
 from flax import nnx
+from flax.nnx import variablelib
 from flax import struct
 
 
@@ -45,6 +48,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_logging
 from maxtext.utils import sharding as maxtext_sharding
+from orbax.checkpoint import logging as ocp_logging
 from orbax.checkpoint import v1 as ocp
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
@@ -61,6 +65,17 @@ create_orbax_emergency_replicator_checkpoint_manager = emergency_checkpointing.c
 
 # Union of v1 Checkpointer / the emergency factories return; used in type hints.
 CheckpointManager = ocp.training.Checkpointer | EmergencyCheckpointManager | EmergencyReplicatorCheckpointManager
+
+
+def _deep_merge_dicts(target: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
+  """Recursively merges source dict into target dict."""
+  out = dict(target)
+  for k, v in source.items():
+    if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+      out[k] = _deep_merge_dicts(out[k], v)
+    else:
+      out[k] = v
+  return out
 
 
 def _weight_mismatches(want, have, path=(), check_missing: bool = True, is_quantized_param: bool = False):
@@ -98,6 +113,134 @@ def _weight_mismatches(want, have, path=(), check_missing: bool = True, is_quant
   if want_shape is not None and got_shape is not None and tuple(want_shape) != tuple(got_shape):
     return [(name, f"shape {tuple(got_shape)} but the model expects {tuple(want_shape)}")]
   return []
+
+
+def _lookup_path(tree, path):
+  """Returns the leaf at `path` in a nested dict, or None if absent."""
+  node = tree
+  for key in path:
+    if not isinstance(node, dict) or key not in node:
+      return None
+    node = node[key]
+  return node
+
+
+def _alias_legacy_collections(params_collection, stored_collection_meta):
+  """Redirects weights whose Flax collection postdates the checkpoint into `params`.
+
+  A weight's Linen collection name is derived from its NNX Variable *class*
+  (`variable_name_from_type`). So promoting a weight from `nnx.Param` to a custom
+  `nnx.Variable` subclass silently moves it from the `params` collection into a new
+  one -- and every checkpoint written before that promotion still stores it under
+  `params`.
+
+  This bit us badly: DeepSeek-V4's routed gate bias became a `MoEBiasVar`, but the
+  converted checkpoints store it at `params/params/decoder/layers_N/mlp/MoeBlock_0/
+  gate/bias`. The restore request simply skipped the unknown `MoEBiasVar` collection,
+  so all 40 bias tensors stayed at their zero initialiser with no error raised, which
+  silently corrupted expert selection in every MoE layer.
+
+  Rather than drop such a collection, look each of its leaves up inside the
+  checkpoint's `params` collection and request it from there. A leaf that is genuinely
+  absent is left alone so the existing mismatch check can still report it.
+
+  Args:
+    params_collection: mapping of collection name -> nested weight tree, as it will be
+      handed to Orbax.
+    stored_collection_meta: mapping of collection name -> nested metadata tree read off
+      the checkpoint, or None when metadata could not be read.
+
+  Returns:
+    `(patched_collection, aliased)` where `aliased` maps collection name -> list of
+    leaf paths that were moved into `params`. Callers restoring into a structure that
+    is keyed by collection (i.e. Linen) must move those paths back afterwards; the NNX
+    path merges all collections by path, so it needs no un-aliasing.
+  """
+  if not isinstance(stored_collection_meta, dict) or not stored_collection_meta:
+    return params_collection, {}
+
+  stored_params = stored_collection_meta.get("params")
+  if not isinstance(stored_params, dict):
+    return params_collection, {}
+
+  patched = dict(params_collection)
+  params_flat = dict(nnx.traversals.flatten_mapping(patched.get("params", {})))
+  aliased = {}
+
+  for col, tree in params_collection.items():
+    if col == "params" or col in stored_collection_meta or not isinstance(tree, dict):
+      continue
+    tree_flat = dict(nnx.traversals.flatten_mapping(tree))
+    moved = []
+    for path, leaf in tree_flat.items():
+      if _lookup_path(stored_params, path) is None:
+        continue  # genuinely absent; let the normal mismatch check speak.
+      params_flat[path] = leaf
+      moved.append(path)
+    if moved:
+      aliased[col] = moved
+      moved_set = set(moved)
+      remaining = {p: v for p, v in tree_flat.items() if p not in moved_set}
+      if remaining:
+        patched[col] = nnx.traversals.unflatten_mapping(remaining)
+      else:
+        patched.pop(col, None)
+      max_logging.log(
+          f"Checkpoint predates the '{col}' collection; restoring its {len(moved)} weight(s) "
+          f"from the 'params' collection instead of skipping them."
+      )
+
+  if aliased:
+    patched["params"] = nnx.traversals.unflatten_mapping(params_flat)
+  return patched, aliased
+
+
+def _unalias_legacy_collections(restored_collection, aliased):
+  """Moves aliased weights back from `params` into their own collection.
+
+  Inverse of `_alias_legacy_collections`, needed only for the Linen path, whose
+  restored structure stays keyed by collection.
+  """
+  if not aliased or not isinstance(restored_collection, dict):
+    return restored_collection
+
+  out = dict(restored_collection)
+  params_flat = dict(nnx.traversals.flatten_mapping(out.get("params", {})))
+  for col, paths in aliased.items():
+    col_flat = dict(nnx.traversals.flatten_mapping(out.get(col, {})))
+    for path in paths:
+      if path in params_flat:
+        col_flat[path] = params_flat.pop(path)
+    if col_flat:
+      out[col] = nnx.traversals.unflatten_mapping(col_flat)
+  out["params"] = nnx.traversals.unflatten_mapping(params_flat)
+  return out
+
+
+def _log_unconsumed_checkpoint_weights(want, stored_collection):
+  """Warns about checkpoint tensors the model never asked for.
+
+  `_weight_mismatches` only walks `want`, so it answers "did the checkpoint supply
+  everything the model needs?" and never "did the model consume everything the
+  checkpoint supplied?". The second question is the one that would have caught the
+  DeepSeek-V4 routed-bias regression immediately. This is a warning rather than an
+  error because legitimately partial loads (LoRA, SFT, params-only) are common.
+  """
+  if not isinstance(want, dict) or not isinstance(stored_collection, dict):
+    return
+  try:
+    want_paths = set(nnx.traversals.flatten_mapping(want).keys())
+    stored_paths = set(nnx.traversals.flatten_mapping(stored_collection).keys())
+  except Exception:  # pylint: disable=broad-except
+    return
+  unconsumed = sorted("/".join(str(p) for p in path) for path in stored_paths - want_paths)
+  if not unconsumed:
+    return
+  preview = ", ".join(unconsumed[:5])
+  max_logging.log(
+      f"WARNING: {len(unconsumed)} checkpoint weight(s) were not requested by the model and "
+      f"will be ignored (the model will use its initialised values). First few: {preview}"
+  )
 
 
 def _expected_and_restored_params(abstract_nnx_state, restored_linen):
@@ -176,6 +319,13 @@ def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
   nnx_aux = restored_linen.get("nnx_aux")
   if nnx_aux:
     train_state_nnx.apply_checkpoint_aux(aux_state, nnx_aux)
+  elif isinstance(restored_linen.get("params"), dict):
+    custom_collections = {k: v for k, v in restored_linen["params"].items() if k != "params" and isinstance(v, dict)}
+    if custom_collections:
+      merged_custom = {}
+      for col_data in custom_collections.values():
+        merged_custom = _deep_merge_dicts(merged_custom, col_data)
+      train_state_nnx.apply_checkpoint_aux(aux_state, {"model": merged_custom})
 
   return nnx.merge_state(linen_state, aux_state, ephemeral)
 
@@ -253,9 +403,17 @@ def _restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
 
 
 def _abstract_params(abstract_unboxed_pre_state):
-  """Returns the state's weights: the NNX Param subtree, or Linen's `params` collection."""
+  """Returns the state's weights: persistent model variables (excluding transient state), or Linen's `params` collection."""
   if isinstance(abstract_unboxed_pre_state, nnx.State):
-    return nnx.split_state(abstract_unboxed_pre_state.model, nnx.Param, ...)[0]
+    model_state = (
+        abstract_unboxed_pre_state["model"] if "model" in abstract_unboxed_pre_state else abstract_unboxed_pre_state
+    )
+    return model_state.filter(
+        lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+    )
+  elif hasattr(abstract_unboxed_pre_state, "model") and isinstance(abstract_unboxed_pre_state.model, nnx.Module):
+    state = nnx.state(abstract_unboxed_pre_state.model)
+    return state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)))
   return abstract_unboxed_pre_state.params
 
 
@@ -392,6 +550,7 @@ def create_orbax_checkpoint_manager(
     todelete_subdir: str | None = None,
     todelete_full_path: str | None = None,
     ocdbt_target_data_file_size_bytes: int | None = None,
+    colocated_python_checkpointing: bool = False,
 ):
   """Returns an Orbax v1 training ``Checkpointer``, or None if checkpointing is disabled."""
   if not enable_checkpointing:
@@ -399,12 +558,6 @@ def create_orbax_checkpoint_manager(
     return None
 
   # TODO: b/529622681 - Remove deprecated settings.
-  if orbax_logger is not None:
-    max_logging.warning(
-        "Cloud logging (enable_checkpoint_cloud_logger) is disabled because"
-        " Orbax v1 now configures its own logger internally. This config"
-        " setting is ignored and will be removed."
-    )
   if dataset_type is not None:
     max_logging.warning(
         "Specifying dataset_type upon checkpointer creation is deprecated and"
@@ -428,6 +581,7 @@ def create_orbax_checkpoint_manager(
       todelete_full_path=todelete_full_path,
       todelete_subdir=todelete_subdir,
       partial_load=True,
+      colocated_python_checkpointing=colocated_python_checkpointing,
   )
 
   manager = ocp.training.Checkpointer(
@@ -444,9 +598,81 @@ def create_orbax_checkpoint_manager(
   )
   # Necessary bridge to support v0 backward compatibility.
   manager.use_async = use_async  # pyrefly: ignore[missing-attribute]
+  if orbax_logger is not None:
+    _attach_checkpoint_logger(manager, orbax_logger)
 
   max_logging.log("Checkpoint manager created!")
   return manager
+
+
+def _attach_checkpoint_logger(manager: ocp.training.Checkpointer, orbax_logger: Any) -> None:
+  """Routes Orbax checkpoint step statistics to `orbax_logger` (e.g. Goodput).
+
+  The Orbax v1 `Checkpointer` does not expose a `logger` argument and builds its
+  internal v0 `CheckpointManager` with the default `StandardLogger`, so save
+  statistics never reach Cloud Logging. Attach the logger to the internal
+  manager so v0-compatible save step statistics are emitted again.
+
+  TODO: b/529622681 - Pass the logger via the public v1 API once Orbax supports it.
+
+  Args:
+    manager: The Orbax v1 training `Checkpointer`.
+    orbax_logger: An Orbax `AbstractLogger`, e.g. `ocp_logging.CloudLogger`.
+  """
+  internal_manager = getattr(manager, "_manager", None)
+  if internal_manager is None or not hasattr(internal_manager, "_logger"):
+    max_logging.warning(
+        "Could not attach checkpoint logger: Orbax v1 Checkpointer internals changed."
+        " Checkpoint save/restore statistics will not be sent to Cloud Logging."
+    )
+    return
+  try:
+    internal_manager._logger = orbax_logger  # pylint: disable=protected-access
+    # v1 `load_checkpointables` bypasses the internal manager's restore logging,
+    # so keep a handle to log restore statistics from `load_state_if_possible`.
+    manager.orbax_logger = orbax_logger  # pyrefly: ignore[missing-attribute]
+  except AttributeError as e:
+    max_logging.warning(
+        f"Could not attach checkpoint logger: {e}."
+        " Checkpoint save/restore statistics will not be sent to Cloud Logging."
+    )
+    return
+  max_logging.log("Attached checkpoint logger to Orbax v1 Checkpointer.")
+
+
+def _load_checkpointables_with_logging(
+    checkpoint_manager: ocp.training.Checkpointer,
+    step: int,
+    abstract_checkpointables: dict[str, Any],
+) -> dict[str, Any]:
+  """Loads checkpointables and logs v0-compatible restore step statistics."""
+  orbax_logger = getattr(checkpoint_manager, "orbax_logger", None)
+  if orbax_logger is None:
+    return checkpoint_manager.load_checkpointables(step, abstract_checkpointables)
+
+  # Logging is auxiliary: failures here must never block the restore itself.
+  step_stats = None
+  try:
+    step_stats = ocp_logging.step_statistics.RestoreStepStatistics()
+    step_stats.step = step
+    step_stats.directory = str(checkpoint_manager.directory)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(f"Failed to initialize checkpoint restore statistics: {e}")
+
+  start_time = time.time()
+  restored = checkpoint_manager.load_checkpointables(step, abstract_checkpointables)
+  end_time = time.time()
+
+  if step_stats is not None:
+    try:
+      step_stats.checkpoint_manager_start_time = start_time
+      step_stats.checkpointer_start_time = start_time
+      step_stats.checkpointer_duration_secs = end_time - start_time
+      step_stats.checkpoint_manager_duration_secs = end_time - start_time
+      orbax_logger.log_entry(dataclasses.asdict(step_stats))
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      max_logging.warning(f"Failed to log checkpoint restore statistics: {e}")
+  return restored
 
 
 def print_save_message(step, async_checkpointing):
@@ -604,7 +830,7 @@ def load_state_if_possible(
         abstract_checkpointables["iter"] = grain_utility.for_restore(
             checkpoint_manager, step, data_iterator, expansion_factor_real_data
         )
-      restored = checkpoint_manager.load_checkpointables(step, abstract_checkpointables)
+      restored = _load_checkpointables_with_logging(checkpoint_manager, step, abstract_checkpointables)
       if is_diloco:
         restored_items = diloco_checkpoint_utils.from_diloco_checkpoint_dict(
             restored["items"], abstract_unboxed_pre_state, config=maxtext_config
@@ -641,6 +867,8 @@ def load_state_if_possible(
         use_ocdbt=use_ocdbt,
         use_zarr3=use_zarr3,
         enable_single_replica_ckpt_restoring=bool(enable_single_replica_ckpt_restoring),
+        convert_flat_moe_weights=bool(getattr(maxtext_config, "moe_flat_fsdp_weights", False)),
+        colocated_python_checkpointing=bool(getattr(maxtext_config, "colocated_python_checkpointing", False)),
     )
     return None, restored_params
   elif load_full_state_from_path != "":
@@ -663,14 +891,36 @@ def load_state_if_possible(
 
 
 def setup_checkpoint_logger(config) -> Any | None:  # pytype: disable=attribute-error
-  """DEPRECATED: Setup checkpoint logger."""
-  # TODO: b/529622681 - Remove this config option entirely.
-  if config.enable_checkpoint_cloud_logger:
+  """Sets up the Orbax checkpoint Cloud Logger used by ML Goodput.
+
+  Args:
+    config: MaxText config.
+
+  Returns:
+    An Orbax `CloudLogger` writing to the `goodput_<run_name>` log if
+    `enable_checkpoint_cloud_logger` is set, otherwise None.
+  """
+  if not config.enable_checkpoint_cloud_logger:
+    return None
+  max_logging.log("Setting up checkpoint logger...")
+  cloud_logger_cls = getattr(ocp_logging, "CloudLogger", None)
+  cloud_logger_options_cls = getattr(ocp_logging, "CloudLoggerOptions", None)
+  if cloud_logger_cls is None or cloud_logger_options_cls is None:
     max_logging.warning(
-        "Cloud logging (enable_checkpoint_cloud_logger) is disabled because"
-        " Orbax v1 now configures its own logger internally. This config"
-        " setting is ignored and will be removed."
+        "enable_checkpoint_cloud_logger is set but Orbax CloudLogger is unavailable"
+        " (is google-cloud-logging installed?). Checkpoint logs are disabled."
     )
+    return None
+  logger_name = f"goodput_{config.run_name}"
+  try:
+    orbax_cloud_logger = cloud_logger_cls(
+        options=cloud_logger_options_cls(job_name=config.run_name, logger_name=logger_name)
+    )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(f"Failed to initialize Orbax CloudLogger: {e}. Checkpoint logs are disabled.")
+    return None
+  max_logging.log(f"Successfully set up checkpoint cloud logger: {logger_name}")
+  return orbax_cloud_logger
 
 
 def _scale_sharding(weight_sharding, scale_shape):
@@ -788,6 +1038,107 @@ def maybe_dequantize_restored_params(restored_weights: Any, expected_param_pytre
   return out
 
 
+_FLAT_MOE_LEAVES = ("wi_0", "wi_1", "wo")
+
+
+def _flat_moe_restore_plan(want, stored_weights):
+  """Finds routed-expert weights the model wants flat (moe_flat_fsdp_weights) but the checkpoint stores 3D.
+
+  Returns {path: (flat_target_sds, stored_shape_sds)} for every leaf named wi_0/wi_1/wo whose expected shape is
+  the flat [E * rows, (L,) cols] view of a stored [E, (L,) rows, cols] array. `stored_shape_sds` carries the stored
+  shape with the (expert | fsdp)-style sharding derived from the flat target's (expert, fsdp) dim-0 sharding, so
+  Orbax restores the 3D/4D array directly in a layout that `_flat_moe_convert` turns into the flat one.
+  """
+  plan = {}
+
+  def _walk(w, s, path):
+    if isinstance(w, dict):
+      for k, v in w.items():
+        _walk(v, s.get(k) if isinstance(s, dict) else None, path + (k,))
+      return
+    if not path or path[-1] not in _FLAT_MOE_LEAVES or s is None:
+      return
+    want_shape = tuple(getattr(w, "shape", ()) or ())
+    stored_shape = tuple(getattr(s, "shape", ()) or ())
+    if not want_shape or not stored_shape or want_shape == stored_shape or len(want_shape) != len(stored_shape) - 1:
+      return
+    if len(stored_shape) == 4:  # scanned: [E, L, rows, cols] -> [E * rows, L, cols]
+      e, l, r, c = stored_shape
+      flat_shape = (e * r, l, c)
+    elif len(stored_shape) == 3:  # unscanned (e.g. MTP): [E, rows, cols] -> [E * rows, cols]
+      e, r, c = stored_shape
+      flat_shape = (e * r, c)
+    else:
+      return
+    if want_shape != flat_shape:
+      return
+    sharding = getattr(w, "sharding", None)
+    mesh = getattr(sharding, "mesh", None)
+    spec = getattr(sharding, "spec", None)
+    if mesh is None or spec is None:
+      return
+    dim0 = spec[0] if len(spec) > 0 else None
+    dim0_axes = () if dim0 is None else ((dim0,) if isinstance(dim0, str) else tuple(dim0))
+    # Dim 0 is (expert, fsdp...) minus size-one axes. With a single axis left we can't tell which it is, so shard
+    # the stored rows dim on it: rows (embed/mlp) divide any mesh axis, the expert count may not.
+    expert_axis = dim0_axes[0] if len(dim0_axes) > 1 else None
+    rest = dim0_axes[1:] if len(dim0_axes) > 1 else dim0_axes
+    rest_spec = None if not rest else (rest[0] if len(rest) == 1 else rest)
+    tail = tuple(spec)[1:] + (None,) * max(0, len(flat_shape) - len(spec))
+    if len(stored_shape) == 4:
+      stored_spec = jax.sharding.PartitionSpec(expert_axis, tail[0], rest_spec, tail[1])
+    else:
+      stored_spec = jax.sharding.PartitionSpec(expert_axis, rest_spec, tail[0])
+    stored_sds = jax.ShapeDtypeStruct(stored_shape, w.dtype, sharding=jax.sharding.NamedSharding(mesh, stored_spec))
+    plan[path] = (w, stored_sds)
+
+  _walk(want, stored_weights, ())
+  return plan
+
+
+def _set_path(tree, path, value):
+  node = tree
+  for key in path[:-1]:
+    if not isinstance(node, dict) or key not in node:
+      return False
+    node = node[key]
+  if not isinstance(node, dict) or path[-1] not in node:
+    return False
+  node[path[-1]] = value
+  return True
+
+
+def _flat_moe_convert(x, target):
+  """Reshards a restored [E, (L,) rows, cols] weight into the flat [E * rows, (L,) cols] target.
+
+  The merge of the expert dim with the FSDP-sharded row dim is a real data movement (each device's flat block is a
+  contiguous run of one expert's rows), so it is done as a jit with `out_shardings`, one layer at a time to bound the
+  transient memory, and the layers are stacked back along the scan axis.
+  """
+  out_sharding = target.sharding
+  mesh = out_sharding.mesh
+  # PartitionSpec may be shorter than the rank (e.g. P() when replicated); pad with None.
+  spec = tuple(out_sharding.spec) + (None,) * (len(target.shape) - len(out_sharding.spec))
+  if x.ndim == 4:
+    e, l, r, c = x.shape
+    layer_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(spec[0], spec[2]))
+
+    def _layer_fn(a, idx):
+      return jax.lax.dynamic_index_in_dim(a, idx, axis=1, keepdims=False).reshape(e * r, c).astype(target.dtype)
+
+    _layer = jax.jit(_layer_fn, out_shardings=layer_sharding)
+    layers = [_layer(x, jnp.int32(i)) for i in range(l)]
+    x.delete()
+    stacked = jax.jit(lambda *ys: jnp.stack(ys, axis=1), out_shardings=out_sharding)(*layers)
+    for y in layers:
+      y.delete()
+    return stacked
+  e, r, c = x.shape
+  y = jax.jit(lambda a: a.reshape(e * r, c).astype(target.dtype), out_shardings=out_sharding)(x)
+  x.delete()
+  return y
+
+
 def load_params_from_path(
     load_parameters_from_path,
     abstract_unboxed_params,
@@ -795,8 +1146,15 @@ def load_params_from_path(
     use_ocdbt=True,
     use_zarr3=True,
     enable_single_replica_ckpt_restoring: bool = False,
+    convert_flat_moe_weights: bool = False,
+    colocated_python_checkpointing: bool = False,
 ):
-  """Load decode params from checkpoint at specified path."""
+  """Load decode params from checkpoint at specified path.
+
+  With `convert_flat_moe_weights` (moe_flat_fsdp_weights), 3D/4D routed-expert weights in the checkpoint are converted
+  to the flat [E * rows, (L,) cols] layout the model expects. With `colocated_python_checkpointing` (Pathways single
+  controller only), the restore runs on the workers through the Orbax colocated-Python dispatcher.
+  """
   assert load_parameters_from_path, "load_parameters_from_path is not defined."
   max_logging.log(f"restoring params from {load_parameters_from_path}")
 
@@ -815,6 +1173,103 @@ def load_params_from_path(
   if restore_key not in ("model_params", "model"):
     restore_key = "params"
 
+  checkpointable_name = "items" if (path / "items").exists() else None
+  # Orbax v1 fails a mid-load shape mismatch itself, with an error that reports the
+  # shapes but not which weight; compare the stored metadata first so the error names
+  # it. A metadata read failure falls through to the load (worst case: Orbax's error).
+  # With colocated Python, read the metadata under the same checkpointing implementation
+  # as the load: outside a Context, Orbax on Pathways requires remote Python instead.
+  metadata_context = (
+      checkpoint_context.build_context(colocated_python_checkpointing=True)
+      if colocated_python_checkpointing
+      else contextlib.nullcontext()
+  )
+  try:
+    with metadata_context:
+      stored = ocp.metadata(path, checkpointable_name=checkpointable_name).metadata
+  except Exception as e:  # pylint: disable=broad-except
+    max_logging.log(f"Skipping pre-load shape check, checkpoint metadata unreadable: {e}")
+    stored = None
+
+  # Flat routed-expert weights (moe_flat_fsdp_weights): restore the checkpoint's 3D/4D arrays, convert after the load.
+  flat_moe_plan = {}
+  if convert_flat_moe_weights and isinstance(stored, dict):
+    stored_root = stored.get(restore_key)
+    # An NNX `want` is bare weights, so drop the stored `params` collection level; a Linen `want` keeps it.
+    stored_params = (
+        stored_root.get("params")
+        if is_nnx and isinstance(stored_root, dict) and isinstance(stored_root.get("params"), dict)
+        else stored_root
+    )
+    flat_moe_plan = _flat_moe_restore_plan(want, stored_params)
+    for wpath, (_, stored_sds) in flat_moe_plan.items():
+      _set_path(want, wpath, stored_sds)
+    if flat_moe_plan:
+      max_logging.log(
+          f"moe_flat_fsdp_weights: {len(flat_moe_plan)} routed-expert weights will be restored in the checkpoint's"
+          f" 3D layout and converted to the flat layout: {['/'.join(map(str, p)) for p in flat_moe_plan]}"
+      )
+
+  aliased_collections = {}
+  if restore_key in ("model_params", "model"):
+    params_collection = want
+  elif is_nnx and restore_key == "params":
+    stored_params_meta = (
+        stored.get("params") if isinstance(stored, dict) and isinstance(stored.get("params"), dict) else {}
+    )
+    # `None` means "we could not read which collections the checkpoint holds", which is
+    # NOT the same as "it holds only `params`". Defaulting to {"params"} would drop every
+    # custom collection from the request below, turning a transient metadata read failure
+    # into a hard restore failure for a checkpoint that is perfectly valid.
+    stored_collections = set(stored_params_meta.keys()) if stored_params_meta else None
+
+    collection_leaves = collections.defaultdict(dict)
+    for path_tuple, leaf in nnx.to_flat_state(abstract_unboxed_params):
+      if isinstance(leaf, nnx.Variable):
+        col = variablelib.variable_name_from_type(leaf.type, allow_register=True)
+        val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
+      else:
+        col = "params"
+        val = leaf
+      collection_leaves[col][tuple(path_tuple)] = val
+
+    params_collection = {col: nnx.traversals.unflatten_mapping(d) for col, d in collection_leaves.items()}
+    if "params" not in params_collection:
+      params_collection["params"] = want
+    for wpath, (_, stored_sds) in flat_moe_plan.items():
+      for col_tree in params_collection.values():
+        _set_path(col_tree, wpath, stored_sds)
+
+    # Augment "params" collection with companion scales from checkpoint metadata if present (FP8 dequantize-on-load)
+    if "params" in params_collection:
+      params_collection["params"] = _augment_want_with_scales(
+          params_collection["params"], stored, is_nnx=True, restore_key="params"
+      )
+
+    # Rescue weights whose collection is newer than the checkpoint BEFORE discarding
+    # unknown collections below -- otherwise they are dropped with no error and stay
+    # at their initialiser values. See _alias_legacy_collections.
+    params_collection, aliased_collections = _alias_legacy_collections(params_collection, stored_params_meta)
+
+    # Anything the checkpoint is KNOWN not to hold genuinely is not there; keep dropping it
+    # so Orbax's partial_load does not hand back unmaterialized leaves. When the collection
+    # set is unknown, request everything and let the post-load mismatch check adjudicate.
+    params_collection = {
+        col: tree
+        for col, tree in params_collection.items()
+        if stored_collections is None or col in stored_collections or col == "params"
+    }
+  else:
+    # Only reachable when `is_nnx` is False: `restore_key` is normalized to one of three
+    # values above, and the preceding branches claim both the non-"params" keys and every
+    # NNX "params" case. So this is the Linen path, whose `want` is already collection-keyed.
+    augmented_want = _augment_want_with_scales(want, stored, is_nnx=False, restore_key=restore_key)
+    params_collection = augmented_want
+    if isinstance(stored, dict):
+      # Linen keeps its structure keyed by collection, so the same rescue applies here;
+      # the restored tree is un-aliased again after the load.
+      params_collection, aliased_collections = _alias_legacy_collections(params_collection, stored.get(restore_key))
+
   # Memory optimization: restore only the "params" key (the checkpoint may also hold opt_state/step);
   # partial_load drops the rest. The abstract carries shape/dtype/sharding directly.
   context = checkpoint_context.build_context(
@@ -823,31 +1278,29 @@ def load_params_from_path(
       checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
       partial_load=True,
       enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+      colocated_python_checkpointing=colocated_python_checkpointing,
   )
   # Dispatch on the on-disk layout instead of assuming a step root: callers pass step roots,
   # v0-style pytree dirs (normalized above), and v0 flat params-only checkpoints
   # (save_params_to_path wrote the pytree directly at the directory).
+  audit_stored = None
   with context:
-    checkpointable_name = "items" if (path / "items").exists() else None
-    # Orbax v1 fails a mid-load shape mismatch itself, with an error that reports the
-    # shapes but not which weight; compare the stored metadata first so the error names
-    # it. A metadata read failure falls through to the load (worst case: Orbax's error).
-    try:
-      stored = ocp.metadata(path, checkpointable_name=checkpointable_name).metadata
-    except Exception as e:  # pylint: disable=broad-except
-      max_logging.log(f"Skipping pre-load shape check, checkpoint metadata unreadable: {e}")
-      stored = None
-
-    augmented_want = _augment_want_with_scales(want, stored, is_nnx, restore_key)
-    if restore_key in ("model_params", "model"):
-      params_collection = augmented_want
-    else:
-      params_collection = {"params": augmented_want} if is_nnx else augmented_want
-
     if isinstance(stored, dict):
       stored_collection = stored.get(restore_key)
+      audit_stored = stored_collection
       if restore_key == "params" and is_nnx and isinstance(stored_collection, dict):
-        stored_collection = stored_collection.get("params")
+        # Everything the checkpoint actually holds, captured BEFORE the request-time
+        # filtering below, which keeps only the collections the model asked for. The
+        # unconsumed audit needs the unfiltered view or it cannot see a dropped weight.
+        audit_stored = {}
+        for col_tree in stored_collection.values():
+          if isinstance(col_tree, dict):
+            audit_stored = _deep_merge_dicts(audit_stored, col_tree)
+        merged_stored = {}
+        for col_name in params_collection.keys():
+          if col_name in stored_collection and isinstance(stored_collection[col_name], dict):
+            merged_stored = _deep_merge_dicts(merged_stored, stored_collection[col_name])
+        stored_collection = merged_stored
       _raise_weight_problems(_weight_mismatches(want, stored_collection, check_missing=False))
     restored = ocp.load(
         path,
@@ -855,6 +1308,11 @@ def load_params_from_path(
         checkpointable_name=checkpointable_name,  # pyrefly: ignore[bad-argument-type]
     )
   restored_collection = restored[restore_key]  # pyrefly: ignore[bad-index]
+  # Weights rescued out of a newer collection came back inside `params`; put them back
+  # where the model expects them. The NNX branch below merges every collection by path,
+  # so it needs no un-aliasing.
+  if not is_nnx and aliased_collections:
+    restored_collection = _unalias_legacy_collections(restored_collection, aliased_collections)
   # partial_load lets Orbax return an unmaterialized leaf for a weight the checkpoint lacks,
   # and a stored array at its own shape rather than the target's. Either reaches the model and
   # fails much later without naming the weight, so check here -- the params-only load
@@ -862,12 +1320,49 @@ def load_params_from_path(
 
   if restore_key in ("model_params", "model"):
     restored_weights = restored_collection
+  elif is_nnx:
+    restored_weights = {}
+    if isinstance(restored_collection, dict):
+      # Process "params" first so custom collection weights always overwrite stale legacy copies.
+      for col_key in sorted(restored_collection, key=lambda k: (k != "params", k)):
+        col_val = restored_collection[col_key]
+        if isinstance(col_val, dict):
+          restored_weights = _deep_merge_dicts(restored_weights, col_val)
+        else:
+          restored_weights[col_key] = col_val
+    else:
+      restored_weights = restored_collection
   else:
-    restored_weights = restored_collection["params"] if is_nnx else restored_collection
+    # Linen: `restored_collection` is already the collection mapping that Linen's
+    # `want` is keyed by (e.g. {"params": ..., "Tid2EidVar": ...}). Do NOT unwrap
+    # the "params" key here -- that drops every other collection and shifts the
+    # remaining weights up a level, so the mismatch check reports the entire model
+    # as missing. Only the NNX branch above needs per-collection flattening.
+    restored_weights = restored_collection
 
+  # Convert the restored 3D/4D routed-expert weights to the flat layout the model expects.
+  for wpath, (flat_sds, stored_sds) in flat_moe_plan.items():
+    arr = _lookup_path(restored_weights, wpath)
+    if not isinstance(arr, jax.Array):
+      continue
+    t0 = time.time()
+    converted = _flat_moe_convert(arr, flat_sds)
+    assert _set_path(restored_weights, wpath, converted)
+    _set_path(want, wpath, flat_sds)
+    max_logging.log(
+        f"moe_flat_fsdp_weights: converted {'/'.join(map(str, wpath))} {tuple(stored_sds.shape)} ->"
+        f" {tuple(converted.shape)} in {time.time() - t0:.1f}s"
+    )
   # Dequantize if checkpoint had companion kernel_scale and target want is unquantized.
   restored_weights = maybe_dequantize_restored_params(restored_weights, want)
+  # Validate against everything the model needs. Rebuilding the expectation from the
+  # post-filter request would excuse precisely the weight whose collection the checkpoint
+  # lacked -- which is the silent corruption this check exists to catch, not an exemption.
   _raise_on_weight_mismatch(want, restored_weights)
+  # Answer the other half of the question: did the model consume everything the checkpoint
+  # offered? Compare against what is ON DISK; comparing against the restored tree can never
+  # differ, because the restore only ever returns what was requested.
+  _log_unconsumed_checkpoint_weights(want, audit_stored)
   if is_nnx:
     nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
     return abstract_unboxed_params

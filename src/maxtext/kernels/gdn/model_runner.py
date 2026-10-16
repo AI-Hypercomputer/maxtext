@@ -617,6 +617,10 @@ def run_gdn_kernel_layer(
       cfg, cp_size, layer.num_k_heads, model_mode, use_gdn_kernel=True
   )
   cp_matmul_precision = jax.lax.Precision[getattr(cfg, "gdn_cp_matmul_precision", "highest").upper()]
+  # Conv1D halo input in qkv's dtype instead of a float32 copy (compute_conv1d_bwd.py). Same values.
+  conv_input_in_qkv_dtype = cfg.gdn_conv1d_input_in_qkv_dtype
+  # Forward kernel's Conv1D output built from dense per-token views (compute_conv1d.py). Same values.
+  conv_dense_token_stack = bool(getattr(cfg, "gdn_conv1d_dense_token_stack", False))
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
@@ -641,6 +645,11 @@ def run_gdn_kernel_layer(
     qkv = jnp.where(mask.reshape(mask.shape + (1,) * (qkv.ndim - mask.ndim)), qkv, 0.0)
     a = jnp.where(mask[..., None], a, jnp.asarray(-1e4, dtype=a.dtype))
     b = jnp.where(mask[..., None], b, jnp.asarray(-1e4, dtype=b.dtype))
+    if model_mode == MODEL_MODE_TRAIN and not getattr(cfg, "packing", True):
+      # packing=False means one sequence per row, whose padding the mask above already makes a no-op, so the
+      # kernel's segment path adds work and changes nothing. Other modes keep it: it also ends the carried conv
+      # state at the last valid token.
+      decoder_segment_ids = None
 
   batch, seq_len = qkv.shape[:2]
   conv_kernel_size = cfg.gdn_conv_kernel_dim
@@ -887,6 +896,8 @@ def run_gdn_kernel_layer(
             use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
             compute_dtype=state_dtype,
             segment_ids=seg_val,
+            conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+            conv_dense_token_stack=conv_dense_token_stack,
         )
 
         if next_cs is not None:
@@ -926,6 +937,8 @@ def run_gdn_kernel_layer(
           cp_axis_name=cp_axis_name if use_seq_sharded_cp else None,
           segment_ids=seg_val,
           cp_matmul_precision=cp_matmul_precision,
+          conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+          conv_dense_token_stack=conv_dense_token_stack,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -968,6 +981,8 @@ def run_gdn_kernel_layer(
         use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
         compute_dtype=state_dtype,
         segment_ids=decoder_segment_ids,
+        conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
+        conv_dense_token_stack=conv_dense_token_stack,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")

@@ -1530,6 +1530,38 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return x
     return x.astype(self._config.grad_dtype)
 
+  def _freeze_mask_for(self, tree: Any) -> Any:
+    """Returns which leaves of `tree` `trainable_parameters_mask` freezes, or None if it freezes none.
+
+    A pytree of Python bools with `tree`'s structure, read off the leaves' paths alone, so `tree` can
+    be the parameters or a gradient tree shaped like them. `_compile_for_batch` caches the parameters'
+    mask in `_freeze_mask`; while that cache is empty -- on the eager path, or for a kernel traced
+    after `_invalidate_pure_state` -- the mask is computed from `tree` instead. `_fwd_bwd_kernel` and
+    `_update_kernel` both read it here, so the leaves whose gradient `fwd_bwd` stops are exactly the
+    leaves `update` zeroes.
+    """
+    # Read once: a background compile can trace a kernel while the main thread empties the cache
+    # (`_disable_pure_state`), and a second read could then return None and skip the stop.
+    freeze_mask = self._freeze_mask
+    if freeze_mask is not None:
+      return freeze_mask
+    if self._freeze_mask_fn is None:
+      return None
+    return self._freeze_mask_fn(tree)
+
+  def _stop_frozen_gradients(self, params: Any) -> Any:
+    """Returns `params` with `jax.lax.stop_gradient` on every leaf `trainable_parameters_mask` freezes.
+
+    Takes effect only inside the function being differentiated: `_fwd_bwd_kernel`'s `diff_wrapper`
+    calls it on the parameters it differentiates. See the comment there for why it changes no number.
+    The leaves stay in the gradient tree, as zeros, so every kernel's signature, the accumulator's
+    layout and the checkpoint format are unchanged.
+    """
+    freeze_mask = self._freeze_mask_for(params)
+    if freeze_mask is None:
+      return params
+    return jax.tree.map(lambda x, frozen: jax.lax.stop_gradient(x) if frozen else x, params, freeze_mask)
+
   def _fwd_bwd_kernel(self, params, rest, batch, graphdef=None):
     """Executes a single forward and backward pass.
 
@@ -1543,7 +1575,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       `(primary_loss, aux_metrics, new_rest, grads, denominator)`: this micro-batch's gradients,
       not yet normalized, in the accumulation dtype except the leaves in `_uncast_grad_mask`, which
-      keep the parameters' dtype; and the loss denominator to normalize them by. Under
+      keep the parameters' dtype, and exactly zero for the parameters `trainable_parameters_mask`
+      freezes; and the loss denominator to normalize them by. Under
       `retry_when_tokens_dropped`, followed by `has_moe_overflow`: whether any MoE layer's ragged
       buffer dropped tokens, in which case the gradients and denominator are zero and `fwd_bwd`
       reruns the micro-batch once the flag reaches the host.
@@ -1551,6 +1584,19 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     loss_callable = self._loss_fn if self._loss_fn is not None else maxtext_train.loss_fn
 
     def diff_wrapper(p, r, b):
+      # No gradient for frozen parameters. `update()` zeroes the gradient of every leaf that
+      # `trainable_parameters_mask` freezes before the norm, clipping and the optimizer see it, so
+      # nothing uses that gradient; stopped here, inside the differentiated function, it is not computed
+      # either (on `value_and_grad`'s arguments the stop would change nothing). JAX emits no
+      # weight-gradient op for those leaves -- a custom-VJP kernel still runs its whole backward, and
+      # XLA drops the cotangent nobody reads where it can -- and `fwd_bwd` returns a constant zero for
+      # them, with nothing to reduce-scatter or all-reduce inside it. The gradient through a frozen
+      # weight into the activations, and on to the trainable parameters, comes from the same ops as
+      # before, so the rest is the same computation: bitwise equal on CPU
+      # (`maxtext_engine_frozen_grad_test.py`), though on TPU XLA may fuse the smaller program
+      # differently. The MLPerf RL recipes freeze the MoE router (`routed_experts/gate/kernel`), so this
+      # drops the router's weight gradient and its reduce-scatter from every MoE layer.
+      p = self._stop_frozen_gradients(p)
       mdl = nnx.merge(graphdef if graphdef is not None else self._model_graphdef, p, r, copy=True)
       if self._gen_model_input_fn is not None:
         # A gen_model_input_fn maps a payload to the loss fn's *keyword arguments* -- see
@@ -1789,10 +1835,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # Cast to `grad_dtype` once, after the sum and the division, as `train.py` does with its
       # accumulated `raw_grads`. A no-op unless `grad_accumulation_dtype` differs from it.
       grads = jax.tree.map(self._to_grad_dtype, grads)
-      freeze_mask = self._freeze_mask
-      if freeze_mask is None and self._freeze_mask_fn is not None:
-        freeze_mask = self._freeze_mask_fn(accumulated_grads)
+      freeze_mask = self._freeze_mask_for(accumulated_grads)
       if freeze_mask is not None:
+        # `fwd_bwd` already returns zeros for these leaves (`_stop_frozen_gradients`). Zeroing them again
+        # costs nothing and still matters: an accumulator restored from an intra-step checkpoint written
+        # by an older engine, or under another mask, can hold non-zero gradients for them, and it keeps
+        # frozen parameters out of the norm and clipping below by construction.
 
         def _apply_freeze(g, is_frozen):
           return jnp.zeros_like(g) if is_frozen else g
@@ -1903,6 +1951,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _prepare_batch(self, payload: Any) -> Any:
     """Maps a payload to the inputs the loss function is called with."""
+    if getattr(payload, "segment_ids", None) is not None and self._config.use_gdn_kernel and not self._config.packing:
+      raise ValueError(
+          "The payload carries segment_ids, which Tunix sets only on sequence-packed rows, but packing=False: "
+          "with use_gdn_kernel=True the GDN kernel then ignores those document boundaries in training. "
+          "Set packing=True."
+      )
     if self._gen_model_input_fn is not None:
       if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
         payload = dataclasses.replace(payload, metadata={})

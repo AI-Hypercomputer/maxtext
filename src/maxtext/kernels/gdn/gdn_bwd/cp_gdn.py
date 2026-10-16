@@ -36,10 +36,47 @@ from jax import lax
 import jax.numpy as jnp
 
 from .. import compute_conv1d as local_compute_conv1d
+from .. import compute_gdn as local_compute_gdn
 
 # Precision of the f32 composition matmuls below: 6 bf16 passes on TPU. `gdn_cp_matmul_precision=high`
 # passes Precision.HIGH (3 passes) to them through their `precision` argument instead.
 DEFAULT_PRECISION = jax.lax.Precision.HIGHEST
+
+
+def _compute_t_inv_batched(
+    k_orig: jax.Array,  # [B, N_c, C, H_k, d_k] f32, already qk-normed if enabled
+    beta_h: jax.Array,  # [N_c, B, H_v, C] f32, already masked if segment_ids
+    cumsum_h: jax.Array,  # [N_c, B, H_v, C] f32
+    seg_c: Optional[jax.Array],  # [N_c, B, 1, C] f32 or None
+    valid_c: Optional[jax.Array],  # [N_c, B, 1, C] bool or None
+    *,
+    repeats: int,
+    precision: jax.lax.Precision = DEFAULT_PRECISION,
+) -> jax.Array:
+  """Computes `t_inv_c: [N_c, B, H_v, C, C]` across all local chunks in one batched call."""
+  num_chunks, batch, num_v_heads, chunk_size = beta_h.shape
+  k_kq = jnp.transpose(k_orig, (1, 0, 3, 2, 4))  # [N_c, B, H_k, C, d_k]
+  if valid_c is not None:
+    k_kq = jnp.where(valid_c[..., None], k_kq, 0.0)
+  kk_kq = jnp.matmul(k_kq, jnp.swapaxes(k_kq, -1, -2), precision=precision)  # [N_c, B, H_k, C, C]
+  kk_h = jnp.repeat(kk_kq, repeats, axis=2)  # [N_c, B, H_v, C, C]
+
+  mask_strict_base = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=-1)
+  if seg_c is not None and valid_c is not None:
+    same_valid = (jnp.abs(seg_c[..., :, None] - seg_c[..., None, :]) < 0.5) & valid_c[..., :, None]
+    mask_strict = mask_strict_base[None, None, None, :, :] * same_valid.astype(jnp.float32)
+  else:
+    mask_strict = mask_strict_base
+  diff = cumsum_h[..., :, None] - cumsum_h[..., None, :]
+  safe_diff = jnp.where(mask_strict > 0.5, diff, -1e4)
+  g_mat_strict = jnp.exp(safe_diff) * mask_strict
+
+  t_lower = kk_h * (beta_h[..., :, None] * g_mat_strict)
+  eye = jnp.eye(chunk_size, dtype=jnp.float32)
+  t_full = eye + t_lower
+  t_flat = t_full.reshape(num_chunks * batch * num_v_heads, chunk_size, chunk_size)
+  t_inv_flat = local_compute_gdn.invert_triangular_matrix(t_flat, precision=precision)
+  return t_inv_flat.reshape(num_chunks, batch, num_v_heads, chunk_size, chunk_size)
 
 
 def gather_cp_segment_metadata(
@@ -279,7 +316,7 @@ def compose_local_from_t_inv(
     a: jax.Array,
     a_log: jax.Array,
     dt_bias: jax.Array,
-    t_inv: jax.Array,
+    t_inv: Optional[jax.Array] = None,
     *,
     num_k_heads: int,
     num_v_heads: int,
@@ -324,6 +361,7 @@ def compose_local_from_t_inv(
   dt_bias_f32 = dt_bias.astype(jnp.float32)[None, None, :, None]
   log_g = -jnp.exp(a_log_f32) * jax.nn.softplus(a_h + dt_bias_f32)
 
+  seg_c = None
   valid_c = None
   if segment_ids is not None:
     s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch, seq_len), init_seg=init_seg)
@@ -364,7 +402,18 @@ def compose_local_from_t_inv(
 
   k_beta_g = k_h * beta_h[..., None] * gating_forward
   k_scaled_bwd = k_h * gating_backward
-  t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))  # [N_c, B, H_v, C, C]
+  if t_inv is None:
+    t_inv_c = _compute_t_inv_batched(
+        k_orig,
+        beta_h,
+        cumsum_h,
+        seg_c,
+        valid_c,
+        repeats=repeats,
+        precision=precision,
+    )
+  else:
+    t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))  # [N_c, B, H_v, C, C]
 
   # Pre-batched GEMMs across all chunks outside any sequential loop
   w_all = jnp.matmul(t_inv_c, k_beta_g, precision=precision)  # [N_c, B, H_v, C, d_k]
@@ -422,7 +471,7 @@ def compose_bwd_local_from_t_inv(
     a_log: jax.Array,
     dt_bias: jax.Array,
     do: jax.Array,
-    t_inv: jax.Array,
+    t_inv: Optional[jax.Array] = None,
     *,
     num_k_heads: int,
     num_v_heads: int,
@@ -478,6 +527,8 @@ def compose_bwd_local_from_t_inv(
   dt_bias_f32 = dt_bias.astype(jnp.float32)[None, None, :, None]
   log_g = -jnp.exp(a_log_f32) * jax.nn.softplus(a_h + dt_bias_f32)
 
+  seg_c = None
+  valid_c = None
   mask_causal_base = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.float32), k=0)
   if segment_ids is not None:
     s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch, seq_len), init_seg=init_seg)
@@ -523,7 +574,18 @@ def compose_bwd_local_from_t_inv(
   q_g = q_h * gating_forward
   k_beta_g = k_h * beta_h[..., None] * gating_forward
   k_scaled_bwd = k_h * gating_backward
-  t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))
+  if t_inv is None:
+    t_inv_c = _compute_t_inv_batched(
+        k_orig,
+        beta_h,
+        cumsum_h,
+        seg_c,
+        valid_c,
+        repeats=repeats,
+        precision=precision,
+    )
+  else:
+    t_inv_c = jnp.transpose(t_inv.astype(jnp.float32), (1, 0, 2, 3, 4))
 
   diff = cumsum_h[..., :, None] - cumsum_h[..., None, :]
   safe_diff_causal = jnp.where(mask_causal > 0.5, diff, -1e4)

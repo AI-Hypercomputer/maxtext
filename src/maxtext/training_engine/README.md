@@ -344,6 +344,7 @@ sharding at construction (for example Tokamax ring attention), while under `jax.
 | `parameter_memory_host_offload` | not supported; raises |
 | `shard_optimizer_over_data` (Zero-1) | shards the optimizer state over the `data` axis inside `update`; requires `shard_mode=explicit` |
 | `skip_step_on_nan` (default true), `skip_step_on_spikes`, `max_grad_norm_spike` | a non-finite or spiking step leaves the state unchanged and records `step_skipped` |
+| `trainable_parameters_mask` | parameters it does not match are frozen. `fwd_bwd` stops their gradient inside the function it differentiates, so it returns zeros for them without computing a weight gradient, or reducing one inside `fwd_bwd`. The zeros keep their slots in the accumulator (and in `update`'s all-reduce, when that is deferred), so kernel signatures and checkpoints are unchanged. `update` zeroes them again before the gradient norm, clipping and the optimizer, so the norm and clipping cover the trainable parameters only. On CPU the trainable gradients, the norm and the trained weights are bitwise those of computing the frozen gradients and discarding them (`maxtext_engine_frozen_grad_test.py`) |
 | `retry_when_tokens_dropped`, `retry_num_moe_token_chunks` | a micro-batch whose MoE ragged buffer overflowed is accumulated as zero and rerun through `fwd_bwd_dropless`, built on a copy of the model with dropless MoE layers (that many token chunks, as a rematerialized scan) and full remat; compiled on a background thread from the first micro-batch. Its flag is read after the next micro-batch is dispatched, or in `update` for the last; `update` records `moe_dropless_replays`. `eval_step` and `model_scope`/`fwd_only` run the dropless graph too |
 | `enable_checkpointing` | `false` disables saving and restoring the train state; `load_parameters_path` still loads weights |
 | `gradient_accumulation_steps` | read only by the standalone script; Tunix chooses the number of micro-batches itself |
@@ -391,6 +392,7 @@ The engine's tests are in `tests/post_training/unit/` and run on CPU; they requi
 | `maxtext_engine_model_build_test.py` | model construction with and without a mesh set by the caller |
 | `maxtext_engine_checkpoint_test.py` | resuming from a mid-step checkpoint through Orbax reproduces the uninterrupted step |
 | `maxtext_engine_grad_cast_test.py` | `cast_grads_after_all_reduce`: which gradients leave `fwd_bwd` uncast, and that moving their cast changes no number on CPU |
+| `maxtext_engine_frozen_grad_test.py` | `trainable_parameters_mask`: `fwd_bwd` has no weight-gradient matmul for a frozen kernel and returns zero for it, while the other gradients, the gradient norms and the trained weights stay bitwise those of computing it, under fsdp, under the deferred all-reduce and on the eager path; a stop on a trainable kernel is caught |
 | `maxtext_engine_prepared_input{,_dropless,_sharded}_test.py` | `prepare_fwd_bwd_input` and `wait_for_device`: a prepared micro-batch trains bit-identically on one device, through Tunix's `TrainerWorker` staging, under the dropless replay and final dropless programs, and on a four-device mesh with Tunix's payload; the wait leaves the in-flight queue and the metrics writes as they were |
 | `maxtext_engine_stage_before_update_test.py` | the order Tunix uses to stage before a deferred update (`fwd_bwd(last)`, `prepare_fwd_bwd_input(next)`, `wait_for_device()`, `update()`) under the dropless replay and final dropless programs, directly and through Tunix's `TrainerWorker`: bit-identical to the base order, including a rerun of the last micro-batch inside `update()` |
 | `maxtext_engine_{constructor,data_parallel,xaot,packing,profiling}_test.py`, `router_replay_engine_test.py` | construction, data parallelism, ahead-of-time compilation, sequence packing, profiling, router replay |
@@ -404,3 +406,7 @@ The engine's tests are in `tests/post_training/unit/` and run on CPU; they requi
   of 0, are unaffected.
 - `pre_train/train.py` sums micro-batch gradients in the dtype of the parameters it differentiates;
   the engine sums them in `grad_accumulation_dtype`, which defaults to `grad_dtype`.
+- With `trainable_parameters_mask`, `pre_train/train.py` computes the frozen parameters' gradients and
+  includes them in the gradient norm and clipping; only its optimizer zeroes their updates. The engine
+  leaves them out of the norm and clipping and does not compute them, which is why stopping their
+  gradient changes no number there.
