@@ -37,11 +37,19 @@ on:
       maxtext_sha:
         required: true
         type: string
+      image_date:
+        required: true
+        type: string
       workflow:
         required: false
         type: string
         default: 'pre-training'
       include_test_assets:
+        required: false
+        type: boolean
+        default: false
+      is_rc:
+        description: 'Whether the image is a Release Candidate'
         required: false
         type: boolean
         default: false
@@ -238,7 +246,7 @@ jobs:
           fi
           echo "BUILD_REPO=${BUILD_REPO}" >> "$GITHUB_ENV"
           echo "build_repo=${BUILD_REPO}" >> "$GITHUB_OUTPUT"
-          echo "maxtext_short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "maxtext_short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Resolve source image digest
         if: ${{ inputs.fast_rebuild }}
@@ -407,7 +415,6 @@ jobs:
           gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${TEMP_IMG}" --quiet
 
           # Add date tag
-          IMAGE_DATE="$(date +%Y-%m-%d)"
           gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "$SOURCE_IMAGE:$IMAGE_DATE" --quiet
 
           # Convert date to YYYYMMDD format
@@ -416,14 +423,30 @@ jobs:
           # Add MaxText tag
           gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
 
+          # Add Release Candidate tags
+          if [[ "${IS_RC}" == "true" ]]; then
+            gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${MAXTEXT_SHA}" --quiet
+            if [[ "${INPUTS_REPOSITORY_NAME}" == "maxtext-images" ]]; then
+              gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:latest-rc" --quiet
+            else
+              echo "Skipping :latest-rc tag (functional and performance tests disabled for this run)."
+            fi
+          fi
+
           # Also keep staging tags in sync when promoting
           if [[ "${BUILD_REPO}" != "${INPUTS_REPOSITORY_NAME}" ]]; then
             gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${IMAGE_DATE}" --quiet
             gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
+            if [[ "${IS_RC}" == "true" ]]; then
+              gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${MAXTEXT_SHA}" --quiet
+              gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:latest-rc" --quiet
+            fi
           fi
         env:
           BUILD_REPO: ${{ needs.build_and_push.outputs.build_repo }}
           IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
+          IMAGE_DATE: ${{ inputs.image_date }}
+          IS_RC: ${{ inputs.is_rc }}
           MAXTEXT_SHA: ${{ needs.build_and_push.outputs.maxtext_short_sha }}
           GITHUB_RUN_ID: ${{ github.run_id }}
           INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}

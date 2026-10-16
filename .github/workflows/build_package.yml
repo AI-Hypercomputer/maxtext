@@ -36,6 +36,9 @@ on:
       maxtext_sha:
         description: "MaxText short SHA used for the build"
         value: ${{ jobs.build_and_upload.outputs.maxtext_sha }}
+      image_date:
+        description: "Date (YYYY-MM-DD) used for tagging Docker images"
+        value: ${{ jobs.build_and_upload.outputs.image_date }}
 
 permissions:
   contents: read
@@ -47,6 +50,7 @@ jobs:
     container: python:3.12-slim-trixie
     outputs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
+      image_date: ${{ steps.vars.outputs.image_date }}
     steps:
       - name: Checkout MaxText
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -62,6 +66,7 @@ jobs:
           # MaxText SHA used to build the package
           MAXTEXT_SHA="$MAXTEXT_SHA_INPUT"
           echo "maxtext_sha=${MAXTEXT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "image_date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
       - name: Install build tools
         run: |
           apt-get update -y && apt-get install -y --no-install-recommends curl ca-certificates
