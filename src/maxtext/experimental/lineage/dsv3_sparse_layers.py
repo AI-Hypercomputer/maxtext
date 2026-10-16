@@ -55,7 +55,9 @@ class RopeFn(Protocol):
 GmmFn = dsv3_sparse_layer.GmmFn
 
 
-def _with_expert_permutations(fn: Callable[..., Any], *, accepts: bool = True) -> Callable[..., Any]:
+def _with_expert_permutations(
+    fn: Callable[..., Any], *, accepts: bool = True
+) -> Callable[..., Any]:
   """Adapts `fn` to the pipelined scan's per-layer `w_aux` keyword.
 
   Args:
@@ -171,9 +173,14 @@ def dsv3_sparse_layers(
 
   num_layers = jax.tree.leaves(w)[0].shape[0]
   if expert_permutations is not None:
-    dsv3_expert_shuffle.validate_expert_permutations(expert_permutations, num_experts=num_experts, num_layers=num_layers)
+    dsv3_expert_shuffle.validate_expert_permutations(
+        expert_permutations, num_experts=num_experts, num_layers=num_layers
+    )
     if expert_permutations.shape[0] != num_layers:
-      raise ValueError(f"expert_permutations has {expert_permutations.shape[0]} rows," f" expected {num_layers}")
+      raise ValueError(
+          f"expert_permutations has {expert_permutations.shape[0]} rows,"
+          f" expected {num_layers}"
+      )
   mb0, mb1 = ops.split_microbatches(x, mesh=mesh)
   yarn_freqs_0, yarn_freqs_1 = ops.split_microbatches(yarn_freqs, mesh=mesh)
   segment_ids_0, segment_ids_1 = ops.split_microbatches(segment_ids, mesh=mesh)
@@ -194,17 +201,21 @@ def dsv3_sparse_layers(
       split=False,
       expert_axis_name=expert_axis_name,
   )
-  w_first = _collect_w_ici_fwd(_collect_w_dcn(jax.tree.map(lambda _w: _w[0], w)))
-  (bank_0, bank_offset_0), (bank_1, bank_offset_1) = dsv3_sparse_layer.init_activation_bank(
-      mb0,
-      w_first,
-      num_layers=num_layers,
-      num_experts_per_tok=num_experts_per_tok,
-      ragged_buffer_factor=ragged_buffer_factor,
-      capacity_factor=capacity_factor,
-      expert_axis_name=expert_axis_name,
-      axis_mapping=axis_mapping,
-      mesh=mesh,
+  w_first = _collect_w_ici_fwd(
+      _collect_w_dcn(jax.tree.map(lambda _w: _w[0], w))
+  )
+  (bank_0, bank_offset_0), (bank_1, bank_offset_1) = (
+      dsv3_sparse_layer.init_activation_bank(
+          mb0,
+          w_first,
+          num_layers=num_layers,
+          num_experts_per_tok=num_experts_per_tok,
+          ragged_buffer_factor=ragged_buffer_factor,
+          capacity_factor=capacity_factor,
+          expert_axis_name=expert_axis_name,
+          axis_mapping=axis_mapping,
+          mesh=mesh,
+      )
   )
   _prologue = ops.PipelinedScanLayer(
       fwd=functools.partial(
@@ -248,9 +259,20 @@ def dsv3_sparse_layers(
           quant=quant,
       ),
   )
+  def _scan_body_fwd(*args, **kwargs):
+    out, res = dsv3_sparse_layer.dsv3_sparse_layer_scan_body_fwd(
+        *args, **kwargs
+    )
+    assert res.mb0.moe is not None
+    moe_0 = res.mb0.moe._replace(
+        out_proj_out=res.mb0.moe.out_proj_out + res.mb0.moe.orig_x,
+        orig_x=None,  # pyrefly: ignore[bad-argument-type]
+    )
+    return out, res._replace(mb0=res.mb0._replace(moe=moe_0))
+
   _scan_body = ops.PipelinedScanLayer(
       fwd=functools.partial(
-          dsv3_sparse_layer.dsv3_sparse_layer_scan_body_fwd,
+          _scan_body_fwd,
           yarn_freqs=(yarn_freqs_0, yarn_freqs_1),
           splash_kernel=splash_kernel,
           num_experts=num_experts,
@@ -368,8 +390,12 @@ def dsv3_sparse_layers(
           quant=quant,
       ),
   )
-  _reduce_w_ici_sc1 = functools.partial(dsv3_sparse_layer.reduce_w_ici_sc1, axis_mapping=axis_mapping)
-  _reduce_w_ici_sc0 = functools.partial(dsv3_sparse_layer.reduce_w_ici_sc0, axis_mapping=axis_mapping)
+  _reduce_w_ici_sc1 = functools.partial(
+      dsv3_sparse_layer.reduce_w_ici_sc1, axis_mapping=axis_mapping
+  )
+  _reduce_w_ici_sc0 = functools.partial(
+      dsv3_sparse_layer.reduce_w_ici_sc0, axis_mapping=axis_mapping
+  )
   collect_fn_pre = None
   reduce_fn_pre = None
   if expert_permutations is not None:
@@ -392,10 +418,18 @@ def dsv3_sparse_layers(
             expert_axis_name=expert_axis_name,
         )
     )
-    _collect_w_ici_fwd = _with_expert_permutations(_collect_w_ici_fwd, accepts=False)
-    _collect_w_ici_bwd = _with_expert_permutations(_collect_w_ici_bwd, accepts=False)
-    _reduce_w_ici_sc1 = _with_expert_permutations(_reduce_w_ici_sc1, accepts=False)
-    _reduce_w_ici_sc0 = _with_expert_permutations(_reduce_w_ici_sc0, accepts=False)
+    _collect_w_ici_fwd = _with_expert_permutations(
+        _collect_w_ici_fwd, accepts=False
+    )
+    _collect_w_ici_bwd = _with_expert_permutations(
+        _collect_w_ici_bwd, accepts=False
+    )
+    _reduce_w_ici_sc1 = _with_expert_permutations(
+        _reduce_w_ici_sc1, accepts=False
+    )
+    _reduce_w_ici_sc0 = _with_expert_permutations(
+        _reduce_w_ici_sc0, accepts=False
+    )
     _prologue = ops.PipelinedScanLayer(
         fwd=_with_expert_permutations(_prologue.fwd, accepts=False),
         bwd=_with_expert_permutations(_prologue.bwd, accepts=False),
@@ -416,7 +450,9 @@ def dsv3_sparse_layers(
       w,
       _collect_w_dcn,
       _collect_w_ici_fwd,
-      functools.partial(dsv3_sparse_layer.reduce_w_dcn, axis_mapping=axis_mapping),
+      functools.partial(
+          dsv3_sparse_layer.reduce_w_dcn, axis_mapping=axis_mapping
+      ),
       _reduce_w_ici_sc1,
       _reduce_w_ici_sc0,
       _collect_w_ici_bwd,
