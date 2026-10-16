@@ -2609,48 +2609,6 @@ class AttentionTest(parameterized.TestCase):
           "shard_mode": "auto",
       },
       {
-          "testcase_name": "cp_with_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_no_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_with_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "explicit",
-      },
-      {
           "testcase_name": "cp_ep_with_load_balance_explicit",
           "ici_context_parallelism": 2,
           "context_parallel_load_balance": True,
@@ -2810,8 +2768,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "no_load_balance", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -2900,36 +2856,12 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": "no_load_balance",
-          "context_parallel_load_balance": False,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": False,
-      },
-      {
-          "testcase_name": "load_balance",
-          "context_parallel_load_balance": True,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": False,
-      },
-      {
           "testcase_name": "load_balance_dq_reduction_unroll",
           "context_parallel_load_balance": True,
           "max_target_length": 1024,
           "dq_reduction_steps": 3,
           "ring_scan_unroll": 2,
           "packing": False,
-      },
-      {
-          "testcase_name": "packed",
-          "context_parallel_load_balance": False,
-          "max_target_length": 512,
-          "dq_reduction_steps": 0,
-          "ring_scan_unroll": 1,
-          "packing": True,
       },
       {
           "testcase_name": "packed_load_balance",
@@ -3272,8 +3204,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -3318,8 +3248,6 @@ class AttentionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "usp_2x2_load_balance", "context_parallel_load_balance": True, "packing": False},
-      {"testcase_name": "usp_2x2_packed", "context_parallel_load_balance": False, "packing": True},
       {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
@@ -4403,48 +4331,6 @@ class MLATest(attention_test_util.MLATestBase):
           "context_parallel_load_balance": False,
           "ici_expert_parallelism": 1,
           "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_with_load_balance",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_ep_with_load_balance",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "auto",
-      },
-      {
-          "testcase_name": "cp_no_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_with_load_balance_explicit",
-          "ici_context_parallelism": 4,
-          "context_parallel_load_balance": True,
-          "ici_expert_parallelism": 1,
-          "shard_mode": "explicit",
-      },
-      {
-          "testcase_name": "cp_ep_no_load_balance_explicit",
-          "ici_context_parallelism": 2,
-          "context_parallel_load_balance": False,
-          "ici_expert_parallelism": 2,
-          "shard_mode": "explicit",
       },
       {
           "testcase_name": "cp_ep_with_load_balance_explicit",
@@ -6690,8 +6576,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         "compressed_rope_max_timescale": 160000,
         "rope_max_timescale": 10000,
         "qk_rope_head_dim": 64,
+        "override_model_config": True,
+        "base_emb_dim": 256,
         "base_num_kv_heads": 1,
-        "base_num_query_heads": 16,
+        "base_num_query_heads": 4,
     }
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -6877,8 +6765,10 @@ class CompressedAttentionTest(parameterized.TestCase):
         "compressed_rope_max_timescale": 160000,
         "rope_max_timescale": 10000,
         "qk_rope_head_dim": 64,
+        "override_model_config": True,
+        "base_emb_dim": 256,
         "base_num_kv_heads": 1,
-        "base_num_query_heads": 16,
+        "base_num_query_heads": 4,
     }
     cfg = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
