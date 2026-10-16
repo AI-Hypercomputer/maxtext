@@ -682,6 +682,8 @@ class AttentionOp(nnx.Module):
         # Diagonal sub-tile skipping requires a pure causal mask.
         self.qk_diag_skip = False
         self.sv_diag_skip = False
+        self.dkv_diag_skip = False
+        self.dkv_diag_skip_dq = False
       else:
         self.block_q = self.config.sa_block_q
         self.block_kv = self.config.sa_block_kv
@@ -706,6 +708,8 @@ class AttentionOp(nnx.Module):
         self.use_base2_exp = self.config.sa_use_base2_exp
         self.qk_diag_skip = self.config.sa_qk_diag_skip
         self.sv_diag_skip = self.config.sa_sv_diag_skip
+        self.dkv_diag_skip = self.config.sa_dkv_diag_skip
+        self.dkv_diag_skip_dq = self.config.sa_dkv_diag_skip_dq
     self.attn_logits_soft_cap = attn_logits_soft_cap
     self.sliding_window_size = sliding_window_size
     self.chunk_attn_window_size = chunk_attn_window_size
@@ -2061,6 +2065,10 @@ class AttentionOp(nnx.Module):
               "sv_diag_skip": self.sv_diag_skip,
               "qk_diag_grid": config.sa_qk_diag_grid,
           }
+          if self.qk_diag_skip and self.dkv_diag_skip:
+            # Needs a Tokamax release whose SplashConfig has dkv_diag_skip; only passed when enabled.
+            diag_skip_kwargs["dkv_diag_skip"] = True
+            diag_skip_kwargs["dkv_diag_skip_dq"] = self.dkv_diag_skip_dq
         sa_config = tokamax_splash_kernel.SplashConfig(
             block_q=min(block_q, query.shape[2]),
             block_kv=min(block_kv, key.shape[2]),

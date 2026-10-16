@@ -996,6 +996,16 @@ class SplashAttention(BaseModel):
   sa_qk_diag_skip: bool = Field(False, description="Maps to qk_diag_skip in SplashConfig.")
   sa_sv_diag_skip: bool = Field(False, description="Maps to sv_diag_skip in SplashConfig.")
   sa_qk_diag_grid: int = Field(2, description="Maps to qk_diag_grid in SplashConfig.")
+  sa_dkv_diag_skip: bool = Field(
+      False,
+      description="With sa_qk_diag_skip: also skip the masked causal-diagonal sub-tiles of the dV/dP/dK matmuls in the"
+      " fused Tokamax Splash dkv kernel. Maps to dkv_diag_skip in SplashConfig.",
+  )
+  sa_dkv_diag_skip_dq: bool = Field(
+      False,
+      description="With sa_dkv_diag_skip: also skip them in the dQ matmul (may flip bf16 ulps vs the full"
+      " reduction). Maps to dkv_diag_skip_dq in SplashConfig.",
+  )
   # If None, each local_sa_* flag inherits from the corresponding sa_* flag.
   local_sa_block_q: int | None = Field(None, description="Block size for Q in local splash attention.")
   local_sa_block_kv: int | None = Field(None, description="Block size for KV in local splash attention.")
@@ -4442,6 +4452,10 @@ class MaxTextConfig(
     """Validates Tokamax Splash diagonal sub-tile skipping and warns when it cannot take effect."""
     if self.sa_qk_diag_grid < 2 or (self.sa_qk_diag_grid & (self.sa_qk_diag_grid - 1)) != 0:
       raise ValueError(f"sa_qk_diag_grid must be a power of 2 and >= 2, got {self.sa_qk_diag_grid}.")
+    if self.sa_dkv_diag_skip and not self.sa_qk_diag_skip:
+      raise ValueError("sa_dkv_diag_skip requires sa_qk_diag_skip=True (same square-block causal preconditions).")
+    if self.sa_dkv_diag_skip_dq and not self.sa_dkv_diag_skip:
+      raise ValueError("sa_dkv_diag_skip_dq requires sa_dkv_diag_skip=True.")
     if not (self.use_tokamax_splash and (self.sa_qk_diag_skip or self.sa_sv_diag_skip)):
       return
     # Tokamax checks square training blocks when the kernel is built at startup, but `eval_sa_*` blocks are

@@ -952,6 +952,8 @@ def _create_mock_flash_op(
       sa_qk_diag_skip=False,
       sa_sv_diag_skip=False,
       sa_qk_diag_grid=2,
+      sa_dkv_diag_skip=False,
+      sa_dkv_diag_skip_dq=False,
       use_tokamax_splash=use_tokamax_splash,
       use_jax_splash=False,
       cost_estimate_flops_fwd=-1,
@@ -1032,6 +1034,8 @@ class BlockCausalMaskTest(unittest.TestCase):
       sa_qk_diag_skip=False,
       sa_sv_diag_skip=False,
       sa_qk_diag_grid=2,
+      sa_dkv_diag_skip=False,
+      sa_dkv_diag_skip_dq=False,
   ):
     """Builds a minimal flash-attention operator for dispatch tests."""
     config = types.SimpleNamespace(
@@ -1066,6 +1070,8 @@ class BlockCausalMaskTest(unittest.TestCase):
         sa_qk_diag_skip=sa_qk_diag_skip,
         sa_sv_diag_skip=sa_sv_diag_skip,
         sa_qk_diag_grid=sa_qk_diag_grid,
+        sa_dkv_diag_skip=sa_dkv_diag_skip,
+        sa_dkv_diag_skip_dq=sa_dkv_diag_skip_dq,
         use_tokamax_splash=use_tokamax_splash,
         use_jax_splash=False,
         cost_estimate_flops_fwd=-1,
@@ -1362,6 +1368,37 @@ class BlockCausalMaskTest(unittest.TestCase):
         else:
           self.assertNotIn("qk_diag_skip", kw)
           self.assertNotIn("sv_diag_skip", kw)
+
+  def test_tpu_tokamax_splash_wires_dkv_diag_skip_flags(self):
+    def capture_splash_config(op, query):
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.tokamax_splash_kernel, "SplashConfig", side_effect=RuntimeError("splash config captured")
+          ) as make_splash_config,
+          self.assertRaisesRegex(RuntimeError, "splash config captured"),
+      ):
+        op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+      return make_splash_config.call_args.kwargs
+
+    query = jnp.zeros((2, 16, 1, 8))
+    # (sa_dkv_diag_skip, sa_dkv_diag_skip_dq, expected dkv kwargs or None when not passed)
+    cases = ((False, False, None), (True, False, (True, False)), (True, True, (True, True)))
+    for dkv, dkv_dq, expected in cases:
+      with self.subTest(sa_dkv_diag_skip=dkv, sa_dkv_diag_skip_dq=dkv_dq):
+        op = self._make_flash_op(
+            attention_type=AttentionType.MLA,
+            use_tokamax_splash=True,
+            sa_qk_diag_skip=True,
+            sa_qk_diag_grid=4,
+            sa_dkv_diag_skip=dkv,
+            sa_dkv_diag_skip_dq=dkv_dq,
+        )
+        kw = capture_splash_config(op, query)
+        if expected is None:
+          self.assertNotIn("dkv_diag_skip", kw)
+        else:
+          self.assertEqual((kw["dkv_diag_skip"], kw["dkv_diag_skip_dq"]), expected)
 
   def _capture_splash_mask(self, op, query, q_axis="context"):
     """Runs `tpu_flash_attention` far enough to see which mask it built."""
