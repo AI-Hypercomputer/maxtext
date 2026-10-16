@@ -266,7 +266,11 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02, clip_logits_epsi
 
 
 def get_data(golden_data_point, config):
-  """Get the golden data for the test indexed at golden_data_index"""
+  """Get the golden data for the test indexed at golden_data_index.
+
+  Sequences longer than `config.max_target_length` are truncated to `config.max_target_length`
+  (matching `--run_hf_model=true` tokenization behavior), and shorter sequences are padded.
+  """
   model_prefix = config.model_name.split("-")[0]
 
   max_logging.log(f"config.global_batch_size_to_train_on={config.global_batch_size_to_train_on}")
@@ -302,12 +306,16 @@ def get_data(golden_data_point, config):
     pixel_values = None
 
   original_ids = np.asarray(golden_data_point["tokens"], dtype=np.int32)
+  logits = np.asarray(golden_data_point["logits"], dtype=np.float32)
   seq_len = len(original_ids)
 
   if seq_len > config.max_target_length:
-    raise ValueError(
-        f"Golden data sequence length ({seq_len}) is greater than max_target_length ({config.max_target_length})"
+    max_logging.log(
+        f"Truncating golden data sequence length ({seq_len}) to max_target_length ({config.max_target_length})"
     )
+    original_ids = original_ids[: config.max_target_length]
+    logits = logits[: config.max_target_length]
+    seq_len = config.max_target_length
 
   s = (config.global_batch_size_to_train_on, config.max_target_length)
 
@@ -315,7 +323,6 @@ def get_data(golden_data_point, config):
   padded_ids = np.pad(original_ids, (0, config.max_target_length - seq_len), "constant", constant_values=0)
   ids = np.stack([padded_ids for _ in range(config.global_batch_size_to_train_on)])
 
-  logits = np.asarray(golden_data_point["logits"], dtype=np.float32)
   if "formatted_prompt" in golden_data_point:
     prompt = golden_data_point["formatted_prompt"]
   else:
@@ -648,7 +655,26 @@ def main(config, test_args):  # pylint: disable=W0621
       maxtext_model = lora_utils.apply_lora_to_model(maxtext_model, mesh, config)
       if config.lora.lora_restore_path:
         lora_utils.restore_lora_from_path(maxtext_model, config)
-    maxtext_state = None
+
+    # Split once so the jitted step receives the existing parameter arrays
+    # rather than a staged second copy of them.
+    nnx_graphdef, nnx_state = nnx.split(maxtext_model)
+
+    @jax.jit
+    def eval_step_nnx(step_state, ids, decoder_positions, decoder_segment_ids):
+      """Fused NNX forward pass.
+
+      Without jit the decoder runs op-by-op and every layer's intermediates stay
+      live, which exhausts HBM on the sparse MoE path and is much slower on CPU.
+      """
+      with mesh, nn_partitioning.axis_rules(config.logical_axis_rules):
+        nnx_model = nnx.merge(nnx_graphdef, step_state)
+        return nnx_model(
+            decoder_input_tokens=ids,
+            decoder_positions=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            enable_dropout=False,
+        )
 
     # The long prompt is required to catch position-dependent regressions (e.g. RoPE);
     # the short prompts above cannot detect them. See build_long_prompt().
@@ -685,22 +711,7 @@ def main(config, test_args):  # pylint: disable=W0621
         hf_logits_torch = hf_model(**inputs).logits
 
       # --- MaxText Forward Pass ---
-      if maxtext_state is None:
-        mt_logits_jax = maxtext_model(
-            decoder_input_tokens=mt_ids,
-            decoder_positions=mt_decoder_positions,
-            decoder_segment_ids=mt_decoder_segment_ids,
-            enable_dropout=False,
-        )
-      else:
-        mt_logits_jax = maxtext_model.apply(
-            maxtext_state.params,
-            mt_ids,
-            mt_decoder_positions,
-            mt_decoder_segment_ids,
-            enable_dropout=False,
-            rngs={"aqt": init_rng},
-        )
+      mt_logits_jax = eval_step_nnx(nnx_state, mt_ids, mt_decoder_positions, mt_decoder_segment_ids)
       mt_logits_jax_sliced = mt_logits_jax[:, :actual_seq_len, :]
       mt_logits_torch = convert_jax_weight_to_torch(mt_logits_jax_sliced)
 

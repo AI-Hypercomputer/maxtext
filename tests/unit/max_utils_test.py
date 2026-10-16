@@ -443,10 +443,12 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
     mock_gpu_init.assert_called_once_with(raw_keys)
 
+  @mock.patch("jax.config.update")
   @mock.patch("maxtext.utils.max_utils.initialize_jax_for_cpu")
-  def test_cpu_backend_calls_initialize_jax_for_cpu(self, mock_cpu_init):
+  def test_cpu_backend_calls_initialize_jax_for_cpu(self, mock_cpu_init, mock_config_update):
     raw_keys = self._base_keys(hardware="cpu")
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_config_update.assert_called_once_with("jax_platforms", "cpu")
     mock_cpu_init.assert_called_once_with(raw_keys)
 
   @mock.patch("jax.distributed.initialize")
