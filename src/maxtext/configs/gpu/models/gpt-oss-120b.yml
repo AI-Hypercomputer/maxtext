@@ -1,0 +1,72 @@
+# model config for gpt-oss-120b
+# https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json
+
+# tokenizer_type: "huggingface"
+
+base_config: "base.yml"
+
+hardware: "gpu"
+enable_checkpointing: False
+
+dataset_type: "synthetic"
+tokenizer_path: openai/gpt-oss-120b
+
+# ~10 bytes/param of weights + grads + AdamW state (~1.17 TB total). On 8x288 GB,
+# pure FSDP OOMs with these defaults (jax ragged_dot, one process for all GPUs) but
+# fits at ~158 GB/device with use_te_grouped_gemm=true under
+# tools/orchestration/gpu_per_device_run.sh.
+per_device_batch_size: 8
+
+
+# not supported at GPU
+megablox: false
+# dense_matmul without token dropping runs every token through all 128 experts
+# (32x the top-4 FLOPs), so the 120B config has to use the sparse (ragged_dot) path.
+sparse_matmul: true
+
+# less memory than ragged_dot
+use_te_grouped_gemm: true
+
+attention: "cudnn_flash_te"
+#max_segments_per_seq must be set when using TransformerEngine attention
+max_segments_per_seq: 32
+# Attention
+base_emb_dim: 2880
+base_num_query_heads: 64
+base_num_kv_heads: 8
+head_dim: 64
+sliding_window_size: 128
+attention_bias: true
+attention_sink: true
+
+# RoPE
+rope_type: "yarn"
+rope_max_timescale: 150_000
+max_position_embeddings: 131072
+original_max_position_embeddings: 4096
+rope_factor: 32
+beta_fast: 32
+beta_slow: 1
+rope_interleave: false
+rope_truncate: false
+rope_attention_scaling: true
+
+# MLP
+base_mlp_dim: 2880
+base_moe_mlp_dim: 2880
+mlp_activations: ["sigmoid","linear"]
+mlp_activations_limit: 7.0
+routed_bias: true
+mlp_bias: true
+num_experts: 128
+num_experts_per_tok: 4
+
+# General
+weight_dtype: bfloat16
+base_num_decoder_layers: 36
+vocab_size: 201088
+normalization_layer_epsilon: 1.0e-5
+enable_dropout: false
+logits_via_embedding: false
+decoder_block: "gpt_oss"
+inhomogeneous_layer_cycle_interval: 2
