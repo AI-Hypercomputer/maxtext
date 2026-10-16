@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792128814530,
+  "lastUpdate": 1792170238006,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -51220,6 +51220,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 6806.334999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 478,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Shuning Jin",
+            "username": "shuningjin",
+            "email": "shuningjin@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "24e75daf8e16a644d3a2db5a36212cdfd9bc4331",
+          "message": "Apply the GPU-only double-buffer loop-unroll metadata only on GPU hardware.\n\nProblem:\n*   `gradient_accumulation_loss_and_grad` wraps every microbatch `grad_func` call in `set_xla_metadata(_xla_loop_unroll_strategy=\"double-buffer\")`. The attribute is only consumed by the XLA:GPU double-buffer loop unrolling pass (https://github.com/openxla/xla/pull/43468).\n*   `set_xla_metadata` stamps the attribute on every op traced inside the scope, including collectives nested in `jax.experimental.compute_on(\"device\")` calls.\n*   XLA's `CallInliner` copies the call's `_xla_compute_type` frontend attribute onto an inlined instruction only when that instruction's frontend attributes are empty. With `gradient_accumulation_steps > 1` the `_xla_compute_type=\"dense\"` TensorCore pin is therefore dropped from those collectives.\n*   XLA:TPU's SparseCore collective offload pass then auto-offloads them; they serialize behind other SparseCore work and stall the TensorCore at the corresponding `call-done`.\n\nFix:\n*   Only enter the metadata scope when `config.hardware` is `gpu` or `gpu_multiprocess`, matching how other GPU-only gradient-accumulation behavior is gated in `src/maxtext/utils/maxtext_utils.py`. TPU and CPU keep the `compute_on` placement intact; XLA:GPU behavior is unchanged.\nPiperOrigin-RevId: 1000871939",
+          "timestamp": "2026-10-16T15:26:53Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/24e75daf8e16a644d3a2db5a36212cdfd9bc4331"
+        },
+        "date": 1792170237068,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 289.19399999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 102.676,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2006.7639999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 97.833,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.16699999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 7774.545999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 478,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1449.684,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 197.23499999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 6770.138999999997,
             "unit": "sec"
           },
           {
