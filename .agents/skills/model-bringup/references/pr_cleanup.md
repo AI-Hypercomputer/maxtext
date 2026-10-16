@@ -14,7 +14,7 @@ Inspect the cumulative diff against the intended PR base, including earlier comm
 
 ## 2. Resolve lint and revalidate
 
-Read `.pre-commit-config.yaml`, `pylintrc`, and formatter configuration. Current Python style is Pyink, two-space indentation, 122-character lines; repository configuration is authoritative.
+Read `.pre-commit-config.yaml`, `pylintrc`, and formatter configuration. Current Python style is Pyink, two-space indentation, 125-character lines; repository configuration is authoritative.
 
 Run configured hooks in the intended dependency environment over all added/modified files. For Python, use `pre-commit run pyink --files ...` and `pre-commit run pylint --files ...`; run applicable non-Python hooks too.
 
