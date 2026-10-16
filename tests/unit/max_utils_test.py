@@ -417,6 +417,13 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     mock_init.assert_not_called()
 
   @mock.patch("jax.distributed.initialize")
+  def test_skip_flag_without_hardware_key_exits_early(self, mock_init):
+    raw_keys = self._base_keys(skip_jax_distributed_system=True)
+    raw_keys.pop("hardware")
+    max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_init.assert_not_called()
+
+  @mock.patch("jax.distributed.initialize")
   def test_single_controller_exits_early(self, mock_init):
     max_utils.maybe_initialize_jax_distributed_system(self._base_keys(enable_single_controller=True))
     mock_init.assert_not_called()
@@ -443,10 +450,12 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
     mock_gpu_init.assert_called_once_with(raw_keys)
 
+  @mock.patch("jax.config.update")
   @mock.patch("maxtext.utils.max_utils.initialize_jax_for_cpu")
-  def test_cpu_backend_calls_initialize_jax_for_cpu(self, mock_cpu_init):
+  def test_cpu_backend_calls_initialize_jax_for_cpu(self, mock_cpu_init, mock_config_update):
     raw_keys = self._base_keys(hardware="cpu")
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
+    mock_config_update.assert_called_once_with("jax_platforms", "cpu")
     mock_cpu_init.assert_called_once_with(raw_keys)
 
   @mock.patch("jax.distributed.initialize")
