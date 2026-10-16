@@ -15,11 +15,13 @@
 
 """MoE related Layers."""
 
+import contextlib
 import dataclasses
 import enum
 import functools
 import inspect
 import math
+import os
 import random
 from typing import Any, Iterable, Optional, Tuple, Union
 
@@ -766,6 +768,62 @@ class Tid2EidVar(nnx.Variable):
 
 class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
+
+
+# fp8_fake_quant_hoist: fp8_moe_fake_quant without the per-layer absmax all-reduce, optionally with fp8 weight
+# gathers. The env var selects a mode while the config key is "off" (e.g. to A/B it without changing the argv).
+FP8_FAKE_QUANT_HOIST_ENV = "PARAMBOLE_FQ_HOIST"
+
+
+def fp8_fake_quant_hoist_mode(config=None) -> str:
+  """The fp8 fake-quant hoist mode, read at trace time: "" (off, the original code), "absmax" or "gather8".
+
+  From the config key `fp8_fake_quant_hoist` (off | absmax | gather8) and the env var PARAMBOLE_FQ_HOIST
+  (unset or 0: no override; absmax; 1: gather8). The env var applies while the key is "off"; both set to
+  different modes raises, and so does any other env value. Applies with `fp8_moe_fake_quant=true` inside the
+  decoder's layer scan (`stacked_fp8_fake_quant_absmax`):
+  - "absmax": the per-channel absmax of every routed-expert weight is computed once for the whole scanned layer
+    stack, before the scan, and each layer fake-quantizes with its slice. That removes the per-layer abs-max
+    reduce and its FSDP max all-reduce from the forward and the remat replay.
+  - "gather8": "absmax", plus `sparse_matmul` all-gathers the float8_e4m3fn codes instead of the bf16
+    fake-quantized weights and dequantizes after the gather, halving the expert-weight all-gather bytes.
+  Both are bit-identical to the default: the same absmax, scale and codes, the same dequantization expression
+  and the same straight-through gradient.
+  """
+  raw = os.environ.get(FP8_FAKE_QUANT_HOIST_ENV, "")
+  value = raw.strip().lower()
+  if value in ("", "0"):
+    env_mode = ""
+  elif value == "1":
+    env_mode = "gather8"
+  elif value == "absmax":
+    env_mode = "absmax"
+  else:
+    raise ValueError(
+        f"{FP8_FAKE_QUANT_HOIST_ENV}={raw!r}: expected unset or 0 (off), 1 (absmax hoist + fp8 weight gathers)"
+        " or absmax (absmax hoist only)."
+    )
+  key = getattr(config, "fp8_fake_quant_hoist", "off") if config is not None else "off"
+  if key not in ("off", "absmax", "gather8"):
+    raise ValueError(f"fp8_fake_quant_hoist={key!r}: expected off, absmax or gather8.")
+  config_mode = "" if key == "off" else key
+  if env_mode and config_mode and env_mode != config_mode:
+    raise ValueError(
+        f"fp8_fake_quant_hoist={key!r} conflicts with {FP8_FAKE_QUANT_HOIST_ENV}={raw!r} (mode {env_mode});"
+        " set one of them."
+    )
+  return config_mode or env_mode
+
+
+# The decoder's layer scan attaches this attribute, for the duration of one layer call, to every eligible
+# RoutedMoE in the layer: {weight name: that layer's per-channel absmax}, sliced by jax.lax.scan from
+# `stacked_fp8_fake_quant_absmax`. It is removed before the scan splits the layer's state, so the graph and the
+# scanned state are exactly as without it.
+FP8_HOISTED_ABSMAX_ATTR = "fp8_fake_quant_hoisted_absmax"
+
+
+class Fp8HoistedAbsmax(nnx.Variable):
+  """One layer's per-channel absmax of its routed-expert weights, computed for the whole scanned stack at once."""
 
 
 class GateLogit(nnx.Module):
@@ -2653,10 +2711,15 @@ class RoutedMoE(nnx.Module):
       wo_bias,
       input_ids=None,
       forced_routed_experts=None,
+      fp8_fake_quant_at_gather=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts.
 
     `w1_kernel=None` (moe_unsplit_prefused_wi) means `w0_kernel` is the whole prefused [w0 | w1] weight.
+
+    `fp8_fake_quant_at_gather` (fp8 fake-quant hoist mode gather8 only): the (w0, w1, wo) per-channel absmax for
+    weights that `__call__` left unrounded (w1's is None when w1_kernel is None). They are rounded to their fp8 grid
+    here, on the FSDP shard, and the all-gather moves the fp8 codes; see the gather below.
     """
     if w1_kernel is None and not self.config.prefuse_moe_weights:
       raise ValueError("sparse_matmul got w1_kernel=None (the whole [w0 | w1] layout), which needs prefuse_moe_weights.")
@@ -5143,9 +5206,34 @@ class RoutedMoE(nnx.Module):
           return w
         return self._maybe_shard_with_pspec(w, pspec)
 
-    w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
-    w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
-    wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
+    if fp8_fake_quant_at_gather is None:
+      w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
+      w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
+      wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
+      fp8_dequantize_after_gather = None
+    else:
+      # fp8_fake_quant_hoist=gather8: fp8_moe_fake_quant with the rounding split around the FSDP all-gather. Each
+      # weight is quantized on its shard with the hoisted absmax (no all-reduce), the float8_e4m3fn codes are
+      # gathered (1 byte per element instead of the 2 of the bf16 fake-quantized weight; still a SparseCore
+      # all-gather on v7x) and dequantized after the gather and the prefetch barrier. Bit-identical to gathering
+      # fake_quantize_weight_per_channel: the dequantization is elementwise with a per-channel scale; the scale is
+      # replicated across FSDP (the decoder lays the hoisted absmax out that way), so placing it in the gathered
+      # layout moves nothing. The weights reach the GEMMs through dequantize_weight_codes_ste, whose backward hands
+      # the cotangent to the shard exactly as the gather's transpose (a sharding constraint) and the
+      # straight-through estimator did, so the weight-gradient reduce-scatter is unchanged. A None w1_kernel
+      # (moe_unsplit_prefused_wi: w0_kernel is the whole [w0 | w1]) stays None.
+      fp8_dequantize_after_gather = []
+      gathered_codes = []
+      for w, absmax, pspec in zip((w0_kernel, w1_kernel, wo_kernel), fp8_fake_quant_at_gather, (w0_pspec, w1_pspec, wo_pspec)):
+        if w is None:
+          gathered_codes.append(None)
+          fp8_dequantize_after_gather.append(None)
+          continue
+        codes, scale = quantizations.quantize_weight_codes_per_channel(jax.lax.stop_gradient(w), absmax=absmax)
+        gathered_codes.append(_fsdp_all_gather(codes, pspec))
+        scale = self._maybe_shard_with_pspec(scale, P(pspec[0], None, pspec[2]))
+        fp8_dequantize_after_gather.append((w, scale, pspec))
+      w0_kernel, w1_kernel, wo_kernel = gathered_codes
     if w0_bias is not None:
       w0_bias = _fsdp_all_gather(w0_bias, w0_bias_pspec)
     if w1_bias is not None:
@@ -5182,6 +5270,18 @@ class RoutedMoE(nnx.Module):
           (inputs, gate_logits, pre_bias_logits),
           (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias),
           backward=prefetch == "forward_backward",
+      )
+
+    if fp8_dequantize_after_gather is not None:
+      # After the barrier, so the barrier orders the (cheaper) code gathers and the dequantization can fuse
+      # into the GEMM operand prologue.
+      w0_kernel, w1_kernel, wo_kernel = (
+          None
+          if deq is None
+          else quantizations.dequantize_weight_codes_ste(
+              deq[0], codes, deq[1], grad_transform=functools.partial(self._maybe_shard_with_pspec, pspec=deq[2])
+          )
+          for codes, deq in zip((w0_kernel, w1_kernel, wo_kernel), fp8_dequantize_after_gather)
       )
 
     route_and_compute_outputs = sparse_matmul_route_and_compute(
@@ -6119,6 +6219,40 @@ class RoutedMoE(nnx.Module):
       output = jax.lax.with_sharding_constraint(output, out_sharding)
     return output, lb_loss, (total_recv_tokens, jnp.asarray(recv_capacity_per_rank, dtype=jnp.int32))
 
+  def _fp8_hoisted_absmax(self, wi_half_width: int | None):
+    """(w0, w1, wo) absmax the decoder's layer scan attached (fp8_fake_quant_hoist), else (None, None, None).
+
+    A pre-fused wi carries one absmax over its 2N columns; each column's absmax is the same in its half, so
+    the halves are exact slices of it. `wi_half_width=None` (moe_unsplit_prefused_wi: w0 is the whole [w0 | w1]
+    and w1 is None) returns the whole wi absmax for w0 and None for w1.
+    """
+    hoisted = getattr(self, FP8_HOISTED_ABSMAX_ATTR, None)
+    if hoisted is None:
+      return None, None, None
+    absmax = hoisted.get_value()
+    if fp8_fake_quant_hoist_mode(self.config) == "gather8":
+      # Pin the gathered-scale layout here, at the first use inside the layer, as well as on the stack. Otherwise
+      # XLA keeps the scan's absmax input FSDP-sharded (the quantize on the shard needs only its slice) and
+      # all-gathers the f32 wo scale in every layer for the dequantization after the gather (exact-cell AOT:
+      # 8 x f32[1,64,1,4096] all-gathers per scan step). Replicated, the scale is computed in full on every device.
+      absmax = {k: self._maybe_shard_with_pspec(v, self._fp8_gathered_scale_pspec(k)) for k, v in absmax.items()}
+    if "wi" in absmax:
+      if wi_half_width is None:
+        return absmax["wi"], None, absmax["wo"]
+      return absmax["wi"][..., :wi_half_width], absmax["wi"][..., wi_half_width:], absmax["wo"]
+    return absmax["wi_0"], absmax["wi_1"], absmax["wo"]
+
+  def _fp8_gathered_scale_pspec(self, weight_name: str) -> P:
+    """The layout of one layer's (E, 1, C) fp8 scale for `weight_name` next to its FSDP-gathered weight.
+
+    Mirrors the default branch of `sparse_matmul`'s `get_routed_moe_shardings` (the only one gather8 supports): the
+    gathered wi (halves or whole) are ("exp", None, "mlp_no_fsdp") and wo is ("exp", "mlp_no_fsdp", None), both
+    without "fsdp"; the scale keeps the expert and channel entries and replicates its size-1 axis.
+    """
+    logical = ("exp", "mlp_no_fsdp", None) if weight_name == "wo" else ("exp", None, "mlp_no_fsdp")
+    pspec = remove_mesh_axes_from_partition_spec(self._logical_to_mesh_axes(logical), ("fsdp",))
+    return P(pspec[0], None, pspec[2])
+
   def __call__(
       self,
       inputs: jax.Array,
@@ -6254,13 +6388,22 @@ class RoutedMoE(nnx.Module):
         w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
         w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
 
+    fp8_fake_quant_at_gather = None
     if cfg.fp8_moe_fake_quant and not is_fused_moe_path:
       # Axis 2 is the output dim of wi_0/wi_1 (mlp) and wo (embed). An fp8_moe rollout quantizes the
       # fused wi = [wi_0 | wi_1] per output channel, so rounding the halves separately is identical.
-      w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel)
-      if w1_kernel is not None:  # None: moe_unsplit_prefused_wi, and the line above rounded both halves at once
-        w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
-      wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel)
+      # fp8_fake_quant_hoist: inside the decoder's layer scan the absmax comes precomputed for the whole stack
+      # (`stacked_fp8_fake_quant_absmax`), so this layer does not reduce and all-reduce it; with gather8 the
+      # rounding also moves into `sparse_matmul`, around the FSDP all-gather, so the gather moves fp8 codes.
+      # Without the attribute (hoist off) all three absmax are None: the original code.
+      w0_absmax, w1_absmax, wo_absmax = self._fp8_hoisted_absmax(None if w1_kernel is None else w0_kernel.shape[-1])
+      if wo_absmax is not None and cfg.sparse_matmul and fp8_fake_quant_hoist_mode(cfg) == "gather8":
+        fp8_fake_quant_at_gather = (w0_absmax, w1_absmax, wo_absmax)
+      else:
+        w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel, absmax=w0_absmax)
+        if w1_kernel is not None:  # None: moe_unsplit_prefused_wi, and the line above rounded both halves at once
+          w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel, absmax=w1_absmax)
+        wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel, absmax=wo_absmax)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because
@@ -6327,6 +6470,7 @@ class RoutedMoE(nnx.Module):
           wo_bias,
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
+          fp8_fake_quant_at_gather=fp8_fake_quant_at_gather,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -6462,3 +6606,139 @@ class RoutedAndSharedMoE(nnx.Module):
         out_sharding=out_sharding,
     )
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
+
+
+def fp8_fake_quant_hoist_enabled(config) -> str:
+  """The fp8 fake-quant hoist mode the decoder's layer scan applies ("" = off). Raises if the config cannot honour it.
+
+  Raising, instead of quietly running the original code, keeps an arm that asks for the hoist from measuring nothing.
+  """
+  mode = fp8_fake_quant_hoist_mode(config)
+  if not mode:
+    return ""
+  unmet = []
+  if not getattr(config, "fp8_moe_fake_quant", False):
+    unmet.append("fp8_moe_fake_quant=true")
+  if config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
+    unmet.append("a training attention (not vllm_rpa*)")
+  if config.parameter_memory_host_offload:
+    unmet.append("parameter_memory_host_offload=false")
+  if getattr(config, "moe_flat_fsdp_weights", False):
+    unmet.append("moe_flat_fsdp_weights=false")
+  if mode == "gather8":
+    if not config.sparse_matmul:
+      unmet.append("sparse_matmul=true")
+    if config.moe_fsdp_use_two_stage_all_gather:
+      unmet.append("moe_fsdp_use_two_stage_all_gather=false")
+    if config.shard_exp_on_fsdp or config.use_2d_fsdp_sharding or getattr(config, "shard_embed_moe_on_fsdp", False):
+      unmet.append("the default expert-weight sharding (shard_exp_on_fsdp, use_2d_fsdp_sharding, shard_embed_moe_on_fsdp off)")
+    if config.moe_expert_weight_prefetch == "forward_backward":
+      unmet.append("moe_expert_weight_prefetch other than forward_backward")
+    if config.moe_pin_sparse_core_all_gathers or (
+        getattr(config, "moe_pin_sparse_core_fsdp_all_gathers", False)
+        and not getattr(config, "moe_pin_sparse_core_fsdp_all_gathers_fwd_only", False)
+    ):
+      unmet.append("no SparseCore-pinned expert-weight gathers in the backward (fwd_only pinning is fine)")
+    if getattr(config, "gather_scanned_kernels_once", False):
+      unmet.append("gather_scanned_kernels_once=false")
+  if unmet:
+    raise ValueError(
+        f"fp8_fake_quant_hoist={getattr(config, 'fp8_fake_quant_hoist', 'off')!r}"
+        f" {FP8_FAKE_QUANT_HOIST_ENV}={os.environ.get(FP8_FAKE_QUANT_HOIST_ENV)!r} (mode {mode}) needs: "
+        + "; ".join(unmet)
+    )
+  return mode
+
+
+def _fp8_hoistable_weight_names(module: "RoutedMoE") -> tuple[str, ...]:
+  """The expert weights whose fake-quant absmax can be computed for the whole stack, () if none.
+
+  Mirrors the `fp8_moe_fake_quant` branch of `RoutedMoE.__call__`: unquantized weights (no scales, no AQT or
+  serve quantization, no sparsity) on the non-fused path, where the layer fake-quantizes
+  `dequantize_weight(param, None, dtype)`, i.e. `param.astype(dtype)`.
+  """
+  cfg = module.config
+  if module.quant is not None or quantizations.in_serve_mode(module.quant):
+    return ()
+  if getattr(module, "wi_0_sparsity_module", None) is not None:
+    return ()
+  if cfg.prefuse_moe_weights:
+    names, scales = ("wi", "wo"), ("wi_scale", "wo_scale")
+  else:
+    names, scales = ("wi_0", "wi_1", "wo"), ("wi_0_scale", "wi_1_scale", "wo_scale")
+  if any(getattr(module, s, None) is not None for s in scales):
+    return ()
+  if any(not isinstance(getattr(module, n, None), nnx.Param) for n in names):
+    return ()
+  return names
+
+
+def stacked_fp8_fake_quant_absmax(layers: nnx.Module, config, mode: str) -> tuple[list, list]:
+  """Per-layer fp8 fake-quant absmax of every eligible RoutedMoE in a scanned layer stack, for the whole stack.
+
+  `layers` is the stacked module `_apply_layers_sequentially` scans (parameters stacked along
+  `config.param_scan_axis`). For each eligible RoutedMoE this computes, from the same cast weights the layers
+  fake-quantize, the per-(expert, channel) absmax of every layer at once, stacked along a new leading axis:
+  jax.lax.scan slices one layer's absmax out of it and `fp8_hoisted_absmax_attached` hands it to that layer.
+  When the reduced axis is FSDP-sharded this is one max all-reduce per weight for the whole stack instead of
+  one per layer in the forward and another per layer in the remat replay. A max is exact, so every layer gets
+  bit-for-bit the absmax it would have computed. No gradient flows through it: the weights are read under
+  stop_gradient, as the layer's own absmax only ever feeds stop_gradient'ed values.
+  With mode "gather8" each absmax is also laid out as the scale next to the gathered weight (replicated across
+  FSDP: for wo, whose channel axis is FSDP-sharded, that is one all-gather for the whole stack), so no layer
+  needs a collective for its scale.
+
+  Returns:
+    (paths, values): the RoutedMoE graph paths within `layers` and, for each, a dict
+    {weight name: absmax stacked as [num_layers, num_experts, 1, channels]}.
+  """
+  paths, values = [], []
+  for path, node in nnx.iter_graph(layers):
+    if not isinstance(node, RoutedMoE):
+      continue
+    names = _fp8_hoistable_weight_names(node)
+    if not names:
+      continue
+    per_weight = {}
+    for name in names:
+      stacked = getattr(node, name).get_value()
+      if stacked.ndim != 4:
+        raise ValueError(f"fp8_fake_quant_hoist expects scanned 3D expert weights, got {name} {stacked.shape}.")
+      w = quantizations.dequantize_weight(jax.lax.stop_gradient(stacked), None, node.dtype)
+      absmax = quantizations.stacked_per_channel_absmax(w, layer_axis=config.param_scan_axis)
+      if mode == "gather8":
+        absmax = node._maybe_shard_with_pspec(absmax, P(None, *node._fp8_gathered_scale_pspec(name)))  # pylint: disable=protected-access
+      per_weight[name] = absmax
+    paths.append(path)
+    values.append(per_weight)
+  if paths:
+    # Once per trace of the scan (WARNING so that it shows without INFO logging): the liveness check for an arm.
+    max_logging.warning(
+        f"[FQHOIST] fp8_fake_quant_hoist={getattr(config, 'fp8_fake_quant_hoist', 'off')!r}"
+        f" {FP8_FAKE_QUANT_HOIST_ENV}={os.environ.get(FP8_FAKE_QUANT_HOIST_ENV)!r} mode={mode}: fp8 fake-quant"
+        f" absmax hoisted out of the layer scan for {len(paths)} RoutedMoE x {sorted(values[0])} of"
+        f" {type(layers).__name__} (fp8-code weight gathers: {'on' if mode == 'gather8' else 'off'}), shapes "
+        + ", ".join(f"{k}{tuple(v.shape)}" for k, v in sorted(values[0].items()))
+    )
+  return paths, values
+
+
+@contextlib.contextmanager
+def fp8_hoisted_absmax_attached(layer: nnx.Module, paths: list, values: list | None):
+  """Attaches one layer's hoisted absmax (`values`, a scan slice) to its RoutedMoEs at `paths` for one call.
+
+  The attribute is removed on exit, before the scan splits the layer's state, so the scanned state, the
+  outputs and the graphdef are exactly as without the hoist.
+  """
+  if not paths or values is None:
+    yield
+    return
+  nodes = dict(nnx.iter_graph(layer))
+  modules = [nodes[p] for p in paths]
+  for module, per_weight in zip(modules, values):
+    setattr(module, FP8_HOISTED_ABSMAX_ATTR, Fp8HoistedAbsmax(per_weight))
+  try:
+    yield
+  finally:
+    for module in modules:
+      delattr(module, FP8_HOISTED_ABSMAX_ATTR)

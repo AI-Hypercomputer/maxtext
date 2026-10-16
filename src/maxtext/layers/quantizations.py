@@ -146,12 +146,17 @@ def dequantize_weight(
   return w_c * scale_c
 
 
-def quantize_weight_per_channel(w: Any, channel_axis: int = 2) -> Tuple[Any, Any]:
+def quantize_weight_per_channel(w: Any, channel_axis: int = 2, absmax: Array | None = None) -> Tuple[Any, Any]:
   """Per-channel float8_e4m3fn quantization of an (num_experts, in_dim, out_dim) MoE expert weight.
 
   Keeps one absmax scale per expert (axis 0) and channel (`channel_axis`), reducing over the other
   axes, so the scale has w's rank with the reduced axes set to 1. The fused MoE kernel applies such
   per-output-channel scales after its FP8 matmul. Accepts a jax.ShapeDtypeStruct for shape inference.
+
+  `absmax`, if given, must be `jnp.max(jnp.abs(w), reduce_axes, keepdims=True)` computed elsewhere: the
+  PARAMBOLE_FQ_HOIST path computes it once for a whole scanned layer stack (`stacked_per_channel_absmax`).
+  A max is exact in any order and over any sharding, so the scale and the codes are bit-identical to
+  computing the absmax here; every op from the absmax on is the same code.
 
   Returns:
     (quantized weight in float8_e4m3fn, float32 scale).
@@ -166,25 +171,112 @@ def quantize_weight_per_channel(w: Any, channel_axis: int = 2) -> Tuple[Any, Any
         jax.ShapeDtypeStruct(tuple(scale_shape), jnp.float32),
     )
   FP8_MAX = 448.0
-  max_val = jnp.max(jnp.abs(w), axis=reduce_axes, keepdims=True)
+  if absmax is None:
+    max_val = jnp.max(jnp.abs(w), axis=reduce_axes, keepdims=True)
+  else:
+    expected = tuple(1 if d in reduce_axes else s for d, s in enumerate(w.shape))
+    if tuple(absmax.shape) != expected or absmax.dtype != w.dtype:
+      raise ValueError(
+          f"absmax must be the per-channel abs-max of w: shape {expected} dtype {w.dtype},"
+          f" got {tuple(absmax.shape)} {absmax.dtype}."
+      )
+    max_val = absmax
   scale = jnp.maximum(max_val / FP8_MAX, 1e-12).astype(jnp.float32)
   q_w = jnp.clip(w / scale, -FP8_MAX, FP8_MAX).astype(jnp.float8_e4m3fn)
   return q_w, scale
 
 
-def fake_quantize_weight_per_channel(w: Array, channel_axis: int = 2) -> Array:
+def stacked_per_channel_absmax(w_stacked: Array, layer_axis: int, channel_axis: int = 2) -> Array:
+  """The absmax `quantize_weight_per_channel` computes, for every layer of a scanned weight stack at once.
+
+  `w_stacked` is a per-layer (num_experts, in_dim, out_dim) weight stacked along `layer_axis` (the config's
+  `param_scan_axis`). Returns `jnp.max(jnp.abs(w_l), reduce_axes, keepdims=True)` for every layer `w_l`,
+  stacked along a new leading axis, which is the layout `jax.lax.scan` slices. When the reduced axis is
+  FSDP-sharded this is one max all-reduce for the whole stack instead of one per layer and per pass.
+  """
+  per_layer_ndim = w_stacked.ndim - 1
+  per_layer_reduce = tuple(d for d in range(per_layer_ndim) if d not in (0, channel_axis))
+  stacked_reduce = tuple(d if d < layer_axis else d + 1 for d in per_layer_reduce)
+  absmax = jnp.max(jnp.abs(w_stacked), axis=stacked_reduce, keepdims=True)
+  return jnp.moveaxis(absmax, layer_axis, 0)
+
+
+def fake_quantize_weight_per_channel(w: Array, channel_axis: int = 2, absmax: Array | None = None) -> Array:
   """Rounds `w` to the grid of `quantize_weight_per_channel(w)`, with a straight-through gradient.
 
   The forward value is the dequantized weight in `w.dtype`, i.e. the weight an FP8 rollout holding
   `quantize_weight_per_channel(w)` computes with. The backward pass treats the rounding as the
-  identity, so gradients reach the high-precision `w`.
+  identity, so gradients reach the high-precision `w`. `absmax`: see `quantize_weight_per_channel`.
   """
-  q, scale = quantize_weight_per_channel(w, channel_axis)
+  q, scale = quantize_weight_per_channel(w, channel_axis, absmax=absmax)
   # Under jit, XLA folds the f32 -> fp8 -> f32 convert pair into a no-op, dropping the rounding.
   q = jax.lax.optimization_barrier(q)
   w_q = jax.lax.stop_gradient((q.astype(jnp.float32) * scale).astype(w.dtype))
   # w - stop_gradient(w) is exactly zero, so the forward value is exactly w_q.
   return w_q + (w - jax.lax.stop_gradient(w))
+
+
+# Bit pattern of -0.0 in float8_e4m3fn (sign bit only).
+_FP8_E4M3FN_NEG_ZERO_BITS = 0x80
+
+
+def quantize_weight_codes_per_channel(
+    w: Array, channel_axis: int = 2, absmax: Array | None = None
+) -> Tuple[Array, Array]:
+  """The float8_e4m3fn codes of `quantize_weight_per_channel(w)`, with -0.0 stored as +0.0, and the float32 scale.
+
+  For an FSDP-sharded `w`, all-gathering these codes and calling `dequantize_weight_codes_ste` after the gather
+  gives bit-for-bit the forward value of all-gathering `fake_quantize_weight_per_channel(w)`, while the all-gather
+  moves 1 byte per element instead of 2 (PARAMBOLE_FQ_HOIST=1).
+  - The dequantization is elementwise with a per-channel scale, so it commutes with the gather exactly.
+  - -0.0 codes are stored as +0.0: `fake_quantize_weight_per_channel` returns `w_q + (w - w)`, and that +0.0
+    addend turns every -0.0 of `w_q` into +0.0 (for finite w). Dequantizing a +0.0 code gives +0.0.
+  - The codes stay float8_e4m3fn for the gather: on TPU v7x the SparseCore all-gather offload takes 8-bit floats
+    (and int8) like bf16, but not uint8, uint16 or int16, which fall back to the TensorCore (compile-only AOT
+    with the bench's libtpu flags).
+  """
+  q, scale = quantize_weight_per_channel(w, channel_axis, absmax=absmax)
+  bits = jax.lax.bitcast_convert_type(q, jnp.uint8)
+  bits = jnp.where(bits == _FP8_E4M3FN_NEG_ZERO_BITS, jnp.zeros_like(bits), bits)
+  q = jax.lax.bitcast_convert_type(bits, jnp.float8_e4m3fn)
+  # As in fake_quantize_weight_per_channel: keep XLA from folding the f32 -> fp8 -> f32 round trip.
+  q = jax.lax.optimization_barrier(q)
+  return q, scale
+
+
+def dequantize_weight_codes_ste(
+    w: Array,
+    codes: Array,
+    scale: Array,
+    grad_transform: Callable[[Array], Array] | None = None,
+) -> Array:
+  """Dequantizes `quantize_weight_codes_per_channel` codes, with a straight-through gradient into `w`.
+
+  Forward: `(codes.astype(float32) * scale).astype(w.dtype)`, the expression `fake_quantize_weight_per_channel`
+  uses; `w` itself is not read. Backward: the output cotangent goes to `w` unchanged (after `grad_transform`,
+  e.g. the sharding constraint that the transpose of a gather would apply), like the straight-through
+  `w_q + (w - stop_gradient(w))`; the codes and the scale get no gradient. `codes` and `scale` may be
+  all-gathered copies of the ones computed from the shard `w`.
+  """
+  dtype = w.dtype
+
+  def _value(codes, scale):
+    return (codes.astype(jnp.float32) * scale).astype(dtype)
+
+  @jax.custom_vjp
+  def _dequant(w, codes, scale):
+    del w
+    return _value(codes, scale)
+
+  def _dequant_fwd(w, codes, scale):
+    del w
+    return _value(codes, scale), None
+
+  def _dequant_bwd(_, g):
+    return (g if grad_transform is None else grad_transform(g)), None, None
+
+  _dequant.defvjp(_dequant_fwd, _dequant_bwd)
+  return _dequant(w, codes, scale)
 
 
 @dataclass

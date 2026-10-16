@@ -1833,6 +1833,28 @@ class MoEGeneral(BaseModel):
           " on weight sync. Activations stay in dtype."
       ),
   )
+  fp8_fake_quant_hoist: Literal["off", "absmax", "gather8"] = Field(
+      "off",
+      description=(
+          "fp8_moe_fake_quant inside the decoder's layer scan, bit-identical to 'off'. 'absmax': the per-channel"
+          " absmax of every routed-expert weight is computed once for the whole layer stack, before the scan (one"
+          " FSDP max all-reduce instead of one per layer and pass). 'gather8': 'absmax', plus sparse_matmul"
+          " all-gathers the float8_e4m3fn codes instead of the bf16 fake-quantized weights and dequantizes after"
+          " the gather. The env var PARAMBOLE_FQ_HOIST (0 off, absmax, 1 = gather8) selects a mode when this is"
+          " 'off'; a different non-off value of both raises."
+      ),
+  )
+
+  @classmethod
+  def _off_for_false_fp8_fake_quant_hoist(cls, v: Any) -> Any:
+    """Coerces False, which YAML and the command line make of a bare `off`, into 'off'."""
+    return "off" if v is False else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues.
+  _validate_fp8_fake_quant_hoist = field_validator("fp8_fake_quant_hoist", mode="before")(
+      _off_for_false_fp8_fake_quant_hoist
+  )
+
   rollout_fp8_moe: bool = Field(
       False,
       description=(

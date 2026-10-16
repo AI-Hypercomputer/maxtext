@@ -342,6 +342,10 @@ fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference
 # Keep routed-expert weights in weight_dtype but round them in the forward pass to the per-channel FP8 grid
 # fp8_moe stores them on, with straight-through gradients: the trainer computes with the rollout's weights.
 fp8_moe_fake_quant: false
+# off | absmax | gather8 (bit-identical to off). absmax: the fake-quant absmax of every routed-expert weight is computed
+# once for the scanned layer stack, before the scan. gather8: also all-gather the fp8 codes and dequantize after the
+# gather. Env PARAMBOLE_FQ_HOIST (0, absmax, 1 = gather8) selects a mode while this is off.
+fp8_fake_quant_hoist: "off"
 # Trainer side: the rollout serves fp8_moe experts, so weight sync quantizes them (and emits their scales).
 rollout_fp8_moe: false
 load_balance_loss_weight: 0.0 # weight for the load balance loss
