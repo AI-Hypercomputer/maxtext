@@ -96,6 +96,7 @@ _DTYPES = {
     "F64": np.float64,
     "F8_E4M3": jnp.float8_e4m3fn,
     "F8_E5M2": jnp.float8_e5m2,
+    "F8_E8M0": jnp.float8_e8m0fnu,  # power-of-two block scales (e.g. DeepSeek-V4.1 `.scale` tensors)
 }
 
 
@@ -120,6 +121,7 @@ class _Piece:
   sub_index: tuple[slice, ...] | None  # Applied to the rows when the sharding also splits other dims.
   devices: list[Any]
   block: "_Block | None" = None
+  pad_rows: int = 0  # Zero rows appended after the read rows (a request padded past the file's dim 0).
 
 
 @dataclasses.dataclass(eq=False)
@@ -303,7 +305,11 @@ class SafetensorsReader:
     if name not in self._index:
       raise KeyError(f"Tensor {name} is not in the checkpoint.")
     entry = self._index[name]
-    if tuple(request.shape) != entry.shape or np.dtype(request.dtype) != entry.dtype:
+    # Dim 0 may be requested longer than the file's: the extra rows read as zeros (so a tensor whose dim 0
+    # shares few factors with the chip count can still be split evenly over all chips).
+    padded_ok = bool(entry.shape) and len(request.shape) == len(entry.shape) and request.shape[0] >= entry.shape[0]
+    same_shape = tuple(request.shape) == entry.shape or (padded_ok and tuple(request.shape[1:]) == entry.shape[1:])
+    if not same_shape or np.dtype(request.dtype) != entry.dtype:
       raise ValueError(
           f"Requested {name} as {tuple(request.shape)} {np.dtype(request.dtype)}, but the checkpoint has"
           f" {entry.shape} {entry.dtype}."
@@ -317,27 +323,30 @@ class SafetensorsReader:
     nbytes = math.prod(entry.shape) * entry.dtype.itemsize
     return _Piece(name, entry.start, entry.start + nbytes, entry.shape, None, devices)
 
-  def _row_pieces(self, name: str, sharding: jax.sharding.Sharding) -> list[_Piece]:
+  def _row_pieces(self, name: str, request: jax.ShapeDtypeStruct) -> list[_Piece]:
     """The row runs this host must read for one tensor, one per distinct piece."""
     entry = self._index[name]
+    shape = tuple(request.shape)  # May have more rows than the file (zero padding).
     by_bounds = collections.defaultdict(list)
-    for device, index in sharding.addressable_devices_indices_map(entry.shape).items():
-      by_bounds[_bounds(index, entry.shape)].append(device)
+    for device, index in request.sharding.addressable_devices_indices_map(shape).items():
+      by_bounds[_bounds(index, shape)].append(device)
     if not entry.shape:  # Scalar.
       return [self._whole(name, devices) for devices in by_bounds.values()]
     row_bytes = math.prod(entry.shape[1:]) * entry.dtype.itemsize
     pieces = []
     for bounds, devices in by_bounds.items():
       (r0, r1), rest = bounds[0], bounds[1:]
+      f0, f1 = min(r0, entry.shape[0]), min(r1, entry.shape[0])  # Rows that are in the file.
       split_rest = any(b != (0, dim) for b, dim in zip(rest, entry.shape[1:]))
       pieces.append(
           _Piece(
               name,
-              entry.start + r0 * row_bytes,
-              entry.start + r1 * row_bytes,
-              (r1 - r0,) + entry.shape[1:],
+              entry.start + f0 * row_bytes,
+              entry.start + f1 * row_bytes,
+              (f1 - f0,) + entry.shape[1:],
               (slice(None),) + tuple(slice(a, b) for a, b in rest) if split_rest else None,
               devices,
+              pad_rows=(r1 - r0) - (f1 - f0),
           )
       )
     return pieces
@@ -383,13 +392,17 @@ class SafetensorsReader:
   def _rows(self, piece: _Piece) -> np.ndarray:
     block = piece.block
     entry = self._index[piece.name]
-    rows = block.buf[piece.start - block.start : piece.end - block.start].view(entry.dtype).reshape(piece.rows_shape)
+    if block is None:  # Only padding rows: nothing was read.
+      rows = np.zeros(piece.rows_shape, entry.dtype)
+    else:
+      rows = block.buf[piece.start - block.start : piece.end - block.start].view(entry.dtype).reshape(piece.rows_shape)
+    if piece.pad_rows:
+      rows = np.concatenate([rows, np.zeros((piece.pad_rows,) + rows.shape[1:], rows.dtype)])
     return rows if piece.sub_index is None else rows[piece.sub_index]
 
   def _build(self, name: str, request: jax.ShapeDtypeStruct, pieces: list[_Piece], arrays: dict):
-    entry = self._index[name]
     shards = [jax.device_put(self._rows(piece), device) for piece in pieces for device in piece.devices]
-    arrays[name] = jax.make_array_from_single_device_arrays(entry.shape, request.sharding, shards)
+    arrays[name] = jax.make_array_from_single_device_arrays(tuple(request.shape), request.sharding, shards)
 
   def _read_range(self, block: _Block, offset: int, length: int) -> float:
     """Reads `length` bytes at `offset` into the block's buffer; returns the seconds it took."""
@@ -423,11 +436,11 @@ class SafetensorsReader:
     arrays, stacks, units = {}, [], []
     for names in groups.values():
       sds = request[names[0]]
-      if self._stackable(names, sds):
+      if tuple(sds.shape) == self._index[names[0]].shape and self._stackable(names, sds):
         stacks.append(self._plan_stack(names, sds, units))
         continue
       for name in names:
-        pieces = self._row_pieces(name, request[name].sharding)
+        pieces = self._row_pieces(name, request[name])
         if pieces:
           units.append(_Unit(pieces, functools.partial(self._build, name, request[name], pieces, arrays)))
         else:  # None of this host's TPU chips hold any of it.
