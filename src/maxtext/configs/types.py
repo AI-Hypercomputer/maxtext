@@ -3447,6 +3447,18 @@ class AudioEncoder(BaseModel):
   max_sample_len_for_audio: int = Field(10000, description="Maximum sample length for audio input.")
 
 
+class AudioOutput(BaseModel):
+  """Shared audio-output controls, independent of a model's speech architecture."""
+
+  enable_audio_output: bool = Field(False, description="Build/load audio-output components and emit audio in decode.")
+  audio_output_type: str = Field("auto", description="Audio implementation; auto selects the model's default.")
+  audio_output_path: str = Field("audio_output.wav", description="Where decode writes the generated waveform.")
+  audio_output_config: dict[str, Any] = Field(
+      default_factory=dict,
+      description="Backend-specific audio settings, validated by the selected implementation.",
+  )
+
+
 class Multimodal(MultimodalGeneral, VisionTower, VisionProjector, AudioEncoder):
   """Configurations for multimodal"""
 
@@ -4140,6 +4152,7 @@ class MaxTextConfig(
     VisionTower,
     VisionProjector,
     AudioEncoder,
+    AudioOutput,
     # Derived
     DerivedValues,
 ):
