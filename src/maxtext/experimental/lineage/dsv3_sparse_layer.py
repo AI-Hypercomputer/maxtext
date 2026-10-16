@@ -22,7 +22,18 @@ from typing import Any, Protocol, overload
 
 import jax
 from jax.experimental import layout as jax_layout
-from jax.experimental.overlap import program_order
+
+try:
+  from jax.experimental.overlap import program_order
+except ImportError:
+  try:
+    from jax._src.pjit import program_order
+  except ImportError:
+
+    def program_order(*unused_args, **unused_kwargs):
+      return lambda fn: fn
+
+
 import jax.numpy as jnp
 import jaxtyping as jt
 import typeguard
@@ -500,7 +511,6 @@ def constrain_activation_bank(
   tiling = ((8, 128), (2, 1)) if jnp.dtype(bank.dtype).itemsize == 2 else ((8, 128),)
   layout = jax_layout.Layout(
       major_to_minor=tuple(range(bank.ndim)),
-      tiling=tiling,
   )
   return jax_layout.with_layout_constraint(bank, layout)
 

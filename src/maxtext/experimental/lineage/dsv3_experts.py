@@ -794,7 +794,6 @@ def dsv3_routed_experts_bwd(
   tiling = ((8, 128), (2, 1)) if jnp.dtype(ragged_bank.dtype).itemsize == 2 else ((8, 128),)
   bank_layout = jax_layout.Layout(
       major_to_minor=(0, 1),
-      tiling=tiling,
   )
   ragged_bank = jax_layout.with_layout_constraint(ragged_bank, bank_layout)
   x_pspec = jax.typeof(routed).sharding.spec

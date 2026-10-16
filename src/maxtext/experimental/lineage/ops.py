@@ -3574,10 +3574,10 @@ def ragged_gather_reduce_tc(
       ) = args
       o_in_hbm_ref = None
 
-    blocks_smem_ref = pltpu.annotate(blocks_smem_ref, no_store=True, no_bank_conflict=True)
-    src_smem_ref = pltpu.annotate(src_smem_ref, no_store=True, no_bank_conflict=True)
-    tok_smem_ref = pltpu.annotate(tok_smem_ref, no_store=True, no_bank_conflict=True)
-    vmem_ref = pltpu.annotate(vmem_ref, no_bank_conflict=True, no_hazard=True)
+    blocks_smem_ref = blocks_smem_ref
+    src_smem_ref = src_smem_ref
+    tok_smem_ref = tok_smem_ref
+    vmem_ref = vmem_ref
 
     num_blocks = blocks_smem_ref[0]
 
