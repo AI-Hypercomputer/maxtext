@@ -14,6 +14,7 @@
 
 """vLLM adapter for MaxText models."""
 
+import dataclasses
 import os
 from flax import nnx
 from flax.core.spmd import logical_axis_rules
@@ -338,6 +339,21 @@ class MaxTextForCausalLM(nnx.Module):
     if positions is None:
       positions = _input_positions
     input_positions = normalize_vllm_input_positions(positions)
+
+    # Propagate is_decode from shared_attention_metadata if present
+    shared_attn_md = kwargs.get("shared_attention_metadata", None)
+    if shared_attn_md is not None and hasattr(shared_attn_md, "is_decode"):
+      if isinstance(attention_metadata, dict):
+        attention_metadata = {
+            k: dataclasses.replace(v, is_decode=shared_attn_md.is_decode)
+            if dataclasses.is_dataclass(v)
+            else v
+            for k, v in attention_metadata.items()
+        }
+      elif dataclasses.is_dataclass(attention_metadata):
+        attention_metadata = dataclasses.replace(
+            attention_metadata, is_decode=shared_attn_md.is_decode
+        )
 
     # Filter kwargs to only those accepted by self.model.
     model_kwargs = dict(kwargs)
