@@ -14,7 +14,9 @@
 
 """Tensor handling utility functions for checkpoint conversion."""
 
+import functools
 from functools import partial
+import math
 from typing import Any, Callable, List
 import jax
 from jax.experimental import multihost_utils
@@ -111,6 +113,52 @@ def _get_hf_tensor(tensor_getter_fn: Callable[[str], np.ndarray], hf_key: Any):
   if isinstance(hf_key, tuple):
     return tuple(tensor_getter_fn(k) for k in hf_key)
   return tensor_getter_fn(hf_key)
+
+
+# A reshard from the leading-axis read layout to the model's sharding can copy the whole array to every device, so an
+# array larger than this is resharded in slices of at most this many bytes.
+_MAX_RESHARD_BYTES = 1 << 30
+
+
+@functools.lru_cache(maxsize=None)
+def _concatenate_fn(axis, sharding):
+  return jax.jit(lambda *pieces: np.concatenate(pieces, axis=axis), out_shardings=sharding)
+
+
+def _reshard(array, sharding):
+  """Places `array` with `sharding`; a large `jax.Array` is moved in slices along an axis `sharding` does not split.
+
+  The read layout orders the devices by process and the model's mesh by topology. Between two device orders, XLA can
+  reshard by gathering the whole array on every device: on two v5e-256 slices with data parallelism across them, the
+  80-layer llama3.1-70b `wi_0` (37.6 GB) needed 70 GB per device. Slices of at most `_MAX_RESHARD_BYTES` bound that copy.
+  """
+  if not isinstance(array, jax.Array) or array.nbytes <= _MAX_RESHARD_BYTES or not hasattr(sharding, "spec"):
+    return _device_put(array, sharding)
+  spec = list(sharding.spec) + [None] * (array.ndim - len(sharding.spec))
+  axis = next((i for i, axis_spec in enumerate(spec) if axis_spec is None and array.shape[i] > 1), None)
+  if axis is None:
+    return _device_put(array, sharding)
+  size = array.shape[axis]
+  step = max(1, size * _MAX_RESHARD_BYTES // array.nbytes)
+  pieces = [
+      jax.device_put(jax.lax.slice_in_dim(array, start, min(start + step, size), axis=axis), sharding)
+      for start in range(0, size, step)
+  ]
+  return _concatenate_fn(axis, sharding)(*pieces)
+
+
+def _split_over_all_devices(tensor) -> bool:
+  """Returns True if `tensor` is a `jax.Array` split over all devices, with no copies.
+
+  Such a tensor is stacked as read and resharded once with its whole stack. Resharding each tensor alone
+  costs one collective per tensor: an all-to-all if the hook transposes the split axis (e.g. MoE `wi_0`),
+  about 0.1 s each on two v5e-256 slices, or 25 min for the 15k `wi_0` tensors of DeepSeek-V3.
+  """
+  if not isinstance(tensor, jax.Array):
+    return False
+  num_devices = len(tensor.sharding.device_set)
+  shard_size = math.prod(tensor.sharding.shard_shape(tensor.shape))
+  return num_devices == jax.device_count() and shard_size * num_devices == tensor.size
 
 
 def nesting_depth(hf_source_keys: Any) -> int:
@@ -269,17 +317,19 @@ def _build_multi_axis_stacked_tensor(
     if level == depth:
       # A tuple of keys is a composite HF source that the hook fuses into one leaf.
       tensor = _apply_hook_fns_any_host(_get_hf_tensor(tensor_getter_fn, keys), mt_slice_shape, hook_fns)
+      if _split_over_all_devices(tensor):
+        return tensor
     else:
       tensor = _binary_chunked_stack([gather(sub, level + 1) for sub in keys], axis=0)
     if target_sharding is not None and level > 0:
-      tensor = _device_put(tensor, sharding_at(level))
+      tensor = _reshard(tensor, sharding_at(level))
     return tensor
 
   stacked_array = gather(hf_source_keys, 0).astype(target_dtype)
   if axes != tuple(range(depth)):
     stacked_array = np.moveaxis(stacked_array, tuple(range(depth)), axes)
   if target_sharding is not None:
-    stacked_array = jax.device_put(stacked_array, target_sharding)
+    stacked_array = _reshard(stacked_array, target_sharding)
   return stacked_array
 
 
@@ -336,13 +386,13 @@ def _build_single_axis_stacked_tensor(
     hf_tensor = _get_hf_tensor(tensor_getter_fn, hf_key_single)
     processed_hf_tensor = _apply_hook_fns_any_host(hf_tensor, mt_slice_shape, hook_fns)
 
-    if target_sharding is not None:
-      processed_hf_tensor = _device_put(processed_hf_tensor, slice_sharding)
+    if target_sharding is not None and not _split_over_all_devices(processed_hf_tensor):
+      processed_hf_tensor = _reshard(processed_hf_tensor, slice_sharding)
     tensors_to_stack.append(processed_hf_tensor)
 
   stacked_array = _binary_chunked_stack(tensors_to_stack, axis=axis_to_stack).astype(target_dtype)
   if target_sharding is not None:
-    stacked_array = jax.device_put(stacked_array, target_sharding)
+    stacked_array = _reshard(stacked_array, target_sharding)
   return stacked_array
 
 
@@ -368,7 +418,7 @@ def get_hf_loading_function(hf_source_keys_or_key, tensor_getter, hook_fn, mt_ta
         array = _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf.shape, hook)
         # Cast to the target dtype, as the stacked cases do. Otherwise a bf16 checkpoint stays bf16
         # even when weight_dtype is float32.
-        return _device_put(array.astype(leaf.dtype), leaf.sharding)
+        return _reshard(array.astype(leaf.dtype), leaf.sharding)
       else:
         return _apply_hook_fns_any_host(_get_hf_tensor(getter, key), leaf, hook)
 
