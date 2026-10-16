@@ -26,6 +26,7 @@ on:
 
 jobs:
   qa:
+    # auto_label_pr.yml matches "Code Quality Check / Pre-commit Linters"; keep this name in sync.
     name: "Pre-commit Linters"
     runs-on: ubuntu-latest
     timeout-minutes: 15
