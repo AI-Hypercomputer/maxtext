@@ -145,6 +145,7 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
         "async_checkpointing": True,
         # Disable scan_layers to prevent prepare_weight_sync from trying to unscan layers on DummyNNXModel
         "scan_layers": False,
+        "profiler": "xplane",
         "skip_first_n_steps_for_profiler": 1,
         "profiler_steps": 2,
     }
