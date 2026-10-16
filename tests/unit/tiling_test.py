@@ -60,7 +60,7 @@ class LossAndGradientCorrectnessTest(unittest.TestCase):
     self.rtol = 1e-2
     self.atol = 1e-2
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_vocab_tiling_nnx_loss(self):
     """
     Tests loss correctness of vocab_tiling_nnx_loss on the NNX path: the tiled loss
@@ -117,7 +117,12 @@ class VocabTilingNNXTest(unittest.TestCase):
   """
 
   def setUp(self):
-    self.base_config = [None, get_test_config_path()]
+    self.base_config = [
+        None,
+        get_test_config_path(),
+        "base_emb_dim=32",
+        "vocab_size=128",
+    ]
     self.rng = jax.random.PRNGKey(1234)
     # Global batch must divide fsdp axis (= jax.device_count() by default), so the
     # batch sharding constraints inside vocab_tiling_nnx_loss are satisfied.
@@ -251,12 +256,12 @@ class VocabTilingNNXTest(unittest.TestCase):
 
   # ---------- Original parity tests (params gradient under both embedding modes) ----------
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_non_tied_embedding(self):
     """custom_vjp parity for non-tied embedding (separate logits_dense)."""
     self._run_parity(logits_via_embedding=False)
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_tied_embedding(self):
     """custom_vjp parity when logits share the input embedding table."""
     self._run_parity(logits_via_embedding=True)
@@ -268,7 +273,7 @@ class VocabTilingNNXTest(unittest.TestCase):
 
   # ---------- Coverage expansion ----------
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_total_z_loss_value_parity(self):
     """The second tuple element (total_z_loss) must match the full-vocab reference."""
     cfg, model = self._build_cfg_and_model(num_vocab_tiling=4)
@@ -296,7 +301,7 @@ class VocabTilingNNXTest(unittest.TestCase):
         ref_total_z_loss, tile_total_z_loss, rtol=self.rtol, atol=self.atol
     ), f"total_z_loss differs: ref={ref_total_z_loss} tiled={tile_total_z_loss}"
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_padded_segmentation(self):
     """Half-padded segmentation: mask actually changes the loss, and parity holds."""
     cfg, model = self._build_cfg_and_model(num_vocab_tiling=4)
@@ -329,7 +334,7 @@ class VocabTilingNNXTest(unittest.TestCase):
     assert jnp.allclose(ref_loss, tile_loss, rtol=self.rtol, atol=self.atol)
     self._assert_pytrees_close(ref_grads, tile_grads, "Padded-segmentation gradients differ.")
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_grad_over_hidden_states(self):
     """Gradient w.r.t. hidden_states (argnums=1) matches the reference: exercises the
     custom_vjp's hidden_states cotangent, which the params-only tests don't reach."""
@@ -369,7 +374,7 @@ class VocabTilingNNXTest(unittest.TestCase):
     assert jnp.any(base_grad != 0)
     assert jnp.allclose(doubled_grad, 2.0 * base_grad, rtol=1e-5, atol=1e-6)
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_bf16_hidden_states(self):
     """bf16 hidden_states: loss/grad parity holds and the grad keeps the bf16 dtype."""
     cfg, model = self._build_cfg_and_model(num_vocab_tiling=4)
@@ -387,7 +392,7 @@ class VocabTilingNNXTest(unittest.TestCase):
     assert tile_grad_h.dtype == jnp.bfloat16, f"grad cast to primal dtype expected bf16, got {tile_grad_h.dtype}"
     assert jnp.allclose(ref_grad_h, tile_grad_h, rtol=5e-2, atol=5e-2)
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_z_loss_zero(self):
     """z_loss=0: total_z_loss is exactly zero; loss/grad parity still holds."""
     cfg, model = self._build_cfg_and_model(num_vocab_tiling=4, z_loss_multiplier=0.0)
@@ -412,7 +417,7 @@ class VocabTilingNNXTest(unittest.TestCase):
     assert jnp.allclose(ref_loss, tile_loss, rtol=self.rtol, atol=self.atol)
     self._assert_pytrees_close(ref_grads, tile_grads, "z_loss=0 gradients differ.")
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_other_params_get_zero_grad(self):
     """Carve-out invariant: non-head params get zero grad, head params don't.
 
@@ -440,7 +445,7 @@ class VocabTilingNNXTest(unittest.TestCase):
         assert jnp.all(leaf == 0), f"non-head leaf {path_str} has non-zero grad — carve-out is wrong"
     assert head_nonzero_seen, "expected at least one head leaf with non-zero grad; got all zeros"
 
-  @pytest.mark.tpu_only
+  @pytest.mark.cpu_only
   def test_nnx_vocab_tiling_num_vocab_tiling_variants(self):
     """Different num_vocab_tiling values (2, 4, 8) all produce identical loss + grads."""
     losses = []

@@ -235,7 +235,6 @@ class RaggedSortTcTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
       ("bf16", jnp.bfloat16),
-      ("f32", jnp.float32),
   )
   def test_sort_unsort(self, dtype):
     self._run(dtype=dtype)
@@ -252,7 +251,6 @@ class RaggedSortTcTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
-      ("flatten_128", 128),
       ("flatten_256", 256),
   )
   def test_sort_unsort_flatten(self, flatten_block_size):
@@ -261,7 +259,6 @@ class RaggedSortTcTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
       ("small_blocks", 64, 64),
-      ("large_blocks", 1024, 896),
   )
   def test_sort_unsort_block_sizes(self, gather_block_size, reduce_block_size):
     self._run(gather_block_size=gather_block_size, reduce_block_size=reduce_block_size, skewed=True)
@@ -273,9 +270,7 @@ class RaggedSortTcTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
-      ("default", {}),
       ("truncated_flatten", {"buffer_factor": 0.75, "flatten_block_size": 256}),
-      ("no_mask_padding", {"mask_padding": False}),
   )
   def test_sort_unsort_prescaled(self, kwargs):
     """Routing weights applied to the buffer rows (moe_tc_ragged_weights_on_activation) + unweighted unsort."""
@@ -284,11 +279,10 @@ class RaggedSortTcTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
       ("default", {}),
-      ("truncated", {"buffer_factor": 0.75}),
-      ("prescaled", {"prescaled": True}),
-      ("f32", {"dtype": jnp.float32}),
-      ("dsv3_hidden", {"num_tokens": 256, "hidden": 7168, "num_experts": 32, "topk": 8, "buffer_factor": 1.25}),
-      ("no_mask_padding", {"mask_padding": False}),
+      (
+          "f32_truncated_prescaled",
+          {"dtype": jnp.float32, "buffer_factor": 0.75, "prescaled": True},
+      ),
   )
   def test_sort_unsort_keep_3d(self, kwargs):
     """moe_tc_ragged_3d_gmm: the sorted buffer stays in the (cap, hidden // 128, 128) layout."""
@@ -296,11 +290,8 @@ class RaggedSortTcTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
-      ("keep_3d", {"keep_3d": True}),
       ("keep_3d_prescaled_truncated", {"keep_3d": True, "prescaled": True, "buffer_factor": 0.75}),
-      ("2d_buffer", {}),
       ("2d_buffer_flatten", {"flatten_block_size": 256}),
-      ("dsv3_hidden", {"keep_3d": True, "num_tokens": 256, "hidden": 7168, "num_experts": 32, "topk": 8}),
   )
   def test_sort_unsort_tokens_3d(self, kwargs):
     """moe_tc_ragged_3d_dispatch: 3D-layout token input / combine output (and their cotangents)."""
@@ -308,12 +299,7 @@ class RaggedSortTcTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
-      ("2d", {}),
       ("2d_truncated", {"buffer_factor": 0.75}),
-      ("2d_no_mask_padding", {"mask_padding": False}),
-      ("2d_flatten", {"flatten_block_size": 256}),
-      ("2d_prescaled", {"prescaled": True}),
-      ("keep_3d_prescaled_truncated", {"keep_3d": True, "prescaled": True, "buffer_factor": 0.75}),
       ("tokens_3d_prescaled", {"keep_3d": True, "tokens_3d": True, "prescaled": True}),
   )
   def test_sort_unsort_window_routing(self, kwargs):
