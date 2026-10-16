@@ -3823,6 +3823,11 @@ class RoutedMoE(nnx.Module):
       # Weights are stored as (G,K,2N): w0/w1 are adjacent slices (the same concatenate as gmm_up), or w0 is already
       # the whole [w0 | w1] (moe_unsplit_prefused_wi).
       w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
+      # wi_tile_fwd_rhs_buffer_count: the fused forward kernel's weight pipeline depth, applied only when that GMM
+      # runs one K tile (its weight block then changes only at expert and n-tile boundaries); otherwise, e.g. with
+      # the eval tiles, the kernel's default buffering.
+      rhs_buffers = self.config.wi_tile_fwd_rhs_buffer_count
+      one_k_tile = not self.config.use_gmm_v2_heuristic_tiling and wi_tile_size[1] >= inputs.shape[-1]
       out = mblx.gmm_silu(
           inputs.astype(self.dtype),
           w_fused.astype(self.dtype),
@@ -3835,6 +3840,7 @@ class RoutedMoE(nnx.Module):
           fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
           fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
           fuse_bwd_dswiglu=fuse_dswiglu_in_wo_gmm,
+          fwd_rhs_buffer_count=rhs_buffers if rhs_buffers and one_k_tile else None,
       )
       if fuse_dswiglu_in_wo_gmm:
         # moe_wo_gmm_fused_dswiglu: (act, [gate | up]); the backward runs through [gate | up] (_prepare_wo_inputs).

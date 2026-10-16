@@ -381,6 +381,11 @@ class GmmConfigs:
   # output with this many columns per [gate_j | up_j] piece (that forward's
   # tile_n), read with split_dact_gate_up. None: the contiguous [gate | up].
   dact_pre_act_tile_n: int | None = None
+  # VMEM buffers of the rhs (weight) tile pipeline. None: the default (3; 2 for a
+  # chunked 3D lhs, see generate_block_specs). With 2, each weight block's DMA
+  # starts one grid step before its first use instead of two, and one weight tile
+  # of VMEM is freed (with fuse_act, a gate and an up tile). Values are unchanged.
+  rhs_buffer_count: int | None = None
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -582,12 +587,16 @@ def generate_block_specs(
     tile_k_rhs //= packing
 
   rhs_tile_shape = (None, cfgs.tiles.tile_n, tile_k_rhs) if cfgs.transpose_rhs else (None, tile_k_rhs, cfgs.tiles.tile_n)
+  if cfgs.rhs_buffer_count is not None:
+    rhs_buffer_count = cfgs.rhs_buffer_count
+  else:
+    # A full-K 3D lhs tile (e.g. a 512 x 7168 fp8 wi forward tile) needs VMEM for
+    # the relayout; double-buffer the (large) rhs tile there.
+    rhs_buffer_count = 2 if cfgs.lhs_chunk_d0 is not None else 3
   rhs_weight_spec = pl.BlockSpec(
       rhs_tile_shape,
       _ordered(index_map.rhs_weight_index_map),
-      # A full-K 3D lhs tile (e.g. a 512 x 7168 fp8 wi forward tile) needs VMEM for
-      # the relayout; double-buffer the (large) rhs tile there.
-      pipeline_mode=pl.Buffered(buffer_count=2 if cfgs.lhs_chunk_d0 is not None else 3),
+      pipeline_mode=pl.Buffered(buffer_count=rhs_buffer_count),
   )
   rhs_scale_block_spec = rhs_bias_block_spec = ps_block_spec = None
   if cfgs.rhs_cfgs.has_bias:
@@ -1786,6 +1795,8 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
     scope_name += f"-dact_{cfgs.fuse_dact}"
     if cfgs.dact_pre_act_tile_n is not None:
       scope_name += f"-preact_tn_{cfgs.dact_pre_act_tile_n}"
+  if cfgs.rhs_buffer_count is not None:
+    scope_name += f"-rhsbuf_{cfgs.rhs_buffer_count}"
   return scope_name
 
 
@@ -1814,6 +1825,7 @@ def make_gmm_configs(
     dact_row_scale: jax.Array | None = None,
     return_dact_dot: bool = False,
     dact_pre_act_tile_n: int | None = None,
+    rhs_buffer_count: int | None = None,
 ):
   """Fills the GMM config for the GMM kernel."""
 
@@ -1987,6 +1999,9 @@ def make_gmm_configs(
       raise ValueError(f"dact_row_scale must have shape ({dims.size_m}, ...); got {dact_row_scale.shape}.")
   elif dact_gate_up is not None or dact_row_scale is not None or return_dact_dot or dact_pre_act_tile_n is not None:
     raise ValueError("dact_gate_up, dact_row_scale, return_dact_dot and dact_pre_act_tile_n require fuse_dact to be set.")
+  if rhs_buffer_count is not None and (not isinstance(rhs_buffer_count, int) or rhs_buffer_count < 2):
+    # One buffer would serialize every weight DMA with the matmul that reads it.
+    raise ValueError(f"rhs_buffer_count must be None or an int >= 2; got {rhs_buffer_count!r}.")
 
   return GmmConfigs(
       dims=dims,
@@ -2005,6 +2020,7 @@ def make_gmm_configs(
       has_dact_row_scale=dact_row_scale is not None,
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
+      rhs_buffer_count=rhs_buffer_count,
   )
 
 
@@ -2019,6 +2035,8 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
     del cfgs_dict["return_dact_dot"]
   if cfgs.dact_pre_act_tile_n is None:
     del cfgs_dict["dact_pre_act_tile_n"]  # the contiguous [gate | up] reader keeps its metadata too
+  if cfgs.rhs_buffer_count is None:
+    del cfgs_dict["rhs_buffer_count"]  # the default rhs buffering keeps its metadata too
   ret = {}
   for path, val in jax.tree_util.tree_leaves_with_path(cfgs_dict):
     key = jax.tree_util.keystr(path, simple=True, separator=".")
@@ -2044,6 +2062,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "fuse_dact",
         "return_dact_dot",
         "dact_pre_act_tile_n",
+        "rhs_buffer_count",
     ]
 )
 def gmm_v2(
@@ -2072,6 +2091,7 @@ def gmm_v2(
     dact_row_scale: jax.Array | None = None,
     return_dact_dot: bool = False,
     dact_pre_act_tile_n: int | None = None,
+    rhs_buffer_count: int | None = None,
 ) -> jax.Array | tuple[jax.Array, ...]:
   """GMM kernel implemented with emit_pipeline.
 
@@ -2135,6 +2155,12 @@ def gmm_v2(
       fused forward's return_pre_act="concat" output: that forward's tile_n (per
       half), i.e. the width of its [gate_j | up_j] pieces. None (or size_n):
       the contiguous [gate | up]. The output is [d_gate | d_up] either way.
+    rhs_buffer_count: VMEM buffers of the rhs (weight) tile pipeline, >= 2.
+      None: the default (3, or 2 for a chunked 3D lhs). 2 frees one weight
+      tile of VMEM (with fuse_act, one gate and one up tile) and starts each
+      weight block's DMA one grid step ahead instead of two. With a single K
+      tile (tile_k == size_k) the weight block changes only at group and n-tile
+      boundaries. The values are unchanged.
 
   Returns:
     Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]); with
@@ -2181,6 +2207,7 @@ def gmm_v2(
       dact_row_scale=dact_row_scale,
       return_dact_dot=return_dact_dot,
       dact_pre_act_tile_n=dact_pre_act_tile_n,
+      rhs_buffer_count=rhs_buffer_count,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles

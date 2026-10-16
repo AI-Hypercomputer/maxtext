@@ -2193,6 +2193,23 @@ class MoEGeneral(BaseModel):
       )
     return self
 
+  @model_validator(mode="after")
+  def validate_wi_tile_fwd_rhs_buffer_count(self) -> "MoEGeneral":
+    """Only the fused wi GMM (megablox ops.gmm_silu) reads wi_tile_fwd_rhs_buffer_count: reject it anywhere else."""
+    n = self.wi_tile_fwd_rhs_buffer_count
+    if n != 0:
+      _reject_unless(
+          f"wi_tile_fwd_rhs_buffer_count={n}",
+          [
+              # One buffer would serialize every weight DMA with the matmul that reads it.
+              (n >= 2, "a value of 0 (the kernel default) or at least 2"),
+              (self.moe_wi_gmm_fused_swiglu, "moe_wi_gmm_fused_swiglu=True (the only GMM that reads it)"),
+              # The layer applies it only with one K tile, which it checks against the explicit tiles.
+              (not self.use_gmm_v2_heuristic_tiling, "use_gmm_v2_heuristic_tiling=False"),
+          ],
+      )
+    return self
+
 
 class MoEKernels(BaseModel):
   """Configuration for MoE-specific kernels like Megablox."""
@@ -2205,6 +2222,20 @@ class MoEKernels(BaseModel):
   )
   wi_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wi.")
   wi_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wi.")
+  wi_tile_fwd_rhs_buffer_count: int = Field(
+      0,
+      description=(
+          "VMEM buffers of the weight tile in the fused wi forward GMM (moe_wi_gmm_fused_swiglu; the tokamax gmm_v2"
+          " kernel's rhs_buffer_count). 0: the kernel default, 3. 2 frees one [gate | up] weight tile of VMEM: with"
+          " wi_tile_fwd_batch_seq=512, wi_tile_fwd_embed_dim=4096 and wi_tile_fwd_mlp_dim=2048 the kernel needs 66.95"
+          " MiB with 3 (over the 57.60 MiB kernel limit) and 50.95 MiB with 2 (MEASURED, kernel-only compile for"
+          " TPU v7x). Each weight block's DMA then starts one grid step before its first use instead of two. Applied"
+          " only when that GMM runs one K tile (wi_tile_fwd_embed_dim >= the embed dim), where the weight block"
+          " changes only at expert and n-tile boundaries; otherwise (e.g. the eval tiles) the default. The forward"
+          " and its remat replay use it; the backward GMMs do not. Buffering only: the values are unchanged."
+          " Requires moe_wi_gmm_fused_swiglu=True and use_gmm_v2_heuristic_tiling=False."
+      ),
+  )
   eval_wi_tile_fwd_batch_seq: int = Field(
       512,
       description="evaluation forward pass tiling dimension for batch/sequence in GMM for wi.",

@@ -427,6 +427,9 @@ moe_ep_all_gather_sparse_core_id: 1
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
+# VMEM buffers of the weight tile in the fused wi forward GMM (moe_wi_gmm_fused_swiglu). 0: the kernel default (3).
+# 2 frees one [gate | up] weight tile; applied only when that GMM runs one K tile. See types.py.
+wi_tile_fwd_rhs_buffer_count: 0
 eval_wi_tile_fwd_batch_seq: 512
 eval_wi_tile_fwd_embed_dim: 1024
 eval_wi_tile_fwd_mlp_dim: 1024
