@@ -2052,9 +2052,9 @@ class LayoutAndSharding(BaseModel):
       False,
       description=(
           "Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in"
-          " both the forward and backward pass. Requires scan_layers=True; the backward always rematerializes"
-          " each layer in full (remat_policy is ignored). Has no effect when no FSDP mesh axis spans more"
-          " than one device. See docs/guides/optimization/fsdp_prefetch.md."
+          " both the forward and backward pass. Requires scan_layers=True. remat_policy applies to each layer;"
+          " gathered weights are never saved and are re-gathered for the backward pass. Has no effect when no"
+          " FSDP mesh axis spans more than one device. See docs/guides/optimization/fsdp_prefetch.md."
       ),
   )
 

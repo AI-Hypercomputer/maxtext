@@ -1330,7 +1330,15 @@ class NNXDecoder(nnx.Module):
   def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
     """Runs the scanned layer stack with FSDP weight prefetching (see `fsdp_prefetch`)."""
     return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
-        layers, x_in, *args, length=length, mesh=self.mesh, config=self.config, **kwargs
+        layers,
+        x_in,
+        *args,
+        length=length,
+        mesh=self.mesh,
+        config=self.config,
+        remat_policy=self.get_remat_policy(),
+        prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
+        **kwargs,
     )
 
   def get_decoder_layers(self):

@@ -34,6 +34,15 @@ of layers with two gathered-weight buffers used in turn, so the forward holds at
 gathered weights (current + prefetched) and the backward at most three (W(k), W(k-1) and dW(k)
 until its reduce-scatter).
 
+### Remat policies
+
+`remat_policy` (including `custom` policies) applies to each decoder layer. The forward pass carries
+the activations that the policy saves (on device or offloaded to host) to the backward pass, which
+rebuilds each layer's vjp from them and the re-gathered weights instead of recomputing the whole
+layer. With `remat_policy=full` only each layer's input is saved. Gathered weights are never saved,
+whatever the policy: if a policy would save a residual shaped like a gathered weight, a warning is
+logged. The number and size of the residuals saved per layer are logged at trace time.
+
 ## Usage
 
 ```bash
@@ -66,8 +75,8 @@ latency hiding scheduler.
 - Only the scanned layer stack is affected: `scan_layers=True` is required.
 - FSDP must be in use: when no FSDP mesh axis (`fsdp`, `fsdp_transpose`) spans more than one
   device, there is nothing to prefetch and the regular scan is used.
-- The backward pass always rematerializes each layer in full, saving only each layer's input
-  activation. `remat_policy` (including `custom` policies) is ignored for the decoder layers.
+- `save_fsdp_gathered_weights` has no effect while the prefetch path is active: the prefetch
+  pipeline never saves gathered weights.
 - The prefetch path is skipped (the regular scan is used) when KV caches are passed (inference),
   with forced expert routing, with `parameter_memory_host_offload=True`, or when quantization
   statistics updates are disabled.
@@ -86,3 +95,13 @@ above:
 | ----------------------- | --------- | ----------- | ----------- |
 | Baseline                | 5222 ms   | 92 ms       | 277 ms      |
 | `prefetch_fsdp_weights` | 4832 ms   | 79 ms       | 240 ms      |
+
+With remat policies that save more activations (same model, `per_device_batch_size=2`,
+`num_experts_per_tok=4`, splash attention blocks 1024 forward / 2048 backward), prefetching keeps
+its gain on top of the saved recompute:
+
+| `remat_policy=custom`, saved on device                            | Baseline | `prefetch_fsdp_weights` |
+| ----------------------------------------------------------------- | -------- | ----------------------- |
+| `decoder_layer_input` only                                        | 2955 ms  | 2650 ms                 |
+| + attention (`mla_q`, `mla_kv`, `out_proj`, `attention_out`)      | 2861 ms  | 2507 ms                 |
+| + MoE (`moe_mlpwi_0`, `moe_mlpwi_1`, `moe_mlpwo`, `moe_x_sorted`) | 2703 ms  | 2418 ms                 |

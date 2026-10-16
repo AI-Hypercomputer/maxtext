@@ -23,6 +23,7 @@ Tests cover:
 """
 
 # pylint: disable=unbalanced-tuple-unpacking
+import re
 import sys
 from types import SimpleNamespace
 import unittest
@@ -2385,11 +2386,53 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
   def test_grad_parity_param_scan_axis_zero(self):
     self._assert_parity(num_layers=4, param_scan_axis=0)
 
-  def test_grad_parity_ignores_remat_policy(self):
-    # The prefetch path always rematerializes each layer in full; other policies are logged and ignored.
+  def _assert_parity_saved_residuals(self, num_layers, **overrides):
+    """Asserts parity and returns how many residuals per layer the prefetch remat policy saves."""
     with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
-      self._assert_parity(num_layers=3, remat_policy="minimal")
-    self.assertTrue(any("remat_policy=minimal is ignored" in str(c) for c in log_info.call_args_list))
+      self._assert_parity(num_layers=num_layers, **overrides)
+    counts = [
+        int(m.group(1))
+        for c in log_info.call_args_list
+        for m in [re.search(r"remat policy saves (\d+) residual", str(c))]
+        if m
+    ]
+    self.assertTrue(counts, "the prefetch pipeline did not apply the remat policy")
+    return counts[0]
+
+  def test_grad_parity_remat_minimal(self):
+    # The forward pass saves the policy's named activations and the backward pass reuses them.
+    self.assertGreater(self._assert_parity_saved_residuals(num_layers=3, remat_policy="minimal"), 0)
+
+  def test_grad_parity_remat_minimal_seven_layers(self):
+    # Two or more layer pairs per loop, so saved residuals ride through both ordered unroll=2 loops.
+    self.assertGreater(self._assert_parity_saved_residuals(num_layers=7, remat_policy="minimal"), 0)
+
+  def test_grad_parity_remat_save_dot_except_mlp(self):
+    self.assertGreater(self._assert_parity_saved_residuals(num_layers=5, remat_policy="save_dot_except_mlp"), 0)
+
+  def test_grad_parity_remat_minimal_one_layer(self):
+    self.assertGreater(self._assert_parity_saved_residuals(num_layers=1, remat_policy="minimal"), 0)
+
+  def test_remat_custom_decoder_layer_input_saves_nothing_extra(self):
+    # `decoder_layer_input` is the layer input under a checkpoint name; the pipeline already keeps
+    # each layer's input, so the policy must not save it a second time.
+    saved = self._assert_parity_saved_residuals(num_layers=4, remat_policy="custom", decoder_layer_input="device")
+    self.assertEqual(saved, 0)
+
+  def test_full_remat_skips_residual_tracing(self):
+    with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
+      self._assert_parity(num_layers=3, remat_policy="full")
+    self.assertFalse(any("remat policy saves" in str(c) for c in log_info.call_args_list))
+
+  def test_grad_parity_remat_custom_offload(self):
+    # Offloaded residuals live in pinned host memory; they must survive the custom_vjp boundary and the
+    # forward scan stacking, and be brought back for the backward pass.
+    try:
+      jax.devices()[0].memory("pinned_host")
+    except Exception:  # pylint: disable=broad-exception-caught
+      self.skipTest("backend has no pinned_host memory")
+    saved = self._assert_parity_saved_residuals(num_layers=5, remat_policy="custom", mlpwo="offload", query_proj="device")
+    self.assertGreater(saved, 0)
 
 
 if __name__ == "__main__":
