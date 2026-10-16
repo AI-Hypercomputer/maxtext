@@ -344,6 +344,46 @@ def _files_hold_one_example_each(
   return len(file_instructions) >= dataloading_host_count and all(f.skip == 0 and f.take == 1 for f in file_instructions)
 
 
+def _sequences_per_eval_file(
+    dataset_name: str, split: str, data_dir: str | None, feature_key: str, max_target_length: int
+) -> int:
+  """Number of `max_target_length` stream chunks one eval file yields on its own.
+
+  Reads only the first example. With stream chunking an `eod` token is appended to every
+  document before chunking with `drop_remainder=True`, so a file of `L` tokens yields
+  `(L + 1) // max_target_length` sequences.
+  """
+  ds = tfds.builder(dataset_name, data_dir=data_dir).as_dataset(split=f"{split}[0:1]", shuffle_files=False)
+  for example in ds.take(1):
+    return (int(tf.size(example[feature_key])) + 1) // max_target_length
+  return 0
+
+
+def _shared_eval_file_assignment(
+    host_index: int, local_num_examples: int, sequences_per_file: int
+) -> tuple[int, int] | None:
+  """File index and in-file sequence offset when several loading hosts share one eval file.
+
+  The eval set is the first `num_loading_hosts * local_num_examples` sequences of the
+  per-file chunked dataset in file order. Host `h` takes sequences
+  `[h * k, (h + 1) * k)` of that order, i.e. file `h * k // S` starting at sequence
+  `h * k % S` (`k = local_num_examples`, `S = sequences_per_file`). Only used when
+  `k < S` and `S % k == 0`, so a host never straddles two files; otherwise `None`.
+
+  Without this, `shard_in_read` sends host `h` to file `h` and every host takes the
+  first `k` sequences of its file. For the replicated c4/en:3.0.9 validation split
+  (2048 files = 16 copies of 128 distinct files, 8 sequences each), 256 loading hosts
+  with `k = 4` then read hosts `h` and `h + 128` from identical files and evaluate only
+  512 distinct sequences, each twice.
+  """
+  if local_num_examples <= 0 or sequences_per_file <= local_num_examples:
+    return None
+  if sequences_per_file % local_num_examples != 0:
+    return None
+  start = host_index * local_num_examples
+  return start // sequences_per_file, start % sequences_per_file
+
+
 def format_fn(x, eos_id: int = 1, pad_id: int = 0):
   """Format function for c4_mlperf."""
   x["inputs"] = x["targets"]
@@ -463,6 +503,7 @@ def preprocess_eval_dataset(
     real_data_rows: Sequence[int] | None = None,
     num_batches: int = 0,
     dataloading_host_count: int = 0,
+    skip_examples: int = 0,
 ) -> tf.data.Dataset:
   """Preprocess the evaluation dataset.
 
@@ -479,6 +520,8 @@ def preprocess_eval_dataset(
       step. Defaults to every row. The other rows are filled with dummy examples.
     num_batches: number of batches every data loading host has to produce.
     dataloading_host_count: number of JAX processes loading real data.
+    skip_examples: number of formatted `max_target_length` sequences to drop from the
+      start of `eval_ds`, used when several loading hosts share one eval file.
 
   Returns:
     The batched eval dataset, with one batch of `eval_global_batch_size_to_load //
@@ -514,6 +557,9 @@ def preprocess_eval_dataset(
     eval_ds = split_tokens_to_targets_length(eval_ds, max_target_length)
     eval_ds = sequence_packing.pack_dataset(eval_ds, max_target_length, pad_id=pad_id)
     eval_ds = eval_ds.map(lambda x: format_fn(x, pad_id=pad_id), num_parallel_calls=AUTOTUNE)
+
+  if skip_examples > 0:
+    eval_ds = eval_ds.skip(skip_examples)
 
   # Every host contributes the same number of rows to the global batch, but only the
   # rows in `real_data_rows` survive the decimation in the eval step, so only those are
@@ -626,16 +672,18 @@ def make_c4_mlperf_eval_iterator(
       )
 
   eval_data_dir = getattr(config, "dataset_path", None)
+  eval_host_index = process_indices.index(jax.process_index())
+  eval_shard_in_read = _files_hold_one_example_each(
+      config.eval_dataset_name, eval_split, eval_data_dir, len(process_indices)
+  )
   eval_ds = get_dataset(
       dataset_name=config.eval_dataset_name,
       split=eval_split,
-      dataloading_host_index=process_indices.index(jax.process_index()),
+      dataloading_host_index=eval_host_index,
       dataloading_host_count=len(process_indices),
       data_dir=eval_data_dir,
       enable_data_shuffling=False,
-      shard_in_read=_files_hold_one_example_each(
-          config.eval_dataset_name, eval_split, eval_data_dir, len(process_indices)
-      ),
+      shard_in_read=eval_shard_in_read,
   )
   eval_ds = rekey(eval_ds, {"inputs": None, "targets": eval_col})
 
@@ -702,6 +750,34 @@ def make_c4_mlperf_eval_iterator(
     num_batches = (max_local_num_examples + len(real_data_rows) - 1) // len(real_data_rows)
 
   use_stream_chunking = getattr(config, "use_stream_chunking", None)
+  effective_stream_chunking = is_tokenized_dataset if use_stream_chunking is None else use_stream_chunking
+
+  # When there are more loading hosts than eval files needed (each file yields several
+  # sequences), several hosts must share a file and read disjoint sequences of it instead
+  # of each taking the first `local_num_examples` sequences of file `host_index`.
+  skip_examples = 0
+  if (
+      eval_shard_in_read
+      and effective_stream_chunking
+      and num_examples > 0
+      and num_examples % len(process_indices) == 0
+  ):
+    sequences_per_file = _sequences_per_eval_file(
+        config.eval_dataset_name, eval_split, eval_data_dir, eval_col, config.max_target_length
+    )
+    assignment = _shared_eval_file_assignment(eval_host_index, local_num_examples, sequences_per_file)
+    if assignment is not None:
+      file_index, skip_examples = assignment
+      eval_ds = tfds.builder(config.eval_dataset_name, data_dir=eval_data_dir).as_dataset(
+          split=f"{eval_split}[{file_index}:{file_index + 1}]", shuffle_files=False
+      )
+      eval_ds = rekey(eval_ds, {"inputs": None, "targets": eval_col})
+      max_logging.log(
+          f"Eval data loading host {jax.process_index()} (loading index {eval_host_index} of "
+          f"{len(process_indices)}) reads eval file {file_index}, sequences "
+          f"[{skip_examples}, {skip_examples + local_num_examples}) of {sequences_per_file}."
+      )
+
   eval_ds = preprocess_eval_dataset(
       eval_ds,
       sp_tokenizer=sp_tokenizer,
@@ -713,6 +789,7 @@ def make_c4_mlperf_eval_iterator(
       real_data_rows=real_data_rows,
       num_batches=num_batches,
       dataloading_host_count=len(process_indices),
+      skip_examples=skip_examples,
   )
 
   eval_multihost_gen = multihost_dataloading.MultiHostDataLoadIterator(eval_ds, global_mesh)
