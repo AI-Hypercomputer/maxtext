@@ -31,15 +31,9 @@ from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import numpy as np
-
-try:
-  from tokamax._src.ops.splash_attention import base
-  from tokamax._src.ops.splash_attention import splash_attention_mask as mask_lib
-  from tokamax._src.ops.splash_attention import splash_attention_mask_info as mask_info_lib
-except ImportError:
-  from tokamax._src.ops.experimental.tpu.splash_attention import base
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as mask_lib
-  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info as mask_info_lib
+from tokamax._src.ops.experimental.tpu.splash_attention import base
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as mask_lib
+from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info as mask_info_lib
 
 P = jax.P
 MaskInfo = mask_info_lib.MaskInfo
