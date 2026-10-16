@@ -20,6 +20,7 @@ the MaxRL AbstractTrainer interface without running an outer loop.
 
 from __future__ import annotations
 
+import collections
 from collections.abc import Callable, Iterator, Mapping
 import concurrent.futures
 import contextlib
@@ -27,6 +28,7 @@ import dataclasses
 import functools
 import gc
 import os
+import threading
 import time
 from typing import Any, Optional
 
@@ -165,6 +167,67 @@ def _split_static_and_dynamic(batch: Any) -> tuple[Any, dict[str, Any]]:
     else:
       dynamic[key] = value
   return dynamic, static
+
+
+STAGE_BATCH_ENV = "TUNIX_STAGE_BATCH"
+STAGE_BATCH_MODES = ("off", "stage", "serialize")
+STAGE_MAX_DEVICE_BATCHES_ENV = "TUNIX_STAGE_MAX_DEVICE_BATCHES"
+
+
+def stage_batch_mode() -> str:
+  """How `fwd_bwd` moves a micro-batch's traced inputs onto the devices; read from `TUNIX_STAGE_BATCH`.
+
+  `off` (unset, 0/false/no/off): the compiled kernel is called on the host (numpy) leaves and the jit call
+  transfers them. `stage` (1/true/yes/on/stage): a caller may `stage_batch` a payload ahead of its `fwd_bwd`,
+  whose transfer is then issued while the previous micro-batch computes; `fwd_bwd` consumes the staged device
+  tree, and a payload that was not staged is transferred explicitly, after the previous transfer finished.
+  `serialize`: nothing is staged, but `fwd_bwd` transfers its inputs explicitly and waits for the previous
+  call's input transfer first, so two micro-batch transfers never share the host-to-device path (the
+  contention control for `stage`). Read once per engine, at `__init__`, by the process that runs the engine.
+  """
+  value = os.environ.get(STAGE_BATCH_ENV, "").strip().lower()
+  if value in ("", "0", "false", "no", "off"):
+    return "off"
+  if value in ("1", "true", "yes", "on", "stage"):
+    return "stage"
+  if value == "serialize":
+    return "serialize"
+  raise ValueError(f"{STAGE_BATCH_ENV}={value!r}: expected one of {STAGE_BATCH_MODES} (or 1/0).")
+
+
+def stage_max_device_batches() -> int:
+  """Maximum number of staged micro-batches kept on device HBM simultaneously (default `1`; `0` = unlimited).
+
+  By default (`1`), `stage_batch` places at most one staged micro-batch onto device HBM at once; any additional
+  micro-batches staged ahead by the orchestrator stay pre-split in trainer host RAM (`on_device=False`, as host
+  `np.ndarray` leaves) and are automatically promoted to device HBM as soon as `fwd_bwd` dispatches the preceding
+  micro-batch. Setting `TUNIX_STAGE_MAX_DEVICE_BATCHES=0` disables the cap so every `stage_batch` transfers to
+  device HBM immediately.
+  """
+  value = os.environ.get(STAGE_MAX_DEVICE_BATCHES_ENV, "").strip()
+  if not value:
+    return 1
+  limit = int(value)
+  if limit < 0:
+    raise ValueError(f"{STAGE_MAX_DEVICE_BATCHES_ENV}={value!r}: expected a non-negative integer.")
+  return limit
+
+
+@dataclasses.dataclass
+class _StagedBatch:
+  """A micro-batch whose traced inputs were prepared or transferred ahead of its `fwd_bwd` (`stage_batch`)."""
+
+  # Caller's name for the payload (e.g. the train request id), or None; matched when both sides give one.
+  key: Any
+  signature: Any
+  static: dict[str, Any]
+  # The traced half, as `jax.Array`s on `_batch_data_shardings` when `on_device=True`, or host `np.ndarray` leaves
+  # when queued in host RAM beyond `TUNIX_STAGE_MAX_DEVICE_BATCHES`.
+  dynamic: Any
+  host_bytes: int
+  staged_at: float
+  on_device: bool = True
+  promoting: bool = False
 
 
 def _batch_signature(dynamic_batch: Any, static_batch: dict[str, Any]) -> Any:
@@ -594,6 +657,8 @@ def router_replay_gen_model_input_fn(payload: abstract_engine.RLTrainerPayload) 
   }
   routed_experts = getattr(payload, "routed_experts", None)
   if routed_experts is not None:
+    # TODO(mazumdera): keep forced_routed_experts as a host numpy array until
+    # jax.device_put shards it onto the mesh to avoid an unsharded H2D + reshard.
     kwargs["forced_routed_experts"] = jnp.asarray(routed_experts)
   return kwargs
 
@@ -977,10 +1042,38 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._moe_audit_missing_step = False
     # The last micro-batch, whose overflow flag is read after the next one is dispatched (or in `update`).
     self._pending_overflow_check: _PendingOverflowCheck | None = None
+    # TUNIX_STAGE_BATCH (see `stage_batch_mode`): micro-batches transferred ahead of their `fwd_bwd` by
+    # `stage_batch`, consumed in FIFO order; and the last input transfer this engine issued (staged or not), which
+    # the next one waits for so two transfers never share the host-to-device path. `stage_batch` may run on another
+    # thread than `fwd_bwd`: `_stage_lock` guards the FIFO and counters (microsecond critical sections, never held
+    # across JAX transfers), while `_transfer_lock` serializes `_wait_for_input_transfer` and `_issue_input_transfer`.
+    self._stage_mode = stage_batch_mode()
+    self._stage_max_device_batches = stage_max_device_batches()
+    self._staged_batches: collections.deque[_StagedBatch] = collections.deque()
+    self._stage_lock = threading.Lock()
+    self._stage_cond = threading.Condition(self._stage_lock)
+    self._transfer_lock = threading.Lock()
+    self._last_input_transfer: Any = None
+    self._in_flight_staged_on_device: int = 0
+    self._promoting_staged_count: int = 0
+    self._stage_warned: set[str] = set()
+    if self._stage_mode != "off":
+      logging.info(
+          "%s=%s (max_device_batches=%d): micro-batch input transfers are %s.",
+          STAGE_BATCH_ENV,
+          self._stage_mode,
+          self._stage_max_device_batches,
+          "staged ahead of fwd_bwd when the caller stages them, else explicit and serialized"
+          if self._stage_mode == "stage"
+          else "explicit and serialized (no staging)",
+      )
     # Set when this run resumed from an intra-step checkpoint, cleared once the step it
     # resumed into completes and its finished state has been checkpointed.
     self._resumed_mid_step = False
     self._cached_losses: list[abstract_engine.WeightedMetric | jax.Array] = []
+    # Readiness token read by Tunix's TrainerWorker.fwd_bwd(apply_optimizer=True) to block until
+    # the optimizer update has landed on device (`update_ready=True`).
+    self.last_update_token: jax.Array | None = None
     # `create_training_optimizer` returns a raw optax GradientTransformation. `TrainStateNNX.apply_gradients`
     # calls `optimizer.update(model, grads)`, which is the nnx.Optimizer signature, and
     # `checkpointing.CheckpointState` expects an nnx.Optimizer too, so wrap it here. `wrt=nnx.Param`
@@ -2518,170 +2611,496 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._throttler.block_until_ready()
     return time.monotonic() - start
 
+  @property
+  def stage_batch_mode(self) -> str:
+    """The `TUNIX_STAGE_BATCH` mode this engine was built with: `off`, `stage` or `serialize`."""
+    return self._stage_mode
+
+  @property
+  def staged_batch_count(self) -> int:
+    """How many staged micro-batches wait to be consumed by `fwd_bwd`."""
+    with self._stage_lock:
+      return len(self._staged_batches)
+
+  def reset_staged(self) -> int:
+    """Drops all queued staged micro-batches and resets in-flight device staging counters."""
+    with self._stage_lock:
+      dropped = len(self._staged_batches)
+      self._staged_batches.clear()
+      self._in_flight_staged_on_device = 0
+      self._promoting_staged_count = 0
+      self._stage_cond.notify_all()
+      return dropped
+
+  def _stage_warn_once(self, what: str, msg: str, *args: Any) -> None:
+    if what not in self._stage_warned:
+      self._stage_warned.add(what)
+      logging.warning(msg, *args)
+
+  def _wait_for_input_transfer(self) -> None:
+    """Waits for the last issued micro-batch input transfer: its leaves' readiness only, never any compute.
+
+    Caller holds `_transfer_lock`. A `jax.Array` from `device_put` is ready when its transfer landed, whether or not a
+    computation that reads it has run, so this never waits on a dispatched `fwd_bwd`.
+    """
+    previous, self._last_input_transfer = self._last_input_transfer, None
+    if previous is not None:
+      jax.block_until_ready(previous)
+
+  def _issue_input_transfer(self, dynamic_batch: Any) -> Any:
+    """Transfers a traced batch half onto `_batch_data_shardings`, after the previous transfer finished.
+
+    Caller holds `_transfer_lock`. Returns the device tree (same structure, `jax.Array` leaves) and keeps it as the
+    transfer the next call waits for. Flattened by hand: the sharding tree has `None` where the batch does, and
+    `flatten_up_to` keeps the two aligned without relying on `device_put`'s own prefix matching.
+    """
+    self._wait_for_input_transfer()
+    leaves, treedef = jax.tree.flatten(dynamic_batch)
+    shardings = treedef.flatten_up_to(self._batch_data_shardings(dynamic_batch))
+    inputs = treedef.unflatten(jax.device_put(leaves, shardings)) if leaves else dynamic_batch
+    self._last_input_transfer = inputs
+    return inputs
+
+  def _promote_staged_head_to_device(self) -> None:
+    """Promotes host-buffered staged micro-batches at the queue head onto device HBM.
+
+    Acquires `_stage_lock` only to reserve entries (`promoting=True`), then performs `_issue_input_transfer` under
+    `_transfer_lock` so concurrent `stage_batch` / `fwd_bwd` queue operations never block on H2D transfers.
+    """
+    to_promote: list[tuple[_StagedBatch, Any]] = []
+    with self._stage_lock:
+      if not self._staged_batches:
+        return
+      limit = self._stage_max_device_batches
+      device_count = (
+          self._in_flight_staged_on_device
+          + self._promoting_staged_count
+          + sum(1 for s in self._staged_batches if s.on_device)
+      )
+      for staged in self._staged_batches:
+        if staged.on_device or staged.promoting:
+          continue
+        if 0 < limit <= device_count:
+          break
+        staged.promoting = True
+        self._promoting_staged_count += 1
+        device_count += 1
+        to_promote.append((staged, staged.dynamic))
+
+    for staged, host_dynamic in to_promote:
+      dev_inputs = None
+      t0 = time.perf_counter()
+      t1 = t0
+      try:
+        with self._transfer_lock:
+          # Waited here, outside `_issue_input_transfer`'s own (then no-op) wait, so the two times are logged apart.
+          self._wait_for_input_transfer()
+          t1 = time.perf_counter()
+          dev_inputs = self._issue_input_transfer(host_dynamic)
+      finally:
+        with self._stage_lock:
+          if dev_inputs is not None:
+            staged.dynamic = dev_inputs
+            staged.on_device = True
+          staged.promoting = False
+          self._promoting_staged_count = max(0, self._promoting_staged_count - 1)
+          queued = len(self._staged_batches)
+          self._stage_cond.notify_all()
+      logging.info(
+          "STAGE_PROMOTE key=%s host_bytes=%d wait_prev_s=%.4f issue_s=%.4f queued=%d on_device=%s",
+          staged.key,
+          staged.host_bytes,
+          t1 - t0,
+          time.perf_counter() - t1,
+          queued,
+          staged.on_device,
+      )
+
+  def stage_batch(self, payload: abstract_engine.TrainerPayload, key: Any = None) -> bool:
+    """Transfers a micro-batch's traced inputs onto the devices ahead of its `fwd_bwd` (`TUNIX_STAGE_BATCH=stage`).
+
+    Runs `_prepare_batch` and the static/dynamic split as `fwd_bwd` will, issues one `jax.device_put` of the traced
+    half onto the compiled kernel's input shardings (or buffers in trainer host RAM as `np.ndarray` leaves when
+    `TUNIX_STAGE_MAX_DEVICE_BATCHES` is reached, promoting to device HBM once the preceding micro-batch dispatches),
+    and queues the entry. Idempotent by `key` when `key` is non-None.
+
+    Args:
+      payload: The micro-batch, as it will be passed to `fwd_bwd`.
+      key: Optional name for it (the train request id). When both this and `fwd_bwd`'s `stage_key` are given they
+        must agree; `fwd_bwd(None, stage_key=key)` runs the staged batch without a payload of its own.
+
+    Returns:
+      True if the batch was staged; False (logged once per reason) when staging is off, or before the first
+      `compile()` request (the eager path takes host leaves straight into the kernel).
+    """
+    if self._stage_mode != "stage":
+      self._stage_warn_once(
+          "mode", "stage_batch called with %s=%s; nothing is staged.", STAGE_BATCH_ENV, self._stage_mode
+      )
+      return False
+    if not self._compile_requested:
+      self._stage_warn_once("eager", "stage_batch called before compile(); the eager path is not staged.")
+      return False
+    t0 = time.perf_counter()
+    dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(payload))
+    signature = _batch_signature(dynamic_batch, static_batch)
+    host_bytes = sum(int(getattr(leaf, "nbytes", 0)) for leaf in jax.tree.leaves(dynamic_batch))
+    t1 = time.perf_counter()
+
+    with self._stage_lock:
+      existing: _StagedBatch | None = None
+      if key is not None:
+        for candidate in self._staged_batches:
+          if candidate.key == key:
+            while candidate.promoting:
+              self._stage_cond.wait()
+            if candidate in self._staged_batches:
+              existing = candidate
+              existing.dynamic = None
+              existing.on_device = False
+            break
+
+      limit = self._stage_max_device_batches
+      device_count = (
+          self._in_flight_staged_on_device
+          + self._promoting_staged_count
+          + sum(1 for s in self._staged_batches if s.on_device)
+      )
+      should_put_on_device = limit == 0 or device_count < limit
+      # TODO(router-replay-input-fn-numpy): keep `router_replay_gen_model_input_fn` outputs host-resident
+      # so host-buffered staging avoids a default-device `jnp.asarray` + `np.asarray` round-trip.
+      initial_inputs = (
+          dynamic_batch
+          if should_put_on_device
+          else jax.tree.map(lambda x: np.asarray(x) if isinstance(x, jax.Array) else x, dynamic_batch)
+      )
+      if existing is not None:
+        existing.signature = signature
+        existing.static = static_batch
+        existing.dynamic = initial_inputs
+        existing.host_bytes = host_bytes
+        existing.staged_at = time.perf_counter()
+        existing.on_device = False
+        existing.promoting = should_put_on_device
+        entry = existing
+      else:
+        entry = _StagedBatch(
+            key=key,
+            signature=signature,
+            static=static_batch,
+            dynamic=initial_inputs,
+            host_bytes=host_bytes,
+            staged_at=time.perf_counter(),
+            on_device=False,
+            promoting=should_put_on_device,
+        )
+        self._staged_batches.append(entry)
+      if should_put_on_device:
+        self._promoting_staged_count += 1
+      queued = len(self._staged_batches)
+
+    t2 = t1
+    on_device = False
+    if should_put_on_device:
+      dev_inputs = None
+      try:
+        with self._transfer_lock:
+          # Waited here, outside `_issue_input_transfer`'s own (then no-op) wait, so the two times are logged apart.
+          self._wait_for_input_transfer()
+          t2 = time.perf_counter()
+          dev_inputs = self._issue_input_transfer(dynamic_batch)
+      finally:
+        with self._stage_lock:
+          if dev_inputs is not None:
+            entry.dynamic = dev_inputs
+            entry.on_device = True
+            on_device = True
+          entry.promoting = False
+          self._promoting_staged_count = max(0, self._promoting_staged_count - 1)
+          self._stage_cond.notify_all()
+
+    logging.info(
+        "STAGE_BATCH key=%s host_bytes=%d prepare_s=%.4f wait_prev_s=%.4f issue_s=%.4f queued=%d on_device=%s",
+        key,
+        host_bytes,
+        t1 - t0,
+        t2 - t1,
+        time.perf_counter() - t2 if should_put_on_device else 0.0,
+        queued,
+        on_device,
+    )
+    return True
+
+  def _take_staged_batch(self, signature: Any, key: Any) -> _StagedBatch | None:
+    """Pops the staged batch `fwd_bwd` should run: the entry matching `key`, or the unkeyed head when `key` is None.
+
+    A keyless `fwd_bwd(payload)` (`signature is not None, key is None`) only consumes an unkeyed FIFO head
+    (`staged.key is None`); keyed staged entries stay in the FIFO for their matching `stage_key` calls.
+    """
+    dropped_mismatch = False
+    with self._stage_lock:
+      if not self._staged_batches:
+        return None
+      head = self._staged_batches[0]
+      if key is not None:
+        named = [s for s in self._staged_batches if s.key == key]
+        if not named:
+          return None
+        staged = named[0]
+        is_out_of_order = staged is not head
+      else:
+        if signature is not None and head.key is not None:
+          return None
+        staged = head
+        is_out_of_order = False
+
+      while staged.promoting:
+        self._stage_cond.wait()
+      if staged not in self._staged_batches:
+        return None
+
+      if signature is not None and self._needs_recompile(signature, staged.signature):
+        self._staged_batches.remove(staged)
+        self._stage_warn_once(
+            "signature",
+            "Staged batch %r does not match the fwd_bwd payload's structure; dropped, the payload is transferred "
+            "explicitly. Logged once.",
+            staged.key,
+        )
+        dropped_mismatch = True
+        staged = None
+      else:
+        head_key = self._staged_batches[0].key
+        self._staged_batches.remove(staged)
+        if is_out_of_order:
+          logging.warning("fwd_bwd took staged batch %r out of FIFO order (head was %r).", key, head_key)
+        self._in_flight_staged_on_device += 1
+
+    if dropped_mismatch:
+      self._promote_staged_head_to_device()
+      return None
+    return staged
+
   @_profiled_step("fwd_bwd", control_profile=True)
-  def fwd_bwd(self, payload: abstract_engine.TrainerPayload | PreparedFwdBwdInput, **kwargs: Any) -> None:
+  def fwd_bwd(
+      self,
+      payload: abstract_engine.TrainerPayload | PreparedFwdBwdInput | None,
+      **kwargs: Any,
+  ) -> None:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
     Args:
-      payload: Packed micro-batch training input, or what `prepare_fwd_bwd_input` made of it.
+      payload: Packed micro-batch training input, what `prepare_fwd_bwd_input` made of it, or None under
+        `TUNIX_STAGE_BATCH=stage` to run the staged batch named by `stage_key` (or the queue head) without a payload of
+        its own.
       **kwargs: Implementation-specific options. `apply_optimizer` (bool), which Tunix passes as the
         orchestrator's flag for the step's final micro-batch, selects the final micro-batch's dropless program
-        under `retry_dropless_final_micro_batch`; everything else is ignored.
+        under `retry_dropless_final_micro_batch`; `stage_key` names the staged batch to consume (see
+        `stage_batch`); everything else is ignored.
     """
-    batch = payload.batch if isinstance(payload, PreparedFwdBwdInput) else self._prepare_batch(payload)
-    apply_optimizer = kwargs.get("apply_optimizer")
-    final = False
-    if self._dropless_replay and self._final_dropless:
-      if apply_optimizer is None:
-        if not self._warned_no_apply_optimizer:
-          # An older caller: every micro-batch then runs the ragged_buffer_factor program and an overflowing
-          # one is replayed dropless, so no token is dropped, but the final micro-batch is not dropless upfront.
-          logging.warning(
-              "retry_dropless_final_micro_batch=True, but fwd_bwd was called without apply_optimizer; the final "
-              "micro-batch runs the ragged_buffer_factor program (replayed dropless on overflow)."
-          )
-          self._warned_no_apply_optimizer = True
-      else:
-        final = bool(apply_optimizer) and not self._in_first_phase()
-
-    model = getattr(self._state, "model", None) if self._state is not None else self._model
-    if not isinstance(model, nnx.Module):
-      raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
-
-    # Wait for previous computations to finish before dispatching the next one to TPU.
-    self._throttler.wait_for_next()
-
-    if self._state is None:
-      self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
-
-    if self._compile_requested:
-      dynamic_batch, static_batch = _split_static_and_dynamic(batch)
-      # A compiled kernel is valid only for the batch it was built against: the traced
-      # half is baked into `in_shardings`, and the static half is closed over. Either
-      # changing needs a fresh kernel -- reusing it would raise an in_shardings mismatch
-      # for the first, and silently use stale values for the second.
-      signature = _batch_signature(dynamic_batch, static_batch)
-      if not self._compiled or self._needs_recompile(signature, self._compiled_signature):
-        # Settled first: its rerun and add run on the kernels and accumulator layout being replaced.
-        self._resolve_overflow_check()
-        self._compile_for_batch(dynamic_batch, static_batch)
-      # The compiled `fwd_bwd` closes over the static half, so it is passed the traced one only.
-      fwd_bwd_kernel, accumulate_kernel, inputs = self._compiled_fwd_bwd, self._compiled_accumulate, dynamic_batch
-      dropless_kernel = None
+    stage_key = kwargs.get("stage_key")
+    staged: _StagedBatch | None = None
+    is_prepared = isinstance(payload, PreparedFwdBwdInput)
+    if payload is None:
+      if self._stage_mode != "stage" or not self._compile_requested:
+        raise ValueError(f"fwd_bwd(None) needs {STAGE_BATCH_ENV}=stage and a compiled engine (stage_key={stage_key!r}).")
+      staged = self._take_staged_batch(None, stage_key)
+      if staged is None:
+        raise ValueError(
+            f"fwd_bwd(None, stage_key={stage_key!r}): no such staged batch ({self.staged_batch_count} queued)."
+        )
+      batch = None
+    elif is_prepared:
+      batch = payload.batch
     else:
-      # The eager path honours `optimizer_memory_host_offload` too, as `_compile_for_batch` does.
-      self._offload_optimizer_state()
-      fwd_bwd_kernel, accumulate_kernel, inputs = self._fwd_bwd_kernel, self._accumulate_kernel, batch
-      dropless_kernel = None
-    # After any recompile, not before: reading first would hand the new kernel a pure
-    # state split against the old graph.
-    params, rest = self._read_model_pure(model)
-    in_first_phase = False
-    if self._dropless_replay:
-      if not self._compile_requested:
-        dropless_kernel = functools.partial(
-            self._fwd_bwd_kernel, graphdef=self._dropless_graphdef_for(self._model_graphdef, params, rest)
-        )
-      in_first_phase = self._in_first_phase()
-      if in_first_phase != self._first_phase_active:
-        self._first_phase_active = in_first_phase
-        if not in_first_phase:
-          kernel_name = "normal"
-        elif self._config.first_phase_ragged_buffer_factor <= 0.0:
-          kernel_name = "dropless"
+      batch = self._prepare_batch(payload)
+    try:  # pylint: disable=too-many-nested-blocks
+      apply_optimizer = kwargs.get("apply_optimizer")
+      final = False
+      if self._dropless_replay and self._final_dropless:
+        if apply_optimizer is None:
+          if not self._warned_no_apply_optimizer:
+            # An older caller: every micro-batch then runs the ragged_buffer_factor program and an overflowing
+            # one is replayed dropless, so no token is dropped, but the final micro-batch is not dropless upfront.
+            logging.warning(
+                "retry_dropless_final_micro_batch=True, but fwd_bwd was called without apply_optimizer; the final "
+                "micro-batch runs the ragged_buffer_factor program (replayed dropless on overflow)."
+            )
+            self._warned_no_apply_optimizer = True
         else:
-          kernel_name = "first-phase"
-        logging.info(
-            "Train step %d %s the first phase (retry_dropless_first_steps=%d): fwd_bwd runs the %s kernel.",
-            self.train_step,
-            "starts" if in_first_phase else "ends",
-            self._config.retry_dropless_first_steps,
-            kernel_name,
-        )
-      if in_first_phase:
-        if self._config.first_phase_ragged_buffer_factor <= 0.0:
-          if self._compile_requested:
-            if not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled):
-              self._join_dropless_compile()
-            if not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled):
-              avals = jax.tree.map(_to_aval, (params, rest, inputs))
-              options = self._xla_options(None)
-              with self._sharding_ctx():
-                self._compiled_fwd_bwd_dropless = self._compiled_fwd_bwd_dropless.lower(*avals).compile(
-                    compiler_options=options
-                )
-            fwd_bwd_kernel = self._compiled_fwd_bwd_dropless
+          final = bool(apply_optimizer) and not self._in_first_phase()
+
+      model = getattr(self._state, "model", None) if self._state is not None else self._model
+      if not isinstance(model, nnx.Module):
+        raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
+
+      # Wait for previous computations to finish before dispatching the next one to TPU.
+      self._throttler.wait_for_next()
+
+      if self._state is None:
+        self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
+      model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+
+      if self._compile_requested:
+        if staged is not None:
+          dynamic_batch, static_batch, signature = staged.dynamic, staged.static, staged.signature
+        else:
+          dynamic_batch, static_batch = _split_static_and_dynamic(batch)
+          # A compiled kernel is valid only for the batch it was built against: the traced
+          # half is baked into `in_shardings`, and the static half is closed over. Either
+          # changing needs a fresh kernel -- reusing it would raise an in_shardings mismatch
+          # for the first, and silently use stale values for the second.
+          signature = _batch_signature(dynamic_batch, static_batch)
+        if not self._compiled or self._needs_recompile(signature, self._compiled_signature):
+          # Settled first: its rerun and add run on the kernels and accumulator layout being replaced.
+          self._resolve_overflow_check()
+          self._compile_for_batch(dynamic_batch, static_batch)
+        if not is_prepared and self._stage_mode == "stage" and staged is None:
+          # A batch staged ahead of this call: same signature (so the same executable and in_shardings), its transfer
+          # already issued while the previous micro-batch computed.
+          staged = self._take_staged_batch(signature, stage_key)
+          if staged is not None:
+            dynamic_batch = staged.dynamic
+          elif stage_key is not None:
+            self._stage_warn_once(
+                "fallback",
+                "fwd_bwd found no staged batch (stage_key=%r); its inputs are transferred explicitly, after the "
+                "previous transfer. Logged once.",
+                stage_key,
+            )
+        if staged is not None and not staged.on_device:
+          with self._transfer_lock:
+            dynamic_batch = self._issue_input_transfer(dynamic_batch)
+          staged.dynamic = dynamic_batch
+          staged.on_device = True
+        elif not is_prepared and self._stage_mode != "off" and staged is None:
+          # `serialize`, or `stage` without a staged batch: the transfer is issued here rather than inside the jit
+          # call, so the next one can wait for it (`_wait_for_input_transfer`) and the two never run at once.
+          with self._transfer_lock:
+            dynamic_batch = self._issue_input_transfer(dynamic_batch)
+        # The compiled `fwd_bwd` closes over the static half, so it is passed the traced one only.
+        fwd_bwd_kernel, accumulate_kernel, inputs = self._compiled_fwd_bwd, self._compiled_accumulate, dynamic_batch
+        dropless_kernel = None
+      else:
+        if batch is None:
+          raise ValueError("fwd_bwd(None) is only valid on the compiled path (after compile()).")
+        # The eager path honours `optimizer_memory_host_offload` too, as `_compile_for_batch` does.
+        self._offload_optimizer_state()
+        fwd_bwd_kernel, accumulate_kernel, inputs = self._fwd_bwd_kernel, self._accumulate_kernel, batch
+        dropless_kernel = None
+      # After any recompile, not before: reading first would hand the new kernel a pure
+      # state split against the old graph.
+      params, rest = self._read_model_pure(model)
+      in_first_phase = False
+      if self._dropless_replay:
+        if not self._compile_requested:
+          dropless_kernel = functools.partial(
+              self._fwd_bwd_kernel, graphdef=self._dropless_graphdef_for(self._model_graphdef, params, rest)
+          )
+        in_first_phase = self._in_first_phase()
+        if in_first_phase != self._first_phase_active:
+          self._first_phase_active = in_first_phase
+          if not in_first_phase:
+            kernel_name = "normal"
+          elif self._config.first_phase_ragged_buffer_factor <= 0.0:
+            kernel_name = "dropless"
           else:
-            fwd_bwd_kernel = dropless_kernel
-        else:
+            kernel_name = "first-phase"
+          logging.info(
+              "Train step %d %s the first phase (retry_dropless_first_steps=%d): fwd_bwd runs the %s kernel.",
+              self.train_step,
+              "starts" if in_first_phase else "ends",
+              self._config.retry_dropless_first_steps,
+              kernel_name,
+          )
+        if in_first_phase:
+          if self._config.first_phase_ragged_buffer_factor <= 0.0:
+            if self._compile_requested:
+              if not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled):
+                self._join_dropless_compile()
+              if not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled):
+                avals = jax.tree.map(_to_aval, (params, rest, inputs))
+                options = self._xla_options(None)
+                with self._sharding_ctx():
+                  self._compiled_fwd_bwd_dropless = self._compiled_fwd_bwd_dropless.lower(*avals).compile(
+                      compiler_options=options
+                  )
+              fwd_bwd_kernel = self._compiled_fwd_bwd_dropless
+            else:
+              fwd_bwd_kernel = dropless_kernel
+          else:
+            if self._compile_requested:
+              fwd_bwd_kernel = self._compiled_fwd_bwd_first_phase
+            else:
+              fwd_bwd_kernel = functools.partial(
+                  self._fwd_bwd_kernel, graphdef=self._first_phase_graphdef_for(self._model_graphdef, params, rest)
+              )
+        elif self._fwd_bwd_compile is not None:
+          future, self._fwd_bwd_compile = self._fwd_bwd_compile, None
+          self._compiled_fwd_bwd = fwd_bwd_kernel = future.result()
+        if final:
+          # The step's final micro-batch: directly dropless, never replayed (it cannot overflow).
           if self._compile_requested:
-            fwd_bwd_kernel = self._compiled_fwd_bwd_first_phase
+            if not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled):
+              self._join_final_compile()
+            if not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled):
+              # Neither warmed up by compile(dummy_data) nor compiled in the background: only when the very first
+              # micro-batch of the run is also its step's last.
+              logging.warning("Compiling fwd_bwd_final_dropless on the critical path (first micro-batch is final).")
+              avals = jax.tree.map(_to_aval, (params, rest, inputs))
+              with self._sharding_ctx():
+                self._compiled_fwd_bwd_final = self._compiled_fwd_bwd_final.lower(*avals).compile(
+                    compiler_options=self._xla_options(None)
+                )
+            fwd_bwd_kernel = self._compiled_fwd_bwd_final
           else:
             fwd_bwd_kernel = functools.partial(
-                self._fwd_bwd_kernel, graphdef=self._first_phase_graphdef_for(self._model_graphdef, params, rest)
+                self._fwd_bwd_kernel, graphdef=self._final_graphdef_for(self._model_graphdef, params, rest)
             )
-      elif self._fwd_bwd_compile is not None:
-        future, self._fwd_bwd_compile = self._fwd_bwd_compile, None
-        self._compiled_fwd_bwd = fwd_bwd_kernel = future.result()
-      if final:
-        # The step's final micro-batch: directly dropless, never replayed (it cannot overflow).
-        if self._compile_requested:
-          if not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled):
-            self._join_final_compile()
-          if not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled):
-            # Neither warmed up by compile(dummy_data) nor compiled in the background: only when the very first
-            # micro-batch of the run is also its step's last.
-            logging.warning("Compiling fwd_bwd_final_dropless on the critical path (first micro-batch is final).")
-            avals = jax.tree.map(_to_aval, (params, rest, inputs))
-            with self._sharding_ctx():
-              self._compiled_fwd_bwd_final = self._compiled_fwd_bwd_final.lower(*avals).compile(
-                  compiler_options=self._xla_options(None)
-              )
-          fwd_bwd_kernel = self._compiled_fwd_bwd_final
+      with self._sharding_ctx():
+        outputs = fwd_bwd_kernel(params, rest, inputs)
+        if (
+            self._dropless_replay
+            and self._final_dropless
+            and self._compile_requested
+            and self._final_compile is None
+            and self._compiled_fwd_bwd_final is not None
+            and not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled)
+        ):
+          # Ahead of the replay kernel's, on the same thread: the first step's last micro-batch needs it for certain.
+          self._start_final_compile(self._compiled_fwd_bwd_final, params, rest, inputs)
+        if (
+            self._dropless_replay
+            and self._compile_requested
+            and self._dropless_compile is None
+            and not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled)
+        ):
+          # On a background thread while the device runs this `fwd_bwd`, rather than at the first overflow in the
+          # middle of a step or ahead of the first `fwd_bwd` on the startup path.
+          self._dropless_compile = self._start_background_compile(self._compiled_fwd_bwd_dropless, params, rest, inputs)
+        if (
+            in_first_phase
+            and self._compile_requested
+            and self._fwd_bwd_compile is None
+            and not isinstance(self._compiled_fwd_bwd, jax.stages.Compiled)
+        ):
+          self._fwd_bwd_compile = self._start_background_compile(self._compiled_fwd_bwd, params, rest, inputs)
+        loss, aux, new_rest, grads, denominator = outputs[:5]
+        aux, audit = _split_moe_audit(aux)
+        if self._accumulated_grads is None:
+          acc_grads, acc_denom = self._start_running_sum(grads), denominator
         else:
-          fwd_bwd_kernel = functools.partial(
-              self._fwd_bwd_kernel, graphdef=self._final_graphdef_for(self._model_graphdef, params, rest)
+          # The compiled kernel donates both running sums, so they are rebound from the outputs below.
+          acc_grads, acc_denom = accumulate_kernel(
+              self._accumulated_grads, self._accumulated_denominator, grads, denominator
           )
-    with self._sharding_ctx():
-      outputs = fwd_bwd_kernel(params, rest, inputs)
-      if (
-          self._dropless_replay
-          and self._final_dropless
-          and self._compile_requested
-          and self._final_compile is None
-          and self._compiled_fwd_bwd_final is not None
-          and not isinstance(self._compiled_fwd_bwd_final, jax.stages.Compiled)
-      ):
-        # Ahead of the replay kernel's, on the same thread: the first step's last micro-batch needs it for certain.
-        self._start_final_compile(self._compiled_fwd_bwd_final, params, rest, inputs)
-      if (
-          self._dropless_replay
-          and self._compile_requested
-          and self._dropless_compile is None
-          and not isinstance(self._compiled_fwd_bwd_dropless, jax.stages.Compiled)
-      ):
-        # On a background thread while the device runs this `fwd_bwd`, rather than at the first overflow in the
-        # middle of a step or ahead of the first `fwd_bwd` on the startup path.
-        self._dropless_compile = self._start_background_compile(self._compiled_fwd_bwd_dropless, params, rest, inputs)
-      if (
-          in_first_phase
-          and self._compile_requested
-          and self._fwd_bwd_compile is None
-          and not isinstance(self._compiled_fwd_bwd, jax.stages.Compiled)
-      ):
-        self._fwd_bwd_compile = self._start_background_compile(self._compiled_fwd_bwd, params, rest, inputs)
-      loss, aux, new_rest, grads, denominator = outputs[:5]
-      aux, audit = _split_moe_audit(aux)
-      if self._accumulated_grads is None:
-        acc_grads, acc_denom = self._start_running_sum(grads), denominator
-      else:
-        # The compiled kernel donates both running sums, so they are rebound from the outputs below.
-        acc_grads, acc_denom = accumulate_kernel(
-            self._accumulated_grads, self._accumulated_denominator, grads, denominator
-        )
-    nnx.update(model, new_rest)
-    self._publish_model_rest(new_rest)
+      nnx.update(model, new_rest)
+      self._publish_model_rest(new_rest)
+    finally:
+      if staged is not None:
+        with self._stage_lock:
+          self._in_flight_staged_on_device = max(0, self._in_flight_staged_on_device - 1)
+        self._promote_staged_head_to_device()
 
     # Don't add metrics to the throttler queue because metrics are logged after
     # the update step.
@@ -2868,7 +3287,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           logging.warning(
               "MOE_DROP_AUDIT step=%d micro=%d program=%s replayed=%s dropped_assignments_used=-1 (no audit was "
               "sown: log_moe_drops needs the ring-of-experts ragged path, and a Tunix loss that returns it)",
-              entry.step, entry.micro, entry.program, entry.replayed,
+              entry.step,
+              entry.micro,
+              entry.program,
+              entry.replayed,
           )
         continue
       dropped = np.asarray(used["dropped"]).astype(np.int64).ravel()
@@ -2983,6 +3405,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # Back to pinned host memory, where the compiled update's `out_shardings` would put it.
       self._offload_optimizer_state()
 
+    # Same readiness signal the throttler uses below: the norm comes out of the update executable.
+    self.last_update_token = grad_norm
     if grad_norm is not None:
       self.record_metrics("gradient_norm", grad_norm)
     if self._log_moe_drops:
