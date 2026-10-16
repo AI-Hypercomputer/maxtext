@@ -47,8 +47,10 @@ def get_feature_spec(config) -> DecoderFeatureSpec:
 def create_audio_components(config, mesh, quant, *, model_mode, rngs) -> dict:
   """Constructs named model components; algorithms and inference state live elsewhere."""
   if get_audio_output_type(config) == "qwen3_omni":
-    from maxtext.models.qwen3_omni_talker import Qwen3OmniTalker  # pylint: disable=import-outside-toplevel
-    from maxtext.models.qwen3_omni_code2wav import Qwen3OmniCode2Wav  # pylint: disable=import-outside-toplevel
+    from maxtext.models.qwen3_omni_audio import (  # pylint: disable=import-outside-toplevel
+        Qwen3OmniTalker,
+        Qwen3OmniCode2Wav,
+    )
 
     return {
         "talker": Qwen3OmniTalker(config, mesh, quant, model_mode=model_mode, rngs=rngs),

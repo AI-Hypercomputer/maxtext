@@ -1611,7 +1611,7 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
 def _qwen3_omni_talker_param_mapping(config):
   """MaxText -> HF weight paths for the Qwen3-Omni speech stack (`talker.*`, `talker.code_predictor.*`, `code2wav.*`).
 
-  Layout follows `maxtext.models.qwen3_omni_talker` (`Transformer.talker` / `Transformer.code2wav`); unscanned only.
+  Layout follows `maxtext.models.qwen3_omni_audio` (`Transformer.talker` / `Transformer.code2wav`); unscanned only.
 
   Args:
     config (dict): HF `Qwen3OmniMoeConfig.to_dict()`.

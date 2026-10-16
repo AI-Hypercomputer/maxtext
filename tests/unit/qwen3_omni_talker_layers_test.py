@@ -33,7 +33,7 @@ import torch
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
-from maxtext.models import qwen3_omni_talker, qwen3_omni_code2wav
+from maxtext.models import qwen3_omni_audio
 from maxtext.utils import maxtext_utils
 from maxtext.utils.globals import MAXTEXT_REPO_ROOT
 from transformers.models.qwen3_omni_moe.configuration_qwen3_omni_moe import (
@@ -342,7 +342,7 @@ class TestTalkerDecoder(TalkerTestBase):
     for p in self.pt.parameters():
       torch.nn.init.normal_(p, std=0.2)
     with self.mesh:
-      self.mt = qwen3_omni_talker.Qwen3OmniTalker(
+      self.mt = qwen3_omni_audio.Qwen3OmniTalker(
           self.config, self.mesh, None, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0)
       )
     copy_talker(self.mt, self.pt)
@@ -385,7 +385,7 @@ class TestTalkerDecoder(TalkerTestBase):
     """KV-cached decode (PREFILL then AUTOREGRESSIVE on one AR-mode module, as the pipeline does) equals a full forward."""
     config = make_config(per_device_batch_size=1.0 / jax.device_count())
     with self.mesh:
-      mt_ar = qwen3_omni_talker.Qwen3OmniTalker(
+      mt_ar = qwen3_omni_audio.Qwen3OmniTalker(
           config, self.mesh, None, model_mode=MODEL_MODE_AUTOREGRESSIVE, rngs=nnx.Rngs(0)
       )
     copy_talker(mt_ar, self.pt)
@@ -421,7 +421,7 @@ class TestCodePredictor(TalkerTestBase):
     for p in self.pt.parameters():
       torch.nn.init.normal_(p, std=0.2)
     with self.mesh:
-      self.mt = qwen3_omni_talker.Qwen3OmniCodePredictor(self.config, self.mesh, None, rngs=nnx.Rngs(0))
+      self.mt = qwen3_omni_audio.Qwen3OmniCodePredictor(self.config, self.mesh, None, rngs=nnx.Rngs(0))
     copy_code_predictor(self.mt, self.pt)  # standalone module; inside the model it is `talker.code_predictor`
 
   def test_hidden_and_heads_match(self):
@@ -457,7 +457,7 @@ class TestCode2Wav(TalkerTestBase):
       elif p.ndim > 1:
         torch.nn.init.normal_(p, std=0.1)
     with self.mesh:
-      self.mt = qwen3_omni_code2wav.Qwen3OmniCode2Wav(self.config, self.mesh, rngs=nnx.Rngs(0))
+      self.mt = qwen3_omni_audio.Qwen3OmniCode2Wav(self.config, self.mesh, rngs=nnx.Rngs(0))
     copy_code2wav(self.mt, self.pt)
 
   def test_waveform_matches(self):

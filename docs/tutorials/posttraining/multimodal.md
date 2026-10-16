@@ -8,14 +8,14 @@ This document provides a guide to use the multimodal functionalities in MaxText 
 
 We also provide a [colab](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/examples/sft_multimodal_gemma3_demo.ipynb) for multimodal features demonstration. The following table provides a list of models and modalities we currently support:
 
-| Models                       | Input: Text | Input: Image | Input: Video | Input: Audio |    Output    |
-| :--------------------------- | :---------: | :----------: | :----------: | :----------: | :----------: |
-| **Gemma3** (4B/12B/27B)      |      ✓      |      ✓       |              |              |     Text     |
-| **Gemma4** (26B/31B)         |      ✓      |      ✓       |              |              |     Text     |
-| **Llama4** (Scout/Maverick)  |      ✓      |      ✓       |              |              |     Text     |
-| **Qwen3-VL** (2B/4B/30B-A3B) |      ✓      |      ✓       |      ✓       |              |     Text     |
-| **Qwen3-Omni**               |      ✓      |      ✓       |      ✓       |      ✓       | Text + Audio |
-| **Qwen3.5** (35B/397B)       |      ✓      |      ✓       |      ✓       |              |     Text     |
+| Models                       | Input: Text | Input: Image | Input: Video | Input: Audio | Output |
+| :--------------------------- | :---------: | :----------: | :----------: | :----------: | :----: |
+| **Gemma3** (4B/12B/27B)      |      ✓      |      ✓       |              |              |  Text  |
+| **Gemma4** (26B/31B)         |      ✓      |      ✓       |              |              |  Text  |
+| **Llama4** (Scout/Maverick)  |      ✓      |      ✓       |              |              |  Text  |
+| **Qwen3-VL** (2B/4B/30B-A3B) |      ✓      |      ✓       |      ✓       |              |  Text  |
+| **Qwen3-Omni**               |      ✓      |      ✓       |      ✓       |      ✓       |  Text  |
+| **Qwen3.5** (35B/397B)       |      ✓      |      ✓       |      ✓       |              |  Text  |
 
 ## Introduction
 
@@ -198,28 +198,6 @@ Input `<|im_start|>user
 <|im_start|>assistant
 ` -> `A roaring Tyrannosaurus rex animatronic is displayed in a museum exhibit.
 ```
-
-### Qwen3-Omni Speech Components and Checkpoints
-
-Qwen3-Omni includes speech-output model components. The speech stack (HF `talker`: a 20-layer MoE decoder with a residual code
-predictor, plus the `code2wav` vocoder) is part of the same MaxText model and checkpoint when the shared flag
-`enable_audio_output=true` is set. Convert the checkpoint with it enabled so the talker weights are included:
-
-```sh
-JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
-    model_name=qwen3-omni-30b-a3b \
-    base_output_directory=${BASE_OUTPUT_PATH?}/unscanned \
-    scan_layers=false use_multimodal=true enable_audio_output=true \
-    --lazy_load_tensors=False
-```
-
-The components are attached directly under `talker` and `code2wav`, preserving existing audio-checkpoint
-parameter paths. `audio_output_type=auto` selects the Qwen3-Omni implementation for existing model configurations;
-`audio_output_type=qwen3_omni` selects it explicitly. Thinker-only checkpoints continue to use
-`enable_audio_output=false`.
-
-This adds model construction, checkpoint conversion, and decoder feature capture. End-to-end speech generation
-through `decode.py` is provided by the follow-up audio-generation change.
 
 ## Supervised Fine-Tuning
 
