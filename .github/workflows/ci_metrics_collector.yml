@@ -1,0 +1,371 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# =============================================================================
+# CI metrics collector - scheduled workflow
+# =============================================================================
+#
+# Keeps the CI Pulse dashboard data fresh by running the collector every four
+# hours. The collector code is not on main. It lives on the ci-metrics-code
+# branch, and this workflow runs exactly one reviewed commit of it: COLLECTOR_SHA
+# below. A commit that is not on that branch is refused before any of it runs.
+#
+# To change the collector:
+#   1. Push the new code to ci-metrics-code. Nothing runs it yet.
+#   2. Open a PR to main that changes COLLECTOR_SHA, with the link
+#      https://github.com/AI-Hypercomputer/maxtext/compare/<old>...<new>
+#      so reviewers can read the code change.
+#   3. After that PR merges, the next run uses the new code.
+#
+# What it does:
+#   1. Checks out COLLECTOR_SHA, after checking that it is on ci-metrics-code
+#   2. Runs the collector tests, and stops before touching any data if they fail
+#   3. Fetches GitHub Actions data (runs, jobs, JUnit artifacts)
+#   4. Saves the raw data on the ci-metrics-store branch
+#   5. Publishes the view files to gh-pages, where the dashboard reads them
+#
+# Only a run on main saves anything. A manual run on another branch, or a dry
+# run, collects and stops there.
+#
+# Each run handles at most 40 CI runs by default, and stops early when fewer than
+# 300 API requests are left this hour. The built-in token's hourly budget is shared
+# by the repository's other workflows. The first run looks back 1 day.
+#
+# How the store stays small: the collector deletes data older than the dashboard's
+# 90-day window and keeps every file under 40 MB (GitHub blocks files over 100 MB),
+# and the push step starts the store branch's history over once a month.
+#
+# Prerequisites:
+#   - the ci-metrics-code branch must exist and hold COLLECTOR_SHA
+#   - the ci-metrics-store branch must exist (orphan, created once)
+#   - GITHUB_TOKEN needs actions:read and contents:write. The job asks for both itself,
+#     because the workflow gives no permissions by default.
+#
+# Why 20 minutes past the hour: GitHub's scheduler is busiest at the top of the
+# hour, and runs set for then often start late. Other workflows also push to
+# gh-pages (the Benchmarks robot), so every push below rebases and retries.
+# concurrency with cancel-in-progress: false makes a slow tick queue the next
+# one instead of running twice.
+# =============================================================================
+
+name: CI metrics collector
+
+on:
+  schedule:
+    # Every four hours, at twenty minutes past the hour (see the header).
+    - cron: '20 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      since:
+        description: 'Collect runs created on or after this day (YYYY-MM-DD). Empty = from the stored watermark.'
+        required: false
+        default: ''
+      until:
+        description: 'Collect runs created on or before this day (YYYY-MM-DD). Empty = up to now.'
+        required: false
+        default: ''
+      backfill_days:
+        description: 'How far back the first tick of an empty store reaches.'
+        required: false
+        default: '1'
+      max_runs:
+        description: 'Stop after this many runs. Empty = 40, which keeps one run well inside the hourly API budget.'
+        required: false
+        default: ''
+      dry_run:
+        description: 'Fetch and compute everything, write nothing.'
+        type: boolean
+        required: false
+        default: false
+
+# One writer of this store, and a slow tick queues rather than racing itself.
+concurrency:
+  group: ci-metrics-collector
+  cancel-in-progress: false
+
+# No permissions by default. The job below asks only for what it needs.
+permissions: {}
+
+jobs:
+  collect:
+    name: Collect one tick
+    # Always a GitHub-hosted runner. This job must never take a self-hosted machine: those
+    # belong to the pipeline being measured, and a collector that competes for them would
+    # change the very queue times it reports.
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    permissions:
+      contents: write # The save steps push to the store branch and gh-pages.
+      actions: read # The collector lists runs and reads their test-result artifacts.
+
+    env:
+      # The collector code: one reviewed commit of its own branch. Change COLLECTOR_SHA only in
+      # a PR to main, with a link to the code changes (see the header).
+      COLLECTOR_BRANCH: ci-metrics-code
+      COLLECTOR_SHA: 3f04cbe52c33d0092ccc4acd6dec61c1314917d8
+      # The repository whose pipeline is measured. Read-only, every request a GET.
+      TARGET_REPO: AI-Hypercomputer/maxtext
+      # The branch the store is committed to, and the directory inside it. This branch is
+      # this project's own: it is never gh-pages and never a branch of the pipeline's work.
+      STORE_BRANCH: ci-metrics-store
+      STORE_DIR: ci-metrics
+      # The branch GitHub Pages serves from. The publish step copies the rendered views here.
+      PAGES_BRANCH: gh-pages
+      PAGES_VIEWS_DIR: dev/bench/ci-pulse/views
+
+    steps:
+      - name: Check out the approved collector commit
+        # Runs only COLLECTOR_SHA, and only if that commit is on COLLECTOR_BRANCH. Only that one
+        # branch is fetched, so a commit that is not on it is never downloaded and the job stops
+        # here, before any collector code runs. That also covers a commit that exists only in a
+        # fork, which GitHub would otherwise serve through this repository's address. No key is
+        # needed or kept: the repository is public.
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${COLLECTOR_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "COLLECTOR_SHA must be a full 40-character commit ID, not '${COLLECTOR_SHA}'." >&2
+            exit 1
+          fi
+          git init --quiet collector-src
+          cd collector-src
+          git fetch --quiet --no-tags "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "+refs/heads/${COLLECTOR_BRANCH}:refs/remotes/origin/${COLLECTOR_BRANCH}"
+          if ! git merge-base --is-ancestor "${COLLECTOR_SHA}" "refs/remotes/origin/${COLLECTOR_BRANCH}"; then
+            echo "${COLLECTOR_SHA} is not on ${COLLECTOR_BRANCH}; refusing to run it." >&2
+            exit 1
+          fi
+          git -c advice.detachedHead=false checkout --quiet "${COLLECTOR_SHA}"
+          echo "Running collector commit ${COLLECTOR_SHA} from ${COLLECTOR_BRANCH}."
+
+      - name: Check out the store branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.STORE_BRANCH }}
+          path: store
+          # Full history: the monthly restart in the push step reads the branch's first
+          # commit. The history stays small because that restart drops it.
+          fetch-depth: 0
+          # No key on disk while the collector runs. The push step adds it.
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requests
+        # Exact versions - the ones the collector was last tested with. The collector runs
+        # with the job's token, so the code it imports must not change without a review.
+        # --no-deps: install these five packages and nothing else.
+        run: |
+          python -m pip install --disable-pip-version-check --no-cache-dir --no-deps \
+            requests==2.34.2 urllib3==2.8.0 idna==3.20 charset-normalizer==3.5.2 certifi==2026.7.22
+
+      - name: Run the collector tests
+        # These guard the data rules (files are only appended to, no file passes the
+        # part-size limit (40 MB), old months are deleted) and how test-result zips that are
+        # too big or broken are refused. If they fail, stop before touching data.
+        working-directory: collector-src
+        run: python -B -m unittest discover -s tools/ci_metrics/collector/tests -p '*_test.py' -t tools/ci_metrics/collector/tests
+
+      - name: Run the tick
+        id: tick
+        shell: bash
+        env:
+          # The built-in token. The collector only reads from GitHub (every request is a GET);
+          # artifact downloads need `actions:read`. The same token can also write, because the
+          # save steps below need that. That is why only the reviewed COLLECTOR_SHA runs here.
+          # A run on another branch saves nothing.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SINCE: ${{ inputs.since }}
+          UNTIL: ${{ inputs.until }}
+          # A scheduled run has no inputs, so these defaults apply. 40 runs cost about 500
+          # API requests (a sample tick in the collector README, on the ci-metrics-code
+          # branch, used 313 for 25 runs). The merge checks add about one request for each
+          # pull request still waiting to merge. The tick checks the budget again as it goes
+          # and stops when fewer than 300 requests are left, so the other workflows that
+          # share the built-in token's hourly budget keep some. The first run of an empty
+          # store looks back 1 day; the dashboard fills in from there.
+          BACKFILL_DAYS: ${{ inputs.backfill_days || '1' }}
+          MAX_RUNS: ${{ inputs.max_runs || '40' }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -uo pipefail
+          args=(--out "${GITHUB_WORKSPACE}/store/${STORE_DIR}" --repo "${TARGET_REPO}")
+          [ -n "${SINCE}" ] && args+=(--since "${SINCE}")
+          [ -n "${UNTIL}" ] && args+=(--until "${UNTIL}")
+          [ -n "${BACKFILL_DAYS}" ] && args+=(--backfill-days "${BACKFILL_DAYS}")
+          [ -n "${MAX_RUNS}" ] && args+=(--max-runs "${MAX_RUNS}")
+          [ "${DRY_RUN}" = "true" ] && args+=(--dry-run)
+
+          cd "${GITHUB_WORKSPACE}/collector-src/tools/ci_metrics" || exit 1
+          python -m collector.tick "${args[@]}" 2>&1 | tee "${RUNNER_TEMP}/tick.log"
+          status=${PIPESTATUS[0]}
+
+          # 0: the tick finished, whether or not it found anything new.
+          # 1: it lost some data and should be looked at. Whatever it did collect is still
+          #    saved below, so the failure costs freshness, not rows.
+          # 2: bad arguments or an unusable store. Running it again will not help until
+          #    the cause is fixed.
+          # The job is failed at the end for anything but 0.
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+          echo "summary=$(tail -n 1 "${RUNNER_TEMP}/tick.log")" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Commit and push the store
+        # Only a run on main saves. A manual run on another branch, or a dry run, stops here.
+        if: ${{ inputs.dry_run != true && github.ref == 'refs/heads/main' }}
+        shell: bash
+        working-directory: store
+        env:
+          # Read through the environment rather than interpolated into the script: a step
+          # output must never become shell source, whatever produced it.
+          TICK_SUMMARY: ${{ steps.tick.outputs.summary }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Skip the commit when nothing changed. In practice every tick changes state.json
+          # and meta.json (both hold a timestamp), so this rarely skips.
+          if [ -z "$(git status --porcelain -- "${STORE_DIR}")" ]; then
+            echo "The store is unchanged; nothing to commit."
+            exit 0
+          fi
+
+          # The checkouts keep no key on disk. Add one now, only for these pushes - the
+          # same way track_performance.yml does.
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git config user.name 'ci-metrics-collector'
+          git config user.email 'ci-metrics-collector@users.noreply.github.com'
+          base="$(git rev-parse HEAD)"
+          git add -- "${STORE_DIR}"
+
+          # One commit per tick, so every file a tick wrote lands together or not at all.
+          # [skip ci] is a second guard: a push made with GITHUB_TOKEN starts no workflow anyway.
+          # The subject carries the marker, the body carries the counts.
+          git commit -m "ci-metrics: $(date -u +%Y-%m-%dT%H:%M:%SZ) [skip ci]" -m "${TICK_SUMMARY}"
+
+          # Once a month, start the branch over: push one new commit that holds today's files
+          # and no history. Old commits only hold older copies of the same files (data files
+          # only grow, and the months the tick deletes are meant to go), so nothing is lost.
+          # --force-with-lease refuses if anyone pushed since this job's checkout; then the
+          # normal push below runs and the next tick tries again.
+          first_month="$(TZ=UTC git log --max-parents=0 -1 --format=%cd --date=format-local:%Y-%m HEAD)"
+          this_month="$(date -u +%Y-%m)"
+          if [ "${first_month}" != "${this_month}" ]; then
+            fresh="$(git commit-tree "HEAD^{tree}" -m "ci-metrics: start history over for ${this_month} [skip ci]" -m "${TICK_SUMMARY}")"
+            if git push --force-with-lease="${STORE_BRANCH}:${base}" origin "${fresh}:refs/heads/${STORE_BRANCH}"; then
+              echo "Started the store history over for ${this_month}."
+              exit 0
+            fi
+            echo "::warning::Could not start the store history over for ${this_month}; pushing normally. The next tick tries again."
+          fi
+
+          # The collector is the only writer of this branch, so a rejection means a human
+          # edited it. Rebase and try again, three times, then give up loudly.
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:${STORE_BRANCH}"; then
+              echo "Pushed on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push rejected on attempt ${attempt}; rebasing onto the branch tip."
+            git pull --rebase origin "${STORE_BRANCH}"
+          done
+          echo "The store could not be pushed after three attempts." >&2
+          exit 1
+
+      - name: Check out gh-pages for publishing
+        if: ${{ inputs.dry_run != true && github.ref == 'refs/heads/main' && steps.tick.outputs.status == '0' }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.PAGES_BRANCH }}
+          path: pages
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Publish views to gh-pages
+        if: ${{ inputs.dry_run != true && github.ref == 'refs/heads/main' && steps.tick.outputs.status == '0' }}
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          STORE_VIEWS="${GITHUB_WORKSPACE}/store/${STORE_DIR}/views"
+          TARGET="${GITHUB_WORKSPACE}/pages/${PAGES_VIEWS_DIR}"
+
+          if [ ! -f "${STORE_VIEWS}/meta.json" ]; then
+            echo "No views to publish (no meta.json in store)."
+            exit 0
+          fi
+
+          # Replace the views folder whole, so files the collector deleted (months
+          # older than the 90-day window, old pull requests) leave the site too.
+          # The first run starts from an empty store, so it shows only its backfill.
+          rm -rf "${TARGET}"
+          mkdir -p "$(dirname "${TARGET}")"
+          cp -R "${STORE_VIEWS}" "${TARGET}"
+          echo "Copied $(find "${TARGET}" -type f -name '*.json' | wc -l | tr -d ' ') view file(s)."
+
+          cd "${GITHUB_WORKSPACE}/pages" || exit 1
+          if [ -z "$(git status --porcelain -- "${PAGES_VIEWS_DIR}")" ]; then
+            echo "Views unchanged; nothing to publish."
+            exit 0
+          fi
+
+          # As in the store push: add the key only now, for this push.
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          git config user.name 'ci-metrics-collector'
+          git config user.email 'ci-metrics-collector@users.noreply.github.com'
+          git add -- "${PAGES_VIEWS_DIR}"
+          git commit -m "ci-metrics: refresh dashboard data [skip ci]"
+
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:${PAGES_BRANCH}"; then
+              echo "Published to ${PAGES_BRANCH} on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push rejected on attempt ${attempt}; rebasing."
+            git pull --rebase origin "${PAGES_BRANCH}"
+          done
+          echo "Could not push to ${PAGES_BRANCH} after three attempts." >&2
+          exit 1
+
+      - name: Report what the tick did
+        if: always()
+        shell: bash
+        env:
+          TICK_SUMMARY: ${{ steps.tick.outputs.summary }}
+          TICK_STATUS: ${{ steps.tick.outputs.status }}
+        run: |
+          if [ -z "${TICK_STATUS}" ]; then
+            echo "The tick did not finish: it timed out, was cancelled, or an earlier step failed." >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "${TICK_SUMMARY} (exit ${TICK_STATUS})" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Fail the job when the tick did not finish cleanly
+        if: ${{ always() && steps.tick.outputs.status != '' && steps.tick.outputs.status != '0' }}
+        shell: bash
+        env:
+          TICK_STATUS: ${{ steps.tick.outputs.status }}
+        run: |
+          if [ "${TICK_STATUS}" = "2" ]; then
+            echo "The tick exited 2: bad arguments or an unusable store. Fix the cause first; running it again will not help." >&2
+          else
+            echo "The tick exited ${TICK_STATUS}: it lost some data. Run the workflow again once the cause is fixed." >&2
+          fi
+          exit 1
