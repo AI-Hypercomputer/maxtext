@@ -297,9 +297,52 @@ _SPARSE_4X8X8 = dsv3_types.DSv3SparseLayerWeightsPytree(
     ),
 )
 
+# 4x4x8: the 4x8x8 layout, except q_up carries its 16-way FSDP over (x, y) on
+# its 192-wide head dim (as k_up and v_up do): 16 ways divide the 32-wide
+# even/odd rope halves in `init_dsv3_mla_weights`, whereas sharding q_lora
+# (1536 / 16 = 96) pads the 128-wide minor TPU tile dim by 33%.
+_MLA_4X4X8 = dataclasses.replace(_MLA_4X8X8, q_up=P(None, None, "core", ("x", "y")))
+_SPARSE_4X4X8 = dataclasses.replace(_SPARSE_4X8X8, mla=_MLA_4X4X8)
+
 # Per-slice `(x, y, z)` topology -> shardings. A multi-slice mesh uses the entry
 # of its slices; `sharding_config` adds data parallelism over `dcn`.
 TOPOLOGY_SHARDINGS: dict[tuple[int, int, int], TopologySharding] = {
+    (4, 4, 8): TopologySharding(
+        axis_mapping={
+            "attention": "core",
+            "fsdp_attention": ("x", "y", "z"),
+            "expert": ("z", "core"),
+            "fsdp_moe": ("x", "y"),
+        },
+        weights=DSv3WeightShardings(
+            decoder=dsv3_types.DSv3WeightsPytree(
+                dense=dsv3_types.DSv3DenseLayerWeightsPytree(
+                    pre_attn_norm_scale=P(None, None),
+                    mla=_MLA_4X4X8,
+                    post_attn_norm_scale=P(None, None),
+                    mlp=dsv3_types.DSv3MLPWeightsPytree(
+                        gate_0=P(None, None, ("x", "y")),
+                        gate_1=P(None, None, ("x", "y")),
+                        linear=P(None, ("x", "y"), None),
+                    ),
+                ),
+                sparse=_SPARSE_4X4X8,
+            ),
+            mtp=dsv3_types.DSv3MTPWeightsPytree(
+                ehproj=dsv3_types.DSv3EHProjWeightsPytree(
+                    enorm_scale=P(None),
+                    hnorm_scale=P(None),
+                    eh_proj=P(("x", "y"), None),
+                ),
+                sparse=drop_layer_axis(_SPARSE_4X4X8),
+            ),
+            # Over every ICI axis, as on 8x8x8: 256 ways divide the 7168-wide
+            # embedding dim.
+            embed_table=P(None, ("x", "y", "z", "core")),
+            final_norm_scale=P(None),
+            head_kernel=P(("x", "y", "z", "core"), None),
+        ),
+    ),
     (4, 8, 8): TopologySharding(
         axis_mapping={
             "attention": "core",

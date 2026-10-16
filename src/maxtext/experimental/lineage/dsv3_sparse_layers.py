@@ -248,9 +248,19 @@ def dsv3_sparse_layers(
           quant=quant,
       ),
   )
+
+  def _scan_body_fwd(*args, **kwargs):
+    out, res = dsv3_sparse_layer.dsv3_sparse_layer_scan_body_fwd(*args, **kwargs)
+    assert res.mb0.moe is not None
+    moe_0 = res.mb0.moe._replace(
+        out_proj_out=res.mb0.moe.out_proj_out + res.mb0.moe.orig_x,
+        orig_x=None,  # pyrefly: ignore[bad-argument-type]
+    )
+    return out, res._replace(mb0=res.mb0._replace(moe=moe_0))
+
   _scan_body = ops.PipelinedScanLayer(
       fwd=functools.partial(
-          dsv3_sparse_layer.dsv3_sparse_layer_scan_body_fwd,
+          _scan_body_fwd,
           yarn_freqs=(yarn_freqs_0, yarn_freqs_1),
           splash_kernel=splash_kernel,
           num_experts=num_experts,

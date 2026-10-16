@@ -428,7 +428,7 @@ def _quantize_routed_weights(
     The quantized routed expert weights.
   """
   return jax.tree.map(
-      lambda w: w
+      lambda w: w  # pylint: disable=g-long-ternary
       if w.dtype == quant_rule.weight_qtype
       else quantization.static_quantize(w, quant_rule.weight_qtype, quant_rule.weight_scale),
       w_routed,
@@ -872,6 +872,8 @@ def ubatch_combine(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     mesh: jax.sharding.Mesh,
     out_specs: jax.sharding.PartitionSpec,
+    combine_qtype: Any | None = None,
+    combine_per_hop_scaling: bool = False,
 ) -> tuple[
     tuple[
         jt.Num[jax.Array, "B T D"],
@@ -880,7 +882,13 @@ def ubatch_combine(
     ],
     tuple[()],
 ]:
-  """Combines reduced routed expert outputs and optionally runs shared expert."""
+  """Combines reduced routed expert outputs and optionally runs shared expert.
+
+  With `combine_qtype`, the combine reduce-scatter runs in that dtype (see
+  `quantization.QuantConfig.combine_qtype`), scaling every ring hop separately
+  with `combine_per_hop_scaling` (see
+  `quantization.QuantConfig.combine_per_hop_scaling`).
+  """
   combined_x = dsv3_router.dsv3_combine(
       y_ag,
       local_seq_length=local_seq_length,
@@ -888,6 +896,8 @@ def ubatch_combine(
       axis_mapping=axis_mapping,
       mesh=mesh,
       out_specs=out_specs,
+      combine_qtype=combine_qtype,
+      combine_per_hop_scaling=combine_per_hop_scaling,
   )
   shared_x = shared_or_moe_in if w_shared is None else dsv3_experts.dsv3_shared_expert(shared_or_moe_in, w_shared)
   combine_out = (
@@ -1445,6 +1455,8 @@ def dsv3_sparse_layer_epilogue_fwd(
   """Forward pass for DSv3 sparse layer epilogue."""
   quant_rule = quant.routed_experts if quant else None
   mla_rule = quant.mla if quant else None
+  combine_qtype = quant.combine_qtype if quant else None
+  combine_per_hop_scaling = quant.combine_per_hop_scaling if quant else False
   w_routed = w.moe.routed if quant_rule is None else _quantize_routed_weights(w.moe.routed, quant_rule)
   (outputs_mla_curr_0, bank_0, bank_offset_0), (
       mb1,
@@ -1459,7 +1471,7 @@ def dsv3_sparse_layer_epilogue_fwd(
 
   @jax.named_call
   @program_order(enforce=False)
-  def phase1(outputs_mla_curr_0, mb1):
+  def phase1(outputs_mla_curr_0):
     out_proj_out_curr_0, orig_x_curr_0 = outputs_mla_curr_0
     (outputs_metadata_curr_0, aux_curr_0), res_metadata_curr_0 = ubatch_norm_and_metadata(
         out_proj_out_curr_0,
@@ -1480,8 +1492,7 @@ def dsv3_sparse_layer_epilogue_fwd(
         router_dtype=router_dtype,
         expert_permutations=expert_permutations,
     )
-    mb1_wait = ubatch_wait(mb1)
-    return (outputs_metadata_curr_0, mb1_wait, aux_curr_0), res_metadata_curr_0
+    return (outputs_metadata_curr_0, aux_curr_0), res_metadata_curr_0
 
   @jax.named_call
   @program_order(enforce=False)
@@ -1594,6 +1605,8 @@ def dsv3_sparse_layer_epilogue_fwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=x_pspec,
+        combine_qtype=combine_qtype,
+        combine_per_hop_scaling=combine_per_hop_scaling,
     )
     (outputs_expert_curr_1, (bank_1, bank_offset_1)), res_expert_curr_1 = ubatch_expert(
         *outputs_dispatch_curr_1,
@@ -1632,6 +1645,8 @@ def dsv3_sparse_layer_epilogue_fwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=x_pspec,
+        combine_qtype=combine_qtype,
+        combine_per_hop_scaling=combine_per_hop_scaling,
     )
     return (out_mb0_wait, outputs_combine_curr_1), ()
 
@@ -1645,8 +1660,8 @@ def dsv3_sparse_layer_epilogue_fwd(
 
   @program_order(enforce=True)
   def _epilogue_fwd(outputs_mla_curr_0, mb1, bank_0, bank_offset_0, bank_1, bank_offset_1):
-    (outputs_metadata_curr_0, mb1_wait, aux_curr_0), res_phase1_curr_0 = phase1(outputs_mla_curr_0, mb1)
-    (outputs_dispatch_curr_0, outputs_mla_curr_1), res_mla_curr_1 = phase2(outputs_metadata_curr_0, mb1_wait)
+    (outputs_metadata_curr_0, aux_curr_0), res_phase1_curr_0 = phase1(outputs_mla_curr_0)
+    (outputs_dispatch_curr_0, outputs_mla_curr_1), res_mla_curr_1 = phase2(outputs_metadata_curr_0, mb1)
     (outputs_dispatch_wait_0, outputs_metadata_curr_1, aux_curr_1), (res_phase3_curr_1) = phase3(
         outputs_dispatch_curr_0, outputs_mla_curr_1
     )
@@ -1804,7 +1819,11 @@ def dsv3_sparse_layer_epilogue_bwd(
   _, segment_ids_1 = segment_ids
 
   if getattr(grad_aux, "logits", None) is not None:
-    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_aux.logits, mesh=mesh)
+    logits_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*x_pspec[:-1], None))
+    grad_logits = grad_aux.logits
+    if jax.typeof(grad_logits).sharding != logits_sharding:
+      grad_logits = jax.reshard(grad_logits, logits_sharding)
+    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_logits, mesh=mesh)
     grad_aux_0 = dsv3_types.DSv3RouterAux[Any](
         group_sizes=getattr(grad_aux, "group_sizes", None),
         selected_experts=getattr(grad_aux, "selected_experts", None),
@@ -1819,7 +1838,9 @@ def dsv3_sparse_layer_epilogue_bwd(
     grad_aux_0 = grad_aux
     grad_aux_1 = grad_aux
 
-  mla_out_curr_0 = res.mb0.moe.out_proj_out + res.mb0.moe.orig_x
+  mla_out_curr_0 = (
+      res.mb0.moe.out_proj_out if res.mb0.moe.orig_x is None else res.mb0.moe.out_proj_out + res.mb0.moe.orig_x
+  )
   with jax.named_scope("post_attn_norm"):
     moe_in_curr_0 = norm_fn(mla_out_curr_0, w.post_attn_norm_scale)
 
@@ -2467,6 +2488,8 @@ def dsv3_sparse_layer_scan_body_fwd(
   """Forward pass for DSv3 sparse layer scan body."""
   quant_rule = quant.routed_experts if quant else None
   mla_rule = quant.mla if quant else None
+  combine_qtype = quant.combine_qtype if quant else None
+  combine_per_hop_scaling = quant.combine_per_hop_scaling if quant else False
   w_routed = w_curr.moe.routed if quant_rule is None else _quantize_routed_weights(w_curr.moe.routed, quant_rule)
   (
       (outputs_mla_curr_0, bank_0, bank_offset_0),
@@ -2480,8 +2503,8 @@ def dsv3_sparse_layer_scan_body_fwd(
 
   @jax.named_call
   @program_order(enforce=False)
-  def phase1(outputs_mla_curr_0, orig_x_curr_1):
-    """Phase 1: mb0 norm, metadata; mb1 wait."""
+  def phase1(outputs_mla_curr_0):
+    """Phase 1: mb0 norm, metadata."""
     out_proj_out_curr_0, orig_x_curr_0 = outputs_mla_curr_0
     (outputs_metadata_curr_0, aux_curr_0), res_metadata_curr_0 = ubatch_norm_and_metadata(
         out_proj_out_curr_0,
@@ -2502,8 +2525,7 @@ def dsv3_sparse_layer_scan_body_fwd(
         router_dtype=router_dtype,
         expert_permutations=expert_permutations,
     )
-    mb1_wait = ubatch_wait(orig_x_curr_1)
-    return (outputs_metadata_curr_0, mb1_wait, aux_curr_0), res_metadata_curr_0
+    return (outputs_metadata_curr_0, aux_curr_0), res_metadata_curr_0
 
   @jax.named_call
   @program_order(enforce=False)
@@ -2610,6 +2632,8 @@ def dsv3_sparse_layer_scan_body_fwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=x_pspec,
+        combine_qtype=combine_qtype,
+        combine_per_hop_scaling=combine_per_hop_scaling,
     )
     (outputs_expert_curr_1, (bank_1, bank_offset_1)), res_expert_curr_1 = ubatch_expert(
         *outputs_dispatch_curr_1,
@@ -2670,6 +2694,8 @@ def dsv3_sparse_layer_scan_body_fwd(
         axis_mapping=axis_mapping,
         mesh=mesh,
         out_specs=x_pspec,
+        combine_qtype=combine_qtype,
+        combine_per_hop_scaling=combine_per_hop_scaling,
     )
     return (outputs_mla_next_0, outputs_combine_curr_1), res_mla_next_0
 
@@ -2684,8 +2710,8 @@ def dsv3_sparse_layer_scan_body_fwd(
 
   @program_order(enforce=True)
   def _scan_body_fwd(outputs_mla_curr_0, mb1, bank_0, bank_offset_0, bank_1, bank_offset_1):
-    (outputs_metadata_curr_0, mb1_wait, aux_curr_0), res_phase1_curr_0 = phase1(outputs_mla_curr_0, mb1)
-    (outputs_dispatch_curr_0, outputs_mla_curr_1), res_mla_curr_1 = phase2(outputs_metadata_curr_0, mb1_wait)
+    (outputs_metadata_curr_0, aux_curr_0), res_phase1_curr_0 = phase1(outputs_mla_curr_0)
+    (outputs_dispatch_curr_0, outputs_mla_curr_1), res_mla_curr_1 = phase2(outputs_metadata_curr_0, mb1)
     (outputs_dispatch_wait_0, outputs_metadata_curr_1, aux_curr_1), (res_phase3_curr_1) = phase3(
         outputs_dispatch_curr_0, outputs_mla_curr_1
     )
@@ -2870,7 +2896,9 @@ def dsv3_sparse_layer_scan_body_bwd(
   assert res.mb1.mla is not None
   assert res.mb1.moe is not None
 
-  mla_out_curr_0 = res.mb0.moe.out_proj_out + res.mb0.moe.orig_x
+  mla_out_curr_0 = (
+      res.mb0.moe.out_proj_out if res.mb0.moe.orig_x is None else res.mb0.moe.out_proj_out + res.mb0.moe.orig_x
+  )
   with jax.named_scope("post_attn_norm"):
     moe_in_curr_0 = norm_fn(mla_out_curr_0, w_curr.post_attn_norm_scale)
 
@@ -2885,7 +2913,11 @@ def dsv3_sparse_layer_scan_body_bwd(
   segment_ids_0, segment_ids_1 = segment_ids
 
   if getattr(grad_aux_curr, "logits", None) is not None:
-    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_aux_curr.logits, mesh=mesh)
+    logits_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(*x_pspec[:-1], None))
+    grad_logits_curr = grad_aux_curr.logits
+    if jax.typeof(grad_logits_curr).sharding != logits_sharding:
+      grad_logits_curr = jax.reshard(grad_logits_curr, logits_sharding)
+    grad_logits_0, grad_logits_1 = ops.split_microbatches(grad_logits_curr, mesh=mesh)
     grad_aux_0 = dsv3_types.DSv3RouterAux[Any](
         group_sizes=grad_aux_curr.group_sizes,
         selected_experts=grad_aux_curr.selected_experts,

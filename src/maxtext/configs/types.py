@@ -1696,7 +1696,13 @@ class DeepSeekMoE(BaseModel):
       False,
       description="Whether to use Lineage DeepSeek-V3 execution.",
   )
-  lineage_quantization: Literal["none", "fp8_full", "fp8_full_splash_qk", "fp8_full_splash_qk_e3"] = Field(
+  lineage_quantization: Literal[
+      "none",
+      "fp8_full",
+      "fp8_full_splash_qk",
+      "fp8_full_splash_qk_e3",
+      "fp8_full_combine_per_hop",
+  ] = Field(
       "none",
       description=(
           "Quantization of the Lineage sparse-layer routed experts and MLA." " Only used if use_lineage is True."

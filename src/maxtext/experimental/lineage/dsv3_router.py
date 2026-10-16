@@ -170,6 +170,59 @@ def _psum_scatter_sc0(
   return _rs(*operands)
 
 
+def _quantized_reduce_scatter_sc0(
+    y_ag: jax.Array,
+    *,
+    axis_name: str | tuple[str, ...],
+    qtype: Any,
+    per_hop_scaling: bool = False,
+) -> jax.Array:
+  """Token reduce-scatter of `y_ag` with `qtype` ring sends on SparseCore 0.
+
+  `ops.reduce_scatter_sc0` keeps the local, D2D and output tokens in bf16 and
+  only quantizes the running sums it sends along the ICI ring to `qtype`. It
+  sums those raw `qtype` values, so every expert device must scale a token
+  identically and no partial sum may overflow. The kernel therefore scales each
+  token by (a power of two bounding) the sum over the expert devices of its
+  local absmax over the `qtype` max and rescales the reduced tokens; only the
+  local per-token absmax is computed here.
+
+  Args:
+    y_ag: Partial top-k reduced expert outputs of shape (NBT, D0, D1).
+    axis_name: Physical expert axes, `(ring_axis, core_axis)`.
+    qtype: Dtype of the ring sends; `jnp.float8_e4m3fn`.
+    per_hop_scaling: Scale every ring hop by its own per-token bound instead of
+      one all-device scale per token (see
+      `ops.reduce_scatter_sc0(per_hop_scaling=...)`).
+
+  Returns:
+    This device's reduced tokens, shape (NBT / num_expert_devices, D0, D1), in
+    `y_ag`'s dtype.
+
+  Raises:
+    ValueError: If `axis_name` is not a `(ring_axis, core_axis)` pair or `qtype`
+      is not `jnp.float8_e4m3fn`.
+  """
+  if not (isinstance(axis_name, (tuple, list)) and len(axis_name) == 2):
+    raise ValueError(
+        "The quantized combine reduce-scatter needs a (ring_axis, core_axis)" f" expert axis mapping, got {axis_name!r}."
+    )
+  if qtype != jnp.float8_e4m3fn:
+    raise ValueError(f"ops.reduce_scatter_sc0 only sends jnp.float8_e4m3fn, got {qtype!r}.")
+  ring_axis, core_axis = axis_name
+  # With `per_hop_scaling=True`, `ops.reduce_scatter_sc0` fuses the per-token
+  # absmax of `local + D2D` directly into the SparseCore 0 vector subcores,
+  # avoiding the standalone TensorCore `ops.token_absmax` pass.
+  token_amax = None if per_hop_scaling else ops.token_absmax(y_ag)
+  return ops.reduce_scatter_sc0(
+      y_ag,
+      token_amax=token_amax,
+      per_hop_scaling=per_hop_scaling,
+      ring_axis=ring_axis,
+      core_axis=core_axis,
+  )
+
+
 def _psum_scatter_and_reduce_sc0(
     *operands: jax.Array,
     axis_name: str | tuple[str, ...],
@@ -1299,6 +1352,8 @@ def dsv3_routing_bwd(
   (_, logits), vjp_fn = jax.vjp(_fwd, x, w)
   if grad_logits is None:
     grad_logits = jnp.zeros_like(logits)
+  elif jax.typeof(grad_logits).sharding != jax.typeof(logits).sharding:
+    grad_logits = jax.reshard(grad_logits, jax.typeof(logits).sharding)
   grad_x, grad_w = vjp_fn((grad_coeffs, grad_logits))
   return grad_x, grad_w
 
@@ -1538,15 +1593,25 @@ def dsv3_combine_impl(
     local_seq_length: int,
     expert_axis_name: str,
     axis_mapping: Mapping[str, str | tuple[str, ...]],
+    combine_qtype: Any | None = None,
+    combine_per_hop_scaling: bool = False,
 ) -> jt.Num[jax.Array, "B T D"]:
   """Combines reduced expert output tokens across devices via psum_scatter."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
-  num_tokens = y_ag.shape[0] // _get_axis_size(physical_expert_axis_name)
-  (y_local,) = _psum_scatter_sc0(
-      y_ag,
-      axis_name=physical_expert_axis_name,
-      num_tokens=num_tokens,
-  )
+  if combine_qtype is not None:
+    y_local = _quantized_reduce_scatter_sc0(
+        y_ag,
+        axis_name=physical_expert_axis_name,
+        qtype=combine_qtype,
+        per_hop_scaling=combine_per_hop_scaling,
+    )
+  else:
+    num_tokens = y_ag.shape[0] // _get_axis_size(physical_expert_axis_name)
+    (y_local,) = _psum_scatter_sc0(
+        y_ag,
+        axis_name=physical_expert_axis_name,
+        num_tokens=num_tokens,
+    )
   return jnp.reshape(
       y_local,
       (-1, local_seq_length, y_local.shape[-2] * y_local.shape[-1]),
@@ -1563,6 +1628,8 @@ def dsv3_combine(
     axis_mapping: Mapping[str, str | tuple[str, ...]],
     mesh: jax.sharding.Mesh,
     out_specs: jax.sharding.PartitionSpec,
+    combine_qtype: Any | None = None,
+    combine_per_hop_scaling: bool = False,
 ) -> jt.Num[jax.Array, "B T D"]:
   """Combines reduced expert output tokens across devices via psum_scatter.
 
@@ -1573,6 +1640,11 @@ def dsv3_combine(
     axis_mapping: Mapping from logical to physical mesh axes.
     mesh: JAX mesh over which the data and model are sharded.
     out_specs: Output PartitionSpec for (B, T, D).
+    combine_qtype: If set, reduce-scatters in this dtype with
+      `ops.reduce_scatter_sc0` (see `quantization.QuantConfig.combine_qtype`).
+    combine_per_hop_scaling: With `combine_qtype`, scale every ring hop by its
+      own per-token bound (see
+      `quantization.QuantConfig.combine_per_hop_scaling`).
 
   Returns:
     Combined output tokens of shape (B, T, D).
@@ -1584,9 +1656,14 @@ def dsv3_combine(
           local_seq_length=local_seq_length,
           expert_axis_name=expert_axis_name,
           axis_mapping=axis_mapping,
+          combine_qtype=combine_qtype,
+          combine_per_hop_scaling=combine_per_hop_scaling,
       ),
       mesh=mesh,
       out_specs=out_specs_phys,
+      # The SparseCore Pallas lowering has no `pvary` rule, which VMA checking
+      # inserts when resolving the kernel's remote DMA `device_id`s.
+      check_vma=combine_qtype is None,
   )(y_ag)
 
 
