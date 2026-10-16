@@ -64,6 +64,9 @@ READ_CHUNK_BYTES = safetensors_reader.READ_CHUNK_BYTES
 READ_THREADS = safetensors_reader.READ_THREADS
 MIN_PIECE_BYTES = safetensors_reader.MIN_PIECE_BYTES
 
+# Writes dispatched before waiting for them to finish (see `load_hf_params_streaming`).
+_MAX_WRITES_IN_FLIGHT = 256
+
 _LOAD_MESH_AXES = ("rows", "copies")
 # "model.layers.12.self_attn.q_proj.weight" -> ("model.", "12").
 _LAYER_KEY = re.compile(r"^(.*?\.)?layers\.(\d+)\.")
@@ -448,6 +451,14 @@ def _check_sources(plan: LoadPlan, hf_metadata: dict):
     )
 
 
+def _padded_rows(write: _Write, meta: Any) -> int:
+  """Dim 0 to read an HF tensor with: the target's, if the hooks only zero-pad its rows (else the file's)."""
+  hooks = write.target.hooks if isinstance(write.target.hooks, (list, tuple)) else [write.target.hooks]
+  if not any(getattr(h, "pads_rows_to_target", False) for h in hooks) or not meta.shape:
+    return meta.shape[0] if meta.shape else 0
+  return max(meta.shape[0], write.target.hook_shape[0])
+
+
 def _load_request(call: list[_Write], hf_metadata: dict, min_bytes_to_split: int) -> dict:
   """The request that makes the reader read this call's HF tensors, split by rows."""
   request = {}
@@ -460,9 +471,14 @@ def _load_request(call: list[_Write], hf_metadata: dict, min_bytes_to_split: int
     for key in write.hf_keys:
       if key not in request:
         meta = hf_metadata[key]
+        shape = tuple(meta.shape)
+        if shape:
+          # Reading the zero rows too lets a dim 0 that shares few factors with the chip count (the
+          # DeepSeek-V4.1 engram tables) be split over every chip instead of a few, each holding a big piece.
+          shape = (_padded_rows(write, meta),) + shape[1:]
         # Request the file's own dtype: the reader never casts.
-        sharding = choose_load_sharding(meta.shape, meta.dtype, devices, min_bytes_to_split, mesh_factor)
-        request[key] = jax.ShapeDtypeStruct(meta.shape, meta.dtype, sharding=sharding)
+        sharding = choose_load_sharding(shape, meta.dtype, devices, min_bytes_to_split, mesh_factor)
+        request[key] = jax.ShapeDtypeStruct(shape, meta.dtype, sharding=sharding)
   return request
 
 
@@ -631,8 +647,12 @@ def load_hf_params_streaming(
           future = prefetcher.submit(reader.fetch, requests[call_index + 1])
         hf_arrays = reader.unpack(fetched)
         del fetched
-        for write in call:
+        for i, write in enumerate(call):
           _apply_write(write, hf_arrays, results)
+          # Bound the asynchronously dispatched writes: each pending multi-host program holds host memory, and a
+          # read call can hold tens of thousands of HF tensors (e.g. DeepSeek-V4.1's 384 experts per layer).
+          if (i + 1) % _MAX_WRITES_IN_FLIGHT == 0:
+            jax.block_until_ready([results[t.name] for t in write.targets])
         # Finish this call's writes before dropping its HF tensors, so at most one
         # call (two with prefetch) of HF tensors is held in HBM.
         jax.block_until_ready([results[t.name] for write in call for t in write.targets])

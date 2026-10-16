@@ -45,7 +45,8 @@ def single_stack_axis(mt_key, config, target_shape) -> int:
   With `scan_layers`, layers are stacked along `param_scan_axis`, or along axis 0 if the weight has no such
   axis (e.g. the Llama 3.1 FP8 per-layer `kernel_scale`, shape `(num_layers,)`). Experts are stacked along
   axis 0: those of an unscanned MoE layer, including one outside the scanned stack (e.g. the DeepSeek-V4
-  prefix layers `layers_0`..), and those of `VARIABLE_COLLECTIONS`.
+  prefix layers `layers_0`..), and those of `VARIABLE_COLLECTIONS`. The layers of a scanned segment
+  (DeepSeek-V4.1's `segments_<k>-layers_<j>`) do have a layer axis.
 
   Args:
     mt_key: The MaxText key, or a tuple of keys for a composite key.
@@ -54,7 +55,7 @@ def single_stack_axis(mt_key, config, target_shape) -> int:
   """
   key_str = mt_key[0] if isinstance(mt_key, tuple) else mt_key
   is_unscanned_moe = "MoeBlock" in key_str and not any(
-      s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
+      s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-", "decoder-segments_")
   )
   if not config.scan_layers or is_unscanned_moe or is_variable_collection_key(mt_key):
     return 0
