@@ -478,6 +478,25 @@ class StreamingLoadTest(parameterized.TestCase):
         np.asarray(hf_tensors[collection_source], np.float32),
     )
 
+  def test_write_limit_waits_for_every_weight_written_since_the_last_wait(self):
+    """Every `_MAX_WRITES_IN_FLIGHT` writes, the loader waits on all weights those writes touched."""
+    waits = []
+    real_block = jax.block_until_ready
+
+    def spy(x):
+      if isinstance(x, list):
+        waits.append(len(x))
+      return real_block(x)
+
+    with (
+        mock.patch.object(hf_streaming_load, "_MAX_WRITES_IN_FLIGHT", 2),
+        mock.patch.object(jax, "block_until_ready", side_effect=spy),
+    ):
+      self._load("llama", scan_layers=False, read_bytes_per_host=0)
+    # Unscanned, each write goes to its own weight: each wait covers both writes; one per call covers the rest.
+    self.assertIn(2, waits)
+    self.assertNotIn(1, waits)
+
   def test_peak_hbm_is_none_where_not_reported(self):
     device = mock.Mock(memory_stats=mock.Mock(side_effect=NotImplementedError))
     with mock.patch.object(jax, "local_devices", return_value=[device]):
@@ -611,6 +630,15 @@ class Float8SourceTest(parameterized.TestCase):
     got = self._load(jnp.float8_e4m3fn, {"params-w": "w"})
     self.assertEqual(got["params"]["w"].dtype, jnp.float8_e4m3fn)
 
+  def test_e8m0_scales_cast_into_wider_weights(self):
+    """E8M0 holds power-of-two scales, which cast to a wider dtype exactly."""
+    ckpt_dir = self.create_tempdir().full_path
+    scales = jnp.asarray([[0.5, 1.0, 2.0, 4.0]], jnp.float32).astype(jnp.float8_e8m0fnu)
+    safetensors.flax.save_file({"s": scales}, os.path.join(ckpt_dir, "model.safetensors"))
+    target = {"s": jax.ShapeDtypeStruct((1, 4), jnp.float32, sharding=NamedSharding(_mesh(), PartitionSpec()))}
+    got = hf_streaming_load.load_hf_params_streaming(ckpt_dir, target, {"params-s": "s"}, {}, _config(True))
+    np.testing.assert_array_equal(np.asarray(got["params"]["s"]), [[0.5, 1.0, 2.0, 4.0]])
+
   def test_fp8_tensor_with_its_scale_loads(self):
     def dequantize(x, target_shape):
       del target_shape
@@ -637,6 +665,8 @@ class DeepSeekV4LayoutTest(parameterized.TestCase):
       ),
       ("scanned_moe_gate", "params-decoder-layers-MoeBlock_0-gate-kernel", (16, 3, 8), 1),  # Mixtral.
       ("scanned_block_weight", "params-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-gate-kernel", (16, 20, 8), 1),
+      # DeepSeek-V4.1 groups its scanned layers into `segments_<k>`, each a stack of `layers_<j>`.
+      ("scanned_segment_weight", "params-decoder-segments_2-layers_0-mlp-MoeBlock_0-gate-kernel", (16, 20, 8), 1),
       ("scanned_layer_weight", "params-decoder-layers-self_attention-query-kernel", (16, 3, 4, 8), 1),
       ("rank_1_weight", "params-decoder-layers-pre_self_attention_layer_norm-scale", (3,), 0),
   )
@@ -692,6 +722,115 @@ class DeepSeekV4LayoutTest(parameterized.TestCase):
         np.asarray(restored["params"]["decoder"]["layers_0"]["MoeBlock_0"]["wi_0"]),
         np.stack([hf[f"layers.0.ffn.experts.{e}.w1.weight"].T for e in range(_EXPERTS)]),
     )
+
+
+def _pad_rows(x, target_shape):
+  return jnp.pad(x, ((0, target_shape[0] - x.shape[0]),) + ((0, 0),) * (x.ndim - 1))
+
+
+class PaddedRowsTest(parameterized.TestCase):
+  """A hook marked `pads_rows_to_target` lets the loader read the HF tensor already zero-padded to the target's rows."""
+
+  def _load_pair(self, scale_rows):
+    """Loads a (weight, scale) pair whose hook dequantizes and zero-pads rows; returns (request, result, want)."""
+    ckpt_dir = self.create_tempdir().full_path
+    rows, padded_rows, cols = 6, 16, 4  # 6 rows split 2 ways on 4 chips; 16 split 4 ways.
+    rng = np.random.default_rng(0)
+    weight = rng.standard_normal((rows, cols), np.float32)
+    scale = rng.standard_normal((scale_rows, 1), np.float32)
+    safetensors.flax.save_file(
+        {"w": jnp.asarray(weight), "w_scale": jnp.asarray(scale)}, os.path.join(ckpt_dir, "model.safetensors")
+    )
+
+    def dequantize(x, target_shape):
+      w, s = x
+      w = w[: weight.shape[0]] * jnp.repeat(s[: scale.shape[0]], rows // scale_rows, axis=0)
+      return _pad_rows(w, target_shape)
+
+    dequantize.pads_rows_to_target = True
+    mesh = _mesh()
+    shape = (padded_rows, cols)
+    target = {"w": jax.ShapeDtypeStruct(shape, jnp.float32, sharding=NamedSharding(mesh, _spec(shape, mesh)))}
+    requests = []
+    real_fetch = safetensors_reader.SafetensorsReader.fetch
+
+    def spy(reader, request, *args, **kwargs):
+      requests.append(dict(request))
+      return real_fetch(reader, request, *args, **kwargs)
+
+    with mock.patch.object(safetensors_reader.SafetensorsReader, "fetch", autospec=True, side_effect=spy):
+      got = hf_streaming_load.load_hf_params_streaming(
+          ckpt_dir,
+          target,
+          {"params-w": ("w", "w_scale")},
+          {"params-w": dequantize},
+          _config(scan_layers=True),
+          min_bytes_to_split=0,
+      )
+    want = _pad_rows(weight * np.repeat(scale, rows // scale_rows, axis=0), shape)
+    return requests[0], np.asarray(got["params"]["w"]), np.asarray(want)
+
+  def test_weight_and_row_scales_split_by_their_padded_rows(self):
+    """A (weight, 1-row scales) pair is padded together, and the shared split factor follows the padded rows."""
+    request, got, want = self._load_pair(scale_rows=6)
+    np.testing.assert_allclose(got, want)
+    self.assertEqual(request["w"].shape, (16, 4))
+    self.assertEqual(request["w_scale"].shape, (16, 1))
+    num_devices = len(_mesh().devices.flat)
+    factor = hf_streaming_load.load_split_factor((16, 4), jnp.float32, num_devices, 0)
+    for sds in request.values():
+      pieces = {rows.start for rows, _ in sds.sharding.devices_indices_map(sds.shape).values()}
+      self.assertLen(pieces, factor)
+
+  def test_block_scales_are_read_as_stored(self):
+    """A block scale has fewer rows than its weight, so it isn't padded to the weight's target rows."""
+    request, got, want = self._load_pair(scale_rows=2)
+    np.testing.assert_allclose(got, want)
+    self.assertEqual(request["w"].shape, (16, 4))
+    self.assertEqual(request["w_scale"].shape, (2, 1))
+
+  @parameterized.parameters(True, False)
+  def test_padded_read(self, marked):
+    ckpt_dir = self.create_tempdir().full_path
+    rows, padded_rows, cols = 6, 16, 4  # 6 rows share only a factor of 2 with the chip count; 16 split evenly.
+    table = np.random.default_rng(0).standard_normal((rows, cols), np.float32)
+    safetensors.flax.save_file({"table.weight": jnp.asarray(table)}, os.path.join(ckpt_dir, "model.safetensors"))
+
+    def hook(x, target_shape):
+      return _pad_rows(x, target_shape)
+
+    if marked:
+      hook.pads_rows_to_target = True
+    mesh = _mesh()
+    shape = (padded_rows, cols)
+    target_tree = {
+        "params": {"table": jax.ShapeDtypeStruct(shape, jnp.float32, sharding=NamedSharding(mesh, _spec(shape, mesh)))}
+    }
+    requests = []
+    real_fetch = safetensors_reader.SafetensorsReader.fetch
+
+    def spy(reader, request, *args, **kwargs):
+      requests.append(dict(request))
+      return real_fetch(reader, request, *args, **kwargs)
+
+    with mock.patch.object(safetensors_reader.SafetensorsReader, "fetch", autospec=True, side_effect=spy):
+      restored = hf_streaming_load.load_hf_params_streaming(
+          ckpt_dir,
+          target_tree,
+          {"params-table": "table.weight"},
+          {"params-table": hook},
+          _config(scan_layers=True),
+          min_bytes_to_split=0,
+      )
+    self.assertLen(requests, 1)
+    request = requests[0]
+    self.assertEqual(request["table.weight"].shape, shape if marked else (rows, cols))
+    devices = tuple(mesh.devices.flat)
+    self.assertEqual(
+        request["table.weight"].sharding,
+        hf_streaming_load.choose_load_sharding(request["table.weight"].shape, np.float32, devices, 0),
+    )
+    np.testing.assert_array_equal(np.asarray(restored["params"]["table"]), _pad_rows(table, shape))
 
 
 if __name__ == "__main__":
