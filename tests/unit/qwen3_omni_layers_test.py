@@ -21,6 +21,7 @@ import hashlib
 import json
 import math
 import os
+import tempfile
 import unittest
 
 from flax import nnx
@@ -2013,6 +2014,105 @@ class TestTransformerSpeechStack(SpeechTestBase):
     text_model = nnx.eval_shape(lambda: build(make_speech_config(enable_audio_output=False, **tiny_thinker)))
     text_paths = {"/".join(str(p) for p in path) for path, _ in nnx.to_flat_state(nnx.state(text_model, nnx.Param))}
     self.assertFalse(any(p.startswith(("talker/", "code2wav/")) for p in text_paths))
+
+
+@pytest.mark.integration_test
+class TestAudioGenerationIntegration(SpeechTestBase):
+  """Runs one CPU generation case covering feature ownership and replay outputs."""
+
+  @classmethod
+  def setUpClass(cls):
+    from maxtext.models import models  # pylint: disable=import-outside-toplevel
+
+    cls.config = make_speech_config(
+        base_emb_dim=EMB,
+        base_num_query_heads=HEADS,
+        base_num_kv_heads=KV_HEADS,
+        head_dim=HEAD_DIM,
+        base_num_decoder_layers=1,
+        num_experts=N_EXPERTS,
+        num_experts_per_tok=TOP_K,
+        base_mlp_dim=MOE_DIM,
+        base_moe_mlp_dim=MOE_DIM,
+        vocab_size=256,
+        use_multimodal=False,
+        use_audio=False,
+        accept_hidden_layer=1,
+        thinker_hidden_size=EMB,
+        talker_vocab_size=1048,
+        code2wav_codebook_size=CP_VOCAB,
+        im_start_token_id=1,
+        user_token_id=2,
+        assistant_token_id=3,
+        tts_pad_token_id=4,
+        tts_bos_token_id=5,
+        tts_eos_token_id=6,
+        codec_pad_id=1024,
+        codec_bos_id=1025,
+        codec_eos_token_id=1026,
+        codec_nothink_id=1027,
+        codec_think_bos_id=1028,
+        codec_think_eos_id=1029,
+        speaker_id={"ethan": 1030},
+        talker_max_new_tokens=2,
+        max_prefill_predict_length=8,
+        max_target_length=10,
+    )
+    cls.engine = maxengine.MaxEngine(cls.config)
+    cls.mesh = cls.engine.mesh
+    with cls.mesh:
+      model = models.Transformer(cls.config, cls.mesh, None, model_mode=MODEL_MODE_PREFILL, rngs=nnx.Rngs(0))
+    cls.params = cls.engine.load_params(params=nnx.state(model, nnx.Param))
+    # Keep the integration fixture deterministic: generate codec 0 instead of random EOS.
+    codec_head = cls.params["talker"]["codec_head"]["kernel"]
+    codec_head.set_value(jnp.zeros_like(codec_head.get_value()))
+
+  def test_audio_generation_and_feature_lifetime(self):
+    """Captured features survive buffer donation and drive speech plus compatible replay artifacts."""
+    from maxtext.inference import audio_generation  # pylint: disable=import-outside-toplevel
+
+    tokens = jnp.array([1, 2, 7, 8, 9, 1, 3, 10], dtype=jnp.int32)
+    prefix, _, features = self.engine.prefill(
+        params=self.params,
+        padded_tokens=tokens,
+        true_length=8,
+        return_features=True,
+    )
+    self.assertNotIn("decoder_features", prefix)
+    self.assertEqual(set(features), {"input_embeddings", "hidden_states_1"})
+    expected = self.params["token_embedder"]["embedding"].get_value()[tokens][None]
+    np.testing.assert_allclose(features["input_embeddings"], expected)
+    before = np.asarray(features["hidden_states_1"]).copy()
+    state = self.engine.init_decode_state(jax.random.PRNGKey(1))
+    state = self.engine.insert(prefix, state, slot=0)
+    state, _ = self.engine.generate(self.params, state, rng=jax.random.PRNGKey(2))
+    np.testing.assert_array_equal(features["hidden_states_1"], before)
+    # Existing users still receive exactly two results.
+    self.assertEqual(len(self.engine.prefill(params=self.params, padded_tokens=tokens, true_length=8)), 2)
+    context = self.engine.get_generation_context(self.params)
+    generator = audio_generation.create_audio_generator(self.config, context)
+    with tempfile.TemporaryDirectory() as directory:
+      path = directory + "/answer.wav"
+      result = generator.generate(
+          audio_generation.AudioGenerationRequest(
+              prompt_ids=np.asarray(tokens),
+              generated_ids=[11, 12, 13],
+              features=features,
+              output_path=path,
+          )
+      )
+      self.assertEqual(result.sample_rate, 24000)
+      self.assertEqual(result.waveform.ndim, 1)
+      self.assertTrue(np.isfinite(result.waveform).all())
+      self.assertGreater(result.waveform.size, 0)
+      self.assertTrue(os.path.exists(path))
+      with np.load(path + ".thinker_outputs.npz") as dump:
+        np.testing.assert_array_equal(dump["accept_hidden_states"], features["hidden_states_1"])
+        np.testing.assert_array_equal(dump["generated_ids"], [11, 12, 13])
+      with np.load(path + ".talker_debug.npz") as dump:
+        np.testing.assert_array_equal(dump["codes"], result.diagnostics["codes"])
+        self.assertIn("inputs_embeds", dump)
+        self.assertIn("position_ids", dump)
 
 
 if __name__ == "__main__":
