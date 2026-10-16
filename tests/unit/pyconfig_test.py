@@ -171,6 +171,24 @@ class PyconfigTest(unittest.TestCase):
         "gs://custom_base/test_run_3/managed-mldiagnostics",
     )
 
+  def test_managed_mldiagnostics_metric_only_run(self):
+    config_omitted = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_1",
+        base_output_directory="gs://base_dir1",
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(config_omitted.managed_mldiagnostics_metric_only_run)
+
+    config_true = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_2",
+        base_output_directory="gs://base_dir2",
+        managed_mldiagnostics_metric_only_run=True,
+        skip_jax_distributed_system=True,
+    )
+    self.assertTrue(config_true.managed_mldiagnostics_metric_only_run)
+
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
