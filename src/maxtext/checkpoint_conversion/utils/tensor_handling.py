@@ -14,7 +14,9 @@
 
 """Tensor handling utility functions for checkpoint conversion."""
 
+import functools
 from functools import partial
+import math
 from typing import Any, Callable, List
 import jax
 from jax.experimental import multihost_utils
@@ -129,7 +131,7 @@ def _device_put(array, sharding):
   """
   if not isinstance(array, jax.Array) and not getattr(sharding, "is_fully_addressable", True):
     return jax.make_array_from_callback(array.shape, sharding, lambda index: array[index])
-  return jax.device_put(array, sharding)
+  return _reshard(array, sharding)
 
 
 def _get_hf_tensor(tensor_getter_fn: Callable[[str], np.ndarray], hf_key: Any):
@@ -143,6 +145,52 @@ def _get_hf_tensor(tensor_getter_fn: Callable[[str], np.ndarray], hf_key: Any):
   if isinstance(hf_key, tuple):
     return tuple(tensor_getter_fn(k) for k in hf_key)
   return tensor_getter_fn(hf_key)
+
+
+# A reshard from the leading-axis read layout to the model's sharding can copy the whole array to every device, so an
+# array larger than this is resharded in slices of at most this many bytes.
+_MAX_RESHARD_BYTES = 1 << 30
+
+
+@functools.lru_cache(maxsize=None)
+def _concatenate_fn(axis, sharding):
+  return jax.jit(lambda *pieces: np.concatenate(pieces, axis=axis), out_shardings=sharding)
+
+
+def _reshard(array, sharding):
+  """Places `array` with `sharding`; a large `jax.Array` is moved in slices along an axis `sharding` does not split.
+
+  The read layout orders the devices by process and the model's mesh by topology. Between two device orders, XLA can
+  reshard by gathering the whole array on every device: on two v5e-256 slices with data parallelism across them, the
+  80-layer llama3.1-70b `wi_0` (37.6 GB) needed 70 GB per device. Slices of at most `_MAX_RESHARD_BYTES` bound that copy.
+  """
+  if not isinstance(array, jax.Array) or array.nbytes <= _MAX_RESHARD_BYTES or not hasattr(sharding, "spec"):
+    return jax.device_put(array, sharding)
+  spec = list(sharding.spec) + [None] * (array.ndim - len(sharding.spec))
+  axis = next((i for i, axis_spec in enumerate(spec) if axis_spec is None and array.shape[i] > 1), None)
+  if axis is None:
+    return jax.device_put(array, sharding)
+  size = array.shape[axis]
+  step = max(1, size * _MAX_RESHARD_BYTES // array.nbytes)
+  pieces = [
+      jax.device_put(jax.lax.slice_in_dim(array, start, min(start + step, size), axis=axis), sharding)
+      for start in range(0, size, step)
+  ]
+  return _concatenate_fn(axis, sharding)(*pieces)
+
+
+def _split_over_all_devices(tensor) -> bool:
+  """Returns True if `tensor` is a `jax.Array` split over all devices, with no copies.
+
+  Such a tensor is stacked as read and resharded once with its whole stack. Resharding each tensor alone
+  costs one collective per tensor: an all-to-all if the hook transposes the split axis (e.g. MoE `wi_0`),
+  about 0.1 s each on two v5e-256 slices, or 25 min for the 15k `wi_0` tensors of DeepSeek-V3.
+  """
+  if not isinstance(tensor, jax.Array):
+    return False
+  num_devices = len(tensor.sharding.device_set)
+  shard_size = math.prod(tensor.sharding.shard_shape(tensor.shape))
+  return num_devices == jax.device_count() and shard_size * num_devices == tensor.size
 
 
 def nesting_depth(hf_source_keys: Any) -> int:
@@ -298,20 +346,30 @@ def _build_multi_axis_stacked_tensor(
     return jax.sharding.NamedSharding(target_sharding.mesh, jax.sharding.PartitionSpec(*stacked_spec, *slice_spec))
 
   def gather(keys, level):
+    """Returns the tensor for `keys`, and whether it is still in the read layout (split over all devices)."""
     if level == depth:
       # A tuple of keys is a composite HF source that the hook fuses into one leaf.
       tensor = _apply_hook_fns_any_host(_get_hf_tensor(tensor_getter_fn, keys), mt_slice_shape, hook_fns)
+      as_read = _split_over_all_devices(tensor)
     else:
-      tensor = _binary_chunked_stack([gather(sub, level + 1) for sub in keys], axis=0)
+      parts = [gather(sub, level + 1) for sub in keys]
+      tensor = _binary_chunked_stack([part for part, _ in parts], axis=0)
+      as_read = all(part_as_read for _, part_as_read in parts)
+    # A stack of tensors split over all devices stays as read until the final reshard. `sharding_at` leaves out
+    # the target's sharding of the axes not stacked yet, so placing an inner stack with it copies the stack across
+    # those mesh axes: with ici_expert_parallelism=16, the DeepSeek-V3 experts took 16 times their final size on
+    # each device.
+    if as_read:
+      return tensor, True
     if target_sharding is not None and level > 0:
       tensor = _device_put(tensor, sharding_at(level))
-    return tensor
+    return tensor, False
 
-  stacked_array = gather(hf_source_keys, 0).astype(target_dtype)
+  stacked_array = gather(hf_source_keys, 0)[0].astype(target_dtype)
   if axes != tuple(range(depth)):
     stacked_array = np.moveaxis(stacked_array, tuple(range(depth)), axes)
   if target_sharding is not None:
-    stacked_array = jax.device_put(stacked_array, target_sharding)
+    stacked_array = _reshard(stacked_array, target_sharding)
   return stacked_array
 
 
@@ -353,13 +411,13 @@ def _build_single_axis_stacked_tensor(
     hf_tensor = _get_hf_tensor(tensor_getter_fn, hf_key_single)
     processed_hf_tensor = _apply_hook_fns_any_host(hf_tensor, mt_slice_shape, hook_fns)
 
-    if target_sharding is not None:
+    if target_sharding is not None and not _split_over_all_devices(processed_hf_tensor):
       processed_hf_tensor = _device_put(processed_hf_tensor, slice_sharding)
     tensors_to_stack.append(processed_hf_tensor)
 
   stacked_array = _binary_chunked_stack(tensors_to_stack, axis=axis_to_stack).astype(target_dtype)
   if target_sharding is not None:
-    stacked_array = jax.device_put(stacked_array, target_sharding)
+    stacked_array = _reshard(stacked_array, target_sharding)
   return stacked_array
 
 
