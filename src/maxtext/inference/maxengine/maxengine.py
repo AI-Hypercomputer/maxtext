@@ -38,6 +38,8 @@ from flax.core.spmd import logical_axis_rules
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.layers import quantizations
+from maxtext.inference.component_runtime import ComponentRuntime, GenerationContext
+from maxtext.common.decoder_features import extract_decoder_features
 from maxtext.inference import inference_utils
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
@@ -221,8 +223,13 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       encoder_video_masks=None,
       encoder_video_grid_thw=None,
       encoder_audios=None,
+      return_intermediates=False,
   ):
-    """NNX equivalent of `model.apply(..., mutable=["cache"])`. Returns (logits, new_cache_dict)."""
+    """NNX equivalent of `model.apply(..., mutable=["cache"])`. Returns (logits, new_cache_dict).
+
+    With `return_intermediates=True` the sown `nnx.Intermediate` values (e.g. requested decoder features) are
+    returned as a third element (pure dict).
+    """
     cache_state = self._nnx_cache_state_template(mode=model_mode)
     nnx.replace_by_pure_dict(cache_state, cache_dict)
     # Merge with the graphdef built for this mode. Layers that captured their
@@ -251,6 +258,9 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         slot=slot,
     )
     new_cache = nnx.to_pure_dict(nnx.state(model, nnx.Cache))
+    if return_intermediates:
+      intermediates = nnx.to_pure_dict(nnx.state(model, nnx.Intermediate))
+      return logits, new_cache, intermediates
     return logits, new_cache
 
   def generate_aot(
@@ -689,8 +699,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     nnx_cache = (
         existing_prefix.cache if existing_prefix is not None else self._nnx_init_cache_dict(mode=MODEL_MODE_PREFILL)
     )
+    feature_spec = self.model.decoder.feature_spec
+    capture_features = feature_spec.enabled
     with self._mesh, logical_axis_rules(self.config.logical_axis_rules):
-      flat_logits, new_cache_dict = self._nnx_run_model(
+      run_outputs = self._nnx_run_model(
           params=input_params,
           cache_dict=nnx_cache,
           decoder_input_tokens=input_tokens,
@@ -707,7 +719,14 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           previous_chunk=previous_chunk,
           true_length=true_length,
           slot=slot,
+          return_intermediates=capture_features,
       )
+    features = None
+    if capture_features:
+      flat_logits, new_cache_dict, intermediates = run_outputs
+      features = extract_decoder_features(intermediates, feature_spec)
+    else:
+      flat_logits, new_cache_dict = run_outputs
     new_vars = {"cache": new_cache_dict}
     if return_prompt_logp:
       prompt_logp = inference_utils.prompt_logprobs_from_prefill(flat_logits, input_tokens, true_length)
@@ -760,7 +779,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
     else:
       next_pos = jnp.full((1, 1), full_true_length, dtype=jnp.int32)
 
-    return {
+    prefix = {
         "logits": selected_logits,
         "cache": cache,
         "next_pos": next_pos,
@@ -768,7 +787,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         "tokens": first_generated_token,
         "prompt_logp": prompt_logp,
         "token_logp": token_logp,
-    }, result
+    }
+    if features is not None:
+      prefix["decoder_features"] = features
+    return prefix, result
 
   # Public non-JIT prefill method that updates page state
   def prefill(
@@ -792,12 +814,17 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       request_id: uuid.UUID | None = None,  # pylint: disable=unused-argument
       slot: int | None = None,
       return_prompt_logp: bool = False,
+      return_features: bool = False,
       algorithm: str | None = None,
       topk: int | None = None,
       nucleus_topp: float | None = None,
       temperature: float | None = None,
   ):  # returns (new_prefix, result_tokens)
-    """Public API for prefill that updates page state outside JIT."""
+    """Prefills a prompt, optionally returning features as a third result.
+
+    Features are removed from the prefix before it can be donated to insert().
+    Existing callers retain the two-result (prefix, tokens) API.
+    """
     if video_grid_thw is not None:
       flat_video_grid = jax.device_get(video_grid_thw).reshape(-1)
       if flat_video_grid.size != 3:
@@ -813,7 +840,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       self.rng, rng = jax.random.split(self.rng)
 
     # Call JIT-compiled version with current state
-    return self._prefill_jit(
+    prefix, result = self._prefill_jit(
         params=params,
         existing_prefix=existing_prefix,
         padded_tokens=padded_tokens,
@@ -836,6 +863,10 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         nucleus_topp=nucleus_topp,
         temperature=temperature,
     )
+    features = prefix.pop("decoder_features", {})
+    if return_features:
+      return prefix, result, features
+    return prefix, result
 
   def prefill_multisampling_aot(  # pylint: disable=too-many-positional-arguments
       self,
@@ -1815,6 +1846,22 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
   def samples_per_slot(self) -> int:
     """Number of samples per slot."""
     return 1
+
+  def get_generation_context(self, params) -> GenerationContext:
+    """Exposes loaded output components without requiring generators to inspect engine internals."""
+    if self._nnx_rest_state is None:
+      raise ValueError("Load parameters before constructing a generation context.")
+    components = {}
+    for name in self.model_ar.audio_component_names:
+      components[name] = ComponentRuntime.from_model(
+          getattr(self.model_ar, name), params[name], self._nnx_rest_state.get(name, nnx.State({}))
+      )
+    return GenerationContext(self._mesh, self.config.logical_axis_rules, params, components)
+
+  @property
+  def nnx_rest_state(self):
+    """Non-Param/non-Cache NNX state (RNG, AQT vars) materialized by `load_params`."""
+    return self._nnx_rest_state
 
   @property
   def mesh(self) -> jax.sharding.Mesh:
