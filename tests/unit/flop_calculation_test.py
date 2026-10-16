@@ -15,14 +15,14 @@
 """Tests for verifying FLOPs calculation in maxtext_utils.py"""
 
 from typing import Any
-import unittest
 from unittest.mock import MagicMock
-from absl.testing import parameterized
-
+from absl.testing import absltest, parameterized
+from flax import nnx
 from maxtext.configs import pyconfig
 from maxtext.utils import maxtext_utils
 from maxtext.utils.maxtext_utils import calculate_tflops_training_per_device
 from tests.utils.test_helpers import get_test_config_path
+import numpy as np
 
 
 class FlopCalculation(parameterized.TestCase):
@@ -1098,12 +1098,75 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertFlopsAlmostEqual(calculated_tflops, golden_total_tflops)
 
+  def _count_qwen3_8_flash_next_active_params(self, cfg) -> int:
+    """Active (per-token) parameters from the instantiated NNX module tree, independent of maxtext_utils.
+
+    Counts every nnx.Param leaf of the abstract model except embedding-lookup tables (token_embedder,
+    PLE ngram_embedding -- gathers, 0 dense FLOPs), and counts routed-expert tensors at the activated
+    fraction num_experts_per_tok / num_experts. Norm scales, A_log, dt_bias are included (negligible).
+    """
+    from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next  # pylint: disable=import-outside-toplevel
+
+    model = nnx.eval_shape(
+        lambda: modeling_qwen3_8_flash_next.create_qwen3_8_flash_next_model(cfg, rngs=nnx.Rngs(params=0))
+    )
+    dense, routed = 0, 0
+    for path, leaf in nnx.state(model, nnx.Param).flat_state():
+      keys = tuple(str(getattr(k, "key", k)) for k in path)
+      shape = leaf.value.shape if hasattr(leaf, "value") else leaf.shape
+      n = int(np.prod(shape))
+      if "token_embedder" in keys or "ngram_embedding" in keys:
+        continue
+      if "experts" in keys:
+        routed += n
+      else:
+        dense += n
+    return dense + routed * cfg.num_experts_per_tok // cfg.num_experts
+
+  def test_qwen3_8_flash_next_flops(self):
+    """6*B*S*P check on the full config, with P from the module tree (not from maxtext_utils)."""
+    for mtp_num_layers in (0, 1):
+      with self.subTest(mtp_num_layers=mtp_num_layers):
+        cfg = self._initialize_model_config(
+            "qwen3.8-flash-next",
+            max_target_length=4096,
+            per_device_batch_size=1,
+            mtp_num_layers=mtp_num_layers,
+        )
+        B, S = cfg.per_device_batch_size, cfg.max_target_length
+        active_params = self._count_qwen3_8_flash_next_active_params(cfg)
+        # The MTP draft block re-runs the shared lm_head on its own hidden states; the weights are counted once in P
+        # but the [B*S, E] x [E, V] matmul executes once per MTP layer in addition to the main head.
+        extra_unembed_params = mtp_num_layers * cfg.vocab_size * cfg.emb_dim
+        golden_weight_tflops = 6 * B * S * (active_params + extra_unembed_params) / 1e12
+        total, weight, attn = calculate_tflops_training_per_device(cfg, log=False)
+        self.assertFlopsAlmostEqual(weight, golden_weight_tflops)
+        self.assertFlopsAlmostEqual(total, golden_weight_tflops + attn)
+
+  def test_qwen3_8_flash_next_published_active_params(self):
+    """Anchor Qwen3.8-Flash-Next non-embedding active params against the published 6.0B model card."""
+    cfg = self._initialize_model_config(
+        "qwen3.8-flash-next",
+        max_target_length=1,
+        per_device_batch_size=1,
+        mtp_num_layers=0,
+    )
+    _, weight_tflops, _ = calculate_tflops_training_per_device(cfg, log=False)
+    non_lookup_params = weight_tflops * 1e12 / 6  # B=S=1 -> 6 * params
+    # Drop lm_head (token-embedding lookup is already 0 FLOPs).
+    non_embedding_params = non_lookup_params - cfg.vocab_size * cfg.emb_dim
+    expected = self.PUBLISHED_ACTIVE_PARAMS_B["qwen3.8-flash-next"] * 1e9
+    self.assertAlmostEqual(non_embedding_params, expected, delta=0.02 * expected)
+
   # ========== Parameterized Tests for Multiple Standard Models ==========
 
   # Published active-param counts (billions). Anchors the reference against
   # external ground truth so symmetric ref/code bugs don't cancel out silently.
   PUBLISHED_ACTIVE_PARAMS_B = {
       "gemma4-26b": 3.82,
+      # Non-embedding activated params from the model card ("180B total / 6B activated");
+      # excludes token embedding, lm_head, and the MTP draft block.
+      "qwen3.8-flash-next": 6.0,
   }
 
   def _verify_flops(self, model_name, max_target_length=1):
@@ -1316,4 +1379,4 @@ class FlopCalculation(parameterized.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
