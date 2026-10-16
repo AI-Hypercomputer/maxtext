@@ -31,6 +31,13 @@ import numpy as np
 
 import pathwaysutils  # pylint: disable=unused-import
 
+# Triton (used by te_mhc) segfaults when its native library is loaded after TensorFlow's, so load
+# it first when it is installed.
+try:
+  import triton  # pylint: disable=unused-import
+except ImportError:
+  pass
+
 try:
   import tensorflow as tf
 
