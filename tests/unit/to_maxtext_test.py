@@ -29,6 +29,7 @@ pytestmark = [pytest.mark.decoupled_target]
 from maxtext.checkpoint_conversion.to_maxtext import (
     _convert_tensor_to_numpy,
     _extract_conversion_args,
+    _param_save_dtype,
     resolve_scale_key,
 )
 
@@ -80,6 +81,68 @@ class ConvertTensorToNumpyTest(unittest.TestCase):
     arr_in = np.array([1.0, 2.0], dtype=np.float32)
     arr_out = _convert_tensor_to_numpy(arr_in, save_dtype="float8_e4m3fn")
     self.assertTrue(np.array_equal(arr_in, arr_out))
+
+
+class ParamSaveDtypeTest(unittest.TestCase):
+  """DeepSeek-V4 router bias and tid2eid must not be rounded to bf16."""
+
+  def test_router_state_saved_as_float32(self):
+    self.assertEqual(_param_save_dtype("MoEBiasVar-decoder-layers_3-mlp-MoeBlock_0-gate-bias", "bfloat16"), "float32")
+    self.assertEqual(_param_save_dtype("Tid2EidVar-decoder-layers_0-mlp-MoeBlock_0-tid2eid", "bfloat16"), "float32")
+
+  def test_other_params_keep_save_dtype(self):
+    self.assertEqual(_param_save_dtype("params-decoder-layers_3-mlp-MoeBlock_0-gate-kernel", "bfloat16"), "bfloat16")
+    self.assertEqual(_param_save_dtype(("params-a", "params-b"), "bfloat16"), "bfloat16")
+
+  def test_non_bf16_save_dtype_unchanged(self):
+    self.assertEqual(_param_save_dtype("MoEBiasVar-x", "float8_e4m3fn"), "float8_e4m3fn")
+    self.assertEqual(_param_save_dtype("Tid2EidVar-x", "float32"), "float32")
+
+  def test_float32_path_is_exact(self):
+    if torch is None:
+      self.skipTest("torch not available")
+    ids = torch.tensor([255, 257, 259, 383], dtype=torch.int64)
+    bias = torch.tensor([47.3456789, 16.06], dtype=torch.float32)
+    np.testing.assert_array_equal(_convert_tensor_to_numpy(ids, "float32"), [255.0, 257.0, 259.0, 383.0])
+    np.testing.assert_array_equal(_convert_tensor_to_numpy(bias, "float32"), bias.numpy())
+    # bf16 rounds both, which is the defect the float32 override avoids.
+    self.assertFalse(np.array_equal(_convert_tensor_to_numpy(ids, "bfloat16").astype(np.float32), ids.numpy()))
+    self.assertFalse(np.array_equal(_convert_tensor_to_numpy(bias, "bfloat16").astype(np.float32), bias.numpy()))
+
+
+class DeepSeekDequantizeTest(unittest.TestCase):
+  """Dequantization keeps non-quantized tensors in their source dtype."""
+
+  def test_non_quantized_tensors_keep_dtype(self):
+    if torch is None:
+      self.skipTest("torch not available")
+    import json  # pylint: disable=import-outside-toplevel
+    import os  # pylint: disable=import-outside-toplevel
+    import tempfile  # pylint: disable=import-outside-toplevel
+    from safetensors.torch import load_file, save_file  # pylint: disable=import-outside-toplevel
+    from maxtext.checkpoint_conversion.standalone_scripts import deepseek_dequantize  # pylint: disable=import-outside-toplevel
+
+    tensors = {
+        "layers.0.ffn.w1.weight": torch.ones(128, 128).to(torch.float8_e4m3fn),
+        "layers.0.ffn.w1.scale": torch.full((1, 1), 2.0, dtype=torch.float32),
+        "layers.0.attention_norm.weight": torch.ones(128, dtype=torch.float32),
+        "layers.3.ffn.gate.bias": torch.tensor([47.3456789, 16.06], dtype=torch.float32),
+        "layers.0.ffn.gate.tid2eid": torch.tensor([[255, 257], [259, 383]], dtype=torch.int64),
+    }
+    with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
+      save_file(tensors, os.path.join(src, "model-00001.safetensors"))
+      with open(os.path.join(src, "model.safetensors.index.json"), "w", encoding="utf8") as f:
+        json.dump({"weight_map": {k: "model-00001.safetensors" for k in tensors}}, f)
+      # convert_model sets the global torch default dtype.
+      self.addCleanup(torch.set_default_dtype, torch.get_default_dtype())
+      deepseek_dequantize.convert_model(src, dst)
+      out = load_file(os.path.join(dst, "model-00001.safetensors"))
+    self.assertEqual(out["layers.0.ffn.w1.weight"].dtype, torch.bfloat16)
+    self.assertTrue(torch.all(out["layers.0.ffn.w1.weight"] == 2.0))
+    self.assertNotIn("layers.0.ffn.w1.scale", out)
+    self.assertEqual(out["layers.0.attention_norm.weight"].dtype, torch.bfloat16)
+    self.assertTrue(torch.equal(out["layers.3.ffn.gate.bias"], tensors["layers.3.ffn.gate.bias"]))
+    self.assertTrue(torch.equal(out["layers.0.ffn.gate.tid2eid"], tensors["layers.0.ffn.gate.tid2eid"]))
 
 
 class ExtractConversionArgsTest(unittest.TestCase):

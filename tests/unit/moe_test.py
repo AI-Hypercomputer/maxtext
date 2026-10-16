@@ -275,6 +275,89 @@ class MlpBlockTest(unittest.TestCase):
     self.model.init({"params": self.rng, "dropout": self.rng}, x)
 
 
+class SharedExpertSwiGLUClampTest(parameterized.TestCase):
+  """DeepSeek-V4 clamps the shared expert's SwiGLU (reference inference/model.py Expert, swiglu_limit)."""
+
+  def _config(self, **overrides):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="shared_expert_clamp_test",
+        enable_checkpointing=False,
+        dtype="float32",
+        weight_dtype="float32",
+        matmul_precision="highest",
+        per_device_batch_size=1,
+        max_target_length=8,
+        **overrides,
+    )
+
+  def _mlp(self, cfg, limit, activations=("silu", "linear"), mesh=None):
+    mesh = mesh or Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      return linears.MlpBlock(
+          config=cfg,
+          mesh=mesh,
+          in_features=4,
+          intermediate_dim=8,
+          activations=activations,
+          intermediate_dropout_rate=0.0,
+          dtype=jnp.float32,
+          weight_dtype=jnp.float32,
+          rngs=nnx.Rngs(0),
+          activations_limit=limit,
+      )
+
+  @parameterized.named_parameters(("unfused", False), ("fused", True))
+  def test_clamp_matches_reference_swiglu(self, fused_mlp):
+    cfg = self._config(fused_mlp=fused_mlp)
+    rng = np.random.default_rng(0)
+    w_gate, w_up = rng.normal(0, 8, (4, 8)), rng.normal(0, 8, (4, 8))
+    w_out = rng.normal(0, 1, (8, 4))
+    x = rng.normal(0, 1, (jax.device_count(), 8, 4))
+    gate, up = x @ w_gate, x @ w_up
+    self.assertTrue((gate > 10).any() and (np.abs(up) > 10).any(), "weights must drive the clamp active")
+    gate_c, up_c = np.minimum(gate, 10), np.clip(up, -10, 10)
+    expected = (gate_c / (1 + np.exp(-gate_c)) * up_c) @ w_out
+
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    outs = {}
+    for limit in (10.0, None):
+      mlp = self._mlp(cfg, limit, mesh=mesh)
+      if fused_mlp:
+        mlp.wi.kernel.set_value(jnp.asarray(np.stack([w_gate, w_up], axis=1), jnp.float32))
+      else:
+        mlp.wi_0.kernel.set_value(jnp.asarray(w_gate, jnp.float32))
+        mlp.wi_1.kernel.set_value(jnp.asarray(w_up, jnp.float32))
+      mlp.wo.kernel.set_value(jnp.asarray(w_out, jnp.float32))
+      with mesh, nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        outs[limit] = np.asarray(nnx.jit(lambda m, v: m(v, deterministic=True))(mlp, jnp.asarray(x, jnp.float32)))
+    np.testing.assert_allclose(outs[10.0], expected, rtol=1e-5, atol=1e-4)
+    self.assertFalse(np.allclose(outs[None], expected, rtol=1e-3, atol=1e-2))
+
+  def test_limit_requires_two_activation_glu(self):
+    with self.assertRaisesRegex(ValueError, "2-activation GLU"):
+      self._mlp(self._config(), 10.0, activations=("relu",))
+
+  @parameterized.named_parameters(("deepseek4_limit", 10.0, 10.0), ("no_limit", -1.0, None))
+  def test_routed_and_shared_moe_wires_limit(self, config_limit, expected):
+    cfg = self._config(
+        model_name="deepseek4-tiny",
+        override_model_config=True,
+        attention="dot_product",
+        mlp_activations_limit=config_limit,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      block = moe.RoutedAndSharedMoE(
+          config=cfg,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          rngs=nnx.Rngs(0),
+      )
+    self.assertEqual(block.shared_experts.activations_limit, expected)
+
+
 class DeepSeekRoutingTest(unittest.TestCase):
 
   def setUp(self):
@@ -4576,6 +4659,62 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
     # The required factor is the smallest that keeps get_ragged_buffer_size >= the shard's token count.
     self.assertEqual(moe.RoutedMoE.get_ragged_buffer_size(8, 2, 4, 2, 1.5), 12)
     self.assertLess(moe.RoutedMoE.get_ragged_buffer_size(8, 2, 4, 2, 1.49), 12)
+
+  def test_return_ra2a_zeros_dropped_token_rows(self):
+    # With a capped ragged_buffer_factor > 0, tokens exceeding a shard's buffer are dropped, leaving
+    # unwritten gap rows between output_offsets[i] + recv_sizes[i] and output_offsets[i + 1] in the
+    # combine ragged_all_to_all output buffer. Zero-initializing that buffer prevents uninitialized
+    # HBM garbage (simulated here by NaN-filled jax.lax.empty) from propagating into unpermute.
+    cfg = _tiny_deepseek_config(
+        "rbf_drop_zero_fill",
+        use_ring_of_experts=False,
+        per_device_batch_size=2,
+        max_target_length=4,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      block = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.moe_mlp_dim,
+          dtype=cfg.dtype,
+          rngs=nnx.Rngs(0),
+      )
+    bsz = jax.device_count() * cfg.per_device_batch_size
+    untruncated_rows = cfg.per_device_batch_size * cfg.max_target_length * cfg.num_experts_per_tok
+    real_empty = jax.lax.empty
+
+    def nan_on_return_buffer(shape, dtype):
+      if shape[0] == untruncated_rows:
+        return jnp.full(shape, jnp.nan, dtype=dtype)
+      return real_empty(shape, dtype)
+
+    def fake_ra2a(operand, output, input_offsets, send_sizes, output_offsets, recv_sizes, **_):
+      del recv_sizes
+      rows = jnp.arange(output.shape[0])[:, None]
+      for i in range(input_offsets.shape[0]):
+        in_idx = jnp.clip(rows[:, 0] - output_offsets[i] + input_offsets[i], 0, operand.shape[0] - 1)
+        mask = (rows >= output_offsets[i]) & (rows < output_offsets[i] + send_sizes[i])
+        output = jnp.where(mask, operand[in_idx], output)
+      return output
+
+    x = jax.random.normal(jax.random.PRNGKey(0), (bsz, cfg.max_target_length, cfg.base_emb_dim), dtype=jnp.float32)
+    with (
+        jax.set_mesh(mesh),
+        nn_partitioning.axis_rules(cfg.logical_axis_rules),
+        mock.patch.object(moe.RoutedMoE, "get_expert_parallelism_size", return_value=2),
+        mock.patch.object(moe.RoutedMoE, "get_ragged_buffer_factor", return_value=0.25),
+        mock.patch.object(jax.lax, "axis_index", return_value=jnp.int32(0)),
+        mock.patch.object(jax.lax, "all_gather", side_effect=lambda a, **_: jnp.stack([a, a], axis=0)),
+        mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=fake_ra2a),
+        mock.patch.object(jax.lax, "empty", side_effect=nan_on_return_buffer),
+    ):
+      out, _, _ = block(x)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out))))
 
 
 def _flat_fsdp_config(**overrides):

@@ -584,6 +584,7 @@ class GateLogit(nnx.Module):
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       kernel_axes: Tuple[Optional[str], ...] = (),
       use_bias: bool = False,
+      bias_dtype: Optional[ctypes.DType] = None,
       score_func: str = "",
       quant: Optional[quantizations.AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
@@ -604,6 +605,7 @@ class GateLogit(nnx.Module):
       use_bias: Whether to add learnable bias in gate logit scores. When enabled,
         this bias aids expert load balancing (like in DeepSeek V3), and is not
         part of the loss calculation.
+      bias_dtype: Data type of the learnable routing bias; defaults to weight_dtype.
       score_func: Scoring function for output normalization before applying bias.
       quant: The quantization configuration. If None, no quantization is applied.
       matmul_precision: The precision level for the matrix multiplication.
@@ -620,6 +622,7 @@ class GateLogit(nnx.Module):
     self.kernel_init = kernel_init
     self.kernel_axes = kernel_axes
     self.use_bias = use_bias
+    self.bias_dtype = bias_dtype or self.weight_dtype
     self.score_func = score_func
     self.quant = quant
     self.shard_mode = shard_mode
@@ -646,9 +649,9 @@ class GateLogit(nnx.Module):
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates.
         self.bias = MoEBiasVar(
-            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
             out_sharding=bias_axes,
         )
       else:
@@ -999,17 +1002,19 @@ class RoutedMoE(nnx.Module):
     else:
       self.quant_einsums = None
 
+    gate_weight_dtype = ctypes.get_weight_dtype(self.config, "gate")
     self.gate = GateLogit(
         in_features_shape=self.moe_expert_input_dim,
         out_features_shape=self.num_experts,
         mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
-        weight_dtype=ctypes.get_weight_dtype(self.config, "gate"),
+        weight_dtype=gate_weight_dtype,
         quant=ctypes.get_quant(self.config, "gate", self.quant),
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
         use_bias=self.config.routed_bias and not self.is_hash_routing,
+        bias_dtype=jnp.float32 if self.config.float32_gate_logits else gate_weight_dtype,
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
@@ -3632,7 +3637,10 @@ class RoutedMoE(nnx.Module):
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if routing.sorted_selected_experts.shape[0] != original_inputs_first_dim:
           raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
-        output_shape = jax.lax.empty(
+        # Rows of tokens dropped by a capped ragged buffer are never written by the
+        # return ragged_all_to_all; zero them so dropped tokens contribute nothing.
+        buffer_init = jnp.zeros if self.get_ragged_buffer_factor() > 0.0 else jax.lax.empty
+        output_shape = buffer_init(
             (
                 original_inputs_first_dim,
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
@@ -5174,6 +5182,10 @@ class RoutedAndSharedMoE(nnx.Module):
     )
 
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
+    # DeepSeek-V4 clamps the shared expert's SwiGLU like the routed experts (apply_ffn_activation).
+    clamp_shared = (
+        self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK4 and self.config.mlp_activations_limit > 0.0
+    )
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,
         in_features=self.moe_expert_input_dim,
@@ -5186,6 +5198,7 @@ class RoutedAndSharedMoE(nnx.Module):
         config=self.config,
         quant=self.quant,
         rngs=self.rngs,
+        activations_limit=self.config.mlp_activations_limit if clamp_shared else None,
     )
 
   @property
