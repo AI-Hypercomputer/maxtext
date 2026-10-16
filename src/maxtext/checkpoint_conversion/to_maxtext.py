@@ -53,6 +53,7 @@ import argparse
 from functools import partial
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -70,7 +71,7 @@ from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MA
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
-from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
+from maxtext.utils import index_share_utils, max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
@@ -144,6 +145,43 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
       return tensor.astype(np.float32)
     return tensor
   return np.asarray(tensor)
+
+
+def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any], config: Any = None) -> Any:
+  """Resolves missing indexer parameters for GLM-5.2 Shared (S) layers from preceding Full (F) donor layers.
+
+  Use-Case:
+    In GLM-5.2 IndexShare models, HuggingFace/Safetensors checkpoints prune indexer weights
+    on Shared (S) layers (e.g., layers 1, 2, 3) because they share weights with the preceding
+    Full (F) donor layer (e.g., layer 0). When constructing the MaxText model state (or when
+    prune_shared_indexers=False), any missing indexer weight on a shared layer is resolved
+    by determining the donor layer via `get_donor_layer_idx`.
+  """
+  str_key = str(key)
+  if "indexer" in str_key and str_key.startswith("model.layers."):
+    m = re.match(r"model\.layers\.(\d+)\.(.+)", str_key)
+    if m:
+      layer_idx = int(m.group(1))
+      rest = m.group(2)
+      pattern = getattr(config, "index_share_pattern", None) if config else None
+      if pattern:
+        num_layers = getattr(config, "base_num_decoder_layers", layer_idx + 1)
+        pattern_tuple = index_share_utils.parse_index_share_pattern(pattern, num_layers)
+        donor_idx = index_share_utils.get_donor_layer_idx(layer_idx, pattern_tuple)
+        donor_key = f"model.layers.{donor_idx}.{rest}"
+        try:
+          return getter_fn(donor_key)
+        except (KeyError, ValueError, FileNotFoundError):
+          pass
+
+      # Fallback: search backwards for closest preceding donor layer containing the key
+      for candidate_idx in range(layer_idx - 1, -1, -1):
+        donor_key = f"model.layers.{candidate_idx}.{rest}"
+        try:
+          return getter_fn(donor_key)
+        except (KeyError, ValueError, FileNotFoundError):
+          continue
+  return None
 
 
 class LazyHFLoader:
@@ -270,7 +308,17 @@ class LazyHFLoader:
       framework = "pt" if torch is not None else "np"
       with safe_open(local_path, framework=framework, device="cpu") as f:
         t = f.get_tensor(resolved_key)
-        return _convert_tensor_to_numpy(t, self.save_dtype)
+        tensor = _convert_tensor_to_numpy(t, self.save_dtype)
+      # Prune older downloaded shards if downloading remotely to prevent disk/RAM exhaustion
+      if not self.is_local and len(self._local_shard_paths) > 3:
+        oldest_shard = next(iter(self._local_shard_paths))
+        oldest_path = self._local_shard_paths.pop(oldest_shard)
+        if os.path.exists(oldest_path):
+          try:
+            os.remove(oldest_path)
+          except OSError:
+            pass
+      return tensor
 
 
 class LazyTensor:
@@ -524,7 +572,13 @@ def _build_single_axis_stacked_tensor(
     if isinstance(hf_key_single, (list, tuple)):
       hf_tensor_numpy = tuple(tensor_getter_fn(k) for k in hf_key_single)
     else:
-      hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      try:
+        hf_tensor_numpy = tensor_getter_fn(hf_key_single)
+      except (ValueError, KeyError) as e:
+        if "indexer" in str(hf_key_single) and str(hf_key_single).startswith("model.layers."):
+          hf_tensor_numpy = np.zeros(mt_slice_shape, dtype=np.float32)
+        else:
+          raise e
     processed_hf_tensor = apply_hook_fns(hf_tensor_numpy, mt_slice_shape, hook_fns)
     tensors_to_stack.append(processed_hf_tensor)
 
@@ -1112,6 +1166,20 @@ def main(
         return _convert_tensor_to_numpy(v, save_dtype)
 
       tensor_getter = _eager_getter
+
+    if getattr(config, "use_index_share", False):
+      orig_tensor_getter = tensor_getter
+
+      def _index_share_tensor_getter(key):
+        try:
+          return orig_tensor_getter(key)
+        except (ValueError, KeyError) as e:
+          donor_tensor = _resolve_shared_indexer_tensor(key, orig_tensor_getter, config=config)
+          if donor_tensor is not None:
+            return donor_tensor
+          raise e
+
+      tensor_getter = _index_share_tensor_getter
 
     if is_merge_mode:
       tensor_getter = _setup_merge_mode_getter(tensor_getter, config, hf_lora_adapter_path, revision)
