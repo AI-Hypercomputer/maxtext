@@ -756,12 +756,7 @@ def make_c4_mlperf_eval_iterator(
   # sequences), several hosts must share a file and read disjoint sequences of it instead
   # of each taking the first `local_num_examples` sequences of file `host_index`.
   skip_examples = 0
-  if (
-      eval_shard_in_read
-      and effective_stream_chunking
-      and num_examples > 0
-      and num_examples % len(process_indices) == 0
-  ):
+  if eval_shard_in_read and effective_stream_chunking and num_examples > 0 and num_examples % len(process_indices) == 0:
     sequences_per_file = _sequences_per_eval_file(
         config.eval_dataset_name, eval_split, eval_data_dir, eval_col, config.max_target_length
     )
