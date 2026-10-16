@@ -66,6 +66,7 @@ Note:
 """
 
 import concurrent.futures
+import contextlib
 import multiprocessing
 import os
 import random
@@ -75,6 +76,7 @@ from flax import nnx
 import flax.traverse_util
 import huggingface_hub
 import jax
+from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from maxtext.checkpoint_conversion.utils import hf_model_configs
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import tensor_handling
@@ -82,6 +84,7 @@ from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.utils import gcs_utils
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_logging
+import numpy as np
 from orbax.checkpoint import v1 as ocp_v1
 from orbax.checkpoint._src.arrays import sharding as sharding_utils
 
@@ -157,8 +160,75 @@ def get_hf_config_and_mappings(maxtext_config):
   return param_map_mt_to_hf, hook_fn_map_mt
 
 
-def load_sharded_hf_state(path):
-  """Loads HF state with maximal sharding across TPU mesh to avoid host OOM.
+def _leading_axis_shardings(abstract_state, devices, num_groups=None):
+  """Shards each tensor along its leading axis only, so each process reads one contiguous byte range.
+
+  A safetensors tensor is stored row-major, so a shard is contiguous in the file only if it splits the
+  leading axis alone. A sharding that splits an inner axis makes every process read many small strided
+  ranges, and Orbax then reads whole file spans instead: each host reads almost the whole checkpoint.
+
+  Each leading axis is split across all devices if it divides evenly, else across processes (copies on a
+  process's local devices), else not at all (only small tensors such as norms and routers in practice).
+
+  Args:
+    abstract_state: Tree of `jax.ShapeDtypeStruct` from the checkpoint metadata.
+    devices: All devices.
+    num_groups: If set, splits the devices into this many groups by id instead of one per process. For
+      tests on one process.
+
+  Returns:
+    A tree of `NamedSharding` matching `abstract_state`.
+  """
+  if num_groups is None:
+    by_process = {}
+    for device in devices:
+      by_process.setdefault(device.process_index, []).append(device)
+    groups = [sorted(group, key=lambda d: d.id) for _, group in sorted(by_process.items())]
+  else:
+    ordered = sorted(devices, key=lambda d: d.id)
+    size = len(ordered) // num_groups
+    groups = [ordered[i * size : (i + 1) * size] for i in range(num_groups)]
+  mesh = Mesh(np.array(groups), ("process", "local"))
+  num_processes, num_local = mesh.devices.shape
+
+  def leading_axis_sharding(sds):
+    rows = sds.shape[0] if sds.shape else 1
+    if rows % (num_processes * num_local) == 0:
+      return NamedSharding(mesh, PartitionSpec(("process", "local")))
+    if rows % num_processes == 0:
+      return NamedSharding(mesh, PartitionSpec("process"))
+    return NamedSharding(mesh, PartitionSpec())
+
+  return jax.tree.map(leading_axis_sharding, abstract_state)
+
+
+@contextlib.contextmanager
+def _no_gcs_read_ahead():
+  """Makes gcsfs read only the requested bytes of a `gs://` file within this context.
+
+  Orbax reads each byte range through `epath`, whose `gs://` backend (gcsfs) also reads `default_block_size`
+  (5 MiB) ahead. Each host reads one range per tensor, so a host of DeepSeek-V3 on 128 hosts needed about
+  230 KB per tensor but downloaded 5.3 MB. The class attribute is set because gcsfs instances are cached per
+  thread and Orbax opens files from worker threads. Writes still use blocks of at least 256 KiB.
+  """
+  try:
+    import gcsfs  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    yield
+    return
+  block_size = gcsfs.GCSFileSystem.default_block_size
+  gcsfs.GCSFileSystem.default_block_size = 0
+  try:
+    yield
+  finally:
+    gcsfs.GCSFileSystem.default_block_size = block_size
+
+
+def load_sharded_hf_state(path, num_groups=None):
+  """Loads HF state sharded across the TPU mesh to avoid host OOM.
+
+  On one process, each tensor is sharded as much as possible. On several processes, each tensor is
+  sharded along its leading axis only; see `_leading_axis_shardings`.
 
   Args:
     path: A directory path (either local or GCS starting with gs://) containing
@@ -166,13 +236,21 @@ def load_sharded_hf_state(path):
       "/path/to/safetensors_directory/"). If a Hugging Face Hub ID was used,
       it should already be cached/downloaded to GCS before calling this
       function.
+    num_groups: If set, shards as on several processes, with the devices split into this many groups by
+      id. For tests on one process.
 
   Returns:
     The loaded Hugging Face state dictionary mapping parameter names to
     JAX arrays.
   """
   t0 = time.time()
-  context = ocp_v1.Context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
+  multi_process = num_groups is not None or jax.process_count() > 1
+  # Leading-axis shards are contiguous, so never read whole spans: with more than 1024 tensors in a file
+  # (fine-grained MoE), Orbax's automatic choice would otherwise read whole spans again.
+  safetensors_options = ocp_v1.options.SafetensorsOptions(max_over_read_ratio=1.0) if multi_process else None
+  context = ocp_v1.Context(
+      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS, safetensors_options=safetensors_options
+  )
   with context:
     metadata = ocp_v1.pytree_metadata(path)
     simple_abstract_state = metadata.metadata
@@ -180,7 +258,10 @@ def load_sharded_hf_state(path):
     # Distributed Sharded Download: Tell JAX to shard the HF Safetensors download
     # across the entire TPU mesh to avoid Host OOM.
     current_global_devices = jax.devices()
-    shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state, devices=current_global_devices)
+    if multi_process:
+      shardings = _leading_axis_shardings(simple_abstract_state, current_global_devices, num_groups)
+    else:
+      shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state, devices=current_global_devices)
 
     def combine_sharding(sds, single_sharding):
       return jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=single_sharding)
@@ -188,7 +269,8 @@ def load_sharded_hf_state(path):
     sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
 
     max_logging.log("Reading raw Safetensors into memory (Distributed Sharded GCS Download)...")
-    hf_state = ocp_v1.load_pytree(path, sharded_abstract_state)
+    with _no_gcs_read_ahead():
+      hf_state = ocp_v1.load_pytree(path, sharded_abstract_state)
     max_logging.log(f"load_sharded_hf_state took {time.time() - t0:.2f}s")
     return hf_state
 
@@ -297,11 +379,7 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
     path = path[5:]
 
   if not path.startswith("gs://") and not os.path.isdir(path):
-    fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
     repo_id = path
-
-    files = fs.glob(f"{repo_id}/*.safetensors")
-
     host_id = jax.process_index()
 
     if hasattr(maxtext_config, "base_output_directory") and maxtext_config.base_output_directory.startswith("gs://"):
@@ -312,6 +390,9 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
       if host_id == 0:
         max_logging.log("Dynamic HF Hub Fast DL: Host 0 is downloading to shared GCS" f" Cache: {gcs_cache_dir}")
         t_gcs_start = time.time()
+        # Only host 0 calls the HF API: anonymous calls from every host of a large job are rate-limited (HTTP 429).
+        fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
+        files = fs.glob(f"{repo_id}/*.safetensors")
 
         # List existing blobs to avoid spawning processes for already cached
         # files
