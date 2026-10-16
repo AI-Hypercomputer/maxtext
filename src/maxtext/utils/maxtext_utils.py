@@ -723,12 +723,25 @@ def calculate_ffn_mamtul_tflops_per_device(config, mlp_dim, in_dim=None):
   return ffn1_flops + ffn2_flops
 
 
+def _is_qwen3_8_flash_next(config) -> bool:
+  """Returns True if config corresponds to the Qwen3.8-Flash-Next hybrid architecture."""
+  model_name = getattr(config, "model_name", "")
+  if isinstance(model_name, str) and model_name.startswith("qwen3.8-flash-next"):
+    return True
+  return config.decoder_block == DecoderBlockType.QWEN3_NEXT and (
+      getattr(config, "use_ple_layer", False) is True or getattr(config, "use_m3_model", False) is True
+  )
+
+
 def get_shared_expert_mlp_dim(config):
   """Returns the MLP dimension used by the shared expert.
 
-  GEMMA4 shared experts use mlp_dim, while other MoE blocks use moe_mlp_dim. See moe.py.
+  GEMMA4 and Qwen3.8-Flash-Next shared experts use mlp_dim, while other MoE
+  blocks use moe_mlp_dim. See moe.py.
   """
-  return config.mlp_dim if config.decoder_block == DecoderBlockType.GEMMA4 else config.moe_mlp_dim
+  if config.decoder_block == DecoderBlockType.GEMMA4 or _is_qwen3_8_flash_next(config):
+    return config.mlp_dim
+  return config.moe_mlp_dim
 
 
 def calculate_routed_and_shared_ffn_tflops_per_device(config):
@@ -1149,6 +1162,146 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
   )
 
 
+def calculate_qwen3_8_flash_next_tflops_training_per_device(config, total_ffn_flops_all_layers, embedding_flops):
+  """Calculates training TFLOPs for Qwen3.8-Flash-Next hybrid architecture.
+
+  Accounts for:
+  - Interleaved 3:1 GatedDeltaNet (GDN) linear attention + QSA (Gated Query +
+  MQA
+    Micro-Block Indexer) sparse attention layers.
+  - 4-stream Hyper-Connections (HCBlock around attention and MoE per decoder
+  layer
+    + final HCMixer).
+  - Layer-2 Per-Layer Embedding (PLE) block (`w_ple`, `gate_proj`, causal
+  conv1d).
+  - Shared-expert sigmoid scalar gate (`shared_expert_gate`) in every MoE block.
+  - Multi-Token Prediction (MTP) block (`mtp_fc` projection over `[inputs_embeds, 4-stream hidden]`
+    + 1 full QSA-MoE decoder layer + `mtp_hc_mixer` + shared `lm_head` unembedding matmul).
+  """
+  B = config.per_device_batch_size
+  S = config.max_target_length
+  E = config.emb_dim
+  num_layers = config.num_decoder_layers
+  cycle_interval = config.inhomogeneous_layer_cycle_interval
+  num_qsa_layers = num_layers // cycle_interval
+  num_gdn_layers = num_layers - num_qsa_layers
+
+  # 1. Gated Delta Net (Linear Attention) FLOPs per GDN layer
+  gdn_weight_flops_per_layer, gdn_attn_flops_per_layer = calculate_gated_delta_net_flops_per_device(config)
+
+  # 2. QSA (Gated Query Attention + MQA Micro-Block Indexer) FLOPs per QSA layer
+  H_q = config.num_query_heads
+  H_kv = config.num_kv_heads
+  D_head = config.head_dim
+  index_n_heads = getattr(config, "index_n_heads", 0)
+  index_kv_heads = getattr(config, "index_kv_heads", 1)
+  index_head_dim = getattr(config, "index_head_dim", 0)
+  compress_ratio = getattr(config, "index_select_block_size", 4) or 4
+  token_budget = getattr(config, "index_select_budget", 0)
+
+  # QSA projections:
+  # - q_proj projects E -> 2 * H_q * D_head (includes output gate)
+  # - k_proj + v_proj project E -> 2 * H_kv * D_head
+  # - o_proj projects H_q * D_head -> E
+  # - indexer_q_proj + indexer_k_proj project E -> (index_n_heads + index_kv_heads) * index_head_dim
+  qsa_q_flops = 2 * B * S * E * (2 * H_q * D_head)
+  qsa_kv_flops = 2 * B * S * E * (2 * H_kv * D_head)
+  qsa_o_flops = 2 * B * S * (H_q * D_head) * E
+  idx_proj_flops = 2 * B * S * E * (index_n_heads + index_kv_heads) * index_head_dim
+  qsa_weight_flops_per_layer = qsa_q_flops + qsa_kv_flops + qsa_o_flops + idx_proj_flops
+
+  # QSA attention + MQA micro-block indexer non-weight FLOPs:
+  # - Indexer block-compressed score matmul (causal half):
+  #   2 * B * S * (S / compress_ratio) * index_n_heads * index_head_dim / 2
+  # - Indexer head reduction (causal half):
+  #   2 * B * S * (S / compress_ratio) * index_n_heads / 2
+  # - Sparse attention over selected token budget (causal window ratio):
+  num_blocks = S / compress_ratio
+  idx_score_flops = B * S * num_blocks * index_n_heads * index_head_dim
+  idx_reduce_flops = B * S * num_blocks * index_n_heads
+  effective_budget = min(token_budget, S) if token_budget > 0 else S
+  qsa_mask_ratio = calculate_indexer_mask_ratio(effective_budget, S)
+  qsa_sparse_attn_flops = 4 * B * (S**2) * H_q * D_head * qsa_mask_ratio
+  qsa_attn_flops_per_layer = qsa_sparse_attn_flops + idx_score_flops + idx_reduce_flops
+
+  # 3. 4-stream Hyper-Connections (HCBlock x2 per decoder layer + final HCMixer)
+  hc_count = getattr(config, "hc_count", 1)
+  hc_lowrank = getattr(config, "hc_lowrank", 0)
+  hc_dim = hc_count * E
+  if hc_count > 1 and hc_lowrank > 0:
+    # Each HCBlock:
+    # - pre_Compress: [B, S, hc_C*E] x [hc_C*E, hc_r] -> 2 * B * S * hc_dim * hc_lowrank
+    # - post_Compress: [B, S, hc_C*E] x [hc_C*E, hc_r] -> 2 * B * S * hc_dim * hc_lowrank
+    # - stream mixing (h_pre / h_res / h_post): 2 * B * S * hc_dim * hc_count
+    hc_block_flops = 2 * B * S * hc_dim * (2 * hc_lowrank + hc_count)
+    hc_layer_flops = 2 * hc_block_flops
+    # Final HCMixer:
+    # - pre_Compress: [B, S, hc_C*E] x [hc_C*E, hc_r]
+    # - Expand + weighted sum: 2 * B * S * hc_dim * hc_lowrank
+    hc_mixer_flops = 2 * B * S * hc_dim * (2 * hc_lowrank)
+    total_hc_flops = num_layers * hc_layer_flops + hc_mixer_flops
+  else:
+    hc_layer_flops = 0
+    hc_mixer_flops = 0
+    total_hc_flops = 0
+
+  # 4. Shared expert scalar gate (`shared_expert_gate`: [E, 1]) per MoE layer
+  shared_expert_gate_flops_per_layer = 2 * B * S * E * getattr(config, "shared_experts", 0)
+  total_shared_gate_flops = num_layers * shared_expert_gate_flops_per_layer
+
+  # 5. Layer-2 Per-Layer Embedding (PLE) block (`w_ple`, `gate_proj`, causal conv1d)
+  if getattr(config, "use_ple_layer", False):
+    ple_dim = getattr(config, "ple_embed_dim", 0) or E
+    ple_conv_k = getattr(config, "ple_conv_kernel_size", 4)
+    # w_ple: [ple_dim, hc_dim], gate_proj: [E, ple_dim], conv1d depthwise: [ple_conv_k, hc_dim]
+    ple_weight_flops = 2 * B * S * (ple_dim * hc_dim + ple_dim * E + ple_conv_k * hc_dim)
+    # Elementwise gated mixing: 2 * B * S * hc_dim
+    ple_attn_flops = 2 * B * S * hc_dim
+  else:
+    ple_weight_flops = 0
+    ple_attn_flops = 0
+
+  # 6. Multi-Token Prediction (MTP) block
+  # In Qwen3.8-Flash-Next, each MTP step projects [inputs_embeds (E), 4-stream hidden (hc_dim)]
+  # -> E via `mtp_fc`, then runs 1 full QSA + MoE decoder layer (with 2 HCBlocks) + `mtp_hc_mixer`
+  # + `self.lm_head(mtp_h)` unembedding matmul. The `lm_head` weights are shared with the main
+  # head, but each MTP step executes its own [B*S, E] x [E, V] matmul (`embedding_flops`).
+  mtp_num_layers = getattr(config, "mtp_num_layers", 0)
+  if mtp_num_layers > 0:
+    mtp_fc_flops = 2 * B * S * (1 + hc_count) * E * E
+    moe_layer_flops = (total_ffn_flops_all_layers / num_layers) + shared_expert_gate_flops_per_layer
+    mtp_weight_flops_per_layer = (
+        mtp_fc_flops + qsa_weight_flops_per_layer + hc_layer_flops + moe_layer_flops + hc_mixer_flops + embedding_flops
+    )
+    mtp_weight_flops = mtp_num_layers * mtp_weight_flops_per_layer
+    mtp_attn_flops = mtp_num_layers * qsa_attn_flops_per_layer
+  else:
+    mtp_weight_flops = 0
+    mtp_attn_flops = 0
+
+  total_weight_flops = (
+      total_ffn_flops_all_layers
+      + total_shared_gate_flops
+      + embedding_flops
+      + num_qsa_layers * qsa_weight_flops_per_layer
+      + num_gdn_layers * gdn_weight_flops_per_layer
+      + total_hc_flops
+      + ple_weight_flops
+      + mtp_weight_flops
+  )
+  total_attn_flops = (
+      num_qsa_layers * qsa_attn_flops_per_layer
+      + num_gdn_layers * gdn_attn_flops_per_layer
+      + ple_attn_flops
+      + mtp_attn_flops
+  )
+
+  return (
+      total_attn_flops * 3 / 10**12,
+      total_weight_flops * 3 / 10**12,
+  )
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
@@ -1281,6 +1434,10 @@ def calculate_tflops_training_per_device(config, log=True):
     total_weight_flops = total_ffn_flops_all_layers + per_layer_flops * config.num_decoder_layers + embedding_flops
     learnable_weight_tflops = total_weight_flops * 3 / 10**12
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+  elif _is_qwen3_8_flash_next(config):
+    attention_tflops, learnable_weight_tflops = calculate_qwen3_8_flash_next_tflops_training_per_device(
+        config, total_ffn_flops_all_layers, embedding_flops
+    )
   elif config.decoder_block in (
       DecoderBlockType.QWEN3_NEXT,
       DecoderBlockType.QWEN3_5,
@@ -1313,7 +1470,7 @@ def calculate_tflops_training_per_device(config, log=True):
 
   # MTP (Multi-Token Prediction) FLOPs Calculation
   mtp_num_layers = getattr(config, "mtp_num_layers", 0)
-  if mtp_num_layers > 0:
+  if mtp_num_layers > 0 and not _is_qwen3_8_flash_next(config):
     # MTP modules act as structural replicas of the model's final decoder layer.
     # To calculate accurately for mixed architectures (e.g., DeepSeek, Llama 4),
     # we must explicitly reconstruct the FLOPs for the final layer rather than averaging.
