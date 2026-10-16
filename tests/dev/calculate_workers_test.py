@@ -31,7 +31,7 @@ def test_constants():
   """Tests that module constants have expected defaults."""
   assert MAX_CPU_WORKERS == 4
   assert MAX_TPU_WORKERS == 3
-  assert MAX_GPU_WORKERS == 3
+  assert MAX_GPU_WORKERS == 1
   assert DEFAULT_WORKERS == 1
   assert LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD == 8.0
   assert TARGET_MINUTES_PER_WORKER == 4.0
@@ -45,8 +45,8 @@ def test_get_max_workers_for_flavor():
   assert get_max_workers_for_flavor("tpu-unit") == 3
   assert get_max_workers_for_flavor("tpu-integration") == 3
   assert get_max_workers_for_flavor("tpu7x-unit") == 3
-  assert get_max_workers_for_flavor("gpu-unit") == 3
-  assert get_max_workers_for_flavor("gpu-integration") == 3
+  assert get_max_workers_for_flavor("gpu-unit") == 1
+  assert get_max_workers_for_flavor("gpu-integration") == 1
   assert get_max_workers_for_flavor("unknown-flavor") == 1
 
 

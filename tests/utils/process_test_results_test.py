@@ -249,6 +249,70 @@ class ProcessTestResultsTest(unittest.TestCase):
         saved = json.load(f)
       self.assertNotIn("tpu-unit::MODULE::tests.unit.some_test", saved)
 
+  def test_main_prunes_stale_tests_for_executed_flavor(self):
+    """Verifies that deleted/deselected tests in an executed flavor are pruned."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      xml_path = os.path.join(tmpdir, "test-results-gpu-unit-1.xml")
+      suite = ET.Element("testsuite")
+      ET.SubElement(
+          suite,
+          "testcase",
+          {
+              "name": "test_active",
+              "classname": "tests.unit.gpu_test.GpuTest",
+              "time": "12.0",
+          },
+      )
+      skipped_tc = ET.SubElement(
+          suite,
+          "testcase",
+          {
+              "name": "test_skipped",
+              "classname": "tests.unit.gpu_test.GpuTest",
+              "time": "0.0",
+          },
+      )
+      ET.SubElement(skipped_tc, "skipped")
+      ET.ElementTree(suite).write(xml_path)
+
+      active_key = "gpu-unit::tests.unit.gpu_test.GpuTest.test_active"
+      skipped_key = "gpu-unit::tests.unit.gpu_test.GpuTest.test_skipped"
+      stale_key = "gpu-unit::tests.unit.gpu_test.GpuTest.test_moved_to_cpu"
+      other_key = "tpu-unit::tests.unit.tpu_test.TpuTest.test_other_flavor"
+
+      baseline_path = os.path.join(tmpdir, "baseline.json")
+      with open(baseline_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                active_key: 10.0,
+                skipped_key: 15.0,
+                stale_key: 45.0,
+                other_key: 30.0,
+            },
+            f,
+        )
+
+      save_baseline_path = os.path.join(tmpdir, "new_baseline.json")
+      argv = [
+          "process_test_results.py",
+          tmpdir,
+          "--baseline",
+          baseline_path,
+          "--save-baseline",
+          save_baseline_path,
+      ]
+      with mock.patch("sys.argv", argv):
+        with self.assertRaises(SystemExit) as cm:
+          process_test_results.main()
+      self.assertEqual(cm.exception.code, 0)
+
+      with open(save_baseline_path, "r", encoding="utf-8") as f:
+        saved = json.load(f)
+      self.assertEqual(saved[active_key], 12.0)
+      self.assertEqual(saved[skipped_key], 15.0)
+      self.assertNotIn(stale_key, saved)
+      self.assertEqual(saved[other_key], 30.0)
+
   def test_cpu_excluded_from_macro_benchmarks(self):
     """Verifies that CPU suites are skipped when building macro-level benchmark entries."""
     total_times_by_job = {
