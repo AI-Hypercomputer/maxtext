@@ -53,7 +53,6 @@ from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
 from maxtext.layers import nnx_scan
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import PositionalEmbedding, Qwen3OmniMoeVisionPosEmbedInterpolate
@@ -909,7 +908,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # `mamba_state_indices`, or -- under mamba prefix caching, where
     # `mamba_state_indices` is None -- a block id looked up in the mamba block
     # table, which needs `gdn_mamba_block_size`.
-    mamba_block_size = getattr(cfg, "gdn_mamba_block_size", None)
+    mamba_block_size = cfg.gdn_mamba_block_size
     use_paged_state = (
         kv_cache is not None
         and isinstance(kv_cache, tuple)
@@ -1861,7 +1860,6 @@ class Qwen3NextScannableBlock(nnx.Module):
           mesh=mesh,
           shard_mode=cfg.shard_mode,
           debug_sharding=cfg.debug_sharding,
-          extra_stack_level=1,
       )
     else:
       self._maybe_shard_with_logical = lambda inputs, *args, **kwargs: inputs
@@ -2073,7 +2071,6 @@ class Qwen3NextDecoderLayer(nnx.Module):
           mesh=mesh,
           shard_mode=cfg.shard_mode,
           debug_sharding=cfg.debug_sharding,
-          extra_stack_level=1,
       )
     else:
       self.out_sharding = None
@@ -2250,7 +2247,6 @@ class AttentionWithNorm(nnx.Module):
           mesh=mesh,
           shard_mode=config.shard_mode,
           debug_sharding=config.debug_sharding,
-          extra_stack_level=1,
       )
     else:
       self.out_sharding = None
@@ -3378,76 +3374,3 @@ class Qwen3OmniAudioProjector(nnx.Module):
     hidden_states = jax.nn.gelu(hidden_states)
     hidden_states = self.proj2(hidden_states)
     return hidden_states
-
-
-# Vision encoder Linen wrappers
-Qwen3OmniMoeVisionPatchMergerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionPatchMerger,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3OmniMoeVisionMLPToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionMLP,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3OmniMoeVisionPatchEmbedToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionPatchEmbed,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3OmniMoeVisionAttentionToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionAttention,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3OmniMoeVisionBlockToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionBlock,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3OmniMoeVisionEncoderToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionEncoder,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3OmniMoeVisionProjectorToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniMoeVisionProjector,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3DecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3MoeDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3MoeDecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3NextDecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextDecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3NextScannableBlockToLinen = nnx_wrappers.to_linen_class(
-    Qwen3NextScannableBlock,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-# Audio encoder Linen wrappers
-Qwen3OmniAudioEncoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniAudioEncoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3OmniAudioEncoderToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniAudioEncoder,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
-
-Qwen3OmniAudioProjectorToLinen = nnx_wrappers.to_linen_class(
-    Qwen3OmniAudioProjector,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)

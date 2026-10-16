@@ -29,7 +29,6 @@ import os
 import sys
 from typing import Optional, Tuple
 
-import flax.linen as nn
 from flax import nnx
 import jax
 from maxtext.configs import pyconfig
@@ -219,22 +218,11 @@ def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):
   """Prints the model structure and the resulting Muon config."""
 
   def get_leaf_info(leaf):
-    # For linen:
-    # Access the shape from the inner ShapeDtypeStruct and names from the wrapper
-    # Return a new tree with the same structure containing only shapes/names
-    if isinstance(leaf, nn.LogicallyPartitioned):
-      return {"shape": leaf.value.shape, "names": leaf.names}
-    # For nnx:
-    # Only return the shape because it doesn't have a wrapper.
-    elif isinstance(leaf, jax.ShapeDtypeStruct):
+    if isinstance(leaf, jax.ShapeDtypeStruct):
       return {"shape": leaf.shape}
     return {"shape": "N/A"}
 
-  info_tree = jax.tree_util.tree_map(
-      get_leaf_info,
-      abstract_param,
-      is_leaf=lambda x: isinstance(x, (nn.LogicallyPartitioned, jax.ShapeDtypeStruct)),
-  )
+  info_tree = jax.tree_util.tree_map(get_leaf_info, abstract_param, is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct))
   print(f"\n=== Model Structure ===\n{info_tree}")
   print(f"\n=== Muon Dimension Numbers ===\n{muon_weight_dimension_numbers}")
   print("\nIs this reasonable?")

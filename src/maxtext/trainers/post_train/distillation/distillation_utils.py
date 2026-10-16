@@ -509,7 +509,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
       # 2. Gather Student unnormalized logits at the Teacher's exact Top-K indices
       s_logits_sparse = jnp.take_along_axis(
           s_logits, teacher_output.top_k_indices, axis=-1  # pyrefly: ignore[bad-argument-type]
-      )  # pyrefly: ignore[bad-argument-type]
+      )
 
       # 3. Normalize Student probabilities only over the exact same Top-K subset
       log_s_T_sparse = jax.nn.log_softmax(s_logits_sparse / temperature, axis=-1)
@@ -561,7 +561,7 @@ class CombinedDistillationStrategy(DistillationStrategy):
 
       feature_loss = beta_feature * self.feature_loss_fn(  # pyrefly: ignore[not-callable]
           s_features_sliced, t_features_sliced, mask
-      )  # pyrefly: ignore[not-callable]
+      )
 
     total_loss = base_logit_loss + feature_loss
 
@@ -733,7 +733,7 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
     target_model = getattr(model, "student_model", model)
 
     step, custom_metadata = super().maybe_restore(
-        model=target_model,  # pyrefly: ignore[bad-argument-type]
+        model=target_model,
         optimizer=optimizer,
         restore_only_lora_params=restore_only_lora_params,
     )
@@ -780,4 +780,4 @@ class MaxTextCheckpointManager(tunix_checkpoint_manager.CheckpointManager):
     super().close()
     if getattr(self, "_checkpointer", None) is not None:
       if hasattr(self._checkpointer, "close"):
-        self._checkpointer.close()  # pytype: disable=attribute-error
+        self._checkpointer.close()

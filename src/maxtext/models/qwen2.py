@@ -26,8 +26,6 @@ import jax.numpy as jnp
 from flax import nnx
 
 from maxtext.common.common_types import Config
-from maxtext.layers import initializers as max_initializers
-from maxtext.layers import nnx_wrappers
 from maxtext.layers import quantizations
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -69,7 +67,6 @@ class AttentionWithNorm(nnx.Module):
         mesh=mesh,
         shard_mode=config.shard_mode,
         debug_sharding=config.debug_sharding,
-        extra_stack_level=1,
     )
 
     # Corresponds to Qwen2's `input_layernorm`
@@ -231,9 +228,3 @@ class Qwen2DecoderLayer(AttentionWithNorm):
       return layer_output, None
     else:
       return layer_output, kv_cache
-
-
-Qwen2DecoderLayerToLinen = nnx_wrappers.to_linen_class(
-    Qwen2DecoderLayer,
-    base_metadata_fn=max_initializers.variable_to_logically_partitioned,
-)
