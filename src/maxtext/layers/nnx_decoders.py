@@ -67,6 +67,7 @@ from maxtext.models import (
     qwen2,
     qwen3,
     qwen3_5,
+    glm5_next,
     qwen3_custom,
     simple_layer,
     weaver,
@@ -993,6 +994,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.GLM5_3,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1377,10 +1379,15 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
         DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
+        # GLM5 does not yet implement a multi-layer scannable block.
+        DecoderBlockType.GLM5_3: [glm5_next.Glm5NextDecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
+
+    if cfg.decoder_block == DecoderBlockType.GLM5_3 and cfg.scan_layers:
+      raise NotImplementedError("scan_layers=true is not yet supported for GLM5.")
 
     return layer_map[cfg.decoder_block]
 
@@ -1538,6 +1545,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE_MLP,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
+        DecoderBlockType.GLM5_3,
         DecoderBlockType.ENVY,
     }:
       return functools.partial(
@@ -1707,6 +1715,8 @@ class NNXDecoder(nnx.Module):
     if self.is_deepseek4:
       return self.hc_head(y)
     # (batch, length, mhc_expansion_rate, emb_dim) --> (batch, length, emb_dim)
+    if cfg.decoder_block == DecoderBlockType.GLM5_3:
+      return jnp.mean(y, axis=2, dtype=y.dtype)
     _, mhc_reduce_fn = mhc.get_functions(cfg.mhc_expansion_rate)
     return mhc_reduce_fn(y)
 
