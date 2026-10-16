@@ -25,7 +25,7 @@ This module implements the *audio output* half of Qwen3-Omni (HF `Qwen3OmniMoeFo
 ``models.Transformer`` instantiates ``talker`` (which owns ``code_predictor``) and ``code2wav`` when
 ``config.enable_audio_output`` is set, mirroring the HF module layout (``talker.*``, ``talker.code_predictor.*``,
 ``code2wav.*``) so one MaxText checkpoint holds thinker and speech stack. Architecture fields come from the
-``talker_*`` / ``code_predictor_*`` / ``code2wav_*`` config entries (HF names); the talker derives a MaxText
+nested ``audio_output_config`` model settings; the talker derives a MaxText
 sub-config from the thinker config so it can reuse ``AttentionWithNorm``, ``RoutedMoE``, ``MlpBlock`` and
 ``Qwen3DecoderLayer`` (KV caching / sharding follow the rest of MaxText). The code predictor sees at most
 ``num_code_groups`` positions per frame, so it runs cache-free in ``MODEL_MODE_TRAIN`` over a fixed-size window.
@@ -36,6 +36,7 @@ sub-config from the thinker config so it can reuse ``AttentionWithNorm``, ``Rout
 import math
 
 from flax import nnx
+from pydantic import BaseModel, ConfigDict, Field
 import jax
 from jax import lax
 import jax.numpy as jnp
@@ -55,6 +56,104 @@ from maxtext.models.qwen3 import AttentionWithNorm, Qwen3DecoderLayer
 # -----------------------------------------------------------------------------
 # Config helpers
 # -----------------------------------------------------------------------------
+class Qwen3OmniTalkerConfig(BaseModel):
+  """Validated Qwen3-Omni talker configuration."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  hidden_size: int = Field(description="Talker hidden size.")
+  intermediate_size: int = Field(description="Talker dense MLP size (also the thinker->talker projection MLP).")
+  num_hidden_layers: int = Field(description="Talker decoder layers.")
+  num_attention_heads: int = Field(description="Talker query heads.")
+  num_key_value_heads: int = Field(description="Talker KV heads.")
+  head_dim: int = Field(description="Talker head dim.")
+  num_experts: int = Field(description="Talker routed experts.")
+  num_experts_per_tok: int = Field(description="Talker experts per token.")
+  moe_intermediate_size: int = Field(description="Talker routed-expert MLP size.")
+  shared_expert_intermediate_size: int = Field(description="Talker shared-expert MLP size.")
+  norm_topk_prob: bool = Field(description="Renormalize talker top-k routing weights.")
+  vocab_size: int = Field(description="Talker codec vocabulary (codebook 0 + control ids).")
+  rope_theta: float = Field(description="Talker RoPE theta (interleaved MRoPE, thinker mrope_section).")
+  rms_norm_eps: float = Field(description="Talker RMSNorm epsilon.")
+  max_new_tokens: int = Field(description="Maximum codec frames (12.5 per second of audio).")
+  do_sample: bool = Field(description="Sample talker codes instead of greedy decoding.")
+  top_k: int = Field(description="Top-k for talker sampling.")
+  top_p: float = Field(description="Top-p for talker sampling.")
+  temperature: float = Field(description="Temperature for talker sampling.")
+  repetition_penalty: float = Field(description="Repetition penalty on generated talker codes.")
+
+
+class Qwen3OmniCodePredictorConfig(BaseModel):
+  """Validated Qwen3-Omni code_predictor configuration."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  hidden_size: int = Field(description="Code predictor hidden size.")
+  intermediate_size: int = Field(description="Code predictor MLP size.")
+  num_hidden_layers: int = Field(description="Code predictor layers.")
+  num_attention_heads: int = Field(description="Code predictor query heads.")
+  num_key_value_heads: int = Field(description="Code predictor KV heads.")
+  head_dim: int = Field(description="Code predictor head dim.")
+  vocab_size: int = Field(description="Residual codebook size.")
+  rope_theta: float = Field(description="Code predictor RoPE theta.")
+
+
+class Qwen3OmniCode2WavConfig(BaseModel):
+  """Validated Qwen3-Omni code2wav configuration."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  dtype: str = Field(description="Compute/param dtype of the code2wav vocoder.")
+  codebook_size: int = Field(description="Code2wav codebook size per quantizer.")
+  hidden_size: int = Field(description="Code2wav transformer hidden size.")
+  intermediate_size: int = Field(description="Code2wav MLP size.")
+  num_hidden_layers: int = Field(description="Code2wav transformer layers.")
+  num_attention_heads: int = Field(description="Code2wav attention heads.")
+  num_key_value_heads: int = Field(description="Code2wav KV heads.")
+  sliding_window: int = Field(description="Code2wav sliding attention window.")
+  rope_theta: float = Field(description="Code2wav RoPE theta.")
+  rms_norm_eps: float = Field(description="Code2wav RMSNorm epsilon.")
+  layer_scale_initial_scale: float = Field(description="Code2wav layer-scale init.")
+  num_quantizers: int = Field(description="Code2wav number of quantizers.")
+  upsample_rates: list[int] = Field(description="Code2wav decoder upsample rates.")
+  upsampling_ratios: list[int] = Field(description="Code2wav pre-decoder upsampling ratios.")
+  decoder_dim: int = Field(description="Code2wav decoder channel dim.")
+
+
+class Qwen3OmniAudioConfig(BaseModel):
+  """Validated Qwen3-Omni audio output configuration."""
+
+  model_config = ConfigDict(extra="forbid")
+
+  talker: Qwen3OmniTalkerConfig
+  code_predictor: Qwen3OmniCodePredictorConfig
+  code2wav: Qwen3OmniCode2WavConfig
+  num_code_groups: int = Field(
+      description="Codec code groups per frame (1 from the talker, rest from the code predictor)."
+  )
+  thinker_hidden_size: int = Field(description="Thinker hidden size fed to the talker projections.")
+  accept_hidden_layer: int = Field(description="Thinker layer whose output feeds the talker at multimodal positions.")
+  codec_pad_id: int = Field(description="Codec pad id.")
+  codec_bos_id: int = Field(description="Codec bos id.")
+  codec_eos_token_id: int = Field(description="Codec eos id (ends speech generation).")
+  codec_nothink_id: int = Field(description="Codec no-think id.")
+  codec_think_bos_id: int = Field(description="Codec think-bos id.")
+  codec_think_eos_id: int = Field(description="Codec think-eos id.")
+  speaker_id: dict[str, int] = Field(description="Speaker name -> codec speaker id.")
+  tts_pad_token_id: int = Field(description="TTS pad token id (thinker vocab).")
+  tts_bos_token_id: int = Field(description="TTS bos token id (thinker vocab).")
+  tts_eos_token_id: int = Field(description="TTS eos token id (thinker vocab).")
+  im_start_token_id: int = Field(description="`<|im_start|>` id.")
+  user_token_id: int = Field(description="`user` role token id.")
+  assistant_token_id: int = Field(description="`assistant` role token id.")
+  speaker: str = Field(description="Speaker voice for audio generation.")
+
+
+def get_audio_config(config: Config) -> Qwen3OmniAudioConfig:
+  """Validates backend-owned settings without adding model fields to the global schema."""
+  return Qwen3OmniAudioConfig.model_validate(config.audio_output_config)
+
+
 def derive_config(config: Config, **overrides) -> Config:
   """Returns a copy of a MaxText ``HyperParameters`` config with the given (already-derived) fields overridden.
 
@@ -71,39 +170,41 @@ def talker_config(config: Config) -> Config:
   """Derives the MaxText config of the talker MoE decoder from the thinker config.
 
   The talker decodes one speech stream alongside the thinker: its prefill covers the user turn plus a 9-token
-  assistant header (<= thinker prefill + 16) and its autoregressive budget is ``talker_max_new_tokens`` frames.
+  assistant header (<= thinker prefill + 16). Its autoregressive budget is
+  ``audio_output_config.talker.max_new_tokens`` frames.
   """
+  audio = get_audio_config(config)
   max_prefill = config.max_prefill_predict_length + 16
-  shared_experts = config.talker_shared_expert_intermediate_size // config.talker_moe_intermediate_size
-  if shared_experts * config.talker_moe_intermediate_size != config.talker_shared_expert_intermediate_size:
+  shared_experts = audio.talker.shared_expert_intermediate_size // audio.talker.moe_intermediate_size
+  if shared_experts * audio.talker.moe_intermediate_size != audio.talker.shared_expert_intermediate_size:
     raise ValueError("talker_shared_expert_intermediate_size must be a multiple of talker_moe_intermediate_size.")
   return derive_config(
       config,
       decoder_block=DecoderBlockType.QWEN3_MOE,
-      base_emb_dim=config.talker_hidden_size,
-      emb_dim=config.talker_hidden_size,
-      base_num_query_heads=config.talker_num_attention_heads,
-      num_query_heads=config.talker_num_attention_heads,
-      base_num_kv_heads=config.talker_num_key_value_heads,
-      num_kv_heads=config.talker_num_key_value_heads,
-      head_dim=config.talker_head_dim,
-      base_num_decoder_layers=config.talker_num_hidden_layers,
-      num_decoder_layers=config.talker_num_hidden_layers,
-      base_mlp_dim=config.talker_moe_intermediate_size,
-      mlp_dim=config.talker_moe_intermediate_size,
-      base_moe_mlp_dim=config.talker_moe_intermediate_size,
-      moe_mlp_dim=config.talker_moe_intermediate_size,
-      num_experts=config.talker_num_experts,
-      num_experts_per_tok=config.talker_num_experts_per_tok,
+      base_emb_dim=audio.talker.hidden_size,
+      emb_dim=audio.talker.hidden_size,
+      base_num_query_heads=audio.talker.num_attention_heads,
+      num_query_heads=audio.talker.num_attention_heads,
+      base_num_kv_heads=audio.talker.num_key_value_heads,
+      num_kv_heads=audio.talker.num_key_value_heads,
+      head_dim=audio.talker.head_dim,
+      base_num_decoder_layers=audio.talker.num_hidden_layers,
+      num_decoder_layers=audio.talker.num_hidden_layers,
+      base_mlp_dim=audio.talker.moe_intermediate_size,
+      mlp_dim=audio.talker.moe_intermediate_size,
+      base_moe_mlp_dim=audio.talker.moe_intermediate_size,
+      moe_mlp_dim=audio.talker.moe_intermediate_size,
+      num_experts=audio.talker.num_experts,
+      num_experts_per_tok=audio.talker.num_experts_per_tok,
       shared_experts=shared_experts,
-      norm_topk_prob=config.talker_norm_topk_prob,
-      vocab_size=config.talker_vocab_size,
-      normalization_layer_epsilon=config.talker_rms_norm_eps,
-      rope_max_timescale=int(config.talker_rope_theta),
+      norm_topk_prob=audio.talker.norm_topk_prob,
+      vocab_size=audio.talker.vocab_size,
+      normalization_layer_epsilon=audio.talker.rms_norm_eps,
+      rope_max_timescale=int(audio.talker.rope_theta),
       use_qk_norm=True,
       use_mrope=True,
       max_prefill_predict_length=max_prefill,
-      max_target_length=max_prefill + config.talker_max_new_tokens,
+      max_target_length=max_prefill + audio.talker.max_new_tokens,
       # Single speech stream; the KV cache batch follows the thinker's decode batch (see talker pipeline).
       use_multimodal=False,
       use_audio=False,
@@ -114,27 +215,28 @@ def talker_config(config: Config) -> Config:
 
 def code_predictor_config(config: Config) -> Config:
   """Derives the config for the dense code-predictor decoder layers from the thinker config."""
-  num_positions = config.num_code_groups
+  audio = get_audio_config(config)
+  num_positions = audio.num_code_groups
   return derive_config(
       config,
       decoder_block=DecoderBlockType.QWEN3,
-      base_emb_dim=config.code_predictor_hidden_size,
-      emb_dim=config.code_predictor_hidden_size,
-      base_num_query_heads=config.code_predictor_num_attention_heads,
-      num_query_heads=config.code_predictor_num_attention_heads,
-      base_num_kv_heads=config.code_predictor_num_key_value_heads,
-      num_kv_heads=config.code_predictor_num_key_value_heads,
-      head_dim=config.code_predictor_head_dim,
-      base_mlp_dim=config.code_predictor_intermediate_size,
-      mlp_dim=config.code_predictor_intermediate_size,
-      base_num_decoder_layers=config.code_predictor_num_hidden_layers,
-      num_decoder_layers=config.code_predictor_num_hidden_layers,
+      base_emb_dim=audio.code_predictor.hidden_size,
+      emb_dim=audio.code_predictor.hidden_size,
+      base_num_query_heads=audio.code_predictor.num_attention_heads,
+      num_query_heads=audio.code_predictor.num_attention_heads,
+      base_num_kv_heads=audio.code_predictor.num_key_value_heads,
+      num_kv_heads=audio.code_predictor.num_key_value_heads,
+      head_dim=audio.code_predictor.head_dim,
+      base_mlp_dim=audio.code_predictor.intermediate_size,
+      mlp_dim=audio.code_predictor.intermediate_size,
+      base_num_decoder_layers=audio.code_predictor.num_hidden_layers,
+      num_decoder_layers=audio.code_predictor.num_hidden_layers,
       num_experts=1,
       num_experts_per_tok=1,
       shared_experts=0,
-      vocab_size=config.code_predictor_vocab_size,
-      normalization_layer_epsilon=config.talker_rms_norm_eps,
-      rope_max_timescale=int(config.code_predictor_rope_theta),
+      vocab_size=audio.code_predictor.vocab_size,
+      normalization_layer_epsilon=audio.talker.rms_norm_eps,
+      rope_max_timescale=int(audio.code_predictor.rope_theta),
       use_qk_norm=True,
       # 1-D RoPE: MRoPE with identical positions on all three axes is exactly HF rotate-half RoPE.
       use_mrope=True,
@@ -264,7 +366,16 @@ class Qwen3OmniTalker(nnx.Module):
   config (see ``talker_config``).
   """
 
-  def __init__(self, config: Config, mesh: Mesh, quant: None | Quant, *, model_mode: str, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      config: Config,
+      mesh: Mesh,
+      quant: None | Quant,
+      *,
+      model_mode: str,
+      rngs: nnx.Rngs,
+  ):
+    audio = get_audio_config(config)
     self.thinker_config = config
     cfg = talker_config(config)
     self.config = cfg
@@ -279,14 +390,26 @@ class Qwen3OmniTalker(nnx.Module):
         rngs=rngs,
     )
     self.text_projection = Qwen3OmniTalkerResizeMLP(
-        cfg, config.thinker_hidden_size, config.talker_intermediate_size, cfg.emb_dim, rngs=rngs
+        cfg,
+        audio.thinker_hidden_size,
+        audio.talker.intermediate_size,
+        cfg.emb_dim,
+        rngs=rngs,
     )
     self.hidden_projection = Qwen3OmniTalkerResizeMLP(
-        cfg, config.thinker_hidden_size, config.talker_intermediate_size, cfg.emb_dim, rngs=rngs
+        cfg,
+        audio.thinker_hidden_size,
+        audio.talker.intermediate_size,
+        cfg.emb_dim,
+        rngs=rngs,
     )
     self.num_layers = cfg.num_decoder_layers
     for i in range(self.num_layers):
-      setattr(self, f"layers_{i}", Qwen3OmniTalkerDecoderLayer(cfg, mesh, model_mode, quant, rngs))
+      setattr(
+          self,
+          f"layers_{i}",
+          Qwen3OmniTalkerDecoderLayer(cfg, mesh, model_mode, quant, rngs),
+      )
     self.decoder_norm = RMSNorm(
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
@@ -354,11 +477,12 @@ class Qwen3OmniCodePredictor(nnx.Module):
   """
 
   def __init__(self, config: Config, mesh: Mesh, quant: None | Quant, *, rngs: nnx.Rngs):
+    audio = get_audio_config(config)
     self.thinker_config = config
     self.mesh = mesh
     cp_cfg = code_predictor_config(config)
     self.config = cp_cfg
-    self.num_residual_groups = config.num_code_groups - 1
+    self.num_residual_groups = audio.num_code_groups - 1
     self.num_layers = cp_cfg.num_decoder_layers
     for i in range(self.num_residual_groups):
       setattr(
@@ -375,7 +499,11 @@ class Qwen3OmniCodePredictor(nnx.Module):
           ),
       )
     for i in range(self.num_layers):
-      setattr(self, f"layers_{i}", Qwen3DecoderLayer(cp_cfg, mesh, MODEL_MODE_TRAIN, quant, rngs))
+      setattr(
+          self,
+          f"layers_{i}",
+          Qwen3DecoderLayer(cp_cfg, mesh, MODEL_MODE_TRAIN, quant, rngs),
+      )
     self.decoder_norm = RMSNorm(
         num_features=cp_cfg.emb_dim,
         dtype=cp_cfg.dtype,
@@ -558,14 +686,15 @@ class Qwen3OmniCode2WavTransformerLayer(nnx.Module):
   """HF ``Qwen3OmniMoeCode2WavTransformerLayer``: sliding-window causal attention + SwiGLU MLP with layer scale."""
 
   def __init__(self, config: Config, *, dtype, rngs):
-    hidden = config.code2wav_hidden_size
-    self.num_heads = config.code2wav_num_attention_heads
-    self.num_kv_heads = config.code2wav_num_key_value_heads
+    audio = get_audio_config(config)
+    hidden = audio.code2wav.hidden_size
+    self.num_heads = audio.code2wav.num_attention_heads
+    self.num_kv_heads = audio.code2wav.num_key_value_heads
     self.head_dim = hidden // self.num_heads
-    self.sliding_window = config.code2wav_sliding_window
-    self.rope_theta = config.code2wav_rope_theta
-    self.eps = config.code2wav_rms_norm_eps
-    inter = config.code2wav_intermediate_size
+    self.sliding_window = audio.code2wav.sliding_window
+    self.rope_theta = audio.code2wav.rope_theta
+    self.eps = audio.code2wav.rms_norm_eps
+    inter = audio.code2wav.intermediate_size
     self.self_attn = ParamGroup(
         q_proj=_param(rngs, (self.num_heads * self.head_dim, hidden), dtype),
         k_proj=_param(rngs, (self.num_kv_heads * self.head_dim, hidden), dtype),
@@ -579,8 +708,8 @@ class Qwen3OmniCode2WavTransformerLayer(nnx.Module):
     )
     self.input_layernorm = _param(rngs, (hidden,), dtype, init=1.0)
     self.post_attention_layernorm = _param(rngs, (hidden,), dtype, init=1.0)
-    self.self_attn_layer_scale = _param(rngs, (hidden,), dtype, init=config.code2wav_layer_scale_initial_scale)
-    self.mlp_layer_scale = _param(rngs, (hidden,), dtype, init=config.code2wav_layer_scale_initial_scale)
+    self.self_attn_layer_scale = _param(rngs, (hidden,), dtype, init=audio.code2wav.layer_scale_initial_scale)
+    self.mlp_layer_scale = _param(rngs, (hidden,), dtype, init=audio.code2wav.layer_scale_initial_scale)
 
   def _rms_norm(self, x: Array, weight: nnx.Param) -> Array:
     x32 = x.astype(jnp.float32)
@@ -637,11 +766,16 @@ class Qwen3OmniCode2WavTransformer(nnx.Module):
   """HF ``Qwen3OmniMoeCode2WavTransformerModel``: stacked sliding-window layers + final RMSNorm."""
 
   def __init__(self, config: Config, *, dtype, rngs):
-    self.num_layers = config.code2wav_num_hidden_layers
-    self.eps = config.code2wav_rms_norm_eps
+    audio = get_audio_config(config)
+    self.num_layers = audio.code2wav.num_hidden_layers
+    self.eps = audio.code2wav.rms_norm_eps
     for i in range(self.num_layers):
-      setattr(self, f"layers_{i}", Qwen3OmniCode2WavTransformerLayer(config, dtype=dtype, rngs=rngs))
-    self.norm = _param(rngs, (config.code2wav_hidden_size,), dtype, init=1.0)
+      setattr(
+          self,
+          f"layers_{i}",
+          Qwen3OmniCode2WavTransformerLayer(config, dtype=dtype, rngs=rngs),
+      )
+    self.norm = _param(rngs, (audio.code2wav.hidden_size,), dtype, init=1.0)
 
   def __call__(self, hidden: Array) -> Array:
     for i in range(self.num_layers):
@@ -668,9 +802,10 @@ class Qwen3OmniCode2WavDecoderBlock(nnx.Module):
   """HF ``Qwen3OmniMoeCode2WavDecoderBlock``: SnakeBeta -> CausalTransConv(2r, r) -> 3 residual units."""
 
   def __init__(self, config: Config, layer_idx: int, *, dtype, rngs):
-    in_dim = config.code2wav_decoder_dim // 2**layer_idx
-    out_dim = config.code2wav_decoder_dim // 2 ** (layer_idx + 1)
-    rate = config.code2wav_upsample_rates[layer_idx]
+    audio = get_audio_config(config)
+    in_dim = audio.code2wav.decoder_dim // 2**layer_idx
+    out_dim = audio.code2wav.decoder_dim // 2 ** (layer_idx + 1)
+    rate = audio.code2wav.upsample_rates[layer_idx]
     blocks = [
         Qwen3OmniSnakeBeta(in_dim, dtype=dtype, rngs=rngs),
         Qwen3OmniCausalTransConv1d(in_dim, out_dim, 2 * rate, rate, dtype=dtype, rngs=rngs),
@@ -689,24 +824,33 @@ class Qwen3OmniCode2Wav(nnx.Module):
   """HF ``Qwen3OmniMoeCode2Wav`` vocoder: ``[batch, num_quantizers, T]`` codes -> ``[batch, 1, T * total_upsample]``."""
 
   def __init__(self, config: Config, mesh: Mesh, *, rngs: nnx.Rngs):
+    audio = get_audio_config(config)
     self.config = config
-    dtype = jnp.dtype(config.code2wav_dtype)
+    dtype = jnp.dtype(audio.code2wav.dtype)
     self.dtype = dtype
-    hidden = config.code2wav_hidden_size
-    self.codebook_size = config.code2wav_codebook_size
-    self.num_quantizers = config.code2wav_num_quantizers
-    self.total_upsample = int(math.prod(config.code2wav_upsample_rates) * math.prod(config.code2wav_upsampling_ratios))
+    hidden = audio.code2wav.hidden_size
+    self.codebook_size = audio.code2wav.codebook_size
+    self.num_quantizers = audio.code2wav.num_quantizers
+    self.total_upsample = int(math.prod(audio.code2wav.upsample_rates) * math.prod(audio.code2wav.upsampling_ratios))
     self.code_embedding = _param(rngs, (self.codebook_size * self.num_quantizers, hidden), dtype)
-    self.num_transformer_layers = config.code2wav_num_hidden_layers
+    self.num_transformer_layers = audio.code2wav.num_hidden_layers
     self.pre_transformer = Qwen3OmniCode2WavTransformer(config, dtype=dtype, rngs=rngs)
-    self.num_upsample = len(config.code2wav_upsampling_ratios)
-    for i, factor in enumerate(config.code2wav_upsampling_ratios):
-      setattr(self, f"upsample_{i}_0", Qwen3OmniCausalTransConv1d(hidden, hidden, factor, factor, dtype=dtype, rngs=rngs))
-      setattr(self, f"upsample_{i}_1", Qwen3OmniConvNeXtBlock(hidden, dtype=dtype, rngs=rngs))
-    decoder = [Qwen3OmniCausalConv1d(hidden, config.code2wav_decoder_dim, 7, dtype=dtype, rngs=rngs)]
-    for i in range(len(config.code2wav_upsample_rates)):
+    self.num_upsample = len(audio.code2wav.upsampling_ratios)
+    for i, factor in enumerate(audio.code2wav.upsampling_ratios):
+      setattr(
+          self,
+          f"upsample_{i}_0",
+          Qwen3OmniCausalTransConv1d(hidden, hidden, factor, factor, dtype=dtype, rngs=rngs),
+      )
+      setattr(
+          self,
+          f"upsample_{i}_1",
+          Qwen3OmniConvNeXtBlock(hidden, dtype=dtype, rngs=rngs),
+      )
+    decoder = [Qwen3OmniCausalConv1d(hidden, audio.code2wav.decoder_dim, 7, dtype=dtype, rngs=rngs)]
+    for i in range(len(audio.code2wav.upsample_rates)):
       decoder.append(Qwen3OmniCode2WavDecoderBlock(config, i, dtype=dtype, rngs=rngs))
-    output_dim = config.code2wav_decoder_dim // 2 ** len(config.code2wav_upsample_rates)
+    output_dim = audio.code2wav.decoder_dim // 2 ** len(audio.code2wav.upsample_rates)
     decoder += [
         Qwen3OmniSnakeBeta(output_dim, dtype=dtype, rngs=rngs),
         Qwen3OmniCausalConv1d(output_dim, 1, 7, dtype=dtype, rngs=rngs),

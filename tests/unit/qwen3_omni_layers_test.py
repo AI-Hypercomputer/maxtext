@@ -1591,7 +1591,7 @@ MAX_TARGET = 24  # Align the single-stream fractional batch with four-device CPU
 
 
 def make_speech_config(**overrides):
-  """Thinker config (`qwen3-omni-30b-a3b`) with tiny speech-stack sizes; HF-named `talker_*` etc. fields."""
+  """Thinker config (`qwen3-omni-30b-a3b`) with tiny nested audio-output settings."""
   base = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
   kwargs = {
       "run_name": "qwen3_omni_talker_test",
@@ -1601,38 +1601,6 @@ def make_speech_config(**overrides):
       "enable_checkpointing": False,
       "enable_audio_output": True,
       "mrope_section": MROPE_SECTION,
-      "talker_hidden_size": EMB,
-      "talker_intermediate_size": PROJ_DIM,
-      "talker_num_hidden_layers": N_LAYERS,
-      "talker_num_attention_heads": HEADS,
-      "talker_num_key_value_heads": KV_HEADS,
-      "talker_head_dim": HEAD_DIM,
-      "talker_num_experts": N_EXPERTS,
-      "talker_num_experts_per_tok": TOP_K,
-      "talker_moe_intermediate_size": MOE_DIM,
-      "talker_shared_expert_intermediate_size": SHARED_EXPERTS * MOE_DIM,
-      "talker_vocab_size": VOCAB,
-      "thinker_hidden_size": THINKER_HIDDEN,
-      "num_code_groups": NUM_CODE_GROUPS,
-      "code_predictor_hidden_size": EMB,
-      "code_predictor_num_hidden_layers": CP_LAYERS,
-      "code_predictor_num_attention_heads": HEADS,
-      "code_predictor_num_key_value_heads": KV_HEADS,
-      "code_predictor_head_dim": HEAD_DIM,
-      "code_predictor_intermediate_size": CP_MLP,
-      "code_predictor_vocab_size": CP_VOCAB,
-      "code2wav_hidden_size": C2W_HIDDEN,
-      "code2wav_num_hidden_layers": C2W_LAYERS,
-      "code2wav_num_attention_heads": C2W_HEADS,
-      "code2wav_num_key_value_heads": C2W_HEADS,
-      "code2wav_intermediate_size": C2W_MLP,
-      "code2wav_sliding_window": C2W_WINDOW,
-      "code2wav_codebook_size": C2W_CODEBOOK,
-      "code2wav_num_quantizers": C2W_NQ,
-      "code2wav_upsample_rates": C2W_UPSAMPLE_RATES,
-      "code2wav_upsampling_ratios": C2W_UPSAMPLING_RATIOS,
-      "code2wav_decoder_dim": C2W_DECODER_DIM,
-      "talker_max_new_tokens": MAX_TARGET - MAX_PREFILL,
       "per_device_batch_size": 1,
       "max_prefill_predict_length": MAX_PREFILL - 16,
       "max_target_length": MAX_TARGET,
@@ -1646,7 +1614,49 @@ def make_speech_config(**overrides):
       "sparse_matmul": True,
       "scan_layers": False,
       "dropout_rate": 0.0,
+      "audio_output_config": {
+          "talker": {
+              "hidden_size": EMB,
+              "intermediate_size": PROJ_DIM,
+              "num_hidden_layers": N_LAYERS,
+              "num_attention_heads": HEADS,
+              "num_key_value_heads": KV_HEADS,
+              "head_dim": HEAD_DIM,
+              "num_experts": N_EXPERTS,
+              "num_experts_per_tok": TOP_K,
+              "moe_intermediate_size": MOE_DIM,
+              "shared_expert_intermediate_size": SHARED_EXPERTS * MOE_DIM,
+              "vocab_size": VOCAB,
+              "max_new_tokens": MAX_TARGET - MAX_PREFILL,
+          },
+          "code_predictor": {
+              "hidden_size": EMB,
+              "num_hidden_layers": CP_LAYERS,
+              "num_attention_heads": HEADS,
+              "num_key_value_heads": KV_HEADS,
+              "head_dim": HEAD_DIM,
+              "intermediate_size": CP_MLP,
+              "vocab_size": CP_VOCAB,
+          },
+          "code2wav": {
+              "hidden_size": C2W_HIDDEN,
+              "num_hidden_layers": C2W_LAYERS,
+              "num_attention_heads": C2W_HEADS,
+              "num_key_value_heads": C2W_HEADS,
+              "intermediate_size": C2W_MLP,
+              "sliding_window": C2W_WINDOW,
+              "codebook_size": C2W_CODEBOOK,
+              "num_quantizers": C2W_NQ,
+              "upsample_rates": C2W_UPSAMPLE_RATES,
+              "upsampling_ratios": C2W_UPSAMPLING_RATIOS,
+              "decoder_dim": C2W_DECODER_DIM,
+          },
+          "thinker_hidden_size": THINKER_HIDDEN,
+          "num_code_groups": NUM_CODE_GROUPS,
+      },
   }
+  audio_overrides = overrides.pop("audio_output_config", {})
+  kwargs["audio_output_config"].update(audio_overrides)
   kwargs.update(overrides)
   return pyconfig.initialize(["", base], **kwargs)
 
@@ -1976,10 +1986,16 @@ class TestTransformerSpeechStack(SpeechTestBase):
 
     def build(config):
       with self.mesh:
-        return models.Transformer(config, self.mesh, None, model_mode=MODEL_MODE_AUTOREGRESSIVE, rngs=nnx.Rngs(0))
+        return models.Transformer(
+            config,
+            self.mesh,
+            None,
+            model_mode=MODEL_MODE_AUTOREGRESSIVE,
+            rngs=nnx.Rngs(0),
+        )
 
     tiny_thinker = {
-        "accept_hidden_layer": 1,
+        "audio_output_config": {"accept_hidden_layer": 1},
         "base_emb_dim": EMB,
         "base_num_query_heads": HEADS,
         "base_num_kv_heads": KV_HEADS,
@@ -1997,7 +2013,10 @@ class TestTransformerSpeechStack(SpeechTestBase):
     paths = {"/".join(str(p) for p in path) for path, _ in nnx.to_flat_state(nnx.state(model, nnx.Param))}
     # Recorded before consolidation with one layer in each component; checkpoint schema must stay unchanged.
     manifest = {
-        "/".join(map(str, path)): {"shape": list(value.shape), "dtype": str(value.dtype)}
+        "/".join(map(str, path)): {
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+        }
         for path, value in nnx.to_flat_state(nnx.state(model, nnx.Param))
     }
     self.assertEqual(len(manifest), 146)

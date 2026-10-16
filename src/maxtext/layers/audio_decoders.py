@@ -40,7 +40,10 @@ def get_audio_output_type(config) -> str | None:
 def get_feature_spec(config) -> DecoderFeatureSpec:
   """Declares the text-model features consumed by the selected audio implementation."""
   if get_audio_output_type(config) == "qwen3_omni":
-    return DecoderFeatureSpec(input_embeddings=True, hidden_layers=(config.accept_hidden_layer,))
+    from maxtext.models.qwen3_omni_audio import get_audio_config  # pylint: disable=import-outside-toplevel
+
+    audio = get_audio_config(config)
+    return DecoderFeatureSpec(input_embeddings=True, hidden_layers=(audio.accept_hidden_layer,))
   return DecoderFeatureSpec()
 
 

@@ -486,7 +486,8 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
       # if override_model_config=True, only apply model configs for keys not present in overrides.
       if temp_cfg.get("override_model_config"):
-        model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg}
+        # Audio backends own a nested configuration: merge partial overrides with model defaults.
+        model_cfg = {k: v for k, v in model_loaded_cfg.items() if k not in overrides_cfg or k == "audio_output_config"}
       else:
         model_cfg = model_loaded_cfg
         # Validate that no keys are overridden by both model config and CLI/kwargs
