@@ -140,6 +140,7 @@ class DecoderBlockType(enum.Enum):
   LLAMA4 = "llama4"
   OLMO3 = "olmo3"
   DEEPSEEK4 = "deepseek4"
+  DEEPSEEK41 = "deepseek41"
   ENVY = "envy"
 
 

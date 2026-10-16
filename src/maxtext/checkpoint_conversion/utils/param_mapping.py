@@ -51,6 +51,7 @@ The main conversion script uses these mappings to systematically transform each
 parameter from the source checkpoint and build the target checkpoint.
 """
 
+import functools
 import warnings
 import numpy as np
 
@@ -4449,6 +4450,346 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
   return mapping
 
 
+# FP4 E2M1 code -> value (sign bit is the high bit of each nibble).
+_FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+
+
+def _dequantize_block_scaled(xp, weight, scale, broadcast_scales=True):
+  """See `dequantize_block_scaled`; `xp` is `np` or `jnp`."""
+  if weight.dtype == np.int8:
+    packed = jax.lax.bitcast_convert_type(weight, jnp.uint8) if xp is jnp else weight.view(np.uint8)
+    table = xp.asarray(_FP4_E2M1_VALUES, dtype=jnp.bfloat16)
+    codes = xp.stack([packed & 0xF, packed >> 4], axis=-1).reshape(weight.shape[0], -1)
+    w = xp.take(table, codes.astype(xp.int32))
+  else:
+    w = weight.astype(jnp.bfloat16)
+  s = scale.astype(jnp.float32).astype(jnp.bfloat16)
+  rows, cols = w.shape
+  block_rows, block_cols = -(-rows // s.shape[0]), -(-cols // s.shape[1])
+  if broadcast_scales and rows == block_rows * s.shape[0] and cols == block_cols * s.shape[1]:
+    # Broadcast the scales instead of materializing them at full size (the engram tables are ~100 GB).
+    blocks = w.reshape(s.shape[0], block_rows, s.shape[1], block_cols)
+    return (blocks * s[:, None, :, None]).reshape(rows, cols)
+  s = xp.repeat(s, block_rows, axis=0)[:rows]
+  s = xp.repeat(s, block_cols, axis=1)[:, :cols]
+  return w * s
+
+
+# On device the dequantization runs per shard (`shard_map`): each chip expands the scales for its own rows of the
+# (row-split) weight, so XLA never partitions the block arithmetic. Letting XLA partition a jitted version silently
+# zeroed 3/4 of some tensors on a 64-chip v5p slice (DeepSeek-V4.1-Flash `wq_b` / `wo_a`, whose 512 / 128 rows per
+# chip line up with the 32-row scale blocks), and moving E8M0 scales between chips has produced NaNs. Every element
+# format times a power of two is exact in bf16, so the result is bit-identical to the numpy path.
+
+
+def _local_dequantize(weight, scale, rows, row_offset):
+  """Dequantizes local rows [row_offset, row_offset + weight.shape[0]) of a weight with `rows` rows in total.
+
+  `scale` is the full (replicated) scale tensor, or exactly these rows' scales when it has one row per weight row.
+  """
+  if weight.dtype == np.int8:
+    packed = jax.lax.bitcast_convert_type(weight, jnp.uint8)
+    codes = jnp.stack([packed & 0xF, packed >> 4], axis=-1).reshape(weight.shape[0], -1)
+    w = jnp.take(jnp.asarray(_FP4_E2M1_VALUES, dtype=jnp.bfloat16), codes.astype(jnp.int32))
+  else:
+    w = weight.astype(jnp.bfloat16)
+  s = scale.astype(jnp.float32).astype(jnp.bfloat16)
+  local_rows, cols = w.shape
+  if s.shape[0] != local_rows:  # Full scale tensor: pick each local row's block.
+    block_rows = -(-rows // s.shape[0])
+    s = jnp.take(s, (row_offset + jnp.arange(local_rows)) // block_rows, axis=0)
+  block_cols = -(-cols // s.shape[1])
+  s = jnp.repeat(s, block_cols, axis=1)[:, :cols]
+  return w * s
+
+
+def _row_axis(sharding):
+  """The mesh axis a load sharding splits dim 0 over, or None (see `hf_streaming_load.choose_load_sharding`)."""
+  spec = sharding.spec if isinstance(sharding, jax.sharding.NamedSharding) else ()
+  return spec[0] if len(spec) and spec[0] is not None else None
+
+
+@functools.lru_cache(maxsize=None)
+def _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, rows, scale_rows):
+  row_axis = weight_spec[0] if len(weight_spec) else None
+  scale_split = len(scale_spec) > 0 and scale_spec[0] is not None
+
+  def local(weight, scale):
+    offset = jax.lax.axis_index(row_axis) * weight.shape[0] if row_axis is not None else 0
+    if not scale_split and scale_rows == rows:
+      # One scale row per weight row, held in full: slice out this shard's rows.
+      scale = jax.lax.dynamic_slice_in_dim(scale, offset, weight.shape[0], axis=0)
+    return _local_dequantize(weight, scale, rows, offset)
+
+  return jax.jit(
+      jax.shard_map(local, mesh=mesh, in_specs=(weight_spec, scale_spec), out_specs=weight_spec, check_vma=False)
+  )
+
+
+def _dequantize_on_device(weight, scale):
+  mesh = weight.sharding.mesh
+  weight_spec = jax.sharding.PartitionSpec(_row_axis(weight.sharding))
+  scale_spec = jax.sharding.PartitionSpec()
+  if (
+      isinstance(scale.sharding, jax.sharding.NamedSharding)
+      and scale.sharding.mesh == mesh
+      and _row_axis(scale.sharding) is not None
+  ):
+    if scale.shape[0] != weight.shape[0]:
+      raise ValueError(
+          f"Row-split scales {scale.shape} must have one row per weight row {weight.shape} to dequantize per shard."
+      )
+    scale_spec = jax.sharding.PartitionSpec(_row_axis(scale.sharding))
+  elif scale.sharding != jax.sharding.NamedSharding(mesh, scale_spec):
+    if not scale.is_fully_replicated:
+      raise ValueError(f"Scales with sharding {scale.sharding} cannot be dequantized per shard of {weight.sharding}.")
+    # A full copy on every chip already: rebuild it on the weight's mesh from the local copies (no communication).
+    scale = jax.make_array_from_single_device_arrays(
+        scale.shape,
+        jax.sharding.NamedSharding(mesh, scale_spec),
+        [jax.device_put(scale.addressable_shards[0].data, d) for d in mesh.local_devices],
+    )
+  fn = _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, weight.shape[0], scale.shape[0])
+  return fn(weight, scale)
+
+
+def pad_rows_to_target(x, target_shape):
+  """Pads dim 0 with zeros up to `target_shape[0]` (e.g. the row-padded DeepSeek-V4.1 engram tables)."""
+  if target_shape is None or x.shape[0] == target_shape[0]:
+    return x
+  xp = _array_module(x)
+  return xp.pad(x, ((0, target_shape[0] - x.shape[0]),) + ((0, 0),) * (x.ndim - 1))
+
+
+# The streaming loader may then read the HF tensor(s) already zero-padded to the target's rows (see
+# `hf_streaming_load._load_request`), which this and the dequantize hook pass through unchanged.
+pad_rows_to_target.pads_rows_to_target = True
+
+
+def dequantize_block_scaled(pair, target_shape=None):
+  """(weight, scale) -> bf16 weight, for block-scaled FP8 / packed FP4 checkpoints (DeepSeek-V4.1 format).
+
+  `weight` is FP8 E4M3 [out, in], or int8 [out, in / 2] holding two FP4 E2M1 codes per byte (low nibble first).
+  `scale` holds one power-of-two (E8M0) scale per block; the block size follows from the two shapes, e.g.
+  32 x 32 blocks for FP8 linears and 1 x 32 for FP4 experts and the FP8 engram table rows. Both element formats
+  times a power of two are exact in bf16.
+  """
+  weight, scale = pair
+  del target_shape  # Row padding, if any, is done by the reader or a later hook.
+  if isinstance(weight, jax.Array):
+    if not isinstance(weight.sharding, jax.sharding.NamedSharding):
+      weight = jax.device_put(
+          weight,
+          jax.sharding.NamedSharding(
+              jax.sharding.Mesh(np.array(sorted(weight.sharding.device_set, key=lambda d: d.id)), ("copies",)),
+              jax.sharding.PartitionSpec(),
+          ),
+      )
+    return _dequantize_on_device(weight, scale)
+  return _dequantize_block_scaled(np, weight, scale)
+
+
+# DeepSeek-V4.1 tensors stored block-quantized (with a sibling `.scale`) in the released checkpoint.
+_DEEPSEEK_V41_QUANTIZED = (
+    "attn.wq_a.weight",
+    "attn.wq_b.weight",
+    "attn.wkv.weight",
+    "attn.wo_a.weight",
+    "attn.wo_b.weight",
+    "attn.indexer.wq_b.weight",
+    "w1.weight",
+    "w2.weight",
+    "w3.weight",
+    "engram.wkv.weight",
+    "engram.embed.weight",
+)
+
+
+def _deepseek41_is_quantized(config) -> bool:
+  quant = config.get("quantization_config") if isinstance(config, dict) else getattr(config, "quantization_config", None)
+  return bool(quant)
+
+
+def _deepseek41_layer_prefixes(maxtext_config, scan_layers):
+  """(MaxText key prefix, HF layer ids, layer spec) for every DeepSeek-V4.1 layer slot.
+
+  Unscanned: one `layers_{i}` per layer. Scanned: one stack `segments_{k}` per segment of structurally identical
+  layer groups; block layer `j` of segment `k` stacks the j-th layer of each of the segment's groups.
+  """
+  from maxtext.models import deepseek41  # pylint: disable=import-outside-toplevel
+
+  specs = deepseek41.build_layer_specs(maxtext_config)
+  if not scan_layers:
+    return [(f"params-decoder-layers_{i}", i, specs[i]) for i in range(len(specs))]
+  out = []
+  for k, segment in enumerate(deepseek41.build_segments(maxtext_config)):
+    for j, layer_id in enumerate(segment.groups[0]):
+      out.append((f"params-decoder-segments_{k}-layers_{j}", [g[j] for g in segment.groups], specs[layer_id]))
+  return out
+
+
+def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText parameter keys to DeepSeek-V4.1 checkpoint keys (upstream `inference/` names, text model).
+
+  The layer structure (compressor / indexer / engram placement, number of experts) comes from `maxtext_config`.
+  Scanned stacks map to a list of HF keys (one per stacked layer); routed experts to a list per expert.
+  """
+  quantized = _deepseek41_is_quantized(config)
+  num_experts = maxtext_config.num_experts
+
+  def with_scales(source):
+    """In a quantized checkpoint, a quantized weight is read together with its scale."""
+    if isinstance(source, list):
+      return [with_scales(x) for x in source]
+    if quantized and source.endswith(_DEEPSEEK_V41_QUANTIZED):
+      return (source, source[: -len("weight")] + "scale")
+    return source
+
+  mapping = {
+      "params-token_embedder-embedding": "embed.weight",
+      "params-decoder-decoder_norm-scale": "norm.weight",
+      "params-decoder-logits_dense-kernel": "head.weight",
+  }
+
+  for prefix, layer_ids, spec in _deepseek41_layer_prefixes(maxtext_config, scan_layers):
+    if isinstance(layer_ids, list):
+
+      def hf(target, layer_ids=layer_ids):
+        return [f"layers.{i}.{target}" for i in layer_ids]
+
+      def hf_experts(target, layer_ids=layer_ids):
+        return [[f"layers.{i}.{target.format(e=e)}" for i in layer_ids] for e in range(num_experts)]
+
+    else:
+
+      def hf(target, layer_ids=layer_ids):
+        return f"layers.{layer_ids}.{target}"
+
+      def hf_experts(target, layer_ids=layer_ids):
+        return [f"layers.{layer_ids}.{target.format(e=e)}" for e in range(num_experts)]
+
+    mapping[f"{prefix}-pre_self_attention_layer_norm-scale"] = hf("attn_norm.weight")
+    mapping[f"{prefix}-post_self_attention_layer_norm-scale"] = hf("ffn_norm.weight")
+    for name in ("hc_attn", "hc_ffn"):
+      for part in ("fn", "base", "scale"):
+        mapping[f"{prefix}-{name}_{part}"] = hf(f"{name}_{part}")
+
+    attn = f"{prefix}-self_attention"
+    mapping[f"{attn}-wq_a-kernel"] = hf("attn.wq_a.weight")
+    mapping[f"{attn}-q_norm-scale"] = hf("attn.q_norm.weight")
+    mapping[f"{attn}-wq_b-kernel"] = hf("attn.wq_b.weight")
+    mapping[f"{attn}-wkv-kernel"] = hf("attn.wkv.weight")
+    mapping[f"{attn}-kv_norm-scale"] = hf("attn.kv_norm.weight")
+    mapping[f"{attn}-o_a_proj-kernel"] = hf("attn.wo_a.weight")
+    mapping[f"{attn}-o_b_proj-kernel"] = hf("attn.wo_b.weight")
+    mapping[f"{attn}-sinks"] = hf("attn.attn_sink")
+    if spec.is_kv_source:
+      mapping[f"{attn}-compressor-wkv-kernel"] = hf("attn.compressor.wkv.weight")
+      if spec.compress_ratio > 1:
+        mapping[f"{attn}-compressor-wgate-kernel"] = hf("attn.compressor.wgate.weight")
+      mapping[f"{attn}-compressor-norm-scale"] = hf("attn.compressor.norm.weight")
+    if spec.is_index_source:
+      mapping[f"{attn}-indexer-wq_b-kernel"] = hf("attn.indexer.wq_b.weight")
+      mapping[f"{attn}-indexer-weights_proj-kernel"] = hf("attn.indexer.weights_proj.weight")
+      if spec.is_kv_source:
+        mapping[f"{attn}-indexer-wk-kernel"] = hf("attn.indexer.wk.weight")
+        mapping[f"{attn}-indexer-k_norm-scale"] = hf("attn.indexer.k_norm.weight")
+
+    mapping[f"{prefix}-mlp-MoeBlock_0-gate-kernel"] = hf("ffn.gate.weight")
+    mapping[f"{prefix.replace('params-', 'MoEBiasVar-')}-mlp-MoeBlock_0-gate-bias"] = hf("ffn.gate.bias")
+    mapping[f"{prefix}-mlp-MoeBlock_0-wi_0"] = hf_experts("ffn.experts.{e}.w1.weight")
+    mapping[f"{prefix}-mlp-MoeBlock_0-wi_1"] = hf_experts("ffn.experts.{e}.w3.weight")
+    mapping[f"{prefix}-mlp-MoeBlock_0-wo"] = hf_experts("ffn.experts.{e}.w2.weight")
+    mapping[f"{prefix}-mlp-shared_experts-wi_0-kernel"] = hf("ffn.shared_experts.w1.weight")
+    mapping[f"{prefix}-mlp-shared_experts-wi_1-kernel"] = hf("ffn.shared_experts.w3.weight")
+    mapping[f"{prefix}-mlp-shared_experts-wo-kernel"] = hf("ffn.shared_experts.w2.weight")
+
+    if spec.has_engram:
+      mapping[f"{prefix}-engram-embed"] = hf("engram.embed.weight")
+      mapping[f"{prefix}-engram-wkv-kernel"] = hf("engram.wkv.weight")
+      mapping[f"{prefix}-engram-q_weight"] = hf("engram.q_weight")
+      mapping[f"{prefix}-engram-k_weight"] = hf("engram.k_weight")
+  return {key: with_scales(source) for key, source in mapping.items()}
+
+
+def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Hooks converting single (per layer / per expert) tensors between DeepSeek-V4.1 and MaxText layouts.
+
+  torch Linear weights [out, in] become kernels [in, *out]; `wo_a` [groups * o_lora_rank, d] becomes the grouped
+  kernel [groups, d, o_lora_rank]; the hyper-connection projections [mix, hc * dim] become [hc * dim, mix].
+  """
+  quantized = _deepseek41_is_quantized(config)
+
+  def to_mt_kernel(x, target_shape):
+    """torch [out, in] -> MaxText [in, *out]; saving: MaxText [in, *out] -> torch [out, in] (target_shape)."""
+    if saving_to_hf:
+      return x.reshape(x.shape[0], -1).T.reshape(target_shape)
+    return x.T.reshape(target_shape)
+
+  def o_a_proj(x, target_shape):
+    if saving_to_hf:  # [g, d, r] -> [g * r, d]
+      return x.transpose(0, 2, 1).reshape(target_shape)
+    groups, _, rank = target_shape
+    return x.reshape(groups, rank, -1).transpose(0, 2, 1)
+
+  def embedding(x, target_shape):
+    return x[: target_shape[0]]
+
+  def logits(x, target_shape):
+    if saving_to_hf:  # [d, vocab] -> [vocab, d]
+      return x.T[: target_shape[0]]
+    return x[: target_shape[1]].T
+
+  mapping = {
+      "params-token_embedder-embedding": embedding,
+      "params-decoder-logits_dense-kernel": logits,
+  }
+  for prefix, _, spec in _deepseek41_layer_prefixes(maxtext_config, scan_layers):
+    attn = f"{prefix}-self_attention"
+    kernels = [
+        f"{prefix}-hc_attn_fn",
+        f"{prefix}-hc_ffn_fn",
+        f"{attn}-wq_a-kernel",
+        f"{attn}-wq_b-kernel",
+        f"{attn}-wkv-kernel",
+        f"{attn}-o_b_proj-kernel",
+        f"{prefix}-mlp-MoeBlock_0-gate-kernel",
+        f"{prefix}-mlp-MoeBlock_0-wi_0",
+        f"{prefix}-mlp-MoeBlock_0-wi_1",
+        f"{prefix}-mlp-MoeBlock_0-wo",
+        f"{prefix}-mlp-shared_experts-wi_0-kernel",
+        f"{prefix}-mlp-shared_experts-wi_1-kernel",
+        f"{prefix}-mlp-shared_experts-wo-kernel",
+    ]
+    if spec.is_kv_source:
+      kernels += [f"{attn}-compressor-wkv-kernel"]
+      if spec.compress_ratio > 1:
+        kernels += [f"{attn}-compressor-wgate-kernel"]
+    if spec.is_index_source:
+      kernels += [f"{attn}-indexer-wq_b-kernel", f"{attn}-indexer-weights_proj-kernel"]
+      if spec.is_kv_source:
+        kernels += [f"{attn}-indexer-wk-kernel"]
+    if spec.has_engram:
+      kernels += [f"{prefix}-engram-wkv-kernel"]
+    for key in kernels:
+      mapping[key] = to_mt_kernel
+    mapping[f"{attn}-o_a_proj-kernel"] = o_a_proj
+    if spec.has_engram:
+      mapping[f"{prefix}-engram-embed"] = pad_rows_to_target
+
+  if quantized and not saving_to_hf:
+    # Dequantize first; the sources of these weights are (weight, scale) pairs (see the param mapping).
+    param_map = DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING({"quantization_config": True}, maxtext_config, scan_layers)
+    for key, source in param_map.items():
+      leaf = source
+      while isinstance(leaf, list):
+        leaf = leaf[0]
+      if isinstance(leaf, tuple):
+        hook = mapping.get(key)
+        mapping[key] = [dequantize_block_scaled] + ([hook] if hook is not None else [])
+  return {k: v for k, v in mapping.items() if v is not None}
+
+
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_MAPPING = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING
 DEEPSEEKV4_MAXTEXT_TO_HF_PARAM_HOOK_FN = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN
 
@@ -4495,6 +4836,8 @@ PARAM_MAPPING = {
     "deepseek3-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek4.1-flash": DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "deepseek4.1-flash-mini": DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4556,6 +4899,8 @@ HOOK_FNS = {
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-tiny": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek4.1-flash": DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "deepseek4.1-flash-mini": DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,

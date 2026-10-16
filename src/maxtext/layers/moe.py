@@ -76,6 +76,13 @@ WI_0 = "wi_0"
 WI_1 = "wi_1"
 WO = "wo"
 
+# Decoder blocks using DeepSeek routing-weight scaling and the SwiGLU clamp.
+_DEEPSEEK_ROUTING_BLOCKS = (
+    ctypes.DecoderBlockType.DEEPSEEK,
+    ctypes.DecoderBlockType.DEEPSEEK4,
+    ctypes.DecoderBlockType.DEEPSEEK41,
+)
+
 
 @struct.dataclass
 class RouteMetadata:
@@ -655,9 +662,11 @@ class GateLogit(nnx.Module):
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates. Kept in float32 whatever the
+        # weight dtype (as upstream): the trained biases are large and close together (e.g. DeepSeek-V4.1-Flash
+        # layer 39 spans 57.17..57.65), so bf16 would collapse them to a handful of values and change the top-k.
         self.bias = MoEBiasVar(
-            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            default_bias_init(rngs.params(), bias_shape, jnp.float32),
             out_sharding=bias_axes,
         )
       else:
@@ -724,8 +733,12 @@ class GateLogit(nnx.Module):
       pre_bias_logits = output
 
     if self.use_bias:
-      bias = jnp.asarray(self.bias[...], self.dtype)
-      output += bias
+      if isinstance(self.bias, MoEBiasVar):
+        # Selection-only bias: add in float32 so bf16 compute does not round it away (see __init__).
+        output = output.astype(jnp.float32) + jnp.asarray(self.bias[...], jnp.float32)
+      else:
+        bias = jnp.asarray(self.bias[...], self.dtype)
+        output += bias
     return output, pre_bias_logits
 
 
@@ -1347,7 +1360,7 @@ class RoutedMoE(nnx.Module):
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
+    if self.config.decoder_block in _DEEPSEEK_ROUTING_BLOCKS:
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1471,10 +1484,7 @@ class RoutedMoE(nnx.Module):
         layer_act = self.activation_fn(layer_w0 * 1.702)
         glu = jnp.multiply(layer_w0, layer_act)
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
-      elif (
-          self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4)
-          and self.config.mlp_activations_limit > 0.0
-      ):
+      elif self.config.decoder_block in _DEEPSEEK_ROUTING_BLOCKS and self.config.mlp_activations_limit > 0.0:
         # DeepSeek V4 uses bounds to clip the SwiGLU activations
         layer_w0 = jnp.clip(layer_w0, min=None, max=self.config.mlp_activations_limit)
         layer_w1 = jnp.clip(
@@ -5125,6 +5135,10 @@ class RoutedAndSharedMoE(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         config=self.config,
         quant=self.quant,
+        # DeepSeek-V4.1 clamps the shared expert's SwiGLU like the routed experts'.
+        activations_limit=(
+            self.config.mlp_activations_limit if self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK41 else 0.0
+        ),
         rngs=self.rngs,
     )
 
