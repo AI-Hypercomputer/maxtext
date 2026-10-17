@@ -22,6 +22,11 @@
 [**Documentation**](https://maxtext.readthedocs.io/en)
 | [**Release Notes**](https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/release_notes.md)
 
+<p align="center">
+  <b>English</b> · <a href="https://github.com/AI-Hypercomputer/maxtext/blob/main/README.zh.md">简体中文</a>
+</p>
+
+
 > **_NOTE:_** We recommend customers use the latest [PyPI release](https://pypi.org/project/maxtext/) (see [installation guide](docs/install_maxtext.md)) or corresponding [pre-built container images](docs/tutorials/build_maxtext.md#pre-built-maxtext-docker-images), while the `main` branch is not expected to be production-ready.
 >
 > We recommend running MaxText with Python 3.12, as it is our primary supported version. Other Python versions may encounter compatibility issues.
