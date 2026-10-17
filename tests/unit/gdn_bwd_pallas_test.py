@@ -3257,6 +3257,7 @@ class GdnBwdPallasTest(absltest.TestCase):
         recurrent_state=jnp.zeros((2, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32),
         **common,
         is_prefill_only=True,
+        bf16_qkv_dma=True,
     )
     out_fp32, (cs_fp32, rs_fp32), tinv_fp32, cstates_fp32 = gdn_wrapper.fused_conv1d_gdn(
         qkv=qkv_fp32,
@@ -3266,6 +3267,7 @@ class GdnBwdPallasTest(absltest.TestCase):
         recurrent_state=jnp.zeros((2, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32),
         **common,
         is_prefill_only=False,
+        bf16_qkv_dma=False,
     )
 
     np.testing.assert_array_equal(np.asarray(out_bf16), np.asarray(out_fp32.astype(jnp.bfloat16)))
