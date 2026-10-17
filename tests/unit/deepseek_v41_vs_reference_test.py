@@ -526,5 +526,30 @@ class DeepSeek41CheckpointTest(unittest.TestCase):
     self._check(scan_layers=True)
 
 
+class TflopsCalculationTest(unittest.TestCase):
+  """Verifies peak-roofline training TFLOPs calculation for DeepSeek-V4.1-Flash."""
+
+  def test_deepseek41_tflops_training_per_device(self):
+    from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel
+
+    config = pyconfig.initialize(
+        [sys.argv[0], "src/maxtext/configs/base.yml"],
+        run_name="deepseek41_tflops_test",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+        model_name="deepseek4.1-flash",
+        per_device_batch_size=1.0,
+        max_target_length=4096,
+    )
+    total_tflops, weight_tflops, attn_tflops = maxtext_utils.calculate_tflops_training_per_device(config, log=False)
+    self.assertAlmostEqual(total_tflops, weight_tflops + attn_tflops, places=5)
+    # Peak roofline for deepseek4.1-flash (pdb=1, seq=4096) is ~434.55 TFLOPs
+    # (learnable_weights ~396.63 TFLOPs, attention/indexer scoring ~37.92 TFLOPs),
+    # significantly lower than the unfactored dense MHA fallback (728.67 TFLOPs).
+    self.assertAlmostEqual(weight_tflops, 396.63, delta=0.1)
+    self.assertAlmostEqual(attn_tflops, 37.92, delta=0.1)
+    self.assertAlmostEqual(total_tflops, 434.55, delta=0.1)
+
+
 if __name__ == "__main__":
   unittest.main()

@@ -31,6 +31,7 @@ What a layer shares with later layers is threaded through a small dict (`shared`
 Reference: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/inference/model.py
 """
 
+import functools
 import math
 from typing import Any, Optional
 
@@ -129,10 +130,29 @@ def select_candidate_blocks(logits: Array, compress_lens: Array, topk_blocks: in
 
 def _scatter_bool(indices: Array, values: Array, width: int) -> Array:
   """[B, S, K] indices and bool values -> [B, S, width] bool with `values` scattered at `indices` (OR-combined)."""
-  b, s, _ = indices.shape
-  bi = jnp.arange(b)[:, None, None]
-  si = jnp.arange(s)[None, :, None]
-  return jnp.zeros((b, s, width), dtype=jnp.bool_).at[bi, si, indices].max(values)
+
+  def _row(idx: Array, val: Array) -> Array:
+    return jnp.zeros((width,), dtype=jnp.bool_).at[idx].set(val, unique_indices=True)
+
+  return jax.vmap(jax.vmap(_row))(indices, values)
+
+
+def _sink_attention(
+    q: Array, keys: Array, mask: Array, sinks: Array, *, softmax_scale: float, precision: Any, out_dtype: Any
+) -> Array:
+  """Softmax attention with a learned per-head sink logit (float32 scores).
+
+  q: [B, c, H, D] (rotated); keys: [B, T, D], also used as values; mask: [B, c, T] visibility; sinks: [H].
+  Returns [B, c, H, D] in `out_dtype`.
+  """
+  qf = q.astype(jnp.float32)
+  kf = keys.astype(jnp.float32)
+  logits = jnp.einsum("bshd,btd->bhst", qf, kf, precision=precision) * softmax_scale
+  logits = jnp.where(mask[:, None], logits, -jnp.inf)
+  b, h, c = logits.shape[:3]
+  sink = jnp.broadcast_to(sinks.astype(jnp.float32)[None, :, None, None], (b, h, c, 1))
+  probs = jax.nn.softmax(jnp.concatenate([logits, sink], axis=-1), axis=-1)[..., :-1]
+  return jnp.einsum("bhst,btd->bshd", probs, kf, precision=precision).astype(out_dtype)
 
 
 class DeepSeek41Compressor(nnx.Module):
@@ -451,6 +471,36 @@ class DeepSeek41Attention(nnx.Module):
       state = {**state, **updates}
     return state["compress_kv"], state["topk_mask"], updates
 
+  def _chunked_attention(self, q, kv, compress_kv, topk_mask, positions, sinks, attend, chunk):
+    """`attend` over query chunks of `chunk` positions (positions contiguous, `s % chunk == 0`).
+
+    A chunk's sliding window only reaches its own `chunk` raw keys and the `window_size - 1` before them, so each
+    chunk attends over [chunk + window_size - 1 raw keys, all compressed keys] instead of [S raw keys, all compressed
+    keys]: the same softmax (every dropped key is masked out anyway) with far fewer FLOPs, and the [B, H, chunk, T]
+    scores of one chunk at a time (each chunk is rematerialized on its own in the backward pass).
+    """
+    b, s, h, d = q.shape
+    pad = self.window_size - 1
+    kv_pad = jnp.pad(kv, ((0, 0), (pad, 0), (0, 0)))
+    # Padding slots get a position no query can see (pos_i - pos_j >= window_size).
+    pos_pad = jnp.pad(positions, ((0, 0), (pad, 0)), constant_values=jnp.iinfo(jnp.int32).min // 2)
+    attend = jax.checkpoint(attend, prevent_cse=False)
+
+    def one_chunk(start):
+      qc = jax.lax.dynamic_slice_in_dim(q, start, chunk, axis=1)
+      pc = jax.lax.dynamic_slice_in_dim(positions, start, chunk, axis=1)
+      keys = jax.lax.dynamic_slice_in_dim(kv_pad, start, chunk + pad, axis=1)
+      key_pos = jax.lax.dynamic_slice_in_dim(pos_pad, start, chunk + pad, axis=1)
+      delta = pc[:, :, None] - key_pos[:, None, :]
+      mask = (delta >= 0) & (delta < self.window_size)
+      if compress_kv is not None:
+        keys = jnp.concatenate([keys, compress_kv], axis=1)
+        mask = jnp.concatenate([mask, jax.lax.dynamic_slice_in_dim(topk_mask, start, chunk, axis=1)], axis=-1)
+      return attend(qc, keys, mask, sinks)
+
+    outs = jax.lax.map(one_chunk, jnp.arange(0, s, chunk))  # [S / chunk, B, chunk, H, D]
+    return jnp.moveaxis(outs, 0, 1).reshape(b, s, h, d)
+
   def __call__(self, x: Array, positions: Array, shared: dict) -> tuple[Array, dict]:
     """x: [B, S, emb]; positions: [B, S] (contiguous from 0). Returns the [B, S, emb] output and the updates this
     layer makes to the shared cross-layer state."""
@@ -459,24 +509,31 @@ class DeepSeek41Attention(nnx.Module):
     q = self.rotary_embedding(self.wq_b(qr), positions, unsqueeze_dim=-2)  # [B, S, H, D]
     kv = self.rotary_embedding(self.kv_norm(self.wkv(x)), positions, unsqueeze_dim=None)  # [B, S, D]
 
-    # Sliding window over the raw KV: key j is visible to query i iff 0 <= pos_i - pos_j < window_size.
-    delta = positions[:, :, None] - positions[:, None, :]
-    mask = (delta >= 0) & (delta < self.window_size)  # [B, S, S]
-    keys = kv
     updates = {}
+    compress_kv = topk_mask = None
     if self.compress_ratio > 0:
       compress_kv, topk_mask, updates = self._compressed_kv(x, qr, positions, shared)
-      keys = jnp.concatenate([kv, compress_kv.astype(kv.dtype)], axis=1)
-      mask = jnp.concatenate([mask, topk_mask], axis=-1)
+      compress_kv = compress_kv.astype(kv.dtype)
 
-    precision = jax.lax.Precision(self.config.matmul_precision)
-    qf = q.astype(jnp.float32)
-    kf = keys.astype(jnp.float32)
-    logits = jnp.einsum("bshd,btd->bhst", qf, kf, precision=precision) * self.softmax_scale
-    logits = jnp.where(mask[:, None], logits, -jnp.inf)
-    sink = jnp.broadcast_to(self.sinks[...].astype(jnp.float32)[None, :, None, None], (b, self.num_heads, s, 1))
-    probs = jax.nn.softmax(jnp.concatenate([logits, sink], axis=-1), axis=-1)[..., :-1]
-    out = jnp.einsum("bhst,btd->bshd", probs, kf, precision=precision).astype(self.config.dtype)
+    attend = functools.partial(
+        _sink_attention,
+        softmax_scale=self.softmax_scale,
+        precision=jax.lax.Precision(self.config.matmul_precision),
+        out_dtype=self.config.dtype,
+    )
+    sinks = self.sinks[...]
+    chunk = self.config.ds41_attention_chunk
+    if chunk and s > chunk and s % chunk == 0:
+      out = self._chunked_attention(q, kv, compress_kv, topk_mask, positions, sinks, attend, chunk)
+    else:
+      # Sliding window over the raw KV: key j is visible to query i iff 0 <= pos_i - pos_j < window_size.
+      delta = positions[:, :, None] - positions[:, None, :]
+      mask = (delta >= 0) & (delta < self.window_size)  # [B, S, S]
+      keys = kv
+      if compress_kv is not None:
+        keys = jnp.concatenate([kv, compress_kv], axis=1)
+        mask = jnp.concatenate([mask, topk_mask], axis=-1)
+      out = attend(q, keys, mask, sinks)
 
     # Undo the query rotation so the output lives in the unrotated value space.
     out = self.rotary_embedding(out, positions, unsqueeze_dim=-2, reverse=True)

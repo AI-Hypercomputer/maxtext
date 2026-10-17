@@ -33,7 +33,7 @@ DeepSeek-V4.1-Flash: [0] [1+engram] [2-7, 8-13] [14-19 (+engram)] [20-23] [24-27
 """
 
 import dataclasses
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -226,7 +226,9 @@ class DeepSeek41DecoderLayer(nnx.Module):
       token_map, compressed_vocab_size = compressed_token_map(config)
       hasher = engram_deepseek41.make_hasher(config, spec.layer_id, token_map, compressed_vocab_size)
       self.engram_hasher = StaticWrapper(hasher)
-      self.engram = engram_deepseek41.DeepSeek41Engram(config, hasher.num_embeddings, kernel_init, rngs=rngs)
+      self.engram = engram_deepseek41.DeepSeek41Engram(
+          config, hasher.num_embeddings, kernel_init, mesh=mesh, rngs=rngs
+      )
 
   def hc_mixes(self, h: jax.Array, prefix: str):
     """h: [B, S, hc, D] -> pre [B, S, hc], post [B, S, hc], comb [B, S, hc, hc] (all float32)."""
@@ -245,7 +247,14 @@ class DeepSeek41DecoderLayer(nnx.Module):
   @staticmethod
   def hc_pre(h: jax.Array, mix: jax.Array) -> jax.Array:
     """Collapses the hc copies: [B, S, hc, D] x [B, S, hc] -> [B, S, D]."""
-    return jnp.sum(mix[..., None] * h.astype(jnp.float32), axis=2).astype(h.dtype)
+    # An explicit float32 sum over the (4) copies instead of a reduce over the hc axis: XLA:TPU multi-output-fuses
+    # that reduce with its rematerialized twin in the backward scan and the fusion emitter then fails ("Cannot find a
+    # valid window" for bf16[S, D] outputs of a reduce over dims {0, 2} of [1, S, hc, D]). Same numerics.
+    hf = h.astype(jnp.float32)
+    out = mix[..., 0, None] * hf[:, :, 0]
+    for i in range(1, h.shape[2]):
+      out = out + mix[..., i, None] * hf[:, :, i]
+    return out.astype(h.dtype)
 
   @staticmethod
   def hc_post(x: jax.Array, residual: jax.Array, post: jax.Array, comb: jax.Array) -> jax.Array:
@@ -268,13 +277,24 @@ class DeepSeek41DecoderLayer(nnx.Module):
     residual = h
     ffn_pre, ffn_post, ffn_comb = self.hc_mixes(h, "hc_ffn")
     x = self.post_self_attention_layer_norm(self.hc_pre(h, attn_pre))
-    x, _, _ = self.mlp(x)
+    x, load_balance_loss, moe_bias_updates = self.mlp(x)
+    # Same training-time MoE outputs as the DeepSeek V3 / V4 layers: the load-balance aux loss (added to the loss in
+    # train.py) and the aux-loss-free routing-bias updates (applied to the MoEBiasVar after each step).
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+    if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+      self.sow(nnx.Intermediate, "moe_bias_updates", moe_bias_updates)
     h = self.hc_post(x, residual, ffn_post, ffn_comb)
     return {**carry, **updates, "h": h, "pre_mix": ffn_pre}
 
 
 class DeepSeek41Block(nnx.Module):
-  """One group of layers (`layers_0`, `layers_1`, ...); the unit scanned over a segment's repeats."""
+  """One group of layers (`layers_0`, `layers_1`, ...); the unit scanned over a segment's repeats.
+
+  With `apply_internal_remat` every layer of the group is its own remat boundary (the scan body itself is then not
+  wrapped in `jax.checkpoint`): a group holds up to six layers, and rematerializing it as a whole would keep the
+  activations of all of them, including each layer's [B, H, S, S + C] attention scores, alive in the backward pass.
+  """
 
   def __init__(
       self,
@@ -284,9 +304,15 @@ class DeepSeek41Block(nnx.Module):
       specs: tuple[LayerSpec, ...],
       quant: Optional[quantizations.AqtQuantization] = None,
       *,
+      remat_policy: Optional[Any] = None,
+      apply_internal_remat: bool = False,
+      prevent_cse: bool = True,
       rngs: nnx.Rngs,
   ):
     self.num_layers = len(specs)
+    self.remat_policy = remat_policy
+    self.apply_internal_remat = apply_internal_remat
+    self.prevent_cse = prevent_cse
     for j, spec in enumerate(specs):
       setattr(
           self,
@@ -294,10 +320,21 @@ class DeepSeek41Block(nnx.Module):
           DeepSeek41DecoderLayer(config=config, mesh=mesh, model_mode=model_mode, spec=spec, quant=quant, rngs=rngs),
       )
 
+  def _run_layer(self, layer: "DeepSeek41DecoderLayer", carry: dict, decoder_positions, decoder_input_tokens) -> dict:
+    if not self.apply_internal_remat:
+      return layer(carry, decoder_positions, decoder_input_tokens)
+
+    def body(mdl, c, pos, tok):
+      return mdl(c, pos, tok)
+
+    return nnx.remat(body, policy=self.remat_policy, prevent_cse=self.prevent_cse)(
+        layer, carry, decoder_positions, decoder_input_tokens
+    )
+
   def __call__(self, carry: dict, decoder_positions: jax.Array, decoder_input_tokens: jax.Array):
     out = carry
     for j in range(self.num_layers):
-      out = getattr(self, f"layers_{j}")(out, decoder_positions, decoder_input_tokens)
+      out = self._run_layer(getattr(self, f"layers_{j}"), out, decoder_positions, decoder_input_tokens)
     # A scan carry keeps its structure: drop shared state that only lives inside this group. Every group starts
     # with its own sharing source, so nothing produced here is needed by a later repeat.
     return {k: out[k] for k in carry}, None
