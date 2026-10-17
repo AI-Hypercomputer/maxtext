@@ -36,6 +36,7 @@ from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import moe_combine_tc
 from maxtext.kernels import sort_activations
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
@@ -1720,8 +1721,27 @@ class RoutedMoE(nnx.Module):
         flatten_selected_experts_safe = flatten_selected_experts
 
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
+      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+
       if self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        sorted_inputs = None
+        if self._use_fused_permute(is_qarray):
+          # moe_permute_kernel="tc": gather the tokens into expert-sorted order on
+          # the TensorCore (fwd one-hot MXU selection, bwd = combine forward with
+          # unit weights); see kernels/moe_combine_tc.py. Returns None when the
+          # kernel preconditions do not hold.
+          with jax.named_scope("moe_permute"):
+            sorted_inputs = moe_combine_tc.permute(
+                inputs_2d.astype(self.dtype),
+                sorted_selected_experts,
+                group_size,
+                self.num_experts_per_tok,
+                block_tokens=self.config.moe_permute_block_tokens,
+                vmem_limit_bytes=self.config.moe_tc_vmem_limit_mib * 1024 * 1024,
+                interpret=self._pallas_interpret(),
+            )
+        if sorted_inputs is None:
+          sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -1730,8 +1750,6 @@ class RoutedMoE(nnx.Module):
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
-
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -1814,6 +1832,7 @@ class RoutedMoE(nnx.Module):
     the result is (batch, seq, emb // 128, 128).
     """
 
+    output = None
     if tc_routing is not None:
       output = ring_ragged_unsort_tc(
           intermediate,
@@ -1852,7 +1871,24 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
       )
-    else:
+    elif self._use_fused_combine(intermediate, weights, group_sizes):
+      # moe_combine_kernel="tc": fused unpermute + top-k weighted sum (f32
+      # accumulation, same arithmetic as float32_weight_sum=True). Never
+      # materializes the [tokens*top_k, emb] unsorted copy; see
+      # kernels/moe_combine_tc.py. Returns None when the kernel preconditions
+      # do not hold so we fall through to the XLA path below.
+      with jax.named_scope("moe_combine"):
+        output = moe_combine_tc.combine(
+            intermediate,
+            sorted_selected_experts,
+            jnp.reshape(weights, (-1, self.num_experts_per_tok)),
+            group_sizes,
+            block_tokens=self.config.moe_combine_block_tokens,
+            vmem_limit_bytes=self.config.moe_tc_vmem_limit_mib * 1024 * 1024,
+            interpret=self._pallas_interpret(),
+            fallback=False,
+        )
+    if output is None:
       unsort_intermediate = _sort_activations(
           intermediate,
           jnp.argsort(sorted_selected_experts),
@@ -1878,6 +1914,37 @@ class RoutedMoE(nnx.Module):
             precision=matmul_precision,
         )
     return output.reshape(batch_size, sequence_length, -1).astype(self.dtype)
+
+  def _pallas_interpret(self) -> bool:
+    """Returns True when the target device platform is not TPU (enabling Mosaic interpret mode)."""
+    return self.mesh.devices.flat[0].platform != "tpu"
+
+  def _use_fused_combine(self, intermediate, weights, group_sizes) -> bool:
+    """Returns True iff `moe_combine_kernel="tc"` is configured and the fused combine is valid here.
+
+    Valid only for the plain local sort: every token*top_k row is present in
+    `intermediate` in stable expert-sorted order and `group_sizes` sums to the
+    row count (no expert parallelism, no truncated/ragged buffers).
+    """
+    if self.config.moe_combine_kernel != "tc" or group_sizes is None:
+      return False
+    if not isinstance(intermediate, jax.Array) or intermediate.ndim != 2:
+      return False
+    if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4:
+      return False
+    if self.get_expert_parallelism_size() != 1 or self.config.use_ring_of_experts:
+      return False
+    return intermediate.shape[0] == math.prod(weights.shape) and group_sizes.ndim == 1
+
+  def _use_fused_permute(self, is_qarray: bool) -> bool:
+    """Returns True iff `moe_permute_kernel="tc"` is configured and the fused permute is valid here.
+
+    Valid only for the plain local sort of unquantized activations (no expert
+    parallelism, no ring-of-experts).
+    """
+    if self.config.moe_permute_kernel != "tc" or is_qarray:
+      return False
+    return self.get_expert_parallelism_size() == 1 and not self.config.use_ring_of_experts
 
   @staticmethod
   def _maybe_truncate_local_group_size(

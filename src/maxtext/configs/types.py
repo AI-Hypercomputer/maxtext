@@ -1419,6 +1419,47 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
   )
+  moe_combine_kernel: Literal["xla", "tc"] = Field(
+      "xla",
+      description=(
+          "Implementation of the MoE combine (unpermute + Top-K weighted sum) in the sparse matmul path without"
+          " expert parallelism. 'xla': gather back into token order and einsum (default). 'tc': fused TensorCore"
+          " Pallas kernel (kernels/moe_combine_tc.py) with f32 accumulation that never materializes the"
+          " [tokens * top_k, emb] unsorted copy. Requires sparse_matmul=True, use_ring_of_experts=False and"
+          " use_ragged_sort=False; falls back to 'xla' at runtime when the kernel preconditions do not hold."
+      ),
+  )
+  moe_combine_block_tokens: int = Field(
+      256,
+      description=(
+          "Tokens per grid step for moe_combine_kernel='tc' (power of two >= 128). Automatically stepped down by"
+          " powers of two (>= 128) to divide the token count and fit within moe_tc_vmem_limit_mib."
+      ),
+  )
+  moe_permute_kernel: Literal["xla", "tc"] = Field(
+      "xla",
+      description=(
+          "Implementation of the MoE token permute (gather into expert-sorted order) when"
+          " moe_use_direct_token_gather=True. 'xla': XLA gather (default). 'tc': fused TensorCore Pallas kernel"
+          " (kernels/moe_combine_tc.py `permute`, forward and backward). Requires moe_use_direct_token_gather=True"
+          " and use_ring_of_experts=False; falls back to 'xla' at runtime when the kernel preconditions do not"
+          " hold."
+      ),
+  )
+  moe_permute_block_tokens: int = Field(
+      512,
+      description=(
+          "Tokens per grid step for moe_permute_kernel='tc' (power of two >= 128). Automatically stepped down by"
+          " powers of two (>= 128) to divide the token count and fit within moe_tc_vmem_limit_mib."
+      ),
+  )
+  moe_tc_vmem_limit_mib: int = Field(
+      120,
+      description=(
+          "Maximum per-kernel VMEM footprint in MiB for moe_combine_kernel='tc' and moe_permute_kernel='tc'"
+          " (>= 16). Block size is stepped down to fit this budget; shapes that still exceed it fall back to 'xla'."
+      ),
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -6172,6 +6213,29 @@ class MaxTextConfig(
 
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
+
+    if self.moe_combine_block_tokens < 128 or (self.moe_combine_block_tokens & (self.moe_combine_block_tokens - 1)) != 0:
+      raise ValueError(
+          f"`moe_combine_block_tokens` must be a power of two >= 128, got {self.moe_combine_block_tokens}."
+      )
+    if self.moe_permute_block_tokens < 128 or (self.moe_permute_block_tokens & (self.moe_permute_block_tokens - 1)) != 0:
+      raise ValueError(
+          f"`moe_permute_block_tokens` must be a power of two >= 128, got {self.moe_permute_block_tokens}."
+      )
+    if self.moe_tc_vmem_limit_mib < 16:
+      raise ValueError(f"`moe_tc_vmem_limit_mib` must be >= 16, got {self.moe_tc_vmem_limit_mib}.")
+
+    if self.moe_combine_kernel == "tc":
+      if not self.sparse_matmul:
+        raise ValueError("`moe_combine_kernel='tc'` requires `sparse_matmul=True`.")
+      if self.use_ring_of_experts or self.use_ragged_sort:
+        raise ValueError("`moe_combine_kernel='tc'` requires `use_ring_of_experts=False` and `use_ragged_sort=False`.")
+
+    if self.moe_permute_kernel == "tc":
+      if not self.moe_use_direct_token_gather:
+        raise ValueError("`moe_permute_kernel='tc'` requires `moe_use_direct_token_gather=True`.")
+      if self.use_ring_of_experts:
+        raise ValueError("`moe_permute_kernel='tc'` requires `use_ring_of_experts=False`.")
 
     for val in self.compress_ratios:
       if val != 0 and val < 4:
