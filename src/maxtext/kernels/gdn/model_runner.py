@@ -625,6 +625,7 @@ def run_gdn_kernel_layer(
   cp_dh_scan = bool(getattr(cfg, "gdn_cp_dh_scan", False))
   # States-only CP pass 1 kernel and VMEM bf16 qkv upcast (wrapper.py). Same values.
   pass1_states_and_bf16_qkv = bool(getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False))
+  cp_fast_state_passing = bool(getattr(cfg, "gdn_cp_fast_state_passing", False)) and model_mode == MODEL_MODE_TRAIN
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
@@ -947,6 +948,7 @@ def run_gdn_kernel_layer(
           cp_m_scan=cp_m_scan,
           cp_dh_scan=cp_dh_scan,
           pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
+          cp_fast_state_passing=cp_fast_state_passing,
       )
 
     if not isinstance(qkv, jax.core.Tracer):

@@ -1706,6 +1706,9 @@ gdn_out_proj_token_minor: false
 # chunks and upcasts to fp32 in VMEM. Bit-identical to false for bfloat16 activations. Requires use_gdn_kernel: true,
 # gdn_chunk_size: 64, and dtype: "bfloat16".
 gdn_cp_pass1_states_and_bf16_qkv: false
+# Sequence-sharded CP GDN training state passing: 2-round exclusive state/grad-state scans on 4 CP ranks and
+# skip dead train-mode final conv/recurrent state broadcasts when initial states are None.
+gdn_cp_fast_state_passing: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

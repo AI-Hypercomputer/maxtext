@@ -2569,6 +2569,15 @@ class Qwen3Next(BaseModel):
           " gdn_chunk_size=64, and dtype='bfloat16'."
       ),
   )
+  gdn_cp_fast_state_passing: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: in training (when initial conv_state and recurrent_state are None), replace the"
+          " 3-round + psum Hillis-Steele cross-rank state and grad-state scans on 4 CP ranks with a 2-round"
+          " 4-ppermute 2-matmul schedule, and skip the unused end-of-step conv/recurrent state broadcasts"
+          " (kernels/gdn/gdn_bwd/cp_gdn.py, api.py). Bit-identical to False. Requires use_gdn_kernel=True."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -5694,6 +5703,7 @@ class MaxTextConfig(
     cp_dh_scan = getattr(cfg, "gdn_cp_dh_scan", False)
     out_proj_token_minor = getattr(cfg, "gdn_out_proj_token_minor", False)
     pass1_states_bf16_qkv = getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False)
+    fast_state_passing = getattr(cfg, "gdn_cp_fast_state_passing", False)
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       if dense_token_stack:
         raise ValueError(
@@ -5713,6 +5723,11 @@ class MaxTextConfig(
       if pass1_states_bf16_qkv:
         raise ValueError(
             "gdn_cp_pass1_states_and_bf16_qkv=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if fast_state_passing:
+        raise ValueError(
+            "gdn_cp_fast_state_passing=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
             f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
         )
       return
@@ -5749,6 +5764,11 @@ class MaxTextConfig(
         raise ValueError(
             "gdn_cp_pass1_states_and_bf16_qkv=True requires use_gdn_kernel=True: only the Pallas GDN forward"
             " kernel runs the states-only CP pass 1 and VMEM bf16 qkv upcast."
+        )
+      if fast_state_passing:
+        raise ValueError(
+            "gdn_cp_fast_state_passing=True requires use_gdn_kernel=True: only the GDN kernel path runs the"
+            " sequence-sharded context-parallel state passing (kernels/gdn/gdn_bwd/cp_gdn.py)."
         )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
