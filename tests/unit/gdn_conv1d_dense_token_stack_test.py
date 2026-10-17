@@ -368,6 +368,7 @@ def _validator_cfg(**overrides):
       "max_target_length": 4096,
       "gdn_conv1d_input_in_qkv_dtype": False,
       "gdn_conv1d_dense_token_stack": False,
+      "gdn_gated_norm_layout": "auto",
       "gdn_cp_mode": "auto",
       "packing": True,
   }

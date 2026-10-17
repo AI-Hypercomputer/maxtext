@@ -1704,6 +1704,10 @@ gdn_cp_m_scan: false
 gdn_cp_dh_scan: false
 # Pin the GatedDeltaNet gated-norm output to token-minor (0, 2, 1) before out_proj in training.
 gdn_out_proj_token_minor: false
+# Layout of the GatedDeltaNet gated-norm output in training: 'auto' (XLA's choice), 'natural' (pinned row-major in the
+# forward, so the f32 norm math stays in the GDN kernel's layout instead of out_proj's token-minor one) or
+# 'natural_fwd_bwd' (its cotangent too). Same values. Non-'auto' requires gdn_out_proj_token_minor: true.
+gdn_gated_norm_layout: "auto"
 # Sequence-sharded CP GDN pass 1 runs the states-only forward kernel (PER_SEQ_STATES, no output or chunk states),
 # and every prefill-only forward kernel (CP pass 1, CP pass 2, and non-CP/head-sharded prefill) DMAs bfloat16 qkv
 # chunks and upcasts to fp32 in VMEM. Bit-identical to false for bfloat16 activations. Requires use_gdn_kernel: true,

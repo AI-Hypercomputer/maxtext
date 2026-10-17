@@ -288,6 +288,7 @@ class GdnConv1dInputInQkvDtypeTest(parameterized.TestCase):
           "dcn_context_usp_ulysses_parallelism": 1,
           "use_gdn_kernel": False,
           "gdn_conv1d_input_in_qkv_dtype": False,
+          "gdn_gated_norm_layout": "auto",
       }
       fields.update(overrides)
       return types.SimpleNamespace(**fields)

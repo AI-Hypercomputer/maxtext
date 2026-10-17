@@ -2597,6 +2597,19 @@ class Qwen3Next(BaseModel):
           " Qwen3NextGatedDeltaNet (models/qwen3.py), matching the MoE output projection input layout."
       ),
   )
+  gdn_gated_norm_layout: Literal["auto", "natural", "natural_fwd_bwd"] = Field(
+      "auto",
+      description=(
+          "GDN training path: memory layout of the gated RMSNorm output in Qwen3NextGatedDeltaNet (models/qwen3.py)."
+          " 'auto' leaves it to XLA, which under gdn_out_proj_token_minor=True propagates out_proj's token-minor input"
+          " layout back into the float32 norm math, so every call re-tiles the bf16 GDN output and transposes a"
+          " float32 [tokens, value_dim] copy of it. 'natural' pins the norm output row-major (0, 1, 2, 3) in the"
+          " forward only (the cotangent keeps XLA's layout), so the norm math stays in the GDN kernel's layout and one"
+          " bf16 transpose to token-minor follows the norm. 'natural_fwd_bwd' also pins the cotangent row-major, so"
+          " the norm backward stays natural and produces d_o in the layout the GDN backward kernels read. Layout only:"
+          " the values are unchanged. Requires gdn_out_proj_token_minor=True and a decoder with Gated DeltaNet layers."
+      ),
+  )
   gdn_cp_pass1_states_and_bf16_qkv: bool = Field(
       False,
       description=(
@@ -5762,6 +5775,7 @@ class MaxTextConfig(
     cp_m_scan = getattr(cfg, "gdn_cp_m_scan", False)
     cp_dh_scan = getattr(cfg, "gdn_cp_dh_scan", False)
     out_proj_token_minor = getattr(cfg, "gdn_out_proj_token_minor", False)
+    gated_norm_layout = cfg.gdn_gated_norm_layout
     pass1_states_bf16_qkv = getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False)
     fast_state_passing = getattr(cfg, "gdn_cp_fast_state_passing", False)
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
@@ -5790,7 +5804,17 @@ class MaxTextConfig(
             "gdn_cp_fast_state_passing=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
             f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
         )
+      if gated_norm_layout != "auto":
+        raise ValueError(
+            f"gdn_gated_norm_layout={gated_norm_layout!r} requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
       return
+    if gated_norm_layout != "auto" and not out_proj_token_minor:
+      raise ValueError(
+          f"gdn_gated_norm_layout={gated_norm_layout!r} requires gdn_out_proj_token_minor=True: it keeps out_proj's"
+          " token-minor input layout out of the GDN gated-norm math, so without that layout there is nothing to keep out."
+      )
     cp_size = math.prod(
         max(1, getattr(cfg, f"{mesh}_{axis}_parallelism"))
         for mesh in ("ici", "dcn")

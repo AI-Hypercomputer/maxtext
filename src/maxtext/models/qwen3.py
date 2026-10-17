@@ -61,6 +61,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated, RMSNorm, l2norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
@@ -123,6 +124,54 @@ def _pin_row_major_layout(x: Array) -> Array:
   if not isinstance(x, jax.core.Tracer):
     return x
   return with_layout_constraint(x, Layout(major_to_minor=tuple(range(x.ndim))))
+
+
+def _with_row_major_layout(x: Array) -> Array:
+  from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
+
+  return with_layout_constraint(x, Layout(major_to_minor=tuple(range(x.ndim))))
+
+
+@jax.custom_vjp
+def _pin_row_major_fwd_and_bwd(x: Array) -> Array:
+  """Returns `x` unchanged, laid out row-major in memory in the forward pass AND for its cotangent in the backward.
+
+  `moe.forward_row_major` constrains only the forward value; this also pins the cotangent, so the backward ops that
+  produce it and consume it run in row-major layout too.
+  """
+  return _with_row_major_layout(x)
+
+
+def _pin_row_major_fwd_and_bwd_fwd(x):
+  return _with_row_major_layout(x), None
+
+
+def _pin_row_major_fwd_and_bwd_bwd(_, cotangent):
+  return (_with_row_major_layout(cotangent),)
+
+
+_pin_row_major_fwd_and_bwd.defvjp(_pin_row_major_fwd_and_bwd_fwd, _pin_row_major_fwd_and_bwd_bwd)
+
+_GDN_GATED_NORM_LAYOUT_LOGGED = set()
+
+
+def _pin_gdn_gated_norm_layout(gated_output: Array, mode: str) -> Array:
+  """Applies `gdn_gated_norm_layout` to the GDN gated-norm output, shape (B, S, H_v, D_v), in training.
+
+  Under `gdn_out_proj_token_minor` the reshaped norm output feeds out_proj token-minor, and XLA propagates that layout
+  back into the float32 norm math: each call re-tiles the bf16 GDN kernel output and transposes a float32
+  [tokens, value_dim] copy of it. Pinning the norm output row-major keeps the norm math in the kernel's layout and
+  leaves one bf16 transpose to token-minor between the norm and out_proj. Layout only: the values are unchanged.
+  """
+  if mode not in _GDN_GATED_NORM_LAYOUT_LOGGED:
+    _GDN_GATED_NORM_LAYOUT_LOGGED.add(mode)
+    where = "in the forward and on its cotangent" if mode == "natural_fwd_bwd" else "in the forward only"
+    max_logging.log(f"[gdn_gated_norm_layout] mode={mode}: GDN gated-norm output pinned row-major {where}")
+  if mode == "natural":
+    return moe.forward_row_major(gated_output)
+  if mode == "natural_fwd_bwd":
+    return _pin_row_major_fwd_and_bwd(gated_output)
+  raise ValueError(f"gdn_gated_norm_layout must be 'auto', 'natural' or 'natural_fwd_bwd', got {mode!r}.")
 
 
 def naive_jax_chunk_gated_delta_rule(
@@ -1471,11 +1520,15 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
     gated_output_reshaped = self.norm(core_attn_out, z, out_sharding=head_sharding)
+    out_proj_token_minor = model_mode == MODEL_MODE_TRAIN and getattr(cfg, "gdn_out_proj_token_minor", False)
+    # validate_gdn_config allows a non-'auto' gdn_gated_norm_layout only with gdn_out_proj_token_minor=True.
+    if out_proj_token_minor and cfg.gdn_gated_norm_layout != "auto":
+      gated_output_reshaped = _pin_gdn_gated_norm_layout(gated_output_reshaped, cfg.gdn_gated_norm_layout)
 
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
     gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
-    if model_mode == MODEL_MODE_TRAIN and getattr(cfg, "gdn_out_proj_token_minor", False):
+    if out_proj_token_minor:
       gated_output = moe._forward_layout_constraint(gated_output, (0, 2, 1))
 
     # Final output shape: (B, S, E)

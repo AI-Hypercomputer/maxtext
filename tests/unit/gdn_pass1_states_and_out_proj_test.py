@@ -778,6 +778,7 @@ def _validator_cfg(**overrides):
       "gdn_conv1d_input_in_qkv_dtype": False,
       "gdn_conv1d_dense_token_stack": False,
       "gdn_out_proj_token_minor": False,
+      "gdn_gated_norm_layout": "auto",
       "gdn_cp_pass1_states_and_bf16_qkv": False,
       "gdn_cp_mode": "auto",
       "packing": True,
