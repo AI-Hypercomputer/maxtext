@@ -1532,6 +1532,18 @@ class MoEGeneral(BaseModel):
           " use_ring_of_experts=True and use_ragged_sort=True."
       ),
   )
+  moe_fallback_topk_capacity: int = Field(
+      0,
+      description=(
+          "Router replay (forced routing): get_topk computes the router's own top-k ids for every token and keeps"
+          " them only for tokens without valid forced ids (and, under moe_exclude_padding_from_routing, never for"
+          " padding). With a value > 0 they are computed only for the tokens that use them: those rows, at most this"
+          " many per get_topk call, are gathered (in token order), top-k'd and written back to their tokens; a"
+          " lax.cond computes every row instead when more tokens use them. top-k is row-wise, so the ids, and hence"
+          " get_topk's weights and ids and their gradients, are bit-identical to 0. Forward-only integer work (the"
+          " ids carry no gradient). 0 (default) = every token, the program unchanged."
+      ),
+  )
   moe_ragged_sort_unique_pair_argsort: bool = Field(
       False,
       description=(
@@ -2104,6 +2116,13 @@ class MoEGeneral(BaseModel):
               self._remat_keeps_moe_tensor_requirement("down-projection output", _MOE_DOWN_PROJECTION_NAMES),
           ],
       )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_fallback_topk_capacity(self) -> "MoEGeneral":
+    """moe_fallback_topk_capacity is a row count: 0 (off) or positive."""
+    if self.moe_fallback_topk_capacity < 0:
+      raise ValueError(f"moe_fallback_topk_capacity must be >= 0, got {self.moe_fallback_topk_capacity}.")
     return self
 
   @model_validator(mode="after")

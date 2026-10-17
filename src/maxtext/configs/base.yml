@@ -388,6 +388,10 @@ use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the Mo
 # router replay / padding exclusion). Same permutation, same values.
 # Needs sparse_matmul, use_ring_of_experts and use_ragged_sort (and te_moe_block=False).
 moe_routing_index_math: 'sort'
+# Router replay (forced routing): compute the router's own top-k (for tokens without valid forced ids) on at most this
+# many compacted token rows per call instead of on every token; a lax.cond takes every row when more tokens need it.
+# Same ids for every token that uses them, so get_topk's outputs are bit-identical. 0 = every token (today).
+moe_fallback_topk_capacity: 0
 # With moe_routing_index_math='sort': the ragged sort's argsorts (and the SparseCore gather-reduce validity sort) as
 # unstable two-operand sorts of unique (key, index) pairs instead of stable argsorts (three operands). Same values.
 moe_ragged_sort_unique_pair_argsort: false

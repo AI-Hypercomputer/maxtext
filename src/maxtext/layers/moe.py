@@ -519,6 +519,65 @@ def topk_indices_by_argmax(scores: jax.Array, k: int) -> jax.Array:
   return jnp.stack(picks, axis=-1)
 
 
+def _top_k_ids(scores: jax.Array, k: int) -> jax.Array:
+  """`jax.lax.top_k(scores, k)[1]`: the ids half of lax.top_k, for fallback_topk_indices_compacted."""
+  return jax.lax.top_k(scores, k)[1]
+
+
+def fallback_topk_indices_compacted(scores: jax.Array, uses: jax.Array, k: int, capacity: int, topk_fn) -> jax.Array:
+  """The router's own top-k ids for the tokens that use them, computed on a compacted set of rows.
+
+  Under router replay (forced routing) get_topk computes the router's top-k for every token, then keeps it only for
+  tokens without valid forced ids (and, under moe_exclude_padding_from_routing, not for padding, which is routed
+  nowhere). This gathers the rows where `uses` is True -- the first `capacity` of them, in token order -- runs
+  `topk_fn` on those rows only and writes each row's ids back to its token. Every other token gets 0, which no
+  output reads. top-k is row-wise (each row's ids depend only on that row's scores), so every using token gets
+  exactly the ids the full computation gives it. When more than `capacity` tokens use it, a lax.cond runs `topk_fn`
+  on every row instead, so the result is the same for any input. Integer ids only: no gradient flows through here.
+
+  Args:
+    scores: [..., num_experts] router scores (get_topk's replay-path softmax probabilities).
+    uses: [...] bool, True where the token's router ids reach get_topk's outputs.
+    k: ids per token.
+    capacity: rows computed on the compacted path (moe_fallback_topk_capacity, > 0).
+    topk_fn: maps [rows, num_experts] scores to [rows, k] int32 ids (topk_indices_by_argmax, or lax.top_k's ids).
+
+  Returns:
+    [..., k] int32: the router's ids wherever `uses` is True. Elsewhere 0 on the compacted path and the full
+    computation's ids on the fallback path; get_topk never reads those.
+  """
+  lead = scores.shape[:-1]
+  num_tokens = math.prod(lead)
+  cap = min(int(capacity), num_tokens)
+  flat_scores = scores.reshape(num_tokens, scores.shape[-1])
+  flat_uses = uses.reshape(num_tokens)
+  # A using token's row on the compacted path is its rank among the using tokens; -1 marks tokens that do not use it.
+  rank = jnp.cumsum(flat_uses.astype(jnp.int32)) - 1
+  slot = jnp.where(flat_uses, rank, -1)
+  num_using = rank[-1] + 1
+
+  def compacted(operands):
+    flat_scores, slot = operands
+    row_iota = jax.lax.broadcasted_iota(jnp.int32, (cap, num_tokens), 0)
+    token_iota = jax.lax.broadcasted_iota(jnp.int32, (cap, num_tokens), 1)
+    # The token of compacted row c: exactly one match while c < num_using; unused rows read token 0 and are dropped.
+    token_of_row = jnp.sum(jnp.where(slot[None, :] == row_iota, token_iota, 0), axis=1)
+    row_ids = topk_fn(jnp.take(flat_scores, token_of_row, axis=0)).astype(jnp.int32)
+    # Back to token order: token t takes row slot[t]'s ids (one match), a non-using token none (0). Compare-select-sum
+    # rather than a gather or scatter, so XLA keeps it on the TensorCore; laid out [k, cap, tokens] so the long token
+    # axis is the minor one, then transposed back to [tokens, k].
+    hit = slot[None, :] == row_iota  # [cap, tokens]
+    ids_t = jnp.sum(jnp.where(hit[None, :, :], row_ids.T[:, :, None], jnp.zeros((), jnp.int32)), axis=1)
+    return ids_t.T
+
+  def every_row(operands):
+    flat_scores, _ = operands
+    return topk_fn(flat_scores).astype(jnp.int32)
+
+  ids = jax.lax.cond(num_using <= cap, compacted, every_row, (flat_scores, slot))
+  return ids.reshape(lead + (k,))
+
+
 def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None):
   """Computes a bias adjustment update based on expert load.
 
@@ -1781,12 +1840,16 @@ class RoutedMoE(nnx.Module):
     valid_token_mask = None
     if forced_routed_experts is not None:
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-      if self.config.moe_routing_index_math == "count":
-        # The router's own choice for tokens without (valid) forced ids: the same indices as top_k, from k argmax
-        # passes instead of a sort. Under moe_exclude_padding_from_routing every token takes this branch.
-        auto_indices = topk_indices_by_argmax(router_probs, self.num_experts_per_tok)
-      else:
-        _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
+      # moe_fallback_topk_capacity > 0: the router's own top-k is computed further down, once token_is_forced is
+      # known, for the tokens that use it only (fallback_topk_indices_compacted). 0 (default): for every token, here.
+      compact_fallback = getattr(self.config, "moe_fallback_topk_capacity", 0) > 0
+      if not compact_fallback:
+        if self.config.moe_routing_index_math == "count":
+          # The router's own choice for tokens without (valid) forced ids: the same indices as top_k, from k argmax
+          # passes instead of a sort. Under moe_exclude_padding_from_routing every token takes this branch.
+          auto_indices = topk_indices_by_argmax(router_probs, self.num_experts_per_tok)
+        else:
+          _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
       # A token has real forced routing only if its slots are within [0, num_experts).
       # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
@@ -1794,6 +1857,21 @@ class RoutedMoE(nnx.Module):
       sorted_experts = jnp.sort(forced_routed_experts, axis=-1)
       has_duplicate = jnp.any(sorted_experts[..., 1:] == sorted_experts[..., :-1], axis=-1, keepdims=True)
       token_is_forced = jnp.logical_and(jnp.all(slot_valid, axis=-1, keepdims=True), jnp.logical_not(has_duplicate))
+      if compact_fallback:
+        # A token's router ids reach the outputs only if it is not forced and, under moe_exclude_padding_from_routing,
+        # not padding (a padding token gets no valid slot below: ids -1 and weights 0, whatever auto_indices holds).
+        uses_router_ids = jnp.logical_not(token_is_forced[..., 0])
+        if self.config.moe_exclude_padding_from_routing:
+          uses_router_ids = jnp.logical_and(
+              uses_router_ids, jnp.logical_not(jnp.all(forced_routed_experts == PAD_TOKEN_ROUTED_EXPERT, axis=-1))
+          )
+        if self.config.moe_routing_index_math == "count":
+          topk_ids_fn = functools.partial(topk_indices_by_argmax, k=self.num_experts_per_tok)
+        else:
+          topk_ids_fn = functools.partial(_top_k_ids, k=self.num_experts_per_tok)
+        auto_indices = fallback_topk_indices_compacted(
+            router_probs, uses_router_ids, self.num_experts_per_tok, self.config.moe_fallback_topk_capacity, topk_ids_fn
+        )
       top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       if self.config.moe_exclude_padding_from_routing:
         # A padding token (every slot PAD_TOKEN_ROUTED_EXPERT) is never forced (its slots are not
