@@ -458,8 +458,10 @@ def _off_by_one_chunk_inverse():
   """Patches the reorder so that restoring natural order is off by one chunk."""
   real_reorder = tokamax_ring_attention.reorder_for_load_balance
 
-  def reorder(x, *, mesh, axis_name, batch_axes, to_natural=False, seq_dim=1):
-    out = real_reorder(x, mesh=mesh, axis_name=axis_name, batch_axes=batch_axes, to_natural=to_natural, seq_dim=seq_dim)
+  def reorder(x, *, mesh, axis_name, batch_axes, to_natural=False, seq_dim=1, **kwargs):
+    out = real_reorder(
+        x, mesh=mesh, axis_name=axis_name, batch_axes=batch_axes, to_natural=to_natural, seq_dim=seq_dim, **kwargs
+    )
     return _roll_one_chunk(out, mesh.shape[axis_name], seq_dim) if to_natural and out is not None else out
 
   return unittest.mock.patch.object(tokamax_ring_attention, "reorder_for_load_balance", reorder)

@@ -1551,6 +1551,11 @@ context_parallel_attention_load_balance: false
 # the remat replay of the attention layers reads it instead of reordering them again. Same values. Requires
 # context_parallel_attention_load_balance: true, remat_policy: custom and scan_layers: true.
 context_parallel_attention_load_balance_hoist_ids: false
+# How context_parallel_attention_load_balance moves each attention layer's tokens into and out of DUAL_CHUNK_SWAP order.
+# "dual_chunk_swap" (default): two collective-permutes of half a shard; a rank keeping its own half copies it inside the
+# permute. "dual_chunk_swap_local_self": the same order and values, with those self pairs dropped from the permutes and
+# the local half taken by a select. Requires context_parallel_attention_load_balance: true.
+context_parallel_attention_load_balance_order: "dual_chunk_swap"
 context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 

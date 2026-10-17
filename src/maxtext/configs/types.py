@@ -2847,6 +2847,17 @@ class HardwareAndMesh(BaseModel):
           " least 2, remat_policy='custom' and scan_layers=True."
       ),
   )
+  context_parallel_attention_load_balance_order: Literal["dual_chunk_swap", "dual_chunk_swap_local_self"] = Field(
+      "dual_chunk_swap",
+      description=(
+          "How context_parallel_attention_load_balance moves each attention layer's tokens between natural and"
+          " DUAL_CHUNK_SWAP order (tokamax_ring_attention.reorder_for_load_balance). 'dual_chunk_swap' (default):"
+          " two collective-permutes of half a shard per reorder, where a rank whose half stays on it is a (r, r)"
+          " pair, i.e. a local copy inside the permute. 'dual_chunk_swap_local_self': the same token order and"
+          " values, with the (r, r) pairs dropped from both permutes and the self rank's own half taken by a select."
+          " Requires context_parallel_attention_load_balance=True with an even context parallelism of at least 2."
+      ),
+  )
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
@@ -2897,6 +2908,34 @@ class HardwareAndMesh(BaseModel):
               (self.scan_layers, "scan_layers=True (the hoist out of the layer loop is jax.lax.scan's)"),
           ],
       )
+    return self
+
+  @model_validator(mode="after")
+  def validate_context_parallel_attention_load_balance_order(self) -> "HardwareAndMesh":
+    """A non-default order changes how the attention load-balance path moves tokens, so it needs that path.
+
+    Runs after validate_context_parallel_attention_load_balance_hoist_ids, which turns the attention load balance off
+    under attention_context_parallel_mode='ulysses'.
+    """
+    if self.context_parallel_attention_load_balance_order == "dual_chunk_swap":
+      return self
+    context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
+        self, f"dcn_{self.context_sharding}_parallelism", 1
+    )
+    _reject_unless(
+        f"context_parallel_attention_load_balance_order={self.context_parallel_attention_load_balance_order!r}",
+        [
+            (
+                self.context_parallel_attention_load_balance,
+                "context_parallel_attention_load_balance=True (the only path that reorders the attention tokens; it is"
+                " off under attention_context_parallel_mode='ulysses')",
+            ),
+            (
+                context_parallel_size >= 2 and context_parallel_size % 2 == 0,
+                f"an even context parallelism of at least 2 (got {context_parallel_size})",
+            ),
+        ],
+    )
     return self
 
 
