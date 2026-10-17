@@ -626,6 +626,9 @@ def run_gdn_kernel_layer(
   # States-only CP pass 1 kernel and VMEM bf16 qkv upcast (wrapper.py). Same values.
   pass1_states_and_bf16_qkv = bool(getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False))
   cp_fast_state_passing = bool(getattr(cfg, "gdn_cp_fast_state_passing", False)) and model_mode == MODEL_MODE_TRAIN
+  # Backward kernel on the natural operand layouts (gdn_bwd/bwd_memory_ref.py). Same values. Read as an attribute: a
+  # config without the key raises instead of silently running the relayout path.
+  bwd_natural_layout = bool(cfg.gdn_bwd_natural_layout)
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
@@ -904,6 +907,7 @@ def run_gdn_kernel_layer(
             conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
             conv_dense_token_stack=conv_dense_token_stack,
             pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
+            bwd_natural_layout=bwd_natural_layout,
         )
 
         if next_cs is not None:
@@ -949,6 +953,7 @@ def run_gdn_kernel_layer(
           cp_dh_scan=cp_dh_scan,
           pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
           cp_fast_state_passing=cp_fast_state_passing,
+          bwd_natural_layout=bwd_natural_layout,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -994,6 +999,7 @@ def run_gdn_kernel_layer(
         conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
         conv_dense_token_stack=conv_dense_token_stack,
         pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
+        bwd_natural_layout=bwd_natural_layout,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")

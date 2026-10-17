@@ -26,6 +26,7 @@ import jax.numpy as jnp
 from .. import compute_conv1d as local_compute_conv1d
 from .. import compute_gdn as local_compute_gdn
 from .bwd_memory_ref import make_bwd_block_specs
+from .bwd_memory_ref import make_bwd_block_specs_natural
 from .runtime_utils import ensure_cpu_interpret_registered
 from .runtime_utils import pallas_unsupported_reason
 from .runtime_utils import target_platform
@@ -126,6 +127,10 @@ class GDNBackwardConfig:
   # with `tri_inv_algo`.
   recompute_t_inv: bool = False
   tri_inv_algo: str = local_compute_gdn.DEFAULT_TRI_INV_ALGO
+  # Natural layout (`pallas_gdn_bwd_kernel(natural_layout=True)`): the body reads q / k / v from three refs (windows
+  # of qkv_conv [B, S, dim]) and writes dq / dk / dv to three refs (windows of dy_conv [B, S, dim]) instead of one
+  # concatenated [chunk, group_dim] block each way. Every other block has the same VMEM shape either way.
+  split_qkv_io: bool = False
 
   @property
   def repeats(self) -> int:
@@ -144,14 +149,16 @@ def _bwd_gdn_pipeline_body(
     has_dh0: bool = False,
 ) -> None:
   """Inner kernel executed per (batch, group, chunk) by emit_pipeline with manual GDN backward."""
-  if len(refs) == 17 and not cfg.recompute_t_inv:
+  # q / k / v (and dq / dk / dv) are one concatenated ref each way, or three with cfg.split_qkv_io.
+  num_qkv = 3 if cfg.split_qkv_io else 1
+  if len(refs) == 15 + 2 * num_qkv and not cfg.recompute_t_inv:
     has_dht = True
     has_dh0 = True
-  idx = 0
+  qkv_refs = refs[:num_qkv]
+  idx = num_qkv
   # pylint: disable=unbalanced-tuple-unpacking
   if cfg.recompute_t_inv:
     (
-        qkv_conv_ref,
         b_ref,
         a_ref,
         do_ref,
@@ -159,12 +166,11 @@ def _bwd_gdn_pipeline_body(
         a_log_ref,
         dt_bias_ref,
         reset_ref,
-    ) = refs[idx : idx + 8]
+    ) = refs[idx : idx + 7]
     t_inv_ref = None
-    idx += 8
+    idx += 7
   else:
     (
-        qkv_conv_ref,
         b_ref,
         a_ref,
         do_ref,
@@ -173,22 +179,23 @@ def _bwd_gdn_pipeline_body(
         a_log_ref,
         dt_bias_ref,
         reset_ref,
-    ) = refs[idx : idx + 9]
-    idx += 9
+    ) = refs[idx : idx + 8]
+    idx += 8
   if has_dht:
     dht_ref = refs[idx]
     idx += 1
   else:
     dht_ref = None
+  dy_refs = refs[idx : idx + num_qkv]
+  idx += num_qkv
   (
-      dy_conv_ref,
       d_b_ref,
       d_a_ref,
       d_a_log_ref,
       d_dt_bias_ref,
-  ) = refs[idx : idx + 5]
+  ) = refs[idx : idx + 4]
   # pylint: enable=unbalanced-tuple-unpacking
-  idx += 5
+  idx += 4
   if has_dh0:
     dh0_ref = refs[idx]
     idx += 1
@@ -217,17 +224,23 @@ def _bwd_gdn_pipeline_body(
 
   is_reset = reset_ref[...][0, 0] > 0.5
   d_state = jnp.where(is_reset, 0.0, d_state_scr[...])
-  compute_dtype = qkv_conv_ref.dtype
-  y_c = qkv_conv_ref[...]
+  compute_dtype = qkv_refs[0].dtype
+  if cfg.split_qkv_io:
+    # Natural layout: the three windows hold exactly the q / k / v slices of the concatenated block below.
+    q_orig = qkv_refs[0][...].reshape((chunk_size, num_kq_heads, kq_head_dim)).astype(jnp.float32)
+    k_orig = qkv_refs[1][...].reshape((chunk_size, num_kq_heads, kq_head_dim)).astype(jnp.float32)
+    v = qkv_refs[2][...].reshape((chunk_size, num_v_heads, v_head_dim)).astype(jnp.float32)
+  else:
+    y_c = qkv_refs[0][...]
 
-  # Slice chunk inputs for this head group
-  q_orig = y_c[:, :q_size].reshape((chunk_size, num_kq_heads, kq_head_dim)).astype(jnp.float32)
-  k_orig = y_c[:, q_size : q_size + k_size].reshape((chunk_size, num_kq_heads, kq_head_dim)).astype(jnp.float32)
-  v = (
-      y_c[:, q_size + k_size : q_size + k_size + v_size]
-      .reshape((chunk_size, num_v_heads, v_head_dim))
-      .astype(jnp.float32)
-  )
+    # Slice chunk inputs for this head group
+    q_orig = y_c[:, :q_size].reshape((chunk_size, num_kq_heads, kq_head_dim)).astype(jnp.float32)
+    k_orig = y_c[:, q_size : q_size + k_size].reshape((chunk_size, num_kq_heads, kq_head_dim)).astype(jnp.float32)
+    v = (
+        y_c[:, q_size + k_size : q_size + k_size + v_size]
+        .reshape((chunk_size, num_v_heads, v_head_dim))
+        .astype(jnp.float32)
+    )
 
   b_val = b_ref[...][:, :num_v_heads].astype(jnp.float32)
   a_val = a_ref[...][:, :num_v_heads].astype(jnp.float32)
@@ -477,10 +490,15 @@ def _bwd_gdn_pipeline_body(
     d_k = jnp.where(valid_c[:, :, None], d_k, 0.0)
 
   # Flatten gradients to chunk_size x dim_size and write to refs
-  d_q_flat = d_q.reshape(chunk_size, q_size).astype(dy_conv_ref.dtype)
-  d_k_flat = d_k.reshape(chunk_size, k_size).astype(dy_conv_ref.dtype)
-  d_v_flat = d_v_val.reshape(chunk_size, v_size).astype(dy_conv_ref.dtype)
-  dy_conv_ref[...] = jnp.concatenate([d_q_flat, d_k_flat, d_v_flat], axis=-1)
+  d_q_flat = d_q.reshape(chunk_size, q_size).astype(dy_refs[0].dtype)
+  d_k_flat = d_k.reshape(chunk_size, k_size).astype(dy_refs[0].dtype)
+  d_v_flat = d_v_val.reshape(chunk_size, v_size).astype(dy_refs[0].dtype)
+  if cfg.split_qkv_io:
+    dy_refs[0][...] = d_q_flat
+    dy_refs[1][...] = d_k_flat
+    dy_refs[2][...] = d_v_flat
+  else:
+    dy_refs[0][...] = jnp.concatenate([d_q_flat, d_k_flat, d_v_flat], axis=-1)
 
   if padded_num_v_heads > num_v_heads:
     d_b_ref[...] = jnp.pad(d_b_val, ((0, 0), (0, padded_num_v_heads - num_v_heads))).astype(d_b_ref.dtype)
@@ -577,12 +595,20 @@ def pallas_gdn_bwd_kernel(
     name: str = "gdn_bwd_kernel",
     recompute_t_inv: bool = False,
     tri_inv_algo: str = local_compute_gdn.DEFAULT_TRI_INV_ALGO,
+    natural_layout: bool = False,
 ):
   """Executes the Pallas reverse-chunk GDNv3 backward kernel using emit_pipeline.
 
   Dispatches a single kernel call with 3D grid=(batch_size, num_groups,
   num_chunks). With `recompute_t_inv=True`, `t_inv` is ignored (may be None) and
   each chunk rebuilds T^-1 in VMEM with `tri_inv_algo`.
+
+  With `natural_layout=True` (config gdn_bwd_natural_layout) the kernel reads qkv_conv [B, S, dim] as three
+  q / k / v channel windows, do [B, S, Hv, dv], chunk_states [B, C, Hv, dk, dv] and t_inv [B, C, Hv, cs, cs] in place
+  and writes dy_conv [B, S, dim] directly (`make_bwd_block_specs_natural`), instead of the XLA slice / transpose /
+  concatenate relayouts into and out of the [B, G, C, ...] head-group-major layout. Same values (every VMEM block holds
+  the same data; only the HBM index maps change). Shapes whose q / k / v channel offsets are not whole blocks keep the
+  relayout path. The kernel is named `<name>_nat` when the natural layout is used.
   """
   if t_inv is None and not recompute_t_inv:
     raise ValueError("pallas_gdn_bwd_kernel needs t_inv unless recompute_t_inv=True.")
@@ -644,6 +670,14 @@ def pallas_gdn_bwd_kernel(
   tile_k_size = tile_kq_heads * kq_head_dim
   tile_v_size = tile_v_heads * v_head_dim
   group_dim_size = tile_q_size + tile_k_size + tile_v_size
+  # The natural layout addresses the k / v channel windows as whole blocks of their own width.
+  natural_layout = bool(natural_layout) and (
+      q_size % tile_k_size == 0
+      and (q_size + k_size) % tile_v_size == 0
+      and tile_q_size % 128 == 0
+      and tile_k_size % 128 == 0
+      and tile_v_size % 128 == 0
+  )
 
   has_seg_ids = segment_ids is not None
   cfg = GDNBackwardConfig(
@@ -659,18 +693,22 @@ def pallas_gdn_bwd_kernel(
       has_seg_ids=has_seg_ids,
       recompute_t_inv=recompute_t_inv,
       tri_inv_algo=tri_inv_algo,
+      split_qkv_io=natural_layout,
   )
 
   padded_tile_v_heads = cfg.padded_num_v_heads
 
   # 1. Prepare qkv_conv into (B, G, C, chunk_size, group_dim_size)
-  q = qkv_conv[:, :, :q_size]
-  k = qkv_conv[:, :, q_size : q_size + k_size]
-  v = qkv_conv[:, :, q_size + k_size :]
-  q_5d = q.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_q_size).transpose((0, 3, 1, 2, 4))
-  k_5d = k.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_k_size).transpose((0, 3, 1, 2, 4))
-  v_5d = v.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_size).transpose((0, 3, 1, 2, 4))
-  qkv_conv_5d = jnp.concatenate([q_5d, k_5d, v_5d], axis=-1)
+  if natural_layout:
+    qkv_conv_5d = None  # the kernel reads q / k / v windows of qkv_conv [B, S, dim] in place
+  else:
+    q = qkv_conv[:, :, :q_size]
+    k = qkv_conv[:, :, q_size : q_size + k_size]
+    v = qkv_conv[:, :, q_size + k_size :]
+    q_5d = q.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_q_size).transpose((0, 3, 1, 2, 4))
+    k_5d = k.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_k_size).transpose((0, 3, 1, 2, 4))
+    v_5d = v.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_size).transpose((0, 3, 1, 2, 4))
+    qkv_conv_5d = jnp.concatenate([q_5d, k_5d, v_5d], axis=-1)
 
   # 2. Prepare b and a into (B, G, C, chunk_size, padded_tile_v_heads)
   # With sequence packing, the signed segment IDs are packed into the spare lane
@@ -703,41 +741,50 @@ def pallas_gdn_bwd_kernel(
         ),
     )
 
-  # 3. Prepare do into (B, G, C, chunk_size, tile_v_heads, v_head_dim)
-  do_6d = do.reshape(
-      batch_size,
-      num_chunks,
-      chunk_size,
-      num_groups,
-      tile_v_heads,
-      cfg.v_head_dim,
-  ).transpose((0, 3, 1, 2, 4, 5))
+  if natural_layout:
+    # 3-5. Natural layout: do [B, S, Hv, dv], chunk_states [B, C, Hv, dk, dv] and t_inv [B, C, Hv, cs, cs] are read in
+    # place (reshapes that only name the dims); the index maps select the head group.
+    do_6d = do.reshape(batch_size, seq_len, num_v_heads, cfg.v_head_dim)
+    chunk_states_6d = chunk_states.reshape(batch_size, num_chunks, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim)
+    t_inv_6d = None
+    if not recompute_t_inv:
+      t_inv_6d = t_inv.reshape(batch_size, num_chunks, num_v_heads, chunk_size, chunk_size).astype(jnp.float32)
+  else:
+    # 3. Prepare do into (B, G, C, chunk_size, tile_v_heads, v_head_dim)
+    do_6d = do.reshape(
+        batch_size,
+        num_chunks,
+        chunk_size,
+        num_groups,
+        tile_v_heads,
+        cfg.v_head_dim,
+    ).transpose((0, 3, 1, 2, 4, 5))
 
-  # 4. Prepare chunk_states into (B, G, C, tile_v_heads, kq_head_dim, v_head_dim)
-  chunk_states_6d = chunk_states.reshape(
-      batch_size,
-      num_chunks,
-      num_groups,
-      tile_v_heads,
-      cfg.kq_head_dim,
-      cfg.v_head_dim,
-  ).swapaxes(1, 2)
+    # 4. Prepare chunk_states into (B, G, C, tile_v_heads, kq_head_dim, v_head_dim)
+    chunk_states_6d = chunk_states.reshape(
+        batch_size,
+        num_chunks,
+        num_groups,
+        tile_v_heads,
+        cfg.kq_head_dim,
+        cfg.v_head_dim,
+    ).swapaxes(1, 2)
 
-  # 5. Prepare t_inv into (B, G, C, tile_v_heads, chunk_size, chunk_size)
-  t_inv_6d = None
-  if not recompute_t_inv:
-    t_inv_6d = (
-        t_inv.reshape(
-            batch_size,
-            num_chunks,
-            num_groups,
-            tile_v_heads,
-            chunk_size,
-            chunk_size,
-        )
-        .swapaxes(1, 2)
-        .astype(jnp.float32)
-    )
+    # 5. Prepare t_inv into (B, G, C, tile_v_heads, chunk_size, chunk_size)
+    t_inv_6d = None
+    if not recompute_t_inv:
+      t_inv_6d = (
+          t_inv.reshape(
+              batch_size,
+              num_chunks,
+              num_groups,
+              tile_v_heads,
+              chunk_size,
+              chunk_size,
+          )
+          .swapaxes(1, 2)
+          .astype(jnp.float32)
+      )
 
   # 6. Prepare a_log and dt_bias into (B, G, 1, padded_tile_v_heads)
   a_log_2d = a_log.reshape(num_groups, tile_v_heads)
@@ -785,7 +832,7 @@ def pallas_gdn_bwd_kernel(
   reset_hbm_5d = jnp.broadcast_to(reset_hbm[:, None, :, :, :], (batch_size, num_groups, num_chunks, 1, 128))
 
   in_args = [
-      qkv_conv_5d,
+      qkv_conv if natural_layout else qkv_conv_5d,
       b_5d,
       a_5d,
       do_6d,
@@ -798,7 +845,11 @@ def pallas_gdn_bwd_kernel(
       dt_bias_4d,
       reset_hbm_5d,
   ]
-  if has_dht:
+  if has_dht and natural_layout:
+    in_args.append(
+        d_recurrent_state.astype(jnp.float32).reshape(batch_size, 1, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim)
+    )
+  elif has_dht:
     dht_6d = (
         d_recurrent_state.astype(jnp.float32)
         .reshape(
@@ -813,26 +864,62 @@ def pallas_gdn_bwd_kernel(
     )
     in_args.append(dht_6d)
 
-  in_specs, out_specs, num_in, num_out = make_bwd_block_specs(
-      num_chunks=num_chunks,
-      chunk_size=chunk_size,
-      dim_size=group_dim_size,
-      num_v_heads=tile_v_heads,
-      kq_head_dim=cfg.kq_head_dim,
-      v_head_dim=cfg.v_head_dim,
-      padded_num_v_heads=padded_tile_v_heads,
-      has_dht=has_dht,
-      has_dh0=has_dh0,
-      has_t_inv=not recompute_t_inv,
-  )
+  if natural_layout:
+    in_specs, out_specs, num_pipe_in, num_pipe_out = make_bwd_block_specs_natural(
+        num_chunks=num_chunks,
+        chunk_size=chunk_size,
+        q_size=q_size,
+        k_size=k_size,
+        tile_q_size=tile_q_size,
+        tile_k_size=tile_k_size,
+        tile_v_size=tile_v_size,
+        num_v_heads=tile_v_heads,
+        kq_head_dim=cfg.kq_head_dim,
+        v_head_dim=cfg.v_head_dim,
+        padded_num_v_heads=padded_tile_v_heads,
+        has_dht=has_dht,
+        has_dh0=has_dh0,
+        has_t_inv=not recompute_t_inv,
+    )
+    # pallas_call operands: qkv_conv once (the pipeline reads it through 3 specs), dy_conv once (written through 3).
+    num_in, num_out = num_pipe_in - 2, num_pipe_out - 2
+    dy_out_shape = jax.ShapeDtypeStruct((batch_size, seq_len, dim_size), qkv_conv.dtype)
+    dh0_out_shape = jax.ShapeDtypeStruct((batch_size, 1, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim), jnp.float32)
+  else:
+    in_specs, out_specs, num_in, num_out = make_bwd_block_specs(
+        num_chunks=num_chunks,
+        chunk_size=chunk_size,
+        dim_size=group_dim_size,
+        num_v_heads=tile_v_heads,
+        kq_head_dim=cfg.kq_head_dim,
+        v_head_dim=cfg.v_head_dim,
+        padded_num_v_heads=padded_tile_v_heads,
+        has_dht=has_dht,
+        has_dh0=has_dh0,
+        has_t_inv=not recompute_t_inv,
+    )
+    dy_out_shape = jax.ShapeDtypeStruct(
+        (batch_size, num_groups, num_chunks, chunk_size, group_dim_size),
+        qkv_conv.dtype,
+    )
+    dh0_out_shape = jax.ShapeDtypeStruct(
+        (
+            batch_size,
+            num_groups,
+            1,
+            tile_v_heads,
+            cfg.kq_head_dim,
+            cfg.v_head_dim,
+        ),
+        jnp.float32,
+    )
   if recompute_t_inv and name == "gdn_bwd_kernel":
     name = f"gdn_bwd_kernel_recompute_{tri_inv_algo}"
+  if natural_layout and name.startswith("gdn_bwd_kernel"):
+    name = f"{name}_nat"
 
   out_shapes_list = [
-      jax.ShapeDtypeStruct(
-          (batch_size, num_groups, num_chunks, chunk_size, group_dim_size),
-          qkv_conv.dtype,
-      ),
+      dy_out_shape,
       jax.ShapeDtypeStruct(b_5d.shape, b_5d.dtype),
       jax.ShapeDtypeStruct(a_5d.shape, a_5d.dtype),
       jax.ShapeDtypeStruct(
@@ -845,19 +932,7 @@ def pallas_gdn_bwd_kernel(
       ),
   ]
   if has_dh0:
-    out_shapes_list.append(
-        jax.ShapeDtypeStruct(
-            (
-                batch_size,
-                num_groups,
-                1,
-                tile_v_heads,
-                cfg.kq_head_dim,
-                cfg.v_head_dim,
-            ),
-            jnp.float32,
-        )
-    )
+    out_shapes_list.append(dh0_out_shape)
   out_shapes = tuple(out_shapes_list)
 
   body = functools.partial(
@@ -868,12 +943,17 @@ def pallas_gdn_bwd_kernel(
   )
 
   def outer(*refs):
+    pipe_refs = refs[: num_in + num_out]
+    if natural_layout:
+      # q / k / v pipeline inputs are three views of the one qkv_conv ref, dq / dk / dv outputs of the one dy_conv ref.
+      ins, outs = pipe_refs[:num_in], pipe_refs[num_in:]
+      pipe_refs = (ins[0],) * 3 + tuple(ins[1:]) + (outs[0],) * 3 + tuple(outs[1:])
     pltpu.emit_pipeline(
         body,
         grid=(batch_size, num_groups, num_chunks),
         in_specs=in_specs,
         out_specs=out_specs,
-    )(*refs[: num_in + num_out], scratches=tuple(refs[num_in + num_out :]))
+    )(*pipe_refs, scratches=tuple(refs[num_in + num_out :]))
 
   if cfg.vmem_limit_mb is not None and cfg.vmem_limit_mb <= 64:
     vmem_limit_bytes = int(cfg.vmem_limit_mb) * 1024 * 1024
@@ -918,14 +998,18 @@ def pallas_gdn_bwd_kernel(
     ) = pallas_out
     dh0_6d = None
 
-  # Reconstruct dy_conv: (B, G, C, S, group_dim_size) -> (B, seq_len, dim_size)
-  dq_5d = dy_conv_chunks[..., :tile_q_size]
-  dk_5d = dy_conv_chunks[..., tile_q_size : tile_q_size + tile_k_size]
-  dv_5d = dy_conv_chunks[..., tile_q_size + tile_k_size :]
-  dq = dq_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, q_size)
-  dk = dk_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, k_size)
-  dv = dv_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, v_size)
-  dy_conv_flat = jnp.concatenate([dq, dk, dv], axis=-1).astype(qkv_conv.dtype)
+  if natural_layout:
+    # The kernel wrote dy_conv in (B, seq_len, dim_size) already.
+    dy_conv_flat = dy_conv_chunks
+  else:
+    # Reconstruct dy_conv: (B, G, C, S, group_dim_size) -> (B, seq_len, dim_size)
+    dq_5d = dy_conv_chunks[..., :tile_q_size]
+    dk_5d = dy_conv_chunks[..., tile_q_size : tile_q_size + tile_k_size]
+    dv_5d = dy_conv_chunks[..., tile_q_size + tile_k_size :]
+    dq = dq_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, q_size)
+    dk = dk_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, k_size)
+    dv = dv_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, v_size)
+    dy_conv_flat = jnp.concatenate([dq, dk, dv], axis=-1).astype(qkv_conv.dtype)
 
   # Reconstruct d_b and d_a: (B, G, C, S, padded_tile_v_heads) -> (B, seq_len, num_v_heads)
   d_b_flat = (
@@ -942,7 +1026,10 @@ def pallas_gdn_bwd_kernel(
   )
 
   if return_dh0:
-    dh0_flat = dh0_6d[:, :, 0, ...].reshape(batch_size, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim)
+    if natural_layout:
+      dh0_flat = dh0_6d.reshape(batch_size, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim)
+    else:
+      dh0_flat = dh0_6d[:, :, 0, ...].reshape(batch_size, num_v_heads, cfg.kq_head_dim, cfg.v_head_dim)
     return (
         dy_conv_flat,
         d_b_flat,

@@ -2618,6 +2618,21 @@ class Qwen3Next(BaseModel):
           " (kernels/gdn/gdn_bwd/cp_gdn.py, api.py). Bit-identical to False. Requires use_gdn_kernel=True."
       ),
   )
+  gdn_bwd_natural_layout: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: the Pallas GDN backward kernel reads qkv_conv [B, S, dim] (as q / k / v channel windows),"
+          " do [B, S, Hv, dv], chunk_states [B, C, Hv, dk, dv] and t_inv [B, C, Hv, cs, cs] and writes dy_conv"
+          " [B, S, dim] in those natural layouts, with BlockSpec index maps selecting each head group"
+          " (kernels/gdn/gdn_bwd/bwd_memory_ref.py make_bwd_block_specs_natural), instead of XLA slice / transpose /"
+          " concatenate relayouts into and out of the [B, G, C, ...] head-group-major layout around the pallas_call;"
+          " with gdn_cp_dh_scan off, the sequence-CP backward composition glue also relayouts q / k / do head-major"
+          " once, before the GQA repeat (cp_gdn.compose_bwd_local_from_t_inv head_major_glue). Port of the backward"
+          " part of maxtext PR #5628. Every kernel VMEM block holds the same values, so the gradients are the same;"
+          " shapes whose q / k / v channel offsets are not whole blocks keep the relayout path. The kernel is named"
+          " gdn_bwd_kernel_nat when used. Requires use_gdn_kernel=True (the only path that runs that kernel)."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------

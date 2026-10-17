@@ -522,8 +522,15 @@ def compose_bwd_local_from_t_inv(
     segment_ids: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
     precision: jax.lax.Precision = DEFAULT_PRECISION,
+    head_major_glue: bool = False,
 ) -> Tuple[jax.Array, jax.Array]:
-  """Computes backward rank transition (dM_local, dS_ext_local) using pre-batched GEMMs."""
+  """Computes backward rank transition (dM_local, dS_ext_local) using pre-batched GEMMs.
+
+  `head_major_glue` (on with gdn_bwd_natural_layout) keeps the math identical but changes where XLA may place the
+  token-major -> head-major relayout of q / k / do: once per tensor, in bf16, on the un-repeated [N_c, B, H, C, d] view,
+  pinned with `lax.optimization_barrier`, instead of on the GQA-repeated f32 tensors inside the gating fusions, which
+  is where XLA's layout assignment puts it once the natural-layout backward kernel makes qkv_conv / do token-major.
+  """
   batch, seq_len, _ = qkv_conv.shape
   num_chunks = seq_len // chunk_size
   repeats = num_v_heads // num_k_heads
@@ -531,26 +538,49 @@ def compose_bwd_local_from_t_inv(
   k_size = num_k_heads * head_k_dim
   scale = 1.0 / jnp.sqrt(head_k_dim)
 
-  q_orig = qkv_conv[:, :, :q_size].reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim).astype(jnp.float32)
-  k_orig = (
-      qkv_conv[:, :, q_size : q_size + k_size]
-      .reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim)
-      .astype(jnp.float32)
-  )
-  if use_qk_norm_in_gdn:
-    q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
-    k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
-  else:
-    q_orig = q_orig * scale
+  if head_major_glue:
 
-  q_rep = jnp.repeat(q_orig, repeats, axis=3)
-  k_rep = jnp.repeat(k_orig, repeats, axis=3)
-  q_h = jnp.transpose(q_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
-  k_h = jnp.transpose(k_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
-  do_h = jnp.transpose(
-      do.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads, head_v_dim),
-      (1, 0, 3, 2, 4),
-  )
+    def _head_major(x: jax.Array, heads: int, dim: int) -> jax.Array:
+      """[B, S, heads * dim] -> [N_c, B, heads, C, dim], relayout pinned on this (un-repeated) tensor."""
+      x = jnp.transpose(x.reshape(batch, num_chunks, chunk_size, heads, dim), (1, 0, 3, 2, 4))
+      # Merging the three major dims leaves no bitcast-compatible token-major layout for this value, and the barrier
+      # keeps the simplifier from cancelling the reshape pair or sinking the GQA broadcast through it.
+      x = lax.optimization_barrier(x.reshape(num_chunks * batch * heads, chunk_size, dim))
+      return x.reshape(num_chunks, batch, heads, chunk_size, dim)
+
+    q_orig = _head_major(qkv_conv[:, :, :q_size], num_k_heads, head_k_dim).astype(jnp.float32)
+    k_orig = _head_major(qkv_conv[:, :, q_size : q_size + k_size], num_k_heads, head_k_dim).astype(jnp.float32)
+    if use_qk_norm_in_gdn:
+      q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
+      k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
+    else:
+      q_orig = q_orig * scale
+    q_h = jnp.repeat(q_orig, repeats, axis=2)  # [N_c, B, H_v, C, d_k]
+    k_h = jnp.repeat(k_orig, repeats, axis=2)  # [N_c, B, H_v, C, d_k]
+    do_h = _head_major(do.reshape(batch, seq_len, num_v_heads * head_v_dim), num_v_heads, head_v_dim).astype(
+        jnp.float32
+    )
+  else:
+    q_orig = qkv_conv[:, :, :q_size].reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim).astype(jnp.float32)
+    k_orig = (
+        qkv_conv[:, :, q_size : q_size + k_size]
+        .reshape(batch, num_chunks, chunk_size, num_k_heads, head_k_dim)
+        .astype(jnp.float32)
+    )
+    if use_qk_norm_in_gdn:
+      q_orig = q_orig * jax.lax.rsqrt(jnp.sum(q_orig**2, axis=-1, keepdims=True) + 1e-6) * scale
+      k_orig = k_orig * jax.lax.rsqrt(jnp.sum(k_orig**2, axis=-1, keepdims=True) + 1e-6)
+    else:
+      q_orig = q_orig * scale
+
+    q_rep = jnp.repeat(q_orig, repeats, axis=3)
+    k_rep = jnp.repeat(k_orig, repeats, axis=3)
+    q_h = jnp.transpose(q_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
+    k_h = jnp.transpose(k_rep, (1, 0, 3, 2, 4))  # [N_c, B, H_v, C, d_k]
+    do_h = jnp.transpose(
+        do.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads, head_v_dim),
+        (1, 0, 3, 2, 4),
+    )
 
   b_h = jnp.transpose(
       b.astype(jnp.float32).reshape(batch, num_chunks, chunk_size, num_v_heads),

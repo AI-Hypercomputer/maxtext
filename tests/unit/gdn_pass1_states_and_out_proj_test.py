@@ -921,6 +921,7 @@ def _trace_model_runner(mode, nk, nv, *, opt_on, remat=True, seg=True, seq=512, 
       gdn_conv1d_input_in_qkv_dtype=True,
       gdn_conv1d_dense_token_stack=True,
       gdn_cp_pass1_states_and_bf16_qkv=opt_on,
+      gdn_bwd_natural_layout=False,
   )
   key_dim, conv_dim = nk * _HEAD_DIM, (2 * nk + nv) * _HEAD_DIM
 
@@ -1080,6 +1081,12 @@ def _backward_rule_positional_forms():
       17: lambda res, cot: gdn_api._gdn_decoupled_conv1d_bwd(
           *nondiff, None, prec, False, True, True, False, True, res, cot
       ),
+      18: lambda res, cot: gdn_api._gdn_decoupled_conv1d_bwd(
+          *nondiff, None, prec, False, True, True, False, True, False, res, cot
+      ),
+      19: lambda res, cot: gdn_api._gdn_decoupled_conv1d_bwd(
+          *nondiff, None, prec, False, True, True, False, True, False, False, res, cot
+      ),
   }
 
   def program(form):
@@ -1101,9 +1108,9 @@ def _backward_rule_positional_forms():
     with ctx:
       return str(jax.make_jaxpr(f)(*args))
 
-  ref = program(17)
+  ref = program(19)
   ok = True
-  for form in (10, 11, 12, 13, 14, 15, 16):
+  for form in (10, 11, 12, 13, 14, 15, 16, 17, 18):
     same = program(form) == ref
     ok &= _check(f"backward rule, {form} positional arguments", same)
   return ok

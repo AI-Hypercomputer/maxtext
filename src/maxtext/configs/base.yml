@@ -1712,6 +1712,10 @@ gdn_cp_pass1_states_and_bf16_qkv: false
 # Sequence-sharded CP GDN training state passing: 2-round exclusive state/grad-state scans on 4 CP ranks and
 # skip dead train-mode final conv/recurrent state broadcasts when initial states are None.
 gdn_cp_fast_state_passing: false
+# GDN kernel path: the Pallas backward kernel reads qkv_conv / do / chunk_states / t_inv and writes dy_conv in their
+# natural layouts (BlockSpec index maps select the head group) instead of XLA relayouts to and from the head-group-major
+# layout (kernels/gdn/gdn_bwd/bwd_memory_ref.py make_bwd_block_specs_natural). Same values. Requires use_gdn_kernel: true.
+gdn_bwd_natural_layout: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
