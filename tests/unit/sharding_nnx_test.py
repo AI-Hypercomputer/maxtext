@@ -503,5 +503,72 @@ class TruncateOutShardingTest(unittest.TestCase):
     self.assertEqual(truncated.reduced, frozenset({"data"}))
 
 
+class TaggedPartitionSpecTest(unittest.TestCase):
+  """A spec carrying reduced/unreduced axes must survive the sharding helpers.
+
+  JAX rejects indexing, slicing, unpacking and iterating such a spec — only `.partitions`
+  reads through it — so every helper that rebuilds a spec has to go through that path.
+  A tagged axis can never also appear in the partitions, so these specs tag "data" while
+  sharding over the other axes.
+  """
+
+  # Only mesh.shape is read by the helpers below, so an abstract mesh keeps the axis
+  # sizes fixed regardless of how many devices the test runner has.
+  mesh = jax.sharding.AbstractMesh((2, 1, 4), ("data", "fsdp", "model"))
+
+  def test_mesh_axes_used_by_tagged_spec(self):
+    spec = PartitionSpec(("fsdp", "model"), None, unreduced={"data"})
+    self.assertEqual(sharding.get_mesh_axes_used_by_tensor_spec(spec), ["fsdp", "model"])
+
+  def test_remove_size_one_mesh_axis_keeps_tags(self):
+    # "fsdp" has size 1, so it is dropped from the partitions while "model" stays.
+    spec = PartitionSpec("fsdp", "model", reduced={"data"})
+    trimmed = sharding.remove_size_one_mesh_axis(spec, self.mesh)
+    self.assertEqual(trimmed.partitions, (None, "model"))
+    self.assertEqual(trimmed.reduced, frozenset({"data"}))
+
+  def test_adjust_pspec_for_indivisible_shapes_keeps_tags(self):
+    # A dimension of 6 does not divide evenly over the 4-way "model" axis, so it is unsharded.
+    spec = PartitionSpec("model", "fsdp", unreduced={"data"})
+    adjusted = sharding.adjust_pspec_for_indivisible_shapes(spec, (6, 8), self.mesh)
+    self.assertEqual(adjusted.partitions, (None, "fsdp"))
+    self.assertEqual(adjusted.unreduced, frozenset({"data"}))
+
+
+class WithoutReducedAxesTest(unittest.TestCase):
+  """`without_reduced_axes` lets a bias add or a convolution consume a `reduced` parameter."""
+
+  def test_untagged_value_is_returned_as_is(self):
+    value = jnp.ones((3,))
+    self.assertIs(sharding.without_reduced_axes(value), value)
+
+  @unittest.skipIf(jax.device_count() < 2, "needs a data axis of size > 1")
+  def test_gradient_stays_unreduced_and_correct(self):
+    """The bias of a data-parallel add still gets an `unreduced` cotangent, summing to the true gradient."""
+    num_devices = min(jax.device_count(), 4)
+    mesh = jax.make_mesh((num_devices,), ("data",), axis_types=(jax.sharding.AxisType.Explicit,))
+    x = jax.random.normal(jax.random.PRNGKey(0), (2 * num_devices, 3))
+    bias = jax.random.normal(jax.random.PRNGKey(1), (3,))
+    expected = jax.grad(lambda b: jnp.sum(jnp.sin(x + b)))(bias)
+
+    def loss(b, xs):
+      return jnp.sum(jnp.sin(xs + sharding.without_reduced_axes(b)))
+
+    with jax.set_mesh(mesh):
+      xs = jax.sharding.reshard(x, PartitionSpec("data", None))
+      tagged = jax.sharding.reshard(bias, PartitionSpec(None, reduced={"data"}))
+      cotangent_specs = []
+
+      @jax.jit
+      def grad_then_reduce(b, xs):
+        grad = jax.grad(loss)(b, xs)
+        cotangent_specs.append(jax.typeof(grad).sharding.spec)
+        return jax.sharding.reshard(grad, PartitionSpec(None))
+
+      got = grad_then_reduce(tagged, xs)
+    self.assertEqual(cotangent_specs[0].unreduced, frozenset({"data"}))
+    np.testing.assert_allclose(got, expected, rtol=1e-5, atol=1e-6)
+
+
 if __name__ == "__main__":
   unittest.main()
