@@ -2618,19 +2618,24 @@ class Qwen3Next(BaseModel):
           " (kernels/gdn/gdn_bwd/cp_gdn.py, api.py). Bit-identical to False. Requires use_gdn_kernel=True."
       ),
   )
-  gdn_bwd_natural_layout: bool = Field(
-      False,
+  gdn_bwd_natural_layout: Literal["off", "states", "all", "no_do", "inputs", "states_dy"] = Field(
+      "off",
       description=(
-          "GDN kernel path: the Pallas GDN backward kernel reads qkv_conv [B, S, dim] (as q / k / v channel windows),"
-          " do [B, S, Hv, dv], chunk_states [B, C, Hv, dk, dv] and t_inv [B, C, Hv, cs, cs] and writes dy_conv"
-          " [B, S, dim] in those natural layouts, with BlockSpec index maps selecting each head group"
-          " (kernels/gdn/gdn_bwd/bwd_memory_ref.py make_bwd_block_specs_natural), instead of XLA slice / transpose /"
-          " concatenate relayouts into and out of the [B, G, C, ...] head-group-major layout around the pallas_call;"
-          " with gdn_cp_dh_scan off, the sequence-CP backward composition glue also relayouts q / k / do head-major"
-          " once, before the GQA repeat (cp_gdn.compose_bwd_local_from_t_inv head_major_glue). Port of the backward"
-          " part of maxtext PR #5628. Every kernel VMEM block holds the same values, so the gradients are the same;"
-          " shapes whose q / k / v channel offsets are not whole blocks keep the relayout path. The kernel is named"
-          " gdn_bwd_kernel_nat when used. Requires use_gdn_kernel=True (the only path that runs that kernel)."
+          "GDN kernel path: operand groups the Pallas GDN backward kernel reads / writes in their natural HBM"
+          " layouts, with BlockSpec index maps selecting each head group (kernels/gdn/gdn_bwd/bwd_memory_ref.py"
+          " make_bwd_block_specs_natural), instead of the XLA slice / transpose / concatenate relayouts into and out"
+          " of the [B, G, C, ...] head-group-major layout around the pallas_call. Groups: qkv (q / k / v channel"
+          " windows of qkv_conv [B, S, dim]), states (chunk_states [B, C, Hv, dk, dv], t_inv [B, C, Hv, cs, cs],"
+          " dht / dh0), do ([B, S, Hv, dv]) and dy (dq / dk / dv windows of dy_conv [B, S, dim]). 'all' = all four"
+          " (the backward part of maxtext PR #5628, plus its head-major sequence-CP composition glue when"
+          " gdn_cp_dh_scan is off); 'no_do' = qkv, states, dy; 'inputs' = qkv, states; 'states_dy' = states, dy;"
+          " 'states' = states only; 'off' = none. Every kernel VMEM block holds the same values in every mode, so"
+          " the gradients are the same; shapes whose q / k / v channel offsets are not whole blocks keep the"
+          " relayout path. The kernel name gets a suffix (gdn_bwd_kernel_nat for 'all', _nat_s for 'states')."
+          " On the Qwen3.5-397B bench cell the TPU compiler re-lays out other tensors when the kernel reads or"
+          " writes the bf16 qkv / do / dy tensors in place (the in_proj_qkvz backward, the gated RMSNorm), so"
+          " 'states' (the f32 chunk_states / t_inv relayouts only, nothing added) is the mode to use there."
+          " Requires use_gdn_kernel=True (the only path that runs that kernel)."
       ),
   )
 

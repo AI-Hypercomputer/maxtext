@@ -626,9 +626,10 @@ def run_gdn_kernel_layer(
   # States-only CP pass 1 kernel and VMEM bf16 qkv upcast (wrapper.py). Same values.
   pass1_states_and_bf16_qkv = bool(getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False))
   cp_fast_state_passing = bool(getattr(cfg, "gdn_cp_fast_state_passing", False)) and model_mode == MODEL_MODE_TRAIN
-  # Backward kernel on the natural operand layouts (gdn_bwd/bwd_memory_ref.py). Same values. Read as an attribute: a
-  # config without the key raises instead of silently running the relayout path.
-  bwd_natural_layout = bool(cfg.gdn_bwd_natural_layout)
+  # Backward kernel with operand groups in their natural layouts ("off", "states", "all", "no_do", "inputs", "states_dy";
+  # gdn_bwd/pallas_mosaic_tpu_bwd.py NATURAL_LAYOUT_MODES). Same values. Read as an attribute: a config without the key
+  # raises instead of silently running the relayout path.
+  bwd_natural_layout = cfg.gdn_bwd_natural_layout
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)

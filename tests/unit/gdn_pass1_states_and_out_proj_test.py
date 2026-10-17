@@ -921,7 +921,7 @@ def _trace_model_runner(mode, nk, nv, *, opt_on, remat=True, seg=True, seq=512, 
       gdn_conv1d_input_in_qkv_dtype=True,
       gdn_conv1d_dense_token_stack=True,
       gdn_cp_pass1_states_and_bf16_qkv=opt_on,
-      gdn_bwd_natural_layout=False,
+      gdn_bwd_natural_layout="off",
   )
   key_dim, conv_dim = nk * _HEAD_DIM, (2 * nk + nv) * _HEAD_DIM
 

@@ -558,7 +558,7 @@ def _trace_model_runner(mode, nk, nv, *, dense, qkv_dtype=False, remat=True, seg
       context_parallel_load_balance=False,
       gdn_conv1d_input_in_qkv_dtype=qkv_dtype,
       gdn_conv1d_dense_token_stack=dense,
-      gdn_bwd_natural_layout=False,
+      gdn_bwd_natural_layout="off",
   )
   key_dim, conv_dim = nk * _HEAD_DIM, (2 * nk + nv) * _HEAD_DIM
 

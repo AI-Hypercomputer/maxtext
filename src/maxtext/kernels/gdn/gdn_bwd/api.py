@@ -33,6 +33,8 @@ from .compute_conv1d_bwd import conv1d_silu_bwd
 from .compute_conv1d_bwd import conv1d_silu_fwd
 from .jax_compute_gdn_states import _compute_forward_conv_and_states
 from .jax_compute_gdn_states import pure_jax_decoupled_conv1d_gdn
+from .pallas_mosaic_tpu_bwd import NATURAL_LAYOUT_MODES
+from .pallas_mosaic_tpu_bwd import natural_layout_mode
 from .pallas_mosaic_tpu_bwd import pallas_gdn_bwd_kernel
 from .runtime_utils import pallas_unsupported_reason
 from .runtime_utils import target_platform
@@ -786,7 +788,7 @@ def gdn_decoupled_conv1d(
     cp_dh_scan: bool = False,
     pass1_states_and_bf16_qkv: bool = False,
     cp_fast_state_passing: bool = False,
-    bwd_natural_layout: bool = False,
+    bwd_natural_layout: bool | str = False,
 ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
   """Decoupled Conv1D + GDN with Pallas backward pass and optional sequence-sharded CP.
 
@@ -814,9 +816,11 @@ def gdn_decoupled_conv1d(
   `cp_fast_state_passing` (config gdn_cp_fast_state_passing) uses the 2-round exclusive cross-rank state and
   grad-state scans on 4 CP ranks and skips dead train-mode final state broadcasts when initial states are None.
 
-  `bwd_natural_layout` (config gdn_bwd_natural_layout) makes the backward rule run the Pallas backward kernel on the
-  natural layouts of its operands (`pallas_gdn_bwd_kernel(natural_layout=True)`) and, with gdn_cp_dh_scan off, the
-  head-major sequence-CP composition glue. Same values; the forward is unchanged.
+  `bwd_natural_layout` (config gdn_bwd_natural_layout: False / "off", "states", True / "all", "no_do", "inputs",
+  "states_dy")
+  makes the backward rule run the Pallas backward kernel with those operand groups in their natural layouts
+  (`pallas_gdn_bwd_kernel(natural_layout=...)`, see NATURAL_LAYOUT_MODES) and, with gdn_cp_dh_scan off and qkv or do
+  natural, the head-major sequence-CP composition glue. Same values; the forward is unchanged.
   """
   del cp_dh_scan, bwd_natural_layout
   if _is_cp_active(cp_axis_name):
@@ -1385,7 +1389,8 @@ def _gdn_decoupled_conv1d_bwd_impl(
           segment_ids=segment_ids,
           init_seg=init_seg,
           precision=cp_matmul_precision,
-          head_major_glue=bwd_natural_layout,
+          # Only a token-major qkv / do kernel layout makes XLA relayout this tree's GQA-repeated f32 tensors.
+          head_major_glue=bool(NATURAL_LAYOUT_MODES[natural_layout_mode(bwd_natural_layout)][0] & {"qkv", "do"}),
       )
     has_recurrent_state = (d_recurrent_state is not None) or bool(has_user_recurrent_state)
     dht_local, _ = cp_gdn.incoming_grad_state(

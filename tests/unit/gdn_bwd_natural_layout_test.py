@@ -11,9 +11,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""gdn_bwd_natural_layout: the GDN backward kernel on the natural operand layouts against the relayout path.
+"""gdn_bwd_natural_layout: the GDN backward kernel with operand groups in their natural layouts against the relayout path.
 
-The Pallas kernels run in interpret mode on CPU. The natural layout only changes the HBM index maps of the backward
+The Pallas kernels run in interpret mode on CPU. Every natural-layout mode only changes HBM index maps of the backward
 kernel (every VMEM block holds the same values), so the outputs must be bitwise equal; deliberately wrong index maps
 must not be.
 """
@@ -88,18 +88,20 @@ def _run(x, nv, *, natural, head_tile, seg, dh0, recompute):
   return jax.jit(fn)(*args), names
 
 
+@pytest.mark.parametrize("mode", ["states", "all", "no_do", "inputs", "states_dy"])
 @pytest.mark.parametrize(
     "nk,nv,head_tile,dtype",
     [(16, 64, None, jnp.bfloat16), (4, 16, 4, jnp.bfloat16), (4, 16, 8, jnp.float32)],
 )
 @pytest.mark.parametrize("seg_mode,dh0,recompute", [("none", False, False), ("packed", True, True)])
-def test_natural_layout_is_bit_identical(nk, nv, head_tile, dtype, seg_mode, dh0, recompute):
+def test_natural_layout_is_bit_identical(nk, nv, head_tile, dtype, seg_mode, dh0, recompute, mode):
   s = 192
   x = _inputs(s, nk, nv, dtype)
   seg = _packed_segments(s) if seg_mode == "packed" else None
-  ref, ref_names = _run(x, nv, natural=False, head_tile=head_tile, seg=seg, dh0=dh0, recompute=recompute)
-  got, got_names = _run(x, nv, natural=True, head_tile=head_tile, seg=seg, dh0=dh0, recompute=recompute)
-  assert not any(n.endswith("_nat") for n in ref_names) and all(n.endswith("_nat") for n in got_names)
+  ref, ref_names = _run(x, nv, natural="off", head_tile=head_tile, seg=seg, dh0=dh0, recompute=recompute)
+  got, got_names = _run(x, nv, natural=mode, head_tile=head_tile, seg=seg, dh0=dh0, recompute=recompute)
+  suffix = bwd_kernel.NATURAL_LAYOUT_MODES[mode][1]
+  assert not any("_nat" in n for n in ref_names) and all(n.endswith(suffix) for n in got_names)
   assert len(ref) == len(got)
   for r, g in zip(ref, got):
     assert r.shape == g.shape and r.dtype == g.dtype
@@ -109,8 +111,8 @@ def test_natural_layout_is_bit_identical(nk, nv, head_tile, dtype, seg_mode, dh0
 
 def test_unaligned_shape_keeps_the_relayout_path():
   x = _inputs(128, 2, 8, jnp.bfloat16)  # (q_size + k_size) = 512 is not a multiple of the 1024-wide v block
-  ref, ref_names = _run(x, 8, natural=False, head_tile=None, seg=None, dh0=False, recompute=False)
-  got, got_names = _run(x, 8, natural=True, head_tile=None, seg=None, dh0=False, recompute=False)
+  ref, ref_names = _run(x, 8, natural="off", head_tile=None, seg=None, dh0=False, recompute=False)
+  got, got_names = _run(x, 8, natural="all", head_tile=None, seg=None, dh0=False, recompute=False)
   assert got_names == ref_names == ["gdn_bwd_kernel"]
   for r, g in zip(ref, got):
     np.testing.assert_array_equal(_bits(g), _bits(r))
@@ -135,10 +137,10 @@ def test_wrong_index_maps_are_detected(wrong, monkeypatch):
 
   s = 192
   x = _inputs(s, 4, 16, jnp.bfloat16, seed=1)
-  ref, _ = _run(x, 16, natural=False, head_tile=8, seg=None, dh0=True, recompute=False)
+  ref, _ = _run(x, 16, natural="off", head_tile=8, seg=None, dh0=True, recompute=False)
   monkeypatch.setattr(bwd_kernel, "make_bwd_block_specs_natural", wrong_specs)
   jax.clear_caches()
-  bad, _ = _run(x, 16, natural=True, head_tile=8, seg=None, dh0=True, recompute=False)
+  bad, _ = _run(x, 16, natural="all", head_tile=8, seg=None, dh0=True, recompute=False)
   jax.clear_caches()
   assert any(not np.array_equal(_bits(b), _bits(r)) for b, r in zip(bad, ref))
 
@@ -239,15 +241,23 @@ def _bwd_kernel_names_through_model_runner(config_fields):
 
 
 def test_config_key_reaches_the_backward_kernel():
-  assert _bwd_kernel_names_through_model_runner({"gdn_bwd_natural_layout": False}) == ["gdn_bwd_kernel"]
-  assert _bwd_kernel_names_through_model_runner({"gdn_bwd_natural_layout": True}) == ["gdn_bwd_kernel_nat"]
+  assert _bwd_kernel_names_through_model_runner({"gdn_bwd_natural_layout": "off"}) == ["gdn_bwd_kernel"]
+  assert _bwd_kernel_names_through_model_runner({"gdn_bwd_natural_layout": "all"}) == ["gdn_bwd_kernel_nat"]
+  assert _bwd_kernel_names_through_model_runner({"gdn_bwd_natural_layout": "states"}) == ["gdn_bwd_kernel_nat_s"]
   # model_runner reads the key as an attribute: a config without it must fail loudly, not run the relayout path.
   with pytest.raises(AttributeError, match="gdn_bwd_natural_layout"):
     _bwd_kernel_names_through_model_runner({})
 
 
-def test_config_default_is_off():
+def test_config_default_is_off_and_modes_are_validated():
+  from pydantic import TypeAdapter  # pylint: disable=import-outside-toplevel
   from maxtext.configs import types as config_types  # pylint: disable=import-outside-toplevel
 
   field = config_types.Qwen3Next.model_fields["gdn_bwd_natural_layout"]
-  assert field.default is False
+  assert field.default == "off"
+  for mode in bwd_kernel.NATURAL_LAYOUT_MODES:
+    assert TypeAdapter(field.annotation).validate_python(mode) == mode
+  with pytest.raises(Exception):
+    TypeAdapter(field.annotation).validate_python("everything")
+  with pytest.raises(ValueError, match="natural_layout must be"):
+    bwd_kernel.natural_layout_mode("everything")

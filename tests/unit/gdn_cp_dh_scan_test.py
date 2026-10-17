@@ -308,7 +308,7 @@ def test_gdn_decoupled_conv1d_cp_scan_gating_and_tpu_lowering(monkeypatch):
         gdn_conv1d_dense_token_stack=False,
         gdn_cp_m_scan=cp_m_scan,
         gdn_cp_dh_scan=cp_dh_scan,
-        gdn_bwd_natural_layout=False,
+        gdn_bwd_natural_layout="off",
     )
 
     def step(q, k, v_raw, b, a, cw, alog, dtb):
