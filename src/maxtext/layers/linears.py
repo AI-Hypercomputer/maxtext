@@ -51,6 +51,9 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   elif fn_or_string == "sqrtsoftplus":
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
+  elif fn_or_string == "relu2":
+    # Squared ReLU (Nemotron-H MLP and MoE experts).
+    return lambda x: jnp.square(jax.nn.relu(x))
   elif isinstance(fn_or_string, str):
     return getattr(jax.nn, fn_or_string)
   elif callable(fn_or_string):
