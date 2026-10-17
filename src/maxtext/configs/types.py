@@ -1732,6 +1732,24 @@ class MoEGeneral(BaseModel):
           " instead of leaving it to XLA."
       ),
   )
+  moe_fp8_token_all_gather: bool = Field(
+      False,
+      description=(
+          "Ring of experts: send the forward token all-gather of the dispatch (each shard's tokens to every expert"
+          " shard) as an fp8 e4m3 payload with one float32 absmax scale per token row (quantize_rows_fp8), and"
+          " dequantize the gathered rows back to the activation dtype right after the gather. Everything after the"
+          " gather (the sort, the expert GMMs, moe_wi_gmm_fused_swiglu, moe_wo_gmm_fused_dswiglu,"
+          " moe_router_grad_from_wo_input) reads the same bfloat16 token buffer as without it, so unlike"
+          " moe_quantize_token_all_gather (fp8 tokens end to end, a QArray GMM input) it works with those keys and"
+          " needs no quantization config. Halves the gather's payload bytes. The backward treats the quantization as"
+          " identity (straight-through): it is the transpose of the plain all-gather, the reduce-scatter of the"
+          " cotangent over the expert axis in its own dtype, as without the key. NUMERICS CHANGE: the expert inputs"
+          " carry one fp8 rounding per element (per-row scale), so the forward activations and every gradient that"
+          " reads them change at fp8 precision. Requires sparse_matmul=True, use_ring_of_experts=True,"
+          " moe_quantize_token_all_gather=False, moe_tc_ragged_3d_dispatch=False, num_moe_emb_chunks=0 and an"
+          " unpinned token all-gather (moe_pin_sparse_core_all_gathers and moe_pin_sparse_core_ep_all_gathers off)."
+      ),
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(
@@ -2258,6 +2276,28 @@ class MoEGeneral(BaseModel):
               self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
           ]
           + self._moe_wo_gmm_fused_dswiglu_tile_requirements(),
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_fp8_token_all_gather(self) -> "MoEGeneral":
+    """The fp8 token all-gather replaces the plain ring-of-experts token all-gather; its backward is the plain one's."""
+    if self.moe_fp8_token_all_gather:
+      _reject_unless(
+          "moe_fp8_token_all_gather=True",
+          [
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (self.use_ring_of_experts, "use_ring_of_experts=True"),
+              # That key already sends the tokens quantized (fp8 into the GMM); the two would quantize twice.
+              (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
+              # The TC 3D dispatch gathers the tokens in its (emb // 128, 128) layout.
+              (not self.moe_tc_ragged_3d_dispatch, "moe_tc_ragged_3d_dispatch=False"),
+              # The per-row scale spans the whole embedding dim, which embedding chunking splits.
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              # The backward is the plain reduce-scatter, the transpose of an unpinned all-gather.
+              (not self.moe_pin_sparse_core_all_gathers, "moe_pin_sparse_core_all_gathers=False"),
+              (not self.moe_pin_sparse_core_ep_all_gathers, "moe_pin_sparse_core_ep_all_gathers=False"),
+          ],
       )
     return self
 

@@ -433,6 +433,9 @@ moe_fp8_bwd_dispatch_qtype: "float8_e4m3fn" # or float8_e5m2
 # Ring of experts: forward combine as an fp8 (e4m3, per-row f32 scale) all-to-all + local f32 sum
 moe_fp8_combine: false
 moe_fp8_combine_pin_sparse_core: false # pin the moe_fp8_combine all-to-all to SparseCore moe_ep_all_gather_sparse_core_id
+# Ring of experts: forward token all-gather (the dispatch) with an fp8 e4m3 payload and a per-row f32 scale, dequantized
+# to the activation dtype after the gather; the backward stays the bf16 reduce-scatter of the cotangent (straight-through)
+moe_fp8_token_all_gather: false
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs

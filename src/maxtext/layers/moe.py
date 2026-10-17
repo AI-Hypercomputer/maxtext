@@ -1239,6 +1239,32 @@ def ep_combine_reduce_scatter(
   return _combine(x)
 
 
+def ep_fp8_token_all_gather(x: jax.Array, axis_name, all_gather_fn, qtype=jnp.float8_e4m3fn) -> jax.Array:
+  """Ring-of-experts dispatch (moe_fp8_token_all_gather): the token all-gather over the EP axis with an fp8 payload.
+
+  Each shard quantizes its tokens per row (last axis, one f32 absmax scale per row: quantize_rows_fp8), gathers the
+  fp8 codes and the scales with `all_gather_fn` (a tiled all-gather on dim 0), and dequantizes the gathered rows back
+  to x.dtype, so every reader of the result sees the same dtype and shape as after the plain all-gather. This changes
+  the forward values (one fp8 rounding per element). The backward treats the quantization as identity
+  (straight-through): the tiled reduce-scatter of the cotangent over the EP axis, in the cotangent's dtype, which is
+  the transpose of the plain tiled all-gather.
+  """
+
+  @jax.custom_vjp
+  def _gather(z):
+    qvalue, scale = quantize_rows_fp8(z, qtype)
+    return dequantize_rows_fp8(all_gather_fn(qvalue), all_gather_fn(scale), z.dtype)
+
+  def _gather_fwd(z):
+    return _gather(z), None
+
+  def _gather_bwd(_, g):
+    return (jax.lax.psum_scatter(g, axis_name, scatter_dimension=0, tiled=True),)
+
+  _gather.defvjp(_gather_fwd, _gather_bwd)
+  return _gather(x)
+
+
 def _order_after(x, dep):
   """Returns x with a data dependency on `dep` (forward only).
 
@@ -3467,6 +3493,11 @@ class RoutedMoE(nnx.Module):
             calibration_method=self.config.act_quantization_calibration_method,
             all_gather_fn=token_all_gather,
         )
+      elif self.config.moe_fp8_token_all_gather:
+        # fp8 payload with a per-row f32 scale, dequantized right after the gather: the readers below see the same
+        # bf16 token buffer as with the plain gather. The config validator rules out the TC 3D dispatch layout and
+        # SparseCore-pinned gathers here.
+        x = ep_fp8_token_all_gather(x, self._expert_parallelism_name, token_all_gather)
       else:
         x = token_all_gather(x)
 
