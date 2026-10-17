@@ -1682,6 +1682,13 @@ gdn_cp_m_scan: false
 # GDN kernel path: replace the sequence-sharded CP backward ds_ext_local XLA reduction tree with the Pallas VMEM scan
 # (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_dh_scan). Requires use_gdn_kernel: true and gdn_chunk_size: 64.
 gdn_cp_dh_scan: false
+# Pin the GatedDeltaNet gated-norm output to token-minor (0, 2, 1) before out_proj in training.
+gdn_out_proj_token_minor: false
+# Sequence-sharded CP GDN pass 1 runs the states-only forward kernel (PER_SEQ_STATES, no output or chunk states),
+# and every prefill-only forward kernel (CP pass 1, CP pass 2, and non-CP/head-sharded prefill) DMAs bfloat16 qkv
+# chunks and upcasts to fp32 in VMEM. Bit-identical to false for bfloat16 activations. Requires use_gdn_kernel: true,
+# gdn_chunk_size: 64, and dtype: "bfloat16".
+gdn_cp_pass1_states_and_bf16_qkv: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

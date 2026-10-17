@@ -209,11 +209,12 @@ def _run_local_gdn_decoupled_fwd(
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
     conv_dense_token_stack: bool = False,
+    bf16_qkv_dma: bool = False,
 ) -> Tuple[Tuple[jax.Array, Tuple[jax.Array, jax.Array]], Optional[jax.Array], Optional[jax.Array],]:
   """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU.
 
-  `conv_dense_token_stack` goes to the Pallas forward kernel (wrapper.fused_conv1d_gdn); the CPU fallback has no
-  in-VMEM Conv1D and does not use it.
+  `conv_dense_token_stack` and `bf16_qkv_dma` go to the Pallas forward kernel (wrapper.fused_conv1d_gdn); the CPU
+  fallback has no in-VMEM Conv1D and does not use them.
   """
   batch_size, seq_len, _ = qkv.shape
   if seq_len % chunk_size != 0:
@@ -340,6 +341,7 @@ def _run_local_gdn_decoupled_fwd(
       head_group_size=head_group_size,
       emit_t_inv=emit_t_inv,
       conv_dense_token_stack=conv_dense_token_stack,
+      bf16_qkv_dma=bf16_qkv_dma,
   )
 
   core_attn_out = core_attn_out_flat.reshape(batch_size, seq_len, num_v_heads, head_v_dim)
@@ -384,6 +386,7 @@ def _run_local_gdn_states_fwd(
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
     conv_dense_token_stack: bool = False,
+    bf16_qkv_dma: bool = True,
 ) -> Tuple[Tuple[jax.Array, jax.Array], Optional[jax.Array]]:
   """Runs local GDN state scan only (CP pass 1), skipping output matmuls and chunk_states."""
   batch_size, seq_len, _ = qkv.shape
@@ -478,6 +481,7 @@ def _run_local_gdn_states_fwd(
       head_group_size=head_group_size,
       emit_t_inv=emit_t_inv,
       conv_dense_token_stack=conv_dense_token_stack,
+      bf16_qkv_dma=bf16_qkv_dma,
   )
 
   if t_inv_raw is None:
@@ -549,6 +553,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
     cp_matmul_precision: jax.lax.Precision = cp_gdn.DEFAULT_PRECISION,
     conv_dense_token_stack: bool = False,
     cp_m_scan: bool = False,
+    pass1_states_and_bf16_qkv: bool = False,
 ):
   """Runs 2-pass sequence-sharded CP forward for GDN. Both passes get `conv_dense_token_stack`."""
   batch_size = qkv.shape[0]
@@ -581,29 +586,56 @@ def _run_cp_gdn_decoupled_fwd_impl(
   zero_rs = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
 
   # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv (when chunk_size <= 64) and S_ext_local
-  states_pass1, t_inv = _run_local_gdn_states_fwd(
-      qkv,
-      b,
-      a,
-      conv_weight,
-      conv_bias,
-      a_log,
-      dt_bias,
-      conv_halo,
-      zero_rs,
-      num_k_heads=num_k_heads,
-      num_v_heads=num_v_heads,
-      head_k_dim=head_k_dim,
-      head_v_dim=head_v_dim,
-      conv_kernel_size=conv_kernel_size,
-      chunk_size=chunk_size,
-      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-      compute_dtype=compute_dtype,
-      segment_ids=s_enc_local,
-      conv_halo_seg=conv_halo_seg,
-      init_seg=init_seg,
-      conv_dense_token_stack=conv_dense_token_stack,
-  )
+  if pass1_states_and_bf16_qkv:
+    states_pass1, t_inv = _run_local_gdn_states_fwd(
+        qkv,
+        b,
+        a,
+        conv_weight,
+        conv_bias,
+        a_log,
+        dt_bias,
+        conv_halo,
+        zero_rs,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        compute_dtype=compute_dtype,
+        segment_ids=s_enc_local,
+        conv_halo_seg=conv_halo_seg,
+        init_seg=init_seg,
+        conv_dense_token_stack=conv_dense_token_stack,
+        bf16_qkv_dma=True,
+    )
+  else:
+    (_, states_pass1), t_inv, _ = _run_local_gdn_decoupled_fwd(
+        qkv,
+        b,
+        a,
+        conv_weight,
+        conv_bias,
+        a_log,
+        dt_bias,
+        conv_halo,
+        zero_rs,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        compute_dtype=compute_dtype,
+        segment_ids=s_enc_local,
+        conv_halo_seg=conv_halo_seg,
+        init_seg=init_seg,
+        conv_dense_token_stack=conv_dense_token_stack,
+        bf16_qkv_dma=False,
+    )
 
   # Convolve only the K channel slice (1/6th of qkv) needed by compose_local_from_t_inv / gdn_cp_m_scan
   q_size = num_k_heads * head_k_dim
@@ -682,6 +714,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
       conv_dense_token_stack=conv_dense_token_stack,
+      bf16_qkv_dma=pass1_states_and_bf16_qkv,
   )
   if s_enc_local is not None:
     # Owner = last rank with a valid local token (rank 0 if none). A rank whose
@@ -709,7 +742,7 @@ def _conv_input_in_qkv_dtype_scoped(fn):
   return scoped
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(9, 10, 11, 12, 13, 14, 15, 16, 17, 19, 20, 21, 22, 23, 24))
 @_conv_input_in_qkv_dtype_scoped
 def gdn_decoupled_conv1d(
     qkv: jax.Array,
@@ -736,6 +769,7 @@ def gdn_decoupled_conv1d(
     conv_dense_token_stack: bool = False,
     cp_m_scan: bool = False,
     cp_dh_scan: bool = False,
+    pass1_states_and_bf16_qkv: bool = False,
 ) -> Tuple[jax.Array, Tuple[jax.Array, jax.Array]]:
   """Decoupled Conv1D + GDN with Pallas backward pass and optional sequence-sharded CP.
 
@@ -754,6 +788,11 @@ def gdn_decoupled_conv1d(
 
   `cp_m_scan` / `cp_dh_scan` (configs gdn_cp_m_scan / gdn_cp_dh_scan) replace the sequence-sharded CP forward
   `m_local` and backward `ds_ext_local` XLA reduction trees with the Pallas VMEM chunk scans (`dh_scan`).
+
+  `pass1_states_and_bf16_qkv` (config gdn_cp_pass1_states_and_bf16_qkv) runs the states-only forward kernel
+  (GDNMode.PER_SEQ_STATES) in sequence-sharded CP pass 1 and keeps prefill qkv in bfloat16 in HBM, upcasting each
+  chunk to float32 in VMEM via vmem_ldst.upcast_large_to_compact. Same values; only HBM traffic and pass 1 dead
+  output work change.
   """
   del cp_dh_scan
   if _is_cp_active(cp_axis_name):
@@ -780,6 +819,7 @@ def gdn_decoupled_conv1d(
         cp_matmul_precision=cp_matmul_precision,
         conv_dense_token_stack=conv_dense_token_stack,
         cp_m_scan=cp_m_scan,
+        pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
     )
     return out, states
 
@@ -808,6 +848,7 @@ def gdn_decoupled_conv1d(
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
       conv_dense_token_stack=conv_dense_token_stack,
+      bf16_qkv_dma=pass1_states_and_bf16_qkv,
   )
   return out, states
 
@@ -848,6 +889,7 @@ def _gdn_decoupled_conv1d_fwd(
     conv_dense_token_stack: bool = False,
     cp_m_scan: bool = False,
     cp_dh_scan: bool = False,
+    pass1_states_and_bf16_qkv: bool = False,
 ):
   """Forward rule for custom_vjp registration of gdn_decoupled_conv1d."""
   del cp_dh_scan
@@ -908,6 +950,7 @@ def _gdn_decoupled_conv1d_fwd(
         cp_matmul_precision=cp_matmul_precision,
         conv_dense_token_stack=conv_dense_token_stack,
         cp_m_scan=cp_m_scan,
+        pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
     )
     out = checkpoint_name(out, "gdn_core_attn_out")
     residuals = (
@@ -952,6 +995,7 @@ def _gdn_decoupled_conv1d_fwd(
       conv_halo_seg=conv_halo_seg,
       init_seg=init_seg,
       conv_dense_token_stack=conv_dense_token_stack,
+      bf16_qkv_dma=pass1_states_and_bf16_qkv,
   )
   out = checkpoint_name(out, "gdn_core_attn_out")
   seg_bundle = (segment_ids, conv_halo_seg, init_seg) if segment_ids is not None else None
@@ -987,13 +1031,19 @@ def _gdn_decoupled_conv1d_bwd(
     conv_dense_token_stack: bool = False,
     cp_m_scan: bool = False,
     cp_dh_scan: bool = False,
+    pass1_states_and_bf16_qkv: bool = False,
     residuals: tuple[Any, ...] | None = None,
     cotangents: tuple[Any, ...] | None = None,
 ):
   """Backward rule for custom_vjp registration of gdn_decoupled_conv1d."""
-  # Support positional calls that omit the trailing nondiff arguments (10..15 positional args).
-  # jax.custom_vjp itself always passes all 14 nondiff arguments plus residuals and cotangents (16 args).
-  if residuals is None and cotangents is None and isinstance(cp_axis_name, tuple) and len(cp_axis_name) >= 10:
+  # Support positional calls that omit the trailing nondiff arguments (10..16 positional args).
+  # jax.custom_vjp itself always passes all 15 nondiff arguments plus residuals and cotangents (17 args).
+  if (
+      residuals is None
+      and cotangents is None
+      and isinstance(cp_axis_name, tuple)
+      and len(cp_axis_name) >= 10
+  ):
     residuals, cotangents = cp_axis_name, cp_matmul_precision
     cp_axis_name, cp_matmul_precision = None, cp_gdn.DEFAULT_PRECISION
   elif (
@@ -1023,11 +1073,18 @@ def _gdn_decoupled_conv1d_bwd(
   elif residuals is None and cotangents is None and isinstance(cp_m_scan, tuple) and len(cp_m_scan) >= 10:
     residuals, cotangents = cp_m_scan, cp_dh_scan
     cp_m_scan, cp_dh_scan = False, False
-  elif cotangents is None and isinstance(cp_dh_scan, tuple) and len(cp_dh_scan) >= 10:
-    residuals, cotangents = cp_dh_scan, residuals
-    cp_dh_scan = False
+  elif residuals is None and cotangents is None and isinstance(cp_dh_scan, tuple) and len(cp_dh_scan) >= 10:
+    residuals, cotangents = cp_dh_scan, pass1_states_and_bf16_qkv
+    cp_dh_scan, pass1_states_and_bf16_qkv = False, False
+  elif (
+      cotangents is None
+      and isinstance(pass1_states_and_bf16_qkv, tuple)
+      and len(pass1_states_and_bf16_qkv) >= 10
+  ):
+    residuals, cotangents = pass1_states_and_bf16_qkv, residuals
+    pass1_states_and_bf16_qkv = False
   # The backward rule recomputes the Conv1D with JAX ops; it never runs the Pallas forward kernel or m_scan.
-  del conv_dense_token_stack, cp_m_scan
+  del conv_dense_token_stack, cp_m_scan, pass1_states_and_bf16_qkv
 
   with compute_conv1d_bwd.conv_input_in_qkv_dtype_scope(conv_input_in_qkv_dtype):
     return _gdn_decoupled_conv1d_bwd_impl(

@@ -623,6 +623,8 @@ def run_gdn_kernel_layer(
   conv_dense_token_stack = bool(getattr(cfg, "gdn_conv1d_dense_token_stack", False))
   cp_m_scan = bool(getattr(cfg, "gdn_cp_m_scan", False))
   cp_dh_scan = bool(getattr(cfg, "gdn_cp_dh_scan", False))
+  # States-only CP pass 1 kernel and VMEM bf16 qkv upcast (wrapper.py). Same values.
+  pass1_states_and_bf16_qkv = bool(getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False))
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
@@ -900,6 +902,7 @@ def run_gdn_kernel_layer(
             segment_ids=seg_val,
             conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
             conv_dense_token_stack=conv_dense_token_stack,
+            pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
         )
 
         if next_cs is not None:
@@ -943,6 +946,7 @@ def run_gdn_kernel_layer(
           conv_dense_token_stack=conv_dense_token_stack,
           cp_m_scan=cp_m_scan,
           cp_dh_scan=cp_dh_scan,
+          pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -987,6 +991,7 @@ def run_gdn_kernel_layer(
         segment_ids=decoder_segment_ids,
         conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
         conv_dense_token_stack=conv_dense_token_stack,
+        pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")

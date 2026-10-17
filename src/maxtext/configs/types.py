@@ -2482,6 +2482,25 @@ class Qwen3Next(BaseModel):
           " (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_dh_scan). Requires use_gdn_kernel=True and gdn_chunk_size=64."
       ),
   )
+  gdn_out_proj_token_minor: bool = Field(
+      False,
+      description=(
+          "GDN training path: pin the gated-norm output to token-minor layout (0, 2, 1) before out_proj in"
+          " Qwen3NextGatedDeltaNet (models/qwen3.py), matching the MoE output projection input layout."
+      ),
+  )
+  gdn_cp_pass1_states_and_bf16_qkv: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: (1) pass 1 of sequence-sharded context parallelism (gdn_cp_mode='seq') runs the"
+          " states-only forward kernel (GDNMode.PER_SEQ_STATES), which skips computing the output and writes"
+          " neither the output nor the chunk states to HBM; and (2) every prefill-only forward kernel (CP pass 1,"
+          " CP pass 2, and non-CP/head-sharded prefill) DMAs bfloat16 qkv chunks and upcasts to float32 in VMEM"
+          " instead of materializing a float32 qkv copy in HBM (float32 activations fall back to the float32 DMA"
+          " path). Bit-identical to False for bfloat16 activations. Requires use_gdn_kernel=True,"
+          " gdn_chunk_size=64, and dtype='bfloat16'."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -5567,6 +5586,8 @@ class MaxTextConfig(
     dense_token_stack = getattr(cfg, "gdn_conv1d_dense_token_stack", False)
     cp_m_scan = getattr(cfg, "gdn_cp_m_scan", False)
     cp_dh_scan = getattr(cfg, "gdn_cp_dh_scan", False)
+    out_proj_token_minor = getattr(cfg, "gdn_out_proj_token_minor", False)
+    pass1_states_bf16_qkv = getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False)
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       if dense_token_stack:
         raise ValueError(
@@ -5576,6 +5597,16 @@ class MaxTextConfig(
       if cp_m_scan or cp_dh_scan:
         raise ValueError(
             "gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if out_proj_token_minor:
+        raise ValueError(
+            "gdn_out_proj_token_minor=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if pass1_states_bf16_qkv:
+        raise ValueError(
+            "gdn_cp_pass1_states_and_bf16_qkv=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
             f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
         )
       return
@@ -5608,6 +5639,11 @@ class MaxTextConfig(
             "gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires use_gdn_kernel=True: only the GDN kernel path"
             " runs the sequence-sharded context-parallel recurrence scans (kernels/gdn/gdn_bwd/dh_scan.py)."
         )
+      if pass1_states_bf16_qkv:
+        raise ValueError(
+            "gdn_cp_pass1_states_and_bf16_qkv=True requires use_gdn_kernel=True: only the Pallas GDN forward"
+            " kernel runs the states-only CP pass 1 and VMEM bf16 qkv upcast."
+        )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(
@@ -5620,6 +5656,14 @@ class MaxTextConfig(
     if (cp_m_scan or cp_dh_scan) and cfg.gdn_chunk_size != 64:
       raise ValueError(
           f"gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}."
+      )
+    if pass1_states_bf16_qkv and cfg.gdn_chunk_size != 64:
+      raise ValueError(
+          f"gdn_cp_pass1_states_and_bf16_qkv=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}."
+      )
+    if pass1_states_bf16_qkv and getattr(cfg, "dtype", "bfloat16") != "bfloat16":
+      raise ValueError(
+          f"gdn_cp_pass1_states_and_bf16_qkv=True requires dtype='bfloat16', got dtype={cfg.dtype!r}."
       )
     if cfg.gdn_key_head_dim % 128 or cfg.gdn_value_head_dim % 128:
       raise ValueError(

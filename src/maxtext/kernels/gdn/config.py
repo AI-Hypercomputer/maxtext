@@ -33,10 +33,10 @@ _TRI_INV_FIELD_DEFAULTS = {
     "emit_t_inv": True,
 }
 
-# GDNConfig fields that change how the kernel lays out a value it computes either way, not what it computes or
-# returns. They are left out of the kernel name and metadata, so the lowered program outside the kernel body is the
-# same with and without them, and a profile shows the same kernel name for both variants (the run's config tells
-# them apart).
+# GDNConfig fields that select an internal layout or prefill bf16-DMA/VMEM-upcast path without changing the kernel's
+# mathematical outputs. Leaving them out of the kernel name and metadata keeps the default (False) metadata identical
+# to the base kernel and shares a single kernel name across variants (the HLO qkv operand shape/dtype and the run's
+# config tell them apart; `is_prefill_only` also changes the prefill qkv operand outside the kernel body).
 _LAYOUT_ONLY_FIELDS = ("conv_dense_token_stack", "is_prefill_only")
 
 

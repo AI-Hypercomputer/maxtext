@@ -241,21 +241,21 @@ def inner_kernel_without_t_inv(
     a_slot_ref: jax.Ref,
     conv_state_slot_ref: jax.Ref,
     recurrent_slot_ref: jax.Ref,
-    out_slot_ref: jax.Array,
     *args,
     cfg: config.GDNConfig,
     **kwargs,
 ) -> None:
   """`inner_kernel` for pipelines without a t_inv output (cfg.emit_t_inv=False)."""
+  # PER_SEQ_STATES omits out_slot_ref (*args starts with weights_slot_ref).
+  # Other modes pass out_slot_ref as args[0], followed by t_inv_slot_ref=None.
+  slot_args = (None, *args) if cfg.mode == config.GDNMode.PER_SEQ_STATES else (args[0], None, *args[1:])
   inner_kernel(
       qkv_slot_ref,
       b_slot_ref,
       a_slot_ref,
       conv_state_slot_ref,
       recurrent_slot_ref,
-      out_slot_ref,
-      None,
-      *args,
+      *slot_args,
       cfg=cfg,
       **kwargs,
   )
@@ -392,6 +392,7 @@ def _fused_conv1d_gdn(
     head_group_size: int | None = None,
     emit_t_inv: bool = True,
     conv_dense_token_stack: bool = False,
+    bf16_qkv_dma: bool = False,
 ) -> tuple[jax.Array | None, tuple[jax.Array, jax.Array], jax.Array | None, jax.Array | None]:
   """Implements fused_conv1d_gdn; states_only=True returns no out and no chunk_states."""
   act_in_dtype = qkv.dtype
@@ -400,7 +401,8 @@ def _fused_conv1d_gdn(
   recurrent_out_dtype = recurrent_state.dtype
   assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
-  if not is_prefill_only:
+  use_bf16_qkv_dma = bool(bf16_qkv_dma and is_prefill_only and act_in_dtype == jnp.bfloat16)
+  if not use_bf16_qkv_dma:
     qkv = qkv.astype(jnp.float32)
   b = b.astype(jnp.float32)
   a = a.astype(jnp.float32)
@@ -475,7 +477,8 @@ def _fused_conv1d_gdn(
   batch_padding_size = padded_batch_size - batch_size
   aligned_num_v_heads = tiling.align_to(n_v + extra_lanes, num_lanes)
   num_v_padding_size = aligned_num_v_heads - n_v
-  if is_prefill_only:
+  use_bf16_qkv_dma = bool(bf16_qkv_dma and is_prefill_only and act_in_dtype == jnp.bfloat16)
+  if use_bf16_qkv_dma:
     # Keep qkv in bf16 in HBM; each chunk is DMA'd into VMEM and upcast to fp32
     # before Conv1D. Reshape [batch, dim] -> [num_chunks, chunk, dim] (a no-copy
     # bitcast since batch_size is a multiple of chunk_size) so each chunk DMA is
@@ -554,7 +557,7 @@ def _fused_conv1d_gdn(
         v_head_dim=d_v,
         has_seg_ids=has_seg_ids,
         use_qk_norm_in_gdn=use_qk_norm_in_gdn,
-        is_prefill_only=is_prefill_only,
+        is_prefill_only=use_bf16_qkv_dma,
         dtypes=config.Dtypes(
             act_in=act_in_dtype,
             act_out=act_out_dtype,
@@ -749,6 +752,7 @@ def _fused_conv1d_gdn(
         "head_group_size",
         "emit_t_inv",
         "conv_dense_token_stack",
+        "bf16_qkv_dma",
     ),
 )
 def fused_conv1d_gdn(
@@ -772,11 +776,11 @@ def fused_conv1d_gdn(
     d_v: int,
     kernel_size: int,
     zero_initialize_out: bool = True,
-    compute_precision: jnp.dtype = jnp.float32,
+    compute_precision: jnp.dtype = jnp.float32.dtype,
     decode_tile_size: int | None = None,
     mixed_tile_size: int | None = None,
     is_prefill_only: bool = False,
-    use_qk_norm_in_gdn: bool = False,
+    use_qk_norm_in_gdn: bool = True,
     segment_ids: jax.Array | None = None,
     conv_halo_seg: jax.Array | None = None,
     init_seg: jax.Array | None = None,
@@ -784,6 +788,7 @@ def fused_conv1d_gdn(
     head_group_size: int | None = None,
     emit_t_inv: bool = True,
     conv_dense_token_stack: bool = False,
+    bf16_qkv_dma: bool = False,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array], jax.Array | None, jax.Array]:
   """Fused Causal Conv1D + Gated Delta Net (GDN) forward pass."""
   out_act, states, t_inv, chunk_states = _fused_conv1d_gdn(
@@ -819,6 +824,7 @@ def fused_conv1d_gdn(
       head_group_size=head_group_size,
       emit_t_inv=emit_t_inv,
       conv_dense_token_stack=conv_dense_token_stack,
+      bf16_qkv_dma=bf16_qkv_dma,
   )
   assert out_act is not None and chunk_states is not None
   return out_act, states, t_inv, chunk_states
@@ -839,6 +845,7 @@ def fused_conv1d_gdn(
         "head_group_size",
         "emit_t_inv",
         "conv_dense_token_stack",
+        "bf16_qkv_dma",
     ),
 )
 def fused_conv1d_gdn_states(
@@ -861,9 +868,9 @@ def fused_conv1d_gdn_states(
     d_k: int,
     d_v: int,
     kernel_size: int,
-    compute_precision: jnp.dtype = jnp.float32,
+    compute_precision: jnp.dtype = jnp.float32.dtype,
     mixed_tile_size: int | None = None,
-    use_qk_norm_in_gdn: bool = False,
+    use_qk_norm_in_gdn: bool = True,
     segment_ids: jax.Array | None = None,
     conv_halo_seg: jax.Array | None = None,
     init_seg: jax.Array | None = None,
@@ -871,6 +878,7 @@ def fused_conv1d_gdn_states(
     head_group_size: int | None = None,
     emit_t_inv: bool = True,
     conv_dense_token_stack: bool = False,
+    bf16_qkv_dma: bool = True,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array | None]:
   """Prefill-only Conv1D + GDN state scan; skips output and chunk_states."""
   _, states, t_inv, _ = _fused_conv1d_gdn(
@@ -905,5 +913,6 @@ def fused_conv1d_gdn_states(
       head_group_size=head_group_size,
       emit_t_inv=emit_t_inv,
       conv_dense_token_stack=conv_dense_token_stack,
+      bf16_qkv_dma=bf16_qkv_dma,
   )
   return states, t_inv
