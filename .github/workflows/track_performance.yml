@@ -86,6 +86,8 @@ jobs:
           git worktree remove gh-pages
 
       - name: Track Test Durations (Macro-level Dashboard)
+        # process_test_results.py writes no file when no flavor has dashboard totals (e.g. every one is CPU or partial).
+        if: ${{ hashFiles('benchmark-results.json') != '' }}
         uses: benchmark-action/github-action-benchmark@3d3bca03e83647895ef4f911fa57de3c7a391aaf # v1.13.0
         with:
           name: MaxText Test Execution Times
