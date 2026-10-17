@@ -1,7 +1,7 @@
 datasets>=5.0.1
 fsspec==2026.6.0
 gcsfs==2026.6.0
-orbax-checkpoint>=0.12.4
+orbax-checkpoint>=0.12.6
 markdown>=3.10.2
 oauthlib>=4.0.0
 setuptools>=84.0.0
