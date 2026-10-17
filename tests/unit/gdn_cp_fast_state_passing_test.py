@@ -126,11 +126,15 @@ class GdnCpFastStatePassingTest(unittest.TestCase):
     key = jax.random.PRNGKey(7)
     ks = jax.random.split(key, 8)
     qkv = jax.random.normal(ks[0], (B, T, C), dtype=jnp.bfloat16)
-    b = jax.random.normal(ks[1], (B, T, Hv), dtype=jnp.bfloat16)
-    a = jax.random.normal(ks[2], (B, T, Hv), dtype=jnp.bfloat16)
+    # Weak decay and a small beta: each rank's state transition over its 128 tokens keeps entries up to about 0.96,
+    # so the states passed on reach the ranks two and three hops away and a broken 2-round scan changes the output
+    # and the gradients. With a_log, a and b drawn from N(0, 1) the transitions are about 1e-31 to 5e-29, the 2-hop
+    # terms underflow to 0 in float32, and a wrong permutation in the 2-round scans left every output bit-identical.
+    b = jnp.full((B, T, Hv), -4.0, dtype=jnp.bfloat16)
+    a = jnp.full((B, T, Hv), -4.0, dtype=jnp.bfloat16)
     conv_w = jax.random.normal(ks[3], (D, 1, C), dtype=jnp.bfloat16) * 0.1
     conv_b = jax.random.normal(ks[4], (C,), dtype=jnp.bfloat16) * 0.1
-    a_log = jax.random.normal(ks[5], (Hv,), dtype=jnp.float32)
+    a_log = jnp.full((Hv,), -6.0, dtype=jnp.float32)
     dt_bias = jax.random.normal(ks[6], (Hv,), dtype=jnp.float32)
     dout = jax.random.normal(ks[7], (B, T, Hv, V), dtype=jnp.bfloat16)
 
@@ -207,7 +211,11 @@ class GdnCpFastStatePassingTest(unittest.TestCase):
       np.testing.assert_array_equal(np.asarray(x), np.asarray(y))
     txt_slow = j_slow.lower(qkv, b, a, conv_w, conv_b, a_log, dt_bias, dout).as_text()
     txt_fast = j_fast.lower(qkv, b, a, conv_w, conv_b, a_log, dt_bias, dout).as_text()
+    # In this program (the final states are not used) the 2-round scans save 2 collective-permutes and 3 matmuls in
+    # each of the forward and the backward scan. The generic fast loop saves the same permutes but only 2 matmuls,
+    # so a disabled 2-round path, whose values are bit-identical, shows up in the matmul count.
     self.assertEqual(txt_slow.count("collective_permute") - txt_fast.count("collective_permute"), 4)
+    self.assertEqual(txt_slow.count("dot_general") - txt_fast.count("dot_general"), 6)
 
 
 if __name__ == "__main__":
