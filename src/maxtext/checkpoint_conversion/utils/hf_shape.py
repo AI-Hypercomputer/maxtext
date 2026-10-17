@@ -1338,6 +1338,67 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def NEMOTRON3_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns mapping between HuggingFace Nemotron-3 Omni text backbone weights path and their shape."""
+  hidden_size = config["hidden_size"]
+  vocab_size = config["vocab_size"]
+  _block_to_char = {
+      "mamba": "M",
+      "linear_attention": "M",
+      "attention": "*",
+      "full_attention": "*",
+      "moe": "E",
+      "mlp": "-",
+  }
+  pattern = config.get("hybrid_override_pattern") or "".join(_block_to_char[b] for b in config["layers_block_type"])
+  mamba_num_heads = config["mamba_num_heads"]
+  mamba_head_dim = config["mamba_head_dim"]
+  ssm_state_size = config["ssm_state_size"]
+  n_groups = config["n_groups"]
+  conv_kernel = config["conv_kernel"]
+  mamba_inner = mamba_num_heads * mamba_head_dim
+  mamba_conv_dim = mamba_inner + 2 * n_groups * ssm_state_size
+  mamba_in_proj_dim = 2 * mamba_inner + 2 * n_groups * ssm_state_size + mamba_num_heads
+  q_dim = config["num_attention_heads"] * config["head_dim"]
+  kv_dim = config["num_key_value_heads"] * config["head_dim"]
+  n_routed_experts = config["n_routed_experts"]
+  moe_intermediate_size = config["moe_intermediate_size"]
+  shared_intermediate_size = config["moe_shared_expert_intermediate_size"]
+
+  hf = "language_model."
+  mapping = {
+      f"{hf}backbone.embeddings.weight": [vocab_size, hidden_size],
+      f"{hf}backbone.norm_f.weight": [hidden_size],
+      f"{hf}lm_head.weight": [vocab_size, hidden_size],
+  }
+  for i, block in enumerate(pattern):
+    layer = f"{hf}backbone.layers.{i}"
+    mapping[f"{layer}.norm.weight"] = [hidden_size]
+    if block == "M":
+      mapping[f"{layer}.mixer.norm.weight"] = [mamba_inner]
+      mapping[f"{layer}.mixer.in_proj.weight"] = [mamba_in_proj_dim, hidden_size]
+      mapping[f"{layer}.mixer.conv1d.weight"] = [mamba_conv_dim, 1, conv_kernel]
+      mapping[f"{layer}.mixer.conv1d.bias"] = [mamba_conv_dim]
+      mapping[f"{layer}.mixer.dt_bias"] = [mamba_num_heads]
+      mapping[f"{layer}.mixer.A_log"] = [mamba_num_heads]
+      mapping[f"{layer}.mixer.D"] = [mamba_num_heads]
+      mapping[f"{layer}.mixer.out_proj.weight"] = [hidden_size, mamba_inner]
+    elif block == "*":
+      mapping[f"{layer}.mixer.q_proj.weight"] = [q_dim, hidden_size]
+      mapping[f"{layer}.mixer.k_proj.weight"] = [kv_dim, hidden_size]
+      mapping[f"{layer}.mixer.v_proj.weight"] = [kv_dim, hidden_size]
+      mapping[f"{layer}.mixer.o_proj.weight"] = [hidden_size, q_dim]
+    elif block == "E":
+      mapping[f"{layer}.mixer.gate.weight"] = [n_routed_experts, hidden_size]
+      mapping[f"{layer}.mixer.gate.e_score_correction_bias"] = [n_routed_experts]
+      for e in range(n_routed_experts):
+        mapping[f"{layer}.mixer.experts.{e}.up_proj.weight"] = [moe_intermediate_size, hidden_size]
+        mapping[f"{layer}.mixer.experts.{e}.down_proj.weight"] = [hidden_size, moe_intermediate_size]
+      mapping[f"{layer}.mixer.shared_experts.up_proj.weight"] = [shared_intermediate_size, hidden_size]
+      mapping[f"{layer}.mixer.shared_experts.down_proj.weight"] = [hidden_size, shared_intermediate_size]
+  return mapping
+
+
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1385,4 +1446,5 @@ HF_SHAPE = {
     "qwen3.5-397b-a17b-fp8": QWEN3_5_HF_WEIGHTS_TO_SHAPE,
     "qwen3.8-2.4t-a95b": QWEN3_8_HF_WEIGHTS_TO_SHAPE,
     "qwen3-next-80b-a3b": QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE,
+    "nemotron3-nano-omni-30b-a3b": NEMOTRON3_HF_WEIGHTS_TO_SHAPE,
 }

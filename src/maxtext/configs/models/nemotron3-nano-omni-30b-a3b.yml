@@ -1,0 +1,66 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# NVIDIA Nemotron-3-Nano-Omni-30B-A3B text backbone (nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16,
+# llm_config). Every value is audited against config.json by tests/unit/nemotron3_config_test.py.
+
+decoder_block: "nemotron3"
+scan_layers: false  # Non-periodic layer pattern.
+
+base_emb_dim: 2688
+base_num_decoder_layers: 52
+hybrid_override_pattern: "MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME"
+vocab_size: 131072
+normalization_layer_epsilon: 1.0e-5
+logits_via_embedding: false
+enable_dropout: false
+
+# NoPE grouped-query attention (6 layers).
+base_num_query_heads: 32
+base_num_kv_heads: 2
+head_dim: 128
+attention_bias: false
+use_qk_norm: false
+float32_qk_product: false
+float32_logits: true
+
+# Mamba-2 (23 layers).
+mamba_num_heads: 64
+mamba_head_dim: 64
+mamba_ssm_state_size: 128
+mamba_n_groups: 8
+mamba_conv_kernel: 4
+mamba_conv_bias: true
+mamba_chunk_size: 128
+mamba_time_step_limit: [0.0, 1.0e+30]
+
+# MoE (23 layers): 128 routed relu2 experts, top-6, plus one 3712-wide shared expert.
+num_experts: 128
+num_experts_per_tok: 6
+base_moe_mlp_dim: 1856
+base_mlp_dim: 1856
+shared_experts: 2  # One shared MLP of width shared_experts * base_moe_mlp_dim = 3712.
+mlp_activations: ["relu2"]
+mlp_bias: false
+routed_score_func: "sigmoid"
+routed_bias: true
+routed_scaling_factor: 2.5
+norm_topk_prob: true
+n_routing_groups: 1
+topk_routing_group: 1
+float32_gate_logits: true
+float32_weight_sum: true
+# Training-only router settings HF does not define: Phase 4 decisions, 0 for parity.
+routed_bias_update_rate: 0.0
+load_balance_loss_weight: 0.0
