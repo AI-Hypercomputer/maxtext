@@ -96,6 +96,7 @@ HF_IDS = {
     "olmo3-7b": "allenai/Olmo-3-7B-Instruct",
     "olmo3-7b-pt": "allenai/Olmo-3-1025-7B",
     "olmo3-32b": "allenai/Olmo-3-32B-Think",
+    "nemotron3-nano-omni-30b-a3b": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16",
     "weaver-mini": "Qwen/Qwen3-VL-4B-Instruct",
     "weaver-max": "Qwen/Qwen3-VL-8B-Instruct",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path

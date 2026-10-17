@@ -63,6 +63,7 @@ from maxtext.models import (
     llama4,
     mistral,
     mixtral,
+    nemotron3,
     olmo3,
     qwen2,
     qwen3,
@@ -993,6 +994,7 @@ class NNXDecoder(nnx.Module):
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
           DecoderBlockType.DEEPSEEK4,
+          DecoderBlockType.NEMOTRON3,
       }:
         layer_kwargs = {"layer_idx": lyr}
       elif config.decoder_block == DecoderBlockType.GPT_OSS:
@@ -1377,10 +1379,13 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
         DecoderBlockType.ENVY: get_scannable(envy.EnvyDecoderLayer, envy.EnvyScannableBlock),
         DecoderBlockType.WEAVER: [weaver.WeaverMoTDecoderLayer],
+        DecoderBlockType.NEMOTRON3: [nemotron3.Nemotron3DecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
+    if cfg.decoder_block == DecoderBlockType.NEMOTRON3 and cfg.scan_layers:
+      raise ValueError("decoder_block='nemotron3' supports only scan_layers=False.")
 
     return layer_map[cfg.decoder_block]
 
@@ -1539,6 +1544,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
+        DecoderBlockType.NEMOTRON3,
     }:
       return functools.partial(
           RMSNorm,
