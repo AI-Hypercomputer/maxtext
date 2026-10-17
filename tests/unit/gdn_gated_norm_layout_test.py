@@ -18,8 +18,10 @@
    typo'd value or key is refused by config construction.
 2. The real Qwen3NextGatedDeltaNet in training, alone and as a remat'd two-layer scan (the production structure: a
    forward body plus a replay in the backward body): the loss and every gradient (parameters and input) are
-   bit-identical for 'auto', 'natural', 'natural_fwd_bwd' and 'token_minor', since a layout constraint never changes a
-   value on CPU, while the lowered program carries exactly the expected extra LayoutConstraints on the 4-D
+   bit-identical for 'auto', 'natural' and 'natural_fwd_bwd'. For 'token_minor' the loss, the input gradient and every
+   parameter gradient but one are bit-identical; the gated-norm scale gradient, a float32 sum over the tokens whose
+   order XLA:CPU takes from the operand layout, matches to a relative 1e-6 (measured: max |d| 9.5e-7, rel 1.3e-7).
+   The lowered program carries exactly the expected extra LayoutConstraints on the 4-D
    (B, S, H_v, D_v) tensors: for 'natural' one row-major pin of the norm output per forward evaluation, plus one per
    backward for 'natural_fwd_bwd'; for 'token_minor' one token-minor (0, 2, 3, 1) pin of the GDN output per forward
    evaluation; none in prefill.
@@ -57,10 +59,6 @@ _LAYOUT_RE = re.compile(
     r"stablehlo\.custom_call @LayoutConstraint\(%[^)]*\)[^\n]*?result_layouts = \[dense<\[([0-9, ]+)\]>[^\n]*?"
     r"->\s*tensor<([0-9a-z]+)>"
 )
-
-
-def _bits(x):
-  return np.asarray(jax.device_get(x)).tobytes()
 
 
 def _cfg(layout, token_minor=True, decoder_block="qwen3_next"):
@@ -138,10 +136,16 @@ def _scan_fns(layout):
   return loss, stacked, hidden
 
 
+_SCALE_LEAF = "['norm']['rms_norm']['scale'].value"  # the gated-norm scale gradient (a sum over the tokens)
+_SCALE_RTOL = 1e-6
+
+
 def _run(loss, params, hidden):
+  """[(name, array)] of the loss, the input gradient and every parameter gradient."""
   val, (gp, gh) = jax.jit(jax.value_and_grad(loss, argnums=(0, 1)))(params, hidden)
-  leaves = [val, gh] + jax.tree.leaves(gp)
-  return [_bits(x) for x in leaves]
+  named = [("loss", val), ("d_input", gh)]
+  named += [(jax.tree_util.keystr(k), v) for k, v in jax.tree_util.tree_leaves_with_path(gp)]
+  return [(n, np.asarray(jax.device_get(v))) for n, v in named]
 
 
 def _constraints(text):
@@ -198,9 +202,21 @@ def check_layout(layout, structure, counts):
   )
 
 
-def check_bits(ref_bits, got_bits):
-  n_diff = sum(1 for a, b in zip(ref_bits, got_bits) if a != b) + abs(len(ref_bits) - len(got_bits))
-  return n_diff == 0, f"{len(got_bits)} arrays (loss, d_input, {len(got_bits) - 2} param grads), {n_diff} differ"
+def check_bits(ref, got, layout):
+  """Bit-identity of every array; for 'token_minor' the gated-norm scale gradient only to a relative _SCALE_RTOL."""
+  if [n for n, _ in ref] != [n for n, _ in got]:
+    return False, "array names differ"
+  bad, tol_used = [], ""
+  for (n, a), (_, b) in zip(ref, got):
+    if a.tobytes() == b.tobytes():
+      continue
+    if layout == "token_minor" and n.endswith(_SCALE_LEAF):
+      rel = float(np.max(np.abs(a.astype(np.float64) - b.astype(np.float64))) / max(float(np.max(np.abs(a))), 1e-30))
+      tol_used = f"; scale grad rel {rel:.2e}"
+      if rel <= _SCALE_RTOL:
+        continue
+    bad.append(n)
+  return not bad, f"{len(got)} arrays (loss, d_input, {len(got) - 2} param grads), {len(bad)} differ {bad}{tol_used}"
 
 
 # Planted variants of `_pin_gdn_gated_norm_layout(x, mode)`: each must fail at least one check.
@@ -211,10 +227,13 @@ PLANTED = {
     "N4_no_cotangent_pin": lambda x, mode: moe.forward_row_major(x),
     "N5_tm_pin_dropped": lambda x, mode: x,
     "N6_tm_wrong_perm_0213": lambda x, mode: moe._forward_layout_constraint(x, (0, 2, 1, 3)),  # pylint: disable=protected-access
+    "N7_tm_heads_reversed": lambda x, mode: moe._forward_layout_constraint(  # pylint: disable=protected-access
+        x[:, :, ::-1, :], (0, 2, 3, 1)
+    ),
 }
 PLANTED_MODE = {"N1_pin_dropped": "natural", "N2_wrong_perm_0132": "natural", "N3_heads_reversed": "natural",
                 "N4_no_cotangent_pin": "natural_fwd_bwd", "N5_tm_pin_dropped": "token_minor",
-                "N6_tm_wrong_perm_0213": "token_minor"}
+                "N6_tm_wrong_perm_0213": "token_minor", "N7_tm_heads_reversed": "token_minor"}
 
 
 def run_all(verbose=True):
@@ -237,8 +256,16 @@ def run_all(verbose=True):
       bits = _run(loss, params, hidden)
       if ref is None:
         ref = bits
-      ok, detail = check_bits(ref, bits)
+      ok, detail = check_bits(ref, bits, layout)
       report(f"{structure}/{layout}", "bits", ok, detail, True)
+      if layout == "token_minor":
+        # The relaxed branch is scoped and bounded: the same token_minor result must FAIL the exact check of the other
+        # modes, and a scale gradient moved by 1e-5 relative (10x the tolerance) must FAIL the token_minor check.
+        ok8, d8 = check_bits(ref, bits, "natural")
+        report(f"{structure}/N8_tol_only_for_token_minor", "gate", ok8, d8, False)
+        moved = [(n, a * np.float32(1 + 1e-5) if n.endswith(_SCALE_LEAF) else a) for n, a in bits]
+        ok9, d9 = check_bits(ref, moved, "token_minor")
+        report(f"{structure}/N9_scale_beyond_tol", "gate", ok9, d9, False)
       ok, detail = check_layout(layout, structure, _counts(loss, params, hidden))
       report(f"{structure}/{layout}", "layout", ok, detail, True)
     for name, fn in PLANTED.items():
@@ -246,7 +273,7 @@ def run_all(verbose=True):
       with mock.patch.object(qwen3, "_pin_gdn_gated_norm_layout", fn):
         loss, params, hidden = make(layout)
         bits = _run(loss, params, hidden)
-        ok_bits, d_bits = check_bits(ref, bits)
+        ok_bits, d_bits = check_bits(ref, bits, layout)
         ok_lay, d_lay = check_layout(layout, structure, _counts(loss, params, hidden))
       # A planted variant must FAIL the combined gate (bits AND layout).
       report(f"{structure}/{name}", "gate", ok_bits and ok_lay, f"bits: {d_bits}; layout: {d_lay}", False)
