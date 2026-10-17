@@ -114,7 +114,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
     [Qwen3.5 & Qwen3.8 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3_5.py)
   - **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gpt_oss.py)
   - **Kimi**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md) | [K2 reuses DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
-  - **Nemotron-3**: [Nemotron-3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/nemotron3.py)
+  - **Nemotron-3**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/nemotron3/Run_Nemotron3.md) | [Nemotron-3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/nemotron3.py)
 
 - **Technical Explanations:**
 
