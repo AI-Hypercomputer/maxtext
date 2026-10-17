@@ -44,6 +44,7 @@ import os
 import re
 import subprocess
 import sys
+from types import SimpleNamespace
 from unittest import mock
 
 from absl.testing import absltest
@@ -57,6 +58,7 @@ import numpy as np
 import pytest
 
 from maxtext.configs import pyconfig
+from maxtext.configs import types
 from maxtext.layers import moe
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -71,7 +73,7 @@ _E4M3_ROW_MAX = 0.06
 _LAYER_MEDIAN_BAND = (0.010, 0.040)
 _LAYER_MAX = 0.10
 _GRAD_REL_MAX = 0.10
-_BROKEN_MIN = 0.5
+_BROKEN_MIN = 0.5  # helper checks only (their rows span ~3 decades of norm)
 _REAL_HELPER = moe.ep_fp8_token_all_gather
 
 
@@ -338,16 +340,18 @@ def _layer_checks():
       f"L1 fused kernels traced: off {traced_off} on {traced_on} (want fused_dlhs = fused_wi_concat = {chunks} in both)"
   )
 
-  with mock.patch.object(moe, "ep_fp8_token_all_gather", _broken_no_scale):
-    bad, _, _ = _run_layer(dsw, cfg_on, mesh, params, x, token_mask)
-  med_b = _stats(_row_rel(np.asarray(ref[1], np.float32), np.asarray(bad[1], np.float32)))[0]
-  results["L2_broken_no_scale"] = med_b > _BROKEN_MIN
-  print(f"L2 broken gather (scale dropped): out median {med_b:.4%} -> {'detected' if med_b > _BROKEN_MIN else 'NOT'}")
-  with mock.patch.object(moe, "ep_fp8_token_all_gather", _broken_local_scale):
-    bad, _, _ = _run_layer(dsw, cfg_on, mesh, params, x, token_mask)
-  med_b = _stats(_row_rel(np.asarray(ref[1], np.float32), np.asarray(bad[1], np.float32)))[0]
-  results["L3_broken_local_scale"] = med_b > _BROKEN_MIN
-  print(f"L3 broken gather (local scale): out median {med_b:.4%} -> {'detected' if med_b > _BROKEN_MIN else 'NOT'}")
+  # The broken gathers must fail the gate the real key passes (L1's output band). Unit-variance tokens have similar row
+  # norms on every shard, so the local-scale variant errs by ~20%, not by the >50% of the helper check's spread rows.
+  for name, broken in (("L2_broken_no_scale", _broken_no_scale), ("L3_broken_local_scale", _broken_local_scale)):
+    with mock.patch.object(moe, "ep_fp8_token_all_gather", broken):
+      bad, _, _ = _run_layer(dsw, cfg_on, mesh, params, x, token_mask)
+    med_b, _, mx_b = _stats(_row_rel(np.asarray(ref[1], np.float32), np.asarray(bad[1], np.float32)))
+    detected = not (_in(med_b, _LAYER_MEDIAN_BAND) and mx_b <= _LAYER_MAX)
+    results[name] = detected
+    print(
+        f"{name}: out median {med_b:.4%} max {mx_b:.4%} (the key's gate: median in {_LAYER_MEDIAN_BAND}, max <="
+        f" {_LAYER_MAX}) -> {'detected' if detected else 'NOT DETECTED'}"
+    )
   return results
 
 
@@ -371,17 +375,42 @@ class ConfigTest(absltest.TestCase):
     self.assertTrue(cfg.moe_fp8_token_all_gather)
     self.assertTrue(cfg.moe_router_grad_from_wo_input and cfg.moe_wi_gmm_fused_swiglu and cfg.moe_wo_gmm_fused_dswiglu)
 
+  def test_validator_itself(self):
+    # On stand-in settings: in a full config, num_moe_token_chunks' own validator rejects use_ring_of_experts=False first.
+    settings = {
+        "moe_fp8_token_all_gather": True,
+        "sparse_matmul": True,
+        "use_ring_of_experts": True,
+        "moe_quantize_token_all_gather": False,
+        "moe_tc_ragged_3d_dispatch": False,
+        "num_moe_emb_chunks": 0,
+        "moe_pin_sparse_core_all_gathers": False,
+        "moe_pin_sparse_core_ep_all_gathers": False,
+    }
+    validate = types.MoEGeneral.validate_moe_fp8_token_all_gather
+    validate(SimpleNamespace(**settings))  # the bench settings pass
+    validate(SimpleNamespace(**{**settings, "moe_fp8_token_all_gather": False, "use_ring_of_experts": False}))
+    for key, bad, requirement in (
+        ("use_ring_of_experts", False, "use_ring_of_experts=True"),
+        ("sparse_matmul", False, "sparse_matmul=True"),
+        ("moe_quantize_token_all_gather", True, "moe_quantize_token_all_gather=False"),
+        ("moe_tc_ragged_3d_dispatch", True, "moe_tc_ragged_3d_dispatch=False"),
+    ):
+      with self.subTest(key=key):
+        with self.assertRaisesRegex(ValueError, re.escape(requirement)):
+          validate(SimpleNamespace(**{**settings, key: bad}))
+
   def test_rejected(self):
     dsw, _ = _bench_stack()
     for overrides, requirement in (
-        ({"use_ring_of_experts": False}, "use_ring_of_experts=True"),
         ({"moe_pin_sparse_core_all_gathers": True}, "moe_pin_sparse_core_all_gathers=False"),
         ({"moe_pin_sparse_core_ep_all_gathers": True}, "moe_pin_sparse_core_ep_all_gathers=False"),
         ({"num_moe_emb_chunks": 2}, "num_moe_emb_chunks=0"),
     ):
       with self.subTest(overrides=overrides):
         # The message must come from this key's validator, not from another key's.
-        with self.assertRaisesRegex(ValueError, re.escape("moe_fp8_token_all_gather=True requires:") + ".*" + re.escape(requirement)):
+        pattern = re.escape("moe_fp8_token_all_gather=True requires:") + ".*" + re.escape(requirement)
+        with self.assertRaisesRegex(ValueError, pattern):
           dsw._cfg(moe_fp8_token_all_gather=True, **overrides)  # pylint: disable=protected-access
 
 
@@ -404,7 +433,7 @@ class HelperUnitTest(absltest.TestCase):
             check_vma=False,
         )
     )
-    got = np.asarray(f(x).astype(jnp.float32))
+    got = np.asarray(f(jax.device_put(x, NamedSharding(mesh, P("expert")))).astype(jnp.float32))
     q, s = moe.quantize_rows_fp8(x, jnp.float8_e4m3fn)
     want = np.asarray(moe.dequantize_rows_fp8(q, s, jnp.bfloat16).astype(jnp.float32))
     np.testing.assert_array_equal(got, want)
