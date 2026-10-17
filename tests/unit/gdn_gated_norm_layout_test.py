@@ -18,11 +18,14 @@
    typo'd value or key is refused by config construction.
 2. The real Qwen3NextGatedDeltaNet in training, alone and as a remat'd two-layer scan (the production structure: a
    forward body plus a replay in the backward body): the loss and every gradient (parameters and input) are
-   bit-identical for 'auto', 'natural' and 'natural_fwd_bwd', since a layout constraint never changes a value on CPU,
-   while the lowered program carries the expected extra row-major LayoutConstraint on the 4-D norm output: one per
-   forward evaluation for 'natural', plus one per backward for 'natural_fwd_bwd'; none in prefill.
+   bit-identical for 'auto', 'natural', 'natural_fwd_bwd' and 'token_minor', since a layout constraint never changes a
+   value on CPU, while the lowered program carries exactly the expected extra LayoutConstraints on the 4-D
+   (B, S, H_v, D_v) tensors: for 'natural' one row-major pin of the norm output per forward evaluation, plus one per
+   backward for 'natural_fwd_bwd'; for 'token_minor' one token-minor (0, 2, 3, 1) pin of the GDN output per forward
+   evaluation; none in prefill.
 3. Negative controls go through the SAME checks and must fail them: the pin dropped, the pin with the permutation
-   (0, 1, 3, 2), a value-changing pin (heads reversed), and 'natural_fwd_bwd' without its cotangent pin.
+   (0, 1, 3, 2), a value-changing pin (heads reversed), 'natural_fwd_bwd' without its cotangent pin, and for
+   'token_minor' the pin dropped and the permutation (0, 2, 1, 3).
 """
 
 import functools
@@ -48,6 +51,7 @@ _PASS_TOKEN = "GDN_GATED_NORM_LAYOUT_CHECKS_PASSED"
 _SEQ, _EMB = 64, 64
 _NORM_SHAPE = "1x64x2x128xbf16"  # the gated-norm output (B, S, H_v, D_v) of the layer below
 _ROW_MAJOR_4D = "3, 2, 1, 0"  # minor_to_major of Layout(major_to_minor=(0, 1, 2, 3))
+_TOKEN_MINOR_4D = "1, 3, 2, 0"  # minor_to_major of Layout(major_to_minor=(0, 2, 3, 1))
 _TOKEN_MINOR_3D = "1, 2, 0"  # minor_to_major of the out_proj token-minor pin (0, 2, 1)
 _LAYOUT_RE = re.compile(
     r"stablehlo\.custom_call @LayoutConstraint\(%[^)]*\)[^\n]*?result_layouts = \[dense<\[([0-9, ]+)\]>[^\n]*?"
@@ -153,7 +157,8 @@ def _counts(loss, params, hidden):
     cs = _constraints(text)
     out[name] = {
         "row_major_4d": sum(1 for lay, ty in cs if lay == _ROW_MAJOR_4D and ty == _NORM_SHAPE),
-        "other_4d_norm": sum(1 for lay, ty in cs if lay != _ROW_MAJOR_4D and ty == _NORM_SHAPE),
+        "token_minor_4d": sum(1 for lay, ty in cs if lay == _TOKEN_MINOR_4D and ty == _NORM_SHAPE),
+        "other_4d_norm": sum(1 for lay, ty in cs if lay not in (_ROW_MAJOR_4D, _TOKEN_MINOR_4D) and ty == _NORM_SHAPE),
         "token_minor_3d": sum(1 for lay, _ in cs if lay == _TOKEN_MINOR_3D),
         "total": len(cs),
         "raw_count": text.count("@LayoutConstraint"),
@@ -162,29 +167,32 @@ def _counts(loss, params, hidden):
 
 
 def _expected(layout, structure):
-  """Row-major 4-D norm-output constraints: (in the forward program, in the value-and-grad program)."""
+  """4-D constraints ((row-major fwd, vg), (token-minor fwd, vg)) in the forward and value-and-grad programs."""
   fwd_evals = {"single": 1, "scan": 1}[structure]  # forward program: one forward body
   vg_fwd_evals = {"single": 1, "scan": 2}[structure]  # value-and-grad: forward + (scan) the remat replay
   bwd = 1  # one backward per layer application site
-  if layout == "auto":
-    return 0, 0
-  if layout == "natural":
-    return fwd_evals, vg_fwd_evals
-  return fwd_evals, vg_fwd_evals + bwd
+  return {
+      "auto": ((0, 0), (0, 0)),
+      "natural": ((fwd_evals, vg_fwd_evals), (0, 0)),
+      "natural_fwd_bwd": ((fwd_evals, vg_fwd_evals + bwd), (0, 0)),
+      "token_minor": ((0, 0), (fwd_evals, vg_fwd_evals)),
+  }[layout]
 
 
 def check_layout(layout, structure, counts):
   """The constraint census of one program pair against `_expected`; returns (ok, detail)."""
-  want_fwd, want_vg = _expected(layout, structure)
+  (want_fwd, want_vg), want_t4 = _expected(layout, structure)
   got_fwd, got_vg = counts["fwd"]["row_major_4d"], counts["vg"]["row_major_4d"]
+  got_t4 = (counts["fwd"]["token_minor_4d"], counts["vg"]["token_minor_4d"])
   stray = counts["fwd"]["other_4d_norm"] + counts["vg"]["other_4d_norm"]
   # The out_proj token-minor pin is forward-only (identity cotangent): one per forward evaluation, untouched by the key.
   want_tm = {"single": (1, 1), "scan": (1, 2)}[structure]
   got_tm = (counts["fwd"]["token_minor_3d"], counts["vg"]["token_minor_3d"])
   parsed_all = all(counts[k]["total"] == counts[k]["raw_count"] for k in ("fwd", "vg"))
-  ok = (got_fwd, got_vg) == (want_fwd, want_vg) and stray == 0 and got_tm == want_tm and parsed_all
+  ok = (got_fwd, got_vg) == (want_fwd, want_vg) and got_t4 == want_t4 and stray == 0 and got_tm == want_tm and parsed_all
   return ok, (
-      f"row-major 4-D fwd/vg {got_fwd}/{got_vg} (want {want_fwd}/{want_vg}), other-layout 4-D {stray} (want 0), "
+      f"row-major 4-D fwd/vg {got_fwd}/{got_vg} (want {want_fwd}/{want_vg}), token-minor 4-D {got_t4} (want {want_t4}), "
+      f"other-layout 4-D {stray} (want 0), "
       f"token-minor 3-D {got_tm} (want {want_tm}), parsed {counts['fwd']['total']}+{counts['vg']['total']} of "
       f"{counts['fwd']['raw_count']}+{counts['vg']['raw_count']}"
   )
@@ -201,9 +209,12 @@ PLANTED = {
     "N2_wrong_perm_0132": lambda x, mode: moe._forward_layout_constraint(x, (0, 1, 3, 2)),  # pylint: disable=protected-access
     "N3_heads_reversed": lambda x, mode: moe.forward_row_major(x[:, :, ::-1, :]),
     "N4_no_cotangent_pin": lambda x, mode: moe.forward_row_major(x),
+    "N5_tm_pin_dropped": lambda x, mode: x,
+    "N6_tm_wrong_perm_0213": lambda x, mode: moe._forward_layout_constraint(x, (0, 2, 1, 3)),  # pylint: disable=protected-access
 }
 PLANTED_MODE = {"N1_pin_dropped": "natural", "N2_wrong_perm_0132": "natural", "N3_heads_reversed": "natural",
-                "N4_no_cotangent_pin": "natural_fwd_bwd"}
+                "N4_no_cotangent_pin": "natural_fwd_bwd", "N5_tm_pin_dropped": "token_minor",
+                "N6_tm_wrong_perm_0213": "token_minor"}
 
 
 def run_all(verbose=True):
@@ -221,7 +232,7 @@ def run_all(verbose=True):
 
   for structure, make in (("single", _single_layer_fns), ("scan", _scan_fns)):
     ref = None
-    for layout in ("auto", "natural", "natural_fwd_bwd"):
+    for layout in ("auto", "natural", "natural_fwd_bwd", "token_minor"):
       loss, params, hidden = make(layout)
       bits = _run(loss, params, hidden)
       if ref is None:
@@ -242,15 +253,16 @@ def run_all(verbose=True):
 
   # Training path only: no row-major 4-D pin when the same config runs in prefill. Prefill writes the layer's cache,
   # so the non-parameter state goes in as a jit argument (a closed-over cache cannot be mutated inside the trace).
-  graphdef, params, rest = _layer("natural", model_mode=MODEL_MODE_PREFILL)
-  hidden, _ = _inputs()
-  text = (
-      jax.jit(lambda p, h, r: nnx.merge(graphdef, p, r)(h, model_mode=MODEL_MODE_PREFILL)[0])
-      .lower(params, hidden, rest)
-      .as_text()
-  )
-  n = sum(1 for lay, ty in _constraints(text) if ty == _NORM_SHAPE)
-  report("single/natural/prefill", "layout", n == 0, f"4-D norm-output constraints {n} (want 0)", True)
+  for layout in ("natural", "token_minor"):
+    graphdef, params, rest = _layer(layout, model_mode=MODEL_MODE_PREFILL)
+    hidden, _ = _inputs()
+    text = (
+        jax.jit(lambda p, h, r, g=graphdef: nnx.merge(g, p, r)(h, model_mode=MODEL_MODE_PREFILL)[0])
+        .lower(params, hidden, rest)
+        .as_text()
+    )
+    n = sum(1 for lay, ty in _constraints(text) if ty == _NORM_SHAPE)
+    report(f"single/{layout}/prefill", "layout", n == 0, f"4-D (B, S, H_v, D_v) constraints {n} (want 0)", True)
   return rows, all_good
 
 
@@ -262,7 +274,7 @@ class GdnGatedNormLayoutConfigTest(absltest.TestCase):
     self.assertEqual(_cfg("auto").gdn_gated_norm_layout, "auto")
 
   def test_accepted_values(self):
-    for layout in ("natural", "natural_fwd_bwd"):
+    for layout in ("natural", "natural_fwd_bwd", "token_minor"):
       self.assertEqual(_cfg(layout).gdn_gated_norm_layout, layout)
 
   def test_refused(self):

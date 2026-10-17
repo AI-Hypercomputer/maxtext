@@ -155,23 +155,33 @@ _pin_row_major_fwd_and_bwd.defvjp(_pin_row_major_fwd_and_bwd_fwd, _pin_row_major
 _GDN_GATED_NORM_LAYOUT_LOGGED = set()
 
 
-def _pin_gdn_gated_norm_layout(gated_output: Array, mode: str) -> Array:
-  """Applies `gdn_gated_norm_layout` to the GDN gated-norm output, shape (B, S, H_v, D_v), in training.
+def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
+  """Applies `gdn_gated_norm_layout` in training; `x` has shape (B, S, H_v, D_v).
 
-  Under `gdn_out_proj_token_minor` the reshaped norm output feeds out_proj token-minor, and XLA propagates that layout
-  back into the float32 norm math: each call re-tiles the bf16 GDN kernel output and transposes a float32
-  [tokens, value_dim] copy of it. Pinning the norm output row-major keeps the norm math in the kernel's layout and
-  leaves one bf16 transpose to token-minor between the norm and out_proj. Layout only: the values are unchanged.
+  'token_minor' takes the GDN output that enters the gated norm, 'natural' and 'natural_fwd_bwd' take the norm output.
+  Under `gdn_out_proj_token_minor` XLA runs the norm token-minor (the gate z leaves in_proj_qkvz token-minor and
+  out_proj reads its input token-minor) and relayouts the GDN kernel output only after converting it to float32: a
+  re-tile, the convert and a float32 [tokens, value_dim] transpose per call. Pinning the bf16 kernel output token-minor
+  makes that one bf16 transpose ahead of the convert. Pinning the norm output row-major instead makes XLA transpose z
+  and the norm output too. Layout only: the values are unchanged.
   """
   if mode not in _GDN_GATED_NORM_LAYOUT_LOGGED:
     _GDN_GATED_NORM_LAYOUT_LOGGED.add(mode)
-    where = "in the forward and on its cotangent" if mode == "natural_fwd_bwd" else "in the forward only"
-    max_logging.log(f"[gdn_gated_norm_layout] mode={mode}: GDN gated-norm output pinned row-major {where}")
+    if mode == "token_minor":
+      msg = "GDN output pinned token-minor (0, 2, 3, 1) in bf16 before the gated norm, in the forward only"
+    else:
+      where = "in the forward and on its cotangent" if mode == "natural_fwd_bwd" else "in the forward only"
+      msg = f"GDN gated-norm output pinned row-major {where}"
+    max_logging.log(f"[gdn_gated_norm_layout] mode={mode}: {msg}")
+  if mode == "token_minor":
+    return moe._forward_layout_constraint(x, (0, 2, 3, 1))  # pylint: disable=protected-access
   if mode == "natural":
-    return moe.forward_row_major(gated_output)
+    return moe.forward_row_major(x)
   if mode == "natural_fwd_bwd":
-    return _pin_row_major_fwd_and_bwd(gated_output)
-  raise ValueError(f"gdn_gated_norm_layout must be 'auto', 'natural' or 'natural_fwd_bwd', got {mode!r}.")
+    return _pin_row_major_fwd_and_bwd(x)
+  raise ValueError(
+      f"gdn_gated_norm_layout must be 'auto', 'natural', 'natural_fwd_bwd' or 'token_minor', got {mode!r}."
+  )
 
 
 def naive_jax_chunk_gated_delta_rule(
@@ -1518,12 +1528,16 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
 
     # The normalization and gating is applied per-head on the value dimension.
 
-    # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
-    gated_output_reshaped = self.norm(core_attn_out, z, out_sharding=head_sharding)
     out_proj_token_minor = model_mode == MODEL_MODE_TRAIN and getattr(cfg, "gdn_out_proj_token_minor", False)
     # validate_gdn_config allows a non-'auto' gdn_gated_norm_layout only with gdn_out_proj_token_minor=True.
-    if out_proj_token_minor and cfg.gdn_gated_norm_layout != "auto":
-      gated_output_reshaped = _pin_gdn_gated_norm_layout(gated_output_reshaped, cfg.gdn_gated_norm_layout)
+    gated_norm_layout = cfg.gdn_gated_norm_layout if out_proj_token_minor else "auto"
+    if gated_norm_layout == "token_minor":
+      core_attn_out = _pin_gdn_gated_norm_layout(core_attn_out, gated_norm_layout)
+
+    # Apply the norm and gate. Output shape: (B, S, H_v, D_v)
+    gated_output_reshaped = self.norm(core_attn_out, z, out_sharding=head_sharding)
+    if gated_norm_layout in ("natural", "natural_fwd_bwd"):
+      gated_output_reshaped = _pin_gdn_gated_norm_layout(gated_output_reshaped, gated_norm_layout)
 
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)

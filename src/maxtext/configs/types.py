@@ -2597,17 +2597,18 @@ class Qwen3Next(BaseModel):
           " Qwen3NextGatedDeltaNet (models/qwen3.py), matching the MoE output projection input layout."
       ),
   )
-  gdn_gated_norm_layout: Literal["auto", "natural", "natural_fwd_bwd"] = Field(
+  gdn_gated_norm_layout: Literal["auto", "natural", "natural_fwd_bwd", "token_minor"] = Field(
       "auto",
       description=(
-          "GDN training path: memory layout of the gated RMSNorm output in Qwen3NextGatedDeltaNet (models/qwen3.py)."
-          " 'auto' leaves it to XLA, which under gdn_out_proj_token_minor=True propagates out_proj's token-minor input"
-          " layout back into the float32 norm math, so every call re-tiles the bf16 GDN output and transposes a"
-          " float32 [tokens, value_dim] copy of it. 'natural' pins the norm output row-major (0, 1, 2, 3) in the"
-          " forward only (the cotangent keeps XLA's layout), so the norm math stays in the GDN kernel's layout and one"
-          " bf16 transpose to token-minor follows the norm. 'natural_fwd_bwd' also pins the cotangent row-major, so"
-          " the norm backward stays natural and produces d_o in the layout the GDN backward kernels read. Layout only:"
-          " the values are unchanged. Requires gdn_out_proj_token_minor=True and a decoder with Gated DeltaNet layers."
+          "GDN training path: memory layout around the gated RMSNorm in Qwen3NextGatedDeltaNet (models/qwen3.py)."
+          " Under gdn_out_proj_token_minor=True XLA runs the norm token-minor, the layout in which the gate z leaves"
+          " in_proj_qkvz and out_proj reads its input, and with 'auto' it relayouts the GDN kernel output only after"
+          " converting it to float32: each call re-tiles the bf16 output, converts it and transposes the float32"
+          " [tokens, value_dim] copy. 'token_minor' pins the bf16 GDN output token-minor (0, 2, 3, 1) in the forward"
+          " (the cotangent keeps XLA's layout), so that relayout is one bf16 transpose ahead of the float32 convert."
+          " 'natural' pins the norm output row-major (0, 1, 2, 3) in the forward and 'natural_fwd_bwd' also its"
+          " cotangent; XLA then transposes z and the norm output as well. Layout only: the values are unchanged."
+          " Requires gdn_out_proj_token_minor=True and a decoder with Gated DeltaNet layers."
       ),
   )
   gdn_cp_pass1_states_and_bf16_qkv: bool = Field(
