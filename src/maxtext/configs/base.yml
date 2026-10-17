@@ -1676,6 +1676,12 @@ gdn_conv1d_input_in_qkv_dtype: false
 # use_gdn_kernel: true and a GDN Conv1D width (2 * key heads * key head dim + value heads * value head dim) that is
 # a multiple of 1024.
 gdn_conv1d_dense_token_stack: false
+# GDN kernel path: replace the sequence-sharded CP forward m_local XLA reduction tree with the Pallas VMEM scan
+# (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_m_scan). Requires use_gdn_kernel: true and gdn_chunk_size: 64.
+gdn_cp_m_scan: false
+# GDN kernel path: replace the sequence-sharded CP backward ds_ext_local XLA reduction tree with the Pallas VMEM scan
+# (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_dh_scan). Requires use_gdn_kernel: true and gdn_chunk_size: 64.
+gdn_cp_dh_scan: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

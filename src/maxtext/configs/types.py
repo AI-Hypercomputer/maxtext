@@ -2425,13 +2425,12 @@ class Qwen3Next(BaseModel):
       "highest",
       description=(
           "Precision of the f32 matmuls that compose the GDN recurrent state across sequence-sharded context"
-          " parallelism (kernels/gdn/gdn_bwd/cp_gdn.py). On TPU 'highest' runs 6 bf16 passes and 'high' runs 3;"
-          " with 'high' the rank-local forward transition product and backward state gradient run as Pallas scans"
-          " (kernels/gdn/gdn_bwd/dh_scan.py) at the same 3 passes. Only the composition math changes; the Pallas GDN"
-          " kernels keep their own precision. It applies only with use_gdn_kernel=True and sequence-sharded GDN"
-          " context parallelism: gdn_cp_mode='seq', or 'auto', which shards the sequence unless the GDN context"
-          " parallelism is 2 and divides the number of key heads. It has no effect with use_gdn_kernel=False (that"
-          " path's context parallelism always uses HIGHEST) or with head-sharded context parallelism."
+          " parallelism (kernels/gdn/gdn_bwd/cp_gdn.py). On TPU 'highest' runs 6 bf16 passes and 'high' runs 3."
+          " Only the XLA composition math changes; the Pallas kernels keep their own precision. It applies only"
+          " with use_gdn_kernel=True and sequence-sharded GDN context parallelism: gdn_cp_mode='seq', or 'auto',"
+          " which shards the sequence unless the GDN context parallelism is 2 and divides the number of key"
+          " heads. It has no effect with use_gdn_kernel=False (that path's context parallelism always uses"
+          " HIGHEST) or with head-sharded context parallelism."
       ),
   )
   gdn_conv1d_input_in_qkv_dtype: bool = Field(
@@ -2465,6 +2464,22 @@ class Qwen3Next(BaseModel):
           " Conv1D width, 2 * gdn_num_key_heads * gdn_key_head_dim + gdn_num_value_heads * gdn_value_head_dim (one"
           " rank's heads under head-sharded GDN context parallelism), that is a multiple of 1024: one float32 vector"
           " register of 8 x 128."
+      ),
+  )
+  gdn_cp_m_scan: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: replace the sequence-sharded context-parallel forward m_local XLA reduction tree"
+          " (kernels/gdn/gdn_bwd/cp_gdn.py compose_local_from_t_inv) with the Pallas VMEM chunk scan"
+          " (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_m_scan). Requires use_gdn_kernel=True and gdn_chunk_size=64."
+      ),
+  )
+  gdn_cp_dh_scan: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: replace the sequence-sharded context-parallel backward ds_ext_local XLA reduction tree"
+          " (kernels/gdn/gdn_bwd/cp_gdn.py compose_bwd_local_from_t_inv) with the Pallas VMEM reverse chunk scan"
+          " (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_dh_scan). Requires use_gdn_kernel=True and gdn_chunk_size=64."
       ),
   )
 
@@ -5550,10 +5565,17 @@ class MaxTextConfig(
     if is_rl_config:
       MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
     dense_token_stack = getattr(cfg, "gdn_conv1d_dense_token_stack", False)
+    cp_m_scan = getattr(cfg, "gdn_cp_m_scan", False)
+    cp_dh_scan = getattr(cfg, "gdn_cp_dh_scan", False)
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       if dense_token_stack:
         raise ValueError(
             "gdn_conv1d_dense_token_stack=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if cp_m_scan or cp_dh_scan:
+        raise ValueError(
+            "gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
             f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
         )
       return
@@ -5581,6 +5603,11 @@ class MaxTextConfig(
             "gdn_conv1d_dense_token_stack=True requires use_gdn_kernel=True: only the Pallas GDN forward kernel"
             " runs the in-VMEM Conv1D (kernels/gdn/compute_conv1d.py) whose output it assembles."
         )
+      if cp_m_scan or cp_dh_scan:
+        raise ValueError(
+            "gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires use_gdn_kernel=True: only the GDN kernel path"
+            " runs the sequence-sharded context-parallel recurrence scans (kernels/gdn/gdn_bwd/dh_scan.py)."
+        )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(
@@ -5590,6 +5617,10 @@ class MaxTextConfig(
       )
     if cfg.gdn_chunk_size not in (64, 128):
       raise ValueError(f"use_gdn_kernel=True requires gdn_chunk_size in (64, 128), got {cfg.gdn_chunk_size}.")
+    if (cp_m_scan or cp_dh_scan) and cfg.gdn_chunk_size != 64:
+      raise ValueError(
+          f"gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}."
+      )
     if cfg.gdn_key_head_dim % 128 or cfg.gdn_value_head_dim % 128:
       raise ValueError(
           "use_gdn_kernel=True requires gdn_key_head_dim and gdn_value_head_dim to be multiples of 128, "
