@@ -253,6 +253,12 @@ def _expand_gdn_remat_names(names: list[str]) -> list[str]:
   return list(dict.fromkeys(expanded))
 
 
+# Checkpoint name of an attention layer's load-balance-ordered positions and segment ids
+# (Attention._to_load_balanced_order); remat_policy=custom saves it under
+# context_parallel_attention_load_balance_hoist_ids.
+ATTENTION_LB_IDS = "attention_lb_ids"
+
+
 def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   """Returns the ``(save_names, offload_names)`` split for remat policies built via
   ``jax.checkpoint_policies.save_and_offload_only_these_names``.
@@ -266,7 +272,8 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   Returns a ``(save_names, offload_names)`` tuple:
     * ``custom``: ``(config.tensors_on_device, config.tensors_to_offload)`` -- the per-tensor
       assignments. Either list may be empty: all tensors set to ``device`` gives an empty offload
-      list, all set to ``remat`` gives ``([], [])``.
+      list, all set to ``remat`` gives ``([], [])``. With
+      ``context_parallel_attention_load_balance_hoist_ids``, ``ATTENTION_LB_IDS`` is saved too.
     * ``qkv_proj_offloaded`` / ``minimal_offloaded``: ``([], <hardcoded offload names>)`` -- presets
       that only offload and save nothing on device.
     * any other policy (``full``, ``minimal``, ``save_*``, ``none``, ...): ``([], [])`` -- these do
@@ -295,6 +302,9 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
     if getattr(config, "use_gdn_kernel", False):
       save_names = _expand_gdn_remat_names(save_names)
       offload_names = _expand_gdn_remat_names(offload_names)
+    if getattr(config, "context_parallel_attention_load_balance_hoist_ids", False):
+      # On device: the saved value depends only on the batch, so jax.lax.scan keeps one copy, outside the layer loop.
+      save_names.append(ATTENTION_LB_IDS)
     overlap = set(save_names) & set(offload_names)
     if overlap:
       raise ValueError(

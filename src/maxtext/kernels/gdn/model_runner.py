@@ -621,6 +621,8 @@ def run_gdn_kernel_layer(
   conv_input_in_qkv_dtype = cfg.gdn_conv1d_input_in_qkv_dtype
   # Forward kernel's Conv1D output built from dense per-token views (compute_conv1d.py). Same values.
   conv_dense_token_stack = bool(getattr(cfg, "gdn_conv1d_dense_token_stack", False))
+  cp_m_scan = bool(getattr(cfg, "gdn_cp_m_scan", False))
+  cp_dh_scan = bool(getattr(cfg, "gdn_cp_dh_scan", False))
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
@@ -939,6 +941,8 @@ def run_gdn_kernel_layer(
           cp_matmul_precision=cp_matmul_precision,
           conv_input_in_qkv_dtype=conv_input_in_qkv_dtype,
           conv_dense_token_stack=conv_dense_token_stack,
+          cp_m_scan=cp_m_scan,
+          cp_dh_scan=cp_dh_scan,
       )
 
     if not isinstance(qkv, jax.core.Tracer):

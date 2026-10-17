@@ -332,10 +332,20 @@ moe_prefused_swiglu_vjp: false
 # [buffer, 3 * mlp]). Numerics change: silu reads the float32 accumulator.
 # Needs prefuse_moe_weights, use_tokamax_gmm and use_gmm_v2, silu+linear without clipping, no bias or quantization.
 moe_wi_gmm_fused_swiglu: false
+# The MoE SwiGLU backward in the epilogue of the wo (down projection) DLHS GMM (megablox gmm_dswiglu, tokamax gmm_v2):
+# the kernel writes d[gate | up] from its float32 accumulator instead of d act in bf16. Numerics change: the derivative
+# reads the float32 accumulator. Same requirements as moe_wi_gmm_fused_swiglu, plus no TC ragged sort, and one n tile:
+# wo_tile_dlhs_mlp_dim = the per-shard MoE MLP dim (with moe_wi_gmm_fused_swiglu, explicit tiles and a
+# wi_tile_fwd_mlp_dim whose half is that dim or a multiple of 128 dividing it).
+moe_wo_gmm_fused_dswiglu: false
 fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference/rollout
 # Keep routed-expert weights in weight_dtype but round them in the forward pass to the per-channel FP8 grid
 # fp8_moe stores them on, with straight-through gradients: the trainer computes with the rollout's weights.
 fp8_moe_fake_quant: false
+# off | absmax | gather8 (bit-identical to off). absmax: the fake-quant absmax of every routed-expert weight is computed
+# once for the scanned layer stack, before the scan. gather8: also all-gather the fp8 codes and dequantize after the
+# gather. Env PARAMBOLE_FQ_HOIST (0, absmax, 1 = gather8) selects a mode while this is off.
+fp8_fake_quant_hoist: "off"
 # Trainer side: the rollout serves fp8_moe experts, so weight sync quantizes them (and emits their scales).
 rollout_fp8_moe: false
 load_balance_loss_weight: 0.0 # weight for the load balance loss
@@ -417,6 +427,9 @@ moe_ep_all_gather_sparse_core_id: 1
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
+# VMEM buffers of the weight tile in the fused wi forward GMM (moe_wi_gmm_fused_swiglu). 0: the kernel default (3).
+# 2 frees one [gate | up] weight tile; applied only when that GMM runs one K tile. See types.py.
+wi_tile_fwd_rhs_buffer_count: 0
 eval_wi_tile_fwd_batch_seq: 512
 eval_wi_tile_fwd_embed_dim: 1024
 eval_wi_tile_fwd_mlp_dim: 1024
@@ -673,6 +686,14 @@ qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
 # Combine matmuls for QKV and MLP
 fused_qkv: false
 fused_mlp: false
+# Training: gather the attention query projection kernel (with Qwen3-Next / Qwen3.5's output gate) once per attention
+# layer in the backward pass instead of twice. The kernel is sharded on its embed dimension, so the partitioner
+# all-gathers it for the remat replay of q = x @ wq and again for the input gradient dx = dq @ wq^T. With this on, the
+# replay's gathered kernel feeds the input gradient (it stays live in between); the kernel gradient is unchanged and
+# the results are the same bits. Requires an unquantized, unfused (fused_qkv: false) query projection whose kernel is
+# sharded on its embed dimension and replicated on the others (no tensor parallelism), auto shard mode, and
+# remat_policy full, save_out_proj, or custom with query_proj: 'remat'.
+query_proj_kernel_gather_once: false
 
 record_internal_nn_metrics: 0
 
@@ -1505,6 +1526,11 @@ context_parallel_load_balance: true
 # GatedDeltaNet, whose recurrence needs natural order) and the input pipeline keep natural order. Only causal
 # (global) attention layers are balanced. Requires context_parallel_load_balance: false and use_multimodal: false.
 context_parallel_attention_load_balance: false
+# Under context_parallel_attention_load_balance, save each attention layer's reordered positions and segment ids
+# for the backward. They depend only on the batch, so jax.lax.scan keeps one saved copy outside the layer loop, and
+# the remat replay of the attention layers reads it instead of reordering them again. Same values. Requires
+# context_parallel_attention_load_balance: true, remat_policy: custom and scan_layers: true.
+context_parallel_attention_load_balance_hoist_ids: false
 context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
@@ -1650,6 +1676,12 @@ gdn_conv1d_input_in_qkv_dtype: false
 # use_gdn_kernel: true and a GDN Conv1D width (2 * key heads * key head dim + value heads * value head dim) that is
 # a multiple of 1024.
 gdn_conv1d_dense_token_stack: false
+# GDN kernel path: replace the sequence-sharded CP forward m_local XLA reduction tree with the Pallas VMEM scan
+# (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_m_scan). Requires use_gdn_kernel: true and gdn_chunk_size: 64.
+gdn_cp_m_scan: false
+# GDN kernel path: replace the sequence-sharded CP backward ds_ext_local XLA reduction tree with the Pallas VMEM scan
+# (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_dh_scan). Requires use_gdn_kernel: true and gdn_chunk_size: 64.
+gdn_cp_dh_scan: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
