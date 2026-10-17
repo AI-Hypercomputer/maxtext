@@ -261,6 +261,8 @@ def process_maxtext_param(
 
   # This list will store tuples of (hf_path, hf_weight)
   output_weights = []
+  key_str_top = maxtext_param_key[0] if isinstance(maxtext_param_key, tuple) else maxtext_param_key
+  param_save_dtype = "float32" if "MoEBiasVar" in key_str_top else maxtext_config.weight_dtype
 
   # Case 1: Unscanned
   if not isinstance(hf_target_paths, list):
@@ -272,7 +274,7 @@ def process_maxtext_param(
         output_weights,
         current_hook_fns,
         hf_shape_map,
-        save_dtype=maxtext_config.weight_dtype,
+        save_dtype=param_save_dtype,
     )
     return output_weights
 
@@ -896,14 +898,18 @@ def load_orbax_checkpoint(config) -> dict:
   devices = np.array(jax.devices()).reshape((-1,))
   single_device_mesh = jax.sharding.Mesh(devices, ("x",))
 
-  def create_restore_args(tree_metadata):
+  def create_restore_args(tree_metadata, preserve_dtype=False):
     """Create restore args for unsharded restoration."""
     if hasattr(tree_metadata, "shape"):
       restore_dtype = None
       if hasattr(tree_metadata, "dtype") and tree_metadata.dtype is not None:
         try:
           orig_dtype = jnp.dtype(tree_metadata.dtype)
-          if jnp.issubdtype(orig_dtype, jnp.floating) and getattr(config, "weight_dtype", None) is not None:
+          if (
+              not preserve_dtype
+              and jnp.issubdtype(orig_dtype, jnp.floating)
+              and getattr(config, "weight_dtype", None) is not None
+          ):
             restore_dtype = jnp.dtype(config.weight_dtype)
           else:
             restore_dtype = orig_dtype
@@ -914,7 +920,10 @@ def load_orbax_checkpoint(config) -> dict:
           dtype=restore_dtype,
       )
     elif isinstance(tree_metadata, dict):
-      return {k: create_restore_args(v) for k, v in tree_metadata.items()}
+      return {
+          k: create_restore_args(v, preserve_dtype=(preserve_dtype or k == "MoEBiasVar"))
+          for k, v in tree_metadata.items()
+      }
     else:
       return None
 
@@ -936,8 +945,12 @@ def load_orbax_checkpoint(config) -> dict:
           checkpoint_tree = filtered_tree
           max_logging.log(f"Filtering checkpoint to exclude optimizer keys from {path}")
 
-    restore_args = jax.tree_util.tree_map(
-        lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
+    restore_args = jax.tree_util.tree_map_with_path(
+        lambda path, x: (
+            create_restore_args(x, preserve_dtype=any(getattr(p, "key", None) == "MoEBiasVar" for p in path))
+            if hasattr(x, "shape")
+            else None
+        ),
         checkpoint_tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )

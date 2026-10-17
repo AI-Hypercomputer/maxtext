@@ -50,7 +50,11 @@ Example Usage:
 """
 
 import argparse
+import asyncio
+import concurrent.futures
+import dataclasses
 from functools import partial
+import gc
 import json
 import os
 import sys
@@ -74,6 +78,9 @@ from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_
 from maxtext.utils.globals import HF_IDS
 import numpy as np
 from orbax.checkpoint import type_handlers
+from orbax.checkpoint.experimental.v1._src.arrays import types as orbax_v1_arrays_types
+from orbax.checkpoint.experimental.v1._src.serialization import numpy_leaf_handler
+from orbax.checkpoint.experimental.v1._src.serialization import registry as orbax_v1_registry
 from safetensors import safe_open
 
 try:
@@ -380,9 +387,73 @@ class LazyTensorHandler(type_handlers.NumpyHandler):
     return await super().serialize(value, *args, **kwargs)
 
 
-# Register LazyTensor with the custom handler.
+# Register LazyTensor with both the v0 and v1 Orbax handlers.
 # It's safe to register this globally even if eager loading is used.
 type_handlers.register_type_handler(LazyTensor, LazyTensorHandler(), override=True)
+
+
+class _AbstractLazyTensor(orbax_v1_arrays_types.AbstractArray):
+  pass
+
+
+class LazyTensorLeafHandler(numpy_leaf_handler.NumpyLeafHandler):
+  """Orbax v1 LeafHandler that materializes LazyTensor leaves in bounded batches."""
+
+  def __init__(self, *, context=None):
+    super().__init__(context=context)
+    if self._context is not None and hasattr(self._context, "async_options"):
+      object.__setattr__(
+          self._context.async_options,
+          "timeout_secs",
+          max(self._context.async_options.timeout_secs or 0, 48 * 3600),
+      )
+
+  async def serialize(self, params, serialization_context):
+    """Serializes parameters in memory-capped batches."""
+    max_batch_bytes = 32 * (1024**3)
+    max_batch_len = 128
+    batches = []
+    cur_batch = []
+    cur_bytes = 0
+    for p in params:
+      nbytes = int(getattr(p.value, "nbytes", 0))
+      if cur_batch and (cur_bytes + nbytes > max_batch_bytes or len(cur_batch) >= max_batch_len):
+        batches.append((cur_batch, cur_bytes))
+        cur_batch = []
+        cur_bytes = 0
+      cur_batch.append(p)
+      cur_bytes += nbytes
+    if cur_batch:
+      batches.append((cur_batch, cur_bytes))
+
+    def _materialize(p):
+      val = np.asarray(p.value) if hasattr(p.value, "__array__") else p.value
+      return dataclasses.replace(p, value=val)
+
+    total_batches = len(batches)
+    loop = asyncio.get_running_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+      for idx, (batch, batch_bytes) in enumerate(batches, 1):
+        t0 = time.time()
+        materialized = await loop.run_in_executor(None, lambda b=batch: list(pool.map(_materialize, b)))
+        commit_coro = await super().serialize(materialized, serialization_context)
+        await commit_coro
+        max_logging.log(
+            f"[LazyTensorLeafHandler] Saved batch {idx}/{total_batches} "
+            f"({len(batch)} params, {batch_bytes / (1024**3):.2f} GiB) in {time.time() - t0:.2f}s"
+        )
+        del materialized
+        gc.collect()
+
+    async def _done():
+      pass
+
+    return _done()
+
+
+orbax_v1_registry.STANDARD_TYPE_AND_ABSTRACT_TYPE_AND_TYPESTR_TO_HANDLER.append(
+    (LazyTensor, _AbstractLazyTensor, ["np.ndarray"], LazyTensorLeafHandler)
+)
 
 
 def get_maxtext_model_info(config):

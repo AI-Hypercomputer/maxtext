@@ -288,6 +288,13 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
     if "qwen3" in max_config.model_name and getattr(max_config, "num_experts", 0) > 1 and hf_attr == "intermediate_size":
       mt_value = mt_value * getattr(max_config, "num_experts_per_tok", 1)
 
+    # Special handling for Nemotron3: HF n_shared_experts=1 (width 3712) maps to MaxText shared_experts=2 (width 2 * 1856)
+    if max_config.model_name.startswith("nemotron3") and hf_attr == "n_shared_experts":
+      hf_shared_width = hf_value * getattr(target_cfg, "moe_shared_expert_intermediate_size", 0)
+      mt_shared_width = mt_value * getattr(max_config, "moe_mlp_dim", 0)
+      if hf_shared_width == mt_shared_width:
+        mt_value = hf_value
+
     # Handle vocab size padding
     if hf_attr == "vocab_size" and isinstance(mt_value, int) and isinstance(hf_value, int):
       # MaxText often pads vocab size to a multiple of 128 or 256 for TPU efficiency
@@ -310,6 +317,19 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
         setattr(target_cfg, hf_attr, mt_value)
       else:
         mismatches.append(f"{hf_attr} (HF={hf_value} vs MaxText={mt_value})")
+
+  if (
+      override
+      and hasattr(target_cfg, "hybrid_override_pattern")
+      and getattr(max_config, "hybrid_override_pattern", "")
+      and target_cfg.hybrid_override_pattern != max_config.hybrid_override_pattern
+  ):
+    _char_to_block = {"M": "linear_attention", "*": "full_attention", "E": "moe", "-": "mlp"}
+    if hasattr(target_cfg, "layers_block_type"):
+      target_cfg.layers_block_type = [_char_to_block.get(c, c) for c in max_config.hybrid_override_pattern]
+    # transformers>=5.17 derives hybrid_override_pattern from layers_block_type; older configs store it.
+    if target_cfg.hybrid_override_pattern != max_config.hybrid_override_pattern:
+      target_cfg.hybrid_override_pattern = max_config.hybrid_override_pattern
 
   if mismatches:
     error_msg = (
@@ -520,7 +540,11 @@ def main(argv: Sequence[str]) -> None:
     raise ValueError(f"HF Tokenizer ID not found for model key: {model_key}")
   hf_token = config.hf_access_token
   hf_tokenizer_id = FLAGS.hf_model_path or HF_IDS[model_key]
-  tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token)
+  try:
+    tokenizer = AutoTokenizer.from_pretrained(hf_tokenizer_id, token=hf_token, trust_remote_code=True)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Warning: Could not load tokenizer from {hf_tokenizer_id} ({exc}); proceeding with tokenizer=None.")
+    tokenizer = None
 
   # For multi-modal case:
   processor = AutoProcessor.from_pretrained(hf_tokenizer_id, token=hf_token) if config.use_multimodal else None

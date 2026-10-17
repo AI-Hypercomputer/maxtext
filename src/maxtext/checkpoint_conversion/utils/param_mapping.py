@@ -1831,6 +1831,108 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   return hooks
 
 
+def NEMOTRON3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """MaxText to HF Nemotron-H names for the Omni checkpoint text backbone (`language_model.` prefix).
+
+  Layer i follows maxtext_config.hybrid_override_pattern[i]: 'M' Mamba-2, '*' attention, 'E' MoE.
+  Routed experts stack to wi_0 (up_proj) and wo (down_proj); there is no gate matrix. The shared
+  expert is one MLP (`wi`/`wo`), never split. The router bias is a MoEBiasVar kept in fp32.
+  """
+  if scan_layers:
+    raise ValueError("Nemotron3 checkpoints support only scan_layers=False.")
+  if config["moe_shared_expert_intermediate_size"] != maxtext_config.shared_experts * config["moe_intermediate_size"]:
+    raise ValueError(
+        f"moe_shared_expert_intermediate_size {config['moe_shared_expert_intermediate_size']} must equal"
+        f" shared_experts ({maxtext_config.shared_experts}) * moe_intermediate_size {config['moe_intermediate_size']}."
+    )
+  hf = "language_model."
+  num_experts = int(getattr(maxtext_config, "num_experts", 0) or config["n_routed_experts"])
+  mapping = {
+      "params-token_embedder-embedding": f"{hf}backbone.embeddings.weight",
+      "params-decoder-decoder_norm-scale": f"{hf}backbone.norm_f.weight",
+      "params-decoder-logits_dense-kernel": f"{hf}lm_head.weight",
+  }
+  for i, block in enumerate(maxtext_config.hybrid_override_pattern):
+    mt, layer = f"params-decoder-layers_{i}", f"{hf}backbone.layers.{i}"
+    mapping[f"{mt}-norm-scale"] = f"{layer}.norm.weight"
+    if block == "M":
+      for mt_name, hf_name in (
+          ("norm-scale", "norm.weight"),
+          ("in_proj-kernel", "in_proj.weight"),
+          ("conv_weight", "conv1d.weight"),
+          ("dt_bias", "dt_bias"),
+          ("A_log", "A_log"),
+          ("D", "D"),
+          ("out_proj-kernel", "out_proj.weight"),
+      ):
+        mapping[f"{mt}-mixer-{mt_name}"] = f"{layer}.mixer.{hf_name}"
+      if maxtext_config.mamba_conv_bias:
+        mapping[f"{mt}-mixer-conv_bias"] = f"{layer}.mixer.conv1d.bias"
+    elif block == "*":
+      for mt_name, hf_name in (("query", "q_proj"), ("key", "k_proj"), ("value", "v_proj"), ("out", "o_proj")):
+        mapping[f"{mt}-mixer-{mt_name}-kernel"] = f"{layer}.mixer.{hf_name}.weight"
+    elif block == "E":
+      routed = f"{mt}-mixer-MoeBlock_0"
+      mapping[f"{routed}-gate-kernel"] = f"{layer}.mixer.gate.weight"
+      mapping[f"MoEBiasVar-decoder-layers_{i}-mixer-MoeBlock_0-gate-bias"] = f"{layer}.mixer.gate.e_score_correction_bias"
+      mapping[f"{routed}-wi_0"] = [  # pyrefly: ignore[bad-assignment]
+          f"{layer}.mixer.experts.{e}.up_proj.weight" for e in range(num_experts)
+      ]
+      mapping[f"{routed}-wo"] = [  # pyrefly: ignore[bad-assignment]
+          f"{layer}.mixer.experts.{e}.down_proj.weight" for e in range(num_experts)
+      ]
+      mapping[f"{mt}-mixer-shared_experts-wi-kernel"] = f"{layer}.mixer.shared_experts.up_proj.weight"
+      mapping[f"{mt}-mixer-shared_experts-wo-kernel"] = f"{layer}.mixer.shared_experts.down_proj.weight"
+    else:
+      raise ValueError(f"Unsupported Nemotron-H block type {block!r} at layer {i}")
+  return mapping
+
+
+def NEMOTRON3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transforms between HF [out, in] linear weights and MaxText kernels; norms, router bias and Mamba
+  dt_bias/A_log/D pass through. The depthwise conv weight is HF [C, 1, K] and MaxText [K, C].
+  """
+  del config
+  if scan_layers:
+    raise ValueError("Nemotron3 checkpoints support only scan_layers=False.")
+
+  def transpose(input_tensor, target_shape=None):
+    del target_shape
+    return input_tensor.T
+
+  def conv_weight(input_tensor, target_shape=None):
+    del target_shape
+    if saving_to_hf:
+      return input_tensor.T[:, None, :]
+    return input_tensor[:, 0, :].T
+
+  def reshape_kernel(input_tensor, target_shape):
+    if saving_to_hf:
+      return input_tensor.reshape(np.flip(np.array(target_shape))).T
+    return input_tensor.T.reshape(target_shape)
+
+  hooks = {"params-decoder-logits_dense-kernel": transpose}
+  for i, block in enumerate(maxtext_config.hybrid_override_pattern):
+    mt = f"params-decoder-layers_{i}"
+    if block == "M":
+      hooks[f"{mt}-mixer-in_proj-kernel"] = transpose
+      hooks[f"{mt}-mixer-out_proj-kernel"] = transpose
+      hooks[f"{mt}-mixer-conv_weight"] = conv_weight
+    elif block == "*":
+      for name in ("query", "key", "value", "out"):
+        hooks[f"{mt}-mixer-{name}-kernel"] = reshape_kernel  # pyrefly: ignore[bad-assignment]
+    elif block == "E":
+      for key in (
+          "MoeBlock_0-gate-kernel",
+          "MoeBlock_0-wi_0",
+          "MoeBlock_0-wo",
+          "shared_experts-wi-kernel",
+          "shared_experts-wo-kernel",
+      ):
+        hooks[f"{mt}-mixer-{key}"] = transpose
+  return hooks
+
+
 def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Generates a parameter mapping from MaxText to HuggingFace Deepseek weight paths.
 
@@ -4636,6 +4738,7 @@ PARAM_MAPPING = {
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "nemotron3-nano-omni-30b-a3b": NEMOTRON3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-397b-a17b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-397b-a17b-fp8": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3.5-35b-a3b": QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -4705,6 +4808,7 @@ HOOK_FNS = {
     "qwen3.5-9b": QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3-next-80b-a3b": QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "qwen3.8-2.4t-a95b": QWEN3_8_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "nemotron3-nano-omni-30b-a3b": NEMOTRON3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x7b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "mixtral-8x22b": MIXTRAL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "olmo3-7b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,

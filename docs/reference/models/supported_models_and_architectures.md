@@ -71,6 +71,11 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Variants**: K2 (1T), K2-Thinking (1T), K2.5 (text), K2.6 (text)
 - **Notes**: DeepSeek V3 architecture; MuonClip optimizer
 
+### Nemotron-3
+
+- **Variants**: Nemotron-3-Nano-Omni-30B-A3B, text backbone only (`model_name=nemotron3-nano-omni-30b-a3b`, Hugging Face `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16`); the vision and audio encoders are not yet supported. Tested on TPU v5p.
+- **Notes**: Hybrid Mamba-2 / MoE / attention decoder (`decoder_block: nemotron3`) with 52 layers set by `hybrid_override_pattern`: 23 Mamba-2, 23 MoE and 6 GQA attention layers without positional embeddings (NoPE). Each MoE layer has 128 routed non-gated two-matrix `relu2` experts (top-6, sigmoid scores plus an fp32 `e_score_correction_bias`) and one 3712-wide shared expert, written as `shared_experts: 2` with `base_moe_mlp_dim: 1856`. Only `scan_layers=false` is supported because the layer pattern does not repeat. Reuses `Attention` (`is_nope_layer=True`), `RoutedAndSharedMoE` and `RMSNorm`; adds `Nemotron3Mamba2Mixer` (chunked SSD scan, decode state) and `Nemotron3RMSNormGated` (gate-then-normalize grouped RMSNorm). The router bias must stay float32 end to end (checkpoint conversion keeps it float32): the 128 biases of a layer sit within about 0.1 of each other, so bfloat16 rounding changes the top-6 choice.
+
 ## Parallelism building blocks
 
 MaxText supports a wide range of parallelism strategies for scaling training and inference across TPUs and GPUs:
@@ -109,6 +114,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
     [Qwen3.5 & Qwen3.8 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3_5.py)
   - **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gpt_oss.py)
   - **Kimi**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md) | [K2 reuses DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
+  - **Nemotron-3**: [Nemotron-3 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/nemotron3.py)
 
 - **Technical Explanations:**
 
