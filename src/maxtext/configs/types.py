@@ -3073,6 +3073,18 @@ class RematAndOffload(BaseModel):
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
+  fp32_master_storage: Literal["f32", "residual16"] = Field(
+      "f32",
+      description=(
+          "Read by Tunix's Fp32MasterOptimizer (weight_dtype=bfloat16). 'f32' (default): a float32 master copy per"
+          " bfloat16 weight. 'residual16': a scanned layer's master is stored as the low 16 bits the bfloat16 weight"
+          " does not hold (uint16, same shape) plus one bit per element, packed 8 to a byte along param_scan_axis,"
+          " saying whether the cast rounded the magnitude up; each update rebuilds the float32 master bit for bit"
+          " (any non-NaN value), so masters, weights and updates are unchanged. 2.13 instead of 4 bytes per element"
+          " stored, and with optimizer_memory_host_offload copied to and from host memory at every update."
+          " Other bfloat16 weights keep a float32 master."
+      ),
+  )
 
 
 class Tokenizer(BaseModel):

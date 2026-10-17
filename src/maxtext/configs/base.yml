@@ -613,6 +613,11 @@ engram: 'remat'
 
 optimizer_memory_host_offload: false
 parameter_memory_host_offload: false
+# Tunix Fp32MasterOptimizer (bf16 weights): "f32" keeps a float32 master per bf16 weight; "residual16" stores a scanned
+# layer's master as the 16 bits its bf16 weight does not hold (uint16) plus one bit per element packed along the scan
+# axis, and rebuilds it bit for bit at each update. Same masters, weights and updates; 2.13 instead of 4 bytes per
+# element stored (and, with optimizer_memory_host_offload, copied to and from the host at every update).
+fp32_master_storage: "f32"
 # Whether to use jax.lax.scan over layers (stacked/unstacked checkpoint). We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations. When resuming from a checkpoint, this flag is auto-determined from metadata.
 scan_layers: true
 param_scan_axis: 1
