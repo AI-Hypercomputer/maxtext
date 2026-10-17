@@ -1556,6 +1556,14 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
   )
+  ragged_unsort_spread_masked_indices: bool = Field(
+      False,
+      description=(
+          "Ring-of-experts unsort backward with moe_routing_index_math='count' and a packed buffer: the slot-order"
+          " gather of the routing-weight gradient gives masked slots distinct in-bounds indices instead of 0."
+          " Bit-identical (masked lanes are discarded); avoids sending 7 of 8 SparseCore gather lookups to one address."
+      ),
+  )
   moe_tc_ragged_sort: bool = Field(
       False,
       description=(

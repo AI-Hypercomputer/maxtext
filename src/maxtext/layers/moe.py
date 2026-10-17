@@ -2388,6 +2388,7 @@ class RoutedMoE(nnx.Module):
           topk_argsort_indices=topk_argsort_indices,
           index_math=self.config.moe_routing_index_math,
           unique_pair_argsort=self.config.moe_ragged_sort_unique_pair_argsort,
+          spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -4448,6 +4449,7 @@ class RoutedMoE(nnx.Module):
           unique_pair_argsort=self.config.moe_ragged_sort_unique_pair_argsort,
           dswiglu_gate_up=dswiglu_gate_up,
           down_projection_bwd_dswiglu=None if dswiglu_gate_up is None else down_projection_bwd_dswiglu,
+          spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
       )
       if forward_tie is not None:
         output, forward_tie = output
