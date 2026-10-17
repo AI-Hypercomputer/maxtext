@@ -1475,6 +1475,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Reshape back to a single feature dimension for the final projection.
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
     gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
+    if model_mode == MODEL_MODE_TRAIN:
+      gated_output = moe._forward_layout_constraint(gated_output, (0, 2, 1))
 
     # Final output shape: (B, S, E)
     output = self.out_proj(gated_output, out_sharding=out_sharding)

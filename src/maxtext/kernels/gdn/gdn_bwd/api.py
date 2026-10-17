@@ -127,6 +127,65 @@ def decoupled_conv1d_gdn_bwd_kernel(
   )
 
 
+def _fused_kernel_inputs(
+    qkv: jax.Array,
+    b: jax.Array,
+    a: jax.Array,
+    conv_weight: jax.Array,
+    conv_state: Optional[jax.Array],
+    recurrent_state: Optional[jax.Array],
+    *,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_kernel_size: int,
+    chunk_size: int,
+):
+  """Shapes local [B, S, ...] inputs into the flat tokamax form expected by wrapper.fused_conv1d_gdn*."""
+  batch_size, seq_len, dim_size = qkv.shape
+  num_seqs = batch_size
+  num_chunks = seq_len // chunk_size
+
+  qkv_flat = qkv.reshape(-1, dim_size)
+  b_flat = b.reshape(-1, b.shape[-1])
+  a_flat = a.reshape(-1, a.shape[-1])
+  tokamax_conv_weight = jnp.swapaxes(conv_weight, 0, 2)
+
+  has_init = (conv_state is not None) or (recurrent_state is not None)
+  query_start_loc = jnp.arange(0, (num_seqs + 1) * seq_len, seq_len, dtype=jnp.int32)
+  state_indices = jnp.arange(1, num_seqs + 1, dtype=jnp.int32)
+  seq_lens = jnp.full((num_seqs,), seq_len + (1 if has_init else 0), dtype=jnp.int32)
+  distribution = jnp.array([0, 0, num_seqs], dtype=jnp.int32)
+
+  if conv_state is None:
+    tokamax_conv_state = jnp.zeros((num_seqs + 1, conv_kernel_size - 1, dim_size), dtype=qkv.dtype)
+  elif conv_state.shape[0] == num_seqs:
+    tokamax_conv_state = jnp.pad(conv_state, ((1, 0), (0, 0), (0, 0)))
+  else:
+    tokamax_conv_state = conv_state
+
+  if recurrent_state is None:
+    tokamax_recurrent_state = jnp.zeros((num_seqs + 1, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
+  elif recurrent_state.shape[0] == num_seqs:
+    tokamax_recurrent_state = jnp.pad(recurrent_state.astype(jnp.float32), ((1, 0), (0, 0), (0, 0), (0, 0)))
+  else:
+    tokamax_recurrent_state = recurrent_state.astype(jnp.float32)
+
+  return (
+      num_chunks,
+      qkv_flat,
+      b_flat,
+      a_flat,
+      tokamax_conv_weight,
+      query_start_loc,
+      state_indices,
+      seq_lens,
+      distribution,
+      tokamax_conv_state,
+      tokamax_recurrent_state,
+  )
+
+
 def _run_local_gdn_decoupled_fwd(
     qkv: jax.Array,
     b: jax.Array,
@@ -156,7 +215,7 @@ def _run_local_gdn_decoupled_fwd(
   `conv_dense_token_stack` goes to the Pallas forward kernel (wrapper.fused_conv1d_gdn); the CPU fallback has no
   in-VMEM Conv1D and does not use it.
   """
-  batch_size, seq_len, dim_size = qkv.shape
+  batch_size, seq_len, _ = qkv.shape
   if seq_len % chunk_size != 0:
     raise ValueError(
         f"GDN forward kernel requires the local sequence length ({seq_len}) to be a multiple of"
@@ -217,33 +276,31 @@ def _run_local_gdn_decoupled_fwd(
       t_inv = None
     return (out, states), t_inv, chunk_states
 
-  num_seqs = batch_size
-  num_chunks = seq_len // chunk_size
-
-  qkv_flat = qkv.reshape(-1, dim_size)
-  b_flat = b.reshape(-1, b.shape[-1])
-  a_flat = a.reshape(-1, a.shape[-1])
-  tokamax_conv_weight = jnp.swapaxes(conv_weight, 0, 2)
-
-  has_init = (conv_state is not None) or (recurrent_state is not None)
-  query_start_loc = jnp.arange(0, (num_seqs + 1) * seq_len, seq_len, dtype=jnp.int32)
-  state_indices = jnp.arange(1, num_seqs + 1, dtype=jnp.int32)
-  seq_lens = jnp.full((num_seqs,), seq_len + (1 if has_init else 0), dtype=jnp.int32)
-  distribution = jnp.array([0, 0, num_seqs], dtype=jnp.int32)
-
-  if conv_state is None:
-    tokamax_conv_state = jnp.zeros((num_seqs + 1, conv_kernel_size - 1, dim_size), dtype=qkv.dtype)
-  elif conv_state.shape[0] == num_seqs:
-    tokamax_conv_state = jnp.pad(conv_state, ((1, 0), (0, 0), (0, 0)))
-  else:
-    tokamax_conv_state = conv_state
-
-  if recurrent_state is None:
-    tokamax_recurrent_state = jnp.zeros((num_seqs + 1, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
-  elif recurrent_state.shape[0] == num_seqs:
-    tokamax_recurrent_state = jnp.pad(recurrent_state.astype(jnp.float32), ((1, 0), (0, 0), (0, 0), (0, 0)))
-  else:
-    tokamax_recurrent_state = recurrent_state.astype(jnp.float32)
+  (
+      num_chunks,
+      qkv_flat,
+      b_flat,
+      a_flat,
+      tokamax_conv_weight,
+      query_start_loc,
+      state_indices,
+      seq_lens,
+      distribution,
+      tokamax_conv_state,
+      tokamax_recurrent_state,
+  ) = _fused_kernel_inputs(
+      qkv=qkv,
+      b=b,
+      a=a,
+      conv_weight=conv_weight,
+      conv_state=conv_state,
+      recurrent_state=recurrent_state,
+      num_v_heads=num_v_heads,
+      head_k_dim=head_k_dim,
+      head_v_dim=head_v_dim,
+      conv_kernel_size=conv_kernel_size,
+      chunk_size=chunk_size,
+  )
 
   (
       core_attn_out_flat,
@@ -301,6 +358,138 @@ def _run_local_gdn_decoupled_fwd(
       ),
       t_inv,
       chunk_states,
+  )
+
+
+def _run_local_gdn_states_fwd(
+    qkv: jax.Array,
+    b: jax.Array,
+    a: jax.Array,
+    conv_weight: jax.Array,
+    conv_bias: Optional[jax.Array],
+    a_log: jax.Array,
+    dt_bias: jax.Array,
+    conv_state: Optional[jax.Array],
+    recurrent_state: Optional[jax.Array],
+    *,
+    num_k_heads: int,
+    num_v_heads: int,
+    head_k_dim: int,
+    head_v_dim: int,
+    conv_kernel_size: int,
+    chunk_size: int,
+    use_qk_norm_in_gdn: bool,
+    compute_dtype: jnp.dtype,
+    segment_ids: Optional[jax.Array] = None,
+    conv_halo_seg: Optional[jax.Array] = None,
+    init_seg: Optional[jax.Array] = None,
+    conv_dense_token_stack: bool = False,
+) -> Tuple[Tuple[jax.Array, jax.Array], Optional[jax.Array]]:
+  """Runs local GDN state scan only (CP pass 1), skipping output matmuls and chunk_states."""
+  batch_size, seq_len, _ = qkv.shape
+  if seq_len % chunk_size != 0:
+    raise ValueError(
+        f"GDN forward kernel requires the local sequence length ({seq_len}) to be a multiple of"
+        f" chunk_size ({chunk_size}); with sequence-sharded context parallelism this is seq_len / cp."
+    )
+  on_cpu = target_platform(qkv) == "cpu"
+  fallback_reason = pallas_unsupported_reason(head_k_dim=head_k_dim, head_v_dim=head_v_dim, chunk_size=chunk_size)
+  if not on_cpu and fallback_reason is not None:
+    raise ValueError(f"GDN Pallas TPU forward kernel does not support {fallback_reason}.")
+  emit_t_inv = chunk_size <= 64
+  head_group_size = local_compute_gdn.default_head_group_size(chunk_size, num_k_heads, num_v_heads, qkv.dtype)
+  if on_cpu:
+    (_, states), t_inv, _ = _run_local_gdn_decoupled_fwd(
+        qkv=qkv,
+        b=b,
+        a=a,
+        conv_weight=conv_weight,
+        conv_bias=conv_bias,
+        a_log=a_log,
+        dt_bias=dt_bias,
+        conv_state=conv_state,
+        recurrent_state=recurrent_state,
+        num_k_heads=num_k_heads,
+        num_v_heads=num_v_heads,
+        head_k_dim=head_k_dim,
+        head_v_dim=head_v_dim,
+        conv_kernel_size=conv_kernel_size,
+        chunk_size=chunk_size,
+        use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+        compute_dtype=compute_dtype,
+        segment_ids=segment_ids,
+        conv_halo_seg=conv_halo_seg,
+        init_seg=init_seg,
+    )
+    return states, t_inv
+
+  (
+      num_chunks,
+      qkv_flat,
+      b_flat,
+      a_flat,
+      tokamax_conv_weight,
+      query_start_loc,
+      state_indices,
+      seq_lens,
+      distribution,
+      tokamax_conv_state,
+      tokamax_recurrent_state,
+  ) = _fused_kernel_inputs(
+      qkv=qkv,
+      b=b,
+      a=a,
+      conv_weight=conv_weight,
+      conv_state=conv_state,
+      recurrent_state=recurrent_state,
+      num_v_heads=num_v_heads,
+      head_k_dim=head_k_dim,
+      head_v_dim=head_v_dim,
+      conv_kernel_size=conv_kernel_size,
+      chunk_size=chunk_size,
+  )
+
+  (new_conv_state, new_recurrent_state), t_inv_raw = local_gdn_wrapper.fused_conv1d_gdn_states(
+      qkv=qkv_flat,
+      b=b_flat,
+      a=a_flat,
+      conv_state=tokamax_conv_state,
+      recurrent_state=tokamax_recurrent_state,
+      conv_weight=tokamax_conv_weight,
+      conv_bias=conv_bias,
+      a_log=a_log,
+      dt_bias=dt_bias,
+      query_start_loc=query_start_loc,
+      state_indices=state_indices,
+      distribution=distribution,
+      seq_lens=seq_lens,
+      n_kq=num_k_heads,
+      n_v=num_v_heads,
+      d_k=head_k_dim,
+      d_v=head_v_dim,
+      kernel_size=conv_kernel_size,
+      compute_precision=jnp.dtype(compute_dtype),
+      mixed_tile_size=chunk_size,
+      use_qk_norm_in_gdn=use_qk_norm_in_gdn,
+      segment_ids=segment_ids,
+      conv_halo_seg=conv_halo_seg,
+      init_seg=init_seg,
+      tri_inv_algo=local_compute_gdn.DEFAULT_TRI_INV_ALGO,
+      head_group_size=head_group_size,
+      emit_t_inv=emit_t_inv,
+      conv_dense_token_stack=conv_dense_token_stack,
+  )
+
+  if t_inv_raw is None:
+    t_inv = None
+  else:
+    t_inv = t_inv_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, chunk_size, chunk_size)
+  return (
+      (
+          new_conv_state[1:].astype(qkv.dtype),
+          new_recurrent_state[1:].astype(jnp.float32),
+      ),
+      t_inv,
   )
 
 
@@ -392,7 +581,7 @@ def _run_cp_gdn_decoupled_fwd_impl(
   zero_rs = jnp.zeros((batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
 
   # Pass 1: Local GDN with zero initial recurrent state -> yields t_inv (when chunk_size <= 64) and S_ext_local
-  (_, states_pass1), t_inv, _ = _run_local_gdn_decoupled_fwd(
+  states_pass1, t_inv = _run_local_gdn_states_fwd(
       qkv,
       b,
       a,

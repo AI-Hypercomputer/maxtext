@@ -37,7 +37,7 @@ _TRI_INV_FIELD_DEFAULTS = {
 # returns. They are left out of the kernel name and metadata, so the lowered program outside the kernel body is the
 # same with and without them, and a profile shows the same kernel name for both variants (the run's config tells
 # them apart).
-_LAYOUT_ONLY_FIELDS = ("conv_dense_token_stack",)
+_LAYOUT_ONLY_FIELDS = ("conv_dense_token_stack", "is_prefill_only")
 
 
 class GDNMode(enum.StrEnum):
@@ -45,6 +45,8 @@ class GDNMode(enum.StrEnum):
 
   BATCHED = enum.auto()
   PER_SEQ = enum.auto()
+  # PER_SEQ that only carries the conv/recurrent states and t_inv: no output, no chunk states.
+  PER_SEQ_STATES = enum.auto()
 
   def get_seq_tile_size(self, tile_size: int) -> int:
     if self == GDNMode.BATCHED:
@@ -99,8 +101,10 @@ class GDNConfig:
   head_group_size: int | None = None
   emit_t_inv: bool = True
   # Build the Conv1D output from dense per-token views (compute_conv1d.stack_conv1d_tokens; config
-  # gdn_conv1d_dense_token_stack). GDNMode.PER_SEQ only.
+  # gdn_conv1d_dense_token_stack). GDNMode.PER_SEQ / PER_SEQ_STATES only.
   conv_dense_token_stack: bool = False
+  # Prefill-only tiles are whole chunks: qkv is DMA'd in act_in dtype and upcast in VMEM.
+  is_prefill_only: bool = False
 
   @property
   def chunk_size(self) -> int:
@@ -183,7 +187,10 @@ class GDNConfig:
       carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
       carry_recurrent_scratch = pltpu.VMEM(recurrent_shape, jnp.float32)
 
-    return {
+    ret = {
         "carry_conv_scratch_ref": carry_conv_scratch,
         "carry_recurrent_scratch_ref": carry_recurrent_scratch,
     }
+    if self.is_prefill_only:
+      ret["qkv_scratch_ref"] = pltpu.VMEM((self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32)
+    return ret
