@@ -21,6 +21,7 @@
 
 import contextlib
 import functools
+import inspect
 import os
 import re
 import subprocess
@@ -1108,6 +1109,15 @@ def _backward_rule_positional_forms():
   return ok
 
 
+def _pass1_arg_index():
+  """Position of pass1_states_and_bf16_qkv among gdn_decoupled_conv1d's arguments.
+
+  The negative controls below overwrite that one argument. Later keys append arguments after it (for example
+  cp_fast_state_passing), so it is found by name, not taken to be the last.
+  """
+  return list(inspect.signature(gdn_api.gdn_decoupled_conv1d.fun).parameters).index("pass1_states_and_bf16_qkv")
+
+
 def main():
   ok = True
   for opt_on in (False, True):
@@ -1120,9 +1130,11 @@ def main():
   # Negative control: dropping pass1_states_and_bf16_qkv in custom_vjp forward rule MUST fail the opt_on=True check.
   real_fwd = gdn_api.gdn_decoupled_conv1d.fwd
 
+  pass1_arg = _pass1_arg_index()
+
   def drop_fwd(*args):
     args = list(args)
-    args[-1] = False  # pass1_states_and_bf16_qkv
+    args[pass1_arg] = False  # pass1_states_and_bf16_qkv
     return real_fwd(*args)
 
   jax.clear_caches()
@@ -1140,7 +1152,7 @@ def main():
   @functools.wraps(real_fun)
   def drop_fun(*args):
     args = list(args)
-    args[-1] = False  # pass1_states_and_bf16_qkv
+    args[pass1_arg] = False  # pass1_states_and_bf16_qkv
     return real_fun(*args)
 
   jax.clear_caches()
