@@ -26,6 +26,7 @@ from maxtext.checkpoint_conversion.to_maxtext import (
     _build_multi_axis_stacked_tensor,
     _build_single_axis_stacked_tensor,
 )
+from maxtext.checkpoint_conversion.utils import hf_model_configs
 from maxtext.checkpoint_conversion.utils import hf_shape
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import utils
@@ -112,6 +113,160 @@ class ParamMappingTest(unittest.TestCase):
             expected = [f"model.language_model.layers.{i}.mlp.{hf_name}.weight" for i in indices]
             self.assertEqual(mapping[f"{prefix}-mlp-{mt_name}-kernel"], expected if scanned else expected[0])
         self.assertFalse(any("routed_experts" in str(key) or "shared_expert" in str(key) for key in mapping))
+
+  def test_deepseek4_284b_mapping_unscanned(self):
+    config = {
+        "num_hidden_layers": 43,
+        "n_routed_experts": 256,
+        "num_hash_layers": 3,
+        "num_experts_per_tok": 6,
+        "compress_ratios": [0, 0, 4, 128] + [4, 128] * 19 + [0],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 256
+    maxtext_config.base_num_decoder_layers = 43
+    maxtext_config.first_num_hash_layers = 3
+    maxtext_config.mtp_num_layers = 0
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-layers_0-self_attention-wq_a-kernel", mapping)
+
+  def test_deepseek4_284b_mapping_scanned(self):
+    config = {
+        "num_hidden_layers": 43,
+        "n_routed_experts": 256,
+        "num_hash_layers": 3,
+        "num_experts_per_tok": 6,
+        "compress_ratios": [0, 0, 4, 128] + [4, 128] * 19 + [0],
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = 256
+    maxtext_config.base_num_decoder_layers = 43
+    maxtext_config.first_num_hash_layers = 3
+    maxtext_config.mtp_num_layers = 0
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-scanned_blocks-layers_0-self_attention-wq_a-kernel", mapping)
+
+  def test_deepseek4_1600b_mapping_unscanned(self):
+    config = hf_model_configs.deepseek4_1600b_dict
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = config["n_routed_experts"]
+    maxtext_config.base_num_decoder_layers = config["num_hidden_layers"]
+    maxtext_config.first_num_hash_layers = config.get("num_hash_layers", 3)
+    maxtext_config.mtp_num_layers = config.get("num_nextn_predict_layers", 0)
+    maxtext_config.compress_ratios = config.get("compress_ratios")
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-decoder_norm-scale", mapping)
+    self.assertIn("params-decoder-logits_dense-kernel", mapping)
+    self.assertIn("params-decoder-hc_head-hc_fn", mapping)
+    self.assertIn("params-decoder-hc_head-hc_base", mapping)
+    self.assertIn("params-decoder-hc_head-hc_scale", mapping)
+
+    for i in range(3):
+      self.assertIn(f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid", mapping)
+      self.assertNotIn(f"MoEBiasVar-decoder-layers_{i}-mlp-MoeBlock_0-gate-bias", mapping)
+    for i in range(3, 61):
+      self.assertIn(f"MoEBiasVar-decoder-layers_{i}-mlp-MoeBlock_0-gate-bias", mapping)
+      self.assertNotIn(f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid", mapping)
+
+    # Validate 1600B shapes
+    shapes = hf_shape.DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config)
+    self.assertEqual(shapes["embed.weight"], [129280, 7168])
+    self.assertEqual(shapes["norm.weight"], [7168])
+    self.assertEqual(shapes["head.weight"], [129280, 7168])
+    self.assertEqual(shapes["hc_head_fn"], [4, 28672])
+    self.assertEqual(shapes["hc_head_base"], [4])
+    self.assertEqual(shapes["hc_head_scale"], [1])
+    self.assertEqual(shapes["layers.0.attn.wq_a.weight"], [1536, 7168])
+    self.assertEqual(shapes["layers.0.attn.wq_b.weight"], [128 * 512, 1536])
+    self.assertEqual(shapes["layers.0.attn.wo_a.weight"], [16384, (128 * 512) // 16])
+    self.assertEqual(shapes["layers.0.attn.wo_b.weight"], [7168, 16384])
+    self.assertEqual(shapes["layers.0.ffn.gate.weight"], [384, 7168])
+    self.assertEqual(shapes["layers.0.ffn.gate.tid2eid"], [129280, 6])
+    self.assertEqual(shapes["layers.3.ffn.gate.bias"], [384])
+    self.assertEqual(shapes["layers.0.ffn.experts.0.w1.weight"], [3072, 7168])
+    self.assertEqual(shapes["layers.0.ffn.experts.0.w2.weight"], [7168, 3072])
+    self.assertEqual(shapes["layers.0.ffn.experts.0.w3.weight"], [3072, 7168])
+    self.assertEqual(shapes["layers.0.ffn.shared_experts.w1.weight"], [3072, 7168])
+    self.assertEqual(shapes["layers.0.ffn.shared_experts.w2.weight"], [7168, 3072])
+    self.assertEqual(shapes["layers.0.ffn.shared_experts.w3.weight"], [3072, 7168])
+    self.assertEqual(shapes["layers.0.attn.compressor.wgate.weight"], [512, 7168])
+    self.assertEqual(shapes["layers.2.attn.compressor.wgate.weight"], [1024, 7168])
+    self.assertEqual(shapes["layers.2.attn.indexer.compressor.wgate.weight"], [256, 7168])
+    self.assertEqual(shapes["layers.2.attn.indexer.weights_proj.weight"], [64, 7168])
+    self.assertEqual(shapes["layers.2.attn.indexer.wq_b.weight"], [8192, 1536])
+
+    # Bijective mapping verification against HF_SHAPE
+    mapped_hf_keys = []
+
+    def collect_keys(v):
+      if v is None:
+        return
+      if isinstance(v, str):
+        mapped_hf_keys.append(v)
+      elif isinstance(v, (list, tuple)):
+        for item in v:
+          collect_keys(item)
+
+    for hf_v in mapping.values():
+      collect_keys(hf_v)
+
+    mapped_set = set(mapped_hf_keys)
+    # Composite tuple keys (e.g. the MTP e_proj/h_proj pair) only serve to_huggingface.
+    hf_keys = {k for k in shapes if isinstance(k, str)}
+    self.assertEqual(mapped_set - hf_keys, set(), "Mapping contains unknown HF keys")
+    hash_bias_keys = {f"layers.{i}.ffn.gate.bias" for i in range(config["num_hash_layers"])}
+    self.assertEqual((hf_keys - mapped_set) - hash_bias_keys, set(), "HF keys not covered by mapping")
+
+  def test_deepseek4_1600b_mapping_scanned(self):
+    config = hf_model_configs.deepseek4_1600b_dict
+    maxtext_config = mock.Mock()
+    maxtext_config.num_experts = config["n_routed_experts"]
+    maxtext_config.base_num_decoder_layers = config["num_hidden_layers"]
+    maxtext_config.first_num_hash_layers = config.get("num_hash_layers", 3)
+    maxtext_config.mtp_num_layers = config.get("num_nextn_predict_layers", 0)
+    maxtext_config.compress_ratios = config.get("compress_ratios")
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+
+    self.assertIn("params-token_embedder-embedding", mapping)
+    self.assertIn("params-decoder-decoder_norm-scale", mapping)
+    self.assertIn("params-decoder-logits_dense-kernel", mapping)
+    self.assertIn("params-decoder-hc_head-hc_fn", mapping)
+
+    for i in range(3):
+      self.assertIn(f"Tid2EidVar-decoder-layers_{i}-mlp-MoeBlock_0-tid2eid", mapping)
+      self.assertNotIn(f"MoEBiasVar-decoder-layers_{i}-mlp-MoeBlock_0-gate-bias", mapping)
+
+    self.assertIn("MoEBiasVar-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-gate-bias", mapping)
+    self.assertIn("MoEBiasVar-decoder-scanned_blocks-layers_1-mlp-MoeBlock_0-gate-bias", mapping)
+    self.assertIn("params-decoder-scanned_blocks-layers_0-self_attention-hca_compressor-gate_proj-kernel", mapping)
+    self.assertIn("params-decoder-scanned_blocks-layers_1-self_attention-csa_compressor-gate_proj-kernel", mapping)
+
+    # Bijective mapping verification against HF_SHAPE
+    shapes = hf_shape.DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config)
+    mapped_hf_keys = []
+
+    def collect_keys(v):
+      if v is None:
+        return
+      if isinstance(v, str):
+        mapped_hf_keys.append(v)
+      elif isinstance(v, (list, tuple)):
+        for item in v:
+          collect_keys(item)
+
+    for hf_v in mapping.values():
+      collect_keys(hf_v)
+
+    mapped_set = set(mapped_hf_keys)
+    # Composite tuple keys (e.g. the MTP e_proj/h_proj pair) only serve to_huggingface.
+    hf_keys = {k for k in shapes if isinstance(k, str)}
+    self.assertEqual(mapped_set - hf_keys, set(), "Mapping contains unknown HF keys")
+    hash_bias_keys = {f"layers.{i}.ffn.gate.bias" for i in range(config["num_hash_layers"])}
+    self.assertEqual((hf_keys - mapped_set) - hash_bias_keys, set(), "HF keys not covered by mapping")
 
   def test_qwen3_next_mapping(self):
     config = {
