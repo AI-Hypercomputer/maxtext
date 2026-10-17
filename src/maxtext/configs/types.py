@@ -1342,6 +1342,18 @@ class MoEGeneral(BaseModel):
           " effect."
       ),
   )
+  moe_combine_per_chunk: bool = Field(
+      False,
+      description=(
+          "Chunked ring-of-experts MoE (the plain chunk loop): make chunk c's unpermute (the local unsort + weighted"
+          " sum before the combine reduce-scatter) wait on chunk c-1's combine reduce-scatter result, through a"
+          " forward-only data dependency on the unpermute's routing weights (saved for the backward pass under the"
+          " remat name 'moe_combine_order', so the recompute does not redo the reduce-scatter). This orders the"
+          " SparseCore work as unpermute0, RS0, unpermute1, RS1. Math unchanged. The pipelined chunk loop"
+          " (moe_chunk_pipeline) already orders them so (its tie 3); there the key has no effect. Needs"
+          " num_moe_token_chunks>1 and use_ring_of_experts=True. Ported from the MLPerf v6.1 DeepSeek-V3 code."
+      ),
+  )
   moe_chunk_pipeline: bool = Field(
       False,
       description=(
@@ -1670,6 +1682,35 @@ class MoEGeneral(BaseModel):
   moe_ep_all_gather_sparse_core_id: int = Field(
       1,
       description="SparseCore ID to pin MoE EP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
+  )
+  moe_fp8_bwd_dispatch: bool = Field(
+      False,
+      description=(
+          "Ring of experts: send the backward of the combine reduce-scatter (the all-gather of the MoE output"
+          " cotangent to every expert shard) as an fp8 payload with a per-row f32 scale, dequantized to the"
+          " cotangent dtype after the gather. Halves that all-gather's bytes; the forward is unchanged. A precision"
+          " change of the expert and router gradients (not bitwise). Ported from the MLPerf v6.1 DeepSeek-V3 code."
+      ),
+  )
+  moe_fp8_bwd_dispatch_qtype: str = Field(
+      "float8_e4m3fn",
+      description="fp8 dtype of the moe_fp8_bwd_dispatch payload (float8_e4m3fn or float8_e5m2).",
+  )
+  moe_fp8_combine: bool = Field(
+      False,
+      description=(
+          "Ring of experts: replace the forward combine reduce-scatter by an fp8 (e4m3, per-row f32 scale)"
+          " all-to-all over the EP axis followed by a local f32 sum. Changes the forward activations; the"
+          " backward stays the all-gather of the cotangent (fp8 if moe_fp8_bwd_dispatch). Ported from the MLPerf"
+          " v6.1 DeepSeek-V3 code."
+      ),
+  )
+  moe_fp8_combine_pin_sparse_core: bool = Field(
+      False,
+      description=(
+          "Pin the moe_fp8_combine all-to-all to the EP SparseCore (compute_on, core moe_ep_all_gather_sparse_core_id)"
+          " instead of leaving it to XLA."
+      ),
   )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
@@ -5492,6 +5533,32 @@ class MaxTextConfig(
             "Supported options: '', 'rowwise', 'fixed,<bound>'."
         )
 
+  def validate_moe_fp8_combine(self):
+    """Validates moe_fp8_combine, moe_fp8_bwd_dispatch and moe_fp8_combine_pin_sparse_core."""
+    if self.moe_fp8_bwd_dispatch:
+      if not self.use_ring_of_experts:
+        raise ValueError("moe_fp8_bwd_dispatch=True requires use_ring_of_experts=True.")
+      if self.moe_fp8_bwd_dispatch_qtype not in ("float8_e4m3fn", "float8_e5m2"):
+        raise ValueError(
+            "moe_fp8_bwd_dispatch_qtype must be float8_e4m3fn or float8_e5m2, got" f" {self.moe_fp8_bwd_dispatch_qtype}."
+        )
+    if self.moe_fp8_combine and not self.use_ring_of_experts:
+      raise ValueError("moe_fp8_combine=True requires use_ring_of_experts=True.")
+    if self.moe_fp8_combine_pin_sparse_core and not self.moe_fp8_combine:
+      raise ValueError("moe_fp8_combine_pin_sparse_core=True has no effect without moe_fp8_combine=True.")
+    if self.moe_fp8_combine or self.moe_fp8_bwd_dispatch:
+      # Both replace the combine reduce-scatter of the ring of experts, which these settings would otherwise bypass.
+      if self.moe_quantize_combine_bwd_method:
+        raise ValueError(
+            "moe_fp8_combine / moe_fp8_bwd_dispatch replace the combine reduce-scatter; unset"
+            f" moe_quantize_combine_bwd_method={self.moe_quantize_combine_bwd_method!r}."
+        )
+      if self.moe_combine_bwd_direct_qarray:
+        raise ValueError(
+            "moe_fp8_combine / moe_fp8_bwd_dispatch have no effect with moe_combine_bwd_direct_qarray=True (the EP"
+            " combine is fused into the wo GMM there)."
+        )
+
   @staticmethod
   def _load_mesh_config_from_yaml(rule_value: str) -> dict:
     """Helper to load and parse custom mesh YAML configurations."""
@@ -6231,6 +6298,10 @@ class MaxTextConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+      if getattr(self, "moe_combine_per_chunk", False):
+        # The ordered unpermute weights are saved so the backward recompute does not redo the combine
+        # reduce-scatter and unpermute that the ordering dependency reads.
+        self.tensors_on_device.append("moe_combine_order")
 
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -6729,6 +6800,7 @@ class MaxTextConfig(
     self.validate_moe_expert_weight_prefetch()
     self.validate_moe_topk_before_ep_all_gather()
     self.validate_moe_quantize_combine_bwd_method()
+    self.validate_moe_fp8_combine()
     self.validate_mllog()
     self.validate_splash_diag_skip()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
@@ -7797,6 +7869,10 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+      if getattr(self, "moe_combine_per_chunk", False):
+        # The ordered unpermute weights are saved so the backward recompute does not redo the combine
+        # reduce-scatter and unpermute that the ordering dependency reads.
+        self.tensors_on_device.append("moe_combine_order")
 
     if self.moe_route != "remat" and not (self.sparse_matmul and self.use_ring_of_experts and self.use_ragged_sort):
       raise ValueError(

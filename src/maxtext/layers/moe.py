@@ -1101,6 +1101,111 @@ def _moe_combine_psum_scatter_bwd(
 _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
 
 
+# moe_fp8_combine / moe_fp8_bwd_dispatch / moe_combine_per_chunk: ported from the MLPerf v6.1 DeepSeek-V3 code
+# (6639e3166, "code from image integrate_v2:mlperf61v4-stackall6").
+def quantize_rows_fp8(x: jax.Array, qtype) -> tuple[jax.Array, jax.Array]:
+  """Per-row fp8 quantization: one f32 absmax scale per row (last axis), returns (qvalue, scale[..., 1])."""
+  qmax = float(jnp.finfo(qtype).max)
+  # abs/max are exact in the input dtype; taking them before the f32 cast keeps XLA from materializing an f32
+  # copy of x between the reduction and the quantizing convert.
+  absmax = jnp.max(jnp.abs(x), axis=-1, keepdims=True).astype(jnp.float32)
+  scale = jnp.where(absmax > 0, absmax / qmax, jnp.ones_like(absmax))
+  return jnp.clip(x.astype(jnp.float32) / scale, -qmax, qmax).astype(qtype), scale
+
+
+def dequantize_rows_fp8(qvalue: jax.Array, scale: jax.Array, dtype) -> jax.Array:
+  """Inverse of quantize_rows_fp8."""
+  return (qvalue.astype(jnp.float32) * scale).astype(dtype)
+
+
+def ep_combine_reduce_scatter(
+    x: jax.Array, axis_name, all_gather_fn=None, bwd_qtype=None, fwd_qtype=None, all_to_all_fn=None
+) -> jax.Array:
+  """Ring-of-experts combine: sums the per-shard partial outputs over the EP axis and scatters them (dim 0).
+
+  With `bwd_qtype` set (moe_fp8_bwd_dispatch), the backward -- the all-gather of the output cotangent to every
+  expert shard -- carries an fp8 payload with a per-row f32 scale gathered alongside, and is dequantized back to
+  the cotangent dtype after the gather. This is a precision change of the gradient, not a bitwise-identical
+  transform.
+
+  With `fwd_qtype` set (moe_fp8_combine), the forward replaces the bf16 reduce-scatter by an fp8 all-to-all: each
+  shard quantizes its partial sums per row (f32 row scale), sends the slice destined for shard j to shard j, and
+  the receiver dequantizes the n slices and sums them in f32 before casting back. This changes the forward
+  activations (one fp8 rounding per expert-shard contribution). The backward treats the quantization as identity
+  (straight-through): it is the all-gather of the cotangent, as for the reduce-scatter.
+  """
+
+  def _rs(z):
+    return jax.lax.psum_scatter(z, axis_name, scatter_dimension=0, tiled=True)
+
+  if bwd_qtype is None and fwd_qtype is None:
+    return _rs(x)
+
+  def _ag(z):
+    if all_gather_fn is not None:
+      return all_gather_fn(z)
+    return jax.lax.all_gather(z, axis_name=axis_name, tiled=True)
+
+  def _a2a(z):
+    if all_to_all_fn is not None:
+      return all_to_all_fn(z)
+    return jax.lax.all_to_all(z, axis_name, split_axis=0, concat_axis=0, tiled=True)
+
+  def _fp8_a2a_sum(z):
+    n = jax.lax.axis_size(axis_name)
+    qvalue, scale = quantize_rows_fp8(z, fwd_qtype)
+    # Block j of the all-to-all output (dim 0) is shard j's partial sum for this shard's slice.
+    parts = _a2a(qvalue).astype(jnp.float32) * _a2a(scale)
+    parts = parts.reshape((n, z.shape[0] // n) + z.shape[1:])
+    return jnp.sum(parts, axis=0).astype(z.dtype)
+
+  def _forward(z):
+    return _rs(z) if fwd_qtype is None else _fp8_a2a_sum(z)
+
+  @jax.custom_vjp
+  def _combine(z):
+    return _forward(z)
+
+  def _combine_fwd(z):
+    return _forward(z), None
+
+  def _combine_bwd(_, g):
+    if bwd_qtype is None:
+      # Same as the transpose of the reduce-scatter (an unpinned tiled all-gather).
+      return (jax.lax.all_gather(g, axis_name=axis_name, tiled=True),)
+    qvalue, scale = quantize_rows_fp8(g, bwd_qtype)
+    return (dequantize_rows_fp8(_ag(qvalue), _ag(scale), g.dtype),)
+
+  _combine.defvjp(_combine_fwd, _combine_bwd)
+  return _combine(x)
+
+
+def _order_after(x, dep):
+  """Returns x with a data dependency on `dep` (forward only).
+
+  The forward pass adds `0 * dep[0]` to x, so every consumer of the result is scheduled after dep
+  exists. An optimization_barrier does not survive to the TPU schedule when XLA removes barriers
+  (--xla_tpu_aggressive_opt_barrier_removal), while XLA does not fold a floating-point multiply by zero,
+  so the dependency does. Apply it to a small operand: it adds one elementwise pass over x. The
+  backward pass returns the cotangent of x unchanged and a zero cotangent for dep.
+  """
+  if not jnp.issubdtype(x.dtype, jnp.floating):
+    raise ValueError(f"_order_after needs a floating-point x, got {x.dtype}")
+
+  @jax.custom_vjp
+  def _tie(v, d):
+    return v + (jnp.reshape(d, (-1,))[0] * 0).astype(v.dtype)
+
+  def _fwd(v, d):
+    return _tie(v, d), None
+
+  def _bwd(_, g):
+    return g, jnp.zeros(dep.shape, dep.dtype)
+
+  _tie.defvjp(_fwd, _bwd)
+  return _tie(x, dep)
+
+
 def _param_path(path) -> tuple:
   """A params pytree path as the module path keys `nnx.iter_modules` yields, plus the param name.
 
@@ -3233,6 +3338,19 @@ class RoutedMoE(nnx.Module):
       def _ep_all_gather(z):
         return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
 
+    def _ep_all_to_all(z):
+      """moe_fp8_combine: tiled EP all-to-all (split and concat on dim 0)."""
+      return jax.lax.all_to_all(z, self._expert_parallelism_name, split_axis=0, concat_axis=0, tiled=True)
+
+    if self.config.moe_fp8_combine_pin_sparse_core:
+      # Pin the moe_fp8_combine all-to-all to the EP SparseCore instead of leaving it to XLA.
+      _ep_all_to_all = functools.partial(
+          compute_on,
+          compute_type="tpu_sparsecore",
+          out_memory_spaces=jax.memory.Space.Device,
+          compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
+      )(_ep_all_to_all)
+
     def roe_ag_and_route(
         x,
         logits,
@@ -4346,7 +4464,19 @@ class RoutedMoE(nnx.Module):
         # combine output where it is.
         output = forward_row_major(output)
       combine_bwd_method = self.config.moe_quantize_combine_bwd_method
-      if combine_bwd_method:
+      if self.config.moe_fp8_combine or self.config.moe_fp8_bwd_dispatch:
+        # moe_fp8_combine: the forward as an fp8 all-to-all + local f32 sum. moe_fp8_bwd_dispatch: the backward
+        # all-gather of the cotangent with an fp8 payload. The config validator rejects moe_quantize_combine_bwd_method
+        # with either key.
+        output = ep_combine_reduce_scatter(
+            output,
+            self._expert_parallelism_name,
+            all_gather_fn=_ep_all_gather,
+            bwd_qtype=jnp.dtype(self.config.moe_fp8_bwd_dispatch_qtype) if self.config.moe_fp8_bwd_dispatch else None,
+            fwd_qtype=jnp.dtype(jnp.float8_e4m3fn) if self.config.moe_fp8_combine else None,
+            all_to_all_fn=_ep_all_to_all,
+        )
+      elif combine_bwd_method:
         output = _moe_combine_psum_scatter(
             output,
             self._expert_parallelism_name,
@@ -4397,10 +4527,20 @@ class RoutedMoE(nnx.Module):
         force_dropless=False,
         gather_weights=True,
         return_weights=False,
+        combine_after=None,
     ):
       if router_grad_from_wo_input and (return_weights or not gather_weights):
         # The fused op does not return the weights (the config validator rejects the two keys together).
         raise NotImplementedError("moe_router_grad_from_wo_input does not support moe_accumulate_chunk_wgrad.")
+
+      def _unpermute_routing(routing):
+        """moe_combine_per_chunk: this chunk's unpermute waits on the previous chunk's combine reduce-scatter
+        (`combine_after`), through a data dependency on the small routing-weight operand of the unpermute."""
+        if combine_after is None:
+          return routing
+        weights = adc.checkpoint_name(_order_after(routing.weights, combine_after), "moe_combine_order")
+        return routing.replace(weights=weights)
+
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
@@ -4471,7 +4611,7 @@ class RoutedMoE(nnx.Module):
         # moe_router_grad_from_wo_input: the activation, the down projection and the unsort as one op whose
         # backward does not read the down projection's output; then the same reduce-scatter as below.
         output, _ = _ring_down_project_and_unpermute(
-            output0, output1, wo, routing, route_metadata, batch_size, sequence_length
+            output0, output1, wo, _unpermute_routing(routing), route_metadata, batch_size, sequence_length
         )
         return _moe_body_outputs(_ring_reduce_scatter(output), routing, (w0, w1, wo))
 
@@ -4573,7 +4713,7 @@ class RoutedMoE(nnx.Module):
             output = self.unpermute(
                 intermediate_output,
                 routing.sorted_selected_experts,
-                routing.weights,
+                _unpermute_routing(routing).weights,
                 batch_size=batch_size,
                 sequence_length=sequence_length,
                 use_custom_sort_vjp=self.config.use_custom_sort_vjp,
@@ -5025,6 +5165,9 @@ class RoutedMoE(nnx.Module):
               force_dropless=force_dropless,
               gather_weights=not accum_chunk_wgrad or c == 0,
               return_weights=accum_chunk_wgrad and c < n_chunks - 1,
+              # moe_combine_per_chunk: this chunk's unpermute waits on the previous chunk's combine reduce-scatter.
+              # (The pipelined chunk loop already orders them that way: its tie 3.)
+              combine_after=outs[-1] if (self.config.moe_combine_per_chunk and outs) else None,
           )
           if accum_chunk_wgrad:
             cur_w0, cur_w1, cur_wo = chunk_weights
