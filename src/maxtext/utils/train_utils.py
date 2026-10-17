@@ -366,7 +366,8 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None):
     recorder:
     devices:
     elastic_retry_cache: Optional `elastic_utils.RetryCache`. An elastic retry on the same slices reuses the mesh and
-      abstract model cached in it instead of building them again.
+      abstract model cached in it instead of building them again. In snapshot mode its `snapshotter` holds the
+      in-memory snapshot of the previous attempt, which the train state is restored from.
 
   Returns:
     init_rng:
@@ -474,8 +475,14 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None):
     shaped_batch = maxtext_utils.get_shaped_batch(config)
     max_utils.maybe_bootstrap_te_moe(config, mesh, shaped_batch)
 
+    # In snapshot mode the retry cache carries the snapshotter across attempts; the state is restored from its
+    # latest snapshot when that is at least as recent as the latest checkpoint.
+    if elastic_retry_cache is None:
+      snapshotter = None
+    else:
+      snapshotter = elastic_retry_cache.snapshotter
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
-        data_iterator, config, mesh, checkpoint_manager, init_state_fn
+        data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=snapshotter
     )
     if getattr(getattr(config, "lora", None), "enable_lora", False) and getattr(config.lora, "lora_restore_path", None):
       # Restore standalone LoRA adapter weights onto the base model state after initialization.

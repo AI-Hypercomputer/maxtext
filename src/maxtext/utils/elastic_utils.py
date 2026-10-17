@@ -244,7 +244,7 @@ class RetryCache:
 
   Don't cache the train state or other large arrays: they would keep the previous attempt's memory alive. The one
   deliberate exception is `snapshotter`, which is not a cache entry: it is set once for the run, outlives every
-  attempt and every slice change, and is reset by the elastic event callback rather than by this class.
+  attempt and every slice change, and is reset on slice-down by the elastic event callback rather than by this class.
   """
 
   def __init__(self):
@@ -254,8 +254,8 @@ class RetryCache:
     self._enabled = False
     self._slices: frozenset[int] | None = None
     self._values: dict[str, Any] = {}
-    # Host-memory snapshots of the train state for `elastic_backup_kind: snapshot`. Not wired up yet: it stays None
-    # until snapshot save and restore land, and `reset` and `clear_if_slices_changed` never touch it.
+    # Host-memory snapshots of the train state for `elastic_backup_kind: snapshot`. `reset` and
+    # `clear_if_slices_changed` never touch it; the elastic event callback resets it on slice-down.
     self.snapshotter: Any = None
 
   @property
@@ -476,6 +476,9 @@ def is_scale_up_event(config) -> bool:
     return bool(elastic_manager.available_inactive_slices)
 
   return False
+
+
+is_slice_down_error = elastic.is_error_due_to_slice_down
 
 
 def maybe_elastic_scale_up(config, checkpoint_manager):

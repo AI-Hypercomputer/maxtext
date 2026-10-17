@@ -1155,6 +1155,76 @@ class ConfigTest(absltest.TestCase):
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
 
+  def test_elastic_snapshot_mode_config(self):
+    """Snapshot mode is the default, takes an interval, and is rejected where it can't work."""
+    config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test"])
+    self.assertEqual(config.elastic_backup_kind, "snapshot")
+    self.assertEqual(config.elastic_snapshot_interval, 10)
+    # Without elastic training the kind is inert, whatever the data pipeline.
+    pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "dataset_type=tfds"])
+    # Elastic runs outside the snapshot envelope opt out explicitly.
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "elastic_enabled=true",
+            "enable_single_controller=true",
+            "dataset_type=tfds",
+            "elastic_backup_kind=checkpoint",
+        ]
+    )
+    self.assertEqual(config.elastic_backup_kind, "checkpoint")
+
+    config = pyconfig.initialize(
+        ["", _BASE_CONFIG_PATH, "run_name=test", "elastic_backup_kind=snapshot", "elastic_snapshot_interval=25"]
+    )
+    self.assertEqual(config.elastic_backup_kind, "snapshot")
+    self.assertEqual(config.elastic_snapshot_interval, 25)
+
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "elastic_snapshot_interval=0"])
+
+    snapshot_argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "elastic_enabled=true",
+        "enable_single_controller=true",
+        "elastic_backup_kind=snapshot",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "not supported with DiLoCo"):
+      pyconfig.initialize(snapshot_argv + ["enable_diloco=true"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "enable_rampup_batch_size"):
+      pyconfig.initialize(
+          snapshot_argv
+          + [
+              "enable_rampup_batch_size=true",
+              "per_device_batch_size=4",
+              "per_device_batch_size_start=1",
+              "per_device_batch_size_increment=1",
+              "global_rampup_samples=100",
+          ]
+      )
+    # Synthetic data needs no iterator position; real data needs grain's ElasticIterator.
+    pyconfig.initialize(snapshot_argv + ["dataset_type=synthetic"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
+      pyconfig.initialize(snapshot_argv + ["dataset_type=tfds"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
+      pyconfig.initialize(snapshot_argv + ["dataset_type=grain", "grain_train_files=/x/*"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "colocated_python_data_input"):
+      pyconfig.initialize(
+          snapshot_argv
+          + [
+              "dataset_type=grain",
+              "grain_train_files=/x/*",
+              "grain_use_elastic_iterator=true",
+              "grain_file_type=arrayrecord",
+              "packing=false",
+              "colocated_python_data_input=true",
+          ]
+      )
+
   def test_te_moe_dispatch_remat_location(self):
     """Dispatch outputs participate in the custom remat policy."""
     name = "te_moe_dispatch_remat_location"

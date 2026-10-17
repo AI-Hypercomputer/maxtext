@@ -3279,7 +3279,19 @@ class ElasticTraining(BaseModel):
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
   elastic_backup_kind: str = Field(
       "snapshot",
-      description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
+      description=(
+          "How an attempt after an elastic event gets its train state back. 'snapshot' keeps a copy of the train"
+          " state and the data iterator position in pinned host memory every `elastic_snapshot_interval` steps, and"
+          " restores that copy when it is at least as recent as the latest checkpoint; it needs grain's"
+          " ElasticIterator (or synthetic data) and is not supported with DiLoCo, rampup batch size or colocated"
+          " python data input, which must set 'checkpoint'. 'checkpoint' only restores the latest persistent"
+          " checkpoint. The snapshot only survives the loss of a slice for state that is replicated across slices, so"
+          " with `shard_optimizer_over_data` it falls back to the checkpoint."
+      ),
+  )
+  elastic_snapshot_interval: PositiveInt = Field(
+      10,
+      description="In snapshot mode, how often (in steps) to copy the train state to pinned host memory.",
   )
   elastic_timeout_seconds: int = Field(
       300,
@@ -5205,6 +5217,26 @@ class MaxTextConfig(
       raise ValueError(
           "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
       )
+    if self.elastic_enabled and self.elastic_backup_kind == "snapshot":
+      if self.enable_diloco:
+        raise ValueError("elastic_backup_kind='snapshot' is not supported with DiLoCo (`enable_diloco=True`).")
+      if self.enable_rampup_batch_size:
+        # The rampup manager derives its progress from the latest checkpoint step before the state is restored,
+        # so a restore from a newer snapshot would leave it behind.
+        raise ValueError("elastic_backup_kind='snapshot' is not supported with `enable_rampup_batch_size=True`.")
+      if self.dataset_type != DatasetType.SYNTHETIC:
+        # The snapshot carries the data iterator position as the global example index of grain's ElasticIterator,
+        # which is the only iterator whose position is valid for any number of hosts.
+        if self.dataset_type != DatasetType.GRAIN or not self.grain_use_elastic_iterator:
+          raise ValueError(
+              "elastic_backup_kind='snapshot' requires `dataset_type=grain` with `grain_use_elastic_iterator=True`"
+              " (or synthetic data), so that the data iterator position can be snapshotted with the train state."
+          )
+        if self.colocated_python_data_input:
+          raise ValueError(
+              "elastic_backup_kind='snapshot' does not support `colocated_python_data_input=True` yet: the data"
+              " iterator position lives in the colocated process and is not part of the snapshot."
+          )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"

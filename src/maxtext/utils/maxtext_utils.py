@@ -1660,7 +1660,7 @@ def setup_decode_state(config, mesh, checkpoint_manager, init_state_fn):
   return state, state_mesh_annotations
 
 
-def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn):
+def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=None):
   is_training = True
   return setup_initial_state(
       data_iterator,
@@ -1669,6 +1669,7 @@ def setup_training_state(data_iterator, config, mesh, checkpoint_manager, init_s
       checkpoint_manager,
       init_state_fn,
       is_training,
+      snapshotter=snapshotter,
   )
 
 
@@ -1679,6 +1680,7 @@ def setup_initial_state(
     checkpoint_manager,
     init_state_fn,
     is_training=True,
+    snapshotter=None,
 ):
   """We initialize the model and optimizer state, and optionally load from a
   checkpoint as necessary.
@@ -1690,6 +1692,9 @@ def setup_initial_state(
     checkpoint_manager: an Orbax checkpointing.CheckpointManager object
     init_state_fn: function to initialize the training state
     is_training: True to initialize training state, False for decode state
+    snapshotter: Optional `snapshotting.Snapshotter` of an elastic run in snapshot mode. When it holds a snapshot
+      that is at least as recent as the latest checkpoint, the state and the data iterator position are restored
+      from it instead of from the checkpoint.
 
   Returns:
     train_state: the initialized train state. For NNX, this is a TrainStateNNX instance
@@ -1722,6 +1727,7 @@ def setup_initial_state(
         source_checkpoint_layout=config.source_checkpoint_layout,
         expansion_factor_real_data=config.expansion_factor_real_data,
         maxtext_config=config,
+        snapshotter=snapshotter,
     )
     if native and restored is None and raw_params is None and config.load_parameters_path:
       # The Lineage-native model restores MaxText-layout params against its own abstract target.
