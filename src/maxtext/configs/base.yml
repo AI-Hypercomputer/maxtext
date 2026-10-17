@@ -408,10 +408,10 @@ use_gmm_v2_heuristic_tiling: false
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
 # Record each MoE layer's routing decisions as a `selected_experts` intermediate, which the decoder
-# returns alongside the hidden state as `expert_indices`. Only read on the vLLM fused MoE path
-# (attention: vllm_rpa / vllm_batched_rpa), so in practice only the vLLM sampler in RL sets it, to
-# capture routing for router replay; off by default so standard serving does not pay for the extra
-# top-k.
+# returns alongside the hidden state as `expert_indices`. The vLLM sampler in RL sets it on the fused
+# MoE path (attention: vllm_rpa / vllm_batched_rpa) to capture routing for router replay. On the
+# sparse/dense paths it records the router's own top-k even under forced routing, which logit checks
+# use to verify router replay. Off by default so standard serving does not pay for the extra top-k.
 return_routed_experts: false
 
 # when moe weight matrices are sharded on both fsdp and fsdp-transpose axes, use two separate all-gather calls
@@ -1588,6 +1588,22 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
+
+################################## Nemotron-H Specific Configs ##################################
+# Per-layer block types for decoder_block "nemotron3": 'M' Mamba-2, '*' attention, 'E' MoE.
+hybrid_override_pattern: ""
+# Mamba-2 heads, head dimension, SSM state size per group and number of B/C groups.
+mamba_num_heads: 0
+mamba_head_dim: 0
+mamba_ssm_state_size: 0
+mamba_n_groups: 1
+# Mamba-2 causal convolution kernel size and bias.
+mamba_conv_kernel: 4
+mamba_conv_bias: true
+# Chunk size of the Mamba-2 chunked scan.
+mamba_chunk_size: 128
+# Clamp range [min, max] for the Mamba-2 time step dt.
+mamba_time_step_limit: [0.0, .inf]
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 
