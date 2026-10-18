@@ -30,8 +30,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 from flax import nnx
+
+torch = pytest.importorskip("torch")
 
 from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.configs import pyconfig

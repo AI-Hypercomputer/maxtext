@@ -36,8 +36,9 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 from flax import nnx
+
+torch = pytest.importorskip("torch")
 
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
