@@ -694,6 +694,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # covers every parameter, which is correct only because LoRA is rejected above.
     self._learning_rate_schedule, tx = train_utils.create_training_optimizer(self._config, self._model, mesh=self._mesh)
     self._optimizer = self._build_optimizer(tx)
+    if self._config.use_m3_model:
+      from maxtext.m3 import models as m3_models  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+      m3_models.configure_engine(self)
     self._train_step: int = 0
 
     self._checkpoint_manager = checkpointing.CheckpointManager(
