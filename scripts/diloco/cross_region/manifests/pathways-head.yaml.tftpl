@@ -1,0 +1,118 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maxtext-diloco-config
+  namespace: default
+data:
+  qwen3_30b_streaming_diloco_cross_region.yml: |
+    ${indent(4, maxtext_config_yaml)}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pathways-head
+  namespace: default
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: pathways-head
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: cpu-np
+      restartPolicy: Never
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      volumes:
+      - name: maxtext-config
+        configMap:
+          name: maxtext-diloco-config
+      initContainers:
+      # Native sidecars exit automatically when maxtext-trainer finishes so the Job completes cleanly.
+      - name: pathways-rm
+        image: ${rm_image}
+        restartPolicy: Always
+        env:
+        - name: HOST_ADDRESS
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: TPU_SKIP_MDS_QUERY
+          value: "true"
+        args:
+        - --server_port=29001
+        - --node_type=resource_manager
+        - --instance_count=${num_slices}
+        - --instance_type=${pathways_tpu_prefix}:${slice_topology}
+        - --temporary_flags_for_debugging=temporary_flag_for_debugging_grpc_transport_port=29003;;;temporary_flag_for_debugging_pipe_unreachable_timeout=600s;;;temporary_flag_for_debugging_ip_address_override=$(HOST_ADDRESS)
+        - --gcs_scratch_location=${gcs_scratch}
+        ports:
+        - containerPort: 29001
+        - containerPort: 29002
+        - containerPort: 29003
+        startupProbe:
+          tcpSocket:
+            port: 29001
+          periodSeconds: 1
+          failureThreshold: 60
+
+      # For longer Spot runs with colocated Python checkpointing, pass --sidecar_name=external
+      # and attach colocated-python-sidecar on workers (see docs/run_maxtext/run_maxtext_snapshotting.md).
+      - name: pathways-proxy
+        image: ${proxy_image}
+        restartPolicy: Always
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS
+          value: "true"
+        args:
+        - --server_port=29000
+        - --resource_manager_address=127.0.0.1:29001
+        - --temporary_flags_for_debugging=temporary_flag_for_debugging_grpc_transport_port=29004;;;temporary_flag_for_debugging_pipe_unreachable_timeout=600s;;;temporary_flag_for_debugging_ip_address_override=$(POD_IP)
+        - --gcs_scratch_location=${gcs_scratch}
+        ports:
+        - containerPort: 29000
+        - containerPort: 29004
+        startupProbe:
+          tcpSocket:
+            port: 29000
+          periodSeconds: 1
+          failureThreshold: 60
+
+      containers:
+      - name: maxtext-trainer
+        image: ${image}
+        volumeMounts:
+        - name: maxtext-config
+          mountPath: /etc/maxtext-config
+          readOnly: true
+        env:
+        - name: JAX_PLATFORMS
+          value: proxy
+        - name: JAX_BACKEND_TARGET
+          value: grpc://127.0.0.1:29000
+        - name: IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS
+          value: "true"
+        - name: XCLOUD_ENVIRONMENT
+          value: GCP
+        - name: LIBTPU_INIT_ARGS
+          value: "--xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_overlap_compute_collective_tc=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
+        command:
+        - bash
+        - -c
+        - |
+          set -euo pipefail
+          echo "[HEAD] Starting MaxText training for ${steps} steps (${num_slices} slices)..."
+          # Run python3 as a child of bash rather than PID 1 so kernel SIGABRT stops the container immediately.
+          python3 -m maxtext.trainers.pre_train.train \
+            /etc/maxtext-config/qwen3_30b_streaming_diloco_cross_region.yml \
+            num_slices=${num_slices} \
+            dcn_diloco_parallelism=${num_slices} \
+            base_output_directory="${gcs_scratch}/runs" \
+            run_name="${run_name}" \
+            steps=${steps} \
+            ${extra_maxtext_args}
