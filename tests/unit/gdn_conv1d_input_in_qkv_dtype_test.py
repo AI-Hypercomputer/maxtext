@@ -289,6 +289,7 @@ class GdnConv1dInputInQkvDtypeTest(parameterized.TestCase):
           "use_gdn_kernel": False,
           "gdn_conv1d_input_in_qkv_dtype": False,
           "gdn_gated_norm_layout": "auto",
+          "gdn_in_proj_kernel_order": False,
       }
       fields.update(overrides)
       return types.SimpleNamespace(**fields)

@@ -454,6 +454,7 @@ def _validator_cfg(**overrides):
       "gdn_cp_pass1_states_and_bf16_qkv": True,
       "dtype": "bfloat16",
       "packing": True,
+      "gdn_in_proj_kernel_order": False,
   }
   fields.update(overrides)
   return types.SimpleNamespace(**fields)

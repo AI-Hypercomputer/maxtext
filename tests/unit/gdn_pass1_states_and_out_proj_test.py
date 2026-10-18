@@ -783,6 +783,7 @@ def _validator_cfg(**overrides):
       "gdn_cp_mode": "auto",
       "packing": True,
       "dtype": "bfloat16",
+      "gdn_in_proj_kernel_order": False,
   }
   fields.update(overrides)
   return types.SimpleNamespace(**fields)

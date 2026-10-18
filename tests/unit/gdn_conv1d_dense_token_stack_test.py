@@ -371,6 +371,7 @@ def _validator_cfg(**overrides):
       "gdn_gated_norm_layout": "auto",
       "gdn_cp_mode": "auto",
       "packing": True,
+      "gdn_in_proj_kernel_order": False,
   }
   fields.update(overrides)
   return types.SimpleNamespace(**fields)

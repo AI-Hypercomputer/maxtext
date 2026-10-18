@@ -226,6 +226,7 @@ def test_gdn_cp_scan_config_validation():
       packing=True,
       max_target_length=256,
       gdn_gated_norm_layout="auto",
+      gdn_in_proj_kernel_order=False,
   )
   MaxTextConfig.validate_gdn_config(cfg_ok, is_rl_config=False)
 
