@@ -179,6 +179,8 @@ def _bwd_kernel_names_through_model_runner(config_fields):
       gdn_cp_m_scan=True,
       gdn_cp_dh_scan=True,
       gdn_cp_pass1_states_and_bf16_qkv=True,
+      gdn_conv1d_natural_layout=False,
+      gdn_fwd_kernel_head_group_size=0,
       **config_fields,
   )
 

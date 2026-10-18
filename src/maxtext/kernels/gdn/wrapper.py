@@ -128,6 +128,24 @@ def inner_kernel(
   carry_recurrent_scratch_ref = args[3] if len(args) > 3 else None
   qkv_scratch_ref = args[4] if len(args) > 4 else None
 
+  if cfg.conv_natural_layout:
+    _inner_kernel_natural_conv(
+        qkv_slot_ref=qkv_slot_ref,
+        b_slot_ref=b_slot_ref,
+        a_slot_ref=a_slot_ref,
+        conv_state_slot_ref=conv_state_slot_ref,
+        recurrent_slot_ref=recurrent_slot_ref,
+        out_slot_ref=out_slot_ref,
+        t_inv_slot_ref=t_inv_slot_ref,
+        chunk_states_slot_ref=chunk_states_slot_ref,
+        metadata_ref=metadata_ref,
+        weights_ref=weights_ref,
+        carry_conv_scratch_ref=carry_conv_scratch_ref,
+        carry_recurrent_scratch_ref=carry_recurrent_scratch_ref,
+        cfg=cfg,
+    )
+    return
+
   p_id = pl.program_id(0)
 
   # Prefill-only qkv arrives in act_in dtype and large layout. Upcast it into the
@@ -233,6 +251,103 @@ def inner_kernel(
 
   if carry_recurrent_scratch_ref is not None:
     carry_recurrent_scratch_ref[...] = new_recurrent_state
+
+
+def _inner_kernel_natural_conv(
+    *,
+    qkv_slot_ref: jax.Ref,  # [1, chunk, dim_size] act_in dtype (prefill-only DMA)
+    b_slot_ref: jax.Ref,
+    a_slot_ref: jax.Ref,
+    conv_state_slot_ref: jax.Ref,  # [1, prev_kernel_size, 1, dim_size] float32
+    recurrent_slot_ref: jax.Ref,
+    out_slot_ref: jax.Ref | None,
+    t_inv_slot_ref: jax.Ref | None,
+    chunk_states_slot_ref: jax.Ref | None,
+    metadata_ref: memory_ref.MetadataRef,
+    weights_ref: memory_ref.WeightRefs,
+    carry_conv_scratch_ref: jax.Ref,  # [NATURAL_CONV_CARRY_ROWS, dim_size] float32
+    carry_recurrent_scratch_ref: jax.Ref,
+    cfg: config.GDNConfig,
+) -> None:
+  """inner_kernel with cfg.conv_natural_layout: the Conv1D + SiLU run on the chunk with tokens on sublanes.
+
+  Same values as inner_kernel's compact path (compute_conv1d.natural_causal_conv1d): the chunk is upcast to float32 in
+  registers instead of through the compact scratch, the halo is the previous chunk's last NATURAL_CONV_CARRY_ROWS rows
+  (on a sequence's first tile, the HBM conv state as its last prev_kernel_size rows, zero without an initial state),
+  and q / k / v are column slices. A prefill-only tile is a whole chunk, so the conv state after it is its last
+  prev_kernel_size rows (causal_conv1d's new_conv_state at real_size == chunk). The GDN part is inner_kernel's.
+  """
+  if cfg.seq_tile_size != 1 or not cfg.is_prefill_only or cfg.chunk_size < config.NATURAL_CONV_CARRY_ROWS:
+    raise ValueError(
+        "conv_natural_layout needs prefill-only whole-chunk tiles (GDNMode.PER_SEQ / PER_SEQ_STATES with the bf16 qkv"
+        f" DMA) and chunk_size >= {config.NATURAL_CONV_CARRY_ROWS}; got mode={cfg.mode}, chunk_size={cfg.chunk_size},"
+        f" is_prefill_only={cfg.is_prefill_only}."
+    )
+  rows = config.NATURAL_CONV_CARRY_ROWS
+  prev = cfg.prev_kernel_size
+  p_id = pl.program_id(0)
+  record = metadata_ref.get_record(p_id, 0)
+  real_sizes = jnp.stack([record.r_size], axis=0)
+  is_first_tile = record.is_first_tile
+  has_initial_state = metadata_ref.s_idx_has_initial_state[record.s_idx]
+
+  # Recurrent state: vmem_ldst.load_and_select_states' selection.
+  prev_recurrent = jnp.where(has_initial_state, recurrent_slot_ref[0], 0)
+  prev_recurrent = jnp.stack([jnp.where(is_first_tile, prev_recurrent, carry_recurrent_scratch_ref[0])], axis=0)
+  if chunk_states_slot_ref is not None:
+    chunk_states_slot_ref[...] = prev_recurrent.astype(chunk_states_slot_ref.dtype)
+
+  # Conv1D halo, as load_and_select_states selects it.
+  halo = vmem_ldst.select_natural_conv_halo(
+      vmem_ldst.load_compact_rows_as_large(conv_state_slot_ref).astype(jnp.float32),
+      carry_conv_scratch_ref[...],
+      is_first_tile,
+      has_initial_state,
+  )
+
+  x = qkv_slot_ref[0].astype(jnp.float32)
+  b_large = vmem_ldst.load_compact_to_large(b_slot_ref)
+  conv_weight = weights_ref.conv.weight[...].astype(jnp.float32)
+  conv_bias = None
+  if weights_ref.conv.bias is not None:
+    conv_bias = weights_ref.conv.bias[...].astype(jnp.float32)
+  conv_out = compute_conv1d.natural_causal_conv1d(
+      x,
+      halo,
+      conv_weight,
+      conv_bias,
+      cfg,
+      b_large=b_large[0] if cfg.has_seg_ids else None,
+  )
+  vmem_ldst.store_large_rows_to_compact(x[cfg.chunk_size - prev :], conv_state_slot_ref)
+  carry_conv_scratch_ref[...] = x[cfg.chunk_size - rows :]
+
+  qkv = jax.nn.silu(conv_out)
+  q, k, v = vmem_ldst.split_qkv_natural(qkv, cfg)
+  a_large = vmem_ldst.load_compact_to_large(a_slot_ref)
+
+  padding_size = cfg.aligned_num_v_heads - cfg.num_v_heads
+  a_log = jnp.pad(weights_ref.gdn.a_log[...], ((0, padding_size)))
+  dt_bias = jnp.pad(weights_ref.gdn.dt_bias[...], ((0, padding_size)))
+  out, new_recurrent_state, t_inv = compute_gdn.chunked_gdn(
+      q_large=q[None],
+      k_large=k[None],
+      v_large=v[None],
+      b_large=jnp.expand_dims(b_large, axis=1),
+      a_large=jnp.expand_dims(a_large, axis=1),
+      state_prev=prev_recurrent,
+      a_log=a_log,
+      dt_bias=dt_bias,
+      cfg=cfg,
+      real_sizes=real_sizes,
+  )
+
+  if out_slot_ref is not None:
+    out_slot_ref[...] = out.astype(out_slot_ref.dtype)
+  recurrent_slot_ref[...] = new_recurrent_state.astype(recurrent_slot_ref.dtype)
+  if t_inv_slot_ref is not None:
+    t_inv_slot_ref[...] = t_inv.astype(t_inv_slot_ref.dtype)
+  carry_recurrent_scratch_ref[...] = new_recurrent_state
 
 
 def inner_kernel_without_t_inv(
@@ -393,8 +508,14 @@ def _fused_conv1d_gdn(
     emit_t_inv: bool = True,
     conv_dense_token_stack: bool = False,
     bf16_qkv_dma: bool = False,
+    conv_natural_layout: bool = False,
 ) -> tuple[jax.Array | None, tuple[jax.Array, jax.Array], jax.Array | None, jax.Array | None]:
-  """Implements fused_conv1d_gdn; states_only=True returns no out and no chunk_states."""
+  """Implements fused_conv1d_gdn; states_only=True returns no out and no chunk_states.
+
+  conv_natural_layout (config gdn_conv1d_natural_layout) runs the per-sequence kernels' Conv1D + SiLU on the bf16 DMA
+  buffer with tokens on sublanes (GDNConfig.conv_natural_layout); it needs that buffer, i.e. bf16_qkv_dma with a
+  prefill-only bf16 qkv.
+  """
   act_in_dtype = qkv.dtype
   act_out_dtype = qkv.dtype
   conv_out_dtype = conv_state.dtype
@@ -402,6 +523,12 @@ def _fused_conv1d_gdn(
   assert a.dtype == b.dtype == qkv.dtype == act_in_dtype
 
   use_bf16_qkv_dma = bool(bf16_qkv_dma and is_prefill_only and act_in_dtype == jnp.bfloat16)
+  if conv_natural_layout and not use_bf16_qkv_dma:
+    raise ValueError(
+        "conv_natural_layout (gdn_conv1d_natural_layout) needs the prefill-only bf16 qkv DMA buffer: is_prefill_only=True,"
+        f" bf16_qkv_dma=True and bfloat16 qkv; got is_prefill_only={is_prefill_only}, bf16_qkv_dma={bf16_qkv_dma},"
+        f" qkv dtype={act_in_dtype}."
+    )
   if not use_bf16_qkv_dma:
     qkv = qkv.astype(jnp.float32)
   b = b.astype(jnp.float32)
@@ -544,6 +671,8 @@ def _fused_conv1d_gdn(
           "emit_t_inv": emit_t_inv,
           "conv_dense_token_stack": conv_dense_token_stack,
       }
+      if conv_natural_layout:
+        per_seq_kwargs["conv_natural_layout"] = True
 
     cfg = config.GDNConfig(
         mode=mode,
@@ -753,6 +882,7 @@ def _fused_conv1d_gdn(
         "emit_t_inv",
         "conv_dense_token_stack",
         "bf16_qkv_dma",
+        "conv_natural_layout",
     ),
 )
 def fused_conv1d_gdn(
@@ -789,6 +919,7 @@ def fused_conv1d_gdn(
     emit_t_inv: bool = True,
     conv_dense_token_stack: bool = False,
     bf16_qkv_dma: bool = False,
+    conv_natural_layout: bool = False,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array], jax.Array | None, jax.Array]:
   """Fused Causal Conv1D + Gated Delta Net (GDN) forward pass."""
   out_act, states, t_inv, chunk_states = _fused_conv1d_gdn(
@@ -825,6 +956,7 @@ def fused_conv1d_gdn(
       emit_t_inv=emit_t_inv,
       conv_dense_token_stack=conv_dense_token_stack,
       bf16_qkv_dma=bf16_qkv_dma,
+      conv_natural_layout=conv_natural_layout,
   )
   assert out_act is not None and chunk_states is not None
   return out_act, states, t_inv, chunk_states
@@ -846,6 +978,7 @@ def fused_conv1d_gdn(
         "emit_t_inv",
         "conv_dense_token_stack",
         "bf16_qkv_dma",
+        "conv_natural_layout",
     ),
 )
 def fused_conv1d_gdn_states(
@@ -879,6 +1012,7 @@ def fused_conv1d_gdn_states(
     emit_t_inv: bool = True,
     conv_dense_token_stack: bool = False,
     bf16_qkv_dma: bool = True,
+    conv_natural_layout: bool = False,
 ) -> tuple[tuple[jax.Array, jax.Array], jax.Array | None]:
   """Prefill-only Conv1D + GDN state scan; skips output and chunk_states."""
   _, states, t_inv, _ = _fused_conv1d_gdn(
@@ -914,5 +1048,6 @@ def fused_conv1d_gdn_states(
       emit_t_inv=emit_t_inv,
       conv_dense_token_stack=conv_dense_token_stack,
       bf16_qkv_dma=bf16_qkv_dma,
+      conv_natural_layout=conv_natural_layout,
   )
   return states, t_inv

@@ -2652,6 +2652,30 @@ class Qwen3Next(BaseModel):
           " Requires use_gdn_kernel=True (the only path that runs that kernel)."
       ),
   )
+  gdn_conv1d_natural_layout: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: the prefill-only Pallas GDN forward kernels (both sequence-sharded context-parallel"
+          " passes, the local path and the forward rule's replay under remat) run their causal Conv1D + SiLU on the"
+          " bf16 [chunk, conv_dim] qkv buffer they DMA, with tokens on sublanes (kernels/gdn/compute_conv1d.py"
+          " natural_causal_conv1d): each shifted tap is a sublane rotation of the chunk whose first rows come from the"
+          " previous chunk's last 8 rows, added in the same order with the same segment masks, and q / k / v are"
+          " column slices. The compact path upcasts the chunk into a per-token float32 scratch (one row store per"
+          " token and 128-lane column) and loads q / k / v back from it row by row. Same values; the backward kernel"
+          " is unchanged. Requires use_gdn_kernel=True and gdn_cp_pass1_states_and_bf16_qkv=True (the bf16 DMA"
+          " buffer)."
+      ),
+  )
+  gdn_fwd_kernel_head_group_size: int = Field(
+      0,
+      description=(
+          "GDN kernel path: kq-head group size of the Pallas GDN forward kernels (kernels/gdn/compute_gdn.py"
+          " chunked_gdn_per_seq processes that many kq heads and their value heads at a time; the decay cumsum is"
+          " still shared). 0 = compute_gdn.default_head_group_size (all heads at once at gdn_chunk_size 64). The"
+          " per-head math is unchanged. Must divide the kq heads each forward kernel sees. Requires"
+          " use_gdn_kernel=True when non-zero."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -5818,6 +5842,31 @@ class MaxTextConfig(
     gated_norm_layout = cfg.gdn_gated_norm_layout
     pass1_states_bf16_qkv = getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False)
     fast_state_passing = getattr(cfg, "gdn_cp_fast_state_passing", False)
+    # getattr: tests drive this validator with partial namespaces; the kernel path (model_runner) reads the attributes.
+    conv_natural_layout = getattr(cfg, "gdn_conv1d_natural_layout", False)
+    fwd_head_group_size = getattr(cfg, "gdn_fwd_kernel_head_group_size", 0)
+    if fwd_head_group_size < 0:
+      raise ValueError(f"gdn_fwd_kernel_head_group_size must be >= 0 (0 = default), got {fwd_head_group_size}.")
+    if conv_natural_layout or fwd_head_group_size:
+      if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+        raise ValueError(
+            "gdn_conv1d_natural_layout / gdn_fwd_kernel_head_group_size require a decoder with Gated DeltaNet layers"
+            f" (qwen3_next or qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if not cfg.use_gdn_kernel:
+        raise ValueError(
+            "gdn_conv1d_natural_layout / gdn_fwd_kernel_head_group_size require use_gdn_kernel=True: only the Pallas"
+            " GDN forward kernels run that Conv1D and head-group loop."
+        )
+    if conv_natural_layout and not pass1_states_bf16_qkv:
+      raise ValueError(
+          "gdn_conv1d_natural_layout=True requires gdn_cp_pass1_states_and_bf16_qkv=True: the natural-layout Conv1D runs"
+          " on the forward kernels' bf16 qkv DMA buffer, which only that option creates."
+      )
+    if fwd_head_group_size and cfg.gdn_num_key_heads % fwd_head_group_size:
+      raise ValueError(
+          f"gdn_fwd_kernel_head_group_size={fwd_head_group_size} must divide gdn_num_key_heads={cfg.gdn_num_key_heads}."
+      )
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       if dense_token_stack:
         raise ValueError(

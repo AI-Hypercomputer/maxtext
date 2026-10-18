@@ -25,6 +25,8 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
 DEFAULT_VMEM_LIMIT_FACTOR: float = 0.90
+# Rows of the natural-layout Conv1D carry (conv_natural_layout): one float32 sublane tile, >= kernel_size - 1.
+NATURAL_CONV_CARRY_ROWS: int = 8
 
 # Optional GDNConfig fields and their defaults.
 _TRI_INV_FIELD_DEFAULTS = {
@@ -37,7 +39,7 @@ _TRI_INV_FIELD_DEFAULTS = {
 # mathematical outputs. Leaving them out of the kernel name and metadata keeps the default (False) metadata identical
 # to the base kernel and shares a single kernel name across variants (the HLO qkv operand shape/dtype and the run's
 # config tell them apart; `is_prefill_only` also changes the prefill qkv operand outside the kernel body).
-_LAYOUT_ONLY_FIELDS = ("conv_dense_token_stack", "is_prefill_only")
+_LAYOUT_ONLY_FIELDS = ("conv_dense_token_stack", "is_prefill_only", "conv_natural_layout")
 
 
 class GDNMode(enum.StrEnum):
@@ -105,6 +107,11 @@ class GDNConfig:
   conv_dense_token_stack: bool = False
   # Prefill-only tiles are whole chunks: qkv is DMA'd in act_in dtype and upcast in VMEM.
   is_prefill_only: bool = False
+  # Run the Conv1D + SiLU on the prefill-only [chunk, dim] qkv buffer with tokens on sublanes (wrapper.inner_kernel,
+  # compute_conv1d.natural_causal_conv1d; config gdn_conv1d_natural_layout) instead of on the per-token compact
+  # float32 scratch. The inter-tile conv carry is then the previous chunk's last 8 rows ([8, dim] float32) and there
+  # is no compact qkv scratch. Same values. Requires is_prefill_only (GDNMode.PER_SEQ / PER_SEQ_STATES).
+  conv_natural_layout: bool = False
 
   @property
   def chunk_size(self) -> int:
@@ -184,13 +191,17 @@ class GDNConfig:
     # NOTE: Currently, batched mode only supports case where 1 seq = 1 tile.
     # Therefore, inter tile carry is not needed.
     if self.mode != GDNMode.BATCHED:
-      carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
+      if self.conv_natural_layout:
+        # The previous chunk's last NATURAL_CONV_CARRY_ROWS rows of float32 qkv, tokens on sublanes.
+        carry_conv_scratch = pltpu.VMEM((NATURAL_CONV_CARRY_ROWS, self.dim_size), jnp.float32)
+      else:
+        carry_conv_scratch = pltpu.VMEM(conv_shape, jnp.float32)
       carry_recurrent_scratch = pltpu.VMEM(recurrent_shape, jnp.float32)
 
     ret = {
         "carry_conv_scratch_ref": carry_conv_scratch,
         "carry_recurrent_scratch_ref": carry_recurrent_scratch,
     }
-    if self.is_prefill_only:
+    if self.is_prefill_only and not self.conv_natural_layout:
       ret["qkv_scratch_ref"] = pltpu.VMEM((self.seq_tile_size, self.chunk_size, 1, self.dim_size), jnp.float32)
     return ret

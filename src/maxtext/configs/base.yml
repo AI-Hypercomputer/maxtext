@@ -1728,6 +1728,13 @@ gdn_cp_fast_state_passing: false
 # dh0) | "all" (qkv, states, do, dy) | "no_do" | "inputs" (qkv, states) | "states_dy". Same values. Requires
 # use_gdn_kernel: true.
 gdn_bwd_natural_layout: "off"
+# GDN kernel path: the prefill-only forward kernels (CP pass 1 and pass 2) run their Conv1D + SiLU on the bf16 [chunk,
+# dim] DMA buffer with tokens on sublanes (kernels/gdn/compute_conv1d.py natural_causal_conv1d) instead of through a
+# per-token compact float32 scratch. Same values. Requires use_gdn_kernel: true and gdn_cp_pass1_states_and_bf16_qkv: true.
+gdn_conv1d_natural_layout: false
+# GDN kernel path: kq-head group size of the Pallas forward kernels (kernels/gdn/compute_gdn.py chunked_gdn_per_seq);
+# 0 = the default (all heads at chunk_size 64). Same values. Must divide the kernel's kq heads.
+gdn_fwd_kernel_head_group_size: 0
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

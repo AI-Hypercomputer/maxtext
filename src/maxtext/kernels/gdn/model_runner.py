@@ -630,6 +630,11 @@ def run_gdn_kernel_layer(
   # gdn_bwd/pallas_mosaic_tpu_bwd.py NATURAL_LAYOUT_MODES). Same values. Read as an attribute: a config without the key
   # raises instead of silently running the relayout path.
   bwd_natural_layout = cfg.gdn_bwd_natural_layout
+  # Forward kernels' Conv1D + SiLU on the bf16 DMA buffer with tokens on sublanes, and their kq-head group size (0 =
+  # default) (wrapper.py, compute_conv1d.natural_causal_conv1d, compute_gdn.chunked_gdn_per_seq). Same values. Read as
+  # attributes: a config without the keys raises instead of silently running the compact path.
+  conv_natural_layout = cfg.gdn_conv1d_natural_layout
+  fwd_head_group_size = cfg.gdn_fwd_kernel_head_group_size
 
   if use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
@@ -909,6 +914,8 @@ def run_gdn_kernel_layer(
             conv_dense_token_stack=conv_dense_token_stack,
             pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
             bwd_natural_layout=bwd_natural_layout,
+            conv_natural_layout=conv_natural_layout,
+            fwd_head_group_size=fwd_head_group_size,
         )
 
         if next_cs is not None:
@@ -955,6 +962,8 @@ def run_gdn_kernel_layer(
           pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
           cp_fast_state_passing=cp_fast_state_passing,
           bwd_natural_layout=bwd_natural_layout,
+          conv_natural_layout=conv_natural_layout,
+          fwd_head_group_size=fwd_head_group_size,
       )
 
     if not isinstance(qkv, jax.core.Tracer):
@@ -1001,6 +1010,8 @@ def run_gdn_kernel_layer(
         conv_dense_token_stack=conv_dense_token_stack,
         pass1_states_and_bf16_qkv=pass1_states_and_bf16_qkv,
         bwd_natural_layout=bwd_natural_layout,
+        conv_natural_layout=conv_natural_layout,
+        fwd_head_group_size=fwd_head_group_size,
     )
 
   core_attn_out = checkpoint_name(core_attn_out, "gdn_core_attn_out")
