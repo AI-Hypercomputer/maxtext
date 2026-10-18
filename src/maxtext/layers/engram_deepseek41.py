@@ -282,7 +282,9 @@ def sharded_row_lookup(
     rank = jnp.arange(t) - (jnp.cumsum(counts) - counts)[owner]  # position among the ids sent to that owner
     fits = is_uniq & (rank < cap)
     dst, pos = jnp.where(fits, owner, group), jnp.where(fits, rank, 0)
-    send = jnp.full((group, cap), -1, jnp.int32).at[dst, pos].set((uniq - owner * shard_rows).astype(jnp.int32), mode="drop")
+    send = (
+        jnp.full((group, cap), -1, jnp.int32).at[dst, pos].set((uniq - owner * shard_rows).astype(jnp.int32), mode="drop")
+    )
     requested = jax.lax.all_to_all(send, axes, 0, 0, tiled=True)  # [group, cap] local rows asked for by each chip
     rows = jnp.take(table_shard, jnp.maximum(requested, 0), axis=0)
     rows = jnp.where((requested >= 0)[..., None], rows, 0).astype(out_dtype)
@@ -306,9 +308,9 @@ def sharded_row_lookup(
     return pieces[0] if len(pieces) == 1 else jnp.concatenate(pieces, axis=1)
 
   local = local_all_to_all if method == "all_to_all" else local_psum_scatter
-  return jax.shard_map(
-      local, mesh=mesh, in_specs=(table_pspec, ids_pspec), out_specs=out_pspec, check_vma=False
-  )(table, ids)
+  return jax.shard_map(local, mesh=mesh, in_specs=(table_pspec, ids_pspec), out_specs=out_pspec, check_vma=False)(
+      table, ids
+  )
 
 
 class DeepSeek41Engram(nnx.Module):

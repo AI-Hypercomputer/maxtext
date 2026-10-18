@@ -226,9 +226,7 @@ class DeepSeek41DecoderLayer(nnx.Module):
       token_map, compressed_vocab_size = compressed_token_map(config)
       hasher = engram_deepseek41.make_hasher(config, spec.layer_id, token_map, compressed_vocab_size)
       self.engram_hasher = StaticWrapper(hasher)
-      self.engram = engram_deepseek41.DeepSeek41Engram(
-          config, hasher.num_embeddings, kernel_init, mesh=mesh, rngs=rngs
-      )
+      self.engram = engram_deepseek41.DeepSeek41Engram(config, hasher.num_embeddings, kernel_init, mesh=mesh, rngs=rngs)
 
   def hc_mixes(self, h: jax.Array, prefix: str):
     """h: [B, S, hc, D] -> pre [B, S, hc], post [B, S, hc], comb [B, S, hc, hc] (all float32)."""

@@ -395,13 +395,17 @@ class DeepSeek41GradParityTest(unittest.TestCase):
       if rel > rtol and err > 1e-6:
         failures.append(f"{name}: |g_ref|={ref_norm:.3e} rel_err={rel:.3e}")
     worst = sorted(rows.items(), key=lambda kv: -kv[1][1])[:8]
-    print(f"\n[scan_layers={scan_layers} {overrides}] loss mt={loss:.6f} ref={self.ref_loss:.6f}; "
-          f"{len(rows)} grads compared; worst rel errors:")
+    print(
+        f"\n[scan_layers={scan_layers} {overrides}] loss mt={loss:.6f} ref={self.ref_loss:.6f}; "
+        f"{len(rows)} grads compared; worst rel errors:"
+    )
     for name, (n, rel) in worst:
       print(f"   {name:60s} |g_ref|={n:.3e} rel={rel:.2e}")
     zero_both = [n for n, (norm, _) in rows.items() if norm == 0.0]
-    print(f"   params with zero gradient in the reference ({len(zero_both)}): "
-          f"{sorted({n.split('.', 2)[-1] for n in zero_both})}")
+    print(
+        f"   params with zero gradient in the reference ({len(zero_both)}): "
+        f"{sorted({n.split('.', 2)[-1] for n in zero_both})}"
+    )
     self.assertFalse(failures, "gradient mismatches:\n" + "\n".join(failures))
 
   def test_unscanned_dense_moe(self):

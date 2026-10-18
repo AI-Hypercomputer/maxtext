@@ -496,7 +496,7 @@ class DeepSeek41Attention(nnx.Module):
       if compress_kv is not None:
         keys = jnp.concatenate([keys, compress_kv], axis=1)
         mask = jnp.concatenate([mask, jax.lax.dynamic_slice_in_dim(topk_mask, start, chunk, axis=1)], axis=-1)
-      return attend(qc, keys, mask, sinks)
+      return attend(qc, keys, mask, sinks)  # pylint: disable=too-many-function-args
 
     outs = jax.lax.map(one_chunk, jnp.arange(0, s, chunk))  # [S / chunk, B, chunk, H, D]
     return jnp.moveaxis(outs, 0, 1).reshape(b, s, h, d)

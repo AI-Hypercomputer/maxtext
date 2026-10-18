@@ -1301,13 +1301,7 @@ def calculate_deepseek41_tflops_training_per_device(config, total_ffn_flops_all_
         active_idx_keys = c_len
       idx_mask_ratio = calculate_indexer_mask_ratio(active_idx_keys, c_len)
       indexer_scoring_flops += (
-          2
-          * batch_size
-          * seq_len
-          * c_len
-          * config.indexer_n_heads
-          * (config.indexer_head_dim + 1)
-          * idx_mask_ratio
+          2 * batch_size * seq_len * c_len * config.indexer_n_heads * (config.indexer_head_dim + 1) * idx_mask_ratio
       )
 
     # 4c. Sparse Top-K Compressed Attention (peak roofline over K = min(indexer_topk, C_l) keys)
@@ -1317,11 +1311,7 @@ def calculate_deepseek41_tflops_training_per_device(config, total_ffn_flops_all_
         4 * batch_size * (seq_len * c_len) * config.num_query_heads * config.head_dim * sparse_mask_ratio
     )
 
-  total_attn_flops = (
-      (num_layers * prefix_attn_per_layer)
-      + sparse_compressed_attn_flops
-      + indexer_scoring_flops
-  )
+  total_attn_flops = (num_layers * prefix_attn_per_layer) + sparse_compressed_attn_flops + indexer_scoring_flops
 
   total_weight_flops = (
       (num_layers * base_attention_weights_per_layer)
