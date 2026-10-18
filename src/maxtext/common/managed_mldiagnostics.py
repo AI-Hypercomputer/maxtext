@@ -74,4 +74,6 @@ class ManagedMLDiagnostics:
         gcs_path=config.managed_mldiagnostics_dir,
         on_demand_xprof=config.managed_mldiagnostics_on_demand_profiling,
         region=region,
+        metric_only_run=config.managed_mldiagnostics_metric_only_run,
+        application_framework="MAXTEXT",
     )

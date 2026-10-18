@@ -44,6 +44,7 @@ class ManagedMLDiagnosticsTest(unittest.TestCase):
     mock_config.managed_mldiagnostics_run_group = "test_group"
     mock_config.managed_mldiagnostics_dir = "gs://test_dir"
     mock_config.managed_mldiagnostics_on_demand_profiling = False
+    mock_config.managed_mldiagnostics_metric_only_run = False
     mock_config.get_keys.return_value = {"key1": "val1"}
 
     with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
@@ -55,6 +56,8 @@ class ManagedMLDiagnosticsTest(unittest.TestCase):
           gcs_path="gs://test_dir",
           on_demand_xprof=False,
           region=None,
+          metric_only_run=False,
+          application_framework="MAXTEXT",
       )
 
   def test_enabled_populated_region_passes_region(self):
@@ -65,6 +68,7 @@ class ManagedMLDiagnosticsTest(unittest.TestCase):
     mock_config.managed_mldiagnostics_run_group = "test_group"
     mock_config.managed_mldiagnostics_dir = "gs://test_dir"
     mock_config.managed_mldiagnostics_on_demand_profiling = False
+    mock_config.managed_mldiagnostics_metric_only_run = False
     mock_config.get_keys.return_value = {"key1": "val1"}
 
     with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
@@ -76,6 +80,32 @@ class ManagedMLDiagnosticsTest(unittest.TestCase):
           gcs_path="gs://test_dir",
           on_demand_xprof=False,
           region="us-east1",
+          metric_only_run=False,
+          application_framework="MAXTEXT",
+      )
+
+  def test_enabled_metric_only_run_true(self):
+    mock_config = mock.MagicMock()
+    mock_config.managed_mldiagnostics = True
+    mock_config.managed_mldiagnostics_region = "us-east1"
+    mock_config.run_name = "test_run"
+    mock_config.managed_mldiagnostics_run_group = "test_group"
+    mock_config.managed_mldiagnostics_dir = "gs://test_dir"
+    mock_config.managed_mldiagnostics_on_demand_profiling = False
+    mock_config.managed_mldiagnostics_metric_only_run = True
+    mock_config.get_keys.return_value = {"key1": "val1"}
+
+    with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
+      ManagedMLDiagnostics(mock_config)
+      mock_run.assert_called_once_with(
+          name="test_run",
+          run_group="test_group",
+          configs={"key1": "val1"},
+          gcs_path="gs://test_dir",
+          on_demand_xprof=False,
+          region="us-east1",
+          metric_only_run=True,
+          application_framework="MAXTEXT",
       )
 
 
