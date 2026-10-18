@@ -3263,7 +3263,30 @@ class RematAndOffload(BaseModel):
           " Other bfloat16 weights keep a float32 master."
       ),
   )
+  optimizer_device_resident_gib: float = Field(
+      0.0,
+      description=(
+          "With optimizer_memory_host_offload: keep the largest optimizer leaves, up to this many GiB per device, in"
+          " device memory between updates instead of pinned host memory. The update reads and writes them in place,"
+          " so they no longer cross the host link twice per step; the rest is offloaded as before. Same values"
+          " (bit-identical); the leaves occupy device memory for the whole step, beside every fwd_bwd and the"
+          " gradient accumulator. 0 (default) = every leaf offloaded."
+      ),
+  )
 
+
+  @model_validator(mode="after")
+  def validate_optimizer_device_resident(self) -> "RematAndOffload":
+    """The device-resident budget only means something with the optimizer state offloaded."""
+    gib = self.optimizer_device_resident_gib
+    if not math.isfinite(gib) or gib < 0:
+      raise ValueError(f"optimizer_device_resident_gib must be a finite number >= 0, got {gib}.")
+    if gib > 0 and not self.optimizer_memory_host_offload:
+      raise ValueError(
+          "optimizer_device_resident_gib > 0 needs optimizer_memory_host_offload=True (without it every optimizer"
+          " leaf is already in device memory)."
+      )
+    return self
 
 class Tokenizer(BaseModel):
   """Configuration for the tokenizer."""

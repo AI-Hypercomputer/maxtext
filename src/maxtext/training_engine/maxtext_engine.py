@@ -77,6 +77,81 @@ _OPTIMIZER_STATE_KEY = "optimizer"
 _HOST_MEMORY_KIND = "pinned_host"
 _DEVICE_MEMORY_KIND = "device"
 
+# Device-resident optimizer leaves under `optimizer_memory_host_offload`, off by default.
+#
+# Offloaded, every optimizer leaf crosses the host link twice per step: the compiled update copies it from pinned
+# host memory to the device and its new value back. On the 397B RL trainer bench those copies are most of the
+# update (14.88 GiB each way per device with residual16 masters). With optimizer_device_resident_gib set to a budget
+# in GiB, the largest optimizer leaves, up to that many bytes per device, stay in device memory between updates
+# instead: `_offload_optimizer_state` keeps them there, the update's shardings are read off the state so it takes
+# them in device memory, and the state is donated, so their new values are written in place and never cross the
+# link. The update computes the same values; only where the chosen leaves live changes. They occupy device memory
+# for the whole step, beside every fwd_bwd and the gradient accumulator, so the budget must fit in what those leave
+# free. 0 (default) offloads every leaf and leaves the traced kernels unchanged.
+_OPT_RESIDENT_KEY = "optimizer_device_resident_gib"
+
+
+def _optimizer_device_resident_budget(config: Any) -> int:
+  """Returns the per-device bytes of optimizer state kept in device memory between updates (0 = off).
+
+  Read from the config's optimizer_device_resident_gib. Anything that is not a finite, non-negative number of GiB
+  raises, so a bad value is never a silent no-op.
+  """
+  gib = float(config.optimizer_device_resident_gib)
+  if not np.isfinite(gib) or gib < 0:
+    raise ValueError(f"{_OPT_RESIDENT_KEY} must be a finite, non-negative number of GiB, got {gib!r}")
+  return int(gib * 2**30)
+
+
+# How many steps of an engine's life print MEM-STATS lines (see `_log_memory_stats`).
+_MEM_STATS_STEPS = 2
+
+
+def _per_device_bytes(aval: Any, leaf_sharding: Any) -> int:
+  """Returns the bytes one device holds of `aval` (an array or `ShapeDtypeStruct`) under `leaf_sharding`."""
+  shape = tuple(aval.shape)
+  if hasattr(leaf_sharding, "shard_shape"):
+    shape = tuple(leaf_sharding.shard_shape(shape))
+  return int(np.prod(shape, dtype=np.int64)) * jnp.dtype(aval.dtype).itemsize
+
+
+def _pick_device_resident_leaves(
+    optimizer_pure: Any, optimizer_shardings: Any, budget: int
+) -> tuple[Any, list[tuple[str, int]]]:
+  """Chooses the optimizer leaves kept in device memory between updates, largest per-device size first.
+
+  A leaf is taken while the running total stays within `budget`, so a smaller leaf can still fill what a
+  larger one left; ties keep tree order. Scalars (step counts) are never taken: they are bytes, not time.
+
+  Args:
+    optimizer_pure: The optimizer state's pure form (arrays or avals).
+    optimizer_shardings: The same tree's shardings, as the update kernel's `in_shardings` hold them.
+    budget: Per-device bytes.
+
+  Returns:
+    `(mask, chosen)`: a tree of bools shaped like `optimizer_shardings` (True = kept in device memory), and the
+    chosen leaves' `(path, per-device bytes)` in the order they were taken.
+  """
+  paths_and_leaves, _ = jax.tree_util.tree_flatten_with_path(optimizer_pure)
+  shardings, treedef = jax.tree.flatten(optimizer_shardings)
+  if len(shardings) != len(paths_and_leaves):
+    raise ValueError(
+        f"{_OPT_RESIDENT_KEY}: the optimizer state has {len(paths_and_leaves)} leaves but its shardings "
+        f"{len(shardings)}; cannot pick the device-resident leaves."
+    )
+  sizes = [
+      _per_device_bytes(leaf, leaf_sharding) if getattr(leaf, "ndim", 0) > 0 else 0
+      for (_, leaf), leaf_sharding in zip(paths_and_leaves, shardings)
+  ]
+  taken = [False] * len(sizes)
+  chosen, total = [], 0
+  for index in sorted(range(len(sizes)), key=lambda i: (-sizes[i], i)):
+    if sizes[index] and total + sizes[index] <= budget:
+      taken[index] = True
+      total += sizes[index]
+      chosen.append((jax.tree_util.keystr(paths_and_leaves[index][0]), sizes[index]))
+  return jax.tree.unflatten(treedef, taken), chosen
+
 # The kernels an update is made of, in the order a step runs them. `compile_kernels()` is
 # keyed by these, and so is the ahead-of-time entry point in `maxtext_engine_compile`.
 KERNEL_NAMES = ("fwd_bwd", "accumulate", "update")
@@ -934,6 +1009,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Set by `_compile_for_batch` under `optimizer_memory_host_offload`: the device shardings
     # `_update_kernel` moves the pinned-host optimizer state onto. `None` without offload.
     self._optimizer_device_shardings: Any = None
+    # optimizer_device_resident_gib (see `_optimizer_device_resident_budget`): set by `_offload_optimizer_state` to the
+    # tree of bools marking the optimizer leaves kept in device memory between updates, or None when every leaf is
+    # offloaded. `_opt_resident_logged` is the last choice announced, so the banner prints once per distinct choice.
+    self._opt_resident_mask: Any = None
+    self._opt_resident_logged: Any = None
+    # `(layout key, mask)` of the last choice, so `update()` does not re-pick every step (`_optimizer_resident_mask`).
+    self._opt_resident_cache: Any = None
+    # Updates this engine instance has applied, for the MEM-STATS lines of its first steps (`_log_memory_stats`).
+    self._mem_stats_step = 0
     # Micro step count within the current training step. Resets on `update()`.
     self._micro_step_count = 0
     # Every micro step this run has ever folded in across optimizer steps.
@@ -1453,32 +1537,159 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     in host memory; the eager path runs it before each `fwd_bwd` and after each `update()`.
     Every optimizer leaf moves, scalars included, as in `train.py`. Idempotent: a leaf already in
     host memory is left alone.
+
+    Under optimizer_device_resident_gib the leaves `_optimizer_resident_mask` picks are kept in device memory
+    instead (moved there if they are elsewhere, e.g. after a restore), so the update reads them where they are.
     """
     if not self._optimizer_offload_enabled() or self._state is None:
       return
     state_pure = self._read_state_pure()
     if _OPTIMIZER_STATE_KEY not in state_pure:
       return
+    resident = self._optimizer_resident_mask(state_pure[_OPTIMIZER_STATE_KEY])
+    self._opt_resident_mask = resident
 
     moved = False
 
-    def place(leaf):
+    def place(leaf, keep_on_device=False):
       nonlocal moved
       if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
         return leaf
       base = self._mesh_sharding(leaf)
-      if base.memory_kind == _HOST_MEMORY_KIND:
+      kind = _DEVICE_MEMORY_KIND if keep_on_device else _HOST_MEMORY_KIND
+      if base.memory_kind == kind:
         return leaf
       moved = True
-      return self._place_leaf(leaf, base.with_memory_kind(_HOST_MEMORY_KIND))
+      return self._place_leaf(leaf, base.with_memory_kind(kind))
 
-    optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
+    if resident is None:
+      optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY])
+    else:
+      optimizer_pure = jax.tree.map(place, state_pure[_OPTIMIZER_STATE_KEY], resident)
     if not moved:
       return
     with self._sharding_ctx():
       nnx.update(self._state, nnx.State({_OPTIMIZER_STATE_KEY: optimizer_pure.raw_mapping}))
     self._invalidate_pure_state()
     self._refresh_pure_state()
+
+  def _optimizer_resident_mask(self, optimizer_pure: Any) -> Any:
+    """Returns the tree of bools marking the optimizer leaves kept in device memory, or None (all offloaded).
+
+    optimizer_device_resident_gib: `_pick_device_resident_leaves`'s choice -- largest per-device size first, a smaller
+    leaf filling what a larger one left, scalars never -- within the budget. It depends only on the budget and the
+    leaves' shapes, dtypes and partition specs, so it is cached on exactly those: `update()` calls this every step,
+    and the choice is made once per state layout. Announced once per distinct choice.
+    """
+    budget = _optimizer_device_resident_budget(self._config)
+    if not budget:
+      return None
+    leaves, treedef = jax.tree.flatten(optimizer_pure)
+    key = (
+        budget,
+        treedef,
+        tuple(
+            (getattr(leaf, "shape", None), str(getattr(leaf, "dtype", None)), self._mesh_sharding(leaf).spec)
+            for leaf in leaves
+        ),
+    )
+    if self._opt_resident_cache is not None and self._opt_resident_cache[0] == key:
+      return self._opt_resident_cache[1]
+    mask, chosen = _pick_device_resident_leaves(optimizer_pure, jax.tree.map(self._mesh_sharding, optimizer_pure), budget)
+    names = tuple(path for path, _ in chosen)
+    if names != self._opt_resident_logged:
+      self._opt_resident_logged = names
+      if not chosen:
+        logging.warning(
+            "%s=%.6f GiB is smaller than every optimizer leaf; every leaf stays in pinned host memory.",
+            _OPT_RESIDENT_KEY,
+            budget / 2**30,
+        )
+      else:
+        logging.info(
+            "OPT-RESIDENT on: %d optimizer leaves (%.3f GiB per device, budget %.3f GiB) stay in device memory "
+            "between updates; the update takes and returns them there, in place: %s",
+            len(chosen),
+            sum(size for _, size in chosen) / 2**30,
+            budget / 2**30,
+            ", ".join(f"{path} {size / 2**30:.4f}" for path, size in chosen),
+        )
+    self._opt_resident_cache = (key, mask if chosen else None)
+    return self._opt_resident_cache[1]
+
+  def _resident_update_shardings(self, update_in_shardings: Any, update_out_shardings: Any) -> tuple[Any, Any]:
+    """Returns the update kernel's `in_shardings` and `out_shardings` with every memory kind named.
+
+    optimizer_device_resident_gib: both trees are read off the state, so the resident leaves are already `device` on
+    the way in and out and every other optimizer leaf `pinned_host`. Naming the rest (an unnamed sharding is in device
+    memory anyway) makes JAX pair each donated input only with an output of its own memory kind
+    (`mlir._set_up_aliases`).
+    """
+    replicated_device = jax.sharding.NamedSharding(
+        self._mesh, jax.sharding.PartitionSpec(), memory_kind=_DEVICE_MEMORY_KIND
+    )
+
+    def named(tree):
+      return jax.tree.map(
+          lambda leaf_sharding: (
+              leaf_sharding
+              if leaf_sharding.memory_kind is not None
+              else leaf_sharding.with_memory_kind(_DEVICE_MEMORY_KIND)
+          ),
+          tree,
+      )
+
+    state_in, grads_in, denominator_in, mean_loss_in = update_in_shardings
+    in_shardings = (
+        named(state_in),
+        named(grads_in),
+        named(denominator_in),
+        # `mean_loss` is passed only under skip_step_on_spikes; otherwise the argument is None.
+        replicated_device if self._config.skip_step_on_spikes else mean_loss_in,
+    )
+    out_shardings = (
+        named(update_out_shardings[0]),
+        replicated_device,  # the gradient norm
+        replicated_device,  # the skip flag, or nothing when no skip rule is on
+    )
+    return in_shardings, out_shardings
+
+  def _log_memory_stats(self, where: str) -> None:
+    """Logs one MEM-STATS line: `memory_stats()` of the first local device, during this engine's first steps.
+
+    Diagnostics only, whatever optimizer_device_resident_gib is: the device memory the train state, the accumulator
+    and the dispatched programs hold, which is what a device-resident budget has to fit beside. Called at
+    `_MEM_STATS_STEPS` steps at most, never in a program, and it never raises: a backend that does not report
+    memory says so in the line.
+    """
+    if jax.process_index() != 0:
+      return
+    try:
+      device = jax.local_devices()[0]
+      stats = device.memory_stats()
+    except Exception as e:  # pylint: disable=broad-except
+      logging.info("MEM-STATS train_step=%d where=%s unavailable: %r", self.train_step, where, e)
+      return
+    if not stats:
+      logging.info(
+          "MEM-STATS train_step=%d where=%s unavailable: memory_stats() returned %r", self.train_step, where, stats
+      )
+      return
+
+    def show(key):
+      value = stats.get(key)
+      return f"{key}={value} ({value / 2**30:.3f} GiB)" if isinstance(value, (int, float)) else f"{key}={value}"
+
+    logging.info(
+        "MEM-STATS train_step=%d where=%s device=%s %s %s %s %s",
+        self.train_step,
+        where,
+        device,
+        show("bytes_in_use"),
+        show("peak_bytes_in_use"),
+        show("bytes_limit"),
+        show("largest_free_block_bytes"),
+    )
 
   def _with_optimizer_on_device(self, state_pure: Any) -> Any:
     """Returns `state_pure` with every optimizer leaf in pinned host memory moved onto the device.
@@ -2156,6 +2367,15 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             lambda s: s.with_memory_kind(_DEVICE_MEMORY_KIND),
             state_mesh_shardings[_OPTIMIZER_STATE_KEY],
         )
+      # optimizer_device_resident_gib: `_offload_optimizer_state` above kept the chosen leaves in device memory, so
+      # the shardings read off the state already give them `device` and the update takes and returns them there,
+      # donated, i.e. in place.
+      if self._opt_resident_mask is not None:
+        update_in_shardings, update_out_shardings = self._resident_update_shardings(
+            update_in_shardings, update_out_shardings
+        )
+      elif _optimizer_device_resident_budget(self._config) and not self._optimizer_offload_enabled():
+        raise ValueError(f"{_OPT_RESIDENT_KEY} > 0 needs optimizer_memory_host_offload=true.")
       # A live accumulator predates this compile -- a checkpoint restore hands one back, and
       # a recompile can flip the deferral on or off -- so it may not be on the shardings the
       # kernels were just built for. `jax.jit` matches `in_shardings` exactly and would
@@ -2180,6 +2400,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._zero1_params_shardings = None
       self._gathered_params_shardings = None
       self._optimizer_device_shardings = None
+      if _optimizer_device_resident_budget(self._config):
+        raise ValueError(f"{_OPT_RESIDENT_KEY} > 0 needs a mesh and optimizer_memory_host_offload=true.")
 
     # 1. JIT Compile Micro FWD/BWD Pass, and the add that accumulates it.
     #
@@ -2643,6 +2865,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           fwd_bwd_kernel = functools.partial(
               self._fwd_bwd_kernel, graphdef=self._final_graphdef_for(self._model_graphdef, params, rest)
           )
+    if self._micro_step_count == 0 and self._mem_stats_step < _MEM_STATS_STEPS:
+      self._log_memory_stats("before micro-batch 1")
     with self._sharding_ctx():
       outputs = fwd_bwd_kernel(params, rest, inputs)
       if (
@@ -2722,6 +2946,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._record_micro_batch(loss, aux)
     self._micro_step_count += 1
     self._total_micro_steps += 1
+    if self._micro_step_count == 1 and self._mem_stats_step == 0:
+      self._log_memory_stats("after micro-batch 1 dispatched")
 
   def _record_micro_batch(self, loss: Any, aux: Any) -> None:
     """Records a micro-batch's loss and auxiliary metrics, and caches its loss for `update`."""
@@ -3018,6 +3244,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         grad_norm if grad_norm is not None else (self._state if self._state is not None else self._model),
         self._metrics_recorder.get_step_metrics(self.train_step),
     )
+    if self._mem_stats_step == 0:
+      self._log_memory_stats("after update dispatched")
+    self._mem_stats_step += 1
 
     self._cached_losses.clear()
     self._accumulated_grads = None

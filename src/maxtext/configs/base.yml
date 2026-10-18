@@ -621,6 +621,11 @@ parameter_memory_host_offload: false
 # axis, and rebuilds it bit for bit at each update. Same masters, weights and updates; 2.13 instead of 4 bytes per
 # element stored (and, with optimizer_memory_host_offload, copied to and from the host at every update).
 fp32_master_storage: "f32"
+# With optimizer_memory_host_offload: keep the largest optimizer leaves (up to this many GiB per device) in device
+# memory between updates; the update reads and writes them in place, so they no longer cross the host link.
+# Bit-identical. They stay in device memory for the whole step, beside fwd_bwd and the gradient accumulator.
+# 0 = off.
+optimizer_device_resident_gib: 0.0
 # Whether to use jax.lax.scan over layers (stacked/unstacked checkpoint). We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations. When resuming from a checkpoint, this flag is auto-determined from metadata.
 scan_layers: true
 param_scan_axis: 1
