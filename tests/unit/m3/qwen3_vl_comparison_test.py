@@ -17,28 +17,27 @@
 Verifies:
   1. Factory routing through model_creation_utils with use_m3_model=True.
   2. 100% parameter path and shape parity against the reference model.
-  3. Qwen3VLModel forward pass execution with multimodal visual embeddings and 3D MRoPE.
+  3. Qwen3VLModel forward pass execution with multimodal visual embeddings and
+     3D MRoPE.
 """
 
 import os
-import unittest
-import numpy as np
-import pytest
+from absl.testing import absltest
 from flax import nnx
-
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
-
 from maxtext.configs import pyconfig
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import (
     Qwen3VLModel,
     create_qwen3_vl_model,
 )
 from maxtext.utils import model_creation_utils
-from maxtext.utils.globals import MAXTEXT_REPO_ROOT
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+import numpy as np
+import pytest
 
-BASE_CONFIG_PATH = os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "configs", "base.yml")
+BASE_CONFIG_PATH = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
 
 
 def _get_qwen3_vl_config_args(use_m3: bool = True, reduced: bool = True):
@@ -69,7 +68,7 @@ def _get_qwen3_vl_config_args(use_m3: bool = True, reduced: bool = True):
 
 @pytest.mark.tpu_backend
 @pytest.mark.tpu_only
-class Qwen3VLComparisonTest(unittest.TestCase):
+class Qwen3VLComparisonTest(absltest.TestCase):
   """Unit tests for self-contained m3 Qwen3-VL implementation."""
 
   def setUp(self):
@@ -130,4 +129,4 @@ class Qwen3VLComparisonTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
