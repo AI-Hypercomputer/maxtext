@@ -1,3 +1,4 @@
+# pylint: disable=missing-function-docstring,use-dict-literal,chained-comparison,unnecessary-lambda-assignment,missing-module-docstring,import-outside-toplevel
 # Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

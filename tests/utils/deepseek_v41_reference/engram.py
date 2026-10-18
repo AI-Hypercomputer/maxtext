@@ -1,3 +1,4 @@
+# pylint: disable=missing-function-docstring,use-dict-literal,chained-comparison,unnecessary-lambda-assignment,missing-module-docstring,import-outside-toplevel
 from dataclasses import dataclass
 
 import numpy as np
