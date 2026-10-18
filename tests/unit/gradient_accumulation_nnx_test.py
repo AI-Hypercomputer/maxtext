@@ -32,6 +32,8 @@ from maxtext.utils import gradient_accumulation
 
 @dataclass
 class _Cfg:
+  """Minimal stand-in for the fields of HyperParameters that this module reads."""
+
   gradient_accumulation_steps: int = 2
   use_tunix_gradient_accumulation: bool = False
   shard_optimizer_over_data: bool = False
@@ -40,6 +42,15 @@ class _Cfg:
   debug_sharding: bool = False
   training_objective: str = "causal_lm"
   use_tunix_gradient_accumulation: bool = False
+
+  per_device_batch_size: float = 1.0
+  global_batch_size_to_load: int | None = None
+  global_batch_size_to_train_on: int = 0
+  micro_batch_size_to_train_on: int | None = None
+  eval_per_device_batch_size: float = 1.0
+  global_batch_size_to_load_eval: int | None = None
+  global_batch_size_to_eval_on: int | None = None
+  micro_batch_size_to_eval_on: int | None = None
 
 
 class _TinyNNX(nnx.Module):
@@ -91,6 +102,27 @@ def _normalized_loss_fn(model, config, data, dropout_rng, params, is_train=True)
   """Produces the per-microbatch normalized loss used by Tunix accumulation."""
   xent_sum, aux = _fake_loss_fn(model, config, data, dropout_rng, params, is_train=is_train)
   return xent_sum / aux["total_weights"], aux
+
+
+def _trimming_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+  """Mirrors the production loss_fn, which trims each microbatch to the real rows.
+
+  `xent_sum` is the sum of the rows the model actually consumed, so a test can
+  assert exactly which rows survived the reshape-and-trim.
+  """
+  del dropout_rng, params, is_train
+  trimmed = {k: v[: config.micro_batch_size_to_train_on, :] for k, v in data.items()}
+  pred = model(trimmed["inputs"])
+  # Keep the result connected to the params so value_and_grad has a real graph.
+  xent_sum = jnp.sum(trimmed["inputs"]) + 0.0 * jnp.sum(pred)
+  aux = {
+      "xent_sum": xent_sum,
+      "total_weights": jnp.array(trimmed["inputs"].shape[0], dtype=jnp.float32),
+      "moe_lb_loss": jnp.array(0.0),
+      "indexer_loss": jnp.array(0.0),
+      "mtp_loss": jnp.array(0.0),
+  }
+  return xent_sum, aux
 
 
 def _make_cotangent_clip(bound):
@@ -416,6 +448,185 @@ class TestGradientAccumulationNNX(unittest.TestCase):
           for gradient in jax.tree.leaves(raw_grads):
             self.assertTrue(jnp.all(jnp.isfinite(gradient)))
             self.assertTrue(jnp.all(gradient == 0))
+
+  def test_fractional_per_device_batch_size_accumulates_all_samples(self):
+    """When per_device_batch_size < 1, GA iterates over all loaded samples."""
+    # Simulate num_devices = 4, pdbs = 0.25, gradient_accumulation_steps = 1
+    # Dataloader loads 4 samples; micro-batch size to train on is 1.
+    cfg = _Cfg(
+        per_device_batch_size=0.25,
+        gradient_accumulation_steps=1,
+        global_batch_size_to_load=4,
+        global_batch_size_to_train_on=4,
+        micro_batch_size_to_train_on=1,
+    )
+    self.assertTrue(gradient_accumulation.should_accumulate_fractional_batch(cfg))
+    self.assertEqual(gradient_accumulation.get_num_microbatches(cfg), 4)
+
+    # Verify eval helpers
+    cfg_eval = _Cfg(
+        eval_per_device_batch_size=0.25,
+        global_batch_size_to_load_eval=4,
+        global_batch_size_to_eval_on=4,
+        micro_batch_size_to_eval_on=1,
+    )
+    self.assertTrue(gradient_accumulation.should_accumulate_fractional_batch(cfg_eval, is_train=False))
+    self.assertEqual(gradient_accumulation.get_num_microbatches(cfg_eval, is_train=False), 4)
+
+    # When per_device_batch_size >= 1.0 and grad_accum_steps == 1,
+    # fractional GA should not trigger.
+    cfg_normal = _Cfg(
+        per_device_batch_size=1.0,
+        eval_per_device_batch_size=1.0,
+        gradient_accumulation_steps=1,
+        global_batch_size_to_load=4,
+        global_batch_size_to_train_on=4,
+        micro_batch_size_to_train_on=4,
+        global_batch_size_to_load_eval=4,
+        global_batch_size_to_eval_on=4,
+        micro_batch_size_to_eval_on=4,
+    )
+    self.assertFalse(gradient_accumulation.should_accumulate_fractional_batch(cfg_normal))
+    self.assertEqual(gradient_accumulation.get_num_microbatches(cfg_normal), 1)
+    self.assertFalse(gradient_accumulation.should_accumulate_fractional_batch(cfg_normal, is_train=False))
+    self.assertEqual(
+        gradient_accumulation.get_num_microbatches(cfg_normal, is_train=False),
+        1,
+    )
+
+    kernel = self.model.linear.kernel.get_value()
+    bias = self.model.linear.bias.get_value()
+
+    def direct_loss(kernel, bias):
+      predictions = self.data["inputs"] @ kernel + bias
+      return jnp.mean((predictions - self.data["targets"]) ** 2)
+
+    expected_loss, expected_grads = jax.value_and_grad(direct_loss, argnums=(0, 1))(kernel, bias)
+    loss, aux, raw_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _fake_loss_fn,
+        cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+
+    # Verify all 4 samples were trained on (total_weights is 4, not decimated to 1)
+    self.assertEqual(float(aux["total_weights"]), 4.0)
+    np.testing.assert_allclose(loss, expected_loss, rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
+    np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
+
+  def test_fractional_eval_microbatch_reshaping_and_accumulation(self):
+    """When eval pdbs < 1, data is microbatched and metrics accumulate without dropping."""
+    cfg_eval = _Cfg(
+        eval_per_device_batch_size=0.25,
+        global_batch_size_to_load_eval=4,
+        global_batch_size_to_eval_on=4,
+        micro_batch_size_to_eval_on=1,
+    )
+    num_microbatches = gradient_accumulation.get_num_microbatches(cfg_eval, is_train=False)
+    self.assertEqual(num_microbatches, 4)
+
+    def reshape_to_microbatch_accumulations(batch_arr):
+      microbatch_shape = (
+          batch_arr.shape[0] // num_microbatches,
+          num_microbatches,
+      ) + batch_arr.shape[1:]
+      reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
+      return jnp.swapaxes(reshaped_batch_arr, 0, 1)
+
+    micro_data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, self.data)
+    self.assertEqual(micro_data["inputs"].shape[0], 4)
+    self.assertEqual(micro_data["inputs"].shape[1], 1)
+
+    def accumulate_eval(acc, micro_batch):
+      _, aux = _fake_loss_fn(self.model, cfg_eval, micro_batch, None, None, is_train=False)
+      return {
+          "xent_sum": acc["xent_sum"] + aux["xent_sum"],
+          "total_weights": acc["total_weights"] + aux["total_weights"],
+      }, None
+
+    init_acc = {"xent_sum": 0.0, "total_weights": 0.0}
+    acc, _ = jax.lax.scan(accumulate_eval, init_acc, micro_data, length=num_microbatches)
+    # All 4 samples should be evaluated on
+    self.assertEqual(float(acc["total_weights"]), 4.0)
+
+  def test_expansion_factor_real_data_does_not_inflate_microbatch_count(self):
+    """`expansion_factor_real_data` pads the loaded batch; it must not add microbatches.
+
+    With `expansion_factor_real_data = 2` the dataloader returns twice the real
+    batch, because only half the hosts read real data and the rest emit
+    placeholder batches. Those rows are trimmed by `loss_fn`, so the microbatch
+    count must stay at `gradient_accumulation_steps`.
+    """
+    # num_devices=4, pdbs=1.0, grad_accum=2, expansion=2
+    # -> load=16 (8 real + 8 placeholder), train_on=8, micro=4.
+    cfg = _Cfg(
+        per_device_batch_size=1.0,
+        gradient_accumulation_steps=2,
+        global_batch_size_to_load=16,
+        global_batch_size_to_train_on=8,
+        micro_batch_size_to_train_on=4,
+    )
+    self.assertFalse(gradient_accumulation.should_accumulate_fractional_batch(cfg))
+    self.assertEqual(gradient_accumulation.get_num_microbatches(cfg), 2)
+
+    # Eval, same expansion: load_eval=8 (4 real + 4 placeholder), eval_on=4, micro=4.
+    cfg_eval = _Cfg(
+        eval_per_device_batch_size=1.0,
+        global_batch_size_to_load_eval=8,
+        global_batch_size_to_eval_on=4,
+        micro_batch_size_to_eval_on=4,
+    )
+    self.assertFalse(gradient_accumulation.should_accumulate_fractional_batch(cfg_eval, is_train=False))
+    self.assertEqual(gradient_accumulation.get_num_microbatches(cfg_eval, is_train=False), 1)
+
+    # Fractional batch size on top of expansion: load=8 (4 real + 4 placeholder),
+    # train_on=4, micro=1 -> 4 microbatches, one per real sample.
+    cfg_fractional = _Cfg(
+        per_device_batch_size=0.25,
+        gradient_accumulation_steps=1,
+        global_batch_size_to_load=8,
+        global_batch_size_to_train_on=4,
+        micro_batch_size_to_train_on=1,
+    )
+    self.assertEqual(gradient_accumulation.get_num_microbatches(cfg_fractional), 4)
+
+  def test_expansion_factor_placeholder_rows_never_reach_the_model(self):
+    """Reshape plus trim must select exactly the real leading rows of the batch."""
+    # num_devices=4, pdbs=0.25, grad_accum=1, expansion=2: the dataloader
+    # returns 8 rows of which only the leading 4 are real.
+    cfg = _Cfg(
+        per_device_batch_size=0.25,
+        gradient_accumulation_steps=1,
+        global_batch_size_to_load=8,
+        global_batch_size_to_train_on=4,
+        micro_batch_size_to_train_on=1,
+    )
+    self.assertEqual(gradient_accumulation.get_num_microbatches(cfg), 4)
+
+    # Real rows carry 1.0; placeholder rows carry a sentinel that must not be
+    # visible in the accumulated loss.
+    data = {
+        "inputs": jnp.concatenate([jnp.ones((4, 2)), jnp.full((4, 2), 100.0)], axis=0),
+        "targets": jnp.zeros((8, 1)),
+    }
+
+    _, aux, _ = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _trimming_loss_fn,
+        cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=data,
+        dropout_rng=None,
+    )
+    # 4 real rows x 2 columns x 1.0 = 8.0. A single leaked placeholder row
+    # would push this to at least 208.0.
+    self.assertEqual(float(aux["xent_sum"]), 8.0)
+    self.assertEqual(float(aux["total_weights"]), 4.0)
 
 
 if __name__ == "__main__":
