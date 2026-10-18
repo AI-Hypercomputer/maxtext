@@ -1,0 +1,54 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Cross-region Streaming DiLoCo recipe for Qwen3-30B-A3B on two 8-chip TPU v5p slices.
+# Non-listed parameters inherit defaults from src/maxtext/configs/base.yml.
+
+base_config: "base.yml"
+model_name: "qwen3-30b-a3b"
+
+# Cloud Pathways uses single-controller execution (override to false for McJax).
+enable_single_controller: true
+
+# Cross-region DCN mesh (2 slices) and intra-slice ICI mesh (4-way FSDP x 2-way EP = 8 chips).
+num_slices: 2
+dcn_diloco_parallelism: 2
+dcn_data_parallelism: 1
+ici_fsdp_parallelism: 4
+ici_expert_parallelism: 2
+
+# Sequence length and memory settings (~52.17 GiB peak HBM per 95 GiB v5p chip).
+max_target_length: 8192
+per_device_batch_size: 1
+attention: "flash"
+weight_dtype: "bfloat16"
+
+# Streaming DiLoCo: 1 non-scanned fragment + 48 decoder-layer fragments, syncing 1 fragment per step.
+# Bucketizing 2D+ non-scanned matrices along their longest unsharded axis flattens per-step WAN transfers.
+enable_diloco: true
+enable_streaming_diloco: true
+num_diloco_fragments: 49
+diloco_bucketize_non_scanned: true
+diloco_sync_period: 49
+diloco_outer_lr: 0.7
+
+# Inner optimizer (scaled by 1/sqrt(2) for 2 replicas) and MoE router stability.
+learning_rate: 7.07e-5
+load_balance_loss_weight: 0.001
+float32_gate_logits: true
+
+# Run one full 49-step fragment cycle plus 11 steps into cycle 2.
+# For longer Spot runs, see docs/run_maxtext/run_maxtext_cross_region_diloco.md for checkpoint settings.
+steps: 60
+base_output_directory: "gs://your-checkpoint-bucket/runs"
