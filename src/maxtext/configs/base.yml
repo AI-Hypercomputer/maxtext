@@ -1735,6 +1735,13 @@ gdn_conv1d_natural_layout: false
 # GDN kernel path: kq-head group size of the Pallas forward kernels (kernels/gdn/compute_gdn.py chunked_gdn_per_seq);
 # 0 = the default (all heads at chunk_size 64). Same values. Must divide the kernel's kq heads.
 gdn_fwd_kernel_head_group_size: 0
+# GDN kernel path, training: compute in_proj_qkvz as two matmuls whose outputs are already in the Pallas kernel's
+# order, qkv = [q | k | v] (all heads of each) and z, instead of one matmul in the per-key-head [q | k | v | z] order
+# followed by a per-head split and concatenation (models/qwen3.py). The column-permuted kernel is gathered once and
+# sliced after the gather; the input gradient is one float32 sum of the two partial products. Same forward values and
+# parameter gradients; the input gradient matches up to float32 summation order. Requires use_gdn_kernel: true and
+# sequence-sharded GDN context parallelism.
+gdn_in_proj_kernel_order: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

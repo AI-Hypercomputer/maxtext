@@ -57,7 +57,7 @@ from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import PositionalEmbedding, Qwen3OmniMoeVisionPosEmbedInterpolate
 from maxtext.layers.initializers import nd_dense_init
-from maxtext.layers.linears import DenseGeneral, MlpBlock
+from maxtext.layers.linears import DenseGeneral, MlpBlock, route_dense_weight_grad
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated, RMSNorm, l2norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -182,6 +182,89 @@ def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
   raise ValueError(
       f"gdn_gated_norm_layout must be 'auto', 'natural', 'natural_fwd_bwd' or 'token_minor', got {mode!r}."
   )
+
+
+_GDN_IN_PROJ_KERNEL_ORDER_LOGGED = set()
+
+
+def _gdn_in_proj_kernel_order_columns(kernel: Array, num_k_heads: int, head_k_dim: int, v_dim_per_k_head: int) -> Array:
+  """Permutes the in_proj_qkvz kernel's columns from per-key-head [q | k | v | z] groups to [q | k | v | z].
+
+  Each block of the result holds that projection for every key head in head order, so its first
+  num_k_heads * (2 * head_k_dim + v_dim_per_k_head) columns are the flat qkv order the Pallas GDN kernel reads
+  (kernels/gdn/model_runner.py) and the remaining num_k_heads * v_dim_per_k_head columns are z in the
+  (H_v, D_v) order of the per-head split. Only the last (column) dimension is permuted.
+  """
+  rows = kernel.shape[:-1]
+  groups = jnp.reshape(kernel, rows + (num_k_heads, 2 * head_k_dim + 2 * v_dim_per_k_head))
+  bounds = (0, head_k_dim, 2 * head_k_dim, 2 * head_k_dim + v_dim_per_k_head, 2 * head_k_dim + 2 * v_dim_per_k_head)
+  blocks = [jnp.reshape(groups[..., lo:hi], rows + (-1,)) for lo, hi in zip(bounds[:-1], bounds[1:])]
+  return jnp.concatenate(blocks, axis=-1)
+
+
+def _gdn_in_proj_kernel_order_dx(d_qkv: Array, d_z: Array, w_qkv: Array, w_z: Array, precision) -> Array:
+  """Input gradient of the two kernel-order projections: ONE float32 sum of both partial products.
+
+  The single in_proj_qkvz matmul accumulates its input gradient over all columns in float32 and rounds it once;
+  summing two separately rounded partial products would add a second rounding.
+  """
+  dims = (((d_qkv.ndim - 1,), (1,)), ((), ()))
+  return lax.dot_general(d_qkv, w_qkv, dims, precision=precision, preferred_element_type=jnp.float32) + lax.dot_general(
+      d_z, w_z, dims, precision=precision, preferred_element_type=jnp.float32
+  )
+
+
+def _gdn_in_proj_kernel_order_dkernel(x: Array, d_qkv: Array, d_z: Array, w_qkv: Array, w_z: Array, precision) -> Array:
+  """Kernel gradient of the two kernel-order projections: the stock dot_general transposes, concatenated by column."""
+  dims = (((x.ndim - 1,), (0,)), ((), ()))
+
+  def dot(rhs):
+    return lax.dot_general(x, rhs, dims, precision=precision)
+
+  (dw_qkv,) = jax.linear_transpose(dot, w_qkv)(d_qkv)
+  (dw_z,) = jax.linear_transpose(dot, w_z)(d_z)
+  return jnp.concatenate([dw_qkv, dw_z], axis=-1)
+
+
+def _gdn_in_proj_kernel_order_gather(kernel: Array, gathered_sharding) -> Array:
+  if gathered_sharding is None:
+    return kernel
+  return jax.lax.with_sharding_constraint(kernel, gathered_sharding)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _gdn_in_proj_kernel_order_dot(x, kernel, num_qkv, precision, gathered_sharding):
+  """`(x @ kernel[:, :num_qkv], x @ kernel[:, num_qkv:])` of the column-permuted in_proj_qkvz kernel.
+
+  The kernel is gathered to `gathered_sharding` by one explicit sharding constraint and sliced after the gather, so
+  the two matmuls share one all-gather, as the single in_proj_qkvz matmul does; slicing the sharded kernel instead
+  would all-gather each slice separately. The backward gathers the kernel once more (as the stock transpose of the
+  single matmul does), forms the input gradient with `_gdn_in_proj_kernel_order_dx` and returns the kernel gradient
+  with no sharding constraint, so the partitioner reduces it to the kernel's sharding as before (transposing the
+  constraint would instead constrain the gradient to the gathered sharding, i.e. all-reduce it).
+  """
+  return _gdn_in_proj_kernel_order_dot_fwd(x, kernel, num_qkv, precision, gathered_sharding)[0]
+
+
+def _gdn_in_proj_kernel_order_dot_fwd(x, kernel, num_qkv, precision, gathered_sharding):
+  gathered = _gdn_in_proj_kernel_order_gather(kernel, gathered_sharding)
+  dims = (((x.ndim - 1,), (0,)), ((), ()))
+  qkv = lax.dot_general(x, gathered[:, :num_qkv], dims, precision=precision)
+  z = lax.dot_general(x, gathered[:, num_qkv:], dims, precision=precision)
+  return (qkv, z), (x, kernel)
+
+
+def _gdn_in_proj_kernel_order_dot_bwd(num_qkv, precision, gathered_sharding, residuals, cotangents):
+  x, kernel = residuals
+  d_qkv, d_z = cotangents
+  gathered = _gdn_in_proj_kernel_order_gather(kernel, gathered_sharding)
+  w_qkv, w_z = gathered[:, :num_qkv], gathered[:, num_qkv:]
+  d_x = _gdn_in_proj_kernel_order_dx(d_qkv, d_z, w_qkv, w_z, precision).astype(x.dtype)
+  d_kernel = _gdn_in_proj_kernel_order_dkernel(x, d_qkv, d_z, w_qkv, w_z, precision).astype(kernel.dtype)
+  return d_x, d_kernel
+
+
+_gdn_in_proj_kernel_order_dot.defvjp(_gdn_in_proj_kernel_order_dot_fwd, _gdn_in_proj_kernel_order_dot_bwd)
 
 
 def naive_jax_chunk_gated_delta_rule(
@@ -886,6 +969,54 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         _sharding((KV_BATCH, gdn_head_axis, None, None)),
     )
 
+  def _in_proj_qkvz_kernel_order(self, hidden_states: Array, head_sharding) -> tuple[Array, Array]:
+    """gdn_in_proj_kernel_order: in_proj_qkvz as qkv (B, S, 2 * K_dim + V_dim) in the Pallas kernel's [q | k | v]
+    order and z (B, S, H_v, D_v), from the same kernel and the same input as the split path."""
+    dense = self.in_proj_qkvz
+    if (
+        dense.quant is not None
+        or dense.kernel_scale is not None
+        or dense.bias is not None
+        or dense.parameter_memory_host_offload
+        or dense.use_two_stage_all_gather
+        or dense.gathered_kernel_axes is not None
+        or dense.shard_mode == ShardMode.EXPLICIT
+    ):
+      raise ValueError(
+          "gdn_in_proj_kernel_order=True supports only an unquantized in_proj_qkvz kernel without bias, kept on device,"
+          " without the two-stage or gather-once kernel all-gather, in auto shard mode."
+      )
+    # The kernel as DenseGeneral.__call__ reads it and casts it to the compute dtype (linears.py).
+    if hasattr(dense.kernel, "get_value"):
+      kernel = dense.kernel.get_value()
+    elif isinstance(dense.kernel, (dict, nnx.State)) and "value" in dense.kernel:
+      kernel = dense.kernel["value"]
+    else:
+      kernel = getattr(dense.kernel, "value", dense.kernel)
+    if hasattr(kernel, "value"):
+      kernel = kernel.value
+    kernel = jnp.asarray(kernel, dense.dtype)
+    v_dim_per_k_head = self.v_heads_per_k_head * self.head_v_dim
+    kernel = _gdn_in_proj_kernel_order_columns(kernel, self.num_k_heads, self.head_k_dim, v_dim_per_k_head)
+    kernel = route_dense_weight_grad(kernel, dense.kernel_axes)
+    num_qkv = 2 * self.key_dim + self.value_dim
+    gathered_sharding = (
+        None if self.mesh is None else jax.sharding.NamedSharding(self.mesh, P(*((None,) * kernel.ndim)))
+    )
+    x = jnp.asarray(hidden_states, dense.dtype)
+    qkv, z = _gdn_in_proj_kernel_order_dot(x, kernel, num_qkv, lax.Precision(dense.matmul_precision), gathered_sharding)
+    if "logged" not in _GDN_IN_PROJ_KERNEL_ORDER_LOGGED:
+      _GDN_IN_PROJ_KERNEL_ORDER_LOGGED.add("logged")
+      max_logging.log(
+          f"[gdn_in_proj_kernel_order] in_proj_qkvz -> qkv {qkv.shape} in kernel order + z {z.shape}: one gathered"
+          " kernel, float32-sum input gradient"
+      )
+    qkv = checkpoint_name(qkv, "qkv_proj")
+    z = checkpoint_name(z, "qkv_proj")
+    batch, seq_len = hidden_states.shape[:2]
+    z = jnp.reshape(z, (batch, seq_len, self.num_v_heads, self.head_v_dim), out_sharding=head_sharding)
+    return qkv, z
+
   @staticmethod
   def _mamba_block_table_slots(
       attention_metadata,
@@ -983,87 +1114,98 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
-    # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
-    qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
-    if use_paged_state and getattr(cfg, "gdn_pin_in_proj_output_layout", True):
-      qkvz = _pin_row_major_layout(qkvz)
-    if use_gdn_kernel:
-      qkvz = checkpoint_name(qkvz, "qkv_proj")
+    # gdn_in_proj_kernel_order: qkv in the Pallas kernel's [q | k | v] order and z straight from two matmuls, no
+    # per-head split (validate_gdn_config requires use_gdn_kernel=True for it).
+    in_proj_kernel_order = (
+        cfg.gdn_in_proj_kernel_order and model_mode == MODEL_MODE_TRAIN and use_gdn_kernel and not use_paged_state
+    )
+    qkv_kernel_order = None
+    if in_proj_kernel_order:
+      qkv_kernel_order, z = self._in_proj_qkvz_kernel_order(hidden_states, head_sharding)
+      query = key = value = value_raw = None
+    else:
+      # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
+      qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
+      if use_paged_state and getattr(cfg, "gdn_pin_in_proj_output_layout", True):
+        qkvz = _pin_row_major_layout(qkvz)
+      if use_gdn_kernel:
+        qkvz = checkpoint_name(qkvz, "qkv_proj")
     # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
 
     # =========================================================================
     # QKVZ and BA Reshaping and Splitting (shared by both paths)
     # =========================================================================
-    # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
-    new_shape_qkvz = (
-        batch,
-        seq_len,
-        self.num_k_heads,  # H_k
-        2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
-    )
-    # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
-    mixed_qkvz = jnp.reshape(qkvz, new_shape_qkvz, out_sharding=head_sharding)
-    if self.mesh is not None:
-      if use_gdn_kernel:
-        logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = gdn_kernel_runner.get_gdn_kernel_cp_sharding_info(
-            cfg, self.mesh, get_logical_axis_rules, gdn_context_axes
+    if not in_proj_kernel_order:
+      # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
+      new_shape_qkvz = (
+          batch,
+          seq_len,
+          self.num_k_heads,  # H_k
+          2 * self.head_k_dim + 2 * self.head_v_dim * self.v_heads_per_k_head,
+      )
+      # mixed_qkvz: (B, S, H_k, 2*D_k + 2*D_v*V_per_K)
+      mixed_qkvz = jnp.reshape(qkvz, new_shape_qkvz, out_sharding=head_sharding)
+      if self.mesh is not None:
+        if use_gdn_kernel:
+          logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = gdn_kernel_runner.get_gdn_kernel_cp_sharding_info(
+              cfg, self.mesh, get_logical_axis_rules, gdn_context_axes
+          )
+        else:
+          logical_rules = get_logical_axis_rules()
+          cp_axes_active = ()
+          cp_axis_for_pspec = None
+          # LENGTH, not None. This with_sharding_constraint told XLA to gather the
+          # full sequence onto every device for the qkvz projection. With ctx=2 at
+          # seq 32,768 that is six live bf16[2, 32768, 16, 512] buffers of 1.07 GB
+          # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
+          # and the reason the first version of this patch cut GDN memory but still
+          # lost overall.
+          cp_len = LENGTH if gdn_context_axes(cfg) else None
+        qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
+        if cp_axes_active and qkvz_pspec[1] is None:
+          qkvz_pspec = jax.sharding.PartitionSpec(qkvz_pspec[0], cp_axis_for_pspec, *qkvz_pspec[2:])
+        # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
+        qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            qkvz_pspec,
+            mixed_qkvz.shape,
+            self.mesh,
+            dims=(0,),
+            allow_remove_axes=True,
         )
-      else:
-        logical_rules = get_logical_axis_rules()
-        cp_axes_active = ()
-        cp_axis_for_pspec = None
-        # LENGTH, not None. This with_sharding_constraint told XLA to gather the
-        # full sequence onto every device for the qkvz projection. With ctx=2 at
-        # seq 32,768 that is six live bf16[2, 32768, 16, 512] buffers of 1.07 GB
-        # each -- found by diffing XLA buffer assignment between ctx=1 and ctx=2,
-        # and the reason the first version of this patch cut GDN memory but still
-        # lost overall.
-        cp_len = LENGTH if gdn_context_axes(cfg) else None
-      qkvz_pspec = logical_to_mesh_axes((KV_BATCH, cp_len, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
-      if cp_axes_active and qkvz_pspec[1] is None:
-        qkvz_pspec = jax.sharding.PartitionSpec(qkvz_pspec[0], cp_axis_for_pspec, *qkvz_pspec[2:])
-      # Training microbatches can be smaller than the physical KV_BATCH mesh partition.
-      qkvz_pspec = remove_incompatible_mesh_axes_from_partition_spec(
-          qkvz_pspec,
-          mixed_qkvz.shape,
-          self.mesh,
-          dims=(0,),
-          allow_remove_axes=True,
-      )
-      qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
-      # Under ShardMode.EXPLICIT `with_sharding_constraint` is an assertion rather than
-      # a hint and rejects any layout it has to change, so reshard through the helper.
-      mixed_qkvz = maybe_shard_with_name(
-          mixed_qkvz,
-          qkvz_sharding,
-          shard_mode=cfg.shard_mode,
-          debug_sharding=cfg.debug_sharding,
-      )
+        qkvz_sharding = jax.sharding.NamedSharding(self.mesh, qkvz_pspec)
+        # Under ShardMode.EXPLICIT `with_sharding_constraint` is an assertion rather than
+        # a hint and rejects any layout it has to change, so reshard through the helper.
+        mixed_qkvz = maybe_shard_with_name(
+            mixed_qkvz,
+            qkvz_sharding,
+            shard_mode=cfg.shard_mode,
+            debug_sharding=cfg.debug_sharding,
+        )
 
-    split_indices_qkvz = [
-        self.head_k_dim,  # D_k
-        2 * self.head_k_dim,  # 2 * D_k
-        2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim),  # 2 * D_k + V_per_K * D_v
-    ]
-    # query: (B, S, H_k, D_k)
-    # key: (B, S, H_k, D_k)
-    # value_raw: (B, S, H_k, V_per_K * D_v)
-    # z_raw: (B, S, H_k, V_per_K * D_v)
-    query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
+      split_indices_qkvz = [
+          self.head_k_dim,  # D_k
+          2 * self.head_k_dim,  # 2 * D_k
+          2 * self.head_k_dim + (self.v_heads_per_k_head * self.head_v_dim),  # 2 * D_k + V_per_K * D_v
+      ]
+      # query: (B, S, H_k, D_k)
+      # key: (B, S, H_k, D_k)
+      # value_raw: (B, S, H_k, V_per_K * D_v)
+      # z_raw: (B, S, H_k, V_per_K * D_v)
+      query, key, value_raw, z_raw = jnp.split(mixed_qkvz, split_indices_qkvz, axis=3)
 
-    # value: (B, S, H_v, D_v)
-    value = jnp.reshape(
-        value_raw,
-        (batch, seq_len, self.num_v_heads, self.head_v_dim),
-        out_sharding=head_sharding,
-    )
-    # z: (B, S, H_v, D_v)
-    z = jnp.reshape(
-        z_raw,
-        (batch, seq_len, self.num_v_heads, self.head_v_dim),
-        out_sharding=head_sharding,
-    )
+      # value: (B, S, H_v, D_v)
+      value = jnp.reshape(
+          value_raw,
+          (batch, seq_len, self.num_v_heads, self.head_v_dim),
+          out_sharding=head_sharding,
+      )
+      # z: (B, S, H_v, D_v)
+      z = jnp.reshape(
+          z_raw,
+          (batch, seq_len, self.num_v_heads, self.head_v_dim),
+          out_sharding=head_sharding,
+      )
 
     # BA Reshaping and Splitting
     new_shape_ba = (
@@ -1222,6 +1364,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           state_dtype=jnp.dtype(getattr(cfg, "gdn_state_dtype", jnp.float32)),
           flat_sharding=flat_sharding,
           gdn_context_axes_fn=gdn_context_axes,
+          qkv_precomputed=qkv_kernel_order,
       )
     else:
       # Flatten head dimensions for concatenation before conv

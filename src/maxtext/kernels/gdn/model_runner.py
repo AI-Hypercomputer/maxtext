@@ -591,10 +591,10 @@ def run_jax_gdn_delta_rule(
 def run_gdn_kernel_layer(
     *,
     layer: Any,
-    query: Array,
-    key: Array,
-    value: Array,
-    value_raw: Array,
+    query: Array | None,
+    key: Array | None,
+    value: Array | None,
+    value_raw: Array | None,
     b: Array,
     a: Array,
     active_cache: Any,
@@ -603,10 +603,15 @@ def run_gdn_kernel_layer(
     state_dtype: DType,
     flat_sharding: jax.sharding.NamedSharding | None = None,
     gdn_context_axes_fn: Any = _default_gdn_context_axes,
+    qkv_precomputed: Array | None = None,
 ) -> tuple[Array, Array | None, Array | None]:
-  """Executes the fused/decoupled Pallas GDN conv1d + delta-rule kernel with CP support."""
+  """Executes the fused/decoupled Pallas GDN conv1d + delta-rule kernel with CP support.
+
+  `qkv_precomputed` (gdn_in_proj_kernel_order, models/qwen3.py): the (B, S, 2 * K_dim + V_dim) qkv already in the
+  kernel's [q | k | v] order; query / key / value / value_raw are then unused and may be None.
+  """
   cfg = layer.config
-  batch, seq_len = query.shape[:2]
+  batch, seq_len = (query if qkv_precomputed is None else qkv_precomputed).shape[:2]
 
   cp_axes = tuple(
       ax for ax in gdn_context_axes_fn(cfg) if layer.mesh and ax in layer.mesh.axis_names and layer.mesh.shape[ax] > 1
@@ -636,7 +641,15 @@ def run_gdn_kernel_layer(
   conv_natural_layout = cfg.gdn_conv1d_natural_layout
   fwd_head_group_size = cfg.gdn_fwd_kernel_head_group_size
 
-  if use_head_sharded_cp:
+  if qkv_precomputed is not None:
+    if use_head_sharded_cp:
+      raise ValueError(
+          "gdn_in_proj_kernel_order=True requires sequence-sharded GDN context parallelism, but this layer resolved"
+          " to head-sharded GDN context parallelism (gdn_cp_mode='auto' with a GDN context parallelism of 2 that"
+          " divides the key heads); set gdn_cp_mode='seq'."
+      )
+    qkv = qkv_precomputed
+  elif use_head_sharded_cp:
     qkv = jnp.concatenate([query, key, value_raw], axis=3)
   else:
     q = jnp.reshape(query, (batch, seq_len, -1), out_sharding=flat_sharding)

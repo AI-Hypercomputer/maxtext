@@ -2676,6 +2676,24 @@ class Qwen3Next(BaseModel):
           " use_gdn_kernel=True when non-zero."
       ),
   )
+  gdn_in_proj_kernel_order: bool = Field(
+      False,
+      description=(
+          "GDN kernel path, training: compute the GatedDeltaNet in_proj_qkvz as two matmuls whose outputs are already"
+          " in the order the Pallas GDN kernel reads, qkv = [q | k | v] (all heads of each) and z, instead of one"
+          " matmul in the per-key-head [q | k | v | z] column order followed by a per-head reshape, split and"
+          " concatenation (models/qwen3.py). XLA keeps that per-head work token-minor and then relayouts q, k and v"
+          " into the feature-minor qkv the kernel reads, and back in the backward. The kernel's columns are permuted"
+          " on each device's shard (the column dimension is not sharded), the permuted kernel is all-gathered once"
+          " and sliced after the gather; the backward re-gathers it once, forms the input gradient as one float32 sum"
+          " of the two partial products, rounded to the compute dtype once, and the kernel gradient as the column"
+          " concatenation of the two partial kernel gradients. The forward values and the parameter gradients are the"
+          " same; the input gradient matches up to float32 summation order. Requires use_gdn_kernel=True and"
+          " sequence-sharded GDN context parallelism (a layer that resolves to head-sharded GDN context parallelism"
+          " raises); unquantized in_proj_qkvz without bias in auto shard mode. No effect outside training or on the"
+          " vLLM paged-state path."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -5867,6 +5885,7 @@ class MaxTextConfig(
       raise ValueError(
           f"gdn_fwd_kernel_head_group_size={fwd_head_group_size} must divide gdn_num_key_heads={cfg.gdn_num_key_heads}."
       )
+    in_proj_kernel_order = cfg.gdn_in_proj_kernel_order
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       if dense_token_stack:
         raise ValueError(
@@ -5896,6 +5915,11 @@ class MaxTextConfig(
       if gated_norm_layout != "auto":
         raise ValueError(
             f"gdn_gated_norm_layout={gated_norm_layout!r} requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if in_proj_kernel_order:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
             f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
         )
       return
@@ -5943,6 +5967,11 @@ class MaxTextConfig(
             "gdn_cp_fast_state_passing=True requires use_gdn_kernel=True: only the GDN kernel path runs the"
             " sequence-sharded context-parallel state passing (kernels/gdn/gdn_bwd/cp_gdn.py)."
         )
+      if in_proj_kernel_order:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True requires use_gdn_kernel=True: only the Pallas GDN kernel path reads the"
+            " kernel-order qkv it produces (kernels/gdn/model_runner.py)."
+        )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(
@@ -5952,6 +5981,11 @@ class MaxTextConfig(
       )
     if cfg.gdn_chunk_size not in (64, 128):
       raise ValueError(f"use_gdn_kernel=True requires gdn_chunk_size in (64, 128), got {cfg.gdn_chunk_size}.")
+    if in_proj_kernel_order and cfg.gdn_cp_mode == "head":
+      raise ValueError(
+          "gdn_in_proj_kernel_order=True requires sequence-sharded GDN context parallelism; gdn_cp_mode='head'"
+          " concatenates q, k and v per key head instead of in the kernel order."
+      )
     if (cp_m_scan or cp_dh_scan) and cfg.gdn_chunk_size != 64:
       raise ValueError(
           f"gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}."
