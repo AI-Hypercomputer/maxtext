@@ -2773,6 +2773,168 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
         t.update()
         self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), expected)
 
+  # optimizer_device_resident_gib: with optimizer_memory_host_offload, the largest optimizer leaves, up to that many GiB per
+  # device, stay in device memory between updates. The dummy model's Adam state has two float32 [2] leaves (8 bytes each on
+  # the test's one CPU device: mu, then nu, in tree order) and scalar step counts, which are never kept on the device.
+
+  def _optimizer_leaf_kinds(self, t):
+    """Returns `(ndim, memory kind)` of every optimizer state leaf, in tree order."""
+    return [
+        (leaf.ndim, leaf.sharding.memory_kind)
+        for leaf in jax.tree.leaves(nnx.state(t.state.optimizer))
+        if hasattr(leaf, "sharding")
+    ]
+
+  def _array_and_scalar_kinds(self, t):
+    kinds = self._optimizer_leaf_kinds(t)
+    return [kind for ndim, kind in kinds if ndim > 0], {kind for ndim, kind in kinds if ndim == 0}
+
+  def test_optimizer_device_resident_keeps_every_array_leaf_on_device(self):
+    """A budget above the whole state keeps every array leaf in device memory, across compiled steps."""
+    t = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=1.0)
+    t.compile(DummyPayload())
+    self.assertEqual(self._array_and_scalar_kinds(t), (["device", "device"], {"pinned_host"}))
+    for _ in range(2):
+      t.fwd_bwd(DummyPayload())
+      t.fwd_bwd(DummyPayload())
+      t.update()
+      # The update takes and returns the resident leaves in device memory; the scalars go back to the host.
+      self.assertEqual(self._array_and_scalar_kinds(t), (["device", "device"], {"pinned_host"}))
+      self.assertEqual(self._memory_kinds(nnx.state(t.state.model, nnx.Param)), {"device"})
+
+  def test_optimizer_device_resident_budget_takes_the_first_leaf_of_a_tie(self):
+    """A budget of exactly one leaf keeps the first of the two equal leaves (tree order) and offloads the other."""
+    t = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=8 / 2**30)
+    t.compile(DummyPayload())
+    for _ in range(2):
+      t.fwd_bwd(DummyPayload())
+      t.update()
+      self.assertEqual(self._array_and_scalar_kinds(t), (["device", "pinned_host"], {"pinned_host"}))
+
+  def test_optimizer_device_resident_budget_below_every_leaf_offloads_all(self):
+    """A budget smaller than every leaf keeps nothing on the device, and says so."""
+    t = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=4 / 2**30)
+    with self.assertLogs(level="WARNING") as logs:
+      t.compile(DummyPayload())
+    self.assertTrue(any("smaller than every optimizer leaf" in line for line in logs.output), logs.output)
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertEqual(self._array_and_scalar_kinds(t), (["pinned_host", "pinned_host"], {"pinned_host"}))
+
+  def test_optimizer_device_resident_preserves_numerics(self):
+    """Placement only: two steps give bit-identical weights and moments with every budget, and without offload."""
+    trained = []
+    for overrides in (
+        {},
+        {"optimizer_memory_host_offload": True},
+        {"optimizer_memory_host_offload": True, "optimizer_device_resident_gib": 8 / 2**30},
+        {"optimizer_memory_host_offload": True, "optimizer_device_resident_gib": 1.0},
+    ):
+      t = self._adam_engine(**overrides)
+      t.compile(DummyPayload())
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    for other in trained[1:]:
+      jax.tree.map(np.testing.assert_array_equal, trained[0], other)
+
+  def test_optimizer_device_resident_leaves_are_updated_in_place(self):
+    """The update is handed the resident leaves donated, so the previous step's arrays are freed, not copied back."""
+    t = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=1.0)
+    t.compile(DummyPayload())
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    before = [leaf for leaf in jax.tree.leaves(nnx.state(t.state.optimizer)) if getattr(leaf, "ndim", 0) > 0]
+    self.assertLen(before, 2)
+    t.fwd_bwd(DummyPayload())
+    t.update()
+    self.assertEqual([leaf.is_deleted() for leaf in before], [True, True])
+
+  def test_optimizer_device_resident_on_eager_path(self):
+    """The eager path, where `compile()` is never called, keeps the same leaves on the device with the same values."""
+    trained = []
+    for overrides in ({}, {"optimizer_memory_host_offload": True, "optimizer_device_resident_gib": 1.0}):
+      t = self._adam_engine(**overrides)
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        if overrides:
+          self.assertEqual(self._array_and_scalar_kinds(t), (["device", "device"], {"pinned_host"}))
+      self.assertFalse(t._compiled)  # pylint: disable=protected-access
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, trained[0], trained[1])
+
+  def test_optimizer_device_resident_choice_is_made_once_per_layout(self):
+    """`update()` asks for the resident leaves every step; the choice is computed once and then reused."""
+    t = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=1.0)
+    with mock.patch.object(
+        maxtext_engine, "_pick_device_resident_leaves", wraps=maxtext_engine._pick_device_resident_leaves
+    ) as picker:
+      t.compile(DummyPayload())
+      t.fwd_bwd(DummyPayload())
+      t.update()
+      calls = picker.call_count
+      self.assertGreaterEqual(calls, 1)
+      for _ in range(3):
+        t.fwd_bwd(DummyPayload())
+        t.update()
+      self.assertEqual(picker.call_count, calls)
+
+  def test_pick_device_resident_leaves_takes_the_largest_first(self):
+    """Largest per-device size first; a smaller leaf fills what a larger one left; ties keep tree order; no scalars."""
+
+    class Whole:
+      """A sharding stand-in with no `shard_shape`: one device holds the whole leaf."""
+
+    class Half:
+      """A sharding stand-in that halves the leading dimension on each device."""
+
+      def shard_shape(self, shape):
+        return (shape[0] // 2,) + tuple(shape[1:])
+
+    f32, i32 = jnp.float32, jnp.int32
+    tree = {
+        "a": jax.ShapeDtypeStruct((4,), f32),  # 16 bytes
+        "b": jax.ShapeDtypeStruct((2,), f32),  # 8 bytes
+        "c": jax.ShapeDtypeStruct((3,), f32),  # 12 bytes
+        "s": jax.ShapeDtypeStruct((), i32),  # a scalar: never kept
+    }
+    whole = {k: Whole() for k in tree}
+    pick = maxtext_engine._pick_device_resident_leaves
+    mask, chosen = pick(tree, whole, 28)
+    self.assertEqual(mask, {"a": True, "b": False, "c": True, "s": False})
+    self.assertEqual(chosen, [("['a']", 16), ("['c']", 12)])
+    mask, chosen = pick(tree, whole, 24)  # c (12) no longer fits beside a; b (8) still does
+    self.assertEqual(mask, {"a": True, "b": True, "c": False, "s": False})
+    self.assertEqual(chosen, [("['a']", 16), ("['b']", 8)])
+    mask, chosen = pick(tree, whole, 2**40)
+    self.assertEqual(mask, {"a": True, "b": True, "c": True, "s": False})
+    self.assertEqual(pick(tree, whole, 7), ({"a": False, "b": False, "c": False, "s": False}, []))
+    # Per-device bytes: halved, `a` (8 bytes) ties with `b` and comes first in tree order.
+    mask, chosen = pick(tree, {**whole, "a": Half()}, 8)
+    self.assertEqual(chosen, [("['a']", 8)])
+    with self.assertRaisesRegex(ValueError, "optimizer_device_resident_gib"):
+      pick(tree, {"a": Whole()}, 8)
+
+  def test_optimizer_device_resident_gib_is_validated(self):
+    """Default 0; a non-finite or negative budget, or a budget without offload, is refused naming the key."""
+    common = {"model_name": "llama3.1-8b", "run_name": "test_run", "skip_jax_distributed_system": True}
+    cfg = [None, get_test_config_path()]
+    self.assertEqual(pyconfig.initialize(cfg, **common).optimizer_device_resident_gib, 0.0)
+    on = pyconfig.initialize(cfg, optimizer_memory_host_offload=True, optimizer_device_resident_gib=6, **common)
+    self.assertEqual(on.optimizer_device_resident_gib, 6.0)
+    self.assertEqual(maxtext_engine._optimizer_device_resident_budget(on), 6 * 2**30)
+    for bad in (-1.0, float("inf"), float("nan")):
+      with self.subTest(bad=bad):
+        with self.assertRaisesRegex(pydantic.ValidationError, "optimizer_device_resident_gib"):
+          pyconfig.initialize(cfg, optimizer_memory_host_offload=True, optimizer_device_resident_gib=bad, **common)
+    needs_offload = "optimizer_device_resident_gib > 0 needs optimizer_memory_host_offload"
+    with self.assertRaisesRegex(pydantic.ValidationError, needs_offload):
+      pyconfig.initialize(cfg, optimizer_device_resident_gib=6, **common)
+
   def test_parameter_offload_is_rejected(self):
     """The engine has no parameter-offload path, so the flag must fail loudly."""
     with self.assertRaisesRegex(NotImplementedError, "parameter_memory_host_offload"):
