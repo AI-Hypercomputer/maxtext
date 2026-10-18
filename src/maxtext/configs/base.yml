@@ -786,6 +786,11 @@ compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_s
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
 custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
+# Gradients of the dense weights a custom_mesh_and_rule replicates over context (rules that map 'embed_grad':
+# cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp): "reduce_scatter" = reduce-scatter over every token axis, then all-gather over
+# the replicated axes (linears.route_dense_weight_grad); "all_reduce" = drop the 'embed_grad' rule, so GSPMD all-reduces
+# each gradient. The forward is unchanged; the gradients differ by summation order only.
+dense_grad_reduce: "reduce_scatter"
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'context_autoregressive', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['circular_repeats', []],

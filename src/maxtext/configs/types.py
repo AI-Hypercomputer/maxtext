@@ -2917,6 +2917,20 @@ class HardwareAndMesh(BaseModel):
       CustomRule.DEFAULT,
       description="Customized mesh and logical rules for evaluation.",
   )
+  dense_grad_reduce: Literal["reduce_scatter", "all_reduce"] = Field(
+      "reduce_scatter",
+      description=(
+          "How the gradients of the dense weights that a custom_mesh_and_rule replicates over context are reduced"
+          " (the rule sets that map 'embed_grad': cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp). 'reduce_scatter':"
+          " linears.route_dense_weight_grad reduce-scatters each such gradient over every token axis and, across an"
+          " optimization barrier, all-gathers the shard over the axes the weight is replicated on. 'all_reduce': the"
+          " 'embed_grad' rule is dropped from logical_axis_rules and logical_axis_rules_for_eval, so"
+          " route_dense_weight_grad returns the kernel unchanged and GSPMD reduces each gradient with a full-size"
+          " all-reduce (which XLA may combine across weights) before keeping the weight's shard. The forward is"
+          " unchanged and the gradients differ by summation order only. 'all_reduce' requires logical axis rules that"
+          " map 'embed_grad'."
+      ),
+  )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
@@ -6133,6 +6147,31 @@ class MaxTextConfig(
           " regroups each token's float32 row in whole vector registers of 8 x 128."
       )
 
+  @staticmethod
+  def _apply_dense_grad_reduce(cfg: Any, *, require_rule: bool) -> None:
+    """When dense_grad_reduce='all_reduce', drops the 'embed_grad' rule from logical_axis_rules (and _for_eval).
+
+    linears.route_dense_weight_grad routes a dense weight's gradient through a reduce-scatter only under rules that map
+    'embed_grad'; without the rule it returns the kernel as is and GSPMD all-reduces the gradient.
+
+    Args:
+      cfg: the config, edited in place.
+      require_rule: refuse 'all_reduce' when logical_axis_rules do not map 'embed_grad' (the key would be a no-op).
+    """
+    if cfg.dense_grad_reduce == "reduce_scatter":
+      return
+    if require_rule and not any(rule and rule[0] == "embed_grad" for rule in (cfg.logical_axis_rules or ())):
+      raise ValueError(
+          "dense_grad_reduce='all_reduce' requires logical_axis_rules that map 'embed_grad' (custom_mesh_and_rule"
+          " cp-as-ep-dense-no-cp or cp-as-ep-dense-fsdp); under other rules the dense-weight gradients are already"
+          " reduced by GSPMD and the key would change nothing."
+      )
+    for attr in ("logical_axis_rules", "logical_axis_rules_for_eval"):
+      rules = getattr(cfg, attr, None)
+      if not rules:
+        continue
+      setattr(cfg, attr, [rule for rule in rules if not (rule and rule[0] == "embed_grad")])
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
@@ -6173,6 +6212,8 @@ class MaxTextConfig(
           if current != disabled_value:
             raise ValueError(f"When EP rank is 1, {flag_name} must be {disabled_value} (was {current}).")
 
+    self._apply_dense_grad_reduce(self, require_rule=True)
+
     # Handle eval custom mesh and rule
     if self.custom_mesh_and_rule_for_eval is CustomRule.DEFAULT:
       # Fallback to primary rule if eval is DEFAULT
@@ -6181,6 +6222,7 @@ class MaxTextConfig(
     else:
       eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
       self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
+      self._apply_dense_grad_reduce(self, require_rule=False)
 
       # Only the logical rules are swapped for eval; the mesh itself is built once from
       # the primary rule. Axes the eval rule names but the mesh lacks silently resolve to
@@ -8174,6 +8216,7 @@ class RLConfig(
     dcn_map = get_parallelism_map("dcn")
     self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
+    MaxTextConfig._apply_dense_grad_reduce(self, require_rule=True)
     MaxTextConfig.validate_gdn_config(self, is_rl_config=True)
     MaxTextConfig.validate_query_proj_kernel_gather_once(self)
     MaxTextConfig._validate_colocated_checkpointing(self)
