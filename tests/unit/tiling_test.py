@@ -117,7 +117,12 @@ class VocabTilingNNXTest(unittest.TestCase):
   """
 
   def setUp(self):
-    self.base_config = [None, get_test_config_path()]
+    self.base_config = [
+        None,
+        get_test_config_path(),
+        "base_emb_dim=32",
+        "vocab_size=128",
+    ]
     self.rng = jax.random.PRNGKey(1234)
     # Global batch must divide fsdp axis (= jax.device_count() by default), so the
     # batch sharding constraints inside vocab_tiling_nnx_loss are satisfied.
@@ -462,3 +467,71 @@ class VocabTilingNNXTest(unittest.TestCase):
           loss, base_loss, rtol=self.rtol, atol=self.atol
       ), f"num_vocab_tiling={n}: loss diverges from n=2 baseline ({loss} vs {base_loss})"
       self._assert_pytrees_close(base_grads, grads, f"num_vocab_tiling={n}: grads diverge from n=2 baseline.")
+
+  @pytest.mark.tpu_only
+  def test_nnx_vocab_tiling_single_scan_in_hlo(self):
+    """Verify forward + backward of vocab_tiling_nnx_loss compiles to a SINGLE while loop (scan)."""
+    cfg, model = self._build_cfg_and_model(num_vocab_tiling=4)
+    hidden_states, labels, segmentation = self._make_inputs(cfg)
+    graphdef, params, rest = self._split_and_axes(cfg, model)
+    tile_loss_fn = self._tiled_loss_fn(cfg, graphdef, rest, hidden_states, labels, segmentation)
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      vg_fn = self._vg(tile_loss_fn)
+      compiled = vg_fn.lower(params, hidden_states).compile()
+      hlo_text = compiled.as_text()
+
+    while_count = hlo_text.count(" while(")
+    self.assertEqual(
+        while_count,
+        1,
+        "Expected exactly 1 while loop (merged fwd+bwd scan) in compiled HLO," f" found {while_count}.",
+    )
+
+  @pytest.mark.tpu_only
+  def test_nnx_vocab_tiling_bf16_weights_and_mixed_precision(self):
+    """Verify loss + grad parity when weight_dtype=bfloat16 (Qwen3.5 config) and mixed precision."""
+    num_tokens = float(self.batch_size * self.seq_len)
+    for weight_dtype in ("bfloat16", "float32"):
+      cfg = pyconfig.initialize(
+          self.base_config,
+          run_name=f"vt_nnx_bf16_w_{weight_dtype}",
+          enable_checkpointing=False,
+          enable_dropout=False,
+          max_target_length=self.seq_len,
+          per_device_batch_size=1,
+          logits_via_embedding=False,
+          base_num_decoder_layers=0,
+          dtype="bfloat16",
+          weight_dtype=weight_dtype,
+          matmul_precision="high",
+          num_vocab_tiling=4,
+          z_loss_multiplier=1e-4,
+      )
+      mesh = maxtext_utils.get_mesh_from_config(cfg)
+      rngs = maxtext_utils_nnx.create_nnx_rngs(cfg)
+      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
+      hidden_states, labels, segmentation = self._make_inputs(cfg, dtype=jnp.bfloat16)
+      graphdef, params, rest = self._split_and_axes(cfg, model)
+
+      raw_ref_fn = self._reference_loss_fn(cfg, graphdef, rest, hidden_states, labels, segmentation)
+      raw_tile_fn = self._tiled_loss_fn(cfg, graphdef, rest, hidden_states, labels, segmentation)
+
+      def ref_loss_fn(p, h, fn=raw_ref_fn):
+        return fn(p, h) / num_tokens
+
+      def tile_loss_fn(p, h, fn=raw_tile_fn):
+        return fn(p, h) / num_tokens
+
+      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        ref_loss, ref_grads = self._vg(ref_loss_fn)(params, hidden_states)
+        tile_loss, tile_grads = self._vg(tile_loss_fn)(params, hidden_states)
+      assert jnp.allclose(ref_loss, tile_loss, rtol=5e-2, atol=5e-2)
+      self._assert_pytrees_close(
+          ref_grads,
+          tile_grads,
+          f"bf16 weight_dtype={weight_dtype} gradients differ.",
+          rtol=5e-2,
+          atol=5e-2,
+      )
