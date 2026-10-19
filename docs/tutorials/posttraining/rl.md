@@ -42,6 +42,75 @@ rely on the vLLM library.
 
 Let's get started!
 
+## TensorBoard metrics for standard GRPO and GSPO
+
+With `enable_tensorboard=true`, MaxText writes held-out evaluation metrics
+under `rl/eval/` to `tensorboard_dir`: `accuracy_percent`,
+`partial_accuracy_percent`, `format_accuracy_percent`, `mean_reward`,
+`num_prompts`, `num_samples`, `num_reward_samples`, `duration_seconds`, and
+`success`. They are written before training, at `eval_interval`, and after
+training, provided `num_test_batches > 0`. No additional model or dataset is
+needed. A failed evaluation records `success=0` without manufacturing zero
+accuracy. Reward is omitted if no responses were successfully reward-scored.
+The actual scored-response count is separate from the generated-sample count.
+
+The evaluation x-axis is the completed outer rollout-policy step (including
+the restored step when resuming). `rl/steps/actor_updates` records the actor's
+optimizer-step counter at evaluation time on that same x-axis. This counter
+can be ahead of the rollout policy: periodic evaluation runs from Tunix's
+buffered train-metric hook. Existing Tunix `actor/train/*` tags retain their
+optimizer-update x-axis; reward/completion tags retain their rollout-batch
+x-axis. Do not equate these axes when using multiple updates per rollout.
+Final and periodic evaluation can both produce a point at the final step.
+
+The configured scoring mode is also explicit in `pass_at_1_percent`,
+`pass_at_k_percent`, or `maj_at_k_percent`, with `num_passes` recording K.
+These use the existing evaluator and sampling strategy; adding logging does
+not change scoring or turn a non-greedy evaluation into a greedy one.
+
+For MoE actors, add `rl.record_moe_metrics=true` to the training command to
+enable `actor/train/moe/` diagnostics:
+
+| Tag suffix                                  | Interpretation                                                                        |
+| ------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `router_entropy_mean_layer`                 | Mean per-token entropy of full-expert router scores, in nats, averaged across layers. |
+| `router_entropy_min_layer`                  | Lowest layer's mean token entropy in each microbatch.                                 |
+| `router_entropy_normalized_mean_layer`      | Router entropy divided by `log(num_experts)`.                                         |
+| `expert_load_entropy_normalized_mean_layer` | Entropy of marginal expert assignments, divided by `log(num_experts)`.                |
+| `expert_load_cv_mean_layer`                 | Standard deviation / mean expert assignment count.                                    |
+| `max_to_mean_load_mean_layer`               | Maximum expert assignment count / mean count.                                         |
+| `unused_expert_fraction_mean_layer`         | Fraction of routed experts receiving no valid assignments.                            |
+| `valid_tokens_mean_layer`                   | Number of valid prompt and completion tokens observed per layer.                      |
+| `observed_router_fraction`                  | Fraction of router modules supported by the observer.                                 |
+
+Router entropy and expert-load entropy answer different questions: a
+confident router can still distribute tokens evenly. Full-expert score
+entropy is measured before top-k selection; sigmoid/positive router scores
+are normalized before computing entropy, and DeepSeek expert-balancing bias
+is excluded from the probability diagnostic. Load metrics use the selected
+top-k assignments, including forced router replay when provided. Padding and
+invalid replay ids are excluded; shared experts are not part of the routed
+expert distribution.
+
+These diagnostics use both valid prompt and completion tokens. Counts are
+reduced across sharded token dimensions before computing load statistics.
+Layer statistics are computed per training microbatch; Tunix averages those
+statistics across microbatches in an optimizer update. They are not statistics
+of the union of all update microbatches. Random, hash and fused routers are
+unobserved and reflected in `observed_router_fraction`. Dense models emit no
+MoE tags. This option currently supports the standard learner only.
+
+Observation adds a routing selection and compact per-token statistics, but
+does not run the Transformer a second time, change router choices, add a
+load-balancing penalty, or change the GRPO/GSPO objective. It is disabled by
+default; measure its overhead on the accelerator and backend used for a run.
+
+Existing `actor/train/entropy` measures output-token entropy for dense and
+MoE models, not router entropy. Existing Tunix `perplexity` is the exponential
+of the RL objective, not language-model perplexity. Prefer
+`rewards/train/score/mean` for summed training reward;
+`rewards/train/mean` averages reward components instead.
+
 ## Install MaxText and post-training dependencies
 
 For instructions on installing MaxText with post-training dependencies on your VM, please refer to the [official documentation](../../install_maxtext.md) and use the `maxtext[tpu-post-train]` installation path to include all necessary post-training dependencies.

@@ -90,6 +90,8 @@ from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
+from maxtext.trainers.post_train.rl.metrics import RLMetricLogger, evaluate_with_logging
+from maxtext.integration.tunix.rl_metrics import configure_moe_metrics
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
 from maxtext.utils import max_logging, max_utils, model_creation_utils
 from maxtext.utils.model_creation_utils import get_rollout_kwargs_for_parallelism
@@ -408,6 +410,8 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
     model_tokenizer,
 ):
   """Setup RL cluster, trainer, and optimizer."""
+  if getattr(trainer_config.rl, "record_moe_metrics", False) and trainer_config.rl.use_agentic_rollout:
+    raise ValueError("rl.record_moe_metrics is currently supported only with standard GRPO/GSPO.")
   # Setup optimizer
   optimizer = utils_rl.get_optimizer(trainer_config)
 
@@ -648,6 +652,9 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
         algo_config=grpo_config,
     )
 
+  if getattr(trainer_config.rl, "record_moe_metrics", False):
+    configure_moe_metrics(rl_cluster, enabled=True)
+
   return rl_cluster, rl_trainer, optimizer, reward_fns
 
 
@@ -701,8 +708,8 @@ def rl_train(argv: Sequence[str], kwargs: dict):
   record_goodput(goodput_recorder, RECORD_JOB_START_TIME)
   _job_completed_gracefully = False
   try:
-    with maybe_monitor_goodput(trainer_config):
-      _rl_train_impl(trainer_config, sampler_config, trainer_devices, sampler_devices, goodput_recorder)
+    with maybe_monitor_goodput(trainer_config), RLMetricLogger(trainer_config) as metric_logger:
+      _rl_train_impl(trainer_config, sampler_config, trainer_devices, sampler_devices, goodput_recorder, metric_logger)
       _job_completed_gracefully = True
   finally:
     if _job_completed_gracefully:
@@ -710,7 +717,12 @@ def rl_train(argv: Sequence[str], kwargs: dict):
 
 
 def _rl_train_impl(
-    trainer_config: Any, sampler_config: Any, trainer_devices: Any, sampler_devices: Any, goodput_recorder: Any = None
+    trainer_config: Any,
+    sampler_config: Any,
+    trainer_devices: Any,
+    sampler_devices: Any,
+    goodput_recorder: Any = None,
+    metric_logger: Any = None,
 ):
   """rl_train execution body."""
   # Create model tokenizer first so we can plumb its pad_id into the model
@@ -784,6 +796,8 @@ def _rl_train_impl(
         model_tokenizer,
     )
 
+  rl_cluster.maxtext_metrics_logger = metric_logger
+
   # Run evaluation before training
   if trainer_config.num_test_batches > 0:
     # Explicitly sync actor model weights to the rollout engine before Pre-RL evaluation.
@@ -794,15 +808,17 @@ def _rl_train_impl(
     # robustness across all initialization and restore workflows.
     rl_cluster.rollout.update_params(nnx.state(actor_model, nnx.Param))
 
-    (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
+    eval_result, _ = evaluate_with_logging(
+        evaluate,
         trainer_config,
         test_dataset,
-        rl_cluster=rl_cluster,
+        rl_cluster,
         num_passes=trainer_config.num_eval_passes,
         corr_lst=trainer_config.eval_corr_lst,
         make_lst=trainer_config.eval_make_lst,
         reward_fns=reward_fns,
     )
+    corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward = eval_result
     max_logging.warning(
         f"Pre RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
         f" {format_accuracy=}%, {mean_reward=:.4f}"
@@ -832,15 +848,17 @@ def _rl_train_impl(
 
   # Run evaluation after training
   if trainer_config.num_test_batches > 0:
-    (corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward), _ = evaluate(
+    eval_result, _ = evaluate_with_logging(
+        evaluate,
         trainer_config,
         test_dataset,
-        rl_cluster=rl_cluster,
+        rl_cluster,
         num_passes=trainer_config.num_eval_passes,
         corr_lst=trainer_config.eval_corr_lst,
         make_lst=trainer_config.eval_make_lst,
         reward_fns=reward_fns,
     )
+    corr, total, accuracy, partial_accuracy, format_accuracy, mean_reward = eval_result
     max_logging.warning(
         f"Post RL Training: {corr=}, {total=}, {accuracy=}%, {partial_accuracy=}%,"
         f" {format_accuracy=}%, {mean_reward=:.4f}"

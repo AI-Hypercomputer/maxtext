@@ -17,6 +17,7 @@
 # pylint: disable=protected-access
 
 import unittest
+from unittest import mock
 import pytest
 from types import SimpleNamespace
 
@@ -199,6 +200,29 @@ class TestScoreResponses(unittest.TestCase):
     self.assertAlmostEqual(is_correct, 1.0)
     self.assertAlmostEqual(is_partially_correct, 1.0)
     self.assertAlmostEqual(has_correct_format, 1.0)
+
+
+class TestEvaluationSampleCounts(unittest.TestCase):
+  """Check actual denominators without changing evaluate's public result tuple."""
+
+  def test_counts_samples_and_failed_reward_rows(self):
+    cfg = _make_config(eval_mode="pass_at_1")
+    dataset = [{"prompts": ["p0", "p1"], "question": ["q0", "q1"], "answer": ['["1"]', '["2"]']}]
+
+    def reward(prompts, completions, **kwargs):
+      del completions, kwargs
+      if prompts == ["p1"]:
+        raise ValueError("scoring unavailable")
+      return [2.0]
+
+    metadata = {}
+    with (
+        mock.patch.object(evaluate_rl, "generate_responses", return_value=[["a", "b"], ["c"]]),
+        mock.patch.object(evaluate_rl, "score_responses", return_value=(True, True, True)),
+    ):
+      result, _ = evaluate_rl.evaluate(cfg, dataset, None, reward_fns=[reward], metrics=metadata)
+    self.assertEqual(result, (2, 2, 100, 100, 100, 2.0))
+    self.assertEqual(metadata, {"num_samples": 3, "num_reward_samples": 2})
 
 
 class TestComputeRowReward(unittest.TestCase):

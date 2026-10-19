@@ -16,6 +16,7 @@
 """
 RL Evaluation Module.
 """
+
 import collections
 import json
 import re
@@ -226,6 +227,7 @@ def evaluate(
     corr_lst=False,
     make_lst=False,
     reward_fns: Optional[list[Callable[..., Any]]] = None,
+    metrics: Optional[dict[str, int]] = None,
 ):
   """
   Computes accuracy and percentage of outputs matching the format.
@@ -245,6 +247,8 @@ def evaluate(
           score is the SUM across all reward functions (matching tunix's GRPO
           aggregation), and the per-example mean is returned as `mean_reward`.
           When None or empty, `mean_reward` is 0.0.
+      metrics: Optional output dictionary for actual sample and reward-scoring
+          counts. The return value remains backward compatible.
 
   Returns:
       Tuple (corr, total, accuracy, partial_accuracy, format_accuracy,
@@ -258,6 +262,7 @@ def evaluate(
   reward_sum = 0.0
   reward_count = 0  # number of (prompt, sampled response) pairs scored
   use_reward = bool(reward_fns)
+  sample_count = 0
 
   for batch in tqdm(dataset):
     answers = batch["answer"]
@@ -274,6 +279,7 @@ def evaluate(
 
     # Score each question-answer pair
     for question, responses, answer, prompt in zip(questions, multiple_call_responses, answers, prompts):
+      sample_count += len(responses)
       # decode the json-encoded list of acceptable answers
       answer_list = list(dict.fromkeys(json.loads(answer)))
       is_correct, is_partially_correct, has_correct_format = score_responses(
@@ -326,4 +332,6 @@ def evaluate(
       reward_sum / reward_count if (use_reward and reward_count > 0) else 0.0,
   )
 
+  if metrics is not None:
+    metrics.update(num_samples=sample_count, num_reward_samples=reward_count)
   return to_return, response_lst
