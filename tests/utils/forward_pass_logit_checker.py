@@ -1,3 +1,4 @@
+# pylint: disable=missing-function-docstring
 # Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -313,6 +314,7 @@ class _ReferenceModel:
 
 
 def _load_reference_model(reference_model, hf_model_path, torch_dtype, config, tokenizer):
+  """Loads an upstream reference model for logit parity verification."""
   import importlib  # pylint: disable=import-outside-toplevel
 
   if reference_model not in _REFERENCE_MODELS:
@@ -787,6 +789,8 @@ def main(config, test_args):  # pylint: disable=W0621
         all_data_to_save.append(data_to_save)
 
   if jax.process_index() == 0 and test_args.output_logits_path:
+    import jsonlines  # pylint: disable=import-outside-toplevel
+
     os.makedirs(os.path.dirname(test_args.output_logits_path), exist_ok=True)
     with jsonlines.open(test_args.output_logits_path, "a") as f:
       f.write(all_data_to_save)

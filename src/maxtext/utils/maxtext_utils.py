@@ -1,3 +1,4 @@
+# pylint: disable=missing-function-docstring,use-dict-literal,chained-comparison,unnecessary-lambda-assignment,missing-module-docstring,import-outside-toplevel
 # Copyright 2023–2025 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -978,6 +979,35 @@ def calculate_engram_tflops(config):
   return learnable_tflops, attention_tflops
 
 
+def calculate_ds41_engram_tflops(config):
+  """Calculate DeepSeek-V4.1 Engram TFLOPs per device (peak roofline).
+
+  In DeepSeek-V4.1, each Engram layer (ds41_engram_layers, default [1, 14])
+  performs:
+  1. Multi-head N-gram hash + table gather (memory/communication only, 0 FLOPs).
+  2. Fused wkv linear projection: engram_dim -> (G + 1) * emb_dim (G keys + 1 value).
+  3. Per-branch dot-product gating: G branches of dim emb_dim.
+  Unlike DeepSeek-V4 Engram, DeepSeek-V4.1 Engram has no short convolution.
+  """
+  B = config.per_device_batch_size
+  S = config.max_target_length
+  G = getattr(config, "mhc_expansion_rate", 1)
+  D = config.emb_dim
+
+  num_ngram_orders = config.ds41_engram_max_ngram_size - 1
+  engram_dim = config.ds41_engram_n_heads * config.ds41_engram_head_dim * num_ngram_orders
+
+  # 1. Fused Key + Value projection: engram_dim -> (G + 1) * D
+  wkv_flops = 2 * (B * S) * engram_dim * ((G + 1) * D)
+  # 2. Per-branch QK dot-product gating: G branches of dim D
+  gating_flops = 2 * (B * S) * G * D
+
+  num_layers = len(config.ds41_engram_layers)
+  learnable_tflops = num_layers * wkv_flops * 3 / 1e12
+  attention_tflops = num_layers * gating_flops * 3 / 1e12
+  return learnable_tflops, attention_tflops
+
+
 def calculate_vision_encoder_tflops(config):
   """Calculate vision encoder TFLOPs per prefill step per device."""
   if config.model_name.startswith("gemma3"):
@@ -1154,6 +1184,151 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
   )
 
 
+def calculate_deepseek41_tflops_training_per_device(config, total_ffn_flops_all_layers, embedding_flops):
+  """Calculates the peak-roofline training TFLOPs per device for DeepSeek-V4.1-Flash.
+
+  DeepSeek-V4.1-Flash uses:
+  1. Base Attention projections on all layers:
+     - Low-rank Q: emb_dim -> q_lora_rank -> num_query_heads * head_dim
+     - Single shared KV head (used for both K and V): emb_dim -> num_kv_heads * head_dim
+     - Grouped low-rank O: (num_query_heads * head_dim) -> (o_groups * o_lora_rank) -> emb_dim
+  2. Cross-layer KV Compressor (DeepSeek41Compressor) ONLY on kv_source_layers:
+     - For r_l > 1: wkv (D -> D_h) + wgate (D -> D_h) over U_l = (S // r_l) * r_l tokens
+     - For r_l == 1: wkv (D -> D_h) over S tokens
+  3. Two-level Lightning Indexer (DeepSeek41Indexer) ONLY on index_source_layers:
+     - Learnable projections: wq_b (q_lora_rank -> H_idx * D_idx) + weights_proj (D -> H_idx),
+       plus wk (D_h -> D_idx over C_l = S // r_l latents) ONLY when l in kv_source_layers.
+     - Peak-roofline QK scoring + head reduction over C_l = S // r_l compressed keys,
+       capped at M_cand = min(C_l, candidate_topk_blocks * candidate_block_size) on
+       re-indexer layers (l > candidate_source_layer).
+  4. Peak-roofline Hybrid Attention Core:
+     - Local causal sliding-window attention (W = min(sliding_window_size, S)) on all layers.
+     - Sparse top-K compressed attention (K = min(indexer_topk, C_l)) on layers with r_l > 0.
+  5. Manifold-Constrained Hyper-Connections (mHC) applied twice per layer.
+  (DeepSeek-V4.1 Engram layers in ds41_engram_layers are added via calculate_ds41_engram_tflops.)
+
+  Args:
+    config: MaxTextConfig instance containing architectural hyperparameters.
+    total_ffn_flops_all_layers: Pre-computed Feed-Forward (MoE/Shared MLP) FLOPs.
+    embedding_flops: Pre-computed output unembedding projection FLOPs.
+
+  Returns:
+    A tuple of (total_attn_flops_in_tflops, total_weight_flops_in_tflops).
+  """
+  batch_size = config.per_device_batch_size
+  seq_len = config.max_target_length
+  num_layers = config.num_decoder_layers
+  sliding_window_size = min(config.sliding_window_size, seq_len)
+
+  c_ratios = list(getattr(config, "compress_ratios", []) or [0] * num_layers)
+  kv_source_set = set(getattr(config, "kv_source_layers", []) or [])
+  index_source_set = set(getattr(config, "index_source_layers", []) or [])
+  cand_source_layer = getattr(config, "candidate_source_layer", -1)
+  cand_max_keys = getattr(config, "candidate_topk_blocks", 2048) * getattr(config, "candidate_block_size", 8)
+
+  # 1. Base Attention Block Projections (Executed on all layers)
+  wq_flops = (
+      2
+      * batch_size
+      * seq_len
+      * ((config.emb_dim * config.q_lora_rank) + (config.q_lora_rank * config.num_query_heads * config.head_dim))
+  )
+  wkv_flops = 2 * batch_size * seq_len * config.emb_dim * (config.num_kv_heads * config.head_dim)
+  grp_feat = (config.num_query_heads * config.head_dim) // config.o_groups
+  o_flops = (2 * batch_size * seq_len * config.o_groups * grp_feat * config.o_lora_rank) + (
+      2 * batch_size * seq_len * (config.o_groups * config.o_lora_rank) * config.emb_dim
+  )
+  base_attention_weights_per_layer = wq_flops + wkv_flops + o_flops
+
+  # 2. Manifold-Constrained Hyper-Connections (mHC) Overheads (2x per layer)
+  if getattr(config, "mhc_expansion_rate", 1) > 1:
+    mhc_flops_per_layer = calculate_mhc_flops_per_layer(config)
+  else:
+    mhc_flops_per_layer = 0
+
+  # 3. Local Causal Sliding Window Attention (Executed on all layers)
+  prefix_attn_per_layer = (
+      4
+      * batch_size
+      * (seq_len * sliding_window_size - 0.5 * sliding_window_size**2)
+      * config.num_query_heads
+      * config.head_dim
+  )
+
+  # 4. Per-layer Compressor, Indexer, and Sparse Compressed Attention
+  compressor_weight_flops = 0
+  indexer_weight_flops = 0
+  indexer_scoring_flops = 0
+  sparse_compressed_attn_flops = 0
+
+  for layer_idx in range(num_layers):
+    r_l = c_ratios[layer_idx] if layer_idx < len(c_ratios) else 0
+    if r_l <= 0:
+      continue
+    c_len = seq_len // r_l
+    if c_len <= 0:
+      continue
+    usable_tokens = c_len * r_l
+
+    # 4a. Compressor projections (only on kv_source_layers)
+    if layer_idx in kv_source_set:
+      if r_l > 1:
+        # wkv (D -> D_h) + wgate (D -> D_h)
+        compressor_weight_flops += 4 * batch_size * usable_tokens * config.emb_dim * config.head_dim
+      else:
+        # r_l == 1: wkv (D -> D_h) only
+        compressor_weight_flops += 2 * batch_size * usable_tokens * config.emb_dim * config.head_dim
+
+    # 4b. Lightning Indexer projections and scoring (only on index_source_layers)
+    if layer_idx in index_source_set:
+      # wq_b (q_lora_rank -> H_idx * D_idx) + weights_proj (D -> H_idx)
+      indexer_weight_flops += (
+          2
+          * batch_size
+          * seq_len
+          * (
+              (config.q_lora_rank * config.indexer_n_heads * config.indexer_head_dim)
+              + (config.emb_dim * config.indexer_n_heads)
+          )
+      )
+      if layer_idx in kv_source_set:
+        # wk (D_h -> D_idx) on C_l compressed latents
+        indexer_weight_flops += 2 * batch_size * c_len * config.head_dim * config.indexer_head_dim
+
+      # Peak-roofline Indexer QK scoring + head reduction
+      if cand_source_layer >= 0 and layer_idx > cand_source_layer:
+        active_idx_keys = min(c_len, cand_max_keys)
+      else:
+        active_idx_keys = c_len
+      idx_mask_ratio = calculate_indexer_mask_ratio(active_idx_keys, c_len)
+      indexer_scoring_flops += (
+          2 * batch_size * seq_len * c_len * config.indexer_n_heads * (config.indexer_head_dim + 1) * idx_mask_ratio
+      )
+
+    # 4c. Sparse Top-K Compressed Attention (peak roofline over K = min(indexer_topk, C_l) keys)
+    k_sparse = min(config.indexer_topk, c_len)
+    sparse_mask_ratio = calculate_indexer_mask_ratio(k_sparse, c_len)
+    sparse_compressed_attn_flops += (
+        4 * batch_size * (seq_len * c_len) * config.num_query_heads * config.head_dim * sparse_mask_ratio
+    )
+
+  total_attn_flops = (num_layers * prefix_attn_per_layer) + sparse_compressed_attn_flops + indexer_scoring_flops
+
+  total_weight_flops = (
+      (num_layers * base_attention_weights_per_layer)
+      + (2 * num_layers * mhc_flops_per_layer)
+      + compressor_weight_flops
+      + indexer_weight_flops
+      + total_ffn_flops_all_layers
+      + embedding_flops
+  )
+
+  return (
+      total_attn_flops * 3 / 10**12,
+      total_weight_flops * 3 / 10**12,
+  )
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   # MLP flops
@@ -1262,6 +1437,10 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_deepseek4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops
     )
+  elif config.decoder_block == DecoderBlockType.DEEPSEEK41:
+    attention_tflops, learnable_weight_tflops = calculate_deepseek41_tflops_training_per_device(
+        config, total_ffn_flops_all_layers, embedding_flops
+    )
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)
@@ -1363,6 +1542,10 @@ def calculate_tflops_training_per_device(config, log=True):
     engram_learnable_tflops, engram_attention_tflops = calculate_engram_tflops(config)
     learnable_weight_tflops += engram_learnable_tflops
     attention_tflops += engram_attention_tflops
+  if getattr(config, "ds41_engram_layers", None):
+    ds41_engram_learnable_tflops, ds41_engram_attention_tflops = calculate_ds41_engram_tflops(config)
+    learnable_weight_tflops += ds41_engram_learnable_tflops
+    attention_tflops += ds41_engram_attention_tflops
 
   if config.use_multimodal:
     # Add vision layers TFLOPs for multimodal models

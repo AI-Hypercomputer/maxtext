@@ -642,6 +642,8 @@ class NNXDecoder(nnx.Module):
     config = self.config
     specs = deepseek41.build_layer_specs(config)
     if config.scan_layers:
+      # Per-layer remat inside each scanned group (see DeepSeek41Block); the scan body is then not rematerialized.
+      per_layer_remat = config.ds41_per_layer_remat and config.remat_policy != "none"
       for k, segment in enumerate(deepseek41.build_segments(config)):
         stack = self._create_scanned_layers(
             deepseek41.DeepSeek41Block,
@@ -649,6 +651,9 @@ class NNXDecoder(nnx.Module):
             metadata_axis_name="layers",
             rngs=rngs,
             specs=tuple(specs[i] for i in segment.groups[0]),
+            remat_policy=self.get_remat_policy() if per_layer_remat else None,
+            apply_internal_remat=per_layer_remat,
+            prevent_cse=maxtext_utils.should_prevent_cse_in_remat(config),
         )
         setattr(self, f"segments_{k}", stack)
     else:
@@ -672,12 +677,24 @@ class NNXDecoder(nnx.Module):
             decoder_input_tokens,
             length=segment.repeats,
             metadata_axis_name="layers",
+            skip_block_remat=stack.apply_internal_remat,
         )
         setattr(self, f"segments_{k}", stack)
         carry = {key: carry[key] for key in ("h", "pre_mix") + plan.keep_after}
     else:
+      # One remat boundary per layer, as for the other unscanned decoders (without it every layer's activations,
+      # including the [B, H, S, S + C] attention scores, would stay alive for the backward pass).
+      policy = self.get_remat_policy()
+      prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
       for i in range(cfg.num_decoder_layers):
-        carry = getattr(self, f"layers_{i}")(carry, decoder_positions, decoder_input_tokens)
+        carry = self._apply_layer_with_remat(
+            getattr(self, f"layers_{i}"),
+            carry,
+            policy,
+            prevent_cse,
+            decoder_positions=decoder_positions,
+            decoder_input_tokens=decoder_input_tokens,
+        )
     return deepseek41.DeepSeek41DecoderLayer.hc_pre(carry["h"], carry["pre_mix"])
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):

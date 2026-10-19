@@ -1,3 +1,4 @@
+# pylint: disable=missing-function-docstring,use-dict-literal,chained-comparison,unnecessary-lambda-assignment,missing-module-docstring,import-outside-toplevel
 # Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -21,6 +22,8 @@ tokenizer.json / tokenizer_config.json (defaults to the HuggingFace repo id).
   python -m pytest tests/unit/deepseek_v41_vs_reference_test.py
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import unittest
@@ -29,7 +32,6 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-import torch
 from flax import nnx
 
 from maxtext.checkpoint_conversion.utils import hf_streaming_load
@@ -37,9 +39,17 @@ from maxtext.configs import pyconfig
 from maxtext.layers import attention_deepseek41
 from maxtext.layers import engram_deepseek41
 from maxtext.models import deepseek41
-from tests.utils.deepseek_v41_reference import model as ref_model
-from tests.utils.deepseek_v41_reference import engram as ref_engram
-from tests.utils.deepseek_v41_reference import runner as ref_runner
+
+try:
+  import torch
+  from tests.utils.deepseek_v41_reference import engram as ref_engram
+  from tests.utils.deepseek_v41_reference import model as ref_model
+  from tests.utils.deepseek_v41_reference import runner as ref_runner
+except ImportError:
+  torch = None
+  ref_engram = None
+  ref_model = None
+  ref_runner = None
 
 TOKENIZER = os.environ.get("DEEPSEEK_V41_TOKENIZER", "deepseek-ai/DeepSeek-V4.1-Flash")
 
@@ -108,7 +118,10 @@ REF_ARGS = dict(
 REF_ARGS["engram_num_embeddings"] = tuple(
     sum(sum(per_ngram) for per_ngram in layer)
     for layer in engram_deepseek41.engram_primes(
-        ENGRAM_LAYERS, REF_ARGS["engram_max_ngram_size"], REF_ARGS["engram_n_heads"], REF_ARGS["engram_vocab_size"]
+        ENGRAM_LAYERS,
+        REF_ARGS["engram_max_ngram_size"],
+        REF_ARGS["engram_n_heads"],
+        REF_ARGS["engram_vocab_size"],
     )
 )
 
@@ -205,7 +218,10 @@ def copy_layer(mt: deepseek41.DeepSeek41DecoderLayer, ref: ref_model.Block):
   _copy_linear(a.wkv, ra.wkv)
   _copy_norm(a.kv_norm, ra.kv_norm)
   g = ra.n_groups
-  _set(a.o_a_proj.kernel, _t2j(ra.wo_a.weight).reshape(g, ra.o_lora_rank, -1).transpose(0, 2, 1))
+  _set(
+      a.o_a_proj.kernel,
+      _t2j(ra.wo_a.weight).reshape(g, ra.o_lora_rank, -1).transpose(0, 2, 1),
+  )
   _copy_linear(a.o_b_proj, ra.wo_b)
   _set(a.sinks, _t2j(ra.attn_sink))
   if ra.compressor is not None:
@@ -214,7 +230,11 @@ def copy_layer(mt: deepseek41.DeepSeek41DecoderLayer, ref: ref_model.Block):
       _copy_linear(a.compressor.wgate, ra.compressor.wgate)
     _copy_norm(a.compressor.norm, ra.compressor.norm)
   if ra.indexer is not None:
-    _copy_linear(a.indexer.wq_b, ra.indexer.wq_b, (ra.indexer.n_heads, ra.indexer.index_head_dim))
+    _copy_linear(
+        a.indexer.wq_b,
+        ra.indexer.wq_b,
+        (ra.indexer.n_heads, ra.indexer.index_head_dim),
+    )
     _copy_linear(a.indexer.weights_proj, ra.indexer.weights_proj)
     if ra.indexer.owns_k:
       _copy_linear(a.indexer.wk, ra.indexer.wk)
@@ -262,6 +282,7 @@ def _init_reference(model: torch.nn.Module, seed: int = 0):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41RotaryTest(unittest.TestCase):
   """YaRN / plain interleaved partial RoPE against `precompute_freqs_cis` + `apply_rotary_emb`."""
 
@@ -294,6 +315,7 @@ class DeepSeek41RotaryTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41CandidateBlocksTest(unittest.TestCase):
 
   def test_select_candidate_blocks(self):
@@ -308,6 +330,7 @@ class DeepSeek41CandidateBlocksTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41EngramHashTest(unittest.TestCase):
 
   def test_hash_ids_match_reference(self):
@@ -338,6 +361,7 @@ class DeepSeek41EngramHashTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41DequantTest(unittest.TestCase):
   """The MaxText loader hook and the reference loader dequantize the released FP8 / FP4 formats identically."""
 
@@ -358,7 +382,10 @@ class DeepSeek41DequantTest(unittest.TestCase):
     # pieces line up with the scale blocks), the scales either a full copy or split the same way.
     devices = jax.devices()
     for n in sorted({d for d in (2, len(devices) // 2, len(devices)) if d > 1 and w_j.shape[0] % d == 0}):
-      w_s = jax.device_put(w_j, hf_streaming_load.choose_load_sharding(w_j.shape, w_j.dtype, devices[:n], 0))
+      w_s = jax.device_put(
+          w_j,
+          hf_streaming_load.choose_load_sharding(w_j.shape, w_j.dtype, devices[:n], 0),
+      )
       for split_scale in (False, True):
         if split_scale and s_j.shape[0] != w_j.shape[0]:
           continue
@@ -368,7 +395,11 @@ class DeepSeek41DequantTest(unittest.TestCase):
         )
         got = param_mapping.dequantize_block_scaled((w_s, s_s))
         self.assertEqual(got.sharding, w_s.sharding)
-        np.testing.assert_array_equal(_j2np(got), expected.numpy(), err_msg=f"{n} chips, split scales {split_scale}")
+        np.testing.assert_array_equal(
+            _j2np(got),
+            expected.numpy(),
+            err_msg=f"{n} chips, split scales {split_scale}",
+        )
 
   def test_fp8_block_32x32(self):
     torch.manual_seed(0)
@@ -403,6 +434,7 @@ class DeepSeek41DequantTest(unittest.TestCase):
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41LayersTest(unittest.TestCase):
   """Runs every layer type of a tiny model, layer by layer, against the reference blocks."""
 
@@ -442,10 +474,18 @@ class DeepSeek41LayersTest(unittest.TestCase):
         carry = layer(carry, positions, tokens)
         ref_h, ref_pre = ref_outs[i]
         np.testing.assert_allclose(
-            _j2np(carry["h"]), ref_h.numpy(), rtol=2e-3, atol=2e-3, err_msg=f"hidden mismatch at layer {i}"
+            _j2np(carry["h"]),
+            ref_h.numpy(),
+            rtol=2e-3,
+            atol=2e-3,
+            err_msg=f"hidden mismatch at layer {i}",
         )
         np.testing.assert_allclose(
-            _j2np(carry["pre_mix"]), ref_pre.numpy(), rtol=2e-3, atol=2e-3, err_msg=f"pre_mix mismatch at layer {i}"
+            _j2np(carry["pre_mix"]),
+            ref_pre.numpy(),
+            rtol=2e-3,
+            atol=2e-3,
+            err_msg=f"pre_mix mismatch at layer {i}",
         )
 
 
@@ -462,9 +502,11 @@ MINI_LAYOUT = dict(
 
 
 @pytest.mark.cpu_only
+@unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41CheckpointTest(unittest.TestCase):
   """Saves a tiny random checkpoint in the upstream layout, streams it into MaxText through the param mapping
-  (`safetensors_dynamic`), and compares the logits with the reference for scanned and unscanned layers."""
+  (`safetensors_dynamic`), and compares the logits with the reference for scanned and unscanned layers.
+  """
 
   @classmethod
   def setUpClass(cls):
@@ -477,14 +519,21 @@ class DeepSeek41CheckpointTest(unittest.TestCase):
     args["engram_num_embeddings"] = tuple(
         sum(sum(per_ngram) for per_ngram in layer)
         for layer in engram_deepseek41.engram_primes(
-            args["engram_layer_ids"], args["engram_max_ngram_size"], args["engram_n_heads"], args["engram_vocab_size"]
+            args["engram_layer_ids"],
+            args["engram_max_ngram_size"],
+            args["engram_n_heads"],
+            args["engram_vocab_size"],
         )
     )
     cls.ref = ref_runner.build_model(ref_model.ModelArgs(**args), tokenizer)
     _init_reference(cls.ref, seed=1)
     cls.ckpt_dir = tempfile.mkdtemp(prefix="dsv41_tiny_")
     state = {k: v.contiguous() for k, v in cls.ref.state_dict().items()}
-    save_file(state, os.path.join(cls.ckpt_dir, "model-00001-of-00001.safetensors"), metadata={"format": "pt"})
+    save_file(
+        state,
+        os.path.join(cls.ckpt_dir, "model-00001-of-00001.safetensors"),
+        metadata={"format": "pt"},
+    )
 
   def _maxtext_logits(self, ids, scan_layers):
     from maxtext.common.common_types import MODEL_MODE_TRAIN  # pylint: disable=import-outside-toplevel
@@ -524,6 +573,35 @@ class DeepSeek41CheckpointTest(unittest.TestCase):
 
   def test_scanned(self):
     self._check(scan_layers=True)
+
+
+class TflopsCalculationTest(unittest.TestCase):
+  """Verifies peak-roofline training TFLOPs calculation for DeepSeek-V4.1-Flash."""
+
+  def test_deepseek41_tflops_training_per_device(self):
+    from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel
+
+    config = pyconfig.initialize(
+        [sys.argv[0], "src/maxtext/configs/base.yml"],
+        run_name="deepseek41_tflops_test",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+        model_name="deepseek4.1-flash",
+        per_device_batch_size=1.0,
+        max_target_length=4096,
+    )
+    (
+        total_tflops,
+        weight_tflops,
+        attn_tflops,
+    ) = maxtext_utils.calculate_tflops_training_per_device(config, log=False)
+    self.assertAlmostEqual(total_tflops, weight_tflops + attn_tflops, places=5)
+    # Peak roofline for deepseek4.1-flash (pdb=1, seq=4096) is ~434.55 TFLOPs
+    # (learnable_weights ~396.63 TFLOPs, attention/indexer scoring ~37.92 TFLOPs),
+    # significantly lower than the unfactored dense MHA fallback (728.67 TFLOPs).
+    self.assertAlmostEqual(weight_tflops, 396.63, delta=0.1)
+    self.assertAlmostEqual(attn_tflops, 37.92, delta=0.1)
+    self.assertAlmostEqual(total_tflops, 434.55, delta=0.1)
 
 
 if __name__ == "__main__":
