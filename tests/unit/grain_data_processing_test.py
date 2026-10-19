@@ -15,7 +15,10 @@
 """Tests for grain data processing."""
 
 import sys
+import importlib.util
+import math
 import os.path
+import shutil
 import tempfile
 import unittest
 from unittest import mock
@@ -31,6 +34,7 @@ from jax.experimental import mesh_utils
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import grain_data_processing
 from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
@@ -359,6 +363,163 @@ class GrainArrayRecordBestFitPackingTest(_GrainArrayRecordSetup, GrainBaseProces
   def setUp(self):
     super().setUp()
     self.config = self._make_config(grain_packing_type="best_fit")
+
+
+class TestGrainBagzDataSource:
+  """Tests Bagz data source construction; runs without the optional bagz package installed."""
+
+  @staticmethod
+  def _fake_bagz():
+    fake_bagz = mock.MagicMock()
+    fake_bagz.LimitsStorage.IN_MEMORY = "IN_MEMORY"
+    fake_bagz.LimitsStorage.ON_DISK = "ON_DISK"
+    fake_bagz.Reader.Options.return_value.limits_storage = None
+    return fake_bagz
+
+  @pytest.mark.parametrize(
+      ("grain_index_storage_option", "expected_limits_storage"),
+      [(None, None), ("in_memory", "IN_MEMORY"), ("offloaded", "ON_DISK")],
+  )
+  def test_get_datasets_uses_bagz_reader(self, grain_index_storage_option, expected_limits_storage):
+    fake_bagz = self._fake_bagz()
+    with (
+        mock.patch.dict(sys.modules, {"bagz": fake_bagz}),
+        mock.patch.object(grain_data_processing, "find_data_files", return_value=["a.bagz", "b.bagz"]),
+        mock.patch.object(grain_data_processing.grain.MapDataset, "source", return_value=mock.MagicMock()) as source,
+    ):
+      grain_data_processing.get_datasets(
+          "*.bagz",
+          "bagz",
+          shuffle=False,
+          shuffle_seed=0,
+          shuffle_buffer_size=1,
+          num_epoch=1,
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          grain_worker_count=0,
+          grain_num_threads=1,
+          grain_prefetch_buffer_size=1,
+          grain_data_source_max_workers=1,
+          grain_index_storage_option=grain_index_storage_option,
+          elastic=True,
+      )
+
+    options = fake_bagz.Reader.Options.return_value
+    fake_bagz.Reader.assert_called_once_with("a.bagz,b.bagz", options)
+    source.assert_called_once_with(fake_bagz.Reader.return_value)
+    assert options.limits_storage == expected_limits_storage
+
+  def test_gcs_path_without_bagz_gcs_plugin_raises(self):
+    fake_bagz = self._fake_bagz()
+    fake_bagz.Reader.side_effect = FileNotFoundError(
+        "NOT_FOUND: No file system registered for 'gs://bucket/data-00000-of-00001.bagz'."
+    )
+    with (
+        mock.patch.dict(sys.modules, {"bagz": fake_bagz}),
+        pytest.raises(ImportError, match="bagz-gcs"),
+    ):
+      input_pipeline_utils.make_bagz_data_source(["gs://bucket/data-00000-of-00001.bagz"])
+
+  def test_missing_file_error_is_not_rewritten(self):
+    fake_bagz = self._fake_bagz()
+    fake_bagz.Reader.side_effect = FileNotFoundError("NOT_FOUND: open: No such file or directory")
+    with (
+        mock.patch.dict(sys.modules, {"bagz": fake_bagz}),
+        pytest.raises(FileNotFoundError, match="No such file"),
+    ):
+      input_pipeline_utils.make_bagz_data_source(["/data/missing.bagz"])
+
+  def test_comma_in_path_raises(self):
+    with (
+        mock.patch.dict(sys.modules, {"bagz": self._fake_bagz()}),
+        pytest.raises(ValueError, match="must not contain ','"),
+    ):
+      input_pipeline_utils.make_bagz_data_source(["/data/a,b.bagz"])
+
+
+def _write_bagz_shards_from_arrayrecord(arrayrecord_path, output_dir, num_shards=2, max_records=2000):
+  """Copies the first `max_records` serialized records of an ArrayRecord file into Bagz shards."""
+  import bagz  # pylint: disable=import-outside-toplevel
+
+  source = grain_data_processing.grain.ArrayRecordDataSource(arrayrecord_path)
+  num_records = min(len(source), max_records)
+  per_shard = math.ceil(num_records / num_shards)
+  for shard in range(num_shards):
+    with bagz.Writer(os.path.join(output_dir, f"c4-train-{shard:05d}-of-{num_shards:05d}.bagz")) as writer:
+      for i in range(shard * per_shard, min(num_records, (shard + 1) * per_shard)):
+        writer.write(source[i])
+  return os.path.join(output_dir, f"c4-train-*-of-{num_shards:05d}.bagz")
+
+
+class _GrainBagzSetup(_GrainArrayRecordSetup):
+  """Private setup mixin for Bagz tests: provides setUp and _make_config.
+
+  Bagz shards are generated from the ArrayRecord test shard, so both formats are exercised with
+  identical serialized tf.Example records and no additional test dataset is needed.
+  """
+
+  bagz_dir = None
+  bagz_pattern = None
+
+  def setUp(self):
+    if importlib.util.find_spec("bagz") is None:
+      self.skipTest("requires the optional bagz package")
+    super().setUp()
+    self.arrayrecord_file = self.config.grain_train_files
+    cls = type(self)
+    if cls.bagz_dir is None:
+      cls.bagz_dir = tempfile.mkdtemp(prefix="maxtext_bagz_test_")
+      cls.bagz_pattern = _write_bagz_shards_from_arrayrecord(self.arrayrecord_file, cls.bagz_dir)
+    self.config = self._make_config(grain_file_type="bagz", grain_train_files=cls.bagz_pattern)
+
+  @classmethod
+  def tearDownClass(cls):
+    if cls.bagz_dir is not None:
+      shutil.rmtree(cls.bagz_dir, ignore_errors=True)
+      cls.bagz_dir = None
+    super().tearDownClass()
+
+
+class GrainBagzProcessingTest(_GrainBagzSetup, GrainDeterminismMixin, GrainBaseProcessingTest, unittest.TestCase):
+  """Test grain data processing with Bagz format.
+
+  Inherits test_train_ds, test_batch_determinism, and test_for_loop_repeatable.
+  """
+
+  @pytest.mark.external_serving  # Same as GrainArrayRecordProcessingTest: skipped in decoupled mode.
+  def test_batch_determinism(self):
+    super().test_batch_determinism()
+
+  def test_bagz_matches_arrayrecord_records(self):
+    arrayrecord = grain_data_processing.grain.ArrayRecordDataSource(self.arrayrecord_file)
+    # Local glob order is filesystem-dependent; sort so shard 00000 comes first and indices line up.
+    bagz_source = input_pipeline_utils.make_bagz_data_source(
+        sorted(grain_data_processing.find_data_files(self.config.grain_train_files))
+    )
+    for i in (0, 1, len(bagz_source) - 1):
+      self.assertEqual(bagz_source[i], arrayrecord[i])
+
+
+class GrainBagzMultiprocessTest(_GrainBagzSetup, GrainBaseProcessingTest, unittest.TestCase):
+  """Test that bagz.Reader pickles into Grain worker processes."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = self._make_config(grain_file_type="bagz", grain_train_files=self.bagz_pattern, grain_worker_count=2)
+
+
+class GrainBagzElasticIteratorTest(_GrainBagzSetup, GrainBaseProcessingTest, unittest.TestCase):
+  """Test Bagz with ElasticIterator and Grain worker processes."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = self._make_config(
+        grain_file_type="bagz",
+        grain_train_files=self.bagz_pattern,
+        grain_use_elastic_iterator=True,
+        packing=False,
+        grain_worker_count=2,
+    )
 
 
 class _GrainParquetSetup:

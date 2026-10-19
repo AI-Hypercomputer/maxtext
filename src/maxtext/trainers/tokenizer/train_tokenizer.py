@@ -51,9 +51,11 @@ _GRAIN_TRAIN_FILES = flags.DEFINE_string(
     "grain_train_files", None, "File pattern for training data (local or gs://)", required=True
 )
 _GRAIN_FILE_TYPE = flags.DEFINE_string(
-    "grain_file_type", "parquet", "Type of data files. Supported: 'parquet', 'arrayrecord', 'tfrecord'."
+    "grain_file_type", "parquet", "Type of data files. Supported: 'parquet', 'arrayrecord', 'bagz', 'tfrecord'."
 )
-_DATA_COLUMN = flags.DEFINE_string("data_column", "text", "Column name to extract text from (used for arrayrecord).")
+_DATA_COLUMN = flags.DEFINE_string(
+    "data_column", "text", "Column name to extract text from (used for arrayrecord, bagz and tfrecord)."
+)
 _VOCAB_SIZE = flags.DEFINE_integer("vocab_size", 32_768, "Vocab size")
 _MAX_CORPUS_CHARS = flags.DEFINE_integer("max_corpus_chars", 10_000_000, "Max corpus chars")
 _ASSETS_PATH = flags.DEFINE_string("assets_path", MAXTEXT_ASSETS_ROOT, "Path to assets directory")
@@ -65,7 +67,7 @@ def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys:
 
   Args:
     data_file_pattern: Glob pattern for data files (local path or gs://).
-    data_file_type: One of 'arrayrecord' or 'parquet'.
+    data_file_type: One of 'arrayrecord', 'bagz', 'parquet' or 'tfrecord'.
     data_keys: Column names to extract from each example (used for arrayrecord).
 
   Returns:
@@ -87,8 +89,11 @@ def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys:
     )  # pyrefly: ignore[bad-argument-type]
     dataset = dataset.map(input_pipeline_utils.KeepFeatures(feature_names=list(data_keys)))
     return iter(dataset)
-  elif data_file_type == "arrayrecord":
-    source = grain.ArrayRecordDataSource(data_files)
+  elif data_file_type in ("arrayrecord", "bagz"):
+    if data_file_type == "bagz":
+      source = input_pipeline_utils.make_bagz_data_source(data_files)
+    else:
+      source = grain.ArrayRecordDataSource(data_files)
     dataset = grain.MapDataset.source(source)
     dataset = dataset.map(input_pipeline_utils.ParseFeatures(list(data_keys), tokenize=True))
     dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(list(data_keys), tokenize=True))
@@ -103,7 +108,9 @@ def build_grain_iterator(data_file_pattern: str, data_file_type: str, data_keys:
     dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(list(data_keys), tokenize=True))
     return iter(dataset)
   else:
-    raise ValueError(f"Unsupported grain_file_type: {data_file_type!r}. Use 'parquet', 'arrayrecord', or 'tfrecord'.")
+    raise ValueError(
+        f"Unsupported grain_file_type: {data_file_type!r}. Use 'parquet', 'arrayrecord', 'bagz', or 'tfrecord'."
+    )
 
 
 def _dump_chars_to_textfile(dataset_iter: Iterator, maxchars: int = int(1e7), data_keys=("text",)) -> tuple[str, int]:

@@ -26,8 +26,8 @@ from maxtext.utils import elastic_utils
 
 
 def parse_and_keep_features(dataset, config, data_columns, tokenize):
-  """Parse arrayrecord features or keep specified columns for other formats."""
-  if config.grain_file_type in ("arrayrecord", "tfrecord"):
+  """Parse serialized tf.Example features (arrayrecord, bagz, tfrecord) or keep specified columns for other formats."""
+  if config.grain_file_type in ("arrayrecord", "bagz", "tfrecord"):
     dataset = dataset.map(input_pipeline_utils.ParseFeatures(data_columns, tokenize))
     dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
   else:
