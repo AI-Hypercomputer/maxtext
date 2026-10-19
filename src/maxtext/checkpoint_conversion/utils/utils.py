@@ -14,6 +14,7 @@
 
 """Checkpoint conversion utility functions."""
 
+import asyncio
 import contextlib
 import gc
 import io
@@ -53,6 +54,12 @@ from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
+from orbax.checkpoint import v1 as ocp_v1
+
+# Orbax v1 does not export its leaf-handler API publicly yet (orbax-checkpoint 0.12).
+from orbax.checkpoint._src.futures import future as ocp_future
+from orbax.checkpoint.experimental.v1._src.serialization import numpy_leaf_handler as ocp_numpy_leaf_handler
+from orbax.checkpoint.experimental.v1._src.serialization import registry as ocp_leaf_registry
 
 _storage = gcs_storage()
 Client = _storage.Client
@@ -1258,6 +1265,112 @@ def shard_jax_weights(jax_weights, device_count, mem_info):
   return jax_weights
 
 
+def _group_indices_by_bytes(nbytes: list[int], budget: int | None) -> list[list[int]]:
+  """Splits leaf indices, in order, into groups whose total bytes fit `budget`.
+
+  A leaf larger than the budget gets a group of its own. `budget=None` (or <= 0)
+  means unbounded: a single group.
+  """
+  if not budget or budget <= 0:
+    return [list(range(len(nbytes)))] if nbytes else []
+  groups, current, current_bytes = [], [], 0
+  for i, n in enumerate(nbytes):
+    if current and current_bytes + n > budget:
+      groups.append(current)
+      current, current_bytes = [], 0
+    current.append(i)
+    current_bytes += n
+  if current:
+    groups.append(current)
+  return groups
+
+
+class _AbstractLazyArray:
+  """Save-only abstract type for lazy leaves; restores go through the np.ndarray handler."""
+
+
+class _BudgetedLazyLeafHandler(ocp_numpy_leaf_handler.NumpyLeafHandler):
+  """Orbax v1 leaf handler that writes lazily-loaded leaves within a memory budget.
+
+  Orbax hands a leaf handler all of its leaves in one batch, and the stock
+  `NumpyLeafHandler` deep-copies every value up front before writing them all
+  concurrently. For `to_maxtext.LazyTensor` proxies that would pull the whole model
+  into host RAM (several times over). Instead, the background commit splits the
+  leaves, in order, into groups of at most half of `context.memory.
+  write_concurrent_bytes`; it loads each group on a thread pool (`LOAD_WORKERS`)
+  while the previous group is being written, and drops a group once written. At most
+  two groups are live, so peak memory stays near the budget.
+
+  Leaves are written as plain NumPy arrays under the "np.ndarray" typestr, so the
+  checkpoint is indistinguishable from one saved from materialized arrays.
+  """
+
+  LOAD_WORKERS = 8
+
+  async def serialize(self, params, serialization_context):
+    # pylint: disable=protected-access
+    infos = [ocp_numpy_leaf_handler._create_v0_saving_paraminfo(p, self._context, serialization_context) for p in params]
+    save_args = [ocp_numpy_leaf_handler._create_v0_savearg(p, self._context) for p in params]
+    lazy_values = [p.value for p in params]
+    budget = self._context.memory.write_concurrent_bytes
+    # Two groups are live at once (one being written, the next being loaded).
+    groups = _group_indices_by_bytes([int(v.nbytes) for v in lazy_values], budget // 2 if budget else None)
+    v0_handler = self._handler_impl
+    load_workers = self.LOAD_WORKERS
+
+    def _load(group):
+      with ThreadPoolExecutor(max_workers=max(1, min(load_workers, len(group)))) as pool:
+        return list(pool.map(lambda i: np.asarray(lazy_values[i]), group))
+
+    async def _commit():
+      if not groups:
+        return
+      pending = asyncio.ensure_future(asyncio.to_thread(_load, groups[0]))
+      try:
+        for k, group in enumerate(groups):
+          values = await pending
+          pending = asyncio.ensure_future(asyncio.to_thread(_load, groups[k + 1])) if k + 1 < len(groups) else None
+          await v0_handler._background_serialize(values, [infos[i] for i in group], [save_args[i] for i in group])
+          del values
+      finally:
+        if pending is not None and not pending.done():
+          pending.cancel()
+
+    # Same commit plumbing as the stock handler: the future is created here, on the
+    # calling thread, so it binds to the current save operation and waits for the
+    # item directory to be created before writing.
+    commit_future = ocp_future.CommitFutureAwaitingContractedSignals(_commit(), name="lazy_np_type_handler")
+    return ocp_numpy_leaf_handler._async_futures([commit_future])
+
+
+# Subclassed to register custom leaf handler for LazyTensor leaves.
+class _LazyAwarePyTreeHandler(ocp_v1.handlers.PyTreeHandler):  # pylint: disable=subclassed-final-class
+  """`PyTreeHandler` whose leaf registry also accepts `to_maxtext.LazyTensor` leaves."""
+
+  def __init__(self, *, context=None, **kwargs):
+    # Imported here: to_maxtext imports this module.
+    from maxtext.checkpoint_conversion.to_maxtext import LazyTensor  # pylint: disable=import-outside-toplevel
+
+    leaf_registry = ocp_leaf_registry.StandardLeafHandlerRegistry()
+    leaf_registry.add(LazyTensor, _AbstractLazyArray, _BudgetedLazyLeafHandler, secondary_typestrs=["np.ndarray"])
+    super().__init__(context=context, leaf_handler_registry=leaf_registry, **kwargs)
+
+
+# Orbax records the saving handler's `module.qualname` in `_CHECKPOINT_METADATA`, and
+# loaders resolve the handler from it. This subclass only changes how leaves are
+# *written*, and the on-disk format is exactly `PyTreeHandler`'s, so record that name:
+# checkpoints then load with the stock handler, without a resolution-fallback warning.
+_LazyAwarePyTreeHandler.__module__ = ocp_v1.handlers.PyTreeHandler.__module__
+_LazyAwarePyTreeHandler.__qualname__ = ocp_v1.handlers.PyTreeHandler.__qualname__
+
+
+def _lazy_aware_checkpointables_registry(checkpointable_name: str):
+  """Orbax checkpointable registry that saves `checkpointable_name` with `_LazyAwarePyTreeHandler`."""
+  registry = ocp_v1.handlers.local_registry(include_global_registry=True)
+  registry.add(_LazyAwarePyTreeHandler, checkpointable_name=checkpointable_name)
+  return registry
+
+
 def save_weights_to_checkpoint(
     maxtext_model_path: str,
     jax_weights: dict,
@@ -1265,6 +1378,8 @@ def save_weights_to_checkpoint(
     use_ocdbt: bool,
     use_zarr3: bool,
     config=None,
+    checkpoint_storage_concurrent_gb: float | None = None,
+    save_timeout_secs: int = 24 * 3600,
 ):
   """Saves model weights to a MaxText-compatible checkpoint with optional sharding.
 
@@ -1281,6 +1396,14 @@ def save_weights_to_checkpoint(
           (OCDBT) format for improved metadata handling.
       use_zarr3: If True, uses the Zarr3 storage format for the underlying array data.
       config: Optional config to save along with checkpoint metadata.
+      checkpoint_storage_concurrent_gb: Orbax write budget in GB (may be fractional).
+          With `device_count == 1`, lazily-loaded leaves (`to_maxtext.LazyTensor`) are
+          loaded just in time during the save, in groups of at most this many bytes,
+          so peak host memory tracks this budget rather than the model size. Defaults
+          to the checkpoint manager's default (96 GB).
+      save_timeout_secs: Deadline for the save's background commit. Lazy leaves are
+          loaded (read from the source checkpoint and transformed) inside the commit,
+          so for large models it must cover the whole conversion, not just the write.
   """
   mem_info = psutil.Process()
   logging.debug("Memory usage: %f GB", mem_info.memory_info().rss / (1024**3))
@@ -1291,6 +1414,7 @@ def save_weights_to_checkpoint(
     jax_weights = shard_jax_weights(jax_weights, device_count, mem_info)
   else:
     # If number of simulated devices is 1, SKIP sharding and SKIP jax conversion.
+    # Lazy leaves stay lazy: `_BudgetedLazyLeafHandler` loads them during the save.
     max_logging.log("Single device: Skip sharding")
 
   # Save checkpoint
@@ -1301,6 +1425,9 @@ def save_weights_to_checkpoint(
   async_checkpointing = False
   save_interval_steps = 1
 
+  manager_kwargs = {}
+  if checkpoint_storage_concurrent_gb is not None:
+    manager_kwargs["checkpoint_storage_concurrent_gb"] = checkpoint_storage_concurrent_gb
   checkpoint_manager = checkpointing.create_orbax_checkpoint_manager(
       maxtext_model_path,
       enable_checkpointing,
@@ -1308,8 +1435,12 @@ def save_weights_to_checkpoint(
       save_interval_steps,
       use_ocdbt=use_ocdbt,
       use_zarr3=use_zarr3,
-      # Sets Orbax-V1 I/O write timeout to 60 minutes (up from 20-minute default) to facilitate large model saving.
       enable_continuous_checkpointing=True,
+      # Orbax v1 bounds the whole background commit by this deadline (default 20 min).
+      async_timeout_secs=save_timeout_secs,
+      # `save_checkpoint` saves the train state as the "items" checkpointable.
+      checkpointables_registry=_lazy_aware_checkpointables_registry("items"),
+      **manager_kwargs,
   )
   if checkpoint_manager is None:
     raise RuntimeError("Failed to create Orbax checkpoint manager.")
