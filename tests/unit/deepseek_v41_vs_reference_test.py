@@ -584,6 +584,7 @@ class TflopsCalculationTest(unittest.TestCase):
     config = pyconfig.initialize(
         [sys.argv[0], "src/maxtext/configs/base.yml"],
         run_name="deepseek41_tflops_test",
+        base_output_directory="/tmp/maxtext_test_output",
         enable_checkpointing=False,
         skip_jax_distributed_system=True,
         model_name="deepseek4.1-flash",

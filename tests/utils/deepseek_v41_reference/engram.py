@@ -1,4 +1,3 @@
-# pylint: disable=missing-function-docstring,use-dict-literal,chained-comparison,unnecessary-lambda-assignment,missing-module-docstring,import-outside-toplevel
 from dataclasses import dataclass
 
 import numpy as np
@@ -142,10 +141,7 @@ class NgramHashState(nn.Module):
     # every hash multiplier derives from the compressed vocab size, so a mismatch there would
     # silently rehash the whole table
     token_map, vocab_size = build_compressed_token_map(tokenizer)
-    assert vocab_size == args.engram_compressed_vocab_size, (
-        vocab_size,
-        args.engram_compressed_vocab_size,
-    )
+    assert vocab_size == args.engram_compressed_vocab_size, (vocab_size, args.engram_compressed_vocab_size)
     self.pad_id = token_map[args.engram_pad_id]
     flat = [[p for per_ngram in layer for p in per_ngram] for layer in layout.primes]
     offsets = [np.cumsum([0, *sizes[:-1]]) for sizes in flat]
@@ -154,19 +150,10 @@ class NgramHashState(nn.Module):
     self.register_buffer("offsets", torch.tensor(np.array(offsets)), persistent=False)
     self.register_buffer("multipliers", multipliers, persistent=False)
     self.register_buffer("token_map", torch.tensor(token_map), persistent=False)
-    self.register_buffer(
-        "cache",
-        torch.empty(args.max_batch_size, args.max_seq_len, dtype=torch.int64),
-        persistent=False,
-    )
+    self.register_buffer("cache", torch.empty(args.max_batch_size, args.max_seq_len, dtype=torch.int64), persistent=False)
 
   @torch.inference_mode()
-  def forward(
-      self,
-      input_ids: torch.Tensor,
-      start_pos: int,
-      token_mask: torch.Tensor | None = None,
-  ) -> torch.Tensor:
+  def forward(self, input_ids: torch.Tensor, start_pos: int, token_mask: torch.Tensor | None = None) -> torch.Tensor:
     """token_mask: [B, L], False for tokens that take no part in an n-gram (image spans).
     Returns the hash ids, shaped [B, L, n_engram_layers, n_hash_cols]."""
     batch, seqlen = input_ids.shape

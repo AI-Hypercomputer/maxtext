@@ -500,7 +500,7 @@ class PureJaxTrainingFixesTest(unittest.TestCase):
 
     ref_out, ref_grad = jax.value_and_grad(lambda t: jnp.sum(jnp.take(t, raw_ids, axis=0) * cotangent))(table_init)
     with mesh:
-      for method in ("all_to_all", "psum_scatter"):
+      for method in ("all_to_all", "psum_scatter", "gather"):
         got_val, got_grad = jax.value_and_grad(
             lambda t, m=method: jnp.sum(
                 engram_deepseek41.sharded_row_lookup(
@@ -519,6 +519,97 @@ class PureJaxTrainingFixesTest(unittest.TestCase):
         )(table_init)
         self.assertAlmostEqual(float(got_val), float(ref_out), delta=1e-4)
         np.testing.assert_allclose(np.asarray(got_grad), np.asarray(ref_grad), rtol=1e-5, atol=1e-5)
+
+      # Verify non-divisible batch fallback (e.g. single-prompt inference/eval) when multi-device mesh is active:
+      single_ids = raw_ids[:1]
+      single_cot = cotangent[:1]
+      ref_single_val, ref_single_grad = jax.value_and_grad(
+          lambda t: jnp.sum(jnp.take(t, single_ids, axis=0) * single_cot)
+      )(table_init)
+      got_single_val, got_single_grad = jax.value_and_grad(
+          lambda t: jnp.sum(
+              engram_deepseek41.sharded_row_lookup(
+                  t,
+                  single_ids,
+                  mesh=mesh,
+                  rules=rules,
+                  out_dtype=jnp.float32,
+                  method="all_to_all",
+                  capacity_factor=4.0,
+                  num_rows=num_real_rows,
+              )
+              * single_cot
+          )
+      )(table_init)
+      self.assertAlmostEqual(float(got_single_val), float(ref_single_val), delta=1e-4)
+      np.testing.assert_allclose(np.asarray(got_single_grad), np.asarray(ref_single_grad), rtol=1e-5, atol=1e-5)
+
+  def test_hc_pre_unrolled_sum_matches_reduce_and_grads(self):
+    h_f32 = jax.random.normal(jax.random.PRNGKey(4), (2, 12, 4, 16), dtype=jnp.float32)
+    mix = jax.random.normal(jax.random.PRNGKey(5), (2, 12, 4), dtype=jnp.float32)
+    cot = jax.random.normal(jax.random.PRNGKey(6), (2, 12, 16), dtype=jnp.float32)
+
+    for dtype in (jnp.float32, jnp.bfloat16):
+      h = h_f32.astype(dtype)
+      ref_val, (ref_dh, ref_dmix) = jax.value_and_grad(
+          lambda h_in, m_in: jnp.sum(
+              jnp.sum(m_in[..., None] * h_in.astype(jnp.float32), axis=2).astype(h_in.dtype) * cot.astype(h_in.dtype)
+          ),
+          argnums=(0, 1),
+      )(h, mix)
+      got_val, (got_dh, got_dmix) = jax.value_and_grad(
+          lambda h_in, m_in: jnp.sum(deepseek41.DeepSeek41DecoderLayer.hc_pre(h_in, m_in) * cot.astype(h_in.dtype)),
+          argnums=(0, 1),
+      )(h, mix)
+      np.testing.assert_allclose(np.asarray(got_val), np.asarray(ref_val), rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(np.asarray(got_dh), np.asarray(ref_dh), rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(np.asarray(got_dmix), np.asarray(ref_dmix), rtol=1e-5, atol=1e-5)
+
+  def test_chunked_attention_matches_dense_sink_attention_and_grads(self):
+    import functools  # pylint: disable=import-outside-toplevel
+    from maxtext.layers import attention_deepseek41  # pylint: disable=import-outside-toplevel
+
+    b, s, h, d, window_size, chunk, c_len = 2, 16, 4, 8, 4, 4, 6
+    q = jax.random.normal(jax.random.PRNGKey(7), (b, s, h, d), dtype=jnp.float32)
+    kv = jax.random.normal(jax.random.PRNGKey(8), (b, s, d), dtype=jnp.float32)
+    compress_kv = jax.random.normal(jax.random.PRNGKey(9), (b, c_len, d), dtype=jnp.float32)
+    sinks = jax.random.normal(jax.random.PRNGKey(10), (h,), dtype=jnp.float32)
+    cot = jax.random.normal(jax.random.PRNGKey(11), (b, s, h, d), dtype=jnp.float32)
+    positions = jnp.broadcast_to(jnp.arange(s, dtype=jnp.int32), (b, s))
+    topk_mask = jax.random.uniform(jax.random.PRNGKey(12), (b, s, c_len)) > 0.4
+
+    attend = functools.partial(
+        attention_deepseek41._sink_attention,  # pylint: disable=protected-access
+        softmax_scale=d**-0.5,
+        precision=jax.lax.Precision.HIGHEST,
+        out_dtype=jnp.float32,
+    )
+    dummy = type("_DummyAttn", (), {"window_size": window_size})()
+
+    for use_compressed in (False, True):
+      c_kv = compress_kv if use_compressed else None
+      t_mask = topk_mask if use_compressed else None
+
+      def dense_loss(q_in, kv_in, ckv_in, s_in):
+        delta = positions[:, :, None] - positions[:, None, :]
+        mask = (delta >= 0) & (delta < window_size)
+        keys = kv_in
+        if ckv_in is not None:
+          keys = jnp.concatenate([kv_in, ckv_in], axis=1)
+          mask = jnp.concatenate([mask, t_mask], axis=-1)
+        return jnp.sum(attend(q_in, keys, mask, s_in) * cot)
+
+      def chunked_loss(q_in, kv_in, ckv_in, s_in):
+        out = attention_deepseek41.DeepSeek41Attention._chunked_attention(  # pylint: disable=protected-access
+            dummy, q_in, kv_in, ckv_in, t_mask, positions, s_in, attend, chunk
+        )
+        return jnp.sum(out * cot)
+
+      ref_val, ref_grads = jax.value_and_grad(dense_loss, argnums=(0, 1, 3))(q, kv, c_kv, sinks)
+      got_val, got_grads = jax.value_and_grad(chunked_loss, argnums=(0, 1, 3))(q, kv, c_kv, sinks)
+      self.assertAlmostEqual(float(got_val), float(ref_val), delta=1e-4)
+      for g_got, g_ref in zip(got_grads, ref_grads):
+        np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

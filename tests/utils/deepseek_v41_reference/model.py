@@ -168,8 +168,7 @@ class ModelArgs:
 
 class ParallelEmbedding(nn.Module):
   """Embedding sharded along the vocab dimension. Each rank holds vocab_size // world_size rows.
-  Out-of-range indices are zero-masked before all_reduce to combine partial embeddings.
-  """
+  Out-of-range indices are zero-masked before all_reduce to combine partial embeddings."""
 
   def __init__(self, vocab_size: int, dim: int):
     super().__init__()
@@ -206,14 +205,10 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = No
 
 def _plain_dtype(dtype):
   """Upstream pins some weights to bf16 (and quantizes the rest). Here those follow the model dtype, so an fp32
-  reference runs in fp32 end to end; weights explicitly kept in fp32 upstream stay fp32.
-  """
+  reference runs in fp32 end to end; weights explicitly kept in fp32 upstream stay fp32."""
   if dtype is None or dtype == torch.bfloat16:
     return default_dtype
-  assert dtype in (
-      torch.float32,
-      torch.float16,
-  ), f"quantized dtype {dtype} is not supported by the reference"
+  assert dtype in (torch.float32, torch.float16), f"quantized dtype {dtype} is not supported by the reference"
   return dtype
 
 
@@ -331,12 +326,7 @@ class Engram(nn.Module):
     self.q_weight = nn.Parameter(torch.ones(args.hc_mult, args.dim))
     self.k_weight = nn.Parameter(torch.ones(args.hc_mult, args.dim))
 
-  def forward(
-      self,
-      x: torch.Tensor,
-      hash_ids: torch.Tensor,
-      token_mask: torch.Tensor | None = None,
-  ) -> torch.Tensor:
+  def forward(self, x: torch.Tensor, hash_ids: torch.Tensor, token_mask: torch.Tensor | None = None) -> torch.Tensor:
     """x: [B, L, hc_mult, dim]; hash_ids: [B, L, n_hash_cols]; token_mask: [B, L], False shuts
     the gate so those positions pass through untouched."""
     kv = self.wkv(self.embed(hash_ids).flatten(-2))
@@ -432,27 +422,15 @@ class Compressor(nn.Module):
     self.norm = RMSNorm(head_dim, args.norm_eps)
     # ratio 1 is a plain projection, so it stays in the checkpoint's bf16; the softmax pooling
     # above ratio 1 runs in fp32, so those weights are promoted to fp32 to match
-    self.wkv = Linear(
-        args.dim,
-        head_dim,
-        dtype=torch.float32 if compress_ratio > 1 else torch.bfloat16,
-    )
+    self.wkv = Linear(args.dim, head_dim, dtype=torch.float32 if compress_ratio > 1 else torch.bfloat16)
     if compress_ratio > 1:
       self.wgate = Linear(args.dim, head_dim, dtype=torch.float32)
       # tail of an incomplete group, carried across decode steps
       self.kv_state: torch.Tensor
       self.score_state: torch.Tensor
       state_shape = (args.max_batch_size, compress_ratio, head_dim)
-      self.register_buffer(
-          "kv_state",
-          torch.zeros(state_shape, dtype=torch.float32),
-          persistent=False,
-      )
-      self.register_buffer(
-          "score_state",
-          torch.full(state_shape, -torch.inf, dtype=torch.float32),
-          persistent=False,
-      )
+      self.register_buffer("kv_state", torch.zeros(state_shape, dtype=torch.float32), persistent=False)
+      self.register_buffer("score_state", torch.full(state_shape, -torch.inf, dtype=torch.float32), persistent=False)
 
   def forward(self, x: torch.Tensor, start_pos: int) -> torch.Tensor | None:
     bsz, seqlen, _ = x.size()
@@ -519,22 +497,11 @@ class Indexer(torch.nn.Module):
       self.k_cache: torch.Tensor
       self.register_buffer(
           "k_cache",
-          torch.zeros(
-              args.max_batch_size,
-              args.max_seq_len // self.compress_ratio,
-              args.index_head_dim,
-          ),
+          torch.zeros(args.max_batch_size, args.max_seq_len // self.compress_ratio, args.index_head_dim),
           persistent=False,
       )
 
-  def forward(
-      self,
-      x: torch.Tensor,
-      qr: torch.Tensor,
-      latent: torch.Tensor,
-      start_pos: int,
-      offset: int,
-  ):
+  def forward(self, x: torch.Tensor, qr: torch.Tensor, latent: torch.Tensor, start_pos: int, offset: int):
     """`latent` is this layer's RoPE-free compressed latent, None when this layer does not
     compress or when its current group is still incomplete. An index-key owner turns it into
     index keys here, which has to happen before Attention overwrites that same storage with
@@ -573,19 +540,13 @@ class Indexer(torch.nn.Module):
     # has passed its last token. One query per decode step, so there it is just a number.
     if start_pos == 0:
       compress_lens = (torch.arange(1, seqlen + 1, device=x.device) // ratio).unsqueeze(-1)
-      index_score.masked_fill_(
-          torch.arange(seqlen // ratio, device=x.device) >= compress_lens,
-          -torch.inf,
-      )
+      index_score.masked_fill_(torch.arange(seqlen // ratio, device=x.device) >= compress_lens, -torch.inf)
     else:
       compress_lens = end_pos // ratio
 
     if self.is_candidate_source:
       shared_attn.candidates = select_candidate_blocks(
-          index_score,
-          compress_lens,
-          self.candidate_topk_blocks,
-          self.candidate_block_size,
+          index_score, compress_lens, self.candidate_topk_blocks, self.candidate_block_size
       )
     elif self.uses_candidates:
       # level two: score with our own weights, but only inside the source's candidate blocks
@@ -727,12 +688,9 @@ class Attention(nn.Module):
         self.window_kv_cache[:bsz, :seqlen] = kv
       else:
         cutoff = seqlen % win
-        (
-            self.window_kv_cache[:bsz, cutoff:win],
-            self.window_kv_cache[:bsz, :cutoff],
-        ) = kv[
-            :, -win:
-        ].split([win - cutoff, cutoff], dim=1)
+        self.window_kv_cache[:bsz, cutoff:win], self.window_kv_cache[:bsz, :cutoff] = kv[:, -win:].split(
+            [win - cutoff, cutoff], dim=1
+        )
       window_kv = kv
     else:  # decode: one token into the ring buffer, attend over the whole window
       self.window_kv_cache[:bsz, start_pos % win] = kv.squeeze(1)
@@ -758,8 +716,7 @@ class Attention(nn.Module):
 
   def _compress_kv(self, x, qr, start_pos, offset):
     """The shared compressed KV and the compressed positions every query may attend to. This
-    layer compresses its own KV only when it is a source; otherwise it just reads the cache.
-    """
+    layer compresses its own KV only when it is a source; otherwise it just reads the cache."""
     bsz, seqlen, _ = x.size()
     ratio = self.compress_ratio
     compress_len = (start_pos + seqlen) // ratio
@@ -813,8 +770,7 @@ class Attention(nn.Module):
 
 class Gate(nn.Module):
   """MoE gating. The correction bias steers expert selection only; the routing weights come from the
-  unbiased scores. Image-span tokens use a separate bias (training `noaux_tc_for_vl`).
-  """
+  unbiased scores. Image-span tokens use a separate bias (training `noaux_tc_for_vl`)."""
 
   def __init__(self, layer_id: int, args: ModelArgs):
     super().__init__()
@@ -968,16 +924,9 @@ class Block(nn.Module):
       self.hc_attn_scale = nn.Parameter(torch.empty(3))
       self.hc_ffn_scale = nn.Parameter(torch.empty(3))
 
-  def hc_mixes(
-      self,
-      x: torch.Tensor,
-      hc_fn: torch.Tensor,
-      hc_scale: torch.Tensor,
-      hc_base: torch.Tensor,
-  ):
+  def hc_mixes(self, x: torch.Tensor, hc_fn: torch.Tensor, hc_scale: torch.Tensor, hc_base: torch.Tensor):
     """x: [b,s,hc,d], hc_fn: [mix_hc, hc*d], hc_scale: [3], hc_base: [mix_hc]. Returns the
-    pre / post / comb coefficients, split out of one projection of the flattened stream.
-    """
+    pre / post / comb coefficients, split out of one projection of the flattened stream."""
     # normalized over the whole flattened hc*d stream, one statistic per token
     x = x.flatten(2).float()
     rsqrt = torch.rsqrt(x.square().mean(-1, keepdim=True) + self.norm_eps)
@@ -989,16 +938,9 @@ class Block(nn.Module):
     y = torch.sum(pre_mix.unsqueeze(-1) * x.float(), dim=2)
     return y.to(x.dtype)
 
-  def hc_post(
-      self,
-      x: torch.Tensor,
-      residual: torch.Tensor,
-      post: torch.Tensor,
-      comb: torch.Tensor,
-  ):
+  def hc_post(self, x: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor):
     """Expand the sublayer output back to hc copies and mix the residual in through `comb`.
-    x: [b,s,d], residual: [b,s,hc,d], post: [b,s,hc], comb: [b,s,hc,hc] -> [b,s,hc,d]
-    """
+    x: [b,s,d], residual: [b,s,hc,d], post: [b,s,hc], comb: [b,s,hc,hc] -> [b,s,hc,d]"""
     y = post.unsqueeze(-1) * x.unsqueeze(-2) + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=2)
     return y.type_as(x)
 
@@ -1014,8 +956,7 @@ class Block(nn.Module):
     sub-block's own `hc_mixes` produces the mix for the *next* one, so attention uses what the
     previous layer's FFN produced and the FFN uses what this attention produced.
 
-    image_mask: [b, s] bool, True inside image spans (selects the VL routing bias).
-    """
+    image_mask: [b, s] bool, True inside image spans (selects the VL routing bias)."""
     residual = x
     attn_pre, attn_post, attn_comb = self.hc_mixes(x, self.hc_attn_fn, self.hc_attn_scale, self.hc_attn_base)
     x = self.hc_pre(x, pre_mix)
@@ -1086,12 +1027,9 @@ class DSparkAttention(Attention):
         self.window_kv_cache[:bsz, :seqlen] = main_kv
       else:
         cutoff = seqlen % win
-        (
-            self.window_kv_cache[:bsz, cutoff:win],
-            self.window_kv_cache[:bsz, :cutoff],
-        ) = main_kv[
-            :, -win:
-        ].split([win - cutoff, cutoff], dim=1)
+        self.window_kv_cache[:bsz, cutoff:win], self.window_kv_cache[:bsz, :cutoff] = main_kv[:, -win:].split(
+            [win - cutoff, cutoff], dim=1
+        )
       return x
 
     bsz, block_size, _ = x.size()
@@ -1165,13 +1103,7 @@ class DSparkBlock(Block):
     self.embed: ParallelEmbedding | None = None
     self.head: ParallelHead | None = None
 
-  def forward(
-      self,
-      x: torch.Tensor,
-      start_pos: int,
-      pre_mix: torch.Tensor,
-      main_x: torch.Tensor,
-  ):
+  def forward(self, x: torch.Tensor, start_pos: int, pre_mix: torch.Tensor, main_x: torch.Tensor):
     if start_pos == 0:
       self.attn(x, start_pos, main_x)  # prefill only seeds the window KV cache
       return x, pre_mix
@@ -1234,8 +1166,7 @@ shared_attn = SharedAttentionRuntime()
 
 class Transformer(nn.Module):
   """DeepSeek-V4.1: embed -> expand to hc_mult copies -> blocks -> collapse -> logits. Building
-  this sets the globals at the top of the file. The tokenizer only feeds the engram token map.
-  """
+  this sets the globals at the top of the file. The tokenizer only feeds the engram token map."""
 
   def __init__(self, args: ModelArgs, tokenizer=None):
     global world_size, rank, default_dtype, compute_fp32
