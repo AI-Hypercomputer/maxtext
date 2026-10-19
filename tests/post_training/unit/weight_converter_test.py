@@ -784,6 +784,57 @@ class TargetFreeConversionTest(unittest.TestCase):
       )
     self.assertIn("must be divisible by base_num_kv_heads", str(ctx.exception))
 
+    # 3. TP fallback: rollout_tensor_parallelism=4, kv_tp_size default (0/None) -> kv_tp_size=4, kv_replication=2
+    cfg_tp4 = _config(
+        inhomogeneous_layer_cycle_interval=1,
+        num_decoder_layers=2,
+        base_num_kv_heads=2,
+        rollout_tensor_parallelism=4,
+        kv_tp_size=0,
+    )
+    converter_tp4 = WeightConverter(
+        config=cfg_tp4,
+        rollout_backend="maxtext",
+    )
+    self.assertEqual(converter_tp4.kv_tp_size, 4)
+    self.assertEqual(converter_tp4._direct.kv_replication, 2)  # pylint: disable=protected-access
+
+    # 4. Explicit kv_tp_size=1 honored even when rollout_tensor_parallelism=4
+    converter_tp4_kv1 = WeightConverter(
+        config=cfg_tp4,
+        kv_tp_size=1,
+        rollout_backend="maxtext",
+    )
+    self.assertEqual(converter_tp4_kv1.kv_tp_size, 1)
+    self.assertEqual(converter_tp4_kv1._direct.kv_replication, 1)  # pylint: disable=protected-access
+
+    # 5. TP * EP fallback: rollout_tensor_parallelism=2, rollout_expert_parallelism=4, kv_tp_size default (0/None)
+    # -> kv_tp_size = 2 * 4 = 8, kv_replication = 8 // 2 = 4
+    cfg_tp2_ep4 = _config(
+        inhomogeneous_layer_cycle_interval=1,
+        num_decoder_layers=2,
+        base_num_kv_heads=2,
+        rollout_tensor_parallelism=2,
+        rollout_expert_parallelism=4,
+        kv_tp_size=0,
+    )
+    converter_tp2_ep4 = WeightConverter(
+        config=cfg_tp2_ep4,
+        rollout_backend="maxtext",
+    )
+    self.assertEqual(converter_tp2_ep4.tp, 2)
+    self.assertEqual(converter_tp2_ep4.kv_tp_size, 8)
+    self.assertEqual(converter_tp2_ep4._direct.kv_replication, 4)  # pylint: disable=protected-access
+
+    # 6. Explicit kv_tp_size=1 honored even when rollout_tensor_parallelism=2 and rollout_expert_parallelism=4
+    converter_tp2_ep4_kv1 = WeightConverter(
+        config=cfg_tp2_ep4,
+        kv_tp_size=1,
+        rollout_backend="maxtext",
+    )
+    self.assertEqual(converter_tp2_ep4_kv1.kv_tp_size, 1)
+    self.assertEqual(converter_tp2_ep4_kv1._direct.kv_replication, 1)  # pylint: disable=protected-access
+
 
 if __name__ == "__main__":
   unittest.main()
