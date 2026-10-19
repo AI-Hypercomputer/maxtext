@@ -318,6 +318,7 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "glm5.3-flash",
 ]
 
 
