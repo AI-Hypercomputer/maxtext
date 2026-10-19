@@ -834,6 +834,7 @@ class MlaAttention(BaseModel):
   qk_nope_head_dim: NonNegativeInt = Field(128, description="Dimension for non-RoPE part of QK heads in MLA.")
   qk_rope_head_dim: NonNegativeInt = Field(64, description="Dimension for RoPE part of QK heads in MLA.")
   v_head_dim: NonNegativeInt = Field(128, description="Dimension of V heads in MLA.")
+  mla_use_output_gate: bool = Field(False, description="Whether to use output gate in MLA attention.")
   use_sliced_mla_proj: bool = Field(
       False,
       description=(
@@ -1134,6 +1135,14 @@ class MoEGeneral(BaseModel):
   moe_expert_input_dim: int = Field(
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
+  )
+  moe_router_input_dim: int = Field(
+      -1,
+      description=(
+          "Dimension of the router (gate) input when it differs from the expert input, e.g. a latent MoE that"
+          " routes on the full hidden state but runs experts on a down-projected latent (pass the router input"
+          " as `gate_inputs`). If < 0, defaults to the expert input dim."
+      ),
   )
   base_moe_mlp_dim: int = Field(-1, description="Intermediate dimension at MoE layer.")
   padded_base_moe_mlp_dim: Optional[int] = Field(
