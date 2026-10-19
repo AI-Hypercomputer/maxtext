@@ -1151,6 +1151,12 @@ def calculate_deepseek4_tflops_training_per_device(config, total_ffn_flops_all_l
 
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
+  if config.use_m3_model:
+    # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.m3 import models as m3_models
+
+    if config.model_name in m3_models.MODEL_FLOPS_REGISTRY:
+      return m3_models.calculate_tflops_per_device(config, log=log)
   # MLP flops
   is_ffn_flops_already_total = False
   if config.num_experts > 1:
