@@ -295,6 +295,7 @@ moe_bwd_prequant_before_unsort: false # fuse TC unsort-reduce into the wo GMM cu
 moe_combine_bwd_direct_qarray: false # with moe_bwd_prequant_before_unsort, fuse the EP combine psum_scatter into the wo GMM custom VJP so backward quantizes the local cotangent once before the EP all-gather and TC unsort-gather. Incompatible with moe_quantize_combine_bwd_method.
 moe_3d_dlhs_partial_sum: false # skip redundant zero-init in 3D DLHS gmm_v2 when accumulating onto an existing 3D partial_sum (e.g. wi_0 DLHS accumulating onto wi_1 DLHS).
 moe_chunk_barrier: false # wraps its iteration with optimization_barrier to chain the chunked ring-of-experts MoE loop so each chunk's input is fenced on the previous chunk's output, forcing sequential (no-interleave) chunk execution. Math unchanged (barrier is identity), loss bit-exact. Needs num_moe_token_chunks>1 + use_ring_of_experts=True to matter.
+moe_combine_per_chunk: false # chunked ring-of-experts, plain chunk loop: chunk c's unpermute waits on chunk c-1's combine reduce-scatter (forward-only data dependency on the routing weights, saved as remat name moe_combine_order), so the SparseCore runs unpermute0, RS0, unpermute1, RS1. Math unchanged. No effect with moe_chunk_pipeline (its tie 3 already orders them).
 moe_chunk_pipeline: false # software-pipeline the chunked ring-of-experts loop: chunk c+1's EP token all-gather runs under chunk c's GMMs and chunk c's gather-reduce + reduce-scatter under chunk c+1's, via optimization barriers (math unchanged; skipped with a warning when --xla_tpu_aggressive_opt_barrier_removal=true or ENABLED applies). Needs num_moe_token_chunks>1 + use_ring_of_experts=True.
 moe_log_max_load_ratio: false # debug: log learning/moe_max_load_ratio{,_mean} (expert-shard load / balanced load) on the ring-of-experts ragged path; overflow iff max > ragged_buffer_factor.
 ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer for routed MoE activations.
@@ -332,10 +333,20 @@ moe_prefused_swiglu_vjp: false
 # [buffer, 3 * mlp]). Numerics change: silu reads the float32 accumulator.
 # Needs prefuse_moe_weights, use_tokamax_gmm and use_gmm_v2, silu+linear without clipping, no bias or quantization.
 moe_wi_gmm_fused_swiglu: false
+# The MoE SwiGLU backward in the epilogue of the wo (down projection) DLHS GMM (megablox gmm_dswiglu, tokamax gmm_v2):
+# the kernel writes d[gate | up] from its float32 accumulator instead of d act in bf16. Numerics change: the derivative
+# reads the float32 accumulator. Same requirements as moe_wi_gmm_fused_swiglu, plus no TC ragged sort, and one n tile:
+# wo_tile_dlhs_mlp_dim = the per-shard MoE MLP dim (with moe_wi_gmm_fused_swiglu, explicit tiles and a
+# wi_tile_fwd_mlp_dim whose half is that dim or a multiple of 128 dividing it).
+moe_wo_gmm_fused_dswiglu: false
 fp8_moe: false # whether MoE weights are quantized to float8_e4m3fn in inference/rollout
 # Keep routed-expert weights in weight_dtype but round them in the forward pass to the per-channel FP8 grid
 # fp8_moe stores them on, with straight-through gradients: the trainer computes with the rollout's weights.
 fp8_moe_fake_quant: false
+# off | absmax | gather8 (bit-identical to off). absmax: the fake-quant absmax of every routed-expert weight is computed
+# once for the scanned layer stack, before the scan. gather8: also all-gather the fp8 codes and dequantize after the
+# gather. Env PARAMBOLE_FQ_HOIST (0, absmax, 1 = gather8) selects a mode while this is off.
+fp8_fake_quant_hoist: "off"
 # Trainer side: the rollout serves fp8_moe experts, so weight sync quantizes them (and emits their scales).
 rollout_fp8_moe: false
 load_balance_loss_weight: 0.0 # weight for the load balance loss
@@ -377,6 +388,10 @@ use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the Mo
 # router replay / padding exclusion). Same permutation, same values.
 # Needs sparse_matmul, use_ring_of_experts and use_ragged_sort (and te_moe_block=False).
 moe_routing_index_math: 'sort'
+# Router replay (forced routing): compute the router's own top-k (for tokens without valid forced ids) on at most this
+# many compacted token rows per call instead of on every token; a lax.cond takes every row when more tokens need it.
+# Same ids for every token that uses them, so get_topk's outputs are bit-identical. 0 = every token (today).
+moe_fallback_topk_capacity: 0
 # With moe_routing_index_math='sort': the ragged sort's argsorts (and the SparseCore gather-reduce validity sort) as
 # unstable two-operand sorts of unique (key, index) pairs instead of stable argsorts (three operands). Same values.
 moe_ragged_sort_unique_pair_argsort: false
@@ -392,6 +407,7 @@ moe_tc_ragged_3d_dispatch: false # moe_tc_ragged_sort + moe_tc_ragged_3d_gmm: ke
 moe_tc_window_routing: false # moe_tc_ragged_sort: keep only the shard's [start, start + cap) routing window, packed uint32 sorts.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
+ragged_unsort_spread_masked_indices: false # bit-identical: masked slots of the count-index unsort gather read distinct entries, not entry 0
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
 ragged_gather_reduce_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
@@ -411,12 +427,24 @@ moe_pin_sparse_core_fsdp_all_gathers: false
 moe_pin_sparse_core_fsdp_all_gathers_fwd_only: false
 moe_fsdp_all_gather_sparse_core_id: 0
 moe_ep_all_gather_sparse_core_id: 1
+# Ring of experts: fp8 payload (per-row f32 scale) for the backward all-gather of the MoE output cotangent
+moe_fp8_bwd_dispatch: false
+moe_fp8_bwd_dispatch_qtype: "float8_e4m3fn" # or float8_e5m2
+# Ring of experts: forward combine as an fp8 (e4m3, per-row f32 scale) all-to-all + local f32 sum
+moe_fp8_combine: false
+moe_fp8_combine_pin_sparse_core: false # pin the moe_fp8_combine all-to-all to SparseCore moe_ep_all_gather_sparse_core_id
+# Ring of experts: forward token all-gather (the dispatch) with an fp8 e4m3 payload and a per-row f32 scale, dequantized
+# to the activation dtype after the gather; the backward stays the bf16 reduce-scatter of the cotangent (straight-through)
+moe_fp8_token_all_gather: false
 # tunable tiling dimensions used for mlp gmm
 # megablox/jax ragged dot - supports forward pass only (6 configs: `wi_tile_fwd...` and `wo_tile_fwd_...`)
 # tokamax ragged dot - supports all 18 configs
 wi_tile_fwd_batch_seq: 512
 wi_tile_fwd_embed_dim: 1024
 wi_tile_fwd_mlp_dim: 1024
+# VMEM buffers of the weight tile in the fused wi forward GMM (moe_wi_gmm_fused_swiglu). 0: the kernel default (3).
+# 2 frees one [gate | up] weight tile; applied only when that GMM runs one K tile. See types.py.
+wi_tile_fwd_rhs_buffer_count: 0
 eval_wi_tile_fwd_batch_seq: 512
 eval_wi_tile_fwd_embed_dim: 1024
 eval_wi_tile_fwd_mlp_dim: 1024
@@ -588,6 +616,16 @@ engram: 'remat'
 
 optimizer_memory_host_offload: false
 parameter_memory_host_offload: false
+# Tunix Fp32MasterOptimizer (bf16 weights): "f32" keeps a float32 master per bf16 weight; "residual16" stores a scanned
+# layer's master as the 16 bits its bf16 weight does not hold (uint16) plus one bit per element packed along the scan
+# axis, and rebuilds it bit for bit at each update. Same masters, weights and updates; 2.13 instead of 4 bytes per
+# element stored (and, with optimizer_memory_host_offload, copied to and from the host at every update).
+fp32_master_storage: "f32"
+# With optimizer_memory_host_offload: keep the largest optimizer leaves (up to this many GiB per device) in device
+# memory between updates; the update reads and writes them in place, so they no longer cross the host link.
+# Bit-identical. They stay in device memory for the whole step, beside fwd_bwd and the gradient accumulator.
+# 0 = off.
+optimizer_device_resident_gib: 0.0
 # Whether to use jax.lax.scan over layers (stacked/unstacked checkpoint). We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations. When resuming from a checkpoint, this flag is auto-determined from metadata.
 scan_layers: true
 param_scan_axis: 1
@@ -673,6 +711,14 @@ qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
 # Combine matmuls for QKV and MLP
 fused_qkv: false
 fused_mlp: false
+# Training: gather the attention query projection kernel (with Qwen3-Next / Qwen3.5's output gate) once per attention
+# layer in the backward pass instead of twice. The kernel is sharded on its embed dimension, so the partitioner
+# all-gathers it for the remat replay of q = x @ wq and again for the input gradient dx = dq @ wq^T. With this on, the
+# replay's gathered kernel feeds the input gradient (it stays live in between); the kernel gradient is unchanged and
+# the results are the same bits. Requires an unquantized, unfused (fused_qkv: false) query projection whose kernel is
+# sharded on its embed dimension and replicated on the others (no tensor parallelism), auto shard mode, and
+# remat_policy full, save_out_proj, or custom with query_proj: 'remat'.
+query_proj_kernel_gather_once: false
 
 record_internal_nn_metrics: 0
 
@@ -745,6 +791,11 @@ compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_s
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
 custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
+# Gradients of the dense weights a custom_mesh_and_rule replicates over context (rules that map 'embed_grad':
+# cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp): "reduce_scatter" = reduce-scatter over every token axis, then all-gather over
+# the replicated axes (linears.route_dense_weight_grad); "all_reduce" = drop the 'embed_grad' rule, so GSPMD all-reduces
+# each gradient. The forward is unchanged; the gradients differ by summation order only.
+dense_grad_reduce: "reduce_scatter"
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'context_autoregressive', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['circular_repeats', []],
@@ -1505,6 +1556,16 @@ context_parallel_load_balance: true
 # GatedDeltaNet, whose recurrence needs natural order) and the input pipeline keep natural order. Only causal
 # (global) attention layers are balanced. Requires context_parallel_load_balance: false and use_multimodal: false.
 context_parallel_attention_load_balance: false
+# Under context_parallel_attention_load_balance, save each attention layer's reordered positions and segment ids
+# for the backward. They depend only on the batch, so jax.lax.scan keeps one saved copy outside the layer loop, and
+# the remat replay of the attention layers reads it instead of reordering them again. Same values. Requires
+# context_parallel_attention_load_balance: true, remat_policy: custom and scan_layers: true.
+context_parallel_attention_load_balance_hoist_ids: false
+# How context_parallel_attention_load_balance moves each attention layer's tokens into and out of DUAL_CHUNK_SWAP order.
+# "dual_chunk_swap" (default): two collective-permutes of half a shard; a rank keeping its own half copies it inside the
+# permute. "dual_chunk_swap_local_self": the same order and values, with those self pairs dropped from the permutes and
+# the local half taken by a select. Requires context_parallel_attention_load_balance: true.
+context_parallel_attention_load_balance_order: "dual_chunk_swap"
 context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
 
@@ -1650,6 +1711,47 @@ gdn_conv1d_input_in_qkv_dtype: false
 # use_gdn_kernel: true and a GDN Conv1D width (2 * key heads * key head dim + value heads * value head dim) that is
 # a multiple of 1024.
 gdn_conv1d_dense_token_stack: false
+# GDN kernel path: replace the sequence-sharded CP forward m_local XLA reduction tree with the Pallas VMEM scan
+# (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_m_scan). Requires use_gdn_kernel: true and gdn_chunk_size: 64.
+gdn_cp_m_scan: false
+# GDN kernel path: replace the sequence-sharded CP backward ds_ext_local XLA reduction tree with the Pallas VMEM scan
+# (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_dh_scan). Requires use_gdn_kernel: true and gdn_chunk_size: 64.
+gdn_cp_dh_scan: false
+# Pin the GatedDeltaNet gated-norm output to token-minor (0, 2, 1) before out_proj in training.
+gdn_out_proj_token_minor: false
+# Layout around the GatedDeltaNet gated norm in training: 'auto' (XLA's choice: it relayouts the GDN output after the
+# f32 convert), 'token_minor' (the bf16 GDN output pinned token-minor in the forward, so that relayout is one bf16
+# transpose), 'natural' (the norm output pinned row-major in the forward) or 'natural_fwd_bwd' (its cotangent too).
+# Same values. Non-'auto' requires gdn_out_proj_token_minor: true.
+gdn_gated_norm_layout: "auto"
+# Sequence-sharded CP GDN pass 1 runs the states-only forward kernel (PER_SEQ_STATES, no output or chunk states),
+# and every prefill-only forward kernel (CP pass 1, CP pass 2, and non-CP/head-sharded prefill) DMAs bfloat16 qkv
+# chunks and upcasts to fp32 in VMEM. Bit-identical to false for bfloat16 activations. Requires use_gdn_kernel: true,
+# gdn_chunk_size: 64, and dtype: "bfloat16".
+gdn_cp_pass1_states_and_bf16_qkv: false
+# Sequence-sharded CP GDN training state passing: 2-round exclusive state/grad-state scans on 4 CP ranks and
+# skip dead train-mode final conv/recurrent state broadcasts when initial states are None.
+gdn_cp_fast_state_passing: false
+# GDN kernel path: operand groups the Pallas backward kernel reads / writes in their natural layouts (BlockSpec index
+# maps select the head group) instead of XLA relayouts to and from the head-group-major layout
+# (kernels/gdn/gdn_bwd/bwd_memory_ref.py make_bwd_block_specs_natural): "off" | "states" (chunk_states, t_inv, dht,
+# dh0) | "all" (qkv, states, do, dy) | "no_do" | "inputs" (qkv, states) | "states_dy". Same values. Requires
+# use_gdn_kernel: true.
+gdn_bwd_natural_layout: "off"
+# GDN kernel path: the prefill-only forward kernels (CP pass 1 and pass 2) run their Conv1D + SiLU on the bf16 [chunk,
+# dim] DMA buffer with tokens on sublanes (kernels/gdn/compute_conv1d.py natural_causal_conv1d) instead of through a
+# per-token compact float32 scratch. Same values. Requires use_gdn_kernel: true and gdn_cp_pass1_states_and_bf16_qkv: true.
+gdn_conv1d_natural_layout: false
+# GDN kernel path: kq-head group size of the Pallas forward kernels (kernels/gdn/compute_gdn.py chunked_gdn_per_seq);
+# 0 = the default (all heads at chunk_size 64). Same values. Must divide the kernel's kq heads.
+gdn_fwd_kernel_head_group_size: 0
+# GDN kernel path, training: compute in_proj_qkvz as two matmuls whose outputs are already in the Pallas kernel's
+# order, qkv = [q | k | v] (all heads of each) and z, instead of one matmul in the per-key-head [q | k | v | z] order
+# followed by a per-head split and concatenation (models/qwen3.py). The column-permuted kernel is gathered once and
+# sliced after the gather; the input gradient is one float32 sum of the two partial products. Same forward values and
+# parameter gradients; the input gradient matches up to float32 summation order. Requires use_gdn_kernel: true and
+# sequence-sharded GDN context parallelism.
+gdn_in_proj_kernel_order: false
 
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.

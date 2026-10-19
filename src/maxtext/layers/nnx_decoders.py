@@ -1065,6 +1065,17 @@ class NNXDecoder(nnx.Module):
       )
     policy = self.get_remat_policy()
     prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)
+    # fp8_fake_quant_hoist (moe.fp8_fake_quant_hoist_mode: the config key or PARAMBOLE_FQ_HOIST; off = the original
+    # code): the per-channel absmax that fixes each routed-expert weight's fp8 fake-quant scale, computed for the
+    # whole stack before the scan (one FSDP max all-reduce instead of one per layer and pass), threaded through the
+    # scan's xs and handed to each layer for the duration of its call. Bit-identical (a max is exact); the scanned
+    # state is unchanged.
+    fp8_absmax_paths, fp8_absmax_stacked = [], []
+    if kv_caches_stacked is None and not getattr(self, "disable_quant_stats_update", False):
+      fp8_hoist_mode = moe.fp8_fake_quant_hoist_enabled(self.config)
+      if fp8_hoist_mode:
+        fp8_absmax_paths, fp8_absmax_stacked = moe.stacked_fp8_fake_quant_absmax(layers, self.config, fp8_hoist_mode)
+    use_fp8_absmax = bool(fp8_absmax_paths)
     graphdef, params, state = nnx.split(layers, nnx.Param, ...)
 
     scan_axis = self.config.param_scan_axis
@@ -1097,6 +1108,11 @@ class NNXDecoder(nnx.Module):
     use_forced_routing = forced_routed_experts_scanned is not None
 
     def layer_fn(carry, scanned_vars):
+      fp8_absmax_layer = None
+      if use_fp8_absmax:
+        # The hoisted absmax rides last in the xs; it is plain arrays, not scanned nnx state.
+        *scanned_vars, fp8_absmax_layer = scanned_vars
+        scanned_vars = tuple(scanned_vars)
       # Ensure metadata rank matches the sliced values
       scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
 
@@ -1130,7 +1146,8 @@ class NNXDecoder(nnx.Module):
       if use_forced_routing:
         call_kwargs["forced_routed_experts"] = forced_routed_experts_layer
 
-      layer_out = layer(carry, *args, **call_kwargs)
+      with moe.fp8_hoisted_absmax_attached(layer, fp8_absmax_paths, fp8_absmax_layer):
+        layer_out = layer(carry, *args, **call_kwargs)
 
       if isinstance(layer_out, tuple):
         new_carry = layer_out[0]
@@ -1196,6 +1213,8 @@ class NNXDecoder(nnx.Module):
         scan_xs = (params, state, forced_routed_experts_scanned)
       else:
         scan_xs = (params, state)
+      if use_fp8_absmax:
+        scan_xs = scan_xs + (fp8_absmax_stacked,)
       final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs, unroll=unroll)
       returned_kv_stacked = None
 

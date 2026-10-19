@@ -897,6 +897,26 @@ class Attention(BaseModel):
           "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
       ),
   )
+  query_proj_kernel_gather_once: bool = Field(
+      False,
+      description=(
+          "Training: gather the attention query projection kernel (including Qwen3-Next / Qwen3.5's output gate,"
+          " which shares it) once per attention layer in the backward pass instead of twice. The kernel is sharded"
+          " on its embed dimension, so the partitioner inserts one all-gather for the remat replay of"
+          " q = x @ wq and another for the input gradient dx = dq @ wq^T. With this on, the projection is a custom"
+          " VJP (layers/linears.py _dot_general_reusing_gathered_kernel) that gathers the kernel with one explicit"
+          " sharding constraint and computes the input gradient from that gathered value, which stays live from the"
+          " replay to the input gradient; the kernel gradient is the stock transpose, reduce-scattered as before."
+          " Same values in the same order, so the outputs and gradients are the same bits. Requires an unquantized"
+          " (quantization='') and unfused (fused_qkv=False) query projection of layers/attentions.py (not"
+          " attention_type mla or compressed), shard_mode='auto', a kernel sharded on its embed dimension"
+          " ('embed_attn' mapped to a mesh axis of size > 1, ici_context_autoregressive_parallelism=1) and"
+          " replicated on the others (q_heads and kv on mesh axes of size 1: no tensor parallelism), and a remat"
+          " policy that replays the projection in the backward: 'full', 'save_out_proj', or 'custom' with"
+          " query_proj='remat'. Under any other policy the projection is saved or not rematerialized, and the"
+          " backward already gathers the kernel once."
+      ),
+  )
 
 
 class MoBa(BaseModel):
@@ -1322,6 +1342,18 @@ class MoEGeneral(BaseModel):
           " effect."
       ),
   )
+  moe_combine_per_chunk: bool = Field(
+      False,
+      description=(
+          "Chunked ring-of-experts MoE (the plain chunk loop): make chunk c's unpermute (the local unsort + weighted"
+          " sum before the combine reduce-scatter) wait on chunk c-1's combine reduce-scatter result, through a"
+          " forward-only data dependency on the unpermute's routing weights (saved for the backward pass under the"
+          " remat name 'moe_combine_order', so the recompute does not redo the reduce-scatter). This orders the"
+          " SparseCore work as unpermute0, RS0, unpermute1, RS1. Math unchanged. The pipelined chunk loop"
+          " (moe_chunk_pipeline) already orders them so (its tie 3); there the key has no effect. Needs"
+          " num_moe_token_chunks>1 and use_ring_of_experts=True. Ported from the MLPerf v6.1 DeepSeek-V3 code."
+      ),
+  )
   moe_chunk_pipeline: bool = Field(
       False,
       description=(
@@ -1500,6 +1532,18 @@ class MoEGeneral(BaseModel):
           " use_ring_of_experts=True and use_ragged_sort=True."
       ),
   )
+  moe_fallback_topk_capacity: int = Field(
+      0,
+      description=(
+          "Router replay (forced routing): get_topk computes the router's own top-k ids for every token and keeps"
+          " them only for tokens without valid forced ids (and, under moe_exclude_padding_from_routing, never for"
+          " padding). With a value > 0 they are computed only for the tokens that use them: those rows, at most this"
+          " many per get_topk call, are gathered (in token order), top-k'd and written back to their tokens; a"
+          " lax.cond computes every row instead when more tokens use them. top-k is row-wise, so the ids, and hence"
+          " get_topk's weights and ids and their gradients, are bit-identical to 0. Forward-only integer work (the"
+          " ids carry no gradient). 0 (default) = every token, the program unchanged."
+      ),
+  )
   moe_ragged_sort_unique_pair_argsort: bool = Field(
       False,
       description=(
@@ -1523,6 +1567,14 @@ class MoEGeneral(BaseModel):
   ragged_sort_use_single_sparsecore: bool = Field(
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
+  )
+  ragged_unsort_spread_masked_indices: bool = Field(
+      False,
+      description=(
+          "Ring-of-experts unsort backward with moe_routing_index_math='count' and a packed buffer: the slot-order"
+          " gather of the routing-weight gradient gives masked slots distinct in-bounds indices instead of 0."
+          " Bit-identical (masked lanes are discarded); avoids sending 7 of 8 SparseCore gather lookups to one address."
+      ),
   )
   moe_tc_ragged_sort: bool = Field(
       False,
@@ -1651,6 +1703,53 @@ class MoEGeneral(BaseModel):
       1,
       description="SparseCore ID to pin MoE EP all-gathers to when moe_pin_sparse_core_all_gathers is True.",
   )
+  moe_fp8_bwd_dispatch: bool = Field(
+      False,
+      description=(
+          "Ring of experts: send the backward of the combine reduce-scatter (the all-gather of the MoE output"
+          " cotangent to every expert shard) as an fp8 payload with a per-row f32 scale, dequantized to the"
+          " cotangent dtype after the gather. Halves that all-gather's bytes; the forward is unchanged. A precision"
+          " change of the expert and router gradients (not bitwise). Ported from the MLPerf v6.1 DeepSeek-V3 code."
+      ),
+  )
+  moe_fp8_bwd_dispatch_qtype: str = Field(
+      "float8_e4m3fn",
+      description="fp8 dtype of the moe_fp8_bwd_dispatch payload (float8_e4m3fn or float8_e5m2).",
+  )
+  moe_fp8_combine: bool = Field(
+      False,
+      description=(
+          "Ring of experts: replace the forward combine reduce-scatter by an fp8 (e4m3, per-row f32 scale)"
+          " all-to-all over the EP axis followed by a local f32 sum. Changes the forward activations; the"
+          " backward stays the all-gather of the cotangent (fp8 if moe_fp8_bwd_dispatch). Ported from the MLPerf"
+          " v6.1 DeepSeek-V3 code."
+      ),
+  )
+  moe_fp8_combine_pin_sparse_core: bool = Field(
+      False,
+      description=(
+          "Pin the moe_fp8_combine all-to-all to the EP SparseCore (compute_on, core moe_ep_all_gather_sparse_core_id)"
+          " instead of leaving it to XLA."
+      ),
+  )
+  moe_fp8_token_all_gather: bool = Field(
+      False,
+      description=(
+          "Ring of experts: send the forward token all-gather of the dispatch (each shard's tokens to every expert"
+          " shard) as an fp8 e4m3 payload with one float32 absmax scale per token row (quantize_rows_fp8), and"
+          " dequantize the gathered rows back to the activation dtype right after the gather. Everything after the"
+          " gather (the sort, the expert GMMs, moe_wi_gmm_fused_swiglu, moe_wo_gmm_fused_dswiglu,"
+          " moe_router_grad_from_wo_input) reads the same bfloat16 token buffer as without it, so unlike"
+          " moe_quantize_token_all_gather (fp8 tokens end to end, a QArray GMM input) it works with those keys and"
+          " needs no quantization config. Halves the gather's payload bytes. The backward treats the quantization as"
+          " identity (straight-through): it is the transpose of the plain all-gather, the reduce-scatter of the"
+          " cotangent over the expert axis in its own dtype, as without the key. NUMERICS CHANGE: the expert inputs"
+          " carry one fp8 rounding per element (per-row scale), so the forward activations and every gradient that"
+          " reads them change at fp8 precision. Requires sparse_matmul=True, use_ring_of_experts=True,"
+          " moe_quantize_token_all_gather=False, moe_tc_ragged_3d_dispatch=False, num_moe_emb_chunks=0 and an"
+          " unpinned token all-gather (moe_pin_sparse_core_all_gathers and moe_pin_sparse_core_ep_all_gathers off)."
+      ),
+  )
   use_random_routing: bool = Field(False, description="Whether to use random routing for debugging.")
   interleave_moe_layer_step: int = Field(1, description="Frequency of MoE layers, e.g., 2 means every 2nd layer is MoE.")
   moe_fsdp_use_two_stage_all_gather: bool = Field(
@@ -1772,6 +1871,34 @@ class MoEGeneral(BaseModel):
           " silently stop saving the MoE tensor."
       ),
   )
+  moe_wo_gmm_fused_dswiglu: bool = Field(
+      False,
+      description=(
+          "Run the backward of the MoE SwiGLU in the epilogue of the down projection's (wo) DLHS GMM (megablox"
+          " ops.gmm_dswiglu, the tokamax gmm_v2 kernel with fuse_dact): the kernel turns the float32 accumulator u = g @"
+          " wo^T of each row into d[gate | up] and writes that [buffer, 2 * mlp] array, instead of writing u in bfloat16"
+          " for separate elementwise passes to read back (the SwiGLU VJP; with moe_router_grad_from_wo_input also the"
+          " routing weight's product and gradient, which then come from the same epilogue). Works with and without"
+          " moe_router_grad_from_wo_input and moe_wi_gmm_fused_swiglu. NUMERICS CHANGE: the SwiGLU derivative reads the"
+          " float32 accumulator instead of its bfloat16 rounding and runs in float32 to one rounding of d[gate | up];"
+          " with moe_router_grad_from_wo_input the routing weight multiplies u in float32 (not its bfloat16 product),"
+          " and the routing-weight gradient is <u, silu(gate) * up> in float32, not <bf16(u), the bfloat16 activation>."
+          " Measured on the Qwen3.5-397B RL trainer bench, 128 TPU v7x, with moe_router_grad_from_wo_input: 87.061 ->"
+          " 86.528 s per step (mean of steps 1-4, arms o275x-s6n3c-l3 vs o275x-s6n3-l3, same pod). Requires"
+          " prefuse_moe_weights=True, sparse_matmul=True, te_moe_block=False, use_tokamax_gmm=True, use_gmm_v2=True, no"
+          " weight quantization, mlp_activations=['silu', 'linear'] without clipping, mlp_bias=False,"
+          " num_moe_emb_chunks=0, moe_flat_fsdp_weights, moe_tc_ragged_sort, moe_tc_ragged_3d_gmm,"
+          " moe_quantize_token_all_gather and moe_accumulate_chunk_wgrad off, a remat policy that does not save the"
+          " routed experts' gate or up half (mlpwi_0, moe_mlpwi_0, moe_mlpwi_1; the minimal* policies save mlpwi_0: the"
+          " up projection hands on its whole [gate | up] output, so those names are never formed), and not"
+          " moe_prefused_swiglu_vjp (no separate activation backward is left for it to fuse). The fused DLHS needs one n"
+          " tile spanning the MLP dim (wo_tile_dlhs_mlp_dim = the per-shard MoE MLP dim). With moe_wi_gmm_fused_swiglu"
+          " it reads the fused wi GMM's [gate | up] in that kernel's per-tile layout (any wi_tile_fwd_mlp_dim whose half"
+          " is that dim or a multiple of 128 dividing it), and needs explicit tiles (use_gmm_v2_heuristic_tiling=False)."
+          " The validator checks the tiles when no mesh axis shards the MoE MLP dim and use_gmm_v2_heuristic_tiling is"
+          " off; otherwise the kernels raise when traced."
+      ),
+  )
   fp8_moe: bool = Field(
       False,
       description="Whether MoE weights are quantized to float8_e4m3fn in inference/rollout.",
@@ -1785,6 +1912,28 @@ class MoEGeneral(BaseModel):
           " on weight sync. Activations stay in dtype."
       ),
   )
+  fp8_fake_quant_hoist: Literal["off", "absmax", "gather8"] = Field(
+      "off",
+      description=(
+          "fp8_moe_fake_quant inside the decoder's layer scan, bit-identical to 'off'. 'absmax': the per-channel"
+          " absmax of every routed-expert weight is computed once for the whole layer stack, before the scan (one"
+          " FSDP max all-reduce instead of one per layer and pass). 'gather8': 'absmax', plus sparse_matmul"
+          " all-gathers the float8_e4m3fn codes instead of the bf16 fake-quantized weights and dequantizes after"
+          " the gather. The env var PARAMBOLE_FQ_HOIST (0 off, absmax, 1 = gather8) selects a mode when this is"
+          " 'off'; a different non-off value of both raises."
+      ),
+  )
+
+  @classmethod
+  def _off_for_false_fp8_fake_quant_hoist(cls, v: Any) -> Any:
+    """Coerces False, which YAML and the command line make of a bare `off`, into 'off'."""
+    return "off" if v is False else v
+
+  # Manually apply the field_validator decorator outside of the class definition to avoid pytype issues.
+  _validate_fp8_fake_quant_hoist = field_validator("fp8_fake_quant_hoist", mode="before")(
+      _off_for_false_fp8_fake_quant_hoist
+  )
+
   rollout_fp8_moe: bool = Field(
       False,
       description=(
@@ -1897,6 +2046,55 @@ class MoEGeneral(BaseModel):
         (self.use_ragged_sort, "use_ragged_sort=True"),
     ]
 
+  def _moe_wo_gmm_fused_dswiglu_tile_requirements(self) -> list[tuple[bool, str]]:
+    """The fused kernels' tile rules for moe_wo_gmm_fused_dswiglu, checked here where the config decides them.
+
+    Each n tile's accumulator is stored as one block. The fused DLHS writes [d gate | d up], which the wi GMM's
+    backward reads contiguous, so it needs one n tile: wo_tile_dlhs_mlp_dim = the MoE MLP dim n. With
+    moe_wi_gmm_fused_swiglu the fused wi forward writes [gate | up] one [gate_j | up_j] block per forward n tile
+    (gmm_silu halves wi_tile_fwd_mlp_dim and clips it to n), and the fused DLHS reads it back in pieces of that width:
+    n itself, or whole lane tiles (a multiple of 128) that divide n. gmm_silu and make_gmm_configs raise on these when
+    the layer is traced; this fails at config time instead. None with use_gmm_v2_heuristic_tiling (calculate_tiling
+    picks the tiles when traced, and the fused pair raises there) or where the config alone does not fix the per-shard
+    n (_moe_mlp_dim_if_unsharded): the kernels still check those.
+    """
+    if self.use_gmm_v2_heuristic_tiling:
+      return []
+    n = self._moe_mlp_dim_if_unsharded()
+    if n is None:
+      return []
+    wo_tile, wi_tile = self.wo_tile_dlhs_mlp_dim, self.wi_tile_fwd_mlp_dim
+    wi_half_tile = min(wi_tile, 2 * n) // 2  # megablox ops.gmm_silu_pre_act_tile_n
+    wi_half_tile_ok = wi_tile % 2 == 0 and (wi_half_tile == n or (wi_half_tile % 128 == 0 and n % wi_half_tile == 0))
+    return [
+        (wo_tile == n, f"wo_tile_dlhs_mlp_dim={n}, the MoE MLP dim (one n tile in the fused DLHS; got {wo_tile})"),
+        (
+            not self.moe_wi_gmm_fused_swiglu or wi_half_tile_ok,
+            f"with moe_wi_gmm_fused_swiglu, a wi_tile_fwd_mlp_dim that halves to {n} or to a multiple of 128 dividing"
+            f" it (the fused DLHS reads [gate | up] in pieces of the fused wi GMM's n tile; got {wi_tile})",
+        ),
+    ]
+
+  def _moe_mlp_dim_if_unsharded(self) -> int | None:
+    """The routed experts' MLP dim n (each half of the prefused wi) if no mesh axis shards it in the GMMs, else None.
+
+    The GMMs see n divided by the mesh axes `mlp_no_fsdp` maps to (sparse_matmul's expert-weight specs). The config
+    alone fixes that only when every such axis has parallelism 1: custom_mesh_and_rule replaces logical_axis_rules
+    after this validator, so the default rule's axes count too, and -1 (filled in from the device count) is unknown
+    here. n is RoutedMoE's prefused half width: padded_base_moe_mlp_dim if set, else moe_mlp_dim.
+    """
+    axes = {"tensor", "tensor_sequence", "autoregressive"}
+    axes.update(axes_for_logical(self.logical_axis_rules or [], "mlp_no_fsdp"))
+    for axis in axes:
+      if getattr(self, f"ici_{axis}_parallelism", None) != 1 or getattr(self, f"dcn_{axis}_parallelism", None) != 1:
+        return None
+    if self.padded_base_moe_mlp_dim is not None:
+      return self.padded_base_moe_mlp_dim
+    base, scale = self.base_moe_mlp_dim, self.global_parameter_scale
+    if base <= 0 or scale <= 0 or scale & (scale - 1):
+      return None
+    return 2 ** get_individual_scales(scale)[2] * base
+
   @model_validator(mode="after")
   def validate_moe_roe_packed_routing_gather(self) -> "MoEGeneral":
     """The packed gather replaces the per-chunk routing gathers of the pipelined local-routing chunk loop."""
@@ -1936,6 +2134,13 @@ class MoEGeneral(BaseModel):
               self._remat_keeps_moe_tensor_requirement("down-projection output", _MOE_DOWN_PROJECTION_NAMES),
           ],
       )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_fallback_topk_capacity(self) -> "MoEGeneral":
+    """moe_fallback_topk_capacity is a row count: 0 (off) or positive."""
+    if self.moe_fallback_topk_capacity < 0:
+      raise ValueError(f"moe_fallback_topk_capacity must be >= 0, got {self.moe_fallback_topk_capacity}.")
     return self
 
   @model_validator(mode="after")
@@ -2005,6 +2210,10 @@ class MoEGeneral(BaseModel):
                   not self.moe_wi_gmm_fused_swiglu,
                   "moe_wi_gmm_fused_swiglu=False (the wi GMM already applies the activation)",
               ),
+              (
+                  not self.moe_wo_gmm_fused_dswiglu,
+                  "moe_wo_gmm_fused_dswiglu=False (the wo GMM's DLHS already writes d[gate | up])",
+              ),
           ],
       )
     return self
@@ -2036,6 +2245,79 @@ class MoEGeneral(BaseModel):
       )
     return self
 
+  @model_validator(mode="after")
+  def validate_moe_wo_gmm_fused_dswiglu(self) -> "MoEGeneral":
+    """The SwiGLU backward fused into the wo DLHS GMM needs the plain bf16 prefused gmm_v2 path and its tile rules."""
+    if self.moe_wo_gmm_fused_dswiglu:
+      _reject_unless(
+          "moe_wo_gmm_fused_dswiglu=True",
+          self._prefused_sparse_matmul_requirements()
+          + [
+              # The fused epilogue is an option of the bf16 tokamax gmm_v2 kernel only; other GMM backends would
+              # ignore it.
+              (self.use_tokamax_gmm and self.use_gmm_v2, "use_tokamax_gmm=True and use_gmm_v2=True"),
+              self._no_weight_quantization_requirement(),
+              # The epilogue differentiates silu(gate) * up; GPT-OSS and clipped activations differ.
+              (list(self.mlp_activations) == ["silu", "linear"], "mlp_activations=['silu', 'linear']"),
+              (self.decoder_block != DecoderBlockType.GPT_OSS, "a decoder_block other than gpt_oss"),
+              (self.mlp_activations_limit <= 0.0, "mlp_activations_limit <= 0 (no clipping)"),
+              (not self.mlp_bias, "mlp_bias=False"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              (not self.moe_flat_fsdp_weights, "moe_flat_fsdp_weights=False"),
+              # The TC ragged sort puts the routing weights on the activation, between the SwiGLU and the down
+              # projection, and fuses its unsort into the down projection: the epilogue would differentiate the
+              # wrong function.
+              (not self.moe_tc_ragged_sort, "moe_tc_ragged_sort=False"),
+              # A 2D bf16 token buffer.
+              (not self.moe_tc_ragged_3d_gmm, "moe_tc_ragged_3d_gmm=False"),
+              (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
+              (not self.moe_accumulate_chunk_wgrad, "moe_accumulate_chunk_wgrad=False"),
+              # The up projection hands on its whole [gate | up] output, so its per-half names are never formed.
+              self._remat_keeps_moe_tensor_requirement("gate and up halves", _MOE_UP_PROJECTION_NAMES),
+          ]
+          + self._moe_wo_gmm_fused_dswiglu_tile_requirements(),
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_moe_fp8_token_all_gather(self) -> "MoEGeneral":
+    """The fp8 token all-gather replaces the plain ring-of-experts token all-gather; its backward is the plain one's."""
+    if self.moe_fp8_token_all_gather:
+      _reject_unless(
+          "moe_fp8_token_all_gather=True",
+          [
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (self.use_ring_of_experts, "use_ring_of_experts=True"),
+              # That key already sends the tokens quantized (fp8 into the GMM); the two would quantize twice.
+              (not self.moe_quantize_token_all_gather, "moe_quantize_token_all_gather=False"),
+              # The TC 3D dispatch gathers the tokens in its (emb // 128, 128) layout.
+              (not self.moe_tc_ragged_3d_dispatch, "moe_tc_ragged_3d_dispatch=False"),
+              # The per-row scale spans the whole embedding dim, which embedding chunking splits.
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks=0"),
+              # The backward is the plain reduce-scatter, the transpose of an unpinned all-gather.
+              (not self.moe_pin_sparse_core_all_gathers, "moe_pin_sparse_core_all_gathers=False"),
+              (not self.moe_pin_sparse_core_ep_all_gathers, "moe_pin_sparse_core_ep_all_gathers=False"),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_wi_tile_fwd_rhs_buffer_count(self) -> "MoEGeneral":
+    """Only the fused wi GMM (megablox ops.gmm_silu) reads wi_tile_fwd_rhs_buffer_count: reject it anywhere else."""
+    n = self.wi_tile_fwd_rhs_buffer_count
+    if n != 0:
+      _reject_unless(
+          f"wi_tile_fwd_rhs_buffer_count={n}",
+          [
+              # One buffer would serialize every weight DMA with the matmul that reads it.
+              (n >= 2, "a value of 0 (the kernel default) or at least 2"),
+              (self.moe_wi_gmm_fused_swiglu, "moe_wi_gmm_fused_swiglu=True (the only GMM that reads it)"),
+              # The layer applies it only with one K tile, which it checks against the explicit tiles.
+              (not self.use_gmm_v2_heuristic_tiling, "use_gmm_v2_heuristic_tiling=False"),
+          ],
+      )
+    return self
+
 
 class MoEKernels(BaseModel):
   """Configuration for MoE-specific kernels like Megablox."""
@@ -2048,6 +2330,20 @@ class MoEKernels(BaseModel):
   )
   wi_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wi.")
   wi_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wi.")
+  wi_tile_fwd_rhs_buffer_count: int = Field(
+      0,
+      description=(
+          "VMEM buffers of the weight tile in the fused wi forward GMM (moe_wi_gmm_fused_swiglu; the tokamax gmm_v2"
+          " kernel's rhs_buffer_count). 0: the kernel default, 3. 2 frees one [gate | up] weight tile of VMEM: with"
+          " wi_tile_fwd_batch_seq=512, wi_tile_fwd_embed_dim=4096 and wi_tile_fwd_mlp_dim=2048 the kernel needs 66.95"
+          " MiB with 3 (over the 57.60 MiB kernel limit) and 50.95 MiB with 2 (MEASURED, kernel-only compile for"
+          " TPU v7x). Each weight block's DMA then starts one grid step before its first use instead of two. Applied"
+          " only when that GMM runs one K tile (wi_tile_fwd_embed_dim >= the embed dim), where the weight block"
+          " changes only at expert and n-tile boundaries; otherwise (e.g. the eval tiles) the default. The forward"
+          " and its remat replay use it; the backward GMMs do not. Buffering only: the values are unchanged."
+          " Requires moe_wi_gmm_fused_swiglu=True and use_gmm_v2_heuristic_tiling=False."
+      ),
+  )
   eval_wi_tile_fwd_batch_seq: int = Field(
       512,
       description="evaluation forward pass tiling dimension for batch/sequence in GMM for wi.",
@@ -2278,6 +2574,126 @@ class Qwen3Next(BaseModel):
           " register of 8 x 128."
       ),
   )
+  gdn_cp_m_scan: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: replace the sequence-sharded context-parallel forward m_local XLA reduction tree"
+          " (kernels/gdn/gdn_bwd/cp_gdn.py compose_local_from_t_inv) with the Pallas VMEM chunk scan"
+          " (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_m_scan). Requires use_gdn_kernel=True and gdn_chunk_size=64."
+      ),
+  )
+  gdn_cp_dh_scan: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: replace the sequence-sharded context-parallel backward ds_ext_local XLA reduction tree"
+          " (kernels/gdn/gdn_bwd/cp_gdn.py compose_bwd_local_from_t_inv) with the Pallas VMEM reverse chunk scan"
+          " (kernels/gdn/gdn_bwd/dh_scan.py gdn_cp_dh_scan). Requires use_gdn_kernel=True and gdn_chunk_size=64."
+      ),
+  )
+  gdn_out_proj_token_minor: bool = Field(
+      False,
+      description=(
+          "GDN training path: pin the gated-norm output to token-minor layout (0, 2, 1) before out_proj in"
+          " Qwen3NextGatedDeltaNet (models/qwen3.py), matching the MoE output projection input layout."
+      ),
+  )
+  gdn_gated_norm_layout: Literal["auto", "natural", "natural_fwd_bwd", "token_minor"] = Field(
+      "auto",
+      description=(
+          "GDN training path: memory layout around the gated RMSNorm in Qwen3NextGatedDeltaNet (models/qwen3.py)."
+          " Under gdn_out_proj_token_minor=True XLA runs the norm token-minor, the layout in which the gate z leaves"
+          " in_proj_qkvz and out_proj reads its input, and with 'auto' it relayouts the GDN kernel output only after"
+          " converting it to float32: each call re-tiles the bf16 output, converts it and transposes the float32"
+          " [tokens, value_dim] copy. 'token_minor' pins the bf16 GDN output token-minor (0, 2, 3, 1) in the forward"
+          " (the cotangent keeps XLA's layout), so that relayout is one bf16 transpose ahead of the float32 convert."
+          " 'natural' pins the norm output row-major (0, 1, 2, 3) in the forward and 'natural_fwd_bwd' also its"
+          " cotangent; XLA then transposes z and the norm output as well. Layout only: the values are unchanged."
+          " Requires gdn_out_proj_token_minor=True and a decoder with Gated DeltaNet layers."
+      ),
+  )
+  gdn_cp_pass1_states_and_bf16_qkv: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: (1) pass 1 of sequence-sharded context parallelism (gdn_cp_mode='seq') runs the"
+          " states-only forward kernel (GDNMode.PER_SEQ_STATES), which skips computing the output and writes"
+          " neither the output nor the chunk states to HBM; and (2) every prefill-only forward kernel (CP pass 1,"
+          " CP pass 2, and non-CP/head-sharded prefill) DMAs bfloat16 qkv chunks and upcasts to float32 in VMEM"
+          " instead of materializing a float32 qkv copy in HBM (float32 activations fall back to the float32 DMA"
+          " path). Bit-identical to False for bfloat16 activations. Requires use_gdn_kernel=True,"
+          " gdn_chunk_size=64, and dtype='bfloat16'."
+      ),
+  )
+  gdn_cp_fast_state_passing: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: in training (when initial conv_state and recurrent_state are None), replace the"
+          " 3-round + psum Hillis-Steele cross-rank state and grad-state scans on 4 CP ranks with a 2-round"
+          " 4-ppermute 2-matmul schedule, and skip the unused end-of-step conv/recurrent state broadcasts"
+          " (kernels/gdn/gdn_bwd/cp_gdn.py, api.py). Bit-identical to False. Requires use_gdn_kernel=True."
+      ),
+  )
+  gdn_bwd_natural_layout: Literal["off", "states", "all", "no_do", "inputs", "states_dy"] = Field(
+      "off",
+      description=(
+          "GDN kernel path: operand groups the Pallas GDN backward kernel reads / writes in their natural HBM"
+          " layouts, with BlockSpec index maps selecting each head group (kernels/gdn/gdn_bwd/bwd_memory_ref.py"
+          " make_bwd_block_specs_natural), instead of the XLA slice / transpose / concatenate relayouts into and out"
+          " of the [B, G, C, ...] head-group-major layout around the pallas_call. Groups: qkv (q / k / v channel"
+          " windows of qkv_conv [B, S, dim]), states (chunk_states [B, C, Hv, dk, dv], t_inv [B, C, Hv, cs, cs],"
+          " dht / dh0), do ([B, S, Hv, dv]) and dy (dq / dk / dv windows of dy_conv [B, S, dim]). 'all' = all four"
+          " (the backward part of maxtext PR #5628, plus its head-major sequence-CP composition glue when"
+          " gdn_cp_dh_scan is off); 'no_do' = qkv, states, dy; 'inputs' = qkv, states; 'states_dy' = states, dy;"
+          " 'states' = states only; 'off' = none. Every kernel VMEM block holds the same values in every mode, so"
+          " the gradients are the same; shapes whose q / k / v channel offsets are not whole blocks keep the"
+          " relayout path. The kernel name gets a suffix (gdn_bwd_kernel_nat for 'all', _nat_s for 'states')."
+          " On the Qwen3.5-397B bench cell the TPU compiler re-lays out other tensors when the kernel reads or"
+          " writes the bf16 qkv / do / dy tensors in place (the in_proj_qkvz backward, the gated RMSNorm), so"
+          " 'states' (the f32 chunk_states / t_inv relayouts only, nothing added) is the mode to use there."
+          " Requires use_gdn_kernel=True (the only path that runs that kernel)."
+      ),
+  )
+  gdn_conv1d_natural_layout: bool = Field(
+      False,
+      description=(
+          "GDN kernel path: the prefill-only Pallas GDN forward kernels (both sequence-sharded context-parallel"
+          " passes, the local path and the forward rule's replay under remat) run their causal Conv1D + SiLU on the"
+          " bf16 [chunk, conv_dim] qkv buffer they DMA, with tokens on sublanes (kernels/gdn/compute_conv1d.py"
+          " natural_causal_conv1d): each shifted tap is a sublane rotation of the chunk whose first rows come from the"
+          " previous chunk's last 8 rows, added in the same order with the same segment masks, and q / k / v are"
+          " column slices. The compact path upcasts the chunk into a per-token float32 scratch (one row store per"
+          " token and 128-lane column) and loads q / k / v back from it row by row. Same values; the backward kernel"
+          " is unchanged. Requires use_gdn_kernel=True and gdn_cp_pass1_states_and_bf16_qkv=True (the bf16 DMA"
+          " buffer)."
+      ),
+  )
+  gdn_fwd_kernel_head_group_size: int = Field(
+      0,
+      description=(
+          "GDN kernel path: kq-head group size of the Pallas GDN forward kernels (kernels/gdn/compute_gdn.py"
+          " chunked_gdn_per_seq processes that many kq heads and their value heads at a time; the decay cumsum is"
+          " still shared). 0 = compute_gdn.default_head_group_size (all heads at once at gdn_chunk_size 64). The"
+          " per-head math is unchanged. Must divide the kq heads each forward kernel sees. Requires"
+          " use_gdn_kernel=True when non-zero."
+      ),
+  )
+  gdn_in_proj_kernel_order: bool = Field(
+      False,
+      description=(
+          "GDN kernel path, training: compute the GatedDeltaNet in_proj_qkvz as two matmuls whose outputs are already"
+          " in the order the Pallas GDN kernel reads, qkv = [q | k | v] (all heads of each) and z, instead of one"
+          " matmul in the per-key-head [q | k | v | z] column order followed by a per-head reshape, split and"
+          " concatenation (models/qwen3.py). XLA keeps that per-head work token-minor and then relayouts q, k and v"
+          " into the feature-minor qkv the kernel reads, and back in the backward. The kernel's columns are permuted"
+          " on each device's shard (the column dimension is not sharded), the permuted kernel is all-gathered once"
+          " and sliced after the gather; the backward re-gathers it once, forms the input gradient as one float32 sum"
+          " of the two partial products, rounded to the compute dtype once, and the kernel gradient as the column"
+          " concatenation of the two partial kernel gradients. The forward values and the parameter gradients are the"
+          " same; the input gradient matches up to float32 summation order. Requires use_gdn_kernel=True and"
+          " sequence-sharded GDN context parallelism (a layer that resolves to head-sharded GDN context parallelism"
+          " raises); unquantized in_proj_qkvz without bias in auto shard mode. No effect outside training or on the"
+          " vLLM paged-state path."
+      ),
+  )
 
 
 # ----------------------------------------------------------------------------
@@ -2459,6 +2875,31 @@ class HardwareAndMesh(BaseModel):
           "use_multimodal=False."
       ),
   )
+  context_parallel_attention_load_balance_hoist_ids: bool = Field(
+      False,
+      description=(
+          "Under context_parallel_attention_load_balance, name each attention layer's DUAL_CHUNK_SWAP-ordered"
+          " positions and segment ids (Attention._to_load_balanced_order) so that remat_policy=custom saves them"
+          " (maxtext_utils.get_save_and_offload_names). They depend only on the batch, so the saved value is a loop"
+          " invariant of the layer scan, which jax.lax.scan hoists out of the loop: the forward computes it once,"
+          " and the remat replay of the attention layers reads that copy instead of reordering the positions and"
+          " segment ids again (two collective-permutes per array, then a per-rank select between the received"
+          " halves and their concatenation). The reordered values are the same, so outputs and gradients do not"
+          " change. Requires context_parallel_attention_load_balance=True with an even context parallelism of at"
+          " least 2, remat_policy='custom' and scan_layers=True."
+      ),
+  )
+  context_parallel_attention_load_balance_order: Literal["dual_chunk_swap", "dual_chunk_swap_local_self"] = Field(
+      "dual_chunk_swap",
+      description=(
+          "How context_parallel_attention_load_balance moves each attention layer's tokens between natural and"
+          " DUAL_CHUNK_SWAP order (tokamax_ring_attention.reorder_for_load_balance). 'dual_chunk_swap' (default):"
+          " two collective-permutes of half a shard per reorder, where a rank whose half stays on it is a (r, r)"
+          " pair, i.e. a local copy inside the permute. 'dual_chunk_swap_local_self': the same token order and"
+          " values, with the (r, r) pairs dropped from both permutes and the self rank's own half taken by a select."
+          " Requires context_parallel_attention_load_balance=True with an even context parallelism of at least 2."
+      ),
+  )
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
@@ -2476,6 +2917,20 @@ class HardwareAndMesh(BaseModel):
       CustomRule.DEFAULT,
       description="Customized mesh and logical rules for evaluation.",
   )
+  dense_grad_reduce: Literal["reduce_scatter", "all_reduce"] = Field(
+      "reduce_scatter",
+      description=(
+          "How the gradients of the dense weights that a custom_mesh_and_rule replicates over context are reduced"
+          " (the rule sets that map 'embed_grad': cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp). 'reduce_scatter':"
+          " linears.route_dense_weight_grad reduce-scatters each such gradient over every token axis and, across an"
+          " optimization barrier, all-gathers the shard over the axes the weight is replicated on. 'all_reduce': the"
+          " 'embed_grad' rule is dropped from logical_axis_rules and logical_axis_rules_for_eval, so"
+          " route_dense_weight_grad returns the kernel unchanged and GSPMD reduces each gradient with a full-size"
+          " all-reduce (which XLA may combine across weights) before keeping the weight's shard. The forward is"
+          " unchanged and the gradients differ by summation order only. 'all_reduce' requires logical axis rules that"
+          " map 'embed_grad'."
+      ),
+  )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
   shardy: bool = Field(True, description="Whether to use shardy XLA backend.")
@@ -2483,6 +2938,61 @@ class HardwareAndMesh(BaseModel):
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
   )
+
+  @model_validator(mode="after")
+  def validate_context_parallel_attention_load_balance_hoist_ids(self) -> "HardwareAndMesh":
+    """The ids are reordered only on the attention load-balance path, and only a scanned custom remat hoists them."""
+    if self.context_parallel_attention_load_balance_hoist_ids:
+      # context_sharding, the parallelism degrees and remat_policy live in other sections; this validator runs on
+      # the combined config. The degree is the one AttentionOp.attention_load_balance_context_size balances over.
+      context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
+          self, f"dcn_{self.context_sharding}_parallelism", 1
+      )
+      _reject_unless(
+          "context_parallel_attention_load_balance_hoist_ids=True",
+          [
+              (
+                  self.context_parallel_attention_load_balance,
+                  "context_parallel_attention_load_balance=True (the only path that reorders them)",
+              ),
+              (
+                  context_parallel_size >= 2 and context_parallel_size % 2 == 0,
+                  f"an even context parallelism of at least 2 (got {context_parallel_size}; attention keeps natural"
+                  " order otherwise)",
+              ),
+              (self.remat_policy == "custom", "remat_policy='custom' (the only policy whose save list takes the name)"),
+              (self.scan_layers, "scan_layers=True (the hoist out of the layer loop is jax.lax.scan's)"),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_context_parallel_attention_load_balance_order(self) -> "HardwareAndMesh":
+    """A non-default order changes how the attention load-balance path moves tokens, so it needs that path.
+
+    Runs after validate_context_parallel_attention_load_balance_hoist_ids, which turns the attention load balance off
+    under attention_context_parallel_mode='ulysses'.
+    """
+    if self.context_parallel_attention_load_balance_order == "dual_chunk_swap":
+      return self
+    context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
+        self, f"dcn_{self.context_sharding}_parallelism", 1
+    )
+    _reject_unless(
+        f"context_parallel_attention_load_balance_order={self.context_parallel_attention_load_balance_order!r}",
+        [
+            (
+                self.context_parallel_attention_load_balance,
+                "context_parallel_attention_load_balance=True (the only path that reorders the attention tokens; it is"
+                " off under attention_context_parallel_mode='ulysses')",
+            ),
+            (
+                context_parallel_size >= 2 and context_parallel_size % 2 == 0,
+                f"an even context parallelism of at least 2 (got {context_parallel_size})",
+            ),
+        ],
+    )
+    return self
 
 
 class LayoutAndSharding(BaseModel):
@@ -2741,7 +3251,42 @@ class RematAndOffload(BaseModel):
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
+  fp32_master_storage: Literal["f32", "residual16"] = Field(
+      "f32",
+      description=(
+          "Read by Tunix's Fp32MasterOptimizer (weight_dtype=bfloat16). 'f32' (default): a float32 master copy per"
+          " bfloat16 weight. 'residual16': a scanned layer's master is stored as the low 16 bits the bfloat16 weight"
+          " does not hold (uint16, same shape) plus one bit per element, packed 8 to a byte along param_scan_axis,"
+          " saying whether the cast rounded the magnitude up; each update rebuilds the float32 master bit for bit"
+          " (any non-NaN value), so masters, weights and updates are unchanged. 2.13 instead of 4 bytes per element"
+          " stored, and with optimizer_memory_host_offload copied to and from host memory at every update."
+          " Other bfloat16 weights keep a float32 master."
+      ),
+  )
+  optimizer_device_resident_gib: float = Field(
+      0.0,
+      description=(
+          "With optimizer_memory_host_offload: keep the largest optimizer leaves, up to this many GiB per device, in"
+          " device memory between updates instead of pinned host memory. The update reads and writes them in place,"
+          " so they no longer cross the host link twice per step; the rest is offloaded as before. Same values"
+          " (bit-identical); the leaves occupy device memory for the whole step, beside every fwd_bwd and the"
+          " gradient accumulator. 0 (default) = every leaf offloaded."
+      ),
+  )
 
+
+  @model_validator(mode="after")
+  def validate_optimizer_device_resident(self) -> "RematAndOffload":
+    """The device-resident budget only means something with the optimizer state offloaded."""
+    gib = self.optimizer_device_resident_gib
+    if not math.isfinite(gib) or gib < 0:
+      raise ValueError(f"optimizer_device_resident_gib must be a finite number >= 0, got {gib}.")
+    if gib > 0 and not self.optimizer_memory_host_offload:
+      raise ValueError(
+          "optimizer_device_resident_gib > 0 needs optimizer_memory_host_offload=True (without it every optimizer"
+          " leaf is already in device memory)."
+      )
+    return self
 
 class Tokenizer(BaseModel):
   """Configuration for the tokenizer."""
@@ -5228,6 +5773,32 @@ class MaxTextConfig(
             "Supported options: '', 'rowwise', 'fixed,<bound>'."
         )
 
+  def validate_moe_fp8_combine(self):
+    """Validates moe_fp8_combine, moe_fp8_bwd_dispatch and moe_fp8_combine_pin_sparse_core."""
+    if self.moe_fp8_bwd_dispatch:
+      if not self.use_ring_of_experts:
+        raise ValueError("moe_fp8_bwd_dispatch=True requires use_ring_of_experts=True.")
+      if self.moe_fp8_bwd_dispatch_qtype not in ("float8_e4m3fn", "float8_e5m2"):
+        raise ValueError(
+            "moe_fp8_bwd_dispatch_qtype must be float8_e4m3fn or float8_e5m2, got" f" {self.moe_fp8_bwd_dispatch_qtype}."
+        )
+    if self.moe_fp8_combine and not self.use_ring_of_experts:
+      raise ValueError("moe_fp8_combine=True requires use_ring_of_experts=True.")
+    if self.moe_fp8_combine_pin_sparse_core and not self.moe_fp8_combine:
+      raise ValueError("moe_fp8_combine_pin_sparse_core=True has no effect without moe_fp8_combine=True.")
+    if self.moe_fp8_combine or self.moe_fp8_bwd_dispatch:
+      # Both replace the combine reduce-scatter of the ring of experts, which these settings would otherwise bypass.
+      if self.moe_quantize_combine_bwd_method:
+        raise ValueError(
+            "moe_fp8_combine / moe_fp8_bwd_dispatch replace the combine reduce-scatter; unset"
+            f" moe_quantize_combine_bwd_method={self.moe_quantize_combine_bwd_method!r}."
+        )
+      if self.moe_combine_bwd_direct_qarray:
+        raise ValueError(
+            "moe_fp8_combine / moe_fp8_bwd_dispatch have no effect with moe_combine_bwd_direct_qarray=True (the EP"
+            " combine is fused into the wo GMM there)."
+        )
+
   @staticmethod
   def _load_mesh_config_from_yaml(rule_value: str) -> dict:
     """Helper to load and parse custom mesh YAML configurations."""
@@ -5320,13 +5891,80 @@ class MaxTextConfig(
     if is_rl_config:
       MaxTextConfig.validate_gdn_remat_requires_kernel(cfg)
     dense_token_stack = getattr(cfg, "gdn_conv1d_dense_token_stack", False)
+    cp_m_scan = getattr(cfg, "gdn_cp_m_scan", False)
+    cp_dh_scan = getattr(cfg, "gdn_cp_dh_scan", False)
+    out_proj_token_minor = getattr(cfg, "gdn_out_proj_token_minor", False)
+    gated_norm_layout = cfg.gdn_gated_norm_layout
+    pass1_states_bf16_qkv = getattr(cfg, "gdn_cp_pass1_states_and_bf16_qkv", False)
+    fast_state_passing = getattr(cfg, "gdn_cp_fast_state_passing", False)
+    # getattr: tests drive this validator with partial namespaces; the kernel path (model_runner) reads the attributes.
+    conv_natural_layout = getattr(cfg, "gdn_conv1d_natural_layout", False)
+    fwd_head_group_size = getattr(cfg, "gdn_fwd_kernel_head_group_size", 0)
+    if fwd_head_group_size < 0:
+      raise ValueError(f"gdn_fwd_kernel_head_group_size must be >= 0 (0 = default), got {fwd_head_group_size}.")
+    if conv_natural_layout or fwd_head_group_size:
+      if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+        raise ValueError(
+            "gdn_conv1d_natural_layout / gdn_fwd_kernel_head_group_size require a decoder with Gated DeltaNet layers"
+            f" (qwen3_next or qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if not cfg.use_gdn_kernel:
+        raise ValueError(
+            "gdn_conv1d_natural_layout / gdn_fwd_kernel_head_group_size require use_gdn_kernel=True: only the Pallas"
+            " GDN forward kernels run that Conv1D and head-group loop."
+        )
+    if conv_natural_layout and not pass1_states_bf16_qkv:
+      raise ValueError(
+          "gdn_conv1d_natural_layout=True requires gdn_cp_pass1_states_and_bf16_qkv=True: the natural-layout Conv1D runs"
+          " on the forward kernels' bf16 qkv DMA buffer, which only that option creates."
+      )
+    if fwd_head_group_size and cfg.gdn_num_key_heads % fwd_head_group_size:
+      raise ValueError(
+          f"gdn_fwd_kernel_head_group_size={fwd_head_group_size} must divide gdn_num_key_heads={cfg.gdn_num_key_heads}."
+      )
+    in_proj_kernel_order = cfg.gdn_in_proj_kernel_order
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       if dense_token_stack:
         raise ValueError(
             "gdn_conv1d_dense_token_stack=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
             f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
         )
+      if cp_m_scan or cp_dh_scan:
+        raise ValueError(
+            "gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if out_proj_token_minor:
+        raise ValueError(
+            "gdn_out_proj_token_minor=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if pass1_states_bf16_qkv:
+        raise ValueError(
+            "gdn_cp_pass1_states_and_bf16_qkv=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if fast_state_passing:
+        raise ValueError(
+            "gdn_cp_fast_state_passing=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if gated_norm_layout != "auto":
+        raise ValueError(
+            f"gdn_gated_norm_layout={gated_norm_layout!r} requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
+      if in_proj_kernel_order:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True requires a decoder with Gated DeltaNet layers (qwen3_next or"
+            f" qwen3_5), got decoder_block={cfg.decoder_block.value}."
+        )
       return
+    if gated_norm_layout != "auto" and not out_proj_token_minor:
+      raise ValueError(
+          f"gdn_gated_norm_layout={gated_norm_layout!r} requires gdn_out_proj_token_minor=True: it keeps out_proj's"
+          " token-minor input layout out of the GDN gated-norm math, so without that layout there is nothing to keep out."
+      )
     cp_size = math.prod(
         max(1, getattr(cfg, f"{mesh}_{axis}_parallelism"))
         for mesh in ("ici", "dcn")
@@ -5351,6 +5989,26 @@ class MaxTextConfig(
             "gdn_conv1d_dense_token_stack=True requires use_gdn_kernel=True: only the Pallas GDN forward kernel"
             " runs the in-VMEM Conv1D (kernels/gdn/compute_conv1d.py) whose output it assembles."
         )
+      if cp_m_scan or cp_dh_scan:
+        raise ValueError(
+            "gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires use_gdn_kernel=True: only the GDN kernel path"
+            " runs the sequence-sharded context-parallel recurrence scans (kernels/gdn/gdn_bwd/dh_scan.py)."
+        )
+      if pass1_states_bf16_qkv:
+        raise ValueError(
+            "gdn_cp_pass1_states_and_bf16_qkv=True requires use_gdn_kernel=True: only the Pallas GDN forward"
+            " kernel runs the states-only CP pass 1 and VMEM bf16 qkv upcast."
+        )
+      if fast_state_passing:
+        raise ValueError(
+            "gdn_cp_fast_state_passing=True requires use_gdn_kernel=True: only the GDN kernel path runs the"
+            " sequence-sharded context-parallel state passing (kernels/gdn/gdn_bwd/cp_gdn.py)."
+        )
+      if in_proj_kernel_order:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True requires use_gdn_kernel=True: only the Pallas GDN kernel path reads the"
+            " kernel-order qkv it produces (kernels/gdn/model_runner.py)."
+        )
       return
     if cfg.ici_tensor_parallelism > 1 or cfg.dcn_tensor_parallelism > 1:
       raise ValueError(
@@ -5360,6 +6018,23 @@ class MaxTextConfig(
       )
     if cfg.gdn_chunk_size not in (64, 128):
       raise ValueError(f"use_gdn_kernel=True requires gdn_chunk_size in (64, 128), got {cfg.gdn_chunk_size}.")
+    if in_proj_kernel_order and cfg.gdn_cp_mode == "head":
+      raise ValueError(
+          "gdn_in_proj_kernel_order=True requires sequence-sharded GDN context parallelism; gdn_cp_mode='head'"
+          " concatenates q, k and v per key head instead of in the kernel order."
+      )
+    if (cp_m_scan or cp_dh_scan) and cfg.gdn_chunk_size != 64:
+      raise ValueError(
+          f"gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}."
+      )
+    if pass1_states_bf16_qkv and cfg.gdn_chunk_size != 64:
+      raise ValueError(
+          f"gdn_cp_pass1_states_and_bf16_qkv=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}."
+      )
+    if pass1_states_bf16_qkv and getattr(cfg, "dtype", "bfloat16") != "bfloat16":
+      raise ValueError(
+          f"gdn_cp_pass1_states_and_bf16_qkv=True requires dtype='bfloat16', got dtype={cfg.dtype!r}."
+      )
     if cfg.gdn_key_head_dim % 128 or cfg.gdn_value_head_dim % 128:
       raise ValueError(
           "use_gdn_kernel=True requires gdn_key_head_dim and gdn_value_head_dim to be multiples of 128, "
@@ -5400,6 +6075,70 @@ class MaxTextConfig(
       MaxTextConfig.validate_gdn_dense_token_stack_width(cfg, cp_size)
 
   @staticmethod
+  def validate_query_proj_kernel_gather_once(cfg: Any) -> None:
+    """Fails a config on which query_proj_kernel_gather_once would not remove an all-gather from the backward.
+
+    The option makes the attention query projection reuse the remat replay's gathered kernel for its input gradient.
+    That saves an all-gather only if the projection is the unquantized, unfused query DenseGeneral of
+    layers/attentions.py, its kernel is sharded on the embed dimension, and the backward replays it; the program is
+    verified to change in nothing else only with the kernel's other dimensions replicated. Shared by MaxTextConfig and
+    RLConfig (RLConfig does not inherit MaxTextConfig's validators). A parallelism left at -1 (filled in when the mesh
+    is built) counts as possibly sharded.
+    """
+    if not getattr(cfg, "query_proj_kernel_gather_once", False):
+      return
+    prefix = "query_proj_kernel_gather_once=True"
+
+    def sharded(mesh_axes):
+      return any(
+          getattr(cfg, f"{mesh}_{axis}_parallelism", 1) not in (0, 1) for axis in mesh_axes for mesh in ("ici", "dcn")
+      )
+
+    if cfg.attention_type in (AttentionType.MLA.value, AttentionType.COMPRESSED.value):
+      raise ValueError(
+          f"{prefix} applies to the query projection of layers/attentions.py; attention_type={cfg.attention_type!r}"
+          " builds its own query projections, which it does not change."
+      )
+    if cfg.fused_qkv:
+      raise ValueError(f"{prefix} requires fused_qkv=False: the fused qkv projection has no separate query kernel.")
+    if cfg.quantization is not None and cfg.quantization != QuantizationType.NONE:
+      raise ValueError(
+          f"{prefix} requires quantization='': a quantized projection runs its own dot_general, got"
+          f" quantization={cfg.quantization!r}."
+      )
+    if cfg.shard_mode == ShardMode.EXPLICIT:
+      raise ValueError(f"{prefix} requires shard_mode='auto'.")
+    if cfg.ici_context_autoregressive_parallelism > 1:
+      raise ValueError(
+          f"{prefix} has nothing to gather with ici_context_autoregressive_parallelism > 1: the query kernel is"
+          " replicated."
+      )
+    embed_axes = axes_for_logical(cfg.logical_axis_rules, "embed_attn")
+    if not sharded(embed_axes):
+      raise ValueError(
+          f"{prefix} has nothing to gather: the kernel's embed dimension (logical axis 'embed_attn') maps to mesh"
+          f" axes {list(embed_axes)}, none of which has a parallelism other than 1."
+      )
+    other_mesh_axes = {name: axes_for_logical(cfg.logical_axis_rules, name) for name in ("q_heads", "kv")}
+    if any(sharded(axes) for axes in other_mesh_axes.values()):
+      raise ValueError(
+          f"{prefix} requires the kernel's other dimensions to be replicated, i.e. logical axes {other_mesh_axes}"
+          " mapped to mesh axes of parallelism 1 (no tensor parallelism on the query kernel): the gathered kernel"
+          " would keep that sharding, and the partitioner may then re-plan the collectives around the projection,"
+          " which is not verified to be exact."
+      )
+    if not (
+        cfg.remat_policy in (RematPolicy.FULL.value, RematPolicy.SAVE_OUT_PROJ.value)
+        or (cfg.remat_policy == RematPolicy.CUSTOM.value and cfg.query_proj == RematLocation.REMAT.value)
+    ):
+      raise ValueError(
+          f"{prefix} requires a remat policy that replays the query projection in the backward ('full',"
+          f" 'save_out_proj', or 'custom' with query_proj='remat'), got remat_policy={cfg.remat_policy!r}"
+          f" (query_proj={cfg.query_proj!r}): when the projection is saved or not rematerialized the backward already"
+          " gathers the kernel once, and the option would only keep the gathered kernel alive longer."
+      )
+
+  @staticmethod
   def validate_gdn_dense_token_stack_width(cfg: Any, cp_size: int) -> None:
     """Fails if gdn_conv1d_dense_token_stack cannot regroup the Conv1D rows the GDN forward kernel convolves.
 
@@ -5430,6 +6169,31 @@ class MaxTextConfig(
           f" heads * gdn_key_head_dim + value heads * gdn_value_head_dim = {width}) to be a multiple of 1024: it"
           " regroups each token's float32 row in whole vector registers of 8 x 128."
       )
+
+  @staticmethod
+  def _apply_dense_grad_reduce(cfg: Any, *, require_rule: bool) -> None:
+    """When dense_grad_reduce='all_reduce', drops the 'embed_grad' rule from logical_axis_rules (and _for_eval).
+
+    linears.route_dense_weight_grad routes a dense weight's gradient through a reduce-scatter only under rules that map
+    'embed_grad'; without the rule it returns the kernel as is and GSPMD all-reduces the gradient.
+
+    Args:
+      cfg: the config, edited in place.
+      require_rule: refuse 'all_reduce' when logical_axis_rules do not map 'embed_grad' (the key would be a no-op).
+    """
+    if cfg.dense_grad_reduce == "reduce_scatter":
+      return
+    if require_rule and not any(rule and rule[0] == "embed_grad" for rule in (cfg.logical_axis_rules or ())):
+      raise ValueError(
+          "dense_grad_reduce='all_reduce' requires logical_axis_rules that map 'embed_grad' (custom_mesh_and_rule"
+          " cp-as-ep-dense-no-cp or cp-as-ep-dense-fsdp); under other rules the dense-weight gradients are already"
+          " reduced by GSPMD and the key would change nothing."
+      )
+    for attr in ("logical_axis_rules", "logical_axis_rules_for_eval"):
+      rules = getattr(cfg, attr, None)
+      if not rules:
+        continue
+      setattr(cfg, attr, [rule for rule in rules if not (rule and rule[0] == "embed_grad")])
 
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
@@ -5471,6 +6235,8 @@ class MaxTextConfig(
           if current != disabled_value:
             raise ValueError(f"When EP rank is 1, {flag_name} must be {disabled_value} (was {current}).")
 
+    self._apply_dense_grad_reduce(self, require_rule=True)
+
     # Handle eval custom mesh and rule
     if self.custom_mesh_and_rule_for_eval is CustomRule.DEFAULT:
       # Fallback to primary rule if eval is DEFAULT
@@ -5479,6 +6245,7 @@ class MaxTextConfig(
     else:
       eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
       self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
+      self._apply_dense_grad_reduce(self, require_rule=False)
 
       # Only the logical rules are swapped for eval; the mesh itself is built once from
       # the primary rule. Axes the eval rule names but the mesh lacks silently resolve to
@@ -5862,6 +6629,10 @@ class MaxTextConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+      if getattr(self, "moe_combine_per_chunk", False):
+        # The ordered unpermute weights are saved so the backward recompute does not redo the combine
+        # reduce-scatter and unpermute that the ordering dependency reads.
+        self.tensors_on_device.append("moe_combine_order")
 
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -6360,6 +7131,7 @@ class MaxTextConfig(
     self.validate_moe_expert_weight_prefetch()
     self.validate_moe_topk_before_ep_all_gather()
     self.validate_moe_quantize_combine_bwd_method()
+    self.validate_moe_fp8_combine()
     self.validate_mllog()
     self.validate_splash_diag_skip()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
@@ -7102,6 +7874,7 @@ class MaxTextConfig(
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
     self.validate_gdn_config(self, is_rl_config=False)
+    self.validate_query_proj_kernel_gather_once(self)
     return self
 
 
@@ -7427,6 +8200,10 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+      if getattr(self, "moe_combine_per_chunk", False):
+        # The ordered unpermute weights are saved so the backward recompute does not redo the combine
+        # reduce-scatter and unpermute that the ordering dependency reads.
+        self.tensors_on_device.append("moe_combine_order")
 
     if self.moe_route != "remat" and not (self.sparse_matmul and self.use_ring_of_experts and self.use_ragged_sort):
       raise ValueError(
@@ -7462,6 +8239,8 @@ class RLConfig(
     dcn_map = get_parallelism_map("dcn")
     self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
+    MaxTextConfig._apply_dense_grad_reduce(self, require_rule=True)
     MaxTextConfig.validate_gdn_config(self, is_rl_config=True)
+    MaxTextConfig.validate_query_proj_kernel_gather_once(self)
     MaxTextConfig._validate_colocated_checkpointing(self)
     return self

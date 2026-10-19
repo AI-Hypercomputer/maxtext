@@ -368,7 +368,10 @@ def _validator_cfg(**overrides):
       "max_target_length": 4096,
       "gdn_conv1d_input_in_qkv_dtype": False,
       "gdn_conv1d_dense_token_stack": False,
+      "gdn_gated_norm_layout": "auto",
       "gdn_cp_mode": "auto",
+      "packing": True,
+      "gdn_in_proj_kernel_order": False,
   }
   fields.update(overrides)
   return types.SimpleNamespace(**fields)
@@ -557,6 +560,9 @@ def _trace_model_runner(mode, nk, nv, *, dense, qkv_dtype=False, remat=True, seg
       context_parallel_load_balance=False,
       gdn_conv1d_input_in_qkv_dtype=qkv_dtype,
       gdn_conv1d_dense_token_stack=dense,
+      gdn_bwd_natural_layout="off",
+      gdn_conv1d_natural_layout=False,
+      gdn_fwd_kernel_head_group_size=0,
   )
   key_dim, conv_dim = nk * _HEAD_DIM, (2 * nk + nv) * _HEAD_DIM
 
@@ -634,15 +640,15 @@ def _trace_decoupled(dense, *, grad, remat, qkv_dtype=False, nk=2, nv=4, seq=128
       conv_dense_token_stack=dense,
   )
 
-  def loss(qkv, b, a, cw, alog, dtb, do):
-    def body(qkv, b, a, cw, alog, dtb):
+  def loss(qkv, b, a, cw, a_log, dtb, do):
+    def body(qkv, b, a, cw, a_log, dtb):
       out, _ = op(
           qkv=qkv,
           b=b,
           a=a,
           conv_weight=cw,
           conv_bias=None,
-          a_log=alog,
+          a_log=a_log,
           dt_bias=dtb,
           conv_state=None,
           recurrent_state=None,
@@ -651,7 +657,7 @@ def _trace_decoupled(dense, *, grad, remat, qkv_dtype=False, nk=2, nv=4, seq=128
 
     if remat:
       body = jax.checkpoint(body, policy=jax.checkpoint_policies.nothing_saveable)
-    return body(qkv, b, a, cw, alog, dtb)
+    return body(qkv, b, a, cw, a_log, dtb)
 
   a = jax.ShapeDtypeStruct
   args = (
@@ -774,8 +780,8 @@ def _backward_rule_positional_forms():
   }
 
   def program(form):
-    def f(qkv, b, a, cw, alog, dtb, do):
-      _, res = gdn_api._gdn_decoupled_conv1d_fwd(qkv, b, a, cw, None, alog, dtb, None, None, *nondiff)
+    def f(qkv, b, a, cw, a_log, dtb, do):
+      _, res = gdn_api._gdn_decoupled_conv1d_fwd(qkv, b, a, cw, None, a_log, dtb, None, None, *nondiff)
       return forms[form](res, (do, (None, None)))
 
     a = jax.ShapeDtypeStruct

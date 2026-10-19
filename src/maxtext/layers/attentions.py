@@ -68,6 +68,7 @@ from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNo
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
+from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
@@ -555,6 +556,12 @@ class Attention(nnx.Module):
       out_features = (self.num_query_heads, self.head_dim * 2)
 
     block_size = getattr(self.config, "weight_block_size", None)
+    # query_proj_kernel_gather_once: the backward's remat replay gathers the kernel once and the input gradient reuses
+    # it (DenseGeneral gathered_kernel_axes: the embed dimension gathered, the others as they are). Training only: a
+    # forward-only model has no backward to save a gather in.
+    gathered_kernel_axes = None
+    if getattr(self.config, "query_proj_kernel_gather_once", False) and self.model_mode == MODEL_MODE_TRAIN:
+      gathered_kernel_axes = tuple(None if axis == "embed_attn" else axis for axis in kernel_axes)
     return DenseGeneral(
         in_features_shape=in_features,
         out_features_shape=out_features,
@@ -567,7 +574,9 @@ class Attention(nnx.Module):
         matmul_precision=self.config.matmul_precision,
         use_bias=self.use_bias_in_projections,
         shard_mode=self.config.shard_mode,
+        mesh=self.mesh if gathered_kernel_axes else None,
         block_size=block_size,
+        gathered_kernel_axes=gathered_kernel_axes,
         rngs=self.rngs,
     )
 
@@ -1302,6 +1311,9 @@ class Attention(nnx.Module):
     Positions travel with their tokens so RoPE (and the dot-product causal mask) see each token's
     original position; segment ids travel with them so packing boundaries still hold. Missing positions
     are materialized first, since the default RoPE positions are the natural-order iota.
+
+    With `context_parallel_attention_load_balance_hoist_ids`, the reordered positions and segment ids are
+    named `maxtext_utils.ATTENTION_LB_IDS`, which `remat_policy=custom` then saves.
     """
     if use_shared_kv:
       raise ValueError(
@@ -1318,4 +1330,13 @@ class Attention(nnx.Module):
     reorder = self.attention_op.reorder_for_attention_load_balance
     reordered_q = reorder(inputs_q)
     reordered_kv = reordered_q if inputs_kv is inputs_q else reorder(inputs_kv)
-    return reordered_q, reordered_kv, reorder(inputs_positions), reorder(decoder_segment_ids)
+    reordered_positions = reorder(inputs_positions)
+    reordered_segment_ids = reorder(decoder_segment_ids)
+    if self.config.context_parallel_attention_load_balance_hoist_ids:
+      # Both depend only on the batch, so the saved value is a loop invariant of the layer scan, which
+      # jax.lax.scan hoists out of the loop: the backward replay of every attention layer then reads the
+      # forward's copy instead of reordering the positions and segment ids again. Same values.
+      reordered_positions = checkpoint_name(reordered_positions, maxtext_utils.ATTENTION_LB_IDS)
+      if reordered_segment_ids is not None:
+        reordered_segment_ids = checkpoint_name(reordered_segment_ids, maxtext_utils.ATTENTION_LB_IDS)
+    return reordered_q, reordered_kv, reordered_positions, reordered_segment_ids

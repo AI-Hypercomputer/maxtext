@@ -138,3 +138,128 @@ def make_bwd_block_specs(
         )
     )
   return in_specs, out_specs, len(in_specs), len(out_specs)
+
+
+def make_bwd_block_specs_natural(
+    num_chunks: int,
+    chunk_size: int,
+    q_size: int,
+    k_size: int,
+    tile_q_size: int,
+    tile_k_size: int,
+    tile_v_size: int,
+    num_v_heads: int,
+    kq_head_dim: int,
+    v_head_dim: int,
+    padded_num_v_heads: int | None = None,
+    has_dht: bool = False,
+    has_dh0: bool = False,
+    has_t_inv: bool = True,
+    natural_parts: frozenset[str] = frozenset({"qkv", "states", "do", "dy"}),
+    dim_size: int | None = None,
+) -> Tuple[list[pl.BlockSpec], list[pl.BlockSpec], int, int]:
+  """Reverse-scan emit_pipeline specs that read and write operand groups in their natural HBM layouts.
+
+  Same pipeline as `make_bwd_block_specs`, except that for every group in `natural_parts` the head group `g` is
+  selected by the index maps instead of by XLA relayouts in front of and behind the pallas_call:
+
+    "qkv":    q, k, v windows of qkv_conv [B, S, dim] (3 inputs)       else qkv_conv [B, G, C, cs, dim_size]
+    "do":     do [B, S, Hv, dv]                                         else [B, G, C, cs, Hv_tile, dv]
+    "states": chunk_states [B, C, Hv, dk, dv], t_inv [B, C, Hv, cs, cs] (omitted with has_t_inv=False),
+              dht / dh0 [B, 1, Hv, dk, dv]                              else the [B, G, ...] layouts
+    "dy":     dq, dk, dv windows of dy_conv [B, S, dim] (3 outputs)     else dy_conv [B, G, C, cs, dim_size]
+  b, a [B, G, C, cs, Hp], a_log, dt_bias [B, G, 1, Hp], reset [B, G, C, 1, 128] and db, da, dal, ddt keep the
+  `make_bwd_block_specs` layouts. The caller passes the same qkv_conv HBM ref for the three q / k / v inputs and the
+  same dy_conv HBM ref for the three dq / dk / dv outputs. Every block lands in VMEM with the shape
+  `make_bwd_block_specs` gives it ([cs, Hv_tile, dv] for do, [Hv_tile, dk, dv] for chunk_states, [Hv_tile, cs, cs] for
+  t_inv, [1, Hv_tile, dk, dv] for dht / dh0), except q / k / v and dq / dk / dv, which are three [cs, tile] blocks
+  instead of one [cs, dim_size] block. `num_v_heads` is the per-group head tile; `dim_size` (the per-group
+  q + k + v width) is needed when "qkv" or "dy" is not natural. The k / v channel offsets must be whole blocks:
+  q_size % tile_k_size == 0 and (q_size + k_size) % tile_v_size == 0.
+  """
+  if padded_num_v_heads is None:
+    padded_num_v_heads = ((num_v_heads + 127) // 128) * 128
+  if q_size % tile_k_size != 0 or (q_size + k_size) % tile_v_size != 0:
+    raise ValueError(
+        f"natural-layout GDN backward specs need whole-block channel offsets, got q_size={q_size}, k_size={k_size},"
+        f" tile_k_size={tile_k_size}, tile_v_size={tile_v_size}."
+    )
+  unknown = set(natural_parts) - {"qkv", "states", "do", "dy"}
+  if unknown:
+    raise ValueError(f"unknown natural-layout operand groups {sorted(unknown)}")
+  k_block_off = q_size // tile_k_size
+  v_block_off = (q_size + k_size) // tile_v_size
+  nat_qkv, nat_states, nat_do, nat_dy = (part in natural_parts for part in ("qkv", "states", "do", "dy"))
+
+  def rc(c):
+    return num_chunks - 1 - c
+
+  def gate_spec(width):
+    # b, a, db, da [B, G, C, chunk_size, padded_num_v_heads]; dal, ddt with width 1
+    return pl.BlockSpec((None, None, None, width, padded_num_v_heads), lambda b, g, c: (b, g, rc(c), 0, 0))
+
+  def qkv_windows():
+    return [
+        pl.BlockSpec((None, chunk_size, tile_q_size), lambda b, g, c: (b, rc(c), g)),
+        pl.BlockSpec((None, chunk_size, tile_k_size), lambda b, g, c: (b, rc(c), k_block_off + g)),
+        pl.BlockSpec((None, chunk_size, tile_v_size), lambda b, g, c: (b, rc(c), v_block_off + g)),
+    ]
+
+  def group_major_qkv():
+    return [pl.BlockSpec((None, None, None, chunk_size, dim_size), lambda b, g, c: (b, g, rc(c), 0, 0))]
+
+  if (not nat_qkv or not nat_dy) and dim_size is None:
+    raise ValueError("dim_size is required when 'qkv' or 'dy' keeps the head-group-major layout")
+
+  in_specs = qkv_windows() if nat_qkv else group_major_qkv()
+  in_specs += [gate_spec(chunk_size), gate_spec(chunk_size)]
+  if nat_do:
+    # do [B, S, Hv, v_head_dim], the layout the sequence-CP dh scan also reads in place
+    in_specs.append(pl.BlockSpec((None, chunk_size, num_v_heads, v_head_dim), lambda b, g, c: (b, rc(c), g, 0)))
+  else:
+    in_specs.append(
+        pl.BlockSpec((None, None, None, chunk_size, num_v_heads, v_head_dim), lambda b, g, c: (b, g, rc(c), 0, 0, 0))
+    )
+  if nat_states:
+    # chunk_states [B, C, Hv, kq_head_dim, v_head_dim] (and t_inv [B, C, Hv, chunk_size, chunk_size])
+    in_specs.append(
+        pl.BlockSpec((None, None, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, rc(c), g, 0, 0))
+    )
+    if has_t_inv:
+      in_specs.append(
+          pl.BlockSpec((None, None, num_v_heads, chunk_size, chunk_size), lambda b, g, c: (b, rc(c), g, 0, 0))
+      )
+  else:
+    in_specs.append(
+        pl.BlockSpec(
+            (None, None, None, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, g, rc(c), 0, 0, 0)
+        )
+    )
+    if has_t_inv:
+      in_specs.append(
+          pl.BlockSpec(
+              (None, None, None, num_v_heads, chunk_size, chunk_size), lambda b, g, c: (b, g, rc(c), 0, 0, 0)
+          )
+      )
+  in_specs += [
+      # a_log, dt_bias [B, G, 1, padded_num_v_heads]
+      pl.BlockSpec((None, None, 1, padded_num_v_heads), lambda b, g, c: (b, g, 0, 0)),
+      pl.BlockSpec((None, None, 1, padded_num_v_heads), lambda b, g, c: (b, g, 0, 0)),
+      # reset [B, G, C, 1, 128]
+      pl.BlockSpec((None, None, None, 1, 128), lambda b, g, c: (b, g, rc(c), 0, 0)),
+  ]
+  # dht / dh0: [B, 1, Hv, kq_head_dim, v_head_dim] natural, else [B, G, 1, Hv_tile, kq_head_dim, v_head_dim]
+  if nat_states:
+    state_spec = pl.BlockSpec((None, 1, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, 0, g, 0, 0))
+  else:
+    state_spec = pl.BlockSpec(
+        (None, None, 1, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, g, 0, 0, 0, 0)
+    )
+  if has_dht:
+    in_specs.append(state_spec)
+
+  out_specs = qkv_windows() if nat_dy else group_major_qkv()
+  out_specs += [gate_spec(chunk_size), gate_spec(chunk_size), gate_spec(1), gate_spec(1)]
+  if has_dh0:
+    out_specs.append(state_spec)
+  return in_specs, out_specs, len(in_specs), len(out_specs)

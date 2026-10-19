@@ -3150,6 +3150,132 @@ class GdnBwdPallasTest(absltest.TestCase):
     for name, got, exp in zip(_GRAD_NAMES + ("d_conv_state", "d_recurrent_state"), grads_c, grads_s):
       np.testing.assert_allclose(np.asarray(got), np.asarray(exp), rtol=tol, atol=tol, err_msg=f"CP c=128: {name}")
 
+  def test_run_local_gdn_states_fwd_matches_full_forward(self):
+    """Verifies states-only forward matches the full forward's state outputs."""
+    batch_size = 2
+    seq_len = 128
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    chunk_size = 64
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+
+    key = jax.random.PRNGKey(2025)
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias = _init_fwd_inputs(
+        key, batch_size, seq_len, dim_size, num_v_heads, conv_kernel_size
+    )
+    k_cs, k_rs = jax.random.split(jax.random.PRNGKey(2026), 2)
+    conv_state = jax.random.normal(k_cs, (batch_size, conv_kernel_size - 1, dim_size), dtype=jnp.float32)
+    recurrent_state = jax.random.normal(k_rs, (batch_size, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32)
+    segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
+    segment_ids = segment_ids.at[0, 64:].set(2)
+    segment_ids = segment_ids.at[1, 96:].set(0)
+
+    common_kwargs = {
+        "qkv": qkv,
+        "b": b,
+        "a": a,
+        "conv_weight": conv_weight,
+        "conv_bias": conv_bias,
+        "a_log": a_log,
+        "dt_bias": dt_bias,
+        "conv_state": conv_state,
+        "recurrent_state": recurrent_state,
+        "num_k_heads": num_k_heads,
+        "num_v_heads": num_v_heads,
+        "head_k_dim": head_k_dim,
+        "head_v_dim": head_v_dim,
+        "conv_kernel_size": conv_kernel_size,
+        "chunk_size": chunk_size,
+        "use_qk_norm_in_gdn": True,
+        "compute_dtype": jnp.float32,
+        "segment_ids": segment_ids,
+    }
+    (_, (exp_conv_state, exp_rec_state)), exp_t_inv, _ = gdn_bwd_pallas._run_local_gdn_decoupled_fwd(**common_kwargs)
+    (got_conv_state, got_rec_state), got_t_inv = gdn_bwd_pallas._run_local_gdn_states_fwd(**common_kwargs)
+
+    np.testing.assert_allclose(got_conv_state, exp_conv_state, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(got_rec_state, exp_rec_state, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(got_t_inv, exp_t_inv, rtol=1e-5, atol=1e-5)
+
+  def test_prefill_bf16_qkv_matches_fp32_qkv_path(self):
+    """Verifies prefill-only bf16 QKV DMA + VMEM upcast matches the fp32 QKV DMA path."""
+    if jax.default_backend() != "tpu":
+      self.skipTest("Pallas GDN kernel requires TPU")
+    from maxtext.kernels.gdn import wrapper as gdn_wrapper  # pylint: disable=import-outside-toplevel
+
+    num_k_heads = 2
+    num_v_heads = 4
+    head_k_dim = 128
+    head_v_dim = 128
+    conv_kernel_size = 4
+    chunk_size = 64
+    dim_size = num_k_heads * head_k_dim * 2 + num_v_heads * head_v_dim
+    seq_len = 2 * chunk_size  # 2 seq tiles, 0 decode requests
+
+    key = jax.random.PRNGKey(31415)
+    qkv, b, a, conv_weight, conv_bias, a_log, dt_bias = _init_fwd_inputs(
+        key, 1, seq_len, dim_size, num_v_heads, conv_kernel_size
+    )
+    qkv_bf16 = qkv.squeeze(0).astype(jnp.bfloat16)
+    qkv_fp32 = qkv_bf16.astype(jnp.float32)
+    b_2d = b.squeeze(0).astype(jnp.bfloat16)
+    a_2d = a.squeeze(0).astype(jnp.bfloat16)
+    conv_weight_t = jnp.transpose(conv_weight, (2, 1, 0)).astype(jnp.float32)
+
+    query_start_loc = jnp.array([0, seq_len], dtype=jnp.int32)
+    state_indices = jnp.array([0], dtype=jnp.int32)
+    distribution = jnp.array([0, 0, 1], dtype=jnp.int32)
+    seq_lens = jnp.array([seq_len], dtype=jnp.int32)
+
+    common = {
+        "conv_weight": conv_weight_t,
+        "conv_bias": conv_bias.astype(jnp.float32),
+        "a_log": a_log.astype(jnp.float32),
+        "dt_bias": dt_bias.astype(jnp.float32),
+        "query_start_loc": query_start_loc,
+        "state_indices": state_indices,
+        "distribution": distribution,
+        "seq_lens": seq_lens,
+        "n_kq": num_k_heads,
+        "n_v": num_v_heads,
+        "d_k": head_k_dim,
+        "d_v": head_v_dim,
+        "kernel_size": conv_kernel_size,
+        "compute_precision": jnp.float32.dtype,
+        "mixed_tile_size": chunk_size,
+        "use_qk_norm_in_gdn": True,
+        "emit_t_inv": True,
+    }
+    out_bf16, (cs_bf16, rs_bf16), tinv_bf16, cstates_bf16 = gdn_wrapper.fused_conv1d_gdn(
+        qkv=qkv_bf16,
+        b=b_2d,
+        a=a_2d,
+        conv_state=jnp.zeros((2, conv_kernel_size - 1, dim_size), dtype=jnp.bfloat16),
+        recurrent_state=jnp.zeros((2, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32),
+        **common,
+        is_prefill_only=True,
+        bf16_qkv_dma=True,
+    )
+    out_fp32, (cs_fp32, rs_fp32), tinv_fp32, cstates_fp32 = gdn_wrapper.fused_conv1d_gdn(
+        qkv=qkv_fp32,
+        b=b_2d.astype(jnp.float32),
+        a=a_2d.astype(jnp.float32),
+        conv_state=jnp.zeros((2, conv_kernel_size - 1, dim_size), dtype=jnp.bfloat16),
+        recurrent_state=jnp.zeros((2, num_v_heads, head_k_dim, head_v_dim), dtype=jnp.float32),
+        **common,
+        is_prefill_only=False,
+        bf16_qkv_dma=False,
+    )
+
+    np.testing.assert_array_equal(np.asarray(out_bf16), np.asarray(out_fp32.astype(jnp.bfloat16)))
+    np.testing.assert_array_equal(np.asarray(cs_bf16), np.asarray(cs_fp32))
+    np.testing.assert_array_equal(np.asarray(rs_bf16), np.asarray(rs_fp32))
+    np.testing.assert_array_equal(np.asarray(tinv_bf16), np.asarray(tinv_fp32))
+    np.testing.assert_array_equal(np.asarray(cstates_bf16), np.asarray(cstates_fp32))
+
 
 def _find_eqns(jaxpr, primitive_name):
   """Returns every `primitive_name` equation in `jaxpr`, including those in nested (tuples of) sub-jaxprs."""

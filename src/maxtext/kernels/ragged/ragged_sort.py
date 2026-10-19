@@ -445,6 +445,7 @@ def _ring_unsort_fan_out(
     gather_kwargs,
     mask_rows,
     index_math="sort",
+    spread_masked_indices=False,
 ):
   """The first half of the unsort's backward: the output cotangent sent to the rows of the sorted buffer.
 
@@ -457,6 +458,9 @@ def _ring_unsort_fan_out(
   cotangent output is ``gathered`` scaled). Without it they are left as the ragged gather wrote them (unwritten by
   the SparseCore kernel, other slots' rows on the reference fallback), which saves a pass over ``[rows, hidden]``
   for a caller whose consumers never read those rows (:func:`ring_ragged_unsort_down_projection`).
+
+  With ``spread_masked_indices`` (``index_math="count"``, packed buffer only) the masked slots of
+  ``to_slot_order``'s gather read their own slot index rather than entry 0; the values are unchanged.
   """
   n = topk_argsort_revert_indices.shape[0]
   # Build the inverse permutation idx_inv such that idx_inv[j] = i
@@ -529,6 +533,13 @@ def _ring_unsort_fan_out(
       shifted = topk_argsort_revert_indices - shard_output_start
       slot_valid = (shifted >= 0) & (shifted < limit)
       dot_table = jnp.pad(per_row, (0, max(0, n - buffer_size)))
+      if spread_masked_indices:
+        # The masked slots (other shards' slots and dropped slots: 7 of 8 at expert parallelism 8) read their own
+        # slot index, an in-bounds entry of the n-entry table, instead of all reading entry 0. The outer where
+        # discards them, so the result is bit-identical; the SparseCore gather no longer sends 7 of 8 lookups to
+        # one address (the suspected cause: the same offloaded gather program measured 0.05-0.11 ms with a
+        # permutation index and 2.8-4.4 ms with the entry-0 fill in a v7x trace).
+        return jnp.where(slot_valid, dot_table[jnp.where(slot_valid, shifted, jnp.arange(n, dtype=shifted.dtype))], 0.0)
       return jnp.where(slot_valid, dot_table[jnp.where(slot_valid, shifted, 0)], 0.0)
     # Scatter the per-row value back to flat slot order; dropped slots stay zero.
     slots = jnp.where(mask, sliced_idx_inv, n)
@@ -555,6 +566,7 @@ def ring_ragged_unsort(
     topk_argsort_indices=None,
     index_math="sort",
     unique_pair_argsort=False,
+    spread_masked_indices=False,
 ):
   """Dual of :func:`ring_ragged_sort`.
 
@@ -591,6 +603,9 @@ def ring_ragged_unsort(
       own row; other shards' and dropped slots read 0). Same values either way.
     unique_pair_argsort: with ``index_math="sort"``, the forward gather-reduce's validity sort as a two-operand
       sort of unique pairs (as in :func:`ring_ragged_sort`). Same values.
+    spread_masked_indices: with ``index_math="count"`` and a packed buffer, the masked slots of the backward's
+      slot-order gather read their own slot index instead of all reading entry 0
+      (``ragged_unsort_spread_masked_indices``). The masked lanes are discarded, so the values are the same.
 
   Returns:
     A 2D ``[num_tokens_local, hidden]`` tensor with expert outputs scattered back
@@ -693,6 +708,7 @@ def ring_ragged_unsort(
         gather_kwargs,
         mask_rows=True,
         index_math=index_math,
+        spread_masked_indices=spread_masked_indices,
     )
     grad_sorted_tokens = (gathered * weight_for_sorted[:, None]).astype(gathered.dtype)
     # Row-wise dot in sorted order, then back to flat slot order (a full buffer has its rows at [0, n)).
@@ -737,6 +753,9 @@ def ring_ragged_unsort_down_projection(
     use_single_sparsecore=False,
     index_math="sort",
     unique_pair_argsort=False,
+    dswiglu_gate_up=None,
+    down_projection_bwd_dswiglu=None,
+    spread_masked_indices=False,
 ):
   """:func:`ring_ragged_unsort` of the down projection, with a backward that does not read its output.
 
@@ -784,8 +803,18 @@ def ring_ragged_unsort_down_projection(
     forward_tie: optional array tied to ``y`` by an optimization barrier in the forward pass only,
       so everything that reads either comes after both. It is returned as a second output and its
       cotangent passes through unchanged.
-    index_math, unique_pair_argsort: as for :func:`ring_ragged_unsort` (they select how the combine's
-      gather-reduce sorts its valid rows, and with "count" how the weight gradient returns to slot order).
+    index_math, unique_pair_argsort, spread_masked_indices: as for :func:`ring_ragged_unsort` (they select how the
+      combine's gather-reduce sorts its valid rows, and with "count" how the weight gradient returns to slot order).
+    dswiglu_gate_up: optional ``[buffer_size, 2 * mlp]`` input ``[gate | up]`` of the SwiGLU whose output
+      is ``intermediate_local`` (moe_wo_gmm_fused_dswiglu). The backward then runs the SwiGLU backward
+      too: instead of ``u = g wo^T`` and ``dh = w u`` it calls ``down_projection_bwd_dswiglu`` (megablox
+      ``gmm_dswiglu_bwd``), whose DLHS epilogue turns the float32 ``u`` of each row into ``d[gate | up]``
+      with the routing weight ``w`` as its row scale and also returns ``<u, h>``, with ``h`` the float32
+      ``silu(gate) * up``. The gradient goes to ``dswiglu_gate_up``; ``intermediate_local`` gets a zero
+      cotangent, so the caller must stop its gradient.
+    down_projection_bwd_dswiglu: with ``dswiglu_gate_up``, ``(gathered, weighted_h, wo, *operands,
+      dact_gate_up=, dact_row_scale=) -> (d_gate_up, dot, dwo)``: the down projection's backward at the
+      input ``weighted_h = w * h`` and cotangent ``gathered = g``, fused with the SwiGLU backward.
 
   Returns:
     The unsorted ``[num_tokens_local, hidden]`` output, and ``forward_tie`` if one was given.
@@ -807,6 +836,84 @@ def ring_ragged_unsort_down_projection(
       index_math,
       unique_pair_argsort,
   )
+
+  if dswiglu_gate_up is not None:
+    if down_projection_bwd_dswiglu is None:
+      raise ValueError("dswiglu_gate_up requires down_projection_bwd_dswiglu.")
+
+    # The op below with one more input, gate_up = [gate | up]: the same forward (gate_up is only a residual),
+    # and a backward that ends at d[gate | up] instead of dh.
+    @jax.custom_vjp
+    def _unsort_down_projection_dswiglu(h, gate_up, wo, operands, group_sizes, revert, weights, argsort_indices, tie):
+      """Down projection, then unsort and combine."""
+      del gate_up
+      return _unsort_down_projection_dswiglu_fwd(
+          h, None, wo, operands, group_sizes, revert, weights, argsort_indices, tie
+      )[0]
+
+    @jax.named_scope("ragged-unsort-down-projection-fwd")
+    def _unsort_down_projection_dswiglu_fwd(h, gate_up, wo, operands, group_sizes, revert, weights, argsort_indices, tie):
+      y = down_projection(h, wo, *operands)
+      if tie is not None:
+        y, tie = jax.lax.optimization_barrier((y, tie))
+      start, end = _ring_unsort_window(group_sizes, local_num_experts, ep_name)
+      out = _ring_unsort_combine(y, revert, weights, start, end, topk, gather_reduce_kwargs)
+      # y is not a residual: the backward below never reads it.
+      res = (h, gate_up, wo, operands, revert, weights, start, end, argsort_indices)
+      return (out if tie is None else (out, tie)), res
+
+    @jax.named_scope("ragged-unsort-down-projection-bwd")
+    def _unsort_down_projection_dswiglu_bwd(res, g_out):
+      h, gate_up, wo, operands, revert, weights, start, end, argsort_indices = res
+      g_unsorted, g_tie = (g_out, None) if forward_tie is None else g_out
+      gathered, weight_for_sorted, mask, to_slot_order = _ring_unsort_fan_out(
+          g_unsorted,
+          revert,
+          weights,
+          start,
+          end,
+          h.shape[0],
+          topk,
+          argsort_indices,
+          gather_kwargs,
+          mask_rows=False,
+          index_math=index_math,
+          spread_masked_indices=spread_masked_indices,
+      )
+      weight = weight_for_sorted[:, None]
+      h32 = h.astype(jnp.float32)
+      # As below: the routing weight on the narrow [rows, mlp] side, dwo = (w * h)^T g.
+      weighted_h = jnp.where(mask[:, None], h32 * weight, 0.0).astype(h.dtype)
+      # The epilogue's row scale: dh = w u, zero outside this shard's rows, so d[gate | up] is zero there too.
+      masked_weight = jnp.where(mask, weight_for_sorted, 0.0)
+      d_gate_up, dot, grad_wo = down_projection_bwd_dswiglu(
+          gathered,
+          weighted_h,
+          wo,
+          *operands,
+          dact_gate_up=gate_up,
+          dact_row_scale=masked_weight,
+      )
+      # The routing-weight gradient <u, h> from the epilogue.
+      dot = jnp.where(mask, dot, 0.0)
+      grad_topk_weights = to_slot_order(dot)
+      grad_operands = jax.tree.map(lambda _: None, operands)
+      # h's gradient is carried by gate_up.
+      return jnp.zeros_like(h), d_gate_up, grad_wo, grad_operands, None, None, grad_topk_weights, None, g_tie
+
+    _unsort_down_projection_dswiglu.defvjp(_unsort_down_projection_dswiglu_fwd, _unsort_down_projection_dswiglu_bwd)
+
+    return _unsort_down_projection_dswiglu(
+        intermediate_local,
+        dswiglu_gate_up,
+        wo_local,
+        tuple(down_projection_operands),
+        group_sizes_local,
+        topk_argsort_revert_indices,
+        topk_weights.astype(jnp.float32),
+        topk_argsort_indices,
+        forward_tie,
+    )
 
   @jax.custom_vjp
   def _unsort_down_projection(h, wo, operands, group_sizes, revert, weights, argsort_indices, tie):
@@ -840,6 +947,7 @@ def ring_ragged_unsort_down_projection(
         gather_kwargs,
         mask_rows=False,
         index_math=index_math,
+        spread_masked_indices=spread_masked_indices,
     )
     weight = weight_for_sorted[:, None]
     h32 = h.astype(jnp.float32)

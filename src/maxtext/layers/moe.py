@@ -15,11 +15,13 @@
 
 """MoE related Layers."""
 
+import contextlib
 import dataclasses
 import enum
 import functools
 import inspect
 import math
+import os
 import random
 from typing import Any, Iterable, Optional, Tuple, Union
 
@@ -517,6 +519,65 @@ def topk_indices_by_argmax(scores: jax.Array, k: int) -> jax.Array:
   return jnp.stack(picks, axis=-1)
 
 
+def _top_k_ids(scores: jax.Array, k: int) -> jax.Array:
+  """`jax.lax.top_k(scores, k)[1]`: the ids half of lax.top_k, for fallback_topk_indices_compacted."""
+  return jax.lax.top_k(scores, k)[1]
+
+
+def fallback_topk_indices_compacted(scores: jax.Array, uses: jax.Array, k: int, capacity: int, topk_fn) -> jax.Array:
+  """The router's own top-k ids for the tokens that use them, computed on a compacted set of rows.
+
+  Under router replay (forced routing) get_topk computes the router's top-k for every token, then keeps it only for
+  tokens without valid forced ids (and, under moe_exclude_padding_from_routing, not for padding, which is routed
+  nowhere). This gathers the rows where `uses` is True -- the first `capacity` of them, in token order -- runs
+  `topk_fn` on those rows only and writes each row's ids back to its token. Every other token gets 0, which no
+  output reads. top-k is row-wise (each row's ids depend only on that row's scores), so every using token gets
+  exactly the ids the full computation gives it. When more than `capacity` tokens use it, a lax.cond runs `topk_fn`
+  on every row instead, so the result is the same for any input. Integer ids only: no gradient flows through here.
+
+  Args:
+    scores: [..., num_experts] router scores (get_topk's replay-path softmax probabilities).
+    uses: [...] bool, True where the token's router ids reach get_topk's outputs.
+    k: ids per token.
+    capacity: rows computed on the compacted path (moe_fallback_topk_capacity, > 0).
+    topk_fn: maps [rows, num_experts] scores to [rows, k] int32 ids (topk_indices_by_argmax, or lax.top_k's ids).
+
+  Returns:
+    [..., k] int32: the router's ids wherever `uses` is True. Elsewhere 0 on the compacted path and the full
+    computation's ids on the fallback path; get_topk never reads those.
+  """
+  lead = scores.shape[:-1]
+  num_tokens = math.prod(lead)
+  cap = min(int(capacity), num_tokens)
+  flat_scores = scores.reshape(num_tokens, scores.shape[-1])
+  flat_uses = uses.reshape(num_tokens)
+  # A using token's row on the compacted path is its rank among the using tokens; -1 marks tokens that do not use it.
+  rank = jnp.cumsum(flat_uses.astype(jnp.int32)) - 1
+  slot = jnp.where(flat_uses, rank, -1)
+  num_using = rank[-1] + 1
+
+  def compacted(operands):
+    flat_scores, slot = operands
+    row_iota = jax.lax.broadcasted_iota(jnp.int32, (cap, num_tokens), 0)
+    token_iota = jax.lax.broadcasted_iota(jnp.int32, (cap, num_tokens), 1)
+    # The token of compacted row c: exactly one match while c < num_using; unused rows read token 0 and are dropped.
+    token_of_row = jnp.sum(jnp.where(slot[None, :] == row_iota, token_iota, 0), axis=1)
+    row_ids = topk_fn(jnp.take(flat_scores, token_of_row, axis=0)).astype(jnp.int32)
+    # Back to token order: token t takes row slot[t]'s ids (one match), a non-using token none (0). Compare-select-sum
+    # rather than a gather or scatter, so XLA keeps it on the TensorCore; laid out [k, cap, tokens] so the long token
+    # axis is the minor one, then transposed back to [tokens, k].
+    hit = slot[None, :] == row_iota  # [cap, tokens]
+    ids_t = jnp.sum(jnp.where(hit[None, :, :], row_ids.T[:, :, None], jnp.zeros((), jnp.int32)), axis=1)
+    return ids_t.T
+
+  def every_row(operands):
+    flat_scores, _ = operands
+    return topk_fn(flat_scores).astype(jnp.int32)
+
+  ids = jax.lax.cond(num_using <= cap, compacted, every_row, (flat_scores, slot))
+  return ids.reshape(lead + (k,))
+
+
 def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None):
   """Computes a bias adjustment update based on expert load.
 
@@ -766,6 +827,62 @@ class Tid2EidVar(nnx.Variable):
 
 class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
+
+
+# fp8_fake_quant_hoist: fp8_moe_fake_quant without the per-layer absmax all-reduce, optionally with fp8 weight
+# gathers. The env var selects a mode while the config key is "off" (e.g. to A/B it without changing the argv).
+FP8_FAKE_QUANT_HOIST_ENV = "PARAMBOLE_FQ_HOIST"
+
+
+def fp8_fake_quant_hoist_mode(config=None) -> str:
+  """The fp8 fake-quant hoist mode, read at trace time: "" (off, the original code), "absmax" or "gather8".
+
+  From the config key `fp8_fake_quant_hoist` (off | absmax | gather8) and the env var PARAMBOLE_FQ_HOIST
+  (unset or 0: no override; absmax; 1: gather8). The env var applies while the key is "off"; both set to
+  different modes raises, and so does any other env value. Applies with `fp8_moe_fake_quant=true` inside the
+  decoder's layer scan (`stacked_fp8_fake_quant_absmax`):
+  - "absmax": the per-channel absmax of every routed-expert weight is computed once for the whole scanned layer
+    stack, before the scan, and each layer fake-quantizes with its slice. That removes the per-layer abs-max
+    reduce and its FSDP max all-reduce from the forward and the remat replay.
+  - "gather8": "absmax", plus `sparse_matmul` all-gathers the float8_e4m3fn codes instead of the bf16
+    fake-quantized weights and dequantizes after the gather, halving the expert-weight all-gather bytes.
+  Both are bit-identical to the default: the same absmax, scale and codes, the same dequantization expression
+  and the same straight-through gradient.
+  """
+  raw = os.environ.get(FP8_FAKE_QUANT_HOIST_ENV, "")
+  value = raw.strip().lower()
+  if value in ("", "0"):
+    env_mode = ""
+  elif value == "1":
+    env_mode = "gather8"
+  elif value == "absmax":
+    env_mode = "absmax"
+  else:
+    raise ValueError(
+        f"{FP8_FAKE_QUANT_HOIST_ENV}={raw!r}: expected unset or 0 (off), 1 (absmax hoist + fp8 weight gathers)"
+        " or absmax (absmax hoist only)."
+    )
+  key = getattr(config, "fp8_fake_quant_hoist", "off") if config is not None else "off"
+  if key not in ("off", "absmax", "gather8"):
+    raise ValueError(f"fp8_fake_quant_hoist={key!r}: expected off, absmax or gather8.")
+  config_mode = "" if key == "off" else key
+  if env_mode and config_mode and env_mode != config_mode:
+    raise ValueError(
+        f"fp8_fake_quant_hoist={key!r} conflicts with {FP8_FAKE_QUANT_HOIST_ENV}={raw!r} (mode {env_mode});"
+        " set one of them."
+    )
+  return config_mode or env_mode
+
+
+# The decoder's layer scan attaches this attribute, for the duration of one layer call, to every eligible
+# RoutedMoE in the layer: {weight name: that layer's per-channel absmax}, sliced by jax.lax.scan from
+# `stacked_fp8_fake_quant_absmax`. It is removed before the scan splits the layer's state, so the graph and the
+# scanned state are exactly as without it.
+FP8_HOISTED_ABSMAX_ATTR = "fp8_fake_quant_hoisted_absmax"
+
+
+class Fp8HoistedAbsmax(nnx.Variable):
+  """One layer's per-channel absmax of its routed-expert weights, computed for the whole scanned stack at once."""
 
 
 class GateLogit(nnx.Module):
@@ -1041,6 +1158,137 @@ def _moe_combine_psum_scatter_bwd(
 
 
 _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
+
+
+# moe_fp8_combine / moe_fp8_bwd_dispatch / moe_combine_per_chunk: ported from the MLPerf v6.1 DeepSeek-V3 code
+# (6639e3166, "code from image integrate_v2:mlperf61v4-stackall6").
+def quantize_rows_fp8(x: jax.Array, qtype) -> tuple[jax.Array, jax.Array]:
+  """Per-row fp8 quantization: one f32 absmax scale per row (last axis), returns (qvalue, scale[..., 1])."""
+  qmax = float(jnp.finfo(qtype).max)
+  # abs/max are exact in the input dtype; taking them before the f32 cast keeps XLA from materializing an f32
+  # copy of x between the reduction and the quantizing convert.
+  absmax = jnp.max(jnp.abs(x), axis=-1, keepdims=True).astype(jnp.float32)
+  scale = jnp.where(absmax > 0, absmax / qmax, jnp.ones_like(absmax))
+  return jnp.clip(x.astype(jnp.float32) / scale, -qmax, qmax).astype(qtype), scale
+
+
+def dequantize_rows_fp8(qvalue: jax.Array, scale: jax.Array, dtype) -> jax.Array:
+  """Inverse of quantize_rows_fp8."""
+  return (qvalue.astype(jnp.float32) * scale).astype(dtype)
+
+
+def ep_combine_reduce_scatter(
+    x: jax.Array, axis_name, all_gather_fn=None, bwd_qtype=None, fwd_qtype=None, all_to_all_fn=None
+) -> jax.Array:
+  """Ring-of-experts combine: sums the per-shard partial outputs over the EP axis and scatters them (dim 0).
+
+  With `bwd_qtype` set (moe_fp8_bwd_dispatch), the backward -- the all-gather of the output cotangent to every
+  expert shard -- carries an fp8 payload with a per-row f32 scale gathered alongside, and is dequantized back to
+  the cotangent dtype after the gather. This is a precision change of the gradient, not a bitwise-identical
+  transform.
+
+  With `fwd_qtype` set (moe_fp8_combine), the forward replaces the bf16 reduce-scatter by an fp8 all-to-all: each
+  shard quantizes its partial sums per row (f32 row scale), sends the slice destined for shard j to shard j, and
+  the receiver dequantizes the n slices and sums them in f32 before casting back. This changes the forward
+  activations (one fp8 rounding per expert-shard contribution). The backward treats the quantization as identity
+  (straight-through): it is the all-gather of the cotangent, as for the reduce-scatter.
+  """
+
+  def _rs(z):
+    return jax.lax.psum_scatter(z, axis_name, scatter_dimension=0, tiled=True)
+
+  if bwd_qtype is None and fwd_qtype is None:
+    return _rs(x)
+
+  def _ag(z):
+    if all_gather_fn is not None:
+      return all_gather_fn(z)
+    return jax.lax.all_gather(z, axis_name=axis_name, tiled=True)
+
+  def _a2a(z):
+    if all_to_all_fn is not None:
+      return all_to_all_fn(z)
+    return jax.lax.all_to_all(z, axis_name, split_axis=0, concat_axis=0, tiled=True)
+
+  def _fp8_a2a_sum(z):
+    n = jax.lax.axis_size(axis_name)
+    qvalue, scale = quantize_rows_fp8(z, fwd_qtype)
+    # Block j of the all-to-all output (dim 0) is shard j's partial sum for this shard's slice.
+    parts = _a2a(qvalue).astype(jnp.float32) * _a2a(scale)
+    parts = parts.reshape((n, z.shape[0] // n) + z.shape[1:])
+    return jnp.sum(parts, axis=0).astype(z.dtype)
+
+  def _forward(z):
+    return _rs(z) if fwd_qtype is None else _fp8_a2a_sum(z)
+
+  @jax.custom_vjp
+  def _combine(z):
+    return _forward(z)
+
+  def _combine_fwd(z):
+    return _forward(z), None
+
+  def _combine_bwd(_, g):
+    if bwd_qtype is None:
+      # Same as the transpose of the reduce-scatter (an unpinned tiled all-gather).
+      return (jax.lax.all_gather(g, axis_name=axis_name, tiled=True),)
+    qvalue, scale = quantize_rows_fp8(g, bwd_qtype)
+    return (dequantize_rows_fp8(_ag(qvalue), _ag(scale), g.dtype),)
+
+  _combine.defvjp(_combine_fwd, _combine_bwd)
+  return _combine(x)
+
+
+def ep_fp8_token_all_gather(x: jax.Array, axis_name, all_gather_fn, qtype=jnp.float8_e4m3fn) -> jax.Array:
+  """Ring-of-experts dispatch (moe_fp8_token_all_gather): the token all-gather over the EP axis with an fp8 payload.
+
+  Each shard quantizes its tokens per row (last axis, one f32 absmax scale per row: quantize_rows_fp8), gathers the
+  fp8 codes and the scales with `all_gather_fn` (a tiled all-gather on dim 0), and dequantizes the gathered rows back
+  to x.dtype, so every reader of the result sees the same dtype and shape as after the plain all-gather. This changes
+  the forward values (one fp8 rounding per element). The backward treats the quantization as identity
+  (straight-through): the tiled reduce-scatter of the cotangent over the EP axis, in the cotangent's dtype, which is
+  the transpose of the plain tiled all-gather.
+  """
+
+  @jax.custom_vjp
+  def _gather(z):
+    qvalue, scale = quantize_rows_fp8(z, qtype)
+    return dequantize_rows_fp8(all_gather_fn(qvalue), all_gather_fn(scale), z.dtype)
+
+  def _gather_fwd(z):
+    return _gather(z), None
+
+  def _gather_bwd(_, g):
+    return (jax.lax.psum_scatter(g, axis_name, scatter_dimension=0, tiled=True),)
+
+  _gather.defvjp(_gather_fwd, _gather_bwd)
+  return _gather(x)
+
+
+def _order_after(x, dep):
+  """Returns x with a data dependency on `dep` (forward only).
+
+  The forward pass adds `0 * dep[0]` to x, so every consumer of the result is scheduled after dep
+  exists. An optimization_barrier does not survive to the TPU schedule when XLA removes barriers
+  (--xla_tpu_aggressive_opt_barrier_removal), while XLA does not fold a floating-point multiply by zero,
+  so the dependency does. Apply it to a small operand: it adds one elementwise pass over x. The
+  backward pass returns the cotangent of x unchanged and a zero cotangent for dep.
+  """
+  if not jnp.issubdtype(x.dtype, jnp.floating):
+    raise ValueError(f"_order_after needs a floating-point x, got {x.dtype}")
+
+  @jax.custom_vjp
+  def _tie(v, d):
+    return v + (jnp.reshape(d, (-1,))[0] * 0).astype(v.dtype)
+
+  def _fwd(v, d):
+    return _tie(v, d), None
+
+  def _bwd(_, g):
+    return g, jnp.zeros(dep.shape, dep.dtype)
+
+  _tie.defvjp(_fwd, _bwd)
+  return _tie(x, dep)
 
 
 def _param_path(path) -> tuple:
@@ -1618,12 +1866,16 @@ class RoutedMoE(nnx.Module):
     valid_token_mask = None
     if forced_routed_experts is not None:
       router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-      if self.config.moe_routing_index_math == "count":
-        # The router's own choice for tokens without (valid) forced ids: the same indices as top_k, from k argmax
-        # passes instead of a sort. Under moe_exclude_padding_from_routing every token takes this branch.
-        auto_indices = topk_indices_by_argmax(router_probs, self.num_experts_per_tok)
-      else:
-        _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
+      # moe_fallback_topk_capacity > 0: the router's own top-k is computed further down, once token_is_forced is
+      # known, for the tokens that use it only (fallback_topk_indices_compacted). 0 (default): for every token, here.
+      compact_fallback = getattr(self.config, "moe_fallback_topk_capacity", 0) > 0
+      if not compact_fallback:
+        if self.config.moe_routing_index_math == "count":
+          # The router's own choice for tokens without (valid) forced ids: the same indices as top_k, from k argmax
+          # passes instead of a sort. Under moe_exclude_padding_from_routing every token takes this branch.
+          auto_indices = topk_indices_by_argmax(router_probs, self.num_experts_per_tok)
+        else:
+          _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
       # A token has real forced routing only if its slots are within [0, num_experts).
       # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
@@ -1631,6 +1883,21 @@ class RoutedMoE(nnx.Module):
       sorted_experts = jnp.sort(forced_routed_experts, axis=-1)
       has_duplicate = jnp.any(sorted_experts[..., 1:] == sorted_experts[..., :-1], axis=-1, keepdims=True)
       token_is_forced = jnp.logical_and(jnp.all(slot_valid, axis=-1, keepdims=True), jnp.logical_not(has_duplicate))
+      if compact_fallback:
+        # A token's router ids reach the outputs only if it is not forced and, under moe_exclude_padding_from_routing,
+        # not padding (a padding token gets no valid slot below: ids -1 and weights 0, whatever auto_indices holds).
+        uses_router_ids = jnp.logical_not(token_is_forced[..., 0])
+        if self.config.moe_exclude_padding_from_routing:
+          uses_router_ids = jnp.logical_and(
+              uses_router_ids, jnp.logical_not(jnp.all(forced_routed_experts == PAD_TOKEN_ROUTED_EXPERT, axis=-1))
+          )
+        if self.config.moe_routing_index_math == "count":
+          topk_ids_fn = functools.partial(topk_indices_by_argmax, k=self.num_experts_per_tok)
+        else:
+          topk_ids_fn = functools.partial(_top_k_ids, k=self.num_experts_per_tok)
+        auto_indices = fallback_topk_indices_compacted(
+            router_probs, uses_router_ids, self.num_experts_per_tok, self.config.moe_fallback_topk_capacity, topk_ids_fn
+        )
       top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       if self.config.moe_exclude_padding_from_routing:
         # A padding token (every slot PAD_TOKEN_ROUTED_EXPERT) is never forced (its slots are not
@@ -2225,6 +2492,7 @@ class RoutedMoE(nnx.Module):
           topk_argsort_indices=topk_argsort_indices,
           index_math=self.config.moe_routing_index_math,
           unique_pair_argsort=self.config.moe_ragged_sort_unique_pair_argsort,
+          spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
       )
     else:
       unsort_intermediate = _sort_activations(
@@ -2653,10 +2921,15 @@ class RoutedMoE(nnx.Module):
       wo_bias,
       input_ids=None,
       forced_routed_experts=None,
+      fp8_fake_quant_at_gather=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts.
 
     `w1_kernel=None` (moe_unsplit_prefused_wi) means `w0_kernel` is the whole prefused [w0 | w1] weight.
+
+    `fp8_fake_quant_at_gather` (fp8 fake-quant hoist mode gather8 only): the (w0, w1, wo) per-channel absmax for
+    weights that `__call__` left unrounded (w1's is None when w1_kernel is None). They are rounded to their fp8 grid
+    here, on the FSDP shard, and the all-gather moves the fp8 codes; see the gather below.
     """
     if w1_kernel is None and not self.config.prefuse_moe_weights:
       raise ValueError("sparse_matmul got w1_kernel=None (the whole [w0 | w1] layout), which needs prefuse_moe_weights.")
@@ -2666,6 +2939,9 @@ class RoutedMoE(nnx.Module):
     # moe_router_grad_from_wo_input: the ring-of-experts down projection and unsort run as one op
     # (_ring_down_project_and_unpermute). The config validator checks the rest; the mesh decides this.
     router_grad_from_wo_input = self.config.moe_router_grad_from_wo_input
+    # moe_wo_gmm_fused_dswiglu: the SwiGLU backward runs in the epilogue of the down projection's (wo) DLHS GMM
+    # (_prepare_wo_inputs, _run_wo_gmm_dswiglu and the fused op of _ring_down_project_and_unpermute).
+    fuse_dswiglu_in_wo_gmm = getattr(self.config, "moe_wo_gmm_fused_dswiglu", False)
     if router_grad_from_wo_input and self.get_tensor_parallelism_size() > 1:
       raise ValueError(
           "moe_router_grad_from_wo_input=True does not support tensor parallelism in the MoE layer: the down"
@@ -3167,6 +3443,19 @@ class RoutedMoE(nnx.Module):
       def _ep_all_gather(z):
         return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
 
+    def _ep_all_to_all(z):
+      """moe_fp8_combine: tiled EP all-to-all (split and concat on dim 0)."""
+      return jax.lax.all_to_all(z, self._expert_parallelism_name, split_axis=0, concat_axis=0, tiled=True)
+
+    if self.config.moe_fp8_combine_pin_sparse_core:
+      # Pin the moe_fp8_combine all-to-all to the EP SparseCore instead of leaving it to XLA.
+      _ep_all_to_all = functools.partial(
+          compute_on,
+          compute_type="tpu_sparsecore",
+          out_memory_spaces=jax.memory.Space.Device,
+          compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
+      )(_ep_all_to_all)
+
     def roe_ag_and_route(
         x,
         logits,
@@ -3204,6 +3493,11 @@ class RoutedMoE(nnx.Module):
             calibration_method=self.config.act_quantization_calibration_method,
             all_gather_fn=token_all_gather,
         )
+      elif self.config.moe_fp8_token_all_gather:
+        # fp8 payload with a per-row f32 scale, dequantized right after the gather: the readers below see the same
+        # bf16 token buffer as with the plain gather. The config validator rules out the TC 3D dispatch layout and
+        # SparseCore-pinned gathers here.
+        x = ep_fp8_token_all_gather(x, self._expert_parallelism_name, token_all_gather)
       else:
         x = token_all_gather(x)
 
@@ -3604,11 +3898,16 @@ class RoutedMoE(nnx.Module):
           # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
           w_fused = jnp.concatenate([w0, w1], axis=-1)
         out = gmm_fn(x, w_fused, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes)
-        if partial_accum0 is None and partial_accum1 is None and self.config.moe_prefused_swiglu_vjp:
+        if (
+            partial_accum0 is None
+            and partial_accum1 is None
+            and (fuse_dswiglu_in_wo_gmm or self.config.moe_prefused_swiglu_vjp)
+        ):
           # moe_prefused_swiglu_vjp: the whole [gate | up] output goes to the activation as one array
           # (apply_ffn_activation_maybe_fused, which layer_w1=None selects), whose backward then writes d[gate | up]
-          # in one pass. There are no per-half outputs to tag; the config validator rejects a remat policy that
-          # would save them, since it would silently stop saving the MoE tensor.
+          # in one pass. moe_wo_gmm_fused_dswiglu: it is the input of the SwiGLU backward fused into the down
+          # projection's DLHS (_prepare_wo_inputs). There are no per-half outputs to tag; the config validators
+          # reject a remat policy that would save them, since it would silently stop saving the MoE tensor.
           return out, None
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
@@ -3696,6 +3995,18 @@ class RoutedMoE(nnx.Module):
       ]
       if unmet:
         raise ValueError(f"moe_wi_gmm_fused_swiglu=True does not support {' or '.join(unmet)}.")
+    if fuse_dswiglu_in_wo_gmm:
+      # As for moe_wi_gmm_fused_swiglu: the fused DLHS is the plain bf16 gmm_v2 of the local expert weights.
+      unmet = [
+          name
+          for name, hit in (
+              ("weight quantization", self.quant is not None),
+              ("an explicit expert-weight all-gather", weight_gather),
+          )
+          if hit
+      ]
+      if unmet:
+        raise ValueError(f"moe_wo_gmm_fused_dswiglu=True does not support {' or '.join(unmet)}.")
 
     def gmm_up_or_silu(
         x,
@@ -3713,9 +4024,10 @@ class RoutedMoE(nnx.Module):
       """gmm_up; with moe_wi_gmm_fused_swiglu, (silu(x @ w0) * (x @ w1), None) from one fused GMM.
 
       `gmm_operands` are the routing operands that `gmm_fn` is bound to (get_gmm_operands_for_local_experts); the
-      fused GMM takes them explicitly. An output1 of None tells the caller the activation is already applied.
-      Biases, the mask and gather_weights only matter in configurations the key does not support (mlp_bias, an
-      explicit weight all-gather).
+      fused GMM takes them explicitly. An output1 of None tells the caller the activation is already applied. With
+      moe_wo_gmm_fused_dswiglu too, output1 is the GMM's [gate | up] (see _prepare_wo_inputs). Biases, the mask and
+      gather_weights only matter in configurations the key does not support (mlp_bias, an explicit weight
+      all-gather).
       """
       if not fuse_silu_in_wi_gmm:
         return gmm_up(
@@ -3739,7 +4051,12 @@ class RoutedMoE(nnx.Module):
       # Weights are stored as (G,K,2N): w0/w1 are adjacent slices (the same concatenate as gmm_up), or w0 is already
       # the whole [w0 | w1] (moe_unsplit_prefused_wi).
       w_fused = w0 if w1 is None else jnp.concatenate([w0, w1], axis=-1)
-      act = mblx.gmm_silu(
+      # wi_tile_fwd_rhs_buffer_count: the fused forward kernel's weight pipeline depth, applied only when that GMM
+      # runs one K tile (its weight block then changes only at expert and n-tile boundaries); otherwise, e.g. with
+      # the eval tiles, the kernel's default buffering.
+      rhs_buffers = self.config.wi_tile_fwd_rhs_buffer_count
+      one_k_tile = not self.config.use_gmm_v2_heuristic_tiling and wi_tile_size[1] >= inputs.shape[-1]
+      out = mblx.gmm_silu(
           inputs.astype(self.dtype),
           w_fused.astype(self.dtype),
           gmm_operands["group_sizes"],
@@ -3750,8 +4067,83 @@ class RoutedMoE(nnx.Module):
           use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
           fuse_dlhs_scale=self.config.moe_accumulate_wi_dlhs,
           fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
+          fuse_bwd_dswiglu=fuse_dswiglu_in_wo_gmm,
+          fwd_rhs_buffer_count=rhs_buffers if rhs_buffers and one_k_tile else None,
       )
-      return (act[: x.shape[0]] if padding_amount else act), None
+      if fuse_dswiglu_in_wo_gmm:
+        # moe_wo_gmm_fused_dswiglu: (act, [gate | up]); the backward runs through [gate | up] (_prepare_wo_inputs).
+        act, gate_up = out
+        return (act[: x.shape[0]], gate_up[: x.shape[0]]) if padding_amount else (act, gate_up)
+      return (out[: x.shape[0]] if padding_amount else out), None
+
+    def _prepare_wo_inputs(output0, output1):
+      """The down projection's input from gmm_up_or_silu's outputs: (activation, None or [gate | up]).
+
+      Without moe_wo_gmm_fused_dswiglu: (the activation, None). With it, the SwiGLU backward runs in the down
+      projection's DLHS epilogue, so its input [gate | up] comes along as the second output and carries the
+      gradient, and the activation is passed with its gradient stopped (its cotangent is the DLHS output, which the
+      epilogue consumes). The activation comes from the fused wi GMM (moe_wi_gmm_fused_swiglu: output0 = act,
+      output1 = [gate | up]) or from the same apply_ffn_activation the unfused path runs on the whole [gate | up]
+      (output0 = [gate | up], output1 = None), so the forward is unchanged.
+      """
+      if not fuse_dswiglu_in_wo_gmm:
+        # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
+        intermediate = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+        return intermediate, None
+      if fuse_silu_in_wi_gmm:
+        return jax.lax.stop_gradient(output0), output1
+      gate_up = output0
+      n = gate_up.shape[-1] // 2
+      intermediate = jax.lax.stop_gradient(self.apply_ffn_activation(gate_up[:, :n], gate_up[:, n:]))
+      return intermediate, gate_up
+
+    def _dswiglu_pre_act_tile_n(gate_up):
+      """moe_wo_gmm_fused_dswiglu: the layout of the [gate | up] the fused DLHS epilogue reads (dact_pre_act_tile_n).
+
+      None for the up projection's GMM output, the contiguous [gate | up]. With moe_wi_gmm_fused_swiglu the fused wi
+      GMM writes it one [gate_j | up_j] block per forward n tile: the width of those pieces, its tile_n per half.
+      """
+      if not fuse_silu_in_wi_gmm:
+        return None
+      _, wi_tile_size = get_wi_gmm_params()
+      return mblx.gmm_silu_pre_act_tile_n(wi_tile_size, gate_up.shape[-1], self.config.use_gmm_v2_heuristic_tiling)
+
+    def _run_wo_gmm_dswiglu(
+        intermediate_layer, gate_up, wo, gmm_fn, wo_tile_size, *, tc_prescaled=False, x_is_3d=False, return_weights=False
+    ):
+      """moe_wo_gmm_fused_dswiglu: the down projection gmm_fn would run, as megablox gmm_dswiglu.
+
+      The same tokamax gmm_v2 forward; its backward returns the SwiGLU input's gradient d[gate | up] from the DLHS
+      epilogue (gmm_dswiglu_bwd) instead of the activation's. Rows are padded to the forward tile, as gmm() pads.
+      The flags are what the caller's gmm_fn call would also handle; the config validator excludes them.
+      """
+      unsupported = [
+          name
+          for name, hit in (
+              # The epilogue would differentiate silu(gate) * up, not the routing-weighted activation.
+              ("routing weights on the activation (moe_tc_ragged_weights_on_activation)", tc_prescaled),
+              ("a 3D token buffer (moe_tc_ragged_3d_gmm)", x_is_3d),
+              ("moe_accumulate_chunk_wgrad", return_weights),
+          )
+          if hit
+      ]
+      if unsupported:
+        raise NotImplementedError(f"moe_wo_gmm_fused_dswiglu does not support {', '.join(unsupported)}.")
+      padded_h, padding_amount = max_utils.maybe_pad(intermediate_layer, fwd_tile("wo_tile_fwd_batch_seq"))
+      padded_gate_up = jnp.pad(gate_up, ((0, padding_amount), (0, 0))) if padding_amount > 0 else gate_up
+      out = mblx.gmm_dswiglu(
+          padded_h.astype(self.dtype),
+          padded_gate_up.astype(self.dtype),
+          wo.astype(self.dtype),
+          gmm_fn.keywords["group_sizes"],  # the routing get_gmm_for_local_experts bound for this buffer
+          preferred_element_type=self.dtype,
+          tiling=wo_tile_size,
+          group_offset=gmm_fn.keywords["group_offset"],
+          use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+          use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+          dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(gate_up),
+      )
+      return out[: intermediate_layer.shape[0]] if padding_amount > 0 else out
 
     def get_gmm_operands_for_local_experts(x, routing, route_metadata):
       """The routing operands of the local experts' GMMs: group sizes, expert assignments, group offset."""
@@ -4002,8 +4394,8 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
-      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
-      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+      # moe_wi_gmm_fused_swiglu / moe_wo_gmm_fused_dswiglu: see _prepare_wo_inputs.
+      intermediate_layer, dswiglu_gate_up = _prepare_wo_inputs(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -4014,14 +4406,26 @@ class RoutedMoE(nnx.Module):
         raise NotImplementedError("moe_tc_ragged_3d_gmm does not support tensor parallelism or mlp_bias.")
       if self.config.moe_bwd_prequant_before_unsort:
         raise NotImplementedError("moe_chunk_pipeline does not support moe_bwd_prequant_before_unsort.")
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-          return_rhs=return_weights,
-          **({"out_is_3d": True} if x_is_3d else {}),
-      )
+      if dswiglu_gate_up is not None:
+        intermediate_output = _run_wo_gmm_dswiglu(
+            intermediate_layer,
+            dswiglu_gate_up,
+            wo,
+            gmm_fn,
+            wo_tile_size,
+            tc_prescaled=tc_prescaled,
+            x_is_3d=x_is_3d,
+            return_weights=return_weights,
+        )
+      else:
+        intermediate_output = gmm_fn(
+            intermediate_layer,
+            wo,
+            tiling=wo_tile_size,
+            weight_gather_axes=wo_gather_axes,
+            return_rhs=return_weights,
+            **({"out_is_3d": True} if x_is_3d else {}),
+        )
       if return_weights:
         intermediate_output, wo = intermediate_output
       if self.get_tensor_parallelism_size() > 1:
@@ -4080,8 +4484,8 @@ class RoutedMoE(nnx.Module):
       `forward_tie` is the pipelined loop's tie 2, applied inside the op to the down-projection output.
       Returns the output as [expert shards x batch, seq, embed], as `_ring_unpermute`, and the tie's output.
       """
-      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
-      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+      # moe_wi_gmm_fused_swiglu / moe_wo_gmm_fused_dswiglu: see _prepare_wo_inputs.
+      intermediate_layer, dswiglu_gate_up = _prepare_wo_inputs(output0, output1)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
 
       def down_projection(h, kernel, group_sizes, expert_assignments, group_offset):
@@ -4094,6 +4498,40 @@ class RoutedMoE(nnx.Module):
             weight_gather_axes=wo_gather_axes,
             group_offset=group_offset,
         )
+
+      def down_projection_bwd_dswiglu(
+          gathered, weighted_h, kernel, group_sizes, expert_assignments, group_offset, *, dact_gate_up, dact_row_scale
+      ):
+        """moe_wo_gmm_fused_dswiglu: down_projection's backward at the input weighted_h and cotangent gathered,
+        with the SwiGLU backward in the DLHS epilogue (megablox gmm_dswiglu_bwd): (d[gate | up], <u, h>, dwo).
+        """
+        del expert_assignments
+        num_rows = gathered.shape[0]
+        # Rows padded to the forward tile, as gmm() pads them; the padding is in no group.
+        gathered, padding_amount = max_utils.maybe_pad(gathered, fwd_tile("wo_tile_fwd_batch_seq"))
+        if padding_amount > 0:
+          weighted_h = jnp.pad(weighted_h, ((0, padding_amount), (0, 0)))
+          dact_gate_up = jnp.pad(dact_gate_up, ((0, padding_amount), (0, 0)))
+          dact_row_scale = jnp.pad(dact_row_scale, (0, padding_amount))
+        d_gate_up, dot, grad_wo = mblx.gmm_dswiglu_bwd(
+            gathered.astype(self.dtype),
+            weighted_h.astype(self.dtype),
+            kernel.astype(self.dtype),
+            group_sizes,
+            group_offset,
+            self.dtype,
+            wo_tile_size,
+            dact_gate_up.astype(self.dtype),
+            dact_row_scale=dact_row_scale,
+            return_dact_dot=True,
+            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+            use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+            dact_pre_act_tile_n=_dswiglu_pre_act_tile_n(dact_gate_up),
+        )
+        if padding_amount > 0:
+          # dot is an array here (return_dact_dot=True).
+          d_gate_up, dot = d_gate_up[:num_rows], dot[:num_rows]  # pylint: disable=unsubscriptable-object
+        return d_gate_up, dot, grad_wo
 
       operands = get_gmm_operands_for_local_experts(intermediate_layer, routing, route_metadata)
       output = ring_ragged_unsort_down_projection(
@@ -4118,6 +4556,9 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           index_math=self.config.moe_routing_index_math,
           unique_pair_argsort=self.config.moe_ragged_sort_unique_pair_argsort,
+          dswiglu_gate_up=dswiglu_gate_up,
+          down_projection_bwd_dswiglu=None if dswiglu_gate_up is None else down_projection_bwd_dswiglu,
+          spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
       )
       if forward_tie is not None:
         output, forward_tie = output
@@ -4134,7 +4575,19 @@ class RoutedMoE(nnx.Module):
         # combine output where it is.
         output = forward_row_major(output)
       combine_bwd_method = self.config.moe_quantize_combine_bwd_method
-      if combine_bwd_method:
+      if self.config.moe_fp8_combine or self.config.moe_fp8_bwd_dispatch:
+        # moe_fp8_combine: the forward as an fp8 all-to-all + local f32 sum. moe_fp8_bwd_dispatch: the backward
+        # all-gather of the cotangent with an fp8 payload. The config validator rejects moe_quantize_combine_bwd_method
+        # with either key.
+        output = ep_combine_reduce_scatter(
+            output,
+            self._expert_parallelism_name,
+            all_gather_fn=_ep_all_gather,
+            bwd_qtype=jnp.dtype(self.config.moe_fp8_bwd_dispatch_qtype) if self.config.moe_fp8_bwd_dispatch else None,
+            fwd_qtype=jnp.dtype(jnp.float8_e4m3fn) if self.config.moe_fp8_combine else None,
+            all_to_all_fn=_ep_all_to_all,
+        )
+      elif combine_bwd_method:
         output = _moe_combine_psum_scatter(
             output,
             self._expert_parallelism_name,
@@ -4185,10 +4638,20 @@ class RoutedMoE(nnx.Module):
         force_dropless=False,
         gather_weights=True,
         return_weights=False,
+        combine_after=None,
     ):
       if router_grad_from_wo_input and (return_weights or not gather_weights):
         # The fused op does not return the weights (the config validator rejects the two keys together).
         raise NotImplementedError("moe_router_grad_from_wo_input does not support moe_accumulate_chunk_wgrad.")
+
+      def _unpermute_routing(routing):
+        """moe_combine_per_chunk: this chunk's unpermute waits on the previous chunk's combine reduce-scatter
+        (`combine_after`), through a data dependency on the small routing-weight operand of the unpermute."""
+        if combine_after is None:
+          return routing
+        weights = adc.checkpoint_name(_order_after(routing.weights, combine_after), "moe_combine_order")
+        return routing.replace(weights=weights)
+
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
@@ -4259,7 +4722,7 @@ class RoutedMoE(nnx.Module):
         # moe_router_grad_from_wo_input: the activation, the down projection and the unsort as one op whose
         # backward does not read the down projection's output; then the same reduce-scatter as below.
         output, _ = _ring_down_project_and_unpermute(
-            output0, output1, wo, routing, route_metadata, batch_size, sequence_length
+            output0, output1, wo, _unpermute_routing(routing), route_metadata, batch_size, sequence_length
         )
         return _moe_body_outputs(_ring_reduce_scatter(output), routing, (w0, w1, wo))
 
@@ -4274,8 +4737,8 @@ class RoutedMoE(nnx.Module):
         w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
         if self.config.moe_tc_routing_checkpoint != "remat":
           w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
-      # moe_wi_gmm_fused_swiglu: the wi GMM already applied the activation (output1 is None).
-      intermediate_layer = output0 if fuse_silu_in_wi_gmm else self.apply_ffn_activation_maybe_fused(output0, output1)
+      # moe_wi_gmm_fused_swiglu / moe_wo_gmm_fused_dswiglu: see _prepare_wo_inputs.
+      intermediate_layer, dswiglu_gate_up = _prepare_wo_inputs(output0, output1)
       if tc_prescaled:
         intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
       wo_gather_axes, wo_tile_size = get_wo_gmm_params()
@@ -4311,15 +4774,27 @@ class RoutedMoE(nnx.Module):
                 ),
             ),
         }
-      intermediate_output = gmm_fn(
-          intermediate_layer,
-          wo,
-          tiling=wo_tile_size,
-          weight_gather_axes=wo_gather_axes,
-          return_rhs=return_weights,
-          **({"out_is_3d": True} if x_is_3d else {}),
-          **tc_unsort_kwargs,
-      )
+      if dswiglu_gate_up is not None:
+        intermediate_output = _run_wo_gmm_dswiglu(
+            intermediate_layer,
+            dswiglu_gate_up,
+            wo,
+            gmm_fn,
+            wo_tile_size,
+            tc_prescaled=tc_prescaled,
+            x_is_3d=x_is_3d,
+            return_weights=return_weights,
+        )
+      else:
+        intermediate_output = gmm_fn(
+            intermediate_layer,
+            wo,
+            tiling=wo_tile_size,
+            weight_gather_axes=wo_gather_axes,
+            return_rhs=return_weights,
+            **({"out_is_3d": True} if x_is_3d else {}),
+            **tc_unsort_kwargs,
+        )
       if return_weights:
         intermediate_output, wo = intermediate_output
       if self.get_tensor_parallelism_size() > 1:
@@ -4349,7 +4824,7 @@ class RoutedMoE(nnx.Module):
             output = self.unpermute(
                 intermediate_output,
                 routing.sorted_selected_experts,
-                routing.weights,
+                _unpermute_routing(routing).weights,
                 batch_size=batch_size,
                 sequence_length=sequence_length,
                 use_custom_sort_vjp=self.config.use_custom_sort_vjp,
@@ -4801,6 +5276,9 @@ class RoutedMoE(nnx.Module):
               force_dropless=force_dropless,
               gather_weights=not accum_chunk_wgrad or c == 0,
               return_weights=accum_chunk_wgrad and c < n_chunks - 1,
+              # moe_combine_per_chunk: this chunk's unpermute waits on the previous chunk's combine reduce-scatter.
+              # (The pipelined chunk loop already orders them that way: its tie 3.)
+              combine_after=outs[-1] if (self.config.moe_combine_per_chunk and outs) else None,
           )
           if accum_chunk_wgrad:
             cur_w0, cur_w1, cur_wo = chunk_weights
@@ -4988,9 +5466,34 @@ class RoutedMoE(nnx.Module):
           return w
         return self._maybe_shard_with_pspec(w, pspec)
 
-    w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
-    w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
-    wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
+    if fp8_fake_quant_at_gather is None:
+      w0_kernel = _fsdp_all_gather(w0_kernel, w0_pspec)
+      w1_kernel = _fsdp_all_gather(w1_kernel, w1_pspec)
+      wo_kernel = _fsdp_all_gather(wo_kernel, wo_pspec)
+      fp8_dequantize_after_gather = None
+    else:
+      # fp8_fake_quant_hoist=gather8: fp8_moe_fake_quant with the rounding split around the FSDP all-gather. Each
+      # weight is quantized on its shard with the hoisted absmax (no all-reduce), the float8_e4m3fn codes are
+      # gathered (1 byte per element instead of the 2 of the bf16 fake-quantized weight; still a SparseCore
+      # all-gather on v7x) and dequantized after the gather and the prefetch barrier. Bit-identical to gathering
+      # fake_quantize_weight_per_channel: the dequantization is elementwise with a per-channel scale; the scale is
+      # replicated across FSDP (the decoder lays the hoisted absmax out that way), so placing it in the gathered
+      # layout moves nothing. The weights reach the GEMMs through dequantize_weight_codes_ste, whose backward hands
+      # the cotangent to the shard exactly as the gather's transpose (a sharding constraint) and the
+      # straight-through estimator did, so the weight-gradient reduce-scatter is unchanged. A None w1_kernel
+      # (moe_unsplit_prefused_wi: w0_kernel is the whole [w0 | w1]) stays None.
+      fp8_dequantize_after_gather = []
+      gathered_codes = []
+      for w, absmax, pspec in zip((w0_kernel, w1_kernel, wo_kernel), fp8_fake_quant_at_gather, (w0_pspec, w1_pspec, wo_pspec)):
+        if w is None:
+          gathered_codes.append(None)
+          fp8_dequantize_after_gather.append(None)
+          continue
+        codes, scale = quantizations.quantize_weight_codes_per_channel(jax.lax.stop_gradient(w), absmax=absmax)
+        gathered_codes.append(_fsdp_all_gather(codes, pspec))
+        scale = self._maybe_shard_with_pspec(scale, P(pspec[0], None, pspec[2]))
+        fp8_dequantize_after_gather.append((w, scale, pspec))
+      w0_kernel, w1_kernel, wo_kernel = gathered_codes
     if w0_bias is not None:
       w0_bias = _fsdp_all_gather(w0_bias, w0_bias_pspec)
     if w1_bias is not None:
@@ -5027,6 +5530,18 @@ class RoutedMoE(nnx.Module):
           (inputs, gate_logits, pre_bias_logits),
           (w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias),
           backward=prefetch == "forward_backward",
+      )
+
+    if fp8_dequantize_after_gather is not None:
+      # After the barrier, so the barrier orders the (cheaper) code gathers and the dequantization can fuse
+      # into the GEMM operand prologue.
+      w0_kernel, w1_kernel, wo_kernel = (
+          None
+          if deq is None
+          else quantizations.dequantize_weight_codes_ste(
+              deq[0], codes, deq[1], grad_transform=functools.partial(self._maybe_shard_with_pspec, pspec=deq[2])
+          )
+          for codes, deq in zip((w0_kernel, w1_kernel, wo_kernel), fp8_dequantize_after_gather)
       )
 
     route_and_compute_outputs = sparse_matmul_route_and_compute(
@@ -5964,6 +6479,40 @@ class RoutedMoE(nnx.Module):
       output = jax.lax.with_sharding_constraint(output, out_sharding)
     return output, lb_loss, (total_recv_tokens, jnp.asarray(recv_capacity_per_rank, dtype=jnp.int32))
 
+  def _fp8_hoisted_absmax(self, wi_half_width: int | None):
+    """(w0, w1, wo) absmax the decoder's layer scan attached (fp8_fake_quant_hoist), else (None, None, None).
+
+    A pre-fused wi carries one absmax over its 2N columns; each column's absmax is the same in its half, so
+    the halves are exact slices of it. `wi_half_width=None` (moe_unsplit_prefused_wi: w0 is the whole [w0 | w1]
+    and w1 is None) returns the whole wi absmax for w0 and None for w1.
+    """
+    hoisted = getattr(self, FP8_HOISTED_ABSMAX_ATTR, None)
+    if hoisted is None:
+      return None, None, None
+    absmax = hoisted.get_value()
+    if fp8_fake_quant_hoist_mode(self.config) == "gather8":
+      # Pin the gathered-scale layout here, at the first use inside the layer, as well as on the stack. Otherwise
+      # XLA keeps the scan's absmax input FSDP-sharded (the quantize on the shard needs only its slice) and
+      # all-gathers the f32 wo scale in every layer for the dequantization after the gather (exact-cell AOT:
+      # 8 x f32[1,64,1,4096] all-gathers per scan step). Replicated, the scale is computed in full on every device.
+      absmax = {k: self._maybe_shard_with_pspec(v, self._fp8_gathered_scale_pspec(k)) for k, v in absmax.items()}
+    if "wi" in absmax:
+      if wi_half_width is None:
+        return absmax["wi"], None, absmax["wo"]
+      return absmax["wi"][..., :wi_half_width], absmax["wi"][..., wi_half_width:], absmax["wo"]
+    return absmax["wi_0"], absmax["wi_1"], absmax["wo"]
+
+  def _fp8_gathered_scale_pspec(self, weight_name: str) -> P:
+    """The layout of one layer's (E, 1, C) fp8 scale for `weight_name` next to its FSDP-gathered weight.
+
+    Mirrors the default branch of `sparse_matmul`'s `get_routed_moe_shardings` (the only one gather8 supports): the
+    gathered wi (halves or whole) are ("exp", None, "mlp_no_fsdp") and wo is ("exp", "mlp_no_fsdp", None), both
+    without "fsdp"; the scale keeps the expert and channel entries and replicates its size-1 axis.
+    """
+    logical = ("exp", "mlp_no_fsdp", None) if weight_name == "wo" else ("exp", None, "mlp_no_fsdp")
+    pspec = remove_mesh_axes_from_partition_spec(self._logical_to_mesh_axes(logical), ("fsdp",))
+    return P(pspec[0], None, pspec[2])
+
   def __call__(
       self,
       inputs: jax.Array,
@@ -6099,13 +6648,22 @@ class RoutedMoE(nnx.Module):
         w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
         w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
 
+    fp8_fake_quant_at_gather = None
     if cfg.fp8_moe_fake_quant and not is_fused_moe_path:
       # Axis 2 is the output dim of wi_0/wi_1 (mlp) and wo (embed). An fp8_moe rollout quantizes the
       # fused wi = [wi_0 | wi_1] per output channel, so rounding the halves separately is identical.
-      w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel)
-      if w1_kernel is not None:  # None: moe_unsplit_prefused_wi, and the line above rounded both halves at once
-        w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
-      wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel)
+      # fp8_fake_quant_hoist: inside the decoder's layer scan the absmax comes precomputed for the whole stack
+      # (`stacked_fp8_fake_quant_absmax`), so this layer does not reduce and all-reduce it; with gather8 the
+      # rounding also moves into `sparse_matmul`, around the FSDP all-gather, so the gather moves fp8 codes.
+      # Without the attribute (hoist off) all three absmax are None: the original code.
+      w0_absmax, w1_absmax, wo_absmax = self._fp8_hoisted_absmax(None if w1_kernel is None else w0_kernel.shape[-1])
+      if wo_absmax is not None and cfg.sparse_matmul and fp8_fake_quant_hoist_mode(cfg) == "gather8":
+        fp8_fake_quant_at_gather = (w0_absmax, w1_absmax, wo_absmax)
+      else:
+        w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel, absmax=w0_absmax)
+        if w1_kernel is not None:  # None: moe_unsplit_prefused_wi, and the line above rounded both halves at once
+          w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel, absmax=w1_absmax)
+        wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel, absmax=wo_absmax)
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because
@@ -6172,6 +6730,7 @@ class RoutedMoE(nnx.Module):
           wo_bias,
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
+          fp8_fake_quant_at_gather=fp8_fake_quant_at_gather,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -6307,3 +6866,139 @@ class RoutedAndSharedMoE(nnx.Module):
         out_sharding=out_sharding,
     )
     return routed_experts + shared_experts, load_balance_loss, moe_bias_updates
+
+
+def fp8_fake_quant_hoist_enabled(config) -> str:
+  """The fp8 fake-quant hoist mode the decoder's layer scan applies ("" = off). Raises if the config cannot honour it.
+
+  Raising, instead of quietly running the original code, keeps an arm that asks for the hoist from measuring nothing.
+  """
+  mode = fp8_fake_quant_hoist_mode(config)
+  if not mode:
+    return ""
+  unmet = []
+  if not getattr(config, "fp8_moe_fake_quant", False):
+    unmet.append("fp8_moe_fake_quant=true")
+  if config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx"):
+    unmet.append("a training attention (not vllm_rpa*)")
+  if config.parameter_memory_host_offload:
+    unmet.append("parameter_memory_host_offload=false")
+  if getattr(config, "moe_flat_fsdp_weights", False):
+    unmet.append("moe_flat_fsdp_weights=false")
+  if mode == "gather8":
+    if not config.sparse_matmul:
+      unmet.append("sparse_matmul=true")
+    if config.moe_fsdp_use_two_stage_all_gather:
+      unmet.append("moe_fsdp_use_two_stage_all_gather=false")
+    if config.shard_exp_on_fsdp or config.use_2d_fsdp_sharding or getattr(config, "shard_embed_moe_on_fsdp", False):
+      unmet.append("the default expert-weight sharding (shard_exp_on_fsdp, use_2d_fsdp_sharding, shard_embed_moe_on_fsdp off)")
+    if config.moe_expert_weight_prefetch == "forward_backward":
+      unmet.append("moe_expert_weight_prefetch other than forward_backward")
+    if config.moe_pin_sparse_core_all_gathers or (
+        getattr(config, "moe_pin_sparse_core_fsdp_all_gathers", False)
+        and not getattr(config, "moe_pin_sparse_core_fsdp_all_gathers_fwd_only", False)
+    ):
+      unmet.append("no SparseCore-pinned expert-weight gathers in the backward (fwd_only pinning is fine)")
+    if getattr(config, "gather_scanned_kernels_once", False):
+      unmet.append("gather_scanned_kernels_once=false")
+  if unmet:
+    raise ValueError(
+        f"fp8_fake_quant_hoist={getattr(config, 'fp8_fake_quant_hoist', 'off')!r}"
+        f" {FP8_FAKE_QUANT_HOIST_ENV}={os.environ.get(FP8_FAKE_QUANT_HOIST_ENV)!r} (mode {mode}) needs: "
+        + "; ".join(unmet)
+    )
+  return mode
+
+
+def _fp8_hoistable_weight_names(module: "RoutedMoE") -> tuple[str, ...]:
+  """The expert weights whose fake-quant absmax can be computed for the whole stack, () if none.
+
+  Mirrors the `fp8_moe_fake_quant` branch of `RoutedMoE.__call__`: unquantized weights (no scales, no AQT or
+  serve quantization, no sparsity) on the non-fused path, where the layer fake-quantizes
+  `dequantize_weight(param, None, dtype)`, i.e. `param.astype(dtype)`.
+  """
+  cfg = module.config
+  if module.quant is not None or quantizations.in_serve_mode(module.quant):
+    return ()
+  if getattr(module, "wi_0_sparsity_module", None) is not None:
+    return ()
+  if cfg.prefuse_moe_weights:
+    names, scales = ("wi", "wo"), ("wi_scale", "wo_scale")
+  else:
+    names, scales = ("wi_0", "wi_1", "wo"), ("wi_0_scale", "wi_1_scale", "wo_scale")
+  if any(getattr(module, s, None) is not None for s in scales):
+    return ()
+  if any(not isinstance(getattr(module, n, None), nnx.Param) for n in names):
+    return ()
+  return names
+
+
+def stacked_fp8_fake_quant_absmax(layers: nnx.Module, config, mode: str) -> tuple[list, list]:
+  """Per-layer fp8 fake-quant absmax of every eligible RoutedMoE in a scanned layer stack, for the whole stack.
+
+  `layers` is the stacked module `_apply_layers_sequentially` scans (parameters stacked along
+  `config.param_scan_axis`). For each eligible RoutedMoE this computes, from the same cast weights the layers
+  fake-quantize, the per-(expert, channel) absmax of every layer at once, stacked along a new leading axis:
+  jax.lax.scan slices one layer's absmax out of it and `fp8_hoisted_absmax_attached` hands it to that layer.
+  When the reduced axis is FSDP-sharded this is one max all-reduce per weight for the whole stack instead of
+  one per layer in the forward and another per layer in the remat replay. A max is exact, so every layer gets
+  bit-for-bit the absmax it would have computed. No gradient flows through it: the weights are read under
+  stop_gradient, as the layer's own absmax only ever feeds stop_gradient'ed values.
+  With mode "gather8" each absmax is also laid out as the scale next to the gathered weight (replicated across
+  FSDP: for wo, whose channel axis is FSDP-sharded, that is one all-gather for the whole stack), so no layer
+  needs a collective for its scale.
+
+  Returns:
+    (paths, values): the RoutedMoE graph paths within `layers` and, for each, a dict
+    {weight name: absmax stacked as [num_layers, num_experts, 1, channels]}.
+  """
+  paths, values = [], []
+  for path, node in nnx.iter_graph(layers):
+    if not isinstance(node, RoutedMoE):
+      continue
+    names = _fp8_hoistable_weight_names(node)
+    if not names:
+      continue
+    per_weight = {}
+    for name in names:
+      stacked = getattr(node, name).get_value()
+      if stacked.ndim != 4:
+        raise ValueError(f"fp8_fake_quant_hoist expects scanned 3D expert weights, got {name} {stacked.shape}.")
+      w = quantizations.dequantize_weight(jax.lax.stop_gradient(stacked), None, node.dtype)
+      absmax = quantizations.stacked_per_channel_absmax(w, layer_axis=config.param_scan_axis)
+      if mode == "gather8":
+        absmax = node._maybe_shard_with_pspec(absmax, P(None, *node._fp8_gathered_scale_pspec(name)))  # pylint: disable=protected-access
+      per_weight[name] = absmax
+    paths.append(path)
+    values.append(per_weight)
+  if paths:
+    # Once per trace of the scan (WARNING so that it shows without INFO logging): the liveness check for an arm.
+    max_logging.warning(
+        f"[FQHOIST] fp8_fake_quant_hoist={getattr(config, 'fp8_fake_quant_hoist', 'off')!r}"
+        f" {FP8_FAKE_QUANT_HOIST_ENV}={os.environ.get(FP8_FAKE_QUANT_HOIST_ENV)!r} mode={mode}: fp8 fake-quant"
+        f" absmax hoisted out of the layer scan for {len(paths)} RoutedMoE x {sorted(values[0])} of"
+        f" {type(layers).__name__} (fp8-code weight gathers: {'on' if mode == 'gather8' else 'off'}), shapes "
+        + ", ".join(f"{k}{tuple(v.shape)}" for k, v in sorted(values[0].items()))
+    )
+  return paths, values
+
+
+@contextlib.contextmanager
+def fp8_hoisted_absmax_attached(layer: nnx.Module, paths: list, values: list | None):
+  """Attaches one layer's hoisted absmax (`values`, a scan slice) to its RoutedMoEs at `paths` for one call.
+
+  The attribute is removed on exit, before the scan splits the layer's state, so the scanned state, the
+  outputs and the graphdef are exactly as without the hoist.
+  """
+  if not paths or values is None:
+    yield
+    return
+  nodes = dict(nnx.iter_graph(layer))
+  modules = [nodes[p] for p in paths]
+  for module, per_weight in zip(modules, values):
+    setattr(module, FP8_HOISTED_ABSMAX_ATTR, Fp8HoistedAbsmax(per_weight))
+  try:
+    yield
+  finally:
+    for module in modules:
+      delattr(module, FP8_HOISTED_ABSMAX_ATTR)
