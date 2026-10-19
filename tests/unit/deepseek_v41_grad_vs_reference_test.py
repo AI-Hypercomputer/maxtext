@@ -590,7 +590,7 @@ class PureJaxTrainingFixesTest(unittest.TestCase):
       c_kv = compress_kv if use_compressed else None
       t_mask = topk_mask if use_compressed else None
 
-      def dense_loss(q_in, kv_in, ckv_in, s_in, tm=t_mask):
+      def dense_loss(q_in, kv_in, ckv_in, s_in, tm=t_mask):  # pylint: disable=cell-var-from-loop
         delta = positions[:, :, None] - positions[:, None, :]
         mask = (delta >= 0) & (delta < window_size)
         keys = kv_in
@@ -599,7 +599,7 @@ class PureJaxTrainingFixesTest(unittest.TestCase):
           mask = jnp.concatenate([mask, tm], axis=-1)
         return jnp.sum(attend(q_in, keys, mask, s_in) * cot)
 
-      def chunked_loss(q_in, kv_in, ckv_in, s_in, tm=t_mask):
+      def chunked_loss(q_in, kv_in, ckv_in, s_in, tm=t_mask):  # pylint: disable=cell-var-from-loop
         out = attention_deepseek41.DeepSeek41Attention._chunked_attention(  # pylint: disable=protected-access
             dummy, q_in, kv_in, ckv_in, tm, positions, s_in, attend, chunk
         )
