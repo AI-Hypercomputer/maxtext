@@ -190,6 +190,11 @@ weight_sparsity_m: null
 weight_sparsity_update_step: 10
 # The first number of steps before updating the sparsity masks.
 weight_sparsity_start_step: 50
+# Comma-separated, ascending decoder layer indices or inclusive ranges to apply weight sparsity to
+# (e.g. "0-13,24-31"). Empty means all decoder layers. Requires weight_sparsity_n/m and scan_layers=False.
+sparse_layers: ""
+# Only apply weight sparsity to MoE expert kernels, not dense matmuls. Requires num_experts > 1.
+sparse_experts_only: False
 # Whether to use Transformer Engine's collective GEMM overlap algorithm with quantization in MLP layers. Note: only valid with tensor-sequence parallelism.
 # "disabled" means no overlap, "mlp" means to only overlap up and down projections in MLP layers,
 # and "full" means to overlap MLP projections as well as the QKV and output projection layers in attention.
@@ -1201,7 +1206,7 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 
-opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+opt_type: "adamw"  # one of "adamw", "adam_pax", "adam_pax_low_memory", "sgd", or "muon"
 
 # If true, skip the training step when loss or gradient spike is detected
 # No updates for both weights and momentums (if applies)
@@ -1225,6 +1230,11 @@ adam_eps_root: 0. # A small constant applied to denominator inside the square ro
 adam_weight_decay: 0.1 # AdamW Weight decay
 adamw_mask: [] # List of parameter names/patterns to exclude from weight decay in AdamW, like ['bias', '.*norm', '.*ln.*'].
 mu_dtype: "" # data type to store "mu" of AdamW tracking the first moment. Inherits from  weight_dtype if unset.
+# opt_type "adam_pax_low_memory" only: rounding of bf16 parameter updates.
+# "nearest": round to nearest (no extra state); "kahan": deterministic Kahan-compensated updates (param-sized bf16
+# residual in optimizer state); "stochastic": unbiased stochastic rounding seeded by stochastic_rounding_seed.
+bf16_update_rounding: "nearest"
+stochastic_rounding_seed: 0
 # Setting nu_dtype is not yet supported by optax, instead nu_dtype is always inherited from weights.
 # See b/399961932 for more.
 
