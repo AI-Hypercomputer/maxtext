@@ -4447,6 +4447,8 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
   first_num_dense_layers = config.get("first_k_dense_replace", 1)
   num_experts = config.get("num_experts", 896)
   full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+  routed_weight_format = getattr(maxtext_config, "routed_experts_weight_format", "bf16") or "bf16"
+  router_bias_name = "e_score_correction_bias" if routed_weight_format == "mxfp4" else "bias"
 
   mapping = {}
 
@@ -4537,8 +4539,9 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
       mapping.update(
           {
               f"{prefix}-mlp-routed_experts-gate-kernel": f"language_model.model.layers.{i}.block_sparse_moe.gate.weight",
-              # moe.RoutedMoE's router bias param is `gate/bias`.
-              f"{prefix}-mlp-routed_experts-gate-bias": (
+              # bf16 experts run through moe.RoutedMoE, whose router bias param is `gate/bias`;
+              # the mxfp4 path (KimiRoutedExperts) keeps the HF name.
+              f"{prefix}-mlp-routed_experts-gate-{router_bias_name}": (
                   f"language_model.model.layers.{i}.block_sparse_moe.gate.e_score_correction_bias"
               ),
               f"{prefix}-mlp-routed_expert_down_proj-kernel": (
@@ -4561,8 +4564,13 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fals
               ),
           }
       )
-      # Routed experts: dense `.weight` kernels.
-      expert_suffixes = (("", ".weight"),)
+      # Routed experts: dense `.weight` (dequantized by the loader) or, in mxfp4 mode, the
+      # released `weight_packed` / `weight_scale` sidecars kept as uint8.
+      expert_suffixes = (
+          (("", ".weight"),)
+          if routed_weight_format != "mxfp4"
+          else (("_packed", ".weight_packed"), ("_scale", ".weight_scale"))
+      )
       for mt_name, hf_name in (("wi_0", "w1"), ("wi_1", "w3"), ("wo", "w2")):
         for mt_suffix, hf_suffix in expert_suffixes:
           mapping[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = [
@@ -4695,8 +4703,8 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
       hooks[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = transpose
       hooks[f"{prefix}-mlp-shared_expert-wo-kernel"] = transpose
       for mt_name in ("wi_0", "wi_1", "wo"):
-        # HF [out, in] (dense) -> MaxText [in.., out].
-        for mt_suffix in ("",):
+        # HF [out, in] (dense) or [out, in/2] / [out, in/32] (MXFP4 sidecars) -> MaxText [in.., out].
+        for mt_suffix in ("", "_packed", "_scale"):
           hooks[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = transpose
 
   return hooks
