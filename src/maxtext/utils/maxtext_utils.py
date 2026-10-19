@@ -1511,6 +1511,11 @@ def get_intermediate_value(model, nested_key, default=None, clear=False):
   """
   intermediate_value = default
   match nested_key:
+    case "block_boundary_activations":
+      if hasattr(model.decoder, "block_boundary_activations"):
+        intermediate_value = getattr(model.decoder, "block_boundary_activations").get_value()[-1]
+        if clear:
+          delattr(model.decoder, "block_boundary_activations")
     case "out_projection_activations":
       layers = model.decoder.get_layers()
       last_layer = layers[-1]
