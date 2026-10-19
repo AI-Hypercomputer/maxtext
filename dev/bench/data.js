@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792386024234,
+  "lastUpdate": 1792400309975,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -52992,6 +52992,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 6767.025000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 482,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "0bcf718717cfaedc90bd471d579d7514bdc5f04e",
+          "message": "Wire MaxText RL profiling and metrics onto tunix's targeted RL profiler and ML Diagnostics.\n\nThe Tunix-based RL trainer used tunix's SFT-era step profiler, which only\ntraces the actor on process 0 and never the vLLM rollout, and it had no\nML Diagnostics integration. Tunix now provides a per-role, invocation-counted\n`RLProfileConfig` and an `MLDiagScalarBackend`; this change maps the MaxText\nRL config onto them.\n\n* `profiler=xplane` builds a tunix `RLProfileConfig` from the new\n  `rl.profiler_start_invocation`, `rl.profiler_num_invocations` and\n  `rl.profiler_timeout_secs` keys, producing one `<role>_invocation_<n>` trace\n  per role. Non-managed traces land in `tensorboard_dir`; with\n  `managed_mldiagnostics=true` the tunix ML Diagnostics backend writes under\n  the MLRun's `gcs_path` (`managed_mldiagnostics_dir`), so\n  `RLProfileConfig.mldiagnostics_dir` is not forwarded (tunix's JAX backend\n  would otherwise prefer it over `tensorboard_dir`).\n* `managed_mldiagnostics=true` creates the ML Diagnostics run before the\n  `RLCluster` (tunix's `RLProfiler` preflights the active run), uploads the\n  trainer config (plus `sampler.<key>` for any sampler-side differences on\n  multi-slice topologies), and installs `MLDiagScalarBackend` next to\n  `TensorboardBackend` as the tunix metrics backends. `RLConfig` now derives\n  `managed_mldiagnostics_dir` like `MaxTextConfig` does and rejects a\n  non-`gs://` directory or on-demand profiling combined with `profiler=xplane`\n  at config time.\n* `common/managed_mldiagnostics.py` changes accordingly. `ManagedMLDiagnostics`\n  stays a process-wide singleton (the RL trainer constructs it once at startup;\n  pretrain's `common/profiler.py` is unchanged). It gains an optional\n  `sampler_config`: when it is the same object as the trainer config\n  (single-slice, colocated) the merge is skipped and the run config is a flat\n  dict with no `sampler.` keys; when it is a distinct object (multi-slice,\n  disaggregated) only keys whose values differ are added as `sampler.<key>`.\n  The JSON-serializability filter now also catches `ValueError` so NaN/Inf\n  values are dropped instead of failing the upload. Because\n  `gcloud_stub.mldiagnostics_modules()` returns a stub object rather than\n  `None` when the SDK is absent, availability is detected via the returned\n  stub flag (`mldiagnostics_available()`); `ManagedMLDiagnostics` logs a\n  warning when the SDK is in stub mode, while pretrain keeps its previous\n  warn-and-continue behavior.\n* With `managed_mldiagnostics=false` the metrics backends are left to tunix's\n  defaults, so non-managed runs log exactly as before. With\n  `managed_mldiagnostics=true` the backends are listed explicitly\n  (`MLDiagScalarBackend` plus `TensorboardBackend` when `enable_tensorboard`\n  is set); a non-empty explicit list replaces tunix's defaults, so managed runs\n  do not get tunix's W&B backend in OSS (or the CLU backend internally).\n* The step-window profiling flags (`profiler_steps`,\n  `skip_first_n_steps_for_profiler`, `profile_periodically_period`, ...) are\n  removed from `RLConfig` via a `ProfilingCore` mixin that only keeps\n  `profiler`; they have no consumer on the Tunix RL path and are rejected with\n  the list of valid fields. Pretrain/SFT keep the full `Profiling` mixin. The\n  in-tree RL scripts are updated to the new keys.\n* On Pathways, `pathwaysutils` traces worker 0 only (`max_num_hosts=1`), so a\n  disaggregated sampler never appears in the rollout trace. A new\n  `rl.profiler_max_num_hosts` key (default 1) parameterizes a wrapper around\n  `jax.profiler.start_trace` to trace worker hosts across all slices.\n* Format `tfds_data_processing_c4_mlperf.py` to satisfy repo-wide `pyink` pre-commit checks.\n\nPiperOrigin-RevId: 1002157478",
+          "timestamp": "2026-10-19T08:21:49Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/0bcf718717cfaedc90bd471d579d7514bdc5f04e"
+        },
+        "date": 1792400309112,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 288.325,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 102.362,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1996.592,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 98.03699999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 155.753,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 6342.6889999999985,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 482,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1446.7559999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 196.829,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 5529.619999999999,
             "unit": "sec"
           },
           {
