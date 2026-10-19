@@ -38,6 +38,7 @@ import numpy as np  # pylint: disable=wrong-import-position
 import pytest  # pylint: disable=wrong-import-position
 from flax import traverse_util  # pylint: disable=wrong-import-position
 
+from maxtext.common.common_types import get_weight_dtype
 from maxtext.integration.vllm.weight_converter import (
     ConversionPlanError,
     MaxTextToMaxTextConverter,
@@ -783,6 +784,157 @@ class TargetFreeConversionTest(unittest.TestCase):
           rollout_backend="maxtext",
       )
     self.assertIn("must be divisible by base_num_kv_heads", str(ctx.exception))
+
+  def test_case_10_target_free_dtype_cast_f32_to_bf16_all_param_kinds(self):
+    cfg = _config(
+        base_num_kv_heads=2,
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+        weight_dtype=jnp.float32,
+        rollout_weight_dtype=jnp.bfloat16,
+    )
+    source = _source_tree(True)
+    # Add an unscanned router/gate param, a KV kernel for replication, and a non-floating leaf.
+    source["base"]["decoder"]["layers"]["layer_3"]["self_attention"]["key"] = {"kernel": _scanned(EMB, 2, 4, offset=4600)}
+    source["base"]["decoder"]["router_gate"] = {
+        "kernel": _arr(EMB, EXPERTS, offset=9000),
+        "step_count": jnp.asarray([1, 2], dtype=jnp.int32),
+    }
+
+    converter = WeightConverter(
+        config=cfg,
+        kv_tp_size=4,
+        rollout_backend="maxtext",
+    )
+    out = converter.convert(source, target_state=None)
+    flat_out = traverse_util.flatten_dict(out)
+
+    # Check MoE gate kernel, dense query kernel, norm scales, fused wi, wo, and KV-replicated key kernel.
+    expected_bf16_paths = [
+        ("base", "token_embedder", "embedding"),
+        ("base", "decoder", "decoder_norm", "scale"),
+        ("base", "decoder", "router_gate", "kernel"),
+        ("base", "decoder", "layers_0", "input_layernorm", "scale"),
+        ("base", "decoder", "layers_0", "moe_block", "gate", "kernel"),
+        ("base", "decoder", "layers_0", "moe_block", "wi"),
+        ("base", "decoder", "layers_0", "moe_block", "wo"),
+        ("base", "decoder", "layers_3", "self_attention", "query", "kernel"),
+        ("base", "decoder", "layers_3", "self_attention", "key", "kernel"),
+    ]
+    for path in expected_bf16_paths:
+      self.assertIn(path, flat_out, f"Missing expected converted path: {path}")
+      leaf = getattr(flat_out[path], "value", flat_out[path])
+      self.assertEqual(leaf.dtype, jnp.bfloat16, f"Expected bfloat16 at {path}, got {leaf.dtype}")
+
+    # Every floating leaf across the entire output must be bfloat16; integer leaves stay int32.
+    for path, param in flat_out.items():
+      leaf = getattr(param, "value", param)
+      if path[-1] == "step_count":
+        self.assertEqual(leaf.dtype, jnp.int32)
+      else:
+        self.assertEqual(leaf.dtype, jnp.bfloat16, f"Expected bfloat16 at {path}, got {leaf.dtype}")
+
+  def test_case_11_target_free_rejects_fp8_target_dtype(self):
+    source = _source_tree(True)
+    for bad_dtype in ("float8_e4m3fn", jnp.float8_e4m3fn, "float8_e5m2", jnp.float8_e5m2):
+      with self.subTest(bad_dtype=bad_dtype):
+        cfg = _config(
+            inhomogeneous_layer_cycle_interval=CYCLE,
+            num_decoder_layers=NUM_LAYERS,
+            prefuse_moe_weights=True,
+            weight_dtype=jnp.float32,
+            rollout_weight_dtype=bad_dtype,
+        )
+        converter = WeightConverter(config=cfg, rollout_backend="maxtext")
+        with self.assertRaisesRegex(ConversionPlanError, "Unsupported target_dtype"):
+          converter.convert(source, target_state=None)
+
+  def test_case_12_target_free_dtype_matches_rollout_per_module_rule(self):
+    """Each module is emitted in the dtype the rollout model allocates it in.
+
+    Raiden's preflight rejects any leaf whose item size differs from the rollout
+    buffer. The rollout allocates parameters via `get_weight_dtype(config, module)`
+    (decoder_norm and the attention q/k norms read `config.weight_dtype`
+    directly), which today returns `config.weight_dtype` for every non-FP8
+    config, so one cast to `rollout_weight_dtype` covers every module. The rollout
+    config sets `float32_gate_logits=True` and the tree includes the modules that
+    branches keyed on that flag store in float32 (MoE gate, norms, GDN
+    parameters, shared_expert_gate, logits_dense): if `get_weight_dtype` gains
+    such a per-module rule, this test fails until the converter mirrors it.
+    """
+    rollout_cfg = pytypes.SimpleNamespace(
+        weight_dtype=jnp.dtype(jnp.bfloat16),
+        dtype=jnp.dtype(jnp.bfloat16),
+        float32_gate_logits=True,
+    )
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+        weight_dtype=jnp.float32,
+        rollout_weight_dtype=rollout_cfg.weight_dtype,
+    )
+    source = _source_tree(True)
+    decoder = source["base"]["decoder"]
+    gdn_layer = decoder["layers"]["layer_0"]
+    gdn_layer["post_attention_layernorm"] = {"scale": _scanned(EMB, offset=5000)}
+    gdn_layer["moe_block"]["gate"]["bias"] = _scanned(EXPERTS, offset=5100)
+    gdn_layer["moe_block"]["shared_expert_gate"] = {"kernel": _scanned(EMB, 1, offset=5200)}
+    gdn_layer["linear_attention"].update(
+        {
+            "in_proj_ba": {"kernel": _scanned(EMB, 4, offset=5300)},
+            "conv1d": {"kernel": _scanned(4, 1, 8, offset=5400)},
+            "A_log": _scanned(2, offset=5500),
+            "dt_bias": _scanned(2, offset=5600),
+            "norm": {"scale": _scanned(4, offset=5700)},
+        }
+    )
+    attn_slot = CYCLE - 1
+    attention = decoder["layers"][f"layer_{attn_slot}"]["self_attention"]
+    attention["query_norm"] = {"scale": _scanned(4, offset=5800)}
+    attention["key_norm"] = {"scale": _scanned(4, offset=5900)}
+    decoder["logits_dense"] = {"kernel": _arr(EMB, 16, offset=6000)}
+
+    out = WeightConverter(config=cfg, rollout_backend="maxtext").convert(source, target_state=None)
+    flat_out = traverse_util.flatten_dict(out)
+
+    # Output path -> module name the rollout passes to `get_weight_dtype`; None means
+    # the rollout reads `config.weight_dtype` directly.
+    expected = {
+        ("base", "token_embedder", "embedding"): "token_embedder",
+        ("base", "decoder", "decoder_norm", "scale"): None,
+        ("base", "decoder", "logits_dense", "kernel"): "logits_dense",
+    }
+    per_slot = {
+        0: {
+            ("input_layernorm", "scale"): "norm",
+            ("post_attention_layernorm", "scale"): "norm",
+            ("moe_block", "gate", "kernel"): "gate",
+            ("moe_block", "gate", "bias"): "gate",
+            ("moe_block", "shared_expert_gate", "kernel"): "shared_expert_gate",
+            ("linear_attention", "in_proj_ba", "kernel"): "in_proj_ba",
+            ("linear_attention", "conv1d", "kernel"): "conv1d",
+            ("linear_attention", "A_log"): "A_log",
+            ("linear_attention", "dt_bias"): "dt_bias",
+            ("linear_attention", "norm", "scale"): "norm",
+        },
+        attn_slot: {
+            ("self_attention", "query_norm", "scale"): None,
+            ("self_attention", "key_norm", "scale"): None,
+        },
+    }
+    for block in range(NUM_BLOCKS):
+      for slot, modules in per_slot.items():
+        layer_key = ("base", "decoder", f"layers_{block * CYCLE + slot}")
+        expected.update({layer_key + suffix: module for suffix, module in modules.items()})
+
+    for path, module in expected.items():
+      with self.subTest(path=".".join(path)):
+        self.assertIn(path, flat_out)
+        want = rollout_cfg.weight_dtype if module is None else get_weight_dtype(rollout_cfg, module)
+        leaf = getattr(flat_out[path], "value", flat_out[path])
+        self.assertEqual(leaf.dtype, jnp.dtype(want))
 
 
 if __name__ == "__main__":

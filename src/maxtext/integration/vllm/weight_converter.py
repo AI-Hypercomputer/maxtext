@@ -479,6 +479,17 @@ _UNROLLED_LAYER_TOKEN = re.compile(r"^layers?_(\d+)$")
 # matching (not exact) so it also covers `cached_prefill_*` / `cached_ar_*`.
 _NON_WEIGHT_PATH_PREFIXES = ("cache", "rngs", "intermediates")
 
+_SUPPORTED_TARGET_FREE_DTYPES = frozenset({jnp.dtype(jnp.bfloat16), jnp.dtype(jnp.float16), jnp.dtype(jnp.float32)})
+
+
+def _cast_target_free_floating_leaf(val: Any, target_dtype: Any, path: str) -> Any:
+  """Casts floating-point leaves to `target_dtype`, leaving non-floating leaves untouched."""
+  if target_dtype is None or not hasattr(val, "dtype"):
+    return val
+  if not jnp.issubdtype(val.dtype, jnp.floating):
+    return val
+  return _apply_dtype_cast(val, target_dtype, path)
+
 
 class MoEFusedLayout:
   """How the rollout expects a pre-fused MoE `wi` kernel to be laid out.
@@ -651,19 +662,18 @@ class MaxTextToMaxTextConverter:
   48-layer model that is hundreds of extra dispatches and N sets of padded
   intermediates rather than one.
 
-  Nothing rollout-side is read from `config`: the rollout's shapes, shardings
-  and dtypes all come from `target_state` at convert time. That matters
-  because the two configs genuinely disagree -- the rollout overrides
-  `prefuse_moe_weights` and has `padded_base_moe_mlp_dim` injected by
-  `maxtext_vllm_adapter/adapter.py` -- so deriving target properties from a
-  config would silently skew. MoE fusion is instead triggered by the target
-  tree carrying a `wi` leaf, and padding falls out of aligning to the target
-  shape.
+  When `target_state` is provided, the rollout's shapes, shardings, and dtypes
+  all come from `target_state` at convert time. In target-free mode
+  (`target_state=None`), rollout conversion settings (`prefuse_moe_weights`,
+  `padded_base_moe_mlp_dim`, `rollout_weight_dtype` / `weight_dtype`, and TP
+  sizes) are resolved from explicit constructor arguments or `config`.
 
   Args:
     config: The MaxText config describing the **trainer's** layer structure
       (`num_decoder_layers`, `inhomogeneous_layer_cycle_interval`,
-      `param_scan_axis`). The layer count and cycle are shared by both sides.
+      `param_scan_axis`) and fallback target-free conversion settings
+      (`rollout_weight_dtype`, `weight_dtype`, `prefuse_moe_weights`,
+      `padded_base_moe_mlp_dim`).
     moe_fused_layout: See `MoEFusedLayout`.
     allow_unused_source_keys: Source leaves permitted to have no target, as
       dot-joined substrings (e.g. a vision tower present only in the trainer).
@@ -674,6 +684,9 @@ class MaxTextToMaxTextConverter:
       barrier is per *source parameter*, which is the granularity that
       matters -- shape and sharding are properties of the source, so every
       layer reading it fails or succeeds together.
+    target_dtype: Optional target dtype for target-free weight conversion. When
+      `None`, falls back to `config.rollout_weight_dtype` and then
+      `config.weight_dtype`.
   """
 
   def __init__(
@@ -700,7 +713,13 @@ class MaxTextToMaxTextConverter:
     else:
       self.prefuse_moe_weights = getattr(config, "prefuse_moe_weights", False)
     self.padded_base_moe_mlp_dim = getattr(config, "padded_base_moe_mlp_dim", None)
-    self.target_dtype = target_dtype if target_dtype is not None else getattr(config, "weight_dtype", None)
+    cfg_rollout_dtype = getattr(config, "rollout_weight_dtype", None) or None
+    if target_dtype is not None:
+      self.target_dtype = target_dtype
+    elif cfg_rollout_dtype is not None:
+      self.target_dtype = cfg_rollout_dtype
+    else:
+      self.target_dtype = getattr(config, "weight_dtype", None)
 
     self.base_num_kv_heads = getattr(config, "base_num_kv_heads", None) or getattr(config, "num_kv_heads", None)
     self.kv_replication = 1
@@ -1048,8 +1067,7 @@ class MaxTextToMaxTextConverter:
 
     if group.op == "identity":
       raw_val = src_flat[group.source_keys[0]]
-      tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
-      val = _apply_dtype_cast(raw_val, tgt_dt, path)
+      val = _cast_target_free_floating_leaf(raw_val, target_dtype, path)
       is_kv = "key.kernel" in path or "value.kernel" in path
       if (
           is_kv
@@ -1067,15 +1085,17 @@ class MaxTextToMaxTextConverter:
     if group.op == "fuse_moe":
       raw_0 = src_flat[group.source_keys[0]]
       raw_1 = src_flat[group.source_keys[1]]
-      wi_0, wi_1 = (_apply_dtype_cast(raw_0, target_dtype, path), _apply_dtype_cast(raw_1, target_dtype, path))
+      wi_0, wi_1 = (
+          _cast_target_free_floating_leaf(raw_0, target_dtype, path),
+          _cast_target_free_floating_leaf(raw_1, target_dtype, path),
+      )
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
       return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
 
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
-    tgt_dt = getattr(raw_val, "dtype", target_dtype) if ("gate" in path or "router" in path) else target_dtype
-    val = _apply_dtype_cast(raw_val, tgt_dt, path)
+    val = _cast_target_free_floating_leaf(raw_val, target_dtype, path)
     self._check_scan_axis(val, path)
     per_block = self._slice_bulk_target_free(val, path)
     return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
@@ -1232,6 +1252,13 @@ class MaxTextToMaxTextConverter:
     """
     if target_state is not None:
       raise NotImplementedError("convert_streaming only supports target-free conversion (target_state=None).")
+
+    resolved_dtype = self._resolve_target_dtype()
+    if resolved_dtype is not None and jnp.dtype(resolved_dtype) not in _SUPPORTED_TARGET_FREE_DTYPES:
+      raise ConversionPlanError(
+          f"Unsupported target_dtype={resolved_dtype!r} for target-free weight conversion; "
+          "only unquantized floating-point dtypes (bfloat16, float16, float32) are supported."
+      )
 
     src_flat = traverse_util.flatten_dict(_to_pure_dict(src_pytree))
     src_flat, src_root = _strip_root(src_flat, "base")

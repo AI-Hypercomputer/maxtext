@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,35 +14,32 @@
 """Defines and runs Llama2 benchmarks on a v6e-256 cluster.
 
 This script configures benchmark runs for Llama2-7B and Llama2-70B models
-on a specific v6e-256 hardware setup using the XPK runner.
+on a specific v6e-256 hardware setup using the Cluster Toolkit (gcluster) runner.
 """
 
-import os
-
 from benchmarks import maxtext_trillium_model_configs as model_configs
-from benchmarks.maxtext_xpk_runner import WorkloadConfig
-from benchmarks.maxtext_xpk_runner import xpk_benchmark_runner
-from benchmarks.maxtext_xpk_runner import XpkClusterConfig
+from benchmarks.ctk_configs import ClusterConfig
+from benchmarks.maxtext_ctk_runner import WorkloadConfig
+from benchmarks.maxtext_ctk_runner import ctk_benchmark_runner
 
 
 DATE = "20241009"
 BASE_DOCKER_IMAGE = "maxtext_base_image"
 
-ZONE = "europe-west4"
+LOCATION = "europe-west4"
 PROJECT = "tpu-prod-env-multipod"
 CLUSTER_NAME = "mlperf-v6e-256"
 DEVICE_TYPE = "v6e-256"
 NUM_SLICES = 1
 BASE_OUTPUT_DIR = "gs://maxtext-experiments-tpem/"
-XPK_PATH = os.path.join("~", "xpk")
 BENCHMARK_STEPS = 20
 
 
 def main() -> None:
-  cluster_config = XpkClusterConfig(
+  cluster_config = ClusterConfig(
       cluster_name=CLUSTER_NAME,
       project=PROJECT,
-      zone=ZONE,
+      location=LOCATION,
       device_type=DEVICE_TYPE,
   )
 
@@ -58,13 +55,12 @@ def main() -> None:
             libtpu_type=None,
             libtpu_nightly_version=DATE,
             pathways_config=None,
-            xpk_path=XPK_PATH,
             num_steps=BENCHMARK_STEPS,
             priority="medium",
         )
     )
 
-  xpk_benchmark_runner(cluster_config, workload_configs)
+  ctk_benchmark_runner(cluster_config, workload_configs)
 
 
 if __name__ == "__main__":
