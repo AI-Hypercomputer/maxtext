@@ -62,23 +62,23 @@ def conv1d_silu_fwd(
     conv_weight_3d = conv_weight[:, None, :].astype(jnp.float32)
 
   if conv_state is not None:
-    conv_input = jnp.concatenate([conv_state.astype(jnp.float32), qkv.astype(jnp.float32)], axis=1)
+    conv_input = jnp.concatenate([conv_state.astype(qkv.dtype), qkv], axis=1)
   else:
-    conv_input = jnp.pad(qkv.astype(jnp.float32), ((0, 0), (kernel_size - 1, 0), (0, 0)))
+    conv_input = jnp.pad(qkv, ((0, 0), (kernel_size - 1, 0), (0, 0)))
   if segment_ids is not None:
     valid_mask, tap_masks = _build_conv_tap_masks(segment_ids, kernel_size, conv_halo_seg)
     conv_out = sum(
-        (conv_input[:, k : k + seq_len, :] * tap_masks[k]) * conv_weight_3d[k, 0, :] for k in range(kernel_size)
+        (conv_input[:, k : k + seq_len, :].astype(jnp.float32) * tap_masks[k]) * conv_weight_3d[k, 0, :] for k in range(kernel_size)
     )
     if conv_bias is not None:
       conv_out = conv_out + conv_bias.astype(jnp.float32)
     conv_out = conv_out * valid_mask
   else:
-    conv_out = sum(conv_input[:, k : k + seq_len, :] * conv_weight_3d[k, 0, :] for k in range(kernel_size))
+    conv_out = sum(conv_input[:, k : k + seq_len, :].astype(jnp.float32) * conv_weight_3d[k, 0, :] for k in range(kernel_size))
     if conv_bias is not None:
       conv_out = conv_out + conv_bias.astype(jnp.float32)
   qkv_conv = jax.nn.silu(conv_out)
-  return conv_out, qkv_conv.astype(output_dtype or qkv.dtype)
+  return conv_out.astype(qkv.dtype), qkv_conv.astype(output_dtype or qkv.dtype)
 
 
 def conv1d_silu_bwd(
@@ -101,9 +101,9 @@ def conv1d_silu_bwd(
     conv_weight_3d = conv_weight[:, None, :].astype(jnp.float32)
 
   if conv_state is not None:
-    conv_input = jnp.concatenate([conv_state.astype(jnp.float32), qkv.astype(jnp.float32)], axis=1)
+    conv_input = jnp.concatenate([conv_state.astype(qkv.dtype), qkv], axis=1)
   else:
-    conv_input = jnp.pad(qkv.astype(jnp.float32), ((0, 0), (kernel_size - 1, 0), (0, 0)))
+    conv_input = jnp.pad(qkv, ((0, 0), (kernel_size - 1, 0), (0, 0)))
 
   valid_mask = None
   tap_masks = None
@@ -144,7 +144,7 @@ def conv1d_silu_bwd(
   # Weight gradient: dw[k] = sum_{b,t} dz[b,t] * conv_input[b, t+k]
   dw_rows = []
   for k in range(kernel_size):
-    x_k = conv_input[:, k : k + seq_len, :]
+    x_k = conv_input[:, k : k + seq_len, :].astype(jnp.float32)
     dz_k = dz * tap_masks[k] if tap_masks is not None else dz
     dw_rows.append(jnp.sum(dz_k * x_k, axis=(0, 1)))
   dw = jnp.stack(dw_rows, axis=0)

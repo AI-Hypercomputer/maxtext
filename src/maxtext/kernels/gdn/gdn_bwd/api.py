@@ -278,7 +278,7 @@ def _run_local_gdn_decoupled_fwd(
     t_inv = None
   else:
     t_inv = t_inv_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, chunk_size, chunk_size)
-  chunk_states = chunk_states_raw.astype(jnp.float32).reshape(batch_size, num_chunks, num_v_heads, head_k_dim, head_v_dim)
+  chunk_states = chunk_states_raw.reshape(batch_size, num_chunks, num_v_heads, head_k_dim, head_v_dim)
   return (
       (
           core_attn_out.astype(qkv.dtype),
@@ -964,7 +964,7 @@ def _gdn_decoupled_conv1d_bwd(
         conv_bias=conv_bias,
         dy=dy_conv,
         kernel_size=conv_kernel_size,
-        conv_out=conv_out_cached,
+        conv_out=None,
         conv_state=conv_state,
         return_d_conv_state=True,
         segment_ids=segment_ids,
@@ -1045,18 +1045,24 @@ def _gdn_decoupled_conv1d_bwd(
     dy_conv, d_b, d_a, d_a_log, d_dt_bias = bwd_out
     dh0_local = None
 
-  d_pre_conv_qkv, d_conv_weight, d_conv_bias, d_cs_local = conv1d_silu_bwd(
+  need_d_cs = bool(has_user_conv_state) or (d_conv_state is not None and segment_ids is not None)
+  conv_bwd_res = conv1d_silu_bwd(
       qkv=pre_conv_qkv,
       conv_weight=conv_weight,
       conv_bias=conv_bias,
       dy=dy_conv,
       kernel_size=conv_kernel_size,
-      conv_out=conv_out_cached,
+      conv_out=None,
       conv_state=conv_state,
-      return_d_conv_state=True,
+      return_d_conv_state=need_d_cs,
       segment_ids=segment_ids,
       conv_halo_seg=conv_halo_seg,
   )
+  if need_d_cs:
+    d_pre_conv_qkv, d_conv_weight, d_conv_bias, d_cs_local = conv_bwd_res
+  else:
+    d_pre_conv_qkv, d_conv_weight, d_conv_bias = conv_bwd_res
+    d_cs_local = None
   # pylint: enable=unbalanced-tuple-unpacking
   if d_conv_state is not None and segment_ids is not None:
     d_pre_conv_qkv, d_cs_local = local_compute_conv1d.extract_segment_conv_state_split_adjoint(

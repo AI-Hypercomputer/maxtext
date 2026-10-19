@@ -487,8 +487,6 @@ def fused_conv1d_gdn(
   aligned_num_v_heads = tiling.align_to(n_v + extra_lanes, num_lanes)
   num_v_padding_size = aligned_num_v_heads - n_v
   qkv = jnp.pad(qkv, ((0, batch_padding_size), (0, 0)))
-  b = jnp.pad(b, ((0, batch_padding_size), (0, num_v_padding_size)))
-  a = jnp.pad(a, ((0, batch_padding_size), (0, num_v_padding_size)))
   if has_seg_ids:
     s_enc_flat, seg_aux_flat = _pack_fwd_segment_metadata(
         segment_ids=segment_ids,
@@ -498,8 +496,11 @@ def fused_conv1d_gdn(
         chunk_size=mixed_tile_size,
         kernel_size=kernel_size,
     )
-    b = b.at[:batch_size, n_v].set(s_enc_flat)
-    b = b.at[:batch_size, n_v + 1].set(seg_aux_flat)
+    b = jnp.concatenate([b, s_enc_flat[:, None].astype(b.dtype), seg_aux_flat[:, None].astype(b.dtype)], axis=1)
+    b = jnp.pad(b, ((0, batch_padding_size), (0, num_v_padding_size - 2)))
+  else:
+    b = jnp.pad(b, ((0, batch_padding_size), (0, num_v_padding_size)))
+  a = jnp.pad(a, ((0, batch_padding_size), (0, num_v_padding_size)))
 
   qkv = qkv.reshape(padded_batch_size, 1, -1)
   b = b.reshape(padded_batch_size, 1, -1)
@@ -611,7 +612,7 @@ def fused_conv1d_gdn(
     if mode == config.GDNMode.PER_SEQ:
       chunk_states_shape = jax.ShapeDtypeStruct(
           (num_chunks, cfg.num_v_heads, cfg.kq_head_dim, cfg.v_head_dim),
-          cfg.dtypes.compute,
+          cfg.dtypes.act_in,
       )
       out_shape_tuple = (
           out_shape,

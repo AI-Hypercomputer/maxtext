@@ -69,8 +69,7 @@ def default_head_group_size(
 
 
 def l2_norm(x: jax.Array, eps: float = 1e-6) -> jax.Array:
-  norm = jnp.sqrt(jnp.sum(x * x, axis=-1, keepdims=True, dtype=x.dtype) + eps)
-  return x / norm
+  return x * jax.lax.rsqrt(jnp.sum(x * x, axis=-1, keepdims=True, dtype=x.dtype) + eps)
 
 
 def get_mask_dtype(dtype: jnp.dtype) -> jnp.dtype:
@@ -143,6 +142,9 @@ def _tri_inv_baseline_b16(
 
 def _bmm(lhs: jax.Array, rhs: jax.Array, precision: jax.lax.Precision | None) -> jax.Array:
   """Batched [n, a, b] @ [n, b, c] -> [n, a, c] with f32 accumulation."""
+  if precision == jax.lax.Precision.DEFAULT:
+    lhs = lhs.astype(jnp.bfloat16)
+    rhs = rhs.astype(jnp.bfloat16)
   return jax.lax.dot_general(
       lhs,
       rhs,
@@ -191,7 +193,15 @@ def _dnc_merge_levels(
     xor_rc = jnp.bitwise_xor(iota_r, iota_c)
   b = first_block
   while b < chunk:
-    if 2 * b == chunk and b >= 8:
+    if 2 * b == chunk and b >= 128:
+      t_10 = lower_part[:, b:, :b]
+      t_00_inv = x[:, :b, :b]
+      t_11_inv = x[:, b:, b:]
+      mid = _bmm(t_10, t_00_inv, precision)
+      bot_left = -_bmm(t_11_inv, mid, precision)
+      bot = jnp.concatenate([bot_left, t_11_inv], axis=2)
+      x = jnp.concatenate([x[:, :b, :], bot], axis=1)
+    elif 2 * b == chunk and b >= 8:
       lower_bot = jnp.where(xor_rc[:, b:, :] >= b, lower_part[:, b:, :], 0.0)
       mid = _bmm(lower_bot, x, precision)
       mid_padded = jnp.concatenate([jnp.zeros_like(mid), mid], axis=1)
@@ -383,8 +393,8 @@ def _chunked_gdn_per_seq_heads(
 
   # NOTE: Repeat along non lane/sublane dim is free.
   # [num_v_heads, chunk, kq_head_dim]
-  q_repeat = jnp.repeat(q_large, cfg.v_per_kq_head, axis=0)
-  k_repeat = jnp.repeat(k_large, cfg.v_per_kq_head, axis=0)
+  q_repeat = q_large if cfg.v_per_kq_head == 1 else jnp.repeat(q_large, cfg.v_per_kq_head, axis=0)
+  k_repeat = k_large if cfg.v_per_kq_head == 1 else jnp.repeat(k_large, cfg.v_per_kq_head, axis=0)
 
   # [1, chunk, num_v_heads]
   g_cum_sum_log = _decay_cumsum(gating_log, cfg, active_c) if decay_cumsum is None else decay_cumsum
@@ -430,15 +440,19 @@ def _chunked_gdn_per_seq_heads(
   iota_c = jax.lax.broadcasted_iota(mask_dtype, mask_shape, 2)
   gating_map = jnp.where(iota_r >= iota_c, gating_map, 0)
 
+  mxu_dtype = jnp.bfloat16 if dot_prec == jax.lax.Precision.DEFAULT else cfg.dtypes.compute
+  q_mxu = q_large.astype(mxu_dtype)
+  k_mxu = k_large.astype(mxu_dtype)
+
   # Compute k @ k^T at num_kq_heads (4x fewer matmuls) before repeating to num_v_heads.
   k_k_t = jax.lax.dot(
-      k_large,
-      k_large,
+      k_mxu,
+      k_mxu,
       dimension_numbers=(((2,), (2,)), ((0,), (0,))),
       precision=dot_prec,
       preferred_element_type=jnp.float32,
   ).astype(cfg.dtypes.compute)
-  beta_k_k_t = jnp.repeat(k_k_t, cfg.v_per_kq_head, axis=0) * beta_large
+  beta_k_k_t = (k_k_t if cfg.v_per_kq_head == 1 else jnp.repeat(k_k_t, cfg.v_per_kq_head, axis=0)) * beta_large
   gating_beta_k_k_t = jnp.where(iota_r > iota_c, gating_map * beta_k_k_t, 0)
   t = jnp.where(iota_r == iota_c, 1, gating_beta_k_k_t)
 
@@ -455,8 +469,8 @@ def _chunked_gdn_per_seq_heads(
   # [num_v_heads, chunk, v_head_dim + kq_head_dim]
   merged_v_k = jnp.concat([v_beta_large, k_beta_gating], axis=-1)
   merged_uw = jax.lax.dot(
-      t_inv,
-      merged_v_k,
+      t_inv.astype(mxu_dtype),
+      merged_v_k.astype(mxu_dtype),
       dimension_numbers=(((2,), (1,)), ((0,), (0,))),
       precision=dot_prec,
       preferred_element_type=jnp.float32,
@@ -473,8 +487,8 @@ def _chunked_gdn_per_seq_heads(
   merged_w_q = jnp.concat([w, q_large_gating], axis=1)
   # [num_v_heads, 2 * chunk, v_head_dim]
   merged_ws_out_updated = jax.lax.dot(
-      merged_w_q,
-      state_prev,
+      merged_w_q.astype(mxu_dtype),
+      state_prev.astype(mxu_dtype),
       dimension_numbers=(((2,), (1,)), ((0,), (0,))),
       precision=dot_prec,
       preferred_element_type=jnp.float32,
@@ -486,14 +500,15 @@ def _chunked_gdn_per_seq_heads(
 
   # [num_v_heads, chunk, v_head_dim]
   u_ws = u - ws
+  u_ws_mxu = u_ws.astype(mxu_dtype)
 
   # [num_v_heads, chunk, kq_head_dim]
   k_repeat_gating = k_repeat * gating_backward
 
   # [num_v_heads, kq_head_dim, v_head_dim]
   state_new = jax.lax.dot(
-      k_repeat_gating,
-      u_ws,
+      k_repeat_gating.astype(mxu_dtype),
+      u_ws_mxu,
       dimension_numbers=(((1,), (1,)), ((0,), (0,))),
       precision=dot_prec,
       preferred_element_type=jnp.float32,
@@ -505,21 +520,21 @@ def _chunked_gdn_per_seq_heads(
 
   # [num_kq_heads, chunk, chunk]
   out_qk = jax.lax.dot(
-      q_large,
-      k_large,
+      q_mxu,
+      k_mxu,
       dimension_numbers=(((2,), (2,)), ((0,), (0,))),
       precision=dot_prec,
       preferred_element_type=jnp.float32,
   ).astype(cfg.dtypes.compute)
   # NOTE: must perform repeat after matmul to reduce required compute.
   # [num_v_heads, chunk, chunk]
-  out_qk = jnp.repeat(out_qk, cfg.v_per_kq_head, axis=0)
+  out_qk = out_qk if cfg.v_per_kq_head == 1 else jnp.repeat(out_qk, cfg.v_per_kq_head, axis=0)
   out_qk *= gating_map
 
   # [num_v_heads, chunk, v_head_dim]
   out_new = jax.lax.dot(
-      out_qk,
-      u_ws,
+      out_qk.astype(mxu_dtype),
+      u_ws_mxu,
       dimension_numbers=(((2,), (1,)), ((0,), (0,))),
       precision=dot_prec,
       preferred_element_type=jnp.float32,

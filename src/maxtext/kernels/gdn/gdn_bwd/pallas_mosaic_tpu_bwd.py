@@ -108,6 +108,57 @@ def _gdn_matmul(
   )
 
 
+
+def _gdn_matmul_bf16_rhs(
+    lhs_f32: jax.Array,
+    rhs_bf16_exact: jax.Array,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+) -> jax.Array:
+  """Bit-exact 2-pass MXU matmul when rhs has no lower bf16 mantissa bits (e.g. binary mask or bf16 do_h)."""
+  if jnp.dtype(compute_dtype) != jnp.bfloat16:
+    return jnp.matmul(lhs_f32.astype(jnp.float32), rhs_bf16_exact.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+  dimension_numbers = (
+      ((lhs_f32.ndim - 1,), (rhs_bf16_exact.ndim - 2,)),
+      (tuple(range(lhs_f32.ndim - 2)), tuple(range(rhs_bf16_exact.ndim - 2))),
+  )
+  lhs_f32 = lhs_f32.astype(jnp.float32)
+  rhs_bf16 = rhs_bf16_exact.astype(jnp.bfloat16)
+  lhs_hi = lhs_f32.astype(jnp.bfloat16)
+  lhs_lo = (lhs_f32 - lhs_hi.astype(jnp.float32)).astype(jnp.bfloat16)
+  dot_bf16 = functools.partial(
+      jax.lax.dot_general,
+      dimension_numbers=dimension_numbers,
+      precision=jax.lax.Precision.DEFAULT,
+      preferred_element_type=jnp.float32,
+  )
+  return dot_bf16(lhs_hi, rhs_bf16) + dot_bf16(lhs_lo, rhs_bf16)
+
+
+def _gdn_matmul_bf16_lhs(
+    lhs_bf16_exact: jax.Array,
+    rhs_f32: jax.Array,
+    compute_dtype: jnp.dtype = jnp.bfloat16,
+) -> jax.Array:
+  """Bit-exact 2-pass MXU matmul when lhs has no lower bf16 mantissa bits (e.g. binary mask or bf16 do_h)."""
+  if jnp.dtype(compute_dtype) != jnp.bfloat16:
+    return jnp.matmul(lhs_bf16_exact.astype(jnp.float32), rhs_f32.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+  dimension_numbers = (
+      ((lhs_bf16_exact.ndim - 1,), (rhs_f32.ndim - 2,)),
+      (tuple(range(lhs_bf16_exact.ndim - 2)), tuple(range(rhs_f32.ndim - 2))),
+  )
+  lhs_bf16 = lhs_bf16_exact.astype(jnp.bfloat16)
+  rhs_f32 = rhs_f32.astype(jnp.float32)
+  rhs_hi = rhs_f32.astype(jnp.bfloat16)
+  rhs_lo = (rhs_f32 - rhs_hi.astype(jnp.float32)).astype(jnp.bfloat16)
+  dot_bf16 = functools.partial(
+      jax.lax.dot_general,
+      dimension_numbers=dimension_numbers,
+      precision=jax.lax.Precision.DEFAULT,
+      preferred_element_type=jnp.float32,
+  )
+  return dot_bf16(lhs_bf16, rhs_hi) + dot_bf16(lhs_bf16, rhs_lo)
+
+
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class GDNBackwardConfig:
   """Configuration dataclass for GDN backward kernel dimensions and tiling."""
@@ -287,8 +338,8 @@ def _bwd_gdn_pipeline_body(
 
   q_kq = jnp.transpose(q_scaled, (1, 0, 2))
   k_kq = jnp.transpose(k_scaled_val, (1, 0, 2))
-  q_h = jnp.repeat(q_kq, repeats, axis=0)
-  k_h = jnp.repeat(k_kq, repeats, axis=0)
+  q_h = q_kq if repeats == 1 else jnp.repeat(q_kq, repeats, axis=0)
+  k_h = k_kq if repeats == 1 else jnp.repeat(k_kq, repeats, axis=0)
   beta = jax.nn.sigmoid(b_val)
 
   sp_input = a_val + dt_bias_val
@@ -300,7 +351,7 @@ def _bwd_gdn_pipeline_body(
     beta = jnp.where(valid_c, beta, 0.0)
     log_g = jnp.where(valid_c, log_g, 0.0)
 
-  cumsum_log_g = jnp.dot(mask_cumsum, log_g, precision=jax.lax.Precision.HIGHEST)
+  cumsum_log_g = _gdn_matmul_bf16_lhs(mask_cumsum, log_g, compute_dtype)
 
   v_h = jnp.transpose(v, (1, 0, 2))
   beta_h = jnp.transpose(beta, (1, 0))
@@ -330,7 +381,7 @@ def _bwd_gdn_pipeline_body(
     # instead of reading the forward kernel's t_inv from HBM. Compute both q @ k^T and
     # k @ k^T at num_kq_heads (4x fewer 3-pass bf16 matmuls) before repeating to num_v_heads.
     kk_kq = _gdn_matmul(k_kq, k_kq_T, compute_dtype, precise=True)
-    t_lower = jnp.repeat(kk_kq, repeats, axis=0) * (beta_h[:, :, None] * g_mat_strict)
+    t_lower = (kk_kq if repeats == 1 else jnp.repeat(kk_kq, repeats, axis=0)) * (beta_h[:, :, None] * g_mat_strict)
     t_rows = jax.lax.broadcasted_iota(jnp.int32, t_lower.shape, 1)
     t_cols = jax.lax.broadcasted_iota(jnp.int32, t_lower.shape, 2)
     t_full = jnp.where(t_rows == t_cols, 1.0, t_lower)
@@ -356,22 +407,22 @@ def _bwd_gdn_pipeline_body(
       v_beta - _gdn_matmul(k_beta_g, state_prev, compute_dtype),
       compute_dtype,
       keep_lhs_fp32=True,
-      precise=True,
+      precise=False,
   )
 
   q_g = q_h * gating_forward
   attn_kq = _gdn_matmul(q_kq, k_kq_T, compute_dtype, precise=True)
-  attn_unmasked = jnp.repeat(attn_kq, repeats, axis=0)
+  attn_unmasked = attn_kq if repeats == 1 else jnp.repeat(attn_kq, repeats, axis=0)
   attn = attn_unmasked * g_mat_causal
 
   k_scaled_bwd = k_h * gating_backward
 
-  dv_attn = _gdn_matmul(jnp.swapaxes(attn, -1, -2), do_h, compute_dtype, precise=True)
+  dv_attn = _gdn_matmul_bf16_rhs(jnp.swapaxes(attn, -1, -2), do_h, compute_dtype)
   dv_new = dv_attn + _gdn_matmul(k_scaled_bwd, d_state, compute_dtype)
-  d_attn = _gdn_matmul(do_h, jnp.swapaxes(v_new, -1, -2), compute_dtype, precise=True)
+  d_attn = _gdn_matmul_bf16_lhs(do_h, jnp.swapaxes(v_new, -1, -2), compute_dtype)
 
   A_T = jnp.swapaxes(A, -1, -2)
-  d_v_beta = _gdn_matmul(A_T, dv_new, compute_dtype, keep_lhs_fp32=True, precise=True)
+  d_v_beta = _gdn_matmul(A_T, dv_new, compute_dtype, keep_lhs_fp32=True, precise=False)
 
   # Packed weight-stationary GEMM: computes [-d_k_beta_g, d_q_g] in one matmul
   neg_d_k_beta_g, d_q_g = jnp.split(
@@ -410,8 +461,12 @@ def _bwd_gdn_pipeline_body(
   )
   d_k_beta_from_S, d_q_h_from_attn = jnp.split(packed_from_k_h, 2, axis=1)
 
-  d_k_h_from_S = _gdn_matmul(jnp.swapaxes(d_S_unmasked, -1, -2), k_beta, compute_dtype, precise=True)
-  d_k_h_from_attn = _gdn_matmul(jnp.swapaxes(d_attn_unmasked, -1, -2), q_h, compute_dtype, precise=True)
+  d_k_h_from_S_and_attn = _gdn_matmul(
+      jnp.concatenate([jnp.swapaxes(d_S_unmasked, -1, -2), jnp.swapaxes(d_attn_unmasked, -1, -2)], axis=-1),
+      jnp.concatenate([k_beta, q_h], axis=1),
+      compute_dtype,
+      precise=True,
+  )
 
   d_k_beta = d_k_beta_g * gating_forward + d_k_beta_from_S
 
@@ -425,7 +480,7 @@ def _bwd_gdn_pipeline_body(
   d_k_h_from_k_scaled = d_k_scaled * gating_backward
 
   d_q_h = d_q_h_from_q_g + d_q_h_from_attn
-  d_k_h = d_k_h_from_attn + d_k_h_from_S + d_k_beta * beta_h[:, :, None] + d_k_h_from_k_scaled
+  d_k_h = d_k_h_from_S_and_attn + d_k_beta * beta_h[:, :, None] + d_k_h_from_k_scaled
 
   # Closed-form vector identity for gating adjoints (eliminates S_unmasked GEMM and d_diff matrices)
   d_cumsum_h = jnp.sum(q_h * d_q_h - k_h * d_k_h, axis=-1) + 2.0 * beta_h * dk_beta_dot_kh
@@ -436,7 +491,7 @@ def _bwd_gdn_pipeline_body(
   d_cumsum_h = d_cumsum_h + jnp.pad(last_col_addition, ((0, 0), (chunk_size - 1, 0)))
 
   d_cumsum_log_g = jnp.transpose(d_cumsum_h, (1, 0))
-  d_log_g = jnp.dot(mask_cumsum.T, d_cumsum_log_g, precision=jax.lax.Precision.HIGHEST)
+  d_log_g = _gdn_matmul_bf16_lhs(mask_cumsum.T, d_cumsum_log_g, compute_dtype)
   if valid_c is not None:
     d_log_g = jnp.where(valid_c, d_log_g, 0.0)
 
@@ -452,14 +507,18 @@ def _bwd_gdn_pipeline_body(
     d_v_val = jnp.where(valid_c[:, :, None], d_v_val, 0.0)
 
   # Sublane-aligned GVA 4:1 head reduction summing over repeats before transpose
-  d_q_proj_h = jnp.sum(
-      d_q_h.reshape(num_kq_heads, repeats, chunk_size, kq_head_dim),
-      axis=1,
-  )
-  d_k_proj_h = jnp.sum(
-      d_k_h.reshape(num_kq_heads, repeats, chunk_size, kq_head_dim),
-      axis=1,
-  )
+  if repeats == 1:
+    d_q_proj_h = d_q_h
+    d_k_proj_h = d_k_h
+  else:
+    d_q_proj_h = jnp.sum(
+        d_q_h.reshape(num_kq_heads, repeats, chunk_size, kq_head_dim),
+        axis=1,
+    )
+    d_k_proj_h = jnp.sum(
+        d_k_h.reshape(num_kq_heads, repeats, chunk_size, kq_head_dim),
+        axis=1,
+    )
   d_q_proj = jnp.transpose(d_q_proj_h, (1, 0, 2))
   d_k_proj = jnp.transpose(d_k_proj_h, (1, 0, 2))
 
@@ -622,9 +681,9 @@ def pallas_gdn_bwd_kernel(
       target_tile = _F32_HEAD_TILE
     else:
       target_tile = _BF16_HEAD_TILE
-    if chunk_size > 64:
-      # ~10 [tile, C, C] f32 intermediates are live per step; keep them at the C=64 budget.
-      target_tile = max(1, target_tile * 64 // chunk_size)
+    if chunk_size > 128:
+      # TPU v6e has 128 MB VMEM; tile_v_heads=32 fits at C=128 (matching compute_gdn.py) and enables num_groups=1 zero-copy.
+      target_tile = max(1, target_tile * 128 // chunk_size)
 
   max_possible = min(num_v_heads, target_tile)
   tile_v_heads = None
@@ -664,13 +723,16 @@ def pallas_gdn_bwd_kernel(
   padded_tile_v_heads = cfg.padded_num_v_heads
 
   # 1. Prepare qkv_conv into (B, G, C, chunk_size, group_dim_size)
-  q = qkv_conv[:, :, :q_size]
-  k = qkv_conv[:, :, q_size : q_size + k_size]
-  v = qkv_conv[:, :, q_size + k_size :]
-  q_5d = q.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_q_size).transpose((0, 3, 1, 2, 4))
-  k_5d = k.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_k_size).transpose((0, 3, 1, 2, 4))
-  v_5d = v.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_size).transpose((0, 3, 1, 2, 4))
-  qkv_conv_5d = jnp.concatenate([q_5d, k_5d, v_5d], axis=-1)
+  if num_groups == 1:
+    qkv_conv_5d = qkv_conv.reshape(batch_size, 1, num_chunks, chunk_size, group_dim_size)
+  else:
+    q = qkv_conv[:, :, :q_size]
+    k = qkv_conv[:, :, q_size : q_size + k_size]
+    v = qkv_conv[:, :, q_size + k_size :]
+    q_5d = q.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_q_size).transpose((0, 3, 1, 2, 4))
+    k_5d = k.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_k_size).transpose((0, 3, 1, 2, 4))
+    v_5d = v.reshape(batch_size, num_chunks, chunk_size, num_groups, tile_v_size).transpose((0, 3, 1, 2, 4))
+    qkv_conv_5d = jnp.concatenate([q_5d, k_5d, v_5d], axis=-1)
 
   # 2. Prepare b and a into (B, G, C, chunk_size, padded_tile_v_heads)
   # With sequence packing, the signed segment IDs are packed into the spare lane
@@ -760,7 +822,12 @@ def pallas_gdn_bwd_kernel(
   if segment_ids is not None:
     s_enc = local_compute_conv1d.encode_segment_ids(segment_ids.reshape(batch_size, seq_len), init_seg=init_seg)
     s_enc_3d = s_enc.reshape(batch_size, num_chunks, chunk_size)
-    b_5d = b_5d.at[:, :, :, :, tile_v_heads].set(s_enc_3d[:, None, :, :].astype(b_5d.dtype))
+    s_enc_5d = jnp.broadcast_to(s_enc_3d[:, None, :, :, None].astype(b_5d.dtype), (batch_size, num_groups, num_chunks, chunk_size, 1))
+    b_unpadded = b_5d[..., :tile_v_heads]
+    rem_pad = padded_tile_v_heads - tile_v_heads - 1
+    b_5d = jnp.concatenate([b_unpadded, s_enc_5d], axis=-1)
+    if rem_pad > 0:
+      b_5d = jnp.pad(b_5d, ((0, 0), (0, 0), (0, 0), (0, 0), (0, rem_pad)))
     active_2d = jnp.abs(s_enc)
     active_3d = active_2d.reshape(batch_size, num_chunks, chunk_size)
     active_end = active_3d[:, :, -1]
@@ -919,13 +986,16 @@ def pallas_gdn_bwd_kernel(
     dh0_6d = None
 
   # Reconstruct dy_conv: (B, G, C, S, group_dim_size) -> (B, seq_len, dim_size)
-  dq_5d = dy_conv_chunks[..., :tile_q_size]
-  dk_5d = dy_conv_chunks[..., tile_q_size : tile_q_size + tile_k_size]
-  dv_5d = dy_conv_chunks[..., tile_q_size + tile_k_size :]
-  dq = dq_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, q_size)
-  dk = dk_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, k_size)
-  dv = dv_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, v_size)
-  dy_conv_flat = jnp.concatenate([dq, dk, dv], axis=-1).astype(qkv_conv.dtype)
+  if num_groups == 1:
+    dy_conv_flat = dy_conv_chunks.reshape(batch_size, seq_len, dim_size).astype(qkv_conv.dtype)
+  else:
+    dq_5d = dy_conv_chunks[..., :tile_q_size]
+    dk_5d = dy_conv_chunks[..., tile_q_size : tile_q_size + tile_k_size]
+    dv_5d = dy_conv_chunks[..., tile_q_size + tile_k_size :]
+    dq = dq_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, q_size)
+    dk = dk_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, k_size)
+    dv = dv_5d.transpose((0, 2, 3, 1, 4)).reshape(batch_size, seq_len, v_size)
+    dy_conv_flat = jnp.concatenate([dq, dk, dv], axis=-1).astype(qkv_conv.dtype)
 
   # Reconstruct d_b and d_a: (B, G, C, S, padded_tile_v_heads) -> (B, seq_len, num_v_heads)
   d_b_flat = (

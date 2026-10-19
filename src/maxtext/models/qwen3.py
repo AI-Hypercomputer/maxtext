@@ -894,8 +894,6 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
     qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
-    if use_gdn_kernel:
-      qkvz = checkpoint_name(qkvz, "qkv_proj")
     # ba: (B, S, 2 * H_v)
     ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
 
@@ -971,6 +969,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         (batch, seq_len, self.num_v_heads, self.head_v_dim),
         out_sharding=head_sharding,
     )
+    if use_gdn_kernel:
+      z = checkpoint_name(z, "qkv_proj")
 
     # BA Reshaping and Splitting
     new_shape_ba = (
@@ -1446,7 +1446,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     output = self.out_proj(gated_output, out_sharding=out_sharding)
     if use_gdn_kernel:
       output = checkpoint_name(output, "out_proj")
-    if decoder_segment_ids is not None:
+    if decoder_segment_ids is not None and not use_gdn_kernel:
       output = jnp.where((decoder_segment_ids != 0)[..., None], output, 0.0)
 
     return output, active_cache

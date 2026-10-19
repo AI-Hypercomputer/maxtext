@@ -1274,6 +1274,19 @@ class NNXDecoder(nnx.Module):
     policy = None
     cfg = self.config
     remat_policy = getattr(self, "remat_policy_override", None) or cfg.remat_policy
+    if getattr(cfg, "use_gdn_kernel", False) and remat_policy == "full":
+      return jax.checkpoint_policies.save_only_these_names(
+          "qkv_proj",
+          "out_proj",
+          "gdn_qkv",
+          "gdn_b",
+          "gdn_a",
+          "gdn_conv_state",
+          "gdn_recurrent_state",
+          "gdn_t_inv",
+          "gdn_chunk_states",
+          "gdn_core_attn_out",
+      )
     if remat_policy and remat_policy != "none":
       if remat_policy in {"minimal_with_context", "minimal_flash"}:
         if remat_policy == "minimal_flash":

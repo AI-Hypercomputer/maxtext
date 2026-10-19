@@ -242,11 +242,16 @@ class Qwen3NextRMSNormGated(nnx.Module):
     Returns:
       The normalized and gated output array. Shape: (..., F)
     """
-    normalized_states = self.rms_norm(hidden_states, out_sharding=out_sharding)
-
-    # Gated Activation using SiLU (Sigmoid-weighted Linear Unit)
-    gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))
-
+    if out_sharding is not None:
+      normalized_states = self.rms_norm(hidden_states, out_sharding=out_sharding)
+      gated_states = normalized_states * jax.nn.silu(gate.astype(jnp.float32))
+      return gated_states.astype(self.dtype)
+    x_f32 = jnp.asarray(hidden_states, jnp.float32)
+    g_f32 = jnp.asarray(gate, jnp.float32)
+    mean2 = jnp.mean(jax.lax.square(x_f32), axis=-1, keepdims=True)
+    inv_rms = jax.lax.rsqrt(mean2 + self.epsilon)
+    scale = jnp.asarray(self.rms_norm.scale[...], jnp.float32)
+    gated_states = x_f32 * inv_rms * scale * jax.nn.silu(g_f32)
     return gated_states.astype(self.dtype)
 
 

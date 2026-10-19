@@ -638,7 +638,7 @@ def run_gdn_kernel_layer(
               jax.sharding.NamedSharding(layer.mesh, P(qkv_spec[0], qkv_spec[1])),
           )
     mask = decoder_segment_ids != 0
-    qkv = jnp.where(mask.reshape(mask.shape + (1,) * (qkv.ndim - mask.ndim)), qkv, 0.0)
+    qkv = jnp.where(mask[..., None], qkv, 0.0)
     a = jnp.where(mask[..., None], a, jnp.asarray(-1e4, dtype=a.dtype))
     b = jnp.where(mask[..., None], b, jnp.asarray(-1e4, dtype=b.dtype))
 
