@@ -590,18 +590,18 @@ class PureJaxTrainingFixesTest(unittest.TestCase):
       c_kv = compress_kv if use_compressed else None
       t_mask = topk_mask if use_compressed else None
 
-      def dense_loss(q_in, kv_in, ckv_in, s_in):
+      def dense_loss(q_in, kv_in, ckv_in, s_in, tm=t_mask):
         delta = positions[:, :, None] - positions[:, None, :]
         mask = (delta >= 0) & (delta < window_size)
         keys = kv_in
         if ckv_in is not None:
           keys = jnp.concatenate([kv_in, ckv_in], axis=1)
-          mask = jnp.concatenate([mask, t_mask], axis=-1)
+          mask = jnp.concatenate([mask, tm], axis=-1)
         return jnp.sum(attend(q_in, keys, mask, s_in) * cot)
 
-      def chunked_loss(q_in, kv_in, ckv_in, s_in):
+      def chunked_loss(q_in, kv_in, ckv_in, s_in, tm=t_mask):
         out = attention_deepseek41.DeepSeek41Attention._chunked_attention(  # pylint: disable=protected-access
-            dummy, q_in, kv_in, ckv_in, t_mask, positions, s_in, attend, chunk
+            dummy, q_in, kv_in, ckv_in, tm, positions, s_in, attend, chunk
         )
         return jnp.sum(out * cot)
 
