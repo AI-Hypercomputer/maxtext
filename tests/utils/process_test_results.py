@@ -181,9 +181,15 @@ def main():
 
   total_times_by_job = {}
   total_tests_by_job = {}
+  seen_keys_by_job = {}
+  shards_by_job = {}
+  failed_jobs = set()
 
   for xml_file in xml_files:
     job_name = extract_job_name(xml_file)
+    basename_parts = os.path.basename(xml_file).replace(".xml", "").split("-")
+    if basename_parts and basename_parts[-1].isdigit():
+      shards_by_job.setdefault(job_name, set()).add(int(basename_parts[-1]))
 
     try:
       tree = ET.parse(xml_file)
@@ -197,6 +203,15 @@ def main():
         time_val = float(testcase.get("time", 0.0))
         job_time += time_val
 
+        name = testcase.get("name", "unknown")
+        classname = testcase.get("classname", "unknown")
+        test_key = f"{job_name}::{classname}.{name}"
+        seen_keys_by_job.setdefault(job_name, set()).add(test_key)
+        has_fail = testcase.find("failure") is not None
+        has_err = testcase.find("error") is not None
+        if has_fail or has_err:
+          failed_jobs.add(job_name)
+
         # Micro-level regression check (enforced for non-excluded modules, warn-only for excluded)
         if process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
           has_regression = True
@@ -208,6 +223,23 @@ def main():
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"Error parsing or processing {xml_file}: {e}")
       has_errors = True
+
+  # Prune stale keys for cleanly executed flavors so deselected/deleted tests
+  # do not inflate worker calculation.
+  if not has_errors:
+    for job_name, seen_keys in seen_keys_by_job.items():
+      shards = shards_by_job.get(job_name, set())
+      shards_complete = not shards or shards == set(range(1, max(shards) + 1))
+      if (
+          job_name != "unknown"
+          and total_tests_by_job.get(job_name, 0) > 0
+          and job_name not in failed_jobs
+          and shards_complete
+      ):
+        prefix = f"{job_name}::"
+        stale_keys = [k for k in new_baseline_data if k.startswith(prefix) and k not in seen_keys]
+        for k in stale_keys:
+          del new_baseline_data[k]
 
   # Output macro-level benchmark JSON if requested
   if args.output_benchmark:

@@ -24,7 +24,7 @@ import sys
 # Maximum worker limits by hardware flavor
 MAX_CPU_WORKERS = 4
 MAX_TPU_WORKERS = 3
-MAX_GPU_WORKERS = 3
+MAX_GPU_WORKERS = 1
 DEFAULT_WORKERS = 1
 
 # Right-sizing parameters for fast test suites
