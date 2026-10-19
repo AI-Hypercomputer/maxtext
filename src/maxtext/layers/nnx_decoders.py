@@ -1769,6 +1769,9 @@ class NNXDecoder(nnx.Module):
     if cfg.logits_via_embedding:
       # Use the transpose of embedding matrix for logit transform.
       embedding_table = shared_embedding.embedding[...]
+      if cfg.distill_fused_lm_head and model_mode == MODEL_MODE_TRAIN:
+        # Distillation computes the logits from (hidden states, embedding table) in sequence chunks.
+        return (y, embedding_table)
       attend_dtype = jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype
       logits = attend_on_embedding(y, embedding_table, attend_dtype, self.config, out_sharding)
 

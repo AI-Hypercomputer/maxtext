@@ -34,6 +34,7 @@ from maxtext.common.common_types import AttentionType, DecoderBlockType, Reorder
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import sparsity_utils
 from maxtext.utils import elastic_utils
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
 from maxtext.utils import accelerator_to_spec_map
@@ -160,6 +161,7 @@ class OptimizerType(str, Enum):
 
   ADAMW = "adamw"
   ADAM_PAX = "adam_pax"
+  ADAM_PAX_LOW_MEMORY = "adam_pax_low_memory"
   SGD = "sgd"
   MUON = "muon"
 
@@ -646,6 +648,27 @@ class Quantization(BaseModel):
       50,
       description=("The first number of steps before updating the sparsity masks."),
   )
+  sparse_layers: str = Field(
+      "",
+      description=(
+          "Comma-separated, ascending decoder layer indices or inclusive ranges to apply weight sparsity to, "
+          "e.g. '0-13,24-31'. Empty means all decoder layers. Requires weight_sparsity_n/m and scan_layers=False."
+      ),
+  )
+  sparse_experts_only: bool = Field(
+      False,
+      description=(
+          "If True, only apply weight sparsity to MoE expert kernels, not dense matmuls. "
+          "Requires weight_sparsity_n/m and num_experts > 1."
+      ),
+  )
+
+  @field_validator("sparse_layers", mode="before")
+  @classmethod
+  def _coerce_sparse_layers_to_str(cls, v: Any) -> Any:
+    """Accepts a single layer index given as an int, e.g. `sparse_layers=5` on the command line."""
+    return str(v) if isinstance(v, int) and not isinstance(v, bool) else v
+
   te_comm_gemm_overlap: str = Field(
       TeCommGemmOverlapPolicy.DISABLED.value,
       description=(
@@ -2540,6 +2563,21 @@ class Distillation(BaseModel):
       description="The type of loss to use for feature distillation ('cosine' or 'l2').",
   )
   distill_layer_indices: None | list = Field(None, description="Feature indices for feature loss.")
+  distill_fused_lm_head: bool = Field(
+      False,
+      description=(
+          "If True, the model returns (hidden_states, embedding_table) instead of logits in training mode and the "
+          "distillation losses project to logits in sequence chunks (distill_lm_head_chunks), so full-vocabulary "
+          "logits are never materialized for the whole sequence. Each model's normalize_embedding_logits, "
+          "final_logits_soft_cap and logits_dot_in_fp32 are applied. Requires logits_via_embedding=True."
+      ),
+  )
+  distill_lm_head_chunks: PositiveInt = Field(
+      8,
+      description=(
+          "Number of sequence chunks used by distill_fused_lm_head (training and eval). Must divide max_target_length."
+      ),
+  )
   distill_alpha_end: Optional[float] = Field(None, description="Target alpha at end of training. None keeps alpha fixed.")
   distill_alpha_schedule: Literal["constant", "linear", "cosine"] = Field(
       "constant",
@@ -2927,6 +2965,16 @@ class AdamW(BaseModel):
       "",
       description="Data type for 'mu' (first moment) in AdamW. Inherits from weight_dtype if empty.",
   )
+  bf16_update_rounding: Literal["nearest", "kahan", "stochastic"] = Field(
+      "nearest",
+      description=(
+          "Rounding of bf16 parameter updates for opt_type='adam_pax_low_memory': 'nearest' (round to nearest), "
+          "'kahan' (deterministic Kahan-compensated summation; keeps a param-sized bf16 residual in optimizer "
+          "state), or 'stochastic' (unbiased stochastic rounding). Non-default values require "
+          "opt_type='adam_pax_low_memory'."
+      ),
+  )
+  stochastic_rounding_seed: int = Field(0, description="PRNG seed for bf16_update_rounding='stochastic'.")
 
 
 class Muon(BaseModel):
@@ -4929,6 +4977,12 @@ class MaxTextConfig(
       if not self.scan_layers:
         raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
 
+    if self.bf16_update_rounding != "nearest" and self.opt_type != OptimizerType.ADAM_PAX_LOW_MEMORY:
+      raise ValueError(
+          f"bf16_update_rounding={self.bf16_update_rounding!r} requires opt_type='adam_pax_low_memory', "
+          f"got opt_type={self.opt_type!r}."
+      )
+
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
       raise ValueError(f"distill_alpha_end must be in [0, 1], got {self.distill_alpha_end}")
@@ -4966,6 +5020,46 @@ class MaxTextConfig(
     self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
+
+    # Validate selective weight sparsity
+    has_weight_sparsity = bool(self.weight_sparsity_n and self.weight_sparsity_m)
+    if self.sparse_layers.strip() or self.sparse_experts_only:
+      if not has_weight_sparsity:
+        raise ValueError("sparse_layers and sparse_experts_only require weight_sparsity_n and weight_sparsity_m.")
+      if self.quantization:
+        raise ValueError(
+            "sparse_layers and sparse_experts_only are only supported for weight-only sparsity (quantization=''), "
+            f"got quantization={self.quantization!r}."
+        )
+    if self.sparse_layers.strip():
+      if self.scan_layers:
+        raise ValueError("sparse_layers requires scan_layers=False to select individual decoder layers.")
+      sparsity_utils.parse_layer_spec(self.sparse_layers, self.num_decoder_layers)
+    if self.sparse_experts_only and self.num_experts <= 1:
+      raise ValueError("sparse_experts_only requires an MoE model (num_experts > 1).")
+    if has_weight_sparsity and not self.quantization and not self.use_qwix_quantization:
+      raise ValueError(
+          "weight_sparsity_n/m without quantization is applied through Qwix and requires use_qwix_quantization=True."
+      )
+
+    # Validate the fused distillation LM head.
+    if self.distill_fused_lm_head:
+      if not self.logits_via_embedding:
+        raise ValueError("distill_fused_lm_head requires logits_via_embedding=True (tied embedding LM head).")
+      if self.parameter_memory_host_offload:
+        raise ValueError(
+            "distill_fused_lm_head does not support parameter_memory_host_offload: the fused head reads the "
+            "embedding table directly instead of moving it to device."
+        )
+      if self.mtp_num_layers > 0:
+        raise ValueError("distill_fused_lm_head does not support multi-token prediction (mtp_num_layers > 0).")
+      if self.offline_data_dir:
+        raise ValueError("distill_fused_lm_head is only supported for online distillation (offline_data_dir unset).")
+      if self.max_target_length % self.distill_lm_head_chunks != 0:
+        raise ValueError(
+            f"max_target_length ({self.max_target_length}) must be divisible by distill_lm_head_chunks "
+            f"({self.distill_lm_head_chunks})."
+        )
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
     if self.elastic_enabled:
