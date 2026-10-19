@@ -73,7 +73,7 @@ from jax.sharding import Mesh
 
 from maxtext.configs import pyconfig
 from maxtext.layers import moe
-from maxtext.layers.latent_moe import KimiDenseMLP, KimiLatentMoEBlock
+from maxtext.layers.latent_moe import KimiDenseMLP, KimiMoERouter, KimiRoutedExperts, KimiLatentMoEBlock
 from maxtext.utils import maxtext_utils
 from tests.utils.kimi_k3_conversion_utils import convert_pytorch_module_to_maxtext_params, load_params_into_nnx
 from tests.utils.kimi_k3_reference import requires_kimi_k3_reference
@@ -81,7 +81,7 @@ from tests.utils.test_helpers import get_test_config_path
 
 
 class KimiK3Group3MoETest(unittest.TestCase):
-  """Tests validating KimiDenseMLP and KimiLatentMoEBlock."""
+  """Tests validating KimiMoERouter, KimiDenseMLP, and KimiLatentMoEBlock."""
 
   def setUp(self):
     super().setUp()
@@ -174,13 +174,39 @@ class KimiK3Group3MoETest(unittest.TestCase):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         mesh=mesh,
+        routed_experts_weight_format=cfg.routed_experts_weight_format,
         config=cfg,
         rngs=nnx.Rngs(0),
     )
     return block, cfg, mesh
 
+  def test_kimi_moe_router(self):
+    """Verifies router scoring, top-k selection, and weight normalization."""
+    rngs = nnx.Rngs(0)
+    router = KimiMoERouter(
+        hidden_size=self.hidden_size,
+        num_experts=self.num_experts,
+        top_k=self.top_k,
+        moe_renormalize=True,
+        routed_scaling_factor=1.0,
+        rngs=rngs,
+    )
+
+    x = jax.random.normal(jax.random.PRNGKey(0), (self.batch_size, self.seq_len, self.hidden_size))
+    topk_idx, topk_weight = router(x)
+
+    self.assertEqual(topk_idx.shape, (self.batch_size, self.seq_len, self.top_k))
+    self.assertEqual(topk_weight.shape, (self.batch_size, self.seq_len, self.top_k))
+
+    # Check that weights sum to 1 for each token
+    weight_sums = np.sum(np.array(topk_weight), axis=-1)
+    np.testing.assert_allclose(weight_sums, np.ones_like(weight_sums), rtol=1e-5, atol=1e-5)
+
   def test_routed_expert_params_have_sharding_axes(self):
-    """Router and routed-expert params carry logical sharding axes (else they replicate per chip)."""
+    """Router and routed-expert params carry logical sharding axes (else they replicate per chip).
+
+    MXFP4 packed codes / scales leave the quantized contraction axis (-2) unsharded.
+    """
 
     def sharding_of(module):
       return {
@@ -188,23 +214,44 @@ class KimiK3Group3MoETest(unittest.TestCase):
           for path, var in nnx.state(module, nnx.Param).flat_state()
       }
 
-    block, _, _ = self._make_block()
-    self.assertIsInstance(block.routed_experts, moe.RoutedMoE)
-    self.assertEqual(
-        sharding_of(block.routed_experts),
-        {
-            "gate/kernel": ("embed", None),
-            "gate/bias": (None,),
-            "wi_0": ("exp", "embed_moe", "mlp_moe"),
-            "wi_1": ("exp", "embed_moe", "mlp_moe"),
-            "wo": ("exp", "mlp_moe", "embed_moe"),
-        },
-    )
-    # Router reads the full hidden state; experts run on the latent.
-    self.assertEqual(block.routed_experts.gate.kernel.shape, (self.hidden_size, self.num_experts))
-    self.assertEqual(
-        block.routed_experts.wi_0.shape, (self.num_experts, self.routed_expert_hidden_size, self.moe_intermediate_size)
-    )
+    with self.subTest(weight_format="bf16"):
+      block, _, _ = self._make_block()
+      self.assertIsInstance(block.routed_experts, moe.RoutedMoE)
+      self.assertEqual(
+          sharding_of(block.routed_experts),
+          {
+              "gate/kernel": ("embed", None),
+              "gate/bias": (None,),
+              "wi_0": ("exp", "embed_moe", "mlp_moe"),
+              "wi_1": ("exp", "embed_moe", "mlp_moe"),
+              "wo": ("exp", "mlp_moe", "embed_moe"),
+          },
+      )
+      # Router reads the full hidden state; experts run on the latent.
+      self.assertEqual(block.routed_experts.gate.kernel.shape, (self.hidden_size, self.num_experts))
+      self.assertEqual(
+          block.routed_experts.wi_0.shape, (self.num_experts, self.routed_expert_hidden_size, self.moe_intermediate_size)
+      )
+
+    with self.subTest(weight_format="mxfp4"):
+      experts = KimiRoutedExperts(
+          num_experts=4,
+          in_features=64,
+          intermediate_dim=32,
+          hidden_size=self.hidden_size,
+          top_k=2,
+          weight_format="mxfp4",
+          rngs=nnx.Rngs(0),
+      )
+      self.assertEqual(
+          sharding_of(experts),
+          {
+              "gate/kernel": ("embed", None),
+              "gate/e_score_correction_bias": (None,),
+              **{f"{n}_{s}": ("exp", None, "mlp_moe") for n in ("wi_0", "wi_1") for s in ("packed", "scale")},
+              **{f"wo_{s}": ("exp", None, "embed_moe") for s in ("packed", "scale")},
+          },
+      )
 
   @requires_kimi_k3_reference
   def test_kimi_dense_mlp_parity(self):

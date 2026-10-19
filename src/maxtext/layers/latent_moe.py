@@ -14,14 +14,17 @@
 
 """Latent MoE and SiTU-activated MLP layers for Kimi-K3."""
 
+import math
 from typing import Optional
 
 from flax import nnx
+import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
 
 from maxtext.common.common_types import Array, Config, DType, ShardMode
 from maxtext.layers import moe
+from maxtext.layers import mxfp4
 from maxtext.layers.initializers import NdInitializer, nd_dense_init
 from maxtext.layers.linears import DenseGeneral, situ_gate, situ_linear
 from maxtext.layers.normalizations import RMSNorm
@@ -107,6 +110,208 @@ class KimiDenseMLP(nnx.Module):
 
 # Logical sharding axes (same names as `moe.RoutedMoE` / the DeepSeek gate).
 ROUTER_KERNEL_AXES = ("embed", None)
+# Dense routed-expert kernels: wi_{0,1} [E, d, m], wo [E, m, d].
+EXPERT_KERNEL_AXES = {
+    "wi_0": ("exp", "embed_moe", "mlp_moe"),
+    "wi_1": ("exp", "embed_moe", "mlp_moe"),
+    "wo": ("exp", "mlp_moe", "embed_moe"),
+}
+# MXFP4 packed codes / E8M0 scales: same layout, but the quantized contraction axis (-2) is
+# left unsharded so 32-element MXFP4 groups never straddle devices (and d/32 need not divide
+# the mesh); only the expert and output axes are sharded.
+EXPERT_PACKED_AXES = {
+    "wi_0": ("exp", None, "mlp_moe"),
+    "wi_1": ("exp", None, "mlp_moe"),
+    "wo": ("exp", None, "embed_moe"),
+}
+
+
+class KimiMoERouter(nnx.Module):
+  """Sigmoid router with auxiliary-loss-free bias correction."""
+
+  def __init__(
+      self,
+      hidden_size: int,
+      num_experts: int,
+      top_k: int = 16,
+      routed_scaling_factor: float = 1.0,
+      moe_renormalize: bool = True,
+      dtype: DType = jnp.float32,
+      weight_dtype: DType = jnp.float32,
+      *,
+      rngs: nnx.Rngs,
+  ):
+    self.hidden_size = hidden_size
+    self.num_experts = num_experts
+    self.top_k = top_k
+    self.routed_scaling_factor = routed_scaling_factor
+    self.moe_renormalize = moe_renormalize
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+
+    self.kernel = nnx.Param(
+        jax.random.normal(rngs.params(), (hidden_size, num_experts), dtype=weight_dtype) * (1.0 / (hidden_size**0.5)),
+        out_sharding=ROUTER_KERNEL_AXES,
+    )
+    self.e_score_correction_bias = nnx.Param(
+        jnp.zeros((num_experts,), dtype=weight_dtype),
+        out_sharding=(None,),
+    )
+
+  def __call__(self, hidden_states: Array) -> tuple[Array, Array]:
+    """Calculates top-k expert indices and normalized routing weights.
+
+    Args:
+      hidden_states: Input tensor of shape [..., hidden_size].
+
+    Returns:
+      topk_idx: Expert indices of shape [..., top_k].
+      topk_weight: Normalized routing weights of shape [..., top_k].
+    """
+    orig_shape = hidden_states.shape
+    x_flat = hidden_states.reshape(-1, orig_shape[-1]).astype(jnp.float32)
+    logits = jnp.matmul(x_flat, self.kernel.value.astype(jnp.float32))
+    scores = jax.nn.sigmoid(logits)
+
+    scores_for_choice = scores + self.e_score_correction_bias.value.astype(jnp.float32)
+    _, topk_idx = jax.lax.top_k(scores_for_choice, self.top_k)
+
+    topk_weight = jnp.take_along_axis(scores, topk_idx, axis=-1)
+
+    if self.top_k > 1 and self.moe_renormalize:
+      denominator = jnp.sum(topk_weight, axis=-1, keepdims=True) + 1e-20
+      topk_weight = topk_weight / denominator
+
+    topk_weight = topk_weight * self.routed_scaling_factor
+
+    batch_shape = orig_shape[:-1]
+    topk_idx = topk_idx.reshape(batch_shape + (self.top_k,))
+    topk_weight = topk_weight.reshape(batch_shape + (self.top_k,)).astype(self.dtype)
+
+    return topk_idx, topk_weight
+
+
+ROUTED_EXPERT_WEIGHT_FORMATS = ("bf16", "mxfp4")
+
+
+class KimiRoutedExperts(nnx.Module):
+  """Routed experts with SiTU activation.
+
+  `weight_format="bf16"` keeps dense float kernels `wi_0/wi_1: [E, d, m]`, `wo: [E, m, d]`
+  (the name refers to the checkpoint format; the dense dtype is `weight_dtype`).
+
+  `weight_format="mxfp4"` keeps the released MXFP4 form instead, in MaxText orientation and
+  quantized along each kernel's contraction axis (-2):
+    `wi_{0,1}_packed: uint8 [E, d/2, m]`, `wi_{0,1}_scale: uint8 [E, d/32, m]`,
+    `wo_packed: uint8 [E, m/2, d]`, `wo_scale: uint8 [E, m/32, d]`.
+  The packed bytes are gathered per token and only the selected top-k experts are
+  dequantized, so a dense copy of all experts never exists.
+  """
+
+  def __init__(
+      self,
+      num_experts: int,
+      in_features: int,
+      intermediate_dim: int,
+      hidden_size: int,
+      top_k: int = 16,
+      routed_scaling_factor: float = 1.0,
+      moe_renormalize: bool = True,
+      dtype: DType = jnp.float32,
+      weight_dtype: DType = jnp.float32,
+      weight_format: str = "bf16",
+      *,
+      rngs: nnx.Rngs,
+  ):
+    if weight_format not in ROUTED_EXPERT_WEIGHT_FORMATS:
+      raise ValueError(f"weight_format must be one of {ROUTED_EXPERT_WEIGHT_FORMATS}, got {weight_format!r}")
+    self.num_experts = num_experts
+    self.in_features = in_features
+    self.intermediate_dim = intermediate_dim
+    self.dtype = dtype
+    self.weight_dtype = weight_dtype
+    self.weight_format = weight_format
+
+    self.gate = KimiMoERouter(
+        hidden_size=hidden_size,
+        num_experts=num_experts,
+        top_k=top_k,
+        routed_scaling_factor=routed_scaling_factor,
+        moe_renormalize=moe_renormalize,
+        dtype=dtype,
+        weight_dtype=weight_dtype,
+        rngs=rngs,
+    )
+
+    scale_in = 1.0 / (in_features**0.5)
+    scale_inter = 1.0 / (intermediate_dim**0.5)
+    shapes = {
+        "wi_0": ((num_experts, in_features, intermediate_dim), scale_in),
+        "wi_1": ((num_experts, in_features, intermediate_dim), scale_in),
+        "wo": ((num_experts, intermediate_dim, in_features), scale_inter),
+    }
+    for name, (shape, init_scale) in shapes.items():
+      if weight_format == "mxfp4":
+        packed, scale = self._init_mxfp4(rngs.params(), shape, init_scale)
+        setattr(self, f"{name}_packed", nnx.Param(packed, out_sharding=EXPERT_PACKED_AXES[name]))
+        setattr(self, f"{name}_scale", nnx.Param(scale, out_sharding=EXPERT_PACKED_AXES[name]))
+      else:
+        kernel = jax.random.normal(rngs.params(), shape, dtype=weight_dtype) * init_scale
+        setattr(self, name, nnx.Param(kernel, out_sharding=EXPERT_KERNEL_AXES[name]))
+
+  @staticmethod
+  def _init_mxfp4(key, shape, init_scale):
+    """Random packed init with roughly the same magnitude as the dense init.
+
+    Codes are uniform over the 16 E2M1 values (std ~2.9); the shared E8M0 exponent is
+    chosen so the decoded std is ~`init_scale`. Only used for from-scratch init; real
+    runs restore the released packed bytes.
+    """
+    if shape[-2] % mxfp4.MXFP4_GROUP_SIZE:
+      raise ValueError(f"contraction dim {shape[-2]} must be a multiple of {mxfp4.MXFP4_GROUP_SIZE} for mxfp4")
+    packed_shape = shape[:-2] + (shape[-2] // 2, shape[-1])
+    scale_shape = shape[:-2] + (shape[-2] // mxfp4.MXFP4_GROUP_SIZE, shape[-1])
+    packed = jax.random.randint(key, packed_shape, 0, 256, dtype=jnp.int32).astype(jnp.uint8)
+    exponent = int(round(math.log2(init_scale / 2.9)))
+    scale = jnp.full(scale_shape, mxfp4.E8M0_BIAS + exponent, dtype=jnp.uint8)
+    return packed, scale
+
+  def _selected(self, name: str, topk_idx: Array) -> Array:
+    """Returns the gathered kernel `[N, top_k, ...]` for `name`, dequantizing if packed."""
+    if self.weight_format == "mxfp4":
+      packed = getattr(self, f"{name}_packed").value[topk_idx]
+      scale = getattr(self, f"{name}_scale").value[topk_idx]
+      return mxfp4.dequantize_mxfp4(packed, scale, axis=-2, dtype=self.dtype)
+    return getattr(self, name).value[topk_idx]
+
+  def __call__(
+      self,
+      x: Array,
+      topk_idx: Array,
+      topk_weight: Array,
+  ) -> Array:
+    """Computes routed expert output.
+
+    Args:
+      x: Latent input tensor of shape [N, in_features].
+      topk_idx: Expert indices of shape [N, top_k].
+      topk_weight: Expert weights of shape [N, top_k].
+
+    Returns:
+      Routed output of shape [N, in_features].
+    """
+    wi_0_selected = self._selected("wi_0", topk_idx)  # [N, top_k, in_features, intermediate_dim]
+    wi_1_selected = self._selected("wi_1", topk_idx)  # [N, top_k, in_features, intermediate_dim]
+    wo_selected = self._selected("wo", topk_idx)  # [N, top_k, intermediate_dim, in_features]
+
+    gate = jnp.einsum("nd,nkdm->nkm", x, wi_0_selected)
+    up = jnp.einsum("nd,nkdm->nkm", x, wi_1_selected)
+    act = situ_gate(gate) * situ_linear(up)
+
+    expert_out = jnp.einsum("nkm,nkmd->nkd", act, wo_selected)
+    routed_out = jnp.einsum("nk,nkd->nd", topk_weight, expert_out)
+
+    return routed_out.astype(self.dtype)
 
 
 class KimiLatentMoEBlock(nnx.Module):
@@ -116,11 +321,14 @@ class KimiLatentMoEBlock(nnx.Module):
   (7168 -> 3584), followed by an RMSNorm and an up-projection; shared experts read the full
   hidden state.
 
-  The router and routed experts are a `moe.RoutedMoE` (sorted/grouped dispatch: megablox /
-  tokamax GMM / `ragged_dot`, expert parallelism), which needs `config` and `mesh`. The config
-  must set `moe_expert_input_dim=routed_expert_hidden_size` and
-  `moe_router_input_dim=hidden_size`; the latent is the expert input and the hidden state is
-  passed as `gate_inputs`.
+  With `routed_experts_weight_format="bf16"` the router and routed experts are a
+  `moe.RoutedMoE` (sorted/grouped dispatch: megablox / tokamax GMM / `ragged_dot`, expert
+  parallelism), which needs `config` and `mesh`. The config must set
+  `moe_expert_input_dim=routed_expert_hidden_size` and `moe_router_input_dim=hidden_size`;
+  the latent is the expert input and the hidden state is passed as `gate_inputs`.
+
+  With `"mxfp4"` they are a `KimiRoutedExperts` holding the released packed bytes, which
+  gathers per-token kernels (CPU inference / parity only until MXFP4 lands in RoutedMoE).
   """
 
   def __init__(
@@ -143,6 +351,7 @@ class KimiLatentMoEBlock(nnx.Module):
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
       mesh: Optional[Mesh] = None,
+      routed_experts_weight_format: str = "bf16",
       config: Optional[Config] = None,
       *,
       rngs: nnx.Rngs,
@@ -172,33 +381,48 @@ class KimiLatentMoEBlock(nnx.Module):
     )
 
     # 896 Routed Experts: 3584 -> 3072 -> 3584 (router on the 7168 hidden state)
-    if config is None or mesh is None:
-      raise ValueError("KimiLatentMoEBlock's routed experts are a moe.RoutedMoE, which needs `config` and `mesh`.")
-    expected = {
-        "moe_expert_input_dim": routed_expert_hidden_size,
-        "moe_router_input_dim": hidden_size,
-        "num_experts": num_experts,
-        "num_experts_per_tok": top_k,
-        "routed_scaling_factor": routed_scaling_factor,
-    }
-    mismatched = {k: (getattr(config, k), v) for k, v in expected.items() if getattr(config, k) != v}
-    if mismatched:
-      raise ValueError(f"config disagrees with KimiLatentMoEBlock args (config, arg): {mismatched}")
-    if not moe_renormalize:
-      raise ValueError("RoutedMoE always renormalizes sigmoid top-k weights; moe_renormalize=False is unsupported.")
-    self.routed_experts = moe.RoutedMoE(
-        config=config,
-        num_experts=num_experts,
-        num_experts_per_tok=top_k,
-        mesh=mesh,
-        kernel_init=kernel_init,
-        kernel_axes=ROUTER_KERNEL_AXES,
-        intermediate_dim=moe_intermediate_size,
-        weight_dtype=weight_dtype,
-        dtype=dtype,
-        quant=quant,
-        rngs=rngs,
-    )
+    if routed_experts_weight_format == "bf16":
+      if config is None or mesh is None:
+        raise ValueError("routed_experts_weight_format='bf16' uses moe.RoutedMoE, which needs `config` and `mesh`.")
+      expected = {
+          "moe_expert_input_dim": routed_expert_hidden_size,
+          "moe_router_input_dim": hidden_size,
+          "num_experts": num_experts,
+          "num_experts_per_tok": top_k,
+          "routed_scaling_factor": routed_scaling_factor,
+      }
+      mismatched = {k: (getattr(config, k), v) for k, v in expected.items() if getattr(config, k) != v}
+      if mismatched:
+        raise ValueError(f"config disagrees with KimiLatentMoEBlock args (config, arg): {mismatched}")
+      if not moe_renormalize:
+        raise ValueError("RoutedMoE always renormalizes sigmoid top-k weights; moe_renormalize=False is unsupported.")
+      self.routed_experts = moe.RoutedMoE(
+          config=config,
+          num_experts=num_experts,
+          num_experts_per_tok=top_k,
+          mesh=mesh,
+          kernel_init=kernel_init,
+          kernel_axes=ROUTER_KERNEL_AXES,
+          intermediate_dim=moe_intermediate_size,
+          weight_dtype=weight_dtype,
+          dtype=dtype,
+          quant=quant,
+          rngs=rngs,
+      )
+    else:
+      self.routed_experts = KimiRoutedExperts(
+          num_experts=num_experts,
+          in_features=routed_expert_hidden_size,
+          intermediate_dim=moe_intermediate_size,
+          hidden_size=hidden_size,
+          top_k=top_k,
+          routed_scaling_factor=routed_scaling_factor,
+          moe_renormalize=moe_renormalize,
+          dtype=dtype,
+          weight_dtype=weight_dtype,
+          weight_format=routed_experts_weight_format,
+          rngs=rngs,
+      )
 
     # Post-expert RMSNorm: 3584
     if self.latent_moe_use_norm:
@@ -265,9 +489,18 @@ class KimiLatentMoEBlock(nnx.Module):
     identity = hidden_states
     orig_shape = hidden_states.shape
 
-    # Down-project to the latent (7168 -> 3584); the router reads the full hidden state.
-    x_latent = self.routed_expert_down_proj(hidden_states)
-    y_routed, _, _ = self.routed_experts(x_latent, gate_inputs=hidden_states)
+    if isinstance(self.routed_experts, moe.RoutedMoE):
+      # Down-project to the latent (7168 -> 3584); the router reads the full hidden state.
+      x_latent = self.routed_expert_down_proj(hidden_states)
+      y_routed, _, _ = self.routed_experts(x_latent, gate_inputs=hidden_states)
+    else:
+      x_flat = hidden_states.reshape(-1, orig_shape[-1])
+      # Router gating (runs on original hidden size)
+      topk_idx, topk_weight = self.routed_experts.gate(x_flat)
+      # Down-project to latent dimension: 7168 -> 3584
+      x_latent = self.routed_expert_down_proj(x_flat)
+      # Routed expert computation
+      y_routed = self.routed_experts(x_latent, topk_idx, topk_weight)
 
     # Post-expert RMSNorm
     if self.routed_expert_norm is not None:
