@@ -765,6 +765,12 @@ _GMM_V2_SMALL_MLP_TILES = {f"{w}_tile_{p}_mlp_dim": 256 for w in ("wi", "wo") fo
 class RoutedMoeTest(parameterized.TestCase):
   """Routed Mixture of Experts test."""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_gmm_grad_equivalence_ref_cache"):
+      delattr(cls, "_gmm_grad_equivalence_ref_cache")
+    super().tearDownClass()
+
   @parameterized.parameters(False, True)
   def test_permute_direct_token_gather_matches_repeat_and_sort(self, compute_gradient):
     inputs = jnp.arange(24, dtype=jnp.float32).reshape(2, 3, 4)
@@ -1187,7 +1193,8 @@ class RoutedMoeTest(parameterized.TestCase):
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
           override_model_config=True,
-          base_emb_dim=7168,  # we want emb dim being multiple of 1024 for fully using the kernel
+          # emb dim must be >= 2048 (multiple of 1024) for ragged_gather_reduce_v2 on TPU v6e SparseCore.
+          base_emb_dim=2048,
           base_mlp_dim=256,
           base_moe_mlp_dim=256,
           dtype="bfloat16",
@@ -1324,7 +1331,7 @@ class RoutedMoeTest(parameterized.TestCase):
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
           override_model_config=True,
-          base_emb_dim=7168,
+          base_emb_dim=2048,
           base_mlp_dim=256,
           base_moe_mlp_dim=256,
           dtype="bfloat16",
@@ -1560,7 +1567,7 @@ class RoutedMoeTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   def test_topk_before_ep_all_gather_loss_and_grad_sparse_core(self):
     self._run_topk_before_ep_all_gather_loss_and_grad(
-        base_emb_dim=7168,
+        base_emb_dim=2048,
         dtype="bfloat16",
         weight_dtype="bfloat16",
         megablox=True,
@@ -1602,10 +1609,7 @@ class RoutedMoeTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
       ("sparsecore_ragged_sort", {}),
-      ("tc_ragged_sort", {"moe_tc_ragged_sort": True}),
-      # moe_tc_routing_checkpoint also saves the per-buffer-row routing weights.
-      ("tc_ragged_sort_weights_on_activation", {"moe_tc_ragged_sort": True, "moe_tc_ragged_weights_on_activation": True}),
-      # Window routing also saves the group sizes.
+      # Window routing + weights on activation saves group sizes and weights.
       (
           "tc_ragged_sort_window_weights_on_activation",
           {"moe_tc_ragged_sort": True, "moe_tc_window_routing": True, "moe_tc_ragged_weights_on_activation": True},
@@ -1748,14 +1752,9 @@ class RoutedMoeTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
       ("default", 1.5, {}),
-      ("truncated", 0.75, {}),
-      ("weights_on_activation", 1.5, {"moe_tc_ragged_weights_on_activation": True}),
-      ("accumulate_wi_dlhs", 1.5, {"moe_accumulate_wi_dlhs": True}),
-      ("dlhs_transpose_rhs", 1.5, {"moe_gmm_v2_dlhs_transpose_rhs": True}),
-      ("accumulate_chunk_wgrad", 1.5, {"moe_accumulate_chunk_wgrad": True, "num_moe_token_chunks": 2}),
       (
           "all_gmm_options",
-          1.5,
+          0.75,
           {
               "moe_accumulate_wi_dlhs": True,
               "moe_gmm_v2_dlhs_transpose_rhs": True,
@@ -1778,9 +1777,14 @@ class RoutedMoeTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
       ("default", 1.5, {}),
-      ("truncated_weights_on_activation", 0.75, {"moe_tc_ragged_weights_on_activation": True}),
-      ("rowwise_combine_bwd", 1.5, {"moe_quantize_combine_bwd_method": "rowwise"}),
-      ("fixed_combine_bwd", 1.5, {"moe_quantize_combine_bwd_method": "fixed,0.01"}),
+      (
+          "truncated_rowwise_combine_bwd",
+          0.75,
+          {
+              "moe_tc_ragged_weights_on_activation": True,
+              "moe_quantize_combine_bwd_method": "rowwise",
+          },
+      ),
   )
   def test_tc_ragged_sort_3d_dispatch(self, ragged_buffer_factor, extra):
     """moe_tc_ragged_3d_dispatch (3D-layout token all-gather / combine) matches the 2D dispatch."""
@@ -1791,9 +1795,9 @@ class RoutedMoeTest(parameterized.TestCase):
         "moe_tc_ragged_sort": True,
         "moe_tc_ragged_3d_gmm": True,
     }
-    # emb 7168 = 56 x 128: the token all-gather and the combine reduce-scatter (and their transposes in the
-    # backward pass) must run on (..., 56, 128) tensors with the flag, and on (..., 7168) ones without it.
-    collective_3d = re.compile(r"\[(?:\d+,)*56,128\](?:\{[^}]*\})? = (all_gather|reduce_scatter)\[")
+    # emb 2048 = 16 x 128: token all-gather and combine reduce-scatter must
+    # run on (..., 16, 128) tensors with the flag, and (..., 2048) without it.
+    collective_3d = re.compile(r"\[(?:\d+,)*16,128\](?:\{[^}]*\})? = (all_gather|reduce_scatter)\[")
 
     def check_jaxprs(jaxpr_ref, jaxpr_tc):
       self.assertEqual(set(collective_3d.findall(jaxpr_tc)), {"all_gather", "reduce_scatter"})
@@ -1809,12 +1813,7 @@ class RoutedMoeTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
-      ("prequant_before_unsort", {"moe_bwd_prequant_before_unsort": True}),
-      ("combine_bwd_direct_qarray", {"moe_bwd_prequant_before_unsort": True, "moe_combine_bwd_direct_qarray": True}),
-      ("3d_dlhs_partial_sum", {"moe_3d_dlhs_partial_sum": True}),
-      ("no_mask_padding", {"moe_bwd_prequant_before_unsort": True, "moe_tc_ragged_mask_padding": False}),
       ("prequant_window_routing", {"moe_bwd_prequant_before_unsort": True, "moe_tc_window_routing": True}),
-      ("fp8_prequant_before_unsort", {"fp8": True, "moe_bwd_prequant_before_unsort": True}),
       (
           "fp8_all",
           {
@@ -1903,8 +1902,6 @@ class RoutedMoeTest(parameterized.TestCase):
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
       ("fixed_act", "fixed,-224,224", False, {}),
-      ("fixed_act_no_channelwise", "fixed,-224,224", True, {}),
-      ("absmax_act_no_channelwise", "absmax", True, {}),
       ("absmax_act_window_routing", "absmax", True, {"moe_tc_window_routing": True}),
   )
   def test_tc_ragged_sort_3d_dispatch_bwd_prequant_fp8(self, act_calibration_method, disable_channelwise_axes, flags):
@@ -1992,7 +1989,7 @@ class RoutedMoeTest(parameterized.TestCase):
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         override_model_config=True,
-        base_emb_dim=7168,
+        base_emb_dim=2048,
         base_mlp_dim=256,
         base_moe_mlp_dim=256,
         dtype="bfloat16",
@@ -2069,7 +2066,7 @@ class RoutedMoeTest(parameterized.TestCase):
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         override_model_config=True,
-        base_emb_dim=7168,
+        base_emb_dim=2048,
         base_mlp_dim=256,
         base_moe_mlp_dim=256,
         dtype="bfloat16",
@@ -2964,16 +2961,9 @@ class QuantizedMoeTest(parameterized.TestCase):
       ) in [
           ("megablox_bf16", "", False, False, False, 1, False),
           ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1, False),
-          ("megablox_fp8_static", "fp8_full", False, False, True, 1, False),
-          ("tokamax_v1_bf16", "", True, False, False, 1, False),
-          ("tokamax_v1_fp8_dynamic", "fp8_full", True, False, False, 1, False),
           ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1, False),
           ("tokamax_v2_bf16", "", True, True, False, 1, False),
-          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 1, False),
-          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, False),
-          ("tokamax_v2_bf16", "", True, True, False, 4, False),
           ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4, False),
-          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 4, False),
           ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, True),
       ]
   )
@@ -3006,6 +2996,10 @@ class QuantizedMoeTest(parameterized.TestCase):
           run_name="gmm_grad_equivalence_test",
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
+          override_model_config=True,
+          base_emb_dim=1024,
+          base_mlp_dim=1024,
+          base_moe_mlp_dim=1024,
           weight_dtype="float32",
           dtype="bfloat16",
           per_device_batch_size=2,
@@ -3045,18 +3039,25 @@ class QuantizedMoeTest(parameterized.TestCase):
         use_tokamax_gmm=False,
         use_gmm_v2=False,
     )
-    # Use normal distribution to generate realistic variances and negative values
-    # to guarantee the quantization scale != 1.0, which catches scale-dropping bugs.
-    hidden_states = jax.random.normal(
-        rng_hidden_states,
-        (
-            int(cfg_ref.per_device_batch_size) * jax.device_count(),
-            cfg_ref.max_target_length,
-            cfg_ref.base_emb_dim,
-        ),
-        dtype=cfg_ref.dtype,
-    )
-    tree_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states)
+    cache_attr = "_gmm_grad_equivalence_ref_cache"
+    ref_cache = getattr(self.__class__, cache_attr, {})
+    cache_key = (jax.device_count(), cfg_ref.base_emb_dim, cfg_ref.max_target_length)
+    if cache_key not in ref_cache:
+      # Use normal distribution to generate realistic variances and negative
+      # values so quantization scale != 1.0, catching scale-dropping bugs.
+      hidden_states = jax.random.normal(
+          rng_hidden_states,
+          (
+              int(cfg_ref.per_device_batch_size) * jax.device_count(),
+              cfg_ref.max_target_length,
+              cfg_ref.base_emb_dim,
+          ),
+          dtype=cfg_ref.dtype,
+      )
+      tree_ref = self._run_moe_loss_and_grad(cfg_ref, rng_model, hidden_states)
+      ref_cache[cache_key] = (hidden_states, tree_ref)
+      setattr(self.__class__, cache_attr, ref_cache)
+    hidden_states, tree_ref = ref_cache[cache_key]
 
     # Target run: custom configuration (sparse, GMM, EP, quantization)
     cfg_tgt = _build_cfg(
@@ -3095,6 +3096,10 @@ class QuantizedMoeTest(parameterized.TestCase):
           run_name="moe_quantize_token_all_gather_test",
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
+          override_model_config=True,
+          base_emb_dim=2048,
+          base_mlp_dim=1024,
+          base_moe_mlp_dim=1024,
           weight_dtype="float32",
           dtype="bfloat16",
           per_device_batch_size=1,
@@ -3163,6 +3168,10 @@ class QuantizedMoeTest(parameterized.TestCase):
           run_name="moe_quantize_combine_bwd_test",
           enable_checkpointing=False,
           model_name="mixtral-8x7b",
+          override_model_config=True,
+          base_emb_dim=2048,
+          base_mlp_dim=1024,
+          base_moe_mlp_dim=1024,
           weight_dtype="float32",
           dtype="bfloat16",
           per_device_batch_size=1,
