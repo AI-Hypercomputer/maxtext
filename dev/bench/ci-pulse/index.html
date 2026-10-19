@@ -908,6 +908,16 @@ function renderTimeline(){
   }
 
   host.appendChild(svg);
+  scrollToNewest(host);
+}
+
+// A wide chart opens scrolled to its right end, where the newest merged pull requests are. A chart
+// drawn while its tab is hidden has no width yet, so it scrolls there once it first gets one.
+function scrollToNewest(el){
+  if(el.clientWidth){el.scrollLeft=el.scrollWidth;return}
+  if(typeof ResizeObserver!=='function')return;
+  const ro=new ResizeObserver(()=>{if(el.clientWidth){ro.disconnect();el.scrollLeft=el.scrollWidth}});
+  ro.observe(el);
 }
 
 // ============ TOOLTIP ============
