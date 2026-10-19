@@ -220,6 +220,17 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
   return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
 
+def pad_batch_to_target_size(batch, target_batch_size: int):
+  """Pads the arrays of `batch` with zero rows up to `target_batch_size`. The loss masks out their zero segmentation."""
+
+  def pad(x):
+    if np.ndim(x) == 0 or len(x) >= target_batch_size:
+      return x
+    return np.pad(x, [(0, target_batch_size - len(x))] + [(0, 0)] * (np.ndim(x) - 1))
+
+  return jtu.tree_map(pad, batch)
+
+
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class.
   expansion_factor_for_grain is only used for grain pipeline when having a subset of hosts loading real data.
@@ -231,6 +242,7 @@ class MultiHostDataLoadIterator:
       global_mesh: Mesh,
       generate_padding_batch: bool = False,
       expansion_loading_factor_for_grain: int = -1,
+      target_local_batch_size: int | None = None,
   ):
     self.global_mesh = global_mesh
     self.dataloader = dataloader
@@ -245,6 +257,7 @@ class MultiHostDataLoadIterator:
     self._reset_and_unread = False
     self.generate_padding_batch = generate_padding_batch
     self.expansion_loading_factor_for_grain = expansion_loading_factor_for_grain
+    self.target_local_batch_size = target_local_batch_size
     _GLOBAL_MULTIHOST_ITERATORS.add(self)
 
   def reset(self):
@@ -323,6 +336,8 @@ class MultiHostDataLoadIterator:
       else:
         raise TimeoutError(f"Failed to load data after {MAX_DATA_LOAD_ATTEMPTS} retry attempts.")
 
+      if self.target_local_batch_size is not None:
+        local_data = pad_batch_to_target_size(local_data, self.target_local_batch_size)
       self.last_local_data = local_data
     input_gdas = jtu.tree_map_with_path(partial(_form_global_array, global_mesh=self.global_mesh), local_data)
 

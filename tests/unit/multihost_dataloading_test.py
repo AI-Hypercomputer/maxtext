@@ -171,6 +171,19 @@ class MultihostDataloadingTest(parameterized.TestCase):
     sec_batch = next(self.multihost_gen)
     self.assertFalse(np.array_equal(first_batch, sec_batch, equal_nan=True))
 
+  def test_pads_the_local_batch_up_to_the_target_size(self):
+    """With `elastic_keep_global_batch_size`, zero rows pad the logical batch up to the physical one."""
+    logical_batch = np.ones((self.mesh.size, 2), dtype=np.int32)
+    iterator = multihost_dataloading.MultiHostDataLoadIterator(
+        itertools.repeat({"inputs_segmentation": logical_batch}), self.mesh, target_local_batch_size=2 * self.mesh.size
+    )
+
+    batch = next(iterator)
+
+    np.testing.assert_array_equal(
+        np.asarray(batch["inputs_segmentation"]), np.concatenate([logical_batch, np.zeros_like(logical_batch)])
+    )
+
   @parameterized.named_parameters(*_get_test_mesh_shapes_named())
   def test_remote_iterator_wrapper_save_state(self, mesh_shape):
     if jax.default_backend() == "gpu":

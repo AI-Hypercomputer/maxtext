@@ -761,7 +761,8 @@ def _make_elastic_iterator(dataset, config, preprocessing_fn, shard_index=None, 
   ds = preprocessing_fn(dataset=dataset)
   return ElasticIterator(
       ds,
-      global_batch_size=config.global_batch_size_to_load,
+      # With `elastic_keep_global_batch_size`, advance by the logical global batch, which the data loader pads.
+      global_batch_size=getattr(config, "logical_global_batch_size_to_load", None) or config.global_batch_size_to_load,
       shard_options=grain.ShardOptions(
           shard_index=shard_index if shard_index is not None else jax.process_index(),
           shard_count=shard_count if shard_count is not None else jax.process_count(),
@@ -915,11 +916,16 @@ def make_grain_train_iterator(
   else:
     train_dataloader = preprocessing_fn(dataset=train_ds)
 
+  # With `elastic_keep_global_batch_size`, the iterator yields the logical global batch: pad it up to the physical one.
+  target_local_batch_size = None
+  if getattr(config, "logical_global_batch_size_to_load", None):
+    target_local_batch_size = config.global_batch_size_to_load // jax.process_count()
   return multihost_dataloading.MultiHostDataLoadIterator(
       train_dataloader,
       global_mesh,
       config.generate_padding_batch_train,
       expansion_loading_factor_for_grain=config.expansion_factor_real_data,
+      target_local_batch_size=target_local_batch_size,
   )
 
 
