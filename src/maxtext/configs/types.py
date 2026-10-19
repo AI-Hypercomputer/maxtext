@@ -3576,6 +3576,10 @@ class VLLM(BaseModel):
       "maxtext",
       description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
   )
+  rollout_weight_dtype: str = Field(
+      "",
+      description="Target weight dtype for trainer->rollout weight conversion. When empty, defaults to weight_dtype.",
+  )
   weight_sync_debug: bool = Field(
       False,
       description=(
