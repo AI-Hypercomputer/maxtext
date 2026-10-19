@@ -46,13 +46,13 @@ from maxtext.models import deepseek41
 from maxtext.utils import maxtext_utils, model_creation_utils
 
 try:
-    import torch
-    from tests.utils.deepseek_v41_reference import model as ref_model
-    from tests.utils.deepseek_v41_reference import runner as ref_runner
+  import torch
+  from tests.utils.deepseek_v41_reference import model as ref_model
+  from tests.utils.deepseek_v41_reference import runner as ref_runner
 except ImportError:
-    torch = None
-    ref_model = None
-    ref_runner = None
+  torch = None
+  ref_model = None
+  ref_runner = None
 
 TOKENIZER = os.environ.get("DEEPSEEK_V41_TOKENIZER", "deepseek-ai/DeepSeek-V4.1-Flash")
 SEQ = 40
@@ -120,459 +120,406 @@ REF_ARGS = dict(
 
 
 def _engram_rows():
-    from maxtext.layers import engram_deepseek41  # pylint: disable=import-outside-toplevel
+  from maxtext.layers import engram_deepseek41  # pylint: disable=import-outside-toplevel
 
-    return tuple(
-        sum(sum(per_ngram) for per_ngram in layer)
-        for layer in engram_deepseek41.engram_primes(
-            ENGRAM_LAYERS,
-            REF_ARGS["engram_max_ngram_size"],
-            REF_ARGS["engram_n_heads"],
-            REF_ARGS["engram_vocab_size"],
-        )
-    )
+  return tuple(
+      sum(sum(per_ngram) for per_ngram in layer)
+      for layer in engram_deepseek41.engram_primes(
+          ENGRAM_LAYERS,
+          REF_ARGS["engram_max_ngram_size"],
+          REF_ARGS["engram_n_heads"],
+          REF_ARGS["engram_vocab_size"],
+      )
+  )
 
 
 def _init_reference(model: torch.nn.Module, seed: int):
-    """Random weights in a realistic range (norm scales around 1), as in deepseek_v41_vs_reference_test."""
-    g = torch.Generator().manual_seed(seed)
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            r = torch.randn(p.shape, generator=g)
-            if name.endswith("norm.weight") or name.endswith(("q_weight", "k_weight")):
-                p.copy_(1.0 + 0.1 * r)
-            elif name.endswith("attn_sink"):
-                p.copy_(0.5 * r)
-            elif name.endswith("_base"):
-                p.copy_(0.1 * r)
-            elif name.endswith("_scale") and "hc_" in name:
-                p.copy_(0.5 + 0.1 * r)
-            elif name.endswith("gate.bias"):
-                p.copy_(0.1 * r)
-            elif "embed" in name:
-                p.copy_(r)
-            else:
-                p.copy_(r / p.shape[-1] ** 0.5)
+  """Random weights in a realistic range (norm scales around 1), as in deepseek_v41_vs_reference_test."""
+  g = torch.Generator().manual_seed(seed)
+  with torch.no_grad():
+    for name, p in model.named_parameters():
+      r = torch.randn(p.shape, generator=g)
+      if name.endswith("norm.weight") or name.endswith(("q_weight", "k_weight")):
+        p.copy_(1.0 + 0.1 * r)
+      elif name.endswith("attn_sink"):
+        p.copy_(0.5 * r)
+      elif name.endswith("_base"):
+        p.copy_(0.1 * r)
+      elif name.endswith("_scale") and "hc_" in name:
+        p.copy_(0.5 + 0.1 * r)
+      elif name.endswith("gate.bias"):
+        p.copy_(0.1 * r)
+      elif "embed" in name:
+        p.copy_(r)
+      else:
+        p.copy_(r / p.shape[-1] ** 0.5)
 
 
-def _reference_logits_with_grad(
-    ref: ref_model.Transformer, ids: torch.Tensor
-) -> torch.Tensor:
-    """`Transformer.forward(ids, full_logits=True)` without its `@torch.inference_mode()`, so autograd records it.
+def _reference_logits_with_grad(ref: ref_model.Transformer, ids: torch.Tensor) -> torch.Tensor:
+  """`Transformer.forward(ids, full_logits=True)` without its `@torch.inference_mode()`, so autograd records it.
 
-    The engram hash ids are integers computed under inference mode upstream; they are cloned into a normal tensor
-    because `F.embedding` saves its indices for the backward pass.
-    """
-    hashes = ref.engram_hash(ids, 0).clone() if ref.engram_hash is not None else None
-    h = ref.embed(ids)
-    h = h.unsqueeze(2).repeat(1, 1, ref.hc_mult, 1)
-    pre_mix = ref_model.make_identity_pre_mix(h, ref.hc_mult)
-    layer = None
-    for layer in ref.layers:
-        if layer.engram is not None:
-            h = layer.engram(h, hashes[:, :, layer.engram.layer_hash_index, :])
-        h, pre_mix = layer(h, 0, pre_mix, None)
-    h = layer.hc_pre(h, pre_mix)
-    return ref.head(ref.norm(h), full_logits=True)
+  The engram hash ids are integers computed under inference mode upstream; they are cloned into a normal tensor
+  because `F.embedding` saves its indices for the backward pass.
+  """
+  hashes = ref.engram_hash(ids, 0).clone() if ref.engram_hash is not None else None
+  h = ref.embed(ids)
+  h = h.unsqueeze(2).repeat(1, 1, ref.hc_mult, 1)
+  pre_mix = ref_model.make_identity_pre_mix(h, ref.hc_mult)
+  layer = None
+  for layer in ref.layers:
+    if layer.engram is not None:
+      h = layer.engram(h, hashes[:, :, layer.engram.layer_hash_index, :])
+    h, pre_mix = layer(h, 0, pre_mix, None)
+  h = layer.hc_pre(h, pre_mix)
+  return ref.head(ref.norm(h), full_logits=True)
 
 
 def _maxtext_config(ckpt_dir, scan_layers, **overrides):
-    args = dict(
-        run_name="deepseek41_grad_test",
-        enable_checkpointing=False,
-        skip_jax_distributed_system=True,
-        model_name="deepseek4.1-flash-mini",
-        override_model_config=True,
-        per_device_batch_size=1.0,
-        max_target_length=SEQ,
-        dtype="float32",
-        weight_dtype="float32",
-        matmul_precision="highest",
-        base_emb_dim=REF_ARGS["dim"],
-        base_num_query_heads=REF_ARGS["n_heads"],
-        head_dim=REF_ARGS["head_dim"],
-        qk_rope_head_dim=REF_ARGS["rope_head_dim"],
-        q_lora_rank=REF_ARGS["q_lora_rank"],
-        o_groups=REF_ARGS["o_groups"],
-        o_lora_rank=REF_ARGS["o_lora_rank"],
-        base_mlp_dim=REF_ARGS["moe_inter_dim"],
-        base_moe_mlp_dim=REF_ARGS["moe_inter_dim"],
-        num_experts=REF_ARGS["n_routed_experts"],
-        num_experts_per_tok=REF_ARGS["n_activated_experts"],
-        sparse_matmul=False,
-        capacity_factor=-1,
-        sliding_window_size=REF_ARGS["window_size"],
-        base_num_decoder_layers=len(COMPRESS_RATIOS),
-        compress_ratios=COMPRESS_RATIOS,
-        kv_source_layers=KV_SOURCES,
-        index_source_layers=INDEX_SOURCES,
-        indexer_n_heads=REF_ARGS["index_n_heads"],
-        indexer_head_dim=REF_ARGS["index_head_dim"],
-        indexer_topk=REF_ARGS["index_topk"],
-        candidate_source_layer=CANDIDATE_SOURCE,
-        candidate_topk_blocks=REF_ARGS["candidate_topk_blocks"],
-        candidate_block_size=REF_ARGS["candidate_block_size"],
-        ds41_engram_layers=ENGRAM_LAYERS,
-        ds41_engram_vocab_size=REF_ARGS["engram_vocab_size"],
-        ds41_engram_max_ngram_size=REF_ARGS["engram_max_ngram_size"],
-        ds41_engram_n_heads=REF_ARGS["engram_n_heads"],
-        ds41_engram_head_dim=REF_ARGS["engram_head_dim"],
-        tokenizer_path=TOKENIZER,
-        scan_layers=scan_layers,
-        load_parameters_path=ckpt_dir,
-        source_checkpoint_layout="safetensors_dynamic",
-    )
-    args.update(overrides)
-    return pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], **args)
+  args = dict(
+      run_name="deepseek41_grad_test",
+      enable_checkpointing=False,
+      skip_jax_distributed_system=True,
+      model_name="deepseek4.1-flash-mini",
+      override_model_config=True,
+      per_device_batch_size=1.0,
+      max_target_length=SEQ,
+      dtype="float32",
+      weight_dtype="float32",
+      matmul_precision="highest",
+      base_emb_dim=REF_ARGS["dim"],
+      base_num_query_heads=REF_ARGS["n_heads"],
+      head_dim=REF_ARGS["head_dim"],
+      qk_rope_head_dim=REF_ARGS["rope_head_dim"],
+      q_lora_rank=REF_ARGS["q_lora_rank"],
+      o_groups=REF_ARGS["o_groups"],
+      o_lora_rank=REF_ARGS["o_lora_rank"],
+      base_mlp_dim=REF_ARGS["moe_inter_dim"],
+      base_moe_mlp_dim=REF_ARGS["moe_inter_dim"],
+      num_experts=REF_ARGS["n_routed_experts"],
+      num_experts_per_tok=REF_ARGS["n_activated_experts"],
+      sparse_matmul=False,
+      capacity_factor=-1,
+      sliding_window_size=REF_ARGS["window_size"],
+      base_num_decoder_layers=len(COMPRESS_RATIOS),
+      compress_ratios=COMPRESS_RATIOS,
+      kv_source_layers=KV_SOURCES,
+      index_source_layers=INDEX_SOURCES,
+      indexer_n_heads=REF_ARGS["index_n_heads"],
+      indexer_head_dim=REF_ARGS["index_head_dim"],
+      indexer_topk=REF_ARGS["index_topk"],
+      candidate_source_layer=CANDIDATE_SOURCE,
+      candidate_topk_blocks=REF_ARGS["candidate_topk_blocks"],
+      candidate_block_size=REF_ARGS["candidate_block_size"],
+      ds41_engram_layers=ENGRAM_LAYERS,
+      ds41_engram_vocab_size=REF_ARGS["engram_vocab_size"],
+      ds41_engram_max_ngram_size=REF_ARGS["engram_max_ngram_size"],
+      ds41_engram_n_heads=REF_ARGS["engram_n_heads"],
+      ds41_engram_head_dim=REF_ARGS["engram_head_dim"],
+      tokenizer_path=TOKENIZER,
+      scan_layers=scan_layers,
+      load_parameters_path=ckpt_dir,
+      source_checkpoint_layout="safetensors_dynamic",
+  )
+  args.update(overrides)
+  return pyconfig.initialize([sys.argv[0], "src/maxtext/configs/base.yml"], **args)
 
 
 def _np(x) -> np.ndarray:
-    return np.asarray(jax.device_get(x), dtype=np.float32)
+  return np.asarray(jax.device_get(x), dtype=np.float32)
 
 
 def _xent(logits, targets):
-    """Mean next-token cross entropy (float32), identical formula on both sides."""
-    logz = jax.nn.logsumexp(logits, axis=-1)
-    picked = jnp.take_along_axis(logits, targets[..., None], axis=-1)[..., 0]
-    return jnp.mean(logz - picked)
+  """Mean next-token cross entropy (float32), identical formula on both sides."""
+  logz = jax.nn.logsumexp(logits, axis=-1)
+  picked = jnp.take_along_axis(logits, targets[..., None], axis=-1)[..., 0]
+  return jnp.mean(logz - picked)
 
 
 def _layer_param_views(spec, get):
-    """(reference name, MaxText array -> reference-layout array) for one layer; `get(path)` reads a MaxText leaf."""
-    i = spec.layer_id
-    ref = f"layers.{i}"
+  """(reference name, MaxText array -> reference-layout array) for one layer; `get(path)` reads a MaxText leaf."""
+  i = spec.layer_id
+  ref = f"layers.{i}"
 
-    def t(path):  # torch Linear [out, in] <- kernel [in, *out]
-        w = get(path)
-        return w.reshape(w.shape[0], -1).T
+  def t(path):  # torch Linear [out, in] <- kernel [in, *out]
+    w = get(path)
+    return w.reshape(w.shape[0], -1).T
 
-    out = {
-        f"{ref}.attn_norm.weight": get("pre_self_attention_layer_norm/scale"),
-        f"{ref}.ffn_norm.weight": get("post_self_attention_layer_norm/scale"),
-        f"{ref}.attn.wq_a.weight": t("self_attention/wq_a/kernel"),
-        f"{ref}.attn.q_norm.weight": get("self_attention/q_norm/scale"),
-        f"{ref}.attn.wq_b.weight": t("self_attention/wq_b/kernel"),
-        f"{ref}.attn.wkv.weight": t("self_attention/wkv/kernel"),
-        f"{ref}.attn.kv_norm.weight": get("self_attention/kv_norm/scale"),
-        # [g, d, r] -> [g * r, d]
-        f"{ref}.attn.wo_a.weight": np.transpose(
-            get("self_attention/o_a_proj/kernel"), (0, 2, 1)
-        ).reshape(-1, get("self_attention/o_a_proj/kernel").shape[1]),
-        f"{ref}.attn.wo_b.weight": t("self_attention/o_b_proj/kernel"),
-        f"{ref}.attn.attn_sink": get("self_attention/sinks"),
-        f"{ref}.ffn.gate.weight": t("mlp/MoeBlock_0/gate/kernel"),
-        f"{ref}.ffn.shared_experts.w1.weight": t("mlp/shared_experts/wi_0/kernel"),
-        f"{ref}.ffn.shared_experts.w3.weight": t("mlp/shared_experts/wi_1/kernel"),
-        f"{ref}.ffn.shared_experts.w2.weight": t("mlp/shared_experts/wo/kernel"),
-    }
-    for name in ("hc_attn", "hc_ffn"):
-        out[f"{ref}.{name}_fn"] = get(f"{name}_fn").T
-        out[f"{ref}.{name}_base"] = get(f"{name}_base")
-        out[f"{ref}.{name}_scale"] = get(f"{name}_scale")
-    wi_0, wi_1, wo = (get(f"mlp/MoeBlock_0/{n}") for n in ("wi_0", "wi_1", "wo"))
-    for e in range(wi_0.shape[0]):
-        out[f"{ref}.ffn.experts.{e}.w1.weight"] = wi_0[e].T
-        out[f"{ref}.ffn.experts.{e}.w3.weight"] = wi_1[e].T
-        out[f"{ref}.ffn.experts.{e}.w2.weight"] = wo[e].T
+  out = {
+      f"{ref}.attn_norm.weight": get("pre_self_attention_layer_norm/scale"),
+      f"{ref}.ffn_norm.weight": get("post_self_attention_layer_norm/scale"),
+      f"{ref}.attn.wq_a.weight": t("self_attention/wq_a/kernel"),
+      f"{ref}.attn.q_norm.weight": get("self_attention/q_norm/scale"),
+      f"{ref}.attn.wq_b.weight": t("self_attention/wq_b/kernel"),
+      f"{ref}.attn.wkv.weight": t("self_attention/wkv/kernel"),
+      f"{ref}.attn.kv_norm.weight": get("self_attention/kv_norm/scale"),
+      # [g, d, r] -> [g * r, d]
+      f"{ref}.attn.wo_a.weight": np.transpose(get("self_attention/o_a_proj/kernel"), (0, 2, 1)).reshape(
+          -1, get("self_attention/o_a_proj/kernel").shape[1]
+      ),
+      f"{ref}.attn.wo_b.weight": t("self_attention/o_b_proj/kernel"),
+      f"{ref}.attn.attn_sink": get("self_attention/sinks"),
+      f"{ref}.ffn.gate.weight": t("mlp/MoeBlock_0/gate/kernel"),
+      f"{ref}.ffn.shared_experts.w1.weight": t("mlp/shared_experts/wi_0/kernel"),
+      f"{ref}.ffn.shared_experts.w3.weight": t("mlp/shared_experts/wi_1/kernel"),
+      f"{ref}.ffn.shared_experts.w2.weight": t("mlp/shared_experts/wo/kernel"),
+  }
+  for name in ("hc_attn", "hc_ffn"):
+    out[f"{ref}.{name}_fn"] = get(f"{name}_fn").T
+    out[f"{ref}.{name}_base"] = get(f"{name}_base")
+    out[f"{ref}.{name}_scale"] = get(f"{name}_scale")
+  wi_0, wi_1, wo = (get(f"mlp/MoeBlock_0/{n}") for n in ("wi_0", "wi_1", "wo"))
+  for e in range(wi_0.shape[0]):
+    out[f"{ref}.ffn.experts.{e}.w1.weight"] = wi_0[e].T
+    out[f"{ref}.ffn.experts.{e}.w3.weight"] = wi_1[e].T
+    out[f"{ref}.ffn.experts.{e}.w2.weight"] = wo[e].T
+  if spec.is_kv_source:
+    out[f"{ref}.attn.compressor.wkv.weight"] = t("self_attention/compressor/wkv/kernel")
+    if spec.compress_ratio > 1:
+      out[f"{ref}.attn.compressor.wgate.weight"] = t("self_attention/compressor/wgate/kernel")
+    out[f"{ref}.attn.compressor.norm.weight"] = get("self_attention/compressor/norm/scale")
+  if spec.is_index_source:
+    out[f"{ref}.attn.indexer.wq_b.weight"] = t("self_attention/indexer/wq_b/kernel")
+    out[f"{ref}.attn.indexer.weights_proj.weight"] = t("self_attention/indexer/weights_proj/kernel")
     if spec.is_kv_source:
-        out[f"{ref}.attn.compressor.wkv.weight"] = t(
-            "self_attention/compressor/wkv/kernel"
-        )
-        if spec.compress_ratio > 1:
-            out[f"{ref}.attn.compressor.wgate.weight"] = t(
-                "self_attention/compressor/wgate/kernel"
-            )
-        out[f"{ref}.attn.compressor.norm.weight"] = get(
-            "self_attention/compressor/norm/scale"
-        )
-    if spec.is_index_source:
-        out[f"{ref}.attn.indexer.wq_b.weight"] = t("self_attention/indexer/wq_b/kernel")
-        out[f"{ref}.attn.indexer.weights_proj.weight"] = t(
-            "self_attention/indexer/weights_proj/kernel"
-        )
-        if spec.is_kv_source:
-            out[f"{ref}.attn.indexer.wk.weight"] = t("self_attention/indexer/wk/kernel")
-            out[f"{ref}.attn.indexer.k_norm.weight"] = get(
-                "self_attention/indexer/k_norm/scale"
-            )
-    if spec.has_engram:
-        out[f"{ref}.engram.embed.weight"] = get(
-            "engram/embed"
-        )  # padded rows, trimmed by the caller
-        out[f"{ref}.engram.wkv.weight"] = t("engram/wkv/kernel")
-        out[f"{ref}.engram.q_weight"] = get("engram/q_weight")
-        out[f"{ref}.engram.k_weight"] = get("engram/k_weight")
-    return out
+      out[f"{ref}.attn.indexer.wk.weight"] = t("self_attention/indexer/wk/kernel")
+      out[f"{ref}.attn.indexer.k_norm.weight"] = get("self_attention/indexer/k_norm/scale")
+  if spec.has_engram:
+    out[f"{ref}.engram.embed.weight"] = get("engram/embed")  # padded rows, trimmed by the caller
+    out[f"{ref}.engram.wkv.weight"] = t("engram/wkv/kernel")
+    out[f"{ref}.engram.q_weight"] = get("engram/q_weight")
+    out[f"{ref}.engram.k_weight"] = get("engram/k_weight")
+  return out
 
 
 def maxtext_grads_in_reference_layout(config, flat: dict) -> dict:
-    """Maps a flat {'a/b/c': array} MaxText gradient tree onto the reference parameter names and layouts."""
-    specs = deepseek41.build_layer_specs(config)
-    out = {
-        "embed.weight": flat["token_embedder/embedding"],
-        "head.weight": flat["decoder/logits_dense/kernel"].T,
-        "norm.weight": flat["decoder/decoder_norm/scale"],
-    }
-    if config.scan_layers:
-        for k, segment in enumerate(deepseek41.build_segments(config)):
-            for r, group in enumerate(segment.groups):
-                for j, layer_id in enumerate(group):
-                    prefix = f"decoder/segments_{k}/layers_{j}/"
-                    # Stacked leaves carry the scan axis at param_scan_axis (= 1 for every leaf here).
-                    get = lambda p, prefix=prefix, r=r: np.take(
-                        flat[prefix + p], r, axis=config.param_scan_axis
-                    )
-                    out.update(_layer_param_views(specs[layer_id], get))
-    else:
-        for spec in specs:
-            prefix = f"decoder/layers_{spec.layer_id}/"
-            out.update(
-                _layer_param_views(spec, lambda p, prefix=prefix: flat[prefix + p])
-            )
-    return out
+  """Maps a flat {'a/b/c': array} MaxText gradient tree onto the reference parameter names and layouts."""
+  specs = deepseek41.build_layer_specs(config)
+  out = {
+      "embed.weight": flat["token_embedder/embedding"],
+      "head.weight": flat["decoder/logits_dense/kernel"].T,
+      "norm.weight": flat["decoder/decoder_norm/scale"],
+  }
+  if config.scan_layers:
+    for k, segment in enumerate(deepseek41.build_segments(config)):
+      for r, group in enumerate(segment.groups):
+        for j, layer_id in enumerate(group):
+          prefix = f"decoder/segments_{k}/layers_{j}/"
+          # Stacked leaves carry the scan axis at param_scan_axis (= 1 for every leaf here).
+          get = lambda p, prefix=prefix, r=r: np.take(flat[prefix + p], r, axis=config.param_scan_axis)
+          out.update(_layer_param_views(specs[layer_id], get))
+  else:
+    for spec in specs:
+      prefix = f"decoder/layers_{spec.layer_id}/"
+      out.update(_layer_param_views(spec, lambda p, prefix=prefix: flat[prefix + p]))
+  return out
 
 
 @pytest.mark.cpu_only
 @unittest.skipIf(torch is None, "PyTorch required for upstream reference parity tests")
 class DeepSeek41GradParityTest(unittest.TestCase):
-    """Loss and every parameter gradient of the full MaxText model vs torch autograd through the reference."""
+  """Loss and every parameter gradient of the full MaxText model vs torch autograd through the reference."""
 
-    @classmethod
-    def setUpClass(cls):
-        from safetensors.torch import save_file  # pylint: disable=import-outside-toplevel
-        from transformers import AutoTokenizer  # pylint: disable=import-outside-toplevel
+  @classmethod
+  def setUpClass(cls):
+    from safetensors.torch import save_file  # pylint: disable=import-outside-toplevel
+    from transformers import AutoTokenizer  # pylint: disable=import-outside-toplevel
 
-        jax.config.update("jax_default_matmul_precision", "highest")
-        torch.manual_seed(0)
-        tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
-        args = {**REF_ARGS, "engram_num_embeddings": _engram_rows()}
-        cls.ref = ref_runner.build_model(ref_model.ModelArgs(**args), tokenizer)
-        _init_reference(cls.ref, seed=7)
-        cls.ckpt_dir = tempfile.mkdtemp(prefix="dsv41_grad_")
-        state = {k: v.contiguous() for k, v in cls.ref.state_dict().items()}
-        save_file(
-            state,
-            os.path.join(cls.ckpt_dir, "model-00001-of-00001.safetensors"),
-            metadata={"format": "pt"},
+    jax.config.update("jax_default_matmul_precision", "highest")
+    torch.manual_seed(0)
+    tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+    args = {**REF_ARGS, "engram_num_embeddings": _engram_rows()}
+    cls.ref = ref_runner.build_model(ref_model.ModelArgs(**args), tokenizer)
+    _init_reference(cls.ref, seed=7)
+    cls.ckpt_dir = tempfile.mkdtemp(prefix="dsv41_grad_")
+    state = {k: v.contiguous() for k, v in cls.ref.state_dict().items()}
+    save_file(
+        state,
+        os.path.join(cls.ckpt_dir, "model-00001-of-00001.safetensors"),
+        metadata={"format": "pt"},
+    )
+
+    # Tokens with lots of repeated n-grams so the engram rows actually collide / get reused.
+    g = torch.Generator().manual_seed(11)
+    base = torch.randint(0, REF_ARGS["vocab_size"], (BATCH, SEQ // 4), generator=g)
+    cls.ids = torch.cat(
+        [
+            base,
+            base,
+            torch.randint(0, REF_ARGS["vocab_size"], (BATCH, SEQ // 2), generator=g),
+        ],
+        dim=1,
+    )
+
+    # Reference forward + backward (float32, autograd).
+    cls.ref.zero_grad(set_to_none=True)
+    with torch.inference_mode():
+      inference_logits = cls.ref(cls.ids, full_logits=True)
+    logits = _reference_logits_with_grad(cls.ref, cls.ids)  # [B, S, V] float32
+    # The grad-enabled replica of the forward must reproduce the upstream (inference-mode) forward exactly.
+    np.testing.assert_array_equal(logits.detach().numpy(), inference_logits.numpy())
+    loss = torch.nn.functional.cross_entropy(
+        logits[:, :-1].reshape(-1, logits.shape[-1]).float(),
+        cls.ids[:, 1:].reshape(-1),
+    )
+    loss.backward()
+    cls.ref_loss = float(loss.detach())
+    cls.ref_logits = logits.detach().numpy()
+    cls.ref_grads = {
+        n: (p.grad.detach().float().numpy() if p.grad is not None else np.zeros(p.shape, np.float32))
+        for n, p in cls.ref.named_parameters()
+    }
+
+  def _maxtext_loss_and_grads(self, scan_layers, **overrides):
+    config = _maxtext_config(self.ckpt_dir, scan_layers, **overrides)
+    mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+    model = model_creation_utils.from_pretrained(config, mesh=mesh, model_mode=MODEL_MODE_TRAIN)
+    tokens = jnp.asarray(self.ids.numpy(), jnp.int32)
+    # The test runs a global batch of per_device_batch_size * num_devices rows; only the first BATCH are scored.
+    gbs = config.global_batch_size_to_train_on
+    tokens = jnp.concatenate([tokens, jnp.zeros((gbs - BATCH, SEQ), jnp.int32)], axis=0) if gbs > BATCH else tokens
+    positions = jnp.broadcast_to(jnp.arange(SEQ), tokens.shape)
+    targets = tokens[:BATCH, 1:]
+    graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+    def loss_fn(params, rest):
+      m = nnx.merge(graphdef, params, rest, copy=True)
+      logits = m(
+          decoder_input_tokens=tokens,
+          decoder_positions=positions,
+          decoder_segment_ids=jnp.ones_like(tokens),
+          enable_dropout=False,
+      )
+      return (
+          _xent(logits[:BATCH, :-1].astype(jnp.float32), targets),
+          logits[:BATCH],
+      )
+
+    with mesh:
+      (loss, logits), grads = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(params, rest)
+    flat = {"/".join(str(k) for k in path): _np(v) for path, v in nnx.to_flat_state(grads)}
+    return config, float(loss), _np(logits), flat
+
+  def _check(self, scan_layers, rtol=2e-3, **overrides):
+    config, loss, logits, flat = self._maxtext_loss_and_grads(scan_layers, **overrides)
+    np.testing.assert_allclose(logits, self.ref_logits, rtol=2e-3, atol=2e-3)
+    self.assertAlmostEqual(loss, self.ref_loss, delta=1e-4 * max(1.0, abs(self.ref_loss)))
+
+    mt = maxtext_grads_in_reference_layout(config, flat)
+    rows = {}
+    failures = []
+    for name, g_ref in self.ref_grads.items():
+      if name.endswith("gate.bias"):
+        continue  # selection-only bias: no gradient upstream (a MoEBiasVar, not a Param, in MaxText)
+      self.assertIn(name, mt, f"no MaxText gradient mapped for {name}")
+      g = mt[name]
+      if name.endswith("engram.embed.weight"):
+        self.assertTrue(
+            np.all(g[g_ref.shape[0] :] == 0),
+            f"{name}: padding rows got a gradient",
         )
+        g = g[: g_ref.shape[0]]
+      self.assertEqual(g.shape, g_ref.shape, name)
+      ref_norm = float(np.linalg.norm(g_ref))
+      err = float(np.linalg.norm(g - g_ref))
+      rel = err / ref_norm if ref_norm > 0 else err
+      rows[name] = (ref_norm, rel)
+      if rel > rtol and err > 1e-6:
+        failures.append(f"{name}: |g_ref|={ref_norm:.3e} rel_err={rel:.3e}")
+    worst = sorted(rows.items(), key=lambda kv: -kv[1][1])[:8]
+    print(
+        f"\n[scan_layers={scan_layers} {overrides}] loss mt={loss:.6f} ref={self.ref_loss:.6f}; "
+        f"{len(rows)} grads compared; worst rel errors:"
+    )
+    for name, (n, rel) in worst:
+      print(f"   {name:60s} |g_ref|={n:.3e} rel={rel:.2e}")
+    zero_both = [n for n, (norm, _) in rows.items() if norm == 0.0]
+    print(
+        f"   params with zero gradient in the reference ({len(zero_both)}): "
+        f"{sorted({n.split('.', 2)[-1] for n in zero_both})}"
+    )
+    self.assertFalse(failures, "gradient mismatches:\n" + "\n".join(failures))
 
-        # Tokens with lots of repeated n-grams so the engram rows actually collide / get reused.
-        g = torch.Generator().manual_seed(11)
-        base = torch.randint(0, REF_ARGS["vocab_size"], (BATCH, SEQ // 4), generator=g)
-        cls.ids = torch.cat(
-            [
-                base,
-                base,
-                torch.randint(
-                    0, REF_ARGS["vocab_size"], (BATCH, SEQ // 2), generator=g
-                ),
-            ],
-            dim=1,
-        )
+  def test_unscanned_dense_moe(self):
+    self._check(scan_layers=False)
 
-        # Reference forward + backward (float32, autograd).
-        cls.ref.zero_grad(set_to_none=True)
-        with torch.inference_mode():
-            inference_logits = cls.ref(cls.ids, full_logits=True)
-        logits = _reference_logits_with_grad(cls.ref, cls.ids)  # [B, S, V] float32
-        # The grad-enabled replica of the forward must reproduce the upstream (inference-mode) forward exactly.
-        np.testing.assert_array_equal(logits.detach().numpy(), inference_logits.numpy())
-        loss = torch.nn.functional.cross_entropy(
-            logits[:, :-1].reshape(-1, logits.shape[-1]).float(),
-            cls.ids[:, 1:].reshape(-1),
-        )
-        loss.backward()
-        cls.ref_loss = float(loss.detach())
-        cls.ref_logits = logits.detach().numpy()
-        cls.ref_grads = {
-            n: (
-                p.grad.detach().float().numpy()
-                if p.grad is not None
-                else np.zeros(p.shape, np.float32)
-            )
-            for n, p in cls.ref.named_parameters()
-        }
+  def test_scanned_dense_moe(self):
+    self._check(scan_layers=True)
 
-    def _maxtext_loss_and_grads(self, scan_layers, **overrides):
-        config = _maxtext_config(self.ckpt_dir, scan_layers, **overrides)
-        mesh = jax.sharding.Mesh(
-            maxtext_utils.create_device_mesh(config), config.mesh_axes
-        )
-        model = model_creation_utils.from_pretrained(
-            config, mesh=mesh, model_mode=MODEL_MODE_TRAIN
-        )
-        tokens = jnp.asarray(self.ids.numpy(), jnp.int32)
-        # The test runs a global batch of per_device_batch_size * num_devices rows; only the first BATCH are scored.
-        gbs = config.global_batch_size_to_train_on
-        tokens = (
-            jnp.concatenate([tokens, jnp.zeros((gbs - BATCH, SEQ), jnp.int32)], axis=0)
-            if gbs > BATCH
-            else tokens
-        )
-        positions = jnp.broadcast_to(jnp.arange(SEQ), tokens.shape)
-        targets = tokens[:BATCH, 1:]
-        graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+  def test_scanned_sparse_matmul_moe(self):
+    # The training path: dropless ragged-dot MoE (megablox is a TPU kernel; ragged_dot runs anywhere).
+    self._check(scan_layers=True, sparse_matmul=True, megablox=False)
 
-        def loss_fn(params, rest):
-            m = nnx.merge(graphdef, params, rest, copy=True)
-            logits = m(
-                decoder_input_tokens=tokens,
-                decoder_positions=positions,
-                decoder_segment_ids=jnp.ones_like(tokens),
-                enable_dropout=False,
-            )
-            return (
-                _xent(logits[:BATCH, :-1].astype(jnp.float32), targets),
-                logits[:BATCH],
-            )
+  def test_scanned_chunked_attention(self):
+    # Query-chunked attention (5 chunks of 8 positions, window 8): same softmax over fewer keys, per-chunk remat.
+    self._check(scan_layers=True, ds41_attention_chunk=8)
 
-        with mesh:
-            (loss, logits), grads = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(
-                params, rest
-            )
-        flat = {
-            "/".join(str(k) for k in path): _np(v)
-            for path, v in nnx.to_flat_state(grads)
-        }
-        return config, float(loss), _np(logits), flat
-
-    def _check(self, scan_layers, rtol=2e-3, **overrides):
-        config, loss, logits, flat = self._maxtext_loss_and_grads(
-            scan_layers, **overrides
-        )
-        np.testing.assert_allclose(logits, self.ref_logits, rtol=2e-3, atol=2e-3)
-        self.assertAlmostEqual(
-            loss, self.ref_loss, delta=1e-4 * max(1.0, abs(self.ref_loss))
-        )
-
-        mt = maxtext_grads_in_reference_layout(config, flat)
-        rows = {}
-        failures = []
-        for name, g_ref in self.ref_grads.items():
-            if name.endswith("gate.bias"):
-                continue  # selection-only bias: no gradient upstream (a MoEBiasVar, not a Param, in MaxText)
-            self.assertIn(name, mt, f"no MaxText gradient mapped for {name}")
-            g = mt[name]
-            if name.endswith("engram.embed.weight"):
-                self.assertTrue(
-                    np.all(g[g_ref.shape[0] :] == 0),
-                    f"{name}: padding rows got a gradient",
-                )
-                g = g[: g_ref.shape[0]]
-            self.assertEqual(g.shape, g_ref.shape, name)
-            ref_norm = float(np.linalg.norm(g_ref))
-            err = float(np.linalg.norm(g - g_ref))
-            rel = err / ref_norm if ref_norm > 0 else err
-            rows[name] = (ref_norm, rel)
-            if rel > rtol and err > 1e-6:
-                failures.append(f"{name}: |g_ref|={ref_norm:.3e} rel_err={rel:.3e}")
-        worst = sorted(rows.items(), key=lambda kv: -kv[1][1])[:8]
-        print(
-            f"\n[scan_layers={scan_layers} {overrides}] loss mt={loss:.6f} ref={self.ref_loss:.6f}; "
-            f"{len(rows)} grads compared; worst rel errors:"
-        )
-        for name, (n, rel) in worst:
-            print(f"   {name:60s} |g_ref|={n:.3e} rel={rel:.2e}")
-        zero_both = [n for n, (norm, _) in rows.items() if norm == 0.0]
-        print(
-            f"   params with zero gradient in the reference ({len(zero_both)}): "
-            f"{sorted({n.split('.', 2)[-1] for n in zero_both})}"
-        )
-        self.assertFalse(failures, "gradient mismatches:\n" + "\n".join(failures))
-
-    def test_unscanned_dense_moe(self):
-        self._check(scan_layers=False)
-
-    def test_scanned_dense_moe(self):
-        self._check(scan_layers=True)
-
-    def test_scanned_sparse_matmul_moe(self):
-        # The training path: dropless ragged-dot MoE (megablox is a TPU kernel; ragged_dot runs anywhere).
-        self._check(scan_layers=True, sparse_matmul=True, megablox=False)
-
-    def test_scanned_chunked_attention(self):
-        # Query-chunked attention (5 chunks of 8 positions, window 8): same softmax over fewer keys, per-chunk remat.
-        self._check(scan_layers=True, ds41_attention_chunk=8)
-
-    def test_unscanned_chunked_attention_ragged_moe(self):
-        self._check(
-            scan_layers=False,
-            ds41_attention_chunk=8,
-            sparse_matmul=True,
-            megablox=False,
-        )
+  def test_unscanned_chunked_attention_ragged_moe(self):
+    self._check(
+        scan_layers=False,
+        ds41_attention_chunk=8,
+        sparse_matmul=True,
+        megablox=False,
+    )
 
 
 class PureJaxTrainingFixesTest(unittest.TestCase):
-    """Pure-JAX verification of PR #5812 training fixes (runs on all CI environments without PyTorch)."""
+  """Pure-JAX verification of PR #5812 training fixes (runs on all CI environments without PyTorch)."""
 
-    def test_scatter_bool_matches_3d_scatter_max_and_vjp(self):
-        from maxtext.layers import attention_deepseek41  # pylint: disable=import-outside-toplevel
+  def test_scatter_bool_matches_3d_scatter_max_and_vjp(self):
+    from maxtext.layers import attention_deepseek41  # pylint: disable=import-outside-toplevel
 
-        scores = jax.random.normal(jax.random.PRNGKey(0), (2, 16, 12))
-        top_vals, top_idx = jax.lax.top_k(scores, 4)
-        vals = top_vals > 0.0
+    scores = jax.random.normal(jax.random.PRNGKey(0), (2, 16, 12))
+    top_vals, top_idx = jax.lax.top_k(scores, 4)
+    vals = top_vals > 0.0
 
-        # Reference 3D advanced scatter-max implementation from base PR #5802:
-        bi = jnp.arange(2)[:, None, None]
-        si = jnp.arange(16)[None, :, None]
-        expected = jnp.zeros((2, 16, 12), dtype=jnp.bool_).at[bi, si, top_idx].max(vals)
+    # Reference 3D advanced scatter-max implementation from base PR #5802:
+    bi = jnp.arange(2)[:, None, None]
+    si = jnp.arange(16)[None, :, None]
+    expected = jnp.zeros((2, 16, 12), dtype=jnp.bool_).at[bi, si, top_idx].max(vals)
 
-        got, vjp_fn = jax.vjp(
-            lambda idx, v: attention_deepseek41._scatter_bool(idx, v, 12), top_idx, vals
-        )  # pylint: disable=protected-access
-        np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
-        d_idx, d_vals = vjp_fn(jnp.zeros_like(got))
-        self.assertEqual(d_idx.dtype, jax.dtypes.float0)
-        self.assertEqual(d_vals.dtype, jax.dtypes.float0)
+    got, vjp_fn = jax.vjp(
+        lambda idx, v: attention_deepseek41._scatter_bool(idx, v, 12), top_idx, vals  # pylint: disable=protected-access
+    )
+    np.testing.assert_array_equal(np.asarray(got), np.asarray(expected))
+    d_idx, d_vals = vjp_fn(jnp.zeros_like(got))
+    self.assertEqual(d_idx.dtype, jax.dtypes.float0)
+    self.assertEqual(d_vals.dtype, jax.dtypes.float0)
 
-    def test_sharded_row_lookup_forward_and_grads_match_take(self):
-        from maxtext.layers import engram_deepseek41  # pylint: disable=import-outside-toplevel
+  def test_sharded_row_lookup_forward_and_grads_match_take(self):
+    from maxtext.layers import engram_deepseek41  # pylint: disable=import-outside-toplevel
 
-        devs = jax.devices()
-        mesh = jax.sharding.Mesh(
-            np.array(devs).reshape(len(devs), 1), ("fsdp", "expert")
-        )
-        rules = (("embed", "fsdp"), ("activation_batch", "fsdp"))
+    devs = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devs).reshape(len(devs), 1), ("fsdp", "expert"))
+    rules = (("embed", "fsdp"), ("activation_batch", "fsdp"))
 
-        num_real_rows, padded_rows, head_dim = 40, 48, 8
-        table_init = jax.random.normal(
-            jax.random.PRNGKey(1), (padded_rows, head_dim), dtype=jnp.float32
-        )
-        # Include deliberate duplicate n-gram IDs across batch/seq/cols within [0, num_real_rows):
-        raw_ids = jax.random.randint(
-            jax.random.PRNGKey(2), (len(devs), 6, 4), 0, num_real_rows // 2
-        )
-        cotangent = jax.random.normal(
-            jax.random.PRNGKey(3), (len(devs), 6, 4, head_dim), dtype=jnp.float32
-        )
+    num_real_rows, padded_rows, head_dim = 40, 48, 8
+    table_init = jax.random.normal(jax.random.PRNGKey(1), (padded_rows, head_dim), dtype=jnp.float32)
+    # Include deliberate duplicate n-gram IDs across batch/seq/cols within [0, num_real_rows):
+    raw_ids = jax.random.randint(jax.random.PRNGKey(2), (len(devs), 6, 4), 0, num_real_rows // 2)
+    cotangent = jax.random.normal(jax.random.PRNGKey(3), (len(devs), 6, 4, head_dim), dtype=jnp.float32)
 
-        ref_out, ref_grad = jax.value_and_grad(
-            lambda t: jnp.sum(jnp.take(t, raw_ids, axis=0) * cotangent)
-        )(table_init)
-        with mesh:
-            for method in ("all_to_all", "psum_scatter"):
-                got_val, got_grad = jax.value_and_grad(
-                    lambda t, m=method: jnp.sum(
-                        engram_deepseek41.sharded_row_lookup(
-                            t,
-                            raw_ids,
-                            mesh=mesh,
-                            rules=rules,
-                            out_dtype=jnp.float32,
-                            method=m,
-                            capacity_factor=4.0,
-                            seq_chunk=3,
-                            num_rows=num_real_rows,
-                        )
-                        * cotangent
-                    )
-                )(table_init)
-                self.assertAlmostEqual(float(got_val), float(ref_out), delta=1e-4)
-                np.testing.assert_allclose(
-                    np.asarray(got_grad), np.asarray(ref_grad), rtol=1e-5, atol=1e-5
+    ref_out, ref_grad = jax.value_and_grad(lambda t: jnp.sum(jnp.take(t, raw_ids, axis=0) * cotangent))(table_init)
+    with mesh:
+      for method in ("all_to_all", "psum_scatter"):
+        got_val, got_grad = jax.value_and_grad(
+            lambda t, m=method: jnp.sum(
+                engram_deepseek41.sharded_row_lookup(
+                    t,
+                    raw_ids,
+                    mesh=mesh,
+                    rules=rules,
+                    out_dtype=jnp.float32,
+                    method=m,
+                    capacity_factor=4.0,
+                    seq_chunk=3,
+                    num_rows=num_real_rows,
                 )
+                * cotangent
+            )
+        )(table_init)
+        self.assertAlmostEqual(float(got_val), float(ref_out), delta=1e-4)
+        np.testing.assert_allclose(np.asarray(got_grad), np.asarray(ref_grad), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":
-    unittest.main()
+  unittest.main()
