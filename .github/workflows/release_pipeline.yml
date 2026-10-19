@@ -128,6 +128,7 @@ jobs:
       workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
@@ -156,6 +157,7 @@ jobs:
       workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 

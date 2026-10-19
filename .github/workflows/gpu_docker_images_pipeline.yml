@@ -113,6 +113,7 @@ jobs:
       workflow: ${{ matrix.workflow }}
       dockerfile: maxtext_gpu_dependencies.Dockerfile
       maxtext_sha: ${{ needs.build_maxtext_package.outputs.maxtext_sha }}
+      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
       include_test_assets: true
       fast_rebuild: ${{ inputs.mode == 'fast-rebuild' }}
       source_run_id: ${{ needs.resolve_source.outputs.source_run_id || inputs.source_run_id }}

@@ -47,7 +47,6 @@ jobs:
     outputs:
       maxtext_sha: ${{ steps.vars.outputs.maxtext_sha }}
       short_sha: ${{ steps.vars.outputs.short_sha }}
-      rc_date: ${{ steps.vars.outputs.rc_date }}
     steps:
       - name: Checkout MaxText
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -65,7 +64,6 @@ jobs:
           {
             echo "maxtext_sha=${MAXTEXT_SHA}"
             echo "short_sha=${SHORT_SHA}"
-            echo "rc_date=$(date -u +%Y%m%d)"
           } >> "$GITHUB_OUTPUT"
 
   build_maxtext_package:
@@ -111,13 +109,15 @@ jobs:
       workflow: ${{ matrix.workflow }}
       dockerfile: ${{ matrix.dockerfile }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.maxtext_sha }}
+      image_date: ${{ needs.build_maxtext_package.outputs.image_date }}
       include_test_assets: true
+      is_rc: true
     secrets:
       HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
   run_ci_tests:
     name: Run ${{ matrix.name }} CI Tests
-    needs: build_release_candidate_images
+    needs: [build_release_candidate_images, get_maxtext_sha]
     if: github.event_name == 'schedule' || inputs.repository_name == 'maxtext-images'
     strategy:
       fail-fast: false
@@ -135,69 +135,16 @@ jobs:
     with:
       image_name: ${{ matrix.image_name }}
       repository_name: 'maxtext-images'
-      image_tag: ${{ github.run_id }}
+      image_tag: ${{ needs.get_maxtext_sha.outputs.short_sha }}
       device: ${{ matrix.device }}
       workflow: ${{ matrix.workflow }}
-
-  tag_release_candidate_images:
-    name: Tag ${{ matrix.name }} Docker Image
-    needs: [build_release_candidate_images, get_maxtext_sha, run_ci_tests]
-    if: |
-      always() &&
-      needs.get_maxtext_sha.result == 'success' &&
-      needs.build_release_candidate_images.result == 'success' &&
-      (needs.run_ci_tests.result == 'success' || needs.run_ci_tests.result == 'skipped')
-    runs-on: linux-x86-n2-16-buildkit
-    container: google/cloud-sdk:524.0.0
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: 'TPU Pre-Training'
-            image_name: tpu_pre_training
-          - name: 'TPU Post-Training'
-            image_name: tpu_post_training
-    steps:
-      - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev -q
-      - name: Add tags to Docker image
-        shell: bash
-        env:
-          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
-          REPOSITORY_NAME: ${{ inputs.repository_name || 'maxtext-images' }}
-          DOCKER_IMAGE_NAME: ${{ matrix.image_name }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          SHA_RC: ${{ needs.get_maxtext_sha.outputs.short_sha }}
-          RC_DATE: ${{ needs.get_maxtext_sha.outputs.rc_date }}
-          TAG_LATEST_RC: ${{ needs.run_ci_tests.result == 'success' && (github.event_name == 'schedule' || inputs.repository_name == 'maxtext-images') }}
-        run: |
-          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${DOCKER_IMAGE_NAME}"
-
-          gcloud container images add-tag \
-            "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
-            "${SOURCE_IMAGE}:${SHA_RC}" \
-            --quiet
-
-          gcloud container images add-tag \
-            "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
-            "${SOURCE_IMAGE}:maxtext_${SHA_RC}_${RC_DATE}" \
-            --quiet
-
-          if [ "${TAG_LATEST_RC}" = "true" ]; then
-            gcloud container images add-tag \
-              "${SOURCE_IMAGE}:${GITHUB_RUN_ID}" \
-              "${SOURCE_IMAGE}:latest-rc" \
-              --quiet
-          else
-            echo "Skipping :latest-rc tag (functional and performance tests disabled for this run)."
-          fi
 
   # TODO(b/573710066): Pass custom Docker image names (tpu_pre_training and
   # tpu_post_training) once run_e2e_tests.yml, promote_docker_image.yml, and
   # the maxtext_e2e_tests Airflow DAG support configurable Docker images.
   run_e2e_tests:
     name: Run E2E tests
-    needs: [get_maxtext_sha, tag_release_candidate_images]
+    needs: [get_maxtext_sha, build_release_candidate_images]
     if: github.event_name == 'schedule' || inputs.repository_name == 'maxtext-images'
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
