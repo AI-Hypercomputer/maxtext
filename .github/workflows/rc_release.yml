@@ -70,7 +70,7 @@ jobs:
     name: Build MaxText Package
     needs: [get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success'
     uses: ./.github/workflows/build_package.yml
     with:
@@ -83,7 +83,7 @@ jobs:
     name: Build ${{ matrix.name }} Docker Image
     needs: [build_maxtext_package, get_maxtext_sha]
     if: |
-      always() &&
+      !cancelled() &&
       needs.get_maxtext_sha.result == 'success' &&
       needs.build_maxtext_package.result == 'success'
     strategy:
