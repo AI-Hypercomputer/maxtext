@@ -1640,16 +1640,21 @@ class Qwen3NextScannableBlock(nnx.Module):
   def _scan_global_layer(self, y, layer_kwargs, forced_routed_experts=None):
     """Runs the single global-attention layer inside a length-1 jax.lax.scan."""
     cfg = self.config
-    graphdef_g, intermediate_g, other_g = nnx.split(self.global_layer, nnx.Intermediate, ...)
+    graphdef_g, params_g, intermediate_g, other_g = nnx.split(self.global_layer, nnx.Param, nnx.Intermediate, ...)
+    # The params ride in as scan xs rather than in the carry: a carried value the body returns
+    # unchanged is a loop invariant, so XLA may hoist the layer's FSDP weight all-gathers out of
+    # the trip-count-one loop into the enclosing block scan, where they no longer overlap this layer.
+    params_xs = jax.tree.map(lambda x: x[None], params_g)
     intermediate_xs = jax.tree.map(lambda x: x[None], intermediate_g)
 
-    def run_global_layer(carry, intermediate_slice):
+    def run_global_layer(carry, xs):
       hidden_states, other = carry
-      layer = nnx.merge(graphdef_g, intermediate_slice, other)
+      params_slice, intermediate_slice = xs
+      layer = nnx.merge(graphdef_g, params_slice, intermediate_slice, other)
       new_hidden_states = self._run_layer(
           layer, hidden_states, layer_kwargs, forced_routed_experts=forced_routed_experts
       )[0]
-      _, new_intermediate, new_other = nnx.split(layer, nnx.Intermediate, ...)
+      _, _, new_intermediate, new_other = nnx.split(layer, nnx.Param, nnx.Intermediate, ...)
       return (new_hidden_states, new_other), new_intermediate
 
     global_remat_policy = self.remat_policy_fn
@@ -1670,7 +1675,7 @@ class Qwen3NextScannableBlock(nnx.Module):
       (y, final_other), stacked_intermediate = jax.lax.scan(
           run_global_layer,
           (y, other_g),
-          intermediate_xs,
+          (params_xs, intermediate_xs),
           length=1,
       )
 
