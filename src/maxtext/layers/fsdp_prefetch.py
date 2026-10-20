@@ -56,7 +56,7 @@ def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False):
     # In auto mode, pin the source to its FSDP-sharded layout so the gather is not hoisted onto the
     # stored parameter (which would materialize the whole gathered stack).
     w = jax.lax.with_sharding_constraint(w, src_sharding)
-  gathered_sharding = sharding.remove_mesh_axes_from_sharding(src_sharding, sharding.FSDP_MESH_AXES)
+  gathered_sharding = sharding.remove_fsdp_from_sharding(src_sharding)
   out = _explicit_fsdp_all_gather(w, mesh, src_sharding.spec, gathered_sharding.spec)
   if out is not None:
     return out
@@ -79,7 +79,7 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec):
   for i, entry in enumerate(spec):
     axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
     axes = tuple(a for a in axes if mesh.shape[a] > 1)
-    fsdp = tuple(a for a in axes if a in sharding.FSDP_MESH_AXES)
+    fsdp = sharding.fsdp_axes_for_dim(axes)
     if not fsdp:
       continue
     if axes[len(axes) - len(fsdp) :] != fsdp:
