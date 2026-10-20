@@ -3165,14 +3165,7 @@ class DevelopmentAndDebugging(BaseModel):
 
 
 class ProfilingCore(BaseModel):
-  """Profiler backend selection shared by every trainer.
-
-  The Tunix-based RL trainer (`trainers/post_train/rl/train_rl.py`) only needs
-  this field: its profiling window is expressed in role invocations via
-  `RL.profiler_start_invocation` / `RL.profiler_num_invocations` and handled by
-  tunix `RLProfileConfig`, so the step-based knobs in `Profiling` are not
-  accepted there.
-  """
+  """Profiler backend selection shared by every trainer."""
 
   profiler: ProfilerType = Field(ProfilerType.NONE, description="Profiler to use ('xplane', 'nsys').")
 
@@ -6557,7 +6550,7 @@ class RLConfig(
     VisionProjector,
     AudioEncoder,
     DevelopmentAndDebugging,
-    ProfilingCore,
+    Profiling,
     AOT,
     Metrics,
     Tensorboard,
@@ -6663,6 +6656,42 @@ class RLConfig(
         for inner_key in annotation.model_fields.keys():
           if inner_key in data:
             nested_dict[inner_key] = data[inner_key]
+
+    # Map legacy step-based profiling flags to RL role-invocation profiling fields
+    # when the invocation fields were not explicitly overridden. Because `pyconfig`
+    # merges `post_train/rl.yml` into `data["rl"]` before constructing `RLConfig`,
+    # `rl_dict` may already contain the `RL` model defaults; query `RL.model_fields`
+    # dynamically rather than hardcoding default values.
+    rl_dict = data.get("rl")
+    if isinstance(rl_dict, dict):
+      rl_fields = getattr(RL, "model_fields")
+      default_start = rl_fields["profiler_start_invocation"].default
+      if (
+          "skip_first_n_steps_for_profiler" in data
+          and "profiler_start_invocation" not in data
+          and rl_dict.get("profiler_start_invocation", default_start) == default_start
+      ):
+        try:
+          skip_steps = int(data["skip_first_n_steps_for_profiler"])
+        except (TypeError, ValueError):
+          skip_steps = -1
+        if skip_steps >= 0:
+          rl_dict["profiler_start_invocation"] = skip_steps
+          data["profiler_start_invocation"] = skip_steps
+
+      default_num = rl_fields["profiler_num_invocations"].default
+      if (
+          "profiler_steps" in data
+          and "profiler_num_invocations" not in data
+          and rl_dict.get("profiler_num_invocations", default_num) == default_num
+      ):
+        try:
+          prof_steps = int(data["profiler_steps"])
+        except (TypeError, ValueError):
+          prof_steps = 0
+        if prof_steps >= 1:
+          rl_dict["profiler_num_invocations"] = prof_steps
+          data["profiler_num_invocations"] = prof_steps
 
     return data
 

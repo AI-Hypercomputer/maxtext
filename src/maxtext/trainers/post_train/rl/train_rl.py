@@ -387,12 +387,37 @@ def build_rl_profiler_config(
   """Returns an RLProfileConfig if xplane profiling is enabled, else None."""
   if trainer_config.profiler != "xplane":
     return None
+  rl_cfg = getattr(trainer_config, "rl", None)
+  rl_fields = getattr(types.RL, "model_fields")
+  start_invocation = getattr(
+      rl_cfg,
+      "profiler_start_invocation",
+      getattr(
+          trainer_config,
+          "skip_first_n_steps_for_profiler",
+          rl_fields["profiler_start_invocation"].default,
+      ),
+  )
+  num_invocations = getattr(
+      rl_cfg,
+      "profiler_num_invocations",
+      getattr(
+          trainer_config,
+          "profiler_steps",
+          rl_fields["profiler_num_invocations"].default,
+      ),
+  )
+  timeout_secs = getattr(
+      rl_cfg,
+      "profiler_timeout_secs",
+      rl_fields["profiler_timeout_secs"].default,
+  )
   return rl_cluster_lib.RLProfileConfig(
-      start_invocation=trainer_config.rl.profiler_start_invocation,
-      num_invocations=trainer_config.rl.profiler_num_invocations,
+      start_invocation=start_invocation,
+      num_invocations=num_invocations,
       output_dir=trainer_config.tensorboard_dir,
       managed_mldiagnostics=trainer_config.managed_mldiagnostics,
-      timeout_secs=trainer_config.rl.profiler_timeout_secs,
+      timeout_secs=timeout_secs,
   )
 
 
