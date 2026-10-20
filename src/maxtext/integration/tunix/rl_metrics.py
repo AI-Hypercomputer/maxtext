@@ -26,7 +26,8 @@ import functools
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from tunix.rl import common, function_registry
+import numpy as np
+from tunix.rl import common
 from tunix.sft import utils as sft_utils
 
 from maxtext.layers.moe import RoutedMoE
@@ -70,10 +71,12 @@ def routing_statistics(entropy, indices, token_mask, num_experts):
   loads = counts / jnp.maximum(assignments[:, None], 1)
   load_entropy = -jnp.sum(loads * jnp.log(jnp.maximum(loads, 1e-30)), axis=-1)
   mean_load = counts.mean(axis=-1)
+  # A one-expert distribution has zero entropy; avoid dividing by log(1).
+  entropy_scale = jnp.log(float(max(num_experts, 2)))
   return {
       "router_entropy": mean_entropy,
-      "router_entropy_normalized": mean_entropy / jnp.log(float(num_experts)),
-      "expert_load_entropy_normalized": load_entropy / jnp.log(float(num_experts)),
+      "router_entropy_normalized": mean_entropy / entropy_scale,
+      "expert_load_entropy_normalized": load_entropy / entropy_scale,
       "expert_load_cv": counts.std(axis=-1) / jnp.maximum(mean_load, 1e-30),
       "max_to_mean_load": counts.max(axis=-1) / jnp.maximum(mean_load, 1e-30),
       "unused_expert_fraction": jnp.where(assignments > 0, (counts == 0).mean(axis=-1), 0),
@@ -86,7 +89,7 @@ def _observed_loss(model, train_example, algo_config, *, policy_loss, pad_id, eo
   # Match the model inputs of Tunix common.compute_per_token_logps exactly.
   token_mask = None
   attention_mask = getattr(train_example, "completion_attention_mask", None)
-  if attention_mask is not None:
+  if isinstance(attention_mask, (jax.Array, np.ndarray)):
     token_mask = jnp.concatenate([train_example.prompt_mask, attention_mask], axis=1)
   segment_ids = getattr(train_example, "segment_ids", None)
   tokens, positions, attention, input_segments = common.process_ids(
@@ -100,15 +103,18 @@ def _observed_loss(model, train_example, algo_config, *, policy_loss, pad_id, eo
   )
   graph, state = nnx.split(model)
   observed = nnx.merge(graph, state)
+  routed_experts = getattr(train_example, "routed_experts", None)
+  if routed_experts is not None:
+    routed_experts = jnp.asarray(routed_experts, dtype=jnp.int32)
   logits, _ = observed(
       tokens,
       positions=positions,
       cache=None,
       attention_mask=attention,
       segment_ids=segment_ids if segment_ids is not None else input_segments,
-      forced_routed_experts=getattr(train_example, "routed_experts", None),
+      forced_routed_experts=routed_experts,
   )
-  result = policy_loss(_PolicyLogits(logits), train_example, algo_config, pad_id=pad_id, eos_id=eos_id)
+  result = policy_loss(_PolicyLogits(logits), train_example, algo_config)
   intermediates = dict(nnx.state(observed, nnx.Intermediate).flat_state())
   layer_metrics = {}
   for path, value in intermediates.items():
@@ -150,11 +156,11 @@ def configure_moe_metrics(cluster, enabled=False):
       supported += int(module.record_rl_metrics)
   if not total:
     return
-  # The learner's generator supplies algo_config, preserving the configured
-  # GRPO/GSPO variant. Keep the original algorithm implementation in Tunix.
+  # Preserve the learner-installed loss, including its bound algorithm config
+  # and options. Do not select a replacement objective from the registry.
   loss = functools.partial(
       _observed_loss,
-      policy_loss=function_registry.get_policy_loss_fn("grpo"),
+      policy_loss=cluster.actor_trainer.loss_fn,
       pad_id=cluster.rollout.pad_id(),
       eos_id=cluster.rollout.eos_id(),
       supported=supported,

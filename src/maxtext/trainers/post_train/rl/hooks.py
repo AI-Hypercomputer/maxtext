@@ -78,7 +78,7 @@ class RLTrainingHooks(_tunix_hooks.TrainingHooks):
   def on_eval_step_end(self, train_ctx, *args, **kwargs):  # noqa: ARG002
     del train_ctx, args, kwargs
 
-  def on_train_step_end(self, trainer, step, loss):  # noqa: ARG002  # pylint: disable=arguments-renamed
+  def on_train_step_end(self, trainer, step, loss):  # noqa: ARG002
     """Fire `evaluate(...)` once per `eval_interval` outer steps."""
     del trainer, loss
     if self._eval_interval <= 0 or getattr(self._trainer_config, "num_test_batches", 0) <= 0:

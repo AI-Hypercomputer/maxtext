@@ -51,7 +51,8 @@ under `rl/eval/` to `tensorboard_dir`: `accuracy_percent`,
 `success`. They are written before training, at `eval_interval`, and after
 training, provided `num_test_batches > 0`. No additional model or dataset is
 needed. A failed evaluation records `success=0` without manufacturing zero
-accuracy. Reward is omitted if no responses were successfully reward-scored.
+accuracy. An empty evaluation records counts and `success=0`, with no accuracy.
+Reward is omitted if no responses were successfully reward-scored.
 The actual scored-response count is separate from the generated-sample count.
 
 The evaluation x-axis is the completed outer rollout-policy step (including
@@ -63,10 +64,12 @@ optimizer-update x-axis; reward/completion tags retain their rollout-batch
 x-axis. Do not equate these axes when using multiple updates per rollout.
 Final and periodic evaluation can both produce a point at the final step.
 
-The configured scoring mode is also explicit in `pass_at_1_percent`,
-`pass_at_k_percent`, or `maj_at_k_percent`, with `num_passes` recording K.
-These use the existing evaluator and sampling strategy; adding logging does
-not change scoring or turn a non-greedy evaluation into a greedy one.
+`num_passes` records the configured number of samples per prompt. Accuracy
+uses the existing `eval_mode` and sampling strategy; adding logging does not
+change scoring or turn a non-greedy evaluation into a greedy one. In
+particular, the legacy `pass` evaluator can overwrite an earlier correct but
+malformed answer with a later wrong answer. Its result is therefore exported
+as `accuracy_percent`, without claiming it is a conventional pass@k metric.
 
 For MoE actors, add `rl.record_moe_metrics=true` to the training command to
 enable `actor/train/moe/` diagnostics:
@@ -98,7 +101,9 @@ Layer statistics are computed per training microbatch; Tunix averages those
 statistics across microbatches in an optimizer update. They are not statistics
 of the union of all update microbatches. Random, hash and fused routers are
 unobserved and reflected in `observed_router_fraction`. Dense models emit no
-MoE tags. This option currently supports the standard learner only.
+MoE tags. This option currently supports the standard learner with unchunked
+log-probability computation only. A single-expert router has zero entropy,
+including the normalized diagnostic.
 
 Observation adds a routing selection and compact per-token statistics, but
 does not run the Transformer a second time, change router choices, add a

@@ -91,12 +91,13 @@ def log_evaluation(logger, cluster, result, metadata, duration, config):
       "rl/steps/actor_updates": cluster.actor_trainer.train_steps,
       "rl/steps/outer": cluster.global_steps,
   }
-  # Missing/failed reward scoring must not look like a measured zero reward.
+  # Empty evaluations must not manufacture measured zero accuracy/reward.
+  if not total or not metadata["num_samples"]:
+    for name in ("accuracy_percent", "partial_accuracy_percent", "format_accuracy_percent"):
+      del values[f"rl/eval/{name}"]
+    values["rl/eval/success"] = 0
   if metadata["num_reward_samples"]:
     values["rl/eval/mean_reward"] = mean_reward
-  mode = getattr(config, "eval_mode", "pass")
-  score_name = {"pass": "pass_at_k", "maj": "maj_at_k", "pass_at_1": "pass_at_1"}[mode]
-  values[f"rl/eval/{score_name}_percent"] = accuracy
   logger.write(values, cluster.global_steps)
 
 
