@@ -90,6 +90,11 @@ def _get_te_moe_checkpoint_kwargs(moe_fn) -> dict[str, str]:
   return {name: label for name, label in _TE_MOE_CHECKPOINT_NAMES.items() if name in parameters}
 
 
+def _get_te_moe_cudnn_gmm_fusion_kwargs(disable_cudnn_gmm_fusion: bool) -> dict[str, bool]:
+  """Disable cuDNN GMM fusion when explicitly requested, otherwise preserve TE's default."""
+  return {"use_cudnn_fusion": False} if disable_cudnn_gmm_fusion else {}
+
+
 @struct.dataclass
 class RouteMetadata:
   """EP communication state needed to undo the forward all-to-all after expert computation."""
@@ -4897,6 +4902,7 @@ class RoutedMoE(nnx.Module):
     )
 
     checkpoint_kwargs = _get_te_moe_checkpoint_kwargs(te_moe.moe)
+    cudnn_gmm_fusion_kwargs = _get_te_moe_cudnn_gmm_fusion_kwargs(self.config.te_moe_disable_cudnn_gmm_fusion)
 
     output, lb_loss, total_recv_tokens = te_moe.moe(
         inputs,
@@ -4926,6 +4932,7 @@ class RoutedMoE(nnx.Module):
         dtype=self.dtype,
         recv_capacity_per_rank=max_utils.get_te_moe_recv_capacity_per_rank(),
         quant_before_fsdp_ag=self.config.te_moe_quantize_before_fsdp_all_gather,
+        **cudnn_gmm_fusion_kwargs,
         **checkpoint_kwargs,
     )
     recv_capacity_per_rank = max_utils.get_te_moe_recv_capacity_per_rank()

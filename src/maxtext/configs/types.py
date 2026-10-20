@@ -1310,6 +1310,13 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
   )
+  te_moe_disable_cudnn_gmm_fusion: bool = Field(
+      False,
+      description=(
+          "Force te_moe.moe(..., use_cudnn_fusion=False). When false, MaxText does not pass use_cudnn_fusion "
+          "and uses TransformerEngine's default."
+      ),
+  )
   te_moe_quantize_before_fsdp_all_gather: bool = Field(
       False,
       description="Quantize TE MoE weight shards before the FSDP all-gather; false quantizes after gathering.",
@@ -5620,6 +5627,8 @@ class MaxTextConfig(
         )
     if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
       raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
+    if self.te_moe_disable_cudnn_gmm_fusion and not self.te_moe_block:
+      raise ValueError("te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True.")
     if self.num_experts > 1:
       if self.moe_mlp_dim <= 0:
         raise ValueError("moe_mlp_dim must be positive for MoE models (num_experts > 1)")

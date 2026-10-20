@@ -199,6 +199,29 @@ class ConfigTest(absltest.TestCase):
           types.MaxTextConfig(**{**common_config, **overrides})
         self.assertIn(expected_error, str(context.exception))
 
+  def test_te_moe_disable_cudnn_gmm_fusion_requires_te_moe_block(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_gmm_quantization": "te_no_quant",
+        "override_logical_axis_rules": True,
+    }
+
+    self.assertFalse(types.MaxTextConfig(**common_config).te_moe_disable_cudnn_gmm_fusion)
+    self.assertTrue(
+        types.MaxTextConfig(
+            **common_config, te_moe_block=True, te_moe_disable_cudnn_gmm_fusion=True
+        ).te_moe_disable_cudnn_gmm_fusion
+    )
+    with self.assertRaisesRegex(
+        pydantic.ValidationError, "te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True"
+    ):
+      types.MaxTextConfig(**common_config, te_moe_disable_cudnn_gmm_fusion=True)
+
   def test_te_moe_quantized_weight_gather_validation(self):
     common = {
         "run_name": "test",
