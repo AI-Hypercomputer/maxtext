@@ -58,8 +58,14 @@ export PYTHONPATH="${MAXTEXT_ROOT}/src:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 
 # -------------------------- Configuration Defaults --------------------------
+# Model variant:
+#   - olmoe3-3p5b            : Baseline (E=512, K=16, F=1792, F_shared=1792; 62.9B total / 3.48B active)
+#   - olmoe3-3p5b-e256k8     : 2x wider routed experts (E=256, K=8, F=3584, F_shared=1792; 62.9B total / 3.46B active)
+#   - olmoe3-3p5b-e256k8-sh2x: Recommended Option A (E=256, K=8, F=3584, F_shared=3584; 63.1B total / 3.74B active)
+#   - olmoe3-3p5b-e256k8-sh4x: Recommended Option B (E=256, K=8, F=3584, F_shared=7168; 63.7B total / 4.30B active)
+MODEL_NAME="${MODEL_NAME:-olmoe3-3p5b}"
 SEQ_LEN="${SEQ_LEN:-8192}"
-RUN_NAME="${RUN_NAME:-olmoe3_3p5b_v4_L${SEQ_LEN}}"
+RUN_NAME="${RUN_NAME:-${MODEL_NAME//-/_}_v4_L${SEQ_LEN}}"
 OUTPUT_DIR="${OUTPUT_DIR:-gs://cloud-tpu-multipod-dev-maxtext-output/olmoe3_3p5b}"
 DATASET_TYPE="${DATASET_TYPE:-synthetic}"
 PER_DEVICE_BATCH="${PER_DEVICE_BATCH:-1.0}"
@@ -97,6 +103,12 @@ if (( SEQ_LEN <= 4096 )); then
   MOE_A2A_TOKEN_CHUNKS="${MOE_A2A_TOKEN_CHUNKS:-2}"
   NUM_VOCAB_TILING="${NUM_VOCAB_TILING:-1}"
   VOCAB_TILING_AG_ONCE="${VOCAB_TILING_AG_ONCE:-false}"
+elif [[ "${MODEL_NAME}" == *"e256k8"* ]]; then
+  # At K=8 (65,536 routed tokens/layer at 8k vs. 131,072 at K=16), 2 chunks give the
+  # same per-chunk buffer as 4 chunks at K=16 and compile 2.2x-2.4x faster (measured on v4-2048).
+  MOE_A2A_TOKEN_CHUNKS="${MOE_A2A_TOKEN_CHUNKS:-2}"
+  NUM_VOCAB_TILING="${NUM_VOCAB_TILING:-4}"
+  VOCAB_TILING_AG_ONCE="${VOCAB_TILING_AG_ONCE:-true}"
 else
   MOE_A2A_TOKEN_CHUNKS="${MOE_A2A_TOKEN_CHUNKS:-4}"
   NUM_VOCAB_TILING="${NUM_VOCAB_TILING:-4}"
@@ -122,7 +134,14 @@ if (( SEQ_LEN <= 4096 )); then
 fi
 export LIBTPU_INIT_ARGS="${LIBTPU_INIT_ARGS:-} ${LIBTPU}"
 
-echo "=== OLMo 3.5 Small (olmoe3-3p5b) TPU v4 Run ==="
+# Megablox tile dimensions: the 256-aligned 896 / 1792 N-tiles divide both the baseline
+# routed width (F=1792) and the 2x wider routed width (F=3584: 3584 = 4 x 896 = 2 x 1792),
+# fit TPU v4's 16 MiB VMEM, and are the tiles verified on the v4-2048 e256k8 / sh2x / sh4x runs.
+WI_TILE_HALF=896
+WI_TILE_FULL=1792
+
+echo "=== OLMo 3.5 Small (${MODEL_NAME}) TPU v4 Run ==="
+echo "  model_name             : ${MODEL_NAME}"
 echo "  run_name               : ${RUN_NAME}"
 echo "  output_dir             : ${OUTPUT_DIR}"
 echo "  dataset_type           : ${DATASET_TYPE}"
@@ -142,6 +161,11 @@ if (( SEQ_LEN <= 4096 )); then
   EXTRA_ARGS+=("moe_mlpwi_0=device")
 else
   EXTRA_ARGS+=("kda_wy=device")
+  if [[ "${MODEL_NAME}" == *"-sh2x" || "${MODEL_NAME}" == *"-sh4x" ]]; then
+    # Save the (2x / 4x wider) shared-expert wi_0 activation instead of recomputing it
+    # in the backward pass (measured -41 to -67 ms/step on v4-2048).
+    EXTRA_ARGS+=("mlpwi_0=device")
+  fi
 fi
 if [[ -n "${PROFILER}" ]]; then
   EXTRA_ARGS+=("profiler=${PROFILER}")
@@ -160,7 +184,7 @@ fi
 
 python3 -m maxtext.trainers.pre_train.train \
   "${MAXTEXT_ROOT}/src/maxtext/configs/base.yml" \
-  model_name=olmoe3-3p5b \
+  model_name="${MODEL_NAME}" \
   override_model_config=true \
   run_name="${RUN_NAME}" \
   base_output_directory="${OUTPUT_DIR}" \
@@ -210,21 +234,21 @@ python3 -m maxtext.trainers.pre_train.train \
   use_gmm_v2=false \
   wi_tile_fwd_batch_seq=512 \
   wi_tile_fwd_embed_dim=768 \
-  wi_tile_fwd_mlp_dim=896 \
+  wi_tile_fwd_mlp_dim="${WI_TILE_HALF}" \
   wi_tile_dlhs_batch_seq=512 \
-  wi_tile_dlhs_mlp_dim=1792 \
+  wi_tile_dlhs_mlp_dim="${WI_TILE_FULL}" \
   wi_tile_dlhs_embed_dim=384 \
   wi_tile_drhs_batch_seq=512 \
   wi_tile_drhs_embed_dim=768 \
-  wi_tile_drhs_mlp_dim=896 \
+  wi_tile_drhs_mlp_dim="${WI_TILE_HALF}" \
   wo_tile_fwd_batch_seq=512 \
-  wo_tile_fwd_mlp_dim=1792 \
+  wo_tile_fwd_mlp_dim="${WI_TILE_FULL}" \
   wo_tile_fwd_embed_dim=384 \
   wo_tile_dlhs_batch_seq=512 \
   wo_tile_dlhs_embed_dim=768 \
-  wo_tile_dlhs_mlp_dim=896 \
+  wo_tile_dlhs_mlp_dim="${WI_TILE_HALF}" \
   wo_tile_drhs_batch_seq=512 \
-  wo_tile_drhs_mlp_dim=896 \
+  wo_tile_drhs_mlp_dim="${WI_TILE_HALF}" \
   wo_tile_drhs_embed_dim=384 \
   attention=flash \
   emo_enabled="${EMO_ENABLED}" \

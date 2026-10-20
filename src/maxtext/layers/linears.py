@@ -286,6 +286,7 @@ def dot_general_with_gathered_kernel(
       d_in = int(np.prod(kernel.shape[:n_in]))
       d_out = int(np.prod(kernel.shape[n_in:]))
       sharded_dim = d_in if shard_on_in else d_out
+      d_other = d_out if shard_on_in else d_in
       if (  # pylint: disable=chained-comparison
           dp_size >= 8
           and ep_total > 1
@@ -293,7 +294,11 @@ def dot_general_with_gathered_kernel(
           and sharded_dim % ep_total == 0
           and d_in >= ep_total
           and d_out >= ep_total
-          and (shard_on_in or (d_in == 1792 and d_out == 768))
+          and (
+              shard_on_in
+              or (d_in == 1792 and d_out == 768)
+              or (len(kernel.shape) == 2 and d_other >= 256 and d_other % 256 == 0)
+          )
       ):
         use_two_stage = True
 

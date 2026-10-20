@@ -62,6 +62,8 @@ MODE="${1:-submit}"
 : "${XPK_BASE_OUTPUT_DIR:=gs://${XPK_PROJECT}-maxtext-output/olmoe3_3p5b}"
 
 # -------------------------- Model & Parallelism Defaults --------------------------
+# MODEL_NAME: olmoe3-3p5b (baseline) | olmoe3-3p5b-e256k8 | olmoe3-3p5b-e256k8-sh2x | olmoe3-3p5b-e256k8-sh4x
+: "${MODEL_NAME:=olmoe3-3p5b}"
 : "${SEQ_LEN:=4096}"
 : "${PER_DEVICE_BATCH:=1.0}"
 : "${GRAD_ACCUM_STEPS:=1}"
@@ -93,6 +95,7 @@ build_inner_command() {
 set -euo pipefail
 export PYTHONPATH=/deps/src:\${PYTHONPATH:-}
 export RUN_NAME='${XPK_RUN_NAME}'
+export MODEL_NAME='${MODEL_NAME}'
 export OUTPUT_DIR='${XPK_BASE_OUTPUT_DIR}'
 export DATASET_TYPE='${DATASET_TYPE}'
 export SEQ_LEN='${SEQ_LEN}'

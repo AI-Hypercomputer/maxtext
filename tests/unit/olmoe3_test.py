@@ -45,6 +45,9 @@ import os
 CANONICAL_COUNTS = {
     "olmoe3-30m": (32_323_588, 29_964_292),
     "olmoe3-3p5b": (62_864_102_080, 3_475_903_168),
+    "olmoe3-3p5b-e256k8": (62_850_798_272, 3_462_599_360),
+    "olmoe3-3p5b-e256k8-sh2x": (63_130_178_240, 3_741_979_328),
+    "olmoe3-3p5b-e256k8-sh4x": (63_688_938_176, 4_300_739_264),
 }
 
 
@@ -137,6 +140,10 @@ class OLMoE3ParameterCountTest(unittest.TestCase):
   def test_3p5b_total_parameters(self):
     self._assert_total("olmoe3-3p5b")
 
+  def test_3p5b_e256k8_variants_total_parameters(self):
+    for name in ("olmoe3-3p5b-e256k8", "olmoe3-3p5b-e256k8-sh2x", "olmoe3-3p5b-e256k8-sh4x"):
+      self._assert_total(name)
+
   def test_30m_total_parameters_scanned(self):
     """Scanned cycles share one parameter set, so the dense first layer has to be peeled out.
 
@@ -166,6 +173,52 @@ class OLMoE3ParameterCountTest(unittest.TestCase):
     for shape in gates:
       self.assertEqual(shape[0], cfg.emb_dim)
       self.assertNotEqual(shape[0], cfg.moe_expert_input_dim)
+
+  def test_parameter_initialization_matches_reference(self):
+    """All OLMoE3 embeddings, projections, routers, and experts use std=0.02 truncated normal."""
+    cfg = _config("olmoe3-30m")
+    mesh, model = _build(cfg)
+    tokens = jnp.ones((1, 8), dtype=jnp.int32)
+    with mesh:
+      params = model.init({"params": jax.random.PRNGKey(0)}, tokens, tokens)["params"]
+
+    flat_params, _ = jax.tree_util.tree_flatten_with_path(params)
+    self.assertTrue(flat_params, "no parameters found")
+
+    checked = set()
+    for path, leaf in flat_params:
+      name = "/".join(str(getattr(k, "key", k)) for k in path if str(getattr(k, "key", k)).lstrip(".") != "value")
+      arr = np.asarray(leaf, dtype=np.float32)
+      if name.endswith(("norm/scale", "o_norm/scale", "query_norm/scale", "key_norm/scale")):
+        np.testing.assert_allclose(arr, 1.0, atol=1e-6, err_msg=name)
+        checked.add("norm")
+      elif name.endswith("A_log"):
+        self.assertTrue(np.all((arr >= 0.0) & (arr <= np.log(16.0) + 1e-6)), f"{name} out of [0, log(16)]")
+        checked.add("A_log")
+      elif name.endswith(("dt_bias", "bias")):
+        np.testing.assert_allclose(arr, 0.0, atol=1e-6, err_msg=name)
+        checked.add("bias")
+      else:
+        # Every embedding, projection, conv, router, and expert kernel uses
+        # truncated_normal(stddev=0.02, lower=-3, upper=3) -> values in [-0.06, 0.06].
+        self.assertLessEqual(float(np.max(np.abs(arr))), 0.06 + 1e-6, f"{name} exceeds 3*0.02 truncation bound")
+        if arr.size >= 1024:
+          self.assertAlmostEqual(float(np.std(arr)), 0.02, delta=0.004, msg=f"{name} std={np.std(arr):.5f}")
+        if "token_embedder" in name:
+          checked.add("token_embedder")
+        elif "mixer/attention" in name:
+          checked.add("self_attention")
+        elif "logits_dense" in name:
+          checked.add("logits_dense")
+        elif "moe_block" in name:
+          checked.add("moe_block")
+        elif "mixer/w_q" in name or "mixer/q_conv" in name:
+          checked.add("kda")
+
+    self.assertEqual(
+        checked,
+        {"norm", "A_log", "bias", "token_embedder", "self_attention", "logits_dense", "moe_block", "kda"},
+    )
 
 
 class OLMoE3PackingTest(unittest.TestCase):

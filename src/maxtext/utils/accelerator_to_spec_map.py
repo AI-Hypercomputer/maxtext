@@ -165,6 +165,13 @@ UserFacingNameToSystemCharacteristics = {
     "v4-1536": SystemCharacteristics("tpu", "v4:8x8x12", "megacore_dense", (2, 2, 1), 768, (True, True, True)),
     "v4-2048": SystemCharacteristics("tpu", "v4:8x8x16", "megacore_dense", (2, 2, 1), 1024, (True, True, True)),
     "v4-4096": SystemCharacteristics("tpu", "v4:8x16x16", "megacore_dense", (2, 2, 1), 2048, (True, True, True)),
+    "v4-4608": SystemCharacteristics("tpu", "v4:12x12x16", "megacore_dense", (2, 2, 1), 2304, (True, True, True)),
+    "v4-5120": SystemCharacteristics("tpu", "v4:8x16x20", "megacore_dense", (2, 2, 1), 2560, (True, True, True)),
+    "v4-5760": SystemCharacteristics("tpu", "v4:12x12x20", "megacore_dense", (2, 2, 1), 2880, (True, True, True)),
+    "v4-6144": SystemCharacteristics("tpu", "v4:12x16x16", "megacore_dense", (2, 2, 1), 3072, (True, True, True)),
+    "v4-6912": SystemCharacteristics("tpu", "v4:12x12x24", "megacore_dense", (2, 2, 1), 3456, (True, True, True)),
+    "v4-7680": SystemCharacteristics("tpu", "v4:12x16x20", "megacore_dense", (2, 2, 1), 3840, (True, True, True)),
+    "v4-8192": SystemCharacteristics("tpu", "v4:16x16x16", "megacore_dense", (2, 2, 1), 4096, (True, True, True)),
     # v5p: one megacore per chip with 96 GB HBM
     "v5p-8": SystemCharacteristics("tpu", "v5:2x2x1", "megacore", (2, 2, 1), 4, (False, False, False)),
     "v5p-16": SystemCharacteristics("tpu", "v5:2x2x2", "megacore", (2, 2, 1), 8, (False, False, False)),

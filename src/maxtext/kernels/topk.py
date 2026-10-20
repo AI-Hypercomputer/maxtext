@@ -41,6 +41,8 @@ def _topk_kernel(x_ref, o_ref, *, k: int):
   num = v.shape[0]
   iota = jax.lax.broadcasted_iota(jnp.int32, v.shape, 0)
   floor = jnp.int32(jnp.iinfo(jnp.int32).min)  # marks taken entries
+  if o_ref.shape[0] > k:
+    o_ref[...] = jnp.zeros_like(o_ref)
   for j in range(k):
     m = jnp.max(key, axis=0, keepdims=True)
     idx = jnp.min(jnp.where(key == m, iota, num), axis=0, keepdims=True)
@@ -59,13 +61,15 @@ def topk_indices(x: jax.Array, k: int, block_tokens: int = 256, interpret: bool 
   pad = (-rows) % block_tokens
   if pad:
     xt = jnp.pad(xt, ((0, 0), (0, pad)))
+  # Pallas TPU 2D BlockSpecs require dim 0 to be a multiple of 8 when grid > 1 on dim 1.
+  k_pad = -(-k // 8) * 8
   out = pl.pallas_call(
       functools.partial(_topk_kernel, k=k),
-      out_shape=jax.ShapeDtypeStruct((k, rows + pad), jnp.int32),
+      out_shape=jax.ShapeDtypeStruct((k_pad, rows + pad), jnp.int32),
       grid=((rows + pad) // block_tokens,),
       in_specs=[pl.BlockSpec((num, block_tokens), lambda i: (0, i))],
-      out_specs=pl.BlockSpec((k, block_tokens), lambda i: (0, i)),
+      out_specs=pl.BlockSpec((k_pad, block_tokens), lambda i: (0, i)),
       compiler_params=pltpu.CompilerParams(dimension_semantics=("parallel",)),
       interpret=interpret,
   )(xt)
-  return out[:, :rows].T.reshape(*lead, k)
+  return out[:k, :rows].T.reshape(*lead, k)

@@ -1151,6 +1151,7 @@ class OLMoE3Attention(nnx.Module):
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
         dropout_rate=cfg.dropout_rate,
+        kernel_init=olmoe3_init,
         name="self_attention",
         quant=quant,
         kv_quant=quantizations.configure_kv_quant(cfg),
@@ -1481,8 +1482,6 @@ class OLMoE3DecoderLayer(nnx.Module):
     ffn_in = self.ffn_in_norm(hidden)
     if self._can_fuse_ffn_in():
       ffn_out, latent_in = self._fused_ffn_in_and_shared_ffn(ffn_in, deterministic=deterministic)
-      if latent_in is None and self.moe_block is not None:
-        latent_in = self.latent_down(ffn_in)
     else:
       ffn_out = self.shared_ffn(ffn_in, deterministic=deterministic)
       latent_in = self.latent_down(ffn_in) if self.moe_block is not None else None
@@ -1525,6 +1524,8 @@ class OLMoE3DecoderLayer(nnx.Module):
     if self.shared_ffn.wi_0.quant_dot_general is not None or self.shared_ffn.wi_1.quant_dot_general is not None:
       return False
     if self.latent_down is not None and (self.latent_down.quant_dot_general is not None or self.latent_down.use_bias):
+      return False
+    if int(self.shared_ffn.wi_0.kernel[...].shape[-1]) > 1792:
       return False
     mlp_axes = nn.logical_to_mesh_axes(("mlp",), self.config.logical_axis_rules)[0]
     if mlp_axes is not None:
