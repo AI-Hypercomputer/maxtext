@@ -636,14 +636,12 @@ def make_olmo_grain_data_loader(
     ops.append(ShiftToInputsTargets(segment_eos_token_id))
   ops.append(grain.transforms.Batch(batch_size=batch_size, drop_remainder=True))
 
-  # Grain expects ``shard_options`` on the DataLoader (sharding used to live
-  # on the Sampler). Our sampler already does the shard-by-rank slicing, but
-  # Grain still requires this object to validate checkpoint compatibility.
-  shard_options = grain.sharding.ShardOptions(shard_index=shard_index, shard_count=shard_count, drop_remainder=True)
-  if global_indices_path:
-    # The DataLoader shards too: it asks the sampler for index ``i * shard_count + shard_index`` for this host's
-    # i-th record. OlmoCoreOrderSampler expects i itself, so hand Grain a single shard.
-    shard_options = grain.sharding.ShardOptions(shard_index=0, shard_count=1, drop_remainder=True)
+  # Both samplers already shard by host (shard_index/shard_count). Handing Grain a real
+  # ShardOptions shards *again*: the DataLoader asks the sampler for index
+  # ``i * shard_count + shard_index`` for this host's i-th record, which double-shards the data and
+  # breaks resume (initial_step lands at the wrong absolute position). NoSharding lets the sampler own
+  # all sharding and feeds it a clean per-host counter (0, 1, 2, ...).
+  shard_options = grain.sharding.NoSharding()
   return grain.DataLoader(
       data_source=source,
       sampler=sampler,

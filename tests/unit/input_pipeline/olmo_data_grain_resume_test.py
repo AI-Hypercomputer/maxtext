@@ -208,6 +208,95 @@ class LoaderResumeViaInitialStepTest(unittest.TestCase):
       self.assertEqual(_detect_resumed_step(cfg), 3)
 
 
+class LoaderShardingResumeTest(unittest.TestCase):
+  """Regression tests for multi-host sharding (``shard_count > 1``).
+
+  These guard the double-sharding bug: ``grain.DataLoader`` re-shards the
+  sampler's index stream when handed a real ``ShardOptions(shard_index,
+  shard_count)`` *while* ``OlmoIndexSampler`` already shards internally. That
+  strides the sampler index by ``shard_count``, which (a) makes each host read
+  only ~1/shard_count of its assigned block and (b) breaks resume because the
+  ``initial_step`` offset is added to a strided index. The fix passes
+  ``NoSharding`` to the DataLoader so the sampler owns all sharding.
+
+  The pre-existing tests above only used ``shard_count=1`` — the one config
+  where the bug cannot appear (stride == 1) — which is why it shipped. These
+  exercise ``shard_count > 1`` end-to-end through the real ``grain.DataLoader``.
+  """
+
+  @staticmethod
+  def _instance_ids(batches):
+    ids: List[int] = []
+    for b in batches:
+      ids.extend(int(x) for x in np.asarray(b["instance_id"]).reshape(-1))
+    return ids
+
+  def test_shards_are_disjoint_and_cover_everything(self):
+    """One epoch across all shards must read each instance exactly once.
+
+    With the double-shard bug each shard reads only ``n_per/shard_count``
+    distinct instances (the rest repeat), so coverage collapses to
+    ``1/shard_count`` of the corpus and this fails.
+    """
+    with tempfile.TemporaryDirectory() as d:
+      # 512 tokens at seq=4 → 128 instances; shard_count=4 → 32 per shard.
+      idx = _build_synthetic_index(d, sizes=(512,), sequence_length=4)
+      shard_count = 4
+      batch_size = 4
+      n_per = idx.total_instances // shard_count  # 32
+      batches_per_epoch = n_per // batch_size  # 8
+
+      seen: List[set] = []
+      for si in range(shard_count):
+        loader = make_olmo_grain_data_loader(
+            idx,
+            seed=5,
+            batch_size=batch_size,
+            shard_index=si,
+            shard_count=shard_count,
+            apply_ngram_filter=False,
+            shift_to_inputs_targets=False,  # keep instance_id in the batch
+            grain_worker_count=0,
+        )
+        ids = self._instance_ids(_take(iter(loader), batches_per_epoch))
+        self.assertEqual(len(ids), n_per)
+        self.assertEqual(len(set(ids)), n_per, msg=f"shard {si} repeated instances within one epoch (double-shard bug)")
+        seen.append(set(ids))
+
+      union = set().union(*seen)
+      self.assertEqual(len(union), idx.total_instances, msg="shards do not cover the full corpus exactly once")
+      for i in range(shard_count):
+        for j in range(i + 1, shard_count):
+          self.assertEqual(seen[i] & seen[j], set(), msg=f"shards {i} and {j} overlap")
+
+  def test_resume_matches_unbroken_with_sharding(self):
+    """Resume via ``initial_step`` must track the continuous run for shard>1.
+
+    With the bug the resumed stream is offset by a factor of ``shard_count``
+    relative to the continuous run, so these batches differ.
+    """
+    with tempfile.TemporaryDirectory() as d:
+      idx = _build_synthetic_index(d, sizes=(512,), sequence_length=4)
+      common = {
+          "seed": 5,
+          "batch_size": 4,
+          "shard_index": 2,  # non-zero shard: exercises the stride offset
+          "shard_count": 4,
+          "apply_ngram_filter": False,
+          "shift_to_inputs_targets": True,
+          "grain_worker_count": 0,
+      }
+      ref = make_olmo_grain_data_loader(idx, initial_step=0, **common)
+      ref_batches = _take(iter(ref), 12)
+
+      k = 5
+      resumed = make_olmo_grain_data_loader(idx, initial_step=k * common["batch_size"], **common)
+      res_batches = _take(iter(resumed), 5)
+
+      for i, (a, b) in enumerate(zip(ref_batches[k:], res_batches)):
+        _assert_batch_equal(a, b, msg=f"sharded resumed batch {i}")
+
+
 if __name__ == "__main__":
   from absl.testing import absltest
 
