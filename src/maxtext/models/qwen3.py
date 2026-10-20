@@ -1646,6 +1646,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     # the trip-count-one loop into the enclosing block scan, where they no longer overlap this layer.
     params_xs = jax.tree.map(lambda x: x[None], params_g)
     intermediate_xs = jax.tree.map(lambda x: x[None], intermediate_g)
+    carried_param_paths = {path for path, _ in nnx.to_flat_state(params_g)}
 
     def run_global_layer(carry, xs):
       hidden_states, other = carry
@@ -1654,8 +1655,13 @@ class Qwen3NextScannableBlock(nnx.Module):
       new_hidden_states = self._run_layer(
           layer, hidden_states, layer_kwargs, forced_routed_experts=forced_routed_experts
       )[0]
-      _, _, new_intermediate, new_other = nnx.split(layer, nnx.Param, nnx.Intermediate, ...)
-      return (new_hidden_states, new_other), new_intermediate
+      _, new_params, new_intermediate, new_other = nnx.split(layer, nnx.Param, nnx.Intermediate, ...)
+      # As in `nnx_scan.apply_scanned_layers`: the params fed in come back unchanged and are dropped,
+      # but params created while tracing the layer (e.g. Qwix LoRA adapters) must leave the scan.
+      created_params = nnx.from_flat_state(
+          [(path, value) for path, value in nnx.to_flat_state(new_params) if path not in carried_param_paths]
+      )
+      return (new_hidden_states, new_other), (new_intermediate, created_params)
 
     global_remat_policy = self.remat_policy_fn
     offload_names = maxtext_utils.get_save_and_offload_names(cfg)
@@ -1672,7 +1678,7 @@ class Qwen3NextScannableBlock(nnx.Module):
       )
 
     with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
-      (y, final_other), stacked_intermediate = jax.lax.scan(
+      (y, final_other), (stacked_intermediate, stacked_created_params) = jax.lax.scan(
           run_global_layer,
           (y, other_g),
           (params_xs, intermediate_xs),
@@ -1680,7 +1686,8 @@ class Qwen3NextScannableBlock(nnx.Module):
       )
 
     intermediate_state = jax.tree.map(lambda x: x[0], stacked_intermediate)
-    nnx.update(self.global_layer, final_other, intermediate_state)
+    created_params = jax.tree.map(lambda x: x[0], stacked_created_params)
+    nnx.update(self.global_layer, final_other, intermediate_state, created_params)
     return y
 
   def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs, forced_routed_experts=None):

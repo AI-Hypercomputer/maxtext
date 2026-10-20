@@ -1070,6 +1070,22 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
 
     np.testing.assert_allclose(np.asarray(scanned), np.asarray(expected), rtol=1e-5, atol=1e-5)
 
+  def test_params_created_inside_the_global_layer_are_kept(self):
+    """A param materialized while the global layer runs (e.g. a Qwix LoRA adapter) must reach the block."""
+    cfg, block = self._build()
+    inputs, segment_ids, positions = self._inputs(cfg)
+    run_layer = block._run_layer  # pylint: disable=protected-access
+
+    def run_layer_creating_a_param(layer, *args, **kwargs):
+      if layer.is_full_attention_layer and not hasattr(layer, "created"):
+        layer.created = nnx.Param(jnp.full((2,), 3.0, dtype=jnp.float32))
+      return run_layer(layer, *args, **kwargs)
+
+    with mock.patch.object(block, "_run_layer", side_effect=run_layer_creating_a_param):
+      block(inputs, segment_ids, positions, True, MODEL_MODE_TRAIN)
+    self.assertTrue(hasattr(block.global_layer, "created"))
+    np.testing.assert_array_equal(np.asarray(block.global_layer.created.value), np.full((2,), 3.0))
+
   def test_rejects_block_whose_global_layer_is_not_last(self):
     """The local scan runs before the global layer, so any other ordering must be refused.
 
