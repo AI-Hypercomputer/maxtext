@@ -104,7 +104,8 @@ MAXTEXT_COMMAND="MODEL_IMPL_TYPE=flax_nnx \
   rollout_tensor_parallelism=8 \
   hbm_utilization_vllm=0.8 \
   profiler=xplane \
-  profiler_steps=2 \
+  profiler_start_invocation=2 \
+  profiler_num_invocations=1 \
   num_batches=500 \
   base_emb_dim=2880 \
   vocab_size=201088 \
