@@ -35,7 +35,7 @@ from maxtext.integration.tunix import rl_metrics
 from maxtext.configs import pyconfig, types
 from maxtext.layers.initializers import nd_dense_init
 from maxtext.layers.moe import RoutedMoE
-from maxtext.trainers.post_train.rl import metrics
+from maxtext.trainers.post_train.rl import evaluate_rl, metrics
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -134,6 +134,37 @@ def test_failed_or_unavailable_eval_reward_is_not_logged_as_zero():
   assert "rl/eval/mean_reward" not in logger.write.call_args.args[0]
   metrics.log_evaluation_failure(logger, cluster, 0.2)
   assert logger.write.call_args.args == ({"rl/eval/success": 0, "rl/eval/duration_seconds": 0.2}, 3)
+
+
+@pytest.mark.parametrize("scores", [[], [1.0, 2.0], [float("nan")], [float("inf")], [float("-inf")]])
+@pytest.mark.parametrize("include_valid_row", [False, True])
+def test_invalid_rewards_are_excluded_from_evaluation_metrics(scores, include_valid_row):
+  cfg = _config("unused", debug=False)
+  logger = mock.Mock()
+  cluster = SimpleNamespace(global_steps=3, actor_trainer=SimpleNamespace(train_steps=6), maxtext_metrics_logger=logger)
+  prompts = ["invalid", "valid"] if include_valid_row else ["invalid"]
+  dataset = [{"prompts": prompts, "question": prompts, "answer": ['["1"]'] * len(prompts)}]
+
+  def reward(prompts, **kwargs):
+    del kwargs
+    return scores if prompts == ["invalid"] else [2.5]
+
+  with (
+      mock.patch.object(evaluate_rl, "generate_responses", return_value=[["a", "b"]] * len(prompts)),
+      mock.patch.object(evaluate_rl, "score_responses", return_value=(True, True, True)),
+  ):
+    metrics.evaluate_with_logging(evaluate_rl.evaluate, cfg, dataset, cluster, reward_fns=[reward])
+  values, step = logger.write.call_args.args
+  assert step == 3
+  assert values["rl/eval/num_samples"] == 2 * len(prompts)
+  assert values["rl/eval/num_reward_samples"] == (2 if include_valid_row else 0)
+  assert values["rl/eval/accuracy_percent"] == 100
+  assert values["rl/eval/success"] == 1
+  if include_valid_row:
+    assert values["rl/eval/mean_reward"] == 2.5
+  else:
+    assert "rl/eval/mean_reward" not in values
+  assert all(np.isfinite(value) for value in values.values())
 
 
 def test_empty_evaluation_has_counts_but_no_accuracy():

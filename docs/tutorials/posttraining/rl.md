@@ -54,6 +54,10 @@ needed. A failed evaluation records `success=0` without manufacturing zero
 accuracy. An empty evaluation records counts and `success=0`, with no accuracy.
 Reward is omitted if no responses were successfully reward-scored.
 The actual scored-response count is separate from the generated-sample count.
+Each reward callback must return exactly one finite score per completion.
+If a callback raises, returns the wrong number of scores, or returns a nonfinite
+score, all responses for that prompt are excluded from the reward mean and
+`num_reward_samples`. Answer accuracy and generated-sample counts are unaffected.
 
 The evaluation x-axis is the completed outer rollout-policy step (including
 the restored step when resuming). `rl/steps/actor_updates` records the actor's

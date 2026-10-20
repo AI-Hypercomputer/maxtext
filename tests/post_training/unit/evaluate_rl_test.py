@@ -316,6 +316,22 @@ class TestComputeRowReward(unittest.TestCase):
     self.assertEqual(score_sum, 0.0)
     self.assertEqual(count, 0)  # zero count so the caller's mean isn't biased
 
+  def test_invalid_reward_discards_entire_multi_pass_row(self):
+    """A later invalid score must discard earlier scores and all row samples."""
+    for scores in ([], [1.0, 2.0], [float("nan")], [float("inf")], [float("-inf")]):
+      with self.subTest(scores=scores):
+        reward = mock.Mock(side_effect=[[2.5], scores])
+        result = evaluate_rl._compute_row_reward(
+            reward_fns=[reward],
+            prompt="p",
+            question="q",
+            responses=["first", "second"],
+            answer="gold",
+            row_idx=0,
+        )
+        self.assertEqual(reward.call_count, 2)
+        self.assertEqual(result, (0.0, 0))
+
   def test_question_is_forwarded_to_reward_fn(self):
     """Regression: helper must pass `question` through to reward fns.
 
