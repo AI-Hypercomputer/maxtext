@@ -39,6 +39,7 @@ Example (CPU or TPU)::
       enable_checkpointing=false
 """
 
+import functools
 import math
 import time
 from collections.abc import Sequence
@@ -47,7 +48,7 @@ from absl import app
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from jax.sharding import NamedSharding
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 import optax
 
@@ -71,18 +72,32 @@ def make_optimizer(config) -> optax.GradientTransformation:
   return tx
 
 
-def make_synthetic_batch(config, mesh, key: jax.Array) -> dict[str, jax.Array]:
+@functools.lru_cache(maxsize=32)
+def _synthetic_batch_fn(batch_size: int, seq_len: int, vocab_size: int, mesh: Mesh):
+  """Jitted batch generator for one shape, with output sharded along the batch dimension.
+
+  One asynchronously dispatched program instead of several eager ops plus a
+  `device_put`. This avoids idle time at the start of each step. `out_shardings`
+  (rather than `with_sharding_constraint`) keeps the exact `P(_BATCH_AXES)` spec
+  instead of letting XLA drop size-1 axes.
+  """
+
+  def body(key: jax.Array) -> dict[str, jax.Array]:
+    tokens = jax.random.randint(key, (batch_size, seq_len + 1), 0, vocab_size, dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, seq_len))
+    return {"inputs": tokens[:, :-1], "targets": tokens[:, 1:], "positions": positions}
+
+  return jax.jit(body, out_shardings=NamedSharding(mesh, P(_BATCH_AXES)))
+
+
+def make_synthetic_batch(config, mesh: Mesh, key: jax.Array) -> dict[str, jax.Array]:
   """Random token batch, sharded along the batch dimension.
 
   Targets are the inputs shifted left by one, so the loss is ordinary
   next-token prediction rather than a constant.
   """
-  batch_size = config.global_batch_size_to_train_on
-  seq_len = config.max_target_length
-  tokens = jax.random.randint(key, (batch_size, seq_len + 1), 0, config.vocab_size, dtype=jnp.int32)
-  positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, seq_len))
-  batch = {"inputs": tokens[:, :-1], "targets": tokens[:, 1:], "positions": positions}
-  return jax.device_put(batch, NamedSharding(mesh, P(_BATCH_AXES)))
+  fn = _synthetic_batch_fn(config.global_batch_size_to_train_on, config.max_target_length, config.vocab_size, mesh)
+  return fn(key)
 
 
 def loss_fn(model: nnx.Module, batch: dict[str, jax.Array]) -> jax.Array:
