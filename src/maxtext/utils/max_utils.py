@@ -238,8 +238,11 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   Currently jax.distributed.initialize() fully works as expected!
 
-  For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
+  For CPUs, we force the JAX platform to 'cpu' before any backend initialization and call
+  jax.distributed.initialize() explicitly, with the specified arguments.
   """
+  if is_cpu_backend(raw_keys):
+    jax.config.update("jax_platforms", "cpu")
 
   # Early exit for cases where we don't need to initialize the jax distributed system.
   if raw_keys["skip_jax_distributed_system"]:
@@ -428,12 +431,12 @@ def get_num_slices(raw_keys, config=None):
 
 def is_cpu_backend(raw_keys):
   """Determine whether Maxtext is intended to run on a CPU backend."""
-  return raw_keys["hardware"] == "cpu"
+  return raw_keys.get("hardware") == "cpu"
 
 
 def is_gpu_backend(raw_keys):
   """Determine whether Maxtext is intended to run on a GPU backend."""
-  return raw_keys["hardware"] == "gpu"
+  return raw_keys.get("hardware") == "gpu"
 
 
 def get_coordinator_ip_address():

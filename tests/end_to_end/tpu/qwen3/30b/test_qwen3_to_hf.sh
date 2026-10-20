@@ -28,4 +28,5 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     tokenizer_type="huggingface" \
     load_parameters_path=${CKPT_PATH} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
-    scan_layers=$SCAN_LAYERS
+    scan_layers=$SCAN_LAYERS \
+    skip_jax_distributed_system=true
