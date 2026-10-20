@@ -321,6 +321,9 @@ ModelName = Literal[
     "olmoe3-3p5b-e256k8-sh4x",
     # OLMo 3.5 partner family (allenai/OLMo-core@codex/partner-model-family-20260914).
     "olmo35-tiny",
+    "olmo35-tiny-e256k8",
+    "olmo35-tiny-e256k8-sh2x",
+    "olmo35-tiny-e256k8-sh4x",
     "olmo35-small",
     "olmo35-medium",
     "olmo35-large",

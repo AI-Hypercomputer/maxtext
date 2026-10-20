@@ -48,6 +48,10 @@ CANONICAL_COUNTS = {
     "olmoe3-3p5b-e256k8": (62_850_798_272, 3_462_599_360),
     "olmoe3-3p5b-e256k8-sh2x": (63_130_178_240, 3_741_979_328),
     "olmoe3-3p5b-e256k8-sh4x": (63_688_938_176, 4_300_739_264),
+    "olmo35-tiny": (12_496_341_632, 794_233_472),
+    "olmo35-tiny-e256k8": (12_492_409_472, 790_301_312),
+    "olmo35-tiny-e256k8-sh2x": (12_539_595_392, 837_487_232),
+    "olmo35-tiny-e256k8-sh4x": (12_633_967_232, 931_859_072),
 }
 
 
@@ -142,6 +146,10 @@ class OLMoE3ParameterCountTest(unittest.TestCase):
 
   def test_3p5b_e256k8_variants_total_parameters(self):
     for name in ("olmoe3-3p5b-e256k8", "olmoe3-3p5b-e256k8-sh2x", "olmoe3-3p5b-e256k8-sh4x"):
+      self._assert_total(name)
+
+  def test_tiny_and_e256k8_variants_total_parameters(self):
+    for name in ("olmo35-tiny", "olmo35-tiny-e256k8", "olmo35-tiny-e256k8-sh2x", "olmo35-tiny-e256k8-sh4x"):
       self._assert_total(name)
 
   def test_30m_total_parameters_scanned(self):
