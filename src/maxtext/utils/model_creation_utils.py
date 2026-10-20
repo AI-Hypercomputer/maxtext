@@ -552,8 +552,11 @@ def create_model(
   """Instantiates and returns the model object, sharded across the mesh."""
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
 
-    return m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+    model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+    model = m3_scan.maybe_apply_scan(model, config, mesh=mesh)
+    return model
 
   # Model definition
   quant = quantizations.configure_quantization(config, quant_mode_str=quant_mode_str)
