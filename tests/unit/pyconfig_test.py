@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import jax.numpy as jnp
 import yaml
 
 from maxtext.configs import pyconfig
@@ -970,6 +971,24 @@ assert train._TF_AVAILABLE is False
           val_yaml,
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
       )
+
+  def test_rollout_weight_dtype_defaults_to_weight_dtype_and_accepts_override(self):
+    cfg_default = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        weight_dtype="float32",
+    )
+    self.assertEqual(cfg_default.weight_dtype, jnp.float32)
+    self.assertEqual(cfg_default.rollout_weight_dtype, jnp.float32)
+
+    cfg_override = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        weight_dtype="float32",
+        rollout_weight_dtype="bfloat16",
+    )
+    self.assertEqual(cfg_override.weight_dtype, jnp.float32)
+    self.assertEqual(cfg_override.rollout_weight_dtype, jnp.bfloat16)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,17 +16,14 @@
 
 This file defines the `UserConfig` dataclass, which serves as a centralized
 location for users to specify their GCP environment, desired models, and
-execution parameters for running benchmarks with XPK. The `USER_CONFIG`
-instance at the bottom of the file is the main object to be modified for
-custom runs.
+execution parameters for running benchmarks with Cluster Toolkit (gcluster). The
+`USER_CONFIG` instance at the bottom of the file is the main object to be
+modified for custom runs.
 """
 
 import dataclasses
-import os
-import sys
+from typing import Any
 
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-sys.path.append(parent_dir)
 from benchmarks import maxtext_trillium_model_configs as v6e_model_configs
 from benchmarks import maxtext_v5e_model_configs as v5e_model_configs
 from benchmarks import maxtext_v5p_model_configs as v5p_model_configs
@@ -51,6 +48,7 @@ class UserConfig:
   cluster_name: str = "v6e-256-cluster"
   project: str = "tpu-prod-env-cluster"
   zone: str = "us-east5-b"
+  location: str | None = None
   device_type: str = "v6e-256"
   priority: str = "medium"
   base_output_directory: str = None
@@ -77,18 +75,29 @@ class UserConfig:
   bq_db_dataset: str = ""
 
   # other configuration
-  xpk_path: str = "~/xpk"
+  xpk_path: str | None = None
   delete: bool = False
   max_restarts: int = 0
   temp_key: str = None
   workload_id: str = None
   skip_validation: bool = False
 
+  # Derived attributes initialized in __post_init__
+  cluster_config: Any = dataclasses.field(init=False, default=None)
+  region: str = dataclasses.field(init=False, default="")
+  pathways_config: Any = dataclasses.field(init=False, default=None)
+  headless_workload_name: str = dataclasses.field(init=False, default="")
+  models: dict[str, list[Any]] = dataclasses.field(init=False, default_factory=dict)
+
   def __post_init__(self):
     """Automatically generate derived attributes after the object is created."""
-    self.cluster_config = get_cluster_config(self.cluster_name, self.project, self.zone, self.device_type)
+    if self.location:
+      self.zone = self.location if len(self.location.split("-")) == 3 else ""
+    self.cluster_config = get_cluster_config(self.cluster_name, self.project, self.zone, self.device_type, self.location)
 
-    self.region = "-".join(self.zone.split("-")[:-1])
+    loc = self.location or self.zone
+    loc_parts = loc.split("-")
+    self.region = "-".join(loc_parts[:-1]) if len(loc_parts) >= 3 else loc
     self.pathways_config = get_pathways_config(
         self.server_image,
         self.proxy_image,
@@ -100,7 +109,12 @@ class UserConfig:
         self.worker_flags,
     )
     self.headless_workload_name = f"{self.user[:3]}-headless"
-    self.base_output_directory = self.base_output_directory or f"gs://{self.user}-{self.region}/{self.user}-"
+    if not self.base_output_directory:
+      # Default prefix format (ends with a hyphen)
+      self.base_output_directory = f"gs://{self.user}-{self.region}/{self.user}-"
+    elif not self.base_output_directory.endswith("/"):
+      # Ensure user-provided directories always end with a slash
+      self.base_output_directory += "/"
 
     device_base_type = self.device_type.split("-", maxsplit=1)[0]
     self.models = build_user_models(
