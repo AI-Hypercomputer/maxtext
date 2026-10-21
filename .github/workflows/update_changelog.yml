@@ -119,6 +119,14 @@ jobs:
           python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode inject
           rm -f raw_commits.txt new_notes.md
 
+      - name: Format release notes like the pre-commit mdformat hook
+        if: steps.collect_commits.outputs.has_changes == 'true'
+        run: |
+          # Same pins as the mdformat hook in .pre-commit-config.yaml, so the opened PR passes the Pre-commit Linters check.
+          python3 -m venv /tmp/mdformat-venv
+          /tmp/mdformat-venv/bin/pip install --quiet 'mdformat==0.7.22' mdformat-myst mdformat-ruff
+          /tmp/mdformat-venv/bin/mdformat --number docs/release_notes.md
+
       - name: Push Changelog to Branch and Create Github Issue
         if: steps.collect_commits.outputs.has_changes == 'true'
         env:

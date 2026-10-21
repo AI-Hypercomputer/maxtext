@@ -23,7 +23,8 @@ python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode collect
 The script automatically:
 - Walks `--first-parent` on `main` and resolves GitHub Merge PR numbers (`#XXXX`) to their initial feature/fix commit on the PR branch (ignoring follow-up review feedback or comment cleanup commits).
 - Excludes any changes in `tests/`, `.github/`, `.gemini/`, `src/maxtext/training_engine/`, `src/maxtext/experimental/` (`experimental/`), `src/dependencies/dockerfiles/`, `src/dependencies/scripts/`, `tools/`, `pytest.ini`, `README.md`, `*Dockerfile`, and `docs/release_notes.md`. Keep this list in sync with `EXCLUDED_PATH_PREFIXES` / `EXCLUDED_FILES` in the script.
-- Excludes container/Docker image vulnerability fixes, Docker registry migrations (e.g., Artifact Registry), Gemini/agent skill updates, `pytest-split` / test runner splitting, `Latest News` announcements, `"No public description"` commits, broken link / `toctree` / Sphinx doc-build fixes, and test-only fixes.
+- Excludes container/Docker image vulnerability fixes, Docker registry migrations (e.g., Artifact Registry), Gemini/agent skill updates, `pytest-split` / test runner splitting, `Latest News` announcements, `"No public description"` commits, broken link / `toctree` / Sphinx doc-build fixes, pre-commit/lint-only fixes, and test-only fixes.
+- Drops a commit together with the revert that undoes it (`Reverts <hash>` / `This reverts commit <hash>` in the subject or body) when both land in the window, and prefixes reverts of older commits with `Revert of: `.
 - Strips Copybara/Piper internal metadata (`PiperOrigin-RevId`).
 - Reads `**Last Updated**: <commit_hash>` from `docs/release_notes.md` (if present) so subsequent runs automatically inspect only commits in `<last_commit>..HEAD`.
 - Consolidates multi-part PR series (e.g., `[NNX] Delete Linen (1/5)..(5/5)`, `FP8`, `DeepSeek-V4`) into single unified entries.
