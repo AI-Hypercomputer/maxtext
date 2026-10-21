@@ -320,6 +320,13 @@ olmoe3_router_metrics: false
 # Sequences per group for the local load imbalance: OLMo-core reports it per GPU, which is 16 sequences for the
 # hero (2048 on 128 GPUs). 0 = the whole batch.
 router_metrics_group_seqs: 16
+# OLMo-core's in-loop perplexity evals (eval/lm/<set>-validation/CE loss and PPL), one padded document per row, every
+# olmo_ppl_eval_interval steps (0 = off). Each set is <olmo_ppl_eval_dir>/<set>/val/part-0-00000.npy.
+olmo_ppl_eval_interval: 0
+olmo_ppl_eval_dir: ''
+olmo_ppl_eval_sets: ['c4_en', 'dolma_books', 'dolma_common-crawl', 'dolma_pes2o', 'dolma_reddit', 'dolma_stack', 'dolma_wiki', 'ice', 'm2d2_s2orc', 'pile', 'wikitext_103']
+olmo_ppl_eval_eos_token_id: 100257
+olmo_ppl_eval_pad_token_id: 100277
 # Peak bf16 TFLOP/s per device for perf/mfu; 0 infers it from the device kind (v4 275, v5e 197, v5p 459, v6e 918).
 peak_device_tflops: 0.0
 moe_use_megatron_seq_aux_loss: false # when true, sigmoid routers (routed_score_func="sigmoid") use Megatron-LM's sequence-wise aux loss summed over MoE layers; false (default) uses the Switch-style loss averaged over MoE layers.

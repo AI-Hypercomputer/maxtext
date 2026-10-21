@@ -74,6 +74,7 @@ from maxtext.common.goodput import (
 from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
+from maxtext.input_pipeline import olmo_ppl_eval
 from maxtext.experimental.lineage import lineage_adapter
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
@@ -1012,6 +1013,16 @@ def training_loop_iteration(
     # Blocking part of the save (async_checkpointing writes the rest in the background).
     metrics["scalar"]["checkpoint/save_duration_s"] = save_seconds
 
+  ppl_eval = python_vars.get("ppl_eval")
+  if ppl_eval is not None and ppl_eval[0].due(step):
+    ppl_start = time.perf_counter()
+    with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_eval):
+      ppl_metrics = ppl_eval[0].run(jax_device_state["p_ppl_eval_step"], state, ppl_eval[1])
+    ppl_metrics["eval/lm/time_seconds"] = time.perf_counter() - ppl_start
+    max_logging.log(f"olmo_ppl_eval after step {step}: " + ", ".join(f"{k}={v:.4f}" for k, v in ppl_metrics.items()))
+    # Logged with this step's metrics (OLMo-core logs its evals at the step they follow).
+    metrics["scalar"].update(ppl_metrics)
+
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
     jax.block_until_ready(state)  # Ensure compilation has finished.
     gcs_utils.upload_dump(
@@ -1349,6 +1360,17 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
         eval_step,
     )
 
+  # OLMo-core's in-loop perplexity evals: their own eval program (EMO eval pool) over prebuilt one-document-per-row
+  # batches, one eval set per batch.
+  p_ppl_eval_step = None
+  ppl_eval = None
+  if getattr(config, "olmo_ppl_eval_interval", 0) > 0:
+    ppl_eval_sharding = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+    p_ppl_eval_step = train_utils.jit_eval_step(
+        config, jit_model, state_mesh_shardings, ppl_eval_sharding, olmo_ppl_eval.ppl_eval_step(eval_step)
+    )
+    ppl_eval = (olmo_ppl_eval.OlmoPplEval(config), ppl_eval_sharding)
+
   p_train_step_dropless = None
   p_eval_step_dropless = None
   if jit_model_dropless is not None:
@@ -1456,6 +1478,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       "p_train_step_dropless": p_train_step_dropless,
       "p_train_step_first_phase": p_train_step_first_phase,
       "p_eval_step": p_eval_step,
+      "p_ppl_eval_step": p_ppl_eval_step,
       "p_eval_step_dropless": p_eval_step_dropless,
       "model": model,
   }
@@ -1469,6 +1492,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       "checkpoint_manager": checkpoint_manager,
       "data_iterator": data_iterator,
       "eval_data_iterator": eval_data_iterator,
+      "ppl_eval": ppl_eval,
       "metric_logger_instance": metric_logger_instance,
       "prof": prof,
   }

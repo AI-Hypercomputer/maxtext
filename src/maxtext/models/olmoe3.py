@@ -38,6 +38,8 @@ with the canonical pools min=top_k, max=eval=num_experts).
 
 # pylint: disable=unnecessary-lambda-assignment
 
+import contextlib
+import contextvars
 import functools
 from typing import Any
 
@@ -75,6 +77,20 @@ _KDA_NORM_EPS = 1e-5
 # Reference init std and router z-loss weight (fixed across the ladder).
 _INIT_STD = 0.02
 _ROUTER_Z_LOSS_WEIGHT = 1e-5
+
+# Set while tracing an eval program that should route on the EMO eval pool. MaxText calls the model the same way in
+# train and eval steps (and enable_dropout is off in training too), so the eval step says so explicitly.
+_EMO_EVAL_POOLS = contextvars.ContextVar("olmoe3_emo_eval_pools", default=False)
+
+
+@contextlib.contextmanager
+def emo_eval_pools():
+  """Within this context, EMO routing uses ``emo_eval_document_expert_pool`` instead of sampling pool sizes."""
+  token = _EMO_EVAL_POOLS.set(True)
+  try:
+    yield
+  finally:
+    _EMO_EVAL_POOLS.reset(token)
 
 
 def olmoe3_init(key, shape, dtype=jnp.float32, in_axis=None, out_axis=None):
@@ -1267,7 +1283,7 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     csum_before = jnp.where((start == 0)[..., None], 0.0, before)
     document_scores = csum_end - csum_before  # [b, s, E]: each token sees its document's totals
 
-    if rngs is not None and cfg.model_call_mode != "inference":
+    if rngs is not None and cfg.model_call_mode != "inference" and not _EMO_EVAL_POOLS.get():
       rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
       draws = jax.random.randint(
           rng, (batch, seq_len), cfg.emo_min_document_expert_pool, cfg.emo_max_document_expert_pool + 1
