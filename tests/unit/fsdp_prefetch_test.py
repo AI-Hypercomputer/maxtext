@@ -63,11 +63,23 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     self.assertFalse(fsdp_prefetch.mesh_uses_fsdp(_abstract_mesh((8,), ("data",))))
 
   def test_per_layer_sharding_drops_layer_axis(self):
-    # Explicit mesh axes, so that the sharding spec is part of the array's type (jax.typeof).
+    # Multi-device abstract mesh (matches the mesh_uses_fsdp=True regime; independent of size-one axis removal).
+    abstract_mesh = _abstract_mesh((4, 2), ("fsdp", "tensor"))
+    abstract_stacked = jax.ShapeDtypeStruct(
+        (2, 4, 8), jnp.float32, sharding=NamedSharding(abstract_mesh, PartitionSpec(None, "fsdp", "tensor"))
+    )
+    abstract_sharding = fsdp_prefetch._per_layer_sharding(abstract_stacked, abstract_mesh)  # pylint: disable=protected-access
+    self.assertEqual(tuple(abstract_sharding.spec), ("fsdp", "tensor"))
+
+    # Concrete 1-device (1, 1) mesh with explicit axes requires keeping size-1 axes in jax.typeof.
+    if hasattr(jax.config, "jax_remove_size_one_mesh_axis_from_type"):
+      previous_flag = jax.config.jax_remove_size_one_mesh_axis_from_type
+      jax.config.update("jax_remove_size_one_mesh_axis_from_type", False)
+      self.addCleanup(jax.config.update, "jax_remove_size_one_mesh_axis_from_type", previous_flag)
     mesh = Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("fsdp", "tensor"), axis_types=(AxisType.Explicit,) * 2)
     stacked = jax.device_put(jnp.ones((2, 4, 8)), NamedSharding(mesh, PartitionSpec(None, "fsdp", "tensor")))
-    s = fsdp_prefetch._per_layer_sharding(stacked, mesh)  # pylint: disable=protected-access
-    self.assertEqual(tuple(s.spec), ("fsdp", "tensor"))
+    layer_sharding = fsdp_prefetch._per_layer_sharding(stacked, mesh)  # pylint: disable=protected-access
+    self.assertEqual(tuple(layer_sharding.spec), ("fsdp", "tensor"))
 
   def test_remove_fsdp_from_sharding(self):
     mesh = _abstract_mesh((4, 2, 2), ("fsdp", "expert", "tensor"))

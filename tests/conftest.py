@@ -261,6 +261,15 @@ def clear_jax_compilation_cache():
 
 
 @pytest.fixture(autouse=True)
+def restore_jax_remove_size_one_mesh_axis_from_type():
+  """Saves and restores jax_remove_size_one_mesh_axis_from_type around each test item."""
+  previous_flag = getattr(jax.config, "jax_remove_size_one_mesh_axis_from_type", None)
+  yield
+  if previous_flag is not None:
+    jax.config.update("jax_remove_size_one_mesh_axis_from_type", previous_flag)
+
+
+@pytest.fixture(autouse=True)
 def handle_skip_on_tpu7x(request):
   """Dynamically skip tests marked with skip_on_tpu7x if running on TPU7x."""
   if request.node.get_closest_marker("skip_on_tpu7x"):
