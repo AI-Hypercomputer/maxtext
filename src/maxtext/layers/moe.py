@@ -2913,11 +2913,15 @@ class RoutedMoE(nnx.Module):
         rngs,
         input_ids=None,
         forced_routed_experts=None,
+        force_dropless=False,
         per_expert_scale=None,
     ):
       local_sorted_indices = None
       all_shards_group_sizes = None
       reshaped_group_sizes = None
+      # force_dropless (the in-layer dropless fallback) sizes the receive buffer for the worst case
+      # instead of ragged_buffer_factor * balanced, so no tokens can be dropped.
+      ragged_buffer_factor = -1.0 if force_dropless else self.get_ragged_buffer_factor()
       (
           x,
           sorted_selected_experts,
@@ -2959,13 +2963,13 @@ class RoutedMoE(nnx.Module):
               num_ep,
               self.config.num_experts,
               self.config.num_experts_per_tok,
-              self.get_ragged_buffer_factor(),
+              ragged_buffer_factor,
           )
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
               all_shards_group_sizes,
               expert_shard_id,
               num_ep,
-              ragged_buffer_factor=self.get_ragged_buffer_factor(),
+              ragged_buffer_factor=ragged_buffer_factor,
               buffer_size=buffer_size,
           )
 
@@ -2988,7 +2992,7 @@ class RoutedMoE(nnx.Module):
               shard_index=expert_shard_id,
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
-              ragged_buffer_factor=self.get_ragged_buffer_factor(),
+              ragged_buffer_factor=ragged_buffer_factor,
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
@@ -3001,7 +3005,7 @@ class RoutedMoE(nnx.Module):
               global_sorted_experts=selected_experts,
               use_custom_sort_vjp=self.config.use_custom_sort_vjp,
               use_ragged_sort=self.config.use_ragged_sort,
-              ragged_buffer_factor=self.get_ragged_buffer_factor(),
+              ragged_buffer_factor=ragged_buffer_factor,
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
 
@@ -3061,6 +3065,7 @@ class RoutedMoE(nnx.Module):
             rngs,
             input_ids=input_ids,
             forced_routed_experts=forced_routed_experts,
+            force_dropless=force_dropless,
             per_expert_scale=per_expert_scale,
         )
 
@@ -3862,7 +3867,9 @@ class RoutedMoE(nnx.Module):
         return jnp.reshape(jnp.asarray(has_overflow, dtype=jnp.bool_), (1,))
 
       fallback_chunks = None
-      if self.config.moe_dropless_fallback == "layer":
+      # The all-to-all path only has a capped receive buffer (and so can only drop tokens) when the
+      # batch is sharded by expert; otherwise every EP shard already holds all tokens.
+      if self.config.moe_dropless_fallback == "layer" and (self.config.use_ring_of_experts or is_batch_sharded_by_expert):
         fallback_chunks = self.get_dropless_fallback_num_chunks(x.shape[1], n_chunks)
       if fallback_chunks is None:
         out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(force_dropless)
@@ -3888,10 +3895,58 @@ class RoutedMoE(nnx.Module):
         out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(False)
         return out, lb_loss, bias_updates, jnp.asarray(has_overflow, dtype=jnp.bool_), required_rbf, max_load_ratio
 
+      def _a2a_dropless_chunks(n_chunks):
+        """Dropless ragged all-to-all path over n_chunks sequence chunks, run as a lax.scan.
+
+        Each chunk sizes its receive buffer for the worst case (force_dropless), which
+        get_dropless_fallback_num_chunks keeps no larger than the capped path's buffer. The scan body
+        is checkpointed, so the backward recomputes one chunk at a time and accumulates the expert
+        weight gradients in the scan carry instead of materializing one per chunk.
+        """
+        batch, seq_len = x.shape[0], x.shape[1]
+        chunk = seq_len // n_chunks
+
+        def split(a):  # [batch, seq, ...] -> [n_chunks, batch, chunk, ...]
+          if a is None:
+            return None
+          return jnp.moveaxis(a.reshape((batch, n_chunks, chunk) + a.shape[2:]), 1, 0)
+
+        def body(carry, xs):
+          x_c, logits_c, pre_bias_logits_c, input_ids_c, forced_c = xs
+          out_c, lb_c, bu_c, _, req_c, ratio_c, _ = _moe_body(
+              x_c,
+              logits_c,
+              pre_bias_logits_c,
+              w0,
+              w1,
+              wo,
+              w0_bias,
+              w1_bias,
+              wo_bias,
+              input_ids_c,
+              rngs,
+              forced_c,
+              force_dropless=True,
+              per_expert_scale=per_expert_scale,
+          )
+          return carry, (out_c, lb_c, bu_c, req_c, ratio_c)
+
+        xs = tuple(split(a) for a in (x, logits, pre_bias_logits, sharded_input_ids, forced_routed_experts))
+        body = jax.checkpoint(body, policy=jax.checkpoint_policies.nothing_saveable)
+        _, (outs, lb_losses, bias_updates, required_rbfs, max_load_ratios) = jax.lax.scan(body, None, xs)
+        output = jnp.moveaxis(outs, 0, 1).reshape((batch, seq_len) + outs.shape[3:])
+        lb_loss = None if lb_losses is None else jnp.mean(lb_losses, axis=0)
+        bias_updates = None if bias_updates is None else finalize_bias_updates(jnp.sum(bias_updates, axis=0))
+        required_rbf = None if required_rbfs is None else jnp.max(required_rbfs)
+        max_load_ratio = None if max_load_ratios is None else jnp.max(max_load_ratios)
+        return output, lb_loss, bias_updates, jnp.bool_(False), required_rbf, max_load_ratio
+
       # Save nothing from the rare dropless branch: lax.cond gives both branches the union of
       # their residuals, so the (larger) dropless residuals would otherwise be held every step.
       @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
       def _dropless_branch():
+        if not self.config.use_ring_of_experts:
+          return _a2a_dropless_chunks(fallback_chunks)
         out, lb_loss, bias_updates, _, required_rbf, max_load_ratio = _route_and_compute(
             True, n_chunks=fallback_chunks, barrier_enabled=True
         )
