@@ -26,13 +26,16 @@ model-name branching.
 """
 
 from collections.abc import Callable
-from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model
-from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model
+from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
+from maxtext.m3.models.qwen38_flash_next.modeling_qwen38_flash_next import create_qwen38_flash_next_model  # pylint: disable=no-name-in-module
+from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model  # pylint: disable=no-name-in-module
 
 
 MODEL_REGISTRY: dict[str, Callable] = {
     "qwen3-0.6b": create_qwen3_model,
     "qwen3-vl-2b": create_qwen3_vl_model,
+    "qwen3.8-flash-next": create_qwen38_flash_next_model,
+    "qwen3.8-flash-next-mini": create_qwen38_flash_next_model,
 }
 
 
