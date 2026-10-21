@@ -260,6 +260,7 @@ jobs:
       - name: Run Tests
         shell: bash
         env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
           TOTAL_WORKERS: ${{ inputs.total_workers }}
           WORKER_GROUP: ${{ inputs.worker_group }}
           IS_SCHEDULED_RUN: ${{ inputs.is_scheduled_run }}
@@ -281,8 +282,19 @@ jobs:
           trap cleanup_tpu_locks TERM INT
 
           if [ "${TOTAL_WORKERS}" -gt 1 ]; then
-            .venv/bin/python3 -m pip install --quiet pytest-split
-            SPLIT_ARGS="--splits ${TOTAL_WORKERS} --group ${WORKER_GROUP}"
+            CANDIDATE_URLS=(
+              "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/dev/bench/per_test_baseline.json"
+            )
+            if [ "${GITHUB_REPOSITORY}" != "AI-Hypercomputer/maxtext" ]; then
+              CANDIDATE_URLS+=("https://raw.githubusercontent.com/AI-Hypercomputer/maxtext/gh-pages/dev/bench/per_test_baseline.json")
+            fi
+            for URL in "${CANDIDATE_URLS[@]}"; do
+              if curl -sSf -H "User-Agent: github-actions" "${URL}" -o per_test_baseline.json; then
+                .venv/bin/python3 tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor tpu-unit
+                break
+              fi
+            done
+            SPLIT_ARGS="--class-splits=${TOTAL_WORKERS} --class-group=${WORKER_GROUP}"
           else
             SPLIT_ARGS=""
           fi

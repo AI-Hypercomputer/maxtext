@@ -263,6 +263,9 @@ jobs:
             else
               SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
             fi
+          elif [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+            $PYTHON_EXE -m pip install --quiet pytest-xdist
+            SPLIT_ARGS="-n auto"
           else
             SPLIT_ARGS=""
           fi
@@ -355,11 +358,17 @@ jobs:
           MAXTEXT_TEST_ASSETS_ROOT="$(pwd)/tests/assets"
           MAXTEXT_PKG_DIR="$(pwd)/src/maxtext"
           export MAXTEXT_REPO_ROOT MAXTEXT_ASSETS_ROOT MAXTEXT_TEST_ASSETS_ROOT MAXTEXT_PKG_DIR
+          mapfile -t DECOUPLED_TEST_FILES < <(grep -rl --include='*_test.py' --include='*_tests.py' --exclude-dir=post_training "decoupled_target" tests/ | sort)
+          if [ "${#DECOUPLED_TEST_FILES[@]}" -eq 0 ]; then
+            echo "::error::No test files marked with decoupled_target found under tests/."
+            exit 1
+          fi
           python3 -m pytest -v \
+            -n auto \
             -m "decoupled_target" \
             --durations=0 \
-            --ignore=tests/post_training \
-            --junitxml=test-results-decoupled-targeted.xml
+            --junitxml=test-results-decoupled-targeted.xml \
+            "${DECOUPLED_TEST_FILES[@]}"
       - name: Upload Reference HLO
         if: ${{ inputs.is_update_hlo }}
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1

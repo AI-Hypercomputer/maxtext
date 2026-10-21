@@ -92,3 +92,39 @@ def test_convert_entry_parameterized_with_dots(mock_repo_root):
       "tests/unit/attention_test.py::AttentionTest::test_hlo_diff[qwen3_1.7b-qwen3-1.7b-overrides2]",
       45.2,
   )
+
+
+def test_convert_entry_absl_dots_and_split_class_remap(tmp_path):
+  """Preserves absl method dots and remaps split-class methods while keeping @parameterized_class suffixes."""
+  unit_dir = tmp_path / "tests" / "unit"
+  unit_dir.mkdir(parents=True)
+  (unit_dir / "m_test.py").write_text(
+      "from absl.testing import parameterized\nfrom parameterized import parameterized_class\n"
+      "class _Base(parameterized.TestCase): pass\n"
+      "class A(_Base):\n  def test_x(self): pass\n"
+      "class B(_Base):\n  @parameterized.named_parameters(('v1.5', True))\n  def test_param(self, f): pass\n"
+      "class C(_Base):\n  def test_x_moved(self): pass\n"
+      "@parameterized_class([{'k': 0}])\nclass P:\n  def test_p(self): pass\n",
+      encoding="utf-8",
+  )
+  root = str(tmp_path)
+  assert convert_durations.convert_entry("tpu-unit::tests.unit.m_test.A.test_x", 4.0, root) == (
+      "tpu-unit",
+      "tests/unit/m_test.py::A::test_x",
+      4.0,
+  )
+  assert convert_durations.convert_entry("tpu-unit::tests.unit.m_test.A.test_x_moved", 5.2, root) == (
+      "tpu-unit",
+      "tests/unit/m_test.py::C::test_x_moved",
+      5.2,
+  )
+  assert convert_durations.convert_entry("tpu-unit::tests.unit.m_test.A.test_param_v1.5", 44.5, root) == (
+      "tpu-unit",
+      "tests/unit/m_test.py::B::test_param_v1.5",
+      44.5,
+  )
+  assert convert_durations.convert_entry("cpu-unit::tests.unit.m_test.P_0.test_p", 3.1, root) == (
+      "cpu-unit",
+      "tests/unit/m_test.py::P_0::test_p",
+      3.1,
+  )
