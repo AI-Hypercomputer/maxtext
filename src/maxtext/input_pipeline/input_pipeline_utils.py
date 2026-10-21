@@ -15,9 +15,10 @@
 """Operations used by Grain"""
 
 import dataclasses
+import sys
 import warnings
 from threading import current_thread
-from typing import Any, Iterable, TYPE_CHECKING
+from typing import Any, Iterable, Sequence, TYPE_CHECKING
 
 if TYPE_CHECKING:
   import datasets
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 import grain.python as grain
 import numpy as np
 from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator  # pylint: disable=protected-access
+from grain._src.python.experimental.index_shuffle.python import index_shuffle_module as index_shuffle  # pylint: disable=protected-access
 from grain.experimental import TFRecordIterDataset
 from maxtext.diffusion.block_diffusion import corruption as block_diffusion_corruption
 from maxtext.input_pipeline.protos import example_pb2
@@ -642,6 +644,106 @@ class IndexShardIterDataset(grain.IterDataset):
     )
 
 
+class BlockShuffleMapDataset(grain.MapDataset):
+  """Worker-aware hierarchical block shuffle and sharding MapDataset.
+
+  Groups physically contiguous records in `parent` into blocks of `block_size`
+  records (`[k * B, (k + 1) * B)`), permutes block order globally across the
+  shard per epoch, and permutes records within each block. Accounts for
+  `mp_prefetch` worker slicing (`index = t * worker_count + w`) so that each
+  worker process consecutively consumes all `B` records of a block from the
+  in-memory block cache before moving to the next block (1 HTTP GET per `B`
+  records instead of 1 HTTP GET per record).
+  """
+
+  _MUTATES_ELEMENT_SPEC = False
+
+  def __init__(
+      self,
+      parent: grain.MapDataset,
+      *,
+      block_size: int = 32,
+      host_index: int = 0,
+      host_count: int = 1,
+      worker_count: int = 1,
+      shuffle: bool = True,
+      seed: int = 42,
+      num_epochs: int | None = 1,
+  ):
+    super().__init__(parent)
+    self._parent_len = len(parent)
+    self._block_size = max(1, min(int(block_size), max(1, self._parent_len)))
+    self._num_blocks = max(1, self._parent_len // self._block_size)
+    self._host_index = int(host_index)
+    self._host_count = max(1, int(host_count))
+    self._worker_count = max(1, int(worker_count))
+    self._shuffle = bool(shuffle)
+    self._seed = int(seed) % (2**32)
+    self._num_epochs = num_epochs
+    if num_epochs is None:
+      self._length = sys.maxsize
+    else:
+      self._length = max(1, (int(num_epochs) * self._parent_len) // self._host_count)
+
+  def __len__(self) -> int:
+    return self._length
+
+  def __str__(self) -> str:
+    return (
+        f"BlockShuffleMapDataset(block_size={self._block_size}, "
+        f"host={self._host_index}/{self._host_count}, workers={self._worker_count})"
+    )
+
+  def _mapped_index(self, index: int) -> int:
+    index = int(index)
+    # Recover worker lane `w` and sequential worker step `t` under mp_prefetch slicing `slice(w, None, W)`
+    t, w = divmod(index, self._worker_count)
+    wb, j = divmod(t, self._block_size)
+    b_host = wb * self._worker_count + w
+    e_host, b_in_shard = divmod(b_host + self._host_index, self._num_blocks)
+    if self._shuffle:
+      if self._num_blocks > 1:
+        block_seed = (self._seed + e_host) % (2**32)
+        phys_block = index_shuffle.index_shuffle(
+            b_in_shard,
+            max_index=self._num_blocks - 1,
+            seed=block_seed,
+            rounds=4,
+        )
+      else:
+        phys_block = 0
+      if self._block_size > 1:
+        intra_seed = (self._seed + (b_host * self._host_count + self._host_index) * 9973 + 1) % (2**32)
+        phys_offset = index_shuffle.index_shuffle(
+            j,
+            max_index=self._block_size - 1,
+            seed=intra_seed,
+            rounds=4,
+        )
+      else:
+        phys_offset = 0
+    else:
+      phys_block = b_in_shard
+      phys_offset = j
+    return phys_block * self._block_size + phys_offset
+
+  def __getitem__(self, index):
+    if isinstance(index, slice):
+      return self.slice(index)
+    with self._stats.record_self_time():
+      mapped = self._mapped_index(index)
+    return self._parent[mapped]
+
+  def _getitems(self, indices: Sequence[int]):
+    with self._stats.record_self_time(num_elements=len(indices)):
+      mapped_indices = [self._mapped_index(idx) for idx in indices]
+    return self._parent._getitems(mapped_indices)  # pylint: disable=protected-access
+
+  @property
+  def _element_spec(self) -> Any:
+    return grain.experimental.get_element_spec(self._parent)
+
+
 @dataclasses.dataclass
 class ParseFeatures(grain.MapTransform):
   """Parse serialized tf.train.Example protos for arrayrecord/tfrecord datasets.
@@ -701,15 +803,38 @@ class ParseFeatures(grain.MapTransform):
 
 @dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
-  """Normalize text feature keys."""
+  """Normalize text feature keys, preserving raw bytes for binary media columns."""
 
   def __init__(self, column_names, tokenize):
     self.column_names = column_names
     self.tokenize = tokenize
 
+  @staticmethod
+  def _decode_or_keep_bytes(val):
+    if len(val) == 0:
+      return ""
+    if len(val) == 1:
+      raw = val[0]
+      if isinstance(raw, (bytes, bytearray)):
+        try:
+          return raw.decode("utf-8")
+        except UnicodeDecodeError:
+          return bytes(raw)
+      return raw
+    decoded = []
+    for item in val:
+      if isinstance(item, (bytes, bytearray)):
+        try:
+          decoded.append(item.decode("utf-8"))
+        except UnicodeDecodeError:
+          decoded.append(bytes(item))
+      else:
+        decoded.append(item)
+    return decoded
+
   def map(self, element):
     if self.tokenize:
-      return {col: element[col][0].decode() for col in self.column_names}
+      return {col: self._decode_or_keep_bytes(element[col]) for col in self.column_names}
     else:
       return {col: element[col] for col in self.column_names}
 

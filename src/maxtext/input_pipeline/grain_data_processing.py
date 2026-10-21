@@ -22,6 +22,7 @@ import functools
 import ml_collections
 from concurrent import futures
 import json
+import numpy as np
 
 import jax
 
@@ -109,6 +110,7 @@ def _apply_mapdataset_transforms(
     grain_num_threads,
     grain_prefetch_buffer_size,
     elastic=False,
+    grain_worker_count=0,
 ):
   """Apply standard shuffle, repeat, shard, and iter conversion transforms.
 
@@ -116,12 +118,44 @@ def _apply_mapdataset_transforms(
   skipped so that the resulting MapDataset can be fed to `ElasticIterator`,
   which performs sharding and batching internally.
   """
+  file_sharded = getattr(dataset, "_file_sharded", False)
+  row_shard = getattr(dataset, "_row_shard", None)
+  read_block_size = getattr(dataset, "_read_block_size", 1)
+  if not elastic and read_block_size > 1:
+    host_idx, host_cnt = (
+        (row_shard if row_shard is not None else (0, 1))
+        if file_sharded
+        else (dataloading_host_index, dataloading_host_count)
+    )
+    effective_workers = max(1, grain_worker_count) if grain_worker_count and grain_worker_count > 0 else 1
+    dataset = input_pipeline_utils.BlockShuffleMapDataset(
+        dataset,
+        block_size=read_block_size,
+        host_index=host_idx,
+        host_count=host_cnt,
+        worker_count=effective_workers,
+        shuffle=shuffle,
+        seed=shuffle_seed,
+        num_epochs=num_epoch,
+    )
+    dataset = dataset.to_iter_dataset(
+        read_options=grain.ReadOptions(
+            num_threads=grain_num_threads,
+            prefetch_buffer_size=grain_prefetch_buffer_size,
+        )
+    )
+    return dataset
+
   if shuffle:
     dataset = dataset.shuffle(seed=shuffle_seed)
   dataset = dataset.repeat(num_epoch)
   if elastic:
     return dataset
-  dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
+  if file_sharded:
+    if row_shard is not None:
+      dataset = dataset[row_shard[0] :: row_shard[1]]
+  else:
+    dataset = dataset[dataloading_host_index::dataloading_host_count]  # sharding
   dataset = dataset.to_iter_dataset(
       read_options=grain.ReadOptions(
           num_threads=grain_num_threads,
@@ -181,12 +215,28 @@ def get_datasets(
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
-      files = find_data_files(pattern, hf_access_token=hf_access_token)
+      files = sorted(find_data_files(pattern, hf_access_token=hf_access_token))
+      file_sharded = False
+      row_shard = None
+      if not elastic and dataloading_host_count > 1 and str(pattern).startswith("gs://"):
+        if shuffle and len(files) > 1:
+          rng = np.random.default_rng(shuffle_seed)
+          perm = rng.permutation(len(files))
+          files = [files[i] for i in perm]
+        file_slice, _, row_shard = input_pipeline_utils.compute_file_sharding(
+            len(files), dataloading_host_index, dataloading_host_count
+        )
+        files = files[file_slice]
+        file_sharded = True
       reader_options = (
           {"index_storage_option": grain_index_storage_option} if grain_index_storage_option is not None else None
       )
       source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
-      return grain.MapDataset.source(source)
+      ds = grain.MapDataset.source(source)
+      ds._file_sharded = file_sharded  # pylint: disable=protected-access
+      ds._row_shard = row_shard  # pylint: disable=protected-access
+      ds._read_block_size = getattr(source, "read_block_size", 1)  # pylint: disable=protected-access
+      return ds
 
     # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
     if mixture_config_path:
@@ -212,6 +262,7 @@ def get_datasets(
             dataloading_host_count,
             grain_num_threads,
             grain_prefetch_buffer_size,
+            grain_worker_count=grain_worker_count,
         )
 
       # Normalize weights
@@ -243,6 +294,7 @@ def get_datasets(
             dataloading_host_count,
             grain_num_threads,
             grain_prefetch_buffer_size,
+            grain_worker_count=grain_worker_count,
         )
       # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
       # for supporting changing the mixture after checkpointing
@@ -261,6 +313,7 @@ def get_datasets(
           grain_num_threads,
           grain_prefetch_buffer_size,
           elastic=elastic,
+          grain_worker_count=grain_worker_count,
       )
       return dataset
   elif data_file_type in ("tfrecord", "parquet"):
