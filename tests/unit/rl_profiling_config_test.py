@@ -45,8 +45,8 @@ _MODEL_OVERRIDES = {
     "tokenizer_path": "meta-llama/Llama-2-7b",
 }
 
-# Step-window profiling flags that exist on the pretrain `Profiling` mixin and
-# must be rejected by `RLConfig`.
+# Step-window profiling flags from the `Profiling` mixin that `RLConfig`
+# continues to accept for backward compatibility with existing scripts.
 _LEGACY_PROFILING_FLAGS = (
     "skip_first_n_steps_for_profiler=1",
     "profiler_steps=2",
@@ -128,14 +128,39 @@ class RLProfilingConfigTest(parameterized.TestCase):
       types.RLConfig(model_name="llama2-7b", tokenizer_path="meta-llama/Llama-2-7b", **bad)
 
   @parameterized.parameters(*_LEGACY_PROFILING_FLAGS)
-  def test_legacy_step_profiling_flags_are_rejected_by_rl_config(self, flag):
+  def test_legacy_step_profiling_flags_are_accepted_by_rl_config(self, flag):
+    cfg = _rl_config(flag, run_name="rl_profiling_test")
     key = flag.split("=", 1)[0]
-    with self.assertRaisesRegex(ValueError, key):
-      _rl_config(flag, run_name="rl_profiling_test")
+    self.assertTrue(hasattr(cfg, key))
+
+  def test_legacy_step_profiling_flags_forward_to_rl_invocation_fields(self):
+    cfg = _rl_config(
+        "profiler=xplane",
+        "skip_first_n_steps_for_profiler=5",
+        "profiler_steps=2",
+        run_name="rl_profiling_test",
+    )
+    self.assertEqual(cfg.skip_first_n_steps_for_profiler, 5)
+    self.assertEqual(cfg.profiler_steps, 2)
+    self.assertEqual(cfg.rl.profiler_start_invocation, 5)
+    self.assertEqual(cfg.rl.profiler_num_invocations, 2)
+
+  def test_explicit_rl_invocation_flags_override_legacy_step_flags(self):
+    cfg = _rl_config(
+        "profiler=xplane",
+        "skip_first_n_steps_for_profiler=5",
+        "profiler_steps=2",
+        "rl.profiler_start_invocation=7",
+        "rl.profiler_num_invocations=4",
+        run_name="rl_profiling_test",
+    )
+    self.assertEqual(cfg.rl.profiler_start_invocation, 7)
+    self.assertEqual(cfg.rl.profiler_num_invocations, 4)
 
   def test_legacy_step_profiling_flags_still_exist_on_pretrain_config(self):
     for flag in _LEGACY_PROFILING_FLAGS:
       self.assertIn(flag.split("=", 1)[0], types.MaxTextConfig.model_fields)
+      self.assertIn(flag.split("=", 1)[0], types.RLConfig.model_fields)
     self.assertIn("profiler", types.RLConfig.model_fields)
     self.assertNotIn("rl", types.MaxTextConfig.model_fields)
 
