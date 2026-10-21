@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import jax.numpy as jnp
 import yaml
 
 from maxtext.configs import pyconfig
@@ -170,6 +171,24 @@ class PyconfigTest(unittest.TestCase):
         config_custom.managed_mldiagnostics_dir,
         "gs://custom_base/test_run_3/managed-mldiagnostics",
     )
+
+  def test_managed_mldiagnostics_metric_only_run(self):
+    config_omitted = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_1",
+        base_output_directory="gs://base_dir1",
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(config_omitted.managed_mldiagnostics_metric_only_run)
+
+    config_true = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        run_name="test_run_2",
+        base_output_directory="gs://base_dir2",
+        managed_mldiagnostics_metric_only_run=True,
+        skip_jax_distributed_system=True,
+    )
+    self.assertTrue(config_true.managed_mldiagnostics_metric_only_run)
 
   def test_multiple_unmodifiable_configs(self):
     config_train = pyconfig.initialize(
@@ -952,6 +971,24 @@ assert train._TF_AVAILABLE is False
           val_yaml,
           f"Default value mismatch for field '{field_name}': types.py default={val_default} vs base.yml={val_yaml}",
       )
+
+  def test_rollout_weight_dtype_defaults_to_weight_dtype_and_accepts_override(self):
+    cfg_default = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        weight_dtype="float32",
+    )
+    self.assertEqual(cfg_default.weight_dtype, jnp.float32)
+    self.assertEqual(cfg_default.rollout_weight_dtype, jnp.float32)
+
+    cfg_override = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        weight_dtype="float32",
+        rollout_weight_dtype="bfloat16",
+    )
+    self.assertEqual(cfg_override.weight_dtype, jnp.float32)
+    self.assertEqual(cfg_override.rollout_weight_dtype, jnp.bfloat16)
 
 
 if __name__ == "__main__":

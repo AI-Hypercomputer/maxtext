@@ -16,7 +16,7 @@
 
 Modules:
   * `rope.py` — rotary positional embedding (base implementation).
-  * `sharding.py` — `Sharding` ABC, logical-axis specs, mesh creation.
+  * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, mesh creation.
 
 Planned modules:
   * `interfaces.py` — shared ABCs and `CausalLMOutput`.

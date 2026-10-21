@@ -24,7 +24,12 @@ import jax
 import jax.experimental.compute_on
 import jax.numpy as jnp
 import jaxtyping as jt
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
+
+try:
+  from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask
+except ImportError:
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
+
 import typeguard
 
 from maxtext.experimental.lineage import dsv3_types

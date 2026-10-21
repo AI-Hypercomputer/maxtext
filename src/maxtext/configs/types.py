@@ -254,6 +254,7 @@ ModelName = Literal[
     "deepseek3.2-671b",
     "deepseek4-tiny",
     "deepseek4-284b",
+    "deepseek4-1600b",
     "deepseek-custom",
     "kimi-k2-1t",
     "gemma-7b",
@@ -294,6 +295,8 @@ ModelName = Literal[
     "weaver-max",
     "weaver-mini-diffuser",
     "qwen3-next-80b-a3b",
+    "qwen3.8-flash-next",
+    "qwen3.8-flash-next-mini",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-9b",
@@ -318,6 +321,7 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "glm5.3-flash",
 ]
 
 
@@ -1309,6 +1313,17 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
   )
+  te_moe_disable_cudnn_gmm_fusion: bool = Field(
+      False,
+      description=(
+          "Force te_moe.moe(..., use_cudnn_fusion=False). When false, MaxText does not pass use_cudnn_fusion "
+          "and uses TransformerEngine's default."
+      ),
+  )
+  te_moe_quantize_before_fsdp_all_gather: bool = Field(
+      False,
+      description="Quantize TE MoE weight shards before the FSDP all-gather; false quantizes after gathering.",
+  )
   te_ep_overflow_check_every_n_steps: PositiveInt = Field(
       20,
       description=(
@@ -1568,7 +1583,10 @@ class MoEGeneral(BaseModel):
 class MoEKernels(BaseModel):
   """Configuration for MoE-specific kernels like Megablox."""
 
-  megablox: bool = Field(True, description="Whether to use Megablox kernels for MoE.")
+  megablox: bool = Field(
+      True,
+      description="Whether to use Megablox kernels for MoE. Automatically disabled when hardware='cpu'.",
+  )
   sparse_matmul: bool = Field(True, description="Whether to use sparse matmul kernels for MoE.")
   wi_tile_fwd_batch_seq: int = Field(
       512,
@@ -1705,9 +1723,7 @@ class DeepSeekMoE(BaseModel):
       "fp8_full_splash_qk_e3_combine_per_hop",
   ] = Field(
       "none",
-      description=(
-          "Quantization of the Lineage sparse-layer routed experts and MLA." " Only used if use_lineage is True."
-      ),
+      description="Quantization of the Lineage sparse-layer routed experts and MLA. Only used if use_lineage is True.",
   )
 
   @classmethod
@@ -1762,6 +1778,38 @@ class Qwen3Next(BaseModel):
       ),
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+
+
+class Qwen3_8FlashNext(BaseModel):
+  """Configuration specific to Qwen3.8-Flash-Next models."""
+
+  hc_count: int = Field(4, description="Number of streams in hyper-connections.")
+  hc_lowrank: int = Field(320, description="Bottleneck dimension in hyper-connections.")
+  index_n_heads: int = Field(4, description="Number of query heads in QSA Indexer.")
+  index_kv_heads: int = Field(1, description="Number of key/value heads in QSA Indexer.")
+  index_head_dim: int = Field(128, description="Head dimension for QSA Indexer.")
+  index_select_block_size: int = Field(4, description="Block compression size for QSA Indexer.")
+  index_select_budget: int = Field(2048, description="Token budget for QSA Indexer.")
+  gdn_output_gate_activation: str = Field(
+      "sigmoid", description="Output gate activation function for GDN linear attention."
+  )
+  use_ple_layer: bool = Field(False, description="Whether to use Per-Layer Embedding (PLE).")
+  ple_layer_id: int = Field(
+      1, description="0-indexed layer where PLE is applied (corresponds to HF 1-indexed ple_layer_ids=[2])."
+  )
+  ple_embed_dim: int = Field(
+      2560, description="Embedding dimension of the PLE layer (HF ple_embed_dim; HF defaults it to hidden_size)."
+  )
+  ple_conv_kernel_size: int = Field(4, description="Kernel size for PLE 1D convolution.")
+  ngram_size: int = Field(3, description="N-gram window size for PLE.")
+  heads_per_ngram: int = Field(8, description="Number of hash heads per n-gram in PLE.")
+  ngram_vocab_size_base: int = Field(20_000_000, description="Base n-gram vocabulary size for PLE.")
+  make_ngram_vocab_size_divisible_by: int = Field(
+      128, description="Alignment divisor for per-head n-gram vocab sizes in PLE."
+  )
+  split_ngram_parts: int = Field(128, description="Number of embedding shards for PLE.")
+  ple_seed: int = Field(1234, description="Hash seed for PLE n-gram hashing.")
+  ple_eos_token_id: int = Field(248044, description="EOS token ID used for PLE n-gram boundary resets (HF eos_token_id).")
 
 
 # ----------------------------------------------------------------------------
@@ -2050,9 +2098,9 @@ class LayoutAndSharding(BaseModel):
       False,
       description=(
           "Prefetch (all-gather) the next scanned layer's FSDP-sharded weights while the current layer runs, in"
-          " both the forward and backward pass. Requires scan_layers=True; the backward always rematerializes"
-          " each layer in full (remat_policy is ignored). Has no effect when no FSDP mesh axis spans more"
-          " than one device. See docs/guides/optimization/fsdp_prefetch.md."
+          " both the forward and backward pass. Requires scan_layers=True. remat_policy applies to each layer;"
+          " gathered weights are never saved and are re-gathered for the backward pass. Has no effect when no"
+          " FSDP mesh axis spans more than one device. See docs/guides/optimization/fsdp_prefetch.md."
       ),
   )
 
@@ -2181,6 +2229,10 @@ class RematAndOffload(BaseModel):
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
+  )
+  te_moe_dispatch_remat_location: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for TE EP dispatch outputs: recompute, save on device, or offload.",
   )
   moe_mlpwi_0: RematLocation = Field(
       RematLocation.REMAT,
@@ -3154,10 +3206,15 @@ class DevelopmentAndDebugging(BaseModel):
   _validate_config = field_validator("constant_bound_config", mode="before")(_clean_empty_string_for_list)
 
 
-class Profiling(BaseModel):
-  """Configuration for performance profiling."""
+class ProfilingCore(BaseModel):
+  """Profiler backend selection shared by every trainer."""
 
   profiler: ProfilerType = Field(ProfilerType.NONE, description="Profiler to use ('xplane', 'nsys').")
+
+
+class Profiling(ProfilingCore):
+  """Configuration for step-window performance profiling (`common/profiler.py`)."""
+
   upload_all_profiler_results: bool = Field(False, description="Upload profiler results from all hosts.")
   skip_first_n_steps_for_profiler: int = Field(1, description="Number of initial steps to skip for profiling.")
   profiler_steps: int = Field(5, description="Number of steps to profile.")
@@ -3240,6 +3297,10 @@ class ManagedMLDiagnostics(BaseModel):
   managed_mldiagnostics_run_group: str = Field("", description="Name used to group multiple runs.")
   managed_mldiagnostics_region: str = Field("", description="GCP region for managed mldiagnostics.")
   managed_mldiagnostics_storage_path: str = Field("", description="Storage path for mldiagnostics (profiles, metrics)")
+  managed_mldiagnostics_metric_only_run: bool = Field(
+      False,
+      description="Whether to create a metric-only run.",
+  )
 
 
 class Goodput(BaseModel):
@@ -3273,7 +3334,19 @@ class ElasticTraining(BaseModel):
   elastic_enabled: bool = Field(False, description="Whether to enable elastic training.")
   elastic_backup_kind: str = Field(
       "snapshot",
-      description=("The kind of backup to use for elastic training: 'snapshot' or 'checkpoint'."),
+      description=(
+          "How an attempt after an elastic event gets its train state back. 'snapshot' keeps a copy of the train"
+          " state and the data iterator position in pinned host memory every `elastic_snapshot_interval` steps, and"
+          " restores that copy when it is at least as recent as the latest checkpoint; it needs grain's"
+          " ElasticIterator (or synthetic data) and is not supported with DiLoCo, rampup batch size or colocated"
+          " python data input, which must set 'checkpoint'. 'checkpoint' only restores the latest persistent"
+          " checkpoint. The snapshot only survives the loss of a slice for state that is replicated across slices, so"
+          " with `shard_optimizer_over_data` it falls back to the checkpoint."
+      ),
+  )
+  elastic_snapshot_interval: PositiveInt = Field(
+      10,
+      description="In snapshot mode, how often (in steps) to copy the train state to pinned host memory.",
   )
   elastic_timeout_seconds: int = Field(
       300,
@@ -3542,6 +3615,10 @@ class VLLM(BaseModel):
       "maxtext",
       description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
   )
+  rollout_weight_dtype: str = Field(
+      "",
+      description="Target weight dtype for trainer->rollout weight conversion. When empty, defaults to weight_dtype.",
+  )
   weight_sync_debug: bool = Field(
       False,
       description=(
@@ -3588,6 +3665,50 @@ class VLLM(BaseModel):
 class RL(BaseModel):
   """Configuration for RL algorithms like Group Relative Policy Optimization (GRPO) among others."""
 
+  # Targeted profiling of the Tunix RL roles (tunix `RLProfileConfig`). Active
+  # only with `profiler=xplane`.
+  profiler_start_invocation: int = Field(
+      2,
+      ge=0,
+      description=(
+          "Zero-based invocation index at which tracing starts for each RL"
+          " role: `update_actor` for the actor and `generate` for the rollout"
+          " engine (tunix `RLProfileConfig.start_invocation`). This counts role"
+          " function calls, not global training steps: `update_actor` runs once"
+          " per micro-batch (mini-batch x gradient accumulation x"
+          " num_iterations per step) and eval actor passes share the actor"
+          " counter. Default 2 skips JIT compilation and warm-up."
+      ),
+  )
+  profiler_num_invocations: int = Field(
+      1,
+      ge=1,
+      description=(
+          "Number of consecutive invocations traced per role once"
+          " `profiler_start_invocation` is reached (tunix"
+          " `RLProfileConfig.num_invocations`). One session is written per"
+          " invocation as `<role>_invocation_<n>`."
+      ),
+  )
+  profiler_timeout_secs: float = Field(
+      60.0,
+      gt=0,
+      description=(
+          "Seconds to wait for tunix's background trace stop and upload thread"
+          " before starting the next trace or closing the cluster (tunix"
+          " `RLProfileConfig.timeout_secs`)."
+      ),
+  )
+  profiler_max_num_hosts: PositiveInt = Field(
+      1,
+      description=(
+          "Pathways only: maximum number of worker hosts to trace with the"
+          " xplane profiler across all RL roles (trainer and sampler). Defaults"
+          " to 1 (worker 0 only). Values > 1 trace worker hosts across all"
+          " slices on the Pathways backend."
+      ),
+  )
+
   num_generations: int = Field(2, description="Number of responses to generate per prompt (G in GRPO paper).")
   num_iterations: int = Field(1, ge=1, description="Number of iterations per batch (μ in GRPO paper).")
   grpo_beta: float = Field(0.08, description="Coefficient for the KL divergence penalty (β).")
@@ -3629,22 +3750,6 @@ class RL(BaseModel):
       description=(
           "Use rollout engine's logprobs as old_per_token_logps. "
           "False selects the step-0 re-forward path (trainer recomputes them)"
-      ),
-  )
-  force_on_policy_ratio: bool = Field(
-      False,
-      description=(
-          "Pin the PPO/GRPO surrogate ratio to exactly 1.0 by using "
-          "stop_gradient(current_logp) as old_per_token_logps. Valid only for "
-          "single-iteration on-policy training (num_iterations=1)."
-      ),
-  )
-  log_sampler_trainer_agreement: bool = Field(
-      False,
-      description=(
-          "Compute an extra trainer forward pass per step to log sampler-vs-trainer "
-          "logp agreement metrics. Costs ~1 forward pass; needed because "
-          "force_on_policy_ratio otherwise leaves no trainer logps to compare."
       ),
   )
 
@@ -3901,6 +4006,32 @@ class DerivedValues(BaseModel):
 # ----------------------------------------------------------------------------
 
 
+def derive_managed_mldiagnostics_dir(
+    base_output_directory: str | None,
+    run_name: str | None,
+    managed_mldiagnostics_storage_path: str | None,
+) -> str | None:
+  """Returns the managed ML Diagnostics root for a run, or None if it cannot be derived.
+
+  Layout: `<managed_mldiagnostics_storage_path or base_output_directory>/<run_name>/managed-mldiagnostics`,
+  without a trailing slash (the SDK mis-joins paths that end in one, b/454725283). The SDK appends its
+  own run identifier below this directory for profiles.
+
+  Args:
+    base_output_directory: The run's base output directory; used when no dedicated storage path is set.
+    run_name: The run name; the directory cannot be derived without it.
+    managed_mldiagnostics_storage_path: Optional dedicated storage root that takes priority over
+      `base_output_directory`.
+
+  Returns:
+    The derived directory, or None when `run_name` or both base paths are empty.
+  """
+  telemetry_base = managed_mldiagnostics_storage_path or base_output_directory
+  if telemetry_base and run_name:
+    return os.path.join(telemetry_base, run_name, "managed-mldiagnostics")
+  return None
+
+
 # Decoder blocks that support router replay (`forced_routed_experts`). All are
 # homogeneous-MoE, so a 4D layer axis is just the decoder layer index;
 # interleaved architectures (Llama4/Envy) would need a MoE-only counter.
@@ -4082,6 +4213,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    Qwen3_8FlashNext,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -4713,9 +4845,11 @@ class MaxTextConfig(
       self.checkpoint_dir = os.path.join(output_dir, "checkpoints", "")
       self.metrics_dir = os.path.join(output_dir, "metrics", "")
       self.tensorboard_dir = os.path.join(output_dir, "tensorboard", "")
-      # To work around SDK bug b/454725283, remove the trailing back slash from the managed_mldiagnostics_dir.
-      telemetry_base = getattr(self, "managed_mldiagnostics_storage_path", "") or self.base_output_directory
-      self.managed_mldiagnostics_dir = os.path.join(telemetry_base, self.run_name, "managed-mldiagnostics")
+      self.managed_mldiagnostics_dir = derive_managed_mldiagnostics_dir(
+          self.base_output_directory,
+          self.run_name,
+          self.managed_mldiagnostics_storage_path,
+      )
       if self.enable_mllog:
         if not self.mllog_file:
           self.mllog_file = os.path.join(output_dir, f"mllog_{self.data_shuffle_seed}.log")
@@ -4908,6 +5042,10 @@ class MaxTextConfig(
     }
     self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
 
+    # Megablox Pallas Mosaic kernels are TPU-specific; automatically fall back to jax.lax.ragged_dot on CPU.
+    if self.hardware == "cpu" and self.megablox:
+      self.megablox = False
+
     # Check for AQT deprecation warning
     if self.quantization and not self.use_qwix_quantization:
       if self.quantization not in (
@@ -5026,6 +5164,7 @@ class MaxTextConfig(
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "te_moe_dispatch_remat_location",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -5198,6 +5337,26 @@ class MaxTextConfig(
       raise ValueError(
           "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
       )
+    if self.elastic_enabled and self.elastic_backup_kind == "snapshot":
+      if self.enable_diloco:
+        raise ValueError("elastic_backup_kind='snapshot' is not supported with DiLoCo (`enable_diloco=True`).")
+      if self.enable_rampup_batch_size:
+        # The rampup manager derives its progress from the latest checkpoint step before the state is restored,
+        # so a restore from a newer snapshot would leave it behind.
+        raise ValueError("elastic_backup_kind='snapshot' is not supported with `enable_rampup_batch_size=True`.")
+      if self.dataset_type != DatasetType.SYNTHETIC:
+        # The snapshot carries the data iterator position as the global example index of grain's ElasticIterator,
+        # which is the only iterator whose position is valid for any number of hosts.
+        if self.dataset_type != DatasetType.GRAIN or not self.grain_use_elastic_iterator:
+          raise ValueError(
+              "elastic_backup_kind='snapshot' requires `dataset_type=grain` with `grain_use_elastic_iterator=True`"
+              " (or synthetic data), so that the data iterator position can be snapshotted with the train state."
+          )
+        if self.colocated_python_data_input:
+          raise ValueError(
+              "elastic_backup_kind='snapshot' does not support `colocated_python_data_input=True` yet: the data"
+              " iterator position lives in the colocated process and is not part of the snapshot."
+          )
     if self.colocated_python_data_input and not self.enable_single_controller:
       raise ValueError(
           "Colocated python data input is only supported with Pathways (single"
@@ -5497,6 +5656,8 @@ class MaxTextConfig(
         )
     if self.moe_use_direct_token_gather and self.use_gather_mosaic_kernel:
       raise ValueError("`moe_use_direct_token_gather=True` currently requires `use_gather_mosaic_kernel=False`.")
+    if self.te_moe_disable_cudnn_gmm_fusion and not self.te_moe_block:
+      raise ValueError("te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True.")
     if self.num_experts > 1:
       if self.moe_mlp_dim <= 0:
         raise ValueError("moe_mlp_dim must be positive for MoE models (num_experts > 1)")
@@ -5526,6 +5687,13 @@ class MaxTextConfig(
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
       if self.te_moe_block and not self.sparse_matmul:
         raise ValueError("te_moe_block=True requires sparse_matmul=True.")
+      if self.te_moe_quantize_before_fsdp_all_gather:
+        if not self.te_moe_block or self.te_gmm_quantization != TEGroupedGemmQuantizationType.TE_MXFP8:
+          raise ValueError(
+              "te_moe_quantize_before_fsdp_all_gather=True requires te_moe_block=True and te_gmm_quantization=te_mxfp8."
+          )
+        if self.use_2d_fsdp_sharding:
+          raise ValueError("te_moe_quantize_before_fsdp_all_gather=True does not support 2D FSDP weight sharding.")
       if self.te_moe_block and not self.prefuse_moe_weights:
         raise ValueError("te_moe_block=True requires prefuse_moe_weights=True.")
       if self.te_moe_block and self.routed_bias_update_rate > 0.0:
@@ -6363,6 +6531,10 @@ class MaxTextConfig(
             f"For qwen3_custom_moe, moe_expert_input_dim ({self.moe_expert_input_dim}) "
             f"must be equal to attention_output_dim ({self.attention_output_dim})"
         )
+    if self.model_name == "glm5.3-flash" and not self.use_m3_model:
+      raise ValueError(
+          "glm5.3-flash requires use_m3_model=True; legacy decoder_block is not" " supported for GLM-5.3-Flash."
+      )
     return self
 
 
@@ -6391,6 +6563,7 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
+    Qwen3_8FlashNext,
     MultimodalGeneral,
     Muon,
     FineTuning,
@@ -6534,6 +6707,42 @@ class RLConfig(
           if inner_key in data:
             nested_dict[inner_key] = data[inner_key]
 
+    # Map legacy step-based profiling flags to RL role-invocation profiling fields
+    # when the invocation fields were not explicitly overridden. Because `pyconfig`
+    # merges `post_train/rl.yml` into `data["rl"]` before constructing `RLConfig`,
+    # `rl_dict` may already contain the `RL` model defaults; query `RL.model_fields`
+    # dynamically rather than hardcoding default values.
+    rl_dict = data.get("rl")
+    if isinstance(rl_dict, dict):
+      rl_fields = getattr(RL, "model_fields")
+      default_start = rl_fields["profiler_start_invocation"].default
+      if (
+          "skip_first_n_steps_for_profiler" in data
+          and "profiler_start_invocation" not in data
+          and rl_dict.get("profiler_start_invocation", default_start) == default_start
+      ):
+        try:
+          skip_steps = int(data["skip_first_n_steps_for_profiler"])
+        except (TypeError, ValueError):
+          skip_steps = -1
+        if skip_steps >= 0:
+          rl_dict["profiler_start_invocation"] = skip_steps
+          data["profiler_start_invocation"] = skip_steps
+
+      default_num = rl_fields["profiler_num_invocations"].default
+      if (
+          "profiler_steps" in data
+          and "profiler_num_invocations" not in data
+          and rl_dict.get("profiler_num_invocations", default_num) == default_num
+      ):
+        try:
+          prof_steps = int(data["profiler_steps"])
+        except (TypeError, ValueError):
+          prof_steps = 0
+        if prof_steps >= 1:
+          rl_dict["profiler_num_invocations"] = prof_steps
+          data["profiler_num_invocations"] = prof_steps
+
     return data
 
   @model_validator(mode="after")
@@ -6604,6 +6813,42 @@ class RLConfig(
       tensorboard_dir = os.path.join(os.path.abspath("maxtext_output"), "tensorboard", "")
     object.__setattr__(self, "tensorboard_dir", tensorboard_dir)
 
+    # Managed ML Diagnostics: derive the run directory and fail at config time
+    # on combinations that would only surface mid-run.
+    object.__setattr__(
+        self,
+        "managed_mldiagnostics_dir",
+        derive_managed_mldiagnostics_dir(
+            self.base_output_directory,
+            self.run_name,
+            self.managed_mldiagnostics_storage_path,
+        ),
+    )
+    if self.managed_mldiagnostics:
+      if not self.managed_mldiagnostics_dir or not self.managed_mldiagnostics_dir.startswith("gs://"):
+        raise ValueError(
+            "managed_mldiagnostics=True requires a gs:// run directory: set"
+            " run_name and either managed_mldiagnostics_storage_path or"
+            " base_output_directory to a gs:// path (derived"
+            f" managed_mldiagnostics_dir={self.managed_mldiagnostics_dir!r})."
+        )
+      if self.profiler == ProfilerType.XPLANE and self.managed_mldiagnostics_on_demand_profiling:
+        raise ValueError(
+            "managed_mldiagnostics_on_demand_profiling=True cannot be combined"
+            " with profiler=xplane on the RL path: an on-demand capture during"
+            " a programmatic trace session fails with 'profile already"
+            " started'. Set managed_mldiagnostics_on_demand_profiling=False (or"
+            " profiler='')."
+        )
+
+    if self.rl.profiler_max_num_hosts > 1:
+      if self.profiler != ProfilerType.XPLANE:
+        raise ValueError(f"rl.profiler_max_num_hosts > 1 requires profiler=xplane, got profiler={self.profiler!r}.")
+      import pathwaysutils  # pylint: disable=import-outside-toplevel
+
+      if not pathwaysutils.is_pathways_backend_used():
+        raise ValueError("rl.profiler_max_num_hosts > 1 is only supported on the Pathways backend (JAX_PLATFORMS=proxy).")
+
     # Slice configuration
     if not (
         (self.cluster.num_trainer_slices == -1 and self.cluster.num_samplers_slices == -1)
@@ -6661,6 +6906,7 @@ class RLConfig(
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "te_moe_dispatch_remat_location",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",

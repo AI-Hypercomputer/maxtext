@@ -60,6 +60,7 @@ from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate,
 from maxtext.layers.attention_mla import indexer_losses
 from maxtext.layers import moe
 from maxtext.common import checkpointing, profiler
+from maxtext.common import snapshotting
 from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
@@ -83,6 +84,7 @@ from maxtext.utils import sharding
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import train_utils
 from maxtext.utils import mllog_utils
+from maxtext.utils import gpu_collective_overlap_pass
 from maxtext.utils.gradient_accumulation import gradient_accumulation_loss_and_grad
 from maxtext.utils.vocabulary_tiling import vocab_tiling_nnx_loss
 
@@ -827,8 +829,17 @@ def training_loop_iteration(
     jax_device_state: dict[str, Any],
     python_vars: dict[str, Any],
     immutable_data: dict[str, Any],
+    elastic_retry_cache: elastic_utils.RetryCache | None = None,
 ):
-  """Executes a single iteration of the training loop."""
+  """Executes a single iteration of the training loop.
+
+  Args:
+    jax_device_state: Device arrays and jitted functions the loop updates.
+    python_vars: Python-side loop state the loop updates.
+    immutable_data: Values fixed for the attempt that the loop only reads.
+    elastic_retry_cache: The retry cache of an elastic run, or None. It outlives the attempt; in snapshot mode its
+      `snapshotter` slot holds the in-memory snapshots the loop saves into.
+  """
   # Unpack jax_device_state
   state = jax_device_state["state"]
   init_rng = jax_device_state["init_rng"]
@@ -853,6 +864,10 @@ def training_loop_iteration(
 
   # Unpack immutable_data
   config = immutable_data["config"]  # for helpers
+  if elastic_retry_cache is None:
+    snapshotter = None
+  else:
+    snapshotter = elastic_retry_cache.snapshotter
   logical_axis_rules_for_train = immutable_data["logical_axis_rules_for_train"]
   logical_axis_rules_for_eval = immutable_data["logical_axis_rules_for_eval"]
   eval_interval = immutable_data["eval_interval"]
@@ -918,6 +933,9 @@ def training_loop_iteration(
   completed_step = step + 1
 
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
+  # Snapshot mode: copy the state and the data iterator position to host memory when due, and always before the
+  # scale-up interrupt at the top of the next step, so that the next attempt resumes from here.
+  snapshotting.maybe_save_snapshot(snapshotter, config, state, step, checkpoint_manager, data_iterator)
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
     jax.block_until_ready(state)  # Ensure compilation has finished.
@@ -1472,7 +1490,9 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
     # Using while loop to allow for potential dynamic 'steps' adjustment in future
     while python_vars["step"] < immutable_data["steps"]:
       step = python_vars["step"]
-      metrics = training_loop_iteration(jax_device_state, python_vars, immutable_data)
+      metrics = training_loop_iteration(
+          jax_device_state, python_vars, immutable_data, elastic_retry_cache=elastic_retry_cache
+      )
       python_vars["step"] += 1
 
       if getattr(config, "te_moe_block", False):
@@ -1558,6 +1578,7 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
   train_utils.validate_train_config(config)
+  gpu_collective_overlap_pass.register()
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
@@ -1592,9 +1613,17 @@ def get_train_func(config, recorder, argv):
     # `elastic_retry` and the attempts it runs, and is passed down to `train_loop` and `setup_train_loop`. It
     # can't live in the config: the config built for an attempt is itself one of the cached objects.
     elastic_retry_cache = elastic_utils.RetryCache()
+    # Snapshot mode (`elastic_backup_kind: snapshot`): the snapshotter keeps the latest copy of the train state in
+    # host memory across attempts. It is not a cache entry, so a slice change never clears it. None otherwise.
+    elastic_retry_cache.snapshotter = snapshotting.create_snapshotter(config)
 
     def on_elastic_event(scale_up):
       elastic_utils.record_elastic_event_start(recorder, scale_up=scale_up)
+      if elastic_retry_cache.snapshotter is not None and not scale_up:
+        # A save that was running when the slice went down may be stuck on it; start over with a new snapshotter
+        # that keeps the last completed snapshot. Before a scale-up nothing is in flight: `maybe_save_snapshot`
+        # waited for the last save.
+        elastic_retry_cache.snapshotter = snapshotting.reset_snapshotter(elastic_retry_cache.snapshotter)
 
     def on_slices_ready():
       elastic_utils.record_elastic_wait_end_and_reinit_start(recorder)

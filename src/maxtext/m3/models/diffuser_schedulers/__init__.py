@@ -1,4 +1,4 @@
-# Copyright 2023–2025 Google LLC
+# Copyright 2023–2026 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,3 +13,7 @@
 # limitations under the License.
 
 """Diffusion noise schedulers package."""
+
+from .scheduling_unipc_multistep import FlaxUniPCMultistepScheduler
+from .scheduling_flow_match import FlaxFlowMatchScheduler
+from .scheduling_utils import FlaxSchedulerMixin, FlaxSchedulerOutput

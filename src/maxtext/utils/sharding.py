@@ -1122,6 +1122,30 @@ def get_formatted_sharding_annotations(params, mesh=None):
 
 FSDP_MESH_AXES = ("fsdp", "fsdp_transpose")
 
+# Mesh axes that act as FSDP weight-sharding axes when they follow `fsdp` or `fsdp_transpose` on
+# the same weight dimension (e.g. `embed` / `embed_attn` / `q_lora` / `kv_lora` in `base.yml`,
+# where `expert` and `context` co-shard non-routed weights alongside `fsdp`).
+# Under the `ep-as-dp` custom rule (`custom_mesh_and_rule=ep-as-dp`), non-routed weights are
+# already replicated over `expert`, so `expert` is absent from their PartitionSpec and including
+# it here is a safe no-op, while routed MoE weights have `expert` alone on the `exp` dimension
+# (with no FSDP axis) and keep `expert` sharded.
+FSDP_CO_AXES = FSDP_MESH_AXES + ("context", "context_usp_ulysses", "expert")
+
+
+def fsdp_axes_for_dim(entry):
+  """Returns the mesh axes in a PartitionSpec entry that should be gathered over FSDP.
+
+  If the dimension contains at least one axis in `FSDP_MESH_AXES`, returns all axes in
+  `FSDP_CO_AXES` from the first FSDP axis onward. Dimensions without an FSDP axis (such as the
+  MoE routed expert dimension `'expert'`) and axes preceding the first FSDP axis (such as
+  `'expert'` in `('expert', 'fsdp')`) are left untouched.
+  """
+  axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+  first_fsdp = next((i for i, a in enumerate(axes) if a in FSDP_MESH_AXES), None)
+  if first_fsdp is None:
+    return ()
+  return tuple(a for a in axes[first_fsdp:] if a in FSDP_CO_AXES)
+
 
 def remove_mesh_axes_from_partition_spec(pspec, axes_to_remove, dims=None):
   """Return `pspec` with `axes_to_remove` stripped from the given dims.
@@ -1233,6 +1257,35 @@ def remove_mesh_axes_from_sharding(sharding_tree, axes_to_remove):
       return jax.sharding.NamedSharding(
           named_sharding.mesh,
           remove_mesh_axes_from_partition_spec(named_sharding.spec, axes_to_remove),
+      )
+    return named_sharding
+
+  return jax.tree.map(_peel, sharding_tree)
+
+
+def remove_fsdp_from_partition_spec(pspec):
+  """Return `pspec` with each dimension's FSDP (and co-sharded) axes removed.
+
+  Unlike `remove_mesh_axes_from_partition_spec(pspec, FSDP_CO_AXES)`, which strips `FSDP_CO_AXES`
+  unconditionally from every dimension (and would strip `'expert'` from the MoE routed expert
+  dimension), this only peels co-sharded axes (`'context'`, `'context_usp_ulysses'`, `'expert'`)
+  on dimensions where they follow an `FSDP_MESH_AXES` axis (`'fsdp'` or `'fsdp_transpose'`).
+  """
+  for i, entry in enumerate(pspec):
+    to_remove = fsdp_axes_for_dim(entry)
+    if to_remove:
+      pspec = remove_mesh_axes_from_partition_spec(pspec, to_remove, dims=(i,))
+  return pspec
+
+
+def remove_fsdp_from_sharding(sharding_tree):
+  """Recursively traverses a sharding tree removing each dimension's FSDP (and co-sharded) axes."""
+
+  def _peel(named_sharding):
+    if isinstance(named_sharding, jax.sharding.NamedSharding):
+      return jax.sharding.NamedSharding(
+          named_sharding.mesh,
+          remove_fsdp_from_partition_spec(named_sharding.spec),
       )
     return named_sharding
 

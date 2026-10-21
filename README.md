@@ -143,6 +143,7 @@ MaxText aims to provide you with the best OSS models, whether as a reference imp
   - Qwen 3 Dense (0.6B, 1.7B, 4B, 8B, 14B, 32B)
   - Qwen 2.5 (1.5B, 7B, 14B)
 - DeepSeek AI
+  - DeepSeek V4 (284B Flash, 1600B Pro)
   - DeepSeek V3.2 (671B)
   - DeepSeek V3.1 (671B)
   - DeepSeek V3 0324 (671B), DeepSeek R1 0528 (671B)

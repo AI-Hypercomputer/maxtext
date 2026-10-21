@@ -72,7 +72,7 @@ jobs:
     needs: release_approval
     uses: ./.github/workflows/build_package.yml
     if: |
-      always() &&
+      !cancelled() &&
       (needs.release_approval.result == 'success' || needs.release_approval.result == 'skipped')
     with:
       device_type: tpu
@@ -120,7 +120,7 @@ jobs:
     needs: [build_maxtext_package, publish_maxtext_to_pypi]
     runs-on: ubuntu-latest
     if: |
-      always() &&
+      !cancelled() &&
       needs.build_maxtext_package.result == 'success' &&
       (needs.publish_maxtext_to_pypi.result == 'success' || needs.publish_maxtext_to_pypi.result == 'skipped')
     outputs:
@@ -142,7 +142,7 @@ jobs:
     name: Publish MaxText Documentation
     needs: [get_latest_maxtext_pypi_version]
     runs-on: ubuntu-latest
-    if: always() && needs.get_latest_maxtext_pypi_version.result == 'success'
+    if: ${{ !cancelled() && needs.get_latest_maxtext_pypi_version.result == 'success' }}
     timeout-minutes: 15
     steps:
       - name: Trigger Read the Docs build
@@ -252,7 +252,7 @@ jobs:
     name: Promote ${{ matrix.name }} Docker Image
     needs: [get_latest_maxtext_pypi_version]
     runs-on: linux-x86-n2-16-buildkit
-    if: always() && needs.get_latest_maxtext_pypi_version.result == 'success'
+    if: ${{ !cancelled() && needs.get_latest_maxtext_pypi_version.result == 'success' }}
     container: google/cloud-sdk:524.0.0
     strategy:
       fail-fast: false

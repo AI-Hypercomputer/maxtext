@@ -713,12 +713,25 @@ class NNXDecoder(nnx.Module):
     num_remaining_layers = config.num_decoder_layers - num_hash_layers
     num_full_blocks = num_remaining_layers // 2
     if num_full_blocks > 0:
+      remat_policy_fn, prevent_cse_in_remat = self._get_deepseek4_remat_policy_and_cse()
       self.scanned_blocks = self._create_scanned_layers(
           deepseek4.DeepSeek4ScannableBlock,
           length=num_full_blocks,
           metadata_axis_name="scanned_blocks",
           rngs=rngs,
+          remat_policy_fn=remat_policy_fn,
+          prevent_cse_in_remat=prevent_cse_in_remat,
       )
+
+  def _get_deepseek4_remat_policy_and_cse(self):
+    """Returns the scan-safe per-layer remat policy and prevent_cse flag for DeepSeek-V4."""
+    # Offloaded residuals cannot cross the trip-count-one boundary, so keep them on device.
+    save_names, offload_names = maxtext_utils.get_save_and_offload_names(self.config)
+    if save_names or offload_names:
+      policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_names))
+    else:
+      policy = self.get_remat_policy()
+    return policy, maxtext_utils.should_prevent_cse_in_remat(self.config)
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -1317,7 +1330,15 @@ class NNXDecoder(nnx.Module):
   def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
     """Runs the scanned layer stack with FSDP weight prefetching (see `fsdp_prefetch`)."""
     return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
-        layers, x_in, *args, length=length, mesh=self.mesh, config=self.config, **kwargs
+        layers,
+        x_in,
+        *args,
+        length=length,
+        mesh=self.mesh,
+        config=self.config,
+        remat_policy=self.get_remat_policy(),
+        prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
+        **kwargs,
     )
 
   def get_decoder_layers(self):
@@ -2520,16 +2541,34 @@ class NNXDecoder(nnx.Module):
     }
 
     # 1. Unrolled prefix layers (0, 1, 2)
+    is_training = model_mode == MODEL_MODE_TRAIN
+    has_remat_policy = cfg.remat_policy is not None and cfg.remat_policy != "none"
+    use_remat = is_training and has_remat_policy
+    remat_policy_fn, prevent_cse = self._get_deepseek4_remat_policy_and_cse() if use_remat else (None, None)
     for layer_idx in range(num_hash_layers):
       layer = getattr(self, f"layers_{layer_idx}")
-      y, _ = layer(
-          y,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          **layer_call_kwargs,
-      )
+      if use_remat:
+        y = deepseek4._run_deepseek4_layer_remat(  # pylint: disable=protected-access
+            layer,
+            y,
+            config=cfg,
+            policy=remat_policy_fn,
+            prevent_cse=prevent_cse,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            **layer_call_kwargs,
+        )
+      else:
+        y, _ = layer(
+            y,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            **layer_call_kwargs,
+        )
 
     # 2. Scanned blocks
     num_remaining_layers = cfg.num_decoder_layers - num_hash_layers
@@ -2544,6 +2583,7 @@ class NNXDecoder(nnx.Module):
           model_mode,
           length=num_full_blocks,
           metadata_axis_name="scanned_blocks",
+          skip_block_remat=True,
           **layer_call_kwargs,
       )
 

@@ -9,7 +9,7 @@ flax
 gcsfs
 google-api-python-client
 google-cloud-aiplatform
-google-cloud-mldiagnostics
+google-cloud-mldiagnostics>=1.0.9
 google-cloud-monitoring
 grain[parquet]
 huggingface_hub>=1.14.0
@@ -23,7 +23,7 @@ ml-goodput-measurement
 numpy
 omegaconf
 optax
-orbax-checkpoint
+orbax-checkpoint>=0.12.8
 parameterized
 pathwaysutils>=0.1.11
 pillow

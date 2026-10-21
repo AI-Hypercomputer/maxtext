@@ -23,7 +23,10 @@ takes its target as a plain integer and is therefore fully testable on a
 single CPU. Only the tests that need a real multi-device mesh are marked
 `tpu_only`. That marker matters -- the repo conftest auto-marks unmarked tests
 `cpu_only` and skips them on accelerator testbeds, so a multi-device test
-without it would silently never run anywhere it matters.
+without it would silently never run anywhere it matters. Those tests size
+their meshes and expectations from `jax.device_count()` rather than assuming
+eight: the TPU runner CI uses has four chips, and a hard-coded eight turned
+every one of them into a skip.
 
 Slice-count note: no testbed here spans more than one slice, and a device's
 slice membership comes from an attribute jax sets, so the multi-slice tests
@@ -39,13 +42,16 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 import numpy as np
 import pytest
 
 from maxtext.m3.core import sharding as sharding_lib
+from maxtext.m3.core.sharding import DefaultSharding
 from maxtext.m3.core.sharding import MESH_AXIS_NAMES
 from maxtext.m3.core.sharding import Sharding
 from maxtext.m3.core.sharding import TensorType
@@ -56,22 +62,26 @@ from maxtext.m3.core.sharding import create_mesh
 
 
 class _ExampleSharding(Sharding):
-  """A representative rule set, shaped like one a real model would ship."""
+  """A small rule set for exercising the ABC, independent of `DefaultSharding`.
+
+  Kept separate so the mechanics tests below keep passing if the default rules
+  change; `DefaultShardingTest` pins those rules on their own.
+  """
 
   def map_axis(self, axis, tensor_name, tensor_type):
     match axis, tensor_type:
       case "batch", TensorType.ACTIVATION:
-        return ("dp", "fsdp")
+        return ("data", "fsdp")
       case "embed", TensorType.WEIGHT:
         return "fsdp"
       case "embed", TensorType.ACTIVATION:
         return None
       case ("heads" | "kv_heads"), _:
-        return "tp"
+        return "tensor"
       case "head_dim", _:
         return None
       case "mlp", _:
-        return "tp"
+        return "tensor"
       case "length", _:
         return None
       case _:
@@ -79,10 +89,10 @@ class _ExampleSharding(Sharding):
 
 
 class _BadSharding(Sharding):
-  """Returns a mesh axis that does not exist, e.g. legacy's name for `tp`."""
+  """Returns a mesh axis that does not exist: the abbreviation for `tensor`."""
 
   def map_axis(self, axis, tensor_name, tensor_type):
-    return "tensor"
+    return "tp"
 
 
 class ResolveAxisSizesTest(parameterized.TestCase):
@@ -97,7 +107,7 @@ class ResolveAxisSizesTest(parameterized.TestCase):
       ("all_explicit", (1, 4, 2, 1), 8, (1, 4, 2, 1)),
       ("auto_fsdp", (1, -1, 1, 1), 8, (1, 8, 1, 1)),
       ("auto_fsdp_with_tp", (1, -1, 2, 1), 8, (1, 4, 2, 1)),
-      ("auto_dp", (-1, 2, 2, 1), 8, (2, 2, 2, 1)),
+      ("auto_data", (-1, 2, 2, 1), 8, (2, 2, 2, 1)),
       ("auto_expert", (1, 2, 1, -1), 8, (1, 2, 1, 4)),
       ("single_device", (1, -1, 1, 1), 1, (1, 1, 1, 1)),
   )
@@ -105,7 +115,7 @@ class ResolveAxisSizesTest(parameterized.TestCase):
     self.assertEqual(_resolve_axis_sizes(sizes, target, "ICI", "per-slice device count"), expected)
 
   @parameterized.named_parameters(
-      ("auto_dp_over_slices", (-1, 1, 1, 1), 4, (4, 1, 1, 1)),
+      ("auto_data_over_slices", (-1, 1, 1, 1), 4, (4, 1, 1, 1)),
       ("explicit_split", (2, 2, 1, 1), 4, (2, 2, 1, 1)),
       ("one_slice", (-1, 1, 1, 1), 1, (1, 1, 1, 1)),
   )
@@ -125,7 +135,7 @@ class ResolveAxisSizesTest(parameterized.TestCase):
       _resolve_axis_sizes(sizes, 8, "ICI", "per-slice device count")
 
   def test_rejects_indivisible_auto_axis(self):
-    """8 devices cannot be split with tp=3."""
+    """8 devices cannot be split with tensor=3."""
     with self.assertRaisesRegex(ValueError, "not divisible"):
       _resolve_axis_sizes((1, -1, 3, 1), 8, "ICI", "per-slice device count")
 
@@ -186,7 +196,7 @@ class ShardingRulesTest(parameterized.TestCase):
 
   def test_weight_spec(self):
     spec = self.sharding("q_proj", ("embed", "heads", "head_dim"))
-    self.assertEqual(spec, P("fsdp", "tp", None))
+    self.assertEqual(spec, P("fsdp", "tensor", None))
 
   def test_defaults_to_weight_tensor_type(self):
     """Omitting `tensor_type` must not silently produce activation rules."""
@@ -203,12 +213,12 @@ class ShardingRulesTest(parameterized.TestCase):
   def test_multi_axis_mapping(self):
     """A logical axis may consume several mesh axes."""
     spec = self.sharding("x", ("batch", "length", "embed"), TensorType.ACTIVATION)
-    self.assertEqual(spec, P(("dp", "fsdp"), None, None))
+    self.assertEqual(spec, P(("data", "fsdp"), None, None))
 
   def test_none_axis_is_replicated_without_consulting_rules(self):
     """An unnamed dimension bypasses `map_axis` entirely."""
     spec = self.sharding("scale", (None, "mlp"))
-    self.assertEqual(spec, P(None, "tp"))
+    self.assertEqual(spec, P(None, "tensor"))
 
   def test_unmapped_axis_raises(self):
     """An unrecognized logical axis must fail loudly, not replicate silently.
@@ -259,12 +269,12 @@ class MeshAxisConflictTest(parameterized.TestCase):
     self.assertIn("'mlp'", str(ctx.exception))
 
   def test_conflict_within_a_multi_axis_mapping_is_caught(self):
-    """`("dp", "fsdp")` on one dimension still consumes both axes."""
+    """`("data", "fsdp")` on one dimension still consumes both axes."""
 
     class _Overlapping(Sharding):
 
       def map_axis(self, axis, tensor_name, tensor_type):
-        return ("dp", "fsdp") if axis == "batch" else "fsdp"
+        return ("data", "fsdp") if axis == "batch" else "fsdp"
 
     with self.assertRaisesRegex(ValueError, "mesh axis 'fsdp'"):
       _Overlapping()("x", ("batch", "embed"))
@@ -278,6 +288,7 @@ class _RecordingSharding(_ExampleSharding):
   """Records every `map_axis` call so the `tensor_type` argument is observable."""
 
   def __init__(self):
+    super().__init__()
     self.calls = []
 
   def map_axis(self, axis, tensor_name, tensor_type):
@@ -349,6 +360,19 @@ def _as_explicit(mesh: jax.sharding.Mesh) -> jax.sharding.Mesh:
   )
 
 
+def _require_multi_device(test: absltest.TestCase) -> int:
+  """Skips `test` unless the testbed has an even device count of at least four; returns the count.
+
+  Even, because the meshes below split `tensor=2`; at least four, because the
+  expert-axis case needs `fsdp=2` times `expert>=2`. That admits the four-chip
+  TPU runner CI uses, eight-chip hosts, and eight forced host-CPU devices alike.
+  """
+  n = jax.device_count()
+  if n < 4 or n % 2:
+    test.skipTest(f"needs an even device count of at least 4, found {n}")
+  return n
+
+
 class ShardModeTest(parameterized.TestCase):
   """`constrain` must pick the API that matches the mesh's sharding mode.
 
@@ -403,45 +427,236 @@ class ShardModeTest(parameterized.TestCase):
       self.assertEqual(tensor_type, TensorType.ACTIVATION, f"axis {axis!r} was resolved with the wrong tensor type")
 
 
+class DefaultShardingTest(parameterized.TestCase):
+  """`DefaultSharding` pinned against the tensors in the design doc's Llama.
+
+  Exact specs rather than "it resolved": a rule that lands on the wrong axis
+  still trains, just slower, and nothing else would notice.
+  """
+
+  def setUp(self):
+    super().setUp()
+    # Flax eager sharding is a process-global flag, and other code sharing the
+    # test process can turn it off. Without it, `*_metadata` sharding is neither
+    # enforced nor applied.
+    self.enter_context(nnx.use_eager_sharding(True))
+    self.sharding = DefaultSharding()
+
+  @parameterized.named_parameters(
+      ("q_proj", "q_proj", ("embed", "heads", "head_dim"), P(("fsdp", "expert"), "tensor", None)),
+      ("k_proj", "k_proj", ("embed", "kv_heads", "head_dim"), P(("fsdp", "expert"), "tensor", None)),
+      ("o_proj", "o_proj", ("heads", "head_dim", "embed"), P("tensor", None, ("fsdp", "expert"))),
+      ("gate", "gate", ("embed", "mlp"), P(("fsdp", "expert"), "tensor")),
+      ("down", "down", ("mlp", "embed"), P("tensor", ("fsdp", "expert"))),
+      ("embedding", "embed", ("vocab", "embed"), P("tensor", ("fsdp", "expert"))),
+      ("norm_scale", "attn_norm", ("norm",), P(None)),
+  )
+  def test_weight_specs(self, tensor_name, axes, expected):
+    self.assertEqual(self.sharding(tensor_name, axes), expected)
+
+  @parameterized.named_parameters(
+      ("query", "query", ("batch", "length", "heads", "head_dim"), P(("data", "fsdp", "expert"), None, "tensor", None)),
+      ("key", "key", ("batch", "length", "kv_heads", "head_dim"), P(("data", "fsdp", "expert"), None, "tensor", None)),
+      ("residual", "post_attn", ("batch", "length", "embed"), P(("data", "fsdp", "expert"), None, None)),
+      ("mlp_mid", "mlp_mid", ("batch", "length", "mlp"), P(("data", "fsdp", "expert"), None, "tensor")),
+      ("logits", "logits", ("batch", "length", "vocab"), P(("data", "fsdp", "expert"), None, "tensor")),
+  )
+  def test_activation_specs(self, tensor_name, axes, expected):
+    self.assertEqual(self.sharding(tensor_name, axes, TensorType.ACTIVATION), expected)
+
+  @parameterized.parameters("embed", "heads", "kv_heads", "head_dim", "mlp", "vocab", "norm", "length")
+  def test_logical_axes_resolve_for_both_tensor_types(self, axis):
+    """Each logical axis a model may pass has a rule for both tensor types.
+
+    `batch` is the deliberate exception -- activation-only, pinned by
+    `test_batch_is_not_a_weight_axis` below.
+    """
+    for tensor_type in TensorType:
+      self.sharding("t", (axis,), tensor_type)
+
+  def test_unknown_axis_raises(self):
+    with self.assertRaisesRegex(KeyError, "embedding"):
+      self.sharding("tok_embed", ("embedding", "embed"))
+
+  def test_batch_is_not_a_weight_axis(self):
+    """A weight annotated with `batch` is a model bug, not a replicated dimension."""
+    with self.assertRaises(KeyError):
+      self.sharding("w", ("batch", "embed"))
+
+  def test_no_doc_tensor_conflicts(self):
+    """The conflict check in `__call__` must stay silent for every tensor the doc's Llama declares."""
+    weights = [("embed", "heads", "head_dim"), ("heads", "head_dim", "embed"), ("embed", "mlp"), ("vocab", "embed")]
+    activations = [("batch", "length", "heads", "head_dim"), ("batch", "length", "embed"), ("batch", "length", "vocab")]
+    for axes in weights:
+      self.sharding("w", axes)
+    for axes in activations:
+      self.sharding("a", axes, TensorType.ACTIVATION)
+
+  def test_construction_outside_a_mesh_raises(self):
+    """Pins the protocol: construct under `set_mesh`, even on one device.
+
+    Flax resolves `kernel_metadata={"out_sharding": ...}` eagerly against the mesh
+    in scope and raises when there is none, rather than storing the spec and
+    leaving the parameter replicated. So the single-device path is "a trivial
+    mesh", never "no mesh". `set_mesh(None)` clears any mesh another test may
+    have left in scope; eager sharding is pinned on in `setUp`.
+    """
+    spec = self.sharding("gate", ("embed", "mlp"))
+    with jax.sharding.set_mesh(None):
+      with self.assertRaisesRegex(ValueError, "mesh"):
+        nnx.Linear(4, 8, use_bias=False, kernel_metadata={"out_sharding": spec}, rngs=nnx.Rngs(0))
+
+  def test_construction_under_a_trivial_mesh_succeeds(self):
+    """The other half of the protocol: a one-device mesh is enough."""
+    spec = self.sharding("gate", ("embed", "mlp"))
+    with jax.sharding.set_mesh(create_mesh(devices=jax.devices()[:1])):
+      layer = nnx.Linear(4, 8, use_bias=False, kernel_metadata={"out_sharding": spec}, rngs=nnx.Rngs(0))
+    self.assertEqual(layer.kernel[...].shape, (4, 8))
+
+
+@pytest.mark.tpu_only
+class DefaultShardingMultiDeviceTest(parameterized.TestCase):
+  """`DefaultSharding` driving real parameter placement through NNX metadata.
+
+  Marked `tpu_only` for the same reason as `CreateMeshMultiDeviceTest`. Sizes
+  come from the device count `n`: `tensor=2` leaves `fsdp = n/2`, and the
+  expert case uses `fsdp=2, expert = n/2`. Tensor dimensions are chosen as
+  multiples of those so every expected shard shape is an exact integer.
+  """
+
+  def setUp(self):
+    super().setUp()
+    self.n = _require_multi_device(self)
+    self.enter_context(nnx.use_eager_sharding(True))  # See `DefaultShardingTest.setUp`.
+    self.sharding = DefaultSharding()
+    self.devices = jax.devices()
+
+  def test_parameters_are_placed_at_construction(self):
+    """`*_metadata={"out_sharding": ...}` plus an ambient mesh is the whole parameter-sharding mechanism.
+
+    Asserted via per-device shard shape, which does not depend on how the
+    realized spec is normalized.
+    """
+    s = self.sharding
+    fsdp = self.n // 2
+    embed_dim = 4 * fsdp
+    mesh = create_mesh(ici={"fsdp": -1, "tensor": 2}, devices=self.devices)
+
+    with jax.sharding.set_mesh(mesh):
+      gate = nnx.Linear(
+          embed_dim, 32, use_bias=False, kernel_metadata={"out_sharding": s("gate", ("embed", "mlp"))}, rngs=nnx.Rngs(0)
+      )
+      embed = nnx.Embed(
+          64, embed_dim, embedding_metadata={"out_sharding": s("embed", ("vocab", "embed"))}, rngs=nnx.Rngs(0)
+      )
+      norm = nnx.RMSNorm(embed_dim, scale_metadata={"out_sharding": s("norm", ("norm",))}, rngs=nnx.Rngs(0))
+
+    # embed over fsdp (4 per device), mlp 32 over tensor=2.
+    self.assertEqual(gate.kernel[...].sharding.shard_shape((embed_dim, 32)), (4, 16))
+    # vocab 64 over tensor=2, embed over fsdp.
+    self.assertEqual(embed.embedding[...].sharding.shard_shape((64, embed_dim)), (32, 4))
+    # norm scale replicated.
+    self.assertEqual(norm.scale[...].sharding.shard_shape((embed_dim,)), (embed_dim,))
+
+  def test_mesh_shape_decides_which_axes_are_live(self):
+    """Same rules, two meshes: the strategy does not change, the combination does.
+
+    With `tensor=1` the `tensor` entries shard nothing and the spec is
+    equivalent to pure FSDP; with `tensor=2` it is not. This is the property
+    that lets one rule set serve every combination of the axes it names.
+    """
+    spec = self.sharding("gate", ("embed", "mlp"))  # P(("fsdp", "expert"), "tensor")
+    pure_fsdp = P("fsdp", None)
+
+    mesh = create_mesh(ici={"fsdp": -1}, devices=self.devices)
+    self.assertTrue(NamedSharding(mesh, spec).is_equivalent_to(NamedSharding(mesh, pure_fsdp), 2))
+
+    mesh = create_mesh(ici={"fsdp": -1, "tensor": 2}, devices=self.devices)
+    self.assertFalse(NamedSharding(mesh, spec).is_equivalent_to(NamedSharding(mesh, pure_fsdp), 2))
+
+  def test_expert_axis_shards_dense_tensors(self):
+    """On a mesh that splits `expert`, dense weights and the batch are sharded across it.
+
+    This is why `expert` sits in the `batch` and `embed` unions. With `embed`
+    on `fsdp` alone, a dense weight would be replicated once per `expert`
+    shard -- `expert` times the memory -- and the batch would not be split over
+    those devices at all. The single-axis spec is evaluated alongside to show
+    the difference rather than assert it from memory.
+    """
+    s = self.sharding
+    n = self.n
+    embed_dim = 2 * n
+    mesh = create_mesh(ici={"fsdp": 2, "expert": -1}, devices=self.devices)
+    self.assertEqual(mesh.shape["expert"], n // 2)
+
+    with jax.sharding.set_mesh(mesh):
+      gate = nnx.Linear(
+          embed_dim, 32, use_bias=False, kernel_metadata={"out_sharding": s("gate", ("embed", "mlp"))}, rngs=nnx.Rngs(0)
+      )
+      residual = jax.jit(lambda x: s.constrain(x, "post_attn", ("batch", "length", "embed")))(
+          jnp.zeros((n, 2, embed_dim))
+      )
+
+    # embed over fsdp x expert = n devices, 2 rows each; mlp 32 over tensor = 1.
+    self.assertEqual(gate.kernel[...].sharding.shard_shape((embed_dim, 32)), (2, 32))
+    # batch n over data x fsdp x expert = n.
+    self.assertEqual(residual.sharding.shard_shape(residual.shape), (1, 2, embed_dim))
+    # The rule this replaces: `fsdp` alone leaves each device holding `expert` times as much.
+    self.assertEqual(NamedSharding(mesh, P("fsdp", None)).shard_shape((embed_dim, 32)), (n, 32))
+
+  def test_activation_constraints_apply(self):
+    s = self.sharding
+    fsdp = self.n // 2
+    mesh = create_mesh(ici={"fsdp": -1, "tensor": 2}, devices=self.devices)
+
+    with jax.sharding.set_mesh(mesh):
+      logits = jax.jit(lambda x: s.constrain(x, "logits", ("batch", "length", "vocab")))(jnp.zeros((fsdp, 2, 16)))
+      residual = jax.jit(lambda x: s.constrain(x, "post_attn", ("batch", "length", "embed")))(jnp.zeros((fsdp, 2, 16)))
+
+    # batch over fsdp; vocab 16 over tensor=2; embed replicated.
+    self.assertEqual(logits.sharding.shard_shape(logits.shape), (1, 2, 8))
+    self.assertEqual(residual.sharding.shard_shape(residual.shape), (1, 2, 16))
+
+
 class CreateMeshTest(parameterized.TestCase):
   """Mesh construction. Single-device cases run anywhere."""
 
   def test_axis_names_are_stable(self):
     """Model rules reference these by name; reordering silently rewires sharding."""
-    self.assertEqual(MESH_AXIS_NAMES, ("dp", "fsdp", "tp", "ep"))
+    self.assertEqual(MESH_AXIS_NAMES, ("data", "fsdp", "tensor", "expert"))
 
   def test_single_device_mesh_is_trivial(self):
     """Defaults must work on one device so there is no special-case code path."""
     mesh = create_mesh(devices=jax.devices()[:1])
     self.assertEqual(mesh.axis_names, MESH_AXIS_NAMES)
-    self.assertEqual(mesh.shape["dp"], 1)
+    self.assertEqual(mesh.shape["data"], 1)
     self.assertEqual(mesh.shape["fsdp"], 1)
     self.assertEqual(mesh.devices.size, 1)
 
   def test_rejects_bad_axis_sizes(self):
     with self.assertRaises(ValueError):
-      create_mesh(ici={"dp": -1, "fsdp": -1}, devices=jax.devices()[:1])
+      create_mesh(ici={"data": -1, "fsdp": -1}, devices=jax.devices()[:1])
 
   def test_dcn_defaults_are_inert_on_one_slice(self):
-    """`dcn_dp_parallelism=-1` must resolve to 1, not compete with the ICI shape.
+    """`dcn={"data": -1}` must resolve to 1, not compete with the ICI shape.
 
     The DCN defaults are always applied, including on the single-slice runs
     that are by far the most common, so they have to disappear cleanly there.
     """
     mesh = create_mesh(devices=jax.devices()[:1])
     self.assertEqual(mesh.devices.size, 1)
-    self.assertEqual(mesh.shape["dp"], 1)
+    self.assertEqual(mesh.shape["data"], 1)
 
   def test_ici_and_dcn_may_each_be_auto(self):
     """One `-1` per shape is legal, because they resolve against different totals."""
-    mesh = create_mesh(ici={"fsdp": -1}, dcn={"dp": -1}, devices=jax.devices()[:1])
+    mesh = create_mesh(ici={"fsdp": -1}, dcn={"data": -1}, devices=jax.devices()[:1])
     self.assertEqual(mesh.devices.size, 1)
 
   @parameterized.named_parameters(
       # An explicit `-1` with nothing left for it to absorb: fails auto-sizing.
-      ("with_auto_dp", {"dcn": {"dp": -1, "tp": 2}}, "Cannot auto-size the -1 DCN mesh axis"),
+      ("with_auto_data", {"dcn": {"data": -1, "tensor": 2}}, "Cannot auto-size the -1 DCN mesh axis"),
       # Fully specified, so it reaches the product check instead.
-      ("fully_specified", {"dcn": {"dp": 1, "tp": 2}}, r"DCN mesh axes .* slice count \(1\)"),
+      ("fully_specified", {"dcn": {"data": 1, "tensor": 2}}, r"DCN mesh axes .* slice count \(1\)"),
   )
   def test_rejects_dcn_request_that_exceeds_the_slice_count(self, kwargs, message):
     """Asking for cross-slice parallelism on a one-slice job must fail loudly.
@@ -455,7 +670,7 @@ class CreateMeshTest(parameterized.TestCase):
 
   def test_rejects_multiple_dcn_auto_axes(self):
     with self.assertRaisesRegex(ValueError, "At most one DCN mesh axis"):
-      create_mesh(dcn={"dp": -1, "fsdp": -1}, devices=jax.devices()[:1])
+      create_mesh(dcn={"data": -1, "fsdp": -1}, devices=jax.devices()[:1])
 
   def test_unnamed_axes_default_to_one(self):
     """Naming only what you split is the point of the mapping form.
@@ -501,45 +716,46 @@ class CreateMeshMultiDeviceTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    self.num_devices = jax.device_count()
-    if self.num_devices < 8:
-      self.skipTest(f"needs at least 8 devices, found {self.num_devices}")
+    self.n = _require_multi_device(self)
+    self.devices = jax.devices()
 
   def test_auto_fsdp_absorbs_all_devices(self):
-    mesh = create_mesh(devices=jax.devices()[:8])
-    self.assertEqual(mesh.shape["fsdp"], 8)
-    self.assertEqual(mesh.shape["tp"], 1)
+    mesh = create_mesh(devices=self.devices)
+    self.assertEqual(mesh.shape["fsdp"], self.n)
+    self.assertEqual(mesh.shape["tensor"], 1)
 
   def test_tensor_parallelism_splits_with_fsdp(self):
-    mesh = create_mesh(ici={"fsdp": -1, "tp": 2}, devices=jax.devices()[:8])
-    self.assertEqual(mesh.shape["fsdp"], 4)
-    self.assertEqual(mesh.shape["tp"], 2)
+    mesh = create_mesh(ici={"fsdp": -1, "tensor": 2}, devices=self.devices)
+    self.assertEqual(mesh.shape["fsdp"], self.n // 2)
+    self.assertEqual(mesh.shape["tensor"], 2)
 
   def test_constrain_shards_activations_across_mesh(self):
     """End to end: logical axes actually split data across devices.
 
     Asserted via per-device shard shape rather than the `PartitionSpec`. With
-    tp=2 the mesh is dp=1, fsdp=4, tp=2, and XLA drops the size-1 `dp` from the
-    realized spec -- so `("batch", ...)` comes back as `P("fsdp", ...)` rather
-    than `P(("dp", "fsdp"), ...)`. Shard shape states the property we actually
-    care about and does not move when the mesh does.
+    `tensor=2` the mesh is `data=1, fsdp=n/2, tensor=2`, and XLA drops the
+    size-1 `data` from the realized spec -- so `("batch", ...)` comes back as
+    `P("fsdp", ...)` rather than `P(("data", "fsdp"), ...)`. Shard shape states
+    the property we actually care about and does not move when the mesh does.
     """
     sharding = _ExampleSharding()
-    mesh = create_mesh(ici={"fsdp": -1, "tp": 2}, devices=jax.devices()[:8])
+    fsdp = self.n // 2
+    mesh = create_mesh(ici={"fsdp": -1, "tensor": 2}, devices=self.devices)
 
     with jax.sharding.set_mesh(mesh):
-      out = jax.jit(lambda x: sharding.constrain(x, "mlp_mid", ("batch", "length", "mlp")))(jnp.zeros((4, 2, 16)))
+      out = jax.jit(lambda x: sharding.constrain(x, "mlp_mid", ("batch", "length", "mlp")))(jnp.zeros((fsdp, 2, 16)))
 
-    # batch 4 over fsdp=4, length replicated, mlp 16 over tp=2.
+    # batch over fsdp, length replicated, mlp 16 over tensor=2.
     self.assertEqual(out.sharding.shard_shape(out.shape), (1, 2, 8))
 
   def test_replicated_axes_are_not_sharded(self):
     """A rule returning None must leave the dimension whole on every device."""
     sharding = _ExampleSharding()
-    mesh = create_mesh(ici={"fsdp": -1, "tp": 2}, devices=jax.devices()[:8])
+    fsdp = self.n // 2
+    mesh = create_mesh(ici={"fsdp": -1, "tensor": 2}, devices=self.devices)
 
     with jax.sharding.set_mesh(mesh):
-      out = jax.jit(lambda x: sharding.constrain(x, "hidden", ("batch", "length", "embed")))(jnp.zeros((4, 2, 16)))
+      out = jax.jit(lambda x: sharding.constrain(x, "hidden", ("batch", "length", "embed")))(jnp.zeros((fsdp, 2, 16)))
 
     # `embed` is unconstrained for activations, so the last dim stays at 16.
     self.assertEqual(out.sharding.shard_shape(out.shape), (1, 2, 16))
@@ -552,14 +768,15 @@ class CreateMeshMultiDeviceTest(parameterized.TestCase):
     wrong API goes unnoticed; with real shards it raises.
 
     The realized spec also differs between modes -- explicit meshes keep the
-    size-1 `dp` that auto normalizes away -- so this asserts shard shape, which
+    size-1 `data` that auto normalizes away -- so this asserts shard shape, which
     is the property that has to match.
     """
     sharding = _ExampleSharding()
-    mesh = _as_explicit(create_mesh(ici={"fsdp": -1, "tp": 2}, devices=jax.devices()[:8]))
+    fsdp = self.n // 2
+    mesh = _as_explicit(create_mesh(ici={"fsdp": -1, "tensor": 2}, devices=self.devices))
 
     with jax.sharding.set_mesh(mesh):
-      out = jax.jit(lambda x: sharding.constrain(x, "mlp_mid", ("batch", "length", "mlp")))(jnp.zeros((4, 2, 16)))
+      out = jax.jit(lambda x: sharding.constrain(x, "mlp_mid", ("batch", "length", "mlp")))(jnp.zeros((fsdp, 2, 16)))
 
     self.assertEqual(out.sharding.shard_shape(out.shape), (1, 2, 8))
 
@@ -581,8 +798,8 @@ class CreateMeshMultiSliceTest(parameterized.TestCase):
 
   def setUp(self):
     super().setUp()
-    if jax.device_count() < 8:
-      self.skipTest(f"needs at least 8 devices, found {jax.device_count()}")
+    self.n = _require_multi_device(self)
+    self.devices = jax.devices()
 
   def test_ici_resolves_per_slice_and_dcn_across_slices(self):
     recorded = {}
@@ -594,14 +811,15 @@ class CreateMeshMultiSliceTest(parameterized.TestCase):
 
     with mock.patch.object(sharding_lib, "_count_slices", return_value=2):
       with mock.patch.object(sharding_lib.mesh_utils, "create_hybrid_device_mesh", side_effect=fake_hybrid):
-        mesh = create_mesh(devices=jax.devices()[:8])
+        mesh = create_mesh(devices=self.devices)
 
-    # 8 devices across 2 slices is 4 per slice. The default `ici_fsdp=-1` must
-    # absorb 4, not 8 -- absorbing 8 is the bug this test exists to catch.
-    self.assertEqual(recorded["ici"], (1, 4, 1, 1))
+    # n devices across 2 slices is n/2 per slice. The default `fsdp=-1` must
+    # absorb n/2, not n -- absorbing n is the bug this test exists to catch.
+    per_slice = self.n // 2
+    self.assertEqual(recorded["ici"], (1, per_slice, 1, 1))
     self.assertEqual(recorded["dcn"], (2, 1, 1, 1))
-    self.assertEqual(mesh.shape["dp"], 2)
-    self.assertEqual(mesh.shape["fsdp"], 4)
+    self.assertEqual(mesh.shape["data"], 2)
+    self.assertEqual(mesh.shape["fsdp"], per_slice)
 
   def test_single_slice_does_not_take_the_hybrid_path(self):
     """`create_hybrid_device_mesh` raises on devices without a `slice_index`.
@@ -610,19 +828,20 @@ class CreateMeshMultiSliceTest(parameterized.TestCase):
     collapsed into an unconditional hybrid call. This pins that.
     """
     with mock.patch.object(sharding_lib.mesh_utils, "create_hybrid_device_mesh") as hybrid:
-      create_mesh(devices=jax.devices()[:8])
+      create_mesh(devices=self.devices)
     hybrid.assert_not_called()
 
   def test_dcn_shape_must_match_the_slice_count(self):
     with mock.patch.object(sharding_lib, "_count_slices", return_value=2):
       with self.assertRaisesRegex(ValueError, r"DCN mesh axes .* slice count \(2\)"):
-        create_mesh(dcn={"dp": 4}, devices=jax.devices()[:8])
+        create_mesh(dcn={"data": 2 * self.n}, devices=self.devices)
 
   def test_rejects_devices_that_do_not_divide_into_slices(self):
     """Integer division would silently drop devices; that must raise instead."""
-    with mock.patch.object(sharding_lib, "_count_slices", return_value=3):
+    non_divisor = next(k for k in range(2, self.n + 2) if self.n % k)
+    with mock.patch.object(sharding_lib, "_count_slices", return_value=non_divisor):
       with self.assertRaisesRegex(ValueError, "do not divide evenly"):
-        create_mesh(devices=jax.devices()[:8])
+        create_mesh(devices=self.devices)
 
 
 if __name__ == "__main__":

@@ -237,7 +237,18 @@ jobs:
               fi
             fi
           fi
-          if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
+          if [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ] && [ "${INPUTS_DEVICE_TYPE}" = "tpu" ] && [[ "${INPUTS_FLAVOR}" == *-unit ]]; then
+            # TPU unit flavors: whole test classes stay on one shard (tests/utils/class_split.py), so the first
+            # test of a class pays its XLA compile in scheduled and PR runs alike. The rest keep pytest-split
+            # below: one integration class (TrainTests) takes longer than an even shard share, CPU durations
+            # are not regression-checked, and GPU has too few test classes to balance.
+            if [ -f .test_durations ]; then
+              echo "Using downloaded .test_durations to balance the class-level split."
+            else
+              echo "Warning: .test_durations not found. The class-level split uses equal weights."
+            fi
+            SPLIT_ARGS="--class-splits=${INPUTS_TOTAL_WORKERS} --class-group=${INPUTS_WORKER_GROUP}"
+          elif [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split
             if [ -f .test_durations ]; then
               echo "Using downloaded .test_durations with least_duration splitting algorithm."
@@ -260,18 +271,25 @@ jobs:
           if [ "${INPUTS_IS_UPDATE_HLO}" == "true" ]; then
             python3 tests/utils/update_hlo_references.py
           else
+            # The GofN suffix lets process_test_results.py notice a shard that left no result file.
+            JUNIT_XML="test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}of${INPUTS_TOTAL_WORKERS}.xml"
             # shellcheck disable=SC2086
             $PYTHON_EXE -m pytest ${INPUTS_PYTEST_ADDOPTS} \
               -v \
               -m "${FINAL_PYTEST_MARKER}" \
               --durations=0 \
-              --junitxml=test-results-${INPUTS_FLAVOR}-${INPUTS_WORKER_GROUP}.xml \
+              --junitxml="${JUNIT_XML}" \
               $PYTEST_COV_ARGS \
               $SPLIT_ARGS \
               ${INPUTS_PYTEST_EXTRA_ARGS} &
             PYTEST_PID=$!
             PYTEST_EXIT_CODE=0
             wait "$PYTEST_PID" || PYTEST_EXIT_CODE=$?
+            if [ "$PYTEST_EXIT_CODE" -eq 2 ] || [ "$PYTEST_EXIT_CODE" -eq 3 ]; then
+              # An interrupted session (e.g. a collection error) still writes a result file, without the test times.
+              # Drop it so process_test_results.py counts this shard as missing instead of saving a near-zero total.
+              rm -f "${JUNIT_XML}"
+            fi
             if [ "$PYTEST_EXIT_CODE" -eq 5 ]; then
               echo "No tests collected for worker group ${INPUTS_WORKER_GROUP} (pytest exit code 5), treating as success."
             elif [ "$PYTEST_EXIT_CODE" -ne 0 ]; then

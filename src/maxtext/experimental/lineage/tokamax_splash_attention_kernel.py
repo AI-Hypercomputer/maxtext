@@ -19,9 +19,15 @@ import functools
 import jax
 import jax.numpy as jnp
 import numpy as np
-from tokamax._src.ops.experimental.tpu.splash_attention import base
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as mask_lib
-from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info as mask_info_lib
+
+try:
+  from tokamax._src.ops.splash_attention import base
+  from tokamax._src.ops.splash_attention import splash_attention_mask as mask_lib
+  from tokamax._src.ops.splash_attention import splash_attention_mask_info as mask_info_lib
+except ImportError:
+  from tokamax._src.ops.experimental.tpu.splash_attention import base
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as mask_lib
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask_info as mask_info_lib
 
 from maxtext.experimental.lineage import splash_attention_kernel as tokamax_splash
 

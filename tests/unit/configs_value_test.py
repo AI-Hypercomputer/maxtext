@@ -199,6 +199,57 @@ class ConfigTest(absltest.TestCase):
           types.MaxTextConfig(**{**common_config, **overrides})
         self.assertIn(expected_error, str(context.exception))
 
+  def test_te_moe_disable_cudnn_gmm_fusion_requires_te_moe_block(self):
+    common_config = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_gmm_quantization": "te_no_quant",
+        "override_logical_axis_rules": True,
+    }
+
+    self.assertFalse(types.MaxTextConfig(**common_config).te_moe_disable_cudnn_gmm_fusion)
+    self.assertTrue(
+        types.MaxTextConfig(
+            **common_config, te_moe_block=True, te_moe_disable_cudnn_gmm_fusion=True
+        ).te_moe_disable_cudnn_gmm_fusion
+    )
+    with self.assertRaisesRegex(
+        pydantic.ValidationError, "te_moe_disable_cudnn_gmm_fusion=True requires te_moe_block=True"
+    ):
+      types.MaxTextConfig(**common_config, te_moe_disable_cudnn_gmm_fusion=True)
+
+  def test_te_moe_quantized_weight_gather_validation(self):
+    common = {
+        "run_name": "test",
+        "num_experts": 2,
+        "base_moe_mlp_dim": 7168,
+        "first_num_dense_layers": 1,
+        "sparse_matmul": True,
+        "prefuse_moe_weights": True,
+        "te_moe_block": True,
+        "te_gmm_quantization": "te_mxfp8",
+        "te_moe_quantize_before_fsdp_all_gather": True,
+        "override_logical_axis_rules": True,
+    }
+    self.assertTrue(types.MaxTextConfig(**common).te_moe_quantize_before_fsdp_all_gather)
+    self.assertFalse(
+        types.MaxTextConfig(
+            **{**common, "te_moe_quantize_before_fsdp_all_gather": False}
+        ).te_moe_quantize_before_fsdp_all_gather
+    )
+    for overrides in (
+        {"te_gmm_quantization": "te_no_quant"},
+        {"use_2d_fsdp_sharding": True},
+        {"te_moe_quantize_before_fsdp_all_gather": "invalid"},
+    ):
+      with self.subTest(overrides=overrides):
+        with self.assertRaises(pydantic.ValidationError):
+          types.MaxTextConfig(**{**common, **overrides})
+
   def test_te_moe_block_uses_ragged_buffer_factor_validation(self):
     common_config = {
         "run_name": "test",
@@ -940,6 +991,20 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.training_objective, "causal_lm")
     self.assertEqual(config.block_diffusion_mask_id, -1)
 
+  def test_cpu_hardware_disables_megablox(self):
+    """Tests that megablox is automatically disabled when hardware=cpu."""
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "hardware=cpu",
+            "megablox=True",
+            "skip_jax_distributed_system=True",
+        ]
+    )
+    self.assertFalse(config.megablox)
+
   def test_block_diffusion_pretraining_config(self):
     config = pyconfig.initialize(
         [
@@ -1126,6 +1191,90 @@ class ConfigTest(absltest.TestCase):
     ]
     with self.assertRaises(pydantic.ValidationError):
       pyconfig.initialize(argv)
+
+  def test_elastic_snapshot_mode_config(self):
+    """Snapshot mode is the default, takes an interval, and is rejected where it can't work."""
+    config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test"])
+    self.assertEqual(config.elastic_backup_kind, "snapshot")
+    self.assertEqual(config.elastic_snapshot_interval, 10)
+    # Without elastic training the kind is inert, whatever the data pipeline.
+    pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "dataset_type=tfds"])
+    # Elastic runs outside the snapshot envelope opt out explicitly.
+    config = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "elastic_enabled=true",
+            "enable_single_controller=true",
+            "dataset_type=tfds",
+            "elastic_backup_kind=checkpoint",
+        ]
+    )
+    self.assertEqual(config.elastic_backup_kind, "checkpoint")
+
+    config = pyconfig.initialize(
+        ["", _BASE_CONFIG_PATH, "run_name=test", "elastic_backup_kind=snapshot", "elastic_snapshot_interval=25"]
+    )
+    self.assertEqual(config.elastic_backup_kind, "snapshot")
+    self.assertEqual(config.elastic_snapshot_interval, 25)
+
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "elastic_snapshot_interval=0"])
+
+    snapshot_argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "elastic_enabled=true",
+        "enable_single_controller=true",
+        "elastic_backup_kind=snapshot",
+    ]
+    with self.assertRaisesRegex(pydantic.ValidationError, "not supported with DiLoCo"):
+      pyconfig.initialize(snapshot_argv + ["enable_diloco=true"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "enable_rampup_batch_size"):
+      pyconfig.initialize(
+          snapshot_argv
+          + [
+              "enable_rampup_batch_size=true",
+              "per_device_batch_size=4",
+              "per_device_batch_size_start=1",
+              "per_device_batch_size_increment=1",
+              "global_rampup_samples=100",
+          ]
+      )
+    # Synthetic data needs no iterator position; real data needs grain's ElasticIterator.
+    pyconfig.initialize(snapshot_argv + ["dataset_type=synthetic"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
+      pyconfig.initialize(snapshot_argv + ["dataset_type=tfds"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "grain_use_elastic_iterator"):
+      pyconfig.initialize(snapshot_argv + ["dataset_type=grain", "grain_train_files=/x/*"])
+    with self.assertRaisesRegex(pydantic.ValidationError, "colocated_python_data_input"):
+      pyconfig.initialize(
+          snapshot_argv
+          + [
+              "dataset_type=grain",
+              "grain_train_files=/x/*",
+              "grain_use_elastic_iterator=true",
+              "grain_file_type=arrayrecord",
+              "packing=false",
+              "colocated_python_data_input=true",
+          ]
+      )
+
+  def test_te_moe_dispatch_remat_location(self):
+    """Dispatch outputs participate in the custom remat policy."""
+    name = "te_moe_dispatch_remat_location"
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "remat_policy=custom"]
+    default_config = pyconfig.initialize(argv)
+    self.assertEqual(getattr(default_config, name), types.RematLocation.REMAT)
+    for location in ("remat", "device", "offload"):
+      with self.subTest(location=location):
+        config = pyconfig.initialize(argv + [f"{name}={location}"])
+        self.assertEqual(name in config.tensors_on_device, location == "device")
+        self.assertEqual(name in config.tensors_to_offload, location == "offload")
+    with self.assertRaises(pydantic.ValidationError):
+      pyconfig.initialize(argv + [f"{name}=invalid"])
 
   def test_indexer_cutoff_threshold_remat_policy(self):
     """Tests custom remat policy and validation for indexer_cutoff_threshold."""

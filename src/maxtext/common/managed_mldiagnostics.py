@@ -12,60 +12,71 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Create the managed mldiagnostics run."""
+"""Managed ML Diagnostics run lifecycle management for MaxText."""
 
 import json
 from typing import Any
 
 from maxtext.common.gcloud_stub import mldiagnostics_modules
+from maxtext.utils import max_logging
 
-mldiag, _ = mldiagnostics_modules()
+mldiag, _mldiag_is_stub = mldiagnostics_modules()
 
 from maxtext.configs.pyconfig import KEYS_NO_LOGGING
 
 
+def mldiagnostics_available() -> bool:
+  """Returns whether the real google_cloud_mldiagnostics SDK is loaded (not the stub)."""
+  return not _mldiag_is_stub
+
+
+def _config_items(config: Any) -> dict[str, Any]:
+  """Extracts configuration key-value pairs as a flat dictionary."""
+  if hasattr(config, "get_keys"):
+    return config.get_keys()
+  return config.model_dump(mode="json")
+
+
 class ManagedMLDiagnostics:
-  """ML Diagnostics Run, implemented with the Singleton pattern.
+  """Centralized ML Diagnostics Run manager implemented as a Singleton."""
 
-  Ensures that only one instance of the class can exist.
-  """
-
-  _instance = None  # Class attribute to hold the single instance
+  _instance = None
 
   def __new__(cls, *args: Any, **kwargs: Any):
-    """Overrides the instance creation method.
-
-    If an instance already exists, it is returned instead of creating a new one.
-    """
     if cls._instance is None:
       cls._instance = super(ManagedMLDiagnostics, cls).__new__(cls)
-
     return cls._instance
 
-  def __init__(self, config):
-    """Initializes the ManagedMLDiagnostics, ensuring this method runs only once."""
-    # We need a flag to ensure __init__ only runs once,
-    # as the object is returned multiple times by __new__.
+  def __init__(self, config: Any, sampler_config: Any | None = None):
     if hasattr(self, "_initialized"):
       return
     self._initialized = True
     if not config.managed_mldiagnostics:
       return
 
-    # Set up the managed mldiagnostics for profiling and metrics uploading.
-    def should_log_key(key, value):
+    if not mldiagnostics_available():
+      max_logging.warning(
+          "managed_mldiagnostics=True, but the google_cloud_mldiagnostics SDK"
+          " is not available (not installed, or MaxText is running in decoupled"
+          " mode); no ML Diagnostics run will be created."
+      )
+
+    def should_log_key(key: str, value: Any) -> bool:
       if key in KEYS_NO_LOGGING:
         return False
       try:
-        # Verify the value can be serialized to json. If not, we'll skip it.
         json.dumps(value, allow_nan=False)
-      except TypeError:
+      except (TypeError, ValueError):
         return False
       return True
 
-    config_dict = {key: value for key, value in config.get_keys().items() if should_log_key(key, value)}
+    config_dict = {key: value for key, value in _config_items(config).items() if should_log_key(key, value)}
 
-    # Create a run for the managed mldiagnostics, and upload the configuration.
+    if sampler_config is not None and sampler_config is not config:
+      for key, value in _config_items(sampler_config).items():
+        if should_log_key(key, value) and config_dict.get(key) != value:
+          config_dict[f"sampler.{key}"] = value
+
     region = config.managed_mldiagnostics_region if config.managed_mldiagnostics_region else None
     mldiag.machinelearning_run(
         name=f"{config.run_name}",
@@ -74,4 +85,6 @@ class ManagedMLDiagnostics:
         gcs_path=config.managed_mldiagnostics_dir,
         on_demand_xprof=config.managed_mldiagnostics_on_demand_profiling,
         region=region,
+        metric_only_run=config.managed_mldiagnostics_metric_only_run,
+        application_framework="MAXTEXT",
     )

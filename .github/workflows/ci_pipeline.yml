@@ -40,14 +40,16 @@ on:
     - cron:  '0 */4 * * *'
 
 concurrency:
-  # Dedup pull requests (canceling previous runs of the same workflow for same PR), and scheduled runs but nothing else
+  # Dedup pull requests (canceling previous runs of the same workflow for same PR) and queue overlapping scheduled runs
   group: >
     ${{
-      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
+      github.event_name == 'pull_request' &&
+        (github.event.action != 'labeled' || github.event.label.name == 'scheduled-only' || github.event.label.name == 'skip-ci-tests') &&
+        format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
       github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
       github.run_id
     }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 permissions:
   contents: read
@@ -122,7 +124,7 @@ jobs:
     needs: [analyze_code_changes, code_quality_check, docs_build_check]
     # Run if either tests or notebooks need to run; on PRs, gate on code quality + docs passing
     if: |
-      always() &&
+      !cancelled() &&
       (needs.analyze_code_changes.outputs.run_tests == 'true' || needs.analyze_code_changes.outputs.run_notebooks == 'true') &&
       (github.event_name != 'pull_request' || (needs.code_quality_check.result == 'success' && needs.docs_build_check.result == 'success'))
     uses: ./.github/workflows/build_package.yml
@@ -136,7 +138,7 @@ jobs:
     name: Jupyter Notebook Tests
     needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
-      always() &&
+      !cancelled() &&
       needs.analyze_code_changes.outputs.run_notebooks == 'true' &&
       needs.build_and_upload_maxtext_package.result == 'success' &&
       (github.event_name != 'pull_request' ||
@@ -157,7 +159,7 @@ jobs:
     name: Gate and Formalize Parameters
     needs: [analyze_code_changes, build_and_upload_maxtext_package]
     if: |
-      always() &&
+      !cancelled() &&
       needs.analyze_code_changes.outputs.run_tests == 'true' &&
       needs.build_and_upload_maxtext_package.result == 'success'
     runs-on: ubuntu-latest
@@ -179,7 +181,7 @@ jobs:
     name: TPU Pretrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -197,7 +199,7 @@ jobs:
     name: TPU Posttrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -216,7 +218,7 @@ jobs:
     name: TPU7X Tests
     needs: [gate_test_run]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       (github.event_name != 'pull_request' ||
         contains(github.event.pull_request.labels.*.name, 'scheduled-only'))
@@ -235,7 +237,7 @@ jobs:
     name: GPU Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_gpu_tests == 'true'
     strategy:
@@ -253,7 +255,7 @@ jobs:
     name: CPU Pretrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_pretrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -271,7 +273,7 @@ jobs:
     name: CPU Posttrain Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_posttrain_tests == 'true'
     uses: ./.github/workflows/run_tests_coordinator.yml
@@ -289,7 +291,7 @@ jobs:
     name: TPU Pathways Unit Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
@@ -316,7 +318,7 @@ jobs:
     name: TPU Pathways Integration Tests
     needs: [gate_test_run, analyze_code_changes]
     if: |
-      always() &&
+      !cancelled() &&
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_pathways_tests == 'true'
     uses: ./.github/workflows/run_pathways_tests.yml
@@ -338,7 +340,7 @@ jobs:
   all_tests_passed:
     name: All Required Tests Passed
     needs: [build_and_upload_maxtext_package, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
-    if: always()
+    if: always()  # must fail, not skip, on cancel: skipped required checks count as passing
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -382,7 +384,7 @@ jobs:
   all_notebooks_passed:
     name: All Notebooks Passed
     needs: [analyze_code_changes, build_and_upload_maxtext_package, maxtext_jupyter_notebooks]
-    if: always()
+    if: always()  # see all_tests_passed
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -412,7 +414,7 @@ jobs:
   notify_failure:
     name: Notify failed build # creates an issue or modifies last open existing issue for failed build
     needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
-    if: ${{ always() }}
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -430,7 +432,7 @@ jobs:
   investigate_failure:
     name: Investigate failed build # investigates failure of scheduled run and comments on tracking issue
     needs: [gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_jupyter_notebooks, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check, notify_failure]
-    if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
+    if: ${{ !cancelled() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:
       contents: 'read'
@@ -447,7 +449,7 @@ jobs:
   track_performance:
     name: Track Test Performance
     needs: [tpu-pretrain-tests, tpu-posttrain-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests]
-    if: ${{ always() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success') }}
+    if: ${{ !cancelled() && (needs.cpu-pretrain-tests.result == 'success' || needs.cpu-posttrain-tests.result == 'success' || needs.gpu-tests.result == 'success' || needs.tpu-pretrain-tests.result == 'success' || needs.tpu-posttrain-tests.result == 'success') }}
     uses: ./.github/workflows/track_performance.yml
     permissions:
       contents: write

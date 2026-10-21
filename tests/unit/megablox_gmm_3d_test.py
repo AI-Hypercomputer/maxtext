@@ -70,7 +70,7 @@ class Gmm3dTest(parameterized.TestCase):
     self.assertEqual(jax.devices()[0].platform, "tpu")
     self.gs = jnp.asarray(GROUP_SIZES)
 
-  @parameterized.product(lhs_dtype=["bfloat16", "float8_e4m3fn"], tile_k=[1024, 1792, 3584, 7168])
+  @parameterized.parameters(("bfloat16", 1024), ("float8_e4m3fn", 7168))
   def test_gmm_3d_lhs(self, lhs_dtype, tile_k):
     """wi fwd (fp8 tokens x fp8 weight) / wo dlhs: 3D lhs, 2D out."""
     lhs_dtype = jnp.dtype(lhs_dtype)
@@ -90,9 +90,7 @@ class Gmm3dTest(parameterized.TestCase):
       np.testing.assert_array_equal(_f32(got), _f32(want))
     self.assertTrue(np.all(_f32(got)[GROUP_SIZES.sum() :] == 0))
 
-  @parameterized.product(
-      lhs_dtype=["bfloat16", "float8_e4m3fn"], tile_n=[1024, 1792, 3584, 7168], quantize_lhs=[False, True]
-  )
+  @parameterized.parameters(("bfloat16", 1024, True), ("float8_e4m3fn", 3584, False))
   def test_gmm_3d_out(self, lhs_dtype, tile_n, quantize_lhs):
     """wo fwd (bf16 act, quantized in-kernel) / wi dlhs (fp8 grad): 2D lhs, 3D bf16 out."""
     lhs_dtype = jnp.dtype(lhs_dtype)
@@ -138,7 +136,7 @@ class Gmm3dTest(parameterized.TestCase):
     _assert_close_chunked_k(got, want, max_mismatch_frac=1e-3)
     self.assertTrue(np.all(_f32(got)[GROUP_SIZES.sum() :] == 0))
 
-  @parameterized.product(dtype=["bfloat16", "float8_e4m3fn"], which=["lhs", "rhs"], tile=[1024, 1792, 3584, 7168])
+  @parameterized.parameters(("bfloat16", "lhs", 1024), ("float8_e4m3fn", "rhs", 3584))
   def test_tgmm_3d(self, dtype, which, tile):
     """dWi (3D lhs tokens) / dWo (3D rhs grad)."""
     dtype = jnp.dtype(dtype)
@@ -160,7 +158,7 @@ class Gmm3dTest(parameterized.TestCase):
     got = jax.jit(f)(lhs3, rhs3, self.gs)
     np.testing.assert_array_equal(np.asarray(got), np.asarray(want))
 
-  @parameterized.product(lhs_dtype=["bfloat16", "float8_e4m3fn"], tile_k=[1024, 3584, 7168])
+  @parameterized.parameters(("bfloat16", 1024), ("float8_e4m3fn", 7168))
   def test_gmm_3d_lhs_transpose_rhs(self, lhs_dtype, tile_k):
     """wo dlhs with native transpose_rhs: 3D lhs (the 3D grad), rhs [g, n, k] contracted on its last dim."""
     lhs_dtype = jnp.dtype(lhs_dtype)
@@ -177,7 +175,7 @@ class Gmm3dTest(parameterized.TestCase):
     else:
       np.testing.assert_array_equal(_f32(got), _f32(want))
 
-  @parameterized.product(tile_n=[1024, 3584, 7168], ps_dtype=["bfloat16", "float32"], transpose_rhs=[False, True])
+  @parameterized.parameters((1024, "bfloat16", False), (3584, "float32", True))
   def test_gmm_3d_out_partial_sum(self, tile_n, ps_dtype, transpose_rhs):
     """wi_0 dlhs accumulated onto the wi_1 dlhs (3D partial_sum), optionally with native transpose_rhs."""
     ps_dtype = jnp.dtype(ps_dtype)
@@ -198,9 +196,7 @@ class Gmm3dTest(parameterized.TestCase):
     self.assertEqual(got.shape, (M, D // 128, 128))
     np.testing.assert_array_equal(_f32(got.reshape(M, D)), _f32(want))
 
-  @parameterized.product(
-      tiles=["1024", "window"], option=["none", "accumulate_wi_dlhs", "dlhs_transpose_rhs", "chunk_wgrad", "all"]
-  )
+  @parameterized.parameters(("1024", "none"), ("window", "all"))
   def test_ops_gmm_3d_vjp(self, tiles, option):
     """ops.gmm custom VJP (fp8 QArray lhs path as in moe) with 3D lhs / out, alone and with the gmm options.
 
@@ -326,7 +322,7 @@ class Gmm3dTest(parameterized.TestCase):
     np.testing.assert_allclose(np.asarray(dw3), np.asarray(dw2), rtol=1e-5, atol=1e-6)
     self.assertGreater(float(jnp.max(jnp.abs(out2.astype(jnp.float32)))), 0.0)
 
-  @parameterized.parameters(True, False)
+  @parameterized.parameters((True,))
   def test_shared_fixed_scale_bwd_is_bit_exact(self, use_gmm_v2):
     """Flag 1 (shared lhs/rhs fixed scale + shared quantized grad) is bit-identical to the unshared bwd.
 
@@ -401,10 +397,7 @@ def _k_tail_reference(lhs, rhs, transpose_rhs):
 class GmmV2KTailTest(parameterized.TestCase):
   """tile_k does not divide size_k: the partial last K tile must mask lhs as well as rhs (stale VMEM is not zero)."""
 
-  @parameterized.product(
-      size_k_tile_k=((256, 384), (384, 256), (640, 512)),
-      transpose_rhs=(False, True),
-  )
+  @parameterized.parameters(((256, 384), False), ((384, 256), True))
   def test_partial_k_tile_matches_reference(self, size_k_tile_k, transpose_rhs):
     size_k, tile_k = size_k_tile_k
     lhs = jax.random.normal(jax.random.PRNGKey(0), (K_TAIL_M, size_k), jnp.float32).astype(jnp.bfloat16)

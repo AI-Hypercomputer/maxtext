@@ -21,9 +21,10 @@ strategy is then a change to one `Sharding` subclass, not a change to a model.
 
 Two call sites, and only two:
 
-  * At construction, for weight metadata::
+  * At construction, for weight metadata (`out_sharding` is Flax's key; the
+    design doc's `sharding` still works but is deprecated)::
 
-      nnx.Linear(..., kernel_metadata={"sharding": s("gate", ("embed", "mlp"))})
+      nnx.Linear(..., kernel_metadata={"out_sharding": s("gate", ("embed", "mlp"))})
 
   * Inside `__call__`, for activation constraints::
 
@@ -51,12 +52,17 @@ from jax.sharding import PartitionSpec as P
 # axes against the physical topology. Inserting an axis in the middle changes
 # the placement of everything after it.
 #
+# The names are legacy's rather than abbreviations because the mesh is shared
+# with `maxtext.training_engine.maxtext_engine` (see `m3/README.md`), which
+# reads the data axis by name: on a mesh with no axis called `"data"` it
+# declines Zero-1 (one warning) and deferred gradient all-reduce (silently).
+#
 # TODO: This is a basic starting point, this list will be expanded soon.
 # Legacy carries twelve axes, but that list is a union -- its seven strategy
 # configs under `configs/custom_mesh_and_rule/` use between one and six. The
 # ones m3 is likely to need next are `stage` (pipeline), `context` and
 # `context_usp_ulysses` (context parallelism), and `tensor_sequence`.
-MESH_AXIS_NAMES = ("dp", "fsdp", "tp", "ep")
+MESH_AXIS_NAMES = ("data", "fsdp", "tensor", "expert")
 
 # A logical axis maps to one mesh axis, several (their product shards the
 # dimension), or None to leave the dimension replicated.
@@ -103,7 +109,7 @@ def _ambient_mesh_is_explicit() -> bool:
 def _validate_mesh_axes(mapped: MeshAxes, axis: str, tensor_name: str) -> None:
   """Rejects mesh axis names that are not on the mesh.
 
-  Without this a typo such as `"tensor"` for `"tp"` surfaces much later as an
+  Without this a typo such as `"tp"` for `"tensor"` surfaces much later as an
   opaque sharding error, far from the rule that produced it.
   """
   if mapped is None:
@@ -120,27 +126,24 @@ def _validate_mesh_axes(mapped: MeshAxes, axis: str, tensor_name: str) -> None:
 class Sharding(abc.ABC):
   """Maps a model's logical axis names onto mesh axes.
 
-  A subclass encodes one parallelism strategy. Strategies are meant to be
-  reused across models, which is why the common logical vocabulary --
-  `"embed"`, `"mlp"`, `"heads"`, `"kv_heads"`, `"norm"`, `"layers"` -- should
-  mean the same thing everywhere. A model with a genuinely novel axis extends a
-  strategy and delegates the rest::
+  A subclass encodes one parallelism strategy; `DefaultSharding` below is the
+  one models start from. Strategies are meant to be reused across models,
+  which is why the common logical vocabulary -- `"embed"`, `"mlp"`, `"heads"`,
+  `"kv_heads"`, `"vocab"`, `"norm"` -- should mean the same thing everywhere.
+  A model with a genuinely novel axis extends a strategy and delegates the
+  rest::
 
-      class PureFsdpSharding(Sharding):
-        def map_axis(self, axis, tensor_name, tensor_type):
-          match axis, tensor_type:
-            case "batch", TensorType.ACTIVATION: return ("dp", "fsdp")
-            case "embed", TensorType.WEIGHT: return "fsdp"
-            case "embed", TensorType.ACTIVATION: return None
-            case ("heads" | "kv_heads"), _: return "tp"
-            case "mlp", _: return "tp"
-            case _: raise KeyError(axis)
-
-      class Qwen3NextSharding(PureFsdpSharding):
+      class Qwen3NextSharding(DefaultSharding):
         def map_axis(self, axis, tensor_name, tensor_type):
           if axis == "gdn_head":
-            return "tp"
+            return "tensor"
           return super().map_axis(axis, tensor_name, tensor_type)
+
+  Which mesh axes are live is the mesh's decision, not the strategy's. An axis
+  of size 1 shards nothing, so one rule set serves pure FSDP, FSDP with tensor
+  parallelism, and data parallelism across slices; the mesh shape selects the
+  combination. A new strategy is only warranted when the same logical axis
+  should land on a *different* mesh axis.
 
   Keeping rules per-strategy rather than per-model matters: legacy's rule table
   is model-agnostic, so N models and S strategies cost S tables. A rule set
@@ -213,6 +216,50 @@ class Sharding(abc.ABC):
     if _ambient_mesh_is_explicit():
       return jax.sharding.reshard(x, spec)
     return jax.lax.with_sharding_constraint(x, spec)
+
+
+class DefaultSharding(Sharding):
+  """The design doc's rule set: FSDP weights, tensor-parallel heads and MLP.
+
+  Weights: the model dimension (`embed`) is sharded over `fsdp` x `expert`;
+  heads, MLP width and vocabulary over `tensor`; norm scales and `head_dim`
+  replicated. Activations: `batch` over `data` x `fsdp` x `expert`; heads, MLP
+  width and vocabulary over `tensor`; the residual stream (`embed`) and
+  `length` replicated.
+
+  Which of these axes are live is decided by the mesh shape, not here. An axis
+  of size 1 shards nothing, so the same rules serve pure FSDP
+  (`ici={"fsdp": -1}`), FSDP with tensor parallelism
+  (`ici={"fsdp": -1, "tensor": 4}`) and data parallelism across slices
+  (`dcn={"data": -1}`).
+
+  `expert` sits in the `batch` and `embed` unions, as it does in legacy's
+  `activation_batch` and `embed` rules, so that on a mesh which splits it a
+  dense model's weights are sharded across it rather than replicated once per
+  expert shard. A routed-expert weight carries its own `experts` dimension,
+  which will want `expert` for itself; that rule arrives with the first MoE
+  model, and the conflict check in `Sharding.__call__` is what will flag the
+  tensors whose `embed` must then give `expert` up.
+
+  Two places this follows the design doc rather than legacy's
+  `logical_axis_rules`: legacy shards the residual-stream activation and the
+  norm scale over `tensor`, where this leaves both replicated.
+  """
+
+  def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
+    match axis, tensor_type:
+      case "batch", TensorType.ACTIVATION:
+        return ("data", "fsdp", "expert")
+      case "embed", TensorType.WEIGHT:
+        return ("fsdp", "expert")
+      case "embed", TensorType.ACTIVATION:
+        return None
+      case ("heads" | "kv_heads" | "mlp" | "vocab"), _:
+        return "tensor"
+      case ("length" | "head_dim" | "norm"), _:
+        return None
+      case _:
+        raise KeyError(f"No sharding rule for logical axis {axis!r} ({tensor_type.value}) on tensor {tensor_name!r}.")
 
 
 def _resolve_axis_sizes(sizes: Sequence[int], target_product: int, kind: str, target_desc: str) -> tuple[int, ...]:
@@ -302,21 +349,26 @@ def create_mesh(
 
   Axes left unnamed default to 1, so callers name only what they split::
 
-      create_mesh(ici={"fsdp": -1})                 # every device on fsdp
-      create_mesh(ici={"fsdp": -1, "tp": 2})        # tp within a slice
-      create_mesh(ici={"fsdp": -1}, dcn={"dp": -1}) # fsdp in a slice, dp across
+      create_mesh(ici={"fsdp": -1})                     # every device on fsdp
+      create_mesh(ici={"fsdp": -1, "tensor": 2})        # tensor within a slice
+      create_mesh(ici={"fsdp": -1}, dcn={"data": -1})   # fsdp in a slice, data across
 
   Mappings rather than one keyword per axis: the axis list is expected to grow
   (see `MESH_AXIS_NAMES`), and a keyword pair per axis per network would scale
   to twenty-odd parameters and churn every call site each time one is added.
 
-  The defaults -- `ici={"fsdp": -1}`, `dcn={"dp": -1}` -- put every device in a
-  slice on `fsdp` and every slice on `dp`. That split is the usual starting
+  The defaults -- `ici={"fsdp": -1}`, `dcn={"data": -1}` -- put every device in
+  a slice on `fsdp` and every slice on `data`. That split is the usual starting
   point because DCN bandwidth comfortably carries a gradient all-reduce but not
   the per-layer traffic that FSDP or tensor parallelism generate. On a single
   device it degenerates to a mesh where every `PartitionSpec` resolves to
   replicated, which is what keeps the single-device code path identical to the
   distributed one instead of a special case.
+
+  Models are constructed inside `jax.sharding.set_mesh(mesh)`, on one device as
+  on many. Flax places each parameter from its `*_metadata={"out_sharding": ...}`
+  at construction and, with no mesh in scope, raises rather than degrading to
+  replicated.
 
   Device ordering is delegated to `jax.experimental.mesh_utils`, which lays the
   mesh out over the detected topology; this function only picks which of its
@@ -329,9 +381,9 @@ def create_mesh(
   replication rather than raising.
 
   Args:
-    ici: Axis sizes within a slice, e.g. `{"fsdp": -1, "tp": 2}`. Defaults to
-      `{"fsdp": -1}`.
-    dcn: Axis sizes across slices. Defaults to `{"dp": -1}`.
+    ici: Axis sizes within a slice, e.g. `{"fsdp": -1, "tensor": 2}`. Defaults
+      to `{"fsdp": -1}`.
+    dcn: Axis sizes across slices. Defaults to `{"data": -1}`.
     devices: Devices to arrange; defaults to `jax.devices()`.
 
   Returns:
@@ -343,7 +395,7 @@ def create_mesh(
       the device or slice count.
   """
   ici_sizes = _shape_from_mapping({"fsdp": -1} if ici is None else ici, "ICI")
-  dcn_sizes = _shape_from_mapping({"dp": -1} if dcn is None else dcn, "DCN")
+  dcn_sizes = _shape_from_mapping({"data": -1} if dcn is None else dcn, "DCN")
 
   devices = list(jax.devices() if devices is None else devices)
   if not devices:

@@ -79,10 +79,13 @@ HF_IDS = {
     "deepseek3-671b": "deepseek-ai/DeepSeek-V3",
     "deepseek3.2-671b": "deepseek-ai/DeepSeek-V3.2",
     "deepseek4-284b": "deepseek-ai/DeepSeek-V4-Flash",
+    "deepseek4-1600b": "deepseek-ai/DeepSeek-V4-Pro",
     "gpt-oss-20b": "unsloth/gpt-oss-20b-BF16",
     "gpt-oss-120b": "unsloth/gpt-oss-120b-BF16",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
     "qwen3-next-80b-a3b": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "qwen3.8-flash-next": "Qwen/Qwen3.8-Flash-Next",
+    "qwen3.8-flash-next-mini": "Qwen/Qwen3.8-Flash-Next",
     "qwen3.5-397b-a17b": "Qwen/Qwen3.5-397B-A17B",
     "qwen3.5-397b-a17b-fp8": "Qwen/Qwen3.5-397B-A17B-FP8",
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
@@ -98,6 +101,7 @@ HF_IDS = {
     "olmo3-32b": "allenai/Olmo-3-32B-Think",
     "weaver-mini": "Qwen/Qwen3-VL-4B-Instruct",
     "weaver-max": "Qwen/Qwen3-VL-8B-Instruct",
+    "glm5.3-flash": "zai-org/GLM-5.3-Flash",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }

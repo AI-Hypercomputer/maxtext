@@ -14,6 +14,7 @@
 
 """Functions for gradient accumulation (GA)"""
 
+import contextlib
 import functools
 
 import jax
@@ -130,15 +131,25 @@ def gradient_accumulation_loss_and_grad(
 
   def accumulate_gradient(acc_grad_and_loss, data):
     ga_params = acc_grad_and_loss["ga_params"]
-    # Scope double-buffering to model scans, not the enclosing gradient accumulation scan.
-    # This metadata only affects XLA:GPU; see https://github.com/openxla/xla/pull/43468.
-    # Enable it with JAX_OPTIMIZATION_LEVEL=O1 and
+    # Scope double-buffering to model scans, not the enclosing gradient
+    # accumulation scan. `_xla_loop_unroll_strategy` is only read by XLA:GPU
+    # (https://github.com/openxla/xla/pull/43468); enable it with
+    # JAX_OPTIMIZATION_LEVEL=O1 and
     # XLA_FLAGS="--xla_gpu_enable_while_loop_unrolling=WHILE_LOOP_UNROLLING_MANUAL_UNROLL".
+    # Skip on TPU/CPU: `set_xla_metadata` pre-populates frontend attributes on
+    # every traced op, causing XLA's CallInliner to drop `_xla_compute_type`
+    # from `compute_on("device")` calls and XLA:TPU to auto-offload those
+    # collectives to SparseCore.
+    loop_unroll_ctx = (
+        set_xla_metadata(_xla_loop_unroll_strategy="double-buffer")
+        if getattr(config, "hardware", "tpu") in ("gpu", "gpu_multiprocess")
+        else contextlib.nullcontext()
+    )
     if is_nnx:
       # Reconstruct the model using the fixed parameters (ga_params)
       # and the advancing non-parameter state (RNGs) from the carry.
       local_model = nnx.merge(graphdef, ga_params, acc_grad_and_loss["rest_state"], copy=True)
-      with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
+      with loop_unroll_ctx:
         (_, aux), cur_batch_gradient = grad_func(local_model, config, data, None, None, is_train=True)
       _, _, next_rest_state = nnx.split(local_model, nnx.Param, ...)
       acc_grad_and_loss["rest_state"] = next_rest_state
@@ -148,7 +159,7 @@ def gradient_accumulation_loss_and_grad(
           if dropout_rng is not None
           else None
       )
-      with set_xla_metadata(_xla_loop_unroll_strategy="double-buffer"):
+      with loop_unroll_ctx:
         (_, aux), cur_batch_gradient = grad_func(model, config, data, rng, ga_params, is_train=True)
     acc_grad_and_loss["loss"] += aux["xent_sum"] + aux.get("dpo_loss", 0.0)
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]

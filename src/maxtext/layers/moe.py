@@ -76,6 +76,24 @@ WI_0 = "wi_0"
 WI_1 = "wi_1"
 WO = "wo"
 
+_TE_MOE_CHECKPOINT_NAMES = {
+    "wi_0_checkpoint_name": "moe_mlpwi_0",
+    "wi_1_checkpoint_name": "moe_mlpwi_1",
+    "wo_checkpoint_name": "moe_mlpwo",
+    "dispatch_checkpoint_name": "te_moe_dispatch_remat_location",
+}
+
+
+def _get_te_moe_checkpoint_kwargs(moe_fn) -> dict[str, str]:
+  """Return supported TE MoE output remat names."""
+  parameters = inspect.signature(moe_fn).parameters
+  return {name: label for name, label in _TE_MOE_CHECKPOINT_NAMES.items() if name in parameters}
+
+
+def _get_te_moe_cudnn_gmm_fusion_kwargs(disable_cudnn_gmm_fusion: bool) -> dict[str, bool]:
+  """Disable cuDNN GMM fusion when explicitly requested, otherwise preserve TE's default."""
+  return {"use_cudnn_fusion": False} if disable_cudnn_gmm_fusion else {}
+
 
 @struct.dataclass
 class RouteMetadata:
@@ -584,6 +602,7 @@ class GateLogit(nnx.Module):
       kernel_init: NdInitializer = nd_dense_init(1.0, "fan_in", "truncated_normal"),
       kernel_axes: Tuple[Optional[str], ...] = (),
       use_bias: bool = False,
+      bias_dtype: Optional[ctypes.DType] = None,
       score_func: str = "",
       quant: Optional[quantizations.AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
@@ -604,6 +623,7 @@ class GateLogit(nnx.Module):
       use_bias: Whether to add learnable bias in gate logit scores. When enabled,
         this bias aids expert load balancing (like in DeepSeek V3), and is not
         part of the loss calculation.
+      bias_dtype: Data type of the learnable routing bias; defaults to weight_dtype.
       score_func: Scoring function for output normalization before applying bias.
       quant: The quantization configuration. If None, no quantization is applied.
       matmul_precision: The precision level for the matrix multiplication.
@@ -620,6 +640,7 @@ class GateLogit(nnx.Module):
     self.kernel_init = kernel_init
     self.kernel_axes = kernel_axes
     self.use_bias = use_bias
+    self.bias_dtype = bias_dtype or self.weight_dtype
     self.score_func = score_func
     self.quant = quant
     self.shard_mode = shard_mode
@@ -646,9 +667,9 @@ class GateLogit(nnx.Module):
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
       if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates.
         self.bias = MoEBiasVar(
-            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
             out_sharding=bias_axes,
         )
       else:
@@ -999,17 +1020,19 @@ class RoutedMoE(nnx.Module):
     else:
       self.quant_einsums = None
 
+    gate_weight_dtype = ctypes.get_weight_dtype(self.config, "gate")
     self.gate = GateLogit(
         in_features_shape=self.moe_expert_input_dim,
         out_features_shape=self.num_experts,
         mesh=self.mesh,
         model_name=self.config.model_name,
         dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
-        weight_dtype=ctypes.get_weight_dtype(self.config, "gate"),
+        weight_dtype=gate_weight_dtype,
         quant=ctypes.get_quant(self.config, "gate", self.quant),
         kernel_init=self.kernel_init,
         kernel_axes=self.kernel_axes,
         use_bias=self.config.routed_bias and not self.is_hash_routing,
+        bias_dtype=jnp.float32 if self.config.float32_gate_logits else gate_weight_dtype,
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
@@ -2409,9 +2432,11 @@ class RoutedMoE(nnx.Module):
           and not self.config.quantization
           and not self.config.use_gmm_v2
           and not isinstance(inputs, qpl.QArray)
+          and self.config.hardware != "cpu"
       )
-      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox
-      use_custom_vjp_gmm = self.config.use_tokamax_gmm or self.config.megablox
+      # Use custom vjp: tokamax gmm v1 (quantized), tokamax gmm v2 (quantized, unquantized), older forked megablox.
+      # On CPU (hardware="cpu"), bypass TPU Pallas custom-VJP kernels and fall back to jax.lax.ragged_dot.
+      use_custom_vjp_gmm = (self.config.use_tokamax_gmm or self.config.megablox) and self.config.hardware != "cpu"
 
       if is_tokamax_v1_unquantized:
         # tokamax v1 (unquantized)
@@ -3632,7 +3657,10 @@ class RoutedMoE(nnx.Module):
         original_inputs_first_dim = batch_size * sequence_length * self.config.num_experts_per_tok
         if routing.sorted_selected_experts.shape[0] != original_inputs_first_dim:
           raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
-        output_shape = jax.lax.empty(
+        # Rows of tokens dropped by a capped ragged buffer are never written by the
+        # return ragged_all_to_all; zero them so dropped tokens contribute nothing.
+        buffer_init = jnp.zeros if self.get_ragged_buffer_factor() > 0.0 else jax.lax.empty
+        output_shape = buffer_init(
             (
                 original_inputs_first_dim,
                 self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
@@ -4840,6 +4868,7 @@ class RoutedMoE(nnx.Module):
     """Run TransformerEngine's fused EP MoEBlock using MaxText-owned params."""
     try:
       from transformer_engine.jax import moe as te_moe  # pylint: disable=import-outside-toplevel
+      from transformer_engine.jax.sharding import MeshResource  # pylint: disable=import-outside-toplevel
     except ImportError as exc:
       raise ImportError(
           "te_moe_block=True requires TransformerEngine JAX MoE support. "
@@ -4866,11 +4895,14 @@ class RoutedMoE(nnx.Module):
     fc1_quantizer_set, fc2_quantizer_set = self.quant.get_moe_block_quantizer_sets(
         self.config.te_gmm_quantization,
         # Dispatch buffers have one group per (fsdp, ep, local_expert),
-        # while model weights retain their global expert-group shape until
-        # TE's grouped-GEMM partitioning gathers the quantized FSDP shard.
-        n_token_groups=fsdp_size * self.num_experts,
+        # while model weights retain their global expert-group descriptor.
+        # TE owns either the BF16 gather or the opt-in quantized gather.
+        n_token_groups=self.mesh.shape.get("data", 1) * fsdp_size * self.num_experts,
         n_expert_groups=self.num_experts,
     )
+
+    checkpoint_kwargs = _get_te_moe_checkpoint_kwargs(te_moe.moe)
+    cudnn_gmm_fusion_kwargs = _get_te_moe_cudnn_gmm_fusion_kwargs(self.config.te_moe_disable_cudnn_gmm_fusion)
 
     output, lb_loss, total_recv_tokens = te_moe.moe(
         inputs,
@@ -4892,14 +4924,16 @@ class RoutedMoE(nnx.Module):
         aux_loss_coeff=self.config.load_balance_loss_weight,
         apply_topk_weights_early=True,
         quantizer_sets=(fc1_quantizer_set, fc2_quantizer_set),
-        ep_axis=self._expert_parallelism_name,
-        data_parallelism_axes=("fsdp",),
+        mesh_resource=MeshResource(dp_resource="data", fsdp_resource="fsdp", ep_resource=self._expert_parallelism_name),
         input_axes=("activation_batch", "activation_norm_length", None),
         gate_kernel_axes=self.kernel_axes,
         wi_kernel_axes=self.wi_kernel_axes,
         wo_kernel_axes=self.wo_kernel_axes,
         dtype=self.dtype,
         recv_capacity_per_rank=max_utils.get_te_moe_recv_capacity_per_rank(),
+        quant_before_fsdp_ag=self.config.te_moe_quantize_before_fsdp_all_gather,
+        **cudnn_gmm_fusion_kwargs,
+        **checkpoint_kwargs,
     )
     recv_capacity_per_rank = max_utils.get_te_moe_recv_capacity_per_rank()
     output = output.astype(self.dtype)
@@ -5174,6 +5208,10 @@ class RoutedAndSharedMoE(nnx.Module):
     )
 
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
+    # DeepSeek-V4 clamps the shared expert's SwiGLU like the routed experts (apply_ffn_activation).
+    clamp_shared = (
+        self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK4 and self.config.mlp_activations_limit > 0.0
+    )
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,
         in_features=self.moe_expert_input_dim,
@@ -5186,6 +5224,7 @@ class RoutedAndSharedMoE(nnx.Module):
         config=self.config,
         quant=self.quant,
         rngs=self.rngs,
+        activations_limit=self.config.mlp_activations_limit if clamp_shared else None,
     )
 
   @property

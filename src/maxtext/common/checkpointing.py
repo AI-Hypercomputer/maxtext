@@ -37,6 +37,7 @@ from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.common import checkpoint_context
 from maxtext.common import emergency_checkpointing
 from maxtext.common import grain_utility
+from maxtext.common import snapshotting
 from maxtext.common import train_state_nnx
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline import synthetic_data_processing
@@ -342,7 +343,7 @@ def _load_linen_checkpoint_into_nnx(
   """Restores a Linen-layout checkpoint into an NNX state.
 
   Restores a Linen-shape target that includes `nnx_aux`, then reshapes back via
-  `_restored_linen_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
+  `restored_linen_to_nnx`. rngs/dropout/batch stats come from `items/nnx_aux` when
   present, else keep their fresh init value. A genuinely-missing weight raises.
   """
   max_logging.log(f"Restoring Linen-layout checkpoint into NNX state at {path}")
@@ -377,14 +378,23 @@ def _load_linen_checkpoint_into_nnx(
     restored = ocp.load(
         root, linen_abstract, checkpointable_name=checkpointable_name
     )  # pyrefly: ignore[bad-argument-type]
-  return _restored_linen_to_nnx(restored, abstract_nnx_state, config=config)
+  return restored_linen_to_nnx(restored, abstract_nnx_state, config=config)
 
 
-def _restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
+def restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   """Reshapes a restored Linen-layout tree into the NNX state.
 
   Raises if the checkpoint is missing a weight. Every NNX restore path ends here: the load
-  itself is the Linen one, since MaxText reads and writes the Linen on-disk layout.
+  itself is the Linen one, since MaxText reads and writes the Linen on-disk layout. The
+  in-memory snapshot restore (`snapshotting.py`) uses it too.
+
+  Args:
+    restored_linen: The restored `items` tree, in the Linen on-disk layout.
+    abstract_nnx_state: The abstract NNX state to reshape it into.
+    config: Optional MaxText config, passed on to the weight check.
+
+  Returns:
+    The NNX state. Leaves the checkpoint doesn't hold, e.g. caches, stay `jax.ShapeDtypeStruct`s.
   """
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
   return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
@@ -516,7 +526,7 @@ def _load_full_state_from_path(
     # The conversion fn returns MaxText's on-disk (Linen) layout, which is what NNX reads,
     # so NNX needs the same reshape as every other restore. An NNX state passes through.
     if isinstance(abstract_unboxed_pre_state, nnx.State) and not isinstance(state, nnx.State):
-      state = _restored_linen_to_nnx(state, abstract_unboxed_pre_state, config=maxtext_config)
+      state = restored_linen_to_nnx(state, abstract_unboxed_pre_state, config=maxtext_config)
     return state
 
   raise ocp.errors.InvalidLayoutError(f"Unknown checkpoint layout: {source_checkpoint_layout}")
@@ -694,6 +704,13 @@ def wait_until_finished(checkpoint_manager):
     checkpoint_manager.wait()
 
 
+def is_saving_in_progress(checkpoint_manager) -> bool:
+  """Whether an async save is still running. The v0 emergency managers don't report it, so they count as idle."""
+  if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
+    return False
+  return checkpoint_manager.is_saving_in_progress()
+
+
 def reached_preemption(checkpoint_manager, step: int) -> bool:
   """Whether a preemption sync point has been reached at ``step`` (manager-agnostic)."""
   if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
@@ -727,6 +744,7 @@ def load_state_if_possible(
     source_checkpoint_layout="orbax",
     expansion_factor_real_data: int = -1,
     maxtext_config: Any | None = None,
+    snapshotter: ocp.training.pathways.Snapshotter | None = None,
 ):
   """Loads TrainState as possible from the inputs.
 
@@ -746,6 +764,9 @@ def load_state_if_possible(
     checkpoint_conversion_fn: function for converting checkpoint to Orbax v1.
     source_checkpoint_layout: Optional checkpoint context to use for loading,
       provided in string format with the default being "orbax".
+    snapshotter: Optional `snapshotting.Snapshotter` of an elastic run in snapshot mode. When it holds a snapshot
+      that is at least as recent as the latest checkpoint, the state and the data iterator position are restored
+      from it instead of from the checkpoint.
 
   Returns:
     A tuple of (train_state, train_state_params) where full_train_state captures
@@ -768,6 +789,16 @@ def load_state_if_possible(
   # does: the NNX abstract is converted to that layout going in, and what comes back is reshaped
   # into the NNX state on the way out.
   is_nnx = isinstance(abstract_unboxed_pre_state, (nnx.State, train_state_nnx.TrainStateNNX))
+
+  if snapshotting.should_restore_snapshot(snapshotter, checkpoint_manager):
+    snapshot_state = snapshotting.load_snapshot(snapshotter, abstract_unboxed_pre_state, maxtext_config, data_iterator)
+    if snapshot_state is not None:
+      # Match the return shape of the checkpoint restore branches below: emergency managers return a bare state
+      # (Case 1), while `ocp.training.Checkpointer` wraps it under `"items"` (Case 2).
+      if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
+        return (snapshot_state, None)
+      return ({"items": snapshot_state}, None)
+    max_logging.log("In-memory snapshot restore failed; falling back to checkpoint restore.")
 
   if checkpoint_manager is not None:
     max_logging.log("checkpoint manager exists so trying to load this run's existing checkpoint")
@@ -802,7 +833,7 @@ def load_state_if_possible(
               restored, abstract_unboxed_pre_state, config=maxtext_config
           )
         elif is_nnx:
-          restored = _restored_linen_to_nnx(restored, abstract_unboxed_pre_state, config=maxtext_config)
+          restored = restored_linen_to_nnx(restored, abstract_unboxed_pre_state, config=maxtext_config)
         return (restored, None)
 
       # Case 2: standard v1 Checkpointer, restoring the grain iterator in place when
@@ -825,7 +856,7 @@ def load_state_if_possible(
         )
         restored = {"items": restored_items}
       elif is_nnx:
-        restored_items = _restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state, config=maxtext_config)
+        restored_items = restored_linen_to_nnx(restored["items"], abstract_unboxed_pre_state, config=maxtext_config)
         restored = {"items": restored_items}
       return (restored, None)
 
