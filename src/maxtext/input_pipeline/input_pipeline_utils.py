@@ -701,15 +701,41 @@ class ParseFeatures(grain.MapTransform):
 
 @dataclasses.dataclass
 class NormalizeFeatures(grain.MapTransform):
-  """Normalize text feature keys."""
+  """Normalize text feature keys, preserving raw bytes for binary media columns."""
 
   def __init__(self, column_names, tokenize):
     self.column_names = column_names
     self.tokenize = tokenize
 
+  @staticmethod
+  def _decode_or_keep_bytes(val):
+    if len(val) == 0:
+      return ""
+    if len(val) == 1:
+      raw = val[0]
+      if isinstance(raw, (bytes, bytearray)):
+        try:
+          return raw.decode("utf-8")
+        except UnicodeDecodeError:
+          return bytes(raw)
+      return raw
+    decoded = []
+    for item in val:
+      if isinstance(item, (bytes, bytearray)):
+        try:
+          decoded.append(item.decode("utf-8"))
+        except UnicodeDecodeError:
+          decoded.append(bytes(item))
+      else:
+        decoded.append(item)
+    return decoded
+
   def map(self, element):
     if self.tokenize:
-      return {col: element[col][0].decode() for col in self.column_names}
+      return {
+          col: self._decode_or_keep_bytes(element[col])
+          for col in self.column_names
+      }
     else:
       return {col: element[col] for col in self.column_names}
 
