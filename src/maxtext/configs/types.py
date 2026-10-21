@@ -1927,8 +1927,8 @@ class MoEGeneral(BaseModel):
       ),
   )
 
-  @classmethod
-  def _off_for_false_fp8_fake_quant_hoist(cls, v: Any) -> Any:
+  @staticmethod
+  def _off_for_false_fp8_fake_quant_hoist(v: Any) -> Any:
     """Coerces False, which YAML and the command line make of a bare `off`, into 'off'."""
     return "off" if v is False else v
 
@@ -2307,7 +2307,7 @@ class MoEGeneral(BaseModel):
   @model_validator(mode="after")
   def validate_wi_tile_fwd_rhs_buffer_count(self) -> "MoEGeneral":
     """Only the fused wi GMM (megablox ops.gmm_silu) reads wi_tile_fwd_rhs_buffer_count: reject it anywhere else."""
-    n = self.wi_tile_fwd_rhs_buffer_count
+    n = getattr(self, "wi_tile_fwd_rhs_buffer_count", 0)
     if n != 0:
       _reject_unless(
           f"wi_tile_fwd_rhs_buffer_count={n}",
@@ -2316,7 +2316,7 @@ class MoEGeneral(BaseModel):
               (n >= 2, "a value of 0 (the kernel default) or at least 2"),
               (self.moe_wi_gmm_fused_swiglu, "moe_wi_gmm_fused_swiglu=True (the only GMM that reads it)"),
               # The layer applies it only with one K tile, which it checks against the explicit tiles.
-              (not self.use_gmm_v2_heuristic_tiling, "use_gmm_v2_heuristic_tiling=False"),
+              (not getattr(self, "use_gmm_v2_heuristic_tiling", False), "use_gmm_v2_heuristic_tiling=False"),
           ],
       )
     return self

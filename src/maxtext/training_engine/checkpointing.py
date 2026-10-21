@@ -410,7 +410,7 @@ class CheckpointManager:
     self._checkpoint_manager: ocp.CheckpointManager | None = None
     # Whether a background save that fails is raised from the next checkpoint call (False, the
     # default) or logged and dropped (True). See `_drain_in_flight_save`.
-    self._abandon_failed_saves = config.abandon_failed_checkpoint_saves
+    self._abandon_failed_saves = getattr(config, "abandon_failed_checkpoint_saves", False)
     # The step of the save most recently handed to Orbax, so a failure that surfaces later can
     # be attributed to it.
     self._in_flight_step: int | None = None
@@ -447,7 +447,7 @@ class CheckpointManager:
               max_to_keep=config.max_num_checkpoints_to_keep,
               enable_async_checkpointing=config.async_checkpointing,
               # Deadline for the background half of a save (storage writes and finalization).
-              async_options=ocp.AsyncOptions(timeout_secs=config.async_checkpointing_timeout_secs),
+              async_options=ocp.AsyncOptions(timeout_secs=getattr(config, "async_checkpointing_timeout_secs", 1200)),
           ),
           item_handlers={
               "model_params": _pytree_handler(),

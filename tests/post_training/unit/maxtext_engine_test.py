@@ -424,8 +424,12 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     )
 
   @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch(
+      "orbax.checkpoint._src.serialization.type_handler_registry.get_type_handler",
+      return_value=type("CloudPathwaysArrayHandler", (), {})(),
+  )
   @mock.patch("orbax.checkpoint.pathways.register_type_handlers")
-  def test_maybe_register_pathways_persistence(self, mock_register_type_handlers):
+  def test_maybe_register_pathways_persistence(self, mock_register_type_handlers, _):
     import orbax.checkpoint.pathways as ocp_pathways  # pylint: disable=import-outside-toplevel
     from maxtext.training_engine import checkpointing as checkpointing_module  # pylint: disable=import-outside-toplevel
 
@@ -2960,6 +2964,10 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
     # as lists while the training rules are tuples, so it must be compared by value.
     maxtext_engine.MaxTextTrainingEngine(self.mock_config)
     same = self.setup_config(custom_mesh_and_rule="pure-fsdp", custom_mesh_and_rule_for_eval="pure-fsdp")
+    maxtext_engine.MaxTextTrainingEngine(same)
+    same.get_keys()["logical_axis_rules_for_eval"] = [
+        [k, list(v) if isinstance(v, tuple) else v] for k, v in same.logical_axis_rules
+    ]
     self.assertNotEqual(same.logical_axis_rules_for_eval, same.logical_axis_rules)
     maxtext_engine.MaxTextTrainingEngine(same)
 

@@ -977,7 +977,7 @@ def inner_kernel(
         if cfgs.return_dact_dot:
           # The dot is one float32 per row: broadcast to a lane row and stored through the extra output.
           tiled_dot_ref, partial_dot_ref = pre_act_refs[0]
-          dot_tile_padded = jnp.broadcast_to(dot_tile, (cfgs.tiles.tile_m, tpu_info.num_lanes))
+          dot_tile_padded = jnp.broadcast_to(dot_tile, (cfgs.tiles.tile_m, pltpu.get_tpu_info().num_lanes))
           _store_group_rows(tiled_dot_ref, partial_dot_ref, dot_tile_padded, metadata_ref, cfgs)
 
       # Write the final output to the output ref.

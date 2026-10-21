@@ -4100,7 +4100,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self.save_checkpoint(metadata=None, force=True)
       self._checkpoint_manager.close()
 
-    if self._compile_executor is not None:
+    if getattr(self, "_compile_executor", None) is not None:
       # Cancels a compile not yet started; one already running cannot be stopped, and interpreter exit joins it.
       self._compile_executor.shutdown(wait=False, cancel_futures=True)
       self._compile_executor = None
