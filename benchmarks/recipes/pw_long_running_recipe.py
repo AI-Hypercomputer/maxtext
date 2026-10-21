@@ -126,6 +126,7 @@ def main():
             pathways_config=pathways_config,
             num_steps=BENCHMARK_STEPS,
             priority="medium",
+            extra_tuning_params=user_config.tuning_param_overrides() or None,
         )
         command, name = mcr.generate_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 

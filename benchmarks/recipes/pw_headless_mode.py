@@ -61,6 +61,8 @@ def main() -> int:
       libtpu_nightly_version="",
       base_docker_image=None,
       pathways_config=dataclasses.replace(user_config.pathways_config, headless=True),
+      # Headless mode runs no MaxText command; generate_workload_cmd rejects overrides instead of dropping them.
+      extra_tuning_params=user_config.tuning_param_overrides() or None,
   )
   command, name = mcr.generate_workload_cmd(
       cluster_config=user_config.cluster_config,
