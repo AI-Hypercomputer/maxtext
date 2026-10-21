@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Exact GCS HTTP QPS and POSIX/GCSFuse `pread64` tracer for MaxText input pipelines.
+"""Exact GCS HTTP QPS and POSIX/GCSFuse `pread64` tracer for MaxText pipelines.
 
 Provides:
 1. `extract_arrayrecord_footer_offset`:
@@ -21,28 +21,28 @@ Provides:
    data chunks (`[0, footer_offset)`) from the `ArrayRecordFooter` index chunk
    and `RiegeliPostscript` (`[footer_offset, file_size)`).
 2. `InstrumentedGCSServer`:
-   A multi-threaded HTTP/1.1 server compatible with `CLOUD_STORAGE_EMULATOR_ENDPOINT`
-   (C++ `google::cloud::storage::Client` / `riegeli::gcs::GcsReader`) and
-   `STORAGE_EMULATOR_HOST` (Python `google-cloud-storage`). Records every HTTP
-   request immediately upon arrival (so stalled `full_get` streams held open by
-   `GcsReader` are never missed), tracks live `transferred_bytes`, and classifies
-   every GET deterministically by exact byte offset into:
+   A multi-threaded HTTP/1.1 server compatible with
+   `CLOUD_STORAGE_EMULATOR_ENDPOINT` (C++ `google::cloud::storage::Client` /
+   `riegeli::gcs::GcsReader`) and `STORAGE_EMULATOR_HOST` (Python
+   `google-cloud-storage`). Records every HTTP request immediately upon arrival,
+   tracks live `transferred_bytes`, and classifies every GET deterministically
+   by exact byte offset into:
    - `list_or_meta`
-   - `init_probe_shard_open` (`ArrayRecordDataSource.__init__` `num_records()` probe)
+   - `init_probe_shard_open` (`ArrayRecordDataSource.__init__` probe)
    - `lazy_worker_shard_open` (`_ensure_reader_exists` per-worker reader open)
    - `record_read` (`[0, footer_offset)` data chunk read)
 3. `PosixGCSFuseTracer`:
-   Attaches `strace -f -qq -s 0 -ttt -y -e trace=pread64` across the process tree
-   (including all PyGrain `mp_prefetch` worker processes) to capture the exact
-   POSIX `pread64(fd<path>, count, offset)` syscalls issued by C++ `riegeli::FdReader`
-   on `.array_record` files, and replays them through a stateful GCSFuse streaming
-   read-ahead and local file-cache state machine.
+   Attaches `strace -f -qq -s 0 -ttt -y -e trace=pread64` across the process
+   tree (including all PyGrain `mp_prefetch` worker processes) to capture the
+   exact POSIX `pread64(fd<path>, count, offset)` syscalls issued by C++
+   `riegeli::FdReader` on `.array_record` files, and replays them through a
+   stateful GCSFuse streaming read-ahead and local file-cache state machine.
 """
 
 import ctypes
 import dataclasses
 import fnmatch
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http import server as http_server
 import json
 import os
 import re
@@ -51,8 +51,8 @@ import sys
 import tempfile
 import threading
 import time
-from typing import Optional
-from urllib.parse import parse_qs, unquote, urlparse
+from typing import Any, Optional
+from urllib import parse as urllib_parse
 
 _RIEGELI_BLOCK_SIZE = 65536
 _ARRAY_RECORD_MAGIC = 0x71930E704FDAE05E
@@ -73,7 +73,7 @@ _FOOTER_CACHE_LOCK = threading.Lock()
 
 
 def extract_arrayrecord_footer_offset(file_path: str) -> int:
-  """Returns the exact byte offset where the ArrayRecordFooter chunk starts in `file_path`."""
+  """Returns the exact byte offset where ArrayRecordFooter starts in `file_path`."""
   abs_path = os.path.abspath(file_path)
   with _FOOTER_CACHE_LOCK:
     if abs_path in _FOOTER_OFFSET_CACHE:
@@ -89,7 +89,7 @@ def extract_arrayrecord_footer_offset(file_path: str) -> int:
       tail = f.read(_RIEGELI_BLOCK_SIZE)
     idx = tail.find(_MAGIC_PROTO_TAG_BYTES)
     if idx != -1:
-      # In RiegeliPostscript proto, field 1 (tag 0x08, footer_offset) immediately precedes field 2 (magic)
+      # In RiegeliPostscript proto, field 1 (0x08, footer_offset) precedes magic
       sub = tail[max(0, idx - 12) : idx]
       t_idx = sub.rfind(b"\x08")
       if t_idx != -1:
@@ -100,7 +100,7 @@ def extract_arrayrecord_footer_offset(file_path: str) -> int:
           if not (b & 0x80):
             break
           shift += 7
-        if 0 < val <= postscript_offset:
+        if 0 < val < size:
           with _FOOTER_CACHE_LOCK:
             _FOOTER_OFFSET_CACHE[abs_path] = val
           return val
@@ -109,6 +109,24 @@ def extract_arrayrecord_footer_offset(file_path: str) -> int:
     return postscript_offset
   except OSError:
     return 0
+
+
+def _compute_peak_window_gets(
+    timestamps: list[float], window_s: float = 1.0
+) -> int:
+  """Returns the maximum number of requests within any `window_s` interval."""
+  if not timestamps:
+    return 0
+  sorted_ts = sorted(timestamps)
+  max_count = 0
+  left = 0
+  for right, ts in enumerate(sorted_ts):
+    while ts - sorted_ts[left] > window_s:
+      left += 1
+    count = right - left + 1
+    if count > max_count:
+      max_count = count
+  return max_count
 
 
 @dataclasses.dataclass
@@ -121,8 +139,8 @@ class GCSRequestRecord:
   method: str
   object_name: str
   range_header: Optional[str]
-  range_type: str  # "list_or_meta", "full_get", "unbounded_range", "bounded_range", "suffix_range"
-  request_category: str  # "list_or_meta", "init_probe_shard_open", "lazy_worker_shard_open", "record_read"
+  range_type: str  # "list_or_meta", "full_get", "unbounded_range", etc.
+  request_category: str
   start_offset: int
   end_offset: int
   footer_offset: int
@@ -132,7 +150,7 @@ class GCSRequestRecord:
 
 
 class InstrumentedGCSServer:
-  """Local multi-threaded GCS HTTP server for exact C++ GcsReader QPS measurement."""
+  """Local multi-threaded GCS HTTP server for exact C++ GcsReader QPS tracing."""
 
   def __init__(self, root_dir: str, bucket_name: str = "qps-bench"):
     self.root_dir = os.path.abspath(root_dir)
@@ -141,15 +159,17 @@ class InstrumentedGCSServer:
     self._phase = "init"
     self._step_idx = -1
     self.requests: list[GCSRequestRecord] = []
-    self._server: Optional[ThreadingHTTPServer] = None
+    self._server: Optional[http_server.ThreadingHTTPServer] = None
     self._thread: Optional[threading.Thread] = None
 
   def set_phase(self, phase: str, step_idx: int = -1) -> None:
+    """Updates the active execution phase and step index for request tagging."""
     with self._lock:
       self._phase = phase
       self._step_idx = step_idx
 
   def reset_stats(self) -> None:
+    """Clears all recorded HTTP requests and resets phase to `init`."""
     with self._lock:
       self.requests.clear()
       self._phase = "init"
@@ -167,12 +187,17 @@ class InstrumentedGCSServer:
     clean_rel = os.path.normpath(object_name).lstrip(os.sep)
     return os.path.join(self.root_dir, clean_rel)
 
-  def _list_matching_objects(self, prefix: str = "", match_glob: str = "") -> list[dict]:
+  def _list_matching_objects(
+      self, prefix: str = "", match_glob: str = ""
+  ) -> list[dict[str, Any]]:
+    """Lists local files under `root_dir` matching `prefix` and `match_glob`."""
     items = []
     for dirpath, _, filenames in os.walk(self.root_dir):
       for fname in sorted(filenames):
         full_path = os.path.join(dirpath, fname)
-        rel_path = os.path.relpath(full_path, self.root_dir).replace(os.sep, "/")
+        rel_path = os.path.relpath(full_path, self.root_dir).replace(
+            os.sep, "/"
+        )
         if prefix and not rel_path.startswith(prefix):
           continue
         if match_glob and not fnmatch.fnmatch(rel_path, match_glob):
@@ -189,9 +214,12 @@ class InstrumentedGCSServer:
     return items
 
   def start(self) -> str:
+    """Starts the background HTTP server and configures GCS emulator env vars."""
     outer = self
 
-    class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    class QuietThreadingHTTPServer(http_server.ThreadingHTTPServer):
+      """ThreadingHTTPServer that suppresses BrokenPipeError from aborted GETs."""
+
       daemon_threads = True
 
       def handle_error(self, request, client_address):
@@ -200,7 +228,9 @@ class InstrumentedGCSServer:
           return
         super().handle_error(request, client_address)
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(http_server.BaseHTTPRequestHandler):
+      """HTTP handler emulating the GCS JSON API with byte-offset classification."""
+
       protocol_version = "HTTP/1.1"
 
       def log_message(self, format, *args):  # pylint: disable=redefined-builtin
@@ -213,21 +243,26 @@ class InstrumentedGCSServer:
           pass
 
       def do_GET(self):  # pylint: disable=invalid-name
-        parsed = urlparse(self.path)
-        query = parse_qs(parsed.query)
+        """Handles GCS list, object metadata, and media Range GET requests."""
+        parsed = urllib_parse.urlparse(self.path)
+        query = urllib_parse.parse_qs(parsed.query)
         path = parsed.path
         now = time.perf_counter()
-        with outer._lock:
-          phase = outer._phase
-          step_idx = outer._step_idx
+        with outer._lock:  # pylint: disable=protected-access
+          phase = outer._phase  # pylint: disable=protected-access
+          step_idx = outer._step_idx  # pylint: disable=protected-access
 
         # 1. List objects endpoint: /storage/v1/b/<bucket>/o
         if path.rstrip("/") == f"/storage/v1/b/{outer.bucket_name}/o":
           prefix = query.get("prefix", [""])[0]
           match_glob = query.get("matchGlob", [""])[0]
-          items = outer._list_matching_objects(prefix=prefix, match_glob=match_glob)
-          body = json.dumps({"kind": "storage#objects", "items": items}).encode("utf-8")
-          outer._record(
+          items = outer._list_matching_objects(  # pylint: disable=protected-access
+              prefix=prefix, match_glob=match_glob
+          )
+          body = json.dumps({"kind": "storage#objects", "items": items}).encode(
+              "utf-8"
+          )
+          outer._record(  # pylint: disable=protected-access
               GCSRequestRecord(
                   timestamp=now,
                   phase=phase,
@@ -255,13 +290,13 @@ class InstrumentedGCSServer:
         marker = f"/b/{outer.bucket_name}/o/"
         xml_marker = f"/{outer.bucket_name}/"
         if marker in path:
-          object_name = unquote(path.split(marker, 1)[1])
+          object_name = urllib_parse.unquote(path.split(marker, 1)[1])
         elif path.startswith(xml_marker):
-          object_name = unquote(path[len(xml_marker) :])
+          object_name = urllib_parse.unquote(path[len(xml_marker) :])
         else:
           self.send_error(404, f"Unknown path: {path}")
           return
-        local_path = outer._resolve_local_path(object_name)
+        local_path = outer._resolve_local_path(object_name)  # pylint: disable=protected-access
         if not os.path.isfile(local_path):
           self.send_error(404, f"Object not found: {object_name}")
           return
@@ -283,7 +318,7 @@ class InstrumentedGCSServer:
               "contentType": "application/octet-stream",
           }
           body = json.dumps(meta).encode("utf-8")
-          outer._record(
+          outer._record(  # pylint: disable=protected-access
               GCSRequestRecord(
                   timestamp=now,
                   phase=phase,
@@ -318,12 +353,12 @@ class InstrumentedGCSServer:
         if rng and rng.startswith("bytes="):
           spec = rng.split("=", 1)[1].strip()
           p0, p1 = spec.split("-", 1)
-          if p0 == "":
+          if not p0:
             suffix_len = int(p1)
             start = max(0, file_size - suffix_len)
             end = file_size - 1
             range_type = "suffix_range"
-          elif p1 == "":
+          elif not p1:
             start = min(int(p0), max(0, file_size - 1))
             end = file_size - 1
             range_type = "unbounded_range"
@@ -333,12 +368,21 @@ class InstrumentedGCSServer:
             range_type = "bounded_range"
           status = 206
 
-        # Exact byte-offset classification:
-        # - `full_get` (Range: None size probe at offset 0), `suffix_range` (ReadLast footer prefetch),
-        #   or any range starting at or after `footer_offset` is 100% a Shard-Open GET.
-        # - Any range starting strictly before `footer_offset` with a Range header is 100% a Record-Read GET.
-        if range_type in ("full_get", "suffix_range") or start >= footer_offset:
-          request_category = "init_probe_shard_open" if phase == "init" else "lazy_worker_shard_open"
+        is_tail_footer_read = start >= footer_offset or (
+            footer_offset > 0
+            and end >= file_size - 1
+            and start >= max(0, footer_offset - 65536)
+        )
+        if (
+            phase == "init"
+            or range_type in ("full_get", "suffix_range")
+            or is_tail_footer_read
+        ):
+          request_category = (
+              "init_probe_shard_open"
+              if phase == "init"
+              else "lazy_worker_shard_open"
+          )
         else:
           request_category = "record_read"
 
@@ -359,8 +403,7 @@ class InstrumentedGCSServer:
             requested_bytes=requested_bytes,
             transferred_bytes=0,
         )
-        # Register request immediately so open connections held by GcsReader are never dropped
-        outer._record(rec)
+        outer._record(rec)  # pylint: disable=protected-access
 
         self.send_response(status)
         self.send_header("Content-Type", "application/octet-stream")
@@ -382,13 +425,15 @@ class InstrumentedGCSServer:
               if not buf:
                 break
               self.wfile.write(buf)
-              outer._add_transferred(rec, len(buf))
+              outer._add_transferred(rec, len(buf))  # pylint: disable=protected-access
               remaining -= len(buf)
         except (BrokenPipeError, ConnectionResetError):
           self.close_connection = True
 
     self._server = QuietThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+    self._thread = threading.Thread(
+        target=self._server.serve_forever, daemon=True
+    )
     self._thread.start()
     endpoint = f"http://127.0.0.1:{self._server.server_port}"
     os.environ["CLOUD_STORAGE_EMULATOR_ENDPOINT"] = endpoint
@@ -396,28 +441,68 @@ class InstrumentedGCSServer:
     return endpoint
 
   def stop(self) -> None:
+    """Stops the background HTTP server."""
     if self._server is not None:
       self._server.shutdown()
       self._server.server_close()
       self._server = None
 
-  def summarize(self) -> dict:
+  def summarize(self) -> dict[str, Any]:
+    """Aggregates request counts and transferred bytes by phase and category."""
     with self._lock:
       reqs = list(self.requests)
 
     media_reqs = [r for r in reqs if r.request_category != "list_or_meta"]
     meta_reqs = [r for r in reqs if r.request_category == "list_or_meta"]
 
-    init_probe_reqs = [r for r in media_reqs if r.request_category == "init_probe_shard_open"]
-    lazy_open_reqs = [r for r in media_reqs if r.request_category == "lazy_worker_shard_open"]
+    init_probe_reqs = [
+        r for r in media_reqs if r.request_category == "init_probe_shard_open"
+    ]
+    lazy_open_reqs = [
+        r for r in media_reqs if r.request_category == "lazy_worker_shard_open"
+    ]
     shard_open_reqs = init_probe_reqs + lazy_open_reqs
-    record_read_reqs = [r for r in media_reqs if r.request_category == "record_read"]
+    record_read_reqs = [
+        r for r in media_reqs if r.request_category == "record_read"
+    ]
 
-    init_and_first_media = [r for r in media_reqs if r.phase in ("init", "first_batch")]
+    init_only_media = [r for r in media_reqs if r.phase == "init"]
+    first_batch_media = [r for r in media_reqs if r.phase == "first_batch"]
+    init_and_first_media = [
+        r for r in media_reqs if r.phase in ("init", "first_batch")
+    ]
     warmup_media = [r for r in media_reqs if r.phase == "warmup"]
     steady_media = [r for r in media_reqs if r.phase == "steady"]
-    steady_record_reads = [r for r in steady_media if r.request_category == "record_read"]
-    steady_lazy_opens = [r for r in steady_media if r.request_category == "lazy_worker_shard_open"]
+    active_iter_media = [r for r in media_reqs if r.phase != "init"]
+    steady_record_reads = [
+        r for r in steady_media if r.request_category == "record_read"
+    ]
+    steady_lazy_opens = [
+        r
+        for r in steady_media
+        if r.request_category == "lazy_worker_shard_open"
+    ]
+
+    step_counts: dict[tuple[str, int], int] = {}
+    steady_step_counts: dict[int, int] = {}
+    for r in active_iter_media:
+      key = (r.phase, r.step_idx)
+      step_counts[key] = step_counts.get(key, 0) + 1
+      if r.phase == "steady":
+        steady_step_counts[r.step_idx] = (
+            steady_step_counts.get(r.step_idx, 0) + 1
+        )
+
+    peak_step_gets = max(step_counts.values()) if step_counts else 0
+    steady_peak_step_gets = (
+        max(steady_step_counts.values()) if steady_step_counts else 0
+    )
+    peak_1s_gets = _compute_peak_window_gets(
+        [r.timestamp for r in media_reqs], window_s=1.0
+    )
+    peak_1s_active_gets = _compute_peak_window_gets(
+        [r.timestamp for r in active_iter_media], window_s=1.0
+    )
 
     unique_shards = sorted({r.object_name for r in media_reqs})
     by_type: dict[str, int] = {}
@@ -426,7 +511,9 @@ class InstrumentedGCSServer:
 
     by_category: dict[str, int] = {}
     for r in media_reqs:
-      by_category[r.request_category] = by_category.get(r.request_category, 0) + 1
+      by_category[r.request_category] = (
+          by_category.get(r.request_category, 0) + 1
+      )
 
     return {
         "total_http_requests": len(reqs),
@@ -436,24 +523,34 @@ class InstrumentedGCSServer:
         "lazy_worker_shard_open_gets": len(lazy_open_reqs),
         "exact_shard_open_gets": len(shard_open_reqs),
         "exact_record_read_gets": len(record_read_reqs),
+        "init_only_gets": len(init_only_media),
+        "first_batch_gets": len(first_batch_media),
         "init_and_first_batch_gets": len(init_and_first_media),
         "warmup_gets": len(warmup_media),
         "steady_total_gets": len(steady_media),
         "steady_record_read_gets": len(steady_record_reads),
         "steady_lazy_shard_open_gets": len(steady_lazy_opens),
+        "peak_step_gets": peak_step_gets,
+        "steady_peak_step_gets": steady_peak_step_gets,
+        "peak_1s_gets": peak_1s_gets,
+        "peak_1s_active_gets": peak_1s_active_gets,
         "unique_shards_touched": len(unique_shards),
         "range_type_breakdown": by_type,
         "request_category_breakdown": by_category,
         "total_requested_bytes": sum(r.requested_bytes for r in media_reqs),
         "total_transferred_bytes": sum(r.transferred_bytes for r in media_reqs),
-        "record_read_requested_bytes": sum(r.requested_bytes for r in record_read_reqs),
-        "record_read_transferred_bytes": sum(r.transferred_bytes for r in record_read_reqs),
+        "record_read_requested_bytes": sum(
+            r.requested_bytes for r in record_read_reqs
+        ),
+        "record_read_transferred_bytes": sum(
+            r.transferred_bytes for r in record_read_reqs
+        ),
     }
 
 
 @dataclasses.dataclass
 class PreadEvent:
-  """A single POSIX `pread64` syscall on an `.array_record` shard captured via `strace`."""
+  """A single POSIX `pread64` syscall on an `.array_record` shard."""
 
   pid: int
   timestamp: float
@@ -464,37 +561,50 @@ class PreadEvent:
   returned_bytes: int
   footer_offset: int
   file_size: int
-  category: str  # "init_probe_shard_open", "lazy_worker_shard_open", "record_read"
+  category: str  # "init_probe_shard_open", "lazy_worker_shard_open", etc.
   phase: str  # "init", "first_batch", "warmup", "steady"
+  step_idx: int = -1
 
 
 _PREAD_LINE_RE = re.compile(
-    r"^\s*(?:(?:\[pid\s+)?(\d+)\]?\s+)?(\d+\.\d+)\s+pread64\((\d+)<([^>]+)>,\s*.*,\s*(\d+),\s*(\d+)\)\s*=\s*(\d+)"
+    r"^\s*(?:(?:\[pid\s+)?(\d+)\]?\s+)?(\d+\.\d+)\s+"
+    r"pread64\((\d+)<([^>]+)>,\s*.*,\s*(\d+),\s*(\d+)\s*\)\s*=\s*(\d+)"
+)
+_PREAD_UNFINISHED_RE = re.compile(
+    r"^(\s*(?:(?:\[pid\s+)?(\d+)\]?\s+)?\d+\.\d+\s+pread64\(.*?)<unfinished"
+    r" \.\.\.>"
+)
+_PREAD_RESUMED_RE = re.compile(
+    r"^\s*(?:(?:\[pid\s+)?(\d+)\]?\s+)?\d+\.\d+\s+<\.\.\.\s*pread64"
+    r" resumed>(.*)$"
 )
 
 
 class PosixGCSFuseTracer:
-  """Traces actual C++ `FdReader` `pread64` syscalls and replays them through a GCSFuse state machine."""
+  """Traces C++ `FdReader` `pread64` syscalls and replays GCSFuse read-ahead."""
 
   def __init__(self, target_dir: str, read_ahead_kb: int = 1024):
     self.target_dir = os.path.abspath(target_dir)
     self.read_ahead_bytes = read_ahead_kb * 1024
-    self._proc: Optional[subprocess.Popen] = None
-    self._trace_file: Optional[tempfile.NamedTemporaryFile] = None
-    self.phase_timestamps: list[tuple[float, str]] = []
+    self._proc: Optional[subprocess.Popen[bytes]] = None
+    self._trace_file: Optional[Any] = None
+    self.phase_timestamps: list[tuple[float, str, int]] = []
 
-  def mark_phase(self, phase: str) -> None:
-    self.phase_timestamps.append((time.time(), phase))
+  def mark_phase(self, phase: str, step_idx: int = -1) -> None:
+    """Records the wall-clock timestamp when a new benchmark phase begins."""
+    self.phase_timestamps.append((time.time(), phase, step_idx))
 
   def start(self) -> None:
+    """Unlocks ptrace_scope and attaches `strace -f -e trace=pread64`."""
     try:
-      # Allow child strace process to attach under Yama ptrace_scope=1
       ctypes.CDLL(None).prctl(0x59616D61, -1, 0, 0, 0)
     except Exception:  # pylint: disable=broad-exception-caught
       pass
 
-    self._trace_file = tempfile.NamedTemporaryFile(mode="r", suffix=".strace", delete=False)
-    self.phase_timestamps = [(time.time(), "init")]
+    self._trace_file = tempfile.NamedTemporaryFile(
+        mode="r", suffix=".strace", delete=False
+    )
+    my_pid = os.getpid()
     self._proc = subprocess.Popen(
         [
             "strace",
@@ -509,24 +619,37 @@ class PosixGCSFuseTracer:
             "-o",
             self._trace_file.name,
             "-p",
-            str(os.getpid()),
+            str(my_pid),
         ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
-    # Give strace 150ms to attach to all threads of the current process
-    time.sleep(0.15)
+    deadline = time.time() + 2.0
+    while time.time() < deadline:
+      try:
+        with open(f"/proc/{my_pid}/status", "r", encoding="utf-8") as sf:
+          status_text = sf.read()
+        if "\nTracerPid:\t0\n" not in status_text:
+          break
+      except OSError:
+        break
+      time.sleep(0.02)
+    time.sleep(0.05)
+    self.phase_timestamps = [(time.time(), "init", -1)]
 
-  def _resolve_phase(self, ts: float) -> str:
+  def _resolve_phase(self, ts: float) -> tuple[str, int]:
     phase = "init"
-    for p_ts, p_name in self.phase_timestamps:
+    step_idx = -1
+    for p_ts, p_name, s_idx in self.phase_timestamps:
       if ts >= p_ts:
         phase = p_name
+        step_idx = s_idx
       else:
         break
-    return phase
+    return phase, step_idx
 
-  def stop_and_summarize(self) -> dict:
+  def stop_and_summarize(self) -> dict[str, Any]:
+    """Stops `strace` and replays `pread64` events through GCSFuse state."""
     if self._proc is not None:
       time.sleep(0.05)
       self._proc.terminate()
@@ -538,14 +661,40 @@ class PosixGCSFuseTracer:
 
     events: list[PreadEvent] = []
     if self._trace_file is not None and os.path.exists(self._trace_file.name):
-      with open(self._trace_file.name, "r", encoding="utf-8", errors="replace") as f:
-        for line in f:
+      pending_by_pid: dict[int, str] = {}
+      with open(
+          self._trace_file.name, "r", encoding="utf-8", errors="replace"
+      ) as f:
+        for raw_line in f:
+          um = _PREAD_UNFINISHED_RE.match(raw_line)
+          if um:
+            u_pid = int(um.group(2)) if um.group(2) else os.getpid()
+            pending_by_pid[u_pid] = um.group(1)
+            continue
+          rm = _PREAD_RESUMED_RE.match(raw_line)
+          if rm:
+            r_pid = int(rm.group(1)) if rm.group(1) else os.getpid()
+            prefix = pending_by_pid.pop(r_pid, None)
+            if prefix is None:
+              continue
+            line = prefix + rm.group(2)
+          else:
+            line = raw_line
+
           if ".array_record" not in line:
             continue
           m = _PREAD_LINE_RE.match(line)
           if not m:
             continue
-          pid_str, ts_str, fd_str, path_str, req_str, off_str, ret_str = m.groups()
+          (
+              pid_str,
+              ts_str,
+              fd_str,
+              path_str,
+              req_str,
+              off_str,
+              ret_str,
+          ) = m.groups()
           abs_path = os.path.abspath(path_str)
           if not abs_path.startswith(self.target_dir):
             continue
@@ -557,9 +706,18 @@ class PosixGCSFuseTracer:
           ret_b = int(ret_str)
           f_size = os.path.getsize(abs_path) if os.path.exists(abs_path) else 0
           footer_off = extract_arrayrecord_footer_offset(abs_path)
-          phase = self._resolve_phase(ts)
-          if off >= footer_off:
-            cat = "init_probe_shard_open" if phase == "init" else "lazy_worker_shard_open"
+          phase, step_idx = self._resolve_phase(ts)
+          is_tail_footer_read = off >= footer_off or (
+              footer_off > 0
+              and (off + ret_b) >= f_size
+              and off >= max(0, footer_off - 65536)
+          )
+          if phase == "init" or is_tail_footer_read:
+            cat = (
+                "init_probe_shard_open"
+                if phase == "init"
+                else "lazy_worker_shard_open"
+            )
           else:
             cat = "record_read"
           events.append(
@@ -575,6 +733,7 @@ class PosixGCSFuseTracer:
                   file_size=f_size,
                   category=cat,
                   phase=phase,
+                  step_idx=step_idx,
               )
           )
       try:
@@ -583,11 +742,6 @@ class PosixGCSFuseTracer:
         pass
       self._trace_file = None
 
-    # Replay exact pread64 stream through stateful GCSFuse Read-Ahead state machine:
-    # Each open file handle `(pid, fd, file_path)` maintains a streaming read-ahead window
-    # `[buf_start, buf_end)`. A `pread64(off, len)` inside `[buf_start, buf_end)` is a
-    # Read-Ahead Cache Hit (0 GCS GETs). A backward seek (`off < buf_start`) or jump past
-    # `buf_end` issues 1 bounded GCS Range GET of `min(file_size - off, max(len, read_ahead_bytes))`.
     ra_windows: dict[tuple[int, int, str], tuple[int, int]] = {}
     gcsfuse_cold_gets: list[PreadEvent] = []
     gcsfuse_cold_bytes = 0
@@ -596,7 +750,11 @@ class PosixGCSFuseTracer:
     for ev in events:
       key = (ev.pid, ev.fd, ev.file_path)
       win = ra_windows.get(key)
-      if win is not None and ev.offset >= win[0] and (ev.offset + ev.returned_bytes) <= win[1]:
+      if (
+          win is not None
+          and ev.offset >= win[0]
+          and (ev.offset + ev.returned_bytes) <= win[1]
+      ):
         readahead_hits += 1
       else:
         fetch_len = min(
@@ -607,16 +765,52 @@ class PosixGCSFuseTracer:
         gcsfuse_cold_gets.append(ev)
         gcsfuse_cold_bytes += fetch_len
 
-    init_probe_gets = [e for e in gcsfuse_cold_gets if e.category == "init_probe_shard_open"]
-    lazy_open_gets = [e for e in gcsfuse_cold_gets if e.category == "lazy_worker_shard_open"]
+    init_probe_gets = [
+        e for e in gcsfuse_cold_gets if e.category == "init_probe_shard_open"
+    ]
+    lazy_open_gets = [
+        e for e in gcsfuse_cold_gets if e.category == "lazy_worker_shard_open"
+    ]
     shard_open_gets = init_probe_gets + lazy_open_gets
-    record_read_gets = [e for e in gcsfuse_cold_gets if e.category == "record_read"]
+    record_read_gets = [
+        e for e in gcsfuse_cold_gets if e.category == "record_read"
+    ]
 
-    init_and_first_gets = [e for e in gcsfuse_cold_gets if e.phase in ("init", "first_batch")]
+    init_only_gets = [e for e in gcsfuse_cold_gets if e.phase == "init"]
+    first_batch_gets = [
+        e for e in gcsfuse_cold_gets if e.phase == "first_batch"
+    ]
+    init_and_first_gets = [
+        e for e in gcsfuse_cold_gets if e.phase in ("init", "first_batch")
+    ]
     warmup_gets = [e for e in gcsfuse_cold_gets if e.phase == "warmup"]
     steady_gets = [e for e in gcsfuse_cold_gets if e.phase == "steady"]
+    active_iter_gets = [e for e in gcsfuse_cold_gets if e.phase != "init"]
     steady_record_gets = [e for e in steady_gets if e.category == "record_read"]
-    steady_lazy_open_gets = [e for e in steady_gets if e.category == "lazy_worker_shard_open"]
+    steady_lazy_open_gets = [
+        e for e in steady_gets if e.category == "lazy_worker_shard_open"
+    ]
+
+    step_counts: dict[tuple[str, int], int] = {}
+    steady_step_counts: dict[int, int] = {}
+    for e in active_iter_gets:
+      key = (e.phase, e.step_idx)
+      step_counts[key] = step_counts.get(key, 0) + 1
+      if e.phase == "steady":
+        steady_step_counts[e.step_idx] = (
+            steady_step_counts.get(e.step_idx, 0) + 1
+        )
+
+    peak_step_gets = max(step_counts.values()) if step_counts else 0
+    steady_peak_step_gets = (
+        max(steady_step_counts.values()) if steady_step_counts else 0
+    )
+    peak_1s_gets = _compute_peak_window_gets(
+        [e.timestamp for e in gcsfuse_cold_gets], window_s=1.0
+    )
+    peak_1s_active_gets = _compute_peak_window_gets(
+        [e.timestamp for e in active_iter_gets], window_s=1.0
+    )
 
     unique_shards = sorted({e.file_path for e in events})
 
@@ -628,11 +822,17 @@ class PosixGCSFuseTracer:
         "lazy_worker_shard_open_gets": len(lazy_open_gets),
         "exact_shard_open_gets": len(shard_open_gets),
         "exact_record_read_gets": len(record_read_gets),
+        "init_only_gets": len(init_only_gets),
+        "first_batch_gets": len(first_batch_gets),
         "init_and_first_batch_gets": len(init_and_first_gets),
         "warmup_gets": len(warmup_gets),
         "steady_total_gets": len(steady_gets),
         "steady_record_read_gets": len(steady_record_gets),
         "steady_lazy_shard_open_gets": len(steady_lazy_open_gets),
+        "peak_step_gets": peak_step_gets,
+        "steady_peak_step_gets": steady_peak_step_gets,
+        "peak_1s_gets": peak_1s_gets,
+        "peak_1s_active_gets": peak_1s_active_gets,
         "unique_shards_touched": len(unique_shards),
         "total_requested_bytes": gcsfuse_cold_bytes,
         "total_transferred_bytes": gcsfuse_cold_bytes,
@@ -650,7 +850,7 @@ class PosixGCSFuseTracer:
 
 
 def read_process_tree_io(root_pid: Optional[int] = None) -> dict[str, int]:
-  """Sums `/proc/<pid>/io` counters (`syscr`, `read_bytes`, `rchar`) for `root_pid` and its children."""
+  """Sums `/proc/<pid>/io` counters (`syscr`, `read_bytes`, `rchar`)."""
   if root_pid is None:
     root_pid = os.getpid()
 
