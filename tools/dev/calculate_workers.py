@@ -28,8 +28,9 @@ MAX_GPU_WORKERS = 3
 DEFAULT_WORKERS = 1
 
 # Right-sizing parameters for fast test suites
-LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD = 8.0
-TARGET_MINUTES_PER_WORKER = 4.0
+LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD = 16.0
+TARGET_MINUTES_PER_WORKER = 8.0
+CPU_XDIST_PARALLELISM = 16
 
 
 def get_max_workers_for_flavor(flavor: str) -> int:
@@ -67,12 +68,19 @@ def calculate_workers(flavor: str, baseline_data: dict[str, float] | None = None
   if test_count == 0:
     return DEFAULT_WORKERS, [DEFAULT_WORKERS]
 
+  # CPU flavors run under pytest-xdist (-n auto on 32-vCPU runners), so summed per-test
+  # durations reflect CPU-minutes across workers rather than single-VM wall-minutes.
+  if flavor.startswith("cpu-"):
+    effective_minutes = max(max(matching) / 60.0, total_minutes / CPU_XDIST_PARALLELISM)
+  else:
+    effective_minutes = total_minutes
+
   # Never allocate more workers than available tests
   workers = min(max_workers, test_count)
 
   # For lightweight test suites, right-size worker count
-  if total_minutes < LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD:
-    workers = min(workers, max(1, math.ceil(total_minutes / TARGET_MINUTES_PER_WORKER)))
+  if effective_minutes < LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD:
+    workers = min(workers, max(1, math.ceil(effective_minutes / TARGET_MINUTES_PER_WORKER)))
 
   workers = max(1, workers)
   return workers, list(range(1, workers + 1))

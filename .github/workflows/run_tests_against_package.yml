@@ -263,6 +263,9 @@ jobs:
             else
               SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
             fi
+          elif [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+            $PYTHON_EXE -m pip install --quiet pytest-xdist
+            SPLIT_ARGS="-n auto"
           else
             SPLIT_ARGS=""
           fi
