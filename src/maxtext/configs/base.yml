@@ -314,6 +314,14 @@ emo_threshold_by_bisection: false
 # OLMoE3: attention/KDA mixers ignore segment ids (whole-instance, as OLMo-core); only EMo uses them.
 olmoe3_segments_for_emo_only: false
 moe_global_load_balancing: false # OLMo-core global_load_balancing: LB counts averaged over the whole batch, not per device
+# Log OLMo-core's router metrics per OLMoE3 MoE layer and in total: load balancing and router z losses (scaled and
+# unscaled), load imbalance and global load imbalance (learning/block_NN/... and learning/...).
+olmoe3_router_metrics: false
+# Sequences per group for the local load imbalance: OLMo-core reports it per GPU, which is 16 sequences for the
+# hero (2048 on 128 GPUs). 0 = the whole batch.
+router_metrics_group_seqs: 16
+# Peak bf16 TFLOP/s per device for perf/mfu; 0 infers it from the device kind (v4 275, v5e 197, v5p 459, v6e 918).
+peak_device_tflops: 0.0
 moe_use_megatron_seq_aux_loss: false # when true, sigmoid routers (routed_score_func="sigmoid") use Megatron-LM's sequence-wise aux loss summed over MoE layers; false (default) uses the Switch-style loss averaged over MoE layers.
 use_random_routing: false # whether to use random routing for debug/test purpose
 use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backward pass processing in sparse matmul

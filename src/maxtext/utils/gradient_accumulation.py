@@ -215,8 +215,8 @@ def gradient_accumulation_loss_and_grad(
   aux = jax.tree.map(lambda x: jnp.sum(x, axis=0), aux)  # pytype: disable=module-attr
   # The auxiliary losses are per-microbatch means; the step's value is their mean over microbatches (as in `loss`
   # above), not their sum, so the logged learning/{moe_lb,indexer,mtp}_loss match GA=1.
-  for key in ("moe_lb_loss", "indexer_loss", "mtp_loss"):
-    if key in aux:
+  for key in ("moe_lb_loss", "indexer_loss", "mtp_loss", "router_metrics", "masked_instance_fraction"):
+    if key in aux and aux[key] is not None:
       aux[key] = aux[key] / config.gradient_accumulation_steps
   if getattr(config, "routed_bias", False) and getattr(config, "routed_bias_update_rate", 0.0) > 0.0:
     # RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1;

@@ -20,6 +20,7 @@
 
 from typing import Any, Sequence, TypedDict
 import datetime
+import re
 import functools
 import gc
 import os
@@ -113,6 +114,29 @@ def get_first_step(model, state):
 # -----------------------------------------------------------------------------
 # Top-level Functions
 # -----------------------------------------------------------------------------
+
+
+# OLMo-core's router z-loss weight, a module constant in models/olmoe3.py (unscaled router z = logged / weight).
+_OLMOE3_ROUTER_Z_LOSS_WEIGHT = 1e-5
+
+
+def _collect_olmoe3_router_metrics(intermediate_outputs):
+  """``[moe_layers, 4]`` router metrics sown by OLMoE3 layers (lb, router z, load imbalance, global imbalance).
+
+  Leaves come back in pytree (key) order, where ``layers_10`` sorts before ``layers_2``, so they are reordered by
+  the layer index in their path. Returns None if no layer sowed them.
+  """
+  found = []
+  for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+    keys = [str(k.key) for k in path if hasattr(k, "key")]
+    if not keys or keys[-1] != "olmoe3_router_metrics":
+      continue
+    index = next((int(k.rsplit("_", 1)[1]) for k in reversed(keys) if re.fullmatch(r"layers_\d+", k)), len(found))
+    found.append((index, jnp.reshape(val, (-1, 4))))
+  if not found:
+    return None
+  found.sort(key=lambda item: item[0])
+  return jnp.concatenate([v for _, v in found], axis=0)
 
 
 def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True):
@@ -370,8 +394,16 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if not is_train and config.mtp_eval_target_module > 0:
     intermediate_outputs["logits"] = logits
 
+  router_metrics = None
+  if getattr(config, "olmoe3_router_metrics", False) and is_train:
+    router_metrics = _collect_olmoe3_router_metrics(intermediate_outputs)
+  # OLMo-core's "masked instances (%)" (a fraction): rows the repetition filter masked out entirely.
+  masked_instance_fraction = jnp.mean(jnp.all(data["targets_segmentation"] == 0, axis=-1).astype(jnp.float32))
+
   aux = {
       "intermediate_outputs": intermediate_outputs,
+      "router_metrics": router_metrics,
+      "masked_instance_fraction": masked_instance_fraction,
       "xent_sum": xent_sum,
       "z_loss": total_z_loss,
       "total_weights": total_weights,
@@ -712,6 +744,35 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             diag_bias_updates.append(mtp_update)
 
   lm_loss = xent_sum / (total_weights + EPS)
+  extra_metrics = {}
+  # lm_loss includes the z-loss (cross_entropy_with_logits adds it to every token's loss); OLMo-core logs CE alone.
+  ce_loss = lm_loss - z_loss
+  extra_metrics["learning/ce_loss"] = ce_loss
+  extra_metrics["learning/ce_perplexity"] = jnp.exp(ce_loss)
+  if config.z_loss_multiplier > 0:
+    extra_metrics["learning/z_loss_unscaled"] = z_loss / config.z_loss_multiplier
+  if "masked_instance_fraction" in aux:
+    extra_metrics["learning/masked_instance_fraction"] = aux["masked_instance_fraction"]
+  router_metrics = aux.get("router_metrics")
+  if router_metrics is not None:
+    lb_weight = config.load_balance_loss_weight
+    lb, router_z, imbalance, global_imbalance = (router_metrics[:, i] for i in range(4))
+    # Totals as OLMo-core forms them from the per-block values: max over blocks for load imbalance, sum for the
+    # rest (its "global load imbalance" total is the sum of the per-block ratios).
+    extra_metrics["learning/load_balancing_loss"] = jnp.sum(lb)
+    extra_metrics["learning/load_balancing_loss_unscaled"] = jnp.sum(lb) / lb_weight
+    extra_metrics["learning/router_z_loss"] = jnp.sum(router_z)
+    extra_metrics["learning/router_z_loss_unscaled"] = jnp.sum(router_z) / _OLMOE3_ROUTER_Z_LOSS_WEIGHT
+    extra_metrics["learning/load_imbalance"] = jnp.max(imbalance)
+    extra_metrics["learning/global_load_imbalance"] = jnp.sum(global_imbalance)
+    for i in range(router_metrics.shape[0]):
+      block = f"learning/block_{i + 1:02d}"
+      extra_metrics[f"{block}/load_balancing_loss"] = lb[i]
+      extra_metrics[f"{block}/load_balancing_loss_unscaled"] = lb[i] / lb_weight
+      extra_metrics[f"{block}/router_z_loss"] = router_z[i]
+      extra_metrics[f"{block}/router_z_loss_unscaled"] = router_z[i] / _OLMOE3_ROUTER_Z_LOSS_WEIGHT
+      extra_metrics[f"{block}/load_imbalance"] = imbalance[i]
+      extra_metrics[f"{block}/global_load_imbalance"] = global_imbalance[i]
   scalar_metrics = {
       "learning/loss": loss,
       "learning/lm_loss": lm_loss,
@@ -721,6 +782,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       "learning/indexer_loss": indexer_loss,
       "learning/mtp_loss": mtp_loss,
       "learning/total_weights": total_weights,
+      **extra_metrics,
   }
   if getattr(config, "te_moe_block", False):
     scalar_metrics.update(
@@ -894,7 +956,9 @@ def training_loop_iteration(
     elastic_utils.maybe_elastic_scale_up(config, checkpoint_manager)
 
   with jax.profiler.StepTraceAnnotation("train", step_num=step):
+    data_load_start = time.perf_counter()
     example_batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+    data_load_seconds = time.perf_counter() - data_load_start
     # DiLoCo's inner step takes the rng like the inner NNX step.
     if config.enable_diloco:
       # pylint: disable=not-callable
@@ -937,7 +1001,16 @@ def training_loop_iteration(
 
   completed_step = step + 1
 
+  save_start = time.perf_counter()
   checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step)
+  save_seconds = time.perf_counter() - save_start
+  # Host-side timings, logged with this step's metrics (OLMo-core: data loading time and checkpoint save duration).
+  metrics["scalar"]["perf/data_loading_seconds"] = data_load_seconds
+  step_seconds = step_time_delta.total_seconds()
+  metrics["scalar"]["perf/data_loading_percent"] = 100.0 * data_load_seconds / step_seconds if step_seconds > 0 else 0.0
+  if config.enable_checkpointing and config.checkpoint_period > 0 and step % config.checkpoint_period == 0:
+    # Blocking part of the save (async_checkpointing writes the rest in the background).
+    metrics["scalar"]["checkpoint/save_duration_s"] = save_seconds
 
   if dump_hlo and step == (dump_step if dump_step >= 0 else start_step):
     jax.block_until_ready(state)  # Ensure compilation has finished.

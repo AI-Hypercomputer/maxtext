@@ -32,6 +32,7 @@ import os
 
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
 
+import functools  # pylint: disable=wrong-import-position
 import types  # pylint: disable=wrong-import-position
 import unittest  # pylint: disable=wrong-import-position
 
@@ -132,6 +133,45 @@ class OLMoE3GlobalLoadBalancingTest(unittest.TestCase):
     tokens = BATCH * SEQ
     expected = 0.01 * NUM_EXPERTS / (TOP_K * tokens) * counts / tokens
     np.testing.assert_allclose(np.asarray(grad), np.broadcast_to(expected, probs.shape), rtol=1e-5)
+
+
+  def test_router_metrics_match_whole_batch(self):
+    """``olmoe3_router_metrics``: [lb, load imbalance, global load imbalance] from inside the sharded MoE.
+
+    The counts are gathered over the batch axes, so every device returns the whole batch's ratios: the local one
+    over consecutive groups of ``router_metrics_group_seqs`` sequences (OLMo-core's per-GPU batch), and the global
+    one over all of it. The lb entry is the loss itself, unchanged by the flag.
+    """
+    group = 2
+    router = _router(self.mesh, True)
+    router.config.olmoe3_router_metrics = True
+    router.config.router_metrics_group_seqs = group
+    router._logical_to_mesh_axes = lambda names: P(("data", "expert"), None, None)  # pylint: disable=protected-access
+    router._router_load_imbalance = functools.partial(  # pylint: disable=protected-access
+        olmoe3.OLMoE3LatentRoutedMoE._router_load_imbalance, router  # pylint: disable=protected-access
+    )
+    sharded = _with_token_axes(
+        jax.shard_map(
+            lambda x: _lb(router, x),
+            mesh=self.mesh,
+            in_specs=P(("data", "expert")),
+            out_specs=P(),
+            check_vma=False,
+        )
+    )
+    lb, local, global_ = (float(v) for v in jax.jit(sharded)(self.logits))
+    ref_value, _ = self._whole_batch()
+    np.testing.assert_allclose(lb, float(ref_value), rtol=1e-6)
+
+    _, top_k = jax.lax.top_k(self.logits, TOP_K)
+    seq_counts = np.asarray(jax.nn.one_hot(top_k, NUM_EXPERTS).sum(axis=(1, 2)))  # [batch, experts]
+    groups = seq_counts.reshape(BATCH // group, group, NUM_EXPERTS).sum(axis=1)
+    expected_local = float(np.max(groups.max(axis=1) / groups.mean(axis=1)))
+    total = seq_counts.sum(axis=0)
+    expected_global = float(total.max() / total.mean())
+    np.testing.assert_allclose(local, expected_local, rtol=1e-6)
+    np.testing.assert_allclose(global_, expected_global, rtol=1e-6)
+    self.assertGreater(local, global_)  # fewer tokens per group: a rank is less balanced than the batch
 
 
 if __name__ == "__main__":

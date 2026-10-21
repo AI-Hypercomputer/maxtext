@@ -65,6 +65,7 @@ from maxtext.layers.linears import DenseGeneral, MlpBlock
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import mesh_axes_for_dim
 
 # The reference uses a separate, looser epsilon for the KDA output norm than for
 # the block RMSNorms (kda_norm_eps=1e-5 vs rms_norm_eps=1e-6). Kept as a module
@@ -1338,7 +1339,45 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     lb = (mean_probs * counts).sum() * self.num_experts / (self.num_experts_per_tok * tokens)
     if reduce_axes:
       lb = jax.lax.pmean(lb, reduce_axes)
-    return lb * self.config.load_balance_loss_weight
+    lb = lb * self.config.load_balance_loss_weight
+    if not getattr(self.config, "olmoe3_router_metrics", False):
+      return lb
+    # olmoe3_router_metrics: [lb, load imbalance, global load imbalance] instead of the scalar; the decoder layer
+    # splits it, so the loss term is unchanged. The vector rides the scalar's path out of the routed MoE's
+    # shard_map (out_specs P(): every device computes the same values from the gathered counts).
+    local_imbalance, global_imbalance = self._router_load_imbalance(expert_mask)
+    return jnp.stack([lb, local_imbalance, global_imbalance])
+
+  def _router_load_imbalance(self, expert_mask):
+    """OLMo-core's per-layer "load imbalance" and "global load imbalance" (max / mean tokens per expert).
+
+    OLMo-core counts each rank's routed tokens per expert over the step (all micro-batches) and reports the
+    worst rank's max/mean ("load imbalance", reduced with max), and the same ratio for the counts summed over
+    the batch ("global load imbalance"). A rank there is ``router_metrics_group_seqs`` sequences (16 for the
+    hero: 2048 sequences on 128 GPUs), so the local ratio here groups the global batch into consecutive
+    groups of that many sequences, independent of how the TPU mesh splits the batch. On the sparse path this
+    runs inside the routed MoE's shard_map: per-sequence counts are summed over any sequence-sharding axes
+    and gathered over the batch axes, so every device holds the whole batch's counts.
+    """
+    cfg = self.config
+    seq_counts = jax.lax.stop_gradient(expert_mask.sum(axis=(1, 2)))  # [batch, experts]
+    if moe.LB_REDUCE_AXES.get() is not None:  # inside the sparse routed MoE's shard_map
+      spec = self._logical_to_mesh_axes(("activation_batch", "activation_norm_length", None))
+      batch_axes = tuple(mesh_axes_for_dim(spec[0])) if spec and spec[0] is not None else ()
+      seq_axes = tuple(mesh_axes_for_dim(spec[1])) if spec and len(spec) > 1 and spec[1] is not None else ()
+      if seq_axes:
+        seq_counts = jax.lax.psum(seq_counts, seq_axes)
+      if batch_axes:
+        seq_counts = jax.lax.all_gather(seq_counts, batch_axes, axis=0, tiled=True)
+    num_seqs = seq_counts.shape[0]
+    group = int(getattr(cfg, "router_metrics_group_seqs", 0) or 0)
+    if group <= 0 or num_seqs % group:
+      group = num_seqs
+    grouped = seq_counts.reshape(num_seqs // group, group, -1).sum(axis=1)  # [groups, experts]
+    local_imbalance = jnp.max(jnp.max(grouped, axis=-1) / jnp.maximum(jnp.mean(grouped, axis=-1), 1e-9))
+    total = seq_counts.sum(axis=0)
+    global_imbalance = jnp.max(total) / jnp.maximum(jnp.mean(total), 1e-9)
+    return local_imbalance, global_imbalance
 
   def __init__(self, *args, gate_in_features: int, **kwargs):
     super().__init__(*args, **kwargs)
@@ -1516,6 +1555,15 @@ class OLMoE3DecoderLayer(nnx.Module):
         # to the one inside moe_block, so XLA folds the two into one.
         router_logits, _ = self.moe_block.gate(ffn_in)
         z_loss = jnp.mean(jax.scipy.special.logsumexp(router_logits.astype(jnp.float32), axis=-1) ** 2)
+        if self.config.olmoe3_router_metrics:
+          # [lb, load imbalance, global load imbalance] from the routed MoE (see load_balance_loss).
+          metrics = load_balance_loss
+          load_balance_loss = metrics[0]
+          self.sow(
+              nnx.Intermediate,
+              "olmoe3_router_metrics",
+              jnp.stack([load_balance_loss, _ROUTER_Z_LOSS_WEIGHT * z_loss, metrics[1], metrics[2]]),
+          )
         self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss + _ROUTER_Z_LOSS_WEIGHT * z_loss)
       ffn_out = ffn_out + self.latent_up(routed)
 
