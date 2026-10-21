@@ -46,6 +46,8 @@ pytest.importorskip("jetstream", reason="jetstream not installed")
 from maxtext.inference.maxengine import maxengine
 from tests.utils.test_helpers import get_test_config_path
 
+pytestmark = [pytest.mark.requires_tf_jetstream]
+
 PROMPT = [3, 17, 42, 5, 9]
 STEPS = 4
 

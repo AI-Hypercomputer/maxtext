@@ -23,7 +23,7 @@ from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled, jetstream
 
-pytestmark = [pytest.mark.external_serving]
+pytestmark = [pytest.mark.external_serving, pytest.mark.requires_tf_jetstream]
 
 config_lib, _, _, _, _ = jetstream()
 if getattr(config_lib, "_IS_STUB", False):

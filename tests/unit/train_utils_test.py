@@ -177,6 +177,7 @@ class TestReorderedDataIterator(unittest.TestCase):
     self.assertEqual(_CountingLoader.builds, 4)
 
 
+@pytest.mark.requires_tf_jetstream
 class TestEvalCachePrefill(unittest.TestCase):
   """Tests for start_eval_cache_prefill (eval_cache_prefill_in_background)."""
 

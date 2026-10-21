@@ -45,6 +45,7 @@ if not _absl_flags.FLAGS.is_parsed():
 import jax
 import os
 import importlib.util
+import re
 
 # Force early JAX initialization on GPU to prevent CUDA context conflicts with TensorFlow/PyTorch.
 # If JAX initialization is deferred, TensorFlow/PyTorch (imported during test collection)
@@ -237,10 +238,63 @@ def pytest_configure(config):
       "decoupled: marked on tests that are not skipped due to GCP deps, when DECOUPLE_GCLOUD=TRUE",
       "skip_on_tpu7x: skip test if running on TPU7x platform",
       "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
+      "requires_tf_jetstream: tests that need the optional TensorFlow / JetStream deps",
   ]:
     config.addinivalue_line("markers", m)
   if config.getoption("class_splits") is not None or config.getoption("class_group") is not None:
     config.pluginmanager.register(ClassSplitPlugin(config), "classsplitplugin")
+
+
+# When set (the *-tf-jetstream CI flavors set it), any test skipped because TensorFlow / JetStream
+# is missing is reported as a failure instead, so the TF-enabled CI environment cannot silently
+# drift back to skipping these tests. Module-level skips happen before markers are visible, so the
+# check matches on the skip reason produced by `pytest.importorskip` / the gcloud_stub JetStream stub.
+_REQUIRE_TF_JETSTREAM_ENV = "MAXTEXT_REQUIRE_TF_JETSTREAM"
+_MISSING_TF_JETSTREAM_SKIP_RE = re.compile(
+    r"could not import '(tensorflow|tensorflow_datasets|tensorflow_text|seqio|jetstream)\b"
+    r"|jetstream not installed"
+    r"|JetStream is not installed",
+    re.IGNORECASE,
+)
+
+
+def _require_tf_jetstream() -> bool:
+  return os.environ.get(_REQUIRE_TF_JETSTREAM_ENV, "").lower() in ("1", "true", "yes")
+
+
+def _skip_reason(longrepr) -> str:
+  # Skip reports carry longrepr as a (path, lineno, reason) tuple.
+  if isinstance(longrepr, tuple) and len(longrepr) == 3:
+    return str(longrepr[2])
+  return str(longrepr)
+
+
+def _fail_if_missing_tf_jetstream(report) -> None:
+  if not report.skipped:
+    return
+  reason = _skip_reason(report.longrepr)
+  if _MISSING_TF_JETSTREAM_SKIP_RE.search(reason):
+    report.outcome = "failed"
+    report.longrepr = (
+        f"{_REQUIRE_TF_JETSTREAM_ENV} is set but this test was skipped because an optional "
+        f"TensorFlow / JetStream dependency is missing: {reason}"
+    )
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_make_collect_report(collector):  # pylint: disable=unused-argument
+  """Turns module-level TF / JetStream import skips into failures when required."""
+  outcome = yield
+  if _require_tf_jetstream():
+    _fail_if_missing_tf_jetstream(outcome.get_result())
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):  # pylint: disable=unused-argument
+  """Turns in-test TF / JetStream import skips into failures when required."""
+  outcome = yield
+  if _require_tf_jetstream():
+    _fail_if_missing_tf_jetstream(outcome.get_result())
 
 
 @pytest.fixture(autouse=True, scope="module")

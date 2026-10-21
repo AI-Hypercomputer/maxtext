@@ -29,7 +29,8 @@ on:
             tpu7x-post-training-unit, tpu7x-post-training-integration,
             gpu-unit, gpu-integration,
             cpu-unit, cpu-integration,
-            cpu-post-training-unit, cpu-post-training-integration
+            cpu-post-training-unit, cpu-post-training-integration,
+            cpu-tf-jetstream, tpu-tf-jetstream
           )
         required: true
         type: string
@@ -152,7 +153,9 @@ jobs:
           "cpu-unit": "cpu",
           "cpu-integration": "cpu",
           "cpu-post-training-unit": "cpu",
-          "cpu-post-training-integration": "cpu"
+          "cpu-post-training-integration": "cpu",
+          "cpu-tf-jetstream": "cpu",
+          "tpu-tf-jetstream": "tpu"
         }')[inputs.flavor] }}
 
       device_name: >-
@@ -170,7 +173,9 @@ jobs:
           "cpu-unit": "X64",
           "cpu-integration": "X64",
           "cpu-post-training-unit": "X64",
-          "cpu-post-training-integration": "X64"
+          "cpu-post-training-integration": "X64",
+          "cpu-tf-jetstream": "X64",
+          "tpu-tf-jetstream": "v6e-4"
         }')[inputs.flavor] }}
 
       cloud_runner: >-
@@ -188,7 +193,9 @@ jobs:
           "cpu-unit": "linux-x86-n2-32",
           "cpu-integration": "linux-x86-n2-32",
           "cpu-post-training-unit": "linux-x86-n2-32",
-          "cpu-post-training-integration": "linux-x86-n2-32"
+          "cpu-post-training-integration": "linux-x86-n2-32",
+          "cpu-tf-jetstream": "linux-x86-n2-32",
+          "tpu-tf-jetstream": "linux-x86-ct6e-180-4tpu"
         }')[inputs.flavor] }}
       # Pytest Marker Mapping
       pytest_marker: >-
@@ -206,7 +213,9 @@ jobs:
             "cpu-unit": "cpu_only and not post_training and not integration_test",
             "cpu-integration": "cpu_only and not post_training and integration_test",
             "cpu-post-training-unit": "cpu_only and post_training",
-            "cpu-post-training-integration": "cpu_only and post_training and integration_test"
+            "cpu-post-training-integration": "cpu_only and post_training and integration_test",
+            "cpu-tf-jetstream": "cpu_only and requires_tf_jetstream and not post_training",
+            "tpu-tf-jetstream": "not cpu_only and not gpu_only and requires_tf_jetstream and not post_training"
           }')[inputs.flavor] }}
 
       pytest_addopts: >-
@@ -224,7 +233,9 @@ jobs:
             "cpu-unit": "",
             "cpu-integration": "",
             "cpu-post-training-unit": "tests/post_training/unit tests/unit",
-            "cpu-post-training-integration": "tests/post_training/integration"
+            "cpu-post-training-integration": "tests/post_training/integration",
+            "cpu-tf-jetstream": "",
+            "tpu-tf-jetstream": ""
           }')[inputs.flavor] }}
 
       pytest_extra_args: >-
@@ -242,7 +253,9 @@ jobs:
             "cpu-unit": "--ignore=tests/post_training",
             "cpu-integration": "--ignore=tests/post_training",
             "cpu-post-training-unit": "",
-            "cpu-post-training-integration": ""
+            "cpu-post-training-integration": "",
+            "cpu-tf-jetstream": "--ignore=tests/post_training",
+            "tpu-tf-jetstream": "--ignore=tests/post_training"
           }')[inputs.flavor] }}
 
       # Resource Scaling

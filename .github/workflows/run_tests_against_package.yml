@@ -104,8 +104,14 @@ jobs:
         # only job that runs them. On one device a test whose batch is smaller than the mesh, or that
         # never enters an axis_rules context, passes for the wrong reason; 4 virtual devices make the
         # sharding real so those bugs surface here instead of on accelerator runners. Also lets the
-        # tests that self-skip below 2 devices actually run.
-        XLA_FLAGS: ${{ inputs.flavor == 'cpu-unit' && '--xla_force_host_platform_device_count=4' || '' }}
+        # tests that self-skip below 2 devices actually run. cpu-tf-jetstream runs the TF/JetStream
+        # subset of that bulk, so it gets the same device count.
+        XLA_FLAGS: ${{ (inputs.flavor == 'cpu-unit' || inputs.flavor == 'cpu-tf-jetstream') && '--xla_force_host_platform_device_count=4' || '' }}
+        # The *-tf-jetstream flavors install the optional TensorFlow / JetStream deps (read by
+        # install_pre_train_extra_deps) and turn any skip caused by those deps missing into a failure
+        # (see tests/conftest.py), so these tests cannot silently stop running again.
+        WITH_TF: ${{ contains(inputs.flavor, 'tf-jetstream') && 'true' || '' }}
+        MAXTEXT_REQUIRE_TF_JETSTREAM: ${{ contains(inputs.flavor, 'tf-jetstream') && '1' || '' }}
         VLLM_TARGET_DEVICE: "tpu"
         UV_TORCH_BACKEND: "cpu"
         MAXTEXT_PACKAGE_EXTRA: >-
@@ -159,6 +165,26 @@ jobs:
           python3 -m pip freeze
         env:
           INPUTS_INSTALL_TORCH_CPU: ${{ inputs.install_torch_cpu }}
+      # Fail fast with a clear message if WITH_TF did not actually yield real TensorFlow / JetStream.
+      # tests/conftest.py also fails any test that skips for this reason (MAXTEXT_REQUIRE_TF_JETSTREAM).
+      - name: Verify TensorFlow / JetStream are installed
+        if: ${{ !inputs.maxtext_installed && contains(inputs.flavor, 'tf-jetstream') }}
+        shell: bash
+        run: |
+          source .venv/bin/activate
+          python3 - <<'PY'
+          import sys
+
+          import tensorflow
+          import tensorflow_datasets
+
+          from maxtext.common.gcloud_stub import jetstream
+
+          config_lib = jetstream()[0]
+          if getattr(config_lib, "_IS_STUB", False):
+            sys.exit("::error::JetStream resolved to the gcloud_stub stub; the real package is not installed.")
+          print(f"tensorflow {tensorflow.__version__}, tensorflow_datasets {tensorflow_datasets.__version__}, jetstream OK")
+          PY
       - name: Copy test assets files
         if: ${{ !inputs.maxtext_installed }}
         run : gcloud storage cp gs://maxtext-test-assets/* tests/assets

@@ -32,6 +32,8 @@ from maxtext.utils.generate_param_only_checkpoint import main as generate_param_
 from tests.integration.checkpointing_test import get_checkpointing_command
 from tests.utils.test_helpers import get_test_config_path, get_test_dataset_path, get_test_base_output_directory
 
+pytestmark = [pytest.mark.requires_tf_jetstream]
+
 
 def get_model_params(quantization):
   return [
