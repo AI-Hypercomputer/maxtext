@@ -31,6 +31,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import types as pytypes  # pylint: disable=wrong-import-position
 import unittest  # pylint: disable=wrong-import-position
+from unittest import mock  # pylint: disable=wrong-import-position
 
 import jax  # pylint: disable=wrong-import-position
 import jax.numpy as jnp  # pylint: disable=wrong-import-position
@@ -39,6 +40,7 @@ import pytest  # pylint: disable=wrong-import-position
 from flax import traverse_util  # pylint: disable=wrong-import-position
 
 from maxtext.common.common_types import get_weight_dtype
+from maxtext.integration.vllm import weight_converter
 from maxtext.integration.vllm.weight_converter import (
     ConversionPlanError,
     MaxTextToMaxTextConverter,
@@ -222,15 +224,39 @@ class ScannedToUnrolledMappingTest(unittest.TestCase):
           err_msg=f"{'.'.join(map(str, key))} differs between the per-slot and nested layouts",
       )
 
-  def test_nested_local_layers_shorter_than_the_cycle_is_rejected(self):
-    """A `local_layers` axis that cannot cover every slot must not slice silently."""
+  def test_nested_local_layers_not_matching_the_cycle_are_rejected(self):
+    """A `local_layers` axis must hold exactly the cycle's local slots, or slots would be dropped silently."""
+    for num_slots in (CYCLE - 2, CYCLE):
+      with self.subTest(num_slots=num_slots):
+        source = _nested_source_tree(True)
+        local = source["base"]["decoder"]["layers"]["local_layers"]
+        local["input_layernorm"]["scale"] = jnp.take(
+            local["input_layernorm"]["scale"], jnp.arange(num_slots) % (CYCLE - 1), axis=SCAN_AXIS + 1
+        )
+        with self.assertRaisesRegex(ConversionPlanError, "nested cycle-slot axis"):
+          MaxTextToMaxTextConverter(_config()).convert(source, _target_tree())
+
+  def test_nested_local_layers_cast_only_the_selected_slot(self):
+    """Every slot's group reads the whole `local_layers` source, so the slot must be taken before the cast."""
     source = _nested_source_tree(True)
-    local = source["base"]["decoder"]["layers"]["local_layers"]
-    local["input_layernorm"]["scale"] = jnp.take(
-        local["input_layernorm"]["scale"], jnp.arange(CYCLE - 2), axis=SCAN_AXIS + 1
-    )
-    with self.assertRaisesRegex(ConversionPlanError, "nested cycle-slot axis"):
+    local = traverse_util.flatten_dict(source["base"]["decoder"]["layers"]["local_layers"])
+    slot_shapes = {
+        ".".join(("decoder", "layers", "local_layers") + key): value.shape[: SCAN_AXIS + 1] + value.shape[SCAN_AXIS + 2 :]
+        for key, value in local.items()
+    }
+    cast_shapes = []
+    real_cast = weight_converter._apply_dtype_cast  # pylint: disable=protected-access
+
+    def recording_cast(val, tgt_dtype, src_key):
+      if "local_layers" in src_key:
+        cast_shapes.append((src_key, val.shape))
+      return real_cast(val, tgt_dtype, src_key)
+
+    with mock.patch.object(weight_converter, "_apply_dtype_cast", side_effect=recording_cast):
       MaxTextToMaxTextConverter(_config()).convert(source, _target_tree())
+    self.assertTrue(cast_shapes)
+    for src_key, shape in cast_shapes:
+      self.assertEqual(shape, slot_shapes[src_key], src_key)
 
   def test_plan_is_built_once_and_reused(self):
     converter = MaxTextToMaxTextConverter(_config())

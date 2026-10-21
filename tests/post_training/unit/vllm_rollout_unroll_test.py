@@ -277,6 +277,46 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), num_blocks * cycle)
 
   @pytest.mark.cpu_only
+  def test_nested_block_scan_honors_an_explicit_pattern_length(self):
+    """The global layer is the last slot of `pattern_length`, which `local_layers` must fill up to."""
+    num_blocks, num_local = 2, 3
+    weights = MockWeights(
+        {
+            "decoder": {
+                "layers": {
+                    "local_layers": {"probe": np.zeros((2, num_blocks, num_local, 1), dtype=np.float32)},
+                    "global_layer": {"probe": np.ones((2, num_blocks, 1), dtype=np.float32)},
+                }
+            }
+        }
+    )
+
+    unrolled = unroll_qwen_scanned_weights(weights, pattern_length=num_local + 1)
+    for block in range(num_blocks):
+      np.testing.assert_array_equal(unrolled["decoder"][f"layers_{block * 4 + 3}"]["probe"], np.ones((2, 1)))
+
+    with self.assertRaisesRegex(ValueError, "hold 3 cycle slots, but pattern_length 5"):
+      unroll_qwen_scanned_weights(weights, pattern_length=num_local + 2)
+
+  @pytest.mark.cpu_only
+  def test_rejects_the_nested_block_scan_remainder(self):
+    """Layers past the last whole cycle live in `layers_remainder`, which must not be dropped silently."""
+    weights = MockWeights(
+        {
+            "decoder": {
+                "layers": {
+                    "local_layers": {"probe": np.zeros((2, 2, 3, 1), dtype=np.float32)},
+                    "global_layer": {"probe": np.zeros((2, 2, 1), dtype=np.float32)},
+                },
+                "layers_remainder": {"local_layers": {"probe": np.zeros((2, 2, 1), dtype=np.float32)}},
+            }
+        }
+    )
+
+    with self.assertRaisesRegex(ValueError, "layers_remainder"):
+      unroll_qwen_scanned_weights(weights)
+
+  @pytest.mark.cpu_only
   def test_rejects_nested_local_layers_without_a_cycle_slot_axis(self):
     """A `local_layers` tensor missing its slot axis must not be read as flat."""
     weights = MockWeights({"decoder": {"layers": {"local_layers": {"probe": np.ones((2, 2))}}}})

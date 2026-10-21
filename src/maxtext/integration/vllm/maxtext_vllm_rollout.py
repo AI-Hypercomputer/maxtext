@@ -370,6 +370,12 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
   local_widths = set()
   has_trailing = False
   for key, value in flat_w.items():
+    if "layers_remainder" in key and "dropout" not in key and "rngs" not in key:
+      # Like MaxTextToMaxTextConverter and raiden_unscan, which reject such a layer count up front.
+      raise ValueError(
+          f"Qwen scanned parameter {'.'.join(map(str, key))} is in `layers_remainder`: unrolling the layers past "
+          "the last whole cycle is not supported, so num_decoder_layers must be a multiple of the cycle."
+      )
     ref = _find_qwen_scanned_layer_idx(key)
     if ref.container_idx == -1 or "dropout" in key or "rngs" in key:
       continue
@@ -391,7 +397,15 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
 
   if len(local_widths) > 1:
     raise ValueError(f"Qwen nested `local_layers` parameters disagree on cycle width: {sorted(local_widths)}")
-  trailing_slot = (max(slot_indices) + 1) if slot_indices else 0
+  if pattern_length is None:
+    trailing_slot = (max(slot_indices) + 1) if slot_indices else 0
+  else:
+    if local_widths and local_widths != {pattern_length - 1}:
+      raise ValueError(
+          f"Qwen nested `local_layers` hold {local_widths.pop()} cycle slots, but pattern_length {pattern_length} "
+          f"leaves {pattern_length - 1} before the global layer"
+      )
+    trailing_slot = pattern_length - 1
   if has_trailing:
     slot_indices.add(trailing_slot)
 
@@ -419,12 +433,14 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
     else:
       slots = (trailing_slot if ref.trailing else ref.slot_idx,)
     for repetition in range(scan_length):
-      block = jnp.take(value, repetition, axis=scan_axis)
+      block = jax.lax.index_in_dim(value, repetition, axis=scan_axis, keepdims=False)
       for local_idx, slot_idx in enumerate(slots):
         global_idx = repetition * pattern_length + slot_idx
         new_key = prefix + (f"layers_{global_idx}",) + suffix
         # Taking the block collapsed `scan_axis`, so the nested slot axis has shifted down into it.
-        new_flat_w[new_key] = jnp.take(block, local_idx, axis=scan_axis) if ref.nested else block
+        new_flat_w[new_key] = (
+            jax.lax.index_in_dim(block, local_idx, axis=scan_axis, keepdims=False) if ref.nested else block
+        )
 
   logging.info(
       "MaxTextVllmSampler: unrolled %d Qwen tensor components across %d layers for direct MaxText weight sync.",

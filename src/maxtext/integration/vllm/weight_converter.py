@@ -1127,8 +1127,8 @@ class MaxTextToMaxTextConverter:
       raw_0 = src_flat[group.source_keys[0]]
       raw_1 = src_flat[group.source_keys[1]]
       wi_0, wi_1 = (
-          self._take_cycle_slot(_cast_target_free_floating_leaf(raw_0, target_dtype, path), group),
-          self._take_cycle_slot(_cast_target_free_floating_leaf(raw_1, target_dtype, path), group),
+          _cast_target_free_floating_leaf(self._take_cycle_slot(raw_0, group), target_dtype, path),
+          _cast_target_free_floating_leaf(self._take_cycle_slot(raw_1, group), target_dtype, path),
       )
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
@@ -1136,7 +1136,7 @@ class MaxTextToMaxTextConverter:
 
     # group.op == "slice"
     raw_val = src_flat[group.source_keys[0]]
-    val = self._take_cycle_slot(_cast_target_free_floating_leaf(raw_val, target_dtype, path), group)
+    val = _cast_target_free_floating_leaf(self._take_cycle_slot(raw_val, group), target_dtype, path)
     self._check_scan_axis(val, path)
     per_block = self._slice_bulk_target_free(val, path)
     return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
@@ -1153,33 +1153,35 @@ class MaxTextToMaxTextConverter:
 
     if group.op == "fuse_moe":
       wi_0, wi_1 = (
-          self._take_cycle_slot(_apply_dtype_cast(src_flat[k], first_tgt.dtype, path), group) for k in group.source_keys
+          _apply_dtype_cast(self._take_cycle_slot(src_flat[k], group), first_tgt.dtype, path) for k in group.source_keys
       )
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk(wi_0, wi_1, first_tgt, path)
     else:  # "slice"
-      val = _apply_dtype_cast(src_flat[group.source_keys[0]], first_tgt.dtype, path)
-      val = self._take_cycle_slot(val, group)
+      val = _apply_dtype_cast(self._take_cycle_slot(src_flat[group.source_keys[0]], group), first_tgt.dtype, path)
       self._check_scan_axis(val, path)
       per_block = _bulk_align_and_unstack(val, self.scan_axis, first_tgt, path)
 
     return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
 
   def _take_cycle_slot(self, val, group: _PlanGroup):
-    """Drops the nested cycle-slot axis from a `local_layers` source."""
+    """Drops the nested cycle-slot axis from a `local_layers` source.
+
+    Runs before any dtype cast, so that only the selected slot is cast.
+    """
     if group.local_index is None:
       return val
     slot_axis = self.scan_axis + 1
-    if val.ndim <= slot_axis or val.shape[slot_axis] <= group.local_index:
+    if val.ndim <= slot_axis or val.shape[slot_axis] != self.cycle - 1:
       raise ConversionPlanError(
-          f"Expected a nested cycle-slot axis holding at least "
-          f"{group.local_index + 1} slots on axis {slot_axis} of "
-          f"{group.source_path}, found shape {val.shape}. Check "
-          "param_scan_axis and inhomogeneous_layer_cycle_interval."
+          f"Expected a nested cycle-slot axis of {self.cycle - 1} slots "
+          f"on axis {slot_axis} of {group.source_path}, found shape "
+          f"{val.shape}. Check param_scan_axis and "
+          "inhomogeneous_layer_cycle_interval."
       )
     if isinstance(val, jax.ShapeDtypeStruct):
       return jax.ShapeDtypeStruct(val.shape[:slot_axis] + val.shape[slot_axis + 1 :], val.dtype)
-    return jnp.take(val, group.local_index, axis=slot_axis)
+    return jax.lax.index_in_dim(val, group.local_index, axis=slot_axis, keepdims=False)
 
   def _check_scan_axis(self, val, path: str) -> None:
     if val.shape[self.scan_axis] != self.num_blocks:
