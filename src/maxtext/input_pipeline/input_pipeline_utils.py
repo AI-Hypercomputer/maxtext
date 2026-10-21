@@ -644,6 +644,172 @@ class IndexShardIterDataset(grain.IterDataset):
     )
 
 
+class GCSBlockCachedArrayRecordDataSource(grain.ArrayRecordDataSource):
+  """ArrayRecordDataSource subclass that retains InitProbe readers and caches contiguous blocks on gs://.
+
+  Makes the Direct GCS QPS optimizations (retained InitProbe readers,
+  `readahead_buffer_size:8M,max_parallelism:0` range coalescing, and thread-safe
+  LRU block caching) work out-of-the-box in MaxText even on stock PyPI
+  `array_record` releases.
+  """
+
+  def __init__(self, paths, reader_options=None):
+    from collections import OrderedDict
+    import itertools
+    import os
+    import re
+    import threading
+    from array_record.python import array_record_data_source as ar_ds
+    from array_record.python import array_record_module
+
+    if isinstance(paths, (str, os.PathLike, ar_ds.FileInstruction)):
+      paths = [paths]
+    elif not isinstance(paths, Sequence):
+      raise ValueError(
+          "Unsupported path format was used. Path format must be "
+          "a Sequence, String, pathlib.Path or FileInstruction."
+      )
+    explicit_block_size = None
+    max_cached_blocks = 8
+    if reader_options is None:
+      self._reader_options_string = ""
+    else:
+      opts_copy = dict(reader_options)
+      if "read_block_size" in opts_copy:
+        explicit_block_size = int(opts_copy.pop("read_block_size"))
+      if "max_cached_blocks" in opts_copy:
+        max_cached_blocks = int(opts_copy.pop("max_cached_blocks"))
+      self._reader_options_string = ",".join(
+          [f"{k}:{v}" for k, v in opts_copy.items() if v is not None]
+      )
+
+    def make_reader(filename_like):
+      filename_str = os.fspath(filename_like)
+      if "readahead_buffer_size" in self._reader_options_string:
+        opts = self._reader_options_string
+      elif filename_str.startswith("gs://"):
+        prefix = "readahead_buffer_size:8M,max_parallelism:0"
+        opts = f"{prefix},{self._reader_options_string}" if self._reader_options_string else prefix
+      else:
+        opts = f"readahead_buffer_size:0,{self._reader_options_string}" if self._reader_options_string else "readahead_buffer_size:0"
+      reader = array_record_module.ArrayRecordReader(
+          filename_like,
+          options=opts,
+          file_reader_buffer_size=ar_ds._DEFAULT_FILE_READER_BUFFER_SIZE,  # pylint: disable=protected-access
+      )
+      ar_ds._check_group_size(filename_like, reader)  # pylint: disable=protected-access
+      return reader
+
+    def get_inst_and_reader(path):
+      if isinstance(path, ar_ds.FileInstruction):
+        return ar_ds._ReadInstruction(os.fspath(path.filename), path.skip, path.skip + path.take), None  # pylint: disable=protected-access
+      if m := re.fullmatch(r"(.*)\[(\d+):(\d+)\]", os.fspath(path)):
+        return ar_ds._ReadInstruction(m.group(1), int(m.group(2)), int(m.group(3))), None  # pylint: disable=protected-access
+      path_str = os.fspath(path)
+      reader = make_reader(path_str)
+      return ar_ds._ReadInstruction(path_str, 0, reader.num_records()), reader  # pylint: disable=protected-access
+
+    num_threads = ar_ds._get_flag_value(ar_ds._GRAIN_NUM_THREADS_COMPUTING_NUM_RECORDS)  # pylint: disable=protected-access
+    results = ar_ds._run_in_parallel(  # pylint: disable=protected-access
+        function=get_inst_and_reader,
+        list_of_kwargs_to_function=[{"path": p} for p in paths],
+        num_workers=min(len(paths), num_threads),
+    )
+    self._read_instructions = [r[0] for r in results]
+    self._readers = [r[1] for r in results]
+    self._paths = [ri.filename for ri in self._read_instructions]
+    self._lock = threading.Lock()
+    self._num_records = sum(ri.num_records for ri in self._read_instructions)
+    self._prefix_sums = list(itertools.accumulate(ri.num_records for ri in self._read_instructions))
+    if explicit_block_size is not None:
+      self._read_block_size = max(1, explicit_block_size)
+    elif any(str(p).startswith("gs://") for p in self._paths):
+      min_records = min((ri.num_records for ri in self._read_instructions), default=1)
+      if min_records >= 128:
+        self._read_block_size = 32
+      elif min_records >= 16:
+        self._read_block_size = 8
+      else:
+        self._read_block_size = max(1, min_records)
+    else:
+      self._read_block_size = 1
+    self._max_cached_blocks = max(1, max_cached_blocks)
+    self._block_cache = OrderedDict()
+
+  @property
+  def read_block_size(self) -> int:
+    return getattr(self, "_read_block_size", 1)
+
+  def _create_gcs_reader(self, filename):
+    import os
+    from array_record.python import array_record_data_source as ar_ds
+    from array_record.python import array_record_module
+    filename_str = os.fspath(filename)
+    if "readahead_buffer_size" in self._reader_options_string:
+      opts = self._reader_options_string
+    elif filename_str.startswith("gs://"):
+      prefix = "readahead_buffer_size:8M,max_parallelism:0"
+      opts = f"{prefix},{self._reader_options_string}" if self._reader_options_string else prefix
+    else:
+      opts = f"readahead_buffer_size:0,{self._reader_options_string}" if self._reader_options_string else "readahead_buffer_size:0"
+    reader = array_record_module.ArrayRecordReader(
+        filename,
+        options=opts,
+        file_reader_buffer_size=ar_ds._DEFAULT_FILE_READER_BUFFER_SIZE,  # pylint: disable=protected-access
+    )
+    ar_ds._check_group_size(filename, reader)  # pylint: disable=protected-access
+    return reader
+
+  def __getitem__(self, record_key):
+    reader_idx, position = self._reader_idx_and_position(record_key)
+    if getattr(self, "_read_block_size", 1) > 1:
+      inst = self._read_instructions[reader_idx]
+      block_idx = (position - inst.start) // self._read_block_size
+      block_start = inst.start + block_idx * self._read_block_size
+      block_end = min(block_start + self._read_block_size, inst.end)
+      cache_key = (reader_idx, block_start)
+      offset_in_block = position - block_start
+      with self._lock:
+        cached_block = self._block_cache.get(cache_key)
+        if cached_block is not None:
+          self._block_cache.move_to_end(cache_key)
+          return cached_block[offset_in_block]
+        if self._readers[reader_idx] is None:
+          self._readers[reader_idx] = self._create_gcs_reader(inst.filename)
+        reader = self._readers[reader_idx]
+        if hasattr(reader, "read"):
+          block_records = reader.read(block_start, block_end)
+        else:
+          block_records = [reader[p] for p in range(block_start, block_end)]
+        self._block_cache[cache_key] = block_records
+        if len(self._block_cache) > self._max_cached_blocks:
+          self._block_cache.popitem(last=False)
+        return block_records[offset_in_block]
+    return super().__getitem__(record_key)
+
+  def __getstate__(self):
+    with self._lock:
+      for idx, reader in enumerate(self._readers):
+        if reader is not None:
+          reader.close()
+          self._readers[idx] = None
+      if hasattr(self, "_block_cache"):
+        self._block_cache.clear()
+    state = self.__dict__.copy()
+    state.pop("_readers", None)
+    state.pop("_lock", None)
+    state.pop("_block_cache", None)
+    return state
+
+  def __setstate__(self, state):
+    from collections import OrderedDict
+    import threading
+    self.__dict__.update(state)
+    self._readers = [None] * len(self._read_instructions)
+    self._lock = threading.Lock()
+    self._block_cache = OrderedDict()
+
+
 class BlockShuffleMapDataset(grain.MapDataset):
   """Worker-aware hierarchical block shuffle and sharding MapDataset.
 

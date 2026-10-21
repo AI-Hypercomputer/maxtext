@@ -231,7 +231,10 @@ def get_datasets(
       reader_options = (
           {"index_storage_option": grain_index_storage_option} if grain_index_storage_option is not None else None
       )
-      source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
+      if str(pattern).startswith("gs://"):
+        source = input_pipeline_utils.GCSBlockCachedArrayRecordDataSource(files, reader_options=reader_options)
+      else:
+        source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
       ds = grain.MapDataset.source(source)
       ds._file_sharded = file_sharded  # pylint: disable=protected-access
       ds._row_shard = row_shard  # pylint: disable=protected-access
