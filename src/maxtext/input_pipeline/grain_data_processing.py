@@ -509,7 +509,7 @@ def dpo_preprocessing_pipeline(
   return dataset
 
 
-def _format_chat_template_grain(element, data_columns, tokenizer_model):
+def _format_chat_template_grain(element, data_columns, tokenizer_model, model_name=None):
   """Grain-compatible mapping function to format raw columns into conversational messages."""
   # Convert raw columns to conversational messages
   if "messages" in data_columns:
@@ -529,14 +529,17 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model):
     messages = element[data_columns[0]]
 
   assert all(
-      hasattr(m, "__contains__") and "role" in m and "content" in m for m in messages
-  ), f"SFT requires a conversational format. Expected dicts with 'role' and 'content', but got: {messages}"
+      hasattr(m, "__contains__")
+      and "role" in m
+      and any(k in m for k in ("content", "tool_calls", "reasoning_content", "content_blocks"))
+      for m in messages
+  ), ("SFT requires a conversational format. Expected dicts with 'role' and content/tool_calls, " f"but got: {messages}")
 
   # Assign the standardized messages back to the primary column
   element[data_columns[0]] = messages
 
   return input_pipeline_utils.apply_chat_template(
-      element, tokenizer_model=tokenizer_model, data_column_name=data_columns[0]
+      element, tokenizer_model=tokenizer_model, data_column_name=data_columns[0], model_name=model_name
   )
 
 
@@ -558,7 +561,9 @@ def sft_preprocessing_pipeline(
   """Use grain pipeline to pre-process the dataset and return iterators for sft fine-tuning"""
   dataset = data_processing_utils.parse_and_keep_features(dataset, config, data_columns, tokenize)
 
-  tokenizer_model, pad_id = data_processing_utils.get_tokenizer_and_pad_id(config)
+  # Chunks are tokenized one by one and the chat template already emits BOS/EOS, so the tokenizer
+  # must not add them to every chunk (same as the HF SFT path and vision SFT below).
+  tokenizer_model, pad_id = data_processing_utils.get_tokenizer_and_pad_id(config, add_bos=False, add_eos=False)
   base_tokenizer_model = tokenizer_model
 
   tokenizer_model = getattr(tokenizer_model, "tokenizer", tokenizer_model)
@@ -572,6 +577,7 @@ def sft_preprocessing_pipeline(
           _format_chat_template_grain,
           data_columns=data_columns,
           tokenizer_model=tokenizer_model,
+          model_name=getattr(config, "model_name", None),
       )
   )
 
