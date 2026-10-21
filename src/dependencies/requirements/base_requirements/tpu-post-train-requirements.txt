@@ -32,6 +32,8 @@ pytest-mock
 python-json-logger
 pyzmq
 ray
+# tunix requires safetensors<0.8 (newer versions break with jax>=0.9).
+safetensors<0.8
 setproctitle>=1.0
 setuptools==80.9.0
 torch==2.12.0
