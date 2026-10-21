@@ -33,7 +33,6 @@ import re
 import subprocess
 import sys
 
-from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -272,6 +271,7 @@ class ConfigKeyTest(_EnvUnset):
 
 
 def _child_env():
+  """Environment for running the 8-device CPU numerics subprocess."""
   env = os.environ.copy()
   # As the CPU proofs ran: no excess precision, so both programs round bf16 intermediates the same way.
   env["XLA_FLAGS"] = (
@@ -372,10 +372,14 @@ def _inputs(batch):
       pos[b, s:e] = np.arange(e - s)
   mask = (seg != 0).astype(np.float32)
   routing = np.stack(
-      [np.stack([rng.permutation(_EXPERTS)[:_TOP_K] for _ in range(batch * _SEQ)]).reshape(batch, _SEQ, _TOP_K)
-       for _ in range(_LAYERS)],
+      [
+          np.stack([rng.permutation(_EXPERTS)[:_TOP_K] for _ in range(batch * _SEQ)]).reshape(batch, _SEQ, _TOP_K)
+          for _ in range(_LAYERS)
+      ],
       axis=2,
-  ).astype(np.int32)  # [batch, seq, layers, top_k]
+  ).astype(
+      np.int32
+  )  # [batch, seq, layers, top_k]
   routing[:, ::7, :, _TOP_K - 1] = -1
   return tuple(jnp.asarray(v) for v in (tokens, pos, seg, routing, targets, mask))
 

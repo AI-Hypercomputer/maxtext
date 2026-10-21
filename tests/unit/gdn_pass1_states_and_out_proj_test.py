@@ -30,9 +30,7 @@ import types
 from unittest import mock
 
 if "--xla_force_host_platform_device_count" not in os.environ.get("XLA_FLAGS", ""):
-  os.environ["XLA_FLAGS"] = (
-      os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=2"
-  ).strip()
+  os.environ["XLA_FLAGS"] = (os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=2").strip()
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -87,6 +85,7 @@ def _pltpu_roll_cpu(x, shift, axis, *, stride=None, stride_axis=None):
 
 
 class _FlatView:
+  """Flat slice view over a boxed ref slice."""
 
   def __init__(self, box, idx, shape):
     self.box = box
@@ -100,6 +99,7 @@ class _FlatView:
 
 
 class _AtIndex:
+  """Reshape proxy for an indexed _BoxRef."""
 
   def __init__(self, box, idx):
     self.box = box
@@ -110,6 +110,7 @@ class _AtIndex:
 
 
 class _AtHelper:
+  """Index helper for _BoxRef."""
 
   def __init__(self, box):
     self.box = box
@@ -349,9 +350,7 @@ class OutProjTokenMinorTest(absltest.TestCase):
     val_off, (dx_off, dw_off) = jax.jit(jax.value_and_grad(functools.partial(loss, token_minor=False), argnums=(0, 1)))(
         x, w
     )
-    val_on, (dx_on, dw_on) = jax.jit(jax.value_and_grad(functools.partial(loss, token_minor=True), argnums=(0, 1)))(
-        x, w
-    )
+    val_on, (dx_on, dw_on) = jax.jit(jax.value_and_grad(functools.partial(loss, token_minor=True), argnums=(0, 1)))(x, w)
     self.assertEqual(float(jnp.max(jnp.abs(val_on - val_off))), 0.0)
     self.assertEqual(float(jnp.max(jnp.abs(dx_on - dx_off))), 0.0)
     self.assertEqual(float(jnp.max(jnp.abs(dw_on - dw_off))), 0.0)
@@ -367,9 +366,15 @@ class OutProjTokenMinorTest(absltest.TestCase):
     self.assertNotEqual(_bits(dx_bad), _bits(dx_off))
     self.assertNotEqual(_bits(dw_bad), _bits(dw_off))
 
-    hlo_train_on = jax.jit(functools.partial(run_out_proj, token_minor=True, model_mode=MODEL_MODE_TRAIN)).lower(x, w).as_text()
-    hlo_train_off = jax.jit(functools.partial(run_out_proj, token_minor=False, model_mode=MODEL_MODE_TRAIN)).lower(x, w).as_text()
-    hlo_prefill_on = jax.jit(functools.partial(run_out_proj, token_minor=True, model_mode=MODEL_MODE_PREFILL)).lower(x, w).as_text()
+    hlo_train_on = (
+        jax.jit(functools.partial(run_out_proj, token_minor=True, model_mode=MODEL_MODE_TRAIN)).lower(x, w).as_text()
+    )
+    hlo_train_off = (
+        jax.jit(functools.partial(run_out_proj, token_minor=False, model_mode=MODEL_MODE_TRAIN)).lower(x, w).as_text()
+    )
+    hlo_prefill_on = (
+        jax.jit(functools.partial(run_out_proj, token_minor=True, model_mode=MODEL_MODE_PREFILL)).lower(x, w).as_text()
+    )
     self.assertIn("LayoutConstraint", hlo_train_on)
     self.assertNotIn("LayoutConstraint", hlo_train_off)
     self.assertNotIn("LayoutConstraint", hlo_prefill_on)
@@ -413,11 +418,7 @@ class OutProjTokenMinorTest(absltest.TestCase):
     def lower_qwen_layer(token_minor, model_mode):
       layer = make_qwen_layer(token_minor, model_mode)
       graphdef, state = nnx.split(layer)
-      return (
-          jax.jit(lambda st, h: nnx.merge(graphdef, st)(h, model_mode=model_mode)[0])
-          .lower(state, hidden)
-          .as_text()
-      )
+      return jax.jit(lambda st, h: nnx.merge(graphdef, st)(h, model_mode=model_mode)[0]).lower(state, hidden).as_text()
 
     hidden = jnp.asarray(rng.standard_normal((1, 64, 64)).astype(np.float32)).astype(jnp.bfloat16)
     qwen_hlo_train_on = lower_qwen_layer(True, MODEL_MODE_TRAIN)
@@ -444,9 +445,7 @@ class PallasInterpretStatesAndBf16QkvTest(absltest.TestCase):
     a_log = jnp.asarray((rng.standard_normal((nv,)) * 0.1).astype(np.float32))
     # Weak decay so initial recurrent_state and inter-chunk recurrent carry survive across both chunks.
     dtb = jnp.asarray((rng.standard_normal((nv,)) * 0.1 - 6.0).astype(np.float32))
-    cs = jnp.asarray((rng.standard_normal((batch_size, _KERNEL - 1, dim)) * 0.3).astype(np.float32)).astype(
-        jnp.bfloat16
-    )
+    cs = jnp.asarray((rng.standard_normal((batch_size, _KERNEL - 1, dim)) * 0.3).astype(np.float32)).astype(jnp.bfloat16)
     rs = jnp.asarray((rng.standard_normal((batch_size, nv, _HEAD_DIM, _HEAD_DIM)) * 0.3).astype(np.float32))
     seg = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
     seg = seg.at[1, 64:].set(2)
@@ -572,7 +571,14 @@ class CpuDecoupledFwdBwdBitIdentityTest(parameterized.TestCase):
     dtb = jnp.asarray((rng.standard_normal((nv,)) * 0.1 - 6.0).astype(np.float32))
     do = jnp.asarray(rng.standard_normal((1, seq, nv, _HEAD_DIM)).astype(np.float32))
     seg = (
-        jnp.concatenate([jnp.ones((1, 64), dtype=jnp.int32), jnp.full((1, 48), 2, dtype=jnp.int32), jnp.zeros((1, 16), dtype=jnp.int32)], axis=1)
+        jnp.concatenate(
+            [
+                jnp.ones((1, 64), dtype=jnp.int32),
+                jnp.full((1, 48), 2, dtype=jnp.int32),
+                jnp.zeros((1, 16), dtype=jnp.int32),
+            ],
+            axis=1,
+        )
         if with_seg
         else None
     )
@@ -609,9 +615,7 @@ class CpuDecoupledFwdBwdBitIdentityTest(parameterized.TestCase):
             (out, ncs, nrs),
         )
 
-      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3, 4, 5), has_aux=True))(
-          qkv, b, a, cw, a_log, dtb
-      )
+      return jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3, 4, 5), has_aux=True))(qkv, b, a, cw, a_log, dtb)
 
     (loss_off, aux_off), grads_off = run(False)
     (loss_on, aux_on), grads_on = run(True)
@@ -688,9 +692,7 @@ class CpuDecoupledFwdBwdBitIdentityTest(parameterized.TestCase):
             check_vma=False,
         )
         def cp_step(qkv_s, b_s, a_s, cw_in, alog_in, dtb_in, cs_in, rs_in, seg_s):
-          out_s, (ncs_s, nrs_s) = call_gdn(
-              qkv_s, b_s, a_s, cw_in, alog_in, dtb_in, cs_in, rs_in, seg_s, "cp", opt_on
-          )
+          out_s, (ncs_s, nrs_s) = call_gdn(qkv_s, b_s, a_s, cw_in, alog_in, dtb_in, cs_in, rs_in, seg_s, "cp", opt_on)
           return out_s, ncs_s, nrs_s
 
       else:
@@ -703,9 +705,7 @@ class CpuDecoupledFwdBwdBitIdentityTest(parameterized.TestCase):
             check_vma=False,
         )
         def cp_step(qkv_s, b_s, a_s, cw_in, alog_in, dtb_in, cs_in, rs_in):
-          out_s, (ncs_s, nrs_s) = call_gdn(
-              qkv_s, b_s, a_s, cw_in, alog_in, dtb_in, cs_in, rs_in, None, "cp", opt_on
-          )
+          out_s, (ncs_s, nrs_s) = call_gdn(qkv_s, b_s, a_s, cw_in, alog_in, dtb_in, cs_in, rs_in, None, "cp", opt_on)
           return out_s, ncs_s, nrs_s
 
       def loss_fn(qkv_in, b_in, a_in, cw_in, alog_in, dtb_in, cs_in, rs_in):
@@ -759,6 +759,7 @@ class CpuDecoupledFwdBwdBitIdentityTest(parameterized.TestCase):
 
 
 def _validator_cfg(**overrides):
+  """Minimal namespace satisfying validate_gdn_config."""
   fields = {
       "decoder_block": config_types.DecoderBlockType.QWEN3_5,
       "ici_context_parallelism": 1,
@@ -891,6 +892,7 @@ def _forward_kernel_calls(closed_jaxpr):
 
 
 class _Value:
+  """Wrapper exposing a .value attribute and slicing."""
 
   def __init__(self, value):
     self.value = value
@@ -900,6 +902,7 @@ class _Value:
 
 
 def _trace_model_runner(mode, nk, nv, *, opt_on, remat=True, seg=True, seq=512, grad=True):
+  """Trace run_gdn_kernel_layer into a closed jaxpr for kernel call inspection."""
   cp = {"none": 1, "seq4": 4, "head2": 2}[mode]
   if mode == "none":
     ctx, mesh = _tpu_target()
@@ -987,11 +990,13 @@ def _trace_model_runner(mode, nk, nv, *, opt_on, remat=True, seg=True, seq=512, 
 
 
 def _check(label, ok, detail=""):
+  """Print check status and return boolean pass flag."""
   print(f"{label}: [{'ok' if ok else 'FAIL'}] {detail}", flush=True)
   return ok
 
 
 def _check_seq_cp_kernel_calls(opt_on, grad=True):
+  """Verify forward kernel names, dtypes, and shapes emitted under seq CP."""
   jaxpr = _trace_model_runner("seq4", 16, 64, opt_on=opt_on, seq=256, grad=grad)
   calls = _forward_kernel_calls(jaxpr)
   names = [n for n, _, _ in calls]
@@ -1011,6 +1016,7 @@ def _check_seq_cp_kernel_calls(opt_on, grad=True):
 
 
 def _lowers_states_and_per_seq_to_mosaic():
+  """Verify both fused_conv1d_gdn_states and fused_conv1d_gdn lower cleanly to Mosaic TPU."""
   ok = True
   for nk, nv in ((2, 4), (16, 64)):
     dim = (2 * nk + nv) * _HEAD_DIM
@@ -1061,15 +1067,15 @@ def _lowers_states_and_per_seq_to_mosaic():
       text_full = jax.jit(fn_full).trace(*args).lower(lowering_platforms=("tpu",)).as_text(debug_info=False)
     names_states = re.findall(r'kernel_name = "([^"]+)"', text_states)
     names_full = re.findall(r'kernel_name = "([^"]+)"', text_full)
-    good = (
-        names_states == ["fused_conv1d_gdn_per_seq_states_b1_c64"]
-        and names_full == ["fused_conv1d_gdn_per_seq_b1_c64"]
-    )
+    good = names_states == ["fused_conv1d_gdn_per_seq_states_b1_c64"] and names_full == [
+        "fused_conv1d_gdn_per_seq_b1_c64"
+    ]
     ok &= _check(f"mosaic lowering width {dim}", good, f"states={names_states} full={names_full}")
   return ok
 
 
 def _backward_rule_positional_forms():
+  """Verify backward custom_vjp rule accepts all positional argument arities."""
   nk, nv, seq = 2, 4, 128
   dim = (2 * nk + nv) * _HEAD_DIM
   nondiff = (nk, nv, _HEAD_DIM, _HEAD_DIM, _KERNEL, _CHUNK, True, jnp.float32)

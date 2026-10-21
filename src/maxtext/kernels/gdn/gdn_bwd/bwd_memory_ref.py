@@ -222,24 +222,18 @@ def make_bwd_block_specs_natural(
     )
   if nat_states:
     # chunk_states [B, C, Hv, kq_head_dim, v_head_dim] (and t_inv [B, C, Hv, chunk_size, chunk_size])
-    in_specs.append(
-        pl.BlockSpec((None, None, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, rc(c), g, 0, 0))
-    )
+    in_specs.append(pl.BlockSpec((None, None, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, rc(c), g, 0, 0)))
     if has_t_inv:
       in_specs.append(
           pl.BlockSpec((None, None, num_v_heads, chunk_size, chunk_size), lambda b, g, c: (b, rc(c), g, 0, 0))
       )
   else:
     in_specs.append(
-        pl.BlockSpec(
-            (None, None, None, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, g, rc(c), 0, 0, 0)
-        )
+        pl.BlockSpec((None, None, None, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, g, rc(c), 0, 0, 0))
     )
     if has_t_inv:
       in_specs.append(
-          pl.BlockSpec(
-              (None, None, None, num_v_heads, chunk_size, chunk_size), lambda b, g, c: (b, g, rc(c), 0, 0, 0)
-          )
+          pl.BlockSpec((None, None, None, num_v_heads, chunk_size, chunk_size), lambda b, g, c: (b, g, rc(c), 0, 0, 0))
       )
   in_specs += [
       # a_log, dt_bias [B, G, 1, padded_num_v_heads]
@@ -252,9 +246,7 @@ def make_bwd_block_specs_natural(
   if nat_states:
     state_spec = pl.BlockSpec((None, 1, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, 0, g, 0, 0))
   else:
-    state_spec = pl.BlockSpec(
-        (None, None, 1, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, g, 0, 0, 0, 0)
-    )
+    state_spec = pl.BlockSpec((None, None, 1, num_v_heads, kq_head_dim, v_head_dim), lambda b, g, c: (b, g, 0, 0, 0, 0))
   if has_dht:
     in_specs.append(state_spec)
 

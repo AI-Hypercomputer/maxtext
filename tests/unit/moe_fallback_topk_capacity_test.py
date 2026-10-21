@@ -62,6 +62,7 @@ def _bits_equal(a, b):
 
 
 def _pyconfig(**overrides):
+  """Initialize a test MaxText pyconfig with optional overrides."""
   from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
   from tests.utils.test_helpers import get_test_config_path  # pylint: disable=import-outside-toplevel
 

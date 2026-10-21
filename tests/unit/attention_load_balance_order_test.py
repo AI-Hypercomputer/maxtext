@@ -137,7 +137,7 @@ def _run_reorder_checks(mesh, batch_axes):
   cotangent = rng.standard_normal(cases["float32"].shape).astype(np.float32)
   dcs = _reorder_outputs(mesh, batch_axes, _DCS, cases, cotangent)
   local_self = _reorder_outputs(mesh, batch_axes, _LOCAL_SELF, cases, cotangent)
-  differ = sorted(str(k) for k in dcs if dcs[k] != local_self[k])
+  differ = sorted(str(k) for k, v in dcs.items() if v != local_self[k])
   assert not differ, f"context={cp}: local_self differs from dual_chunk_swap in {differ}"
 
   # Program: the dual_chunk_swap pairs minus the self pairs.
@@ -168,7 +168,7 @@ def _run_reorder_checks(mesh, batch_axes):
   if first_self or second_self:
     with _self_rank_keeps_zeros():
       broken = _reorder_outputs(mesh, batch_axes, _LOCAL_SELF, cases, cotangent)
-    assert any(broken[k] != dcs[k] for k in dcs), f"context={cp}: positive control went undetected"
+    assert any(broken[k] != v for k, v in dcs.items()), f"context={cp}: positive control went undetected"
 
 
 # ---------------------------------------------------------------------------

@@ -354,7 +354,9 @@ def natural_causal_conv1d(
   rows = halo.shape[0]
   prev = cfg.prev_kernel_size
   if not prev < rows <= chunk or rows % 8:
-    raise ValueError(f"natural_causal_conv1d needs kernel_size - 1 < halo rows <= chunk, a multiple of 8; got {halo.shape}.")
+    raise ValueError(
+        f"natural_causal_conv1d needs kernel_size - 1 < halo rows <= chunk, a multiple of 8; got {halo.shape}."
+    )
   has_seg = cfg.has_seg_ids and b_large is not None
   row = jax.lax.broadcasted_iota(jnp.int32, (rows, 1), 0)
   seg_cur = seg_hdr = None

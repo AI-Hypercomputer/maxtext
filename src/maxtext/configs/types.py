@@ -815,7 +815,10 @@ class Attention(BaseModel):
 
   attention: str = Field(
       "autoselected",
-      description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, vllm_batched_rpa_long_ctx, etc).",
+      description=(
+          "The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa,"
+          " vllm_batched_rpa_long_ctx, etc)."
+      ),
   )
   attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
       "global", description="The variant of attention to use."
@@ -3274,7 +3277,6 @@ class RematAndOffload(BaseModel):
       ),
   )
 
-
   @model_validator(mode="after")
   def validate_optimizer_device_resident(self) -> "RematAndOffload":
     """The device-resident budget only means something with the optimizer state offloaded."""
@@ -3287,6 +3289,7 @@ class RematAndOffload(BaseModel):
           " leaf is already in device memory)."
       )
     return self
+
 
 class Tokenizer(BaseModel):
   """Configuration for the tokenizer."""
@@ -5334,7 +5337,9 @@ class MaxTextConfig(
 
     if self.retry_when_tokens_dropped:
       if self.moe_dropless_fallback is not None:
-        raise ValueError("retry_when_tokens_dropped=True cannot be combined with moe_dropless_fallback (both handle drops).")
+        raise ValueError(
+            "retry_when_tokens_dropped=True cannot be combined with moe_dropless_fallback (both handle drops)."
+        )
       if self.num_experts <= 1:
         raise ValueError("retry_when_tokens_dropped=True requires num_experts > 1.")
       if self.ragged_buffer_factor == -1:
@@ -5394,7 +5399,11 @@ class MaxTextConfig(
     """Validates retry_dropless_first_steps, first_phase_ragged_buffer_factor and the REQUIRED_RBF probe."""
     if self.retry_dropless_first_steps < 0:
       raise ValueError(f"retry_dropless_first_steps must be >= 0 (got {self.retry_dropless_first_steps}).")
-    if self.retry_dropless_first_steps > 0 and self.moe_dropless_fallback != "step" and not self.retry_when_tokens_dropped:
+    if (
+        self.retry_dropless_first_steps > 0
+        and self.moe_dropless_fallback != "step"
+        and not self.retry_when_tokens_dropped
+    ):
       raise ValueError(
           "retry_dropless_first_steps > 0 requires moe_dropless_fallback='step' or retry_when_tokens_dropped=True."
       )
@@ -5866,8 +5875,7 @@ class MaxTextConfig(
     if self.pathways_checkpointing_impl == "colocated_python":
       if os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") != "1":
         raise ValueError(
-            "pathways_checkpointing_impl='colocated_python' requires "
-            "ENABLE_PATHWAYS_PERSISTENCE=1 in the environment."
+            "pathways_checkpointing_impl='colocated_python' requires " "ENABLE_PATHWAYS_PERSISTENCE=1 in the environment."
         )
       if (
           self.checkpoint_storage_device_host_concurrent_gb is None
@@ -6024,17 +6032,11 @@ class MaxTextConfig(
           " concatenates q, k and v per key head instead of in the kernel order."
       )
     if (cp_m_scan or cp_dh_scan) and cfg.gdn_chunk_size != 64:
-      raise ValueError(
-          f"gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}."
-      )
+      raise ValueError(f"gdn_cp_m_scan=True / gdn_cp_dh_scan=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}.")
     if pass1_states_bf16_qkv and cfg.gdn_chunk_size != 64:
-      raise ValueError(
-          f"gdn_cp_pass1_states_and_bf16_qkv=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}."
-      )
+      raise ValueError(f"gdn_cp_pass1_states_and_bf16_qkv=True requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}.")
     if pass1_states_bf16_qkv and getattr(cfg, "dtype", "bfloat16") != "bfloat16":
-      raise ValueError(
-          f"gdn_cp_pass1_states_and_bf16_qkv=True requires dtype='bfloat16', got dtype={cfg.dtype!r}."
-      )
+      raise ValueError(f"gdn_cp_pass1_states_and_bf16_qkv=True requires dtype='bfloat16', got dtype={cfg.dtype!r}.")
     if cfg.gdn_key_head_dim % 128 or cfg.gdn_value_head_dim % 128:
       raise ValueError(
           "use_gdn_kernel=True requires gdn_key_head_dim and gdn_value_head_dim to be multiples of 128, "
@@ -8239,8 +8241,8 @@ class RLConfig(
     dcn_map = get_parallelism_map("dcn")
     self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
-    MaxTextConfig._apply_dense_grad_reduce(self, require_rule=True)
+    MaxTextConfig._apply_dense_grad_reduce(self, require_rule=True)  # pylint: disable=protected-access
     MaxTextConfig.validate_gdn_config(self, is_rl_config=True)
     MaxTextConfig.validate_query_proj_kernel_gather_once(self)
-    MaxTextConfig._validate_colocated_checkpointing(self)
+    MaxTextConfig._validate_colocated_checkpointing(self)  # pylint: disable=protected-access
     return self

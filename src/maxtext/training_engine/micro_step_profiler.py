@@ -35,11 +35,7 @@ class MicroStepProfiler:
     # means ProfilerType.NONE still opens a trace, and under Pathways
     # jax.profiler.start_trace then raises "No profile started" from inside
     # fwd_bwd, killing the trainer mid-run.
-    if (
-        jax.process_index() != 0
-        or config.profiler == ProfilerType.NONE
-        or config.profiler_steps == 0
-    ):
+    if jax.process_index() != 0 or config.profiler == ProfilerType.NONE or config.profiler_steps == 0:
       self.do_not_profile = True
       return
 

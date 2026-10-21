@@ -125,8 +125,10 @@ def _conv_stage(nk, nv, seg_row, has_init, bias, seed, natural_conv):
   cb = jnp.asarray(rng.standard_normal((dim,)).astype(np.float32)) if bias else None
   hbm = jnp.asarray(rng.standard_normal((prev, dim)).astype(np.float32))
   rec = jnp.zeros((1, nv, _HEAD_DIM, _HEAD_DIM), jnp.float32)
-  b_all = _b_lanes(seg_row if seg else [0] * t, has_init, nv, rng) if seg else rng.standard_normal((t, 128)).astype(
-      np.float32
+  b_all = (
+      _b_lanes(seg_row if seg else [0] * t, has_init, nv, rng)
+      if seg
+      else rng.standard_normal((t, 128)).astype(np.float32)
   )
   n = t // _CHUNK
   md = memory_ref.MetadataRef.create(
@@ -154,18 +156,18 @@ def _conv_stage(nk, nv, seg_row, has_init, bias, seed, natural_conv):
         cfg=cfg,
     )
     lhs = jnp.concatenate([prev_conv, x.astype(jnp.float32).reshape(1, _CHUNK, 1, dim)], axis=1)
-    out, new_cs = compute_conv1d.causal_conv1d(
-        real, lhs, w, cb, cfg, b.reshape(1, _CHUNK, 1, 128) if seg else None
-    )
+    out, new_cs = compute_conv1d.causal_conv1d(real, lhs, w, cb, cfg, b.reshape(1, _CHUNK, 1, 128) if seg else None)
     y = jax.nn.silu(out)[0, :, 0, :]
     kd = nk * _HEAD_DIM
-    compact.append([
-        y[:, :kd].reshape(_CHUNK, nk, _HEAD_DIM).transpose(1, 0, 2),
-        y[:, kd : 2 * kd].reshape(_CHUNK, nk, _HEAD_DIM).transpose(1, 0, 2),
-        y[:, 2 * kd :].reshape(_CHUNK, nv, _HEAD_DIM).transpose(1, 0, 2),
-        new_cs[0, :, 0, :],
-        prev_conv[0, :, 0, :],
-    ])
+    compact.append(
+        [
+            y[:, :kd].reshape(_CHUNK, nk, _HEAD_DIM).transpose(1, 0, 2),
+            y[:, kd : 2 * kd].reshape(_CHUNK, nk, _HEAD_DIM).transpose(1, 0, 2),
+            y[:, 2 * kd :].reshape(_CHUNK, nv, _HEAD_DIM).transpose(1, 0, 2),
+            new_cs[0, :, 0, :],
+            prev_conv[0, :, 0, :],
+        ]
+    )
     record = md.get_record(jnp.int32(j), 0)
     halo = vmem_ldst.select_natural_conv_halo(hbm, carry_n, record.is_first_tile, md.s_idx_has_initial_state[0])
     x32 = x.astype(jnp.float32)
@@ -268,12 +270,14 @@ def _pltpu_roll_cpu(x, shift, axis, *, stride=None, stride_axis=None):
 
 
 def _pltpu_repeat_cpu(x, repeats, axis):
+  """CPU stand-in for pltpu.repeat."""
   reps = [1] * x.ndim
   reps[axis] = repeats
   return jnp.tile(x, reps)
 
 
 class _FlatView:
+  """Flat slice view over a boxed ref slice."""
 
   def __init__(self, box, idx, shape):
     self.box, self.idx, self.shape = box, idx, shape
@@ -307,6 +311,7 @@ class _BoxRef:
 
 
 class _At:
+  """Index helper for _BoxRef."""
 
   def __init__(self, box):
     self.box = box
@@ -351,6 +356,7 @@ def _interpret_context():
 
 
 def _kernel_inputs(seg, init, seed, nk=2, nv=4, batch=2, nchunks=3):
+  """Construct synthetic inputs for local GDN kernel interpret checks."""
   rng = np.random.default_rng(seed)
   dim, t = (2 * nk + nv) * _HEAD_DIM, nchunks * _CHUNK
   segment_ids = None
@@ -358,36 +364,34 @@ def _kernel_inputs(seg, init, seed, nk=2, nv=4, batch=2, nchunks=3):
     r0 = np.repeat([1, 2, 3, 4, 5], [65, 1, 2, 60, t - 128])
     r1 = np.concatenate([np.repeat([7, 8, 9], [3, 61, 66]), np.zeros(t - 130, np.int64)])
     segment_ids = jnp.asarray(np.stack([r0, r1][:batch]), jnp.int32)
-  return dict(
-      qkv=jnp.asarray((rng.standard_normal((batch, t, dim)) * 0.5).astype(np.float32)).astype(jnp.bfloat16),
-      b=jnp.asarray(rng.standard_normal((batch, t, nv)).astype(np.float32)).astype(jnp.bfloat16),
-      a=jnp.asarray(rng.standard_normal((batch, t, nv)).astype(np.float32)).astype(jnp.bfloat16),
-      conv_weight=jnp.asarray((rng.standard_normal((_KERNEL, 1, dim)) * 0.3).astype(np.float32)),
-      conv_bias=jnp.asarray((rng.standard_normal((dim,)) * 0.1).astype(np.float32)),
-      a_log=jnp.asarray((rng.standard_normal((nv,)) * 0.1).astype(np.float32)),
-      dt_bias=jnp.asarray((rng.standard_normal((nv,)) * 0.1 - 4.0).astype(np.float32)),
-      conv_state=(
+  return {
+      "qkv": jnp.asarray((rng.standard_normal((batch, t, dim)) * 0.5).astype(np.float32)).astype(jnp.bfloat16),
+      "b": jnp.asarray(rng.standard_normal((batch, t, nv)).astype(np.float32)).astype(jnp.bfloat16),
+      "a": jnp.asarray(rng.standard_normal((batch, t, nv)).astype(np.float32)).astype(jnp.bfloat16),
+      "conv_weight": jnp.asarray((rng.standard_normal((_KERNEL, 1, dim)) * 0.3).astype(np.float32)),
+      "conv_bias": jnp.asarray((rng.standard_normal((dim,)) * 0.1).astype(np.float32)),
+      "a_log": jnp.asarray((rng.standard_normal((nv,)) * 0.1).astype(np.float32)),
+      "dt_bias": jnp.asarray((rng.standard_normal((nv,)) * 0.1 - 4.0).astype(np.float32)),
+      "conv_state": (
           jnp.asarray((rng.standard_normal((batch, _KERNEL - 1, dim)) * 0.3).astype(np.float32)).astype(jnp.bfloat16)
           if init
           else None
       ),
-      recurrent_state=(
-          jnp.asarray((rng.standard_normal((batch, nv, _HEAD_DIM, _HEAD_DIM)) * 0.3).astype(np.float32))
-          if init
-          else None
+      "recurrent_state": (
+          jnp.asarray((rng.standard_normal((batch, nv, _HEAD_DIM, _HEAD_DIM)) * 0.3).astype(np.float32)) if init else None
       ),
-      num_k_heads=nk,
-      num_v_heads=nv,
-      head_k_dim=_HEAD_DIM,
-      head_v_dim=_HEAD_DIM,
-      conv_kernel_size=_KERNEL,
-      chunk_size=_CHUNK,
-      use_qk_norm_in_gdn=True,
-      compute_dtype=jnp.float32,
-      segment_ids=segment_ids,
-      conv_dense_token_stack=True,
-      bf16_qkv_dma=True,
-  )
+      "num_k_heads": nk,
+      "num_v_heads": nv,
+      "head_k_dim": _HEAD_DIM,
+      "head_v_dim": _HEAD_DIM,
+      "conv_kernel_size": _KERNEL,
+      "chunk_size": _CHUNK,
+      "use_qk_norm_in_gdn": True,
+      "compute_dtype": jnp.float32,
+      "segment_ids": segment_ids,
+      "conv_dense_token_stack": True,
+      "bf16_qkv_dma": True,
+  }
 
 
 class KernelInterpretTest(parameterized.TestCase):
@@ -409,19 +413,23 @@ class KernelInterpretTest(parameterized.TestCase):
     """Positive control: a natural path that swaps q and k changes the kernel outputs."""
     common = _kernel_inputs(True, True, 5)
     split = vmem_ldst.split_qkv_natural
+
+    def swapped_split(y, c):
+      q, k, v = split(y, c)
+      return k, q, v
+
     jax.clear_caches()  # the kernels are jitted: a cached trace of the natural path would hide the patch
     try:
       with _interpret_context():
         ref = gdn_api._run_local_gdn_decoupled_fwd(**common)
-        with mock.patch.object(vmem_ldst, "split_qkv_natural", side_effect=lambda y, c: (lambda q, k, v: (k, q, v))(
-            *split(y, c))):
+        with mock.patch.object(vmem_ldst, "split_qkv_natural", side_effect=swapped_split):
           got = gdn_api._run_local_gdn_decoupled_fwd(**common, conv_natural_layout=True)
     finally:
       jax.clear_caches()
     self.assertNotEqual(_bits(ref[0][0]), _bits(got[0][0]))
 
   def test_natural_layout_needs_the_bf16_dma_buffer(self):
-    common = dict(_kernel_inputs(False, False, 1), bf16_qkv_dma=False)
+    common = {**_kernel_inputs(False, False, 1), "bf16_qkv_dma": False}
     with _interpret_context(), self.assertRaisesRegex(ValueError, "bf16 qkv DMA"):
       gdn_api._run_local_gdn_decoupled_fwd(**common, conv_natural_layout=True)
 
@@ -431,6 +439,7 @@ class KernelInterpretTest(parameterized.TestCase):
 
 
 def _validator_cfg(**overrides):
+  """Minimal namespace satisfying validate_gdn_config."""
   fields = {
       "decoder_block": config_types.DecoderBlockType.QWEN3_5,
       "ici_context_parallelism": 1,
@@ -474,13 +483,19 @@ class ValidatorTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      ("natural_without_bf16_dma", {"gdn_conv1d_natural_layout": True, "gdn_cp_pass1_states_and_bf16_qkv": False},
-       "gdn_conv1d_natural_layout"),
+      (
+          "natural_without_bf16_dma",
+          {"gdn_conv1d_natural_layout": True, "gdn_cp_pass1_states_and_bf16_qkv": False},
+          "gdn_conv1d_natural_layout",
+      ),
       ("natural_without_kernel", {"gdn_conv1d_natural_layout": True, "use_gdn_kernel": False}, "use_gdn_kernel"),
       ("group_not_dividing", {"gdn_fwd_kernel_head_group_size": 3}, "gdn_fwd_kernel_head_group_size=3"),
       ("group_negative", {"gdn_fwd_kernel_head_group_size": -1}, "gdn_fwd_kernel_head_group_size"),
-      ("group_without_gdn", {"gdn_fwd_kernel_head_group_size": 4,
-                             "decoder_block": config_types.DecoderBlockType.LLAMA2}, "Gated DeltaNet"),
+      (
+          "group_without_gdn",
+          {"gdn_fwd_kernel_head_group_size": 4, "decoder_block": config_types.DecoderBlockType.LLAMA2},
+          "Gated DeltaNet",
+      ),
   )
   def test_rejected(self, overrides, pattern):
     with self.assertRaisesRegex(ValueError, pattern):

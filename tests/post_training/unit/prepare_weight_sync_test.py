@@ -150,8 +150,8 @@ class PrepareWeightSyncTest(unittest.TestCase):
     self.assertEqual(call_order, ["metrics", "release_buffers"])
 
   def test_drain_before_convert_and_single_tree_peak_liveness(self):
-    import gc
-    import weakref
+    import gc  # pylint: disable=import-outside-toplevel
+    import weakref  # pylint: disable=import-outside-toplevel
 
     class _Leaf:
       pass
@@ -161,6 +161,8 @@ class PrepareWeightSyncTest(unittest.TestCase):
     peak_live_trees_during_convert = []
 
     class _FakeSync:
+      """Fake weight sync backend tracking bound buffer lifetimes."""
+
       def __init__(self, **kwargs):
         self.arrays = []
         self.names = []
@@ -187,9 +189,7 @@ class PrepareWeightSyncTest(unittest.TestCase):
       def work_unit_metadata_all(self):
         return []
 
-    self.engine._checkpoint_manager.wait_until_finished.side_effect = (
-        lambda: events.append("wait_until_finished")
-    )
+    self.engine._checkpoint_manager.wait_until_finished.side_effect = lambda: events.append("wait_until_finished")
 
     def _convert_side_effect(_):
       gc.collect()
@@ -284,4 +284,3 @@ class PrepareWeightSyncTest(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
-

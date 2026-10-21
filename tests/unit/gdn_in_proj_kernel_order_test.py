@@ -183,6 +183,7 @@ class ColumnsTest(absltest.TestCase):
 
 
 def _validator_cfg(**overrides):
+  """Minimal namespace satisfying validate_gdn_config."""
   fields = {
       "decoder_block": config_types.DecoderBlockType.QWEN3_5,
       "ici_context_parallelism": 1,

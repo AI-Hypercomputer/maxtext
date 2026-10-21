@@ -19,6 +19,8 @@ Uses the on-disk format that `ENABLE_PATHWAYS_PERSISTENCE=1` writes (`use_ocdbt=
 seeded model, as a resumed RL trainer would.
 """
 
+# pylint: disable=protected-access,import-outside-toplevel
+
 import glob
 import inspect
 import os
@@ -390,4 +392,3 @@ class TrainingEngineCheckpointRoundTripTest(unittest.TestCase):
 
 if __name__ == "__main__":
   unittest.main()
-

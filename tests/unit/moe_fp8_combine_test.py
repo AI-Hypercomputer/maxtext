@@ -160,6 +160,7 @@ def _broken_bwd_no_scale(x, axis_name, all_gather_fn=None, bwd_qtype=None, fwd_q
 # ---------------------------------------------------------------------------------------------------------------
 # 1. The helper on a ("context", "expert") = (4, 2) mesh.
 def _helper_checks():
+  """Run numerical and positive-control checks on the FP8 reduce-scatter helper."""
   mesh = jax.make_mesh((4, 2), _EP_AXES)
   n, b, s, e = _NUM_DEVICES, 2, 32, _EMB
   k1, k2, k3 = jax.random.split(jax.random.PRNGKey(3), 3)
@@ -169,9 +170,7 @@ def _helper_checks():
   w = jax.random.normal(k3, (n * b, s, e), jnp.float32)  # cotangent probe, [shards x b, s, e] global
 
   def smap(f):
-    return jax.jit(
-        jax.shard_map(f, mesh=mesh, in_specs=(P(_EP_AXES),), out_specs=P(_EP_AXES), check_vma=False)
-    )
+    return jax.jit(jax.shard_map(f, mesh=mesh, in_specs=(P(_EP_AXES),), out_specs=P(_EP_AXES), check_vma=False))
 
   # shard i owns rows [i * n * b, (i + 1) * n * b)
   flat = jax.device_put(x.reshape(n * n * b, s, e), NamedSharding(mesh, P(_EP_AXES)))
@@ -220,7 +219,9 @@ def _helper_checks():
   ):
     med_g, p99_g, mx_g = _stats(_row_rel(g_exact, grad(bwd_qtype=jnp.dtype(qt))))
     ok = _in(med_g, band)
-    print(f"{name}: grad per-row median {med_g:.4%} p99 {p99_g:.4%} max {mx_g:.4%} (band {band}) -> {'ok' if ok else 'FAIL'}")
+    print(
+        f"{name}: grad per-row median {med_g:.4%} p99 {p99_g:.4%} max {mx_g:.4%} (band {band}) -> {'ok' if ok else 'FAIL'}"
+    )
     results[name] = ok
   med_b = _stats(_row_rel(g_exact, grad(_broken_bwd_no_scale, bwd_qtype=jnp.dtype(jnp.float8_e4m3fn))))[0]
   results["H6_broken_bwd_no_scale"] = med_b > _BROKEN_MIN
@@ -231,6 +232,7 @@ def _helper_checks():
 # ---------------------------------------------------------------------------------------------------------------
 # 2./3. The routed-MoE layer.
 def _cfg(**overrides):
+  """Construct routed-MoE test pyconfig with optional overrides."""
   kwargs = {
       "run_name": "moe_fp8_combine",
       "enable_checkpointing": False,
@@ -320,11 +322,11 @@ def _bit_identical(a, b):
 
 def _close_report(label, ref, new, out_should_change):
   """Per-row output error, loss and per-leaf gradient relative errors; returns pass."""
-  (lr, orf, gr), (ln, onw, gn) = ref, new
-  orf, onw = np.asarray(orf, np.float32), np.asarray(onw, np.float32)
-  r = _row_rel(orf, onw)
+  (lr, orf, gr), (ln, own, gn) = ref, new
+  orf, own = np.asarray(orf, np.float32), np.asarray(own, np.float32)
+  r = _row_rel(orf, own)
   med, p99, mx = _stats(r) if r.size else (0.0, 0.0, 0.0)
-  out_same = bool(np.array_equal(orf, onw))
+  out_same = bool(np.array_equal(orf, own))
   if out_should_change:
     ok = (not out_same) and _in(med, _LAYER_MEDIAN_BAND) and mx <= _LAYER_MAX
   else:
@@ -349,6 +351,7 @@ def _close_report(label, ref, new, out_should_change):
 
 
 def _layer_checks():
+  """Run routed-MoE forward and backward FP8 combine layer checks."""
   results = {}
   base = {"moe_chunk_pipeline": True, "moe_router_grad_from_wo_input": True}
   cfg_off = _cfg(**base)
@@ -388,8 +391,10 @@ def _layer_checks():
   ties_off, ties_on = text_p_off.count("moe_combine_order"), text_p_on.count("moe_combine_order")
   same = _bit_identical(ref_p, new_p)
   results["C1_per_chunk_plain"] = same and ties_off == 0 and ties_on >= cfg_off.num_moe_token_chunks - 1
-  print(f"C1 moe_combine_per_chunk (plain loop): bit-identical {same}, ties off/on {ties_off}/{ties_on} -> "
-        f"{results['C1_per_chunk_plain']}")
+  print(
+      f"C1 moe_combine_per_chunk (plain loop): bit-identical {same}, ties off/on {ties_off}/{ties_on} -> "
+      f"{results['C1_per_chunk_plain']}"
+  )
   _, text_pp_on = _run(_cfg(**base, moe_combine_per_chunk=True), mesh, params, x)
   results["C2_per_chunk_pipelined_noop"] = text_pp_on.count("moe_combine_order") == 0
   print(f"C2 moe_combine_per_chunk (pipelined loop) ties: {text_pp_on.count('moe_combine_order')} (want 0, no-op)")

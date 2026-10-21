@@ -270,17 +270,15 @@ def _normalize_colocated_cpu_shardings() -> None:
     return
 
   def _strip_pinned(fn: Any) -> Any:
-    return lambda shd: fn(
-        shd.with_memory_kind("device")
-        if getattr(shd, "memory_kind", None) == "pinned_host"
-        else shd
-    )
+    return lambda shd: fn(shd.with_memory_kind("device") if getattr(shd, "memory_kind", None) == "pinned_host" else shd)
 
+  # pylint: disable=protected-access
   colocated_transport.colocated_cpu_sharding = _strip_pinned(colocated_transport.colocated_cpu_sharding)
   colocated_transport._normalize_single_device_sharding_to_colocated_cpu = _strip_pinned(
       colocated_transport._normalize_single_device_sharding_to_colocated_cpu
   )
   colocated_transport._maxtext_Normalized = True
+  # pylint: enable=protected-access
 
 
 def _est_host_bytes(spec: jax.ShapeDtypeStruct) -> int:
@@ -342,9 +340,7 @@ def _configure_colocated_python_handler(handler: Any, *, d2h_concurrent_gb: floa
           out.extend(_run_dispatch(func, input_arrays, specs, func_args, kw))
           batch.clear()
 
-        for item in zip(
-            func_kwargs["infos"], func_kwargs["args"], func_kwargs["shardings"], result_specs
-        ):
+        for item in zip(func_kwargs["infos"], func_kwargs["args"], func_kwargs["shardings"], result_specs):
           arr_bytes = _est_host_bytes(item[3])
           if batch and b_bytes + arr_bytes >= max_bytes:
             _flush()
@@ -357,7 +353,7 @@ def _configure_colocated_python_handler(handler: Any, *, d2h_concurrent_gb: floa
       return _run_dispatch(func, input_arrays, result_specs, func_args, func_kwargs)
 
   dispatcher.dispatch = locked_dispatch
-  dispatcher._maxtext_wrapped = True
+  dispatcher._maxtext_wrapped = True  # pylint: disable=protected-access
 
 
 def _assert_uniform_device_set(tree: Any, *, item: str) -> None:
@@ -376,9 +372,7 @@ def _assert_uniform_device_set(tree: Any, *, item: str) -> None:
     PathwaysCheckpointingUnavailableError: If any leaf's sharding.device_set differs from the
       majority device set across `tree`, listing up to 5 offending keypaths.
   """
-  flat = jax.tree_util.tree_flatten_with_path(
-      nnx.to_pure_dict(tree) if isinstance(tree, nnx.State) else tree
-  )[0]
+  flat = jax.tree_util.tree_flatten_with_path(nnx.to_pure_dict(tree) if isinstance(tree, nnx.State) else tree)[0]
   sharded: list[tuple[Any, frozenset[Any]]] = []
   for path, leaf in flat:
     sharding = getattr(leaf, "sharding", None)
@@ -388,11 +382,7 @@ def _assert_uniform_device_set(tree: Any, *, item: str) -> None:
   if len(sharded) <= 1:
     return
   majority_set, _ = collections.Counter(ds for _, ds in sharded).most_common(1)[0]
-  offenders = [
-      f"{jax.tree_util.keystr(p)} (len(device_set)={len(ds)})"
-      for p, ds in sharded
-      if ds != majority_set
-  ]
+  offenders = [f"{jax.tree_util.keystr(p)} (len(device_set)={len(ds)})" for p, ds in sharded if ds != majority_set]
   if offenders:
     sample = ", ".join(offenders[:5])
     more = f" (+{len(offenders) - 5} more)" if len(offenders) > 5 else ""

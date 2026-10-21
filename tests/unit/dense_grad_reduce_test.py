@@ -71,7 +71,10 @@ def test_dense_grad_reduce_on_cpu_mesh():
 
 def _rules_differ_by_embed_grad(rs_rules, ar_rules) -> bool:
   """ar_rules == rs_rules with exactly the 'embed_grad' rule removed, order kept."""
-  as_list = lambda rules: [[r[0], list(r[1]) if isinstance(r[1], (list, tuple)) else r[1]] for r in rules]
+
+  def as_list(rules):
+    return [[r[0], list(r[1]) if isinstance(r[1], (list, tuple)) else r[1]] for r in rules]
+
   rs, ar = as_list(rs_rules), as_list(ar_rules)
   return rs.count(_EMBED_GRAD_RULE) == 1 and [r for r in rs if r != _EMBED_GRAD_RULE] == ar
 
@@ -122,7 +125,10 @@ def _bit_identical_by_class(reference, result):
   """(dense leaves bit-identical, dense leaves, other leaves bit-identical, other leaves)."""
   dense = [n for n in reference.grads if any(k in n for k in _DENSE_NAMES)]
   other = [n for n in reference.grads if n not in dense]
-  same = lambda names: sum(int(np.array_equal(result.grads[n], reference.grads[n])) for n in names)
+
+  def same(names):
+    return sum(int(np.array_equal(result.grads[n], reference.grads[n])) for n in names)
+
   return same(dense), len(dense), same(other), len(other)
 
 
@@ -157,7 +163,10 @@ def _refused(base, label, rule, **overrides) -> bool:
   except Exception as error:  # pylint: disable=broad-exception-caught
     msg = " ".join(str(error).split())
     named = "dense_grad_reduce" in msg
-    print(f"{label}: refused ({type(error).__name__}), message names dense_grad_reduce: {named}: ...{msg[-200:]}", flush=True)
+    print(
+        f"{label}: refused ({type(error).__name__}), message names dense_grad_reduce: {named}: ...{msg[-200:]}",
+        flush=True,
+    )
     return named
   print(f"{label}: ACCEPTED (not refused)", flush=True)
   return False
@@ -190,14 +199,21 @@ def main():
       base, "all_reduce", rs_run, ar_run
   )
   checks["numerics: bfloat16 model"] = base._numerics("all_reduce vs reduce_scatter", ar, rs)
-  print("bit-identical gradient leaves (dense, of; other, of): %d of %d; %d of %d" % _bit_identical_by_class(rs, ar), flush=True)
+  d_eq, d_n, o_eq, o_n = _bit_identical_by_class(rs, ar)
+  print(f"bit-identical gradient leaves (dense, of; other, of): {d_eq} of {d_n}; {o_eq} of {o_n}", flush=True)
 
   rs32 = base._run(base._config(_RULE, **base._F32_DENSE), data, cotangent)
-  ar32 = base._run(base._config(_RULE, dense_grad_reduce="all_reduce", **base._F32_DENSE), data, cotangent, values=rs32.values)
+  ar32 = base._run(
+      base._config(_RULE, dense_grad_reduce="all_reduce", **base._F32_DENSE), data, cotangent, values=rs32.values
+  )
   checks["numerics: float32 dense variant"] = base._numerics(
       "float32 dense all_reduce vs reduce_scatter", ar32, rs32, tol=base._F32_TOL
   )
-  print("float32 bit-identical gradient leaves (dense, of; other, of): %d of %d; %d of %d" % _bit_identical_by_class(rs32, ar32), flush=True)
+  d32_eq, d32_n, o32_eq, o32_n = _bit_identical_by_class(rs32, ar32)
+  print(
+      f"float32 bit-identical gradient leaves (dense, of; other, of): {d32_eq} of {d32_n}; {o32_eq} of {o32_n}",
+      flush=True,
+  )
 
   # Positive controls.
   inert = staticmethod(lambda cfg, *, require_rule: None)
@@ -208,7 +224,9 @@ def main():
       base, "control: rule edit disabled", rs_run, wrong_run
   )
   wrong = base._run(cfg_ar, data, cotangent, values=rs.values, control=_dense_grads_scaled(0.25))
-  controls["dense gradients averaged over the 4 context ranks"] = not base._numerics("control: dense grads / 4", wrong, rs)
+  controls["dense gradients averaged over the 4 context ranks"] = not base._numerics(
+      "control: dense grads / 4", wrong, rs
+  )
   query = next(name for name in rs.values if re.search(r"\['query'\].*\['kernel'\]", name))
   perturbed = dict(rs.values, **{query: rs.values[query] * np.float32(1 + 1e-3)})
   wrong = base._run(cfg_ar, data, cotangent, values=perturbed)

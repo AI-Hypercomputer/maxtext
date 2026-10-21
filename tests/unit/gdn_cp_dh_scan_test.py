@@ -203,8 +203,8 @@ def test_dh_scan_matches_compose_bwd_local_tree(layout, head_tile, monkeypatch):
 
 def test_gdn_cp_scan_config_validation():
   """gdn_cp_m_scan and gdn_cp_dh_scan default to False and validate GDN kernel prerequisites."""
-  from types import SimpleNamespace
-  from maxtext.configs.types import DecoderBlockType, MaxTextConfig
+  from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+  from maxtext.configs.types import DecoderBlockType, MaxTextConfig  # pylint: disable=import-outside-toplevel
 
   cfg_ok = SimpleNamespace(
       decoder_block=DecoderBlockType.QWEN3_NEXT,
@@ -245,11 +245,10 @@ def test_gdn_cp_scan_config_validation():
 
 def test_gdn_decoupled_conv1d_cp_scan_gating_and_tpu_lowering(monkeypatch):
   """Keys off: dh_scan is never called. On an abstract TPU7x mesh, m only: the m scan; both: both pallas_calls."""
-  import functools
-  from types import SimpleNamespace
-  from jax._src import core as jax_core
-  from maxtext.configs.types import ShardMode
-  from maxtext.kernels.gdn import model_runner
+  from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+  from jax._src import core as jax_core  # pylint: disable=import-outside-toplevel
+  from maxtext.configs.types import ShardMode  # pylint: disable=import-outside-toplevel
+  from maxtext.kernels.gdn import model_runner  # pylint: disable=import-outside-toplevel
 
   calls = {"m_scan": 0, "dh_scan": 0}
   orig_m = dh_scan.gdn_cp_m_scan
@@ -276,19 +275,23 @@ def test_gdn_decoupled_conv1d_cp_scan_gating_and_tpu_lowering(monkeypatch):
   )
 
   class _Val:
+
     def __init__(self, v):
       self.value = v
+
     def __getitem__(self, idx):
       return self.value[idx]
 
   def pallas_names(closed_jaxpr):
     names = []
+
     def visit(jaxpr):
       for eqn in jaxpr.eqns:
         if eqn.primitive.name == "pallas_call":
           names.append(eqn.params.get("name", ""))
         for sub in jax_core.jaxprs_in_params(eqn.params):
           visit(sub)
+
     visit(closed_jaxpr.jaxpr)
     return names
 
@@ -315,7 +318,7 @@ def test_gdn_decoupled_conv1d_cp_scan_gating_and_tpu_lowering(monkeypatch):
         gdn_fwd_kernel_head_group_size=0,
     )
 
-    def step(q, k, v_raw, b, a, cw, alog, dtb):
+    def step(q, k, v_raw, b, a, cw, along, dtb):
       def loss_fn(q_x, k_x, v_x, b_x, a_x):
         layer = SimpleNamespace(
             config=cfg,
@@ -327,7 +330,7 @@ def test_gdn_decoupled_conv1d_cp_scan_gating_and_tpu_lowering(monkeypatch):
             key_dim=nk * d,
             v_heads_per_k_head=nv // nk,
             conv1d=SimpleNamespace(kernel=_Val(cw), bias=None),
-            A_log=_Val(alog),
+            A_log=_Val(along),
             dt_bias=_Val(dtb),
         )
         out, _, _ = model_runner.run_gdn_kernel_layer(
@@ -397,9 +400,9 @@ def test_gdn_decoupled_conv1d_cp_scan_cpu_numerics():
 
 def _cpu_numerics_checks():
   """Key-OFF is bit-identical to default; Key-ON in CPU interpret mode matches forward and backward closely."""
-  import functools
-  from jax.sharding import PartitionSpec as P
-  from maxtext.kernels.gdn.gdn_bwd import api as gdn_api
+  import functools  # pylint: disable=import-outside-toplevel
+  from jax.sharding import PartitionSpec as P  # pylint: disable=import-outside-toplevel
+  from maxtext.kernels.gdn.gdn_bwd import api as gdn_api  # pylint: disable=import-outside-toplevel
 
   assert jax.device_count() >= _NUMERICS_DEVICES, jax.devices()
 

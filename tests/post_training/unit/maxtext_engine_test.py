@@ -2698,20 +2698,25 @@ class MaxTextTrainingEngineTest(absltest.TestCase):
 
         seen_pre_restore_kinds = []
 
-        def fake_restore(step, args):
+        def fake_restore(step, args, engine=t, seen=None):
           del step, args
-          seen_pre_restore_kinds.append(self._memory_kinds(nnx.state(t.state.optimizer)))
-          device_sharding = jax.sharding.NamedSharding(t._mesh, jax.sharding.PartitionSpec()).with_memory_kind("device")
+          assert seen is not None
+          seen.append(self._memory_kinds(nnx.state(engine.state.optimizer)))
+          device_sharding = jax.sharding.NamedSharding(engine._mesh, jax.sharding.PartitionSpec()).with_memory_kind(
+              "device"
+          )
           restored_opt = jax.tree.map(
-              lambda x: jax.device_put(x, device_sharding) if hasattr(x, "sharding") else x,
-              nnx.state(t.state.optimizer, nnx.optimizer.OptState),
+              lambda x, shd=device_sharding: jax.device_put(x, shd) if hasattr(x, "sharding") else x,
+              nnx.state(engine.state.optimizer, nnx.optimizer.OptState),
           )
           return {
-              "model_params": nnx.state(t.state.model),
+              "model_params": nnx.state(engine.state.model),
               "optimizer_state": restored_opt,
           }
 
-        mock_orbax_mgr.restore.side_effect = fake_restore
+        mock_orbax_mgr.restore.side_effect = lambda step, args, f=fake_restore, s=seen_pre_restore_kinds: f(
+            step, args, seen=s
+        )
 
         self.assertEqual(t.restore_checkpoint(), {"step": 3})
         self.assertEqual(seen_pre_restore_kinds, [{"pinned_host"}])

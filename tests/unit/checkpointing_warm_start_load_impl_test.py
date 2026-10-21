@@ -14,6 +14,8 @@
 
 """Unit tests for warm-start colocated_python_checkpointing plumbing in common/checkpointing.py."""
 
+# pylint: disable=protected-access
+
 import os
 from types import SimpleNamespace
 import unittest
@@ -51,12 +53,8 @@ class CheckpointingWarmStartLoadImplTest(unittest.TestCase):
       self.assertFalse(checkpointing._use_colocated_python_load(cfg_pers))
 
       # Supports dict configs
-      self.assertTrue(
-          checkpointing._use_colocated_python_load({"pathways_checkpointing_impl": "colocated_python"})
-      )
-      self.assertFalse(
-          checkpointing._use_colocated_python_load({"pathways_checkpointing_impl": "persistence"})
-      )
+      self.assertTrue(checkpointing._use_colocated_python_load({"pathways_checkpointing_impl": "colocated_python"}))
+      self.assertFalse(checkpointing._use_colocated_python_load({"pathways_checkpointing_impl": "persistence"}))
 
       # Fallback to False when config is None or missing field (leaves persistence path untouched)
       self.assertFalse(checkpointing._use_colocated_python_load(None))

@@ -30,6 +30,7 @@ from flax import nnx
 from flax import struct
 import jax
 from jax import ad_checkpoint as adc
+
 try:
   # jax 0.11.0 (the RL trainer image) has the keyword form (compute_type, out_memory_spaces, compiler_options) only as
   # compute_on2; newer jax renamed it compute_on. The SparseCore pins below use the keyword form.
@@ -341,6 +342,8 @@ def forward_row_major(x: jax.Array) -> jax.Array:
   Only the forward value is constrained; the cotangent keeps whatever layout XLA picks.
   """
   return _forward_layout_constraint(x, tuple(range(x.ndim)))
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
 def take_along_last_axis_dense_vjp(x: jax.Array, indices: jax.Array, num_classes: int) -> jax.Array:
   """`jnp.take_along_axis(x, indices, axis=-1)` whose backward is dense rather than a scatter-add.
@@ -1548,7 +1551,9 @@ class RoutedMoE(nnx.Module):
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
-        score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") else self.config.routed_score_func,
+        score_func=""
+        if self.config.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx")
+        else self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
@@ -1869,13 +1874,6 @@ class RoutedMoE(nnx.Module):
       # moe_fallback_topk_capacity > 0: the router's own top-k is computed further down, once token_is_forced is
       # known, for the tokens that use it only (fallback_topk_indices_compacted). 0 (default): for every token, here.
       compact_fallback = getattr(self.config, "moe_fallback_topk_capacity", 0) > 0
-      if not compact_fallback:
-        if self.config.moe_routing_index_math == "count":
-          # The router's own choice for tokens without (valid) forced ids: the same indices as top_k, from k argmax
-          # passes instead of a sort. Under moe_exclude_padding_from_routing every token takes this branch.
-          auto_indices = topk_indices_by_argmax(router_probs, self.num_experts_per_tok)
-        else:
-          _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
       # A token has real forced routing only if its slots are within [0, num_experts).
       # Tokens with UNSET_ROUTED_EXPERT (-1) slots must fall back to auto_indices
@@ -1898,6 +1896,12 @@ class RoutedMoE(nnx.Module):
         auto_indices = fallback_topk_indices_compacted(
             router_probs, uses_router_ids, self.num_experts_per_tok, self.config.moe_fallback_topk_capacity, topk_ids_fn
         )
+      elif self.config.moe_routing_index_math == "count":
+        # The router's own choice for tokens without (valid) forced ids: the same indices as top_k, from k argmax
+        # passes instead of a sort. Under moe_exclude_padding_from_routing every token takes this branch.
+        auto_indices = topk_indices_by_argmax(router_probs, self.num_experts_per_tok)
+      else:
+        _, auto_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
       top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
       if self.config.moe_exclude_padding_from_routing:
         # A padding token (every slot PAD_TOKEN_ROUTED_EXPERT) is never forced (its slots are not
@@ -2365,9 +2369,7 @@ class RoutedMoE(nnx.Module):
       # balanced_load uses the same integer expression as the buffer sizing above (buffer_size =
       # int(balanced_size * rbf)), so overflow at a factor rbf is exactly max_shard_load > balanced_load * rbf.
       audit_balanced_load = (bsz_times_seq_len // num_expert_parallelism) * self.num_experts_per_tok
-      audit_ratio = max_expert_shard_load_ratio(
-          group_size, num_expert_parallelism, jnp.float32(audit_balanced_load)
-      )
+      audit_ratio = max_expert_shard_load_ratio(group_size, num_expert_parallelism, jnp.float32(audit_balanced_load))
       if use_truncated_buffer:
         # This device's own shard: the assignments past the buffer `_truncate_matrix` cuts below (the same
         # buffer_size), i.e. max(0, shard_load - buffer_size). Summed over the mesh, every EP shard of every
@@ -5482,18 +5484,18 @@ class RoutedMoE(nnx.Module):
       # the cotangent to the shard exactly as the gather's transpose (a sharding constraint) and the
       # straight-through estimator did, so the weight-gradient reduce-scatter is unchanged. A None w1_kernel
       # (moe_unsplit_prefused_wi: w0_kernel is the whole [w0 | w1]) stays None.
-      fp8_dequantize_after_gather = []
-      gathered_codes = []
-      for w, absmax, pspec in zip((w0_kernel, w1_kernel, wo_kernel), fp8_fake_quant_at_gather, (w0_pspec, w1_pspec, wo_pspec)):
+      fp8_dequantize_after_gather = [None, None, None]
+      gathered_codes = [None, None, None]
+      for idx, (w, absmax, pspec) in enumerate(
+          zip((w0_kernel, w1_kernel, wo_kernel), fp8_fake_quant_at_gather, (w0_pspec, w1_pspec, wo_pspec))
+      ):
         if w is None:
-          gathered_codes.append(None)
-          fp8_dequantize_after_gather.append(None)
           continue
         codes, scale = quantizations.quantize_weight_codes_per_channel(jax.lax.stop_gradient(w), absmax=absmax)
-        gathered_codes.append(_fsdp_all_gather(codes, pspec))
+        gathered_codes[idx] = _fsdp_all_gather(codes, pspec)
         scale = self._maybe_shard_with_pspec(scale, P(pspec[0], None, pspec[2]))
-        fp8_dequantize_after_gather.append((w, scale, pspec))
-      w0_kernel, w1_kernel, wo_kernel = gathered_codes
+        fp8_dequantize_after_gather[idx] = (w, scale, pspec)
+      w0_kernel, w1_kernel, wo_kernel = gathered_codes[0], gathered_codes[1], gathered_codes[2]
     if w0_bias is not None:
       w0_bias = _fsdp_all_gather(w0_bias, w0_bias_pspec)
     if w1_bias is not None:
@@ -6576,7 +6578,9 @@ class RoutedMoE(nnx.Module):
 
     gate_logits, pre_bias_logits = self.gate(routing_inputs)
 
-    is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and not self.is_hash_routing
+    is_fused_moe_path = (
+        cfg.attention in ("vllm_rpa", "vllm_batched_rpa", "vllm_batched_rpa_long_ctx") and not self.is_hash_routing
+    )
 
     native_gmm = (
         isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
@@ -6891,7 +6895,9 @@ def fp8_fake_quant_hoist_enabled(config) -> str:
     if config.moe_fsdp_use_two_stage_all_gather:
       unmet.append("moe_fsdp_use_two_stage_all_gather=false")
     if config.shard_exp_on_fsdp or config.use_2d_fsdp_sharding or getattr(config, "shard_embed_moe_on_fsdp", False):
-      unmet.append("the default expert-weight sharding (shard_exp_on_fsdp, use_2d_fsdp_sharding, shard_embed_moe_on_fsdp off)")
+      unmet.append(
+          "the default expert-weight sharding (shard_exp_on_fsdp, use_2d_fsdp_sharding, shard_embed_moe_on_fsdp off)"
+      )
     if config.moe_expert_weight_prefetch == "forward_backward":
       unmet.append("moe_expert_weight_prefetch other than forward_backward")
     if config.moe_pin_sparse_core_all_gathers or (

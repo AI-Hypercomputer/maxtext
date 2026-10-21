@@ -177,6 +177,8 @@ class FusedForwardLoweringTest(parameterized.TestCase):
   _TILING = (128, _K, 2 * _NH, 128, _K, _K, 128, _K, 2 * _NH)
 
   def _fwd_and_bwd_names(self, fuse_bwd_dswiglu, fwd_rhs_buffer_count):
+    """Return kernel names emitted during forward + backward lowering."""
+
     def fwd_and_bwd(lhs, rhs, gs):
       def f(l, r):
         return ops.gmm_silu(
@@ -261,8 +263,10 @@ def _layer_case(label, overrides, want_fused_forward, mesh, params, x, token_mas
       and np.isfinite(loss)
       and loss > 0
   )
-  print(f"{label}: [{'ok' if ok else 'FAIL'}] gmm_v2 calls (kind, rhs_buffer_count) -> count: {calls}; traced {traced}",
-        flush=True)
+  print(
+      f"{label}: [{'ok' if ok else 'FAIL'}] gmm_v2 calls (kind, rhs_buffer_count) -> count: {calls}; traced {traced}",
+      flush=True,
+  )
   return ok, result
 
 

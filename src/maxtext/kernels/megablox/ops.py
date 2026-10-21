@@ -1518,6 +1518,7 @@ def _gmm_silu(
     fuse_3d,
     fwd_rhs_buffer_count,
 ):
+  """Runs the fused SiLU grouped matmul with custom VJP."""
   # Not differentiated: the activation alone, nothing else is written.
   del dlhs_transpose, fuse_scale, fuse_3d
   return _gmm_silu_kernel(

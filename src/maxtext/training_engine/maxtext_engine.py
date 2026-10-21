@@ -152,6 +152,7 @@ def _pick_device_resident_leaves(
       chosen.append((jax.tree_util.keystr(paths_and_leaves[index][0]), sizes[index]))
   return jax.tree.unflatten(treedef, taken), chosen
 
+
 # The kernels an update is made of, in the order a step runs them. `compile_kernels()` is
 # keyed by these, and so is the ahead-of-time entry point in `maxtext_engine_compile`.
 KERNEL_NAMES = ("fwd_bwd", "accumulate", "update")
@@ -3094,7 +3095,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           logging.warning(
               "MOE_DROP_AUDIT step=%d micro=%d program=%s replayed=%s dropped_assignments_used=-1 (no audit was "
               "sown: log_moe_drops needs the ring-of-experts ragged path, and a Tunix loss that returns it)",
-              entry.step, entry.micro, entry.program, entry.replayed,
+              entry.step,
+              entry.micro,
+              entry.program,
+              entry.replayed,
           )
         continue
       dropped = np.asarray(used["dropped"]).astype(np.int64).ravel()

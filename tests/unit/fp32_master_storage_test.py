@@ -35,6 +35,7 @@ _KEY_FIELD = mt_types.RematAndOffload.model_fields[_KEY]
 
 
 def _pyconfig(**overrides):
+  """Initializes MaxText pyconfig for fp32_master_storage unit tests."""
   from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
   from tests.utils.test_helpers import get_test_config_path  # pylint: disable=import-outside-toplevel
 

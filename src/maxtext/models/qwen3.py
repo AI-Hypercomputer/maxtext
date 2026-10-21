@@ -179,9 +179,7 @@ def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
     return moe.forward_row_major(x)
   if mode == "natural_fwd_bwd":
     return _pin_row_major_fwd_and_bwd(x)
-  raise ValueError(
-      f"gdn_gated_norm_layout must be 'auto', 'natural', 'natural_fwd_bwd' or 'token_minor', got {mode!r}."
-  )
+  raise ValueError(f"gdn_gated_norm_layout must be 'auto', 'natural', 'natural_fwd_bwd' or 'token_minor', got {mode!r}.")
 
 
 _GDN_IN_PROJ_KERNEL_ORDER_LOGGED = set()
@@ -1000,9 +998,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     kernel = _gdn_in_proj_kernel_order_columns(kernel, self.num_k_heads, self.head_k_dim, v_dim_per_k_head)
     kernel = route_dense_weight_grad(kernel, dense.kernel_axes)
     num_qkv = 2 * self.key_dim + self.value_dim
-    gathered_sharding = (
-        None if self.mesh is None else jax.sharding.NamedSharding(self.mesh, P(*((None,) * kernel.ndim)))
-    )
+    gathered_sharding = None if self.mesh is None else jax.sharding.NamedSharding(self.mesh, P(*((None,) * kernel.ndim)))
     x = jnp.asarray(hidden_states, dense.dtype)
     qkv, z = _gdn_in_proj_kernel_order_dot(x, kernel, num_qkv, lax.Precision(dense.matmul_precision), gathered_sharding)
     if "logged" not in _GDN_IN_PROJ_KERNEL_ORDER_LOGGED:
@@ -1119,6 +1115,9 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     in_proj_kernel_order = (
         cfg.gdn_in_proj_kernel_order and model_mode == MODEL_MODE_TRAIN and use_gdn_kernel and not use_paged_state
     )
+    # ba: (B, S, 2 * H_v)
+    ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
+
     qkv_kernel_order = None
     if in_proj_kernel_order:
       qkv_kernel_order, z = self._in_proj_qkvz_kernel_order(hidden_states, head_sharding)
@@ -1130,13 +1129,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         qkvz = _pin_row_major_layout(qkvz)
       if use_gdn_kernel:
         qkvz = checkpoint_name(qkvz, "qkv_proj")
-    # ba: (B, S, 2 * H_v)
-    ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
 
-    # =========================================================================
-    # QKVZ and BA Reshaping and Splitting (shared by both paths)
-    # =========================================================================
-    if not in_proj_kernel_order:
+      # =========================================================================
+      # QKVZ Reshaping and Splitting
+      # =========================================================================
       # Per-K_head group dim: 2 * D_k + 2 * D_v * V_per_K
       new_shape_qkvz = (
           batch,
@@ -1946,9 +1942,9 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       shared_gate = jax.nn.sigmoid(shared_gate_output.astype(jnp.float32))
       if exclude_padding:
         shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
-      final_output = (
-          routed_output.astype(jnp.float32) + shared_gate * shared_expert_output.astype(jnp.float32)
-      ).astype(self.config.dtype)
+      final_output = (routed_output.astype(jnp.float32) + shared_gate * shared_expert_output.astype(jnp.float32)).astype(
+          self.config.dtype
+      )
     else:
       shared_gate = jax.nn.sigmoid(shared_gate_output)
       if exclude_padding:

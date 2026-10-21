@@ -1582,10 +1582,12 @@ class GdnBwdPallasTest(absltest.TestCase):
     orig_kernel = bwd_api.pallas_gdn_bwd_kernel
 
     def wrapped_kernel(*args, **kwargs):
-      recorded_calls.append((
-          kwargs.get("d_recurrent_state") is not None,
-          bool(kwargs.get("return_dh0", False)),
-      ))
+      recorded_calls.append(
+          (
+              kwargs.get("d_recurrent_state") is not None,
+              bool(kwargs.get("return_dh0", False)),
+          )
+      )
       return orig_kernel(*args, **kwargs)
 
     with mock.patch.object(bwd_api, "pallas_gdn_bwd_kernel", side_effect=wrapped_kernel):

@@ -154,6 +154,7 @@ def _constraints(text):
 
 
 def _counts(loss, params, hidden):
+  """Count LayoutConstraint occurrences in lowered forward and value_and_grad StableHLO."""
   fwd = jax.jit(loss).lower(params, hidden).as_text()
   vg = jax.jit(jax.value_and_grad(loss, argnums=(0, 1))).lower(params, hidden).as_text()
   out = {}
@@ -231,9 +232,15 @@ PLANTED = {
         x[:, :, ::-1, :], (0, 2, 3, 1)
     ),
 }
-PLANTED_MODE = {"N1_pin_dropped": "natural", "N2_wrong_perm_0132": "natural", "N3_heads_reversed": "natural",
-                "N4_no_cotangent_pin": "natural_fwd_bwd", "N5_tm_pin_dropped": "token_minor",
-                "N6_tm_wrong_perm_0213": "token_minor", "N7_tm_heads_reversed": "token_minor"}
+PLANTED_MODE = {
+    "N1_pin_dropped": "natural",
+    "N2_wrong_perm_0132": "natural",
+    "N3_heads_reversed": "natural",
+    "N4_no_cotangent_pin": "natural_fwd_bwd",
+    "N5_tm_pin_dropped": "token_minor",
+    "N6_tm_wrong_perm_0213": "token_minor",
+    "N7_tm_heads_reversed": "token_minor",
+}
 
 
 def run_all(verbose=True):
@@ -333,13 +340,18 @@ class GdnGatedNormLayoutModuleTest(absltest.TestCase):
         loss, params, hidden = _single_layer_fns("natural_fwd_bwd")
         jax.jit(loss).lower(params, hidden)
     msgs = [c.args[0] for c in log.call_args_list if "[gdn_gated_norm_layout]" in c.args[0]]
-    self.assertEqual(msgs, ["[gdn_gated_norm_layout] mode=natural_fwd_bwd: GDN gated-norm output pinned row-major in "
-                            "the forward and on its cotangent"])
+    self.assertEqual(
+        msgs,
+        [
+            "[gdn_gated_norm_layout] mode=natural_fwd_bwd: GDN gated-norm output pinned row-major in "
+            "the forward and on its cotangent"
+        ],
+    )
 
 
 if __name__ == "__main__":
   if "--harness" in sys.argv:
-    _, ok = run_all(verbose=True)
-    print(_PASS_TOKEN if ok else "GDN_GATED_NORM_LAYOUT_CHECKS_FAILED", flush=True)
-    sys.exit(0 if ok else 1)
+    _, passed = run_all(verbose=True)
+    print(_PASS_TOKEN if passed else "GDN_GATED_NORM_LAYOUT_CHECKS_FAILED", flush=True)
+    sys.exit(0 if passed else 1)
   absltest.main()

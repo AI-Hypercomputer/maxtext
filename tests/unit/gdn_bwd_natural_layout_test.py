@@ -45,17 +45,17 @@ def _inputs(s, nk, nv, dtype, seed=0):
   dim = 2 * nk * _D + nv * _D
   nc = s // _C
   k = jax.random.split(jax.random.PRNGKey(seed), 9)
-  return dict(
-      qkv_conv=jax.random.normal(k[0], (1, s, dim), jnp.float32).astype(dtype),
-      b=jax.random.normal(k[1], (1, s, nv), jnp.float32).astype(jnp.bfloat16),
-      a=(jax.random.normal(k[2], (1, s, nv), jnp.float32) - 2.0).astype(jnp.bfloat16),
-      a_log=jax.random.normal(k[3], (nv,), jnp.float32) * 0.3,
-      dt_bias=jax.random.normal(k[4], (nv,), jnp.float32) * 0.3,
-      do=jax.random.normal(k[5], (1, s, nv, _D), jnp.float32).astype(dtype),
-      chunk_states=jax.random.normal(k[6], (1, nc, nv, _D, _D), jnp.float32) * 0.05,
-      t_inv=jnp.tril(jax.random.normal(k[7], (1, nc, nv, _C, _C), jnp.float32) * 0.05, -1) + jnp.eye(_C),
-      d_recurrent_state=jax.random.normal(k[8], (1, nv, _D, _D), jnp.float32) * 0.05,
-  )
+  return {
+      "qkv_conv": jax.random.normal(k[0], (1, s, dim), jnp.float32).astype(dtype),
+      "b": jax.random.normal(k[1], (1, s, nv), jnp.float32).astype(jnp.bfloat16),
+      "a": (jax.random.normal(k[2], (1, s, nv), jnp.float32) - 2.0).astype(jnp.bfloat16),
+      "a_log": jax.random.normal(k[3], (nv,), jnp.float32) * 0.3,
+      "dt_bias": jax.random.normal(k[4], (nv,), jnp.float32) * 0.3,
+      "do": jax.random.normal(k[5], (1, s, nv, _D), jnp.float32).astype(dtype),
+      "chunk_states": jax.random.normal(k[6], (1, nc, nv, _D, _D), jnp.float32) * 0.05,
+      "t_inv": jnp.tril(jax.random.normal(k[7], (1, nc, nv, _C, _C), jnp.float32) * 0.05, -1) + jnp.eye(_C),
+      "d_recurrent_state": jax.random.normal(k[8], (1, nv, _D, _D), jnp.float32) * 0.05,
+  }
 
 
 def _packed_segments(s):
@@ -65,6 +65,7 @@ def _packed_segments(s):
 
 
 def _run(x, nv, *, natural, head_tile, seg, dh0, recompute):
+  """Runs the Pallas GDN backward kernel in interpret mode."""
   fn = functools.partial(
       bwd_kernel.pallas_gdn_bwd_kernel,
       num_v_heads=nv,
@@ -82,9 +83,7 @@ def _run(x, nv, *, natural, head_tile, seg, dh0, recompute):
   )
   args = [x[n] for n in ("qkv_conv", "b", "a", "a_log", "dt_bias", "do", "chunk_states")]
   args.append(None if recompute else x["t_inv"])
-  names = [
-      str(e.params["name"]) for e in jax.make_jaxpr(fn)(*args).jaxpr.eqns if e.primitive.name == "pallas_call"
-  ]
+  names = [str(e.params["name"]) for e in jax.make_jaxpr(fn)(*args).jaxpr.eqns if e.primitive.name == "pallas_call"]
   return jax.jit(fn)(*args), names
 
 
@@ -158,9 +157,7 @@ def _bwd_kernel_names_through_model_runner(config_fields):
   """Backward kernel names in the gradient of model_runner.run_gdn_kernel_layer, seq CP 4 on a TPU7x abstract mesh."""
   nk, nv, seq, cp = 16, 64, 256, 4
   device = jax.sharding.AbstractDevice(device_kind="TPU7x", num_cores=1, platform="tpu")
-  mesh = jax.sharding.AbstractMesh(
-      (cp,), ("context",), axis_types=(jax.sharding.AxisType.Auto,), abstract_device=device
-  )
+  mesh = jax.sharding.AbstractMesh((cp,), ("context",), axis_types=(jax.sharding.AxisType.Auto,), abstract_device=device)
   cfg = types.SimpleNamespace(
       ici_context_parallelism=cp,
       dcn_context_parallelism=1,

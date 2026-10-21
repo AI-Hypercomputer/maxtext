@@ -67,7 +67,15 @@ def decoupled_conv1d_gdn_bwd_kernel(
     conv_halo_seg: Optional[jax.Array] = None,
     init_seg: Optional[jax.Array] = None,
     interpret: bool | pltpu.InterpretParams | None = None,
-) -> Tuple[jax.Array, jax.Array, jax.Array, jax.Array, Optional[jax.Array], jax.Array, jax.Array,]:
+) -> Tuple[
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    jax.Array,
+    Optional[jax.Array],
+    jax.Array,
+    jax.Array,
+]:
   """Decoupled Conv1D + GDN backward combining Pallas GDN bwd and JAX Conv1D bwd."""
   del seq_lens, qkv
   if segment_ids is not None and conv_halo_seg is None and init_seg is None:
@@ -229,7 +237,11 @@ def _run_local_gdn_decoupled_fwd(
     bf16_qkv_dma: bool = False,
     conv_natural_layout: bool = False,
     fwd_head_group_size: int = 0,
-) -> Tuple[Tuple[jax.Array, Tuple[jax.Array, jax.Array]], Optional[jax.Array], Optional[jax.Array],]:
+) -> Tuple[
+    Tuple[jax.Array, Tuple[jax.Array, jax.Array]],
+    Optional[jax.Array],
+    Optional[jax.Array],
+]:
   """Runs local GDN forward pass on TPU returning (t_inv, chunk_states), or pure JAX on CPU.
 
   `conv_dense_token_stack`, `bf16_qkv_dma` and `conv_natural_layout` go to the Pallas forward kernel
@@ -983,18 +995,20 @@ def _gdn_decoupled_conv1d_fwd(
       conv_state,
       recurrent_state,
       segment_ids,
-  ) = _unwrap_primal((
-      qkv,
-      b,
-      a,
-      conv_weight,
-      conv_bias,
-      a_log,
-      dt_bias,
-      conv_state,
-      recurrent_state,
-      segment_ids,
-  ))
+  ) = _unwrap_primal(
+      (
+          qkv,
+          b,
+          a,
+          conv_weight,
+          conv_bias,
+          a_log,
+          dt_bias,
+          conv_state,
+          recurrent_state,
+          segment_ids,
+      )
+  )
   qkv = checkpoint_name(qkv, "gdn_fwd_conv")
   qkv = checkpoint_name(qkv, "gdn_conv_out")
   has_initial_state = (conv_state is not None) or (recurrent_state is not None)
@@ -1126,12 +1140,7 @@ def _gdn_decoupled_conv1d_bwd(
   """Backward rule for custom_vjp registration of gdn_decoupled_conv1d."""
   # Support positional calls that omit the trailing nondiff arguments (10..20 positional args).
   # jax.custom_vjp itself always passes all 19 nondiff arguments plus residuals and cotangents (21 args).
-  if (
-      residuals is None
-      and cotangents is None
-      and isinstance(cp_axis_name, tuple)
-      and len(cp_axis_name) >= 10
-  ):
+  if residuals is None and cotangents is None and isinstance(cp_axis_name, tuple) and len(cp_axis_name) >= 10:
     residuals, cotangents = cp_axis_name, cp_matmul_precision
     cp_axis_name, cp_matmul_precision = None, cp_gdn.DEFAULT_PRECISION
   elif (
@@ -1181,10 +1190,7 @@ def _gdn_decoupled_conv1d_bwd(
     residuals, cotangents = cp_fast_state_passing, bwd_natural_layout
     cp_fast_state_passing, bwd_natural_layout = False, False
   elif (
-      residuals is None
-      and cotangents is None
-      and isinstance(bwd_natural_layout, tuple)
-      and len(bwd_natural_layout) >= 10
+      residuals is None and cotangents is None and isinstance(bwd_natural_layout, tuple) and len(bwd_natural_layout) >= 10
   ):
     residuals, cotangents = bwd_natural_layout, conv_natural_layout
     bwd_natural_layout, conv_natural_layout = False, False

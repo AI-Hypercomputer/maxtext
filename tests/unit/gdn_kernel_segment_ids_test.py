@@ -123,7 +123,9 @@ class GdnKernelSegmentIdsTest(unittest.TestCase):
 
   def test_unpacked_prefill_keeps_segment_ids(self):
     # Prefill carries its states forward, and the segment path ends the conv state at the last valid token.
-    _, kernel_seg = _run(_layer(packing=False, model_mode=MODEL_MODE_PREFILL), _unpacked_segment_ids(), MODEL_MODE_PREFILL)
+    _, kernel_seg = _run(
+        _layer(packing=False, model_mode=MODEL_MODE_PREFILL), _unpacked_segment_ids(), MODEL_MODE_PREFILL
+    )
     self.assertIsNotNone(kernel_seg)
 
 

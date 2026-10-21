@@ -120,9 +120,7 @@ class RMSNorm(nnx.Module):
     if self.shard_mode == ShardMode.EXPLICIT:
       effective_scale = _align_scale_with_normalized_axis(effective_scale, y)
 
-    out_fp32 = jnp.einsum(
-        "...k,k->...k", y, effective_scale, precision=lax.Precision.HIGHEST, out_sharding=out_sharding
-    )
+    out_fp32 = jnp.einsum("...k,k->...k", y, effective_scale, precision=lax.Precision.HIGHEST, out_sharding=out_sharding)
     return jnp.asarray(out_fp32, self.dtype)
 
 

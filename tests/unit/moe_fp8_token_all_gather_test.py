@@ -147,6 +147,7 @@ def _broken_bwd_no_reduce(x, axis_name, all_gather_fn, qtype=jnp.float8_e4m3fn):
 # ---------------------------------------------------------------------------------------------------------------
 # 1. The helper on a ("context", "expert") = (4, 2) mesh.
 def _helper_checks():
+  """Run numerical and positive-control checks on the FP8 token all-gather helper."""
   mesh = jax.make_mesh((4, 2), _EP_AXES)
   n, b, s, e = _NUM_DEVICES, 1, 64, 256
   k1, k2, k3 = jax.random.split(jax.random.PRNGKey(5), 3)
@@ -219,6 +220,7 @@ def _helper_checks():
 # ---------------------------------------------------------------------------------------------------------------
 # 2. The routed-MoE layer on the bench stack, with the stand-ins of moe_wo_gmm_fused_dswiglu_test.py.
 def _bench_stack():
+  """Return stand-in module and benchmark MoE config overrides."""
   from tests.unit import moe_wo_gmm_fused_dswiglu_test as dsw  # pylint: disable=import-outside-toplevel
 
   stack = {
@@ -281,11 +283,11 @@ def _bit_identical(a, b):
 
 def _close_report(label, ref, new):
   """Per-row output error, loss and per-leaf gradient relative errors; returns pass."""
-  (lr, orf, gr), (ln, onw, gn) = ref, new
-  orf, onw = np.asarray(orf, np.float32), np.asarray(onw, np.float32)
-  r = _row_rel(orf, onw)
+  (lr, orf, gr), (ln, own, gn) = ref, new
+  orf, own = np.asarray(orf, np.float32), np.asarray(own, np.float32)
+  r = _row_rel(orf, own)
   med, p99, mx = _stats(r) if r.size else (0.0, 0.0, 0.0)
-  out_same = bool(np.array_equal(orf, onw))
+  out_same = bool(np.array_equal(orf, own))
   ok = (not out_same) and _in(med, _LAYER_MEDIAN_BAND) and mx <= _LAYER_MAX
   loss_rel = abs(float(ln) - float(lr)) / abs(float(lr))
   ok &= loss_rel < 0.01 and np.isfinite(float(ln))
@@ -312,6 +314,7 @@ def _e4m3_gathers(text):
 
 
 def _layer_checks():
+  """Run routed-MoE layer checks for moe_fp8_token_all_gather."""
   # pylint: disable=protected-access
   dsw, stack = _bench_stack()
   results = {}

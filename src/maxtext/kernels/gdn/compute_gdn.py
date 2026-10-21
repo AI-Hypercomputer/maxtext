@@ -479,6 +479,7 @@ def _chunked_gdn_per_seq_heads(
         precision=dot_prec,
         preferred_element_type=jnp.float32,
     )
+    out_updated = None
   else:
     # [num_v_heads, chunk, kq_head_dim]
     q_large_gating = q_repeat * gating_forward
