@@ -1338,7 +1338,52 @@ def DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def QWEN38_HF_WEIGHTS_TO_SHAPE(config):
+  """Shapes for standalone Qwen3.8 text export, preserving PLE source shards."""
+  from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
+  from maxtext.models.qwen38 import hc_shapes, layer_shapes  # pylint: disable=import-outside-toplevel
+
+  text = config.get("text_config", config)
+  cfg = SimpleNamespace(
+      emb_dim=text["hidden_size"],
+      num_decoder_layers=text["num_hidden_layers"],
+      num_query_heads=text["num_attention_heads"],
+      num_kv_heads=text["num_key_value_heads"],
+      head_dim=text["head_dim"],
+      normalization_layer_epsilon=text.get("rms_norm_eps", 1e-6),
+      num_experts=text["num_experts"],
+      num_experts_per_tok=text["num_experts_per_tok"],
+      norm_topk_prob=text.get("norm_topk_prob", True),
+      moe_mlp_dim=text["moe_intermediate_size"],
+      gdn_num_key_heads=text["linear_num_key_heads"],
+      gdn_num_value_heads=text["linear_num_value_heads"],
+      gdn_key_head_dim=text["linear_key_head_dim"],
+      gdn_value_head_dim=text["linear_value_head_dim"],
+      gdn_conv_kernel_dim=text.get("linear_conv_kernel_dim", 4),
+      qwen38_hc_count=text["hc_count"],
+      qwen38_hc_lowrank=text["hc_lowrank"],
+      qwen38_ple_compact_rows=text.get("qwen38_ple_compact_rows", 0),
+      rope_max_timescale=10000000,
+      partial_rotary_factor=0.25,
+  )
+  prefix = "model"
+  shapes = {
+      f"{prefix}.embed_tokens.weight": [text["vocab_size"], cfg.emb_dim],
+      "lm_head.weight": [text["vocab_size"], cfg.emb_dim],
+  }
+  shapes.update(
+      {
+          f"{prefix}.hyper_connection_mixer.{k}": list(v)
+          for k, v in hc_shapes(cfg.emb_dim, cfg.qwen38_hc_count, cfg.qwen38_hc_lowrank, False).items()
+      }
+  )
+  for i in range(cfg.num_decoder_layers):
+    shapes.update({f"{prefix}.layers.{i}.{k}": list(v) for k, v in layer_shapes(cfg, i).items()})
+  return shapes
+
+
 HF_SHAPE = {
+    "qwen3.8-flash-next": QWEN38_HF_WEIGHTS_TO_SHAPE,
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,

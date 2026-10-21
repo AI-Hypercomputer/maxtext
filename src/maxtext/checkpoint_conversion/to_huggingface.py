@@ -185,7 +185,13 @@ def _get_model_mappings(
   if model_name not in PARAM_MAPPING or model_name not in HF_SHAPE or model_name not in HOOK_FNS:
     raise ValueError(f"Mappings not found for model: {model_name}. Available PARAM_MAPPING keys: {PARAM_MAPPING.keys()}")
 
+  if model_name == "qwen3.8-flash-next":
+    hf_config_dict = dict(hf_config_dict)
+    hf_config_dict["qwen38_ple_compact_rows"] = maxtext_config.qwen38_ple_compact_rows
   param_mapping = PARAM_MAPPING[model_name](hf_config_dict, maxtext_config, scan_layers)
+  if model_name == "qwen3.8-flash-next":
+    param_mapping = {key: value.replace("model.language_model.", "model.") for key, value in param_mapping.items()}
+
   hook_fn_mapping = HOOK_FNS[model_name](hf_config_dict, maxtext_config, scan_layers, saving_to_hf=True)
 
   # Promote composite hook keys into param_mapping.

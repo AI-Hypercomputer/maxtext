@@ -67,6 +67,7 @@ from maxtext.models import (
     qwen2,
     qwen3,
     qwen3_5,
+    qwen38,
     qwen3_custom,
     simple_layer,
     weaver,
@@ -992,6 +993,7 @@ class NNXDecoder(nnx.Module):
       elif config.decoder_block in {
           DecoderBlockType.QWEN3_NEXT,
           DecoderBlockType.QWEN3_5,
+          DecoderBlockType.QWEN3_8,
           DecoderBlockType.DEEPSEEK4,
       }:
         layer_kwargs = {"layer_idx": lyr}
@@ -1372,6 +1374,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
+        DecoderBlockType.QWEN3_8: [qwen38.Qwen38DecoderLayer],
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
         DecoderBlockType.LLAMA4: get_scannable(llama4.Llama4DecoderLayer, llama4.Llama4ScannableBlock),
         DecoderBlockType.OLMO3: get_scannable(olmo3.Olmo3DecoderLayer, olmo3.Olmo3ScannableBlock),
@@ -1517,6 +1520,8 @@ class NNXDecoder(nnx.Module):
 
   def get_norm_layer(self, num_features: int, rngs: nnx.Rngs):
     """get normalization layer (return type inherits from nn.Module)"""
+    if self.config.decoder_block == DecoderBlockType.QWEN3_8:
+      return functools.partial(qwen38.Qwen38Mixer, config=self.config, rngs=rngs)
     if self.config.decoder_block in {
         DecoderBlockType.DEFAULT,
         DecoderBlockType.LLAMA2,
@@ -1980,6 +1985,9 @@ class NNXDecoder(nnx.Module):
         # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
         y = mhc_expand(y)
 
+    if cfg.decoder_block == DecoderBlockType.QWEN3_8:
+      y = jnp.tile(y, (1, 1, cfg.qwen38_hc_count))
+
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
 
     layer_kwargs = {
@@ -2001,7 +2009,7 @@ class NNXDecoder(nnx.Module):
     if attention_metadata is not None:
       layer_kwargs["attention_metadata"] = attention_metadata
 
-    if cfg.engram_layers and decoder_input_tokens is not None:
+    if (cfg.engram_layers or cfg.decoder_block == DecoderBlockType.QWEN3_8) and decoder_input_tokens is not None:
       layer_kwargs["decoder_input_tokens"] = decoder_input_tokens
 
     if forced_routed_experts is not None:

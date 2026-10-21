@@ -132,11 +132,11 @@ def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
   temperature: temperature parameter for scaling probability
   """
   if algorithm == "greedy":
-    return jnp.argmax(logits, axis=-1)
+    return jnp.argmax(logits, axis=-1).astype(jnp.int32)
   elif algorithm == "weighted":
-    return jax.random.categorical(rng, logits / temperature)
+    return jax.random.categorical(rng, logits / temperature).astype(jnp.int32)
   elif algorithm == "nucleus":
-    return sample_nucleus_topp_logits(logits, nucleus_topp, temperature, rng)
+    return sample_nucleus_topp_logits(logits, nucleus_topp, temperature, rng).astype(jnp.int32)
   elif algorithm == "topk":
     return sample_topk_logits(logits, topk, temperature, rng)
   elif algorithm == "composite":
