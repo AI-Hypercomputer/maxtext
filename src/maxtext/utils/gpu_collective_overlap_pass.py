@@ -710,9 +710,18 @@ def _is_te_ep_call_start(inst, comp_by_name: dict) -> bool:
   return _resolve_profile_key(inst, comp_by_name).startswith(("te_ep_combine", "te_ep_dispatch"))
 
 
-_TE_GEMM_TARGET_RE = re.compile(r'custom_call_target="(te_grouped_gemm[^"]*|te_gemm[^"]*)"')
+# cuDNN Frontend lowers both the grouped GEMM + SwiGLU + quant forward kernel
+# and the grouped GEMM + dSwiGLU + quant backward kernel through this generic
+# CuTeDSL launcher. The concrete kernel name is embedded in backend_config and
+# is not guaranteed to be present in HloInstruction.to_string().
+_CUDNN_FE_FUSED_GROUPED_GEMM_RE = r'custom_call_target="CuteDSLRT_NvJaxCutlassCall_v2"'
+_TE_GEMM_TARGET_RE = re.compile(
+    r'custom_call_target="(?:te_grouped_gemm[^"]*|te_gemm[^"]*)"' + "|" + _CUDNN_FE_FUSED_GROUPED_GEMM_RE
+)
 _HEAVY_ANCHOR_TARGET_RE = re.compile(
-    r'custom_call_target="(te_grouped_gemm[^"]*|te_gemm[^"]*|[^"]*cudnn[^"]*|[^"]*cublas[^"]*)"'
+    r'custom_call_target="(?:te_grouped_gemm[^"]*|te_gemm[^"]*|[^"]*cudnn[^"]*|[^"]*cublas[^"]*)"'
+    + "|"
+    + _CUDNN_FE_FUSED_GROUPED_GEMM_RE
 )
 
 
