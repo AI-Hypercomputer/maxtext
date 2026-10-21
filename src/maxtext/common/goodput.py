@@ -29,7 +29,7 @@ goodput, monitoring, _GOODPUT_STUB = goodput_modules()
 
 
 def get_goodput_job_name(config) -> str:
-  return config.goodput_job_name or config.run_name
+  return getattr(config, "goodput_job_name", "") or config.run_name
 
 
 class GoodputEvent(Enum):

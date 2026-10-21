@@ -120,7 +120,7 @@ debug: false
 # uploaded to tensorboard.
 enable_tunix_perf_metrics: false
 enable_goodput_recording: false
-goodput_job_name: ""
+goodput_job_name: "" # Optional/test only; not needed for production runs (defaults to run_name)
 monitor_goodput: false
 enable_pathways_goodput: false
 
