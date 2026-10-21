@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for optional TransformerEngine MoE checkpoint arguments."""
+"""Tests for optional TransformerEngine MoE arguments."""
 
 # These tests directly exercise the private checkpoint compatibility helper.
 # pylint: disable=protected-access
@@ -75,3 +75,11 @@ def test_te_moe_checkpoint_kwargs_for_legacy_signature():
     pass
 
   assert moe._get_te_moe_checkpoint_kwargs(te_moe) == {}
+
+
+def test_te_moe_cudnn_gmm_fusion_default_is_omitted():
+  assert not moe._get_te_moe_cudnn_gmm_fusion_kwargs(False)
+
+
+def test_te_moe_cudnn_gmm_fusion_can_be_disabled():
+  assert moe._get_te_moe_cudnn_gmm_fusion_kwargs(True) == {"use_cudnn_fusion": False}
