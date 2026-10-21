@@ -695,7 +695,7 @@ class GCSBlockCachedArrayRecordDataSource(grain.ArrayRecordDataSource):
       reader = array_record_module.ArrayRecordReader(
           filename_like,
           options=opts,
-          file_reader_buffer_size=ar_ds._DEFAULT_FILE_READER_BUFFER_SIZE,  # pylint: disable=protected-access
+          file_reader_buffer_size=getattr(ar_ds, "_DEFAULT_FILE_READER_BUFFER_SIZE", 1 << 24),  # pylint: disable=protected-access
       )
       ar_ds._check_group_size(filename_like, reader)  # pylint: disable=protected-access
       return reader
@@ -755,7 +755,7 @@ class GCSBlockCachedArrayRecordDataSource(grain.ArrayRecordDataSource):
     reader = array_record_module.ArrayRecordReader(
         filename,
         options=opts,
-        file_reader_buffer_size=ar_ds._DEFAULT_FILE_READER_BUFFER_SIZE,  # pylint: disable=protected-access
+        file_reader_buffer_size=getattr(ar_ds, "_DEFAULT_FILE_READER_BUFFER_SIZE", 1 << 24),  # pylint: disable=protected-access
     )
     ar_ds._check_group_size(filename, reader)  # pylint: disable=protected-access
     return reader
