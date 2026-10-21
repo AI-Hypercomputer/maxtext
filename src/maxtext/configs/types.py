@@ -295,6 +295,8 @@ ModelName = Literal[
     "weaver-max",
     "weaver-mini-diffuser",
     "qwen3-next-80b-a3b",
+    "qwen3.8-flash-next",
+    "qwen3.8-flash-next-mini",
     "qwen3-omni-30b-a3b",
     "qwen3-custom-30b-a3b",
     "qwen3.5-9b",
@@ -1768,6 +1770,38 @@ class Qwen3Next(BaseModel):
       ),
   )
   partial_rotary_factor: float = Field(1.0, description="The ratio of dimension to apply ROPE on")
+
+
+class Qwen38FlashNext(BaseModel):
+  """Configuration specific to Qwen3.8-Flash-Next models."""
+
+  hc_count: int = Field(4, description="Number of streams in hyper-connections.")
+  hc_lowrank: int = Field(320, description="Bottleneck dimension in hyper-connections.")
+  index_n_heads: int = Field(4, description="Number of query heads in QSA Indexer.")
+  index_kv_heads: int = Field(1, description="Number of key/value heads in QSA Indexer.")
+  index_head_dim: int = Field(128, description="Head dimension for QSA Indexer.")
+  index_select_block_size: int = Field(4, description="Block compression size for QSA Indexer.")
+  index_select_budget: int = Field(2048, description="Token budget for QSA Indexer.")
+  gdn_output_gate_activation: str = Field(
+      "sigmoid", description="Output gate activation function for GDN linear attention."
+  )
+  use_ple_layer: bool = Field(False, description="Whether to use Per-Layer Embedding (PLE).")
+  ple_layer_id: int = Field(
+      1, description="0-indexed layer where PLE is applied (corresponds to HF 1-indexed ple_layer_ids=[2])."
+  )
+  ple_embed_dim: int = Field(
+      2560, description="Embedding dimension of the PLE layer (HF ple_embed_dim; HF defaults it to hidden_size)."
+  )
+  ple_conv_kernel_size: int = Field(4, description="Kernel size for PLE 1D convolution.")
+  ngram_size: int = Field(3, description="N-gram window size for PLE.")
+  heads_per_ngram: int = Field(8, description="Number of hash heads per n-gram in PLE.")
+  ngram_vocab_size_base: int = Field(20_000_000, description="Base n-gram vocabulary size for PLE.")
+  make_ngram_vocab_size_divisible_by: int = Field(
+      128, description="Alignment divisor for per-head n-gram vocab sizes in PLE."
+  )
+  split_ngram_parts: int = Field(128, description="Number of embedding shards for PLE.")
+  ple_seed: int = Field(1234, description="Hash seed for PLE n-gram hashing.")
+  ple_eos_token_id: int = Field(248044, description="EOS token ID used for PLE n-gram boundary resets (HF eos_token_id).")
 
 
 # ----------------------------------------------------------------------------
@@ -4178,6 +4212,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    Qwen38FlashNext,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -6521,6 +6556,7 @@ class RLConfig(
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
+    Qwen38FlashNext,
     MultimodalGeneral,
     Muon,
     FineTuning,
