@@ -211,6 +211,39 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     np.testing.assert_allclose(raw_grads["linear"]["kernel"].get_value(), expected_grads[0], rtol=1e-6)
     np.testing.assert_allclose(raw_grads["linear"]["bias"].get_value(), expected_grads[1], rtol=1e-6)
 
+  def test_z_loss_is_the_token_weighted_mean_over_microbatches(self):
+    """The logged z_loss under GA is the whole batch's per-token z-loss, not the sum of the micro-batch means."""
+    # Micro-batch 0 carries 3 tokens with per-token z-loss 1.0; micro-batch 1 carries 1 token with 5.0.
+    z_values = jnp.array([1.0, 5.0])
+    weights = jnp.array([3.0, 1.0])
+
+    def loss_with_z(model, config, data, dropout_rng, params, is_train=True):
+      del config, dropout_rng, params, is_train
+      mb = data["mb"][0]
+      per_sample = jnp.mean((model(data["inputs"]) - data["targets"]) ** 2, axis=-1)
+      aux = {
+          "xent_sum": jnp.sum(per_sample),
+          "total_weights": weights[mb],
+          "z_loss": z_values[mb],
+          "moe_lb_loss": jnp.array(0.0),
+          "indexer_loss": jnp.array(0.0),
+          "mtp_loss": jnp.array(0.0),
+      }
+      return jnp.sum(per_sample), aux
+
+    # Micro-batch i takes rows i, i + GA, ... (strided), so rows 0 and 2 are micro-batch 0.
+    data = dict(self.data, mb=jnp.array([0, 1, 0, 1]))
+    _, aux, _ = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        loss_with_z,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=data,
+        dropout_rng=None,
+    )
+    np.testing.assert_allclose(float(aux["z_loss"]), (1.0 * 3 + 5.0 * 1) / 4, rtol=1e-6)
+
   def test_params_loop_barrier_leaves_loss_and_grads_unchanged(self):
     """The barrier only changes what XLA may hoist out of the scan, not the result."""
     results = []

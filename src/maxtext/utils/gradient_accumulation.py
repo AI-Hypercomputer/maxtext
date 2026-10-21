@@ -218,6 +218,13 @@ def gradient_accumulation_loss_and_grad(
   for key in ("moe_lb_loss", "indexer_loss", "mtp_loss", "router_metrics", "masked_instance_fraction"):
     if key in aux and aux[key] is not None:
       aux[key] = aux[key] / config.gradient_accumulation_steps
+  # loss_fn's z_loss is each micro-batch's per-token mean; the step's value is the per-token mean over the whole batch
+  # (as GA=1 logs it), i.e. the micro-batch means weighted by their token counts, not their sum.
+  if "z_loss" in scanned_aux and "total_weights" in scanned_aux:
+    weights = jnp.asarray(scanned_aux["total_weights"], jnp.float32)
+    aux["z_loss"] = jnp.sum(jnp.asarray(scanned_aux["z_loss"], jnp.float32) * weights) / jnp.maximum(
+        jnp.sum(weights), 1.0
+    )
   if getattr(config, "routed_bias", False) and getattr(config, "routed_bias_update_rate", 0.0) > 0.0:
     # RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1;
     # convert the counts summed across microbatches into a single full-batch sign() update.
