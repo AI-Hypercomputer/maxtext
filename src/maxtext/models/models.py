@@ -25,7 +25,7 @@ from jax.sharding import Mesh
 from flax.core import FrozenDict
 from flax import nnx
 
-from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
+from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, DecoderBlockType, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
@@ -33,6 +33,7 @@ from maxtext.layers.embeddings import Embed
 from maxtext.layers.encoders import AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.models import olmoe3
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import max_logging
 
@@ -128,13 +129,18 @@ class Transformer(nnx.Module):
 
     cfg = self.config
     mesh = self.mesh
+    embedding_init = (
+        olmoe3.olmoe3_init
+        if cfg.decoder_block == DecoderBlockType.OLMOE3
+        else jax.nn.initializers.normal(stddev=1.0)
+    )
     self.token_embedder = Embed(
         mesh=self.mesh,
         num_embeddings=cfg.vocab_size,
         num_features=cfg.emb_dim,
         dtype=cfg.dtype,
         attend_dtype=jnp.float32 if cfg.logits_dot_in_fp32 else cfg.dtype,  # for logit training stability
-        embedding_init=jax.nn.initializers.normal(stddev=1.0),
+        embedding_init=embedding_init,
         config=cfg,
         rngs=rngs,
     )

@@ -317,6 +317,22 @@ ModelName = Literal[
     "olmo3-7b",
     "olmo3-7b-pt",
     "olmo3-32b",
+    "olmoe3-30m",
+    "olmoe3-3p5b",
+    "olmoe3-3p5b-e256k8",
+    "olmoe3-3p5b-e256k8-sh2x",
+    "olmoe3-3p5b-e256k8-sh4x",
+    # OLMo 3.5 partner family (allenai/OLMo-core@codex/partner-model-family-20260914).
+    "olmo35-tiny",
+    "olmo35-small",
+    "olmo35-medium",
+    "olmo35-large",
+    # Scaling ladder for the architecture ablation study; see olmoe3-arch-ablations.md.
+    "olmoe3-ladder-d512",
+    "olmoe3-ladder-d768",
+    "olmoe3-ladder-d1024",
+    "olmoe3-ladder-d1536",
+    "olmoe3-ladder-d2048",
     "envy-test",
     "envy-switch-base",
     "envy-switch-large",
@@ -507,6 +523,14 @@ class DataTypes(BaseModel):
   dtype: DType = Field(DType.BFLOAT16, description="The data type for activations.")
   grad_dtype: DType = Field(DType.FLOAT32, description="The data type for gradients.")
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
+  cast_params_to_compute_dtype: bool = Field(
+      False,
+      description=(
+          "Cast large fp32 weights to `dtype` once per step, before the forward pass. The fp32 master"
+          " and optimizer are unchanged, but FSDP gathers weights and reduce-scatters their gradients"
+          " in the compute dtype. Router kernels and small tensors stay fp32."
+      ),
+  )
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
       description="Precision level for matrix multiplications.",
@@ -673,6 +697,17 @@ class ModelArchitecture(BaseModel):
   base_mlp_dim: int = Field(7168, description="Base dimension of the MLP layer.")
   dense_init_scale: float = Field(1.0, description="Initialization scale for dense layers")
   base_num_decoder_layers: int = Field(16, description="Base number of decoder layers.")
+  scale_embeddings_by_sqrt_emb_dim: bool = Field(
+      False,
+      description="Multiply the token embeddings by sqrt(emb_dim) before the decoder stack.",
+  )
+  use_embedding_norm: bool = Field(
+      False,
+      description=(
+          "Apply an RMSNorm to the token embeddings before the decoder stack. "
+          "Runs after scale_embeddings_by_sqrt_emb_dim when both are set."
+      ),
+  )
   head_dim: int = Field(
       128,
       description="Model query and key head dimension.",
@@ -705,6 +740,23 @@ class ModelArchitecture(BaseModel):
   v_norm_with_scale: bool = Field(
       True,
       description="Whether to apply scale on value normalization (default True).",
+  )
+  qk_norm_per_head: bool = Field(
+      False,
+      description=(
+          "Give the query/key RMSNorm an independent learned gain per head "
+          "([heads, head_dim]) instead of one gain shared across heads "
+          "([head_dim]). OLMoE3's reference uses per-head gains."
+      ),
+  )
+  use_scalable_softmax: bool = Field(
+      False,
+      description=(
+          "Scalable softmax (SSMax): scale the query by log(visible causal span) "
+          "times a learned per-query-head gain, before the usual 1/sqrt(head_dim). "
+          "The span is taken from the decoder positions, so packed documents that "
+          "restart positions also restart the span."
+      ),
   )
 
 
@@ -778,6 +830,32 @@ class LogitsAndLoss(BaseModel):
   vocab_tiling_ag_once: bool = Field(
       False,
       description="All gather the output head weight once before the tiled loss so the backward reuses it.",
+  )
+  fused_lm_head_ce: bool = Field(
+      False,
+      description=(
+          "Compute the untied LM head + cross entropy (incl. z-loss) with the fused Pallas TPU kernel"
+          " (kernels/fused_ce.py) under shard_map over the batch axes; the [tokens, vocab] logits are"
+          " never materialized. Train mode only; takes precedence over num_vocab_tiling."
+      ),
+  )
+  fused_lm_head_ce_block_t: int = Field(512, description="Fused LM-head CE: token tile of the forward kernel.")
+  fused_lm_head_ce_block_v: int = Field(1024, description="Fused LM-head CE: vocab tile of the forward kernel.")
+  fused_lm_head_ce_bwd_fused: bool = Field(
+      True,
+      description=(
+          "Fused LM-head CE: single backward kernel (one logits recompute, dw read-modify-written in HBM)"
+          " instead of separate dx and dw kernels (two recomputes)."
+      ),
+  )
+  fused_lm_head_ce_block_t_bwd: int = Field(512, description="Fused LM-head CE: token tile of the fused backward.")
+  fused_lm_head_ce_block_v_bwd: int = Field(128, description="Fused LM-head CE: vocab tile of the fused backward.")
+  fused_lm_head_ce_block_t_dx: int = Field(256, description="Fused LM-head CE: token tile of the dx kernel.")
+  fused_lm_head_ce_block_v_dx: int = Field(512, description="Fused LM-head CE: vocab tile of the dx kernel.")
+  fused_lm_head_ce_block_t_dw: int = Field(256, description="Fused LM-head CE: token tile of the dw kernel.")
+  fused_lm_head_ce_block_v_dw: int = Field(512, description="Fused LM-head CE: vocab tile of the dw kernel.")
+  fused_lm_head_ce_vmem_limit_mib: int = Field(
+      0, description="Fused LM-head CE: Mosaic scoped VMEM limit in MiB (0 = compiler default)."
   )
 
 
@@ -1118,6 +1196,15 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
+  moe_aux_loss_reduction: Literal["mean", "sum"] = Field(
+      "mean",
+      description=(
+          "How the per-layer MoE auxiliary losses (moe_lb_loss intermediates: load balance plus any router z term) "
+          "combine into the training loss. 'mean' is MaxText's: load_balance_loss_weight weights the average over "
+          "MoE layers. 'sum' weights each layer by it, as OLMo-core does (attach_auxiliary_loss per router), so the "
+          "balancing gradient is num_moe_layers times stronger at the same weight."
+      ),
+  )
   moe_dropless_fallback: Literal["step", "layer"] | None = Field(
       None,
       description=(
@@ -1246,13 +1333,23 @@ class MoEGeneral(BaseModel):
       False,
       description=(
           "Diagnostic (profiling, not production). When True, chain the chunked"
-          " ring-of-experts MoE loop so each chunk's input is fenced with"
+          " MoE loop so each chunk's input is fenced with"
           " jax.lax.optimization_barrier on the previous chunk's output,"
           " forcing XLA to run the chunks sequentially (no interleave/fusion)."
           " Math is unchanged (barrier is identity), so loss stays bit-exact."
-          " Used to test whether the token-AG/RS chunks overlap at all today."
-          " Requires num_moe_token_chunks>1 and use_ring_of_experts=True to have any"
-          " effect."
+          " Supports both use_ring_of_experts=True (num_moe_token_chunks>1) and"
+          " moe_a2a_token_chunks>1."
+      ),
+  )
+  moe_a2a_pipeline_chunks: bool = Field(
+      False,
+      description=(
+          "When True with moe_a2a_token_chunks>1, pipeline the 3 stages of each"
+          " token chunk (dispatch ragged_all_to_all, expert FFN GMMs, combine"
+          " ragged_all_to_all) across chunks using jax.lax.optimization_barrier"
+          " so chunk c's MXU expert FFN overlaps chunk (c+1)'s dispatch A2A and"
+          " chunk (c-1)'s combine A2A while bounding live chunk buffers to at"
+          " most 2 chunks."
       ),
   )
   moe_log_max_load_ratio: bool = Field(
@@ -1275,7 +1372,36 @@ class MoEGeneral(BaseModel):
       None,
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
+  base_shared_expert_mlp_dim: int = Field(
+      -1,
+      description=(
+          "Intermediate dimension of the shared (always-on) expert on MoE layers. "
+          "If < 0, defaults to base_moe_mlp_dim, i.e. the shared expert is as wide as a routed expert."
+      ),
+  )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  emo_enabled: bool = Field(
+      False,
+      description="EMo document-pool routing (OLMoE3): restrict each packed document's top-k to a per-document expert pool.",
+  )
+  emo_min_document_expert_pool: int = Field(
+      16, description="Smallest EMo training pool size (must be >= num_experts_per_tok)."
+  )
+  emo_max_document_expert_pool: int = Field(512, description="Largest EMo training pool size (must be <= num_experts).")
+  emo_eval_document_expert_pool: int = Field(512, description="Fixed EMo pool size outside training.")
+  emo_threshold_by_bisection: bool = Field(
+      False,
+      description="With moe_lean_routing, find the EMo pool threshold by bisecting on the score bits"
+      " (32 counting passes) instead of sorting every token's expert scores.",
+  )
+  olmoe3_segments_for_emo_only: bool = Field(
+      False,
+      description=(
+          "OLMoE3: the attention and KDA mixers see every instance as one segment (no document masking, no state"
+          " resets), as OLMo-core trains without document lengths; only the EMo router's document pools use the"
+          " segment ids."
+      ),
+  )
   moe_use_megatron_seq_aux_loss: bool = Field(
       False,
       description=(
@@ -1660,6 +1786,31 @@ class MoEKernels(BaseModel):
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
 
+  gmm_v2_dlhs_transpose_in_kernel: bool = Field(
+      False,
+      description=(
+          "In the GMM v2 bwd, read the weight as stored and transpose it inside the dlhs kernel,"
+          " instead of writing a transposed copy of the gathered expert weights to HBM every layer."
+      ),
+  )
+
+  tokamax_gmm_tile_m: NonNegativeInt = Field(
+      0,
+      description=(
+          "Override the m-tile (the ragged dimension) of the Tokamax v1 ragged-dot kernel. "
+          "0 leaves Tokamax's own heuristic alone. The `wi_tile_*`/`wo_tile_*` knobs do NOT "
+          "reach this kernel: the v1 path calls `tokamax.ragged_dot`, whose public API takes "
+          "no tiling argument, so on that path the `tiling` tuple is silently ignored. The "
+          "heuristic sets tile_m = min(total_rows, 1024) and only ever shrinks it for VMEM, "
+          "never to match a group boundary, so at fewer than 1024 rows per expert every "
+          "m-tile straddles several expert groups and the kernel pays for each. Set this to "
+          "the expected rows per expert, seq_len * per_device_batch_size * top_k / "
+          "num_experts, to align them. Only tile_m is overridden; tile_k, tile_n and the "
+          "buffer count stay with Tokamax's VMEM-aware choice, and lowering tile_m only "
+          "lowers VMEM, so the override cannot push the kernel over budget."
+      ),
+  )
+
 
 class DeepSeekMoE(BaseModel):
   """Configuration specific to DeepSeek-style MoE layers."""
@@ -1753,6 +1904,239 @@ class Qwen3Next(BaseModel):
   gdn_value_head_dim: int = Field(128, description="Head dimension for the value in the Gated Delta Net.")
   gdn_num_key_heads: int = Field(16, description="Number of key/query heads in the Gated Delta Net.")
   gdn_num_value_heads: int = Field(32, description="Number of value heads in the Gated Delta Net.")
+  gdn_state_dtype: str = Field(
+      "float32",
+      description="dtype for the chunked delta-rule state and matmul operands. The decay algebra stays float32 either way.",
+  )
+  use_tokamax_kda: bool = Field(
+      False,
+      description=(
+          "Use the fused tokamax Kimi Delta Attention kernel (experimental; requires a tokamax build with the KDA op)."
+      ),
+  )
+  kda_allow_neg_eigval: bool = Field(
+      True,
+      description=(
+          "beta in [0,2) via allow_neg_eigval (reference). False clamps beta to [0,1], the only range the tokamax"
+          " Mosaic KDA kernel is validated for (non-reference; kernel fallback/diagnostic only)."
+      ),
+  )
+  kda_fused_input_proj: bool = Field(
+      False,
+      description=(
+          "Compute the KDA layer's six projections of x (q, k, v, decay and gate low-rank inputs, beta) as one"
+          " matmul over their concatenated kernels. Same parameters and math; fewer, wider matmuls."
+      ),
+  )
+  kda_chunked_impl: Literal["pairwise", "subblock"] = Field(
+      "pairwise",
+      description=(
+          "Pure-JAX chunked KDA (use_tokamax_kda=False, e.g. TPU v4). 'subblock' factors the intra-chunk decay"
+          " through sub-block pivots onto the MXU, inverts by block doubling, and hoists the WY products out"
+          " of the scan; 'pairwise' builds the full per-pair decay tensor."
+      ),
+  )
+  kda_sub_block: int = Field(
+      16,
+      description="Sub-block KDA: rows per diagonal sub-block of the intra-chunk matrices (divides gdn_chunk_size).",
+  )
+  kda_fused_proj_reduce_scatter: bool = Field(
+      False,
+      description="With kda_fused_input_proj, constrain the concatenated kernel to the weights' embed sharding so"
+      " its gradient is reduce-scattered instead of all-reduced in full.",
+  )
+  kda_pallas_intra: bool = Field(
+      False,
+      description="Sub-block KDA: Pallas forward for the intra-chunk score and key-key matrices"
+      " (kernels/kda_intra.py; per-pair factors and the decayed right operand stay in VMEM), with the"
+      " hand-derived backward in XLA. 1.75x faster than XLA's forward on v4, and closer to f32.",
+  )
+  megablox_drhs_transpose_larger: bool = Field(
+      False,
+      description="megablox: compute the weight gradient as drhs^T = dout^T @ lhs when the activation is wider"
+      " than the gradient (the expert down projection), so tgmm transposes the narrower tile in the kernel."
+      " Same sums; 1.61 -> 1.13 ms for the 1792 x 768 down projection at the v4 EP-64 shape. Set"
+      " wo_tile_drhs_embed_dim to the full embed width with it (the tiling is swapped for the transposed call).",
+  )
+  kda_pallas_chunk: bool = Field(
+      False,
+      description="Sub-block KDA: one Pallas kernel (kernels/kda_scan.kda_chunk_scan) for the WY products"
+      " u = X vb, w = X kb, the chunk-state recurrence and the readout, fwd and bwd (bf16 state only);"
+      " supersedes kda_pallas_scan.",
+  )
+  kda_inverse_precision: Literal["highest", "high"] = Field(
+      "highest",
+      description="Sub-block KDA: matmul precision of the triangular inverse (I + M)^-1 and its VJP. 'high'"
+      " (3-pass bf16, ~6e-6 relative error) is far below the bf16 rounding the inverse gets right after.",
+  )
+  kda_pallas_fused: bool = Field(
+      False,
+      description="Sub-block KDA: the whole chunk pipeline (intra matrices, masks, triangular inverse, WY"
+      " operands, recurrence, readout) in one Pallas kernel per direction (kernels/kda_fused.py); bf16 or f32"
+      " state (gdn_state_dtype). Supersedes kda_pallas_intra, kda_pallas_chunk and kda_pallas_scan.",
+  )
+  kda_fused_token_major: bool = Field(
+      False,
+      description="With kda_pallas_fused, the kernel reads q, k, v and the per-step log-decay in the [B, T, H, d]"
+      " layout and writes its output in it, and takes the in-chunk cumulative decay itself: no transposes into"
+      " and out of chunks, and no XLA cumulative-sum matmul.",
+  )
+  kda_flat_head_layout: bool = Field(
+      False,
+      description="With kda_pallas_fused + kda_fused_token_major, keep q, k, v, the log-decay, the kernel output and"
+      " the output norm/gate in the head-flattened [B, T, H * d] layout end to end. [T, H, d] and [T, H * d] tile"
+      " differently on TPU, so the [B, T, H, d] round trips around the kernel (and their gradients) are relayout"
+      " copies; per-head reductions run in kernels/head_norm.py. Same math.",
+  )
+  kda_outer_block: int = Field(
+      0,
+      description="With kda_pallas_fused, rows per outer block of a two-level intra-chunk factorization (0: one"
+      " level of 8-row sub-blocks). The columns before an outer block share its first row as pivot, so the"
+      " full-width rescaling runs once per outer block; 32 makes the bwd 14% faster at the same accuracy.",
+  )
+  kda_fused_residuals: Literal["all", "wy"] = Field(
+      "all",
+      description="With kda_fused=device/offload, what the fused KDA kernel keeps for the bwd. 'all': its output"
+      " and every VJP residual (no forward kernel in the remat recompute; 176 MiB + states per layer at B=1,"
+      " T=8192). 'wy': only the intra-chunk inverse/kk and scores (48 MiB per layer), from a separate kernel;"
+      " the remat recompute then runs only the recurrence + readout part of the forward.",
+  )
+  kda_fused_state_stride: int = Field(
+      2,
+      description="With kda_fused=device/offload: keep the f32 (bf16) chunk state of every k-th chunk for the bwd"
+      " (all states are 256 MiB per layer at B=1, T=8192, H=8, dk=256, dv=512 in f32). 1: all; 2: every other"
+      " chunk's, the bwd kernel rebuilds the rest from the previous chunk (one extra matmul); 0: none, a separate"
+      " Pallas pass rebuilds them from the saved deltas. Bit-identical results.",
+  )
+  kda_pallas_intra_bwd: bool = Field(
+      False,
+      description="With kda_pallas_intra: also run the backward as the Pallas kernel. 2x faster alone, but"
+      " slower in the full model than the fused XLA hand VJP on v4-128.",
+  )
+  olmoe3_replicate_router: bool = Field(
+      False,
+      description="OLMoE3: keep the router weight (emb x num_experts) replicated instead of FSDP-sharded, so it is"
+      " not all-gathered at every use (latency-bound small gathers); its gradient is all-reduced once instead.",
+  )
+  kda_intra_custom_vjp: bool = Field(
+      False,
+      description="Sub-block KDA: hand-derived backward for the intra-chunk score and key-key matrices (three"
+      " shared contractions instead of autodiff through the exps and masks). Same math; 2.2x faster fwd+bwd on v4.",
+  )
+  kda_pallas_scan: bool = Field(
+      False,
+      description="Sub-block KDA: run the chunk-state recurrence as the Pallas kernel in kernels/kda_scan.py, with"
+      " the state resident in VMEM and a hand-written backward. Needs gdn_state_dtype=bfloat16.",
+  )
+  tokamax_kda_max_num_segments: int = Field(
+      32,
+      description=(
+          "Static bound on packed documents per sequence for the tokamax KDA kernel; the kernel pads seq by "
+          "(chunk-1)*bound positions, so keep it close to the real packing maximum."
+      ),
+  )
+  tokamax_kda_log_decay_floor: float = Field(
+      20.0,
+      description=(
+          "Floor, in nats, on the per-step KDA log-decay passed to the tokamax kernel. The kernel overflows"
+          " fp32 exp once a step decays past ~30 nats, returning NaN; a floor of 20 changes the output by"
+          " under exp(-20) per step. 0 disables it and lets the kernel activate the gate itself."
+      ),
+  )
+  tokamax_kda_resets_in_gate: bool = Field(
+      False,
+      description=(
+          "Mark packed-document starts by setting that token's KDA log-decay to -tokamax_kda_log_decay_floor"
+          " and call the tokamax kernel without segment ids. This skips the varlen path, which pads each"
+          " sequence by (chunk-1)*tokamax_kda_max_num_segments positions. The previous document's state"
+          " leaks in at exp(-floor) (4.5e-5 at floor 10), below bf16 rounding. Needs a floor > 0."
+      ),
+  )
+  tokamax_kda_l2norm_outside: bool = Field(
+      False,
+      description=(
+          "Do the KDA q/k L2-norm in MaxText, in [B,T,H,D] layout, instead of inside the tokamax kernel."
+          " Same formula; lets XLA fuse the norm and its bwd with the neighbouring ops."
+      ),
+  )
+  olmoe3_per_layer_remat: bool = Field(
+      False,
+      description=(
+          "Rematerialize each OLMoE3 layer on its own instead of per mixer cycle. Without it the"
+          " unrolled first cycle is not rematerialized at all and the scanned cycles remat as a block."
+      ),
+  )
+  moe_lean_routing: bool = Field(
+      False,
+      description=(
+          "Same routing, fewer sorts: the EMo pool mask from one value sort instead of two argsorts,"
+          " the routing inverse permutation computed once, and top-k indices and the EMo mask saved"
+          " under the moe_routing remat name so the bwd does not recompute them."
+      ),
+  )
+  moe_topk_by_bisection: bool = Field(
+      False,
+      description="With moe_lean_routing, pick the top-k experts by bisecting on the logit bits instead of"
+      " lax.top_k (a sort on TPU). Same experts, returned in ascending index order.",
+  )
+  use_fused_latent_moe: bool = Field(
+      False,
+      description="Whether to use the fused Pallas backward kernel for LatentMoE routed experts.",
+  )
+  moe_fused_swiglu_gmm: bool = Field(
+      False,
+      description="Run the routed expert FFN (sparse_matmul + megablox, SwiGLU, no bias/quantization) with the"
+      " kernels in kernels/latent_moe: the gate/up GMM writes only silu(a)*b (a, b stay in VMEM), and a custom VJP"
+      " recomputes a, b per tile in the backward and applies the SwiGLU derivative in the kernel epilogue. Forward"
+      " tiles come from wi_tile_fwd_* / wo_tile_fwd_*, dx from wi_tile_dlhs_*, dwi from wi_tile_drhs_*.",
+  )
+  moe_fused_swiglu_bwd_tile_batch_seq: int = Field(
+      256, description="moe_fused_swiglu_gmm: row tile of the fused SwiGLU backward kernel."
+  )
+  moe_fused_swiglu_bwd_tile_embed_dim: int = Field(
+      768, description="moe_fused_swiglu_gmm: contracting (embed) tile of the fused SwiGLU backward kernel."
+  )
+  moe_fused_swiglu_bwd_tile_mlp_dim: int = Field(
+      896, description="moe_fused_swiglu_gmm: column (mlp) tile of the fused SwiGLU backward kernel."
+  )
+  moe_fused_swiglu_dwo_tile_embed_dim: int = Field(
+      768, description="moe_fused_swiglu_gmm: contracting (embed) tile of the dwo^T = dy^T h weight-gradient kernel."
+  )
+  moe_fused_swiglu_dwo_tile_mlp_dim: int = Field(
+      896, description="moe_fused_swiglu_gmm: column (mlp) tile of the dwo^T = dy^T h weight-gradient kernel."
+  )
+  moe_topk_pallas: bool = Field(
+      False,
+      description="With moe_lean_routing, pick the top-k experts with the Pallas kernel in kernels/topk.py"
+      " instead of lax.top_k (a sort on TPU). Same indices in the same order.",
+  )
+  moe_a2a_token_chunks: int = Field(
+      1,
+      description="Run the all-to-all MoE path (not ring-of-experts) in this many sequence chunks. Routing runs"
+      " once over the whole sequence and each chunk reuses its slice as forced experts, so EMo pools still see"
+      " whole documents. Smaller dispatch buffers keep the permute gathers inside v4's 128 MiB CMEM at seq 8192.",
+  )
+  moe_a2a_expert_major: bool = Field(
+      False,
+      description="With expert parallelism over a batch-sharded input, send one ragged all-to-all slice per"
+      " (destination shard, local expert) so received tokens are already grouped by local expert. Removes the"
+      " local permute row gather on the dispatch and combine sides (and their bwd scatters).",
+  )
+  moe_a2a_row_align: int = Field(
+      1,
+      description="With moe_a2a_expert_major and moe_lean_routing, pad every expert's rows in the send buffer to"
+      " a multiple of this many (zero rows) and run the ragged all-to-alls on [rows / align, align, dim] slabs."
+      " At 8 (a v4 bf16 tile) XLA keeps the native layout instead of relaying out to a row-contiguous one before"
+      " and after every all-to-all. The receive buffer grows by the worst-case padding, so no token is dropped"
+      " that the unpadded buffer keeps; the output is unchanged.",
+  )
+  kda_conv_in_compute_dtype: bool = Field(
+      False,
+      description=(
+          "Cast the KDA short-conv weight to the activation dtype, so q/k/v reach the kernel in bf16"
+          " instead of being promoted to fp32 by the fp32 weight. Halves their residuals."
+      ),
+  )
   gdn_chunk_size: int = Field(
       64,
       description="Chunk size for the parallel scan algorithm in the Gated Delta Net.",
@@ -2239,6 +2623,61 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT,
       description="Remat policy for the second MoE layer's output.",
   )
+  moe_routing: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for MoE routing artifacts (top-k weights and indices, dispatch "
+          "sort order, group sizes). Saving them keeps the backward pass from recomputing "
+          "routing; they are a few MB per layer."
+      ),
+  )
+  moe_router_logits: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the MoE router logits (needed by the aux-loss backward).",
+  )
+  moe_dispatch: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the dispatched (expert-sorted) MoE inputs.",
+  )
+  moe_combine: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the expert-parallel MoE combine output (after the return all-to-all) and the"
+          " unpermuted layer output. Saving them skips the wo GMM and the combine all-to-all in the bwd."
+      ),
+  )
+  kda_wy: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the KDA intra-chunk inverse and the masked q-k scores. Saving them lets the remat"
+          " forward skip the intra-chunk build and the triangular inverse."
+      ),
+  )
+  kda_fused: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the fused Pallas KDA kernel's output and its VJP residuals (kda_pallas_fused; per"
+          " layer at B=1, T=8192, H=8, C=128: bf16 output 64 MiB + delta 64 MiB + packed inverse/kk 32 MiB +"
+          " scores 16 MiB, plus 256 MiB of f32 chunk states / kda_fused_state_stride). Saving them skips the"
+          " forward kernel in the remat recompute."
+      ),
+  )
+  kda_proj: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the fused KDA input projection output (before the short conv).",
+  )
+  gathered_weights: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for FSDP all-gathered dense weights: 'device' keeps the gathered copy across the"
+      " remat boundary so the bwd does not all-gather again (FSDP without reshard-after-forward).",
+  )
+  moe_x_sorted: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the expert-local MoE tokens after the expert-parallel dispatch all-to-all and"
+          " local sort. Saving them skips the dispatch all-to-all in the bwd."
+      ),
+  )
   query_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the query projection.")
   key_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the key projection.")
   value_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the value projection.")
@@ -2307,6 +2746,17 @@ class DatasetGeneral(BaseModel):
   """General configuration for dataset and data loading."""
 
   dataset_type: DatasetType = Field(DatasetType.SYNTHETIC, description="The type of the data loading pipeline.")
+  norm_metrics: Literal["all", "grad", "none"] = Field(
+      "all",
+      description="Norm metrics per step. 'all': grad, raw grad and param norms (three full passes). 'grad': the"
+      " raw grad norm shared with gradient clipping, and the clipped norm derived from it (no param norm)."
+      " 'none': skip them. Training is unchanged; only the logged metrics differ.",
+  )
+  synthetic_data_reuse_batch: bool = Field(
+      False,
+      description="With dataset_type=synthetic, generate the (fixed) batch once and return it every step, so the"
+      " per-step reshard of the synthetic arrays stays out of the step time. Same values as regenerating.",
+  )
   per_device_batch_size: int | float = Field(12, description="The batch size per device.")
   eval_per_device_batch_size: int | float = Field(
       0.0,
@@ -2483,6 +2933,20 @@ class OlmoGrainDataset(BaseModel):
       description="Replacement prefix used together with olmo_path_remap_from (e.g. /mnt/disks/.../).",
   )
   olmo_apply_ngram_filter: bool = Field(True, description="Mask repetitive instances per OLMo-core's repetition filter.")
+  olmo_segment_eos_token_id: int = Field(
+      -1,
+      description=(
+          "olmo_grain: with >= 0, inputs_segmentation numbers the EOS-delimited documents of each instance as "
+          "OLMo-core's EMo router does (an EOS starts the next segment), offset by one; -1 keeps one segment per instance."
+      ),
+  )
+  olmo_global_indices_path: PathStr = Field(
+      "",
+      description=(
+          "Path to OLMo-core's global indices file (headerless uint32 permutation) to train in its batch order "
+          "instead of data_shuffle_seed."
+      ),
+  )
 
 
 class DPO(BaseModel):
@@ -2921,6 +3385,14 @@ class Optimizer(BaseModel):
       description="The decay style for WSD schedule ('linear' or 'cosine').",
   )
   warmup_steps_fraction: float = Field(0.1, ge=0.0, le=1.0, description="Fraction of total steps for LR warmup.")
+  warmup_step_offset: int = Field(
+      0,
+      ge=0,
+      description=(
+          "Warmup position of the first training step: step i trains at learning_rate * (i + offset) / warmup_steps. "
+          "0 is MaxText's warmup from zero; 1 matches trainers that count steps from one, such as OLMo-core."
+      ),
+  )
   learning_rate_schedule_steps: int = Field(
       -1,
       ge=-1,
@@ -3896,6 +4368,10 @@ class DerivedValues(BaseModel):
   moe_mlp_dim: None | int = Field(
       None,
       description="Effective MLP dimension for MoE layers, scaled by `global_parameter_scale`.",
+  )
+  shared_expert_mlp_dim: None | int = Field(
+      None,
+      description="Effective shared-expert MLP dimension, scaled by `global_parameter_scale`.",
   )
   num_decoder_layers: None | int = Field(
       None,
@@ -4997,6 +5473,10 @@ class MaxTextConfig(
     self.num_kv_heads = (2**num_head_scale) * self.base_num_kv_heads
     self.mlp_dim = (2**mlp_dim_scale) * self.base_mlp_dim
     self.moe_mlp_dim = (2**mlp_dim_scale) * self.base_moe_mlp_dim
+    # A shared expert defaults to routed-expert width; widen it to shift capacity
+    # from the routed (comm-heavy) path to the dense (compute-bound) path.
+    base_shared = self.base_shared_expert_mlp_dim
+    self.shared_expert_mlp_dim = (2**mlp_dim_scale) * (base_shared if base_shared > 0 else self.base_moe_mlp_dim)
     self.num_decoder_layers = (2**layer_scale) * self.base_num_decoder_layers
 
     # E. HARDWARE-DEPENDENT CALCULATIONS
@@ -5158,6 +5638,15 @@ class MaxTextConfig(
           "moe_mlpwi_1",
           "moe_mlpwo",
           "te_moe_dispatch_remat_location",
+          "moe_routing",
+          "moe_router_logits",
+          "moe_dispatch",
+          "moe_x_sorted",
+          "moe_combine",
+          "kda_wy",
+          "kda_fused",
+          "gathered_weights",
+          "kda_proj",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
@@ -6394,6 +6883,22 @@ class MaxTextConfig(
           f"max_target_length={self.max_target_length}, max_position_embeddings={self.max_position_embeddings}."
       )
 
+    # `shard_exp_on_fsdp` gives the routed expert kernels the logical axes
+    # ("embed_moe", None, "mlp_moe"), so the expert dimension rides the fsdp axis
+    # and num_experts must divide the fsdp size. Without this, the failure is an
+    # `IndivisibleError` raised inside jit at trace time, after the whole model
+    # has been built. `pyconfig_deprecated.py` carries the same guard; this keeps
+    # the pydantic path from being the laxer of the two. A negative
+    # ici_fsdp_parallelism is the auto-fill sentinel and is resolved later.
+    if self.shard_exp_on_fsdp and self.ici_fsdp_parallelism > 0 and self.num_experts > 0:
+      if self.num_experts % self.ici_fsdp_parallelism != 0:
+        raise ValueError(
+            f"shard_exp_on_fsdp=True requires num_experts ({self.num_experts}) to be divisible by "
+            f"ici_fsdp_parallelism ({self.ici_fsdp_parallelism}). Split the mesh instead of shrinking "
+            f"fsdp, e.g. ici_data_parallelism={self.ici_fsdp_parallelism // self.num_experts} "
+            f"ici_fsdp_parallelism={self.num_experts}, which holds the global batch."
+        )
+
     # I. FINAL TYPE CONVERSIONS AND DERIVED LISTS
     ici_map = {
         "diloco": self.ici_diloco_parallelism,
@@ -6875,6 +7380,10 @@ class RLConfig(
     self.num_kv_heads = int((2**num_head_scale) * self.base_num_kv_heads)
     self.mlp_dim = int((2**mlp_dim_scale) * self.base_mlp_dim)
     self.moe_mlp_dim = int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0))
+    base_shared = getattr(self, "base_shared_expert_mlp_dim", -1)
+    self.shared_expert_mlp_dim = int(
+        (2**mlp_dim_scale) * (base_shared if base_shared > 0 else getattr(self, "base_moe_mlp_dim", 0))
+    )
     self.num_decoder_layers = int((2**layer_scale) * self.base_num_decoder_layers)
 
     # Mirror into internal MaxText fields for backward compatibility.
@@ -6898,6 +7407,15 @@ class RLConfig(
           "moe_mlpwi_1",
           "moe_mlpwo",
           "te_moe_dispatch_remat_location",
+          "moe_routing",
+          "moe_router_logits",
+          "moe_dispatch",
+          "moe_x_sorted",
+          "moe_combine",
+          "kda_wy",
+          "kda_fused",
+          "gathered_weights",
+          "kda_proj",
           "mlpwi_0",
           "mlpwi_1",
           "mlpwo",
