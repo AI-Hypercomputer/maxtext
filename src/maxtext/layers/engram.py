@@ -24,6 +24,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from maxtext.common.common_types import Array, Config, MODEL_MODE_TRAIN
 from maxtext.input_pipeline.tokenizer import HFTokenizer
 from maxtext.layers.embeddings import Embed
@@ -31,6 +32,7 @@ from maxtext.layers.initializers import NdInitializer, nd_dense_init
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils import max_utils
 import numpy as np
 import sympy
 import tokenizers
@@ -319,12 +321,31 @@ class NgramHashMapping:
     # Concatenate all heads: [B, S, H_total] where H_total = H * num_ngram_orders
     return jnp.concatenate(all_hashes, axis=2)
 
-  def __call__(self, input_ids) -> dict[int, Array]:
+  def __call__(self, input_ids, load_balanced_cp_size: int = 1) -> dict[int, Array]:
+    """
+    Computes the n-gram hash indices of every Engram layer.
+
+    Args:
+      input_ids: [B, S] token ids from the standard tokenizer.
+      load_balanced_cp_size: Context-parallel size the input pipeline permuted the sequence with
+        (DUAL_CHUNK_SWAP, see `max_utils.reorder_sequence`), i.e. `max_utils.reordered_cp_size`.
+        1 means `input_ids` are in natural token order.
+
+    Returns:
+      {layer_id: [B, S, H_total]} hash indices, in the same token order as `input_ids`.
+    """
     # input_ids from standard tokenizer
     compressed_ids = self.compressed_tokenizer(input_ids)
+    if load_balanced_cp_size > 1:
+      # The n-gram windows take each token's predecessors by array index (`x[:, :-k]`), which
+      # is only its history when the sequence is in natural order. Token ids are small
+      # (int32, [B, S]), so undo the permutation here and re-apply it to the hashes below.
+      compressed_ids = max_utils.reorder_sequence(compressed_ids, cp_size=load_balanced_cp_size, to_contiguous=True)
     hash_ids_for_all_layers = {}
     for layer_id in self.layer_ids:
       hash_ids = self._get_ngram_hashes(compressed_ids, layer_id=layer_id)
+      if load_balanced_cp_size > 1:
+        hash_ids = max_utils.reorder_sequence(hash_ids, cp_size=load_balanced_cp_size)
       hash_ids_for_all_layers[layer_id] = hash_ids
     return hash_ids_for_all_layers
 
@@ -404,6 +425,7 @@ class ShortConv(nnx.Module):
       dilation: int,
       mhc_expansion_rate: int,
       rngs: nnx.Rngs = None,
+      mesh: Optional[Mesh] = None,
   ):
     """
     Args:
@@ -413,8 +435,16 @@ class ShortConv(nnx.Module):
       dilation: Dilation rate for the convolution.
       mhc_expansion_rate (G): Number of branches.
       rngs: RNG state for initialization.
+      mesh: Device mesh. Only needed to convolve sequences that the input pipeline permuted for
+        context-parallel load balancing (see `__call__`).
     """
     self.mhc_expansion_rate = mhc_expansion_rate
+    self.mesh = mesh
+    # Mesh axis the sequence is sharded over under context parallelism.
+    self.context_axis = config.context_sharding
+    self.dilation = dilation
+    # Tokens of history an output depends on, i.e. the "CAUSAL" left padding of `self.conv`.
+    self.halo_size = (kernel_size - 1) * dilation
 
     # Norms
     # Vectorized Init: Independent weights per branch
@@ -456,12 +486,15 @@ class ShortConv(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, x: Array) -> Array:
+  def __call__(self, x: Array, load_balanced_cp_size: int = 1) -> Array:
     """
     Compute y^i = SiLU(Conv1D(RMSNorm^i(x^i))) for each branch i.
 
     Args:
       x: Input tensor of shape [B, S, G, D]
+      load_balanced_cp_size: Context-parallel size the input pipeline permuted the sequence with
+        (DUAL_CHUNK_SWAP, see `max_utils.reorder_sequence`), i.e. `max_utils.reordered_cp_size`.
+        1 means `x` is in natural token order.
     Returns:
       Output tensor of shape [B, S, G, D]
 
@@ -487,10 +520,92 @@ class ShortConv(nnx.Module):
     # Flatten branches into channel: [B, S, G, D] -> [B, S, G * D]
     x_flat = x.reshape(B, S, G * D)
     # Depthwise Convolution to mix temporal dimension S only. [B, S, G * D] shape stays
-    y = self.conv(x_flat)
+    if load_balanced_cp_size > 1:
+      y = self._load_balanced_conv(x_flat, load_balanced_cp_size)
+    else:
+      y = self.conv(x_flat)
     y = jax.nn.silu(y)
     # Restore branch: [B, S, G * D] -> [B, S, G, D]
     return y.reshape(B, S, G, D)
+
+  def _load_balanced_conv(self, x_flat: Array, cp_size: int) -> Array:
+    """
+    Causal depthwise convolution of a sequence stored in DUAL_CHUNK_SWAP order.
+
+    With `context_parallel_load_balance` the input pipeline permutes every sequence with
+    `max_utils.reorder_sequence`: the sequence is cut into 2 * cp_size chunks and context-parallel
+    rank r holds natural chunks r and 2 * cp_size - 1 - r. `self.conv` takes each token's history
+    from whatever precedes it in memory, which at every chunk seam is the wrong chunk - for the
+    second local chunk even a later one.
+
+    `nnx.Conv` implements "CAUSAL" as a left pad of `halo_size` zeros followed by a "VALID"
+    convolution. Here each local chunk is left-padded with the last `halo_size` tokens of its natural
+    predecessor instead (zeros only for chunk 0), fetched from the rank that holds it with
+    `lax.ppermute`, and then put through the same "VALID" convolution. The output is identical to
+    convolving the sequence in natural order, and the exchange moves 2 * halo_size tokens per rank
+    regardless of the sequence length.
+
+    Args:
+      x_flat: [B, S, C] in DUAL_CHUNK_SWAP order, S sharded over `self.context_axis`.
+      cp_size: Size of the context axis the sequence was permuted for.
+    Returns:
+      [B, S, C] in the same order as `x_flat`.
+    """
+    seq_len = x_flat.shape[1]
+    halo = self.halo_size
+    axis = self.context_axis
+    conv = self.conv
+    if seq_len % (2 * cp_size) != 0 or seq_len // (2 * cp_size) < halo:
+      raise ValueError(
+          f"Engram ShortConv under context_parallel_load_balance needs a sequence length that is a multiple of"
+          f" 2 * cp_size with chunks of at least {halo} tokens, got sequence length {seq_len} for cp_size {cp_size}."
+      )
+
+    def local_conv(x, kernel):
+      # x: [B, 2 * L, C], the two chunks of this rank: natural chunks r and 2 * cp_size - 1 - r.
+      x, kernel = conv.promote_dtype((x, kernel), dtype=conv.dtype)
+      chunk = x.shape[1] // 2
+      first, second = x[:, :chunk], x[:, chunk:]
+      rank = jax.lax.axis_index(axis)
+      # Chunk r - 1 is the first chunk of rank r - 1. Rank 0 receives nothing and `ppermute` fills in
+      # zeros, which is exactly the causal padding at the start of the sequence.
+      halo_first = jax.lax.ppermute(first[:, -halo:], axis, perm=[(r, r + 1) for r in range(cp_size - 1)])
+      # Chunk 2 * cp_size - 2 - r is the second chunk of rank r + 1 ...
+      halo_second = jax.lax.ppermute(second[:, -halo:], axis, perm=[(r, r - 1) for r in range(1, cp_size)])
+      # ... except on the last rank, whose two chunks (cp_size - 1 and cp_size) are adjacent.
+      halo_second = jnp.where(rank == cp_size - 1, first[:, -halo:], halo_second)
+
+      def valid_conv(seq):
+        # What `self.conv` runs after its "CAUSAL" padding.
+        return jax.lax.conv_general_dilated(
+            seq,
+            kernel,
+            window_strides=(1,),
+            padding="VALID",
+            rhs_dilation=(self.dilation,),
+            dimension_numbers=("NWC", "WIO", "NWC"),
+            feature_group_count=conv.feature_group_count,
+            precision=conv.precision,
+        )
+
+      return jnp.concatenate(
+          [
+              valid_conv(jnp.concatenate([halo_first, first], axis=1)),
+              valid_conv(jnp.concatenate([halo_second, second], axis=1)),
+          ],
+          axis=1,
+      )
+
+    # Manual only over the context axis: batch and channels keep whatever sharding the surrounding
+    # program gives them, so no other mesh axis names are assumed here.
+    return jax.shard_map(
+        local_conv,
+        mesh=self.mesh,
+        in_specs=(P(None, axis, None), P()),
+        out_specs=P(None, axis, None),
+        axis_names={axis},
+        check_vma=True,
+    )(x_flat, conv.kernel[...])
 
 
 class Engram(nnx.Module):
@@ -616,9 +731,10 @@ class Engram(nnx.Module):
         dilation=self.max_ngram_size,
         mhc_expansion_rate=mhc_expansion_rate,
         rngs=rngs,
+        mesh=mesh,
     )
 
-  def __call__(self, hidden_states: Array, hash_input_ids: Array) -> Array:
+  def __call__(self, hidden_states: Array, hash_input_ids: Array, load_balanced_cp_size: int = 1) -> Array:
     """
     Computes the Engram output by retrieving, gating, and smoothing n-gram memory.
 
@@ -626,6 +742,10 @@ class Engram(nnx.Module):
       hidden_states: current transformer state. Shape: [B, S, G, D].
       hash_input_ids: Hashed token IDs. Shape: [B, S, H_total].
         Produced by `hash_mapping.hash(input_ids)[layer_id]`.
+      load_balanced_cp_size: Context-parallel size the input pipeline permuted the sequence with
+        (DUAL_CHUNK_SWAP, see `max_utils.reorder_sequence`), i.e. `max_utils.reordered_cp_size`.
+        1 means the inputs are in natural token order. Everything here except `short_conv` is
+        pointwise along S, so only the convolution has to know.
 
     Returns:
       Shape: [B, S, G, D]
@@ -687,7 +807,7 @@ class Engram(nnx.Module):
     # 8. ShortConv as Temporal Smoothing
     # [B, S, G, D] shape stays
     # Apply depthwise conv to mix S
-    conv_output = self.short_conv(gated_value)
+    conv_output = self.short_conv(gated_value, load_balanced_cp_size=load_balanced_cp_size)
     # residual connection for conv component
     output = gated_value + conv_output
 
