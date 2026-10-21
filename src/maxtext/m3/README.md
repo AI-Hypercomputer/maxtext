@@ -51,6 +51,7 @@ with jax.set_mesh(create_mesh()):
   model = models.create_model(config, mesh, rngs=nnx.Rngs(0))   # Sharding resolves logical axes
   model = remat.maybe_apply_remat(model, config)                # sets Layers.remat; no wrapper
   model = scan.maybe_apply_scan(model, config)                  # Layers -> ScannedLayers
+  remat.check_tags(model, config, *batch)                       # a policy that would save nothing is an error
   model = quantization.maybe_quantize(model, config, *batch)    # qwix, by interception
   optimizer = offload.make_optimizer(model, tx, config)         # state on pinned_host if asked
 loss, parts = train.loss.loss_fn(model, batch)                  # cross entropy + model.aux_loss
@@ -59,6 +60,12 @@ loss, parts = train.loss.loss_fn(model, batch)                  # cross entropy 
 Every m3 model's `__call__` returns a `CausalLMOutput(logits, aux_loss)`. MoE models carry their
 load-balance loss through the decoder stack as part of the layer carry and return it there; nothing
 is `sow`n.
+
+Remat policies go by the `checkpoint_name` tags a model puts on its activations (`query_proj`,
+`mlpwo`, ...). JAX does not check that a policy's names exist, so `check_tags` does: it traces one
+forward pass and refuses a policy that matches nothing, which would otherwise run as full
+rematerialization with no error. `tests/unit/m3/infra_test.py` runs the same check over every
+registered model.
 
 ### Kernels
 
@@ -73,6 +80,10 @@ out = dot_product_attention(q, k, v, positions=..., segment_ids=..., kernel=self
 self.executor = moe.executor_from_config(config, sharding)                # MoE blocks
 out = moe.routed_experts(x, weights, indices, wi_0, wi_1, wo, executor=self.executor)
 ```
+
+Both `kernel` and `executor` are required arguments. A model that omitted them would otherwise run
+the reference arithmetic whatever the config asks for, with nothing but a slower step to show for
+it; code that wants the reference says so (`kernels.XLA_ATTENTION`, `moe.DENSE`).
 
 The kernel object is a frozen dataclass holding the backend name and the mesh axes the kernel's
 inputs are sharded over (looked up through the `Sharding`, so model code still names logical axes

@@ -110,6 +110,14 @@ class AttentionKernelConfigTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "No fused attention backend"):
       kernels.fused_attention(x, x, x, segment_ids=None, kernel=kernels.XLA_ATTENTION)
 
+  def test_mesh_in_scope_requires_a_mesh(self):
+    """`jax.sharding.get_abstract_mesh()` is empty, not an error, outside `set_mesh`; the error is ours."""
+    with self.assertRaisesRegex(ValueError, "need a mesh in scope"):
+      kernels.mesh_in_scope()
+    mesh = create_mesh(devices=jax.devices()[:1])
+    with jax.set_mesh(mesh):
+      self.assertEqual(kernels.mesh_in_scope().axis_names, mesh.axis_names)
+
 
 class GroupedMatmulTest(absltest.TestCase):
 
@@ -252,7 +260,9 @@ class FusedAttentionTest(parameterized.TestCase):
     def run(q, k, v, positions, segment_ids):
       fused = attention.dot_product_attention(q, k, v, positions=positions, segment_ids=segment_ids, kernel=splash)
       unsegmented = attention.dot_product_attention(q, k, v, positions=positions, segment_ids=None, kernel=splash)
-      reference = attention.dot_product_attention(q, k, v, positions=positions, segment_ids=segment_ids)
+      reference = attention.dot_product_attention(
+          q, k, v, positions=positions, segment_ids=segment_ids, kernel=kernels.XLA_ATTENTION
+      )
       return fused, unsegmented, reference
 
     fused, unsegmented, reference = run(q, k, v, positions, segment_ids)

@@ -115,9 +115,9 @@ class ScanTest(parameterized.TestCase):
     self.assertEqual([block.num_layers for block in container], [config.first_num_dense_layers, 2])
     paths = m3_test_utils.flat_params(scanned)
     self.assertIn(("decoder", "layers", 0, "mlp", "wi_0", "kernel"), paths)
-    self.assertIn(("decoder", "layers", 1, "DeepSeekMoeBlock_0", "MoeBlock_0", "wi_0"), paths)
+    self.assertIn(("decoder", "layers", 1, "moe_block", "routed_experts", "wi_0"), paths)
     # Non-parameter state (the router bias) is stacked too and survives a call.
-    bias = scanned.decoder.layers[1].DeepSeekMoeBlock_0.MoeBlock_0.gate.bias
+    bias = scanned.decoder.layers[1].moe_block.routed_experts.gate.bias
     self.assertEqual(bias[...].shape, (2, config.num_experts))
 
   def test_remat_is_carried_into_the_scan_body(self):

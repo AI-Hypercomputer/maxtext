@@ -20,19 +20,23 @@ checkpoint restore, HF weight mappings, optimizer masks and weight sync --
 several of which fail silently on a path they do not recognise. Instead, every
 `Layers` container in the model gets a `Remat` setting and checkpoints each
 layer call itself (see `maxtext.m3.core.layers`). The parameter tree is
-byte-identical with and without remat; `tests/unit/m3/remat_test.py` pins
+byte-identical with and without remat; `RematTest` in `tests/unit/m3/layers_test.py` pins
 that.
 
 Policy names are legacy's, so a `remat_policy=` flag means the same thing on
 both stacks. They refer to the `checkpoint_name` tags model files place on
 activations (`query_proj`, `mlpwi`, ...), which are the only remat-related
-thing a model file contains.
+thing a model file contains. The names are a convention, not an interface
+JAX checks: a policy whose names a model never tags saves nothing and raises
+nothing. `check_tags` makes that an error at setup.
 """
 
-from collections.abc import Callable
+from collections.abc import Iterator
+from typing import Any
 
 from flax import nnx
 import jax
+import jax.extend as jex
 
 from maxtext.m3.core.layers import Layers, Remat
 
@@ -40,16 +44,19 @@ _PROJECTIONS = ("query_proj", "value_proj", "key_proj", "kv_proj", "qkv_proj")
 _MINIMAL = _PROJECTIONS + ("out_proj", "mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo")
 
 
-def _save(*names: str) -> Callable[..., bool]:
-  return jax.checkpoint_policies.save_only_these_names(*names)
+def _save(*names: str) -> Remat:
+  return Remat(policy=jax.checkpoint_policies.save_only_these_names(*names), names=names)
 
 
-def _offload(names: tuple[str, ...]) -> Callable[..., bool]:
-  return jax.checkpoint_policies.save_and_offload_only_these_names(
-      names_which_can_be_saved=[],
-      names_which_can_be_offloaded=list(names),
-      offload_src="device",
-      offload_dst="pinned_host",
+def _offload(names: tuple[str, ...]) -> Remat:
+  return Remat(
+      policy=jax.checkpoint_policies.save_and_offload_only_these_names(
+          names_which_can_be_saved=[],
+          names_which_can_be_offloaded=list(names),
+          offload_src="device",
+          offload_dst="pinned_host",
+      ),
+      names=names,
   )
 
 
@@ -64,31 +71,34 @@ def resolve_policy(config) -> Remat | None:
     case "none" | "" | None:
       return None
     case "full":
-      policy = None
+      return Remat(policy=None, names=None)
     case "minimal" | "minimal_with_context" | "minimal_flash":
-      policy = _save(*_MINIMAL)
+      return _save(*_MINIMAL)
     case "save_qkv_proj":
-      policy = _save(*_PROJECTIONS)
+      return _save(*_PROJECTIONS)
     case "save_dot_except_mlp":
-      policy = _save(*_PROJECTIONS, "out_proj")
+      return _save(*_PROJECTIONS, "out_proj")
     case "save_dot_except_mlpwi":
-      policy = _save(*_PROJECTIONS, "out_proj", "mlpwo")
+      return _save(*_PROJECTIONS, "out_proj", "mlpwo")
     case "save_out_proj":
-      policy = _save("out_proj")
+      return _save("out_proj")
     case "qkv_proj_offloaded":
-      policy = _offload(("query_proj", "value_proj", "key_proj", "kv_proj"))
+      return _offload(("query_proj", "value_proj", "key_proj", "kv_proj"))
     case "minimal_offloaded":
-      policy = _offload(_MINIMAL)
+      return _offload(_MINIMAL)
     case "custom":
-      policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-          names_which_can_be_saved=list(config.tensors_on_device),
-          names_which_can_be_offloaded=list(config.tensors_to_offload),
-          offload_src="device",
-          offload_dst="pinned_host",
+      on_device, to_offload = tuple(config.tensors_on_device), tuple(config.tensors_to_offload)
+      return Remat(
+          policy=jax.checkpoint_policies.save_and_offload_only_these_names(
+              names_which_can_be_saved=list(on_device),
+              names_which_can_be_offloaded=list(to_offload),
+              offload_src="device",
+              offload_dst="pinned_host",
+          ),
+          names=on_device + to_offload,
       )
     case other:
       raise ValueError(f"Unknown remat_policy {other!r} for m3.")
-  return Remat(policy=policy)
 
 
 def apply_remat(model: nnx.Module, remat: Remat | None) -> nnx.Module:
@@ -102,3 +112,59 @@ def apply_remat(model: nnx.Module, remat: Remat | None) -> nnx.Module:
 def maybe_apply_remat(model: nnx.Module, config) -> nnx.Module:
   """Applies `config.remat_policy` to `model`. A no-op for `remat_policy=none`."""
   return apply_remat(model, resolve_policy(config))
+
+
+def _jaxprs_in(value: Any) -> Iterator[jex.core.Jaxpr]:
+  """The jaxprs held by one equation parameter: `scan`, `checkpoint`, `pjit`, `shard_map`, ..."""
+  if isinstance(value, jex.core.ClosedJaxpr):
+    yield value.jaxpr
+  elif isinstance(value, jex.core.Jaxpr):
+    yield value
+  elif isinstance(value, (list, tuple)):
+    for item in value:
+      yield from _jaxprs_in(item)
+
+
+def _names_in(jaxpr: jex.core.Jaxpr) -> Iterator[str]:
+  for eqn in jaxpr.eqns:
+    if eqn.primitive.name == "name":
+      yield eqn.params["name"]
+    for value in eqn.params.values():
+      for sub in _jaxprs_in(value):
+        yield from _names_in(sub)
+
+
+def checkpoint_names(model: nnx.Module, *args: Any, **kwargs: Any) -> frozenset[str]:
+  """The `checkpoint_name` tags one forward pass `model(*args, **kwargs)` emits.
+
+  Traces the call (no compilation, no execution) and collects the tags,
+  including those inside `jax.checkpoint` and `jax.lax.scan` bodies, so it
+  sees the same tags whether or not remat and scan have been applied.
+  """
+  graphdef, state = nnx.split(model)
+
+  def forward(state, *args):
+    return nnx.merge(graphdef, state)(*args, **kwargs)
+
+  return frozenset(_names_in(jax.make_jaxpr(forward)(state, *args).jaxpr))
+
+
+def check_tags(model: nnx.Module, config, *example_args: Any, **example_kwargs: Any) -> frozenset[str]:
+  """Raises if `config.remat_policy` names only tags `model` never emits.
+
+  Such a policy is indistinguishable from `full` when it runs: everything is
+  recomputed, the step is slower, and nothing reports it. One forward pass
+  over the example inputs is traced to compare. Call it after scan, so the
+  trace covers one layer body rather than every layer. Returns the tags
+  found, which is also what a new model's author wants to see.
+  """
+  remat = resolve_policy(config)
+  if remat is None or remat.names is None:
+    return frozenset()
+  found = checkpoint_names(model, *example_args, **example_kwargs)
+  if not found & set(remat.names):
+    raise ValueError(
+        f"remat_policy={config.remat_policy!r} saves or offloads {sorted(remat.names)}, but the model tags "
+        f"{sorted(found)}; it would save nothing. Tag the activations with those names or choose another policy."
+    )
+  return found

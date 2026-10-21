@@ -24,8 +24,11 @@ out.
 
 The `kernel` argument is how a fused implementation gets in without the
 model knowing: a model resolves `kernels.attention_from_config(config,
-sharding)` once at construction and passes the result here. The default is
-the reference arithmetic below.
+sharding)` once at construction and passes the result here. There is no
+default on purpose. A model that forgot to resolve a kernel would otherwise
+run the reference arithmetic below whatever `attention=` the config says,
+with nothing to show for it but a slower step. Code that wants the reference
+says so with `kernel=kernels.XLA_ATTENTION`.
 
 Numerics follow legacy MaxText's `apply_attention_dot` so that parity holds in
 bf16: scores stay in the input dtype unless `float32_logits`, the mask is
@@ -55,7 +58,7 @@ def dot_product_attention(
     positions: jax.Array,
     segment_ids: jax.Array | None = None,
     float32_logits: bool = False,
-    kernel: kernels.AttentionKernel = kernels.XLA_ATTENTION,
+    kernel: kernels.AttentionKernel,
 ) -> jax.Array:
   """Causal grouped-query attention.
 
@@ -71,7 +74,9 @@ def dot_product_attention(
       legacy's flash path makes.
     segment_ids: `(batch, length)` ids for packed sequences, or `None`.
     float32_logits: Compute the softmax in float32. Fused kernels always do.
-    kernel: Which implementation runs; see `core/kernels.py`.
+    kernel: Which implementation runs; see `core/kernels.py`. Models pass
+      `kernels.attention_from_config(config, sharding)`; `kernels.XLA_ATTENTION`
+      is the reference arithmetic below.
 
   Returns:
     `(batch, length, heads, value_dim)` in `value.dtype`.

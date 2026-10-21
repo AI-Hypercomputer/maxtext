@@ -12,18 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for `maxtext.m3.infra.quantization` and `maxtext.m3.infra.offload`.
+"""Tests for `maxtext.m3.infra.quantization`, `maxtext.m3.infra.offload` and the remat tag check.
 
 Both transforms are checked for the property that matters to every consumer
 of the parameter tree: they leave it alone. Quantization is additionally
 checked to produce a close-but-different forward pass (so it really is on),
 and offload to keep the optimizer trajectory unchanged while the state lives
-in host memory.
+in host memory. The remat tag check is run against every registered model,
+which is where a model whose tags drift from the policy names gets caught.
 """
 
 from types import SimpleNamespace
 
 from absl.testing import absltest
+from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -33,7 +35,7 @@ import pytest
 
 from maxtext.m3 import models as m3_models
 from maxtext.m3.core.sharding import create_mesh
-from maxtext.m3.infra import offload, quantization
+from maxtext.m3.infra import offload, quantization, remat, scan
 from maxtext.m3.train.loss import loss_fn
 from tests.utils import m3_test_utils
 
@@ -82,6 +84,13 @@ class QuantizationTest(absltest.TestCase):
     self.assertIsNone(rules[0].weight_qtype)
     self.assertRegex("decoder/layers/0/moe_block/gate", rules[0].module_path)
 
+  def test_fp8_quantizes_gradients_to_e5m2(self):
+    """`fp8` is e4m3 forward, e5m2 backward; the explicit names are one dtype throughout."""
+    rule = quantization.quantization_rules(SimpleNamespace(quantization="fp8"))[-1]
+    self.assertEqual((rule.weight_qtype, rule.act_qtype, rule.bwd_qtype), (jnp.float8_e4m3fn,) * 2 + (jnp.float8_e5m2,))
+    rule = quantization.quantization_rules(SimpleNamespace(quantization="fp8_e4m3"))[-1]
+    self.assertEqual((rule.weight_qtype, rule.act_qtype, rule.bwd_qtype), (jnp.float8_e4m3fn,) * 3)
+
   def test_unknown_quantization_raises(self):
     with self.assertRaisesRegex(ValueError, "m3 supports quantization"):
       quantization.quantization_rules(SimpleNamespace(quantization="int2"))
@@ -127,6 +136,43 @@ class OffloadTest(absltest.TestCase):
     off = offload.make_optimizer(model, optax.sgd(0.1), SimpleNamespace(optimizer_memory_host_offload=False))
     self.assertIsInstance(on, offload.HostOffloadedOptimizer)
     self.assertNotIsInstance(off, offload.HostOffloadedOptimizer)
+
+
+_NAMED_POLICIES = (
+    "minimal",
+    "save_qkv_proj",
+    "save_dot_except_mlp",
+    "save_dot_except_mlpwi",
+    "save_out_proj",
+    "qkv_proj_offloaded",
+    "minimal_offloaded",
+)
+
+
+class RematTagsTest(parameterized.TestCase):
+  """Every named policy must find a tag in every registered model, or it is full remat in disguise."""
+
+  def setUp(self):
+    super().setUp()
+    self.mesh = create_mesh(devices=jax.devices()[:1])
+    self.enter_context(jax.set_mesh(self.mesh))
+
+  @parameterized.product(model_name=("qwen3-0.6b", "qwen3-30b-a3b", "deepseek3-tiny"), scan_layers=(False, True))
+  def test_named_policies_match_model_tags(self, model_name, scan_layers):
+    config = m3_test_utils.tiny_config(model_name, remat_policy="minimal", scan_layers=scan_layers)
+    model = remat.maybe_apply_remat(m3_models.create_model(config, self.mesh, rngs=nnx.Rngs(0)), config)
+    model = scan.maybe_apply_scan(model, config)
+    found = remat.checkpoint_names(model, *quantization.example_batch(config))
+    for policy in _NAMED_POLICIES:
+      names = remat.resolve_policy(SimpleNamespace(remat_policy=policy)).names
+      self.assertTrue(found & set(names), f"{model_name}: {policy} names {names}, model tags {sorted(found)}")
+
+  def test_check_tags_rejects_a_policy_that_saves_nothing(self):
+    config = m3_test_utils.tiny_config("qwen3-0.6b")
+    model = m3_models.create_model(config, self.mesh, rngs=nnx.Rngs(0))
+    custom = SimpleNamespace(remat_policy="custom", tensors_on_device=["not_a_tag"], tensors_to_offload=[])
+    with self.assertRaisesRegex(ValueError, "would save nothing"):
+      remat.check_tags(model, custom, *quantization.example_batch(config))
 
 
 if __name__ == "__main__":

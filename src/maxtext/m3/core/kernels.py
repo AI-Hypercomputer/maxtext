@@ -38,6 +38,15 @@ wants explicit `in_specs`. The specs are activation rules, so a different
 `Sharding` strategy moves the kernels with it; the mesh itself is the one in
 scope (`jax.set_mesh`), read the same way `Sharding.constrain` reads it.
 
+Why the specs come from `Sharding` and not from the inputs: the prototype
+read `jax.typeof(query).sharding` at call time. That only reports the real
+spec under a mesh whose axes are `Explicit`; on m3's mesh (`Auto` axes,
+`core.sharding.create_mesh`) a traced input sharded `P("fsdp", None)` reports
+`P(None, None)` inside `jit`, with or without a `with_sharding_constraint`
+before it, and the kernel would be given replicated specs without any error.
+Checked on a v6e-8 with jax 0.11.1. If m3 moves to explicit sharding, the
+lookup from inputs becomes an option again.
+
 Backends, all from upstream packages (JAX's Pallas ops and `tokamax`), none
 from legacy MaxText's forked copies under `src/maxtext/kernels/`:
 

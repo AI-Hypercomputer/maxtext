@@ -86,14 +86,17 @@ def make_optimizer(config) -> optax.GradientTransformation:
 def setup_model(config, mesh: Mesh) -> tuple[nnx.Module, nnx.Optimizer]:
   """Builds the model and optimizer with every transform applied, in the fixed order.
 
-  Must run inside `jax.set_mesh(mesh)`. Quantization traces a forward pass of
-  the training shape, so it comes after scan (one layer body to trace) and
-  before the optimizer, which must see the final parameter tree.
+  Must run inside `jax.set_mesh(mesh)`. The remat check and quantization each
+  trace a forward pass of the training shape, so they come after scan (one
+  layer body to trace); quantization also comes before the optimizer, which
+  must see the final parameter tree.
   """
   model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
   model = remat.maybe_apply_remat(model, config)
   model = scan.maybe_apply_scan(model, config)
-  model = quantization.maybe_quantize(model, config, *quantization.example_batch(config))
+  example = quantization.example_batch(config)
+  remat.check_tags(model, config, *example)
+  model = quantization.maybe_quantize(model, config, *example)
   optimizer = offload.make_optimizer(model, make_optimizer(config), config)
   return model, optimizer
 

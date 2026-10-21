@@ -149,6 +149,27 @@ class RematTest(parameterized.TestCase):
     out = nnx.jit(lambda m, x: m.layers(x, scale=0.5))(model, self.x)
     np.testing.assert_allclose(out, model.layers(self.x, scale=0.5), rtol=1e-6)
 
+  def test_named_policies_record_their_tags(self):
+    self.assertIn("mlpwo", remat.resolve_policy(SimpleNamespace(remat_policy="minimal")).names)
+    self.assertEqual(remat.resolve_policy(SimpleNamespace(remat_policy="save_out_proj")).names, ("out_proj",))
+    self.assertIsNone(remat.resolve_policy(SimpleNamespace(remat_policy="full")).names)
+    custom = SimpleNamespace(remat_policy="custom", tensors_on_device=["a"], tensors_to_offload=["b"])
+    self.assertEqual(remat.resolve_policy(custom).names, ("a", "b"))
+
+  @parameterized.named_parameters(("plain", "none"), ("rematted", "minimal"))
+  def test_checkpoint_names_sees_tags_through_remat(self, policy):
+    model = remat.maybe_apply_remat(_Model(nnx.Rngs(0)), SimpleNamespace(remat_policy=policy))
+    self.assertEqual(remat.checkpoint_names(model.layers, self.x, scale=0.5), {"mlpwo"})
+
+  def test_check_tags_refuses_a_policy_that_would_save_nothing(self):
+    """`_Block` tags only `mlpwo`; a policy naming other tags would silently be full remat."""
+    model = _Model(nnx.Rngs(0))
+    self.assertEqual(remat.check_tags(model.layers, SimpleNamespace(remat_policy="minimal"), self.x), {"mlpwo"})
+    self.assertEqual(remat.check_tags(model.layers, SimpleNamespace(remat_policy="full"), self.x), frozenset())
+    self.assertEqual(remat.check_tags(model.layers, SimpleNamespace(remat_policy="none"), self.x), frozenset())
+    with self.assertRaisesRegex(ValueError, "save_qkv_proj.*would save nothing"):
+      remat.check_tags(model.layers, SimpleNamespace(remat_policy="save_qkv_proj"), self.x)
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -20,6 +20,7 @@ executors are covered on TPU in `kernels_test.py`. The attention function is
 checked against `jax.nn.dot_product_attention`.
 """
 
+import functools
 from types import SimpleNamespace
 
 from absl.testing import absltest
@@ -29,6 +30,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from maxtext.m3.core import attention, moe
+from maxtext.m3.core.kernels import XLA_ATTENTION
 from maxtext.m3.core.sharding import DefaultSharding
 
 
@@ -137,7 +139,7 @@ class AttentionTest(parameterized.TestCase):
     k = jax.random.normal(keys[1], (b, t, kv_heads, d))
     v = jax.random.normal(keys[2], (b, t, kv_heads, d))
     positions = jnp.broadcast_to(jnp.arange(t), (b, t))
-    out = attention.dot_product_attention(q, k, v, positions=positions)
+    out = attention.dot_product_attention(q, k, v, positions=positions, kernel=XLA_ATTENTION)
     expected = jax.nn.dot_product_attention(q, k, v, is_causal=True, scale=1.0)
     np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
 
@@ -147,11 +149,12 @@ class AttentionTest(parameterized.TestCase):
     q, k, v = (jax.random.normal(key, (b, t, 1, d)) for key in keys)
     positions = jnp.array([[0, 1, 2, 0, 1, 2]])
     segment_ids = jnp.array([[1, 1, 1, 2, 2, 2]])
-    packed = attention.dot_product_attention(q, k, v, positions=positions, segment_ids=segment_ids)
+    attend = functools.partial(attention.dot_product_attention, kernel=XLA_ATTENTION)
+    packed = attend(q, k, v, positions=positions, segment_ids=segment_ids)
     separate = jnp.concatenate(
         [
-            attention.dot_product_attention(q[:, :3], k[:, :3], v[:, :3], positions=positions[:, :3]),
-            attention.dot_product_attention(q[:, 3:], k[:, 3:], v[:, 3:], positions=positions[:, 3:]),
+            attend(q[:, :3], k[:, :3], v[:, :3], positions=positions[:, :3]),
+            attend(q[:, 3:], k[:, 3:], v[:, 3:], positions=positions[:, 3:]),
         ],
         axis=1,
     )

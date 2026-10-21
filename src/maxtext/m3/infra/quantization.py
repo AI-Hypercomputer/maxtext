@@ -21,10 +21,14 @@ quantize their operands on the fly. Nothing in a model file changes -- no
 rule 4 of `m3/README.md` intact. Parameters stay `nnx.Param` and keep their
 paths, and `maybe_quantize` checks the latter rather than assuming it.
 
-The rule set is the legacy one for the same `config.quantization` values:
-every matmul under the decoder layers, int8 or fp8, with backward-pass
-quantization of the same type. The tied-embedding logits matmul and the
-router projection are left in full precision, as in legacy.
+The rule set covers every matmul under the decoder layers, with the
+tied-embedding logits matmul and the router projection left in full
+precision, as in legacy. `int8`, `fp8_e4m3` and `fp8_e5m2` mean what legacy's
+qwix rules make them mean: one dtype for weights, activations and gradients.
+`fp8` is the design doc's rule -- `float8_e4m3fn` forward, `float8_e5m2` for
+the gradients, which need the range more than the precision -- and is also
+what legacy's `fp8_full` does; legacy's qwix `fp8` keeps e4m3 in the backward
+pass as well, so the two `fp8`s differ there.
 """
 
 from flax import nnx
@@ -32,11 +36,12 @@ import jax
 import jax.numpy as jnp
 import qwix
 
+# `config.quantization` -> (forward dtype, gradient dtype).
 _QTYPES = {
-    "int8": jnp.int8,
-    "fp8": jnp.float8_e4m3fn,
-    "fp8_e4m3": jnp.float8_e4m3fn,
-    "fp8_e5m2": jnp.float8_e5m2,
+    "int8": (jnp.int8, jnp.int8),
+    "fp8": (jnp.float8_e4m3fn, jnp.float8_e5m2),
+    "fp8_e4m3": (jnp.float8_e4m3fn, jnp.float8_e4m3fn),
+    "fp8_e5m2": (jnp.float8_e5m2, jnp.float8_e5m2),
 }
 
 
@@ -46,7 +51,7 @@ def quantization_rules(config) -> list[qwix.QtRule] | None:
     return None
   if config.quantization not in _QTYPES:
     raise ValueError(f"m3 supports quantization in {sorted(_QTYPES)}; got {config.quantization!r}.")
-  qtype = _QTYPES[config.quantization]
+  fwd_qtype, bwd_qtype = _QTYPES[config.quantization]
   return [
       # The router decides which experts run; quantizing it changes routing, so
       # it stays in full precision. qwix matches rules first-hit, so this one
@@ -54,9 +59,9 @@ def quantization_rules(config) -> list[qwix.QtRule] | None:
       qwix.QtRule(module_path=r".*/gate$", weight_qtype=None, act_qtype=None, bwd_qtype=None, op_names=("dot_general",)),
       qwix.QtRule(
           module_path="decoder/layers.*",
-          weight_qtype=qtype,
-          act_qtype=qtype,
-          bwd_qtype=qtype,
+          weight_qtype=fwd_qtype,
+          act_qtype=fwd_qtype,
+          bwd_qtype=bwd_qtype,
           op_names=("dot_general", "einsum"),
       ),
   ]

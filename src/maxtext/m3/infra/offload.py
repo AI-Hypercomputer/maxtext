@@ -25,7 +25,7 @@ Moving memory kinds inside a traced function goes through
 own sharding `with_memory_kind`. `to_memory` picks whichever applies.
 
 Verified on a v6e-8 that the loss trajectory matches the un-offloaded
-optimizer step for step (see `tests/unit/m3/offload_test.py`). Activation
+optimizer step for step (`OffloadTest` in `tests/unit/m3/infra_test.py`). Activation
 offload is a remat policy (`minimal_offloaded`, `custom`), not this module;
 parameter offload is not implemented.
 """

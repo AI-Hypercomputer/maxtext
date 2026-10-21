@@ -58,11 +58,11 @@ class DeepSeekV3ComparisonTest(absltest.TestCase):
     u.assert_params_match(self, legacy, m3, cfg.first_num_dense_layers)
     paths = u.flat_params(m3)
     self.assertIn(("decoder", "layers", 0, "mlp", "wi_0", "kernel"), paths)
-    self.assertIn(("decoder", "layers", 1, "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "kernel"), paths)
-    self.assertIn(("decoder", "layers", 1, "DeepSeekMoeBlock_0", "shared_experts", "wo", "kernel"), paths)
+    self.assertIn(("decoder", "layers", 1, "moe_block", "routed_experts", "gate", "kernel"), paths)
+    self.assertIn(("decoder", "layers", 1, "moe_block", "shared_experts", "wo", "kernel"), paths)
     self.assertIn(("decoder", "layers", 0, "self_attention", "wkv_b", "kernel"), paths)
     # The routing bias is state, not a parameter, on both sides.
-    self.assertNotIn(("decoder", "layers", 1, "DeepSeekMoeBlock_0", "MoeBlock_0", "gate", "bias"), paths)
+    self.assertNotIn(("decoder", "layers", 1, "moe_block", "routed_experts", "gate", "bias"), paths)
     self.assertNotEmpty(nnx.to_flat_state(nnx.state(m3, RouterBias)))
 
   def test_forward_logits_match(self):

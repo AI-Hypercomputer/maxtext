@@ -26,6 +26,9 @@ from maxtext.utils import max_utils, maxtext_utils, model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 
 _LEGACY_LAYER = re.compile(r"(dense_|moe_)?layers_(\d+)")
+# Legacy path segments that are Linen class names rather than attribute names,
+# and the m3 attribute that holds the same parameters.
+_LEGACY_SEGMENTS = {"DeepSeekMoeBlock_0": "moe_block", "MoeBlock_0": "routed_experts"}
 
 # Reduced shapes that keep every model under test small enough for CPU. The
 # `base_*` keys are what the model YAMLs set; overriding the derived names
@@ -109,13 +112,15 @@ def _fmt(value) -> str:
 
 
 def legacy_to_m3_path(path: tuple, first_num_dense_layers: int = 0) -> tuple:
-  """Maps a legacy unscanned decoder path onto m3's `Layers` container layout.
+  """Maps a legacy unscanned decoder path onto m3's layout.
 
   `decoder/layers_3/...` becomes `decoder/layers/3/...`. DeepSeek numbers its
   two kinds separately, `dense_layers_i` and `moe_layers_j`; m3 keeps them in
   one container, so `moe_layers_j` maps to index `first_num_dense_layers + j`.
-  Other paths are returned unchanged.
+  Segments named in `_LEGACY_SEGMENTS` -- Linen-era class names that m3 models
+  do not carry -- are renamed. Other paths are returned unchanged.
   """
+  path = tuple(_LEGACY_SEGMENTS.get(segment, segment) if isinstance(segment, str) else segment for segment in path)
   for i in range(len(path) - 1):
     if path[i] == "decoder" and isinstance(path[i + 1], str):
       match = _LEGACY_LAYER.fullmatch(path[i + 1])

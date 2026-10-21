@@ -44,9 +44,14 @@ class Remat:
       nothing -- full rematerialization. Named policies come from
       `jax.checkpoint_policies` and refer to the `checkpoint_name` tags that
       model files put on their activations.
+    names: The tags `policy` saves or offloads, so that a policy naming only
+      tags a model never emits can be reported (`infra.remat.check_tags`)
+      instead of silently behaving like full rematerialization. `None` for a
+      policy that does not go by tags.
   """
 
   policy: Callable[..., bool] | None = None
+  names: tuple[str, ...] | None = None
 
 
 class Layers(nnx.List):

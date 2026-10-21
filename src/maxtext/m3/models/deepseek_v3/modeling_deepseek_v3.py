@@ -28,10 +28,13 @@ are defined in this file:
     `first_num_dense_layers` ordinary MLP layers before the MoE layers.
 
 The expert matmuls come from `maxtext.m3.core.moe`; the softmax attention
-arithmetic from `maxtext.m3.core.attention`. Parameter names match the legacy
-checkpoint layout, including its historical `DeepSeekMoeBlock_0.MoeBlock_0`
-nesting. The dense and MoE layers share one `Layers` container, in order;
-under `scan_layers` they become two scanned runs (see `maxtext.m3.infra.scan`).
+arithmetic from `maxtext.m3.core.attention`. Parameter names follow the legacy
+checkpoint layout except where legacy's are Linen artifacts: its
+`DeepSeekMoeBlock_0.MoeBlock_0` nesting is `moe_block.routed_experts` here,
+and the rename happens where legacy weights are loaded
+(`tests.utils.m3_test_utils.legacy_to_m3_path` for now), not in the model.
+The dense and MoE layers share one `Layers` container, in order; under
+`scan_layers` they become two scanned runs (see `maxtext.m3.infra.scan`).
 
 Not here yet: the loss-free bias *update* (`routed_bias_update_rate`),
 multi-token prediction, and the DeepSeek-V3.2 indexer.
@@ -357,7 +360,7 @@ def group_limited_mask(scores: jax.Array, *, n_routing_groups: int, topk_routing
 
 
 class DeepSeekV3RoutedExperts(nnx.Module):
-  """Router plus routed experts; attribute name `MoeBlock_0` in the checkpoint."""
+  """Router plus routed experts (legacy checkpoint name: `MoeBlock_0`)."""
 
   def __init__(self, config: Config, *, sharding: Sharding, rngs: nnx.Rngs):
     self.config = config
@@ -416,14 +419,14 @@ class DeepSeekV3RoutedExperts(nnx.Module):
 
 
 class DeepSeekV3MoE(nnx.Module):
-  """Routed experts plus shared experts; attribute name `DeepSeekMoeBlock_0` in the checkpoint."""
+  """Routed experts plus shared experts (legacy checkpoint name: `DeepSeekMoeBlock_0`)."""
 
   def __init__(self, config: Config, *, sharding: Sharding, rngs: nnx.Rngs):
-    self.MoeBlock_0 = DeepSeekV3RoutedExperts(config, sharding=sharding, rngs=rngs)  # pylint: disable=invalid-name
+    self.routed_experts = DeepSeekV3RoutedExperts(config, sharding=sharding, rngs=rngs)
     self.shared_experts = DeepSeekV3MLP(config, config.shared_experts * config.moe_mlp_dim, sharding=sharding, rngs=rngs)
 
   def __call__(self, x: jax.Array) -> tuple[jax.Array, jax.Array]:
-    routed, aux = self.MoeBlock_0(x)
+    routed, aux = self.routed_experts(x)
     return routed + self.shared_experts(x), aux
 
 
@@ -479,14 +482,14 @@ class DeepSeekV3MoeLayer(_DeepSeekV3Layer):
 
   def __init__(self, config: Config, *, sharding: Sharding, rngs: nnx.Rngs):
     super().__init__(config, sharding=sharding, rngs=rngs)
-    self.DeepSeekMoeBlock_0 = DeepSeekV3MoE(config, sharding=sharding, rngs=rngs)  # pylint: disable=invalid-name
+    self.moe_block = DeepSeekV3MoE(config, sharding=sharding, rngs=rngs)
 
   def __call__(
       self, carry: Carry, *, decoder_positions: jax.Array, decoder_segment_ids: jax.Array | None = None
   ) -> Carry:
     x, aux_loss = carry
     x = self._attend(x, decoder_positions, decoder_segment_ids)
-    moe_out, layer_aux = self.DeepSeekMoeBlock_0(self.post_self_attention_layer_norm(x))
+    moe_out, layer_aux = self.moe_block(self.post_self_attention_layer_norm(x))
     return (x + moe_out).astype(self.config.dtype), aux_loss + layer_aux
 
 
