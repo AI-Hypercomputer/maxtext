@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1792572164298,
+  "lastUpdate": 1792586445185,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -54316,6 +54316,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
             "value": 197.532,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Fenghui Zhang",
+            "username": "fenghuizhang",
+            "email": "fhzhang@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "93a2560c37311dc475f93cabb928fa3907f7f37e",
+          "message": "Add the `glm5_3_flash` model configuration and sharding foundation under `maxtext/m3/models/glm5_3_flash/`:\n- Add `Glm5Config` (`glm5_config.py`) specifying all GLM-5.3-Flash architectural hyperparameters (45 decoder layers with a 3:1 KDA / NoPE-DSA-MLA schedule, 3 dense Clamped-SwiGLU layers + 42 288-expert sigmoid-routed MoE layers, 4-stream Sinkhorn-20 mHC with `mhc_eps=1e-6`, and Layer-45 MTP) along with `mini_config` and `from_maxtext_config`.\n- Enforce explicit validation guards rejecting sequence packing (`packing=True` or segment IDs > 1), non-`\"full\"` `indexer_types`, non-zero `routed_bias_update_rate`, non-zero `indexer_loss_scaling_factor`, non-zero `qk_rope_head_dim` / `rope_parameters`, mismatched key/value head counts or dimensions, and non-string or unsupported `kda_implementation` values.\n- Add `Glm5Sharding` mapping logical axis names (`expert`, `embed`, `heads`, `kv`, `vocab`, `mlp`, `norm`, `q_lora`, `kv_lora`, `batch`) to physical mesh axes (`data`, `fsdp`, `tensor`, `expert`), including `ep_in_batch` activation partitioning.\n- Add `src/maxtext/configs/models/glm5.3-flash.yml`, register `\"glm5.3-flash\"` in `ModelName` and `HF_IDS`, and add unit tests covering configuration invariants, published HF `config.json` match (`test_matches_published_hf_text_config`), validation guards, sharding rules, and `pyconfig` initialization.\n\n- [x] Tested with unit tests\n\nPiperOrigin-RevId: 1003714341",
+          "timestamp": "2026-10-21T07:23:05Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/93a2560c37311dc475f93cabb928fa3907f7f37e"
+        },
+        "date": 1792586444492,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 284.972,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 48,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 103.677,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 34,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1996.7750000000005,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 99.20900000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 10,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 154.822,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 74,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 4395.151999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 306,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1450.585,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 102,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 196.612,
             "unit": "sec"
           },
           {
