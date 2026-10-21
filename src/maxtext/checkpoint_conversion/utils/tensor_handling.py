@@ -47,7 +47,7 @@ def nesting_depth(hf_source_keys: Any) -> int:
   return depth
 
 
-def stacked_axes(mt_key: str, config, depth: int) -> tuple:
+def stacked_axes(mt_key: str | tuple[str, ...], config, depth: int) -> tuple:
   """Returns where each of the ``depth`` stacked axes lands in the MaxText tensor.
 
   The outer-to-inner ordering of the returned axes matches the outer-to-inner
@@ -59,16 +59,23 @@ def stacked_axes(mt_key: str, config, depth: int) -> tuple:
     qwen3-next): the block's local layers are an inner scan nested inside the
     outer block scan, so ``(blocks, local)`` sit at
     ``(param_scan_axis, param_scan_axis + 1)`` rather than at the leading axes.
+    A remainder block (``layers_remainder-local_layers-...``) is not inside the
+    block scan, so its local layers stack like any other scanned layers.
   * A nested block scan whose weights are *also* expert-stacked (qwen3-next's
     routed experts): the expert axis still leads, giving
     ``(0, param_scan_axis, param_scan_axis + 1)``.
   """
   if isinstance(mt_key, tuple) and mt_key:
     mt_key = mt_key[0]
-  if isinstance(mt_key, str) and "-local_layers" in mt_key:
+  if isinstance(mt_key, str) and "-local_layers" in mt_key and "layers_remainder-" not in mt_key:
     param_scan_axis = config.param_scan_axis
     nested_axes = (param_scan_axis, param_scan_axis + 1)
-    return nested_axes if depth == 2 else (0,) + nested_axes
+    if depth == 2:
+      return nested_axes
+    if param_scan_axis == 0:
+      # Both scan axes would then sit in front of the expert axis, which no longer leads.
+      raise ValueError(f"{mt_key}: expert-stacked weights in a nested block scan need param_scan_axis >= 1.")
+    return (0,) + nested_axes
   return tuple(range(depth))
 
 
@@ -102,7 +109,7 @@ def _build_multi_axis_stacked_tensor(
     hook_fns: Any,
     target_leaf: Any,
     config,
-    mt_key: str = "",
+    mt_key: str | tuple[str, ...] = "",
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along several axes, in place on device.
 

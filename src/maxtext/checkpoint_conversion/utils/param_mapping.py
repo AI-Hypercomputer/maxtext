@@ -1004,6 +1004,24 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(
       mapping[(f"{global_prefix}-mlp-routed_experts-wi_0", f"{global_prefix}-mlp-routed_experts-wi_1")] = [
           hf_layer(b, global_position, "mlp.experts.gate_up_proj") for b in range(num_blocks)
       ]
+
+    # Layers past the last whole cycle are linear-attention layers in a remainder block, stacked [local].
+    remainder_positions = range(num_main_layers - num_blocks * layer_cycle_interval)
+    if remainder_positions:
+      remainder_prefix = "params-decoder-layers_remainder-local_layers"
+      for subkey, suffix in local_specs:
+        mapping[f"{remainder_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+            hf_entry(num_blocks, p, suffix) for p in remainder_positions
+        ]
+      for subkey, suffix in expert_specs:
+        mapping[f"{remainder_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+            [hf_layer(num_blocks, p, f"mlp.experts.{e}.{suffix}") for p in remainder_positions]
+            for e in range(num_experts)
+        ]
+      if fused_experts:
+        mapping[(f"{remainder_prefix}-mlp-routed_experts-wi_0", f"{remainder_prefix}-mlp-routed_experts-wi_1")] = [
+            hf_layer(num_blocks, p, "mlp.experts.gate_up_proj") for p in remainder_positions
+        ]
   else:
     # Unscanned layer mapping
     for i in range(num_main_layers):
@@ -1389,6 +1407,8 @@ def QWEN3_5_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
         ("params-decoder-layers-local_layers", False),
         ("params-decoder-layers-global_layer", True),
     ]
+    if num_main_layers % layer_cycle_interval:
+      layer_prefixes.append(("params-decoder-layers_remainder-local_layers", False))
   else:
     layer_prefixes = [
         (f"params-decoder-layers_{i}", (i % layer_cycle_interval + 1) % layer_cycle_interval == 0)
@@ -1625,6 +1645,20 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=F
           [hf_layer(b, global_position, f"mlp.experts.{e}.{suffix}") for b in range(num_blocks)]
           for e in range(num_experts)
       ]
+
+    # Layers past the last whole cycle are linear-attention layers in a remainder block, stacked [local].
+    remainder_positions = range(num_main_layers - num_blocks * layer_cycle_interval)
+    if remainder_positions:
+      remainder_prefix = "params-decoder-layers_remainder-local_layers"
+      for subkey, suffix in local_specs:
+        mapping[f"{remainder_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+            hf_layer(num_blocks, p, suffix) for p in remainder_positions
+        ]
+      for subkey, suffix in expert_specs:
+        mapping[f"{remainder_prefix}-{subkey}"] = [  # pyrefly: ignore[bad-assignment, no-matching-overload]
+            [hf_layer(num_blocks, p, f"mlp.experts.{e}.{suffix}") for p in remainder_positions]
+            for e in range(num_experts)
+        ]
   else:
     # Unscanned layer mapping
     for i in range(num_main_layers):
@@ -1720,12 +1754,15 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   num_main_layers = config["num_hidden_layers"]
   # Scanned blocks expose two prefixes -- the stacked local (linear-attention) layers
   # and the single global (full-attention) layer -- rather than one prefix per position
-  # in the cycle. Unscanned models keep one prefix per decoder layer.
+  # in the cycle, plus the remainder block's local layers when the cycle does not divide
+  # the layer count. Unscanned models keep one prefix per decoder layer.
   if scan_layers:
     layer_prefixes = [
         ("params-decoder-layers-local_layers", False),
         ("params-decoder-layers-global_layer", True),
     ]
+    if num_main_layers % layer_cycle_interval:
+      layer_prefixes.append(("params-decoder-layers_remainder-local_layers", False))
   else:
     layer_prefixes = [
         (f"params-decoder-layers_{i}", (i % layer_cycle_interval + 1) % layer_cycle_interval == 0)

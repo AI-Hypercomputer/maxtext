@@ -436,7 +436,7 @@ def _build_multi_axis_stacked_tensor(
     hook_fns: Any,
     target_shape: tuple,
     config,
-    mt_key: str = "",
+    mt_key: str | tuple[str, ...] = "",
 ) -> np.ndarray:
   """Builds a MaxText tensor by stacking HF weights along several axes.
 

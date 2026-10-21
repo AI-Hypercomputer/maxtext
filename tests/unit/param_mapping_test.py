@@ -442,6 +442,63 @@ class ParamMappingTest(unittest.TestCase):
         tensor_handling.stacked_axes(local_key, cfg, depth=2),
     )
 
+  def test_qwen3_hybrid_mappings_cover_the_scan_remainder(self):
+    """Layers past the last whole cycle live in `layers_remainder`, whose local layers stack [local] alone."""
+    num_layers, cycle, num_experts = 10, 4, 2
+    remainder_layers = [8, 9]
+    prefix = "params-decoder-layers_remainder-local_layers"
+
+    next_config = {"num_hidden_layers": num_layers, "num_experts": num_experts}
+    next_mt_config = mock.Mock(inhomogeneous_layer_cycle_interval=cycle)
+    mapping = param_mapping.QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(next_config, next_mt_config, scan_layers=True)
+    self.assertEqual(
+        mapping[f"{prefix}-attention-in_proj_qkvz-kernel"],
+        [f"model.layers.{i}.linear_attn.in_proj_qkvz.weight" for i in remainder_layers],
+    )
+    self.assertEqual(
+        mapping[f"{prefix}-mlp-routed_experts-wo"],
+        [[f"model.layers.{i}.mlp.experts.{e}.down_proj.weight" for i in remainder_layers] for e in range(num_experts)],
+    )
+    # The remainder starts on a cycle boundary, so it never holds the full-attention layer.
+    self.assertNotIn(f"{prefix}-attention-attention-query-kernel", mapping)
+    hooks = param_mapping.QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(next_config, next_mt_config, scan_layers=True)
+    for subkey in ("attention-in_proj_qkvz-kernel", "attention-conv1d-kernel", "mlp-routed_experts-wo"):
+      self.assertIn(f"{prefix}-{subkey}", mapping)
+      self.assertIn(f"{prefix}-{subkey}", hooks)
+
+    qwen3_5_config = {"text_config": {"num_hidden_layers": num_layers, "num_experts": num_experts}}
+    qwen3_5_mt_config = mock.Mock(
+        num_decoder_layers=num_layers,
+        num_experts=num_experts,
+        inhomogeneous_layer_cycle_interval=cycle,
+        weight_dtype="bfloat16",
+        use_multimodal=False,
+    )
+    mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(qwen3_5_config, qwen3_5_mt_config, scan_layers=True)
+    hf = "model.language_model.layers"
+    self.assertEqual(
+        mapping[f"{prefix}-attention-in_proj_ba-kernel"],
+        [(f"{hf}.{i}.linear_attn.in_proj_b.weight", f"{hf}.{i}.linear_attn.in_proj_a.weight") for i in remainder_layers],
+    )
+    self.assertEqual(
+        mapping[(f"{prefix}-mlp-routed_experts-wi_0", f"{prefix}-mlp-routed_experts-wi_1")],
+        [f"{hf}.{i}.mlp.experts.gate_up_proj" for i in remainder_layers],
+    )
+
+    # A whole number of cycles leaves no remainder block to map.
+    qwen3_5_mt_config.num_decoder_layers = 8
+    qwen3_5_config["text_config"]["num_hidden_layers"] = 8
+    mapping = param_mapping.QWEN3_5_MAXTEXT_TO_HF_PARAM_MAPPING(qwen3_5_config, qwen3_5_mt_config, scan_layers=True)
+    self.assertFalse(any("layers_remainder" in str(key) for key in mapping))
+
+  def test_nested_scan_expert_axes_need_a_nonzero_param_scan_axis(self):
+    """With param_scan_axis=0 the expert axis no longer leads a nested block scan's routed experts."""
+    cfg = mock.Mock(param_scan_axis=0)
+    local_key = "params-decoder-layers-local_layers-mlp-routed_experts-wi_0"
+    self.assertEqual(tensor_handling.stacked_axes(local_key, cfg, depth=2), (0, 1))
+    with self.assertRaisesRegex(ValueError, "param_scan_axis >= 1"):
+      tensor_handling.stacked_axes(local_key, cfg, depth=3)
+
   @staticmethod
   def _indices_from_name(name):
     """Parses a synthetic HF key such as "e1_b0_l2" back into its stacked-axis indices."""
@@ -543,6 +600,25 @@ class ParamMappingTest(unittest.TestCase):
     for e in range(num_experts):
       for b in range(num_blocks):
         np.testing.assert_array_equal(stacked[e, b], value_of(e, b))
+
+  def test_qwen3_next_remainder_experts_stack_unstack_roundtrip(self):
+    """The remainder block is not inside the block scan, so its routed experts take the plain
+    scanned-MoE layout, (experts, local), even though their key names `local_layers`."""
+    num_experts, num_local = 2, 3
+    slice_shape = (4, 3)
+    cfg = self._qwen3_next_conversion_config()
+    mt_key = "params-decoder-layers_remainder-local_layers-mlp-routed_experts-wi_0"
+
+    def value_of(e, l):
+      return np.full(slice_shape, e * 100 + l, dtype=np.float32)
+
+    hf_names = [[f"e{e}_l{l}" for l in range(num_local)] for e in range(num_experts)]
+    target_shape = (num_experts, num_local, *slice_shape)
+
+    stacked = self._assert_stack_unstack_roundtrip(mt_key, hf_names, target_shape, slice_shape, value_of, cfg)
+    for e in range(num_experts):
+      for l in range(num_local):
+        np.testing.assert_array_equal(stacked[e, l], value_of(e, l))
 
   def test_weaver_text_mapping(self):
     config = {
