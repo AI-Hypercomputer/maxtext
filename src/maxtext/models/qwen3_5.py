@@ -20,6 +20,9 @@ import functools
 from typing import Any, cast
 
 from flax import nnx
+import jax
+from jax import ad_checkpoint
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import Array, Config, ShardMode, get_weight_dtype
@@ -88,6 +91,8 @@ class Qwen3_5ScannableBlock(nnx.Module):
       kv_cache: None | tuple[Any, ...] = None,
       attention_metadata: None | dict[str, Any] = None,
       forced_routed_experts: jnp.ndarray | None = None,
+      remat_policy_fn=None,
+      prevent_cse=False,
   ) -> tuple[Array, None | tuple[Any, ...]]:
     cfg = self.config
     x = carry
@@ -103,18 +108,75 @@ class Qwen3_5ScannableBlock(nnx.Module):
       # sub-layer in this cycle (see nnx_decoders.py's scan wiring).
       layer_forced_routed_experts = forced_routed_experts[i] if forced_routed_experts is not None else None
       layer_kv_cache = kv_cache[i] if (kv_cache is not None and i < len(kv_cache)) else None
-      x, new_kv_cache = layer(
-          x,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          previous_chunk,
-          slot,
-          kv_cache=layer_kv_cache,
-          attention_metadata=attention_metadata,
-          forced_routed_experts=layer_forced_routed_experts,
-      )
+      if getattr(cfg, "qwen3_5_sublayer_remat", False):
+
+        def run_layer(
+            carry_in,
+            layer_graphdef,
+            layer_state,
+            _kv_cache=layer_kv_cache,
+            _forced_routed_experts=layer_forced_routed_experts,
+        ):
+          layer_merged = nnx.merge(layer_graphdef, layer_state)
+          out_x, out_kv = layer_merged(
+              carry_in,
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              previous_chunk,
+              slot,
+              kv_cache=_kv_cache,
+              attention_metadata=attention_metadata,
+              forced_routed_experts=_forced_routed_experts,
+          )
+          _, inter_state, _ = nnx.split(layer_merged, nnx.Intermediate, ...)
+          return (out_x, out_kv), inter_state
+
+        run_layer_fn = jax.checkpoint(run_layer, policy=remat_policy_fn, prevent_cse=prevent_cse)
+        layer_graphdef, layer_state = nnx.split(layer, nnx.Variable)
+
+        if kv_cache is None:
+
+          def scan_sublayer_body(
+              carry_and_state,
+              _,
+              _run_layer_fn=run_layer_fn,
+              _layer_graphdef=layer_graphdef,
+          ):
+            curr_x, curr_state = carry_and_state
+            (out_x, out_kv), inter = _run_layer_fn(curr_x, _layer_graphdef, curr_state)
+            return (out_x, curr_state), (out_kv, inter)
+
+          with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+            (x, _), (stacked_kv, stacked_inter) = jax.lax.scan(
+                scan_sublayer_body,
+                (x, layer_state),
+                None,
+                length=1,
+            )
+          new_kv_cache = jax.tree.map(lambda v: v[0], stacked_kv)
+          inter_state = jax.tree.map(lambda v: v[0], stacked_inter)
+        else:
+          (x, new_kv_cache), inter_state = run_layer_fn(x, layer_graphdef, layer_state)
+
+        if inter_state:
+          for path, v_state in inter_state.flat_state():
+            name = path[-1] if isinstance(path, tuple) and len(path) > 0 else "moe_has_overflow"
+            layer.sow(nnx.Intermediate, name, v_state.value)
+      else:
+        x, new_kv_cache = layer(
+            x,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            previous_chunk,
+            slot,
+            kv_cache=layer_kv_cache,
+            attention_metadata=attention_metadata,
+            forced_routed_experts=layer_forced_routed_experts,
+        )
       updated_kv_caches.append(new_kv_cache)
 
     if kv_cache is None:
@@ -255,36 +317,76 @@ class Qwen3_5DecoderLayer(nnx.Module):
     if isinstance(attention_metadata, dict):
       attention_metadata = attention_metadata.get(f"layer.{self.layer_idx}", attention_metadata.get(self.layer_idx))
 
-    # First LayerNorm, applied before the attention block.
-    hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
-    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    if (
+        getattr(self.config, "qwen3_5_sublayer_remat", False)
+        and getattr(self.config, "num_experts", 1) > 1
+        and kv_cache is None
+    ):
+      attn_graphdef, attn_state = nnx.split((self.input_layernorm, self.attention), nnx.Variable)
 
-    # Conditionally apply either the Linear Attention or Full Attention block.
-    if isinstance(self.attention, Qwen3_5FullAttention):
-      attention_output, new_kv_cache = cast(Qwen3_5FullAttention, self.attention)(
-          hidden_states,
-          decoder_segment_ids,
-          decoder_positions,
-          deterministic,
-          model_mode,
-          kv_cache=kv_cache,
-          attention_metadata=attention_metadata,
-          out_sharding=self.out_sharding,
-      )
+      def _run_attn_subblock_impl(x_in, state_in, seg_in, pos_in):
+        norm_mod, attn_mod = nnx.merge(attn_graphdef, state_in)
+        h = norm_mod(x_in, out_sharding=self.out_sharding)
+        h = self._maybe_shard_with_logical(h, self.activation_axis_names)
+        if isinstance(attn_mod, Qwen3_5FullAttention):
+          attn_out, _ = cast(Qwen3_5FullAttention, attn_mod)(
+              h,
+              seg_in,
+              pos_in,
+              deterministic,
+              model_mode,
+              kv_cache=None,
+              attention_metadata=attention_metadata,
+              out_sharding=self.out_sharding,
+          )
+        else:
+          attn_out, _ = cast(Qwen3_5GatedDeltaNet, attn_mod)(
+              h,
+              model_mode=model_mode,
+              kv_cache=None,
+              decoder_segment_ids=seg_in,
+              attention_metadata=attention_metadata,
+              out_sharding=self.out_sharding,
+          )
+        attn_out = self._maybe_shard_with_logical(attn_out, self.activation_axis_names)
+        h_out = x_in + attn_out
+        return self._maybe_shard_with_logical(h_out, self.activation_axis_names)
+
+      _run_attn_subblock = jax.checkpoint(_run_attn_subblock_impl, policy=None, prevent_cse=False)
+      hidden_states = _run_attn_subblock(inputs, attn_state, decoder_segment_ids, decoder_positions)
+      hidden_states = ad_checkpoint.checkpoint_name(hidden_states, "attn_subblock_out")
+      new_kv_cache = None
     else:
-      attention_output, new_kv_cache = cast(Qwen3_5GatedDeltaNet, self.attention)(
-          hidden_states,
-          model_mode=model_mode,
-          kv_cache=kv_cache,
-          decoder_segment_ids=decoder_segment_ids,
-          attention_metadata=attention_metadata,
-          out_sharding=self.out_sharding,
-      )
+      # First LayerNorm, applied before the attention block.
+      hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
+      hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
-    # First residual connection after attention
-    attention_output = self._maybe_shard_with_logical(attention_output, self.activation_axis_names)
-    hidden_states = residual + attention_output
-    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+      # Conditionally apply either the Linear Attention or Full Attention block.
+      if isinstance(self.attention, Qwen3_5FullAttention):
+        attention_output, new_kv_cache = cast(Qwen3_5FullAttention, self.attention)(
+            hidden_states,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            kv_cache=kv_cache,
+            attention_metadata=attention_metadata,
+            out_sharding=self.out_sharding,
+        )
+      else:
+        attention_output, new_kv_cache = cast(Qwen3_5GatedDeltaNet, self.attention)(
+            hidden_states,
+            model_mode=model_mode,
+            kv_cache=kv_cache,
+            decoder_segment_ids=decoder_segment_ids,
+            attention_metadata=attention_metadata,
+            out_sharding=self.out_sharding,
+        )
+
+      # First residual connection after attention
+      attention_output = self._maybe_shard_with_logical(attention_output, self.activation_axis_names)
+      hidden_states = residual + attention_output
+      hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # Prepare for the MoE / MLP block by capturing the new residual
     residual = hidden_states

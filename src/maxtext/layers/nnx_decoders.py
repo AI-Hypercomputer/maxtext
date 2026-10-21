@@ -1265,7 +1265,7 @@ class NNXDecoder(nnx.Module):
         return new_carry, (new_current_state, updated_kv)
       return new_carry, new_current_state
 
-    if skip_block_remat:
+    if skip_block_remat or getattr(self.config, "qwen3_5_sublayer_remat", False):
       # The scanned module applies its own remat internally; wrapping the whole
       # body again would double-remat and recompute the entire block.
       layer_fn_wrapped = layer_fn
@@ -1986,6 +1986,9 @@ class NNXDecoder(nnx.Module):
         "slot": slot,
         "previous_chunk": previous_chunk,
     }
+    if self.is_qwen3_5 and getattr(cfg, "qwen3_5_sublayer_remat", False):
+      layer_kwargs["remat_policy_fn"] = policy
+      layer_kwargs["prevent_cse"] = maxtext_utils.should_prevent_cse_in_remat(cfg)
     # Extract the bidirectional mask locally for layer configurations
     bidirectional_mask = None
     if multimodal_input is not None:
