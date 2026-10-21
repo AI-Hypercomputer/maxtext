@@ -43,6 +43,12 @@ layer. With `remat_policy=full` only each layer's input is saved. Gathered weigh
 whatever the policy: if a policy would save a residual shaped like a gathered weight, a warning is
 logged. The number and size of the residuals saved per layer are logged at trace time.
 
+Some models scan blocks that rematerialize their own sub-layers (for example Gemma4, DeepSeek-V4,
+Qwen3-Next and Qwen3.5), and those blocks are prefetched as a whole. For them the policy also saves
+each sub-layer's `decoder_layer_input`, so the backward pass recomputes every sub-layer once, from
+its input, rather than recomputing the whole block before the block's own remat recomputes each
+sub-layer again.
+
 ## Usage
 
 ```bash

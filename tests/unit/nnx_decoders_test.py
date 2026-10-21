@@ -2571,6 +2571,21 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
     saved = self._assert_parity_saved_residuals(num_layers=5, remat_policy="custom", mlpwo="offload", query_proj="device")
     self.assertGreater(saved, 0)
 
+  def test_blocks_with_internal_remat_save_their_sub_layer_inputs(self):
+    """A block that remats its own sub-layers is not recomputed whole before that remat runs.
+
+    Under full remat the pipeline would otherwise keep only each block's input, so the backward
+    pass would recompute the block and then, inside the block's own remat, every sub-layer again.
+    Saving each sub-layer's input instead takes two residuals per Qwen3.5 block -- the local
+    scan's stacked inputs and the global layer's -- and none of them may be a gathered weight.
+    """
+    model_config = {k: v for k, v in _QWEN3_5_CONFIG.items() if k != "base_num_decoder_layers"}
+    with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
+      self._assert_parity(num_layers=8, remat_policy="full", **model_config)
+    logs = [str(c) for c in log_info.call_args_list]
+    self.assertTrue(any("remat policy saves 2 residual(s) per layer" in log for log in logs), logs)
+    self.assertFalse(any("shaped like gathered weights" in log for log in logs), logs)
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -1945,6 +1945,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     if isinstance(inputs, tuple):
       inputs = inputs[0]
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     residual = inputs
 
     if isinstance(attention_metadata, dict):

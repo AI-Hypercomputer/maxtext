@@ -1204,7 +1204,9 @@ class NNXDecoder(nnx.Module):
         and not self.config.parameter_memory_host_offload
         and not getattr(self, "disable_quant_stats_update", False)
     ):
-      return self._apply_layers_sequentially_prefetch(layers, x_in, *args, length=length, **kwargs)
+      return self._apply_layers_sequentially_prefetch(
+          layers, x_in, *args, length=length, skip_block_remat=skip_block_remat, **kwargs
+      )
     if length == 0:
       return (
           x_in,
@@ -1358,7 +1360,9 @@ class NNXDecoder(nnx.Module):
 
     return final_carry, out_layers, returned_kv_stacked if use_kv else None
 
-  def _apply_layers_sequentially_prefetch(self, layers, x_in, *args, length: int, **kwargs):
+  def _apply_layers_sequentially_prefetch(
+      self, layers, x_in, *args, length: int, skip_block_remat: bool = False, **kwargs
+  ):
     """Runs the scanned layer stack with FSDP weight prefetching (see `fsdp_prefetch`)."""
     return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
         layers,
@@ -1369,6 +1373,7 @@ class NNXDecoder(nnx.Module):
         config=self.config,
         remat_policy=self.get_remat_policy(),
         prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
+        skip_block_remat=skip_block_remat,
         **kwargs,
     )
 
