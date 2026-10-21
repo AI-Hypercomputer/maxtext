@@ -29,6 +29,7 @@ import numpy as np
 
 from maxtext.common.common_types import ShardMode
 from maxtext.layers import fsdp_prefetch
+from maxtext.utils import sharding
 
 
 def _abstract_mesh(shape, names):
@@ -67,6 +68,18 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     stacked = jax.device_put(jnp.ones((2, 4, 8)), NamedSharding(mesh, PartitionSpec(None, "fsdp", "tensor")))
     s = fsdp_prefetch._per_layer_sharding(stacked, mesh)  # pylint: disable=protected-access
     self.assertEqual(tuple(s.spec), ("fsdp", "tensor"))
+
+  def test_remove_fsdp_from_sharding(self):
+    mesh = _abstract_mesh((4, 2, 2), ("fsdp", "expert", "tensor"))
+    tree = {
+        "co_sharded": NamedSharding(mesh, PartitionSpec(("fsdp", "expert"), "tensor")),
+        "routed": NamedSharding(mesh, PartitionSpec("expert", "fsdp", None)),
+        "compound": NamedSharding(mesh, PartitionSpec(("expert", "fsdp"), None)),
+    }
+    stripped = sharding.remove_fsdp_from_sharding(tree)
+    self.assertEqual(tuple(stripped["co_sharded"].spec), (None, "tensor"))
+    self.assertEqual(tuple(stripped["routed"].spec), ("expert", None, None))
+    self.assertEqual(tuple(stripped["compound"].spec), ("expert", None))
 
 
 class FsdpPrefetchAllGatherTest(unittest.TestCase):
@@ -110,6 +123,45 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     self.assertIn('name = "fsdp"', gathers[0])
     self.assertIn('name = "fsdp_transpose"', gathers[0])
     self.assertIn("(tensor<3x2xf32>) -> tensor<3x8xf32>", gathers[0])
+    self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
+
+  def test_explicit_mode_gathers_co_sharded_expert_axis_with_fsdp(self):
+    mesh = _abstract_mesh((4, 2), ("fsdp", "expert"))
+    # Non-routed weights (attention, dense MLP, shared experts) are sharded over ('fsdp', 'expert').
+    out, gathers = self._lower_gather(mesh, PartitionSpec(("fsdp", "expert"), None), (16, 6))
+    self.assertEqual(out.shape, (16, 6))
+    self.assertEqual(tuple(out.sharding.spec), (None, None))
+    self.assertEqual(len(gathers), 1)
+    self.assertIn("all_gather_dim = 0", gathers[0])
+    self.assertIn('name = "fsdp"', gathers[0])
+    self.assertIn('name = "expert"', gathers[0])
+    self.assertIn("(tensor<2x6xf32>) -> tensor<16x6xf32>", gathers[0])
+    self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
+
+  def test_explicit_mode_preserves_routed_expert_axis(self):
+    mesh = _abstract_mesh((4, 2), ("fsdp", "expert"))
+    # MoE routed expert weights have 'expert' on dim 0 and 'fsdp' on dim 1; only 'fsdp' is gathered.
+    out, gathers = self._lower_gather(mesh, PartitionSpec("expert", "fsdp", None), (4, 16, 6))
+    self.assertEqual(out.shape, (4, 16, 6))
+    self.assertEqual(tuple(out.sharding.spec), ("expert", None, None))
+    self.assertEqual(len(gathers), 1)
+    self.assertIn("all_gather_dim = 1", gathers[0])
+    self.assertIn('name = "fsdp"', gathers[0])
+    self.assertNotIn('name = "expert"', gathers[0])
+    self.assertIn("(tensor<2x4x6xf32>) -> tensor<2x16x6xf32>", gathers[0])
+    self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
+
+  def test_explicit_mode_preserves_leading_expert_axis_on_compound_dim(self):
+    mesh = _abstract_mesh((2, 4), ("expert", "fsdp"))
+    # Compound ('expert', 'fsdp') on the expert dim (e.g. moe_flat_fsdp_weights) keeps 'expert' sharded.
+    out, gathers = self._lower_gather(mesh, PartitionSpec(("expert", "fsdp"), None), (16, 6))
+    self.assertEqual(out.shape, (16, 6))
+    self.assertEqual(tuple(out.sharding.spec), ("expert", None))
+    self.assertEqual(len(gathers), 1)
+    self.assertIn("all_gather_dim = 0", gathers[0])
+    self.assertIn('name = "fsdp"', gathers[0])
+    self.assertNotIn('name = "expert"', gathers[0])
+    self.assertIn("(tensor<2x6xf32>) -> tensor<8x6xf32>", gathers[0])
     self.assertIn('xla_explicit_fsdp = "yes"', gathers[0])
 
   def test_non_minor_fsdp_axis_falls_back_to_resharding(self):
