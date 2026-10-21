@@ -28,6 +28,7 @@ import sys
 import unittest
 
 from flax import nnx
+from flax import traverse_util
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
@@ -95,6 +96,38 @@ def _batch_rows(cfg):
   every device, so a batch built with fewer rows than this cannot be sharded.
   """
   return int(round(cfg.per_device_batch_size * jax.device_count()))
+
+
+def _unscan_qwen3_hybrid_params(scanned_params, cycle_interval, num_layers, scan_axis):
+  """Renames a scanned Qwen3-Next/Qwen3.5 param tree to the unscanned decoder's `layers_{i}` params.
+
+  `layers.local_layers` stacks blocks then local slots on `scan_axis`, `layers.global_layer` stacks
+  blocks, and `layers_remainder.local_layers` stacks the layers past the last whole cycle.
+  """
+  num_blocks = num_layers // cycle_interval
+  unscanned = {}
+  for key, value in traverse_util.flatten_dict(scanned_params).items():
+    if "layers" in key:
+      idx = key.index("layers")
+      if key[idx + 1] == "local_layers":
+        per_layer = {
+            block * cycle_interval + slot: value.take(block, axis=scan_axis).take(slot, axis=scan_axis)
+            for block in range(num_blocks)
+            for slot in range(cycle_interval - 1)
+        }
+      else:
+        per_layer = {
+            block * cycle_interval + cycle_interval - 1: value.take(block, axis=scan_axis) for block in range(num_blocks)
+        }
+    elif "layers_remainder" in key:
+      idx = key.index("layers_remainder")
+      per_layer = {num_blocks * cycle_interval + i: value.take(i, axis=scan_axis) for i in range(value.shape[scan_axis])}
+    else:
+      unscanned[key] = value
+      continue
+    for layer, layer_value in per_layer.items():
+      unscanned[key[:idx] + (f"layers_{layer}",) + key[idx + 2 :]] = layer_value
+  return traverse_util.unflatten_dict(unscanned)
 
 
 class DummyConfig:
@@ -468,9 +501,15 @@ class TrainerRouterReplayTest(unittest.TestCase):
     print(f"\n[Trainer Router Replay][{label}] Computed loss with forced routing" f" + padding: {loss}")
     return loss, aux
 
-  def _loss_for_routing(self, cfg, seq_len, forced_experts):
-    """train.loss_fn for one routing, reusing fixed params so losses compare."""
+  def _build_model(self, cfg):
+    """Builds the model for `cfg` from a fixed seed."""
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(42))
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      return model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
+
+  def _loss_for_routing(self, cfg, seq_len, forced_experts, model=None):
+    """train.loss_fn for one routing, reusing fixed params so losses compare."""
     batch_rows = _batch_rows(cfg)
     tokens = jnp.array(([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32)
     inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_rows, 1))
@@ -479,8 +518,6 @@ class TrainerRouterReplayTest(unittest.TestCase):
         (batch_rows, 1),
     )
     segmentation = jnp.ones((batch_rows, seq_len), dtype=jnp.int32)
-
-    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(42))
 
     data_batch = {
         "inputs": inputs,
@@ -491,8 +528,9 @@ class TrainerRouterReplayTest(unittest.TestCase):
     }
     if forced_experts is not None:
       data_batch["forced_routed_experts"] = forced_experts
+    if model is None:
+      model = self._build_model(cfg)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
       loss, _ = train.loss_fn(
           model,
           cfg,
@@ -665,6 +703,52 @@ class TrainerRouterReplayTest(unittest.TestCase):
     a = shared.at[:, :, -1, :].set(1)
     b = shared.at[:, :, -1, :].set(3)
     self._assert_routing_is_load_bearing(cfg, seq_len, a, b, "qwen3.5 scan remainder")
+
+  def test_scanned_routing_matches_unscanned_with_several_local_layers_and_a_remainder(self):
+    """Each sub-layer of a scanned block must replay its own layer's routing.
+
+    With a cycle of 3 every block scans two local layers, and 8 layers leave a
+    two-layer remainder block, so a slice sent to the wrong local layer, block
+    or remainder layer moves the loss away from the unscanned model's, which
+    gets the same weights and indexes the routing by layer directly.
+    """
+    seq_len, batch_size, top_k, num_experts = 8, 1, 2, 4
+    cycle_interval, layers = 3, 8
+    kwargs = {
+        "base_num_decoder_layers": layers,
+        "num_decoder_layers": layers,
+        "inhomogeneous_layer_cycle_interval": cycle_interval,
+    }
+    scanned_cfg = self._qwen35_cfg(
+        seq_len, batch_size, num_experts, top_k, "test_router_replay_scan_parity", scan_layers=True, **kwargs
+    )
+    unscanned_cfg = self._qwen35_cfg(
+        seq_len, batch_size, num_experts, top_k, "test_router_replay_unscan_parity", scan_layers=False, **kwargs
+    )
+    scanned_model = self._build_model(scanned_cfg)
+    unscanned_model = self._build_model(unscanned_cfg)
+    unscanned_params = nnx.state(unscanned_model, nnx.Param)
+    nnx.replace_by_pure_dict(
+        unscanned_params,
+        _unscan_qwen3_hybrid_params(
+            nnx.state(scanned_model, nnx.Param).to_pure_dict(), cycle_interval, layers, scanned_cfg.param_scan_axis
+        ),
+    )
+    nnx.update(unscanned_model, unscanned_params)
+
+    # A distinct expert pair per layer: layer l routes to experts l and l + 1 (mod num_experts).
+    layer_ids = jnp.arange(layers, dtype=jnp.int32)
+    pairs = jnp.stack([layer_ids % num_experts, (layer_ids + 1) % num_experts], axis=-1)
+    routing = jnp.broadcast_to(pairs[None, None], (_batch_rows(scanned_cfg), seq_len, layers, top_k))
+    unscanned_loss = self._loss_for_routing(unscanned_cfg, seq_len, routing, model=unscanned_model)
+    scanned_loss = self._loss_for_routing(scanned_cfg, seq_len, routing, model=scanned_model)
+    self.assertAlmostEqual(scanned_loss, unscanned_loss, places=4)
+
+    # The comparison can only catch a mix-up if swapping two local layers' routing moves the loss.
+    swapped = routing.at[:, :, [0, 1], :].set(routing[:, :, [1, 0], :])
+    self.assertNotAlmostEqual(
+        self._loss_for_routing(unscanned_cfg, seq_len, swapped, model=unscanned_model), unscanned_loss, places=4
+    )
 
   def test_loss_fn_with_forced_routed_experts_gemma4(self):
     """Gemma4 is supported unscanned only (its scanned path raises), and it is
