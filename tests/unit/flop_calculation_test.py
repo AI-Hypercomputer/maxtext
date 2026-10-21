@@ -313,6 +313,60 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
 
+  def test_nemotron3_nano_omni_flops(self):
+    """Nemotron-3 hybrid: 23 Mamba-2, 23 MoE (relu2, 2 matrices) and 6 NoPE GQA layers."""
+    b, s = 1, 4096
+    try:
+      cfg = self._initialize_model_config(
+          "nemotron3-nano-omni-30b-a3b", max_target_length=s, per_device_batch_size=b, scan_layers=False
+      )
+    except FileNotFoundError:
+      config_args = [None, get_test_config_path("base.yml"), "run_name=test", "skip_jax_distributed_system=True"]
+      cfg = pyconfig.initialize(
+          config_args,
+          decoder_block="nemotron3",
+          base_emb_dim=2688,
+          base_num_decoder_layers=52,
+          hybrid_override_pattern="MEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEM*EMEMEMEM*EMEMEMEME",
+          vocab_size=131072,
+          base_num_query_heads=32,
+          base_num_kv_heads=2,
+          head_dim=128,
+          mamba_num_heads=64,
+          mamba_head_dim=64,
+          mamba_ssm_state_size=128,
+          mamba_n_groups=8,
+          mamba_conv_kernel=4,
+          mamba_conv_bias=True,
+          mamba_chunk_size=128,
+          num_experts=128,
+          num_experts_per_tok=6,
+          base_moe_mlp_dim=1856,
+          base_mlp_dim=1856,
+          shared_experts=2,
+          mlp_activations=["relu2"],
+          max_target_length=s,
+          per_device_batch_size=b,
+          scan_layers=False,
+          enable_checkpointing=False,
+      )
+    e, vocab = 2688, 131072
+    # Mamba-2: in_proj 2688 -> 2*4096 + 2*8*128 + 64 = 10304, out_proj 4096 -> 2688, depthwise conv k=4 over 6144.
+    mamba_weight = 2 * b * s * e * (10304 + 4096) + 2 * b * s * 4 * 6144
+    mamba_core = 4 * b * s * 64 * 64 * 128
+    # MoE: router 2688 x 128; 6 routed + 2 shared halves of width 1856, 2 matrices each.
+    moe_weight = 2 * b * s * e * 128 + (6 + 2) * 2 * 2 * b * s * e * 1856
+    # Attention: 32 query + 2 kv heads of 128, output projection, causal score + value FLOPs.
+    attn_weight = 2 * b * s * e * (32 + 2 * 2) * 128 + 2 * b * s * e * 32 * 128
+    attn_core = 4 * b * s * s * 32 * 128 / 2
+    embedding = 2 * b * s * e * vocab
+    weight_tflops = (23 * mamba_weight + 23 * moe_weight + 6 * attn_weight + embedding) * 3 / 1e12
+    attention_tflops = (23 * mamba_core + 6 * attn_core) * 3 / 1e12
+    total, learnable, attention = calculate_tflops_training_per_device(cfg, log=False)
+    self.assertFlopsAlmostEqual(learnable, weight_tflops)
+    self.assertFlopsAlmostEqual(attention, attention_tflops)
+    self.assertFlopsAlmostEqual(total, weight_tflops + attention_tflops)
+
   def test_llama2_7b_flops(self):
     """Test Llama2 7b Flops calculation with default parameters"""
     cfg = self._initialize_model_config(

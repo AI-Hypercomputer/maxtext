@@ -581,6 +581,10 @@ class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
 
 
+# Model-name prefixes routed DeepSeek-V3 style: the bias only picks the experts, weights are unbiased scores.
+DEEPSEEK_ROUTING_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "nemotron3")
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -661,10 +665,12 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.model_name.startswith(DEEPSEEK_ROUTING_PREFIXES):
         # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates.
+        # Nemotron3 keeps it in fp32: bf16 rounding of its large biases reorders the top-k.
+        bias_dtype = jnp.float32 if self.model_name.startswith("nemotron3") else self.bias_dtype
         self.bias = MoEBiasVar(
-            default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
+            default_bias_init(rngs.params(), bias_shape, bias_dtype),
             out_sharding=bias_axes,
         )
       else:
@@ -727,7 +733,7 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.model_name.startswith(DEEPSEEK_ROUTING_PREFIXES):
       pre_bias_logits = output
 
     if self.use_bias:
@@ -933,6 +939,15 @@ class RoutedMoE(nnx.Module):
     self.rngs = rngs
     self.is_hash_routing = is_hash_routing
     self.weight_quant = weight_quant
+    # One activation means non-gated experts (Nemotron-H relu2): wi_0 is the up projection and there is no wi_1.
+    self.has_wi_1 = len(self.config.mlp_activations) > 1
+    if not self.has_wi_1 and (
+        self.config.prefuse_moe_weights
+        or self.config.te_moe_block
+        or self.config.num_moe_emb_chunks > 0
+        or self.config.attention in ("vllm_rpa", "vllm_batched_rpa")
+    ):
+      raise NotImplementedError("Non-gated MoE experts support only the unfused dense_matmul and sparse_matmul paths.")
 
     # DeepSeek V4 Hash Routing
     if self.is_hash_routing:
@@ -1006,7 +1021,7 @@ class RoutedMoE(nnx.Module):
       self._expert_parallelism_name = "expert"
 
     if isinstance(self.quant, (quantizations.Fp8Quantization, quantizations.NANOOFp8Quantization)):
-      einsum_names = [WI_0, WI_1, WO]
+      einsum_names = [WI_0, WI_1, WO] if self.has_wi_1 else [WI_0, WO]
       if self.config.capacity_factor > 0:
         einsum_names += [DISPATCH, COMBINE]
       self.quant_einsums = nnx.Dict(
@@ -1052,10 +1067,14 @@ class RoutedMoE(nnx.Module):
           sharding_axes=self.wi_kernel_axes,
           sparsity_rule=sparsity_rule,
       )
-      self.wi_1_sparsity_module = sparsity_module.SparsityModule(
-          shape=(self.num_experts, self.config.emb_dim, self.intermediate_dim),
-          sharding_axes=self.wi_kernel_axes,
-          sparsity_rule=sparsity_rule,
+      self.wi_1_sparsity_module = (
+          sparsity_module.SparsityModule(
+              shape=(self.num_experts, self.config.emb_dim, self.intermediate_dim),
+              sharding_axes=self.wi_kernel_axes,
+              sparsity_rule=sparsity_rule,
+          )
+          if self.has_wi_1
+          else None
       )
       self.wo_sparsity_module = sparsity_module.SparsityModule(
           shape=(self.num_experts, self.intermediate_dim, self.config.emb_dim),
@@ -1082,7 +1101,7 @@ class RoutedMoE(nnx.Module):
       # memory. Instead they are retrieved from the tensors stored in the 'aqt'
       # collection.
       self.wi_0 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
-      self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim))
+      self.wi_1 = jnp.zeros((num_experts, self.moe_expert_input_dim, intermediate_dim)) if self.has_wi_1 else None
       self.wo = jnp.zeros((num_experts, intermediate_dim, self.moe_expert_input_dim))
     elif self.config.prefuse_moe_weights:
       self.wi = nnx.Param(
@@ -1123,10 +1142,13 @@ class RoutedMoE(nnx.Module):
           _init_expert_kernel((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype),
           out_sharding=self.wi_kernel_axes,
       )
-      self.wi_1 = nnx.Param(
-          _init_expert_kernel((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype),
-          out_sharding=self.wi_kernel_axes,
-      )
+      if self.has_wi_1:
+        self.wi_1 = nnx.Param(
+            _init_expert_kernel((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype),
+            out_sharding=self.wi_kernel_axes,
+        )
+      else:
+        self.wi_1 = None
       self.wo = nnx.Param(
           _init_expert_kernel((self.num_experts, moe_intermediate_dim, self.moe_expert_input_dim), self.weight_dtype),
           out_sharding=self.wo_kernel_axes,
@@ -1141,9 +1163,13 @@ class RoutedMoE(nnx.Module):
           default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
           out_sharding=wi_bias_axes,
       )
-      self.wi_1_bias = nnx.Param(
-          default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
-          out_sharding=wi_bias_axes,
+      self.wi_1_bias = (
+          nnx.Param(
+              default_bias_init(self.rngs.params(), wi_bias_shape, self.weight_dtype),
+              out_sharding=wi_bias_axes,
+          )
+          if self.has_wi_1
+          else None
       )
       self.wo_bias = nnx.Param(
           default_bias_init(self.rngs.params(), wo_bias_shape, self.weight_dtype),
@@ -1230,9 +1256,13 @@ class RoutedMoE(nnx.Module):
             jnp.ones(wi_scale_shape, dtype=scale_dtype),
             sharding=wi_scale_sharding,
         )
-        self.wi_1_scale = nnx.Param(
-            jnp.ones(wi_scale_shape, dtype=scale_dtype),
-            sharding=wi_scale_sharding,
+        self.wi_1_scale = (
+            nnx.Param(
+                jnp.ones(wi_scale_shape, dtype=scale_dtype),
+                sharding=wi_scale_sharding,
+            )
+            if self.has_wi_1
+            else None
         )
         self.wo_scale = nnx.Param(
             jnp.ones(wo_scale_shape, dtype=scale_dtype),
@@ -1347,6 +1377,9 @@ class RoutedMoE(nnx.Module):
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
+      elif self.config.decoder_block == ctypes.DecoderBlockType.NEMOTRON3:
+        # Forced choice with the HF weights: the unbiased sigmoid scores.
+        top_k_weights = jnp.take_along_axis(pre_bias_logits, gather_indices, axis=-1)
       else:
         top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
     else:
@@ -1369,7 +1402,7 @@ class RoutedMoE(nnx.Module):
         top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
         top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
       # NOTE: deepseek2 has a different pattern
-      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      elif self.config.model_name.startswith(DEEPSEEK_ROUTING_PREFIXES):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
@@ -1378,7 +1411,11 @@ class RoutedMoE(nnx.Module):
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
+    if self.config.decoder_block in (
+        ctypes.DecoderBlockType.DEEPSEEK,
+        ctypes.DecoderBlockType.DEEPSEEK4,
+        ctypes.DecoderBlockType.NEMOTRON3,
+    ):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1490,9 +1527,11 @@ class RoutedMoE(nnx.Module):
     return top_k_weights, top_k_indices
 
   def apply_ffn_activation(self, layer_w0, layer_w1):
-    """Applies FFN activation function."""
+    """Applies FFN activation function; `layer_w1` is None for non-gated experts."""
     with jax.named_scope("ffn_act"):
-      if self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
+      if layer_w1 is None:
+        intermediate_layer = self.activation_fn(layer_w0)
+      elif self.config.decoder_block == ctypes.DecoderBlockType.GPT_OSS:
         layer_w0 = jnp.clip(layer_w0, min=None, max=self.config.mlp_activations_limit)
         layer_w1 = jnp.clip(
             layer_w1,
@@ -2576,7 +2615,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.config.model_name.startswith(DEEPSEEK_ROUTING_PREFIXES):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -3202,6 +3241,8 @@ class RoutedMoE(nnx.Module):
           if mask is not None:
             layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
+        if w1 is None:
+          return (layer_w0, None, w0, None) if return_weights else (layer_w0, None)
 
         layer_w1 = gmm_fn(
             x_for_w1,
@@ -3695,6 +3736,8 @@ class RoutedMoE(nnx.Module):
     # shard_map below. A shard_map cannot close over an array that lives on explicit
     # mesh axes, so it is threaded down as an argument instead of read off the module.
     per_expert_scale = None if self.per_expert_scale is None else self.per_expert_scale[...]
+    if w1_kernel is None:
+      w1_pspec = None
 
     in_specs = (
         input_partition_pspec,
@@ -3930,7 +3973,7 @@ class RoutedMoE(nnx.Module):
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     pre_bias_logits_logical_axes = (
         (batch_logical_axis, "activation_norm_length", None)
-        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2"))
+        if self.config.model_name.startswith(DEEPSEEK_ROUTING_PREFIXES)
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
@@ -4370,7 +4413,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.config.model_name.startswith(DEEPSEEK_ROUTING_PREFIXES):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
@@ -4579,19 +4622,21 @@ class RoutedMoE(nnx.Module):
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = self._maybe_shard_moe_dispatch(layer_w0, mlp_axis, moe_peel_expert)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
-      with jax.named_scope("wi_1"):
-        w1_kernel_axes = ("exp", None, "mlp")
-        w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
-        layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes, einsum_name=WI_1)(
-            mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
-        )
-        if self.config.mlp_bias:
-          w1_bias = w1_bias[:, None, None, :]
-          layer_w1 = layer_w1 + w1_bias
-        if self.config.activations_in_float32:
-          layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = self._maybe_shard_moe_dispatch(layer_w1, mlp_axis, moe_peel_expert)
-        layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
+      layer_w1 = None
+      if w1_kernel is not None:
+        with jax.named_scope("wi_1"):
+          w1_kernel_axes = ("exp", None, "mlp")
+          w1_kernel = self.maybe_all_gather_kernel_weight_in_expert_parallelism(w1_kernel, w1_kernel_axes)
+          layer_w1 = self.get_einsum(rhs_mesh_axes=w1_kernel_axes, einsum_name=WI_1)(
+              mlp_up_einsum, dispatch, w1_kernel, precision=matmul_precision
+          )
+          if self.config.mlp_bias:
+            w1_bias = w1_bias[:, None, None, :]
+            layer_w1 = layer_w1 + w1_bias
+          if self.config.activations_in_float32:
+            layer_w1 = layer_w1.astype(jnp.float32)
+          layer_w1 = self._maybe_shard_moe_dispatch(layer_w1, mlp_axis, moe_peel_expert)
+          layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
       with jax.named_scope("wo"):
         wo_kernel_axes = ("exp", "mlp", None)
@@ -4654,15 +4699,17 @@ class RoutedMoE(nnx.Module):
         if self.config.activations_in_float32:
           layer_w0 = layer_w0.astype(jnp.float32)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
-      with jax.named_scope("wi_1"):
-        layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_1)(
-            "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
-        )
-        if self.config.mlp_bias:
-          layer_w1 = layer_w1 + w1_bias[None, None, :, :]
-        if self.config.activations_in_float32:
-          layer_w1 = layer_w1.astype(jnp.float32)
-        layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
+      layer_w1 = None
+      if w1_kernel is not None:
+        with jax.named_scope("wi_1"):
+          layer_w1 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_1)(
+              "BSM,EMH -> BSEH", inputs, w1_kernel, precision=matmul_precision
+          )
+          if self.config.mlp_bias:
+            layer_w1 = layer_w1 + w1_bias[None, None, :, :]
+          if self.config.activations_in_float32:
+            layer_w1 = layer_w1.astype(jnp.float32)
+          layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
 
       with jax.named_scope("wo"):
@@ -4995,6 +5042,11 @@ class RoutedMoE(nnx.Module):
 
     is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
 
+    if cfg.return_routed_experts and not is_fused_moe_path and not self.is_hash_routing:
+      # The router's own choice, even under forced routing, so router replay can be checked against it.
+      _, own_top_k_indices = self.get_topk(gate_logits, pre_bias_logits, self.rngs)
+      self.selected_experts = nnx.Intermediate(own_top_k_indices)
+
     native_gmm = (
         isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
         and cfg.sparse_matmul
@@ -5049,13 +5101,15 @@ class RoutedMoE(nnx.Module):
       wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
       wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
       if is_fused_moe_path:
+        if not self.has_wi_1:
+          raise NotImplementedError("The fused MoE path needs gated experts (wi_0 and wi_1).")
         w0_kernel, w0_native_scale = _maybe_native_fused_weight(self.wi_0[...], wi_0_scale)
         w1_kernel, w1_native_scale = _maybe_native_fused_weight(self.wi_1[...], wi_1_scale)
         if w0_native_scale is not None and w1_native_scale is not None:
           wi_native_scale = jnp.concatenate([w0_native_scale, w1_native_scale], axis=-1)
       else:
         w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
-        w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
+        w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale) if self.has_wi_1 else None
 
     # For fused MoE path (inference only), if we have not fused expert
     # scales at init, we must apply them to wo_kernel here because
@@ -5072,11 +5126,12 @@ class RoutedMoE(nnx.Module):
 
     if self.wi_0_sparsity_module is not None:
       _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
-      _, w1_kernel = self.wi_1_sparsity_module(jnp.zeros_like(w1_kernel), w1_kernel)
+      if self.wi_1_sparsity_module is not None:
+        _, w1_kernel = self.wi_1_sparsity_module(jnp.zeros_like(w1_kernel), w1_kernel)
       _, wo_kernel = self.wo_sparsity_module(jnp.zeros_like(wo_kernel), wo_kernel)
     if cfg.mlp_bias:
       w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
-      w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)
+      w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype) if self.wi_1_bias is not None else None
       wo_bias = jnp.asarray(self.wo_bias[...], self.dtype)
     else:
       w0_bias, w1_bias, wo_bias = None, None, None

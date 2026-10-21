@@ -823,6 +823,27 @@ def calculate_gated_delta_net_flops_per_device(config):
   return gdn_weight_flops, gdn_attn_flops
 
 
+def calculate_nemotron3_flops_per_device(config):
+  """FLOPs per forward pass of one Nemotron-3 Mamba-2, MoE and attention layer.
+
+  Returns (mamba_weight, mamba_core, moe_weight). The SSD core is counted in its recurrent form, as for the gated delta
+  net: per token and head, the state update (dt * B outer x) and the read-out (C . state) are P * N multiply-adds each.
+  """
+  b, s, e = config.per_device_batch_size, config.max_target_length, config.emb_dim
+  heads, head_dim = config.mamba_num_heads, config.mamba_head_dim
+  state, groups = config.mamba_ssm_state_size, config.mamba_n_groups
+  d_inner = heads * head_dim
+  conv_dim = d_inner + 2 * groups * state
+  in_proj_dim = 2 * d_inner + 2 * groups * state + heads  # gate, x, B, C, dt
+  mamba_weight = 2 * b * s * e * (in_proj_dim + d_inner) + 2 * b * s * config.mamba_conv_kernel * conv_dim
+  mamba_core = 4 * b * s * heads * head_dim * state
+  gate_flops = 2 * b * s * e * config.num_experts
+  moe_weight = gate_flops + calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * (
+      config.num_experts_per_tok + config.shared_experts
+  )
+  return mamba_weight, mamba_core, moe_weight
+
+
 def calculate_gemma3_vision_layers_tflops_per_device(config):
   """
   Estimate TFLOPs for Gemma3 vision encoder (ViT-style).
@@ -1281,6 +1302,17 @@ def calculate_tflops_training_per_device(config, log=True):
     total_weight_flops = total_ffn_flops_all_layers + per_layer_flops * config.num_decoder_layers + embedding_flops
     learnable_weight_tflops = total_weight_flops * 3 / 10**12
     attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+  elif config.decoder_block == DecoderBlockType.NEMOTRON3:
+    pattern = config.hybrid_override_pattern
+    mamba_weight, mamba_core, moe_weight = calculate_nemotron3_flops_per_device(config)
+    total_weights = (
+        pattern.count("M") * mamba_weight
+        + pattern.count("E") * moe_weight
+        + pattern.count("*") * (qkv_flops + projection_flops)
+        + embedding_flops
+    )
+    learnable_weight_tflops = total_weights * 3 / 10**12
+    attention_tflops = (pattern.count("M") * mamba_core + pattern.count("*") * causal_attention_flops) * 3 / 10**12
   elif config.decoder_block in (
       DecoderBlockType.QWEN3_NEXT,
       DecoderBlockType.QWEN3_5,

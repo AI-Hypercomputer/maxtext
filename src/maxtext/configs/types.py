@@ -319,6 +319,7 @@ ModelName = Literal[
     "envy-switch-base",
     "envy-switch-large",
     "envy-switch-xxl",
+    "nemotron3-nano-omni-30b-a3b",
 ]
 
 
@@ -1508,7 +1509,8 @@ class MoEGeneral(BaseModel):
       False,
       description=(
           "Record each MoE layer's routing as a `selected_experts` intermediate, returned by the "
-          "decoder as `expert_indices`. Required to capture routing from inference for router replay."
+          "decoder as `expert_indices`. Required to capture routing from inference for router replay. "
+          "Outside the vLLM fused path it records the router's own top-k even when routing is forced."
       ),
   )
   float32_weight_sum: bool = Field(
@@ -1739,6 +1741,28 @@ class DeepSeekMoE(BaseModel):
   lineage_dq_reduction_steps: int = Field(
       1,
       description=("Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None."),
+  )
+
+
+class Nemotron3(BaseModel):
+  """Configuration specific to Nemotron-H hybrid Mamba-2 / attention / MoE models."""
+
+  hybrid_override_pattern: str = Field(
+      "",
+      description=(
+          "Per-layer block types for decoder_block='nemotron3': 'M' Mamba-2, '*' attention, 'E' MoE."
+          " Its length must equal num_decoder_layers."
+      ),
+  )
+  mamba_num_heads: int = Field(0, description="Number of Mamba-2 heads.")
+  mamba_head_dim: int = Field(0, description="Mamba-2 head dimension.")
+  mamba_ssm_state_size: int = Field(0, description="Mamba-2 SSM state size per group.")
+  mamba_n_groups: int = Field(1, description="Number of Mamba-2 B/C groups (also the gated-norm group count).")
+  mamba_conv_kernel: int = Field(4, description="Mamba-2 causal depthwise convolution kernel size.")
+  mamba_conv_bias: bool = Field(True, description="Whether the Mamba-2 convolution has a bias.")
+  mamba_chunk_size: int = Field(128, description="Chunk size of the Mamba-2 chunked scan.")
+  mamba_time_step_limit: list[float] = Field(
+      [0.0, float("inf")], description="Clamp range [min, max] applied to the Mamba-2 time step dt."
   )
 
 
@@ -4005,6 +4029,7 @@ FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS = (
     DecoderBlockType.QWEN3_5,
     DecoderBlockType.MIXTRAL,
     DecoderBlockType.GEMMA4,
+    DecoderBlockType.NEMOTRON3,
 )
 
 
@@ -4178,6 +4203,7 @@ class MaxTextConfig(
     MoEKernels,
     DeepSeekMoE,
     Qwen3Next,
+    Nemotron3,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -6017,6 +6043,16 @@ class MaxTextConfig(
         raise ValueError(
             f"The number of decoder layers ({self.base_num_decoder_layers}) must be divisible by interleave moe layer step "
             f"({self.interleave_moe_layer_step})"
+        )
+    if self.decoder_block == DecoderBlockType.NEMOTRON3:
+      if self.scan_layers:
+        raise ValueError("decoder_block='nemotron3' supports only scan_layers=False (non-periodic layer pattern).")
+      if len(self.hybrid_override_pattern) != self.base_num_decoder_layers or set(self.hybrid_override_pattern) - set(
+          "ME*"
+      ):
+        raise ValueError(
+            f"hybrid_override_pattern {self.hybrid_override_pattern!r} must have one of 'M', 'E', '*' per decoder"
+            f" layer ({self.base_num_decoder_layers})."
         )
     if self.decoder_block in (
         DecoderBlockType.QWEN3_NEXT,
