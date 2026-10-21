@@ -23,8 +23,10 @@ from unittest.mock import patch
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
+from maxtext.configs import types
 from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
+from maxtext.training_engine import micro_step_profiler
 from maxtext.utils import maxtext_utils
 import pytest
 from tests.utils.test_helpers import get_test_config_path
@@ -105,6 +107,7 @@ class MaxTextTrainingEngineProfilingTest(absltest.TestCase):
     """`fwd_bwd` starts the profile and `update` stops it, without an outer loop."""
     cfg = _tiny_config(
         base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
         skip_first_n_steps_for_profiler=1,
         profiler_steps=1,
     )
@@ -128,6 +131,7 @@ class MaxTextTrainingEngineProfilingTest(absltest.TestCase):
   def test_close_rescues_a_profile_left_open_by_an_interrupted_step(self):
     cfg = _tiny_config(
         base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
         skip_first_n_steps_for_profiler=0,
         profiler_steps=5,
     )
@@ -141,6 +145,86 @@ class MaxTextTrainingEngineProfilingTest(absltest.TestCase):
       engine.close()
 
     self.stop_trace.assert_called_once()
+
+  def test_profiler_disabled_when_profiler_mode_is_not_xplane(self):
+    cfg = _tiny_config(
+        base_output_directory=self.create_tempdir().full_path,
+        skip_first_n_steps_for_profiler=0,
+        profiler_steps=5,
+    )
+    self.assertEqual(cfg.profiler, types.ProfilerType.NONE)
+    prof = micro_step_profiler.MicroStepProfiler(cfg)
+    self.assertTrue(prof.do_not_profile)
+    prof.maybe_activate(total_micro_steps=0, current_micro_step=0, train_step=0)
+    self.start_trace.assert_not_called()
+
+  def test_upload_all_profiler_results_enables_non_zero_process_profiling(self):
+    cfg_host0_only = _tiny_config(
+        base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=0,
+        profiler_steps=1,
+        upload_all_profiler_results=False,
+    )
+    cfg_all_hosts = _tiny_config(
+        base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=0,
+        profiler_steps=1,
+        upload_all_profiler_results=True,
+    )
+    with patch("jax.process_index", return_value=1):
+      prof_host0_only = micro_step_profiler.MicroStepProfiler(cfg_host0_only)
+      self.assertTrue(prof_host0_only.do_not_profile)
+      prof_host0_only.maybe_activate(total_micro_steps=0, current_micro_step=0, train_step=0)
+      self.start_trace.assert_not_called()
+
+      prof_all_hosts = micro_step_profiler.MicroStepProfiler(cfg_all_hosts)
+      self.assertFalse(prof_all_hosts.do_not_profile)
+      prof_all_hosts.maybe_activate(total_micro_steps=0, current_micro_step=0, train_step=0)
+      self.start_trace.assert_called_once()
+      prof_all_hosts.maybe_deactivate(total_micro_steps=0, current_micro_step=0, train_step=0)
+      self.stop_trace.assert_called_once()
+
+  def test_tpu_and_power_profiling_options_populated_in_advanced_configuration(self):
+    cfg = _tiny_config(
+        base_output_directory=self.create_tempdir().full_path,
+        profiler="xplane",
+        skip_first_n_steps_for_profiler=0,
+        profiler_steps=1,
+        enable_tpu_profiling_options=True,
+        tpu_num_chips_to_profile_per_task=2,
+        tpu_num_sparse_cores_to_trace=4,
+        tpu_num_sparse_core_tiles_to_trace=8,
+        profile_power_events=True,
+        xprof_tpu_power_trace_level=1,
+        xprof_e2e_enable_fw_throttle_event=True,
+        xprof_e2e_enable_fw_power_level_event=True,
+        xprof_e2e_enable_fw_thermal_event=True,
+        enable_continuous_profiling=True,
+    )
+    with patch("jax.profiler.ProfileOptions") as mock_options_cls:
+      prof = micro_step_profiler.MicroStepProfiler(cfg)
+      mock_options_cls.assert_called_once()
+      self.assertEqual(
+          prof.profiling_options.advanced_configuration,
+          {
+              "tpu_power_trace_level": 1,
+              "e2e_enable_fw_throttle_event": True,
+              "e2e_enable_fw_power_level_event": True,
+              "e2e_enable_fw_thermal_event": True,
+              "tpu_num_chips_to_profile_per_task": 2,
+              "tpu_num_sparse_core_tiles_to_trace": 8,
+              "tpu_num_sparse_cores_to_trace": 4,
+              "enable_continuous_profiling": True,
+          },
+      )
+      self.assertIs(type(prof.profiling_options.advanced_configuration["tpu_power_trace_level"]), int)
+      prof.maybe_activate(total_micro_steps=0, current_micro_step=0, train_step=0)
+      self.start_trace.assert_called_once_with(
+          cfg.tensorboard_dir,
+          profiler_options=prof.profiling_options,
+      )
 
 
 if __name__ == "__main__":

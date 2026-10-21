@@ -21,6 +21,7 @@ from typing import Any
 
 from absl import logging
 from maxtext.configs import pyconfig
+from maxtext.configs import types
 
 
 class MicroStepProfiler:
@@ -29,7 +30,11 @@ class MicroStepProfiler:
   def __init__(self, config: pyconfig.HyperParameters) -> None:
     """Initializes the profiler."""
     self.do_not_profile = False
-    if jax.process_index() != 0 or config.profiler_steps == 0:
+    if (
+        config.profiler != types.ProfilerType.XPLANE
+        or config.profiler_steps == 0
+        or (not config.upload_all_profiler_results and jax.process_index() != 0)
+    ):
       self.do_not_profile = True
       return
 
@@ -45,10 +50,28 @@ class MicroStepProfiler:
       )
       return
     self.profiling_options = jax.profiler.ProfileOptions()
+    advanced_config: dict[str, Any] = {}
+    if config.profile_power_events:
+      advanced_config.update(
+          {
+              "tpu_power_trace_level": int(config.xprof_tpu_power_trace_level),
+              "e2e_enable_fw_throttle_event": config.xprof_e2e_enable_fw_throttle_event,
+              "e2e_enable_fw_power_level_event": config.xprof_e2e_enable_fw_power_level_event,
+              "e2e_enable_fw_thermal_event": config.xprof_e2e_enable_fw_thermal_event,
+          }
+      )
+    if config.enable_tpu_profiling_options:
+      advanced_config.update(
+          {
+              "tpu_num_chips_to_profile_per_task": config.tpu_num_chips_to_profile_per_task,
+              "tpu_num_sparse_core_tiles_to_trace": config.tpu_num_sparse_core_tiles_to_trace,
+              "tpu_num_sparse_cores_to_trace": config.tpu_num_sparse_cores_to_trace,
+          }
+      )
     if config.enable_continuous_profiling:
-      self.profiling_options.advanced_configuration = {
-          "enable_continuous_profiling": True,
-      }
+      advanced_config["enable_continuous_profiling"] = True
+    if advanced_config:
+      self.profiling_options.advanced_configuration = advanced_config
     self.profile_active: bool = False
     # profiler_period is the distance between successive profiling window,
     # profiler_steps=3, profiler_period=4 gives [1,3], [5,7], [9,11].
