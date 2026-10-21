@@ -19,7 +19,7 @@ model structures with Tunix's training interfaces.
 """
 
 import abc
-from typing import Any, Callable, Iterator, List, Literal, Optional, Sequence
+from typing import Any, Callable, Iterable, Iterator, List, Literal, Optional, Sequence
 
 import flax
 from flax import nnx
@@ -135,6 +135,23 @@ class MaxTextToTunixIterator:
         top_k_logits=batch.get("top_k_logits"),
         top_k_indices=batch.get("top_k_indices"),
     )
+
+
+class MaxTextToTunixIterable:
+  """Adapts restartable MaxText data for repeated Tunix evaluation passes.
+
+  The source must support reset() or return a fresh iterator from iter(). Training
+  uses MaxTextToTunixIterator directly to preserve its checkpointed position.
+  """
+
+  def __init__(self, maxtext_iterable: Iterable):
+    self._iterable = maxtext_iterable
+
+  def __iter__(self) -> MaxTextToTunixIterator:
+    # Some input wrappers only restart through reset(), as in the pretraining loop.
+    if hasattr(self._iterable, "reset"):
+      self._iterable.reset()
+    return MaxTextToTunixIterator(iter(self._iterable))
 
 
 # -----------------------------------------------------------------------------
