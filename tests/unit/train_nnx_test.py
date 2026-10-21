@@ -22,6 +22,7 @@ production loss_fn uses (decoder_input_tokens, decoder_positions, ...).
 from dataclasses import dataclass
 import datetime
 import functools
+import inspect
 import types as pytypes
 import unittest
 from unittest import mock
@@ -34,6 +35,7 @@ from maxtext.layers import nnx_scan
 import numpy as np
 from maxtext.common import train_state_nnx
 from maxtext.common import metric_logger
+from maxtext.common import profiler
 from maxtext.common.metric_logger import record_activation_metrics
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train import train as pre_train
@@ -1307,6 +1309,100 @@ class TestStepDiagnosticsNNX(unittest.TestCase):
     with mock.patch.object(metric_logger.max_logging, "log") as log:
       logger.log_metrics({"scalar": scalars}, step=3, metric_type="train")
     self.assertNotIn("diag:", log.call_args[0][0])
+
+
+class TestNNXNamedScopeContext(unittest.TestCase):
+  """Verifies hierarchical jax.named_scope wrapping for NNX modules in XProf traces."""
+
+  def test_hierarchical_scopes_preserved_across_split_merge(self):
+    class _Linear(nnx.Module):
+
+      def __init__(self):
+        self.w = nnx.Param(jnp.ones((4, 4)))
+
+      def __call__(self, x, *, scale: float = 1.0):
+        return (x @ self.w[...]) * scale
+
+    class _Mlp(nnx.Module):
+
+      def __init__(self):
+        self.wi_0 = _Linear()
+        self.wo = _Linear()
+
+      def __call__(self, x):
+        return self.wo(jax.nn.silu(self.wi_0(x, scale=2.0)))
+
+    class _Layer(nnx.Module):
+
+      def __init__(self):
+        self.mlp = _Mlp()
+
+      def __call__(self, x):
+        return self.mlp(x)
+
+    layer = _Layer()
+    graphdef, state = nnx.split(layer)
+    x = jnp.ones((2, 4))
+
+    def step(g, s, inp):
+      merged = nnx.merge(g, s)
+      return merged(inp)
+
+    with profiler.nnx_named_scope_context():
+      # inspect.signature must still see keyword-only parameters (used by nnx_decoders).
+      self.assertIn("scale", inspect.signature(_Linear.__call__).parameters)
+      hlo_scoped = jax.jit(step).lower(graphdef, state, x).as_text(debug_info=True)
+
+    self.assertIn("_Layer/mlp/wi_0/dot_general", hlo_scoped)
+    self.assertIn("_Layer/mlp/wo/dot_general", hlo_scoped)
+
+    # Exiting the context restores default unscoped behavior.
+    jax.clear_caches()
+    hlo_unscoped = jax.jit(step).lower(graphdef, state, x).as_text(debug_info=True)
+    self.assertNotIn("_Layer/mlp/wi_0", hlo_unscoped)
+
+  def test_super_call_does_not_duplicate_scope(self):
+    class _Base(nnx.Module):
+
+      def __call__(self, x):
+        return jnp.sin(x)
+
+    class _Derived(_Base):
+
+      def __call__(self, x):
+        return super().__call__(x) * 2.0
+
+    mod = _Derived()
+    x = jnp.ones((4,))
+    with profiler.nnx_named_scope_context():
+      hlo = jax.jit(mod.__call__).lower(x).as_text(debug_info=True)
+    self.assertIn("_Derived/sin", hlo)
+    self.assertNotIn("_Derived/_Base", hlo)
+
+  def test_unhashable_dataclass_submodule(self):
+    # A @dataclass with default eq=True sets __hash__ = None (e.g. attentions.L2Norm).
+    @dataclass(repr=False)
+    class _Norm(nnx.Module):
+      eps: float = 1e-6
+
+      def __call__(self, x):
+        return x * jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.eps)
+
+    class _Attn(nnx.Module):
+
+      def __init__(self):
+        self.query_norm = _Norm()
+
+      def __call__(self, x):
+        return self.query_norm(x)
+
+    mod = _Attn()
+    with self.assertRaises(TypeError):
+      hash(mod.query_norm)
+    x = jnp.ones((2, 4))
+    with profiler.nnx_named_scope_context():
+      hlo = jax.jit(mod.__call__).lower(x).as_text(debug_info=True)
+    self.assertIn("_Attn/query_norm/rsqrt", hlo)
 
 
 if __name__ == "__main__":

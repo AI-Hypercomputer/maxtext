@@ -1598,7 +1598,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
 
 def run(config, recorder, elastic_retry_cache=None):
   """Run the job given hyperparameters and utilities."""
-  with (max_utils.maybe_get_transformer_engine_context(config),):
+  with (
+      max_utils.maybe_get_transformer_engine_context(config),
+      profiler.nnx_named_scope_context(),
+  ):
     train_loop(config, recorder, elastic_retry_cache=elastic_retry_cache)
 
 
