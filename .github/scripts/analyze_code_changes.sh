@@ -225,6 +225,7 @@ UNMATCHED_FILES=()
 EXCLUDED_FILES=(
   '^\.gemini/'
   '\.github/workflows/update_changelog.yml$'
+  '^\.github/workflows/ci_pulse_publish\.yml$'
   '^\.github/scripts/'
   '^tools/'
   '\.md$'
