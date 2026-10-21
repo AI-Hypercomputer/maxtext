@@ -112,15 +112,21 @@ def apply_scanned_layers(
   ``remat`` is separate from ``remat_policy`` because ``None`` is JAX's full
   rematerialization policy, not an indication that rematerialization is off.
 
+  ``xs`` is an optional pytree of per-layer inputs (e.g. router replay indices)
+  whose leaves have a leading axis of size ``length``. When it is given, layer
+  ``i`` is applied as ``apply_fn(layer, carry, xs_i)`` with the ``i``-th slice of
+  every leaf; otherwise as ``apply_fn(layer, carry)``.
+
   Externally managed per-layer state, such as KV caches, is not supported by
   this scan path.
 
   Note:
-    This is a minimal, model-agnostic scan primitive. The other NNX decoder
-    paths instead go through ``NNXDecoder._apply_layers_sequentially``, a heavier
-    applier that also threads external (vLLM) KV caches via a static unroll and
-    re-applies scan-axis metadata. Gemma4 is currently the only caller of this
-    function; unifying the two appliers is a follow-up cleanup.
+    This is a minimal, model-agnostic scan primitive, used by scannable blocks
+    for their inner per-layer scans. The NNX decoder's own layer scan instead
+    goes through ``NNXDecoder._apply_layers_sequentially``, a heavier applier
+    that also threads external (vLLM) KV caches via a static unroll and
+    re-applies scan-axis metadata; unifying the two appliers is a follow-up
+    cleanup.
   """
   if length <= 0:
     return carry

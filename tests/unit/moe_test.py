@@ -761,17 +761,22 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
 
 
 @pytest.mark.parametrize(
-    ("weight_dtype", "dtype", "expect_barrier"),
+    ("weight_dtype", "dtype", "scan_layers", "expect_barrier"),
     (
-        (jnp.bfloat16, jnp.bfloat16, True),
-        (jnp.float32, jnp.float32, True),
-        (jnp.float32, jnp.bfloat16, False),
+        (jnp.bfloat16, jnp.bfloat16, True, True),
+        (jnp.float32, jnp.float32, True, True),
+        (jnp.float32, jnp.bfloat16, True, False),
+        # Without a layer scan there is no loop to hoist the gather out of.
+        (jnp.bfloat16, jnp.bfloat16, False, False),
     ),
 )
-def test_sparse_matmul_pins_expert_kernel_all_gather_when_the_upcast_is_an_identity(weight_dtype, dtype, expect_barrier):
+def test_sparse_matmul_pins_expert_kernel_all_gather_when_the_upcast_is_an_identity(
+    weight_dtype, dtype, scan_layers, expect_barrier
+):
   """Sparse MoE keeps the FSDP kernel gather from being hoisted out of a scanned decoder."""
   fake_moe = SimpleNamespace(
       config=SimpleNamespace(
+          scan_layers=scan_layers,
           shard_exp_on_fsdp=False,
           use_2d_fsdp_sharding=False,
           shard_embed_moe_on_fsdp=False,

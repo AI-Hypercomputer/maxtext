@@ -1690,7 +1690,7 @@ class Qwen3NextScannableBlock(nnx.Module):
     nnx.update(self.global_layer, final_other, intermediate_state, created_params)
     return y
 
-  def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs, forced_routed_experts=None):
+  def _forward_with_external_kv_cache(self, y, kv_cache, layer_kwargs):
     """Runs the block with externally-supplied per-layer kv caches.
 
     Inference KV caches are a Python list of per-layer entries, so this path
@@ -1708,8 +1708,7 @@ class Qwen3NextScannableBlock(nnx.Module):
         current_state = jax.tree.map(lambda x, i=i: x[i], state)
         layer = nnx.merge(graphdef, current_params, current_state)
         current_kv = kv_cache[i] if (kv_cache is not None and i < len(kv_cache)) else None
-        current_routing = None if forced_routed_experts is None else forced_routed_experts[i]
-        y, new_kv = self._run_layer(layer, y, layer_kwargs, current_kv, forced_routed_experts=current_routing)
+        y, new_kv = self._run_layer(layer, y, layer_kwargs, current_kv)
         updated_kvs.append(new_kv)
         # Collect only non-Param state: parameters are read-only here, so stacking
         # them back would allocate a second copy of every layer weight. Non-Param
@@ -1721,8 +1720,7 @@ class Qwen3NextScannableBlock(nnx.Module):
 
     if self.global_layer is not None:
       global_kv = kv_cache[self.num_local] if (kv_cache is not None and self.num_local < len(kv_cache)) else None
-      global_routing = None if forced_routed_experts is None else forced_routed_experts[self.num_local]
-      y, new_kv = self._run_layer(self.global_layer, y, layer_kwargs, global_kv, forced_routed_experts=global_routing)
+      y, new_kv = self._run_layer(self.global_layer, y, layer_kwargs, global_kv)
       updated_kvs.append(new_kv)
 
     return y, tuple(updated_kvs)
@@ -1772,9 +1770,15 @@ class Qwen3NextScannableBlock(nnx.Module):
           f"forced_routed_experts must carry one slice per sub-layer of the block: expected leading axis "
           f"{self.num_of_layers}, got {forced_routed_experts.shape[0]} (shape {forced_routed_experts.shape})."
       )
+    if isinstance(attention_metadata, dict):
+      # Such metadata is keyed by global layer index, which the sub-layers of a scanned block do not have (every local
+      # layer is built with layer_idx=0). The vLLM path that sends it runs unscanned (configs/inference/vllm.yml).
+      raise NotImplementedError("Per-layer attention_metadata (a dict keyed by layer) requires scan_layers=False.")
 
     if kv_cache is not None:
-      return self._forward_with_external_kv_cache(inputs, kv_cache, layer_kwargs, forced_routed_experts)
+      if forced_routed_experts is not None:
+        raise NotImplementedError("Forced routing is not supported together with externally-managed kv caches.")
+      return self._forward_with_external_kv_cache(inputs, kv_cache, layer_kwargs)
 
     y = inputs
     if self.local_layers is not None:
@@ -1992,9 +1996,8 @@ class Qwen3NextDecoderLayer(nnx.Module):
     # Instantiate and call our `Qwen3NextSparseMoeBlock`.
     mlp_output, load_balance_loss = self._apply_mlp(hidden_states, deterministic, forced_routed_experts)
 
-    # We sow the load balancing loss so it can be collected and added to the total loss
-    # during training.
-    # Assigned, not sown: `sow` appends, so Intermediate would grow per call, which a scan body cannot express.
+    # Keep the load balancing loss so it can be collected and added to the total loss during training. It is
+    # assigned rather than sown: `sow` appends, so Intermediate would grow per call, which a scan body cannot express.
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.moe_lb_loss = nnx.Intermediate(load_balance_loss)
 
