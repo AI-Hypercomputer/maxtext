@@ -12,27 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Minimal m3 training loop, intended for collecting profiles.
+"""Minimal m3 training loop, and the place where infrastructure is composed.
 
-Deliberately bare: synthetic data, AdamW at a constant learning rate, plain
-next-token cross entropy, no checkpointing, no eval, no metrics writer. It
-exists so an m3 model can be stepped end to end and traced; it is not a
-replacement for `maxtext.trainers.pre_train.train`.
+Deliberately bare: synthetic data, AdamW at a constant learning rate, no
+checkpointing, no eval, no metrics writer. It exists so an m3 model can be
+stepped end to end and traced; it is not a replacement for
+`maxtext.trainers.pre_train.train`.
+
+What it does show is the composition order that every m3 driver follows
+(`setup_model`):
+
+    construct -> remat -> scan -> quantize -> optimizer -> host offload
+
+Each step is a function from `maxtext.m3.infra` that reads one config field
+and is a no-op when that field is off. Models never see any of it.
 
 Configuration reuses the legacy `pyconfig` surface, because that is what m3
 model constructors take today. The fields read here are `steps`,
 `per_device_batch_size`, `max_target_length`, `learning_rate`, the optimizer
 fields consumed by `maxtext.optimizers.optimizers.get_optimizer`,
-`gradient_clipping_threshold`, `init_weights_seed`, and the profiler fields
-consumed by `maxtext.common.profiler.Profiler` (`profiler`,
-`skip_first_n_steps_for_profiler`, `profiler_steps`, ...). The trace is
-written under `config.tensorboard_dir`. `gradient_accumulation_steps > 1` and
-batch sizes that do not split over the mesh are rejected rather than emulated.
+`gradient_clipping_threshold`, `init_weights_seed`, the transform fields
+`remat_policy`, `scan_layers`, `param_scan_axis`, `quantization`,
+`optimizer_memory_host_offload`, and the profiler fields consumed by
+`maxtext.common.profiler.Profiler`. The trace is written under
+`config.tensorboard_dir`. `gradient_accumulation_steps > 1` and batch sizes
+that do not split over the mesh are rejected rather than emulated.
 
 Example (CPU or TPU)::
 
     python3 -m maxtext.m3.train.loop src/maxtext/configs/base.yml \\
-      model_name=qwen3-0.6b use_m3_model=true scan_layers=false \\
+      model_name=qwen3-0.6b use_m3_model=true scan_layers=true remat_policy=minimal \\
       per_device_batch_size=1 max_target_length=256 steps=8 \\
       profiler=xplane skip_first_n_steps_for_profiler=3 profiler_steps=3 \\
       base_output_directory=/tmp/m3 run_name=qwen3_profile \\
@@ -56,6 +65,8 @@ from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
 from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.infra import offload, quantization, remat, scan
+from maxtext.m3.train.loss import LossBreakdown, loss_fn
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 
@@ -70,6 +81,21 @@ def make_optimizer(config) -> optax.GradientTransformation:
   if config.gradient_clipping_threshold > 0:
     return optax.chain(optax.clip_by_global_norm(config.gradient_clipping_threshold), tx)
   return tx
+
+
+def setup_model(config, mesh: Mesh) -> tuple[nnx.Module, nnx.Optimizer]:
+  """Builds the model and optimizer with every transform applied, in the fixed order.
+
+  Must run inside `jax.set_mesh(mesh)`. Quantization traces a forward pass of
+  the training shape, so it comes after scan (one layer body to trace) and
+  before the optimizer, which must see the final parameter tree.
+  """
+  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
+  model = remat.maybe_apply_remat(model, config)
+  model = scan.maybe_apply_scan(model, config)
+  model = quantization.maybe_quantize(model, config, *quantization.example_batch(config))
+  optimizer = offload.make_optimizer(model, make_optimizer(config), config)
+  return model, optimizer
 
 
 @functools.lru_cache(maxsize=32)
@@ -100,28 +126,24 @@ def make_synthetic_batch(config, mesh: Mesh, key: jax.Array) -> dict[str, jax.Ar
   return fn(key)
 
 
-def loss_fn(model: nnx.Module, batch: dict[str, jax.Array]) -> jax.Array:
-  """Mean next-token cross entropy, computed in float32."""
-  logits = model(batch["inputs"], batch["positions"])
-  losses = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), batch["targets"])
-  return jnp.mean(losses)
-
-
 @nnx.jit(donate_argnums=(0, 1))
-def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict[str, jax.Array]) -> jax.Array:
+def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict[str, jax.Array]) -> LossBreakdown:
   """One forward/backward/update. Mutates `model` and `optimizer` in place."""
-  loss, grads = nnx.value_and_grad(loss_fn)(model, batch)
+  (_, breakdown), grads = nnx.value_and_grad(loss_fn, has_aux=True)(model, batch)
   optimizer.update(model, grads)
-  return loss
+  return breakdown
 
 
-def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int) -> tuple[float, float]:
+def _log_step(step: int, breakdown: LossBreakdown, last_done: float, tokens_per_step: int) -> tuple[float, float]:
   """Blocks until `step` finishes, logs it, and returns its loss and completion time."""
-  loss = float(loss)
+  xent, aux = float(breakdown.cross_entropy), float(breakdown.aux_loss)
   done = time.perf_counter()
   step_time = done - last_done
-  max_logging.log(f"step {step}: loss {loss:.4f}, {step_time:.3f}s, {tokens_per_step / step_time:,.0f} tokens/s")
-  return loss, done
+  aux_text = f", aux {aux:.5f}" if aux else ""
+  max_logging.log(
+      f"step {step}: loss {xent:.4f}{aux_text}, {step_time:.3f}s, {tokens_per_step / step_time:,.0f} tokens/s"
+  )
+  return xent + aux, done
 
 
 def train_loop(config) -> float:
@@ -147,14 +169,16 @@ def train_loop(config) -> float:
     )
 
   with jax.set_mesh(mesh):
-    model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
-    optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
+    model, optimizer = setup_model(config, mesh)
 
     num_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
     tokens_per_step = config.global_batch_size_to_train_on * config.max_target_length
     max_logging.log(
         f"m3 loop: {config.model_name}, {num_params / 1e9:.3f}B params, "
-        f"batch {config.global_batch_size_to_train_on} x {config.max_target_length} tokens"
+        f"batch {config.global_batch_size_to_train_on} x {config.max_target_length} tokens, "
+        f"remat_policy={config.remat_policy}, scan_layers={config.scan_layers}, "
+        f"quantization={config.quantization or 'none'}, "
+        f"optimizer_memory_host_offload={config.optimizer_memory_host_offload}"
     )
 
     prof = profiler.Profiler(config, offset_step=0)
@@ -165,16 +189,16 @@ def train_loop(config) -> float:
     # while the host prepares the next step. Reading step N-1's loss after
     # dispatching step N keeps one step queued. Step time is the interval
     # between consecutive completions, so step 0's includes compilation.
-    pending = None  # (step, loss) dispatched but not yet logged.
+    pending = None  # (step, breakdown) dispatched but not yet logged.
     last_done = time.perf_counter()
     for step in range(config.steps):
       batch = make_synthetic_batch(config, mesh, jax.random.fold_in(data_key, step))
       prof.maybe_activate_profiler(step, nnx.state(model))
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
-        step_loss = train_step(model, optimizer, batch)
+        breakdown = train_step(model, optimizer, batch)
       if pending is not None:
         loss, last_done = _log_step(*pending, last_done, tokens_per_step)
-      pending = (step, step_loss)
+      pending = (step, breakdown)
       prof.maybe_deactivate_profiler(step, nnx.state(model))
     if pending is not None:
       loss, last_done = _log_step(*pending, last_done, tokens_per_step)

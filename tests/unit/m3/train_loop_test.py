@@ -96,6 +96,31 @@ class TrainLoopTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "does not split over"):
       loop.train_loop(_tiny_config(self.output_dir, per_device_batch_size=0.5))
 
+  def test_train_loop_with_every_transform(self):
+    """Remat, scan and int8 quantization compose in the documented order and the loop still trains."""
+    config = _tiny_config(self.output_dir, remat_policy="minimal", scan_layers=True, quantization="int8")
+    loss = loop.train_loop(config)
+    self.assertTrue(math.isfinite(loss), f"loss={loss}")
+
+  def test_train_loop_moe_reports_aux_loss(self):
+    config = _tiny_config(
+        self.output_dir,
+        model_name="qwen3-30b-a3b",
+        base_mlp_dim=32,
+        base_moe_mlp_dim=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        load_balance_loss_weight=0.01,
+        sparse_matmul=False,
+    )
+    mesh = create_mesh()
+    with jax.set_mesh(mesh):
+      model, optimizer = loop.setup_model(config, mesh)
+      batch = loop.make_synthetic_batch(config, mesh, jax.random.key(0))
+      breakdown = loop.train_step(model, optimizer, batch)
+    self.assertGreater(float(breakdown.aux_loss), 0.0)
+    self.assertTrue(math.isfinite(float(breakdown.cross_entropy)))
+
 
 if __name__ == "__main__":
   absltest.main()

@@ -14,15 +14,20 @@
 
 """Post-construction transforms applied from training setup, never from models.
 
-Planned modules:
-  * `remat.py` — path-transparent remat wrapper + `maybe_apply_remat`.
-  * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
-  * `quantization.py` — qwix int8/fp8 rules + `maybe_quantize`.
-  * `offload.py` — `to_host` for optimizer/parameter offloading.
+Modules:
+  * `remat.py` -- `maybe_apply_remat`: sets the `Layers` containers' `Remat`.
+  * `scan.py` -- `maybe_apply_scan`: replaces `Layers` with `ScannedLayers`.
+  * `quantization.py` -- `maybe_quantize`: qwix int8 / fp8 by interception.
+  * `offload.py` -- `HostOffloadedOptimizer`, optimizer state on `pinned_host`.
 
-Composition order is fixed:
+Composition order is fixed, and `maxtext.m3.train.loop.setup_model` is the
+reference for it:
 `construct -> remat -> scan -> quantize -> optimizer -> host offload`.
 
-Model files contain only zero-cost annotations (`checkpoint_name` tags and
-sharding specs); they must never import from this package.
+None of these wrap the model in another module. Remat, quantization and
+offload leave the parameter tree untouched; scan changes it exactly as
+legacy's scanned layout does -- a layer axis on each parameter, no extra path
+segment -- and the tests under `tests/unit/m3/` assert both. Model files
+contain only zero-cost annotations (`checkpoint_name` tags and sharding
+constraints); they must never import from this package.
 """

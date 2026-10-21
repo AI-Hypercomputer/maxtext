@@ -12,221 +12,69 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Comparison, unit, and parity tests for M3 Qwen3 implementation.
+"""Parity of m3 Qwen3 against legacy MaxText Qwen3.
 
-Covers:
-(1) Model routing and construction via model_creation_utils
-(2) Forward pass execution under different batch sizes, sequence lengths, and modes
-(3) Parameter tree, paths, shapes, and dtypes parity against Flax Linen
-(4) Numerical parity of forward pass logits
-(5) Numerical parity of cross-entropy loss and backward gradients
+Both models are built from one seed on one mesh and legacy's weights are
+copied into m3. Checked: parameter paths, shapes and dtypes; forward logits;
+training loss and per-parameter gradients. The path check also runs at
+qwen3-0.6b's real dimensions, which `override_model_config` would otherwise
+mask.
 """
 
-import unittest
 from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
-import numpy as np
 import pytest
 
-from maxtext.common.common_types import (
-    MODEL_MODE_TRAIN,
-)
-from maxtext.configs import pyconfig
-from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Model, create_qwen3_model
-from maxtext.utils import max_utils, model_creation_utils
-
-
-def _get_base_config_args(use_m3: bool, reduced: bool = True, tp: int = 1):
-  """Generates CLI config arguments for Qwen3 comparison tests."""
-  args = [
-      "",
-      "src/maxtext/configs/base.yml",
-      "model_name=qwen3-0.6b",
-      f"use_m3_model={str(use_m3).lower()}",
-      "scan_layers=false",
-      "weight_dtype=bfloat16",
-      "per_device_batch_size=1",
-      "max_target_length=32",
-      "max_prefill_predict_length=16",
-  ]
-  if reduced:
-    args.extend(
-        [
-            "override_model_config=true",
-            "num_decoder_layers=2",
-            "emb_dim=64",
-            "mlp_dim=128",
-            "num_query_heads=4",
-            "num_kv_heads=2",
-            "head_dim=16",
-            "vocab_size=256",
-        ]
-    )
-  if tp > 1:
-    args.append(f"ici_tensor_parallelism={tp}")
-  return args
+from maxtext.m3.core.interfaces import CausalLMOutput
+from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Model
+from maxtext.utils import model_creation_utils
+from tests.utils import m3_test_utils as u
 
 
 @pytest.mark.tpu_backend
 @pytest.mark.tpu_only
-class Qwen3ComparisonTest(unittest.TestCase):
-  """Compares legacy Qwen3 (use_m3_model=false) vs modern M3 Qwen3 (use_m3_model=true)."""
+class Qwen3ComparisonTest(absltest.TestCase):
 
   def setUp(self):
-    """Sets up device allocations for comparison tests."""
     super().setUp()
-    self.num_devices = min(len(jax.devices()), 4)
-    self.devices = jax.devices()[: self.num_devices]
+    self.mesh = u.legacy_mesh(u.tiny_config("qwen3-0.6b"))
+    self.enter_context(jax.set_mesh(self.mesh))
 
-  def _make_mesh(self, tp: int = 1):
-    """Creates a device mesh."""
-    cfg = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=False, reduced=True, tp=tp))
-    mesh_shape = [1] * len(cfg.mesh_axes)
-    tp_axis_idx = cfg.mesh_axes.index("tensor")
-    mesh_shape[tp_axis_idx] = tp
-    mesh_array = np.array(self.devices[:tp]).reshape(mesh_shape)
-    return Mesh(mesh_array, cfg.mesh_axes)
+  def test_create_model_routes_to_m3(self):
+    cfg = u.tiny_config("qwen3-0.6b")
+    model = model_creation_utils.create_model(cfg, self.mesh, rngs=nnx.Rngs(0))
+    self.assertIsInstance(model, Qwen3Model)
+    batch = u.random_batch(cfg)
+    output = model(batch["inputs"], batch["positions"], batch["segment_ids"])
+    self.assertIsInstance(output, CausalLMOutput)
+    self.assertEqual(output.logits.shape, (2, 8, cfg.vocab_size))
+    self.assertIsNone(output.aux_loss)
 
-  def test_model_creation_utils_routing(self):
-    """Verifies that model_creation_utils.create_model routes to Qwen3Model when use_m3_model=true."""
-    cfg = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
-    with jax.set_mesh(mesh):
-      model = model_creation_utils.create_model(cfg, mesh)
-      self.assertIsInstance(model, Qwen3Model)
+  def test_parameters_match_at_full_size(self):
+    legacy, m3, _ = u.build_pair("qwen3-0.6b", self.mesh, full_size=True)
+    u.assert_params_match(self, legacy, m3)
 
-  def test_qwen3_forward_pass_train(self):
-    """Verifies train forward pass executes and produces correct logits shape."""
-    cfg = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
-    with jax.set_mesh(mesh):
-      model = create_qwen3_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN)
-      batch_size, seq_len = 2, 8
-      tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-      positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
-      logits = model(tokens, positions, model_mode=MODEL_MODE_TRAIN)
-      self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
+  def test_parameters_match_with_untied_head(self):
+    legacy, m3, _ = u.build_pair("qwen3-0.6b", self.mesh, logits_via_embedding=False)
+    u.assert_params_match(self, legacy, m3)
+    self.assertIn(("decoder", "logits_dense", "kernel"), u.flat_params(m3))
 
-  def test_qwen3_forward_pass_variable_length(self):
-    """Verifies forward pass executes on different sequence lengths and batch sizes."""
-    cfg = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
-    with jax.set_mesh(mesh):
-      model = create_qwen3_model(cfg, mesh)
-      batch_size, seq_len = 1, 4
-      tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-      positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
-      logits = model(tokens, positions)
-      self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
+  def test_forward_logits_match(self):
+    legacy, m3, cfg = u.build_pair("qwen3-0.6b", self.mesh)
+    batch = u.random_batch(cfg)
+    logits_legacy = u.legacy_logits(legacy, batch)
+    logits_m3 = m3(batch["inputs"], batch["positions"], batch["segment_ids"]).logits
+    self.assertLess(float(jnp.max(jnp.abs(logits_legacy - logits_m3))), 1e-4)
 
-  def test_parameter_shapes_and_paths_match(self):
-    """Verifies that all parameter paths, shapes, and dtypes match 100% with Flax Linen."""
-    cfg_old = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=False, reduced=False, tp=1))
-    cfg_new = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=False, tp=1))
-    mesh = self._make_mesh(tp=1)
-
-    _, abs_old = model_creation_utils.create_nnx_abstract_model(cfg_old, mesh)
-    _, abs_new = model_creation_utils.create_nnx_abstract_model(cfg_new, mesh)
-
-    p_old = nnx.state(abs_old, nnx.Param)
-    p_new = nnx.state(abs_new, nnx.Param)
-
-    flat_old = dict(p_old.flat_state())
-    flat_new = dict(p_new.flat_state())
-
-    self.assertEqual(
-        len(flat_old), len(flat_new), f"Parameter counts differ: old has {len(flat_old)}, new has {len(flat_new)}"
-    )
-    self.assertEqual(set(flat_old.keys()), set(flat_new.keys()), "Parameter keys / paths do not match")
-
-    for key in sorted(flat_old.keys()):
-      val_old = flat_old[key]
-      val_new = flat_new[key]
-
-      self.assertEqual(val_old.shape, val_new.shape, f"Shape mismatch for {key}: {val_old.shape} vs {val_new.shape}")
-      self.assertEqual(val_old.dtype, val_new.dtype, f"Dtype mismatch for {key}: {val_old.dtype} vs {val_new.dtype}")
-
-  def test_forward_numerical_parity(self):
-    """Verifies numerical equivalence of forward pass logits under identical parameters."""
-    cfg_old = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=False, reduced=True))
-    cfg_new = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
-
-    with jax.set_mesh(mesh):
-      rngs = nnx.Rngs(42)
-      model_old = model_creation_utils.create_model(cfg_old, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-      model_new = model_creation_utils.create_model(cfg_new, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-
-      p_old = nnx.state(model_old, nnx.Param)
-      nnx.update(model_new, p_old)
-
-      batch_size, seq_len = 2, 8
-      tokens = jax.random.randint(jax.random.PRNGKey(0), (batch_size, seq_len), 0, cfg_old.vocab_size)
-      positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
-
-      logits_old = model_old(tokens, positions, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
-      logits_new = model_new(tokens, positions, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
-
-      max_diff = float(jnp.max(jnp.abs(logits_old - logits_new)))
-      self.assertLess(max_diff, 1e-4, f"Max logits diff too high: {max_diff}")
-
-  def test_loss_and_gradients_parity(self):
-    """Verifies numerical parity of cross-entropy loss and parameter gradients."""
-    cfg_old = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=False, reduced=True))
-    cfg_new = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
-
-    with jax.set_mesh(mesh):
-      rngs = nnx.Rngs(42)
-      model_old = model_creation_utils.create_model(cfg_old, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-      model_new = model_creation_utils.create_model(cfg_new, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-
-      p_old = nnx.state(model_old, nnx.Param)
-      nnx.update(model_new, p_old)
-
-      batch_size, seq_len = 2, 8
-      tokens = jax.random.randint(jax.random.PRNGKey(1), (batch_size, seq_len), 0, cfg_old.vocab_size)
-      targets = jax.random.randint(jax.random.PRNGKey(2), (batch_size, seq_len), 0, cfg_old.vocab_size)
-      positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
-      segment_ids = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-
-      def loss_fn(m):
-        """Calculates mean cross-entropy loss over random tokens."""
-        logits = m(tokens, positions, decoder_segment_ids=segment_ids, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
-        one_hot = jax.nn.one_hot(targets, cfg_old.vocab_size)
-        xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot)
-        return jnp.mean(xent)
-
-      # Test direct loss evaluation parity
-      loss_direct_old = float(loss_fn(model_old))
-      loss_direct_new = float(loss_fn(model_new))
-      self.assertAlmostEqual(
-          loss_direct_old, loss_direct_new, places=3, msg=f"Direct loss mismatch: {loss_direct_old} vs {loss_direct_new}"
-      )
-
-      # Test backward pass gradients parity
-      loss_old, grads_old = nnx.value_and_grad(loss_fn)(model_old)
-      loss_new, grads_new = nnx.value_and_grad(loss_fn)(model_new)
-
-      rel_loss_diff = abs(float(loss_old) - float(loss_new)) / (float(loss_old) + 1e-6)
-      self.assertLess(rel_loss_diff, 0.01, f"Relative loss diff in value_and_grad too high: {rel_loss_diff}")
-
-      flat_g_old = dict(nnx.state(grads_old, nnx.Param).flat_state())
-      flat_g_new = dict(nnx.state(grads_new, nnx.Param).flat_state())
-
-      for key in sorted(flat_g_old.keys()):
-        g_old = flat_g_old[key][...]
-        g_new = flat_g_new[key][...]
-        diff = float(jnp.max(jnp.abs(g_old - g_new)))
-        norm = float(jnp.max(jnp.abs(g_old)))
-        rel_diff = diff / (norm + 1e-6)
-        self.assertTrue(
-            diff < 0.05 or rel_diff < 0.10,
-            f"Grad diff too high for {key}: rel_diff={rel_diff:.4f}, diff={diff:.4f}, norm={norm:.4f}",
-        )
+  def test_loss_and_gradients_match(self):
+    legacy, m3, cfg = u.build_pair("qwen3-0.6b", self.mesh)
+    batch = u.random_batch(cfg, seed=1)
+    loss_legacy, grads_legacy = nnx.value_and_grad(u.legacy_loss)(legacy, batch, cfg)
+    loss_m3, grads_m3 = nnx.value_and_grad(u.m3_loss)(m3, batch, cfg)
+    u.assert_losses_close(self, loss_legacy, loss_m3)
+    u.assert_grads_close(self, grads_legacy, grads_m3)
 
 
 if __name__ == "__main__":

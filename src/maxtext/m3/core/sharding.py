@@ -236,10 +236,13 @@ class DefaultSharding(Sharding):
   `expert` sits in the `batch` and `embed` unions, as it does in legacy's
   `activation_batch` and `embed` rules, so that on a mesh which splits it a
   dense model's weights are sharded across it rather than replicated once per
-  expert shard. A routed-expert weight carries its own `experts` dimension,
-  which will want `expert` for itself; that rule arrives with the first MoE
-  model, and the conflict check in `Sharding.__call__` is what will flag the
-  tensors whose `embed` must then give `expert` up.
+  expert shard. A routed-expert weight `(experts, embed, mlp)` wants `expert`
+  for its own leading dimension, and `Sharding.__call__` would reject `embed`
+  claiming it a second time, so expert weights name their trailing dimensions
+  `expert_embed` (over `fsdp` only) and `expert_mlp` (over `tensor`) instead.
+  This mirrors legacy's `exp` / `embed_moe` / `mlp_moe` split. The `experts`
+  axis of an activation -- router logits, per-expert outputs -- stays
+  replicated: on this rule set the batch already covers `expert`.
 
   Two places this follows the design doc rather than legacy's
   `logical_axis_rules`: legacy shards the residual-stream activation and the
@@ -258,6 +261,14 @@ class DefaultSharding(Sharding):
         return "tensor"
       case ("length" | "head_dim" | "norm"), _:
         return None
+      case "experts", TensorType.WEIGHT:
+        return "expert"
+      case "experts", TensorType.ACTIVATION:
+        return None
+      case "expert_embed", TensorType.WEIGHT:
+        return "fsdp"
+      case "expert_mlp", _:
+        return "tensor"
       case _:
         raise KeyError(f"No sharding rule for logical axis {axis!r} ({tensor_type.value}) on tensor {tensor_name!r}.")
 

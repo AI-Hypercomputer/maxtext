@@ -31,11 +31,12 @@ import numpy as np
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, MultimodalInput
+from maxtext.m3.core.interfaces import CausalLMOutput
+from maxtext.m3.core.sharding import DefaultSharding, Sharding
 from maxtext.m3.models.qwen3.modeling_qwen3 import (
     Qwen3MLP,
     Qwen3Decoder,
 )
-
 
 # ---------------------------------------------------------------------------
 # Core Pure Linear Layer
@@ -799,7 +800,6 @@ class Qwen3VLAttention(nnx.Module):
       inputs: jax.Array,
       decoder_positions: Optional[jax.Array] = None,
       decoder_segment_ids: Optional[jax.Array] = None,
-      deterministic: bool = False,
   ) -> jax.Array:
     s = inputs.shape[1]
     query = self.query(inputs)
@@ -838,8 +838,8 @@ class Qwen3VLDecoderLayer(nnx.Module):
   def __init__(
       self,
       config: Config,
-      mesh: Optional[Mesh] = None,
       *,
+      sharding: Sharding,
       rngs: nnx.Rngs,
   ):
     self.config = config
@@ -847,27 +847,26 @@ class Qwen3VLDecoderLayer(nnx.Module):
         "epsilon": config.normalization_layer_epsilon,
         "dtype": config.dtype,
         "param_dtype": config.weight_dtype,
+        "scale_metadata": {"out_sharding": sharding("layer_norm", ("norm",))},
         "rngs": rngs,
     }
     self.pre_self_attention_layer_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kw)
     self.post_self_attention_layer_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kw)
     self.self_attention = Qwen3VLAttention(config, rngs=rngs)
-    self.mlp = Qwen3MLP(config, rngs=rngs)
+    self.mlp = Qwen3MLP(config, sharding=sharding, rngs=rngs)
 
   def __call__(
       self,
       inputs: jax.Array,
-      decoder_segment_ids: Optional[jax.Array] = None,
+      *,
       decoder_positions: Optional[jax.Array] = None,
-      deterministic: bool = False,
-      **kwargs,
+      decoder_segment_ids: Optional[jax.Array] = None,
   ) -> jax.Array:
     normed_attn_in = self.pre_self_attention_layer_norm(inputs)
     attn_out = self.self_attention(
         normed_attn_in,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
     )
     x = (inputs + attn_out).astype(self.config.dtype)
 
@@ -892,22 +891,22 @@ class Qwen3VLDecoder(Qwen3Decoder):
   def __init__(
       self,
       config: Config,
-      mesh: Optional[Mesh] = None,
       *,
+      sharding: Sharding,
       rngs: nnx.Rngs,
   ):
-    super().__init__(config, mesh, rngs=rngs, layer_cls=Qwen3VLDecoderLayer)
+    super().__init__(config, sharding=sharding, rngs=rngs, layer_cls=Qwen3VLDecoderLayer)
 
   def __call__(
       self,
       shared_embedding: Any,
       decoder_input_tokens: jax.Array,
+      *,
       decoder_positions: Optional[jax.Array] = None,
       decoder_segment_ids: Optional[jax.Array] = None,
       deepstack_visual_embeds: Optional[Sequence[jax.Array]] = None,
       multimodal_input: Optional[MultimodalInput] = None,
-      deterministic: bool = False,
-  ) -> tuple[jax.Array, jax.Array]:
+  ) -> jax.Array:
     y = shared_embedding(decoder_input_tokens)
     visual_mask = None
     if multimodal_input is not None and multimodal_input.image_embeddings is not None:
@@ -923,14 +922,10 @@ class Qwen3VLDecoder(Qwen3Decoder):
           feature_mask=multimodal_input.image_masks,
       )
 
-    for lyr in range(self.num_layers):
-      layer = getattr(self, f"layers_{lyr}")
-      y = layer(
-          y,
-          decoder_segment_ids=decoder_segment_ids,
-          decoder_positions=decoder_positions,
-          deterministic=deterministic,
-      )
+    # Iterated rather than called: deepstack features are injected between
+    # layers. The scan transform therefore does not apply to this decoder.
+    for lyr, layer in enumerate(self.layers):
+      y = layer(y, decoder_positions=decoder_positions, decoder_segment_ids=decoder_segment_ids)
       if deepstack_visual_embeds is not None and lyr < len(deepstack_visual_embeds):
         feat = deepstack_visual_embeds[lyr]
         if feat is not None and multimodal_input is not None and multimodal_input.image_masks is not None:
@@ -938,8 +933,7 @@ class Qwen3VLDecoder(Qwen3Decoder):
         if visual_mask is not None and feat is not None:
           y = deepstack_process(y, visual_mask, feat)
 
-    logits = self.apply_output_head(shared_embedding, y, deterministic=deterministic)
-    return logits, y
+    return self.apply_output_head(shared_embedding, y)
 
 
 def _compact_visual_features(features: jax.Array, feature_mask: jax.Array) -> jax.Array:
@@ -980,10 +974,13 @@ class Qwen3VLModel(nnx.Module):
       config: Config,
       mesh: Optional[Mesh] = None,
       *,
+      sharding: Optional[Sharding] = None,
       rngs: nnx.Rngs,
-      **kwargs,
+      **unused_kwargs,
   ):
+    del mesh, unused_kwargs  # Legacy `create_model` signature; the ambient mesh is the one that matters.
     self.config = config
+    self.sharding = sharding or DefaultSharding()
 
     # 1. Vision Tower matching checkpoint parameter hierarchy
     self.vision_encoder = (
@@ -996,21 +993,10 @@ class Qwen3VLModel(nnx.Module):
         features=config.emb_dim,
         dtype=config.dtype,
         param_dtype=config.weight_dtype,
+        embedding_metadata={"out_sharding": self.sharding("token_embedder", ("vocab", "embed"))},
         rngs=rngs,
     )
-    self.decoder = Qwen3VLDecoder(
-        config=config,
-        rngs=rngs,
-    )
-
-  def logits_from_hidden_states_for_vocab_tiling(
-      self, hidden_states: jax.Array, deterministic: bool, model_mode: Optional[str] = None, **kwargs
-  ) -> jax.Array:
-    return self.decoder.apply_output_head(
-        shared_embedding=self.token_embedder,
-        y=hidden_states,
-        deterministic=deterministic,
-    )
+    self.decoder = Qwen3VLDecoder(config, sharding=self.sharding, rngs=rngs)
 
   def __call__(
       self,
@@ -1020,10 +1006,9 @@ class Qwen3VLModel(nnx.Module):
       encoder_images: Optional[jax.Array] = None,
       encoder_image_masks: Optional[jax.Array] = None,
       encoder_video_grid_thw: Optional[jax.Array] = None,
-      enable_dropout: bool = False,
-      **kwargs,
-  ) -> jax.Array:
-    deterministic = kwargs.get("deterministic", not enable_dropout)
+      **unused_kwargs,
+  ) -> CausalLMOutput:
+    del unused_kwargs  # Legacy call keywords (`model_mode`, `enable_dropout`, ...).
 
     # Process vision inputs if provided
     image_embeddings = None
@@ -1058,16 +1043,15 @@ class Qwen3VLModel(nnx.Module):
       )
 
     # Decoder forward pass
-    logits, _ = self.decoder(
-        shared_embedding=self.token_embedder,
-        decoder_input_tokens=decoder_input_tokens,
+    logits = self.decoder(
+        self.token_embedder,
+        decoder_input_tokens,
         decoder_positions=decoder_positions,
         decoder_segment_ids=decoder_segment_ids,
-        deterministic=deterministic,
         deepstack_visual_embeds=deepstack_feats,
         multimodal_input=multimodal_input,
     )
-    return logits
+    return CausalLMOutput(logits=logits)
 
 
 def create_qwen3_vl_model(

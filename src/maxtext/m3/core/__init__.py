@@ -15,13 +15,21 @@
 """Core m3 primitives: the pieces NNX does not already provide.
 
 Modules:
-  * `rope.py` — rotary positional embedding (base implementation).
-  * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, mesh creation.
+  * `rope.py` -- rotary positional embedding (base variant).
+  * `attention.py` -- causal softmax attention as a pure function; takes a
+    kernel object that can route it to a fused implementation.
+  * `kernels.py` -- fused-kernel adapters (splash / tokamax attention,
+    megablox / tokamax grouped matmul): legacy-config translation, the
+    `shard_map` each Pallas kernel needs, nothing model-specific.
+  * `sharding.py` -- `Sharding` ABC, `DefaultSharding` rules, mesh creation.
+  * `layers.py` -- the `Layers` container that `infra` transforms act on.
+  * `moe.py` -- routed-expert execution (dense, `ragged_dot`, and the Pallas
+    executors from `kernels.py`), aux loss.
+  * `interfaces.py` -- `CausalLMOutput`.
 
 Planned modules:
-  * `interfaces.py` — shared ABCs and `CausalLMOutput`.
-  * `checkpoint.py` — Orbax wrapper.
-  * `data.py` — data loading helpers on top of the MaxText input pipeline.
+  * `checkpoint.py` -- Orbax wrapper.
+  * `data.py` -- data loading helpers on top of the MaxText input pipeline.
 
 Leaf layers (`nnx.Linear`, `nnx.Einsum`, `nnx.Embed`, `nnx.RMSNorm`, ...) are
 used directly from NNX and are deliberately not wrapped here.
