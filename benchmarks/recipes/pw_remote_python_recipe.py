@@ -97,6 +97,7 @@ def main():
             base_docker_image=None,
             pathways_config=pathways_config,
             num_steps=1000000,
+            extra_tuning_params=user_config.tuning_param_overrides() or None,
         )
         command, name = mcr.generate_workload_cmd(cluster_config=cluster_config, wl_config=wl_config)
 
