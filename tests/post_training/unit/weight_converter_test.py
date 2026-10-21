@@ -31,6 +31,7 @@ os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import types as pytypes  # pylint: disable=wrong-import-position
 import unittest  # pylint: disable=wrong-import-position
+from unittest import mock  # pylint: disable=wrong-import-position
 
 import jax  # pylint: disable=wrong-import-position
 import jax.numpy as jnp  # pylint: disable=wrong-import-position
@@ -39,6 +40,7 @@ import pytest  # pylint: disable=wrong-import-position
 from flax import traverse_util  # pylint: disable=wrong-import-position
 
 from maxtext.common.common_types import get_weight_dtype
+from maxtext.integration.vllm import weight_converter
 from maxtext.integration.vllm.weight_converter import (
     ConversionPlanError,
     MaxTextToMaxTextConverter,
@@ -126,6 +128,18 @@ def _source_tree(fused_moe_on_target: bool):
   }
 
 
+def _nested_source_tree(fused_moe_on_target: bool):
+  """Trainer state in the nested-scan layout `Qwen3NextScannableBlock` produces."""
+  legacy = _source_tree(fused_moe_on_target)["base"]["decoder"]["layers"]
+  local_slots = [legacy[f"layer_{slot}"] for slot in range(CYCLE - 1)]
+  tree = _source_tree(fused_moe_on_target)
+  tree["base"]["decoder"]["layers"] = {
+      "local_layers": jax.tree.map(lambda *slots: jnp.stack(slots, axis=SCAN_AXIS + 1), *local_slots),
+      "global_layer": legacy[f"layer_{CYCLE - 1}"],
+  }
+  return tree
+
+
 def _target_tree(moe_intermediate=MOE_DIM, fused=True, wo_intermediate=MOE_DIM):
   """Rollout state: unrolled `layers_{0..7}`, optionally fused MoE.
 
@@ -196,6 +210,53 @@ class ScannedToUnrolledMappingTest(unittest.TestCase):
         np.asarray(out["token_embedder"]["embedding"]),
         np.asarray(_arr(16, EMB)),
     )
+
+  def test_nested_scan_layout_converts_identically(self):
+    """The nested-scan layout converts to the same rollout weights as the per-slot layout."""
+    target = _target_tree()
+    legacy = traverse_util.flatten_dict(MaxTextToMaxTextConverter(_config()).convert(_source_tree(True), target))
+    nested = traverse_util.flatten_dict(MaxTextToMaxTextConverter(_config()).convert(_nested_source_tree(True), target))
+    self.assertEqual(set(legacy), set(nested))
+    for key, want in legacy.items():
+      np.testing.assert_array_equal(
+          np.asarray(nested[key]),
+          np.asarray(want),
+          err_msg=f"{'.'.join(map(str, key))} differs between the per-slot and nested layouts",
+      )
+
+  def test_nested_local_layers_not_matching_the_cycle_are_rejected(self):
+    """A `local_layers` axis must hold exactly the cycle's local slots, or slots would be dropped silently."""
+    for num_slots in (CYCLE - 2, CYCLE):
+      with self.subTest(num_slots=num_slots):
+        source = _nested_source_tree(True)
+        local = source["base"]["decoder"]["layers"]["local_layers"]
+        local["input_layernorm"]["scale"] = jnp.take(
+            local["input_layernorm"]["scale"], jnp.arange(num_slots) % (CYCLE - 1), axis=SCAN_AXIS + 1
+        )
+        with self.assertRaisesRegex(ConversionPlanError, "nested cycle-slot axis"):
+          MaxTextToMaxTextConverter(_config()).convert(source, _target_tree())
+
+  def test_nested_local_layers_cast_only_the_selected_slot(self):
+    """Every slot's group reads the whole `local_layers` source, so the slot must be taken before the cast."""
+    source = _nested_source_tree(True)
+    local = traverse_util.flatten_dict(source["base"]["decoder"]["layers"]["local_layers"])
+    slot_shapes = {
+        ".".join(("decoder", "layers", "local_layers") + key): value.shape[: SCAN_AXIS + 1] + value.shape[SCAN_AXIS + 2 :]
+        for key, value in local.items()
+    }
+    cast_shapes = []
+    real_cast = weight_converter._apply_dtype_cast  # pylint: disable=protected-access
+
+    def recording_cast(val, tgt_dtype, src_key):
+      if "local_layers" in src_key:
+        cast_shapes.append((src_key, val.shape))
+      return real_cast(val, tgt_dtype, src_key)
+
+    with mock.patch.object(weight_converter, "_apply_dtype_cast", side_effect=recording_cast):
+      MaxTextToMaxTextConverter(_config()).convert(source, _target_tree())
+    self.assertTrue(cast_shapes)
+    for src_key, shape in cast_shapes:
+      self.assertEqual(shape, slot_shapes[src_key], src_key)
 
   def test_plan_is_built_once_and_reused(self):
     converter = MaxTextToMaxTextConverter(_config())
@@ -980,6 +1041,44 @@ class TargetFreeConversionTest(unittest.TestCase):
       guided_out = guided_converter.convert(source, target_state=target)
       wi_guided = guided_out["decoder"]["layers_0"]["moe_block"]["wi"]
       np.testing.assert_array_equal(np.asarray(wi_guided), expected_concat)
+
+  def test_case_14_nested_scan_layout_target_free(self):
+    """Target-free conversion reads the nested `Qwen3NextScannableBlock` layout to the per-slot answer.
+
+    One `local_layers` source feeds a plan group per cycle slot, so it must stay
+    available until the last of those groups has run.
+    """
+    cfg = _config(padded_base_moe_mlp_dim=MOE_DIM + 2, prefuse_moe_weights=True)
+
+    def convert(source, streaming):
+      converter = MaxTextToMaxTextConverter(cfg, prefuse_moe_weights=True)
+      if streaming:
+        flat = {}
+        for piece in converter.convert_streaming(source, target_state=None, groups_per_piece=1):
+          flat.update(traverse_util.flatten_dict(piece))
+        return flat
+      return traverse_util.flatten_dict(converter.convert(source, target_state=None))
+
+    for streaming in (False, True):
+      with self.subTest(streaming=streaming):
+        legacy = convert(_source_tree(True), streaming)
+        nested = convert(_nested_source_tree(True), streaming)
+        self.assertEqual(set(legacy), set(nested))
+        for key, want in legacy.items():
+          np.testing.assert_array_equal(
+              np.asarray(getattr(nested[key], "value", nested[key])),
+              np.asarray(getattr(want, "value", want)),
+              err_msg=f"{'.'.join(map(str, key))} differs between the per-slot and nested layouts",
+          )
+
+    def to_struct(x):
+      return jax.ShapeDtypeStruct(x.shape, x.dtype)
+
+    abstract = {
+        key: getattr(value, "value", value).shape
+        for key, value in convert(jax.tree_util.tree_map(to_struct, _nested_source_tree(True)), False).items()
+    }
+    self.assertEqual(abstract, {key: getattr(value, "value", value).shape for key, value in legacy.items()})
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ import inspect
 
 from flax import nnx
 import jax
+from jax import ad_checkpoint
 from jax.experimental import xla_metadata
 from jax.experimental.layout import Layout, with_layout_constraint
 import jax.numpy as jnp
@@ -493,6 +494,23 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
 _custom_vjp_prefetch_pipeline.defvjp(_custom_vjp_prefetch_pipeline_fwd, _custom_vjp_prefetch_pipeline_bwd)
 
 
+_SAVE_SUBLAYER_INPUTS = jax.checkpoint_policies.save_only_these_names("decoder_layer_input")
+
+
+def _also_save_sublayer_inputs(remat_policy):
+  """Returns `remat_policy` (None for full remat), extended to also save every `decoder_layer_input` it recomputes."""
+  if remat_policy is None:
+    return _SAVE_SUBLAYER_INPUTS
+
+  def policy(prim, *args, **params):
+    decision = remat_policy(prim, *args, **params)
+    if decision is False or decision is ad_checkpoint.Recompute:
+      return _SAVE_SUBLAYER_INPUTS(prim, *args, **params)
+    return decision
+
+  return policy
+
+
 def mesh_uses_fsdp(mesh) -> bool:
   """Whether any FSDP mesh axis of `mesh` spans more than one device.
 
@@ -502,7 +520,16 @@ def mesh_uses_fsdp(mesh) -> bool:
 
 
 def apply_layers_with_fsdp_prefetch(
-    layers, x_in, *args, length: int, mesh, config, remat_policy=None, prevent_cse: bool = False, **kwargs
+    layers,
+    x_in,
+    *args,
+    length: int,
+    mesh,
+    config,
+    remat_policy=None,
+    prevent_cse: bool = False,
+    skip_block_remat: bool = False,
+    **kwargs,
 ):
   """Runs a scanned NNX layer stack with FSDP weight prefetching in the forward and backward pass.
 
@@ -517,6 +544,11 @@ def apply_layers_with_fsdp_prefetch(
       saves the activations this policy saves (in addition to each layer's input) and the backward
       pass recomputes the rest; gathered weights are never saved.
     prevent_cse: `prevent_cse` of the per-layer `jax.checkpoint` (only used with a remat policy).
+    skip_block_remat: Whether each scanned module is a block that rematerializes its own sub-layers
+      (as for `NNXDecoder._apply_layers_sequentially`). The pipeline keeps its per-module remat, since
+      without it the forward pass would save the weights the block's inner scans read, but the policy
+      then also saves each sub-layer's `decoder_layer_input`: the backward pass rebuilds every
+      sub-layer from its input once, instead of first recomputing the whole block.
     **kwargs: Keyword arguments passed to every layer call (those not accepted by the layer are dropped).
 
   Returns:
@@ -527,6 +559,8 @@ def apply_layers_with_fsdp_prefetch(
   """
   if length == 0:
     return x_in, layers, None
+  if skip_block_remat:
+    remat_policy = _also_save_sublayer_inputs(remat_policy)
   graphdef, params, state = nnx.split(layers, nnx.Param, ...)
 
   scan_axis = config.param_scan_axis

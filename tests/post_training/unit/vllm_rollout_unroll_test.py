@@ -232,6 +232,99 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), 4)
 
   @pytest.mark.cpu_only
+  def test_unrolls_the_nested_local_and_global_block_scan(self):
+    """Nested `local_layers` plus `global_layer` unroll to a dense `layers_{global_idx}` run."""
+    num_blocks, num_local = 2, 3
+    cycle = num_local + 1
+    local_probe = np.zeros((2, num_blocks, num_local, 1), dtype=np.float32)
+    global_probe = np.zeros((2, num_blocks, 1), dtype=np.float32)
+    for block in range(num_blocks):
+      for slot in range(num_local):
+        local_probe[:, block, slot, :] = block * cycle + slot
+      global_probe[:, block, :] = block * cycle + num_local
+    weights = MockWeights(
+        {
+            "base": {
+                "decoder": {
+                    "layers": {
+                        "local_layers": {"probe": local_probe},
+                        "global_layer": {"probe": global_probe},
+                    },
+                    "decoder_norm": {"scale": np.ones(2)},
+                }
+            }
+        }
+    )
+
+    unrolled = unroll_qwen_scanned_weights(weights)
+
+    decoder = unrolled["base"]["decoder"]
+    for layer_idx in range(num_blocks * cycle):
+      self.assertIn(f"layers_{layer_idx}", decoder)
+      np.testing.assert_array_equal(
+          decoder[f"layers_{layer_idx}"]["probe"],
+          np.full((2, 1), layer_idx, dtype=np.float32),
+      )
+    np.testing.assert_array_equal(decoder["decoder_norm"]["scale"], np.ones(2))
+    target = {
+        "model": {
+            "decoder": {
+                f"layers_{layer_idx}": {"probe": np.zeros((2, 1), dtype=np.float32)}
+                for layer_idx in range(num_blocks * cycle)
+            }
+        }
+    }
+    self.assertEqual(validate_direct_sync_layer_coverage(unrolled, target), num_blocks * cycle)
+
+  @pytest.mark.cpu_only
+  def test_nested_block_scan_honors_an_explicit_pattern_length(self):
+    """The global layer is the last slot of `pattern_length`, which `local_layers` must fill up to."""
+    num_blocks, num_local = 2, 3
+    weights = MockWeights(
+        {
+            "decoder": {
+                "layers": {
+                    "local_layers": {"probe": np.zeros((2, num_blocks, num_local, 1), dtype=np.float32)},
+                    "global_layer": {"probe": np.ones((2, num_blocks, 1), dtype=np.float32)},
+                }
+            }
+        }
+    )
+
+    unrolled = unroll_qwen_scanned_weights(weights, pattern_length=num_local + 1)
+    for block in range(num_blocks):
+      np.testing.assert_array_equal(unrolled["decoder"][f"layers_{block * 4 + 3}"]["probe"], np.ones((2, 1)))
+
+    with self.assertRaisesRegex(ValueError, "hold 3 cycle slots, but pattern_length 5"):
+      unroll_qwen_scanned_weights(weights, pattern_length=num_local + 2)
+
+  @pytest.mark.cpu_only
+  def test_rejects_the_nested_block_scan_remainder(self):
+    """Layers past the last whole cycle live in `layers_remainder`, which must not be dropped silently."""
+    weights = MockWeights(
+        {
+            "decoder": {
+                "layers": {
+                    "local_layers": {"probe": np.zeros((2, 2, 3, 1), dtype=np.float32)},
+                    "global_layer": {"probe": np.zeros((2, 2, 1), dtype=np.float32)},
+                },
+                "layers_remainder": {"local_layers": {"probe": np.zeros((2, 2, 1), dtype=np.float32)}},
+            }
+        }
+    )
+
+    with self.assertRaisesRegex(ValueError, "layers_remainder"):
+      unroll_qwen_scanned_weights(weights)
+
+  @pytest.mark.cpu_only
+  def test_rejects_nested_local_layers_without_a_cycle_slot_axis(self):
+    """A `local_layers` tensor missing its slot axis must not be read as flat."""
+    weights = MockWeights({"decoder": {"layers": {"local_layers": {"probe": np.ones((2, 2))}}}})
+
+    with self.assertRaisesRegex(ValueError, "has no scan axis"):
+      unroll_qwen_scanned_weights(weights)
+
+  @pytest.mark.cpu_only
   def test_correctly_unrolls_homogeneous_scanned_weights(self):
     """Verify homogeneous scanned layers (LLaMA, Qwen Base) unroll to layers_{global_idx}."""
     # 4 layers stacked on scan_axis=1 (feature_dim=2, num_layers=4, hidden=1)
