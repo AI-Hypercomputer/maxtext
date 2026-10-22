@@ -129,7 +129,8 @@ def _collect_olmoe3_router_metrics(intermediate_outputs):
   """
   found = []
   for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
-    keys = [str(k.key) for k in path if hasattr(k, "key")]
+    # DictKey / FlattenedIndexKey carry .key, GetAttrKey .name; SequenceKey (.idx) isn't a layer name.
+    keys = [str(k.key) if hasattr(k, "key") else str(k.name) for k in path if hasattr(k, "key") or hasattr(k, "name")]
     if not keys or keys[-1] != "olmoe3_router_metrics":
       continue
     index = next((int(k.rsplit("_", 1)[1]) for k in reversed(keys) if re.fullmatch(r"layers_\d+", k)), len(found))
@@ -761,7 +762,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     # Totals as OLMo-core forms them from the per-block values: max over blocks for load imbalance, sum for the
     # rest (its "global load imbalance" total is the sum of the per-block ratios).
     extra_metrics["learning/load_balancing_loss"] = jnp.sum(lb)
-    extra_metrics["learning/load_balancing_loss_unscaled"] = jnp.sum(lb) / lb_weight
+    if lb_weight > 0:  # the layers only sow these with a positive weight; guard the division regardless
+      extra_metrics["learning/load_balancing_loss_unscaled"] = jnp.sum(lb) / lb_weight
     extra_metrics["learning/router_z_loss"] = jnp.sum(router_z)
     extra_metrics["learning/router_z_loss_unscaled"] = jnp.sum(router_z) / _OLMOE3_ROUTER_Z_LOSS_WEIGHT
     extra_metrics["learning/load_imbalance"] = jnp.max(imbalance)
@@ -769,7 +771,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     for i in range(router_metrics.shape[0]):
       block = f"learning/block_{i + 1:02d}"
       extra_metrics[f"{block}/load_balancing_loss"] = lb[i]
-      extra_metrics[f"{block}/load_balancing_loss_unscaled"] = lb[i] / lb_weight
+      if lb_weight > 0:
+        extra_metrics[f"{block}/load_balancing_loss_unscaled"] = lb[i] / lb_weight
       extra_metrics[f"{block}/router_z_loss"] = router_z[i]
       extra_metrics[f"{block}/router_z_loss_unscaled"] = router_z[i] / _OLMOE3_ROUTER_Z_LOSS_WEIGHT
       extra_metrics[f"{block}/load_imbalance"] = imbalance[i]
