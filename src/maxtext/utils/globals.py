@@ -102,6 +102,7 @@ HF_IDS = {
     "weaver-mini": "Qwen/Qwen3-VL-4B-Instruct",
     "weaver-max": "Qwen/Qwen3-VL-8B-Instruct",
     "glm5.3-flash": "zai-org/GLM-5.3-Flash",
+    "ming-3.0-audio-tiny": "inclusionAI/Ming-3.0-audio-tiny",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }

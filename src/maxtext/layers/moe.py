@@ -667,7 +667,7 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
         # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates.
         self.bias = MoEBiasVar(
             default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
@@ -733,7 +733,7 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
       pre_bias_logits = output
 
     if self.use_bias:
@@ -1375,7 +1375,7 @@ class RoutedMoE(nnx.Module):
         top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
         top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
       # NOTE: deepseek2 has a different pattern
-      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      elif self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
@@ -1384,7 +1384,11 @@ class RoutedMoE(nnx.Module):
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
-    if self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4):
+    if self.config.decoder_block in (
+        ctypes.DecoderBlockType.DEEPSEEK,
+        ctypes.DecoderBlockType.DEEPSEEK4,
+        ctypes.DecoderBlockType.MING,
+    ):
       top_k_weights = self.deepseek_scale_weights(top_k_weights)
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -2582,7 +2586,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+      if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -3936,7 +3940,7 @@ class RoutedMoE(nnx.Module):
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length", None)
     pre_bias_logits_logical_axes = (
         (batch_logical_axis, "activation_norm_length", None)
-        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2"))
+        if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming"))
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
@@ -4380,7 +4384,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2")):
+    if self.config.model_name.startswith(("deepseek3", "deepseek4", "kimi-k2", "ming")):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)

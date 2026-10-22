@@ -322,6 +322,7 @@ ModelName = Literal[
     "envy-switch-large",
     "envy-switch-xxl",
     "glm5.3-flash",
+    "ming-3.0-audio-tiny",
 ]
 
 
@@ -1750,6 +1751,15 @@ class DeepSeekMoE(BaseModel):
   lineage_dq_reduction_steps: int = Field(
       1,
       description=("Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None."),
+  )
+
+
+class Ming(BaseModel):
+  """Configuration specific to inclusionAI Ming (BailingMoeV3) models with Kimi Delta Attention."""
+
+  kda_lower_bound: float = Field(
+      -5.0,
+      description="Lower bound of the KDA forget gate in log space: g = lower_bound * sigmoid(exp(A_log) * (f + dt_bias)).",
   )
 
 
@@ -4215,6 +4225,7 @@ class MaxTextConfig(
     DeepSeekMoE,
     Qwen3Next,
     Qwen3_8FlashNext,
+    Ming,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -6564,6 +6575,7 @@ class RLConfig(
     SplashAttention,
     Qwen3Next,
     Qwen3_8FlashNext,
+    Ming,
     MultimodalGeneral,
     Muon,
     FineTuning,

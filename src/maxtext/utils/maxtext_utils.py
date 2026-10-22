@@ -748,7 +748,7 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.MING):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
